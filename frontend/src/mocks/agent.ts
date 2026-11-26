@@ -44,7 +44,7 @@ import { PREVIEW_IMAGE } from './features/assistantBlobs'
 
 /**
  * #7027 — the API's bounds on a session's browser options (backend
- * `api/crud_agent_sessions.py` `SessionBrowser`), worded as the agent words its
+ * `tools/go/core/internal/sessions` `SessionBrowser`), worded as the agent words its
  * `invalid_browser` refusal; null when they pass.
  */
 function browserRefusal(b: SessionBrowserInput): string | null {

@@ -4,7 +4,7 @@ import { BLOB_NAME, type MadeImages, type SessionBlob, type SessionImages, type 
 import { type BlobMediaType, DOCUMENT_MEDIA_TYPES, IMAGE_MEDIA_TYPES } from './images.js'
 
 // A session's images and saved HTTP bodies over the API's CRUD routes (#5299 step 7; backend
-// api/crud_agent_blobs.py, areas `session-blobs` and `http-bodies`): `SessionBlobs` and
+// tools/go/core/internal/blobs, areas `session-blobs` and `http-bodies`): `SessionBlobs` and
 // `PgHttpBodies` method for method, each one route and one transaction. The bytes are the
 // request's multipart parts and the answer's body, never base64 (#5299 D8, #2479). A session
 // id and a name travel in the query or the body, never the route's path, and a name is

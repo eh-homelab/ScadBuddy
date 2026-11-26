@@ -5,7 +5,7 @@ import type { ServerEvent } from './protocol.js'
 import { sessionPath } from './rows.js'
 
 // A session's event log over the API's CRUD routes (#5299 step 9, part b; backend
-// api/crud_agent_events.py, area `session-events`): each `EventRows` method is one route and one
+// tools/go/core/internal/events, area `session-events`): each `EventRows` method is one route and one
 // transaction. An event travels as its JSON text, as it is stored; one read through the fork
 // chain comes back as logged, and is addressed to the session here. A session id goes into a path only as `sessionPath` makes it.
 

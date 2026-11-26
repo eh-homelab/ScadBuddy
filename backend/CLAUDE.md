@@ -354,11 +354,11 @@ only the sleeps move; a budget on the real clock fails on a slow runner (#6252).
   that has it (`project.offers_host_functions`). A flow's payloads are sealed per run
   (`payload_codec.py`, `flows_client.py`), so flows need `SCADBUDDY_SECRET_KEY_FILE`.
 - `backend/scadbuddy/flows/` — flow versions and runs (`store.py`: `workflow_definitions`,
-  `workflow_runs`, the latter written only by the run's workflow), `agent_reads.py` (the
-  agent's questions about the flow tables, read only, for `api/crud_agent.py` area `flows`,
-  #5299 D7: the queries the agent ran over SQL, of which the agent's tests keep a copy,
-  `agent/test/support/sqlFlowRunReads.ts`; the API revokes the agent's grants on
-  `workflow_runs` and `workflow_run_decisions`, `auth/revoke.py`), `typecheck.py` (a
+  `workflow_runs`, the latter written only by the run's workflow; the agent's reads of the
+  flow tables, area `flows`, #5299 D7, are Go's, `tools/go/core/internal/agentreads`, #7667,
+  and the agent's tests keep a copy of the queries, `agent/test/support/sqlFlowRunReads.ts`;
+  the API revokes the agent's grants on `workflow_runs` and `workflow_run_decisions`,
+  `auth/revoke.py`), `typecheck.py` (a
   script's check at registration and at each start), `history.py` (a Reset's preview: the
   outward sends past a point, by activity id), `component.py` (`FLOWS`; runs the
   `projects` worker in-process with `SCADBUDDY_TEMPORAL_WORKER_INPROCESS` or
@@ -387,120 +387,38 @@ only the sleeps move; a budget on the real clock fails on a slow runner (#6252).
   operation's. Lock order: the run's row, then the task's, then the event log; a task write
   inside a run's write comes before the run's own event (`cancel_for_run_in`). Nothing logs
   a schema, a context or an answer.
-- `backend/scadbuddy/agent_data/` — the agent's settings, Claude credentials and payload data
-  keys behind the CRUD service (#5299 step 4, D5; #5342), for `api/crud_agent_secrets.py`
-  (class `crud.agent`, areas `settings`, `credentials`, `payload-keys`): `credentials.py` is
-  `agent/src/credentials.ts` `CredentialStore` statement for statement (the AAD, the table
-  lock, the `FOR UPDATE` health write, the warm-evict NOTIFY), sealed and opened here with the
-  KEK; `settings.py` a write with the NOTIFYs in its transaction and, with `expect`, a
-  compare-and-set under the table's lock; `payload_keys.py` a subject's data key released
-  (made first under the subject's advisory lock, never for a subject in
-  `ai_forgotten_subjects`), never the KEK; `audit.py` the `ai_audit` row each reveal
-  (kind `credential`; a redaction's once per `REDACT_AUDIT_WINDOW`) and release (kind `payload_key`, once per subject and
-  `RELEASE_AUDIT_WINDOW`) writes in its transaction; `rotation.py` the re-wrap of the credentials and payload
-  keys at the API's start (`main._rotate_agent_secrets`). For `api/crud_agent_forget.py` (area
-  `forget`, #5299 step 6): `forget.py` a subject's tombstone, its flow images and its key in one
-  transaction under its lock, a session's forks first taking their ranges of its transcript,
-  events and images (`transcripts.py` `copy_fork_ranges`, #5299 step 9, part c; refused,
-  `ForksTakeRangesError`, only with no KEK when a fork takes transcript entries, and the agent
-  copies them itself), a browser call's key dropped and the
-  hourly sweep of the keys no forget deletes; `flow_blobs.py` a flow run's images kept (sealed by
-  the agent, sent as multipart bytes; the tombstone check and `FLOW_IMAGES_MAX` under the lock)
-  and read. For `api/crud_agent_workspace.py` (area `workspace`, #5299 step 7): `workspace.py`
-  is the agent's `workspace/store.ts` `SessionFiles` on the API, with the sealing
-  (`seal_file`, `open_file`; the agent's tests keep a copy of the format, `agent/test/support/sql/workspaceSealing.ts`) and the file keys
-  wrapped and opened here under the session's payload key (`payload_keys.py` `key_in`, no
-  audit row: the key never leaves the API) or the KEK; each write's row, its blob's
-  `blob_refs` hold and its `workspace.file` events in one transaction, the reconcile one
-  transaction under `RECONCILE_LOCK`, and `rewrap` at a rotation. `api/crud_agent_blobs.py`
-  (areas `session-blobs`, `attachments`, `http-bodies`, #5299 step 7) is the agent's
-  `sessions/blobs.ts`, `attachments/store.ts` and `sessions/httpBodies.ts` statement for
-  statement: an image's name and signature checked from its bytes, a tool call's images
-  replaced whole, a fenced write checked `FOR SHARE`, a queued message's images deleted by
-  `…/session-blobs/deletes` only when its own write made them and no write stored them since
-  (every write sets `created_at`, #6413), a fork's read through its chain, an
-  attachment's caps under its owner's lock, a saved body read by range (tests
-  `tests/crud/test_crud_agent_blobs.py`). `flows/forget.py` and `flows/images.py` run the same statements on the API's own
-  tables, with no fallback for a database the agent never migrated (the API applies its files
-  first, #5299 D6). Its tests make the agent's tables
-  with the agent's own migration files (`render/agent_migrations.py` `migrate_agent`) and open
-  the credential vectors `tests/fixtures/secret-vectors.json`, a copy that
-  `lint-codec-copies.sh` keeps equal to the agent's. `notify.py` re-wraps the agent's Web Push
-  keys and notification channels' tokens (#5299 step 5) in the same rotation. `background.py` and `operations.py` are
-  the agent's background tasks (with a Monitor's events, a Workflow's journal and child chats)
-  and its command record `ai_operations`, for `api/crud_agent_tasks.py` (areas
-  `background-tasks`, `operations`, #5299 step 8): the agent's `BackgroundTaskStore` and
-  `OperationStore` statement for statement, a task's create under the session's
-  `bgtask:<session>` advisory lock; an operation's insert or end writes its `activity` row in
-  the same transaction (`ActivityIndex.ingest_agent_operation_in`), and the bus's
-  `ai_operation.changed` stays only for an agent pod still on SQL. `sessions.py` is a
-  session's row as the agent's session manager reads and writes it and what its calls touched,
-  for `api/crud_agent_sessions.py` (areas `sessions`, `session-resources`, #5299 step 9): the
-  agent's `PgSessionRows` and `PgResourceRows` statement for statement, an insert counted under
-  the owner's `ai_sessions.start:<kind>:<id>` lock and a fork's checked under its parent's
-  payload-key lock, shared, so an agent pod still on SQL excludes it (tests
-  `tests/crud/test_crud_agent_sessions.py`). `transcripts.py` is a session's transcript, for
-  `api/crud_agent_transcripts.py` (area `transcripts`, #5299 step 9, part b): the agent's
-  `PgTranscriptRows` statement for statement, each entry sealed and opened here under the
-  session's payload key (`payload_keys.py` `key_in`, no audit row) with the agent's AAD
-  (`ai_session_entries:<session>:<subpath>:<uuid or #id>`, so the ids are reserved with `nextval`
-  first); an append's tombstone check (under the subject's payload-key lock, shared), its fence
-  (`turn_attempt`, `durable_turn_id`, `FOR SHARE`) and its insert are one transaction, and a
-  fork's transcript is read through its chain (`LEAST(bound, cut)`) in one snapshot, read again
-  when an ancestor was forgotten meanwhile (tests `tests/crud/test_crud_agent_transcripts.py`).
-  `events.py` is a session's event log, for `api/crud_agent_events.py` (area `session-events`,
-  #5299 step 9, part b): the agent's `PgEventRows` statement for statement, a seq taken from
-  `ai_sessions.event_seq` in the insert's statement, a turn's append fenced `FOR UPDATE` on its
-  placement, a fork's read through its chain (`LEAST(bound, cut)`) in one statement, and a new
-  fork's log under its parent's payload-key lock, shared (tests
-  `tests/crud/test_crud_agent_events.py`). `order_costs.py` is the order items a session revised
-  and its spend's report, for `api/crud_agent_order_costs.py` (area `session-order-costs`, #5299
-  step 9, part c): the agent's `PgOrderCostRows`, a report's writes each checking in its
-  transaction that the caller's token holds the session's lease (`leases.py`
-  `order-cost:<session id>`, whose acquire also tries the SQL pod's advisory lock) (tests
-  `tests/crud/test_crud_agent_order_costs.py`). `turns.py` is a durable turn's writes of its
-  session's row, for `api/crud_agent_turns.py` (area `session-turns`, #6449): the agent's
-  `PgTurnRows` statement for statement, each with its events (`events.py` `append_in`) in one
-  transaction: a send's claim and its give-back (only while the row runs that turn), a
-  placement's claim (the only writer of `turn_attempt`, only while the row runs the turn), its
-  spend (once per key, `ai_turn_spend_keys`, so a write sent again after its answer was lost is
-  added once), the turn's end only while the row
-  runs that turn (its closing events worded with the lineage's spend and budget read `FOR UPDATE`,
-  `word_tail`, as the agent's `wordTail`) with the queue's head claimed in the same transaction,
-  and the running sweep's end of a lost turn only at the `event_seq` it read; a write waits at most
-  `LOCK_TIMEOUT_MS` (10 s) for the row's lock, else 503 `row_busy`, and a call at most
-  `POOL_WAIT_S` (10 s) for a connection, else 503 `pool_busy` (tests
-  `tests/crud/test_crud_agent_turns.py`). `edits.py` is an edit of a session, for `api/crud_agent_edits.py` (area
-  `session-edits`, #6449): the agent's `PgEditRows` transaction, under the row's lock and only
-  while the principal owns it, with its warm eviction, an archive's `done` summaries dismissed and
-  their events; a newly done session needs `told`, checked last (`untold`), so that answer means
-  the edit would pass: the agent then tells its workflow and sends it again (tests
-  `tests/crud/test_crud_agent_edits.py`).
-- The agent's small stores (#5299 step 5): `api/crud_agent_stores.py` (areas
-  `activity-kinds`, `browser-origins`, `bridge-tabs`, `pairings`, `mcp-tokens`) and
-  `api/crud_agent_notify.py` (area `notify`, sealed with the KEK under the agent's AAD), each
-  route one method of the agent's store and its SQL, a transaction as one transaction: the
-  pairing request's advisory lock, the accept's `FOR UPDATE` with the code hash compared in
-  constant time, a push subscription under its endpoint row's lock. A tab image's bytes are
-  the request's and the answer's body, checked against its sha256 name. Tests
-  `tests/api/test_crud_agent_stores.py`, `test_crud_agent_notify.py`. The plugin stores
-  (#5299 step 5): `api/crud_agent_access.py` (areas `access` and `plugin-sessions`: the tool
-  access, each write with its warm-evict NOTIFY in one transaction; the tool listings, a
-  connection test's stored only while its lease holds, under the plugin's or the package's
-  row lock; the leases `…/agent/leases/{key}`, `agent_data/leases.py` over the API's own
-  table `agent_leases`, as `bambuddy/copy_leases.py`, whose acquire also tries the old
-  session advisory lock so an SQL-path agent pod's test makes it `busy`; the upstream MCP
-  sessions), `api/crud_agent_plugins.py` (area `plugins`: the remote plugins and their
-  OAuth sign-ins, sealed and opened with the KEK under the agent's AAD,
-  `agent_data/plugins.py`, which also re-wraps them in the rotation; a token refresh is
-  stored only while the lease `plugin-oauth:<plugin>` holds) and `api/crud_agent_packages.py`
-  (area `plugin-packages`: each write with `agent_data/packages.py` `prune_stale_rows`, the
-  agent's `pruneStaleRows`; area `package-mirrors`, #6935: an archive or npm pin's file kept
-  as the blob `plugin-mirror-<sha256>` by `agent_data/package_mirrors.py`, a bytes pin
-  stored only while its mirror is held, and each package write releasing the holds no pin
-  names after a day). `agent_data/access.py` holds the access writes they share.
-  Tests `tests/api/test_crud_agent_access.py`, `test_crud_agent_plugins.py`,
-  `test_crud_agent_packages.py`.
+- `backend/scadbuddy/agent_data/` — the agent's data behind the CRUD service (#5299, #5342).
+  Go's core (`tools/go/core`, a package per area under `internal/`) serves most of the agent's
+  CRUD routes, and hands every route it does not serve to this API (#7667). The Python agent
+  routes left are: `api/crud_agent.py` (`POST …/orders/{id}/assistant-cost`),
+  `api/crud_agent_forget.py` (a subject's forget, `forget.py`: its tombstone, its flow images
+  and its key in one transaction under its lock, a session's forks first taking their ranges of
+  its transcript, events and images, `transcripts.py` `copy_fork_ranges`, #5299 step 9, part c;
+  refused, `ForksTakeRangesError`, only with no KEK when a fork takes transcript entries, and the
+  agent copies them itself), `api/crud_agent_keys.py` (the fetch grants),
+  `api/crud_agent_notify.py` (`GET …/push/waiting`), `api/crud_agent_tasks.py` (an operation's
+  insert and end, `operations.py`, each with its `activity` row in the same transaction,
+  `ActivityIndex.ingest_agent_operation_in`), `api/crud_agent_workspace.py` (the status, the
+  bytes, the writes, the copies and the blob moves, over `workspace.py`: the agent's
+  `workspace/store.ts` `SessionFiles` on the API, with the sealing, `seal_file`; the agent's
+  tests keep a copy of the format, `agent/test/support/sql/workspaceSealing.ts`; the file keys
+  wrapped under the session's payload key, `payload_keys.py` `key_in`, no audit row, or the
+  KEK; each write's row, its blob's `blob_refs` hold and its `workspace.file` events in one
+  transaction), `api/crud_agent_plugins.py` (the remote plugins and their OAuth sign-ins,
+  sealed and opened with the KEK under the agent's AAD, `plugins.py`; a token refresh is stored
+  only while the lease `plugin-oauth:<plugin>` holds, `leases.py` `held_in`, over the API's own
+  table `agent_leases`), `api/crud_agent_packages.py` (area `package-mirrors`, #6935: an
+  archive or npm pin's file kept as the blob `plugin-mirror-<sha256>` by `package_mirrors.py`;
+  and a hosted version's zip), `api/crud_agent_changes.py` (below) and `api/crud_areas.py`.
+  `rotation.py` re-wraps the credentials (`credentials.py`), the payload keys, the Web Push keys
+  and channel tokens (`notify.py`), the plugins and the workspace's file keys at the API's start
+  (`main._rotate_agent_secrets`). `flows/forget.py` and `flows/images.py` run the forget's and
+  the flow images' statements on the API's own tables (`forget.py`, `flow_blobs.py`). Its tests
+  make the agent's tables with the agent's own migration files (`render/agent_migrations.py`
+  `migrate_agent`) and open the credential vectors `tests/fixtures/secret-vectors.json`, a copy
+  that `lint-codec-copies.sh` keeps equal to the agent's. Tests `tests/crud/test_crud_agent_*.py`,
+  `tests/crud/test_agent_rotation.py`, `tests/api/test_crud_agent_plugins.py`,
+  `test_crud_agent_packages.py`, `test_agent_notify_rotation.py`.
 - Hosted plugins (#6932, spec `2026-11-21-hosted-plugin-feeds-design.md` §6.1 to §6.3):
   `hosted_plugins/` (`rules.py` the draft's paths, names and caps; `bundle.py` the publish's
   checks, the generated `plugin.json`, the deterministic zip and the content hash, a port of
@@ -511,76 +429,26 @@ only the sleeps move; a budget on the real clock fails on a slow runner (#6252).
   The bytes are blobs `attachment-<sha256>` held in `blob_refs` by holder `hosted_plugin`.
   Routes `api/hosted_plugins.py` (`/hosted-plugins`, `api` class; `GET /{name}/versions` lists
   the versions newest first for Settings' editor, #6937) and the agent's area
-  `hosted-plugins` in `api/crud_agent_packages.py` (a plugin's latest version, a version's
-  zip). Tests `tests/hosted_plugins/`, `tests/api/test_hosted_plugins.py`. Each committed
+  `hosted-plugins` (a plugin's latest version, Go's `tools/go/core/internal/packages`; a
+  version's zip, `api/crud_agent_packages.py`). Tests `tests/hosted_plugins/`, `tests/api/test_hosted_plugins.py`. Each committed
   hosted-plugin create, change, publish and delete, and each `plugin-packages` write (install,
-  re-pin, discard, approve, enable, delete), publishes `plugin_packages.changed`
+  re-pin, discard, approve, enable, delete; Go's `internal/packages`), publishes `plugin_packages.changed`
   (`core/events.py` `PluginPackagesChanged`, the name only) on the realtime topic
   `plugin-packages`, which Settings → Tools & plugins follows (#7460). A marketplace
   feed's packages are `ai_plugin_feed_packages` (#6933; a package's delete removes its rows),
-  read by the agent through area `plugin-feeds` (`GET …/agent/plugin-feeds/{feed}`, the same
-  module: each package at its current pin, whether it is approved, and a hosted one's version
+  read by the agent through area `plugin-feeds` (`GET …/agent/plugin-feeds/{feed}`, Go's
+  `internal/packages`: each package at its current pin, whether it is approved, and a hosted one's version
   as its pin names it (`version`), listed only while that version's content hash is the
   pin's; `?package=` reads one package; #6936: `pin_kind`, `bytes_sha256` and
   `allow_refused` too, and `PUT`/`DELETE …/plugin-feeds/{feed}/packages/{name}` add and
   remove a package, 404 `feed-not-found` or `package-not-found`); the agent serves the feed
-  itself. Test `tests/api/test_crud_agent_plugin_feeds.py`. A hosted package (#6934) is
+  itself. A hosted package (#6934) is
   `source_kind` `hosted`, `pin_kind` `version`: its install and re-pin are stored only when
   that version of the hosted plugin has the content hash sent (409
   `hosted-version-mismatch`), a package of another kind cannot take a hosted plugin's name
   (409 `hosted-name-taken`; both checks and the hosted create take
   `hosted_plugins/store.py` `lock_name`), and each row answered carries
   `hosted_latest_version`.
-- The agent's tool-call gate (#5299 step 10): `api/crud_agent_gate.py` (area `gate`) over
-  `agent_data/gate.py`, the agent's `gate/store.ts` writers statement for statement, each one
-  transaction: an entry opened (the Reset's cancels first, in their own), resolved, or decided
-  against its row's record by the gate's validator under the row's lock (`gate_validate.py` and
-  `gate_canonical.py`, byte copies of agent-durable's, kept so by `lint-codec-copies.sh`, with the
-  shared vectors in `tests/fixtures/`), a flow's refusal, and a run grant's approval checked
-  against `flow_grants` and `flow_grant_uses` under the grant row's share lock. The API builds the
-  session events as the agent did, appends them in the write's transaction, and answers them
-  (`logged`), which the agent hands to its event log. A decide that must know the row's run is
-  live answers `live_check` and writes nothing, and the agent asks again naming the run it found
-  running. Tests `tests/crud/test_crud_agent_gate.py`, `test_gate_vectors.py`.
-  `api/crud_agent_pending.py` (area `pending-input`) over `agent_data/pending_input.py` is the
-  rest of the gate's SQL statement for statement: the agent's `gate/projection.ts` reads, the
-  orphan sweep (`gate/sweep.ts`; each cancel one transaction with its events, the session's
-  `idle` and an approval's audit row), a durable turn's response read and its parked call's span
-  mark (only while the turn's `turn_attempt` and `durable_turn_id` hold the session, checked `FOR
-  SHARE` in the mark's transaction), and a call's recorded approval (`PgApprovalRecords`). Tests
-  `tests/crud/test_crud_agent_pending.py`.
-  `api/crud_agent_audit.py` (area `audit`) over `agent_data/audit_log.py` is the agent's
-  `audit/log.ts` `AuditLog`: a row written (a tool call's approver copied from `ai_approvals` or
-  its request's `approved` response in the same statement), a page listed, and the prune, the one
-  DELETE the table's trigger lets through. Tests `tests/crud/test_crud_agent_audit.py`.
-  `api/crud_agent_approvals.py` (area `approvals`) over `agent_data/approvals.py` is the agent's
-  `approvals/service.ts` `ApprovalService` SQL: its reads, a pending approval made (with its
-  session events), a decision written once (the guarded UPDATE, the span's context the agent
-  sends, the session events and the `approval` audit row in one transaction), a prepared action
-  used once by its asker for its input hash, and an MCP prepare's bounds under its advisory lock.
-  Who may see or decide stays the agent's check. Tests `tests/crud/test_crud_agent_approvals.py`.
-  `api/crud_agent_questions.py` (area `questions`) over `agent_data/questions.py` is the agent's
-  `gate/questions.ts` `QuestionService` SQL: its reads, a `done` summary's dismissal (the guarded
-  UPDATE, its events and its `question` audit row in one transaction), the attention rate limit's
-  count (only while the caller holds the lease `attention-rate`, `agent_data/leases.py`, whose
-  acquire also tries the SQL path's `scadbuddy:attention-rate` transaction lock; 409 `lease-lost`
-  otherwise, never a count), a turn's `done` facts (`gate/doneSummary.ts` `loadDoneSummary`'s two
-  reads; the text is the agent's, which redacts the turn's secrets) and its post (only while the
-  turn's `turn_attempt` and `durable_turn_id` hold the session, read `FOR UPDATE`, and the session
-  is the browser user's; at most `DONE_POSTS_PER_TURN`, a refusal audited `rate_limited`; the
-  summaries it replaces, the events and their audit rows in the same transaction). Tests
-  `tests/crud/test_crud_agent_questions.py`.
-  `api/crud_agent_escalations.py` (area `escalations`) over `agent_data/escalations.py` is the
-  agent's `flows/escalations.ts` `Escalations` SQL and `flows/queue.ts`'s read of a run's child
-  entries: a parent's pass up and a deny's claim and release (each only while the entry is at hop
-  `parent` for the session named), the hop's timeout sweep, and a delivery's claim, hand back and
-  skip, with the record of a run's own calls sent. Who may answer stays the agent's check. Tests
-  `tests/crud/test_crud_agent_escalations.py`.
-  `api/crud_agent_mcp.py` (area `mcp-relay`, #5299 step 11) is the agent's `mcp/relayRows.ts`
-  `PgRelayRows` statement for statement: the /mcp session directory (`ai_mcp_sessions`), a relay
-  message's body row and its `scadbuddy_mcp` NOTIFY in one transaction (the header checked against
-  the relay's shapes and the NOTIFY payload cap), a row taken or withdrawn once, and the sweep.
-  Tests `tests/crud/test_crud_agent_mcp.py`.
 - The agent's change stream (#5299 D4, step 11): `agent_changes/hub.py` (`ChangeHub`, component
   `agent_changes/component.py` `CHANGES`) registers the agent's five NOTIFY channels on the
   process's one `PgListener` (before it runs) and taps `PgNotifyEventBus` (`taps`) for
@@ -594,18 +462,6 @@ only the sleeps move; a budget on the real clock fails on a slow runner (#6252).
   and `STREAMS_MAX` cap them (429). uvicorn waits for open responses before the lifespan's
   shutdown, so the component chains a SIGTERM/SIGINT handler
   in front of uvicorn's that ends every stream first. Tests `tests/crud/test_crud_agent_changes.py`.
-  `api/crud_agent_publish.py` (areas `publish` and `session-reads`, #6501): the NOTIFYs the
-  agent sent outside a store's write, a `session.*` bus event on `scadbuddy_events` (each field
-  checked, so the payload stays small) and a warm eviction on `scadbuddy_warm_evict`; and two
-  reads of a session's own events in `agent_data/events.py`, its open calls (`open_calls`) and a
-  child's text before a call (`reasoning_deltas`), the agent's statements. Tests
-  `tests/crud/test_crud_agent_publish.py`.
-  `api/crud_agent_sweeps.py` (areas `session-sweeps` and `forget-rows`, #6501): which of up to
-  `LIVE_IDS_MAX` session ids still have an `ai_sessions` row, for the agent's directory sweeps;
-  and a forget's last step, only for a session with an `ai_forgotten_subjects` row (409
-  `not-forgotten` otherwise): its `ai_session_entries` rows and its row in one transaction, then
-  the `ai_session_file_bytes` no file names (a failure left to the agent's sweep) and the
-  warm-evict NOTIFY. Tests `tests/crud/test_crud_agent_sweeps.py`.
 - `backend/scadbuddy/flow_triggers/` — runs started on a schedule or an event (#2484,
   spec 2026-10-11 §12): `store.py` (`flow_triggers`, their standing grants and fires),
   `fire.py` (the `flow_trigger_fire` activity on the `library` queue), `events.py` (the
@@ -1092,7 +948,7 @@ only the sleeps move; a budget on the real clock fails on a slow runner (#6252).
   `InvoicePatch.import_run_id` with the conditional `if_import_run_id` (one UPDATE under the invoice's
   row lock, so two starts cannot both claim it). An empty PATCH `{}` returns the invoice unchanged.
   The agent's session blobs accept `application/pdf` (6 MiB, migration
-  `20261118T0811Z_session_blobs_pdf.sql`) and store it (`crud_agent_blobs.py` stores and checks the bytes only; the attachment header is set by the agent's sessions route).
+  `20261118T0811Z_session_blobs_pdf.sql`) and store it (Go's `tools/go/core/internal/blobs` stores and checks the bytes only; the attachment header is set by the agent's sessions route).
 - `backend/scadbuddy/profile_fetch/` — the 3DFP profile-fetch worker and its browser service
   (#6625, #6780, plan `docs/superpowers/plans/2026-11-18-profile-fetch-worker.md`): `python -m
   scadbuddy.profile_fetch` (`worker.py`) polls the queue `profile-fetch`, serves `/healthz` and
@@ -1716,10 +1572,7 @@ only the sleeps move; a budget on the real clock fails on a slow runner (#6252).
   short statements on the API's role go on the shared `scadbuddy-rows` pool
   (`rows/component.py` `ROWS`). `tests/test_pg_pools.py` sums an API process's pools
   and fails on any new or bigger one; change it, and README "Running it", on purpose.
-  The agent's lease acquire (`api/crud_agent_access.py`) runs on the settings store's pool.
-  During a roll, a `plugin-oauth:` acquire whose grant row an SQL-path agent pod holds keeps
-  one of its connections for up to the request's `wait_s` (at most `MAX_WAIT`, 25 s). At
-  most `MAX_ROW_WAITS` (2) acquires of a process wait so; the rest poll without waiting.
+  The agent's leases are Go's (`tools/go/core/internal/access`, #7667).
 - One plain setting (#7384): `SettingsStore.get(KEY)` with a typed key of
   `library/settings_store.py` (`Setting[T]`, e.g. `OPERATION_RETENTION_SECONDS`; never a
   secret, an own-table or a registry field) answers as `load` does, from the API's cache of

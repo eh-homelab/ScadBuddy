@@ -24,7 +24,7 @@ import type { Owner } from '../sessions/protocol.js'
 // quotes them.
 //
 // The rows are the API's (#5299 step 7, area `attachments`): `CrudAttachmentStore`
-// (crudStore.ts) runs each method on its CRUD routes (backend api/crud_agent_blobs.py), the
+// (crudStore.ts) runs each method on its CRUD routes (tools/go/core/internal/blobs), the
 // per-owner lock and caps in the API's transaction.
 
 /** How long an attachment waits to be sent. */

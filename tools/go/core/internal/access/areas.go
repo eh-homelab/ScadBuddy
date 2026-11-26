@@ -1,5 +1,5 @@
 // Package access is the agent's tool access, tool listings, leases and plugin sessions:
-// backend/scadbuddy/api/crud_agent_access.py with agent_data/access.py and leases.py,
+// backend/scadbuddy/api/crud_agent_access.py (removed in #7667) with agent_data/access.py and leases.py,
 // statement for statement (areas access and plugin-sessions). Each route is one of the agent
 // store's methods and runs its SQL, a transaction as one transaction (#5299 D2).
 package access

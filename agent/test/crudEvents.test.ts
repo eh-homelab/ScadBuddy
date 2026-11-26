@@ -4,8 +4,8 @@ import { EventLog, ForkParentGone } from '../src/sessions/eventLog.js'
 import type { ServerEvent } from '../src/sessions/protocol.js'
 
 // A session's event log through the API's CRUD routes (#5299 step 9, part b), against a fake API
-// that answers as the backend's api/crud_agent_events.py does (the backend's
-// tests/crud/test_crud_agent_events.py covers the routes, the fence and the chain). An event
+// that answers as the backend's tools/go/core/internal/events does (the backend's
+// the Go tests in tools/go/core covers the routes, the fence and the chain). An event
 // travels as its JSON text, an inherited one is addressed to the session here, a session id goes
 // into a path only as a lowercase UUID, and the log keeps its interface.
 

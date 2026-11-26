@@ -55,24 +55,26 @@ call hashes its input for the audit log after it ran, so no Temporal worker poll
 lists and answers the areas (`src/api/dataHealth.ts` `dataHealthOf`, `CrudAreas.answers`),
 else `unreachable`, and `ai` then says `unavailable (the API does not answer the agent's CRUD
 areas)` (`src/aiStatus.ts`). There is no migration wait: the tests' ledger wait is
-`test/support/schema.ts`, and their file list `test/support/expected-migrations.json`. Backend
-`api/crud_agent_start.py` (#6501; test `test/crudStart.test.ts`) serves area `auth-sessions`.
+`test/support/schema.ts`, and their file list `test/support/expected-migrations.json`. Go's core
+(`tools/go/core/internal/agentstart`, #6501, #7667; test `test/crudStart.test.ts`) serves area
+`auth-sessions`.
 A route's answer counts only with `X-ScadBuddy-Crud: 1`; any other failure takes the read's
 error path (a lookup failure the activity retries, a 500, a resync). A GET, or a call marked
 `idempotent`, whose connection drops (`crudRead.ts` `TRANSIENT_KINDS`, not a refusal, which its caller
 waits out) is sent again after `RETRY_DELAYS_MS`; a write never is. A turn that still fails on one is placed again
 (`BackendUnreachable`, #6994). Each area, its client
-and its backend module:
+and the module that serves it: Go's core (`tools/go/core`, a package per area under
+`internal/`) serves most routes and hands the rest to the Python API (#7667):
 
 - `auth-sessions`: a signed-in person's session (`src/auth/browserSession.ts`,
   `CrudSessionLookup`; only the cookie's hash travels, at most `LOOKUPS_IN_FLIGHT` at once, the
   rest waiting up to `LOOKUP_WAIT_MS`, then failing as no session).
-- `keys` (backend `api/crud_agent_keys.py`): the approvals' input-hash key (`GET …/agent/keys/input-hash`,
+- `keys` (Go `internal/secrets`; the fetch grants: backend `api/crud_agent_keys.py`): the approvals' input-hash key (`GET …/agent/keys/input-hash`,
   `src/api/agentKeys.ts` `InputHashKey`) and the one-off fetch grants (`POST …/agent/fetch-grants`,
   `CrudFetchGrants`). Both keys are derived from the API's KEK. The input-hash key is
   released once and kept for the process's life (every replica hashes with one key); the
   grants' key stays on the API.
-- `flows` (#5299 D7, `api/crud_agent.py`): a run's starter, its decision checks, a grant in force, a run's queue and
+- `flows` (#5299 D7, Go `internal/agentreads`): a run's starter, its decision checks, a grant in force, a run's queue and
   steps, the waiting runs and the parent-hop approvals (`src/flows/backendReads.ts`
   `CrudFlowRunReads` over `src/api/crudRead.ts` `crudRead`, used by `temporal/flowRuns.ts`,
   `flows/queue.ts`, `flows/escalations.ts` and `temporal/toolActivities.ts`). The API revokes
@@ -86,7 +88,8 @@ and its backend module:
   `src/temporal/payloadCodec.ts` `CrudPayloadKeys` (a subject's data key, made under the
   subject's lock and never for a forgotten subject, audited as kind `payload_key` once per
   subject in 10 minutes, cached 30 s here).
-- `forget` (#5299 step 6, `api/crud_agent_forget.py`): `src/sessions/forget.ts`
+- `forget` (#5299 step 6; a subject's forget: backend `api/crud_agent_forget.py`; the rest:
+  Go `internal/forget`): `src/sessions/forget.ts`
   `CrudSubjectKeys.forget` (under the subject's lock, the tombstone, a flow run's images and the
   key, a session's forks first taking their ranges of its transcript, events and images,
   backend `transcripts.py` `copy_fork_ranges`; an API with no KEK whose forks take transcript
@@ -94,11 +97,12 @@ and its backend module:
   nothing more), a browser call's key and the hourly key sweep, and a flow run's images
   (`src/temporal/flowBlobs.ts` `CrudFlowBlobs`, multipart bytes; the tombstone check and the
   cap in the API's transaction).
-- `workspace` (#5299 step 7, `api/crud_agent_workspace.py`): `src/workspace/crudStore.ts`
+- `workspace` (#5299 step 7; Go `internal/workspace`, and backend `api/crud_agent_workspace.py`
+  for the status, the bytes, the writes, the copies and the blob moves): `src/workspace/crudStore.ts`
   `CrudSessionFiles`. The API seals, stores and opens each file and re-wraps principals' keys;
   a write's row, blob hold and `workspace.file` events are one transaction there, and the
-  reconcile one transaction under `RECONCILE_LOCK`. This process sends and gets plaintext only.
-- `session-blobs`, `attachments`, `http-bodies` (#5299 step 7, `api/crud_agent_blobs.py`):
+  reconcile one transaction under its lock (Go). This process sends and gets plaintext only.
+- `session-blobs`, `attachments`, `http-bodies` (#5299 step 7, Go `internal/blobs`):
   a session's images and PDFs (`src/sessions/crudBlobs.ts` `CrudSessionBlobs`; the sessions
   route serves a PDF with `Content-Disposition: attachment`; a durable tool call's images
   replaced whole; a placement's write fenced by `TurnFence`, checked `FOR SHARE`; a queued
@@ -106,13 +110,14 @@ and its backend module:
   write made, #6413), the staged attachments (`CrudAttachmentStore`) and the saved
   http_request bodies (`CrudHttpBodies`, read by range). Bytes are multipart parts and answer
   bodies.
-- `background-tasks`, `operations` (#5299 step 8, `api/crud_agent_tasks.py`):
+- `background-tasks`, `operations` (#5299 step 8; Go `internal/tasks`, and backend
+  `api/crud_agent_tasks.py` for an operation's insert and end):
   `CrudBackgroundTasks` (tasks, a Monitor's events, a Workflow's journal and child chats) and
   `CrudOperations` (`ai_operations`; the API writes the activity row in its transaction).
   Bodies go through `crudRead.ts` `wellFormed`: the API refuses a lone surrogate.
 - `sessions`, `session-resources`, `transcripts`, `session-events`, `session-order-costs`
-  (#5299 step 9, `api/crud_agent_sessions.py`, `_transcripts.py`, `_events.py`,
-  `_order_costs.py`): `CrudSessionRows` (one read of the row answers the record, a turn's claim
+  (#5299 step 9, Go `internal/sessions`, `internal/transcripts`, `internal/events`,
+  `internal/ordercosts`): `CrudSessionRows` (one read of the row answers the record, a turn's claim
   and `poolRemainingUsd`; an insert's owner limit and a fork's tombstone check run under their
   locks), `CrudResourceRows`, `src/sessions/crudTranscripts.ts` `CrudTranscriptRows` (sealed and
   opened by the API under the session's data key with the agent's AAD, so entries travel as
@@ -124,7 +129,7 @@ and its backend module:
   `forkLog` under the parent's payload-key lock). `TranscriptStore` (`src/sessions/store.ts`) keeps the per-session
   append order and `EventLog` its followers, wakes and 1 s polls (D4). A session id goes into a
   path only as a lowercase UUID, encoded (`rows.ts` `sessionPath`).
-- `session-turns`, `session-edits` (#6449, `api/crud_agent_turns.py`, `_edits.py`):
+- `session-turns`, `session-edits` (#6449, Go `internal/turns`, `internal/edits`):
   `CrudTurnRows` is one route per write, its events in its transaction and its fence checked
   there: a send's claim and give-back, the queueable read, the turn's state read, a
   placement's claim (the only writer of `turn_attempt`), its spend (each write under a key of
@@ -139,7 +144,7 @@ and its backend module:
   (#7031), and the first send after an unarchive starts a new run (`durable.ts`,
   `ALLOW_DUPLICATE`).
 - `gate`, `pending-input`, `audit`, `approvals`, `questions`, `escalations` (#5299 step 10,
-  `GATE_AREAS`, `api/crud_agent_gate.py` and siblings): `src/gate/crudStore.ts` `CrudGate`
+  `GATE_AREAS`, Go `internal/gate` and its siblings): `src/gate/crudStore.ts` `CrudGate`
   (`openInput`, `resolveInput`, `denyInput`, `decideInput`, `readInput`, `grantInput`; the API
   writes the rows, events, status, audit row and `scadbuddy_input` NOTIFY in one transaction
   and answers the events, `logged`; `decideInput` runs the validator there, and with `live` the
@@ -154,21 +159,23 @@ and its backend module:
   post lands only while the turn holds the session, with its cap, events and audit rows in one
   transaction); `src/flows/crudEscalations.ts` (who may answer is checked here; a delivery's
   claim is committed before its turn starts and handed back, `unclaim`, when it does not).
-- `publish`, `session-reads` (#6501, `api/crud_agent_publish.py`): `CrudPublisher` (a
+- `publish`, `session-reads` (#6501, Go `internal/publish`): `CrudPublisher` (a
   `session.*` bus event, a handoff's warm eviction) and `CrudSessionReads` (a session's open
   calls, a child's reasoning).
-- `session-sweeps`, `forget-rows` (#6501, `api/crud_agent_sweeps.py`):
+- `session-sweeps`, `forget-rows` (#6501, Go `internal/sweeps`):
   `src/sessions/presence.ts` `CrudSessionPresence` (pages of `LIVE_IDS_MAX`; a failed read
   throws, so a sweep removes nothing it could not check) and `forget.ts` `CrudForgetRows`
   (refused 409 `not-forgotten` with no tombstone).
 - The small stores (#5299 step 5, `src/api/crudStores.ts` `STORE_AREAS`,
-  `api/crud_agent_stores.py`, `_notify.py`): `activity-kinds`, `browser-origins`
+  Go `internal/stores`; the push waiting read: backend `api/crud_agent_notify.py`): `activity-kinds`, `browser-origins`
   (`CrudSessionOrigins`), `bridge-tabs` (`CrudSessionTabStore`, `CrudTabOwnerStore`,
   `CrudTabImageStore`), `pairings` (only the code's hash leaves this process), `mcp-tokens`
   (a mint and a verify send the hash only) and `notify` (`CrudPushStore`, `CrudChannelRows`: the
   API seals and opens the VAPID key, the subscriptions' keys and the channels' tokens). Test
   `test/crudStores.test.ts`.
-- The plugin stores (#5299 step 5, `api/crud_agent_access.py`, `_plugins.py`, `_packages.py`):
+- The plugin stores (#5299 step 5, Go `internal/access`, `internal/plugins`,
+  `internal/packages`; the rest of the plugins and the package mirrors: backend
+  `api/crud_agent_plugins.py`, `api/crud_agent_packages.py`):
   `access` (`CrudAccessRows`; `CrudToolListings`, whose connection test holds the lease
   `tool-listing:<source>`, `crudStores.ts` `CrudLeases`, renewed every 30 s, and stores its
   listing only while the lease holds, else 409 `lease-lost`), `plugin-sessions`, `plugins`
@@ -191,10 +198,10 @@ and its backend module:
   downloads, and keeps a failed one for `ARCHIVE_FAILURE_KEPT_MS` (60 s, the feed's `max-age`;
   a missing mirror is not kept); `PUT`/`DELETE …/{feed}/packages/{name}` are Settings' UI-only
   writes, 503 `not-served` while the API does not serve them yet (a rolling deploy).
-- `mcp-relay` (#5299 step 11, `api/crud_agent_mcp.py`): `src/mcp/relayRows.ts` `CrudRelayRows`
+- `mcp-relay` (#5299 step 11, Go `internal/mcprelay`): `src/mcp/relayRows.ts` `CrudRelayRows`
   (the /mcp session directory and messages; a message's row and its `scadbuddy_mcp` NOTIFY
-  commit in one transaction). `test/mcpSessions.pg.test.ts` runs the relay against the
-  backend's port.
+  commit in one transaction). `test/mcpSessions.pg.test.ts` runs the relay over fake routes
+  that answer with the agent's own SQL; the routes' own tests are Go's (`internal/mcprelay`).
 - `changes` (#5299 D4, `api/crud_agent_changes.py`, `agent_changes/hub.py`):
   `src/events/changeStream.ts` `ChangeStream`, the agent's one source of NOTIFYs, a server-sent
   event stream `GET …/agent/changes` carrying the six channels (`scadbuddy_events`, `_input`,
@@ -473,8 +480,8 @@ opens every one and seals it again byte for byte).
     `copy_fork_ranges`), and an API with no KEK refuses it when a fork takes transcript
     entries (`fork_cut` above 0; a fork of a closed DurableSession takes none). The API
     answers every read through the fork chain in one snapshot, stopping at the least cut below
-    each ancestor (`LEAST(bound, cut)`: backend `agent_data/transcripts.py`, `events.py`,
-    `api/crud_agent_blobs.py`); a new chain read must do the same. When it is made, a fork
+    each ancestor (`LEAST(bound, cut)`: Go `internal/transcripts`, `internal/events`,
+    `internal/blobs`); a new chain read must do the same. When it is made, a fork
     copies none of its parent's transcript, event or image rows; its workspace file rows are
     copied, naming the same bytes (`SessionFiles.copy`). A gated tool's activity runs only
     with an `approved` `ai_input_responses` row for its own request id.
@@ -499,10 +506,10 @@ opens every one and seals it again byte for byte).
     bytes (#4789) are a blob of the content store, sealed under a per-file key wrapped under
     the session's data key, held in `blob_refs` as `(ai_session_file, <workspace>/<path>)`
     before the row that names them and released after it is gone, and the hourly reconcile
-    (one replica at a time, `RECONCILE_LOCK`) releases what cascades, `forgetSubject` and
+    (one replica at a time, Go `internal/workspace`) releases what cascades, `forgetSubject` and
     crashes left and holds a row no hold names; no trigger.
-    `test/workspaceBlobs.backend.e2e.test.ts` runs it against the real API on moto
-    (`backend/tests/support/workspace_backend.py`). Only on `store_backend` local do the bytes
+    `test/workspaceBlobs.backend.e2e.test.ts` runs it against the real API on moto, behind
+    Go's core (`backend/tests/support/workspace_backend.py`; it skips without `uv` or `go`). Only on `store_backend` local do the bytes
     stay in Postgres, one `ai_session_file_bytes` row per sha256 that every file with those
     bytes names, so a fork shares them (#4212); on any other backend a write that cannot be
     sealed and stored is refused `unavailable`, never kept in plaintext. Rows of

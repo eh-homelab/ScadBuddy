@@ -1,5 +1,5 @@
 // Package tasks is the agent's background tasks and the reads of its command record:
-// backend/scadbuddy/api/crud_agent_tasks.py over agent_data/background.py and
+// backend/scadbuddy/api/crud_agent_tasks.py over agent_data/background.py (removed in #7667) and
 // agent_data/operations.py, statement for statement (area background-tasks, and
 // operations:read). An operation's insert and end stay Python's: they write its activity
 // row in the same transaction.

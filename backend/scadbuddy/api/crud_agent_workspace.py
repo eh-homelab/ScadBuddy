@@ -16,9 +16,6 @@ principal's id may hold a ``/``. Each is checked against ``WORKSPACE_PATTERN`` a
 - ``GET …/workspace/status``: where a write's bytes go (``blobs``, ``postgres`` or
   ``refused`` with ``reason``), how many sealed files cannot be read from here, and why a
   sealed file cannot be read now (``sealed_unreadable``).
-- ``GET …/workspace/files`` (``workspace``, ``prefix``), ``GET …/workspace/file``
-  (``workspace``, ``path``), ``GET …/workspace/usage``, ``POST …/workspace/session-files``
-  (at most ``SESSIONS_MAX`` sessions): the metadata.
 - ``GET …/workspace/file-bytes`` (``workspace``, ``path``, ``expected_sha256``): the
   plaintext, streamed a segment at a time; 404, or 409 when the file is not at
   ``expected_sha256``. A file that changes while it streams ends the stream short: the
@@ -27,11 +24,12 @@ principal's id may hold a ``/``. Each is checked against ``WORKSPACE_PATTERN`` a
   workspace, path, media type, sha256, size, source, what the file must be now, and the
   ``workspace.file`` events to log) and the part ``file``, at most ``FILE_BYTES_CEILING``
   bytes and the ``workspace_file_max_bytes`` setting.
-- ``POST …/workspace/file-deletes``, ``POST …/workspace/copies`` (a fork's), ``POST
-  …/workspace/blob-moves`` (one batch of files still in Postgres moved to blobs), ``POST
-  …/workspace/sweeps`` (principals' expired files) and ``POST …/workspace/reconciles`` (the
-  holds made to match the rows, one replica at a time: ``skipped: held`` while another
-  holds the lock).
+- ``POST …/workspace/copies`` (a fork's) and ``POST …/workspace/blob-moves`` (one batch of
+  files still in Postgres moved to blobs).
+
+The metadata reads (``…/workspace/files``, ``…/file``, ``…/usage``, ``…/session-files``), the
+delete, the sweep and the reconcile are Go's (``tools/go/core/internal/workspace``, #7667):
+they need neither the blob store nor the KEK.
 """
 
 from __future__ import annotations
@@ -64,8 +62,6 @@ logger = logging.getLogger(__name__)
 
 T = TypeVar("T")
 
-#: The most sessions one ``session-files`` read names (the picker's ``LIST_LIMIT_MAX``).
-SESSIONS_MAX = 500
 #: The largest ``meta`` part of a write.
 META_BYTES_MAX = 32 * 1024
 #: The largest ``source`` a file keeps, as JSON.
@@ -145,23 +141,6 @@ class FileInfo(BaseModel):
     updated_at: datetime
 
 
-class SessionFileInfo(FileInfo):
-    sealed: bool
-
-
-class Files(BaseModel):
-    files: list[FileInfo]
-
-
-class OneFile(BaseModel):
-    file: FileInfo | None
-
-
-class Usage(BaseModel):
-    files: int
-    bytes: int
-
-
 class BytesStatus(BaseModel):
     store: Literal["blobs", "postgres", "refused"]
     backend: str | None = None
@@ -196,53 +175,6 @@ async def workspace_status(state: StateDep) -> BytesStatus:
     if unreadable:
         out.unreadable_files = unreadable
     return out
-
-
-@router.get("/workspace/files", name="crud_agent_workspace_files")
-async def workspace_files(
-    state: StateDep,
-    workspace: Workspace,
-    prefix: Annotated[str | None, Query(max_length=ws.PATH_MAX + 64)] = None,
-) -> Files:
-    key = _workspace(workspace)
-    rows = await _in_conn(state, lambda conn: ws.list_files(conn, key, prefix))
-    return Files(files=[FileInfo.model_validate(r) for r in rows])
-
-
-@router.get("/workspace/file", name="crud_agent_workspace_file")
-async def workspace_file(state: StateDep, workspace: Workspace, path: FilePath) -> OneFile:
-    key, name = _workspace(workspace), _path(path)
-    row = await _in_conn(state, lambda conn: ws.stat(conn, key, name))
-    return OneFile(file=None if row is None else FileInfo.model_validate(row))
-
-
-@router.get("/workspace/usage", name="crud_agent_workspace_usage")
-async def workspace_usage(state: StateDep, workspace: Workspace) -> Usage:
-    key = _workspace(workspace)
-    files, total = await _in_conn(state, lambda conn: ws.usage(conn, key))
-    return Usage(files=files, bytes=total)
-
-
-class SessionsAsk(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-
-    session_ids: list[Annotated[str, Field(pattern=rf"^{ws.UUID_PATTERN}$")]] = Field(
-        max_length=SESSIONS_MAX
-    )
-
-
-class SessionsFiles(BaseModel):
-    sessions: dict[str, list[SessionFileInfo]]
-
-
-@router.post("/workspace/session-files", name="crud_agent_workspace_session_files")
-async def workspace_session_files(body: SessionsAsk, state: StateDep) -> SessionsFiles:
-    found = await _in_conn(state, lambda conn: ws.list_sessions(conn, body.session_ids))
-    return SessionsFiles(
-        sessions={
-            sid: [SessionFileInfo.model_validate(r) for r in rows] for sid, rows in found.items()
-        }
-    )
 
 
 # --- the bytes ---------------------------------------------------------------------------
@@ -535,36 +467,6 @@ async def workspace_write(request: Request, state: StateDep) -> Written:
     return Written(file=FileInfo.model_validate(info), seqs=seqs)
 
 
-class DeleteAsk(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-
-    workspace: str = Field(min_length=1, max_length=ws.WORKSPACE_MAX)
-    path: str = Field(min_length=1, max_length=ws.PATH_MAX + 64)
-    expected_sha256: Sha | None = None
-    events: list[Annotated[str, Field(max_length=ws.EVENT_BYTES_MAX)]] = Field(
-        default_factory=list, max_length=ws.EVENTS_MAX
-    )
-
-
-class Deleted(BaseModel):
-    deleted: bool
-    seqs: list[int]
-
-
-@router.post("/workspace/file-deletes", name="crud_agent_workspace_delete")
-async def workspace_delete(body: DeleteAsk, state: StateDep) -> Deleted:
-    key, name = _workspace(body.workspace), _path(body.path)
-    try:
-        events = ws.check_events(key, body.events)
-    except ValueError as err:
-        raise _unprocessable(f"events: {err}") from None
-    deleted, seqs, named = await _in_conn(
-        state, lambda conn: ws.delete_row(conn, key, name, body.expected_sha256, events)
-    )
-    await _drop_bytes(state, [named] if named else [])
-    return Deleted(deleted=deleted, seqs=seqs)
-
-
 class CopyAsk(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -640,39 +542,3 @@ async def workspace_move_to_blobs(body: MoveAsk, state: StateDep) -> Moved:
         )
         await _drop_bytes(state, [named] if named else [])
     return Moved(moved=moved, local=False, more=bool(rows))
-
-
-class SweepAsk(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-
-    ttl_ms: int = Field(default=ws.TTL_MS, ge=60_000, le=365 * 86_400_000)
-
-
-class Swept(BaseModel):
-    swept: int
-
-
-@router.post("/workspace/sweeps", name="crud_agent_workspace_sweep")
-async def workspace_sweep(body: SweepAsk, state: StateDep) -> Swept:
-    return Swept(swept=await _in_conn(state, lambda conn: ws.sweep(conn, body.ttl_ms)))
-
-
-class ReconcileAsk(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-
-    grace_seconds: int = Field(default=3600, ge=0, le=31_536_000)
-
-
-class Reconciled(BaseModel):
-    released: int
-    held: int
-    #: ``held``: another reconcile holds the lock, and this one did nothing.
-    skipped: Literal["held"] | None = None
-
-
-@router.post("/workspace/reconciles", name="crud_agent_workspace_reconcile")
-async def workspace_reconcile(body: ReconcileAsk, state: StateDep) -> Reconciled:
-    done = await _in_conn(state, lambda conn: ws.reconcile(conn, body.grace_seconds))
-    if done is None:
-        return Reconciled(released=0, held=0, skipped="held")
-    return Reconciled(released=done[0], held=done[1])

@@ -1,6 +1,7 @@
 """Hosted plugins (#6932, spec 2026-11-21 §6.1 to §6.3, `api/hosted_plugins.py`): the draft's
 routes, path rules and caps, the publish, the immutable versions, and the agent's CRUD reads
-(area ``hosted-plugins``, `api/crud_agent_packages.py`)."""
+(area ``hosted-plugins``, `api/crud_agent_packages.py`: a version's zip; the plugin's row is
+Go's, #7667)."""
 
 from __future__ import annotations
 
@@ -299,19 +300,11 @@ def test_the_same_draft_publishes_the_same_zip_bytes(client: TestClient) -> None
     assert client.get(f"{CRUD}/greeter/versions/1.zip", headers=token(client)).content == zip_bytes
 
 
-def test_the_agent_reads_the_latest_version_and_its_zip(client: TestClient) -> None:
+def test_the_agent_reads_a_versions_zip(client: TestClient) -> None:
     agent = token(client)
-    assert client.get(f"{CRUD}/greeter", headers=agent).json() == {"plugin": None}
     _ready(client)
     _put(client, "skills/hello/run.sh", b"#!/bin/sh\n", executable="true")
-    unpublished = client.get(f"{CRUD}/greeter", headers=agent).json()["plugin"]
-    assert (unpublished["latest_version"], unpublished["latest"]) == (None, None)
     v1 = client.post(f"{BASE}/greeter/publish").json()
-
-    plugin = client.get(f"{CRUD}/greeter", headers=agent).json()["plugin"]
-    assert plugin["latest_version"] == 1
-    assert plugin["latest"]["content_hash"] == v1["content_hash"]
-    assert plugin["latest"]["files"] == v1["files"]
 
     got = client.get(f"{CRUD}/greeter/versions/1.zip", headers=agent)
     assert got.status_code == 200
@@ -334,9 +327,10 @@ def test_the_agent_reads_the_latest_version_and_its_zip(client: TestClient) -> N
 
 
 def test_only_the_agent_credential_reaches_the_crud_routes(client: TestClient) -> None:
+    zip_url = f"{CRUD}/greeter/versions/1.zip"
     for caller in ("print", "projects"):
-        assert client.get(f"{CRUD}/greeter", headers=token(client, caller)).status_code == 403
-    assert client.get(f"{CRUD}/greeter").status_code == 401
+        assert client.get(zip_url, headers=token(client, caller)).status_code == 403
+    assert client.get(zip_url).status_code == 401
     assert (
         "hosted-plugins"
         in client.get("/api/v1/internal/crud/agent/areas", headers=token(client)).json()["areas"]

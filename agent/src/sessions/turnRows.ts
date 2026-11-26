@@ -6,7 +6,7 @@ import { sessionPath, type Who } from './rows.js'
 
 // A durable turn's writes of its session's row (#6449, #5299 step 9), behind one interface
 // (durable.ts, turnHost.ts, temporal/session/finishActivity.ts, durableSweep.ts): `CrudTurnRows`,
-// over the API's CRUD routes (backend api/crud_agent_turns.py, area `session-turns`), each method
+// over the API's CRUD routes (tools/go/core/internal/turns, area `session-turns`), each method
 // one route and one transaction, its fence checked there (#5299 D2).
 //
 // The fences: a placement takes the turn (`turn_attempt`, which nothing else writes) only while
@@ -125,7 +125,7 @@ const nextBody = (next: NextClaim) => ({
 /**
  * A row write's request through the API (the turn routes, and an edit's, edits.ts): longer than
  * the route's own waits, a pooled connection (`POOL_WAIT_S`, 10 s) and then the row's lock
- * (`turns.LOCK_TIMEOUT_MS`, 10 s, backend api/crud_agent_turns.py), so the route gives up before
+ * (`turns.LOCK_TIMEOUT_MS`, 10 s, tools/go/core/internal/turns), so the route gives up before
  * the agent does and a write never commits after the agent reported it failed. Change them
  * together.
  */

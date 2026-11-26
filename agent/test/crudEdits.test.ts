@@ -4,7 +4,7 @@ import { SessionError } from '../src/sessions/manager.js'
 import { ROW_WRITE_TIMEOUT_MS } from '../src/sessions/turnRows.js'
 
 // An edit of a session through the API's CRUD route (#6449), against a fake API that answers as
-// the backend's api/crud_agent_edits.py does (tests/crud/test_crud_agent_edits.py covers the
+// the backend's tools/go/core/internal/edits does (the Go tests in tools/go/core covers the
 // route). The edit is sent untold first;
 // the workflow is told it is done only when the route answers `untold` (every other check passed,
 // nothing written), and the edit is then sent again, told. A refusal or a 503 tells no workflow, a

@@ -22,7 +22,7 @@ import { startFakeIdp } from './support/fakeIdp.js'
 // The marketplace feed (#6933, spec 2026-11-21 §6.4, routes/pluginFeeds.ts): served on /mcp's
 // auth to Claude Code sessions outside ScadBuddy, listing only approved pins, with zip URLs made from
 // the origin the feed was asked on. The reads are a fake of the CRUD routes (backend
-// tests/api/test_crud_agent_plugin_feeds.py covers those).
+// the Go tests in tools/go/core covers those).
 
 const PUBLIC = 'https://scadbuddy.test'
 const FEED = `${PUBLIC}/api/v1/ai/plugin-feeds/default`

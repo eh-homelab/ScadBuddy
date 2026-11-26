@@ -1,5 +1,5 @@
 // Package pending is the gate's pending input and responses beyond its writers:
-// backend/scadbuddy/agent_data/pending_input.py and api/crud_agent_pending.py, statement for
+// backend/scadbuddy/agent_data/pending_input.py (removed in #7667) and api/crud_agent_pending.py (removed in #7667), statement for
 // statement (area pending-input).
 package pending
 

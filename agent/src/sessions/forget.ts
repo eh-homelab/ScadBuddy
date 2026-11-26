@@ -51,7 +51,7 @@ import { CrudSessionReads, type SessionReads } from './sessionReads.js'
 // take transcript entries, refuses it (`forks`): the forget then throws ForksNeedKeys and deletes
 // nothing more.
 // Step 3's rows, their unnamed bytes and the warm eviction are the API's too (#6501, area
-// `forget-rows`, backend api/crud_agent_sweeps.py, `CrudForgetRows`); step 0 reads the tasks and
+// `forget-rows`, tools/go/core/internal/sweeps, `CrudForgetRows`); step 0 reads the tasks and
 // the open calls through the API.
 // Its callers: an operator (`node dist/forget-subject.js <subject>`) and any delete
 // route added later. `SessionStore.delete` is never reached for a durable session,

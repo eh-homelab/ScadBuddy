@@ -1,5 +1,5 @@
 // Package blobs is the assistant's session images, attachments and saved HTTP bodies:
-// backend/scadbuddy/api/crud_agent_blobs.py, statement for statement (areas session-blobs,
+// backend/scadbuddy/api/crud_agent_blobs.py (removed in #7667), statement for statement (areas session-blobs,
 // attachments and http-bodies). Bytes travel as bytes: a write is multipart/form-data, a
 // read answers the bytes as its body.
 package blobs

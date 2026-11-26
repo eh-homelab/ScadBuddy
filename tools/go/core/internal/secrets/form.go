@@ -14,7 +14,7 @@ import (
 	"github.com/eh-homelab/ScadBuddy/tools/go/core/internal/httpx"
 )
 
-// form reads a JSON body as the pydantic models of crud_agent_secrets.py do (extra="forbid"):
+// form reads a JSON body as the pydantic models of crud_agent_secrets.py (removed in #7667) do (extra="forbid"):
 // each read notes its issue at its loc, and err is the 422 of all of them.
 type form struct {
 	at     []string

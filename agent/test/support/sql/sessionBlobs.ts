@@ -12,7 +12,7 @@ import type { ServerEvent } from '../../../src/sessions/protocol.js'
 import { forkChain } from './eventRows.js'
 
 // A session's images over SQL on the test database: what the agent ran itself before #5299 step
-// 12, and what the API's `session-blobs` routes (backend api/crud_agent_blobs.py) run. Test-only.
+// 12, and what the API's `session-blobs` routes (tools/go/core/internal/blobs) run. Test-only.
 
 export class SessionBlobs implements SessionImages {
   private readonly sql: Sql
@@ -79,7 +79,7 @@ export class SessionBlobs implements SessionImages {
 
   /**
    * Stores each image, or sets the time of one already there (its bytes stay): the names made,
-   * and the latest time set (backend api/crud_agent_blobs.py `_insert_blobs`).
+   * and the latest time set (tools/go/core/internal/blobs `_insert_blobs`).
    */
   private async insert(tx: TransactionSql, sessionId: string, images: readonly SessionBlob[]): Promise<{ names: string[]; at?: string }> {
     const names: string[] = []

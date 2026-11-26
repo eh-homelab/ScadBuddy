@@ -1,7 +1,6 @@
-"""The two keys the agent derived from its own KEK, through CRUD routes (#5299 step 12):
-only the ``agent`` credential reaches them, the input-hash key is the one the agent
-derived (so a hash written before still matches), and a fetch grant minted here passes
-the asset route's check."""
+"""A fetch grant, through the agent's CRUD route (#5299 step 12): only the ``agent``
+credential reaches it, and a grant minted here passes the asset route's check. The
+input-hash key's route is Go's (#7667), tested in ``tools/go/core/internal/secrets``."""
 
 from __future__ import annotations
 
@@ -36,9 +35,6 @@ pytestmark = pytest.mark.requires_postgres
 
 BASE = "/api/v1/internal/crud/agent"
 KEK_B64 = base64.b64encode(b"\x31" * 32).decode()
-#: The agent's own derivation of that KEK's key (Node, `hkdfSync('sha256', kek, empty,
-#: 'scadbuddy:ai_approvals:input_hash:v1', 32)`, as `approvals/service.ts` ran it).
-AGENT_INPUT_HASH_KEY = "Sl3Jx+pP/OVUmJWyOmEw4ogfnYnnhW/M0UZfNJrtyEw="
 
 
 def _app(pool: PgPool, tmp_path: Path, *, kek: str | None) -> FastAPI:
@@ -75,15 +71,6 @@ def _token(app: FastAPI, caller: ServiceCaller = "agent") -> dict[str, str]:
     minted = InProcessProvider(caller, lambda: credentials).token()
     assert minted is not None
     return {"authorization": f"Bearer {minted}"}
-
-
-def test_the_input_hash_key_is_the_agents_own(pg_pool: PgPool, tmp_path: Path) -> None:
-    app = _app(pg_pool, tmp_path, kek=KEK_B64)
-    with TestClient(app) as client:
-        answer = client.get(f"{BASE}/keys/input-hash", headers=_token(app))
-    assert answer.status_code == 200
-    assert answer.json() == {"key": AGENT_INPUT_HASH_KEY}
-    assert "no-store" in answer.headers["cache-control"]
 
 
 def test_a_minted_grant_passes_the_asset_routes_check(pg_pool: PgPool, tmp_path: Path) -> None:
@@ -125,14 +112,14 @@ def test_a_malformed_ask_is_refused(pg_pool: PgPool, tmp_path: Path, body: dict[
 def test_another_caller_is_refused(pg_pool: PgPool, tmp_path: Path) -> None:
     app = _app(pg_pool, tmp_path, kek=KEK_B64)
     with TestClient(app) as client:
-        key = client.get(f"{BASE}/keys/input-hash", headers=_token(app, "render"))
         grant = client.post(
             f"{BASE}/fetch-grants",
             json={"host": "a.example", "url": "https://a.example/x"},
             headers=_token(app, "render"),
         )
-        bare = client.get(f"{BASE}/keys/input-hash")
-    assert key.status_code == 403
+        bare = client.post(
+            f"{BASE}/fetch-grants", json={"host": "a.example", "url": "https://a.example/x"}
+        )
     assert grant.status_code == 403
     assert bare.status_code == 401
 
@@ -140,13 +127,11 @@ def test_another_caller_is_refused(pg_pool: PgPool, tmp_path: Path) -> None:
 def test_no_kek_is_kek_missing(pg_pool: PgPool, tmp_path: Path) -> None:
     app = _app(pg_pool, tmp_path, kek=None)
     with TestClient(app) as client:
-        key = client.get(f"{BASE}/keys/input-hash", headers=_token(app))
         grant = client.post(
             f"{BASE}/fetch-grants",
             json={"host": "a.example", "url": "https://a.example/x"},
             headers=_token(app),
         )
-    assert (key.status_code, key.json()["reason"]) == (503, "kek-missing")
     assert (grant.status_code, grant.json()["reason"]) == (503, "kek-missing")
 
 

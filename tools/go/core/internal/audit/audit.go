@@ -1,5 +1,5 @@
-// Package audit is the agent's audit log: backend/scadbuddy/agent_data/audit_log.py and
-// api/crud_agent_audit.py, statement for statement (area audit). Insert is also every other
+// Package audit is the agent's audit log: backend/scadbuddy/agent_data/audit_log.py (removed in #7667) and
+// api/crud_agent_audit.py (removed in #7667), statement for statement (area audit). Insert is also every other
 // area's audit row.
 package audit
 

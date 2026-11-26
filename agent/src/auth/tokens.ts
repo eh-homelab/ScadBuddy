@@ -128,7 +128,7 @@ function recordOfWire(row: WireToken): TokenRecord {
 
 /**
  * The token store through the API's CRUD routes, area `mcp-tokens` (backend
- * api/crud_agent_stores.py). The plaintext never leaves this process: a mint sends the hash
+ * tools/go/core/internal/stores). The plaintext never leaves this process: a mint sends the hash
  * it made, and `verify` sends the presented token's hash, which the API looks up and stamps in
  * one `UPDATE … RETURNING` by its unique index, comparing hashes only. Every expiry is judged
  * by the database's clock, so `now` is not sent.

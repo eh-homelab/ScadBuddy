@@ -2,7 +2,7 @@ import { randomUUID } from 'node:crypto'
 import { AGENT_CRUD, CRUD_READ_TIMEOUT_MS, CrudReadError, crudFetch } from './crudRead.js'
 
 // The agent's small stores behind the API's CRUD routes (#5299 step 5; backend
-// api/crud_agent_stores.py, crud_agent_notify.py, crud_agent_access.py, crud_agent_plugins.py
+// tools/go/core/internal/stores, crud_agent_notify.py, tools/go/core/internal/access, crud_agent_plugins.py
 // and crud_agent_packages.py): activity kinds, browser origins, session tabs, tab owners, tab
 // images, pairings, MCP tokens, Web Push and notification channels (`notify`), tool access and
 // listings, upstream MCP sessions, remote plugins and their sign-ins, and plugin packages and
@@ -115,10 +115,10 @@ export function segment(value: string, rule: RegExp, what: string): string {
   return encodeURIComponent(value)
 }
 
-/** The most tab ids one call sends (backend api/crud_agent_stores.py `TABS_MAX`). */
+/** The most tab ids one call sends (tools/go/core/internal/stores `TABS_MAX`). */
 export const TABS_PER_CALL = 500
 
-/** The most sources one access or listing read sends (backend api/crud_agent_access.py `SOURCES_MAX`). */
+/** The most sources one access or listing read sends (tools/go/core/internal/access `SOURCES_MAX`). */
 export const SOURCES_PER_CALL = 1000
 
 /** `items` in runs of at most `size`, in order. */
@@ -148,7 +148,7 @@ export const LEASE_KEY = /^(tool-listing:(remote:[a-z][a-z0-9-]{0,30}[a-z0-9]|pa
 export type HeldLease = { key: string; token: string }
 
 /**
- * The agent's leases through the API's CRUD routes (#5299 D3; backend api/crud_agent_access.py,
+ * The agent's leases through the API's CRUD routes (#5299 D3; tools/go/core/internal/access,
  * `…/leases/{key}`): a lock held across work that is not the database's, as a row with an
  * expiry, since a process with no database cannot hold a session advisory lock.
  */

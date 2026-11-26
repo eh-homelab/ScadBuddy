@@ -111,12 +111,12 @@ function fromWire(p: WirePairing): PairingView {
   return { id: p.id, label: p.label, expiresAt: new Date(p.expires_at) }
 }
 
-/** The route's reason for a request it refuses (backend api/crud_agent_stores.py `PAIRING_REFUSED`). */
+/** The route's reason for a request it refuses (tools/go/core/internal/stores `PAIRING_REFUSED`). */
 const PAIRING_REFUSED = 'pairing-refused'
 
 /**
  * The pairing store through the API's CRUD routes, area `pairings` (backend
- * api/crud_agent_stores.py): the API runs each method's transaction, `request`'s cap check
+ * tools/go/core/internal/stores): the API runs each method's transaction, `request`'s cap check
  * under the same advisory lock and `accept` under the row's `FOR UPDATE`. The code never leaves
  * this process: the API is sent its SHA-256 only, and compares hashes.
  */

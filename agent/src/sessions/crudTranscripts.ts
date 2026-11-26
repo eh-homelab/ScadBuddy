@@ -5,7 +5,7 @@ import { sessionPath } from './rows.js'
 import type { AppendFence, TranscriptHead, TranscriptRows } from './store.js'
 
 // A session's transcript over the API's CRUD routes (#5299 step 9, part b; backend
-// api/crud_agent_transcripts.py, area `transcripts`): each `TranscriptRows` method is one route
+// tools/go/core/internal/transcripts, area `transcripts`): each `TranscriptRows` method is one route
 // and one transaction. The API seals and opens every entry with the session's data key
 // (#5299 D5): an entry travels as its JSON text, so what comes back is deep-equal to what went in
 // (the SDK's one invariant, store.ts). A session id goes into a path only as `sessionPath` makes

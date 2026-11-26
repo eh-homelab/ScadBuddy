@@ -6,13 +6,13 @@ sha256 of the file the agent fetched once at install. The agent sends that file 
 before it stores the pin; a load unpacks this copy, never the upstream URL, so an approved
 pin still loads after upstream deletes or changes the file.
 
-Each mirror is the blob ``plugin-mirror-<sha256>`` (one file, `BLOB_FILE`), held in
-``blob_refs`` by ``(HOLDER, <package name>/<sha256>)`` (`holder_id`): the package the agent
-sent the file for. A pin of a package is stored only while that package's hold of its
-sha256 stands (`held`), so one package's upload never stands in for another's. A hold
-stays while that package's pin or pending re-pin names the sha256 (`release_unnamed`); a
-hold no row names goes once it is older than `UNNAMED_GRACE`, so an install between its
-upload and its row is never cut short. The blob sweep removes the bytes once no hold of
+Each mirror is the blob ``plugin-mirror-<sha256>`` (one file, `BLOB_FILE`), held in ``blob_refs`` by
+``(HOLDER, <package name>/<sha256>)`` (`holder_id`): the package the agent sent the file for. A pin
+of a package is stored only while that package's hold of its sha256 stands (Go's
+``tools/go/core/internal/packages`` checks it, #7667), so one package's upload never stands in for
+another's. A hold stays while that package's pin or pending re-pin names the sha256
+(`release_unnamed`); a hold no row names goes once it is older than `UNNAMED_GRACE`, so an install
+between its upload and its row is never cut short. The blob sweep removes the bytes once no hold of
 any package is left.
 """
 
@@ -101,16 +101,6 @@ def hold(conn: psycopg.Connection[Any], name: str, sha256: str) -> None:
         "INSERT INTO blob_refs (key, holder_kind, holder_id) VALUES (%s, %s, %s)"
         " ON CONFLICT (key, holder_kind, holder_id) DO UPDATE SET created_at = now()",
         (blob_key(sha256), HOLDER, holder_id(name, sha256)),
-    )
-
-
-def held(conn: psycopg.Connection[Any], name: str, sha256: str) -> bool:
-    return (
-        conn.execute(
-            "SELECT 1 FROM blob_refs WHERE key = %s AND holder_kind = %s AND holder_id = %s",
-            (blob_key(sha256), HOLDER, holder_id(name, sha256)),
-        ).fetchone()
-        is not None
     )
 
 

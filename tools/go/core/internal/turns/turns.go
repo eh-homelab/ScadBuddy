@@ -1,5 +1,5 @@
 // Package turns is a durable turn's writes of its session's row (area session-turns):
-// backend/scadbuddy/api/crud_agent_turns.py and agent_data/turns.py, statement for statement.
+// backend/scadbuddy/api/crud_agent_turns.py (removed in #7667) and agent_data/turns.py (removed in #7667), statement for statement.
 // Each write is one transaction with its events, its fence checked in it (#5299 D2), and its
 // lock waits bounded: a write that waits past lockTimeout for its row's lock is refused 503
 // row_busy, one that waits past poolWait for a connection 503 pool_busy, never committed late.
@@ -23,7 +23,7 @@ import (
 )
 
 const (
-	// nameMax is the longest owner id (crud_agent_sessions.py NAME_MAX).
+	// nameMax is the longest owner id (crud_agent_sessions.py (removed in #7667) NAME_MAX).
 	nameMax = 512
 	// attemptMax is a placement's attempt; markKeyMax a mark's key (the turn id and a request
 	// id: REQUEST_ID_MAX 500 in gate/crudStore.ts).

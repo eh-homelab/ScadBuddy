@@ -10,7 +10,7 @@ import { appendIn } from './gate.js'
 
 // Tests only: the orphan sweep's reads and cancels over the test database, the SQL the agent ran
 // before the API took area `pending-input` (#5299 step 12). src holds no SQL; the API's is
-// backend agent_data/pending_input.py. Each entry is one transaction; an approval's audit row is
+// tools/go/core/internal/pending. Each entry is one transaction; an approval's audit row is
 // written after it.
 
 type Row = {

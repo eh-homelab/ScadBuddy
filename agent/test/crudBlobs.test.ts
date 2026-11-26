@@ -10,8 +10,8 @@ import type { Owner } from '../src/sessions/protocol.js'
 
 // A session's images, the staged attachments and the saved http_request bodies through the API's
 // CRUD routes (#5299 step 7, areas `session-blobs`, `attachments`, `http-bodies`), against a fake
-// API that keeps them in memory as backend api/crud_agent_blobs.py does (the backend's
-// tests/crud/test_crud_agent_blobs.py covers the routes and the SQL).
+// API that keeps them in memory as tools/go/core/internal/blobs does (the backend's
+// the Go tests in tools/go/core covers the routes and the SQL).
 
 const BASE = 'http://api:8080'
 const PREFIX = '/api/v1/internal/crud/agent'

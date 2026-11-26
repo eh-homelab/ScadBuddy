@@ -47,7 +47,7 @@ export type PluginSessionRows = SessionLedger & {
   own(self: string, mark: string): Promise<Row[]>
 }
 
-/** The rows through the API's CRUD routes (backend api/crud_agent_access.py). */
+/** The rows through the API's CRUD routes (tools/go/core/internal/access). */
 export class CrudPluginSessions implements PluginSessionRows {
   readonly #call: ReturnType<typeof crudOf>
   readonly #replica: string

@@ -10,7 +10,7 @@ import { copyForkRanges } from './transcriptRows.js'
 
 // forgetSubject's routes over SQL on the test database: what the API's `forget`, `forget-rows`,
 // `background-tasks` and `session-reads` routes run (backend api/crud_agent_forget.py,
-// api/crud_agent_sweeps.py), as the agent once ran them itself. Test-only.
+// tools/go/core/internal/sweeps), as the agent once ran them itself. Test-only.
 
 /**
  * `forgetSubject`'s deps over `sql`, with `extra` on top. `extra.keys` opens and seals the

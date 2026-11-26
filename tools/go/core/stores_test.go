@@ -9,7 +9,7 @@ import (
 	"testing"
 )
 
-// The agent's small stores (internal/stores), as backend/tests/api/test_crud_agent_stores.py
+// The agent's small stores (internal/stores), as backend/tests/api/test_crud_agent_stores.py (removed in #7667)
 // checks them.
 
 const storeAreas = "activity-kinds, browser-origins, bridge-tabs, pairings, mcp-tokens"

@@ -35,7 +35,7 @@ import type { ImageRef, SentImage } from './protocol.js'
 // forgetting a parent copies those into it first.
 //
 // The rows are the API's (#5299 step 7, area `session-blobs`): `CrudSessionBlobs` (crudBlobs.ts)
-// runs each method on its CRUD routes (backend api/crud_agent_blobs.py), one transaction each.
+// runs each method on its CRUD routes (tools/go/core/internal/blobs), one transaction each.
 // A forget copies a fork's images there (backend events.py `copy_fork_blobs`, #5299 step 9,
 // part c).
 

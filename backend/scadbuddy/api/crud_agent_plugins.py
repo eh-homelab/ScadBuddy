@@ -19,6 +19,10 @@ sign-in's tokens for a request (``…/grants/{plugin}/open``), a flow's state an
 for its redirect and its callback, and every stored token for the redaction list
 (``…/stored-secrets``).
 
+A plugin's delete and a sign-in's mark and forget (``…/plugins/{name}/delete``,
+``…/plugin-oauth/grants/{plugin}/mark`` and ``…/forget``) are Go's
+(``tools/go/core/internal/plugins``, #7667): they seal and open nothing.
+
 A token refresh (``…/grants/{plugin}/refreshed``) is stored only while the caller holds
 the lease ``plugin-oauth:<plugin>`` (`agent_data/leases.py`, ``…/agent/leases/{key}``),
 which replaces the row lock the agent held across the token endpoint's answer (#5299 D3).
@@ -528,19 +532,6 @@ async def plugin_tool_access(name: PathName, body: ToolAccessSet, state: StateDe
     return _view(await _in_tx(state, run), kek)
 
 
-@router.post("/plugins/{name}/delete", name="crud_agent_plugin_delete")
-async def plugin_delete(name: PathName, state: StateDep) -> Done:
-    def run(conn: psycopg.Connection[Any]) -> bool:
-        gone = conn.execute("DELETE FROM ai_plugins WHERE name = %s", (name,)).rowcount
-        if gone == 0:
-            return False
-        acc.forget_source(conn, acc.remote_source(name))
-        acc.notify_warm_evict(conn)
-        return True
-
-    return Done(done=await _in_tx(state, run))
-
-
 @router.post("/plugins/{name}/reveal", name="crud_agent_plugin_reveal")
 async def plugin_reveal(name: PathName, state: StateDep) -> OpenedAnswer:
     """One plugin with its header value opened, for a connection test."""
@@ -981,50 +972,6 @@ async def oauth_grant_refreshed(plugin: PathName, body: GrantRefreshed, state: S
         return True
 
     return Stored(stored=await _in_tx(state, run))
-
-
-class GrantMark(_Body):
-    reason: Annotated[str, Field(min_length=1, max_length=TEXT_MAX)]
-    #: Only while this grant is the plugin's; left out, whichever is.
-    grant: UUID | None = None
-
-
-@router.post("/plugin-oauth/grants/{plugin}/mark", name="crud_agent_plugin_oauth_grant_mark")
-async def oauth_grant_mark(plugin: PathName, body: GrantMark, state: StateDep) -> Done:
-    """Marks the sign-in failed (``PluginOAuth.mark``): "Sign in again" in Settings."""
-
-    def run(conn: psycopg.Connection[Any]) -> bool:
-        if body.grant is None:
-            updated = conn.execute(
-                "UPDATE ai_plugin_oauth SET status = 'error', last_error = %s"
-                " WHERE plugin = %s AND status = 'connected'",
-                (body.reason, plugin),
-            ).rowcount
-        else:
-            updated = conn.execute(
-                "UPDATE ai_plugin_oauth SET status = 'error', last_error = %s"
-                " WHERE plugin = %s AND status = 'connected' AND grant_id = %s",
-                (body.reason, plugin, body.grant),
-            ).rowcount
-        if updated > 0:
-            acc.notify_warm_evict(conn)
-        return updated > 0
-
-    return Done(done=await _in_tx(state, run))
-
-
-@router.post("/plugin-oauth/grants/{plugin}/forget", name="crud_agent_plugin_oauth_grant_forget")
-async def oauth_grant_forget(plugin: PathName, state: StateDep) -> Done:
-    """Signs the plugin out (``PluginOAuth.forget``): the grant and any flow under way."""
-
-    def run(conn: psycopg.Connection[Any]) -> bool:
-        conn.execute("DELETE FROM ai_plugin_oauth_flows WHERE plugin = %s", (plugin,))
-        gone = conn.execute("DELETE FROM ai_plugin_oauth WHERE plugin = %s", (plugin,)).rowcount
-        if gone > 0:
-            acc.notify_warm_evict(conn)
-        return gone > 0
-
-    return Done(done=await _in_tx(state, run))
 
 
 class StoredSecrets(BaseModel):

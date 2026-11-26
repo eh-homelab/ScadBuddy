@@ -18,12 +18,18 @@ from typing import Any, Literal
 from fastapi import status
 from pydantic import BaseModel, field_validator
 
-from scadbuddy.api.crud_agent_events import UUID_PATTERN
 from scadbuddy.core.json_values import unstorable
 from scadbuddy.core.problems import ApiError
 from scadbuddy.crud.guard import crud_router
 from scadbuddy.tasks.component import TasksDep
-from scadbuddy.tasks.models import MAX_BY_CHARS, MAX_JSON_BYTES, Task, TaskOpen, json_fits
+from scadbuddy.tasks.models import (
+    MAX_BY_CHARS,
+    MAX_JSON_BYTES,
+    UUID_PATTERN,
+    Task,
+    TaskOpen,
+    json_fits,
+)
 from scadbuddy.tasks.store import (
     RunBehindError,
     RunEndedError,

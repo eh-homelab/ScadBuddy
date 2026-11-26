@@ -9,8 +9,8 @@ import type { TurnRow } from '../src/sessions/rows.js'
 import type { ServerEvent } from '../src/sessions/protocol.js'
 
 // The agent's NOTIFYs and a session's last event reads through the API's CRUD routes (#6501),
-// against a fake API that answers as the backend's api/crud_agent_publish.py does (the
-// backend's tests/crud/test_crud_agent_publish.py covers the routes and the NOTIFYs). A session
+// against a fake API that answers as the backend's tools/go/core/internal/publish does (the
+// backend's the Go tests in tools/go/core covers the routes and the NOTIFYs). A session
 // id goes into a path only as a lowercase UUID, encoded; an id that is no UUID sends nothing.
 
 const BASE = 'http://api:8080'

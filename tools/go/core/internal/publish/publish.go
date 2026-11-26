@@ -1,5 +1,5 @@
 // Package publish is the agent's NOTIFYs and its last reads of a session's own events:
-// backend/scadbuddy/api/crud_agent_publish.py and agent_data/events.py open_calls and
+// backend/scadbuddy/api/crud_agent_publish.py (removed in #7667) and agent_data/events.py open_calls and
 // reasoning_deltas, statement for statement (areas publish and session-reads).
 package publish
 
@@ -23,7 +23,7 @@ const (
 	EventsChannel = "scadbuddy_events"
 	// WarmEvictChannel tells every replica to evict a session's warm process.
 	WarmEvictChannel = "scadbuddy_warm_evict"
-	// bodyBytesMax is the event-log routes' bound (crud_agent_events.py BODY_BYTES_MAX).
+	// bodyBytesMax is the event-log routes' bound (crud_agent_events.py (removed in #7667) BODY_BYTES_MAX).
 	bodyBytesMax     = 32 * 1024 * 1024
 	toolUseIDMax     = 500
 	reasoningScanMax = 10_000

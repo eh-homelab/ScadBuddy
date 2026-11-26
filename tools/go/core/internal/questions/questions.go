@@ -1,5 +1,5 @@
 // Package questions is the agent's questions and done summaries:
-// backend/scadbuddy/agent_data/questions.py and api/crud_agent_questions.py, statement for
+// backend/scadbuddy/agent_data/questions.py (removed in #7667) and api/crud_agent_questions.py (removed in #7667), statement for
 // statement (area questions). Each write is one transaction with its session events and its
 // audit rows; a done post writes only while the turn's placement holds the session, and the
 // attention count is read only while its caller holds the lease attention-rate.

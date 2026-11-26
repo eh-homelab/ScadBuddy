@@ -3,8 +3,8 @@ import { CrudAudit } from '../src/audit/crudAudit.js'
 import { type AuditEntry, AuditLog, DETAIL_MAX, SUMMARY_MAX } from '../src/audit/log.js'
 
 // The audit log through the API's CRUD routes (#5299 step 10, area `audit`), against a fake API
-// that answers as backend api/crud_agent_audit.py does (its tests,
-// tests/crud/test_crud_agent_audit.py, cover the SQL, the approver's copy and the prune's trigger
+// that answers as tools/go/core/internal/audit does (its tests,
+// the Go tests in tools/go/core, cover the SQL, the approver's copy and the prune's trigger
 // on Postgres). AuditLog takes no SQL once the area is listed; every text is capped before it is
 // sent; an id that is no UUID goes as null, as the SQL wrote it; and a failed write is reported,
 // never thrown.

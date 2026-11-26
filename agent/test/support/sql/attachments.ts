@@ -20,7 +20,7 @@ import type { Owner } from '../../../src/sessions/protocol.js'
 import { SessionBlobs } from './sessionBlobs.js'
 
 // The staged attachments over SQL on the test database: what the agent ran itself before #5299
-// step 12, and what the API's `attachments` routes (backend api/crud_agent_blobs.py) run. Test-only.
+// step 12, and what the API's `attachments` routes (tools/go/core/internal/blobs) run. Test-only.
 
 type Row = {
   id: string

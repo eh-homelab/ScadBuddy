@@ -5,8 +5,8 @@ import { aiStatus } from '../src/aiStatus.js'
 import { BrowserSessions, CrudSessionLookup, sessionIdHash } from '../src/auth/browserSession.js'
 
 // What the agent reads per request through the API's CRUD routes (#6501), against a fake API
-// that answers as the backend's api/crud_agent_start.py does (the backend's
-// tests/crud/test_crud_agent_start.py covers the routes): a signed-in person's session by its
+// that answers as the backend's tools/go/core/internal/agentstart does (the backend's
+// the Go tests in tools/go/core covers the routes): a signed-in person's session by its
 // cookie's hash, and health's probe of the agent's data, which is the API's (#5299 step 12).
 
 const BASE = 'http://api:8080'

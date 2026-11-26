@@ -9,7 +9,7 @@ import { SqlAudit } from './audit.js'
 import { appendIn } from './gate.js'
 
 // Tests only: the approvals over the test database, the SQL the agent ran before the API took
-// area `approvals` (#5299 step 12). src holds no SQL; the API's is backend agent_data/approvals.py.
+// area `approvals` (#5299 step 12). src holds no SQL; the API's is tools/go/core/internal/approvals.
 // A decision's audit row is written after its transaction here, in it on the API.
 
 const COLUMNS = `id, session_id, turn_id, tool_use_id, tool, input_summary, input_hash, tier,

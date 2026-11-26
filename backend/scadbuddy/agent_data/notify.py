@@ -2,7 +2,7 @@
 each data key sealed under the previous KEK sealed again under the current one, as the
 agent's ``PushStore.rewrapFrom`` and ``ChannelStore.rewrapFrom`` did at its start. The AADs
 are the agent's (``agent/src/notify/pushStore.ts``, ``notify/channels.ts``), and the routes
-that seal them are `api/crud_agent_notify.py`."""
+that seal them are Go's (``tools/go/core/internal/stores``, #7667)."""
 
 from __future__ import annotations
 

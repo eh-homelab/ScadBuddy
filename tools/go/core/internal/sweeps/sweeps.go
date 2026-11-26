@@ -1,5 +1,5 @@
 // Package sweeps is the agent's directory sweeps and a forget's own deletes:
-// backend/scadbuddy/api/crud_agent_sweeps.py, statement for statement (areas session-sweeps
+// backend/scadbuddy/api/crud_agent_sweeps.py (removed in #7667), statement for statement (areas session-sweeps
 // and forget-rows).
 package sweeps
 
@@ -20,7 +20,7 @@ import (
 
 const (
 	liveIDsMax = 1000
-	// bodyBytesMax is the event-log routes' bound (crud_agent_events.py BODY_BYTES_MAX).
+	// bodyBytesMax is the event-log routes' bound (crud_agent_events.py (removed in #7667) BODY_BYTES_MAX).
 	bodyBytesMax = 32 * 1024 * 1024
 )
 

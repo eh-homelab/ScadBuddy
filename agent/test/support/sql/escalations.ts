@@ -8,7 +8,7 @@ import { PostgresTokenStore } from './tokens.js'
 
 // Tests only: a flow run's calls at the starting session's hop over the test database, the SQL
 // the agent ran before the API took area `escalations` (#5299 step 12). src holds no SQL; the
-// API's is backend agent_data/escalations.py.
+// API's is tools/go/core/internal/escalations.
 
 /** One step of an entry's way up (`hops`, spec §4.6). */
 function step(action: string, actor: string, reason?: string): Record<string, string> {

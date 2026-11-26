@@ -92,7 +92,7 @@ export type TranscriptHead = { exists: boolean; since: string | null }
 /**
  * Where a session's transcript rows are kept (#5299 step 9, part b): `CrudTranscriptRows`
  * (crudTranscripts.ts), the API's routes (area `transcripts`, backend
- * api/crud_agent_transcripts.py), which seal and open each entry there. Each method is one
+ * tools/go/core/internal/transcripts), which seal and open each entry there. Each method is one
  * transaction.
  */
 export interface TranscriptRows {

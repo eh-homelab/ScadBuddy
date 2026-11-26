@@ -36,7 +36,7 @@ type part struct {
 	data []byte
 }
 
-// readMultipart is crud_agent_blobs.py `_multipart`: the meta part and up to parts byte
+// readMultipart is crud_agent_blobs.py (removed in #7667) `_multipart`: the meta part and up to parts byte
 // parts, their sum at most bytesMax.
 func readMultipart(r *http.Request, parts int, bytesMax int) (string, map[string][]byte, error) {
 	_, params, _ := mime.ParseMediaType(r.Header.Get("Content-Type"))

@@ -84,7 +84,7 @@ export class BrowserOrigins {
   }
 }
 
-/** The approvals through the API's CRUD routes, area `browser-origins` (backend api/crud_agent_stores.py). */
+/** The approvals through the API's CRUD routes, area `browser-origins` (tools/go/core/internal/stores). */
 export class CrudSessionOrigins implements SessionOrigins {
   readonly #call: ReturnType<typeof crudOf>
 

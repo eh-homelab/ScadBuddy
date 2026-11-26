@@ -1,5 +1,5 @@
 // Package events is a session's panel-protocol event log: backend/scadbuddy/agent_data/
-// events.py and api/crud_agent_events.py, statement for statement (area session-events).
+// events.py and api/crud_agent_events.py (removed in #7667), statement for statement (area session-events).
 //
 // Order without gaps: seq comes from ai_sessions.event_seq, bumped in the statement that
 // inserts the events, so two writers of one session commit in seq order. Python still writes

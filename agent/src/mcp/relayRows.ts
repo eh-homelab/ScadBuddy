@@ -3,7 +3,7 @@ import { type CrudTarget, crudOf } from '../api/crudStores.js'
 // The /mcp session relay's storage (#2086, sessionRelay.ts): the directory of which replica holds
 // each session (`ai_mcp_sessions`), the relay's message rows (`ai_mcp_relay_messages`) and the
 // NOTIFY that announces each message on `scadbuddy_mcp`, through the backend's CRUD routes of
-// area `mcp-relay` (`CrudRelayRows`, backend api/crud_agent_mcp.py), one route per method. A
+// area `mcp-relay` (`CrudRelayRows`, tools/go/core/internal/mcprelay), one route per method. A
 // message's row and its NOTIFY commit in one transaction, so the row is readable before its
 // header is heard.
 
@@ -31,7 +31,7 @@ export interface RelayRows {
   sweep(idleSeconds: number): Promise<void>
 }
 
-/** The CRUD routes' bound on an idle window (backend api/crud_agent_mcp.py `IDLE_SECONDS_MAX`). */
+/** The CRUD routes' bound on an idle window (tools/go/core/internal/mcprelay `IDLE_SECONDS_MAX`). */
 export const RELAY_IDLE_SECONDS_MAX = 7 * 24 * 3600
 
 /**

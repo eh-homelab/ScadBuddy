@@ -5,7 +5,7 @@ import type { Owner } from '../sessions/protocol.js'
 import type { ApprovalRow } from './service.js'
 
 // The approvals (MCP prepares) through the API's CRUD routes (#5299 step 10; backend
-// api/crud_agent_approvals.py, agent_data/approvals.py), area `approvals`. ApprovalService
+// tools/go/core/internal/approvals, tools/go/core/internal/approvals), area `approvals`. ApprovalService
 // (approvals/service.ts) calls only these.
 // Who may see or decide an approval stays the service's check; a decision is written on the API
 // once, with its span's context, its session events and its audit row in one transaction.

@@ -9,8 +9,8 @@ import { ForksNeedKeys } from '../src/sessions/store.js'
 import { sweepTurnDirs } from '../src/temporal/turnServers.js'
 
 // The pod's directory sweeps and a forget's last rows through the API's CRUD routes (#6501),
-// against a fake API that answers as the backend's api/crud_agent_sweeps.py does (the backend's
-// tests/crud/test_crud_agent_sweeps.py covers the routes). A session id goes into a path only as
+// against a fake API that answers as the backend's tools/go/core/internal/sweeps does (the backend's
+// the Go tests in tools/go/core covers the routes). A session id goes into a path only as
 // a lowercase UUID, encoded; an id that is no UUID sends nothing.
 
 const BASE = 'http://api:8080'

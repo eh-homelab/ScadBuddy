@@ -1,4 +1,4 @@
-// Package mcprelay is the agent's /mcp session relay: backend/scadbuddy/api/crud_agent_mcp.py,
+// Package mcprelay is the agent's /mcp session relay: backend/scadbuddy/api/crud_agent_mcp.py (removed in #7667),
 // statement for statement (area mcp-relay). Each route is one statement, or one transaction,
 // of the agent's mcp/relayRows.ts PgRelayRows.
 //

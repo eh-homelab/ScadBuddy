@@ -13,7 +13,7 @@ import { type GateEntry, RespondRefusal, type Role } from './validate.js'
 // grant does not hold).
 //
 // The API runs each write as one route and one transaction (#5299 step 10; gate/crudStore.ts
-// `CrudGate`, backend api/crud_agent_gate.py and agent_data/gate.py): the rows, the session
+// `CrudGate`, tools/go/core/internal/gate and tools/go/core/internal/gate): the rows, the session
 // status, the audit row, the session events and, for a resolution, `NOTIFY scadbuddy_input,
 // <request id>`, so a waiter learns of it without polling. The batches of events it appended
 // come back with the answer (`logged`) and are told to the event log (`committed`), which wakes

@@ -10,7 +10,7 @@ import {
   SubjectForgotten,
 } from '../../../src/temporal/payloadCodec.js'
 
-// The API's payload keys (backend api/crud_agent_secrets.py, agent_data/), over SQL on the test
+// The API's payload keys (tools/go/core/internal/secrets, agent_data/), over SQL on the test
 // database: what the agent ran itself before #5299 step 12. Test-only.
 
 /** The advisory lock key creation and forgetSubject take for a subject (Ruling 11). */

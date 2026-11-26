@@ -1,5 +1,5 @@
 // Package approvals is the agent's classic approvals: backend/scadbuddy/agent_data/
-// approvals.py and api/crud_agent_approvals.py, statement for statement (area approvals).
+// approvals.py and api/crud_agent_approvals.py (removed in #7667), statement for statement (area approvals).
 package approvals
 
 import (

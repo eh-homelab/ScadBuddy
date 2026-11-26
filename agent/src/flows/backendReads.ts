@@ -2,12 +2,12 @@ import { crudRead } from '../api/crudRead.js'
 
 // The agent's questions about the backend's flow tables (#5299 D7): `workflow_runs`,
 // `workflow_run_decisions` and `flow_grants`. The backend answers each over a CRUD route of
-// area `flows` (backend api/crud_agent.py, flows/agent_reads.py). The agent holds no database
+// area `flows` (backend api/crud_agent.py, tools/go/core/internal/agentreads). The agent holds no database
 // client (#5299 step 12).
 //
 // The gate's own read of `flow_grants` and `flow_grant_uses` (gate/store.ts `grantInput`) is not
 // here: it holds the grant row's share lock across the gate's writes, so it runs on the API in
-// the grant's own route (gate/crudStore.ts, backend api/crud_agent_gate.py, #5299 step 10).
+// the grant's own route (gate/crudStore.ts, tools/go/core/internal/gate, #5299 step 10).
 
 export type QueueHop = { hop: string; action: string; actor: string; at: string; reason?: string | null }
 

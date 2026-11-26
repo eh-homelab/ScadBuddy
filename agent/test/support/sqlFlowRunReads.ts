@@ -11,7 +11,7 @@ import type {
 } from '../../src/flows/backendReads.js'
 
 // The backend's answers to the agent's flow reads, as its CRUD routes of area `flows` give them
-// (backend flows/agent_reads.py, the same queries), run straight on the test database: the
+// (tools/go/core/internal/agentreads, the same queries), run straight on the test database: the
 // agent's Postgres tests have no API to ask. The agent itself reads these tables only through
 // the routes (src/flows/backendReads.ts `CrudFlowRunReads`, #5299): it has no SQL client
 // (#5299 step 12), which test/retiredTables.test.ts guards.

@@ -14,7 +14,7 @@ import {
 } from './store.js'
 
 // The staged attachments over the API's CRUD routes (#5299 step 7; backend
-// api/crud_agent_blobs.py, area `attachments`): `AttachmentStore` method for method. The image
+// tools/go/core/internal/blobs, area `attachments`): `AttachmentStore` method for method. The image
 // and its preview are the upload's multipart parts and each read's body, never base64 (D8,
 // #2479). An attachment id is the only id placed in a route's path, and only once it is a
 // UUID; the owner travels in the query or the body. A claim stores the bytes the turn already

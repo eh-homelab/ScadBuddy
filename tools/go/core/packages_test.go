@@ -12,7 +12,7 @@ import (
 
 // The agent's plugin packages, feeds and hosted reads (internal/packages), and the plugin
 // routes that need no KEK (internal/plugins), as backend/tests/api/test_crud_agent_packages.py,
-// test_crud_agent_plugin_feeds.py, test_crud_agent_hosted_packages.py and
+// test_crud_agent_plugin_feeds.py (removed in #7667), test_crud_agent_hosted_packages.py (removed in #7667) and
 // test_crud_agent_plugins.py check them.
 
 const packageAreas = "plugin-packages, plugin-feeds, hosted-plugins:read, plugins"

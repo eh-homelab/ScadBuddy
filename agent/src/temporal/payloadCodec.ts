@@ -188,7 +188,7 @@ export class KeyCache implements ForgetsKeys {
 
 /**
  * A subject's data key released by the API (#5299 D5, #5342): `POST …/crud/agent/payload-keys/
- * {subject}` (backend api/crud_agent_secrets.py, area `payload-keys`) opens it with the KEK, and
+ * {subject}` (tools/go/core/internal/secrets, area `payload-keys`) opens it with the KEK, and
  * with `create` makes it first, under the subject's lock and never for a forgotten subject, in
  * its own transaction, and audits the release. This process holds no KEK for it; it keeps the
  * key 30 s at most.

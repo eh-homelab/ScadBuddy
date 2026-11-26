@@ -17,7 +17,6 @@ from fastapi import APIRouter, Path, Query, Response, status
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 
-from scadbuddy.api.crud_agent_events import UUID_PATTERN
 from scadbuddy.api.flows import browser_only, unavailable
 from scadbuddy.api.limits import RouteLimit
 from scadbuddy.api.operations import (
@@ -36,6 +35,7 @@ from scadbuddy.tasks.component import TasksComponent, TasksDep
 from scadbuddy.tasks.models import (
     MAX_BY_CHARS,
     MAX_JSON_BYTES,
+    UUID_PATTERN,
     Task,
     TaskQuestion,
     TaskState,

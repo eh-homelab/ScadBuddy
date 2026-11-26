@@ -8,7 +8,7 @@ import { type Logged, REQUEST_ID_MAX } from './crudStore.js'
 import type { AwayWindow, DoneTouch } from './doneSummary.js'
 
 // The `done` summaries and the attention limits through the API's CRUD routes (#5299 step 10;
-// backend api/crud_agent_questions.py, agent_data/questions.py), area `questions`. QuestionService
+// tools/go/core/internal/questions, tools/go/core/internal/questions), area `questions`. QuestionService
 // (gate/questions.ts) calls only these.
 //
 // The summary's text stays the agent's: `doneFacts` reads what the turn touched, the service

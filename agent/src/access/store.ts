@@ -179,7 +179,7 @@ export type AccessRows = Pick<CrudAccessRows, 'rows' | 'row' | 'write'>
 
 /**
  * The access rows through the API's CRUD routes, area `access` (backend
- * api/crud_agent_access.py).
+ * tools/go/core/internal/access).
  */
 export class CrudAccessRows {
   readonly #call: ReturnType<typeof crudOf>

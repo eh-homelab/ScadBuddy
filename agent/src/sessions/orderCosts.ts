@@ -143,7 +143,7 @@ export const orderCostLease = (sessionId: string): string => `order-cost:${sessi
 
 /**
  * The rows and the report lock over the API's CRUD routes (#5299 step 9, part c; backend
- * api/crud_agent_order_costs.py, area `session-order-costs`): the lock is a lease row
+ * tools/go/core/internal/ordercosts, area `session-order-costs`): the lock is a lease row
  * (`order-cost:<id>`, #5299 D3), renewed while the report runs, and every write of the report
  * names the lease's token, so one whose lease lapsed writes nothing (409 `lease-lost`).
  */

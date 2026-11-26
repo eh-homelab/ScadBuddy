@@ -5,7 +5,7 @@ import { isRuntimeKey } from '../../../src/sessions/runtimeSettings.js'
 import { evictsWarmOnWrite } from '../../../src/sessions/warmEvict.js'
 
 // `ai_settings` over SQL on the test database: what the API's `settings` routes run (backend
-// api/crud_agent_secrets.py), as the agent once ran them itself. Test-only.
+// tools/go/core/internal/secrets), as the agent once ran them itself. Test-only.
 
 type Expected = { key: string; present: boolean; value?: unknown }
 

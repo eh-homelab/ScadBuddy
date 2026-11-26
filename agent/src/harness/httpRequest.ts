@@ -184,7 +184,7 @@ export const HttpReadInput = {
     .regex(SAVED_ID, 'a saved response id')
     .describe('The `saved.id` an http_request result gave'),
   // At most what Postgres's `substring` takes (an int4), where a session's saved body is read: the
-  // API's ranged read takes the same bound (backend api/crud_agent_blobs.py `OFFSET_MAX`).
+  // API's ranged read takes the same bound (tools/go/core/internal/blobs `OFFSET_MAX`).
   offset: z
     .number()
     .int()

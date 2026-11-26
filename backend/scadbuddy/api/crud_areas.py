@@ -12,174 +12,166 @@ from pydantic import BaseModel
 from scadbuddy.crud.guard import CrudCaller, crud_router
 
 #: Each caller's complete areas. The render ``assets`` area also covers
-#: ``…/render/blob-index/{key}/forget-copy``, added with it (#5298 Task 18). The print
-#: ``runs`` area also covers ``…/print/outcomes``, added with it (#5298 Task 24). The print
-#: ``printer-ensure`` area is Task 29's ``…/print/printers/ensure-bambuddy`` alone, taken
-#: early by #4625 so a merge never runs on the worker's role. The print ``reprints`` area
-#: is ``…/print/reprints``, the queue item a reprint queued (#3741). The storefront ``pay`` area
-#: is ``…/storefront/pay/checkout`` (#4960), which the edge's ``/pay#<token>`` page reads.
-#: The storefront ``turnstile`` area is ``…/storefront/turnstile`` and
-#: ``…/turnstile/verify``, the bot check (#5283). The storefront ``accounts`` area is
-#: ``…/storefront/account`` and its ``verify``, ``sign-out`` and ``orders`` (#5283). The
-#: storefront ``order`` area is ``…/storefront/order/*``, the customer's order page (#5283).
-#: The storefront ``variants`` area is ``…/storefront/listings/{id}/variant`` and
-#: ``…/storefront/variants/{key}/preview.glb``, the instant read of a visitor's choices
-#: (#6921). The storefront ``file-prices`` area is ``…/storefront/listings/{id}/price``,
-#: the price of a visitor's colours on a file listing (#6710).
-#: The agent's ``workspace-blob-refs`` area is ``…/agent/workspace-blob-refs`` and its
-#: ``/release`` (#5299), the holds of its workspace files' blobs. Its ``events`` area is
-#: ``…/agent/events`` and ``…/events/head``, the event log's gap and head; its ``flows``
-#: area is ``…/agent/flow-runs/*``, ``…/flow-decisions`` and ``…/flow-grants/in-force``,
-#: its reads of flow runs, their decisions and grants (#5299 D7). Its ``settings`` area is
+#: ``…/render/blob-index/{key}/forget-copy``, added with it (#5298 Task 18). The print ``runs`` area
+#: also covers ``…/print/outcomes``, added with it (#5298 Task 24). The print ``printer-ensure``
+#: area is Task 29's ``…/print/printers/ensure-bambuddy`` alone, taken early by #4625 so a merge
+#: never runs on the worker's role. The print ``reprints`` area is ``…/print/reprints``, the queue
+#: item a reprint queued (#3741). The storefront ``pay`` area is ``…/storefront/pay/checkout``
+#: (#4960), which the edge's ``/pay#<token>`` page reads. The storefront ``turnstile`` area is
+#: ``…/storefront/turnstile`` and ``…/turnstile/verify``, the bot check (#5283). The storefront
+#: ``accounts`` area is ``…/storefront/account`` and its ``verify``, ``sign-out`` and ``orders``
+#: (#5283). The storefront ``order`` area is ``…/storefront/order/*``, the customer's order page
+#: (#5283). The storefront ``variants`` area is ``…/storefront/listings/{id}/variant`` and
+#: ``…/storefront/variants/{key}/preview.glb``, the instant read of a visitor's choices (#6921). The
+#: storefront ``file-prices`` area is ``…/storefront/listings/{id}/price``, the price of a visitor's
+#: colours on a file listing (#6710). The agent's ``workspace-blob-refs`` area is
+#: ``…/agent/workspace-blob-refs`` and its ``/release`` (#5299), the holds of its workspace files'
+#: blobs. Its ``events`` area is ``…/agent/events`` and ``…/events/head``, the event log's gap and
+#: head; its ``flows`` area is ``…/agent/flow-runs/*``, ``…/flow-decisions`` and
+#: ``…/flow-grants/in-force``, its reads of flow runs, their decisions and grants (#5299 D7). Go
+#: serves these three (`tools/go/core/internal/agentreads`, #7667). Its ``settings`` area is
 #: ``…/agent/settings``, ``ai_settings`` (#5299 step 4); its ``credentials`` area is
-#: ``…/agent/credentials`` and every route under it, the Claude credentials sealed and
-#: opened on the API, a reveal audited; its ``payload-keys`` area is
-#: ``…/agent/payload-keys/{subject}``, a subject's data key released (made first under the
-#: subject's lock, never for a forgotten one) and audited, never the KEK (#5299 D5,
-#: #5342; `api/crud_agent_secrets.py`); its ``forget`` area is
-#: ``…/agent/forgotten-subjects/{subject}``, ``…/payload-keys/{subject}/drop``,
+#: ``…/agent/credentials`` and every route under it, the Claude credentials sealed and opened on the
+#: API, a reveal audited; its ``payload-keys`` area is ``…/agent/payload-keys/{subject}``, a
+#: subject's data key released (made first under the subject's lock, never for a forgotten one) and
+#: audited, never the KEK (#5299 D5, #5342; `tools/go/core/internal/secrets`); its ``forget`` area
+#: is ``…/agent/forgotten-subjects/{subject}``, ``…/payload-keys/{subject}/drop``,
 #: ``…/payload-key-sweeps`` and ``…/flow-blobs/{subject}`` with its ``/{name}``: a subject's
-#: tombstone with its key and flow images, a browser call's key dropped, the keys no forget
-#: deletes swept, and a flow run's images kept and read (#5299 step 6;
-#: `api/crud_agent_forget.py`). Its ``workspace`` area is every ``…/agent/workspace/*`` route:
-#: the workspace files, sealed and opened on the API, their blobs' holds and their events
-#: written in each write's transaction, a fork's copy, the move to blobs, the sweep and the
-#: reconcile (#5299 step 7; `api/crud_agent_workspace.py`). Its ``session-blobs`` area is
-#: ``…/agent/session-blobs`` and its ``…/deletes`` (a queued message's images, #6413), a
-#: session's images and a durable tool call's, read through a
-#: fork's chain; its ``attachments`` area is ``…/agent/attachments`` and every route under
-#: it, the images the panel stages before a turn sends them; its ``http-bodies`` area is
-#: ``…/agent/http-bodies`` and every route under it, a session's saved HTTP bodies read by
-#: range (#5299 step 7; `api/crud_agent_blobs.py`). Its ``background-tasks`` area is
-#: ``…/agent/background-tasks`` and every route under it, a session's background tasks, a
-#: Monitor's events and a Workflow's journal and child chats; its ``operations`` area is
-#: ``…/agent/operations`` and every route under it, ``ai_operations`` with its activity row
-#: (#5299 step 8, `api/crud_agent_tasks.py`). Its ``sessions`` area is ``…/agent/sessions``,
-#: ``…/agent/session-starts`` and every route under ``…/agent/sessions/{id}`` but
-#: ``…/resources``: a session's row as the session manager reads and writes it (its insert
-#: under the owner's start lock, a fork's under its parent's, the handoff, the budget, a
-#: failed fork discarded); its ``session-resources`` area is ``…/agent/sessions/{id}/resources``,
-#: what a session's tool calls touched (#5299 step 9, `api/crud_agent_sessions.py`). Its
+#: tombstone with its key and flow images, a browser call's key dropped, the keys no forget deletes
+#: swept, and a flow run's images kept and read (#5299 step 6; `tools/go/core/internal/forget`, and
+#: `api/crud_agent_forget.py` for the tombstone). Its ``workspace`` area is every
+#: ``…/agent/workspace/*`` route: the workspace files, sealed and opened on the API, their blobs'
+#: holds and their events written in each write's transaction, a fork's copy, the move to blobs, the
+#: sweep and the reconcile (#5299 step 7; `tools/go/core/internal/workspace`, and
+#: `api/crud_agent_workspace.py` for the status, the bytes, the writes, the copies and the blob
+#: moves). Its ``session-blobs`` area is ``…/agent/session-blobs`` and its ``…/deletes`` (a queued
+#: message's images, #6413), a session's images and a durable tool call's, read through a fork's
+#: chain; its ``attachments`` area is ``…/agent/attachments`` and every route under it, the images
+#: the panel stages before a turn sends them; its ``http-bodies`` area is ``…/agent/http-bodies``
+#: and every route under it, a session's saved HTTP bodies read by range (#5299 step 7;
+#: `tools/go/core/internal/blobs`). Its ``background-tasks`` area is ``…/agent/background-tasks``
+#: and every route under it, a session's background tasks, a Monitor's events and a Workflow's
+#: journal and child chats; its ``operations`` area is ``…/agent/operations`` and every route under
+#: it, ``ai_operations`` with its activity row (#5299 step 8, `tools/go/core/internal/tasks`, and
+#: `api/crud_agent_tasks.py` for an operation's insert and end). Its ``sessions`` area is
+#: ``…/agent/sessions``, ``…/agent/session-starts`` and every route under ``…/agent/sessions/{id}``
+#: but ``…/resources``: a session's row as the session manager reads and writes it (its insert under
+#: the owner's start lock, a fork's under its parent's, the handoff, the budget, a failed fork
+#: discarded); its ``session-resources`` area is ``…/agent/sessions/{id}/resources``, what a
+#: session's tool calls touched (#5299 step 9, `tools/go/core/internal/sessions`). Its
 #: ``transcripts`` area is ``…/agent/transcripts`` and ``…/agent/sessions/{id}/entries``,
 #: ``…/transcript``, ``…/cwd`` and ``…/subkeys`` with every route under them: a session's
 #: transcript, sealed and opened on the API, a fork's read through its chain (#5299 step 9,
-#: `api/crud_agent_transcripts.py`). Its ``session-events`` area is
+#: `tools/go/core/internal/transcripts`). Its ``session-events`` area is
 #: ``…/agent/sessions/{id}/events`` and ``…/fork-log`` with every route under them: a session's
-#: event log, a fork's read through its chain (#5299 step 9, `api/crud_agent_events.py`). Its
+#: event log, a fork's read through its chain (#5299 step 9, `tools/go/core/internal/events`). Its
 #: ``session-order-costs`` area is ``…/agent/sessions/{id}/order-costs`` and
-#: ``…/agent/order-costs/sweep`` with every route under them: the order items a session revised
-#: and its spend's report under its lease (#5299 step 9, `api/crud_agent_order_costs.py`). The
-#: print ``uploads``
-#: area also covers ``…/print/slices`` and ``…/print/slice-starts`` (#5298 Task 25). Its
+#: ``…/agent/order-costs/sweep`` with every route under them: the order items a session revised and
+#: its spend's report under its lease (#5299 step 9, `tools/go/core/internal/ordercosts`). The print
+#: ``uploads`` area also covers ``…/print/slices`` and ``…/print/slice-starts`` (#5298 Task 25). Its
 #: ``previews`` area also covers ``…/print/project-targets``, ``…/print/folderless`` and
 #: ``…/print/destination-touches`` (#5298 Task 26). Its ``copy-leases`` area is
 #: ``…/print/copy-leases/{key}``, the copy lease (#5298 Task 27). Its ``links`` area is
 #: ``…/print/links``, ``…/print/sends`` and ``…/print/last-prints`` (#5298 Task 28). Its
-#: ``lan-imports`` area is ``…/print/lan-imports``, a LAN-only printer's print record
-#: (#4699 phase 4). Its ``printers`` area is every other ``…/print/printers`` route (the
-#: reads, a printer's access code, a virtual printer's sync) and ``…/print/reports``
-#: (#5298 Task 29). Its ``rack`` area is ``…/print/rack``, the rack hotends' usage
-#: (#5298 Task 30). Its ``spools`` area is ``…/print/native-slices`` (#5298 Task 31; its
-#: ``…/print/spools`` routes went with the spool overlay, #6262 Task 12, and its
-#: ``…/print/held-presets`` reads with the kept copy, #7275). Its
-#: ``transfer-urls`` area is ``…/print/transfer-urls``, a LAN print's read URL of a
-#: native slice's file (#5298 Task 32). Its ``access-codes`` area is
-#: ``…/print/access-codes`` and ``…/access-codes/virtual-printer``: whether the API opens
-#: access codes, and a virtual printer's sealed code opened (#5298 Task 33). Its
-#: ``filament`` area is ``…/print/filament/trays``, ``…/filament/presets``,
-#: ``…/filament/print-uses`` and ``…/filament/print-uses/settle``: a native run's SB
-#: spools and what its LAN starts use of them (#6262 Task 6); and ``…/filament/rows`` and
-#: ``…/filament/bb-to-sb``, the Bambuddy path's SB spools (Task 7). An area of its own, so a
-#: print worker that books there waits for an API that serves them. Its ``filament-sync``
-#: area is ``…/print/filament/sync/directions``, ``…/plan``, ``…/results`` and ``…/pass``:
-#: the sync pass's reads and writes of SB, `FilamentSyncApi` (#6265 Task 6). Its
-#: ``filament-pull`` area is ``…/print/filament/pull``, ``…/pull/usage``,
-#: ``…/pull/ha-states`` and ``…/pull/trays``: what the worker read of Bambuddy for the pull,
-#: applied by the API, `BbPullApi` (#6772). Its ``sensor-notify`` area is
-#: ``…/print/filament/sensor-notifications/claim`` and ``…/{id}/end``: the sensors' alert
-#: notifications the print worker sends through Bambuddy (#6646). The intake
-#: ``sources`` area is ``…/intake/sources/{id}/read``, ``…/preview`` and ``…/check``: a
-#: customer's staged file, checked by the intake worker (#6133). The agent's small stores
-#: (#5299 step 5, `api/crud_agent_stores.py`): its ``activity-kinds`` area is
-#: ``…/agent/activity-kinds``; its ``browser-origins`` area is ``…/agent/browser-origins``
-#: and every route under it, a session's approved origins; its ``bridge-tabs`` area is
-#: ``…/agent/session-tabs``, ``…/agent/tab-owners/*`` and ``…/agent/tab-images/{name}``
-#: (the bytes in the body), which tab a session pairs with, which replica holds a tab and
-#: a tab's images; its ``pairings`` area is ``…/agent/pairings`` and every route under it;
-#: its ``mcp-tokens`` area is ``…/agent/mcp-tokens`` and every route under it, the MCP
-#: bearer tokens by their hashes; its ``notify`` area is ``…/agent/push/*`` and
-#: ``…/agent/notify-channels`` and every route under it, the Web Push records and the
-#: notification channels, sealed and opened with the API's KEK
-#: (`api/crud_agent_notify.py`). Its plugin stores (#5299 step 5): its ``access`` area is
-#: ``…/agent/access/*`` and ``…/agent/tool-listings/*``, the tool access and the listings
-#: a connection test stores, and ``…/agent/leases/{key}``, the leases the agent holds
+#: ``lan-imports`` area is ``…/print/lan-imports``, a LAN-only printer's print record (#4699 phase
+#: 4). Its ``printers`` area is every other ``…/print/printers`` route (the reads, a printer's
+#: access code, a virtual printer's sync) and ``…/print/reports`` (#5298 Task 29). Its ``rack`` area
+#: is ``…/print/rack``, the rack hotends' usage (#5298 Task 30). Its ``spools`` area is
+#: ``…/print/native-slices`` (#5298 Task 31; its ``…/print/spools`` routes went with the spool
+#: overlay, #6262 Task 12, and its ``…/print/held-presets`` reads with the kept copy, #7275). Its
+#: ``transfer-urls`` area is ``…/print/transfer-urls``, a LAN print's read URL of a native slice's
+#: file (#5298 Task 32). Its ``access-codes`` area is ``…/print/access-codes`` and
+#: ``…/access-codes/virtual-printer``: whether the API opens access codes, and a virtual printer's
+#: sealed code opened (#5298 Task 33). Its ``filament`` area is ``…/print/filament/trays``,
+#: ``…/filament/presets``, ``…/filament/print-uses`` and ``…/filament/print-uses/settle``: a native
+#: run's SB spools and what its LAN starts use of them (#6262 Task 6); and ``…/filament/rows`` and
+#: ``…/filament/bb-to-sb``, the Bambuddy path's SB spools (Task 7). An area of its own, so a print
+#: worker that books there waits for an API that serves them. Its ``filament-sync`` area is
+#: ``…/print/filament/sync/directions``, ``…/plan``, ``…/results`` and ``…/pass``: the sync pass's
+#: reads and writes of SB, `FilamentSyncApi` (#6265 Task 6). Its ``filament-pull`` area is
+#: ``…/print/filament/pull``, ``…/pull/usage``, ``…/pull/ha-states`` and ``…/pull/trays``: what the
+#: worker read of Bambuddy for the pull, applied by the API, `BbPullApi` (#6772). Its
+#: ``sensor-notify`` area is ``…/print/filament/sensor-notifications/claim`` and ``…/{id}/end``: the
+#: sensors' alert notifications the print worker sends through Bambuddy (#6646). The intake
+#: ``sources`` area is ``…/intake/sources/{id}/read``, ``…/preview`` and ``…/check``: a customer's
+#: staged file, checked by the intake worker (#6133). The agent's small stores (#5299 step 5,
+#: `tools/go/core/internal/stores`): its ``activity-kinds`` area is ``…/agent/activity-kinds``; its
+#: ``browser-origins`` area is ``…/agent/browser-origins`` and every route under it, a session's
+#: approved origins; its ``bridge-tabs`` area is ``…/agent/session-tabs``, ``…/agent/tab-owners/*``
+#: and ``…/agent/tab-images/{name}`` (the bytes in the body), which tab a session pairs with, which
+#: replica holds a tab and a tab's images; its ``pairings`` area is ``…/agent/pairings`` and every
+#: route under it; its ``mcp-tokens`` area is ``…/agent/mcp-tokens`` and every route under it, the
+#: MCP bearer tokens by their hashes; its ``notify`` area is ``…/agent/push/*`` and
+#: ``…/agent/notify-channels`` and every route under it, the Web Push records and the notification
+#: channels, sealed and opened with the API's KEK (`tools/go/core/internal/stores`, and
+#: `api/crud_agent_notify.py` for the waiting pushes). Its plugin stores (#5299 step 5): its
+#: ``access`` area is ``…/agent/access/*`` and ``…/agent/tool-listings/*``, the tool access and the
+#: listings a connection test stores, and ``…/agent/leases/{key}``, the leases the agent holds
 #: across a connection test and a sign-in's token refresh (#5299 D3,
-#: `api/crud_agent_access.py`); its ``plugin-sessions`` area is ``…/agent/plugin-sessions``
-#: and every route under it, the upstream MCP sessions its forwarders hold; its ``plugins``
-#: area is ``…/agent/plugins`` and ``…/agent/plugin-oauth`` and every route under them, the
-#: remote plugins and their sign-ins, sealed and opened with the API's KEK
-#: (`api/crud_agent_plugins.py`); its ``plugin-packages`` area is
-#: ``…/agent/plugin-packages`` and every route under it, the installed packages' pins
-#: (`api/crud_agent_packages.py`); its ``package-mirrors`` area is ``…/agent/package-mirrors``
-#: and every route under it, the bytes of the archive and npm pins kept as blobs (#6935);
-#: its ``hosted-plugins`` area is ``…/agent/hosted-plugins/*``, a hosted plugin's latest
-#: version and a version's zip (#6932, the same module); its ``plugin-feeds`` area is
-#: ``…/agent/plugin-feeds/{feed}``, a marketplace feed's packages at their current pins
-#: (#6933, the same module), and ``…/plugin-feeds/{feed}/packages/{name}``, a package added
-#: to the feed or removed (#6936). Its ``gate`` area is ``…/agent/gate/*``: the tool-call
-#: gate's writes, an entry opened, a run grant's approval checked against ``flow_grants``, a
-#: flow's refusal, an entry resolved, a response decided against the row's record by the
-#: gate's validator, and the record read, each with its session events, status, audit row and
-#: ``scadbuddy_input`` NOTIFY in its transaction (#5299 step 10, `api/crud_agent_gate.py`). Its
-#: ``pending-input`` area is ``…/agent/pending-input/*``: the open entries and their responses
-#: read, a parked call's and a decision's span written, the first only while the durable turn's
-#: placement holds the session, the orphan sweep's cancels (each with its events, status and
-#: audit row in its transaction), and a call's recorded approval (`api/crud_agent_pending.py`).
-#: Its ``audit`` area is ``…/agent/audit/*``: the audit log's rows written, listed and pruned
-#: (`api/crud_agent_audit.py`). Its ``approvals`` area is ``…/agent/approvals/*``: the classic
-#: approvals read, made, decided once (with their events and audit row in the decision's
-#: transaction) and used once (`api/crud_agent_approvals.py`). Its ``questions`` area is
-#: ``…/agent/questions/*``: the `done` summaries read, dismissed and posted (the post only while
-#: the turn's placement holds the session), and the attention limit's count under its lease
-#: (`api/crud_agent_questions.py`). Its ``escalations`` area is ``…/agent/escalations/*``: a flow
-#: run's calls at the starting session's hop, passed up, denied, moved on its timeout and
-#: delivered, and a run's child entries for its queue (`api/crud_agent_escalations.py`).
-#: Its ``publish`` area is ``…/agent/publish/session-event`` and ``…/publish/warm-evict``: a
-#: ``session.*`` bus event NOTIFYed on ``scadbuddy_events`` and a warm process's eviction on
-#: ``scadbuddy_warm_evict``; its ``session-reads`` area is ``…/agent/sessions/{id}/open-calls``
-#: and ``…/reasoning``, a session's calls with no result and a child's text before a call
-#: (#6501, `api/crud_agent_publish.py`).
-#: Its ``session-turns`` area is ``…/agent/sessions/{id}/turn`` with every route under it and
-#: ``…/agent/turns/stale``: a durable turn's writes of its session's row, each with its events
-#: in one transaction and its fence checked there (a send's claim and give-back, a Stop's flag, a
-#: placement's claim, its spend, the turn's end with the queue's head, the queue's event, and the
-#: running sweep's end of a lost turn; #6449, `api/crud_agent_turns.py`). Its
-#: ``mcp-relay`` area is ``…/agent/mcp-relay/*``: the /mcp session directory, the relay's messages
-#: (a body row and its ``scadbuddy_mcp`` NOTIFY in one transaction) and their sweep (#5299 step
-#: 11, `api/crud_agent_mcp.py`). Its ``changes`` area is ``…/agent/changes``: the server-sent
-#: event stream of the agent's six NOTIFY channels, with ``Last-Event-ID`` replay of the event log
-#: (#5299 D4, step 11, `api/crud_agent_changes.py`).
+#: `tools/go/core/internal/access`); its ``plugin-sessions`` area is ``…/agent/plugin-sessions`` and
+#: every route under it, the upstream MCP sessions its forwarders hold; its ``plugins`` area is
+#: ``…/agent/plugins`` and ``…/agent/plugin-oauth`` and every route under them, the remote plugins
+#: and their sign-ins, sealed and opened with the API's KEK (`tools/go/core/internal/plugins` and
+#: `api/crud_agent_plugins.py`); its ``plugin-packages`` area is ``…/agent/plugin-packages`` and
+#: every route under it, the installed packages' pins (`tools/go/core/internal/packages`); its
+#: ``package-mirrors`` area is ``…/agent/package-mirrors`` and every route under it, the bytes of
+#: the archive and npm pins kept as blobs (#6935); its ``hosted-plugins`` area is
+#: ``…/agent/hosted-plugins/*``, a hosted plugin's latest version
+#: (`tools/go/core/internal/packages`) and a version's zip (#6932, `api/crud_agent_packages.py`,
+#: with the mirrors); its ``plugin-feeds`` area is ``…/agent/plugin-feeds/{feed}``, a marketplace
+#: feed's packages at their current pins (#6933, `tools/go/core/internal/packages`), and
+#: ``…/plugin-feeds/{feed}/packages/{name}``, a package added to the feed or removed (#6936). Its
+#: ``gate`` area is ``…/agent/gate/*``: the tool-call gate's writes, an entry opened, a run grant's
+#: approval checked against ``flow_grants``, a flow's refusal, an entry resolved, a response decided
+#: against the row's record by the gate's validator, and the record read, each with its session
+#: events, status, audit row and ``scadbuddy_input`` NOTIFY in its transaction (#5299 step 10,
+#: `tools/go/core/internal/gate`). Its ``pending-input`` area is ``…/agent/pending-input/*``: the
+#: open entries and their responses read, a parked call's and a decision's span written, the first
+#: only while the durable turn's placement holds the session, the orphan sweep's cancels (each with
+#: its events, status and audit row in its transaction), and a call's recorded approval
+#: (`tools/go/core/internal/pending`). Its ``audit`` area is ``…/agent/audit/*``: the audit log's
+#: rows written, listed and pruned (`tools/go/core/internal/audit`). Its ``approvals`` area is
+#: ``…/agent/approvals/*``: the classic approvals read, made, decided once (with their events and
+#: audit row in the decision's transaction) and used once (`tools/go/core/internal/approvals`). Its
+#: ``questions`` area is ``…/agent/questions/*``: the `done` summaries read, dismissed and posted
+#: (the post only while the turn's placement holds the session), and the attention limit's count
+#: under its lease (`tools/go/core/internal/questions`). Its ``escalations`` area is
+#: ``…/agent/escalations/*``: a flow run's calls at the starting session's hop, passed up, denied,
+#: moved on its timeout and delivered, and a run's child entries for its queue
+#: (`tools/go/core/internal/escalations`). Its ``publish`` area is ``…/agent/publish/session-event``
+#: and ``…/publish/warm-evict``: a ``session.*`` bus event NOTIFYed on ``scadbuddy_events`` and a
+#: warm process's eviction on ``scadbuddy_warm_evict``; its ``session-reads`` area is
+#: ``…/agent/sessions/{id}/open-calls`` and ``…/reasoning``, a session's calls with no result and a
+#: child's text before a call (#6501, `tools/go/core/internal/publish`). Its ``session-turns`` area
+#: is ``…/agent/sessions/{id}/turn`` with every route under it and ``…/agent/turns/stale``: a
+#: durable turn's writes of its session's row, each with its events in one transaction and its fence
+#: checked there (a send's claim and give-back, a Stop's flag, a placement's claim, its spend, the
+#: turn's end with the queue's head, the queue's event, and the running sweep's end of a lost turn;
+#: #6449, `tools/go/core/internal/turns`). Its ``mcp-relay`` area is ``…/agent/mcp-relay/*``: the
+#: /mcp session directory, the relay's messages (a body row and its ``scadbuddy_mcp`` NOTIFY in one
+#: transaction) and their sweep (#5299 step 11, `tools/go/core/internal/mcprelay`). Its ``changes``
+#: area is ``…/agent/changes``: the server-sent event stream of the agent's six NOTIFY channels,
+#: with ``Last-Event-ID`` replay of the event log (#5299 D4, step 11, `api/crud_agent_changes.py`).
 #: Its ``session-edits`` area is ``…/agent/sessions/{id}/edit``: a rename, marking a session done
 #: and archiving it, under the row's lock with its warm eviction, an archive's ``done`` summaries
-#: dismissed and their events in one transaction (#6449, `api/crud_agent_edits.py`).
-#: Its ``migrations`` area is ``…/agent/migrations/ledger``, the ledger rows of the files the
-#: agent expects, which it waits for at its start; its ``auth-sessions`` area is
-#: ``…/agent/auth-sessions/lookup``, a signed-in person's live session by its cookie's hash
-#: (#6501, `api/crud_agent_start.py`).
-#: Its ``session-sweeps`` area is ``…/agent/sessions/live``, which session ids still have a
-#: row, for its directory sweeps; its ``forget-rows`` area is
-#: ``…/agent/sessions/{id}/forget-rows``, a forgotten session's last rows deleted with its
-#: unnamed workspace bytes and its warm-evict NOTIFY (#6501, `api/crud_agent_sweeps.py`).
-#: Its ``keys`` area is ``…/agent/keys/input-hash``, the approvals' input-hash key, and
-#: ``…/agent/fetch-grants``, a one-off fetch's grant minted here, so the agent mounts no KEK
-#: (#5299 step 12, `api/crud_agent_keys.py`).
-#: The print ``own-presets`` area is ``…/print/own-presets`` and its
-#: ``/documents``: ScadBuddy's own filament presets a native run reads (#7176).
-#: The profile-fetch ``runs`` area is ``…/profile-fetch/runs/{id}/files/{sha256}``,
-#: ``…/import`` and ``…/failed``: a fetch's preset files, their import as the type's
-#: ScadBuddy presets (#7176), and its failure (#6625, `api/crud_profile_fetch.py`).
-#: The projects ``tasks`` area is ``…/projects/tasks`` and its ``/{id}/close`` and
-#: ``/{id}/answered``: the typed questions a flow asks (#7364, `api/crud_tasks.py`).
+#: dismissed and their events in one transaction (#6449, `tools/go/core/internal/edits`). Its
+#: ``migrations`` area is ``…/agent/migrations/ledger``, the ledger rows of the files the agent
+#: expects, which it waits for at its start; its ``auth-sessions`` area is
+#: ``…/agent/auth-sessions/lookup``, a signed-in person's live session by its cookie's hash (#6501,
+#: `tools/go/core/internal/agentstart`). Its ``session-sweeps`` area is ``…/agent/sessions/live``,
+#: which session ids still have a row, for its directory sweeps; its ``forget-rows`` area is
+#: ``…/agent/sessions/{id}/forget-rows``, a forgotten session's last rows deleted with its unnamed
+#: workspace bytes and its warm-evict NOTIFY (#6501, `tools/go/core/internal/sweeps`). Its ``keys``
+#: area is ``…/agent/keys/input-hash``, the approvals' input-hash key, and ``…/agent/fetch-grants``,
+#: a one-off fetch's grant minted here, so the agent mounts no KEK (#5299 step 12,
+#: `tools/go/core/internal/secrets`, and `api/crud_agent_keys.py` for the fetch grants). The print
+#: ``own-presets`` area is ``…/print/own-presets`` and its ``/documents``: ScadBuddy's own filament
+#: presets a native run reads (#7176). The profile-fetch ``runs`` area is
+#: ``…/profile-fetch/runs/{id}/files/{sha256}``, ``…/import`` and ``…/failed``: a fetch's preset
+#: files, their import as the type's ScadBuddy presets (#7176), and its failure (#6625,
+#: `api/crud_profile_fetch.py`). The projects ``tasks`` area is ``…/projects/tasks`` and its
+#: ``/{id}/close`` and ``/{id}/answered``: the typed questions a flow asks (#7364,
+#: `api/crud_tasks.py`).
 CRUD_AREAS: dict[CrudCaller, list[str]] = {
     "projects": ["flows", "operations", "payload-keys", "tasks"],
     "render": ["settings", "jobs", "refs", "blob-index", "store-folders", "assets", "libraries"],

@@ -1,5 +1,5 @@
-// Package edits is an edit of a session: backend/scadbuddy/api/crud_agent_edits.py and
-// agent_data/edits.py, statement for statement (area session-edits).
+// Package edits is an edit of a session: backend/scadbuddy/api/crud_agent_edits.py (removed in #7667) and
+// agent_data/edits.py (removed in #7667), statement for statement (area session-edits).
 //
 // Under the row's lock, taken only while the principal owns it: a done refused while a turn
 // holds the row, an archive refused while a turn holds it or anything is parked on the person;
@@ -30,7 +30,7 @@ const (
 	titleMax     = 4096
 	bodyBytesMax = 64 * 1024
 	// poolWait and lockTimeoutMs bound a write's waits under the agent's 30 s request
-	// (crud_agent_turns.py POOL_WAIT_S, agent_data/turns.py LOCK_TIMEOUT_MS).
+	// (crud_agent_turns.py (removed in #7667) POOL_WAIT_S, agent_data/turns.py (removed in #7667) LOCK_TIMEOUT_MS).
 	poolWait      = 10 * time.Second
 	lockTimeoutMs = 10_000
 	// archivedReason is why a done summary dismissed by an archive ended.
@@ -51,7 +51,7 @@ func (e *Edits) Routes() []crud.Route {
 	}
 }
 
-// logged is events appended in the transaction, as crud_agent_gate.py Logged.
+// logged is events appended in the transaction, as crud_agent_gate.py (removed in #7667) Logged.
 type logged struct {
 	SessionID string            `json:"session_id"`
 	Events    []json.RawMessage `json:"events"`

@@ -2,7 +2,7 @@ import { z } from 'zod'
 import type { SessionBrowser } from './rows.js'
 
 // A session's browser options (#7027) as the tool, the session route and the chat socket take
-// them: the shape only. The bounds are the API's alone (backend api/crud_agent_sessions.py
+// them: the shape only. The bounds are the API's alone (tools/go/core/internal/sessions
 // `SessionBrowser`); a value it refuses comes back as `SessionError('invalid_browser')`, 422.
 
 export const SessionBrowserInput = z

@@ -1,5 +1,5 @@
 // Package sessions is a session's row and what its tool calls touched: backend/scadbuddy/
-// api/crud_agent_sessions.py and agent_data/sessions.py, statement for statement (areas
+// api/crud_agent_sessions.py (removed in #7667) and agent_data/sessions.py (removed in #7667), statement for statement (areas
 // sessions and session-resources).
 //
 // The insert takes the owner's start lock before it counts the owner's recent sessions, and a

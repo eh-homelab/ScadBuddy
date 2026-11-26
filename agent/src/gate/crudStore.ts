@@ -6,7 +6,7 @@ import type { DenyInput, GrantInput, InputRecord, OpenInput, ResolveInput, Respo
 import { REFUSALS, type RefusalCode, type Role } from './validate.js'
 
 // The tool-call gate's writes through the API's CRUD routes (#5299 step 10, D2; backend
-// api/crud_agent_gate.py, agent_data/gate.py): each of gate/store.ts's writers is one route and
+// tools/go/core/internal/gate, tools/go/core/internal/gate): each of gate/store.ts's writers is one route and
 // one transaction on the API, which builds the session events as store.ts does and answers the
 // batches it appended (`logged`), which store.ts hands to the event log once the answer is back.
 //
@@ -14,7 +14,7 @@ import { REFUSALS, type RefusalCode, type Role } from './validate.js'
 // API takes (`REQUEST_ID_MAX`) is never sent: no row can hold it, so a resolve, a decide, a read
 // or a grant of it answers as one of an id that was never asked.
 
-/** The longest request id the routes take (backend api/crud_agent_gate.py `REQUEST_ID_MAX`). */
+/** The longest request id the routes take (tools/go/core/internal/gate `REQUEST_ID_MAX`). */
 export const REQUEST_ID_MAX = 2048
 
 /** A batch of a session's events the API appended in the write's transaction, with their seqs. */

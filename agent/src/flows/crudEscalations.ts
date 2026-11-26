@@ -4,7 +4,7 @@ import { REQUEST_ID_MAX } from '../gate/crudStore.js'
 import { isUuid } from '../harness/stateDirs.js'
 
 // A flow run's calls at the starting session's hop through the API's CRUD routes (#5299 step 10;
-// backend api/crud_agent_escalations.py, agent_data/escalations.py), area `escalations`:
+// tools/go/core/internal/escalations, tools/go/core/internal/escalations), area `escalations`:
 // Escalations' reads and writes of `ai_pending_input` and `ai_escalation_deliveries` (flows/escalations.ts),
 // and FlowQueue's read of a run's child entries (flows/queue.ts). Who may answer stays Escalations' check; every write of an
 // answer or a delivery names the parent session again, so it moves nothing of another session's

@@ -6,8 +6,8 @@ import type { EventLog } from '../src/sessions/eventLog.js'
 import { RecordedApprovals } from '../src/temporal/toolActivities.js'
 
 // The gate's pending input through the API's CRUD routes (#5299 step 10, area `pending-input`),
-// against a fake API that answers as backend api/crud_agent_pending.py does (its tests,
-// tests/crud/test_crud_agent_pending.py, cover the SQL, the turn fence's lock and the sweep's
+// against a fake API that answers as tools/go/core/internal/pending does (its tests,
+// the Go tests in tools/go/core, cover the SQL, the turn fence's lock and the sweep's
 // writes on Postgres). Ids go in the body or the query, never the path; an id no row can hold is
 // never sent; the sweep's cancels reach the event log; and an approval counts only from the API's
 // answer for this call's hash.

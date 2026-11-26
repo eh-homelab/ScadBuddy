@@ -21,7 +21,7 @@ import (
 )
 
 // The agent's Claude credentials, ai_credentials: agent_data/credentials.py and the
-// credentials routes of api/crud_agent_secrets.py. The AAD binds a sealed secret to its row
+// credentials routes of api/crud_agent_secrets.py (removed in #7667). The AAD binds a sealed secret to its row
 // and to the columns that say where it is sent. Every structural write takes the table's lock
 // (SHARE ROW EXCLUSIVE: readers are not blocked); a health write locks the row.
 

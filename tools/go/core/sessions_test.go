@@ -11,7 +11,7 @@ import (
 	"time"
 )
 
-// The sessions areas, as backend/tests/crud/test_crud_agent_sessions.py and the others check
+// The sessions areas, as backend/tests/crud/test_crud_agent_sessions.py (removed in #7667) and the others check
 // Python's.
 
 const sessionAreas = "sessions, session-resources, session-order-costs, publish, session-reads," +

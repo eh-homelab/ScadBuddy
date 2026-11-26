@@ -4,8 +4,9 @@ not one (``../`` among them) is refused before any SQL; a write checks its confl
 and directory clash under the workspace's lock and writes its row, its blob's hold and its
 events in one transaction; the API seals each file under a key of its own, wrapped under
 the session's payload key or the KEK, and opens it again; on ``store_backend`` local the
-bytes stay in Postgres, shared by sha256; a fork's copy, the move to blobs, the sweep, the
-reconcile (one at a time) and a key rotation."""
+bytes stay in Postgres, shared by sha256; a fork's copy, the move to blobs and a key
+rotation. The metadata reads, the delete, the sweep and the reconcile are Go's (#7667), tested
+in ``tools/go/core/internal/workspace``."""
 
 from __future__ import annotations
 
@@ -13,14 +14,12 @@ import base64
 import hashlib
 import json
 import os
-import threading
 import uuid
 from collections.abc import Iterator
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
 
-import psycopg
 import pytest
 from fastapi import Depends, FastAPI
 from fastapi.testclient import TestClient
@@ -239,21 +238,19 @@ def test_only_the_agent_credential_reaches_the_routes(tables: PgPool, tmp_path: 
 def test_a_path_or_workspace_that_climbs_is_refused(local: Agent, tables: PgPool) -> None:
     sid = _session(tables)
     for path in ("../x", "a/../b", "/etc/passwd", ".hidden", "a//b"):
-        answer = local.get("/workspace/file", workspace=f"session:{sid}", path=path)
+        answer = local.read(f"session:{sid}", path)
         assert answer.status_code == 422, path
         assert answer.json()["reason"] == "invalid_path"
         assert local.write(f"session:{sid}", path, b"x").status_code == 422
     for workspace in ("session:../x", f"session:{sid}/..", "principal:root:x", "other"):
-        assert local.get("/workspace/files", workspace=workspace).status_code == 422
+        assert local.read(workspace, "a").status_code == 422
     assert _sql(tables, "SELECT * FROM ai_session_files") == []
 
 
 # --- Postgres (store_backend local) -----------------------------------------------------
 
 
-def test_a_file_kept_in_postgres_is_written_read_listed_and_deleted(
-    local: Agent, tables: PgPool
-) -> None:
+def test_a_file_kept_in_postgres_is_written_and_read(local: Agent, tables: PgPool) -> None:
     sid = _session(tables)
     key = f"session:{sid}"
     written = local.write(
@@ -279,29 +276,8 @@ def test_a_file_kept_in_postgres_is_written_read_listed_and_deleted(
     read = local.read(key, "notes/a.txt")
     assert read.status_code == 200 and read.content == b"hello"
     assert read.headers["x-scadbuddy-sha256"] == hashlib.sha256(b"hello").hexdigest()
-    assert [f["path"] for f in local.get("/workspace/files", workspace=key).json()["files"]] == [
-        "notes/a.txt"
-    ]
-    assert local.get("/workspace/files", workspace=key, prefix="other").json()["files"] == []
-    assert local.get("/workspace/usage", workspace=key).json() == {"files": 1, "bytes": 5}
-    listed = local.post("/workspace/session-files", {"session_ids": [sid]}).json()["sessions"]
-    assert listed[sid][0]["sealed"] is False
     assert local.read(key, "notes/a.txt", expected="0" * 64).status_code == 409
-
-    gone = local.post(
-        "/workspace/file-deletes",
-        {
-            "workspace": key,
-            "path": "notes/a.txt",
-            "events": [json.dumps(_event(sid, "notes/a.txt", "deleted"))],
-        },
-    ).json()
-    assert gone["deleted"] is True and len(gone["seqs"]) == 1
-    # Its bytes went with the last file that named them.
-    assert _sql(tables, "SELECT * FROM ai_session_file_bytes") == []
-    assert local.read(key, "notes/a.txt").status_code == 404
-    again = local.post("/workspace/file-deletes", {"workspace": key, "path": "notes/a.txt"})
-    assert again.json() == {"deleted": False, "seqs": []}
+    assert local.read(key, "notes/b.txt").status_code == 404
 
 
 def test_a_write_is_refused_on_conflict_caps_and_a_directory_clash(
@@ -366,15 +342,6 @@ def test_a_fork_shares_the_bytes_kept_in_postgres(local: Agent, tables: PgPool) 
     assert len(_sql(tables, "SELECT * FROM ai_session_file_bytes")) == 1
 
 
-def test_the_sweep_takes_principals_expired_files(local: Agent, tables: PgPool) -> None:
-    sid = _session(tables)
-    local.write("principal:bearer:token:1", "old", b"x")
-    local.write(f"session:{sid}", "kept", b"y")
-    _sql(tables, "UPDATE ai_session_files SET updated_at = now() - interval '2 days'")
-    assert local.post("/workspace/sweeps", {}).json() == {"swept": 1}
-    assert [r["path"] for r in _sql(tables, "SELECT path FROM ai_session_files")] == ["kept"]
-
-
 def test_status_says_postgres_on_store_backend_local(local: Agent) -> None:
     status = local.get("/workspace/status").json()
     assert status["store"] == "postgres"
@@ -405,15 +372,10 @@ def test_a_session_file_is_sealed_held_and_opened_again(blobs: Agent, tables: Pg
     assert _sql(tables, "SELECT subject FROM ai_payload_keys") == [{"subject": f"session-{sid}"}]
     assert blobs.read(key, "big.bin").content == data
     assert blobs.read(key, "big.bin", expected=hashlib.sha256(data).hexdigest()).content == data
-    listed = blobs.post("/workspace/session-files", {"session_ids": [sid]}).json()["sessions"]
-    assert listed[sid][0]["sealed"] is True
-
     replaced = blobs.write(key, "big.bin", b"small")
     assert replaced.status_code == 200
     new = _sql(tables, "SELECT blob_key FROM ai_session_files")[0]["blob_key"]
     assert _holds(tables) == {(new, f"{key}/big.bin")}
-    blobs.post("/workspace/file-deletes", {"workspace": key, "path": "big.bin"})
-    assert _holds(tables) == set()
 
 
 def test_a_principal_file_is_wrapped_under_the_kek_and_rewrapped_at_rotation(
@@ -510,37 +472,6 @@ def test_files_kept_in_postgres_move_to_blobs(tables: PgPool, tmp_path: Path) ->
         assert _holds(tables) == {(row["blob_key"], f"session:{sid}/a.txt")}
         assert _sql(tables, "SELECT * FROM ai_session_file_bytes") == []
         assert agent.read(f"session:{sid}", "a.txt").content == b"inline"
-
-
-def test_reconcile_releases_orphan_holds_and_holds_unheld_rows(
-    blobs: Agent, tables: PgPool
-) -> None:
-    sid = _session(tables)
-    blobs.write(f"session:{sid}", "a", b"x")
-    blob = _sql(tables, "SELECT blob_key FROM ai_session_files")[0]["blob_key"]
-    _sql(tables, "DELETE FROM blob_refs")
-    orphan = "workspace-" + "1" * 64
-    _sql(
-        tables,
-        "INSERT INTO blob_refs (key, holder_kind, holder_id, created_at)"
-        " VALUES (%s, 'ai_session_file', 'session:gone/x', now() - interval '2 hours'),"
-        " (%s, 'ai_session_file', 'session:fresh/x', now())",
-        (orphan, orphan),
-    )
-    done = blobs.post("/workspace/reconciles", {"grace_seconds": 3600}).json()
-    assert done == {"released": 1, "held": 1, "skipped": None}
-    assert _holds(tables) == {(blob, f"session:{sid}/a"), (orphan, "session:fresh/x")}
-
-
-def test_reconcile_skips_while_another_holds_the_lock(
-    blobs: Agent, tables: PgPool, pg_conninfo: str
-) -> None:
-    held = threading.Event()
-    with psycopg.connect(pg_conninfo, autocommit=True) as other:
-        other.execute("SELECT pg_advisory_lock(hashtextextended(%s, 0))", (ws.RECONCILE_LOCK,))
-        held.set()
-        done = blobs.post("/workspace/reconciles", {}).json()
-        assert done == {"released": 0, "held": 0, "skipped": "held"}
 
 
 def test_seal_file_opens_segment_by_segment_and_refuses_a_cut(tables: PgPool) -> None:

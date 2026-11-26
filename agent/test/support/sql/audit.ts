@@ -21,7 +21,7 @@ import { isUuid } from '../../../src/harness/stateDirs.js'
 
 // Tests only: the audit log's rows over the test database, the SQL the agent ran before the
 // API took area `audit` (#5299 step 12). src holds no SQL; the API's is backend
-// agent_data/audit_log.py.
+// tools/go/core/internal/audit.
 
 /** The approvals' and the audit log's input-hash key in tests: one per process, as the API's is one. */
 export const TEST_HASH_KEY = Buffer.alloc(32, 7)

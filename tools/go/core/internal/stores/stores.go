@@ -1,4 +1,4 @@
-// Package stores is the agent's small stores: backend/scadbuddy/api/crud_agent_stores.py,
+// Package stores is the agent's small stores: backend/scadbuddy/api/crud_agent_stores.py (removed in #7667),
 // statement for statement (areas activity-kinds, browser-origins, bridge-tabs, pairings and
 // mcp-tokens). Each route runs in one transaction, as Python's _in_tx.
 package stores

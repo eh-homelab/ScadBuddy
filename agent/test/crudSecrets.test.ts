@@ -26,7 +26,7 @@ import { CrudPayloadKeys, SubjectForgotten } from '../src/temporal/payloadCodec.
 
 // The agent's settings, Claude credentials and payload data keys through the API's CRUD routes
 // (#5299 step 4, D5; #5342), against a fake API that keeps them in memory as the backend's
-// api/crud_agent_secrets.py does (the backend's tests/crud/test_crud_agent_secrets.py covers the
+// tools/go/core/internal/secrets does (the backend's the Go tests in tools/go/core covers the
 // routes themselves). Every store here runs with no KEK in this process: the API seals and opens.
 
 const BASE = 'http://api:8080'

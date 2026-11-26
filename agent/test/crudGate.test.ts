@@ -7,8 +7,8 @@ import type { EventLog } from '../src/sessions/eventLog.js'
 import type { ServerEvent } from '../src/sessions/protocol.js'
 
 // The tool-call gate's writes through the API's CRUD routes (#5299 step 10, area `gate`), against
-// a fake API that answers as backend api/crud_agent_gate.py does (its tests,
-// tests/crud/test_crud_agent_gate.py, cover the SQL, the locks, the validator and the refusals on
+// a fake API that answers as tools/go/core/internal/gate does (its tests,
+// the Go tests in tools/go/core, cover the SQL, the locks, the validator and the refusals on
 // Postgres; test/gateBackend.pg.test.ts checks the API writes what the agent's SQL writes). The
 // store takes no SQL once the area is listed; what the API appended reaches the event log.
 

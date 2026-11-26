@@ -1,14 +1,10 @@
-"""The agent's data behind the CRUD service (#5299, #5342): its settings, its Claude
-credentials and its payload data keys, read and written for ``api/crud_agent_secrets.py``;
-its background tasks and its command record, for ``api/crud_agent_tasks.py`` (#5299 step 8,
-``background.py``, ``operations.py``).
+"""The agent's data behind the CRUD service (#5299, #5342). Go's core (``tools/go/core``)
+serves most of the agent's CRUD routes (#7667). Here is what the API's own routes and its
+start still run: the re-wrap of the agent's sealed rows under a new KEK (``rotation.py``), a
+subject's forget (``forget.py``), the workspace's sealed files (``workspace.py``), the
+command record (``operations.py``), the package mirrors and the plugin writes.
 
-The agent's tables (``ai_settings``, ``ai_credentials``, ``ai_payload_keys``,
-``ai_forgotten_subjects``, ``ai_audit``, ``ai_background_tasks``, ``ai_background_events``,
-``ai_workflow_calls``, ``ai_workflow_children``, ``ai_operations``) are the agent's
-migrations' own; each function here is the SQL the agent ran itself before
-(``agent/src/credentials.ts``, ``agent/src/temporal/payloadCodec.ts``,
-``agent/src/background/store.ts``, ``agent/src/operations/store.ts``), as one transaction.
-The KEK opens and seals here (D5): the agent gets a credential's plaintext or a subject's
-data key from a route for that purpose, audited in ``ai_audit``, and never the KEK.
+The agent's tables are the agent's migrations' own; each function here is the SQL the agent
+ran itself before, as one transaction. The KEK opens and seals here (D5), and the agent
+never gets it.
 """

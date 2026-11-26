@@ -1,5 +1,5 @@
 // Package agentstart is what the agent reads at its start and per request: backend/scadbuddy/
-// api/crud_agent_start.py, statement for statement (areas migrations and auth-sessions).
+// api/crud_agent_start.py (removed in #7667), statement for statement (areas migrations and auth-sessions).
 package agentstart
 
 import (
@@ -16,7 +16,7 @@ import (
 
 const (
 	migrationIDsMax = 5000
-	// bodyBytesMax is the event-log routes' bound (crud_agent_events.py BODY_BYTES_MAX).
+	// bodyBytesMax is the event-log routes' bound (crud_agent_events.py (removed in #7667) BODY_BYTES_MAX).
 	bodyBytesMax = 32 * 1024 * 1024
 )
 

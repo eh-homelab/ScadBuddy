@@ -7,7 +7,7 @@ import (
 	"testing"
 )
 
-// The classic approvals' routes, as backend/tests/crud/test_crud_agent_approvals.py checks them.
+// The classic approvals' routes, as backend/tests/crud/test_crud_agent_approvals.py (removed in #7667) checks them.
 
 var asker = map[string]any{"kind": "bearer", "id": "agent-1", "label": "Agent one"}
 var askerWho = map[string]any{"kind": "bearer", "id": "agent-1"}

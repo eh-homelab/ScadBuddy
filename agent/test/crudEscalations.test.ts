@@ -7,8 +7,8 @@ import { SessionError } from '../src/sessions/manager.js'
 import type { TurnRow } from '../src/sessions/rows.js'
 
 // A flow run's calls at the starting session's hop through the API's CRUD routes (#5299 step 10,
-// area `escalations`), against a fake API that answers as backend api/crud_agent_escalations.py
-// does (its tests, tests/crud/test_crud_agent_escalations.py, cover the SQL on Postgres). Who may
+// area `escalations`), against a fake API that answers as tools/go/core/internal/escalations
+// does (its tests, the Go tests in tools/go/core, cover the SQL on Postgres). Who may
 // answer is still checked here first; every write names the parent session; a delivery's claim
 // is handed back when its turn does not start, and skipped to the person when the session cannot
 // be asked; ids go in the body or the query, never the path.

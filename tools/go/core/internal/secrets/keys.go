@@ -19,7 +19,7 @@ import (
 )
 
 // A durable subject's payload data key released to the agent (agent_data/payload_keys.py),
-// the ai_audit row of each release (agent_data/audit.py), and the approvals' input-hash key
+// the ai_audit row of each release (agent_data/audit.py (removed in #7667)), and the approvals' input-hash key
 // (api/crud_agent_keys.py). Never the KEK.
 
 const (

@@ -8,7 +8,7 @@ import (
 	"testing"
 )
 
-// The session-turns area's writes, as backend/tests/crud/test_crud_agent_turns.py checks them.
+// The session-turns area's writes, as backend/tests/crud/test_crud_agent_turns.py (removed in #7667) checks them.
 
 func turnsAPI(t *testing.T) *api { return newAPI(t, "session-turns") }
 

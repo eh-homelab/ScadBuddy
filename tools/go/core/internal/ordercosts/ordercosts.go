@@ -1,5 +1,5 @@
 // Package ordercosts is the order items a session revised and its spend's report to them:
-// backend/scadbuddy/api/crud_agent_order_costs.py and agent_data/order_costs.py, statement for
+// backend/scadbuddy/api/crud_agent_order_costs.py (removed in #7667) and agent_data/order_costs.py (removed in #7667), statement for
 // statement (area session-order-costs).
 //
 // A report runs under the session's lease (order-cost:<session id>). Each write of a report

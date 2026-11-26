@@ -18,7 +18,7 @@ import (
 // The agent's canonical JSON: what JSON.stringify writes for the value JavaScript parses
 // from a JSON text, with object keys sorted by UTF-16 code unit at every depth. The approvals'
 // input hash (backend flows/approval_hash.py, agent approvals/service.ts) writes numbers as
-// ECMAScript does; a gate response's hash (agent_data/gate_canonical.py) holds none.
+// ECMAScript does; a gate response's hash (agent_data/gate_canonical.py (removed in #7667)) holds none.
 
 // InputHashInfo is the HKDF label of the approvals' input-hash key.
 const InputHashInfo = "scadbuddy:ai_approvals:input_hash:v1"

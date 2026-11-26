@@ -234,7 +234,7 @@ any replica, so a request for a session another replica holds is relayed there t
 Postgres ([`agent/src/mcp/sessionRelay.ts`](../../agent/src/mcp/sessionRelay.ts)). The
 directory and the messages are written through the backend's CRUD routes, area `mcp-relay`
 (`…/crud/agent/mcp-relay/*`,
-[`crud_agent_mcp.py`](../../backend/scadbuddy/api/crud_agent_mcp.py), #5299 step 11;
+[`tools/go/core/internal/mcprelay`](../../tools/go/core/internal/mcprelay), #5299 step 11;
 [`relayRows.ts`](../../agent/src/mcp/relayRows.ts)). A message's row and its `scadbuddy_mcp` NOTIFY commit in one
 transaction; the diagram's Postgres steps are those routes' statements. Over the routes each
 message (an ack, a beat, the head, each chunk, the end) is one HTTP call to the API, sent in

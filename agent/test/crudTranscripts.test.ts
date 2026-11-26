@@ -6,8 +6,8 @@ import { TranscriptStore } from '../src/sessions/store.js'
 import { SubjectForgotten } from '../src/temporal/payloadCodec.js'
 
 // A session's transcript through the API's CRUD routes (#5299 step 9, part b), against a fake API
-// that answers as the backend's api/crud_agent_transcripts.py does (the backend's
-// tests/crud/test_crud_agent_transcripts.py covers the routes, the sealing and the chain). An entry
+// that answers as the backend's tools/go/core/internal/transcripts does (the backend's
+// the Go tests in tools/go/core covers the routes, the sealing and the chain). An entry
 // travels as its JSON text, a session id goes into a path only as a lowercase UUID, and the store
 // keeps its interface: each method goes to its route.
 

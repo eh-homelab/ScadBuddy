@@ -423,7 +423,7 @@ every agent secret (the Claude credentials, the payload keys, the Web Push and c
 the plugins' header secrets and sign-ins, the workspace file keys and the transcripts) and
 answers each plaintext, or a key derived from the KEK (the approvals' input-hash key, the
 one-off fetch grants), to the `agent` credential from a route for that purpose
-([`backend/scadbuddy/api/crud_agent_secrets.py`](../../backend/scadbuddy/api/crud_agent_secrets.py),
+([`tools/go/core/internal/secrets`](../../tools/go/core/internal/secrets),
 #5299 step 4, #5342; area `keys`, [`agent/src/api/agentKeys.ts`](../../agent/src/api/agentKeys.ts)).
 
 ### 3.1 Generating it
@@ -971,7 +971,7 @@ backend over its CRUD routes (`/api/v1/internal/crud/agent/`, area `flows`,
 `agent/src/flows/backendReads.ts`, #5299 D7); every flow tool call's run read takes its
 `FOR SHARE` lock in the route's own transaction. The gate's grant check reads
 `flow_grants` and `flow_grant_uses` on the API, under the grant row's share lock, in the
-grant route's transaction (`backend/scadbuddy/api/crud_agent_gate.py`, area `gate`, #5299
+grant route's transaction (`tools/go/core/internal/gate`, area `gate`, #5299
 step 10). The API takes back everything the role `scadbuddy_agent` held (among it
 `events`, `workflow_runs`, `workflow_run_decisions`, `flow_grants` and `flow_grant_uses`)
 at every start (`RETIRED_ROLES`, PR #6906)
@@ -1830,7 +1830,7 @@ call (`agent/src/access/live.ts`), so `off` refuses a call in a turn under way.
   10 × 20 MiB of plaintext `bytea` a session: size the database for it beside the other
   per-session storage. The rows go with the session; they are written and read by range
   through the API's CRUD routes (area `http-bodies`, #5299 step 7)
-  ([`backend/scadbuddy/api/crud_agent_blobs.py`](../../backend/scadbuddy/api/crud_agent_blobs.py)). A flow run's bodies stay on the
+  ([`tools/go/core/internal/blobs`](../../tools/go/core/internal/blobs)). A flow run's bodies stay on the
   replica that ran the call, under `durable-turns/flow-<id>/http/`, removed by every
   pod's hourly sweep after 7 days (#2496); that sweep also clears a `durable-turns/<id>/`
   directory a pod left before #2374.

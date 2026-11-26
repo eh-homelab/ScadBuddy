@@ -5,9 +5,11 @@ the real hidden routes, in the database it names, beside its own tables.
 ``uv run --frozen python -m tests.support.workspace_backend`` (in ``backend/``) with
 ``SCADBUDDY_DATABASE_URL`` set: it starts a Temporal dev server (as the API tests do:
 SCADBUDDY_TEST_TEMPORAL_DEV_SERVER or ``temporal`` on PATH) and moto's S3, serves the app
-on a free loopback port with ``store_backend`` s3 and a KEK of its own, and prints
-``READY <base url> <agent token>`` once ``/healthz`` answers: the token is an ``agent``
-service credential, which the holds' CRUD routes (`api/crud_agent.py`, #5299) require.
+on a free loopback port with ``store_backend`` s3 and a KEK of its own, and in front of it the
+Go API (``tools/go/core``, #7667), which serves the workspace's metadata, deletes, reconcile
+and blob holds and gives every other request to Python, as on prod (``go`` must be on PATH).
+It prints ``READY <base url> <agent token>`` once ``/healthz`` answers through the Go API: the
+token is an ``agent`` service credential, which the CRUD routes require.
 ``SCADBUDDY_TEST_WORKSPACE_KEK`` (base64), when set, is that KEK, so the test's own sealing
 and the API's open each other's files (#5299 step 7).
 It runs until it is signalled or its stdin closes; the test kills its process group."""
@@ -16,12 +18,15 @@ from __future__ import annotations
 
 import base64
 import os
+import shutil
 import socket
+import subprocess
 import sys
 import tempfile
 import threading
 import time
 import uuid
+from collections.abc import Callable
 from pathlib import Path
 
 import httpx
@@ -34,12 +39,52 @@ from scadbuddy.main import create_app
 from tests.support.store import moto_s3
 from tests.support.temporal import temporal_server
 
+#: The repository's root, where ``go.work`` is.
+REPO = Path(__file__).resolve().parents[3]
+#: The areas the Go API answers here: the workspace routes the agent's test calls that are
+#: Go's, and the blob holds.
+CORE_AREAS = "workspace:sql,workspace-blob-refs"
+
 
 def _free_port() -> int:
     with socket.socket() as probe:
         probe.bind(("127.0.0.1", 0))
         port: int = probe.getsockname()[1]
     return port
+
+
+def _wait_healthy(base: str, alive: Callable[[], bool]) -> None:
+    deadline = time.monotonic() + 120
+    while True:
+        try:
+            if httpx.get(f"{base}/healthz", timeout=5).status_code == 200:
+                return
+        except httpx.HTTPError:
+            pass
+        if not alive() or time.monotonic() > deadline:
+            sys.exit(f"{base} did not start")
+        time.sleep(0.5)
+
+
+def _core(
+    scratch: Path, database_url: str, upstream: str, kek: Path
+) -> tuple[str, subprocess.Popen[bytes]]:
+    """The Go API built and started in front of ``upstream``: its base URL and its process."""
+    go = shutil.which("go")
+    if go is None:
+        sys.exit("go is not on PATH: the Go API serves the workspace's routes")
+    binary = scratch / "scadbuddy-core"
+    subprocess.run([go, "build", "-o", str(binary), "./tools/go/core"], cwd=REPO, check=True)
+    port = _free_port()
+    env = {
+        "PATH": os.environ.get("PATH", ""),
+        "SCADBUDDY_DATABASE_URL": database_url,
+        "SCADBUDDY_CORE_UPSTREAM": upstream,
+        "SCADBUDDY_CORE_AREAS": CORE_AREAS,
+        "SCADBUDDY_CORE_LISTEN": f"127.0.0.1:{port}",
+        "SCADBUDDY_SECRET_KEY_FILE": str(kek),
+    }
+    return f"http://127.0.0.1:{port}", subprocess.Popen([str(binary)], env=env)
 
 
 def main() -> None:
@@ -91,23 +136,18 @@ def main() -> None:
         )
         thread = threading.Thread(target=server.run, daemon=True)
         thread.start()
-        deadline = time.monotonic() + 120
-        while True:
-            try:
-                if httpx.get(f"{base}/healthz", timeout=5).status_code == 200:
-                    break
-            except httpx.HTTPError:
-                pass
-            if not thread.is_alive() or time.monotonic() > deadline:
-                sys.exit("the API did not start")
-            time.sleep(0.5)
+        _wait_healthy(base, thread.is_alive)
+        front, core = _core(root, database_url, base, kek)
+        _wait_healthy(front, lambda: core.poll() is None)
         credentials = app.state.scadbuddy.components.get(AUTH).credentials
         token = InProcessProvider("agent", lambda: credentials).token()
         if token is None:
             sys.exit("the API minted no agent credential")
-        print(f"READY {base} {token}", flush=True)
+        print(f"READY {front} {token}", flush=True)
         # Until the test closes stdin (or kills the group).
         sys.stdin.read()
+        core.terminate()
+        core.wait(timeout=30)
         server.should_exit = True
         thread.join(timeout=30)
 

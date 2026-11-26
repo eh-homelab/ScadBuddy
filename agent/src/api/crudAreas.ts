@@ -10,7 +10,7 @@ import { CrudReadError, crudRead } from './crudRead.js'
 
 /**
  * The areas of the agent's settings, Claude credentials and payload data keys, which the API
- * seals and opens with the KEK (#5299 step 4, D5; backend api/crud_agent_secrets.py).
+ * seals and opens with the KEK (#5299 step 4, D5; tools/go/core/internal/secrets).
  */
 export const SECRET_AREAS = ['settings', 'credentials', 'payload-keys'] as const
 
@@ -28,7 +28,7 @@ export const WORKSPACE_AREAS = ['workspace'] as const
 
 /**
  * The areas of a session's images, the staged attachments and the saved http_request bodies
- * (#5299 step 7; backend api/crud_agent_blobs.py; sessions/crudBlobs.ts, attachments/crudStore.ts).
+ * (#5299 step 7; tools/go/core/internal/blobs; sessions/crudBlobs.ts, attachments/crudStore.ts).
  */
 export const BLOB_AREAS = ['session-blobs', 'attachments', 'http-bodies'] as const
 
@@ -41,49 +41,49 @@ export const TASK_AREAS = ['background-tasks', 'operations'] as const
 
 /**
  * The tool-call gate's areas (#5299 step 10). `gate`, its writes: an entry opened, resolved or
- * decided, a flow's refusal and a request's response read (backend api/crud_agent_gate.py;
+ * decided, a flow's refusal and a request's response read (tools/go/core/internal/gate;
  * gate/crudStore.ts); a run grant's check goes through its route whether or not it is listed.
  * `pending-input`: the projection's reads, the orphan sweep's cancels, a durable turn's response
  * read and its fenced span mark, and a call's recorded approval (backend
- * api/crud_agent_pending.py; gate/crudPending.ts). `audit`: the audit log's rows written, listed
- * and pruned (backend api/crud_agent_audit.py; audit/crudAudit.ts). `approvals`: the classic
+ * tools/go/core/internal/pending; gate/crudPending.ts). `audit`: the audit log's rows written, listed
+ * and pruned (tools/go/core/internal/audit; audit/crudAudit.ts). `approvals`: the classic
  * approvals, each decision written once with its events and audit row (backend
- * api/crud_agent_approvals.py; approvals/crudApprovals.ts).
+ * tools/go/core/internal/approvals; approvals/crudApprovals.ts).
  */
 export const GATE_AREAS = ['gate', 'pending-input', 'audit', 'approvals', 'questions', 'escalations'] as const
 
 /**
  * The areas of the sessions' rows and of what their tool calls touched (#5299 step 9, part a;
- * backend api/crud_agent_sessions.py; sessions/rows.ts, sessions/touched.ts), and of their
+ * tools/go/core/internal/sessions; sessions/rows.ts, sessions/touched.ts), and of their
  * transcripts, sealed and opened by the API, and their event logs (part b;
- * api/crud_agent_transcripts.py, api/crud_agent_events.py; sessions/crudTranscripts.ts,
+ * tools/go/core/internal/transcripts, tools/go/core/internal/events; sessions/crudTranscripts.ts,
  * sessions/crudEvents.ts).
  */
 export const SESSION_AREAS = ['sessions', 'session-resources', 'transcripts', 'session-events', 'session-order-costs'] as const
 
 /**
  * The area of the /mcp session relay's directory and messages (#5299 step 11; backend
- * api/crud_agent_mcp.py; mcp/relayRows.ts).
+ * tools/go/core/internal/mcprelay; mcp/relayRows.ts).
  */
 export const RELAY_AREAS = ['mcp-relay'] as const
 
 /**
  * The NOTIFYs sent outside a store's write (a `session.*` bus event, a warm eviction) and a
  * session's last event reads (its open calls, a child's reasoning) (#6501; backend
- * api/crud_agent_publish.py; sessions/publish.ts, sessions/sessionReads.ts).
+ * tools/go/core/internal/publish; sessions/publish.ts, sessions/sessionReads.ts).
  */
 export const REST_AREAS = ['publish', 'session-reads'] as const
 
 /**
  * The areas of a durable turn's writes of its session's row, each with its events in one
  * transaction and its fence checked there (`session-turns`), and of an edit of a session with its
- * events (`session-edits`) (#6449; backend api/crud_agent_turns.py, api/crud_agent_edits.py;
+ * events (`session-edits`) (#6449; tools/go/core/internal/turns, tools/go/core/internal/edits;
  * sessions/turnRows.ts, sessions/edits.ts).
  */
 export const TURN_AREAS = ['session-turns', 'session-edits'] as const
 
 /**
- * A signed-in person's session, read per request (#6501; backend api/crud_agent_start.py;
+ * A signed-in person's session, read per request (#6501; tools/go/core/internal/agentstart;
  * auth/browserSession.ts `CrudSessionLookup`).
  */
 export const START_AREAS = ['auth-sessions'] as const
@@ -96,7 +96,7 @@ export const KEY_AREAS = ['keys'] as const
 
 /**
  * Which sessions still have a row, for the pod's directory sweeps, and a forget's last rows
- * (#6501; backend api/crud_agent_sweeps.py; sessions/presence.ts, sessions/forget.ts
+ * (#6501; tools/go/core/internal/sweeps; sessions/presence.ts, sessions/forget.ts
  * `CrudForgetRows`).
  */
 export const SWEEP_AREAS = ['session-sweeps', 'forget-rows'] as const

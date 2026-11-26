@@ -10,8 +10,8 @@ import (
 	"time"
 )
 
-// The gate's and the audit log's routes, as backend/tests/crud/test_crud_agent_gate.py and
-// test_crud_agent_audit.py check them.
+// The gate's and the audit log's routes, as backend/tests/crud/test_crud_agent_gate.py (removed in #7667) and
+// test_crud_agent_audit.py (removed in #7667) check them.
 
 var me = map[string]any{"kind": "browser", "id": "browser", "label": "You"}
 var system = map[string]any{"kind": "system", "id": "scadbuddy", "label": "ScadBuddy"}

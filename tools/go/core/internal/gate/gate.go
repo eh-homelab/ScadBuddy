@@ -1,5 +1,5 @@
-// Package gate is the tool-call gate's writes: backend/scadbuddy/agent_data/gate.py,
-// gate_validate.py, gate_canonical.py and api/crud_agent_gate.py, statement for statement
+// Package gate is the tool-call gate's writes: backend/scadbuddy/agent_data/gate.py (removed in #7667),
+// gate_validate.py (removed in #7667), gate_canonical.py (removed in #7667) and api/crud_agent_gate.py (removed in #7667), statement for statement
 // (area gate). Its helpers build the session events the other gate areas write (pending-input,
 // approvals, questions, escalations), key order included, as the Python API built them.
 package gate

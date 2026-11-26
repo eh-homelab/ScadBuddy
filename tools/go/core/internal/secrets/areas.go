@@ -1,5 +1,5 @@
 // Package secrets is the agent's settings, Claude credentials, payload data keys and
-// input-hash key: api/crud_agent_secrets.py and api/crud_agent_keys.py, statement for
+// input-hash key: api/crud_agent_secrets.py (removed in #7667) and api/crud_agent_keys.py, statement for
 // statement (areas settings, credentials, payload-keys and keys). The API seals and opens
 // here with the KEK; a secret travels only in these routes' bodies, and every CRUD answer is
 // no-store.

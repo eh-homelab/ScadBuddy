@@ -1,5 +1,7 @@
-"""A session's transcript, the Agent SDK's ``SessionStore`` rows (#5299 step 9, part b), for
-``api/crud_agent_transcripts.py`` area ``transcripts``: ``ai_session_entries``.
+"""A session's transcript, the Agent SDK's ``SessionStore`` rows (#5299 step 9, part b):
+``ai_session_entries``. The ``transcripts`` routes are Go's (``tools/go/core/internal/transcripts``,
+#7667); here is what a forget runs to copy a fork's range (``copy_fork_ranges``), with the
+append and read its tests use.
 
 Each function is the SQL of ``agent/src/sessions/store.ts`` (`PgTranscriptRows`) statement for
 statement, a transaction as one transaction, with the sealing moved here (D5): the agent sends
@@ -33,8 +35,6 @@ from scadbuddy.workflows.payload_codec import payload_key_lock
 
 #: ``entry_type`` is plaintext, so only a short token-like type is stored (``ENTRY_TYPE``).
 ENTRY_TYPE = re.compile(r"^[a-z][a-z0-9_-]{0,63}$")
-#: How many of a session's newest user and assistant rows ``last_cwd`` opens first.
-LAST_CWD_ROWS = 20
 #: How often a load is read again when an ancestor was forgotten while it read.
 TRANSCRIPT_TRIES = 3
 
@@ -262,139 +262,6 @@ def transcript(conn: Connection[Any], session_id: str, keys: Keks) -> list[str]:
             if not ancestor_gone or attempt >= TRANSCRIPT_TRIES:
                 raise
             attempt += 1
-
-
-_ROW = "SELECT id, uuid, entry, sealed FROM ai_session_entries"
-
-
-def subpath_entries(conn: Connection[Any], session_id: str, subpath: str, keks: Keks) -> list[str]:
-    rows = conn.execute(
-        f"{_ROW} WHERE session_id = %s AND subpath = %s ORDER BY id", (session_id, subpath)
-    ).fetchall()
-    return _open(conn, session_id, subpath, rows, keks)
-
-
-def last_of_type(
-    conn: Connection[Any], session_id: str, subpath: str, kind: str, keks: Keks
-) -> str | None:
-    """The newest row without a uuid of this ``type``, by its plaintext ``entry_type``, or a
-    row from before sealing whose text names it."""
-    rows = conn.execute(
-        f"{_ROW} WHERE session_id = %s AND subpath = %s AND uuid IS NULL AND NOT inherited"
-        " AND (entry_type = %s OR (entry_type IS NULL AND entry LIKE %s))"
-        " ORDER BY id DESC LIMIT 1",
-        (session_id, subpath, kind, f'%"{kind}"%'),
-    ).fetchall()
-    return _open(conn, session_id, subpath, rows, keks)[0] if rows else None
-
-
-def _cwd_of(texts: list[str]) -> str | None:
-    for text in reversed(texts):
-        try:
-            cwd = _parsed(text).get("cwd")
-        except ValueError:
-            continue
-        if isinstance(cwd, str) and cwd != "":
-            return cwd
-    return None
-
-
-def last_cwd(conn: Connection[Any], session_id: str, keks: Keks) -> str | None:
-    """``lastCwd``: the newest ``cwd`` the session's own user and assistant rows name, else
-    its transcript's as it loads (a fork before its first turn)."""
-    rows = conn.execute(
-        f"{_ROW} WHERE session_id = %s AND subpath = '' AND NOT inherited"
-        " AND (entry_type IN ('user', 'assistant') OR entry_type IS NULL)"
-        " ORDER BY id DESC LIMIT %s",
-        (session_id, LAST_CWD_ROWS),
-    ).fetchall()
-    if rows:
-        own = _cwd_of(list(reversed(_open(conn, session_id, "", rows, keks))))
-        if own is not None:
-            return own
-    return _cwd_of(transcript(conn, session_id, keks))
-
-
-def list_sessions(conn: Connection[Any], project_key: str) -> list[dict[str, Any]]:
-    return list(
-        conn.execute(
-            "SELECT session_id, floor(extract(epoch FROM max(created_at)) * 1000)::bigint AS mtime"
-            " FROM ai_session_entries WHERE project_key = %s AND subpath = ''"
-            " GROUP BY session_id",
-            (project_key,),
-        ).fetchall()
-    )
-
-
-def delete(conn: Connection[Any], session_id: str, subpath: str | None) -> None:
-    """The main transcript takes its subagent transcripts with it."""
-    if subpath is None:
-        conn.execute("DELETE FROM ai_session_entries WHERE session_id = %s", (session_id,))
-    else:
-        conn.execute(
-            "DELETE FROM ai_session_entries WHERE session_id = %s AND subpath = %s",
-            (session_id, subpath),
-        )
-
-
-def subkeys(conn: Connection[Any], session_id: str) -> list[str]:
-    return [
-        r["subpath"]
-        for r in conn.execute(
-            "SELECT DISTINCT subpath FROM ai_session_entries"
-            " WHERE session_id = %s AND subpath <> '' ORDER BY subpath",
-            (session_id,),
-        ).fetchall()
-    ]
-
-
-def head(conn: Connection[Any], session_id: str) -> dict[str, Any]:
-    """Whether there is a main transcript to resume (rows of its own, or a fork's range,
-    ``transcriptExists``), and its own newest row with a uuid (``warm.ts`` ``spawn``)."""
-    row = conn.execute(
-        "SELECT EXISTS (SELECT 1 FROM ai_session_entries WHERE session_id = %(id)s"
-        " AND subpath = '')"
-        " OR EXISTS (SELECT 1 FROM ai_sessions WHERE id::text = %(id)s"
-        " AND fork_parent_id IS NOT NULL AND fork_cut > 0) AS found,"
-        " (SELECT max(id) FROM ai_session_entries WHERE session_id = %(id)s AND subpath = ''"
-        " AND uuid IS NOT NULL AND NOT inherited)::text AS since",
-        {"id": session_id},
-    ).fetchone()
-    assert row is not None
-    return {"exists": bool(row["found"]), "since": row["since"]}
-
-
-def moved(conn: Connection[Any], session_id: str, since: int | None, own: list[str]) -> bool:
-    """``warm.ts`` ``tailMoved``: whether a row with a uuid the process did not write landed
-    in the main transcript after ``since``."""
-    row = conn.execute(
-        "SELECT 1 FROM ai_session_entries WHERE session_id = %s AND subpath = ''"
-        " AND uuid IS NOT NULL AND NOT inherited AND id > %s AND NOT (uuid = ANY(%s::text[]))"
-        " LIMIT 1",
-        (session_id, since or 0, own),
-    ).fetchone()
-    return row is not None
-
-
-def user_landed(conn: Connection[Any], session_id: str, mark: int) -> bool:
-    """``store.ts`` ``userLanded`` (for ``turnHost.ts``): whether a user entry landed in the
-    main transcript after row ``mark``; a legacy row's own top-level ``type`` is read."""
-    rows = conn.execute(
-        "SELECT entry_type = 'user' AS typed, entry FROM ai_session_entries"
-        " WHERE session_id = %s AND subpath = '' AND id > %s AND NOT inherited"
-        " AND (entry_type = 'user' OR (entry_type IS NULL AND entry LIKE '%%\"user\"%%'))"
-        " ORDER BY id",
-        (session_id, mark),
-    ).fetchall()
-    for row in rows:
-        if row["typed"]:
-            return True
-        try:
-            if _parsed(row["entry"] or "").get("type") == "user":
-                return True
-        except ValueError:
-            continue
-    return False
 
 
 #: At most this many rows in one insert of ``copy_fork_ranges``.

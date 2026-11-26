@@ -9,7 +9,7 @@ import { CrudPluginSessions, endOwnSessions, sweepDeadReplicas } from '../src/pl
 
 // The tool access, the tool listings and the plugin sessions through the API's CRUD routes
 // (#5299 step 5), against a fake API that keeps them in memory as backend
-// api/crud_agent_access.py does (the backend's tests/api/test_crud_agent_access.py covers the
+// tools/go/core/internal/access does (the backend's the Go tests in tools/go/core covers the
 // routes and the lease on Postgres). None of these stores takes a KEK or a database.
 
 const BASE = 'http://api:8080'

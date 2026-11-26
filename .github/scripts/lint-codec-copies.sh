@@ -10,9 +10,6 @@
 #  - the two Python codecs must be the same code apart from their imports,
 #    docstrings (module, class and function ones) and converter function (the key lock and tombstone logic that no
 #    vector covers);
-#  - the gate's validator and response hash (agent-durable's gate/validate.py and
-#    gate/canonical.py), which the API runs behind its CRUD routes (#5299 step 10), are
-#    copied into backend/ byte for byte.
 #  - the hosted plugin name rules (#6932): `hosted_plugins/rules.py` `RESERVED_NAMES` must
 #    be the same set as `agent/src/plugins/registry.ts` `RESERVED_PLUGIN_NAMES`.
 set -euo pipefail
@@ -27,15 +24,13 @@ same agent/test/fixtures/payload-vectors.json backend/tests/fixtures/payload-vec
 same agent/test/fixtures/subject-vectors.json backend/tests/fixtures/subject-vectors.json
 # The agent's credential vectors, which the API opens behind its CRUD routes (#5299 step 4).
 same agent/test/fixtures/secret-vectors.json backend/tests/fixtures/secret-vectors.json
-# The gate's validator and response hash, which the API runs behind its CRUD routes (#5299
-# step 10): agent-durable's, copied whole, and the vectors that pin them to the agent's.
+# The vectors that pin the gate's validator and response hash (agent-durable's) to the
+# agent's; the Go API's gate (tools/go/core/internal/gate, #7667) reads this copy.
 same agent/test/fixtures/pending-input-vectors.json backend/tests/fixtures/pending-input-vectors.json
 same agent/test/fixtures/response-hash-vectors.json backend/tests/fixtures/response-hash-vectors.json
 # The hosted plugin content hash's vectors (#6932): `hash.ts` and `hosted_plugins/bundle.py`
 # must give the same hash, and the backend's tests read this copy.
 same agent/test/fixtures/hosted-plugin-hash-vectors.json backend/tests/fixtures/hosted-plugin-hash-vectors.json
-same agent-durable/src/scadbuddy_durable/gate/validate.py backend/scadbuddy/agent_data/gate_validate.py
-same agent-durable/src/scadbuddy_durable/gate/canonical.py backend/scadbuddy/agent_data/gate_canonical.py
 
 if ! python3 - "$root" <<'PY'
 import ast

@@ -15,7 +15,7 @@ import (
 	"testing"
 )
 
-// The tests of backend/tests/crud/test_crud_agent_blobs.py, test_crud_agent_tasks.py and
+// The tests of backend/tests/crud/test_crud_agent_blobs.py (removed in #7667), test_crud_agent_tasks.py and
 // test_crud_agent_workspace.py that cover what Go answers.
 
 const blobAreas = "session-blobs, attachments, http-bodies, background-tasks, operations:read, workspace:sql"

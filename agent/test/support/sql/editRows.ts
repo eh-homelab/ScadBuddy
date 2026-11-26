@@ -7,7 +7,7 @@ import { WARM_EVICT_CHANNEL } from '../../../src/sessions/warmEvict.js'
 import { appendEventsIn } from './eventRows.js'
 
 // `EditRows` straight on the test database, the transaction the API's route runs (backend
-// agent_data/edits.py), for tests with no API (#5299).
+// tools/go/core/internal/edits), for tests with no API (#5299).
 
 /** True for a posted `done` summary (#1383): reason `done`, no timer. `alias` is the table's alias in the query. */
 function isDoneSummary(sql: Sql | TransactionSql, alias?: string) {

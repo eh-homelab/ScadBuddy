@@ -30,10 +30,6 @@ def package_source(pkg: str) -> str:
     return f"package:{pkg}"
 
 
-def package_server_source(pkg: str, server: str) -> str:
-    return f"package:{pkg}/mcp:{server}"
-
-
 def notify_warm_evict(conn: Connection[Any], target: str = "*") -> None:
     """Tells every replica to evict ``target``'s warm process (``*``: every one)."""
     conn.execute("SELECT pg_notify(%s, %s)", (WARM_EVICT_CHANNEL, target))

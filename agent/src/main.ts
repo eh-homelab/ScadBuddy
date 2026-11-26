@@ -220,28 +220,28 @@ const dataHealth = dataHealthOf(crudAreas, undefined, () => inputHashKey.isRelea
 const untilAreas = (): Promise<void> => crudAreas.whenComplete()
 /** Ready: every area listed and the key released; what a Temporal worker waits for before it polls. */
 const untilReady = (): Promise<void> => untilAreas().then(untilKey)
-// The tool-call gate's routes (#5299 step 10, backend api/crud_agent_gate.py), and its pending
+// The tool-call gate's routes (#5299 step 10, tools/go/core/internal/gate), and its pending
 // input and responses beyond its writers (area `pending-input`).
 const gateRoutes = new CrudGate(crudTarget)
 const pendingRoutes = new CrudPending(crudTarget)
 const approvalRoutes = new CrudApprovals(crudTarget)
-// A session's images, and the saved http_request bodies (#5299 step 7, backend api/crud_agent_blobs.py).
+// A session's images, and the saved http_request bodies (#5299 step 7, tools/go/core/internal/blobs).
 const sessionImages = new CrudSessionBlobs(config.backendUrl, { fetch: crudFetch })
 const httpBodies: HttpBodiesFor = (sessionId) => new CrudHttpBodies(config.backendUrl, sessionId, { fetch: crudFetch })
-// The sessions' rows and what their calls touched (#5299 step 9, backend api/crud_agent_sessions.py).
+// The sessions' rows and what their calls touched (#5299 step 9, tools/go/core/internal/sessions).
 const sessionRows = new CrudSessionRows(config.backendUrl, { fetch: crudFetch })
 const resourceRows = new CrudResourceRows(config.backendUrl, { fetch: crudFetch })
-// The transcripts, sealed and opened by the API (backend api/crud_agent_transcripts.py).
+// The transcripts, sealed and opened by the API (tools/go/core/internal/transcripts).
 const transcriptRows = new CrudTranscriptRows(config.backendUrl, { fetch: crudFetch })
-// The sessions' event logs (backend api/crud_agent_events.py).
+// The sessions' event logs (tools/go/core/internal/events).
 const eventRows = new CrudEventRows(config.backendUrl, { fetch: crudFetch })
 // The NOTIFYs sent outside a store's write and a session's last event reads (#6501, backend
-// api/crud_agent_publish.py).
+// tools/go/core/internal/publish).
 const publisher = new CrudPublisher(crudTarget)
 const sessionReads = new CrudSessionReads(crudTarget)
-// A durable turn's writes of its session's row with their events (#6449, backend api/crud_agent_turns.py).
+// A durable turn's writes of its session's row with their events (#6449, tools/go/core/internal/turns).
 const turnRows = new CrudTurnRows(config.backendUrl, { fetch: crudFetch })
-// An edit of a session with its events (#6449, backend api/crud_agent_edits.py).
+// An edit of a session with its events (#6449, tools/go/core/internal/edits).
 const editRows = new CrudEditRows(config.backendUrl, { fetch: crudFetch })
 // Which sessions still have a row, for the directory sweeps (#6501, area `session-sweeps`).
 const sessionPresence = new CrudSessionPresence(crudTarget)

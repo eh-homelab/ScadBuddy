@@ -6,7 +6,7 @@ import type { SessionBusEvent } from './busEvents.js'
 // (busEvents.ts `SessionEventPublisher`) and a warm process's eviction sent on its own
 // (warmEvict.ts; a store's write sends its eviction in its own transaction on the API), through
 // the API's routes `…/agent/publish/session-event` and `…/publish/warm-evict` (backend
-// api/crud_agent_publish.py), which NOTIFY, so every listener hears the same payloads. Both are
+// tools/go/core/internal/publish), which NOTIFY, so every listener hears the same payloads. Both are
 // best-effort: a lost one costs latency only.
 
 export interface Publisher {

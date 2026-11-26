@@ -20,7 +20,7 @@ export interface SessionTabStore {
   get(sessionId: string, signal?: AbortSignal): Promise<string | undefined>
 }
 
-/** The pairings through the API's CRUD routes, area `bridge-tabs` (backend api/crud_agent_stores.py). */
+/** The pairings through the API's CRUD routes, area `bridge-tabs` (tools/go/core/internal/stores). */
 export class CrudSessionTabStore implements SessionTabStore {
   readonly #call: ReturnType<typeof crudOf>
 

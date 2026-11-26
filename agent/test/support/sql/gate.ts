@@ -20,7 +20,7 @@ import type { InputEntry, InputOutcome, Owner, ServerEvent } from '../../../src/
 
 // Tests only: the gate's writes over the test database, the SQL the agent ran before the API
 // took area `gate` (#5299 step 12), behind the routes' interface (`GateRoutes`). src holds no
-// SQL; the API's is backend agent_data/gate.py. The run grant's check has no SQL here.
+// SQL; the API's is tools/go/core/internal/gate. The run grant's check has no SQL here.
 
 /** A GateDb over the test database: the session events go to `events` as a route's `logged` do. */
 export function sqlGateDb(sql: Sql, events: EventLog): GateDb {

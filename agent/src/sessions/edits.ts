@@ -26,7 +26,7 @@ import type { WarmSessions } from './warm.js'
 // is dismissed in the same transaction, so it leaves the badge with the chat.
 //
 // The edit's transaction is `EditRows.edit` (#6449): `CrudEditRows`, the API's route (backend
-// api/crud_agent_edits.py, area `session-edits`), which runs it as one transaction there (#5299
+// tools/go/core/internal/edits, area `session-edits`), which runs it as one transaction there (#5299
 // D2). The edit is sent untold first: the route checks every refusal before `untold`, its last, so `untold`
 // means the edit would pass and nothing was written. Only then is the workflow told and the edit
 // sent again, told. A refusal, a 503 or a lost answer on the first call ends no workflow. What

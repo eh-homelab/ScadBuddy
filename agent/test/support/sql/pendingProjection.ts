@@ -13,7 +13,7 @@ import type { Owner } from '../../../src/sessions/protocol.js'
 
 // Tests only: the projection's reads over the test database, the SQL the agent ran before the
 // API took area `pending-input` (#5299 step 12). src holds no SQL; the API's are
-// backend agent_data/pending_input.py.
+// tools/go/core/internal/pending.
 
 export class SqlPendingProjection implements PendingReads {
   readonly #sql: Sql

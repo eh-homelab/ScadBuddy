@@ -7,8 +7,8 @@ import type { EventLog } from '../src/sessions/eventLog.js'
 import type { ServerEvent } from '../src/sessions/protocol.js'
 
 // The `done` summaries and the attention limits through the API's CRUD routes (#5299 step 10,
-// area `questions`), against a fake API that answers as backend api/crud_agent_questions.py does
-// (its tests, tests/crud/test_crud_agent_questions.py, cover the SQL, the turn fence, the cap,
+// area `questions`), against a fake API that answers as tools/go/core/internal/questions does
+// (its tests, the Go tests in tools/go/core, cover the SQL, the turn fence, the cap,
 // the lease and the audit rows on Postgres). The summary's text is written here with the turn's
 // secrets redacted; a post names the turn's placement; the count is read only under the lease,
 // and anything but a count refuses the request; ids go in the body or the query, never the path.

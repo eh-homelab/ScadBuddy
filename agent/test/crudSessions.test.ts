@@ -5,8 +5,8 @@ import { CrudSessionRows } from '../src/sessions/rows.js'
 import { CrudResourceRows, SessionResources } from '../src/sessions/touched.js'
 
 // A session's row and what its calls touched through the API's CRUD routes (#5299 step 9, part
-// a), against a fake API that answers as the backend's api/crud_agent_sessions.py does (the
-// backend's tests/crud/test_crud_agent_sessions.py covers the routes and their SQL). Each method
+// a), against a fake API that answers as the backend's tools/go/core/internal/sessions does (the
+// backend's the Go tests in tools/go/core covers the routes and their SQL). Each method
 // goes to its route.
 
 const BASE = 'http://api:8080'

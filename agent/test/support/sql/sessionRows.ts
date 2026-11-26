@@ -5,7 +5,7 @@ import { payloadKeyLock } from './payloadKeys.js'
 import type { Owner } from '../../../src/sessions/protocol.js'
 
 // `SessionRows` straight on the test database, the statements the API's routes run (backend
-// agent_data/sessions.py), for tests with no API (#5299).
+// tools/go/core/internal/sessions), for tests with no API (#5299).
 
 /** The session whose budget this one spends from: itself, or a fork's lineage root (#823). */
 const ROOT = 'coalesce(ai_sessions.budget_root_id, ai_sessions.id)'
@@ -51,7 +51,7 @@ export function likeLiteral(text: string): string {
  * creator-or-offered filter is served by the ai_sessions_owner,
  * ai_sessions_creator (backend/scadbuddy/migrations_agent/20260928T0107Z_sessions.sql) and
  * ai_sessions_pending_owner (20260929T1825Z_session_handoff_offers.sql) indexes. The API's
- * `agent_data/sessions.py` `list_query` is the same query.
+ * `tools/go/core/internal/sessions` `list_query` is the same query.
  */
 export function listQuery(principal: Owner, filter: ListFilter = {}): { text: string; params: (string | number)[] } {
   const where: string[] = []

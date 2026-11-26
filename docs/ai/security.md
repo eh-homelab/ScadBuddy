@@ -33,7 +33,7 @@ Spec §8.1 ("minted in Settings, stored hashed") and §9 ("MCP auth mode, tokens
 [`agent/src/auth/tokens.ts`](../../agent/src/auth/tokens.ts), over `ai_mcp_tokens`
 ([`backend/scadbuddy/migrations_agent/20260928T0734Z_mcp_tokens.sql`](../../backend/scadbuddy/migrations_agent/20260928T0734Z_mcp_tokens.sql))
 through the agent's CRUD area `mcp-tokens`
-(#5299 step 5, [`backend/scadbuddy/api/crud_agent_stores.py`](../../backend/scadbuddy/api/crud_agent_stores.py)):
+(#5299 step 5, [`tools/go/core/internal/stores`](../../tools/go/core/internal/stores)):
 the API runs the statements; the agent has no SQL client (#5299 step 12). The plaintext never leaves the agent: a mint sends
 the hash it made, and a verify sends the presented token's hash, which the API looks up
 by its unique index and compares as a hash only.
@@ -403,7 +403,7 @@ The agent reads no KEK (#5299 step 12).
 
 - **Where they are opened (#5299 step 4, D5; #5342).** The API seals and opens the Claude
   credentials with the KEK (areas `credentials` and `payload-keys`,
-  [`backend/scadbuddy/api/crud_agent_secrets.py`](../../backend/scadbuddy/api/crud_agent_secrets.py)),
+  [`tools/go/core/internal/secrets`](../../tools/go/core/internal/secrets)),
   and the agent never opens one. A turn's credentials come from `POST …/crud/agent/credentials/reveal` (purpose
   `turn`; `redact` for the scrubbing of tool output, `test` for a connection test), a
   subject's payload data key from `POST …/crud/agent/payload-keys/{subject}`, never the
@@ -412,10 +412,10 @@ The agent reads no KEK (#5299 step 12).
   reveal's row is kind `credential`, action `reveal.<purpose>`: one per call, but
   `reveal.redact` (every tool call's redaction, which the agent also keeps 10 s,
   `plugins/secrets.ts` `SAVED_SECRETS_CACHE_MS`) once in 10 minutes
-  (`api/crud_agent_secrets.py` `REDACT_AUDIT_WINDOW`). A payload
+  (`tools/go/core/internal/secrets` `redactAuditWindow`). A payload
   key's is kind `payload_key`: `payload_key.create` and a refusal every time, and
-  `payload_key.release` once per subject in 10 minutes (`agent_data/payload_keys.py`
-  `RELEASE_AUDIT_WINDOW`), since the agent asks at transcript-read rate. A
+  `payload_key.release` once per subject in 10 minutes (`tools/go/core/internal/secrets`
+  `releaseAuditWindow`), since the agent asks at transcript-read rate. A
   payload key is made there under the subject's advisory lock, never for a subject in
   `ai_forgotten_subjects`. The agent keeps a released key 30 s at most.
   The Web Push keys and the notification channels' tokens are sealed and opened by the
@@ -435,7 +435,7 @@ The agent reads no KEK (#5299 step 12).
   the agent sends and gets plaintext and never holds a file key. Its session images, the staged attachments and the saved HTTP bodies
   go through the API's routes too (areas `session-blobs`, `attachments` and
   `http-bodies`, #5299 step 7,
-  [`backend/scadbuddy/api/crud_agent_blobs.py`](../../backend/scadbuddy/api/crud_agent_blobs.py)):
+  [`tools/go/core/internal/blobs`](../../tools/go/core/internal/blobs)):
   the same statements, the owner's caps under the owner's lock there, the bytes as the
   bodies' bytes, never base64. The two keys the agent once derived from its KEK are the
   API's too (area `keys`, #5299 step 12, `agent/src/api/agentKeys.ts`): the approvals'

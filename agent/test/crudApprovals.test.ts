@@ -4,8 +4,8 @@ import { ApprovalError, ApprovalService } from '../src/approvals/service.js'
 import type { EventLog } from '../src/sessions/eventLog.js'
 
 // The classic approvals through the API's CRUD routes (#5299 step 10, area `approvals`), against
-// a fake API that answers as backend api/crud_agent_approvals.py does (its tests,
-// tests/crud/test_crud_agent_approvals.py, cover the SQL, the once-only decision, its audit row,
+// a fake API that answers as tools/go/core/internal/approvals does (its tests,
+// the Go tests in tools/go/core, cover the SQL, the once-only decision, its audit row,
 // the prepares' bounds and their lock on Postgres). The service takes no SQL once the area is
 // listed; who may decide stays its own check, made before any write is asked for; a decision's
 // events reach the event log; and a decision that loses is no decision.

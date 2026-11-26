@@ -14,8 +14,8 @@ import { CrudPushStore, SubscriptionTakenError } from '../src/notify/pushStore.j
 import type { SessionImage } from '../src/sessions/blobs.js'
 
 // The agent's small stores through the API's CRUD routes (#5299 step 5), against a fake API
-// that keeps them in memory as backend api/crud_agent_stores.py does (the backend's
-// tests/api/test_crud_agent_stores.py covers the routes, their locks and expiries, on
+// that keeps them in memory as tools/go/core/internal/stores does (the backend's
+// the Go tests in tools/go/core covers the routes, their locks and expiries, on
 // Postgres). None of these stores takes a KEK: they work in a process that holds none.
 
 const BASE = 'http://api:8080'

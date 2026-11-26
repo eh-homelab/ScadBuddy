@@ -18,7 +18,7 @@ import (
 )
 
 // The agent's ai_settings: agent_data/settings.py and the settings routes of
-// api/crud_agent_secrets.py.
+// api/crud_agent_secrets.py (removed in #7667).
 
 const (
 	settingsMax     = 50

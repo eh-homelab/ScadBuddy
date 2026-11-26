@@ -9,7 +9,7 @@ import (
 	"github.com/eh-homelab/ScadBuddy/tools/go/core/internal/seal"
 )
 
-// The validator: backend/scadbuddy/agent_data/gate_validate.py (a port of the agent's
+// The validator: backend/scadbuddy/agent_data/gate_validate.py (removed in #7667) (a port of the agent's
 // gate/validate.ts), check for check and in the same order.
 
 const (

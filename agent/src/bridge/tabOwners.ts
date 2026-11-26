@@ -31,7 +31,7 @@ export interface TabOwnerStore {
   ownerOf(tabId: string, signal?: AbortSignal): Promise<TabOwner | undefined>
 }
 
-/** The owners through the API's CRUD routes, area `bridge-tabs` (backend api/crud_agent_stores.py). */
+/** The owners through the API's CRUD routes, area `bridge-tabs` (tools/go/core/internal/stores). */
 export class CrudTabOwnerStore implements TabOwnerStore {
   readonly #call: ReturnType<typeof crudOf>
 

@@ -1,7 +1,7 @@
 // Package agentreads is backend/scadbuddy/api/crud_agent.py but its assistant-cost route,
 // statement for statement: the holds of the workspace files' blobs (area
 // workspace-blob-refs, store/refs.py), the backend's event log's head and gap (area events),
-// and the agent's reads of the flow tables (area flows, flows/agent_reads.py).
+// and the agent's reads of the flow tables (area flows, flows/agent_reads.py (removed in #7667)).
 //
 // POST …/orders/{id}/assistant-cost (area order-costs) stays Python's: it runs the orders
 // lifecycle, which Go does not have.

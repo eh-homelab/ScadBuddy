@@ -19,18 +19,19 @@ import { TEMPORAL_CLI, TEMPORAL_CLI_ENV } from './support/temporal.js'
 
 // #4789 end to end: the agent's SessionFiles against the real backend's hidden routes
 // (backend/tests/support/workspace_backend.py: the API on moto's S3, its own KEK and a
-// Temporal dev server), both services migrated into one database, as in production
-// (docs/ai/operating.md §13). It also pins the holds the agent takes through its CRUD routes
-// (backend api/crud_agent.py, with the agent's service credential, #5299) to the backend's
-// own `blob_refs` rows: the agent's code never touches that table, the test reads it. And it
+// Temporal dev server, with the Go API in front, tools/go/core, #7667), both services migrated
+// into one database, as in production (docs/ai/operating.md §13). It also pins the holds the
+// agent takes through its CRUD routes (the Go API's area `workspace-blob-refs`, with the agent's
+// service credential, #5299) to the backend's own `blob_refs` rows: the agent's code never
+// touches that table, the test reads it. And it
 // checks that the API's sealing (backend agent_data/workspace.py, #5299 step 7) and the tests' copy
 // of its format (support/sql/workspaceSealing.ts) open each other's files: the harness takes the test's KEK.
 
 const BACKEND_DIR = fileURLToPath(new URL('../../backend/', import.meta.url))
 
-function hasUv(): boolean {
+function has(command: string, ...args: string[]): boolean {
   try {
-    execFileSync('uv', ['--version'], { stdio: 'ignore' })
+    execFileSync(command, args, { stdio: 'ignore' })
     return true
   } catch {
     return false
@@ -41,9 +42,11 @@ const skip = !TEST_DATABASE_URL
   ? `${TEST_DATABASE_URL_ENV} is not set`
   : !TEMPORAL_CLI
     ? `${TEMPORAL_CLI_ENV} is not set and no temporal on PATH`
-    : !hasUv()
+    : !has('uv', '--version')
       ? 'uv is not on PATH (the backend runs under it)'
-      : undefined
+      : !has('go', 'version')
+        ? 'go is not on PATH (the Go API runs in front of the backend)'
+        : undefined
 
 const KEK_B64 = Buffer.alloc(32, 11).toString('base64')
 const kek = kekFromBase64(KEK_B64)

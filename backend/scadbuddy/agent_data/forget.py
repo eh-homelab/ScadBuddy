@@ -1,6 +1,7 @@
-"""Forgetting a durable subject's key, and the deletes of keys nothing forgets (#5299 step
-6): the SQL ``agent/src/sessions/forget.ts`` and ``agent/src/temporal/payloadCodec.ts`` ran
-themselves before, each as one transaction, for ``api/crud_agent_forget.py``.
+"""Forgetting a durable subject's key (#5299 step 6): the SQL ``agent/src/sessions/forget.ts``
+ran itself before, as one transaction, for ``api/crud_agent_forget.py``. A browser call's key
+dropped and the sweep of the keys nothing forgets are Go's (``tools/go/core/internal/forget``,
+#7667).
 
 ``forget`` is forgetSubject's key transaction (spec 2026-10-01 §6.5, plan 5c Ruling 12): under
 the subject's advisory lock (``payload_key_lock``, which a key's creation also takes,
@@ -35,15 +36,6 @@ TOMBSTONE = (
 DELETE_FLOW_BLOBS = "DELETE FROM ai_flow_blobs WHERE subject = %s"
 DELETE_KEY = "DELETE FROM ai_payload_keys WHERE subject = %s"
 
-#: How old a browser call's key is before the sweep deletes it: far past the longest call
-#: (the agent's ``BRIDGE_KEY_MAX_AGE_S``).
-BRIDGE_KEY_MAX_AGE_S = 3600
-#: How old a session's key is before the sweep looks at it: well past any insert it could
-#: race (the agent's ``ORPHAN_KEY_MIN_AGE_S``).
-ORPHAN_KEY_MIN_AGE_S = 24 * 3600
-#: The most orphaned session keys one sweep deletes.
-ORPHAN_SWEEP_LIMIT = 100
-
 
 class ForksTakeRangesError(Exception):
     """The session's forks take transcript entries, and the API has no KEK to copy them."""
@@ -65,58 +57,3 @@ def forget(conn: Connection[Any], subject: str, keys: Keks) -> bool:
         if subject.startswith("flow-"):
             cur.execute(DELETE_FLOW_BLOBS, (subject,))
         return cur.execute(DELETE_KEY, (subject,)).rowcount > 0
-
-
-def drop_bridge_key(conn: Connection[Any], subject: str) -> bool:
-    """A browser call's key deleted once its caller has the answer (the agent's
-    ``dropPayloadKey``), under the subject's lock; no tombstone, as nothing takes the id
-    again. Whether there was one."""
-    with conn.transaction():
-        cur = conn.cursor(row_factory=tuple_row)
-        cur.execute(LOCK, (payload_key_lock(subject),))
-        return cur.execute(DELETE_KEY, (subject,)).rowcount > 0
-
-
-def sweep(
-    conn: Connection[Any],
-    *,
-    orphan_min_age_s: int = ORPHAN_KEY_MIN_AGE_S,
-    bridge_max_age_s: int = BRIDGE_KEY_MAX_AGE_S,
-) -> tuple[int, int]:
-    """The keys no forget deletes (the agent's ``sweepOrphanedSessionKeys`` and
-    ``sweepBridgeKeys``): a session's whose ``ai_sessions`` row is gone (a durable fork whose
-    workflow never started, #3317), older than ``orphan_min_age_s`` and checked again under
-    its lock, one transaction each; and a browser call's older than ``bridge_max_age_s``
-    (#4780). Not a forget: no tombstone. Answers (orphaned, bridge) deleted."""
-    cur = conn.cursor(row_factory=tuple_row)
-    with conn.transaction():
-        subjects = [
-            row[0]
-            for row in cur.execute(
-                "SELECT k.subject FROM ai_payload_keys k"
-                " WHERE k.subject LIKE 'session-%%'"
-                " AND k.created_at < now() - make_interval(secs => %s)"
-                " AND NOT EXISTS (SELECT 1 FROM ai_sessions s"
-                " WHERE s.id::text = substr(k.subject, 9))"
-                " LIMIT %s",
-                (orphan_min_age_s, ORPHAN_SWEEP_LIMIT),
-            ).fetchall()
-        ]
-    orphaned = 0
-    for subject in subjects:
-        session = subject.removeprefix("session-")
-        with conn.transaction():
-            cur.execute(LOCK, (payload_key_lock(subject),))
-            orphaned += cur.execute(
-                "DELETE FROM ai_payload_keys WHERE subject = %s"
-                " AND NOT EXISTS (SELECT 1 FROM ai_sessions WHERE id::text = %s)"
-                " AND NOT EXISTS (SELECT 1 FROM ai_session_entries WHERE session_id::text = %s)",
-                (subject, session, session),
-            ).rowcount
-    with conn.transaction():
-        bridges = cur.execute(
-            "DELETE FROM ai_payload_keys WHERE subject LIKE 'bridge-%%'"
-            " AND created_at < now() - make_interval(secs => %s)",
-            (bridge_max_age_s,),
-        ).rowcount
-    return orphaned, bridges

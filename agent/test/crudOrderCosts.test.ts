@@ -2,8 +2,8 @@ import { describe, expect, it } from 'vitest'
 import { CrudOrderCostRows, OrderCosts, orderCostLease, type AssistantCostReport } from '../src/sessions/orderCosts.js'
 
 // A session's order costs and its spend's report through the API's CRUD routes (#5299 step 9,
-// part c), against a fake API that answers as the backend's api/crud_agent_order_costs.py and
-// lease routes do (the backend's tests/crud/test_crud_agent_order_costs.py covers the routes, the
+// part c), against a fake API that answers as the backend's tools/go/core/internal/ordercosts and
+// lease routes do (the backend's the Go tests in tools/go/core covers the routes, the
 // lease checks and the SQL pod's lock). The report lock is a lease row: every write of a report
 // names its token, and the lease is released however the report ends.
 

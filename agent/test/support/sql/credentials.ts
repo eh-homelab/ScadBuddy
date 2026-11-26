@@ -88,7 +88,7 @@ function tryOpen(kek: Kek, row: Pick<Row, 'id' | 'kind' | 'base_url' | 'secret_s
 
 /**
  * `ai_credentials` over SQL on the test database, sealed under `kek` (the API's key): what the
- * API's `credentials` routes run (backend api/crud_agent_secrets.py), as the agent once ran them
+ * API's `credentials` routes run (tools/go/core/internal/secrets), as the agent once ran them
  * itself. `kek` undefined is an API with no key.
  */
 export class SqlCredentials implements CredentialRepo {

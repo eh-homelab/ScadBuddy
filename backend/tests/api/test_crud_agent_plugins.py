@@ -1,13 +1,13 @@
 """The agent's remote plugins and their sign-ins behind its CRUD routes (#5299 step 5, area
 ``plugins``, `api/crud_agent_plugins.py`): the API seals and opens them with the KEK under
 the agent's own AADs, so the agent needs none, each write sends the warm eviction in its
-transaction, and a token refresh is kept only under its lease."""
+transaction, and a token refresh is kept only under its lease. A plugin's delete and a
+sign-in's mark and forget are Go's (#7667), tested in ``tools/go/core/internal/plugins``."""
 
 from __future__ import annotations
 
 import base64
 import json
-import time
 import uuid
 from pathlib import Path
 from typing import Any
@@ -16,7 +16,6 @@ import psycopg
 import pytest
 from fastapi.testclient import TestClient
 
-from scadbuddy.agent_data import leases
 from scadbuddy.agent_data.rotation import rotate
 from scadbuddy.core.secrets import Envelope, kek_from_base64, open_secret, seal_secret
 from scadbuddy.core.settings import Settings
@@ -372,95 +371,6 @@ def test_a_refresh_is_kept_only_under_its_lease(
     ).json()
     assert again["grant"]["secret"]["access_token"] == "at-2"
     assert again["grant"]["access_expires_at"].startswith("2030-01-01")
-
-
-def test_a_refresh_lease_waits_for_an_sql_pods_row_lock_only_as_long_as_asked(
-    client: TestClient, agent: dict[str, str], db: Any, pg_conninfo: str
-) -> None:
-    """The rollout: an SQL-path pod holds the grant's row across a refresh. The acquire
-    waits for it no longer than ``wait_s``, then answers busy."""
-    _signed_in(client, agent, db)
-    ask = {"token": str(uuid.uuid4()), "ttl_s": 60, "wait_s": 0.5}
-    with psycopg.connect(pg_conninfo) as old_pod:
-        old_pod.execute("SELECT 1 FROM ai_plugin_oauth WHERE plugin = 'docs' FOR UPDATE")
-        started = time.monotonic()
-        busy = client.post(f"{BASE}/leases/plugin-oauth:docs", json=ask, headers=agent)
-        assert time.monotonic() - started < 5
-        assert (busy.status_code, busy.json()["reason"]) == (409, "busy")
-        old_pod.rollback()
-        assert db.execute("SELECT count(*) FROM agent_leases").fetchone()[0] == 0
-    held = client.post(f"{BASE}/leases/plugin-oauth:docs", json=ask, headers=agent)
-    assert held.status_code == 200
-
-
-def test_a_refresh_lease_puts_back_the_lock_timeout_in_force(
-    client: TestClient, agent: dict[str, str], db: Any, pg_conninfo: str
-) -> None:
-    """The wait's own lock_timeout ends with the row lock: the rest of the transaction keeps
-    what was set before."""
-    _signed_in(client, agent, db)
-    with psycopg.connect(pg_conninfo) as conn, conn.transaction():
-        conn.execute("SET LOCAL lock_timeout = '7s'")
-        assert leases.acquire(conn, "plugin-oauth:docs", str(uuid.uuid4()), 60, 0.5) is not None
-        assert conn.execute("SELECT current_setting('lock_timeout')").fetchone() == ("7s",)
-
-
-def test_past_max_row_waits_an_acquire_does_not_wait_on_the_grant_row(
-    client: TestClient, agent: dict[str, str], monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """Each wait holds a pool connection, so only MAX_ROW_WAITS acquires wait on the row."""
-    from scadbuddy.api import crud_agent_access
-
-    waits: list[float] = []
-    real = leases.acquire
-
-    def acquire(conn: Any, key: str, token: str, ttl: float, wait: float = 0.0) -> Any:
-        waits.append(wait)
-        return real(conn, key, token, ttl, wait)
-
-    monkeypatch.setattr(leases, "acquire", acquire)
-    ask = {"token": str(uuid.uuid4()), "ttl_s": 60, "wait_s": 5}
-    held = client.post(f"{BASE}/leases/plugin-oauth:docs", json=ask, headers=agent)
-    assert held.status_code == 200
-    assert waits[-1] > 0
-    monkeypatch.setattr(crud_agent_access, "_row_waits", crud_agent_access.MAX_ROW_WAITS)
-    ask["token"] = str(uuid.uuid4())
-    client.post(f"{BASE}/leases/plugin-oauth:other", json=ask, headers=agent)
-    assert waits[-1] == 0
-
-
-def test_a_mark_and_a_sign_out_tell_the_warm_caches(
-    client: TestClient, agent: dict[str, str], db: Any, listener: Any
-) -> None:
-    grant = _signed_in(client, agent, db)
-    _heard(listener)
-    other = {"reason": "refused", "grant": str(uuid.uuid4())}
-    assert client.post(
-        f"{BASE}/plugin-oauth/grants/docs/mark", json=other, headers=agent
-    ).json() == {"done": False}
-    assert _heard(listener) == []
-    marked = client.post(
-        f"{BASE}/plugin-oauth/grants/docs/mark",
-        json={"reason": "sign in again", "grant": grant},
-        headers=agent,
-    )
-    assert marked.json() == {"done": True}
-    assert _heard(listener) == ["*"]
-    failed = client.post(
-        f"{BASE}/plugin-oauth/grants/docs/open",
-        json={"plugin_url": URL, "grant": grant},
-        headers=agent,
-    ).json()
-    assert failed["fail"] == "sign in again"
-    assert client.post(f"{BASE}/plugin-oauth/grants/docs/forget", headers=agent).json() == {
-        "done": True
-    }
-    assert _heard(listener) == ["*"]
-    assert client.post(f"{BASE}/plugin-oauth/grants/docs/forget", headers=agent).json() == {
-        "done": False
-    }
-    assert client.post(f"{BASE}/plugins/docs/delete", headers=agent).json() == {"done": True}
-    assert _heard(listener) == ["*"]
 
 
 def test_a_key_rotation_rewraps_the_plugin_secrets_and_sign_ins(

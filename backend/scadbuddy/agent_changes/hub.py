@@ -77,10 +77,10 @@ from scadbuddy.core.pg_events import MAX_REPLAY_LIMIT, Replay
 
 logger = logging.getLogger(__name__)
 
-#: The agent's channels besides the event bus's: the gate's input (`agent_data/gate.py`), the
-#: pending-input tables' ticks (migration ``20261103T1944Z_pending_input_notify.sql``), the MCP
-#: relay (`api/crud_agent_mcp.py`), the warm process cache's evictions and the runtime settings
-#: (`agent_data/settings.py`).
+#: The agent's channels besides the event bus's: the gate's input (`tools/go/core/internal/gate`),
+#: the pending-input tables' ticks (migration ``20261103T1944Z_pending_input_notify.sql``), the MCP
+#: relay (`tools/go/core/internal/mcprelay`), the warm process cache's evictions and the runtime
+#: settings (`agent_data/settings.py`).
 CHANNELS: Final = (
     "scadbuddy_input",
     "scadbuddy_pending",

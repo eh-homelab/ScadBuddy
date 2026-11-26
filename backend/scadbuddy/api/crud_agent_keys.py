@@ -1,30 +1,23 @@
-"""The two keys the agent derived from its own KEK, behind CRUD routes (#5299 step 12, D5):
-under ``/api/v1/internal/crud/agent/``, for the ``agent`` credential only (`crud_router`).
-With them the agent mounts no KEK.
+"""A key the agent derived from its own KEK, behind a CRUD route (#5299 step 12, D5): under
+``/api/v1/internal/crud/agent/``, for the ``agent`` credential only (`crud_router`). With it
+the agent mounts no KEK.
 
-Area ``keys``:
+Area ``keys``: ``GET …/keys/input-hash``, the approvals' input-hash key, is Go's
+(``tools/go/core/internal/secrets``, #7667). This route stays here:
 
-- ``GET …/keys/input-hash``: the HMAC key of the approvals' input hashes (agent
-  `approvals/service.ts` `inputHash`), HKDF-SHA256 of the KEK with the label the agent used
-  (:data:`INPUT_HASH_KEY_INFO`), so a hash written before this route still matches. Every
-  agent process must hash with one key: a call prepared on one replica is confirmed on
-  another. Never the KEK.
 - ``POST …/fetch-grants``: a grant for one fetch off the asset allowlist
   (`library/fetch_grants.py` `mint`), for the agent's ``fetch_asset`` after its approval.
   The key stays here.
 
-Both answer 503 ``kek-missing`` when this API holds no KEK. Every CRUD answer is
+It answers 503 ``kek-missing`` when this API holds no KEK. Every CRUD answer is
 ``no-store``, and no log line here names a key or a grant.
 """
 
 from __future__ import annotations
 
-import base64
 from datetime import UTC, datetime
 from typing import Annotated, Any, Final
 
-from cryptography.hazmat.primitives import hashes
-from cryptography.hazmat.primitives.kdf.hkdf import HKDF
 from fastapi import status
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
@@ -39,19 +32,11 @@ from scadbuddy.library.url_import import ImportRefusedError
 
 router = crud_router("agent")
 
-#: The agent's HKDF label of the input-hash key (`approvals/service.ts`, before #5299 step 12).
-INPUT_HASH_KEY_INFO: Final = b"scadbuddy:ai_approvals:input_hash:v1"
-#: This API holds no KEK (as `api/crud_agent_secrets.py`).
+#: This API holds no KEK.
 KEK_MISSING: Final = "kek-missing"
 #: The longest host and URL a grant names.
 HOST_MAX: Final = 253
 URL_MAX: Final = 8192
-
-
-def input_hash_key(kek: Kek) -> bytes:
-    return HKDF(algorithm=hashes.SHA256(), length=32, salt=None, info=INPUT_HASH_KEY_INFO).derive(
-        kek.key
-    )
 
 
 def _kek(state: Any) -> Kek:
@@ -63,16 +48,6 @@ def _kek(state: Any) -> Kek:
             reason=KEK_MISSING,
         )
     return kek
-
-
-class InputHashKey(BaseModel):
-    #: The 32-byte key, base64.
-    key: str
-
-
-@router.get("/keys/input-hash", name="crud_agent_input_hash_key")
-async def release_input_hash_key(state: StateDep) -> InputHashKey:
-    return InputHashKey(key=base64.b64encode(input_hash_key(_kek(state))).decode("ascii"))
 
 
 class GrantAsk(BaseModel):

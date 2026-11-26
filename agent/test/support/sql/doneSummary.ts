@@ -5,7 +5,7 @@ import { WAIT_FOR_USER } from '../../../src/gate/entry.js'
 
 // Tests only: the done summary's facts read over the test database, the SQL the agent ran
 // before the API took area `questions` (#5299 step 12). The API's is backend
-// agent_data/questions.py.
+// tools/go/core/internal/questions.
 
 /**
  * The summary of turn `turnId` of `sessionId`, which started at `since` by the

@@ -959,7 +959,7 @@ export type ResourceRow = {
 
 /**
  * Where `SessionResources` keeps the rows (#5299 step 9, part a): `CrudResourceRows`, the API's
- * routes (area `session-resources`, backend api/crud_agent_sessions.py).
+ * routes (area `session-resources`, tools/go/core/internal/sessions).
  */
 export interface ResourceRows {
   /** One call's rows, at most MAX_TOUCHES_PER_CALL; throws for a session that is gone. */

@@ -29,15 +29,6 @@ COLUMNS = (
 )
 
 
-def find(conn: Connection[Any], operation_key: str) -> dict[str, Any] | None:
-    """The key's newest operation, whatever its status: one key is one effect."""
-    return conn.execute(
-        f"SELECT {COLUMNS} FROM ai_operations WHERE operation_key = %s"
-        " ORDER BY created_at DESC LIMIT 1",
-        (operation_key,),
-    ).fetchone()
-
-
 def get(conn: Connection[Any], operation_id: str) -> dict[str, Any] | None:
     return conn.execute(
         f"SELECT {COLUMNS} FROM ai_operations WHERE id = %s", (operation_id,)

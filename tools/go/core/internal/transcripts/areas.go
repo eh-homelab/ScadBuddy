@@ -1,5 +1,5 @@
 // Package transcripts is a session's transcript, the Agent SDK's SessionStore rows in
-// ai_session_entries: backend/scadbuddy/api/crud_agent_transcripts.py and
+// ai_session_entries: backend/scadbuddy/api/crud_agent_transcripts.py (removed in #7667) and
 // agent_data/transcripts.py, statement for statement (area transcripts).
 //
 // The API seals and opens each entry under the session's data key (ai_payload_keys, subject

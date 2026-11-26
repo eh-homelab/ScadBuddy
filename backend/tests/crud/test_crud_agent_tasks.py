@@ -1,16 +1,14 @@
-"""The agent's background tasks and its command record through CRUD routes (#5299 step 8,
-`api/crud_agent_tasks.py`): only the ``agent`` credential reaches them, each route is the
-agent's SQL as one transaction (`agent_data/background.py`, `agent_data/operations.py`),
-a session's active tasks are capped under its lock, and an operation's activity row is
-written in the transaction that writes the operation.
+"""The agent's command record through CRUD routes (#5299 step 8, `api/crud_agent_tasks.py`):
+only the ``agent`` credential reaches them, each route is the agent's SQL as one transaction
+(`agent_data/operations.py`), and an operation's activity row is written in the transaction
+that writes the operation. Area ``background-tasks`` and the operation reads are Go's
+(#7667), tested in ``tools/go/core/internal/tasks``.
 
 The agent's tables are made from its own migration files, as the API applies them at its
 start (#5299 D6)."""
 
 from __future__ import annotations
 
-import threading
-import uuid
 from collections.abc import Iterator
 from types import SimpleNamespace
 from typing import Any
@@ -21,7 +19,6 @@ from fastapi.testclient import TestClient
 
 from scadbuddy.activity.component import ACTIVITY
 from scadbuddy.activity.index import ActivityIndex
-from scadbuddy.agent_data import background
 from scadbuddy.api import crud_agent_tasks, crud_areas
 from scadbuddy.auth.check import auth_check
 from scadbuddy.auth.component import AUTH
@@ -40,7 +37,6 @@ from tests.crud.crud_support import _NoSessions, _Noted
 pytestmark = pytest.mark.requires_postgres
 
 BASE = "/api/v1/internal/crud/agent"
-OWNER = {"kind": "browser", "id": "browser", "label": "You"}
 KEY = "ab" * 32
 
 
@@ -82,11 +78,6 @@ class Agent:
         self.client = client
         self.headers = headers
 
-    def get(self, path: str, **params: Any) -> Any:
-        response = self.client.get(f"{BASE}{path}", params=params, headers=self.headers)
-        assert response.status_code == 200, response.text
-        return response.json()
-
     def post(self, path: str, body: Any) -> Any:
         response = self.client.post(f"{BASE}{path}", json=body, headers=self.headers)
         assert response.status_code == 200, response.text
@@ -103,18 +94,6 @@ def _sql(pool: PgPool, query: str, params: tuple[Any, ...] = ()) -> list[dict[st
     with pool.connection() as conn:
         cur = conn.execute(query.encode(), params)
         return list(cur.fetchall()) if cur.description else []
-
-
-def _session(pool: PgPool, status: str = "running") -> str:
-    session = str(uuid.uuid4())
-    _sql(
-        pool,
-        "INSERT INTO ai_sessions (id, origin, owner_kind, owner_id, owner_label, creator_kind,"
-        " creator_id, status, max_turns, budget_usd) VALUES (%s, 'chat', 'browser', 'browser',"
-        " 'You', 'browser', 'browser', %s, 10, 1)",
-        (session, status),
-    )
-    return session
 
 
 @pytest.fixture
@@ -135,17 +114,6 @@ def agent(app: FastAPI) -> Iterator[Agent]:
         yield Agent(client, _token(app))
 
 
-def _new(session: str, **extra: Any) -> dict[str, Any]:
-    return {
-        "session_id": session,
-        "kind": "cron",
-        "description": "every minute",
-        "spec": {"cron": "* * * * *", "prompt": "hi"},
-        "created_by": OWNER,
-        **extra,
-    }
-
-
 def _operation(op_id: str, **extra: Any) -> dict[str, Any]:
     return {
         "id": op_id,
@@ -163,13 +131,11 @@ def _operation(op_id: str, **extra: Any) -> dict[str, Any]:
 # --- scope ------------------------------------------------------------------------------
 
 
-def test_the_areas_are_listed() -> None:
-    for area in ("background-tasks", "operations"):
-        assert area in crud_areas.CRUD_AREAS["agent"]
+def test_the_area_is_listed() -> None:
+    assert "operations" in crud_areas.CRUD_AREAS["agent"]
 
 
 def test_only_the_agent_credential_reaches_them(app: FastAPI, tables: PgPool) -> None:
-    session = _session(tables)
     with TestClient(app) as client:
         for headers, code in (
             ({}, 401),
@@ -177,206 +143,11 @@ def test_only_the_agent_credential_reaches_them(app: FastAPI, tables: PgPool) ->
             (_token(app, "projects"), 403),
             (_token(app, "render"), 403),
         ):
-            create = client.post(f"{BASE}/background-tasks", json=_new(session), headers=headers)
-            assert create.status_code == code
-            listed = client.get(
-                f"{BASE}/background-tasks", params={"session_id": session}, headers=headers
-            )
-            assert listed.status_code == code
-            events = client.post(
-                f"{BASE}/background-tasks/0000abcd/events", json={"text": "x"}, headers=headers
-            )
-            assert events.status_code == code
             insert = client.post(f"{BASE}/operations", json=_operation("o1"), headers=headers)
             assert insert.status_code == code
-            assert client.get(f"{BASE}/operations/o1", headers=headers).status_code == code
-    assert _sql(tables, "SELECT id FROM ai_background_tasks") == []
+            finish = client.post(f"{BASE}/operations/o1/finish", json={}, headers=headers)
+            assert finish.status_code == code
     assert _sql(tables, "SELECT id FROM ai_operations") == []
-
-
-# --- background tasks -------------------------------------------------------------------
-
-
-def test_a_task_is_made_read_and_listed(agent: Agent, tables: PgPool) -> None:
-    session = _session(tables)
-    at = "2026-11-15T08:00:00Z"
-    task = agent.post("/background-tasks", _new(session, next_at=at))["task"]
-    assert task["session_id"] == session
-    assert (task["kind"], task["state"], task["fired"], task["created_by"]) == (
-        "cron",
-        "active",
-        0,
-        OWNER,
-    )
-    assert task["next_at"].startswith("2026-11-15T08:00:00")
-    assert agent.get(f"/background-tasks/{task['id']}")["task"]["id"] == task["id"]
-    assert agent.get("/background-tasks/0000abcd")["task"] is None
-    assert [t["id"] for t in agent.get("/background-tasks", session_id=session)["tasks"]] == [
-        task["id"]
-    ]
-    assert agent.post(f"/background-tasks/{task['id']}/finish", {"state": "done"}) == {
-        "finished": True
-    }
-    assert agent.get("/background-tasks", session_id=session)["tasks"] == []
-    assert len(agent.get("/background-tasks", session_id=session, all=True)["tasks"]) == 1
-
-
-def test_a_session_has_at_most_max_active_tasks(agent: Agent, tables: PgPool) -> None:
-    session = _session(tables)
-    for _ in range(background.MAX_ACTIVE):
-        assert agent.post("/background-tasks", _new(session))["task"] is not None
-    assert agent.post("/background-tasks", _new(session))["task"] is None
-
-
-def test_concurrent_creates_never_pass_the_cap(app: FastAPI, tables: PgPool) -> None:
-    session = _session(tables)
-    made: list[bool] = []
-    lock = threading.Lock()
-
-    def create() -> None:
-        with TestClient(app) as client:
-            response = client.post(
-                f"{BASE}/background-tasks", json=_new(session), headers=_token(app)
-            )
-            with lock:
-                made.append(response.json()["task"] is not None)
-
-    threads = [threading.Thread(target=create) for _ in range(background.MAX_ACTIVE + 5)]
-    for thread in threads:
-        thread.start()
-    for thread in threads:
-        thread.join()
-    assert made.count(True) == background.MAX_ACTIVE
-    rows = _sql(tables, "SELECT count(*)::int AS n FROM ai_background_tasks")
-    assert rows[0]["n"] == background.MAX_ACTIVE
-
-
-def test_a_task_is_scheduled_fired_and_ended_once(agent: Agent, tables: PgPool) -> None:
-    session = _session(tables)
-    task_id = agent.post("/background-tasks", _new(session))["task"]["id"]
-    agent.post(f"/background-tasks/{task_id}/scheduled", {"at": "2026-11-15T09:00:00Z"})
-    assert agent.get(f"/background-tasks/{task_id}")["task"]["next_at"].startswith(
-        "2026-11-15T09:00:00"
-    )
-    agent.post(f"/background-tasks/{task_id}/fired", {"at": "2026-11-15T09:00:01Z"})
-    fired = agent.get(f"/background-tasks/{task_id}")["task"]
-    assert (fired["fired"], fired["next_at"]) == (1, None)
-    assert fired["last_fired_at"].startswith("2026-11-15T09:00:01")
-    agent.post(f"/background-tasks/{task_id}/progress", {"detail": "phase 2"})
-    agent.post(f"/background-tasks/{task_id}/spec", {"spec": {"scriptPath": "a.js"}})
-    kept = agent.get(f"/background-tasks/{task_id}")["task"]
-    assert (kept["detail"], kept["spec"]) == ("phase 2", {"scriptPath": "a.js"})
-    end = {"state": "cancelled", "detail": "cancelled by You"}
-    assert agent.post(f"/background-tasks/{task_id}/finish", end) == {"finished": True}
-    assert agent.post(f"/background-tasks/{task_id}/finish", end) == {"finished": False}
-    # An ended task takes no more progress or fires.
-    agent.post(f"/background-tasks/{task_id}/progress", {"detail": "late"})
-    agent.post(f"/background-tasks/{task_id}/fired", {"at": "2026-11-15T09:00:02Z"})
-    ended = agent.get(f"/background-tasks/{task_id}")["task"]
-    assert (ended["state"], ended["detail"], ended["fired"]) == (
-        "cancelled",
-        "cancelled by You",
-        1,
-    )
-
-
-def test_the_recurring_crons_are_listed(agent: Agent, tables: PgPool) -> None:
-    session = _session(tables)
-    recurring = agent.post("/background-tasks", _new(session))["task"]["id"]
-    once = _new(session, spec={"cron": "0 9 * * *", "recurring": False})
-    agent.post("/background-tasks", once)
-    agent.post("/background-tasks", _new(session, kind="wakeup", spec={"prompt": "x"}))
-    listed = agent.get("/background-tasks/recurring-crons")["tasks"]
-    assert [t["id"] for t in listed] == [recurring]
-
-
-def test_a_monitors_events_are_capped_paged_and_delivered(agent: Agent, tables: PgPool) -> None:
-    session = _session(tables)
-    task_id = agent.post("/background-tasks", _new(session, kind="monitor"))["task"]["id"]
-    path = f"/background-tasks/{task_id}"
-    for n in range(background.MAX_EVENTS):
-        assert agent.post(f"{path}/events", {"text": f"line {n}"}) == {"appended": True}
-    assert agent.post(f"{path}/events", {"text": "over"}) == {"appended": False}
-    assert agent.post(f"{path}/events", {"text": "the end", "notice": True}) == {"appended": True}
-    assert agent.get(f"{path}/events/count")["count"] == background.MAX_EVENTS + 1
-    assert agent.get(f"{path}/events/count", pending=True)["count"] == background.MAX_EVENTS + 1
-    first = agent.get(f"{path}/events/pending", max_chars=20)["events"]
-    # As many as fit in 20 characters ("line 0", "line 1", "line 2"), and always the oldest.
-    assert [e["text"] for e in first] == ["line 0", "line 1", "line 2"]
-    assert [e["text"] for e in agent.get(f"{path}/events/pending", max_chars=1)["events"]] == [
-        "line 0"
-    ]
-    agent.post(f"{path}/events/delivered", {"up_to": first[-1]["seq"]})
-    assert agent.get(f"{path}/events/count", pending=True)["count"] == background.MAX_EVENTS - 2
-    rest = agent.get(f"{path}/events/pending")["events"]
-    assert rest[0]["text"] == "line 3" and rest[-1]["text"] == "the end"
-
-
-def test_a_workflows_journal_keeps_the_first_write(agent: Agent, tables: PgPool) -> None:
-    session = _session(tables)
-    task_id = agent.post("/background-tasks", _new(session, kind="workflow"))["task"]["id"]
-    path = f"/background-tasks/{task_id}"
-    assert agent.get(f"{path}/calls", key=KEY, occurrence=0)["call"] is None
-    child = _session(tables)
-    agent.post(f"{path}/calls", {"key": KEY, "occurrence": 0, "result": None, "ok": True})
-    agent.post(
-        f"{path}/calls",
-        {"key": KEY, "occurrence": 1, "result": {"a": 1}, "ok": False, "child_id": child},
-    )
-    agent.post(f"{path}/calls", {"key": KEY, "occurrence": 1, "result": "second", "ok": True})
-    # A null result is a row too.
-    assert agent.get(f"{path}/calls", key=KEY, occurrence=0)["call"] == {"result": None, "ok": True}
-    assert agent.get(f"{path}/calls", key=KEY, occurrence=1)["call"] == {
-        "result": {"a": 1},
-        "ok": False,
-    }
-
-
-def test_a_journal_row_the_agents_sql_kept_as_empty_reads_as_null(
-    agent: Agent, tables: PgPool
-) -> None:
-    session = _session(tables)
-    task_id = agent.post("/background-tasks", _new(session, kind="workflow"))["task"]["id"]
-    _sql(
-        tables,
-        "INSERT INTO ai_workflow_calls (task_id, call_key, occurrence, result, ok)"
-        " VALUES (%s, %s, 0, '{}', true)",
-        (task_id, KEY),
-    )
-    path = f"/background-tasks/{task_id}/calls"
-    assert agent.get(path, key=KEY, occurrence=0)["call"] == {"result": None, "ok": True}
-
-
-def test_a_workflows_open_children_are_those_no_journal_names(agent: Agent, tables: PgPool) -> None:
-    session = _session(tables)
-    task_id = agent.post("/background-tasks", _new(session, kind="workflow"))["task"]["id"]
-    path = f"/background-tasks/{task_id}"
-    journalled, done, open_child = _session(tables), _session(tables, "done"), _session(tables)
-    for child in (journalled, done, open_child, open_child):
-        agent.post(f"{path}/children", {"child_id": child})
-    agent.post(
-        f"{path}/calls",
-        {"key": KEY, "occurrence": 0, "result": 1, "ok": True, "child_id": journalled},
-    )
-    assert agent.get(f"{path}/children/open")["children"] == [open_child]
-
-
-def test_bad_bodies_are_refused(agent: Agent, tables: PgPool) -> None:
-    session = _session(tables)
-    assert agent.status("POST", "/background-tasks", _new("not-a-uuid")) == 422
-    assert agent.status("POST", "/background-tasks", _new(session, kind="daemon")) == 422
-    assert agent.status("POST", "/background-tasks", _new(session, description="")) == 422
-    owner = {**OWNER, "kind": "root"}
-    assert agent.status("POST", "/background-tasks", _new(session, created_by=owner)) == 422
-    assert agent.status("GET", "/background-tasks/NOT-HEX") == 422
-    too_long = {"text": "x" * (background.NOTICE_MAX_CHARS + 1)}
-    assert agent.status("POST", "/background-tasks/0000abcd/events", too_long) == 422
-    assert agent.status("POST", "/background-tasks/0000abcd/finish", {"state": "active"}) == 422
-    call = {"key": "short", "occurrence": 0, "ok": True}
-    assert agent.status("POST", "/background-tasks/0000abcd/calls", call) == 422
-    assert agent.status("POST", "/background-tasks/0000abcd/events/delivered", {"up_to": "x"}) == (
-        422
-    )
 
 
 # --- operations -------------------------------------------------------------------------
@@ -407,10 +178,6 @@ def test_an_operation_is_recorded_once_with_its_activity_row(agent: Agent, table
         "token:t1",
         "install",
     )
-    assert agent.get("/operations/o1")["operation"]["id"] == "o1"
-    assert agent.get(f"/operations/by-key/{KEY}")["operation"]["id"] == "o1"
-    assert agent.get("/operations/none")["operation"] is None
-    assert agent.get(f"/operations/by-key/{'cd' * 32}")["operation"] is None
 
 
 def test_an_operation_ends_once(agent: Agent, tables: PgPool) -> None:

@@ -4,7 +4,7 @@ import { CrudPluginFeeds, FeedWriteError } from '../src/plugins/feed.js'
 
 // The feed's CRUD client (#6936, plugins/feed.ts `CrudPluginFeeds`): the writes and the mirror
 // read over area `plugin-feeds` and `package-mirrors`, against a fake of the routes (backend
-// tests/api/test_crud_agent_plugin_feeds.py covers the routes).
+// the Go tests in tools/go/core covers the routes).
 
 const BASE = 'http://api.test'
 const PREFIX = '/api/v1/internal/crud/agent'

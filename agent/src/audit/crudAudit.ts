@@ -3,8 +3,8 @@ import { type CrudTarget, crudOf } from '../api/crudStores.js'
 import { isUuid } from '../harness/stateDirs.js'
 import { type AuditEntry, type AuditFilter, type AuditPage, type AuditRecord, cap, DETAIL_MAX, SUMMARY_MAX } from './log.js'
 
-// The audit log through the API's CRUD routes (#5299 step 10; backend api/crud_agent_audit.py,
-// agent_data/audit_log.py), area `audit`: a row written (its approver copied in the same
+// The audit log through the API's CRUD routes (#5299 step 10; tools/go/core/internal/audit,
+// tools/go/core/internal/audit), area `audit`: a row written (its approver copied in the same
 // statement on the API), a page listed, and the rows past the retention pruned. AuditLog
 // (audit/log.ts) calls only these. Every text is capped here, so the API never refuses a row
 // for its length.

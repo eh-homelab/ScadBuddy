@@ -43,7 +43,7 @@ export interface SessionLookup {
   byHash(id: string): Promise<PersonSession | undefined>
 }
 
-/** The lookup through the API's route (area `auth-sessions`, backend api/crud_agent_start.py, #6501): only the hash travels. */
+/** The lookup through the API's route (area `auth-sessions`, tools/go/core/internal/agentstart, #6501): only the hash travels. */
 export class CrudSessionLookup implements SessionLookup {
   readonly #call: ReturnType<typeof crudOf>
   readonly #max: number

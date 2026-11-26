@@ -272,7 +272,7 @@ type WireListing = { source: string; tools: unknown; listed_at: string; truncate
 
 /**
  * The listings through the API's CRUD routes, area `access` (backend
- * api/crud_agent_access.py). A connection test holds the lease `tool-listing:<source>`
+ * tools/go/core/internal/access). A connection test holds the lease `tool-listing:<source>`
  * (`CrudLeases`), and the API stores its listing only while that lease holds, under the
  * plugin's or the package's row lock (`lease-lost` otherwise, an error of the test's own).
  */

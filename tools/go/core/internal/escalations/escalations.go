@@ -1,5 +1,5 @@
 // Package escalations is a flow run's calls at the starting session's hop:
-// backend/scadbuddy/agent_data/escalations.py and api/crud_agent_escalations.py, statement for
+// backend/scadbuddy/agent_data/escalations.py (removed in #7667) and api/crud_agent_escalations.py (removed in #7667), statement for
 // statement (area escalations). Every write of an answer or a delivery names the parent session
 // again in its WHERE, so a caller that names another session moves nothing.
 package escalations

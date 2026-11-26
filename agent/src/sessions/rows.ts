@@ -7,7 +7,7 @@ import type { ResourceRef } from './touched.js'
 
 // A session's row as the session manager reads and writes it (`ai_sessions`), behind one
 // interface (#5299 step 9, part a): `CrudSessionRows`, over the API's CRUD routes (backend
-// api/crud_agent_sessions.py, area `sessions`), each method one route and one transaction
+// tools/go/core/internal/sessions, area `sessions`), each method one route and one transaction
 // (#5299 D2). A durable turn's writes
 // of the row with its events (a send's claim, a placement's, its spend, the turn's end) are
 // turnRows.ts's (#6449); an edit's are sessions/edits.ts's.
@@ -95,7 +95,7 @@ export type ListFilter = {
 /** A principal as a condition: its kind and id. */
 export type Who = Pick<Owner, 'kind' | 'id'>
 
-/** A row's title at most (backend api/crud_agent_sessions.py `TITLE_MAX`): a chain of forks adds ` (fork)` each. */
+/** A row's title at most (tools/go/core/internal/sessions `TITLE_MAX`): a chain of forks adds ` (fork)` each. */
 export const ROW_TITLE_MAX = 4096
 
 /** A new row (manager.ts `insert`). */

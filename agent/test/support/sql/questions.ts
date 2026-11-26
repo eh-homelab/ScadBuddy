@@ -23,7 +23,7 @@ import { appendIn } from './gate.js'
 
 // Tests only: the `done` summaries and the attention limits over the test database, the SQL the
 // agent ran before the API took area `questions` (#5299 step 12). src holds no SQL; the API's is
-// backend agent_data/questions.py. The lease `attention-rate` is the advisory lock below, and the
+// tools/go/core/internal/questions. The lease `attention-rate` is the advisory lock below, and the
 // audit rows are written after each transaction here, in it on the API.
 
 /** The advisory lock that stands for the lease `attention-rate`. */

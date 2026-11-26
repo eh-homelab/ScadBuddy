@@ -11,8 +11,8 @@ import { sessionFinishActivities } from '../src/temporal/session/finishActivity.
 import { SESSION_BEGIN_TURN_ACTIVITY, SESSION_FINISH_ACTIVITY } from '../src/temporal/session/names.js'
 
 // A durable turn's row writes through the API's CRUD routes (#6449), against a fake API that
-// answers as the backend's api/crud_agent_turns.py does (the backend's
-// tests/crud/test_crud_agent_turns.py covers the routes and their fences). A session id goes
+// answers as the backend's tools/go/core/internal/turns does (the backend's
+// the Go tests in tools/go/core covers the routes and their fences). A session id goes
 // into a path only as
 // a lowercase UUID, encoded; a turn id is a UUID or never sent; the events travel as their JSON
 // text and come back as the logged batch the caller hands its followers.

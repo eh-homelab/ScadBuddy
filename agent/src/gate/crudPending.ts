@@ -14,7 +14,7 @@ import {
 } from './projection.js'
 
 // The gate's pending input and responses beyond its writers, through the API's CRUD routes (#5299
-// step 10; backend api/crud_agent_pending.py, agent_data/pending_input.py), area `pending-input`:
+// step 10; tools/go/core/internal/pending, tools/go/core/internal/pending), area `pending-input`:
 // the projection's reads (gate/projection.ts), the orphan sweep (gate/sweep.ts, each cancel one
 // transaction on the API with its events, status and audit row, the batches it appended answered
 // as `logged`), a durable turn's response read and its parked call's span mark (sessions/

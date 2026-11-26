@@ -7,7 +7,7 @@ import (
 	"testing"
 )
 
-// The pending-input routes, as backend/tests/crud/test_crud_agent_pending.py checks them.
+// The pending-input routes, as backend/tests/crud/test_crud_agent_pending.py (removed in #7667) checks them.
 
 const trace = "00-0af7651916cd43dd8448eb211c80319c-b7ad6b7169203331-01"
 

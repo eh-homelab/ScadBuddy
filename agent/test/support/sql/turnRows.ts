@@ -18,7 +18,7 @@ import { appendEventsIn } from './eventRows.js'
 import { POOL_BUDGET, POOL_COST } from './sessionRows.js'
 
 // `TurnRows` straight on the test database, the statements the API's routes run (backend
-// agent_data/turns.py), for tests with no API (#5299).
+// tools/go/core/internal/turns), for tests with no API (#5299).
 
 /** A durable row's statuses while it holds a turn (durableSweep.ts `TURN_STATUSES`). */
 const RUNNING = ['running', 'waiting_approval', 'waiting_input']

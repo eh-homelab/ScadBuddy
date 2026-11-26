@@ -21,6 +21,9 @@ from scadbuddy.tasks.schema import prompt_schema_problems
 
 TaskState = Literal["open", "answered", "cancelled", "expired"]
 
+#: A task's id: a UUID, lower-case.
+UUID_PATTERN = r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$"
+
 #: A context or an answer, as JSON text, may be this many bytes.
 MAX_JSON_BYTES = 16 * 1024
 MAX_UI_CHARS = 200

@@ -1,5 +1,7 @@
 """The assistant's workspace files (#2329), ``ai_session_files``, kept by the API for the
-agent's CRUD routes (#5299 step 7, ``api/crud_agent_workspace.py``): what the agent's
+agent's CRUD routes (#5299 step 7, ``api/crud_agent_workspace.py``; the listings, the
+deletes, the sweep and the reconcile are Go's, ``tools/go/core/internal/workspace``, #7667):
+what the agent's
 ``workspace/store.ts`` ``SessionFiles`` ran over SQL, with the file keys sealed and
 opened here, since the KEK is only in the API (#5299 D5).
 
@@ -16,7 +18,7 @@ sha256, which every file with those bytes names, so a fork shares them (#4212).
 
 A blob is kept while a row names it: its hold ``(ai_session_file, <workspace>/<path>)`` in
 ``blob_refs`` is written and dropped here in the transaction that writes or deletes the
-row, so a hold and its row commit together. ``reconcile`` releases what a session's
+row, so a hold and its row commit together. Go's reconcile releases what a session's
 cascade, a forget or an older agent's failed release left, and holds a row no hold names.
 """
 
@@ -28,7 +30,6 @@ import os
 import re
 from collections.abc import AsyncIterator
 from dataclasses import dataclass
-from datetime import datetime
 from typing import Any, Literal
 
 from psycopg import Connection
@@ -55,11 +56,6 @@ DEFAULT_WORKSPACE_MAX_BYTES = 200 * 1024 * 1024
 FILE_BYTES_CEILING = 100 * 1024 * 1024
 #: The most files one workspace holds (``WORKSPACE_MAX_FILES``).
 MAX_FILES = 5_000
-#: How long a principal's file lives after its last write.
-TTL_MS = 24 * 60 * 60 * 1000
-#: The lock one reconcile at a time takes: the agent's ``RECONCILE_LOCK``, so an agent pod
-#: still on SQL (a session lock on the same key) and the API never reconcile at once.
-RECONCILE_LOCK = "scadbuddy:ai_session_files:reconcile"
 #: The ``blob_refs.holder_kind`` of a workspace file.
 HOLDER_KIND = "ai_session_file"
 
@@ -291,65 +287,6 @@ def limits(conn: Connection[Any]) -> tuple[int, int]:
         _positive(stored.get(FILE_MAX_SETTING), DEFAULT_FILE_MAX_BYTES),
         _positive(stored.get(WORKSPACE_MAX_SETTING), DEFAULT_WORKSPACE_MAX_BYTES),
     )
-
-
-def list_files(conn: Connection[Any], workspace: str, prefix: str | None) -> list[dict[str, Any]]:
-    under = None if prefix is None else f"{check_path(prefix.rstrip('/'))}/"
-    rows = (
-        _cur(conn)
-        .execute(
-            f"SELECT {_INFO} FROM ai_session_files WHERE workspace = %s"
-            " AND (%s::text IS NULL OR starts_with(path, %s)) ORDER BY path",
-            (workspace, under, under),
-        )
-        .fetchall()
-    )
-    return [info_of(r) for r in rows]
-
-
-def usage(conn: Connection[Any], workspace: str) -> tuple[int, int]:
-    row = (
-        _cur(conn)
-        .execute(
-            "SELECT count(*)::int AS files, coalesce(sum(size), 0)::bigint AS bytes"
-            " FROM ai_session_files WHERE workspace = %s",
-            (workspace,),
-        )
-        .fetchone()
-    )
-    return (row["files"], int(row["bytes"])) if row else (0, 0)
-
-
-def list_sessions(conn: Connection[Any], session_ids: list[str]) -> dict[str, list[dict[str, Any]]]:
-    out: dict[str, list[dict[str, Any]]] = {}
-    if not session_ids:
-        return out
-    rows = (
-        _cur(conn)
-        .execute(
-            f"SELECT workspace, {_INFO}, blob_key IS NOT NULL AS sealed FROM ai_session_files"
-            " WHERE workspace = ANY(%s::text[]) ORDER BY workspace, path",
-            ([f"session:{i}" for i in session_ids],),
-        )
-        .fetchall()
-    )
-    for row in rows:
-        out.setdefault(row["workspace"][len("session:") :], []).append(
-            {**info_of(row), "sealed": row["sealed"]}
-        )
-    return out
-
-
-def stat(conn: Connection[Any], workspace: str, path: str) -> dict[str, Any] | None:
-    row = (
-        _cur(conn)
-        .execute(
-            f"SELECT {_INFO} FROM ai_session_files WHERE workspace = %s AND path = %s",
-            (workspace, path),
-        )
-        .fetchone()
-    )
-    return None if row is None else info_of(row)
 
 
 def blob_rows(conn: Connection[Any]) -> int:
@@ -687,41 +624,6 @@ def write_row(
     return info_of(row), seqs, replaced_bytes if replaced_bytes != bytes_sha else None
 
 
-def delete_row(
-    conn: Connection[Any], workspace: str, path: str, expected: str | None, events: list[str]
-) -> tuple[bool, list[int], str | None]:
-    """Deletes a file, its blob's hold and logs its events in one transaction: (whether
-    there was one, the seqs, the bytes row it named). ``conflict`` when ``expected`` does
-    not hold."""
-    session = session_of(workspace)
-    with conn.transaction():
-        cur = _cur(conn)
-        if events:
-            _lock_session(conn, session)
-        row = cur.execute(
-            "SELECT sha256 FROM ai_session_files WHERE workspace = %s AND path = %s FOR UPDATE",
-            (workspace, path),
-        ).fetchone()
-        if row is None:
-            return False, [], None
-        if expected is not None and row["sha256"] != expected:
-            raise WorkspaceRefusedError(
-                "conflict",
-                f"{path} changed since it was read: its sha256 is {row['sha256']};"
-                " nothing was deleted",
-            )
-        gone = cur.execute(
-            "DELETE FROM ai_session_files WHERE workspace = %s AND path = %s"
-            " RETURNING blob_key, bytes_sha256",
-            (workspace, path),
-        ).fetchone()
-        assert gone is not None
-        if gone["blob_key"] is not None:
-            _release(conn, gone["blob_key"], workspace, path)
-        seqs = _append_events(conn, session, events) if events and session else []
-    return True, seqs, gone["bytes_sha256"]
-
-
 # --- a fork's copy, the move to blobs, the sweep, reconcile, rotation ---------------------
 
 
@@ -911,58 +813,6 @@ def moved_row(conn: Connection[Any], workspace: str, path: str, digest: str, pla
     return updated
 
 
-def sweep(conn: Connection[Any], ttl_ms: int) -> int:
-    """Deletes principals' files last written more than ``ttl_ms`` ago with their blobs'
-    holds, then every bytes row no file names; how many files went."""
-    with conn.transaction():
-        rows = (
-            _cur(conn)
-            .execute(
-                "DELETE FROM ai_session_files WHERE session_id IS NULL"
-                " AND updated_at < now() - (%s * interval '1 millisecond')"
-                " RETURNING workspace, path, blob_key",
-                (ttl_ms,),
-            )
-            .fetchall()
-        )
-        for row in rows:
-            if row["blob_key"] is not None:
-                _release(conn, row["blob_key"], row["workspace"], row["path"])
-    drop_unnamed_bytes(conn)
-    return len(rows)
-
-
-def reconcile(conn: Connection[Any], grace_s: int) -> tuple[int, int] | None:
-    """Makes the holds match the rows in one transaction: releases every hold older than
-    ``grace_s`` whose row is gone or names another blob (what a session's cascade, a forget,
-    a crash or an older agent's failed release left), and holds every row no hold names.
-    None, doing nothing, while another reconcile holds ``RECONCILE_LOCK``: an agent pod still
-    on SQL takes it as a session lock across its own run."""
-    with conn.transaction():
-        locked = conn.execute(
-            "SELECT pg_try_advisory_xact_lock(hashtextextended(%s, 0))", (RECONCILE_LOCK,)
-        ).fetchone()
-        if locked is None or not _first(locked):
-            return None
-        released = conn.execute(
-            "DELETE FROM blob_refs r WHERE r.holder_kind = %(kind)s"
-            " AND r.created_at < now() - make_interval(secs => %(grace)s)"
-            " AND NOT EXISTS (SELECT 1 FROM ai_session_files f WHERE f.blob_key = r.key"
-            " AND f.workspace || '/' || f.path = r.holder_id)",
-            {"kind": HOLDER_KIND, "grace": grace_s},
-        ).rowcount
-        held = conn.execute(
-            "INSERT INTO blob_refs (key, holder_kind, holder_id)"
-            " SELECT f.blob_key, %(kind)s, f.workspace || '/' || f.path FROM ai_session_files f"
-            " WHERE f.blob_key IS NOT NULL AND NOT EXISTS (SELECT 1 FROM blob_refs r"
-            " WHERE r.key = f.blob_key AND r.holder_kind = %(kind)s"
-            " AND r.holder_id = f.workspace || '/' || f.path)"
-            " ON CONFLICT (key, holder_kind, holder_id) DO NOTHING",
-            {"kind": HOLDER_KIND},
-        ).rowcount
-    return released, held
-
-
 def rewrap(conn: Connection[Any], previous: Kek, current: Kek) -> tuple[int, int]:
     """Key rotation: every principal file key sealed under ``previous`` sealed again under
     ``current``, as the agent did at its start before #5299 step 7. (re-wrapped, failed)."""
@@ -1002,10 +852,6 @@ def rewrap(conn: Connection[Any], previous: Kek, current: Kek) -> tuple[int, int
 
 def sha256_hex(data: bytes) -> str:
     return hashlib.sha256(data).hexdigest()
-
-
-def iso(value: datetime) -> str:
-    return value.isoformat()
 
 
 def _first(row: Any) -> Any:
