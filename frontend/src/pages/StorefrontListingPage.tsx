@@ -176,6 +176,9 @@ function refusalAlert(refusal: ListingRefusal, schema: CustomizerSchema | undefi
   // #5701: a parameter the design sets itself has no row of its own. Until the schema is
   // read, the Design block shows no note, so the alert names the parameter instead.
   if (refusal.kind === 'param' && refusal.code === 'pipeline_set' && schema && !shownParams(schema).some((p) => p.name === refusal.name)) return 'Not published: the design needs a change. See the note under “Design” below.'
+  // #7778: any other refusal of a parameter with no row (a hidden one, or one this version
+  // does not have) has no note under it to point to.
+  if (refusal.kind === 'param' && schema && !shownParams(schema).some((p) => p.name === refusal.name)) return `Not published: “${param?.caption || refusal.name}” needs a change, but this editor shows no row for it: it is a hidden parameter of this design, or one this version does not have.`
   return `Not published: “${param?.caption || refusal.name}” needs a change. See the note under it below.`
 }
 

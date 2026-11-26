@@ -511,8 +511,9 @@ describe('StorefrontListingPage (#5282, #6157)', () => {
       const { user } = renderStorefront(`/storefront/listings/${listing.id}`)
       const block = await design()
       await user.click(screen.getByRole('button', { name: 'Publish' }))
-      // Another code keeps its own words, by the parameter, though the parameter has no row.
-      await waitFor(() => expect(screen.getAllByRole('alert')[0]).toHaveTextContent('needs a change. See the note under it below.'))
+      // Another code names the parameter, and says it has no row, not that a note is under it (#7778).
+      await waitFor(() => expect(screen.getAllByRole('alert')[0]).toHaveTextContent('needs a change, but this editor shows no row for it'))
+      expect(screen.getAllByRole('alert')[0]).not.toHaveTextContent('See the note under it below')
       expect(screen.getAllByRole('alert')[0]).not.toHaveTextContent('Design')
       expect(within(block).queryByRole('alert')).toBeNull()
     })
