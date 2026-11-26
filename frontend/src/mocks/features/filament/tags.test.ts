@@ -70,6 +70,18 @@ describe('the tag mocks (#7273)', () => {
     expect(got.resolved ?? null).toBeNull()
   })
 
+  it('stops at the first record that is a code, as `tag_codes.code_in` does, even when it names nothing', async () => {
+    const got = await postTagRead({ uid: '04:0c:0c:0c:0c:0c:0c', tag_type: null, records: [text('L-999999'), url('https://h/x/L-4')] })
+    expect(got.next).toBe('bind_or_create')
+    expect(got.resolved ?? null).toBeNull()
+  })
+
+  it('a record that is no code is skipped for a later one that is', async () => {
+    const got = await postTagRead({ uid: null, tag_type: null, records: [text('hello'), url('https://h/x/L-4')] })
+    expect(got.next).toBe('open_code')
+    expect(got.resolved).toMatchObject({ kind: 'location', code: 'L-4' })
+  })
+
   it('looks the spool up before it checks the backup', async () => {
     expect(await codeOf(spoolTagRecords(NOBODY, { uid: UID, records: [], backup_id: NOBODY }))).toEqual({ status: 404, code: undefined })
     expect(await codeOf(spoolTagRecords(spoolId(1), { uid: UID, records: [], backup_id: NOBODY }))).toEqual({ status: 409, code: 'backup_mismatch' })

@@ -1189,6 +1189,22 @@ def test_a_bound_tag_still_opens_its_spool_over_a_code_in_its_records(pg_pool: P
     assert result.spool is not None and result.spool.id == spool
 
 
+def test_an_unknown_code_first_is_a_new_tag_whatever_a_later_record_names(pg_pool: PgPool) -> None:
+    _, number = _place(pg_pool, "Shelf 9")
+    store = FilamentSpoolStore(pg_pool)
+    result = tags.read(
+        store,
+        TagRead(
+            source="phone",
+            uid="04:a2:b3:c4",
+            records=(_text_record("L-999999"), _url_record(f"https://h/x/L-{number}")),
+        ),
+        actor="ann",
+        defaults=DEFAULTS,
+    )
+    assert result.next == "bind_or_create" and result.resolved is None
+
+
 def test_a_code_that_names_no_row_is_a_new_tag(pg_pool: PgPool) -> None:
     store = FilamentSpoolStore(pg_pool)
     result = tags.read(

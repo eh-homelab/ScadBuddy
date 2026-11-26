@@ -83,6 +83,11 @@ def test_the_first_record_that_names_something_wins() -> None:
     assert code_in([text("hello"), url("https://h/x/L-4"), text("S-1")]) == Code("L", 4)
 
 
+def test_the_first_record_that_is_a_code_wins_whether_or_not_it_names_a_row() -> None:
+    # `resolve_records` looks only this one up; a later record's code is never read.
+    assert code_in([text("L-999999"), text("S-1")]) == Code("L", 999999)
+
+
 def test_other_record_types_are_skipped() -> None:
     mime = NdefRecord(record_type="mime", media_type="application/json", data_hex="4c2d34")
     assert code_in([mime]) is None

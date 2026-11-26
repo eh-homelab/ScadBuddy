@@ -158,9 +158,15 @@ function Scanner() {
   useEffect(() => {
     const nfc = session
     // The session never changes (`useState`'s initialiser), so this runs once.
+    // A read's answer that lands after the page is gone (a tap while an earlier tap's answer
+    // navigated away) is dropped, and the page navigates at most once: two taps in flight
+    // would otherwise each navigate, the second over the first's page.
+    let alive = true
+    let navigated = false
     const off = nfc.onReading((reading: Reading) => {
       postTagRead({ uid: reading.uid || null, tag_type: null, records: reading.records }).then(
         (result) => {
+          if (!alive || navigated) return
           const key = (nextKey.current += 1)
           setEntries((now) => [{ key, at: new Date(), uid: reading.uid, records: reading.records, result, held: {} }, ...now])
           setOpenKey(key)
@@ -168,13 +174,19 @@ function Scanner() {
           // The read's number makes each announcement new: a live region says nothing when its text stays the same.
           setAnnouncement(`${announcementOf(reading.uid, result)} (read ${key})`)
           const target = openAtOnceRef.current ? targetOf(result) : null
-          if (target) void navigateRef.current(target)
+          if (target) {
+            navigated = true
+            void navigateRef.current(target)
+          }
         },
-        (cause: unknown) => setError(`ScadBuddy could not look up the tag: ${cause instanceof ApiError ? cause.detail : 'try the tag again'}.`),
+        (cause: unknown) => {
+          if (alive) setError(`ScadBuddy could not look up the tag: ${cause instanceof ApiError ? cause.detail : 'try the tag again'}.`)
+        },
       )
     })
     const offError = nfc.onReadingError(() => setError(UNREADABLE))
     return () => {
+      alive = false
       off()
       offError()
       nfc.stop()

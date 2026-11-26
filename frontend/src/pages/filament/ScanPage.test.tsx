@@ -6,6 +6,7 @@ import { seedNfcJob } from '../../mocks/features/filament/tags'
 import { server } from '../../mocks/server'
 import { filamentLinks } from '../../lib/filamentLinks'
 import { installNdefStub, type NdefStub } from '../../test/ndefStub'
+import { http } from 'msw'
 import { MemoryRouter, Route, Routes } from 'react-router'
 import { renderPage } from '../../test/utils'
 import { ScanPage } from './ScanPage'
@@ -416,6 +417,35 @@ describe('the scan page (#7273)', () => {
       await screen.findByRole('button', { name: 'Scanning — hold a tag to the phone' })
       stub.tap({ serialNumber: '04:a1:b2:c3:d4:e5:f6', records: [] })
       expect(await screen.findByRole('heading', { name: 'Spool page' })).toBeInTheDocument()
+    })
+
+    it('with Open at once on, two taps in flight navigate once, to the first', async () => {
+      openWithTargets()
+      const { default: userEvent } = await import('@testing-library/user-event')
+      const user = userEvent.setup()
+      await user.click(screen.getByRole('switch', { name: 'Open what I scan at once' }))
+      await user.click(screen.getByRole('button', { name: 'Scan' }))
+      await screen.findByRole('button', { name: 'Scanning — hold a tag to the phone' })
+      // The second read's answer is held until the first has opened its page, then let go.
+      let release!: () => void
+      const released = new Promise<void>((resolve) => {
+        release = resolve
+      })
+      server.use(
+        http.post('/api/v1/filament/tags/reads', async ({ request }) => {
+          const body = (await request.clone().json()) as { uid: string | null }
+          if (body.uid === '04:a1:b2:c3:d4:e5:f6') await released
+          // Falls through to the filament mock's own answer.
+        }),
+      )
+      stub.tap({ serialNumber: '04:0c:0c:0c:0c:0c:0c', records: [PLACE_LABEL] })
+      stub.tap({ serialNumber: '04:a1:b2:c3:d4:e5:f6', records: [] })
+      expect(await screen.findByRole('heading', { name: 'Place page' })).toBeInTheDocument()
+      release()
+      // The answer that would open the spool lands on a page that is gone, and is dropped.
+      await new Promise((resolve) => setTimeout(resolve, 50))
+      expect(screen.queryByRole('heading', { name: 'Spool page' })).toBeNull()
+      expect(screen.getByRole('heading', { name: 'Place page' })).toBeInTheDocument()
     })
 
     it('with Open at once on, a new tag stays on the page', async () => {

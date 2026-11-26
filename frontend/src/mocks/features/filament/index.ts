@@ -1674,7 +1674,7 @@ function csvRows(body: { rows?: unknown }): Record<string, string | null>[] | Re
 // -- codes and printer labels (#6955) --
 
 /** `codes/parse.py`: any case, an optional dash, a one-letter prefix and a number. */
-function parseCode(text: string): { prefix: string; number: number } | null {
+export function parseCode(text: string): { prefix: string; number: number } | null {
   const hit = /^([A-Z])-?([0-9]+)$/.exec(text.trim().toUpperCase())
   return hit ? { prefix: hit[1]!, number: Number(hit[2]) } : null
 }
