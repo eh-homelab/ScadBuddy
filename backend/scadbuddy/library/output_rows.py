@@ -193,8 +193,8 @@ class OutputRow:
     #: The store sets it, so the value given is ignored.
     bytes_at: datetime | None = None
     #: The parameters that differ from the template's defaults, for the list's ``q``
-    #: (`output_query.params_text`, #7257). Empty for a row the copy wrote: the copy
-    #: knows no template defaults.
+    #: (`output_query.params_text`, #7257). NOT NULL since release B's migration: a row
+    #: with no `output_index` text holds '' and matches `q` by its name only.
     params_text: str = ""
 
 
@@ -881,12 +881,14 @@ class OutputRows:
     def refresh_claim(self, output_id: str) -> None:
         """A live save's claim, made young again (A4 review M1): the prune
         (`prune_claims`) never takes a claim whose save still runs. Nothing when the save's
-        row has deleted it."""
+        row has deleted it, or the prune took it first (logged)."""
         with self._pool.connection() as conn:
-            conn.execute(
+            cursor = conn.execute(
                 "UPDATE output_claims SET claimed_at = clock_timestamp() WHERE output_id = %s",
                 (output_id,),
             )
+            if cursor.rowcount == 0:
+                logger.info("a running save's claim was gone at refresh", extra={"id": output_id})
 
     def prune_claims(self, grace: timedelta) -> int:
         """Delete the claims older than ``grace``, by the database's clock: a save that

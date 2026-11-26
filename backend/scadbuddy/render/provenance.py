@@ -3,9 +3,10 @@
 The output's row keeps its meta and parameters, but the 3MF outlives it: it is
 uploaded to Bambuddy, downloaded, mailed around and re-opened in Bambu Studio long
 after ScadBuddy has forgotten the output. So the same facts are stamped into the file
-(``stamp``), with an "Edit in ScadBuddy" link in its description. Nothing in
-ScadBuddy reads the stamp back now: since #7257 an output's edit target is its row
-alone (no row is a 404). :func:`read` stays for the tests that check what
+(``stamp``), with an "Edit in ScadBuddy" link in its description. Since #7257 an
+output's edit target is its row alone (no row is a 404). Only the asset sweep reads
+the stamp back, as raw text, for the asset ids it names (`library/assets.py`
+``_ids_in_archive``). :func:`read` has no caller outside the tests that check what
 :func:`stamp` wrote; :func:`content_key` only takes the stamp out.
 
 The stamp is a namespaced ``<metadata>`` element on the root model, the pattern

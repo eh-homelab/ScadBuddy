@@ -80,7 +80,8 @@ def _filters(query: OutputQuery) -> tuple[str, list[Any]]:
         where.append("x.slug = ANY(%s)")
         args.append(list(query.slugs))
     if query.q:
-        # An `outputs` row a phase 2 pod saved has no text yet (#7257): it matches no text.
+        # `params_text` is NOT NULL since release B's migration (#7257): a row with no
+        # index text holds '' and matches `q` by its name only.
         where.append("(x.name ILIKE %s ESCAPE '\\' OR x.params_text ILIKE %s ESCAPE '\\')")
         args += [_like(query.q), _like(query.q)]
     if not query.include_storefront:

@@ -736,6 +736,8 @@ class OutputStore:
         finally:
             if keeping is not None:
                 keeping.cancel()
+                with contextlib.suppress(asyncio.CancelledError):
+                    await keeping
             # Shielded: a cancelled save still removes its staged folder.
             await asyncio.shield(asyncio.to_thread(shutil.rmtree, staging, True))
 
