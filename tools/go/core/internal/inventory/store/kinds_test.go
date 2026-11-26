@@ -474,3 +474,27 @@ func TestABuiltinKindKeepsItsResolvedClass(t *testing.T) {
 	// A move that keeps the resolved class is no class change.
 	must(updateKind(t, pool, k, "spool_part", wire.KindPatch{ParentID: wire.Some("part")}))
 }
+
+// Fix round 2.
+
+func TestABuiltinKindBelowKeepsItsResolvedClass(t *testing.T) {
+	pool, k := testdb.New(t), kindStore()
+	must(createKind(t, pool, k, wire.KindInput{ID: "mypart", Name: "My part", ParentID: ptr("durable")}))
+	must(updateKind(t, pool, k, "nozzle", wire.KindPatch{ParentID: wire.Some("mypart")}))
+
+	_, err := updateKind(t, pool, k, "mypart", wire.KindPatch{SpecialType: wire.Some("printer")})
+	r := refusal(t, err, 409, "kind_in_use")
+	want := []ClassProblem{{Owner: "item_kind:nozzle", Key: "special_type", To: ptr("printer")}}
+	if !reflect.DeepEqual(r.Problems, want) {
+		t.Fatalf("special problems %#v", r.Problems)
+	}
+	_, err = updateKind(t, pool, k, "mypart", wire.KindPatch{ParentID: wire.Some("general_consumable")})
+	r = refusal(t, err, 409, "kind_in_use")
+	want = []ClassProblem{{Owner: "item_kind:nozzle", Key: "role", From: ptr("durable"), To: ptr("consumable")}}
+	if !reflect.DeepEqual(r.Problems, want) {
+		t.Fatalf("class problems %#v", r.Problems)
+	}
+	if got := getKind(t, pool, k, "mypart"); *got.ParentID != "durable" || got.SpecialType != nil {
+		t.Fatalf("mypart changed: %+v", got)
+	}
+}

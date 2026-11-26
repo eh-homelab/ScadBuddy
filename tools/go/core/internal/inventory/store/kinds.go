@@ -47,9 +47,12 @@ type StepProblem struct {
 
 // ClassProblem is the class key a class_changed refusal names; null is a key left open.
 type ClassProblem struct {
-	Key  string  `json:"key"`
-	From *string `json:"from"`
-	To   *string `json:"to"`
+	// Owner is the kind below the saved one whose class would change (item_kind:<id>);
+	// empty for the saved kind.
+	Owner string  `json:"owner,omitempty"`
+	Key   string  `json:"key"`
+	From  *string `json:"from"`
+	To    *string `json:"to"`
 }
 
 // The phase 2 tracking rules (§8, R-K1-6): the class a tracking stands for, and the
@@ -721,6 +724,13 @@ func (k *Kinds) Update(ctx context.Context, tx pgx.Tx, id string, p wire.KindPat
 		}
 		oldCls, oldSpecial, _ := set.chain(d).Class()
 		change := classChange(oldCls, oldSpecial, cls, special)
+		if change != nil && d != id && next[d].Builtin {
+			owned := *change
+			owned.Owner = "item_kind:" + d
+			return wire.ItemKind{}, &Refused{Status: 409, Code: "kind_in_use",
+				Detail:   "the kind's items or built-in status forbid it: item_kind:" + d + " is built in; its class stays",
+				Problems: []ClassProblem{owned}}
+		}
 		if change != nil && has[d] {
 			return wire.ItemKind{}, &Refused{Status: 422, Code: "class_changed",
 				Detail: "the change would change the class of " + d + ", which has items", Problems: []ClassProblem{*change}}
