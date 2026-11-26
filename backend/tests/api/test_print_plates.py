@@ -23,7 +23,13 @@ from scadbuddy.api.deps import STATE_ATTR
 from scadbuddy.core.paths import DataPaths
 from scadbuddy.core.settings import Settings
 from scadbuddy.printers.component import PRINTERS, Printers
-from tests.api.conftest import files_only, read_stored, set_plate_image, wait_for_job
+from tests.api.conftest import (
+    PNG_BYTES,
+    files_only,
+    read_stored,
+    set_plate_image,
+    wait_for_job,
+)
 from tests.api.test_print import API
 from tests.api.test_print_filaments import queue_route as filament_queue_route
 from tests.api.test_print_filaments import slice_kept, slice_routes
@@ -251,14 +257,21 @@ def test_a_plate_with_no_cover_shows_the_outputs_thumbnail_when_asked(
     configure(client)
     output_id = _output_without_cover(client, model)
     add_plate(_output_3mf(paths, output_id), 2, thumbnail=b"\x89PNG plate two")
+    covered = client.put(
+        f"/api/v1/outputs/{output_id}/thumbnail",
+        files={"file": ("t.png", PNG_BYTES, "image/png")},
+        headers=press(),
+    )
+    assert covered.status_code == 204, covered.text
     asked = {"cover_if_missing": "true"}
 
-    own = client.get(f"/api/v1/outputs/{output_id}/thumbnail")
     fallback = client.get(f"/api/v1/outputs/{output_id}/plates/1/thumbnail", params=asked)
     kept = client.get(f"/api/v1/outputs/{output_id}/plates/2/thumbnail", params=asked)
 
-    assert (fallback.status_code, fallback.content) == (own.status_code, own.content)
+    assert (fallback.status_code, fallback.content) == (200, PNG_BYTES)
     assert kept.content == b"\x89PNG plate two"
+    # Not asked, a plate with no cover is still a 404: the plate picker shows none.
+    assert client.get(f"/api/v1/outputs/{output_id}/plates/1/thumbnail").status_code == 404
 
 
 @pytest.mark.requires_postgres
