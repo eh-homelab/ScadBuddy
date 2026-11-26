@@ -1,10 +1,11 @@
 import { createHash } from 'node:crypto'
-import { mkdir, readdir, readFile, symlink, writeFile } from 'node:fs/promises'
+import { mkdir, mkdtemp, readdir, readFile, rm, symlink, writeFile } from 'node:fs/promises'
+import { tmpdir } from 'node:os'
 import path from 'node:path'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { SandboxClient, SandboxError } from '../src/sandbox/client.js'
 import { STREAM_MAX_BYTES, syncPath } from '../src/sandbox/protocol.js'
-import { commandEnv } from '../src/sandbox/server.js'
+import { commandEnv, runCommand } from '../src/sandbox/server.js'
 import { startLocalSandbox } from './support/sandbox.js'
 
 const sha = (s: string | Buffer) => createHash('sha256').update(s).digest('hex')
@@ -30,16 +31,20 @@ describe('the sandbox exec server', () => {
   })
 
   it("times a command on a monotonic clock: a wall clock stepped back never makes its duration negative", async () => {
-    const { client } = await start()
-    // A wall clock stepped back a minute while the command ran (WSL's clock does this).
+    const root = await mkdtemp(path.join(tmpdir(), 'sandbox-clock-'))
+    await mkdir(path.join(root, 'work'))
+    await mkdir(path.join(root, 'home'))
+    // A wall clock stepped back a minute while the command ran (WSL's clock does this); only
+    // runCommand runs meanwhile, with no server around it.
     const real = Date.now.bind(Date)
     let calls = 0
     const spy = vi.spyOn(Date, 'now').mockImplementation(() => real() - (++calls > 1 ? 60_000 : 0))
     try {
-      const result = await client.exec('bash', 'sleep 0.2', 10_000)
+      const result = await runCommand({ work: path.join(root, 'work'), home: path.join(root, 'home'), pathEnv: process.env.PATH ?? '/usr/bin:/bin' }, { shell: 'bash', command: 'sleep 0.2', timeout_ms: 10_000 })
       expect(result.duration_ms).toBeGreaterThanOrEqual(150)
     } finally {
       spy.mockRestore()
+      await rm(root, { recursive: true, force: true })
     }
   })
 

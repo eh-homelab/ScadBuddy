@@ -825,8 +825,10 @@ export function runInSandbox(options: SandboxCall, shell: Shell, command: string
       await client.setKept(kept)
       // The base is kept once a slot has run here (startInSandbox set it): the pod as this sync
       // left it. A truncated manifest gives none to trust, and the previous one stays: cleared, a
-      // slot that still runs would have its writes taken for the session's to overwrite. The
-      // command ran and its changes are in the session: a base that cannot be set is not its failure.
+      // slot that still runs would have its writes taken for the session's to overwrite. Its
+      // cost: a file this command changed keeps its older base entry, so a later session edit to
+      // it is reported `overwritten` though no slot wrote it. The command ran and its changes
+      // are in the session: a base that cannot be set is not its failure.
       if (base !== null && back.after) {
         await client.setBase(back.after).catch((err: unknown) => {
           console.warn(`session ${options.sessionId}: the sandbox's base could not be set after a command: ${err instanceof Error ? err.message : String(err)}`)
@@ -858,6 +860,8 @@ export function startInSandbox(options: SandboxCall, shell: Shell, command: stri
       await client.setKept(kept)
       // A truncated manifest may lack files the earlier base names: that base stays, as after a
       // command (runInSandbox), so a slot's write there is still told apart from the session's.
+      // Its cost, there too: a file this sync pushed keeps its older base entry, so a later
+      // session edit to it is reported `overwritten` though the slot never wrote it.
       if (!before.truncated || base === null) await client.setBase(before.files)
       const slot = await client.startSlot(shell, command, timeoutMs)
       return {

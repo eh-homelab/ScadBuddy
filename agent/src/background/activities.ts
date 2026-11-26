@@ -265,11 +265,12 @@ export function backgroundActivities(deps: BackgroundActivityDeps) {
 
     async [BG_FINISH](input: { taskId: string; state: 'done' | 'cancelled' | 'failed'; detail?: string }): Promise<void> {
       await deps.store.finish(input.taskId, input.state, input.detail)
-      // A cancel (the panel's, TaskStop's, the session's end) may land before the watch of a
-      // command in the sandbox began, and an unstarted watch never runs; a failed watch (its
-      // replica gone, its activity timed out) may have left the slot running: it stops here.
-      // A task done has a slot that ended, or that its watch stopped.
-      if (input.state !== 'done' && deps.sandbox) {
+      // A command in the sandbox stops here at any end: a cancel (the panel's, TaskStop's, the
+      // session's end) may land before its watch began, and an unstarted watch never runs; a
+      // watch that never started or died (its replica gone, its activity timed out) ends the task
+      // `done` with `failed` as its detail and stopped nothing. A slot that ended already answers
+      // the stop with nothing (stopSlot never throws).
+      if (deps.sandbox) {
         const t = await deps.store.get(input.taskId)
         if (t && sandboxSpec(t)) await stopSlot(deps.sandbox, t)
       }
