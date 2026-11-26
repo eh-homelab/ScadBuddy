@@ -2754,10 +2754,11 @@ holds the manifests. Phase 1 added two Deployments, the relay and the recorders.
   `deploy/camera/`. The recorder image sets `TZ=UTC`. MediaMTX names segment files in local
   time, and the recorder refuses any other `TZ` (`RecorderSettings.check_environment`).
   `build-image.yml` job `camera` publishes all three (amd64); `ci.yml` job `camera-image` builds and
-  checks all three. `deploy.reusable.yml` does not pin them yet. When a pin comes, it must move the
-  relay's image only when the relay's code or MediaMTX changes, not with each ScadBuddy release
-  (spec §6.1): each relay restart is a gap of about 10 to 30 s in every printer's recording
-  (the spec's estimate, §6.9).
+  checks all three. `deploy.reusable.yml` pins the recorder and the edge in eh-homelab/clusters
+  `applications/scadbuddy-camera/` to each build's `sha-<7>@sha256:<digest>` (#7997), both
+  containers of each. It never moves the relay. The relay's pin moves by hand, in a reviewed
+  clusters PR, only when the relay's code or MediaMTX changes (spec §6.1): each relay restart
+  is a gap of about 10 to 30 s in every printer's recording (the spec's estimate, §6.9).
 - **Two containers per pod.** Each pod runs its image twice: MediaMTX
   (`args: [mediamtx, /etc/mediamtx/mediamtx.yml]`) and the controller (the default command,
   `python -m scadbuddy.camera.relay`, `.recorder` or `.edge`). The controller
