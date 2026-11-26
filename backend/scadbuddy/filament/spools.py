@@ -218,6 +218,14 @@ class ContinuedFromNotArchivedError(ValueError):
         super().__init__("continued_from names a spool that is not archived")
 
 
+class ContinuedFromTakenError(ValueError):
+    """``continued_from`` names a spool another spool already continues (#7909): its
+    newest ``archived`` event carries ``continued_as`` and that spool still exists."""
+
+    def __init__(self) -> None:
+        super().__init__("continued_from names a spool another spool already continues")
+
+
 class SpoolBulkRefusedError(ValueError):
     """A bulk edit that one spool refuses (#7151, R-7151-1): the whole edit is refused,
     naming that spool by its number."""
@@ -476,24 +484,42 @@ def _closing_on(
     )
 
 
+#: The keys `ledger.closing` writes on an ``archived`` event (#7909).
+_CLOSING_KEYS = frozenset(m.Closing.model_fields)
+
+
 def _final_filament(
     reading_g: float | None, grams: float | None, empty: EmptyWeight | None
 ) -> float | None:
     """A final weighing's filament (#7684), as `SpoolEventAdd`'s rule reads it: ``grams``
     when given, else the reading less the effective empty weight; ``None`` with no
-    weighing, no empty weight known, or a reading under it."""
+    weighing, no empty weight known, a reading under it, or a reading under ``grams``
+    (which `SpoolArchive` refuses, #7909)."""
     if grams is not None:
-        return grams
+        return None if reading_g is not None and reading_g < grams else grams
     if reading_g is None or empty is None or reading_g < empty.grams:
         return None
     return reading_g - empty.grams
 
 
-def _reading_notice(reading_g: float | None, empty: EmptyWeight | None) -> m.ClosingNotice | None:
+def _reading_notice(
+    reading_g: float | None, grams: float | None, empty: EmptyWeight | None
+) -> m.ClosingNotice | None:
     """The preview's word on a reading the archive would refuse (the review of #7844):
+    ``reading_below_grams`` for a reading under the ``grams`` sent with it (#7909),
     ``no_empty_weight`` with no empty weight known, ``reading_below_empty`` for a reading
-    under it. `_final_filament` answers ``None`` for both."""
+    under it. `_final_filament` answers ``None`` for each."""
     if reading_g is None:
+        return None
+    if grams is not None:
+        if reading_g < grams:
+            return m.ClosingNotice(
+                code="reading_below_grams",
+                text=(
+                    f"The reading, {_grams_text(reading_g)}, is under the {_grams_text(grams)}"
+                    " of filament: a spool cannot weigh less than the filament on it."
+                ),
+            )
         return None
     if empty is None:
         return m.ClosingNotice(
@@ -699,11 +725,12 @@ class FilamentSpoolStore:
                 (spool_id,),
             ).fetchall()
             weighings = [e for e in history if e.kind == "weighed"]
-            # #7684: an archived spool's closing is its newest `archived` event's data.
+            # #7684: an archived spool's closing is its newest `archived` event's data;
+            # #7909: an event from before the closing carries none of its keys, so none.
             archives = [e for e in history if e.kind == "archived"]
             closing = (
                 m.Closing.model_validate(archives[-1].data)
-                if spool.archived_at and archives
+                if spool.archived_at and archives and _CLOSING_KEYS & archives[-1].data.keys()
                 else None
             )
             return m.SpoolDetail.model_validate(
@@ -956,6 +983,16 @@ class FilamentSpoolStore:
                 raise SpoolCopySourceError()
             if source["archived_at"] is None:
                 raise ContinuedFromNotArchivedError()
+            # #7909: one continuation per source, while the spool it names still exists.
+            taken = conn.execute(
+                "SELECT 1 FROM filament_spool_events e"
+                " JOIN filament_spools s ON s.id = (e.data->>'continued_as')::uuid"
+                " WHERE e.id = (SELECT id FROM filament_spool_events WHERE spool_id = %s"
+                "  AND kind = 'archived' ORDER BY at DESC, seq DESC LIMIT 1)",
+                (body.continued_from,),
+            ).fetchone()
+            if taken is not None:
+                raise ContinuedFromTakenError()
             continued = body.continued_from
         if body.copy_of is not None:
             # One read: the source, and its migrated rows (none: one row of NULLs).
@@ -1306,9 +1343,10 @@ class FilamentSpoolStore:
         it: ``final_grams`` is the filament; ``final_reading_g`` alone takes the spool's
         effective empty weight off, and ``None`` where that cannot be done (no empty
         weight, or a reading under it: the archive refuses those); neither closes on the
-        spool's ``grams_left`` with no scale side. The notices follow the setting
-        ``filament_weighing_finished_left_g``; a reading the archive would refuse is said
-        first (`_reading_notice`)."""
+        spool's ``grams_left`` with no scale side; a reading under ``final_grams`` (which
+        `SpoolArchive` refuses) closes on nothing too (#7909). The notices follow the
+        setting ``filament_weighing_finished_left_g``; a reading the archive would refuse
+        is said first (`_reading_notice`)."""
         defaults = self._defaults()
         with self._pool.connection() as conn, conn.transaction():
             conn.execute("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ")
@@ -1320,7 +1358,7 @@ class FilamentSpoolStore:
             weighed = final_reading_g is not None or final_grams is not None
             closed = _closing_on(conn, spool_id, reason, final, grams_left=not weighed)
         left = closed["final_filament_g"]
-        refused = _reading_notice(None if final_grams is not None else final_reading_g, empty)
+        refused = _reading_notice(final_reading_g, final_grams, empty)
         return m.ClosingPreview(
             closing=m.Closing.model_validate(closed),
             final_filament_g=left,

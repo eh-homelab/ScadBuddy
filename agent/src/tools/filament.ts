@@ -892,7 +892,8 @@ const tools: Tool[] = [
       "and `copy_of` (a spool's `id`) starts from that spool: its type, own overrides, note, own presets and K " +
       'values and its place unless that is a tray, never its number, tag, tray, weight, weight lock or `added_full`; `fields` ' +
       'then change the copy. `continued_from` (#7684, with `copy_of` the same archived, respooled spool and `grams_left` its final filament) links the two: the new ' +
-      "spool's `created` event keeps `continued_from` and the source's `archived` event `continued_as`; 422 `continued_from_not_archived` otherwise. " +
+      "spool's `created` event keeps `continued_from` and the source's `archived` event `continued_as`; 422 `continued_from_not_archived` otherwise, " +
+      '`continued_from_taken` for a source a spool already continues (#7909). ' +
       'Either answers the list of spools made, and a resend of the same call makes none twice; ' +
       'a resend of a copy reads the source again, and when the source changed in between it makes a new set from it. ' +
       '422 when an effective minimum temperature is above its maximum or the spool would have neither type nor ' +
@@ -1124,7 +1125,8 @@ const tools: Tool[] = [
       '`notices` says what disagrees with the reason: `filament_left` for a finished spool with more than the setting ' +
       '`filament_weighing_finished_left_g` on it, `not_finished_but_empty` for another reason at or under it, and what ' +
       'filament_spool_archive would refuse: `no_empty_weight` for a reading with no empty weight known (send `final_grams` ' +
-      'instead), `reading_below_empty` for a reading under it; tell the user before archiving. 404 for no such spool.',
+      'instead), `reading_below_empty` for a reading under it, `reading_below_grams` for a reading under the `final_grams` ' +
+      'sent with it (#7909); tell the user before archiving. 404 for no such spool.',
     input: z.object({
       spool_id: z.string().uuid().describe("A spool's `id` from filament_spool_list"),
       reason: z.enum(['finished', 'respooled', 'damaged', 'other']).optional().describe('Why it would be archived'),

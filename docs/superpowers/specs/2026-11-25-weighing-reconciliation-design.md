@@ -220,10 +220,14 @@ The change:
   reason), not on `SpoolPatch`; the closing also keeps `started_from` (`reading` or
   `label`) and `final_filament_g`; the preview is `GET /filament/spools/{id}/closing` with
   its `notices`, against the setting `filament_weighing_finished_left_g` (5 g), which also
-  name a reading the archive would refuse (`no_empty_weight`, `reading_below_empty`); the
-  dialog takes the spool's effective empty weight from the preview's `empty_g`; the sync's
+  name a reading the archive would refuse (`no_empty_weight`, `reading_below_empty`, and
+  since #7909 `reading_below_grams`, a reading under the `final_grams` sent with it); the
+  dialog takes the spool's effective empty weight from the preview's `empty_g`, and says so
+  when that changes the meaning of a number already typed (#7909); the sync's
   archives record `other`; and `continued_from` is a field of `SpoolDraft`, sent with
-  `copy_of`, for one spool. `SpoolDetail.closing` carries the archived spool's closing.
+  `copy_of`, for one spool, and refused (`continued_from_taken`, #7909) while a spool that
+  continues the source still exists. `SpoolDetail.closing` carries the archived spool's
+  closing, `null` for an archive from before #7684 (#7909).
 
 ### 5.5 Tolerances
 
