@@ -244,10 +244,12 @@ on shutdown.
   you would Bambuddy's slicer sidecar, or switch sign-in on and set the mode to
   `enforce` ("Signing in" below) before it is reachable by anyone you do not trust.
 - **State** lives in `/data` (`SCADBUDDY_DATA_DIR`): models (a git repository),
-  outputs, downloaded fonts and caches. Back up the volume. A saved output's record is
-  in the database and its bytes are in the blob store (on the `bambuddy` store they stay
-  files); on the `local` store they are in `/data/output-blobs/` (#7257). The folders under `/data/outputs/` stay as a fallback
-  until the cut-over's second release. Settings and saved presets are in the
+  downloaded fonts and caches. Back up the volume. A saved output's record is in the
+  database and its bytes are in the blob store; on the `local` store they are in
+  `/data/output-blobs/` (#7257). No code reads or writes `/data/outputs/` since the
+  cut-over's second release (#7257): it is an unread backup, and deleting it is the
+  owner's step. That release does not start on the `bambuddy` store, even with no
+  outputs ("Recovering an unready blob store" below). Settings and saved presets are in the
   database, not in `/data`: back that up too. The Bambuddy API key is stored there as plain text
   (it used to be a 0600 file on the volume), so it is in every database backup;
   supply it with `SCADBUDDY_BAMBUDDY_API_KEY` from a secret if that matters. The
@@ -474,12 +476,7 @@ on shutdown.
     (`orders/store.py`), a storefront publish's lock (at most 2 at once,
     `orders/storefront/listings.py`, in the gauges as `scadbuddy-storefront-publish`), a library copy's target locks (`print_library/copy_store.py`),
     the Bambuddy catalogue refresh and upload claims, the store's folder lock, the
-    output backfill's claim, the service credential rotation and the flow keys. The copy
-    of the saved outputs to rows (#7255) and the copy of their bytes to the blob store
-    (#7256, after it) each hold their advisory lock for the whole run on a connection of
-    its own (`scadbuddy-output-copy`, up to 15 minutes; `scadbuddy-output-byte-copy`, up
-    to its 30-minute timeout in the sweep, with no bound at a start), not on a pool's;
-    each of their statements takes a connection of the main pool. So
+    output backfill's claim, the service credential rotation and the flow keys. So
     leave headroom above the pools' sum. Every pool keeps only what it uses (the main
     pool one more) and closes a connection left idle for a minute, one a minute
     (psycopg_pool's `max_idle`). The `LISTEN` connection and `scadbuddy-preview-follows`
@@ -1100,19 +1097,12 @@ hook (`temporal-promote-workers.yaml`) would also try to make the old revision c
 and fail that sync: take `scadbuddy-library` out of its list for such a rollback. Rolling back to any build
 from #4090 on needs nothing: its pods make their own build current.
 
-**Saved outputs during a roll-out (#7255).** An API pod of a build before #7255 saves
-an output in the files only. Once a copy run has finished, the newer pods look outputs
-up in the `outputs` rows only, so such an output is a 404 on them until the next copy
-writes its row: the next housekeeping sweep (every `asset_sweep_interval`), or the next
-API start. A rollback to such a build makes the same window. To end it sooner, restart
-one API pod once the roll-out is done: its start runs the copy. Then check
-`GET /api/v1/outputs/copy-status` ([Saved outputs](docs/architecture/data.md#saved-outputs)).
-Both copies stop at the cut-over mark (#7257), which `copy-status` names as
-`cut_over_at`; after the roll-out of its first release, check that `cut_over_at` is set
-and `bytes.pending` is 0 ([The cut-over](docs/architecture/data.md#the-cut-over)).
-Check too that the last row copy run (`copy-status`'s `started_at`) started after the last
-pod of a build before phase 2 (#7256) went: a start writes the mark before it runs the row
-copy, so a write such a pod made in the files only after that run is never copied.
+**Saved outputs during a roll-out (#7257).** Since the cut-over's second release, an
+output's row and blobs are its only record, and no copy runs. Its migration refuses to
+run until the first release wrote the cut-over mark and every row's bytes are blobs: a
+refused pod restarts, and the pods of the first release go on serving. Upgrade from the
+first release only, once `GET /api/v1/outputs/copy-status` names `cut_over_at` and
+`bytes.pending` is 0 ([The cut-over](docs/architecture/data.md#the-cut-over)).
 
 ### Render worker (#424)
 
@@ -1289,8 +1279,8 @@ clusters. It serves `/healthz` (`{"ok": true, "build_id": …, "task_queue": …
   (`/api/v1/internal/workspace-blobs/…`, #4789) are the agent's credential's
   (`internal.workspace`) in the same way: `POST /uploads` is a write path, minting a token
   for one internal PUT of up to 128 MiB with no workflow or row behind it. An output's last print is recorded in
-  Postgres (`output_last_prints`); an older `meta.json`'s last print still reads for an
-  output not printed since.
+  Postgres (`output_last_prints`); the last print that an older `meta.json` held (now in
+  the output's row) still reads for an output not printed since.
 - **Environment:** `SCADBUDDY_TEMPORAL_ADDRESS`,
   `SCADBUDDY_TEMPORAL_NAMESPACE`, `SCADBUDDY_TEMPORAL_TASK_QUEUE_BAMBUDDY`,
   `SCADBUDDY_TEMPORAL_SEARCH_ATTRIBUTES`, `SCADBUDDY_API_INTERNAL_URL`, and

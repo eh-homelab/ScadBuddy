@@ -27,7 +27,8 @@ one commit.
 ## Data
 
 - The models git repository; each output's record is its `outputs` row (#7255), which
-  also lists them across models (#7257); pushes in `git_remote_pushes`.
+  also lists them across models (#7257), and its bytes are blobs (#7256; no file under
+  `data/outputs/` is read since #7257's second release); pushes in `git_remote_pushes`.
 - Settings: `SCADBUDDY_GIT_REMOTE_URL`, `_USERNAME`, `_TOKEN`.
 
 ## Tests
