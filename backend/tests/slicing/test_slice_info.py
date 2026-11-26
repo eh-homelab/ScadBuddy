@@ -299,6 +299,14 @@ def test_a_merged_slot_keeps_its_metres_only_with_every_sources_length() -> None
         gcode={1: b"; HEADER_BLOCK_START\n; filament: 3\n; HEADER_BLOCK_END\nM620 S2A\n"},
     )
     assert plate_uses(both, 1) == PlateUses(grams_by_slot={3: 1.2}, length_by_slot={3: 0.4})
+    # A source with a length but no grams (the review of #7933, #7964) is dropped before the
+    # merge (``filaments3mf.py`` keeps the slots with ``used_g > 0``): it adds neither.
+    weightless = sliced_3mf(
+        plates={1: (60, [0.0, 0.0, 1.0])},
+        metres={1: [0.1, None, 0.3]},
+        gcode={1: b"; HEADER_BLOCK_START\n; filament: 3\n; HEADER_BLOCK_END\nM620 S2A\n"},
+    )
+    assert plate_uses(weightless, 1) == PlateUses(grams_by_slot={3: 1.0}, length_by_slot={3: 0.3})
 
 
 def test_the_metres_move_with_the_grams_onto_the_filament_the_plate_prints() -> None:
