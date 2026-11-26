@@ -22,6 +22,7 @@ describe('scadbuddyJobPath (#3743)', () => {
     run_id: 'run-luna-2',
     archive_id: null,
     matched_by: 'queue_item',
+    plate: null,
     ...fields,
   })
 
