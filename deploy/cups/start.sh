@@ -8,7 +8,8 @@
 # RequestRoot (jobs), cache/ its CacheDir. They are created here, so cupsd owns them
 # (and may chmod them, which it does at every start) even when the volume's
 # root belongs to root; each file of the image's ServerRoot that etc/ lacks is copied
-# in, and none is overwritten.
+# in, and none is overwritten except snmp.conf, which is replaced from
+# /etc/cups/snmp.conf at every start.
 #
 # With CUPS_QUEUES set, its queues are rewritten at every start, so the Deployment's env
 # is the only place they are configured. Queues added on the admin page (a printer
@@ -51,6 +52,9 @@ run_cupsd() {
 }
 
 if [ -z "${CUPS_QUEUES:-}" ]; then
+  # Every queue is the deployment's own now; a stale list would later drop a queue
+  # added meanwhile under one of its names.
+  rm -f "$state/etc/scadbuddy-queues"
   run_cupsd
 fi
 
@@ -118,6 +122,18 @@ fi
 # queue: the default is CUPS_QUEUES's first. A queue dropped from CUPS_QUEUES goes,
 # with its PPD.
 drop=" ${names[*]} "
+if ! [ -f "$managed" ] && [ -f "$conf" ]; then
+  # The first start with this list (or after CUPS_QUEUES was unset): every queue on
+  # the Zebra ZPL driver is one start.sh declared, so one dropped from CUPS_QUEUES
+  # in the same rollout goes rather than being kept as an admin-page queue.
+  while read -r old; do
+    drop+="$old "
+    case " ${names[*]} " in *" $old "*) ;; *) rm -f "$state/etc/ppd/$old.ppd" ;; esac
+  done < <(awk '
+    /^<(Default)?Printer / { name = $2; sub(/>$/, "", name) }
+    /^MakeModel Zebra ZPL Label Printer$/ { print name }
+  ' "$conf")
+fi
 if [ -f "$managed" ]; then
   while read -r old; do
     [ -n "$old" ] && drop+="$old "
