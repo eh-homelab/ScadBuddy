@@ -11,6 +11,7 @@ import {
   type KeptRecord,
   keptValue,
   MANIFEST_MAX_ENTRIES,
+  RECORD_MAX_BYTES,
   type Manifest,
   type ManifestEntry,
   MAX_SEGMENTS,
@@ -479,7 +480,7 @@ export function sandboxServer(options: SandboxServerOptions): Server {
       if (url.pathname === '/v1/base') {
         if (req.method === 'GET') return json(res, 200, { base })
         if (req.method === 'PUT') {
-          const parsed = await jsonBody(req, 4 * 1024 * 1024, parseBase)
+          const parsed = await jsonBody(req, RECORD_MAX_BYTES, parseBase)
           if (typeof parsed === 'string') return json(res, 400, { error: parsed })
           base = parsed
           return json(res, 200, { paths: base === null ? null : Object.keys(base).length })
@@ -520,7 +521,7 @@ export function sandboxServer(options: SandboxServerOptions): Server {
       if (url.pathname === '/v1/kept') {
         if (req.method === 'GET') return json(res, 200, kept)
         if (req.method === 'PUT') {
-          const raw = await readBody(req, 4 * 1024 * 1024)
+          const raw = await readBody(req, RECORD_MAX_BYTES)
           let parsed: KeptRecord | string
           try {
             parsed = raw ? parseKept(JSON.parse(raw.toString('utf8'))) : 'the body is too large'

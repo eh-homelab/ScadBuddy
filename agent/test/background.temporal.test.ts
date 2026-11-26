@@ -223,6 +223,26 @@ describe.skipIf(!TEMPORAL_CLI || !TEST_DATABASE_URL)(`a background task's workfl
     await expect.poll(async () => (await client.slotStatus(long.slot.id))?.running ?? false, { timeout: 30_000 }).toBe(false)
   }, 90_000)
 
+  it('stops a sandbox slot whose task is cancelled before its watch starts (a panel cancel, #5916)', async () => {
+    const dir = await ensureSessionDir(workPaths, sessionId)
+    const { slot } = await startInSandbox({ sandboxes: boxes, sessionId, dir, limits, signal: AbortSignal.timeout(30_000) }, 'bash', 'sleep 120', 3_600_000)
+    const tasks = new BackgroundTasks({ store, runner: temporalTaskRunner(env.client, TASK_QUEUE) })
+    // The replica that ran the turn is gone: nothing polls its queue, so the watch never starts.
+    const t = (await tasks.create({
+      sessionId,
+      kind: 'monitor',
+      description: 'serve',
+      spec: { description: 'serve', command: 'serve', queue: `${TASK_QUEUE}.gone-replica`, timeoutMs: 3_600_000, background: 'shell', sandbox: { slot: slot.id, shell: 'bash', outputFile: slot.output_file } },
+      createdBy: browser,
+    }))!
+    const client = new SandboxClient(boxes.started.get(sessionId)!.endpoint, AbortSignal.timeout(90_000))
+    await new Promise((r) => setTimeout(r, 1000))
+    expect(await client.slotStatus(slot.id)).toMatchObject({ running: true })
+    // The panel's cancel goes through the service alone (routes/backgroundTasks.ts), not TaskStop.
+    await tasks.cancel(sessionId, t.id, 'the user in the panel')
+    await expect.poll(async () => (await client.slotStatus(slot.id))?.running ?? false, { timeout: 30_000 }).toBe(false)
+  }, 90_000)
+
   it('sends a backlog past one delivery\'s budget over several messages, none past it', async () => {
     // 12 events of ~7000 characters each, recorded while the session is busy: ~84k
     // characters, more than DELIVER_MAX_CHARS, wait for one idle delivery.

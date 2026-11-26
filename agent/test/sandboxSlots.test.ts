@@ -1,6 +1,6 @@
 import { existsSync, readFileSync } from 'node:fs'
 import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
-import { createServer } from 'node:http'
+import { createServer, request } from 'node:http'
 import type { AddressInfo } from 'node:net'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
@@ -9,8 +9,8 @@ import { followSlot, NOTICE_PATHS_MAX, shellNotice } from '../src/background/san
 import { type BackgroundTask, NOTICE_MAX_CHARS } from '../src/background/store.js'
 import type { BackgroundContext } from '../src/builtins/background.js'
 import { runShell, type ShellContext } from '../src/builtins/sandboxShell.js'
-import { catchUpInSandbox, runInSandbox, SandboxClient, startInSandbox, WATCH_LINE_MAX_BYTES } from '../src/sandbox/client.js'
-import { MAX_SLOTS, SLOT_KEEP_BYTES } from '../src/sandbox/protocol.js'
+import { catchUpInSandbox, runInSandbox, type SandboxEndpoint, type Sandboxes, SandboxClient, startInSandbox, WATCH_LINE_MAX_BYTES } from '../src/sandbox/client.js'
+import { MANIFEST_MAX_ENTRIES, MAX_SLOTS, SLOT_KEEP_BYTES } from '../src/sandbox/protocol.js'
 import { reapStrays } from '../src/sandbox/server.js'
 import { UNTRUSTED_KEY } from '../src/safety/untrusted.js'
 import { LocalSandboxes, startLocalSandbox } from './support/sandbox.js'
@@ -343,6 +343,65 @@ describe("a slot's files come back to the session", () => {
     }
   })
 
+  it('takes a base as large as a full manifest of long paths', async () => {
+    const client = new SandboxClient((await sandboxes.acquire(SESSION)), signal())
+    const seg = (c: string) => c.repeat(127)
+    const base = new Map<string, string>()
+    // 511-character paths, the longest a workspace path is, at the manifest's entry cap: about 11.6 MiB of JSON.
+    for (let i = 0; i < MANIFEST_MAX_ENTRIES; i++) base.set(`${seg('a')}/${seg('b')}/${seg('c')}/${String(i).padStart(127, 'f')}`, 'e'.repeat(64))
+    await client.setBase(base)
+    expect((await client.base())?.size).toBe(MANIFEST_MAX_ENTRIES)
+  })
+
+  it('answers a command that ran even when the pod refuses its base afterwards', async () => {
+    const box = await startLocalSandbox()
+    let refuse = false
+    const proxy = createServer((req, res) => {
+      if (refuse && req.method === 'PUT' && req.url === '/v1/base') {
+        req.resume()
+        res.writeHead(400, { 'content-type': 'application/json' })
+        res.end('{"error":"the body is too large"}')
+        return
+      }
+      const up = request(`${box.endpoint.url}${req.url}`, { method: req.method, headers: req.headers }, (r) => {
+        res.writeHead(r.statusCode ?? 502, r.headers)
+        r.pipe(res)
+      })
+      up.on('error', () => res.destroy())
+      req.pipe(up)
+    })
+    await new Promise<void>((r) => proxy.listen(0, '127.0.0.1', r))
+    const endpoint: SandboxEndpoint = { url: `http://127.0.0.1:${(proxy.address() as AddressInfo).port}`, token: box.endpoint.token }
+    const via: Sandboxes = { acquire: async () => endpoint, find: async () => endpoint }
+    try {
+      const c = { ...call(), sandboxes: via }
+      const { slot } = await startInSandbox(c, 'bash', 'true', 10_000)
+      await drain(new SandboxClient(endpoint, signal()), slot.id)
+      refuse = true
+      const run = await runInSandbox(c, 'bash', 'echo ran > ran.txt; echo ok', 10_000)
+      expect(run.result.stdout).toBe('ok\n')
+      expect(await readFile(path.join(dir, 'ran.txt'), 'utf8')).toBe('ran\n')
+    } finally {
+      proxy.closeAllConnections()
+      await new Promise((r) => proxy.close(r))
+      box.server.closeAllConnections()
+      await box.close()
+    }
+  })
+
+  it("keeps the base past a command whose manifest is truncated, so a running slot's writes still come back", async () => {
+    const { slot } = await startInSandbox(call(), 'bash', 'while [ ! -e .go ]; do sleep 0.05; done; echo slot > late.txt', 60_000)
+    const client = new SandboxClient(sandboxes.started.get(SESSION)!.endpoint, signal())
+    // More entries than a manifest walks (names it never syncs, so none comes back): its manifest is truncated.
+    await runInSandbox(call(), 'bash', `mkdir many && cd many && seq 1 ${MANIFEST_MAX_ENTRIES + 1} | sed 's/^/./' | xargs touch`, 60_000)
+    expect(await client.base()).not.toBeNull()
+    await runInSandbox(call(), 'bash', 'rm -rf many; touch .go', 10_000)
+    await drain(client, slot.id)
+    const run = await runInSandbox(call(), 'bash', 'cat late.txt', 10_000)
+    expect(run.result.stdout).toBe('slot\n')
+    expect(await readFile(path.join(dir, 'late.txt'), 'utf8')).toBe('slot\n')
+  }, 60_000)
+
   it('under the same caps as a foreground command', async () => {
     const { slot } = await startInSandbox({ ...call(), limits: { fileMaxBytes: 10, workspaceMaxBytes: 1000 } }, 'bash', 'head -c 100 /dev/zero > big.bin', 10_000)
     await drain(new SandboxClient(sandboxes.started.get(SESSION)!.endpoint, signal()), slot.id)
@@ -413,6 +472,50 @@ describe("following a slot from the worker (background/sandboxSource.ts)", () =>
     expect(end).toEqual({ outcome: 'cancelled' })
     const client = new SandboxClient(sandboxes.started.get(SESSION)!.endpoint, AbortSignal.timeout(10_000))
     expect(await client.slotStatus(slot.id)).toBeUndefined()
+  })
+
+  it('resumes a broken watch from the last byte it had, and notes what the pod no longer kept', async () => {
+    const id = 'b'.repeat(32)
+    const status = { id, running: false, exit_code: 0, signal: null, timed_out: false, stopped: false, bytes: 14, output_file: '/tmp/x' }
+    const froms: string[] = []
+    const pod = createServer((req, res) => {
+      const url = new URL(req.url ?? '/', 'http://pod')
+      if (url.pathname !== `/v1/slots/${id}/watch`) {
+        res.writeHead(404, { 'content-type': 'application/json' })
+        res.end('{"error":"no"}')
+        return
+      }
+      froms.push(url.searchParams.get('from') ?? '')
+      res.writeHead(200, { 'content-type': 'application/x-ndjson' })
+      if (froms.length === 1) {
+        // The first watch is cut short after four bytes.
+        res.write('{"type":"data","at":0,"stream":"stdout","bytes":4}\nabc\n{"type":"data","at":4,"stream":"stdout","bytes":9}\nxy')
+        res.end()
+        return
+      }
+      // The resumed watch: what the pod no longer keeps, then cut short again; the next resumes past it.
+      if (froms.length === 2) res.end('{"type":"lost","from":4,"to":10}\n{"type":"data","at":10,"stream":"stdout","bytes":4}\nxy')
+      else res.end(`{"type":"data","at":10,"stream":"stdout","bytes":4}\nxyz\n{"type":"end","status":${JSON.stringify(status)}}\n`)
+    })
+    await new Promise<void>((r) => pod.listen(0, '127.0.0.1', r))
+    const endpoint = { url: `http://127.0.0.1:${(pod.address() as AddressInfo).port}`, token: 't' }
+    const events: string[] = []
+    try {
+      const end = await followSlot({ sandboxes: { acquire: async () => endpoint, find: async () => endpoint }, limits: async () => limits }, task({ sandbox: { slot: id, shell: 'bash', outputFile: '/tmp/x' } }), {
+        dir,
+        timeoutMs: 10_000,
+        signal: new AbortController().signal,
+        onEvent: async (text) => (events.push(text), true),
+        onNotice: async () => {},
+        retryMs: 10,
+      })
+      expect(end).toEqual({ outcome: 'exited', code: 0 })
+      expect(froms).toEqual(['0', '4', '10'])
+      expect(events.join('\n')).toBe('abc\n[6 bytes of output not kept]\nxyz')
+    } finally {
+      pod.closeAllConnections()
+      await new Promise((r) => pod.close(r))
+    }
   })
 
   it("ends with a clear reason when the session's pod is gone", async () => {

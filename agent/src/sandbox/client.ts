@@ -822,8 +822,15 @@ export function runInSandbox(options: SandboxCall, shell: Shell, command: string
       const result = await client.exec(shell, command, timeoutMs)
       const back = await syncBack(client, options.dir, before, options.limits, kept)
       await client.setKept(kept)
-      // The base is kept once a slot has run here (startInSandbox set it): the pod as this sync left it.
-      if (base !== null) await client.setBase(back.after ?? null)
+      // The base is kept once a slot has run here (startInSandbox set it): the pod as this sync
+      // left it. A truncated manifest gives none to trust, and the previous one stays: cleared, a
+      // slot that still runs would have its writes taken for the session's to overwrite. The
+      // command ran and its changes are in the session: a base that cannot be set is not its failure.
+      if (base !== null && back.after) {
+        await client.setBase(back.after).catch((err: unknown) => {
+          console.warn(`session ${options.sessionId}: the sandbox's base could not be set after a command: ${err instanceof Error ? err.message : String(err)}`)
+        })
+      }
       return {
         result,
         back,

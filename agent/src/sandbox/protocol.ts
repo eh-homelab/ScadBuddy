@@ -31,6 +31,12 @@ export const MAX_SEGMENTS = 4
 export const SCRATCH_DIRS: ReadonlySet<string> = new Set(['node_modules', '__pycache__'])
 /** How many entries a manifest walk visits before it stops and says it is truncated. */
 export const MANIFEST_MAX_ENTRIES = 20_000
+/**
+ * The most a PUT of a path record (the base, the kept record) may be: MANIFEST_MAX_ENTRIES
+ * entries of `"<path>":"<sha256>",`, each path at most WORKSPACE_PATH_MAX characters that JSON
+ * never escapes (WORKSPACE_PATH), so a full manifest's record always fits (about 11.6 MiB).
+ */
+export const RECORD_MAX_BYTES = MANIFEST_MAX_ENTRIES * (WORKSPACE_PATH_MAX + 72) + 64
 
 /** Whether `rel` is a workspace path that syncs: the workspace's form, and no scratch directory in it. */
 export function syncPath(rel: string): boolean {
