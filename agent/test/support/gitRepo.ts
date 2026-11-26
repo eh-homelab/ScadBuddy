@@ -9,6 +9,9 @@ import { type Checkout, FetchError, GitFetcher, type RepoFetcher } from '../../s
 // only fetches https URLs that pass the egress check; `localFetcher` maps
 // such a URL to a file:// repository here and fetches it with the real
 // GitFetcher (so the real git commands run), allowed the file protocol.
+// A repository serves partial fetches (`uploadpack.allowFilter`, as GitHub does)
+// unless made with `filter: false`, so a package's `path` gets the sparse
+// checkout (#7908); without it git warns and sends every blob.
 
 export const gitMissing: string | undefined = (() => {
   try {
@@ -35,6 +38,8 @@ function git(dir: string, ...args: string[]): string {
 
 export type Files = Record<string, string>
 
+export type RepoOptions = { symlinks?: Files; executable?: string[]; filter?: boolean }
+
 export type TestRepo = {
   dir: string
   commit: string
@@ -43,9 +48,13 @@ export type TestRepo = {
   remove(): void
 }
 
-export function gitRepo(files: Files, options: { symlinks?: Files; executable?: string[] } = {}): TestRepo {
+export function gitRepo(files: Files, options: RepoOptions = {}): TestRepo {
   const dir = mkdtempSync(path.join(os.tmpdir(), 'pkg-repo-'))
   git(dir, 'init', '-q', '-b', 'main')
+  if (options.filter !== false) {
+    git(dir, 'config', 'uploadpack.allowFilter', 'true')
+    git(dir, 'config', 'uploadpack.allowAnySHA1InWant', 'true')
+  }
   const commitFiles = (next: Record<string, string | null>, opts: { symlinks?: Files; executable?: string[] } = {}) => {
     for (const [rel, content] of Object.entries(next)) {
       const abs = path.join(dir, rel)
@@ -75,12 +84,12 @@ export function localFetcher(repos: Record<string, TestRepo>): RepoFetcher & { c
   const checkouts: string[] = []
   return {
     checkouts,
-    checkout(url: string, ref: string, into: string, signal?: AbortSignal): Promise<Checkout> {
+    checkout(url: string, ref: string, into: string, signal?: AbortSignal, subpath?: string): Promise<Checkout> {
       checkouts.push(`${url}@${ref}`)
       const key = /^https:\/\/git\.test\/(.+)\.git$/.exec(url)?.[1]
       const repo = key === undefined ? undefined : repos[key]
       if (!repo) return Promise.reject(new FetchError(`no test repository for ${url}`))
-      return real.checkout(pathToFileURL(repo.dir).href, ref, into, signal)
+      return real.checkout(pathToFileURL(repo.dir).href, ref, into, signal, subpath)
     },
     specialPaths: (checkout, subpath) => real.specialPaths(checkout, subpath),
   }
