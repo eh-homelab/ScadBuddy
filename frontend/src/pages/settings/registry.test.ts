@@ -123,6 +123,7 @@ describe('registry', () => {
           'workspace',
           'memory',
           'notifications',
+          'flow-answerers',
         ],
       ],
       ['tools', ['builtin', 'packages', 'hosted-plugins', 'remote']],

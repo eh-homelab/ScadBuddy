@@ -93,8 +93,9 @@ read_by_tests=$(sed -n "s/^read_by_tests='\(.*\)'$/\1/p" "$here/select-lanes.sh"
 IFS='|' read -ra patterns <<<"$read_by_tests"
 for pattern in "${patterns[@]}"; do
   path=$(sed -e 's/^\^//' -e 's/\$$//' -e 's/\\//g' <<<"$pattern")
-  # Each entry must be a literal path; a regex could not be matched to a ci.yml line.
-  if [[ "$(sed -e 's/^\^//' -e 's/\$$//' -e 's/\\.//g' <<<"$pattern")" =~ [][*+?(){}^$.\\] ]]; then
+  # Each entry must be a literal path; a regex could not be matched to a ci.yml line. Only an
+  # escaped dot is literal: any other escape (`\w`, `\d`) leaves its backslash and fails here.
+  if [[ "$(sed -e 's/^\^//' -e 's/\$$//' -e 's/\\\.//g' <<<"$pattern")" =~ [][*+?(){}^$.\\] ]]; then
     echo "FAIL: read_by_tests entry $pattern is not a literal path"; fail=1; continue
   fi
   grep -qxF -- "      - \"$path\"" "$here/../workflows/ci.yml" \

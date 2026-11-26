@@ -470,6 +470,8 @@ func TestTheFlowReadsLeaveOutMalformedEntries(t *testing.T) {
 		'{"session":"s","principal":7}', '{}')`, run, waiting)
 	queue := a.ok("GET", "/flow-runs/"+run+"/queue", "").body["run"].(map[string]any)
 	expect(t, len(queue["waiting_on"].([]any)), 1)
+	// A call parked before #7471 has no people_only: it reads as people only.
+	expect(t, queue["waiting_on"].([]any)[0].(map[string]any)["people_only"], true)
 	expect(t, queue["steps"], []any{map[string]any{"seq": 1.0, "fn": "f", "call_id": "c1",
 		"status": "done", "session_id": nil}})
 	expect(t, queue["starter_session"], "s")

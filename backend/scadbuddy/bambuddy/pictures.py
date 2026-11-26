@@ -34,14 +34,21 @@ def scadbuddy_picture(job: ScadBuddyJob) -> str | None:
 
 def queue_item_picture(item: QueueItem, job: ScadBuddyJob | None) -> str | None:
     """A queued item's picture: ScadBuddy's for its own job, else Bambuddy's thumbnail
-    of the item's library file, else of its archive, where Bambuddy has one."""
+    of the item's library file, else of its archive, where Bambuddy has one. An item for
+    plate 2 or later shows that plate's image, not the cover, which is plate 1's (#7458);
+    the farm serves the cover when Bambuddy has no image of the plate."""
     ours = scadbuddy_picture(job) if job is not None else None
     if ours is not None:
         return ours
+    picture = (
+        "thumbnail"
+        if item.plate_id is None or item.plate_id < 2
+        else f"plates/{item.plate_id}/thumbnail"
+    )
     if item.library_file_id is not None and item.library_file_thumbnail:
-        return f"{FARM}/library/{item.library_file_id}/thumbnail"
+        return f"{FARM}/library/{item.library_file_id}/{picture}"
     if item.archive_id is not None and item.archive_thumbnail and not item.archive_deleted:
-        return f"{FARM}/archives/{item.archive_id}/thumbnail"
+        return f"{FARM}/archives/{item.archive_id}/{picture}"
     return None
 
 

@@ -215,7 +215,9 @@ One image, two roles ([agent.md](agent.md#processes-and-roles)). The sidecar ser
 ## Session sandbox and egress proxy
 
 `SCADBUDDY_SANDBOX_ROLE=exec` is one pod per assistant session that runs sandboxed `Bash`
-and `PowerShell`; `egress` is those pods' CONNECT proxy (`agent/src/sandbox/main.ts:13-19`).
+and `PowerShell`, and their background commands and a `Monitor`'s command in background
+slots (`agent/src/sandbox/slots.ts`, #5916, #7310); `egress` is those pods' CONNECT proxy
+(`agent/src/sandbox/main.ts:13-19`).
 The agent worker creates the pods through the Kubernetes API (`agent/src/sandbox/pods.ts:192`).
 
 ## agent-durable

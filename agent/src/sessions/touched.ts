@@ -298,6 +298,8 @@ export const EXTRACTORS: Readonly<Record<string, Extractor>> = {
   revoke_flow_trigger_grant: () => [],
   // A starting session's answer to its run's call (#2482) is recorded on the call's hops.
   escalation_respond: () => [],
+  // An answer to a flow's question (#7471) is the run's: its decision names the session.
+  answer_flow_question: () => [],
   // Orders (#4249) are their own record: an order's page carries its audit line, one row
   // per status change, quote, attempt, shipment and payment, with who made each.
   customer_upsert: () => [],

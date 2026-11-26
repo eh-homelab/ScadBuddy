@@ -299,9 +299,10 @@ export class PackageInstaller {
     return problems
   }
 
-  private async checkout(url: string, ref: string, into: string, signal?: AbortSignal): Promise<Checkout> {
+  /** `subpath`: the one folder used from the checkout, so only its files are fetched (#7908); '' for all. */
+  private async checkout(url: string, ref: string, into: string, signal: AbortSignal | undefined, subpath: string): Promise<Checkout> {
     try {
-      return await this.fetcher.checkout(url, ref, into, signal)
+      return await this.fetcher.checkout(url, ref, into, signal, subpath)
     } catch (err) {
       if (err instanceof FetchError) throw new PluginError(err.message, 502)
       throw err
@@ -500,7 +501,7 @@ export class PackageInstaller {
     await this.egress(fetchUrl, `marketplace entry "${fallbackName}"`)
     const tmp = await this.tempDir()
     try {
-      const checkout = await this.checkout(fetchUrl, ref, path.join(tmp, 'repo'), signal)
+      const checkout = await this.checkout(fetchUrl, ref, path.join(tmp, 'repo'), signal, fetchPath)
       const pkg = path.join(tmp, 'pkg')
       const { tree, review } = await this.extractAndVet(checkout, fetchPath, pkg, fallbackName)
       const prepared: PreparedPackage = {
@@ -533,7 +534,9 @@ export class PackageInstaller {
     await this.egress(source.url, 'source url')
     const tmp = await this.tempDir()
     try {
-      const repo = await this.checkout(source.url, source.ref, path.join(tmp, 'repo'), signal)
+      // A marketplace's own repository is fetched whole: its entry's folder is not known until
+      // marketplace.json is read, and a relative entry is a folder of this same checkout.
+      const repo = await this.checkout(source.url, source.ref, path.join(tmp, 'repo'), signal, source.kind === 'git' ? source.path : '')
       let checkout = repo
       let fetchUrl = source.url
       let fetchPath = source.kind === 'git' ? source.path : ''
@@ -552,7 +555,7 @@ export class PackageInstaller {
         fetchPath = target.path
         if (!target.sameRepo) {
           await this.egress(target.url, `marketplace entry "${source.entry}"`)
-          checkout = await this.checkout(target.url, target.ref, path.join(tmp, 'plugin-repo'), signal)
+          checkout = await this.checkout(target.url, target.ref, path.join(tmp, 'plugin-repo'), signal, target.path)
         }
         fallbackName = source.entry
       } else {
@@ -746,7 +749,7 @@ export class PackageInstaller {
       await this.egress(pin.fetchUrl, 'plugin url')
       const tmp = await this.tempDir()
       try {
-        const checkout = await this.checkout(pin.fetchUrl, pin.commit, path.join(tmp, 'repo'))
+        const checkout = await this.checkout(pin.fetchUrl, pin.commit, path.join(tmp, 'repo'), undefined, pin.fetchPath)
         if (checkout.commit !== pin.commit) {
           throw new PluginError(`fetched commit ${checkout.commit}, the pin is ${pin.commit}`, 502)
         }

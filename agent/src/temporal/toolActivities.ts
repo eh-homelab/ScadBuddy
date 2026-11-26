@@ -31,7 +31,7 @@ import { turnPrincipal } from '../tools/harness.js'
 import { FLOW_IMAGES_MAX, type FlowBlobStore, type FlowImage, flowImageOf } from './flowBlobs.js'
 import type { FlowRunReads } from '../flows/backendReads.js'
 import { flowOf, type FlowRuns } from './flowRuns.js'
-import { FLOW_TOOL_TIER_ACTIVITY, flowToolTierActivity } from './flowTools.js'
+import { FLOW_TOOL_TIER_ACTIVITY, flowToolTierActivity, forFlows } from './flowTools.js'
 import { BUILTIN_TIER_ACTIVITY, builtinTier, TOOL_TIER_ACTIVITY, toolTierActivity } from './toolTier.js'
 import type { AccessResolver } from '../access/resolver.js'
 import { type WorkspaceFiles, withWorkspaceSize } from '../workspace/store.js'
@@ -383,8 +383,11 @@ type Caller = {
  * was given, so an approval of the parked call authorises no other tool or input.
  */
 async function flowCaller(tool: Tool, flow: string, deps: ToolActivityDeps, toolUseId: string): Promise<Caller> {
-  if (tool.name.startsWith('browser_')) {
-    throw ApplicationFailure.nonRetryable(`${tool.name} is not for flows: a flow has no session and no browser tab`, NOT_FOR_FLOWS)
+  if (!forFlows(tool)) {
+    throw ApplicationFailure.nonRetryable(
+      `${tool.name} is not for flows: a flow has no session or browser tab, and never answers its own questions`,
+      NOT_FOR_FLOWS,
+    )
   }
   // #2258: without the execution's run id the request id (`flow:<run>:<execution>:<call>`)
   // matches no decision, so the call would be refused NotApproved with no reason given.

@@ -683,8 +683,10 @@ opens every one and seals it again byte for byte).
     (`background/temporal.ts`, plan Step 9.8, its older jobs converted at start by
     `convertCronTasks`), and a wakeup or a one-shot cron one `BackgroundTask` workflow on
     `agent-tools`; a Monitor's command
-    runs on the replica that ran the turn, its own queue, and never where a sandbox is set up
-    (#5864: its description there offers `ws` only), its events in
+    runs on the replica that ran the turn, its own queue, or, where a sandbox is set up, in the
+    session's pod as a background slot (`sandbox/slots.ts`) that the activity on that queue
+    follows (`background/sandboxSource.ts`, #5916), as does a sandboxed Bash or PowerShell with
+    `run_in_background` (a `monitor` task with `spec.background` `shell`, #7310), its events in
     `ai_background_events`; a Workflow's
     script runs in QuickJS (`workflowRunner.ts`, never Node's `vm`), each `agent()` a child chat
     (`workflowAgents.ts`, a chat with no background built-in of its own), its results journalled in `ai_workflow_calls`; every turn that has them

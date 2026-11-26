@@ -55,7 +55,7 @@ import { nestedQueries } from '../builtins/nested.js'
 import { browserGuard } from '../browser/guard.js'
 import { loadAgentDefinitions } from '../harness/agentDefinitions.js'
 import { BUILTIN_SERVER, classicBuiltinNote, classicBuiltinServer } from '../builtins/server.js'
-import { sandboxShellTools, SHELL_BUILTINS } from '../builtins/sandboxShell.js'
+import { sandboxShellTools, sandboxStarter, SHELL_BUILTINS, type ShellContext } from '../builtins/sandboxShell.js'
 
 /** The longest a turn's assembly waits for its plugin and http tools' listing (temporal/turnTools.ts LIST_TIMEOUT_MS is each server's). */
 const TURN_TOOLS_LIST_MS = 30_000
@@ -475,10 +475,10 @@ export class TurnRunner {
       const servedTools = [...sessionTools, ...shellTools]
       const served = servedTools.map((t) => t.name)
       /**
-       * Bash's tier when the turn offers it natively: a Monitor's command runs a shell where Bash runs
-       * (nativeBuiltins.ts `SESSION_BUILTINS`). Never with a sandbox: there Bash runs in the pod.
+       * Bash's tier when the turn offers it: a Monitor's command runs a shell where Bash runs
+       * (nativeBuiltins.ts `SESSION_BUILTINS`), natively here or, with a sandbox, in the session's pod (#5916).
        */
-      const shellTier = nativeTools.find((t) => t.name === BASH)?.tier
+      const shellTier = (this.deps.sandbox ? shellTools : nativeTools).find((t) => t.name === BASH)?.tier
       servedTier = sessionTierOf(servedTools, shellTier)
       // Every package's http MCP servers, through the forwarder like a remote
       // plugin's (#2320); Claude Code loads the packages without them (above).
@@ -592,6 +592,20 @@ export class TurnRunner {
       const movedNote = ranIn !== undefined && ranIn !== here ? directoryNote(ranIn, here) : undefined
       // Claude Code's task list in the session directory, so it moves with it (Step 9.6, stateDirs.ts).
       if (nativeTools.some((t) => TASK_TOOLS.has(t.name))) await linkTaskList(this.deps.paths, cwd, id)
+      // The session's sandbox pod (#5864), where its Bash and PowerShell run, and its background commands (#5916, #7310).
+      const sandboxes = this.deps.sandbox
+      const files = this.deps.files
+      const shell: ShellContext | undefined = sandboxes
+        ? {
+            sandboxes,
+            sessionId: id,
+            dir: cwd,
+            limits: () => files.limits(),
+            get signal() {
+              return slot.current?.http?.signal ?? AbortSignal.abort(new Error(NO_TURN))
+            },
+          }
+        : undefined
       // The turn's ScadBuddy calls as activities (plan 2026-10-13 Step 9.2), each given the gate
       // entry the seam approved it on, and bounded by the turn's own limit. Without a starter (no
       // Temporal), they run here.
@@ -726,7 +740,7 @@ export class TurnRunner {
           : {}),
         // ScadBuddy's fixed part (the untrusted-data notice and the tool notes), then the user's own
         // text from Settings → Assistant → Runtime (#5222), on the base the user chose.
-        systemPromptAppend: [systemAppend(), ...(served.length ? [classicBuiltinNote(servedTools, shellTier, this.deps.sandbox !== undefined)] : []), turnSettings.system_prompt_append.trim()]
+        systemPromptAppend: [systemAppend(), ...(served.length ? [classicBuiltinNote(servedTools, shellTier)] : []), turnSettings.system_prompt_append.trim()]
           .filter((part) => part !== '')
           .join('\n\n'),
         systemPromptBase: turnSettings.system_prompt_base,
@@ -765,19 +779,7 @@ export class TurnRunner {
                 ...(served.length
                   ? {
                       [BUILTIN_SERVER]: classicBuiltinServer(served, {
-                        ...(this.deps.sandbox
-                          ? {
-                              shell: {
-                                sandboxes: this.deps.sandbox,
-                                sessionId: id,
-                                dir: cwd,
-                                limits: () => this.deps.files.limits(),
-                                get signal() {
-                                  return slot.current?.http?.signal ?? AbortSignal.abort(new Error(NO_TURN))
-                                },
-                              },
-                            }
-                          : {}),
+                        ...(shell ? { shell } : {}),
                         ...(this.deps.background
                           ? {
                               background: {
@@ -786,9 +788,11 @@ export class TurnRunner {
                                 owner: session.owner,
                                 tz: this.deps.background.tz,
                                 now: () => new Date(),
-                                // A Monitor's command runs where this turn's Bash runs: this replica, and only while
-                                // Bash is on there. With a sandbox (#5864) the session's Bash runs in its pod, so never.
+                                // A Monitor's command runs where this turn's Bash runs, and only while Bash is on: this
+                                // replica, or the session's sandbox pod (#5916), followed from this replica, which
+                                // holds the session directory its files come back to.
                                 ...(shellTier !== undefined ? { commandQueue: this.deps.background.commandQueue } : {}),
+                                ...(shell && shellTier !== undefined ? { sandbox: sandboxStarter(shell) } : {}),
                                 workspace: this.deps.files,
                                 // Where Claude Code's file tools work: a Workflow's script is kept there (#5162).
                                 dir: cwd,

@@ -4,6 +4,10 @@ import { Link } from 'react-router'
 import { ApiError } from '../../../api/client'
 import { createSpool, listSpools, postTagRead, type DecodedSpool, type NdefRecord, type Spool, type TagReadResult } from '../../../api/filament'
 import { filamentLinks } from '../../../lib/filamentLinks'
+import { useAsync } from '../../../lib/useAsync'
+import { entityApi, type PropertyValue } from '../../entities/api'
+import { DefinedFields } from '../../entities/DefinedFields'
+import { fieldErrorsOf, propertiesPatch, refusalText, type FieldErrors } from '../../entities/definedProperties'
 import { RgbaSwatch } from '../RgbaSwatch'
 import { PhotoButtons, type HeldPhotos } from './PhotoButtons'
 import { Button } from '@/components/ui/button'
@@ -97,6 +101,11 @@ export function NewTag({ uid, records, result, onBound, held, onHeld }: NewTagPr
   const [search, setSearch] = useState('')
   /** The spool "Create" made when its bind failed: the next tap binds it, and makes none. */
   const [made, setMade] = useState<Spool | null>(null)
+  // #7703: the spool's defined keys, so a create its required keys refuse can be filled here.
+  const keys = useAsync(() => entityApi.propertySchema('spool'), [])
+  const schema = keys.data?.schema ?? {}
+  const [defined, setDefined] = useState<Record<string, PropertyValue | undefined>>({})
+  const [fieldErrors, setFieldErrors] = useState<FieldErrors | undefined>()
 
   useEffect(() => {
     let live = true
@@ -124,11 +133,15 @@ export function NewTag({ uid, records, result, onBound, held, onHeld }: NewTagPr
     if (!result.draft && !made) return
     setBusy(true)
     setError(null)
+    setFieldErrors(undefined)
     let spool = made
     try {
-      spool ??= await createSpool(result.draft!)
+      const properties = propertiesPatch(schema, {}, defined)
+      spool ??= await createSpool(Object.keys(properties).length > 0 ? { ...result.draft!, properties } : result.draft!)
     } catch (cause) {
-      setError(reasonOf(cause, 'ScadBuddy could not make the spool. Try again.'))
+      const refused = fieldErrorsOf(cause)
+      setFieldErrors(refused ?? undefined)
+      setError(refused ? refusalText(refused) : reasonOf(cause, 'ScadBuddy could not make the spool. Try again.'))
       setBusy(false)
       return
     }
@@ -158,6 +171,7 @@ export function NewTag({ uid, records, result, onBound, held, onHeld }: NewTagPr
     <div className="flex flex-col gap-5">
       {result.decoded ? <DecodedFields decoded={result.decoded} /> : <p className="text-muted-foreground">The tag holds no spool data ScadBuddy can read.</p>}
       <PhotoButtons spool={null} held={held} onHeld={onHeld} />
+      {!made && result.draft && <DefinedFields schema={schema} values={defined} onChange={setDefined} errors={fieldErrors} />}
       {made ? (
         <Button type="button" className="h-12 text-base" disabled={busy} onClick={() => void create()}>
           <LinkIcon /> Bind to spool #{made.number}
