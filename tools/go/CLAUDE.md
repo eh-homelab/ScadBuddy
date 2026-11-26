@@ -19,7 +19,7 @@ runs `go work sync`, which would move a lagging client's `go.mod` past its own
 bambuddy-fs's mount tests need `/dev/fuse` and `fusermount3` (they skip without the
 device). core's tests need `SCADBUDDY_TEST_DATABASE_URL` (they skip without it;
 CI sets `SCADBUDDY_TEST_POSTGRES_REQUIRED`). The Go toolchain is pinned in these places, moved together: `go.work`'s
-`toolchain`, the golang tag in `tools/go/bambuddy-fs/Dockerfile`, `tools/go/core/Dockerfile` and `tools/go/fleet/Dockerfile`, and `GOTOOLCHAIN` in
+`toolchain`, the golang tag in `tools/go/bambuddy-fs/Dockerfile`, `tools/go/core/Dockerfile`, `tools/go/fleet/Dockerfile` and `tools/go/fleetd/Dockerfile`, and `GOTOOLCHAIN` in
 `go-module-ci.yml`, in `ci.yml`'s two freshness steps and in its `go-client` job.
 
 
@@ -39,6 +39,12 @@ CI sets `SCADBUDDY_TEST_POSTGRES_REQUIRED`). The Go toolchain is pinned in these
   `…/crud/fleet/` routes and a `Bus` over the API's fleet change stream, with the `fleet`
   credential; it imports nothing from `core/`) and the server binary (`/mcp`, `/healthz`,
   `FLEETCHAT_*` settings; README there).
+  `fleetd/` is the fleet's machine service (#7987), a systemd user service on each Linux
+  machine: `internal/discover` (the hashed machine id, live sessions from
+  `<config dir>/sessions` and `/proc`, transcript paths by name only, git facts, the
+  account uuid), `internal/registry` (the client of core's `…/crud/fleet-rotator/machines`
+  routes, a `fleet` PAT from `--token-file`, https only), `internal/report` (changed rows
+  only, all every 5 minutes) and `internal/watch` (inotify); README there.
   `claudecreds/` is a library for Claude Code logins (#7981): `ResetFromText`, the reset a
   usage-limit text names, in UTC or an IANA zone, held to the agent's
   `rate-limit-reset-vectors.json` with the TypeScript and Python ports (#7986; README there).
