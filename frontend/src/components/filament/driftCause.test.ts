@@ -23,8 +23,8 @@ describe('driftCause (#7685, spec §5.6)', () => {
   })
 
   it('names the density when the drift is what the slicer over-counted', () => {
-    // 300 g booked at the type's 1.24 of filament that is really 1.31: the ledger took 300 g off,
-    // the scale sees 300 × 1.24 / 1.31 = 284 g gone, 16 g more left than expected.
+    // 300 g booked by a slicer at 1.31 of filament that is really the type's 1.24: the ledger
+    // took 300 g off, the scale sees 300 × 1.24 / 1.31 = 284 g gone, 16 g more left than expected.
     const dense = input({ driftG: 16, usedG: 300, impliedDensity: 1.31, typeDensity: 1.24, densityMismatch: true })
     expect(driftCause(dense)).toEqual({ kind: 'density', implied: 1.31, type: 1.24 })
     // A drift that the densities do not explain is not blamed on them.

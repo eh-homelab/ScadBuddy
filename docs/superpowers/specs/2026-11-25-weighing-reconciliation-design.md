@@ -271,7 +271,13 @@ change:
   fit winning, none under a gram of drift: the label weight (the drift is the start gap,
   within a gram or a tenth), the density (the drift is `used_g × (1 − type / implied)`, the
   same tolerance, with a mismatch), then a placeholder empty weight. The sentence follows the
-  drift sentence in the Weight section ("Likely cause: …").
+  drift sentence in the Weight section ("Likely cause: …"). Two readings of this section as
+  built: the implied density is the slicer's own grams over its own metres, so it is the
+  slicer preset's density read back, not a measurement, and a mismatch means the preset's
+  density and the type's disagree; and a placeholder empty weight is named for any drift
+  of a gram or more, since nothing knows the real empty weight to match the drift against.
+  The label-weight and placeholder causes show as soon as the spool is read; the density
+  cause needs the history, so it can replace a placeholder cause once the history loads.
 
 ### 5.7 Carriers (slice E, #7278)
 

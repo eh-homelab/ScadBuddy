@@ -5,8 +5,10 @@
  * A sentence, never a booking. The first rule that fits wins, in this order:
  *
  * 1. `label_weight`: the scale found exactly the gap the label over-promised.
- * 2. `density`: the ledger took the slicer's grams, sliced at the type's density; filament
- *    of the prints' density would have weighed `usedG × type / implied`.
+ * 2. `density`: the ledger took the slicer's grams, sliced at the density the prints imply
+ *    (the slicer's own grams over its own metres, so its preset's density read back);
+ *    filament of the type's density weighed `usedG × type / implied`, and the scale finds
+ *    `usedG × (1 − type / implied)` more than the ledger expected.
  * 3. `empty_weight`: the spool's empty weight is a placeholder.
  */
 import type { SpoolEvent } from '../../api/filament'

@@ -267,16 +267,19 @@ history (`GET /filament/spools/{id}/history`) sums the metres of the plates that
 (`metrics.used_m`, null when none does), derives the density those plates' grams and metres
 imply over the spool's effective diameter (`implied_density_g_cm3`; 1 m of 1.75 mm filament
 at 1.24 g/cm³ is 2.98 g) and compares it with the type's (`density_g_cm3`): apart by more
-than 5 % is `density_mismatch`. The spool page's Used tile adds the metres ("3 prints, 40 g
+than 5 % is `density_mismatch`. Both numbers are the slicer's, so the implied density is
+the slicer preset's density read back, not a measurement: a mismatch means the preset and
+the type disagree about the filament. The spool page's Used tile adds the metres ("3 prints, 40 g
 each, 11.7 m"), a Density tile shows the implied value with "The type says 1.24 g/cm³" or
 the mismatch sentence ("The prints imply 1.31 g/cm³, 6% over the type's 1.24 g/cm³: check
 the type's density or the label."), and the timeline shows a print's metres beside its grams
 ("−35 g, 11.7 m, measured"). A mismatch is a sentence, never a booking. The Weight section's
 drift sentence then names a likely cause when one fits, the first of: the label weight (the
 drift is the added-full spool's start gap), the type's density (the drift is what the
-slicer's grams over-counted at the type's density, with a mismatch), or a placeholder empty
-weight ("Likely cause: the spool's empty weight is a placeholder."). Nothing under a gram of
-drift, and nothing with no fit. Design: the same spec, §5.6.
+slicer's grams over-counted at its preset's density, with a mismatch), or a placeholder
+empty weight, for any drift, since the real empty weight is unknown ("Likely cause: the
+spool's empty weight is a placeholder."). Nothing under a gram of drift, and nothing with
+no fit; the density cause waits for the history to load. Design: the same spec, §5.6.
 
 ### The phone page, the hand-held Scan mode (#7273)
 
