@@ -27,6 +27,7 @@ import (
 	"github.com/eh-homelab/ScadBuddy/tools/go/core/internal/agentreads"
 	"github.com/eh-homelab/ScadBuddy/tools/go/core/internal/agentstart"
 	"github.com/eh-homelab/ScadBuddy/tools/go/core/internal/approvals"
+	"github.com/eh-homelab/ScadBuddy/tools/go/core/internal/assistantcost"
 	"github.com/eh-homelab/ScadBuddy/tools/go/core/internal/audit"
 	"github.com/eh-homelab/ScadBuddy/tools/go/core/internal/auth"
 	"github.com/eh-homelab/ScadBuddy/tools/go/core/internal/blobs"
@@ -34,6 +35,7 @@ import (
 	"github.com/eh-homelab/ScadBuddy/tools/go/core/internal/edits"
 	"github.com/eh-homelab/ScadBuddy/tools/go/core/internal/escalations"
 	"github.com/eh-homelab/ScadBuddy/tools/go/core/internal/events"
+	"github.com/eh-homelab/ScadBuddy/tools/go/core/internal/fetchgrants"
 	"github.com/eh-homelab/ScadBuddy/tools/go/core/internal/fleet"
 	"github.com/eh-homelab/ScadBuddy/tools/go/core/internal/forget"
 	"github.com/eh-homelab/ScadBuddy/tools/go/core/internal/front"
@@ -229,6 +231,7 @@ var areaPackages = []areaRoutes{
 	ordercosts.Areas, packages.Areas, pending.Areas, plugins.Areas, publish.Areas,
 	questions.Areas, secrets.Areas, sessions.Areas, stores.Areas, sweeps.Areas, tasks.Areas,
 	transcripts.Areas, workspace.Areas,
+	assistantcost.Areas, fetchgrants.Areas,
 }
 
 // sealed are the areas that seal or open with the KEK: without one they refuse to start.
@@ -247,7 +250,8 @@ func newRouter(pool *pgxpool.Pool, next http.Handler, keys *seal.Keys, areas, au
 	more := map[string][]crud.Route{}
 	for _, p := range areaPackages {
 		for name, routes := range p(pool, keys) {
-			more[name] = routes
+			// Two packages may serve one area (keys: secrets and fetchgrants).
+			more[name] = append(more[name], routes...)
 		}
 	}
 	for name := range strings.SplitSeq(areas, ",") {
