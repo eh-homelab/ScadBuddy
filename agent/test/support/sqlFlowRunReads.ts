@@ -62,10 +62,13 @@ export class SqlFlowRunReads implements FlowRunReads {
        WHERE d.request_id = ${requestId} AND d.kind = 'approval' AND d.outcome = 'approved'
          AND d.input_hash = ${inputHash}`
     const checks: DecisionChecks = { approved: false, approvedUnresolved: false, byPerson: false, lapsed: false }
+    // Each grant's chain is read once, however many rows name it (#7890).
+    const chains = new Map<string, boolean>()
     for (const row of rows) {
       const byGrant = row.responder.startsWith('grant:')
+      if (row.grant_id !== null && !chains.has(row.grant_id)) chains.set(row.grant_id, await this.#chainInForce(row.grant_id))
       // A run grant's approval holds only while its whole chain is in force (#2481, #5685).
-      const holds = !byGrant || (row.grant_id !== null && (await this.#chainInForce(row.grant_id)))
+      const holds = !byGrant || (row.grant_id !== null && chains.get(row.grant_id) === true)
       checks.approved ||= holds
       checks.approvedUnresolved ||= holds && (byGrant || row.narrowed === true)
       checks.byPerson ||= row.responder === 'browser'
@@ -83,7 +86,7 @@ export class SqlFlowRunReads implements FlowRunReads {
    * standing grant any of them was seeded from, under the approval that seeded it (#4252). */
   async #chainInForce(grantId: string): Promise<boolean> {
     const rows = await this.#sql<
-      { parent_grant_id: string | null; status: string; revoked_at: Date | null; expires_at: Date | null; standing_grant_id: string | null; standing_in_force: boolean | null }[]
+      { parent_grant_id: string | null; status: string; revoked_at: Date | null; live: boolean; standing_grant_id: string | null; standing_in_force: boolean | null }[]
     >`
       WITH RECURSIVE chain AS (
         SELECT id, parent_grant_id, status, revoked_at, expires_at, standing_grant_id,
@@ -91,18 +94,18 @@ export class SqlFlowRunReads implements FlowRunReads {
         UNION ALL SELECT g.id, g.parent_grant_id, g.status, g.revoked_at, g.expires_at,
                g.standing_grant_id, g.standing_approval_id, c.depth + 1
           FROM flow_grants g JOIN chain c ON g.id = c.parent_grant_id WHERE c.depth < 64)
-      SELECT c.*, (t.status = 'approved' AND t.revoked_at IS NULL
+      SELECT c.*, (c.expires_at IS NOT NULL AND c.expires_at > now()) AS live,
+             (t.status = 'approved' AND t.revoked_at IS NULL
                    AND t.expires_at > now() AND t.approval_id = c.standing_approval_id) AS standing_in_force
         FROM chain c LEFT JOIN flow_trigger_grants t ON t.id = c.standing_grant_id`
-    const now = Date.now()
+    // Both expiries by the database's clock, as the backend's (#7890).
     return (
       rows.length > 0 &&
       rows.every(
         (row) =>
           row.status === 'approved' &&
           row.revoked_at === null &&
-          row.expires_at !== null &&
-          now < row.expires_at.getTime() &&
+          row.live &&
           (row.standing_grant_id === null || row.standing_in_force === true),
       ) &&
       rows.some((row) => row.parent_grant_id === null)

@@ -1533,20 +1533,20 @@ def chain_in_force(conn: Connection[DictRow], grant_id: str) -> bool:
         " UNION ALL SELECT g.id, g.parent_grant_id, g.status, g.revoked_at, g.expires_at,"
         " g.standing_grant_id, g.standing_approval_id, c.depth + 1"
         " FROM flow_grants g JOIN chain c ON g.id = c.parent_grant_id WHERE c.depth < 64)"
-        " SELECT c.*, (t.status = 'approved' AND t.revoked_at IS NULL"
+        " SELECT c.*, (c.expires_at IS NOT NULL AND c.expires_at > now()) AS live,"
+        " (t.status = 'approved' AND t.revoked_at IS NULL"
         " AND t.expires_at > now() AND t.approval_id = c.standing_approval_id)"
         " AS standing_in_force FROM chain c"
         " LEFT JOIN flow_trigger_grants t ON t.id = c.standing_grant_id",
         (grant_id,),
     ).fetchall()
-    now = datetime.now(UTC)
+    # Both expiries by the database's clock, as before #5685 (#7890).
     return (
         bool(rows)
         and all(
             row["status"] == "approved"
             and row["revoked_at"] is None
-            and row["expires_at"] is not None
-            and now < row["expires_at"]
+            and row["live"] is True
             and (row["standing_grant_id"] is None or row["standing_in_force"] is True)
             for row in rows
         )
