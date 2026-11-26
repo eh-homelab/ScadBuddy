@@ -20,6 +20,38 @@ const rotatorBase = "/api/v1/internal/crud/fleet-rotator"
 // machineID is a machine's id as the rotator sends it: a SHA-256, in hex.
 const machineID = "5f1c0e7d2b9a8c4e3f6d1a0b9c8e7f6a5d4c3b2a1f0e9d8c7b6a5f4e3d2c1b0a"
 
+// onMachine starts the path of a session's row on machineID; the session id follows.
+const onMachine = "/machines/" + machineID + "/sessions/"
+
+// hostPath is the path of a session's row on a machine.
+func hostPath(machine, session string) string {
+	return "/machines/" + machine + "/sessions/" + session
+}
+
+// hosts is a read session's hosts, one per machine.
+func hosts(t *testing.T, session map[string]any) []map[string]any {
+	t.Helper()
+	list, ok := session["hosts"].([]any)
+	if !ok {
+		t.Fatalf("no hosts in %v", session)
+	}
+	out := make([]map[string]any, len(list))
+	for i, h := range list {
+		out[i] = h.(map[string]any)
+	}
+	return out
+}
+
+// onlyHost is the one host of a read session.
+func onlyHost(t *testing.T, session map[string]any) map[string]any {
+	t.Helper()
+	h := hosts(t, session)
+	if len(h) != 1 {
+		t.Fatalf("%d hosts, want 1: %v", len(h), session)
+	}
+	return h[0]
+}
+
 type registry struct {
 	*api
 	fleetToken, rotatorToken string
@@ -80,7 +112,6 @@ func machineBody() string {
 // sessionBody is a full session row, with pairs changing or adding fields (nil drops one).
 func sessionBody(pairs ...any) string {
 	m := map[string]any{
-		"machine_id":         machineID,
 		"pid":                4242,
 		"proc_start":         "97360477",
 		"cwd":                "/home/elan/repos/ScadBuddy",
@@ -132,13 +163,22 @@ func TestTheRegistryStoresMachinesAndSessions(t *testing.T) {
 	}
 
 	session := uuid()
-	g.write("/sessions/"+session, sessionBody(), 200)
+	// The PUT answers the caller's own row: the session's id and handle, and the host.
+	put := g.write(onMachine+session, sessionBody(), 200).body
+	expect(t, put["session_id"], session)
+	expect(t, put["handle"], session[:8])
+	expect(t, put["machine"].(map[string]any)["id"], machineID)
+	if _, ok := put["hosts"]; ok {
+		t.Fatalf("the PUT answers the hosts of other machines: %v", put)
+	}
 	// The session's fleet agent is made as touch makes it.
 	expect(t, g.count(`SELECT count(*) FROM fleet_agents WHERE session_id = '`+session+`'`), 1)
 
-	got := g.read("/sessions/"+session, 200).body
-	expect(t, got["session_id"], session)
-	expect(t, got["handle"], session[:8])
+	read := g.read("/sessions/"+session, 200).body
+	expect(t, read["session_id"], session)
+	expect(t, read["handle"], session[:8])
+	got := onlyHost(t, read)
+	expect(t, read["last_seen"], got["last_seen"])
 	expect(t, got["pid"], float64(4242))
 	expect(t, got["proc_start"], "97360477")
 	expect(t, got["cwd"], "/home/elan/repos/ScadBuddy")
@@ -160,22 +200,24 @@ func TestTheRegistryStoresMachinesAndSessions(t *testing.T) {
 	}
 
 	// A PUT replaces the row: an absent optional field is cleared.
-	g.write("/sessions/"+session, sessionBody("credential_id", nil, "status", "idle"), 200)
-	got = g.read("/sessions/"+session, 200).body
+	g.write(onMachine+session, sessionBody("credential_id", nil, "status", "idle"), 200)
+	got = onlyHost(t, g.read("/sessions/"+session, 200).body)
 	expect(t, got["status"], "idle")
 	expect(t, got["credential_id"], nil)
 	expect(t, got["credential"], nil)
 
 	// A credential that is gone reads as none, with its id kept.
-	g.write("/sessions/"+session, sessionBody("credential_id", "deleted"), 200)
-	got = g.read("/sessions/"+session, 200).body
+	g.write(onMachine+session, sessionBody("credential_id", "deleted"), 200)
+	got = onlyHost(t, g.read("/sessions/"+session, 200).body)
 	expect(t, got["credential_id"], "deleted")
 	expect(t, got["credential"], nil)
 
 	list := g.read("/sessions", 200).body
 	expect(t, len(list["sessions"].([]any)), 1)
 	expect(t, list["more"], false)
-	expect(t, list["sessions"].([]any)[0].(map[string]any)["session_id"], session)
+	listed := list["sessions"].([]any)[0].(map[string]any)
+	expect(t, listed["session_id"], session)
+	expect(t, onlyHost(t, listed)["machine"].(map[string]any)["id"], machineID)
 
 	g.read("/sessions/"+uuid(), 404)
 }
@@ -184,7 +226,7 @@ func TestTheSessionsListPages(t *testing.T) {
 	g := newRegistry(t)
 	g.write("/machines/"+machineID, machineBody(), 200)
 	for range 3 {
-		g.write("/sessions/"+uuid(), sessionBody(), 200)
+		g.write(onMachine+uuid(), sessionBody(), 200)
 	}
 	page := g.read("/sessions?limit=2", 200).body
 	expect(t, len(page["sessions"].([]any)), 2)
@@ -196,16 +238,33 @@ func TestAClearedSessionLinksToTheOneBefore(t *testing.T) {
 	g := newRegistry(t)
 	g.write("/machines/"+machineID, machineBody(), 200)
 	before, after, elsewhere := uuid(), uuid(), uuid()
-	g.write("/sessions/"+before, sessionBody(), 200)
+	g.write(onMachine+before, sessionBody(), 200)
 	time.Sleep(5 * time.Millisecond)
-	g.write("/sessions/"+after, sessionBody(), 200)
-	g.write("/sessions/"+elsewhere, sessionBody("proc_start", "1"), 200)
-	expect(t, g.read("/sessions/"+after, 200).body["previous_session_id"], before)
-	expect(t, g.read("/sessions/"+elsewhere, 200).body["previous_session_id"], nil)
+	g.write(onMachine+after, sessionBody(), 200)
+	g.write(onMachine+elsewhere, sessionBody("proc_start", "1"), 200)
+	previous := func(session string) any {
+		return onlyHost(t, g.read("/sessions/"+session, 200).body)["previous_session_id"]
+	}
+	expect(t, previous(after), before)
+	expect(t, previous(elsewhere), nil)
 	// A later PUT of the first session does not link it to the second.
-	g.write("/sessions/"+before, sessionBody(), 200)
-	expect(t, g.read("/sessions/"+before, 200).body["previous_session_id"], nil)
-	expect(t, g.read("/sessions/"+after, 200).body["previous_session_id"], before)
+	g.write(onMachine+before, sessionBody(), 200)
+	expect(t, previous(before), nil)
+	expect(t, previous(after), before)
+
+	// The link stays on one machine: another machine's process with the same pid and
+	// proc_start is no session before this one.
+	laptop := rotatorCredential(g.api, "laptop")
+	laptopID := strings.Repeat("1", 64)
+	if got := g.do("PUT", rotatorBase+"/machines/"+laptopID, machineBody(), bearer(laptop)); got.status != 200 {
+		t.Fatalf("the laptop registers: %d %s", got.status, got.raw)
+	}
+	time.Sleep(5 * time.Millisecond)
+	onLaptop := uuid()
+	if got := g.do("PUT", rotatorBase+hostPath(laptopID, onLaptop), sessionBody(), bearer(laptop)); got.status != 200 {
+		t.Fatalf("the laptop writes a session: %d %s", got.status, got.raw)
+	}
+	expect(t, previous(onLaptop), nil)
 }
 
 func TestTheRegistryRefusesBadFields(t *testing.T) {
@@ -214,8 +273,10 @@ func TestTheRegistryRefusesBadFields(t *testing.T) {
 	session := uuid()
 
 	for name, path := range map[string]string{
-		"an upper-case session id": "/sessions/" + strings.ToUpper(session),
-		"no uuid":                  "/sessions/not-a-uuid",
+		"an upper-case session id": onMachine + strings.ToUpper(session),
+		"no uuid":                  onMachine + "not-a-uuid",
+		"a raw machine id":         hostPath("0123456789abcdef0123456789abcdef", session),
+		"an upper-case machine id": hostPath(strings.ToUpper(machineID), session),
 	} {
 		if got := g.do("PUT", rotatorBase+path, sessionBody(), bearer(g.rotatorToken)); got.status != 422 {
 			t.Errorf("%s: %d %s", name, got.status, got.raw)
@@ -254,7 +315,7 @@ func TestTheRegistryRefusesBadFields(t *testing.T) {
 		"pid 0":                             sessionBody("pid", 0),
 		"a pid past pid_max":                sessionBody("pid", 4194305),
 		"a proc start that is no number":    sessionBody("proc_start", "12a"),
-		"a raw machine id":                  sessionBody("machine_id", "0123456789abcdef0123456789abcdef"),
+		"a machine id in the body":          sessionBody("machine_id", machineID),
 		"an upper-case account uuid":        sessionBody("account_uuid", "11111111-2222-4333-8444-55555555555A"),
 		"a bad time":                        sessionBody("last_reset_at", "tomorrow"),
 		"no cwd":                            sessionBody("cwd", nil),
@@ -263,7 +324,7 @@ func TestTheRegistryRefusesBadFields(t *testing.T) {
 		"a control character in the status": sessionBody("status", "busy\t"),
 		"too long a credential id":          sessionBody("credential_id", strings.Repeat("c", 65)),
 	} {
-		if got := g.do("PUT", rotatorBase+"/sessions/"+session, body, bearer(g.rotatorToken)); got.status != 422 {
+		if got := g.do("PUT", rotatorBase+onMachine+session, body, bearer(g.rotatorToken)); got.status != 422 {
 			t.Errorf("%s: %d %s", name, got.status, got.raw)
 		}
 	}
@@ -272,7 +333,7 @@ func TestTheRegistryRefusesBadFields(t *testing.T) {
 
 	// A machine that never registered is a 404, and makes no agent.
 	other := strings.Repeat("0", 64)
-	got := g.do("PUT", rotatorBase+"/sessions/"+session, sessionBody("machine_id", other), bearer(g.rotatorToken))
+	got := g.do("PUT", rotatorBase+hostPath(other, session), sessionBody(), bearer(g.rotatorToken))
 	expect(t, got.status, 404)
 	expect(t, got.body["reason"], "unknown-machine")
 	expect(t, g.count(`SELECT count(*) FROM fleet_agents`), 0)
@@ -282,9 +343,9 @@ func TestASessionWhoseHandleIsTakenIsAConflict(t *testing.T) {
 	g := newRegistry(t)
 	g.write("/machines/"+machineID, machineBody(), 200)
 	first := uuid()
-	g.write("/sessions/"+first, sessionBody(), 200)
+	g.write(onMachine+first, sessionBody(), 200)
 	twin := first[:8] + uuid()[8:]
-	got := g.do("PUT", rotatorBase+"/sessions/"+twin, sessionBody(), bearer(g.rotatorToken))
+	got := g.do("PUT", rotatorBase+onMachine+twin, sessionBody(), bearer(g.rotatorToken))
 	expect(t, got.status, 409)
 	expect(t, got.body["reason"], "handle-taken")
 }
@@ -293,10 +354,10 @@ func TestEachCallerReachesOnlyItsRegistryRoutes(t *testing.T) {
 	g := newRegistry(t)
 	g.write("/machines/"+machineID, machineBody(), 200)
 	session := uuid()
-	g.write("/sessions/"+session, sessionBody(), 200)
+	g.write(onMachine+session, sessionBody(), 200)
 	for name, c := range map[string]struct{ method, path, body, token string }{
 		"fleet writes a machine":      {"PUT", rotatorBase + "/machines/" + machineID, machineBody(), g.fleetToken},
-		"fleet writes a session":      {"PUT", rotatorBase + "/sessions/" + session, sessionBody(), g.fleetToken},
+		"fleet writes a session":      {"PUT", rotatorBase + onMachine + session, sessionBody(), g.fleetToken},
 		"the rotator lists sessions":  {"GET", fleetBase + "/sessions", "", g.rotatorToken},
 		"the rotator reads a session": {"GET", fleetBase + "/sessions/" + session, "", g.rotatorToken},
 		"the rotator reads the inbox": {"GET", fleetBase + "/agents/" + session + "/inbox", "", g.rotatorToken},
@@ -312,7 +373,7 @@ func TestEachCallerReachesOnlyItsRegistryRoutes(t *testing.T) {
 }
 
 // A machine belongs to the proof that registered it first. Only that proof's credential
-// refreshes it or writes its sessions, and a session never moves to another machine.
+// refreshes it or writes its sessions.
 func TestAMachineBelongsToItsProof(t *testing.T) {
 	g := newRegistry(t)
 	laptop := rotatorCredential(g.api, "laptop")
@@ -335,31 +396,79 @@ func TestAMachineBelongsToItsProof(t *testing.T) {
 
 	// A session on a machine of another proof is refused, and makes no agent.
 	session := uuid()
-	got = put("/sessions/"+session, sessionBody(), laptop)
+	got = put(onMachine+session, sessionBody(), laptop)
 	expect(t, got.status, 403)
 	expect(t, got.body["reason"], "machine-of-another-proof")
 	expect(t, g.count(`SELECT count(*) FROM fleet_agents`), 0)
-
-	// A session row never moves to another machine, even one of the caller's own.
-	g.write("/sessions/"+session, sessionBody(), 200)
-	other := strings.Repeat("2", 64)
-	g.write("/machines/"+other, machineBody(), 200)
-	got = put("/sessions/"+session, sessionBody("machine_id", other), g.rotatorToken)
-	expect(t, got.status, 409)
-	expect(t, got.body["reason"], "session-on-another-machine")
-	got = put("/sessions/"+session, sessionBody("machine_id", laptopID), laptop)
-	expect(t, got.status, 409)
-	expect(t, got.body["reason"], "session-on-another-machine")
-	expect(t, g.read("/sessions/"+session, 200).body["machine"].(map[string]any)["id"], machineID)
 
 	// A fleet-rotator credential that names no machine writes nothing.
 	unbound := g.credential("fleet-rotator", "crud.fleet-rotator")
 	got = put("/machines/"+strings.Repeat("3", 64), machineBody(), unbound)
 	expect(t, got.status, 403)
 	expect(t, got.body["reason"], "no-machine")
-	got = put("/sessions/"+uuid(), sessionBody(), unbound)
+	got = put(onMachine+uuid(), sessionBody(), unbound)
 	expect(t, got.status, 403)
 	expect(t, got.body["reason"], "no-machine")
+}
+
+// One Claude Code session id can run on two machines at once. Each machine writes its own
+// row of the session, and no machine changes another machine's row.
+func TestASessionRunsOnSeveralMachines(t *testing.T) {
+	g := newRegistry(t)
+	laptop := rotatorCredential(g.api, "laptop")
+	laptopID := strings.Repeat("1", 64)
+	put := func(path, body, token string) answer {
+		return g.do("PUT", rotatorBase+path, body, bearer(token))
+	}
+	g.write("/machines/"+machineID, machineBody(), 200)
+	if got := put("/machines/"+laptopID, object("hostname", "laptop", "os", "linux",
+		"os_user", "elan", "service_version", "0.1.0"), laptop); got.status != 200 {
+		t.Fatalf("the laptop registers its own machine: %d %s", got.status, got.raw)
+	}
+
+	session := uuid()
+	g.write(hostPath(machineID, session), sessionBody("cwd", "/home/elan/on-devbox"), 200)
+	time.Sleep(5 * time.Millisecond)
+	got := put(hostPath(laptopID, session), sessionBody("cwd", "/home/elan/on-laptop", "pid", 7), laptop)
+	if got.status != 200 {
+		t.Fatalf("the laptop writes its row of the session: %d %s", got.status, got.raw)
+	}
+	expect(t, got.body["machine"].(map[string]any)["id"], laptopID)
+	expect(t, got.body["cwd"], "/home/elan/on-laptop")
+	expect(t, g.count(`SELECT count(*) FROM fleet_agents`), 1)
+	expect(t, g.count(`SELECT count(*) FROM fleet_session_hosts WHERE session_id = '`+session+`'`), 2)
+
+	// The read gives the session once, with one host per machine, the most recently seen
+	// first.
+	read := g.read("/sessions/"+session, 200).body
+	expect(t, read["session_id"], session)
+	both := hosts(t, read)
+	expect(t, len(both), 2)
+	expect(t, both[0]["machine"].(map[string]any)["id"], laptopID)
+	expect(t, both[0]["cwd"], "/home/elan/on-laptop")
+	expect(t, both[0]["pid"], float64(7))
+	expect(t, both[1]["machine"].(map[string]any)["id"], machineID)
+	expect(t, both[1]["cwd"], "/home/elan/on-devbox")
+	expect(t, read["last_seen"], both[0]["last_seen"])
+	list := g.read("/sessions", 200).body["sessions"].([]any)
+	expect(t, len(list), 1)
+	expect(t, len(hosts(t, list[0].(map[string]any))), 2)
+
+	// Neither machine's credential changes the other machine's row.
+	got = put(hostPath(laptopID, session), sessionBody("cwd", "/stolen"), g.rotatorToken)
+	expect(t, got.status, 403)
+	expect(t, got.body["reason"], "machine-of-another-proof")
+	got = put(hostPath(machineID, session), sessionBody("cwd", "/stolen"), laptop)
+	expect(t, got.status, 403)
+	expect(t, got.body["reason"], "machine-of-another-proof")
+	expect(t, g.count(`SELECT count(*) FROM fleet_session_hosts WHERE cwd = '/stolen'`), 0)
+
+	// Each machine still writes its own row, and the other row stays as it was.
+	g.write(hostPath(machineID, session), sessionBody("cwd", "/home/elan/devbox-2"), 200)
+	expect(t, g.count(`SELECT count(*) FROM fleet_session_hosts
+		WHERE machine_id = '`+laptopID+`' AND cwd = '/home/elan/on-laptop'`), 1)
+	expect(t, g.count(`SELECT count(*) FROM fleet_session_hosts
+		WHERE machine_id = '`+machineID+`' AND cwd = '/home/elan/devbox-2'`), 1)
 }
 
 func TestTheRemoteIsAPlainGitURL(t *testing.T) {
@@ -413,7 +522,7 @@ func TestTheRemoteIsAPlainGitURL(t *testing.T) {
 		if c.ok {
 			want = 200
 		}
-		got := g.do("PUT", rotatorBase+"/sessions/"+uuid(), sessionBody("git_remote", c.remote), bearer(g.rotatorToken))
+		got := g.do("PUT", rotatorBase+onMachine+uuid(), sessionBody("git_remote", c.remote), bearer(g.rotatorToken))
 		if got.status != want {
 			t.Errorf("%q: %d %s, want %d", c.remote, got.status, got.raw, want)
 		}

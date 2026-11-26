@@ -88,16 +88,20 @@ the messages returned. A text over 16 MiB is a 422 whose detail names the limit 
 (reason `seq-ahead`). `GET /changes` stays Python's.
 
 The same area serves the session registry (`internal/fleet/registry.go`, #7985). Caller
-`fleet` reads `GET /sessions` (`?limit=`, as the inbox: the most recently seen first, and
-`more`) and `GET /sessions/{session_id}` (404 reason `unknown-session`): each row with its
-machine and its credential's `id`, `name`, `kind` and `last4` only, joined from
-`ai_credentials`, never a secret column. Caller `fleet-rotator` (scope `crud.fleet-rotator`),
+`fleet` reads `GET /sessions` (`?limit=`, as the inbox: the most recently seen session
+first, by its newest host, and `more`) and `GET /sessions/{session_id}` (404 reason
+`unknown-session`). One session id can run on several machines at once, so each session is
+its `session_id`, `handle`, `last_seen` (the newest host's) and `hosts`, one per machine,
+the most recently seen first: each host with its machine and its credential's `id`,
+`name`, `kind` and `last4` only, joined from `ai_credentials`, never a secret column. Caller `fleet-rotator` (scope `crud.fleet-rotator`),
 under `/api/v1/internal/crud/fleet-rotator`, writes `PUT /machines/{id}` (the id is 64
-lower-case hex: a SHA-256, never the raw machine id) and `PUT /sessions/{session_id}` (the
-whole row: an optional field left out is cleared). A session `PUT` makes the session's fleet
-agent as `touch` does (409 `handle-taken`), needs its machine (404 `unknown-machine`), and
-links a new row to the newest row of the same machine, pid and `proc_start`
-(`previous_session_id`, the session before a `/clear`). Every field is checked: lengths,
+lower-case hex: a SHA-256, never the raw machine id) and `PUT
+/machines/{machine_id}/sessions/{session_id}` (the session's row on that machine, keyed by
+both ids; the whole row: an optional field left out is cleared). A session `PUT` makes the
+session's fleet agent as `touch` does (409 `handle-taken`), needs its machine (404
+`unknown-machine`), links a new row to the newest row of the same machine, pid and
+`proc_start` (`previous_session_id`, the session before a `/clear`), and answers that one
+row only, never another machine's. Every field is checked: lengths,
 absolute paths, no control characters, a full `git_head`. `git_remote` is an `http(s)://`,
 `ssh://` or `git://` URL with no query and no fragment, or the scp-like `user@host:path`
 (user `[A-Za-z0-9._-]+`). Only an `ssh://` URL may name a user, with no password; anything
@@ -108,10 +112,10 @@ A `fleet-rotator` credential names its machine: the `<machine>` of the bootstrap
 gives a handler the verified service). The machine's `id` is the service's own hash, so the
 first `PUT /machines/{id}` records the caller's proof name in `fleet_machines.proof_name`. A
 `PUT /machines/{id}` of a row another proof registered is a 403 (reason
-`machine-of-another-proof`), and so is a session `PUT` whose `machine_id` is registered to
-another proof. A session `PUT` that would move an existing row to another `machine_id` is a
-409 (reason `session-on-another-machine`). A `fleet-rotator` credential with no machine
-writes nothing (403 `no-machine`).
+`machine-of-another-proof`), and so is a session `PUT` whose machine is registered to
+another proof. So two machines of different proofs each hold a row of the same session id,
+and neither changes the other's. A `fleet-rotator` credential with no machine writes
+nothing (403 `no-machine`).
 
 Each of `browser-origins`, `bridge-tabs`, `pairings`, `mcp-tokens`, `plugin-packages` and
 `plugin-feeds` also has a `:read` form, its GETs only. Area `package-mirrors` (the blob store)

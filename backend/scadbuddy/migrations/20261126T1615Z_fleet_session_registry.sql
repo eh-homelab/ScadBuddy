@@ -20,16 +20,18 @@ CREATE TABLE fleet_machines (
     updated_at timestamptz NOT NULL DEFAULT now()
 );
 
--- One row per session id. After /clear, Claude Code gives the same process (pid and
--- proc_start) a new session id: that session gets a new row, and previous_session_id links
--- it to the row before it.
+-- One row per session id and machine: one session id can run on several machines at once
+-- (measured 2026-11-26 in fleet chat: one session id posted from two machines), and each
+-- machine writes only its own row. After /clear, Claude Code gives the same process
+-- (machine, pid and proc_start) a new session id: that session gets a new row, and
+-- previous_session_id links it to the row of the same machine before it.
 --
 -- credential_id names an ai_credentials row, with no foreign key: that table is the agent's
 -- schema (migrations_agent/), which the API applies after this one, so on a new database it
 -- does not exist yet here. A deleted credential must not be held back by a session row
 -- either. The reads join it by id, and a missing row reads as no credential.
 CREATE TABLE fleet_session_hosts (
-    session_id uuid PRIMARY KEY REFERENCES fleet_agents ON DELETE CASCADE,
+    session_id uuid NOT NULL REFERENCES fleet_agents ON DELETE CASCADE,
     machine_id text NOT NULL REFERENCES fleet_machines ON DELETE CASCADE,
     pid integer NOT NULL CHECK (pid > 0),
     proc_start text NOT NULL CHECK (proc_start ~ '^[0-9]{1,20}$'),
@@ -50,9 +52,12 @@ CREATE TABLE fleet_session_hosts (
     last_rate_limit_at timestamptz,
     last_reset_at timestamptz,
     last_seen timestamptz NOT NULL DEFAULT now(),
-    previous_session_id uuid REFERENCES fleet_session_hosts ON DELETE SET NULL,
+    previous_session_id uuid,
     created_at timestamptz NOT NULL DEFAULT now(),
-    updated_at timestamptz NOT NULL DEFAULT now()
+    updated_at timestamptz NOT NULL DEFAULT now(),
+    PRIMARY KEY (session_id, machine_id),
+    FOREIGN KEY (previous_session_id, machine_id) REFERENCES fleet_session_hosts (session_id, machine_id)
+        ON DELETE SET NULL (previous_session_id)
 );
 
 CREATE INDEX fleet_session_hosts_process ON fleet_session_hosts (machine_id, pid, proc_start, created_at);

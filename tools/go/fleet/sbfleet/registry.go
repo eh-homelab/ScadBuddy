@@ -35,12 +35,21 @@ type Credential struct {
 	Last4 string  `json:"last4"`
 }
 
-// Session is where a session runs: its machine, process, paths, git facts and credential.
-// A nil pointer is a fact the machine service did not send. Credential is nil when
-// CredentialID is nil or names no credential that still exists.
+// Session is a session and the machines it runs on. One session id can run on several
+// machines at once: Hosts has one entry per machine, the most recently seen first, and
+// LastSeen is the newest host's.
 type Session struct {
-	SessionID         string      `json:"session_id"`
-	Handle            string      `json:"handle"`
+	SessionID string    `json:"session_id"`
+	Handle    string    `json:"handle"`
+	LastSeen  time.Time `json:"last_seen"`
+	Hosts     []Host    `json:"hosts"`
+}
+
+// Host is where a session runs on one machine: the machine, process, paths, git facts and
+// credential. A nil pointer is a fact the machine service did not send. Credential is nil
+// when CredentialID is nil or names no credential that still exists. PreviousSessionID is
+// the session of the same process on this machine before a /clear.
+type Host struct {
 	PID               int64       `json:"pid"`
 	ProcStart         string      `json:"proc_start"`
 	Cwd               string      `json:"cwd"`
@@ -77,7 +86,8 @@ func NewRegistry(baseURL string, token func() (string, error), opts ...Option) *
 	return &Registry{c: newClient(baseURL, token, requestTimeout, opts)}
 }
 
-// Sessions is up to limit sessions, the most recently seen first, and whether more wait.
+// Sessions is up to limit sessions, each with all its hosts, the most recently seen first
+// (by its newest host), and whether more wait.
 // A limit of 0 is core's default (50); core gives at most 200.
 func (r *Registry) Sessions(ctx context.Context, limit int) ([]Session, bool, error) {
 	route := "/sessions"
@@ -94,7 +104,7 @@ func (r *Registry) Sessions(ctx context.Context, limit int) ([]Session, bool, er
 	return out.Sessions, out.More, nil
 }
 
-// Session is one session's row, or ErrUnknownSession.
+// Session is one session with all its hosts, or ErrUnknownSession.
 func (r *Registry) Session(ctx context.Context, sessionID string) (*Session, error) {
 	var out Session
 	if err := r.c.do(ctx, http.MethodGet, "/sessions/"+url.PathEscape(sessionID), nil, &out); err != nil {

@@ -6,7 +6,6 @@ package fleet
 // A read gives a credential's id, name, kind and last 4 characters, never its secret.
 
 import (
-	"context"
 	"errors"
 	"fmt"
 	"net/http"
@@ -125,7 +124,8 @@ func RegistryWrites(pool *pgxpool.Pool) []crud.Route {
 	f := &Fleet{Pool: pool}
 	return []crud.Route{
 		{Method: "PUT", Path: "/machines/{id}", Handle: f.putMachine, MaxBody: registryBodyMax},
-		{Method: "PUT", Path: "/sessions/{session_id}", Handle: f.putSession, MaxBody: registryBodyMax},
+		{Method: "PUT", Path: "/machines/{machine_id}/sessions/{session_id}", Handle: f.putSession,
+			MaxBody: registryBodyMax},
 	}
 }
 
@@ -188,13 +188,17 @@ func (f *Fleet) putMachine(r *http.Request, p crud.Params) (any, error) {
 	return m, nil
 }
 
-// putSession writes the session's row whole: an optional field left out is cleared. It makes
-// the session's fleet agent as touch does, when there is none. A new row is linked to the
-// newest row of the same machine, pid and proc_start (the session before a /clear). The
-// machine must be registered to the caller's proof (403), and a row never moves to another
-// machine (409).
+// putSession writes the session's row on the machine whole: an optional field left out is
+// cleared. One session id can run on several machines at once, so each machine has a row of
+// its own, and a caller writes only the rows of machines registered to its proof (403). It
+// makes the session's fleet agent as touch does, when there is none. A new row is linked to
+// the newest row of the same machine, pid and proc_start (the session before a /clear).
 func (f *Fleet) putSession(r *http.Request, p crud.Params) (any, error) {
 	proof, err := proofName(r)
+	if err != nil {
+		return nil, err
+	}
+	machineID, err := p.Match("machine_id", machinePattern)
 	if err != nil {
 		return nil, err
 	}
@@ -202,14 +206,13 @@ func (f *Fleet) putSession(r *http.Request, p crud.Params) (any, error) {
 	if err != nil {
 		return nil, err
 	}
-	b, err := crud.ReadBody(r, "machine_id", "pid", "proc_start", "cwd", "config_dir",
+	b, err := crud.ReadBody(r, "pid", "proc_start", "cwd", "config_dir",
 		"transcript_path", "git_remote", "git_branch", "worktree_root", "git_head", "cc_version",
 		"kind", "entrypoint", "name", "status", "credential_id", "account_uuid",
 		"last_rate_limit_at", "last_reset_at")
 	if err != nil {
 		return nil, err
 	}
-	machineID := b.Match("machine_id", 64, 64, machinePattern)
 	pid := b.IntRange("pid", 1, pidMax)
 	proc := b.Match("proc_start", 1, 20, procPattern)
 	cwd := b.Match("cwd", 1, pathMax, absolutePattern)
@@ -261,7 +264,7 @@ func (f *Fleet) putSession(r *http.Request, p crud.Params) (any, error) {
 		if err != nil {
 			return err
 		}
-		tag, err := tx.Exec(ctx, `INSERT INTO fleet_session_hosts (session_id, machine_id, pid, proc_start,
+		_, err = tx.Exec(ctx, `INSERT INTO fleet_session_hosts (session_id, machine_id, pid, proc_start,
 				cwd, config_dir, transcript_path, git_remote, git_branch, worktree_root, git_head, cc_version,
 				kind, entrypoint, name, status, credential_id, account_uuid, last_rate_limit_at,
 				last_reset_at, previous_session_id)
@@ -270,26 +273,25 @@ func (f *Fleet) putSession(r *http.Request, p crud.Params) (any, error) {
 				(SELECT h.session_id FROM fleet_session_hosts h
 				 WHERE h.machine_id = $2 AND h.pid = $3 AND h.proc_start = $4 AND h.session_id <> $1
 				 ORDER BY h.created_at DESC LIMIT 1))
-			ON CONFLICT (session_id) DO UPDATE SET machine_id = $2, pid = $3, proc_start = $4, cwd = $5,
+			ON CONFLICT (session_id, machine_id) DO UPDATE SET pid = $3, proc_start = $4, cwd = $5,
 				config_dir = $6, transcript_path = $7, git_remote = $8, git_branch = $9,
 				worktree_root = $10, git_head = $11, cc_version = $12, kind = $13, entrypoint = $14,
 				name = $15, status = $16, credential_id = $17, account_uuid = $18,
 				last_rate_limit_at = $19::timestamptz, last_reset_at = $20::timestamptz,
-				last_seen = now(), updated_at = now()
-			WHERE fleet_session_hosts.machine_id = $2`,
+				last_seen = now(), updated_at = now()`,
 			session, machineID, pid, proc, cwd, configDir, transcript, remote, branch, worktree, head,
 			ccVersion, kind, entrypoint, name, status, credential, account, rateLimited, reset)
-		if err == nil && tag.RowsAffected() == 0 {
-			// The row exists on another machine: ON CONFLICT updated nothing.
-			return httpx.WithReason(http.StatusConflict,
-				"that session is on another machine", "session-on-another-machine")
-		}
 		return err
 	})
 	if err != nil {
 		return nil, err
 	}
-	return f.sessionByID(ctx, f.Pool, session)
+	rows, err := f.Pool.Query(ctx, sessionSelect+` WHERE h.session_id = $1 AND h.machine_id = $2`,
+		session, machineID)
+	if err != nil {
+		return nil, err
+	}
+	return pgx.CollectExactlyOneRow(rows, scanSession)
 }
 
 type credentialInfo struct {
@@ -299,9 +301,8 @@ type credentialInfo struct {
 	Last4 string  `json:"last4"`
 }
 
-type sessionHost struct {
-	SessionID         string          `json:"session_id"`
-	Handle            string          `json:"handle"`
+// host is a session's row on one machine.
+type host struct {
 	PID               int64           `json:"pid"`
 	ProcStart         string          `json:"proc_start"`
 	Cwd               string          `json:"cwd"`
@@ -327,6 +328,39 @@ type sessionHost struct {
 	UpdatedAt         wire.Time       `json:"updated_at"`
 	Machine           machine         `json:"machine"`
 }
+
+// sessionHost is one machine's row of a session, with the session's id and handle: a PUT's
+// answer. It names no other machine's row.
+type sessionHost struct {
+	SessionID string `json:"session_id"`
+	Handle    string `json:"handle"`
+	host
+}
+
+// session is a session with its hosts, one per machine it runs on, the most recently seen
+// first. LastSeen is the newest host's.
+type session struct {
+	SessionID string    `json:"session_id"`
+	Handle    string    `json:"handle"`
+	LastSeen  wire.Time `json:"last_seen"`
+	Hosts     []host    `json:"hosts"`
+}
+
+// sessionsOf groups rows ordered by session, then host, into sessions.
+func sessionsOf(rows []sessionHost) []session {
+	out := []session{}
+	for _, row := range rows {
+		if n := len(out); n == 0 || out[n-1].SessionID != row.SessionID {
+			out = append(out, session{SessionID: row.SessionID, Handle: row.Handle, LastSeen: row.LastSeen})
+		}
+		last := &out[len(out)-1]
+		last.Hosts = append(last.Hosts, row.host)
+	}
+	return out
+}
+
+// hostOrder orders a session's hosts: the most recently seen first.
+const hostOrder = `h.last_seen DESC, h.machine_id`
 
 // sessionSelect reads a session row with its agent's handle, its machine and the
 // credential's non-secret columns. ai_credentials is joined by id: no secret column is read.
@@ -362,12 +396,13 @@ func scanSession(row pgx.CollectableRow) (sessionHost, error) {
 	return s, nil
 }
 
-type querier interface {
-	Query(ctx context.Context, sql string, args ...any) (pgx.Rows, error)
-}
-
-func (f *Fleet) sessionByID(ctx context.Context, q querier, session string) (any, error) {
-	rows, err := q.Query(ctx, sessionSelect+` WHERE h.session_id = $1`, session)
+// session is one session with all its hosts, each with its machine and credential.
+func (f *Fleet) session(r *http.Request, p crud.Params) (any, error) {
+	id, err := p.UUID("session_id")
+	if err != nil {
+		return nil, err
+	}
+	rows, err := f.Pool.Query(r.Context(), sessionSelect+` WHERE h.session_id = $1 ORDER BY `+hostOrder, id)
 	if err != nil {
 		return nil, err
 	}
@@ -378,26 +413,22 @@ func (f *Fleet) sessionByID(ctx context.Context, q querier, session string) (any
 	if len(found) == 0 {
 		return nil, httpx.WithReason(http.StatusNotFound, "no fleet session has that id", "unknown-session")
 	}
-	return found[0], nil
+	return sessionsOf(found)[0], nil
 }
 
-// session is one session's row, with its machine and credential.
-func (f *Fleet) session(r *http.Request, p crud.Params) (any, error) {
-	session, err := p.UUID("session_id")
-	if err != nil {
-		return nil, err
-	}
-	return f.sessionByID(r.Context(), f.Pool, session)
-}
-
-// sessions is up to limit sessions, the most recently seen first, and whether more wait.
+// sessions is up to limit sessions, each with all its hosts, the most recently seen session
+// first (by its newest host), and whether more wait.
 func (f *Fleet) sessions(r *http.Request, _ crud.Params) (any, error) {
 	limit, err := pageLimit(r)
 	if err != nil {
 		return nil, err
 	}
-	rows, err := f.Pool.Query(r.Context(), sessionSelect+`
-		ORDER BY h.last_seen DESC, h.session_id LIMIT $1`, limit+1)
+	rows, err := f.Pool.Query(r.Context(), `WITH page AS (
+			SELECT session_id, max(last_seen) AS seen FROM fleet_session_hosts
+			GROUP BY session_id ORDER BY seen DESC, session_id LIMIT $1)
+		`+sessionSelect+`
+		JOIN page p ON p.session_id = h.session_id
+		ORDER BY p.seen DESC, h.session_id, `+hostOrder, limit+1)
 	if err != nil {
 		return nil, err
 	}
@@ -405,12 +436,10 @@ func (f *Fleet) sessions(r *http.Request, _ crud.Params) (any, error) {
 	if err != nil {
 		return nil, err
 	}
-	more := int64(len(found)) > limit
+	list := sessionsOf(found)
+	more := int64(len(list)) > limit
 	if more {
-		found = found[:limit]
+		list = list[:limit]
 	}
-	if found == nil {
-		found = []sessionHost{}
-	}
-	return map[string]any{"sessions": found, "more": more}, nil
+	return map[string]any{"sessions": list, "more": more}, nil
 }

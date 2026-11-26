@@ -91,14 +91,16 @@ with 401 calls `f` with the refused credential and is sent once more with the ne
 
   | Method | Route |
   |---|---|
-  | `Sessions(ctx, limit)` | `GET /sessions?limit=` (`{"sessions", "more"}`; the most recently seen first; a `limit` of 0 sends none, core's 50; core gives at most 200) |
-  | `Session(ctx, sessionID)` | `GET /sessions/{session_id}` (one `Session`) |
+  | `Sessions(ctx, limit)` | `GET /sessions?limit=` (`{"sessions", "more"}`; the most recently seen first, by the newest host; a `limit` of 0 sends none, core's 50; core gives at most 200) |
+  | `Session(ctx, sessionID)` | `GET /sessions/{session_id}` (one `Session`, with all its hosts) |
 
-  A `Session` is where a session runs: its `Machine` (the id is a SHA-256 of the machine's
-  `/etc/machine-id` and the user, never the raw id), pid and `ProcStart`, paths, git facts,
-  Claude Code facts, the last rate limit and its reset, and `PreviousSessionID` (the
-  session of the same process before a `/clear`). A nil pointer is a fact the machine
-  service did not send. `Credential` names the credential in use by its id, name, kind and
+  One session id can run on several machines at once. A `Session` is its id, handle,
+  `LastSeen` (the newest host's) and `Hosts`, one `Host` per machine, the most recently
+  seen first. A `Host` is where the session runs on that machine: its `Machine` (the id is
+  a SHA-256 of the machine's `/etc/machine-id` and the user, never the raw id), pid and
+  `ProcStart`, paths, git facts, Claude Code facts, the last rate limit and its reset, and
+  `PreviousSessionID` (the session of the same process on the same machine before a
+  `/clear`). A nil pointer is a fact the machine service did not send. `Credential` names the credential in use by its id, name, kind and
   last 4 characters, never its secret; it is nil when `CredentialID` is nil or names no
   credential that still exists. A 404 with reason `unknown-session` is
   `sbfleet.ErrUnknownSession`; other answers map as the `Store`'s do. It takes the same
