@@ -19,6 +19,7 @@ import (
 	"time"
 
 	"github.com/jackc/pgx/v5/pgxpool"
+	"go.opentelemetry.io/otel/metric"
 
 	"github.com/eh-homelab/ScadBuddy/tools/go/telemetry"
 	"github.com/eh-homelab/ScadBuddy/tools/go/telemetry/pgxtrace"
@@ -30,6 +31,8 @@ import (
 	"github.com/eh-homelab/ScadBuddy/tools/go/core/internal/audit"
 	"github.com/eh-homelab/ScadBuddy/tools/go/core/internal/auth"
 	"github.com/eh-homelab/ScadBuddy/tools/go/core/internal/blobs"
+	"github.com/eh-homelab/ScadBuddy/tools/go/core/internal/bus"
+	"github.com/eh-homelab/ScadBuddy/tools/go/core/internal/changes"
 	"github.com/eh-homelab/ScadBuddy/tools/go/core/internal/crud"
 	"github.com/eh-homelab/ScadBuddy/tools/go/core/internal/edits"
 	"github.com/eh-homelab/ScadBuddy/tools/go/core/internal/escalations"
@@ -46,6 +49,7 @@ import (
 	"github.com/eh-homelab/ScadBuddy/tools/go/core/internal/plugins"
 	"github.com/eh-homelab/ScadBuddy/tools/go/core/internal/publish"
 	"github.com/eh-homelab/ScadBuddy/tools/go/core/internal/questions"
+	"github.com/eh-homelab/ScadBuddy/tools/go/core/internal/realtime"
 	"github.com/eh-homelab/ScadBuddy/tools/go/core/internal/seal"
 	"github.com/eh-homelab/ScadBuddy/tools/go/core/internal/secrets"
 	"github.com/eh-homelab/ScadBuddy/tools/go/core/internal/sessions"
@@ -141,9 +145,20 @@ func run(ctx context.Context, env func(string) string, tel *telemetry.Telemetry)
 	if err != nil {
 		return err
 	}
-	router, err := newRouter(pool, upstream, keys, env("SCADBUDDY_CORE_AREAS"), env("SCADBUDDY_AUTH_MODE"))
+	// The event stream's one LISTEN connection, which both listeners' streams share.
+	hub := bus.NewHub(pool, tel.Meter())
+	stream := &streams{hub: hub, meter: tel.Meter(), env: env}
+	go func() {
+		// A stream never ends by itself: end them all first, so the servers can drain.
+		<-ctx.Done()
+		hub.Close()
+	}()
+	router, err := newRouter(pool, upstream, keys, env("SCADBUDDY_CORE_AREAS"), env("SCADBUDDY_AUTH_MODE"), stream)
 	if err != nil {
 		return err
+	}
+	if stream.used {
+		hub.Start(5 * time.Second)
 	}
 	address := or(env("SCADBUDDY_CORE_LISTEN"), ":8080")
 	servers := map[string]http.Handler{address: tel.Server(router, untraced...)}
@@ -158,7 +173,7 @@ func run(ctx context.Context, env func(string) string, tel *telemetry.Telemetry)
 		if err != nil {
 			return fmt.Errorf("SCADBUDDY_CORE_CRUD_UPSTREAM: %w", err)
 		}
-		crudRouter, err := newRouter(pool, crudUpstream, keys, env("SCADBUDDY_CORE_AREAS"), env("SCADBUDDY_AUTH_MODE"))
+		crudRouter, err := newRouter(pool, crudUpstream, keys, env("SCADBUDDY_CORE_AREAS"), env("SCADBUDDY_AUTH_MODE"), stream)
 		if err != nil {
 			return err
 		}
@@ -236,8 +251,32 @@ var sealed = map[string]bool{
 	"credentials": true, "payload-keys": true, "keys": true, "notify": true, "transcripts": true,
 }
 
+// streams are what the event stream's areas (changes, ws) share: the process's one hub, the
+// meter and the settings the socket reads.
+type streams struct {
+	hub   *bus.Hub
+	meter metric.MeterProvider
+	env   func(string) string
+	// used says whether an area named uses the hub.
+	used bool
+}
+
 // newRouter answers the named areas: <area> for all its routes here, <area>:read for its GETs.
-func newRouter(pool *pgxpool.Pool, next http.Handler, keys *seal.Keys, areas, authMode string) (*crud.Router, error) {
+// stream is the process's event stream; without one, an area that needs it gets a hub of
+// its own.
+func newRouter(pool *pgxpool.Pool, next http.Handler, keys *seal.Keys, areas, authMode string, stream ...*streams) (http.Handler, error) {
+	var st *streams
+	if len(stream) > 0 {
+		st = stream[0]
+	}
+	streamOf := func() *streams {
+		if st == nil {
+			st = &streams{hub: bus.NewHub(pool, nil), env: os.Getenv}
+		}
+		st.used = true
+		return st
+	}
+	socket := false
 	router := &crud.Router{
 		Resolver: &auth.Resolver{Pool: pool},
 		Enforce:  authMode == "enforce",
@@ -265,6 +304,14 @@ func newRouter(pool *pgxpool.Pool, next http.Handler, keys *seal.Keys, areas, au
 			router.Add("agent", turn.Writes()...)
 		case "fleet":
 			router.Add(fleet.Caller, fleet.Routes(pool)...)
+		case "changes":
+			s := streamOf()
+			for caller, routes := range changes.Routes(s.hub) {
+				router.Add(caller, routes...)
+			}
+		case "ws":
+			streamOf()
+			socket = true
 		default:
 			if keys == nil && sealed[strings.TrimSuffix(name, ":read")] {
 				return nil, fmt.Errorf("SCADBUDDY_CORE_AREAS names %q, which needs %s", name, seal.Variable)
@@ -275,6 +322,10 @@ func newRouter(pool *pgxpool.Pool, next http.Handler, keys *seal.Keys, areas, au
 			}
 			router.Add("agent", routes...)
 		}
+	}
+	if socket {
+		// The browser's socket is no CRUD route: it stands in front of the router.
+		return realtime.New(context.Background(), st.hub, pool, router, st.env, st.meter)
 	}
 	return router, nil
 }
