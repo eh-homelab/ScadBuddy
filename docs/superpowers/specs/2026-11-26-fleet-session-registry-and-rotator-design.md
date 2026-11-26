@@ -72,7 +72,18 @@ notes, not here). "Code" means read in the code, not run.
 - A running session checks the file's mtime before each model request, and on a change drops
   its cached tokens and reads the file again. It also re-reads the file after a 401 and adopts a
   token that differs from the one refused (code). So a login written by another process is
-  used on the session's next request, with no restart (code; not yet run, see #7982).
+  used on the session's next request, with no restart (code; measured live in #7982, below).
+- Measured live (#7982, 2026-11-26, Claude Code 2.1.332, this machine): two long-lived
+  `claude -p --input-format stream-json` processes shared a scratch `CLAUDE_CONFIG_DIR`. Between
+  turns, `.credentials.json` was replaced through a 0600 temp file and a rename, with no
+  `~/.claude.json` change and no lock. Each copied login had its refresh token removed, so the
+  originals could not rotate. Login A: both processes answered. An invalid access token: both
+  failed on their next turn with `authentication_failed` (401). Login B (a second account, at its
+  weekly limit): both got `rate_limit` (429) with "You've hit your weekly limit · resets Nov 29,
+  8am (America/New_York)", so B's token was used. Login A again: both answered. The
+  file was read again within a second of the rename, and a 401 left no state that blocked the
+  next login. Not measured: interactive sessions (the same request path in code), and a
+  `claude setup-token` token as `accessToken`.
 - `/login` also writes `oauthAccount` in `~/.claude.json` (with `accountUuid`,
   `organizationUuid`, `emailAddress` and `profileFetchedAt`). A running session re-checks at 1 s,
   3 s and 10 s after that entry changes, and on a change clears its caches and refreshes its
