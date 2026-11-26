@@ -117,6 +117,20 @@ describe('toolStatus (#782)', () => {
     expect(stoppedBy(done('t2'), [done('t2')])).toBeUndefined()
   })
 
+  // #7911: a call that started after another's result came means that one had ended.
+  it('failed, not stopped, when a later call started after its result came', () => {
+    const restarted: FeedItem = { kind: 'error', id: 'e1', message: WORKER_RESTARTED_TEXT, code: WORKER_RESTARTED }
+    // t1 failed while it was the last item; t2 started after, and the restart cut t2.
+    const failed = tool('t1', { result: { ok: false, summary: 'boom', sources: [] }, resultAfter: 't1' })
+    expect(statusOf([failed, tool('t2'), restarted], 't1')).toBe('failed')
+    expect(statusOf([failed, tool('t2'), restarted], 't2')).toBe('stopped')
+    // Both ran at once and the restart cut both: each result came after both had started.
+    const one = tool('t1', { result: { ok: false, summary: 'refused', sources: [] }, resultAfter: 't2' })
+    const two = tool('t2', { result: { ok: false, summary: 'refused', sources: [] }, resultAfter: 't2' })
+    expect(statusOf([one, two, restarted], 't1')).toBe('stopped')
+    expect(statusOf([one, two, restarted], 't2')).toBe('stopped')
+  })
+
   it('waits for the user while its question is open', () => {
     expect(statusOf([tool('t1'), question('q1', 't1', 'pending')], 't1')).toBe('waiting_input')
     expect(statusOf([tool('t1'), question('q1', 't1', 'answered')], 't1')).toBe('running')
