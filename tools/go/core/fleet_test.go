@@ -175,6 +175,30 @@ func TestTheFleetRoutesServeTheStore(t *testing.T) {
 	expect(t, a.count(`SELECT count(*) FROM fleet_channels WHERE name = 'ops'`), 1)
 }
 
+func TestFleetRowsSayWhenTheyWereMadeAndChanged(t *testing.T) {
+	a := newFleet(t)
+	ann, bob := a.agent(), a.agent()
+	expect(t, a.count(`SELECT count(*) FROM fleet_agents
+		WHERE session_id = ANY($1) AND created_at = updated_at AND created_at <= last_seen`, []string{ann, bob}), 2)
+	dm := a.send(ann, handle(bob), "hello")
+	expect(t, dm.status, 200)
+	seq := int64(dm.body["seq"].(float64))
+	// A delivery is written in the send's own transaction, so its time is the message's.
+	expect(t, a.count(`SELECT count(*) FROM fleet_deliveries d JOIN fleet_messages m USING (seq)
+		WHERE d.seq = $1 AND d.created_at = m.sent_at`, seq), 2)
+
+	// Reading moves the cursor, and the row's updated_at with it; a touch moves only last_seen.
+	time.Sleep(10 * time.Millisecond)
+	a.inbox(bob, "")
+	expect(t, a.count(`SELECT count(*) FROM fleet_agents WHERE session_id = $1 AND updated_at > created_at`, bob), 1)
+	a.fleet("POST", "/agents/"+ann+"/touch", "", 200)
+	expect(t, a.count(`SELECT count(*) FROM fleet_agents WHERE session_id = $1 AND updated_at = created_at`, ann), 1)
+	before := a.text(`SELECT updated_at::text FROM fleet_agents WHERE session_id = $1`, bob)
+	time.Sleep(10 * time.Millisecond)
+	a.fleet("PUT", "/agents/"+bob+"/cursor", `{"seq":0}`, 200)
+	expect(t, a.count(`SELECT count(*) FROM fleet_agents WHERE session_id = $1 AND updated_at > $2::timestamptz`, bob, before), 1)
+}
+
 func TestAnUnknownAgentIs404(t *testing.T) {
 	a := newFleet(t)
 	ann, ghost := a.agent(), uuid()
