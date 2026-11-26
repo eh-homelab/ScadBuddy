@@ -29,7 +29,6 @@ from tests.camera.test_e2e_mediamtx import (
     DEPLOY,
     EDGE_PASS,
     EDGE_USER,
-    free_port,
     publishing,
     start_mediamtx,
     until,
@@ -588,22 +587,25 @@ async def test_an_hls_walk_through_the_proxy_to_a_real_edge(
     through the proxy, against MediaMTX v1.21.4 with `deploy/camera/mediamtx-edge.yml`."""
     printer = _make_printer(client, recorded=True)
     printer_rtsp, publisher = await publishing(tmp_path, spawn, media)
-    hls, whep = free_port(), free_port()
-    _, mtx = await start_mediamtx(
+    _, mtx, ports = await start_mediamtx(
         spawn,
+        tmp_path,
         media,
         "edge",
         DEPLOY / "mediamtx-edge.yml",
+        (
+            "MTX_APIADDRESS",
+            "MTX_METRICSADDRESS",
+            "MTX_HLSADDRESS",
+            "MTX_WEBRTCADDRESS",
+            "MTX_WEBRTCLOCALUDPADDRESS",
+        ),
         {
-            "MTX_APIADDRESS": f"127.0.0.1:{free_port()}",
-            "MTX_METRICSADDRESS": f"127.0.0.1:{free_port()}",
-            "MTX_HLSADDRESS": f"127.0.0.1:{hls}",
-            "MTX_WEBRTCADDRESS": f"127.0.0.1:{whep}",
-            "MTX_WEBRTCLOCALUDPADDRESS": f"127.0.0.1:{free_port()}",
             "MTX_AUTHINTERNALUSERS_0_USER": EDGE_USER,
             "MTX_AUTHINTERNALUSERS_0_PASS": EDGE_PASS,
         },
     )
+    hls, whep = ports["MTX_HLSADDRESS"], ports["MTX_WEBRTCADDRESS"]
     try:
         await mtx.put_path(
             printer,
