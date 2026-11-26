@@ -204,6 +204,8 @@ class _Feed:
     stopping: asyncio.Task[None] | None = None
     #: The stop has flushed and released, and retries a path delete that failed.
     removing: bool = False
+    #: Set by the stop once it has flushed and released, before its path delete.
+    released: asyncio.Event = field(default_factory=asyncio.Event)
 
 
 class SourceError(Exception):
@@ -434,15 +436,25 @@ class Recorder:
             return
         feed = self._feeds.get(printer_id)
         if feed is not None and feed.stopping is not None:
-            if feed.removing:
-                # Added again while its stop retries the path delete: the path stays.
-                await _cancel(feed.stopping)
-                feed.stopping = None
-                feed.removing = False
-            else:
-                # Added again while its stop flushes: the stop ends first.
-                await asyncio.gather(feed.stopping, return_exceptions=True)
+            # Added again while it stops: wait for the flush and the release only, never
+            # for the path delete, whose retries can last (#7408 review).
+            released = asyncio.ensure_future(feed.released.wait())
+            try:
+                await asyncio.wait({feed.stopping, released}, return_when=asyncio.FIRST_COMPLETED)
+            finally:
+                await _cancel(released)
+            if feed.stopping.done():
+                # The stop ended: the path is gone, or (a stop that failed early) is put
+                # again below.
                 present = False
+            else:
+                # It is deleting the path: the path stays. A delete that went through
+                # before the cancel is undone by the put below.
+                await _cancel(feed.stopping)
+                self._confs.pop(printer_id, None)
+            feed.stopping = None
+            feed.removing = False
+            feed.released.clear()
             feed = self._feeds.get(printer_id)
         if feed is None:
             now = self._clock()
@@ -472,7 +484,7 @@ class Recorder:
         """Stop a printer's recording. With a feed, the flush runs in a task of its own
         (`_wind_down`), so a flush of up to `STOP_FLUSH_SECONDS` does not hold `_lock`, and
         other printers' changes go on meanwhile. A change that adds the same printer again
-        waits, under `_lock`, for its flush to end (`_start`)."""
+        waits, under `_lock`, for its flush and release to end (`_start`)."""
         feed = self._feeds.get(printer_id)
         if feed is None:
             await self._remove(printer_id, None, present)
@@ -484,8 +496,9 @@ class Recorder:
     async def _wind_down(self, printer_id: str, feed: _Feed, present: bool) -> None:
         """Flush (when leading, with the renewals going on, for at most
         `STOP_FLUSH_SECONDS`), release, delete the path, report ``stopped``. A delete that
-        fails is tried again with back-off until it succeeds or the printer is added again
-        (`_start` cancels the stop): no change event comes to retry it."""
+        fails is tried again with back-off until it succeeds or the printer is added again:
+        no change event comes to retry it. An add waits for the flush and the release
+        (``released``) and then cancels the delete (`_start`), so it never waits on it."""
         async with feed.lock:
             if self._leads(feed):
                 deadline = self._clock() + STOP_FLUSH_SECONDS
@@ -494,6 +507,7 @@ class Recorder:
         feed.renewer = None
         if feed.held:
             await self._release(printer_id, feed)
+        feed.released.set()
         delay = self._retry_min
         while True:
             try:
@@ -1045,7 +1059,7 @@ class Recorder:
         await self._feed.aclose()
 
 
-async def _cancel(task: asyncio.Task[None] | None) -> None:
+async def _cancel(task: asyncio.Future[Any] | None) -> None:
     if task is not None:
         task.cancel()
         await asyncio.gather(task, return_exceptions=True)

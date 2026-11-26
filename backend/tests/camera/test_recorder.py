@@ -1316,3 +1316,51 @@ async def test_a_printer_added_again_ends_a_stop_that_cannot_delete(
     assert feed.stopping is None
     assert P1 in rig.mtx.paths
     await rig.recorder.aclose()
+
+
+async def test_a_printer_added_again_during_the_flush_keeps_its_path_when_delete_fails(
+    tmp_path: Path, api: FakeCamera, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The add arrives while the stop flushes, and then MediaMTX refuses every delete. The
+    add waits only for the flush and the release, then takes the path back: it does not
+    hold `_lock` behind the delete's retries."""
+    api.printers = [P1]
+    rig = Rig(tmp_path, api)
+    fake = cast("FakeUploader", rig.recorder._uploader)
+    gate = asyncio.Event()
+
+    async def put(seg: LocalSegment) -> str:
+        await gate.wait()
+        return await FakeUploader.put(fake, seg)
+
+    real = rig.mtx.handle
+
+    def handle(request: httpx.Request) -> httpx.Response:
+        if request.method != "GET" and request.url.path.split("/")[-2] == "delete":
+            return httpx.Response(500)
+        return real(request)
+
+    try:
+        await rig.recorder.reconcile_all()
+        await rig.recorder.renew(P1)
+        await rig.segment(0)
+        monkeypatch.setattr(rig.recorder._uploader, "put", put)
+        rig.mtx.handle = handle  # type: ignore[method-assign]
+        rig.recorder._mtx = rig.mtx.client()
+        api.printers = []
+        await rig.recorder.reconcile(P1)
+        api.printers = [P1]
+        again = asyncio.create_task(rig.recorder.reconcile(P1))
+        await asyncio.sleep(0.05)
+        assert not again.done(), "the add waits for the flush"
+        gate.set()
+        async with asyncio.timeout(10):
+            await again
+        feed = rig.recorder._feeds[P1]
+        assert feed.stopping is None
+        assert not feed.removing
+        assert P1 in rig.mtx.paths
+        assert P1 in rig.recorder._confs
+    finally:
+        gate.set()
+        await rig.recorder.aclose()
