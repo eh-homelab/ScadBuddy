@@ -1,6 +1,6 @@
 # The Python backend moves to Go, Python stays as activities
 
-Status: approved by the owner (epic #7667), 2026-11-25. Building: `tools/go/core` serves the first areas (#7680); the CRUD port and the client address are in #7702; the other agent CRUD areas are in their own PRs. Nothing is deployed yet.
+Status: approved by the owner (epic #7667), 2026-11-25. On prod: `tools/go/core` fronts the API pod and serves every agent CRUD area it has (eh-homelab/clusters#4334, #4366); this PR deletes their Python handlers. The rest is not built.
 
 Sources: counts and file references are from `main` at `1f9bf6962` (2026-11-25), read by
 two surveys of the tree. "Inferred" marks what was not read or run. Prod figures name
