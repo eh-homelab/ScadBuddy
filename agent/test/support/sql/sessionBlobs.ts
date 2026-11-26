@@ -79,7 +79,7 @@ export class SessionBlobs implements SessionImages {
 
   /**
    * Stores each image, or sets the time of one already there (its bytes stay): the names made,
-   * and the latest time set (tools/go/core/internal/blobs `_insert_blobs`).
+   * and the latest time set (tools/go/core/internal/blobs).
    */
   private async insert(tx: TransactionSql, sessionId: string, images: readonly SessionBlob[]): Promise<{ names: string[]; at?: string }> {
     const names: string[] = []

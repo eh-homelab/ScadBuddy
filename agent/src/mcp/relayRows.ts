@@ -31,7 +31,7 @@ export interface RelayRows {
   sweep(idleSeconds: number): Promise<void>
 }
 
-/** The CRUD routes' bound on an idle window (tools/go/core/internal/mcprelay `IDLE_SECONDS_MAX`). */
+/** The CRUD routes' bound on an idle window (tools/go/core/internal/mcprelay `idleSecondsMax`). */
 export const RELAY_IDLE_SECONDS_MAX = 7 * 24 * 3600
 
 /**

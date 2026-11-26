@@ -10,6 +10,9 @@ expect true  tools/go/bambuddy-fs/main.go
 expect true  backend/scadbuddy/migrations/20261102T0645Z_service_credentials.sql
 expect true  backend/scadbuddy/migrations_agent/20260928T0107Z_sessions.sql
 expect false backend/scadbuddy/migrationsx/a.sql
+# core's sessions tests read the browser options' shared vectors.
+expect true  workers/playwright-mcp/browser-vectors.json
+expect false workers/playwright-mcp/options.mjs
 expect true  go.work
 expect true  go.work.sum
 expect true  vendor/modules.txt

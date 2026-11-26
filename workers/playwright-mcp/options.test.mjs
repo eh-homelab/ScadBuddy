@@ -196,7 +196,7 @@ test('a response the server sends answers a request; its ping and notifications 
   assert.equal(isResponse({ jsonrpc: '2.0', method: 'notifications/tools/list_changed' }), false);
 });
 
-// The bounds the API holds too (the Go tests in tools/go/core reads the same file).
+// The bounds the API holds too (tools/go/core/internal/sessions/vectors_test.go reads the same file).
 const vectors = JSON.parse(readFileSync(new URL('./browser-vectors.json', import.meta.url), 'utf8'));
 
 test("the bounds are the shared vectors' (the API's)", () => {

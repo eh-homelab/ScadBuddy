@@ -10,7 +10,7 @@ import (
 	"github.com/eh-homelab/ScadBuddy/tools/go/core/internal/jsonv"
 )
 
-// The shared vectors the agent's and the backend's validators run (backend/tests/fixtures).
+// The shared vectors that the agent's validator and this package's run (backend/tests/fixtures).
 const fixtures = "../../../../../backend/tests/fixtures/"
 
 func load(t *testing.T, name string) jsonv.Object {

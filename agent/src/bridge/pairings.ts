@@ -111,7 +111,7 @@ function fromWire(p: WirePairing): PairingView {
   return { id: p.id, label: p.label, expiresAt: new Date(p.expires_at) }
 }
 
-/** The route's reason for a request it refuses (tools/go/core/internal/stores `PAIRING_REFUSED`). */
+/** The route's reason for a request it refuses (tools/go/core/internal/stores `pairingRefused`). */
 const PAIRING_REFUSED = 'pairing-refused'
 
 /**

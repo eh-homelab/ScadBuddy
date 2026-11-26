@@ -95,7 +95,7 @@ export type ListFilter = {
 /** A principal as a condition: its kind and id. */
 export type Who = Pick<Owner, 'kind' | 'id'>
 
-/** A row's title at most (tools/go/core/internal/sessions `TITLE_MAX`): a chain of forks adds ` (fork)` each. */
+/** A row's title at most (tools/go/core/internal/sessions `titleMax`): a chain of forks adds ` (fork)` each. */
 export const ROW_TITLE_MAX = 4096
 
 /** A new row (manager.ts `insert`). */

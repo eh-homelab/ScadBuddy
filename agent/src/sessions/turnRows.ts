@@ -124,8 +124,8 @@ const nextBody = (next: NextClaim) => ({
 
 /**
  * A row write's request through the API (the turn routes, and an edit's, edits.ts): longer than
- * the route's own waits, a pooled connection (`POOL_WAIT_S`, 10 s) and then the row's lock
- * (`turns.LOCK_TIMEOUT_MS`, 10 s, tools/go/core/internal/turns), so the route gives up before
+ * the route's own waits, a pooled connection (`poolWait`, 10 s) and then the row's lock
+ * (`lockTimeout`, 10 s, both in tools/go/core/internal/turns), so the route gives up before
  * the agent does and a write never commits after the agent reported it failed. Change them
  * together.
  */

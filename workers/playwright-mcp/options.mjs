@@ -1,10 +1,10 @@
 // The wrapper's pure parts (#7027): the X-ScadBuddy-Browser header and the server's flags.
 // No Playwright import, so `node --test options.test.mjs` runs anywhere.
 //
-// The bounds are R-7027-2's, the same as the API's `SessionBrowser` and `Viewport`
-// (tools/go/core/internal/sessions, BROWSER_UA_PATTERN, BROWSER_LOCALE_PATTERN,
-// BROWSER_LOCALE_MAX, VIEWPORT_WIDTH, VIEWPORT_HEIGHT). Change both together, and
-// browser-vectors.json, which both tests check against. The API
+// The bounds are R-7027-2's, the same as the API's (tools/go/core/internal/sessions,
+// uaPattern, localePattern, browserLocaleMx, viewportWMin/WMax, viewportHMin/HMax).
+// Change both together, and browser-vectors.json, which both tests check against
+// (options.test.mjs and internal/sessions/vectors_test.go). The API
 // already refused anything outside them, so a value that fails here is a bug or a
 // forged header: the session gets the server's defaults, and the warning says why
 // without the value.

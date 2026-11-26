@@ -24,7 +24,7 @@ expect "true false false true false" backend/scadbuddy/camera/recorder.py
 expect "false false false false true" deploy/CLAUDE.md
 expect "true false true true false" workers/rust/vectors/slice_plate.json
 expect "true false false true false" frontend/page-csp.txt
-expect "true false false true false" workers/playwright-mcp/browser-vectors.json
+expect "false false false false false" workers/playwright-mcp/browser-vectors.json
 expect "false false false false false" workers/playwright-mcp/options.mjs
 expect "true false false true false" THIRD_PARTY_NOTICES.md
 expect "true false false true false" .github/scripts/merge-test-durations.sh

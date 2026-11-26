@@ -6,7 +6,7 @@ import { isUuid } from '../harness/uuid.js'
 // `POST …/crud/agent/sessions/live`. A failed
 // read throws, so a sweep removes nothing it could not check.
 
-/** The most ids one read asks the API about (tools/go/core/internal/sweeps `LIVE_IDS_MAX`). */
+/** The most ids one read asks the API about (tools/go/core/internal/sweeps `liveIDsMax`). */
 export const LIVE_IDS_MAX = 1000
 
 export interface SessionPresence {

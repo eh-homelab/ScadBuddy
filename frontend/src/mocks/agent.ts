@@ -43,9 +43,9 @@ import { takeAttachment } from './features/assistantAttachments'
 import { PREVIEW_IMAGE } from './features/assistantBlobs'
 
 /**
- * #7027 — the API's bounds on a session's browser options (backend
- * `tools/go/core/internal/sessions` `SessionBrowser`), worded as the agent words its
- * `invalid_browser` refusal; null when they pass.
+ * #7027 — the API's bounds on a session's browser options
+ * (`tools/go/core/internal/sessions`), worded as the agent words its `invalid_browser`
+ * refusal; null when they pass.
  */
 function browserRefusal(b: SessionBrowserInput): string | null {
   const range = (field: string, n: number, lo: number, hi: number) =>

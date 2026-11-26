@@ -115,10 +115,10 @@ export function segment(value: string, rule: RegExp, what: string): string {
   return encodeURIComponent(value)
 }
 
-/** The most tab ids one call sends (tools/go/core/internal/stores `TABS_MAX`). */
+/** The most tab ids one call sends (tools/go/core/internal/stores `tabsMax`). */
 export const TABS_PER_CALL = 500
 
-/** The most sources one access or listing read sends (tools/go/core/internal/access `SOURCES_MAX`). */
+/** The most sources one access or listing read sends (tools/go/core/internal/access `sourcesMax`). */
 export const SOURCES_PER_CALL = 1000
 
 /** `items` in runs of at most `size`, in order. */

@@ -13,7 +13,7 @@ export type Delta = { message: string | null; delta: string | null }
 
 /** The most characters of a tool_use id the API takes (backend `TOOL_USE_ID_MAX`): a longer one names no logged call. */
 export const TOOL_USE_ID_MAX = 500
-/** The longest turn id the API takes (tools/go/core/internal/events `TURN_ID_MAX`). */
+/** The longest turn id the API takes (tools/go/core/internal/events `turnIDMax`). */
 export const TURN_ID_MAX = 500
 /** The widest window one reasoning read scans (backend `REASONING_SCAN_MAX`). */
 export const SCAN_MAX = 10_000

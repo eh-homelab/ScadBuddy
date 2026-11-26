@@ -564,7 +564,7 @@ type Expected = { key: string; present: boolean; value?: unknown }
 
 /** How many times a compare-and-set reads again after another writer moved a key it read. */
 export const SETTINGS_CAS_TRIES = 5
-/** The most keys one `GET …/settings` takes (tools/go/core/internal/secrets `SETTINGS_MAX`). */
+/** The most keys one `GET …/settings` takes (tools/go/core/internal/secrets `settingsMax`). */
 export const SETTINGS_READ_MAX = 50
 
 /** `ai_settings` through the API's CRUD routes, area `settings` (see above). */

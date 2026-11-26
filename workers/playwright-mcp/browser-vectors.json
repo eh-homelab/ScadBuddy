@@ -1,5 +1,5 @@
 {
-  "about": "A session's browser options (#7027): the bounds the API (tools/go/core/internal/sessions) and the playwright-mcp wrapper (options.mjs) both hold, and values each must take or refuse. the Go tests in tools/go/core and options.test.mjs check their own constants and checks against this file.",
+  "about": "A session's browser options (#7027): the bounds the API (tools/go/core/internal/sessions) and the playwright-mcp wrapper (options.mjs) both hold, and values each must take or refuse. tools/go/core/internal/sessions/vectors_test.go and options.test.mjs check their own constants and checks against this file.",
   "bounds": {
     "user_agent_pattern": "^[\\x20-\\x7E]{1,512}$",
     "locale_pattern": "^[A-Za-z]{2,8}(-[A-Za-z0-9]{1,8})*$",

@@ -14,7 +14,7 @@ import { REFUSALS, type RefusalCode, type Role } from './validate.js'
 // API takes (`REQUEST_ID_MAX`) is never sent: no row can hold it, so a resolve, a decide, a read
 // or a grant of it answers as one of an id that was never asked.
 
-/** The longest request id the routes take (tools/go/core/internal/gate `REQUEST_ID_MAX`). */
+/** The longest request id the routes take (tools/go/core/internal/gate `RequestIDMax`). */
 export const REQUEST_ID_MAX = 2048
 
 /** A batch of a session's events the API appended in the write's transaction, with their seqs. */
