@@ -2798,14 +2798,16 @@ jobs:
       # base's own lockfile, so the diff shows what this PR changes and nothing
       # else. A base that cannot export (a broken main, #880) skips the diff with
       # a warning instead of failing: otherwise the PR that fixes main could never
-      # pass. The head's own export is still checked above.
+      # pass. The head's own export is still checked above. The worktree skips the
+      # LFS smudge: the export reads no fixture, and the runner's git-lfs would
+      # otherwise download every one, so a failed LFS download failed the job (#7840).
       - name: Export the base's spec
         id: base
         if: ${{ steps.detect.outputs.backend == 'true' }}
         run: |
           set -euo pipefail
           git fetch --no-tags --depth=1 origin "$BASE_SHA"
-          git worktree add --detach "$RUNNER_TEMP/base" "$BASE_SHA"
+          GIT_LFS_SKIP_SMUDGE=1 git worktree add --detach "$RUNNER_TEMP/base" "$BASE_SHA"
           if uv run --directory "$RUNNER_TEMP/base/backend" --frozen \
             python -m scadbuddy.tools.export_openapi "$RUNNER_TEMP/base.json" >/dev/null; then
             echo "exported=true" >> "$GITHUB_OUTPUT"
