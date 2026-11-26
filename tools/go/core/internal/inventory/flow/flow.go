@@ -20,6 +20,7 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/eh-homelab/ScadBuddy/tools/go/core/internal/inventory/handlers"
+	"github.com/eh-homelab/ScadBuddy/tools/go/core/internal/inventory/problem"
 	"github.com/eh-homelab/ScadBuddy/tools/go/core/internal/inventory/store"
 	"github.com/eh-homelab/ScadBuddy/tools/go/core/internal/inventory/wire"
 )
@@ -40,7 +41,7 @@ type Moved = store.Moved
 
 // call is one step on its target: the item locked (FOR SHARE when lock) and read with its
 // chain and the unit's steps, the step resolved, and its handler's implementation. A
-// blocking problem of the step is 422 steps_invalid; a missing required parameter is 409
+// blocking problem of the step, or one with no step, is 422 steps_invalid; a missing required parameter is 409
 // step_incomplete (R-K1-8); a handler with no implementation is 409 handler_not_built
 // (R-K1-7).
 func (f *Flow) call(ctx context.Context, q pgx.Tx, step handlers.Step, at store.Target, lock bool) (wire.Item, handlers.Choice, any, error) {
@@ -56,7 +57,9 @@ func (f *Flow) call(ctx context.Context, q pgx.Tx, step handlers.Step, at store.
 	missing := []string{}
 	for _, p := range problems {
 		switch {
-		case p.Step != step:
+		case p.Step != "" && p.Step != step:
+			// Another step's problem. One with no step (a special type's needs unmet)
+			// blocks every step.
 		case p.Reason == handlers.MissingParam:
 			missing = append(missing, p.Missing...)
 		default:
@@ -68,9 +71,7 @@ func (f *Flow) call(ctx context.Context, q pgx.Tx, step handlers.Step, at store.
 	}
 	choice, ok := res.Steps[step]
 	if !ok {
-		return wire.Item{}, handlers.Choice{}, nil, &store.Refused{Status: 409, Code: "step_not_applicable",
-			Detail: fmt.Sprintf("the item's class has no %s step: %s", step, sub.Item.ID),
-			Fields: map[string]any{"step": string(step), "class": sub.Item.Class}}
+		return wire.Item{}, handlers.Choice{}, nil, problem.NotApplicable(string(step), sub.Item.ID, sub.Item.Class)
 	}
 	if len(missing) > 0 {
 		slices.Sort(missing)

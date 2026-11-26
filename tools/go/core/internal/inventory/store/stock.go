@@ -18,6 +18,7 @@ import (
 
 	"github.com/eh-homelab/ScadBuddy/tools/go/core/internal/inventory/handlers"
 	"github.com/eh-homelab/ScadBuddy/tools/go/core/internal/inventory/model"
+	"github.com/eh-homelab/ScadBuddy/tools/go/core/internal/inventory/problem"
 	"github.com/eh-homelab/ScadBuddy/tools/go/core/internal/inventory/wire"
 )
 
@@ -94,10 +95,7 @@ func unitInstalled(id string) error {
 	return &Refused{Status: 409, Code: "unit_installed", Detail: "the unit is fitted in another unit: " + id}
 }
 
-func wrongCounting(id string) error {
-	return &Refused{Status: 409, Code: "wrong_counting",
-		Detail: "a lot call on an item counted in units, or a unit call on one counted in lots: " + id}
-}
+func wrongCounting(id string) error { return problem.WrongCounting(id) }
 
 // badInput is an input the public model refuses (a pydantic validation error in Python).
 func badInput(format string, args ...any) error {
@@ -666,6 +664,11 @@ func checkReceiveLot(in wire.ReceiveLot) error {
 // set and the cost given kept as foreign_unit_cost_minor (R-7067-11, D11, R-P2-11); a
 // receive with no cost opens at 0 with its cost unknown too.
 func (Stock) ReceiveLot(ctx context.Context, tx pgx.Tx, item wire.Item, in wire.ReceiveLot, shop string, by json.RawMessage) (wire.Lot, error) {
+	// With no shop currency every named currency would count as foreign and the cost
+	// would be stored as unknown: the caller's fault, so a failure, not a refusal.
+	if shop == "" {
+		return wire.Lot{}, errors.New("store: a receive needs the shop's currency")
+	}
 	if err := checkReceiveLot(in); err != nil {
 		return wire.Lot{}, err
 	}

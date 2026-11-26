@@ -44,3 +44,18 @@ func (r *Refused) Body() map[string]any {
 	}
 	return body
 }
+
+// NotApplicable is 409 step_not_applicable: the item's class has no such step (a service's
+// receive, a durable's count). It replaces phase 2's item_not_counted (R-K1-23).
+func NotApplicable(step, item string, class any) *Refused {
+	return &Refused{Status: 409, Code: "step_not_applicable",
+		Detail: "the item's class has no " + step + " step: " + item,
+		Fields: map[string]any{"step": step, "class": class}}
+}
+
+// WrongCounting is 409 wrong_counting: a lots call on an item counted in units, or the
+// reverse (R-K1-23, phase 2's wrong_tracking).
+func WrongCounting(item string) *Refused {
+	return &Refused{Status: 409, Code: "wrong_counting",
+		Detail: "a lot call on an item counted in units, or a unit call on one counted in lots: " + item}
+}

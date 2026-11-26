@@ -242,3 +242,24 @@ func rat(s string) *big.Rat {
 	r, _ := new(big.Rat).SetString(s)
 	return r
 }
+
+// TestAReceiveWithNoShopCurrencyFails: an empty shop currency would make every named
+// currency foreign and store the cost as unknown; it is a failure, not a refusal.
+func TestAReceiveWithNoShopCurrencyFails(t *testing.T) {
+	pool := testdb.New(t)
+	item := stockItem(t, pool, "M3 bolt")
+	_, err := inTx(t, pool, func(ctx context.Context, tx pgx.Tx) (wire.Lot, error) {
+		if _, err := Lock(ctx, tx, Target{Item: item.ID}, true); err != nil {
+			return wire.Lot{}, err
+		}
+		return Stock{}.ReceiveLot(ctx, tx, item, wire.ReceiveLot{Qty: "1", UnitCostMinor: ptr(wire.Decimal("5")),
+			Currency: ptr("USD")}, "", Actor(browser))
+	})
+	var refused *Refused
+	if err == nil || errors.As(err, &refused) {
+		t.Fatalf("got %v, want a failure", err)
+	}
+	if n := lotCount(t, pool, item); n != 0 {
+		t.Fatalf("%d lots", n)
+	}
+}

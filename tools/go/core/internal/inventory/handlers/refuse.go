@@ -2,7 +2,6 @@ package handlers
 
 import (
 	"context"
-	"fmt"
 	"math/big"
 
 	"github.com/jackc/pgx/v5"
@@ -17,9 +16,7 @@ import (
 type refuse struct{}
 
 func notApplicable(step Step, item wire.Item) error {
-	return &problem.Refused{Status: 409, Code: "step_not_applicable",
-		Detail: fmt.Sprintf("the item's class has no %s step: %s", step, item.ID),
-		Fields: map[string]any{"step": string(step), "class": item.Class}}
+	return problem.NotApplicable(string(step), item.ID, item.Class)
 }
 
 func (refuse) Receive(_ context.Context, _ pgx.Tx, in ReceiveIn) (ReceiveOut, error) {
@@ -62,9 +59,5 @@ func (refuse) Sync(_ context.Context, _ pgx.Tx, in SyncIn) error {
 	return notApplicable("sync", in.Item)
 }
 
-// wrongCounting is a lots call on an item counted in units, or the reverse (R-K1-23,
-// phase 2's wrong_tracking).
-func wrongCounting(item wire.Item) error {
-	return &problem.Refused{Status: 409, Code: "wrong_counting",
-		Detail: "a lot call on an item counted in units, or a unit call on one counted in lots: " + item.ID}
-}
+// wrongCounting is a lots call on an item counted in units, or the reverse.
+func wrongCounting(item wire.Item) error { return problem.WrongCounting(item.ID) }
