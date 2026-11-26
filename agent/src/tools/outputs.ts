@@ -85,16 +85,18 @@ export const outputTools: Tool[] = [
   defineTool({
     name: 'save_output',
     label: 'Keep a render as an output',
-    description: 'Keep a finished render job as an output. render_model does this itself with `save_output: true`.',
-    input: z.object({ slug, job_id: z.string().min(1), name: z.string().optional() }),
+    description:
+      'Keep a finished render job as an output. render_model does this itself with `save_output: true`. ' +
+      "`index` picks which of a pipeline job's outputs (0, the first, by default).",
+    input: z.object({ slug, job_id: z.string().min(1), name: z.string().optional(), index: z.number().int().min(0).optional() }),
     risk: 'write',
     routes: ['POST /api/v1/models/{slug}/outputs'],
-    handler: async ({ slug, job_id, name }, ctx) =>
+    handler: async ({ slug, job_id, name, index }, ctx) =>
       json(
         await command(ctx, `save output of ${job_id}`, (headers) =>
           ctx.backend.POST('/api/v1/models/{slug}/outputs', {
             params: { path: { slug } },
-            body: { job_id, name: name ?? null },
+            body: { job_id, name: name ?? null, ...(index === undefined ? {} : { index }) },
             headers,
           }),
         ),

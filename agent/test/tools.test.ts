@@ -569,6 +569,24 @@ describe('render_model', () => {
     expect(firstText(done)).toMatchObject({ status: 'done' })
     expect(saved).toEqual({ job_id: 'j', name: null, inputs })
   })
+
+  // Review of #7869: an order item's kit names save_output for the outputs it has not saved,
+  // so the tool takes which of a pipeline job's outputs to keep.
+  it("keeps the pipeline job's output that `index` names", async () => {
+    const saved: unknown[] = []
+    server.use(
+      http.post(`${BACKEND}/api/v1/models/box/outputs`, async ({ request }) => {
+        saved.push(await request.json())
+        return HttpResponse.json({ id: '0123456789abcdef0123456789abcdef' }, { status: 201 })
+      }),
+    )
+    await runTool(tool('save_output'), { slug: 'box', job_id: 'j', index: 2 }, ctx())
+    await runTool(tool('save_output'), { slug: 'box', job_id: 'j' }, ctx())
+    expect(saved).toEqual([
+      { job_id: 'j', name: null, index: 2 },
+      { job_id: 'j', name: null },
+    ])
+  })
 })
 
 describe('uploads', () => {
