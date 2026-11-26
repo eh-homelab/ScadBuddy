@@ -76,6 +76,10 @@ unchanged, to the Python API: WebSockets, SSE and large bodies included. On prod
 | `questions` | `/questions/*`: the `done` summaries read, dismissed and posted, and the attention count |
 | `escalations` | `/escalations/*`: a flow run's calls passed up, denied, moved, delivered, and a run's entries |
 | `audit` | `POST` `/audit/record`, `…/list`, `…/prune` |
+| `unknown-trays:read` | `GET /api/v1/filament/unknown-trays` (public, caller `api`), and the print worker's `GET …/crud/print/filament/printers/{printer_id}/unknown-trays` (caller `print`) |
+| `unknown-trays` | those, and `POST /api/v1/filament/unknown-trays/{id}/dismiss` (public). Go writes no spool here (#7143) |
+
+The `unknown-trays` public routes use `internal/auth` (see "Public routes"). Their CRUD route is caller `print`'s, so it has its own `case` in `newRouter` (areaPackages mounts on caller `agent`).
 
 Area `fleet` (`internal/fleet`) is caller `fleet`'s (scope `crud.fleet`), under
 `/api/v1/internal/crud/fleet`: `POST /agents/{session_id}/touch`, `GET /agents`, `PUT` and
