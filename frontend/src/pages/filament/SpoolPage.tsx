@@ -33,6 +33,7 @@ import {
 } from '../../api/filament'
 import { ArchiveSpoolDialog } from '../../components/filament/ArchiveSpoolDialog'
 import { ClosingSummary } from '../../components/filament/ClosingSummary'
+import { driftCause, startGapG } from '../../components/filament/driftCause'
 import { GramsBasis } from '../../components/filament/GramsBasis'
 import { WeighingBreakdown } from '../../components/filament/WeighingBreakdown'
 import { BelowLabelChoice, type Resolution } from '../../components/filament/BelowLabelChoice'
@@ -1005,7 +1006,19 @@ export function SpoolPage() {
                   <p className="text-2xl font-semibold tracking-tight tabular-nums">{leftNow == null ? 'Not known' : grams(leftNow)}</p>
                   {saved?.archived_at && saved.closing && <ClosingSummary closing={saved.closing} at={saved.archived_at} />}
                   {saved?.last_weighing && saved.last_weighing.data.reading_g != null ? (
-                    <WeighingBreakdown event={saved.last_weighing} />
+                    <WeighingBreakdown
+                      event={saved.last_weighing}
+                      // #7685: the drift's likely cause, once the history (the density) has loaded.
+                      cause={driftCause({
+                        driftG: typeof saved.last_weighing.data.drift_g === 'number' ? saved.last_weighing.data.drift_g : null,
+                        emptyBasis: typeof saved.last_weighing.data.empty_basis === 'string' ? saved.last_weighing.data.empty_basis : null,
+                        startGapG: startGapG(saved.basis.anchor, saved.added_full ?? null, effective?.label_weight_g ?? null),
+                        usedG: history?.metrics.used_g ?? 0,
+                        impliedDensity: history?.metrics.implied_density_g_cm3 ?? null,
+                        typeDensity: history?.metrics.density_g_cm3 ?? null,
+                        densityMismatch: history?.metrics.density_mismatch ?? false,
+                      })}
+                    />
                   ) : (
                     <p className="text-[13px] text-muted-foreground">
                       {saved?.last_weighed_g != null && saved.last_weighed_at
