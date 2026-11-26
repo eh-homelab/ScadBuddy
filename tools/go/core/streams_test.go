@@ -36,7 +36,7 @@ func newStreams(t *testing.T, env map[string]string) *streamAPI {
 	hub := bus.NewHub(pool, nil)
 	t.Cleanup(hub.Close)
 	st := &streams{hub: hub, env: func(name string) string { return env[name] }}
-	router, err := newRouter(pool, http.NotFoundHandler(), nil, "changes, ws", env["SCADBUDDY_AUTH_MODE"], nil, nil, st)
+	router, err := newRouter(pool, http.NotFoundHandler(), nil, "changes, ws", env["SCADBUDDY_AUTH_MODE"], nil, nil, nil, st)
 	if err != nil {
 		t.Fatal(err)
 	}
