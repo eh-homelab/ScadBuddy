@@ -81,10 +81,16 @@ func New(baseURL string, token func() (string, error), tel *telemetry.Telemetry)
 	return &Client{
 		BaseURL: base,
 		Token:   token,
-		HTTP:    &http.Client{Timeout: 30 * time.Second, Transport: tel.Transport(http.DefaultTransport, peer)},
+		HTTP:    &http.Client{Timeout: callTimeout, Transport: tel.Transport(http.DefaultTransport, peer)},
 		Store:   &http.Client{Timeout: 30 * time.Second, Transport: tel.Transport(httpx.Outside(nil), "s3")},
 	}
 }
+
+// callTimeout bounds each call to core. A commit may wait up to 10 s for a lock slot and
+// 30 s for the object's lock (blobstore slotWait, stageLockTries × stageLockTimeout) before
+// it answers 503 store_busy, then make its store requests; this leaves room for all of it,
+// so the caller gets core's answer rather than its own timeout.
+const callTimeout = 2 * time.Minute
 
 type slot struct {
 	UploadID string            `json:"upload_id"`

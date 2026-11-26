@@ -101,10 +101,10 @@ and the ACL `private` signed (Signature V4, pinned against botocore's answer in 
 goes to the upload's own staging object, `<prefix>/staging/<32 random hex>` (the storefront's
 staging form, `store/s3.py` `staging_key`), never to the content key. The commit holds the
 object's stage lock shared (`blob-object:s3:<sha256>`, a session lock on a connection of its own
-outside the pool, at most 3 at once, a slot waited for at most 30 s; 6 tries of 5 s, then 503
+outside the pool, at most 3 at once, a slot waited for at most 10 s; 6 tries of 5 s, then 503
 `store_busy`, as `StageHold`). It reads the content object: one that is there is never written, as
-`store/s3.py` `upload` does not, and one that is not the key's bytes is a 503
-`store_object_mismatch`, with nothing indexed (a row that named it stays as it was) and the staging
+`store/s3.py` `upload` does not, and one that is not the key's bytes is a 409
+`store_object_mismatch` (only a repair fixes it; Python's `_verified` answers 403 `ref_mismatch`), with nothing indexed (a row that named it stays as it was) and the staging
 object kept, so the commit goes through once the object is repaired. Otherwise it reads the staging
 object (at most the kind's limit), checks its size and SHA-256, and PUTs those verified bytes to the
 content key, so a later PUT to the staging key changes nothing indexed; a staging object gone (another
@@ -117,8 +117,8 @@ upload's id is a ticket MACed under the KEK (HKDF label `scadbuddy:blobs:upload:
 stands for an upload: its URL lasts 15 minutes and its commit an hour more, and another caller's
 commit of it is a 404. Refusals carry a `reason`: 422 `kind_not_allowed`, 413 `upload_too_large`,
 507 `store_full`, 404 `upload_not_found`, 410 `upload_expired`, 409 `upload_not_received`, 422
-`upload_mismatch`, 503 `store_unavailable`, `store_busy` or `store_object_mismatch`.
-`internal/blobclient` is its Go client: `New(baseURL, token, tel)`, `Upload(ctx, kind, mediaType, body)`.
+`upload_mismatch`, 409 `store_object_mismatch`, 503 `store_unavailable` or `store_busy`.
+`internal/blobclient` is its Go client: `New(baseURL, token, tel)`, `Upload(ctx, kind, mediaType, body)`; each call to core may take 2 minutes, longer than a busy commit takes to answer `store_busy`.
 Both sides trace their requests with `telemetry`'s `Transport`: each span records the method, the
 status and the peer (`s3` for the store), never a URL, so a presigned query is never recorded. A
 request to the store carries no trace context (`internal/httpx` `Outside`), as Python's S3 spans

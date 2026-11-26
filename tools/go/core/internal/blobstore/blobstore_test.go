@@ -234,7 +234,11 @@ func writeCases(t *testing.T, pool *pgxpool.Pool, cases []vectorCase, verified b
 		}
 		ref := Ref{SHA256: c.SHA256, Kind: c.Kind, Backend: "s3", BackendID: c.ObjectKey, Size: c.Size}
 		err := pgx.BeginFunc(ctx, pool, func(tx pgx.Tx) error {
-			_, err := index(ctx, tx, c.IndexKey, ref, verified)
+			if verified {
+				_, err := index(ctx, tx, c.IndexKey, ref)
+				return err
+			}
+			_, err := putIn(ctx, tx, c.IndexKey, ref)
 			return err
 		})
 		if err != nil {
@@ -692,7 +696,7 @@ func verifiedAt(t *testing.T, h *harness, key string) time.Time {
 	return at
 }
 
-// A content object that is not its key's bytes is a 503 store_object_mismatch: it is not
+// A content object that is not its key's bytes is a 409 store_object_mismatch: it is not
 // overwritten, nothing is indexed, a row that named it verified before stays as it was,
 // and the staging object stays, so the commit goes through once the object is repaired.
 func TestAWrongContentObjectIsRefused(t *testing.T) {
@@ -718,7 +722,7 @@ func TestAWrongContentObjectIsRefused(t *testing.T) {
 	}
 	id := upload["upload_id"].(string)
 	status, got := h.post("/uploads/"+id+"/commit", core, nil)
-	if status != http.StatusServiceUnavailable || got["reason"] != "store_object_mismatch" {
+	if status != http.StatusConflict || got["reason"] != "store_object_mismatch" {
 		t.Fatal(status, got)
 	}
 	if got, _ := h.object("t/tag_dump/" + sha); string(got) != "corrupt" {
@@ -740,7 +744,7 @@ func TestAWrongContentObjectIsRefused(t *testing.T) {
 		t.Fatal(got)
 	}
 	status, got = h.post("/uploads/"+oupload["upload_id"].(string)+"/commit", core, nil)
-	if status != http.StatusServiceUnavailable || got["reason"] != "store_object_mismatch" {
+	if status != http.StatusConflict || got["reason"] != "store_object_mismatch" {
 		t.Fatal(status, got)
 	}
 	var rows int

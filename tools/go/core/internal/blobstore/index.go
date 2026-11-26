@@ -90,12 +90,12 @@ func putIn(ctx context.Context, tx pgx.Tx, key string, ref Ref) (*Ref, error) {
 	}
 }
 
-// index writes key's row in tx as the commit does: putIn, then, when verified (the commit
-// read the object and found its size and SHA-256), the mark store/index.py
-// `BlobIndex.mark_verified_in` sets.
-func index(ctx context.Context, tx pgx.Tx, key string, ref Ref, verified bool) (*Ref, error) {
+// index writes key's row in tx as the commit does: putIn, then the mark store/index.py
+// `BlobIndex.mark_verified_in` sets. Every commit has read the object and found its size
+// and SHA-256 before it indexes.
+func index(ctx context.Context, tx pgx.Tx, key string, ref Ref) (*Ref, error) {
 	before, err := putIn(ctx, tx, key, ref)
-	if err != nil || !verified {
+	if err != nil {
 		return before, err
 	}
 	_, err = tx.Exec(ctx, `UPDATE store_blobs SET verified_at = now() WHERE key = $1 AND sha256 = $2

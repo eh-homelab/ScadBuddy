@@ -13,7 +13,7 @@
 // object; when there is none, it reads the staging object, checks its size and SHA-256, and
 // PUTs those verified bytes to the content key itself, so a PUT to the staging key after
 // the check changes nothing indexed. It never overwrites a content key, as store/s3.py
-// `upload` does not: a content object that is not its key's bytes is a 503
+// `upload` does not: a content object that is not its key's bytes is a 409
 // store_object_mismatch, with nothing indexed and the staging object kept. Any other
 // backend is a 503 not_configured.
 //
@@ -74,10 +74,11 @@ const (
 	// connection outside the pool (store/index.py STAGE_LOCK_SLOTS).
 	stageSlots = 3
 	// slotWait is how long a commit waits for one of stageSlots; then 503 store_busy, so
-	// no queue grows behind 3 busy slots. Python's semaphore waits unbounded; this is its
-	// lock's own budget (stageLockTries × stageLockTimeout, 30 s), so a commit waits for a
-	// slot no longer than one slot's holder may wait for the lock.
-	slotWait = stageLockTries * stageLockTimeout
+	// no queue grows behind 3 busy slots (Python's semaphore waits unbounded). With the
+	// lock's own budget (stageLockTries × stageLockTimeout, 30 s) a busy commit answers
+	// within 40 s, inside blobclient's commit timeout (blobclient.callTimeout), so the
+	// caller sees the 503 rather than its own timeout.
+	slotWait = 10 * time.Second
 	// bodyMax bounds a request's JSON.
 	bodyMax = 4 << 10
 	// The canned ACL every object is written with (store/s3.py STAGED_ACL).
@@ -301,7 +302,7 @@ func (b *Blobs) commit(r *http.Request, p crud.Params) (any, error) {
 		return nil, err
 	}
 	err = pgx.BeginFunc(ctx, b.Pool, func(tx pgx.Tx) error {
-		before, err := index(ctx, tx, key, ref, true)
+		before, err := index(ctx, tx, key, ref)
 		if err != nil {
 			return err
 		}
@@ -393,7 +394,7 @@ func matches(body []byte, t ticket) bool {
 }
 
 // place makes the content object hold t's bytes. A content object that is there already
-// is never written (store/s3.py `upload`); one that is not t's bytes is a 503
+// is never written (store/s3.py `upload`); one that is not t's bytes is a 409
 // store_object_mismatch. Otherwise the staging object is read, checked, and its verified
 // bytes, not the staging object, are PUT to the content key. On every refusal the staging
 // object stays, so the commit may be sent again.
@@ -451,7 +452,9 @@ func stored(ctx context.Context, body []byte, t ticket) error {
 	}
 	slog.WarnContext(ctx, "the store's object is not the bytes its key names; it is left as it is",
 		"kind", t.Kind, "sha256", t.SHA256)
-	return refused(http.StatusServiceUnavailable, "store_object_mismatch",
+	// 409, not 503: only a repair of the object fixes it, so it is no passing failure to retry
+	// (Python's `_verified` answers 403 ref_mismatch for the same case).
+	return refused(http.StatusConflict, "store_object_mismatch",
 		"the store's object at this blob's key is not its bytes; nothing was indexed")
 }
 
