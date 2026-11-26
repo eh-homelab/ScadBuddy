@@ -478,8 +478,24 @@ SETTING_DOCS: Final[Mapping[str, SettingDoc]] = MappingProxyType(
         "filament_label_template": SettingDoc(
             "Label template",
             "The size of a printed label, for spools and for printer, AMS and slot places:"
-            " a roll or box label, an AMS holder, an Avery sheet, or a custom size of 40 to"
-            " 190 mm wide and 25 to 190 mm tall. The Labels page saves the last one chosen.",
+            " a roll or box label, an AMS holder, an Avery sheet, a sheet grid you saved, or a"
+            " custom size of 40 to 190 mm wide and 25 to 190 mm tall. The Labels page saves the"
+            " last one chosen. A saved sheet is read at each print, so an edit applies to the"
+            " next print; when it is deleted, the labels download is refused, and the page draws"
+            " at 50 x 25 mm, until you choose another template.",
+        ),
+        "filament_label_output": SettingDoc(
+            "Label output",
+            "The file that the labels download gives: a PDF, or PNG images at 203, 300 or"
+            " 600 dpi for label printer software. One page is one PNG; more pages come as a"
+            " ZIP of PNGs. Also the fields a spool label prints, top to bottom: number,"
+            " material, colour name, colour hex, brand, location, nozzle temperatures, label"
+            " weight, the note's first line and the date it was added, and the QR code. The"
+            " default is the number, material, colour name, brand and QR code. Lines that do"
+            " not fit on the label are left off from the bottom; the number, when chosen,"
+            " stays. Without the QR code, the text uses its space. Place labels always print"
+            " their code, name and QR code. The Labels page saves the last format, dpi and"
+            " fields.",
         ),
         "filament_shopping_auto_add_empty": SettingDoc(
             "Add empty spools to the shopping list",

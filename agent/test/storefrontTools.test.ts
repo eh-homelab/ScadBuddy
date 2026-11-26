@@ -6,7 +6,7 @@ import { tiersUpTo } from '../src/auth/principal.js'
 import type { components } from '../src/api/schema.js'
 import { ALL_TOOLS } from '../src/tools/index.js'
 import type { Tool, ToolContext } from '../src/tools/registry.js'
-import { colourProblems, defaultsFor, draftMaterials, fileTitleColours, isSupportMaterial, titleColours, withColourChoices, withoutWords } from '../src/tools/storefrontDraft.js'
+import { colourProblems, defaultsFor, draftMaterials, fileTitleColours, isSupportMaterial, soldDesign, titleColours, withColourChoices, withoutWords } from '../src/tools/storefrontDraft.js'
 import { BACKEND, firstText, services } from './helpers/mcp.js'
 
 // #6131 (design 2026-11-13 §6) — the assistant's storefront tools: a draft (`write`) built
@@ -17,7 +17,7 @@ beforeAll(() => server.listen({ onUnhandledFrame: 'error' }))
 afterEach(() => server.resetHandlers())
 afterAll(() => server.close())
 
-type Schema = components['schemas']['CustomizerSchema']
+type Schema = components['schemas']['RevisionSchema']
 type Filament = components['schemas']['Filament']
 
 function tool(name: string): Tool {
@@ -65,11 +65,22 @@ interface FileVector {
   titles: { title: string; colours: string[] }[]
 }
 
-const shared = JSON.parse(readFileSync(`${import.meta.dirname}/../../test-fixtures/storefront/sell-draft-vectors.json`, 'utf8')) as (Vector | FileVector)[]
-// The `source` cases are a pipeline listing's (#5701): the editor's until this tool takes a design's
-// inputs (spec 2026-11-17 §11 item 7), which then drops this filter.
+/**
+ * #5701 — a "Sell on storefront" case of a render's whole inputs (`source`): the smart defaults
+ * of its values and, for a pipeline template, its own inputs and their version (`soldDesign`).
+ */
+interface SourceVector {
+  name: string
+  schema: Schema
+  filaments: Filament[]
+  source: Record<string, unknown>
+  expected: Record<string, unknown>
+}
+
+const shared = JSON.parse(readFileSync(`${import.meta.dirname}/../../test-fixtures/storefront/sell-draft-vectors.json`, 'utf8')) as (Vector | FileVector | SourceVector)[]
 const vectors = shared.filter((vector): vector is Vector => !('file' in vector) && !('source' in vector))
 const fileVectors = shared.filter((vector): vector is FileVector => 'file' in vector)
+const sourceVectors = shared.filter((vector): vector is SourceVector => 'source' in vector)
 const owl = vectors[0] as Vector
 
 const OUTPUT = 'a'.repeat(32)
@@ -199,7 +210,9 @@ describe('storefront tools (#6131)', () => {
     })
     expect(posted?.fixed).toEqual(owl.expected.fixed)
     expect(posted?.colours).toEqual(owl.expected.colours)
-    // No render, so no render-time note; no colour in the title, so none taken out.
+    // No render, so no render-time note; no colour in the title, so none taken out; no pipeline
+    // (#5701), so no design to set up and no inputs.
+    expect(posted).not.toHaveProperty('inputs')
     expect(result['notes']).toEqual([])
     await expect(tool('storefront_listing_draft').execute({ slug: 'owl', values: { bodyy: '#000000' } }, ctx())).rejects.toThrow('bodyy is not a parameter')
   })
@@ -216,6 +229,87 @@ describe('storefront tools (#6131)', () => {
     await expect(tool('storefront_listing_draft').execute({}, ctx())).rejects.toThrow('exactly one')
     await expect(tool('storefront_listing_draft').execute({ output_id: OUTPUT, slug: 'owl' }, ctx())).rejects.toThrow('exactly one')
     await expect(tool('storefront_listing_draft').execute({ slug: 'owl', library_file_id: 46 }, ctx())).rejects.toThrow('exactly one')
+  })
+
+  describe('a pipeline template (#5701, spec 2026-11-17 §9)', () => {
+    const house = sourceVectors[0] as SourceVector
+    const DOLLHOUSE = 'd'.repeat(32)
+
+    /** The dollhouse's output (whole inputs `inputs`), model, schema and price book; `onPost` gets the listing a draft posts. */
+    function serveDollhouse(inputs: Record<string, unknown>, onPost: (body: unknown) => void, schema: Schema = house.schema): void {
+      const { params, ...rest } = inputs
+      server.use(
+        http.get(`${BACKEND}/api/v1/outputs/${DOLLHOUSE}`, () =>
+          HttpResponse.json({ id: DOLLHOUSE, slug: 'dollhouse', model_version: COMMIT, name: 'Dollhouse', job_id: 'j2', params, inputs: rest }),
+        ),
+        http.get(`${BACKEND}/api/v1/jobs/j2`, () => HttpResponse.json({ id: 'j2', slug: 'dollhouse', status: 'done' })),
+        http.get(`${BACKEND}/api/v1/models/dollhouse`, () => HttpResponse.json({ slug: 'dollhouse', name: 'Dollhouse', media: [] })),
+        http.get(`${BACKEND}/api/v1/models/dollhouse/versions`, () => HttpResponse.json([{ commit: COMMIT, short: 'ccccccc', current: true }])),
+        http.get(`${BACKEND}/api/v1/models/dollhouse/versions/${COMMIT}/schema`, () => HttpResponse.json(schema)),
+        http.get(`${BACKEND}/api/v1/orders/price-book`, () => HttpResponse.json({ filaments: house.filaments })),
+        http.post(`${BACKEND}/api/v1/storefront/listings`, async ({ request }) => {
+          const body = (await request.json()) as Record<string, unknown>
+          onPost(body)
+          return HttpResponse.json({ id: LISTING, ...body, published: false }, { status: 201 })
+        }),
+      )
+    }
+
+    it('splits a render’s whole inputs as the page does (the shared vectors)', () => {
+      expect(sourceVectors.length).toBeGreaterThan(0)
+      for (const vector of sourceVectors) {
+        const { values, design } = soldDesign(vector.schema, vector.source)
+        expect({ ...defaultsFor(vector.schema, vector.filaments, values), ...design }, vector.name).toEqual(vector.expected)
+      }
+    })
+
+    it('drafts from an output with its own inputs and their version, and leaves out what the pipeline sets', async () => {
+      for (const vector of sourceVectors) {
+        let posted: Record<string, unknown> | undefined
+        serveDollhouse(vector.source, (body) => (posted = body as Record<string, unknown>), vector.schema)
+        const result = firstText(await tool('storefront_listing_draft').execute({ output_id: DOLLHOUSE }, ctx())) as Record<string, unknown>
+        const { inputs, inputs_v, fixed } = vector.expected
+        expect(posted, vector.name).toMatchObject({ fixed, ...(inputs !== undefined ? { inputs, inputs_v } : {}) })
+        if (inputs === undefined) {
+          expect(posted, vector.name).not.toHaveProperty('inputs')
+          expect(posted, vector.name).not.toHaveProperty('inputs_v')
+        }
+        expect(Object.keys((posted?.['params'] as object | undefined) ?? {}), vector.name).not.toContain('piece')
+        expect(result['notes'], vector.name).toEqual([])
+      }
+    })
+
+    it('sets no inputs from a model, and says the design needs setting up in the editor', async () => {
+      let posted: Record<string, unknown> | undefined
+      serveDollhouse(house.source, (body) => (posted = body as Record<string, unknown>))
+      const result = firstText(await tool('storefront_listing_draft').execute({ slug: 'dollhouse' }, ctx())) as Record<string, unknown>
+      expect(posted).not.toHaveProperty('inputs')
+      expect(posted).not.toHaveProperty('inputs_v')
+      expect(result['notes']).toEqual([
+        `Dollhouse has a design of its own to set up (its pipeline's inputs), which a model brings none of: open the listing at /storefront/listings/${LISTING} and press "Set up the design" before you publish it, or draft it from a saved output of that design.`,
+      ])
+    })
+
+    it('refuses to lock or set a parameter the pipeline sets itself', async () => {
+      serveDollhouse(house.source, () => {})
+      await expect(tool('storefront_listing_draft').execute({ output_id: DOLLHOUSE, lock: ['piece'] }, ctx())).rejects.toThrow(
+        'piece is set by the design itself, so a listing cannot lock it',
+      )
+      await expect(tool('storefront_listing_draft').execute({ slug: 'dollhouse', values: { piece: 'roof' } }, ctx())).rejects.toThrow(
+        'piece is set by the design itself, so a listing cannot set it',
+      )
+      await expect(tool('storefront_listing_draft').execute({ slug: 'dollhouse', lock: ['piece'] }, ctx())).rejects.toThrow(
+        'piece is set by the design itself, so a listing cannot lock it',
+      )
+      // The pipeline's own reason, even for a name its schema's parameters leave out.
+      serveDollhouse(house.source, () => {}, { ...house.schema, pipeline_params: ['piece', 'storeys'] })
+      await expect(tool('storefront_listing_draft').execute({ slug: 'dollhouse', values: { storeys: 2 } }, ctx())).rejects.toThrow(
+        'storeys is set by the design itself, so a listing cannot set it',
+      )
+      await expect(tool('storefront_listing_draft').execute({ slug: 'dollhouse', lock: ['storeys'] }, ctx())).rejects.toThrow(
+        'storeys is set by the design itself, so a listing cannot lock it',
+      )
+    })
   })
 
   describe('a library file (#6710 §11.3)', () => {

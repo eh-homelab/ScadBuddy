@@ -394,14 +394,16 @@ async def test_a_hand_attempt_is_answered_when_its_archive_read_is_slow(
     shop: Shop, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """#6145: the write waits for the archives' read only so long; past it, the attempt
-    is recorded and answered with no actuals."""
+    is recorded and answered with no actuals. No wall-clock bound around the write: its
+    database work once took over 2 s on a loaded runner (#7820). A write that waited for
+    the read would get its facts after 5 s and record their actuals, which the check
+    below refuses."""
     monkeypatch.setattr("scadbuddy.api.orders.ARCHIVE_READ_TIMEOUT", 0.05)
     order, item = shop.accepted()
     body = FulfilmentInput(quantity=1, outcome="succeeded", archive_id=81)
 
-    answered = await asyncio.wait_for(
-        record_fulfilment(order.id, item.id, body, orders_of(shop, SlowArchives(facts(81)))),
-        2,
+    answered = await record_fulfilment(
+        order.id, item.id, body, orders_of(shop, SlowArchives(facts(81)))
     )
 
     assert (answered.archive_ids, answered.actual_seconds, answered.actual_grams) == (

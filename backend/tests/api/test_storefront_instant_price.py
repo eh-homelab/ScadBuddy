@@ -411,3 +411,28 @@ def test_the_price_shown_and_the_price_charged_are_of_one_row(
     assert r.status_code == 200, r.text
     [item] = r.json()["items"]
     assert (item["price"], item["unit_price_minor"]) == ("firm", est["price_minor"])
+
+
+def test_a_variant_is_priced_again_after_the_prune_took_its_first_render(
+    crud: CrudCaller, listing: dict[str, Any], sliced: type[FakeSlicer]
+) -> None:
+    """#7655: the slice run saved the first render's output, and the prune then took that
+    render's job. Once the price key moves (here the setup fee), the same choices render
+    again and are priced firm from the new job, not refused as another 3MF."""
+    first = render_until_done(crud, TOKEN_A, listing, {"width": 44})
+    est = priced(crud, first["id"])
+    assert est["source"] == "slice"
+    # As the prune does once a job's result is past its time: the job is gone, the
+    # output the slice run saved stays.
+    with _state(crud.api).projection.pool.connection() as conn:
+        conn.execute("DELETE FROM storefront_renders WHERE job_id = %s", (first["id"],))
+        conn.execute("DELETE FROM render_jobs WHERE id = %s", (first["id"],))
+    set_fee = crud.api.put("/api/v1/settings", json={"pricing_setup_fee": "3.25"})
+    assert set_fee.status_code == 200, set_fee.text
+    again = render_until_done(crud, TOKEN_A, listing, {"width": 44})
+    assert again["id"] != first["id"]
+    answer = priced(crud, again["id"])
+    assert answer["source"] == "slice", answer
+    assert answer["price_minor"] != est["price_minor"]
+    failed = rows(crud, "SELECT failure FROM storefront_slice_prices WHERE status = 'failed'")
+    assert failed == []

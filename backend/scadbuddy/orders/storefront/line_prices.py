@@ -38,7 +38,7 @@ from scadbuddy.orders.pricing import Plate, PlateFilament
 from scadbuddy.orders.storefront.held_file import priced_file
 from scadbuddy.orders.storefront.limits import RenderLimits
 from scadbuddy.orders.storefront.pipeline_inputs import shows_design
-from scadbuddy.orders.storefront.renders import fetch_files, one_output, output_of, variant_of
+from scadbuddy.orders.storefront.renders import fetch_files, output_of, variant_of
 from scadbuddy.orders.storefront.slice_price import PriceRow, firm_price
 from scadbuddy.orders.storefront.wire import Listing
 from scadbuddy.render.job_models import JobNotFoundError
@@ -163,8 +163,8 @@ async def variant_at_add(
     output is of the listing's design (#6921: the page showed that preview and price
     with no render): its 3MF's sha256 and slot filaments, as the server recorded them.
     The price is still read by the key (`price_of`), never from the browser. None when
-    there is neither, a slot has no listing filament, or its render made several outputs
-    (`one_output`): the line has no firm price."""
+    there is neither, or a slot has no listing filament: the line has no firm price. A
+    render of several outputs is one variant over all of them (`variant_of`, #5701)."""
 
     def job() -> Any:
         job_id = RenderLimits(state.projection.pool).job_of(visitor_id, render_key)
@@ -179,8 +179,6 @@ async def variant_at_add(
     if found is None or found.state != "done" or found.result is None:
         return await _priced_variant(state, listing, variant_key)
     if not shows_design(listing, found.slug, found.model_version, found.inputs):
-        return None
-    if not one_output(found):
         return None
     if not await fetch_files(state, found):
         return None
