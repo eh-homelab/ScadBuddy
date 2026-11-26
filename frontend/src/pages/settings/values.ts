@@ -293,8 +293,9 @@ export function toPatchValue(name: FieldName, raw: string, settings: Settings): 
   }
   // #6265 — one direction per data type: the form's six-part string, split.
   if (name === 'filament_sync') return syncParts(raw)
-  // #4699 — an empty list allows no source (each print goes to Unsorted imports) or skips no printer.
+  // #7471 — an empty list is people only.
   if (name === 'flow_answerers') return raw === '' ? [] : raw.split(',')
+  // #4699 — an empty list allows no source (each print goes to Unsorted imports) or skips no printer.
   if (name === 'print_auto_import_sources') return raw === '' ? [] : raw.split(',')
   if (name === 'print_auto_import_skip_printers') return raw === '' ? [] : raw.split(',').map(Number)
   if (name === 'print_auto_import_skip_lan_printers') return raw === '' ? [] : raw.split(',')

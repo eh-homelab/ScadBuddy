@@ -288,9 +288,16 @@ function LoadedScript({ definitionId }: { definitionId: string }) {
   )
 }
 
+/** Whether an answer could have ended `step`: one never ends it running, cancelled or timed out. */
+function answerable(step: FlowStep): boolean {
+  if (step.status === 'running') return false
+  return step.status !== 'failed' || (step.error !== 'CancelledError' && step.error !== 'TimeoutError')
+}
+
 function Steps({ steps, answers }: { steps: FlowStep[]; answers: FlowAnswerBy[] }) {
-  // #7471: the latest answer of each question (a Reset may answer it again). A step still
-  // running has no answer in effect: a Reset to before its answer parked it again.
+  // #7471: the latest answer of each question (a Reset may answer it again). A Reset to
+  // before an answer parks its question again, so an answer on record is in effect only on
+  // a step an answer could have ended: not one still running, cancelled or timed out.
   const by = new Map(answers.map((a) => [a.call_id, a.answered_by] as const))
   return (
     <Card size="sm" className="px-3">
@@ -311,7 +318,7 @@ function Steps({ steps, answers }: { steps: FlowStep[]; answers: FlowAnswerBy[] 
               <td className="py-1 pr-3 font-mono">{step.fn}</td>
               <td className="py-1 pr-3">
                 {step.error ? `${step.status} (${step.error})` : step.status}
-                {step.status !== 'running' && by.has(step.call_id) && (
+                {answerable(step) && by.has(step.call_id) && (
                   <span className="block text-muted-foreground">
                     <AnsweredBy by={by.get(step.call_id)} />
                   </span>

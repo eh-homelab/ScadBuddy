@@ -103,6 +103,26 @@ describe('WorkflowRunPage', () => {
     expect(link.getAttribute('href')).toMatch(/\?assistant-session=s-9$/)
   })
 
+  it.each(['CancelledError', 'TimeoutError'])(
+    'names no one for a question a Reset parked again that then ended %s (#7471)',
+    async (error) => {
+      const [run] = (await api.listFlowRuns()).filter((r) => r.id === 'run-ask')
+      setFlowRuns([
+        {
+          ...run!,
+          status: 'failed',
+          waiting_on: [],
+          steps: run!.steps.map((s) => (s.call_id === 'call-2' ? { ...s, status: 'failed' as const, error } : s)),
+        },
+      ])
+      setFlowAnswers('run-ask', [{ call_id: 'call-2', answered_by: 'session:s-9', admitted_by: 'setting' }])
+      render('run-ask')
+      const steps = await screen.findByRole('table', { name: 'Steps' })
+      expect(await within(steps).findByText(`failed (${error})`)).toBeInTheDocument()
+      expect(within(steps).queryByText('Answered by the assistant')).toBeNull()
+    },
+  )
+
   it('names no one for a question a Reset parked again, though its old answer is on record (#7471)', async () => {
     // run-ask's call-2 is running and waiting again: the answer is of an undone execution.
     setFlowAnswers('run-ask', [{ call_id: 'call-2', answered_by: 'session:s-9', admitted_by: 'setting' }])
