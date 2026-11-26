@@ -1,9 +1,11 @@
 import { useState, type FormEvent } from 'react'
+import { listCatalog, listSpools, listTypes } from '../../api/filament'
 import { failure } from '../../lib/mediaFiles'
 import { useAsync } from '../../lib/useAsync'
-import { entityApi } from './api'
+import { CATALOGS } from '../filament/catalogs'
+import { REQUIRED_KINDS, entityApi, hasValue, type PropertyValue } from './api'
 import { PropertyKeyTable } from './PropertyKeyTable'
-import { namedTwice, rowsOf, schemaOf } from './propertyKeys'
+import { namedTwice, requiredOf, rowsOf, schemaOf } from './propertyKeys'
 import { Button } from '@/components/ui/button'
 
 type Props = { kind: string; onSaved: () => void; onCancel: () => void }
@@ -27,10 +29,30 @@ export function KindKeysForm({ kind, onSaved, onCancel }: Props) {
   return <Keys kind={kind} own={schema.data.schema} onSaved={onSaved} onCancel={onCancel} />
 }
 
+/** The unarchived rows of a kind whose rows are checked (#7703), by id: what its own list route answers. */
+async function liveRows(kind: string): Promise<string[]> {
+  const catalog = CATALOGS.find((spec) => spec.entity === kind)
+  const rows: { id: string; archived_at?: string | null }[] =
+    kind === 'spool' ? await listSpools() : kind === 'spool_type' ? await listTypes() : catalog ? await listCatalog(catalog.kind) : []
+  return rows.filter((row) => !row.archived_at).map((row) => row.id)
+}
+
+/** Each key's count of unarchived rows that have no value for it. */
+async function lacking(kind: string, keys: string[]): Promise<Map<string, number>> {
+  const [ids, properties] = await Promise.all([liveRows(kind), entityApi.kindProperties(kind)])
+  const values = (id: string): Record<string, PropertyValue> => properties[id] ?? {}
+  return new Map(keys.map((key) => [key, ids.filter((id) => !hasValue(values(id)[key])).length]))
+}
+
 function Keys({ kind, own, onSaved, onCancel }: Props & { own: Record<string, unknown> }) {
   const [rows, setRows] = useState(() => rowsOf(own))
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState<string | null>(null)
+  const requirable = REQUIRED_KINDS.has(kind)
+  // A key ticked required here and not before: rows without it read incomplete once saved.
+  const wasRequired = new Set(requiredOf(own))
+  const newlyRequired = [...new Set(rows.filter((row) => row.required && row.key.trim() && !wasRequired.has(row.key.trim())).map((row) => row.key.trim()))]
+  const counts = useAsync(() => (newlyRequired.length ? lacking(kind, newlyRequired) : Promise.resolve(new Map<string, number>())), [kind, newlyRequired.join('\u001f')])
 
   async function save(event: FormEvent) {
     event.preventDefault()
@@ -49,7 +71,16 @@ function Keys({ kind, own, onSaved, onCancel }: Props & { own: Record<string, un
   return (
     <form noValidate aria-label={`Keys of ${kind}`} onSubmit={(event) => void save(event)} className="flex flex-col gap-2 overflow-x-auto rounded-md border p-2.5 text-[13px]">
       <p className="text-muted-foreground">These keys are for every entity of this kind. They type a value; any other key is still kept, and removing a key here keeps the values stored under it.</p>
-      <PropertyKeyTable label={`Property keys of ${kind}`} rows={rows} onChange={setRows} />
+      <PropertyKeyTable label={`Property keys of ${kind}`} rows={rows} onChange={setRows} requirable={requirable} />
+      {newlyRequired.length > 0 && (
+        <ul aria-label="Rows that lack a newly required key" className="text-xs text-muted-foreground">
+          {newlyRequired.map((key) => {
+            const n = counts.data?.get(key)
+            return <li key={key}>{n === undefined ? `Counting the rows that lack ${key}…` : `${n} ${n === 1 ? 'row lacks' : 'rows lack'} ${key}`}</li>
+          })}
+          <li>A row without a required key reads incomplete, and its next save asks for it.</li>
+        </ul>
+      )}
       <div className="flex gap-2">
         <Button type="submit" size="xs" disabled={busy}>
           Save keys
