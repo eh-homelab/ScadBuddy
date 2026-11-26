@@ -1,4 +1,4 @@
-import { screen, waitFor, within } from '@testing-library/react'
+import { fireEvent, screen, waitFor, within } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { delay, http, HttpResponse } from 'msw'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
@@ -138,6 +138,23 @@ describe('ArchiveSpoolDialog (#7684)', () => {
     await userEvent.keyboard('250')
     expect(field).toHaveValue('250')
     expect(within(dialog).queryByText(/after all/)).toBeNull()
+  })
+
+  it('keeps the note for a change after a select-all that changed nothing (#7945)', async () => {
+    server.use(http.get('*/api/v1/filament/spools/:id/closing', slowFirstPreview()))
+    const { dialog } = await show(3, 180)
+    const field = within(dialog).getByLabelText<HTMLInputElement>('Scale reading, with the spool (g)')
+    await userEvent.type(field, '210')
+    await within(dialog).findByText(/after all/, undefined, { timeout: 3000 })
+    // A select-all and a Shift press change nothing; the caret then moves, and an edit that fires no
+    // keydown or paste (a drop, a menu's Undo) is an edit of the old number, not a replacement.
+    await userEvent.tripleClick(field)
+    await userEvent.keyboard('{Shift}')
+    field.setSelectionRange(3, 3)
+    fireEvent.select(field)
+    fireEvent.change(field, { target: { value: '2100' } })
+    expect(field).toHaveValue('2100')
+    expect(within(dialog).getByText(/after all/)).toBeInTheDocument()
   })
 
   it('drops the note when a shorter number is pasted over the old one (#7945)', async () => {
