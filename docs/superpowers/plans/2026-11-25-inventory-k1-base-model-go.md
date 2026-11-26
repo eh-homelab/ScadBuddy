@@ -241,10 +241,16 @@ both specs.
    `life_hours` on a kind whose life handler is `life.months`; a lot of a `part` item with
    a fractional `on_hand`. The migration never aborts; it places each row and reports it.
    Test: Task 7 `test_every_phase_2_combination_is_placed`.
-4. **A kind edit that would change its items' class.** A `PATCH` that moves a kind with
+4. **A kind edit that would change its items' class or break a required key.** A `PATCH` that moves a kind with
    items to a parent of another class, or a child that sets a key its parent set to
    another value, is refused (422 `class_changed`, the key named) and writes nothing.
-   Test: Task 10 `TestAParentChangeThatChangesAClassIsRefused`.
+   Test: Task 10 `TestAParentChangeThatChangesAClassIsRefused`. The same holds for the
+   required properties (R-K1-33): a kind change that leaves a kind below it requiring a
+   key it no longer defines is 422 `bad_property_schema`, naming that kind. An item that
+   became incomplete still takes stock, archives and restores; only its create and its
+   form save are refused. Tests: Task 10b `TestAnAncestorThatDropsARequiredKeyIsRefused`,
+   `TestAMoveThatDropsAGrandchildsKeyIsRefused`, `TestAnIncompleteItemStillTakesStock`,
+   `TestArchiveAndRestoreAreNotChecked`.
 5. **Go's worker slow or down while a person saves.** The activity waits on its queue.
    The public route stops waiting after 15 s and answers 202 with the activity id, never a
    500; the page shows "Still working" and follows it to its result. A second press with
@@ -272,7 +278,7 @@ both specs.
 | 1 | `feat/6949-k1-1-property-history` (PR #7938, base main, which has #7819 and the design #7784) | The history events, the history subscriber and its cursor, the readers, the panel and the tool, and the proof's property history test (§4.8). Lands on its own, after #7819 |
 | 2 | `feat/6949-k1-2-inventory-model` (PR #7875; cut from the design branch, which holds `docs/inventory-model/`, now on main) | The class, the catalog and the resolver in Go, and the YAML test |
 | 3 | `feat/6949-k1-3-inventory-migration` (PR #7881, on 2) | The §8 migration, `inventory_operations`, the caller `inventory`, the relation tables |
-| 4 | `feat/6949-k1-4-inventory-core` (on 3, with layer 1 merged in) | The store, the default handlers, the base flow, idempotency, the Temporal worker and activities, the read routes |
+| 4 | `feat/6949-k1-4-inventory-core` (on 3, with layer 1 merged in) | The store, the default handlers, the base flow, idempotency, the Temporal worker and activities, the read routes, the items' required properties (Task 10b) |
 | 5 | `feat/6949-k1-5-inventory-forwarders` (on 4) | The Python forwarders (reads over HTTP, writes as activities); the kind and item stores and the `/parts` aliases go; the new problem codes |
 | 6 | `feat/6949-k1-6-order-stock-activities` (on 5) | The order lifecycle and the printer merge start activities; Python's stock writes go |
 | 7 | `feat/6949-k1-7-inventory-docs` (on 6) | Docs |
@@ -577,6 +583,9 @@ K1 ports `check.py` up to the README table (R-K1-19). Its relation checks and it
 - `package wire`: the JSON of `inventory/models.py`, field for field: `ItemKind` (phase 2 fields, plus `nature`, `role`, `counting`, `billing` (`string|null`), `special_type`, `steps`, `incomplete_steps: string[]`); `KindInput`, `KindPatch` (phase 2 fields plus the class keys, `special_type` and `steps`; `tracking` and `life_basis` still taken, R-K1-6); `Item` (phase 2 fields plus `steps`, `incomplete_steps`, `class: {nature, role, counting, billing}`, `special_type`); `ItemInput`, `InventoryItemPatch` (plus `steps`); `Unit` (phase 2 fields, plus `steps`, `starts_at`, `ends_at`, and status `ended`). Readers derive `tracking`, `life_basis`, `life_hours`, `life_months` (R-K1-6) and `compatible_with` (the model kinds' names, R-K1-11).
 - `store.Kinds`: `List(ctx, q, archived bool)`, `Get`, `Create(ctx, tx, in wire.KindInput, by Actor)`, `Update(ctx, tx, id, patch, by)`, `Archive`, `Restore`, `Schema(ctx, q, id) (merged, own json.RawMessage, keysInUse [][2]any, err)`. Each save: build the chain, `ResolveKind(chain)` (Task 5; an open class is no refusal for a kind, C3); `Blocking` problems → `*Refused{Status: 422, Code: "steps_invalid", Problems}`; a class conflict → 422 `class_changed` (key, from, to); a parent change that changes the class of a kind with items (its own or its descendants') → 422 `class_changed`; publishes one `handler_config.changed` (`bus.PublishIn`, in the save's transaction) for each step whose handler or params changed; rewrites `tracking`, `life_basis`.
 - `store.Items`: `List(ctx, q, f ItemFilter)` (phase 2 filters `kind`, `descendants`, `q`, `low`, `archived`, `compatible` (a model kind by name, through `relations`), `limit` 1–5000 default 1000), `Get`, `Create`, `Update`, `Archive`, `Restore`. A save calls `Resolve(chain, item.Steps, nil)`: `Blocking` → 422 `steps_invalid`; `ErrClassOpen` → 422 `class_open`. Then the properties (as `check.py` `resolve` l.128-136): the resolved special type's `requires_properties` and each `required` key of the chain's merged `attribute_schema`, against the item's `entity_properties`. An item's properties can only be written once the item exists (through `/entities/item:<id>/properties`; `ItemInput` has none), so a missing one refuses nothing: the item reads `missing_properties: [key]` (sorted; `wire.Item` gains it here, `models.Item` in Task 13), as `incomplete_steps` does for a parameter. It is derived on every read (and returned by the save), never stored, so a property set through `/entities/item:<id>/properties` shows on the next read with no item save; an item whose resolved special type is `filament_spool` → 409 `filament_item_refused` (phase 2 Ruling 9, until K3). `compatible_with` codes become `compatible_with` relations to model kinds, made under `printer` when missing (the §8 id rule).
+  **Superseded in part (2026-11-26, R-K1-33):** "a missing one refuses nothing" no longer
+  holds. Task 10b adds `properties` to `ItemInput` and `InventoryItemPatch`, and an item
+  create or save without its required properties is refused.
 - Errors keep phase 2's problem codes where the concept stays (`inventory/problems.py`): `kind_not_found`, `kind_exists`, `kind_in_use`, `kind_cycle`, `kind_archived`, `item_not_found`, `item_exists`, `bad_property_schema`, `filament_item_refused`.
 
 Phase 2's `tests/inventory/test_kinds.py` and `test_items.py` cases are rewritten here, one Go test per Python test of the same name in CamelCase (#7667 §5.2 step 4); layer 5 deletes the Python ones.
@@ -587,12 +596,90 @@ Phase 2's `tests/inventory/test_kinds.py` and `test_items.py` cases are rewritte
   - `TestAParentChangeThatChangesAClassIsRefused`: a consumable kind with one item, `PATCH parent_id = durable` → 422 `class_changed` `{key: role, from: consumable, to: durable}`.
   - `TestTrackingIsDerived`: a kind made with `{nature: service, billing: flat}` reads `tracking = none`; a `KindInput` with only `tracking: unit` under `durable` saves as durable; `life_basis` reads `hours` for `life.hours`.
   - `TestCompatibleWithBecomesRelations`: an item made with `compatible_with: ["H2C"]` reads it back; `List(compatible: "H2C")` finds it; a new code `P1S` makes `printer_p1s`.
-  - `TestAnItemNamesItsMissingProperties`: a kind whose schema requires `material`, and an item under `filament_spool`'s special type's `requires_properties` stand-in (a test catalog), made with no properties → saved, `missing_properties == ["material", …]`; the properties set → an empty list on the next read. `ResolveKind` is what the kind save calls and `Resolve` what the item save calls (a fake catalog records which).
+  - `TestAnItemNamesItsMissingProperties`: a kind whose schema requires `material`, and an item under `filament_spool`'s special type's `requires_properties` stand-in (a test catalog), made with no properties → saved, `missing_properties == ["material", …]`; the properties set → an empty list on the next read. `ResolveKind` is what the kind save calls and `Resolve` what the item save calls (a fake catalog records which). (Task 10b replaces it with `TestAnItemWithoutARequiredPropertyIsRefused`, R-K1-33.)
   - `TestAStepChangeIsAConfigEvent`: an item's `steps.life.params.hours` 1500 → 2000 → one `handler_config.changed`, `old` and `new` as the resolved params, `owner = item:<id>`; `history.Apply` → one `handler_config_history` row; `Apply` again → still one. A save that rolls back publishes nothing.
 - [ ] **Step 2: Run** `cd tools/go/core && go test ./internal/inventory/store/ -run 'Kind|Item|Compatible|Tracking|Config'` — Expected: FAIL.
 - [ ] **Step 3: Implement.**
 - [ ] **Step 4: Run** the same — Expected: PASS.
 - [ ] **Step 5: Commit** `feat(core): inventory kinds and items with class and steps (#6949, K1 4/7)`
+
+### Task 10b: Items refuse without their required properties
+
+> Runs after Task 12 (ruling, 2026-11-26: the plan text came after Task 12 started). It
+> is in reading order here because it changes Task 10's stores. It also changes Task
+> 12's activities, problem codes and golden answers. The rule is R-K1-33 (owner,
+> 2026-11-26, [#7950](https://github.com/eh-homelab/ScadBuddy/issues/7950)). This task is
+> the Go side. Its only Python changes are a test of the shared vectors and the two
+> shared statements that `apply_on` reads (#7667 §5.1); Python's behaviour does not
+> change. Task 13 does the forwarders, the item forms and the agent tool.
+
+**Files:**
+- Create: `tools/go/core/internal/inventory/store/properties.go` (the property patch, the value rules, completeness), `tools/go/core/internal/inventory/store/testdata/property_values.json` (the shared vectors), `backend/scadbuddy/entities/shared/entity_property_upsert.sql`, `backend/scadbuddy/entities/shared/entity_property_delete.sql`, `tools/go/core/internal/inventory/activities/testdata/answers/ItemCreateMissingProperties.json`
+- Modify: `tools/go/core/internal/inventory/wire/wire.go`, `tools/go/core/internal/inventory/store/items.go` (`Create`, `Update`, `derive`, `propertiesWithValues`), `tools/go/core/internal/inventory/store/kinds.go` (`Update`: the required keys below), `tools/go/core/internal/inventory/store/schema.go` (`valid` becomes `fits`), `tools/go/core/internal/inventory/activities/activities.go` (`ItemCreate`, `ItemUpdate`), `tools/go/core/internal/inventory/routes/problems.go` (`Codes`), `tools/go/core/internal/inventory/activities/testdata/answers/Item*.json` (rewritten by `-update`), `tools/go/core/README.md` ("Where it differs from Python"), `backend/scadbuddy/entities/properties.py` (`apply_on` reads its two statements from the shared files; no change in behaviour)
+- Test: `tools/go/core/internal/inventory/store/properties_test.go`, `store/items_test.go`, `store/kinds_test.go`, `store/idempotency_test.go` (`TestSharedStatementsMatch`), `tools/go/core/internal/inventory/flow/flow_test.go`, `tools/go/core/internal/inventory/activities/activities_test.go`, `tools/go/core/internal/inventory/routes/reads_test.go`, `backend/tests/entities/test_property_vectors.py`, `backend/tests/crud/test_shared_sql.py`
+
+**Interfaces:**
+- `package wire`:
+  - `type PropertyPatch map[string]json.RawMessage`: as `entities/properties.py` `PropertyPatch.set`. A JSON `null` removes the key.
+  - `ItemInput.Properties PropertyPatch \`json:"properties,omitempty"\`` and `InventoryItemPatch.Properties PropertyPatch \`json:"properties,omitempty"\``.
+  - `Item.InvalidProperties []string \`json:"invalid_properties"\``. `MissingProperties` stays (Task 10). Both lists are sorted keys.
+- The value rules, ported from `entities/properties.py` (one function per Python function):
+  - `shapeProblem(v any) string` is `_shape_problem`: a finite number that fits a double; a string of at most 2000 characters with no U+0000; a list of at most 50 strings, each at most 500 characters with no U+0000. The reason texts are Python's, word for word.
+  - `hasValue(v any) bool` is `has_value`: `false` and `0` are values; `null`, a blank string and an empty list are not.
+  - `fits(v any, sub map[string]any) (keyword string, ok bool)` replaces `valid` in `store/schema.go`, and the schema check keeps calling it. `keyword` is the first keyword that fails (`type`, `enum`, `const`, `minimum`, `maximum`, `exclusiveMinimum`, `exclusiveMaximum`, `multipleOf`, `minLength`, `maxLength`, `minItems`, `maxItems`, `uniqueItems`, `items`). Where two keywords fail, the vectors pin which one Python's `best_match` names, and `fits` names the same one.
+  - `type Invalid struct{ Key, Reason string }` (JSON `{key, reason}`). `Reason` is `does not fit '<keyword>'`.
+  - `completeness(schema mergedProps, required []string, values map[string]any) (missing []string, invalid []Invalid)` is `completeness`. A key that no schema defines never makes an item incomplete. Both lists are sorted by key.
+- Why Go ports the rules and does not call Python: an activity has no client of the API, and the API calls Go, not the reverse (§6.1). Why it ports and does not add a JSON Schema library: the subset is small, `valid` already ports it for the schema check (Task 10), and a library checks a wider language than `check_schema` allows. A port can drift, so `store/testdata/property_values.json` holds the vectors that both sides run, as `store/testdata/actors.json` does for the actor (Task 9). The `backend` lane already selects `tools/go/core/internal/inventory/store/testdata/`, and the `go` lane selects `backend/scadbuddy/entities/shared/` (`.github/scripts/select-lanes.sh`, `select-go.sh`). The file has four lists:
+  - `shape`: `{value, problem}` (`problem` is the reason text, or `null`);
+  - `has_value`: `{value, has}`;
+  - `fit`: `{schema, value, fails}` (`fails` is the keyword, or `null`; include `1.0` against `{"type": "integer"}`, a value that fails two keywords, an `enum` of mixed types, and a list against `items`);
+  - `completeness`: `{schema, values, missing, invalid}` (`invalid` as keys).
+- `func ApplyProperties(ctx context.Context, tx pgx.Tx, ref string, props map[string]json.RawMessage, patch wire.PropertyPatch, by Actor) error` is `apply_on` for `item:<id>`, in the caller's transaction:
+  1. Each key matches `^[a-z][a-z0-9_]{0,63}$`. Each non-null value passes `shapeProblem`. A value of a defined key passes `fits`. Else `*Refused{422, "bad_property_value"}` with the entities' type and the detail `property '<key>': <reason>`, as `entities/problems.py` `bad_property_value` writes it.
+  2. `EnsureEntity(ctx, tx, "item", id)` (Task 9). Then `SELECT 1 FROM entities WHERE id = $1 FOR UPDATE`.
+  3. Each key: the statement of `entities/shared/entity_property_delete.sql` for a `null`, else the statement of `entities/shared/entity_property_upsert.sql` (`source = 'manual'`, `updated_by` = the actor). These are the texts that `apply_on` runs today (#7667 §5.1).
+  4. More than 200 keys after the patch, and more than before it → `bad_property_value` with key `*`.
+  The layer 1 triggers publish one `entity_property.changed` per key. `store.Tx` already took the event log's lock and set `scadbuddy.actor` before any row lock, so no new lock order comes in.
+- `func checkItem(ctx context.Context, tx pgx.Tx, cat Catalog, set kindSet, id string) error`: reads the item's values, its chain's merged schema and its special type's `requires_properties`, then calls `completeness`. When either list is not empty, it returns `*Refused{Status: 422, Code: "missing_required_properties", Type: entityProblems + "missing_required_properties", Detail, Fields: {"missing": [...], "invalid": [{key, reason}]}}`. `Detail` is Python's: `missing required properties: a, b`, or `properties that do not fit: c` when no key is missing.
+- `Items.Create`: after the item insert, `ApplyProperties` with `in.Properties`, then `checkItem`. The order of refusals is: the kind's checks, `steps_invalid` and the other resolution problems, `filament_item_refused`, `item_exists`, `bad_property_value`, then `missing_required_properties`.
+- `Items.Update`: a patch that sends no field (all nil and unset, and no `properties`) is not checked, and it answers the item as it is. Every other patch writes its fields, then `ApplyProperties`, then `checkItem`. A patch is checked even when it changes no value, as `checks_save` looks at the fields sent: so the early "no change" return of Task 10 comes after `checkItem`. A save that omits `properties` is checked against the stored ones.
+- A refusal from `checkItem` or `ApplyProperties` is a `*Refused`. `store.Write` rolls back its savepoint, so the item row, its properties and their events go, and it records the answer (Task 9, C4). Temporal does not retry it.
+- Not checked: `Items.Archive`, `Items.Restore`, every `flow.Flow` step (`Receive`, `Consume`, `Count`, `Move`, `Retire`, `GiveBack`, `Recost`, `Repoint`, `Estimate`, `SetLotCost`), `LotUpdate` and `UnitUpdate`. None of them calls `checkItem`. No sync or import writes an item through Go in K1, so `Create` and `Update` take no "unchecked" switch.
+- Reads: `propertiesWithValues` becomes `propertyValues(ctx, q, itemIDs) (map[string]map[string]any, error)`, the stored values by item. `derive` then computes `MissingProperties` and `InvalidProperties` with `completeness`. An item with `ArchivedAt != nil` reads both lists empty.
+- `Kinds.Update`: after it builds `next`, each kind `d` of `below` other than `id`, and each key of `d`'s own `required`, must be in the merged properties of `next.chain(d)`. Else `badSchema("kind '%s' would require '%s', which it no longer defines", d, key)`: 422 `bad_property_schema`, the first such kind in `subtree` order, nothing written. The kind's own schema keeps its Task 10 check (`checkSchema(kind.Schema, defined(up))`), which already refuses a move that drops a key that the kind itself requires. `required` merges down the tree as `mergedSchema` does today, and a child may require a key that it only inherits (Task 10).
+- Activities: `inventory.ItemCreate` decodes `properties` in `wire.ItemInput`, and `inventory.ItemUpdate` decodes it in `wire.InventoryItemPatch`. Both pass it to the store. The activity names and their count (19) do not change.
+- `routes/problems.go` `Codes` gains `"missing_required_properties": 422` and `"bad_property_value": 422`. Both keep the entities' type (`https://scadbuddy.dev/problems/entities/<code>`), as `bad_property_schema` does. The comment above `Codes` names them.
+- `tools/go/core/README.md` "Where it differs from Python": `invalid[].reason` is `does not fit '<keyword>'`, and not the message of `jsonschema`'s `best_match`. The keys, the keyword and the status are the same (the vectors check them).
+
+- [ ] **Step 1: Write the failing tests:**
+  - `TestPropertyValuesMatchPython` (`properties_test.go`): each vector of `testdata/property_values.json` gives the same `shapeProblem`, `hasValue`, `fits` keyword and `completeness` keys.
+  - `test_property_values_match_the_go_vectors` (`backend/tests/entities/test_property_vectors.py`): the same file through `_shape_problem`, `has_value`, `best_match(...).validator` and `completeness` (its `missing` sorted).
+  - `TestSharedStatementsMatch` (Go) and `test_shared_statements_match` (Python) also compare `entity_property_upsert.sql` and `entity_property_delete.sql`.
+  - `TestAnItemWithoutARequiredPropertyIsRefused` (`items_test.go`; it replaces `TestAnItemNamesItsMissingProperties`): a kind whose schema requires `material`, and a test catalog whose special type requires `diameter_mm`. `Create` with no properties → `*Refused{422, missing_required_properties}`, `missing == ["diameter_mm", "material"]`, `invalid == []`; no `items` row and no `entities` row.
+  - `TestAnItemCreatedWithItsPropertiesSaves`: the same kind, `properties: {material: "PLA", diameter_mm: 1.75}` → the item, `missing_properties == []`, `invalid_properties == []`; two `entity_properties` rows with `source = 'manual'` and `updated_by` = the actor; two `entity_property.changed` events with that actor.
+  - `TestAFalseOrZeroIsAValue`: `false` and `0` fill a required key; `"  "` and `[]` do not (`missing` names them).
+  - `TestASentValueThatDoesNotFitIsRefused`: `properties: {weight_g: "heavy"}` where `weight_g` is `{type: number}` → 422 `bad_property_value`, detail `property 'weight_g': does not fit 'type'`, no row.
+  - `TestTooManyKeysIsRefused`: 201 keys → 422 `bad_property_value`, detail `property '*': an entity has at most 200 keys`.
+  - `TestASaveIsCheckedAgainstTheStoredProperties`: an item made before its kind required `mpn`. `Update {name: "New"}` → 422, `missing == ["mpn"]`, the name unchanged. `Update {name: "New", properties: {mpn: "A1"}}` → the item, named "New".
+  - `TestASaveThatChangesNothingIsStillChecked`: `Update {name: <the same name>}` on that item → 422 `missing_required_properties`.
+  - `TestAStoredValueThatNoLongerFitsIsInvalid`: `colour: "red"` stored, then the kind's `colour` enum becomes `["green"]`. A read gives `invalid_properties == ["colour"]`. `Update {note: "n"}` → 422, `missing == []`, `invalid == [{key: colour, reason: "does not fit 'enum'"}]`.
+  - `TestARemoveOfARequiredKeyIsRefused`: `Update {properties: {material: null}}` → 422, `missing == ["material"]`; the value stays.
+  - `TestAnEmptyPatchIsNotChecked`: `Update {}` on an incomplete item → the item; nothing written.
+  - `TestArchiveAndRestoreAreNotChecked`: an incomplete item → `Archive` and `Restore` succeed.
+  - `TestAnArchivedItemIsNeverMarked`: an incomplete item, archived → `Get` and `List(archived: true)` read both lists empty.
+  - `TestAnIncompleteItemStillTakesStock` (`flow_test.go`): an incomplete consumable item → `Receive` (`receive.lot`) and `Consume` write their moves.
+  - `TestAChildMayRequireAKeyItInherits` (`kinds_test.go`): the parent defines `mpn`, and the child's schema is `{required: ["mpn"]}` → saved; `Schema(child)` has `required == ["mpn"]`.
+  - `TestRequiredMergesDownTheTree`: the parent requires `a`, the child requires `b` → a new item of the child with no properties is refused with `missing == ["a", "b"]`.
+  - `TestAnAncestorThatDropsARequiredKeyIsRefused`: the parent defines `mpn`, and the child requires it. A `PATCH` of the parent's schema without `mpn` → 422 `bad_property_schema`, detail `kind 'child' would require 'mpn', which it no longer defines`; the parent's schema unchanged.
+  - `TestAMoveThatDropsAGrandchildsKeyIsRefused`: `a > b > c`, `a` defines `mpn`, `c` requires it. A `PATCH b {parent_id: <a kind without mpn>}` → 422 `bad_property_schema` that names `c`.
+  - `TestItemCreateCarriesProperties` (`activities_test.go`): `inventory.ItemCreate` with `properties` → `Answer{201, …}`, the item complete. The same `Key` run twice → one item, one row per key, one event per key.
+  - `TestAMissingPropertyIsAnAnswerNotAFailure`: `inventory.ItemCreate` without a required key → `Answer{422, missing_required_properties}`, `err == nil`, one `crud_requests` row. The same `Key` again → the same answer, and the store does not run.
+  - `TestPropertyCodesKeepTheEntitiesType` (`reads_test.go`): `missing_required_properties` and `bad_property_value` answer 422 with the type `https://scadbuddy.dev/problems/entities/<code>`.
+  - `TestTheAnswersMatchTheirGoldenFiles` (Task 12): the `Item*.json` files gain `invalid_properties`, and `ItemCreateMissingProperties.json` records the refusal's body.
+- [ ] **Step 2: Run** `cd tools/go/core && go test -race ./internal/inventory/...` and `cd backend && uv run --frozen pytest tests/entities/test_property_vectors.py tests/crud/test_shared_sql.py -q` — Expected: FAIL.
+- [ ] **Step 3: Implement.** Then `go test ./internal/inventory/activities/ -update`, and read the diff of each golden file: only `invalid_properties` and the new file change.
+- [ ] **Step 4: Run** the same, then `cd tools/go/core && go vet ./...`, `gofmt -l tools/go` and `cd backend && uv run --frozen pytest tests/entities tests/api/test_entity_properties.py -n auto -q` — Expected: PASS, no file listed.
+- [ ] **Step 5: Commit** `feat(core): items refuse without their required properties (#6949, K1 4/7)`
 
 ### Task 11: The default handlers and the base flow
 
@@ -689,9 +776,9 @@ Phase 2's `tests/api/test_inventory.py` and `test_inventory_stock.py` cases for 
 
 **Files:**
 - Create: `backend/scadbuddy/inventory/core_client.py`, `backend/scadbuddy/inventory/activity.py`, `backend/scadbuddy/api/inventory_operations.py`, `frontend/src/pages/inventory/StillWorking.tsx`
-- Modify: `backend/scadbuddy/core/settings.py`, `backend/scadbuddy/core/events.py` (`InventoryOperationEvent`), `backend/scadbuddy/activity/component.py` (its ingest), `backend/scadbuddy/activity/index.py` (`ingest_inventory_operation`), `backend/scadbuddy/inventory/component.py`, `backend/scadbuddy/inventory/models.py`, `backend/scadbuddy/inventory/problems.py`, `backend/scadbuddy/api/inventory.py` (kinds, items), `backend/scadbuddy/api/inventory_stock.py` (lots, units, moves; `recost` moves in Task 16), `backend/scadbuddy/main.py` (the operations router), `backend/scadbuddy/api/entity_properties.py`, `backend/scadbuddy/core/setting_docs.py`, `frontend/src/pages/inventory/api.ts` (writes through `command`), the pages that call its writes (`ItemStock.tsx`, `LotPage.tsx`, `UnitPage.tsx`, `ItemPage.tsx`, `KindsPage.tsx`), `frontend/src/lib/problems.ts`, `frontend/src/mocks/features/inventory.ts`
+- Modify: `backend/scadbuddy/core/settings.py`, `backend/scadbuddy/core/events.py` (`InventoryOperationEvent`), `backend/scadbuddy/activity/component.py` (its ingest), `backend/scadbuddy/activity/index.py` (`ingest_inventory_operation`), `backend/scadbuddy/inventory/component.py`, `backend/scadbuddy/inventory/models.py`, `backend/scadbuddy/inventory/problems.py`, `backend/scadbuddy/api/inventory.py` (kinds, items), `backend/scadbuddy/api/inventory_stock.py` (lots, units, moves; `recost` moves in Task 16), `backend/scadbuddy/main.py` (the operations router), `backend/scadbuddy/api/entity_properties.py`, `backend/scadbuddy/core/setting_docs.py`, `frontend/src/pages/inventory/api.ts` (writes through `command`), the pages that call its writes (`ItemStock.tsx`, `LotPage.tsx`, `UnitPage.tsx`, `ItemPage.tsx`, `KindsPage.tsx`), `frontend/src/lib/problems.ts`, `frontend/src/mocks/features/inventory.ts`; for the required properties (R-K1-33): `backend/scadbuddy/entities/properties.py` (`REQUIRED_KINDS`), `backend/scadbuddy/inventory/kinds.py` (`merged_schema` returns `required`), `frontend/src/pages/inventory/InventoryPage.tsx`, `frontend/src/components/entities/api.ts` (`REQUIRED_KINDS`), `agent/src/tools/inventory.ts` (`inventory_item_upsert`)
 - Delete: `backend/scadbuddy/inventory/items.py`; from `inventory/kinds.py` the `KindStore` class (keep module-level `merged_schema`, `item_schema`, `keys_in_use(conn, kind_id)`, which `entities/` and `api/entity_properties.py` read); `backend/tests/inventory/test_kinds.py`, `test_items.py` (ported in Task 10)
-- Test: `backend/tests/api/test_inventory.py`, `backend/tests/api/test_inventory_stock.py`, `backend/tests/inventory/test_core_client.py`, `backend/tests/inventory/test_go_answers.py`, `backend/tests/activity/test_inventory_operations.py` (with a new `backend/tests/activity/__init__.py`, as `tests/crud/` has), `frontend/src/pages/inventory/StillWorking.test.tsx`, `frontend/src/pages/inventory/ItemStock.test.tsx` (new)
+- Test: `backend/tests/api/test_inventory.py`, `backend/tests/api/test_inventory_stock.py`, `backend/tests/inventory/test_core_client.py`, `backend/tests/inventory/test_go_answers.py`, `backend/tests/activity/test_inventory_operations.py` (with a new `backend/tests/activity/__init__.py`, as `tests/crud/` has), `frontend/src/pages/inventory/StillWorking.test.tsx`, `frontend/src/pages/inventory/ItemStock.test.tsx` (new), `backend/tests/api/test_entity_properties.py`, `frontend/src/pages/inventory/ItemPage.test.tsx`, `InventoryPage.test.tsx`, `KindsPage.test.tsx`, `agent/test/inventory.test.ts`
 
 **Interfaces:**
 - `Settings.core_crud_url: str | None` (env `SCADBUDDY_CORE_CRUD_URL`, an `http://` URL such as `http://127.0.0.1:8082/api/v1`) for reads (R-K1-4); `Settings.temporal_task_queue_inventory: str = "inventory"`.
@@ -711,6 +798,10 @@ Phase 2's `tests/api/test_inventory.py` and `test_inventory_stock.py` cases for 
 - `api/inventory_operations.py`: `GET /api/v1/inventory/operations/{operation_id}` → `Operation` (`operations/store.py:34`), read from Go's `GET /operations/one?id=` (Task 12); 404 `operation_not_found`.
 - `api/inventory.py`, `api/inventory_stock.py`: each kind, item, lot, unit and move route parses, calls `InventoryCore.read` or `write` with the activity of Task 12, and answers the model, or 202. Offers keep their current code (K3).
 - `models.py`: `ItemKind`, `KindInput`, `KindPatch`, `Item`, `ItemInput`, `InventoryItemPatch`, `Unit` gain Task 10's fields (`Class = Literal`s, `Steps = dict[str, StepConf]`, `incomplete_steps: list[str]`, and on `Item` `missing_properties: list[str]`); the phase 2 fields stay (R-K1-6).
+- Required properties (R-K1-33; Task 10b is the Go side):
+  - `models.py`: `ItemInput` and `InventoryItemPatch` gain `properties: dict[str, JsonValue] | None` (the keys and the bound of `PropertyPatch.set`, at most `MAX_KEYS`); `Item` gains `invalid_properties: list[str]`.
+  - `api/inventory.py`: the item create and `PATCH` routes put `properties` in the activity's `body` unchanged, so Go writes the item and its properties in one transaction. A `PATCH` sends `model_dump(exclude_unset=True)`, so an empty patch stays empty and Go does not check it. Go's 422 `missing_required_properties` (with `missing` and `invalid`) and `bad_property_value` pass through unchanged, with the entities' type. Each route's description names both codes, as the spool routes in `api/filament.py` do.
+  - `entities/properties.py` `REQUIRED_KINDS` gains `item` (#7950: Go now owns the kind resolution), and its comment says so. `inventory/kinds.py` module-level `merged_schema` also returns the merged `required` keys (ancestor first, no duplicates, as Go's `mergedSchema`). So `schema_for(item:<id>)` carries them, and `PATCH /entities/item:<id>/properties` refuses a patch that removes or empties a required key that has a value (`apply_on`, as for spools). A key that is still missing refuses nothing there.
 - The Activities tab (R-K1-22, the agent's pattern):
   - `core/events.py`: `class InventoryOperationEvent(BaseEvent)`, `kind: Literal["inventory_operation.changed"] = "inventory_operation.changed"`, `operation_id: str`, added to the `Event` union. It goes to no WebSocket topic, as `AgentOperationEvent`.
   - `ActivityIndex.ingest_inventory_operation(operation_id: str) -> None` and `ingest_inventory_operation_in(conn, operation_id)`: read the `inventory_operations` row and `upsert_in` an `ActivityRow` (`id = f"inventory_operation:{id}"`, `kind = row.kind` (the activity name, `inventory.Take`), `subject`, `status`, `title` from the kind's label and the subject, `source = "inventory_operations"`, `source_id = id`, `created_at`, `finished_at`, `detail = {"problem", "attempt", "last_error"}`).
@@ -721,6 +812,12 @@ Phase 2's `tests/api/test_inventory.py` and `test_inventory_stock.py` cases for 
   - `pages/inventory/api.ts`: each write calls `command<T>(path, init, '/inventory/operations', key, onAccepted)` (`api/client.ts:913`), not `request`, so it sends an `Idempotency-Key`, takes a 202 and follows `GET /inventory/operations/{id}` to the result or the problem. Each write takes an optional `onAccepted`.
   - `StillWorking.tsx`: `<StillWorking id={string} href={string | undefined} />` (an inventory write passes the operation id and `/activity?q=<id>`; a workflow passes no `href`, C10), a status line "Still working. This can take a moment; you can leave this page." with a link to the operation on the Activities tab (`/activity?q=<id>`, as the Activities page filters). `ItemStock`, `LotPage`, `UnitPage`, `ItemPage` and `KindsPage` keep the accepted operation in state from `onAccepted`, show `StillWorking` while the command runs, and clear it when it settles. A second press while it runs reuses the first press's key (`command`'s `key` argument), so it attaches.
 - Problem codes (R-K1-23, owner 2026-11-25: the new codes now, with no mapping): `inventory/problems.py` drops `item_not_counted` and `wrong_tracking` and passes Go's codes through. Every reader of an old code changes in this task: `api/inventory_stock.py:8,46` (docstrings and `codes(...)`), `agent/src/tools/inventory.ts:424-425,492` (descriptions: `step_not_applicable`, `wrong_counting`), `frontend/src/mocks/features/inventory.ts:462-464` (`Refused(409, 'step_not_applicable', …)`, `'wrong_counting'`), `frontend/src/lib/problems.ts` (a message for each new code), the backend tests that assert them (rewritten in Go in Task 12; `test_inventory_stock.py:132-137,172` become forwarder pass-through tests), `docs/features/inventory.md:43` (Task 17).
+- The item forms (R-K1-33; the filament pages' pattern of #7809):
+  - `pages/inventory/ItemPage.tsx`: the item's create and edit forms show the kind's defined keys as fields with `DefinedFields` (`components/entities/DefinedFields.tsx`), from the kind's merged schema (`GET /inventory/kinds/{kind_id}/schema`), required keys first. Save sends the item and `propertiesPatch(...)` in one request (`pages/inventory/api.ts` bodies carry `properties`). A 422 `missing_required_properties` marks each missing or ill-fitting field and keeps the draft. `PropertiesPanel` gets `hideKeys` with the form's keys, so the panel lists only ad hoc keys.
+  - `pages/inventory/InventoryPage.tsx`: each row shows `IncompleteMark` (`Missing required: a, b`), and an `Only incomplete` checkbox narrows the list to items with a missing or invalid key, as `pages/filament/TypesTab.tsx` does.
+  - `components/entities/api.ts` `REQUIRED_KINDS` gains `item`, so the item kinds' key table (`KindsPage.tsx`) shows the Required box, and before a save it says how many items lack each newly required key (from `keys_in_use`).
+  - `frontend/src/mocks/features/inventory.ts` refuses an item create or save as Go does (Task 10b) and marks the reads.
+- The agent tool (R-K1-33; as #7910 does for filament): `inventory_item_upsert` sends `properties` in the same request as the item (`POST` or `PATCH /inventory/items`), not in a second `PATCH /entities/item:<id>/properties`. An edit with only `properties` keeps the property patch route. A 422 `missing_required_properties` becomes the `ToolError` of `agent/src/tools/call.ts` `missingRequired`, which names each missing and each ill-fitting key. The description drops "they are set on the item after it is saved" and says that a missing required key writes nothing.
 - The agent's inventory tools call the public routes, which may answer 202; `agent/src/tools/inventory.ts` treats a 202 as "still running, operation <id>" in its answer text and does not repeat the call.
 
 - [ ] **Step 1: Write the failing tests** (reads through an `httpx.MockTransport` that stands in for Go; writes through a fake Temporal client that records `start_activity`'s name, input and options, and whose handle answers what the test gives):
@@ -736,9 +833,14 @@ Phase 2's `tests/api/test_inventory.py` and `test_inventory_stock.py` cases for 
   - `test_a_missed_notice_is_repaired`: an `inventory_operations` row and no event → the housekeeping activity repair writes its `activity` row.
   - `test_kind_schema_history_route`: `history_rows` with two rows of `item_kind:<id>` → two changes.
   - `test_inventory_operations.py`: an `inventory_operations` row, then the event on the bus → one `activity` row `inventory_operation:<id>` with the row's kind, subject and status; the row moved to `succeeded` and the event again → the same activity row, `succeeded`, `finished_at` set; every kind of `inventory/activity.py` is in the registry.
+  - `test_item_properties_go_in_the_activity_body`: `POST /inventory/items` with `properties` → one `inventory.ItemCreate` start whose `body` carries them; no second write.
+  - `test_a_missing_property_refusal_passes_through`: the activity answers the body of `ItemCreateMissingProperties.json` (Task 10b) → the public 422 has the type `https://scadbuddy.dev/problems/entities/missing_required_properties`, `missing` and `invalid` unchanged.
+  - `test_item_property_patch_cannot_empty_a_required_key`: `PATCH /entities/item:<id>/properties` `{set: {material: ""}}` on an item whose kind requires `material` and has it → 422 `missing_required_properties`, `missing == ["material"]`; a patch that sets another key while `material` is missing → 200.
+  - `ItemPage.test.tsx`: `saves the item and its defined properties with one request`; `a refused save marks each missing field and keeps the draft`. `InventoryPage.test.tsx`: `shows missing required and filters to incomplete items`. `KindsPage.test.tsx`: `an item kind has the Required box and says how many items lack a key`.
+  - `agent/test/inventory.test.ts`: `inventory_item_upsert sends properties with the item in one request`; `inventory_item_upsert names each missing key on a refusal`; `an item edit with only properties uses the property patch`.
   - `StillWorking.test.tsx`: `shows still working with a link to the activity` (an `OperationAccepted` → the text and `href` `/activity?q=op-1`); `ItemStock.test.tsx`: `a slow receive shows still working and then the lot` (the mock answers 202, then the operation `running`, then `succeeded` with the lot → "Still working" shows, then goes, and the lot is listed); `a second press reuses the key` (two presses → two requests with one `Idempotency-Key`).
 - [ ] Add `tools/go/core/internal/inventory/activities/testdata/` and `tools/go/core/internal/publish/testdata/` to the `backend` lane's pattern in `.github/scripts/select-lanes.sh`, and a case to `select-lanes.test.sh` (root CLAUDE.md "A new cross-tree read").
-- [ ] **Step 2: Run** `cd backend && uv run --frozen pytest tests/api/test_inventory.py tests/api/test_inventory_stock.py tests/inventory tests/activity -q` and `cd frontend && pnpm gen:api && pnpm exec vitest run src/pages/inventory` — Expected: FAIL.
+- [ ] **Step 2: Run** `cd backend && uv run --frozen pytest tests/api/test_inventory.py tests/api/test_inventory_stock.py tests/api/test_entity_properties.py tests/inventory tests/activity -q` and `cd frontend && pnpm gen:api && pnpm exec vitest run src/pages/inventory` — Expected: FAIL.
 - [ ] **Step 3: Implement**; delete the Python kind and item stores and their tests. Load the `frontend-design` skill before `StillWorking.tsx`.
 - [ ] **Step 4: Run** the tests, `uv run --frozen pytest tests/auth -q`, `bash .github/scripts/select-lanes.test.sh`, `cd frontend && pnpm typecheck && pnpm lint && pnpm exec vitest run src/pages/inventory src/mocks/features/inventory.test.ts`, `cd agent && pnpm gen:api && pnpm typecheck && pnpm exec vitest run test/inventory.test.ts` — Expected: PASS.
 - [ ] **Step 5: Commit** `feat(inventory): public inventory reads go to Go's routes and writes to its activities, 202 when slow (#6949, K1 5/7)`
@@ -932,6 +1034,11 @@ retry to become consistent.
   missing required parameter. That one marks the kind or item incomplete
   (`incomplete_steps`), as §8 needs for migrated kinds, and a call of that step is 409
   `step_incomplete`. So a broken combination still never reaches stock (§4.2).
+  **Superseded in part (owner, 2026-11-26, R-K1-33).** Task 10 also applied this rule to an
+  item's required properties: the item save wrote the item and only listed the gap in
+  `missing_properties`. That part is replaced. An item create or save now refuses a
+  missing or ill-fitting property (422 `missing_required_properties`, Task 10b). The rule
+  for a missing required parameter stays as written above.
 - **R-K1-9. The migration's rules beyond §8.** A person kind whose rule conflicts with its
   new parent's class, and a person root kind, move under the root of their class. A
   `life_basis` on a non-durable kind is dropped. Each placement is counted in
@@ -1106,6 +1213,47 @@ retry to become consistent.
   refusal after a commit (a `Take` refused) is recorded, not undone (design §6.1a
   "Orders").
 
+- **R-K1-33. Items refuse without their required properties** (owner, 2026-11-26,
+  [#7950](https://github.com/eh-homelab/ScadBuddy/issues/7950) comment; design §3
+  "Required properties"; spec 2026-11-21 §6.3b). It replaces the item part of R-K1-8.
+  The Python reference is `backend/scadbuddy/entities/required.py` and
+  `entities/properties.py`, and the spool routes of #7703
+  ([#7729](https://github.com/eh-homelab/ScadBuddy/pull/7729),
+  [#7809](https://github.com/eh-homelab/ScadBuddy/pull/7809),
+  [#7910](https://github.com/eh-homelab/ScadBuddy/pull/7910)).
+  - An item's required keys are the merged `required` keys of its kind chain and the
+    `requires_properties` of its resolved special type.
+  - An item create or save that leaves the item without a value for a required key, or
+    with a stored value that does not fit its key's subschema, is refused: 422
+    `missing_required_properties` with `missing` (keys) and `invalid` (`{key, reason}`),
+    the entities' problem type. It is a `*Refused`: `store.Write` records it, and Temporal
+    does not retry it. Nothing is written. A sent value that does not fit is 422
+    `bad_property_value`, as `apply_on` answers.
+  - Not checked: an item `PATCH` that sends no field (items have no `archived` or
+    `sort_order` field; archive and restore are their own activities, which never check);
+    `inventory.ItemArchive` and `inventory.ItemRestore`; every stock step and event; syncs
+    and imports. In K1 no sync or import writes an item through Go; one that comes later
+    writes through its own activity, which does not call the check.
+  - `wire.ItemInput` and `wire.InventoryItemPatch` carry `properties` (a patch; `null`
+    removes a key). Go writes them with the item in one transaction, inside `store.Tx`,
+    which takes the event log's lock and sets the actor first. The `entity_properties`
+    triggers of layer 1 publish one `entity_property.changed` per key, as for every
+    writer. A refusal rolls back the savepoint, so no event is left.
+  - Every item read carries `missing_properties` and `invalid_properties` (sorted keys).
+    An archived item reads both empty.
+  - A kind schema may mark keys `required`. The required keys merge down the tree, and a
+    child may require a key it only inherits (Task 10 already allows both). New: a kind
+    change that leaves a kind below it requiring a key its merged schema no longer
+    defines is 422 `bad_property_schema`, and the detail names that kind and the key.
+  - Go ports the value rules; it does not call Python. A shared vector file proves that
+    the port matches (Task 10b).
+  - Order: Task 10b is the Go side and runs after Task 12. Its only Python changes are
+    a vector test and the shared statements that `apply_on` reads; they change no Python
+    behaviour. Task 13 forwards `properties` and
+    passes the refusal through, `REQUIRED_KINDS` gains `item`, the item forms show the
+    kind's defined keys, and `inventory_item_upsert` sends `properties` in the same
+    request.
+
 ## Pre-flight rulings (round 7, 2026-11-25)
 
 The pre-flight scan found 35 conflicts (C1-C35); each is applied in the task text.
@@ -1134,7 +1282,7 @@ the e2e spec path. C33-C35 line and fixture corrections.
   Tasks 7, 10. §4.8: Tasks 1–3, 6. §6.1: Tasks 8, 9, 13, 16. §6.1a: Task 12 (worker,
   activities, interceptor), Task 13 (starts and policies), Task 16 (orders, merge), Task 15
   (deployment). §6.2 layout: Tasks 5, 9–12. §6.3 data for K1: Task 7. §7 proof as a test:
-  Task 6. §8: Task 7. §9 K1 needs the CRUD port: Task 15. §4.5–4.7's cache, §5's handlers,
+  Task 6. §8: Task 7. §3 "Required properties" (R-K1-33): Tasks 10b, 13. §9 K1 needs the CRUD port: Task 15. §4.5–4.7's cache, §5's handlers,
   §6.4: K2 (seams table).
 - **Type names.** `model.Class`, `model.Chain`, `model.Steps`, `handlers.Catalog`,
   `handlers.Resolution`, `handlers.Problem`, `handlers.Registry`, `store.Write`,

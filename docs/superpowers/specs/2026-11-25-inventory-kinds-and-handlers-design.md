@@ -93,6 +93,37 @@ from #7703), `special` (a special type, §4.4), and `steps` (handlers and parame
 The categories people know, `Filament > PLA > Matte` and `Paper`, are kinds in the same
 tree. A category below the class roots changes no behaviour unless it sets `steps`.
 
+**Required properties (owner, 2026-11-26, [#7950](https://github.com/eh-homelab/ScadBuddy/issues/7950)).**
+Items follow the spool rule of spec
+[§6.3b](2026-11-21-inventory-and-purchasing-design.md) (#7703). The Python reference is
+`backend/scadbuddy/entities/required.py` and `entities/properties.py`.
+
+- A kind's schema may mark keys `required`. The required keys merge down the kind tree: a
+  child keeps its ancestors' required keys and may add its own. A child may require a key
+  that it only inherits. A kind change that would leave a kind below it requiring a key
+  that its merged schema no longer defines (an ancestor drops the key, or a kind moves) is
+  refused with 422 `bad_property_schema`. The problem names that kind and the key.
+- An item's required keys are the merged `required` keys of its kind chain, plus the
+  `requires_properties` of its special type (§4.4).
+- The item create and save take an optional `properties` patch. Go writes the item and
+  its properties in one transaction. The property triggers publish their history events,
+  as for every writer (§4.8).
+- An item create or save is refused when the item is not complete after it: a required
+  key has no value, or a stored value does not fit the subschema of its key. The answer is
+  422 `missing_required_properties` with `missing` (the keys) and `invalid` (each key with
+  its reason), as the spool routes answer
+  ([#7729](https://github.com/eh-homelab/ScadBuddy/pull/7729),
+  [#7809](https://github.com/eh-homelab/ScadBuddy/pull/7809),
+  [#7910](https://github.com/eh-homelab/ScadBuddy/pull/7910)). Nothing is written. A value
+  that the caller sends and that does not fit stays 422 `bad_property_value`.
+- These writes are not checked: a save that changes only `archived`, `sort_order` or
+  both (an archive, a restore); stock steps and other events; syncs and imports. They
+  write the item, and the item reads incomplete.
+- Every item read carries `missing_properties` and `invalid_properties` (keys). A read
+  computes them; nothing stores them. An archived item is never marked.
+- This replaces the first K1 rule (plan R-K1-8), which saved the item and only listed the
+  missing keys.
+
 ## 4. Handlers: what a thing does
 
 ### 4.1 Steps
@@ -146,7 +177,8 @@ A special type is a named set of handlers. It says:
 
 - `needs`: the class it requires (`filament_spool`: physical, consumable, unit).
 - `handlers`: the steps it overrides.
-- `requires_properties`: properties its items must have.
+- `requires_properties`: properties its items must have. An item create or save without
+  one is refused (§3, "Required properties").
 - `panels`: the UI panels the frontend shows for its units (a frontend registry keyed
   by panel id).
 - `tools`: its agent tools.
@@ -590,6 +622,8 @@ Each is an issue under #6949, with layers as stacked PRs.
   units, moves, the internal routes, the Python forwarders for the phase 2 routes, the
   idempotency keys, and the migration of §8. The YAML test. It needs `scadbuddy-core`
   deployed with its CRUD port (#7702), not the front process: Python calls Go directly.
+  K1 also checks the required properties of an item when the item is created or saved
+  (§3, "Required properties"; owner, 2026-11-26, #7950).
 - K1 also adds the property history (§4.8): it touches only `entity_properties` and
   `entities`, so it can land first, on its own. K1 also creates the relationship tables
   and `handler_config_history` (§6.3, §4.7).
