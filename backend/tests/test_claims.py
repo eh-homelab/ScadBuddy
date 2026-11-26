@@ -176,6 +176,28 @@ def test_release_keeps_a_claim_another_request_put_since(tmp_path: Path) -> None
     assert [path.name for path in tmp_path.iterdir()] == [a.name]
 
 
+def test_release_never_moves_a_claim_another_request_put_since(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#7853: B renewed the claim A created, and B's run may be reading it. A's release
+    leaves it in place: a move aside and back would leave no file for a moment, and a
+    read of B's in that gap is a LookupError (two copies of one archive photo, #7232)."""
+    claims = ClaimStore(tmp_path)
+    a = claims.hold(b"a")
+    claims.hold(b"a")
+    moved: list[tuple[Any, Any]] = []
+    rename = os.rename
+
+    def recording_rename(src: Any, dst: Any) -> None:
+        moved.append((src, dst))
+        rename(src, dst)
+
+    monkeypatch.setattr(os, "rename", recording_rename)
+    claims.release(a)
+    assert moved == []
+    assert claims.get(a.name) == b"a"
+
+
 def test_hold_file_moves_a_streamed_file_in_and_a_second_renews_it(tmp_path: Path) -> None:
     """A media upload is streamed to disk, never read into memory (#1054): its file
     is moved in under the digest computed while streaming."""
