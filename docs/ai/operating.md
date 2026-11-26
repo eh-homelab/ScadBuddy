@@ -1088,7 +1088,9 @@ path" ([Agent SDK plugins](https://code.claude.com/docs/en/agent-sdk/plugins)).
   unpacks the recorded zip on a cache miss and uses it only when its files hash to the pin.
   With no mirror recorded, or one that is missing, unreadable or hashes to other files, the
   package is not loaded: the problem reads `plugin package <name> was not loaded: its
-  mirror is not ready yet` (or `its mirror failed its check (…)`), and the load starts the
+  mirror is not ready yet` (or `its mirror failed its check (…)` for a mirror that does not
+  unpack or hash to the pin, or `its mirror could not be read (…)` for a transport error),
+  and the load starts the
   mirror job.
 - **The mirror job** (`agent/src/plugins/packages/mirrorJob.ts`) is the only place a commit
   is fetched after install. On Temporal it is the `PackageMirror` workflow on `agent-tools`
