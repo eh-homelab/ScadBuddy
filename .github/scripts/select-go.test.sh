@@ -11,6 +11,8 @@ expect true  backend/scadbuddy/migrations/20261102T0645Z_service_credentials.sql
 expect true  backend/scadbuddy/migrations_agent/20260928T0107Z_sessions.sql
 expect false backend/scadbuddy/migrationsx/a.sql
 expect true  docs/inventory-model/kinds.yaml
+expect true  backend/tests/fixtures/event-stream-vectors.json
+expect false backend/tests/fixtures/event-stream-vectors.json.bak
 expect true  go.work
 expect true  go.work.sum
 expect true  vendor/modules.txt
@@ -25,6 +27,8 @@ expect true  .github/scripts/select-go.sh
 expect true  .github/scripts/select-go.test.sh
 expect true  .github/scripts/changed-paths.sh
 expect true  agent/test/fixtures/rate-limit-reset-vectors.json
+expect true  backend/tests/fixtures/auth-vectors.json
+expect false backend/tests/fixtures/secret-vectors.json
 expect false agent/test/fixtures/secret-vectors.json
 expect false agent/src/harness/credentialErrors.ts
 expect false Dockerfile

@@ -33,7 +33,6 @@ from scadbuddy.bambuddy.uploads import LibraryCopy, SlicedCopy
 from scadbuddy.core.paths import DataPaths
 from scadbuddy.core.problems import ApiError
 from scadbuddy.core.settings import Settings
-from scadbuddy.library.outputs import OutputMeta
 from scadbuddy.library.settings_store import S3Settings
 from scadbuddy.main import create_app
 from scadbuddy.operations.blob_claims import UPLOAD_KEY_PREFIX, sweep_upload_blobs, upload_key
@@ -46,7 +45,6 @@ from scadbuddy.print_library.remote import RemoteLibrary
 from scadbuddy.print_library.store import NativeFile, Unset
 from scadbuddy.print_library.sweep import sweep_library
 from scadbuddy.render.bambu3mf import write_bambu_3mf
-from scadbuddy.render.glb import BoundingBox
 from scadbuddy.render.split import ColourPart
 from scadbuddy.render.thumbnail import render_plate_thumbnails
 from scadbuddy.store.content import BlobScope, ContentStore
@@ -65,6 +63,7 @@ from tests.api.test_send import configure
 from tests.conftest import UNUSED_DATABASE_URL, UNUSED_TEMPORAL_ADDRESS
 from tests.support.no_bambuddy import forbid_bambuddy
 from tests.support.operations import press
+from tests.support.row_outputs import app_outputs, insert_row, output_meta
 
 pytestmark = [pytest.mark.requires_postgres, pytest.mark.usefixtures("recorded_sb_spools")]
 
@@ -143,12 +142,9 @@ def uploaded_with_output(
     native_client: TestClient, model: str, paths: DataPaths, tmp_path: Path
 ) -> NativeFile:
     """A file whose row names a saved output. On the S3 store a render needs the
-    template's git snapshot, so the output is its directory and `meta.json` alone,
-    which is all `OutputStore.directory` finds it by."""
+    template's git snapshot, so the output is its row alone (#7257)."""
     output_id = "0123456789abcdef"
-    directory = paths.outputs / model / output_id
-    directory.mkdir(parents=True)
-    (directory / "meta.json").write_text("{}", encoding="utf-8")
+    insert_row(app_outputs(native_client), output_meta(output_id, model))
     return _upload(native_client, _three_mf(tmp_path / "bracket.3mf"), output_id=output_id)
 
 
@@ -1099,17 +1095,8 @@ def test_arrange_resolves_a_filed_files_output(
     """The file is the output's copy, so its objects come from the output's manifest:
     this one records none, which is the output's own 409, naming it."""
     assert uploaded_with_output.output_id is not None
-    meta = paths.outputs / model / uploaded_with_output.output_id / "meta.json"
-    meta.write_text(
-        OutputMeta(
-            id=uploaded_with_output.output_id,
-            slug=model,
-            job_id="j",
-            created_at=datetime.now(UTC),
-            bbox_mm=BoundingBox(min=(0, 0, 0), max=(10, 10, 4), size=(10, 10, 4)),
-        ).model_dump_json(),
-        encoding="utf-8",
-    )
+    row = app_outputs(native_client).rows.get(uploaded_with_output.output_id)
+    assert row is not None and row.manifest is None
 
     response = native_client.post(
         "/api/v1/outputs/arrange", json={"objects": [{"library_file_id": uploaded_with_output.id}]}

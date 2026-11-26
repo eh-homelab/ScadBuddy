@@ -663,13 +663,14 @@ def test_the_latest_copies_are_read_off_an_index_not_sorted(pool: Pool) -> None:
 async def test_migrate_to_bambuddy_refused_with_output_blobs(pool: Pool, tmp_path: Path) -> None:
     """Ruling R5 (#7256): outputs never reach Bambuddy's library through a migration. The
     check runs before any backend is built, and each batch checks again, for an output put
-    after the run started."""
+    after the run started. Since #7257 it refuses with no output blob too: the API does
+    not start on the bambuddy store."""
     src = local_content(tmp_path / "a", pool)
     bambuddy = LocalContentBackend(tmp_path / "b")
     bambuddy.backend = "bambuddy"
     index = BlobIndex(pool)
-    # Not refused while no output blob is indexed.
-    await migrate.refuse_outputs_to_bambuddy(index, "bambuddy")
+    with pytest.raises(migrate.OutputsNotForBambuddyError, match="bambuddy store holds none"):
+        await migrate.refuse_outputs_to_bambuddy(index, "bambuddy")
     await src.put("output", b"3mf", name="k", scope=SCOPE, key="output-abc-model")
     with pytest.raises(StoreNotReadyError, match="output"):
         # Settings are never read: the refusal comes before any backend is built.

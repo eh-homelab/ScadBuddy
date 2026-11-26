@@ -12,10 +12,12 @@ import pytest
 from scadbuddy.filament import models as m
 from scadbuddy.filament.catalog import CatalogStore
 from scadbuddy.filament.insert_weights import (
+    InsertWeightChangedError,
     InsertWeightStore,
     NoInsertWeightOfferError,
     below_label,
     checked_by_default,
+    full,
     is_placeholder,
     mean_weight,
     offer_reason,
@@ -76,7 +78,17 @@ def test_a_spool_is_unused_only_with_no_consumption_and_full_grams() -> None:
     ]
     assert unused(lower, grams_left=1000.0, label=1000) is False
     assert unused(weighed, grams_left=990.0, label=1000) is False
-    assert unused(weighed, grams_left=None, label=1000) is False
+    # #7449-1: no grams left and no use is full, the label weight.
+    assert unused(weighed, grams_left=None, label=1000) is True
+    assert unused(printed, grams_left=None, label=1000) is False
+
+
+def test_full_takes_the_tolerance_itself() -> None:
+    # #7449-3: a spool booked at `reading - round(derived)` can sit 0.5 g off its label.
+    assert full(1000.5, 1000) is True
+    assert full(999.5, 1000) is True
+    assert full(1000.51, 1000) is False
+    assert full(None, 1000) is True
 
 
 def test_an_offer_needs_a_reading_above_the_label_and_a_derived_weight_at_most_it() -> None:
@@ -256,12 +268,12 @@ def test_a_spool_with_no_offer_says_why(pg_pool: PgPool) -> None:
     assert heavy is not None and heavy.reason == "derived_too_heavy"
     light = store.check(fresh, 1000)
     assert light is not None and light.reason == "not_above_label"
-    # 0.3 g over the label rounds to a 0 g weight, which the table refuses.
+    # 0.3 g over the label rounds to a 0 g weight, which the table refuses (#7449-2).
     sliver = store.check(fresh, 1000.3)
-    assert sliver is not None and (sliver.reason, sliver.offer) == ("not_above_label", None)
+    assert sliver is not None and (sliver.reason, sliver.offer) == ("mean_below_1g", None)
     with pytest.raises(NoInsertWeightOfferError) as slivered:
         store.accept(fresh, 1000.3)
-    assert slivered.value.reason == "not_above_label"
+    assert slivered.value.reason == "mean_below_1g"
 
     # 900 g left is a reading below the label: use. 1100 g left is no use, but not full.
     part = store.check(_spool(pg_pool, insert, grams_left=900), 1150)
@@ -361,3 +373,93 @@ def test_a_person_write_sets_the_basis(pg_pool: PgPool) -> None:
         "placeholder",
         True,
     )
+
+
+@pg
+def test_a_spool_with_no_grams_left_and_no_use_is_offered(pg_pool: PgPool) -> None:
+    """#7449-1: a spool made without grams left and never weighed counts as full."""
+    insert = _insert(pg_pool)
+    check = _store(pg_pool).check(_spool(pg_pool, insert, grams_left=None), 1150)
+    assert check is not None and check.offer is not None
+    assert check.offer.new_empty_weight_g == 150
+
+
+@pg
+def test_a_spool_half_a_gram_off_its_label_is_still_full(pg_pool: PgPool) -> None:
+    """#7449-3: the 0.5 g tolerance holds at its edge."""
+    insert = _insert(pg_pool)
+    check = _store(pg_pool).check(_spool(pg_pool, insert, grams_left=1000.5), 1150)
+    assert check is not None and check.reason is None
+
+
+@pg
+def test_an_archived_insert_gets_no_offer(pg_pool: PgPool) -> None:
+    """#7449-4: in the check and in the accept's check under the locks."""
+    store = _store(pg_pool)
+    insert = _insert(pg_pool)
+    spool = _spool(pg_pool, insert)
+    with pg_pool.connection() as conn:
+        conn.execute(
+            "UPDATE filament_insert_types SET archived_at = now() WHERE id = %s", (insert,)
+        )
+    check = store.check(spool, 1150)
+    assert check is not None and (check.reason, check.offer) == ("no_insert", None)
+    assert check.filament_g == 950
+    with pytest.raises(NoInsertWeightOfferError) as refused:
+        store.accept(spool, 1150)
+    assert refused.value.reason == "no_insert"
+    assert _insert_row(pg_pool, insert).empty_weight_g == 200
+    # A reading under the label still asks what is up (#7683): a resolution writes nothing
+    # to the insert, so an archived one does not hide it.
+    under = store.check(spool, 950)
+    assert under is not None and (under.reason, under.default) == ("below_label", "tared")
+    assert [r.kind for r in under.resolutions] == ["tared", "short", "label_wrong"]
+
+
+@pg
+def test_deleting_a_spool_recomputes_a_derived_weight(pg_pool: PgPool) -> None:
+    """#7450-1: the delete takes the spool's row out of the mean in its transaction."""
+    store, spools = _store(pg_pool), FilamentSpoolStore(pg_pool)
+    insert = _insert(pg_pool)
+    first, second = _spool(pg_pool, insert), _spool(pg_pool, insert)
+    assert store.accept(first, 1150) is not None
+    assert store.accept(second, 1160) is not None
+    assert _insert_row(pg_pool, insert).empty_weight_g == 155
+    assert spools.delete(second) is True
+    row = _insert_row(pg_pool, insert)
+    assert (row.empty_weight_g, row.empty_weight_basis, row.derived_count) == (150, "derived", 1)
+    # The last reading gone: the weight stays as it was, and nothing new is set.
+    assert spools.delete(first) is True
+    row = _insert_row(pg_pool, insert)
+    assert (row.empty_weight_g, row.empty_weight_basis, row.derived_count) == (150, "derived", 0)
+
+
+@pg
+def test_deleting_a_spool_leaves_a_person_weight(pg_pool: PgPool) -> None:
+    """#7450-1: only a `derived` weight is the mean of its rows."""
+    store, spools = _store(pg_pool), FilamentSpoolStore(pg_pool)
+    insert = _insert(pg_pool)
+    first, second = _spool(pg_pool, insert), _spool(pg_pool, insert)
+    assert store.accept(first, 1150) is not None
+    assert store.accept(second, 1160) is not None
+    CatalogStore(pg_pool).update("insert-types", insert, m.InsertTypePatch(empty_weight_g=170))
+    assert spools.delete(second) is True
+    row = _insert_row(pg_pool, insert)
+    assert (row.empty_weight_g, row.empty_weight_basis, row.derived_count) == (170, "person", 1)
+
+
+@pg
+def test_an_accept_naming_another_weight_is_refused(pg_pool: PgPool) -> None:
+    """#7450-2: the weight the person saw must be the weight saved."""
+    store = _store(pg_pool)
+    insert = _insert(pg_pool)
+    first, second = _spool(pg_pool, insert), _spool(pg_pool, insert)
+    seen = store.check(second, 1160)
+    assert seen is not None and seen.offer is not None and seen.offer.new_empty_weight_g == 160
+    assert store.accept(first, 1150) is not None
+    with pytest.raises(InsertWeightChangedError) as changed:
+        store.accept(second, 1160, expected_g=160)
+    assert changed.value.new_empty_weight_g == 155
+    assert _insert_row(pg_pool, insert).derived_count == 1
+    done = store.accept(second, 1160, expected_g=155)
+    assert done is not None and done.empty_weight_g == 155

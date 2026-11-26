@@ -31,14 +31,19 @@ describe('settings values', () => {
     const extra = { ...settings, sources: { ...settings.sources, made_up_knob: 'env' } } as Settings
     expect(fieldsOf('diagnostics', extra)).toContain('made_up_knob')
   })
-  it('chooses the Bambuddy store only with a saved URL and an inbox in the draft', () => {
-    const saved = { ...settings, bambuddy_url: 'https://b.test', library_folder_id: 3 }
-    const pick = (n: string) => (n === 'store_backend' ? 'bambuddy' : n === 'library_folder_id' ? '3' : '')
-    expect(storeChoice(saved, pick).backend).toBe('bambuddy')
-    expect(storeChoice(saved, (n) => (n === 'store_backend' ? 'bambuddy' : '')).backend).toBe('local')
-    expect(
-      storeChoice({ ...saved, bambuddy_url: null }, (n) => (n === 'store_backend' ? 'bambuddy' : '3')).savedBambuddyUrl,
-    ).toBe(false)
+  it('chooses the S3 store only once it is saved, and never the Bambuddy library (#7257)', () => {
+    const s3 = (n: string) => (n === 'store_backend' ? 's3' : '')
+    expect(storeChoice(settings, s3).backend).toBe('local')
+    const saved = {
+      ...settings,
+      store_s3_endpoint: 'https://s3.test',
+      store_s3_bucket: 'outputs',
+      store_s3_access_key_id: 'key',
+      has_store_s3_secret_access_key: true,
+    }
+    expect(storeChoice(saved, s3).backend).toBe('s3')
+    const bambuddy = { ...saved, bambuddy_url: 'https://b.test', library_folder_id: 3 }
+    expect(storeChoice(bambuddy, (n) => (n === 'store_backend' ? 'bambuddy' : '3')).backend).toBe('local')
   })
   it('says a limit of 0 is none', () => {
     expect(ofLimit('3', 0, String)).toBe('3 (no limit)')

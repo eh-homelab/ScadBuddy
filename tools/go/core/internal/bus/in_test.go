@@ -4,7 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
-	"flag"
+	goflag "flag"
 	"os"
 	"path/filepath"
 	"testing"
@@ -17,7 +17,7 @@ import (
 )
 
 // update rewrites testdata/history from what the tests publish (go test -run History -update).
-var update = flag.Bool("update", false, "rewrite testdata/history")
+var update = goflag.Bool("update", false, "rewrite testdata/history")
 
 func TestMain(m *testing.M) { testdb.Main(m) }
 

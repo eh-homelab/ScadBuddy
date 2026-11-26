@@ -73,6 +73,47 @@ Decisions this plan adds (D-n):
   `empty_weight_basis: placeholder`. `derived`, `catalog` and `weighed_empty` are never taken from a
   body. Bambuddy's pull keeps inserting with the column default `catalog`.
 
+Review follow-ups (#7449 to #7452, decided by the owner's session, 2026-11-25; they change D2
+and R-7280-6 where they differ):
+
+- **R-7449-1** A spool with NULL `grams_left` and no consuming event counts as full: it holds
+  its label weight. The reason docs say so (`models.py` `NoOfferReason`, the routes' text).
+- **R-7449-2** A new mean that rounds below 1 g answers its own reason, `mean_below_1g`, not
+  `not_above_label` (backend `NoOfferReason`, the frontend mocks, the agent tool text, the skill).
+- **R-7449-3** The full tolerance holds at its edge: `abs(grams_left - label) <= 0.5`.
+- **R-7449-4** An archived insert type answers `no_insert`, in `check_on` and in the re-check
+  under lock in `accept_on`. The check still gives `filament_g` from its weight. A reading
+  under the label still answers `below_label` with its resolutions (#7683), because none of them
+  writes the insert: the review of cac9b3da1 found that an archived insert had hidden them, and a
+  tared reading was then booked one insert weight light.
+- **R-7450-1** A spool's delete takes its reading row out in the delete's transaction
+  (`insert_weights.forget_spool_on`, called by `FilamentSpoolStore.delete`), with the insert's row
+  locked first. When the insert's basis is `derived`, its `empty_weight_g` becomes the mean of the
+  rows left; `derived_count` is a count of the rows, so it follows. Neither the issue nor this plan
+  says what an insert with no readings left weighs, so: the last weight stays, the basis stays
+  `derived`, and nothing new is set (`derived_count` reads 0). An accept that moves a spool's
+  row to its new insert leaves the old insert the same way. The spool page then says the weight
+  is "from new-spool readings no longer counted", which is true in both cases. Another basis is never changed.
+- **R-7450-2** `InsertWeightAccept` takes an optional `new_empty_weight_g`. When it is given and
+  the mean under the locks differs, the accept writes nothing and answers 409
+  `insert_weight_changed` with the `new_empty_weight_g` now. The UI sends the offer's value, and on
+  that 409 says the weight changed and checks again. The agent tool takes the value the person
+  approved as its own `new_empty_weight_g` input (the first answer's offer) and sends it, never a
+  later check's value: the review of c02fc7c6d found that the later check's value let a moved
+  mean through.
+- **R-7450-3** When `current_basis` is `person` and the weight is not a placeholder, the offer says
+  that the weight a person set is replaced.
+- **R-7451-1** No empty-spool weighing exists yet (#7300): the UI and the skill say to correct the
+  estimate by editing the insert's empty weight. This replaces R-7280-6's "a later weighing of an
+  empty spool replaces it".
+- **R-7451-2** The tool's approval text without `accept_insert_weight` is "Check, or record, a
+  reading of …", as that call books nothing when there is an offer.
+- **R-7451-3** The skill, and the offer when its mean uses more than one reading, say that the
+  spool can end a few grams off its label weight and then gets no later offer (`not_full`).
+- **R-7452-1** A check that has not answered `CHECK_WAIT_MS` (10 s) after its request left stops
+  holding "Record weighing": the weighing works without an offer, as when the check fails, and the
+  form says the check did not answer. A later answer is still shown.
+
 ## Global Constraints
 
 - New migration file only, named `$(date -u +%Y%m%dT%H%MZ)_filament_insert_weight_readings.sql`;

@@ -825,6 +825,7 @@ def test_a_job_whose_queue_item_scadbuddy_sent_is_marked(client: TestClient) -> 
         "run_id": None,
         "archive_id": None,
         "matched_by": "queue_item",
+        "plate": 1,
     }
     assert cards[2]["scadbuddy"] is None
     assert cards[3]["scadbuddy"] is None
@@ -856,13 +857,20 @@ def test_an_unreadable_queue_costs_only_the_marks(client: TestClient) -> None:
 
 
 def _lan_run(
-    client: TestClient, printer: str, subtask: str, *, run_id: str, ended: Any = None
+    client: TestClient,
+    printer: str,
+    subtask: str,
+    *,
+    run_id: str,
+    ended: Any = None,
+    plate: int | None = 1,
 ) -> None:
-    """A native run on ``printer`` that started ``subtask`` over the LAN."""
+    """A native run on ``printer`` that started ``subtask`` (its plate ``plate``) over
+    the LAN."""
     state: AppState = getattr(client.app.state, STATE_ATTR)  # type: ignore[attr-defined]
     store = state.print_runs.store
     started = LanStarted(
-        subtask_name=subtask, started_at=datetime.now(UTC), plate_id=1, ended=ended
+        subtask_name=subtask, started_at=datetime.now(UTC), plate_id=plate, ended=ended
     )
 
     async def seed() -> None:
@@ -912,12 +920,69 @@ def test_a_job_a_run_started_over_the_lan_is_marked(client: TestClient) -> None:
         "run_id": "run3741",
         "archive_id": None,
         "matched_by": "lan_start",
+        "plate": 1,
     }
     assert cards[shed]["scadbuddy"] is None
     assert cards[loft]["scadbuddy"] is None
     # #3742: a LAN card asks Bambuddy nothing, so only ScadBuddy's job has a picture.
     assert cards[garage]["picture"] == f"/api/v1/outputs/{'o' * 32}/thumbnail"
     assert cards[loft]["picture"] is None
+
+
+#: A card's picture for the plate its job records (#8031): plate 2 or later is that
+#: plate's image, and plate 1 or no plate is the thumbnail.
+RUNNING_PLATE_PICTURES = [
+    (2, f"/api/v1/outputs/{'o' * 32}/plates/2/thumbnail?cover_if_missing=true"),
+    (1, f"/api/v1/outputs/{'o' * 32}/thumbnail"),
+    (None, f"/api/v1/outputs/{'o' * 32}/thumbnail"),
+]
+
+
+@pytest.mark.parametrize(("plate", "picture"), RUNNING_PLATE_PICTURES)
+def test_a_lan_card_shows_the_running_plates_picture(
+    client: TestClient, plate: int | None, picture: str
+) -> None:
+    """#8031: a LAN card whose run started plate 2 shows plate 2's image, not the
+    thumbnail, which is plate 1's."""
+    garage = _lan_printer(client)
+    _registry(client).reports.put(
+        garage, {"gcode_state": "RUNNING", "subtask_name": "scadbuddy-r8031-p2"}, datetime.now(UTC)
+    )
+    _lan_run(client, garage, "scadbuddy-r8031-p2", run_id="r8031", plate=plate)
+
+    (card,) = client.get(NOW).json()["printers"]
+
+    assert card["scadbuddy"]["plate"] == plate
+    assert card["picture"] == picture
+
+
+@respx.mock
+@pytest.mark.parametrize(("plate", "picture"), RUNNING_PLATE_PICTURES)
+def test_a_queue_card_shows_the_running_plates_picture(
+    client: TestClient, plate: int | None, picture: str
+) -> None:
+    """#8031: a Bambuddy card whose printing item ScadBuddy sent for plate 2 shows plate
+    2's image, from the plate the send recorded, not the thumbnail."""
+    configure_bambuddy(client)
+    answer_version()
+    respx.get(f"{API}/printers/").mock(return_value=httpx.Response(200, json=[printer(1)]))
+    respx.get(f"{API}/printers/1/status").mock(
+        return_value=httpx.Response(200, json=status(1, current_archive_id=13))
+    )
+    respx.get(f"{API}/queue/", params={"status": "printing"}).mock(
+        return_value=httpx.Response(200, json=[printing_item(310, 1, 13)])
+    )
+    state: AppState = getattr(client.app.state, STATE_ATTR)  # type: ignore[attr-defined]
+    asyncio.run(
+        state.print_links.record_sends(
+            PrintSubject.output("o" * 32), [PrintSend(queue_item_id=310, plate_id=plate)]
+        )
+    )
+
+    (card,) = client.get(NOW).json()["printers"]
+
+    assert card["scadbuddy"]["plate"] == plate
+    assert card["picture"] == picture
 
 
 def test_a_lan_start_two_runs_share_is_not_marked(client: TestClient) -> None:

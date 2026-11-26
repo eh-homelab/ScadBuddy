@@ -47,7 +47,9 @@ CI sets `SCADBUDDY_TEST_POSTGRES_REQUIRED`). The Go toolchain is pinned in these
   only, all every 5 minutes) and `internal/watch` (inotify); README there.
   `claudecreds/` is a library for Claude Code logins (#7981): `ResetFromText`, the reset a
   usage-limit text names, in UTC or an IANA zone, held to the agent's
-  `rate-limit-reset-vectors.json` with the TypeScript and Python ports (#7986; README there).
+  `rate-limit-reset-vectors.json` with the TypeScript and Python ports (#7986), and
+  `Rotate`, which replaces a config dir's login under Claude Code's own locks (#7989;
+  README there).
   `telemetry/` is the OpenTelemetry setup every module uses (#7667): traces, metrics and
   logs over OTLP from the `OTEL_*` variables (off, at no cost, with no endpoint), the
   server and client HTTP wrappers, the slog bridge, the runtime and process metrics, and

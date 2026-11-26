@@ -7,6 +7,7 @@ from __future__ import annotations
 import io
 import json
 import zipfile
+from pathlib import Path
 from typing import Any
 
 import httpx
@@ -26,7 +27,6 @@ from scadbuddy.bambuddy.prime_tower import (
 from scadbuddy.bambuddy.print_run import PrintRunRequest
 from scadbuddy.core.paths import DataPaths
 from scadbuddy.render.bambu3mf import replate_3mf
-from tests.api.conftest import files_only
 from tests.api.test_filament_profiles import preset_values
 from tests.api.test_print_filaments import API, prepared, queue_route
 from tests.api.test_print_preview import SLICED, Job, sliced_routes, start_slice
@@ -39,6 +39,7 @@ from tests.api.test_print_run_choices import (
 from tests.api.test_print_supports import overrides, routes
 from tests.api.test_send import upload_route
 from tests.bambuddy.conftest import recording
+from tests.support.saved_outputs import rewrite_model
 
 pytestmark = [pytest.mark.requires_postgres, pytest.mark.usefixtures("recorded_sb_spools")]
 
@@ -175,10 +176,13 @@ def test_the_background_slice_slices_with_the_prints_tower(client: TestClient, m
     assert queued.called
 
 
-def _state_tower_off(paths: DataPaths, output_id: str) -> None:
+def _state_tower_off(client: TestClient, output_id: str) -> None:
     """The output's 3MF as Arrange writes it with the tower off (#3770): it states
     ``enable_prime_tower`` "0" and places no tower."""
-    [path] = paths.outputs.glob(f"*/{output_id}/model.3mf")
+    rewrite_model(client, output_id, _tower_off)
+
+
+def _tower_off(path: Path) -> None:
     with zipfile.ZipFile(path) as archive:
         entries = {info.filename: archive.read(info.filename) for info in archive.infolist()}
     settings = json.loads(entries["Metadata/project_settings.config"])
@@ -210,9 +214,8 @@ def test_a_file_arranged_with_the_tower_off_slices_with_it_off(
     """#3770: the slicer's process preset replaces the file's own ``enable_prime_tower``,
     so a print with no choice of its own sends the file's "0" as an override, and the
     send trusts the file's tower off."""
-    files_only(client)
     output_id = prepared(client, model)
-    _state_tower_off(paths, output_id)
+    _state_tower_off(client, output_id)
     replated = _replated(monkeypatch)
     sliced = routes()
 
@@ -228,9 +231,8 @@ def test_a_print_that_turns_the_tower_on_lays_out_room_over_the_files_off(
 ) -> None:
     """#3770: the print's tower on wins at the slice, so the copy is laid out with room
     for it (``replate_3mf`` ``tower_on``), rather than trusting the file's "0"."""
-    files_only(client)
     output_id = prepared(client, model)
-    _state_tower_off(paths, output_id)
+    _state_tower_off(client, output_id)
     replated = _replated(monkeypatch)
     sliced = routes()
     preset_values(PRESET)
