@@ -1826,9 +1826,14 @@ only the sleeps move; a budget on the real clock fails on a slow runner (#6252).
   `mocks/features/activity.ts`.
 - `backend/scadbuddy/inventory/` — the item core (#7067, spec
   `docs/superpowers/specs/2026-11-21-inventory-and-purchasing-design.md` §6.4-6.6; page
-  `docs/features/inventory.md`): `models.py` (the Pydantic models), `kinds.py` (`KindStore`, the
-  `item_kinds` tree and its inherited `attribute_schema`), `items.py` (`ItemStore`; a `filament`
-  kind's items are refused until phase 3), `offers.py` (`OfferStore`: `supplier_offers` and
+  `docs/features/inventory.md`): `models.py` (the Pydantic models), `core_client.py`
+  (`InventoryCore`, #6949 K1: the kind, item, lot, unit and move routes read over
+  scadbuddy-core's CRUD routes and write by starting its `inventory.<Name>` activity on the
+  queue `inventory`, with the `Idempotency-Key` as the activity id; a write past the 15 s wait
+  answers 202, followed at `GET /inventory/operations/{id}`), `activity.py` (the Activities
+  tab's `inventory.<Name>` kinds), `kinds.py` (`merged_schema`, `item_schema` and
+  `keys_in_use` of the `item_kinds` tree; Go writes the kinds and items now),
+  `offers.py` (`OfferStore`: `supplier_offers` and
   `offer_price_points`), `stock.py` (`StockStore`: lots, units and moves; `_fifo`, `take`,
   `give_back`, `count_item`, `recost_lot`; `parts_moved`, the one reader of job cost's parts figure;
   the lock order of R-P2-32: `lock_items` takes, per item in `item_id` order, the item `FOR SHARE`,

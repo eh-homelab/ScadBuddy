@@ -39,8 +39,8 @@ parent's keys; its own subschema for a key wins (`inventory/kinds.py:1-5`).
 |---|---|---|
 | `lot` | counted stock | lots and moves |
 | `unit` | one by one | units and moves |
-| `filament` | spools with a gram ledger | none yet; items and offers of this kind are refused until phase 3 (Ruling 9, `FilamentItemRefused`, `inventory/items.py:32`) |
-| `none` | not counted | none; any stock call is 409 `item_not_counted` (Ruling 1, spec §6.4) |
+| `filament` | spools with a gram ledger | none yet; items and offers of this kind are refused until phase 3 (Ruling 9, `FilamentItemRefused`, `inventory/stock.py`) |
+| `none` | not counted | none; any stock call is 409 `step_not_applicable` (`item_not_counted` before #6949 K1) (Ruling 1, spec §6.4) |
 
 The migration seeds the built-in kinds (`20261124T0323Z_inventory_core.sql:189`): filament,
 printer, part (with nozzle, hotend, belt, build plate, AMS part and hardware under it),
