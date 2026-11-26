@@ -13,6 +13,7 @@ import (
 	"net/url"
 	"os"
 	"os/signal"
+	"path"
 	"strings"
 	"sync/atomic"
 	"syscall"
@@ -155,6 +156,12 @@ func run(ctx context.Context, env func(string) string, tel *telemetry.Telemetry)
 		<-ctx.Done()
 		hub.Close()
 	}()
+	// Set but empty stops the start, as in Python; newRouter reads empty as unset.
+	if _, set := os.LookupEnv("SCADBUDDY_AUTH_MODE"); set {
+		if _, err := auth.ParseMode(env("SCADBUDDY_AUTH_MODE"), true); err != nil {
+			return fmt.Errorf("SCADBUDDY_AUTH_MODE: %w", err)
+		}
+	}
 	router, err := newRouter(pool, upstream, keys, env("SCADBUDDY_CORE_AREAS"), env("SCADBUDDY_AUTH_MODE"), tel.Meter(), stream)
 	if err != nil {
 		return err
@@ -358,14 +365,43 @@ func newRouter(pool *pgxpool.Pool, next http.Handler, keys *seal.Keys, areas, au
 	}
 	var handler http.Handler = router
 	if served {
-		public.Handle("/", router)
-		handler = public
+		handler = &publicFront{mux: public, next: router}
 	}
 	if socket {
 		// The browser's socket is no CRUD route: it stands in front of the router.
 		return realtime.New(context.Background(), st.hub, pool, handler, st.env, st.meter)
 	}
 	return handler, nil
+}
+
+// publicFront serves a request from the public routes only where its path is canonical and
+// one of them matches it, method included; every other request, a path the mux would answer
+// with its own redirect among them, goes on to next unchanged.
+type publicFront struct {
+	mux  *http.ServeMux
+	next http.Handler
+}
+
+func (f *publicFront) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	if p := r.URL.Path; p == canonical(p) {
+		if _, pattern := f.mux.Handler(r); pattern != "" {
+			f.mux.ServeHTTP(w, r)
+			return
+		}
+	}
+	f.next.ServeHTTP(w, r)
+}
+
+// canonical is p as net/http's mux cleans it: path.Clean, keeping a trailing slash.
+func canonical(p string) string {
+	if p == "" || p[0] != '/' {
+		return "/" + p
+	}
+	c := path.Clean(p)
+	if strings.HasSuffix(p, "/") && c != "/" {
+		c += "/"
+	}
+	return c
 }
 
 // newUpstream forwards to the Python API at an http:// URL or a unix:///path socket. The

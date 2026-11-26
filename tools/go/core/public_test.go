@@ -55,6 +55,19 @@ func TestAPublicAreaIsServedBehindTheGate(t *testing.T) {
 	if status, _ := get("", "/api/v1/elsewhere"); status != http.StatusTeapot {
 		t.Errorf("another path: %d, not Python's", status)
 	}
+	// A path the mux would clean goes to Python unchanged, never to the mux's redirect.
+	for _, path := range []string{"//api/v1/test-public", "/api/v1/x/../test-public", "/api/v1//elsewhere"} {
+		if status, _ := get("", path); status != http.StatusTeapot {
+			t.Errorf("%s: %d, not Python's", path, status)
+		}
+	}
+	// A public pattern's other methods go to Python too.
+	router, _ := newRouter(pool, next, nil, "test-public", "", nil)
+	rec := httptest.NewRecorder()
+	router.ServeHTTP(rec, httptest.NewRequest(http.MethodPost, "/api/v1/test-public", nil))
+	if rec.Code != http.StatusTeapot {
+		t.Errorf("POST to a GET pattern: %d, not Python's", rec.Code)
+	}
 	if _, err := newRouter(pool, next, nil, "test-public", "enforced", nil); err == nil {
 		t.Error("an unknown SCADBUDDY_AUTH_MODE was taken")
 	}
