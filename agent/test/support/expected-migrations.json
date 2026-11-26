@@ -430,5 +430,9 @@
   {
     "id": "20261124T0215Z_session_runtime_not_null",
     "sha256": "69cfdad9690606b0dfb38977feed6395bf8339e7b9c395b19bbc932b0b3401e7"
+  },
+  {
+    "id": "20261126T1613Z_credential_claude_login_scope_lease",
+    "sha256": "f55c5f47d2b845538dcc3eb4dab7813ad53812238a6e720befb0b5d88c7abde7"
   }
 ]

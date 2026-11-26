@@ -841,3 +841,162 @@ def test_rotation_rewraps_credentials_and_payload_keys(tables: PgPool, tmp_path:
         ]
         assert rows[0]["credential"]["secret"] == API_KEY
         assert _key(agent.post(f"/payload-keys/{subject}", {})) == dek
+
+
+# --- #7983: the claude_login kind, the scope and the machine lease -------------------------
+# Core's internal/secrets/claude_login_test.go holds the Go copy of the routes to the same cases.
+
+ACCESS = "sk-ant-oat01-access-token-vector-AAAA"
+REFRESH = "sk-ant-ort01-refresh-token-vector-BBBB"
+#: A claudeAiOauth object as Claude Code writes it, with a space and a newline in it.
+LOGIN = (
+    f'{{"accessToken": "{ACCESS}", "refreshToken": "{REFRESH}",\n'
+    ' "expiresAt": 1795000000000, "refreshTokenExpiresAt": null,'
+    ' "accountUuid": "8d2c3a4e-0000-4000-8000-00000000000a",'
+    ' "organizationUuid": "8d2c3a4e-0000-4000-8000-00000000000b",'
+    ' "rateLimitTier": "default_claude_max_20x", "scopes": ["user:inference"],'
+    ' "subscriptionType": "max", "subscriptionTypeSource": "account"}'
+)
+
+
+def _created(agent: Agent, body: dict[str, Any]) -> dict[str, Any]:
+    r = agent.post("/credentials", body)
+    assert r.status_code == 201, r.text
+    row: dict[str, Any] = r.json()["credential"]
+    return row
+
+
+def test_a_claude_login_is_sealed_with_its_account_in_clear(agent: Agent) -> None:
+    created = agent.post(
+        "/credentials", {"kind": "claude_login", "secret": LOGIN, "email": "ops@example.com"}
+    )
+    assert created.status_code == 201
+    row = created.json()["credential"]
+    assert (row["kind"], row["scope"], row["last4"], row["base_url"]) == (
+        "claude_login",
+        "fleet",
+        "AAAA",
+        None,
+    )
+    assert [
+        row[k]
+        for k in (
+            "account_uuid",
+            "organization_uuid",
+            "subscription_type",
+            "rate_limit_tier",
+            "email",
+        )
+    ] == [
+        "8d2c3a4e-0000-4000-8000-00000000000a",
+        "8d2c3a4e-0000-4000-8000-00000000000b",
+        "max",
+        "default_claude_max_20x",
+        "ops@example.com",
+    ]
+    assert (row["leased_to"], row["leased_at"], row["lease_epoch"]) == (None, None, 0)
+    listed = agent.get("/credentials")
+    one = agent.get("/credentials/one", id=row["id"])
+    for raw in (created.text, listed.text, one.text):
+        assert ACCESS not in raw and REFRESH not in raw
+    assert listed.json()["credentials"][0]["scope"] == "fleet"
+    opened = agent.post("/credentials/reveal", {"id": row["id"], "purpose": "test"})
+    assert opened.json()["credential"] == {
+        "kind": "claude_login",
+        "base_url": None,
+        "secret": LOGIN,
+    }
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        {"kind": "claude_login", "secret": "not json"},
+        {"kind": "claude_login", "secret": '["a"]'},
+        {"kind": "claude_login", "secret": '{"accessToken": "x", "expiresAt": 1}'},
+        {
+            "kind": "claude_login",
+            "secret": '{"accessToken": "x", "refreshToken": "y", "expiresAt": "soon"}',
+        },
+        {
+            "kind": "claude_login",
+            "secret": '{"accessToken": "x", "refreshToken": "y", "expiresAt": 1, "accountUuid": 7}',
+        },
+        {"kind": "claude_login", "secret": LOGIN, "scope": "agent"},
+        {"kind": "claude_login", "secret": LOGIN, "base_url": "https://gw.example.com"},
+        {"kind": "anthropic_api_key", "secret": API_KEY, "email": "ops@example.com"},
+        {"kind": "claude_login", "secret": LOGIN, "email": "two words@example.com"},
+    ],
+)
+def test_a_claude_login_keeps_the_kinds_rules(agent: Agent, body: dict[str, Any]) -> None:
+    r = agent.post("/credentials", body)
+    assert (r.status_code, r.json()["reason"]) == (400, "credential-refused"), r.text
+
+
+def test_a_scope_outside_the_three_is_invalid(agent: Agent) -> None:
+    r = agent.post("/credentials", {"kind": "anthropic_api_key", "secret": API_KEY, "scope": "x"})
+    assert r.status_code == 422
+    both = _created(agent, {"kind": "claude_login", "secret": LOGIN, "scope": "both"})
+    assert (both["scope"], both["email"]) == ("both", None)
+
+
+def test_the_scope_defaults_to_the_agent_and_a_save_moves_it(agent: Agent) -> None:
+    def save(row_id: str, update: dict[str, Any]) -> dict[str, Any]:
+        r = agent.post("/credentials/save", {"id": row_id, "update": update})
+        assert r.status_code == 200, r.text
+        out: dict[str, Any] = r.json()["credential"]
+        return out
+
+    key = _created(agent, {"kind": "anthropic_api_key", "secret": API_KEY})
+    assert (key["scope"], key["account_uuid"], key["email"]) == ("agent", None, None)
+    fleet = _created(
+        agent, {"kind": "anthropic_api_key", "secret": API_KEY + "x", "scope": "fleet"}
+    )
+    assert fleet["scope"] == "fleet"
+    moved = save(key["id"], {"kind": "anthropic_api_key", "scope": "both"})
+    assert (moved["scope"], moved["epoch"]) == ("both", 0)
+    kept = save(key["id"], {"kind": "anthropic_api_key", "secret": API_KEY + "y"})
+    assert (kept["scope"], kept["epoch"]) == ("both", 1)
+    as_login = save(
+        key["id"], {"kind": "claude_login", "secret": LOGIN, "email": "ops@example.com"}
+    )
+    assert (as_login["scope"], as_login["subscription_type"], as_login["email"]) == (
+        "both",
+        "max",
+        "ops@example.com",
+    )
+    back = save(key["id"], {"kind": "anthropic_api_key", "secret": API_KEY})
+    assert (back["account_uuid"], back["email"]) == (None, None)
+    agent_key = _created(agent, {"kind": "anthropic_api_key", "secret": API_KEY + "z"})
+    login = save(agent_key["id"], {"kind": "claude_login", "secret": LOGIN})
+    assert login["scope"] == "fleet"
+    mailed = save(agent_key["id"], {"kind": "claude_login", "email": "new@example.com"})
+    assert (mailed["email"], mailed["epoch"]) == ("new@example.com", login["epoch"])
+
+
+def test_only_a_login_holds_a_lease_or_an_account(agent: Agent, tables: PgPool) -> None:
+    key = _created(agent, {"kind": "anthropic_api_key", "secret": API_KEY})
+    held = _created(agent, {"kind": "claude_login", "secret": LOGIN})
+    # Two machines may each hold a login to one account.
+    _created(agent, {"kind": "claude_login", "secret": LOGIN})
+    for sql in (
+        "UPDATE ai_credentials SET leased_to = 'm1', leased_at = now() WHERE id = %s",
+        "UPDATE ai_credentials SET email = 'ops@example.com' WHERE id = %s",
+        "UPDATE ai_credentials SET scope = 'nobody' WHERE id = %s",
+    ):
+        with pytest.raises(psycopg.errors.CheckViolation), tables.connection() as conn:
+            conn.execute(sql, (key["id"],))
+    with pytest.raises(psycopg.errors.CheckViolation), tables.connection() as conn:
+        conn.execute("UPDATE ai_credentials SET leased_to = 'm1' WHERE id = %s", (held["id"],))
+    with tables.connection() as conn:
+        conn.execute(
+            "UPDATE ai_credentials SET leased_to = 'm1', leased_at = '2026-11-26T00:00:00Z',"
+            " lease_epoch = 3 WHERE id = %s",
+            (held["id"],),
+        )
+    leased = agent.get("/credentials/one", id=held["id"]).json()["credential"]
+    assert (leased["leased_to"], leased["leased_at"], leased["lease_epoch"]) == (
+        "m1",
+        "2026-11-26T00:00:00+00:00",
+        3,
+    )

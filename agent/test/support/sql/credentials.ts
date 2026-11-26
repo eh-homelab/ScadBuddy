@@ -7,6 +7,7 @@ import {
   type CredentialEvent,
   type CredentialKind,
   type CredentialRepo,
+  type CredentialScope,
   type CredentialStatus,
   type CredentialTransition,
   type CredentialUpdate,
@@ -20,7 +21,7 @@ import {
   TOO_MANY_MESSAGE,
 } from '../../../src/credentials.js'
 import { type Envelope, type Kek, rewrap, SEAL_V1, SealError, sealedVersion } from '../../../src/secrets.js'
-import { openCredential, planPut } from '../memoryCredentials.js'
+import { openCredential, planPut, scopeOf } from '../memoryCredentials.js'
 
 type Row = {
   id: string
@@ -40,6 +41,15 @@ type Row = {
   last_error_at: Date | null
   last_used_at: Date | null
   epoch: number
+  scope: CredentialScope
+  account_uuid: string | null
+  organization_uuid: string | null
+  subscription_type: string | null
+  rate_limit_tier: string | null
+  email: string | null
+  leased_to: string | null
+  leased_at: Date | null
+  lease_epoch: string | number
 }
 
 const iso = (d: Date | null): string | null => (d ? d.toISOString() : null)
@@ -61,6 +71,15 @@ function stored(row: Omit<Row, 'secret_sealed' | 'dek_sealed'>): StoredCredentia
     epoch: row.epoch,
     kekId: row.kek_id,
     legacyFormat: row.seal_version === SEAL_V1,
+    scope: row.scope,
+    account_uuid: row.account_uuid,
+    organization_uuid: row.organization_uuid,
+    subscription_type: row.subscription_type,
+    rate_limit_tier: row.rate_limit_tier,
+    email: row.email,
+    leased_to: row.leased_to,
+    leased_at: iso(row.leased_at),
+    lease_epoch: Number(row.lease_epoch),
   }
 }
 
@@ -110,7 +129,8 @@ export class SqlCredentials implements CredentialRepo {
              get_byte(secret_sealed, 0) AS seal_version,
              CASE WHEN status = 'cooling_down' AND cooldown_until <= now() THEN 'active' ELSE status END AS status,
              CASE WHEN status = 'cooling_down' AND cooldown_until > now() THEN cooldown_until END AS cooldown_until,
-             last_error, last_error_at, last_used_at, epoch
+             last_error, last_error_at, last_used_at, epoch, scope, account_uuid, organization_uuid,
+             subscription_type, rate_limit_tier, email, leased_to, leased_at, lease_epoch
       FROM ai_credentials
       ${id === undefined ? db`` : db`WHERE id = ${id}`}
       ORDER BY priority`
@@ -148,7 +168,8 @@ export class SqlCredentials implements CredentialRepo {
              get_byte(secret_sealed, 0) AS seal_version,
              CASE WHEN status = 'cooling_down' AND cooldown_until <= now() THEN 'active' ELSE status END AS status,
              CASE WHEN status = 'cooling_down' AND cooldown_until > now() THEN cooldown_until END AS cooldown_until,
-             last_error, last_error_at, last_used_at, epoch
+             last_error, last_error_at, last_used_at, epoch, scope, account_uuid, organization_uuid,
+             subscription_type, rate_limit_tier, email, leased_to, leased_at, lease_epoch
       FROM ai_credentials ORDER BY priority`
     return rows.map((row) => {
       const view = stored(row)
@@ -166,11 +187,17 @@ export class SqlCredentials implements CredentialRepo {
         return await this.insert(tx, update, kek)
       }
       const plan = planPut(update, current, kek, current.id)
-      if ('keep' in plan) return plan.keep
+      const scope = scopeOf(update, current)
+      if ('keep' in plan) {
+        if (scope === current.scope) return plan.keep
+        await tx`UPDATE ai_credentials SET scope = ${scope} WHERE id = ${current.id}`
+        await tx`SELECT pg_notify('scadbuddy_warm_evict', '*')`
+        return await this.one(tx, current.id)
+      }
       const { kind, baseUrl, envelope, last4: tail } = plan.write
       await tx`
         UPDATE ai_credentials SET
-          kind = ${kind}, base_url = ${baseUrl},
+          kind = ${kind}, base_url = ${baseUrl}, scope = ${scope},
           secret_sealed = ${envelope.secretSealed}, dek_sealed = ${envelope.dekSealed},
           kek_id = ${envelope.kekId}, last4 = ${tail}, updated_at = now(),
           status = 'active', cooldown_until = NULL, last_error = NULL, last_error_at = NULL, epoch = epoch + 1
@@ -201,9 +228,9 @@ export class SqlCredentials implements CredentialRepo {
     if ('keep' in plan) throw new Error('planPut kept a credential that does not exist')
     const { kind, baseUrl, envelope, last4: tail } = plan.write
     await tx`
-      INSERT INTO ai_credentials (id, priority, kind, name, base_url, secret_sealed, dek_sealed, kek_id, last4)
+      INSERT INTO ai_credentials (id, priority, kind, name, base_url, secret_sealed, dek_sealed, kek_id, last4, scope)
       VALUES (${id}, (SELECT COALESCE(MAX(priority) + 1, 0) FROM ai_credentials), ${kind}, ${name}, ${baseUrl},
-              ${envelope.secretSealed}, ${envelope.dekSealed}, ${envelope.kekId}, ${tail})`
+              ${envelope.secretSealed}, ${envelope.dekSealed}, ${envelope.kekId}, ${tail}, ${scopeOf(update, undefined)})`
     await tx`SELECT pg_notify('scadbuddy_warm_evict', '*')`
     return await this.one(tx, id)
   }

@@ -38,7 +38,19 @@ const (
 		" base URL; save it again"
 )
 
-var kinds = []string{"anthropic_api_key", "claude_oauth_token", "gateway"}
+var kinds = []string{"anthropic_api_key", "claude_login", "claude_oauth_token", "gateway"}
+
+// scopes say who may use a credential (#7983): ScadBuddy's agent, the fleet's login rotator, or both.
+var scopes = []string{"agent", "fleet", "both"}
+
+// claudeLogin is the kind whose secret is a whole Claude Code claudeAiOauth object. Only the
+// fleet uses one; its account is stored in clear, and only it holds a machine lease.
+const claudeLogin = "claude_login"
+
+const (
+	accountFieldMax = 200
+	emailMax        = 320
+)
 
 // refused is a request the credential store refuses (CredentialRefusedError).
 func refused(status int, detail string) error {
@@ -129,7 +141,8 @@ const columns = `id, priority, kind, name, base_url, last4, updated_at, kek_id,
 	get_byte(secret_sealed, 0) AS seal_version,
 	CASE WHEN status = 'cooling_down' AND cooldown_until <= now() THEN 'active' ELSE status END AS status,
 	CASE WHEN status = 'cooling_down' AND cooldown_until > now() THEN cooldown_until END AS cooldown_until,
-	last_error, last_error_at, last_used_at, epoch`
+	last_error, last_error_at, last_used_at, epoch, scope, account_uuid, organization_uuid,
+	subscription_type, rate_limit_tier, email, leased_to, leased_at, lease_epoch`
 
 type row struct {
 	ID            string
@@ -147,8 +160,22 @@ type row struct {
 	LastErrorAt   *time.Time
 	LastUsedAt    *time.Time
 	Epoch         int
-	SecretSealed  []byte
-	DEKSealed     []byte
+	Scope         string
+	account
+	Email        *string
+	LeasedTo     *string
+	LeasedAt     *time.Time
+	LeaseEpoch   int64
+	SecretSealed []byte
+	DEKSealed    []byte
+}
+
+// account is a claude_login's account, in clear: never secret.
+type account struct {
+	AccountUUID      *string
+	OrganizationUUID *string
+	SubscriptionType *string
+	RateLimitTier    *string
 }
 
 type querier interface {
@@ -213,6 +240,16 @@ type stored struct {
 	Epoch         int     `json:"epoch"`
 	KEKID         string  `json:"kek_id"`
 	LegacyFormat  bool    `json:"legacy_format"`
+	// #7983: who may use it, a claude_login's account and its machine lease.
+	Scope            string  `json:"scope"`
+	AccountUUID      *string `json:"account_uuid"`
+	OrganizationUUID *string `json:"organization_uuid"`
+	SubscriptionType *string `json:"subscription_type"`
+	RateLimitTier    *string `json:"rate_limit_tier"`
+	Email            *string `json:"email"`
+	LeasedTo         *string `json:"leased_to"`
+	LeasedAt         *string `json:"leased_at"`
+	LeaseEpoch       int64   `json:"lease_epoch"`
 }
 
 func (r *row) stored() stored {
@@ -221,6 +258,9 @@ func (r *row) stored() stored {
 		Last4: r.Last4, UpdatedAt: *iso(&r.UpdatedAt), Status: r.Status,
 		CooldownUntil: iso(r.CooldownUntil), LastError: r.LastError, LastErrorAt: iso(r.LastErrorAt),
 		LastUsedAt: iso(r.LastUsedAt), Epoch: r.Epoch, KEKID: r.KEKID, LegacyFormat: r.SealVersion == seal.V1,
+		Scope: r.Scope, AccountUUID: r.AccountUUID, OrganizationUUID: r.OrganizationUUID,
+		SubscriptionType: r.SubscriptionType, RateLimitTier: r.RateLimitTier, Email: r.Email,
+		LeasedTo: r.LeasedTo, LeasedAt: iso(r.LeasedAt), LeaseEpoch: r.LeaseEpoch,
 	}
 }
 
@@ -235,6 +275,8 @@ func (r *row) label() string {
 		}
 	case "claude_oauth_token":
 		what = "OAuth token"
+	case claudeLogin:
+		what = "Claude login"
 	}
 	tail := ""
 	if r.Last4 != "" {
@@ -315,27 +357,140 @@ type update struct {
 	kind            string
 	baseURL, secret *string
 	name            *string
+	// scope nil keeps the stored one (a new row: agent, or fleet for a claude_login).
+	scope *string
+	// email nil keeps the stored one; "" clears it. A claude_login's only.
+	email *string
 }
 
 func readUpdate(f *form) update {
-	return update{
+	u := update{
 		kind:    f.choice("kind", nil, kinds...),
 		baseURL: f.text("base_url", 0, 2048, nil),
 		secret:  f.text("secret", 1, 4096, nil),
 		name:    f.text("name", 0, 1024, nil),
+		email:   f.text("email", 0, 1024, nil),
 	}
+	if f.raw("scope") != nil {
+		scope := f.choice("scope", nil, scopes...)
+		u.scope = &scope
+	}
+	return u
 }
 
-var updateFields = []string{"kind", "base_url", "secret", "name"}
+var updateFields = []string{"kind", "base_url", "secret", "name", "scope", "email"}
 
 type plan struct {
-	baseURL  *string
-	envelope seal.Envelope
+	baseURL *string
+	// envelope nil keeps the stored secret.
+	envelope *seal.Envelope
 	last4    string
+	scope    string
+	account  account
+	email    *string
 }
 
-// plan is credentials.ts planPut: nil to keep the stored secret (only when neither kind nor
-// base_url changes).
+// changes says whether a plan that keeps the secret still writes the scope or the email.
+func (p *plan) changes(current *row) bool {
+	return p.scope != current.Scope || !equal(p.email, current.Email)
+}
+
+// planScope is the row's scope after u: the one asked, else the stored one, else agent. A
+// claude_login is the fleet's: it takes fleet for agent unless a scope is asked, and refuses agent.
+func planScope(u update, current *row) (string, error) {
+	scope := "agent"
+	if current != nil {
+		scope = current.Scope
+	}
+	switch {
+	case u.scope != nil:
+		scope = *u.scope
+	case u.kind == claudeLogin && scope == "agent":
+		scope = "fleet"
+	}
+	if u.kind == claudeLogin && scope == "agent" {
+		return "", refused(400, `kind "claude_login" is the fleet's: scope must be "fleet" or "both"`)
+	}
+	return scope, nil
+}
+
+// planEmail is a claude_login's email after u: the one asked ("" clears it), else the stored one.
+func planEmail(u update, current *row) (*string, error) {
+	if u.kind != claudeLogin {
+		if u.email != nil && *u.email != "" {
+			return nil, refused(400, `email applies to kind "claude_login" only`)
+		}
+		return nil, nil
+	}
+	if u.email == nil {
+		if current != nil && current.Kind == claudeLogin {
+			return current.Email, nil
+		}
+		return nil, nil
+	}
+	email := *u.email
+	if email == "" {
+		return nil, nil
+	}
+	if utf8.RuneCountInString(email) > emailMax || !strings.Contains(email, "@") ||
+		strings.IndexFunc(email, func(r rune) bool { return pyIsSpace(r) || unicode.IsControl(r) }) >= 0 {
+		return nil, refused(400, emailMessage)
+	}
+	return &email, nil
+}
+
+const (
+	emailMessage   = "email must be one address, at most 320 characters, with no space or control character"
+	loginMessage   = "a claude_login secret must be a claudeAiOauth JSON object"
+	loginNeeds     = "a claude_login secret needs accessToken and refreshToken as text and expiresAt as a number"
+	accountMessage = "%s must be text of at most 200 characters"
+)
+
+// loginAccount reads a claude_login's secret: a claudeAiOauth object with accessToken and
+// refreshToken as text and expiresAt as a number. It answers the account in it and the last
+// four characters of its access token.
+func loginAccount(secret string) (account, string, error) {
+	var o map[string]json.RawMessage
+	if json.Unmarshal([]byte(secret), &o) != nil || o == nil {
+		return account{}, "", refused(400, loginMessage)
+	}
+	var access, refresh string
+	var expires float64
+	for _, need := range []struct {
+		name string
+		into any
+	}{{"accessToken", &access}, {"refreshToken", &refresh}, {"expiresAt", &expires}} {
+		raw, ok := o[need.name]
+		if !ok || string(raw) == "null" || json.Unmarshal(raw, need.into) != nil {
+			return account{}, "", refused(400, loginNeeds)
+		}
+	}
+	if access == "" || refresh == "" {
+		return account{}, "", refused(400, loginNeeds)
+	}
+	var a account
+	for _, field := range []struct {
+		name string
+		into **string
+	}{
+		{"accountUuid", &a.AccountUUID}, {"organizationUuid", &a.OrganizationUUID},
+		{"subscriptionType", &a.SubscriptionType}, {"rateLimitTier", &a.RateLimitTier},
+	} {
+		raw, ok := o[field.name]
+		if !ok || string(raw) == "null" {
+			continue
+		}
+		var v string
+		if json.Unmarshal(raw, &v) != nil || utf8.RuneCountInString(v) > accountFieldMax {
+			return account{}, "", refused(400, fmt.Sprintf(accountMessage, field.name))
+		}
+		*field.into = &v
+	}
+	return a, last4(access), nil
+}
+
+// plan is credentials.ts planPut: its envelope nil to keep the stored secret (only when
+// neither kind nor base_url changes).
 func (s *Store) plan(u update, current *row, id string) (*plan, error) {
 	var baseURL *string
 	if u.kind == "gateway" {
@@ -350,6 +505,15 @@ func (s *Store) plan(u update, current *row, id string) (*plan, error) {
 	} else if u.baseURL != nil && *u.baseURL != "" {
 		return nil, refused(400, `base_url applies to kind "gateway" only`)
 	}
+	scope, err := planScope(u, current)
+	if err != nil {
+		return nil, err
+	}
+	email, err := planEmail(u, current)
+	if err != nil {
+		return nil, err
+	}
+	p := &plan{baseURL: baseURL, scope: scope, email: email}
 	if u.secret == nil {
 		if current == nil {
 			return nil, refused(400, "no credential is stored yet; secret is required")
@@ -361,20 +525,26 @@ func (s *Store) plan(u update, current *row, id string) (*plan, error) {
 		if current.SealVersion == seal.V1 {
 			return nil, refused(409, legacyFormatMessage)
 		}
-		return nil, nil
+		return p, nil
 	}
 	secret := pyStrip(*u.secret)
 	if secret == "" {
 		return nil, refused(400, "secret is empty")
 	}
-	if strings.IndexFunc(secret, pyIsSpace) >= 0 {
-		return nil, refused(400, "secret must not contain whitespace")
+	if u.kind == claudeLogin {
+		// A claudeAiOauth object as Claude Code writes it: its whitespace is JSON's, not the token's.
+		if p.account, p.last4, err = loginAccount(secret); err != nil {
+			return nil, err
+		}
+	} else {
+		if strings.IndexFunc(secret, pyIsSpace) >= 0 {
+			return nil, refused(400, "secret must not contain whitespace")
+		}
+		p.last4 = last4(secret)
 	}
-	return &plan{
-		baseURL:  baseURL,
-		envelope: seal.SealSecret(s.Keys.Current, secret, credentialAAD(id, u.kind, baseURL)),
-		last4:    last4(secret),
-	}, nil
+	envelope := seal.SealSecret(s.Keys.Current, secret, credentialAAD(id, u.kind, baseURL))
+	p.envelope = &envelope
+	return p, nil
 }
 
 func equal(a, b *string) bool { return (a == nil) == (b == nil) && (a == nil || *a == *b) }
@@ -397,10 +567,16 @@ func (s *Store) insert(ctx context.Context, tx pgx.Tx, u update) (*row, error) {
 	if err != nil {
 		return nil, err
 	}
+	if p.envelope == nil {
+		return nil, errors.New("a create kept a secret that does not exist")
+	}
 	if _, err := tx.Exec(ctx, `INSERT INTO ai_credentials (id, priority, kind, name, base_url, secret_sealed,
-		dek_sealed, kek_id, last4) VALUES ($1, (SELECT COALESCE(MAX(priority) + 1, 0)
-		FROM ai_credentials), $2, $3, $4, $5, $6, $7, $8)`,
+		dek_sealed, kek_id, last4, scope, account_uuid, organization_uuid, subscription_type,
+		rate_limit_tier, email) VALUES ($1, (SELECT COALESCE(MAX(priority) + 1, 0)
+		FROM ai_credentials), $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)`,
 		id, u.kind, name, p.baseURL, p.envelope.SecretSealed, p.envelope.DEKSealed, p.envelope.KEKID, p.last4,
+		p.scope, p.account.AccountUUID, p.account.OrganizationUUID, p.account.SubscriptionType,
+		p.account.RateLimitTier, p.email,
 	); err != nil {
 		return nil, err
 	}
@@ -477,17 +653,33 @@ func (s *Store) save(r *http.Request, _ crud.Params) (any, error) {
 			return err
 		}
 		p, err := s.plan(u, current, current.ID)
-		if err != nil || p == nil {
-			out = current
+		if err != nil {
 			return err
 		}
-		if _, err := tx.Exec(ctx, `UPDATE ai_credentials SET kind = $1, base_url = $2, secret_sealed = $3,
-			dek_sealed = $4, kek_id = $5, last4 = $6, updated_at = now(),
-			status = 'active', cooldown_until = NULL, last_error = NULL,
-			last_error_at = NULL, epoch = epoch + 1 WHERE id = $7`,
-			u.kind, p.baseURL, p.envelope.SecretSealed, p.envelope.DEKSealed, p.envelope.KEKID, p.last4,
-			current.ID); err != nil {
-			return err
+		switch {
+		case p.envelope == nil && !p.changes(current):
+			out = current
+			return nil
+		case p.envelope == nil:
+			// The scope or the email only: the secret and its epoch stay.
+			if _, err := tx.Exec(ctx, `UPDATE ai_credentials SET scope = $1, email = $2 WHERE id = $3`,
+				p.scope, p.email, current.ID); err != nil {
+				return err
+			}
+		default:
+			// A kind other than claude_login holds no lease.
+			if _, err := tx.Exec(ctx, `UPDATE ai_credentials SET kind = $1, base_url = $2, secret_sealed = $3,
+				dek_sealed = $4, kek_id = $5, last4 = $6, updated_at = now(),
+				status = 'active', cooldown_until = NULL, last_error = NULL,
+				last_error_at = NULL, epoch = epoch + 1, scope = $7, account_uuid = $8,
+				organization_uuid = $9, subscription_type = $10, rate_limit_tier = $11, email = $12,
+				leased_to = CASE WHEN $1 = 'claude_login' THEN leased_to END,
+				leased_at = CASE WHEN $1 = 'claude_login' THEN leased_at END WHERE id = $13`,
+				u.kind, p.baseURL, p.envelope.SecretSealed, p.envelope.DEKSealed, p.envelope.KEKID, p.last4,
+				p.scope, p.account.AccountUUID, p.account.OrganizationUUID, p.account.SubscriptionType,
+				p.account.RateLimitTier, p.email, current.ID); err != nil {
+				return err
+			}
 		}
 		if err := evict(ctx, tx); err != nil {
 			return err

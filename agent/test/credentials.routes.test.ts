@@ -118,6 +118,10 @@ describe('/api/v1/ai/credentials/entries (#1093)', () => {
       last_error: null,
       last_error_at: null,
       last_used_at: null,
+      scope: 'agent',
+      agent_uses: true,
+      email: null,
+      subscription_type: null,
     })
     await create({ kind: 'gateway', base_url: 'https://llm.example/', secret: GW })
     const list = await call<CredentialListView>('GET', '/entries')

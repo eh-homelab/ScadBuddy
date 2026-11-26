@@ -24,7 +24,7 @@ from scadbuddy_durable.secrets import SEAL_V1, Envelope, Kek, SealError, open_se
 
 log = logging.getLogger(__name__)
 
-CredentialKind = Literal["anthropic_api_key", "claude_oauth_token", "gateway"]
+CredentialKind = Literal["anthropic_api_key", "claude_login", "claude_oauth_token", "gateway"]
 
 LEGACY_FORMAT_MESSAGE = (
     "the stored credential was saved in an older format that did not bind its kind and"
@@ -46,7 +46,11 @@ class Credential:
     @property
     def label(self) -> str:
         """For logs: which credential, never its secret (credentials.ts `credentialLabel`)."""
-        what = {"gateway": f"gateway {self.base_url or ''}", "claude_oauth_token": "OAuth token"}
+        what = {
+            "gateway": f"gateway {self.base_url or ''}",
+            "claude_oauth_token": "OAuth token",
+            "claude_login": "Claude login",
+        }
         return f"credential {self.priority + 1} ({what.get(self.kind, 'API key')})"
 
 
@@ -98,11 +102,15 @@ async def usable_credentials(conn: psycopg.AsyncConnection[Any], kek: Kek) -> li
     Usable is the agent's rule: active, or cooling down with its cooldown passed;
     sealed under the mounted key; in the current format; and authenticating against
     its row. A row that fails any of those is skipped and logged by label.
+
+    Only the agent's rows (#7983): never a ``claude_login`` (a whole Claude Code login, the
+    fleet's), and never a row whose ``scope`` is ``fleet``.
     """
     cur = await conn.execute(
         "SELECT id, priority, kind, base_url, secret_sealed, dek_sealed, kek_id, epoch"
         " FROM ai_credentials"
-        " WHERE status = 'active' OR (status = 'cooling_down' AND cooldown_until <= now())"
+        " WHERE (status = 'active' OR (status = 'cooling_down' AND cooldown_until <= now()))"
+        " AND kind <> 'claude_login' AND scope IN ('agent', 'both')"
         " ORDER BY priority"
     )
     usable: list[Credential] = []

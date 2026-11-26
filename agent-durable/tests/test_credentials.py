@@ -66,7 +66,8 @@ def test_env_per_kind(vectors: dict[str, Any]) -> None:
     kek = kek_from_base64(vectors["kek_b64"])
     got = {}
     for v in vectors["credentials"]:
-        if v["opens"]:
+        # A claude_login is the fleet's: it has no environment here (#7983).
+        if v["opens"] and v["kind"] != "claude_login":
             c = open_credential(
                 kek,
                 id=v["id"],
@@ -111,13 +112,14 @@ async def _insert(conn: psycopg.AsyncConnection[Any], v: dict[str, Any], **over:
         "kek_id": v["kek_id"],
         "status": "active",
         "cooldown_until": None,
+        "scope": "agent",
         **over,
     }
     await conn.execute(
         "INSERT INTO ai_credentials (id, priority, kind, base_url, secret_sealed, dek_sealed,"
-        " kek_id, last4, status, cooldown_until)"
+        " kek_id, last4, status, cooldown_until, scope)"
         " VALUES (%(id)s, %(priority)s, %(kind)s, %(base_url)s, %(secret_sealed)s,"
-        " %(dek_sealed)s, %(kek_id)s, '', %(status)s, %(cooldown_until)s)",
+        " %(dek_sealed)s, %(kek_id)s, '', %(status)s, %(cooldown_until)s, %(scope)s)",
         row,
     )
 
@@ -161,6 +163,22 @@ async def test_an_edited_row_is_skipped_and_the_next_is_used(
     await _insert(agent_db, by["oauth token"], priority=1)
     usable = await usable_credentials(agent_db, kek)
     assert [c.kind for c in usable] == ["claude_oauth_token"]
+
+
+@pytest.mark.requires_postgres
+async def test_the_fleets_rows_are_never_used(
+    agent_db: psycopg.AsyncConnection[Any], vectors: dict[str, Any]
+) -> None:
+    """#7983: a claude_login, and a row whose scope is fleet, are the fleet's; a row whose
+    scope is both is the agent's too."""
+    kek = kek_from_base64(vectors["kek_b64"])
+    by = {v["name"]: v for v in vectors["credentials"]}
+    await _insert(agent_db, by["claude login"], priority=0, scope="fleet")
+    await _insert(agent_db, by["api key, migrated row id"], priority=1, scope="fleet")
+    await _insert(agent_db, by["oauth token"], priority=2, scope="both")
+    await _insert(agent_db, by["gateway with a path"], priority=3)
+    usable = await usable_credentials(agent_db, kek)
+    assert [c.kind for c in usable] == ["claude_oauth_token", "gateway"]
 
 
 def test_an_unknown_kind_is_refused_not_treated_as_a_gateway(vectors: dict[str, Any]) -> None:

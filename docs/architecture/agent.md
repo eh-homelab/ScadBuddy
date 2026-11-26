@@ -201,6 +201,10 @@ security: [browser-bridge.md](../ai/browser-bridge.md).
 - **Claude credentials.** Kinds `anthropic_api_key`, `claude_oauth_token` and `gateway`
   (`credentials.ts`), each sealed with a per-row key under the API's KEK. The API seals and
   opens them, and the agent reads them through area `credentials` (`CrudCredentials`).
+  The pool is shared with the fleet's login rotator (#7983): kind `claude_login` (a whole
+  Claude Code `claudeAiOauth` login, its account in clear columns, with a machine lease) and
+  column `scope` (`agent`, `fleet` or `both`). The agent uses only a row that `agentUses`
+  accepts: never a `claude_login`, and never scope `fleet`.
 
 ## Tests and evals
 

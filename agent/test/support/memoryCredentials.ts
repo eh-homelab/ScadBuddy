@@ -17,6 +17,7 @@ import {
   TOO_MANY_MESSAGE,
   type StoredCredential,
   type CredentialKind,
+  type CredentialScope,
 } from '../../src/credentials.js'
 import { type Envelope, type Kek, last4, openSecret, SEAL_V1, SealError, sealedVersion, sealSecret } from '../../src/secrets.js'
 
@@ -85,13 +86,31 @@ export function planPut(
   }
 }
 
-/** Decrypts a stored row. Throws SealError on a wrong KEK, an altered row, or a v1 row. */
-export function openCredential(
-  kek: Kek,
-  row: { id: string; kind: CredentialKind; base_url: string | null; envelope: Envelope },
-): Credential {
+/**
+ * A row's scope after `update` (#7983), as the API sets it: the one asked, else the stored one,
+ * else `agent`; a `claude_login` takes `fleet` for `agent` and refuses `agent`.
+ */
+export function scopeOf(update: CredentialUpdate, current: Pick<StoredCredential, 'scope'> | undefined): CredentialScope {
+  let scope = update.scope ?? current?.scope ?? 'agent'
+  if (update.scope === undefined && update.kind === 'claude_login' && scope === 'agent') scope = 'fleet'
+  if (update.kind === 'claude_login' && scope === 'agent') {
+    throw new CredentialError('kind "claude_login" is the fleet\'s: scope must be "fleet" or "both"', 400)
+  }
+  return scope
+}
+
+type Sealed = { id: string; kind: CredentialKind; base_url: string | null; envelope: Envelope }
+
+/** A stored row's plaintext, of any kind. Throws SealError on a wrong KEK, an altered row, or a v1 row. */
+export function openSealed(kek: Kek, row: Sealed): string {
   if (sealedVersion(row.envelope.secretSealed) === SEAL_V1) throw new SealError(LEGACY_FORMAT_MESSAGE)
-  const secret = openSecret(kek, row.envelope, credentialAad(row.id, row.kind, row.base_url))
+  return openSecret(kek, row.envelope, credentialAad(row.id, row.kind, row.base_url))
+}
+
+/** Decrypts a stored row as the agent runs it. Throws SealError as `openSealed` does, and for a `claude_login`. */
+export function openCredential(kek: Kek, row: Sealed): Credential {
+  const secret = openSealed(kek, row)
+  if (row.kind === 'claude_login') throw new SealError("a claude_login is the fleet's: the agent does not run it")
   if (row.kind === 'gateway') {
     if (row.base_url === null) throw new SealError('gateway credential has no base_url')
     return { kind: 'gateway', baseUrl: row.base_url, secret }
@@ -225,10 +244,16 @@ export class MemoryCredentials implements CredentialRepo {
       if (id !== undefined) throw new CredentialError(`no credential ${id}`, 404)
       return this.create(update)
     }
-    const plan = planPut(update, await this.get(row.id), this.kek, row.id)
-    if ('keep' in plan) return plan.keep
+    const current = await this.get(row.id)
+    const plan = planPut(update, current, this.kek, row.id)
+    const scope = scopeOf(update, current)
+    if ('keep' in plan) {
+      row.scope = scope
+      return (await this.get(row.id)) as StoredCredential
+    }
     const { kind, baseUrl, envelope, last4 } = plan.write
     Object.assign(row, {
+      scope,
       kind,
       base_url: baseUrl,
       last4,
@@ -254,6 +279,15 @@ export class MemoryCredentials implements CredentialRepo {
     const { kind, baseUrl, envelope, last4 } = plan.write
     this.rows.push({
       id,
+      scope: scopeOf(update, undefined),
+      account_uuid: null,
+      organization_uuid: null,
+      subscription_type: null,
+      rate_limit_tier: null,
+      email: kind === 'claude_login' ? (update.email ?? null) : null,
+      leased_to: null,
+      leased_at: null,
+      lease_epoch: 0,
       kind,
       name,
       base_url: baseUrl,

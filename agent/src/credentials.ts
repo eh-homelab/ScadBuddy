@@ -20,8 +20,26 @@ import { SealError } from './secrets.js'
 // pods that race each keep the strongest verdict: `disabled` is
 // never downgraded by a rate limit, and of two cooldowns the later wins.
 
-export const CREDENTIAL_KINDS = ['anthropic_api_key', 'claude_oauth_token', 'gateway'] as const
+// #7983: the pool is shared with the fleet's login rotator (design
+// 2026-11-26-fleet-session-registry-and-rotator-design.md §6.1). A `claude_login` row holds a
+// whole Claude Code login (`claudeAiOauth`), which the agent cannot run; `scope` says who may use
+// a row: `agent`, `fleet` or `both`. The agent uses only a row `agentUses` accepts. Settings
+// lists every row, with its scope.
+
+export const CREDENTIAL_KINDS = ['anthropic_api_key', 'claude_login', 'claude_oauth_token', 'gateway'] as const
 export type CredentialKind = (typeof CREDENTIAL_KINDS)[number]
+
+/** The kinds the agent runs a turn on, and the kinds Settings saves. */
+export const AGENT_CREDENTIAL_KINDS = ['anthropic_api_key', 'claude_oauth_token', 'gateway'] as const
+export type AgentCredentialKind = (typeof AGENT_CREDENTIAL_KINDS)[number]
+
+export const CREDENTIAL_SCOPES = ['agent', 'fleet', 'both'] as const
+export type CredentialScope = (typeof CREDENTIAL_SCOPES)[number]
+
+/** Whether the agent may use the row: a kind it runs, in scope `agent` or `both`. */
+export function agentUses(c: Pick<StoredCredential, 'kind' | 'scope'>): boolean {
+  return (AGENT_CREDENTIAL_KINDS as readonly string[]).includes(c.kind) && c.scope !== 'fleet'
+}
 
 export const CREDENTIAL_STATUSES = ['active', 'cooling_down', 'disabled'] as const
 export type CredentialStatus = (typeof CREDENTIAL_STATUSES)[number]
@@ -39,6 +57,14 @@ export type CredentialSummary = {
   base_url: string | null
   last4: string
   updated_at: string
+  /** Who may use it (#7983); see `agentUses`. */
+  scope: CredentialScope
+  /** A `claude_login`'s account, in clear (#7983); null on every other kind. */
+  account_uuid: string | null
+  organization_uuid: string | null
+  subscription_type: string | null
+  rate_limit_tier: string | null
+  email: string | null
 }
 
 /**
@@ -63,6 +89,10 @@ export type StoredCredential = CredentialSummary & {
   kekId: string
   /** True when sealed by #354's v1 format, which did not bind kind and base_url; it will not open. */
   legacyFormat: boolean
+  /** The machine that holds a `claude_login` now, and since when (#7983); null when none does. */
+  leased_to: string | null
+  leased_at: string | null
+  lease_epoch: number
 }
 
 /** What a query learned about a credential (harness/fallback.ts). */
@@ -144,6 +174,10 @@ export type CredentialUpdate = {
   secret?: string
   /** Read by `create` only; `rename` changes the name of a stored one (#3710). */
   name?: string | null
+  /** Omitted: keep the stored scope (a new row: `agent`, or `fleet` for a `claude_login`). */
+  scope?: CredentialScope
+  /** A `claude_login`'s account email; omitted keeps the stored one. */
+  email?: string | null
 }
 
 /** A request the store refuses; `status` is the HTTP status the route answers with. */
@@ -237,7 +271,13 @@ type Labelled = Pick<StoredCredential, 'priority' | 'kind' | 'base_url' | 'last4
 /** The kind and the last four characters: "API key …abcd". */
 function credentialWhat(c: Labelled): string {
   const what =
-    c.kind === 'gateway' ? `gateway ${c.base_url ?? ''}` : c.kind === 'claude_oauth_token' ? 'OAuth token' : 'API key'
+    c.kind === 'gateway'
+      ? `gateway ${c.base_url ?? ''}`
+      : c.kind === 'claude_oauth_token'
+        ? 'OAuth token'
+        : c.kind === 'claude_login'
+          ? 'Claude login'
+          : 'API key'
   return `${what}${c.last4 ? ` …${c.last4}` : ''}`
 }
 
@@ -413,12 +453,27 @@ export class SettingsStore {
 type WireStored = Omit<StoredCredential, 'kekId' | 'legacyFormat'> & { kek_id: string; legacy_format: boolean }
 type WireCredential = { kind: CredentialKind; base_url?: string | null; secret: string }
 
+/** #7983's columns as an API from before them answers: every row is the agent's, with no account or lease. */
+const BEFORE_SCOPES = {
+  scope: 'agent',
+  account_uuid: null,
+  organization_uuid: null,
+  subscription_type: null,
+  rate_limit_tier: null,
+  email: null,
+  leased_to: null,
+  leased_at: null,
+  lease_epoch: 0,
+} as const
+
 function fromWire(row: WireStored): StoredCredential {
   const { kek_id, legacy_format, ...rest } = row
-  return { ...rest, kekId: kek_id, legacyFormat: legacy_format }
+  return { ...BEFORE_SCOPES, ...rest, kekId: kek_id, legacyFormat: legacy_format }
 }
 
-function credentialFromWire(c: WireCredential): Credential {
+/** The credential as the agent runs it; undefined for a `claude_login`, which only the fleet uses. */
+function credentialFromWire(c: WireCredential): Credential | undefined {
+  if (c.kind === 'claude_login') return undefined
   if (c.kind === 'gateway') {
     if (!c.base_url) throw new SealError('gateway credential has no base_url')
     return { kind: 'gateway', baseUrl: c.base_url, secret: c.secret }
@@ -511,6 +566,8 @@ export class CrudCredentials implements CredentialRepo {
       ...(baseUrl ? { base_url: baseUrl } : {}),
       ...(update.secret === undefined ? {} : { secret: update.secret }),
       ...(update.name === undefined ? {} : { name: normaliseCredentialName(update.name) }),
+      ...(update.scope === undefined ? {} : { scope: update.scope }),
+      ...(update.email === undefined ? {} : { email: update.email ?? '' }),
     }
   }
 

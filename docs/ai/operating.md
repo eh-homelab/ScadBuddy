@@ -512,6 +512,11 @@ There can be several credentials, one row each in `ai_credentials`, in priority 
 - `gateway`: a `base_url` plus a token, passed as `ANTHROPIC_BASE_URL` and
   `ANTHROPIC_AUTH_TOKEN`.
 
+The pool also holds the fleet's rows (#7983): kind `claude_login` (a whole Claude Code
+`claudeAiOauth` login, which only the fleet's login rotator uses) and any row whose `scope`
+is `fleet`. The assistant never uses or tests those rows; Settings lists them with their
+scope. A row's `scope` is `agent` by default, `fleet` for a `claude_login`.
+
 The mapping is in `credentialEnv()` in [`agent/src/harness/run.ts`](../../agent/src/harness/run.ts).
 Its sources are the [LLM gateway docs](https://code.claude.com/docs/en/llm-gateway-connect)
 ("`ANTHROPIC_AUTH_TOKEN` in `Authorization: Bearer`, `ANTHROPIC_API_KEY` in

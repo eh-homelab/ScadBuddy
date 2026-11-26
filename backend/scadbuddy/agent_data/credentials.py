@@ -14,6 +14,11 @@ a warm Claude Code depends on tells every agent replica's cache on commit
 The agent normalises a gateway's base URL and a credential's name before it sends them
 (``normaliseBaseUrl``, ``normaliseCredentialName``: the URL parser is the agent's, and the
 AAD binds the URL as the agent spells it); this module checks the result again.
+
+#7983: the pool is shared with the fleet's login rotator. Kind ``claude_login`` holds a whole
+Claude Code ``claudeAiOauth`` object, with its account in clear columns; ``scope`` says who may
+use a row (``agent``, ``fleet`` or ``both``); a ``claude_login`` row may hold a machine lease.
+Core's ``internal/secrets/credentials.go`` serves these routes too, with the same rules.
 """
 
 from __future__ import annotations
@@ -39,8 +44,28 @@ from scadbuddy.core.secrets import (
 )
 from scadbuddy.core.secrets import rewrap as rewrap_envelope
 
-Kind = Literal["anthropic_api_key", "claude_oauth_token", "gateway"]
+Kind = Literal["anthropic_api_key", "claude_login", "claude_oauth_token", "gateway"]
 Status = Literal["active", "cooling_down", "disabled"]
+Scope = Literal["agent", "fleet", "both"]
+
+#: The kind whose secret is a whole Claude Code ``claudeAiOauth`` object: the fleet's only.
+CLAUDE_LOGIN = "claude_login"
+ACCOUNT_FIELD_MAX = 200
+EMAIL_MAX = 320
+EMAIL_MESSAGE = (
+    "email must be one address, at most 320 characters, with no space or control character"
+)
+LOGIN_MESSAGE = "a claude_login secret must be a claudeAiOauth JSON object"
+LOGIN_NEEDS = (
+    "a claude_login secret needs accessToken and refreshToken as text and expiresAt as a number"
+)
+#: The account fields of a ``claudeAiOauth`` object, by their column.
+ACCOUNT_FIELDS = {
+    "account_uuid": "accountUuid",
+    "organization_uuid": "organizationUuid",
+    "subscription_type": "subscriptionType",
+    "rate_limit_tier": "rateLimitTier",
+}
 
 #: The most credentials stored at once (credentials.ts ``MAX_CREDENTIALS``).
 MAX_CREDENTIALS = 100
@@ -77,6 +102,10 @@ class Update:
     base_url: str | None = None
     secret: str | None = None
     name: str | None = None
+    #: None keeps the stored scope (a new row: agent, or fleet for a claude_login).
+    scope: Scope | None = None
+    #: A claude_login's email: None keeps the stored one, "" clears it.
+    email: str | None = None
 
 
 def credential_aad(row_id: str, kind: str, base_url: str | None) -> str:
@@ -139,7 +168,8 @@ _COLUMNS = (
     " ELSE status END AS status,"
     " CASE WHEN status = 'cooling_down' AND cooldown_until > now() THEN cooldown_until"
     " END AS cooldown_until,"
-    " last_error, last_error_at, last_used_at, epoch"
+    " last_error, last_error_at, last_used_at, epoch, scope, account_uuid, organization_uuid,"
+    " subscription_type, rate_limit_tier, email, leased_to, leased_at, lease_epoch"
 )
 
 
@@ -188,6 +218,15 @@ def stored(row: dict[str, Any]) -> dict[str, Any]:
         "epoch": row["epoch"],
         "kek_id": row["kek_id"],
         "legacy_format": row["seal_version"] == SEAL_V1,
+        "scope": row["scope"],
+        "account_uuid": row["account_uuid"],
+        "organization_uuid": row["organization_uuid"],
+        "subscription_type": row["subscription_type"],
+        "rate_limit_tier": row["rate_limit_tier"],
+        "email": row["email"],
+        "leased_to": row["leased_to"],
+        "leased_at": iso(row["leased_at"]),
+        "lease_epoch": row["lease_epoch"],
     }
 
 
@@ -199,6 +238,8 @@ def label(row: dict[str, Any]) -> str:
         if kind == "gateway"
         else "OAuth token"
         if kind == "claude_oauth_token"
+        else "Claude login"
+        if kind == CLAUDE_LOGIN
         else "API key"
     )
     tail = f" …{row['last4']}" if row["last4"] else ""
@@ -213,11 +254,108 @@ def _evict(conn: Connection[Any]) -> None:
     conn.execute("SELECT pg_notify(%s, '*')", (WARM_EVICT_CHANNEL,))
 
 
-def _plan(
-    update: Update, current: dict[str, Any] | None, kek: Kek | None, row_id: str
-) -> tuple[str | None, Envelope, str] | None:
-    """credentials.ts ``planPut``: the base URL, the new envelope and last four, or None to
-    keep the stored secret (only when neither ``kind`` nor ``base_url`` changes)."""
+def _scope(update: Update, current: dict[str, Any] | None) -> str:
+    """The row's scope after ``update``: the one asked, else the stored one, else agent. A
+    claude_login is the fleet's: it takes fleet for agent unless a scope is asked, and
+    refuses agent."""
+    scope: str = "agent" if current is None else current["scope"]
+    if update.scope is not None:
+        scope = update.scope
+    elif update.kind == CLAUDE_LOGIN and scope == "agent":
+        scope = "fleet"
+    if update.kind == CLAUDE_LOGIN and scope == "agent":
+        raise CredentialRefusedError(
+            'kind "claude_login" is the fleet\'s: scope must be "fleet" or "both"', 400
+        )
+    return scope
+
+
+def _email(update: Update, current: dict[str, Any] | None) -> str | None:
+    """A claude_login's email after ``update``: the one asked ("" clears it), else the
+    stored one."""
+    if update.kind != CLAUDE_LOGIN:
+        if update.email:
+            raise CredentialRefusedError('email applies to kind "claude_login" only', 400)
+        return None
+    if update.email is None:
+        if current is not None and current["kind"] == CLAUDE_LOGIN:
+            email: str | None = current["email"]
+            return email
+        return None
+    if update.email == "":
+        return None
+    email = update.email
+    if (
+        len(email) > EMAIL_MAX
+        or "@" not in email
+        or any(c.isspace() or unicodedata.category(c) == "Cc" for c in email)
+    ):
+        raise CredentialRefusedError(EMAIL_MESSAGE, 400)
+    return email
+
+
+def _refuse_constant(name: str) -> Any:
+    raise ValueError(name)
+
+
+def login_account(secret: str) -> tuple[dict[str, str | None], str]:
+    """A claude_login's secret read: a ``claudeAiOauth`` object with accessToken and
+    refreshToken as text and expiresAt as a number. Answers the account in it, by column,
+    and the last four characters of its access token."""
+    try:
+        found = json.loads(secret, parse_constant=_refuse_constant)
+    except ValueError:
+        found = None
+    if not isinstance(found, dict):
+        raise CredentialRefusedError(LOGIN_MESSAGE, 400)
+    access, refresh, expires = (
+        found.get("accessToken"),
+        found.get("refreshToken"),
+        found.get("expiresAt"),
+    )
+    if (
+        not isinstance(access, str)
+        or not access
+        or not isinstance(refresh, str)
+        or not refresh
+        or isinstance(expires, bool)
+        or not isinstance(expires, int | float)
+    ):
+        raise CredentialRefusedError(LOGIN_NEEDS, 400)
+    account: dict[str, str | None] = {}
+    for column, field in ACCOUNT_FIELDS.items():
+        value = found.get(field)
+        if value is not None and (not isinstance(value, str) or len(value) > ACCOUNT_FIELD_MAX):
+            raise CredentialRefusedError(
+                f"{field} must be text of at most {ACCOUNT_FIELD_MAX} characters", 400
+            )
+        account[column] = value
+    return account, last4(access)
+
+
+@dataclass(frozen=True)
+class _Plan:
+    """A save planned: ``envelope`` None keeps the stored secret."""
+
+    base_url: str | None
+    envelope: Envelope | None
+    last4: str
+    scope: str
+    email: str | None
+    account: dict[str, str | None]
+
+    def changes(self, current: dict[str, Any]) -> bool:
+        """Whether a plan that keeps the secret still writes the scope or the email."""
+        return bool(self.scope != current["scope"] or self.email != current["email"])
+
+
+_NO_ACCOUNT: dict[str, str | None] = dict.fromkeys(ACCOUNT_FIELDS)
+
+
+def _plan(update: Update, current: dict[str, Any] | None, kek: Kek | None, row_id: str) -> _Plan:
+    """credentials.ts ``planPut``: the base URL, the new envelope (None to keep the stored
+    secret, only when neither ``kind`` nor ``base_url`` changes), the scope, the email and a
+    claude_login's account."""
     base_url: str | None = None
     if update.kind == "gateway":
         if not update.base_url:
@@ -225,6 +363,8 @@ def _plan(
         base_url = check_base_url(update.base_url)
     elif update.base_url:
         raise CredentialRefusedError('base_url applies to kind "gateway" only', 400)
+    scope = _scope(update, current)
+    email = _email(update, current)
 
     if update.secret is None:
         if current is None:
@@ -237,17 +377,22 @@ def _plan(
             )
         if current["seal_version"] == SEAL_V1:
             raise CredentialRefusedError(LEGACY_FORMAT_MESSAGE, 409)
-        return None
+        return _Plan(base_url, None, "", scope, email, _NO_ACCOUNT)
 
     secret = update.secret.strip()
     if not secret:
         raise CredentialRefusedError("secret is empty", 400)
-    if any(c.isspace() for c in secret):
-        raise CredentialRefusedError("secret must not contain whitespace", 400)
+    if update.kind == CLAUDE_LOGIN:
+        # A claudeAiOauth object as Claude Code writes it: its whitespace is JSON's.
+        account, tail = login_account(secret)
+    else:
+        if any(c.isspace() for c in secret):
+            raise CredentialRefusedError("secret must not contain whitespace", 400)
+        account, tail = _NO_ACCOUNT, last4(secret)
     if kek is None:
         raise CredentialRefusedError(NO_KEK_MESSAGE, 503)
     envelope = seal_secret(kek, secret, credential_aad(row_id, update.kind, base_url))
-    return base_url, envelope, last4(secret)
+    return _Plan(base_url, envelope, tail, scope, email, account)
 
 
 def _one(conn: Connection[Any], row_id: str) -> dict[str, Any]:
@@ -276,22 +421,27 @@ def _insert(conn: Connection[Any], update: Update, kek: Kek | None) -> dict[str,
     row_id = str(uuid.uuid4())
     name = check_name(update.name)
     plan = _plan(update, None, kek, row_id)
-    if plan is None:
+    envelope = plan.envelope
+    if envelope is None:
         raise RuntimeError("a save kept a credential that does not exist")
-    base_url, envelope, tail = plan
     conn.execute(
         "INSERT INTO ai_credentials (id, priority, kind, name, base_url, secret_sealed,"
-        " dek_sealed, kek_id, last4) VALUES (%s, (SELECT COALESCE(MAX(priority) + 1, 0)"
-        " FROM ai_credentials), %s, %s, %s, %s, %s, %s, %s)",
+        " dek_sealed, kek_id, last4, scope, account_uuid, organization_uuid,"
+        " subscription_type, rate_limit_tier, email) VALUES (%s, (SELECT"
+        " COALESCE(MAX(priority) + 1, 0) FROM ai_credentials), %s, %s, %s, %s, %s, %s, %s,"
+        " %s, %s, %s, %s, %s, %s)",
         (
             row_id,
             update.kind,
             name,
-            base_url,
+            plan.base_url,
             envelope.secret_sealed,
             envelope.dek_sealed,
             envelope.kek_id,
-            tail,
+            plan.last4,
+            plan.scope,
+            *plan.account.values(),
+            plan.email,
         ),
     )
     _evict(conn)
@@ -319,24 +469,42 @@ def put(
                 raise CredentialRefusedError(f"no credential {row_id}", 404)
             return _insert(conn, update, kek)
         plan = _plan(update, current, kek, current["id"])
-        if plan is None:
-            return current
-        base_url, envelope, tail = plan
-        conn.execute(
-            "UPDATE ai_credentials SET kind = %s, base_url = %s, secret_sealed = %s,"
-            " dek_sealed = %s, kek_id = %s, last4 = %s, updated_at = now(),"
-            " status = 'active', cooldown_until = NULL, last_error = NULL,"
-            " last_error_at = NULL, epoch = epoch + 1 WHERE id = %s",
-            (
-                update.kind,
-                base_url,
-                envelope.secret_sealed,
-                envelope.dek_sealed,
-                envelope.kek_id,
-                tail,
-                current["id"],
-            ),
-        )
+        envelope = plan.envelope
+        if envelope is None:
+            if not plan.changes(current):
+                return current
+            # The scope or the email only: the secret and its epoch stay.
+            conn.execute(
+                "UPDATE ai_credentials SET scope = %s, email = %s WHERE id = %s",
+                (plan.scope, plan.email, current["id"]),
+            )
+        else:
+            # A kind other than claude_login holds no lease.
+            conn.execute(
+                "UPDATE ai_credentials SET kind = %(kind)s, base_url = %(base_url)s,"
+                " secret_sealed = %(secret_sealed)s, dek_sealed = %(dek_sealed)s,"
+                " kek_id = %(kek_id)s, last4 = %(last4)s, updated_at = now(),"
+                " status = 'active', cooldown_until = NULL, last_error = NULL,"
+                " last_error_at = NULL, epoch = epoch + 1, scope = %(scope)s,"
+                " account_uuid = %(account_uuid)s, organization_uuid = %(organization_uuid)s,"
+                " subscription_type = %(subscription_type)s,"
+                " rate_limit_tier = %(rate_limit_tier)s, email = %(email)s,"
+                " leased_to = CASE WHEN %(kind)s = 'claude_login' THEN leased_to END,"
+                " leased_at = CASE WHEN %(kind)s = 'claude_login' THEN leased_at END"
+                " WHERE id = %(id)s",
+                {
+                    "kind": update.kind,
+                    "base_url": plan.base_url,
+                    "secret_sealed": envelope.secret_sealed,
+                    "dek_sealed": envelope.dek_sealed,
+                    "kek_id": envelope.kek_id,
+                    "last4": plan.last4,
+                    "scope": plan.scope,
+                    **plan.account,
+                    "email": plan.email,
+                    "id": current["id"],
+                },
+            )
         _evict(conn)
         return _one(conn, current["id"])
 
