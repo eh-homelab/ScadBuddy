@@ -194,16 +194,24 @@ func run(ctx context.Context, env func(string) string, tel *telemetry.Telemetry)
 	}
 	// The history subscriber (#6949): every replica runs it, and one at a time applies.
 	go history.Run(ctx, pool, history.Options{})
-	stopWorker := func() {}
+	stopWorker := func(context.Context) {}
 	if namesArea(areas, "inventory") {
-		w := worker.New(temporalClient, temporal.InventoryQueue, worker.Options{
-			Interceptors: []interceptor.WorkerInterceptor{activities.Record(pool, tel.Meter())},
+		acts := activities.New(pool, or(env("SCADBUDDY_ORDERS_CURRENCY"), "USD"))
+		record := activities.Record(pool, tel.Meter())
+		health := func(ctx context.Context) error {
+			_, err := temporalClient.CheckHealth(ctx, &client.CheckHealthRequest{})
+			return err
+		}
+		stopWorker = startWorker(ctx, health, func() worker.Worker {
+			w := worker.New(temporalClient, temporal.InventoryQueue, worker.Options{
+				Interceptors: []interceptor.WorkerInterceptor{record},
+			})
+			activities.Register(w, acts)
+			return w
 		})
-		activities.Register(w, activities.New(pool, or(env("SCADBUDDY_ORDERS_CURRENCY"), "USD")))
-		stopWorker = startWorker(ctx, w)
 	}
 	return serve(ctx, servers, func(drain context.Context) {
-		stopWorker()
+		stopWorker(drain)
 		tel.Shutdown(drain)
 	})
 }
@@ -218,34 +226,60 @@ func namesArea(areas, area string) bool {
 	return false
 }
 
-// workerRetry is how long a worker that could not start waits before it tries again.
+// workerRetry is how long the worker waits before it asks Temporal again.
 var workerRetry = 5 * time.Second
 
-// startWorker starts w beside the HTTP servers. A Temporal out of reach at the start does
-// not stop core, which is the API pod's front: the worker tries again every workerRetry
-// until ctx ends. The function it gives stops the worker once it has started.
-func startWorker(ctx context.Context, w worker.Worker) (stop func()) {
-	started := make(chan bool, 1)
+// startWorker starts the inventory worker beside the HTTP servers. A Temporal out of reach
+// does not stop core, which is the API pod's front. Until health (Temporal's CheckHealth)
+// answers, the worker waits workerRetry and asks again. Then it builds a worker and starts it.
+// The SDK keeps a worker's first Start result (sync.OnceValue), so a worker whose Start
+// failed is never started again: the next try builds a new one. The function it gives stops
+// the started worker, and waits for it at most until drain ends.
+func startWorker(ctx context.Context, health func(context.Context) error, build func() worker.Worker) (stop func(drain context.Context)) {
+	started := make(chan worker.Worker, 1)
 	go func() {
 		for {
-			err := w.Start()
+			ask, cancel := context.WithTimeout(ctx, 10*time.Second)
+			err := health(ask)
+			cancel()
 			if err == nil {
-				slog.Info("the inventory worker polls Temporal")
-				started <- true
-				return
+				w := build()
+				if err = w.Start(); err == nil {
+					slog.Info("the inventory worker polls Temporal")
+					started <- w
+					return
+				}
 			}
-			slog.Warn("the inventory worker could not start", "error", err.Error())
+			if ctx.Err() == nil {
+				slog.Warn("the inventory worker could not start", "error", err.Error())
+			}
 			select {
 			case <-ctx.Done():
-				started <- false
+				started <- nil
 				return
 			case <-time.After(workerRetry):
 			}
 		}
 	}()
-	return func() {
-		if <-started {
+	return func(drain context.Context) {
+		var w worker.Worker
+		select {
+		case w = <-started:
+		case <-drain.Done():
+			return
+		}
+		if w == nil {
+			return
+		}
+		stopped := make(chan struct{})
+		go func() {
 			w.Stop()
+			close(stopped)
+		}()
+		select {
+		case <-stopped:
+		case <-drain.Done():
+			slog.Warn("the inventory worker did not stop before the drain ended")
 		}
 	}
 }

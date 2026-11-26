@@ -104,8 +104,10 @@ is no write route. Area `inventory` also runs the inventory worker.
 
 With area `inventory`, core runs a Temporal worker on the task queue
 `SCADBUDDY_TEMPORAL_TASK_QUEUE_INVENTORY` beside its HTTP servers, and stops it with them
-(`internal/inventory/activities`). Its client is lazy: Temporal out of reach does not stop core,
-and the worker tries to start again every 5 s. Each write of the inventory is one activity,
+(`internal/inventory/activities`). Its client is lazy: Temporal out of reach does not stop core.
+The worker asks Temporal's `CheckHealth` every 5 s until it answers, then builds a worker and
+starts it. The SDK keeps a worker's first `Start` result, so after a failed start the next try
+builds a new worker. At shutdown core stops the worker within the drain's 20 s. Each write of the inventory is one activity,
 registered by its name: `inventory.KindCreate`, `…KindUpdate`, `…KindArchive`, `…KindRestore`,
 `…ItemCreate`, `…ItemUpdate`, `…ItemArchive`, `…ItemRestore`, `…ReceiveLot`, `…ReceiveUnits`,
 `…LotUpdate` (cost, place, note), `…LotAdjust`, `…Take` (a use, and an order's take), `…Count`,

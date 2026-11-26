@@ -753,7 +753,7 @@ func TestTheInventoryWorkerStartsAndStopsWithTheServers(t *testing.T) {
 		"SCADBUDDY_CORE_AREAS":       "inventory",
 		"SCADBUDDY_TEMPORAL_ADDRESS": "127.0.0.1:1",
 	}
-	workerRetry = 10 * time.Millisecond
+	setWorkerRetry(t, 10*time.Millisecond)
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan error, 1)
 	go func() { done <- run(ctx, func(k string) string { return env[k] }, nil) }()
