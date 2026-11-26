@@ -139,7 +139,7 @@ Where the accounts live:
 | 3 | `tools/go/core/internal/fleet`, a migration | The session registry (§6.3) |
 | 4 | `tools/go/claudecreds` (new library module) | Reading transcripts, the reset parser, and the login file writer (§6.4, §6.5) |
 | 5 | `tools/go/fleetd` (new binary module) | The machine service (§6.6) |
-| 6 | `tools/go/fleet`, `tools/go/fleetchat` | The registry and rotations in the fleet's HTTP API and MCP tools, and the continue message (§6.7) |
+| 6 | `tools/go/fleet`, `tools/go/fleetchat` | The registry and rotations in the fleet's HTTP API and MCP tools, and the continue message (§6.7, §6.8) |
 | 7 | eh-homelab/clusters, the project-ops plugin | Routes, proofs and the install (§7) |
 
 ## 6. Design
@@ -174,9 +174,10 @@ Where the accounts live:
   is renewed like the other callers' (`tools/go/fleet/sbfleet` `NewExchange`).
 - Routes under `/api/v1/internal/crud/fleet-rotator/`, all requiring the caller:
   - `PUT /machines/{id}`: register or refresh the machine (hostname, OS, user, service version).
-  - `POST /leases`: lease the best usable `fleet`/`both` row for this machine (priority order,
-    no cooldown, not disabled, not leased elsewhere), and reveal it. An API-key row needs no
-    lease. Answers `recovers_at` when none is usable.
+  - `POST /leases`: lease the best usable `claude_login` row with scope `fleet` for this machine
+    (priority order, no cooldown, not disabled, not leased elsewhere), and reveal it. Only
+    `claude_login` rows are leased: `fleetd` writes only a `claudeAiOauth` login (§4, §6.6).
+    Answers `recovers_at` when none is usable.
   - `PUT /leases/{credential}`: write back the current login (the refresh token changes) while
     the lease is held, keyed by `lease_epoch`.
   - `DELETE /leases/{credential}`: release, after a final write-back.
