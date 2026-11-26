@@ -442,7 +442,7 @@ event. This layer waits for #7819 (R-K1-26).
   - `TestANewHandlerDropsTheOldParams`: kind `life: {handler: life.months, params: {months: 60}}`, item `life: {handler: life.hours, params: {hours: 10, source: manual}}` → params `{hours: 10, source: manual}` only.
   - `TestResolveProblems`, table-driven, one row each: an unknown handler; `count.lot` on `life`; `bill.hourly` on a physical class; a parameter `hourz`; `hours: "ten"`; `hours: true` (a boolean is no number); `source: "solar"` (not in enum); `life.hours` with no `hours` (`missing_param`, and `Blocking` is empty); a unit layer that names a handler.
   - `TestAKindMayLeaveItsClassOpen`: `ResolveKind(chain consumable)` → no error; `Resolve(chain consumable, nil, nil)` → `ErrClassOpen`.
-  - `TestResolveKindChecksWhatItNames`: `ResolveKind` of a kind under `consumable` that names `life.hours` on `life` → `not_applicable` (`role` is set to `consumable`); one that names `count.unit` with `counting` open → no problem.
+  - `TestResolveKindChecksWhatItNames`: `ResolveKind` of a kind under `consumable` that names `life.hours` on `life` → `not_applicable` (`role` is set to `consumable`); one that names `cost.unit` on `cost` (applies `{counting: unit}`) with `counting` open → no problem.
   - `TestASpecialTypeNeedsItsClass`: `filament_spool` on `{physical, durable, unit}` → `special_needs`.
 - [ ] **Step 2: Run** `cd tools/go/core && go test ./internal/inventory/model/ ./internal/inventory/handlers/` — Expected: FAIL.
 - [ ] **Step 3: Implement.** No branch in `Resolve` names a kind, a handler or a special type.
