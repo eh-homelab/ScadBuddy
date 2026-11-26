@@ -162,10 +162,25 @@ The owner's decisions (2026-11-26):
 
 ### Server-side decode (G1)
 
+The owner changed this part on 2026-11-26 ("prefer go code", "The tag data raw should be
+stored in the blob store", "implement 100% of the rfid tag guide"; decisions on #7905).
+
+- The decode is Go: `tools/go/core/internal/bambutag` decodes every field the
+  [RFID Tag Guide](https://github.com/Bambu-Research-Group/RFID-Tag-Guide) documents. It gives
+  each undocumented byte range as hex and the RSA signature (blocks 40-63) as hex, unverified.
+  It accepts a partial read; a field whose block is missing is absent, never zero. Its JSON
+  carries `decoder_version` and `complete`.
+- Every MIFARE read is stored raw through the blob API (#7961, kind `tag_dump`): the data
+  blocks and the UID, never the key trailers. A partial read is stored too, with its missing
+  sectors marked. Each row of `filament_tag_reads` points at its dump, and `blocks` there is
+  replaced by that pointer. The tag's `raw_blob` is written only from a complete read.
+- `decoded` holds the decoder's JSON with its version, so a later decoder can decode the
+  stored dumps again without a re-scan.
+- The route is Go, behind the shared person auth (#8053). The Python notes below give the
+  behaviour it keeps.
 - `TagReadIn` and `NfcJobResultIn` get `tag_type` and `mifare_blocks: [{index, data_hex}]`
   (64 at most, 16 bytes each).
-- `filament/bambu_tag.py` decodes the blocks into a `BambuTag` (the fields above). A tag is
-  untrusted: strings and numbers are bounded before use, as `tag_formats.py` does.
+- A tag is untrusted: strings and numbers are bounded before use, as `tag_formats.py` does.
 - `read_on` decodes a Bambu read, takes block 9 as the read's `tray_uuid`, and gives
   `decoded` and `draft` as for an NDEF read: the material, brand and subtype found in the
   catalog by `fila_id` and type name, the colour from block 5 (and its Bambu colour code,
@@ -225,6 +240,20 @@ The app sends traces, metrics and logs as `tools/go/bambuddy-fs` sends its own (
 - The app makes no HTTP call of its own, so it propagates no `traceparent`. The page in the
   WebView keeps its own browser tracing (`frontend/src/lib/tracing.ts`). The app does not
   instrument the page.
+
+### The scan view
+
+The owner asked for it on 2026-11-26 ("I'll be able to see raw hex view and decoded fill in
+UI?"). The `/scan` page shows it after a tap, and a tag's page shows it for each stored read.
+
+- A decoded panel: every field with its unit, colour swatches for the colours. A field from a
+  missing sector says "not read".
+- A raw hex view: 16 sectors by 3 data blocks, 16 bytes a row. Hovering a byte range names
+  its field and highlights it in the decoded panel. Undocumented ranges say "unknown". The
+  signature sectors (10-15) are folded and say "unverified". A partial read shows its
+  missing sectors as gaps. A copy button copies the dump.
+- The read history opens each read's own dump and fields, so two taps can be compared.
+- The decoded fields come from `decoded`; the hex comes from the read's blob, through the API.
 
 ### Scan a tag (G6)
 
