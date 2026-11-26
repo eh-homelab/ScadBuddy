@@ -206,6 +206,23 @@ def test_a_rate_limit_reset_is_read_from_the_result_text(case: dict[str, Any]) -
         assert reset == datetime.fromisoformat(case["at"])
 
 
+def test_a_zone_name_in_another_case_is_refused_where_the_filesystem_would_open_it(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """#8023: on a case-insensitive filesystem (macOS) ZoneInfo opens "america/new_york".
+    The stand-in below opens any case, so the test gives the same answer on Linux."""
+    from zoneinfo import ZoneInfo
+
+    import scadbuddy_durable.credentials as credentials
+
+    monkeypatch.setattr(credentials, "ZoneInfo", lambda name: ZoneInfo("America/New_York"))
+    now = datetime(2026, 10, 17, 22, 16, 5, tzinfo=UTC)
+    assert rate_limit_reset("resets 1pm (america/new_york)", now) is None
+    assert rate_limit_reset("resets 1pm (America/New_York)", now) == datetime(
+        2026, 10, 18, 17, 0, tzinfo=UTC
+    )
+
+
 def test_a_named_reset_is_still_held_to_a_day() -> None:
     until = rate_limit_reset("resets Oct 21, 4am (UTC)", NOW)
     assert cooldown_until(NOW, until) == NOW + timedelta(hours=24)

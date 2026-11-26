@@ -61,3 +61,33 @@ func TestResetFromTextVectors(t *testing.T) {
 		})
 	}
 }
+
+// A zone directory that holds a name in another case refuses it, as a case-insensitive
+// filesystem (macOS) would otherwise open it (#8023). The directory here is a stand-in
+// for /usr/share/zoneinfo, so the test gives the same answer on Linux and macOS.
+func TestAZoneNameInAnotherCaseIsRefused(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(dir, "America"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "America", "New_York"), nil, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	saved := zoneDirs
+	zoneDirs = []string{dir}
+	t.Cleanup(func() { zoneDirs = saved })
+
+	for name, want := range map[string]bool{
+		"America/New_York": true,
+		"america/new_york": false,
+		"America/new_york": false,
+		"Asia/Kolkata":     true,
+	} {
+		if got := writtenAsFiled(name); got != want {
+			t.Errorf("writtenAsFiled(%q) = %v, want %v", name, got, want)
+		}
+	}
+	if _, ok := ResetFromText("resets 1pm (america/new_york)", time.Date(2026, 10, 17, 22, 16, 5, 0, time.UTC)); ok {
+		t.Error("a lower-case zone name was read")
+	}
+}
