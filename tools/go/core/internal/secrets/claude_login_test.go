@@ -156,3 +156,29 @@ func TestOnlyALoginHoldsALeaseOrAnAccount(t *testing.T) {
 	leased := a.get("/credentials/one?id=" + held["id"].(string)).body["credential"].(obj)
 	expect(t, []any{leased["leased_to"], leased["leased_at"], leased["lease_epoch"]}, []any{"m1", "2026-11-26T00:00:00+00:00", 3})
 }
+
+func TestWideningAFleetRowToTheAgentNeedsItsSecretAgain(t *testing.T) {
+	a := newAPI(t, keysOf(kek))
+	fleet := a.post("/credentials", obj{"kind": "anthropic_api_key", "secret": apiKey + "f", "scope": "fleet"}).body["credential"].(obj)
+	id := fleet["id"].(string)
+	for _, scope := range []string{"agent", "both"} {
+		r := a.post("/credentials/save", obj{"id": id, "update": obj{"kind": "anthropic_api_key", "scope": scope}})
+		expect(t, []any{r.status, r.body["detail"]},
+			[]any{422, "to share a fleet credential with the agent, enter its secret again"})
+		row := a.get("/credentials/one?id=" + id).body["credential"].(obj)
+		expect(t, []any{row["scope"], row["epoch"]}, []any{"fleet", 0})
+		expect(t, a.post("/credentials/reveal", obj{"id": id, "purpose": "test"}).body,
+			obj{"credential": nil, "credentials": nil})
+	}
+	// With its secret in the same save, the row widens and its epoch moves.
+	widened := a.post("/credentials/save", obj{"id": id, "update": obj{"kind": "anthropic_api_key",
+		"secret": apiKey + "w", "scope": "both"}})
+	expect(t, []any{widened.status, widened.body["credential"].(obj)["scope"], widened.body["credential"].(obj)["epoch"]},
+		[]any{200, "both", 1})
+	expect(t, a.post("/credentials/reveal", obj{"id": id, "purpose": "test"}).body["credential"].(obj)["secret"],
+		apiKey+"w")
+	// A narrowing needs no secret and keeps the epoch.
+	narrowed := a.post("/credentials/save", obj{"id": id, "update": obj{"kind": "anthropic_api_key", "scope": "fleet"}})
+	expect(t, []any{narrowed.status, narrowed.body["credential"].(obj)["scope"], narrowed.body["credential"].(obj)["epoch"]},
+		[]any{200, "fleet", 1})
+}

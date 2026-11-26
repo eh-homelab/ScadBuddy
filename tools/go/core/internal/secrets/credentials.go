@@ -36,6 +36,7 @@ const (
 		" was read, so reload it"
 	legacyFormatMessage = "the stored credential was saved in an older format that did not bind its kind and" +
 		" base URL; save it again"
+	wideningMessage = "to share a fleet credential with the agent, enter its secret again"
 )
 
 var kinds = []string{"anthropic_api_key", "claude_login", "claude_oauth_token", "gateway"}
@@ -534,6 +535,11 @@ func (s *Store) plan(u update, current *row, id string) (*plan, error) {
 		}
 		if current.SealVersion == seal.V1 {
 			return nil, refused(409, legacyFormatMessage)
+		}
+		// The agent's reveal opens agent and both rows only. A fleet row that the agent's caller
+		// widens must carry its secret, so that caller cannot open a secret it never knew.
+		if current.Scope == "fleet" && scope != "fleet" {
+			return nil, refused(422, wideningMessage)
 		}
 		return p, nil
 	}
@@ -1057,6 +1063,8 @@ func (s *Store) reveal(r *http.Request, _ crud.Params) (any, error) {
 			}
 			out.Credentials = &list
 			// Redaction reads every credential at tool-call rate: one row a window says it did.
+			// It gets the agent's own rows only. That is correct: the agent's process never holds
+			// a fleet secret, so it has none to redact.
 			if purpose == "redact" {
 				lately, err := recordedLately(ctx, tx, "credential", []string{action}, redactAuditWindow, nil)
 				if err != nil || lately {

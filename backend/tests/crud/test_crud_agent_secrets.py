@@ -1020,6 +1020,51 @@ def test_the_scope_defaults_to_the_agent_and_a_save_moves_it(agent: Agent) -> No
     assert (mailed["email"], mailed["epoch"]) == ("new@example.com", login["epoch"])
 
 
+def test_widening_a_fleet_row_to_the_agent_needs_its_secret_again(agent: Agent) -> None:
+    fleet = _created(
+        agent, {"kind": "anthropic_api_key", "secret": API_KEY + "f", "scope": "fleet"}
+    )
+    for scope in ("agent", "both"):
+        r = agent.post(
+            "/credentials/save",
+            {"id": fleet["id"], "update": {"kind": "anthropic_api_key", "scope": scope}},
+        )
+        assert (r.status_code, r.json()["reason"], r.json()["detail"]) == (
+            422,
+            "credential-refused",
+            "to share a fleet credential with the agent, enter its secret again",
+        ), r.text
+        row = agent.get(f"/credentials/one?id={fleet['id']}").json()["credential"]
+        assert (row["scope"], row["epoch"]) == ("fleet", 0)
+        one = agent.post("/credentials/reveal", {"id": fleet["id"], "purpose": "test"})
+        assert one.json() == {"credential": None, "credentials": None}
+    # With its secret in the same save, the row widens and its epoch moves.
+    widened = agent.post(
+        "/credentials/save",
+        {
+            "id": fleet["id"],
+            "update": {"kind": "anthropic_api_key", "secret": API_KEY + "w", "scope": "both"},
+        },
+    )
+    assert widened.status_code == 200, widened.text
+    assert (widened.json()["credential"]["scope"], widened.json()["credential"]["epoch"]) == (
+        "both",
+        1,
+    )
+    opened = agent.post("/credentials/reveal", {"id": fleet["id"], "purpose": "test"})
+    assert opened.json()["credential"]["secret"] == API_KEY + "w"
+    # A narrowing needs no secret and keeps the epoch.
+    narrowed = agent.post(
+        "/credentials/save",
+        {"id": fleet["id"], "update": {"kind": "anthropic_api_key", "scope": "fleet"}},
+    )
+    assert narrowed.status_code == 200, narrowed.text
+    assert (narrowed.json()["credential"]["scope"], narrowed.json()["credential"]["epoch"]) == (
+        "fleet",
+        1,
+    )
+
+
 def test_only_a_login_holds_a_lease_or_an_account(agent: Agent, tables: PgPool) -> None:
     key = _created(agent, {"kind": "anthropic_api_key", "secret": API_KEY})
     held = _created(agent, {"kind": "claude_login", "secret": LOGIN})

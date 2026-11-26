@@ -483,6 +483,8 @@ def _reveal(conn: Any, body: RevealAsk, kek: Kek) -> Revealed | SealError:
                 out.append(RevealedRow(stored=_stored(row), credential=opened))
             count = sum(1 for r in out if r.credential is not None)
             # Redaction reads every credential at tool-call rate: one row a window says it did.
+            # It gets the agent's own rows only. That is correct: the agent's process never
+            # holds a fleet secret, so it has none to redact.
             if body.purpose != "redact" or not audit.recorded_lately(
                 conn, "credential", (action,), REDACT_AUDIT_WINDOW
             ):

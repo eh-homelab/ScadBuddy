@@ -55,6 +55,7 @@ EMAIL_MAX = 320
 EMAIL_MESSAGE = (
     "email must be one address, at most 320 characters, with no space or control character"
 )
+WIDENING_MESSAGE = "to share a fleet credential with the agent, enter its secret again"
 LOGIN_MESSAGE = "a claude_login secret must be a claudeAiOauth JSON object"
 LOGIN_NEEDS = (
     "a claude_login secret needs accessToken and refreshToken as text and expiresAt as a number"
@@ -384,6 +385,10 @@ def _plan(update: Update, current: dict[str, Any] | None, kek: Kek | None, row_i
             )
         if current["seal_version"] == SEAL_V1:
             raise CredentialRefusedError(LEGACY_FORMAT_MESSAGE, 409)
+        # The agent's reveal opens agent and both rows only. A fleet row that the agent's
+        # caller widens must carry its secret, so that caller cannot open a secret it never knew.
+        if current["scope"] == "fleet" and scope != "fleet":
+            raise CredentialRefusedError(WIDENING_MESSAGE, 422)
         return _Plan(base_url, None, "", scope, email, _NO_ACCOUNT)
 
     secret = update.secret.strip()
