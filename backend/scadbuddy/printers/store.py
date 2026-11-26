@@ -210,7 +210,7 @@ def _repoint_keyed(table: str, keys: tuple[str, ...]) -> RepointHook:
     whose ``keys`` the kept printer already has: the kept printer's stands."""
     same = " AND ".join(f"kept.{key} = gone.{key}" for key in keys)
 
-    def repoint(conn: Connection[DictRow], merged: str, into: str) -> None:
+    def repoint(conn: Connection[DictRow], merged: str, into: str, by: Actor) -> None:
         conn.execute(
             f"DELETE FROM {table} AS gone WHERE gone.printer_id = %(merged)s::uuid"
             f" AND EXISTS (SELECT 1 FROM {table} AS kept"
