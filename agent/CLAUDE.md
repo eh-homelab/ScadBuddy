@@ -628,7 +628,8 @@ opens every one and seals it again byte for byte).
     `zip.ts`; `mirror_sha256`, or `pending_mirror_sha256` for a re-pin), used only when
     its files hash to the pin. A load (turn, warm-up, file read, header secrets) never runs
     git (the owner's decision of 2026-11-26 on #7907): with no usable mirror it leaves the
-    package out (`MirrorNotReadyError`, "its mirror is not ready yet") and starts the
+    package out (`MirrorNotReadyError`: "its mirror is not ready yet", "its mirror failed its
+    check (…)" or "its mirror could not be read (…)") and starts the
     mirror job (`mirrorJob.ts`): on Temporal the `PackageMirror` workflow on `agent-tools`
     (`temporal/packageMirror.ts`, id `package-mirror-<name>-<commit>-<16 of the hash>`,
     `USE_EXISTING` + `ALLOW_DUPLICATE`, so a run open is joined and a finished one can run
