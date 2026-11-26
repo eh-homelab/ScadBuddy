@@ -33,7 +33,7 @@ import {
 } from '../../api/filament'
 import { ArchiveSpoolDialog } from '../../components/filament/ArchiveSpoolDialog'
 import { ClosingSummary } from '../../components/filament/ClosingSummary'
-import { driftCause, startGapG } from '../../components/filament/driftCause'
+import { weighingCause } from '../../components/filament/driftCause'
 import { GramsBasis } from '../../components/filament/GramsBasis'
 import { WeighingBreakdown } from '../../components/filament/WeighingBreakdown'
 import { BelowLabelChoice, type Resolution } from '../../components/filament/BelowLabelChoice'
@@ -1008,16 +1008,8 @@ export function SpoolPage() {
                   {saved?.last_weighing && saved.last_weighing.data.reading_g != null ? (
                     <WeighingBreakdown
                       event={saved.last_weighing}
-                      // #7685: the drift's likely cause, once the history (the density) has loaded.
-                      cause={driftCause({
-                        driftG: typeof saved.last_weighing.data.drift_g === 'number' ? saved.last_weighing.data.drift_g : null,
-                        emptyBasis: typeof saved.last_weighing.data.empty_basis === 'string' ? saved.last_weighing.data.empty_basis : null,
-                        startGapG: startGapG(saved.basis.anchor, saved.added_full ?? null, effective?.label_weight_g ?? null),
-                        usedG: history?.metrics.used_g ?? 0,
-                        impliedDensity: history?.metrics.implied_density_g_cm3 ?? null,
-                        typeDensity: history?.metrics.density_g_cm3 ?? null,
-                        densityMismatch: history?.metrics.density_mismatch ?? false,
-                      })}
+                      // #7685: the drift's likely cause, once the history (the previous anchor, the density) has loaded.
+                      cause={history ? weighingCause(saved.last_weighing, history, { addedFull: saved.added_full ?? null, labelWeight: effective?.label_weight_g ?? null, weightLocked: saved.weight_locked }) : null}
                     />
                   ) : (
                     <p className="text-[13px] text-muted-foreground">

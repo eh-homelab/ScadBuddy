@@ -63,9 +63,9 @@ describe('WeighingBreakdown (#7682)', () => {
 describe('the likely cause of a drift (#7685)', () => {
   const drifted = weighed({ grams_after: 980, data: { ...insert, empty_basis: 'catalog', expected_g: 1000.7, drift_g: -20.7 } })
 
-  it('names the label weight and the start gap', () => {
-    render(<WeighingBreakdown event={drifted} cause={{ kind: 'label_weight', gap: 20.7 }} />)
-    expect(screen.getByText(/Likely cause: the label weight; the spool started 20.7 g under it\.$/)).toBeInTheDocument()
+  it('names the starting amount and its gap to the label', () => {
+    render(<WeighingBreakdown event={drifted} cause={{ kind: 'start_amount', gap: 20.7 }} />)
+    expect(screen.getByText(/Likely cause: the starting amount; it was 20.7 g under the label weight, and the scale found the label weight\.$/)).toBeInTheDocument()
   })
 
   it("names the type's density against the prints'", () => {

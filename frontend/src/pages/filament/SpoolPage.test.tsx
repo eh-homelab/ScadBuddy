@@ -2,7 +2,7 @@ import { screen, waitFor, within } from '@testing-library/react'
 import { http, HttpResponse } from 'msw'
 import { Route, Routes } from 'react-router'
 import { beforeEach, describe, expect, it, onTestFinished, vi } from 'vitest'
-import { createTagBackup, getSpool, getType, listSpoolEvents, listSpools, patchSpool, setSpoolKValues, setSpoolPresets, spoolTagRecords, spoolTagWritten } from '../../api/filament'
+import { addSpoolEvent, createTagBackup, getSpool, getType, listSpoolEvents, listSpools, patchSpool, setSpoolKValues, setSpoolPresets, spoolTagRecords, spoolTagWritten } from '../../api/filament'
 import { SPOOL_ADVANCED_KEY } from '../../components/filament/SpoolSections'
 import { H2C, L, spoolId, T, TAG } from '../../mocks/features/filament/seed'
 import { INVOICE, LINE, SUPPLIER } from '../../mocks/features/filamentPurchasingSeed'
@@ -83,6 +83,16 @@ describe('the spool page', () => {
     await heading(4)
     const weight = screen.getByRole('region', { name: 'Weight' })
     expect(await within(weight).findByText('Started at the label weight 1000 g. Bambuddy reported 268 g; 732 g unexplained.')).toBeInTheDocument()
+  })
+
+  it("names the starting amount as the drift's likely cause when the scale finds the label weight (#7685)", async () => {
+    // #4 started at Bambuddy's 268 g of a 1000 g label and printed 148 g: the ledger expects 120 g.
+    // A reading of 852 g of filament is the label weight less the print: the starting amount was wrong.
+    await addSpoolEvent(spoolId(4), { kind: 'weighed', source: 'scale', reading_g: 1102 })
+    open(4)
+    await heading(4)
+    const weight = screen.getByRole('region', { name: 'Weight' })
+    expect(await within(weight).findByText(/The scale found 732 g more than the prints accounted for\. Likely cause: the starting amount; it was 732 g under the label weight, and the scale found the label weight\./)).toBeInTheDocument()
   })
 
   it('says how the tag came in and when it was written (#7149)', async () => {

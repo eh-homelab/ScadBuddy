@@ -267,17 +267,21 @@ change:
   `density_g_cm3` (the spool's effective type density) and `density_mismatch`
   (`DENSITY_TOLERANCE` 0.05). The page's Density tile says the mismatch ("The prints imply
   1.31 g/cm³, 6% over the type's 1.24 g/cm³: check the type's density or the label."). The
-  drift's likely cause is the frontend's `driftCause.ts`, checked in this order, the first
-  fit winning, none under a gram of drift: the label weight (the drift is the start gap,
-  within a gram or a tenth), the density (the drift is `used_g × (1 − type / implied)`, the
-  same tolerance, with a mismatch), then a placeholder empty weight. The sentence follows the
-  drift sentence in the Weight section ("Likely cause: …"). Two readings of this section as
-  built: the implied density is the slicer's own grams over its own metres, so it is the
-  slicer preset's density read back, not a measurement, and a mismatch means the preset's
-  density and the type's disagree; and a placeholder empty weight is named for any drift
-  of a gram or more, since nothing knows the real empty weight to match the drift against.
-  The label-weight and placeholder causes show as soon as the spool is read; the density
-  cause needs the history, so it can replace a placeholder cause once the history loads.
+  drift's likely cause is the frontend's `driftCause.ts` (`weighingCause`), read against the
+  anchor the weighing was compared with (`previousAnchor`: the newest anchor before it by
+  the ledger's own anchor rule over the history's events) and checked in this order, the first fit winning, none
+  under a gram of drift: the starting amount (an added-full spool whose anchor is the
+  `created` figure of a pull: the drift is the gap from that figure to the label, within a
+  gram or a tenth, so the scale found the label weight and the figure was wrong), the
+  density (the drift is `since × (1 − type / implied)`, where `since` is the grams the
+  ledger took off between that anchor and the weighing, the anchor's grams less
+  `expected_g`; the same tolerance, with a mismatch), then a placeholder empty weight. The
+  sentence follows the drift sentence in the Weight section ("Likely cause: …"). Two
+  readings of this section as built: the implied density is the slicer's own grams over its
+  own metres, so it is the slicer preset's density read back, not a measurement, and a
+  mismatch means the preset's density and the type's disagree; and a placeholder empty
+  weight is named for any drift of a gram or more, since nothing knows the real empty weight
+  to match the drift against. Every cause needs the history, so none shows until it loads.
 
 ### 5.7 Carriers (slice E, #7278)
 

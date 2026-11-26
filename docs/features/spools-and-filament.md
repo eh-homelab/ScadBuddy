@@ -274,12 +274,14 @@ each, 11.7 m"), a Density tile shows the implied value with "The type says 1.24 
 the mismatch sentence ("The prints imply 1.31 g/cm³, 6% over the type's 1.24 g/cm³: check
 the type's density or the label."), and the timeline shows a print's metres beside its grams
 ("−35 g, 11.7 m, measured"). A mismatch is a sentence, never a booking. The Weight section's
-drift sentence then names a likely cause when one fits, the first of: the label weight (the
-drift is the added-full spool's start gap), the type's density (the drift is what the
-slicer's grams over-counted at its preset's density, with a mismatch), or a placeholder
+drift sentence then names a likely cause when one fits, read against the anchor the weighing
+was compared with (the newest anchor before it), the first of: the starting amount (an
+added-full spool anchored on a pull's figure whose drift is that figure's gap to the label:
+the scale found the label weight), the type's density (the drift is what the slicer's grams
+since that anchor over-counted at its preset's density, with a mismatch), or a placeholder
 empty weight, for any drift, since the real empty weight is unknown ("Likely cause: the
 spool's empty weight is a placeholder."). Nothing under a gram of drift, and nothing with
-no fit; the density cause waits for the history to load. Design: the same spec, §5.6.
+no fit; every cause waits for the history to load. Design: the same spec, §5.6.
 
 ### The phone page, the hand-held Scan mode (#7273)
 

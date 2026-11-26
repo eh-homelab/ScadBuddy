@@ -7,8 +7,8 @@ const density = (value: number) => `${Number(value.toFixed(2))} g/cm³`
 /** #7685: the sentence for a drift's likely cause (`driftCause`). */
 function causeText(cause: DriftCause): string {
   switch (cause.kind) {
-    case 'label_weight':
-      return ` Likely cause: the label weight; the spool started ${grams(cause.gap)} under it.`
+    case 'start_amount':
+      return ` Likely cause: the starting amount; it was ${grams(Math.abs(cause.gap))} ${cause.gap > 0 ? 'under' : 'over'} the label weight, and the scale found the label weight.`
     case 'density':
       return ` Likely cause: the type's density (${density(cause.type)}) disagrees with the prints' (${density(cause.implied)}).`
     case 'empty_weight':
