@@ -9,7 +9,10 @@ import { defineTool, json, type Tool } from './registry.js'
 // route takes no Idempotency-Key: a second start joins the running migration, so `answered`'s
 // re-send after a lost answer is harmless.
 
-const backend = z.enum(['bambuddy', 's3'])
+// `bambuddy` is a source only: the API refuses a migration to it, and refuses to start on
+// it (#7257: the outputs live only in the blob store, which the bambuddy store cannot hold).
+const source = z.enum(['bambuddy', 's3'])
+const target = z.enum(['s3'])
 
 export const storeTools: Tool[] = [
   defineTool({
@@ -20,10 +23,11 @@ export const storeTools: Tool[] = [
       'background workflow. The target backend\'s settings must already be saved on the Settings page (no tool writes them). Each row switches to its copy when ' +
       'ScadBuddy next starts with store_backend set to `target`. A second call while it runs joins it; one ' +
       'after it ended retries what failed. Refused (409) once store_backend is already `target`. Follow it ' +
-      'with store_migrate_status.',
+      'with store_migrate_status. The only target is `s3`: ScadBuddy no longer runs on the `bambuddy` store ' +
+      '(#7257), so `bambuddy` is a source only.',
     input: z.object({
-      source: backend,
-      target: backend,
+      source,
+      target,
       batch: z.number().int().min(1).max(1000).optional().describe('Rows copied per batch (the backend picks when omitted)'),
     }),
     risk: 'outward',
@@ -45,7 +49,7 @@ export const storeTools: Tool[] = [
       "A store migration's progress: rows still to copy (`remaining`), `copied`, the ones whose copy " +
       'failed and why (`failed`, up to 200 of `failed_count`), and whether it `running`. Refused (404) when ' +
       'none ever ran for the pair.',
-    input: z.object({ source: backend, target: backend }),
+    input: z.object({ source, target }),
     risk: 'read',
     routes: ['GET /api/v1/store/migrate'],
     handler: async ({ source, target }, { backend }) =>

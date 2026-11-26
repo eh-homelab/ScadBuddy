@@ -1,9 +1,12 @@
 """What produced a 3MF, stamped into the file itself.
 
-The output directory already keeps ``meta.json`` and ``params.json``, but the 3MF
-outlives it: it is uploaded to Bambuddy, downloaded, mailed around and re-opened in
-Bambu Studio long after ScadBuddy has forgotten the output. Stamping the same facts
-into the file is what lets "Edit in ScadBuddy" still resolve when the record is gone.
+The output's row keeps its meta and parameters, but the 3MF outlives it: it is
+uploaded to Bambuddy, downloaded, mailed around and re-opened in Bambu Studio long
+after ScadBuddy has forgotten the output. So the same facts are stamped into the file
+(``stamp``), with an "Edit in ScadBuddy" link in its description. Nothing in
+ScadBuddy reads the stamp back now: since #7257 an output's edit target is its row
+alone (no row is a 404). :func:`read` stays for the tests that check what
+:func:`stamp` wrote; :func:`content_key` only takes the stamp out.
 
 The stamp is a namespaced ``<metadata>`` element on the root model, the pattern
 Bambu Studio itself uses for ``BambuStudio:3mfVersion`` — so Bambu Studio reads the

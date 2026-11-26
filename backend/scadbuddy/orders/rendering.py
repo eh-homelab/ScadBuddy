@@ -173,9 +173,10 @@ async def output_for_reference(
     ``source`` marks who saves a new output (#6371): only the storefront slice run
     passes ``storefront``; an order's render and a quote keep the back office's.
 
-    The save claims ``saved_as`` first (``OutputStore.claim``): a directory already
-    there (another attempt's save still writing, or an output that does not match) is
-    left alone, and the new output gets an id of its own. A render that fails or is
+    The save claims ``saved_as`` first (``OutputStore.claim``, its ``output_claims``
+    row): a claim already held (another attempt's save still running) or a saved output
+    of that id (one that does not match) is left alone, and the new output gets an id of
+    its own. A render that fails or is
     cancelled is a 409 that names its job and its error.
 
     With ``needs_job`` (a caller that reads the render job, as the storefront's slice

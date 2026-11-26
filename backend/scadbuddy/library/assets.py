@@ -1187,7 +1187,7 @@ def _ids_in_archive(archive: Path) -> set[str]:
     """The ids in a 3MF's root model, where its provenance is stamped.
 
     Not `provenance.read`: that answers None for a stamp it cannot parse as well as
-    for none at all, which is right for "Edit in ScadBuddy" and wrong here -- a
+    for none at all, which is wrong here -- a
     damaged or foreign-version stamp must still keep what it names. So the root
     model's raw text is matched, as a JSON record's is. An archive that cannot be
     read as a 3MF raises `DamagedArchiveError`, an OSError. The folder walk and the

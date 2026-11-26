@@ -756,8 +756,9 @@ only the sleeps move; a budget on the real clock fails on a slow runner (#6252).
 - `backend/scadbuddy/printers/hot_path.py` — the native hot path (#3818 tier A, plan
   `docs/superpowers/plans/2026-10-18-hot-path-without-bambuddy.md`): a print that
   touches Bambuddy nowhere. `hot_path_native(settings, path)` decides per run from the
-  stored backends (`slicer_backend`, `library_backend` `native`, `store_backend` `s3` or
-  `bambuddy`) and the printer row's resolved path; there is no stored switch of its own.
+  stored backends (`slicer_backend`, `library_backend` `native`, `store_backend` `s3`;
+  `NATIVE_STORES` still names `bambuddy`, on which the API no longer starts, #7257) and
+  the printer row's resolved path; there is no stored switch of its own.
   One request may choose (#5352, print-flow spec §2 "As built: the request picks the
   path"): `PrintRunRequest.path` `bambuddy` is Bambuddy's queue whatever the row says
   (`run_route`/`ensured_route` `asked`, no LAN report read; the printer must link

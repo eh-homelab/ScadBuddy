@@ -4,7 +4,6 @@ them, paged as `GET /models/{slug}/outputs`; and the index's repair at start."""
 
 from __future__ import annotations
 
-import logging
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
@@ -207,31 +206,27 @@ def test_recent_outputs_list_from_rows(client: TestClient, three: tuple[str, str
     assert gone.status_code == 409, gone.text
 
 
-def test_writes_pass_with_tables_dropped(
-    client: TestClient, three: tuple[str, str, str], caplog: pytest.LogCaptureFixture
-) -> None:
+def test_writes_pass_with_tables_dropped(client: TestClient, three: tuple[str, str, str]) -> None:
     """#7257 plan D1: release B's migration dropped ``output_index`` and
-    ``output_hold_slugs``. A save, a rename, a delete and a model's delete pass, and each
-    skipped hold slug write is logged."""
+    ``output_hold_slugs``. A save, a rename, a delete and a model's delete pass, and no
+    write reaches either table."""
     first, second, third = three
     rows = state_of(client).outputs.rows
     assert rows is not None
-    with caplog.at_level(logging.WARNING, logger="scadbuddy.library"):
-        fourth = saved(client, SLUG, {"width": 16}, "Gate")
-        renamed = client.patch(
-            f"/api/v1/outputs/{fourth}", json={"name": "Gate tag"}, headers=press()
-        )
-        assert renamed.status_code == 200, renamed.text
-        deleted = client.delete(f"/api/v1/outputs/{first}", headers=press())
-        assert deleted.status_code in (200, 204), deleted.text
-        plate = client.get(f"/api/v1/outputs/{third}").json()["slug"]
-        model = client.delete(f"/api/v1/models/{plate}", headers=press())
-        assert model.status_code == 204, model.text
-    skipped = {r.getMessage() for r in caplog.records if "its table is gone" in r.getMessage()}
-    assert {
-        "an output's hold slug skipped: its table is gone (#7257)",
-        "an output's hold slug delete skipped: its table is gone (#7257)",
-    } <= skipped
+    fourth = saved(client, SLUG, {"width": 16}, "Gate")
+    renamed = client.patch(f"/api/v1/outputs/{fourth}", json={"name": "Gate tag"}, headers=press())
+    assert renamed.status_code == 200, renamed.text
+    deleted = client.delete(f"/api/v1/outputs/{first}", headers=press())
+    assert deleted.status_code in (200, 204), deleted.text
+    plate = client.get(f"/api/v1/outputs/{third}").json()["slug"]
+    model = client.delete(f"/api/v1/models/{plate}", headers=press())
+    assert model.status_code == 204, model.text
+    with rows._pool.connection() as conn:
+        gone = conn.execute(
+            "SELECT to_regclass('output_index') IS NULL AND"
+            " to_regclass('output_hold_slugs') IS NULL AS gone"
+        ).fetchone()
+    assert gone is not None and gone["gone"]
     assert rows.get(fourth) is not None and rows.get(first) is None
     assert rows.get(third) is None and rows.get(second) is not None
     fourth_row = rows.get(fourth)

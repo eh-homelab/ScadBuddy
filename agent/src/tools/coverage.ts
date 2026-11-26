@@ -531,9 +531,9 @@ export const NOT_A_TOOL: readonly { operation: Operation; reason: string }[] = [
   {
     operation: 'GET /api/v1/outputs/copy-status',
     reason:
-      "The last run of the copy of the outputs' files to rows (#7255), at an API start or in a housekeeping " +
-      "sweep: an operator's check after a deploy. The copy runs by itself, so an agent has nothing to act " +
-      'on; the outputs it copied are in the output tools.',
+      "The last runs of the copies of the outputs' files to rows and blobs (#7255, #7256), which #7257 " +
+      'retired, and `cut_over_at`: an operator\'s check after a deploy. Nothing runs any more, so an agent ' +
+      'has nothing to act on; the outputs are in the output tools.',
   },
   {
     operation: 'POST /api/v1/outputs/{output_id}/backfill',

@@ -941,7 +941,8 @@ def _housekeeping_activities(state: AppState) -> list[Callable[..., Any]]:
 
     @activity.defn(name=REAP_SWEEP)
     async def reap_output_holds() -> None:
-        # A scan of every output's directory can be slow on a network volume: heartbeat.
+        # It reads rows only now; it heartbeats as every sweep does, so a worker lost
+        # mid-pass is noticed within the heartbeat timeout (`_heartbeating`).
         await _heartbeating(_reap_output_holds_logged(state))
 
     @activity.defn(name=OUTPUT_COPY_SWEEP)

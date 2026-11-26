@@ -456,6 +456,21 @@ During release B's roll, a release A pod still writes an output's folder as well
 and blobs; a release B pod reads none of it. Both claim an id in `output_claims`, so they
 share one claim.
 
+Three gaps stay open while both builds run, so avoid model deletes during the roll:
+
+- A model delete that a release A pod handles finds the model's outputs by their folders,
+  so it misses the outputs that release B pods saved (they have no folder). Their rows go
+  with the model, but their native library copies, Bambuddy uploads and print links stay,
+  dangling.
+- When that delete's move fails, the release A pod runs `restore_rows` from the folders.
+  The outputs that release B saved stay deleted, and the rows it restores have no blob
+  keys.
+- Each API start makes its build current on the `library` queue
+  (`main._make_library_current`), so a release A pod that restarts mid-roll takes the
+  housekeeping runs back. It can then replay runs that release B recorded behind
+  `OUTPUTS_CUT_OVER_PATCH`, a patch its build does not have, until a release B pod starts
+  and is current again.
+
 After release B's roll ends:
 
 1. Confirm that every API pod runs release B's image (`kubectl -n bambuddy get pods -o

@@ -946,7 +946,7 @@ SETTING_DOCS: Final[Mapping[str, SettingDoc]] = MappingProxyType(
         "blob_cache_dir": SettingDoc(
             "Piece cache folder",
             "Where the API, and a render worker where it is set, keeps its copies of"
-            " rendered pieces and other blobs on the S3 or Bambuddy store. Unset, the data"
+            " rendered pieces and other blobs on the S3 store. Unset, the data"
             " volume's blobs folder. A node-local folder, such as an emptyDir, keeps them off"
             " a shared volume. Ignored on the local store, where that folder is the store.",
         ),
