@@ -76,10 +76,11 @@ class TemplateSettings(BaseModel):
     print_settings: dict[str, ProcessValue] = Field(default_factory=dict)
     part_settings: dict[str, PartSettings] = Field(default_factory=dict)
     #: The model.json's refusal of its settings at that read, with both settings empty:
-    #: the slice refuses with it, though the model.json is fixed when it runs. A worker
-    #: of a build before this field ignores it, so during a roll such a slice may price
-    #: empty settings under the refused key, only if the model.json is fixed meanwhile.
-    refusal: str | None = None
+    #: the slice refuses with it, though the model.json is fixed when it runs. A dump
+    #: leaves it out when it is None, so an operation body names it only for a refused
+    #: variant. A worker of a build before this field refuses that body (``extra="forbid"``),
+    #: so during a roll only a refused variant's slice fails, and it is refused anyway.
+    refusal: str | None = Field(default=None, exclude_if=lambda value: value is None)
 
 
 class OutputReader(OutputFiles, Protocol):

@@ -510,6 +510,9 @@ async def test_the_template_settings_are_read_again_only_after_a_while(
     clock[0] += slice_price.TEMPLATE_TTL
     await slice_price.live_template_settings(catalogue, "demo")
     assert reads == ["demo", "other", "demo"]
+    # #7842 review: a read drops the entries past `TEMPLATE_TTL`, so a deleted
+    # template's entry does not stay for the process's life.
+    assert set(slice_price._template_settings[catalogue]) == {"demo"}
 
 
 def test_the_plan_carries_the_templates_settings_in_its_key_and_its_request(
@@ -547,6 +550,39 @@ def test_the_plan_carries_the_templates_settings_in_its_key_and_its_request(
             library_file=priced_file(),
             template_settings=SUPPORTED,
         )
+
+
+def test_a_refusal_goes_in_the_plan_and_only_a_refused_body_names_it(shop: Shop) -> None:
+    """#7842 review: the plan carries a model.json's refusal to the slice, and the
+    operation body names `refusal` only when there is one. A worker of a build before the
+    field (`extra="forbid"`) then refuses only a refused variant, not every one."""
+    item = shop.get_item()
+    assert item.reference is not None
+    pla = shop.rows.filament(shop.pla)
+    petg = shop.rows.filament(shop.petg)
+    assert pla is not None and petg is not None
+    asked: dict[str, Any] = {
+        "settings": StoredSettings(storefront_slice_profile=PROFILE),
+        "reference": item.reference,
+        "model_sha256": SHA,
+        "filaments": [pla, petg],
+        "currency": "USD",
+        "policy": POLICY,
+        "machine_rate": None,
+        "printer": OPENING,
+        "type_presets": TYPE_PRESETS,
+    }
+    why = TemplateSettings(refusal="print_settings.x: not a value")
+    plain = plan_variant(**asked)
+    refused = plan_variant(**asked, template_settings=why)
+    supported = plan_variant(**asked, template_settings=SUPPORTED)
+    assert plain is not None and refused is not None and supported is not None
+    assert refused.key != plain.key
+    assert refused.variant.template_settings == why
+    assert "refusal" not in supported.variant.model_dump(mode="json")["template_settings"]
+    body = refused.variant.model_dump(mode="json")
+    assert body["template_settings"]["refusal"] == "print_settings.x: not a value"
+    assert type(refused.variant).model_validate(body) == refused.variant
 
 
 async def test_the_slice_takes_the_settings_its_key_holds(shop: Shop, prices: SlicePrices) -> None:

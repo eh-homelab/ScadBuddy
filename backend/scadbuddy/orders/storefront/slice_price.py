@@ -1544,6 +1544,9 @@ async def live_template_settings(catalogue: Any, slug: str) -> TemplateSettings:
     if found is not None and now - found[0] < TEMPLATE_TTL:
         return found[1]
     settings = await asyncio.to_thread(read_template_settings, catalogue, slug)
+    # A read drops what is past `TEMPLATE_TTL`, so a deleted template's entry goes too.
+    for stale in [name for name, (at, _) in kept.items() if now - at >= TEMPLATE_TTL]:
+        del kept[stale]
     kept[slug] = (now, settings)
     return settings
 
