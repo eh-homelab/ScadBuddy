@@ -105,6 +105,7 @@ from scadbuddy.core.settings import (
 from scadbuddy.core.settings_cache import SETTINGS_CACHE_TTL, SettingsCache
 from scadbuddy.filament.label_output import LabelOutput
 from scadbuddy.filament.label_templates import LabelTemplateChoice
+from scadbuddy.flows.answerers import MAX_ANSWERERS, AnswererRule
 from scadbuddy.library.asset_fetch import DEFAULT_ASSET_FETCH_DOMAINS, normalise_domain
 from scadbuddy.library.catalogue import PrintSequence
 from scadbuddy.orders.message_models import MessagingBinding
@@ -506,6 +507,8 @@ class StoredSettings(BambuddyIds):
     print_auto_import_sources: list[ImportSource] | None = None
     #: The Bambuddy printers whose prints the watcher leaves alone.
     print_auto_import_skip_printers: list[int] | None = None
+    #: Who besides a person may answer a flow's question (#7471); ``None`` is nobody.
+    flow_answerers: list[str] | None = None
     #: The LAN-only printers (registry ids, #4699 phase 4) whose prints the watcher leaves
     #: alone: a printer with no Bambuddy link has no Bambuddy id to name.
     print_auto_import_skip_lan_printers: list[str] | None = None
@@ -849,6 +852,9 @@ class SettingsPatch(BaseModel):
     print_auto_import: bool | None = None
     print_auto_import_sources: list[ImportSource] | None = Field(default=None, max_length=4)
     print_auto_import_skip_printers: list[int] | None = Field(default=None, max_length=200)
+    #: #7471: who besides a person may answer a flow's question; ``null`` puts it back to
+    #: people only. A person's to change (`api/settings.py`). A repeat is kept once.
+    flow_answerers: list[AnswererRule] | None = Field(default=None, max_length=MAX_ANSWERERS)
     print_auto_import_skip_lan_printers: (
         list[Annotated[str, StringConstraints(min_length=1, max_length=64)]] | None
     ) = Field(default=None, max_length=200)
@@ -1033,6 +1039,11 @@ class SettingsPatch(BaseModel):
         if domains is None:
             return None
         return list(dict.fromkeys(normalise_domain(domain) for domain in domains))
+
+    @field_validator("flow_answerers")
+    @classmethod
+    def _answerers_once(cls, rules: list[str] | None) -> list[str] | None:
+        return None if rules is None else list(dict.fromkeys(rules))
 
     @field_validator("profile_fetch_nozzles")
     @classmethod

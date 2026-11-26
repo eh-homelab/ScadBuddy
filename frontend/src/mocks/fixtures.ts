@@ -1258,6 +1258,7 @@ export const settings: Settings = {
   print_auto_import_sources: ['archive', 'archive_source', 'library'],
   print_auto_import_skip_printers: [],
   print_auto_import_skip_lan_printers: [],
+  flow_answerers: [],
   // #6868: an empty spool adds its type to the shopping list; stored only, on by default.
   filament_shopping_auto_add_empty: true,
   filament_preset_mirror: true,

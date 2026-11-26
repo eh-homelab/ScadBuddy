@@ -387,3 +387,73 @@ describe('the orders bound (#4252)', () => {
     expect(MAX_ORDERS).toBe(list?.maxItems)
   })
 })
+
+describe('answer_flow_question (#7471)', () => {
+  const RUN = '2c9d6bcd-bbfd-4b2d-9b5d-ab8dfbbd4bed'
+  const CALL = '3d9d6bcd-bbfd-4b2d-9b5d-ab8dfbbd4bed'
+  const answer = (input: Record<string, unknown>) => tool('answer_flow_question').execute({ run_id: RUN, call_id: CALL, ...input }, ctx())
+
+  it('waits for an approval at its default access', async () => {
+    expect(tool('answer_flow_question').risk).toBe('outward')
+    expect(tool('answer_flow_question').gated).toBe(true)
+    let sent = 0
+    server.use(http.post(`${BACKEND}/api/v1/workflow-runs/${RUN}/answer`, () => { sent++; return HttpResponse.json({}) }))
+    const below = await runTool(tool('answer_flow_question'), { run_id: RUN, call_id: CALL, answer: 'yes' }, ctx())
+    expect(below.isError).toBe(true)
+    expect(sent).toBe(0)
+  })
+
+  it("sends a text to the run's answer route", async () => {
+    const seen: unknown[] = []
+    server.use(
+      http.post(`${BACKEND}/api/v1/workflow-runs/${RUN}/answer`, async ({ request }) => {
+        seen.push({ key: request.headers.get('Idempotency-Key'), body: await request.json() })
+        return HttpResponse.json({ run_id: RUN, call_id: CALL, outcome: 'answered' })
+      }),
+    )
+    expect(firstText(await answer({ answer: 'yes' }))).toEqual({ run_id: RUN, call_id: CALL, outcome: 'answered' })
+    expect(seen).toEqual([{ key: expect.stringMatching(/^[0-9a-f]{32}$/), body: { call_id: CALL, answer: 'yes' } }])
+  })
+
+  it('sends an object to the task', async () => {
+    const seen: unknown[] = []
+    server.use(
+      http.get(`${BACKEND}/api/v1/tasks/${CALL}`, () => HttpResponse.json({ id: CALL, run_id: RUN, state: 'open' })),
+      http.post(`${BACKEND}/api/v1/tasks/${CALL}/answer`, async ({ request }) => {
+        seen.push(await request.json())
+        return HttpResponse.json({ id: CALL, run_id: RUN, state: 'answered' })
+      }),
+    )
+    expect(firstText(await answer({ answer: { size: 'S' } }))).toMatchObject({ state: 'answered' })
+    expect(seen).toEqual([{ answer: { size: 'S' } }])
+  })
+
+  it('refuses a task of another run', async () => {
+    let sent = 0
+    server.use(
+      http.get(`${BACKEND}/api/v1/tasks/${CALL}`, () => HttpResponse.json({ id: CALL, run_id: DEFINITION, state: 'open' })),
+      http.post(`${BACKEND}/api/v1/tasks/${CALL}/answer`, () => { sent++; return HttpResponse.json({}) }),
+    )
+    await expect(answer({ answer: { size: 'S' } })).rejects.toThrow(/not a question of flow run/)
+    expect(sent).toBe(0)
+  })
+
+  it("gives the 403's reason to the model", async () => {
+    const detail = "Only a person answers this flow's questions. The setting flow_answerers says who else may."
+    server.use(
+      http.post(`${BACKEND}/api/v1/workflow-runs/${RUN}/answer`, () =>
+        HttpResponse.json(
+          { type: 'https://scadbuddy.dev/problems/flow-answer-not-allowed', status: 403, detail },
+          { status: 403, headers: { 'Content-Type': 'application/problem+json' } },
+        ),
+      ),
+    )
+    await expect(answer({ answer: 'yes' })).rejects.toThrow(/flow_answerers/)
+  })
+
+  it('is refused in a flow run', async () => {
+    const { forFlows } = await import('../src/temporal/flowTools.js')
+    expect(forFlows(tool('answer_flow_question'))).toBe(false)
+    expect(forFlows(tool('get_flow_run'))).toBe(true)
+  })
+})

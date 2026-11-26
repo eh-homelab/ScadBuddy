@@ -1,8 +1,9 @@
-"""Tasks (#7364): the typed questions flows ask a person, and their answers.
+"""Tasks (#7364): the typed questions flows ask, and their answers.
 
-An answer is checked here against the task's schema, then given to the run by the
-`task_answer` operation (`flows/operations.py`). It reaches the operation sealed under
-the run's key, so it is in no history, record or log in the clear.
+An answer is checked here against the task's schema, then given to the run by an
+operation (`flows/operations.py`): `task_answer` for a person's, `flow_agent_answer` for
+an assistant session's or MCP token's that `flow_answerers` admits (#7471). It reaches the
+operation sealed under the run's key, so it is in no history, record or log in the clear.
 """
 
 from __future__ import annotations
@@ -18,7 +19,8 @@ from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 
 from scadbuddy.api.crud_agent_events import UUID_PATTERN
-from scadbuddy.api.flows import browser_only, unavailable
+from scadbuddy.api.deps import SettingsStoreDep
+from scadbuddy.api.flows import admit, agent_answer, answerer, unavailable
 from scadbuddy.api.limits import RouteLimit
 from scadbuddy.api.operations import (
     OPERATION_RESPONSES,
@@ -26,11 +28,18 @@ from scadbuddy.api.operations import (
     operation_answer,
     run_operation,
 )
+from scadbuddy.auth.component import CallerDep
 from scadbuddy.core.authorship import browser_principal
 from scadbuddy.core.events import TASK_PLACE_CHAR, TASK_PLACE_MAX
 from scadbuddy.core.problems import PROBLEM_MEDIA_TYPE, ApiError
 from scadbuddy.flows.component import FlowsDep
-from scadbuddy.flows.operations import TASK_ANSWER, TASK_NOT_OPEN, seal_answer, task_not_open
+from scadbuddy.flows.operations import (
+    AGENT_ANSWER,
+    TASK_ANSWER,
+    TASK_NOT_OPEN,
+    seal_answer,
+    task_not_open,
+)
 from scadbuddy.operations.component import OperationsDep
 from scadbuddy.tasks.component import TasksComponent, TasksDep
 from scadbuddy.tasks.models import (
@@ -69,7 +78,7 @@ class TaskList(BaseModel):
 
 
 class TaskAnswerBody(BaseModel):
-    """A person's answer to a task."""
+    """An answer to a task: a person's, or an admitted assistant's (#7471)."""
 
     #: The answer, by the schema's property names. At most 16 KiB of JSON.
     answer: dict[str, Any]
@@ -112,7 +121,8 @@ def list_tasks(
 )
 async def get_task(task_id: TaskIdPath, tasks: TasksDep) -> Task:
     # The answer and who gave it too, for every caller of an `api` route
-    # (`auth/routes.py`): only `answer_task` is a person's alone.
+    # (`auth/routes.py`). No task route is a person's alone: an agent answers only when
+    # `flow_answerers` admits it (`api/flows.py` `answerer` and `admit`, #7471).
     return await _found(tasks, task_id)
 
 
@@ -153,14 +163,18 @@ async def answer_task(
     ops: OperationsDep,
     flows: FlowsDep,
     tasks: TasksDep,
+    settings: SettingsStoreDep,
+    caller: CallerDep,
     idempotency_key: IdempotencyKey = None,
 ) -> Task | JSONResponse:
     """Check the answer against the task's schema and give it to the run. The same request
     again returns the task as it stands. A 202's operation says only that it was answered:
     read the task itself at ``GET /tasks/{id}``. Read it again after a 409 too. A 409
     ``not-open`` has the task's own ``state``, which is ``open`` for a moment when the run
-    has another answer that is not marked yet."""
-    browser_only("Only a person answers a task.")
+    has another answer that is not marked yet. A person answers; an assistant session or
+    MCP token only when the setting ``flow_answerers`` names it and the question is not for
+    people only (#7471)."""
+    found = answerer(caller)
     answer = body.answer
     # First: nothing below walks an answer that is too large.
     if not _fits(answer):
@@ -181,8 +195,14 @@ async def answer_task(
     except psycopg.errors.UndefinedTable:
         raise unavailable() from None
 
+    person = found.kind == "person"
+
     async def refuse() -> None:
         # Not for a repeat, which is its first answer however the task stands now.
+        if not person:
+            # A task's id is its prompt's call id (`workflows/flow_tools.py` `_prompt_task`):
+            # the parked entry's key.
+            await admit(found, settings, flows, task.run_id, task.id)
         if task.state != "open":
             raise task_not_open(task.state)
         problems = await asyncio.to_thread(validate_answer, task.schema_, answer)
@@ -198,14 +218,23 @@ async def answer_task(
         result = await run_operation(
             ops,
             response,
-            kind=ops.kinds[TASK_ANSWER],
+            kind=ops.kinds[TASK_ANSWER if person else AGENT_ANSWER],
             subject=f"flow:{task.run_id}",
-            request={
-                "run_id": task.run_id,
-                "task_id": task.id,
-                "answer_sealed": sealed,
-                "by": browser_principal()[:MAX_BY_CHARS],
-            },
+            request=(
+                {
+                    "run_id": task.run_id,
+                    "task_id": task.id,
+                    "answer_sealed": sealed,
+                    "by": browser_principal()[:MAX_BY_CHARS],
+                }
+                if person
+                else {
+                    "run_id": task.run_id,
+                    "task_id": task.id,
+                    "answer_sealed": sealed,
+                    **agent_answer(found),
+                }
+            ),
             idempotency_key=idempotency_key,
             before_start=refuse,
         )

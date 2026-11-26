@@ -213,6 +213,10 @@ def _check_inputs(definition: Definition, inputs: dict[str, Any] | None) -> None
 async def _check_grant(triggers: Triggers, spec: GrantSpec) -> None:
     tool_tiers = await agent_tool_tiers(triggers.flows)
     problems = validate_rules(spec.rules, tool_tiers=tool_tiers)
+    if spec.answers is not None:
+        # Never in a standing grant (#7471, spec §4.3): each fire's run would let an
+        # answerer in that no person looked at.
+        problems.append("a trigger's grant cannot let anyone else answer the runs' questions")
     now = datetime.now(UTC)
     if spec.expires_at <= now:
         problems.append("expires_at is in the past")

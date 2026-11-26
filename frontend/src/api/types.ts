@@ -228,6 +228,7 @@ export type FlowRun = Schemas['Run']
 export type FlowRunView = Schemas['RunView']
 export type FlowRunStatus = FlowRunView['status']
 export type FlowPending = Schemas['PendingEntry']
+export type FlowAnswerBy = Schemas['AnswerBy']
 /** #7364 — a flow prompt's question as the run page lists it, and the whole task (`GET /tasks/{id}`). */
 export type TaskQuestion = Schemas['TaskQuestion']
 export type Task = Schemas['Task']

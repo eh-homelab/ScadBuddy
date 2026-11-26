@@ -366,8 +366,9 @@ only the sleeps move; a budget on the real clock fails on a slow runner (#6252).
   /workflow-runs/{id}`: key, then workflow, then row), `sweep.py` (the housekeeping
   sweep for runs whose execution closed). Routes `api/flows.py`. An outward call's
   approval timeout resolves from the run, its flow, then `flow_approval_timeout_seconds`
-  (0 is never). `operations.py` has the answers: `flow_answer` (a text) and `task_answer` (a
-  prompt's, #7364), and the decisions: `flow_decide` (a person's) and `flow_escalate` (the
+  (0 is never). `operations.py` has the answers: `flow_answer` (a text), `task_answer` (a
+  prompt's, #7364) and `flow_agent_answer` (an agent's answer, text or task, that
+  `flow_answerers` admitted, #7471), and the decisions: `flow_decide` (a person's) and `flow_escalate` (the
   starter session's). A print, an arrange or a ScadBuddy tool runs only on an approval on
   record (`flow_decision`, #7588); the agent checks the row for its own tools and a plugin's. `store.py` moves a run's tasks in the transaction of the run's own write:
   an end cancels the open ones, a Reset makes them match (`TaskStore.cancel_for_run_in`,
@@ -379,7 +380,8 @@ only the sleeps move; a budget on the real clock fails on a slow runner (#6252).
   `validate.py` (`validate_answer`: its problems never quote a value), `store.py`
   (`TaskStore`, the table `tasks`), `component.py` (`TASKS`, `TasksDep`). Routes
   `api/tasks.py`: `GET /tasks` (`TaskQuestion`s), `GET /tasks/{id}` and `POST /tasks/{id}/answer`
-  (`browser_only`, `PERSON_ENDPOINTS`; the answer sealed into the operation). The projects
+  (a person, or an agent that `flow_answerers` admits, `api/flows.py` `answerer` and `admit`;
+  the answer sealed into the operation). The projects
   worker's area `tasks` is `api/crud_tasks.py` (`…/projects/tasks`, its `/{id}/close` and
   `/{id}/answered`), client `crud/tasks.py` `RemoteTasks`; the area is in the worker's
   `PROJECTS_CRUD_AREAS`. Event `task.changed` (`core/events.py` `TaskChanged`), realtime
