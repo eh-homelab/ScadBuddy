@@ -257,7 +257,7 @@ export const storefrontTools: Tool[] = [
         )
       } else if (schema.pipeline && Object.keys(sold.design.inputs ?? {}).length === 0) {
         notes.push(
-          `The output holds none of ${record.name}'s own design inputs (its pipeline's), so the listing starts with none: open the listing at ${page} and check "Set up the design" before you publish it.`,
+          `The output holds none of ${record.name}'s own design inputs (its pipeline's), so the listing starts with none: open the listing at ${page} and press "Set up the design" before you publish it.`,
         )
       }
       return json({

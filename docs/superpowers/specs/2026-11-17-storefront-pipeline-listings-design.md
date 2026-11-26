@@ -794,7 +794,8 @@ A listing pins a commit (fact 11). Here that means:
   pipeline template, it takes the output's `inputs` less `params` and `v` as `inputs`,
   and `inputs.v` as `inputs_v`, and runs the smart defaults over `inputs.params`. With
   `{slug, values}` it sets no inputs; the answer then says that the design needs setting
-  up in the editor, with the editor link. `storefront_listing_publish` is unchanged: its
+  up in the editor, with the editor link. It says the same for an output whose own inputs
+  are empty. `storefront_listing_publish` is unchanged: its
   refusals carry the new codes.
 - `storefrontDraft.ts` (the agent's copy of `defaultsFor`) and `listingDraft.ts` both
   gain the split of a source's inputs into `inputs`, `inputs_v` and the values. The rule

@@ -280,7 +280,7 @@ describe('storefront tools (#6131)', () => {
         expect(result['notes'], vector.name).toEqual(
           empty
             ? [
-                `The output holds none of Dollhouse's own design inputs (its pipeline's), so the listing starts with none: open the listing at /storefront/listings/${LISTING} and check "Set up the design" before you publish it.`,
+                `The output holds none of Dollhouse's own design inputs (its pipeline's), so the listing starts with none: open the listing at /storefront/listings/${LISTING} and press "Set up the design" before you publish it.`,
               ]
             : [],
         )
