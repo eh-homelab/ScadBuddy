@@ -2553,8 +2553,8 @@ jobs:
   # the 2 x 1 queue's PDF prints as ZPL 2 in wide while the 4 x 6 one waits with a
   # message, and prints 4 in wide once the length is 6 in; another container cannot add
   # a printer or disable a queue without the admin login; the web page's admin asks for
-  # the mounted password and pauses a queue with it; a waiting job survives a restart on a
-  # PVC-like volume.
+  # the mounted password and pauses a queue with it; a custom size prints at the queue's
+  # width; a waiting job survives a restart on a PVC-like volume.
   # In the `image` lane, and in `CI Summary`'s needs.
   cups-image:
     name: CUPS image build and smoke
@@ -2604,7 +2604,7 @@ jobs:
             { printf '%s' "$first"; cat; } >> /fz/out.zpl
           fi
           FAKE
-          sed -i 's/^          //' "$fz/h" && chmod 0755 "$fz/h"
+          chmod 0755 "$fz/h"
           docker network create cupsci
           docker run -d --name fakezebra --network cupsci -v "$fz:/fz" \
             mirror.gcr.io/library/busybox:1.37@sha256:a7dbc319b1438115a207e11930dc4bb3e643dcb3ec0bdd694bb36cd8fad289ec \
@@ -2619,6 +2619,7 @@ jobs:
           docker exec cups lpstat -d | grep -q 'S-EDCDU03-2x1$'
           # Each queue's PPD offers only its own size.
           test "$(docker exec cups grep -c '^\*PageSize ' /var/lib/cups/etc/ppd/S-EDCDU03-4x6.ppd)" = 1
+          if docker exec cups grep -q '^\*CustomPageSize' /var/lib/cups/etc/ppd/S-EDCDU03-4x6.ppd; then echo "the PPD offers a custom size" >&2; exit 1; fi
           client() { docker run --rm --network cupsci --entrypoint sh scadbuddy-cups:ci -c "$1"; }
           pdf='printf "%%!PS\n/Helvetica findfont 14 scalefont setfont 10 30 moveto (ScadBuddy) show showpage\n" > /tmp/t.ps && gs -q -sDEVICE=pdfwrite -o /tmp/t.pdf /tmp/t.ps'
           # 2 x 1 labels are loaded: the 4 x 6 job waits with a message, the 2 x 1 one prints.
@@ -2650,6 +2651,16 @@ jobs:
           if docker exec cups lpstat -p S-EDCDU03-2x1 | grep -q disabled; then echo "paused without the login" >&2; exit 1; fi
           curl -s -c "$jar" -b "$jar" -u admin:ci-admin-pw -o /dev/null -X POST -d "org.cups.sid=$sid&OP=stop-printer" "$u/printers/S-EDCDU03-2x1"
           docker exec cups lpstat -p S-EDCDU03-2x1 | grep -q disabled || { docker exec cups lpstat -p S-EDCDU03-2x1; exit 1; }
+          curl -s -c "$jar" -b "$jar" -u admin:ci-admin-pw -o /dev/null -X POST -d "org.cups.sid=$sid&OP=start-printer" "$u/printers/S-EDCDU03-2x1"
+          # A custom size cannot get past a queue's own: a 4 x 6 in custom job on the
+          # 2 x 1 queue (2 x 1 labels loaded) prints 2 in wide.
+          echo 0208 > "$fz/len"
+          wide=$(grep -c '\^PW812' "$fz/out.zpl")
+          narrow=$(grep -c '\^PW406' "$fz/out.zpl")
+          client "$pdf && lp -h cups:8631 -d S-EDCDU03-2x1 -o media=Custom.4x6in /tmp/t.pdf"
+          for _ in $(seq 30); do [ "$(grep -c '\^PW406' "$fz/out.zpl")" -gt "$narrow" ] && break; sleep 1; done
+          [ "$(grep -c '\^PW406' "$fz/out.zpl")" -gt "$narrow" ] || { docker logs cups; exit 1; }
+          test "$(grep -c '\^PW812' "$fz/out.zpl")" = "$wide"
           # State on a volume whose root is root's, group 10001, setgid, as a PVC with
           # fsGroup 10001 arrives: a job waiting for an unreachable printer is still
           # queued after a restart.

@@ -802,7 +802,8 @@ CMD ["xvfb-run", "-a", "python", "-m", "pytest", "tests/profile_fetch/test_site.
 # Debian's own packages: `cups` holds the `rastertolabel` filter, `cups-common` the
 # `sample.drv` that makes the "Zebra ZPL Label Printer" PPD, and `cups-filters` (with its
 # core drivers) the PDF and image to raster filters (`dpkg -S` in debian 13.7, 2026-11-25).
-# start.sh declares the one queue from env and runs cupsd in the foreground, without root.
+# start.sh declares one queue per label size from CUPS_QUEUES and runs cupsd in the
+# foreground, without root.
 # /var/lib/cups may be a volume (deploy/cups/README.md, "State").
 FROM debian:trixie-slim@sha256:8aa5a7bf5a1955bddbe7d74fcdd0b91ab30e74362a8b73af672b0481b35b44a0 AS cups
 

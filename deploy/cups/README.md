@@ -20,8 +20,8 @@ the client.
   ```
 
   PAGE-SIZE is a PageSize of the Zebra ZPL PPD (`w144h72` is 2 x 1 in, `w288h432` is 4 x 6
-  in; the size in points, 72 a inch). Each queue's PPD keeps only its own size, so a
-  print dialog offers nothing else.
+  in; the size in points, 72 a inch). Each queue's PPD keeps only its own size and no
+  custom size, so a print dialog offers nothing else.
 
 ## Label sizes
 

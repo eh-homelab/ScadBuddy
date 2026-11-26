@@ -1,5 +1,5 @@
 #!/bin/bash
-# Prepares CUPS's state, declares the one label printer from env, then runs cupsd in
+# Prepares CUPS's state, declares one queue per label size from CUPS_QUEUES, then runs cupsd in
 # the foreground (deploy/cups/README.md).
 #
 # The configuration is /etc/cups/cupsd.conf and cups-files.conf: the image's, or files
@@ -16,8 +16,8 @@
 #
 #   CUPS_QUEUES  one queue per line: NAME PAGE-SIZE DEVICE-URI [DESCRIPTION...]
 #                PAGE-SIZE is a PageSize of the Zebra ZPL PPD (w144h72 is 2 x 1 in,
-#                w288h432 is 4 x 6 in); the queue's PPD keeps only that size, so a
-#                print dialog offers nothing else. DEVICE-URI is usually
+#                w288h432 is 4 x 6 in); the queue's PPD keeps only that size and
+#                no custom size, so a print dialog offers nothing else. DEVICE-URI is usually
 #                zebra://HOST:9100?length=DOTS, which holds a job until the loaded
 #                labels match (deploy/cups/zebra). The first queue is the default.
 #   CUPS_ADMIN_PASSWORD_FILE
@@ -66,6 +66,9 @@ while read -r name size uri info; do
         opt = $2; sub(/\/.*/, "", opt); sub(/:$/, "", opt)
         if (opt != size) next
       }
+      # The Zebra model allows custom sizes (sample.drv VariablePaperSize); a custom
+      # size would print at its own width on the labels of this queue.
+      /^\*(CustomPageSize|ParamCustomPageSize|MaxMediaWidth|MaxMediaHeight)[ :]/ { next }
       /^\*Default(PageSize|PageRegion|ImageableArea|PaperDimension):/ { sub(/: .*/, ": " size) }
       { print }
     ' > "$ppd"
