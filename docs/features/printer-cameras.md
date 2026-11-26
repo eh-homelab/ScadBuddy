@@ -206,6 +206,10 @@ The hooks need `curl`, so the camera images take the release binary on
   `api/streaming.py` (`ClosingStreamingResponse`).
 - Frontend: `frontend/src/components/prints/LivePlayer.tsx`, `hlsLoader.ts`, `NowPrinting.tsx`
   (`LiveCameraView`, `CameraFeeds`), `src/mocks/features/camera.ts`.
+- Agent: `agent/src/tools/print.ts` `get_printer_camera_state` (`read`) and
+  `reconnect_printer_camera` (`write`: it restarts ScadBuddy's own pull and sends nothing to the
+  printer, so it needs no approval). The live routes are `NOT_A_TOOL` entries in
+  `agent/src/tools/coverage.ts`; an agent reads a frame with `get_printer_camera`.
 - MediaMTX configs: `deploy/camera/mediamtx-relay.yml`, `mediamtx-recorder.yml`,
   `mediamtx-edge.yml`.
 - Images: Dockerfile stages `mediamtx`, `camera-deps`, `camera`, `camera-relay`,

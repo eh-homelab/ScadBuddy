@@ -732,6 +732,20 @@ export const NOT_A_TOOL: readonly { operation: Operation; reason: string }[] = [
   },
   ...(
     [
+      'GET /api/v1/camera/live/{printer_id}/hls/{name}',
+      'POST /api/v1/camera/live/{printer_id}/whep',
+      'PATCH /api/v1/camera/live/{printer_id}/whep/{session}',
+      'DELETE /api/v1/camera/live/{printer_id}/whep/{session}',
+    ] as const
+  ).map((operation) => ({
+    operation,
+    reason:
+      "The camera dialog's live view (#7330): a WebRTC (WHEP) exchange and an LL-HLS stream that never ends, " +
+      "proxied to the live edge for the browser's player. An agent reads the camera a frame at a time through " +
+      'get_printer_camera.',
+  })),
+  ...(
+    [
       'GET /api/v1/printers/{printer_id}/kprofiles',
       'POST /api/v1/printers/{printer_id}/kprofiles',
       'POST /api/v1/printers/{printer_id}/kprofiles/batch',
