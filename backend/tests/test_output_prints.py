@@ -1,6 +1,6 @@
 """`OutputPrintStore` (#1060): an output's last print in Postgres, so the print worker
-records it without the data volume; an older ``meta.json`` still answers for an output
-with no row."""
+records it without the data volume; the last print an older release wrote into the
+output's meta still answers for an output with no row."""
 
 from __future__ import annotations
 
@@ -12,8 +12,8 @@ import pytest
 
 from scadbuddy.core.paths import DataPaths
 from scadbuddy.library.output_prints import OutputPrintStore
+from scadbuddy.library.output_rows import OutputRow, OutputRows
 from scadbuddy.library.outputs import (
-    META_NAME,
     LanPlateSend,
     OutputMeta,
     OutputStore,
@@ -37,7 +37,15 @@ def prints(pg_conninfo: str) -> Iterator[OutputPrintStore]:
         jobs.close()
 
 
-def saved(root: Path, output_id: str, **fields: object) -> OutputMeta:
+@pytest.fixture
+def store(tmp_path: Path, prints: OutputPrintStore) -> OutputStore:
+    """Rows only: these tests read no bytes."""
+    return OutputStore(
+        DataPaths(root=tmp_path), rows=OutputRows(prints._pool), bytes=None, prints=prints
+    )
+
+
+def saved(store: OutputStore, output_id: str, **fields: object) -> OutputMeta:
     """An output record as an older release wrote it, last print and all."""
     meta = OutputMeta(
         id=output_id,
@@ -47,9 +55,22 @@ def saved(root: Path, output_id: str, **fields: object) -> OutputMeta:
         bbox_mm=BoundingBox(min=(0, 0, 0), max=(1, 1, 1), size=(1, 1, 1)),
         **fields,  # type: ignore[arg-type]
     )
-    directory = DataPaths(root=root).outputs / SLUG / output_id
-    directory.mkdir(parents=True)
-    (directory / META_NAME).write_text(meta.model_dump_json(), encoding="utf-8")
+    store.rows.insert(
+        OutputRow(
+            output_id=output_id,
+            slug=SLUG,
+            meta=meta,
+            params={},
+            inputs=None,
+            record=None,
+            manifest=None,
+            bom=None,
+            arranged_from=None,
+            backfill=None,
+            has_plate_cover=False,
+            copied_at=meta.created_at,
+        )
+    )
     return meta
 
 
@@ -58,10 +79,9 @@ def plate(plate_id: int, item: int) -> PlateSend:
 
 
 def test_a_recorded_print_overrides_the_files_last_print(
-    tmp_path: Path, prints: OutputPrintStore
+    store: OutputStore, prints: OutputPrintStore
 ) -> None:
-    store = OutputStore(DataPaths(root=tmp_path), prints=prints)
-    meta = saved(tmp_path, "a" * 32, queue_item_id=1, print_route="slice_queue", project_id=7)
+    meta = saved(store, "a" * 32, queue_item_id=1, print_route="slice_queue", project_id=7)
 
     prints.record(meta.id, queue_item_id=5, slice_job_id=9, project_id=None, plates=[plate(1, 5)])
 
@@ -74,19 +94,17 @@ def test_a_recorded_print_overrides_the_files_last_print(
     assert listed.queue_item_id == 5
 
 
-def test_an_output_with_no_row_reads_its_file(tmp_path: Path, prints: OutputPrintStore) -> None:
-    store = OutputStore(DataPaths(root=tmp_path), prints=prints)
-    meta = saved(tmp_path, "b" * 32, queue_item_id=3, print_route="slice_queue")
+def test_an_output_with_no_row_reads_its_meta(store: OutputStore, prints: OutputPrintStore) -> None:
+    meta = saved(store, "b" * 32, queue_item_id=3, print_route="slice_queue")
 
     assert store.get(meta.id).queue_item_id == 3
     assert store.list_for(SLUG)[0].queue_item_id == 3
 
 
 def test_a_later_print_into_no_project_clears_the_project_and_replaces_the_plates(
-    tmp_path: Path, prints: OutputPrintStore
+    store: OutputStore, prints: OutputPrintStore
 ) -> None:
-    store = OutputStore(DataPaths(root=tmp_path), prints=prints)
-    meta = saved(tmp_path, "c" * 32)
+    meta = saved(store, "c" * 32)
 
     prints.record(meta.id, queue_item_id=5, slice_job_id=9, project_id=4, plates=[plate(1, 5)])
     prints.record(
@@ -98,9 +116,8 @@ def test_a_later_print_into_no_project_clears_the_project_and_replaces_the_plate
     assert [p.plate_id for p in got.plates] == [1, 2]
 
 
-def test_delete_forgets_the_row(tmp_path: Path, prints: OutputPrintStore) -> None:
-    store = OutputStore(DataPaths(root=tmp_path), prints=prints)
-    meta = saved(tmp_path, "d" * 32)
+def test_delete_forgets_the_row(store: OutputStore, prints: OutputPrintStore) -> None:
+    meta = saved(store, "d" * 32)
     prints.record(meta.id, queue_item_id=5, slice_job_id=9, project_id=None, plates=[])
 
     prints.delete(meta.id)
@@ -114,13 +131,12 @@ PRINTER = "0b2c6f0e-8d1a-4c35-9b8e-2f6d4a1c7e90"
 
 
 def test_a_lan_print_is_recorded_with_its_run_printer_and_plates(
-    tmp_path: Path, prints: OutputPrintStore
+    store: OutputStore, prints: OutputPrintStore
 ) -> None:
     """#4644: a print over the LAN has no queue item, so its last print is its run, its
     printer and the plates it started with their copies; an older Bambuddy print's ids
     no longer show."""
-    store = OutputStore(DataPaths(root=tmp_path), prints=prints)
-    meta = saved(tmp_path, "e" * 32, queue_item_id=1, print_route="slice_queue", project_id=7)
+    meta = saved(store, "e" * 32, queue_item_id=1, print_route="slice_queue", project_id=7)
 
     prints.record_lan(
         meta.id,
@@ -144,32 +160,32 @@ def test_a_lan_print_is_recorded_with_its_run_printer_and_plates(
 
 
 def test_an_output_queued_to_bambuddy_then_printed_over_the_lan_was_sent(
-    tmp_path: Path, prints: OutputPrintStore
+    store: OutputStore, prints: OutputPrintStore
 ) -> None:
     """#5143: a LAN print clears the Bambuddy print's ids from the last print, but the
     output did reach Bambuddy's queue, so it still says so (the browser's "Send again"),
-    whether the ids were the row's or an older ``meta.json``'s."""
-    store = OutputStore(DataPaths(root=tmp_path), prints=prints)
-    queued = saved(tmp_path, "a" * 32)
+    whether the ids were the row's or an older meta's."""
+    queued = saved(store, "a" * 32)
     prints.record(queued.id, queue_item_id=5, slice_job_id=9, project_id=None, plates=[])
     assert store.get(queued.id).sent_to_bambuddy is True
     prints.record_lan(queued.id, run_id="run-1", printer=None, plates=[])
     got = store.get(queued.id)
     assert (got.queue_item_id, got.sent_to_bambuddy) == (None, True)
 
-    older = saved(tmp_path, "b" * 32, queue_item_id=1, print_route="slice_queue")
+    older = saved(store, "b" * 32, queue_item_id=1, print_route="slice_queue")
     prints.record_lan(older.id, run_id="run-2", printer=None, plates=[])
     assert store.get(older.id).sent_to_bambuddy is True
 
-    never = saved(tmp_path, "c" * 32)
+    never = saved(store, "c" * 32)
     assert store.get(never.id).sent_to_bambuddy is False
     prints.record_lan(never.id, run_id="run-3", printer=None, plates=[])
     assert store.get(never.id).sent_to_bambuddy is False
 
 
-def test_the_lan_follow_moves_its_runs_last_print(tmp_path: Path, prints: OutputPrintStore) -> None:
-    store = OutputStore(DataPaths(root=tmp_path), prints=prints)
-    meta = saved(tmp_path, "f" * 32)
+def test_the_lan_follow_moves_its_runs_last_print(
+    store: OutputStore, prints: OutputPrintStore
+) -> None:
+    meta = saved(store, "f" * 32)
     prints.record_lan(meta.id, run_id="run-1", printer=None, plates=[])
 
     # An older run's read never moves the newer run's row.
@@ -191,10 +207,9 @@ def test_the_lan_follow_moves_its_runs_last_print(tmp_path: Path, prints: Output
 
 
 def test_a_bambuddy_print_after_a_lan_print_clears_the_lan_fields(
-    tmp_path: Path, prints: OutputPrintStore
+    store: OutputStore, prints: OutputPrintStore
 ) -> None:
-    store = OutputStore(DataPaths(root=tmp_path), prints=prints)
-    meta = saved(tmp_path, "9" * 32)
+    meta = saved(store, "9" * 32)
     prints.record_lan(
         meta.id, run_id="run-1", printer=PRINTER, plates=[LanPlateSend(plate_id=1, copies=1)]
     )

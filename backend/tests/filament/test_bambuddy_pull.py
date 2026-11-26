@@ -358,7 +358,7 @@ def _own_presets(pool: PgPool, spool: UUID) -> list[tuple[str, str, str | None, 
         ]
 
 
-def _sb_preset(pool: PgPool, bb_id: int, name: str) -> int:
+def _sb_preset(pool: PgPool, bb_id: int, name: str, instance: str | None = None) -> int:
     """A ScadBuddy preset that is Bambuddy local preset ``bb_id`` (#7176); its document's
     blob is not read here."""
     with pool.connection() as conn, conn.transaction():
@@ -371,6 +371,7 @@ def _sb_preset(pool: PgPool, bb_id: int, name: str) -> int:
             doc={"name": name},
             made_by="test",
             bb_preset_id=bb_id,
+            bb_instance=instance,
         )
 
 
@@ -393,6 +394,24 @@ def test_a_bambuddy_preset_scadbuddy_holds_is_pulled_as_its_sb_ref(pg_pool: PgPo
     )
     assert _own_presets(pg_pool, spool.id) == [
         (size, "142", "Other", True) for size in ("0.2", "0.4", "0.6", "0.8")
+    ]
+
+
+def test_a_bambuddy_id_is_mapped_only_on_its_own_bambuddy(pg_pool: PgPool) -> None:
+    """#7223: after a Bambuddy URL change two ScadBuddy presets hold id 141, one per
+    Bambuddy. The pull of the configured Bambuddy writes the ref of its own."""
+    f = _filament(pg_pool)
+    own = _sb_preset(pg_pool, 141, "New 141", "n3wn3wn3wn3w")
+    _sb_preset(pg_pool, 141, "Old 141", "0ld0ld0ld0ld")
+    pull(
+        f,
+        [bb(slicer_filament="141", slicer_filament_name="New 141")],
+        now=NOW,
+        instance="n3wn3wn3wn3w",
+    )
+    (spool,) = f.spools.list()
+    assert _own_presets(pg_pool, spool.id) == [
+        (size, f"sb-{own}", "New 141", True) for size in ("0.2", "0.4", "0.6", "0.8")
     ]
 
 

@@ -9,11 +9,9 @@ credential, while no API runs.
 
 ``run`` does these steps, in this order:
 
-1. The preflight again, then a dump of every row and ``meta.json`` that the next steps
-   change.
+1. The preflight again, then a dump of every row that the next steps change.
 2. ``models`` to ``models-old``, then ``models-next`` (`models_next` made it) to ``models``.
-3. The new ``model_version`` in each mapped output's ``meta.json``.
-4. One transaction: every row that holds an old commit id (`COLUMNS`), the recorded HEAD,
+3. One transaction: every row that holds an old commit id (`COLUMNS`), the recorded HEAD,
    no row in ``templates`` and ``template_copy_runs`` (the start copy makes them again), and
    no ``models`` row in ``git_remote_pushes``. It compares the rows with the dump first. Last
    it looks for an old id and for a pin that does not resolve, and then it commits.
@@ -21,9 +19,11 @@ credential, while no API runs.
 A step that was done is seen and not done again. So a second ``run`` with the same dump
 finishes one that stopped. Nothing here removes a repository, an output or its file.
 
-``rollback`` renames back, puts the dumped ``meta.json`` files and columns back, and sets
-the recorded HEAD. It refuses when one of them holds something that neither the dump nor
-``run`` put there.
+``rollback`` renames back, puts the dumped columns back, and sets the recorded HEAD. It
+refuses when one of them holds something that neither the dump nor ``run`` put there.
+
+An output's record is its ``outputs`` row alone (#7257): the switch reads and writes no
+file under ``data/outputs/``, which is the owner's unread backup.
 """
 
 from __future__ import annotations
@@ -60,7 +60,7 @@ from scadbuddy.library.models_next import (
     _templates,
     derived_map,
 )
-from scadbuddy.library.outputs import META_NAME, OutputMeta
+from scadbuddy.library.outputs import OutputMeta
 from scadbuddy.library.repo_lock import LOCK_KEY as MODELS_LOCK
 from scadbuddy.render.inputs import inputs_key
 from scadbuddy.render.job_models import render_key
@@ -104,10 +104,10 @@ MAP: Final = "unnest(%s::text[], %s::text[], %s::text[]) AS m(slug, old, new)"
 #: The dump's files.
 MANIFEST = "manifest.json"
 ROWS = "rows.jsonl"
-FILES = "files.jsonl"
 TABLES = "tables.jsonl"
 MAP_COPY = "map.json"
-FORMAT = 1
+#: 2: no ``meta.json`` files (#7257); a dump of format 1 is refused.
+FORMAT = 2
 
 #: How many of a list a message names.
 NAMED = 10
@@ -142,19 +142,6 @@ class Row:
         return f"{self.table} {self.id}"
 
 
-@dataclass(frozen=True)
-class File:
-    """A ``meta.json`` to change, by its path in the data directory."""
-
-    path: str
-    old_sha256: str
-    new_sha256: str
-    mtime_ns: int
-
-    def __str__(self) -> str:
-        return self.path
-
-
 class Where(NamedTuple):
     """Where the two repositories are."""
 
@@ -179,7 +166,6 @@ class Found:
     #: The templates at the old HEAD.
     slugs: list[str] = field(default_factory=list)
     rows: list[Row] = field(default_factory=list)
-    files: list[File] = field(default_factory=list)
 
 
 @dataclass(frozen=True)
@@ -190,13 +176,8 @@ class Dump:
     ids: Ids
     slugs: list[str]
     rows: list[Row]
-    files: list[File]
     #: The rows of `EMPTIED`, the recorded HEAD and the push, as JSON text.
     tables: dict[str, list[str]]
-
-    def kept(self, file: File) -> Path:
-        """The copy of ``file``."""
-        return self.directory / "files" / file.path
 
 
 def _say(line: str) -> None:
@@ -228,19 +209,6 @@ def _write(path: Path, data: bytes) -> None:
         os.fsync(out.fileno())
 
 
-def _put(path: Path, data: bytes, mtime_ns: int | None = None) -> None:
-    """``data`` at ``path``, whole or not at all (as `outputs._replace`), on the disk."""
-    temporary = path.with_name(f".{path.name}.{uuid.uuid4().hex}")
-    try:
-        _write(temporary, data)
-        if mtime_ns is not None:
-            os.utime(temporary, ns=(mtime_ns, mtime_ns))
-        os.replace(temporary, path)
-    finally:
-        temporary.unlink(missing_ok=True)
-    _sync(path.parent)
-
-
 def _rename(source: Path, target: Path) -> None:
     os.rename(source, target)
     _sync(target.parent)
@@ -248,13 +216,6 @@ def _rename(source: Path, target: Path) -> None:
 
 def _sha256(data: bytes) -> str:
     return hashlib.sha256(data).hexdigest()
-
-
-def _with_version(data: bytes, version: str) -> bytes:
-    """A ``meta.json`` with another ``model_version``, in the form `OutputStore.rename`
-    writes. A key that this build does not know stays."""
-    body = {**json.loads(data), "model_version": version}
-    return (json.dumps(body, indent=2) + "\n").encode()
 
 
 # ── the two repositories ──────────────────────────────────────────────────────
@@ -480,31 +441,6 @@ def _check_pins(conn: Conn, found: Found) -> None:
                 )
 
 
-def _check_outputs(conn: Conn, found: Found, files: Mapping[str, tuple[str, str | None]]) -> None:
-    """That each row says what its file says. ``files`` is what `_plan_files` read."""
-
-    def moved(slug: str, version: str | None) -> tuple[str, str | None]:
-        return slug, found.ids.get((slug, version or ""), version)
-
-    rows = _outputs(conn)
-    for key, slug, version in rows:
-        there = files.get(key)
-        if there is None:
-            if (slug, version or "") in found.ids:
-                found.reports.append(
-                    f"outputs {key}: no {META_NAME} that can be read; the row is changed"
-                )
-        elif moved(*there) != moved(slug, version):
-            found.refused.append(
-                f"outputs {key}: its row says {slug} at {version}, and its {META_NAME} says"
-                f" {there[0]} at {there[1]}"
-            )
-    known = {key for key, _, _ in rows}
-    for file in found.files:
-        if Path(file.path).parent.name not in known:
-            found.reports.append(f"{file}: the output has no row; the file is changed")
-
-
 def _check_decisions(conn: Conn, found: Found) -> None:
     """That no two decisions are of one version after it, as the unique index asks."""
     moved = {
@@ -577,33 +513,6 @@ def _kept_rows(conn: Conn, table: str) -> list[str]:
     return [row for row in rows if json.loads(row)["repository"] == PUSHED]
 
 
-# ── the meta.json files ───────────────────────────────────────────────────────
-
-
-def _plan_files(paths: DataPaths, found: Found) -> dict[str, tuple[str, str | None]]:
-    """Plan each ``meta.json`` with an old id. Each readable one's template and version, by
-    its output."""
-    read: dict[str, tuple[str, str | None]] = {}
-    for path in sorted(paths.outputs.glob(f"*/*/{META_NAME}")):
-        slug, key = path.parent.parent.name, path.parent.name
-        data = path.read_bytes()
-        try:
-            meta = OutputMeta.model_validate_json(data)
-        except ValidationError:
-            meta = None
-        # As the start copy reads one (`OutputStore.row_from_files`).
-        if meta is None or (meta.slug, meta.id) != (slug, key):
-            found.reports.append(f"outputs/{slug}/{key}: its {META_NAME} cannot be read; left")
-            continue
-        read[key] = (slug, meta.model_version)
-        new = found.ids.get((slug, meta.model_version or ""))
-        if new is not None:
-            changed = _sha256(_with_version(data, new))
-            name = path.relative_to(paths.root).as_posix()
-            found.files.append(File(name, _sha256(data), changed, path.stat().st_mtime_ns))
-    return read
-
-
 # ── the preflight ─────────────────────────────────────────────────────────────
 
 
@@ -647,11 +556,9 @@ def _survey(conn: Conn, paths: DataPaths, *, begun: bool) -> Found:
     except SwitchRefusedError as error:
         found.refused += error.reasons
         return found
-    read = _plan_files(paths, found)
     found.rows, reports = _plan_rows(conn, found.ids)
     found.reports += reports
     _check_pins(conn, found)
-    _check_outputs(conn, found, read)
     _check_decisions(conn, found)
     recorded = _recorded_head(conn)
     if recorded not in (None, found.old_head) and not (begun and recorded == found.new_head):
@@ -659,7 +566,6 @@ def _survey(conn: Conn, paths: DataPaths, *, begun: bool) -> Found:
             f"{HEAD_TABLE} says {recorded}, and the HEAD of {found.where.old} is {found.old_head}"
         )
     found.counts = {table: sum(row.table == table for row in found.rows) for table in COLUMNS}
-    found.counts[META_NAME] = len(found.files)
     found.counts |= {table: len(_kept_rows(conn, table)) for table in (*EMPTIED, PUSH_TABLE)}
     return found
 
@@ -669,8 +575,9 @@ def _survey(conn: Conn, paths: DataPaths, *, begun: bool) -> Found:
 
 def _check_place(paths: DataPaths, directory: Path) -> Path:
     target = directory.resolve()
-    homes = [_beside(paths, name) for name in (paths.models.name, NEXT_NAME, OLD_NAME)]
-    for home in (*homes, paths.outputs):
+    # ``outputs`` is the owner's backup of the outputs (#7257): no dump goes there either.
+    homes = [_beside(paths, name) for name in (paths.models.name, NEXT_NAME, OLD_NAME, "outputs")]
+    for home in homes:
         if target == home.resolve() or home.resolve() in target.parents:
             raise SwitchRefusedError(f"the dump {directory} is in {home}")
     if not target.parent.is_dir():
@@ -697,15 +604,9 @@ def _make_dump(conn: Conn, paths: DataPaths, directory: Path, found: Found) -> D
     ]
     bodies = {
         ROWS: _lines([vars(row) for row in found.rows]),
-        FILES: _lines([vars(file) for file in found.files]),
         TABLES: _lines(tables),
         MAP_COPY: (json.dumps(ids, indent=1) + "\n").encode(),
     }
-    for file in found.files:
-        data = (paths.root / file.path).read_bytes()
-        if _sha256(data) != file.old_sha256:
-            raise SwitchFailedError(f"{file} changed while it was dumped")
-        bodies[f"files/{file.path}"] = data
     for name, data in bodies.items():
         _write(partial / name, data)
     manifest = {
@@ -726,6 +627,21 @@ def _make_dump(conn: Conn, paths: DataPaths, directory: Path, found: Found) -> D
     return made
 
 
+def _refuse_older_format(directory: Path, body: bytes) -> None:
+    """`SwitchRefusedError` when the manifest names an older `FORMAT`: a dump of a build
+    that wrote ``meta.json`` files (#7257), which this build cannot finish or undo."""
+    try:
+        manifest = json.loads(body)
+    except ValueError:
+        return
+    found = manifest.get("format") if isinstance(manifest, dict) else None
+    if isinstance(found, int) and found < FORMAT:
+        raise SwitchRefusedError(
+            f"the dump {directory} is of format {found} (an older build):"
+            " finish or roll it back with that build's image"
+        )
+
+
 def _load_dump(directory: Path) -> Dump | None:
     """The dump, whole; None where there is none yet."""
     if not directory.exists() or not any(directory.iterdir()):
@@ -736,6 +652,7 @@ def _load_dump(directory: Path) -> Dump | None:
     try:
         lines = (directory / MANIFEST).read_bytes().splitlines(keepends=True)
         body = b"".join(lines[:-1])
+        _refuse_older_format(directory, body)
         if not lines or lines[-1] != f"{_sha256(body)}\n".encode():
             raise damaged
         manifest = json.loads(body)
@@ -760,27 +677,12 @@ def _load_dump(directory: Path) -> Dump | None:
         {(slug, old): new for slug, old, new in json.loads(held[MAP_COPY])},
         manifest["slugs"],
         [Row(**json.loads(line)) for line in held[ROWS].splitlines()],
-        [File(**json.loads(line)) for line in held[FILES].splitlines()],
         tables,
     )
 
 
-def _open_dump(paths: DataPaths, directory: Path) -> Dump | None:
-    """`_load_dump`, and only if each file it names is an output's ``meta.json``. Its hash
-    shows a dump that was cut short, and not one that was changed: a path in it is where
-    `rollback` writes."""
-    dump = _load_dump(directory)
-    outputs = paths.outputs.resolve()
-    for file in [] if dump is None else dump.files:
-        parts = Path(file.path).parts
-        inside = (paths.root / file.path).resolve().parent.parent.parent == outputs
-        if len(parts) != 4 or parts[0] != outputs.name or parts[3] != META_NAME or not inside:
-            raise SwitchRefusedError(f"the dump names {file.path}, which is not an output's")
-    return dump
-
-
-def _check_dump(paths: DataPaths, found: Found, dump: Dump, recorded: str | None) -> None:
-    """That the dump is of this switch, and of the rows and files that are not changed."""
+def _check_dump(found: Found, dump: Dump, recorded: str | None) -> None:
+    """That the dump is of this switch, and of the rows that are not changed."""
     if (dump.old_head, dump.new_head, dump.ids) != (found.old_head, found.new_head, found.ids):
         raise SwitchRefusedError(f"the dump {dump.directory} is of another switch")
     assert found.where is not None
@@ -789,24 +691,6 @@ def _check_dump(paths: DataPaths, found: Found, dump: Dump, recorded: str | None
     done = begun and not found.rows and recorded == dump.new_head
     if found.rows != dump.rows and not done:
         raise SwitchRefusedError(f"the rows are not those of the dump {dump.directory}: {what}")
-    planned = {file.path: file for file in found.files}
-    if any(file not in dump.files for file in found.files):
-        raise SwitchRefusedError(
-            f"the {META_NAME} files are not those of the dump {dump.directory}: {what}"
-        )
-    for file in dump.files:
-        if file.path not in planned and not (begun and _is_new(paths, file)):
-            raise SwitchRefusedError(
-                f"{file} is not as the dump {dump.directory} has it, and not as a switch writes"
-                f" it: {what}"
-            )
-
-
-def _is_new(paths: DataPaths, file: File) -> bool:
-    try:
-        return _sha256((paths.root / file.path).read_bytes()) == file.new_sha256
-    except FileNotFoundError:
-        return False
 
 
 # ── the switch ────────────────────────────────────────────────────────────────
@@ -815,7 +699,7 @@ def _is_new(paths: DataPaths, file: File) -> bool:
 def run(paths: DataPaths, conninfo: str, directory: Path) -> bool:
     """Do the switch, or finish one that stopped. False where it was done already."""
     directory = _check_place(paths, directory)
-    dump = _open_dump(paths, directory)
+    dump = _load_dump(directory)
     with _connected(conninfo) as conn:
         found = _survey(conn, paths, begun=dump is not None)
         if found.refused:
@@ -825,8 +709,8 @@ def run(paths: DataPaths, conninfo: str, directory: Path) -> bool:
             _say(f"note: {line}")
         if dump is None:
             dump = _make_dump(conn, paths, directory, found)
-            _say(f"dumped {len(dump.rows)} rows and {len(dump.files)} files to {directory}")
-        _check_dump(paths, found, dump, _recorded_head(conn))
+            _say(f"dumped {len(dump.rows)} rows to {directory}")
+        _check_dump(found, dump, _recorded_head(conn))
         # No API may start while `models` is missing: its sweep would delete outputs (#7649).
         _refuse_sessions(conn)
         if found.where.renames < 1:
@@ -837,8 +721,6 @@ def run(paths: DataPaths, conninfo: str, directory: Path) -> bool:
             _say(f"renamed {NEXT_NAME} to {paths.models.name}")
         where = _where(paths)
         _check_new(where, dump)
-        written = _put_files(paths, dump)
-        _say(f"{META_NAME}: {written} of {len(dump.files)} are written now")
         with conn.transaction():
             changed = _apply(conn, dump)
             if changed:
@@ -846,26 +728,6 @@ def run(paths: DataPaths, conninfo: str, directory: Path) -> bool:
         if changed:
             _say(f"{len(dump.rows)} rows are changed")
     return changed
-
-
-def _put_files(paths: DataPaths, dump: Dump) -> int:
-    """Write each ``meta.json`` that is not written yet; how many those were."""
-    written = 0
-    for file in dump.files:
-        path = paths.root / file.path
-        if _is_new(paths, file):
-            continue
-        if not path.exists():
-            # Nothing deletes one while no API runs: a write would make an orphan folder.
-            raise SwitchFailedError(f"{file}: its output is gone since the dump")
-        old = dump.kept(file).read_bytes()
-        version = json.loads(old)["model_version"]
-        data = _with_version(old, dump.ids[path.parent.parent.name, version])
-        if _sha256(data) != file.new_sha256:
-            raise SwitchFailedError(f"{file}: not what was planned")
-        _put(path, data)
-        written += 1
-    return written
 
 
 def _lock_tables(conn: Conn) -> None:
@@ -953,7 +815,7 @@ def rollback(paths: DataPaths, conninfo: str, directory: Path) -> None:
     """Put back what the dump holds. It removes no file, and no row but those that the API
     makes again."""
     directory = _check_place(paths, directory)
-    dump = _open_dump(paths, directory)
+    dump = _load_dump(directory)
     if dump is None:
         raise SwitchRefusedError(f"the dump {directory} is not there")
     with _connected(conninfo) as conn:
@@ -961,10 +823,9 @@ def rollback(paths: DataPaths, conninfo: str, directory: Path) -> None:
         where = _where(paths)
         since = _check_back(where, dump)
         rows, gone, refused = _rows_back(conn, dump)
-        files, missing, others = _files_back(paths, dump)
-        if refused or others:
-            raise SwitchRefusedError(*refused, *others)
-        for line in [*gone, *missing]:
+        if refused:
+            raise SwitchRefusedError(*refused)
+        for line in gone:
             _say(f"note: {line}")
         if where.renames == 2:
             _rename(paths.models, _beside(paths, NEXT_NAME))
@@ -972,9 +833,6 @@ def rollback(paths: DataPaths, conninfo: str, directory: Path) -> None:
         if where.renames >= 1:
             _rename(_beside(paths, OLD_NAME), paths.models)
             _say(f"renamed {OLD_NAME} to {paths.models.name}")
-        for file in files:
-            _put(paths.root / file.path, dump.kept(file).read_bytes(), file.mtime_ns)
-        _say(f"{META_NAME}: {len(files)} of {len(dump.files)} are put back now")
         with conn.transaction():
             _undo_rows(conn, dump)
         _say(f"{len(rows)} of {len(dump.rows)} rows are put back now")
@@ -1014,8 +872,9 @@ def _stored(conn: Conn, row: Row) -> Values | None:
 
 
 def _same(now: Values, then: Values) -> bool:
-    """Whether a row holds these values. The start copy makes an output's meta again from
-    its file, with the defaults that the file leaves out."""
+    """Whether a row holds these values. A start copy of the outputs (#7255, retired by
+    #7257) made an output's meta again from its file, with the defaults that the file
+    leaves out."""
     return all(
         now[name] == value or (name == "meta" and _meta(now[name]) == _meta(value))
         for name, value in then.items()
@@ -1044,27 +903,6 @@ def _rows_back(conn: Conn, dump: Dump) -> tuple[list[Row], list[str], list[str]]
             back.append(row)
         else:
             refused.append(f"{row} holds neither what the dump has nor what the switch wrote")
-    return back, gone, refused
-
-
-def _files_back(paths: DataPaths, dump: Dump) -> tuple[list[File], list[str], list[str]]:
-    """As `_rows_back`, of the files."""
-    back: list[File] = []
-    gone: list[str] = []
-    refused: list[str] = []
-    for file in dump.files:
-        path = paths.root / file.path
-        try:
-            digest = _sha256(path.read_bytes())
-        except FileNotFoundError:
-            gone.append(f"{file} is gone")
-            continue
-        if digest == file.old_sha256 and path.stat().st_mtime_ns == file.mtime_ns:
-            continue
-        if digest in (file.old_sha256, file.new_sha256):
-            back.append(file)
-        else:
-            refused.append(f"{file} holds neither what the dump has nor what the switch wrote")
     return back, gone, refused
 
 

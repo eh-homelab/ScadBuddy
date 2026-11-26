@@ -85,7 +85,35 @@ default, at most 200) and at most 4 MiB of message text: it stops before the mes
 would pass 4 MiB, always holds at least one, and then says `more`; the cursor moves only past
 the messages returned. A text over 16 MiB is a 422 whose detail names the limit (reason
 `text-too-long`). A cursor `PUT` only moves it back: a `seq` past the cursor is a 422
-(reason `seq-ahead`). `GET /changes` stays Python's.
+(reason `seq-ahead`). Its `GET /changes` is area `changes` (below).
+
+### The event stream (#7768)
+
+`internal/bus` publishes on the event bus and reads it. One `LISTEN` connection per process,
+outside the request pool, hears `scadbuddy_events` and the agent's five channels
+(`scadbuddy_input`, `_pending`, `_mcp`, `_warm_evict`, `_settings`) and hands each NOTIFY to
+every subscriber's bounded queue. It never waits on a subscriber. When the connection comes
+back after a drop, every subscriber gets a gap. Two areas read it; each is off until
+`SCADBUDDY_CORE_AREAS` names it:
+
+| Area | What |
+|---|---|
+| `changes` | `GET /api/v1/internal/crud/<caller>/changes` for the callers `agent`, `fleet`, `camera` and `camera-relay`, as `agent_changes/hub.py` serves them: the same frames (`change`, `ready`, `reconnected`, the keepalive every 15 s), the `Last-Event-ID` replay (at most 1000 events, else `resync`), the gap's replay, and the filters (`fleet.*` kinds only to `fleet`; `printer.changed` and `camera.reconnect` only to the camera callers; the other channels only to `agent`). At most 4 streams per credential and peer address (the TCP peer, never `X-Forwarded-For`, as uvicorn `--no-proxy-headers` gives it to Python) and 64 in all (429); `fleet` and the two camera callers have budgets of their own, 8 each |
+| `ws` | `WS /api/v1/ws`, the browser's realtime socket, as `api/realtime.py` serves it: the topic protocol (`subscribe`, `unsubscribe`, `check`; `subscribed` with `last`, `changed`, `event`, `resync`, `ping` every 25 s, `error`), the origin check, `SCADBUDDY_AUTH_MODE=enforce`'s refusal before the handshake, a revoked session's close (4401), and the socket cap. In `observe`, a socket that `enforce` would refuse is counted in `scadbuddy.auth.would_refuse` (by `class` and `reason`), as `auth/check.py` counts it. A handshake with a personal access token (`sbpat_`) goes to Python, which resolves those |
+
+`ws` reads `SCADBUDDY_PUBLIC_URL` (the setting `public_url`'s stored value comes first, read
+at each handshake), `SCADBUDDY_ALLOWED_ORIGINS` and `SCADBUDDY_REALTIME_SOCKETS` (default 256;
+the stored setting comes first, read at the start), as the API does. A refused handshake is a
+403 with no body, as uvicorn answers a socket closed before it was accepted.
+
+Python's frames and core's are the same bytes: `backend/tests/fixtures/event-stream-vectors.json`
+holds each payload's change frame live and in replay, which callers keep it, its topics and its
+socket frame, the typed kinds' fields, and the topic rules. The backend's
+`tests/test_event_stream_vectors.py` writes it from Python's own code
+(`UPDATE_EVENT_STREAM_VECTORS=1`) and checks it; `internal/bus`, `internal/changes` and
+`internal/realtime` check core against it. A replay writes a typed event as pydantic's
+`model_dump_json` does (`internal/bus/kinds.go` holds each kind's fields) and an opaque one as
+`json.dumps` does, both from the log's `jsonb`.
 
 Each of `browser-origins`, `bridge-tabs`, `pairings`, `mcp-tokens`, `plugin-packages` and
 `plugin-feeds` also has a `:read` form, its GETs only. Area `package-mirrors` (the blob store)
@@ -194,7 +222,17 @@ A setting telemetry cannot use (such as a malformed endpoint URL) is logged once
   `pgxpool.acquire.waits`, `…wait_time`, `…canceled`; the Go runtime's (`go.goroutine.count`,
   `go.memory.used`, `go.memory.class`, `go.gc.count`, `go.gc.pause.time`, `go.processor.limit`,
   `go.schedule.duration`, …) and the process's (`process.cpu.time`, `process.memory.usage`,
-  `process.unix.file_descriptor.count`, `process.uptime`). Always cumulative.
+  `process.unix.file_descriptor.count`, `process.uptime`). The event stream's:
+  `scadbuddy.events.subscribers` (open, by `transport`: `changes` or `ws`),
+  `scadbuddy.events.frames` (by `transport` and `frame`), `scadbuddy.events.resyncs` (by
+  `transport` and `reason`: `place`, `gap` or `overflow`) and
+  `scadbuddy.events.listener.reconnects`. `scadbuddy.auth.would_refuse` (by `class` and
+  `reason`) counts the sockets `observe` serves that `enforce` would refuse. Always cumulative.
+- **Streams.** A change stream or a socket ends its server span when it starts
+  (`telemetry.Streaming`), so no span stays open for the hours a stream lasts; its
+  `http.server.request.duration` is the time to its start. A socket's span has status 101.
+  What a socket does later (a `check`, a session read) is a root span of its own (`ws check`,
+  `ws session`), linked to the socket's span.
 - **Logs.** The JSON on stderr stays, with every attribute. With logs on, each record also goes
   over OTLP, and a record logged in a request carries its `trace_id` and `span_id` (on stderr
   too). The OTLP copy leaves out the attributes `path`, `error`, `err`, `url`, `query` and
@@ -241,6 +279,20 @@ At a stop, the servers drain and the three signals flush within the 20 s shutdow
 - `POST /sessions`: a scope's size counts each number as it was sent; Python counted its own
   spelling of it (`1e3` as `1000.0`).
 - `POST /workspace-blob-refs` answers 204 with no `Content-Type`.
+- The event stream: a replayed typed event takes what pydantic's lax mode takes for its fields
+  (an int as a whole float or a text of digits, a bool as `0`, `1` or a word), but not every
+  other coercion pydantic makes; an event it does not take is a `resync`, as in Python. A lone
+  surrogate escape in a socket frame reads as U+FFFD. The socket offers no compression
+  (`permessage-deflate`); the messages are the same. Each process caps its own sockets: with
+  core in front, Python's cap no longer counts them.
+- The socket reads a message of at most 64 KiB, which holds Python's largest frame (16,384
+  characters of up to 4 bytes each). A bigger one closes the socket with 1009; Python read up
+  to 8 MiB and answered `frame too large`. Pings and pongs take from the frame rate, as
+  messages do, and a pong counts only after a keepalive ping. A session's socket reads the
+  session again at each `resync` and closes with 4401 when it was revoked, so a lost
+  `auth.session_revoked` does not leave it open.
+- A change stream ends when a frame's write waits 30 s for a client that reads nothing, and
+  frees its place under the caps. Python waits on such a client.
 
 ## Tests
 
