@@ -797,6 +797,55 @@ COPY backend/tests ./tests
 ENV PYTEST_ADDOPTS="-p no:cacheprovider"
 CMD ["xvfb-run", "-a", "python", "-m", "pytest", "tests/profile_fetch/test_site.py"]
 
+# ── cups: the label print server ──────────────────────────────────────────────
+# CUPS with the Zebra ZPL driver, for the network label printer (deploy/cups/README.md).
+# Debian's own packages: `cups` holds the `rastertolabel` filter, `cups-common` the
+# `sample.drv` that makes the "Zebra ZPL Label Printer" PPD, and `cups-filters` (with its
+# core drivers) the PDF and image to raster filters (`dpkg -S` in debian 13.7, 2026-11-25).
+# start.sh declares one queue per label size from CUPS_QUEUES and runs cupsd in the
+# foreground, without root.
+# /var/lib/cups may be a volume (deploy/cups/README.md, "State").
+FROM debian:trixie-slim@sha256:8aa5a7bf5a1955bddbe7d74fcdd0b91ab30e74362a8b73af672b0481b35b44a0 AS cups
+
+# hadolint ignore=DL3008
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends cups cups-filters ghostscript libpam-pwdfile openssl tini \
+    && rm -rf /var/lib/apt/lists/* \
+    && test -x /usr/lib/cups/filter/rastertolabel \
+    && test -f /usr/share/cups/drv/sample.drv \
+    && test -f /usr/lib/x86_64-linux-gnu/security/pam_pwdfile.so
+
+RUN groupadd --gid 10001 cups \
+    && useradd --uid 10001 --gid 10001 --no-create-home --home-dir /tmp --shell /usr/sbin/nologin cups \
+    && rm -f /etc/cups/printers.conf /etc/cups/ppd/* \
+    && mkdir -p /usr/local/share/scadbuddy-cups \
+    && cp -a /etc/cups /usr/local/share/scadbuddy-cups/server-root \
+    && rm -f /usr/local/share/scadbuddy-cups/server-root/cupsd.conf /usr/local/share/scadbuddy-cups/server-root/cups-files.conf \
+    && printf 'User cups\nGroup cups\nSystemGroup cups\nServerRoot /var/lib/cups/etc\nRequestRoot /var/lib/cups/spool\nCacheDir /var/lib/cups/cache\nErrorLog stderr\nAccessLog stderr\nPageLog stderr\n' > /etc/cups/cups-files.conf \
+    && mkdir -p /run/cups /var/log/cups /var/lib/cups \
+    && chown -R 10001:10001 /run/cups /var/log/cups /var/lib/cups \
+    && printf 'auth required pam_pwdfile.so pwdfile=/var/lib/cups/etc/admin.passwd\naccount required pam_permit.so\n' > /etc/pam.d/cups
+# The admin login (cupsd.conf): cupsd runs without root, so PAM checks the password
+# against a file start.sh writes from CUPS_ADMIN_PASSWORD_FILE, not against /etc/shadow.
+# The configuration (cupsd.conf, cups-files.conf) stays in /etc/cups, the image's or
+# mounted over it. The state (queues, PPDs, jobs) lives in subdirectories of
+# /var/lib/cups that start.sh creates, so a volume there (its root owned by root, as a
+# PVC's is) still gives cupsd directories it owns and may chmod.
+COPY deploy/cups/cupsd.conf /etc/cups/cupsd.conf
+COPY deploy/cups/start.sh /usr/local/bin/cups-start
+COPY --chmod=0755 deploy/cups/zebra /usr/lib/cups/backend/zebra
+
+ARG SCADBUDDY_REVISION=unknown
+ARG SCADBUDDY_VERSION=dev
+ENV SCADBUDDY_REVISION=${SCADBUDDY_REVISION} \
+    SCADBUDDY_VERSION=${SCADBUDDY_VERSION}
+
+WORKDIR /tmp
+USER 10001:10001
+EXPOSE 8631
+ENTRYPOINT ["/usr/bin/tini", "--"]
+CMD ["/usr/local/bin/cups-start"]
+
 # ── mediamtx: the pinned MediaMTX release binary ──────────────────────────────
 # Printer camera recording (#7328, docs/features/printer-cameras.md). One place for the
 # version and the per-arch digests: the camera images and the `test` stage copy the

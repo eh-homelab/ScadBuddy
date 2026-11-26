@@ -9,7 +9,8 @@
 #   image          the app image: build, ruff and mypy, container smoke, real-backend
 #                  e2e and the bambuddy-fs live mount; every backend change, plus the
 #                  frontend and Go trees that run against it; and the
-#                  `profile-fetch-image` and `camera-image` jobs (#6625, #7328)
+#                  `profile-fetch-image`, `camera-image` and `cups-image` jobs (#6625,
+#                  #7328, deploy/cups/)
 #   docs_only      every changed path is a Markdown file under docs/, or a CLAUDE.md
 #                  or AGENTS.md in any directory but a vendor/ tree: the lint, frontend, agent, models,
 #                  freshness and Go jobs skip, and only the `markdown` job checks the
@@ -36,7 +37,7 @@ backend="^(backend/|models/|deploy/camera/|deploy/grafana/|deploy/security/|test
 # backend/scadbuddy/migrations_agent/ (#5299). The job also checks the backend's harness pin.
 agent_durable="^(agent-durable/|agent/|backend/scadbuddy/migrations_agent/|backend/(pyproject\.toml|uv\.lock)$|\.github/scripts/(uv-git-pin|harness-pin)(\.test)?\.sh$|$wiring)"
 rust="^(workers/rust/|$wiring)"
-image_extra='^(frontend/|scripts/gen-api-request-defaults\.mjs$|tools/go/|go\.work(\.sum)?$|vendor/|\.github/scripts/(bambuddy-fs-live|fonts-probe)\.sh$)'
+image_extra='^(frontend/|deploy/cups/|scripts/gen-api-request-defaults\.mjs$|tools/go/|go\.work(\.sum)?$|vendor/|\.github/scripts/(bambuddy-fs-live|fonts-probe)\.sh$)'
 
 docs='^(docs/.+\.md|(.+/)?(CLAUDE|AGENTS)\.md)$'
 paths=$(cat)

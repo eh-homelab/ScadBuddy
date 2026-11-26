@@ -531,11 +531,11 @@ at publish and after Prepare colours) both ask it, so the rule goes there and no
 for the add and for `reprice` at submit, so a cart line never keeps a firm price for a
 design the listing no longer sells. `variant_at_add` applies it to the visitor's own job.
 
-**Several outputs.** Until PR 5, `renders.py` `one_output` (at most one entry in
-`job.outputs`) is asked by `estimate_of`, so by the estimate and the warming, and by
-`variant_at_add`. A variant key is recorded only through `estimate_of`, so the instant
-read and an add from it find no row of such a render. A line of one keeps no variant, so
-the submit prices nothing. The submit has no job to ask: the render is pruned after a day.
+**Several outputs.** From PR 3 to PR 4, `renders.py` `one_output` (at most one entry in
+`job.outputs`) was asked by `estimate_of`, so by the estimate and the warming, and by
+`variant_at_add`, and a line of such a render kept no variant. PR 5 removed it: since then
+`variant_of` gives one variant over every output (§7.4) on each path. The submit has no job
+to ask: the render is pruned after a day.
 So a line's row says whether its 3MF is the whole render (`storefront_item_prices`
 `every_output`, true on each row written since PR 3), and `price_of` gives a pipeline's
 line no price without it. A line that PR 2 added has the first output's 3MF, whatever else
@@ -696,8 +696,9 @@ the same job. The first output is reused only while its job can still be read
 reference renders again, and each output of the new job is saved under
 `rerendered_output_id(saved_as(k), job_id)`, one id per output and job, so no attempt
 saves it twice. A job gone between that check and the read gives the first output alone,
-which the check below refuses. The order's render and the quote do not pass `needs_job`,
-so they reuse a matching output as before.
+which the check below refuses. Since PR 5 the order's render and its slice quote call
+`outputs_for_reference` too, so they also reuse an output only while its job can be read;
+a caller of `output_for_reference` alone reuses a matching output as before.
 `storefront_output_id(render_key, index=0)` keeps today's id for index 0. For a
 later output it appends `:{index}` to the uuid5 name string, not to the id: the id is
 `uuid5(NAMESPACE_URL, f"scadbuddy:storefront_output:{render_key}:{index}").hex`
@@ -755,18 +756,45 @@ today, so a kit adds no new counting. The whole kit's slice runs under the one
 operation's `QUOTE_TIMEOUT` (`LOST_AFTER` is built on it). §10.4 measures a whole
 dollhouse slice against it.
 
-**The order.** The order's render still saves and attaches output 0 to the item
-(`output_for_reference`), because `OrderItem` holds one `output_id`. The customer's firm
-price covers the whole kit, and the price row's plates go to the item's job cost. The
-other outputs of an ordered kit are found by the job: each saved output records its
-`job_id`, and the job lists every output. The cart line has every slot of the kit, so
-until PR 5 a back-office slice quote of it, which slices output 0 alone, is refused for a
-slot that only another output uses (`quote.py` `unsliced_slots`): the shop types the
-price. An order page that renders and prints every output of an item is part of this build (PR 5, §11). **No customer pays for an output the
-order cannot make:** until PR 5 lands, a render with more than one output still answers
-`none`, so such a kit is priced by hand. PR 4 builds the kit price, and PR 5 turns it on
-together with the order's every-output render and print. The dollhouse makes one output
-(fact 2), so no listed template meets this today.
+**The order (PR 5).** The order's render (`order_item_render`) and the item's slice quote
+(`quote.py` `ensure_output`) call `outputs_for_reference` with the item: it sets output 0
+on the item, because `OrderItem` holds one `output_id`, and saves each later output `k` of
+the same job under `orders/rendering.py` `kit_output_id(<the item's output>, k)`, a uuid5
+of that id and `k` (`later_as`). The item's own output is reused while it matches and its
+job can be read, and its later outputs go under ids of it; once the prune took the job,
+the reference renders again and the item takes the new job's outputs. `kit_output_ids`
+finds every output of the item from its `output_id`: each later id while it holds an output
+that records the same `job_id`. The order read carries them as `ItemDetail.kit_outputs`,
+and how many outputs the render made as `ItemDetail.kit_count` (both empty or 0 for an
+item of one output). `kit_count` is the count the item's print refuses by (below), so the
+page and the print agree.
+
+The customer's firm price covers the whole kit, and the price row's plates (renumbered,
+each filament by kit slot) go to the item's quote, so job cost reads every plate and every
+kit slot of the kit (`tests/orders/test_costs.py`).
+
+The order page prints each output on its own, in the plain print dialog of that output,
+and the shop records the item's attempt by hand under Fulfilment. The item's own print
+(`order_item_print`) refuses a kit, 409 `item_kit`, naming the saved outputs in `outputs`:
+an attempt records one print run and counts the item's quantity made, so an attempt of one
+output would count the whole kit made. It knows a kit by its saved outputs, or, for an
+output another path set on the item (a person's pick, an add with an `output_id`), by its
+render job while the job can be read (`kit_count`, extension `count`); such an output whose
+job the prune took is not known as part of a kit (#7780). When the order holds fewer
+outputs than the job made, the refusal and the order page say to save the others from the
+model's recent renders first. A store that fails while the order read looks for a kit
+leaves the item without one, logged; the order still reads. The order page names each
+output by its name and shows its colours when the output store answers. The items card's
+bulk Print leaves a kit out. A test
+print of a kit's revision prints output 0 alone, as before: it counts for nothing. An
+attempt per output, and a back-office slice quote of every output, are #7780: until then a
+back-office slice quote of a kit slices output 0 alone and is refused for a slot that only
+another output uses (`quote.py` `unsliced_slots`), and the shop types the price.
+
+**No customer pays for an output the order cannot make:** until PR 5, a render with more
+than one output answered `none`, so such a kit was priced by hand. PR 4 built the kit
+price, and PR 5 turned it on together with the order's every-output render and print. The
+dollhouse makes one output (fact 2), so no listed template meets this today.
 
 ## 8. Template changes (question 5)
 
@@ -800,7 +828,8 @@ A listing pins a commit (fact 11). Here that means:
   pipeline template, it takes the output's `inputs` less `params` and `v` as `inputs`,
   and `inputs.v` as `inputs_v`, and runs the smart defaults over `inputs.params`. With
   `{slug, values}` it sets no inputs; the answer then says that the design needs setting
-  up in the editor, with the editor link. `storefront_listing_publish` is unchanged: its
+  up in the editor, with the editor link. It says the same for an output whose own inputs
+  are empty. `storefront_listing_publish` is unchanged: its
   refusals carry the new codes.
 - `storefrontDraft.ts` (the agent's copy of `defaultsFor`) and `listingDraft.ts` both
   gain the split of a source's inputs into `inputs`, `inputs_v` and the values. The rule
@@ -872,16 +901,21 @@ A listing pins a commit (fact 11). Here that means:
   - A plate of the second output that fails, and a kit slot at 0 g, each give a
     `failed` row and no price; no row is ever `done` with part of the kit.
   - Outputs saved from two jobs give `GEOMETRY_DIFFERS`.
-  - Until PR 5: the estimate route still answers `none` for a job of two outputs
-    (`tests/api/test_storefront_pipeline_listings.py`, also while the kit's `done` row
-    stands; the same file prices a real render of two outputs).
+  - Until PR 5 the estimate route answered `none` for a job of two outputs; since PR 5 it
+    answers the kit's price (`tests/api/test_storefront_pipeline_listings.py`, which
+    prices a real render of two outputs).
   - `slice_and_price` with no `place` gives the plates as today (a back-office quote
     test, unchanged).
   - One claim: a two-output variant takes one place of `storefront_slices_concurrent`;
     with `limit=1`, a second variant's read answers `pending`.
-- PR 5, the order of a kit item (`tests/orders/`): an item from a two-output render
-  attaches both outputs by `job_id`; its job cost meets every kit slot; the order page
-  offers a print of each output; the estimate route now answers the kit price.
+- PR 5, the order of a kit item: an item from a two-output render attaches both outputs
+  by `job_id` (`tests/orders/test_rendering.py`, and the order's read of a real render,
+  `tests/api/test_storefront_pipeline_listings.py`); its job cost meets every kit slot
+  (`tests/orders/test_costs.py`); the item's print refuses a kit, `item_kit`
+  (`tests/orders/test_printing.py`); the order page offers a print of each output
+  (`PrintItem.test.tsx`), and bulk Print leaves a kit out (`ItemsBulk.test.tsx`); the
+  estimate route, the instant read, the add and the submit answer the kit's price, and a
+  line PR 2 added stays by hand.
 - `outputs_for_reference` (`tests/orders/test_rendering.py`): saves every output under
   `storefront_output_id(key, k)`, index 0 under today's id, and reuses saved outputs that match on a second call with
   no new render.
@@ -968,6 +1002,9 @@ until the step that makes it safe.
    cost meets every kit slot, and the order page prints each output. This PR removes PR
    3's `none` for several outputs (`one_output`), so the kit price goes live only with it.
    `every_output` stays: a line added before PR 3 holds one output's digest for good. After 4.
+   As built: the order page prints each output in its plain print dialog, the item's own
+   print refuses a kit (`item_kit`), and the shop records the attempt by hand; an attempt
+   per output is #7780 (§7.4, "The order").
 6. **`feat(storefront): set a listing's design inputs`** (frontend, and
    `RevisionSchema.pipeline`, §6.1). The Design block,
    the "Set up the design" dialog (owner, decision 1), the schema form fallback, Sell's

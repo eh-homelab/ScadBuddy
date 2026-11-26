@@ -496,10 +496,13 @@ on shutdown.
     `NOTIFY scadbuddy_events` in one transaction, and every replica's subscribers
     hear it once over the process's one `LISTEN` connection. After
     that connection drops and comes back, subscribers get a `bus.resync` event.
-    The table keeps events for `Last-Event-ID` replay:
-    `SCADBUDDY_EVENT_LOG_RETENTION_SECONDS` (86400) and
-    `SCADBUDDY_EVENT_LOG_RETENTION_ROWS` (100000), 0 for no limit, pruned by every
-    replica every 5 minutes.
+    The table keeps every event by default, for `Last-Event-ID` replay:
+    `SCADBUDDY_EVENT_LOG_RETENTION_SECONDS` (0) and
+    `SCADBUDDY_EVENT_LOG_RETENTION_ROWS` (0), 0 for no limit.
+    `SCADBUDDY_EVENT_LOG_RETENTION_KINDS` is a JSON object of seconds by kind prefix
+    (`{"job": 3600}`; the longest matching prefix wins, 0 keeps that kind forever), and
+    an event's own `retention_seconds` beats it. The rows cap counts only the events that
+    no other rule covers. Every replica prunes every 5 minutes.
     `scadbuddy_events_published_total`, `scadbuddy_events_dropped_total{reason}`,
     `scadbuddy_events_received_total`, `scadbuddy_events_resyncs_total` and
     `scadbuddy_event_log_pruned_total` show it working. NOTIFY channels are per
@@ -990,7 +993,7 @@ A deploy that rolls the pod also migrates the database at startup
 log, `20260928T0724Z_analyzer_decisions.sql` the print analyzers'
 `analyzer_decisions`, and `20260928T0840Z_settings.sql` the settings tables). The
 event log's retention is `SCADBUDDY_EVENT_LOG_RETENTION_SECONDS` /
-`SCADBUDDY_EVENT_LOG_RETENTION_ROWS` (see the render queue settings above); the
+`SCADBUDDY_EVENT_LOG_RETENTION_ROWS` / `_KINDS` (see the render queue settings above); the
 defaults need no manifest change.
 
 ```mermaid

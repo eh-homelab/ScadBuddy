@@ -141,10 +141,11 @@ async def test_each_copy_frees_its_lock_before_it_returns(
 ) -> None:
     """#7769: a copy releases its advisory lock before it returns, not when the server
     ends its closed session a moment later, so the cut-over's check of both locks, made
-    at once, finds them free. Many times, as the race is short."""
+    at once, finds them free. Several times, as the race is short: without the fix it
+    failed 2 of 3 runs of 25 loops (#7769); 10 keep the shard balanced (#7823)."""
     store, _ = saved
     rows = _rows(store)
-    for _ in range(25):
+    for _ in range(10):
         assert copy_outputs(store, rows, projection.conninfo) is not None
         assert _both_locks_free(projection.pool)
         assert await copy_output_bytes(store, rows, content, projection.conninfo) is not None

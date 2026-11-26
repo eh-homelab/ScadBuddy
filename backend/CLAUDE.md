@@ -1171,6 +1171,14 @@ only the sleeps move; a budget on the real clock fails on a slow runner (#6252).
   `deploy/camera/`; the images are the Dockerfile's `camera-relay` and `camera-recorder`.
   Tests: `tests/camera/` (the real-MediaMTX e2e `test_e2e_mediamtx.py` needs MediaMTX and
   ffmpeg, which the `test` stage has; locally it fetches the pinned MediaMTX itself).
+- Agent fleet chat (spec `docs/superpowers/specs/2026-11-25-agent-fleet-messaging-design.md`):
+  the `fleet` CRUD caller (ServiceAccount `scadbuddy-fleet`, scope `crud.fleet`, areas `changes`
+  and `fleet`) and the migration `*_fleet.sql` (`fleet_agents`, `fleet_channels`,
+  `fleet_members`, `fleet_messages`, `fleet_deliveries`; it also adds `fleet` to the two caller
+  CHECKs, which every new caller needs). Python serves only `api/crud_fleet.py`, `GET
+  …/changes`, the stream of events whose kind starts with `fleet.` (an `OpaqueEvent`, its frame
+  data the stored payload) with a budget of its own (`FLEET_STREAMS_MAX`); the `fleet` area's
+  routes are core's (Go). Test: `tests/api/test_crud_fleet_changes.py`.
 - `backend/scadbuddy/filament/` labels and printer places (#6955, plan
   `docs/superpowers/plans/2026-11-22-printer-location-labels.md`). A location has a `number`
   (identity, never reused; its code is `L-<n>`; migration `20261122T0603Z_filament_location_numbers.sql`).
@@ -1895,7 +1903,7 @@ only the sleeps move; a budget on the real clock fails on a slow runner (#6252).
   `QUOTE_TIMEOUT`), its steps `quote.py`: the check writes nothing; the run writes the
   body's filaments onto the item (`update_item`'s `filaments`, a repin only when a slot
   changes), renders and saves an output through `output_create`'s run when the item has
-  none matching (`ensure_output` over `rendering.py` `output_for_reference`, #6324: a
+  none matching (`ensure_output` over `rendering.py` `outputs_for_reference`, its first output, #5701 PR 5; #6324: a
   `Reference` to its output, no item needed; given one, `AttachTo` sets it on the item with
   no new revision and no quote dropped), slices every plate through `bambuddy/preview.py` `start_preview_plates`
   (the dialog's background slice, either slicer), keeps each plate's sliced file as the
@@ -1941,7 +1949,8 @@ only the sleeps move; a budget on the real clock fails on a slow runner (#6252).
   `order_item_render` kind of `operations.py` on the `library` queue (`POST
   /orders/{id}/items/{item}/render`, subject `order_item:<id>`, check `render_check`, the
   quote's refusals; the output saved under `render_output_id`, one per operation), which
-  renders the item's reference and sets the output on it. "Slice…" on an item with a design
+  renders the item's reference and sets the output on it, and saves every later output of a
+  pipeline's render under `kit_output_id` (#5701 PR 5, `outputs_for_reference`). "Slice…" on an item with a design
   and no output starts it, then opens the print dialog on the new output (`useSliceQuotes`
   `render`, the run's `stage` `rendering`); the agent's `order_item_quote` needs none.
   Attachments (#4251, spec §6.2 "As built"): any file on an order, a line item or a print attempt,
@@ -2588,10 +2597,14 @@ only the sleeps move; a budget on the real clock fails on a slow runner (#6252).
   render of several outputs is one variant (spec 2026-11-17 §7.4): `kit_colours` (one colour,
   one slot across the outputs), `kit_digest` (every output's 3MF), each output saved under
   `storefront_output_id(render_key, index)` and sliced whole with its own slots' presets, and
-  one `price_plates` over every plate (`slice_and_price`'s `place`). No visitor gets that
-  price until #5701's PR 5, whose order makes every output: `renders.py` `one_output` refuses
-  it on every path. A pipeline's cart line needs its row's `every_output`. A file listing has
-  no `inputs`.
+  one `price_plates` over every plate (`slice_and_price`'s `place`). Every path gives that
+  price, since the order makes every output (#5701 PR 5): the item's render
+  (`order_item_render`) and its slice quote (`ensure_output`) save each later output under
+  `orders/rendering.py` `kit_output_id(<the item's output>, index)`, `kit_output_ids` finds
+  them by that id and the job (`ItemDetail.kit_outputs`), and the item's print refuses a kit
+  (409 `item_kit`; also by the output's render job while it lasts, `kit_count`, which the
+  order read gives as `ItemDetail.kit_count`), whose outputs the order page prints one by one. A pipeline's cart line needs its row's
+  `every_output`. A file listing has no `inputs`.
   A file listing (#6710 PR 3, `orders/storefront/file_listings.py`) is published from a held
   copy, `listing-file-<sha256>`, held under (`storefront_listing_kept`, listing id) and named by
   the listing's pin. It is on the public site (#6710 PR 6): `public_card` and `public_listing`

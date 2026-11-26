@@ -16,6 +16,7 @@ from pydantic import ValidationError
 from scadbuddy.filament import models as m
 from scadbuddy.filament.catalog import find_by_key
 from scadbuddy.filament.spools import Conn, FilamentDefaults, FilamentSpoolStore, NoSpoolError
+from scadbuddy.filament.tag_codes import resolve_records
 from scadbuddy.filament.tag_formats import (
     KIND_OF,
     ORIGIN_OF,
@@ -263,12 +264,17 @@ def read_on(
         holder = bind_spool_id
     spool = None if holder is None else FilamentSpoolStore.read(conn, holder, defaults=defaults)
     tag = None if tag_id is None else FilamentSpoolStore.tag_row_on(conn, tag_id)
-    next_step: Literal["open_spool", "bind_or_create", "none"] = (
-        "open_spool" if spool else "bind_or_create" if tag else "none"
+    # A tag a spool holds opens the spool: the binding is the stronger claim, whatever the
+    # records say. Otherwise a code or spool id in the records opens what it names (#6955).
+    resolved = None if spool is not None else resolve_records(conn, read.records)
+    next_step: Literal["open_spool", "open_code", "bind_or_create", "none"] = (
+        "open_spool" if spool else "open_code" if resolved else "bind_or_create" if tag else "none"
     )
     decoded = decode(read.records)
     draft = None if decoded is None or holder is not None else draft_of(conn, decoded)
-    return m.TagReadResult(tag=tag, spool=spool, decoded=decoded, draft=draft, next=next_step)
+    return m.TagReadResult(
+        tag=tag, spool=spool, decoded=decoded, draft=draft, resolved=resolved, next=next_step
+    )
 
 
 def read(

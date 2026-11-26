@@ -251,7 +251,7 @@ export function rederive(order: Order) {
 }
 
 function detail(order: Order): OrderDetail {
-  const items = itemsOf(order.id).map((i) => ({ ...i, quotes: quotesOf(i.id), fulfilments: attemptsOf(i.id).map((f) => ({ ...f, stale: staleAttempt(f) })), revisions: revisionsOf(i.id) }))
+  const items = itemsOf(order.id).map((i) => ({ ...i, quotes: quotesOf(i.id), fulfilments: attemptsOf(i.id).map((f) => ({ ...f, stale: staleAttempt(f) })), revisions: revisionsOf(i.id), kit_count: (i as { kit_count?: number }).kit_count ?? 0 }))
   // `store.charges`: the typed rows by position, then the auto tax row (#5281).
   const charges = state.charges.filter((c) => c.order_id === order.id).sort(compareCharges)
   const payments = state.payments.filter((p) => p.order_id === order.id)

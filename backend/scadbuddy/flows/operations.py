@@ -767,6 +767,10 @@ def flow_kinds(
             raise (taken() if resolved else _stale()) from None
         except BaseException as err:
             if not await settle(arrived, err, undo):
+                if isinstance(err, RPCError) and err.status == RPCStatusCode.NOT_FOUND:
+                    # The run closed, or was closing, under the send ("workflow update was
+                    # aborted by closing workflow"): the call is no longer waiting (#7822).
+                    raise _stale() from None
                 raise
 
     async def give(

@@ -261,8 +261,10 @@ def _event_log_gap(pool: agent_reads.Pool, after: int, limit: int) -> EventLogGa
     # read of the gap had it (the GUARD of the older agent's `events/pgListener.ts`).
     with pool.connection() as conn, conn.transaction():
         rows = conn.execute(
+            # The fleet's kinds name its session ids, its only identity: they are for the
+            # `fleet` caller alone (#7818), as in the agent's change stream (`keep_agent`).
             "SELECT seq, event_id, payload, logged_at FROM events"
-            " WHERE seq > %s ORDER BY seq DESC LIMIT %s",
+            " WHERE seq > %s AND left(kind, 6) <> 'fleet.' ORDER BY seq DESC LIMIT %s",
             (after, limit),
         ).fetchall()
         clock = conn.execute("SELECT now() AS at").fetchone()
