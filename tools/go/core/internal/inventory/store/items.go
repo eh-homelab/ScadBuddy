@@ -7,7 +7,6 @@ import (
 	"fmt"
 	"regexp"
 	"slices"
-	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -21,8 +20,10 @@ import (
 
 // Items (design §4.2; phase 2 inventory/items.py): the catalog entry of a thing, of one
 // kind. A save resolves the item's steps over its kind's (Resolve: the class must be
-// complete); its attributes are its entity properties (item:<id>), which it may still lack:
-// those are read, never refused (R-K1-8).
+// complete); its attributes are its entity properties (item:<id>). A create or save writes
+// its property patch and is refused when the item is not complete after it (R-K1-33); the
+// other writes (an archive, a restore, a stock step) are not checked, and a read marks
+// what an item lacks.
 
 // refusedSpecial is the special types whose items are refused until their phase builds
 // their handlers (phase 2 Ruling 9; filament items wait for K3).
@@ -220,19 +221,21 @@ func (s *Items) read(ctx context.Context, q Querier, clause string, args ...any)
 	if err != nil {
 		return nil, err
 	}
-	present, err := propertiesWithValues(ctx, q, ids)
+	values, err := propertyValues(ctx, q, ids)
 	if err != nil {
 		return nil, err
 	}
 	for i := range out {
-		s.derive(&out[i], set, compatible[out[i].ID], present[out[i].ID])
+		s.derive(&out[i], set, compatible[out[i].ID], values[out[i].ID])
 	}
 	return out, nil
 }
 
 // derive fills what an item reads but does not store: its kind path, class, special type,
-// incomplete steps and missing properties (R-K1-8), and compatible_with (R-K1-11).
-func (s *Items) derive(it *wire.Item, set kindSet, compatible []string, present map[string]bool) {
+// incomplete steps (R-K1-8), compatible_with (R-K1-11), and its missing and invalid
+// properties (completeness over its stored values; both empty for an archived item,
+// R-K1-33).
+func (s *Items) derive(it *wire.Item, set kindSet, compatible []string, values map[string]any) {
 	chain := set.chain(it.KindID)
 	it.KindPath = set.path(it.KindID)
 	if it.Steps == nil {
@@ -254,45 +257,16 @@ func (s *Items) derive(it *wire.Item, set kindSet, compatible []string, present 
 	if _, problems, err := s.Cat.Resolve(chain, it.Steps, nil); err == nil {
 		it.IncompleteSteps = incomplete(problems)
 	}
-	_, required := mergedSchema(chain)
-	if sp, ok := s.Cat.SpecialType(special); ok && special != "" {
-		required = append(required, sp.RequiresProperties...)
+	it.MissingProperties, it.InvalidProperties = []string{}, []string{}
+	if it.ArchivedAt != nil {
+		return
 	}
-	it.MissingProperties = []string{}
-	for _, key := range required {
-		if !present[key] && !slices.Contains(it.MissingProperties, key) {
-			it.MissingProperties = append(it.MissingProperties, key)
-		}
+	props, required := itemSchema(s.Cat, chain)
+	missing, invalid := completeness(props, required, values)
+	it.MissingProperties = missing
+	for _, v := range invalid {
+		it.InvalidProperties = append(it.InvalidProperties, v.Key)
 	}
-	sort.Strings(it.MissingProperties)
-}
-
-// propertiesWithValues is the keys each item has a value for, by item id: as
-// entities/properties.py has_value, false and 0 count, a blank string or an empty list do
-// not.
-func propertiesWithValues(ctx context.Context, q Querier, itemIDs []string) (map[string]map[string]bool, error) {
-	rows, err := q.Query(ctx, `SELECT e.ref, p.key FROM entity_properties p
-		JOIN entities e ON e.id = p.entity_id AND e.kind = 'item'
-		WHERE e.ref = ANY($1) AND CASE jsonb_typeof(p.value)
-			WHEN 'string' THEN p.value #>> '{}' ~ '[^[:space:]]'
-			WHEN 'array' THEN jsonb_array_length(p.value) > 0
-			ELSE true END`, itemIDs)
-	if err != nil {
-		return nil, err
-	}
-	out := map[string]map[string]bool{}
-	for rows.Next() {
-		var item, key string
-		if err := rows.Scan(&item, &key); err != nil {
-			rows.Close()
-			return nil, err
-		}
-		if out[item] == nil {
-			out[item] = map[string]bool{}
-		}
-		out[item][key] = true
-	}
-	return out, rows.Err()
 }
 
 // Schema is the merged schema of the item's kind; the empty object schema for an id that
@@ -432,9 +406,11 @@ func firstErr(errs ...error) error {
 }
 
 // Create makes an item: kind_not_found, kind_archived, class_open, steps_invalid,
-// filament_item_refused (Ruling 9) or item_exists. A blank source_ref is stored as null.
-// Each compatible_with code becomes a relation to its model kind. It publishes one
-// handler_config.changed per step it resolves.
+// filament_item_refused (Ruling 9), item_exists, bad_property_value or
+// missing_required_properties (R-K1-33). A blank source_ref is stored as null. Each
+// compatible_with code becomes a relation to its model kind. It publishes one
+// handler_config.changed per step it resolves, and the property triggers one
+// entity_property.changed per key it sets.
 func (s *Items) Create(ctx context.Context, tx pgx.Tx, in wire.ItemInput, by Actor) (wire.Item, error) {
 	source := in.Source
 	if source == "" {
@@ -501,13 +477,30 @@ func (s *Items) Create(ctx context.Context, tx pgx.Tx, in wire.ItemInput, by Act
 	if err := publishConfig(ctx, tx, "item:"+id, nil, res.Steps, by); err != nil {
 		return wire.Item{}, err
 	}
+	if err := s.properties(ctx, tx, set, chain, id, in.Properties, by); err != nil {
+		return wire.Item{}, err
+	}
 	return s.Get(ctx, tx, id)
 }
 
+// properties writes the patch on the item id (ApplyProperties, against the chain's merged
+// schema) and then checks the item (checkItem): bad_property_value, then
+// missing_required_properties.
+func (s *Items) properties(ctx context.Context, tx pgx.Tx, set kindSet, chain model.Chain, id string, patch wire.PropertyPatch, by Actor) error {
+	props, _ := mergedSchema(chain)
+	if err := ApplyProperties(ctx, tx, id, props, patch, by); err != nil {
+		return err
+	}
+	return checkItem(ctx, tx, s.Cat, set, id)
+}
+
 // Update changes the fields the patch names: item_not_found, item_exists, class_open,
-// steps_invalid. On an imported item (source not manual) each editable field whose value
-// changes joins edited_fields, which a later import skips. A steps change publishes one
-// handler_config.changed per step whose resolved handler or parameters changed.
+// steps_invalid, bad_property_value, missing_required_properties. On an imported item
+// (source not manual) each editable field whose value changes joins edited_fields, which a
+// later import skips. A steps change publishes one handler_config.changed per step whose
+// resolved handler or parameters changed. A patch that sends no field writes nothing and
+// is not checked; every other patch is checked, even one that changes no value, as
+// checks_save looks at the fields sent (R-K1-33).
 func (s *Items) Update(ctx context.Context, tx pgx.Tx, id string, p wire.InventoryItemPatch, by Actor) (wire.Item, error) {
 	if !uuidText.MatchString(id) {
 		return wire.Item{}, itemNotFound(id)
@@ -530,6 +523,9 @@ func (s *Items) Update(ctx context.Context, tx pgx.Tx, id string, p wire.Invento
 	cur, err := s.Get(ctx, tx, id)
 	if err != nil {
 		return wire.Item{}, err
+	}
+	if sendsNothing(p) {
+		return cur, nil
 	}
 	norm := func(d wire.Decimal) (string, error) {
 		var out string
@@ -602,7 +598,10 @@ func (s *Items) Update(ctx context.Context, tx pgx.Tx, id string, p wire.Invento
 		}
 	}
 	if len(edits) == 0 && !stepsChanged {
-		return cur, nil
+		if err := s.properties(ctx, tx, set, chain, id, p.Properties, by); err != nil {
+			return wire.Item{}, err
+		}
+		return s.Get(ctx, tx, id)
 	}
 	var res, old handlers.Resolution
 	if stepsChanged {
@@ -638,7 +637,17 @@ func (s *Items) Update(ctx context.Context, tx pgx.Tx, id string, p wire.Invento
 			return wire.Item{}, err
 		}
 	}
+	if err := s.properties(ctx, tx, set, chain, id, p.Properties, by); err != nil {
+		return wire.Item{}, err
+	}
 	return s.Get(ctx, tx, id)
+}
+
+// sendsNothing is whether the patch sends no field: every field absent, and no properties.
+func sendsNothing(p wire.InventoryItemPatch) bool {
+	return p.Name == nil && p.Manufacturer == nil && p.CompatibleWith == nil && p.LowStock == nil &&
+		!p.LifeHours.Set && !p.LifeMonths.Set && !p.Saleable.Set && p.Note == nil && p.Steps == nil &&
+		p.Properties == nil
 }
 
 // Archive archives the item.

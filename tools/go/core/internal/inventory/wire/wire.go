@@ -145,11 +145,16 @@ type KindPatch struct {
 	Steps           *model.Steps    `json:"steps,omitempty"`
 }
 
+// PropertyPatch is entities/properties.py PropertyPatch.set: the keys to set on an item,
+// each with its JSON value. A JSON null removes the key (R-K1-33).
+type PropertyPatch map[string]json.RawMessage
+
 // Item is models.py Item. Decimals are plain strings ("7", "2.5"). LifeHours, LifeMonths
 // and CompatibleWith are read from the item's own steps.life and its compatible_with
 // relations (R-K1-6, R-K1-11). MissingProperties are the keys the special type and the
-// kinds' schemas require that the item has no value for, read on every read and never
-// stored (R-K1-8).
+// kinds' schemas require that the item has no value for; InvalidProperties are the keys
+// its kinds' schemas define whose stored value does not fit. Both are sorted, read on
+// every read and never stored, and empty for an archived item (R-K1-33).
 type Item struct {
 	ID                string      `json:"id"`
 	KindID            string      `json:"kind_id"`
@@ -179,38 +184,42 @@ type Item struct {
 	Class             Class       `json:"class"`
 	SpecialType       *string     `json:"special_type"`
 	MissingProperties []string    `json:"missing_properties"`
+	InvalidProperties []string    `json:"invalid_properties"`
 }
 
 // ItemInput is models.py ItemInput. LifeHours and LifeMonths go into steps.life (R-K1-6);
 // each CompatibleWith code becomes a compatible_with relation to a model kind (R-K1-11).
+// Properties are written with the item, in its transaction (R-K1-33).
 type ItemInput struct {
-	KindID         string      `json:"kind_id"`
-	Name           string      `json:"name"`
-	Manufacturer   string      `json:"manufacturer,omitempty"`
-	CompatibleWith []string    `json:"compatible_with,omitempty"`
-	LowStock       *Decimal    `json:"low_stock,omitempty"`
-	LifeHours      *Decimal    `json:"life_hours,omitempty"`
-	LifeMonths     *int64      `json:"life_months,omitempty"`
-	Saleable       *bool       `json:"saleable,omitempty"`
-	Source         string      `json:"source,omitempty"`
-	SourceRef      *string     `json:"source_ref,omitempty"`
-	Note           string      `json:"note,omitempty"`
-	Steps          model.Steps `json:"steps,omitempty"`
+	KindID         string        `json:"kind_id"`
+	Name           string        `json:"name"`
+	Manufacturer   string        `json:"manufacturer,omitempty"`
+	CompatibleWith []string      `json:"compatible_with,omitempty"`
+	LowStock       *Decimal      `json:"low_stock,omitempty"`
+	LifeHours      *Decimal      `json:"life_hours,omitempty"`
+	LifeMonths     *int64        `json:"life_months,omitempty"`
+	Saleable       *bool         `json:"saleable,omitempty"`
+	Source         string        `json:"source,omitempty"`
+	SourceRef      *string       `json:"source_ref,omitempty"`
+	Note           string        `json:"note,omitempty"`
+	Steps          model.Steps   `json:"steps,omitempty"`
+	Properties     PropertyPatch `json:"properties,omitempty"`
 }
 
 // InventoryItemPatch is models.py InventoryItemPatch: an absent field keeps its value.
 // life_hours, life_months and saleable null clear it; another null keeps the value. Steps
-// replaces the item's own steps.
+// replaces the item's own steps. Properties is a patch of the item's properties.
 type InventoryItemPatch struct {
-	Name           *string      `json:"name,omitempty"`
-	Manufacturer   *string      `json:"manufacturer,omitempty"`
-	CompatibleWith *[]string    `json:"compatible_with,omitempty"`
-	LowStock       *Decimal     `json:"low_stock,omitempty"`
-	LifeHours      Opt[Decimal] `json:"life_hours,omitzero"`
-	LifeMonths     Opt[int64]   `json:"life_months,omitzero"`
-	Saleable       Opt[bool]    `json:"saleable,omitzero"`
-	Note           *string      `json:"note,omitempty"`
-	Steps          *model.Steps `json:"steps,omitempty"`
+	Name           *string       `json:"name,omitempty"`
+	Manufacturer   *string       `json:"manufacturer,omitempty"`
+	CompatibleWith *[]string     `json:"compatible_with,omitempty"`
+	LowStock       *Decimal      `json:"low_stock,omitempty"`
+	LifeHours      Opt[Decimal]  `json:"life_hours,omitzero"`
+	LifeMonths     Opt[int64]    `json:"life_months,omitzero"`
+	Saleable       Opt[bool]     `json:"saleable,omitzero"`
+	Note           *string       `json:"note,omitempty"`
+	Steps          *model.Steps  `json:"steps,omitempty"`
+	Properties     PropertyPatch `json:"properties,omitempty"`
 }
 
 // Unit is models.py Unit (C29), plus its steps (parameters only, §4.2 layer 5) and a

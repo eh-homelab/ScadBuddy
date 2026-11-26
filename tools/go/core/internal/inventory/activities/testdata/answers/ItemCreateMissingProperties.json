@@ -1,0 +1,11 @@
+{
+  "code": "missing_required_properties",
+  "detail": "missing required properties: material",
+  "invalid": [],
+  "missing": [
+    "material"
+  ],
+  "status": 422,
+  "title": "Unprocessable Content",
+  "type": "https://scadbuddy.dev/problems/entities/missing_required_properties"
+}

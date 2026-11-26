@@ -255,6 +255,14 @@ At a stop, the servers drain and the three signals flush within the 20 s shutdow
   `SCADBUDDY_ORDERS_CURRENCY`, else `USD`. A row that holds JSON `null` reads as no row.
 - Inventory: `GET /items/{id}/estimate` is new (Python's `estimate_unit_cost` had no route): it
   answers `{unit_cost_minor, cost_unknown}`, or the refusal a take of `qty` would give.
+- Inventory: an item create or save that is not complete is 422 `missing_required_properties`
+  (R-K1-33). Each `invalid[].reason` is `does not fit '<keyword>'`, and not the message of
+  `jsonschema`'s `best_match`. A sent value that does not fit is 422 `bad_property_value` with
+  the detail `property '<key>': does not fit '<keyword>'`. The keys, the keyword and the status
+  are Python's; `store/testdata/property_values.json` holds the vectors that both languages
+  run. Where a list's string does not fit, the keyword is that string's keyword, as
+  `best_match` names it, not `items`. A patch with more than one bad key names the first key
+  in key order; Python names the first in the order sent.
 
 ## Tests
 

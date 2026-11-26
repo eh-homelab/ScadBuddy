@@ -20,7 +20,8 @@ const (
 	maxList     = 50
 	maxListItem = 500
 	draft202012 = "https://json-schema.org/draft/2020-12/schema"
-	// entityProblems is entities/problems.py PROBLEMS: bad_property_schema keeps its type.
+	// entityProblems is entities/problems.py PROBLEMS: bad_property_schema,
+	// bad_property_value and missing_required_properties keep its type.
 	entityProblems = "https://scadbuddy.dev/problems/entities/"
 )
 
@@ -348,13 +349,13 @@ func checkKey(v any, where string, item bool) error {
 	if enum, ok := sub["enum"].([]any); ok {
 		some := false
 		for _, e := range enum {
-			some = some || takes(e, item) && valid(e, sub)
+			some = some || takes(e, item) && fitsAll(e, sub)
 		}
 		if !some {
 			return badSchema("'enum' %s holds no value a key can take", where)
 		}
 	}
-	if c, ok := sub["const"]; ok && !(takes(c, item) && valid(c, sub)) {
+	if c, ok := sub["const"]; ok && !(takes(c, item) && fitsAll(c, sub)) {
 		return badSchema("'const' %s is no value a key can take", where)
 	}
 	if err := checkBounds(sub, where, maxStr); err != nil {
@@ -431,94 +432,104 @@ func checkBounds(sub map[string]any, where string, maxStr int) error {
 	return nil
 }
 
-// valid is whether v fits the subschema sub, for the keywords the subset allows (format is
-// an annotation and checks nothing).
-func valid(v any, sub map[string]any) bool {
-	if t, ok := sub["type"]; ok {
-		named := []any{t}
-		if list, ok := t.([]any); ok {
+// fits is whether v fits the subschema sub, for the keywords the subset allows (format is
+// an annotation and checks nothing). When it does not, keyword is the one that jsonschema's
+// best_match names, as Python reads it over the subschema with its keys sorted: a failure
+// of v itself comes before a failure of one of its list's strings, and of those the first
+// keyword by name; among the strings, the last one that fails. A failure in a string names
+// that string's keyword, not "items".
+func fits(v any, sub map[string]any) (keyword string, ok bool) {
+	for _, k := range sortedKeys(sub) {
+		if k != "items" && !keywordFits(k, sub[k], v) {
+			return k, false
+		}
+	}
+	if items, ok := sub["items"].(map[string]any); ok {
+		if list, ok := v.([]any); ok {
+			for i := len(list) - 1; i >= 0; i-- {
+				if k, ok := fits(list[i], items); !ok {
+					return k, false
+				}
+			}
+		}
+	}
+	return "", true
+}
+
+// keywordFits is whether v passes the one keyword k with the value want. A bound checks
+// only a value of its type: a number bound a number, a length a string, a count a list.
+func keywordFits(k string, want, v any) bool {
+	switch k {
+	case "type":
+		named := []any{want}
+		if list, ok := want.([]any); ok {
 			named = list
 		}
-		fits := false
-		for _, n := range named {
-			fits = fits || hasJSONType(v, n.(string))
-		}
-		if !fits {
-			return false
-		}
+		return slices.ContainsFunc(named, func(n any) bool { s, _ := n.(string); return hasJSONType(v, s) })
+	case "enum":
+		enum, _ := want.([]any)
+		return slices.ContainsFunc(enum, func(e any) bool { return jsonEqual(e, v) })
+	case "const":
+		return jsonEqual(want, v)
+	case "uniqueItems":
+		return want != true || unique(v)
 	}
-	if enum, ok := sub["enum"].([]any); ok {
-		if !slices.ContainsFunc(enum, func(e any) bool { return jsonEqual(e, v) }) {
-			return false
-		}
-	}
-	if c, ok := sub["const"]; ok && !jsonEqual(c, v) {
-		return false
+	b, isBound := number(want)
+	if !isBound {
+		return true
 	}
 	if f, ok := number(v); ok {
-		bound := func(k string) (float64, bool) {
-			b, ok := sub[k]
-			if !ok {
-				return 0, false
-			}
-			return number(b)
+		switch k {
+		case "minimum":
+			return f >= b
+		case "maximum":
+			return f <= b
+		case "exclusiveMinimum":
+			return f > b
+		case "exclusiveMaximum":
+			return f < b
+		case "multipleOf":
+			q := f / b
+			return q == math.Trunc(q)
 		}
-		if b, ok := bound("minimum"); ok && f < b {
-			return false
-		}
-		if b, ok := bound("maximum"); ok && f > b {
-			return false
-		}
-		if b, ok := bound("exclusiveMinimum"); ok && f <= b {
-			return false
-		}
-		if b, ok := bound("exclusiveMaximum"); ok && f >= b {
-			return false
-		}
-		if b, ok := bound("multipleOf"); ok {
-			if q := f / b; q != math.Trunc(q) {
-				return false
-			}
-		}
-	}
-	limit := func(k string) (float64, bool) {
-		b, ok := sub[k]
-		if !ok {
-			return 0, false
-		}
-		return number(b)
 	}
 	if s, ok := v.(string); ok {
 		n := float64(utf8.RuneCountInString(s))
-		if b, ok := limit("minLength"); ok && n < b {
-			return false
-		}
-		if b, ok := limit("maxLength"); ok && n > b {
-			return false
+		switch k {
+		case "minLength":
+			return n >= b
+		case "maxLength":
+			return n <= b
 		}
 	}
 	if list, ok := v.([]any); ok {
 		n := float64(len(list))
-		if b, ok := limit("minItems"); ok && n < b {
-			return false
+		switch k {
+		case "minItems":
+			return n >= b
+		case "maxItems":
+			return n <= b
 		}
-		if b, ok := limit("maxItems"); ok && n > b {
-			return false
-		}
-		if sub["uniqueItems"] == true {
-			for i := range list {
-				for j := i + 1; j < len(list); j++ {
-					if jsonEqual(list[i], list[j]) {
-						return false
-					}
-				}
-			}
-		}
-		if items, ok := sub["items"].(map[string]any); ok {
-			for _, e := range list {
-				if !valid(e, items) {
-					return false
-				}
+	}
+	return true
+}
+
+// fitsAll is fits without the keyword.
+func fitsAll(v any, sub map[string]any) bool {
+	_, ok := fits(v, sub)
+	return ok
+}
+
+// unique is whether v, when it is a list, holds no value twice.
+func unique(v any) bool {
+	list, ok := v.([]any)
+	if !ok {
+		return true
+	}
+	for i := range list {
+		for j := i + 1; j < len(list); j++ {
+			if jsonEqual(list[i], list[j]) {
+				return false
 			}
 		}
 	}

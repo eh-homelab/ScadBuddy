@@ -498,3 +498,60 @@ func TestABuiltinKindBelowKeepsItsResolvedClass(t *testing.T) {
 		t.Fatalf("mypart changed: %+v", got)
 	}
 }
+
+// Required properties merge down the tree (R-K1-33).
+
+func TestAChildMayRequireAKeyItInherits(t *testing.T) {
+	pool, k := testdb.New(t), kindStore()
+	must(createKind(t, pool, k, wire.KindInput{ID: "parent", Name: "Parent", ParentID: ptr("hardware"),
+		AttributeSchema: schema(map[string]any{"mpn": map[string]any{"type": "string"}})}))
+	must(createKind(t, pool, k, wire.KindInput{ID: "child", Name: "Child", ParentID: ptr("parent"),
+		AttributeSchema: json.RawMessage(`{"type": "object", "required": ["mpn"]}`)}))
+	if got := merged(t, pool, k, "child")["required"]; !reflect.DeepEqual(got, []any{"mpn"}) {
+		t.Fatalf("required %v", got)
+	}
+}
+
+func TestRequiredMergesDownTheTree(t *testing.T) {
+	pool, k := testdb.New(t), kindStore()
+	must(createKind(t, pool, k, wire.KindInput{ID: "parent", Name: "Parent", ParentID: ptr("hardware"),
+		AttributeSchema: json.RawMessage(`{"type": "object", "properties": {"a": {"type": "string"}}, "required": ["a"]}`)}))
+	must(createKind(t, pool, k, wire.KindInput{ID: "child", Name: "Child", ParentID: ptr("parent"),
+		AttributeSchema: json.RawMessage(`{"type": "object", "properties": {"b": {"type": "string"}}, "required": ["b"]}`)}))
+	_, err := createItem(t, pool, itemStore(), wire.ItemInput{KindID: "child", Name: "X"})
+	if missing, _ := incompleteness(t, err); !reflect.DeepEqual(missing, []string{"a", "b"}) {
+		t.Fatalf("missing %v", missing)
+	}
+}
+
+func TestAnAncestorThatDropsARequiredKeyIsRefused(t *testing.T) {
+	pool, k := testdb.New(t), kindStore()
+	must(createKind(t, pool, k, wire.KindInput{ID: "parent", Name: "Parent", ParentID: ptr("hardware"),
+		AttributeSchema: schema(map[string]any{"mpn": map[string]any{"type": "string"}})}))
+	must(createKind(t, pool, k, wire.KindInput{ID: "child", Name: "Child", ParentID: ptr("parent"),
+		AttributeSchema: json.RawMessage(`{"type": "object", "required": ["mpn"]}`)}))
+	_, err := updateKind(t, pool, k, "parent", wire.KindPatch{AttributeSchema: schema(nil)})
+	if r := refusal(t, err, 422, "bad_property_schema"); r.Detail != "kind 'child' would require 'mpn', which it no longer defines" {
+		t.Fatalf("%q", r.Detail)
+	}
+	if got := merged(t, pool, k, "parent")["properties"]; !reflect.DeepEqual(got, map[string]any{"mpn": map[string]any{"type": "string"}}) {
+		t.Fatalf("the parent's schema changed: %v", got)
+	}
+}
+
+func TestAMoveThatDropsAGrandchildsKeyIsRefused(t *testing.T) {
+	pool, k := testdb.New(t), kindStore()
+	must(createKind(t, pool, k, wire.KindInput{ID: "a", Name: "A", ParentID: ptr("hardware"),
+		AttributeSchema: schema(map[string]any{"mpn": map[string]any{"type": "string"}})}))
+	must(createKind(t, pool, k, wire.KindInput{ID: "b", Name: "B", ParentID: ptr("a")}))
+	must(createKind(t, pool, k, wire.KindInput{ID: "c", Name: "C", ParentID: ptr("b"),
+		AttributeSchema: json.RawMessage(`{"type": "object", "required": ["mpn"]}`)}))
+	must(createKind(t, pool, k, wire.KindInput{ID: "bare", Name: "Bare", ParentID: ptr("hardware")}))
+	_, err := updateKind(t, pool, k, "b", wire.KindPatch{ParentID: wire.Some("bare")})
+	if r := refusal(t, err, 422, "bad_property_schema"); r.Detail != "kind 'c' would require 'mpn', which it no longer defines" {
+		t.Fatalf("%q", r.Detail)
+	}
+	if got := getKind(t, pool, k, "b"); got.ParentID == nil || *got.ParentID != "a" {
+		t.Fatalf("b moved to %v", got.ParentID)
+	}
+}

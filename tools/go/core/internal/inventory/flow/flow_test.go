@@ -1500,3 +1500,29 @@ func TestASpecialTypeWhoseNeedsAreUnmetBlocksEveryStep(t *testing.T) {
 		t.Fatalf("%d moves", n)
 	}
 }
+
+// An item that became incomplete still takes stock: only its create and its save are
+// checked (R-K1-33).
+func TestAnIncompleteItemStillTakesStock(t *testing.T) {
+	f, pool := setup(t)
+	kinds := &store.Kinds{Cat: handlers.Builtin()}
+	items := &store.Items{Cat: handlers.Builtin()}
+	out(run(t, pool, func(ctx context.Context, tx pgx.Tx) (wire.ItemKind, error) {
+		return kinds.Create(ctx, tx, wire.KindInput{ID: "plain", Name: "Plain", ParentID: ptr("hardware"),
+			AttributeSchema: []byte(`{"type": "object", "properties": {"mpn": {"type": "string"}}}`)}, store.Actor(by))
+	})).ok(t)
+	item := newItem(t, pool, "plain", "Old")
+	out(run(t, pool, func(ctx context.Context, tx pgx.Tx) (wire.ItemKind, error) {
+		return kinds.Update(ctx, tx, "plain", wire.KindPatch{AttributeSchema: []byte(
+			`{"type": "object", "properties": {"mpn": {"type": "string"}}, "required": ["mpn"]}`)}, store.Actor(by))
+	})).ok(t)
+	got, err := items.Get(bg, pool, item)
+	if err != nil || !reflect.DeepEqual(got.MissingProperties, []string{"mpn"}) {
+		t.Fatalf("%v %v", got.MissingProperties, err)
+	}
+
+	out(receiveLot(f, t, item, lot("10", "500", day(1)))).ok(t)
+	ms := out(take(f, t, item, "4", wire.UseInput{})).ok(t)
+	eq(t, shapes(ms), []shape{{"-4", "500"}})
+	eq(t, onHands(t, pool, item), []string{"6"})
+}
