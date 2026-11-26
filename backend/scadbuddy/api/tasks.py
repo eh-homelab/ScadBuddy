@@ -20,7 +20,7 @@ from pydantic import BaseModel
 
 from scadbuddy.api.crud_agent_events import UUID_PATTERN
 from scadbuddy.api.deps import SettingsStoreDep
-from scadbuddy.api.flows import admit, agent_answer, answerer, unavailable
+from scadbuddy.api.flows import admission, agent_answer, answerer, unavailable
 from scadbuddy.api.limits import RouteLimit
 from scadbuddy.api.operations import (
     OPERATION_RESPONSES,
@@ -32,6 +32,7 @@ from scadbuddy.auth.component import CallerDep
 from scadbuddy.core.authorship import browser_principal
 from scadbuddy.core.events import TASK_PLACE_CHAR, TASK_PLACE_MAX
 from scadbuddy.core.problems import PROBLEM_MEDIA_TYPE, ApiError
+from scadbuddy.flows.answerers import BY_SETTING
 from scadbuddy.flows.component import FlowsDep
 from scadbuddy.flows.operations import (
     AGENT_ANSWER,
@@ -196,13 +197,18 @@ async def answer_task(
         raise unavailable() from None
 
     person = found.kind == "person"
+    # A task's id is its prompt's call id (`workflows/flow_tools.py` `_prompt_task`): the
+    # parked entry's key.
+    admitted_by, refusal = (
+        (BY_SETTING, None)
+        if person
+        else await admission(found, settings, flows, task.run_id, task.id)
+    )
 
     async def refuse() -> None:
         # Not for a repeat, which is its first answer however the task stands now.
-        if not person:
-            # A task's id is its prompt's call id (`workflows/flow_tools.py` `_prompt_task`):
-            # the parked entry's key.
-            await admit(found, settings, flows, task.run_id, task.id)
+        if refusal is not None:
+            raise refusal
         if task.state != "open":
             raise task_not_open(task.state)
         problems = await asyncio.to_thread(validate_answer, task.schema_, answer)
@@ -232,7 +238,7 @@ async def answer_task(
                     "run_id": task.run_id,
                     "task_id": task.id,
                     "answer_sealed": sealed,
-                    **agent_answer(found),
+                    **agent_answer(found, admitted_by),
                 }
             ),
             idempotency_key=idempotency_key,

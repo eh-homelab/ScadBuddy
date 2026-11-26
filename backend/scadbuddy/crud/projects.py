@@ -23,6 +23,7 @@ from scadbuddy.flows.grants import ConsumeRequest, Grant, GrantUse
 from scadbuddy.flows.models import CallOperation, Decision, Proposal, Run
 from scadbuddy.flows.store import (
     RESET_CALL_S,
+    GrantLapsedError,
     HopMovedError,
     ResetBeforeFloorError,
     ResetSupersededError,
@@ -34,6 +35,7 @@ BASE = f"/api/v1{PREFIX}/projects"
 #: `api/crud_projects.py` `HOP_MOVED`, `RESET_SUPERSEDED`, `RESET_BEFORE_FLOOR`,
 #: `RESET_REFUSED`, `SUBJECT_FORGOTTEN`.
 HOP_MOVED = "hop_moved"
+GRANT_LAPSED = "grant_lapsed"
 RESET_SUPERSEDED = "reset-superseded"
 RESET_BEFORE_FLOOR = "reset-before-floor"
 RESET_REFUSED = "reset-refused"
@@ -141,6 +143,8 @@ class RemoteFlowStore:
         except CrudRefusedError as error:
             if error.status == 409 and error.problem.get("reason") == HOP_MOVED:
                 raise HopMovedError(decision.request_id) from error
+            if error.status == 409 and error.problem.get("reason") == GRANT_LAPSED:
+                raise GrantLapsedError(decision.request_id) from error
             raise
         return bool(response.json()["recorded"])
 

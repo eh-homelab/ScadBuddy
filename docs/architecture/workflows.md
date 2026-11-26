@@ -278,8 +278,10 @@ limit. A prompt also has a row in `tasks`, which the activities `flow_task_open`
 `flow_task_answered` and `flow_task_close` write through the API
 (`scadbuddy/workflows/flow_activities.py` `FlowTaskActivities`). The answers are the
 operation kinds `flow_answer` and `task_answer` on `projects`, and `flow_agent_answer` for an
-assistant that the setting `flow_answerers` admits (#7471; `scadbuddy/flows/operations.py`
-`flow_kinds`).
+assistant that the setting `flow_answerers` or the run's grant admits (#7471;
+`scadbuddy/flows/operations.py` `flow_kinds`). A grant-admitted answer is recorded only
+while the grant chain is in force (`FlowStore.record_decision`, 409 `grant_lapsed` over the
+CRUD route).
 See [features/flows.md](../features/flows.md#questions-to-a-person).
 
 ## Housekeeping

@@ -26,7 +26,7 @@ from psycopg_pool import ConnectionPool
 
 from scadbuddy.bambuddy.runs import TransactionalEvents
 from scadbuddy.core.events import FlowRunEvent
-from scadbuddy.flows.answerers import SessionOwner
+from scadbuddy.flows.answerers import BY_SETTING, SessionOwner
 from scadbuddy.flows.grants import (
     ConsumeRequest,
     Consumption,
@@ -118,6 +118,11 @@ class GrantStateError(Exception):
 class HopMovedError(Exception):
     """The parked call is no longer at the hop the decision was made for (#2482): the
     starter session's hop ended, or a person decided it first."""
+
+
+class GrantLapsedError(Exception):
+    """The run grant that admitted an agent's answer (#7471, spec 2026-11-25 §4.3) is no
+    longer in force with its chain, or no longer lets anyone answer: nothing was recorded."""
 
 
 #: `approval_expiry_seconds` (the agent's Settings → Assistant) when it is not set.
@@ -376,7 +381,10 @@ class FlowStore:
         """Record an answer or approval before the harness is told. True when recorded, or
         when this same decision is there already (a retried run resends it); False when
         another decision holds the request id. With `at_hop`, only while the call waits
-        at that hop, checked under the run's row lock: `HopMovedError` otherwise."""
+        at that hop, checked under the run's row lock: `HopMovedError` otherwise. A new
+        answer that a grant admitted (`admitted_by` its id) is recorded only while the
+        grant and its chain are in force, under the grant row's share lock:
+        `GrantLapsedError` otherwise."""
         return await asyncio.to_thread(self._record_decision, decision, at_hop)
 
     async def get_decision(self, request_id: str) -> Decision | None:
@@ -967,6 +975,8 @@ class FlowStore:
                 ),
             ).fetchone()
             if row is not None:
+                if decision.kind == "answer" and decision.admitted_by not in (None, BY_SETTING):
+                    self._grant_admits(conn, decision)
                 return True
             # In SQL: jsonb writes some numbers (1e23) another way than they came. Locked: a
             # take-over under way ends first, and a later one sees this caller's operation.
@@ -977,6 +987,23 @@ class FlowStore:
                 (*_decided(decision), decision.input_hash, decision.request_id),
             ).fetchone()
         return held is not None and bool(held["same"])
+
+    def _grant_admits(self, conn: Connection[DictRow], decision: Decision) -> None:
+        """`GrantLapsedError` (which rolls the insert back) unless the run grant
+        `decision.admitted_by` is the run's, still lets agents answer, and is in force with
+        its chain. Its row is share-locked, so a revocation lands wholly before or after."""
+        row = conn.execute(
+            f"SELECT {_GRANT} FROM flow_grants WHERE id = %s AND run_id = %s FOR SHARE",
+            (decision.admitted_by, decision.run_id),
+        ).fetchone()
+        grant = None if row is None else Grant.model_validate(row)
+        if (
+            grant is None
+            or grant.spec.answers is None
+            or not grant.in_force(datetime.now(UTC))
+            or not self._chain_in_force(conn, grant)
+        ):
+            raise GrantLapsedError(decision.request_id)
 
     def _answers_of(self, run_id: str) -> list[Decision]:
         with self._pool.connection() as conn:

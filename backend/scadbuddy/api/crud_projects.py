@@ -29,7 +29,12 @@ from scadbuddy.flows.component import FlowsDep
 from scadbuddy.flows.grants import ConsumeRequest, Grant, GrantUse
 from scadbuddy.flows.models import CallOperation, Decision, Proposal, Run
 from scadbuddy.flows.operations import reset_execution
-from scadbuddy.flows.store import HopMovedError, ResetBeforeFloorError, ResetSupersededError
+from scadbuddy.flows.store import (
+    GrantLapsedError,
+    HopMovedError,
+    ResetBeforeFloorError,
+    ResetSupersededError,
+)
 from scadbuddy.workflows.flow_models import (
     FlowRecord,
     FlowWaiting,
@@ -40,6 +45,8 @@ from scadbuddy.workflows.flow_models import (
 
 #: A decision refused because its call left the hop it was made for.
 HOP_MOVED = "hop_moved"
+#: The grant that admitted an agent's answer lapsed before it was recorded (#7471).
+GRANT_LAPSED = "grant_lapsed"
 #: A Reset refused because another Reset replaced the execution first.
 RESET_SUPERSEDED = "reset-superseded"
 #: A Reset refused because its point is before the entries the row keeps.
@@ -270,6 +277,12 @@ async def record_decision(body: DecisionWrite, flows: FlowsDep) -> Recorded:
             status.HTTP_409_CONFLICT,
             "The call is no longer at the hop the decision was made for.",
             reason=HOP_MOVED,
+        ) from None
+    except GrantLapsedError:
+        raise ApiError(
+            status.HTTP_409_CONFLICT,
+            "The run grant that let this answer through is no longer in force.",
+            reason=GRANT_LAPSED,
         ) from None
 
 

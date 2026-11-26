@@ -390,8 +390,10 @@ same way, `vite.config.ts`).
   (`lib/flows.ts` `taskTopic`) and shows the newer of its read and the page's. Both answer
   forms are `USER_ONLY`. A question the flow asked of people only says so (`pendingParts.tsx`
   `PeopleOnly`); the run's steps and the task card name an assistant that answered and link its
-  session (`AnsweredBy`, `lib/flows.ts` `answererLabel`). Settings, Assistant, "Flows'
-  questions" (`pages/settings/sections/flow-answerers.tsx`) is `flow_answerers` (#7471).
+  session (`AnsweredBy`, `lib/flows.ts` `answererLabel`), and say when the run's grant let it
+  answer. Settings, Assistant, "Flows' questions" (`pages/settings/sections/flow-answerers.tsx`)
+  is `flow_answerers` (#7471); it and a run grant's `answers` in `GrantEditor` share
+  `components/flows/AnswerersPicker.tsx`.
   `SchemaForm` draws a form from a schema, for an answer (`answer`) and
   for Start run; `inputsForm.tsx` `useInputs` holds the fields, `lib/flowInputs.ts` the parse:
   an answer leaves out a blank field, Start run sends a cleared text. Mocks:
