@@ -12,6 +12,7 @@ expect true  backend/scadbuddy/migrations_agent/20260928T0107Z_sessions.sql
 expect false backend/scadbuddy/migrationsx/a.sql
 expect true  backend/tests/fixtures/blob-upload-vectors.json
 expect false backend/tests/fixturesx/a.json
+expect true  backend/tests/fixtures/event-stream-vectors.json
 expect true  go.work
 expect true  go.work.sum
 expect true  vendor/modules.txt
@@ -20,6 +21,7 @@ expect true  scripts/generate-go-client.jq
 expect true  .github/scripts/generate-go-client-jq.test.sh
 expect true  .github/workflows/go-module-ci.yml
 expect true  tools/go/bambuddy-fs/Dockerfile
+expect true  tools/go/fleetd/main.go
 expect true  .github/workflows/ci.yml
 expect true  .github/scripts/select-go.sh
 expect true  .github/scripts/select-go.test.sh

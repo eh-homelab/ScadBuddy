@@ -1,8 +1,9 @@
 """Who besides a person may answer a flow's question (#7471, spec 2026-11-25 §4).
 
 A person answers whatever the setting says. An assistant session or an MCP token answers
-only through the agent's service credential, when the setting `flow_answerers` names it
-and the question is not for people only. A call from a flow run never answers."""
+only through the agent's service credential, when the setting `flow_answerers` or the
+run's approved grant (`answers`) names it and the question is not for people only. A
+call from a flow run never answers."""
 
 from __future__ import annotations
 

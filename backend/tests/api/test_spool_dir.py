@@ -31,6 +31,7 @@ from tests.api.test_print_filaments import queue_route, slice_routes
 from tests.api.test_print_library import library_3mf, library_file
 from tests.api.test_print_run_choices import body, follow_run
 from tests.api.test_send import API, configure
+from tests.conftest import PgPool
 from tests.support.arrange import saved_output
 
 pytestmark = pytest.mark.requires_postgres
@@ -63,10 +64,10 @@ def _spooled_only_under(app: FastAPI, node: Path) -> None:
 
 @respx.mock
 def test_arrange_spools_a_library_file_under_the_spool_dir(
-    client: TestClient, app: FastAPI, tmp_path: Path, node: Path
+    client: TestClient, app: FastAPI, tmp_path: Path, pg_pool: PgPool, node: Path
 ) -> None:
     configure(client)
-    asyncio.run(saved_output(tmp_path))
+    asyncio.run(saved_output(tmp_path, pg_pool))
     library_file(88, content=two_colour_3mf(tmp_path))
     app.dependency_overrides[get_render] = lambda: Arranger()
 

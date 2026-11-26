@@ -6,6 +6,7 @@ import os
 import shutil
 import threading
 import time
+import uuid
 from collections.abc import Callable, Iterator
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import ExitStack
@@ -26,6 +27,7 @@ from scadbuddy.core.settings import Settings
 from scadbuddy.library.catalogue import Catalogue, ModelMeta
 from scadbuddy.library.history import GitError
 from scadbuddy.library.presets import PresetStore
+from scadbuddy.main import create_app
 from scadbuddy.render.job_models import Job, JobTableKind
 from scadbuddy.render.jobs import _make_staging
 from scadbuddy.render.runner import ProcessOutput, RenderTimeoutError
@@ -34,9 +36,11 @@ from scadbuddy.render.solids import WRAPPER_PREFIX
 from scadbuddy.workflows import pipeline_activities
 from scadbuddy.workflows.models import OutputRequest
 from tests.api.conftest import PNG_BYTES, set_fake_env
+from tests.conftest import PgPool
 from tests.support.arrange import saved_output
 from tests.support.media import MemoryMediaStore
 from tests.support.operations import press
+from tests.support.row_outputs import app_outputs, insert_row, output_meta
 from tests.support.template_rows import sync_template_rows
 
 SOURCE = "width = 10;\ncube(width);\n"
@@ -169,13 +173,21 @@ def test_the_derived_schema_is_cached_outside_the_versioned_tree(
     assert cached["schema"]["parameters"][0]["name"] == "width"
 
 
-def test_deleting_a_model_takes_its_outputs_with_it(
-    client: TestClient, model: str, paths: DataPaths
-) -> None:
-    orphan = paths.outputs / model / "deadbeef"
-    orphan.mkdir(parents=True)
+def _output_row(client: TestClient, slug: str) -> str:
+    """An output row of ``slug`` with no bytes; its id."""
+    output_id = uuid.uuid4().hex
+    insert_row(app_outputs(client), output_meta(output_id, slug))
+    return output_id
+
+
+def _row_slugs(client: TestClient) -> set[str]:
+    return app_outputs(client).rows.slugs()
+
+
+def test_deleting_a_model_takes_its_outputs_with_it(client: TestClient, model: str) -> None:
+    _output_row(client, model)
     client.delete(f"/api/v1/models/{model}", headers=press())
-    assert not orphan.exists()
+    assert model not in _row_slugs(client)
 
 
 def test_a_deleted_model_leaves_the_list(client: TestClient) -> None:
@@ -223,13 +235,12 @@ def test_a_stale_tombstone_is_swept_at_startup(app: FastAPI, paths: DataPaths) -
 
 
 @pytest.mark.usefixtures("model")
-def test_an_orphaned_output_is_swept_at_startup(app: FastAPI, paths: DataPaths) -> None:
-    orphan = paths.outputs / "gone" / "deadbeef"
-    orphan.mkdir(parents=True)
-    (orphan / "model.3mf").write_bytes(b"3mf")
-
-    with TestClient(app):
-        assert list(paths.outputs.iterdir()) == []
+def test_an_orphaned_output_is_swept_at_startup(app: FastAPI, settings: Settings) -> None:
+    """#7257: the rows of a gone template's outputs go at the next start."""
+    with TestClient(app) as client:
+        _output_row(client, "gone")
+    with TestClient(create_app(settings)) as client:
+        assert "gone" not in _row_slugs(client)
 
 
 @pytest.mark.usefixtures("model")
@@ -249,8 +260,7 @@ def test_an_orphaned_schema_cache_and_revision_are_swept_at_startup(
 def test_a_delete_sweeps_other_models_orphans(
     client: TestClient, model: str, paths: DataPaths
 ) -> None:
-    orphan = paths.outputs / "gone" / "deadbeef"
-    orphan.mkdir(parents=True)
+    _output_row(client, "gone")
     paths.schema_cache.mkdir(parents=True)
     paths.model_schema_cache("gone").write_text("{}\n", encoding="utf-8")
     # A live template besides: a models directory with none sweeps nothing (#7649).
@@ -259,7 +269,7 @@ def test_a_delete_sweeps_other_models_orphans(
 
     assert client.delete(f"/api/v1/models/{model}", headers=press()).status_code == 204
 
-    assert not (paths.outputs / "gone").exists()
+    assert "gone" not in _row_slugs(client)
     assert not paths.model_schema_cache("gone").exists()
 
 
@@ -268,13 +278,13 @@ def test_a_root_that_cannot_be_listed_does_not_stop_the_others(
     client: TestClient, paths: DataPaths, caplog: pytest.LogCaptureFixture
 ) -> None:
     catalogue = client.app.state.scadbuddy.catalogue  # type: ignore[attr-defined]
-    (paths.outputs / "gone" / "deadbeef").mkdir(parents=True)
+    paths.model_revision_dir("gone", "0" * 40).mkdir(parents=True)
     paths.schema_cache.mkdir(parents=True)
     paths.model_schema_cache("gone").write_text("{}\n", encoding="utf-8")
     iterdir = Path.iterdir
 
     def stalled(self: Path) -> Iterator[Path]:
-        if self == paths.outputs:
+        if self == paths.model_revisions:
             raise OSError("EIO")
         return iterdir(self)
 
@@ -291,7 +301,7 @@ def test_a_slug_or_root_that_cannot_be_checked_is_kept_and_the_rest_swept(
 ) -> None:
     catalogue = client.app.state.scadbuddy.catalogue  # type: ignore[attr-defined]
     for slug in ("gone", "unknown"):
-        (paths.outputs / slug / "deadbeef").mkdir(parents=True)
+        _output_row(client, slug)
     paths.schema_cache.mkdir(parents=True)
     paths.model_schema_cache("gone").write_text("{}\n", encoding="utf-8")
     exists, is_dir = Path.exists, Path.is_dir
@@ -313,7 +323,7 @@ def test_a_slug_or_root_that_cannot_be_checked_is_kept_and_the_rest_swept(
         removed = catalogue.sweep_orphans()
 
     assert removed == ["cache/schema/gone.json", "outputs/gone"]
-    assert (paths.outputs / "unknown").exists()
+    assert _row_slugs(client) == {"unknown"}
     assert "could not check a model for orphans" in caplog.text
     assert "could not list for orphans" in caplog.text
 
@@ -335,7 +345,6 @@ def test_the_orphan_sweep_never_raises(paths: DataPaths, failing: tuple[str, ...
     it must swallow every filesystem error itself: a root it cannot check, a listing,
     a slug's liveness and a removal, and the saved presets' pass. Where the models
     directory itself cannot be listed, nothing is swept, presets included (#7649)."""
-    (paths.outputs / "gone" / "deadbeef").mkdir(parents=True)
     paths.model_revision_dir("gone", "0" * 40).mkdir(parents=True)
     paths.schema_cache.mkdir(parents=True)
     paths.model_schema_cache("gone").write_text("{}\n", encoding="utf-8")
@@ -375,14 +384,14 @@ def test_a_new_model_does_not_inherit_a_gone_models_leftovers(
 ) -> None:
     catalogue = client.app.state.scadbuddy.catalogue  # type: ignore[attr-defined]
     # What a delete whose sweep failed leaves behind for the next model of the name.
-    (paths.outputs / "reused" / "deadbeef").mkdir(parents=True)
+    _output_row(client, "reused")
     paths.model_revision_dir("reused", "0" * 40).mkdir(parents=True)
     paths.schema_cache.mkdir(parents=True)
     paths.model_schema_cache("reused").write_text("{}\n", encoding="utf-8")
 
     catalogue.create("reused", "cube(1);\n", ModelMeta(name="Reused"))
 
-    assert not (paths.outputs / "reused").exists()
+    assert "reused" not in _row_slugs(client)
     assert not (paths.model_revisions / "reused").exists()
     assert not paths.model_schema_cache("reused").exists()
 
@@ -396,8 +405,7 @@ def test_the_orphan_sweep_never_touches_a_live_model(
     paths.model_dir(creating).mkdir()
     derived: list[Path] = []
     for slug in (model, creating):
-        output = paths.output_dir(slug, "deadbeef")
-        output.mkdir(parents=True)
+        _output_row(client, slug)
         export = paths.model_revision_dir(slug, "0" * 40)
         # The boot's prune run (`prune_revision_exports`) runs beside this test. It
         # removes a slug directory that it finds empty, so a plain `mkdir(parents=True)`
@@ -406,10 +414,11 @@ def test_the_orphan_sweep_never_touches_a_live_model(
         _make_staging(export)
         paths.schema_cache.mkdir(parents=True, exist_ok=True)
         paths.model_schema_cache(slug).write_text("{}\n", encoding="utf-8")
-        derived += [output, export, paths.model_schema_cache(slug)]
+        derived += [export, paths.model_schema_cache(slug)]
 
     assert catalogue.sweep_orphans() == []
     assert all(path.exists() for path in derived)
+    assert _row_slugs(client) == {model, creating}
 
 
 @pytest.mark.parametrize("state", ["missing", "empty", "only built-ins"])
@@ -419,8 +428,7 @@ def test_no_sweep_while_the_models_directory_has_no_template(
     """#7649: a wrong mount, a rename in progress or a restore that is not whole. Every
     template would read as gone, and its outputs and presets with it."""
     catalogue = client.app.state.scadbuddy.catalogue  # type: ignore[attr-defined]
-    output = paths.output_dir(model, "deadbeef")
-    output.mkdir(parents=True)
+    _output_row(client, model)
     paths.schema_cache.mkdir(parents=True, exist_ok=True)
     paths.model_schema_cache(model).write_text("{}\n", encoding="utf-8")
     body = {"name": "Lid", "inputs": {"params": {"width": 12}}}
@@ -436,7 +444,7 @@ def test_no_sweep_while_the_models_directory_has_no_template(
     with caplog.at_level("WARNING"):
         assert catalogue.sweep_orphans() == []
         assert catalogue.sweep_orphan_previews() == []
-    assert output.is_dir() and paths.model_schema_cache(model).is_file()
+    assert model in _row_slugs(client) and paths.model_schema_cache(model).is_file()
     assert [saved.name for saved in catalogue.presets.saved_presets(model)] == ["Lid"]
     assert model in catalogue.previews.slugs()
     assert "no template" in caplog.text
@@ -451,11 +459,11 @@ def test_a_template_a_commit_deleted_is_swept_with_no_template_left(
     slug = _upload(client).json()["slug"]
     assert client.delete(f"/api/v1/models/{slug}", headers=press()).status_code == 204
     # What a render racing the delete writes after its sweep.
-    paths.output_dir(slug, "deadbeef").mkdir(parents=True)
-    paths.output_dir("never", "deadbeef").mkdir(parents=True)
+    _output_row(client, slug)
+    _output_row(client, "never")
 
     assert catalogue.sweep_orphans() == [f"outputs/{slug}"]
-    assert (paths.outputs / "never").is_dir()
+    assert _row_slugs(client) == {"never"}
 
 
 def test_a_template_still_in_head_is_kept_though_a_commit_deleted_a_file_of_it(
@@ -471,11 +479,10 @@ def test_a_template_still_in_head_is_kept_though_a_commit_deleted_a_file_of_it(
     extra.unlink()
     assert catalogue.history.commit("Drop the file", slug) is not None
     paths.model_dir(slug).rename(paths.root / "away")
-    output = paths.output_dir(slug, "deadbeef")
-    output.mkdir(parents=True)
+    _output_row(client, slug)
 
     assert catalogue.sweep_orphans() == []
-    assert output.is_dir()
+    assert _row_slugs(client) == {slug}
 
 
 def test_a_failed_startup_sweep_does_not_stop_the_boot(
@@ -664,8 +671,7 @@ def test_a_failed_cleanup_step_does_not_fail_a_completed_delete(
     schema_cache = paths.model_schema_cache(model)
     export = paths.model_revision_dir(model, "0" * 40)
     export.mkdir(parents=True)
-    output = paths.outputs / model / "deadbeef"
-    output.mkdir(parents=True)
+    _output_row(client, model)
     real_unlink = Path.unlink
 
     def failing_unlink(self: Path, missing_ok: bool = False) -> None:
@@ -683,7 +689,7 @@ def test_a_failed_cleanup_step_does_not_fail_a_completed_delete(
     assert schema_cache.exists()
     assert not paths.model_dir(model).exists()
     assert not (paths.model_revisions / model).exists()
-    assert not (paths.outputs / model).exists()
+    assert model not in _row_slugs(client)
     assert list(paths.tombstones.iterdir()) == []
 
 
@@ -917,12 +923,13 @@ def test_a_real_arrange_a_delete_cancels_settles_in_time_and_the_model_goes(
     client: TestClient,
     paths: DataPaths,
     tmp_path: Path,
+    pg_pool: PgPool,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """#3263: an arrange of the model's outputs, on the app's own worker, is held in
     its write step; the delete's `handle.cancel()` reaches it, and its run settles the
     row `cancelled` within the delete's wait, as a render's does."""
-    _, meta, written = asyncio.run(saved_output(tmp_path))
+    _, meta, written = asyncio.run(saved_output(tmp_path, pg_pool))
     started, release = asyncio.Event(), tmp_path / "release"
 
     async def held(req: OutputRequest, *_: object, **__: object) -> NoReturn:

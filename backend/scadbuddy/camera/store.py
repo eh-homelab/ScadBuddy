@@ -1,8 +1,9 @@
 """The camera store: which printers record, the segment index, the feed leases and the
 feed state (plan 2026-11-23 camera recording, phase 1).
 
-A printer qualifies when its LAN link has a sealed code, its last report names an
-``rtsps://`` camera (`models.rtsp_url`) and ``printers.camera_recording`` is on. One
+A printer qualifies when it is a physical printer (``printers.kind`` ``physical``), its LAN
+link has a sealed code, its last report names an ``rtsps://`` camera (`models.rtsp_url`) and
+``printers.camera_recording`` is on. One
 recorder at a time holds a printer's lease. The lease is one statement, so two recorders
 that ask at once cannot both get it."""
 
@@ -101,7 +102,9 @@ class CameraStore:
             rows = conn.execute(
                 "SELECT p.id, p.lan_host, p.lan_cert_sha256, r.report FROM printers p"
                 " JOIN printer_reports r ON r.printer_id = p.id"
-                " WHERE p.camera_recording AND p.lan_host IS NOT NULL"
+                # A Bambuddy virtual printer has the forwarded printer's report, so an
+                # RTSP URL, but no camera (#7996).
+                " WHERE p.kind = 'physical' AND p.camera_recording AND p.lan_host IS NOT NULL"
                 " AND p.access_code_sealed IS NOT NULL AND p.lan_cert_sha256 IS NOT NULL"
                 f"{where} ORDER BY p.created_at, p.id",
                 args,

@@ -377,8 +377,8 @@ def test_overlapping_saves_under_one_id_never_touch_each_others_output(
     """#5390 review: two attempts of one quote save under the operation's output id at
     once. The first is in the middle of its save when the second starts, and the
     second's write fails. The first claimed the id, so the second saves under an id of
-    its own: its failure removes only its own directory and releases only its own
-    Parts, and the first output and its holds survive."""
+    its own: its failure releases only its own Parts, and the first output and its
+    holds survive."""
     job_id, parts = finished(app, tmp_path)
     state: AppState = getattr(app.state, STATE_ATTR)
     kind = state.components.get(OPERATIONS).kinds["output_create"]
@@ -387,21 +387,21 @@ def test_overlapping_saves_under_one_id_never_touch_each_others_output(
     go = threading.Event()
     calls: list[str | None] = []
 
-    def create(job: Job, **kwargs: Any) -> Any:
+    def create(job: Job, directory: Path, **kwargs: Any) -> Any:
         calls.append(kwargs.get("output_id"))
         if len(calls) == 1:
             inside.set()
             if paused == "before_the_write":
                 assert go.wait(30)
-                return real(job, **kwargs)
-            meta = real(job, **kwargs)
+                return real(job, directory, **kwargs)
+            meta = real(job, directory, **kwargs)
             assert go.wait(30)
             return meta
         # The second save's copy fails part way: the job's preview is gone.
         [chosen] = job.outputs
         gone = chosen.result.model_copy(update={"preview_glb": "gone/preview.glb"})
         broken = job.model_copy(update={"outputs": [chosen.model_copy(update={"result": gone})]})
-        return real(broken, **kwargs)
+        return real(broken, directory, **kwargs)
 
     monkeypatch.setattr(state.outputs, "prepare", create)
     shared = uuid.uuid4().hex
@@ -416,7 +416,7 @@ def test_overlapping_saves_under_one_id_never_touch_each_others_output(
     assert client.portal is not None
     first = client.portal.start_task_soon(kind.run, body, {})
     assert inside.wait(30)
-    # #7257: the first attempt holds the id's row claim as well as its folder.
+    # #7257: the first attempt holds the id's row claim.
     assert claims(pool) == {shared}
     with pytest.raises(ApiError):
         client.portal.call(kind.run, body, {})
@@ -438,18 +438,18 @@ def test_failed_save_releases_claim(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """#7257 (plan Task A4): a save that fails after it claimed its id frees the row
-    claim and the folder, so the next attempt claims the id and saves under it."""
+    claim, so the next attempt claims the id and saves under it."""
     job_id, _ = finished(app, tmp_path)
     state: AppState = getattr(app.state, STATE_ATTR)
     kind = state.components.get(OPERATIONS).kinds["output_create"]
     real = state.outputs.prepare
     calls: list[str | None] = []
 
-    def fails_once(job: Job, **kwargs: Any) -> Any:
+    def fails_once(job: Job, directory: Path, **kwargs: Any) -> Any:
         calls.append(kwargs.get("output_id"))
         if len(calls) == 1:
             raise RuntimeError("the save stopped")
-        return real(job, **kwargs)
+        return real(job, directory, **kwargs)
 
     monkeypatch.setattr(state.outputs, "prepare", fails_once)
     shared = uuid.uuid4().hex
@@ -465,7 +465,7 @@ def test_failed_save_releases_claim(
     with pytest.raises(RuntimeError, match="the save stopped"):
         client.portal.call(kind.run, body, {})
     assert claims(pool) == set()
-    assert not state.outputs.paths.output_dir("demo", shared).exists()
+    assert not (state.outputs.paths.root / "outputs" / "demo" / shared).exists()
 
     saved = client.portal.call(kind.run, body, {})
     assert saved["id"] == shared

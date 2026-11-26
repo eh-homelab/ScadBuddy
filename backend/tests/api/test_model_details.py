@@ -5,7 +5,6 @@ from __future__ import annotations
 import itertools
 import json
 import os
-import shutil
 import threading
 import time
 import zipfile
@@ -21,10 +20,9 @@ import scadbuddy.api.models as models_api
 from scadbuddy.api import limits
 from scadbuddy.api.models import MAX_SOURCE_CHARS, MAX_THUMBNAIL_BYTES, _mib
 from scadbuddy.core.paths import DataPaths
-from scadbuddy.library import outputs as outputs_module
-from scadbuddy.render import provenance
 from tests.api.conftest import PNG_BYTES, set_plate_image, wait_for_job
 from tests.support.operations import press
+from tests.support.row_outputs import update_row
 from tests.support.template_rows import sync_template_rows
 
 SLUG = "widget"
@@ -98,14 +96,6 @@ def zip_opens(monkeypatch: pytest.MonkeyPatch) -> _Counting:
     """Every archive opened from here on; only the output store opens any on these routes."""
     counter = _Counting(zipfile.ZipFile)
     monkeypatch.setattr(zipfile, "ZipFile", counter)
-    return counter
-
-
-def _scans(client: TestClient, monkeypatch: pytest.MonkeyPatch) -> _Counting:
-    """Every full rescan of a model's outputs for its cover, from here on."""
-    store = client.app.state.scadbuddy.outputs  # type: ignore[attr-defined]
-    counter = _Counting(store._scan_plate_cover)
-    monkeypatch.setattr(store, "_scan_plate_cover", counter)
     return counter
 
 
@@ -422,20 +412,6 @@ def test_a_thumbnail_of_its_own_wins_over_the_fallback_and_removing_it_restores_
     assert client.get(f"/api/v1/models/{SLUG}/thumbnail").content == COVER_ONE
 
 
-def test_an_unreadable_output_does_not_break_the_catalogue(
-    client: TestClient, paths: DataPaths
-) -> None:
-    _create(client)
-    broken = paths.output_dir(SLUG, "f" * 32)
-    broken.mkdir(parents=True)
-    (broken / "meta.json").write_text("{not json", encoding="utf-8")
-    good = _generate(client, paths, SLUG, COVER_ONE)
-    assert good != "f" * 32
-
-    assert client.get("/api/v1/models").status_code == 200
-    assert client.get(f"/api/v1/models/{SLUG}/thumbnail").content == COVER_ONE
-
-
 # ── the fallback is resolved once, not per listing ────────────────────────────
 
 
@@ -455,96 +431,15 @@ def test_a_second_listing_opens_no_archive(
     assert zip_opens.calls == before
 
 
-def test_the_thumbnail_after_a_listing_reads_only_the_resolved_archive(
-    client: TestClient, paths: DataPaths, zip_opens: _Counting, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    _create(client)
-    _generate(client, paths, SLUG, None)
-    _generate(client, paths, SLUG, COVER_TWO)
-    _listed(client)
-    scans = _scans(client, monkeypatch)
-    before = zip_opens.calls
-
-    assert client.get(f"/api/v1/models/{SLUG}/thumbnail").content == COVER_TWO
-
-    assert scans.calls == 0
-    # The one archive holding the cover -- not the coverless output before it.
-    assert zip_opens.calls == before + 1
-
-
-def test_a_new_output_with_a_cover_is_picked_up(
-    client: TestClient, paths: DataPaths, monkeypatch: pytest.MonkeyPatch
-) -> None:
+def test_a_new_output_with_a_cover_is_picked_up(client: TestClient, paths: DataPaths) -> None:
     _create(client)
     _generate(client, paths, SLUG, None)
     assert _listed(client)[SLUG]["has_thumbnail"] is False
-    scans = _scans(client, monkeypatch)
-    _listed(client)
-    assert scans.calls == 0
 
     _generate(client, paths, SLUG, COVER_ONE)
 
     assert _listed(client)[SLUG]["thumbnail_source"] == "output"
     assert client.get(f"/api/v1/models/{SLUG}/thumbnail").content == COVER_ONE
-
-
-def test_a_lookup_racing_an_output_being_saved_is_not_kept(
-    client: TestClient, paths: DataPaths, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """A listing that lands while an output is half-written (its 3MF is there, its
-    record is not) resolves to nothing. The outputs directory's mtime does not move
-    again when the record lands, so only `create` forgetting it makes it right."""
-    _create(client)
-    store = client.app.state.scadbuddy.outputs  # type: ignore[attr-defined]
-
-    def stamp_then_list(*args: Any, **kwargs: Any) -> None:
-        provenance.stamp(*args, **kwargs)
-        assert store.plate_cover_archive(SLUG) is None
-
-    monkeypatch.setattr(outputs_module, "stamp", stamp_then_list)
-
-    _generate(client, paths, SLUG, COVER_ONE)
-
-    assert _listed(client)[SLUG]["thumbnail_source"] == "output"
-    assert client.get(f"/api/v1/models/{SLUG}/thumbnail").content == COVER_ONE
-
-
-def test_deleting_a_model_forgets_its_resolved_cover(client: TestClient, paths: DataPaths) -> None:
-    _create(client)
-    _generate(client, paths, SLUG, COVER_ONE)
-    assert _listed(client)[SLUG]["thumbnail_source"] == "output"
-    store = client.app.state.scadbuddy.outputs  # type: ignore[attr-defined]
-    assert store.remembers_plate_cover(SLUG)
-
-    assert client.delete(f"/api/v1/models/{SLUG}", headers=press()).status_code == 204
-
-    assert not store.remembers_plate_cover(SLUG)
-    # Nothing else is kept per slug: the only other state is one store-wide counter.
-    assert SLUG not in store._covers
-    assert not [
-        value for value in vars(store).values() if isinstance(value, dict) and SLUG in value
-    ]
-
-
-def test_a_cover_scan_in_flight_across_a_model_delete_is_not_stored(
-    client: TestClient, paths: DataPaths, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    _create(client)
-    _generate(client, paths, SLUG, COVER_ONE)
-    store = client.app.state.scadbuddy.outputs  # type: ignore[attr-defined]
-    real_scan = store._scan_plate_cover
-
-    def scan_then_delete(slug: str) -> Any:
-        found = real_scan(slug)
-        # The model goes away while this scan holds its answer.
-        assert client.delete(f"/api/v1/models/{SLUG}", headers=press()).status_code == 204
-        return found
-
-    monkeypatch.setattr(store, "_scan_plate_cover", scan_then_delete)
-
-    assert store.plate_cover_archive(SLUG) is not None
-
-    assert not store.remembers_plate_cover(SLUG)
 
 
 @pytest.mark.requires_postgres
@@ -611,11 +506,13 @@ def test_the_first_output_stays_first_when_the_clock_stepped_back(
     second save."""
     _create(client)
     first = _generate(client, paths, SLUG, COVER_ONE)
-    meta_path = paths.output_dir(SLUG, first) / outputs_module.META_NAME
-    meta = json.loads(meta_path.read_text(encoding="utf-8"))
+    store = client.app.state.scadbuddy.outputs  # type: ignore[attr-defined]
+    meta = store.get(first).model_dump(mode="json")
     ahead = datetime.fromisoformat(meta["created_at"]) + timedelta(seconds=60)
     meta["created_at"] = ahead.isoformat()
-    meta_path.write_text(json.dumps(meta), encoding="utf-8")
+    with store.rows._pool.connection() as conn:
+        conn.execute("UPDATE outputs SET created_at = %s WHERE output_id = %s", (ahead, first))
+    update_row(store, first, meta=meta)
 
     second = _generate(client, paths, SLUG, COVER_TWO)
 
@@ -636,21 +533,6 @@ def test_deleting_the_only_covering_output_leaves_no_thumbnail(
 
     assert _listed(client)[SLUG]["has_thumbnail"] is False
     assert client.get(f"/api/v1/models/{SLUG}/thumbnail").status_code == 404
-
-
-def test_an_output_removed_behind_the_stores_back_is_noticed(
-    client: TestClient, paths: DataPaths
-) -> None:
-    """The orphan sweep and a model delete remove outputs without going through the
-    store's own `delete`; the outputs directory's mtime is what catches those."""
-    _create(client)
-    first = _generate(client, paths, SLUG, COVER_ONE)
-    _generate(client, paths, SLUG, COVER_TWO)
-    assert client.get(f"/api/v1/models/{SLUG}/thumbnail").content == COVER_ONE
-
-    shutil.rmtree(paths.output_dir(SLUG, first))
-
-    assert client.get(f"/api/v1/models/{SLUG}/thumbnail").content == COVER_TWO
 
 
 # ── README ────────────────────────────────────────────────────────────────────

@@ -6,6 +6,7 @@ import json
 import zipfile
 from datetime import UTC, datetime
 from pathlib import Path
+from typing import Any, cast
 
 import pytest
 from temporalio.exceptions import ApplicationError
@@ -37,7 +38,6 @@ from scadbuddy.workflows.outputs import _materials, manifest_of
 from scadbuddy.workflows.packing import PackError, explicit_plate
 from scadbuddy.workflows.pipeline_activities import PipelineActivities
 from tests.support.openscad import install_fake_openscad
-from tests.support.saved_outputs import save_files
 
 PLATE = PlateSize(key="default", width=256.0, depth=256.0)
 
@@ -430,8 +430,9 @@ async def test_an_own_layout_must_name_one_of_the_parts(tmp_path: Path) -> None:
 
 
 def test_a_save_that_fails_part_way_leaves_no_output_directory(tmp_path: Path) -> None:
-    """A save copies all or nothing (final review I2): a source gone from
-    the store fails the save and removes what it had written."""
+    """A source gone from the store fails the save's staging (final review I2), which
+    writes nothing on the share (#7257); `OutputStore.saving` removes the staged folder
+    (`tests/test_output_save_staged.py`)."""
     paths = DataPaths(tmp_path / "data")
     paths.ensure()
     job = Job(
@@ -446,6 +447,9 @@ def test_a_save_that_fails_part_way_leaves_no_output_directory(tmp_path: Path) -
             bbox_mm=BoundingBox(min=(0, 0, 0), max=(1, 1, 1), size=(1, 1, 1)),
         ),
     )
+    staging = tmp_path / "staging"
+    staging.mkdir()
     with pytest.raises(FileNotFoundError):
-        save_files(OutputStore(paths), job)
-    assert not any((paths.outputs / "demo").iterdir())
+        OutputStore(paths, rows=cast(Any, None), bytes=None).prepare(job, staging)
+    # Staged on the spool, never on the share (#7257); the caller removes the folder.
+    assert not (paths.root / "outputs" / "demo").exists()

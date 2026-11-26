@@ -37,6 +37,8 @@ function render(initial?: FlowGrantSpec) {
   return { ...view, onSubmit }
 }
 
+const BASE: FlowGrantSpec = { expires_at: new Date(Date.now() + HOUR).toISOString(), sessions: false, ask_starter_session: true, rules: [] }
+
 const rule = (name: string) => screen.findByRole('group', { name: `Rule ${name}` })
 
 describe('GrantEditor', () => {
@@ -59,6 +61,33 @@ describe('GrantEditor', () => {
     expect(ahead).toBeLessThanOrEqual(24 * HOUR)
     expect(spec.expires_at).toMatch(/(Z|[+-]\d\d:\d\d)$/)
     expect(grantProblems(spec, new Date(), OUTWARD)).toEqual([])
+  })
+
+  it("names who else may answer the run's questions, and leaves answers out when nobody is chosen (#7471)", async () => {
+    const { user, onSubmit } = render({ ...BASE, answers: { who: ['starter'] } })
+    const who = await screen.findByRole('group', { name: 'Who else may answer its questions' })
+    expect(within(who).getByRole('checkbox', { name: 'The session that started the run' })).toBeChecked()
+    await user.click(within(who).getByRole('checkbox', { name: 'Any of your assistant sessions' }))
+    await user.click(screen.getByRole('button', { name: 'Use grant' }))
+    expect(onSubmit.mock.calls[0]![0].answers).toEqual({ who: ['starter', 'sessions'] })
+    await user.click(within(who).getByRole('checkbox', { name: 'The session that started the run' }))
+    await user.click(within(who).getByRole('checkbox', { name: 'Any of your assistant sessions' }))
+    await user.click(screen.getByRole('button', { name: 'Use grant' }))
+    expect(onSubmit.mock.calls[1]![0]).not.toHaveProperty('answers')
+  })
+
+  it("offers no answerers on a standing grant, which may not hold them (#7471)", async () => {
+    const onSubmit = vi.fn<(spec: FlowGrantSpec) => void>()
+    renderPage(<GrantEditor standing submitLabel="Use grant" onSubmit={onSubmit} />)
+    expect(await rule('queue_print')).toBeInTheDocument()
+    expect(screen.queryByRole('group', { name: 'Who else may answer its questions' })).not.toBeInTheDocument()
+  })
+
+  it('offers no starting session to answer for a run a person starts (#7471)', async () => {
+    renderPage(<GrantEditor personStarts submitLabel="Start run" onSubmit={vi.fn()} />)
+    const who = await screen.findByRole('group', { name: 'Who else may answer its questions' })
+    expect(within(who).queryByRole('checkbox', { name: 'The session that started the run' })).toBeNull()
+    expect(within(who).getByRole('checkbox', { name: 'Any of your assistant sessions' })).toBeInTheDocument()
   })
 
   it('warns in red about a rule with no bounds, until one is set', async () => {

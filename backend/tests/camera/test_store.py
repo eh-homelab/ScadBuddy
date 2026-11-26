@@ -75,6 +75,23 @@ def test_sources_skip_unqualified(
         assert camera.sources_with_codes(pid) == []
 
 
+def test_sources_skip_a_virtual_printer(
+    camera: CameraStore, printers: PrinterStore, pg_pool: PgPool
+) -> None:
+    """A Bambuddy virtual printer has a LAN link and the report of the printer it forwards
+    to, so an RTSP URL, but no camera (#7996, seen on prod 2026-11-26)."""
+    physical = make_printer(printers, pg_pool)
+    virtual = make_printer(printers, pg_pool, serial="01P00A000000003")
+    with pg_pool.connection() as conn:
+        conn.execute(
+            "UPDATE printers SET kind = 'bambuddy_virtual', bambuddy_vp_id = 1 WHERE id = %s",
+            (uuid.UUID(virtual),),
+        )
+    assert [s.printer_id for s in camera.sources()] == [physical]
+    assert camera.sources(virtual) == []
+    assert camera.recorded(virtual) is False
+
+
 def test_acquire_is_exclusive(camera: CameraStore, printers: PrinterStore, pg_pool: PgPool) -> None:
     pid = make_printer(printers, pg_pool)
     barrier = threading.Barrier(8)

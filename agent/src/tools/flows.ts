@@ -54,6 +54,20 @@ const grantSpec = z
     sessions: z.boolean().default(false).describe('Whether it covers the outward calls of sessions the run starts'),
     ask_starter_session: z.boolean().default(true).describe('Whether calls outside it go to this session first'),
     rules: z.array(grantRule).max(32),
+    answers: z
+      .object({
+        who: z
+          .array(z.string().regex(/^(starter|sessions|token:[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})$/))
+          .min(1)
+          .max(100),
+      })
+      .strict()
+      .optional()
+      .describe(
+        "Who besides a person may answer the run's questions (#7471), as the setting flow_answerers: `starter` " +
+          "(the session that started the run), `sessions` (any of the user's sessions), `token:<id>` (an MCP token " +
+          "and its sessions). A question the script asks people_only stays a person's.",
+      ),
   })
   .strict()
   .describe(
@@ -111,7 +125,7 @@ export const flowTools: Tool[] = [
       'and any other None; raises ValueError for a schema, title, context, place, ui or timeout_s it does not take, where ' +
       "title, context and ui are limited in size and the refusal names the limit, and for an answer that does not fit its field's type), " +
       'both with no limit unless `timeout_s` (at least 10 s; then a TimeoutError) sets one, and answered by a person; ' +
-      "with people_only False the user's setting flow_answerers may also let an assistant answer, " +
+      "with people_only False the user's setting flow_answerers or the run's grant may also let an assistant answer, " +
       '`render(slug, params)` (returns {job_id, status, error}; status done, failed or cancelled), ' +
       '`save_output(slug, job_id, name)` (returns the output id), and two that wait for a person to approve them ' +
       'in ScadBuddy: `queue_print(source, request)` (source {output_id} or {file_id}; request is the print ' +
@@ -485,7 +499,7 @@ export const flowTools: Tool[] = [
     description:
       'One flow run: its record, and `pending`, what it waits on now (a question for a person, or an approval). ' +
       'People approve on the Workflows page, never through a tool. A question whose `people_only` is false may be ' +
-      "answered with answer_flow_question when the user's setting flow_answerers allows it. To go back to an " +
+      "answered with answer_flow_question when the user's setting flow_answerers or the run's approved grant allows it. To go back to an " +
       'earlier point, see preview_flow_reset.',
     input: z.object({ run_id: runId }),
     risk: 'read',
@@ -575,7 +589,8 @@ export const flowTools: Tool[] = [
     description:
       "Answer a flow run's question (#7471): a `wait_for_human` with a text, a `prompt` with an object of its " +
       "task's fields (get_flow_run's `pending` names the call and its `task`). Allowed only when the user's " +
-      'setting flow_answerers names this session (or its MCP token) and the question is not `people_only`; else a ' +
+      "setting flow_answerers, or the run's approved grant (`answers`), names this session (or its MCP token) and " +
+      'the question is not `people_only`; else a ' +
       '403 says why. The first answer wins: a later one is told that it was answered already. Not for flow runs.',
     input: z.object({
       run_id: runId,

@@ -97,10 +97,12 @@ def test_a_prompt_answer_reaches_the_script_as_a_dict(
     run_id, entry = parked(client, ASK, "return a['email']")
     assert (entry["kind"], entry["fn"], entry["prompt"]) == ("answer", "prompt", "Where to?")
     call_id = entry["call_id"]
-    # The run's page has the task as its own route does, without the answer.
+    # The run's page has the task as its own route does, without the answer and what
+    # admitted it (#7471).
     held = task(client, call_id)
-    unanswered = {k: v for k, v in held.items() if k not in ("answer", "answered_by")}
-    assert entry["task"] == unanswered and len(unanswered) == len(held) - 2
+    answer_keys = ("answer", "answered_by", "admitted_by")
+    unanswered = {k: v for k, v in held.items() if k not in answer_keys}
+    assert entry["task"] == unanswered and len(unanswered) == len(held) - 3
     assert (held["state"], held["title"], held["schema"]) == ("open", "Where to?", EMAIL)
     assert (held["run_id"], held["place"], held["context"]) == (run_id, "bench", [{"text": "hi"}])
     listed = client.get("/api/v1/tasks", params={"place": "bench"}).json()["tasks"]

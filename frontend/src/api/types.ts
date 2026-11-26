@@ -229,9 +229,9 @@ export type FlowRunView = Schemas['RunView']
 export type FlowRunStatus = FlowRunView['status']
 export type FlowPending = Schemas['PendingEntry']
 export type FlowAnswerBy = Schemas['AnswerBy']
-/** #7364 — a flow prompt's question as the run page lists it, and the whole task (`GET /tasks/{id}`). */
+/** #7364 — a flow prompt's question as the run page lists it, and the whole task (`GET /tasks/{id}`), with what admitted an agent's answer (#7471). */
 export type TaskQuestion = Schemas['TaskQuestion']
-export type Task = Schemas['Task']
+export type Task = Schemas['TaskView']
 /** One thing wrong with an answer (a 422's `problems`): a property, an item of one (`tags/0`), or '' for the whole. */
 export interface AnswerProblem {
   field: string

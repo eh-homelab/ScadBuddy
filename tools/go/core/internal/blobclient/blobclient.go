@@ -68,7 +68,8 @@ type Client struct {
 	Store *http.Client
 }
 
-// New is a Client of the area at baseURL, with a 30 s bound on each request. tel is the
+// New is a Client of the area at baseURL. Each call to core is bounded by callTimeout (2
+// minutes) and the PUT to the store by 30 s. tel is the
 // process's telemetry (nil for none): each request is a CLIENT span, which records the
 // method, the status and the peer, never a URL, so the presigned query stays out. The calls
 // to core carry the trace context; the PUT to the store carries none (httpx.Outside).

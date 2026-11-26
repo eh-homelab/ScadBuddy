@@ -1,8 +1,10 @@
 from __future__ import annotations
 
+import dataclasses
 import threading
 import time
-from typing import Any, NoReturn
+from pathlib import Path
+from typing import Any, NoReturn, cast
 
 import pytest
 from fastapi.testclient import TestClient
@@ -10,8 +12,12 @@ from fastapi.testclient import TestClient
 from scadbuddy import main
 from scadbuddy.api.deps import STATE_ATTR
 from scadbuddy.core.settings import Settings
+from scadbuddy.library.outputs import OutputStoreUnusableError
 from scadbuddy.library.settings_store import StoreNotReadyError
-from scadbuddy.store.factory import StoreBundle
+from scadbuddy.store.content import ContentStore
+from scadbuddy.store.factory import StoreBundle, build_store
+from scadbuddy.store.index import BlobIndex, Pool
+from scadbuddy.store.local import LocalContentBackend
 
 
 def test_store_usage_reports_the_local_backend(client: TestClient) -> None:
@@ -120,3 +126,31 @@ def test_healthz_never_waits_for_a_settings_read(
             assert time.monotonic() - started < 2
     finally:
         release.set()
+
+
+def test_start_on_bambuddy_store_refuses(
+    settings: Settings, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """The outputs live only in the blob store (#7257): a `bambuddy` store, whose content
+    store holds none (spec 6.4), stops the start, and the start closes it first."""
+    closed: list[bool] = []
+
+    def on_bambuddy(**kwargs: object) -> StoreBundle:
+        bundle = build_store(**kwargs)  # type: ignore[arg-type]
+        backend = LocalContentBackend(tmp_path / "bambuddy")
+        backend.backend = "bambuddy"
+        content = ContentStore(backend, BlobIndex(cast(Pool, None)))
+        aclose = content.aclose
+
+        async def counted() -> None:
+            closed.append(True)
+            await aclose()
+
+        content.aclose = counted  # type: ignore[method-assign]
+        return dataclasses.replace(bundle, backend="bambuddy", content=content)
+
+    monkeypatch.setattr(main, "build_store", on_bambuddy)
+    app = main.create_app(settings)
+    with pytest.raises(OutputStoreUnusableError, match="bambuddy store"), TestClient(app):
+        pass
+    assert closed == [True]
