@@ -1,0 +1,214 @@
+# Real examples (design §7). Every thing the owner named on 2026-11-25 is here as an item
+# (what you buy) and an instance (a lot or a unit you have), with the relationships
+# between them. Prices and lives are examples, not measured values.
+#
+# `check.py` resolves every item's handlers from kinds.yaml and handlers.yaml, checks the
+# parameters and the relationships, and prints the table in README.md §3.
+
+items:
+  - id: h2c
+    name: Bambu Lab H2C
+    kind: printer_h2c
+    manufacturer: Bambu Lab
+    properties: {model_code: H2C}
+  - id: nozzle_hs_04
+    name: H2C hardened steel nozzle 0.4 mm
+    kind: nozzle
+    manufacturer: Bambu Lab
+    properties: {diameter_mm: 0.4, material: hardened_steel}
+    steps:
+      life: {params: {hours: 1500}}
+  - id: pla_matte_charcoal
+    name: Bambu PLA Matte Charcoal 1 kg
+    kind: filament_pla_matte
+    manufacturer: Bambu Lab
+    properties: {rgba: "000000FF", colour_name: Charcoal, diameter_mm: 1.75, label_g: 1000}
+  - id: pla_plus_gold
+    name: Bambu PLA+ Gold 1 kg
+    kind: filament_pla
+    manufacturer: Bambu Lab
+    properties: {rgba: "E4BD68FF", colour_name: Gold, diameter_mm: 1.75, label_g: 1000}
+  - id: reusable_spool
+    name: Bambu reusable spool
+    kind: spool_part
+    manufacturer: Bambu Lab
+    properties: {empty_weight_g: 216}
+  - id: pei_textured
+    name: Textured PEI plate 350 mm
+    kind: build_plate
+    manufacturer: Bambu Lab
+  - id: ntag215
+    name: NTAG215 stickers, pack of 50
+    kind: rfid_tag
+    offer: {pack: 50}
+  - id: drill
+    name: Cordless drill 18 V
+    kind: tool
+    steps:
+      life: {params: {months: 84, salvage_pct: 10}}
+  - id: label_printer_62
+    name: Label printer, 62 mm
+    kind: label_printer
+  - id: label_roll_62
+    name: Continuous label roll 62 mm
+    kind: label_roll
+    properties: {width_mm: 62}
+    steps:
+      count: {params: {capacity: 400}}
+  - id: label_roll_29
+    name: Die-cut label roll 29 mm
+    kind: label_roll
+    properties: {width_mm: 29}
+    steps:
+      count: {params: {capacity: 800}}
+  - id: label_printer_plan
+    name: Label printer service plan, 2 years
+    kind: service_plan
+    steps:
+      receive: {params: {term_months: 24}}
+  - id: h2c_warranty
+    name: H2C manufacturer warranty, 1 year
+    kind: warranty
+    steps:
+      receive: {params: {term_months: 12}}
+  - id: letter_paper
+    name: Letter size paper, 20 lb
+    kind: paper
+    offer: {pack: 500, pack_name: ream}
+  - id: repair_labour
+    name: Printer repair labour
+    kind: labour
+    steps:
+      bill: {params: {cost_rate_minor: 4000, sell_rate_minor: 6000, increment_minutes: 15, minimum_minutes: 30}}
+  - id: nozzle_swap
+    name: Nozzle swap, flat rate
+    kind: flat_service
+    steps:
+      bill: {params: {cost_minor: 800, sell_minor: 1500}}
+
+# What you have. A unit may override its item's parameters (`steps`).
+instances:
+  - {id: h2c_1, item: h2c, type: unit, serial: 31B-598, name: "3DP-31B-598", cost_minor: 349900}
+  - {id: h2c_2, item: h2c, type: unit, name: "Printer B", cost_minor: 349900}
+  - {id: nozzle_3, item: nozzle_hs_04, type: unit, cost_minor: 2500}
+  - {id: nozzle_4, item: nozzle_hs_04, type: unit, cost_minor: 2500}
+  - {id: plate_1, item: pei_textured, type: unit, cost_minor: 4000}
+  - {id: spool_112, item: pla_matte_charcoal, type: unit}
+  - {id: spool_113, item: pla_plus_gold, type: unit}
+  - {id: insert_7, item: reusable_spool, type: unit}
+  - {id: tags_lot_1, item: ntag215, type: lot, received: 100}
+  - {id: drill_1, item: drill, type: unit, cost_minor: 12000, in_service_at: 2026-11-25}
+  - {id: label_printer_1, item: label_printer_62, type: unit}
+  - {id: roll_4, item: label_roll_62, type: unit}
+  - {id: roll_5, item: label_roll_62, type: unit}
+  - {id: roll_9, item: label_roll_29, type: unit}
+  - {id: plan_1, item: label_printer_plan, type: unit, starts_at: 2026-11-25, ends_at: 2028-11-25}
+  - {id: warranty_1, item: h2c_warranty, type: unit, starts_at: 2026-06-01, ends_at: 2027-06-01}
+  - {id: paper_lot_1, item: letter_paper, type: lot, received: 2500}
+
+# Relationships. `expect: refused` marks one the design must refuse; `check.py` fails if
+# it is allowed.
+relations:
+  - {type: accepts, from: "kind:filament", to: "kind:spool_part", max: 1}
+  - {type: accepts, from: "kind:printer_h2c", to: "kind:nozzle", max: 2}
+  - {type: accepts, from: "kind:printer_h2c", to: "kind:build_plate", max: 1}
+  - {type: accepts, from: "item:label_printer_62", to: "kind:label_roll", max: 1, where: {width_mm: 62}}
+  - {type: compatible_with, from: "item:nozzle_hs_04", to: "kind:printer_h2c"}
+  - {type: contains, from: "unit:h2c_1", to: "unit:nozzle_3"}
+  - {type: contains, from: "unit:h2c_1", to: "unit:plate_1"}
+  - {type: contains, from: "unit:spool_112", to: "unit:insert_7"}
+  - {type: contains, from: "unit:label_printer_1", to: "unit:roll_4"}
+  - {type: contains, from: "unit:label_printer_1", to: "unit:roll_5", expect: refused,
+     why: "the label printer holds one roll (max 1), and roll_4 is in it"}
+  - {type: contains, from: "unit:label_printer_1", to: "unit:roll_9", expect: refused,
+     why: "roll_9 is 29 mm; the label printer accepts only width_mm 62"}
+  - {type: contains, from: "unit:drill_1", to: "unit:nozzle_4", expect: refused,
+     why: "the drill accepts nothing"}
+  - {type: contains, from: "unit:h2c_1", to: "unit:insert_7", expect: refused,
+     why: "insert_7 is already in spool_112"}
+  - {type: covers, from: "unit:plan_1", to: "unit:label_printer_1"}
+  - {type: covers, from: "unit:warranty_1", to: "unit:h2c_1"}
+  - {type: covers, from: "unit:drill_1", to: "unit:h2c_1", expect: refused,
+     why: "only a service with a term covers"}
+
+# What happens over time (design §4.5, §4.7, README §5.7, §6). `check.py` replays it in
+# order:
+#   add, remove  - change a `contains` relationship;
+#   run          - print runs that end on a printer (`hours` of running, `prints` of them).
+#                  They book on the printer (own_run_hours) and, through it, on every unit
+#                  it contains at that moment (container_run_hours; prints for uses);
+#   set_params   - a person changes a handler parameter on a unit;
+#   reading      - a person enters a measured value by hand (the unit page's Advanced
+#                  section), as a weighing sets a spool's grams. Later uses count on top;
+#   refresh      - recompute the cached values of one unit or all, now;
+#   set_property, remove_property - a person changes an item's property. Every set and
+#                  remove is recorded with its old value (design §4.8).
+# Each event recomputes the cached handler values it touches; a history row is written
+# only when a value changes. Then `expect_life`, `expect_history` and
+# `expect_config_history` must hold.
+history:
+  - {at: 2026-12-01, do: add, rel: {type: contains, from: "unit:h2c_1", to: "unit:nozzle_4"}}
+  - {at: 2026-12-02, do: run, printer: "unit:h2c_1", hours: 600, prints: 400}
+  - {at: 2027-01-10, do: remove, rel: {type: contains, from: "unit:h2c_1", to: "unit:nozzle_4"}}
+  - {at: 2027-01-10, do: remove, rel: {type: contains, from: "unit:h2c_1", to: "unit:plate_1"}}
+  - {at: 2027-01-11, do: add, rel: {type: contains, from: "unit:h2c_2", to: "unit:nozzle_4"}}
+  - {at: 2027-01-11, do: add, rel: {type: contains, from: "unit:h2c_2", to: "unit:plate_1"}}
+  - {at: 2027-01-12, do: run, printer: "unit:h2c_2", hours: 750, prints: 500}
+  - {at: 2027-01-13, do: run, printer: "unit:h2c_1", hours: 100, prints: 80}
+  - {at: 2027-01-13, do: reading, target: "unit:nozzle_4", step: life, value: 1400}
+  - {at: 2027-01-14, do: set_params, target: "unit:nozzle_3", step: life, params: {hours: 2000}}
+  - {at: 2027-01-15, do: run, printer: "unit:h2c_2", hours: 50, prints: 30}
+  - {at: 2027-01-20, do: set_property, target: "item:pla_plus_gold", key: colour_name, value: Silk Gold}
+  - {at: 2027-01-21, do: set_property, target: "item:pla_plus_gold", key: colour_name, value: Silk Gold}
+  - {at: 2027-01-22, do: remove_property, target: "item:nozzle_hs_04", key: material}
+  - {at: 2027-01-25, do: refresh, scope: "unit:drill_1", expect_changed: ["unit:drill_1"]}
+  - {at: 2027-01-25, do: refresh, scope: all, expect_changed: []}
+
+# The nozzle and the plate moved from printer A (h2c_1) to printer B (h2c_2). Each keeps
+# what it did in both: nozzle_4 600 + 750 = 1350 of 1500 h; plate_1 400 + 500 = 900 of
+# 1000 prints. Printer A's last run came after they left, so it does not count on them;
+# it counts on nozzle_3, which stayed, and whose life a person then raised to 2000 h.
+# On 2027-01-13 a person judged nozzle_4's wear by hand at 1400 h (it had 1350 counted);
+# printer B's 50 h on 2027-01-15 count on top: 1450 of 1500 h. Plate_1 gets B's 30 prints.
+expect_life:
+  - {unit: nozzle_4, used: 1450, share: 0.9667, warn: true, book_value_minor: 83.33}
+  - {unit: plate_1, used: 930, share: 0.93, warn: true, book_value_minor: 280}
+  - {unit: nozzle_3, used: 700, share: 0.35, warn: false, book_value_minor: 1625}
+  - {unit: h2c_1, used: 700, share: 0.07, warn: false, book_value_minor: 325407}
+  - {unit: h2c_2, used: 800, share: 0.08, warn: false, book_value_minor: 321908}
+  - {unit: drill_1, used: 2, share: 0.0238, warn: false, book_value_minor: 11742.86}
+
+# The value history: one row per change, never rewritten. The moves (`relation`) changed
+# no value, so they wrote no row. The second refresh changed nothing, so it wrote none.
+expect_history:
+  nozzle_4:
+    - {at: 2026-12-01, reason: received, used: 0, share: 0.0, book: 2500.0}
+    - {at: 2026-12-02, reason: use, used: 600, share: 0.4, book: 1500.0}
+    - {at: 2027-01-12, reason: use, used: 1350, share: 0.9, book: 250.0}
+    - {at: 2027-01-13, reason: manual, used: 1400, share: 0.9333, book: 166.67}
+    - {at: 2027-01-15, reason: use, used: 1450, share: 0.9667, book: 83.33}
+  nozzle_3:
+    - {at: 2026-12-01, reason: received, used: 0, share: 0.0, book: 2500.0}
+    - {at: 2026-12-02, reason: use, used: 600, share: 0.4, book: 1500.0}
+    - {at: 2027-01-13, reason: use, used: 700, share: 0.4667, book: 1333.33}
+    - {at: 2027-01-14, reason: params_changed, used: 700, share: 0.35, book: 1625.0}
+  drill_1:
+    - {at: 2026-12-01, reason: received, used: 0, share: 0.0, book: 12000.0}
+    - {at: 2027-01-25, reason: refresh, used: 2, share: 0.0238, book: 11742.86}
+
+# Property history: the item's first values (written when it was made, here by the
+# import), then each change. The second set to the same value wrote nothing.
+expect_property_history:
+  "item:pla_plus_gold":
+    - {key: colour_name, at: 2026-12-01, op: set, old: null, new: Gold, actor: import}
+    - {key: diameter_mm, at: 2026-12-01, op: set, old: null, new: 1.75, actor: import}
+    - {key: label_g, at: 2026-12-01, op: set, old: null, new: 1000, actor: import}
+    - {key: rgba, at: 2026-12-01, op: set, old: null, new: E4BD68FF, actor: import}
+    - {key: colour_name, at: 2027-01-20, op: set, old: Gold, new: Silk Gold, actor: person}
+  "item:nozzle_hs_04":
+    - {key: diameter_mm, at: 2026-12-01, op: set, old: null, new: 0.4, actor: import}
+    - {key: material, at: 2026-12-01, op: set, old: null, new: hardened_steel, actor: import}
+    - {key: material, at: 2027-01-22, op: remove, old: hardened_steel, new: null, actor: person}
+
+expect_config_history:
+  - {target: "unit:nozzle_3", step: life, key: hours, old: 1500, new: 2000}

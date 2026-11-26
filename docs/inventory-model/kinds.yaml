@@ -1,0 +1,196 @@
+# The kind tree (design §3). A kind sets its class, or narrows its parent's: a child may
+# set a class key its parent left open, never change one its parent set. A kind may name
+# a special type, a uom, a property schema, and a handler or handler parameters per step.
+#
+# `steps.<step>`: `handler` picks another handler for that step; `params` sets that
+# handler's parameters (an item or a unit may override them, design §4.3).
+#
+# The root kinds are the three answers to "what is it": service, consumable, durable.
+# Every built-in kind of the phase 2 seed
+# (backend/scadbuddy/migrations/20261124T0323Z_inventory_core.sql l.189-209) has a place
+# here; `was` names its old `tracking` and `life_basis`. A kind with `was` or `seed: true`
+# is seeded by the migration; the others are examples a person would add.
+# `was.items_on`: the phase 2 items on that root move to this kind (a root leaves its
+# class open, so no item sits on it). `was.from_model_code`: made from that printer model
+# code in `items.compatible_with` (design §8).
+
+kinds:
+  # --- roots --------------------------------------------------------------------------------
+  - id: service
+    name: Service
+    class: {nature: service}
+    was: {tracking: none, life_basis: none}
+  - id: consumable
+    name: Consumable
+    class: {nature: physical, role: consumable}
+    was: {tracking: lot, life_basis: none}
+  - id: durable
+    name: Durable
+    class: {nature: physical, role: durable, counting: unit}
+
+  # --- consumables ----------------------------------------------------------------------------
+  - id: filament
+    name: Filament
+    parent: consumable
+    class: {counting: unit}
+    special: filament_spool
+    uom: g
+    was: {tracking: filament, life_basis: none}
+  - id: filament_pla
+    name: PLA
+    parent: filament
+  - id: filament_pla_matte
+    name: Matte
+    parent: filament_pla
+  - id: general_consumable
+    name: General consumable
+    parent: consumable
+    class: {counting: lot}
+    seed: true
+    was: {items_on: consumable}
+  - id: paper
+    name: Paper
+    parent: consumable
+    class: {counting: lot}
+    uom: sheet
+  - id: label_roll
+    name: Label roll
+    parent: consumable
+    class: {counting: unit}
+    uom: label
+    schema:
+      width_mm: {type: number, required: true}
+  - id: rfid_tag
+    name: RFID tag
+    parent: consumable
+    class: {counting: lot}
+    uom: each
+  - id: desiccant
+    name: Desiccant
+    parent: consumable
+    class: {counting: lot}
+    uom: g
+    was: {tracking: lot, life_basis: none}
+  - id: packaging
+    name: Packaging
+    parent: consumable
+    class: {counting: lot}
+    was: {tracking: lot, life_basis: none}
+  - id: lubricant
+    name: Lubricant
+    parent: consumable
+    class: {counting: lot}
+    uom: ml
+    was: {tracking: lot, life_basis: none}
+  - id: hardware
+    name: Hardware
+    parent: consumable
+    class: {counting: lot}
+    was: {tracking: lot, life_basis: none, parent: part}
+  - id: ams_part
+    name: AMS part
+    parent: consumable
+    class: {counting: lot}
+    was: {tracking: lot, life_basis: none, parent: part}
+  - id: printed_part
+    name: Printed part
+    parent: consumable
+    class: {counting: lot}
+    was: {tracking: lot, life_basis: none}
+  - id: assembly
+    name: Assembly
+    parent: consumable
+    class: {counting: lot}
+    was: {tracking: lot, life_basis: none}
+
+  # --- durables ---------------------------------------------------------------------------------
+  - id: printer
+    name: Printer
+    parent: durable
+    special: printer
+    steps:
+      life: {handler: life.hours, params: {hours: 10000, source: own_run_hours}}
+    was: {tracking: unit, life_basis: hours}
+  - id: printer_h2c
+    name: H2C
+    parent: printer
+    was: {from_model_code: H2C}
+  - id: part
+    name: Part
+    parent: durable
+    was: {tracking: lot, life_basis: none}
+  - id: nozzle
+    name: Nozzle
+    parent: part
+    steps:
+      life: {handler: life.hours, params: {hours: 1000, source: container_run_hours, warn_pct: 90}}
+    was: {tracking: unit, life_basis: hours}
+  - id: hotend
+    name: Hotend
+    parent: part
+    steps:
+      life: {handler: life.hours, params: {hours: 2000, source: container_run_hours}}
+    was: {tracking: unit, life_basis: hours}
+  - id: belt
+    name: Belt
+    parent: part
+    steps:
+      life: {handler: life.hours, params: {hours: 3000, source: container_run_hours}}
+    was: {tracking: unit, life_basis: hours}
+  - id: build_plate
+    name: Build plate
+    parent: part
+    steps:
+      life: {handler: life.uses, params: {uses: 1000, warn_pct: 90}}
+    was: {tracking: unit, life_basis: months}
+  - id: spool_part
+    name: Spool insert
+    parent: durable
+    seed: true
+    was: {tracking: unit, life_basis: none}
+  - id: equipment
+    name: Equipment
+    parent: durable
+    steps:
+      life: {handler: life.months, params: {months: 60}}
+    was: {tracking: unit, life_basis: months}
+  - id: dry_bin
+    name: Dry bin
+    parent: equipment
+    was: {tracking: unit, life_basis: months}
+  - id: tool
+    name: Tool
+    parent: equipment
+    was: {tracking: unit, life_basis: months}
+  - id: label_printer
+    name: Label printer
+    parent: equipment
+    steps:
+      life: {params: {months: 36}}
+
+  # --- services ---------------------------------------------------------------------------------
+  - id: warranty
+    seed: true
+    name: Warranty
+    parent: service
+    class: {billing: term}
+    steps:
+      life: {params: {warn_days: 30}}
+  - id: service_plan
+    seed: true
+    name: Service plan
+    parent: service
+    class: {billing: term}
+    steps:
+      life: {params: {warn_days: 30}}
+  - id: labour
+    seed: true
+    name: Labour
+    parent: service
+    class: {billing: hourly}
+  - id: flat_service
+    seed: true
+    name: Flat-rate service
+    parent: service
+    class: {billing: flat}
+    was: {items_on: service}
