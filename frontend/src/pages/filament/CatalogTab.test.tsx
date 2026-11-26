@@ -286,4 +286,14 @@ describe('the Catalog tab', () => {
     await waitFor(() => expect(within(screen.getByRole('table', { name: 'Colours' })).queryByText(other.name)).toBeNull())
     expect(within(screen.getByRole('table', { name: 'Colours' })).getByText(lacking.name)).toBeInTheDocument()
   })
+
+  // #7809 review: a filter that leaves no row says so.
+  it('says no row is incomplete when the filter leaves none (#7703)', async () => {
+    entityMock.schemas.brand = { type: 'object', properties: { site: { type: 'string' } }, required: ['site'] }
+    for (const row of await listCatalog('brands')) seedEntityProperties(`brand:${row.id}`, { site: 'x' })
+    const { user } = renderPage(<CatalogTab />, { route: '/filament/catalog?kind=brands' })
+    await within(await list('Brands')).findByText('Sunlu')
+    await user.click(screen.getByRole('checkbox', { name: 'Only incomplete' }))
+    expect(await within(screen.getByRole('table', { name: 'Brands' })).findByText('No row is incomplete.')).toBeVisible()
+  })
 })

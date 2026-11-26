@@ -132,6 +132,8 @@ export function CatalogList({ kind }: { kind: CatalogKind }) {
   const [asked, setAsked] = useState('')
   // A catalog where every row is drawn and may be re-ordered; colours are searched instead.
   const searched = kind === 'colours'
+  // The rows the Incomplete filter keeps; the footer and empty state count these (#7703).
+  const visible = rows?.filter((row) => !onlyIncomplete || isIncomplete(row)) ?? []
 
   useEffect(() => {
     if (!searched) return
@@ -448,7 +450,7 @@ export function CatalogList({ kind }: { kind: CatalogKind }) {
               </tr>
             </thead>
             <tbody>
-              {(searched ? rows.filter((row) => !onlyIncomplete || isIncomplete(row)).slice(0, SHOWN_MAX) : rows.filter((row) => !onlyIncomplete || isIncomplete(row))).flatMap((row, at) => {
+              {(searched ? visible.slice(0, SHOWN_MAX) : visible).flatMap((row, at) => {
                 const gone = row.archived_at != null
                 const from = provenance(row)
                 return [
@@ -517,10 +519,17 @@ export function CatalogList({ kind }: { kind: CatalogKind }) {
                     : []),
                 ]
               })}
-              {searched && rows.length > SHOWN_MAX && (
+              {searched && visible.length > SHOWN_MAX && (
                 <tr className="border-t">
                   <td colSpan={4} className="px-2 py-3 text-muted-foreground">
-                    Showing {SHOWN_MAX.toLocaleString()} of {rows.length.toLocaleString()} colours. Search to narrow the list.
+                    Showing {SHOWN_MAX.toLocaleString()} of {visible.length.toLocaleString()} {onlyIncomplete ? 'incomplete ' : ''}colours. Search to narrow the list.
+                  </td>
+                </tr>
+              )}
+              {onlyIncomplete && rows.length > 0 && visible.length === 0 && (
+                <tr className="border-t">
+                  <td colSpan={4} className="px-2 py-3 text-muted-foreground">
+                    No row is incomplete.
                   </td>
                 </tr>
               )}
