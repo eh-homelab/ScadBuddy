@@ -153,6 +153,7 @@ async def test_prepare_run_refuses_a_printer_with_an_unknown_tray(
     printers_with_kek: PrinterStore, reports: PrinterReportStore
 ) -> None:
     bambuddy_routes()
+    assignments()
     pid = lan_linked(printers_with_kek, reports)
 
     with pytest.raises(UnknownSpoolLoadedError) as refused:
@@ -184,6 +185,7 @@ async def test_a_sliced_file_is_refused_too(
     printers_with_kek: PrinterStore, reports: PrinterReportStore
 ) -> None:
     bambuddy_routes()
+    assignments()
     pid = lan_linked(printers_with_kek, reports)
 
     with pytest.raises(UnknownSpoolLoadedError):
@@ -201,6 +203,7 @@ async def test_the_check_says_it_as_an_error_with_the_tray_ids(
     printers_with_kek: PrinterStore, reports: PrinterReportStore
 ) -> None:
     bambuddy_routes()
+    assignments()
     pid = lan_linked(printers_with_kek, reports)
 
     result = await check(printers_with_kek, reports, run_request(printer=pid), FakeReads([REF]))
