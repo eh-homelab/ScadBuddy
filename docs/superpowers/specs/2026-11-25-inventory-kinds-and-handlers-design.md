@@ -210,6 +210,10 @@ Owner rulings, 2026-11-25 (given to scadbuddy-53, relayed on PR #7784):
 
 ### 4.7 Cached values, their history, and refresh (owner, 2026-11-25)
 
+The histories here follow §4.8's rule: each change is an event on the stream
+(`handler_value.changed`, `handler_config.changed`), published in the transaction that
+changes the value, and the history subscriber inserts it into its history table.
+
 The owner: "the system should cache the handler values and keep a history", and "allow
 for a refresh".
 
@@ -263,15 +267,37 @@ overwrites and a remove leaves no trace.
   key it moves.
 - A property schema change (`entity_property_schemas`, a kind's `schema`) is recorded the
   same way in `entity_property_schema_history`.
-- Every writer records the row in the same transaction as the write. My call: a database
-  trigger on `entity_properties` writes it, so no writer, Python or Go, can skip it. Every
-  writer sets `SET LOCAL scadbuddy.actor` per transaction; the trigger takes that actor
-  first, and the row's `updated_by` only when it is unset. So a merge, which copies
+- **The event stream is the history** (owner, 2026-11-25: "assume event stream is the
+  history"; "have a subscriber manage the history table by insert log every event
+  change"). Each change is published as an event on the `events` log
+  (`migrations/20260928T0630Z_events.sql`, `core/pg_events.py`; Go's `internal/bus`) in
+  the same transaction as the write: `entity_property.changed` (entity id, kind, ref,
+  key, op, old, new, source, actor, at) and `entity_property_schema.changed`. The history
+  tables are not written by the writers. A **history subscriber** reads the stream from
+  its own durable cursor and inserts one row per change event; the event's `seq` is the
+  row's key, so a replay inserts nothing twice.
+- **No writer can skip the event.** My call: a database trigger on `entity_properties`
+  publishes the event (an `INSERT INTO events` and a `pg_notify`, as `internal/bus`
+  `Publish` does) in the writer's transaction, so Python, Go and a cascade all publish.
+  Every writer sets `SET LOCAL scadbuddy.actor` per transaction; the trigger takes that
+  actor first, and the row's `updated_by` only when it is unset. So a merge, which copies
   `updated_by` from the old row (`entities/registry.py` l.135), is credited to the person
   who merged. A remove without an actor is refused.
 - A delete of an entity (the sweep, a merge) cascades to its properties after the entity
-  row is gone. A `BEFORE DELETE` trigger on `entities` records each of its keys as
-  removed, with the entity's `kind` and `ref`, before the cascade.
+  row is gone. A `BEFORE DELETE` trigger on `entities` publishes a remove event for each
+  of its keys, with the entity's `kind` and `ref`, before the cascade.
+- **The history events are kept forever.** On main the log is still pruned by age and
+  count (`core/pg_events.py` l.79-84). Open PR #7819 (#7818) changes that: by default every
+  event is kept forever (`SCADBUDDY_EVENT_LOG_RETENTION_SECONDS` and `_ROWS` default to 0),
+  and `SCADBUDDY_EVENT_LOG_RETENTION_KINDS` sets retention per kind prefix (read on its
+  branch by scadbuddy-09 and scadbuddy-34, 2026-11-25). The history kinds
+  (`entity_property.`, `entity_property_schema.`, `handler_value.`, `handler_config.`)
+  get no retention, so they stay. K1 depends on #7819. The stream itself is then the
+  history; the history tables are the subscriber's indexed copy for reads by entity.
+- **The subscriber's cursor.** No durable subscriber cursor exists on main or in an open
+  PR (#7768 puts persisted cursors out of its scope). K1 adds `event_subscribers` (name,
+  `seq`, updated). The history subscriber reads from its cursor after a restart, and its
+  lag is a metric with an alert.
 - The current properties must equal the history replayed (last row per key). The proof
   checks it; the Go tests do too.
 - The item, unit and kind pages show a property's history, and the agent's
@@ -457,10 +483,14 @@ layout is asked of the #7667 owner (comment on #7667, 2026-11-25).
   `entities`, `attrs jsonb` for `max` and `where`, `created_at`, `created_by`, `ended_at`).
 - New `inventory_signals`: one row per signal raised, so the schedule never raises one
   twice.
-- New `entity_property_history` and `entity_property_schema_history` (append only, a
-  trigger writes them), §4.8.
+- New `entity_property_history` and `entity_property_schema_history` (append only, written
+  only by the history subscriber from the event stream), §4.8. The same subscriber writes
+  `handler_value_history` and `handler_config_history` (§4.7).
+- New `event_subscribers` (name, cursor `seq`, updated): each durable subscriber's place
+  in the stream (§4.8).
 - New `handler_values` (the cache, primary key `entity_id`, `step`),
-  `handler_value_history` and `handler_config_history` (append only), §4.7.
+  `handler_value_history` and `handler_config_history` (append only, written by the history
+  subscriber), §4.7.
 - `order_items`: one nullable `service_item_id` (a `custom` item that sells a service,
   §4.6 ruling 2). Orders stay Python's; fulfilling such an item calls Go's consume route.
 
@@ -586,7 +616,9 @@ of #7667's phase 6 into this work).
     rewrites old rows.
 14. A manual reading replaces the counted measure from its time on; it does not change
     the life's length (`hours`), which is a parameter.
-15. Property history is written by a database trigger, for every entity kind (§4.8).
+15. Every change is an event; a trigger publishes property events so no writer can skip
+    one; a durable history subscriber writes the history tables; history kinds are kept
+    forever under #7819's per-kind retention (§4.8).
 16. Every Python-to-Go write is a Standalone Activity run by a Go worker; reads stay HTTP
     (§6.1a).
 
