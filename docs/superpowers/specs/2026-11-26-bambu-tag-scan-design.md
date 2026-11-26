@@ -1,0 +1,223 @@
+# Bambu tags from the phone, and scans in the assistant (#7905)
+
+Issue #7905, epic #7171. This design changes two non-goals of
+`2026-11-23-web-nfc-tags-design.md` (#7273): reading the data on Bambu tags is now a goal, and
+ScadBuddy gets an app.
+
+## Intent
+
+During an invoice import, one line can hide which spools were bought. A Bambu "mystery box"
+(`MB-FL-…`) is one line with no colour codes. The owner wants to identify those spools by
+tapping each spool's tag with a phone, not by loading each one into an AMS slot, and to hand
+what a scan read to the assistant (issue #7905).
+
+The owner's decisions (2026-11-26):
+
+- "We need to support scanning bambu tags". The closed-source Android app Spool Scanner
+  (`com.sveas.spoolscanner`) reads them on the owner's phone ("Spoolscanner app works fine").
+- "We will need a scadbuddy app, should be xplat eventually, Android first. I'm thinking .net?"
+- "I'd prefer server side decoding."
+- "Every tag scan should be recorded in the tag history."
+
+## Measured and sourced facts
+
+- Bambu spool tags are MIFARE Classic 1K. Each sector's key A is derived from the UID:
+  HKDF-SHA256, input the UID bytes, salt `9A 75 9C F2 C4 F7 CA FF 22 2C B9 76 9B 41 BC 96`,
+  info `RFID-A\0`, 16 keys of 6 bytes, one per sector
+  ([deriveKeys.py](https://github.com/Bambu-Research-Group/RFID-Tag-Guide/blob/main/deriveKeys.py)).
+- Block layout ([BambuLabRfid.md](https://github.com/Bambu-Research-Group/RFID-Tag-Guide/blob/main/BambuLabRfid.md)),
+  numbers little-endian, every 4th block a key trailer: block 1 holds the variant id (bytes
+  0-7, `A50-K0`) and the material id (bytes 8-15, `GFA50`, the AMS's `tray_info_idx`); block 2
+  the filament type; block 4 the detailed type (`PLA Basic`); block 5 the colour RGBA (bytes
+  0-3), the spool weight in grams (bytes 4-5) and the diameter (float, byte 8); block 6 drying
+  and nozzle temperatures; block 9 the tray UID (the AMS's `tray_uuid`); block 12 the
+  production date as ASCII `<year>_<month>_<day>_<hour>_<minute>`; block 16 a second colour.
+  Sectors 10-15 hold an RSA signature.
+- Web NFC reads a Bambu tag's UID but none of its blocks. Measured on prod on 2026-11-25:
+  the owner's phone scan of a Bambu spool made tag `a167982e…` with `tag_uid` `7E7482BB`,
+  kind `other`, no records (`filament_tag_list`, read 2026-11-26). Web NFC cannot authenticate
+  a MIFARE Classic sector (#7273 Non-goals; https://w3c.github.io/web-nfc/).
+- **The phone's UID and the AMS's `tag_uid` differ in form.** The same physical tag is
+  `becfa1bf…`, `tag_uid` `7E7482BB00000100`, tray `D3B5D4BC…`, from the AMS. Every one of the
+  38 `bambu_mifare` rows on prod ends `00000100`: the AMS reports the 4-byte UID and then
+  `00000100`. `read` compares strings, so the phone's read made a second tag row instead of
+  finding the first (read 2026-11-26). Android's own NFC API gives the same 4-byte form: the
+  owner's Spool Scanner export (2026-11-26, 24 Bambu spools scanned 2026-11-23 and 24) holds
+  UIDs such as `6EC39097`, and 5 of them are prod AMS tags as `<uid>00000100` (spools 43, 36,
+  81, 42 and 10). With `7E7482BB`, 6 of 6 match the rule. The other 19 are on no SB tag (a
+  second side, or a spool no AMS has seen). Spool Scanner keeps `alternateUids` per spool,
+  the same idea as G3.
+- A Bambu spool carries two tags, one on each side, with different UIDs and the same tray UID
+  in block 9. `filament_tags` allows one row per `tray_uuid` and one `tag_uid` per row
+  (`20261114T1301Z_filament_spools.sql`), so a spool's second side has no row to match.
+- Android reads MIFARE Classic through `android.nfc.tech.MifareClassic`, only on phones whose
+  NFC controller supports it ([gamersi/rfid-bbl-scanner-poc](https://github.com/gamersi/rfid-bbl-scanner-poc):
+  "Many Samsung devices support it; Pixels typically do not"). Spool Scanner 1.4 is a .NET
+  MAUI app that uses that API (`android/nfc/tech/MifareClassic` in its
+  `libaot-SpoolScan.dll.so`; XAPK from APKPure, sha256 `a639dcd6…63ba1`, inspected statically
+  on 2026-11-26). Its source is not public.
+- The LAN host `scadbuddy.internal.nullreference.io` runs with auth mode `off`: every caller
+  there is the anonymous browser principal (`docs/security/trust-boundaries.md`). No sign-in
+  page is involved, so a WebView on that host needs no identity provider.
+
+## Goals
+
+- G1. The phone reads a Bambu tag (its UID and every block it can authenticate) and ScadBuddy
+  decodes it **on the server**: material, detailed type, `fila_id` and variant, colour,
+  weight, diameter, temperatures, production date and tray UID. It finds the spool that
+  holds the tag, or offers a spool draft from the decoded fields, as an OpenSpool read does.
+- G2. **One input path** (#7273 G3 stays): a Bambu read is one more `TagRead` through
+  `POST /api/v1/filament/tags/reads` (and an NFC job's result) into `filament/tags.py`
+  `read`. Nothing else decodes or binds.
+- G3. **A tag is found by any of its UIDs.** A phone UID matches the AMS's form, and a tag
+  can hold several UIDs (a spool's two sides). A native read adds a side's UID to the tag
+  its block 9 names. A UID-only read (Web NFC) can be linked to a tag by hand ("same spool
+  as…").
+- G4. **Every scan is in the tag's history.** Each phone or agent read, and each time an AMS
+  first sees a tag in a tray, is a row: when, source, who, the UID, what was read (raw blocks
+  or NDEF records), the decoded fields and the printer place for an AMS read. The tag page
+  lists them, and the scan page lists the latest scans.
+- G5. **The ScadBuddy app**, .NET MAUI, Android first, cross-platform later. It reads and
+  writes tags natively and posts through the same routes as the page.
+- G6. The assistant's composer gets **Scan a tag**. It queues a read job (the `nfc-jobs`
+  routes `nfc_read` uses), the person taps the tag, and the job's result becomes a scan on
+  the message. A message can carry several (one per spool in a box). The agent gets them as
+  untrusted data, the same as tool output.
+- G7. Agent `nfc_read` gets Bambu reads with no change to its code: the job's result is the
+  read's answer. Its description stops saying "Chrome on Android" and "NDEF" only.
+
+## Non-goals
+
+- Writing or cloning a Bambu tag. The signature makes a written tag useless to a Bambu
+  printer.
+- Checking the RSA signature. Bambu's public key is not in the sources above.
+- iOS in the first release. Core NFC's support for MIFARE Classic is not checked yet; check it
+  before the iOS work is planned.
+- The AMS-slot source of Scan a tag (#7905 lists it). ScadBuddy has no native route that reads
+  a tray from the LAN report, and new routes go in Go (#7667). A follow-up issue tracks it.
+- Showing the scans again in the transcript after the message is sent. A follow-up issue
+  tracks it.
+- App store publishing. The APK is sideloaded.
+
+## Anti-goals
+
+- A second input path, or a decoder outside the server.
+- A native bridge that any page can call.
+- A scan whose contents the agent treats as instructions.
+- A second tag row for one physical tag.
+
+## Constraints
+
+- New backend routes go in Go (#7667), and `tools/go/core` is not deployed yet. This design
+  adds no route: it adds fields to the existing read bodies and answers, one table and one
+  column change (new Python inside the existing `tags` area, which moves to Go with it).
+- Only the API holds SQL (root CLAUDE.md). The app reaches ScadBuddy as the page does, on the
+  LAN host.
+- Bytes travel as hex in JSON only where NDEF records already do (`data_hex`): at most 64
+  blocks of 16 bytes. No images in JSON (#2479).
+- CI runs on `ubuntu-latest` only. A MAUI Android build runs there with the .NET SDK and the
+  `maui-android` workload.
+
+## Approaches
+
+1. **A MAUI app whose screens are the web page** (picked by the owner, 2026-11-26: "Web for
+   now"). A MAUI app hosts `/scan` in a HybridWebView and
+   gives it a native NFC service through a bridge. One UI; iOS later is a second NFC service,
+   not new screens.
+2. **A MAUI app with native screens.** A real app look, offline use. Two UIs to keep in step
+   with the web page.
+3. A USB reader on the desktop through WebUSB. No app, but hardware, desk only, and OS
+   drivers often hold the device. Rejected: the owner wants an app.
+
+## Design
+
+### Tag identity (G3), first
+
+- A new table `filament_tag_uids (uid text PRIMARY KEY, tag_id uuid NOT NULL REFERENCES
+  filament_tags ON DELETE CASCADE, source text, added_at, added_by)`. Every UID of a tag is a
+  row; `filament_tags.tag_uid` stays as the tag's first UID so that reads and Bambuddy sync
+  keep working.
+- `clean_tag_uid` gives one form for a MIFARE UID: a 4-byte UID (8 hex digits) and the AMS's
+  16-digit form ending `00000100` are the same key. The lookup (`_find`, `holder_by_keys`,
+  `FilamentSpoolStore.tag_on`) goes through `filament_tag_uids`.
+- A native read with block 9 adds its UID to the tag of that tray UID, or makes the tag.
+- "Same spool as…" on a tag page links a UID-only tag to another tag: its UIDs and its history
+  move to the other tag, and the empty row goes. Both write a history row.
+- A migration fills `filament_tag_uids` from `filament_tags.tag_uid` and merges the prod rows
+  that are one tag in two forms (today `a167982e…` into `becfa1bf…`), guarded by id and value
+  as backend/CLAUDE.md asks.
+- This part ships first, on its own (the owner, 2026-11-26: "Ahead of the rest"): it fixes
+  today's duplicate rows from web scans.
+
+### Scan history (G4)
+
+- A new append-only table `filament_tag_reads`: `id`, `tag_id`, `at`, `source` (`phone`,
+  `app`, `agent`, `ams`), `actor`, `uid`, `tray_uuid`, `records` (jsonb, NDEF), `blocks`
+  (jsonb, MIFARE, key trailers never stored), `decoded` (jsonb), `printer_id`, `ams_id`,
+  `tray_id`, `job_id`. Rows are never updated; a tag merge moves them.
+- `read_on` writes the row for a phone, app or agent read. The AMS capture writes one when a
+  tag appears in a tray (`capture.py`'s `loaded`), not on every report.
+- Routes: `GET /filament/tags/{id}/reads` (paged, newest first) and `GET /filament/tag-reads`
+  (the latest scans across tags, for the scan page). Agent tool `filament_tag_reads` (`read`).
+
+### Server-side decode (G1)
+
+- `TagReadIn` and `NfcJobResultIn` get `tag_type` and `mifare_blocks: [{index, data_hex}]`
+  (64 at most, 16 bytes each).
+- `filament/bambu_tag.py` decodes the blocks into a `BambuTag` (the fields above). A tag is
+  untrusted: strings and numbers are bounded before use, as `tag_formats.py` does.
+- `read_on` decodes a Bambu read, takes block 9 as the read's `tray_uuid`, and gives
+  `decoded` and `draft` as for an NDEF read: the material, brand and subtype found in the
+  catalog by `fila_id` and type name, the colour from block 5 (and its Bambu colour code,
+  `ColourCodes`), the label weight from block 5. The answer gets `bambu`, the decoded fields.
+  The tag's kind is `bambu_mifare`.
+- Tested against the published dumps.
+
+### The app (G5)
+
+- .NET MAUI, `app/` in this repo, Android first, min SDK 29.
+- It opens the LAN host's `/scan` page (the URL set once in the app). Navigation stays on that
+  origin; another origin opens in the browser.
+- The bridge (`window.ScadBuddyNfc`) is offered only to that origin. It has `read()` and
+  `write(records)`, each answered once:
+  - `read()` turns on reader mode until a tag is tapped or the page cancels. For a MIFARE
+    Classic tag, it derives the 16 keys, authenticates each sector with key A, and reads its
+    blocks; a sector that refuses is left out, and key trailers are never sent. It answers
+    `{kind: 'mifare_classic', uid, blocks}`. For an NDEF tag it answers `{kind: 'ndef', uid,
+    records}` in the page's `WireRecord` shape.
+  - `write(records)` writes NDEF records, reads them back and answers what it read, so the
+    page's backup-first write (#7273 G7) runs as it does with Web NFC.
+- `lib/webNfc.ts` gets a reader seam: `nfcSupport()` answers `native` when the bridge exists,
+  and `NfcSession` uses it then, Web NFC otherwise. A MIFARE read posts the raw blocks; the
+  screen shows the server's answer. No decoder in the page.
+- The release APK is signed with a key kept in 1Password and in the repo's Actions secrets.
+  A workflow `app.yml` builds and tests on `ubuntu-latest` for changes under `app/`, and
+  attaches the APK to a release on an `app-v*` tag.
+
+### Scan a tag (G6)
+
+- The composer's attach menu gets "Scan a tag". It posts `POST /api/v1/filament/nfc-jobs`
+  (`kind: read`), shows a chip "Tap the tag on your phone", and polls the job until it ends. A
+  done job's chip shows the material, colour and spool number; a failed or expired one says
+  why and can be tried again. Chips can be removed. Several are allowed.
+- The `user.message` frame gets `scans: [{job_id}]` (16 at most). Before the turn starts, the
+  agent reads each job through its backend client and refuses one that is not a `done` `read`
+  job. With auth mode `off` every job is the anonymous principal's, so ownership is not
+  checked (the LAN host is the trust boundary, as for every other route there). The agent
+  adds a `<tag_scans>` block after the page context, with the sentence that marks the page
+  context as data, not instructions.
+
+## Calls the assistant made (the owner may change them)
+
+- A Bambu read gives a spool draft, as an NDEF read does, so a mystery-box spool can be made
+  from its scan.
+- The app loads the LAN host, where auth is off and no sign-in page is needed. Off the LAN
+  (the SSO host) is later work: identity providers often refuse sign-in inside a WebView.
+- Scan jobs are not bound to a chat; any finished read job id can be named.
+- An AMS read is a history row when the tag appears in a tray, not on every report.
+
+## Left to the builder
+
+- The exact `bambu` field names, and how a missing sector shows on the screen.
+- The PR order after the identity fix: decode and history, then the app and the page seam,
+  then Scan a tag, each with its tests.
