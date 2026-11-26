@@ -271,8 +271,9 @@ overwrites and a remove leaves no trace.
   history"; "have a subscriber manage the history table by insert log every event
   change"). Each change is published as an event on the `events` log
   (`migrations/20260928T0630Z_events.sql`, `core/pg_events.py`; Go's `internal/bus`) in
-  the same transaction as the write: `entity_property.changed` (entity id, kind, ref,
-  key, op, old, new, source, actor, at) and `entity_property_schema.changed`. The history
+  the same transaction as the write: `entity_property.changed` (entity id,
+  `entity_kind`, ref, key, op, old, new, source, actor, at; `kind` is the envelope's own
+  field) and `entity_property_schema.changed`. The history
   tables are not written by the writers. A **history subscriber** reads the stream from
   its own durable cursor and inserts one row per change event; the event's `seq` is the
   row's key, so a replay inserts nothing twice.
@@ -405,9 +406,12 @@ gives us the visibility into the Activities tab in SB".
   working" and follows it on the Activities tab. A repeat with the same key is never an
   error: while it runs it attaches and answers `202` again, and once it is done it
   answers the stored result. So repeated tries cause no extra work.
-- **Orders.** Fulfilling an order item commits the order change, then starts
-  `inventory.Take` with the item's key. Temporal retries it until Go answers; there is no
-  outbox table and no sweep. If the start itself fails, the fulfil call answers an error
+- **Orders.** Fulfilling an order item commits the order change, then starts a small
+  workflow `SettleOrderParts` with the item's key: its first step is the Go activity
+  `inventory.Take`, its second a Python activity that records `parts.used` on the order.
+  Temporal retries each step until it succeeds; there is no outbox table, no sweep and no
+  manual settle. If the take does not finish in 15 s, fulfil answers 202 ("stock still
+  settling") and the order settles by itself when the workflow ends. If the start itself fails, the fulfil call answers an error
   and the person retries; the fulfil is idempotent.
 - **Merges.** An entity or printer merge first executes `inventory.Repoint` (move the
   stock rows from the old id to the kept one), then runs its own transaction and deletes
