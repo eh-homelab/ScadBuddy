@@ -417,6 +417,7 @@ func TestProductionTimeTakesOnlyDigits(t *testing.T) {
 		"+2026_05_08_23_15": "<absent>",
 		"2026_+5_08_23_15":  "<absent>",
 		"2026_5_08_23_15":   "<absent>",
+		"2026_05_08_3_15":   "<absent>",
 		"2026_05_08_23_15x": "<absent>",
 		"2026_02_30_23_15":  "<absent>",
 		"2026_05_08_24_00":  "<absent>",

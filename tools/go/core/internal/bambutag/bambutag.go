@@ -394,10 +394,11 @@ func text(b []byte) string {
 }
 
 func productionTime(s string) *string {
-	// time.Parse takes only the digits the layout names: no sign, no padding, no extra text,
-	// and no day the calendar lacks.
-	at, err := time.Parse("2006_01_02_15_04", s)
-	if err != nil {
+	// time.Parse refuses a sign, extra text and a day the calendar lacks, but its 15 takes a
+	// one-digit hour, so the value must also format back to the same text.
+	const layout = "2006_01_02_15_04"
+	at, err := time.Parse(layout, s)
+	if err != nil || at.Format(layout) != s {
 		return nil
 	}
 	return ptr(at.Format("2006-01-02T15:04:05"))
