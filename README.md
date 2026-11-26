@@ -1114,8 +1114,7 @@ run until the first release wrote the cut-over mark and every row's bytes are bl
 refused pod restarts, and the pods of the first release go on serving. Upgrade from the
 first release only, once `GET /api/v1/outputs/copy-status` named `cut_over_at` and
 `bytes.pending` was 0 ([The cut-over](docs/architecture/data.md#the-cut-over)). #7887
-removed that route and the mark's table after the second release; a build from it on
-upgrades only an install that already runs the second release.
+removed that route after the second release.
 
 ### Render worker (#424)
 

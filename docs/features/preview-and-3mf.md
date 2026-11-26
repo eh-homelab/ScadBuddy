@@ -37,8 +37,8 @@ printing is the print dialog's job.
 - Tables: `render_jobs`, `blob_refs`, `piece_geometry`, `outputs` (each output's record,
   #7255; it also lists them, #7257), `output_files` and `output_derived` (#7256),
   and `output_claims` (#7257). #7257's second release dropped `output_index` and
-  `output_hold_slugs`; #7887 dropped `output_copy_runs`, `output_byte_runs` and
-  `output_cutover`.
+  `output_hold_slugs`; `output_copy_runs`, `output_byte_runs` and `output_cutover` are
+  unused since #7887, whose second step drops them.
 - Blob keys: a piece's key (64-hex), `output-<job>-<i>`; a saved output's bytes,
   `output-<id>-<role>` and `output-<id>-file-<hash>`, kind `output` (#7256; the only copy
   since #7257's second release, which reads no file under `data/outputs/`; on `local` the
