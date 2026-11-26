@@ -1,6 +1,9 @@
 package handlers
 
-import "fmt"
+import (
+	"fmt"
+	"slices"
+)
 
 // ErrNotBuilt is a handler the catalog names that has no implementation yet (R-K1-7).
 type ErrNotBuilt struct {
@@ -33,11 +36,7 @@ func (r *Registry) For(step Step, id string) (any, error) {
 	if !ok {
 		return nil, fmt.Errorf("unknown handler %s", id)
 	}
-	fills := false
-	for _, s := range sp.Steps {
-		fills = fills || s == step
-	}
-	if !fills {
+	if !slices.Contains(sp.Steps, step) {
 		return nil, fmt.Errorf("handler %s does not fill step %s", id, step)
 	}
 	impl, ok := r.impls[id]
