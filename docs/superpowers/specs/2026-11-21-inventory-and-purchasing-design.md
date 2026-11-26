@@ -205,7 +205,7 @@ ASINs, manufacturer part number and product page, an empty spool's weight, a fil
   person. For an item (phase 2), its item kind's `attribute_schema`, which follows the same
   rule (a child kind inherits its parent's keys). In phase 3a, when a spool type becomes an
   item of kind `filament`, that kind's schema starts as the `spool_type` row's, and the
-  `spool` row's keys move to the `filament` kind's unit keys (owner, 2026-11-25). The
+  `spool` row's keys move to the `filament` kind's unit keys (owner, 2026-11-25); where a kind holds its unit keys is left to the plan (§10). The
   `spool_type` and `spool` rows of `entity_property_schemas` then go with their entity
   kinds (§6.1).
 - Well-known keys, documented in the seeded schemas and still plain properties: on a spool
@@ -384,7 +384,7 @@ phase 3a; owner, 2026-11-25),
 `installed_in_unit_id` (a nozzle in a printer, a belt in an H2C), `cost`, `origin` and its
 ids as for lots, `in_service_at`, `retired_at`, `life_hours` / `life_months` (override the
 item's), `printer_id` (nullable link to `printers`, for a unit that is a printer),
-`location_ref_id` (nullable link to the `filament_locations` row a dry bin *is*, as the dry
+`location_ref_id` (nullable link to the `filament_locations` row (`locations` after 3a) a dry bin *is*, as the dry
 bins session proposed).
 
 **Filament** (`tracking = filament`): a spool type is an item of kind `filament` (one item
