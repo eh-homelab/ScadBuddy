@@ -1205,7 +1205,9 @@ describe.skipIf(skip !== '')(`session affinity${skip}`, { timeout: 180_000 }, ()
     expect(await turnCosts(id)).toEqual([expect.closeTo(REPLY_COST_USD, 12)])
   })
 
-  it('SIGTERM mid-turn: a turn still running past the grace is cut and moves, its spend counted once (I4)', async () => {
+  // Skipped by the owner's decision of 2026-11-26 (#7874): it runs the real Claude Code binary through
+  // a shutdown and is slow in CI. Kept so it can be turned on again; it checks the replay of a cut call.
+  it.skip('SIGTERM mid-turn: a turn still running past the grace is cut and moves, its spend counted once (I4)', async () => {
     const hold = latch()
     slowGate = hold.promise
     script = (r) => (conversation(r).includes(RESTARTED_PROMPT) ? { text: 'carried on' } : { toolUse: { name: 'mcp__stub__slow', input: { q: 'x' } } })
