@@ -46,7 +46,11 @@ export type LabelTemplates = Schemas['LabelTemplates']
 export type LabelTemplate = Schemas['LabelTemplate']
 export type LabelSheet = Schemas['LabelSheet']
 export type LabelTemplateChoice = Schemas['LabelTemplateChoice']
-export type LabelsPdfRequest = Schemas['LabelsPdfRequest']
+export type LabelsRequest = Schemas['LabelsRequest']
+export type LabelOutput = Schemas['LabelOutput']
+export type SavedLabelSheet = Schemas['SavedLabelSheet']
+export type SheetLayout = Schemas['SheetLayout']
+export type LabelSheetIn = Schemas['LabelSheetIn']
 export type PrinterLabel = Schemas['PrinterLabel']
 export type LocationNode = Schemas['LocationNode']
 export type LocationCreate = Schemas['LocationCreate']
@@ -72,6 +76,10 @@ export type GramsPoint = Schemas['GramsPoint']
 export type SpoolMetrics = Schemas['SpoolMetrics']
 export type AmsError = Schemas['AmsError']
 export type InsertWeightCheck = Schemas['InsertWeightCheck']
+export type SpoolArchive = Schemas['SpoolArchive']
+export type ArchiveReason = NonNullable<SpoolArchive['reason']>
+export type Closing = Schemas['Closing']
+export type ClosingPreview = Schemas['ClosingPreview']
 export type InsertWeightOffer = Schemas['InsertWeightOffer']
 export type InsertWeightAccepted = Schemas['InsertWeightAccepted']
 export type Forecast = Schemas['Forecast']
@@ -183,9 +191,23 @@ export const copySpool = (id: string) => request<SpoolDraft>(`${BASE}/spools/${s
 /** Only the fields sent change; `null` clears an override. */
 export const patchSpool = (id: string, body: SpoolPatch) => request<Spool>(`${BASE}/spools/${seg(id)}`, json('PATCH', body))
 
-/** `archived: false` restores it. */
-export const archiveSpool = (id: string, archived = true) =>
-  request<Spool>(`${BASE}/spools/${seg(id)}/archive`, json('POST', { archived }))
+/**
+ * `archived: false` restores it. An archive (#7684) names its `reason` and may send the final
+ * weighing (`final_reading_g` with the spool, or `final_grams` of filament), booked just before
+ * the `archived` event, whose `data` keeps the closing.
+ */
+export const archiveSpool = (id: string, body: SpoolArchive = { archived: true }) =>
+  request<Spool>(`${BASE}/spools/${seg(id)}/archive`, json('POST', body))
+
+/** #7684 — what archiving with these inputs would record, and what disagrees with the reason. Reads only. */
+export const closingPreview = (id: string, reason: ArchiveReason | null, finalReadingG: number | null, finalGrams: number | null) => {
+  const query = new URLSearchParams()
+  if (reason) query.set('reason', reason)
+  if (finalReadingG != null) query.set('final_reading_g', String(finalReadingG))
+  if (finalGrams != null) query.set('final_grams', String(finalGrams))
+  const text = query.toString()
+  return request<ClosingPreview>(`${BASE}/spools/${seg(id)}/closing${text ? `?${text}` : ''}`)
+}
 
 /**
  * #7151 — the same patch on several spools, all or none: a spool that refuses it refuses
@@ -468,13 +490,34 @@ export const printerLabels = (printerIds: string[] | null) =>
 /** #7157 — the label templates, and a custom label's bounds. */
 export const listLabelTemplates = () => request<LabelTemplates>(`${BASE}/label-templates`)
 
+/** #7216 — saves a new sheet grid (409 `label_sheet_name_taken` or `too_many_label_sheets`, 422 for a grid that does not fit its page). */
+export const createLabelSheet = (body: LabelSheetIn) => request<SavedLabelSheet>(`${BASE}/label-sheets`, json('POST', body))
+
+/** #7216 — replaces a saved sheet's name and layout; the next print uses the new grid. */
+export const replaceLabelSheet = (id: string, body: LabelSheetIn) => request<SavedLabelSheet>(`${BASE}/label-sheets/${seg(id)}`, json('PUT', body))
+
+/** #7216 — deletes a saved sheet; a choice that still names it is refused `label_sheet_gone` at the next print. */
+export const deleteLabelSheet = (id: string) => request<void>(`${BASE}/label-sheets/${seg(id)}`, { method: 'DELETE' })
+
 /**
- * #7157 — the labels PDF of these spools, then these places (`POST /filament/labels`), as the answer's bytes for
- * `downloadBlob`; a refusal throws `ApiError` with the sentence for the person (`no_label_base`, an unknown id).
+ * #7157, #7216 — the labels file of these spools, then these places (`POST /filament/labels`), as the answer's bytes for
+ * `downloadBlob`: a PDF, one PNG, or a ZIP of PNGs (R-7216-6). A refusal throws `ApiError` with the sentence for
+ * the person (`no_label_base`, `png_too_large`, an unknown id).
  */
-export async function labelsPdf(body: LabelsPdfRequest): Promise<Blob> {
-  const response = await requestRaw(`${BASE}/labels`, { method: 'POST', headers: { 'Content-Type': 'application/json', Accept: 'application/pdf' }, body: JSON.stringify(body) })
+export async function labelsFile(body: LabelsRequest): Promise<Blob> {
+  const response = await requestRaw(`${BASE}/labels`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', Accept: 'application/pdf, image/png, application/zip' },
+    body: JSON.stringify(body),
+  })
   return response.blob()
+}
+
+/** #7216 — the name to save a labels file under, from its type (R-7216-6). */
+export function fileName(blob: Blob): string {
+  if (blob.type === 'image/png') return 'labels.png'
+  if (blob.type === 'application/zip') return 'labels.zip'
+  return 'labels.pdf'
 }
 
 /** Adds a place, or with `id` changes one (only the fields sent). */

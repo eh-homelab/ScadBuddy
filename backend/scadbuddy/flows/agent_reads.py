@@ -1,7 +1,9 @@
 """The questions the agent asks of the flow tables (#5299 D7), answered for its CRUD routes
 (`api/crud_agent.py`). Each query is the one the agent ran over SQL before, so the answers
-did not change; the agent's tests run a copy on their own database
-(``agent/test/support/sqlFlowRunReads.ts``). The agent reads; nothing here writes.
+did not change, except that a run grant now holds only while its whole chain is in force,
+as the API's own check requires (`store.chain_in_force`, #5685). The agent's tests run a
+copy on their own database (``agent/test/support/sqlFlowRunReads.ts``). The agent reads;
+nothing here writes.
 
 The JSON in ``workflow_runs.waiting_on`` and ``steps`` is passed on as the backend's
 projection wrote it (`workflows/flow_models.py`), field by field: a time stays the
@@ -17,6 +19,8 @@ from psycopg import Connection
 from psycopg.rows import DictRow
 from psycopg_pool import ConnectionPool
 
+from scadbuddy.flows.store import chain_in_force
+
 Pool = ConnectionPool[Connection[DictRow]]
 
 #: A parked call's fields the agent reads (`FlowWaiting`), and a hop record's (`HopRecord`).
@@ -29,16 +33,6 @@ DECISION_CHECKS = ("approved", "approved_unresolved", "by_person", "lapsed")
 #: The most runs `waiting_runs` lists: past that, the longest-waiting ones are left out.
 WAITING_RUNS_MAX = 200
 
-#: A run grant's approval holds only while the grant is in force (#2481).
-_GRANT_IN_FORCE = (
-    "EXISTS (SELECT 1 FROM flow_grants g WHERE 'grant:' || g.id = d.responder"
-    " AND g.status = 'approved' AND g.revoked_at IS NULL AND now() < g.expires_at)"
-)
-#: One approval of the call with this hash.
-_APPROVED = (
-    "FROM workflow_run_decisions d WHERE d.request_id = %(request_id)s"
-    " AND d.kind = 'approval' AND d.outcome = 'approved' AND d.input_hash = %(input_hash)s"
-)
 #: A parked call at hop parent that is an approval, and whose hop has not timed out by
 #: Postgres's clock (#3411); a malformed ``hop_until`` is that call skipped.
 _PARENT_APPROVAL_LIVE = (
@@ -98,39 +92,47 @@ def run_starter(pool: Pool, run_id: str, execution: str) -> dict[str, Any] | Non
 
 def decision_checks(pool: Pool, request_id: str, input_hash: str) -> dict[str, bool]:
     """Whether the call's approval with this hash holds (a run grant's only while the
-    grant is in force), holds without having seen what the call resolves to (a grant's
-    or a narrowing's, #4445), was a person's in the browser (#959), or was a grant's
-    that has lapsed (#2481)."""
+    grant's whole chain is in force, `store.chain_in_force`, #5685), holds without having
+    seen what the call resolves to (a grant's or a narrowing's, #4445), was a person's in
+    the browser (#959), or was a grant's that has lapsed (#2481)."""
     params = {"request_id": request_id, "input_hash": input_hash}
     with pool.connection() as conn:
-        row = conn.execute(
-            f"SELECT EXISTS (SELECT 1 {_APPROVED}"
-            f" AND (d.responder NOT LIKE 'grant:%%' OR {_GRANT_IN_FORCE})) AS approved,"
-            f" EXISTS (SELECT 1 {_APPROVED}"
-            " AND (d.responder LIKE 'grant:%%' OR d.response ? 'narrowed_by')"
-            f" AND (d.responder NOT LIKE 'grant:%%' OR {_GRANT_IN_FORCE})) AS approved_unresolved,"
-            f" EXISTS (SELECT 1 {_APPROVED} AND d.responder = 'browser') AS by_person,"
-            " EXISTS (SELECT 1 FROM workflow_run_decisions d"
-            " JOIN flow_grants g ON 'grant:' || g.id = d.responder"
+        rows = conn.execute(
+            "SELECT d.responder, d.response ? 'narrowed_by' AS narrowed,"
+            " g.id AS grant_id FROM workflow_run_decisions d"
+            " LEFT JOIN flow_grants g ON 'grant:' || g.id = d.responder"
             " WHERE d.request_id = %(request_id)s AND d.kind = 'approval'"
-            " AND d.outcome = 'approved' AND d.input_hash = %(input_hash)s"
-            " AND (g.status <> 'approved' OR g.revoked_at IS NOT NULL OR g.expires_at IS NULL"
-            " OR now() >= g.expires_at)) AS lapsed",
+            " AND d.outcome = 'approved' AND d.input_hash = %(input_hash)s",
             params,
-        ).fetchone()
-    assert row is not None
-    return {name: bool(row[name]) for name in DECISION_CHECKS}
+        ).fetchall()
+        approved = unresolved = by_person = lapsed = False
+        # Each grant's chain is read once, however many rows name it (#7890).
+        chains: dict[str, bool] = {}
+        for row in rows:
+            responder = str(row["responder"])
+            by_grant = responder.startswith("grant:")
+            grant_id = row["grant_id"]
+            if grant_id is not None and grant_id not in chains:
+                chains[grant_id] = chain_in_force(conn, grant_id)
+            holds = not by_grant or (grant_id is not None and chains[grant_id])
+            approved = approved or holds
+            unresolved = unresolved or (holds and (by_grant or bool(row["narrowed"])))
+            by_person = by_person or responder == "browser"
+            # A grant that is gone is neither in force nor lapsed, as before.
+            lapsed = lapsed or (by_grant and row["grant_id"] is not None and not holds)
+    return {
+        "approved": approved,
+        "approved_unresolved": unresolved,
+        "by_person": by_person,
+        "lapsed": lapsed,
+    }
 
 
 def grant_in_force(pool: Pool, grant_id: str) -> bool:
-    """Whether run grant ``grant_id`` is approved, not revoked and not expired."""
+    """Whether run grant ``grant_id`` is in force, with every grant it inherits from and
+    the standing grant it was seeded from (`store.chain_in_force`, #5685)."""
     with pool.connection() as conn:
-        row = conn.execute(
-            "SELECT 1 FROM flow_grants WHERE id = %s AND status = 'approved'"
-            " AND revoked_at IS NULL AND now() < expires_at",
-            (grant_id,),
-        ).fetchone()
-    return row is not None
+        return chain_in_force(conn, grant_id)
 
 
 def _run_fields(row: DictRow) -> dict[str, Any]:

@@ -32,6 +32,7 @@ ServiceCaller = Literal[
     "profile-fetch",
     "camera",
     "camera-relay",
+    "fleet",
     "inventory",
 ]
 

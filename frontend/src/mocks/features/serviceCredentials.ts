@@ -16,6 +16,7 @@ const SCOPES: Record<ServiceCaller, string[]> = {
   'profile-fetch': ['crud.profile-fetch'],
   camera: ['crud.camera'],
   'camera-relay': ['crud.camera-relay'],
+  fleet: ['crud.fleet'],
   inventory: ['crud.inventory'],
 }
 

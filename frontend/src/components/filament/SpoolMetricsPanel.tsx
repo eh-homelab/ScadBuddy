@@ -4,6 +4,8 @@ import { when } from './formClasses'
 import { useMoney } from './purchasing/useMoney'
 
 const grams = (value: number) => `${Number(value.toFixed(1))} g`
+const metres = (value: number) => `${Number(value.toFixed(1))} m`
+const density = (value: number) => `${Number(value.toFixed(2))} g/cm³`
 const signed = (value: number) => `${value > 0 ? '+' : value < 0 ? '−' : ''}${grams(Math.abs(value))}`
 const days = (value: number) => {
   const whole = Math.floor(value)
@@ -39,18 +41,27 @@ export function SpoolMetricsPanel({ history, gramsLeft, createdAt }: { history: 
   const age = (now - Date.parse(createdAt)) / DAY_MS
   const aged = Math.max(1, Math.round(age))
   const burnOver = age < window ? `Since it was added ${aged} ${aged === 1 ? 'day' : 'days'} ago` : `Over the last ${window} days`
+  // #7685 (spec §5.6): the metres of the plates that carry a length, and the density they imply against the type's.
+  const alsoMetres = metrics.used_m != null ? `, ${metres(metrics.used_m)}` : ''
+  const implied = metrics.implied_density_g_cm3
+  const typeDensity = metrics.density_g_cm3
+  const typeSays = typeDensity != null ? `The type says ${density(typeDensity)}` : 'The type has no density'
+  const densityNote =
+    implied != null && typeDensity != null && metrics.density_mismatch
+      ? `The prints imply ${density(implied)}, ${Math.round(Math.abs(implied / typeDensity - 1) * 100)}% ${implied > typeDensity ? 'over' : 'under'} the type's ${density(typeDensity)}: check the type's density or the label.`
+      : typeSays
   const tiles: Tile[] = [
     // #7149: after a reset, Used counts from it (`consumed_g`), as Bambuddy's "Total consumed" does.
     metrics.consumed_since
       ? {
           label: 'Used',
           value: grams(metrics.consumed_g),
-          note: `Since the reset on ${when(metrics.consumed_since)}, ${grams(metrics.used_g)} in all`,
+          note: `Since the reset on ${when(metrics.consumed_since)}, ${grams(metrics.used_g)}${alsoMetres} in all`,
         }
       : {
           label: 'Used',
           value: grams(metrics.used_g),
-          note: metrics.prints === 0 ? 'No prints yet' : `${metrics.prints} ${metrics.prints === 1 ? 'print' : 'prints'}${metrics.grams_per_print != null ? `, ${grams(metrics.grams_per_print)} each` : ''}`,
+          note: metrics.prints === 0 ? 'No prints yet' : `${metrics.prints} ${metrics.prints === 1 ? 'print' : 'prints'}${metrics.grams_per_print != null ? `, ${grams(metrics.grams_per_print)} each` : ''}${alsoMetres}`,
         },
     { label: 'Burn rate', value: burn == null ? null : `${grams(burn)} a day`, why: noPrints, note: burnOver },
     {
@@ -62,6 +73,13 @@ export function SpoolMetricsPanel({ history, gramsLeft, createdAt }: { history: 
       label: 'Waste',
       value: grams(metrics.wasted_g),
       note: metrics.used_g > 0 ? `${Math.round((metrics.wasted_g / metrics.used_g) * 100)}% of what it used, in failed and cancelled prints` : 'From failed and cancelled prints',
+    },
+    {
+      label: 'Density',
+      value: implied == null ? null : density(implied),
+      why: 'No print has a length yet',
+      note: densityNote,
+      also: implied == null && typeDensity != null ? typeSays : null,
     },
     { label: 'Cost used', value: metrics.cost_used == null ? null : money.format(metrics.cost_used, history.currency), why: 'No cost per kg is set' },
     {

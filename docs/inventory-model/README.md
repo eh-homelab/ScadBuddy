@@ -24,7 +24,8 @@ uvx --with pyyaml python -I docs/inventory-model/check.py
 It resolves each item's class and handlers, checks each handler's step, class and
 parameters, checks each instance and relationship, and checks that §3's table is what it
 resolved. It also checks that the five relationships marked `expect: refused` are refused,
-each for its stated reason. It replays `examples.yaml`'s history (a nozzle and a plate
+each for its stated reason: the rule `check_relation` names must be the entry's `reason`
+code. It replays `examples.yaml`'s history (a nozzle and a plate
 move from one printer to another, a person enters a reading by hand, a person changes a
 life, two refreshes), and checks the
 cached values, their history and the parameter history against what the YAML expects. It
@@ -32,11 +33,11 @@ also checks that rebuilding the cache from the sources gives the same values.
 Output on 2026-11-25:
 
 ```text
-refused as expected: contains unit:label_printer_1 -> unit:roll_5: unit:label_printer_1 holds 1 of kind:label_roll at most, and has ['unit:roll_4']
-refused as expected: contains unit:label_printer_1 -> unit:roll_9: unit:label_printer_1 does not accept unit:roll_9
-refused as expected: contains unit:drill_1 -> unit:nozzle_4: unit:drill_1 does not accept unit:nozzle_4
-refused as expected: contains unit:h2c_1 -> unit:insert_7: unit:insert_7 is already in unit:spool_112
-refused as expected: covers unit:drill_1 -> unit:h2c_1: unit:drill_1: class {'nature': 'physical', 'role': 'durable', 'counting': 'unit'} is not {'nature': 'service', 'billing': 'term'}
+refused as expected: contains unit:label_printer_1 -> unit:roll_5: over_max: unit:label_printer_1 holds 1 of kind:label_roll at most, and has ['unit:roll_4']
+refused as expected: contains unit:label_printer_1 -> unit:roll_9: not_accepted: unit:label_printer_1 does not accept unit:roll_9
+refused as expected: contains unit:drill_1 -> unit:nozzle_4: not_accepted: unit:drill_1 does not accept unit:nozzle_4
+refused as expected: contains unit:h2c_1 -> unit:insert_7: already_contained: unit:insert_7 is already in unit:spool_112
+refused as expected: covers unit:drill_1 -> unit:h2c_1: end_not_allowed: unit:drill_1: class {'nature': 'physical', 'role': 'durable', 'counting': 'unit'} is not {'nature': 'service', 'billing': 'term'}
 refresh unit:drill_1 at 2027-01-25: 1 changed ['unit:drill_1']
 refresh all at 2027-01-25: 0 changed []
 life as expected: nozzle_4 used 1450, 96.7%, warn True, book value 83.33
@@ -173,7 +174,8 @@ flowchart LR
     end
 ```
 
-Refused by `check.py`, each for the reason the design gives:
+Refused by `check.py`, each for the reason the design gives (its `reason` code in
+`examples.yaml` must be the rule that refuses it):
 
 | Relationship | Why it is refused |
 |---|---|

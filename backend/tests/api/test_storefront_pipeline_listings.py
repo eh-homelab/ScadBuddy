@@ -1,8 +1,8 @@
 # ruff: noqa: F811  (pytest fixtures imported by name, then taken as arguments)
 """A pipeline template on the storefront (#5701, spec 2026-11-17): the shop fixes the
 pipeline's own inputs on the listing, publish checks them against the shape the template
-declares, every render takes them whole, and a render of one output has a firm price from
-a slice. A render of several outputs has none yet: its line is priced by hand."""
+declares, every render takes them whole, and a render has a firm price from a slice: one
+price over every output of the render, and the order renders and prints every output."""
 
 from __future__ import annotations
 
@@ -660,8 +660,8 @@ def two_colours(
 
 
 def kit_price(crud: CrudCaller, listing: dict[str, Any], job: Job) -> dict[str, Any]:
-    """The row of the kit's price, through the price path itself: no visitor's read asks
-    for one yet (`one_output`)."""
+    """The row of the kit's price, through the price path itself, before a visitor's read
+    asks for it."""
     state = _state(crud.api)
     record = state.components.get(ORDERS).listings.get(listing["id"])
     portal = crud.api.portal
@@ -696,8 +696,7 @@ def test_every_output_of_a_kit_is_sliced_and_priced_once(
     sliced: type[FakeSlicer],
 ) -> None:
     """Spec §7.4, over a real render of two outputs: one price of both, each saved from the
-    one job and sliced with the presets of its own slots. A visitor is still shown none of
-    it, though the price stands (until PR 5)."""
+    one job and sliced with the presets of its own slots, and shown to the visitor."""
     api = crud.api
     listing, job = two_colours
     state = _state(api)
@@ -721,15 +720,51 @@ def test_every_output_of_a_kit_is_sliced_and_priced_once(
     assert row["output_id"] == metas[0].id
     assert counted_rows(crud, TOKEN_A) == 1
 
-    assert estimate(crud, job.id)["source"] == "none"
-    assert instant(crud, listing, {})["price"]["source"] == "none"
+    # PR 5: the visitor is shown the kit's price, and the cart line keeps it.
+    shown = estimate(crud, job.id)
+    assert (shown["source"], shown["price_key"]) == ("slice", row["price_key"])
+    assert instant(crud, listing, {})["price"]["price_key"] == row["price_key"]
     draft = add(crud, listing, {})
-    assert draft["items"][0]["price"] == "by_hand"
-    assert rows(crud, SHOWN) == []
-    # The line has every slot of the kit, each with its filament.
+    assert draft["items"][0]["price"] == "firm"
+    assert rows(crud, "SELECT every_output FROM storefront_item_prices") == [{"every_output": True}]
+    sent = submit(crud, draft)
+    assert sent.status_code == 200 and sent.json()["pay_now"] is True, sent.text
+    # The line has every slot of the kit, each with its filament, and its quote every
+    # plate of the kit by kit slot: job cost reads the whole kit from it.
     [item] = api.get(f"/api/v1/orders/{draft['id']}").json()["items"]
     assert [slot["filament_id"] for slot in item["colours"]] == [dense_red, pla_blue]
+    [quote] = item["quotes"]
+    assert quote["source"] == "storefront"
+    assert [plate["index"] for plate in quote["plates"]] == [1, 2]
+    assert [[f["slot"] for f in plate["filaments"]] for plate in quote["plates"]] == [[0], [1]]
     assert len(sliced.started) == 2
+
+
+def test_the_order_of_a_kit_renders_and_attaches_every_output(
+    crud: CrudCaller, two_colours: tuple[dict[str, Any], Job]
+) -> None:
+    """PR 5 (spec §7.4 "The order"): the item's render saves every output of the one job.
+    The item holds the first, and the order lists every output of it, found by the job."""
+    api = crud.api
+    listing, job = two_colours
+    draft = add(crud, listing, {})
+    assert submit(crud, draft).status_code == 200
+    [item] = draft["items"]
+    path = f"/api/v1/orders/{draft['id']}/items/{item['id']}/render"
+    for _ in range(2):
+        started = api.post(path, headers=press())
+        assert started.status_code == 202, started.text
+        op = follow_operation(api, started.json(), timeout=120, poll=0.2)
+        assert op["status"] == "succeeded", op
+    [read] = api.get(f"/api/v1/orders/{draft['id']}").json()["items"]
+    first = read["output_id"]
+    assert read["kit_outputs"][0] == first and len(read["kit_outputs"]) == 2
+    metas = [_state(api).outputs.get(output_id) for output_id in read["kit_outputs"]]
+    assert {meta.job_id for meta in metas} == {job.id}
+    assert [meta.colors for meta in metas] == [out.result.colors for out in job.outputs]
+    assert {meta.source for meta in metas} == {"back_office"}
+    # The second render reused both: one render job, two outputs.
+    assert len(rows(crud, "SELECT id FROM render_jobs")) == 1
 
 
 @pytest.mark.parametrize("fault", ["left out", "two jobs"])
@@ -907,54 +942,55 @@ def test_publish_and_prepare_warm_the_prices_of_a_pipeline(
     assert counted_rows(crud, TOKEN_A) == 0
 
 
-def test_a_render_of_several_outputs_has_no_price_on_any_path(
+def test_a_render_of_several_outputs_is_priced_on_every_path(
     crud: CrudCaller,
     template: dict[str, Any],
     dense_red: str,
     sliced: type[FakeSlicer],
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """An order makes the first output only (spec §7.4), so no customer pays for such a
-    kit: not at publish's warming, the estimate, the instant read, the add or the submit,
-    though a ``done`` price of its first output's very 3MF stands."""
+    """PR 5 (spec §7.4): the order makes every output, so the kit has the price of every
+    output at publish's warming, the estimate, the instant read, the add and the submit,
+    never the ``done`` price of its first output's very 3MF. A line PR 2 added kept the
+    first output's digest (``every_output`` false), and stays priced by hand."""
     api = crud.api
-    plain, _est = plain_price(crud, template, dense_red)
+    plain, est = plain_price(crud, template, dense_red)
     warmed = noted_warms(crud, monkeypatch)
     kit = {**template, "commit": committed(api, template["slug"], source=TWO_OUTPUTS)}
     listing = republish(api, plain, kit_body(kit, dense_red))
     wait_warmed(warmed)
-    assert warmed == ["settled", "end"]
 
     shown = render_until_done(crud, TOKEN_A, listing, {})
     job = _state(api).render.store.read(shown["id"])
     assert len(job.outputs) == 2
-    [row] = slices(crud)
     digest, filaments = variant_at(crud, listing, job)
     # The kit's digest is not its first output's, whose price is the plain listing's.
-    assert (file_sha256(crud, job, 0), filaments) == (row["model_sha256"], row["slot_filaments"])
-    assert digest != row["model_sha256"]
+    assert digest != file_sha256(crud, job, 0)
+    priced_kit = priced(crud, shown["id"])
+    assert priced_kit["source"] == "slice"
+    assert priced_kit["price_key"] != est["price_key"]
+    [row] = rows(crud, "SELECT * FROM storefront_slice_prices WHERE model_sha256 = %s", digest)
+    assert (row["status"], row["price_key"]) == ("done", priced_kit["price_key"])
+    assert len(slices(crud)) == 2
 
-    assert estimate(crud, shown["id"])["source"] == "none"
     found = instant(crud, listing, {})
-    assert (found["price"]["source"], found["preview"]) == ("none", None)
+    assert found["price"]["price_key"] == priced_kit["price_key"]
     draft = add(crud, listing, {})
     [line] = draft["items"]
-    assert line["price"] == "by_hand"
-    # The line keeps no variant, so no later submit finds a price for it.
-    assert rows(crud, SHOWN) == []
-    # A line PR 2 added kept one, of the first output.
+    assert line["price"] == "firm"
+    # A line PR 2 added kept the first output's digest, with no price yet.
     with _state(api).projection.pool.connection() as conn:
         conn.execute(
-            "INSERT INTO storefront_item_prices (order_item_id, listing_id, model_sha256,"
-            " slot_filaments) VALUES (%s, %s, %s, %s)",
-            (line["id"], listing["id"], row["model_sha256"], filaments),
+            "UPDATE storefront_item_prices SET model_sha256 = %s, slot_filaments = %s,"
+            " every_output = false, price_key = NULL, unit_price_minor = NULL,"
+            " currency = NULL WHERE order_item_id = %s",
+            (file_sha256(crud, job, 0), filaments, line["id"]),
         )
     sent = submit(crud, draft)
     assert sent.status_code == 200, sent.text
     assert sent.json()["pay_now"] is False
     [item] = api.get(f"/api/v1/orders/{draft['id']}").json()["items"]
     assert item["quotes"] == []
-    assert len(sliced.started) == 1 and len(slices(crud)) == 1
 
 
 def test_a_republish_with_other_inputs_shows_none_of_the_old_design(

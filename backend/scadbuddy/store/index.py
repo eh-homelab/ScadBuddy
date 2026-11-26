@@ -2,13 +2,16 @@
 
 from __future__ import annotations
 
+import asyncio
+import contextlib
 import logging
-from collections.abc import Callable, Sequence
+import threading
+from collections.abc import AsyncIterator, Callable, Iterator, Sequence
 from datetime import datetime
 from typing import Any, Protocol
 
 from psycopg import Connection
-from psycopg.errors import DeadlockDetected
+from psycopg.errors import DeadlockDetected, LockNotAvailable
 from psycopg.rows import DictRow
 from psycopg.types.json import Jsonb
 from psycopg_pool import ConnectionPool
@@ -36,6 +39,153 @@ COPIED_REFS_SQL = (
     f"SELECT {_COLUMNS} FROM store_blobs WHERE backend = %s AND migrated_backend = %s"
     " ORDER BY touched_at DESC LIMIT %s"
 )
+
+
+#: How many saves may be in their upload phase at once on one pod, each with one
+#: connection of the API's stage-lock pool (`StageLocks`, #7477 review I2).
+STAGE_LOCK_SLOTS = 3
+#: The stage-lock pool's connections kept for removals' exclusive locks
+#: (`StageLocks.claim_connection`, #7756 review): a removal holds one through the
+#: backend's remove, a round trip, so it is never the API's shared pool's.
+CLAIM_LOCK_SLOTS = 1
+#: The size of the stage-lock pool (`scadbuddy-stage-locks`): every save slot and every
+#: removal slot has a connection of its own, so neither waits for the other's.
+STAGE_LOCK_POOL_SIZE = STAGE_LOCK_SLOTS + CLAIM_LOCK_SLOTS
+
+
+def _drop_or_discard(conn: Connection[DictRow], query: str, params: tuple[str, ...]) -> None:
+    """Run ``query``, an advisory unlock. When it fails, close ``conn``: a pool discards a
+    closed connection, and a closed session holds no lock. Given back alive, it would keep
+    its locks for its next user (#7477 review M2)."""
+    try:
+        conn.execute(query, params).fetchone()
+    except Exception:
+        logger.warning("could not drop an object's advisory lock", exc_info=True)
+        conn.close()
+
+
+#: How long a stage hold waits for one object's lock, a try, while a removal's claim
+#: holds it (#7756 review): a claim lasts one backend remove, so a hung remove must not
+#: pin a save's slot. `StageHold.take` tries `STAGE_LOCK_TRIES` times, then gives up.
+STAGE_LOCK_TIMEOUT_MS = 5000
+STAGE_LOCK_TRIES = 6
+
+
+class StageLockBusyError(Exception):
+    """A removal held an object's lock for every try of `StageHold.take`: the save fails,
+    and may be sent again."""
+
+
+def _lock_shared(conn: Connection[DictRow], name: str) -> None:
+    """Take the session lock ``name`` shared on ``conn``, waiting `STAGE_LOCK_TIMEOUT_MS`
+    a try, `STAGE_LOCK_TRIES` tries. Each try is a transaction whose ``SET LOCAL`` ends
+    with it, so the pooled connection keeps no timeout; the session lock outlives the
+    commit."""
+    for _ in range(STAGE_LOCK_TRIES):
+        try:
+            with conn.transaction():
+                conn.execute(
+                    "SELECT set_config('lock_timeout', %s, true)", (f"{STAGE_LOCK_TIMEOUT_MS}ms",)
+                )
+                conn.execute(
+                    "SELECT pg_advisory_lock_shared(hashtextextended(%s, 0))", (name,)
+                ).fetchone()
+            return
+        except LockNotAvailable:
+            logger.info("an object's stage lock is claimed by a removal; trying again")
+    raise StageLockBusyError(f"a removal held {name} for {STAGE_LOCK_TRIES} tries")
+
+
+def object_lock_name(backend: str, sha256: str) -> str:
+    """The text whose ``hashtextextended(…, 0)`` keys the session advisory lock of the
+    objects of ``sha256`` on ``backend`` (#7477). A stager holds it shared from before its
+    upload until its rows commit (`StageHold`); a release removes such an object only
+    while it holds it exclusively (`BlobIndex.claim_unnamed`). The kind is left out, so
+    two kinds of the same bytes share one lock: that only makes a release wait for a
+    later pass. Content-addressed backends (S3, local) name the object by its sha256."""
+    return f"blob-object:{backend}:{sha256}"
+
+
+class StageHold:
+    """The shared locks a stager holds on the objects it uploaded (#7477), on one pooled
+    connection of its own (`StageLocks`' pool), from before each upload until `close`. A
+    session lock, so no transaction stays open and nothing commits. A process that dies
+    drops its connection and so its locks. Blocking; `close` is idempotent and
+    thread-safe."""
+
+    def __init__(self, pool: Pool) -> None:
+        self._pool = pool
+        self._conn: Connection[DictRow] | None = None
+        self._held: set[str] = set()
+        self._closed = False
+        self._lock = threading.Lock()
+
+    def take(self, backend: str, sha256: str) -> None:
+        """Hold the objects of ``sha256`` on ``backend`` shared; it waits only while a
+        release holds them (`BlobIndex.claim_unnamed`), which never waits itself, and at
+        most `STAGE_LOCK_TRIES` tries of `STAGE_LOCK_TIMEOUT_MS`: then
+        `StageLockBusyError`, and the caller closes the hold as on any failure."""
+        name = object_lock_name(backend, sha256)
+        with self._lock:
+            if self._closed:
+                raise RuntimeError("this stage hold is closed")
+            if name in self._held:
+                return
+            if self._conn is None:
+                self._conn = self._pool.getconn()
+            _lock_shared(self._conn, name)
+            self._held.add(name)
+
+    def close(self) -> None:
+        """Drop every lock and give the connection back."""
+        with self._lock:
+            self._closed = True
+            conn, self._conn = self._conn, None
+            self._held.clear()
+        if conn is None:
+            return
+        try:
+            _drop_or_discard(conn, "SELECT pg_advisory_unlock_all()", ())
+        finally:
+            self._pool.putconn(conn)
+
+
+class StageLocks:
+    """Where stage holds and removals take their lock connection, and how many of each
+    may hold one at once (#7477 review I2, #7756 review). The pool is small and of its
+    own, not the API's shared one: a save holds its connection from its first upload to
+    its commit and meanwhile needs the shared pool for its index reads and its rows, and
+    a removal holds its exclusive lock through the backend's remove, so locks taken there
+    could take every connection and stall every route. The pool holds ``slots`` plus
+    ``claim_slots`` connections: a save waits for one of ``slots`` before its first
+    upload (`hold`), and a removal for one of ``claim_slots`` (`claim_connection`), so
+    each one's connection is always free when its turn comes, and a save never waits
+    mid-save for a second one. A removal takes its lock without waiting and needs no
+    other connection, so a removal slot is never held for longer than one remove."""
+
+    def __init__(self, pool: Pool, slots: int, claim_slots: int = CLAIM_LOCK_SLOTS) -> None:
+        self.pool = pool
+        self.slots = slots
+        self._free = asyncio.Semaphore(slots)
+        self._claims = threading.BoundedSemaphore(claim_slots)
+
+    @contextlib.contextmanager
+    def claim_connection(self) -> Iterator[Connection[DictRow]]:
+        """A connection for a removal's exclusive lock, once a removal slot is free.
+        Blocking."""
+        with self._claims, self.pool.connection() as conn:
+            yield conn
+
+    @contextlib.asynccontextmanager
+    async def hold(self) -> AsyncIterator[StageHold]:
+        """A `StageHold`, once a slot is free; closed, and its slot freed, at the end."""
+        async with self._free:
+            stage = StageHold(self.pool)
+            try:
+                yield stage
+            finally:
+                # Shielded: a cancel must not leave the locks held on a pooled connection.
+                await asyncio.shield(asyncio.to_thread(stage.close))
 
 
 def _kept_copy(ref: BlobRef) -> tuple[str, ...]:
@@ -109,8 +259,13 @@ class BlobIndex:
     CRUD route commits its idempotency ledger row with the write (#5298, plan D5);
     `retrying` runs either form again when Postgres picks it as a deadlock's victim."""
 
-    def __init__(self, pool: Pool) -> None:
+    def __init__(self, pool: Pool, *, stage_locks: StageLocks | None = None) -> None:
+        """``stage_locks``: where `stage_hold` and `claim_unnamed` take their lock
+        connections. The API passes its own small pool (`SettingsStore.stage_lock_pool`);
+        without it they come from ``pool``, bounded to `STAGE_LOCK_SLOTS` saves and
+        `CLAIM_LOCK_SLOTS` removals (tests, tools)."""
         self._pool = pool
+        self._stage_locks = stage_locks or StageLocks(pool, STAGE_LOCK_SLOTS)
 
     def get(self, key: str) -> BlobStat | None:
         with self._pool.connection() as conn:
@@ -403,12 +558,44 @@ class BlobIndex:
         """Whether a row names the object, as its own or as its migrated copy: a copy
         still running across the flip is recorded only beside its row."""
         with self._pool.connection() as conn:
+            return self._names(conn, backend, backend_id)
+
+    def stage_hold(self) -> contextlib.AbstractAsyncContextManager[StageHold]:
+        """A new `StageHold` (`StageLocks.hold`): it waits for a free slot first."""
+        return self._stage_locks.hold()
+
+    @contextlib.contextmanager
+    def claim_unnamed(self, backend: str, backend_id: str, sha256: str) -> Iterator[bool]:
+        """Whether the object may be removed now: True only when this call holds its lock
+        exclusively (`object_lock_name`, never waiting for it) and no row names it,
+        checked under that lock. The lock is held until the block ends, so a stager that
+        comes meanwhile waits for the remove and then uploads again. False: a stager holds
+        it (a save between its upload and its commit), or a row names it; leave it."""
+        name = object_lock_name(backend, sha256)
+        # The stage-lock pool's removal slot, not the shared pool: the lock is held
+        # through the caller's remove, a backend round trip (#7756 review).
+        with self._stage_locks.claim_connection() as conn:
             row = conn.execute(
-                "SELECT EXISTS (SELECT 1 FROM store_blobs"
-                " WHERE (backend, backend_id) = (%s, %s)"
-                " OR (migrated_backend, migrated_backend_id) = (%s, %s)) AS shared",
-                (backend, backend_id, backend, backend_id),
+                "SELECT pg_try_advisory_lock(hashtextextended(%s, 0)) AS got", (name,)
             ).fetchone()
+            if not (row and row["got"]):
+                yield False
+                return
+            try:
+                yield not self._names(conn, backend, backend_id)
+            finally:
+                _drop_or_discard(
+                    conn, "SELECT pg_advisory_unlock(hashtextextended(%s, 0))", (name,)
+                )
+
+    @staticmethod
+    def _names(conn: Connection[DictRow], backend: str, backend_id: str) -> bool:
+        row = conn.execute(
+            "SELECT EXISTS (SELECT 1 FROM store_blobs"
+            " WHERE (backend, backend_id) = (%s, %s)"
+            " OR (migrated_backend, migrated_backend_id) = (%s, %s)) AS shared",
+            (backend, backend_id, backend, backend_id),
+        ).fetchone()
         return bool(row and row["shared"])
 
     def recorded(self, backend: str, backend_id: str) -> bool:

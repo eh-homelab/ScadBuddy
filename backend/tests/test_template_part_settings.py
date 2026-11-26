@@ -9,7 +9,7 @@ from pathlib import Path
 import pytest
 from pydantic import ValidationError
 
-from scadbuddy.bambuddy.output_reader import LocalOutputs
+from scadbuddy.bambuddy.output_reader import LocalOutputs, TemplateSettings
 from scadbuddy.bambuddy.part_settings import MAX_SLOT, PartSettings, by_colour, laid_under
 from scadbuddy.core.paths import DataPaths
 from scadbuddy.library.catalogue import Catalogue, InvalidModelMetaError, meta_from_raw
@@ -216,6 +216,43 @@ async def test_an_arranged_output_takes_no_template_part_settings(
 
     assert (await reader.naming(plain)).part_settings == {1: PartSettings(top_shell_layers=8)}
     assert (await reader.naming(arranged)).part_settings is None
+
+
+async def test_the_naming_takes_settings_read_before_over_the_live_ones(
+    tmp_path: Path, pg_pool: PgPool
+) -> None:
+    """#7633: a storefront slice is named with the settings its price key holds, read
+    once when the key was made, never the template's as they are now."""
+    paths, job, _ = await finished_job(tmp_path)
+    store = OutputStore(paths)
+    plain = save_files(store, job, name="plain", index=0)
+    meta = json.loads(paths.model_meta("demo").read_text(encoding="utf-8"))
+    meta["print_settings"] = {"wall_loops": "2"}
+    meta["part_print_settings"] = {"label_color": {"wall_loops": 5}}
+    paths.model_meta("demo").write_text(json.dumps(meta), encoding="utf-8")
+    source = paths.model_source("demo")
+    source.write_text(
+        'label_color = "#FFFFFF"; // color\n' + source.read_text(encoding="utf-8"),
+        encoding="utf-8",
+    )
+    params = store.directory(plain.id) / PARAMS_NAME
+    params.write_text(json.dumps({"label_color": plain.colors[0]}), encoding="utf-8")
+    catalogue = Catalogue(paths, media_store=MemoryMediaStore(), wrapper_prefix=WRAPPER_PREFIX)
+    open_template_rows(catalogue, pg_pool)
+    reader = LocalOutputs(store, catalogue)
+    held = TemplateSettings(
+        print_settings={"enable_support": "1"},
+        part_settings={"label_color": PartSettings(top_shell_layers=8)},
+    )
+
+    named = await reader.naming(plain, template_settings=held)
+    assert named.print_settings == {"enable_support": "1"}
+    assert named.part_settings == {1: PartSettings(top_shell_layers=8)}
+    none = await reader.naming(plain, template_settings=TemplateSettings())
+    assert (none.print_settings, none.part_settings) == ({}, None)
+    live = await reader.naming(plain)
+    assert live.print_settings == {"wall_loops": "2"}
+    assert live.part_settings == {1: PartSettings(wall_loops=5)}
 
 
 def test_the_request_wins_per_key_over_the_template() -> None:

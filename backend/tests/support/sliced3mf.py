@@ -11,18 +11,25 @@ def sliced_3mf(
     plates: Mapping[int, tuple[int, list[float]]],
     gcode: Mapping[int, bytes],
     images: Mapping[int, bytes] | None = None,
+    metres: Mapping[int, list[float | None]] | None = None,
 ) -> bytes:
     """``plates``: plate -> (prediction seconds, used grams per slot from 1);
     ``gcode``: plate -> its ``Metadata/plate_<n>.gcode``; ``images``: plate -> its
-    ``Metadata/plate_<n>.png``."""
+    ``Metadata/plate_<n>.png``; ``metres``: plate -> used metres per slot from 1, a slot
+    with ``None`` written without ``used_m`` (#7685)."""
     info = ["<config>"]
     for index, (seconds, grams) in plates.items():
         info.append("  <plate>")
         info.append(f'    <metadata key="index" value="{index}"/>')
         info.append(f'    <metadata key="prediction" value="{seconds}"/>')
         info.append(f'    <metadata key="weight" value="{sum(grams)}"/>')
+        lengths = (metres or {}).get(index, [])
         for slot, used in enumerate(grams, start=1):
-            info.append(f'    <filament id="{slot}" type="PLA" color="#FFFFFF" used_g="{used}"/>')
+            length = lengths[slot - 1] if slot <= len(lengths) else None
+            used_m = "" if length is None else f' used_m="{length}"'
+            info.append(
+                f'    <filament id="{slot}" type="PLA" color="#FFFFFF"{used_m} used_g="{used}"/>'
+            )
         info.append("  </plate>")
     info.append("</config>")
     buffer = io.BytesIO()

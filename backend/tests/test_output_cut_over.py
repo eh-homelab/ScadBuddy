@@ -14,14 +14,16 @@ from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
 
+import psycopg
 import pytest
 from temporalio.testing import ActivityEnvironment
 
 from scadbuddy import main
+from scadbuddy.library import output_byte_copy, output_copy
 from scadbuddy.library.output_byte_copy import copy_output_bytes
 from scadbuddy.library.output_bytes import OutputBytes
 from scadbuddy.library.output_copy import copy_outputs
-from scadbuddy.library.output_rows import OutputRows, output_blob_key
+from scadbuddy.library.output_rows import BYTES_LOCK, COPY_LOCK, OutputRows, output_blob_key
 from scadbuddy.library.outputs import OutputMeta, OutputStore
 from scadbuddy.render.projection import JobProjection
 from scadbuddy.store.content import ContentStore
@@ -120,6 +122,114 @@ async def test_byte_run_that_finished_writes_the_mark(
     marks = [r for r in caplog.records if r.getMessage() == "the outputs are cut over (#7257)"]
     assert len(marks) == 1
     assert marks[0].at == at  # type: ignore[attr-defined]
+
+
+def _both_locks_free(pool: Pool) -> bool:
+    """Whether another session takes both copies' locks now, as `try_cut_over` does."""
+    with pool.connection() as conn, conn.transaction():
+        found = conn.execute(
+            "SELECT pg_try_advisory_xact_lock(hashtextextended(%s, 0))"
+            " AND pg_try_advisory_xact_lock(hashtextextended(%s, 0)) AS free",
+            (COPY_LOCK, BYTES_LOCK),
+        ).fetchone()
+    assert found is not None
+    return bool(found["free"])
+
+
+async def test_each_copy_frees_its_lock_before_it_returns(
+    saved: tuple[OutputStore, list[OutputMeta]],
+    content: ContentStore,
+    projection: JobProjection,
+) -> None:
+    """#7769: a copy releases its advisory lock before it returns, not when the server
+    ends its closed session a moment later, so the cut-over's check of both locks, made
+    at once, finds them free. Several times, as the race is short: without the fix it
+    failed 2 of 3 runs of 25 loops (#7769); 10 keep the shard balanced (#7823)."""
+    store, _ = saved
+    rows = _rows(store)
+    for _ in range(10):
+        assert copy_outputs(store, rows, projection.conninfo) is not None
+        assert _both_locks_free(projection.pool)
+        assert await copy_output_bytes(store, rows, content, projection.conninfo) is not None
+        assert _both_locks_free(projection.pool)
+
+
+async def test_each_copy_frees_its_lock_25_times_on_an_empty_store(
+    tmp_path: Path, content: ContentStore, projection: JobProjection
+) -> None:
+    """#7769 at the full count of the run that caught it, on a store with no saved
+    output, so each copy only takes and releases its lock (#7848)."""
+    paths, _, _ = await finished_job(tmp_path / "empty")
+    store = OutputStore(paths)
+    store.rows = OutputRows(projection.pool)
+    rows = _rows(store)
+    for _ in range(25):
+        assert copy_outputs(store, rows, projection.conninfo) is not None
+        assert _both_locks_free(projection.pool)
+        assert await copy_output_bytes(store, rows, content, projection.conninfo) is not None
+        assert _both_locks_free(projection.pool)
+
+
+def _unlocks_twice(conn: Any) -> Any:
+    """``conn`` with each `pg_advisory_unlock` run twice: the second answers false."""
+    real = conn.execute
+
+    def execute(query: Any, params: Any = None, **kw: Any) -> Any:
+        if "pg_advisory_unlock" in str(query):
+            real(query, params, **kw)
+        return real(query, params, **kw)
+
+    setattr(conn, "execute", execute)  # noqa: B010
+    return conn
+
+
+def _aunlocks_twice(conn: Any) -> Any:
+    real = conn.execute
+
+    async def execute(query: Any, params: Any = None, **kw: Any) -> Any:
+        if "pg_advisory_unlock" in str(query):
+            await real(query, params, **kw)
+        return await real(query, params, **kw)
+
+    setattr(conn, "execute", execute)  # noqa: B010
+    return conn
+
+
+async def test_an_unlock_that_held_nothing_is_logged_and_the_run_still_answers(
+    saved: tuple[OutputStore, list[OutputMeta]],
+    content: ContentStore,
+    projection: JobProjection,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """#7848: `pg_advisory_unlock` answers false, not an error, for a lock the session
+    does not hold. Each copy logs that once, and its result still comes through."""
+    store, _ = saved
+    rows = _rows(store)
+
+    def connect(*args: Any, **kwargs: Any) -> Any:
+        return _unlocks_twice(psycopg.connect(*args, **kwargs))
+
+    async def aconnect(*args: Any, **kwargs: Any) -> Any:
+        return _aunlocks_twice(await psycopg.AsyncConnection.connect(*args, **kwargs))
+
+    monkeypatch.setattr(
+        output_copy, "psycopg", SimpleNamespace(connect=connect, Error=psycopg.Error)
+    )
+    monkeypatch.setattr(
+        output_byte_copy,
+        "psycopg",
+        SimpleNamespace(AsyncConnection=SimpleNamespace(connect=aconnect), Error=psycopg.Error),
+    )
+    with caplog.at_level(logging.WARNING, logger="scadbuddy.library"):
+        assert copy_outputs(store, rows, projection.conninfo) is not None
+        assert await copy_output_bytes(store, rows, content, projection.conninfo) is not None
+    said = [r.getMessage() for r in caplog.records]
+    assert said.count("the output copy's unlock found its lock not held") == 1
+    assert said.count("the byte copy's unlock found its lock not held") == 1
+    # The false answer, not a `psycopg.Error` taken by mistake beside it (#7892).
+    assert not [m for m in said if "could not be released" in m]
+    assert _both_locks_free(projection.pool)
 
 
 async def test_no_mark_while_a_row_has_no_bytes(

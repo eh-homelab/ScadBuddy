@@ -20,6 +20,8 @@ from psycopg import Connection, errors
 from psycopg.rows import DictRow
 from psycopg_pool import ConnectionPool
 
+from scadbuddy.entities.refs import EntityRef
+from scadbuddy.entities.required import checks_save, mark_incomplete, save_properties_on
 from scadbuddy.filament import ledger
 from scadbuddy.filament import models as m
 from scadbuddy.filament.bb_sync_models import forget_sync
@@ -34,7 +36,7 @@ from scadbuddy.filament.catalog import (
     TypeTempError as TypeTempError,
 )
 from scadbuddy.filament.colour import normalise_rgba
-from scadbuddy.orders.models import FilamentEffect, FilamentInput, FilamentPatch
+from scadbuddy.orders.models import Actor, FilamentEffect, FilamentInput, FilamentPatch
 from scadbuddy.orders.store import OrderStore
 
 Conn = Connection[DictRow]
@@ -51,7 +53,8 @@ _Ids = list[int]
 
 #: The fields whose change rewrites a type's price book row.
 _PRICED = frozenset({"cost_per_kg", "material_id", "subtype_id", "brand_id", "rgba"})
-_TYPE_COLUMNS = ", ".join(m.SpoolType.model_fields)
+SPOOL_TYPE = "spool_type"
+_TYPE_COLUMNS = ", ".join(f for f in m.SpoolType.model_fields if f not in m.COMPLETENESS)
 _PRESET_COLUMNS = ", ".join(m.TypePreset.model_fields)
 _K_COLUMNS = ", ".join(m.TypeKValue.model_fields)
 
@@ -208,12 +211,14 @@ class SpoolTypeStore:
             rows = conn.execute(
                 f"SELECT {_TYPE_COLUMNS} FROM filament_spool_types{where} ORDER BY upper(code), id"
             ).fetchall()
-        return [m.SpoolType.model_validate(row) for row in rows]
+            types = [m.SpoolType.model_validate(row) for row in rows]
+            mark_incomplete(conn, SPOOL_TYPE, types)
+        return types
 
     def get(self, type_id: UUID) -> m.SpoolType | None:
         with self._pool.connection() as conn:
             row = self._row(conn, type_id)
-        return None if row is None else m.SpoolType.model_validate(row)
+            return None if row is None else _marked(conn, m.SpoolType.model_validate(row))
 
     def presets(self, type_id: UUID) -> _Presets:
         with self._pool.connection() as conn:
@@ -233,10 +238,24 @@ class SpoolTypeStore:
             ).fetchall()
         return [m.TypeKValue.model_validate(row) for row in rows]
 
-    def create(self, body: m.SpoolTypeCreate) -> m.SpoolType:
+    def create(
+        self, body: m.SpoolTypeCreate, *, by: Actor | None = None, checked: bool = False
+    ) -> m.SpoolType:
+        """A new type with its ``properties``, by ``by``; with ``checked`` (the type
+        route, #7703 spec 6.3b) an incomplete type is `MissingRequiredProperties` and
+        nothing is written."""
         try:
             with self._orders.transaction() as conn:
-                return self.create_on(conn, body)
+                made = self.create_on(conn, body.model_copy(update={"properties": None}))
+                if body.properties or checked:
+                    save_properties_on(
+                        conn,
+                        EntityRef(SPOOL_TYPE, str(made.id)),
+                        body.properties,
+                        by or Actor(kind="browser"),
+                        check=checked,
+                    )
+                return _marked(conn, made)
         except errors.UniqueViolation:
             raise CatalogExistsError() from None
         except errors.ForeignKeyViolation:
@@ -245,8 +264,11 @@ class SpoolTypeStore:
     def create_on(self, conn: Conn, body: m.SpoolTypeCreate) -> m.SpoolType:
         """`create` on ``conn``, in the caller's transaction (confirming an invoice,
         #6266). A duplicate or a missing catalog row is the driver's `UniqueViolation` or
-        `ForeignKeyViolation`; `create` maps them."""
-        data = body.model_dump()
+        `ForeignKeyViolation`; `create` maps them. It writes no ``properties`` and checks
+        nothing (#7703): `create` does."""
+        if body.properties is not None:
+            raise ValueError("create_on writes no properties")
+        data = body.model_dump(exclude={"properties"})
         check_temps(data)
         names = list(data)
         row = conn.execute(
@@ -258,14 +280,25 @@ class SpoolTypeStore:
         row = self._link_price_book(conn, row, changed=True)
         return m.SpoolType.model_validate(row)
 
-    def update(self, type_id: UUID, patch: m.SpoolTypePatch, *, actor: str) -> m.SpoolType | None:
+    def update(
+        self,
+        type_id: UUID,
+        patch: m.SpoolTypePatch,
+        *,
+        actor: str,
+        by: Actor | None = None,
+        checked: bool = False,
+    ) -> m.SpoolType | None:
         """The fields ``patch`` sends (``archived`` included); ``None`` for no such type.
         The temperature ranges are checked as they stand after the patch. A changed field
         in `OVERRIDABLE` writes one ``edited`` event, as ``actor``, on each unarchived
         spool of the type that does not override it (`_fan_out`); that event also
-        refreshes the spool's grams, which read the label weight."""
+        refreshes the spool's grams, which read the label weight. Its ``properties`` are
+        written with it, by ``by``; with ``checked`` (the type route, #7703 spec 6.3b) a
+        save that leaves the type incomplete is `MissingRequiredProperties`, unless it sends
+        only ``archived``."""
         sent = [n for n in type(patch).model_fields if n in patch.model_fields_set]
-        columns = [n for n in sent if n != "archived"]
+        columns = [n for n in sent if n not in ("archived", "properties")]
         sets = [f"{name} = %s" for name in columns]
         values: list[Any] = [getattr(patch, name) for name in columns]
         archived = getattr(patch, "archived", None) if "archived" in sent else None
@@ -295,11 +328,21 @@ class SpoolTypeStore:
                     if n in OVERRIDABLE and current[n] != row[n]
                 }
                 _fan_out(conn, type_id, changes, actor)
+                check = checked and checks_save(patch.model_fields_set)
+                if patch.properties or check:
+                    save_properties_on(
+                        conn,
+                        EntityRef(SPOOL_TYPE, str(type_id)),
+                        patch.properties,
+                        by or Actor(kind="browser"),
+                        check=check,
+                    )
+                updated = _marked(conn, m.SpoolType.model_validate(row))
         except errors.UniqueViolation:
             raise CatalogExistsError() from None
         except errors.ForeignKeyViolation:
             raise CatalogRefError() from None
-        return m.SpoolType.model_validate(row)
+        return updated
 
     def archive(self, type_id: UUID, archived: bool, *, actor: str) -> m.SpoolType | None:
         """Take a type off the lists (``True``), freeing its code, or put it back."""
@@ -846,6 +889,11 @@ def _own_keys(
         (spool_ids,),
     ).fetchall():
         found.setdefault(r["spool_id"], set()).add(tuple(r[c] for c in columns))
+    return found
+
+
+def _marked(conn: Conn, found: m.SpoolType) -> m.SpoolType:
+    mark_incomplete(conn, SPOOL_TYPE, [found])
     return found
 
 

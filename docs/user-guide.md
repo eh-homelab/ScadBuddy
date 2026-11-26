@@ -756,7 +756,7 @@ changed. A card with more than eight tools has a **Filter**.
 - **The plugin feed** (**Settings → MCP access → Plugin feed**). Claude Code sessions
   outside ScadBuddy can install the approved packages you add to the feed, from its
   `marketplace.json`, with the same access token (or OIDC sign-in) as `/mcp`. The feed
-  is on the LAN host only, as `/mcp` is. Copy the setup snippet the section shows into
+  works on the LAN host and from outside it, as `/mcp` does. Copy the setup snippet the section shows into
   the client's `~/.claude/settings.json`. Every client of the feed runs what it lists,
   hooks and MCP servers included for a package you approved as it is.
 - **Remote MCP plugins**. Give a **Name**, the **MCP endpoint URL** and, if it needs

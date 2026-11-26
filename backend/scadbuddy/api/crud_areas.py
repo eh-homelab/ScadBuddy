@@ -274,6 +274,7 @@ CRUD_AREAS: dict[CrudCaller, list[str]] = {
     "profile-fetch": ["runs"],
     "camera": ["printers", "changes"],
     "camera-relay": ["printers", "changes"],
+    "fleet": ["changes", "fleet"],
     # #6949 K1: the areas arrive with the inventory routes (layer 4).
     "inventory": [],
 }

@@ -3,7 +3,7 @@ import { z } from 'zod'
 import type { components } from '../api/schema.js'
 import { ok } from './call.js'
 import { command } from './command.js'
-import { PROPERTY_RULES, propertiesNotSet, propertyChanges, propertySet, setPropertiesAfter } from './entities.js'
+import { catalogRowRef, PROPERTY_RULES, propertyChanges, propertySet, savedProperties, setPropertiesAfter } from './entities.js'
 import { linkingTools, type LinkKind } from './filamentLinks.js'
 import {
   catalogNames,
@@ -176,38 +176,48 @@ const tools: Tool[] = [
       'materials, subtypes, brands, categories and effects catalogs a name is matched by its key (letters and ' +
       'digits, any case: `dual-color` is `Dual Color`) against every name and alias, archived rows included (a ' +
       "subtype's within its material); the 409 names the row that holds it. In the other catalogs an archived " +
-      'row frees its name and a 409 means another unarchived row has it. Only what the user says. Writes ' +
-      'ScadBuddy only.',
+      'row frees its name and a 409 means another unarchived row has it. ' +
+      '`properties` (#7026) are saved with the row in the same request and the answer carries them; a refused ' +
+      'value or a required key left empty (#7703) writes nothing. An edit with only `properties` leaves the row ' +
+      'itself untouched and is not checked for completeness. ' +
+      `${PROPERTY_RULES} Only what the user says. Writes ScadBuddy only.`,
     input: z.object({
       kind,
       row_id: z.string().uuid().optional().describe("A row's `id` from filament_catalog_list; omit to add"),
       fields: z.record(z.string(), z.unknown()).default({}).describe('The row fields to set'),
       archived: z.boolean().optional(),
+      properties: propertySet.optional().describe("The row's properties, saved with it; `null` removes a key"),
     }),
     risk: 'write',
     source: SOURCE,
-    routes: ['POST /api/v1/filament/catalog/{kind}', 'PATCH /api/v1/filament/catalog/{kind}/{row_id}'],
-    summarize: ({ kind, row_id, fields }) =>
-      row_id ? `Edit ${kind} row ${row_id}` : `Add to ${kind} ${String(fields['name'] ?? '')}`.trim(),
-    handler: async ({ kind, row_id, fields, archived }, { backend }) => {
+    routes: [
+      'POST /api/v1/filament/catalog/{kind}',
+      'PATCH /api/v1/filament/catalog/{kind}/{row_id}',
+      'GET /api/v1/entities/{ref}/properties',
+      'PATCH /api/v1/entities/{ref}/properties',
+    ],
+    summarize: ({ kind, row_id, fields, properties }) =>
+      (row_id ? `Edit ${kind} row ${row_id}` : `Add to ${kind} ${String(fields['name'] ?? '')}`.trim()) + propertyChanges(properties),
+    handler: async ({ kind, row_id, fields, archived, properties }, { backend }) => {
+      const body = properties === undefined ? fields : { ...fields, properties }
+      let row: { id: string }
       if (row_id === undefined) {
         if (archived !== undefined) throw new ToolError('archived needs a row_id')
-        return json(
-          await ok(
-            backend.POST('/api/v1/filament/catalog/{kind}', { params: { path: { kind } }, body: fields }),
-            `add to the ${kind} catalog`,
-          ),
-        )
-      }
-      return json(
-        await ok(
+        row = await ok(backend.POST('/api/v1/filament/catalog/{kind}', { params: { path: { kind } }, body }), `add to the ${kind} catalog`)
+      } else if (properties !== undefined && archived === undefined && Object.keys(fields).length === 0) {
+        // Properties only: the property patch, which leaves the row and its `updated_at` alone.
+        return json({ kind, id: row_id, properties: await setPropertiesAfter(backend, catalogRowRef(kind, row_id), properties) })
+      } else {
+        row = await ok(
           backend.PATCH('/api/v1/filament/catalog/{kind}/{row_id}', {
             params: { path: { kind, row_id } },
-            body: archived === undefined ? fields : { ...fields, archived },
+            body: archived === undefined ? body : { ...body, archived },
           }),
           `edit ${kind} row ${row_id}`,
-        ),
-      )
+        )
+      }
+      if (properties === undefined) return json(row)
+      return json({ ...row, properties: await savedProperties(backend, catalogRowRef(kind, row.id), `${kind} row ${row.id}`) })
     },
   }),
 
@@ -370,10 +380,11 @@ const tools: Tool[] = [
       "clears it) is the type's filament id on 3dfilamentprofiles.com, which filament_type_fetch_profiles " +
       "fetches its slicer presets by. `drying_temp_c` (whole °C) and `drying_hours` (a decimal) are the type's " +
       "drying values, the default of a drying of its spools (filament_spool_add_event). 409 when an unarchived type has the " +
-      'code; 422 when a minimum temperature is above its maximum. `properties` (#7026) are set on the type after it ' +
-      'is saved, and the answer carries them; if they are refused, the error says the type was saved and they were ' +
-      `not. An edit with only \`properties\` leaves the type itself untouched. ${PROPERTY_RULES} Only what the user ` +
-      'says. Writes ScadBuddy only.',
+      'code; 422 when a minimum temperature is above its maximum. ' +
+      '`properties` (#7026) are saved with the type in the same request and the answer carries them; a refused ' +
+      'value or a required key left empty (#7703) writes nothing. An edit with only `properties` leaves the type ' +
+      'itself untouched and is not checked for completeness. ' +
+      `${PROPERTY_RULES} Only what the user says. Writes ScadBuddy only.`,
     input: z.object({
       type_id: z.string().uuid().optional().describe("A type's `id`; omit to add"),
       fields: z
@@ -404,7 +415,7 @@ const tools: Tool[] = [
         .default({})
         .describe('The type fields to set'),
       archived: z.boolean().optional(),
-      properties: propertySet.optional().describe("The type's properties to set after the type is saved; `null` removes a key"),
+      properties: propertySet.optional().describe("The type's properties, saved with it; `null` removes a key"),
     }),
     risk: 'write',
     source: SOURCE,
@@ -412,6 +423,7 @@ const tools: Tool[] = [
       'POST /api/v1/filament/types',
       'PATCH /api/v1/filament/types/{type_id}',
       'PATCH /api/v1/entities/{ref}/properties',
+      'GET /api/v1/entities/{ref}/properties',
       'GET /api/v1/filament/types/{type_id}',
     ],
     summarize: ({ type_id, fields, properties }) =>
@@ -420,7 +432,7 @@ const tools: Tool[] = [
       let row
       if (type_id === undefined) {
         if (archived !== undefined) throw new ToolError('archived needs a type_id')
-        row = await ok(backend.POST('/api/v1/filament/types', { body: fields as never }), 'add a spool type')
+        row = await ok(backend.POST('/api/v1/filament/types', { body: { ...fields, properties } as never }), 'add a spool type')
       } else if (properties !== undefined && archived === undefined && Object.keys(fields).length === 0) {
         // Properties only: no row PATCH, which would move the type's `updated_at` and so its sync time.
         const set = await setPropertiesAfter(backend, `spool_type:${type_id}`, properties)
@@ -430,13 +442,13 @@ const tools: Tool[] = [
         row = await ok(
           backend.PATCH('/api/v1/filament/types/{type_id}', {
             params: { path: { type_id } },
-            body: archived === undefined ? fields : { ...fields, archived },
+            body: { ...fields, archived, properties },
           }),
           `edit spool type ${type_id}`,
         )
       }
       if (properties === undefined) return json(row)
-      return json({ ...row, properties: await setPropertiesAfter(backend, `spool_type:${row.id}`, properties, `spool type ${row.id}`) })
+      return json({ ...row, properties: await savedProperties(backend, `spool_type:${row.id}`, `spool type ${row.id}`) })
     },
   }),
 
@@ -891,19 +903,24 @@ const tools: Tool[] = [
       'When adding, `quantity` (1 to 100) makes that many identical spools in one request, each with its own number, ' +
       "and `copy_of` (a spool's `id`) starts from that spool: its type, own overrides, note, own presets and K " +
       'values and its place unless that is a tray, never its number, tag, tray, weight, weight lock or `added_full`; `fields` ' +
-      'then change the copy. Either answers the list of spools made, and a resend of the same call makes none twice; ' +
+      'then change the copy. `continued_from` (#7684, with `copy_of` the same archived, respooled spool and `grams_left` its final filament) links the two: the new ' +
+      "spool's `created` event keeps `continued_from` and the source's `archived` event `continued_as`; 422 `continued_from_not_archived` otherwise, " +
+      '`continued_from_taken` for a source a spool already continues (#7909). ' +
+      'Either answers the list of spools made, and a resend of the same call makes none twice; ' +
       'a resend of a copy reads the source again, and when the source changed in between it makes a new set from it. ' +
       '422 when an effective minimum temperature is above its maximum or the spool would have neither type nor ' +
-      'material. `properties` (#7026) are set on the spool, or on each spool made, after it is saved, and the answer carries them; if they ' +
-      'are refused, the error says the spool was saved and they were not. An edit with only `properties` leaves ' +
-      `the spool itself untouched. ${PROPERTY_RULES} Only what the user says. ` +
-      'Writes ScadBuddy only.',
+      'material. `properties` (#7026) are saved with the spool, or with each spool made, in the same request and the ' +
+      'answer carries them; a refused value or a required key left empty (#7703) writes nothing. A copy does not ' +
+      "take its source's properties. An edit with only `properties` leaves the spool itself untouched and is not " +
+      'checked for ' +
+      `completeness. ${PROPERTY_RULES} Only what the user says. Writes ScadBuddy only.`,
     input: z.object({
       spool_id: z.string().uuid().optional().describe("A spool's `id`; omit to add"),
       fields: z.record(z.string(), z.unknown()).default({}).describe('The spool fields to set'),
       quantity: z.number().int().min(1).max(100).optional().describe('When adding: how many identical spools to make'),
       copy_of: z.string().uuid().optional().describe("When adding: the `id` of a spool to copy"),
-      properties: propertySet.optional().describe("The spool's properties to set after the spool is saved; `null` removes a key"),
+      continued_from: z.string().uuid().optional().describe('When adding one spool: the `id` of the archived (respooled) spool whose filament it continues'),
+      properties: propertySet.optional().describe("The spool's properties, saved with it; `null` removes a key"),
     }),
     risk: 'write',
     source: SOURCE,
@@ -913,6 +930,7 @@ const tools: Tool[] = [
       'POST /api/v1/filament/spools/bulk',
       'GET /api/v1/filament/spools/{spool_id}/copy',
       'PATCH /api/v1/entities/{ref}/properties',
+      'GET /api/v1/entities/{ref}/properties',
       'GET /api/v1/filament/spools/{spool_id}',
     ],
     summarize: ({ spool_id, quantity, copy_of, properties }) =>
@@ -920,10 +938,10 @@ const tools: Tool[] = [
         ? `Edit spool ${spool_id}`
         : `Add ${quantity && quantity > 1 ? `${quantity} spools` : 'a spool'}${copy_of ? ` copied from ${copy_of}` : ''}`) +
       propertyChanges(properties),
-    handler: async ({ spool_id, fields, quantity, copy_of, properties }, ctx) => {
+    handler: async ({ spool_id, fields, quantity, copy_of, continued_from, properties }, ctx) => {
       const { backend } = ctx
-      if (spool_id !== undefined && (quantity !== undefined || copy_of !== undefined)) {
-        throw new ToolError('`quantity` and `copy_of` are for adding a spool; leave out `spool_id`')
+      if (spool_id !== undefined && (quantity !== undefined || copy_of !== undefined || continued_from !== undefined)) {
+        throw new ToolError('`quantity`, `copy_of` and `continued_from` are for adding a spool; leave out `spool_id`')
       }
       if (spool_id !== undefined && properties !== undefined && Object.keys(fields).length === 0) {
         // Properties only: no row PATCH, as for a type (an empty one could still move the row's sync time).
@@ -931,12 +949,11 @@ const tools: Tool[] = [
         const row = await ok(backend.GET('/api/v1/filament/spools/{spool_id}', { params: { path: { spool_id } } }), `the properties were set, but reading spool ${spool_id}`)
         return json({ ...row, properties: set })
       }
-      const withProperties = async (row: { id: string }) =>
-        properties === undefined
-          ? row
-          : { ...row, properties: await setPropertiesAfter(backend, `spool:${row.id}`, properties, `spool ${row.id}`) }
-      if (spool_id === undefined && quantity === undefined && copy_of === undefined) {
-        return json(await withProperties(await ok(backend.POST('/api/v1/filament/spools', { body: fields as SpoolCreate }), 'add a spool')))
+      const sent = properties === undefined ? fields : { ...fields, properties }
+      const withProperties = async (row: { id: string }, lead = `spool ${row.id}`) =>
+        properties === undefined ? row : { ...row, properties: await savedProperties(backend, `spool:${row.id}`, lead) }
+      if (spool_id === undefined && quantity === undefined && copy_of === undefined && continued_from === undefined) {
+        return json(await withProperties(await ok(backend.POST('/api/v1/filament/spools', { body: sent as SpoolCreate }), 'add a spool')))
       }
       if (spool_id === undefined) {
         const draft: SpoolDraft = copy_of
@@ -949,7 +966,7 @@ const tools: Tool[] = [
         // resend reads the copy again, so its key names that draft too (R-7150-8): a changed
         // source is a new request, never a 422 for a key sent with another body.
         // The draft carries `copy_of` (the copy route answers it), so a copied migrated preset row stays so (R-7150-13).
-        const body = { ...draft, spool: { ...draft.spool, ...fields }, quantity: quantity ?? 1 } as SpoolBulkCreate
+        const body = { ...draft, spool: { ...draft.spool, ...sent }, quantity: quantity ?? 1, ...(continued_from ? { continued_from } : {}) } as SpoolBulkCreate
         const key = copy_of
           ? createHash('sha256').update(`${idempotencyKey(ctx)}\x1f${JSON.stringify(draft)}`).digest('hex')
           : idempotencyKey(ctx)
@@ -961,23 +978,9 @@ const tools: Tool[] = [
           'add the spools',
         )
         if (properties === undefined) return json(rows)
-        // One at a time, stopping at the first failure (a refused value is refused for the rest
-        // too); the error names every spool made, so none is left without its properties unseen.
+        const made = `all ${rows.length} spools (${rows.map((r) => r.id).join(', ')}) were saved; spool`
         const out = []
-        for (const row of rows) {
-          try {
-            out.push({ ...row, properties: await setPropertiesAfter(backend, `spool:${row.id}`, properties) })
-          } catch (e) {
-            const done = out.map((r) => r.id)
-            const left = rows.slice(done.length).map((r) => `spool:${r.id}`)
-            throw propertiesNotSet(
-              `${rows.length} spools were saved (${rows.map((r) => r.id).join(', ')}); ` +
-                (done.length > 0 ? `the properties were set on ${done.join(', ')} but not on ` : 'the properties were not set on ') +
-                `${left.join(', ')} (set them with entity_property_set on each, not this tool again)`,
-              e,
-            )
-          }
-        }
+        for (const row of rows) out.push(await withProperties(row, `${made} ${row.id}`))
         return json(out)
       }
       return json(
@@ -985,7 +988,7 @@ const tools: Tool[] = [
           await ok(
             backend.PATCH('/api/v1/filament/spools/{spool_id}', {
               params: { path: { spool_id } },
-              body: fields,
+              body: sent,
             }),
             `edit spool ${spool_id}`,
           ),
@@ -1073,21 +1076,79 @@ const tools: Tool[] = [
     label: 'Archive or restore a spool',
     description:
       '`archived: true` takes a spool off the lists (an empty or retired reel); `false` puts it back. A spool ' +
-      'that has printed cannot be deleted, only archived. Only what the user says. Writes ScadBuddy; with tag sync on (filament_sync.tags), ' +
-      'the archived spool\'s tag is then cleared in Bambuddy.',
-    input: z.object({ spool_id: z.string().uuid(), archived: z.boolean().default(true) }),
+      'that has printed cannot be deleted, only archived. An archive takes `reason` (`finished`, `respooled`, ' +
+      '`damaged` or `other`; ask when the user did not say) and the final weighing (#7684): `final_reading_g`, the ' +
+      'scale reading with the spool, from which its empty weight is taken as filament_spool_add_event takes it, or ' +
+      '`final_grams`, the filament left, or both. The weighing is booked just before the `archived` event, whose ' +
+      '`data` keeps the closing: `reason`, `started_g`, `started_from`, `ledger_consumed_g`, `final_filament_g`, ' +
+      '`scale_consumed_g` and `drift_g` (negative: the scale found less than the ledger expected). 422 ' +
+      '`no_empty_weight` or `reading_below_empty` archives nothing; a restore takes no reason or reading. ' +
+      'Only what the user says. Writes ScadBuddy; with tag sync on (filament_sync.tags), ' +
+      "the archived spool's tag is then cleared in Bambuddy.",
+    input: z.object({
+      spool_id: z.string().uuid(),
+      archived: z.boolean().default(true),
+      reason: z.enum(['finished', 'respooled', 'damaged', 'other']).optional().describe('Why it is archived'),
+      final_reading_g: z.number().min(0).max(1_000_000).optional().describe('The scale reading with the spool, at the end'),
+      final_grams: z.number().min(0).max(1_000_000).optional().describe('The filament left at the end'),
+    }),
     risk: 'write',
     source: SOURCE,
     routes: ['POST /api/v1/filament/spools/{spool_id}/archive'],
-    summarize: ({ spool_id, archived }) => `${archived ? 'Archive' : 'Restore'} spool ${spool_id}`,
-    handler: async ({ spool_id, archived }, { backend }) =>
+    summarize: ({ spool_id, archived, reason }) => `${archived ? 'Archive' : 'Restore'} spool ${spool_id}${reason ? ` (${reason})` : ''}`,
+    handler: async ({ spool_id, archived, reason, final_reading_g, final_grams }, { backend }) =>
       json(
         await ok(
           backend.POST('/api/v1/filament/spools/{spool_id}/archive', {
             params: { path: { spool_id } },
-            body: { archived },
+            body: {
+              archived,
+              ...(reason !== undefined ? { reason } : {}),
+              ...(final_reading_g !== undefined ? { final_reading_g } : {}),
+              ...(final_grams !== undefined ? { final_grams } : {}),
+            },
           }),
           `archive spool ${spool_id}`,
+        ),
+      ),
+  }),
+
+  defineTool({
+    name: 'filament_spool_closing',
+    label: "Preview a spool's closing before it is archived",
+    description:
+      "Reads only (#7684). What filament_spool_archive would record as the `archived` event's `closing` with these " +
+      'inputs: `reason`, and the final weighing as `final_reading_g` (the scale reading with the spool; `final_filament_g` ' +
+      'is null with no empty weight known or a reading under it, which the archive refuses) or `final_grams` (the filament ' +
+      "left; with both, the net). With neither the closing is on the ledger's grams left and has no scale side. " +
+      '`notices` says what disagrees with the reason: `filament_left` for a finished spool with more than the setting ' +
+      '`filament_weighing_finished_left_g` on it, `not_finished_but_empty` for another reason at or under it, and what ' +
+      'filament_spool_archive would refuse: `no_empty_weight` for a reading with no empty weight known (send `final_grams` ' +
+      'instead), `reading_below_empty` for a reading under it, `reading_below_grams` for a reading under the `final_grams` ' +
+      'sent with it (#7909); tell the user before archiving. 404 for no such spool.',
+    input: z.object({
+      spool_id: z.string().uuid().describe("A spool's `id` from filament_spool_list"),
+      reason: z.enum(['finished', 'respooled', 'damaged', 'other']).optional().describe('Why it would be archived'),
+      final_reading_g: z.number().min(0).max(1_000_000).optional().describe('The scale reading with the spool, at the end'),
+      final_grams: z.number().min(0).max(1_000_000).optional().describe('The filament left at the end'),
+    }),
+    risk: 'read',
+    source: SOURCE,
+    routes: ['GET /api/v1/filament/spools/{spool_id}/closing'],
+    handler: async ({ spool_id, reason, final_reading_g, final_grams }, { backend }) =>
+      json(
+        await ok(
+          backend.GET('/api/v1/filament/spools/{spool_id}/closing', {
+            params: {
+              path: { spool_id },
+              query: {
+                ...(reason !== undefined ? { reason } : {}),
+                ...(final_reading_g !== undefined ? { final_reading_g } : {}),
+                ...(final_grams !== undefined ? { final_grams } : {}),
+              },
+            },
+          }),
+          `preview the closing of spool ${spool_id}`,
         ),
       ),
   }),
@@ -1306,7 +1367,9 @@ const tools: Tool[] = [
     description:
       "A spool's timeline and metrics: the newest 50 ledger `events` (newest first, with `actor`, `order_id` " +
       'and `archive_id`), its `metrics` (use, waste, cost used, value left, burn rate, empty day, days since ' +
-      'opened and last use, hours outside dry storage, AMS error), `type_ams_error`, `currency` and ' +
+      'opened and last use, hours outside dry storage, AMS error; the metres its lengthed prints extruded, `used_m`, ' +
+      'the density they imply, `implied_density_g_cm3`, against the type\'s `density_g_cm3`, and `density_mismatch` ' +
+      'when they are more than 5% apart, a note to check the type or the label, never a booking), `type_ams_error`, `currency` and ' +
       '`window_days`. `truncated` is true when older events exist. filament_spool_events lists every event, oldest first, so the ' +
       'older events are at the start of its list. ' +
       'The grams-left `series` is left out. 404 for no such spool.',
@@ -1653,7 +1716,15 @@ const tools: Tool[] = [
       'slightly heavy, then call again with the same `reading_g` and `accept_insert_weight` true or false. ' +
       '`checked_by_default` is advice only: pass `true` only when the user says to take it. `true` changes the insert in ' +
       'ScadBuddy only and runs before the weighing, so the weighing uses the new empty weight; `false` books with the ' +
-      'current empty weight. With no offer, the weighing is booked at once, and `true` is refused with nothing booked.',
+      'current empty weight. With no offer, the weighing is booked at once, and `true` is refused with nothing booked. ' +
+      'A new spool read under its label weight (#7683): the check answers `reason: below_label` with `shortfall_g`, ' +
+      '`resolutions` (`tared`: the scale was tared on the empty spool, the filament is the reading; `short`: the spool ' +
+      'holds less than its label, the filament is the reading less the empty weight and the spool stops being added ' +
+      "full; `label_wrong`: the same filament, and the spool's own label weight becomes it, `new_label_weight_g`), " +
+      'each with its `filament_g`, and `default`. With no `resolution` the tool books nothing (`event: null`, ' +
+      '`below_label`): tell the person the shortfall and the readings offered with their numbers, then call again with ' +
+      'the same `reading_g` and the `resolution` the person chose. Pass `resolution` only when the user chose it; a ' +
+      'resolution the check does not offer is refused (422 `no_below_label`) with nothing booked.',
     input: z.object({
       spool_id: z.string().uuid(),
       kind: z.enum(['weighed', 'dried', 'consumed_reset']),
@@ -1661,6 +1732,10 @@ const tools: Tool[] = [
       grams: z.number().min(0).optional(),
       reading_g: z.number().positive().max(100000).optional().describe('Scale reading with the spool, in grams (weighed only)'),
       accept_insert_weight: z.boolean().optional().describe("After an offer: true takes its empty weight for the insert, false declines it (needs reading_g)"),
+      resolution: z
+        .enum(['tared', 'short', 'label_wrong'])
+        .optional()
+        .describe("After a `below_label` answer: how the reading under the label is read, the person's choice (needs reading_g, no grams)"),
       temp_c: z.number().int().min(0).nullable().optional().describe("Left out: the spool's drying default"),
       hours: z.string().nullable().optional().describe("A decimal, e.g. `8`; left out: the spool's drying default"),
       note: z.string().optional(),
@@ -1672,18 +1747,19 @@ const tools: Tool[] = [
       'GET /api/v1/filament/spools/{spool_id}/insert-weight-offer',
       'POST /api/v1/filament/spools/{spool_id}/insert-weight',
     ],
-    summarize: ({ spool_id, kind, grams, reading_g, accept_insert_weight }) =>
+    summarize: ({ spool_id, kind, grams, reading_g, accept_insert_weight, resolution }) =>
       kind === 'weighed'
         ? reading_g !== undefined
-          ? `Record a reading of ${reading_g} g on spool ${spool_id}${accept_insert_weight ? ' and take its insert weight' : ''}`
+          ? `Record a reading of ${reading_g} g on spool ${spool_id}${accept_insert_weight ? ' and take its insert weight' : ''}${resolution ? ` (${resolution})` : ''}`
           : `Record ${grams ?? '?'} g on spool ${spool_id}`
         : kind === 'consumed_reset'
           ? `Reset the used counter of spool ${spool_id}`
           : `Record a drying of spool ${spool_id}`,
-    handler: async ({ spool_id, reading_g, accept_insert_weight, ...body }, { backend }) => {
+    handler: async ({ spool_id, reading_g, accept_insert_weight, resolution, ...body }, { backend }) => {
       const path = { spool_id }
       if (reading_g === undefined) {
         if (accept_insert_weight) throw new ToolError('accept_insert_weight needs reading_g')
+        if (resolution) throw new ToolError('resolution needs reading_g')
         return json(
           await ok(
             backend.POST('/api/v1/filament/spools/{spool_id}/events', { params: { path }, body }),
@@ -1693,12 +1769,33 @@ const tools: Tool[] = [
       }
       if (body.kind !== 'weighed') throw new ToolError('reading_g is for a weighing (kind: weighed)')
       if (body.grams !== undefined) throw new ToolError('give reading_g or grams, not both')
+      if (resolution) {
+        if (accept_insert_weight) throw new ToolError('a resolution and accept_insert_weight never meet on one reading')
+        const event = await ok(
+          backend.POST('/api/v1/filament/spools/{spool_id}/events', {
+            params: { path },
+            body: { ...body, reading_g, resolution },
+          }),
+          `record on spool ${spool_id}`,
+        )
+        return json({ event, filament_g: event.grams_after, insert_weight: null, insert_weight_accepted: null })
+      }
       const check = await ok(
         backend.GET('/api/v1/filament/spools/{spool_id}/insert-weight-offer', {
           params: { path, query: { reading_g } },
         }),
         `check the insert weight of spool ${spool_id}`,
       )
+      if (check.reason === 'below_label') {
+        return json({
+          event: null,
+          filament_g: null,
+          below_label: check,
+          next:
+            'Nothing was booked. Tell the person the shortfall and the readings offered with their numbers, then ' +
+            'call again with the same reading_g and the resolution the person chose.',
+        })
+      }
       if (check.offer && accept_insert_weight === undefined) {
         return json({
           event: null,
@@ -1893,14 +1990,82 @@ const tools: Tool[] = [
     description:
       'The label sizes the Labels page offers (#7157): each template\'s `id`, `name`, `width_mm`, `height_mm` and, ' +
       'for a sheet of labels, its `sheet` (page, columns, rows, margins and gaps); `custom`, the bounds of a custom ' +
-      'size. With none chosen the labels are `roll_50x25`. The chosen one is the setting ' +
-      '`filament_label_template` (get_settings).',
+      'size; `saved`, the sheets that filament_label_sheet_upsert saved (`id`, `name`, `layout`). With none chosen ' +
+      'the labels are `roll_50x25`. The chosen one is the setting `filament_label_template` (get_settings). A ' +
+      'saved sheet is chosen as `{template: "saved", sheet_id}`.',
     input: z.object({}),
     risk: 'read',
     source: SOURCE,
     routes: ['GET /api/v1/filament/label-templates'],
     handler: async (_input, { backend }) =>
       json(await ok(backend.GET('/api/v1/filament/label-templates'), 'list the label templates')),
+  }),
+
+  defineTool({
+    name: 'filament_label_sheet_upsert',
+    label: 'Save a label sheet',
+    description:
+      'Save a label sheet (#7216): a named grid of labels on an A4 or Letter page. Without `sheet_id` it adds a ' +
+      'sheet. With one (from filament_label_templates `saved`) it replaces that whole sheet. `name` is 1 to 100 ' +
+      'characters after the spaces at its ends are removed, and two names may not differ only by case. `layout` has `page` (`a4` or `letter`), `width_mm` ' +
+      '(40 to 190), `height_mm` (25 to 190), `cols` (1 to 20), `rows` (1 to 40), `top_mm` and `left_mm` (the page ' +
+      'margins, 0 to 190) and `col_gap_mm` and `row_gap_mm` (0 to 190, default 0). 422 when the grid does not fit ' +
+      'its page. 409 `label_sheet_name_taken` when the name is in use. 409 `too_many_label_sheets` when 100 sheets ' +
+      'are saved. 404 for an unknown `sheet_id`. Only what the user says. Writes ScadBuddy only.',
+    input: z.object({
+      sheet_id: z.string().uuid().optional().describe('A saved sheet `id`; omit to add'),
+      name: z
+        .string()
+        .transform((v) => v.trim().normalize('NFC'))
+        .pipe(z.string().min(1).max(100)),
+      layout: z.object({
+        page: z.enum(['a4', 'letter']),
+        width_mm: z.number().min(40).max(190),
+        height_mm: z.number().min(25).max(190),
+        cols: z.number().int().min(1).max(20),
+        rows: z.number().int().min(1).max(40),
+        top_mm: z.number().min(0).max(190),
+        left_mm: z.number().min(0).max(190),
+        col_gap_mm: z.number().min(0).max(190).optional(),
+        row_gap_mm: z.number().min(0).max(190).optional(),
+      }),
+    }),
+    risk: 'write',
+    source: SOURCE,
+    routes: ['POST /api/v1/filament/label-sheets', 'PUT /api/v1/filament/label-sheets/{sheet_id}'],
+    summarize: ({ name }) => `Save label sheet ${name}`,
+    handler: async ({ sheet_id, name, layout }, { backend }) => {
+      const body = { name, layout: { ...layout, col_gap_mm: layout.col_gap_mm ?? 0, row_gap_mm: layout.row_gap_mm ?? 0 } }
+      if (sheet_id === undefined)
+        return json(await ok(backend.POST('/api/v1/filament/label-sheets', { body }), 'add a label sheet'))
+      return json(
+        await ok(
+          backend.PUT('/api/v1/filament/label-sheets/{sheet_id}', { params: { path: { sheet_id } }, body }),
+          `save label sheet ${sheet_id}`,
+        ),
+      )
+    },
+  }),
+
+  defineTool({
+    name: 'filament_label_sheet_delete',
+    label: 'Delete a label sheet',
+    description:
+      'Delete a saved label sheet by its `id` (filament_label_templates `saved`). 404 for an unknown id. A label ' +
+      'choice that still names the deleted sheet makes the next label print answer 409 `label_sheet_gone`; choose ' +
+      'another template then. Only when the user asks. Writes ScadBuddy only.',
+    input: z.object({ sheet_id: z.string().uuid() }),
+    risk: 'write',
+    source: SOURCE,
+    routes: ['DELETE /api/v1/filament/label-sheets/{sheet_id}'],
+    summarize: ({ sheet_id }) => `Delete label sheet ${sheet_id}`,
+    handler: async ({ sheet_id }, { backend }) => {
+      await ok(
+        backend.DELETE('/api/v1/filament/label-sheets/{sheet_id}', { params: { path: { sheet_id } } }),
+        `delete label sheet ${sheet_id}`,
+      )
+      return json({ deleted: sheet_id })
+    },
   }),
 
   defineTool({

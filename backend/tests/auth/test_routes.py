@@ -83,6 +83,7 @@ def test_every_route_has_a_class() -> None:
             "crud.profile-fetch",
             "crud.camera",
             "crud.camera-relay",
+            "crud.fleet",
             "crud.inventory",
             "flow.host",
         )
@@ -382,5 +383,19 @@ def test_camera_routes_classed() -> None:
     )
     assert (
         would_refuse("crud.camera", relay, request_header=False, header_needed=False)
+        == "wrong_caller"
+    )
+
+
+def test_fleet_scope_and_route_class() -> None:
+    assert SCOPES["fleet"] == frozenset({"crud.fleet"})
+    match = CRUD_PATH.match("/api/v1/internal/crud/fleet/changes")
+    assert match is not None
+    assert CRUD_CLASSES[match.group(1)] == "crud.fleet"
+    fleet = Service("fleet", frozenset({"crud.fleet"}))
+    camera = Service("camera", frozenset({"crud.camera"}))
+    assert would_refuse("crud.fleet", fleet, request_header=False, header_needed=False) is None
+    assert (
+        would_refuse("crud.fleet", camera, request_header=False, header_needed=False)
         == "wrong_caller"
     )

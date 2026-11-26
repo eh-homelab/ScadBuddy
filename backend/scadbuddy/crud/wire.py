@@ -17,6 +17,7 @@ CrudCaller = Literal[
     "profile-fetch",
     "camera",
     "camera-relay",
+    "fleet",
     "inventory",
 ]
 CRUD_HEADER = "X-ScadBuddy-Crud"

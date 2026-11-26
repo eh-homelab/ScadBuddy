@@ -42,6 +42,7 @@ from scadbuddy.agent_data.gate_validate import (
     Role,
     validate_respond,
 )
+from scadbuddy.flows.store import chain_in_force
 
 PROTOCOL_VERSION = 1
 #: What a parked call waits on (the agent's ``INPUT_CHANNEL``), sent as a resolution commits.
@@ -529,7 +530,9 @@ def grant_input(
     """Records the run grant's approval of a call, only if the backend recorded the grant's use
     of this request id, by this session, for this very hash, and the grant is in force: one
     transaction under the grant row's share lock, so a revocation lands wholly before or after
-    it. Nothing of the verdict is taken on trust. False when it does not hold."""
+    it, with every grant it inherits from and the standing grant it was seeded from in force
+    too (`store.chain_in_force`, #5685). Nothing of the verdict is taken on trust. False when
+    it does not hold."""
     responder = run_grant_responder(grant_id)
     with conn.transaction():
         holds = conn.execute(
@@ -540,6 +543,10 @@ def grant_input(
             (grant_id, request_id, session_id, input_hash),
         ).fetchone()
         if holds is None:
+            return False
+        # Inherited, or seeded from a standing grant: only while its whole chain is in
+        # force, as the API's check of the call requires (#5685).
+        if not chain_in_force(conn, grant_id):
             return False
         inserted = conn.execute(
             "INSERT INTO ai_input_responses (request_id, session_id, kind, outcome, responder)"

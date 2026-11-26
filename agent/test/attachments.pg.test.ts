@@ -259,6 +259,8 @@ describe.skipIf((skip !== undefined) || AGENT_SESSIONS_SKIP !== '')(`attachments
       })
       // The turn's message in the process: its session's workflow placed it (agentSessions()).
       await expect.poll(() => prompts.length, { timeout: 15_000 }).toBe(pushed + 1)
+      // The prompt can reach the runner before the session.started frame; a close first drops it (#7860).
+      await expect.poll(() => out.some((e) => e.type === 'session.started'), { timeout: 15_000 }).toBe(true)
       connection.close()
       const started = out.find((e) => e.type === 'session.started') as { sessionId: string } | undefined
       expect(started).toBeDefined()

@@ -118,6 +118,57 @@ describe('the spool timeline', () => {
     expect(items()[3]).not.toHaveTextContent(/expected|ledger/)
   })
 
+  it('names how a reading under the label was read (#7683)', () => {
+    const base = { reading_g: 900, empty_source: 'insert', empty_basis: 'catalog', empty_name: 'Plastic', expected_g: null, drift_g: null }
+    renderPage(
+      <SpoolTimeline
+        rows={[
+          row({ at: '2026-11-12T10:00:00Z', kind: 'weighed', source: 'scale', grams_after: 900, data: { ...base, empty_g: 0, empty_source: 'tared', empty_basis: null, empty_name: null, resolution: 'tared', shortfall_g: 100 } }),
+          row({ at: '2026-11-11T10:00:00Z', kind: 'weighed', source: 'scale', grams_after: 700, data: { ...base, empty_g: 200, resolution: 'short', shortfall_g: 100 } }),
+          row({ at: '2026-11-10T10:00:00Z', kind: 'weighed', source: 'scale', grams_after: 700, data: { ...base, empty_g: 200, resolution: 'label_wrong', shortfall_g: 100 } }),
+        ]}
+        catalogs={catalogs}
+        types={types}
+      />,
+    )
+    expect(items()[0]).toHaveTextContent('Weighed, 900 g, scale, reading 900 g, scale tared on the spool')
+    expect(items()[0]).not.toHaveTextContent(/spool 0 g/)
+    expect(items()[1]).toHaveTextContent('Weighed, 700 g, scale, reading 900 g, spool 200 g, spool short by 100 g')
+    expect(items()[2]).toHaveTextContent('Weighed, 700 g, scale, reading 900 g, spool 200 g, label corrected')
+  })
+
+  it('says why a spool was archived and links the two ends of a respooled one (#7684)', () => {
+    renderPage(
+      <SpoolTimeline
+        rows={[
+          row({ at: '2026-11-12T10:00:00Z', kind: 'archived', data: { reason: 'respooled', started_g: 1000, continued_as: 's-new' } }),
+          row({ at: '2026-11-11T10:00:00Z', kind: 'archived', data: { reason: 'finished', started_g: 1000 } }),
+          row({ at: '2026-11-01T10:00:00Z', kind: 'created', source: 'person', grams_after: 480, data: { continued_from: 's-old' } }),
+        ]}
+        catalogs={catalogs}
+        types={types}
+      />,
+    )
+    expect(items()[0]).toHaveTextContent('Archived, respooled, continues as a new spool')
+    expect(within(items()[0]!).getByRole('link', { name: 'a new spool' })).toHaveAttribute('href', '/filament/spools/s-new')
+    expect(items()[1]).toHaveTextContent('Archived, finished')
+    expect(items()[1]).not.toHaveTextContent('continues')
+    expect(items()[2]).toHaveTextContent('Added, with 480 g, continues an earlier spool')
+    expect(within(items()[2]!).getByRole('link', { name: 'an earlier spool' })).toHaveAttribute('href', '/filament/spools/s-old')
+  })
+
+  it("shows a print's length beside its grams when the plate had one (#7685)", () => {
+    const lengthed = [
+      row({ at: '2026-11-10T10:00:00Z', kind: 'print_ended', source: 'print_actual', delta_g: -35, data: { job: 'j', basis: 'sliced', length_m: 11.7 } }),
+      row({ at: '2026-11-09T10:00:00Z', kind: 'print_ended', source: 'print_actual', delta_g: 0, data: { job: 'k', basis: 'not_applied', length_m: 0 } }),
+    ]
+    renderPage(<SpoolTimeline rows={lengthed} catalogs={catalogs} types={types} />)
+    const [done, failed] = items()
+    expect(done).toHaveTextContent('−35 g, 11.7 m, measured')
+    expect(failed).toHaveTextContent('Print ended, 0 g, measured')
+    expect(failed).not.toHaveTextContent(/\d m\b/)
+  })
+
   it("says how a reading differs from the last value, in words", () => {
     renderPage(<SpoolTimeline rows={[row({ kind: 'weighed', source: 'scale', grams_after: 820, delta_g: -20 })]} catalogs={catalogs} types={types} />)
     expect(items()[0]).toHaveTextContent('Weighed, 820 g, scale, 20 g less than the last value')

@@ -48,8 +48,38 @@ describe('WeighingBreakdown (#7682)', () => {
     expect(screen.getByText(/\(Plastic, weighed empty\)\. The ledger expected 992 g\. The scale found 8 g more than the prints accounted for\./)).toBeInTheDocument()
   })
 
+  it('says the scale was tared on the spool, and compares nothing when the gap was explained (#7683)', () => {
+    render(<WeighingBreakdown event={weighed({ grams_after: 900, data: { reading_g: 900, empty_g: 0, empty_source: 'tared', empty_basis: null, empty_name: null, expected_g: 1000, drift_g: null, resolution: 'tared', shortfall_g: 100 } })} />)
+    expect(screen.getByText(/Weighed 900 g on .*: filament 900 g \(the scale was tared on the spool\)\.$/)).toBeInTheDocument()
+    expect(screen.queryByText(/spool 0 g|ledger expected|matches the prints/)).toBeNull()
+  })
+
   it('names a person-taken empty weight', () => {
     render(<WeighingBreakdown event={weighed({ grams_after: 962, data: { reading_g: 1180, empty_g: 218, empty_source: 'person', empty_basis: null, empty_name: null, expected_g: null, drift_g: null } })} />)
     expect(screen.getByText(/filament 962 g \+ spool 218 g \(taken off by hand\)\./)).toBeInTheDocument()
+  })
+})
+
+describe('the likely cause of a drift (#7685)', () => {
+  const drifted = weighed({ grams_after: 980, data: { ...insert, empty_basis: 'catalog', expected_g: 1000.7, drift_g: -20.7 } })
+
+  it('names the starting amount and its gap to the label', () => {
+    render(<WeighingBreakdown event={drifted} cause={{ kind: 'start_amount', gap: 20.7 }} />)
+    expect(screen.getByText(/Likely cause: the starting amount; it was 20.7 g under the label weight, and the scale found the label weight\.$/)).toBeInTheDocument()
+  })
+
+  it("names the type's density against the prints'", () => {
+    render(<WeighingBreakdown event={drifted} cause={{ kind: 'density', implied: 1.31, type: 1.24 }} />)
+    expect(screen.getByText(/Likely cause: the type's density \(1\.24 g\/cm³\) disagrees with the prints' \(1\.31 g\/cm³\)\.$/)).toBeInTheDocument()
+  })
+
+  it('names a placeholder empty weight', () => {
+    render(<WeighingBreakdown event={drifted} cause={{ kind: 'empty_weight' }} />)
+    expect(screen.getByText(/Likely cause: the spool's empty weight is a placeholder\.$/)).toBeInTheDocument()
+  })
+
+  it('says nothing more with no cause', () => {
+    render(<WeighingBreakdown event={drifted} cause={null} />)
+    expect(screen.queryByText(/Likely cause/)).not.toBeInTheDocument()
   })
 })

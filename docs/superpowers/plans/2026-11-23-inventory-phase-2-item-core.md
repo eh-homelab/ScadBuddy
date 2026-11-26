@@ -761,8 +761,8 @@ Load `frontend-design` first.
   rules in place.
 - Install, value over life and printers as units (§6.4): phase 4 (#7069); the columns exist.
 - `saleable` is stored and shown; refusing to sell is phase 6 (#7071) and #7278.
-- #7278 (spool parts) waits for phase 3 (#7068), where spools get `filament_spools.unit_id`
-  (Ruling 7).
+- #7278 (spool parts) waits for phase 3 (#7068), where spools become units. (Ruling 7. The `filament_spools.unit_id` column was dropped:
+  the spool's id is its unit's id, ruling 1 on #7068.)
 
 ## Rulings (owner, 2026-11-23)
 

@@ -219,17 +219,20 @@ async def test_a_500_from_the_accept_route_does_not_pass(
     """An error the route does not expect fails the accept fast, as a 5xx, which the
     worker does not take for a state that passes (`render_accept`). The route's answer
     ends the budget: the error names the last try's failure, and a retry that a loaded
-    runner stalls past `ACCEPT_TIMEOUT` would be a read timeout, `transport` (#7525)."""
+    runner stalls past `ACCEPT_TIMEOUT` would be a read timeout, `transport` (#7525).
+    One try reaches the route, counted, not timed: a loaded runner made the one round trip
+    take 3.5 s (#7885)."""
+    tries: list[int] = []
 
     def broken(*_: object, **__: object) -> Job:
+        tries.append(1)
         clock.end_budget()
         raise RuntimeError("relation render_jobs has no column x")
 
     monkeypatch.setattr(projection, "accept", broken)
-    started = time.monotonic()
     with pytest.raises(CrudUnavailableError) as failed:
         await _accept(jobs, _job())
-    assert time.monotonic() - started < 3
+    assert len(tries) == 1
     assert failed.value.failure == "unavailable" and not failed.value.passes
 
 

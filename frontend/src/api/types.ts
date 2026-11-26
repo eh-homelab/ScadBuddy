@@ -411,6 +411,8 @@ export type QueueItem = Schemas['FarmQueueItem']
 export type ScadBuddyJob = Schemas['ScadBuddyJob']
 export type ArchiveStats = Schemas['ArchiveStats']
 export type PrinterNow = Schemas['PrinterNow']
+export type PrinterCamera = Schemas['PrinterCamera']
+export type CameraFeed = Schemas['CameraFeed']
 /** #3823 — the printer registry: one row per physical printer, keyed by serial. */
 export type PrinterRow = Schemas['PrinterRow']
 export type PrinterCreate = Schemas['PrinterCreate']

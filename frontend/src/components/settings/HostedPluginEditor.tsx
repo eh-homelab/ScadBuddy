@@ -126,8 +126,9 @@ export function HostedPluginEditor({ plugin, pkg, onPlugin, onPackage, onDeleted
   /**
    * #7735 — orders the reads of the files: the mount read's and each save's (`reloadDraft`).
    * An older read still lands while no files are shown, so a newer read that failed does not
-   * leave the list on its skeleton (#7747). That older list can lack a file the failed save
-   * added or renamed, until the editor reads the files again (#7759).
+   * leave the list on its skeleton (#7747). That older list is the draft before the failed
+   * save: it can lack a file the save added or the new path of a rename, and still show a file
+   * it deleted or a rename's old path, until the editor reads the files again (#7759, #7764).
    */
   const fileReads = useRef(0)
 

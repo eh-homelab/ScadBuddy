@@ -71,6 +71,7 @@ from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from scadbuddy.bambuddy.choices import PrinterOpening, opening_choices, printer_opening
 from scadbuddy.bambuddy.options import library_options_scope
+from scadbuddy.bambuddy.output_reader import TemplateSettings, read_template_settings
 from scadbuddy.bambuddy.resolver import PRINTER_MODEL, PrintChoices
 from scadbuddy.core.problems import ApiError
 from scadbuddy.filament.models import EffectivePreset
@@ -544,10 +545,27 @@ def key_subject(library_file: PricedFile | None) -> dict[str, str]:
     return {"kind": "library_file", "library": library_file.library}
 
 
-def key_setup(request: SliceQuoteRequest) -> dict[str, Any]:
+def key_setup(
+    request: SliceQuoteRequest, template_settings: TemplateSettings | None = None
+) -> dict[str, Any]:
     """The key's ``setup`` (#6710 §7.4): the remembered print sequence, process overrides
-    and settings per part the request slices with."""
-    return request.model_dump(mode="json", include=set(SETUP_FIELDS))
+    and settings per part the request slices with, and the template's own print settings
+    and settings per part that the slice takes (``template_settings``, #7633). Each of
+    the template's two is in the setup only when it is not empty, so the key of a
+    template with none is the key it had before #7633 and `KEY_VERSION` stays 4."""
+    setup = request.model_dump(mode="json", include=set(SETUP_FIELDS))
+    if template_settings is None:
+        return setup
+    if template_settings.print_settings:
+        setup["template_print_settings"] = dict(template_settings.print_settings)
+    parts = {
+        name: dumped
+        for name, settings in template_settings.part_settings.items()
+        if (dumped := settings.model_dump(mode="json", exclude_none=True))
+    }
+    if parts:
+        setup["template_part_settings"] = parts
+    return setup
 
 
 def price_key(
@@ -569,7 +587,8 @@ def price_key(
     each slot's price-book filament as it is priced (``filaments``, by slot from 0), with
     its colour and its filament type's preset for the H2C and the chosen nozzle
     (``presets``, by slot id; a colour pair changes the purge), the profile, the dialog's
-    choices and the remembered setup (:func:`key_setup`), and the price book's policy and
+    choices and the setup (:func:`key_setup`: the remembered setup, and a template's own
+    print settings and settings per part, #7633), and the price book's policy and
     the machine rate that prices it (the live rate of the profile's printer,
     `MachineRates.for_quote`, #6153)."""
     size = choices.nozzles[0].size
@@ -734,11 +753,18 @@ class SliceVariant(BaseModel):
     #: filament's colour (``resolve``'s ``slot_colours``). Empty for a render, whose 3MF
     #: holds the visitor's colours already.
     slot_colours: dict[int, str] = Field(default_factory=dict)
+    #: A render's template settings as the key holds them (#7633, :func:`key_setup`),
+    #: which its slice takes in place of the template's as they are when it runs. None
+    #: for a file, a model.json that refused them (the slice refuses too), and an
+    #: operation started before #7633 (the slice reads them as it did).
+    template_settings: TemplateSettings | None = None
 
     @model_validator(mode="after")
     def _one_subject(self) -> SliceVariant:
         if (self.reference is None) == (self.library_file is None):
             raise ValueError("a variant names a reference or a library file, exactly one")
+        if self.library_file is not None and self.template_settings is not None:
+            raise ValueError("a file's variant takes no template settings")
         return self
 
     @property
@@ -865,7 +891,11 @@ async def price_variant(run: SliceRun, variant: SliceVariant) -> PriceRow:
 
                 def start() -> Awaitable[list[Any]]:
                     return run.slicer.start(
-                        output_id, variant.slice, subject, slot_presets=variant.slot_presets
+                        output_id,
+                        variant.slice,
+                        subject,
+                        slot_presets=variant.slot_presets,
+                        template_settings=variant.template_settings,
                     )
             else:
                 if len(slot_colours) != len(slots):
@@ -938,7 +968,13 @@ def _kit(
             presets: SlotPresets = {
                 own + 1: variant.slot_presets[slot + 1] for own, slot in slots.items()
             }
-            plates = await slicer.start(one.output_id, variant.slice, subject, slot_presets=presets)
+            plates = await slicer.start(
+                one.output_id,
+                variant.slice,
+                subject,
+                slot_presets=presets,
+                template_settings=variant.template_settings,
+            )
             owners.extend(slots for _ in plates)
             started += plates
         return started
@@ -1001,12 +1037,15 @@ def plan_variant(
     library_file: PricedFile | None = None,
     variant_key: str | None = None,
     listing_id: str | None = None,
+    template_settings: TemplateSettings | None = None,
 ) -> Planned | None:
     """The variant of its subject with ``filaments`` on its slots, sliced with the choices
     the print dialog opens on for the subject on the profile's printer (``printer``, as
     :func:`~scadbuddy.bambuddy.choices.printer_opening` read it; #6574) and the setup the
     dialog seeds from the subject's remembered choices (``slice_request``, #6710 §7.2),
-    each slot with its filament type's presets (``type_presets``, by type).
+    each slot with its filament type's presets (``type_presets``, by type). A render's
+    template settings (``template_settings``, #7633) go into the key's setup and into the
+    variant, so its slice takes the settings the key holds; a file takes none.
 
     The subject is one of two (#6710 §7.1): ``reference``'s render, whose 3MF is
     ``model_sha256``, ``filaments`` on its slots from 0, its choices remembered under the
@@ -1020,6 +1059,8 @@ def plan_variant(
     (`NO_TYPE_PRESET`)."""
     if (reference is None) == (library_file is None):
         raise ValueError("a variant names a reference or a library file, exactly one")
+    if library_file is not None and template_settings is not None:
+        raise ValueError("a file's variant takes no template settings")
     if library_file is not None:
         remembered = settings.model_print_choices.get(
             library_options_scope(library_file.id), library_file.remembered
@@ -1069,7 +1110,7 @@ def plan_variant(
         policy=policy,
         machine_rate=None if machine_rate is None else machine_rate.rate_per_hour,
         subject=key_subject(library_file),
-        setup=key_setup(request),
+        setup=key_setup(request, template_settings),
     )
     return Planned(
         key=key,
@@ -1086,6 +1127,7 @@ def plan_variant(
             machine_rate=machine_rate,
             variant_key=variant_key,
             listing_id=listing_id,
+            template_settings=template_settings,
         ),
     )
 
@@ -1141,7 +1183,9 @@ async def planned_variant(
     profile, a printer the registry lacks or whose status cannot be read, or no type or
     type preset for a slot's material). Its subject is a render (``reference`` and the
     sha256 of its 3MF) or a file listing's file (``library_file``, #6710), as
-    :func:`plan_variant` takes them: every read of a price builds its key here."""
+    :func:`plan_variant` takes them: every read of a price builds its key here. A render's
+    template settings are read here once (#7633), as the template's model.json has them
+    now: the key holds them and the slice takes them."""
     if filaments is None:
         return None
     orders = _orders(state)
@@ -1159,6 +1203,11 @@ async def planned_variant(
         return None
     wanted = {profile.materials.get(f.material.casefold()) for f in filaments}
     type_presets = await read_type_presets(state, [t for t in wanted if t is not None])
+    template_settings = (
+        None
+        if reference is None
+        else await asyncio.to_thread(read_template_settings, state.catalogue, reference.slug)
+    )
     return plan_variant(
         settings=settings,
         reference=reference,
@@ -1172,6 +1221,7 @@ async def planned_variant(
         type_presets=type_presets,
         variant_key=variant_key,
         listing_id=listing_id,
+        template_settings=template_settings,
     )
 
 

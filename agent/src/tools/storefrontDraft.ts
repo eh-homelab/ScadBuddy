@@ -2,12 +2,13 @@ import type { components } from '../api/schema.js'
 
 // #6131 (design 2026-11-13 §4) — the smart defaults of a storefront listing, the agent's
 // copy of the Storefront page's (`frontend/src/components/storefront/listingDraft.ts`
-// `defaultsFor`, `colourProblems`, `titleColours`, `withoutWords`, `sellMedia`, and a library
-// file's draft below, #6710). The two
+// `defaultsFor`, `colourProblems`, `titleColours`, `withoutWords`, `sellMedia`, a library
+// file's draft below, #6710, and `designInputs.ts` `soldDesign`, #5701). The two
 // packages share no code, so `test-fixtures/storefront/sell-draft-vectors.json` holds the
 // cases both tests check, and a change to one copy must keep them passing in both.
 
-type Schema = components['schemas']['CustomizerSchema']
+/** A schema at a commit, with what the revision declares of its pipeline (#5701). */
+type Schema = components['schemas']['CustomizerSchema'] & Partial<Pick<components['schemas']['RevisionSchema'], 'pipeline' | 'pipeline_params'>>
 type Parameter = components['schemas']['Parameter']
 type Filament = components['schemas']['Filament']
 type MediaView = components['schemas']['MediaView']
@@ -27,8 +28,40 @@ export interface ListingDefaults {
   colours: string[]
 }
 
+/** The parameters a listing can name: every one outside the hidden group that the pipeline does not set itself (#5701). */
 function shownParams(schema: Schema): Parameter[] {
-  return (schema.parameters ?? []).filter((param) => param.group !== HIDDEN_GROUP)
+  const set = schema.pipeline_params ?? []
+  return (schema.parameters ?? []).filter((param) => param.group !== HIDDEN_GROUP && !set.includes(param.name))
+}
+
+/** A pipeline template's own inputs on a listing and the version they were made at (#5701, spec 2026-11-17 §4.2). */
+export interface ListingDesign {
+  inputs?: Record<string, unknown>
+  inputs_v?: number
+}
+
+function isObject(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value)
+}
+
+function isValue(value: unknown): value is Value {
+  return typeof value === 'string' || typeof value === 'number' || typeof value === 'boolean'
+}
+
+/**
+ * #5701 (spec 2026-11-17 §9) — what a listing takes from a render's or an output's whole
+ * inputs (`whole`): the values the smart defaults run over (`params`), and, for a pipeline
+ * template, the rest but `v` as `inputs` and `v` as `inputs_v` (0 when it has none, an
+ * output made before inputs had a version). A template with no pipeline takes the values
+ * only, since publish refuses inputs there. The page's `designInputs.ts` `soldDesign`; the
+ * shared vectors' `source` cases pin both.
+ */
+export function soldDesign(schema: Schema, whole: Readonly<Record<string, unknown>>): { values: Record<string, Value>; design: ListingDesign } {
+  const { params, ...extra } = whole
+  const values = isObject(params) && Object.values(params).every(isValue) ? (params as Record<string, Value>) : {}
+  if (!schema.pipeline) return { values, design: {} }
+  const { v, ...inputs } = extra
+  return { values, design: { inputs, inputs_v: typeof v === 'number' && Number.isInteger(v) && v >= 0 ? v : 0 } }
 }
 
 /**
