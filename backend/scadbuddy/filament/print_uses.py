@@ -52,23 +52,36 @@ class SlotUse(BaseModel):
     spool_id: UUID
     grams: float
     plate_started_at: datetime
+    #: The metres the sliced plate gives the slot (#7685); ``None`` when it gives none.
+    length_m: float | None = None
 
 
 def slot_uses(
-    spools: Mapping[int, SpoolOption], grams: Mapping[int, float], started_at: datetime
+    spools: Mapping[int, SpoolOption],
+    grams: Mapping[int, float],
+    started_at: datetime,
+    lengths: Mapping[int, float] | None = None,
 ) -> list[SlotUse]:
     """Each slot's use of the SB spool in its tray, by slot: the slot's chosen tray's
     ``sb_spool_id`` (`trays.loaded_trays`: found by its tag or a person's tray link),
-    and the grams the sliced plate gives the slot (`slicing.slice_info.plate_grams`). A
-    slot whose tray holds no SB spool, or that prints nothing, uses none."""
+    the grams the sliced plate gives the slot (`slicing.slice_info.plate_uses`) and its
+    metres where the plate gives them, above 0 (#7685). A slot whose tray holds no SB
+    spool, or that prints nothing, uses none."""
     uses: list[SlotUse] = []
     for slot_id in sorted(spools):
         spool_id = spools[slot_id].sb_spool_id
         used = grams.get(slot_id, 0.0)
         if spool_id is None or used <= 0:
             continue
+        length = (lengths or {}).get(slot_id)
         uses.append(
-            SlotUse(slot_id=slot_id, spool_id=spool_id, grams=used, plate_started_at=started_at)
+            SlotUse(
+                slot_id=slot_id,
+                spool_id=spool_id,
+                grams=used,
+                plate_started_at=started_at,
+                length_m=length if length is not None and length > 0 else None,
+            )
         )
     return uses
 
@@ -96,7 +109,8 @@ def record_uses(
 
 def record_uses_in(conn: Conn, run_id: str, subtask: str, uses: Sequence[SlotUse]) -> int:
     """What a LAN start uses, as the printer takes it: a ``print_started`` event with
-    its ``print_estimate`` per slot, at the plate's start. A slot booked already (an
+    its ``print_estimate`` per slot, at the plate's start, with the slot's metres as
+    ``data.length_m`` where the plate gives them (#7685). A slot booked already (an
     attempt that starts again) keeps its event; a spool deleted since is left out. The
     number of events booked."""
     booked = 0
@@ -124,7 +138,7 @@ def record_uses_in(conn: Conn, run_id: str, subtask: str, uses: Sequence[SlotUse
             actor=ACTOR,
             # When the printer took the plate: a reading after it holds the plate.
             at=use.plate_started_at,
-            data={"job": subtask},
+            data={"job": subtask} | ({} if use.length_m is None else {"length_m": use.length_m}),
         )
         booked += event is not None
     return booked

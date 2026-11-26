@@ -329,7 +329,10 @@ def kit_count(outputs: OutputsRead, jobs: JobReads | None, first: str, saved: in
     (:func:`kit_output_ids`), or more while its job can still be read and lists more. An
     output set on the item by another path than the item's render or quote (a person's
     pick of a later output, an item's add with an ``output_id``) saves none of the others;
-    its job tells, until the prune takes it (#5701 PR 5, #7780)."""
+    its job tells, until the prune takes it (#5701 PR 5, #7780). The job is read even
+    when several outputs are saved: the render saves the later ones one at a time after
+    it attaches the first, so a save that failed part way leaves fewer than the job made
+    (review of #7876)."""
     if jobs is None:
         return saved
     try:

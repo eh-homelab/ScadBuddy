@@ -7,6 +7,7 @@ import { Checkbox } from '@/components/ui/checkbox'
 import { cn } from '@/lib/utils'
 import { RgbaSwatch } from './RgbaSwatch'
 import { DriftNotice, NeedsType } from './SpoolsTable'
+import { IncompleteMark } from '../entities/IncompleteMark'
 import { grams, type SpoolGroup } from './spoolsQuery'
 
 interface Props {
@@ -63,6 +64,7 @@ export function SpoolCards({ groups, selected, onSelect, checks }: Props) {
                     </p>
                     <NeedsType spool={spool} />
                     <DriftNotice spool={spool} />
+                    <IncompleteMark row={spool} />
                     <NeedsDrying spool={spool} />
                     <CheckTray check={checks?.get(spool.id)} />
                   </div>

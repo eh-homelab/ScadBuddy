@@ -881,13 +881,13 @@ RUN case "$TARGETARCH" in \
     && rm -f /tmp/mediamtx.tar.gz /tmp/mediamtx.sha256 \
     && test "$(mediamtx --version)" = "$MEDIAMTX_VERSION"
 
-# ── camera-relay, camera-recorder: printer camera recording (#7328) ───────────
-# Two images, one per process (README.md, "Printer cameras (#7328)"). Each pod
+# ── camera-relay, camera-recorder, camera-edge: printer camera recording and live view (#7328, #7330) ──
+# Three images, one per process (README.md, "Printer cameras (#7328)"). Each pod
 # runs two containers of its image: MediaMTX (`args: [mediamtx, /etc/mediamtx/mediamtx.yml]`)
 # and the controller (the default command). The controller drives MediaMTX's control API
 # on 127.0.0.1:9997, and MediaMTX's hooks run curl against the controller's hook server on
 # 127.0.0.1:9091, so both share the pod's network. The recorder's two containers also
-# share /segments. Neither process holds a database secret or client (#5295).
+# share /segments. No process holds a database secret or client (#5295).
 #
 # `camera-deps` builds the venv as `profile-fetch-deps` does: no dev group, no editable
 # install, and no psycopg package. It needs git for the git-pinned
@@ -929,16 +929,16 @@ ENV PATH=/opt/venv/bin:$PATH \
     PYTHONUNBUFFERED=1 \
     PYTHONDONTWRITEBYTECODE=1
 
-# Fails the build when a psycopg package is installed, or when either process's start
-# imports Postgres code (#5295: neither has a database). `-B`, so it writes no bytecode.
+# Fails the build when a psycopg package is installed, or when any camera process's start
+# imports Postgres code (#5295: none has a database). `-B`, so it writes no bytecode.
 RUN python -B - <<'CHECK'
 import importlib.util, sys
 for name in ("psycopg", "psycopg_binary", "psycopg_pool", "psycopg_c"):
     if importlib.util.find_spec(name) is not None:
         sys.exit(f"ERROR: {name} is installed in the camera image")
-import scadbuddy.camera.relay, scadbuddy.camera.recorder
+import scadbuddy.camera.relay, scadbuddy.camera.recorder, scadbuddy.camera.edge
 if any(m == "psycopg" or m.startswith("psycopg.") for m in sys.modules):
-    sys.exit("ERROR: importing scadbuddy.camera.relay or .recorder imported psycopg")
+    sys.exit("ERROR: importing scadbuddy.camera.relay, .recorder or .edge imported psycopg")
 CHECK
 
 RUN groupadd --gid 10001 camera \
@@ -971,6 +971,13 @@ ENV TZ=UTC
 # The controller's /healthz and /metrics (`camera.process.HEALTH_PORT`).
 EXPOSE 9090
 CMD ["python", "-m", "scadbuddy.camera.recorder"]
+
+FROM camera AS camera-edge
+COPY deploy/camera/mediamtx-edge.yml /etc/mediamtx/mediamtx.yml
+# MediaMTX's LL-HLS and WebRTC (WHEP) for the API, WebRTC's ICE over UDP; the
+# controller's /healthz and /metrics (`camera.process.HEALTH_PORT`).
+EXPOSE 8888 8889 8189/udp 9090
+CMD ["python", "-m", "scadbuddy.camera.edge"]
 
 # ── openscad-lsp: the editor's language server ────────────────────────────────
 # Completion, hover and go-to-definition in the source editor (#95), bridged to

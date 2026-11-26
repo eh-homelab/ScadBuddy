@@ -86,12 +86,17 @@ got=$(printf '' | "$here/select-lanes.sh" | paste -sd' ')
 got=$("$here/select-lanes.sh" all | paste -sd' ')
 [[ "$got" == "backend=true agent_durable=true rust=true image=true docs_only=false" ]] || { echo "FAIL: all -> $got"; fail=1; }
 # #7891: each path `read_by_tests` names is re-included in ci.yml's push `paths`, so a
-# push to main that changes only that doc still runs CI. The two lists must match.
+# push to main that changes only that doc still runs CI. The check runs one way: ci.yml
+# also re-includes paths that `read_by_tests` does not name (`**/vendor/**`).
 read_by_tests=$(sed -n "s/^read_by_tests='\(.*\)'$/\1/p" "$here/select-lanes.sh")
 [[ -n "$read_by_tests" ]] || { echo "FAIL: no read_by_tests in select-lanes.sh"; fail=1; }
 IFS='|' read -ra patterns <<<"$read_by_tests"
 for pattern in "${patterns[@]}"; do
   path=$(sed -e 's/^\^//' -e 's/\$$//' -e 's/\\//g' <<<"$pattern")
+  # Each entry must be a literal path; a regex could not be matched to a ci.yml line.
+  if [[ "$(sed -e 's/^\^//' -e 's/\$$//' -e 's/\\.//g' <<<"$pattern")" =~ [][*+?(){}^$.\\] ]]; then
+    echo "FAIL: read_by_tests entry $pattern is not a literal path"; fail=1; continue
+  fi
   grep -qxF -- "      - \"$path\"" "$here/../workflows/ci.yml" \
     || { echo "FAIL: ci.yml push paths do not re-include $path"; fail=1; }
 done

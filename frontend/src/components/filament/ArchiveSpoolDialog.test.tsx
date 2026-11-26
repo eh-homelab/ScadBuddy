@@ -1,6 +1,6 @@
 import { screen, waitFor, within } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
-import { http, HttpResponse } from 'msw'
+import { delay, http, HttpResponse } from 'msw'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { getSpool } from '../../api/filament'
 import { spoolId } from '../../mocks/features/filament/seed'
@@ -17,6 +17,9 @@ function recorded() {
   })
   return bodies
 }
+
+/** A preview that finds no empty weight for the spool, whatever the page believed. */
+const noEmptyWeightPreview = () => HttpResponse.json({ closing: { reason: null, started_g: 1000, started_from: 'reading', ledger_consumed_g: 750, final_filament_g: null, scale_consumed_g: null, drift_g: null }, final_filament_g: null, empty_g: null, notices: [] })
 
 /** Spool #10 is on a cardboard spool (180 g empty) with 250 g left; spool #3 has no insert. */
 async function show(number: number, emptyWeightG: number | null) {
@@ -80,6 +83,30 @@ describe('ArchiveSpoolDialog (#7684)', () => {
     await userEvent.click(within(dialog).getByRole('button', { name: 'Archive' }))
     await waitFor(() => expect(onArchived).toHaveBeenCalledTimes(1))
     expect(posts).toEqual([{ archived: true, reason: 'finished', final_reading_g: 210 }])
+  })
+
+  it('says so when the preview changes what a typed number means (#7909)', async () => {
+    // The page believes the spool is on a 180 g insert; the preview, answered after the number is typed (the hook's 300 ms debounce plus this delay), finds no empty weight, so the number is the filament left. The wait is longer than that sum with room for a loaded machine (the review of #7931).
+    server.use(http.get('*/api/v1/filament/spools/:id/closing', async () => (await delay(600), noEmptyWeightPreview())))
+    const posts = recorded()
+    const { dialog, onArchived } = await show(3, 180)
+    const field = within(dialog).getByLabelText('Scale reading, with the spool (g)')
+    await userEvent.type(field, '210')
+    expect(await within(dialog).findByText('No empty weight is known for this spool after all: the number is read as the filament left, not as a scale reading.', undefined, { timeout: 3000 })).toBeInTheDocument()
+    expect(within(dialog).getByLabelText('Filament left (g)')).toBe(field)
+    await userEvent.click(within(dialog).getByRole('radio', { name: 'Damaged' }))
+    await userEvent.click(within(dialog).getByRole('button', { name: 'Archive' }))
+    await waitFor(() => expect(onArchived).toHaveBeenCalledTimes(1))
+    expect(posts).toEqual([{ archived: true, reason: 'damaged', final_grams: 210 }])
+  })
+
+  it('says nothing about a number typed once the label had already changed (#7909)', async () => {
+    server.use(http.get('*/api/v1/filament/spools/:id/closing', () => noEmptyWeightPreview()))
+    const { dialog } = await show(3, 180)
+    const field = await within(dialog).findByLabelText('Filament left (g)')
+    await userEvent.type(field, '210')
+    await waitFor(() => expect(within(dialog).getByText(/Filament at the end/)).toBeInTheDocument())
+    expect(within(dialog).queryByText(/after all/)).toBeNull()
   })
 
   it('starts afresh each time it opens', async () => {

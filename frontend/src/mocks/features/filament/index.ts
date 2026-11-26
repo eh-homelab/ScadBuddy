@@ -13,6 +13,8 @@ import { invoiceRefOf, typeSuppliersOf } from '../filamentPurchasing'
 import { printersState } from '../printers'
 import { H2C, seed, spoolId, type Catalogs, type Seed, type SpoolRow } from './seed'
 import { jobOf } from '../../../components/filament/eventText'
+import { CATALOGS } from '../../../components/filament/catalogs'
+import { checksSave, marksOf, rowPropertiesRefusal, saveRowProperties } from '../entities'
 
 type S = components['schemas']
 
@@ -371,6 +373,15 @@ const FIELDS = {
   event: ['kind', 'source', 'at', 'grams', 'reading_g', 'resolution', 'temp_c', 'hours', 'note'],
   locationCreate: ['name', 'kind_id', 'parent_id', 'identifier', 'capacity', 'printer_id', 'ams_id', 'tray_id', 'note', 'sort_order'],
 } as const
+/** A row not made yet holds no properties: its checks run against this entity (#7703). */
+const UNMADE = '00000000-0000-4000-8000-0000000000ff'
+const catalogEntity = (kind: string) => CATALOGS.find((spec) => spec.kind === kind)!.entity
+/** A body without its `properties`, and those. */
+function split(raw: unknown): [Record<string, unknown>, unknown] {
+  const { properties, ...rest } = (raw ?? {}) as Record<string, unknown>
+  return [rest, properties]
+}
+
 const PATCH_FIELDS = { type: [...FIELDS.typeCreate, 'archived'], spool: [...FIELDS.spoolCreate.filter((field) => field !== 'grams_left'), 'archived'], location: [...FIELDS.locationCreate, 'archived'] }
 
 /** The 422 for a body (or each row of a list body) that has a key `allowed` lacks, or `null`. */
@@ -410,6 +421,11 @@ const OVERRIDABLE = [
 const nameOf = <K extends keyof Catalogs>(kind: K, id: string | null | undefined) =>
   id ? (state.catalogs[kind] as { id: string; name: string }[]).find((row) => row.id === id)?.name ?? null : null
 
+/** A type as its reads answer it (#7703: with its marks). */
+function typeView(type: S['SpoolType']): S['SpoolType'] {
+  return { ...type, ...marksOf(`spool_type:${type.id}`, type.archived_at != null) }
+}
+
 function view(row: SpoolRow): FilamentSpool {
   const type = state.types.find((one) => one.id === row.type_id)
   const effective: S['EffectiveValues'] = {}
@@ -426,6 +442,7 @@ function view(row: SpoolRow): FilamentSpool {
   const pct = effective.low_stock_pct ?? LOW_STOCK_PCT
   return {
     ...row,
+    ...marksOf(`spool:${row.id}`, row.archived_at != null),
     // The invoice line it was bought on (#6700): a line may fill a spool with none.
     invoice_line_id: invoicedLine.get(row.id) ?? invoiceRefOf(row.id)?.line_id ?? null,
     effective,
@@ -513,8 +530,8 @@ function detail(row: SpoolRow): S['SpoolDetail'] {
     k_values: effectiveKValues(row.id),
     basis: { anchor, deltas },
     last_weighing: [...ledger].reverse().find((event) => event.kind === 'weighed') ?? null,
-    // #7684: an archived spool's closing is its newest `archived` event's data.
-    closing: row.archived_at ? (([...ledger].reverse().find((event) => event.kind === 'archived')?.data as S['Closing'] | undefined) ?? null) : null,
+    // #7684: an archived spool's closing is its newest `archived` event's data; #7909: none when the event (from before the closing) carries no closing key.
+    closing: row.archived_at ? closingOnEvent([...ledger].reverse().find((event) => event.kind === 'archived')?.data) : null,
     in_use: ledger.some((event) => event.kind === 'print_started' || event.kind === 'print_ended'),
     invoice: invoiceRefOf(row.id, invoicedLine.get(row.id)),
     type_suppliers: row.type_id ? typeSuppliersOf(row.type_id) : [],
@@ -1014,9 +1031,19 @@ function closingOf(events: readonly S['SpoolEvent'][], row: SpoolRow, reason: Ar
   }
 }
 
+const CLOSING_KEYS = ['reason', 'started_g', 'started_from', 'ledger_consumed_g', 'final_filament_g', 'scale_consumed_g', 'drift_g'] as const
+
+/** `spools.py` `detail()` (#7909): an `archived` event's data as the closing, or null when it carries none of the closing's keys. */
+function closingOnEvent(data: Record<string, unknown> | undefined): S['Closing'] | null {
+  if (!data || !CLOSING_KEYS.some((key) => key in data)) return null
+  return data as S['Closing']
+}
+
 /** `_reading_notice`: a reading the archive would refuse, said first. */
-function readingNotice(readingG: number | null, emptyG: number | null): S['ClosingNotice'][] {
+function readingNotice(readingG: number | null, grams: number | null, emptyG: number | null): S['ClosingNotice'][] {
   if (readingG == null) return []
+  // #7909: a reading under the filament sent with it is what `SpoolArchive` refuses.
+  if (grams != null) return readingG < grams ? [{ code: 'reading_below_grams', text: `The reading, ${gramsText(readingG)}, is under the ${gramsText(grams)} of filament: a spool cannot weigh less than the filament on it.` }] : []
   if (emptyG == null) return [{ code: 'no_empty_weight', text: 'No empty weight is known for this spool, so the reading cannot be turned into filament: enter the filament left instead, or give the spool an insert.' }]
   if (readingG < emptyG) return [{ code: 'reading_below_empty', text: `The reading is under the empty spool's ${emptyG} g.` }]
   return []
@@ -1328,6 +1355,8 @@ export interface MockPlate {
   // `metrics_models.Outcome`.
   outcome: 'completed' | 'failed' | 'cancelled' | 'unknown'
   printer_id: string | null
+  /** #7685: the plate's metres (`data.length_m`); `null` for a plate booked without one. */
+  length_m?: number | null
 }
 
 /**
@@ -1338,18 +1367,35 @@ export interface MockPlate {
  */
 function platesOf(events: readonly S['SpoolEvent'][]): MockPlate[] {
   const bbJobs = new Set(events.filter((event) => event.ref_kind === 'bb_usage' && event.kind === 'print_ended').map(jobOf))
+  const lengthOf = (event: S['SpoolEvent']) => (typeof event.data?.length_m === 'number' ? event.data.length_m : null)
+  // #7685: Bambuddy's rows carry no length, so a paired plate takes the length of SB's own ends of the
+  // job, summed (one spool can feed several slots of a job, each an end of its own).
+  const sbLengths = new Map<string | null, number>()
+  for (const event of events) {
+    const length = event.kind === 'print_ended' && event.ref_kind === 'print_run' ? lengthOf(event) : null
+    if (length != null) sbLengths.set(jobOf(event), (sbLengths.get(jobOf(event)) ?? 0) + length)
+  }
   return [...events].sort(byTime).flatMap((event) => {
     if (event.kind !== 'print_ended') return []
     const grams = event.delta_g ? -event.delta_g : 0
     if (event.ref_kind === 'bb_usage') {
       const status = event.data?.bb_status
       const outcome = typeof status === 'string' && BB_OUTCOMES.has(status) ? (status as MockPlate['outcome']) : 'unknown'
-      return [{ at: event.at, grams, outcome, printer_id: event.printer_id }]
+      return [{ at: event.at, grams, outcome, printer_id: event.printer_id, length_m: sbLengths.get(jobOf(event)) ?? null }]
     }
     if (event.ref_kind !== 'print_run' || bbJobs.has(jobOf(event)) || event.data?.basis === 'covered') return []
     const failed = event.data?.basis === 'not_applied'
-    return [{ at: event.at, grams: failed ? 0 : grams, outcome: failed ? 'failed' : 'completed', printer_id: event.printer_id }]
+    return [{ at: event.at, grams: failed ? 0 : grams, outcome: failed ? 'failed' : 'completed', printer_id: event.printer_id, length_m: lengthOf(event) }]
   })
+}
+
+/** `metrics.DENSITY_TOLERANCE` (#7685): the implied and the type's density apart by more than this is a mismatch. */
+const DENSITY_TOLERANCE = 0.05
+
+/** `metrics.implied_density` (#7685, spec §5.6): `grams / (metres * 100 * pi * (diameter_mm / 20)^2)`, g/cm³; `null` when either is 0 or less. */
+export function impliedDensity(grams: number, metres: number, diameterMm: number): number | null {
+  if (grams <= 0 || metres <= 0 || diameterMm <= 0) return null
+  return grams / (metres * 100 * Math.PI * (diameterMm / 20) ** 2)
 }
 
 /** The grams the plates in `events` used, each spool's plates counted by `platesOf` (`summary`'s `consumed_g`). */
@@ -1445,6 +1491,14 @@ function spoolHistory(row: SpoolRow): S['SpoolHistory'] {
   const effective = view(row).effective
   const perKg = effective?.cost_per_kg ?? mockSettings().filament_default_cost_per_kg ?? null
   const labelWeight = effective?.label_weight_g
+  // #7685 (`metrics.spool_metrics`): the metres of the plates with a length over 0 m (a failed
+  // plate's 0 m counts for nothing), and the density their grams imply over the spool's
+  // diameter, against the type's.
+  const lengthed = plates.filter((plate) => plate.length_m != null && plate.length_m > 0)
+  const usedMetres = lengthed.length > 0 ? lengthed.reduce((sum, plate) => sum + (plate.length_m ?? 0), 0) : null
+  const implied = usedMetres != null ? impliedDensity(lengthed.reduce((sum, plate) => sum + plate.grams, 0), usedMetres, Number(effective?.diameter_mm ?? '1.75')) : null
+  const typeDensity = effective?.density_g_cm3 != null ? Number(effective.density_g_cm3) : null
+  const mismatch = implied != null && typeDensity != null && typeDensity > 0 && Math.abs(implied / typeDensity - 1) > DENSITY_TOLERANCE
   const bySeq = [...events].sort((a, b) => a.seq - b.seq)
   const series: S['GramsPoint'][] = bySeq
     .flatMap((event, i) => {
@@ -1477,6 +1531,10 @@ function spoolHistory(row: SpoolRow): S['SpoolHistory'] {
       days_since_last_use: row.last_used_at ? (nowMs - Date.parse(row.last_used_at)) / DAY_MS : null,
       hours_outside_dry: row.hours_outside_dry,
       ams_error: amsError(amsErrors(events, labelWeight)),
+      used_m: usedMetres,
+      implied_density_g_cm3: implied,
+      density_g_cm3: typeDensity,
+      density_mismatch: mismatch,
     },
     type_ams_error: row.type_id
       ? amsError(sameType.flatMap((one) => amsErrors(state.events.filter((event) => event.spool_id === one.id), view(one).effective?.label_weight_g)))
@@ -2040,7 +2098,8 @@ export const handlers = [
         .filter((row) => archived || !row.archived_at)
         .filter((row) => words.every((word) => texts(row).some((text) => text.includes(word))))
         .sort((a, b) => a.sort_order - b.sort_order || a.name.localeCompare(b.name))
-        .map((row) => (params.kind === 'insert-types' ? insertView(row as unknown as S['InsertType']) : row)),
+        .map((row) => (params.kind === 'insert-types' ? insertView(row as unknown as S['InsertType']) : row))
+        .map((row) => ({ ...row, ...marksOf(`${catalogEntity(String(params.kind))}:${(row as unknown as { id: string }).id}`, row.archived_at != null) })),
     )
   }),
   // -- the colour catalog's syncs (#6907) --
@@ -2090,15 +2149,18 @@ export const handlers = [
   http.post(`${BASE}/catalog/:kind`, async ({ params, request }) => {
     const kind = params.kind as keyof Catalogs
     if (!(kind in state.catalogs)) return problem(404, `no catalog ${String(kind)}`)
-    const body = normalised((await request.json()) as Record<string, unknown>)
-    const refused = catalogRefusal(kind, body, body)
+    const [raw, properties] = split(await request.json())
+    const body = normalised(raw)
+    const refused = catalogRefusal(kind, body, body) ?? rowPropertiesRefusal(request, `${catalogEntity(kind)}:${UNMADE}`, properties, true)
     if (refused) return refused
     const blank = Object.fromEntries([...CATALOG_FIELDS[kind]].map((field) => [field, null]))
     // #6907: a person's colour has no source, no sync time and no Bambuddy link.
     const own = kind === 'colours' ? { source: null, synced_at: null, bb_colour_id: null } : kind === 'insert-types' ? { empty_weight_basis: insertBasis(body) } : {}
     const made = { ...blank, sort_order: 0, ...body, ...own, ...(isAliased(kind) ? { aliases: [] } : {}), id: newId(), archived_at: null, created_at: now(), updated_at: now() }
     ;(state.catalogs[kind] as unknown[]).push(made)
-    return HttpResponse.json(kind === 'insert-types' ? insertView(made as unknown as S['InsertType']) : made, { status: 201 })
+    const entity = `${catalogEntity(kind)}:${made.id}`
+    saveRowProperties(entity, properties)
+    return HttpResponse.json({ ...(kind === 'insert-types' ? insertView(made as unknown as S['InsertType']) : made), ...marksOf(entity, false) }, { status: 201 })
   }),
   http.patch(`${BASE}/catalog/:kind/:id`, async ({ params, request }) => {
     const kind = params.kind as keyof Catalogs
@@ -2106,12 +2168,15 @@ export const handlers = [
     const rows = state.catalogs[kind] as { id: string; archived_at: string | null }[]
     const at = rows.findIndex((row) => row.id === params.id)
     if (at < 0) return problem(404, `no ${String(kind)} row ${String(params.id)}`)
-    const body = (await request.json()) as Record<string, unknown>
+    const sent = (await request.json()) as Record<string, unknown>
+    const [body, properties] = split(sent)
     const clear = cleared(body, ['name', 'sort_order'])
     if (clear) return problem(422, clear)
     const next = patched(rows[at]!, body)
-    const refused = catalogRefusal(kind, next, body, rows[at]!.id)
+    const entity = `${catalogEntity(kind)}:${rows[at]!.id}`
+    const refused = catalogRefusal(kind, next, body, rows[at]!.id) ?? rowPropertiesRefusal(request, entity, properties, checksSave(sent))
     if (refused) return refused
+    saveRowProperties(entity, properties)
     if (isAliased(kind) && typeof body.name === 'string') {
       const key = catalogKey(body.name)
       const own = next as unknown as AliasedRow
@@ -2124,7 +2189,7 @@ export const handlers = [
     // #7280 D6: a person's weight is `person` unless it says `placeholder`.
     if (kind === 'insert-types' && body.empty_weight_g != null) (next as unknown as S['InsertType']).empty_weight_basis = insertBasis(body)
     rows[at] = next
-    return HttpResponse.json(kind === 'insert-types' ? insertView(next as unknown as S['InsertType']) : next)
+    return HttpResponse.json({ ...(kind === 'insert-types' ? insertView(next as unknown as S['InsertType']) : next), ...marksOf(entity, next.archived_at != null) })
   }),
   http.get(`${BASE}/catalog/:kind/resolve`, ({ params, request }) => {
     const kind = String(params.kind)
@@ -2161,17 +2226,27 @@ export const handlers = [
   // -- spool types --
   http.get(`${BASE}/types`, ({ request }) => {
     const archived = flag(request, 'include_archived')
-    return HttpResponse.json(state.types.filter((type) => archived || !type.archived_at).sort((a, b) => a.code.localeCompare(b.code)))
+    return HttpResponse.json(
+      state.types
+        .filter((type) => archived || !type.archived_at)
+        .sort((a, b) => a.code.localeCompare(b.code))
+        .map(typeView),
+    )
   }),
   http.post(`${BASE}/types`, async ({ request }) => {
-    const made = createType(await request.json())
-    return made instanceof Response ? made : HttpResponse.json(made, { status: 201 })
+    const [raw, properties] = split(await request.json())
+    const refused = rowPropertiesRefusal(request, `spool_type:${UNMADE}`, properties, true)
+    if (refused) return refused
+    const made = createType(raw)
+    if (made instanceof Response) return made
+    saveRowProperties(`spool_type:${made.id}`, properties)
+    return HttpResponse.json(typeView(made), { status: 201 })
   }),
   http.get(`${BASE}/types/:id`, ({ params }) => {
     const type = state.types.find((one) => one.id === params.id)
     if (!type) return problem(404, `no spool type ${String(params.id)}`)
     return HttpResponse.json({
-      ...type,
+      ...typeView(type),
       presets: state.typePresets.filter((one) => one.type_id === type.id),
       k_values: state.typeKValues.filter((one) => one.type_id === type.id),
     } satisfies S['SpoolTypeDetail'])
@@ -2179,16 +2254,30 @@ export const handlers = [
   http.patch(`${BASE}/types/:id`, async ({ params, request }) => {
     const at = state.types.findIndex((one) => one.id === params.id)
     if (at < 0) return problem(404, `no spool type ${String(params.id)}`)
-    const body = (await request.json()) as Record<string, unknown>
+    const sent = (await request.json()) as Record<string, unknown>
+    const [body, properties] = split(sent)
     const extra = extraKeys(body, PATCH_FIELDS.type)
     if (extra) return extra
     const clear = cleared(body, ['code', 'material_id', 'rgba', 'diameter_mm', 'label_weight_g'])
     if (clear) return problem(422, clear)
     const next = patched(state.types[at]!, body)
-    const refused = typeRefusal(next, next.id)
+    const refused = typeRefusal(next, next.id) ?? rowPropertiesRefusal(request, `spool_type:${next.id}`, properties, checksSave(sent))
     if (refused) return refused
+    saveRowProperties(`spool_type:${next.id}`, properties)
     state.types[at] = PRICED.some((field) => field in body) ? linkPriceBook(next) : next
-    return HttpResponse.json(state.types[at])
+    return HttpResponse.json(typeView(state.types[at]))
+  }),
+  // #7703 — only the cost, not checked for required properties.
+  http.put(`${BASE}/types/:id/cost-per-kg`, async ({ params, request }) => {
+    const at = state.types.findIndex((one) => one.id === params.id)
+    if (at < 0) return problem(404, `no spool type ${String(params.id)}`)
+    const body = (await request.json()) as Record<string, unknown>
+    const extra = extraKeys(body, ['cost_per_kg'])
+    if (extra) return extra
+    if (!('cost_per_kg' in body)) return problem(422, 'cost_per_kg: Field required')
+    const next = patched(state.types[at]!, { cost_per_kg: body.cost_per_kg })
+    state.types[at] = linkPriceBook(next)
+    return HttpResponse.json(typeView(state.types[at]))
   }),
   // #6714: the fill from a type's slicer profile, over `PROFILES` (`fillType`).
   http.post(`${BASE}/types/fill-from-profile`, async ({ request }) => {
@@ -2301,14 +2390,15 @@ export const handlers = [
     )
   }),
   http.post(`${BASE}/spools`, async ({ request }) => {
-    const raw = await request.json()
+    const [raw, properties] = split(await request.json())
     const extra = extraKeys(raw, FIELDS.spoolCreate)
     if (extra) return extra
     const body = normalised(raw as S['SpoolCreate-Input'])
     const made = newSpool(body)
-    const refused = spoolRefusal(made)
+    const refused = spoolRefusal(made) ?? rowPropertiesRefusal(request, `spool:${UNMADE}`, properties, true)
     if (refused) return refused
     state.spools.push(made)
+    saveRowProperties(`spool:${made.id}`, properties)
     addEvent(made.id, 'created', { source: made.grams_left != null ? 'person' : null, grams_after: made.grams_left })
     return HttpResponse.json(view(made), { status: 201 })
   }),
@@ -2333,6 +2423,12 @@ export const handlers = [
   // #7150 — `POST /filament/spools/bulk`: N spools of one draft, all or none.
   http.post(`${BASE}/spools/bulk`, async ({ request }) => {
     const raw = (await request.json()) as Record<string, unknown>
+    // The replay key is the body as sent, `properties` included.
+    const asked = JSON.stringify(raw)
+    const [spoolBody, properties] = split(raw.spool)
+    if (raw.spool !== undefined) raw.spool = spoolBody
+    const propertiesRefused = rowPropertiesRefusal(request, `spool:${UNMADE}`, properties, true)
+    if (propertiesRefused) return propertiesRefused
     const presetKeys = ['printer_model', 'nozzle_diameter', 'slicer_filament', 'slicer_filament_name']
     const extra =
       extraKeys(raw, ['spool', 'quantity', 'location_id', 'presets', 'k_values', 'copy_of', 'continued_from']) ??
@@ -2343,7 +2439,7 @@ export const handlers = [
     const quantity = body.quantity ?? 1
     if (!Number.isInteger(quantity) || quantity < 1 || quantity > 100) return problem(422, 'quantity: Input should be between 1 and 100')
     if (body.continued_from && quantity !== 1) return problem(422, 'body: Value error, only one spool continues a respooled one')
-    return keyed(request, JSON.stringify(raw), () => {
+    return keyed(request, asked, () => {
       const place = body.location_id ? state.locations.find((one) => one.id === body.location_id && !one.archived_at) : null
       if (body.location_id && !place) return problem(422, REFUSED.moveTarget)
       if (place && place.tray_id != null) return problem(422, REFUSED.trayPlace)
@@ -2353,6 +2449,10 @@ export const handlers = [
       const source = body.continued_from ? findSpool(body.continued_from) : null
       if (body.continued_from && !source) return problem(422, 'copy_of names no spool')
       if (source && !source.archived_at) return problem(422, 'continued_from names a spool that is not archived', { code: 'continued_from_not_archived' })
+      // #7909: one continuation per source, while the spool it names still exists.
+      const sourceClosing = source ? state.events.filter((event) => event.spool_id === source.id && event.kind === 'archived').sort(byTime).at(-1) : undefined
+      const continuedAs = sourceClosing?.data?.continued_as
+      if (typeof continuedAs === 'string' && findSpool(continuedAs)) return problem(422, 'continued_from names a spool another spool already continues', { code: 'continued_from_taken' })
       const carried = state.spoolPresets.filter((one) => body.copy_of && one.spool_id === body.copy_of && one.migrated)
       const presets = (body.presets ?? []).map((row) => ({
         ...row,
@@ -2369,6 +2469,7 @@ export const handlers = [
       }
       for (const row of made) {
         state.spools.push(row)
+        saveRowProperties(`spool:${row.id}`, properties)
         addEvent(row.id, 'created', { source: row.grams_left != null ? 'person' : null, grams_after: row.grams_left, data: source ? { continued_from: source.id } : {} })
         if (source) {
           const closing = state.events.filter((event) => event.spool_id === source.id && event.kind === 'archived').sort(byTime).at(-1)
@@ -2488,7 +2589,8 @@ export const handlers = [
   http.patch(`${BASE}/spools/:id`, async ({ params, request }) => {
     const at = state.spools.findIndex((row) => row.id === params.id)
     if (at < 0) return problem(404, `no spool ${String(params.id)}`)
-    const body = (await request.json()) as Record<string, unknown>
+    const sent = (await request.json()) as Record<string, unknown>
+    const [body, properties] = split(sent)
     const extra = extraKeys(body, PATCH_FIELDS.spool)
     if (extra) return extra
     const clear = cleared(body, ['weight_locked'])
@@ -2496,8 +2598,9 @@ export const handlers = [
     const { archived, ...fields } = normalised(body)
     const current = state.spools[at]!
     const next = { ...current, ...(fields as Partial<SpoolRow>) }
-    const refused = spoolRefusal(next)
+    const refused = spoolRefusal(next) ?? rowPropertiesRefusal(request, `spool:${current.id}`, properties, checksSave(sent))
     if (refused) return refused
+    saveRowProperties(`spool:${current.id}`, properties)
     const changes = Object.fromEntries(
       Object.keys(fields)
         .filter((field) => current[field as keyof SpoolRow] !== next[field as keyof SpoolRow])
@@ -2558,11 +2661,11 @@ export const handlers = [
     const grams = query.get('final_grams') == null ? null : Number(query.get('final_grams'))
     const insert = state.catalogs['insert-types'].find((one) => one.id === view(row).effective?.insert_type_id)
     // `_final_filament`: a reading that cannot be resolved closes on nothing, not on the ledger.
-    const finalFilament = grams ?? (readingG != null && insert && readingG >= insert.empty_weight_g ? readingG - insert.empty_weight_g : null)
+    const finalFilament = grams != null ? (readingG != null && readingG < grams ? null : grams) : readingG != null && insert && readingG >= insert.empty_weight_g ? readingG - insert.empty_weight_g : null
     const weighed = readingG != null || grams != null
     const events = state.events.filter((event) => event.spool_id === row.id)
     const closing = closingOf(events, row, (reason as ArchiveReason | null) ?? null, finalFilament, weighed ? null : row.grams_left)
-    const notices = [...readingNotice(grams != null ? null : readingG, insert?.empty_weight_g ?? null), ...closingNotices((reason as ArchiveReason | null) ?? null, closing.final_filament_g ?? null)]
+    const notices = [...readingNotice(readingG, grams, insert?.empty_weight_g ?? null), ...closingNotices((reason as ArchiveReason | null) ?? null, closing.final_filament_g ?? null)]
     return HttpResponse.json({ closing, final_filament_g: closing.final_filament_g ?? null, empty_g: insert?.empty_weight_g ?? null, notices } satisfies S['ClosingPreview'])
   }),
   http.post(`${BASE}/spools/:id/tags`, async ({ params, request }) => {

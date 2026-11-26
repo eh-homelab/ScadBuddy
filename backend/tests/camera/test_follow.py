@@ -245,3 +245,85 @@ async def test_follower_without_resync_first_does_not_resync() -> None:
     await asyncio.sleep(0.05)
     task.cancel()
     assert resyncs == []
+
+
+async def test_a_reconnect_change_calls_on_reconnect() -> None:
+    hold = asyncio.Event()
+    body = [
+        frame("ready", {"resync": False, "reconnect": False}, "5"),
+        change("camera.reconnect", "p3", "6"),
+        change("printer.changed", "p4", "7"),
+    ]
+    changes: list[str] = []
+    reconnects: list[str] = []
+
+    async def on_reconnect(printer_id: str) -> None:
+        reconnects.append(printer_id)
+
+    task = asyncio.create_task(
+        follower(lambda request: sse(body, hold), changes, [], on_reconnect=on_reconnect).run()
+    )
+    await until(lambda: changes)
+    task.cancel()
+    assert reconnects == ["p3"]
+    assert changes == ["p4"]
+
+
+async def test_a_reconnect_without_a_handler_is_a_change() -> None:
+    hold = asyncio.Event()
+    body = [
+        frame("ready", {"resync": False, "reconnect": False}, "5"),
+        change("camera.reconnect", "p3", "6"),
+    ]
+    changes: list[str] = []
+    task = asyncio.create_task(follower(lambda request: sse(body, hold), changes, []).run())
+    await until(lambda: changes)
+    task.cancel()
+    assert changes == ["p3"]
+
+
+async def test_a_failed_reconnect_resyncs_at_the_next_ready() -> None:
+    bodies = [
+        [change("camera.reconnect", "p3", "6")],
+        [frame("ready", {"resync": False, "reconnect": False}, "7")],
+    ]
+    resyncs: list[int] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return sse(bodies.pop(0) if len(bodies) > 1 else bodies[0], asyncio.Event())
+
+    async def on_reconnect(printer_id: str) -> None:
+        raise RuntimeError("boom")
+
+    task = asyncio.create_task(follower(handler, [], resyncs, on_reconnect=on_reconnect).run())
+    await until(lambda: resyncs)
+    task.cancel()
+    assert resyncs == [1]
+
+
+async def test_a_reconnect_event_through_keep_camera_reaches_on_reconnect() -> None:
+    from scadbuddy.agent_changes.hub import Change
+    from scadbuddy.api.crud_camera import keep_camera
+    from scadbuddy.core.events import PG_CHANNEL, CameraReconnectEvent
+
+    event = CameraReconnectEvent(printer_id="p9")
+    payload = event.model_dump_json()
+    assert keep_camera(Change(PG_CHANNEL, payload))
+    # What the stream sends is the change's payload as the frame's ``p``.
+    body = [
+        frame("ready", {"resync": False, "reconnect": False}, "5"),
+        frame("change", {"c": PG_CHANNEL, "p": payload}, "6"),
+    ]
+    reconnects: list[str] = []
+
+    async def on_reconnect(printer_id: str) -> None:
+        reconnects.append(printer_id)
+
+    task = asyncio.create_task(
+        follower(
+            lambda request: sse(body, asyncio.Event()), [], [], on_reconnect=on_reconnect
+        ).run()
+    )
+    await until(lambda: reconnects)
+    task.cancel()
+    assert reconnects == ["p9"]

@@ -229,8 +229,9 @@ record, and says when the numbers disagree with the reason: a finished spool wit
 than the setting `filament_weighing_finished_left_g` (5 g by default) still on it ("30 g of
 filament are still on it."), or any other reason at or under it ("It reads empty; is it
 finished?"), and what the archive would refuse: a reading with no empty weight known
-(`no_empty_weight`) or under it (`reading_below_empty`). The person can go on; nothing
-refuses. `POST /filament/spools/{id}/archive`
+(`no_empty_weight`), under it (`reading_below_empty`) or under the `final_grams` sent with
+it (`reading_below_grams`, #7909); such a reading closes on nothing. The person can go on;
+nothing refuses. `POST /filament/spools/{id}/archive`
 takes `reason`, `final_reading_g` and `final_grams`: a final weighing is booked as a
 `weighed` event just before the `archived` event, by the same rules as any weighing
 (422 `no_empty_weight`, `reading_below_empty`; a restore takes neither).
@@ -248,11 +249,47 @@ the reason on the archive.
 
 Respooled offers "Archive and continue as a new spool": the copy flow opens with the final
 filament as the new spool's grams and "Added full: No", and the save sends `continued_from`
-with `copy_of`. The source must be archived (422 `continued_from_not_archived`) and the
+with `copy_of`. The source must be archived (422 `continued_from_not_archived`) and not
+yet continued by a spool that still exists (422 `continued_from_taken`, #7909), and the
 request makes one spool. The new spool's `created` event keeps `continued_from`, the source's
-newest `archived` event gets `continued_as`, and the timeline links the two ends. The agent's
+newest `archived` event gets `continued_as`, and the timeline links the two ends. A spool
+archived before #7684 has no closing: its page shows none (#7909). The agent's
 `filament_spool_archive` takes the reason and the final reading, `filament_spool_closing` (a
 read) previews the closing and its notices, and `filament_spool_upsert` takes `continued_from`. Design: the same spec, §5.4 and §5.5.
+
+### Length and the density check (#7685)
+
+A LAN print books its filament length beside its grams: the sliced plate's `used_m` per
+filament (Bambu Studio writes it beside `used_g` in `Metadata/slice_info.config`; measured on
+`backend/tests/printers/fixtures/rack-slice-info-h2c.config`) is read by
+`slicing/slice_info.py` `plate_uses` with the grams, rides in `LanUploaded.length_by_slot`
+and `SlotUse.length_m`, and is kept as `data.length_m` on the `print_started` event (absent
+when the plate gave the slot no length) and copied onto its `print_ended` (`0.0` on a failed
+plate, as its grams are 0). Bambuddy's usage rows have no length and keep none, so a plate
+Bambuddy also booked (the paired plate counts once, as the BB row) takes the length of
+ScadBuddy's own end of the job. The spool's
+history (`GET /filament/spools/{id}/history`) sums the metres of the plates that carry a
+length over 0 m (`metrics.used_m`, null when none does: a spool whose lengthed plates all
+failed has no metres, not 0 m), derives the density those plates' grams and metres
+imply over the spool's effective diameter (`implied_density_g_cm3`; 1 m of 1.75 mm filament
+at 1.24 g/cm³ is 2.98 g) and compares it with the type's (`density_g_cm3`): apart by more
+than 5 % is `density_mismatch`. For a plate ScadBuddy alone booked, both numbers are the
+slicer's, so the implied density is the slicer preset's density read back, not a
+measurement: a mismatch means the preset and the type disagree about the filament. For a
+plate Bambuddy also booked, the grams are Bambuddy's usage row's over the slicer's metres,
+summed over the job's ends on the spool (one spool can feed several slots of a job). The spool page's Used tile adds the metres ("3 prints, 40 g
+each, 11.7 m"), a Density tile shows the implied value with "The type says 1.24 g/cm³" or
+the mismatch sentence ("The prints imply 1.31 g/cm³, 6% over the type's 1.24 g/cm³: check
+the type's density or the label."), and the timeline shows a print's metres beside its grams
+("−35 g, 11.7 m, measured"). A mismatch is a sentence, never a booking. The Weight section's
+drift sentence then names a likely cause when one fits, read against the anchor the weighing
+was compared with (the newest anchor before it), the first of: the starting amount (an
+added-full spool anchored on a pull's figure whose drift is that figure's gap to the label:
+the scale found the label weight), the type's density (the drift is what the slicer's grams
+since that anchor over-counted at its preset's density, with a mismatch), or a placeholder
+empty weight, for any drift, since the real empty weight is unknown ("Likely cause: the
+spool's empty weight is a placeholder."). Nothing under a gram of drift, and nothing with
+no fit; every cause waits for the history to load. Design: the same spec, §5.6.
 
 ### The phone page, the hand-held Scan mode (#7273)
 
@@ -313,7 +350,16 @@ matches `[a-z][a-z0-9_]{0,63}`. Limits: 200 keys per entity, 2000 characters per
   `missing_properties` and `invalid_properties` (keys only); an archived row is never
   marked. `PATCH /entities/{ref}/properties` refuses removing or emptying a required key
   that has a value (`backend/scadbuddy/entities/required.py`). Items and item kinds follow
-  once the base-kind design settles; the UI follows in its own change.
+  once the base-kind design settles.
+- In the UI, a kind's key table has a Required column for those kinds. Ticking it shows how
+  many live rows lack the key. The spool, type and catalog forms show the defined keys as
+  fields, required ones first and marked. A refused save marks each missing or ill-fitting
+  field and says "Fill the required properties first". The Spools, Types and catalog lists
+  mark an incomplete row and filter to them ("Incomplete"). "Create type from this spool",
+  the price book's "Make a type" and a new tag's "Create a spool from this tag" ask for the
+  required keys before they make the row. "Reset to type", the bulk bar's type and linking
+  a type to a price book row use the unchecked routes, so they work on an incomplete row
+  (`frontend/src/components/entities/DefinedFields.tsx`, `RequiredKeysDialog.tsx`).
 - `item` is the exception (#7067). An item's properties follow its item kind's
   `attribute_schema`, merged down the kind tree (a child kind's key wins;
   `backend/scadbuddy/inventory/kinds.py` `item_schema`). An item kind's schema is set on the
@@ -365,6 +411,8 @@ matches `[a-z][a-z0-9_]{0,63}`. Limits: 200 keys per entity, 2000 characters per
 - Core: `backend/scadbuddy/filament/`:
   - the SB spools a print reads: `inventory.py` (`read_sb_spools` at `:957`, `reconcile_trays` at `:453`);
   - `capture.py`, `ledger.py`, `catalog.py`, `types.py`, `locations.py`, `sensors.py`, `invoices.py`, `labels.py`;
+  - a LAN print's grams and metres: `print_uses.py`, `prints.py`, read from the sliced plate by `backend/scadbuddy/slicing/slice_info.py` `plate_uses`;
+  - the history and its metrics: `metrics.py` (`implied_density`), `metrics_store.py`; the drift's likely cause: `frontend/src/components/filament/driftCause.ts`;
   - `backend/scadbuddy/codes/` (code parsing and resolving);
   - `bb_sync_*.py` and `bambuddy_pull.py`;
   - `profile_fetch.py`, `sb_presets.py` (ScadBuddy's presets) and

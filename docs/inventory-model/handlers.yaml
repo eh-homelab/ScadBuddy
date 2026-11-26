@@ -1,0 +1,320 @@
+# The handler catalog (design: docs/superpowers/specs/2026-11-25-inventory-kinds-and-handlers-design.md).
+#
+# A step is one thing the base flow does to stock. A handler fills one step for the kinds
+# it applies to. No step's behaviour is written into the base flow: the base flow only
+# looks up the handler and calls it. `refuse` fills a step that does not apply: the call is
+# refused with the problem `step_not_applicable`.
+#
+# `params` is the handler's parameter schema: each key names its type and whether it is
+# required. A kind, an item or a unit sets the values (§4.3 of the design).
+
+steps:
+  receive: Make stock from an invoice line or by hand (a lot, units, or a service term).
+  consume: Book one use against a print, an order, a job or another unit.
+  count: Set or measure what is left (a stock count, a remaining count, a weighing).
+  move: Change where a lot or a unit is.
+  retire: End a lot or a unit (used up, scrapped, sold, lost, respooled, term ended).
+  cost: Give a lot or a unit its cost, and the cost of one use at the time of the use.
+  life: Give a unit its used share, its book value and its end-of-life signals.
+  bill: Give a service its charge for one use or for its term.
+  label: Say what a printed label and a scanned code show.
+  sync: Exchange stock with an outside system.
+
+handlers:
+  # --- shared ---------------------------------------------------------------------------
+  - id: refuse
+    steps: [receive, consume, count, move, retire, cost, life, bill, label, sync]
+    applies: {}
+    does: Refuses the call with `step_not_applicable`. It fills a step a class does not have.
+
+  # --- receive ----------------------------------------------------------------------------
+  - id: receive.lot
+    steps: [receive]
+    applies: {nature: physical, counting: lot}
+    does: >-
+      Writes one lot of `received` quantity (packs × pack size, in the kind's uom) and one
+      `receive` move. The line's price is spread over everything received.
+  - id: receive.units
+    steps: [receive]
+    applies: {nature: physical, counting: unit}
+    does: Writes one unit per received piece, each with its share of the line's price.
+  - id: receive.service_term
+    steps: [receive]
+    applies: {nature: service, billing: term}
+    does: >-
+      Writes one service instance (a unit) with `starts_at` and `ends_at`. Its `covers`
+      relation names what it covers.
+    params:
+      term_months: {type: integer, required: true}
+
+  # --- consume ----------------------------------------------------------------------------
+  - id: consume.lot_fifo
+    steps: [consume]
+    applies: {nature: physical, counting: lot}
+    does: Takes the quantity from the oldest lots first and writes `use` moves.
+  - id: consume.remaining
+    steps: [consume]
+    applies: {nature: physical, role: consumable, counting: unit}
+    does: Lowers one unit's remaining count (labels left on a roll) and writes a `use` move.
+  - id: consume.use
+    steps: [consume]
+    applies: {nature: physical, role: durable}
+    does: >-
+      Records one use of a durable unit (a print on a plate, a job with a drill). It moves
+      no stock. The unit's life handler reads the uses.
+  - id: consume.service
+    steps: [consume]
+    applies: {nature: service}
+    does: >-
+      Records one use of a service against an order item or a unit. Fulfilling an order item
+      that names a service item writes it. The bill handler gives its cost and sell sides.
+
+  # --- count ------------------------------------------------------------------------------
+  - id: count.lot
+    steps: [count]
+    applies: {nature: physical, counting: lot}
+    does: Sets a lot's on-hand from a stock count and writes an `adjust` move for the difference.
+  - id: count.remaining
+    steps: [count]
+    applies: {nature: physical, role: consumable, counting: unit}
+    does: Sets one unit's remaining count from a count by a person.
+    params:
+      capacity: {type: number, required: true}
+
+  # --- move -------------------------------------------------------------------------------
+  - id: move.place
+    steps: [move]
+    applies: {nature: physical}
+    does: >-
+      Changes the place of a lot or a unit. It writes no stock move: a place change moves
+      no quantity, and `on_hand` is the sum of the moves (phase 2 `inventory/stock.py`
+      `update_lot`).
+
+  # --- retire -----------------------------------------------------------------------------
+  - id: retire.default
+    steps: [retire]
+    applies: {nature: physical}
+    does: >-
+      Ends a lot or a unit with a reason (`used_up`, `scrapped`, `sold`, `lost`) and writes
+      the matching move. A unit installed in another is removed first.
+  - id: retire.term_end
+    steps: [retire]
+    applies: {nature: service, billing: term}
+    does: Ends a service instance at `ends_at`, or early with a reason (`cancelled`).
+
+  # --- cost -------------------------------------------------------------------------------
+  - id: cost.lot_fifo
+    steps: [cost]
+    applies: {nature: physical, counting: lot}
+    does: A use costs its lots' unit costs, oldest first, as a snapshot at the time of use.
+  - id: cost.unit
+    steps: [cost]
+    applies: {counting: unit}
+    does: >-
+      A unit costs its share of the invoice line. A use of a consumable unit costs its
+      share of the unit cost. A durable unit's cost reaches a job only through its life
+      handler (book value) or a container's rate.
+  - id: cost.bill
+    steps: [cost]
+    applies: {nature: service}
+    does: A use of a service costs the cost side of its bill handler (never the sell side).
+
+  # --- life -------------------------------------------------------------------------------
+  - id: life.none
+    steps: [life]
+    applies: {}
+    does: The unit has no life. Its book value is its cost until it is retired.
+  - id: life.months
+    steps: [life]
+    applies: {nature: physical, role: durable}
+    does: Book value falls in a straight line from cost to salvage over `months` from in service.
+    params:
+      months: {type: integer, required: true}
+      salvage_pct: {type: number, required: false}
+  - id: life.hours
+    steps: [life]
+    applies: {nature: physical, role: durable}
+    does: >-
+      Book value falls with hours in service. It sums the unit's own `unit_uses` rows up to
+      the time asked. `source` says which rows count: `container_run_hours`, the hours
+      booked on this unit through whatever container held it at the time (so a nozzle
+      moved from one printer to another keeps every hour it ran in each); `own_run_hours`,
+      the unit's own running (a printer); `manual`, hours a person enters.
+    params:
+      hours: {type: number, required: true}
+      source: {type: string, required: true, enum: [container_run_hours, own_run_hours, manual]}
+      warn_pct: {type: number, required: false}
+  - id: life.uses
+    steps: [life]
+    applies: {nature: physical, role: durable}
+    does: Book value falls with the count of uses (prints on a plate). It warns at `warn_pct`.
+    params:
+      uses: {type: integer, required: true}
+      warn_pct: {type: number, required: false}
+  - id: life.term
+    steps: [life]
+    applies: {nature: service, billing: term}
+    does: >-
+      The prepaid value falls in a straight line from `starts_at` to `ends_at`. It warns
+      `warn_days` before the end.
+    params:
+      warn_days: {type: integer, required: false}
+
+  # --- bill -------------------------------------------------------------------------------
+  # A bill has two sides (owner, 2026-11-25): the cost to the shop, which job cost takes,
+  # and the sell price, which a quote defaults to. Either side may be left out.
+  - id: bill.hourly
+    steps: [bill]
+    applies: {nature: service, billing: hourly}
+    does: >-
+      Hours, rounded up to `increment_minutes` and at least `minimum_minutes`, times
+      `cost_rate_minor` (the cost) and times `sell_rate_minor` (the sell price). The
+      rounding is the same for both sides.
+    params:
+      cost_rate_minor: {type: integer, required: false}
+      sell_rate_minor: {type: integer, required: false}
+      increment_minutes: {type: integer, required: false}
+      minimum_minutes: {type: integer, required: false}
+  - id: bill.flat
+    steps: [bill]
+    applies: {nature: service, billing: flat}
+    does: One use costs `cost_minor` and sells for `sell_minor`.
+    params:
+      cost_minor: {type: integer, required: false}
+      sell_minor: {type: integer, required: false}
+  - id: bill.term
+    steps: [bill]
+    applies: {nature: service, billing: term}
+    does: >-
+      The cost is the price paid for the term (its invoice line); a use within the term
+      costs nothing more. `sell_minor` is the price when the shop sells the term on.
+    params:
+      sell_minor: {type: integer, required: false}
+
+  # --- label ------------------------------------------------------------------------------
+  - id: label.default
+    steps: [label]
+    applies: {}
+    does: Prints the code, the QR and the `fields` named (property keys, number, place, note, added).
+    params:
+      fields: {type: list, required: false}
+      enabled: {type: boolean, required: false}
+
+  # --- sync -------------------------------------------------------------------------------
+  - id: sync.none
+    steps: [sync]
+    applies: {}
+    does: No outside system.
+
+  # --- special type: filament_spool (ports backend/scadbuddy/filament/) --------------------
+  - id: filament.receive
+    steps: [receive]
+    applies: {special: filament_spool}
+    does: >-
+      receive.units, then the spool row per unit (label grams, insert, type), in the same
+      transaction (spools.py, invoices.py confirm).
+  - id: filament.consume_grams
+    steps: [consume]
+    applies: {special: filament_spool}
+    does: Books grams from a print or Bambuddy usage on the spool ledger (ledger.py, print_uses.py, bambuddy_usage.py).
+  - id: filament.weigh
+    steps: [count]
+    applies: {special: filament_spool}
+    does: A weighing on a scale or by a person, with its drift (empty_weight.py, insert_weights.py, #7681).
+  - id: filament.move
+    steps: [move]
+    applies: {special: filament_spool}
+    does: move.place, plus AMS trays and AMS capture (capture.py, locations.py).
+  - id: filament.close
+    steps: [retire]
+    applies: {special: filament_spool}
+    does: >-
+      The closing weighing with a reason (`finished`, `respooled`, `damaged`, #7684). A
+      respooled spool continues as a new unit with a `continues_from` relation.
+  - id: filament.cost_per_kg
+    steps: [cost]
+    applies: {special: filament_spool}
+    does: A use costs its grams × the spool's per-kg cost at the time of use (cost_calc.py, `cost_per_kg_at`).
+  - id: filament.label
+    steps: [label]
+    applies: {special: filament_spool}
+    does: The spool label and its templates (labels.py, label_templates.py, label_pdf.py).
+  - id: filament.bambuddy_sync
+    steps: [sync]
+    applies: {special: filament_spool}
+    does: The Bambuddy spool sync (bb_sync_*.py, bambuddy_pull.py).
+
+  # --- special type: printer (ports backend/scadbuddy/printers/, phase 4) -----------------
+  - id: printer.receive
+    steps: [receive]
+    applies: {special: printer}
+    does: receive.units, then links or makes the `printers` row (bambuddy_sync.py, lan_link.py).
+  - id: printer.consume_run
+    steps: [consume]
+    applies: {special: printer}
+    does: >-
+      A print run that ends books its run hours on the printer and one use on every unit
+      the printer `contains` (run_hours.py, progress.py). Each unit's own life handler reads it.
+  - id: printer.machine_rate
+    steps: [cost]
+    applies: {special: printer}
+    does: >-
+      The machine rate for job cost: the printer's life (cost over its hours) plus the life
+      of every unit it contains, per hour. An installed unit reaches job cost only here.
+  - id: printer.bambuddy_link
+    steps: [sync]
+    applies: {special: printer}
+    does: Keeps the unit linked to its Bambuddy or LAN printer (printers/bambuddy_sync.py).
+
+# The defaults per class. A kind's class picks one column; a special type or a kind may
+# name another handler for any step.
+defaults:
+  consumable_lot:
+    match: {nature: physical, role: consumable, counting: lot}
+    handlers: {receive: receive.lot, consume: consume.lot_fifo, count: count.lot, move: move.place,
+               retire: retire.default, cost: cost.lot_fifo, life: life.none, bill: refuse,
+               label: label.default, sync: sync.none}
+  consumable_unit:
+    match: {nature: physical, role: consumable, counting: unit}
+    handlers: {receive: receive.units, consume: consume.remaining, count: count.remaining, move: move.place,
+               retire: retire.default, cost: cost.unit, life: life.none, bill: refuse,
+               label: label.default, sync: sync.none}
+  durable_unit:
+    match: {nature: physical, role: durable, counting: unit}
+    handlers: {receive: receive.units, consume: consume.use, count: refuse, move: move.place,
+               retire: retire.default, cost: cost.unit, life: life.none, bill: refuse,
+               label: label.default, sync: sync.none}
+  service_term:
+    match: {nature: service, billing: term}
+    handlers: {receive: receive.service_term, consume: consume.service, count: refuse, move: refuse,
+               retire: retire.term_end, cost: cost.bill, life: life.term, bill: bill.term,
+               label: label.default, sync: sync.none}
+  service_hourly:
+    match: {nature: service, billing: hourly}
+    handlers: {receive: refuse, consume: consume.service, count: refuse, move: refuse,
+               retire: refuse, cost: cost.bill, life: refuse, bill: bill.hourly,
+               label: refuse, sync: sync.none}
+  service_flat:
+    match: {nature: service, billing: flat}
+    handlers: {receive: refuse, consume: consume.service, count: refuse, move: refuse,
+               retire: refuse, cost: cost.bill, life: refuse, bill: bill.flat,
+               label: refuse, sync: sync.none}
+
+# A special type is a named set of handlers that replace the defaults for its steps. It
+# names the class it needs, the properties it requires, its UI panels and its agent tools.
+special_types:
+  filament_spool:
+    needs: {nature: physical, role: consumable, counting: unit}
+    handlers: {receive: filament.receive, consume: filament.consume_grams, count: filament.weigh,
+               move: filament.move, retire: filament.close, cost: filament.cost_per_kg,
+               label: filament.label, sync: filament.bambuddy_sync}
+    requires_properties: [rgba, diameter_mm]
+    panels: [spool_grams, spool_trays, spool_tags, spool_presets, spool_k_values, spool_weighing]
+    tools: [filament_spool_*, filament_type_*]
+  printer:
+    needs: {nature: physical, role: durable, counting: unit}
+    handlers: {receive: printer.receive, consume: printer.consume_run, cost: printer.machine_rate,
+               sync: printer.bambuddy_link}
+    requires_properties: [model_code]
+    panels: [printer_status, printer_camera, printer_queue, printer_installed]
+    tools: [get_printer, list_printers]

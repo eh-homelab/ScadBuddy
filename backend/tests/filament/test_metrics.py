@@ -8,6 +8,8 @@ from decimal import Decimal
 from typing import Any
 from uuid import UUID, uuid4
 
+import pytest
+
 from scadbuddy.filament import metrics
 from scadbuddy.filament.metrics_models import AmsError, Plate
 from scadbuddy.filament.models import SpoolEvent
@@ -57,7 +59,12 @@ def sb_start(at: datetime, grams: float, job: str) -> SpoolEvent:
     )
 
 
-def sb_end(at: datetime, grams: float, job: str, basis: str = "sliced") -> SpoolEvent:
+def sb_end(
+    at: datetime, grams: float, job: str, basis: str = "sliced", length_m: float | None = None
+) -> SpoolEvent:
+    data: dict[str, Any] = {"job": job, "basis": basis}
+    if length_m is not None:
+        data["length_m"] = length_m
     return event(
         at,
         "print_ended",
@@ -65,7 +72,7 @@ def sb_end(at: datetime, grams: float, job: str, basis: str = "sliced") -> Spool
         delta_g=-grams,
         ref_kind="print_run",
         ref_id=f"run/{job}/1",
-        data={"job": job, "basis": basis},
+        data=data,
     )
 
 
@@ -304,6 +311,8 @@ def _metrics(events: list[SpoolEvent], **over: Any) -> Any:
         "label_weight_g": 1000,
         "window_days": 30,
         "now": NOW,
+        "diameter_mm": 1.75,
+        "density_g_cm3": 1.24,
     }
     return metrics.spool_metrics(events, **(values | over))
 
@@ -359,3 +368,99 @@ def test_a_consumed_reset_counts_only_the_plates_after_the_newest() -> None:
     found = _metrics(events)
     assert (found.consumed_g, found.consumed_since) == (10.0, newest.at)
     assert found.used_g == 75.0
+
+
+# -- length and density (#7685, spec §5.6) ---------------------------------------------
+
+
+def test_plates_carry_their_length() -> None:
+    found = metrics.plates([sb_end(days(1), 2.98, "a", length_m=1.0), sb_end(days(2), 5, "b")])
+    assert [p.length_m for p in found] == [None, 1.0]
+    assert metrics.plates([bb_end(days(1), 3, "c")])[0].length_m is None
+
+
+def test_implied_density_of_a_metre_of_pla() -> None:
+    """1 m of 1.75 mm filament at 1.24 g/cm³ is 2.98 g (spec §5.6)."""
+    assert metrics.implied_density(2.98, 1.0, 1.75) == pytest.approx(1.239, abs=0.001)
+
+
+def test_the_density_uses_the_spools_diameter() -> None:
+    assert metrics.implied_density(7.9, 1.0, 2.85) == pytest.approx(1.239, abs=0.001)
+
+
+def test_zero_metres_give_no_density() -> None:
+    assert metrics.implied_density(5.0, 0.0, 1.75) is None
+    assert metrics.implied_density(0.0, 1.0, 1.75) is None
+    assert metrics.implied_density(5.0, -1.0, 1.75) is None
+
+
+def test_metrics_sum_the_metres_of_the_plates_that_have_one() -> None:
+    """The density is over the grams and metres of the plates with a length only; a
+    plate from before the slice counts in ``used_g`` and nowhere else."""
+    events = [
+        sb_end(days(3), 2.98, "a", length_m=1.0),
+        sb_end(days(2), 5.96, "b", length_m=2.0),
+        sb_end(days(1), 10, "c"),
+    ]
+    found = _metrics(events)
+    assert found.used_g == pytest.approx(18.94)
+    assert found.used_m == 3.0
+    assert found.implied_density_g_cm3 == pytest.approx(1.239, abs=0.001)
+    assert found.density_g_cm3 == 1.24
+    assert found.density_mismatch is False
+
+
+def test_plates_with_no_length_give_no_metres() -> None:
+    found = _metrics([sb_end(days(1), 10, "a"), bb_end(days(2), 5, "b")])
+    assert found.used_m is None
+    assert found.implied_density_g_cm3 is None
+    assert found.density_g_cm3 == 1.24
+    assert found.density_mismatch is False
+    bare = _metrics([], density_g_cm3=None)
+    assert (bare.used_m, bare.implied_density_g_cm3, bare.density_g_cm3) == (None, None, None)
+
+
+def test_a_failed_plate_adds_no_metres() -> None:
+    events = [
+        sb_end(days(2), 2.98, "a", length_m=1.0),
+        sb_end(days(1), 0, "b", basis="not_applied", length_m=0.0),
+    ]
+    found = _metrics(events)
+    assert (found.used_m, found.prints) == (1.0, 2)
+    assert found.implied_density_g_cm3 == pytest.approx(1.239, abs=0.001)
+
+
+def test_a_paired_plate_takes_its_length_from_the_sb_end() -> None:
+    """Bambuddy's usage row carries no length, so a plate it also booked keeps the length
+    of ScadBuddy's own ``print_ended`` of the job (the review of #7865)."""
+    bb = bb_end(days(1), 28, "a")
+    events = [sb_start(days(1.1), 30, "a"), sb_end(days(1), 30, "a", length_m=9.4), bb]
+    (found,) = metrics.plates(events)
+    assert (found.grams, found.event_id, found.length_m) == (28.0, bb.id, 9.4)
+    assert metrics.plates([bb_end(days(1), 3, "c")])[0].length_m is None
+
+
+def test_a_paired_plate_sums_the_metres_of_its_slots() -> None:
+    """One spool fed two slots of the job, so ScadBuddy booked two ends; Bambuddy's one
+    row for the spool carries their grams, and the plate carries their metres summed."""
+    bb = bb_end(days(1), 20, "a")
+    ends = [sb_end(days(1), 10, "a", length_m=3.4), sb_end(days(1), 10, "a", length_m=3.4)]
+    (found,) = metrics.plates([*ends, bb])
+    assert (found.grams, found.event_id, found.length_m) == (20.0, bb.id, 6.8)
+    assert _metrics([*ends, bb]).used_m == 6.8
+
+
+def test_only_failed_plates_give_no_metres() -> None:
+    """A spool whose lengthed plates all failed (0 m) has no metres, not 0 m."""
+    found = _metrics([sb_end(days(1), 0, "b", basis="not_applied", length_m=0.0)])
+    assert (found.used_m, found.implied_density_g_cm3, found.prints) == (None, None, 1)
+
+
+def test_a_density_off_by_more_than_five_percent_is_a_mismatch() -> None:
+    off = _metrics([sb_end(days(1), 3.3, "a", length_m=1.0)])
+    assert off.implied_density_g_cm3 == pytest.approx(1.372, abs=0.001)
+    assert off.density_mismatch is True
+    close = _metrics([sb_end(days(1), 3.0, "a", length_m=1.0)])
+    assert close.density_mismatch is False
+    unknown = _metrics([sb_end(days(1), 3.3, "a", length_m=1.0)], density_g_cm3=None)
+    assert unknown.density_mismatch is False

@@ -3,6 +3,12 @@ import { describe, expect, it } from 'vitest'
 import { originPolicy } from '../src/http/origins.js'
 import type { SettingsRepo } from '../src/credentials.js'
 import {
+  DEFAULT_TOOL_IMAGE_INLINE_MAX,
+  MAX_TOOL_IMAGE_INLINE_MAX,
+  MIN_TOOL_IMAGE_INLINE_MAX,
+  SETTING_TOOL_IMAGE_INLINE_MAX,
+} from '../src/tools/imageLimits.js'
+import {
   DEFAULT_IMAGE_LONG_EDGE,
   IMAGE_SETTINGS_PATH,
   MAX_IMAGE_LONG_EDGE,
@@ -15,6 +21,11 @@ import {
 // attached image to before sending it, behind the same UI guards as every other
 // AI settings route (routes/guard.ts).
 
+const INLINE = {
+  tool_inline_max_bytes: DEFAULT_TOOL_IMAGE_INLINE_MAX,
+  tool_inline_min: MIN_TOOL_IMAGE_INLINE_MAX,
+  tool_inline_max: MAX_TOOL_IMAGE_INLINE_MAX,
+}
 const URL_ = `https://scadbuddy.example${IMAGE_SETTINGS_PATH}`
 const UI = { host: 'scadbuddy.example', origin: 'https://scadbuddy.example', 'x-forwarded-proto': 'https' }
 
@@ -51,14 +62,27 @@ describe('the image long-edge setting', () => {
     const { app, values, contexts } = setup()
     const before = await get(app)
     expect(before.status).toBe(200)
-    expect(await before.json()).toEqual({ long_edge: 1568, min: MIN_IMAGE_LONG_EDGE, max: MAX_IMAGE_LONG_EDGE })
+    expect(await before.json()).toEqual({ long_edge: 1568, min: MIN_IMAGE_LONG_EDGE, max: MAX_IMAGE_LONG_EDGE, ...INLINE })
     const saved = await put(app, { long_edge: 2000 })
     expect(saved.status).toBe(200)
-    expect(await saved.json()).toEqual({ long_edge: 2000, min: MIN_IMAGE_LONG_EDGE, max: MAX_IMAGE_LONG_EDGE })
+    expect(await saved.json()).toEqual({ long_edge: 2000, min: MIN_IMAGE_LONG_EDGE, max: MAX_IMAGE_LONG_EDGE, ...INLINE })
     // Audited as the UI user, from the request's address.
     expect(contexts[0]).toMatchObject({ surface: 'http', clientIp: '10.0.0.7' })
     expect(values.get(SETTING_IMAGE_LONG_EDGE)).toBe(2000)
     expect(((await (await get(app)).json()) as { long_edge: number }).long_edge).toBe(2000)
+  })
+
+  it("stores a tool image's inline limit apart, and leaves the long edge alone", async () => {
+    const { app, values } = setup()
+    const saved = await put(app, { tool_inline_max_bytes: 100_000 })
+    expect(saved.status).toBe(200)
+    expect(await saved.json()).toMatchObject({ long_edge: 1568, tool_inline_max_bytes: 100_000 })
+    expect(values.get(SETTING_TOOL_IMAGE_INLINE_MAX)).toBe(100_000)
+    expect(values.has(SETTING_IMAGE_LONG_EDGE)).toBe(false)
+    expect((await put(app, { tool_inline_max_bytes: MIN_TOOL_IMAGE_INLINE_MAX })).status).toBe(200)
+    expect((await put(app, { tool_inline_max_bytes: MAX_TOOL_IMAGE_INLINE_MAX })).status).toBe(200)
+    expect((await put(app, { tool_inline_max_bytes: MAX_TOOL_IMAGE_INLINE_MAX + 1 })).status).toBe(400)
+    expect((await put(app, { tool_inline_max_bytes: MIN_TOOL_IMAGE_INLINE_MAX - 1 })).status).toBe(400)
   })
 
   it('takes the bounds themselves', async () => {

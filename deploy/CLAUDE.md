@@ -19,9 +19,9 @@ These notes cover `deploy/`; paths are repo-relative; the root `CLAUDE.md` has t
   service emits (`lint-dashboard.sh` checks both, in every file); a span named at run
   time (a server span, `bambuddy.<op>`, Temporal's) is matched by attribute instead.
 
-- `deploy/camera/` — MediaMTX's configs for the printer camera relay and recorders (#7328):
-  `mediamtx-relay.yml` and `mediamtx-recorder.yml`, copied into the `camera-relay` and
-  `camera-recorder` images at `/etc/mediamtx/mediamtx.yml`. The real-MediaMTX e2e
+- `deploy/camera/` — MediaMTX's configs for the printer camera relay, recorders and live edge (#7328):
+  `mediamtx-relay.yml`, `mediamtx-recorder.yml` and `mediamtx-edge.yml` (#7330), copied into the
+  `camera-relay`, `camera-recorder` and `camera-edge` images at `/etc/mediamtx/mediamtx.yml`. The real-MediaMTX e2e
   (`backend/tests/camera/test_e2e_mediamtx.py`) runs them too. Their comments cite
   MediaMTX's docs and the measurements they rest on; a MediaMTX bump re-measures them (the
   camera spec §2).

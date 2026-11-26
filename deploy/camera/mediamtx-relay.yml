@@ -1,7 +1,7 @@
 # MediaMTX in the camera relay's pod (printer camera recording, phase 1). The relay process
 # (`backend/scadbuddy/camera/relay.py`) adds one path per printer through the control API,
-# which listens on localhost only. The recorders read those paths over RTSP on :8554 with
-# the one read user. Keys: https://raw.githubusercontent.com/bluenviron/mediamtx/main/mediamtx.yml
+# which listens on localhost only. The recorders and the live edge read those paths over RTSP
+# on :8554 with the one read user. Keys: https://raw.githubusercontent.com/bluenviron/mediamtx/main/mediamtx.yml
 #
 # The read user comes from the environment. MediaMTX reads no variables inside this file;
 # it overrides a key from `MTX_<KEY>`, and a list entry by its index
@@ -34,7 +34,7 @@ moq: no
 
 authMethod: internal
 authInternalUsers:
-  # Entry 0: the recorders' read user (see above).
+  # Entry 0: the read user of the recorders and the live edge (see above).
   - user: read-user-unset
     pass: sha256:Wbdt6Pfz3S83QDssMcx0gtQt06QotiJ7mTUszfkUehU=
     ips: []
