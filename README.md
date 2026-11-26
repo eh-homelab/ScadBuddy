@@ -1596,26 +1596,10 @@ workers restart.
 - **`local`** (the default): this server's volume. Renders then run only in-process
   (`SCADBUDDY_TEMPORAL_WORKER_INPROCESS`): a render worker Deployment holds no database
   and refuses to start on `local` (#5298 plan D11; "Render worker (#424)" above).
-- **`bambuddy`**: Bambuddy's library. Files go to `<Inbox folder>/<Template>/Work/`,
-  and ScadBuddy deletes only inside a `Work/` folder of the inbox folder Settings
-  names. Changing that folder leaves the previous one's `Work/` files for you to delete.
-  Any file in a ScadBuddy `Work/` folder that ScadBuddy did not upload, such as one
-  dropped there by hand, is deleted once it is older than `SCADBUDDY_JOB_TTL`
-  (a day while it is 0, which keeps renders forever): keep
-  your own files elsewhere.
-  The same goes for the Bambuddy URL: folders are recorded per instance, so pointing
-  ScadBuddy at another Bambuddy makes new folders there and never deletes by the old
-  instance's folder ids (#683). Respelling the same URL (host case, a default port, a
-  trailing slash) is the same instance; another host, scheme, port or path is not.
-  To switch:
-  1. Set Bambuddy's URL (Settings → *Connection*) and the **Inbox folder, for sends
-     without a project** (Settings → *Projects & files*), which is the store's inbox.
-  2. In Bambuddy, create a key with *Manage Library* only, and paste it into Settings as
-     **Render worker API key**.
-  3. Choose **Bambuddy library** under **Blob store**, and restart the API and the
-     workers.
+- **`bambuddy`**: can no longer be chosen. The API refuses to start on it since #7257;
+  see "Recovering an unready blob store" below.
 
-  The workers then need no shared volume:
+  On a multi-worker store (`s3`), the workers need no shared volume:
   - Give each one an `emptyDir` at `/data`. It holds the worker's piece cache (`blobs/`)
     and the snapshots, fonts, uploads and library checkouts it fetched.
   - Previews (the catalogue's default renders) render on the workers too, from the
@@ -1689,7 +1673,7 @@ workers restart.
 
   **Sweeps.** The API runs the store's sweep on its own `SCADBUDDY_ASSET_SWEEP_INTERVAL`.
   A piece or snapshot that no job references is deleted from the
-  store (on `bambuddy`, from Bambuddy's library) once nothing has used it for
+  store once nothing has used it for
   `SCADBUDDY_ASSET_SWEEP_GRACE` (a week by default). The API's own upload sweep uses the
   same grace.
 
@@ -1709,7 +1693,7 @@ workers restart.
 
 - **`s3`**: an S3-compatible object store, the second multi-worker backend (design:
   `docs/superpowers/specs/2026-10-16-own-store-slicer-rust-workers-design.md` §4). The
-  workers need no shared volume, exactly as for `bambuddy` above (an `emptyDir` at
+  workers need no shared volume, as described above (an `emptyDir` at
   `/data`, the same cache and sweep settings). Settings → **Blob store** takes seven
   values, each seeded by the `SCADBUDDY_<FIELD>` variable of the same name and applied
   at restart:

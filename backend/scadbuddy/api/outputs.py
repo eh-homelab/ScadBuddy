@@ -235,9 +235,9 @@ class EditTarget(BaseModel):
     params: dict[str, ParamValue] = Field(default_factory=dict)
     inputs: dict[str, Any] = Field(default_factory=dict)
     model_version: str | None = None
-    #: ``record``: read from the output's row. ``3mf`` (the 3MF alone, with no record)
-    #: is no longer answered since #7257, which reads no folder.
-    source: Literal["record", "3mf"]
+    #: Always ``record``: read from the output's row. ``3mf`` (the 3MF alone, with no
+    #: record) is gone since #7257, which reads no folder.
+    source: Literal["record"]
     #: An arranged output's sources (spec 2026-09-27 §7): it has no one template state
     #: to reopen, so the page says where its objects came from instead.
     arranged_from: list[str] = Field(default_factory=list)

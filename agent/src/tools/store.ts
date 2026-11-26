@@ -11,6 +11,7 @@ import { defineTool, json, type Tool } from './registry.js'
 
 // `bambuddy` is a source only: the API refuses a migration to it, and refuses to start on
 // it (#7257: the outputs live only in the blob store, which the bambuddy store cannot hold).
+// The status tool still takes it as a target, so a migration recorded before #7257 stays readable.
 const source = z.enum(['bambuddy', 's3'])
 const target = z.enum(['s3'])
 
@@ -49,7 +50,7 @@ export const storeTools: Tool[] = [
       "A store migration's progress: rows still to copy (`remaining`), `copied`, the ones whose copy " +
       'failed and why (`failed`, up to 200 of `failed_count`), and whether it `running`. Refused (404) when ' +
       'none ever ran for the pair.',
-    input: z.object({ source, target }),
+    input: z.object({ source, target: source }),
     risk: 'read',
     routes: ['GET /api/v1/store/migrate'],
     handler: async ({ source, target }, { backend }) =>

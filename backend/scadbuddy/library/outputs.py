@@ -1604,8 +1604,7 @@ def reap_orphan_holds(
     hold past ``grace`` whose output has no ``outputs`` row and no claim younger than
     ``grace`` (`_reap_rows_only`)."""
     with span("outputs.reap_orphan_holds") as current:
-        if store.rows is not None:
-            current.set_attribute("scadbuddy.claims_pruned", store.rows.prune_claims(grace))
+        current.set_attribute("scadbuddy.claims_pruned", store.rows.prune_claims(grace))
         current.set_attribute("scadbuddy.rows_only", True)
         released = _reap_rows_only(refs, grace)
         current.set_attribute("scadbuddy.released", released)
