@@ -368,9 +368,10 @@ Go owns stock; Python calls it.
   write takes an `Idempotency-Key`. The ledger is the existing `crud_requests`
   (`migrations/20261106T1836Z_crud_requests.sql`, `crud/idempotency.py`), kept 7 days for
   the caller `inventory` (24 hours for the others); a repeat returns the stored result.
-  The Python caller writes its own row first, then calls Go with a key derived from that
-  row (`order_item:<id>:parts:<version>`), and Temporal retries a failed call (§6.1a). A
-  caller that must undo its own row on a refusal does so in its own transaction.
+  The caller starts its workflow first, and the workflow's first activity writes the
+  caller's row (§6.1a "Nothing manual, no sweeps"); Go is called with a key derived from
+  that row (`order_item:<id>:parts:<n>`), and Temporal retries a failed call. A refusal
+  in the first activity rolls back, so nothing is left to undo.
 - In Go, a handler runs in the base flow's transaction: every table a handler writes is
   in the same database, written by `scadbuddy-core`.
 
@@ -386,9 +387,9 @@ gives us the visibility into the Activities tab in SB".
   GA, read 2026-11-25). Every stock write that crosses from Python to Go is one: the
   Python caller starts the Go activity by its type name (`inventory.Receive`,
   `inventory.Take`, `inventory.GiveBack`, `inventory.Recost`, `inventory.Repoint`, …) on
-  the task queue `inventory`. A public route waits for the result inline
-  (`client.execute_activity`); a background settle starts it and returns
-  (`client.start_activity`). Reads stay plain HTTP on the internal routes.
+  the task queue `inventory`. A public route starts it (`client.start_activity`) and
+  waits up to 15 s for the result, then answers 202 ("A slow write" below); a workflow
+  runs it as a step by the same type name. Reads stay plain HTTP on the internal routes.
 - **Go runs the activities.** `scadbuddy-core` gets a Temporal client and a worker for
   the `inventory` queue. Each activity runs the base flow in its own database
   transaction, so the activity is the Go code itself, with no second HTTP hop. The same
@@ -416,7 +417,8 @@ gives us the visibility into the Activities tab in SB".
   `inventory.Take`; a Python activity that records `parts.used`. Temporal retries each
   step until it succeeds. If the workflow does not finish in 15 s, fulfil answers 202
   ("stock still settling") and the order settles by itself when the workflow ends. If the start itself fails, the fulfil call answers an error
-  and the person retries; the fulfil is idempotent.
+  and nothing was written; a client that sends it again does its own idempotent retry,
+  not a repair.
 - **Merges.** An entity or printer merge is a workflow too: it first executes
   `inventory.Repoint` (move the stock rows from the old id to the kept one), then an
   activity runs the merge's own transaction and deletes the old row. Calling Go from inside the merge's locked transaction would make the two
@@ -425,10 +427,11 @@ gives us the visibility into the Activities tab in SB".
   repeats the first step. The foreign key protects only `stock_moves.entity_id`.
   `stock_units.printer_id` is `ON DELETE SET NULL`, so a delete would clear it, not
   fail. So the printer merge locks the gone printer's row `FOR UPDATE`, then checks
-  whether a stock row names it; if one does, it executes `inventory.Repoint` first. The
-  printer merge runs inside its callers' transactions (`printers/store.py` l.667, l.949),
-  so it rolls back, executes `inventory.Repoint` with no transaction open, and runs
-  again, at most 3 times (plan K1, R-K1-15, R-K1-25).
+  whether a stock row names it; if one does, it rolls back, and the workflow executes
+  `inventory.Repoint` again (with a new key per round) and runs the merge again. There is
+  no cap: only a stock write racing the merge repeats it, and the workflow ends only once
+  the merge has committed (owner, 2026-11-25; plan K1, R-K1-29). The callers that need the
+  kept row (`link_bambuddy`, `ensure_bambuddy_written`) wait on the workflow's result.
 - **Visibility.** It is not automatic; every feature writes its own record row and the
   activity record follows it. Renders, print runs and the backend's operations write an
   `activity` row in the same transaction as their own row (`ActivityIndex.upsert_in`, for
