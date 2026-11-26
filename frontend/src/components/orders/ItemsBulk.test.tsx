@@ -61,7 +61,7 @@ describe('ItemsBulk (#4955)', () => {
   // #5701 PR 5: a kit prints output by output from its details, never in the item's dialog.
   it('leaves a kit out of Print', () => {
     const model = (n: number, kit: string[]) =>
-      ({ ...approved(n), kind: 'model', reference: { slug: 'demo' }, output_id: kit[0] ?? 'o', kit_outputs: kit }) as unknown as OrderItemDetail
+      ({ ...approved(n), kind: 'model', reference: { slug: 'demo' }, output_id: kit[0] ?? 'o', kit_outputs: kit, kit_count: kit.length }) as unknown as OrderItemDetail
     const props = { order, shipments: [], unfulfilAllowed: true, busy: false, onWriting: () => undefined, onClear: () => undefined, onChanged: () => undefined }
     const { unmount } = render(<ItemsBulk {...props} selected={[model(1, ['a', 'b'])]} />)
     expect(screen.getByRole('button', { name: 'Print…' })).toBeDisabled()

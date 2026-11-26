@@ -104,5 +104,7 @@ sequenceDiagram
   them (`backend/scadbuddy/orders/storefront/pipeline_inputs.py`). A render of several
   outputs has one price over all of them. The order page prints each output on its own, and
   the shop records the item's attempt by hand: the item's own print refuses a kit
-  (`item_kit`, `backend/scadbuddy/orders/printing.py`;
+  (`item_kit`, `backend/scadbuddy/orders/printing.py`). When the order holds fewer outputs
+  than the render made, the page says to save the others from the model's recent renders
+  (`kit_count`, `backend/scadbuddy/api/orders.py`;
   [#5701](https://github.com/eh-homelab/ScadBuddy/issues/5701)).

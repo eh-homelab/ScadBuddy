@@ -1,6 +1,6 @@
-import { useMemo, useState } from 'react'
+import { useEffect, useMemo, useState } from 'react'
 import { api, ApiError } from '../../api/client'
-import type { Order, OrderItemDetail, PartSettingsMap, PrintRunRequest, Quote, Revision } from '../../api/types'
+import type { Order, OrderItemDetail, Output, PartSettingsMap, PrintRunRequest, Quote, Revision } from '../../api/types'
 import { orderItemSource } from '../../lib/printSource'
 import { PrintPicker } from '../PrintPicker'
 import { quoteToPrint } from './price'
@@ -89,27 +89,61 @@ export function PrintItem({ order, item, onChanged, testRevision }: { order: Ord
 /**
  * #5701 PR 5 — a kit's outputs, each printed on its own in the plain print dialog. The prints
  * record no attempt of the item, so the shop records it under Fulfilment once every output
- * is printed.
+ * is printed. Each output shows its name and colours when the store answers for it. When the
+ * render made more outputs than the order holds (`kit_count`), the page says to save the others
+ * from the model's recent renders first.
  */
 function KitPrints({ item, onChanged }: { item: OrderItemDetail; onChanged: () => void }) {
   const [printing, setPrinting] = useState<string | null>(null)
-  const outputs = item.kit_outputs ?? []
+  const [details, setDetails] = useState<Record<string, Output>>({})
+  const outputs = useMemo(() => item.kit_outputs ?? [], [item.kit_outputs])
+  const count = Math.max(item.kit_count ?? 0, outputs.length)
   const slug = item.reference?.slug
+  useEffect(() => {
+    let live = true
+    for (const id of outputs) {
+      api.getOutput(id).then(
+        (output) => live && setDetails((now) => ({ ...now, [id]: output })),
+        () => undefined,
+      )
+    }
+    return () => {
+      live = false
+    }
+  }, [outputs])
   if (!slug) return null
   return (
     <div className="space-y-2 text-[13px]">
       <p className="text-muted-foreground">
-        {`This item is a kit of ${outputs.length} outputs. Print each one, then record the attempt under Fulfilment.`}
+        {`This item is a kit of ${count} outputs. Print each one, then record the attempt under Fulfilment.`}
       </p>
+      {outputs.length < count && (
+        <p role="note" className="text-amber-700 dark:text-amber-400">
+          {`The order holds ${outputs.length} of them. Save the others from the model's recent renders, then print them too.`}
+        </p>
+      )}
       <ul aria-label="Outputs to print" className="divide-y rounded-md border">
-        {outputs.map((id, index) => (
-          <li key={id} className="flex items-center justify-between gap-2 px-2 py-1.5">
-            <span>{`Output ${index + 1}`}</span>
-            <Button type="button" size="sm" variant="outline" aria-label={`Print output ${index + 1} of ${outputs.length}`} onClick={() => setPrinting(id)}>
-              Print…
-            </Button>
-          </li>
-        ))}
+        {outputs.map((id, index) => {
+          const output = details[id]
+          const label = output?.name || `Output ${index + 1}`
+          return (
+            <li key={id} className="flex items-center justify-between gap-2 px-2 py-1.5">
+              <span className="flex min-w-0 items-center gap-2">
+                <span className="truncate">{label}</span>
+                {output?.colors && output.colors.length > 0 && (
+                  <span className="flex shrink-0 gap-0.5" aria-label={`Colours ${output.colors.join(', ')}`}>
+                    {output.colors.map((colour, at) => (
+                      <span key={`${colour}-${at}`} className="size-3 rounded-full border" style={{ backgroundColor: colour }} />
+                    ))}
+                  </span>
+                )}
+              </span>
+              <Button type="button" size="sm" variant="outline" aria-label={`Print output ${index + 1} of ${count}`} onClick={() => setPrinting(id)}>
+                Print…
+              </Button>
+            </li>
+          )
+        })}
       </ul>
       {printing && <PrintPicker open source={{ kind: 'output', output: { id: printing, slug } }} onClose={() => setPrinting(null)} onRan={onChanged} />}
     </div>
