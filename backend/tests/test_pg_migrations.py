@@ -1714,3 +1714,347 @@ def test_an_orphan_part_entity_raises(pg_conninfo: str) -> None:
         conn.rollback()
         assert conn.execute("SELECT count(*) FROM parts").fetchone() == (1,)
         assert conn.execute("SELECT to_regclass('part_item_map')").fetchone() == (None,)
+
+
+# -- the K1 class migration (#6949 K1 Task 7, design 2026-11-25 §6.3, §8) ---------------------
+
+#: Each kind with its ancestors, itself at depth 0.
+_CHAIN = (
+    "WITH RECURSIVE chain (kind_id, anc_id, depth) AS ("
+    " SELECT id, id, 0 FROM item_kinds"
+    " UNION ALL SELECT c.kind_id, k.parent_id, c.depth + 1 FROM chain c"
+    " JOIN item_kinds k ON k.id = c.anc_id WHERE k.parent_id IS NOT NULL)"
+)
+
+#: Each kind's class, read root first (a child only answers what its parent left open).
+_RESOLVED = (
+    _CHAIN + ", resolved AS (SELECT c.kind_id,"
+    " (array_agg(a.nature ORDER BY c.depth DESC)"
+    "  FILTER (WHERE a.nature IS NOT NULL))[1] AS nature,"
+    " (array_agg(a.role ORDER BY c.depth DESC) FILTER (WHERE a.role IS NOT NULL))[1] AS role,"
+    " (array_agg(a.counting ORDER BY c.depth DESC)"
+    "  FILTER (WHERE a.counting IS NOT NULL))[1] AS counting,"
+    " (array_agg(a.billing ORDER BY c.depth DESC)"
+    "  FILTER (WHERE a.billing IS NOT NULL))[1] AS billing,"
+    " count(a.special_type) AS specials,"
+    " (array_agg(a.steps -> 'life' ->> 'handler' ORDER BY c.depth)"
+    "  FILTER (WHERE a.steps -> 'life' ? 'handler'))[1] AS life"
+    " FROM chain c JOIN item_kinds a ON a.id = c.anc_id GROUP BY c.kind_id)"
+)
+
+_REPORT_RULES = {
+    "seeded_kinds",
+    "person_kinds",
+    "kind_life",
+    "items_on_roots",
+    "item_life",
+    "unit_life",
+    "part_lots",
+    "model_codes",
+    "tracking_derived",
+}
+
+
+def _before_inventory_class(conn: psycopg.Connection[tuple[object, ...]]) -> None:
+    """Every file before the K1 class migration."""
+    migrate(conn, MIGRATIONS[: _index("inventory_class")])
+
+
+def _item(
+    conn: psycopg.Connection[tuple[object, ...]],
+    kind: str,
+    name: str,
+    *,
+    life_hours: int | None = None,
+    life_months: int | None = None,
+    compatible: list[str] | None = None,
+    minute: int = 0,
+) -> str:
+    row = conn.execute(
+        "INSERT INTO items (kind_id, name, life_hours, life_months, compatible_with, created_at)"
+        " VALUES (%s, %s, %s, %s, %s,"
+        " '2026-11-01T10:00:00Z'::timestamptz + make_interval(mins => %s)) RETURNING id::text",
+        (kind, name, life_hours, life_months, compatible or [], minute),
+    ).fetchone()
+    assert row is not None
+    return str(row[0])
+
+
+def _report(conn: psycopg.Connection[tuple[object, ...]], rule: str) -> tuple[int, list[dict]]:  # type: ignore[type-arg]
+    row = conn.execute(
+        "SELECT count, detail FROM inventory_k1_report WHERE rule = %s", (rule,)
+    ).fetchone()
+    assert row is not None, rule
+    return row[0], row[1]  # type: ignore[return-value]
+
+
+@pytest.mark.requires_postgres
+def test_inventory_class_places_the_builtin_kinds(pg_conninfo: str) -> None:
+    """§8 built-in kinds: by `kinds.yaml`. A kind's class columns hold its own keys only
+    (C22), so `printer` sets none and its chain gives physical, durable, unit; its special
+    type stays NULL until K6 (R-K1-7)."""
+    with psycopg.connect(pg_conninfo) as conn:
+        _before_inventory_class(conn)
+        migrate(conn)
+        assert conn.execute(
+            "SELECT parent_id, nature, role, counting, billing, special_type,"
+            " steps -> 'life' ->> 'handler' FROM item_kinds WHERE id = 'printer'"
+        ).fetchone() == ("durable", None, None, None, None, None, "life.hours")
+        assert conn.execute(
+            _RESOLVED + " SELECT nature, role, counting, billing FROM resolved"
+            " WHERE kind_id = 'printer'"
+        ).fetchone() == ("physical", "durable", "unit", None)
+        assert conn.execute("SELECT name FROM item_kinds WHERE id = 'spool_part'").fetchone() == (
+            "Spool insert",
+        )
+        assert (
+            conn.execute(
+                "SELECT parent_id, counting FROM item_kinds WHERE id IN ('hardware', 'ams_part')"
+            ).fetchall()
+            == [("consumable", "lot")] * 2
+        )
+        new = [
+            "durable",
+            "general_consumable",
+            "warranty",
+            "service_plan",
+            "labour",
+            "flat_service",
+        ]
+        assert conn.execute(
+            "SELECT count(*) FROM item_kinds WHERE id = ANY(%s) AND builtin", (new,)
+        ).fetchone() == (6,)
+        # R-K1-6: the old columns are derived from the class and `steps.life`.
+        assert dict(
+            conn.execute(
+                "SELECT id, tracking || '/' || life_basis FROM item_kinds"
+                " WHERE id IN ('filament', 'durable', 'consumable', 'service', 'printer',"
+                " 'build_plate', 'equipment', 'labour')"
+            ).fetchall()
+        ) == {
+            "filament": "filament/none",
+            "durable": "unit/none",
+            "consumable": "lot/none",
+            "service": "none/none",
+            "printer": "unit/hours",
+            "build_plate": "unit/none",
+            "equipment": "unit/months",
+            "labour": "none/none",
+        }
+        assert conn.execute("SELECT count(*) FROM relation_types WHERE builtin").fetchone() == (5,)
+        assert {r[0] for r in conn.execute("SELECT rule FROM inventory_k1_report")} == (
+            _REPORT_RULES
+        )
+        for table in ("relations", "handler_config_history", "inventory_operations"):
+            assert conn.execute("SELECT to_regclass(%s)", (table,)).fetchone() != (None,)
+        # A unit may end (a service term).
+        item = _item(conn, "warranty", "Care")
+        conn.execute(
+            "INSERT INTO stock_units (item_id, status, cost_minor, origin, created_by)"
+            " VALUES (%s, 'ended', 0, 'manual', '{}')",
+            (item,),
+        )
+
+
+_TRACKINGS = ("lot", "unit", "filament", "none")
+_BASES = ("none", "hours", "months")
+_PARENTS = (None, "part", "consumable", "equipment")
+
+
+@pytest.mark.requires_postgres
+def test_every_phase_2_combination_is_placed(pg_conninfo: str) -> None:
+    """§8 and R-K1-9: a person kind of each `tracking`, `life_basis` and parent gets the
+    class of its tracking. One whose rule conflicts with its parent's class, or that is a
+    root, moves under the root of its class; a life basis on a kind that is not durable is
+    dropped; an item's `life_hours` on a kind that is not durable is dropped."""
+    combos = [(t, b, p) for t in _TRACKINGS for b in _BASES for p in _PARENTS]
+    items: dict[str, str] = {}
+    with psycopg.connect(pg_conninfo) as conn:
+        _before_inventory_class(conn)
+        for n, (tracking, basis, parent) in enumerate(combos):
+            kind = f"k_{tracking}_{basis}_{parent or 'root'}"
+            conn.execute(
+                "INSERT INTO item_kinds (id, name, parent_id, tracking, life_basis)"
+                " VALUES (%s, %s, %s, %s, %s)",
+                (kind, kind, parent, tracking, basis),
+            )
+            items[_item(conn, kind, kind, life_hours=100 if n % 3 == 0 else None)] = kind
+        migrate(conn)
+
+        conflicts = conn.execute(
+            _CHAIN + " SELECT c.kind_id FROM chain c JOIN item_kinds k ON k.id = c.kind_id"
+            " JOIN item_kinds a ON a.id = c.anc_id WHERE c.depth > 0 AND ("
+            " k.nature <> a.nature OR k.role <> a.role OR k.counting <> a.counting"
+            " OR k.billing <> a.billing)"
+        ).fetchall()
+        assert conflicts == []
+        rows = conn.execute(
+            _RESOLVED + " SELECT kind_id, nature, role, counting, billing, specials"
+            " FROM resolved WHERE kind_id LIKE 'k\\_%'"
+        ).fetchall()
+        assert len(rows) == len(combos)
+        for kind, nature, role, counting, billing, specials in rows:
+            assert specials <= 1, kind
+            if nature == "service":
+                assert (role, counting, billing) == (None, None, "flat"), kind
+            else:
+                assert nature == "physical" and role and counting and billing is None, kind
+        assert {r[0] for r in conn.execute("SELECT rule FROM inventory_k1_report")} == (
+            _REPORT_RULES
+        )
+
+        role_of = {
+            "lot": "consumable", "unit": "durable", "filament": "consumable", "none": None
+        }  # fmt: skip
+        stays = {("lot", "consumable"), ("unit", "part"), ("unit", "equipment")}
+        moved = {f"k_{t}_{b}_{p or 'root'}" for t, b, p in combos if (t, p) not in stays}
+        _, detail = _report(conn, "person_kinds")
+        assert {d["kind"] for d in detail} == moved
+        assert all("old_parent" in d for d in detail)
+        _, detail = _report(conn, "kind_life")
+        assert {d["kind"] for d in detail} == {
+            f"k_{t}_{b}_{p or 'root'}" for t, b, p in combos if b != "none" and t != "unit"
+        }
+        _, detail = _report(conn, "item_life")
+        assert {d["item"] for d in detail} == {
+            item
+            for item, kind in items.items()
+            if role_of[kind.split("_")[1]] != "durable"
+            and conn.execute("SELECT life_hours FROM items WHERE id = %s", (item,)).fetchone()
+            != (None,)
+        }
+        # A durable person kind's basis is its `steps.life` handler, unless its parent's
+        # chain already names it (`equipment` gives `life.months`).
+        assert dict(
+            conn.execute(
+                "SELECT id, steps -> 'life' FROM item_kinds WHERE id IN"
+                " ('k_unit_hours_root', 'k_unit_months_part', 'k_unit_months_equipment')"
+            ).fetchall()
+        ) == {
+            "k_unit_hours_root": {
+                "handler": "life.hours",
+                "params": {"source": "own_run_hours"},
+            },
+            "k_unit_months_part": {"handler": "life.months", "params": {}},
+            "k_unit_months_equipment": None,
+        }
+        assert conn.execute(
+            "SELECT tracking, life_basis FROM item_kinds WHERE id = 'k_filament_hours_root'"
+        ).fetchone() == ("filament", "none")
+
+
+@pytest.mark.requires_postgres
+def test_items_on_roots_move(pg_conninfo: str) -> None:
+    """§8: a root leaves its class open, so its items move to the seeded leaf."""
+    with psycopg.connect(pg_conninfo) as conn:
+        _before_inventory_class(conn)
+        tape = _item(conn, "consumable", "Tape")
+        repair = _item(conn, "service", "Repair")
+        migrate(conn)
+        assert dict(
+            conn.execute(
+                "SELECT id::text, kind_id FROM items WHERE id = ANY(%s::uuid[])", ([tape, repair],)
+            ).fetchall()
+        ) == {tape: "general_consumable", repair: "flat_service"}
+        assert _report(conn, "items_on_roots")[0] == 2
+
+
+@pytest.mark.requires_postgres
+def test_part_lots_become_units(pg_conninfo: str) -> None:
+    """R-K1-10: `part` becomes durable, so its lots become whole units at the lot's cost,
+    with an `adjust` move; the fraction stays on the lot and is named."""
+    with psycopg.connect(pg_conninfo) as conn:
+        _before_inventory_class(conn)
+        item = _item(conn, "part", "Fan")
+        lot = conn.execute(
+            "INSERT INTO stock_lots (item_id, received_qty, on_hand, unit_cost_minor, origin,"
+            " created_by) VALUES (%s, 2.5, 2.5, 300, 'manual', '{}') RETURNING id::text",
+            (item,),
+        ).fetchone()
+        assert lot is not None
+        migrate(conn)
+        assert (
+            conn.execute(
+                "SELECT cost_minor, origin, status FROM stock_units WHERE item_id = %s", (item,)
+            ).fetchall()
+            == [(300, "opening", "in_stock")] * 2
+        )
+        assert conn.execute(
+            "SELECT kind, qty, unit_cost_minor, amount_minor FROM stock_moves"
+            " WHERE lot_id = %s::uuid",
+            (lot[0],),
+        ).fetchall() == [("adjust", -2, 300, -600)]
+        assert conn.execute(
+            "SELECT count(*) FROM stock_moves WHERE kind = 'receive' AND qty = 1"
+            " AND unit_cost_minor = 300 AND unit_id IS NOT NULL AND item_id = %s",
+            (item,),
+        ).fetchone() == (2,)
+        assert conn.execute(
+            "SELECT on_hand FROM stock_lots WHERE id = %s::uuid", (lot[0],)
+        ).fetchone() == (Decimal("0.5"),)
+        count, detail = _report(conn, "part_lots")
+        assert count == 1
+        assert detail == [{"lot": lot[0], "item": item, "units": 2, "left": 0.5}]
+
+
+@pytest.mark.requires_postgres
+def test_model_codes_become_kinds(pg_conninfo: str) -> None:
+    """§8 and R-K1-11: each distinct model code is a kind under `printer`, named as the
+    oldest item spells it; each item is `compatible_with` its codes' kinds, and a printer
+    item with one code takes that kind."""
+    with psycopg.connect(pg_conninfo) as conn:
+        _before_inventory_class(conn)
+        one = _item(conn, "nozzle", "Hardened", compatible=["H2C"], minute=1)
+        two = _item(conn, "nozzle", "Brass", compatible=["h2c", " X1C "], minute=2)
+        printer = _item(conn, "printer", "Mine", compatible=["H2C"], minute=3)
+        both = _item(conn, "printer", "Spare", compatible=["H2C", "X1C"], minute=4)
+        migrate(conn)
+        assert conn.execute(
+            "SELECT id, name, parent_id FROM item_kinds WHERE id LIKE 'printer\\_%' ORDER BY id"
+        ).fetchall() == [
+            ("printer_h2c", "H2C", "printer"),
+            ("printer_x1c", "X1C", "printer"),
+        ]
+        rels = conn.execute(
+            "SELECT f.ref, t.ref FROM relations r JOIN entities f ON f.id = r.from_entity"
+            " JOIN entities t ON t.id = r.to_entity"
+            " WHERE r.type_id = 'compatible_with' AND f.kind = 'item' AND t.kind = 'item_kind'"
+        ).fetchall()
+        assert {r for r in rels if r[0] in (one, two)} == {
+            (one, "printer_h2c"),
+            (two, "printer_h2c"),
+            (two, "printer_x1c"),
+        }
+        assert dict(
+            conn.execute(
+                "SELECT id::text, kind_id FROM items WHERE id = ANY(%s::uuid[])", ([printer, both],)
+            ).fetchall()
+        ) == {printer: "printer_h2c", both: "printer"}
+        assert conn.execute(
+            "SELECT d ->> 'stays' FROM inventory_k1_report, jsonb_array_elements(detail) AS d"
+            " WHERE rule = 'model_codes' AND d ? 'stays'"
+        ).fetchall() == [(both,)]
+
+
+@pytest.mark.requires_postgres
+def test_item_life_moves_into_steps(pg_conninfo: str) -> None:
+    """§4.5: an item's life moves into `steps.life`, as parameters of the handler it
+    resolves to, or with the handler it needs on a durable item."""
+    with psycopg.connect(pg_conninfo) as conn:
+        _before_inventory_class(conn)
+        nozzle = _item(conn, "nozzle", "Hardened", life_hours=1500)
+        tool = _item(conn, "tool", "Driver", life_hours=50)
+        migrate(conn)
+        assert dict(
+            conn.execute(
+                "SELECT id::text, steps FROM items WHERE id = ANY(%s::uuid[])", ([nozzle, tool],)
+            ).fetchall()
+        ) == {
+            nozzle: {"life": {"params": {"hours": 1500}}},
+            tool: {
+                "life": {
+                    "handler": "life.hours",
+                    "params": {"hours": 50, "source": "own_run_hours"},
+                }
+            },
+        }

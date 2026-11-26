@@ -61,6 +61,8 @@ KINDS: dict[str, EntityKind] = {
         _kind("insert_type", "filament_insert_types", "uuid"),
         _kind("colour", "filament_colours", "uuid"),
         _kind("location_kind", "filament_location_kinds", "uuid"),
+        # A kind is a relationship's end (inventory K1, design §6.3).
+        _kind("item_kind", "item_kinds"),
     )
 }
 
@@ -180,9 +182,10 @@ class EntityStore:
     def orphans(
         self, conn: Conn, limit: int, *, guarded: Collection[str] = ()
     ) -> list[tuple[UUID, EntityRef]]:
-        """Up to `limit` entities whose owner's row is gone and that no stock move names
-        (a move keeps its entity, R-P2-4, #7067). One of a kind in `guarded` is taken only
-        once no `entity_attachments` row names it."""
+        """Up to `limit` entities whose owner's row is gone and that no stock move or
+        relationship names (a move keeps its entity, R-P2-4, #7067; so does a relationship,
+        inventory K1). One of a kind in `guarded` is taken only once no
+        `entity_attachments` row names it."""
         found: list[tuple[UUID, EntityRef]] = []
         for kind in KINDS.values():
             if len(found) >= limit:
@@ -197,6 +200,8 @@ class EntityStore:
                 f" (SELECT 1 FROM {kind.table} t"
                 f"  WHERE t.{kind.id_column} = {_ref_as_id(kind)}){guard}"
                 " AND NOT EXISTS (SELECT 1 FROM stock_moves m WHERE m.entity_id = e.id)"
+                " AND NOT EXISTS (SELECT 1 FROM relations r"
+                "  WHERE r.from_entity = e.id OR r.to_entity = e.id)"
                 " ORDER BY e.created_at, e.id LIMIT %s".encode(),
                 (kind.name, limit - len(found)),
             ).fetchall()

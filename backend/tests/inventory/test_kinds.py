@@ -71,7 +71,7 @@ def test_a_kind_under_its_own_descendant_is_a_cycle(kinds: KindStore) -> None:
     with pytest.raises(KindCycle):
         kinds.update("fastener", KindPatch(parent_id="fastener"), BY)
     kind = kinds.get("part")
-    assert kind is not None and kind.parent_id is None
+    assert kind is not None and kind.parent_id == "durable"
 
 
 def test_a_restricting_schema_is_refused_and_the_old_one_stays(kinds: KindStore) -> None:
@@ -152,7 +152,7 @@ def test_list_counts_each_kinds_items(kinds: KindStore, items: ItemStore) -> Non
 def test_an_items_schema_is_its_kinds_merged(
     kinds: KindStore, items: ItemStore, pg_pool: PgPool
 ) -> None:
-    kinds.update("part", KindPatch(attribute_schema=_schema(mpn={"type": "string"})), BY)
+    kinds.update("consumable", KindPatch(attribute_schema=_schema(mpn={"type": "string"})), BY)
     made = items.create(ItemInput(kind_id="hardware", name="M3 nut"), BY)
 
     with pg_pool.connection() as conn:
