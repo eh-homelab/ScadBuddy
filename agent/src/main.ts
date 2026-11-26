@@ -101,7 +101,8 @@ import { CrudFlowBlobs } from './temporal/flowBlobs.js'
 import { CrudFlowRuns } from './temporal/flowRuns.js'
 import { flowSessionActivities } from './temporal/flowSessions.js'
 import { decidedCalls, gateActivities, RecordedApprovals, RowSessionOwners, type ToolActivityDeps, toolActivities, toolCallActivities } from './temporal/toolActivities.js'
-import { finishedToolCalls, toolCallResult, type ToolCallStarter, toolCallStarter } from './tools/activityProjection.js'
+import { cutToolCall, finishedToolCalls, toolCallResult, type ToolCallStarter, toolCallStarter } from './tools/activityProjection.js'
+import type { DanglingCall } from './sessions/restartedCalls.js'
 import { TASK_QUEUE } from './temporal/names.js'
 import { sessionFinishActivities } from './temporal/session/finishActivity.js'
 import { CrudTurnRows } from './sessions/turnRows.js'
@@ -767,6 +768,9 @@ const turnHost =
         // A restarted turn's calls that finished as ToolCall workflows (Step 9.2), read with the client below.
         finishedCalls: (sessionId: string, turnId: string) =>
           temporalClient ? finishedToolCalls({ reads: sessionReads, client: temporalClient }, sessionId, turnId) : Promise.resolve([]),
+        // How each call a lost placement left in flight ended, when it is a ToolCall: its own result (#7874).
+        cutCall: (sessionId: string, call: DanglingCall, wait: { waitMs: number; signal: AbortSignal; beat: () => void }) =>
+          temporalClient ? cutToolCall({ client: temporalClient, blobs: sessionImages }, sessionId, call, wait) : Promise.resolve({ kind: 'none' as const }),
         // A `done` summary, posted as a classic turn's (#5003).
         questions: sessions.questions,
         // The session's working directory, a copy of its workspace placed for each turn and written back at its end (Step 9.5).
@@ -886,7 +890,8 @@ const eagerClient = (): Client | undefined => {
 }
 if (temporalClient) {
   const results = { client: temporalClient, blobs: sessionImages }
-  toolCallStart = toolCallStarter({ ...results, eager: eagerClient })
+  // A call whose turn a shutdown cut here runs on: the restarted placement reads its result (#7874).
+  toolCallStart = toolCallStarter({ ...results, eager: eagerClient, keeps: (sessionId) => turnHost?.keepsCalls(sessionId) ?? false })
   // `tool_call_result`: what a finished call returned, which a restarted turn's message names (Step 9.2).
   toolServices.toolCallResults = (session, toolUseId) => toolCallResult(results, session, toolUseId)
 }
