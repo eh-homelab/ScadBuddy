@@ -21,9 +21,10 @@ One migration places every phase 2 row by §8. The Python routes under
 caller, `inventory`, which the API mints in process. For a write they run a Temporal
 Standalone Activity (`inventory.<Name>`) on the task queue `inventory`, which a worker
 inside `scadbuddy-core` runs (§6.1a). The activity id is the idempotency key. The order
-lifecycle, the printer merge and the `/parts` aliases stop writing stock: the lifecycle starts
-the workflow `SettleOrderParts` (Go's take, then Python's record), the merge executes
-`inventory.Repoint` first, and the aliases are deleted. After K1 no Python code writes a
+lifecycle, the printer merge and the `/parts` aliases stop writing stock: a fulfil, a re-cost and
+a printer merge each start a Python workflow before they write anything (`FulfilOrderItem`,
+`RecostLot`, `MergePrinters`), whose steps commit the order or printer change and call
+Go's activities; the aliases are deleted. After K1 no Python code writes a
 stock table.
 
 **Tech Stack:** Go 1.26 (`tools/go/core`, pgx v5, `go.temporal.io/sdk` v1.49.0 or newer,
@@ -228,8 +229,10 @@ both specs.
    properties. Each remove is one event with the entity's kind and ref and the sweep's or
    the merge's actor; a direct remove with no `scadbuddy.actor` is refused and changes
    nothing. The subscriber restarts, two replicas run it, or its cursor is set back: each
-   event still gives exactly one history row. A payload it cannot store stops the cursor
-   and raises the lag alert; it never skips the event. Tests: Task 1
+   event still gives exactly one history row. A payload it cannot store can come only from a
+   bug (the publisher builds every payload from the table's own columns); it stops the
+   cursor and raises the lag alert, and the event is applied once the fix is deployed,
+   with no data to repair. Tests: Task 1
    `test_a_set_publishes_one_event`, `test_a_cascade_publishes_one_remove_per_key`,
    `TestAReplayInsertsNothingTwice`, `TestTwoSubscribersApplyOnce`,
    `TestABadPayloadStopsTheCursor`; Task 2 `test_the_sweep_publishes_what_it_removes`.
@@ -248,16 +251,17 @@ both specs.
    the same key answers 202 again, never an error, and starts nothing new. When the worker
    comes back the activity runs once. An activity that failed or timed out runs again on
    the same key, and `crud_requests` keeps it from writing twice. Temporal itself out of
-   reach is 503 `inventory_unavailable`, and nothing was started. An order fulfil whose
-   `SettleOrderParts` cannot start answers 503 (nothing started; safe to retry); one whose
-   take does not finish in time answers 202 "stock still settling", and the workflow
-   records `parts.used` by itself, once, whatever retries. Tests: Task 13
+   reach is 503 `inventory_unavailable`, and nothing was started. An order fulfil, a re-cost and a printer merge start their
+   workflow before they write anything: a failed start answers 503 and nothing was
+   written; a slow Go step answers 202, and the workflow finishes by itself, writing
+   `parts.used` once, whatever retries. Nothing waits for a person. Tests: Task 13
    `test_a_slow_write_answers_202_and_a_repeat_202_again`,
    `test_a_done_write_answers_the_stored_result`, `test_a_failed_activity_runs_again`,
    `test_temporal_out_of_reach_is_a_503`; `StillWorking.test.tsx`; Task 16
-   `test_a_failed_start_fails_the_fulfil`, `test_a_slow_take_answers_202_settling`,
-   `test_a_fulfil_retry_attaches_to_the_workflow`,
-   `test_a_failed_record_is_retried_without_a_second_take`.
+   `test_a_failed_start_writes_nothing`,
+   `test_a_slow_take_answers_202_and_settles_by_itself`, `test_a_repeat_attaches`,
+   `test_a_failed_record_is_retried_without_a_second_take`,
+   `test_unfulfil_waits_for_the_fulfil`, `test_a_merge_repoints_then_merges`.
 
 ---
 
@@ -484,7 +488,7 @@ K1 ports `check.py` up to the README table (R-K1-19). Its relation checks and it
   - `relations (id uuid PK DEFAULT gen_random_uuid(), type_id text NOT NULL REFERENCES relation_types, from_entity uuid NOT NULL REFERENCES entities, to_entity uuid NOT NULL REFERENCES entities, attrs jsonb NOT NULL DEFAULT '{}', created_at timestamptz NOT NULL DEFAULT clock_timestamp(), created_by jsonb NOT NULL, ended_at timestamptz, CHECK (from_entity <> to_entity))`; unique `(type_id, from_entity, to_entity) WHERE ended_at IS NULL`; index `(to_entity) WHERE ended_at IS NULL`.
   - `handler_config_history (event_seq bigint PRIMARY KEY, owner text NOT NULL` (`item_kind:<id>`, `item:<uuid>`, `unit:<uuid>`)`, step text NOT NULL, handler text, old jsonb, new jsonb, at timestamptz NOT NULL, actor jsonb NOT NULL)`; index `(owner, step, event_seq)`. Only the history subscriber writes it, from `handler_config.changed` (R-K1-13).
   - `inventory_k1_report (rule text PRIMARY KEY, count int NOT NULL, detail jsonb NOT NULL DEFAULT '[]')`, one row per rule below (R-K1-9). K2 drops it.
-  - `inventory_operations (id text PRIMARY KEY CHECK (length(id) BETWEEN 1 AND 300)` (the activity id)`, kind text NOT NULL` (the activity name, `inventory.Take`)`, subject text NOT NULL DEFAULT ''` (`item:<id>`, `lot:<id>`, `unit:<id>`, `item_kind:<id>`, `printer:<id>`)`, status text NOT NULL CHECK (status IN ('running','succeeded','failed')), workflow_id text` (set when a workflow ran the activity, `SettleOrderParts` in Task 16; NULL for a standalone one)`, attempt int NOT NULL DEFAULT 1, actor jsonb, problem jsonb, last_error text, created_at timestamptz NOT NULL DEFAULT clock_timestamp(), updated_at timestamptz NOT NULL DEFAULT clock_timestamp(), finished_at timestamptz)`; index `(status, updated_at)`. Only Go writes it (R-K1-22). The result body stays in `crud_requests` (7 days); the row keeps the problem.
+  - `inventory_operations (id text PRIMARY KEY CHECK (length(id) BETWEEN 1 AND 300)` (the activity id)`, kind text NOT NULL` (the activity name, `inventory.Take`)`, subject text NOT NULL DEFAULT ''` (`item:<id>`, `lot:<id>`, `unit:<id>`, `item_kind:<id>`, `printer:<id>`)`, status text NOT NULL CHECK (status IN ('running','succeeded','failed')), workflow_id text` (set when a workflow ran the activity, `FulfilOrderItem`, `RecostLot`, `MergePrinters` in Task 16; NULL for a standalone one)`, attempt int NOT NULL DEFAULT 1, actor jsonb, problem jsonb, last_error text, created_at timestamptz NOT NULL DEFAULT clock_timestamp(), updated_at timestamptz NOT NULL DEFAULT clock_timestamp(), finished_at timestamptz)`; index `(status, updated_at)`. Only Go writes it (R-K1-22). The result body stays in `crud_requests` (7 days); the row keeps the problem.
 - Data, in this order (each step writes its report row; the actor of every row is `{"kind":"provider","principal":"inventory_k1_migration"}`):
   1. `seeded_kinds`: insert `durable`, `general_consumable`, `warranty`, `service_plan`, `labour`, `flat_service`; set name, parent, class, special type and steps of every built-in kind from `kinds.yaml` (`spool_part` keeps its id and becomes "Spool insert"; `ams_part` and `hardware` move under `consumable` with `counting = lot`). `printer` gets no `special_type` (R-K1-7).
   2. `person_kinds`: each `builtin = false` kind gets the class of its `tracking` (`lot` → consumable, lot; `unit` → durable; `none` → service, flat; `filament` → under `filament`), setting only the keys its parent leaves open. A kind whose rule conflicts with its parent's class, and a person root kind, move under the root of their class (`consumable`, `durable`, `service`). Detail: each moved kind with its old parent.
@@ -642,7 +646,7 @@ Phase 2's `tests/inventory/test_stock.py` cases are rewritten here, one Go test 
   - `store.StartOperation(ctx, pool, op Operation)`: in a short transaction, upsert `inventory_operations` (`status = 'running'`, `attempt`, `actor`, `subject`, `updated_at`) and `Notify(…, "inventory_operation.changed", {"operation_id": id})`.
   - `store.FinishOperation(ctx, tx, id string, a Answer)`: in the write's own transaction (`store.Write` calls it, through `OperationFrom(ctx)`, after `do` and after a replay): `status` `succeeded`, or `failed` with `problem` when `a.Status >= 400`; `finished_at`; the same `Notify`. So the row's end commits with the stock write, or not at all.
   - `store.NoteError(ctx, pool, id string, attempt int, err error)`: an attempt that failed (an infrastructure error) keeps `status = 'running'` and sets `last_error`, `attempt`; Temporal retries it.
-  - `store.Operation(ctx, q, id) (wire.Operation, bool, error)`: the row as `operations/store.py` `Operation` (`id`, `kind`, `subject`, `status`, `result` from `crud_requests` when `succeeded`, `error` = `problem` when `failed`, `created_at`, `finished_at`). A `running` row older than 60 s is checked with Temporal (`client.GetActivityHandle(…).Describe`, or `DescribeWorkflowExecution` of its `workflow_id`): a closed, failed or timed-out activity (or workflow) marks the row `failed` with the problem `inventory_activity_failed` (its last error as `detail`) and notifies.
+  - `store.Operation(ctx, q, id) (wire.Operation, bool, error)`: the row as `operations/store.py` `Operation` (`id`, `kind`, `subject`, `status`, `result` from `crud_requests` when `succeeded`, `error` = `problem` when `failed`, `created_at`, `finished_at`). A `running` row older than 60 s is checked with Temporal (`client.GetActivityHandle(…).Describe`, or `DescribeWorkflowExecution` of its `workflow_id`): a closed, failed or timed-out activity (or workflow) is answered as `failed` with the problem `inventory_activity_failed` (its last error as `detail`). The read writes nothing: Temporal is the source, and no row is repaired.
   - `activities.Record(pool) interceptor.WorkerInterceptor` (the clusters `progress` pattern, `interceptor.WorkerInterceptorBase`, `ActivityInboundInterceptorBase`): before each attempt `StartOperation` (id = the input's `Key`, `workflow_id` = `activity.GetInfo(ctx).WorkflowExecution.ID` when a workflow runs it, kind = the activity type, subject = the first entity the input names), puts the recorder in `ctx` for `store.Write`, and calls `Next`; on an `error`, `NoteError`. A failure of the record is logged and counted; it never fails the activity.
 - `package inventory`: `const Caller = "inventory"`; `func Areas(pool *pgxpool.Pool, _ *seal.Keys) map[string][]crud.Route` returns `inventory:read` (every read route). Area `inventory` is the reads plus the worker: `main.go` starts the worker only when `SCADBUDDY_CORE_AREAS` names `inventory`.
 - `main.go`: `callerPackages = map[string]areaRoutes{inventory.Caller: inventory.Areas}`; `newRouter` mounts each area of a caller package with `router.Add(caller, routes...)`; an area name in two packages stops the start.
@@ -659,7 +663,7 @@ Phase 2's `tests/api/test_inventory.py` and `test_inventory_stock.py` cases for 
   - `TestADatabaseOutOfReachFailsTheActivity`: a closed pool → a non-nil `error` (Temporal retries).
   - `TestTheRecordWritesStartAndEnd` (`record_test.go`, `testdb.New`, a `LISTEN scadbuddy_events` connection): one activity → a `running` row and one notice, then `succeeded` and a second notice, one `id`; a 409 answer → `failed` with `problem.code`; the end row and the stock write commit together (a forced rollback of the write leaves the row `running`).
   - `TestAFailedAttemptStaysRunning`: an attempt that returns an error → `running`, `attempt = 1`, `last_error` set; the next attempt succeeds → `succeeded`, `attempt = 2`.
-  - `TestAStaleRunningRowIsClosedFromTemporal` (a fake `Describe` that answers timed out) → `failed`, `inventory_activity_failed`.
+  - `TestAStaleRunningRowReadsTemporal` (a fake `Describe` that answers timed out) → `failed`, `inventory_activity_failed`.
   - `TestTheNoticeIsAnEventPythonReads` (`notify_test.go`): the payload has exactly `id`, `at`, `kind`, `operation_id`; it is written to `testdata/inventory_operation_changed.json`, which Task 13 decodes with `decode_event`.
   - `TestTheInventoryAreaAnswersOnlyItsCaller` (`main_test.go`): an `agent` credential → 403 `wrong_caller`; an `inventory` credential with `crud.inventory` → 200 and `X-ScadBuddy-Crud: 1`.
   - `TestInventoryNeedsTemporal`: `SCADBUDDY_CORE_AREAS=inventory` without `SCADBUDDY_TEMPORAL_ADDRESS` → `run` returns an error naming the variable.
@@ -690,7 +694,7 @@ Phase 2's `tests/api/test_inventory.py` and `test_inventory_stock.py` cases for 
     2. `answer = await asyncio.wait_for(asyncio.shield(handle.result()), wait)`; `{status, body}`: a status ≥ 400 is raised as `ApiError` with the problem's status, type, detail and `code` unchanged; else `Done(body)`.
     3. The wait ends → `OperationAccepted(id=key, kind=f"inventory.{name}", subject=subject, status="running", created_at=…, repeated=…)`; the route answers it with status 202. The activity still runs.
     4. A start that cannot reach Temporal → 503 `inventory_unavailable`; nothing was started, and a retry with the same key is safe.
-  - `def write_blocking(self, …) -> Done | OperationAccepted`: the same for synchronous callers (the printer merge, Task 16), through `asyncio.run_coroutine_threadsafe` on the app's loop.
+  - Workflows that call Go (Task 16) do not use `write`: they run `inventory.<Name>` as a workflow step.
   - Key: `f"{by.kind}:{by.principal or ''}:{idempotency_key}"` when the public request carried `Idempotency-Key`, else `f"req:{uuid4()}"`.
 - Each public write route takes an optional `Idempotency-Key` header (1–200 characters) and declares a `202` answer of `OperationAccepted` beside its own.
 - `api/inventory_operations.py`: `GET /api/v1/inventory/operations/{operation_id}` → `Operation` (`operations/store.py:34`), read from Go's `GET /operations/one?id=` (Task 12); 404 `operation_not_found`.
@@ -762,49 +766,59 @@ Phase 2's `tests/api/test_inventory.py` and `test_inventory_stock.py` cases for 
 
 ## Layer 6 — `feat/6949-k1-6-order-stock-activities` (on layer 5)
 
-### Task 16: Orders settle stock through a workflow; the printer merge repoints first; Python's stock writes go
+### Task 16: Order fulfil, re-cost and printer merge are workflows; Python's stock writes go
+
+The rule (owner 2026-11-25, design §6.1a "Nothing manual, no sweeps"): a change that
+crosses the Python-Go line starts its workflow before it commits anything, and the
+workflow's first activity commits the local change. A failed start writes nothing and
+answers an error. No state needs a sweep, a backstop, a repair loop, a button or a manual
+retry to become consistent.
 
 **Files:**
-- Create: `backend/scadbuddy/workflows/settle_order_parts.py` (`SettleOrderParts`, `VersionedSettleOrderParts`), `backend/scadbuddy/orders/parts_activities.py` (`orders_parts_record`, `start_settle`), `backend/tests/fixtures/settle_order_parts_histories/`
-- Modify: `backend/scadbuddy/main.py` (`LIBRARY_WORKFLOWS` gains `VersionedSettleOrderParts`; the `library` worker registers `orders_parts_record`), `backend/scadbuddy/orders/lifecycle.py` (`_lock_parts_of`, `_use_parts`, `_return_parts`, `parts_unit_cost`, `recost_lot`), `backend/scadbuddy/api/inventory_stock.py` (`recost`), `backend/scadbuddy/printers/store.py` (`_merge` and its two callers, l.667 and l.949), `backend/scadbuddy/entities/registry.py` (`repoint_entity` loses its `UPDATE stock_moves`)
+- Create: `backend/scadbuddy/workflows/order_stock.py` (`FulfilOrderItem`, `RecostLot`, `MergePrinters`, their `Versioned*` subclasses), `backend/scadbuddy/orders/stock_activities.py` (`orders_fulfil_commit`, `orders_parts_record`, `orders_recost_orders`, `orders_recost_record`, `orders_await_workflow`), `backend/scadbuddy/printers/merge_activities.py` (`printers_merge_commit`), `backend/scadbuddy/orders/stock_start.py` (`start_and_wait`), `backend/scadbuddy/migrations/<UTC>_order_items_parts_workflow.sql`, `backend/tests/fixtures/order_stock_histories/`
+- Modify: `backend/scadbuddy/main.py` (`LIBRARY_WORKFLOWS` gains the three; the `library` worker registers the activities), `backend/scadbuddy/orders/lifecycle.py` (`fulfil_items`, `accept_fulfilment`, `unfulfil_item` become a check plus a start; `_lock_parts_of`, `_use_parts`, `_return_parts`, `recost_lot` go; their SQL moves to the activities), `backend/scadbuddy/api/orders.py` (the fulfil, accept and unfulfil routes take an optional `Idempotency-Key` and declare 202), `backend/scadbuddy/api/inventory_stock.py` (`recost`), `backend/scadbuddy/printers/store.py` (`_merge`, `link_bambuddy`, `ensure_bambuddy_written`), `backend/scadbuddy/printers/bambuddy_sync.py` (entry action `merging`), `backend/scadbuddy/api/printers.py` (the link route, 202), `backend/scadbuddy/api/crud_print.py` (`ensure_bambuddy`, 202), `backend/scadbuddy/crud/print.py` (the worker follows a 202), `backend/scadbuddy/entities/registry.py` (`repoint_entity` loses its `UPDATE stock_moves`), frontend `components/orders/itemActions.ts`, `ItemsBulk.tsx`, `Unfulfil.tsx`, `OrderItemsTable.tsx`, `mocks/features/orders/orders.ts`, the printer link dialog's caller of `link_bambuddy`, `agent/src/tools/orders.ts`, `agent/src/tools/printers.ts` (the 202 text)
 - Delete: from `backend/scadbuddy/inventory/stock.py` every write (`StockStore` and its helpers); keep `parts_moves`, `parts_moved`, `PartsMoved` (readers, R-K1-16); `backend/tests/inventory/test_stock.py` (ported in Task 11)
-- Test: `backend/tests/orders/test_stock_activities.py`, `backend/tests/workflows/test_settle_order_parts.py` (`requires_temporal`), `backend/tests/test_settle_order_parts_replay.py`, `frontend/src/components/orders/OrderItemsTable.test.tsx` (`a slow fulfil shows stock still settling until parts.used`), `agent/test/orders.test.ts` (the 202 text), `backend/tests/orders/test_parts_lifecycle.py`, `backend/tests/printers/test_merge_stock.py` (new, beside `test_merge_filament.py`), `backend/tests/test_no_python_stock_writes.py`
+- Test: `backend/tests/orders/test_stock_activities.py`, `backend/tests/workflows/test_order_stock.py` (`requires_temporal`), `backend/tests/test_order_stock_replay.py`, `backend/tests/orders/test_parts_lifecycle.py`, `backend/tests/printers/test_merge_stock.py` (new, beside `test_merge_filament.py`), `backend/tests/test_no_python_stock_writes.py`, `frontend/src/components/orders/OrderItemsTable.test.tsx`, `agent/test/orders.test.ts`
 
 **Interfaces:**
-- Keys (§6.1a): the workflow id `order_item:<order_item_id>:parts:<n>` (fulfil) or `order_item:<order_item_id>:parts:<n>:return` (unfulfil); each activity's key is the workflow id plus `:<item_id>` (`order_item:<id>:parts:<n>:<item_id>` for `inventory.Take`, `…:return:<item_id>` for `inventory.GiveBack`), where `n` is the item's fulfilment cycle: 1 + the count of its earlier `parts.returned` events, read under the order's lock (so a retry of one fulfil reads the same `n`, and the take after an unfulfil gets a new one). `lot:<lot_id>:recost:<request key>` for `inventory.Recost`. `entity_merge:printer:<gone>:<kept>` for `inventory.Repoint`.
-- `SettleOrderParts` (R-K1-27; design §6.1a "Orders"): a Python workflow on the `library` queue (`SCADBUDDY_TEMPORAL_TASK_QUEUE_LIBRARY`), whose worker runs in the API process: the record step writes orders rows, and only the API holds SQL (root CLAUDE.md #5295). AUTO_UPGRADE through `VersionedSettleOrderParts` in `main.LIBRARY_WORKFLOWS`, so it replays `tests/fixtures/settle_order_parts_histories/`, and a later change to its commands goes behind `workflow.patched`.
-  - Input `SettleParts{order_id, order_item_id, n, direction: Literal["take", "return"], parts: list[{item_id, qty}], actor}`; output `SettleResult{used: list[PartsMoved] | None, refused: list[{item_id, problem}]}`.
-  - Step 1, per part in `item_id` order: `workflow.execute_activity("inventory.Take" | "inventory.GiveBack", {key, actor, params: {item_id}, body: {qty, order_id, order_item_id}}, task_queue="inventory", activity_id=key, schedule_to_close_timeout=24 h, start_to_close_timeout=30 s, retry_policy=RetryPolicy(maximum_interval=30 s))`, by type name: the Go worker runs it (Task 12). A refusal is an answer (`{status, body}`), not a failure.
-  - Step 2: `workflow.execute_activity(orders_parts_record, …, start_to_close_timeout=30 s, retry_policy=RetryPolicy(maximum_interval=30 s))` on `library`: under the order's lock, writes `parts.used` (or `parts.returned`) with the answers' moves, and `parts.stock_refused` per refusal, then publishes `order_item.changed`. It is idempotent: an event whose `detail.settle` is the workflow id already there → writes nothing. A failure retries step 2 only; step 1 is not run again (Temporal keeps its result), and a Go retry of step 1 itself writes once (`crud_requests`, Task 12).
-- `lifecycle.py`, fulfil (R-K1-14):
-  1. In the order's transaction: the transition as today; `order_item_parts.used` set; before the commit, `GET …/items/{item_id}/estimate?qty=` per part refuses `bad_quantity` as phase 2 did (a read takes no lock). Commit.
-  2. Then `start_settle(...)` (sync, through `asyncio.run_coroutine_threadsafe` on the app's loop): `client.start_workflow(VersionedSettleOrderParts.run, SettleParts(...), id=<workflow id>, task_queue=<library>, id_conflict_policy=USE_EXISTING, id_reuse_policy=ALLOW_DUPLICATE_FAILED_ONLY)`; `WorkflowAlreadyStartedError` (it succeeded before) → `get_workflow_handle(id)`. Then wait up to 15 s on `handle.result()`.
-  3. Done in time → the route answers as today (step 2 wrote `parts.used` before the result). Not done → the route answers its usual body with status 202, and each such item carries `parts_settling: {workflow_id, started_at}`; the item settles by itself when the workflow ends. A start that fails (Temporal out of reach) → `LifecycleError("inventory_unavailable", …)` (503; nothing was started, safe to retry): the order stays fulfilled without `parts.used`, and the next fulfil of the item starts the workflow.
-  A fulfil sent again (the same `n`) attaches to the running workflow, reads its result, or (after a failed run) runs it again; step 1's keys are the same, so Go takes the stock once. `OrderItem.parts_settling` is read from the item's events: set for a fulfilled item with parts whose newest settle has no `parts.used` or `parts.stock_refused` event yet. No `…/parts/settle` route: no workflow needs one.
-  Unfulfil does the same with `direction="return"`, `inventory.GiveBack` and `parts.returned`. `_lock_parts_of` goes: each activity is its own transaction.
-- Frontend (R-K1-27): the fulfil callers (`components/orders/itemActions.ts`, `ItemsBulk.tsx`) go through `command`; `OrderItemsTable.tsx` shows `StillWorking` (Task 13) with the text "Order fulfilled; stock still settling" on an item with `parts_settling`, until an `order_item.changed` on the `order:<id>` topic brings the item with it empty. No button: nothing for a person to do. Mocks: `mocks/features/orders/orders.ts`. Agent: `order_item_fulfil` and `order_fulfil` say "fulfilled; stock still settling (workflow <id>); it settles by itself" on a 202; no new tool.
-- `parts_unit_cost` reads the estimate route. `recost_lot` locks the orders (its transaction), executes `inventory.Recost` with `body={orders: [ids]}` inside it (Go waits on no row Python holds: it locks the lot and its moves, never an order), writes the events, commits; `recost_orders_moved` → the whole recost again (phase 2 `_RECOST_TRIES`).
-- Printer merge (owner 2026-11-25, R-K1-15): `_merge(conn, gone, kept)` first locks the `gone` printer row `FOR UPDATE`, then reads whether a stock row names it (`stock_units.printer_id = gone`, or a `stock_moves.entity_id` of the entity `printer:gone`). If one does, it raises `NeedsRepoint(gone, kept)`; the caller's transaction rolls back; the store calls `InventoryCore.write_blocking("Repoint", key=f"entity_merge:printer:{gone}:{kept}", body={kind: "printer", gone, kept})` with no transaction open, and runs the whole method again (at most 3 times, then `MergeBusy`, 409). A `write_blocking` that answers `OperationAccepted` stops the merge with 503 `stock_pending` (nothing of the merge is written; a retry uses the same key). The merge stays synchronous, not a workflow (R-K1-28). With no stock row, the merge goes on as today without the stock references. A stock write that names `gone` after the check waits on the row lock and then fails on its foreign key when the printer is gone (`stock_moves.entity_id`), or would set `printer_id` NULL (`ON DELETE SET NULL`): the lock makes Go's insert wait, and its retry after the commit finds the printer gone and is refused. `PRINTER_REFERENCES` loses `stock_units`; `repoint_entity` loses its `UPDATE stock_moves`.
-- `test_no_python_stock_writes.py`: `git grep`-style scan of `backend/scadbuddy/**/*.py` (not `migrations/`) for `INSERT INTO|UPDATE|DELETE FROM` followed by `items`, `item_kinds`, `stock_lots`, `stock_units`, `stock_moves`; the only allowed hits are `inventory/offers.py` (`supplier_offers`, `offer_price_points` are not stock tables, K3) — so the test fails on any stock-table write.
+- Shared: every workflow here is Python, on the `library` queue (`SCADBUDDY_TEMPORAL_TASK_QUEUE_LIBRARY`), whose worker runs in the API process: its commit and record steps write Python-owned rows, which only the API may write (root CLAUDE.md #5295). AUTO_UPGRADE through `Versioned*` in `main.LIBRARY_WORKFLOWS`; they replay `tests/fixtures/order_stock_histories/`, and a later change to their commands goes behind `workflow.patched`. A Go step is `workflow.execute_activity("inventory.<Name>", {key, actor, params, body}, task_queue="inventory", activity_id=key, schedule_to_close_timeout=24 h, start_to_close_timeout=30 s, retry_policy=RetryPolicy(maximum_interval=30 s))`, by type name. A Python step has `start_to_close_timeout=30 s` and the same retry policy. A refusal is an answer, never a failure. Every Python step is idempotent by the workflow id (it checks for its own event or row first).
+- `stock_start.py`: `def start_and_wait(workflow, arg, *, id: str, wait: float = 15.0) -> Done | WorkflowAccepted` (sync, through `asyncio.run_coroutine_threadsafe` on the app's loop): `start_workflow(…, id=id, task_queue=<library>, id_conflict_policy=USE_EXISTING, id_reuse_policy=ALLOW_DUPLICATE_FAILED_ONLY)`; `WorkflowAlreadyStartedError` (it succeeded before) → `get_workflow_handle(id)`; wait up to `wait` on the result. `WorkflowAccepted{workflow_id, kind, started_at, repeated}` is answered with status 202 by the route. A start that cannot reach Temporal → 503 `inventory_unavailable`, and nothing was written. A workflow whose result is a refusal → the route raises it as today's `LifecycleError` (its 409/422 and code).
+- Ids (R-K1-29): `order_item:<item_id>:<op>:<request key>` for one item (`op` is `fulfil`, `accept`, `unfulfil`), `order:<order_id>:fulfil:<request key>` for the bulk route, `lot:<lot_id>:recost:<request key>`, `entity_merge:printer:<gone>:<kept>`. The request key is the route's `Idempotency-Key` (the browser's and the agent's `command` send one, so their repeats attach), else a new uuid. The stock keys inside are made in the commit step under the order's lock: `order_item:<item_id>:parts:<n>:<part_item_id>` (`n` = 1 + the item's earlier `parts.returned` events), `…:return:<part_item_id>` for a give-back.
+- Migration: `order_items ADD parts_workflow_id text` (the open fulfil or unfulfil workflow of the item; NULL when none). `OrderItem` gains `parts_settling: WorkflowAccepted | None`, read from it.
+- `FulfilOrderItem` (input `{order_id, op: "fulfil" | "accept" | "unfulfil", lines: [{item_id, quantity?, fulfilment_id?}], actor}`; R-K1-27, R-K1-30):
+  1. `orders_fulfil_commit`: one transaction under the order's lock (`_lock`), with every check and write that `fulfil_items`, `accept_fulfilment` or `unfulfil_item` makes today, in the same order: `check_submitted`, `_producing`, the status checks, the attempt rows, `_accept_attempt` (`fulfilled`), `_rederive`, the audit rows. Before the commit, `GET …/items/{item_id}/estimate?qty=` per part (Go's read) refuses `bad_quantity` as phase 2 did. It sets `order_item_parts.used` (or clears it for an unfulfil) and `parts_workflow_id`, and returns the stock calls `[{key, item_id, qty}]`. A refusal (an order on hold, an item not open, a quantity too large) rolls back and ends the workflow with that refusal: nothing was written. When an item's `parts_workflow_id` names another open workflow, it commits nothing and returns `wait_for`; the workflow then runs `orders_await_workflow(wait_for)` (heartbeats each 10 s while it awaits that handle's result) and step 1 again. So a fulfil and an unfulfil of one item never overlap, and nobody retries by hand.
+  2. Per stock call, in `item_id` order: `inventory.Take` (or `inventory.GiveBack` for an unfulfil).
+  3. `orders_parts_record`: under the order's lock, `parts.used` (or `parts.returned`) with the answers' moves, `parts.stock_refused` per refusal, `parts_workflow_id = NULL`; then `order_item.changed`. A second run finds its event (`detail.workflow = <id>`) and writes nothing.
+  A workflow with no stock call (an item without parts) still runs step 1 and step 3; a fulfil never commits outside it.
+- `RecostLot` (input `{lot_id, cost, actor}`): 1. `orders_recost_orders`: the orders whose moves name the lot (Go's read); 2. `inventory.Recost` with `{orders}`; `recost_orders_moved` → step 1 and 2 again, at most 3 times, then the workflow ends with that refusal (Go wrote nothing); 3. `orders_recost_record`: under the named orders' locks, in id order, the cost events. Nothing is committed before step 2 answers.
+- `MergePrinters` (input `{gone, kept, then: "link" | "ensure", args, actor}`; R-K1-28): 1. `inventory.Repoint` with `{kind: "printer", gone, kept}`; 2. `printers_merge_commit`: the caller's whole transaction as today (`link_bambuddy`'s or `_ensure_locked`'s, with `_merge`), which first locks the gone printer `FOR UPDATE` and checks that no stock row names it (`stock_units.printer_id`, or a `stock_moves.entity_id` of `printer:gone`); a row that a stock write added since → it rolls back and returns `again`, and the workflow runs step 1 and 2 again, at most 3 times, then fails with `merge_busy` (nothing of the merge written). It returns the kept row. The store starts the workflow before it writes anything, only when it is about to merge (`holder` found as today, read without a lock); with no merge to do, it runs today's transaction inline. `link_bambuddy`'s route answers the row, or 202 with `WorkflowAccepted`. `ensure_bambuddy_written`'s CRUD route answers the row, or 202; the print worker's `RemotePrinterStore` follows a 202 by polling `GET …/print/printers/merge?id=<workflow id>` (new, area `printers`) until the row comes (its caller, an activity, waits; no person). `sync_printers` reports the printer as action `merging` with the workflow id, and the entry is final when the workflow ends. No 503 `stock_pending`: only a failed start answers 503.
+- `PRINTER_REFERENCES` loses `stock_units`; `repoint_entity` loses its `UPDATE stock_moves` (the printer merge is its only caller).
+- Frontend: the fulfil, accept and unfulfil callers (`itemActions.ts`, `ItemsBulk.tsx`, `Unfulfil.tsx`) and the re-cost go through `command`; `OrderItemsTable.tsx` shows `StillWorking` with "Order fulfilled; stock still settling" while `parts_settling` is set, until `order_item.changed` on `order:<id>` brings the item with it empty. No button: nothing for a person to do. The printer link shows `StillWorking` on its 202. Mocks: `mocks/features/orders/orders.ts`. Agent: `order_item_fulfil`, `order_fulfil`, `order_item_unfulfil` and the printer link tools say "accepted; it finishes by itself (workflow <id>)" on a 202; no new tool.
+- `test_no_python_stock_writes.py`: `git grep`-style scan of `backend/scadbuddy/**/*.py` (not `migrations/`) for `INSERT INTO|UPDATE|DELETE FROM` followed by `items`, `item_kinds`, `stock_lots`, `stock_units`, `stock_moves`; the only allowed hits are `inventory/offers.py` (`supplier_offers`, `offer_price_points` are not stock tables, K3).
 
-- [ ] **Step 1: Write the failing tests** (the fake Temporal client of Task 13):
-  - `test_fulfil_takes_stock_through_an_activity`: fulfil an item with 2 of a part → one `SettleOrderParts` `order_item:oi1:parts:1`, whose `inventory.Take` has key `order_item:oi1:parts:1:<part>`, qty `"2"`; one `parts.used` event with the answer's amount.
-  - `test_unfulfil_then_fulfil_uses_new_keys`: workflows `…:parts:1`, `…:parts:1:return`, `…:parts:2`; Take keys `…:parts:1:<part>`, `…:parts:2:<part>`.
-  - `test_a_failed_start_fails_the_fulfil`: `start_workflow` raises `RPCError` → 503 `inventory_unavailable`; the item is fulfilled; no `parts.used`.
-  - `test_a_slow_take_answers_202_settling` (`test_settle_order_parts.py`, a real dev server; a test worker registers a fake `@activity.defn(name="inventory.Take")` on queue `inventory` that blocks until the test releases it, and counts its runs): fulfil → 202, the item's `parts_settling.workflow_id == "order_item:oi1:parts:1"`, no `parts.used`. Release the take → the workflow ends, exactly one `parts.used`, `parts_settling` reads empty, one `order_item.changed` published; the fake ran once.
-  - `test_a_fulfil_retry_attaches_to_the_workflow`: while the take blocks, fulfil the item again with the same `n` → 202 with the same workflow id, one execution in Temporal; after release, one `parts.used`; a third fulfil after it ended → the stored result, no new run.
-  - `test_a_failed_record_is_retried_without_a_second_take`: `orders_parts_record` raises on its first attempt → Temporal retries it; one `parts.used`; the fake take ran once.
-  - `test_settle_order_parts_replays` (`test_settle_order_parts_replay.py`): the recorded histories replay with `Replayer`.
-  - `test_a_refused_take_is_recorded`: the take answers 422 `bad_quantity` → the workflow succeeds, one `parts.stock_refused`, no `parts.used`.
-  - `test_bad_quantity_refuses_before_the_commit`: the estimate route says overflow → `LifecycleError("bad_quantity")`, the order not changed, no activity.
-  - `test_recost_retries_when_another_order_moved`: the first answer is 409 `recost_orders_moved`, the second a result → two activities with two keys, events once.
-  - `test_a_merge_repoints_stock_first`: a unit with `printer_id = gone` → one `inventory.Repoint` with id `entity_merge:printer:gone:kept`, then the merge commits; with no stock row, no activity.
-  - `test_no_python_stock_writes`.
-  - The phase 2 cases of `test_parts_lifecycle.py` still pass with the fake.
-- [ ] **Step 2: Run** `cd backend && uv run --frozen pytest tests/orders/test_stock_activities.py tests/workflows/test_settle_order_parts.py tests/test_settle_order_parts_replay.py tests/orders/test_parts_lifecycle.py tests/printers tests/test_no_python_stock_writes.py -q` — Expected: FAIL.
-- [ ] **Step 3: Implement**; delete the Python stock writes and `test_stock.py`. Record the replay fixtures from a run of `test_settle_order_parts.py` (fulfil, a slow take, a refusal, a record retry).
+- [ ] **Step 1: Write the failing tests.** `test_order_stock.py` runs a real dev server; a test worker registers fakes `@activity.defn(name="inventory.Take")`, `"inventory.GiveBack"`, `"inventory.Recost"`, `"inventory.Repoint"` on queue `inventory`, each of which counts its runs and can block until the test releases it:
+  - `test_fulfil_takes_stock_through_the_workflow`: fulfil an item with 2 of a part → one `FulfilOrderItem`; the item is `fulfilled`; one Take with key `order_item:oi1:parts:1:<part>`, qty `"2"`; one `parts.used` with the answer's amount; `parts_settling` empty.
+  - `test_a_failed_start_writes_nothing`: `start_workflow` raises `RPCError` → 503 `inventory_unavailable`; the item is still `approved`, no attempt row, no audit row, no `parts.used`.
+  - `test_a_refusal_in_the_commit_writes_nothing`: the order on hold → the workflow ends with `order_on_hold`; the route answers 409 `order_on_hold`; no row written; no Take.
+  - `test_a_slow_take_answers_202_and_settles_by_itself`: the Take blocks → 202 with `workflow_id`; the item is `fulfilled` with `parts_settling` set; no `parts.used`. Release → one `parts.used`, `parts_settling` empty, one `order_item.changed`; the Take ran once.
+  - `test_a_repeat_attaches`: while the Take blocks, the same `Idempotency-Key` again → 202 with the same workflow id, one execution; after release, one `parts.used`; the same key after the end → the stored result, no new run.
+  - `test_a_failed_record_is_retried_without_a_second_take`: `orders_parts_record` raises on its first attempt → retried; one `parts.used`; the Take ran once.
+  - `test_unfulfil_waits_for_the_fulfil`: an unfulfil while the fulfil's Take blocks → 202; nothing of the unfulfil written; release → the fulfil records `parts.used`, then the unfulfil commits and gives back with key `…:parts:1:return:<part>`; `parts.returned` once; no person acted.
+  - `test_unfulfil_then_fulfil_uses_new_keys`: Take `…:parts:1:<part>`, GiveBack `…:parts:1:return:<part>`, Take `…:parts:2:<part>`.
+  - `test_bulk_fulfil_is_one_workflow`: two items in one call → one workflow `order:<id>:fulfil:<key>`; a refusal of the second item → nothing written for either (today's invariant).
+  - `test_bad_quantity_refuses_in_the_commit`: the estimate route says overflow → 409 `bad_quantity`, the order not changed, no Take.
+  - `test_a_refused_take_is_recorded`: the Take answers 422 `bad_quantity` → the workflow succeeds, one `parts.stock_refused`, no `parts.used`.
+  - `test_recost_retries_when_another_order_moved`: the first Recost answers 409 `recost_orders_moved`, the second a result → two Recost runs, the events once; three refusals → the route answers 409 and nothing was written.
+  - `test_a_merge_repoints_then_merges`: a unit with `printer_id = gone`; `link_bambuddy` → one `MergePrinters`, one Repoint `entity_merge:printer:gone:kept`, then the merge; the gone row is gone; the route answers the kept row. A slow Repoint → 202, and the merge commits when it ends; the gone row stays until then.
+  - `test_a_merge_with_no_stock_runs_inline`: no stock row → no workflow, today's transaction.
+  - `test_the_sync_reports_merging`: `sync_printers` with a slow Repoint → the entry's action is `merging` with the workflow id.
+  - `test_order_stock_replays` (`test_order_stock_replay.py`): the recorded histories replay with `Replayer`.
+  - `test_no_python_stock_writes`; the phase 2 cases of `test_parts_lifecycle.py` still pass.
+  - Frontend `OrderItemsTable.test.tsx`: `a slow fulfil shows stock still settling until parts.used` (the mock answers 202, then sends `order_item.changed` with `parts_settling` null → the notice goes); there is no "Settle" button. Agent `orders.test.ts`: the 202 text.
+- [ ] **Step 2: Run** `cd backend && uv run --frozen pytest tests/orders/test_stock_activities.py tests/workflows/test_order_stock.py tests/test_order_stock_replay.py tests/orders/test_parts_lifecycle.py tests/printers tests/test_no_python_stock_writes.py -q`, `cd frontend && pnpm exec vitest run src/components/orders`, `cd agent && pnpm exec vitest run test/orders.test.ts` — Expected: FAIL.
+- [ ] **Step 3: Implement**; delete the Python stock writes and `test_stock.py`. Record the replay fixtures from a run of `test_order_stock.py` (a fulfil, a slow take, a refusal, a record retry, an unfulfil that waits, a recost retry, a merge).
 - [ ] **Step 4: Run** the tests, then `uv run --frozen pytest tests/orders tests/printers tests/entities -n auto -q` — Expected: PASS.
-- [ ] **Step 5: Commit** `feat(orders): order parts settle through a workflow; re-costs and printer merges write stock through Go's activities (#6949, K1 6/7)`
+- [ ] **Step 5: Commit** `feat(orders): fulfil, re-cost and printer merge are workflows; Python writes no stock (#6949, K1 6/7)`
 
 ---
 
@@ -855,8 +869,9 @@ Phase 2's `tests/api/test_inventory.py` and `test_inventory_stock.py` cases for 
 7. Round 4: the event stream is the history; a durable subscriber writes the history
    tables (R-K1-12, R-K1-13). K1 depends on #7819 (R-K1-26).
 8. Round 4: a slow fulfil answers 202, "order fulfilled; stock still settling" (R-K1-27).
-9. Round 5: a workflow, `SettleOrderParts`, settles the order's stock; no manual settle
-   (R-K1-27). The printer merge stays synchronous (R-K1-28).
+9. Round 5: nothing manual and no sweeps. A change that crosses the line starts its
+   workflow before it commits anything (`FulfilOrderItem`, `RecostLot`, `MergePrinters`;
+   R-K1-27 to R-K1-30).
 
 ## Rulings (R-K1-n, made in this plan; the owner may change them)
 
@@ -915,20 +930,16 @@ Phase 2's `tests/api/test_inventory.py` and `test_inventory_stock.py` cases for 
   `handler_config.changed` with `bus.PublishIn` in the save's transaction, and the
   subscriber writes `handler_config_history`. `handler_value.changed` and its table come
   with `handler_values` in K2, by the same rule.
-- **R-K1-14 (replaces the first draft's outbox). Orders.** Fulfil commits the order change,
-  then starts `SettleOrderParts` (id `order_item:<id>:parts:<n>`, queue `library`): the Go
-  activity `inventory.Take` per part, then the Python activity that records `parts.used`.
-  Temporal retries each step; there is no outbox, no sweep and no manual settle. A failed
-  start fails the call (503, safe to retry); no answer in 15 s answers 202 (R-K1-27).
-  Unfulfil does the same with `inventory.GiveBack`. A re-cost executes `inventory.Recost`
-  inside its order-locked transaction, as before.
-- **R-K1-15 (replaces "merges keep their SQL"). Printer merge.** The merge locks the gone
-  printer, checks for stock rows naming it, and if any, rolls back, executes
-  `inventory.Repoint` with no transaction open, and runs again. Go's later insert naming the
-  gone printer waits on the lock and then fails on the foreign key (or would be nulled by
-  `ON DELETE SET NULL` on `stock_units.printer_id`, which the check under the lock covers).
-  `entities/registry.py` `repoint_entity` loses its stock `UPDATE`: the printer merge is
-  its only caller (`git grep repoint_entity`).
+- **R-K1-14 (replaces the first draft's outbox). Orders.** A fulfil, an accept, an
+  unfulfil and a re-cost start their workflow (`FulfilOrderItem`, `RecostLot`, queue
+  `library`) before they write anything; the workflow's first activity commits the order
+  change, then Go's activity runs, then a Python activity records the result (Task 16).
+  Temporal retries each step; there is no outbox, no sweep, no button and no manual retry.
+- **R-K1-15 (replaces "merges keep their SQL"). Printer merge.** `MergePrinters`:
+  `inventory.Repoint`, then an activity runs the caller's merge transaction, which locks
+  the gone printer and checks that no stock row names it (a stock row added since → step 1
+  and 2 again). `entities/registry.py` `repoint_entity` loses its stock `UPDATE`: the
+  printer merge is its only caller (`git grep repoint_entity`).
 - **R-K1-16. Readers keep their reads.** `orders/parts.py:421`, `orders/store.py:2661`
   (and so `orders/costs.py`), `entities/sweep.py:31`, `entities/registry.py:203` read stock
   tables; reads are not writes (§6.1). They move with #7667 phase 5, or in K2 where they need
@@ -966,9 +977,9 @@ Phase 2's `tests/api/test_inventory.py` and `test_inventory_stock.py` cases for 
   policies are `USE_EXISTING` and `ALLOW_DUPLICATE_FAILED_ONLY`: a repeat while it runs
   attaches (202 again), a repeat after a success answers the stored result, a repeat after a
   failure or a timeout runs again, and Go's `crud_requests` check stops a second commit. A
-  repeat with the same key is never an error. Order fulfil answers 202 "stock still settling" when the wait on `SettleOrderParts`
-  ends (R-K1-27); the printer merge answers 503 `stock_pending` (R-K1-28). Both answer 503 when the start
-  fails, safe to retry with the same key. A running row older than 60 s is checked with Temporal's Describe (Task 12).
+  repeat with the same key is never an error. Order fulfil, re-cost and the printer link answer 202 when the wait on their workflow
+  ends (R-K1-27, R-K1-28). All answer 503 when the start
+  fails, and then nothing was written. A running row older than 60 s is checked with Temporal's Describe (Task 12).
 - **R-K1-25. Design wording for the review findings** (the coordinator puts it in the
   design, or it stays here):
   - Finding 2 (§6.1a "Merges"): "The foreign key protects only `stock_moves.entity_id`.
@@ -994,27 +1005,53 @@ Phase 2's `tests/api/test_inventory.py` and `test_inventory_stock.py` cases for 
   default; each history event also carries `retention_seconds: 0`, which comes first in
   #7819's precedence, so no `SCADBUDDY_EVENT_LOG_RETENTION_KINDS`, `_SECONDS` or `_ROWS`
   value can prune it (Task 1 `test_history_events_survive_every_prune`).
-- **R-K1-27. A slow order fulfil answers 202, and a workflow settles it** (the
-  coordinator, round 5; replaces round 4's manual settle). Fulfil commits, starts
-  `SettleOrderParts` and waits up to 15 s for its result. Not done → 202 with the route's
-  usual body, each item's `parts_settling.workflow_id` set ("order fulfilled; stock still
-  settling"). The workflow's second step records `parts.used` when the take ends, so no
-  person, button, tool or settle route is needed. The workflow is Python on `library`
-  because its record step writes orders rows, which only the API may write; its take step
-  runs on Go's `inventory` queue by type name. A retry of fulfil attaches (Use Existing),
-  reads the result (after a success) or runs it again (after a failure, Allow Duplicate
-  Failed Only); Go's `crud_requests` keeps the take to one. `inventory_operations` gains
-  `workflow_id`, so the stale-row check describes the workflow (Task 12).
-- **R-K1-28. The printer merge stays synchronous** (checked in round 5). Its callers need
-  the kept row in the same call: `link_bambuddy` (`api/printers.py` l.440, a person's link,
-  answers the linked row) and `ensure_bambuddy_written` (the Bambuddy printer sync,
-  `printers/bambuddy_sync.py` l.391, and the print worker's CRUD route, `api/crud_print.py`
-  l.795, which act on the row it returns). A workflow would answer before the merge, with
-  the gone row still in place. So the merge repoints first (`write_blocking`, up to 15 s),
-  then merges in one transaction; past 15 s it answers 503 `stock_pending` with nothing of
-  the merge written, and the repoint goes on. The retry (the person, the next sync pass,
-  the worker's CRUD retries) uses the same key and finds the repoint done. Nothing is left
-  half done, so no workflow is needed to finish it.
+- **R-K1-27. Order fulfil is the workflow `FulfilOrderItem`** (owner 2026-11-25, design
+  §6.1a "Nothing manual, no sweeps"; replaces round 4's manual settle and round 5's
+  `SettleOrderParts`). The route checks its input, starts the workflow, and waits up to
+  15 s. Step 1 commits the order change, step 2 is Go's `inventory.Take`, step 3 records
+  `parts.used`. Not done in 15 s → 202, and the item shows "stock still settling" until
+  step 3's `order_item.changed`. A failed start writes nothing (503). A repeat with the
+  same key attaches. The workflow is Python on `library` because steps 1 and 3 write
+  orders rows, which only the API may write; step 2 runs on Go's `inventory` queue by type
+  name. `inventory_operations` has `workflow_id`, so its read asks Temporal about the
+  workflow (Task 12).
+- **R-K1-28. The printer merge is the workflow `MergePrinters`** (owner 2026-11-25,
+  replacing round 5's synchronous merge). Its callers wanted the kept row in the same call
+  (`link_bambuddy`, `api/printers.py` l.440; `ensure_bambuddy_written`, from
+  `printers/bambuddy_sync.py` l.391 and `api/crud_print.py` l.795). They still get it when
+  the workflow ends within 15 s. Past that, the link route answers 202, the sync reports
+  `merging`, and the print worker's client follows the 202 to the row; the gone row stays
+  until the merge commits, so no reader sees half a merge. Only a failed start answers 503.
+  A printer link that needs no merge runs inline, as today.
+- **R-K1-29. Workflow ids come from the request key.** `order_item:<item>:<op>:<key>`,
+  `order:<order>:fulfil:<key>`, `lot:<lot>:recost:<key>`, with the route's
+  `Idempotency-Key` (else a uuid), and `entity_merge:printer:<gone>:<kept>`. The stock keys
+  need the fulfilment cycle `n`, which only the order's lock can read, so step 1 makes
+  them and returns them; a repeat with the same request key replays step 1's result, so
+  Go sees the same keys. Two requests with different keys for one item: the second's
+  step 1 finds the item no longer open and ends with that refusal, writing nothing.
+- **R-K1-30. How the fulfil transaction splits** (checked against `orders/lifecycle.py`
+  `fulfil_items` l.5052, `accept_fulfilment` l.5199, `_accept_attempt`, `unfulfil_item`
+  l.5257, `_lock_parts_of` l.5356, `_use_parts` l.5366). Today one transaction holds the
+  order's lock (`_lock`), checks the order and every item, locks the part items in
+  `item_id` order (`_lock_parts_of`, R-P2-28), writes the attempts, takes the stock, sets
+  `order_item_parts.used`, rederives the status and writes the audit rows. The
+  invariants, and where each now holds:
+  - All or nothing over the call's items, and every check before any write: step 1, one
+    transaction under the order's lock, as today.
+  - `bad_quantity` before the commit: step 1 reads Go's estimate route before its commit
+    (a read takes no lock).
+  - The parts taken once per fulfilment cycle: the stock keys carry `n`, and Go's
+    `crud_requests` answers a repeated key.
+  - No deadlock between part items: each Go take is its own transaction on one item, so
+    the multi-item lock order is no longer needed and `_lock_parts_of` goes.
+  - A fulfil and an unfulfil of one item never interleave: `order_items.parts_workflow_id`
+    is set in step 1 and cleared in step 3, under the order's lock; a second workflow's
+    step 1 sees it and waits for that workflow (`orders_await_workflow`), then runs.
+  - The order's status follows the attempts, not the stock: `_rederive` stays in step 1,
+    so an order reads `ready` once fulfilled, while its parts settle.
+  - The cost of the parts on the order (`parts.used`) is written once, in step 3, from
+    Go's answers.
 
 ## Self-review
 
@@ -1030,17 +1067,24 @@ Phase 2's `tests/api/test_inventory.py` and `test_inventory_stock.py` cases for 
   `store.Answer`, `store.Actor`, `flow.Flow`, `activities.Activities`,
   `activities.Register`, `activities.Record`, `inventory.Areas`, `inventory.Caller`,
   `scadbuddy_publish_event`, `bus.PublishIn`, `history.Apply`, `history.Run`,
-  `event_subscribers`, `parts_settling`, `SettleOrderParts`, `SettleParts`,
-  `orders_parts_record`, `start_settle`, `publish.Notify`, `store.StartOperation`, `store.FinishOperation`, `store.NoteError`,
+  `event_subscribers`, `parts_settling`, `parts_workflow_id`, `FulfilOrderItem`,
+  `RecostLot`, `MergePrinters`, `WorkflowAccepted`, `start_and_wait`,
+  `orders_fulfil_commit`, `orders_parts_record`, `orders_await_workflow`,
+  `printers_merge_commit`, `publish.Notify`, `store.StartOperation`, `store.FinishOperation`, `store.NoteError`,
   `store.Operation`, `InventoryOperationEvent`, `ingest_inventory_operation`,
   `OperationAccepted`, `StillWorking`,
-  `InventoryCore.read`, `InventoryCore.write`, `InventoryCore.write_blocking` are used with
+  `InventoryCore.read`, `InventoryCore.write` are used with
   one spelling in every task. The 19 activity names in Task 12 are the ones Tasks 13 and
   16 start.
 - **No new caller.** Only the `inventory` caller exists; Go's activity record is a row in
   its own transaction plus an event (R-K1-22).
 - **History.** No writer inserts a history row; every history table has `event_seq` as its
   key and only `internal/history` writes it (Tasks 1, 7, 10).
+- **Nothing manual.** A grep for settle buttons, "retry later", "the person retries",
+  backstops, sweeps and repairs finds none in K1's design. The entities orphan sweep
+  (`entities/sweep.py`) is phase 1's existing housekeeping, which K1 only teaches to skip
+  related entities; the only manual actions are a person's Refresh and manual readings
+  (§4.7), both K2 features.
 - **No outbox, no sweep.** No task adds a table of pending calls or a housekeeping step;
   every write that crosses the line is an activity start.
 - **Proportion.** The plan gives signatures, tests and values; no task writes a body that
