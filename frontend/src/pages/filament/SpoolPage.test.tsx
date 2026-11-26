@@ -721,6 +721,12 @@ describe('the spool page\'s history (#6269)', () => {
     expect(within(metrics).getByText('Empty around').parentElement).toHaveTextContent(new Date('2027-03-15T00:00:00Z').toLocaleDateString(undefined, { dateStyle: 'medium', timeZone: 'UTC' }))
     expect(within(metrics).getByText('30 g')).toBeInTheDocument()
     expect(within(metrics).getByText('±20 g')).toBeInTheDocument()
+    // #7685: job-d's 35 g over 11.7 m of 1.75 mm filament is 1.24 g/cm³ (`impliedDensity`),
+    // 2% under the material's 1.27: inside the tolerance, so no mismatch sentence.
+    expect(within(metrics).getByText('Used').parentElement).toHaveTextContent('3 prints, 40 g each, 11.7 m')
+    const density = within(metrics).getByText('Density').parentElement!
+    expect(density).toHaveTextContent('1.24 g/cm³')
+    expect(density).not.toHaveTextContent('check the type')
     const timeline = within(history).getByRole('list', { name: 'History of this spool' })
     expect(within(timeline).getByRole('link', { name: 'Print 41' })).toHaveAttribute('href', '/prints/41')
     expect(within(timeline).getByRole('link', { name: 'Its order' })).toHaveAttribute('href', `/orders/${ORDER_CLOSED}`)
@@ -743,7 +749,8 @@ describe('the spool page\'s history (#6269)', () => {
     await user.click(within(dialog).getByRole('button', { name: 'Reset counter' }))
     await waitFor(() => expect(posts).toEqual([{ kind: 'consumed_reset' }]))
     await waitFor(() => expect(used()).toHaveTextContent(/^Used0 g/))
-    expect(used()).toHaveTextContent('120 g in all')
+    // #7685: the seed's one lengthed plate (job-d, 11.7 m) shows beside the lifetime grams.
+    expect(used()).toHaveTextContent('120 g, 11.7 m in all')
     expect((await getSpool(spoolId(2))).grams_left).toBe(820)
   })
 
