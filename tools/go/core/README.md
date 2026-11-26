@@ -1,7 +1,7 @@
 # scadbuddy-core
 
 ScadBuddy's API in Go (#7667). It answers the areas it has and gives every other request,
-unchanged, to the Python API: WebSockets, SSE and large bodies included. It is not deployed yet.
+unchanged, to the Python API: WebSockets, SSE and large bodies included. On prod it is the API pod's front on 8080 and 8082 (eh-homelab/clusters#4334, #4366).
 
 | Variable | Default | What |
 |---|---|---|
@@ -108,6 +108,57 @@ admits only 8080 and 8082, is what keeps other pods off it.
 Loopback, not a Unix socket: `openscad-lsp` in Python's container may open `AF_UNIX` sockets but
 no TCP ones (`editor/nonet.py`). Over a `unix://` upstream uvicorn gives Python no client
 address, so `core/proxies.py` ignores the `X-Forwarded-For` the front sets: use TCP.
+
+A forward that Python refuses (nothing listens yet, at a pod's start) is dialled again every
+250 ms, for at most 30 s or until its client goes away; then the answer is 502. This holds only
+until Python has taken one connection: after that, Python is up, and a refusal (Python restarted)
+is a 502 at once. Only the
+dial is tried again, so no request reaches Python twice.
+
+## Telemetry
+
+Core sends OpenTelemetry traces, metrics and logs over OTLP/HTTP, set up by the shared
+`tools/go/telemetry` module (#7667, epic #988). Only the standard `OTEL_*` variables set it:
+
+| Variable | What |
+|---|---|
+| `OTEL_EXPORTER_OTLP_ENDPOINT` | The collector's base URL: `/v1/traces`, `/v1/metrics` and `/v1/logs` go there. Unset, with no signal's own endpoint, telemetry is off and costs nothing |
+| `OTEL_EXPORTER_OTLP_TRACES_ENDPOINT`, `…_METRICS_ENDPOINT`, `…_LOGS_ENDPOINT` | One signal's full URL, used as is |
+| `OTEL_TRACES_EXPORTER`, `OTEL_METRICS_EXPORTER`, `OTEL_LOGS_EXPORTER` | Unset or a list that names `otlp`: on. `none` turns that signal off; any other value too, with a warning |
+| `OTEL_SDK_DISABLED` | `true` turns every signal off |
+| `OTEL_SERVICE_NAME` | Default `scadbuddy-core` |
+| `OTEL_RESOURCE_ATTRIBUTES` | Added to the resource, as for the API (`deployment.environment=prod`) |
+| `OTEL_TRACES_SAMPLER`, `…_ARG` | Replace the default sampler, which is the API's: a client span with no parent (a query from a background loop) is dropped |
+| `OTEL_EXPORTER_OTLP_HEADERS`, `…_TIMEOUT`, `…_CERTIFICATE`, `OTEL_METRIC_EXPORT_INTERVAL`, `OTEL_BSP_*`, `OTEL_BLRP_*` | As the SDK reads them |
+
+A setting telemetry cannot use (such as a malformed endpoint URL) is logged once as
+"telemetry is off", and core runs with every signal off; it never stops core.
+
+- **Traces.** Each request on both listeners is a server span, a child of the `traceparent` it
+  carries. A route Go answers names it as the API's FastAPI spans are (`GET
+  /api/v1/internal/crud/agent/sessions/{session_id}/events/last-seq`) and sets `http.route`;
+  spans carry `http.method`, `http.status_code` and `http.request.method`,
+  `http.response.status_code`. A forward is a client span to the upstream, and Python gets its
+  `traceparent`, so Python's span is a child of core's: one trace. Every query, batch and pool
+  wait is a span (`db.system=postgresql`, the statement's text with its values bound apart, named
+  by `db.query.summary`). A 5xx is an error; a problem records `scadbuddy.failure_class` and
+  `scadbuddy.problem.reason`. `/healthz`, `/metrics` and `/telemetry/v1/traces` are not traced,
+  as in Python. No path, query string or header is recorded.
+- **Metrics.** `http.server.request.duration`, `http.server.request.body.size`,
+  `http.server.response.body.size` (by method, route, status), the same three as
+  `http.client.*` for the forward, `db.client.operation.duration`,
+  `db.client.connection.count` (used, idle), `db.client.connection.max` and
+  `pgxpool.acquire.waits`, `…wait_time`, `…canceled`; the Go runtime's (`go.goroutine.count`,
+  `go.memory.used`, `go.memory.class`, `go.gc.count`, `go.gc.pause.time`, `go.processor.limit`,
+  `go.schedule.duration`, …) and the process's (`process.cpu.time`, `process.memory.usage`,
+  `process.unix.file_descriptor.count`, `process.uptime`). Always cumulative.
+- **Logs.** The JSON on stderr stays, with every attribute. With logs on, each record also goes
+  over OTLP, and a record logged in a request carries its `trace_id` and `span_id` (on stderr
+  too). The OTLP copy leaves out the attributes `path`, `error`, `err`, `url`, `query` and
+  `dsn`, and any value that is a URL with credentials; a message's credentials are replaced
+  (`telemetry.DefaultKeep`).
+
+At a stop, the servers drain and the three signals flush within the 20 s shutdown.
 
 ## Where it differs from Python
 

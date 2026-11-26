@@ -115,13 +115,14 @@ func TestHelpExitsZero(t *testing.T) {
 
 func TestCredential(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "token")
-	read, opts := credential(config{CredentialFile: path})
-	if opts != nil {
-		t.Error("a fixed credential is renewed")
+	same := func(rt http.RoundTripper) http.RoundTripper { return rt }
+	read, opts := credential(config{CredentialFile: path}, same)
+	if len(opts) != 1 {
+		t.Error("a fixed credential is renewed, or its requests are not wrapped")
 	}
 	for _, c := range []config{{CoreURL: "http://core", TokenFile: "/a"}, {CoreURL: "http://core", BootstrapFile: "/b"}} {
-		if _, opts := credential(c); len(opts) != 1 {
-			t.Errorf("%+v: an exchanged credential with no renewal on a 401", c)
+		if _, opts := credential(c, same); len(opts) != 2 {
+			t.Errorf("%+v: an exchanged credential with no renewal on a 401, or not wrapped", c)
 		}
 	}
 	if _, err := read(); err == nil {
@@ -182,7 +183,8 @@ func TestHealthz(t *testing.T) {
 	}
 }
 
-// TestNoCoreImports: sbfleet and the binary reach core only over HTTP.
+// TestNoCoreImports: sbfleet and the binary reach core only over HTTP. The one other module
+// of the repo they use is telemetry, the OpenTelemetry setup every Go module shares.
 func TestNoCoreImports(t *testing.T) {
 	out, err := exec.Command("go", "list", "-deps", "./...").CombinedOutput()
 	if err != nil {
@@ -195,7 +197,7 @@ func TestNoCoreImports(t *testing.T) {
 			continue
 		}
 		mod, _, _ := strings.Cut(rest, "/")
-		if mod != "fleet" && mod != "fleetchat" {
+		if mod != "fleet" && mod != "fleetchat" && mod != "telemetry" {
 			t.Errorf("fleet depends on %s", pkg)
 		}
 	}

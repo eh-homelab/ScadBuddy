@@ -525,7 +525,7 @@ func python(t *testing.T, handler http.HandlerFunc) (front string) {
 	upstream := &http.Server{Handler: handler}
 	go upstream.Serve(listener)
 	t.Cleanup(func() { upstream.Close() })
-	next, err := newUpstream("unix://"+socket, nil)
+	next, err := newUpstream("unix://"+socket, nil, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -624,7 +624,10 @@ func TestAForwardedUpgradeIsATunnel(t *testing.T) {
 }
 
 func TestAnUpstreamThatIsDownIsABadGateway(t *testing.T) {
-	next, err := newUpstream("unix://"+filepath.Join(t.TempDir(), "none"), nil)
+	was := dialWait
+	dialWait = 0
+	t.Cleanup(func() { dialWait = was })
+	next, err := newUpstream("unix://"+filepath.Join(t.TempDir(), "none"), nil, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -637,7 +640,7 @@ func TestAnUpstreamThatIsDownIsABadGateway(t *testing.T) {
 	res.Body.Close()
 	expect(t, res.StatusCode, http.StatusBadGateway)
 	for _, bad := range []string{"", "ftp://x", "8080"} {
-		if _, err := newUpstream(bad, nil); err == nil {
+		if _, err := newUpstream(bad, nil, nil); err == nil {
 			t.Errorf("%q was taken", bad)
 		}
 	}
@@ -651,7 +654,7 @@ func TestTheCRUDPortMayNotBeTheMainAddress(t *testing.T) {
 		"SCADBUDDY_CORE_CRUD_LISTEN":   "127.0.0.1:0",
 		"SCADBUDDY_CORE_CRUD_UPSTREAM": "http://127.0.0.1:2",
 	}
-	err := run(context.Background(), func(k string) string { return env[k] })
+	err := run(context.Background(), func(k string) string { return env[k] }, nil)
 	if err == nil || !strings.Contains(err.Error(), "needs its own") {
 		t.Fatalf("got %v", err)
 	}
@@ -672,7 +675,7 @@ func TestAFailedBindLeavesNothingListening(t *testing.T) {
 	ok := http.HandlerFunc(func(http.ResponseWriter, *http.Request) {})
 	if err := serve(context.Background(), map[string]http.Handler{
 		address: ok, taken.Addr().String(): ok,
-	}); err == nil {
+	}, func(context.Context) {}); err == nil {
 		t.Fatal("a taken address was served")
 	}
 	again, err := net.Listen("tcp", address)
@@ -689,7 +692,7 @@ func TestTheCRUDPortNeedsPythonsCRUDListener(t *testing.T) {
 		"SCADBUDDY_CORE_LISTEN":      "127.0.0.1:0",
 		"SCADBUDDY_CORE_CRUD_LISTEN": "127.0.0.1:1",
 	}
-	err := run(context.Background(), func(k string) string { return env[k] })
+	err := run(context.Background(), func(k string) string { return env[k] }, nil)
 	if err == nil || !strings.Contains(err.Error(), "SCADBUDDY_CORE_CRUD_UPSTREAM") {
 		t.Fatalf("got %v", err)
 	}
