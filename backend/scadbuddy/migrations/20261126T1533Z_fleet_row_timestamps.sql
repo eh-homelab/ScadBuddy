@@ -2,9 +2,10 @@
 -- fleet_channels (created_at), fleet_members (joined_at) and fleet_messages (sent_at) had
 -- theirs and never change; fleet_agents and fleet_deliveries had none.
 --
--- fleet_agents.created_at is when the fleet first saw the session; updated_at is when its row
--- last changed (core's fleet routes set it with the cursor). last_seen stays the time of its
--- latest call. Rows that exist get the earliest time on record for them.
+-- fleet_agents.created_at is when the fleet first saw the session; updated_at is when its
+-- cursor last moved (an inbox read or a rewind; core's fleet routes set it with the cursor).
+-- A call that only touches the row moves last_seen, the time of its latest call, and leaves
+-- updated_at alone. Rows that exist get the earliest time on record for them.
 ALTER TABLE fleet_agents
     ADD COLUMN created_at timestamptz,
     ADD COLUMN updated_at timestamptz;

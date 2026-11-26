@@ -479,6 +479,7 @@ func (f *Fleet) inbox(r *http.Request, p crud.Params) (any, error) {
 		if peek || len(out) == 0 {
 			return nil
 		}
+		// updated_at is when the cursor last moved: every write of cursor sets it (#7968).
 		_, err = tx.Exec(ctx, `UPDATE fleet_agents SET cursor = $2, updated_at = now() WHERE session_id = $1`,
 			session, out[len(out)-1].Seq)
 		return err
@@ -518,6 +519,7 @@ func (f *Fleet) rewind(r *http.Request, p crud.Params) (any, error) {
 				fmt.Sprintf("seq %d is past the agent's cursor (%d): a rewind only moves it back", seq, cursor),
 				"seq-ahead")
 		}
+		// updated_at is when the cursor last moved: every write of cursor sets it (#7968).
 		_, err = tx.Exec(ctx, `UPDATE fleet_agents SET cursor = $2, updated_at = now() WHERE session_id = $1`, session, seq)
 		return err
 	})
