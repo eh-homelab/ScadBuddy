@@ -627,6 +627,21 @@ def _make_dump(conn: Conn, paths: DataPaths, directory: Path, found: Found) -> D
     return made
 
 
+def _refuse_older_format(directory: Path, body: bytes) -> None:
+    """`SwitchRefusedError` when the manifest names an older `FORMAT`: a dump of a build
+    that wrote ``meta.json`` files (#7257), which this build cannot finish or undo."""
+    try:
+        manifest = json.loads(body)
+    except ValueError:
+        return
+    found = manifest.get("format") if isinstance(manifest, dict) else None
+    if isinstance(found, int) and found < FORMAT:
+        raise SwitchRefusedError(
+            f"the dump {directory} is of format {found} (an older build):"
+            " finish or roll it back with that build's image"
+        )
+
+
 def _load_dump(directory: Path) -> Dump | None:
     """The dump, whole; None where there is none yet."""
     if not directory.exists() or not any(directory.iterdir()):
@@ -637,6 +652,7 @@ def _load_dump(directory: Path) -> Dump | None:
     try:
         lines = (directory / MANIFEST).read_bytes().splitlines(keepends=True)
         body = b"".join(lines[:-1])
+        _refuse_older_format(directory, body)
         if not lines or lines[-1] != f"{_sha256(body)}\n".encode():
             raise damaged
         manifest = json.loads(body)

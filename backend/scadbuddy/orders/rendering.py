@@ -73,7 +73,7 @@ class Renders(Protocol):
 
 @dataclass(frozen=True)
 class RenderedOutput:
-    """The output a reference renders to: its id and its colours, as ``meta.json``
+    """The output a reference renders to: its id and its colours, as its row's ``meta``
     records them, the reference's ``render_key``, and the render job it was saved from
     (the output's ``job_id``)."""
 
@@ -109,7 +109,7 @@ def reference_matches(
     reference: Reference,
     schema: CustomizerSchema | None = None,
 ) -> OutputMeta | None:
-    """The output's ``meta.json`` when it is the reference's render (#4250 Ruling 7): its
+    """The output's row ``meta`` when it is the reference's render (#4250 Ruling 7): its
     ``slug``, ``model_version`` and normalised inputs, from one read of it. An arranged
     output records a content hash where a render records its commit, and an item pins
     the template's commit instead (#4565): no render of the reference remakes the

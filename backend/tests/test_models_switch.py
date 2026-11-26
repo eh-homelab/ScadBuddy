@@ -1165,6 +1165,21 @@ def test_a_damaged_dump_is_refused(world: World, name: str) -> None:
     assert_untouched(world, emptied=False)
 
 
+def test_a_dump_of_format_1_is_refused_with_its_own_reason(world: World) -> None:
+    with pytest.MonkeyPatch.context() as patch:
+        kill_after(patch, "dumped")
+        with pytest.raises(Killed):
+            world.run()
+    path = world.dump / "manifest.json"
+    manifest = json.loads(b"".join(path.read_bytes().splitlines(keepends=True)[:-1]))
+    body = json.dumps({**manifest, "format": 1}).encode() + b"\n"
+    path.write_bytes(body + f"{hashlib.sha256(body).hexdigest()}\n".encode())
+    for command in (world.run, world.rollback):
+        with pytest.raises(SwitchRefusedError, match="of format 1 \\(an older build\\)"):
+            command()
+    assert_untouched(world, emptied=False)
+
+
 def test_a_dump_of_rows_that_changed_since_is_refused(world: World) -> None:
     with pytest.MonkeyPatch.context() as patch:
         kill_after(patch, "dumped")

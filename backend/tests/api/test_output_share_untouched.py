@@ -109,7 +109,8 @@ def _save(client: TestClient, model: str, width: float) -> str:
     return output_id
 
 
-def test_no_output_path_touches_the_share(client: TestClient, model: str, share: Path) -> None:
+def test_no_output_path_touches_the_share(share: Path, client: TestClient, model: str) -> None:
+    """``share`` comes first, so the app's start (its `ensure`, its sweeps) is watched too."""
     state = _state(client)
     first = _save(client, model, 1)
     second = _save(client, model, 2)
@@ -158,8 +159,32 @@ def test_model_delete_forgets_rows_after_rename(
     assert state.outputs.rows.ids_for_slug(model) == []
 
 
+def test_model_delete_sweeps_rows_its_first_drop_left(
+    share: Path, client: TestClient, model: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """When the delete's own drop of the rows fails, its `sweep_orphans(deleted=(slug,))`
+    drops them in the same delete, with no later start or sweep."""
+    state = _state(client)
+    meta = output_meta("a" * 32, model)
+    insert_row(state.outputs, meta)
+    rows = state.outputs.rows
+    drop = rows.delete_slug
+    calls: list[str] = []
+
+    def first_fails(slug: str) -> None:
+        calls.append(slug)
+        if len(calls) == 1:
+            raise RuntimeError("the first drop fails")
+        drop(slug)
+
+    monkeypatch.setattr(rows, "delete_slug", first_fails)
+    assert client.delete(f"/api/v1/models/{model}", headers=press()).status_code == 204
+    assert calls == [model, model]
+    assert rows.ids_for_slug(model) == []
+
+
 def test_sweep_orphans_forgets_rows_of_missing_model(
-    client: TestClient, model: str, share: Path
+    share: Path, client: TestClient, model: str
 ) -> None:
     state = _state(client)
     gone = output_meta("d" * 32, "gone")
@@ -173,7 +198,7 @@ def test_sweep_orphans_forgets_rows_of_missing_model(
 
 
 def test_reaper_releases_holds_of_output_without_row(
-    client: TestClient, model: str, share: Path, caplog: pytest.LogCaptureFixture
+    share: Path, client: TestClient, model: str, caplog: pytest.LogCaptureFixture
 ) -> None:
     """The reaper reads rows only, and `hold_parts` / `release_parts` write no slug to
     the dropped ``output_hold_slugs``: no warning per call."""

@@ -174,7 +174,7 @@ def output_kinds(state: AppState, components: Components) -> list[OperationKind]
         files_dir = None
         if chosen is not None and chosen.files_key is not None:
             if not await blobs.fetch(chosen.files_key):
-                # Before the save, so a refused save leaves nothing under outputs/.
+                # Before the save, so a refused save leaves no row and no blob.
                 raise ApiError(
                     status.HTTP_409_CONFLICT,
                     "the job's extra files are no longer in the store; render again",

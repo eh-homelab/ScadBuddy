@@ -1227,9 +1227,10 @@ class OutputStore:
         return [row.meta for row in reversed(self.rows.for_slug(slug))]
 
     def forget_indexed(self, slug: str) -> None:
-        """Drop the rows of ``slug``'s outputs with their model, before their directory
-        goes (spec §6.2). Their output rows are the record (#7255), so a failure to drop
-        them raises, and the caller keeps the directory for a retry."""
+        """Drop the rows of ``slug``'s outputs and release their byte holds (spec §6.2),
+        after the model's rename (`Catalogue.delete`). The rows are the record (#7255,
+        #7257), so a failure raises to the caller: `Catalogue.delete` logs it and leaves the
+        rows to `Catalogue.sweep_orphans`. No outputs directory goes (#7257, plan D10)."""
         self.rows.delete_slug(slug)
 
     def has_plate_cover(self, slug: str) -> bool:

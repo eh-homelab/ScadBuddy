@@ -1,8 +1,7 @@
 """The cut-over (#7257). Release B retired the copies of the files to rows and to blobs
 (plan Task B2): the housekeeping activities `OUTPUT_COPY_SWEEP` and `OUTPUT_BYTES_SWEEP`
-stay registered for one release and do nothing. And after the `output_cutover` mark, a
-write into an output's folder tolerates a missing folder (plan D1), until release B
-stops the folder writes."""
+stay registered for one release and do nothing. Release B writes no folder: the rows
+and the blobs are the only record."""
 
 from __future__ import annotations
 
