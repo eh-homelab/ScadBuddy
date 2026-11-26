@@ -20,6 +20,20 @@ export type KindPropertySchema = Schemas['KindPropertySchema']
 
 /** The kinds whose files are written on the order routes (409 `use_order_route`). */
 export const ORDER_KINDS = new Set(['order', 'order_item', 'order_item_fulfilment', 'order_item_revision'])
+/**
+ * #7703 — the kinds whose schema may list `required` keys, checked on the row's own create and
+ * save (`backend/scadbuddy/entities/properties.py` `REQUIRED_KINDS`; items follow later).
+ */
+export const REQUIRED_KINDS = new Set(['spool', 'spool_type', 'material', 'subtype', 'brand', 'category', 'effect', 'insert_material', 'insert_type', 'colour', 'location_kind'])
+
+/** Whether a property has a value (spec §6.3b): a blank string and an empty list do not; `false` and `0` do. */
+export function hasValue(value: PropertyValue | null | undefined): boolean {
+  if (value === null || value === undefined) return false
+  if (typeof value === 'string') return value.trim() !== ''
+  if (Array.isArray(value)) return value.length > 0
+  return true
+}
+
 /** A print archive's files are Bambuddy's: listed, never written or served here. */
 export const PRINT_ARCHIVE = 'print_archive'
 

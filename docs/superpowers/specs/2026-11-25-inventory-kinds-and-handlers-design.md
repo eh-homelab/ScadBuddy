@@ -368,7 +368,7 @@ Go owns stock; Python calls it.
   write takes an `Idempotency-Key`. The ledger is the existing `crud_requests`
   (`migrations/20261106T1836Z_crud_requests.sql`, `crud/idempotency.py`), kept 7 days for
   the caller `inventory` (24 hours for the others); a repeat returns the stored result.
-  The caller starts its workflow first, and the workflow's first activity writes the
+  The caller starts its workflow first, and the fulfil workflow's first activity writes the
   caller's row (§6.1a "Nothing manual, no sweeps"); Go is called with a key derived from
   that row (the workflow `order_item:<id>:parts:<n>`, each `inventory.Take`
   `order_item:<id>:parts:<n>:<item>`), and Temporal retries a failed call. A refusal in
@@ -414,7 +414,10 @@ gives us the visibility into the Activities tab in SB".
   answers the stored result. So repeated tries cause no extra work.
 - **Nothing manual, no sweeps** (owner, 2026-11-25: "nothing manual here should happen
   for sweeps"). A change that crosses a boundary starts its workflow *before* it commits
-  anything, and the workflow's own first activity commits the local change. So a failed
+  anything, and only the workflow's own activities commit. `FulfilOrderItem`'s first
+  activity commits the order change, then Go's `Take` runs; `RecostLot` reads the orders,
+  then Go's `Recost` runs, then an activity records the cost; `MergePrinter` runs Go's
+  `Repoint`, then the merge commits. So a failed
   start leaves nothing half done (the person gets an error, and nothing was written), and
   no state ever needs a sweep, a backstop, a repair loop or a person to settle it.
 - **Orders.** Fulfilling an order item starts the workflow `FulfilOrderItem` with the
@@ -438,8 +441,11 @@ gives us the visibility into the Activities tab in SB".
   fail. So the printer merge locks the gone printer's row `FOR UPDATE`, then checks
   whether a stock row names it; if one does, it rolls back, and the workflow executes
   `inventory.Repoint` again (with a new key per round) and runs the merge again. There is
-  no cap: only a stock write racing the merge repeats it, and the workflow ends only once
-  the merge has committed (owner, 2026-11-25; plan K1, R-K1-29). A round repeats only
+  no cap: only a stock write racing the merge repeats it. The workflow ends when the merge
+  commits, or when the merge step refuses (one of the caller's checks fails): then it
+  executes `inventory.Repoint` back, for exactly the rows it moved, and the run fails with
+  that problem, so the same id can start again (owner, 2026-11-25; plan K1, R-K1-29,
+  R-K1-32). A round repeats only
   after a new stock write named the gone printer, and the workflow waits between rounds
   (`workflow.sleep`, doubling from 1 s to 60 s), so a busy stock writer cannot spin it. The callers that need the
   kept row (`link_bambuddy`, `ensure_bambuddy_written`) wait on the workflow's result.

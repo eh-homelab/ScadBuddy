@@ -7,7 +7,6 @@ Bambuddy's own OpenAPI, not a guess.
 
 from __future__ import annotations
 
-import hashlib
 import json
 import re
 from datetime import UTC, datetime
@@ -629,6 +628,10 @@ class AmsTray(BambuddyModel):
     nozzle_temp_max: int | None = None
     state: int | None = None
     exists: bool | None = None
+    #: The printer's K-profile index and K value for the tray (#7276); a mistyped one reads
+    #: as absent.
+    cali_idx: int | None = None
+    k: float | None = None
     #: The RFID tag's UID and the spool's UUID (#3818), all zeros for an untagged spool:
     #: OpenBambuAPI ``mqtt.md`` at ``cc383a2c``, the ``pushing.pushall`` example, and
     #: ``tests/bambuddy/recordings/printer-status-rack.json``. `spools.models` cleans them.
@@ -636,6 +639,16 @@ class AmsTray(BambuddyModel):
     #: status the API serves (#4336 review M6), so a dump of this model drops them.
     tag_uid: SkipJsonSchema[str | None] = Field(default=None, exclude=True)
     tray_uuid: SkipJsonSchema[str | None] = Field(default=None, exclude=True)
+
+    @field_validator("cali_idx", mode="before")
+    @classmethod
+    def _cali_idx(cls, value: Any) -> Any:
+        return _number(value, int)
+
+    @field_validator("k", mode="before")
+    @classmethod
+    def _k(cls, value: Any) -> Any:
+        return _number(value, float)
 
 
 class AmsUnit(BambuddyModel):
@@ -650,9 +663,6 @@ class AmsUnit(BambuddyModel):
     is_ams_ht: bool = False
     module_type: str = ""
     tray: list[AmsTray] = Field(default_factory=list)
-    #: The unit's serial, which Bambuddy keys an AMS label by (#7153). Read in the backend
-    #: only, never in a status the API serves, as the tag keys are.
-    serial_number: SkipJsonSchema[str | None] = Field(default=None, exclude=True)
 
     @field_validator("humidity", mode="before")
     @classmethod
@@ -748,6 +758,12 @@ class PrinterStatus(BambuddyModel):
     #: 0 when idle, 1 while it changes filament, 2 while it reads a tag
     #: (``backend/app/services/bambu_mqtt.py`` line 1292, maziggy/bambuddy v1.3.1).
     tray_now: int | None = None
+    #: Each extruder's loaded slot as ``(ams_id, slot)``, by extruder id, from a LAN
+    #: report's ``device.extruder.info[].snow`` (`printers/status.py` `extruder_loaded`):
+    #: ``None`` for an extruder that holds nothing or a value not decoded, ``[]`` when the
+    #: report names no two extruders' ``snow`` (#7276 P40). ``tray_now`` names only the
+    #: active extruder's slot.
+    extruder_loaded: list[tuple[int, int] | None] = Field(default_factory=list)
     ams_status_main: int | None = None
     #: What the printer is doing now, whoever started it (#977). ``progress`` is a
     #: percentage and ``remaining_time`` minutes, as Bambu's MQTT ``mc_percent`` and
@@ -1129,6 +1145,9 @@ class KProfileTable(BambuddyModel):
 
     profiles: list[KProfile] = Field(default_factory=list)
     nozzle_diameter: str | None = None
+    #: How many extruders the printer has, from ScadBuddy's stored report (#7276, P54):
+    #: the LAN route fills it; None where nothing says (Bambuddy's own answer).
+    extruders: int | None = None
 
 
 class KProfileWriteResult(BambuddyModel):
@@ -1696,47 +1715,3 @@ class QueueItemCreate(BambuddyModel):
     #: extruder index. Bambuddy re-checks it against the live rack at dispatch.
     nozzle_rack_choice: dict[str, int] | None = None
     cleanup_library_after_dispatch: bool = False
-
-
-class SlotPreset(BambuddyModel):
-    """A row of ``GET /api/v1/printers/{id}/slot-presets`` (#7153): the slicer preset
-    Bambuddy shows for a slot, kept in its database, not on the printer
-    (``routes/printers.py`` line 2689, maziggy/bambuddy v1.3.1)."""
-
-    ams_id: int
-    tray_id: int
-    preset_id: str
-    preset_name: str
-    tray_info_idx: str | None = None
-
-
-class SlotControlAnswer(BambuddyModel):
-    """Bambuddy's ``{success, message}`` after a slot reset, refresh, load or unload
-    (#7153). It says the command was sent, not that the printer did it."""
-
-    success: bool = True
-    message: str = ""
-
-
-class SlotConfigure(BaseModel):
-    """The query of ``POST /api/v1/printers/{id}/slots/{ams}/{tray}/configure`` (#6264;
-    the route's parameters in ``rfid-routes.json``, v1.3.1). ``tray_color`` is
-    ``RRGGBBAA`` without ``#``."""
-
-    tray_info_idx: str
-    tray_type: str
-    tray_sub_brands: str
-    tray_color: str
-    nozzle_temp_min: int
-    nozzle_temp_max: int
-    cali_idx: int | None = None
-    nozzle_diameter: str
-    setting_id: str | None = None
-    k_value: float | None = None
-
-    def query(self) -> dict[str, str | int | float]:
-        return {k: v for k, v in self.model_dump().items() if v is not None}
-
-    def digest(self) -> str:
-        body = json.dumps(self.model_dump(), sort_keys=True, separators=(",", ":"))
-        return hashlib.sha256(body.encode()).hexdigest()

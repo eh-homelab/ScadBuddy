@@ -98,6 +98,17 @@ class Recorded(BaseModel):
     recorded: bool
 
 
+class AnswererAsk(BaseModel):
+    """An agent answerer (`session:<id>`, `token:<id>`) and its author's principal."""
+
+    responder: str
+    principal: str | None = None
+
+
+class Allowed(BaseModel):
+    allowed: bool
+
+
 class Used(BaseModel):
     use: GrantUse
 
@@ -270,6 +281,13 @@ async def record_grant_decision(body: Decision, flows: FlowsDep) -> Recorded:
 @router.get("/decisions/operations", name="crud_projects_call_operations")
 async def call_operations(run_id: str, call_id: str, flows: FlowsDep) -> list[CallOperation]:
     return await flows.store.call_operations(run_id, call_id)
+
+
+@router.post("/decisions/answerer", name="crud_projects_answer_allowed")
+async def answer_allowed(body: AnswererAsk, flows: FlowsDep) -> Allowed:
+    """Whether an agent's session or token may still answer a flow's question (#7471,
+    spec §4.4): the operation's check asks it again, after the route."""
+    return Allowed(allowed=await flows.store.answer_allowed(body.responder, body.principal))
 
 
 @router.post("/decisions/take-over", name="crud_projects_take_over_decision")

@@ -39,13 +39,13 @@ sequenceDiagram
 
 A script asks with a host function (`backend/scadbuddy/workflows/flow_tools.py`):
 
-| | `wait_for_human(question, timeout_s=None)` | `prompt(title, schema, context=None, place=None, ui=None, timeout_s=None)` |
+| | `wait_for_human(question, timeout_s=None, people_only=False)` | `prompt(title, schema, context=None, place=None, ui=None, timeout_s=None, people_only=False)` |
 |---|---|---|
 | The question | a text | a title and a form |
 | The answer | `{answer}`, a text | a dict by field name |
 | Row in `tasks` | none | one, opened before the call waits |
 | Answer route | `POST /api/v1/workflow-runs/{run_id}/answer` | `POST /api/v1/tasks/{task_id}/answer` |
-| Operation kind | `flow_answer` | `task_answer` |
+| Operation kind | `flow_answer`; an agent's: `flow_agent_answer` | `task_answer`; an agent's: `flow_agent_answer` |
 | Harness callback | `human_answer_open` (`human_answer` in a replay of an older call) | `task_answer` |
 
 The text route refuses a prompt's call with 409 `flow-answer-is-a-task`
@@ -90,13 +90,39 @@ title, context, place, `ui` or `timeout_s` it does not take, and for an answer t
 the schema and not the field's type (a huge number). It raises `RouteRefusedError` when the
 run takes no task, because it ended or is gone.
 
-**Who answers.** A person, in the browser. Both answer routes refuse a request that an agent
-authored, a service credential, and a delegated session such as the agent's headless
-browser (`backend/scadbuddy/api/flows.py` `browser_only`,
-`backend/scadbuddy/core/authorship.py` `by_a_person`). In `enforce` they are person-only
-routes (`backend/scadbuddy/auth/routes.py` `PERSON_ENDPOINTS`). The forms on the page are
-user-only (`USER_ONLY`): the assistant cannot press or fill them, and cannot read the text
-typed in them ([browser-bridge.md](../ai/browser-bridge.md#data-agent-user-only)).
+**Who answers.** A person, always (`backend/scadbuddy/core/authorship.py` `by_a_person`). The
+person's setting `flow_answerers` (#7471) may also let in, on the agent's service credential:
+
+| Value | Who |
+|---|---|
+| `starter` | the session that started the run |
+| `sessions` | any session that a browser user owns |
+| `token:<id>` | that MCP token, and the sessions it owns |
+
+Empty, the default, is people only. Only a person changes it (403 `person_only`). A session
+answers only while it is not archived, is its author's, holds `write`, and is not a flow's
+(`ai_sessions.background_tools`, `turn_flow`). A token answers only while it is not revoked
+or expired and holds `write`. A call from a flow run never answers. A question that the
+script asked with `people_only=True`, or that parked before #7471, is for people only. Any
+other caller gets 403 `flow-answer-not-allowed`, whose detail names the setting or says that
+the question is for people only (`backend/scadbuddy/flows/answerers.py`,
+`backend/scadbuddy/api/flows.py` `answerer` and `admit`). The route reads the setting; the
+operation's check asks again about the question and the session or token, so a Reset that
+parks a people-only question in between is refused. A repeat of a request gets its first
+answer. Both routes are `api` routes, so `enforce` lets the agent's credential reach them.
+
+The assistant answers with the tool `answer_flow_question` (tier `outward`, so a person
+approves each answer unless they lower it). The decision row names the answerer
+(`responder`: `browser`, `session:<id>` or `token:<id>`) and what admitted it
+(`admitted_by`: `setting`). A task's `answered_by` is that text for an agent. The run's page
+names the assistant and links its session. A person's answer keeps the Update id and the
+operation key it had before. A person may take over an agent's answer that never reached the
+run; an agent only its own. A run grant cannot admit answerers yet (`GrantSpec.answers` is
+refused), a child run's grant never has them, and a trigger's grant may not hold them.
+
+The forms on the page are user-only (`USER_ONLY`): the assistant cannot press or fill them,
+and cannot read the text typed in them
+([browser-bridge.md](../ai/browser-bridge.md#data-agent-user-only)).
 
 **The answer's way.** The route checks the answer against the task's schema
 (`backend/scadbuddy/tasks/validate.py` `validate_answer`). A problem names a field and
@@ -119,7 +145,7 @@ another answer on the row and leaves an expired task as it is.
 | State | When |
 |---|---|
 | `open` | the prompt asked, and the run waits or soon will |
-| `answered` | a person's answer reached the run |
+| `answered` | an answer reached the run |
 | `expired` | the prompt's time was up (`flow_task_close`) |
 | `cancelled` | the run ended, the call ended with no answer, or a Reset went back to before the prompt |
 

@@ -1,11 +1,11 @@
 import { setTimeout as sleep } from 'node:timers/promises'
 import { z } from 'zod'
 import { ACCEPTING_MS, command, type CommandHeaders, isRunning, reattachFollowing, RESPOND_ASYNC } from './command.js'
-import { binary } from './binary.js'
+import { binary, binaryImage } from './binary.js'
 import { ok } from './call.js'
 import { CAMERA, cameraQuery, params, slug, VIEW, VIEW_SIZE, withQuery } from './common.js'
 import { FROM_WORKSPACE_ONLY, uploadInit, uploadName, withSent, workspaceFile, workspacePathInput, workspaceShaInput } from './workspaceUploads.js'
-import { blob, defineTool, idempotencyKey, image, json, type Tool, type ToolContext, ToolError, toolErrorText } from './registry.js'
+import { blob, defineTool, idempotencyKey, json, type Tool, type ToolContext, ToolError, toolErrorText } from './registry.js'
 import { DEFAULT_RENDER_LIMITER, renderPrincipal } from './renderLimits.js'
 import { validateParams } from './validate.js'
 import { FETCH_GRANT_HEADER } from './fetchGrant.js'
@@ -384,7 +384,7 @@ export const customizerTools: Tool[] = [
     routes: ['GET /api/v1/jobs/{job_id}/views/{view}.png'],
     title: ({ view }) => `Look at the render (${view})`,
     handler: async ({ job_id, view, size, ...camera }, ctx) =>
-      binary(
+      binaryImage(
         ctx.backend.GET('/api/v1/jobs/{job_id}/views/{view}.png', {
           params: { path: { job_id, view }, query: { size, ...cameraQuery(camera) } },
           parseAs: 'stream',
@@ -396,7 +396,6 @@ export const customizerTools: Tool[] = [
           name: `${job_id}-${view}.png`,
           fallbackType: 'image/png',
         },
-        image,
       ),
   }),
 
@@ -714,21 +713,19 @@ export const customizerTools: Tool[] = [
       if (!include_content) return meta
       if (MESH_KINDS.has(stored.kind)) {
         // A mesh's bytes are no image: its picture is the backend's preview (#959).
-        const preview = await binary(
+        const preview = await binaryImage(
           ctx.backend.GET('/api/v1/models/{slug}/assets/{asset_id}/preview', { params: { path }, parseAs: 'stream' }),
           `get asset preview ${asset_id}`,
           ctx,
           { path: `/api/v1/models/${slug}/assets/${asset_id}/preview`, name: `asset-${asset_id}.png`, fallbackType: 'image/png' },
-          imageOrText,
         )
         return { content: [...meta.content, ...preview.content] }
       }
-      const content = await binary(
+      const content = await binaryImage(
         ctx.backend.GET('/api/v1/models/{slug}/assets/{asset_id}/content', { params: { path }, parseAs: 'stream' }),
         `get asset content ${asset_id}`,
         ctx,
         { path: `/api/v1/models/${slug}/assets/${asset_id}/content`, name: `asset-${asset_id}`, fallbackType: 'image/png' },
-        imageOrText,
       )
       return { content: [...meta.content, ...content.content] }
     },
@@ -742,7 +739,7 @@ export const customizerTools: Tool[] = [
     risk: 'read',
     routes: ['GET /api/v1/models/{slug}/samples/{name}'],
     handler: async ({ slug, name, version }, ctx) =>
-      binary(
+      binaryImage(
         ctx.backend.GET('/api/v1/models/{slug}/samples/{name}', {
           params: { path: { slug, name }, query: { version } },
           parseAs: 'stream',
@@ -754,7 +751,6 @@ export const customizerTools: Tool[] = [
           name,
           fallbackType: 'image/png',
         },
-        imageOrText,
       ),
   }),
 ]
@@ -788,9 +784,3 @@ export function plainFetchUrl(url: string): boolean {
   }
 }
 
-/** MCP image content is raster; an SVG is more useful to a model as its text. */
-function imageOrText(bytes: ArrayBuffer, mimeType: string) {
-  return mimeType === 'image/svg+xml'
-    ? { content: [{ type: 'text' as const, text: Buffer.from(bytes).toString('utf8') }] }
-    : image(bytes, mimeType)
-}

@@ -14,7 +14,7 @@ import { writeDirFile } from '../src/workspace/directory.js'
 // server answers. These tests stand in for a sandbox that lies.
 
 const sha = (b: Buffer | string) => createHash('sha256').update(b).digest('hex')
-const none = () => ({ files: new Map<string, string>(), unsynced: new Set<string>(), notSent: [] })
+const none = () => ({ files: new Map<string, string>(), truncated: false, unsynced: new Set<string>(), notSent: [] })
 
 type Fake = { manifest: unknown; files: Record<string, Buffer>; deleted: string[]; got: string[] }
 
@@ -86,7 +86,7 @@ describe('a sandbox that lies', () => {
     expect([...before.files.keys()]).toEqual([])
     // syncBack: a bad path in `before` that the sandbox no longer lists is never removed here.
     fake.manifest = { files: [], truncated: false }
-    const back = await syncBack(client(box.url), dir, { files: new Map([['../outside/victim.txt', 'a'.repeat(64)]]), unsynced: new Set<string>(), notSent: [] }, limits)
+    const back = await syncBack(client(box.url), dir, { files: new Map([['../outside/victim.txt', 'a'.repeat(64)]]), truncated: false, unsynced: new Set<string>(), notSent: [] }, limits)
     expect(back.removed).toEqual([])
     expect(await readFile(path.join(outside, 'victim.txt'), 'utf8')).toBe('keep me')
   })

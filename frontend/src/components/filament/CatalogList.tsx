@@ -3,7 +3,12 @@ import { useCallback, useEffect, useRef, useState, type FormEvent } from 'react'
 import { useSearchParams } from 'react-router'
 import { ApiError } from '../../api/client'
 import { isAliasedKind, listCatalog, upsertCatalog, type CatalogInput, type CatalogKind } from '../../api/filament'
+import { useAsync } from '../../lib/useAsync'
+import { entityApi, type PropertyValue } from '../entities/api'
 import { AttachmentsPanel } from '../entities/AttachmentsPanel'
+import { DefinedFields } from '../entities/DefinedFields'
+import { IncompleteMark } from '../entities/IncompleteMark'
+import { fieldErrorsOf, isIncomplete, propertiesPatch, refusalText, type FieldErrors } from '../entities/definedProperties'
 import { KindKeysForm } from '../entities/KindKeysForm'
 import { LinksPanel } from '../entities/LinksPanel'
 import { PropertiesPanel } from '../entities/PropertiesPanel'
@@ -19,7 +24,7 @@ import { RgbaSwatch } from './RgbaSwatch'
 import { CATALOGS, type Field } from './catalogs'
 import { ColourSources } from './ColourSources'
 
-type Row = { id: string; name: string; sort_order: number; archived_at: string | null } & Record<string, unknown>
+type Row = { id: string; name: string; sort_order: number; archived_at: string | null; missing_properties?: string[]; invalid_properties?: string[] } & Record<string, unknown>
 type Value = string | boolean | null
 type Draft = { id: string | null; name: string; values: Record<string, Value> }
 
@@ -104,6 +109,8 @@ export function CatalogList({ kind }: { kind: CatalogKind }) {
   const spec = CATALOGS.find((one) => one.kind === kind)!
   const [params, setParams] = useSearchParams()
   const archived = params.get('archived') === 'true'
+  // #7703: only the rows their required properties leave incomplete; a re-order needs every row, so it is off then.
+  const onlyIncomplete = params.get('incomplete') === 'true'
   const [rows, setRows] = useState<Row[] | null>(null)
   const [names, setNames] = useState<Map<string, string>>(new Map())
   const [options, setOptions] = useState<Partial<Record<CatalogKind, Row[]>>>({})
@@ -114,10 +121,19 @@ export function CatalogList({ kind }: { kind: CatalogKind }) {
   const [formError, setFormError] = useState<string | null>(null)
   const [saving, setSaving] = useState(false)
   const [editingKeys, setEditingKeys] = useState(false)
+  // #7703: the kind's defined keys are fields of the row's form, saved with it.
+  const keys = useAsync(() => entityApi.propertySchema(spec.entity), [spec.entity, editingKeys])
+  const schema = keys.data?.schema ?? {}
+  const requiresKeys = Array.isArray(schema.required) && schema.required.length > 0
+  const [defined, setDefined] = useState<Record<string, PropertyValue | undefined>>({})
+  const [definedBefore, setDefinedBefore] = useState<Record<string, PropertyValue | undefined>>({})
+  const [fieldErrors, setFieldErrors] = useState<FieldErrors | undefined>()
   const [search, setSearch] = useState('')
   const [asked, setAsked] = useState('')
   // A catalog where every row is drawn and may be re-ordered; colours are searched instead.
   const searched = kind === 'colours'
+  // The rows the Incomplete filter keeps; the footer and empty state count these (#7703).
+  const visible = rows?.filter((row) => !onlyIncomplete || isIncomplete(row)) ?? []
 
   useEffect(() => {
     if (!searched) return
@@ -126,7 +142,26 @@ export function CatalogList({ kind }: { kind: CatalogKind }) {
   }, [search, searched])
 
   const refs = [...new Set(spec.fields.flatMap((field) => (field.ref ? [field.ref] : [])))]
-  const needsMore = spec.fields.some((field) => field.required)
+  // Until the schema answers (or when it cannot be read), the full form: a name-only add could be refused (#7953).
+  const needsMore = spec.fields.some((field) => field.required) || requiresKeys || !keys.data
+
+  /** Opens the row's form (a new row's without one), with its defined properties. */
+  async function open(row?: Row) {
+    setFormError(null)
+    setFieldErrors(undefined)
+    let values: Record<string, PropertyValue | undefined> = {}
+    if (row) {
+      try {
+        values = Object.fromEntries((await entityApi.properties(`${spec.entity}:${row.id}`)).map((p) => [p.key, p.value]))
+      } catch (cause) {
+        setError(message(cause))
+        return
+      }
+    }
+    setDefined(values)
+    setDefinedBefore(values)
+    setDraft(draftOf(spec.fields, row))
+  }
 
   // Each load's number: an answer to any but the newest is dropped, so a late answer to
   // an older search never replaces a newer one's rows.
@@ -191,6 +226,8 @@ export function CatalogList({ kind }: { kind: CatalogKind }) {
         const before = was ? sent(field, draftOf(spec.fields, was).values[field.name] ?? null) : null
         if (was ? JSON.stringify(value) !== JSON.stringify(before) : value !== null && value !== false) body[field.name] = value
       }
+      const properties = propertiesPatch(schema, definedBefore, defined)
+      if (Object.keys(properties).length > 0) body.properties = properties
       if (was) {
         if (Object.keys(body).length > 0) await write(kind, body, was.id)
       } else {
@@ -199,6 +236,9 @@ export function CatalogList({ kind }: { kind: CatalogKind }) {
       setDraft(null)
       await load()
     } catch (cause) {
+      const refused = fieldErrorsOf(cause)
+      setFieldErrors(refused ?? undefined)
+      if (refused) return setFormError(refusalText(refused))
       setFormError(cause instanceof Error && !(cause instanceof ApiError) ? cause.message : message(cause))
     } finally {
       setSaving(false)
@@ -300,6 +340,7 @@ export function CatalogList({ kind }: { kind: CatalogKind }) {
           </label>
         )
       })}
+      <DefinedFields schema={schema} values={defined} onChange={setDefined} errors={fieldErrors} />
       {isAliasedKind(kind) && draft.id && (
         <AliasChips kind={kind} id={draft.id} aliases={(rows?.find((row) => row.id === draft.id)?.aliases as string[] | undefined) ?? []} onSaved={load} />
       )}
@@ -343,11 +384,24 @@ export function CatalogList({ kind }: { kind: CatalogKind }) {
           />
           Show archived
         </label>
+        <label className="flex items-center gap-2 text-[13px] text-muted-foreground">
+          <Checkbox
+            checked={onlyIncomplete}
+            aria-label="Only incomplete"
+            onCheckedChange={(on) => {
+              const next = new URLSearchParams(params)
+              if (on === true) next.set('incomplete', 'true')
+              else next.delete('incomplete')
+              setParams(next, { replace: true })
+            }}
+          />
+          Incomplete
+        </label>
         <Button type="button" size="sm" variant="ghost" className="ml-auto" aria-expanded={editingKeys} onClick={() => setEditingKeys((open) => !open)}>
           Property keys
         </Button>
         {needsMore ? (
-          <Button type="button" size="sm" onClick={() => { setFormError(null); setDraft(draftOf(spec.fields)) }}>
+          <Button type="button" size="sm" onClick={() => void open()}>
             <PlusIcon /> Add
           </Button>
         ) : (
@@ -397,7 +451,7 @@ export function CatalogList({ kind }: { kind: CatalogKind }) {
               </tr>
             </thead>
             <tbody>
-              {(searched ? rows.slice(0, SHOWN_MAX) : rows).flatMap((row, at) => {
+              {(searched ? visible.slice(0, SHOWN_MAX) : visible).flatMap((row, at) => {
                 const gone = row.archived_at != null
                 const from = provenance(row)
                 return [
@@ -407,6 +461,7 @@ export function CatalogList({ kind }: { kind: CatalogKind }) {
                         {typeof row.rgba === 'string' && <RgbaSwatch rgba={row.rgba} size="md" />}
                         <span className={gone ? 'text-muted-foreground line-through' : 'font-medium'}>{row.name}</span>
                         {gone && <span className="text-[12px] text-muted-foreground">Archived</span>}
+                        <IncompleteMark row={row} />
                       </span>
                       {Array.isArray(row.aliases) && row.aliases.length > 0 && (
                         <span className="mt-1 block">
@@ -420,7 +475,7 @@ export function CatalogList({ kind }: { kind: CatalogKind }) {
                     </td>
                     <td className={`${TD} text-right tabular-nums`}>{row.sort_order}</td>
                     <td className={`${TD} whitespace-nowrap text-right`}>
-                      {!searched && (
+                      {!searched && !onlyIncomplete && (
                         <>
                           <Button type="button" size="xs" variant="ghost" data-move="-1" aria-label={`Move ${row.name} up`} disabled={at === 0} onClick={() => void move(at, -1)}>
                             <ArrowUpIcon />
@@ -430,7 +485,7 @@ export function CatalogList({ kind }: { kind: CatalogKind }) {
                           </Button>
                         </>
                       )}
-                      <Button type="button" size="xs" variant="ghost" aria-label={`Edit ${row.name}`} onClick={() => { setFormError(null); setDraft(draftOf(spec.fields, row)) }}>
+                      <Button type="button" size="xs" variant="ghost" aria-label={`Edit ${row.name}`} onClick={() => void open(row)}>
                         <PencilIcon /> Edit
                       </Button>
                       <Button
@@ -465,10 +520,17 @@ export function CatalogList({ kind }: { kind: CatalogKind }) {
                     : []),
                 ]
               })}
-              {searched && rows.length > SHOWN_MAX && (
+              {searched && visible.length > SHOWN_MAX && (
                 <tr className="border-t">
                   <td colSpan={4} className="px-2 py-3 text-muted-foreground">
-                    Showing {SHOWN_MAX.toLocaleString()} of {rows.length.toLocaleString()} colours. Search to narrow the list.
+                    Showing {SHOWN_MAX.toLocaleString()} of {visible.length.toLocaleString()} {onlyIncomplete ? 'incomplete ' : ''}colours. Search to narrow the list.
+                  </td>
+                </tr>
+              )}
+              {onlyIncomplete && rows.length > 0 && visible.length === 0 && (
+                <tr className="border-t">
+                  <td colSpan={4} className="px-2 py-3 text-muted-foreground">
+                    No row is incomplete.
                   </td>
                 </tr>
               )}

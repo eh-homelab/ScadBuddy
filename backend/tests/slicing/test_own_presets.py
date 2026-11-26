@@ -113,6 +113,15 @@ async def test_the_catalogue_lists_a_preset_once(own: MemoryOwn) -> None:
     assert catalogue.native_ref(ref, "filament") == ref
 
 
+async def test_a_scadbuddy_presets_row_carries_its_filament_id() -> None:
+    """Its flattened ``filament_id``: its own, else its parent's, as a slot configure sends
+    it (#7276, R-7276-15)."""
+    own = MemoryOwn({12: SILK, 13: {**SILK, "name": "Own id", "filament_id": "GFL99"}})
+    catalogue = await catalogue_for(None, native=Profiles(PROFILES, own=own))
+    local = {row.ref.id: row.filament_id for row in catalogue.filament if row.ref.source == "local"}
+    assert local == {"sb-12": "GFA00", "sb-13": "GFL99"}
+
+
 async def test_a_local_ref_to_an_adopted_id_resolves_to_its_scadbuddy_preset(
     own: MemoryOwn,
 ) -> None:

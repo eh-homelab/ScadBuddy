@@ -33,6 +33,12 @@ var (
 // New is a pool on a fresh copy of the migrated database, dropped when the test ends.
 func New(t *testing.T) *pgxpool.Pool {
 	t.Helper()
+	return NewWith(t, nil)
+}
+
+// NewWith is New, its pool's config first given to configure (a tracer, say).
+func NewWith(t *testing.T, configure func(*pgxpool.Config)) *pgxpool.Pool {
+	t.Helper()
 	server := os.Getenv(Env)
 	if server == "" {
 		if os.Getenv(RequiredEnv) != "" {
@@ -49,7 +55,14 @@ func New(t *testing.T) *pgxpool.Pool {
 	if err := admin(ctx, server, "CREATE DATABASE "+name+" TEMPLATE "+template); err != nil {
 		t.Fatal(err)
 	}
-	pool, err := pgxpool.New(ctx, with(server, name))
+	config, err := pgxpool.ParseConfig(with(server, name))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if configure != nil {
+		configure(config)
+	}
+	pool, err := pgxpool.NewWithConfig(ctx, config)
 	if err != nil {
 		t.Fatal(err)
 	}

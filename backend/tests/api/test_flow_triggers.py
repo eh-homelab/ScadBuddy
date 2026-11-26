@@ -376,6 +376,19 @@ def test_an_edit_that_returns_an_approved_grant_to_requested_is_a_new_push(
 
 
 @pytest.mark.usefixtures("triggers")
+def test_a_standing_grant_never_lets_anyone_else_answer(client: TestClient) -> None:
+    """#7471, spec §4.3: each fire's run would let in an answerer no person looked at."""
+    definition = register(client, WAITS)
+    trigger = create(client, definition["id"])
+    refused = attach(
+        client, trigger["id"], grant({"fn": "queue_print"}, answers={"who": ["sessions"]})
+    )
+    assert refused.status_code == 422, refused.text
+    assert refused.json()["type"] == "https://scadbuddy.dev/problems/flow-grant-invalid"
+    assert "answer" in refused.json()["problems"][0]["message"]
+
+
+@pytest.mark.usefixtures("triggers")
 def test_a_standing_grant_expires_within_30_days(client: TestClient) -> None:
     definition = register(client, WAITS)
     trigger = create(client, definition["id"])
