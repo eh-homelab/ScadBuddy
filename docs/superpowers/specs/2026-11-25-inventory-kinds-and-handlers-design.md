@@ -406,16 +406,20 @@ gives us the visibility into the Activities tab in SB".
   working" and follows it on the Activities tab. A repeat with the same key is never an
   error: while it runs it attaches and answers `202` again, and once it is done it
   answers the stored result. So repeated tries cause no extra work.
-- **Orders.** Fulfilling an order item commits the order change, then starts a small
-  workflow `SettleOrderParts` with the item's key: its first step is the Go activity
-  `inventory.Take`, its second a Python activity that records `parts.used` on the order.
-  Temporal retries each step until it succeeds; there is no outbox table, no sweep and no
-  manual settle. If the take does not finish in 15 s, fulfil answers 202 ("stock still
-  settling") and the order settles by itself when the workflow ends. If the start itself fails, the fulfil call answers an error
+- **Nothing manual, no sweeps** (owner, 2026-11-25: "nothing manual here should happen
+  for sweeps"). A change that crosses a boundary starts its workflow *before* it commits
+  anything, and the workflow's own first activity commits the local change. So a failed
+  start leaves nothing half done (the person gets an error, and nothing was written), and
+  no state ever needs a sweep, a backstop, a repair loop or a person to settle it.
+- **Orders.** Fulfilling an order item starts the workflow `FulfilOrderItem` with the
+  item's key. Its steps: a Python activity that commits the order change; the Go activity
+  `inventory.Take`; a Python activity that records `parts.used`. Temporal retries each
+  step until it succeeds. If the workflow does not finish in 15 s, fulfil answers 202
+  ("stock still settling") and the order settles by itself when the workflow ends. If the start itself fails, the fulfil call answers an error
   and the person retries; the fulfil is idempotent.
-- **Merges.** An entity or printer merge first executes `inventory.Repoint` (move the
-  stock rows from the old id to the kept one), then runs its own transaction and deletes
-  the old row. Calling Go from inside the merge's locked transaction would make the two
+- **Merges.** An entity or printer merge is a workflow too: it first executes
+  `inventory.Repoint` (move the stock rows from the old id to the kept one), then an
+  activity runs the merge's own transaction and deletes the old row. Calling Go from inside the merge's locked transaction would make the two
   transactions wait on each other; this order avoids it. A stock row that lands on the
   old id between the two steps makes the delete fail on its foreign key, and the merge
   repeats the first step. The foreign key protects only `stock_moves.entity_id`.
