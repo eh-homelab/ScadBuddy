@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import logging
 from collections.abc import Mapping, Sequence
+from datetime import UTC
 from typing import Any
 from urllib.parse import urlsplit
 from uuid import UUID
@@ -184,6 +185,16 @@ class LabelPayloadTooLongError(ValueError):
         )
 
 
+def temps_text(low: int | None, high: int | None) -> str | None:
+    """The nozzle temperatures a spool label prints (#7216, R-7216-9): the low and the high
+    value with an en dash between them and ` °C` after, one value when only one is set or
+    both are equal, else ``None``."""
+    if low is None or high is None or low == high:
+        one = low if low is not None else high
+        return None if one is None else f"{one} °C"
+    return f"{low}\N{EN DASH}{high} °C"
+
+
 def pdf_labels(
     spools: FilamentSpoolStore,
     locations: LocationStore,
@@ -193,8 +204,11 @@ def pdf_labels(
 ) -> list[Label]:
     """The labels of ``spool_ids``, then ``location_ids``, from SB's own rows, with what the
     browser label carries (`frontend/src/components/filament/Label.tsx`): a spool's number,
-    material and subtype, colour name and brand, its QR `scadbuddy:spool:<id>`; a place's
-    code and name, its QR `<base>/x/L-<n>`. An archived row still gets its label."""
+    material and subtype, colour name and brand, its QR `scadbuddy:spool:<id>`, and the values
+    of the other fields a spool label can print (#7216, R-7216-9: the effective colour as
+    `#RRGGBB`, its place's name, nozzle temperatures, label weight, the note's first line and
+    the row's `created_at` day in UTC); a place's code and name, its QR `<base>/x/L-<n>`. An
+    archived row still gets its label."""
     labels: list[Label] = []
     # One read per kind (at most `MAX_LABELS` ids); the labels keep the request's order.
     found_spools = spools.get_many(spool_ids) if spool_ids else {}
@@ -203,13 +217,25 @@ def pdf_labels(
         if spool is None:
             raise LabelNotFoundError("spool", spool_id)
         material = " ".join(n for n in (spool.names.material, spool.names.subtype) if n)
+        effective = spool.effective
+        note = (spool.note or "").strip().splitlines()
         labels.append(
             SpoolLabel(
                 number=spool.number,
                 material=material or None,
-                colour=spool.effective.colour_name or spool.colour_name,
+                colour=effective.colour_name or spool.colour_name,
                 brand=spool.names.brand,
                 qr=f"scadbuddy:spool:{spool_id}",
+                hex=effective.rgba[:7].upper() if effective.rgba else None,
+                location=spool.names.location,
+                temps=temps_text(effective.nozzle_temp_min, effective.nozzle_temp_max),
+                weight=(
+                    f"{effective.label_weight_g} g"
+                    if effective.label_weight_g is not None
+                    else None
+                ),
+                note=note[0].strip() if note else None,
+                added=spool.created_at.astimezone(UTC).date().isoformat(),
             )
         )
     found_places = locations.get_many(location_ids) if location_ids else {}

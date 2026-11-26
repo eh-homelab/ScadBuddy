@@ -2,7 +2,7 @@
 // a house designer. It lists the pieces a box house needs and previews one at a time;
 // Generate keeps the piece on screen. The whole house in one Generate is phase 4's pipeline.
 
-import { DEFAULT_HOUSE, LIMITS, clampHouse, housePieces, pieceParams, pieceText, pieceTotal } from './pieces.js'
+import { DEFAULT_HOUSE, LIMITS, clampHouse, housePieces, pieceLabel, pieceParams, pieceText, pieceTotal } from './pieces.js'
 
 const DRIVEN = new Set(['piece', 'course', 'width_units', 'depth_units'])
 const HOUSE_LABELS = {
@@ -145,7 +145,7 @@ export async function mount(root, host) {
     const inputs = host.inputs.get()
     const house = clampHouse(inputs.house ?? DEFAULT_HOUSE)
     const count = pieceTotal(housePieces(house))
-    return `${house.cols}×${house.rows}-module house, ${house.storeys} storey(s), ${count} pieces; showing ${inputs.params?.piece ?? 'the default piece'}.`
+    return `${house.cols}×${house.rows}-module house, ${house.storeys} storey(s), ${count} pieces; showing ${inputs.params?.piece ? pieceLabel(inputs.params.piece) : 'the default piece'}.`
   })
   return () => {
     unsubscribe()

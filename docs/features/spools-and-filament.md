@@ -218,14 +218,48 @@ weight is known (the phone page sends it alone, so a decimal reading keeps the i
 name). Design: `docs/superpowers/specs/2026-11-25-weighing-reconciliation-design.md`
 §5.1, §5.2, §5.5.
 
-### The phone page (#7273)
+### A new spool's first weighing under the label weight (#7683)
 
-`/filament/scan` reads and writes spool tags with the phone's own NFC reader, through Web NFC
-(spec `docs/superpowers/specs/2026-11-23-web-nfc-tags-design.md`). It works only in Chrome on
+When a spool that is new by #7280's rule (nothing consumed, grams left at the
+label) reads under its label weight, the insert weight check
+(`GET /filament/spools/{id}/insert-weight-offer`) answers `reason` `below_label` with
+`shortfall_g` (the label less the reading), `resolutions` and `default`. Each resolution
+names its filament: `tared` (the scale was tared on the empty spool, so the reading is the
+filament), `short` (the spool holds less than its label: the reading less the empty weight,
+and the spool stops being added full) and `label_wrong` (the same filament, and the spool's
+own label weight becomes it, rounded; the type keeps its own). `short` and `label_wrong`
+are offered only when the reading is at least the empty weight. The default is `tared`
+within 10 % of the label, else `short`; a reading under the empty weight offers `tared`
+alone, so its default is `tared`. The weigh form and the phone page show the three
+with their numbers ("The reading is 100 g under the label weight. What is up?") with the
+default preselected, and the weighing posts `resolution` with `reading_g` alone; the
+agent's `filament_spool_add_event` answers the choices (`below_label`, nothing booked)
+until it is called again with one. The store checks the choice again under the row locks
+(a resolution the check no longer offers is 422 `no_below_label` with the check's
+`reason`), books the side effect as an `edited` event before the weighing, and keeps
+`resolution` and `shortfall_g` in the event's `data`; a `tared` weighing's `empty_source`
+is `tared`, `empty_g` 0. A resolved weighing keeps `expected_g` and records no `drift_g`,
+so it raises no Drift mark: the person just explained the gap. The timeline says "scale tared on the spool", "spool short by
+100 g" or "label corrected", and the Weight section's sentence reads "filament 900 g (the
+scale was tared on the spool)". Design: the same spec, §5.3.
+
+### The phone page, the hand-held Scan mode (#7273)
+
+`/scan` ("Scan" in the nav; `/filament/scan` redirects there) reads and writes tags with the
+phone's own NFC reader, through Web NFC
+(spec `docs/superpowers/specs/2026-11-23-web-nfc-tags-design.md`; the Scan mode's plan
+`docs/superpowers/plans/2026-11-25-scan-mode.md`). It works only in Chrome on
 Android, in its own tab: Web NFC refuses a frame, so inside Bambuddy the page shows its address
-to open. A tap posts the tag's UID and records to `POST /filament/tags/reads`, which opens the
-spool that holds the tag, or offers to bind it or make a spool from what the tag says
-(OpenSpool or OpenTag3D). "Write tag" on a spool backs the tag up first, writes the spool's
+to open. A tap posts the tag's UID and records to `POST /filament/tags/reads`, which opens
+what the tag names, in this order: the spool that holds the tag (`next` `open_spool`; the
+binding wins over anything the records say); else the thing a typed code in the records names,
+a `url` record whose path ends `/x/<code>` (a printed label) or a `text` record such as `L-12`
+or `S-142`, or a `scadbuddy:spool:<id>` text (`next` `open_code`, with `resolved` in the
+`GET /codes/{code}` shape; `backend/scadbuddy/filament/tag_codes.py`); else it offers to bind
+the tag or make a spool from what the tag says (OpenSpool or OpenTag3D). A code that names no
+row is a new tag. The switch "Open what I scan at once" (remembered on the phone, localStorage
+`scadbuddy.scan.openAtOnce`) opens the thing's page on each such read, and the page then starts
+scanning by itself when it opens. "Write tag" on a spool backs the tag up first, writes the spool's
 records in the tag's own format (else the `filament_tag_format` setting), reads the tag back,
 and binds it only when the read-back equals what was sent. Every write keeps a backup, which
 the page can write back. An agent reads or writes a tag through an NFC job (`nfc_read`,
@@ -250,8 +284,25 @@ matches `[a-z][a-z0-9_]{0,63}`. Limits: 200 keys per entity, 2000 characters per
 - Each kind has a schema that documents and types the keys it knows. It never refuses a
   key. The schema is an allowlisted subset of JSON Schema Draft 2020-12 (`TOP_KEYWORDS`,
   `KEY_KEYWORDS`, `ITEM_KEYWORDS`; list items are strings). An `enum` or `const` must fit its
-  key, and no bound may cross its pair or a cap. Anything else is 422 `bad_property_schema`, naming the keyword. Values
-  already stored are not checked again after a schema change.
+  key, and no bound may cross its pair or a cap. Anything else is 422 `bad_property_schema`, naming the keyword. A
+  schema change rewrites and refuses no stored value; on the required kinds below, reads mark a
+  value that no longer fits and the row's next checked save refuses it.
+- Required keys (#7703, [spec §6.3b](../superpowers/specs/2026-11-21-inventory-and-purchasing-design.md)).
+  The schema of a spool, a spool type or a catalog kind may list keys under `required`
+  (`REQUIRED_KINDS`); any other kind's schema with `required` is 422 `bad_property_schema`.
+  The row's own create and save routes (`POST`/`PATCH /filament/spools`,
+  `POST /filament/spools/bulk`, `POST`/`PATCH /filament/types` and
+  `POST`/`PATCH /filament/catalog/{kind}`) take `properties` beside the row, write both in
+  one transaction, and refuse a row whose required keys have no value or whose defined keys
+  hold a value that no longer fits: 422 `missing_required_properties`, with `missing` and
+  `invalid`. An empty or blank string and an empty list are no value; `false` and `0` are.
+  Not checked: a save that sends only `archived` or `sort_order`, bulk-update, events,
+  syncs, imports, invoice confirm, a catalog row added on the way to another, and
+  `PUT /filament/types/{id}/cost-per-kg`, which sets only the cost. Reads carry
+  `missing_properties` and `invalid_properties` (keys only); an archived row is never
+  marked. `PATCH /entities/{ref}/properties` refuses removing or emptying a required key
+  that has a value (`backend/scadbuddy/entities/required.py`). Items and item kinds follow
+  once the base-kind design settles; the UI follows in its own change.
 - `item` is the exception (#7067). An item's properties follow its item kind's
   `attribute_schema`, merged down the kind tree (a child kind's key wins;
   `backend/scadbuddy/inventory/kinds.py` `item_schema`). An item kind's schema is set on the
@@ -338,7 +389,11 @@ matches `[a-z][a-z0-9_]{0,63}`. Limits: 200 keys per entity, 2000 characters per
   `filament_label_base_url` (an https origin of at most 64 characters, live; unset, labels use
   `public_url` reduced to its https origin, then the page's own origin),
   `filament_label_template` (#7157, stored only: the label template the labels page and the
-  labels PDF use; the 50 x 25 mm roll label by default).
+  labels PDF use; the 50 x 25 mm roll label by default; a saved sheet grid by its
+  `sheet_id`, #7216),
+  `filament_label_output` (#7216, stored only: the labels file's format, `pdf` or `png`, the
+  PNG's dpi, 203, 300 or 600, and the spool label's fields; a PDF at 300 dpi with the number,
+  material, colour, brand and QR code by default).
 - Bambuddy's spool fields (#7149, plan
   `docs/superpowers/plans/2026-11-23-spool-bb-fields.md`,
   migration `20261123T0609Z_filament_spool_bb_fields.sql`):
@@ -385,14 +440,84 @@ matches `[a-z][a-z0-9_]{0,63}`. Limits: 200 keys per entity, 2000 characters per
   `docs/superpowers/plans/2026-11-23-label-templates-pdf.md`): the labels page offers SB's
   50 x 25 mm roll label, Bambuddy's six templates (two box labels, two AMS holder labels and
   the Avery 5160 and L7160 sheets) and a custom size, and saves the choice in
-  `filament_label_template`. A sheet template prints on its own grid. "Download PDF" asks
+  `filament_label_template`. A sheet template prints on its own grid. "Download" asks
   `POST /api/v1/filament/labels` (`backend/scadbuddy/filament/label_pdf.py`, ReportLab) for
   the same labels at the same template and saves it through `downloadBlob`, so it works
   inside Bambuddy's frame. A place label's PDF needs the label address or an https public
   URL (409 `no_label_base` otherwise). The browser print stays.
   The agent reads codes with `filament_code_resolve`, `filament_location_get` and
-  `filament_printer_labels`, and the label sizes with `filament_label_templates`; the PDF
-  route has no tool (R-7157-10).
+  `filament_printer_labels`, and the label sizes with `filament_label_templates`. It saves
+  and deletes saved sheets with `filament_label_sheet_upsert` and
+  `filament_label_sheet_delete` (`write`, #7216 R-7216-14). The PDF route has no tool
+  (R-7157-10).
+- Labels as PNG (#7216, plan `docs/superpowers/plans/2026-11-25-label-outputs.md`): with
+  `format` `png` (or the setting `filament_label_output`), `POST /api/v1/filament/labels`
+  gives each page of the PDF as a greyscale PNG at the chosen dpi, drawn by PDFium
+  (`backend/scadbuddy/filament/label_png.py`), so the PNG and the PDF never disagree. Each PNG
+  carries its dpi, so label printer software prints it at its size. One page is `labels.png`;
+  more pages are `labels.zip`, a stored ZIP of `spool-<number>.png` and `L-<n>.png` (one label
+  a page) or `sheet-<n>.png` (a sheet). Past 400 megapixels in all, the route answers 422
+  `png_too_large`: choose PDF, a lower dpi or fewer labels. The labels page has the choice
+  beside the template: PDF or PNG, and for PNG the dpi (203, 300 or 600). It saves each change
+  in `filament_label_output`, and "Download" names the file by the type of the answer.
+- The fields a spool label prints (#7216, R-7216-9 and R-7216-10): the body's `fields`, else
+  the setting `filament_label_output`'s, from `number`, `material` (with its subtype),
+  `colour` (its name), `hex` (the effective colour as `#RRGGBB`), `brand`, `location` (its
+  place's name), `temps` (the nozzle range, or one value), `weight` (the label weight in g),
+  `note` (its first line), `added` (the row's `created_at` day in UTC) and `qr`. The lines
+  print top to bottom in that order, whatever order the request sends. At least one field is
+  chosen (422 otherwise). The default is what labels printed before: `number`, `material`,
+  `colour`, `brand` and `qr`. The text block may be the label's height less twice `PAD_MM`
+  (1.5 mm); the last lines go until it fits, and a chosen number always stays. The fit counts
+  line heights only (`backend/scadbuddy/filament/label_pdf.py` `NUMBER_MM`, `FIELD_MM`,
+  `LEADING`, `BIG_LEADING`, `GAP_MM`), never glyph widths, so the browser label keeps the same
+  lines in its own font. Without `qr`, the text column starts at the quiet zone and takes the
+  QR code's width too. A place label ignores the fields: it prints its code, name and QR code.
+  The labels page has a box for each field under "Spool label prints" (the last chosen box
+  is off), draws its labels with the same fields and fit (`labelSheet.ts` `spoolLines`,
+  `fitLines`), sends them with "Download", and saves each change in
+  `filament_label_output`. A change of the fields keeps the format and dpi, and a change of
+  the format or dpi keeps the fields. A tick changes one box only (R-7216-18): a tick made
+  before the settings arrive is applied to the stored fields, not to the default the page
+  showed.
+- What the labels file prints (#7216, R-7216-1 to R-7216-4): the text is DejaVu Sans, embedded,
+  so a name in Latin, Cyrillic, Greek, Armenian, Georgian, Hebrew, Arabic or Lao prints as
+  itself, not as `?`. A character DejaVu lacks takes the first Noto font of a fixed chain that
+  has it (Devanagari, Bengali, Tamil, Sinhala, Thai, Khmer, Myanmar and Ethiopic among them;
+  `backend/scadbuddy/filament/label_fonts.py` `FALLBACKS`). A character no font in the image
+  holds, CJK among them, prints as U+FFFD. Not done yet (#7707): Arabic prints unjoined,
+  Indic scripts print with no shaping, and Hebrew and Arabic print in stored order, not right
+  to left. When the server lacks DejaVu Sans, the route answers 503 `label_font_missing`,
+  which names the missing file. The browser print keeps the browser's own fonts.
+- Saved sheet grids (#7216, R-7216-11 to R-7216-13): a person names a sheet layout (the page,
+  `a4` or `letter`; the label size; the columns, rows, margins and gaps) and saves it. The API
+  keeps it in the table `label_sheets` (`backend/scadbuddy/filament/label_sheets.py`), and no
+  other process reads it. A name is 1 to 100 characters after trim and NFC, and unique with
+  case ignored (409 `label_sheet_name_taken`). An install keeps at most 100 sheets (409
+  `too_many_label_sheets`). A label is 40 to 190 mm wide and 25 to 190 mm tall; the grid has
+  1 to 20 columns and 1 to 40 rows and must fit its page with 0.01 mm of slack (422
+  otherwise). `GET /api/v1/filament/label-templates` lists them as `saved`;
+  `POST /api/v1/filament/label-sheets` saves one, and `PUT` and `DELETE
+  /api/v1/filament/label-sheets/{id}` replace and delete it. These writes do not nudge the
+  Bambuddy sync, which has nothing of them to push. A label choice names a saved sheet by
+  its id (`{template: "saved", sheet_id}`), and `POST /api/v1/filament/labels` reads the row
+  at each request, so an edit applies to the next print, PDF or PNG. A choice of a deleted
+  sheet answers 409 `label_sheet_gone`.
+  The labels page lists the saved sheets in the template picker under "Saved sheets". "New
+  sheet…" opens the sheet editor (`frontend/src/components/filament/LabelSheetEditor.tsx`:
+  the name, the page, the label width and height, the columns and rows, the top and left
+  margins and the column and row gaps, in mm, with a drawing of the grid on its page). The
+  server's 409 and 422 text is the only check the editor shows. A saved sheet becomes the
+  label choice, `filament_label_template` `{template: "saved", sheet_id}`. For a saved sheet
+  that is chosen, "Edit sheet…" changes it, and "Delete" deletes it after a confirm; the page
+  then goes back to the 50 x 25 mm roll label. After each save or delete, the page reads the
+  template list again. It also reads it again when its tab is shown again, and before "Print",
+  which waits for that read and prints on the newest grid, so a sheet that the agent edits
+  while the page is open prints as edited; a failed read prints with the grid the page has
+  (R-7216-21). A saved sheet prints on its own grid, as a sheet template does. When
+  the stored choice names a sheet that is not in the list, the page draws at 50 x 25 mm and
+  says that the saved sheet was deleted; "Download" still sends the stored choice and shows
+  the 409.
 
 ## Tests
 

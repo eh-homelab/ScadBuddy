@@ -29,7 +29,12 @@ from temporalio.exceptions import ApplicationError
 from temporalio.service import RPCError, RPCStatusCode
 
 from scadbuddy.bambuddy.errors import UNAVAILABLE_PROBLEM
-from scadbuddy.bambuddy.output_reader import LocalOutputs, invalid_meta, require
+from scadbuddy.bambuddy.output_reader import (
+    LocalOutputs,
+    TemplateSettings,
+    invalid_meta,
+    require,
+)
 from scadbuddy.bambuddy.part_settings import dumped
 from scadbuddy.bambuddy.preview import PreviewStarted
 from scadbuddy.bambuddy.print_run import (
@@ -91,7 +96,12 @@ from scadbuddy.orders.quote import (
     support_check,
 )
 from scadbuddy.orders.quote_preview import start_library_quote_preview, start_quote_preview
-from scadbuddy.orders.rendering import AttachTo, RenderedOutput, output_for_reference
+from scadbuddy.orders.rendering import (
+    AttachTo,
+    RenderedOutput,
+    kit_output_id,
+    outputs_for_reference,
+)
 from scadbuddy.orders.served_library import ServedLibrary, served_shelf
 from scadbuddy.orders.spools import item_plan
 from scadbuddy.orders.storefront.slice_price import (
@@ -215,8 +225,15 @@ class PreviewSlicer:
         subject: str,
         *,
         slot_presets: SlotPresets | None = None,
+        template_settings: TemplateSettings | None = None,
     ) -> list[PreviewStarted]:
-        return await self._start(request, subject, output_id=output_id, slot_presets=slot_presets)
+        return await self._start(
+            request,
+            subject,
+            output_id=output_id,
+            slot_presets=slot_presets,
+            template_settings=template_settings,
+        )
 
     async def start_library(
         self,
@@ -250,6 +267,7 @@ class PreviewSlicer:
         slot_presets: SlotPresets | None = None,
         slot_colours: SlotColours | None = None,
         held: HeldFile | None = None,
+        template_settings: TemplateSettings | None = None,
     ) -> list[PreviewStarted]:
         core = self.core
         settings = await asyncio.to_thread(core.settings_store.load)
@@ -300,7 +318,7 @@ class PreviewSlicer:
         assert output_id is not None
         outputs = LocalOutputs(core.outputs, core.catalogue)
         meta = await require(outputs, output_id)
-        naming = await outputs.naming(meta)
+        naming = await outputs.naming(meta, template_settings=template_settings)
         # The run's refusal (#5649): never a price for a print the run refuses.
         if naming.invalid_meta is not None:
             raise invalid_meta(naming.invalid_meta)
@@ -719,13 +737,17 @@ def order_kinds(core: Core, components: Components) -> list[OperationKind]:
         if order is None:
             raise ApiError(status.HTTP_404_NOT_FOUND, f"no order {order_id!r}")
         reference = reference_of(item)
-        await output_for_reference(
+        saved_as = render_output_id(OPERATION_RUN.get())
+        # Every output of a pipeline's render (#5701 PR 5): the item holds the first, and
+        # the order finds the others from it (`kit_output_ids`).
+        await outputs_for_reference(
             reference,
             outputs=core.outputs,
             renders=_Renders(core),
             create_output=create_output,
             name=f"{order.label} {item.title}",
-            saved_as=render_output_id(OPERATION_RUN.get()),
+            saved_as=lambda _index: saved_as,
+            later_as=kit_output_id,
             schema=await reference_schema(core, reference),
             item=AttachTo(
                 lifecycle=lifecycle,
@@ -779,6 +801,7 @@ def order_kinds(core: Core, components: Components) -> list[OperationKind]:
                 part_settings=dumped(asked.part_settings),
                 setup=setup,
                 content=core.store.content,
+                jobs=core.render.store,
             )
         # The request as it prints: what it left out is the quote's (`_same_setup` passed).
         body = PrintRunRequest.model_validate(filled(sent, checked.get("setup")))

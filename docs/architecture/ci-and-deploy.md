@@ -30,8 +30,9 @@ copied into `app`; `test` (`Dockerfile:1007`) is the CI image. Only `build` gate
 workflow: every other job is `continue-on-error` (for example `build-image.yml:221`).
 
 The Go CLIs are published by `build-go-image.yml`, one image per `tools/go/*` module with
-a `main.go` (`build-go-image.yml:46`, `:133`): today `scadbuddy-bambuddy-fs` only. Nothing
-deploys it ([`tools/go/CLAUDE.md`](../../tools/go/CLAUDE.md)). `build-go-image.yml` skips
+a `main.go`, except core (`build-go-image.yml:46`, `:133`), as
+`ghcr.io/eh-homelab/scadbuddy-<module>`. Nothing in this repo deploys them
+([`tools/go/CLAUDE.md`](../../tools/go/CLAUDE.md)). `build-go-image.yml` skips
 `tools/go/core`: `build-image.yml`'s `core` job publishes `scadbuddy-core` with every
 build, and the deploy pins it (#7667).
 
@@ -103,7 +104,7 @@ Summary**, which needs every job except `lfs-fixtures` and `dispatch-review`
 |---|---|---|---|
 | layout | `layout` (`:99`) | reads the changed paths and picks the lanes | root `CLAUDE.md` |
 | lint | `lint` (`:199`) | actionlint, hadolint, shellcheck, the `lint-*.sh` scripts and every `.github/scripts/*.test.sh`, including the deploy workflow's shell tests (`:317`, `:322`) | root `CLAUDE.md` "Workflow/Dockerfile lint" |
-| markdown | `markdown` (`:457`) | markdownlint-cli2 over `docs/**/*.md` (`.markdownlint-cli2.jsonc`); on a docs-only change (`docs_only`, `select-lanes.sh`) the only job that checks it | root `CLAUDE.md` "CI and caching rules" |
+| markdown | `markdown` (`:457`) | markdownlint-cli2 over `docs/**/*.md` and each `CLAUDE.md` and `AGENTS.md` outside `vendor/` (`.markdownlint-cli2.jsonc`); on a docs-only change (`docs_only`, `select-lanes.sh`) the only job that checks it | root `CLAUDE.md` "CI and caching rules" |
 | frontend | `frontend` (`:447`), `frontend-unit` (`:515`), `frontend-e2e` (`:575`), `frontend-e2e-split` (`:696`) | typecheck, vitest, Playwright shards | [`frontend/CLAUDE.md`](../../frontend/CLAUDE.md) |
 | agent | `agent` (`:747`) | the agent's tests; builds the `agent` (`:850`), `sandbox` (`:899`) and `playwright-mcp` (#7027) targets | [`agent/CLAUDE.md`](../../agent/CLAUDE.md) |
 | agent_durable | `agent-durable` (`:936`) | builds the `agent-durable` target (`:1012`) | [`agent-durable/CLAUDE.md`](../../agent-durable/CLAUDE.md) |
@@ -121,8 +122,9 @@ Outside `ci.yml`:
 
 - `hot-path-e2e.yml` builds `runtime`, `test` and `slicer` and runs the real stack
   (`e2e-stack/run.sh --mode both`, then `--auth`) on PRs touching `e2e-stack/**` or
-  `backend/**`, weekly and on dispatch (`.github/workflows/hot-path-e2e.yml:29-40`,
-  `:194-200`). It is not part of CI Summary. See
+  `backend/**` (a `CLAUDE.md` or `AGENTS.md` aside), weekly and on dispatch
+  (`.github/workflows/hot-path-e2e.yml:29-40`,
+  `:196-202`). It is not part of CI Summary. See
   [`e2e-stack/CLAUDE.md`](../../e2e-stack/CLAUDE.md).
 - `merge-queue-review.yml` carries the `claude-review` verdict onto a merge-queue commit.
 - `ai-evals.yml` runs the agent's live evals on dispatch only ([`docs/ai/evals.md`](../ai/evals.md)).

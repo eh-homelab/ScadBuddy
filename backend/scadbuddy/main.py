@@ -205,7 +205,7 @@ from scadbuddy.store.content import ContentStore, sweep_content
 from scadbuddy.store.download_cache import DOWNLOADS_DIRNAME
 from scadbuddy.store.factory import blob_spool, build_store
 from scadbuddy.store.geometry import GeometryIndex
-from scadbuddy.store.index import BlobIndex
+from scadbuddy.store.index import STAGE_LOCK_SLOTS, BlobIndex, StageLocks
 from scadbuddy.store.local import LocalContentBackend
 from scadbuddy.store.migrate import migrate_activity
 from scadbuddy.worker import (
@@ -534,6 +534,22 @@ async def _sweep_duplicate_staging_logged(state: AppState, *, reraise: bool = Fa
             raise
 
 
+async def _sweep_unrecorded(content: ContentStore, grace: float) -> int:
+    """#701: remove what uploads to ``content``'s backend left with no row (their process
+    died first), once older than ``grace``; 0 for a backend that is no
+    `UnrecordedSweeper`. `claim`: an object a live save uploaded and has not indexed yet
+    stays (#7477); one a dead save left goes once past the grace."""
+    backend = content.backend
+    if not isinstance(backend, UnrecordedSweeper):
+        return 0
+    swept = await backend.sweep_unrecorded(
+        cutoff=datetime.now(UTC) - timedelta(seconds=grace),
+        recorded=partial(content.index.shares_backend_id, backend.backend),
+        claim=content.claim_object,
+    )
+    return swept if isinstance(swept, int) else len(swept)
+
+
 async def _sweep_blobs_logged(state: AppState) -> None:
     """The Temporal path's blob store: the pieces no job references any more. Only
     the Schedule's sweep runs it, so a failure is logged and fails its activity."""
@@ -552,21 +568,23 @@ async def _sweep_blobs_logged(state: AppState) -> None:
                     logger.info(
                         "removed unreferenced output blobs", extra={"count": len(outputs_swept)}
                     )
+                # And what a save that died before its commit uploaded there (#7477).
+                unrecorded = await _sweep_unrecorded(
+                    state.outputs.bytes.content, state.config.sweep_grace
+                )
         else:
             failed = False
             try:
                 removed = await sweep_content(
                     state.store.content, state.refs, grace=state.config.sweep_grace
                 )
-                backend = state.store.content.backend
-                if isinstance(backend, UnrecordedSweeper):
-                    # #701: an upload whose process died before its row was written.
-                    cutoff = datetime.now(UTC) - timedelta(seconds=state.config.sweep_grace)
-                    index = state.store.content.index
-                    swept = await backend.sweep_unrecorded(
-                        cutoff=cutoff, recorded=partial(index.shares_backend_id, backend.backend)
+                # A `LocalContentBackend` is swept for unrecorded objects only as the
+                # outputs' own store, above (#7477); no other store over one is (none
+                # is built in prod; #7756 review).
+                if not isinstance(state.store.content.backend, LocalContentBackend):
+                    unrecorded = await _sweep_unrecorded(
+                        state.store.content, state.config.sweep_grace
                     )
-                    unrecorded = swept if isinstance(swept, int) else len(swept)
             except BaseException:
                 # BaseException on purpose: a cancelled sweep must stay cancelled, not be
                 # replaced by the trim's own failure below.
@@ -2764,6 +2782,10 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     # The blob store (#426): its index and the render settings live in the settings
     # pool, open only from here on.
     pool = state.settings_store.pool
+    # #7477 review I2: a save's stage hold takes a connection of a small pool of its own,
+    # never the shared one, and waits for a slot of it before its first upload; a
+    # removal's exclusive lock takes that pool's reserved connection (#7756 review).
+    stage_locks = StageLocks(state.settings_store.stage_lock_pool, STAGE_LOCK_SLOTS)
     source = RenderSettingsSource(pool, state.settings)
     try:
         current = await asyncio.to_thread(load_render_store_settings, pool, state.settings)
@@ -2774,7 +2796,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
             config=state.config,
             paths=state.paths,
             pool=pool,
-            index=BlobIndex(pool),
+            index=BlobIndex(pool, stage_locks=stage_locks),
             source=source,
             history=state.history,
             fonts=state.fonts,
@@ -2810,7 +2832,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     if state.store.backend == "local":
         output_content = ContentStore(
             LocalContentBackend(state.paths.output_blobs),
-            BlobIndex(pool),
+            BlobIndex(pool, stage_locks=stage_locks),
             spool=blob_spool(state.config, state.paths),
         )
         state.outputs.bytes = OutputBytes(output_content)

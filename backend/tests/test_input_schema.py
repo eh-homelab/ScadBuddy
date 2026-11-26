@@ -417,6 +417,8 @@ def test_a_default_with_a_timeout_and_a_real_error_names_the_real_error() -> Non
     """#7688: the refusal is jsonschema's pick among the real errors, so a timeout does
     not hide a value that is too long; and it is a refusal, not a retry."""
     both = {**SLOW_DEFAULT, "maxLength": 8}
-    [problem] = _past_deadline(_top(x=both), retry_timeouts=True)
-    assert problem.startswith("x: default does not fit:") and "too long" in problem
-    assert "to check" not in problem
+    # A prompt's task (retry_timeouts) and a registration (#7762) name the same error.
+    for kwargs in ({"retry_timeouts": True}, {}):
+        [problem] = _past_deadline(_top(x=both), **kwargs)
+        assert problem.startswith("x: default does not fit:") and "too long" in problem
+        assert "to check" not in problem

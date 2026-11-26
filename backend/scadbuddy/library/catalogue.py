@@ -13,7 +13,7 @@ import tempfile
 import threading
 import time
 import uuid
-from collections.abc import Callable, Coroutine, Iterator, Mapping, Sequence
+from collections.abc import Callable, Coroutine, Iterable, Iterator, Mapping, Sequence
 from contextlib import AbstractContextManager
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -3482,7 +3482,7 @@ class Catalogue:
         # Its derived files -- the schema cache, exported old revisions and its
         # outputs (NOT in the repository: a 3MF is a build artefact, not source)
         # -- and any an earlier delete failed to clear or a race wrote since.
-        self.sweep_orphans()
+        self.sweep_orphans(deleted=(slug,))
         # Whether or not the sweep got to its outputs: the model is gone either way.
         self._forget_cover(slug)
         self._drop_preview(slug)
@@ -3543,7 +3543,7 @@ class Catalogue:
                 removed.append(entry.name)
         return removed
 
-    def sweep_orphans(self) -> list[str]:
+    def sweep_orphans(self, *, deleted: Iterable[str] = ()) -> list[str]:
         """Remove the slug-keyed derived files of every model that is gone.
 
         A delete's own cleanup can fail (a busy PVC, a crash after the commit),
@@ -3559,7 +3559,17 @@ class Catalogue:
         Each root and each slug is checked on its own: one that cannot be read
         is logged and skipped -- a slug whose liveness is unknown is kept -- and
         the rest are still swept.
+
+        A slug whose directory is absent is gone only where something says it was
+        deleted (#7649): a commit deleted it, ``deleted`` names it (the delete that
+        calls this), or the models directory still holds a template of mine. A
+        models directory that is missing, empty or holds only the built-ins (a
+        wrong mount, a rename in progress, a restore that is not whole) says
+        nothing of the rest, so they are kept.
         """
+        gone = self._gone(deleted)
+        if gone is None:
+            return []
         candidates: list[tuple[str, Path]] = []
         keyed_by_file = (self.paths.schema_cache,)
         roots = (self.paths.outputs, self.paths.model_revisions, *keyed_by_file)
@@ -3577,7 +3587,7 @@ class Catalogue:
         removed: list[str] = []
         for slug, path in sorted(candidates):
             try:
-                if self.paths.model_dir(slug).exists():
+                if not gone(slug):
                     continue
             except OSError:
                 logger.exception("could not check a model for orphans", extra={"slug": slug})
@@ -3597,9 +3607,7 @@ class Catalogue:
         # way: a template that is gone takes its presets with it.
         if self.presets is not None:
             try:
-                forgotten = self.presets.sweep_orphans(
-                    lambda slug: self.paths.model_dir(slug).exists()
-                )
+                forgotten = self.presets.sweep_orphans(lambda slug: not gone(slug))
             except (OSError, psycopg.Error):
                 logger.exception("could not sweep saved presets for orphans")
             else:
@@ -3657,10 +3665,12 @@ class Catalogue:
         ids. Apart from `sweep_orphans`, which works by path: the previews are
         rows in the database.
 
-        A model counts as live while its directory exists, as for `sweep_orphans`,
-        and one whose liveness cannot be checked is kept.
+        A model counts as gone as for `sweep_orphans`: nothing is dropped while the
+        models directory holds no template, unless a commit deleted it (#7649). One
+        whose liveness cannot be checked is kept.
         """
-        if self.previews is None:
+        gone = None if self.previews is None else self._gone()
+        if self.previews is None or gone is None:
             return []
         try:
             slugs = self.previews.slugs()
@@ -3672,7 +3682,7 @@ class Catalogue:
         removed: list[str] = []
         for slug in slugs:
             try:
-                if self.paths.model_dir(slug).exists():
+                if not gone(slug):
                     continue
             except OSError:
                 logger.exception("could not check a model for orphans", extra={"slug": slug})
@@ -3680,6 +3690,33 @@ class Catalogue:
             self.previews.drop(slug)
             removed.append(slug)
         return removed
+
+    def _gone(self, deleted: Iterable[str] = ()) -> Callable[[str], bool] | None:
+        """Whether a slug is gone, as :meth:`sweep_orphans` says. None, with a
+        warning, where nothing can say: then nothing is swept."""
+        known = set(deleted)
+        try:
+            if _templates_in(self.paths.models):
+                return lambda slug: not self.paths.model_dir(slug).exists()
+        except OSError:
+            logger.exception(
+                "could not list the templates: no orphan is swept",
+                extra={"path": str(self.paths.models)},
+            )
+            return None
+        history = self.history
+        try:
+            if history is not None and history.available:
+                known |= history.deleted_templates()
+        except (GitError, OSError):
+            logger.exception("could not read the deleted templates")
+        if not known:
+            logger.warning(
+                "the models directory holds no template: no orphan is swept",
+                extra={"path": str(self.paths.models)},
+            )
+            return None
+        return lambda slug: slug in known and not self.paths.model_dir(slug).exists()
 
     def _drop_preview(self, slug: str) -> None:
         """Best effort, like the rest of a delete's or a reused slug's cleanup: one

@@ -5,7 +5,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { api } from '../api/client'
 import type { MediaView, StorefrontListing } from '../api/types'
 import { resetMockState, setMockMedia } from '../mocks/handlers'
-import { keychainSchema, versionIds } from '../mocks/fixtures'
+import { DOLLHOUSE_SLUG, DOLLHOUSE_VERSION, keychainSchema, versionIds } from '../mocks/fixtures'
 import { FILAMENT_PETG, FILAMENT_PLA } from '../mocks/features/orders/state'
 import { server } from '../mocks/server'
 import { renderPage } from '../test/utils'
@@ -434,8 +434,103 @@ describe('StorefrontListingPage (#5282, #6157)', () => {
     const { user } = renderStorefront()
     await within(await screen.findByTestId('listing-preview')).findByLabelText('Name on the tag')
     await user.click(screen.getByRole('button', { name: 'Publish' }))
-    expect(await screen.findByRole('alert')).toHaveTextContent(detail)
+    // #5701 — said in the Design block; the alert points there.
+    expect(await within(await screen.findByRole('group', { name: 'Design' })).findByRole('alert')).toHaveTextContent(detail)
+    expect(screen.getAllByRole('alert')[0]).toHaveTextContent('See the note under “Design” below.')
     expect(screen.queryByText('Published')).toBeNull()
+  })
+
+  it('names the parameter of a refusal while the design’s settings are not read (#7660 review)', async () => {
+    server.use(
+      http.get('/api/v1/models/:slug/versions/:commit/schema', () => HttpResponse.json({ detail: 'down' }, { status: 503 })),
+      http.post('/api/v1/storefront/listings/:id/publish', () =>
+        HttpResponse.json(
+          { type: 'https://scadbuddy.dev/problems/storefront/listing_param_pipeline_set', title: 'Unprocessable Content', status: 422, detail: 'set by the pipeline', name: 'params.text_size' },
+          { status: 422, headers: { 'Content-Type': 'application/problem+json' } },
+        ),
+      ),
+    )
+    const listing = await seed('Open')
+    const { user } = renderStorefront(`/storefront/listings/${listing.id}`)
+    await waitFor(() => expect(screen.getByLabelText('Title')).toHaveValue('Open'))
+    await user.click(screen.getByRole('button', { name: 'Publish' }))
+    // No Design block note exists without the schema, so the alert does not point there.
+    expect(await screen.findByText('Not published: “text_size” needs a change. See the note under it below.')).toBeInTheDocument()
+  })
+
+  describe('a pipeline design (#5701)', () => {
+    const HOUSE = { cols: 3, rows: 1, storeys: 2, windows: 4 }
+    const seedHouse = (house: Record<string, number>, over: object = {}) =>
+      api.createStorefrontListing({ slug: DOLLHOUSE_SLUG, commit: DOLLHOUSE_VERSION, title: 'House', inputs: { house }, inputs_v: 1, ...over })
+    const design = () => screen.findByRole('group', { name: 'Design' })
+
+    it('keeps its inputs through a save of another field, and publishes them', async () => {
+      const listing = await seedHouse(HOUSE)
+      const { user } = renderStorefront(`/storefront/listings/${listing.id}`)
+      expect(await design()).toHaveTextContent('House: Modules wide 3, Modules deep 1, Storeys 2, Windows per storey 4')
+      expect(screen.queryByText('Unsaved changes')).toBeNull()
+      await user.type(screen.getByLabelText('Title'), '!')
+      await user.click(screen.getByRole('button', { name: 'Publish' }))
+      expect(await screen.findByText('Published')).toBeInTheDocument()
+      const [saved] = await stored()
+      expect(saved).toMatchObject({ title: 'House!', inputs: { house: HOUSE }, inputs_v: 1, snapshot: { pipeline: true, inputs: { house: HOUSE } } })
+    })
+
+    it('names what publish refused in the Design block, until the next edit', async () => {
+      const listing = await seedHouse({ ...HOUSE, storeys: 9 })
+      const { user } = renderStorefront(`/storefront/listings/${listing.id}`)
+      const block = await design()
+      await user.click(screen.getByRole('button', { name: 'Publish' }))
+      expect(await within(block).findByRole('alert')).toHaveTextContent('Storeys: at most 3.')
+      expect(screen.getAllByRole('alert')[0]).toHaveTextContent('See the note under “Design” below.')
+      await user.type(screen.getByLabelText('Title'), '!')
+      expect(within(block).queryByRole('alert')).toBeNull()
+    })
+
+    it('has no settings of the parameters its pipeline sets, and takes them off the listing', async () => {
+      const listing = await seedHouse(HOUSE, { params: { piece: { kind: 'choice', choices: ['wall'] } } })
+      const { user } = renderStorefront(`/storefront/listings/${listing.id}`)
+      await design()
+      const settings = screen.getByRole('region', { name: 'Settings' })
+      expect(await within(settings).findByRole('group', { name: 'Course height' })).toBeInTheDocument()
+      expect(within(settings).queryByRole('group', { name: 'Piece' })).toBeNull()
+      await user.click(screen.getByRole('button', { name: 'Save draft' }))
+      await waitFor(async () => expect((await stored())[0]?.params).toEqual({}))
+    })
+
+    it('points only a refusal of a parameter its pipeline sets to the Design block (#7794 review)', async () => {
+      server.use(
+        http.post('/api/v1/storefront/listings/:id/publish', () =>
+          HttpResponse.json(
+            { type: 'https://scadbuddy.dev/problems/storefront/listing_default_invalid', title: 'Unprocessable Content', status: 422, detail: 'no', name: 'piece' },
+            { status: 422, headers: { 'Content-Type': 'application/problem+json' } },
+          ),
+        ),
+      )
+      const listing = await seedHouse(HOUSE)
+      const { user } = renderStorefront(`/storefront/listings/${listing.id}`)
+      const block = await design()
+      await user.click(screen.getByRole('button', { name: 'Publish' }))
+      // Another code names the parameter, and says it has no row, not that a note is under it (#7778).
+      await waitFor(() => expect(screen.getAllByRole('alert')[0]).toHaveTextContent('needs a change, but this editor shows no row for it'))
+      expect(screen.getAllByRole('alert')[0]).not.toHaveTextContent('See the note under it below')
+      expect(screen.getAllByRole('alert')[0]).not.toHaveTextContent('Design')
+      expect(within(block).queryByRole('alert')).toBeNull()
+    })
+
+    it('drops them with the template, and keeps them at another version of it', async () => {
+      const listing = await seedHouse(HOUSE)
+      const { user } = renderStorefront(`/storefront/listings/${listing.id}`)
+      await design()
+      await user.click(screen.getByRole('button', { name: 'Change' }))
+      await user.click(screen.getByRole('combobox', { name: 'Version' }))
+      await user.click(screen.getAllByRole('option')[1]!)
+      expect(await design()).toHaveTextContent('Modules wide 3')
+      await user.click(screen.getByRole('combobox', { name: 'Design' }))
+      await user.click(screen.getByRole('option', { name: 'Name Keychain' }))
+      await within(await screen.findByTestId('listing-preview')).findByLabelText('Name on the tag')
+      expect(screen.queryByRole('group', { name: 'Design' })).toBeNull()
+    })
   })
 
   it('says beside the materials that publish refused a colour of a material the listing does not allow (#6258)', async () => {
@@ -892,6 +987,18 @@ describe('StorefrontListingPage (#5282, #6157)', () => {
       await waitFor(() => expect(screen.getByRole('combobox', { name: 'Version' })).toHaveTextContent(`${versionIds.raised.slice(0, 7)}`))
       expect(screen.getByRole('combobox', { name: 'Version' })).toHaveTextContent('(current)')
       expect(screen.getAllByRole('note')[0]).toHaveTextContent('not in the design')
+    })
+
+    it('takes a pipeline template’s own inputs and their version, which publish brings up to date (#5701)', async () => {
+      serveJob({ slug: DOLLHOUSE_SLUG, model_version: DOLLHOUSE_VERSION, params: { piece: 'roof_panel', course_height: 220 }, inputs: { params: { piece: 'roof_panel', course_height: 220 }, v: 0 } })
+      const { user } = renderStorefront('/storefront/listings/new?sell=job:j1')
+      expect(await screen.findByText('The design the template starts with')).toBeInTheDocument()
+      await user.click(screen.getByRole('button', { name: 'Publish' }))
+      expect(await screen.findByText('Published')).toBeInTheDocument()
+      const [saved] = await stored()
+      expect(saved).toMatchObject({ inputs: {}, inputs_v: 0, snapshot: { inputs: { house: { cols: 2 } }, inputs_version: 1 } })
+      expect(saved?.fixed).toMatchObject({ course_height: 220 })
+      expect({ ...saved?.fixed, ...saved?.params }).not.toHaveProperty('piece')
     })
 
     it('leaves a listing opened while the fill-in ran alone when the fill-in answers (#6140 review)', async () => {

@@ -142,6 +142,7 @@ export function reset() {
   invoicedLine.clear()
   fetches.clear()
   insertReadings.clear()
+  savedSheets = []
 }
 
 type InsertBasis = S['InsertType']['empty_weight_basis']
@@ -177,6 +178,9 @@ function insertWeightCheck(row: SpoolRow, reading: number): S['InsertWeightCheck
     insert_type_id: insert?.id ?? null,
     empty_weight_g: weight,
     filament_g: weight == null ? null : reading - weight,
+    shortfall_g: null,
+    resolutions: [],
+    default: null,
   })
   if (row.archived_at) return answer('archived')
   if (!insert) return answer('no_insert')
@@ -191,6 +195,17 @@ function insertWeightCheck(row: SpoolRow, reading: number): S['InsertWeightCheck
     })
   if (used) return answer('used')
   if (row.grams_left == null || Math.abs(row.grams_left - label) >= 0.5) return answer('not_full')
+  if (reading < label - 0.5) {
+    // #7683 `insert_weights.below_label`: the shortfall, the readings of it, the default.
+    const filament = reading - insert.empty_weight_g
+    const resolutions: S['BelowLabelResolution'][] = [{ kind: 'tared', filament_g: reading, new_label_weight_g: null }]
+    if (filament >= 0) {
+      resolutions.push({ kind: 'short', filament_g: filament, new_label_weight_g: null })
+      resolutions.push({ kind: 'label_wrong', filament_g: filament, new_label_weight_g: Math.max(1, Math.floor(filament + 0.5)) })
+    }
+    const shortfall = label - reading
+    return { ...answer('below_label'), shortfall_g: shortfall, resolutions, default: shortfall > 0.1 * label && resolutions.length > 1 ? 'short' : 'tared' }
+  }
   const derived = reading - label
   if (derived <= 0) return answer('not_above_label')
   if (derived > label) return answer('derived_too_heavy')
@@ -253,6 +268,78 @@ export const LABEL_TEMPLATES: S['LabelTemplates'] = {
     },
   ],
   custom: { min_width_mm: 40, min_height_mm: 25, max_width_mm: 190, max_height_mm: 190 },
+  // #7216 — the saved sheet grids: `GET /label-templates` answers `savedSheets` here.
+  saved: [],
+}
+
+/** #7216 — the saved sheets (`label_sheets.py` `LabelSheetStore`); none until the Labels page saves one. */
+let savedSheets: S['SavedLabelSheet'][] = []
+
+/**
+ * Python's `str.casefold()` for the common cases: `toLowerCase()`, then `ß` (and `ẞ`, which lowers to it) to `ss`,
+ * and the final sigma `ς` to `σ`. JavaScript has no casefold. Not covered: the other full case folds, such as the
+ * ligatures (`ﬁ` to `fi`), `ŉ`, the Greek letters with a iota subscript and the Cherokee letters, so two such names
+ * the real route refuses can both save in the mock.
+ */
+const casefold = (text: string) => text.toLowerCase().replace(/ß/g, 'ss').replace(/ς/g, 'σ')
+
+/** `label_sheets.py` `name_key`: NFC, then case folded (`casefold` says where it differs). */
+const sheetKey = (name: string) => casefold(name.normalize('NFC'))
+
+/** `label_sheets.py` `sort_key`: the name with its marks removed, then its key. */
+const sheetSort = (name: string) => casefold(name.normalize('NFKD').replace(/\p{M}/gu, ''))
+
+/**
+ * #7216 — a sheet body as `LabelSheetIn` and `SheetLayout` check it, or the refusal: the name, the bounds and the
+ * fit on the page, with Pydantic's messages, so the Labels page shows what the real route says.
+ */
+function sheetRefusal(body: S['LabelSheetIn']): Response | null {
+  const errors: { loc: string[]; msg: string }[] = []
+  const name = (body.name ?? '').normalize('NFC').trim()
+  if (name.length < 1) errors.push({ loc: ['body', 'name'], msg: 'String should have at least 1 character' })
+  if (name.length > 100) errors.push({ loc: ['body', 'name'], msg: 'String should have at most 100 characters' })
+  const layout = body.layout
+  const bounds: [Exclude<keyof S['SheetLayout'], 'page'>, number, number][] = [
+    ['width_mm', 40, 190],
+    ['height_mm', 25, 190],
+    ['cols', 1, 20],
+    ['rows', 1, 40],
+    ['top_mm', 0, 190],
+    ['left_mm', 0, 190],
+    ['col_gap_mm', 0, 190],
+    ['row_gap_mm', 0, 190],
+  ]
+  for (const [key, min, max] of bounds) {
+    const value: unknown = layout[key]
+    if (typeof value !== 'number') errors.push({ loc: ['body', 'layout', key], msg: 'Input should be a valid number' })
+    else if (value < min) errors.push({ loc: ['body', 'layout', key], msg: `Input should be greater than or equal to ${min}` })
+    else if (value > max) errors.push({ loc: ['body', 'layout', key], msg: `Input should be less than or equal to ${max}` })
+  }
+  if (errors.length === 0) {
+    const [pageW, pageH] = layout.page === 'a4' ? [210, 297] : [215.9, 279.4]
+    const wide = layout.left_mm + layout.cols * layout.width_mm + (layout.cols - 1) * layout.col_gap_mm
+    const tall = layout.top_mm + layout.rows * layout.height_mm + (layout.rows - 1) * layout.row_gap_mm
+    const g = (n: number) => String(Number(n.toPrecision(6)))
+    if (wide > pageW + 0.01) errors.push({ loc: ['body', 'layout'], msg: `Value error, the grid is ${g(wide)} mm wide, but the ${layout.page} page is ${g(pageW)} mm wide` })
+    else if (tall > pageH + 0.01) errors.push({ loc: ['body', 'layout'], msg: `Value error, the grid is ${g(tall)} mm tall, but the ${layout.page} page is ${g(pageH)} mm tall` })
+  }
+  return errors.length > 0 ? problem(422, 'the request did not match the expected shape', { errors }) : null
+}
+
+/** `label_sheets.py` `LabelSheetNameTakenError`, as the route answers it. */
+const sheetNameTaken = (name: string) => problem(409, `a label sheet named '${name}' exists: choose another name`, { code: 'label_sheet_name_taken' })
+
+/**
+ * #7216 — the pages `label_pdf.py` `page_count` draws for `count` labels: one label a page on a roll, else as many
+ * pages as the sheet needs (the template's own grid, or the packed Letter sheet of `_packed` for the `sheet` layout).
+ */
+function labelPages(choice: S['LabelTemplateChoice'] | null | undefined, layout: 'roll' | 'sheet', count: number) {
+  const sheet = choice?.template === 'saved' ? savedSheets.find((one) => one.id === choice.sheet_id)?.layout : undefined
+  const known = LABEL_TEMPLATES.templates.find((one) => one.id === (choice?.template ?? 'roll_50x25'))
+  const width = sheet?.width_mm ?? known?.width_mm ?? choice?.width_mm ?? 50
+  const height = sheet?.height_mm ?? known?.height_mm ?? choice?.height_mm ?? 25
+  const grid = sheet ?? known?.sheet ?? (layout === 'sheet' ? { cols: Math.max(1, Math.floor(192 / (width + 2))), rows: Math.max(1, Math.floor((279.4 - 20 + 2) / (height + 2))) } : null)
+  return grid ? Math.ceil(count / (grid.cols * grid.rows)) : count
 }
 
 const TITLES = { 404: 'Not Found', 409: 'Conflict', 422: 'Unprocessable Content', 428: 'Precondition Required' } as const
@@ -278,7 +365,7 @@ const FIELDS = {
   proposalPick: ['brand_id', 'material_id', 'subtype_id', 'rgba', 'label_weight_g', 'material_number', 'code', 'spool_ids'],
   archive: ['archived'],
   tag: ['tag_uid', 'tray_uuid', 'kind', 'override'],
-  event: ['kind', 'source', 'at', 'grams', 'reading_g', 'temp_c', 'hours', 'note'],
+  event: ['kind', 'source', 'at', 'grams', 'reading_g', 'resolution', 'temp_c', 'hours', 'note'],
   locationCreate: ['name', 'kind_id', 'parent_id', 'identifier', 'capacity', 'printer_id', 'ams_id', 'tray_id', 'note', 'sort_order'],
 } as const
 const PATCH_FIELDS = { type: [...FIELDS.typeCreate, 'archived'], spool: [...FIELDS.spoolCreate.filter((field) => field !== 'grams_left'), 'archived'], location: [...FIELDS.locationCreate, 'archived'] }
@@ -1660,12 +1747,36 @@ function csvRows(body: { rows?: unknown }): Record<string, string | null>[] | Re
 // -- codes and printer labels (#6955) --
 
 /** `codes/parse.py`: any case, an optional dash, a one-letter prefix and a number. */
-function parseCode(text: string): { prefix: string; number: number } | null {
+export function parseCode(text: string): { prefix: string; number: number } | null {
   const hit = /^([A-Z])-?([0-9]+)$/.exec(text.trim().toUpperCase())
   return hit ? { prefix: hit[1]!, number: Number(hit[2]) } : null
 }
 
 const placeCode = (place: S['Location']) => `L-${place.number}`
+
+/**
+ * `codes/resolve.py` `resolve` over `parseCode`: the row a code's text names, in the
+ * `/codes/{code}` shape, or null. Shared by `GET /codes/{code}` and the tag-read mock
+ * (`tags.ts` `readOn`), so a scanned label and a typed code resolve by one rule (#6955).
+ */
+export function resolveCodeText(text: string): S['Resolved'] | null {
+  const parsed = parseCode(text)
+  if (!parsed) return null
+  if (parsed.prefix === 'L') {
+    const place = state.locations.find((one) => one.number === parsed.number)
+    return place ? { kind: 'location', id: place.id, code: placeCode(place), name: place.name, archived: !!place.archived_at } : null
+  }
+  if (parsed.prefix === 'S') {
+    const row = state.spools.find((one) => one.number === parsed.number)
+    return row ? resolvedSpool(row) : null
+  }
+  return null
+}
+
+/** A spool in the `/codes/{code}` shape; also what a `scadbuddy:spool:<id>` text resolves to. */
+export function resolvedSpool(row: { id: string; number: number; archived_at?: string | null }): S['Resolved'] {
+  return { kind: 'spool', id: row.id, code: `S-${row.number}`, name: null, archived: !!row.archived_at }
+}
 const step = (place: S['Location']): S['PathStep'] => ({ id: place.id, code: placeCode(place), name: place.name })
 const byOrder = (a: S['Location'], b: S['Location']) => a.sort_order - b.sort_order || a.name.localeCompare(b.name)
 
@@ -1787,6 +1898,9 @@ export function spoolViewOf(spoolId: string): FilamentSpool | null {
   const row = findSpool(spoolId)
   return row ? view(row) : null
 }
+
+/** The spool's own row by its id, archived or not; null for an unknown id. */
+export const spoolRowOf = (spoolId: string) => findSpool(spoolId) ?? null
 
 /** The tag by its id. */
 export const tagOf = (tagId: string): S['Tag'] | undefined => tagById(tagId)
@@ -2373,6 +2487,8 @@ export const handlers = [
     if (body.reading_g != null && body.kind !== 'weighed') return problem(422, 'body: Value error, only a weighing has reading_g')
     if (body.reading_g != null && body.grams != null && body.reading_g < body.grams) return problem(422, 'body: Value error, reading_g is below grams')
     if (body.kind === 'weighed' && body.grams == null && body.reading_g == null) return problem(422, 'body: Value error, a weighing needs grams')
+    if (body.resolution != null && body.reading_g == null) return problem(422, 'body: Value error, a resolution needs reading_g')
+    if (body.resolution != null && body.grams != null) return problem(422, 'body: Value error, a resolution takes reading_g alone')
     if (body.kind === 'consumed_reset' && (body.grams != null || body.temp_c != null || body.hours != null)) {
       return problem(422, 'body: Value error, a consumed reset has no grams, temp_c or hours')
     }
@@ -2387,26 +2503,44 @@ export const handlers = [
       const data: Record<string, unknown> = {}
       if (body.reading_g != null) {
         const insert = state.catalogs['insert-types'].find((one) => one.id === view(row).effective?.insert_type_id)
-        if (grams == null) {
+        if (body.resolution != null) {
+          // #7683 `add_event`: checked again, the side effect an `edited` event before the weighing.
+          const check = insertWeightCheck(row, body.reading_g)
+          const chosen = check.resolutions.find((one) => one.kind === body.resolution)
+          if (check.reason !== 'below_label' || !chosen) {
+            return problem(422, `no reading under the label weight to resolve: ${check.reason}`, { code: 'no_below_label', reason: check.reason })
+          }
+          grams = chosen.filament_g
+          if (chosen.kind === 'short') {
+            addEvent(row.id, 'edited', { at: when, data: { changes: { added_full: [row.added_full, false] } } })
+            state.spools[at] = { ...row, added_full: false }
+          } else if (chosen.kind === 'label_wrong') {
+            addEvent(row.id, 'edited', { at: when, data: { changes: { label_weight_g: [row.label_weight_g, chosen.new_label_weight_g] } } })
+            state.spools[at] = { ...row, label_weight_g: chosen.new_label_weight_g ?? null }
+          }
+          Object.assign(data, { resolution: chosen.kind, shortfall_g: check.shortfall_g })
+        } else if (grams == null) {
           if (!insert) return problem(422, 'the spool has no empty weight to take off the reading', { code: 'no_empty_weight' })
           grams = body.reading_g - insert.empty_weight_g
           if (grams < 0) return problem(422, "the reading is below the spool's empty weight", { code: 'reading_below_empty' })
         }
         const emptyG = body.reading_g - grams
-        const own = insert != null && Math.abs(emptyG - insert.empty_weight_g) < 0.05 ? insert : null
+        const tared = body.resolution === 'tared'
+        const own = !tared && insert != null && Math.abs(emptyG - insert.empty_weight_g) < 0.05 ? insert : null
         const expected = row.grams_left
         Object.assign(data, {
           reading_g: body.reading_g,
           empty_g: emptyG,
-          empty_source: own ? 'insert' : 'person',
+          empty_source: tared ? 'tared' : own ? 'insert' : 'person',
           empty_basis: own ? (isPlaceholder(own.empty_weight_basis, own.note) ? 'placeholder' : own.empty_weight_basis) : null,
           empty_name: own?.name ?? null,
           expected_g: expected,
-          drift_g: expected == null ? null : Math.round((grams - expected) * 10) / 10,
+          // #7683: a resolved weighing keeps what was expected and records no drift.
+          drift_g: expected == null || body.resolution != null ? null : Math.round((grams - expected) * 10) / 10,
         })
       }
       const drift = typeof data.drift_g === 'number' ? data.drift_g : null
-      state.spools[at] = { ...row, grams_left: grams, last_weighed_g: grams, last_weighed_at: when, last_drift_g: drift }
+      state.spools[at] = { ...state.spools[at]!, grams_left: grams, last_weighed_g: grams, last_weighed_at: when, last_drift_g: drift }
       return HttpResponse.json(
         addEvent(row.id, 'weighed', { at: when, source: body.source ?? 'person', grams_before: row.grams_left, grams_after: grams, data }),
         { status: 201 },
@@ -2518,18 +2652,8 @@ export const handlers = [
   // -- places --
   http.get('/api/v1/codes/:code', ({ params }) => {
     const code = String(params.code)
-    const parsed = parseCode(code)
-    const unknown = () => problem(404, `no thing has the code '${code}'`, { code: 'code_unknown' })
-    if (!parsed) return unknown()
-    if (parsed.prefix === 'L') {
-      const place = state.locations.find((one) => one.number === parsed.number)
-      return place ? HttpResponse.json({ kind: 'location', id: place.id, code: placeCode(place), name: place.name, archived: !!place.archived_at } satisfies S['Resolved']) : unknown()
-    }
-    if (parsed.prefix === 'S') {
-      const row = state.spools.find((one) => one.number === parsed.number)
-      return row ? HttpResponse.json({ kind: 'spool', id: row.id, code: `S-${row.number}`, name: null, archived: !!row.archived_at } satisfies S['Resolved']) : unknown()
-    }
-    return unknown()
+    const resolved = resolveCodeText(code)
+    return resolved ? HttpResponse.json(resolved) : problem(404, `no thing has the code '${code}'`, { code: 'code_unknown' })
   }),
   http.get(`${BASE}/locations/:id`, ({ params }) => {
     const place = state.locations.find((one) => one.id === params.id)
@@ -2545,10 +2669,41 @@ export const handlers = [
     return HttpResponse.json({ base_url: null, labels: wanted.flatMap(printerLabelRows), no_report: [] } satisfies S['PrinterLabels'])
   }),
   // #7157 — `filament/label_templates.py` `TEMPLATES` and its custom bounds.
-  http.get(`${BASE}/label-templates`, () => HttpResponse.json(LABEL_TEMPLATES)),
+  http.get(`${BASE}/label-templates`, () =>
+    HttpResponse.json({ ...LABEL_TEMPLATES, saved: [...savedSheets].sort((a, b) => sheetSort(a.name).localeCompare(sheetSort(b.name)) || a.id.localeCompare(b.id)) }),
+  ),
+  // #7216 — `POST`, `PUT` and `DELETE /filament/label-sheets`, with the route's refusals.
+  http.post(`${BASE}/label-sheets`, async ({ request }) => {
+    const body = (await request.json()) as S['LabelSheetIn']
+    const refused = sheetRefusal(body)
+    if (refused) return refused
+    const name = body.name.normalize('NFC').trim()
+    if (savedSheets.some((one) => sheetKey(one.name) === sheetKey(name))) return sheetNameTaken(name)
+    if (savedSheets.length >= 100) return problem(409, 'at most 100 saved label sheets: delete one before you save another', { code: 'too_many_label_sheets' })
+    const made: S['SavedLabelSheet'] = { id: newId(), name, layout: { ...body.layout }, created_at: now(), updated_at: now() }
+    savedSheets.push(made)
+    return HttpResponse.json(made, { status: 201 })
+  }),
+  http.put(`${BASE}/label-sheets/:id`, async ({ params, request }) => {
+    const body = (await request.json()) as S['LabelSheetIn']
+    const refused = sheetRefusal(body)
+    if (refused) return refused
+    const at = savedSheets.findIndex((one) => one.id === params.id)
+    if (at < 0) return problem(404, `no label sheet ${String(params.id)}`)
+    const name = body.name.normalize('NFC').trim()
+    if (savedSheets.some((one) => one.id !== params.id && sheetKey(one.name) === sheetKey(name))) return sheetNameTaken(name)
+    const changed: S['SavedLabelSheet'] = { ...savedSheets[at]!, name, layout: { ...body.layout }, updated_at: now() }
+    savedSheets[at] = changed
+    return HttpResponse.json(changed)
+  }),
+  http.delete(`${BASE}/label-sheets/:id`, ({ params }) => {
+    if (!savedSheets.some((one) => one.id === params.id)) return problem(404, `no label sheet ${String(params.id)}`)
+    savedSheets = savedSheets.filter((one) => one.id !== params.id)
+    return new HttpResponse(null, { status: 204 })
+  }),
   // #7157 — `POST /filament/labels`: the route's refusals, and a stand-in PDF (the real one is ReportLab's).
   http.post(`${BASE}/labels`, async ({ request }) => {
-    const body = (await request.json()) as S['LabelsPdfRequest']
+    const body = (await request.json()) as S['LabelsRequest']
     const spools = body.spool_ids ?? []
     const places = body.location_ids ?? []
     const count = spools.length + places.length
@@ -2558,8 +2713,19 @@ export const handlers = [
     const noPlace = places.find((id) => !state.locations.some((one) => one.id === id))
     if (noPlace) return problem(404, `no location ${noPlace}`)
     const settings = mockSettings()
+    // #7216 — a choice that names a deleted saved sheet (R-7216-12).
+    const chosen = body.template ?? settings.filament_label_template
+    if (chosen?.template === 'saved' && !savedSheets.some((one) => one.id === chosen.sheet_id))
+      return problem(409, 'The saved sheet was deleted. Choose another template.', { code: 'label_sheet_gone' })
     if (places.length > 0 && !settings.filament_label_base_url && !settings.public_url?.startsWith('https://'))
       return problem(409, 'A place label needs an address: set the label address in Settings, or the public URL.', { code: 'no_label_base' })
+    // #7216 — a PNG answer is one byte of the type the real route gives: one page is one PNG, more pages are a ZIP
+    // (R-7216-6). The real route reads the stored settings when the request names no format or template.
+    if ((body.format ?? settings.filament_label_output?.format) === 'png') {
+      const choice = body.template ?? settings.filament_label_template
+      const [type, name] = labelPages(choice, body.layout ?? 'roll', count) === 1 ? ['image/png', 'labels.png'] : ['application/zip', 'labels.zip']
+      return new HttpResponse(new Blob(['x'], { type }), { headers: { 'Content-Type': type, 'Content-Disposition': `attachment; filename="${name}"` } })
+    }
     return new HttpResponse(new Blob([`%PDF-1.4\n% ${count} labels\n%%EOF\n`], { type: 'application/pdf' }), {
       headers: { 'Content-Type': 'application/pdf', 'Content-Disposition': 'attachment; filename="labels.pdf"' },
     })

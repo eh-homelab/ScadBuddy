@@ -291,5 +291,79 @@
       "media_ids": ["plate:1"]
     },
     "titles": [{ "title": "Bracket – White Snow", "colours": ["White", "Snow"] }]
+  },
+  {
+    "name": "a pipeline template (#5701): its own inputs and their version go with the listing, and the params the pipeline sets are neither offered nor locked",
+    "schema": {
+      "groups": ["Piece", "Text", "Shape", "Colours"],
+      "parameters": [
+        { "name": "piece", "type": "select", "group": "Piece", "caption": "Piece", "initial": "wall", "options": [{ "name": "Wall", "value": "wall" }, { "name": "Roof", "value": "roof" }] },
+        { "name": "label", "type": "string", "group": "Text", "caption": "Name", "initial": "Home", "max_length": 40 },
+        { "name": "course", "type": "slider", "group": "Shape", "caption": "Course height", "initial": 210, "min": 180, "max": 240, "step": 5 },
+        { "name": "wall", "type": "color", "group": "Colours", "caption": "Wall", "initial": "#FFFFFF" }
+      ],
+      "pipeline": { "inputs_version": 1, "inputs": { "type": "object", "properties": { "house": { "type": "object", "properties": { "cols": { "type": "integer" } } } } }, "fault": "" },
+      "pipeline_params": ["piece"]
+    },
+    "filaments": [
+      { "id": "f-white", "material": "PLA", "subtype": null, "brand": null, "colour_name": "White", "colour": "#ffffff", "cost_per_kg": "20", "density_g_cm3": "1.24", "archived_at": null, "created_at": "2026-11-01T00:00:00Z", "updated_at": "2026-11-01T00:00:00Z" }
+    ],
+    "source": { "house": { "cols": 3 }, "params": { "piece": "roof", "course": 220 }, "v": 1 },
+    "expected": { "params": { "label": { "kind": "text", "max_length": 40 }, "wall": { "kind": "choice", "choices": [] } }, "fixed": { "course": 220 }, "colours": ["f-white"], "inputs": { "house": { "cols": 3 } }, "inputs_v": 1 }
+  },
+  {
+    "name": "a pipeline template's render with none of its own inputs (#5701): empty, at the version they were made, which publish migrates from",
+    "schema": {
+      "groups": ["Piece", "Text", "Shape", "Colours"],
+      "parameters": [
+        { "name": "piece", "type": "select", "group": "Piece", "caption": "Piece", "initial": "wall", "options": [{ "name": "Wall", "value": "wall" }, { "name": "Roof", "value": "roof" }] },
+        { "name": "label", "type": "string", "group": "Text", "caption": "Name", "initial": "Home", "max_length": 40 },
+        { "name": "course", "type": "slider", "group": "Shape", "caption": "Course height", "initial": 210, "min": 180, "max": 240, "step": 5 },
+        { "name": "wall", "type": "color", "group": "Colours", "caption": "Wall", "initial": "#FFFFFF" }
+      ],
+      "pipeline": { "inputs_version": 1, "inputs": { "type": "object", "properties": { "house": { "type": "object", "properties": { "cols": { "type": "integer" } } } } }, "fault": "" },
+      "pipeline_params": ["piece"]
+    },
+    "filaments": [
+      { "id": "f-white", "material": "PLA", "subtype": null, "brand": null, "colour_name": "White", "colour": "#ffffff", "cost_per_kg": "20", "density_g_cm3": "1.24", "archived_at": null, "created_at": "2026-11-01T00:00:00Z", "updated_at": "2026-11-01T00:00:00Z" }
+    ],
+    "source": { "params": {}, "v": 0 },
+    "expected": { "params": { "label": { "kind": "text", "max_length": 40 }, "wall": { "kind": "choice", "choices": [] } }, "fixed": { "course": 210 }, "colours": ["f-white"], "inputs": {}, "inputs_v": 0 }
+  },
+  {
+    "name": "a pipeline template's output from before inputs had a version (#5701): version 0",
+    "schema": {
+      "groups": ["Piece", "Text", "Shape", "Colours"],
+      "parameters": [
+        { "name": "piece", "type": "select", "group": "Piece", "caption": "Piece", "initial": "wall", "options": [{ "name": "Wall", "value": "wall" }, { "name": "Roof", "value": "roof" }] },
+        { "name": "label", "type": "string", "group": "Text", "caption": "Name", "initial": "Home", "max_length": 40 },
+        { "name": "course", "type": "slider", "group": "Shape", "caption": "Course height", "initial": 210, "min": 180, "max": 240, "step": 5 },
+        { "name": "wall", "type": "color", "group": "Colours", "caption": "Wall", "initial": "#FFFFFF" }
+      ],
+      "pipeline": { "inputs_version": 1, "inputs": { "type": "object", "properties": { "house": { "type": "object", "properties": { "cols": { "type": "integer" } } } } }, "fault": "" },
+      "pipeline_params": ["piece"]
+    },
+    "filaments": [
+      { "id": "f-white", "material": "PLA", "subtype": null, "brand": null, "colour_name": "White", "colour": "#ffffff", "cost_per_kg": "20", "density_g_cm3": "1.24", "archived_at": null, "created_at": "2026-11-01T00:00:00Z", "updated_at": "2026-11-01T00:00:00Z" }
+    ],
+    "source": { "house": { "cols": 2 }, "params": { "course": 200 } },
+    "expected": { "params": { "label": { "kind": "text", "max_length": 40 }, "wall": { "kind": "choice", "choices": [] } }, "fixed": { "course": 200 }, "colours": ["f-white"], "inputs": { "house": { "cols": 2 } }, "inputs_v": 0 }
+  },
+  {
+    "name": "a template with no pipeline takes none of its interface's own state (#5701): publish refuses inputs there",
+    "schema": {
+      "groups": ["Piece", "Text", "Shape", "Colours"],
+      "parameters": [
+        { "name": "piece", "type": "select", "group": "Piece", "caption": "Piece", "initial": "wall", "options": [{ "name": "Wall", "value": "wall" }, { "name": "Roof", "value": "roof" }] },
+        { "name": "label", "type": "string", "group": "Text", "caption": "Name", "initial": "Home", "max_length": 40 },
+        { "name": "course", "type": "slider", "group": "Shape", "caption": "Course height", "initial": 210, "min": 180, "max": 240, "step": 5 },
+        { "name": "wall", "type": "color", "group": "Colours", "caption": "Wall", "initial": "#FFFFFF" }
+      ]
+    },
+    "filaments": [
+      { "id": "f-white", "material": "PLA", "subtype": null, "brand": null, "colour_name": "White", "colour": "#ffffff", "cost_per_kg": "20", "density_g_cm3": "1.24", "archived_at": null, "created_at": "2026-11-01T00:00:00Z", "updated_at": "2026-11-01T00:00:00Z" }
+    ],
+    "source": { "lid": { "open": true }, "params": { "piece": "roof" }, "v": 0 },
+    "expected": { "params": { "label": { "kind": "text", "max_length": 40 }, "wall": { "kind": "choice", "choices": [] } }, "fixed": { "piece": "roof", "course": 210 }, "colours": ["f-white"] }
   }
 ]

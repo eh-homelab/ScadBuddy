@@ -21,7 +21,7 @@ expect "true false false true false" deploy/security/seccomp/profile-fetch.json
 expect "true false false true false" deploy/security/apparmor/scadbuddy-intake-sandbox
 expect "true false false true false" deploy/camera/mediamtx-relay.yml
 expect "true false false true false" backend/scadbuddy/camera/recorder.py
-expect "false false false false false" deploy/CLAUDE.md
+expect "false false false false true" deploy/CLAUDE.md
 expect "true false true true false" workers/rust/vectors/slice_plate.json
 expect "true false false true false" frontend/page-csp.txt
 expect "true false false true false" workers/playwright-mcp/browser-vectors.json
@@ -38,6 +38,7 @@ expect "false true false false false" .github/scripts/uv-git-pin.sh
 expect "false true false false false" .github/scripts/harness-pin.test.sh
 expect "false false true false false" workers/rust/crates/sb-slicer/src/lib.rs
 expect "false false false true false" frontend/src/main.tsx
+expect "false false false true false" deploy/cups/start.sh
 expect "false false false true false" scripts/gen-api-request-defaults.mjs
 expect "false false false false false" scripts/generate-go-client.sh
 expect "false false false true false" tools/go/bambuddy-fs/main.go
@@ -61,6 +62,22 @@ expect "false false false false false" docs/superpowers/specs/2026-09-22-scadbud
 expect "false false false false false" docs/architecture/diagram.png
 expect "false false false false false" docs.md
 expect "true false false true false" backend/docs/notes.md
+# CLAUDE.md and AGENTS.md are docs in every directory, and select no lane.
+expect "false false false false true" CLAUDE.md
+expect "false false false false true" AGENTS.md
+expect "false false false false true" backend/CLAUDE.md
+expect "false false false false true" workers/rust/CLAUDE.md agent-durable/AGENTS.md models/CLAUDE.md docs/ai/operating.md
+expect "false false false true false" backend/CLAUDE.md frontend/src/main.tsx
+expect "true false false true false" frontend/CLAUDE.md backend/scadbuddy/main.py
+expect "false false false false false" CLAUDE.md README.md
+expect "true false false true false" backend/NOTCLAUDE.md
+expect "true false false true false" backend/CLAUDE.md.bak
+expect "true false false true false" backend/CLAUDE.md/x.py
+expect "true false false true false" backend/CLAUDExmd
+# A vendored module's CLAUDE.md or AGENTS.md is code: the Go vendor drift check runs.
+expect "false false false true false" vendor/go.opentelemetry.io/otel/AGENTS.md
+expect "false false false true false" tools/go/scadbuddy-client/vendor/go.opentelemetry.io/otel/CLAUDE.md
+expect "false false false true false" CLAUDE.md tools/go/scadbuddy-client/vendor/go.opentelemetry.io/otel/AGENTS.md
 got=$(printf '' | "$here/select-lanes.sh" | paste -sd' ')
 [[ "$got" == "backend=false agent_durable=false rust=false image=false docs_only=false" ]] || { echo "FAIL: empty -> $got"; fail=1; }
 got=$("$here/select-lanes.sh" all | paste -sd' ')

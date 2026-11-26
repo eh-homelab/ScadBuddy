@@ -15,6 +15,7 @@ from scadbuddy.filament.catalog import CatalogStore
 from scadbuddy.filament.insert_weights import InsertWeightStore
 from scadbuddy.filament.inventory import FilamentInventory, PoolSbSpoolReads
 from scadbuddy.filament.invoices import InvoiceStore
+from scadbuddy.filament.label_sheets import LabelSheetStore
 from scadbuddy.filament.locations import LocationStore
 from scadbuddy.filament.metrics_store import MetricsSettings, MetricsStore
 from scadbuddy.filament.presets import PoolSpoolPresets
@@ -73,6 +74,11 @@ class Filament:
     def insert_weights(self) -> InsertWeightStore:
         """An insert's empty weight from new spools' weighings (#7280)."""
         return InsertWeightStore(self.spools)
+
+    @property
+    def label_sheets(self) -> LabelSheetStore:
+        """The saved label sheet grids (#7216)."""
+        return LabelSheetStore(self.spools.pool)
 
     @property
     def sync_passes(self) -> SyncPassStore:
