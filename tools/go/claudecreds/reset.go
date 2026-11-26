@@ -1,4 +1,5 @@
-// Package claudecreds reads facts about Claude Code logins and their limits.
+// Package claudecreds reads facts about Claude Code logins and their limits, and
+// replaces a login under Claude Code's own locks.
 package claudecreds
 
 import (

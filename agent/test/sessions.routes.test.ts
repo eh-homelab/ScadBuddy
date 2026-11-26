@@ -98,7 +98,7 @@ describe.skipIf((skip !== undefined) || AGENT_SESSIONS_SKIP !== '')(`session rou
     expect((await m.get(id, browser)).turns).toBe(2)
   })
 
-  it("takes, logs and ignores an earlier client's mode, whatever its value (#7323)", async () => {
+  it("drops an earlier client's mode, whatever its value, and logs nothing (#7323)", async () => {
     const start = (body: unknown) =>
       app.request('/api/v1/ai/sessions', { method: 'POST', headers: JSON_UI, body: JSON.stringify(body) })
     const log = vi.spyOn(console, 'error').mockImplementation(() => {})
@@ -110,7 +110,7 @@ describe.skipIf((skip !== undefined) || AGENT_SESSIONS_SKIP !== '')(`session rou
         expect(body.session).not.toHaveProperty('mode')
         expect(body).not.toHaveProperty('mode_fallback')
       }
-      expect(log.mock.calls.filter(([line]) => String(line).includes('session mode'))).toHaveLength(4)
+      expect(log.mock.calls.filter(([line]) => String(line).includes('session mode'))).toEqual([])
     } finally {
       log.mockRestore()
     }

@@ -1026,7 +1026,7 @@ describe('filament_spool_add_event with a new spool reading (#7280)', () => {
     server.use(http.post(`${SPOOL}/events`, () => HttpResponse.json({ detail: 'boom' }, { status: 500 })))
     const res = await runTool(
       tool('filament_spool_add_event'),
-      { spool_id: ROW, kind: 'weighed', reading_g: 1150, accept_insert_weight: true },
+      { spool_id: ROW, kind: 'weighed', reading_g: 1150, accept_insert_weight: true, new_empty_weight_g: 150 },
       ctx(),
     )
     expect(res.isError).toBe(true)
@@ -1041,14 +1041,28 @@ describe('filament_spool_add_event with a new spool reading (#7280)', () => {
     mock(CHECK, order, bodies)
     const res = await runTool(
       tool('filament_spool_add_event'),
-      { spool_id: ROW, kind: 'weighed', reading_g: 1150, accept_insert_weight: true },
+      { spool_id: ROW, kind: 'weighed', reading_g: 1150, accept_insert_weight: true, new_empty_weight_g: 150 },
       ctx(),
     )
     expect(res.isError).toBeFalsy()
     expect(order).toEqual(['offer 1150', 'accept', 'event'])
-    expect(bodies).toEqual([{ reading_g: 1150 }, { kind: 'weighed', source: 'person', reading_g: 1150, grams: 1000 }])
+    // #7450-2: the accept names the offer's weight, so a mean that moved meanwhile is refused.
+    expect(bodies).toEqual([{ reading_g: 1150, new_empty_weight_g: 150 }, { kind: 'weighed', source: 'person', reading_g: 1150, grams: 1000 }])
     const out = firstText(res) as Record<string, { empty_weight_g: number }>
     expect(out.insert_weight_accepted?.empty_weight_g).toBe(150)
+  })
+
+  it('accepts the weight the person approved, not a newer check (#7450-2)', async () => {
+    const order: string[] = []
+    const bodies: unknown[] = []
+    // The person approved 160 g; another spool's accept moved the mean to 155 g before this call.
+    mock({ ...CHECK, offer: { ...OFFER, new_empty_weight_g: 155 } }, order, bodies)
+    await runTool(
+      tool('filament_spool_add_event'),
+      { spool_id: ROW, kind: 'weighed', reading_g: 1150, accept_insert_weight: true, new_empty_weight_g: 160 },
+      ctx(),
+    )
+    expect(bodies[0]).toEqual({ reading_g: 1150, new_empty_weight_g: 160 })
   })
 
   it('books nothing when accept has no offer', async () => {
@@ -1056,12 +1070,20 @@ describe('filament_spool_add_event with a new spool reading (#7280)', () => {
     mock({ offer: null, reason: 'used', insert_type_id: ROW, empty_weight_g: 200, filament_g: 950 }, order, [])
     const res = await runTool(
       tool('filament_spool_add_event'),
-      { spool_id: ROW, kind: 'weighed', reading_g: 1150, accept_insert_weight: true },
+      { spool_id: ROW, kind: 'weighed', reading_g: 1150, accept_insert_weight: true, new_empty_weight_g: 150 },
       ctx(),
     )
     expect(res.isError).toBe(true)
     expect(JSON.stringify(res)).toContain('used')
     expect(order).toEqual(['offer 1150'])
+  })
+
+  it('names a check as well as a booking in its approval text (#7451-2)', () => {
+    const summarize = tool('filament_spool_add_event').summarize
+    const base = { spool_id: ROW, kind: 'weighed', source: 'person' } as const
+    expect(summarize({ ...base, reading_g: 1150 })).toBe(`Check, or record, a reading of 1150 g on spool ${ROW}`)
+    expect(summarize({ ...base, reading_g: 1150, accept_insert_weight: false })).toBe(`Record a reading of 1150 g on spool ${ROW}`)
+    expect(summarize({ ...base, reading_g: 1150, accept_insert_weight: true })).toBe(`Record a reading of 1150 g on spool ${ROW} and take its insert weight`)
   })
 
   it('refuses bad combinations before any call', async () => {
@@ -1072,6 +1094,9 @@ describe('filament_spool_add_event with a new spool reading (#7280)', () => {
     expect((await run({ kind: 'dried', reading_g: 1150 })).isError).toBe(true)
     expect((await run({ kind: 'dried', accept_insert_weight: true })).isError).toBe(true)
     expect((await run({ kind: 'weighed', grams: 900, accept_insert_weight: true })).isError).toBe(true)
+    // #7450-2: an accept names the weight the person approved.
+    expect((await run({ kind: 'weighed', reading_g: 1150, accept_insert_weight: true })).isError).toBe(true)
+    expect((await run({ kind: 'weighed', reading_g: 1150, accept_insert_weight: false, new_empty_weight_g: 150 })).isError).toBe(true)
     expect(order).toEqual([])
   })
 

@@ -20,7 +20,6 @@ from fastapi.testclient import TestClient
 from scadbuddy.bambuddy import commits, project_file
 from scadbuddy.bambuddy.project_file import STEM_MAX_UTF16_UNITS, project_stem
 from scadbuddy.core.paths import DataPaths
-from scadbuddy.library.outputs import META_NAME, OutputMeta
 from scadbuddy.render.schema import ParamValue
 from tests.api.conftest import set_fake_env
 from tests.api.test_internal_outputs import state
@@ -95,14 +94,12 @@ def named_output(client: TestClient, model: str, name: str = "Elan") -> str:
 def in_spool_nines_colour(client: TestClient, paths: DataPaths, model: str, output_id: str) -> None:
     """Make the output's own colour spool 9's (#688197, inventory-spools.json), so a
     print from spool 9 is in the colours Generate filed the project file in."""
-    meta_path = paths.output_dir(model, output_id) / META_NAME
-    meta = json.loads(meta_path.read_text(encoding="utf-8"))
-    meta["colors"] = ["#688197"]
-    meta_path.write_text(json.dumps(meta), encoding="utf-8")
-    # The row is the record a read answers from (#7255): it gets the same colours.
+    # The row is the record a read answers from (#7255, #7257).
     rows = state(client).outputs.rows
     assert rows is not None
-    rows.update_meta(output_id, OutputMeta.model_validate(meta))
+    row = rows.get(output_id)
+    assert row is not None
+    rows.update_meta(output_id, row.meta.model_copy(update={"colors": ["#688197"]}))
 
 
 def remember_h2c_at(client: TestClient, nozzle: str) -> None:

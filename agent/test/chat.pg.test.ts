@@ -190,7 +190,7 @@ describe.skipIf((skip !== undefined) || AGENT_SESSIONS_SKIP !== '')(`ChatConnect
     connection.close()
   })
 
-  it("takes, logs and ignores an older tab's mode, new or existing: every session is an AgentSession (#7323)", async () => {
+  it("drops an older tab's mode, new or existing, and logs nothing: every session is an AgentSession (#7323)", async () => {
     const out: { type: string; sessionId?: string; mode?: string; code?: string }[] = []
     const logged: string[] = []
     const connection = new ChatConnection(m, (e) => out.push(e as never), { log: (line) => logged.push(line) })
@@ -212,11 +212,7 @@ describe.skipIf((skip !== undefined) || AGENT_SESSIONS_SKIP !== '')(`ChatConnect
     )
     await settle()
     expect(out.filter((e) => e.type === 'error')).toEqual([])
-    // Once per arrival, naming no value.
-    expect(logged.filter((l) => l.includes('session mode'))).toEqual([
-      'chat: a user.message named a session mode, which is ignored (#7323)',
-      'chat: a user.message named a session mode, which is ignored (#7323)',
-    ])
+    expect(logged.filter((l) => l.includes('session mode'))).toEqual([])
     connection.close()
   })
 })

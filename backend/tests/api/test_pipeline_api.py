@@ -135,13 +135,13 @@ def test_an_output_whose_files_left_the_store_is_a_409_and_writes_nothing(
     job = _done(client, model, {"params": {}, "v": 1})
     state = getattr(client.app.state, STATE_ATTR)  # type: ignore[attr-defined]
     state.store.blobs.remove(output_key(str(job["id"]), 0))
-    before = set((paths.outputs / model).glob("*")) if (paths.outputs / model).is_dir() else set()
+    before = client.get(f"/api/v1/models/{model}/outputs").json()
     refused = client.post(
         f"/api/v1/models/{model}/outputs", json={"job_id": job["id"], "index": 0}, headers=press()
     )
     assert refused.status_code == 409, refused.text
     assert "no longer in the store" in refused.json()["detail"]
-    after = set((paths.outputs / model).glob("*")) if (paths.outputs / model).is_dir() else set()
+    after = client.get(f"/api/v1/models/{model}/outputs").json()
     assert after == before
 
 
