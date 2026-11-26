@@ -132,7 +132,7 @@ def tray_agreement(
 @dataclass(frozen=True)
 class TrayMove:
     """One tray `FilamentInventory.reconcile_trays` set right: the spool it moved to no
-    place (``None`` for a tray no spool held, D9), and the spool it put in the tray."""
+    place (``None`` when D9 found none placed there), and the spool it put in the tray."""
 
     printer_id: UUID
     ams_id: int
@@ -504,14 +504,21 @@ class FilamentInventory:
                     and candidate is not None
                     and _untagged(tray)
                     and tray_agreement(candidate, tray, materials)
-                    and self._place_assigned(
+                ):
+                    evicted = self._place_assigned(
                         printers[str(printer_id)].name, printer_id, tray, candidate
                     )
-                ):
-                    moved.append(
-                        TrayMove(printer_id, tray.ams_id, tray.tray_id, None, candidate.id)
-                    )
-                    held.add(candidate.id)
+                    if evicted is not None:
+                        moved.append(
+                            TrayMove(
+                                printer_id,
+                                tray.ams_id,
+                                tray.tray_id,
+                                evicted[0] if evicted else None,
+                                candidate.id,
+                            )
+                        )
+                        held.add(candidate.id)
                 continue
             if _verdict(tray, holder, found_by, candidate, materials) != "move":
                 continue
@@ -873,12 +880,14 @@ class FilamentInventory:
 
     def _place_assigned(
         self, name: str, printer_id: UUID, tray: SeenTray, assigned: m.Spool
-    ) -> bool:
+    ) -> list[UUID] | None:
         """`reconcile_trays`'s move for a tray no spool holds (D9, #7143): ``assigned`` into
         the tray, and the tray's unknown-tray row deleted, in one transaction. Locks as
-        `link_on` does: the tray's advisory lock, then the spools by id. False, with
-        nothing written, when a spool holds the tray by now or ``assigned`` is archived
-        since the read: the next pass looks again."""
+        `link_on` does: the tray's advisory lock, then the spools by id. A spool placed
+        at the tray that `holder_on` does not see (its fingerprint is stale) moves to no
+        place first; the ids of those spools are returned. ``None``, with nothing
+        written, when a spool holds the tray by now or ``assigned`` is archived since the
+        read: the next pass looks again."""
         place = self._locations.ensure_ams(
             printer_id,
             tray.ams_id,
@@ -894,12 +903,12 @@ class FilamentInventory:
             ).fetchall()
             mine = next((row for row in rows if row["id"] == assigned.id), None)
             if mine is None or mine["archived_at"] is not None:
-                return False
+                return None
             if self.holder_on(conn, printer_id, tray) != (None, None):
-                return False
-            for row in rows:
-                if row["id"] != assigned.id:
-                    LocationStore.move_on(conn, row["id"], None, actor=RECONCILE_ACTOR)
+                return None
+            evicted = [row["id"] for row in rows if row["id"] != assigned.id]
+            for spool_id in evicted:
+                LocationStore.move_on(conn, spool_id, None, actor=RECONCILE_ACTOR)
             self.place_on(
                 conn,
                 assigned.id,
@@ -909,7 +918,7 @@ class FilamentInventory:
                 reason="assigned_to_empty_tray",
             )
             clear_on(conn, printer_id, tray.ams_id, tray.tray_id)
-        return True
+        return evicted
 
     def _others(self, printer_id: UUID) -> list[tuple[UUID, list[SeenTray]]]:
         """Every other registry printer's trays, as its latest stored report shows them."""

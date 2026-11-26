@@ -9,6 +9,7 @@ from uuid import UUID, uuid4
 import pytest
 
 from scadbuddy.filament.inventory import RECONCILE_ACTOR, FilamentInventory
+from scadbuddy.filament.spools import FilamentSpoolStore
 from scadbuddy.filament.unknown_tray_rows import note_on, rows_on
 from scadbuddy.spools.models import SeenTray
 from tests.conftest import PgPool
@@ -110,3 +111,36 @@ def test_reconcile_leaves_a_disagreeing_assigned_spool(pg_pool: PgPool) -> None:
     assert moved == []
     assert _cells(pg_pool, printer) == [(HT_A, 0)]
     assert _get(pg_pool, pink).location_id is None
+
+
+def test_reconcile_evicts_a_spool_placed_with_a_stale_fingerprint(pg_pool: PgPool) -> None:
+    printer = _printer(pg_pool)
+    old = _spool(pg_pool, "PLA", PINK)
+    grey = _spool(pg_pool, "PETG", GREY)
+    _link_bb(pg_pool, grey, 121)
+    inventory = FilamentInventory(pg_pool)
+    inventory.link(
+        printer,
+        HT_A,
+        0,
+        old,
+        SeenTray(ams_id=HT_A, tray_id=0, material="PLA", rgba=PINK),
+        actor="ann",
+    )
+    # The tray now reports grey PETG, so the old spool's fingerprint is stale.
+    _report(pg_pool, printer, _tray("PETG", GREY))
+    seen = SeenTray(ams_id=HT_A, tray_id=0, material="PETG", rgba=GREY)
+    with pg_pool.connection() as conn:
+        note_on(conn, printer, seen, T0)
+    place = _get(pg_pool, old).location_id
+    assert place is not None
+
+    moved = inventory.reconcile_trays([_assigned(121)])
+
+    assert [(m.removed, m.placed) for m in moved] == [(old, grey)]
+    assert _get(pg_pool, old).location_id is None
+    assert _get(pg_pool, grey).location_id == place
+    assert _cells(pg_pool, printer) == []
+    assert [e.data["to"] for e in FilamentSpoolStore(pg_pool).events(old) if e.kind == "moved"][
+        -1
+    ] is None
