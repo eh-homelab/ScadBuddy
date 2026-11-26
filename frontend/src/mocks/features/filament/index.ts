@@ -1341,8 +1341,13 @@ export interface MockPlate {
 function platesOf(events: readonly S['SpoolEvent'][]): MockPlate[] {
   const bbJobs = new Set(events.filter((event) => event.ref_kind === 'bb_usage' && event.kind === 'print_ended').map(jobOf))
   const lengthOf = (event: S['SpoolEvent']) => (typeof event.data?.length_m === 'number' ? event.data.length_m : null)
-  // #7685: Bambuddy's rows carry no length, so a paired plate takes the length of SB's own end of the job.
-  const sbLengths = new Map(events.filter((event) => event.kind === 'print_ended' && event.ref_kind === 'print_run' && lengthOf(event) != null).map((event) => [jobOf(event), lengthOf(event)]))
+  // #7685: Bambuddy's rows carry no length, so a paired plate takes the length of SB's own ends of the
+  // job, summed (one spool can feed several slots of a job, each an end of its own).
+  const sbLengths = new Map<string | null, number>()
+  for (const event of events) {
+    const length = event.kind === 'print_ended' && event.ref_kind === 'print_run' ? lengthOf(event) : null
+    if (length != null) sbLengths.set(jobOf(event), (sbLengths.get(jobOf(event)) ?? 0) + length)
+  }
   return [...events].sort(byTime).flatMap((event) => {
     if (event.kind !== 'print_ended') return []
     const grams = event.delta_g ? -event.delta_g : 0

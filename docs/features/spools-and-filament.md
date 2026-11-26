@@ -270,9 +270,11 @@ length over 0 m (`metrics.used_m`, null when none does: a spool whose lengthed p
 failed has no metres, not 0 m), derives the density those plates' grams and metres
 imply over the spool's effective diameter (`implied_density_g_cm3`; 1 m of 1.75 mm filament
 at 1.24 g/cm³ is 2.98 g) and compares it with the type's (`density_g_cm3`): apart by more
-than 5 % is `density_mismatch`. Both numbers are the slicer's, so the implied density is
-the slicer preset's density read back, not a measurement: a mismatch means the preset and
-the type disagree about the filament. The spool page's Used tile adds the metres ("3 prints, 40 g
+than 5 % is `density_mismatch`. For a plate ScadBuddy alone booked, both numbers are the
+slicer's, so the implied density is the slicer preset's density read back, not a
+measurement: a mismatch means the preset and the type disagree about the filament. For a
+plate Bambuddy also booked, the grams are Bambuddy's usage row's over the slicer's metres,
+summed over the job's ends on the spool (one spool can feed several slots of a job). The spool page's Used tile adds the metres ("3 prints, 40 g
 each, 11.7 m"), a Density tile shows the implied value with "The type says 1.24 g/cm³" or
 the mismatch sentence ("The prints imply 1.31 g/cm³, 6% over the type's 1.24 g/cm³: check
 the type's density or the label."), and the timeline shows a print's metres beside its grams

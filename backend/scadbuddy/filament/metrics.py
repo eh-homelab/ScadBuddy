@@ -63,15 +63,16 @@ def plates(events: Sequence[SpoolEvent]) -> list[Plate]:
     """The spool's plates, oldest first, each counted once (module docstring)."""
     paired = ledger.pairs(events)
     # #7685: Bambuddy's usage rows carry no length, so a paired plate takes the length of
-    # ScadBuddy's own end of the job.
-    sb_lengths = {
-        sb_job: sb_length
-        for event in events
-        if event.kind == ledger.PRINT_ENDED
-        and event.ref_kind == ledger.PRINT_RUN
-        and (sb_job := ledger.job_of(event)) is not None
-        and (sb_length := _length(event)) is not None
-    }
+    # ScadBuddy's own ends of the job, summed: one spool can feed several slots of a job,
+    # each booked as an end of its own (`record_uses_in`, one event per slot).
+    sb_lengths: dict[str, float] = {}
+    for event in events:
+        if event.kind != ledger.PRINT_ENDED or event.ref_kind != ledger.PRINT_RUN:
+            continue
+        sb_job = ledger.job_of(event)
+        sb_length = _length(event)
+        if sb_job is not None and sb_length is not None:
+            sb_lengths[sb_job] = sb_lengths.get(sb_job, 0.0) + sb_length
     found: list[Plate] = []
     for event in _ordered(events):
         if event.kind != ledger.PRINT_ENDED:

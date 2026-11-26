@@ -50,16 +50,24 @@ const order = (a: SpoolEvent, b: SpoolEvent) => Date.parse(a.at) - Date.parse(b.
 export interface SpoolFacts {
   addedFull: boolean | null
   labelWeight: number | null
+  /**
+   * The spool's lock now. The weighing's `expected_g` used the lock as it was then, so an AMS
+   * anchor can read differently here when the lock changed since; the cause is a sentence,
+   * and that case is left as it is.
+   */
   weightLocked: boolean
 }
 
 /**
  * The anchor the weighing was compared with: the newest anchor before it (`ledger.is_anchor`,
- * as `ledger.basis` read it for the weighing's `expected_g`), by time then seq. The weighing
- * itself, an anchor too, is never its own.
+ * as `ledger.basis` read it for the weighing's `expected_g`), by time then seq. Before it in
+ * time, strictly: `ledger.expected_before` keeps only the events before the weighing's `at`
+ * and the deltas at that instant, so an anchor at the same instant, whatever its seq, was not
+ * read. The weighing itself, an anchor too, is never its own.
  */
 export function previousAnchor(events: readonly SpoolEvent[], weighing: SpoolEvent, facts: SpoolFacts): SpoolEvent | null {
-  return [...events].filter((event) => order(event, weighing) < 0 && isAnchor(event, facts.weightLocked, facts.labelWeight)).sort((a, b) => order(b, a))[0] ?? null
+  const at = Date.parse(weighing.at)
+  return [...events].filter((event) => Date.parse(event.at) < at && isAnchor(event, facts.weightLocked, facts.labelWeight)).sort((a, b) => order(b, a))[0] ?? null
 }
 
 /**

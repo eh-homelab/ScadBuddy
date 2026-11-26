@@ -440,6 +440,16 @@ def test_a_paired_plate_takes_its_length_from_the_sb_end() -> None:
     assert metrics.plates([bb_end(days(1), 3, "c")])[0].length_m is None
 
 
+def test_a_paired_plate_sums_the_metres_of_its_slots() -> None:
+    """One spool fed two slots of the job, so ScadBuddy booked two ends; Bambuddy's one
+    row for the spool carries their grams, and the plate carries their metres summed."""
+    bb = bb_end(days(1), 20, "a")
+    ends = [sb_end(days(1), 10, "a", length_m=3.4), sb_end(days(1), 10, "a", length_m=3.4)]
+    (found,) = metrics.plates([*ends, bb])
+    assert (found.grams, found.event_id, found.length_m) == (20.0, bb.id, 6.8)
+    assert _metrics([*ends, bb]).used_m == 6.8
+
+
 def test_only_failed_plates_give_no_metres() -> None:
     """A spool whose lengthed plates all failed (0 m) has no metres, not 0 m."""
     found = _metrics([sb_end(days(1), 0, "b", basis="not_applied", length_m=0.0)])

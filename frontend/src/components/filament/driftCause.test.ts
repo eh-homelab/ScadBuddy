@@ -139,6 +139,12 @@ describe('the anchor a weighing was compared with (#7685)', () => {
     expect(previousAnchor([weighed, printed], weighed, facts)).toBeNull()
   })
 
+  it('skips an anchor at the weighing\'s own instant, as ledger.expected_before does', () => {
+    // Same `at`, a lower seq: `expected_before` keeps only deltas at that instant, so it was not read.
+    const sameInstant = { ...event('2026-11-16T10:00:00Z', 'ams_reading', { source: 'ams_remain', grams_after: 119 }), seq: weighed.seq - 1 }
+    expect(previousAnchor([created, sameInstant, weighed], weighed, facts)).toBe(created)
+  })
+
   it('gives the grams the ledger took off since it', () => {
     expect(gramsSinceAnchor(created, 120)).toBe(148)
     expect(gramsSinceAnchor(created, 300)).toBe(0)
