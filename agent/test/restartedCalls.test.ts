@@ -21,8 +21,9 @@ import { toolCallWorkflowId } from '../src/temporal/toolCall.js'
 // after its interrupt (warm.ts `seal`), and the restarted placement gives each dangling call its
 // result (restartedCalls.ts, turnHost.ts `#supply`), a ToolCall's own when it has one
 // (activityProjection.ts `cutToolCall`). The whole path, on the bundled Claude Code against the
-// fake endpoint: test/sessionAffinity.temporal.test.ts "SIGTERM mid-turn: a turn still running past
-// the grace".
+// fake endpoint, is test/sessionAffinity.temporal.test.ts "SIGTERM mid-turn: a turn still running
+// past the grace", skipped since 2026-11-26 by the owner's decision (#7874); until it runs again,
+// only these tests and sessions.e2e.test.ts "keeps a turn stopped by a restart" check the path.
 
 const SID = '00000000-0000-4000-8000-000000000001'
 let n = 0
@@ -226,6 +227,36 @@ describe('WarmSessions.seal', () => {
     // A subagent's own transcript is not the conversation's chain.
     await mirror!.append({ ...key, subpath: 'subagents/agent-1' }, [{ type: 'user', uuid: 'u-sub' }])
     expect(appended.flat().map((e) => e.uuid ?? e.type)).toEqual(['u-real', 'last-prompt', 'cost-state', 'u-sub'])
+    await warm.close()
+  })
+
+  it('lands what comes before its first stopped call, the turn\'s prompt among them (sessions.e2e "keeps a turn stopped by a restart")', async () => {
+    const appended: SessionStoreEntry[][] = []
+    const inner: SessionStore = {
+      append: async (_key, entries) => void appended.push(entries),
+      load: async () => null,
+    }
+    let mirror: SessionStore | undefined
+    const warm = new WarmSessions({
+      store: { lastOfType: async () => null, head: async () => ({ exists: false, since: null }), moved: async () => false },
+      maxEntries: 1,
+      idleMs: 600_000,
+      start: (run: HarnessRun) => {
+        mirror = run.sessionStore
+        return idle()
+      },
+    })
+    const { entry } = await warm.acquire(SID, assembly(inner), { kind: 'anthropic_api_key', secret: 'sk-ant-test' }, 1)
+    const key = { projectKey: '', sessionId: SID }
+    warm.seal(entry)
+    // The cut came while the request was with the model: Claude Code hands the prompt over only now.
+    await mirror!.append(key, [{ type: 'user', uuid: 'u-prompt', message: { content: 'and the second word is kettle' } }])
+    await mirror!.append(key, [
+      { type: 'assistant', uuid: 'a-call', parentUuid: 'u-prompt', message: { content: [{ type: 'tool_use', id: 'toolu_c', name: 'ToolSearch' }] } },
+      { type: 'user', uuid: 'u-refused', parentUuid: 'a-call', message: { content: [{ type: 'tool_result', tool_use_id: 'toolu_c', content: "The user doesn't want to proceed with this tool use." }] } },
+      { type: 'user', uuid: 'u-after', parentUuid: 'u-refused', message: { content: 'text after the refusal' } },
+    ])
+    expect(appended.flat().map((e) => e.uuid ?? e.type)).toEqual(['u-prompt', 'a-call'])
     await warm.close()
   })
 })

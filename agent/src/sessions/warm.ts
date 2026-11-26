@@ -167,10 +167,15 @@ class MirroredTranscript {
   /** Cut off (`WarmSessions.cut`): a placement the workflow gave up on; nothing more of it is written. */
   fenced = false
   /**
-   * Sealed (`WarmSessions.seal`): a shutdown cut the turn. The conversation's entries from now on
-   * (each with a uuid) are dropped; the rest (`last-prompt`, `cost-state`) still land.
+   * Sealed (`WarmSessions.seal`): a shutdown cut the turn. From the first entry handed over after
+   * the seal that holds a tool_result (Claude Code's answer for a call the cut stopped), that entry
+   * and every later one with a uuid are dropped, so no landed entry names a dropped one as its
+   * parent. Entries before it land as before: the turn's prompt can be handed over after the
+   * seal, and the next turn needs it. Entries with no uuid (`last-prompt`, `cost-state`) land.
    */
   sealed = false
+  /** Set once a sealed mirror dropped its first tool_result entry: the rest of the chain goes too. */
+  private dropping = false
   /**
    * The condition the turn holding the process writes under (`WarmSessions.fence`), checked in
    * each append's own transaction: an AgentSession placement that still holds its turn. Once an
@@ -192,7 +197,13 @@ class MirroredTranscript {
         for (const entry of entries) if (typeof entry.uuid === 'string') this.own.add(entry.uuid)
       }
       // Decided as it is handed over: an entry handed over before the seal was written before the interrupt.
-      if (this.sealed && (key.subpath ?? '') === '') entries = entries.filter((entry) => typeof entry.uuid !== 'string')
+      if (this.sealed && (key.subpath ?? '') === '') {
+        entries = entries.filter((entry) => {
+          if (typeof entry.uuid !== 'string') return true
+          if (!this.dropping && holdsToolResult(entry)) this.dropping = true
+          return !this.dropping
+        })
+      }
       const write = this.pending.then(async () => {
         if (this.fenced || entries.length === 0) return
         const fence = this.fence
@@ -527,11 +538,14 @@ export class WarmSessions {
 
   /**
    * A shutdown cut the turn on `entry` (sessions/turnHost.ts, #7874): what its process writes
-   * from now on into the main conversation is dropped. Claude Code answers its interrupt with a
+   * from now on into the main conversation is dropped from Claude Code's first answer for a
+   * stopped call. Claude Code answers its interrupt with a
    * tool_result for each call still in flight, "The user doesn't want to proceed with this tool
    * use…", which would read as the user's refusal; the restarted placement gives each such call
-   * its real result instead (restartedCalls.ts). Every later entry of the chain goes too, so none
-   * names a dropped one as its parent. Entries with no uuid (`last-prompt`, `cost-state`) still land.
+   * its real result instead (restartedCalls.ts). The drop starts at the first such tool_result
+   * entry, and every later entry of the chain goes too, so none names a dropped one as its parent;
+   * the entries before it land (the turn's prompt among them). Entries with no uuid (`last-prompt`,
+   * `cost-state`) still land.
    */
   seal(entry: WarmEntry): void {
     const slot = this.slots.get(entry.sessionId)
@@ -976,4 +990,11 @@ export function costStateUsd(entry: string | null, log: (message: string) => voi
   if (parsed.type === 'cost-state' && typeof parsed.totalCostUSD === 'number') return parsed.totalCostUSD
   log('warm: a cost-state transcript entry has no numeric totalCostUSD; counting from 0')
   return 0
+}
+
+/** Whether a transcript entry is a user message that carries a tool_result block. */
+function holdsToolResult(entry: SessionStoreEntry): boolean {
+  if (entry.type !== 'user') return false
+  const content = (entry.message as { content?: unknown } | undefined)?.content
+  return Array.isArray(content) && content.some((b) => typeof b === 'object' && b !== null && (b as { type?: unknown }).type === 'tool_result')
 }
