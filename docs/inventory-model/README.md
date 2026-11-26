@@ -401,7 +401,9 @@ value and signals of a life, a roll's remaining count, a lot's unit cost. Pages,
 value, job cost and the machine rate read the cache; they never run a handler on a read.
 Each time a value changes, the old one stays: a row is appended to
 `handler_value_history`, never rewritten. A change of handler or parameters is appended to
-`handler_config_history`. The cache is derived: the sources stay `unit_uses`, the moves
+`handler_config_history`. The event stream is the history: each change is an event
+published in the change's transaction, and a history subscriber inserts one row per event
+(design §4.8). The cache is derived: the sources stay `unit_uses`, the moves
 and the parameters, and a rebuild from them must give the same values.
 
 ```mermaid
@@ -410,21 +412,27 @@ sequenceDiagram
     participant B as Base flow (one transaction)
     participant H as The unit's handler
     participant C as handler_values (cache)
+    participant ES as Event stream
+    participant HS as History subscriber
     participant VH as handler_value_history
     participant CH as handler_config_history
     E->>B: something that touches unit U
     opt a person changed a handler or its parameters
-        B->>CH: append: old and new, who, when
+        B->>ES: handler_config.changed (old, new, who, when)
     end
     B->>H: compute U's value now
     H-->>B: value
     B->>C: compare with the cached value
     alt changed
         B->>C: replace it
-        B->>VH: append: at, reason, value, handler and params in force
+        B->>ES: handler_value.changed (at, reason, value, handler and params)
     else the same
         B-->>E: nothing written
     end
+    Note over B,ES: the events commit with the change, in one transaction
+    HS->>ES: read from its cursor
+    HS->>CH: insert one row per handler_config.changed
+    HS->>VH: insert one row per handler_value.changed
 ```
 
 **Manual readings** (owner, 2026-11-25: "allow for manual, like weight, in advanced").
