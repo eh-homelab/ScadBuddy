@@ -35,6 +35,7 @@ export const PRINTERS_NOW: PrinterNow[] = [
     error: null,
     // #3742 — Bambuddy's cover of the job, through ScadBuddy's farm proxy.
     picture: '/api/v1/farm/printers/1/cover?archive=90',
+    camera_live: false,
   },
   {
     id: '00000000-0000-4000-8000-000000000002',
@@ -68,6 +69,7 @@ export const PRINTERS_NOW: PrinterNow[] = [
     },
     // #3742 — ScadBuddy's own picture of its job.
     picture: '/api/v1/outputs/luna-0001/thumbnail',
+    camera_live: false,
   },
   {
     id: '00000000-0000-4000-8000-000000000003',
@@ -88,6 +90,9 @@ export const PRINTERS_NOW: PrinterNow[] = [
     bambuddy_url: null,
     bambuddy_archive_page: false,
     error: null,
+    // #7330 — recorded, with the live edge set up: its camera is the live view. Mocks
+    // only: a real recorded printer has a LAN link (`camera/store.py` `_sources`).
+    camera_live: true,
   },
 ]
 
@@ -100,6 +105,11 @@ export function reset(): void {
 /** Replace what the printers report, for a test. */
 export function setPrintersNow(printers: PrinterNow[]): void {
   state.printers = printers
+}
+
+/** The cards as `GET /print/printers/now` answers them now (#7330: the camera mocks). */
+export function printersNowState(): PrinterNow[] {
+  return withLan(state.printers)
 }
 
 /**
@@ -125,6 +135,7 @@ function withLan(cards: PrinterNow[]): PrinterNow[] {
         path: 'native',
         printer_id: null,
         name: row.name,
+        camera_live: false,
       }),
     )
   return [...shown, ...lanOnly]
@@ -137,7 +148,7 @@ const PICTURED_OUTPUTS = new Set(['luna-0001', 'luna-0002'])
 
 export const handlers = [
   http.get('/api/v1/print/printers/now', () =>
-    HttpResponse.json({ printers: withLan(state.printers) } satisfies PrintersNow),
+    HttpResponse.json({ printers: printersNowState() } satisfies PrintersNow),
   ),
   http.get('/api/v1/farm/library/:id/thumbnail', () => pngResponse()),
   http.get('/api/v1/farm/archives/:id/thumbnail', () => pngResponse()),

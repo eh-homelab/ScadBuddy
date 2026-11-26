@@ -770,15 +770,18 @@ def flow_kinds(
             verdict = await settle(arrived, err, undo)
             if verdict is True:
                 return
-            if (
-                verdict is False
-                and isinstance(err, RPCError)
-                and err.status == RPCStatusCode.NOT_FOUND
-            ):
+            if isinstance(err, RPCError) and err.status == RPCStatusCode.NOT_FOUND:
                 # The run closed, or was closing, under the send ("workflow update was
-                # aborted by closing workflow"), and the Update never existed: the call is
-                # no longer waiting (#7822). An unknown fate keeps its row and error (#7883).
-                raise _stale() from None
+                # aborted by closing workflow").
+                if verdict is False:
+                    # The Update never existed: the call is no longer waiting (#7822).
+                    raise _stale() from None
+                # Whether it landed is unknown, so the row and the error stay (#7883, #7900).
+                activity.logger.warning(
+                    "flow decision %s: the run closed under its send, and whether it landed"
+                    " is unknown; its row stays",
+                    decision.request_id,
+                )
             raise
 
     async def give(

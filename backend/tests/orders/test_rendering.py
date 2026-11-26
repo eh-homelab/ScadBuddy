@@ -509,3 +509,12 @@ def test_a_kit_is_counted_from_its_job_when_its_outputs_are_not_saved() -> None:
     renders.gone.add("job-1")
     assert kit_count(outputs, renders, "picked", 1) == 1
     assert kit_count(outputs, renders, "gone", 1) == 1
+
+
+def test_a_kit_whose_saves_stopped_part_way_is_counted_from_its_job() -> None:
+    """Review of #7876: the render saves the later outputs one at a time after it
+    attaches the first, so a save that failed part way leaves two of three saved. The
+    job still says three, so the order page and the print say the third is not saved."""
+    outputs = SavedOutputs()
+    outputs.metas["first"] = OutputMeta.model_construct(id="first", slug="demo", job_id="job-1")
+    assert kit_count(outputs, SeveralRenders(3), "first", 2) == 3

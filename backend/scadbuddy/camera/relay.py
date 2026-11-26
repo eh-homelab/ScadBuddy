@@ -278,30 +278,42 @@ class Relay:
         """Bring one printer's path up to date: add or replace it, or remove it when the API
         answers 404 ``not_recorded``."""
         async with self._lock:
-            try:
-                response = await self._crud.request(
-                    "GET", f"{BASE}/printers/{quote(printer_id, safe='')}"
-                )
-            except CrudRefusedError as refused:
-                if refused.status != 404:
-                    raise
-                existing = await self._existing()
-                self._held = set(existing)
-                await self._remove(printer_id, printer_id in existing)
-                return
-            try:
-                item = response.json()
-            except ValueError:
-                raise SourceError(f"the API sent an unreadable source for {printer_id}") from None
-            parsed = _parse(item)
+            await self._reconcile_locked(printer_id)
+
+    async def restart(self, printer_id: str) -> None:
+        """Drop one printer's MediaMTX path, then bring it up again, so MediaMTX dials the
+        printer afresh (``camera.reconnect``). One hold of the lock, as `reconcile`."""
+        async with self._lock:
             existing = await self._existing()
             self._held = set(existing)
-            try:
-                parsed = await _dialable(parsed)
-            except SourceError:
-                await self._remove(printer_id, printer_id in existing)
+            await self._remove(printer_id, printer_id in existing)
+            await self._reconcile_locked(printer_id)
+
+    async def _reconcile_locked(self, printer_id: str) -> None:
+        try:
+            response = await self._crud.request(
+                "GET", f"{BASE}/printers/{quote(printer_id, safe='')}"
+            )
+        except CrudRefusedError as refused:
+            if refused.status != 404:
                 raise
-            await self._put(printer_id, self._conf(parsed), printer_id in existing)
+            existing = await self._existing()
+            self._held = set(existing)
+            await self._remove(printer_id, printer_id in existing)
+            return
+        try:
+            item = response.json()
+        except ValueError:
+            raise SourceError(f"the API sent an unreadable source for {printer_id}") from None
+        parsed = _parse(item)
+        existing = await self._existing()
+        self._held = set(existing)
+        try:
+            parsed = await _dialable(parsed)
+        except SourceError:
+            await self._remove(printer_id, printer_id in existing)
+            raise
+        await self._put(printer_id, self._conf(parsed), printer_id in existing)
 
     async def on_hook(self, printer_id: str, event: HookEvent) -> None:
         """MediaMTX's pull of ``printer_id`` became ready or not ready. A hook for a path the
@@ -357,7 +369,12 @@ async def run(settings: RelaySettings, stop: asyncio.Event | None = None) -> Non
                 "camera relay: first reconcile failed (%s: %s)", type(error).__name__, error
             )
         follow = ChangeFollower(
-            crud, f"{BASE}/changes", relay.reconcile, relay.reconcile_all, resync_first=True
+            crud,
+            f"{BASE}/changes",
+            relay.reconcile,
+            relay.reconcile_all,
+            resync_first=True,
+            on_reconnect=relay.restart,
         )
         follower = asyncio.create_task(follow.run())
         logger.info("camera relay running")

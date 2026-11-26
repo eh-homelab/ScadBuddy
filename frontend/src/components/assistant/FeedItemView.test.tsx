@@ -121,6 +121,15 @@ describe("a headless-browser navigation's approval card (#982)", () => {
   })
 })
 
+describe('the worker-restart line (#7874)', () => {
+  it('is a quiet line, not the warning an error shows (#7911)', () => {
+    const item: FeedItem = { kind: 'error', id: 'e1', code: 'worker_restarted', message: 'the agent worker restarted; the turn continues on another worker' }
+    render(<FeedItemView item={item} onDecide={vi.fn()} onAnswer={vi.fn()} />)
+    expect(screen.getByTestId('agent-worker-restarted')).toHaveTextContent('the turn continues on another worker')
+    expect(screen.queryByRole('alert')).toBeNull()
+  })
+})
+
 describe('the memory line', () => {
   const memory = (item: Partial<Extract<FeedItem, { kind: 'memory' }>>, advanced = false) =>
     render(

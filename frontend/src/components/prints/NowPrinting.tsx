@@ -1,9 +1,9 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { Link } from 'react-router'
 import { api, ApiError } from '../../api/client'
-import type { PrinterNow } from '../../api/types'
+import type { CameraFeed, PrinterCamera, PrinterNow } from '../../api/types'
 import { bambuddyLink } from '../../lib/bambuddyLinks'
-import { formatDuration } from '../../lib/format'
+import { formatDuration, formatFullTime } from '../../lib/format'
 import { useSubscription } from '../../lib/realtime'
 import { NEW_TAB } from '../../lib/embed'
 import { CameraIcon, ExternalLinkIcon, RefreshCwIcon, VideoIcon } from 'lucide-react'
@@ -21,6 +21,7 @@ import {
 import { Skeleton } from '@/components/ui/skeleton'
 import { cn } from '@/lib/utils'
 import { JobPicture } from './JobPicture'
+import { LivePlayer } from './LivePlayer'
 import { lastSeen, mergeCards, type NowCard } from './nowCards'
 import { LanRunControls } from '../print/LanRunControls'
 import { PlateWarning } from './PlateWarning'
@@ -131,7 +132,8 @@ export function usePrintersNow(): PrintersNowState {
 export function PrinterStrip({ now }: { now: PrintersNowState }) {
   const { cards, error } = now
   /** #981 — the printer whose camera is open, by id, so its status stays current. */
-  // The registry printer whose camera is open (#3823): only a Bambuddy-linked one has one.
+  // The registry printer whose camera is open (#3823): a Bambuddy-linked one, or one with
+  // the live view (#7330).
   const [watching, setWatching] = useState<string | null>(null)
 
   // #2752 review: a printer that drops out closes its camera for good; it does not
@@ -228,7 +230,7 @@ function PrinterCard({ card, onCamera }: { card: NowCard; onCamera: () => void }
         <PrinterState printer={printer} />
         {/* #4942, #4939 — a native run's prints still to start on this printer. */}
         {printer.lan_run && !stale && <LanRunControls control={printer.lan_run} printerName={printer.name} className="mt-2" />}
-        {printer.printer_id !== null && printer.activity !== 'offline' && !printer.error && !stale && (
+        {(printer.camera_live || printer.printer_id !== null) && printer.activity !== 'offline' && !printer.error && !stale && (
           <Button
             variant="outline"
             size="sm"
@@ -405,8 +407,9 @@ export function jobName(printer: PrinterNow): string | null {
 }
 
 /**
- * #981 — the printer's live camera, with what it is printing beside it. The stream is
- * Bambuddy's MJPEG through ScadBuddy, open only while this dialog is: closing it drops
+ * #981 — the printer's live camera, with what it is printing beside it. #7330 — a printer
+ * with `camera_live` plays the live view ({@link LivePlayer}), with its feed states and
+ * Reconnect beside it. Any other's stream is Bambuddy's MJPEG through ScadBuddy, open only while this dialog is: closing it drops
  * the image, which ends the request and so Bambuddy's stream. A stream that is refused
  * or fails falls back to a snapshot with Refresh. One that stalls mid-stream is ended
  * cleanly by the backend, which browsers do not report as an error, so it keeps its
@@ -425,9 +428,14 @@ function CameraDialog({ printer, onClose }: { printer: PrinterNow | null; onClos
         </DialogHeader>
         {/* Keyed per printer, so another printer's camera starts live, never in the last
             one's snapshot mode (which would fetch a snapshot first). */}
-        {printer && printer.printer_id !== null && (
-          <CameraView key={printer.id} printer={printer} bambuddyId={printer.printer_id} />
-        )}
+        {printer &&
+          (printer.camera_live ? (
+            <LiveCameraView key={printer.id} printer={printer} />
+          ) : (
+            printer.printer_id !== null && (
+              <CameraView key={printer.id} printer={printer} bambuddyId={printer.printer_id} />
+            )
+          ))}
         <DialogFooter>
           <Button variant="outline" onClick={onClose}>
             Close
@@ -499,5 +507,179 @@ function CameraView({ printer, bambuddyId }: { printer: PrinterNow; bambuddyId: 
         <JobStatus printer={printer} />
       </div>
     </div>
+  )
+}
+
+/** #7330 — the live view, with the job and the camera's feed states beside it. */
+function LiveCameraView({ printer }: { printer: PrinterNow }) {
+  // A reconnect restarts the relay's pull, so the player starts over too, once the pull is back.
+  const [attempt, setAttempt] = useState(0)
+  const restart = useCallback(() => setAttempt((count) => count + 1), [])
+  return (
+    <div className="grid gap-4 md:grid-cols-[minmax(0,1fr)_16rem]" data-testid="printer-camera">
+      <div className="min-w-0">
+        <LivePlayer key={attempt} printerId={printer.id} />
+      </div>
+      <div className="flex min-w-0 flex-col text-[12.5px]" data-testid="printer-camera-status">
+        <Badge variant="outline" className={cn('font-normal', ACTIVITY[printer.activity].tone)}>
+          {ACTIVITY[printer.activity].label}
+        </Badge>
+        <JobStatus printer={printer} />
+        <CameraFeeds printerId={printer.id} onReconnect={restart} />
+      </div>
+    </div>
+  )
+}
+
+function relayFeed(camera: PrinterCamera): CameraFeed | undefined {
+  return camera.feeds.find((feed) => feed.part === 'relay')
+}
+
+const FEED_PART: Record<CameraFeed['part'], string> = { relay: 'Live feed', recorder: 'Recording' }
+const FEED_STATE: Record<CameraFeed['state'], { label: string; dot: string }> = {
+  pulling: { label: 'Receiving', dot: 'bg-ok' },
+  retrying: { label: 'Retrying', dot: 'bg-warn' },
+  stalled: { label: 'Stalled', dot: 'bg-warn' },
+  stopped: { label: 'Stopped', dot: 'bg-muted-foreground' },
+}
+
+/**
+ * How long the player waits for the relay to report `pulling` again after a reconnect
+ * before it starts over anyway.
+ */
+const RECONNECT_WAIT_MS = 20_000
+
+/**
+ * #7330 — each part's feed state (`GET /printers/{id}/camera`), read again on the
+ * printer's camera events, and Reconnect, which asks the relay to restart its pull.
+ * `onReconnect` runs when the relay next reports `pulling` after the reconnect (a report
+ * newer than the one read when it was sent), or after `RECONNECT_WAIT_MS`. A player that
+ * started at once would attach to the old pull while the relay tears it down.
+ */
+function CameraFeeds({ printerId, onReconnect }: { printerId: string; onReconnect: () => void }) {
+  const [camera, setCamera] = useState<PrinterCamera | null>(null)
+  const [readError, setReadError] = useState<string | null>(null)
+  const [sending, setSending] = useState(false)
+  const [reconnect, setReconnect] = useState<{ sent: true } | { refused: string } | null>(null)
+  const read = useRef<() => void>(() => undefined)
+  const last = useRef<PrinterCamera | null>(null)
+  const waiting = useRef<{ since: string | null; timer: ReturnType<typeof setTimeout> } | null>(null)
+  const restart = useRef(onReconnect)
+  useEffect(() => {
+    restart.current = onReconnect
+  }, [onReconnect])
+  // `camera.feed` and `camera.reconnect` publish on `printer:<id>`; its reports do too,
+  // about once a second while it prints, and are no news here.
+  useSubscription(`printer:${printerId}`, (signal) => {
+    if (signal === 'resync' || signal.kind.startsWith('camera.')) read.current()
+  })
+  useEffect(() => {
+    let live = true
+    let sent = 0
+    const done = () => {
+      if (waiting.current) clearTimeout(waiting.current.timer)
+      waiting.current = null
+    }
+    read.current = () => {
+      const mine = ++sent
+      const current = () => live && mine === sent
+      api
+        .printerCamera(printerId)
+        .then((answer) => {
+          if (!current()) return
+          last.current = answer
+          setCamera(answer)
+          setReadError(null)
+          const relay = relayFeed(answer)
+          if (waiting.current && relay?.state === 'pulling' && relay.updated_at !== waiting.current.since) {
+            done()
+            restart.current()
+          }
+        })
+        .catch((cause: unknown) => {
+          if (current()) setReadError(cause instanceof ApiError ? cause.detail : 'The camera state could not be read.')
+        })
+    }
+    read.current()
+    return () => {
+      live = false
+      read.current = () => undefined
+      last.current = null
+      done()
+    }
+  }, [printerId])
+
+  const send = () => {
+    setSending(true)
+    setReconnect(null)
+    api
+      .reconnectPrinterCamera(printerId)
+      .then(() => {
+        setReconnect({ sent: true })
+        if (waiting.current) clearTimeout(waiting.current.timer)
+        const since = last.current ? (relayFeed(last.current)?.updated_at ?? null) : null
+        const timer = setTimeout(() => {
+          waiting.current = null
+          restart.current()
+        }, RECONNECT_WAIT_MS)
+        waiting.current = { since, timer }
+      })
+      .catch((cause: unknown) =>
+        setReconnect({
+          // A problem with no detail still says what it is: its title.
+          refused:
+            (cause instanceof ApiError && (cause.detail || cause.problem.title)) || 'The reconnect could not be sent.',
+        }),
+      )
+      .finally(() => setSending(false))
+  }
+
+  return (
+    <section aria-labelledby={`camera-feeds-${printerId}`} className="mt-3 flex flex-col border-t pt-3">
+      <h3 id={`camera-feeds-${printerId}`} className="mb-1.5 text-xs font-medium">
+        Camera
+      </h3>
+      {readError ? (
+        <p className="text-xs text-muted-foreground">{readError}</p>
+      ) : camera === null ? (
+        <p className="text-xs text-muted-foreground">Reading the camera</p>
+      ) : camera.feeds.length === 0 ? (
+        <p className="text-xs text-muted-foreground">No feed has reported yet.</p>
+      ) : (
+        <ul aria-label="Camera feeds" className="space-y-1.5">
+          {camera.feeds.map((feed) => (
+            <li
+              key={feed.part}
+              className="flex items-start gap-2"
+              data-testid={`camera-feed-${feed.part}`}
+              title={`Since ${formatFullTime(Date.parse(feed.updated_at))}`}
+            >
+              <span aria-hidden="true" className={cn('mt-[5px] size-2 shrink-0 rounded-full', FEED_STATE[feed.state].dot)} />
+              <span className="min-w-0">
+                {FEED_PART[feed.part]}{' '}
+                <span className="text-muted-foreground">{FEED_STATE[feed.state].label}</span>
+                {feed.detail && (
+                  <span className="block text-[11.5px] break-words text-muted-foreground">{feed.detail}</span>
+                )}
+              </span>
+            </li>
+          ))}
+        </ul>
+      )}
+      <Button variant="outline" size="sm" className="mt-2 self-start" disabled={sending} onClick={send}>
+        <RefreshCwIcon aria-hidden="true" />
+        Reconnect
+      </Button>
+      {reconnect && 'sent' in reconnect && (
+        <p className="mt-1 text-xs text-muted-foreground" role="status">
+          Reconnecting the camera.
+        </p>
+      )}
+      {reconnect && 'refused' in reconnect && (
+        <p className="mt-1 text-xs text-warn" role="alert">
+          {reconnect.refused}
+        </p>
+      )}
+    </section>
   )
 }

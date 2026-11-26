@@ -8,8 +8,8 @@ import { sessionImage } from '../src/sessions/blobs.js'
 import { SessionBlobs } from './support/sql/sessionBlobs.js'
 import type { SessionManager } from '../src/sessions/manager.js'
 import { TranscriptStore } from '../src/sessions/store.js'
-import { TurnHost } from '../src/sessions/turnHost.js'
-import { BACKEND_UNREACHABLE } from '../src/temporal/session/names.js'
+import { TurnHost, WORKER_RESTARTED, WORKER_RESTARTED_TEXT } from '../src/sessions/turnHost.js'
+import { BACKEND_UNREACHABLE, SHUTTING_DOWN_FAILURE } from '../src/temporal/session/names.js'
 import { testPayloadKeys } from './support/payloadKeys.js'
 import { TEST_DATABASE_URL, TEST_DATABASE_URL_ENV, throwawayDatabase } from './support/postgres.js'
 import { browser, costStateEntry, manager, scriptedRunner, tempPaths } from './support/sessions.js'
@@ -181,6 +181,37 @@ describe.skipIf(skip !== undefined)(`a placement's spend over a carried cost-sta
     const refused = new CrudReadError('the backend refused the transcript of session s (HTTP 500)', 500, true)
     const placed = await place(R, { carried: 'none', beforeLoad: () => Promise.reject(refused) })
     expect(placed.result).toMatchObject({ status: 'failed', error: expect.stringContaining('HTTP 500') })
+  })
+
+  it('a placement cut by a shutdown logs a worker_restarted error before it fails ShuttingDown, so the panel shows the call in flight as stopped (#7874)', async () => {
+    let started!: () => void
+    const running = new Promise<void>((resolve) => (started = resolve))
+    const scripted = scriptedRunner(() => {
+      started()
+      return { hang: true }
+    })
+    m = manager({ sql: db.sql, paths: await tempPaths(), run: scripted.runner, audit: sqlAuditLog(db.sql) })
+    const { session } = await m.start(browser, { origin: 'chat' })
+    const id = session.id
+    const turnId = randomUUID()
+    await db.sql`
+      UPDATE ai_sessions SET status = 'running', runtime = 'unified', durable_turn_id = ${turnId}, updated_at = now()
+      WHERE id = ${id}`
+    const host = new TurnHost({ core: m.turnCore, ...hostStores(db.sql), images: new SessionBlobs(db.sql), hostQueue: 'agent-sessions.pod-a' })
+    const placed = host
+      .run(
+        { sessionId: id, turnId, attempt: 'run:1', message: { turn_id: turnId, author: browser, text: 'run long', images: [], system_append: null } },
+        { heartbeat: () => {}, cancelled: new AbortController().signal, cancelReason: () => 'interrupt' },
+      )
+      .catch((err: unknown) => err)
+    await running
+    await host.stop({ graceMs: 0, abortWaitMs: 10_000 })
+    const result = await placed
+    expect(result).toBeInstanceOf(ApplicationFailure)
+    expect((result as ApplicationFailure).type).toBe(SHUTTING_DOWN_FAILURE)
+    const errors = (await m.events.read(id, 0, 1000)).map((e) => e.event).filter((e) => e.type === 'error')
+    // Without it, the log holds no reason: the stopped placement's tail (its `interrupted` error) goes to no workflow.
+    expect(errors).toContainEqual(expect.objectContaining({ type: 'error', sessionId: id, code: WORKER_RESTARTED, message: WORKER_RESTARTED_TEXT }))
   })
 
   it('a PDF blob the turn names reaches the SDK user message as a document block (#6267)', async () => {

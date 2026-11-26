@@ -46,6 +46,12 @@ name: Deploy (reusable)
 #      to `ghcr.io/eh-homelab/scadbuddy-playwright-mcp:<version>@sha256:<its
 #      digest>`, in playwright-mcp.yaml, once that file exists; a build
 #      that published no playwright-mcp image keeps the pin and warns.
+#      The agent fleet chat server (#7903) is pinned the same way, to
+#      `ghcr.io/eh-homelab/scadbuddy-fleet:<version>@sha256:<its digest>`, in
+#      scadbuddy-fleet.yaml, once that file exists. build-go-image.yml, not
+#      Build Image, publishes it, and only for a push that touches Go, so it is
+#      looked up once with no wait; a build with no fleet image keeps the pin
+#      and warns.
 #      The API in Go (#7667), the `core` container in the API's pod, is pinned
 #      like the slicer's, to
 #      `ghcr.io/eh-homelab/scadbuddy-core:<version>@sha256:<its digest>`, in
@@ -160,6 +166,11 @@ env:
   # profile-fetch worker, so its absence for a build keeps the pin.
   PLAYWRIGHT_MCP_IMAGE: ghcr.io/eh-homelab/scadbuddy-playwright-mcp
   MANIFEST_PLAYWRIGHT_MCP: applications/scadbuddy/playwright-mcp.yaml
+  # The agent fleet chat server (#7903), its own Deployment
+  # (eh-homelab/clusters, scadbuddy-fleet.yaml), under the same tags but from
+  # build-go-image.yml. Pinned like playwright-mcp; its absence keeps the pin.
+  FLEET_IMAGE: ghcr.io/eh-homelab/scadbuddy-fleet
+  MANIFEST_FLEET: applications/scadbuddy/scadbuddy-fleet.yaml
   # The API in Go (#7667), same run, same tags: the `core` container in
   # $MANIFEST. Optional until that file names it; resolved and pinned like the
   # slicer, so its absence for a build keeps the pin.
@@ -556,6 +567,32 @@ jobs:
           fi
           echo "digest=$digest" >> "$GITHUB_OUTPUT"
 
+      # The agent fleet chat server (#7903): only when its manifest exists and
+      # names the image. build-go-image.yml publishes it, only for a push that
+      # touches Go and in a few minutes, well before Build Image ends, so it is
+      # looked up once with no wait: a version with no fleet image is a
+      # warning and an empty digest, and the pin stays.
+      - name: Resolve the fleet image
+        id: fleet
+        env:
+          VERSION: ${{ inputs.version }}
+        run: |
+          set -euo pipefail
+          if ! grep -sqE "^\s*(- )?image:.*${FLEET_IMAGE//./\\.}" "clusters/${MANIFEST_FLEET}"; then
+            echo "clusters/${MANIFEST_FLEET} is absent or does not run ${FLEET_IMAGE}; not resolving it"
+            echo "digest=" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          ref="${FLEET_IMAGE}:${VERSION}"
+          digest=$(docker buildx imagetools inspect "$ref" 2>/dev/null | awk '/^Digest:/ {print $2; exit}' || true)
+          if [[ "$digest" =~ ^sha256:[0-9a-f]{64}$ ]]; then
+            echo "$ref -> $digest"
+          else
+            echo "::warning::no $ref (got '$digest'); the fleet pin stays as it is"
+            digest=""
+          fi
+          echo "digest=$digest" >> "$GITHUB_OUTPUT"
+
       # The API in Go (#7667), resolved like the slicer: only when the API's
       # manifest names the image, and an image its continue-on-error job did
       # not publish is a warning and an empty digest.
@@ -707,6 +744,7 @@ jobs:
           SLICER_DIGEST: ${{ steps.slicer.outputs.digest }}
           PROFILE_FETCH_DIGEST: ${{ steps.profile-fetch.outputs.digest }}
           PLAYWRIGHT_MCP_DIGEST: ${{ steps.playwright-mcp.outputs.digest }}
+          FLEET_DIGEST: ${{ steps.fleet.outputs.digest }}
           CORE_DIGEST: ${{ steps.core.outputs.digest }}
           SANDBOX_DIGEST: ${{ steps.sandbox.outputs.digest }}
           VERSION: ${{ inputs.version }}
@@ -876,6 +914,24 @@ jobs:
             sed -i -E "s|${pm_line}|\1image: ${PLAYWRIGHT_MCP_IMAGE}:${VERSION}@${PLAYWRIGHT_MCP_DIGEST}|" "$target"
             expect_one "$target" "^\s*image: ${PLAYWRIGHT_MCP_IMAGE//./\\.}:${VERSION//./\\.}@${PLAYWRIGHT_MCP_DIGEST}\$" "pinned playwright-mcp image"
             playwright_mcp=pinned
+          }
+
+          # The fleet chat server's line (#7903), in its own Deployment's file,
+          # exactly as playwright-mcp's. Sets $fleet to `pinned`, `kept` or
+          # (file absent) `none`.
+          fleet=none
+          pin_fleet() { # manifest
+            local target=$1
+            local fl_line="^(\s*)image: ${FLEET_IMAGE//./\\.}[:@][^[:space:]]*\$"
+            expect_one "$target" "$fl_line" "fleet image"
+            if [[ ! "${FLEET_DIGEST:-}" =~ ^sha256:[0-9a-f]{64}$ ]]; then
+              echo "::warning file=$target::no ${FLEET_IMAGE} image was published for ${VERSION}; keeping the fleet pin as it is"
+              fleet=kept
+              return 0
+            fi
+            sed -i -E "s|${fl_line}|\1image: ${FLEET_IMAGE}:${VERSION}@${FLEET_DIGEST}|" "$target"
+            expect_one "$target" "^\s*image: ${FLEET_IMAGE//./\\.}:${VERSION//./\\.}@${FLEET_DIGEST}\$" "pinned fleet image"
+            fleet=pinned
           }
 
           # The API in Go's line (#7667), the `core` container in the API's
@@ -1107,6 +1163,13 @@ jobs:
             echo "::notice::${MANIFEST_PLAYWRIGHT_MCP} is not in clusters yet; not pinning it"
           fi
           echo "playwright_mcp=$playwright_mcp" >> "$GITHUB_OUTPUT"
+          if [ -f "$MANIFEST_FLEET" ]; then
+            pin_fleet "$MANIFEST_FLEET"
+            [ "$fleet" != pinned ] || manifests+=("$MANIFEST_FLEET")
+          else
+            echo "::notice::${MANIFEST_FLEET} is not in clusters yet; not pinning it"
+          fi
+          echo "fleet=$fleet" >> "$GITHUB_OUTPUT"
           # The sessions' shell sandbox (#5864): every scanned file that names
           # it, each such line an `image:` or a `value:` (the agent worker's
           # SCADBUDDY_SANDBOX_IMAGE) holding the image alone. A build with no
@@ -1186,13 +1249,14 @@ jobs:
           # workflow does not resolve, or a second copy of a pin outside its
           # file fails the deploy here, rather than staying on its old build.
           # The exceptions are a slicer pin kept on purpose (pin_slicer), a
-          # profile-fetch, playwright-mcp and core pins kept the same way, and
+          # profile-fetch, playwright-mcp, fleet and core pins kept the same way, and
           # the sandbox pins.
           allowed=("${IMAGE}:${VERSION}@${DIGEST}" "${AGENT_IMAGE}:${VERSION}@${AGENT_DIGEST}")
           [ "$durable" != pinned ] || allowed+=("${AGENT_DURABLE_IMAGE}:${VERSION}@${AGENT_DURABLE_DIGEST}")
           [ "$slicer" != pinned ] || allowed+=("${SLICER_IMAGE}:${VERSION}@${SLICER_DIGEST}")
           [ "$profile_fetch" != pinned ] || allowed+=("${PROFILE_FETCH_IMAGE}:${VERSION}@${PROFILE_FETCH_DIGEST}")
           [ "$playwright_mcp" != pinned ] || allowed+=("${PLAYWRIGHT_MCP_IMAGE}:${VERSION}@${PLAYWRIGHT_MCP_DIGEST}")
+          [ "$fleet" != pinned ] || allowed+=("${FLEET_IMAGE}:${VERSION}@${FLEET_DIGEST}")
           [ "$core" != pinned ] || allowed+=("${CORE_IMAGE}:${VERSION}@${CORE_DIGEST}")
           [ "$sandbox" != pinned ] || allowed+=("${SANDBOX_IMAGE}:${VERSION}@${SANDBOX_DIGEST}")
           stale=0
@@ -1206,6 +1270,7 @@ jobs:
               if [ "$slicer" = kept ] && [ "$f" = "$MANIFEST_SLICER" ] && [[ "$ref" == "${SLICER_IMAGE}"[:@]* ]]; then ok=true; fi
               if [ "$profile_fetch" = kept ] && [ "$f" = "$MANIFEST_PROFILE_FETCH" ] && [[ "$ref" == "${PROFILE_FETCH_IMAGE}"[:@]* ]]; then ok=true; fi
               if [ "$playwright_mcp" = kept ] && [ "$f" = "$MANIFEST_PLAYWRIGHT_MCP" ] && [[ "$ref" == "${PLAYWRIGHT_MCP_IMAGE}"[:@]* ]]; then ok=true; fi
+              if [ "$fleet" = kept ] && [ "$f" = "$MANIFEST_FLEET" ] && [[ "$ref" == "${FLEET_IMAGE}"[:@]* ]]; then ok=true; fi
               if [ "$core" = kept ] && [ "$f" = "$MANIFEST" ] && [[ "$ref" == "${CORE_IMAGE}"[:@]* ]]; then ok=true; fi
               if [ "$sandbox" = kept ] && [[ "$ref" == "${SANDBOX_IMAGE}"[:@]* ]]; then ok=true; fi
               if [ "$ok" != true ]; then
@@ -1243,6 +1308,8 @@ jobs:
           PROFILE_FETCH: ${{ steps.edit.outputs.profile_fetch }}
           PLAYWRIGHT_MCP_DIGEST: ${{ steps.playwright-mcp.outputs.digest }}
           PLAYWRIGHT_MCP: ${{ steps.edit.outputs.playwright_mcp }}
+          FLEET_DIGEST: ${{ steps.fleet.outputs.digest }}
+          FLEET: ${{ steps.edit.outputs.fleet }}
           CORE_DIGEST: ${{ steps.core.outputs.digest }}
           CORE: ${{ steps.edit.outputs.core }}
           SANDBOX_DIGEST: ${{ steps.sandbox.outputs.digest }}
@@ -1298,6 +1365,11 @@ jobs:
             kept)   playwright_mcp_note="kept at its current pin: no image was published for ${VERSION}" ;;
             *)      playwright_mcp_note="not run in clusters yet (#7027)" ;;
           esac
+          case "$FLEET" in
+            pinned) fleet_note="\`${FLEET_IMAGE}:${VERSION}@${FLEET_DIGEST}\`" ;;
+            kept)   fleet_note="kept at its current pin: no image was published for ${VERSION}" ;;
+            *)      fleet_note="not run in clusters yet (#7903)" ;;
+          esac
           case "$CORE" in
             pinned) core_note="\`${CORE_IMAGE}:${VERSION}@${CORE_DIGEST}\`" ;;
             kept)   core_note="kept at its current pin: no image was published for ${VERSION}" ;;
@@ -1315,7 +1387,7 @@ jobs:
 
           Pin ${IMAGE}:${VERSION}@${DIGEST}
           and ${AGENT_IMAGE}:${VERSION}@${AGENT_DIGEST}
-          (agent-durable: ${durable_note}; slicer: ${slicer_note}; profile-fetch: ${profile_fetch_note}; playwright-mcp: ${playwright_mcp_note}; core: ${core_note}; sandbox: ${sandbox_note}; dashboard: ${dashboard_note})
+          (agent-durable: ${durable_note}; slicer: ${slicer_note}; profile-fetch: ${profile_fetch_note}; playwright-mcp: ${playwright_mcp_note}; fleet: ${fleet_note}; core: ${core_note}; sandbox: ${sandbox_note}; dashboard: ${dashboard_note})
           built from eh-homelab/ScadBuddy@${REVISION} (${KIND}),
           in ${manifest_files[*]}.
 
@@ -1339,6 +1411,7 @@ jobs:
           - **Slicer:** ${slicer_note}
           - **Profile-fetch:** ${profile_fetch_note}
           - **Playwright MCP:** ${playwright_mcp_note}
+          - **Fleet:** ${fleet_note}
           - **Core:** ${core_note}
           - **Sandbox:** ${sandbox_note}
           - **Dashboard:** ${dashboard_note}

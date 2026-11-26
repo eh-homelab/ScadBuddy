@@ -40,11 +40,14 @@ class ChangeFollower:
         retry_max: float = RETRY_MAX,
         idle: float = IDLE,
         resync_first: bool = False,
+        on_reconnect: Callable[[str], Awaitable[None]] | None = None,
     ) -> None:
         self._client = client
         self._path = path
         self._on_change = on_change
         self._on_resync = on_resync
+        #: A ``camera.reconnect`` change goes here when set, else to ``on_change``.
+        self._on_reconnect = on_reconnect
         self._retry_min = retry_min
         self._retry_max = retry_max
         self._idle = idle
@@ -133,24 +136,31 @@ class ChangeFollower:
         if event == "reconnected":
             await self._resync()
         elif event == "change":
-            printer_id = self._printer_id(data)
+            kind, printer_id = self._kind_and_printer(data)
             if printer_id is not None:
+                handler = (
+                    self._on_reconnect
+                    if kind == "camera.reconnect" and self._on_reconnect is not None
+                    else self._on_change
+                )
                 try:
-                    await self._on_change(printer_id)
+                    await handler(printer_id)
                 except Exception:
                     self._pending = True
                     raise
         return False
 
     @staticmethod
-    def _printer_id(data: object) -> str | None:
+    def _kind_and_printer(data: object) -> tuple[str | None, str | None]:
         if not isinstance(data, dict) or not isinstance(data.get("p"), str):
-            return None
+            return None, None
         try:
             payload = json.loads(data["p"])
         except ValueError:
-            return None
+            return None, None
         if not isinstance(payload, dict) or payload.get("kind") not in CHANGE_KINDS:
-            return None
+            return None, None
         printer_id = payload.get("printer_id")
-        return printer_id if isinstance(printer_id, str) else None
+        if not isinstance(printer_id, str):
+            return None, None
+        return payload["kind"], printer_id

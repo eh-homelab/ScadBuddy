@@ -1,11 +1,11 @@
 import { randomUUID } from 'node:crypto'
 import { z } from 'zod'
 import { command, isRunning } from './command.js'
-import { binary } from './binary.js'
+import { binary, binaryImage } from './binary.js'
 import { ok } from './call.js'
 import { slug } from './common.js'
 import { NATIVE_ID_BASE } from '../sessions/touched.js'
-import { blob, defineTool, image, json, ToolError, type Tool } from './registry.js'
+import { blob, defineTool, json, ToolError, type Tool } from './registry.js'
 
 // Print history (issue #308): ScadBuddy's own prints, each a Bambuddy archive linked
 // to the output that printed it. Routes: backend/scadbuddy/api/print_history.py.
@@ -435,7 +435,7 @@ export const printMediaTools: Tool[] = [
     handler: async ({ archive_id, photo, plate }, ctx) => {
       if (photo !== undefined && plate !== undefined) throw new ToolError('give a photo or a plate, not both')
       if (photo !== undefined) {
-        return binary(
+        return binaryImage(
           ctx.backend.GET('/api/v1/prints/{archive_id}/photos/{filename}', {
             params: { path: { archive_id, filename: photo } },
             parseAs: 'stream',
@@ -443,11 +443,10 @@ export const printMediaTools: Tool[] = [
           `get photo ${photo} of print ${archive_id}`,
           ctx,
           { path: `/api/v1/prints/${archive_id}/photos/${photo}`, name: photo, fallbackType: 'image/jpeg' },
-          image,
         )
       }
       if (plate !== undefined) {
-        return binary(
+        return binaryImage(
           ctx.backend.GET('/api/v1/prints/{archive_id}/plates/{index}/thumbnail', {
             params: { path: { archive_id, index: plate } },
             parseAs: 'stream',
@@ -459,15 +458,13 @@ export const printMediaTools: Tool[] = [
             name: `print-${archive_id}-plate-${plate}.png`,
             fallbackType: 'image/png',
           },
-          image,
         )
       }
-      return binary(
+      return binaryImage(
         ctx.backend.GET('/api/v1/prints/{archive_id}/thumbnail', { params: { path: { archive_id } }, parseAs: 'stream' }),
         `get thumbnail of print ${archive_id}`,
         ctx,
         { path: `/api/v1/prints/${archive_id}/thumbnail`, name: `print-${archive_id}.png`, fallbackType: 'image/png' },
-        image,
       )
     },
   }),

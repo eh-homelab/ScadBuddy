@@ -92,9 +92,10 @@ describe('entity attachment and link tools', () => {
 
   it("answers a photo as an image, its thumbnail on request, and any other file as its bytes", async () => {
     const jpeg = Buffer.from([0xff, 0xd8, 0xff, 0xe0, 1, 2, 3])
+    const webp = Buffer.from('RIFF\0\0\0\0WEBPVP8 ')
     server.use(
       ...serveFile(SPOOL, 'image/jpeg', jpeg),
-      http.get(`${base(SPOOL)}/attachments/${ID}/thumbnail`, () => new HttpResponse(Buffer.from('RIFF'), { headers: { 'Content-Type': 'image/webp' } })),
+      http.get(`${base(SPOOL)}/attachments/${ID}/thumbnail`, () => new HttpResponse(webp, { headers: { 'Content-Type': 'image/webp' } })),
       ...serveFile(PRINTER, 'application/pdf', Buffer.from('%PDF-1.7'), {}, 'manual.pdf'),
     )
     const get = tool('entity_attachment_get')
@@ -107,7 +108,7 @@ describe('entity attachment and link tools', () => {
     const photo = await get.execute({ entity: SPOOL, attachment_id: ID }, ctx())
     expect(photo.content).toEqual([{ type: 'image', mimeType: 'image/jpeg', data: jpeg.toString('base64') }])
     const thumb = await get.execute({ entity: SPOOL, attachment_id: ID, thumbnail: true }, ctx())
-    expect(thumb.content).toEqual([{ type: 'image', mimeType: 'image/webp', data: Buffer.from('RIFF').toString('base64') }])
+    expect(thumb.content).toEqual([{ type: 'image', mimeType: 'image/webp', data: webp.toString('base64') }])
     const ws = memoryWorkspaceWithWrites()
     const pdf = await get.execute({ entity: PRINTER, attachment_id: ID }, { ...ctx(), workspace: ws.workspace } as ToolContext)
     expect(pdf.content.some((c) => c.type === 'resource' || c.type === 'resource_link')).toBe(false)
@@ -217,7 +218,7 @@ describe('entity attachment and link tools', () => {
     server.use(...serveFile(SPOOL, 'image/jpeg', big))
     const result = await tool('entity_attachment_get').execute({ entity: SPOOL, attachment_id: ID }, ctx())
     expect(result.content.some((c) => c.type === 'image')).toBe(false)
-    expect(firstText(result)).toMatchObject({ viewable: false, media_type: 'image/jpeg', size_bytes: IMAGE_BYTES_MAX + 1 })
+    expect(firstText(result)).toMatchObject({ inline: false, media_type: 'image/jpeg', size_bytes: IMAGE_BYTES_MAX + 1 })
   })
 
   it("refuses an order's entity with the backend's use_order_route", async () => {

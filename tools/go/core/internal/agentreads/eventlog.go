@@ -11,6 +11,10 @@ import (
 	"github.com/eh-homelab/ScadBuddy/tools/go/core/internal/crud"
 )
 
+// fleetKindPrefix starts every fleet event's kind: Python's FLEET_KIND_PREFIX
+// (backend/scadbuddy/api/crud_agent_changes.py), which the agent's change stream leaves out.
+const fleetKindPrefix = "fleet."
+
 const (
 	// eventsPageMax is the agent's replay limit plus one.
 	eventsPageMax = 5001
@@ -71,7 +75,8 @@ func (a *Reads) gap(r *http.Request, _ crud.Params) (any, error) {
 		// The fleet's kinds name its session ids, its only identity: they are for the fleet
 		// caller alone (#7818), as in the agent's change stream (crud_agent_changes.py).
 		rows, err := tx.Query(ctx, `SELECT seq::text, event_id, payload, logged_at FROM events
-			WHERE seq > $1 AND left(kind, 6) <> 'fleet.' ORDER BY seq DESC LIMIT $2`, after, limit)
+			WHERE seq > $1 AND NOT starts_with(kind, $3) ORDER BY seq DESC LIMIT $2`,
+			after, limit, fleetKindPrefix)
 		if err != nil {
 			return err
 		}

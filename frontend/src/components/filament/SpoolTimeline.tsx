@@ -22,6 +22,7 @@ type Filter = (typeof FILTERS)[number]['label']
 const SOURCE: Record<string, string> = { scale: 'scale', person: 'by hand', ams_remain: 'AMS', bb: 'Bambuddy', print_actual: 'measured', print_estimate: 'estimate' }
 
 const grams = (value: number) => `${Number(value.toFixed(1))} g`
+const metres = (value: number) => `${Number(value.toFixed(1))} m`
 const delta = (value: number) => `${value > 0 ? '+' : value < 0 ? '−' : ''}${grams(Math.abs(value))}`
 const tray = (event: SpoolEvent) => (event.ams_id != null && event.tray_id != null ? `AMS ${String.fromCharCode(65 + event.ams_id)}${event.tray_id + 1}` : null)
 
@@ -39,6 +40,7 @@ function detail(event: SpoolEvent, names: EventNames): string {
     drift_g?: number | null
     resolution?: string | null
     shortfall_g?: number | null
+    length_m?: number | null
   }
   const source = event.source ? SOURCE[event.source] : undefined
   const parts: (string | null | undefined)[] = []
@@ -60,7 +62,8 @@ function detail(event: SpoolEvent, names: EventNames): string {
       break
     case 'print_started':
     case 'print_ended':
-      parts.push(event.delta_g != null ? delta(event.delta_g) : null, event.grams_after != null ? `${grams(event.grams_after)} left` : null, source, data.bb_status && data.bb_status !== 'completed' ? data.bb_status : null, tray(event))
+      // #7685: the plate's length beside its grams, when the sliced plate gave one.
+      parts.push(event.delta_g != null ? delta(event.delta_g) : null, data.length_m ? metres(data.length_m) : null, event.grams_after != null ? `${grams(event.grams_after)} left` : null, source, data.bb_status && data.bb_status !== 'completed' ? data.bb_status : null, tray(event))
       break
     case 'created':
       parts.push(event.grams_after != null ? `with ${grams(event.grams_after)}` : null)

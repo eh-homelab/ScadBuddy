@@ -514,7 +514,8 @@ describe('StorefrontListingPage (#5282, #6157)', () => {
       // Another code names the parameter, and says the design sets it, not that a note is under it (#7778, #7862).
       await waitFor(() => expect(screen.getAllByRole('alert')[0]).toHaveTextContent('needs a change, but the design sets it itself, so this editor shows no row for it'))
       expect(screen.getAllByRole('alert')[0]).not.toHaveTextContent('See the note under it below')
-      expect(screen.getAllByRole('alert')[0]).not.toHaveTextContent('Design')
+      // The pointer to the Design block's note, not any use of the word (#7899).
+      expect(screen.getAllByRole('alert')[0]).not.toHaveTextContent(/See the note under “Design”/)
       expect(within(block).queryByRole('alert')).toBeNull()
     })
 

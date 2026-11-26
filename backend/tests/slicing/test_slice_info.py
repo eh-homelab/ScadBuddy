@@ -8,7 +8,14 @@ from typing import Any
 import pytest
 
 from scadbuddy.core.problems import ApiError
-from scadbuddy.slicing.slice_info import filament_changes, plate_gcode, plate_grams, read_sliced
+from scadbuddy.slicing.slice_info import (
+    PlateUses,
+    filament_changes,
+    plate_gcode,
+    plate_grams,
+    plate_uses,
+    read_sliced,
+)
 from tests.support.sliced3mf import sliced_3mf, with_corrupt_member
 
 ONE = sliced_3mf(plates={1: (3600, [12.5, 3.0])}, gcode={1: b"M620 S0A\nM620 S1A\nM620 S0A\n"})
@@ -244,3 +251,39 @@ def test_plate_grams_of_what_cannot_be_read_are_none() -> None:
     assert plate_grams(two, 3) == {}
     assert plate_grams(b"not a zip", 1) == {}
     assert plate_grams(ONE, 1) == {1: 12.5, 2: 3.0}
+
+
+def test_plate_uses_reads_the_metres_beside_the_grams() -> None:
+    """#7685: Bambu Studio writes ``used_m`` beside ``used_g`` per filament (measured on
+    ``tests/printers/fixtures/rack-slice-info-h2c.config``); a slot without it has no
+    length, and its grams still book."""
+    payload = sliced_3mf(plates={1: (3600, [12.5, 3.0])}, metres={1: [4.2, None]}, gcode={1: b""})
+    assert plate_uses(payload, 1) == PlateUses(
+        grams_by_slot={1: 12.5, 2: 3.0}, length_by_slot={1: 4.2}
+    )
+    assert read_sliced(payload, 1).length_by_slot == {1: 4.2}
+    assert plate_grams(payload, 1) == {1: 12.5, 2: 3.0}
+
+
+def test_a_slot_with_no_length_books_grams_only() -> None:
+    """A ``used_m`` that is not a number loses the length only."""
+    original = sliced_3mf(plates={1: (3600, [12.5])}, gcode={1: b""})
+    out = io.BytesIO()
+    with zipfile.ZipFile(io.BytesIO(original)) as source, zipfile.ZipFile(out, "w") as archive:
+        for name in source.namelist():
+            data = source.read(name)
+            if name == "Metadata/slice_info.config":
+                data = data.replace(b'used_g="12.5"', b'used_m="x" used_g="12.5"')
+                assert b'used_m="x"' in data
+            archive.writestr(name, data)
+    assert plate_uses(out.getvalue(), 1) == PlateUses(grams_by_slot={1: 12.5}, length_by_slot={})
+    assert plate_uses(b"not a zip", 1) == PlateUses()
+
+
+def test_the_metres_move_with_the_grams_onto_the_filament_the_plate_prints() -> None:
+    """A one-filament plate's ``id="1"`` is the filament it prints (#4711): its length
+    moves as its grams do."""
+    file = sliced_3mf(
+        plates={1: (60, [1.0])}, metres={1: [0.3]}, gcode={1: b"; filament: 3\nM620 S2A\n"}
+    )
+    assert plate_uses(file, 1) == PlateUses(grams_by_slot={3: 1.0}, length_by_slot={3: 0.3})
