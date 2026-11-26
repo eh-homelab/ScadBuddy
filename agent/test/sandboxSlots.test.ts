@@ -544,8 +544,11 @@ describe("following a slot from the worker (background/sandboxSource.ts)", () =>
   })
 
   it("reads a task back at its finish only for a monitor, and stops a monitor's slot", async () => {
-    const { slot } = await startInSandbox(call(), 'bash', 'sleep 60', 60_000)
-    const t = task({ sandbox: { slot: slot.id, shell: 'bash', outputFile: slot.output_file } })
+    const started = async () => {
+      const { slot } = await startInSandbox(call(), 'bash', 'sleep 60', 60_000)
+      return { slot, t: task({ sandbox: { slot: slot.id, shell: 'bash', outputFile: slot.output_file } }) }
+    }
+    let { slot, t } = await started()
     let gets = 0
     const store = {
       finish: async () => true,
@@ -557,9 +560,14 @@ describe("following a slot from the worker (background/sandboxSource.ts)", () =>
     expect(gets).toBe(0)
     const client = new SandboxClient(sandboxes.started.get(SESSION)!.endpoint, AbortSignal.timeout(10_000))
     expect(await client.slotStatus(slot.id)).toMatchObject({ running: true })
-    // A monitor's end, and one from a workflow started before `monitor` was sent: read back, its slot stopped.
-    await finish({ taskId: t.id, state: 'done' })
+    // A monitor's end: read back, its slot stopped.
+    await finish({ taskId: t.id, state: 'done', monitor: true })
     expect(gets).toBe(1)
+    expect(await client.slotStatus(slot.id)).toBeUndefined()
+    // One from a workflow started before `monitor` was sent: read back too, its slot stopped.
+    ;({ slot, t } = await started())
+    await finish({ taskId: t.id, state: 'done' })
+    expect(gets).toBe(2)
     expect(await client.slotStatus(slot.id)).toBeUndefined()
   })
 
