@@ -1,9 +1,10 @@
-import { screen, waitFor, within } from '@testing-library/react'
+import { act, screen, waitFor, within } from '@testing-library/react'
 import { http, HttpResponse } from 'msw'
 import { Route, Routes } from 'react-router'
-import { beforeEach, describe, expect, it } from 'vitest'
+import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { getSpool, listCatalog, upsertCatalog } from '../../api/filament'
 import { SPOOL_ADVANCED_KEY } from '../../components/filament/SpoolSections'
+import { CHECK_WAIT_MS } from '../../components/filament/useInsertWeightCheck'
 import { IT, spoolId } from '../../mocks/features/filament/seed'
 import { server } from '../../mocks/server'
 import { rememberAdvanced } from '../../test/advanced'
@@ -182,13 +183,22 @@ describe('the weigh form offers an insert weight from a new spool (#7280)', () =
   })
 
   it('records the weighing when the check does not answer (#7452)', async () => {
-    server.use(http.get('*/api/v1/filament/spools/:id/insert-weight-offer', () => new Promise<never>(() => {})))
-    const { user } = open(9)
-    await heading(9)
-    await user.type(screen.getByLabelText('Scale reading, with the spool (g)'), '1200')
-    expect(await screen.findByText('The empty weight check did not answer. You can record the weighing without it.', undefined, { timeout: 15_000 })).toBeInTheDocument()
-    expect(screen.getByRole('button', { name: 'Record weighing' })).toBeEnabled()
-  }, 20_000)
+    // Fake timers that still let real time pass, so the page loads and the wait is skipped.
+    vi.useFakeTimers({ shouldAdvanceTime: true })
+    try {
+      server.use(http.get('*/api/v1/filament/spools/:id/insert-weight-offer', () => new Promise<never>(() => {})))
+      const { user } = open(9)
+      await heading(9)
+      await user.type(screen.getByLabelText('Scale reading, with the spool (g)'), '1200')
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(CHECK_WAIT_MS)
+      })
+      expect(await screen.findByText('The empty weight check did not answer. You can record the weighing without it.')).toBeInTheDocument()
+      expect(screen.getByRole('button', { name: 'Record weighing' })).toBeEnabled()
+    } finally {
+      vi.useRealTimers()
+    }
+  })
 })
 
 describe('the weigh form asks what is up when a new spool reads under its label (#7683)', () => {

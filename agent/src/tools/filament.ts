@@ -1712,15 +1712,17 @@ const tools: Tool[] = [
       "what the insert's empty weight would become (`derived_g`, `new_empty_weight_g`, `current_empty_weight_g`, " +
       '`current_basis`, `sample_count`). When there is an offer and `accept_insert_weight` is left out, the tool books ' +
       'nothing (`event: null`): tell the person the numbers and that makers overfill by about 10-30 g, so the estimate is ' +
-      "slightly heavy, and, when `current_basis` is `person`, that the weight a person set is replaced; then call " +
-      'again with the same `reading_g` and `accept_insert_weight` true or false. ' +
+      "slightly heavy, and, when `current_basis` is `person` and `placeholder` is false, that the weight a person set " +
+      'is replaced; then call again with the same `reading_g` and `accept_insert_weight` true or false. With `true`, ' +
+      "also pass `new_empty_weight_g`: that first answer's `insert_weight.offer.new_empty_weight_g`, the weight the " +
+      'person approved. ' +
       '`checked_by_default` is advice only: pass `true` only when the user says to take it. `true` changes the insert in ' +
       'ScadBuddy only and runs before the weighing, so the weighing uses the new empty weight; `false` books with the ' +
       'current empty weight. With no offer, the weighing is booked at once, and `true` is refused with nothing booked. ' +
-      'A `true` whose mean moved since its check (another spool of the insert was accepted or deleted) is refused ' +
-      '(`insert_weight_changed`) with nothing booked: call again without `accept_insert_weight` and tell the person ' +
-      'the new numbers. A spool weighed into a mean of several readings can end a few grams off its label weight, ' +
-      'so it gets no later offer (`not_full`).',
+      'When the mean moved after the person saw the offer (another spool of the insert was accepted or deleted), a ' +
+      '`true` is refused (`insert_weight_changed`) with nothing booked: call again without `accept_insert_weight` and ' +
+      'tell the person the new numbers. A spool weighed into a mean of several readings can end a few grams off its label weight, ' +
+      'so it gets no later offer (`not_full`). ' +
       'A new spool read under its label weight (#7683): the check answers `reason: below_label` with `shortfall_g`, ' +
       '`resolutions` (`tared`: the scale was tared on the empty spool, the filament is the reading; `short`: the spool ' +
       'holds less than its label, the filament is the reading less the empty weight and the spool stops being added ' +
@@ -1736,6 +1738,12 @@ const tools: Tool[] = [
       grams: z.number().min(0).optional(),
       reading_g: z.number().positive().max(100000).optional().describe('Scale reading with the spool, in grams (weighed only)'),
       accept_insert_weight: z.boolean().optional().describe("After an offer: true takes its empty weight for the insert, false declines it (needs reading_g)"),
+      new_empty_weight_g: z
+        .number()
+        .int()
+        .positive()
+        .optional()
+        .describe("With accept_insert_weight true: the offer's new_empty_weight_g from the first call, the weight the person approved"),
       resolution: z
         .enum(['tared', 'short', 'label_wrong'])
         .optional()
@@ -1762,8 +1770,13 @@ const tools: Tool[] = [
         : kind === 'consumed_reset'
           ? `Reset the used counter of spool ${spool_id}`
           : `Record a drying of spool ${spool_id}`,
-    handler: async ({ spool_id, reading_g, accept_insert_weight, resolution, ...body }, { backend }) => {
+    handler: async ({ spool_id, reading_g, accept_insert_weight, new_empty_weight_g, resolution, ...body }, { backend }) => {
       const path = { spool_id }
+      // #7450-2: an accept names the weight the person approved, so a mean that moved after the offer is refused.
+      if (accept_insert_weight && new_empty_weight_g === undefined) {
+        throw new ToolError("accept_insert_weight true needs new_empty_weight_g: the first call's offer.new_empty_weight_g")
+      }
+      if (!accept_insert_weight && new_empty_weight_g !== undefined) throw new ToolError('new_empty_weight_g is only for accept_insert_weight true')
       if (reading_g === undefined) {
         if (accept_insert_weight) throw new ToolError('accept_insert_weight needs reading_g')
         if (resolution) throw new ToolError('resolution needs reading_g')
@@ -1821,8 +1834,8 @@ const tools: Tool[] = [
         accepted = await ok(
           backend.POST('/api/v1/filament/spools/{spool_id}/insert-weight', {
             params: { path },
-            // #7450-2: a mean that moved since this check is a 409 `insert_weight_changed`.
-            body: { reading_g, new_empty_weight_g: check.offer.new_empty_weight_g },
+            // #7450-2: a mean that moved after the person saw the offer is a 409 `insert_weight_changed`.
+            body: { reading_g, new_empty_weight_g: new_empty_weight_g! },
           }),
           `take the insert weight of spool ${spool_id}`,
         )

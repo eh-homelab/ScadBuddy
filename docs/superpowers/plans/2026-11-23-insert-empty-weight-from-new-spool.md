@@ -92,9 +92,12 @@ and R-7280-6 where they differ):
 - **R-7450-2** `InsertWeightAccept` takes an optional `new_empty_weight_g`. When it is given and
   the mean under the locks differs, the accept writes nothing and answers 409
   `insert_weight_changed` with the `new_empty_weight_g` now. The UI sends the offer's value, and on
-  that 409 says the weight changed and checks again; the agent sends its own check's value.
-- **R-7450-3** When `current_basis` is `person`, the offer says that the weight a person set is
-  replaced.
+  that 409 says the weight changed and checks again. The agent tool takes the value the person
+  approved as its own `new_empty_weight_g` input (the first answer's offer) and sends it, never a
+  later check's value: the review of c02fc7c6d found that the later check's value let a moved
+  mean through.
+- **R-7450-3** When `current_basis` is `person` and the weight is not a placeholder, the offer says
+  that the weight a person set is replaced.
 - **R-7451-1** No empty-spool weighing exists yet (#7300): the UI and the skill say to correct the
   estimate by editing the insert's empty weight. This replaces R-7280-6's "a later weighing of an
   empty spool replaces it".

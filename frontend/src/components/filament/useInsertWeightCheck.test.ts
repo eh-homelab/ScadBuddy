@@ -5,7 +5,7 @@ import { CHECK_WAIT_MS, useInsertWeightCheck } from './useInsertWeightCheck'
 
 vi.mock('../../api/filament', () => ({ insertWeightOffer: vi.fn() }))
 
-const NO_OFFER: InsertWeightCheck = { offer: null, reason: 'used', insert_type_id: 'i', empty_weight_g: 180, filament_g: 1020 }
+const NO_OFFER: InsertWeightCheck = { offer: null, reason: 'used', insert_type_id: 'i', empty_weight_g: 180, filament_g: 1020, shortfall_g: null, resolutions: [], default: null }
 
 describe('useInsertWeightCheck (#7452)', () => {
   beforeEach(() => vi.useFakeTimers())
