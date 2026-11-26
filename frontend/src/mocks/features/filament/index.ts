@@ -513,8 +513,8 @@ function detail(row: SpoolRow): S['SpoolDetail'] {
     k_values: effectiveKValues(row.id),
     basis: { anchor, deltas },
     last_weighing: [...ledger].reverse().find((event) => event.kind === 'weighed') ?? null,
-    // #7684: an archived spool's closing is its newest `archived` event's data.
-    closing: row.archived_at ? (([...ledger].reverse().find((event) => event.kind === 'archived')?.data as S['Closing'] | undefined) ?? null) : null,
+    // #7684: an archived spool's closing is its newest `archived` event's data; #7909: none when the event (from before the closing) carries no closing key.
+    closing: row.archived_at ? closingOnEvent([...ledger].reverse().find((event) => event.kind === 'archived')?.data) : null,
     in_use: ledger.some((event) => event.kind === 'print_started' || event.kind === 'print_ended'),
     invoice: invoiceRefOf(row.id, invoicedLine.get(row.id)),
     type_suppliers: row.type_id ? typeSuppliersOf(row.type_id) : [],
@@ -1015,8 +1015,18 @@ function closingOf(events: readonly S['SpoolEvent'][], row: SpoolRow, reason: Ar
 }
 
 /** `_reading_notice`: a reading the archive would refuse, said first. */
-function readingNotice(readingG: number | null, emptyG: number | null): S['ClosingNotice'][] {
+const CLOSING_KEYS = ['reason', 'started_g', 'started_from', 'ledger_consumed_g', 'final_filament_g', 'scale_consumed_g', 'drift_g'] as const
+
+/** `spools.py` `detail()` (#7909): an `archived` event's data as the closing, or null when it carries none of the closing's keys. */
+function closingOnEvent(data: Record<string, unknown> | undefined): S['Closing'] | null {
+  if (!data || !CLOSING_KEYS.some((key) => key in data)) return null
+  return data as S['Closing']
+}
+
+function readingNotice(readingG: number | null, grams: number | null, emptyG: number | null): S['ClosingNotice'][] {
   if (readingG == null) return []
+  // #7909: a reading under the filament sent with it is what `SpoolArchive` refuses.
+  if (grams != null) return readingG < grams ? [{ code: 'reading_below_grams', text: `The reading, ${gramsText(readingG)}, is under the ${gramsText(grams)} of filament: a spool cannot weigh less than the filament on it.` }] : []
   if (emptyG == null) return [{ code: 'no_empty_weight', text: 'No empty weight is known for this spool, so the reading cannot be turned into filament: enter the filament left instead, or give the spool an insert.' }]
   if (readingG < emptyG) return [{ code: 'reading_below_empty', text: `The reading is under the empty spool's ${emptyG} g.` }]
   return []
@@ -2353,6 +2363,10 @@ export const handlers = [
       const source = body.continued_from ? findSpool(body.continued_from) : null
       if (body.continued_from && !source) return problem(422, 'copy_of names no spool')
       if (source && !source.archived_at) return problem(422, 'continued_from names a spool that is not archived', { code: 'continued_from_not_archived' })
+      // #7909: one continuation per source, while the spool it names still exists.
+      const sourceClosing = source ? state.events.filter((event) => event.spool_id === source.id && event.kind === 'archived').sort(byTime).at(-1) : undefined
+      const continuedAs = sourceClosing?.data?.continued_as
+      if (typeof continuedAs === 'string' && findSpool(continuedAs)) return problem(422, 'continued_from names a spool another spool already continues', { code: 'continued_from_taken' })
       const carried = state.spoolPresets.filter((one) => body.copy_of && one.spool_id === body.copy_of && one.migrated)
       const presets = (body.presets ?? []).map((row) => ({
         ...row,
@@ -2558,11 +2572,11 @@ export const handlers = [
     const grams = query.get('final_grams') == null ? null : Number(query.get('final_grams'))
     const insert = state.catalogs['insert-types'].find((one) => one.id === view(row).effective?.insert_type_id)
     // `_final_filament`: a reading that cannot be resolved closes on nothing, not on the ledger.
-    const finalFilament = grams ?? (readingG != null && insert && readingG >= insert.empty_weight_g ? readingG - insert.empty_weight_g : null)
+    const finalFilament = grams != null ? (readingG != null && readingG < grams ? null : grams) : readingG != null && insert && readingG >= insert.empty_weight_g ? readingG - insert.empty_weight_g : null
     const weighed = readingG != null || grams != null
     const events = state.events.filter((event) => event.spool_id === row.id)
     const closing = closingOf(events, row, (reason as ArchiveReason | null) ?? null, finalFilament, weighed ? null : row.grams_left)
-    const notices = [...readingNotice(grams != null ? null : readingG, insert?.empty_weight_g ?? null), ...closingNotices((reason as ArchiveReason | null) ?? null, closing.final_filament_g ?? null)]
+    const notices = [...readingNotice(readingG, grams, insert?.empty_weight_g ?? null), ...closingNotices((reason as ArchiveReason | null) ?? null, closing.final_filament_g ?? null)]
     return HttpResponse.json({ closing, final_filament_g: closing.final_filament_g ?? null, empty_g: insert?.empty_weight_g ?? null, notices } satisfies S['ClosingPreview'])
   }),
   http.post(`${BASE}/spools/:id/tags`, async ({ params, request }) => {

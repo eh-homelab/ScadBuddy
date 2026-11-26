@@ -14,6 +14,7 @@ from scadbuddy.filament import models as m
 from scadbuddy.filament.catalog import CatalogStore
 from scadbuddy.filament.spools import (
     ContinuedFromNotArchivedError,
+    ContinuedFromTakenError,
     FilamentDefaults,
     FilamentSpoolStore,
     NoBelowLabelError,
@@ -681,3 +682,61 @@ def test_only_one_spool_continues_a_source(pg_pool: PgPool) -> None:
     FilamentSpoolStore(pg_pool).archive(source, True, actor="t", reason="respooled")
     with pytest.raises(ValueError, match="one spool"):
         _continue(pg_pool, source, quantity=2)
+
+
+# -- the leftovers of #7844's review (#7909) ------------------------------------------
+
+
+@pg
+def test_detail_shows_no_closing_for_an_archive_made_before_the_closing(pg_pool: PgPool) -> None:
+    """An `archived` event written before #7844 carries no closing key: the page says
+    nothing rather than an all-null closing."""
+    store = FilamentSpoolStore(pg_pool)
+    spool = _spool(pg_pool, _insert(pg_pool))
+    store.archive(spool, True, actor="t", reason="finished", final_reading_g=680)
+    with pg_pool.connection() as conn:
+        conn.execute(
+            'UPDATE filament_spool_events SET data = \'{"author": "t"}\'::jsonb'
+            " WHERE spool_id = %s AND kind = 'archived'",
+            (spool,),
+        )
+    detail = store.detail(spool)
+    assert detail is not None and detail.archived_at is not None
+    assert detail.closing is None
+
+
+@pg
+def test_a_source_continued_once_is_not_continued_again(pg_pool: PgPool) -> None:
+    """A second `continued_from` of the same source would overwrite the first link on its
+    `archived` event; it is refused while the first continuation still exists."""
+    source = _spool(pg_pool, _insert(pg_pool))
+    store = FilamentSpoolStore(pg_pool)
+    store.archive(source, True, actor="t", reason="respooled", final_reading_g=680)
+    (first,) = _continue(pg_pool, source)
+    with pytest.raises(ContinuedFromTakenError):
+        _continue(pg_pool, source)
+    assert store.events(source)[-1].data["continued_as"] == str(first)
+    # Once the first continuation is deleted, the source may be continued again.
+    assert store.delete(first)
+    (second,) = _continue(pg_pool, source)
+    assert store.events(source)[-1].data["continued_as"] == str(second)
+
+
+@pg
+def test_the_preview_names_a_reading_under_the_filament(pg_pool: PgPool) -> None:
+    """`final_reading_g` under `final_grams` is what `SpoolArchive` refuses (422): the
+    preview closes on nothing and says so, as it does for the other refused readings."""
+    spool = _spool(pg_pool, _insert(pg_pool))
+    _weighed_once(pg_pool, spool)
+    preview = FilamentSpoolStore(pg_pool).closing_preview(spool, "finished", 100, 200)
+    assert preview is not None
+    assert preview.final_filament_g is None and preview.closing.final_filament_g is None
+    assert preview.closing.scale_consumed_g is None
+    assert [n.code for n in preview.notices] == ["reading_below_grams"]
+    assert preview.notices[0].text == (
+        "The reading, 100 g, is under the 200 g of filament: a spool cannot weigh"
+        " less than the filament on it."
+    )
+    fine = FilamentSpoolStore(pg_pool).closing_preview(spool, "finished", 200, 100)
+    assert fine is not None and fine.final_filament_g == 100
+    assert fine.notices[0].code == "filament_left"

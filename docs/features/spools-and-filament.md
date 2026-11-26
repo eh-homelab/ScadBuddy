@@ -229,8 +229,9 @@ record, and says when the numbers disagree with the reason: a finished spool wit
 than the setting `filament_weighing_finished_left_g` (5 g by default) still on it ("30 g of
 filament are still on it."), or any other reason at or under it ("It reads empty; is it
 finished?"), and what the archive would refuse: a reading with no empty weight known
-(`no_empty_weight`) or under it (`reading_below_empty`). The person can go on; nothing
-refuses. `POST /filament/spools/{id}/archive`
+(`no_empty_weight`), under it (`reading_below_empty`) or under the `final_grams` sent with
+it (`reading_below_grams`, #7909); such a reading closes on nothing. The person can go on;
+nothing refuses. `POST /filament/spools/{id}/archive`
 takes `reason`, `final_reading_g` and `final_grams`: a final weighing is booked as a
 `weighed` event just before the `archived` event, by the same rules as any weighing
 (422 `no_empty_weight`, `reading_below_empty`; a restore takes neither).
@@ -248,9 +249,11 @@ the reason on the archive.
 
 Respooled offers "Archive and continue as a new spool": the copy flow opens with the final
 filament as the new spool's grams and "Added full: No", and the save sends `continued_from`
-with `copy_of`. The source must be archived (422 `continued_from_not_archived`) and the
+with `copy_of`. The source must be archived (422 `continued_from_not_archived`) and not
+yet continued by a spool that still exists (422 `continued_from_taken`, #7909), and the
 request makes one spool. The new spool's `created` event keeps `continued_from`, the source's
-newest `archived` event gets `continued_as`, and the timeline links the two ends. The agent's
+newest `archived` event gets `continued_as`, and the timeline links the two ends. A spool
+archived before #7684 has no closing: its page shows none (#7909). The agent's
 `filament_spool_archive` takes the reason and the final reading, `filament_spool_closing` (a
 read) previews the closing and its notices, and `filament_spool_upsert` takes `continued_from`. Design: the same spec, §5.4 and §5.5.
 
