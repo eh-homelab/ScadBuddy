@@ -128,6 +128,26 @@ def test_history_of_a_new_spool(pg_pool: PgPool) -> None:
     assert found.currency == "USD"
 
 
+def test_history_has_the_metres_and_the_types_density(pg_pool: PgPool) -> None:
+    """#7685: the history's metrics carry the metres of the lengthed plates, the density
+    they imply over the spool's effective diameter, and the type's density."""
+    type_id = _type(pg_pool, density_g_cm3=Decimal("1.24"))
+    spool = _spool(pg_pool, type_id=type_id, grams_left=900)
+    _event(
+        pg_pool, spool, "print_ended", source="print_actual", delta_g=-2.98,
+        at=NOW - timedelta(days=2), ref_kind="print_run", ref_id="run-a/a/1",
+        data={"job": "a", "basis": "sliced", "length_m": 1.0},
+    )  # fmt: skip
+    _sb_end(pg_pool, spool, NOW - timedelta(days=1), 10, "b")
+    found = _store(pg_pool).history(spool)
+    assert found is not None
+    assert found.metrics.used_g == pytest.approx(12.98)
+    assert found.metrics.used_m == 1.0
+    assert found.metrics.implied_density_g_cm3 == pytest.approx(1.239, abs=0.001)
+    assert found.metrics.density_g_cm3 == 1.24
+    assert found.metrics.density_mismatch is False
+
+
 def test_history_of_no_spool_is_none(pg_pool: PgPool) -> None:
     assert _store(pg_pool).history(uuid4()) is None
 

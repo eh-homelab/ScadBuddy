@@ -11,6 +11,7 @@ from urllib.parse import urlsplit
 from pydantic import (
     BaseModel,
     Field,
+    SecretStr,
     ValidationError,
     ValidationInfo,
     field_validator,
@@ -712,6 +713,15 @@ class Settings(BaseSettings):
     # worker reads its store settings through (#5298). Also the base the API mints the
     # native slicer's transfer URLs under (`slicing/transfer.py`, #3822).
     api_internal_url: str | None = None
+    # SCADBUDDY_CAMERA_EDGE_WHEP_URL (camera live view): the live edge's cluster-internal
+    # WHEP URL (MediaMTX's WebRTC port, :8889), which the API proxies the browser's WHEP to.
+    # SCADBUDDY_CAMERA_EDGE_HLS_URL: its LL-HLS URL (:8888). The edge's read user,
+    # SCADBUDDY_CAMERA_EDGE_READ_USER and _PASS, goes on every proxied call as HTTP Basic
+    # auth. Unless all four are set, there is no live view.
+    camera_edge_whep_url: str | None = None
+    camera_edge_hls_url: str | None = None
+    camera_edge_read_user: str | None = None
+    camera_edge_read_pass: SecretStr | None = None
     # SCADBUDDY_SLICER_PROFILES_DIR: Bambu Studio's BBL vendor profiles and the image's
     # BAMBU_STUDIO_VERSION, which the native slicer's preset files are built from (#3822).
     slicer_profiles_dir: Path = Path("/opt/slicer-profiles")
@@ -728,6 +738,36 @@ class Settings(BaseSettings):
         if parts.scheme not in {"http", "https"} or not parts.netloc:
             raise ValueError(f"SCADBUDDY_API_INTERNAL_URL must be an http(s) URL, not {value!r}")
         return value
+
+    @field_validator("camera_edge_whep_url", "camera_edge_hls_url")
+    @classmethod
+    def _camera_edge_urls_are_http(cls, value: str | None, info: ValidationInfo) -> str | None:
+        if value is None or not value.strip():
+            return None
+        parts = urlsplit(value)
+        if parts.scheme not in {"http", "https"} or not parts.netloc:
+            name = f"SCADBUDDY_{str(info.field_name).upper()}"
+            raise ValueError(f"{name} must be an http(s) URL, not {value!r}")
+        return value
+
+    @field_validator("camera_edge_read_user")
+    @classmethod
+    def _camera_edge_read_user_set(cls, value: str | None) -> str | None:
+        return value if value and value.strip() else None
+
+    @field_validator("camera_edge_read_pass")
+    @classmethod
+    def _camera_edge_read_pass_set(cls, value: SecretStr | None) -> SecretStr | None:
+        return value if value is not None and value.get_secret_value() else None
+
+    def camera_edge_ready(self) -> bool:
+        """Whether the live edge is set up: both its URLs and its read user."""
+        return None not in (
+            self.camera_edge_whep_url,
+            self.camera_edge_hls_url,
+            self.camera_edge_read_user,
+            self.camera_edge_read_pass,
+        )
 
     @field_validator("agent_internal_url")
     @classmethod
@@ -778,9 +818,13 @@ class Settings(BaseSettings):
 
     # SCADBUDDY_EVENT_LOG_RETENTION_SECONDS / _ROWS, Postgres only: how much of the
     # event log (Last-Event-ID replay, spec §7) each replica's pruning keeps. 0 is no
-    # limit on that dimension.
+    # limit on that dimension, and the default (an event is kept forever).
+    # SCADBUDDY_EVENT_LOG_RETENTION_KINDS (JSON object): seconds to keep each kind and
+    # its sub-kinds, by dotted prefix ({"job": 3600}); the longest prefix that matches
+    # wins, and 0 keeps that prefix forever. An event's own `retention_seconds` beats it.
     event_log_retention_seconds: float = DEFAULT_EVENT_LOG_RETENTION_SECONDS
     event_log_retention_rows: int = DEFAULT_EVENT_LOG_RETENTION_ROWS
+    event_log_retention_kinds: dict[str, float] = Field(default_factory=dict)
 
     @field_validator("event_log_retention_seconds", "event_log_retention_rows")
     @classmethod
@@ -788,6 +832,22 @@ class Settings(BaseSettings):
         if value < 0:
             name = f"SCADBUDDY_{(info.field_name or '').upper()}"
             raise ValueError(f"{name} must be at least 0, not {value}")
+        return value
+
+    @field_validator("event_log_retention_kinds")
+    @classmethod
+    def _retention_kinds_valid(cls, value: dict[str, float]) -> dict[str, float]:
+        for prefix, seconds in value.items():
+            if not KIND_PREFIX.fullmatch(prefix):
+                raise ValueError(
+                    f"SCADBUDDY_EVENT_LOG_RETENTION_KINDS: {prefix!r} is not a kind prefix"
+                    " (dotted lowercase segments, such as 'job.progress')"
+                )
+            if seconds < 0:
+                raise ValueError(
+                    f"SCADBUDDY_EVENT_LOG_RETENTION_KINDS: {prefix!r} must be at least 0,"
+                    f" not {seconds}"
+                )
         return value
 
     # SCADBUDDY_FLOW_APPROVAL_TIMEOUT_SECONDS (#1057): how long an outward host call of
@@ -813,6 +873,9 @@ class Settings(BaseSettings):
     # SCADBUDDY_FILAMENT_WEIGHING_DRIFT_NOTICE_G (#7682): a weighing whose drift is at or
     # over this many grams, either way, is a notice on the spool and in the list.
     filament_weighing_drift_notice_g: int = Field(default=10, ge=0, le=100000)
+    # SCADBUDDY_FILAMENT_WEIGHING_FINISHED_LEFT_G (#7684): a spool archived as finished
+    # with more than this many grams of filament left gets a notice first.
+    filament_weighing_finished_left_g: int = Field(default=5, ge=0, le=100000)
     # SCADBUDDY_FILAMENT_DRYING_TEMP_C and _FILAMENT_DRYING_HOURS (#7156, R-7156-5): the
     # drying a spool is offered when nothing in the catalog (spool, type, subtype,
     # material) sets one (`filament/spools.py` `_drying_defaults`). Unset offers none.
@@ -948,6 +1011,9 @@ class NoDatabaseSettings(Settings):
     def _database_required(cls, value: str) -> str:
         return value
 
+
+#: A kind prefix of `event_log_retention_kinds`: dotted kind segments (`job`, `job.progress`).
+KIND_PREFIX: Final = re.compile(r"[a-z][a-z0-9_]*(\.[a-z][a-z0-9_]*)*")
 
 #: What ``log_level`` takes: the standard library's own level names.
 LOG_LEVELS: Final = ("DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL")
@@ -1099,6 +1165,22 @@ BOOTSTRAP_FIELDS: Final[Mapping[str, str]] = MappingProxyType(
             "Whether this process serves the print queue itself, decided by whether the"
             " deployment runs the `scadbuddy-print` worker."
         ),
+        "camera_edge_whep_url": (
+            "Where the API reaches the live camera edge's WHEP port inside the cluster: the"
+            " deployment's Service. Unset, the camera dialog offers no live view."
+        ),
+        "camera_edge_hls_url": (
+            "The live camera edge's LL-HLS port inside the cluster, beside its WHEP URL: the"
+            " deployment's Service."
+        ),
+        "camera_edge_read_user": (
+            "The live camera edge's read user, which the edge's own pod is given too; the"
+            " deployment sets both from one secret."
+        ),
+        "camera_edge_read_pass": (
+            "The live camera edge's read password: a credential, which the deployment sets"
+            " from the same secret as the edge's."
+        ),
         "api_internal_url": (
             "Where the render, print, projects and slicer workers reach the API inside the"
             " cluster: the deployment's Service, read by those workers and by the API, which"
@@ -1207,6 +1289,7 @@ APPLIES: Final[Mapping[str, Applies]] = MappingProxyType(
         "filament_low_stock_pct": "live",
         "filament_default_cost_per_kg": "live",
         "filament_weighing_drift_notice_g": "live",
+        "filament_weighing_finished_left_g": "live",
         "filament_drying_temp_c": "live",
         "filament_drying_hours": "live",
         "filament_label_base_url": "live",
@@ -1222,6 +1305,7 @@ APPLIES: Final[Mapping[str, Applies]] = MappingProxyType(
         "duplicate_staging_max_age": "live",
         "event_log_retention_seconds": "live",
         "event_log_retention_rows": "live",
+        "event_log_retention_kinds": "live",
         # Read by every flow run's start.
         "flow_approval_timeout_seconds": "live",
         # A key change swaps the client and refetches the catalogue.

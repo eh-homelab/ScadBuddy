@@ -58,8 +58,16 @@ on:
     branches: [main]
     # A docs-only push to main runs nothing: its PR already ran `markdown`, the
     # one job a docs-only change needs (select-lanes.sh `docs_only`).
-    paths-ignore:
-      - "docs/**/*.md"
+    # `paths`, not `paths-ignore`: a later pattern re-includes a vendored module's
+    # CLAUDE.md or AGENTS.md, and the doc a test reads, which are code
+    # (select-lanes.sh `read_by_tests`, #7792).
+    paths:
+      - "**"
+      - "!docs/**/*.md"
+      - "!**/CLAUDE.md"
+      - "!**/AGENTS.md"
+      - "**/vendor/**"
+      - "docs/superpowers/specs/2026-09-22-scadbuddy-design.md"
   # Weekly, and on demand, so every template's verify.sh runs against the image
   # even in a week when nothing merged (#229). The template checks are the
   # reason; the rest of CI rides along because it is cheap and it is the same
@@ -187,8 +195,10 @@ jobs:
       # push, the schedule, a dispatch, or a diff that cannot be read selects every
       # lane. `CI Summary` re-derives the same answer from its own checkout, so a
       # skipped lane job is accepted only where this change really does not need it.
-      # `docs_only`: every changed path is docs/**/*.md. Then the lint, frontend,
-      # agent, models, freshness and Go jobs skip too; only `markdown` checks it.
+      # `docs_only`: every changed path is docs/**/*.md, or a CLAUDE.md or AGENTS.md
+      # in any directory but a vendor/ tree, and none is a doc a test reads
+      # (`read_by_tests`). Then the lint, frontend, agent, models, freshness and Go
+      # jobs skip too; only `markdown` checks it.
       - name: Select the lanes this change needs
         id: lanes
         env:
@@ -455,9 +465,10 @@ jobs:
   # took about 1 minute each there, so this job now takes about 5.
   # ── Markdown lint ───────────────────────────────────────────────────────────
   #
-  # markdownlint-cli2 over docs/**/*.md with `.markdownlint-cli2.jsonc` (the
-  # style rules are off; it checks structure). Runs on every change: on a
-  # docs-only change (`docs_only`) it is the only check that runs.
+  # markdownlint-cli2 over docs/**/*.md and each CLAUDE.md and AGENTS.md outside
+  # vendor/, with `.markdownlint-cli2.jsonc` (the style rules are off; it checks
+  # structure). Runs on every change: on a docs-only change (`docs_only`) it is the
+  # only check that runs.
   markdown:
     name: Markdown lint
     runs-on: ubuntu-latest
@@ -1154,7 +1165,7 @@ jobs:
     # projection the Temporal path writes (#424) and the other `requires_postgres`
     # tests. The test
     # container reaches it on the runner's loopback (`--network host`), and each
-    # test works in a schema of its own. The container smoke test below uses it
+    # test works in a database of its own. The container smoke test below uses it
     # too, since the app will not start without it.
     services:
       postgres:
@@ -1713,12 +1724,15 @@ jobs:
           sampler=$!
           rc=0
           # RUST_BACKTRACE: a Temporal core panic keeps its backtrace in the log (#7519).
+          # SCADBUDDY_TEST_FONTS_REQUIRED: a labels font test fails, not skips, when the
+          # image lacks a Noto font it needs (#7216).
           docker run --rm --cidfile "$cid" --network host --shm-size=1g \
             --memory=13g --memory-swap=13g \
             -v "$PWD/test-fixtures:/app/test-fixtures:ro" \
             -v "$PWD/results:/results" \
             -e SCADBUDDY_TEST_DATABASE_URL=postgresql://postgres:postgres@127.0.0.1:5432/scadbuddy_test \
             -e SCADBUDDY_TEST_FIXTURES=/app/test-fixtures \
+            -e SCADBUDDY_TEST_FONTS_REQUIRED=1 \
             -e RUST_BACKTRACE=1 \
             -w /app/backend scadbuddy:ci-test uv run --frozen --no-sync pytest -n auto \
             --splits 8 --group ${{ matrix.group }} --splitting-algorithm least_duration \
@@ -2372,11 +2386,12 @@ jobs:
             -e SCADBUDDY_TEST_CHROMIUM_REQUIRED=1 scadbuddy-profile-fetch-test:ci \
             xvfb-run -a python -m pytest -rs tests/profile_fetch/test_site.py
 
-  # The camera relay's and recorder's images (#7328, docs/features/printer-cameras.md):
-  # the Dockerfile's `camera-relay` and `camera-recorder` targets, checked as the cluster
-  # runs them. The build itself checks the pinned MediaMTX's version and that neither
-  # process imports Postgres code. Then: uid 10001, MediaMTX and curl (its hooks run curl)
-  # in both, TZ=UTC in the recorder, each controller's refusals (exit 2), and each MediaMTX
+  # The camera relay's, recorder's and edge's images (#7328, #7330,
+  # docs/features/printer-cameras.md): the Dockerfile's `camera-relay`, `camera-recorder` and
+  # `camera-edge` targets, checked as the cluster runs them. The build itself checks the
+  # pinned MediaMTX's version and that no process imports Postgres code. Then: uid 10001,
+  # MediaMTX and curl (its hooks run curl) in all three, TZ=UTC in the recorder, each
+  # controller's refusals (exit 2), and each MediaMTX
   # started on its own config with its control API answering on localhost. The relay's
   # read user comes from MTX_AUTHINTERNALUSERS_0_USER/_PASS, as in the Deployment: a
   # DESCRIBE with that user gets past auth (404, no stream), a wrong password gets 401.
@@ -2426,10 +2441,22 @@ jobs:
           tags: scadbuddy-camera-recorder:ci
           cache-from: type=gha,scope=camera
 
+      # No cache-to, for the recorder's reason: the edge's layers are the `camera` stage's,
+      # which the relay's build caches, plus its own config COPY, which takes no time.
+      - name: Build the camera edge image
+        uses: docker/build-push-action@v7
+        with:
+          context: .
+          target: camera-edge
+          platforms: linux/amd64
+          load: true
+          tags: scadbuddy-camera-edge:ci
+          cache-from: type=gha,scope=camera
+
       - name: Camera smoke
         run: |
           set -euo pipefail
-          for image in scadbuddy-camera-relay:ci scadbuddy-camera-recorder:ci; do
+          for image in scadbuddy-camera-relay:ci scadbuddy-camera-recorder:ci scadbuddy-camera-edge:ci; do
             test "$(docker run --rm "$image" id -u)" = 10001
             test "$(docker run --rm "$image" mediamtx --version)" = v1.21.4
             docker run --rm "$image" curl --version | head -n 1
@@ -2447,6 +2474,12 @@ jobs:
           test "$status" -eq 2
           grep -q 'SCADBUDDY_DATABASE_URL is set' "$RUNNER_TEMP/recorder.log"
           grep -q 'so TZ must be UTC' "$RUNNER_TEMP/recorder.log"
+          status=0
+          docker run --rm --network none -e SCADBUDDY_DATABASE_URL=x \
+            scadbuddy-camera-edge:ci > "$RUNNER_TEMP/edge.log" 2>&1 || status=$?
+          cat "$RUNNER_TEMP/edge.log"
+          test "$status" -eq 2
+          grep -q 'SCADBUDDY_DATABASE_URL is set; the camera edge holds no database secret' "$RUNNER_TEMP/edge.log"
 
       - name: MediaMTX on each image's config
         run: |
@@ -2456,7 +2489,10 @@ jobs:
             scadbuddy-camera-relay:ci mediamtx /etc/mediamtx/mediamtx.yml
           docker run -d --name recorder-mtx --network none \
             scadbuddy-camera-recorder:ci mediamtx /etc/mediamtx/mediamtx.yml
-          for c in relay-mtx recorder-mtx; do
+          docker run -d --name edge-mtx --network none \
+            -e MTX_AUTHINTERNALUSERS_0_USER=reader -e MTX_AUTHINTERNALUSERS_0_PASS=ci-secret \
+            scadbuddy-camera-edge:ci mediamtx /etc/mediamtx/mediamtx.yml
+          for c in relay-mtx recorder-mtx edge-mtx; do
             for _ in $(seq 30); do
               docker exec "$c" curl -fsS -o /dev/null http://127.0.0.1:9997/v3/paths/list && break
               sleep 1
@@ -2481,6 +2517,21 @@ jobs:
               if status.split(b" ")[1] != code:
                   sys.exit(f"{label}: want {code.decode()}, got {status.decode()}")
           PY
+          # The edge fails closed: HLS and WHEP answer 401 without the read user's password.
+          # With it, both get past the check to the path, which has no stream (404).
+          docker exec edge-mtx curl -fsS -X POST -H 'Content-Type: application/json' \
+            -d '{"source":"publisher"}' http://127.0.0.1:9997/v3/config/paths/add/ci
+          edge() {
+            docker exec edge-mtx curl -s -o /dev/null -w '%{http_code}' "$@"
+          }
+          hls='http://127.0.0.1:8888/ci/index.m3u8?cookieCheck=1'
+          whep=(-X POST -H 'Content-Type: application/sdp' --data-binary x http://127.0.0.1:8889/ci/whep)
+          test "$(edge "$hls")" = 401
+          test "$(edge -u reader:wrong "$hls")" = 401
+          test "$(edge -u reader:ci-secret "$hls")" = 404
+          test "$(edge "${whep[@]}")" = 401
+          test "$(edge -u reader:wrong "${whep[@]}")" = 401
+          test "$(edge -u reader:ci-secret "${whep[@]}")" = 404
 
   # ── The API spec: deterministic export, its diff on the PR, the msw worker ─
   #
@@ -2535,6 +2586,138 @@ jobs:
   #   frontend/pnpm-lock.yaml, backend/uv.lock — owned by Dependabot and by
   #     `--frozen-lockfile` / `--frozen`, which already fail loudly on drift.
   #
+  # The label print server's image (deploy/cups/README.md): the Dockerfile's `cups`
+  # target, checked as the cluster runs it. The build itself checks that the Zebra driver
+  # and its filter are installed. Then: cupsd runs as uid 10001 and declares one queue
+  # per label size from env; against a fake Zebra on :9100 that reports a label length,
+  # the 2 x 1 queue's PDF prints as ZPL 2 in wide while the 4 x 6 one waits with a
+  # message, and prints 4 in wide once the length is 6 in; another container cannot add
+  # a printer or disable a queue without the admin login; the web page's admin asks for
+  # the mounted password and pauses a queue with it; a custom size prints at the queue's
+  # width; a waiting job survives a restart on a PVC-like volume.
+  # In the `image` lane, and in `CI Summary`'s needs.
+  cups-image:
+    name: CUPS image build and smoke
+    needs: layout
+    if: ${{ needs.layout.outputs.image == 'true' && needs.layout.outputs.run_image == 'true' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 1
+
+      - uses: docker/setup-buildx-action@v4
+        # Google's Docker Hub mirror: Docker Hub refuses some anonymous pulls (#3370).
+        with:
+          driver-opts: image=mirror.gcr.io/moby/buildkit:buildx-stable-1
+          buildkitd-config-inline: |
+            [registry."docker.io"]
+              mirrors = ["mirror.gcr.io"]
+
+      # build-image.yml's `cups` job shares the scope; mode=min (the Actions cache is at
+      # its ceiling, #743).
+      - name: Build the CUPS image
+        uses: docker/build-push-action@v7
+        with:
+          context: .
+          target: cups
+          platforms: linux/amd64
+          load: true
+          tags: scadbuddy-cups:ci
+          cache-from: type=gha,scope=cups
+          cache-to: type=gha,scope=cups,mode=min
+
+      - name: CUPS smoke
+        run: |
+          set -euo pipefail
+          # A fake Zebra on :9100: it answers `~HS` with the label length in
+          # $fz/len (dots, as the GK420t does) and appends anything else to
+          # $fz/out.zpl. dd, not head: head reads past the 3 bytes and drops them.
+          fz="$RUNNER_TEMP/fakezebra" && mkdir -p "$fz" && echo 0208 > "$fz/len"
+          cat > "$fz/h" <<'FAKE'
+          #!/bin/sh
+          first=$(dd bs=1 count=3 2>/dev/null)
+          if [ "$first" = "~HS" ]; then
+            printf '\002030,0,0,%s,000,0,0,0,000,0,0,0\003\r\n\002000,0,0,0,0,2,3,0,00000000,1,000\003\r\n\0021234,0\003\r\n' "$(cat /fz/len)"
+          else
+            { printf '%s' "$first"; cat; } >> /fz/out.zpl
+          fi
+          FAKE
+          chmod 0755 "$fz/h"
+          docker network create cupsci
+          docker run -d --name fakezebra --network cupsci -v "$fz:/fz" \
+            mirror.gcr.io/library/busybox:1.37@sha256:a7dbc319b1438115a207e11930dc4bb3e643dcb3ec0bdd694bb36cd8fad289ec \
+            sh -c 'while true; do nc -l -p 9100 -e /fz/h; done'
+          queues=$'S-EDCDU03-2x1 w144h72 zebra://fakezebra:9100?length=203&interval=2 2 x 1 in\nS-EDCDU03-4x6 w288h432 zebra://fakezebra:9100?length=1218&interval=2 4 x 6 in'
+          adm="$RUNNER_TEMP/cups-admin" && mkdir -p "$adm" && echo 'ci-admin-pw' > "$adm/password" && chmod 0644 "$adm/password"
+          docker run -d --name cups --network cupsci -p 18631:8631 -v "$adm:/run/secrets/cups-admin:ro" \
+            -e CUPS_QUEUES="$queues" scadbuddy-cups:ci
+          for _ in $(seq 30); do docker exec cups lpstat -p S-EDCDU03-4x6 2>/dev/null | grep -q 'is idle' && break; sleep 1; done
+          docker exec cups lpstat -p S-EDCDU03-4x6 | grep -q 'is idle' || { docker logs cups; exit 1; }
+          test "$(docker exec cups id -u)" = 10001
+          docker exec cups lpstat -d | grep -q 'S-EDCDU03-2x1$'
+          # Each queue's PPD offers only its own size.
+          test "$(docker exec cups grep -c '^\*PageSize ' /var/lib/cups/etc/ppd/S-EDCDU03-4x6.ppd)" = 1
+          if docker exec cups grep -q '^\*CustomPageSize' /var/lib/cups/etc/ppd/S-EDCDU03-4x6.ppd; then echo "the PPD offers a custom size" >&2; exit 1; fi
+          client() { docker run --rm --network cupsci --entrypoint sh scadbuddy-cups:ci -c "$1"; }
+          pdf='printf "%%!PS\n/Helvetica findfont 14 scalefont setfont 10 30 moveto (ScadBuddy) show showpage\n" > /tmp/t.ps && gs -q -sDEVICE=pdfwrite -o /tmp/t.pdf /tmp/t.ps'
+          # 2 x 1 labels are loaded: the 4 x 6 job waits with a message, the 2 x 1 one prints.
+          client "$pdf && lp -h cups:8631 -d S-EDCDU03-4x6 /tmp/t.pdf && lp -h cups:8631 -d S-EDCDU03-2x1 /tmp/t.pdf"
+          for _ in $(seq 60); do grep -q '\^XZ' "$fz/out.zpl" 2>/dev/null && break; sleep 1; done
+          grep -q '\^PW406' "$fz/out.zpl" || { docker logs cups; head -c 400 "$fz/out.zpl"; exit 1; }
+          sleep 4
+          test "$(grep -c '\^PW' "$fz/out.zpl")" = 1 || { echo "the 4 x 6 job printed on 2 x 1 labels" >&2; exit 1; }
+          docker exec cups lpstat -p -l S-EDCDU03-4x6 | grep -q 'this queue prints 6.00 in labels' \
+            || { docker exec cups lpstat -p -l S-EDCDU03-4x6; exit 1; }
+          docker exec cups lpstat -o S-EDCDU03-4x6 | grep -q '^S-EDCDU03-4x6-1 '
+          # 4 x 6 labels loaded and calibrated: the waiting job prints at 4 in wide.
+          echo 1221 > "$fz/len"
+          for _ in $(seq 30); do grep -q '\^PW812' "$fz/out.zpl" && break; sleep 1; done
+          grep -q '\^PW812' "$fz/out.zpl" || { docker logs cups; exit 1; }
+          if client 'lpadmin -h cups:8631 -p Other -v socket://192.0.2.1:9100'; then echo "a remote client added a printer" >&2; exit 1; fi
+          if client 'cupsdisable -h cups:8631 S-EDCDU03-2x1'; then echo "a remote client disabled a queue" >&2; exit 1; fi
+          docker exec cups lpstat -p | grep -c '^printer' | grep -qx 2
+          # The web page's admin: 401 without the login or with a wrong password, 200 with
+          # admin and the mounted one; with it, a queue pauses through the page.
+          u=http://127.0.0.1:18631
+          test "$(curl -s -o /dev/null -w '%{http_code}' "$u/admin")" = 401
+          test "$(curl -s -o /dev/null -w '%{http_code}' -u admin:wrong "$u/admin")" = 401
+          test "$(curl -s -o /dev/null -w '%{http_code}' -u admin:ci-admin-pw "$u/admin")" = 200
+          jar="$RUNNER_TEMP/cups-cookies"
+          curl -s -c "$jar" -b "$jar" "$u/printers/S-EDCDU03-2x1" >/dev/null
+          sid=$(awk '/org.cups.sid/ { print $7 }' "$jar")
+          test "$(curl -s -c "$jar" -b "$jar" -o /dev/null -w '%{http_code}' -X POST -d "org.cups.sid=$sid&OP=stop-printer" "$u/printers/S-EDCDU03-2x1")" = 401
+          if docker exec cups lpstat -p S-EDCDU03-2x1 | grep -q disabled; then echo "paused without the login" >&2; exit 1; fi
+          curl -s -c "$jar" -b "$jar" -u admin:ci-admin-pw -o /dev/null -X POST -d "org.cups.sid=$sid&OP=stop-printer" "$u/printers/S-EDCDU03-2x1"
+          docker exec cups lpstat -p S-EDCDU03-2x1 | grep -q disabled || { docker exec cups lpstat -p S-EDCDU03-2x1; exit 1; }
+          curl -s -c "$jar" -b "$jar" -u admin:ci-admin-pw -o /dev/null -X POST -d "org.cups.sid=$sid&OP=start-printer" "$u/printers/S-EDCDU03-2x1"
+          # A custom size cannot get past a queue's own: a 4 x 6 in custom job on the
+          # 2 x 1 queue (2 x 1 labels loaded) prints 2 in wide.
+          echo 0208 > "$fz/len"
+          wide=$(grep -c '\^PW812' "$fz/out.zpl")
+          narrow=$(grep -c '\^PW406' "$fz/out.zpl")
+          client "$pdf && lp -h cups:8631 -d S-EDCDU03-2x1 -o media=Custom.4x6in /tmp/t.pdf"
+          for _ in $(seq 30); do [ "$(grep -c '\^PW406' "$fz/out.zpl")" -gt "$narrow" ] && break; sleep 1; done
+          [ "$(grep -c '\^PW406' "$fz/out.zpl")" -gt "$narrow" ] || { docker logs cups; exit 1; }
+          test "$(grep -c '\^PW812' "$fz/out.zpl")" = "$wide"
+          # State on a volume whose root is root's, group 10001, setgid, as a PVC with
+          # fsGroup 10001 arrives: a job waiting for an unreachable printer is still
+          # queued after a restart.
+          state="$RUNNER_TEMP/cups-state"
+          mkdir -p "$state" && sudo chown root:10001 "$state" && sudo chmod 2775 "$state"
+          persist() {
+            docker run -d --name cups-state -v "$state:/var/lib/cups" \
+              -e CUPS_QUEUES='S-EDCDU03-2x1 w144h72 zebra://192.0.2.1:9100?length=203' scadbuddy-cups:ci
+            for _ in $(seq 30); do docker exec cups-state lpstat -p S-EDCDU03-2x1 2>/dev/null | grep -q '^printer S-EDCDU03-2x1' && break; sleep 1; done
+          }
+          persist
+          docker exec cups-state sh -c 'echo held > /tmp/t.txt && lp -d S-EDCDU03-2x1 /tmp/t.txt'
+          docker stop -t 10 cups-state && docker rm cups-state
+          persist
+          docker exec cups-state lpstat -o | grep -q '^S-EDCDU03-2x1-1 ' || { docker logs cups-state; exit 1; }
+          echo "CUPS image OK"
+
   # PR-only, and ALWAYS on a PR. A push has no base to diff against and no PR
   # to comment on. Never path-gated: `CI Summary` counts a SKIPPED job as
   # satisfied, so a path-gated skip is indistinguishable on the checks UI from
@@ -2652,14 +2835,16 @@ jobs:
       # base's own lockfile, so the diff shows what this PR changes and nothing
       # else. A base that cannot export (a broken main, #880) skips the diff with
       # a warning instead of failing: otherwise the PR that fixes main could never
-      # pass. The head's own export is still checked above.
+      # pass. The head's own export is still checked above. The worktree skips the
+      # LFS smudge: the export reads no fixture, and the runner's git-lfs would
+      # otherwise download every one, so a failed LFS download failed the job (#7840).
       - name: Export the base's spec
         id: base
         if: ${{ steps.detect.outputs.backend == 'true' }}
         run: |
           set -euo pipefail
           git fetch --no-tags --depth=1 origin "$BASE_SHA"
-          git worktree add --detach "$RUNNER_TEMP/base" "$BASE_SHA"
+          GIT_LFS_SKIP_SMUDGE=1 git worktree add --detach "$RUNNER_TEMP/base" "$BASE_SHA"
           if uv run --directory "$RUNNER_TEMP/base/backend" --frozen \
             python -m scadbuddy.tools.export_openapi "$RUNNER_TEMP/base.json" >/dev/null; then
             echo "exported=true" >> "$GITHUB_OUTPUT"
@@ -2961,7 +3146,7 @@ jobs:
     # THIS display name is the required status-check context. Renaming it
     # silently unsatisfiable-ifies branch protection.
     name: CI Summary
-    needs: [layout, lint, markdown, frontend, frontend-unit, frontend-e2e, frontend-e2e-split, agent, agent-durable, image, backend-pytest, backend-pytest-split, models, go-select, go, rust, slicer-image, profile-fetch-image, camera-image, freshness, go-client]
+    needs: [layout, lint, markdown, frontend, frontend-unit, frontend-e2e, frontend-e2e-split, agent, agent-durable, image, backend-pytest, backend-pytest-split, models, go-select, go, rust, slicer-image, profile-fetch-image, camera-image, cups-image, freshness, go-client]
     # `!cancelled()`, not a bare `needs:`. A bare `needs:` SKIPS this job when
     # an upstream job fails, and GitHub counts a SKIPPED REQUIRED CHECK AS
     # SATISFIED — a failing build would report green on the one check that
@@ -3003,6 +3188,7 @@ jobs:
           SLICER_IMAGE_RESULT: ${{ needs.slicer-image.result }}
           PROFILE_FETCH_IMAGE_RESULT: ${{ needs.profile-fetch-image.result }}
           CAMERA_IMAGE_RESULT: ${{ needs.camera-image.result }}
+          CUPS_IMAGE_RESULT: ${{ needs.cups-image.result }}
           FRESHNESS_RESULT: ${{ needs.freshness.result }}
           GO_CLIENT_RESULT: ${{ needs.go-client.result }}
           EVENT_NAME: ${{ github.event_name }}
@@ -3061,7 +3247,7 @@ jobs:
           need_agent_durable=false
           if [ "$has_agent_durable" = true ] && [ "$(lane agent_durable)" = true ]; then need_agent_durable=true; fi
           need_rust=$(lane rust)
-          # A docs-only change (every path docs/**/*.md) needs only `markdown`.
+          # A docs-only change (select-lanes.sh `docs_only`) needs only `markdown`.
           not_docs=true
           if [ "$(lane docs_only)" = true ]; then not_docs=false; fi
           need() { if [ "$1" = true ] && [ "$not_docs" = true ]; then echo true; else echo false; fi; }
@@ -3089,6 +3275,7 @@ jobs:
           assert "Image build, backend checks, container smoke, real-backend e2e" "$IMAGE_RESULT" "$need_image"
           assert "Profile-fetch image build and driver tests" "$PROFILE_FETCH_IMAGE_RESULT" "$need_image"
           assert "Camera images build and smoke"          "$CAMERA_IMAGE_RESULT" "$need_image"
+          assert "CUPS image build and smoke"             "$CUPS_IMAGE_RESULT" "$need_image"
           assert "Backend pytest (every shard)"           "$BACKEND_PYTEST_RESULT" "$need_backend"
           assert "Backend pytest shards cover the suite"  "$BACKEND_PYTEST_SPLIT_RESULT" "$need_backend"
           assert "Template verify scripts"                "$MODELS_RESULT"   "$(need "$has_models")"

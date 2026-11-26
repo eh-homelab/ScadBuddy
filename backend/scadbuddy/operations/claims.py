@@ -126,11 +126,19 @@ class ClaimStore:
 
     def release(self, held: Held) -> None:
         """Remove the claim ``held`` created, unless a put has written it since; a claim
-        already gone is no error. It is moved aside first, and put back when what was
-        moved is not the file ``held`` wrote."""
+        already gone is no error. A claim that is not the file ``held`` wrote is left
+        where it is, never moved: a run of the put that renewed it may be reading it
+        (#7853). Otherwise it is moved aside first, and put back when what was moved is
+        not the file ``held`` wrote (a put between the check and the move)."""
         if not held.created:
             return
         path = self._path(held.name)
+        try:
+            found = path.stat()
+        except FileNotFoundError:
+            return
+        if (found.st_ino, found.st_mtime_ns) != (held.inode, held.mtime_ns):
+            return
         aside = self.root / f".released-{uuid.uuid4().hex}"
         try:
             os.rename(path, aside)

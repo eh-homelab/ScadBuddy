@@ -192,6 +192,12 @@ export const RUNTIME_FIELDS: readonly FieldSpec[] = [
     section: 'filament',
     kind: 'count',
   },
+  // #7684 — a spool archived as finished with more than this on it gets a notice first.
+  {
+    name: 'filament_weighing_finished_left_g',
+    section: 'filament',
+    kind: 'count',
+  },
   {
     name: 'filament_default_cost_per_kg',
     section: 'filament',

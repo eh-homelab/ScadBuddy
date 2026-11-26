@@ -32,6 +32,53 @@ describe('a spool label', () => {
   })
 })
 
+describe('a spool label with chosen fields (#7216)', () => {
+  const full = { ...spool('Jade White'), effective: { colour_name: 'Jade White', rgba: '#00ae42ff' } } as unknown as SpoolDetail
+
+  it('shows only the chosen fields', () => {
+    render(<Label spool={full} svg="<svg></svg>" fields={['number', 'hex']} />)
+    expect(screen.getByText('#42')).toBeInTheDocument()
+    expect(screen.getByText('#00AE42')).toBeInTheDocument()
+    expect(screen.queryByText('Bambu Lab')).toBeNull()
+    expect(screen.queryByText('PLA Basic')).toBeNull()
+  })
+
+  it('draws no QR box when the QR is not chosen', () => {
+    render(<Label spool={full} svg="<svg></svg>" fields={['number', 'hex']} />)
+    expect(screen.getByTestId('label').querySelector('svg')).toBeNull()
+  })
+
+  it('draws the QR box by default', () => {
+    render(<Label spool={full} svg="<svg></svg>" />)
+    expect(screen.getByTestId('label').querySelector('svg')).not.toBeNull()
+  })
+
+  it('leaves off the lines that do not fit, from the bottom', () => {
+    const all = { ...full, effective: { ...full.effective, label_weight_g: 1000 }, names: { ...full.names, location: 'Shelf A' } } as unknown as SpoolDetail
+    render(<Label spool={all} svg="<svg></svg>" fields={['number', 'material', 'colour', 'hex', 'brand', 'location', 'weight']} />)
+    expect(screen.getByText('#00AE42')).toBeInTheDocument()
+    expect(screen.queryByText('Bambu Lab')).toBeNull()
+    expect(screen.queryByText('1000 g')).toBeNull()
+  })
+
+  it('gives the number the QR column too when the QR is not chosen', () => {
+    resetMeasuring()
+    vi.spyOn(HTMLCanvasElement.prototype, 'getContext').mockReturnValue({
+      font: '',
+      measureText: (text: string) => ({ width: 60 * text.length }),
+    } as unknown as CanvasRenderingContext2D)
+    render(<Label spool={{ ...full, number: 10000 } as SpoolDetail} svg="<svg></svg>" fields={['number']} />)
+    const size = parseFloat(screen.getByText('#10000').style.fontSize)
+    // 50 mm less the quiet zone and the padding leaves 45.9 mm: the cap holds.
+    expect(size).toBe(9)
+  })
+
+  afterEach(() => {
+    vi.restoreAllMocks()
+    resetMeasuring()
+  })
+})
+
 describe('a label at another size (#7157)', () => {
   it('draws a spool label at the size it is given', () => {
     render(<Label spool={spool('Red')} svg="<svg></svg>" size={{ widthMm: 62, heightMm: 29, sheet: null }} />)

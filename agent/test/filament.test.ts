@@ -209,7 +209,7 @@ describe('filament type tools', () => {
     expect((await runTool(tool('filament_type_upsert'), { archived: true }, ctx())).isError).toBe(true)
   })
 
-  it('sets properties after the type is saved, and answers them (#7026)', async () => {
+  it('sends properties with the row on create, in one request, and answers them (#7703)', async () => {
     const calls: string[] = []
     const PROPS = `${BACKEND}/api/v1/entities/${encodeURIComponent(`spool_type:${ROW}`)}/properties`
     server.use(
@@ -217,21 +217,20 @@ describe('filament type tools', () => {
         calls.push(`POST ${JSON.stringify(await request.json())}`)
         return HttpResponse.json({ id: ROW }, { status: 201 })
       }),
-      http.patch(PROPS, async ({ request }) => {
-        calls.push(`PATCH ${JSON.stringify(await request.json())}`)
+      http.get(PROPS, () => {
+        calls.push('GET props')
         return HttpResponse.json({ properties: [{ key: 'gtin', value: ['0123'], source: 'manual' }] })
       }),
     )
     const added = await runTool(tool('filament_type_upsert'), { fields: { code: 'PLA-RED' }, properties: { gtin: ['0123'], td: null } }, ctx())
     expect(added.isError).toBeFalsy()
     expect(firstText(added)).toMatchObject({ id: ROW, properties: [{ key: 'gtin', value: ['0123'] }] })
-    expect(calls).toEqual(['POST {"code":"PLA-RED"}', 'PATCH {"set":{"gtin":["0123"],"td":null}}'])
+    expect(calls).toEqual(['POST {"code":"PLA-RED","properties":{"gtin":["0123"],"td":null}}', 'GET props'])
   })
 
-  it('says the type was saved and the properties were not when the properties are refused (#7026)', async () => {
+  it('answers a refused value sent with the row as nothing saved (#7703)', async () => {
     server.use(
-      http.patch(TYPE, () => HttpResponse.json({ id: ROW })),
-      http.patch(`${BACKEND}/api/v1/entities/${encodeURIComponent(`spool_type:${ROW}`)}/properties`, () =>
+      http.patch(TYPE, () =>
         HttpResponse.json(
           { type: 'https://scadbuddy.dev/problems/entities/bad_property_value', title: 'Bad property value', status: 422, detail: 'td: not a number' },
           { status: 422 },
@@ -241,13 +240,54 @@ describe('filament type tools', () => {
     const result = await runTool(tool('filament_type_upsert'), { type_id: ROW, fields: { note: 'x' }, properties: { td: 'thick' } }, ctx())
     expect(result.isError).toBe(true)
     const text = String(firstText(result))
-    expect(text).toContain(`spool type ${ROW} was saved`)
-    expect(text).toContain('properties were not')
     expect(text).toContain('td: not a number')
-    expect(text).toContain(`entity_property_set on spool_type:${ROW}`)
+    expect(text).not.toContain('was saved')
   })
 
-  it('sends no type PATCH for a properties-only edit, and both writes in order with fields (#7026)', async () => {
+  it('names each missing key on a refusal, and each ill-fitting one with its reason (#7703)', async () => {
+    const refusal = () =>
+      HttpResponse.json(
+        {
+          type: 'https://scadbuddy.dev/problems/entities/missing_required_properties',
+          title: 'Missing required properties',
+          status: 422,
+          code: 'missing_required_properties',
+          detail: 'required properties are missing or do not fit',
+          missing: ['mpn', 'gtin'],
+          invalid: [{ key: 'td', reason: "'thick' is not of type 'number'" }],
+        },
+        { status: 422 },
+      )
+    server.use(
+      http.post(TYPES, refusal),
+      http.patch(TYPE, refusal),
+      http.post(SPOOLS, refusal),
+      http.patch(SPOOL, refusal),
+      http.post(`${BACKEND}/api/v1/filament/spools/bulk`, refusal),
+      http.post(LIST, refusal),
+      http.patch(ONE, refusal),
+    )
+    for (const [name, args] of [
+      ['filament_type_upsert', { fields: { code: 'PLA-RED' } }],
+      ['filament_type_upsert', { type_id: ROW, fields: { note: 'x' } }],
+      ['filament_spool_upsert', { fields: { type_id: ROW } }],
+      ['filament_spool_upsert', { spool_id: ROW, fields: { note: 'x' } }],
+      ['filament_spool_upsert', { quantity: 2, fields: { type_id: ROW } }],
+      ['filament_catalog_upsert', { kind: 'brands', fields: { name: 'Acme' } }],
+      ['filament_catalog_upsert', { kind: 'brands', row_id: ROW, fields: { name: 'Acme' } }],
+    ] as const) {
+      const result = await runTool(tool(name), args, ctx())
+      expect(result.isError, name).toBe(true)
+      const text = String(firstText(result))
+      expect(text, name).toContain('missing: mpn, gtin')
+      expect(text, name).toContain('td')
+      expect(text, name).toContain("'thick' is not of type 'number'")
+      expect(text, name).toContain('`properties`')
+      expect(text, name).not.toContain('was saved')
+    }
+  })
+
+  it('sends no type PATCH for a properties-only edit, and the properties inside the PATCH with fields (#7026, #7703)', async () => {
     const calls: string[] = []
     const PROPS = `${BACKEND}/api/v1/entities/${encodeURIComponent(`spool_type:${ROW}`)}/properties`
     server.use(
@@ -263,19 +303,23 @@ describe('filament type tools', () => {
         calls.push(`PATCH props ${JSON.stringify(await request.json())}`)
         return HttpResponse.json({ properties: [{ key: 'mpn', value: 'M1', source: 'manual' }] })
       }),
+      http.get(PROPS, () => {
+        calls.push('GET props')
+        return HttpResponse.json({ properties: [{ key: 'mpn', value: 'M1', source: 'manual' }] })
+      }),
     )
     const only = await runTool(tool('filament_type_upsert'), { type_id: ROW, properties: { mpn: 'M1' } }, ctx())
     expect(firstText(only)).toMatchObject({ id: ROW, code: 'PLA-RED', properties: [{ key: 'mpn' }] })
     expect(calls).toEqual(['PATCH props {"set":{"mpn":"M1"}}', 'GET type'])
     calls.length = 0
     await runTool(tool('filament_type_upsert'), { type_id: ROW, fields: { note: 'n' }, properties: { mpn: 'M1' } }, ctx())
-    expect(calls).toEqual(['PATCH type {"note":"n"}', 'PATCH props {"set":{"mpn":"M1"}}'])
+    expect(calls).toEqual(['PATCH type {"note":"n","properties":{"mpn":"M1"}}', 'GET props'])
     expect(tool('filament_type_upsert').summarize({ type_id: ROW, properties: { mpn: 'M1', td: null } })).toBe(
       `Edit spool type ${ROW}; properties: set mpn; remove td`,
     )
     calls.length = 0
     await runTool(tool('filament_type_upsert'), { type_id: ROW, archived: true, properties: { mpn: 'M1' } }, ctx())
-    expect(calls).toEqual(['PATCH type {"archived":true}', 'PATCH props {"set":{"mpn":"M1"}}'])
+    expect(calls).toEqual(['PATCH type {"archived":true,"properties":{"mpn":"M1"}}', 'GET props'])
   })
 
   it('answers a refused properties-only edit with the API detail and no "was saved" lead (#7026)', async () => {
@@ -546,6 +590,7 @@ describe('filament spool tools', () => {
     ['filament_spool_set_presets', 'write'],
     ['filament_spool_set_k_values', 'write'],
     ['filament_spool_archive', 'write'],
+    ['filament_spool_closing', 'read'],
     ['filament_spool_delete', 'write'],
     ['filament_spool_bind_tag', 'write'],
     ['filament_tag_unbind', 'write'],
@@ -707,29 +752,61 @@ describe('filament spool tools', () => {
     expect(calls).toEqual([['add', fields], ['edit', { rgba: null }], ['archive', { archived: true }], ['delete']])
   })
 
-  it("sets a spool's properties after the spool write, and reports a refused set (#7026)", async () => {
+  it('archives a spool with a reason and a final weighing (#7684)', async () => {
+    const bodies: unknown[] = []
+    server.use(
+      http.post(`${SPOOL}/archive`, async ({ request }) => {
+        bodies.push(await request.json())
+        return HttpResponse.json({ id: ROW, archived_at: '2026-11-25T12:00:00Z' })
+      }),
+    )
+    const call = { spool_id: ROW, reason: 'finished', final_reading_g: 230 }
+    expect((await runTool(tool('filament_spool_archive'), call, ctx())).isError).toBeFalsy()
+    await runTool(tool('filament_spool_archive'), { spool_id: ROW, reason: 'damaged', final_grams: 12 }, ctx())
+    expect(bodies).toEqual([
+      { archived: true, reason: 'finished', final_reading_g: 230 },
+      { archived: true, reason: 'damaged', final_grams: 12 },
+    ])
+    expect(() => tool('filament_spool_archive').parse({ spool_id: ROW, reason: 'lost' })).toThrow()
+  })
+
+  it("previews a spool's closing with the query it was given (#7684)", async () => {
+    const seen: string[] = []
+    server.use(
+      http.get(`${SPOOL}/closing`, ({ request }) => {
+        seen.push(new URL(request.url).search)
+        return HttpResponse.json({ closing: { reason: 'finished', drift_g: -3 }, notices: ['filament_left'] })
+      }),
+    )
+    const out = await runTool(tool('filament_spool_closing'), { spool_id: ROW, reason: 'finished', final_reading_g: 230 }, ctx())
+    expect(firstText(out)).toEqual({ closing: { reason: 'finished', drift_g: -3 }, notices: ['filament_left'] })
+    await runTool(tool('filament_spool_closing'), { spool_id: ROW }, ctx())
+    expect(seen).toEqual(['?reason=finished&final_reading_g=230', ''])
+    expect(() => tool('filament_spool_closing').parse({ spool_id: ROW, reason: 'lost' })).toThrow()
+  })
+
+  it("sends a spool's properties inside its PATCH, and says when reading them back fails (#7703)", async () => {
     const calls: string[] = []
     const PROPS = `${BACKEND}/api/v1/entities/${encodeURIComponent(`spool:${ROW}`)}/properties`
-    let refuse = false
+    let down = false
     server.use(
       http.patch(SPOOL, async ({ request }) => {
         calls.push(`PATCH spool ${JSON.stringify(await request.json())}`)
         return HttpResponse.json({ id: ROW })
       }),
-      http.patch(PROPS, async ({ request }) => {
-        calls.push(`PATCH props ${JSON.stringify(await request.json())}`)
-        if (refuse) return HttpResponse.json({ detail: 'lot_number: too long' }, { status: 422 })
+      http.get(PROPS, () => {
+        calls.push('GET props')
+        if (down) return HttpResponse.json({ detail: 'down' }, { status: 503 })
         return HttpResponse.json({ properties: [{ key: 'lot_number', value: 'L-2207', source: 'manual' }] })
       }),
     )
     const edited = await runTool(tool('filament_spool_upsert'), { spool_id: ROW, fields: { note: 'n' }, properties: { lot_number: 'L-2207' } }, ctx())
     expect(firstText(edited)).toMatchObject({ id: ROW, properties: [{ key: 'lot_number', value: 'L-2207' }] })
-    expect(calls).toEqual(['PATCH spool {"note":"n"}', 'PATCH props {"set":{"lot_number":"L-2207"}}'])
-    refuse = true
-    const refused = await runTool(tool('filament_spool_upsert'), { spool_id: ROW, fields: { note: 'n' }, properties: { lot_number: 'x' } }, ctx())
-    expect(refused.isError).toBe(true)
-    expect(String(firstText(refused))).toContain(`spool ${ROW} was saved`)
-    expect(String(firstText(refused))).toContain('lot_number: too long')
+    expect(calls).toEqual(['PATCH spool {"note":"n","properties":{"lot_number":"L-2207"}}', 'GET props'])
+    down = true
+    const unread = await runTool(tool('filament_spool_upsert'), { spool_id: ROW, fields: { note: 'n' }, properties: { lot_number: 'x' } }, ctx())
+    expect(unread.isError).toBe(true)
+    expect(String(firstText(unread))).toContain(`spool ${ROW} was saved with its properties`)
   })
 
   it('sends no spool PATCH for a properties-only edit (#7026)', async () => {
@@ -888,6 +965,51 @@ describe('filament_spool_add_event with a new spool reading (#7280)', () => {
     expect((firstText(res) as Record<string, unknown>).filament_g).toBe(950)
   })
 
+  const BELOW = {
+    offer: null,
+    reason: 'below_label',
+    insert_type_id: ROW,
+    empty_weight_g: 200,
+    filament_g: 700,
+    shortfall_g: 100,
+    resolutions: [
+      { kind: 'tared', filament_g: 900, new_label_weight_g: null },
+      { kind: 'short', filament_g: 700, new_label_weight_g: null },
+      { kind: 'label_wrong', filament_g: 700, new_label_weight_g: 700 },
+    ],
+    default: 'tared',
+  }
+
+  it('with a reading under the label and no resolution, names the choices and books nothing (#7683)', async () => {
+    const order: string[] = []
+    const bodies: unknown[] = []
+    mock(BELOW, order, bodies)
+    const res = await runTool(tool('filament_spool_add_event'), { spool_id: ROW, kind: 'weighed', reading_g: 900 }, ctx())
+    expect(res.isError).toBeFalsy()
+    expect(order).toEqual(['offer 900'])
+    expect(bodies).toEqual([])
+    const out = firstText(res) as Record<string, unknown>
+    expect(out.event).toBeNull()
+    expect(out.below_label).toMatchObject({ shortfall_g: 100, default: 'tared' })
+    expect(String(out.next)).toContain('resolution')
+  })
+
+  it('with a resolution, posts it with the reading alone (#7683)', async () => {
+    const order: string[] = []
+    const bodies: unknown[] = []
+    mock(BELOW, order, bodies)
+    const res = await runTool(
+      tool('filament_spool_add_event'),
+      { spool_id: ROW, kind: 'weighed', source: 'scale', reading_g: 900, resolution: 'short' },
+      ctx(),
+    )
+    expect(res.isError).toBeFalsy()
+    expect(order).toEqual(['event'])
+    expect(bodies).toEqual([{ kind: 'weighed', source: 'scale', reading_g: 900, resolution: 'short' }])
+    expect((firstText(res) as Record<string, unknown>).event).toEqual({ kind: 'weighed' })
+    expect(tool('filament_spool_add_event').description).toContain('below_label')
+  })
+
   it('sends the reading beside the grams, so the event keeps its breakdown (#7682)', async () => {
     const order: string[] = []
     const bodies: unknown[] = []
@@ -982,6 +1104,8 @@ describe('filament location tools', () => {
     ['filament_location_get', 'read'],
     ['filament_printer_labels', 'read'],
     ['filament_label_templates', 'read'],
+    ['filament_label_sheet_upsert', 'write'],
+    ['filament_label_sheet_delete', 'write'],
     ['filament_location_upsert', 'write'],
     ['filament_spool_move', 'write'],
   ])('%s is %s tier, never gated', (name, risk) => {
@@ -1030,6 +1154,99 @@ describe('filament location tools', () => {
     await runTool(tool('filament_printer_labels'), {}, ctx())
     await runTool(tool('filament_printer_labels'), { printer_ids: [ROW] }, ctx())
     expect(bodies).toEqual([{ printer_ids: null }, { printer_ids: [ROW] }])
+  })
+
+  it('saves a label sheet: POST without a sheet_id, PUT with one (#7216)', async () => {
+    const SHEETS = `${BACKEND}/api/v1/filament/label-sheets`
+    const layout = { page: 'a4', width_mm: 70, height_mm: 37, cols: 3, rows: 8, top_mm: 0, left_mm: 0 }
+    const calls: unknown[] = []
+    server.use(
+      http.post(SHEETS, async ({ request }) => {
+        calls.push(['post', await request.json()])
+        return HttpResponse.json({ id: ROW, name: 'Avery', layout }, { status: 201 })
+      }),
+      http.put(`${SHEETS}/${ROW}`, async ({ request }) => {
+        calls.push(['put', await request.json()])
+        return HttpResponse.json({ id: ROW, name: 'Avery 2', layout })
+      }),
+    )
+    const added = await runTool(tool('filament_label_sheet_upsert'), { name: 'Avery', layout }, ctx())
+    expect(firstText(added)).toEqual({ id: ROW, name: 'Avery', layout })
+    const edited = await runTool(tool('filament_label_sheet_upsert'), { sheet_id: ROW, name: 'Avery 2', layout }, ctx())
+    expect(firstText(edited)).toEqual({ id: ROW, name: 'Avery 2', layout })
+    const filled = { ...layout, col_gap_mm: 0, row_gap_mm: 0 }
+    expect(calls).toEqual([['post', { name: 'Avery', layout: filled }], ['put', { name: 'Avery 2', layout: filled }]])
+    expect(tool('filament_label_sheet_upsert').summarize?.({ name: 'Avery', layout } as never)).toBe('Save label sheet Avery')
+  })
+
+  it('surfaces a label sheet 409 and 404 answer, and refuses an out-of-bound input before a request (#7216)', async () => {
+    const SHEETS = `${BACKEND}/api/v1/filament/label-sheets`
+    const layout = { page: 'a4', width_mm: 70, height_mm: 37, cols: 3, rows: 8, top_mm: 0, left_mm: 0 }
+    const sent: unknown[] = []
+    server.use(
+      http.post(SHEETS, async ({ request }) => {
+        sent.push(await request.json())
+        return HttpResponse.json(
+          { type: 'about:blank', title: 'Conflict', status: 409, detail: 'label_sheet_name_taken' },
+          { status: 409, headers: { 'Content-Type': 'application/problem+json' } },
+        )
+      }),
+      http.put(`${SHEETS}/${ROW}`, () =>
+        HttpResponse.json(
+          { type: 'about:blank', title: 'Not Found', status: 404, detail: 'label_sheet_not_found' },
+          { status: 404, headers: { 'Content-Type': 'application/problem+json' } },
+        ),
+      ),
+    )
+    const taken = await runTool(tool('filament_label_sheet_upsert'), { name: 'Avery', layout }, ctx())
+    expect(taken.isError).toBe(true)
+    expect(JSON.stringify(taken.content)).toContain('label_sheet_name_taken')
+    const missing = await runTool(tool('filament_label_sheet_upsert'), { sheet_id: ROW, name: 'Avery', layout }, ctx())
+    expect(missing.isError).toBe(true)
+    expect(JSON.stringify(missing.content)).toContain('label_sheet_not_found')
+    sent.length = 0
+    const refused = await runTool(tool('filament_label_sheet_upsert'), { name: 'Avery', layout: { ...layout, cols: 21 } }, ctx())
+    expect(refused.isError).toBe(true)
+    expect(sent).toEqual([])
+  })
+
+  it('trims a label sheet name before the length check and sends it trimmed (#7216)', async () => {
+    const layout = { page: 'a4', width_mm: 70, height_mm: 37, cols: 3, rows: 8, top_mm: 0, left_mm: 0 }
+    const names: unknown[] = []
+    server.use(
+      http.post(`${BACKEND}/api/v1/filament/label-sheets`, async ({ request }) => {
+        names.push(((await request.json()) as { name: string }).name)
+        return HttpResponse.json({ id: ROW, name: 'x', layout }, { status: 201 })
+      }),
+    )
+    const name = 'a'.repeat(100)
+    const ok = await runTool(tool('filament_label_sheet_upsert'), { name: `${name} `, layout }, ctx())
+    expect(ok.isError).toBeFalsy()
+    expect(names).toEqual([name])
+    expect((await runTool(tool('filament_label_sheet_upsert'), { name: `${name}a`, layout }, ctx())).isError).toBe(true)
+    expect((await runTool(tool('filament_label_sheet_upsert'), { name: '   ', layout }, ctx())).isError).toBe(true)
+    // 100 code points outside the BMP are 200 UTF-16 units; zod and the backend both count 100.
+    const wide = '\u{1F9F5}'.repeat(100)
+    expect((await runTool(tool('filament_label_sheet_upsert'), { name: wide, layout }, ctx())).isError).toBeFalsy()
+    expect(names.at(-1)).toBe(wide)
+  })
+
+  it('says a deleted sheet makes the next print a 409 (#7216)', () => {
+    expect(tool('filament_label_sheet_delete').description).toContain('label_sheet_gone')
+    expect(tool('filament_label_sheet_delete').description).not.toContain('default size')
+  })
+
+  it('deletes a label sheet and reports its id (#7216)', async () => {
+    const calls: string[] = []
+    server.use(
+      http.delete(`${BACKEND}/api/v1/filament/label-sheets/${ROW}`, () => {
+        calls.push('delete')
+        return new HttpResponse(null, { status: 204 })
+      }),
+    )
+    const res = await runTool(tool('filament_label_sheet_delete'), { sheet_id: ROW }, ctx())
+    expect(firstText(res)).toEqual({ deleted: ROW })
+    expect(calls).toEqual(['delete'])
   })
 
   it('lists the label templates', async () => {
@@ -1839,6 +2056,26 @@ describe('filament_spool_upsert quantity and copy_of', () => {
     ])
   })
 
+  it('passes continued_from through for a respooled spool (#7684)', async () => {
+    const bodies: unknown[] = []
+    server.use(
+      http.get(`${SPOOLS}/${SOURCE_ID}/copy`, () =>
+        HttpResponse.json({ spool: { type_id: ROW, weight_locked: false }, location_id: null, presets: [], k_values: [], copy_of: SOURCE_ID }),
+      ),
+      http.post(BULK, async ({ request }) => {
+        bodies.push(await request.json())
+        return HttpResponse.json([{ id: ROW, number: 22 }], { status: 201 })
+      }),
+    )
+    const call = { copy_of: SOURCE_ID, continued_from: SOURCE_ID, fields: { grams_left: 480, added_full: false } }
+    expect((await runTool(tool('filament_spool_upsert'), call, ctx())).isError).toBeFalsy()
+    expect(bodies).toEqual([
+      { spool: { type_id: ROW, weight_locked: false, grams_left: 480, added_full: false }, location_id: null, presets: [], k_values: [], quantity: 1, copy_of: SOURCE_ID, continued_from: SOURCE_ID },
+    ])
+    const refused = await runTool(tool('filament_spool_upsert'), { spool_id: ROW, continued_from: SOURCE_ID }, ctx())
+    expect(refused.isError).toBe(true)
+  })
+
   // R-7150-8: a resend reads the copy again, so its key names the draft it read too.
   const TEAL = { spool: { type_id: ROW, colour_name: 'Teal' }, location_id: null, presets: [], k_values: [] }
   function copyResends(drafts: (typeof TEAL)[]) {
@@ -1874,12 +2111,16 @@ describe('filament_spool_upsert quantity and copy_of', () => {
     expect(keys[1]).not.toBe(keys[0])
   })
 
-  it('sets properties on each spool a bulk add made, and answers them (#7026)', async () => {
-    const set: string[] = []
+  it('sends properties inside a bulk add, and answers each spool with them (#7703)', async () => {
+    const bodies: unknown[] = []
+    const read: string[] = []
     server.use(
-      http.post(BULK, () => HttpResponse.json([{ id: ROW, number: 1 }, { id: SOURCE_ID, number: 2 }], { status: 201 })),
-      http.patch(`${BACKEND}/api/v1/entities/:ref/properties`, async ({ params, request }) => {
-        set.push(`${String(params.ref)} ${JSON.stringify(await request.json())}`)
+      http.post(BULK, async ({ request }) => {
+        bodies.push(await request.json())
+        return HttpResponse.json([{ id: ROW, number: 1 }, { id: SOURCE_ID, number: 2 }], { status: 201 })
+      }),
+      http.get(`${BACKEND}/api/v1/entities/:ref/properties`, ({ params }) => {
+        read.push(String(params.ref))
         return HttpResponse.json({ properties: [{ key: 'mpn', value: 'M1', source: 'manual' }] })
       }),
     )
@@ -1889,33 +2130,43 @@ describe('filament_spool_upsert quantity and copy_of', () => {
       { id: ROW, properties: [{ key: 'mpn' }] },
       { id: SOURCE_ID, properties: [{ key: 'mpn' }] },
     ])
-    expect(set).toEqual([`spool:${ROW} {"set":{"mpn":"M1"}}`, `spool:${SOURCE_ID} {"set":{"mpn":"M1"}}`])
+    expect(bodies).toEqual([{ spool: { type_id: ROW, properties: { mpn: 'M1' } }, quantity: 2 }])
+    expect(read).toEqual([`spool:${ROW}`, `spool:${SOURCE_ID}`])
   })
 
-  it('names every spool a bulk add made when a property write fails part way (#7026)', async () => {
-    const THIRD = '00000000-0000-4000-8000-000000000003'
-    const set: string[] = []
+  it('catalog upsert takes properties: in the row body, then read back, or alone through the property patch (#7703)', async () => {
+    const calls: string[] = []
+    const PROPS = `${BACKEND}/api/v1/entities/${encodeURIComponent(`brand:${ROW}`)}/properties`
     server.use(
-      http.post(BULK, () =>
-        HttpResponse.json([{ id: ROW, number: 1 }, { id: SOURCE_ID, number: 2 }, { id: THIRD, number: 3 }], { status: 201 }),
-      ),
-      http.patch(`${BACKEND}/api/v1/entities/:ref/properties`, ({ params }) => {
-        set.push(String(params.ref))
-        return set.length === 1
-          ? HttpResponse.json({ properties: [{ key: 'td', value: 1.5, source: 'manual' }] })
-          : HttpResponse.json({ detail: { problem: 'bad_property_value', message: 'td must be a number' } }, { status: 422 })
+      http.post(LIST, async ({ request }) => {
+        calls.push(`POST ${JSON.stringify(await request.json())}`)
+        return HttpResponse.json({ id: ROW, name: 'Acme' }, { status: 201 })
+      }),
+      http.patch(ONE, async ({ request }) => {
+        calls.push(`PATCH row ${JSON.stringify(await request.json())}`)
+        return HttpResponse.json({ id: ROW, name: 'Acme' })
+      }),
+      http.get(PROPS, () => {
+        calls.push('GET props')
+        return HttpResponse.json({ properties: [{ key: 'site', value: 'acme.test', source: 'manual' }] })
+      }),
+      http.patch(PROPS, async ({ request }) => {
+        calls.push(`PATCH props ${JSON.stringify(await request.json())}`)
+        return HttpResponse.json({ properties: [] })
       }),
     )
-    const result = await runTool(tool('filament_spool_upsert'), { quantity: 3, fields: { type_id: ROW }, properties: { td: 'abc' } }, ctx())
-    expect(result.isError).toBe(true)
-    const text = JSON.stringify(result.content)
-    expect(text).toContain(`3 spools were saved (${ROW}, ${SOURCE_ID}, ${THIRD})`)
-    expect(text).toContain(`the properties were set on ${ROW}`)
-    expect(text).toContain(`not on spool:${SOURCE_ID}, spool:${THIRD}`)
-    expect(text).toContain('entity_property_set')
-    expect(text).toContain('not this tool again')
-    // It stops at the first failure: a refused value would be refused for the rest too.
-    expect(set).toEqual([`spool:${ROW}`, `spool:${SOURCE_ID}`])
+    const added = await runTool(tool('filament_catalog_upsert'), { kind: 'brands', fields: { name: 'Acme' }, properties: { site: 'acme.test' } }, ctx())
+    expect(added.isError).toBeFalsy()
+    expect(firstText(added)).toMatchObject({ id: ROW, properties: [{ key: 'site', value: 'acme.test' }] })
+    expect(calls).toEqual(['POST {"name":"Acme","properties":{"site":"acme.test"}}', 'GET props'])
+    calls.length = 0
+    const only = await runTool(tool('filament_catalog_upsert'), { kind: 'brands', row_id: ROW, properties: { site: null } }, ctx())
+    expect(only.isError).toBeFalsy()
+    expect(firstText(only)).toMatchObject({ kind: 'brands', id: ROW, properties: [] })
+    expect(calls).toEqual(['PATCH props {"set":{"site":null}}'])
+    expect(tool('filament_catalog_upsert').summarize({ kind: 'brands', row_id: ROW, fields: {}, properties: { site: null } })).toBe(
+      `Edit brands row ${ROW}; properties: remove site`,
+    )
   })
 
   it('refuses quantity or copy_of on an edit before calling the backend', async () => {

@@ -34,10 +34,41 @@ function problemSlug(error: unknown): string | undefined {
   return typeof type === 'string' ? PROBLEM_TYPE.exec(type)?.[1] : undefined
 }
 
+/** A property key (backend `entities/properties.py` `KEY`): safe to name in a summary. */
+const PROPERTY_KEY = /^[a-z][a-z0-9_]{0,63}$/
+
+/**
+ * A checked save's 422 `missing_required_properties` (#7703): the summary names each key, so
+ * the model can fill them in one retry; each reason is the backend's text, so it stays untrusted.
+ */
+function missingRequired(what: string, status: number, error: unknown): ToolError | undefined {
+  if (typeof error !== 'object' || error === null) return undefined
+  const body = error as { code?: unknown; missing?: unknown; invalid?: unknown }
+  if (body.code !== 'missing_required_properties') return undefined
+  const missing = (Array.isArray(body.missing) ? body.missing : []).filter((k): k is string => typeof k === 'string' && PROPERTY_KEY.test(k))
+  const invalid = (Array.isArray(body.invalid) ? body.invalid : []).filter(
+    (i): i is { key: string; reason?: unknown } => typeof i === 'object' && i !== null && typeof i.key === 'string' && PROPERTY_KEY.test(i.key),
+  )
+  const parts = [
+    missing.length ? `missing: ${missing.join(', ')}` : '',
+    invalid.length ? `values that do not fit: ${invalid.map((i) => i.key).join(', ')}` : '',
+  ].filter(Boolean)
+  const reasons = invalid.map((i) => `${i.key}: ${typeof i.reason === 'string' ? i.reason : JSON.stringify(i.reason)}`).join('; ')
+  return new ToolError(
+    `${what} failed (HTTP ${status}): its required properties are not all filled (${parts.join('; ') || 'see the reason'}). ` +
+      'Nothing was written; give each one a value in `properties`.',
+    status,
+    reasons || describe(error) || undefined,
+    problemSlug(error),
+  )
+}
+
 /** The response body, or a ToolError naming `what` failed, the status and the backend's reason. */
 export async function ok<T>(pending: Promise<FetchResult<T>>, what: string): Promise<T> {
   const { data, error, response } = await pending
   if (!response.ok) {
+    const refused = response.status === 422 ? missingRequired(what, response.status, error) : undefined
+    if (refused) throw refused
     const reason = describe(error)
     // The reason is the backend's (or, relayed, Bambuddy's) text: untrusted (#258).
     throw new ToolError(`${what} failed (HTTP ${response.status})`, response.status, reason || undefined, problemSlug(error))

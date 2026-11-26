@@ -7,6 +7,7 @@ and a custom size of one label a page."""
 from __future__ import annotations
 
 from typing import Final, Literal
+from uuid import UUID
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
@@ -19,6 +20,7 @@ TemplateId = Literal[
     "avery_5160",
     "avery_l7160",
     "custom",
+    "saved",
 ]
 
 #: The template a label takes when none is chosen: what SB printed before #7157.
@@ -92,13 +94,16 @@ BY_ID: Final = {template.id: template for template in TEMPLATES}
 
 class LabelTemplateChoice(BaseModel):
     """The setting `filament_label_template` and a PDF request's `template`: a template's
-    id, and for `custom` its width and height (R-7157-2)."""
+    id, for `custom` its width and height (R-7157-2), and for `saved` the saved sheet's
+    id (#7216 R-7216-12)."""
 
     model_config = ConfigDict(extra="forbid", allow_inf_nan=False)
 
     template: TemplateId = DEFAULT_TEMPLATE
     width_mm: float | None = Field(default=None, ge=MIN_WIDTH_MM, le=MAX_LENGTH_MM)
     height_mm: float | None = Field(default=None, ge=MIN_HEIGHT_MM, le=MAX_LENGTH_MM)
+    #: The `label_sheets` row a `saved` choice names; the PDF reads it at each request.
+    sheet_id: UUID | None = None
 
     @model_validator(mode="after")
     def _sizes_only_for_custom(self) -> LabelTemplateChoice:
@@ -107,10 +112,17 @@ class LabelTemplateChoice(BaseModel):
             raise ValueError("a custom label needs width_mm and height_mm")
         if self.template != "custom" and sized:
             raise ValueError("width_mm and height_mm are only for a custom label")
+        if self.template == "saved" and self.sheet_id is None:
+            raise ValueError("a saved sheet needs its sheet_id")
+        if self.template != "saved" and self.sheet_id is not None:
+            raise ValueError("sheet_id is only for a saved sheet")
         return self
 
     def resolved(self) -> LabelTemplate:
-        """The template this choice names, a custom one built from its sizes."""
+        """The template this choice names, a custom one built from its sizes. A saved
+        sheet is a row: `label_sheets.resolve` reads it."""
+        if self.template == "saved":
+            raise ValueError("a saved sheet is read from its row: use label_sheets.resolve")
         if self.template == "custom":
             assert self.width_mm is not None and self.height_mm is not None
             return LabelTemplate(

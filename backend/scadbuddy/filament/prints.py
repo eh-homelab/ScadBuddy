@@ -45,10 +45,13 @@ class OpenUse:
     ref_id: str
     delta_g: float | None
     job: str
+    #: The metres the start booked (#7685, ``data.length_m``); ``None`` for none.
+    length_m: float | None = None
 
 
 _OPEN = (
-    "SELECT e.spool_id, e.ref_id, e.delta_g, e.data ->> 'job' AS job"
+    "SELECT e.spool_id, e.ref_id, e.delta_g, e.data ->> 'job' AS job,"
+    " (e.data ->> 'length_m')::float AS length_m"
     " FROM filament_spool_events e WHERE e.kind = %(started)s AND e.ref_kind = %(kind)s"
     " AND {where} AND NOT EXISTS (SELECT 1 FROM filament_spool_events d"
     " WHERE d.spool_id = e.spool_id AND d.kind = %(ended)s"
@@ -74,6 +77,7 @@ def _open(conn: Conn, where: str, params: dict[str, Any]) -> list[OpenUse]:
             delta_g=row["delta_g"],
             # An estimate from before #6263 and the migration's reach has no `data.job`.
             job=row["job"] or row["ref_id"].split("/", 1)[-1].rsplit("/", 1)[0],
+            length_m=row["length_m"],
         )
         for row in rows
     ]
@@ -110,9 +114,17 @@ def book_end(
     ended: str,
 ) -> m.SpoolEvent | None:
     """The ``print_ended`` of ``use``: its sliced grams as the actual when ``applied``,
-    else 0, which drops the estimate. ``None`` when the use is ended already. ``at`` is
+    else 0, which drops the estimate, and its metres the same way as ``data.length_m``
+    when the start booked them (#7685). ``None`` when the use is ended already. ``at`` is
     when the plate ended; with none the ledger books it now. ``ended`` is ``report`` or
     ``settle``."""
+    data: dict[str, Any] = {
+        "basis": "sliced" if applied else "not_applied",
+        "job": use.job,
+        "ended": ended,
+    }
+    if use.length_m is not None:
+        data["length_m"] = use.length_m if applied else 0.0
     return ledger.record(
         conn,
         use.spool_id,
@@ -123,7 +135,7 @@ def book_end(
         ref_id=use.ref_id,
         actor=actor,
         at=at,
-        data={"basis": "sliced" if applied else "not_applied", "job": use.job, "ended": ended},
+        data=data,
     )
 
 

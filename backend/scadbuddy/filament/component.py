@@ -15,6 +15,7 @@ from scadbuddy.filament.catalog import CatalogStore
 from scadbuddy.filament.insert_weights import InsertWeightStore
 from scadbuddy.filament.inventory import FilamentInventory, PoolSbSpoolReads
 from scadbuddy.filament.invoices import InvoiceStore
+from scadbuddy.filament.label_sheets import LabelSheetStore
 from scadbuddy.filament.locations import LocationStore
 from scadbuddy.filament.metrics_store import MetricsSettings, MetricsStore
 from scadbuddy.filament.presets import PoolSpoolPresets
@@ -75,6 +76,11 @@ class Filament:
         return InsertWeightStore(self.spools)
 
     @property
+    def label_sheets(self) -> LabelSheetStore:
+        """The saved label sheet grids (#7216)."""
+        return LabelSheetStore(self.spools.pool)
+
+    @property
     def sync_passes(self) -> SyncPassStore:
         """The Bambuddy sync's pass history (#6905)."""
         return SyncPassStore(self.spools)
@@ -96,6 +102,7 @@ def _build(core: Core, components: Components) -> Filament:
                 "filament_drying_temp_c",
                 "filament_drying_hours",
                 "filament_weighing_drift_notice_g",
+                "filament_weighing_finished_left_g",
             }
         )
         return FilamentDefaults(
@@ -104,6 +111,7 @@ def _build(core: Core, components: Components) -> Filament:
             drying_temp_c=read["filament_drying_temp_c"],
             drying_hours=read["filament_drying_hours"],
             drift_notice_g=int(read["filament_weighing_drift_notice_g"]),
+            finished_left_g=int(read["filament_weighing_finished_left_g"]),
         )
 
     def shop_currency() -> str:

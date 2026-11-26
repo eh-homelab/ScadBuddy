@@ -1,19 +1,35 @@
 """A client of MediaMTX's control API (``/v3/config/paths/*``). The relay gives it each
-printer's source URL, access code included, here and nowhere else; the recorder gives it the
-relay's URL with the relay read password."""
+printer's source URL, access code included, here and nowhere else; the recorders and the live
+edge give it the relay's URL with the relay read password (`relay_source`)."""
 
 from __future__ import annotations
 
 from typing import Any
-from urllib.parse import quote
+from urllib.parse import quote, urlsplit, urlunsplit
 
 import httpx
+from pydantic import SecretStr
 
 PAGE = 1000
 
 
 class MediaMtxError(Exception):
     """MediaMTX refused or missed a path change. It names the path and the status only."""
+
+
+def relay_source(relay_url: str, user: str, password: SecretStr, printer_id: str) -> str:
+    """The relay's RTSP URL of one printer's path, with the relay read user and password in
+    it: ``rtsp://<user>:<pass>@<relay host>/<printer_id>``. Only MediaMTX gets it."""
+    parts = urlsplit(relay_url)
+    return urlunsplit(
+        (
+            parts.scheme,
+            f"{quote(user, safe='')}:{quote(password.get_secret_value(), safe='')}@{parts.netloc}",
+            f"{parts.path.rstrip('/')}/{quote(printer_id, safe='')}",
+            "",
+            "",
+        )
+    )
 
 
 def why(error: httpx.HTTPError) -> str:

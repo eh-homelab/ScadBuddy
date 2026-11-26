@@ -41,7 +41,9 @@ def apply_runtime(state: AppState, values: Settings, *, booting: bool = False) -
     state.fonts.use_api_key(config.google_fonts_api_key)
     if isinstance(state.events, PgNotifyEventBus):
         state.events.retention = EventLogRetention(
-            seconds=running.event_log_retention_seconds, rows=running.event_log_retention_rows
+            seconds=running.event_log_retention_seconds,
+            rows=running.event_log_retention_rows,
+            kinds=running.event_log_retention_kinds,
         )
     logging.getLogger().setLevel(running.log_level)
     if booting:

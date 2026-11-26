@@ -2,7 +2,7 @@ import { http, HttpResponse } from 'msw'
 import type { CustomizerSchema, ListingBound, StorefrontListing, StorefrontListingInput, StorefrontListingPage } from '../../api/types'
 import { mockModels, mockSettings, problem } from '../handlers'
 import * as orders from './orders/state'
-import { filamentOptions } from '../fixtures'
+import { filamentOptions, pipelines } from '../fixtures'
 import { libraryFiles, pngResponse } from './library'
 
 /**
@@ -192,6 +192,35 @@ function fields(body: StorefrontListingInput, found?: StorefrontListing) {
     media_ids: body.media_ids ?? [],
     materials: body.materials ?? [],
   }
+}
+
+/**
+ * #5701 — a listing's inputs at its template's version, as a publish stores them, or the
+ * refusal: inputs on a template with no pipeline, one the shape requires that is not set, and
+ * a number past its limits (the checks of the backend's that these mocks' schemas use).
+ */
+function pipelineInputs(listing: StorefrontListing): Record<string, unknown> | Response {
+  const pipeline = pipelines[listing.slug ?? '']
+  const inputs = listing.inputs ?? {}
+  if (!pipeline) {
+    if (Object.keys(inputs).length === 0) return {}
+    return refused(422, 'listing_inputs_unexpected', 'this version of the template has no pipeline, so it takes no inputs', { name: 'inputs' })
+  }
+  const current = pipeline.declared.inputs_version ?? 0
+  const now = (listing.inputs_v ?? current) < current ? { ...pipeline.fresh, ...inputs } : inputs
+  const bad = (name: string, reason: string, message: string) => refused(422, 'listing_inputs_invalid', `${name}: ${message}`, { name, reason })
+  const shape = pipeline.declared.inputs as { properties: Record<string, { properties: Record<string, { minimum: number; maximum: number }> }> }
+  for (const [key, spec] of Object.entries(shape.properties)) {
+    const value = now[key] as Record<string, number> | undefined
+    if (value === undefined) return bad(`inputs.${key}`, 'required', 'is required')
+    for (const [name, { minimum, maximum }] of Object.entries(spec.properties)) {
+      const number = value[name]
+      if (number === undefined) return bad(`inputs.${key}.${name}`, 'required', 'is required')
+      if (number < minimum) return bad(`inputs.${key}.${name}`, 'minimum', `${number} is less than the minimum of ${minimum}`)
+      if (number > maximum) return bad(`inputs.${key}.${name}`, 'maximum', `${number} is greater than the maximum of ${maximum}`)
+    }
+  }
+  return now
 }
 
 const UNPUBLISHED: Pick<StorefrontListing, 'published' | 'snapshot' | 'media' | 'published_at'> = {
@@ -431,6 +460,9 @@ export const handlers = [
     const notAllowed = materialRefusal(found)
     if (notAllowed) return notAllowed
     if (found.source === 'library_file') return publishFile(found)
+    const pipeline = pipelines[found.slug ?? '']
+    const inputs = pipelineInputs(found)
+    if (inputs instanceof Response) return inputs
     const at = stamp()
     const published: StorefrontListing = {
       ...found,
@@ -441,15 +473,14 @@ export const handlers = [
       snapshot: {
         kind: 'template',
         schema: EMPTY_SCHEMA,
-        pipeline: false,
+        pipeline: pipeline !== undefined,
         template_name: found.slug ?? '',
         libraries: [],
         snapshot_key: `src-${found.slug}-${found.commit}`,
         // The backend fills every unnamed parameter's default in here; the mock has no schema.
         fixed: { ...found.fixed },
-        // #5701: the mock lists no pipeline template, so a listing has no inputs.
-        inputs: {},
-        inputs_version: 0,
+        inputs,
+        inputs_version: pipeline?.declared.inputs_version ?? 0,
       },
     }
     listings = listings.map((l) => (l.id === id ? published : l))

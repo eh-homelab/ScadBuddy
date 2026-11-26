@@ -619,6 +619,57 @@ def test_a_grant_not_in_force_approves_nothing(agent: Agent, tables: PgPool, cha
     assert _sql(tables, "SELECT count(*) AS n FROM ai_input_responses")[0]["n"] == 0
 
 
+def _chain(pool: PgPool, grant: str, broken: str) -> None:
+    """Grant ``grant`` inherits from ``parent``, which a standing grant seeded; ``broken``
+    names the link that is not in force, or "none"."""
+    _sql(
+        pool,
+        "INSERT INTO flow_triggers (id, name, definition_id, kind, event, created_by)"
+        " VALUES ('trig-1', 'gate', 'def-1', 'event', '{}', '{}')",
+    )
+    _sql(
+        pool,
+        "INSERT INTO flow_trigger_grants (id, trigger_id, status, spec, requested_by,"
+        " revoked_at, expires_at, approval_id) VALUES ('standing', 'trig-1', 'approved',"
+        " '{}', '{}', CASE WHEN %s THEN now() END,"
+        " now() + CASE WHEN %s THEN interval '-1 second' ELSE interval '1 hour' END, 'a1')",
+        (broken == "standing revoked", broken == "standing expired"),
+    )
+    _sql(
+        pool,
+        "INSERT INTO flow_grants (id, run_id, status, spec, requested_by, revoked_at,"
+        " expires_at, standing_grant_id, standing_approval_id) VALUES ('parent', 'run-parent',"
+        " 'approved', '{}', '{}', CASE WHEN %s THEN now() END, now() + interval '1 hour',"
+        " 'standing', 'a1')",
+        (broken == "parent revoked",),
+    )
+    _grant_row(pool, grant)
+    _sql(pool, "UPDATE flow_grants SET parent_grant_id = 'parent' WHERE id = %s", (grant,))
+
+
+@pytest.mark.parametrize(
+    ("broken", "granted"),
+    [
+        ("none", True),
+        ("parent revoked", False),
+        ("standing revoked", False),
+        ("standing expired", False),
+    ],
+)
+def test_a_grant_approves_only_while_its_whole_chain_is_in_force(
+    agent: Agent, tables: PgPool, broken: str, granted: bool
+) -> None:
+    """#5685: the grant it inherits from, and the standing grant that seeded that one, are
+    checked as the API's own check of the call does (`store.chain_in_force`)."""
+    session = _session(tables)
+    rid = _rid(session)
+    _chain(tables, "g1", broken)
+    _use(tables, "g1", rid, session)
+    assert agent.post("/gate/grant", _grant(session, rid, "g1")) == {"granted": granted}
+    count = _sql(tables, "SELECT count(*) AS n FROM ai_input_responses")[0]["n"]
+    assert count == (1 if granted else 0)
+
+
 def test_a_revocation_waits_for_a_grant_under_its_share_lock(
     agent: Agent, tables: PgPool, pg_conninfo: str
 ) -> None:

@@ -61,6 +61,20 @@ def test_a_slot_uses_the_sb_spool_in_its_tray() -> None:
     assert slot_uses({1: _option(-1, red)}, {}, STARTED) == []
 
 
+def test_a_slot_carries_its_length() -> None:
+    """#7685: the sliced plate's metres per slot ride beside the grams; a slot the plate
+    gives no length, or 0, has none."""
+    red = uuid.uuid4()
+    uses = slot_uses(
+        {1: _option(-1, red), 2: _option(-2, red), 3: _option(-3, red)},
+        {1: 12.5, 2: 3.0, 3: 1.0},
+        STARTED,
+        {1: 4.2, 3: 0.0},
+    )
+    assert [u.length_m for u in uses] == [4.2, None, None]
+    assert SlotUse(slot_id=1, spool_id=red, grams=1, plate_started_at=STARTED).length_m is None
+
+
 pg = pytest.mark.requires_postgres
 
 
@@ -157,6 +171,41 @@ def test_settle_replaces_the_estimate_once(pg_pool: PgPool) -> None:
         ("sliced", "settle", "a")
     ]
     assert ended[0].at > started_at
+
+
+def _end_data(pool: PgPool, spool_id: UUID) -> list[dict[str, Any]]:
+    return [e.data for e in FilamentSpoolStore(pool).events(spool_id) if e.kind == "print_ended"]
+
+
+@pg
+def test_the_start_and_its_end_keep_the_length(pg_pool: PgPool) -> None:
+    """#7685: a start with a length writes ``data.length_m`` on its ``print_started``, and
+    its settled ``print_ended`` copies it."""
+    spool = _spool(pg_pool)
+    _run(pg_pool, [_start("a")])
+    use = _use(spool, 12.5).model_copy(update={"length_m": 4.2})
+    assert record_uses(pg_pool, RUN, "a", [use]) == 1
+    (started,) = [e for e in FilamentSpoolStore(pg_pool).events(spool) if e.kind == "print_started"]
+    assert started.data == {"job": "a", "length_m": 4.2}
+    assert settle_uses(pg_pool, RUN, ["done"]) is True
+    assert _end_data(pg_pool, spool) == [
+        {"basis": "sliced", "job": "a", "ended": "settle", "length_m": 4.2}
+    ]
+
+
+@pg
+def test_settle_books_the_length_beside_the_grams(pg_pool: PgPool) -> None:
+    """A failed start books 0 g and 0 m; a start with no length ends with no ``length_m``
+    key."""
+    failed, bare = _spool(pg_pool), _spool(pg_pool)
+    _run(pg_pool, [_start("a"), _start("b")])
+    record_uses(pg_pool, RUN, "a", [_use(failed, 10).model_copy(update={"length_m": 4.2})])
+    record_uses(pg_pool, RUN, "b", [_use(bare, 10)])
+    assert settle_uses(pg_pool, RUN, ["failed", "done"]) is True
+    assert _end_data(pg_pool, failed) == [
+        {"basis": "not_applied", "job": "a", "ended": "settle", "length_m": 0.0}
+    ]
+    assert _end_data(pg_pool, bare) == [{"basis": "sliced", "job": "b", "ended": "settle"}]
 
 
 @pg

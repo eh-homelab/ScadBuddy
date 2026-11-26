@@ -2,7 +2,7 @@ import { screen, waitFor, within } from '@testing-library/react'
 import { http, HttpResponse } from 'msw'
 import { Route, Routes } from 'react-router'
 import { beforeEach, describe, expect, it, onTestFinished, vi } from 'vitest'
-import { createTagBackup, getSpool, getType, listSpoolEvents, listSpools, patchSpool, setSpoolKValues, setSpoolPresets, spoolTagRecords, spoolTagWritten } from '../../api/filament'
+import { addSpoolEvent, createTagBackup, getSpool, getType, listSpoolEvents, listSpools, patchSpool, setSpoolKValues, setSpoolPresets, spoolTagRecords, spoolTagWritten } from '../../api/filament'
 import { SPOOL_ADVANCED_KEY } from '../../components/filament/SpoolSections'
 import { H2C, L, spoolId, T, TAG } from '../../mocks/features/filament/seed'
 import { INVOICE, LINE, SUPPLIER } from '../../mocks/features/filamentPurchasingSeed'
@@ -83,6 +83,16 @@ describe('the spool page', () => {
     await heading(4)
     const weight = screen.getByRole('region', { name: 'Weight' })
     expect(await within(weight).findByText('Started at the label weight 1000 g. Bambuddy reported 268 g; 732 g unexplained.')).toBeInTheDocument()
+  })
+
+  it("names the starting amount as the drift's likely cause when the scale finds the label weight (#7685)", async () => {
+    // #4 started at Bambuddy's 268 g of a 1000 g label and printed 148 g: the ledger expects 120 g.
+    // A reading of 852 g of filament is the label weight less the print: the starting amount was wrong.
+    await addSpoolEvent(spoolId(4), { kind: 'weighed', source: 'scale', reading_g: 1102 })
+    open(4)
+    await heading(4)
+    const weight = screen.getByRole('region', { name: 'Weight' })
+    expect(await within(weight).findByText(/The scale found 732 g more than the prints accounted for\. Likely cause: the starting amount; it was 732 g under the label weight, and the scale found the label weight\./)).toBeInTheDocument()
   })
 
   it('says how the tag came in and when it was written (#7149)', async () => {
@@ -193,6 +203,33 @@ describe('the spool page', () => {
     await heading(1)
     expect(screen.queryByText('Choose a material')).toBeNull()
     expect(screen.getByRole('combobox', { name: 'Material' })).not.toHaveAttribute('aria-invalid', 'true')
+  })
+
+  it('archives through the dialog with a reason, then shows the spool archived (#7684)', async () => {
+    const { user } = open(3)
+    await heading(3)
+    await user.click(screen.getByRole('button', { name: 'Archive' }))
+    const dialog = await screen.findByRole('dialog', { name: 'Archive spool #3' })
+    await user.click(within(dialog).getByRole('radio', { name: 'Other' }))
+    await user.click(within(dialog).getByRole('button', { name: 'Archive' }))
+    expect(await screen.findByRole('button', { name: 'Restore' })).toBeInTheDocument()
+    expect(screen.queryByRole('dialog')).toBeNull()
+    expect((await getSpool(spoolId(3))).archived_at).not.toBeNull()
+    // The Weight section now says the closing: no final weighing, so the ledger's side only.
+    expect(within(screen.getByRole('region', { name: 'Weight' })).getByTestId('closing-summary')).toHaveTextContent(/^Other on .*: started with .*; not weighed at the end\.$/)
+  })
+
+  it('continues a respooled spool as a new one from the archive dialog (#7684)', async () => {
+    const { user } = open(10)
+    await heading(10)
+    await user.click(screen.getByRole('button', { name: 'Archive' }))
+    const dialog = await screen.findByRole('dialog', { name: 'Archive spool #10' })
+    await user.click(within(dialog).getByRole('radio', { name: 'Respooled' }))
+    await user.click(within(dialog).getByRole('button', { name: 'Archive and continue as a new spool' }))
+    expect(await screen.findByRole('heading', { level: 1, name: 'New spool' })).toBeInTheDocument()
+    expect(await screen.findByText((_, node) => node?.tagName === 'P' && /^Continues spool #10: its filament, respooled\.$/.test(node.textContent ?? ''))).toBeInTheDocument()
+    expect(screen.getByLabelText('Grams left')).toHaveValue('250')
+    expect((await getSpool(spoolId(10))).archived_at).not.toBeNull()
   })
 
   it('offers no Delete for a spool that printed, only Archive and why', async () => {
@@ -563,6 +600,27 @@ describe('the spool page', () => {
     expect(twin).toMatchObject({ colour_name: 'Teal', label_weight_g: 1000, grams_left: null })
   })
 
+  it('continues a respooled spool as a new one with its filament (#7684)', async () => {
+    const posts = recorded('POST', /\/filament\/spools\/bulk$/)
+    rememberAdvanced(SPOOL_ADVANCED_KEY)
+    const { user } = render(`/filament/spools/new?copy=${spoolId(19)}&continue=1&grams=480`)
+    expect(await screen.findByRole('heading', { level: 1, name: 'New spool' })).toBeInTheDocument()
+    // The banner's text is split around the spool link, so the matcher reads the whole paragraph.
+    expect(await screen.findByText((_, node) => node?.tagName === 'P' && /^Continues spool #19: its filament, respooled\.$/.test(node.textContent ?? ''))).toBeInTheDocument()
+    expect(screen.getByLabelText('Grams left')).toHaveValue('480')
+    expect(screen.getByRole('combobox', { name: 'Added full' })).toHaveTextContent('No')
+    await user.click(screen.getByRole('button', { name: 'Save spool' }))
+    await waitFor(() => expect(posts).toHaveLength(1))
+    const sent = posts[0] as { continued_from: string; copy_of: string; spool: { grams_left: number; added_full: boolean } }
+    expect(sent.continued_from).toBe(spoolId(19))
+    expect(sent.copy_of).toBe(spoolId(19))
+    expect(sent.spool).toMatchObject({ grams_left: 480, added_full: false })
+    expect(await heading(20)).toBeInTheDocument()
+    const created = (await listSpoolEvents((await listSpools()).find((one) => one.number === 20)!.id))[0]
+    expect(created?.data).toMatchObject({ continued_from: spoolId(19) })
+    expect((await listSpoolEvents(spoolId(19))).findLast((one) => one.kind === 'archived')?.data).toMatchObject({ continued_as: created?.spool_id })
+  })
+
   it('names the source as copy_of and never marks a preset row migrated (R-7150-11, R-7150-13)', async () => {
     const posts = recorded('POST', /\/filament\/spools\/bulk$/)
     const { user } = render(`/filament/spools/new?copy=${spoolId(6)}`)
@@ -673,6 +731,12 @@ describe('the spool page\'s history (#6269)', () => {
     expect(within(metrics).getByText('Empty around').parentElement).toHaveTextContent(new Date('2027-03-15T00:00:00Z').toLocaleDateString(undefined, { dateStyle: 'medium', timeZone: 'UTC' }))
     expect(within(metrics).getByText('30 g')).toBeInTheDocument()
     expect(within(metrics).getByText('±20 g')).toBeInTheDocument()
+    // #7685: job-d's 35 g over 11.7 m of 1.75 mm filament is 1.24 g/cm³ (`impliedDensity`),
+    // 2% under the material's 1.27: inside the tolerance, so no mismatch sentence.
+    expect(within(metrics).getByText('Used').parentElement).toHaveTextContent('3 prints, 40 g each, 11.7 m')
+    const density = within(metrics).getByText('Density').parentElement!
+    expect(density).toHaveTextContent('1.24 g/cm³')
+    expect(density).not.toHaveTextContent('check the type')
     const timeline = within(history).getByRole('list', { name: 'History of this spool' })
     expect(within(timeline).getByRole('link', { name: 'Print 41' })).toHaveAttribute('href', '/prints/41')
     expect(within(timeline).getByRole('link', { name: 'Its order' })).toHaveAttribute('href', `/orders/${ORDER_CLOSED}`)
@@ -695,7 +759,8 @@ describe('the spool page\'s history (#6269)', () => {
     await user.click(within(dialog).getByRole('button', { name: 'Reset counter' }))
     await waitFor(() => expect(posts).toEqual([{ kind: 'consumed_reset' }]))
     await waitFor(() => expect(used()).toHaveTextContent(/^Used0 g/))
-    expect(used()).toHaveTextContent('120 g in all')
+    // #7685: the seed's one lengthed plate (job-d, 11.7 m) shows beside the lifetime grams.
+    expect(used()).toHaveTextContent('120 g, 11.7 m in all')
     expect((await getSpool(spoolId(2))).grams_left).toBe(820)
   })
 

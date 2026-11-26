@@ -85,6 +85,7 @@ export function ToolCallView({
   sessionId,
   advanced,
   nested = false,
+  reason,
 }: {
   call: ToolCall
   status: ToolStatus
@@ -92,6 +93,8 @@ export function ToolCallView({
   advanced: boolean
   /** A subagent's call shown under its `Agent` call. */
   nested?: boolean
+  /** Why a stopped call stopped, in the panel's words (chat/toolGroups.ts `stopReasonText`, #7874). */
+  reason?: string
 }) {
   const [toggled, setToggled] = useState<boolean | undefined>(undefined)
   const open = toggled ?? advanced
@@ -122,6 +125,11 @@ export function ToolCallView({
       {/* Only a call that ran and broke: a refused or stopped one's result is Claude Code's
           note to the model ("The user doesn't want to proceed…"), kept under Details (#2149). */}
       {result && !result.ok && status === 'failed' && <p className="mt-1 text-warn">{result.summary}</p>}
+      {status === 'stopped' && reason && (
+        <p className="mt-1 text-[11.5px] text-muted-foreground" data-testid="agent-tool-stop-reason">
+          {reason}
+        </p>
+      )}
       {result?.images && result.images.length > 0 && (
         <div className="mt-1.5">
           <ToolImages images={result.images} sessionId={sessionId} title={title} size="full" />
@@ -188,12 +196,15 @@ export function ToolCallView({
 export function ToolGroup({
   calls,
   statuses,
+  reasons,
   sessionId,
   advanced,
 }: {
   calls: ToolCall[]
   /** Each call's status, in order (chat/toolGroups.ts `toolStatus`). */
   statuses: ToolStatus[]
+  /** Each call's stop reason, in order, if any (chat/toolGroups.ts `stopReasonText`, #7874). */
+  reasons?: (string | undefined)[]
   sessionId: string
   advanced: boolean
 }) {
@@ -208,6 +219,7 @@ export function ToolGroup({
       sessionId={sessionId}
       advanced={advanced}
       nested={call.parent !== undefined && ids.has(call.parent)}
+      reason={reasons?.[i]}
     />
   ))
   // #2149: one wrapper whatever the count, so a call keeps its place in the tree (and its

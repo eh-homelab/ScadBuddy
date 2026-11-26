@@ -5,8 +5,9 @@
 ScadBuddy records the camera of each printer that qualifies, all the time, as fMP4 segments
 of about 4 s in the blob store, with an index in Postgres. Phase 1 of
 [#7334](https://github.com/eh-homelab/ScadBuddy/issues/7334) ([#7328](https://github.com/eh-homelab/ScadBuddy/issues/7328))
-records and indexes only. Per-print video, live view, timelapses and retention are phases
-2 to 5 (spec
+records and indexes only. Phase 3
+([#7330](https://github.com/eh-homelab/ScadBuddy/issues/7330)) adds the live view (see "Live
+view" below). Per-print video, timelapses and retention are phases 2, 4 and 5 (spec
 [§9](../superpowers/specs/2026-11-23-printer-camera-recording-design.md#9-phases-each-one-issue-under-one-new-epic)).
 
 A printer qualifies when all three are true (`camera/store.py` `CameraStore.sources`):
@@ -19,7 +20,7 @@ A printer qualifies when all three are true (`camera/store.py` `CameraStore.sour
 
 ## How it works
 
-Two processes do the work. Each runs beside its own MediaMTX in one pod. The design is in
+Three processes do the work. Each runs beside its own MediaMTX in one pod. The design is in
 the spec
 [§6.1](../superpowers/specs/2026-11-23-printer-camera-recording-design.md#61-parts); the
 plan is `docs/superpowers/plans/2026-11-23-printer-camera-recording.md`.
@@ -35,6 +36,12 @@ flowchart LR
     M2 -->|/segments| C2[recorder 2 controller]
     C1 & C2 -->|crud.camera: lease, index, feed| API
     C1 & C2 -->|put segment| S3[(Bucket)]
+    RM -->|RTSP, read user, on demand| EM[edge MediaMTX :8888 :8889 :8189/udp]
+    EC[edge controller] -->|control API 127.0.0.1:9997| EM
+    EC -->|crud.camera| API
+    API -->|WHEP and LL-HLS, edge read user| EM
+    Browser -->|/api/v1/camera/live/...| API
+    Browser -.->|WebRTC media, UDP 8189| EM
 ```
 
 - **The relay** (`python -m scadbuddy.camera.relay`, `camera/relay.py`) is the only part
@@ -62,7 +69,14 @@ flowchart LR
   is no stall. 30 s is past the longest a healthy leader goes without an index while video
   arrives: a lost hook's file waits `ADOPT_AGE` (12 s), then an upload pass (5 s) and at most
   `INDEX_EVERY` (8 s) of puts.
-- **Changes.** Both controllers follow a filtered change stream
+- **The edge** (`python -m scadbuddy.camera.edge`, `camera/edge.py`) is the live view's
+  server. Its controller puts one on-demand path per recorded printer in its MediaMTX
+  (`source` is the relay's RTSP URL with the relay read user, `sourceOnDemand: true`,
+  `sourceOnDemandCloseAfter: 10s`), and never puts an unchanged path again, so a resync cuts no
+  viewer. Its MediaMTX serves WebRTC (WHEP) on 8889, LL-HLS on 8888 and WebRTC media on UDP
+  8189, behind the edge read user. The edge holds no access code and no bucket key. It sets
+  `scadbuddy_camera_viewers`.
+- **Changes.** The controllers follow a filtered change stream
   (`GET …/crud/camera[-relay]/changes`, `camera/follow.py`). On `resync` they read the full
   list again; they never act on a stale row.
 - **The two containers of a pod.** Each pod runs its image twice: MediaMTX
@@ -128,6 +142,58 @@ flowchart LR
   feed report carries an `error` that names it (`Recorder._note_clock`,
   `FeedSender.set_error`).
 
+## Live view
+
+The camera dialog (`NowPrinting.tsx`) shows a live player when `GET /api/v1/printers/now` marks
+the printer `camera_live`. That is true when the printer is recorded and the API has all four
+settings `SCADBUDDY_CAMERA_EDGE_WHEP_URL`, `SCADBUDDY_CAMERA_EDGE_HLS_URL`,
+`SCADBUDDY_CAMERA_EDGE_READ_USER` and `SCADBUDDY_CAMERA_EDGE_READ_PASS` (spec
+[§6.7](../superpowers/specs/2026-11-23-printer-camera-recording-design.md#67-live-view)).
+Otherwise the dialog keeps the MJPEG view.
+
+- **The proxy** (`api/camera.py`). The browser calls only the API's origin. The API forwards
+  to the edge with HTTP Basic auth of the edge read user on every call, and forwards no
+  browser header (no cookie, no `Authorization`). Routes:
+  - `POST /api/v1/camera/live/{printer_id}/whep` (an SDP offer, `application/sdp`, 64 KiB at
+    most), and `PATCH`/`DELETE …/whep/{session}`. The edge's `Location` is rewritten to the
+    API's path; any other `Location` is dropped.
+  - `GET …/hls/{name}` (LL-HLS). It passes the query keys `_HLS_msn`, `_HLS_part`,
+    `_HLS_skip`, `session` and `cookieCheck`, and no others. The name is
+    `[A-Za-z0-9_-]{1,128}.(m3u8|mp4|m4s)`. A 302 to a path of the same printer is rewritten into
+    the proxy; any other redirect is a 502.
+  - `GET /api/v1/printers/{id}/camera` (the feed states and `live`) and
+    `POST …/camera/reconnect` (202; the relay replaces that printer's path, `camera.reconnect`
+    event, `Relay.restart`). After the 202 the dialog starts its player again only when the
+    relay next reports `pulling` (a report newer than the one it read before), or after 20 s
+    (`NowPrinting.tsx` `CameraFeeds`). A player that started at once would attach to the old
+    pull while the relay removes it.
+- **Problem types.** `camera-edge-unset` (503: the route's own URL, or the user or password, is unset; `camera_live` is then false), `camera-edge-unreachable`
+  (502), `camera-edge-refused` (502: the edge refused the read user, or sent a redirect that
+  the proxy does not pass), `camera-live-session-ended` (404: MediaMTX dropped the HLS session;
+  the player starts again), `camera-not-recorded` (409 on reconnect; 404 on the live routes).
+- **The player** (`LivePlayer.tsx`). It tries WebRTC first. It falls back to LL-HLS (hls.js,
+  loaded on demand) after 6 s without a connected ICE state, after 6 s of ICE `disconnected`, or
+  at once when the offer is refused or ICE fails. After 10 s of HLS with no frame it shows
+  "Camera unavailable" with "Try again". A fatal HLS error before the first frame is retried
+  after 1 s inside that wait. Close and a change of printer end the WHEP session and destroy
+  hls.js. A WHEP answer that comes after the fallback is ended at once.
+- **An HLS session** (MediaMTX v1.21.4, measured 2026-11-25, edge e2e and curl). A request for
+  `index.m3u8` with no query gets a 302 to `index.m3u8?cookieCheck=1` and a cookie. The proxy
+  forwards no cookie, so the next answer names the session in the query key `session`
+  (`video1_stream.m3u8?session=<uuid>`, each segment and part too). A request without the
+  session gets 401 "session not found". Once made, the session id works without credentials at
+  MediaMTX, so it acts as a bearer key. The browser gets it in the playlists, through the
+  proxy, and sends it back in the query. The edge admits a request that names it without the
+  read password, so only the NetworkPolicy (the API's pods only on 8888) keeps it from being
+  used outside the proxy.
+- **Lifetime of a pull** (same date and method). With `hlsMuxerCloseAfter: 10s` the muxer is
+  gone 10 s after the last HLS request, the session stays a reader until about 40 s, and the
+  relay lost the edge's reader 48.5 s after the last request (69.2 s with the default 60 s).
+  So a viewer who closes the dialog costs the relay about 50 s of one RTSP client.
+- **Metrics.** `scadbuddy_camera_viewers{printer}` counts MediaMTX readers of the printer's
+  edge path: one per WebRTC session, one for the whole HLS muxer. It is not a count of people.
+  The "Live viewers" panel in the "Cameras" row shows it.
+
 ### MediaMTX facts (v1.21.4)
 
 The release is pinned by version and sha256 in the Dockerfile's `mediamtx` stage. The
@@ -141,25 +207,35 @@ The hooks need `curl`, so the camera images take the release binary on
 
 ## Code
 
-- Processes: `backend/scadbuddy/camera/relay.py`, `recorder.py`, shared `process.py` (hook
+- Processes: `backend/scadbuddy/camera/relay.py`, `recorder.py`, `edge.py`, shared `process.py` (hook
   server, `/healthz`, `/readyz`, `main_with`), `follow.py`, `feed.py`, `mediamtx.py` (control API
   client), `uploads.py` (bucket), `mp4.py` (init section parse), `settings.py`
-  (`RelaySettings`, `RecorderSettings`).
+  (`RelaySettings`, `RecorderSettings`, `EdgeSettings`).
 - API side: `backend/scadbuddy/camera/store.py` (`CameraStore`), `models.py`,
   `backend/scadbuddy/api/crud_camera.py`, `api/crud_camera_relay.py`; the callers in
-  `auth/exchange.py` `SERVICE_ACCOUNTS` (`scadbuddy-camera`, `scadbuddy-camera-relay`).
-- MediaMTX configs: `deploy/camera/mediamtx-relay.yml`, `deploy/camera/mediamtx-recorder.yml`.
+  `auth/exchange.py` `SERVICE_ACCOUNTS` (`scadbuddy-camera`, `scadbuddy-camera-relay`,
+  `scadbuddy-camera-edge`); the browser's routes `backend/scadbuddy/api/camera.py` and
+  `api/streaming.py` (`ClosingStreamingResponse`).
+- Frontend: `frontend/src/components/prints/LivePlayer.tsx`, `hlsLoader.ts`, `NowPrinting.tsx`
+  (`LiveCameraView`, `CameraFeeds`), `src/mocks/features/camera.ts`.
+- Agent: `agent/src/tools/print.ts` `get_printer_camera_state` (`read`) and
+  `reconnect_printer_camera` (`write`: it restarts ScadBuddy's own pull and sends nothing to the
+  printer, so it needs no approval). The live routes are `NOT_A_TOOL` entries in
+  `agent/src/tools/coverage.ts`; an agent reads a frame with `get_printer_camera`.
+- MediaMTX configs: `deploy/camera/mediamtx-relay.yml`, `mediamtx-recorder.yml`,
+  `mediamtx-edge.yml`.
 - Images: Dockerfile stages `mediamtx`, `camera-deps`, `camera`, `camera-relay`,
-  `camera-recorder`; published by `build-image.yml` job `camera`, checked by `ci.yml` job
+  `camera-recorder`, `camera-edge`; published by `build-image.yml` job `camera`, checked by `ci.yml` job
   `camera-image`.
 
 ## Data
 
 - Tables: `camera_segments`, `camera_leases`, `camera_feeds`, and the column
   `printers.camera_recording` (`backend/scadbuddy/migrations/20261124T0059Z_camera_recording.sql`).
-- Events: `camera.feed` (a feed state changed, `core/events.py` `CameraFeedEvent`). The
-  change streams' filter also names `camera.reconnect` (`api/crud_camera.py` `CAMERA_KINDS`),
-  which nothing sends before phase 3.
+- Events: `camera.feed` (a feed state changed, `core/events.py` `CameraFeedEvent`) and
+  `camera.reconnect` (the browser's Reconnect, `CameraReconnectEvent`; the relay's follower
+  replaces that printer's path, `api/crud_camera.py` `CAMERA_KINDS`). The browser also gets
+  `camera.feed` on the topic `printer:<id>` (`api/realtime.py`).
 - Blobs: one object per segment, under `<prefix>/camera/` in the camera bucket. Only the
   recorder pods hold its keys.
 - Metrics. The relay (`camera/relay.py`): `scadbuddy_camera_relay_pulling` (1 while the
@@ -168,7 +244,9 @@ The hooks need `curl`, so the camera images take the release binary on
   recorders (`camera/recorder.py`): `scadbuddy_camera_segments_indexed_total`,
   `scadbuddy_camera_upload_lag_seconds`, `scadbuddy_camera_backlog_bytes`,
   `scadbuddy_camera_leader` and `scadbuddy_camera_last_segment_age_seconds`. All are per
-  printer. The "Cameras" row of `deploy/grafana/scadbuddy-printing.json` shows them.
+  printer. The edge (`camera/edge.py` `ViewersCollector`) sets `scadbuddy_camera_viewers`,
+  read from MediaMTX's path list at each scrape. The "Cameras" row of
+  `deploy/grafana/scadbuddy-printing.json` shows them all.
 
 ## Tests
 
@@ -179,8 +257,18 @@ The hooks need `curl`, so the camera images take the release binary on
   real MediaMTX processes on the `deploy/camera/` configs run the relay and two recorders with
   their `curl` hooks; the test kills the leader and checks that the index has no gap. The
   Dockerfile's `test` stage has ffmpeg and MediaMTX, so it fails there instead of skipping.
+  The same file has the edge test: with no viewer the relay path has 0 readers; HLS through the
+  edge answers 200; the relay then shows 1 reader, gone 60 s after the last request at most;
+  HLS and WHEP answer 401 without the edge read password; no log holds a password.
+- API proxy: `backend/tests/api/test_camera_live.py` (a mock edge, and one walk through the proxy
+  to a real MediaMTX edge: `index.m3u8`, its redirect, the variant, the init and a segment, and one
+  blocking reload), `test_camera_routes.py`.
+- Player: `frontend/src/components/prints/LivePlayer.test.tsx` (a fake `RTCPeerConnection` and hls.js),
+  `NowPrinting.test.tsx`, and Playwright `frontend/e2e/camera-live.spec.ts` (the fallback to HLS
+  through msw, the 302, the feed list, Reconnect, and no reads after Close).
 - Images: `ci.yml` job `camera-image` (MediaMTX's version, `curl`, `TZ=UTC`, the refusals,
-  MediaMTX on each config, and the relay's read user from `MTX_AUTHINTERNALUSERS_0_*`).
+  MediaMTX on each config, the relay's read user from `MTX_AUTHINTERNALUSERS_0_*`, and the
+  edge's: HLS and WHEP answer 401 without or with a wrong password, and 404 with the right one).
 
 ## Limits and known issues
 
@@ -196,4 +284,19 @@ The hooks need `curl`, so the camera images take the release binary on
   estimate, §6.9). So the relay's image is not rolled with ScadBuddy's releases: it changes
   only when the relay's code or MediaMTX changes (spec §6.1). No deploy pin exists for it yet.
 - Deployment lives in eh-homelab/clusters; the issue that asks for it is drafted with the
-  phase 1 PR.
+  phase 1 PR. The edge's manifests (the Deployment, two secrets, NetworkPolicies, the UDP
+  port) are not made yet.
+- WebRTC media (UDP 8189) from browsers to the edge is not measured. The player falls back
+  to LL-HLS after 6 s, which needs no UDP.
+- hls.js through the real proxy's 302 is proven only against mocks (msw in Playwright). The
+  proxy and a real MediaMTX are tested together with an HTTP client (TestClient, which follows
+  the 302), not with a browser.
+- The Go front (`tools/go/core`, not deployed) forwards camera routes to Python. A blocking HLS
+  request takes about 20 s there: the Python proxy waits up to 20 s for a blocking playlist, so
+  the front's forward must allow that.
+- A WHEP session that the browser's 6 s timer ends while the edge still creates it is ended by
+  the player when the answer comes. If the page closes first, MediaMTX's own timeout ends it.
+- A later ICE `disconnected` is covered by a 6 s timer; a `disconnected` that clears keeps
+  WebRTC.
+- The proxy has no cap on live viewers per printer (the MJPEG route has 4). Each HLS request
+  runs one query of the recorded printers, and LL-HLS asks for a part many times a second.

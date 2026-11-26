@@ -43,7 +43,7 @@ from scadbuddy.printers.store import PrinterNotFoundError
 
 MAX_SEGMENTS = 500
 #: The ``scadbuddy_events`` kinds the camera callers' streams carry. ``camera.reconnect`` is
-#: sent from phase 3; the filter names it now.
+#: sent by the browser's reconnect route (``api/camera.py``).
 CAMERA_KINDS = frozenset({"printer.changed", "camera.reconnect"})
 #: The streams both camera callers may hold together: their own budget, counted by caller
 #: and not by credential, never taken from the agent's.

@@ -9,11 +9,17 @@
 #   image          the app image: build, ruff and mypy, container smoke, real-backend
 #                  e2e and the bambuddy-fs live mount; every backend change, plus the
 #                  frontend and Go trees that run against it; and the
-#                  `profile-fetch-image` and `camera-image` jobs (#6625, #7328)
-#   docs_only      every changed path is a Markdown file under docs/: the lint,
-#                  frontend, agent, models, freshness and Go jobs skip, and only the
-#                  `markdown` job checks the change. False with `all` and on an
-#                  empty diff.
+#                  `profile-fetch-image`, `camera-image` and `cups-image` jobs (#6625,
+#                  #7328, deploy/cups/)
+#   docs_only      every changed path is a Markdown file under docs/, or a CLAUDE.md
+#                  or AGENTS.md in any directory but a vendor/ tree, and none is a doc a
+#                  test reads (`read_by_tests`): the lint, frontend, agent, models,
+#                  freshness and Go jobs skip, and only the `markdown` job checks the
+#                  change. False with `all` and on an empty diff.
+#
+# Those docs paths select no lane, so `backend/CLAUDE.md` runs no backend job.
+# A path under a vendor/ directory is never docs: a vendored module's CLAUDE.md or
+# AGENTS.md is module content, and the Go job's vendor drift check must see it.
 #
 # Each lane also selects on the shared build inputs (Dockerfile, .dockerignore) and
 # on its own wiring (ci.yml, this script, changed-paths.sh), as select-go.sh does.
@@ -32,17 +38,22 @@ backend="^(backend/|models/|deploy/camera/|deploy/grafana/|deploy/security/|test
 # backend/scadbuddy/migrations_agent/ (#5299). The job also checks the backend's harness pin.
 agent_durable="^(agent-durable/|agent/|backend/scadbuddy/migrations_agent/|backend/(pyproject\.toml|uv\.lock)$|\.github/scripts/(uv-git-pin|harness-pin)(\.test)?\.sh$|$wiring)"
 rust="^(workers/rust/|$wiring)"
-image_extra='^(frontend/|scripts/gen-api-request-defaults\.mjs$|tools/go/|go\.work(\.sum)?$|vendor/|\.github/scripts/(bambuddy-fs-live|fonts-probe)\.sh$)'
+image_extra='^(frontend/|deploy/cups/|scripts/gen-api-request-defaults\.mjs$|tools/go/|go\.work(\.sum)?$|vendor/|\.github/scripts/(bambuddy-fs-live|fonts-probe)\.sh$)'
 
+docs='^(docs/.+\.md|(.+/)?(CLAUDE|AGENTS)\.md)$'
+# A doc a test reads is code, not docs-only: `agent/test/evalScoring.test.ts` resolves
+# the design spec's §6.2 from disk (#7792). A new test that reads a doc adds its path here.
+read_by_tests='^docs/superpowers/specs/2026-09-22-scadbuddy-design\.md$'
 paths=$(cat)
-pick() { if grep -qE "$1" <<<"$paths"; then echo true; else echo false; fi; }
+code=$(grep -vE "$docs" <<<"$paths" || true; grep -E "(^|/)vendor/|$read_by_tests" <<<"$paths" || true)
+pick() { if grep -qE "$1" <<<"$code"; then echo true; else echo false; fi; }
 
 b=$(pick "$backend")
 echo "backend=$b"
 echo "agent_durable=$(pick "$agent_durable")"
 echo "rust=$(pick "$rust")"
 if [ "$b" = true ]; then echo "image=true"; else echo "image=$(pick "$image_extra")"; fi
-if [ -n "$paths" ] && ! grep -qvE '^docs/.+\.md$' <<<"$paths"; then
+if [ -n "$paths" ] && [ -z "$code" ]; then
   echo "docs_only=true"
 else
   echo "docs_only=false"

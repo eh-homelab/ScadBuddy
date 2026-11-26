@@ -24,7 +24,7 @@ import { statusLabel } from '../../agent/chat/labels'
 import { pageContext, suggestedPrompts } from '../../agent/chat/pageContext'
 import { isDone, QUEUE_MAX } from '../../agent/chat/protocol'
 import { askedBy, isBusy, isOwnedByBrowser, type SessionPatch, type SessionState } from '../../agent/chat/state'
-import { feedBlocks, toolStatus } from '../../agent/chat/toolGroups'
+import { feedBlocks, stopReasonText, stoppedBy, toolStatus } from '../../agent/chat/toolGroups'
 import type { ChatTransportFactory } from '../../agent/chat/transport'
 import { useAgentChat } from '../../agent/chat/useAgentChat'
 import { useSpeakReplies } from '../../agent/chat/voice'
@@ -926,6 +926,7 @@ export function AssistantChat({
                 key={`tools-${block.id}`}
                 calls={block.calls}
                 statuses={block.calls.map((call) => toolStatus(call, active.items, { settled: !busy }))}
+                reasons={block.calls.map((call) => stopReasonText(stoppedBy(call, active.items)))}
                 sessionId={active.id}
                 advanced={advanced}
               />
