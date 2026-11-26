@@ -1227,9 +1227,9 @@ async def referenced_asset_ids(
     """Every asset id something keeps (#296): the sweep removes nothing in here.
 
     - every output's records, and for an output whose ``params`` is empty or gone, the
-      root model of its 3MF, where the provenance "Edit in ScadBuddy" falls back to is
-      stamped. The rows' JSON is scanned (#7255, #7257). The ids such a 3MF names are
-      kept in ``output_derived`` (kind ``asset_ids``, `ASSET_IDS_VERSION`), so a 3MF,
+      root model of its 3MF, where its provenance is stamped. The rows' JSON is scanned
+      (#7255, #7257). The ids such a 3MF names are kept in ``output_derived`` (kind
+      ``asset_ids``, `ASSET_IDS_VERSION`), so a 3MF,
       which is never rewritten, is read once, from its model blob through a temporary
       file (#7256);
     - ``records``: JSON records from Postgres, each scanned whole: every saved

@@ -683,8 +683,7 @@ string.
     and `scadbuddy_assets_swept_total`.
   - *What keeps an asset.* Any 64-hex string equal to its id in: an output's JSON
     records (`params.json`, `meta.json`) or, when `params.json` is gone, the raw
-    root model of its 3MF, where the provenance "Edit in ScadBuddy" falls back to
-    is stamped (raw rather than through `provenance.read`, which answers "no
+    root model of its 3MF, where its provenance is stamped (raw rather than through `provenance.read`, which answers "no
     stamp" for a stamp it cannot parse); a
     saved preset (`presets/`); a template's `presets.json` or `model.json`, mine or
     built-in; or a job in the render queue's store, whatever its state (with
