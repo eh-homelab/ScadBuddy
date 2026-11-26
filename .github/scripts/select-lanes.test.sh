@@ -51,7 +51,10 @@ expect "true true true true false" .github/workflows/ci.yml
 expect "true true true true false" .github/scripts/select-lanes.sh
 expect "true true true true false" .github/scripts/changed-paths.sh
 expect "false false false false false" README.md
-expect "false false false false true" docs/superpowers/specs/2026-09-22-scadbuddy-design.md
+# The design spec is the exception: agent/test/evalScoring.test.ts reads its §6.2, so a
+# change to it is not docs-only and the agent job runs (#7792).
+expect "false false false false false" docs/superpowers/specs/2026-09-22-scadbuddy-design.md
+expect "false false false false true" docs/superpowers/specs/2026-09-27-template-pipelines-design.md
 expect "false false false false false" .github/workflows/build-image.yml
 expect "false false false false false" backendx/foo.py
 expect "false false false false false" workers/rustacean.md
