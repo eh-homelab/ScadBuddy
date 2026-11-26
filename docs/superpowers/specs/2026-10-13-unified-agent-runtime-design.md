@@ -674,7 +674,7 @@ never did (`questions/service.ts:34-38`).
     message and die before Claude Code writes it.
 - **Retries are bounded** by the recovery loop's 3 cycles. After that the turn ends `failed`,
   with the reason, as classic's `interrupted` does today.
-- **Deploy.** On SIGTERM the worker stops polling. A running turn gets up to 12 s
+- **Deploy.** On SIGTERM the worker stops polling. A running turn gets up to 5 minutes (12 s before #7874)
   (`TurnHost.stop` `graceMs`, beside `stopTurns`), and is then closed with `q.close()`, which
   gives E3's graceful synthetic result. Only such a cut turn fails with `ShuttingDown`,
   which is retryable, and the new pods resume it as above. A turn that ends on its own in
