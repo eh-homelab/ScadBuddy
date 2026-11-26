@@ -82,6 +82,10 @@ export function stoppedBy(call: ToolCall, items: readonly FeedItem[]): string | 
   if (at < 0) return undefined
   // A call that started after this one's result came: this one had ended, so its failure is
   // its own, not the stop's (#7911). Unknown (no `resultAfter`, or it left the feed): as before.
+  // The match is by id alone: `freshId` can give a later item the id of an error that
+  // `dropErrorsAbout` removed, so `ended` can point too far down. Then the scan goes past later
+  // calls it should stop at, and the call shows "Stopped" as before #7911, never a wrong failure
+  // (#7920).
   const ended = call.resultAfter === undefined ? -1 : items.findIndex((i) => i.id === call.resultAfter)
   for (const [offset, item] of items.slice(at + 1).entries()) {
     if (item.kind === 'error' && item.code !== undefined && STOP_CODES.has(item.code)) return item.code
