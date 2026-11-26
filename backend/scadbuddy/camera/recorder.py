@@ -146,6 +146,11 @@ LEADER = Gauge(
     "1 while this recorder holds the printer's lease.",
     ["printer", "recorder"],
 )
+STALL_RELEASES = Counter(
+    "scadbuddy_camera_stall_releases_total",
+    "Leases this recorder gave up because it indexed nothing while video came in (#7407).",
+    ["printer"],
+)
 LAST_SEGMENT_AGE = Gauge(
     "scadbuddy_camera_last_segment_age_seconds",
     "Seconds since this recorder's last segment of the printer (since the path started, before"
@@ -190,6 +195,9 @@ class _Feed:
     #: The ends this recorder's index calls left since the renewal on its way was sent: a
     #: stale lease answer can name only these, or the end before them.
     own_ends: list[datetime] = field(default_factory=list)
+    #: The ends of index calls that failed on this side: each may have committed (a lost
+    #: answer). A lease answer that names one confirms it (`Recorder._confirm`, #7998).
+    unsure_ends: set[datetime] = field(default_factory=set)
     #: Successful index calls, and the count at the last renewal (`Recorder._check_stall`).
     indexed_ok: int = 0
     stall_mark: int = 0
@@ -262,6 +270,8 @@ class Recorder:
         self._lock = asyncio.Lock()
         #: A full reconcile has put the API's paths in MediaMTX (`ready`).
         self._synced = False
+        #: The last ``ready`` listing and when it was read (`_ready_paths`).
+        self._ready_cache: tuple[float, dict[str, bool]] | None = None
 
     def __repr__(self) -> str:
         return f"Recorder(name={self._name!r}, printers={sorted(self._feeds)!r})"
@@ -542,6 +552,7 @@ class Recorder:
                 (BACKLOG, (printer_id,)),
                 (LEADER, (printer_id, self._name)),
                 (LAST_SEGMENT_AGE, (printer_id,)),
+                (STALL_RELEASES, (printer_id,)),
             ):
                 with suppress(KeyError):
                     gauge.remove(*labels)
@@ -813,12 +824,16 @@ class Recorder:
             return
         self._lead(printer_id, feed, answer.held, sent)
         if not answer.held:
+            # A count from a past time as leader must not carry over to the next one.
+            feed.stall_ticks = 0
             self._prune(feed, answer.indexed_until)
             return
         # A stale answer names an end this recorder's own index calls left (`own_ends`);
         # any other end is another recorder's: the handover (D14).
         mine = {before, feed.own_end, feed.indexing, *feed.own_ends}
-        if answer.indexed_until not in mine:
+        if answer.indexed_until in feed.unsure_ends:
+            self._confirm(feed, answer.indexed_until)
+        elif answer.indexed_until not in mine:
             self._handover(feed, answer.indexed_until)
         self._report(printer_id, feed)
         await self._check_stall(printer_id, feed)
@@ -833,8 +848,7 @@ class Recorder:
             feed.stall_ticks = 0
             return
         try:
-            async with asyncio.timeout(CHECK_BUDGET):
-                ready = (await self._mtx.ready()).get(printer_id, False)
+            ready = (await self._ready_paths()).get(printer_id, False)
         except (httpx.HTTPError, TimeoutError):
             return
         if not ready:
@@ -851,7 +865,19 @@ class Recorder:
         )
         feed.stall_ticks = 0
         feed.not_before = self._clock() + START_HOLDOFF
+        STALL_RELEASES.labels(printer_id).inc()
         await self._release(printer_id, feed)
+
+    async def _ready_paths(self) -> dict[str, bool]:
+        """MediaMTX's ``ready`` flags, read at most once per half tick: the stall checks of
+        every printer in one tick share one listing (#7998)."""
+        now = self._clock()
+        if self._ready_cache is not None and now - self._ready_cache[0] < TICK_SECONDS / 2:
+            return self._ready_cache[1]
+        async with asyncio.timeout(CHECK_BUDGET):
+            ready = await self._mtx.ready()
+        self._ready_cache = (now, ready)
+        return ready
 
     async def upload(self, printer_id: str) -> None:
         """One upload pass: adopt unnamed files, then, while leading, upload and index the
@@ -879,6 +905,16 @@ class Recorder:
             item.seg.path.unlink(missing_ok=True)
 
     @staticmethod
+    def _confirm(feed: _Feed, end: datetime) -> None:
+        """An index call of this recorder that failed on its side had committed: drop the
+        segments it named, as a success would have, with no discontinuity (#7998)."""
+        for item in [i for i in feed.pending if i.seg.ends_at <= end]:
+            feed.pending.remove(item)
+            item.seg.path.unlink(missing_ok=True)
+        feed.own_end = end if feed.own_end is None else max(feed.own_end, end)
+        feed.unsure_ends = {e for e in feed.unsure_ends if e > feed.own_end}
+
+    @staticmethod
     def _handover(feed: _Feed, indexed_until: datetime | None) -> None:
         """Another recorder indexed after this one (D14): start from the segment that holds
         the index's end, or the oldest one after it, marked ``discontinuity``."""
@@ -891,6 +927,8 @@ class Recorder:
         else:
             feed.gap = True
         feed.own_end = indexed_until
+        if indexed_until is not None:
+            feed.unsure_ends = {e for e in feed.unsure_ends if e > indexed_until}
 
     def _report(self, printer_id: str, feed: _Feed) -> None:
         if self._clock() - feed.arrived >= STALL_SECONDS:
@@ -965,7 +1003,7 @@ class Recorder:
             ).model_dump(mode="json")
             for item in batch
         ]
-        feed.indexing = max(item.seg.ends_at for item in batch)
+        sent_end = feed.indexing = max(item.seg.ends_at for item in batch)
         try:
             await self._crud.request(
                 "POST",
@@ -986,6 +1024,8 @@ class Recorder:
                 )
             return False
         except Exception as error:
+            # It may have committed and lost its answer: its end may be this recorder's own.
+            feed.unsure_ends.add(sent_end)
             logger.warning(
                 "camera recorder: the index of %s failed (%s)", printer_id, type(error).__name__
             )
@@ -1000,6 +1040,7 @@ class Recorder:
             feed.own_end = end if feed.own_end is None else max(feed.own_end, end)
         if feed.own_end is not None:
             feed.own_ends.append(feed.own_end)
+            feed.unsure_ends = {e for e in feed.unsure_ends if e > feed.own_end}
         feed.indexed_ok += 1
         SEGMENTS_INDEXED.labels(printer_id).inc(len(batch))
         lag = datetime.now(UTC) - batch[-1].seg.ends_at

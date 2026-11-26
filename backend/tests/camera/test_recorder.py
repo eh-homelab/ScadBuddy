@@ -1364,3 +1364,104 @@ async def test_a_printer_added_again_during_the_flush_keeps_its_path_when_delete
     finally:
         gate.set()
         await rig.recorder.aclose()
+
+
+async def test_a_lost_index_answer_named_by_a_renewal_is_no_handover(
+    tmp_path: Path, api: FakeCamera
+) -> None:
+    """The index call commits but its answer is lost (#7998), and the renewal on its way
+    names that end: the end is this recorder's own, so no false discontinuity follows."""
+    rig = Rig(tmp_path, api)
+    await rig.recorder.reconcile_all()
+    await rig.segment(0)
+    await rig.recorder.tick(P1)
+    await rig.segment(4)
+    await rig.segment(8)
+    real_lease = rig.recorder._lease
+    crud = rig.recorder._crud
+    real_request = crud.request
+
+    async def lost(method: str, path: str, **kwargs: Any) -> httpx.Response:
+        response = await real_request(method, path, **kwargs)
+        if path.endswith("/segments"):
+            raise httpx.ReadTimeout("the answer was lost")
+        return response
+
+    async def lease(printer_id: str, action: Any) -> Any:
+        # The index commits while the renewal is on its way; the answer names its end.
+        crud.request = lost  # type: ignore[method-assign]
+        await rig.recorder.upload(P1)
+        crud.request = real_request  # type: ignore[method-assign]
+        return await real_lease(printer_id, action)
+
+    rig.recorder._lease = lease  # type: ignore[method-assign]
+    await rig.recorder.renew(P1)
+    rig.recorder._lease = real_lease  # type: ignore[method-assign]
+    await rig.segment(12)
+    await rig.recorder.tick(P1)
+    assert api.starts() == [at(0), at(4), at(8), at(12)]
+    assert api.flags() == [True, False, False, False]
+    await rig.recorder.aclose()
+
+
+async def test_the_stall_count_restarts_when_the_lease_is_lost(
+    tmp_path: Path, api: FakeCamera
+) -> None:
+    """Stall renewals counted while leading do not carry over a time as standby (#7998)."""
+    rig = Rig(tmp_path, api)
+    await rig.recorder.reconcile_all()
+    await rig.recorder.tick(P1)
+    feed = rig.recorder._feeds[P1]
+    feed.stall_ticks = STALLED_LEAD_TICKS - 1
+    api.leases[P1] = ("rec-b", api.now + timedelta(hours=1))
+    await rig.recorder.renew(P1)
+    assert not feed.held
+    assert feed.stall_ticks == 0
+    await rig.recorder.aclose()
+
+
+async def test_one_tick_reads_the_ready_paths_once(tmp_path: Path, api: FakeCamera) -> None:
+    """The stall check of every printer in one tick shares one ``/v3/paths/list`` (#7998)."""
+    api.printers = [P1, "p2"]
+    rig = Rig(tmp_path, api)
+    await rig.recorder.reconcile_all()
+    for name in (P1, "p2"):
+        await rig.recorder.tick(name)
+    rig.mtx.ready.update({P1: True, "p2": True})
+    real = rig.recorder._mtx.ready
+    calls: list[int] = []
+
+    async def ready() -> dict[str, bool]:
+        calls.append(1)
+        return await real()
+
+    rig.recorder._mtx.ready = ready  # type: ignore[method-assign]
+    rig.clock.now += 5
+    for name in (P1, "p2"):
+        await rig.recorder.renew(name)
+    assert len(calls) == 1
+    rig.clock.now += 5
+    await rig.recorder.renew(P1)
+    assert len(calls) == 2
+    await rig.recorder.aclose()
+
+
+async def test_a_stall_release_is_counted(tmp_path: Path, api: FakeCamera) -> None:
+    """Each stall release adds one to ``scadbuddy_camera_stall_releases_total``, so two
+    recorders that both cannot index and hand the lease back and forth show it (#7998)."""
+    labels = {"printer": P1}
+    before = REGISTRY.get_sample_value("scadbuddy_camera_stall_releases_total", labels) or 0
+    rig = Rig(tmp_path, api)
+    await rig.recorder.reconcile_all()
+    await rig.segment(0)
+    await rig.recorder.tick(P1)
+    rig.mtx.ready[P1] = True
+    api.bucket.fail = True
+    for i in range(STALLED_LEAD_TICKS + 1):
+        await rig.segment(4 + i * 4)
+        rig.clock.now += 5
+        await rig.recorder.tick(P1)
+    assert P1 not in api.leases
+    after = REGISTRY.get_sample_value("scadbuddy_camera_stall_releases_total", labels)
+    assert after == before + 1
+    await rig.recorder.aclose()
