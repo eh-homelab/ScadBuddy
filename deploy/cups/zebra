@@ -75,7 +75,9 @@ ready() {
   line2=$(sed -n 2p <<<"$status")
   IFS=',' read -r -a f1 <<<"$line1"
   IFS=',' read -r -a f2 <<<"$line2"
-  if [ "${#f1[@]}" -lt 4 ] || [ "${#f2[@]}" -lt 3 ]; then
+  # The length must be digits before it reaches arithmetic: bash evaluates an
+  # expression's text, so a reply like `a[$(cmd)]` would run cmd.
+  if [ "${#f1[@]}" -lt 4 ] || [ "${#f2[@]}" -lt 3 ] || ! [[ "${f1[3]}" =~ ^[0-9]{1,6}$ ]]; then
     echo "STATE: +connecting-to-device" >&2
     echo "INFO: The label printer $host:$port does not answer. Waiting." >&2
     return 1
