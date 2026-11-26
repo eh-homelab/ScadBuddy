@@ -56,17 +56,33 @@ class ClaimStore:
         self.root = root
 
     @contextlib.contextmanager
-    def _locked(self) -> Iterator[None]:
-        """The store's lock, held for one change of a claim's name (#7947). It is a file
-        beside the root, not in it, so a listing of the claims is only claims; opened for
-        writing, as an exclusive ``flock`` on NFS needs (the API's ``/data``)."""
+    def _lock_file(self) -> Iterator[int]:
+        """The store's lock file, open: a file beside the root, not in it, so a listing
+        of the claims is only claims; opened for writing, as an exclusive ``flock`` on NFS
+        needs (the API's ``/data``)."""
         self.root.mkdir(parents=True, exist_ok=True)
         fd = os.open(self.root.with_name(f"{self.root.name}.lock"), os.O_RDWR | os.O_CREAT, 0o644)
         try:
-            fcntl.flock(fd, fcntl.LOCK_EX)
-            yield
+            yield fd
         finally:
             os.close(fd)
+
+    @staticmethod
+    @contextlib.contextmanager
+    def _held(fd: int) -> Iterator[None]:
+        """The lock on the open lock file ``fd``, held for one change of a claim's name
+        (#7947)."""
+        fcntl.flock(fd, fcntl.LOCK_EX)
+        try:
+            yield
+        finally:
+            fcntl.flock(fd, fcntl.LOCK_UN)
+
+    @contextlib.contextmanager
+    def _locked(self) -> Iterator[None]:
+        """The store's lock, held for one change of a claim's name (#7947)."""
+        with self._lock_file() as fd, self._held(fd):
+            yield
 
     def _path(self, name: str) -> Path:
         if not _NAME.fullmatch(name):
@@ -174,13 +190,16 @@ class ClaimStore:
             entries = list(self.root.iterdir())
         except FileNotFoundError:
             return 0
-        for path in entries:
-            with self._locked():
-                try:
-                    if os.stat(path).st_mtime >= cutoff:
+        # One open of the lock file for the whole sweep, the lock taken per entry (#7966):
+        # each open is a round trip on NFS.
+        with self._lock_file() as fd:
+            for path in entries:
+                with self._held(fd):
+                    try:
+                        if os.stat(path).st_mtime >= cutoff:
+                            continue
+                        path.unlink()
+                    except FileNotFoundError:
                         continue
-                    path.unlink()
-                except FileNotFoundError:
-                    continue
-            removed += 1
+                removed += 1
         return removed

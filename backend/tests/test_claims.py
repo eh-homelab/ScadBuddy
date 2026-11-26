@@ -2,6 +2,7 @@ import hashlib
 import os
 import threading
 import time
+from collections.abc import Iterator
 from datetime import timedelta
 from pathlib import Path
 from typing import Any
@@ -112,12 +113,21 @@ def test_a_put_survives_the_sweep_removing_the_claim_under_it(
     assert claims.get(name) == b"a"
 
 
-#: The puts `_put_waits_on_the_lock` started, joined by each test once its call returns.
-_PUTS: list[threading.Thread] = []
+@pytest.fixture
+def puts() -> Iterator[list[threading.Thread]]:
+    """The puts `_put_waits_on_the_lock` starts, joined at teardown whether or not the
+    test passed, so none runs on into the next test (#7966)."""
+    started: list[threading.Thread] = []
+    yield started
+    for put in started:
+        put.join(timeout=5)
 
 
 def _put_waits_on_the_lock(
-    claims: ClaimStore, name: str, monkeypatch: pytest.MonkeyPatch
+    claims: ClaimStore,
+    name: str,
+    monkeypatch: pytest.MonkeyPatch,
+    puts: list[threading.Thread],
 ) -> list[bool]:
     """Patch ``os.stat`` so that the first stat of the claim ``name`` (the check of a
     release or the sweep) starts a put of its bytes in a thread, and records whether that
@@ -129,7 +139,7 @@ def _put_waits_on_the_lock(
         if Path(path).name == name and not waited:
             put = threading.Thread(target=claims.put, args=(b"a",))
             put.start()
-            _PUTS.append(put)
+            puts.append(put)
             put.join(timeout=0.3)
             waited.append(put.is_alive())
         return stat(path, *args, **kwargs)
@@ -138,13 +148,8 @@ def _put_waits_on_the_lock(
     return waited
 
 
-def _join_puts() -> None:
-    while _PUTS:
-        _PUTS.pop().join(timeout=5)
-
-
 def test_a_put_waits_while_the_sweep_checks_and_removes_a_claim(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, puts: list[threading.Thread]
 ) -> None:
     """#7947 (review 3c 1.4): a put of an old claim's bytes cannot come between the
     sweep's check and its removal; it waits on the lock, then writes the claim anew."""
@@ -152,9 +157,10 @@ def test_a_put_waits_while_the_sweep_checks_and_removes_a_claim(
     name = claims.put(b"a")
     past = time.time() - timedelta(days=2).total_seconds()
     os.utime(tmp_path / "claims" / name, (past, past))
-    waited = _put_waits_on_the_lock(claims, name, monkeypatch)
+    waited = _put_waits_on_the_lock(claims, name, monkeypatch, puts)
     assert claims.sweep(timedelta(days=1)) == 1
-    _join_puts()
+    for put in puts:
+        put.join(timeout=5)
     assert waited == [True]
     assert claims.get(name) == b"a"
 
@@ -222,7 +228,7 @@ def test_release_never_moves_a_claim_another_request_put_since(
 
 
 def test_a_put_waits_while_a_release_checks_and_removes_its_claim(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, puts: list[threading.Thread]
 ) -> None:
     """#7947: a put of the same bytes cannot come between `release`'s check (still the
     file its hold wrote) and its removal, so the claim's name is never missing while
@@ -230,9 +236,10 @@ def test_a_put_waits_while_a_release_checks_and_removes_its_claim(
     on the lock, then writes the claim anew."""
     claims = ClaimStore(tmp_path / "claims")
     held = claims.hold(b"a")
-    waited = _put_waits_on_the_lock(claims, held.name, monkeypatch)
+    waited = _put_waits_on_the_lock(claims, held.name, monkeypatch, puts)
     claims.release(held)
-    _join_puts()
+    for put in puts:
+        put.join(timeout=5)
     assert waited == [True]
     assert claims.get(held.name) == b"a"
     assert [path.name for path in (tmp_path / "claims").iterdir()] == [held.name]
