@@ -157,7 +157,8 @@ func (t *Tracer) TraceAcquireStart(ctx context.Context, _ *pgxpool.Pool, _ pgxpo
 	if !trace.SpanContextFromContext(ctx).IsValid() {
 		return ctx
 	}
-	ctx, span := t.tracer.Start(ctx, "pgxpool.acquire")
+	ctx, span := t.tracer.Start(ctx, "pgxpool.acquire", trace.WithSpanKind(trace.SpanKindInternal),
+		trace.WithAttributes(attribute.String("db.system.name", "postgresql"), attribute.String("db.system", "postgresql")))
 	return context.WithValue(ctx, acquireKey{}, span)
 }
 

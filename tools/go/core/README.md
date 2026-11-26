@@ -1,7 +1,7 @@
 # scadbuddy-core
 
 ScadBuddy's API in Go (#7667). It answers the areas it has and gives every other request,
-unchanged, to the Python API: WebSockets, SSE and large bodies included. It is not deployed yet.
+unchanged, to the Python API: WebSockets, SSE and large bodies included. On prod it is the API pod's front on 8080 and 8082 (eh-homelab/clusters#4334, #4366).
 
 | Variable | Default | What |
 |---|---|---|
@@ -99,7 +99,9 @@ no TCP ones (`editor/nonet.py`). Over a `unix://` upstream uvicorn gives Python 
 address, so `core/proxies.py` ignores the `X-Forwarded-For` the front sets: use TCP.
 
 A forward that Python refuses (nothing listens yet, at a pod's start) is dialled again every
-250 ms, for at most 30 s or until the request's context ends; then the answer is 502. Only the
+250 ms, for at most 30 s or until its client goes away; then the answer is 502. This holds only
+until Python has taken one connection: after that, Python is up, and a refusal (Python restarted)
+is a 502 at once. Only the
 dial is tried again, so no request reaches Python twice.
 
 ## Telemetry

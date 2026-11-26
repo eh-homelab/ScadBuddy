@@ -14,6 +14,7 @@ import (
 	"os"
 	"os/signal"
 	"strings"
+	"sync/atomic"
 	"syscall"
 	"time"
 
@@ -275,7 +276,7 @@ func newRouter(pool *pgxpool.Pool, next http.Handler, keys *seal.Keys, areas, au
 // newUpstream forwards to the Python API at an http:// URL or a unix:///path socket. The
 // request's client, as the trusted proxies name it, is the one X-Forwarded-For value Python
 // reads; Python trusts the front alone. Each forward is a client span whose traceparent
-// Python continues. A dial that Python refuses is tried again (waitForUpstream).
+// Python continues. A dial that Python refuses is tried again (upstreamWait).
 func newUpstream(raw string, trusted front.Networks, tel *telemetry.Telemetry) (http.Handler, error) {
 	target, err := url.Parse(raw)
 	if err != nil || raw == "" {
@@ -286,12 +287,13 @@ func newUpstream(raw string, trusted front.Networks, tel *telemetry.Telemetry) (
 	transport.DisableCompression = true
 	transport.MaxIdleConnsPerHost = 64
 	dialer := &net.Dialer{Timeout: 30 * time.Second, KeepAlive: 30 * time.Second}
+	wait := &upstreamWait{}
 	switch target.Scheme {
 	case "http":
-		transport.DialContext = waitForUpstream(dialer.DialContext)
+		transport.DialContext = wait.dial(dialer.DialContext)
 	case "unix":
 		path := target.Path
-		transport.DialContext = waitForUpstream(func(ctx context.Context, _, _ string) (net.Conn, error) {
+		transport.DialContext = wait.dial(func(ctx context.Context, _, _ string) (net.Conn, error) {
 			return dialer.DialContext(ctx, "unix", path)
 		})
 		target = &url.URL{Scheme: "http", Host: "scadbuddy"}
@@ -302,6 +304,7 @@ func newUpstream(raw string, trusted front.Networks, tel *telemetry.Telemetry) (
 		Transport:     tel.Transport(transport, target.Hostname()),
 		FlushInterval: -1, // SSE and progress answers reach the client as they are written.
 		Rewrite: func(p *httputil.ProxyRequest) {
+			p.Out = p.Out.WithContext(context.WithValue(p.Out.Context(), requestDone{}, p.In.Context().Done()))
 			p.Out.URL.Scheme, p.Out.URL.Host = target.Scheme, target.Host
 			p.Out.Host = p.In.Host
 			// Rewrite drops these; Python reads them from its trusted peer, the front.
@@ -322,20 +325,33 @@ func newUpstream(raw string, trusted front.Networks, tel *telemetry.Telemetry) (
 	}, nil
 }
 
-// waitForUpstream dials again, every 250 ms, while the upstream refuses the connection (or
-// its socket file is not there yet), until the request's context ends or dialWait has
-// passed. Only a dial is tried again: no byte of the request has been sent, so no request
-// is ever sent twice. Then the last error stands, and the forward answers 502.
-func waitForUpstream(dial func(ctx context.Context, network, address string) (net.Conn, error)) func(ctx context.Context, network, address string) (net.Conn, error) {
+// requestDone carries the forwarded request's Done channel to the dial. The transport dials on
+// a context that its request's cancellation does not end, but that keeps its values.
+type requestDone struct{}
+
+// upstreamWait dials again, every 250 ms, while the upstream refuses the connection (or its
+// socket is not there yet), as it does while Python starts beside core, until the request
+// ends or dialWait passes. Only the dial is tried again, so no request is sent twice. Once
+// Python has taken one connection it is up: a later refusal (Python restarted) fails at once.
+type upstreamWait struct{ answered atomic.Bool }
+
+func (u *upstreamWait) dial(dial func(ctx context.Context, network, address string) (net.Conn, error)) func(ctx context.Context, network, address string) (net.Conn, error) {
 	return func(ctx context.Context, network, address string) (net.Conn, error) {
+		done, _ := ctx.Value(requestDone{}).(<-chan struct{})
 		deadline := time.Now().Add(dialWait)
 		for {
 			conn, err := dial(ctx, network, address)
-			if err == nil || !refused(err) || !time.Now().Before(deadline) {
-				return conn, err
+			if err == nil {
+				u.answered.Store(true)
+				return conn, nil
+			}
+			if u.answered.Load() || !refused(err) || !time.Now().Before(deadline) {
+				return nil, err
 			}
 			select {
 			case <-ctx.Done():
+				return nil, err
+			case <-done:
 				return nil, err
 			case <-time.After(250 * time.Millisecond):
 			}

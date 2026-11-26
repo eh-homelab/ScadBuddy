@@ -180,10 +180,11 @@ pub fn init_telemetry() -> anyhow::Result<Telemetry> {
             .with_tracer(p.tracer("scadbuddy"))
             .with_filter(EnvFilter::new("info"))
     });
-    let logs = telemetry
-        .logs
-        .as_ref()
-        .map(|p| OpenTelemetryTracingBridge::new(p).with_filter(EnvFilter::new("info")));
+    let logs = telemetry.logs.as_ref().map(|p| {
+        OpenTelemetryTracingBridge::new(p)
+            .with_filter(EnvFilter::new("info"))
+            .with_filter(tracing_subscriber::filter::filter_fn(exportable))
+    });
     tracing_subscriber::registry()
         .with(fmt)
         .with(otel)
@@ -389,6 +390,17 @@ fn exception_type(events: &[opentelemetry::trace::Event]) -> Option<String> {
         })
 }
 
+/// Whether a log event may go out over OTLP: not when it carries a field the spans drop (an
+/// `error`, a URL, a path). The SDK cannot remove one attribute from a log record, so such an
+/// event stays on stdout only; its span still says that it failed.
+fn exportable(metadata: &tracing::Metadata<'_>) -> bool {
+    !metadata.is_event()
+        || !metadata
+            .fields()
+            .iter()
+            .any(|f| DROPPED.contains(&f.name()))
+}
+
 fn keep(attributes: &mut Vec<KeyValue>) {
     attributes.retain(|kv| {
         let key = kv.key.as_str();
@@ -485,6 +497,36 @@ mod tests {
     /// A span, a process metric and a log record inside the span, through in-memory
     /// exporters: the record carries the span's trace and span ids, and so does the
     /// stdout line.
+    #[test]
+    fn a_log_event_with_an_error_or_a_url_does_not_go_out_over_otlp() {
+        use opentelemetry_sdk::logs::InMemoryLogExporter;
+
+        let logs = InMemoryLogExporter::default();
+        let loggers = SdkLoggerProvider::builder()
+            .with_simple_exporter(logs.clone())
+            .build();
+        let subscriber = tracing_subscriber::registry().with(
+            OpenTelemetryTracingBridge::new(&loggers)
+                .with_filter(tracing_subscriber::filter::filter_fn(exportable)),
+        );
+        tracing::subscriber::with_default(subscriber, || {
+            tracing::warn!(error = "open /home/someone/a.3mf: denied", "a slice failed");
+            tracing::info!(url.full = "http://u:p@x/y", "a fetch");
+            tracing::info!(stage = "slice", "a stage ended");
+        });
+        loggers.force_flush().unwrap();
+        let records = logs.get_emitted_logs().unwrap();
+        assert_eq!(records.len(), 1);
+        assert!(
+            records[0]
+                .record
+                .attributes_iter()
+                .all(|(k, _)| k.as_str() == "stage"),
+            "{:?}",
+            records[0].record.attributes_iter().collect::<Vec<_>>()
+        );
+    }
+
     #[test]
     fn a_span_a_process_metric_and_a_log_record_that_carries_the_trace_id() {
         use std::sync::{Arc, Mutex};

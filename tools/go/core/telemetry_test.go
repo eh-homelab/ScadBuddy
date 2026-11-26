@@ -8,6 +8,7 @@ import (
 	"net/http/httptest"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -45,11 +46,15 @@ func recordTelemetry(t *testing.T) *recorded {
 	return &recorded{tel: &telemetry.Telemetry{Traces: tp, Meters: mp}, spans: spans, reader: reader}
 }
 
+// named waits up to 5 s for a span of that name: a server span ends after its response
+// is written, so it can reach the recorder after the client has its answer.
 func (r *recorded) named(name string) []tracetest.SpanStub {
 	var out []tracetest.SpanStub
-	for _, s := range r.spans.GetSpans() {
-		if s.Name == name {
-			out = append(out, s)
+	for deadline := time.Now().Add(5 * time.Second); len(out) == 0 && time.Now().Before(deadline); time.Sleep(10 * time.Millisecond) {
+		for _, s := range r.spans.GetSpans() {
+			if s.Name == name {
+				out = append(out, s)
+			}
 		}
 	}
 	return out
@@ -200,13 +205,21 @@ func TestAForwardedRequestIsOneTrace(t *testing.T) {
 	res.Body.Close()
 
 	sent := <-traceparent
+	// The server span ends after the response is written, so it can reach the recorder
+	// after the client has read the body: wait for both.
 	var front, forward tracetest.SpanStub
-	for _, s := range rec.spans.GetSpans() {
-		switch s.SpanKind {
-		case oteltrace.SpanKindServer:
-			front = s
-		case oteltrace.SpanKindClient:
-			forward = s
+	for deadline := time.Now().Add(5 * time.Second); time.Now().Before(deadline); time.Sleep(10 * time.Millisecond) {
+		front, forward = tracetest.SpanStub{}, tracetest.SpanStub{}
+		for _, s := range rec.spans.GetSpans() {
+			switch s.SpanKind {
+			case oteltrace.SpanKindServer:
+				front = s
+			case oteltrace.SpanKindClient:
+				forward = s
+			}
+		}
+		if front.SpanContext.IsValid() && forward.SpanContext.IsValid() {
+			break
 		}
 	}
 	expect(t, front.SpanContext.TraceID().String(), "0af7651916cd43dd8448eb211c80319c")
@@ -278,5 +291,79 @@ func TestAForwardStopsWaitingAfterDialWait(t *testing.T) {
 	expect(t, res.StatusCode, http.StatusBadGateway)
 	if d := time.Since(started); d < 300*time.Millisecond || d > 5*time.Second {
 		t.Fatalf("answered after %v", d)
+	}
+}
+
+// freeAddress is a TCP address nothing listens on.
+func freeAddress(t *testing.T) string {
+	t.Helper()
+	l, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	address := l.Addr().String()
+	l.Close()
+	return address
+}
+
+func TestAForwardStopsWaitingWhenItsClientGoesAway(t *testing.T) {
+	address := freeAddress(t)
+	wait := &upstreamWait{}
+	dials := atomic.Int32{}
+	dial := wait.dial(func(ctx context.Context, network, address string) (net.Conn, error) {
+		dials.Add(1)
+		return (&net.Dialer{}).DialContext(ctx, network, address)
+	})
+	gone := make(chan struct{})
+	ctx := context.WithValue(context.Background(), requestDone{}, (<-chan struct{})(gone))
+	result := make(chan error, 1)
+	go func() {
+		_, err := dial(ctx, "tcp", address)
+		result <- err
+	}()
+	time.Sleep(600 * time.Millisecond)
+	close(gone)
+	select {
+	case err := <-result:
+		if err == nil {
+			t.Fatal("a dial to nothing succeeded")
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("the dial went on after its request ended")
+	}
+	if n := dials.Load(); n < 2 || n > 5 {
+		t.Fatalf("%d dials", n)
+	}
+}
+
+func TestARefusalAfterPythonHasAnsweredFailsAtOnce(t *testing.T) {
+	l, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	address := l.Addr().String()
+	go func() {
+		for {
+			c, err := l.Accept()
+			if err != nil {
+				return
+			}
+			c.Close()
+		}
+	}()
+	wait := &upstreamWait{}
+	dial := wait.dial((&net.Dialer{}).DialContext)
+	conn, err := dial(context.Background(), "tcp", address)
+	if err != nil {
+		t.Fatal(err)
+	}
+	conn.Close()
+	l.Close()
+	started := time.Now()
+	if _, err := dial(context.Background(), "tcp", address); err == nil {
+		t.Fatal("a dial to a closed port succeeded")
+	}
+	if d := time.Since(started); d > 200*time.Millisecond {
+		t.Fatalf("a refusal after Python answered waited %v", d)
 	}
 }
