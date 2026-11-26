@@ -285,7 +285,9 @@ def _lengths_on_printed(
 ) -> dict[int, float]:
     """The metres on the filaments the plate prints (#7685), moved as `_on_printed` moves
     the grams. A slot whose sources include one with grams but no length is left out
-    (#7932): its metres would cover only part of its grams and skew the implied density."""
+    (#7932): its metres would cover only part of its grams and skew the implied density.
+    Each value is rounded to 2 places as `_on_printed` rounds a merged one; Bambu Studio
+    writes ``used_m`` with 2 decimals, so an unmerged slot's metres are unchanged."""
     moved: dict[int, float] = {}
     partial: set[int] = set()
     for slot in sliced:

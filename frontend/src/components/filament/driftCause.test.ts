@@ -175,6 +175,8 @@ describe('the cause of a weighing on the spool page (#7685)', () => {
     const weighing = event('2026-11-16T10:00:00Z', 'weighed', { source: 'scale', grams_after: 53, data: { reading_g: 303, empty_g: 250, empty_source: 'insert', empty_basis: 'catalog', expected_g: 50, drift_g: 3.2 } })
     const over = { implied_density_g_cm3: 1.31, density_g_cm3: 1.24, density_mismatch: true }
     expect(weighingCause(weighing, history([created, printed, pct, weighing], over), { ...facts, addedFull: false })).toEqual({ kind: 'density', implied: 1.31, type: 1.24 })
+    const little = event('2026-11-16T10:00:00Z', 'weighed', { source: 'scale', grams_after: 100.5, data: { reading_g: 350.5, empty_g: 250, empty_source: 'insert', empty_basis: 'catalog', expected_g: 100, drift_g: 0.5 } })
+    expect(weighingCause(little, history([created, printed, pct, little], over), { ...facts, addedFull: false })).toBeNull()
   })
 
   it('scales the density cause by the grams since the previous anchor', () => {
