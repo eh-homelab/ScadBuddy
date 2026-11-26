@@ -16,6 +16,7 @@ from psycopg.types.json import Jsonb
 
 from scadbuddy.bambuddy.models import LocalPresetDetail
 from scadbuddy.filament import sb_presets
+from scadbuddy.filament.bb_sync_results import reset_links
 from scadbuddy.filament.models import TypePreset
 from scadbuddy.filament.sb_presets import (
     FilamentPresetStore,
@@ -31,6 +32,7 @@ from scadbuddy.filament.types import PresetUnknownError, SpoolTypeStore
 from scadbuddy.slicing.own_presets import sb_id, sb_ref
 from scadbuddy.store.local import LocalBlobStore
 from tests.conftest import PgPool
+from tests.filament.test_bambuddy_pull import _filament
 from tests.filament.test_types import _body
 
 pytestmark = pytest.mark.requires_postgres
@@ -398,20 +400,18 @@ async def test_a_scadbuddy_owned_preset_is_never_read_back(pg_pool: PgPool, tmp_
     assert json.dumps((await store.documents([made]))[made]) == json.dumps(doc)
 
 
-async def test_own_rows_give_a_bambuddy_id_only_of_the_links_bambuddy(
+async def test_own_rows_give_a_bambuddy_id_only_of_the_configured_bambuddy(
     pg_pool: PgPool, tmp_path: Path
 ) -> None:
     """#7223: two presets hold id 7, one per Bambuddy. The native catalogue maps a
-    Bambuddy id to a preset, so a row gives the id only when it is of the links' Bambuddy
-    (or of an unrecorded one)."""
+    Bambuddy id to a preset, so a row gives the id only when it is of the configured
+    Bambuddy (or of an unrecorded one), whatever the links record."""
     blobs = LocalBlobStore(tmp_path / "blobs")
-    store = FilamentPresetStore(pg_pool, lambda: blobs)
-    made: dict[str, int] = {}
     for name, instance in (("Old", "0ld0ld0ld0ld"), ("New", "n3wn3wn3wn3w"), ("Bare", None)):
         doc = _doc(name)
         key, sha256 = await keep_document(blobs, document_bytes(doc))
         with pg_pool.connection() as conn, conn.transaction():
-            made[name] = create_on(
+            create_on(
                 conn,
                 name=name,
                 source="bambuddy",
@@ -423,24 +423,27 @@ async def test_own_rows_give_a_bambuddy_id_only_of_the_links_bambuddy(
                 bb_instance=instance,
             )
 
-    with pg_pool.connection() as conn:
-        conn.execute("UPDATE filament_bb_sync_state SET instance = 'n3wn3wn3wn3w'")
-    assert {r.name: r.bb_preset_id for r in await store.rows()} == {
-        "Old": None,
-        "New": 7,
-        "Bare": 7,
-    }
-    with pg_pool.connection() as conn:
-        conn.execute("UPDATE filament_bb_sync_state SET instance = NULL")
-    assert {r.bb_preset_id for r in await store.rows()} == {7}
+    store = FilamentPresetStore(pg_pool, lambda: blobs, lambda: "n3wn3wn3wn3w")
+    # Before a reset (links of the old Bambuddy) and after it (none recorded).
+    for recorded in ("0ld0ld0ld0ld", None):
+        with pg_pool.connection() as conn:
+            conn.execute("UPDATE filament_bb_sync_state SET instance = %s", (recorded,))
+        assert {r.name: r.bb_preset_id for r in await store.rows()} == {
+            "Old": None,
+            "New": 7,
+            "Bare": 7,
+        }
+    unconfigured = FilamentPresetStore(pg_pool, lambda: blobs, lambda: None)
+    assert {r.bb_preset_id for r in await unconfigured.rows()} == {7}
+    assert {r.bb_preset_id for r in await FilamentPresetStore(pg_pool, lambda: blobs).rows()} == {7}
 
 
-async def test_a_fetch_run_of_another_bambuddy_never_types_an_adopted_preset(
+async def test_a_reset_strips_the_old_bambuddys_ids_from_fetch_runs(
     pg_pool: PgPool, tmp_path: Path
 ) -> None:
-    """#7223: an old profile-fetch run's ``preset_id`` names the Bambuddy of its time. When
-    the links' recorded Bambuddy is another than the configured one, id 141 is not that
-    run's preset, so the adopted preset stays a ``bambuddy`` one."""
+    """#7223: an old profile-fetch run's ``preset_id`` names the Bambuddy of its time. A
+    reset that deletes the links strips those ids, so the new Bambuddy's id 141 never
+    matches the run, and the adopted preset stays a ``bambuddy`` one."""
     blobs = LocalBlobStore(tmp_path / "blobs")
     held = MemoryPresets()
     kind = _type(pg_pool, "PLA-F")
@@ -458,6 +461,12 @@ async def test_a_fetch_run_of_another_bambuddy_never_types_an_adopted_preset(
             ),
         )
         conn.execute("UPDATE filament_bb_sync_state SET instance = '0ld0ld0ld0ld'")
+    reset_links(_filament(pg_pool), "0ld0ld0ld0ld", "n3wn3wn3wn3w", None, expect_kept=False)
+    with pg_pool.connection() as conn:
+        row = conn.execute("SELECT files FROM filament_profile_fetches").fetchone()
+    assert row is not None
+    files: Any = row["files"]
+    assert files == {"H2C": {"0.4": {"key": "k", "name": "n", "sha256": "s"}}}
     assert await adopt_held(pg_pool, blobs, held, "n3wn3wn3wn3w") == 1
     (made,) = FilamentPresetStore(pg_pool, lambda: blobs).all()
     assert (made.source, made.type_id) == ("bambuddy", None)

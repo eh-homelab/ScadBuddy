@@ -537,10 +537,10 @@ class _Run:
     defer_archived: bool
     refs: BbRefs
     claims: list[_Claim]
-    moved: int = 0
     #: The Bambuddy this pull reads (`pull`'s ``instance``): a preset id maps only to a
     #: preset of it (`sb_presets.by_bb_id_on`).
-    instance: str | None = None
+    instance: str | None
+    moved: int = 0
 
     def claimed(self, bb: BbSpool) -> bool:
         """Decision 10: an open spool create intent can adopt ``bb``."""
@@ -1004,9 +1004,7 @@ def _preset_sent(bb: BbSpool) -> tuple[str | None, str | None]:
 BB_PRESET_NOZZLES = ("0.2", "0.4", "0.6", "0.8")
 
 
-def _bb_presets(
-    conn: Conn, spool_id: UUID, bb: BbSpool, actor: str, instance: str | None = None
-) -> bool:
+def _bb_presets(conn: Conn, spool_id: UUID, bb: BbSpool, actor: str, instance: str | None) -> bool:
     """A linked BB spool's ``slicer_filament`` (and its name) as the SB spool's own H2C
     preset at every nozzle size, a ``migrated`` row (#6262 Task 7 ruling R1), so a plan
     on Bambuddy's path finds the preset Bambuddy's spool named. True when a row changed.
