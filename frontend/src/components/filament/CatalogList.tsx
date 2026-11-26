@@ -142,7 +142,8 @@ export function CatalogList({ kind }: { kind: CatalogKind }) {
   }, [search, searched])
 
   const refs = [...new Set(spec.fields.flatMap((field) => (field.ref ? [field.ref] : [])))]
-  const needsMore = spec.fields.some((field) => field.required) || requiresKeys
+  // Until the schema answers (or when it cannot be read), the full form: a name-only add could be refused (#7953).
+  const needsMore = spec.fields.some((field) => field.required) || requiresKeys || !keys.data
 
   /** Opens the row's form (a new row's without one), with its defined properties. */
   async function open(row?: Row) {
