@@ -249,8 +249,9 @@ subscribed inboxes of new messages. Its other settings are `FLEETCHAT_LISTEN`,
 `FLEETCHAT_CORE_URL`, `FLEETCHAT_MAX_TEXT`, `FLEETCHAT_PAGE_SIZE`,
 `FLEETCHAT_MAX_PAGE_SIZE` and `FLEETCHAT_SESSION_TIMEOUT`
 ([`tools/go/fleet/README.md`](../../tools/go/fleet/README.md)). The server has no auth of
-its own: a NetworkPolicy is to admit only ScadBuddy's pods. Neither the server nor that
-policy is deployed yet.
+its own: anything on the LAN may call it, directly or through ScadBuddy's `/mcp`
+(the owner's decision of 2026-11-26), and a NetworkPolicy is to admit only ScadBuddy's pods and the LAN's
+Gateway. Neither the server nor that policy is deployed yet.
 
 ## bambuddy-fs
 

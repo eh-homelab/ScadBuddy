@@ -88,7 +88,9 @@ with 401 calls `f` with the refused credential and is sent once more with the ne
 `scadbuddy-fleet`, its version from the build info or `dev`) and `GET /healthz`
 (`ok`). On SIGTERM it takes no new request and lets the open ones finish for 5 s,
 then ends those still open (the MCP GET streams) and stops within 10 s. The server has
-no auth of its own; a NetworkPolicy admits only ScadBuddy's pods.
+no auth of its own. Anything on the LAN may call it, directly or through ScadBuddy's `/mcp`
+(the owner's decision of 2026-11-26): its NetworkPolicy admits ScadBuddy's pods and the LAN's Gateway, never
+the internet.
 
 | Flag | Environment | Default |
 |---|---|---|
@@ -120,10 +122,10 @@ longer texts through.
 
 ## Deploying
 
-The Kubernetes objects are eh-homelab/clusters' `applications/scadbuddy/scadbuddy-fleet.yaml`
-and `networkpolicy-fleet.yaml` (#7903). ScadBuddy's deploy (`deploy.reusable.yml`) moves the
-image pin with each build that published a fleet image, and keeps it otherwise. What they
-hold:
+Nothing deploys it yet. The Kubernetes objects will be eh-homelab/clusters'
+`applications/scadbuddy/scadbuddy-fleet.yaml` and `networkpolicy-fleet.yaml` (#7903). Once
+that file exists, ScadBuddy's deploy (`deploy.reusable.yml`) moves the image pin with each
+build that published a fleet image, and keeps it otherwise. Before a deploy, they need:
 
 - Core serves the fleet's routes only when `SCADBUDDY_CORE_AREAS` names `fleet`
   (`tools/go/core/README.md`). Without it the routes go to Python, which has none of them
@@ -135,8 +137,11 @@ hold:
   use `FLEETCHAT_SERVICE_BOOTSTRAP_FILE` and the file `fleet` in the API's
   `SCADBUDDY_SERVICE_BOOTSTRAP_DIR` instead. Never deploy `FLEETCHAT_CREDENTIAL_FILE`: a
   fixed credential is not renewed.
-- A NetworkPolicy that admits only ScadBuddy's pods on 8080 (the server has no auth of
-  its own) and lets the pod reach only DNS and core.
+- A route on ScadBuddy's LAN-only hostname, `https://scadbuddy.internal.nullreference.io/fleet/mcp`
+  rewritten to the server's `/mcp`, so anything on the LAN can call it (the owner's decision of 2026-11-26).
+  The hostname's DNS record is DNS-only, so the server is never on the internet.
+- A NetworkPolicy that admits, on 8080, ScadBuddy's pods and that Gateway's proxy pods (the
+  server has no auth of its own), and lets the pod reach only DNS and core.
 - `FLEETCHAT_SESSION_TIMEOUT`: keep the 24 h default, or set a shorter one; never `0`
   while Claude Code is a client.
 

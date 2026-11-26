@@ -172,7 +172,9 @@ serves `/mcp` and `/healthz`. `build-go-image.yml` publishes it as
 `ghcr.io/eh-homelab/scadbuddy-fleet`. Both modules declare `go 1.25.0` (the floor of go-sdk
 v1.8.0, the latest stable release on 2026-11-25); the workspace builds with go1.26.9. Forge
 imports `fleetchat` and writes its own host. The server has no auth of its own; a
-NetworkPolicy lets in only ScadBuddy's pods, as for the Playwright MCP server.
+NetworkPolicy lets in only ScadBuddy's pods, as for the Playwright MCP server. Changed on
+2026-11-26: anything on the LAN may call it, directly or through ScadBuddy's `/mcp`
+**(owner)**, so the policy also admits the LAN's Gateway.
 
 ## 7. Non-goals
 
