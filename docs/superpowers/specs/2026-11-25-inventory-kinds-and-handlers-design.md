@@ -370,8 +370,13 @@ Go owns stock; Python calls it.
   the caller `inventory` (24 hours for the others); a repeat returns the stored result.
   The caller starts its workflow first, and the workflow's first activity writes the
   caller's row (§6.1a "Nothing manual, no sweeps"); Go is called with a key derived from
-  that row (`order_item:<id>:parts:<n>`), and Temporal retries a failed call. A refusal
-  in the first activity rolls back, so nothing is left to undo.
+  that row (the workflow `order_item:<id>:parts:<n>`, each `inventory.Take`
+  `order_item:<id>:parts:<n>:<item>`), and Temporal retries a failed call. A refusal in
+  the first activity rolls back and fails the workflow as non-retryable, so nothing was
+  written and the same id may start again. A refusal by Go after the first activity has
+  committed (a `Take` refused for a business reason) is an answer, not a failure: it is
+  not retried, the workflow's last activity records it on the order
+  (`parts.stock_refused`), the person sees it there, and nothing is rolled back.
 - In Go, a handler runs in the base flow's transaction: every table a handler writes is
   in the same database, written by `scadbuddy-core`.
 
@@ -414,8 +419,12 @@ gives us the visibility into the Activities tab in SB".
   no state ever needs a sweep, a backstop, a repair loop or a person to settle it.
 - **Orders.** Fulfilling an order item starts the workflow `FulfilOrderItem` with the
   item's key. Its steps: a Python activity that commits the order change; the Go activity
-  `inventory.Take`; a Python activity that records `parts.used`. Temporal retries each
-  step until it succeeds. If the workflow does not finish in 15 s, fulfil answers 202
+  `inventory.Take`; a Python activity that records `parts.used`. Temporal retries a step
+  that fails; a refusal is an answer, not a failure. A refusal in the first activity ends
+  the workflow as failed (a non-retryable error carrying the problem), with nothing
+  written, so the same id can start again once the cause is fixed. A refusal of `Take`
+  is recorded by the last activity as `parts.stock_refused`, which the order shows; the
+  order change stays, and nothing is rolled back. If the workflow does not finish in 15 s, fulfil answers 202
   ("stock still settling") and the order settles by itself when the workflow ends. If the start itself fails, the fulfil call answers an error
   and nothing was written; a client that sends it again does its own idempotent retry,
   not a repair.
@@ -430,7 +439,9 @@ gives us the visibility into the Activities tab in SB".
   whether a stock row names it; if one does, it rolls back, and the workflow executes
   `inventory.Repoint` again (with a new key per round) and runs the merge again. There is
   no cap: only a stock write racing the merge repeats it, and the workflow ends only once
-  the merge has committed (owner, 2026-11-25; plan K1, R-K1-29). The callers that need the
+  the merge has committed (owner, 2026-11-25; plan K1, R-K1-29). A round repeats only
+  after a new stock write named the gone printer, and the workflow waits between rounds
+  (`workflow.sleep`, doubling from 1 s to 60 s), so a busy stock writer cannot spin it. The callers that need the
   kept row (`link_bambuddy`, `ensure_bambuddy_written`) wait on the workflow's result.
 - **Visibility.** It is not automatic; every feature writes its own record row and the
   activity record follows it. Renders, print runs and the backend's operations write an
@@ -527,7 +538,7 @@ and examples of every thing named in §2 G1 with instances and relationships. It
 `check.py` resolves every item's handlers by §4.2, checks every handler's step, class and
 parameters, every instance and every relationship (each container field's `max`
 included), checks that five relationships the design must refuse are refused for their
-stated reason, and checks that the README's table is the resolved one. On 2026-11-25 it
+stated reason (each entry's `reason` code is the rule that refuses it), and checks that the README's table is the resolved one. On 2026-11-25 it
 passed (`uvx --with pyyaml python -I docs/inventory-model/check.py`): 33 kinds, 38
 handlers, 16 items, 17 instances, 16 relationships, and a history of 16 events whose 6
 unit lives, 21 value history rows, the parameter history, and 16 property history rows (8
