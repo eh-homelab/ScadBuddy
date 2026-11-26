@@ -258,8 +258,8 @@ main on 2026-11-01:
   There is no session mode: plan Phase 10 dropped the `ai_sessions.mode` column and the
   `session_mode` setting (migrations `20261101T2300Z_drop_session_mode.sql` and
   `20261101T2000Z_drop_durable_settings.sql`), the panel has no mode picker, and
-  nothing answers a mode. `POST /api/v1/ai/sessions` and the chat socket still take one from an
-  earlier client and ignore it, with a log line for each (#7323). The Python `DurableSession` retired in
+  nothing answers a mode. `POST /api/v1/ai/sessions` and the chat socket drop a `mode` key that an
+  earlier client still sends, as they drop any key they do not name (#7323). The Python `DurableSession` retired in
   Phase 8, and its open sessions moved to `AgentSession` in Phase 7 (the prod backfill of plan Step 7.2 moved 62 of 62 and left
   none open, as #2726's checklist records). `agent-durable` runs no turn and stays at zero
   replicas.
