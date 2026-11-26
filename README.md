@@ -643,8 +643,11 @@ socket would give it root on the node.
 ### Payment webhooks (#4957)
 
 The front door (Pomerium and the LAN gateway) stays in front of every route except
-this one and the agent's bearer-token paths (`/mcp`, `/mcp/workspace/` and
-`/api/v1/ai/plugin-feeds/`, eh-homelab/clusters#4017), which check their own credential. A
+this one and the agent's bearer-token paths, which check their own credential: `/mcp`,
+`/mcp/workspace/` and the plugin feed's three reads (`…/plugin-feeds/{feed}/marketplace.json`,
+`…/plugins/{name}/versions/…` and `…/plugins/{name}/archives/…`; eh-homelab/clusters#4017
+and #4368). The feed's Settings routes under the same prefix take no token and stay
+behind the front door. A
 payment provider must reach `POST /api/v1/payments/webhooks/<provider>` from the
 internet, so route only the path prefix `/api/v1/payments/webhooks/` from the public
 host to the API Service, and no other path. That route takes no session: the
