@@ -7,7 +7,7 @@ from __future__ import annotations
 import asyncio
 import json
 from collections.abc import AsyncIterator
-from typing import Any
+from contextlib import AsyncExitStack, asynccontextmanager
 
 import httpx
 import pytest
@@ -41,26 +41,29 @@ async def served(pg_conninfo: str) -> AsyncIterator[Served]:
         yield it
 
 
-async def _open(
+@asynccontextmanager
+async def _opened(
     client: httpx.AsyncClient,
     served: Served,
     caller: ServiceCaller,
     base: str,
     last: str | None = None,
-) -> tuple[Any, Sse]:
+) -> AsyncIterator[Sse]:
+    """One open stream, closed when the block ends, also when an assertion in it fails."""
     headers = {**served.token(caller), **({"last-event-id": last} if last is not None else {})}
-    context = client.stream("GET", f"{served.url}{base}/changes", headers=headers)
-    response = await context.__aenter__()
-    assert response.status_code == 200, await response.aread()
-    return context, Sse(response)
+    async with client.stream("GET", f"{served.url}{base}/changes", headers=headers) as response:
+        assert response.status_code == 200, await response.aread()
+        yield Sse(response)
 
 
 @pytest.mark.parametrize(("caller", "base"), ROUTES)
 async def test_camera_stream_filters_kinds(
     served: Served, caller: ServiceCaller, base: str
 ) -> None:
-    async with httpx.AsyncClient(timeout=None) as client:
-        ctx, sse = await _open(client, served, caller, base)
+    async with (
+        httpx.AsyncClient(timeout=None) as client,
+        _opened(client, served, caller, base) as sse,
+    ):
         assert (await sse.next())["event"] == "ready"
         served.bus.publish(_printer("printer.report"))
         served.bus.publish(ModelEvent(kind="model.updated", slug="m"))
@@ -72,7 +75,6 @@ async def test_camera_stream_filters_kinds(
         # No other channel's change reaches it either.
         with pytest.raises(TimeoutError):
             await sse.next(0.5)
-        await ctx.__aexit__(None, None, None)
 
 
 @pytest.mark.parametrize(("caller", "base"), ROUTES)
@@ -85,38 +87,39 @@ async def test_camera_stream_replays_after_last_event_id(
         _printer(),
         ModelEvent(kind="model.updated", slug="x"),
     )
-    async with httpx.AsyncClient(timeout=None) as client:
-        ctx, sse = await _open(client, served, caller, base)
+    async with (
+        httpx.AsyncClient(timeout=None) as client,
+        _opened(client, served, caller, base) as sse,
+    ):
         await sse.next()
         served.bus.publish(first)
         assert (await sse.next())["id"] == first.id
-        await ctx.__aexit__(None, None, None)
         for event in (skipped, second, other):
             served.bus.publish(event)
         await _logged(served, other.id)
-        ctx, sse = await _open(client, served, caller, base, first.id)
-        replayed = await sse.next()
-        ready = await sse.next()
-        assert replayed["id"] == second.id
-        assert ready["event"] == "ready"
-        assert ready["data"] == {"resync": False, "reconnect": True}
-        assert ready["id"] == other.id
-        later = _printer()
-        served.bus.publish(later)
-        assert (await sse.next())["id"] == later.id
-        await ctx.__aexit__(None, None, None)
+        async with _opened(client, served, caller, base, first.id) as sse:
+            replayed = await sse.next()
+            ready = await sse.next()
+            assert replayed["id"] == second.id
+            assert ready["event"] == "ready"
+            assert ready["data"] == {"resync": False, "reconnect": True}
+            assert ready["id"] == other.id
+            later = _printer()
+            served.bus.publish(later)
+            assert (await sse.next())["id"] == later.id
 
 
 @pytest.mark.parametrize(("caller", "base"), ROUTES)
 async def test_camera_stream_resync_on_bad_id(
     served: Served, caller: ServiceCaller, base: str
 ) -> None:
-    async with httpx.AsyncClient(timeout=None) as client:
-        ctx, sse = await _open(client, served, caller, base, "not an id")
+    async with (
+        httpx.AsyncClient(timeout=None) as client,
+        _opened(client, served, caller, base, "not an id") as sse,
+    ):
         ready = await sse.next()
         assert ready["event"] == "ready"
         assert ready["data"] == {"resync": True, "reconnect": True}
-        await ctx.__aexit__(None, None, None)
 
 
 async def test_the_camera_callers_have_the_changes_area(served: Served) -> None:
@@ -157,18 +160,13 @@ async def test_camera_streams_have_a_budget_of_their_own(served: Served) -> None
     """Each token is a new credential, so the cap counts the caller group, and the agent's
     streams stay free while it is full."""
     agent_base = "/api/v1/internal/crud/agent"
-    async with httpx.AsyncClient(timeout=None) as client:
-        opened = []
-        try:
-            for i in range(crud_camera.CAMERA_STREAMS_MAX):
-                caller, base = ROUTES[i % 2]
-                opened.append(await _open(client, served, caller, base))
-            for caller, base in ROUTES:
-                assert await _status(client, served, caller, base) == 429
-            assert await _status(client, served, "agent", agent_base) == 200
-        finally:
-            for ctx, _ in opened:
-                await ctx.__aexit__(None, None, None)
+    async with httpx.AsyncClient(timeout=None) as client, AsyncExitStack() as opened:
+        for i in range(crud_camera.CAMERA_STREAMS_MAX):
+            caller, base = ROUTES[i % 2]
+            await opened.enter_async_context(_opened(client, served, caller, base))
+        for caller, base in ROUTES:
+            assert await _status(client, served, caller, base) == 429
+        assert await _status(client, served, "agent", agent_base) == 200
 
 
 @pytest.mark.parametrize(("caller", "base"), ROUTES)
@@ -177,9 +175,8 @@ async def test_a_closed_camera_stream_frees_its_place(
 ) -> None:
     async with httpx.AsyncClient(timeout=None) as client:
         for _ in range(crud_camera.CAMERA_STREAMS_MAX + 1):
-            ctx, sse = await _open(client, served, caller, base)
-            assert (await sse.next())["event"] == "ready"
-            await ctx.__aexit__(None, None, None)
+            async with _opened(client, served, caller, base) as sse:
+                assert (await sse.next())["event"] == "ready"
             await asyncio.wait_for(_closed(served), PROMPTLY)
 
 
@@ -194,16 +191,16 @@ async def test_a_long_run_of_filtered_events_is_a_resync(
     monkeypatch.setattr(hub_module, "REPLAY_MAX", 2)
     first = _printer()
     others = [_printer("printer.report") for _ in range(3)]
-    async with httpx.AsyncClient(timeout=None) as client:
-        ctx, sse = await _open(client, served, "camera", ROUTES[0][1])
+    async with (
+        httpx.AsyncClient(timeout=None) as client,
+        _opened(client, served, "camera", ROUTES[0][1]) as sse,
+    ):
         await sse.next()
         served.bus.publish(first)
         assert (await sse.next())["id"] == first.id
-        await ctx.__aexit__(None, None, None)
         for event in others:
             served.bus.publish(event)
         await _logged(served, others[-1].id)
-        ctx, sse = await _open(client, served, "camera", ROUTES[0][1], first.id)
-        ready = await sse.next()
-        assert ready["data"] == {"resync": True, "reconnect": True}
-        await ctx.__aexit__(None, None, None)
+        async with _opened(client, served, "camera", ROUTES[0][1], first.id) as sse:
+            ready = await sse.next()
+            assert ready["data"] == {"resync": True, "reconnect": True}

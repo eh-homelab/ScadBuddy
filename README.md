@@ -835,10 +835,13 @@ and "Not this order" hides it for good, after an unlink and a new link too. If t
 later changes or removes a deposit already recorded, the order page warns until the shop
 records the difference as a `bank_transfer` payment with the transaction id as reference
 (payments are never edited). A cancelled order takes no payment and shows no such warning.
-With `SCADBUDDY_PUBLIC_URL` set, Link registers
-`https://<public host>/api/v1/payments/bank/webhook` for the account's webhooks
-([webhooks](https://plaid.com/docs/api/webhooks/)); an account linked before the public URL
-was set gets none until it is linked again. Each webhook is checked by its
+With `SCADBUDDY_STOREFRONT_PUBLIC_URL` (else `SCADBUDDY_PUBLIC_URL`) set, Link registers
+`https://<that host>/api/v1/payments/bank/webhook` for the account's webhooks
+([webhooks](https://plaid.com/docs/api/webhooks/)). The storefront's host comes first because
+Plaid must reach it from the internet, and the back office may be LAN-only; the deployment
+then routes that one path to the API (eh-homelab/clusters `httproute-storefront.yaml`). An
+account linked before that URL was set, or while it named another host, keeps the old one
+until it is linked again. Each webhook is checked by its
 `Plaid-Verification` JWT
 ([webhook verification](https://plaid.com/docs/api/webhooks/webhook-verification/)).
 `SYNC_UPDATES_AVAILABLE` reads the new deposits at once. When the bank needs the shop to
@@ -2754,10 +2757,11 @@ holds the manifests. Phase 1 added two Deployments, the relay and the recorders.
   `deploy/camera/`. The recorder image sets `TZ=UTC`. MediaMTX names segment files in local
   time, and the recorder refuses any other `TZ` (`RecorderSettings.check_environment`).
   `build-image.yml` job `camera` publishes all three (amd64); `ci.yml` job `camera-image` builds and
-  checks all three. `deploy.reusable.yml` does not pin them yet. When a pin comes, it must move the
-  relay's image only when the relay's code or MediaMTX changes, not with each ScadBuddy release
-  (spec §6.1): each relay restart is a gap of about 10 to 30 s in every printer's recording
-  (the spec's estimate, §6.9).
+  checks all three. `deploy.reusable.yml` pins the recorder and the edge in eh-homelab/clusters
+  `applications/scadbuddy-camera/` to each build's `sha-<7>@sha256:<digest>` (#7997), both
+  containers of each. It never moves the relay. The relay's pin moves by hand, in a reviewed
+  clusters PR, only when the relay's code or MediaMTX changes (spec §6.1): each relay restart
+  is a gap of about 10 to 30 s in every printer's recording (the spec's estimate, §6.9).
 - **Two containers per pod.** Each pod runs its image twice: MediaMTX
   (`args: [mediamtx, /etc/mediamtx/mediamtx.yml]`) and the controller (the default command,
   `python -m scadbuddy.camera.relay`, `.recorder` or `.edge`). The controller
@@ -2869,9 +2873,10 @@ holds the manifests. Phase 1 added two Deployments, the relay and the recorders.
   the same numbers: `curl -fsS -o /dev/null http://127.0.0.1:9997/v3/paths/list`.
   Each controller also answers `/readyz` on 9090: 503 until the change follower runs, a full
   reconcile has put the API's paths in MediaMTX, and `/healthz` would answer 200. The
-  recorder adds one rule: every recorded printer has delivered a segment since the process
-  started, or has delivered none for 120 s (`STALL_SECONDS`; a printer that is off sends no
-  video to any recorder, and must not stop a rollout). The relay does not wait for its pulls:
+  recorder adds one rule: every printer it recorded at its first full reconcile has delivered
+  a segment since the process started, or has delivered none for 120 s (`STALL_SECONDS`; a
+  printer that is off sends no video to any recorder, and must not stop a rollout). A printer
+  added later does not count. The relay does not wait for its pulls:
   a printer that is off must not take the relay out of its Service. Use it as the
   controller's readiness probe with the same numbers (`periodSeconds: 10`,
   `timeoutSeconds: 4`, `failureThreshold: 3`). On the recorder Deployment, set

@@ -4,6 +4,7 @@ import { packageSource } from '../../../src/access/model.js'
 import {
   entryOf,
   filesOfRow,
+  type MirrorRecord,
   type PackagePin,
   type PackageRepo,
   type PackageRow,
@@ -182,7 +183,8 @@ export class PackageStore implements PackageRepo {
           pending_ref = ${sourceColumns(p.source).ref}, pending_fetch_url = ${p.fetchUrl}, pending_fetch_path = ${p.fetchPath},
           pending_pin_kind = ${preparedKind(p)}, pending_commit_sha = ${preparedKind(p) === 'commit' ? p.commit : null},
           pending_bytes_sha256 = ${p.bytesSha256 ?? null}, pending_version = ${p.version ?? null}, pending_content_hash = ${p.contentHash},
-          pending_files = ${tx.json(p.files)}, pending_review = ${tx.json(p.review)}, updated_at = now()
+          pending_files = ${tx.json(p.files)}, pending_review = ${tx.json(p.review)}, pending_mirror_sha256 = NULL,
+          updated_at = now()
         WHERE name = ${name}
         RETURNING *`
       await pruneStaleRows(tx, name, row!.review)
@@ -196,7 +198,8 @@ export class PackageStore implements PackageRepo {
       const [row] = await tx<PackageRow[]>`
         UPDATE ai_plugin_packages SET pending_ref = NULL, pending_fetch_url = NULL, pending_fetch_path = NULL,
           pending_pin_kind = NULL, pending_commit_sha = NULL, pending_bytes_sha256 = NULL, pending_version = NULL,
-          pending_content_hash = NULL, pending_files = NULL, pending_review = NULL, updated_at = now()
+          pending_content_hash = NULL, pending_files = NULL, pending_review = NULL, pending_mirror_sha256 = NULL,
+          updated_at = now()
         WHERE name = ${name}
         RETURNING *`
       if (!row) throw new PluginError(`no plugin package named "${name}"`, 404)
@@ -240,8 +243,10 @@ export class PackageStore implements PackageRepo {
             enabled = enabled AND NOT ${moved}, source_ref = pending_ref, fetch_url = pending_fetch_url, fetch_path = pending_fetch_path,
             pin_kind = pending_pin_kind, commit_sha = pending_commit_sha, bytes_sha256 = pending_bytes_sha256,
             version = pending_version, content_hash = pending_content_hash,
-            files = pending_files, review = pending_review, approved_at = now(), allow_refused = ${allow},
-            pending_ref = NULL, pending_fetch_url = NULL, pending_fetch_path = NULL, pending_pin_kind = NULL,
+            files = pending_files, review = pending_review,
+            mirror_sha256 = COALESCE(pending_mirror_sha256, CASE WHEN pending_commit_sha = commit_sha
+              AND pending_content_hash = content_hash THEN mirror_sha256 END),
+            approved_at = now(), allow_refused = ${allow}, pending_mirror_sha256 = NULL, pending_ref = NULL, pending_fetch_url = NULL, pending_fetch_path = NULL, pending_pin_kind = NULL,
             pending_commit_sha = NULL, pending_bytes_sha256 = NULL, pending_version = NULL, pending_content_hash = NULL,
             pending_files = NULL, pending_review = NULL, updated_at = now()
           WHERE name = ${name}
@@ -296,5 +301,17 @@ export class PackageStore implements PackageRepo {
   async filesOf(name: string, pending: boolean): Promise<{ pin: PackagePin; files: FileList } | undefined> {
     const [row] = await this.sql<PackageRow[]>`SELECT * FROM ai_plugin_packages WHERE name = ${name}`
     return row ? filesOfRow(row, pending) : undefined
+  }
+
+  /** The API's record of a commit pin's mirror (#7907), with no check of its hold: the fake has no blob store. */
+  async recordMirror(name: string, m: MirrorRecord): Promise<void> {
+    const [row] = await this.sql<PackageRow[]>`
+      UPDATE ai_plugin_packages SET
+        mirror_sha256 = CASE WHEN pin_kind = 'commit' AND commit_sha = ${m.commit} AND content_hash = ${m.contentHash}
+          THEN ${m.sha256} ELSE mirror_sha256 END,
+        pending_mirror_sha256 = CASE WHEN pending_pin_kind = 'commit' AND pending_commit_sha = ${m.commit}
+          AND pending_content_hash = ${m.contentHash} THEN ${m.sha256} ELSE pending_mirror_sha256 END
+      WHERE name = ${name} RETURNING *`
+    if (!row) throw new PluginError(`no plugin package named "${name}"`, 404)
   }
 }

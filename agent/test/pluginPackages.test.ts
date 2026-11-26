@@ -44,6 +44,8 @@ import { PluginForwarder } from '../src/plugins/forwarder.js'
 import { forwardPackageServers } from '../src/plugins/packages/mcp.js'
 import { connectHttp } from '../src/temporal/turnTools.js'
 import { startFakeMcp } from './support/fakeMcp.js'
+import { memoryMirror } from './support/memoryMirror.js'
+import { storedZip } from '../src/plugins/packages/zip.js'
 import { memoryAccess } from './support/memoryAccess.js'
 
 // Plugin packages (#297, src/plugins/packages/): source validation, the
@@ -586,23 +588,37 @@ describe.skipIf(gitMissing !== undefined)(`installing from git${gitMissing ? ` (
   let cacheRoot: string
   let fetcher: ReturnType<typeof localFetcher>
   let installer: PackageInstaller
+  // A commit pin's files are mirrored at install, and a load reads only the cache or the mirror,
+  // never git (#7907).
+  let mirror: ReturnType<typeof memoryMirror>
+  const mirrored = (options: Partial<ConstructorParameters<typeof PackageInstaller>[0]> & { cacheRoot: string }): PackageInstaller =>
+    new PackageInstaller({ fetcher, resolve: resolver(), mirror: () => mirror, recordMirror: async () => undefined, ...options })
 
   beforeEach(() => {
     repos = {}
     cacheRoot = mkdtempSync(path.join(os.tmpdir(), 'pkg-cache-'))
     temps.push(cacheRoot)
     fetcher = localFetcher(repos)
-    installer = new PackageInstaller({ fetcher, cacheRoot, resolve: resolver() })
+    mirror = memoryMirror()
+    installer = mirrored({ cacheRoot })
   })
   afterEach(() => {
     for (const repo of Object.values(repos)) repo.remove()
   })
 
-  const pinOf = (p: { review: { name: string }; fetchUrl: string; fetchPath: string; commit: string; contentHash: string }): PackagePin => ({
+  const pinOf = (p: {
+    review: { name: string }
+    fetchUrl: string
+    fetchPath: string
+    commit: string
+    contentHash: string
+    mirrorSha256?: string
+  }): PackagePin => ({
     name: p.review.name,
     fetchUrl: p.fetchUrl,
     fetchPath: p.fetchPath,
     commit: p.commit,
+    ...(p.mirrorSha256 ? { mirrorSha256: p.mirrorSha256 } : {}),
     contentHash: p.contentHash,
   })
 
@@ -692,7 +708,11 @@ describe.skipIf(gitMissing !== undefined)(`installing from git${gitMissing ? ` (
       mkdirSync(path.dirname(path.join(tree, rel)), { recursive: true })
       writeFileSync(path.join(tree, rel), text)
     }
-    const pin = { ...base, commit, contentHash: (await hashTree(tree)).hash, allowRefused: true }
+    // Its mirror, as an older replica's install would have sent it.
+    const zip = storedZip(Object.entries({ ...GREETER, 'agents/deep.md': deep }).map(([rel, text]) => ({ path: rel, data: Buffer.from(text), executable: false })))
+    const mirrorSha256 = createHash('sha256').update(zip).digest('hex')
+    await mirror.put('greeter', mirrorSha256, zip)
+    const pin = { ...base, commit, mirrorSha256, contentHash: (await hashTree(tree)).hash, allowRefused: true }
     const loaded = await loadPackagesForRun({ enabledPins: () => Promise.resolve([pin]) }, installer)
     expect(loaded).toMatchObject({ paths: [], allowedPaths: [], loaded: [] })
     expect(loaded.problems.join()).toMatch(new RegExp(`greeter was not loaded: .*longer than ${ALIAS_KEY_CAP}`))
@@ -720,7 +740,7 @@ describe.skipIf(gitMissing !== undefined)(`installing from git${gitMissing ? ` (
     expect(loaded.problems.join()).toMatch(/MCP server "mem"/)
   })
 
-  it("gives a package's header secrets when it fails to load, cached or fetched again, and fails when it cannot be had (#5485)", async () => {
+  it("gives a package's header secrets when it fails to load, cached or read from its mirror, and fails when it cannot be had (#5485)", async () => {
     const HEADER = 'Bearer pkg-header-token-77'
     repos.greeter = gitRepo({
       ...GREETER,
@@ -729,51 +749,54 @@ describe.skipIf(gitMissing !== undefined)(`installing from git${gitMissing ? ` (
     const pin = pinOf(await installer.prepare(validateSource({ kind: 'git', url: 'https://git.test/greeter.git' })))
     // The endpoint fails the egress check at load, so the package is left out of the turn.
     const refusing = resolver({ 'mcp.example': ['169.254.169.254'] })
-    const later = new PackageInstaller({ fetcher, cacheRoot, resolve: refusing })
+    const later = mirrored({ cacheRoot, resolve: refusing })
     const loaded = await loadPackagesForRun({ enabledPins: () => Promise.resolve([pin]) }, later)
     expect(loaded.loaded).toEqual([])
     expect(loaded.problems.join()).toMatch(/MCP server "mem"/)
     // Its header is still read, from the cached copy.
     expect(await later.headerSecrets(pin)).toEqual([HEADER, 'pkg-header-token-77'])
-    // And from a copy fetched again, never vetted, when none is cached.
+    // And from its mirror, never vetted, when none is cached.
     const emptyCache = mkdtempSync(path.join(os.tmpdir(), 'pkg-cache-'))
     temps.push(emptyCache)
-    const fresh = new PackageInstaller({ fetcher, cacheRoot: emptyCache, resolve: refusing })
+    const fresh = mirrored({ cacheRoot: emptyCache, resolve: refusing })
     expect(await fresh.headerSecrets(pin)).toEqual([HEADER, 'pkg-header-token-77'])
-    // A copy that cannot be had fails the read (fail-closed).
+    // A copy that cannot be had fails the read (fail-closed), and git is never asked.
     const goneCache = mkdtempSync(path.join(os.tmpdir(), 'pkg-cache-'))
     temps.push(goneCache)
-    const gone = new PackageInstaller({ fetcher: localFetcher({}), cacheRoot: goneCache, resolve: resolver() })
-    await expect(gone.headerSecrets(pin)).rejects.toThrow(/no test repository/)
+    mirror.down = true
+    const before = fetcher.checkouts.length
+    const gone = mirrored({ cacheRoot: goneCache })
+    await expect(gone.headerSecrets(pin)).rejects.toThrow(/its mirror failed its check \(the API did not answer\)/)
+    expect(fetcher.checkouts).toHaveLength(before)
   })
 
-  it('refuses a pin whose files could not be had again for a short window, without a new fetch (#5488)', async () => {
+  it('refuses a pin whose files could not be had again for a short window, without a new mirror read (#5488)', async () => {
     const HEADER = 'Bearer pkg-header-token-78'
     repos.greeter = gitRepo({
       ...GREETER,
       '.mcp.json': JSON.stringify({ mcpServers: { mem: { type: 'http', url: 'https://mcp.example/mcp/', headers: { Authorization: HEADER } } } }),
     })
     const pin = pinOf(await installer.prepare(validateSource({ kind: 'git', url: 'https://git.test/greeter.git' })))
-    // The git host is down: no repository to fetch, and nothing cached.
-    const served: Record<string, TestRepo> = {}
-    const down = localFetcher(served)
+    // The mirror does not answer, and nothing is cached.
+    mirror.down = true
+    mirror.gets = 0
     const emptyCache = mkdtempSync(path.join(os.tmpdir(), 'pkg-cache-'))
     temps.push(emptyCache)
-    const cut = new PackageInstaller({ fetcher: down, cacheRoot: emptyCache, resolve: resolver() })
+    const cut = mirrored({ cacheRoot: emptyCache })
     vi.useFakeTimers({ toFake: ['Date'] })
     try {
       vi.setSystemTime(new Date('2026-11-06T00:00:00Z'))
-      await expect(cut.headerSecrets(pin)).rejects.toThrow(/no test repository/)
-      expect(down.checkouts).toHaveLength(1)
-      // Within the window: refused again, with no fetch, even once the host is back.
-      served.greeter = repos.greeter
+      await expect(cut.headerSecrets(pin)).rejects.toThrow(/did not answer/)
+      expect(mirror.gets).toBe(1)
+      // Within the window: refused again, with no read, even once the mirror is back.
+      mirror.down = false
       vi.setSystemTime(Date.now() + PACKAGE_SECRETS_FAILURE_MS)
-      await expect(cut.headerSecrets(pin)).rejects.toThrow(/no test repository/)
-      expect(down.checkouts).toHaveLength(1)
-      // After it: fetched again, and the values come back.
+      await expect(cut.headerSecrets(pin)).rejects.toThrow(/did not answer/)
+      expect(mirror.gets).toBe(1)
+      // After it: read again, and the values come back.
       vi.setSystemTime(Date.now() + 1)
       expect(await cut.headerSecrets(pin)).toEqual([HEADER, 'pkg-header-token-78'])
-      expect(down.checkouts).toHaveLength(2)
+      expect(mirror.gets).toBe(2)
     } finally {
       vi.useRealTimers()
     }
@@ -786,8 +809,8 @@ describe.skipIf(gitMissing !== undefined)(`installing from git${gitMissing ? ` (
       '.mcp.json': JSON.stringify({ mcpServers: { mem: { type: 'http', url: 'https://mcp.example/mcp/', headers: { Authorization: HEADER } } } }),
     })
     const pin = pinOf(await installer.prepare(validateSource({ kind: 'git', url: 'https://git.test/greeter.git' })))
-    const served: Record<string, TestRepo> = {}
-    const down = localFetcher(served)
+    mirror.down = true
+    mirror.gets = 0
     const fresh = () => {
       const dir = mkdtempSync(path.join(os.tmpdir(), 'pkg-cache-'))
       temps.push(dir)
@@ -797,46 +820,49 @@ describe.skipIf(gitMissing !== undefined)(`installing from git${gitMissing ? ` (
     try {
       vi.setSystemTime(new Date('2026-11-06T00:00:00Z'))
 
-      // Through a fetch: a load fetches the package again and `place` puts the copy in the cache.
-      const viaLoad = new PackageInstaller({ fetcher: down, cacheRoot: fresh(), resolve: resolver() })
-      await expect(viaLoad.headerSecrets(pin)).rejects.toThrow(/no test repository/)
-      expect(down.checkouts).toHaveLength(1)
-      served.greeter = repos.greeter
+      // Through a load: it reads the mirror again and `place` puts the copy in the cache.
+      const viaLoad = mirrored({ cacheRoot: fresh() })
+      await expect(viaLoad.headerSecrets(pin)).rejects.toThrow(/did not answer/)
+      expect(mirror.gets).toBe(1)
+      mirror.down = false
       vi.setSystemTime(Date.now() + 1_000)
       await viaLoad.materialise(pin)
-      expect(down.checkouts).toHaveLength(2)
-      // `place` cleared the failure: with the copy gone and the host down again, the next read
-      // fetches (and fails afresh) instead of answering the cached failure.
+      expect(mirror.gets).toBe(2)
+      // `place` cleared the failure: with the copy gone and the mirror down again, the next read
+      // asks the mirror (and fails afresh) instead of answering the cached failure.
       rmSync(viaLoad.cacheDir(pin), { recursive: true, force: true })
-      delete served.greeter
-      await expect(viaLoad.headerSecrets(pin)).rejects.toThrow(/no test repository/)
-      expect(down.checkouts).toHaveLength(3)
+      mirror.down = true
+      await expect(viaLoad.headerSecrets(pin)).rejects.toThrow(/did not answer/)
+      expect(mirror.gets).toBe(3)
 
-      // Through a copy already in the cache: another installer on the same cache fetched it.
+      // Through a copy already in the cache: another installer on the same cache read it.
       const shared = fresh()
-      const viaCache = new PackageInstaller({ fetcher: down, cacheRoot: shared, resolve: resolver() })
-      await expect(viaCache.headerSecrets(pin)).rejects.toThrow(/no test repository/)
-      expect(down.checkouts).toHaveLength(4)
-      await new PackageInstaller({ fetcher, cacheRoot: shared, resolve: resolver() }).materialise(pin)
+      const viaCache = mirrored({ cacheRoot: shared })
+      await expect(viaCache.headerSecrets(pin)).rejects.toThrow(/did not answer/)
+      expect(mirror.gets).toBe(4)
+      mirror.down = false
+      await mirrored({ cacheRoot: shared }).materialise(pin)
+      mirror.down = true
+      expect(mirror.gets).toBe(5)
       vi.setSystemTime(Date.now() + 1_000)
       expect(await viaCache.headerSecrets(pin)).toEqual([HEADER, 'pkg-header-token-79'])
-      expect(down.checkouts).toHaveLength(4)
-      // And the success cleared the entry: with no copy and no host, the next read fetches.
+      expect(mirror.gets).toBe(5)
+      // And the success cleared the entry: with no copy and no mirror, the next read asks again.
       rmSync(viaCache.cacheDir(pin), { recursive: true, force: true })
-      await expect(viaCache.headerSecrets(pin)).rejects.toThrow(/no test repository/)
-      expect(down.checkouts).toHaveLength(5)
+      await expect(viaCache.headerSecrets(pin)).rejects.toThrow(/did not answer/)
+      expect(mirror.gets).toBe(6)
     } finally {
       vi.useRealTimers()
     }
   })
 
-  it('refuses a fetch on the unvetted path whose files do not hash to the pin, and the secrets read fails closed (#5488)', async () => {
+  it('refuses a mirror on the unvetted path whose files do not hash to the pin, and the secrets read fails closed (#5488)', async () => {
     repos.greeter = gitRepo(GREETER)
     const good = pinOf(await installer.prepare(validateSource({ kind: 'git', url: 'https://git.test/greeter.git' })))
     const pin = { ...good, contentHash: `sha256:${'0'.repeat(64)}` }
     const emptyCache = mkdtempSync(path.join(os.tmpdir(), 'pkg-cache-'))
     temps.push(emptyCache)
-    const cut = new PackageInstaller({ fetcher, cacheRoot: emptyCache, resolve: resolver() })
+    const cut = mirrored({ cacheRoot: emptyCache })
     await expect(cut.headerSecrets(pin)).rejects.toThrow(/hash to sha256:[0-9a-f]{64}, not the pinned sha256:0{64}/)
     expect(existsSync(cut.cacheDir(pin))).toBe(false)
     await expect(
@@ -927,7 +953,7 @@ describe.skipIf(gitMissing !== undefined)(`installing from git${gitMissing ? ` (
     expect(problems.at(-1)).toMatch(/^and \d+ more$/)
   })
 
-  it('warms a new replica`s cache with every enabled package, so its first turn fetches nothing (#4217)', async () => {
+  it('warms a new replica`s cache with every enabled package, so its first turn reads nothing (#4217)', async () => {
     repos.greeter = gitRepo(GREETER)
     const pin = pinOf(await installer.prepare(validateSource({ kind: 'git', url: 'https://git.test/greeter.git' })))
     const store = { enabledPins: () => Promise.resolve([pin]) }
@@ -935,35 +961,39 @@ describe.skipIf(gitMissing !== undefined)(`installing from git${gitMissing ? ` (
     const fresh = () => {
       const root = mkdtempSync(path.join(os.tmpdir(), 'pkg-cache-'))
       temps.push(root)
-      return new PackageInstaller({ fetcher, cacheRoot: root, resolve: resolver() })
+      return mirrored({ cacheRoot: root })
     }
     const warmed = fresh()
     const before = fetcher.checkouts.length
     expect(await warmPackages(store, warmed)).toEqual([])
-    expect(fetcher.checkouts).toHaveLength(before + 1)
+    expect(mirror.gets).toBe(1)
     const run = await loadPackagesForRun(store, warmed)
     expect(run.paths).toEqual([warmed.cacheDir(pin)])
-    expect(fetcher.checkouts).toHaveLength(before + 1)
+    expect(mirror.gets).toBe(1)
     run.release()
 
-    // A turn that loads while the warm-up is still fetching waits on that fetch.
+    // A turn that loads while the warm-up is still reading waits on that read.
     const racing = fresh()
     const [, during] = await Promise.all([warmPackages(store, racing), loadPackagesForRun(store, racing)])
     expect(during.paths).toEqual([racing.cacheDir(pin)])
-    expect(fetcher.checkouts).toHaveLength(before + 2)
+    expect(mirror.gets).toBe(2)
+    // Neither ever fetched git.
+    expect(fetcher.checkouts).toHaveLength(before)
     during.release()
   })
 
-  it('re-fetches a missing or altered cache from the pin, and refuses a pin whose files hash differently', async () => {
+  it('rebuilds a missing or altered cache from the mirror, and refuses a pin whose files hash differently', async () => {
     repos.greeter = gitRepo(GREETER)
     const prepared = await installer.prepare(validateSource({ kind: 'git', url: 'https://git.test/greeter.git' }))
     const pin = pinOf(prepared)
     const dir = installer.cacheDir(pin)
 
-    // Altered on disk: re-fetched at the pinned commit, and the file is back.
+    // Altered on disk: rebuilt from the pin's mirror, never git, and the file is back.
+    const fetched = fetcher.checkouts.length
     await writeFile(path.join(dir, 'skills/hello/SKILL.md'), '!`env`\n')
     expect(await installer.materialise(pin)).toBe(dir)
-    expect(fetcher.checkouts.at(-1)).toBe(`https://git.test/greeter.git@${pin.commit}`)
+    expect(mirror.gets).toBe(1)
+    expect(fetcher.checkouts).toHaveLength(fetched)
     expect(await readFile(path.join(dir, 'skills/hello/SKILL.md'), 'utf8')).toContain('Say hello')
 
     // Missing: the same.

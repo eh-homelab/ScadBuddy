@@ -499,8 +499,12 @@ only the sleeps move; a budget on the real clock fails on a slow runner (#6252).
   (area `plugin-packages`: each write with `agent_data/packages.py` `prune_stale_rows`, the
   agent's `pruneStaleRows`; area `package-mirrors`, #6935: an archive or npm pin's file kept
   as the blob `plugin-mirror-<sha256>` by `agent_data/package_mirrors.py`, a bytes pin
-  stored only while its mirror is held, and each package write releasing the holds no pin
-  names after a day). `agent_data/access.py` holds the access writes they share.
+  stored only while its mirror is held, and each package write releasing the holds no row
+  names after a day; #7907: a commit pin's files as a zip there too, recorded by
+  `POST …/plugin-packages/{name}/mirror` as `mirror_sha256` or `pending_mirror_sha256`
+  only for the commit and content hash the row names and only while the package holds
+  it, the approval of a re-pin moving the pending one; Go's copy is
+  `tools/go/core/internal/packages`, which serves area `plugin-packages` on prod). `agent_data/access.py` holds the access writes they share.
   Tests `tests/api/test_crud_agent_access.py`, `test_crud_agent_plugins.py`,
   `test_crud_agent_packages.py`.
 - Hosted plugins (#6932, spec `2026-11-21-hosted-plugin-feeds-design.md` §6.1 to §6.3):
@@ -1203,8 +1207,9 @@ only the sleeps move; a budget on the real clock fails on a slow runner (#6252).
   starts it answers 200 when MediaMTX answers and holds the paths and, in the recorder, the
   clock is within 2 s: the follower does not count yet. `/readyz` answers 503 until the
   follower runs, a full reconcile has put the paths and `/healthz` would pass; the recorder
-  also waits until every recorded printer has delivered a segment since start, or none for
-  `STALL_SECONDS` (120 s), so a rolling update (with `minReadySeconds: 30`) stops the other
+  also waits until every printer it recorded at its first full reconcile has delivered a
+  segment since start, or none for `STALL_SECONDS` (120 s); a printer added later does not
+  count. So a rolling update (with `minReadySeconds: 30`) stops the other
   recorder only once this one holds video. `follow.py` follows the filtered change stream,
   `feed.py` sends feed states, `mediamtx.py` is the control API client, `uploads.py` the bucket
   (`Uploader`, the object key), `mp4.py` the init section parse (`moov/udta` left out of the
@@ -3356,7 +3361,7 @@ only the sleeps move; a budget on the real clock fails on a slow runner (#6252).
   topic `order:<id>`) per order it suggested a deposit for, and per order of a recorded
   deposit whose amount it changed or that it removed, so an open order page reloads.
   Plaid's webhook (`POST /payments/bank/webhook`, in `PUBLIC_ENDPOINTS`; the link token
-  names it from `public_url`, `PaymentsComponent._webhook_url`) is checked by its
+  names it from `storefront_public_url`, else `public_url`, `PaymentsComponent._webhook_url`, #7976) is checked by its
   `Plaid-Verification` JWT before it is read (`plaid.webhook_key_id`, `verification_key`,
   `verify_webhook`: ES256 only, a `kid` shaped as a UUID (`KID_SHAPE`) before Plaid is
   asked, `iat` at most 5 minutes old and at most `WEBHOOK_MAX_SKEW_SECONDS` (60) ahead,

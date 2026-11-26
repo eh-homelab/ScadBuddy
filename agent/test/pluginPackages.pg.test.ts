@@ -8,7 +8,8 @@ import type { Database } from './support/database.js'
 import type { HarnessRun } from '../src/harness/run.js'
 import { originPolicy } from '../src/http/origins.js'
 import { hashTree } from '../src/plugins/packages/hash.js'
-import { loadPackagesForRun, PackageInstaller, verifiedReview } from '../src/plugins/packages/install.js'
+import { loadPackagesForRun, PackageInstaller, recordPreparedMirror, verifiedReview } from '../src/plugins/packages/install.js'
+import { memoryMirror } from './support/memoryMirror.js'
 import { validateSource, withRepinRef } from '../src/plugins/packages/source.js'
 import { packageKinds } from '../src/plugins/packages/operations.js'
 import type { PackageView } from '../src/plugins/packages/store.js'
@@ -54,7 +55,28 @@ describe.skipIf((skip) || AGENT_SESSIONS_SKIP !== '')(`plugin packages on Postgr
     store = new PackageStore(db.sql)
     repos = { greeter: gitRepo(GREETER) }
     cacheRoot = mkdtempSync(path.join(os.tmpdir(), 'pkg-pg-cache-'))
-    installer = new PackageInstaller({ fetcher: localFetcher(repos), cacheRoot, resolve: resolver() })
+    // A commit pin's files are mirrored at install and re-pin, and recorded once the pin is
+    // stored, as operations.ts `stored` does; a load reads only the cache or the mirror (#7907).
+    const mirror = memoryMirror()
+    installer = new PackageInstaller({
+      fetcher: localFetcher(repos),
+      cacheRoot,
+      resolve: resolver(),
+      mirror: () => mirror,
+      recordMirror: (name, m) => store.recordMirror(name, m),
+    })
+    const create = store.create.bind(store)
+    const setPending = store.setPending.bind(store)
+    store.create = async (prepared) => {
+      const view = await create(prepared)
+      await recordPreparedMirror(store, {}, prepared, { name: view.name })
+      return view
+    }
+    store.setPending = async (name, prepared) => {
+      const view = await setPending(name, prepared)
+      await recordPreparedMirror(store, {}, prepared, { name: view.name })
+      return view
+    }
   })
   afterEach(async () => {
     await drop()
@@ -119,6 +141,7 @@ describe.skipIf((skip) || AGENT_SESSIONS_SKIP !== '')(`plugin packages on Postgr
           fetchUrl: GIT_URL,
           fetchPath: '',
           commit: installed.commit_sha!,
+          mirrorSha256: expect.stringMatching(/^[0-9a-f]{64}$/),
           contentHash: installed.content_hash,
           allowRefused: false,
         },
@@ -844,7 +867,8 @@ describe.skipIf((skip) || AGENT_SESSIONS_SKIP !== '')(`plugin packages on Postgr
       )
       await store.approve('other', other.commit_sha!, other.content_hash)
       await store.setEnabled('other', true)
-      await db.sql`UPDATE ai_plugin_packages SET fetch_url = 'https://git.test/gone.git' WHERE name = 'other'`
+      // Its mirror is lost, and a load never fetches git (#7907).
+      await db.sql`UPDATE ai_plugin_packages SET fetch_url = 'https://git.test/gone.git', mirror_sha256 = NULL WHERE name = 'other'`
       rmSync(path.join(cacheRoot, 'other'), { recursive: true, force: true })
 
       const scripted = scriptedRunner(() => ({ reply: 'hi' }))
@@ -874,7 +898,7 @@ describe.skipIf((skip) || AGENT_SESSIONS_SKIP !== '')(`plugin packages on Postgr
       expect(
         logged.filter((e) => e.type === 'error' && e.code === 'plugin_unavailable').map((e) => e.message),
       ).toEqual([
-        expect.stringMatching(/^plugin package other was not loaded: no test repository/),
+        expect.stringMatching(/^plugin package other was not loaded: its mirror is not ready yet/),
         // The fake init message lists no plugins: the loaded one is reported as not loaded by Claude Code.
         'plugin package greeter was not loaded by Claude Code',
       ])

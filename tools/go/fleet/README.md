@@ -41,7 +41,9 @@ telemetry's `Transport`); `(*Exchange).WrapTransport` does the same for the exch
   | `Rewind` | `PUT /agents/{session_id}/cursor` `{"seq"}` |
 
   A problem's `reason` maps to an error that `errors.Is` finds: `unknown-agent` (404)
-  to `fleetchat.ErrUnknownAgent`, `not-member` (403) to `fleetchat.ErrNotMember`, and
+  to `fleetchat.ErrUnknownAgent`, `unknown-channel` (404, a post to or a leave of a
+  channel nobody has joined) to `fleetchat.ErrUnknownChannel`, `not-member` (403) to
+  `fleetchat.ErrNotMember`, and
   `handle-taken` (409, two session ids that share their first 8 hex characters) to
   `sbfleet.ErrHandleTaken`, `seq-ahead` (422, a rewind past the cursor) to
   `fleetchat.ErrBadSeq`, and `text-too-long` (422, a text over core's 16 MiB, detail
