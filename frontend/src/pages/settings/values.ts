@@ -1,4 +1,5 @@
 import type { Settings } from '../../api/types'
+import { answerersOrder } from '../../lib/flows'
 import { RUNTIME_FIELDS, serverValue, type FieldName, type FieldSpec, type SectionId } from './fields'
 
 /** #296 — `used` of `limit`, where a limit of 0 means none. */
@@ -212,9 +213,7 @@ export function printerIdsValue(ids: readonly number[]): string {
 
 /** #7471 — `flow_answerers` as the form holds it: `starter`, `sessions`, then the tokens, once each. */
 export function answerersValue(rules: readonly string[]): string {
-  const unique = [...new Set(rules)]
-  const fixed = ['starter', 'sessions'].filter((rule) => unique.includes(rule))
-  return [...fixed, ...unique.filter((rule) => !fixed.includes(rule)).sort()].join(',')
+  return answerersOrder(rules).join(',')
 }
 
 /** #6041 — the form's value for a list of registry printer ids (uuids): sorted, comma-joined. */

@@ -6,7 +6,8 @@ import { crc32 } from 'node:zlib'
 // The same files give the same bytes, on every replica and Node version: entries in path
 // order, stored (no compression, so no zlib version changes them), a fixed time
 // (1980-01-01 00:00, the format's first), mode 0644 or 0755, UTF-8 names, no extra fields.
-// No zip64: the unpacked caps (unpack.ts, 500 files, 20 MiB) keep every field in range.
+// No zip64: the caps (unpack.ts, 500 files and 20 MiB; a commit pin's mirror, hash.ts, 2,000
+// files and 20 MiB, #7907) keep every field in range.
 
 export type ZipFile = { path: string; data: Buffer; executable: boolean }
 

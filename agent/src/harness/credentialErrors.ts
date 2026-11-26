@@ -165,18 +165,65 @@ export function rateLimitResetFromHeaders(headers: Headers, now: number): number
 
 // Claude Code's subscription-limit text names its reset, "resets 10:30pm (UTC)" or
 // "resets Oct 21, 4am (UTC)" (#4088, measured in prod `ai_credentials.last_error`).
-// The same parse as agent-durable's credentials.py `rate_limit_reset` (#4093).
-const RESET = /\bresets\s+(?:([a-z]{3})[a-z]*\.?\s+(\d{1,2}),?\s+)?(\d{1,2})(?::(\d{2}))?\s*(am|pm)\s*\(UTC\)/i
+// A machine that is not pinned to UTC names its own IANA zone, "resets 1:30am
+// (America/New_York)" (#7986, measured in local Claude Code transcripts).
+// The same parse as agent-durable's credentials.py `rate_limit_reset` (#4093) and
+// tools/go/claudecreds `ResetFromText` (#7986).
+const RESET =
+  /\bresets\s+(?:([a-z]{3})[a-z]*\.?\s+(\d{1,2}),?\s+)?(\d{1,2})(?::(\d{2}))?\s*(am|pm)\s*\((UTC|[a-z][a-z0-9_+-]*(?:\/[a-z0-9_+-]+)+)\)/i
 /** How long after a named minute it still counts as passing now (see rateLimitResetFromText). */
 export const RESET_GRACE_MS = 15 * 60_000
 /** How far ahead a dated reset may roll into next year (weekly limits name days ahead). */
 export const RESET_HORIZON_MS = 31 * 24 * 60 * 60_000
 const MONTHS = ['jan', 'feb', 'mar', 'apr', 'may', 'jun', 'jul', 'aug', 'sep', 'oct', 'nov', 'dec']
+const DAY_MS = 24 * 60 * 60_000
 
-/** Epoch ms of that UTC date and time, or undefined when it is not one (Feb 30). */
-function utc(year: number, month: number, day: number, hour: number, minute: number): number | undefined {
-  const at = new Date(Date.UTC(year, month, day, hour, minute))
-  return at.getUTCMonth() === month && at.getUTCDate() === day ? at.getTime() : undefined
+/** A formatter for the zone, or undefined when the zone is not a known IANA name as written. */
+function zoneFormat(zone: string): Intl.DateTimeFormat | undefined {
+  if (zone.toUpperCase() === 'UTC') zone = 'UTC'
+  try {
+    const fmt = new Intl.DateTimeFormat('en-US', {
+      timeZone: zone,
+      hourCycle: 'h23',
+      year: 'numeric',
+      month: 'numeric',
+      day: 'numeric',
+      hour: 'numeric',
+      minute: 'numeric',
+      second: 'numeric',
+    })
+    // ICU reads a name in any case; Go and Python read it only as written.
+    const resolved = fmt.resolvedOptions().timeZone
+    const wrongCase = resolved !== zone && resolved.toLowerCase() === zone.toLowerCase()
+    return wrongCase ? undefined : fmt
+  } catch {
+    return undefined
+  }
+}
+
+/** The wall clock in the zone at `at` (epoch ms), as epoch ms of that wall clock read as UTC. */
+function wall(fmt: Intl.DateTimeFormat, at: number): number {
+  const p = Object.fromEntries(fmt.formatToParts(at).map((x) => [x.type, Number(x.value)]))
+  return Date.UTC(p.year!, p.month! - 1, p.day!, p.hour!, p.minute!, p.second!)
+}
+
+/** The zone's offset at `at` (epoch ms), in ms. */
+function offset(fmt: Intl.DateTimeFormat, at: number): number {
+  return wall(fmt, at) - Math.floor(at / 1000) * 1000
+}
+
+/**
+ * Epoch ms of that date and time in the zone, or undefined when it is not a date
+ * (Feb 30). A time that occurs twice (DST ends) is the earlier; a time that does not
+ * occur (DST starts) is read with the offset before the gap. Python's fold=0 does the same.
+ */
+function zoned(fmt: Intl.DateTimeFormat, year: number, month: number, day: number, hour: number, minute: number): number | undefined {
+  const local = Date.UTC(year, month, day, hour, minute)
+  const d = new Date(local)
+  if (d.getUTCMonth() !== month || d.getUTCDate() !== day) return undefined
+  const before = local - offset(fmt, local - DAY_MS)
+  const after = local - offset(fmt, local + DAY_MS)
+  return wall(fmt, before) === local || wall(fmt, after) !== local ? before : after
 }
 
 /**
@@ -189,7 +236,9 @@ function utc(year: number, month: number, day: number, hour: number, minute: num
  * an OAuth key's 429 with `anthropic-ratelimit-unified-status: rejected` ends in
  * "You've hit your session limit · resets 6:35pm (UTC)" (2.1.314: "your 5-hour limit";
  * test/fallback.e2e.test.ts), in
- * the zone Claude Code runs in, which options.ts pins to UTC.
+ * the zone Claude Code runs in, which options.ts pins to UTC. Another machine names
+ * its IANA zone, "(America/New_York)" (#7986): today, tomorrow and a date are then
+ * that zone's, with its DST rules, and a zone this runtime does not know is undefined.
  *
  * The text names the minute, never the second, so a reset within RESET_GRACE_MS
  * before `now` is one that is passing now, not tomorrow's (or next year's):
@@ -198,25 +247,32 @@ function utc(year: number, month: number, day: number, hour: number, minute: num
 export function rateLimitResetFromText(text: string, now: number): number | undefined {
   const m = RESET.exec(text)
   if (!m) return undefined
-  const [, monthName, day, h, mm, half] = m
+  const [, monthName, day, h, mm, half, zone] = m
   const hour12 = Number(h)
   const minute = Number(mm ?? 0)
   if (hour12 < 1 || hour12 > 12 || minute > 59) return undefined
   const hour = (hour12 % 12) + (half!.toLowerCase() === 'pm' ? 12 : 0)
-  const today = new Date(now)
+  const fmt = zoneFormat(zone!)
+  if (fmt === undefined) return undefined
+  // Today is the zone's date at `now`.
+  const today = new Date(wall(fmt, now))
   if (monthName === undefined) {
-    const at = utc(today.getUTCFullYear(), today.getUTCMonth(), today.getUTCDate(), hour, minute)!
+    const [y, mo, d] = [today.getUTCFullYear(), today.getUTCMonth(), today.getUTCDate()]
+    const at = zoned(fmt, y, mo, d, hour, minute)!
     if (at > now) return at
-    return at > now - RESET_GRACE_MS ? undefined : at + 24 * 60 * 60_000
+    if (at > now - RESET_GRACE_MS) return undefined
+    // Tomorrow is the zone's next date, which is not always 24 hours later (DST).
+    const next = new Date(Date.UTC(y, mo, d + 1))
+    return zoned(fmt, next.getUTCFullYear(), next.getUTCMonth(), next.getUTCDate(), hour, minute)
   }
   const month = MONTHS.indexOf(monthName.toLowerCase())
   if (month < 0) return undefined
-  const at = utc(today.getUTCFullYear(), month, Number(day), hour, minute)
+  const at = zoned(fmt, today.getUTCFullYear(), month, Number(day), hour, minute)
   if (at === undefined) return undefined
   if (at > now) return at
   // Only a date just across the new year is next year's ("Jan 2" on Dec 31); one
   // earlier this year has passed, however recently.
-  const later = utc(today.getUTCFullYear() + 1, month, Number(day), hour, minute)
+  const later = zoned(fmt, today.getUTCFullYear() + 1, month, Number(day), hour, minute)
   return later !== undefined && later - now <= RESET_HORIZON_MS ? later : undefined
 }
 
