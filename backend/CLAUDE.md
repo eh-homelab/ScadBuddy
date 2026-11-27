@@ -299,12 +299,10 @@ only the sleeps move; a budget on the real clock fails on a slow runner (#6252).
   AUTO_UPGRADE through a `Versioned*` subclass (`main.LIBRARY_WORKFLOWS`; an unversioned
   worker cannot complete a workflow that declares a behavior), so each stays
   replay-compatible behind `patched`; a new one needs its own behavior or the worker
-  refuses to build. The outputs' copies are retired (#7257): the row copy
-  (`OUTPUT_COPY_SWEEP`, #7255) and the byte copy (`OUTPUT_BYTES_SWEEP`, #7256) are not
-  scheduled by a run with `OUTPUTS_CUT_OVER_PATCH`. Both names stay in `SWEEPS`, and their
-  activities stay registered as no-ops that log `CUT_OVER_NOTHING_TO_COPY`, so a run
-  recorded before that patch replays; a follow-up removes them with
-  `workflow.deprecate_patch`. The API's start copies nothing either (docs/architecture/data.md
+  refuses to build. The outputs' copies are gone: the row copy (#7255) and the
+  byte copy (#7256) stopped at `OUTPUTS_CUT_OVER_PATCH` (#7257), and #7886 removed their
+  sweeps, activities and patches. `Housekeeping.run` keeps that patch as
+  `workflow.deprecate_patch`, so a run recorded with it replays. The API's start copies nothing either (docs/architecture/data.md
   "The cut-over"). Sweeps off (`asset_sweep_interval` 0) deletes the
   first, so only `PRUNE_SWEEPS` still run; the print dialog's background slices
   (`housekeeping_sweep_preview_slices`) are not among them. A new periodic pass is an

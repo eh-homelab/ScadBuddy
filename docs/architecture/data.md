@@ -422,9 +422,9 @@ copy (#7255) ran at each API start and in the housekeeping sweep
 `housekeeping_copy_outputs`; each run was a row of `output_copy_runs`. The byte copy
 (#7256) ran after it, and in the sweep `housekeeping_copy_output_bytes`; each run was a row
 of `output_byte_runs`. A housekeeping run with `OUTPUTS_CUT_OVER_PATCH` schedules neither.
-Both activities stay registered as no-ops that log `CUT_OVER_NOTHING_TO_COPY`, so a run
-recorded before that patch replays (`scadbuddy/workflows/housekeeping.py`). A follow-up
-(#7886) removes them with `workflow.deprecate_patch`.
+#7886 removed both sweeps, their activities and their patches, and retired
+`OUTPUTS_CUT_OVER_PATCH` with `workflow.deprecate_patch`
+(`scadbuddy/workflows/housekeeping.py`).
 
 #7887 (plan D11) removed the copies' state in two releases: first
 `GET /api/v1/outputs/copy-status`, which answered their last runs and the cut-over
