@@ -103,15 +103,24 @@ func TestDelegateReadsItsOwnRead(t *testing.T) {
 	expectStatus(t, h.do("GET", read, me, ""), 200)
 }
 
-// An upload for a call that ended gets no hold.
+// A call that ends while its upload is being stored gets no hold: the hold is written only
+// while the call is locked open.
 func TestUploadAfterTheCallEndsHoldsNothing(t *testing.T) {
 	h := newHarness(t, auth.Observe)
 	me := h.person("user:i#me")
 	d := h.pair(me)
 	call := h.start(me, d, `{"method":"nfc.read"}`)
-	h.sql(`UPDATE device_calls SET outcome = 'timeout', ended_at = now() WHERE id = $1::uuid`, call)
+	// The call ends after the first check and the Put, before the hold.
+	h.blobs.onPut = func() {
+		h.sql(`UPDATE device_calls SET outcome = 'timeout', ended_at = now() WHERE id = $1::uuid`, call)
+	}
 	got := h.do("POST", "/api/v1/devices/uploads?call="+call+"&kind=tag_dump", d.token, fixtureDump(t))
 	expectStatus(t, got, 409)
+	expect(t, got.body["reason"], any("call_closed"))
+	h.blobs.mu.Lock()
+	stored := len(h.blobs.objects)
+	h.blobs.mu.Unlock()
+	expect(t, stored, 1)
 	expect(t, h.count(`SELECT count(*) FROM blob_refs WHERE holder_kind = 'device_call'`), 0)
 }
 

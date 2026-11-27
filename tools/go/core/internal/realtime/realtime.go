@@ -540,7 +540,7 @@ func (x *session) frame(ctx context.Context, m message) error {
 	calls := 0
 	for _, t := range requested.Items {
 		// A device follows its own topic only, and a person a device call's only when it
-		// owns the device (device.go). Each call topic is one read of the database, so one
+		// owns the device or made the call (device.go). Each call topic is one read of the database, so one
 		// frame may name at most MaxCallTopics of them.
 		if kind == "subscribe" && t.Kind == 's' && callTopic.MatchString(t.Str) {
 			if calls++; calls > MaxCallTopics {
