@@ -50,7 +50,8 @@ unchanged, to the Python API: WebSockets, SSE and large bodies included. On prod
 | `plugins` | `POST` `/plugins/{name}/delete`, `/plugin-oauth/grants/{plugin}/mark`, `…/forget` only: the routes that need no KEK |
 | `remote-plugins` † | every route of `crud_agent_plugins.py`: `/plugins` (`GET`, `POST`), `GET /plugins/{name}`, `POST` `/plugins/open-enabled`, `…/{name}/update`, `…/tool-access`, `…/reveal`, `…/delete`; `POST` `/plugin-oauth/flows` and its `…/authorize`, `…/take`; `/plugin-oauth/grants` and its `…/{plugin}/open`, `…/refreshed` (only while the lease `plugin-oauth:<plugin>` holds), `…/mark`, `…/forget`; `/plugin-oauth/stored-secrets` |
 | `plugin-packages` | `/plugin-packages` and every route under it |
-| `hosted-plugins:read` | `GET /hosted-plugins/{name}`. A version's zip (the blob store) stays Python's |
+| `hosted-plugins:read` | `GET /hosted-plugins/{name}`. A version's zip is area `package-mirrors` |
+| `package-mirrors` | `POST /package-mirrors/{name}`, `GET /package-mirrors/{name}/{sha256}`, `GET /hosted-plugins/{name}/versions/{version}.zip`: the routes that need the blob store (below) |
 | `plugin-feeds` | `GET /plugin-feeds/{feed}`; `PUT`, `DELETE` `…/packages/{name}` |
 | `sessions:read` | `GET /session-starts`, `GET /sessions/{id}`, `POST /sessions/list` |
 | `sessions` | those, and `POST /sessions`, `…/{id}/agent`, `…/offer`, `…/offer/cancel`, `…/owner`, `…/budget`, `…/discard` |
@@ -162,8 +163,18 @@ channel's members, or as a DM to one agent by its handle. An unknown sender is a
 sender has its name as `from`.
 
 Each of `browser-origins`, `bridge-tabs`, `pairings`, `mcp-tokens`, `plugin-packages` and
-`plugin-feeds` also has a `:read` form, its GETs only. Area `package-mirrors` (the blob store)
-is Python's.
+`plugin-feeds` also has a `:read` form, its GETs only. Area `package-mirrors`
+(`internal/packages` `MirrorAreas`) is not wired in `main.go` yet: it needs the blob store's
+reads and publish by key (`packages.Blobs`), which `internal/blobstore` does not have yet.
+As `api/crud_agent_packages.py` and `agent_data/package_mirrors.py` do, a mirror's `POST` spools
+the body to a temporary file and hashes it as it streams, refused 413 past 24 MiB (on a declared
+`Content-Length` before the body is read, or as it streams without one), keeps it as the blob
+`plugin-mirror-<sha256>` (claimed when the store holds it, else published), then holds it in
+`blob_refs` for `<name>/<sha256>` and releases every hold no row names past its day, in one
+transaction. A mirror's `GET` serves the bytes only while the package's row names the sha256 in
+`bytes_sha256`, `pending_bytes_sha256`, `mirror_sha256` or `pending_mirror_sha256` (404
+`mirror-not-found`). A hosted version's zip is the blob `attachment-<zip_sha256>`, checked
+against its sha256 (500 `blob-missing`), with its sha256 and content hash in the headers.
 
 An area Go answers in part leaves its other routes to Python: name it only where Python still runs.
 
@@ -331,6 +342,11 @@ At a stop, the servers drain and the three signals flush within the 20 s shutdow
 - `POST /sessions`: a scope's size counts each number as it was sent; Python counted its own
   spelling of it (`1e3` as `1000.0`).
 - `POST /workspace-blob-refs` answers 204 with no `Content-Type`.
+- `package-mirrors`: a mirror past its limit is refused with the CRUD headers (Python's body gate
+  answered without them). A mirror's `GET` is the whole body with no `ETag`, `Last-Modified` or
+  range answers (Python's `FileResponse`). A version in a zip's path is decimal digits only
+  (pydantic's lax mode also took a sign or spaces), and a last segment that does not end `.zip` is
+  a 404 from Go.
 - The event stream: a replayed typed event takes what pydantic's lax mode takes for its fields
   (an int as a whole float or a text of digits, a bool as `0`, `1` or a word), but not every
   other coercion pydantic makes; an event it does not take is a `resync`, as in Python. A lone
