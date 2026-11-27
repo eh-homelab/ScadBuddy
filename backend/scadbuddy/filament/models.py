@@ -838,6 +838,8 @@ class SpoolMove(_In):
     """Where a spool goes; ``null`` takes it out of every place."""
 
     location_id: UUID | None
+    #: What to do when the target is a dry box that holds a spool already (#7167).
+    if_occupied: Literal["refuse", "replace"] = "refuse"
 
 
 # -- spool types ----------------------------------------------------------------------
@@ -1380,6 +1382,11 @@ class Spool(_Row):
     added_full: bool | None = None
     #: When its tag was written (Bambuddy's ``encode_time``, R-7149-3). Read only.
     tag_encoded_at: datetime | None = None
+    #: The dry box the spool lives in (#7167): where it goes back to after a print. Null when
+    #: it has none; it clears when the box is deleted.
+    home_location_id: UUID | None = None
+    #: When the person was last asked to pick a home for the spool (#7167).
+    home_asked_at: datetime | None = None
     #: The values the spool has after its overrides over its type's.
     effective: EffectiveValues = Field(default_factory=EffectiveValues)
     #: The names of the fields the spool overrides.
@@ -1657,6 +1664,7 @@ EventKind = Literal[
     "restored",
     "synced_from_bb",
     "consumed_reset",
+    "non_print_waste",
 ]
 EventSource = Literal["ams_remain", "scale", "print_estimate", "print_actual", "person", "bb"]
 
@@ -1893,6 +1901,8 @@ class Closing(BaseModel):
     final_filament_g: float | None = None
     scale_consumed_g: float | None = None
     drift_g: float | None = None
+    #: Grams the scale says went to no print (purge, a jam, a failed start), #7167.
+    non_print_waste_g: float | None = None
 
 
 class ClosingNotice(BaseModel):
