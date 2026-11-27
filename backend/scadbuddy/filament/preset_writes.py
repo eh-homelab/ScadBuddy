@@ -107,10 +107,16 @@ class PresetEditInput(BaseModel):
     actor: str
     idempotency_key: str
 
-    @field_validator("set", "unset")
+    @field_validator("set", "unset", mode="before")
     @classmethod
     def _keys_allowed(cls, value: Any) -> Any:
+        """Before the type check, so a credential key is refused whatever its value's type
+        and its value is never in a failure. A key that is not a string is left to it."""
+        if not isinstance(value, dict | list):
+            return value
         for key in value:
+            if not isinstance(key, str):
+                continue
             if not KEY.match(key) or key == "name" or is_credential(key):
                 raise PydanticCustomError(
                     KEY_REFUSED, "the key {key} cannot be set or unset", {"key": key}
@@ -146,16 +152,19 @@ def _parsed[Input: (PresetCopyInput, PresetEditInput)](
     model: type[Input], raw: dict[str, Any]
 ) -> Input:
     """``raw`` as ``model``: a refused key is ``key_refused`` (its key the detail), any
-    other fault ``invalid_input`` (each fault's ``loc`` and ``msg`` the detail)."""
+    other fault ``invalid_input`` (each fault's ``loc`` and ``msg`` the detail). The
+    failure holds no input value: it goes to Temporal's history, the logs and the Go
+    problem."""
     try:
         return model.model_validate(raw)
     except ValidationError as error:
-        faults = error.errors(include_url=False)
+        faults = error.errors(include_url=False, include_input=False)
         for fault in faults:
             if fault["type"] == KEY_REFUSED:
                 raise _refused(KEY_REFUSED, fault["msg"], fault["ctx"]["key"]) from None
         listed = [{"loc": list(f["loc"]), "msg": f["msg"]} for f in faults]
-        raise _refused(INVALID_INPUT, str(error), listed) from None
+        message = "; ".join(f"{'.'.join(map(str, f['loc']))}: {f['msg']}" for f in listed)
+        raise _refused(INVALID_INPUT, message, listed) from None
 
 
 def _ledger_key(body: PresetCopyInput | PresetEditInput) -> tuple[str, dict[str, Any]]:

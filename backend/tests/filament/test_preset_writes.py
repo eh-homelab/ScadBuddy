@@ -106,7 +106,7 @@ async def _doc(pool: PgPool, blobs: LocalBlobStore, preset_id: int) -> dict[str,
 async def _refused(write: Any) -> ApplicationError:
     with pytest.raises(ApplicationError) as caught:
         await write
-    assert caught.value.non_retryable
+    assert caught.value.non_retryable is True
     return caught.value
 
 
@@ -350,8 +350,11 @@ _EDIT = {"preset_id": 1, "expected_version": 1, "actor": "ann", "idempotency_key
     [
         ({"set": {"printhost_apikey": "s"}}, "printhost_apikey"),
         ({"set": {"a": "1"}, "unset": ["a"]}, "a"),
+        # Refused before the type check, so the value is never in a failure.
+        ({"set": {"printhost_apikey": 12345}}, "printhost_apikey"),
+        ({"unset": ["my_token", 7]}, "my_token"),
     ],
-    ids=["credential", "both"],
+    ids=["credential", "both", "credential not a string", "unset not all strings"],
 )
 async def test_an_edit_activity_refuses_a_refused_key_once(
     fields: dict[str, Any], key: str
@@ -379,6 +382,29 @@ async def test_an_activity_refuses_a_bad_input_once(
     error = await _refused(_ACTIVITIES[name](raw))
     assert error.type == "invalid_input"
     assert [e["loc"] for e in error.details[0]] == [loc]
+
+
+#: A value that must never be in an activity failure.
+SENTINEL = "sentinel-s3cret-value"
+
+
+@pytest.mark.parametrize(
+    ("name", "raw"),
+    [
+        (
+            COPY_ACTIVITY,
+            {"preset_id": SENTINEL, "name": "A", "actor": "ann", "idempotency_key": "k"},
+        ),
+        (EDIT_ACTIVITY, _EDIT | {"set": {"a": {"nested": SENTINEL}}}),
+        (EDIT_ACTIVITY, _EDIT | {"name": SENTINEL * 20}),
+    ],
+    ids=["copy id", "edit set value", "edit name"],
+)
+async def test_a_refused_input_never_echoes_its_values(name: str, raw: dict[str, Any]) -> None:
+    error = await _refused(_ACTIVITIES[name](raw))
+    assert error.type == "invalid_input"
+    assert SENTINEL not in error.message
+    assert SENTINEL not in json.dumps(error.details)
 
 
 async def test_a_replay_gets_the_first_answer_after_the_document_is_lost(
