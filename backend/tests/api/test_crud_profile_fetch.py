@@ -1017,10 +1017,11 @@ def test_a_waiting_import_holds_no_pool_connection(
     polls_before, start = polls(), time.monotonic()
     time.sleep(wait)
     covered = longest(start)
-    # It keeps polling, every LEASE_POLL_SECONDS (0.1 s). How many polls fit in the window
-    # depends on the runner's load, so three are due by 5 s past it: a waiter that polls
-    # every few seconds still fails, and a loaded runner has room (#8104).
-    kept_polling = until(lambda: polls() - polls_before >= 3, start + wait + 5)
+    # It keeps polling, every LEASE_POLL_SECONDS (0.1 s), about 65 polls in the 6.5 s from
+    # the window's start to 5 s past it. How many fit depends on the runner's load, so ten
+    # are due by then: a waiter slower than one poll each 0.65 s fails, and a loaded
+    # runner has room (#8104, #8118).
+    kept_polling = until(lambda: polls() - polls_before >= 10, start + wait + 5)
     polls_after = polls()
     release.set()
     first.join(timeout=60)

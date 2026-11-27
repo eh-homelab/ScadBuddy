@@ -12,7 +12,7 @@ import { server } from '../../mocks/server'
 import { entityMock, seedEntityProperties } from '../../mocks/features/entities'
 import { rememberAdvanced } from '../../test/advanced'
 import { choose } from '../../test/select'
-import { readSpec } from '../../test/spec'
+import { schemaProperty } from '../../test/spec'
 import { renderPage } from '../../test/utils'
 import { SpoolPage } from './SpoolPage'
 import { SpoolsTab } from './SpoolsTab'
@@ -870,10 +870,7 @@ describe("the spool page's Advanced toggle", () => {
 
   it('shows a saved diameter other than the default with Advanced off, and hides the default (#7642)', async () => {
     // #8107: the backend's default, read from the spec, so a change there fails here.
-    const { json, path } = readSpec()
-    const spec = json as { components?: { schemas?: Record<string, { properties?: { diameter_mm?: { default?: unknown } } }> } }
-    const fallback = spec.components?.schemas?.['SpoolTypeCreate-Input']?.properties?.diameter_mm?.default
-    if (typeof fallback !== 'string') throw new Error(`SpoolTypeCreate-Input.diameter_mm.default not in the spec at ${path}`)
+    const fallback = schemaProperty('SpoolTypeCreate-Input', 'diameter_mm', 'default', 'string')
     await patchSpool(spoolId(2), { diameter_mm: fallback })
     const { unmount } = open(2)
     await heading(2)
