@@ -12,7 +12,7 @@ import { linkTypeFilament } from '../orders/priceBook'
 // Also a cycle (`filamentPurchasing.ts` calls `addInvoicedSpools`): only inside functions.
 import { invoiceRefOf, typeSuppliersOf } from '../filamentPurchasing'
 import { printersState } from '../printers'
-import { H2C, LK, seed, spoolId, type Catalogs, type Seed, type SpoolRow } from './seed'
+import { H2C, L, LK, seed, spoolId, type Catalogs, type Seed, type SpoolRow } from './seed'
 import { jobOf } from '../../../components/filament/eventText'
 import { CATALOGS } from '../../../components/filament/catalogs'
 import { checksSave, marksOf, rowPropertiesRefusal, saveRowProperties } from '../entities'
@@ -146,6 +146,7 @@ export function reset() {
   fetches.clear()
   insertReadings.clear()
   savedSheets = []
+  seedHomeReturnFromStorage()
 }
 
 type InsertBasis = S['InsertType']['empty_weight_basis']
@@ -490,6 +491,76 @@ const findSpool = (id: string) => state.spools.find((row) => row.id === id)
 
 function listed(includeArchived: boolean) {
   return state.spools.filter((row) => includeArchived || !row.archived_at).sort((a, b) => a.number - b.number)
+}
+
+/** #7167 `dry_box.py` `BOX`: a live dry-storage place of capacity 1 that is no printer's. */
+function isDryBox(id: string, place: Pick<S['Location'], 'kind_id' | 'capacity' | 'archived_at' | 'printer_id'> | undefined = state.locations.find((one) => one.id === id)): boolean {
+  if (!place || place.archived_at || place.printer_id || place.capacity !== 1) return false
+  return state.catalogs['location-kinds'].some((kind) => kind.id === place.kind_id && kind.dry_storage)
+}
+
+/** `spools.py` `_AWAITING_HOME`: asked, in no place, and its home still a live dry box. */
+const awaitsHome = (row: SpoolRow) => row.home_asked_at != null && row.location_id == null && row.home_location_id != null && isDryBox(row.home_location_id)
+
+/** `dry_box.py` `check_not_many`: a place that would be a dry box while it holds two spools or more. */
+function boxHasMany(id: string, place: S['Location']): Response | null {
+  if (!isDryBox(id, place)) return null
+  const held = state.spools.filter((one) => one.location_id === id && !one.archived_at).length
+  return held > 1 ? problem(422, 'the place holds more than one spool, so it cannot be a dry box', { code: 'box_has_many' }) : null
+}
+
+/** The mock's dry box of one spool (#7167): `Dry box 2`, under the workshop. */
+export const HOME_BOX = '00000000-0000-4000-8000-0000000b0c01'
+
+/**
+ * #7167 — a spool waiting for its home answer: S-11 came out of the H2C's AMS-A slot 1 and was
+ * parked (no place), and its home `Dry box 2` (capacity 1) holds S-7, unless `empty`. Returns the box.
+ */
+export function seedHomeReturn({ empty = false }: { empty?: boolean } = {}): { box: string } {
+  if (!state.locations.some((one) => one.id === HOME_BOX)) {
+    state.locations.push({
+      id: HOME_BOX,
+      number: Math.max(0, ...state.locations.map((place) => place.number)) + 1,
+      name: 'Dry box 2',
+      kind_id: LK.DRY_BOX,
+      parent_id: L.WORKSHOP,
+      printer_root: false,
+      identifier: null,
+      capacity: 1,
+      printer_id: null,
+      ams_id: null,
+      tray_id: null,
+      note: null,
+      sort_order: 2,
+      archived_at: null,
+      created_at: '2026-11-20T09:00:00Z',
+      updated_at: '2026-11-20T09:00:00Z',
+    })
+  }
+  const asked = '2026-11-26T08:00:00Z'
+  const set = (n: number, change: Partial<SpoolRow>) => {
+    const at = state.spools.findIndex((one) => one.id === spoolId(n))
+    state.spools[at] = { ...state.spools[at]!, ...change }
+  }
+  if (!empty) set(7, { location_id: HOME_BOX, home_location_id: HOME_BOX })
+  set(11, { location_id: null, home_location_id: HOME_BOX, home_asked_at: asked })
+  const tray = { source: 'ams_remain' as const, printer_id: H2C.printer_id, ams_id: 0, tray_id: 0, at: asked }
+  addEvent(spoolId(11), 'unloaded', { ...tray, data: { by: 'tag' } })
+  addEvent(spoolId(11), 'moved', { at: asked, source: null, data: { from: L.AMS_A1, to: null } })
+  return { box: HOME_BOX }
+}
+
+/**
+ * A Playwright run or the dev preview puts the waiting spool in before the page loads: `"1"`
+ * under this `sessionStorage` key, read at load and at each reset.
+ */
+export const HOME_RETURN_SEED_KEY = 'scadbuddy.mock.home-return'
+function seedHomeReturnFromStorage() {
+  try {
+    if (typeof sessionStorage !== 'undefined' && sessionStorage.getItem(HOME_RETURN_SEED_KEY) === '1') seedHomeReturn()
+  } catch {
+    // Nothing seeded.
+  }
 }
 
 function trayOf(row: SpoolRow): S['TrayPlace'] | null {
@@ -1008,7 +1079,8 @@ function setArchived(at: number, archived: boolean, reason: ArchiveReason | null
       addEvent(row.id, 'tag_unbound', { data: { tag_id: open.tag_id, reason: 'archived' } })
     }
   }
-  state.spools[at] = { ...state.spools[at]!, archived_at: archived ? now() : null, updated_at: now() }
+  // #7167: an archived spool is asked about its home no more (`spools.py` `_archive`).
+  state.spools[at] = { ...state.spools[at]!, archived_at: archived ? now() : null, ...(archived ? { home_asked_at: null } : {}), updated_at: now() }
   if (!archived) {
     addEvent(row.id, 'restored')
     return
@@ -2462,9 +2534,11 @@ export const handlers = [
   http.get(`${BASE}/spools`, ({ request }) => {
     const search = new URL(request.url).searchParams
     const needsType = search.get('needs_type')
+    const awaitingHome = search.get('awaiting_home')
     return HttpResponse.json(
       listed(flag(request, 'include_archived'))
         .filter((row) => needsType === null || (needsType === 'true') === !row.type_id)
+        .filter((row) => awaitingHome === null || (awaitingHome === 'true') === awaitsHome(row))
         .map(view),
     )
   }),
@@ -2744,7 +2818,10 @@ export const handlers = [
     const finalFilament = grams != null ? (readingG != null && readingG < grams ? null : grams) : readingG != null && insert && readingG >= insert.empty_weight_g ? readingG - insert.empty_weight_g : null
     const weighed = readingG != null || grams != null
     const events = state.events.filter((event) => event.spool_id === row.id)
-    const closing = closingOf(events, row, (reason as ArchiveReason | null) ?? null, finalFilament, weighed ? null : row.grams_left)
+    const base = closingOf(events, row, (reason as ArchiveReason | null) ?? null, finalFilament, weighed ? null : row.grams_left)
+    // `ledger.closing(waste=True)` (#7167): the raw final filament above 0, unless respooled.
+    const final = finalFilament ?? (weighed ? null : row.grams_left)
+    const closing = { ...base, non_print_waste_g: final != null && final > 0 && reason !== 'respooled' ? final : null }
     const notices = [...readingNotice(readingG, grams, insert?.empty_weight_g ?? null), ...closingNotices((reason as ArchiveReason | null) ?? null, closing.final_filament_g ?? null)]
     return HttpResponse.json({ closing, final_filament_g: closing.final_filament_g ?? null, empty_g: insert?.empty_weight_g ?? null, notices } satisfies S['ClosingPreview'])
   }),
@@ -2885,18 +2962,30 @@ export const handlers = [
     const sent = await request.json()
     const extra = extraKeys(sent, FIELDS.move)
     if (extra) return extra
-    const { location_id, if_occupied } = sent as S['SpoolMove']
+    const { location_id, if_occupied, answers } = sent as S['SpoolMove']
     if (location_id && !state.locations.some((place) => place.id === location_id && !place.archived_at)) {
       return problem(422, REFUSED.moveTarget)
     }
-    if (if_occupied === 'replace' && location_id) {
-      // `homes.py` `move_into`: the box's other spool is archived (reason `other`, waste `cause` `replaced`) first.
-      const held = state.spools.findIndex((one) => one.location_id === location_id && one.id !== params.id && one.archived_at === null)
-      if (held >= 0) setArchived(held, true, 'other', null, 'replaced')
+    // #7167 `homes.py` `move_into`: `answers` names the unloaded spool whose prompt this answers.
+    const answered = answers ? state.spools.findIndex((one) => one.id === answers) : -1
+    if (answers && answered < 0) return problem(404, `no spool ${answers}`)
+    if (answers && (location_id == null || state.spools[answered]!.home_location_id !== location_id)) {
+      return problem(422, `the home of spool ${answers} is not this place`, { code: 'not_its_home' })
     }
+    const held = location_id && isDryBox(location_id) ? state.spools.findIndex((one) => one.location_id === location_id && one.id !== params.id && one.archived_at === null) : -1
+    if (held >= 0 && if_occupied !== 'replace') {
+      // `dry_box.py` `BoxFullError`: a dry box holds one spool.
+      const occupant = state.spools[held]!.id
+      return problem(409, `the dry box already holds spool ${occupant}`, { code: 'box_full', occupant_id: occupant })
+    }
+    // A replace archives the box's other spool (reason `other`, waste `cause` `replaced`) first.
+    if (held >= 0) setArchived(held, true, 'other', null, 'replaced')
+    if (answered >= 0 && answers !== params.id) state.spools[answered] = { ...state.spools[answered]!, home_asked_at: null }
     const row = state.spools[at]!
     if (row.location_id !== location_id) {
-      state.spools[at] = { ...row, location_id, updated_at: now() }
+      // `dry_box.py` `keep_home_on`: a dry box becomes the spool's home, and it is asked about its home no more.
+      const home = location_id && isDryBox(location_id) ? location_id : (row.home_location_id ?? null)
+      state.spools[at] = { ...row, location_id, home_location_id: home, home_asked_at: null, updated_at: now() }
       addEvent(row.id, 'moved', { data: { from: row.location_id, to: location_id } })
     }
     return HttpResponse.json(view(state.spools[at]!))
@@ -3077,6 +3166,8 @@ export const handlers = [
     const next = patched(state.locations[at]!, body)
     if (!next.archived_at && placeTaken(next, self)) return problem(409, REFUSED.locationExists)
     if (badRef(next, LOCATION_REFS)) return problem(422, REFUSED.catalogRef)
+    const many = boxHasMany(self, next)
+    if (many) return many
     state.locations[at] = next
     return HttpResponse.json(next)
   }),
@@ -3229,4 +3320,7 @@ function spoolSummary(row: SpoolRow): S['FilamentSpoolSummary'] {
     },
   }
 }
+
+// Last: the seed helper reads constants defined above.
+seedHomeReturnFromStorage()
 

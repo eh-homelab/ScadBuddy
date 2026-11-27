@@ -276,6 +276,21 @@ same way, `vite.config.ts`).
   `src/mocks/features/filament/unknownTrays.ts`. Until the Go resolve route exists, the dialog's
   "Link spool" gets a 404 and names the same path (Filament → Locations → the place). The print
   verdict e2e is `e2e/unknown-spool.spec.ts` (the mock tray: `unknownTrays.ts` `UNKNOWN_TRAY_SEED_KEY`).
+- Dry boxes and the home return (#7167): a dry box is a dry-storage place of capacity 1 (the
+  "Dry box" switch in Filament → Locations' place form, shown only for a dry-storage kind, sets
+  capacity 1; a 422 `box_has_many` shows its text). `lib/homeReturns.ts` `useHomeReturns` reads
+  `GET /filament/spools?awaiting_home=true` as the unknown trays are read; `needsYou.ts` lists each
+  as the kind `home-return` (source `homes`, since `home_asked_at`). The shell owns the dialog
+  (`components/filament/useHomeReturnDialog.tsx`, `NeedsYou.answerHome`); the spool page's "Dry box"
+  banner opens the same `HomeReturnDialog`. The person always names the spool that goes in, through
+  `components/filament/IdentifySpool.tsx` (Scan tag only where Web NFC is; a code field always, with
+  "Use camera" where `window.BarcodeDetector` exists, else "Take a photo" through `api/scan.ts`, which
+  a 404 hides; Pick by hand): nothing is preselected, the unloaded spool included. The box's spool or
+  an empty box moves with `if_occupied: 'refuse'`, any other spool with `replace`, each with
+  `answers`; a 409 `box_full` reads the box again. The archive dialog says the grams it books as
+  non-print waste (`closing.non_print_waste_g`). Mocks: `mocks/features/filament/index.ts`
+  `seedHomeReturn` (S-11 out of the H2C's AMS-A slot 1, home `Dry box 2` holding S-7), or `"1"` under
+  `sessionStorage` `HOME_RETURN_SEED_KEY` for the dev preview.
 - The print watcher (#4699 phase 2): Settings → Printing's "Print watcher"
   (`pages/settings/sections/print-watcher.tsx`; the list fields' form values are
   comma-joined, `values.ts` `sourcesValue`, `printerIdsValue`, `registryIdsValue`), and the Prints page's

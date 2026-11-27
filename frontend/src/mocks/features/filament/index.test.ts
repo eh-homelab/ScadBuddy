@@ -43,6 +43,7 @@ import {
   type SpoolTypeCreate,
 } from '../../../api/filament'
 import { resetMockState } from '../../handlers'
+import { seedHomeReturn } from './index'
 import { B, H2C, IT, L, LK, M, SENSOR, spoolId, T, TAG } from './seed'
 
 // #6262 Task 14 — the Filament section's mock API over its seed, through the client.
@@ -302,12 +303,57 @@ describe('the filament mocks', () => {
     })
 
     it('a replace move archives the box spool and books its grams with cause replaced', async () => {
+      const { box } = seedHomeReturn()
+      expect((await getSpool(spoolId(7))).location_id).toBe(box)
+      await moveSpool(spoolId(1), box, { ifOccupied: 'replace' })
+      expect((await getSpool(spoolId(7))).archived_at).not.toBeNull()
+      expect((await events(spoolId(7)))[0]?.data).toMatchObject({ waste_g: 300, cause: 'replaced' })
+      expect((await getSpool(spoolId(1))).location_id).toBe(box)
+      expect(await waste()).toBe(300)
+    })
+
+    it('a replace into a place that is no dry box is the plain move', async () => {
       expect((await getSpool(spoolId(2))).location_id).toBe(L.DRY_BOX)
       await moveSpool(spoolId(1), L.DRY_BOX, { ifOccupied: 'replace' })
-      expect((await getSpool(spoolId(2))).archived_at).not.toBeNull()
-      expect((await events(spoolId(2)))[0]?.data).toMatchObject({ waste_g: 820, cause: 'replaced' })
-      expect((await getSpool(spoolId(1))).location_id).toBe(L.DRY_BOX)
-      expect(await waste()).toBe(820)
+      expect((await getSpool(spoolId(2))).archived_at).toBeNull()
+      expect(await waste()).toBe(0)
+    })
+
+    it('the closing preview carries the waste the archive would book', async () => {
+      expect((await closingPreview(spoolId(10), 'damaged', null, null)).closing.non_print_waste_g).toBe(250)
+      expect((await closingPreview(spoolId(10), 'respooled', null, null)).closing.non_print_waste_g).toBeNull()
+      expect((await closingPreview(spoolId(10), 'finished', null, 0)).closing.non_print_waste_g).toBeNull()
+    })
+  })
+
+  describe('dry boxes and the home return (#7167)', () => {
+    it('lists only the spools awaiting a home answer with awaiting_home', async () => {
+      expect(await listSpools({ awaitingHome: true })).toEqual([])
+      seedHomeReturn()
+      expect((await listSpools({ awaitingHome: true })).map((one) => one.number)).toEqual([11])
+      expect((await listSpools({ awaitingHome: false })).map((one) => one.number)).not.toContain(11)
+    })
+
+    it('refuses a full box with box_full naming its spool, and changes nothing', async () => {
+      const { box } = seedHomeReturn()
+      expect(await refusal(moveSpool(spoolId(1), box))).toMatchObject({ status: 409, code: 'box_full', occupant_id: spoolId(7) })
+      expect((await getSpool(spoolId(1))).location_id).toBe(L.SHELF_A)
+    })
+
+    it('answers the prompt with answers, and checks it', async () => {
+      const { box } = seedHomeReturn()
+      expect(await refusal(moveSpool(spoolId(7), box, { answers: NOBODY }))).toMatchObject({ status: 404 })
+      expect(await refusal(moveSpool(spoolId(7), L.SHELF_A, { answers: spoolId(11) }))).toMatchObject({ status: 422, code: 'not_its_home' })
+      await moveSpool(spoolId(7), box, { answers: spoolId(11) })
+      const unloaded = await getSpool(spoolId(11))
+      expect(unloaded.home_asked_at).toBeNull()
+      expect(unloaded.location_id).toBeNull()
+      expect(await listSpools({ awaitingHome: true })).toEqual([])
+    })
+
+    it('refuses to make a box of a place that holds several spools (box_has_many)', async () => {
+      expect(await refusal(upsertLocation({ capacity: 1 }, L.DRY_BOX))).toMatchObject({ status: 422, code: 'box_has_many' })
+      expect((await listLocations()).flatMap((one) => one.children ?? []).find((one) => one.id === L.DRY_BOX)?.capacity).toBe(4)
     })
   })
 

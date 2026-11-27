@@ -4,6 +4,7 @@ import { Route, Routes } from 'react-router'
 import { beforeEach, describe, expect, it, onTestFinished, vi } from 'vitest'
 import { addSpoolEvent, archiveSpool, createTagBackup, getSpool, getType, listSpoolEvents, listSpools, patchSpool, setSpoolKValues, setSpoolPresets, spoolTagRecords, spoolTagWritten } from '../../api/filament'
 import { SPOOL_ADVANCED_KEY } from '../../components/filament/SpoolSections'
+import { seedHomeReturn } from '../../mocks/features/filament'
 import { H2C, L, spoolId, T, TAG } from '../../mocks/features/filament/seed'
 import { INVOICE, LINE, SUPPLIER } from '../../mocks/features/filamentPurchasingSeed'
 import { ORDER_CLOSED } from '../../mocks/features/orders/state'
@@ -54,6 +55,28 @@ describe('the spool page', () => {
       expect(within(screen.getByRole('navigation', { name: 'Sections' })).getByRole('link', { name })).toHaveAttribute('href', `#${anchor}`)
     }
     expect(screen.getByRole('combobox', { name: 'Go to section' })).toBeInTheDocument()
+  })
+
+  it('asks which spool goes into its dry box, and the banner goes once answered (#7167)', async () => {
+    seedHomeReturn()
+    const { user } = open(11)
+    await heading(11)
+    const banner = await screen.findByRole('region', { name: 'Dry box' })
+    expect(within(banner).getByText('S-11 came out of its tray. Which spool goes into its dry box?')).toBeInTheDocument()
+    await user.click(within(banner).getByRole('button', { name: 'Choose the spool…' }))
+    const dialog = await screen.findByRole('dialog', { name: 'S-11 came out of 3DP-31B-598 H2C AMS-A slot 1. Which spool goes into Dry box 2?' })
+    await user.click(within(dialog).getByRole('radio', { name: 'Pick by hand' }))
+    await user.click(await within(await within(dialog).findByRole('radiogroup', { name: 'Spools' })).findByRole('radio', { name: /^S-11\b/ }))
+    await user.click(within(dialog).getByRole('button', { name: 'Put in box' }))
+    await waitFor(() => expect(screen.queryByRole('region', { name: 'Dry box' })).toBeNull())
+    expect(screen.getByText('Put S-11 in Dry box 2')).toBeInTheDocument()
+    expect((await getSpool(spoolId(7))).archived_at).not.toBeNull()
+  })
+
+  it('shows no dry box banner for a spool that waits for nothing (#7167)', async () => {
+    open(1)
+    await heading(1)
+    expect(screen.queryByRole('region', { name: 'Dry box' })).toBeNull()
   })
 
   it('says what the newest weighing was made of (#7682)', async () => {

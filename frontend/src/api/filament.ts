@@ -159,8 +159,9 @@ const json = (method: string, body: unknown): RequestInit => ({ method, body: JS
 
 // -- spools ---------------------------------------------------------------------------
 
-export const listSpools = (options: { includeArchived?: boolean; needsType?: boolean } = {}) =>
-  request<Spool[]>(`${BASE}/spools${query({ include_archived: options.includeArchived || undefined, needs_type: options.needsType })}`)
+/** `awaitingHome` (#7167) keeps only the spools asked which spool goes into their home dry box. */
+export const listSpools = (options: { includeArchived?: boolean; needsType?: boolean; awaitingHome?: boolean } = {}) =>
+  request<Spool[]>(`${BASE}/spools${query({ include_archived: options.includeArchived || undefined, needs_type: options.needsType, awaiting_home: options.awaitingHome })}`)
 
 export const getSpool = (id: string) => request<SpoolDetail>(`${BASE}/spools/${seg(id)}`)
 
@@ -378,9 +379,14 @@ export const insertWeightOffer = (spoolId: string, readingG: number) =>
 export const acceptInsertWeight = (spoolId: string, readingG: number, newEmptyWeightG?: number) =>
   request<InsertWeightAccepted>(`${BASE}/spools/${seg(spoolId)}/insert-weight`, json('POST', { reading_g: readingG, new_empty_weight_g: newEmptyWeightG }))
 
-/** `null` takes it out of every place. */
-export const moveSpool = (id: string, locationId: string | null, options: { ifOccupied?: 'refuse' | 'replace' } = {}) =>
-  request<Spool>(`${BASE}/spools/${seg(id)}/move`, json('POST', { location_id: locationId, if_occupied: options.ifOccupied }))
+/**
+ * `null` takes it out of every place. A full dry box is a 409 `box_full` naming `occupant_id`
+ * unless `ifOccupied` is `replace` (#7167). `answers` is the unloaded spool whose home-return
+ * prompt this move answers: its `home_asked_at` clears (404 for no such spool, 422
+ * `not_its_home` when its home is not `locationId`).
+ */
+export const moveSpool = (id: string, locationId: string | null, options: { ifOccupied?: 'refuse' | 'replace'; answers?: string } = {}) =>
+  request<Spool>(`${BASE}/spools/${seg(id)}/move`, json('POST', { location_id: locationId, if_occupied: options.ifOccupied, ...(options.answers ? { answers: options.answers } : {}) }))
 
 /** Books each loaded spool's AMS remaining percent (#6268); the answer counts what it did and what it skipped. */
 export const syncAmsWeights = () => request<AmsSyncResult>(`${BASE}/spools/sync-ams-weights`, { method: 'POST' })

@@ -7,6 +7,7 @@ import { decisionBody, respond, RespondError } from '../../agent/respond'
 import { noticeTitle } from '../../agent/attentionNotifications'
 import { actorText, flowRunPath } from '../../lib/flows'
 import { timeAgo } from '../../lib/format'
+import { homeReturnTitle, spoolCode } from '../../lib/homeReturns'
 import { NEEDS_YOU_ID, NeedsYouContext, REVIEW_PARAM, reviewPath, runName, type NeedsYouItem } from '../../lib/needsYou'
 import { traceAction } from '../../lib/traceAction'
 import { Button } from '@/components/ui/button'
@@ -39,6 +40,8 @@ function kindLabel(item: NeedsYouItem): string {
       return 'Pairing request'
     case 'unknown_spool':
       return 'Unknown spool'
+    case 'home-return':
+      return 'Dry box'
     case 'agent': {
       const { entry } = item
       if (entry.run) return entry.kind === 'approval' ? 'Flow run approval' : 'Flow run question'
@@ -60,6 +63,8 @@ function sourceText(item: NeedsYouItem): string {
       return `${item.pairing.label}, from outside ScadBuddy`
     case 'unknown_spool':
       return `${item.tray.printer_name} ${item.tray.slot}`
+    case 'home-return':
+      return `${spoolCode(item.spool)}${item.spool.effective?.colour_name ? `, ${item.spool.effective.colour_name}` : ''}`
     case 'agent': {
       const { entry } = item
       if (entry.run) return `Flow run ${entry.run.name}${entry.tool ? `, ${entry.tool}` : ''}`
@@ -80,6 +85,8 @@ function askText(item: NeedsYouItem): string {
       return 'Each run it starts would make the calls inside the grant without asking you, until it expires.'
     case 'unknown_spool':
       return `Prints to ${item.tray.printer_name} wait until you link the spool in ${item.tray.slot}.`
+    case 'home-return':
+      return homeReturnTitle(item.spool)
     case 'pairing':
       return 'It could see this tab and change it as you can. Type the code it gave you in the pairing prompt on this page.'
   }
@@ -246,6 +253,15 @@ export function NeedsYouRow({
       return ctx?.answerSpool ? (
         <Button size="sm" aria-haspopup="dialog" onClick={() => ctx.answerSpool?.(tray)}>
           Tell ScadBuddy which spool…
+        </Button>
+      ) : null
+    }
+    if (item.kind === 'home-return') {
+      // The shell owns the dialog: this row goes away once the prompt is answered.
+      const { spool } = item
+      return ctx?.answerHome ? (
+        <Button size="sm" aria-haspopup="dialog" onClick={() => ctx.answerHome?.(spool)}>
+          Choose the spool…
         </Button>
       ) : null
     }
