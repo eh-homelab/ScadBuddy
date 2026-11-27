@@ -366,6 +366,14 @@ async def test_an_edit_activity_refuses_a_refused_key_once(
     assert error.details == (key,)
 
 
+async def test_a_long_refused_key_is_cut_in_the_message_and_details() -> None:
+    long_key = "x" * 70 + "_token"
+    error = await _refused(_ACTIVITIES[EDIT_ACTIVITY](_EDIT | {"unset": [long_key]}))
+    assert error.type == "key_refused"
+    assert error.details == ("x" * 64 + "\u2026",)
+    assert long_key not in str(error)
+
+
 @pytest.mark.parametrize(
     ("name", "raw", "loc"),
     [

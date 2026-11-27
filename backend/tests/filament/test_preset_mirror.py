@@ -919,6 +919,23 @@ async def test_send_again_while_another_mirror_runs_is_busy(
 
 
 @respx.mock
+async def test_send_again_with_an_old_error_while_another_mirror_runs_is_busy(
+    pg_pool: PgPool, tmp_path: Path
+) -> None:
+    """An error from before the start is no failure of this send: the lock is held, so busy."""
+    blobs = LocalBlobStore(tmp_path / "blobs")
+    made = await _make(pg_pool, blobs, {"name": "Waits"}, source="manual")
+    _failed_before(pg_pool, made)
+    conninfo = pg_pool.conninfo
+    held = await acquire_lock(conninfo() if callable(conninfo) else str(conninfo), LOCK)
+    assert held is not None
+    try:
+        assert await _again(pg_pool, blobs, made) == "busy"
+    finally:
+        held.close()
+
+
+@respx.mock
 async def test_send_again_past_its_timeout_is_pending(pg_pool: PgPool, tmp_path: Path) -> None:
     """Bambuddy never answers the create, so any bound is passed."""
     blobs = LocalBlobStore(tmp_path / "blobs")

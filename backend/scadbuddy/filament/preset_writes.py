@@ -94,6 +94,14 @@ KEY_REUSED: Final = "idempotency_key_reused"
 #: An input that is not a copy or an edit, for a reason other than a key.
 INVALID_INPUT: Final = "invalid_input"
 
+SHOWN_KEY: Final = 64
+
+
+def _shown(key: str) -> str:
+    """``key`` as a failure shows it: the first ``SHOWN_KEY`` characters, then an ellipsis."""
+    return key if len(key) <= SHOWN_KEY else key[:SHOWN_KEY] + "\u2026"
+
+
 PresetName = Annotated[str, StringConstraints(strip_whitespace=True, min_length=1, max_length=200)]
 Mirror = Literal["sent", "failed", "pending", "off"]
 
@@ -134,7 +142,7 @@ class PresetEditInput(BaseModel):
                 continue
             if not KEY.match(key) or key == "name" or is_credential(key):
                 raise PydanticCustomError(
-                    KEY_REFUSED, "the key {key} cannot be set or unset", {"key": key}
+                    KEY_REFUSED, "the key {key} cannot be set or unset", {"key": _shown(key)}
                 )
         return value
 
@@ -145,7 +153,7 @@ class PresetEditInput(BaseModel):
         both = sorted(self.set.keys() & set(self.unset))
         if both:
             raise PydanticCustomError(
-                KEY_REFUSED, "the key {key} is both set and unset", {"key": both[0]}
+                KEY_REFUSED, "the key {key} is both set and unset", {"key": _shown(both[0])}
             )
         if self.name is None and not self.set and not self.unset:
             raise ValueError("an edit needs a name, a key to set or a key to unset")
