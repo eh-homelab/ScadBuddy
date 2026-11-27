@@ -2036,7 +2036,8 @@ const tools: Tool[] = [
       "`spool_id` and `code` (a label code such as `S-12`), `net_weight_g` (the spool's weight without its core, " +
       "more than 0) and `seen_at` (the row's `seen_at`, as listed, never changed). It answers `{id, number, code, " +
       'location_id}`. 409 `tray_changed`: the tray changed after the list; read the list again. 404 `code_unknown`: ' +
-      'no spool has that code. 409 `spool_archived`. 409 `no_ams_kind`. 404 `spool_missing`: the spool was archived or deleted while it linked. 409 `tag_clash`: the tray's tag is on another spool. Use only what the user says: never pick a ' +
+      'no spool has that code. 409 `spool_archived`. 409 `no_ams_kind`. 404 `spool_missing`: the spool was archived ' +
+      'or deleted while it linked. 409 `tag_clash`: the tag on the tray is on another spool. Use only what the user says: never pick a ' +
       'candidate yourself. Writes ScadBuddy only.',
     input: z.object({
       tray_id: z.string().uuid(),

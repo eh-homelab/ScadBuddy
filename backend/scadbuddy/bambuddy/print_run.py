@@ -938,6 +938,8 @@ async def refuse_unknown_spools(
         )
         return
     if refs and inventory is not None:
+        # On Bambuddy's path the check has read the inventory for its plan already, so this is a
+        # second read when a tray is unknown (small, and only then).
         held = {
             tray_label(spool.loaded.ams_id, spool.loaded.tray_id)
             for spool in await inventory()
