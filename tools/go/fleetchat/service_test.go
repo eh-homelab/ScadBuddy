@@ -45,7 +45,7 @@ func TestValidation(t *testing.T) {
 	if err := svc.Join(ctx, "nope", "ops"); !errors.Is(err, ErrBadSession) {
 		t.Errorf("Join with a bad session: %v; want ErrBadSession", err)
 	}
-	for _, ch := range []string{"", "Ops", "a b", "ops_1", strings.Repeat("a", 41)} {
+	for _, ch := range []string{"", "Ops", "a b", "ops_1", strings.Repeat("a", 64)} {
 		if err := svc.Join(ctx, sidA, ch); !errors.Is(err, ErrBadChannel) {
 			t.Errorf("Join(%q): %v; want ErrBadChannel", ch, err)
 		}
