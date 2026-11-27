@@ -31,6 +31,8 @@ import { FLOW_IMAGES_FULL, GRANT_REVOKED } from '../src/temporal/toolActivities.
 import { CALL_ID_META } from '../src/builtins/callId.js'
 import { connectInProcess, listTurnTools, TURN_TOOL_TIER_ACTIVITY, turnToolActivities, turnToolActivity, type TurnContext, type TurnServer, type ListedTools, type TurnToolsDeps, type TurnToolsResult } from '../src/temporal/turnTools.js'
 import { turnToolEnv } from './support/turnToolEnv.js'
+import { toolCallWorkflowId } from '../src/temporal/toolCall.js'
+import { durableRequestId } from '../src/gate/ids.js'
 
 // A turn's plugin and http tools as activities (#2320): listed per turn, tiered per call from
 // the input, gated by the recorded approval, and refused once their server is gone.
@@ -398,10 +400,56 @@ describe('turn tools in a durable session', () => {
       env(TURN_TOOL_TIER_ACTIVITY).run(activities[TURN_TOOL_TIER_ACTIVITY]!, { tool: `${HTTP_SERVER}__${HTTP_TOOL}`, input })
     expect(await tier({ url: 'http://example.test/', method: 'POST' })).toEqual({ tier: 'outward', declared: 'outward' })
     expect(await tier({ url: 'http://example.test/' })).toEqual({ tier: 'read', declared: 'read' })
+    // A GET to a private host a person must approve (#8178): outward in a flow and a durable turn too.
+    expect(await tier({ url: 'http://nas.example/', allow_private_host: 'nas.example' })).toEqual({ tier: 'outward', declared: 'outward' })
+    const unapproved = await failure(
+      env(`turn:${HTTP_SERVER}__${HTTP_TOOL}`).run(turnToolActivity(deps), { url: 'http://nas.example/', allow_private_host: 'nas.example' }),
+    )
+    expect(unapproved.type).toBe('NotApproved')
     const refused = await failure(
       env(`turn:${HTTP_SERVER}__${HTTP_TOOL}`).run(turnToolActivity(deps), { url: 'http://example.test/', method: 'POST' }),
     )
     expect(refused.type).toBe('NotApproved')
+  })
+
+  it("runs a private host's read only on a person's own approval, never a run grant's (review of #8178)", async () => {
+    const saveRoot = await mkdtemp(path.join(os.tmpdir(), 'turn-http-'))
+    const call = (byPerson: boolean) => {
+      const deps: TurnToolsDeps = {
+        sessions: { ownerOf: async (id) => (id === SESSION ? (BROWSER as never) : undefined) },
+        servers: turnServers({ httpRequest: { saveRoot, bodies: noBodies() } }),
+        // Approved either way; only who approved it differs.
+        approvals: { approved: async () => true, byPerson: async () => byPerson },
+      }
+      // Port 9 on loopback: nothing answers, so a call the gate lets through fails as a request, not NotApproved.
+      return env(`turn:${HTTP_SERVER}__${HTTP_TOOL}`).run(turnToolActivity(deps), { url: 'http://127.0.0.1:9/', allow_private_host: '127.0.0.1' })
+    }
+    const byGrant = await failure(call(false))
+    expect(byGrant.type).toBe('NotApproved')
+    expect(byGrant.message).toMatch(/a person's own approval/)
+    const byPerson = await call(true).then(
+      () => undefined,
+      (err: unknown) => err as { type?: string },
+    )
+    expect(byPerson?.type).not.toBe('NotApproved')
+  })
+
+  it("refuses a ToolCall's private host read that a grant approved, as the turn path does (review of #8277)", async () => {
+    const saveRoot = await mkdtemp(path.join(os.tmpdir(), 'turn-http-'))
+    const deps: TurnToolsDeps = {
+      sessions: { ownerOf: async (id) => (id === SESSION ? (BROWSER as never) : undefined) },
+      servers: turnServers({ httpRequest: { saveRoot, bodies: noBodies() } }),
+      // Approved, but not by a person.
+      approvals: { approved: async () => true, byPerson: async () => false },
+    }
+    const toolUseId = 'toolu_grant'
+    const result = await env(`turn:${HTTP_SERVER}__${HTTP_TOOL}`, `tool-${toolUseId}`, toolCallWorkflowId(SESSION, toolUseId)).run(turnToolActivity(deps), {
+      tool: `${HTTP_SERVER}__${HTTP_TOOL}`,
+      input: { url: 'http://127.0.0.1:9/', allow_private_host: '127.0.0.1' },
+      requestId: durableRequestId(SESSION, 'run-1', toolUseId),
+    })
+    // A ToolCall's refusal is a result the model reads, not a thrown failure.
+    expect(result).toMatchObject({ ok: false, content: [{ type: 'text', text: expect.stringMatching(/a person's own approval/) }] })
   })
 
   it("takes http_request's switch and tier from ai_access (#2171): off hides it, an item set to outward parks a GET", async () => {

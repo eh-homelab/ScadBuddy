@@ -39,6 +39,17 @@ def test_a_spool_resolves_with_no_name(client: TestClient) -> None:
     }
 
 
+def test_a_seeded_kind_resolves_by_its_k_code(client: TestClient) -> None:
+    kinds = client.get("/api/v1/inventory/kinds")
+    assert kinds.status_code == 200, kinds.text
+    got = client.get(f"{CODES}/K-1")
+    assert got.status_code == 200, got.text
+    body = got.json()
+    assert body["kind"] == "item_kind" and body["code"] == "K-1"
+    assert body["id"] in {k["id"] for k in kinds.json()["kinds"]}
+    assert client.get(f"{CODES}/k1").json()["id"] == body["id"]
+
+
 def test_an_archived_location_still_resolves(client: TestClient) -> None:
     place = _location(client, "Old")
     client.patch(f"{LOCATIONS}/{place['id']}", json={"archived": True})

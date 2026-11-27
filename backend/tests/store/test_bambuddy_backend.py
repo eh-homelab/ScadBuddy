@@ -611,7 +611,7 @@ async def test_a_rotated_render_key_is_used_without_a_restart(pool: Pool, tmp_pa
     assert [c.request.headers["X-API-Key"] for c in route.calls] == ["old", "new"]
     put("bambuddy_render_api_key", None)
     put("bambuddy_api_key", "full")
-    assert (await source.current()).key_is_fallback is True
+    assert (await source.current()).api_key == "full"
     await backend.aclose()
 
 

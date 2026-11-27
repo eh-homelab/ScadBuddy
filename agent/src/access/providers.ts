@@ -32,7 +32,7 @@ const SPECS: readonly Spec[] = [
 
 const SOURCE_IDS: readonly string[] = SPECS.map((s) => s.id)
 
-export const HTTP_DEFAULT_NOTE = 'read for GET and HEAD, outward (asks first) for anything else'
+export const HTTP_DEFAULT_NOTE = 'read for GET and HEAD to a public host, outward (asks first) for anything else'
 
 const rowOf = (rows: readonly AccessRow[], source: string, item: string): AccessRow | undefined =>
   rows.find((r) => r.source === source && r.item === item)

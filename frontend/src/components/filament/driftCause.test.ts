@@ -97,6 +97,7 @@ const history = (events: SpoolEvent[], over: Partial<SpoolHistory['metrics']> = 
     prints: 1,
     grams_per_print: 148,
     wasted_g: 0,
+    non_print_waste_g: 0,
     cost_used: null,
     value_left: null,
     burn_g_per_day: null,

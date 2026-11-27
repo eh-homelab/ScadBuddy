@@ -649,6 +649,7 @@ export class TurnRunner {
                   sessionId: id,
                   ...(this.deps.httpRequest.resolve ? { resolve: this.deps.httpRequest.resolve } : {}),
                   ...(this.deps.httpRequest.limits ? { limits: this.deps.httpRequest.limits } : {}),
+                  ...(this.deps.httpRequest.allowPrivate ? { allowPrivate: true } : {}),
                 },
                 slot,
               ),

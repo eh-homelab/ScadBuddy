@@ -68,8 +68,8 @@ type Store interface {
 
 var (
 	ErrBadSession   = errors.New("session_id must be a canonical lower-case UUID")
-	ErrBadChannel   = errors.New("channel must match ^[a-z0-9-]{1,40}$")
-	ErrBadTarget    = errors.New("give exactly one of channel or agent; agent is an 8-character lower-case hex handle or a name like a channel's")
+	ErrBadChannel   = errors.New("channel must be, in lower case and at most 256 characters, an issue or PR reference (owner/repo#123), an Actions run reference (owner/repo/runs/123) or a name under Kubernetes' rules (a DNS-1123 subdomain: a-z, 0-9, - and ., each dot-separated part 1-63 characters that starts and ends with a letter or digit)")
+	ErrBadTarget    = errors.New("give exactly one of channel or agent; agent is an 8-character lower-case hex handle or a name (1 to 40 of a-z, 0-9 and -, with at least one character that is not a hex digit, such as rotator)")
 	ErrEmptyText    = errors.New("text is empty")
 	ErrTooLong      = errors.New("text is longer than the largest message allowed")
 	ErrBadSeq       = errors.New("seq must be 0 or more, and not past your cursor")

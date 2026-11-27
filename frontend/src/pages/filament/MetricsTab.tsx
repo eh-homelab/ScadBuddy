@@ -66,6 +66,7 @@ function dimensionHref(dimension: Dimension, key: string | null | undefined): st
 }
 const BUCKET_TITLES: Record<MetricsBucket, string> = { week: 'Weeks', month: 'Months' }
 const WASTE_TITLES = { material: 'By material', type: 'By type', printer: 'By printer' } as const
+const NON_PRINT_WASTE_TITLES = { material: 'By material', type: 'By type' } as const
 /**
  * The categorical series in their fixed order (`index.css` `--sb-series-*`): the palette's
  * first three slots, its all-pairs cap, because zero segments are skipped and any two can
@@ -456,6 +457,30 @@ export function MetricsTab() {
           </div>
         ) : (
           !errors.metrics && loading
+        )}
+        {metrics && (metrics.non_print_waste_g > 0 || metrics.non_print_waste.length > 0) && (
+          <div role="group" aria-label="Non-print waste" className="mt-6 flex flex-col gap-3 border-t border-border pt-4">
+            <div className="flex flex-col gap-0.5">
+              <h3 className="text-[13px] font-medium">Non-print waste</h3>
+              <p className="text-[12px] text-muted-foreground">
+                {g(metrics.non_print_waste_g)} thrown away off the printer, {span}: what was left on archived spools and replaced boxes. It is not in the print waste above.
+              </p>
+            </div>
+            <div className="grid gap-6 sm:grid-cols-2">
+              {(['material', 'type'] as const).map((name) => (
+                <div key={name} className="flex min-w-0 flex-col gap-2">
+                  <h4 className="text-[12px] text-muted-foreground">{NON_PRINT_WASTE_TITLES[name]}</h4>
+                  <BarList
+                    label={`Non-print waste ${NON_PRINT_WASTE_TITLES[name].toLowerCase()}`}
+                    empty="No non-print waste in this range."
+                    rows={metrics.non_print_waste
+                      .filter((row) => row.dimension === name)
+                      .map((row) => ({ key: row.key ?? '', label: row.label, value: row.wasted_g, text: g(row.wasted_g) }))}
+                  />
+                </div>
+              ))}
+            </div>
+          </div>
         )}
       </Section>
 

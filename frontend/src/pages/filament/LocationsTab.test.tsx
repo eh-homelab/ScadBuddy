@@ -2,6 +2,8 @@ import { screen, waitFor, within } from '@testing-library/react'
 import { describe, expect, it } from 'vitest'
 import { listLocations } from '../../api/filament'
 import { L, spoolId } from '../../mocks/features/filament/seed'
+import { seedUnknownTray } from '../../mocks/features/filament/unknownTrays'
+import { NeedsYouHarness } from '../../test/needsYou'
 import { renderPage } from '../../test/utils'
 import { choose } from '../../test/select'
 import { LocationsTab } from './LocationsTab'
@@ -109,5 +111,53 @@ describe('the Locations tab', () => {
     const { user } = renderPage(<LocationsTab />)
     await user.click(within(await place(L.DRY_BOX)).getByRole('button', { name: 'Archive Dry box 1' }))
     await waitFor(() => expect(within(screen.getByRole('list', { name: 'Locations' })).queryByText('Dry box 1')).toBeNull())
+  })
+})
+
+describe('the Locations tab · dry boxes (#7167)', () => {
+  it('offers Print label on a dry box row, which opens the place label flow, and on no tray', async () => {
+    renderPage(<LocationsTab />)
+    const box = await place(L.DRY_BOX)
+    expect(within(box).getByRole('link', { name: 'Print label for Dry box 1' })).toHaveAttribute('href', `/filament/labels?locations=${L.DRY_BOX}`)
+    expect(within(await place(L.AMS_A1)).queryByRole('link', { name: /Print label/ })).toBeNull()
+  })
+
+  it('offers the Dry box switch only for a dry-storage kind, and sets capacity 1', async () => {
+    const { user } = renderPage(<LocationsTab />)
+    await tree()
+    await user.click(screen.getByRole('button', { name: 'Add a place' }))
+    await user.type(await screen.findByLabelText('Name'), 'Box 9')
+    await choose(user, screen.getByRole('combobox', { name: 'Kind' }), 'Shelf')
+    expect(screen.queryByRole('switch', { name: 'Dry box' })).toBeNull()
+    await choose(user, screen.getByRole('combobox', { name: 'Kind' }), 'Dry box')
+    const box = screen.getByRole('switch', { name: 'Dry box' })
+    expect(box).not.toBeChecked()
+    await user.click(box)
+    expect(screen.getByLabelText('Capacity (spools)')).toHaveValue(1)
+    await user.click(screen.getByRole('button', { name: 'Save' }))
+    await waitFor(async () => expect((await listLocations()).find((one) => one.name === 'Box 9')?.capacity).toBe(1))
+    expect(within(await tree()).getAllByText('Box 9').length).toBeGreaterThan(0)
+  })
+
+  it('shows the box_has_many refusal for a place that holds several spools', async () => {
+    const { user } = renderPage(<LocationsTab />)
+    await user.click(within(await place(L.DRY_BOX)).getByRole('button', { name: 'Edit Dry box 1' }))
+    const box = await screen.findByRole('switch', { name: 'Dry box' })
+    await user.click(box)
+    await user.click(screen.getByRole('button', { name: 'Save' }))
+    expect(await screen.findByRole('alert')).toHaveTextContent('the place holds more than one spool, so it cannot be a dry box')
+  })
+})
+
+describe('the Locations tab · unknown trays (#7143)', () => {
+  it('lists the unknown trays above the tree', async () => {
+    seedUnknownTray()
+    renderPage(
+      <NeedsYouHarness>
+        <LocationsTab />
+      </NeedsYouHarness>,
+    )
+    expect(await screen.findByText('Unknown spool in 3DP-31B-598 AMS-A slot 2')).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: 'Tell ScadBuddy which spool…' })).toBeInTheDocument()
   })
 })

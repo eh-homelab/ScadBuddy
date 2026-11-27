@@ -2,7 +2,7 @@
  * #6262 — the Filament section's client for `/api/v1/filament/*`
  * (`backend/scadbuddy/api/filament.py`), typed from the generated `schema.d.ts`.
  */
-import { command, request, requestRaw } from './client'
+import { ApiError, command, request, requestRaw } from './client'
 import type { components, operations } from './schema'
 
 type Schemas = components['schemas']
@@ -159,8 +159,9 @@ const json = (method: string, body: unknown): RequestInit => ({ method, body: JS
 
 // -- spools ---------------------------------------------------------------------------
 
-export const listSpools = (options: { includeArchived?: boolean; needsType?: boolean } = {}) =>
-  request<Spool[]>(`${BASE}/spools${query({ include_archived: options.includeArchived || undefined, needs_type: options.needsType })}`)
+/** `awaitingHome` (#7167) keeps only the spools asked which spool goes into their home dry box. */
+export const listSpools = (options: { includeArchived?: boolean; needsType?: boolean; awaitingHome?: boolean } = {}) =>
+  request<Spool[]>(`${BASE}/spools${query({ include_archived: options.includeArchived || undefined, needs_type: options.needsType, awaiting_home: options.awaitingHome })}`)
 
 export const getSpool = (id: string) => request<SpoolDetail>(`${BASE}/spools/${seg(id)}`)
 
@@ -378,9 +379,38 @@ export const insertWeightOffer = (spoolId: string, readingG: number) =>
 export const acceptInsertWeight = (spoolId: string, readingG: number, newEmptyWeightG?: number) =>
   request<InsertWeightAccepted>(`${BASE}/spools/${seg(spoolId)}/insert-weight`, json('POST', { reading_g: readingG, new_empty_weight_g: newEmptyWeightG }))
 
-/** `null` takes it out of every place. */
-export const moveSpool = (id: string, locationId: string | null) =>
-  request<Spool>(`${BASE}/spools/${seg(id)}/move`, json('POST', { location_id: locationId }))
+/**
+ * `null` takes it out of every place. A full dry box is a 409 `box_full` naming `occupant_id`
+ * unless `ifOccupied` is `replace` (#7167). `answers` is the unloaded spool whose home-return
+ * prompt this move answers: its `home_asked_at` clears (404 for no such spool, 422
+ * `not_its_home` when its home is not `locationId`). `expectedOccupantId` is the box's spool the
+ * person saw: a replace finds another there and is a 409 `box_full` naming it, archiving nothing.
+ */
+/** A replace names the box's spool it expects; without it the server answers 422 `expected_occupant_required` (#7167). */
+type MoveOptions = { answers?: string; expectedLocationId?: string | null } & ({ ifOccupied?: 'refuse'; expectedOccupantId?: string } | { ifOccupied: 'replace'; expectedOccupantId: string })
+
+export const moveSpool = (id: string, locationId: string | null, options: MoveOptions = {}) =>
+  request<Spool>(
+    `${BASE}/spools/${seg(id)}/move`,
+    json('POST', {
+      location_id: locationId,
+      if_occupied: options.ifOccupied,
+      ...(options.answers ? { answers: options.answers } : {}),
+      ...(options.expectedOccupantId ? { expected_occupant_id: options.expectedOccupantId } : {}),
+      ...(options.expectedLocationId !== undefined ? { expected_location_id: options.expectedLocationId } : {}),
+    }),
+  )
+
+/**
+ * The spool's place now, when `cause` is a 409 `move_stale` (#7168): `expectedLocationId` was not where
+ * the spool was, or it is archived. `null` for any other error.
+ */
+export const staleOf = (cause: unknown): { locationId: string | null; archived: boolean } | null => {
+  if (!(cause instanceof ApiError) || cause.status !== 409) return null
+  const body = cause.problem as { code?: unknown; location_id?: unknown; archived?: unknown }
+  if (body.code !== 'move_stale') return null
+  return { locationId: typeof body.location_id === 'string' ? body.location_id : null, archived: body.archived === true }
+}
 
 /** Books each loaded spool's AMS remaining percent (#6268); the answer counts what it did and what it skipped. */
 export const syncAmsWeights = () => request<AmsSyncResult>(`${BASE}/spools/sync-ams-weights`, { method: 'POST' })

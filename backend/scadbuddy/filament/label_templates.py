@@ -13,6 +13,7 @@ from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 TemplateId = Literal[
     "roll_50x25",
+    "roll_2x1in",
     "box_40x30",
     "box_62x29",
     "ams_holder_74x33",
@@ -67,6 +68,7 @@ class LabelTemplate(BaseModel):
 
 TEMPLATES: Final[tuple[LabelTemplate, ...]] = (
     LabelTemplate(id="roll_50x25", name="Roll label 50 x 25 mm", width_mm=50, height_mm=25),
+    LabelTemplate(id="roll_2x1in", name="Roll label 2 x 1 in", width_mm=50.8, height_mm=25.4),
     LabelTemplate(id="box_40x30", name="Box label 40 x 30 mm", width_mm=40, height_mm=30),
     LabelTemplate(id="box_62x29", name="Box label 62 x 29 mm", width_mm=62, height_mm=29),
     LabelTemplate(id="ams_holder_74x33", name="AMS holder 74 x 33 mm", width_mm=74, height_mm=33),

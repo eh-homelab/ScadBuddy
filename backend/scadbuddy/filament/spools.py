@@ -26,11 +26,17 @@ from pydantic import JsonValue
 from scadbuddy.core.settings import Settings
 from scadbuddy.core.tracing import traced_transaction
 from scadbuddy.entities.refs import EntityRef
-from scadbuddy.entities.required import checks_save, mark_incomplete, save_properties_on
+from scadbuddy.entities.required import (
+    checks_save,
+    hold_for_properties,
+    mark_incomplete,
+    save_properties_on,
+)
 from scadbuddy.filament import dry_hours, ledger, metrics
 from scadbuddy.filament import models as m
 from scadbuddy.filament import presets as p
 from scadbuddy.filament.catalog import CatalogRefError
+from scadbuddy.filament.dry_box import BOX, BoxFullError, is_dry_box, occupant_on
 from scadbuddy.filament.empty_weight import EmptyWeight, effective_on
 from scadbuddy.filament.insert_weights import check_on, forget_spool_on
 from scadbuddy.filament.invoice_money import price_per_kg, unit_cost
@@ -98,6 +104,13 @@ _SPOOL_FIELDS = tuple(
     }
 )
 _SPOOL_COLUMNS = ", ".join(_SPOOL_FIELDS)
+#: A spool of ``filament_spools`` asked which spool goes into its home box, and still
+#: waiting (#7167): asked, in no place, and its home still a live dry box.
+_AWAITING_HOME = (
+    "(home_asked_at IS NOT NULL AND location_id IS NULL AND EXISTS (SELECT 1"
+    " FROM filament_locations l JOIN filament_location_kinds k ON k.id = l.kind_id"
+    f" WHERE l.id = filament_spools.home_location_id AND {BOX}))"
+)
 _TYPE_COLUMNS = ", ".join(f for f in m.SpoolType.model_fields if f not in m.COMPLETENESS)
 _TAG_COLUMNS = ", ".join(m.Tag.model_fields)
 _BINDING_COLUMNS = ", ".join(m.TagBinding.model_fields)
@@ -297,6 +310,11 @@ def _setting_defaults() -> FilamentDefaults:
     return _SETTING_DEFAULTS
 
 
+def _hold(conn: Conn, properties: dict[str, JsonValue] | None, by: Actor | None) -> None:
+    """`hold_for_properties` for `_properties`' write, first in the transaction."""
+    hold_for_properties(conn, properties, by or Actor(kind="browser"))
+
+
 def _properties(
     conn: Conn,
     spool_id: UUID,
@@ -467,6 +485,7 @@ def _closing_on(
     *,
     grams_left: bool = True,
     events: Sequence[m.SpoolEvent] | None = None,
+    waste: bool = False,
 ) -> dict[str, Any]:
     """The spool's closing now (`ledger.closing`, #7684): with ``final_filament_g`` the
     final weighing's filament, else, when ``grams_left``, on the spool's grams left.
@@ -481,6 +500,7 @@ def _closing_on(
         final_filament_g=final_filament_g,
         reason=reason,
         grams_left=spool["grams_left"] if grams_left else None,
+        waste=waste,
     )
 
 
@@ -633,20 +653,31 @@ class FilamentSpoolStore:
         conninfo = self._pool.conninfo
         return conninfo() if callable(conninfo) else conninfo
 
-    def list(self, *, include_archived: bool = False, needs_type: bool | None = None) -> _Spools:
+    def list(
+        self,
+        *,
+        include_archived: bool = False,
+        needs_type: bool | None = None,
+        awaiting_home: bool | None = None,
+    ) -> _Spools:
         """By number. ``needs_type`` keeps only the spools with no type (``True``) or only
-        those with one (``False``)."""
-        return self._list(self._defaults(), include_archived, needs_type)
+        those with one (``False``). ``awaiting_home`` keeps only the spools asked which
+        spool goes into their home box (#7167: ``home_asked_at`` set, no place, and a home
+        that is still a live dry box), or only the others (``False``)."""
+        return self._list(self._defaults(), include_archived, needs_type, awaiting_home)
 
     def _list(
         self,
         defaults: FilamentDefaults,
         include_archived: bool = False,
         needs_type: bool | None = None,
+        awaiting_home: bool | None = None,
     ) -> _Spools:
         where = [] if include_archived else ["archived_at IS NULL"]
         if needs_type is not None:
             where.append("type_id IS NULL" if needs_type else "type_id IS NOT NULL")
+        if awaiting_home is not None:
+            where.append(("" if awaiting_home else "NOT ") + _AWAITING_HOME)
         clause = f" WHERE {' AND '.join(where)}" if where else ""
         with self._pool.connection() as conn:
             rows = conn.execute(
@@ -897,6 +928,7 @@ class FilamentSpoolStore:
         defaults = self._defaults()
         try:
             with self._pool.connection() as conn, conn.transaction():
+                _hold(conn, body.properties, by)
                 bare = body.model_copy(update={"properties": None})
                 spool_id = self.create_on(conn, bare, actor=actor)
                 _properties(conn, spool_id, body.properties, by, checked)
@@ -971,6 +1003,8 @@ class FilamentSpoolStore:
         copy and the save, an unchanged copied row stops being ``migrated``. That is
         intended. Each spool gets the draft's ``properties``, by ``by``; with ``checked``
         (#7703) an incomplete spool is `MissingRequiredProperties`."""
+        # The log before any row this locks; the caller has locked none a merge takes.
+        _hold(conn, body.spool.properties, by)
         carried: set[_PresetValues] = set()
         continued: UUID | None = None
         if body.continued_from is not None:
@@ -1036,11 +1070,11 @@ class FilamentSpoolStore:
     def copy(self, spool_id: UUID) -> m.SpoolDraft | None:
         """A new spool's draft from ``spool_id`` (#7150, R-7150-3): its type, its own
         overrides and note, its own presets and K values, and its place unless that is a
-        printer's tray or archived. Not its number, tags, tray place, ledger (so no
-        ``grams_left``), weight lock or ``added_full``, a fact of the source's own history
-        (R-7150-10). ``copy_of`` names the source, so a bulk create marks the rows that
-        match its ``migrated`` ones (R-7150-11, R-7150-13). ``None`` for no such spool.
-        Writes nothing."""
+        printer's tray, a dry box (the source holds it) or archived. Not its number, tags,
+        tray place, ledger (so no ``grams_left``), weight lock or ``added_full``, a fact of
+        the source's own history (R-7150-10). ``copy_of`` names the source, so a bulk create
+        marks the rows that match its ``migrated`` ones (R-7150-11, R-7150-13).
+        ``None`` for no such spool. Writes nothing."""
         left_out = {"grams_left", "weight_locked", "added_full", "properties"}
         fields = [f for f in m.SpoolCreate.model_fields if f not in left_out]
         with self._pool.connection() as conn:
@@ -1058,6 +1092,8 @@ class FilamentSpoolStore:
                     (row["location_id"],),
                 ).fetchone()
                 place = None if kept is None else kept["id"]
+                if place is not None and is_dry_box(conn, place):
+                    place = None  # the source holds its box; a copy would find it full
             presets = conn.execute(
                 "SELECT printer_model, nozzle_diameter, slicer_filament, slicer_filament_name"
                 " FROM filament_spool_presets WHERE spool_id = %s"
@@ -1102,6 +1138,8 @@ class FilamentSpoolStore:
         defaults = self._defaults()
         try:
             with self._pool.connection() as conn, conn.transaction():
+                # The log before the spool row `update_on` locks (#6949).
+                _hold(conn, patch.properties, by)
                 if not self.update_on(conn, spool_id, patch, actor=actor):
                     return None
                 _properties(
@@ -1356,7 +1394,7 @@ class FilamentSpoolStore:
             final = _final_filament(final_reading_g, final_grams, empty)
             # A reading that cannot be resolved closes on nothing, not on the ledger.
             weighed = final_reading_g is not None or final_grams is not None
-            closed = _closing_on(conn, spool_id, reason, final, grams_left=not weighed)
+            closed = _closing_on(conn, spool_id, reason, final, grams_left=not weighed, waste=True)
         left = closed["final_filament_g"]
         refused = _reading_notice(final_reading_g, final_grams, empty)
         return m.ClosingPreview(
@@ -1381,43 +1419,88 @@ class FilamentSpoolStore:
         spool. Nothing is written when it is already so. An archive (#7684) first books the
         final weighing when one is sent, as `add_event` books one (`_weigh_on`:
         `NoEmptyWeightError`, `ReadingBelowEmptyError`), then the ``archived`` event with
-        the closing (`ledger.closing`) as its ``data``, in one transaction."""
+        the closing (`ledger.closing`) as its ``data``, in one transaction. The grams left
+        after that weighing are booked as non-print waste (`archive_on`)."""
         if not archived:
             return self.update(spool_id, m.SpoolPatch(archived=False), actor=actor)
         defaults = self._defaults()
         with self._pool.connection() as conn, conn.transaction():
-            # The tag before the spool, as every writer of bindings takes them.
-            conn.execute(
-                "SELECT t.id FROM filament_tags t JOIN filament_tag_bindings b"
-                " ON b.tag_id = t.id WHERE b.spool_id = %s AND b.unbound_at IS NULL"
-                " ORDER BY t.id FOR UPDATE OF t",
-                (spool_id,),
+            return self.archive_on(
+                conn,
+                spool_id,
+                defaults=defaults,
+                reason=reason,
+                final_reading_g=final_reading_g,
+                final_grams=final_grams,
+                actor=actor,
             )
-            current = conn.execute(
-                f"SELECT {_SPOOL_COLUMNS} FROM filament_spools WHERE id = %s FOR UPDATE",
-                (spool_id,),
-            ).fetchone()
-            if current is None:
-                return None
-            if current["archived_at"] is None:
-                # The ledger before the final weighing: `ledger.closing` starts from the
-                # first manual reading, which the final weighing would otherwise be on a
-                # spool never weighed before (the review of #7844).
-                before = ledger.events(conn, spool_id)
-                final: float | None = None
-                if final_reading_g is not None or final_grams is not None:
-                    weighing = m.SpoolEventAdd(
-                        kind="weighed",
-                        source="scale" if final_reading_g is not None else "person",
-                        grams=final_grams,
-                        reading_g=final_reading_g,
-                    )
-                    weighed = self._weigh_on(conn, spool_id, weighing, actor, {})
-                    assert weighed is not None
-                    final = weighed.grams_after
-                closing = _closing_on(conn, spool_id, reason, final, events=before)
-                self._archive(conn, current, True, actor, data=closing)
-            return self._spool(conn, spool_id, defaults, self._clock())
+
+    def archive_on(
+        self,
+        conn: Conn,
+        spool_id: UUID,
+        *,
+        defaults: FilamentDefaults,
+        reason: m.ArchiveReason | None,
+        final_reading_g: float | None,
+        final_grams: float | None,
+        actor: str,
+        cause: str | None = None,
+    ) -> m.Spool | None:
+        """`archive`'s body for ``archived=True``, on ``conn`` in the caller's transaction
+        (it opens none and takes no pool connection, #7167); ``None`` for no such spool.
+        ``defaults`` is the Filament settings, which the caller reads (`defaults`) before
+        it takes ``conn``: the reader may take a pool connection of its own.
+        Order: the final weighing, then, when grams are left after it and ``reason`` is
+        not ``respooled``, one ``non_print_waste`` event (the zero reading, source
+        ``person``, ``data.waste_g`` the grams left, ``data.cause`` ``cause`` or
+        ``archive``), then the ``archived`` event. One fact is one event: the weighing is
+        never booked twice, so the waste is what is left after it. Only a person's archive
+        and a box's replace (``cause="replaced"``) book waste; `bulk_archive`, the pull's
+        archive and `respooled` do not."""
+        # The tag before the spool, as every writer of bindings takes them.
+        conn.execute(
+            "SELECT t.id FROM filament_tags t JOIN filament_tag_bindings b"
+            " ON b.tag_id = t.id WHERE b.spool_id = %s AND b.unbound_at IS NULL"
+            " ORDER BY t.id FOR UPDATE OF t",
+            (spool_id,),
+        )
+        current = conn.execute(
+            f"SELECT {_SPOOL_COLUMNS} FROM filament_spools WHERE id = %s FOR UPDATE",
+            (spool_id,),
+        ).fetchone()
+        if current is None:
+            return None
+        if current["archived_at"] is None:
+            # The ledger before the final weighing: `ledger.closing` starts from the
+            # first manual reading, which the final weighing would otherwise be on a
+            # spool never weighed before (the review of #7844).
+            before = ledger.events(conn, spool_id)
+            final: float | None = None
+            if final_reading_g is not None or final_grams is not None:
+                weighing = m.SpoolEventAdd(
+                    kind="weighed",
+                    source="scale" if final_reading_g is not None else "person",
+                    grams=final_grams,
+                    reading_g=final_reading_g,
+                )
+                weighed = self._weigh_on(conn, spool_id, weighing, actor, {})
+                assert weighed is not None
+                final = weighed.grams_after
+            closing = _closing_on(conn, spool_id, reason, final, events=before, waste=True)
+            waste = closing["non_print_waste_g"]
+            if waste is not None:
+                ledger.record(
+                    conn,
+                    spool_id,
+                    "non_print_waste",
+                    source="person",
+                    absolute_g=0,
+                    actor=actor,
+                    data={"waste_g": waste, "cause": cause or "archive"},
+                )
+            self._archive(conn, current, True, actor, data=closing)
+        return self._spool(conn, spool_id, defaults, self._clock())
 
     def delete(self, spool_id: UUID, *, refusing: Iterable[m.EventKind] = _USED) -> bool:
         """Remove a spool that never printed, with its events, tag bindings and Bambuddy
@@ -2049,9 +2132,26 @@ class FilamentSpoolStore:
         data: dict[str, Any] | None = None,
     ) -> None:
         """Archive or restore the locked row ``current``. ``data`` is the ``archived``
-        event's closing (`ledger.closing`, #7684); a restore carries none."""
+        event's closing (`ledger.closing`, #7684); a restore carries none. A restore into
+        a dry box another spool holds is `BoxFullError`, and nothing is written (#7167).
+
+        `bulk_archive` restores many spools: it locks every spool first, in id order,
+        and then each spool's place in turn. A move into one of those boxes at the same
+        time can deadlock with it, and Postgres aborts one of the two (a 500 the person
+        retries). This is the class of P17 and P20 in the dry-box plan, accepted on the
+        same terms: it needs two people acting on the same spools and box at once."""
         if (current["archived_at"] is not None) == archived:
             return
+        if not archived:
+            # #7167: an archived spool keeps its place; it may not take a box another
+            # spool holds now. The spool is locked, then the place, as `move_on` does.
+            place = conn.execute(
+                "SELECT location_id FROM filament_spools WHERE id = %s", (current["id"],)
+            ).fetchone()
+            if place is not None and place["location_id"] is not None:
+                held = occupant_on(conn, place["location_id"], but=current["id"])
+                if held is not None:
+                    raise BoxFullError(held)
         if archived:
             closed = conn.execute(
                 "UPDATE filament_tag_bindings SET unbound_at = now(), reason = 'archived'"
@@ -2068,10 +2168,12 @@ class FilamentSpoolStore:
                     data={"tag_id": closed["tag_id"], "reason": "archived"},
                 )
                 enqueue_tag(conn, closed["tag_id"])
+        # An archived spool is asked nothing about its home (#7167).
         conn.execute(
             "UPDATE filament_spools SET archived_at = CASE WHEN %s THEN now() END,"
+            " home_asked_at = CASE WHEN %s THEN NULL ELSE home_asked_at END,"
             " updated_at = now() WHERE id = %s",
-            (archived, current["id"]),
+            (archived, archived, current["id"]),
         )
         if archived:
             # #6265 R-T3-5: an archived spool's sync error leaves the status. Its create
@@ -2092,33 +2194,49 @@ class FilamentSpoolStore:
     @staticmethod
     def _tag(conn: Conn, uid: str | None, tray: str | None, kind: m.TagKind) -> tuple[UUID, str]:
         """The id and kind of the tag either key names, locked and given the key it lacked;
-        else a new tag of ``kind``. A tag another transaction makes first is found on the
-        second look."""
+        else a new tag of ``kind``. The UID is any of a tag's UIDs (`filament_tag_uids`,
+        #8148); one the tag lacks is added to it, so a Bambu spool's second side names its
+        tray's tag. A tag another transaction makes first, or a UID it adds to a tag first,
+        is found on the second look."""
         while True:
             found = conn.execute(
                 f"SELECT {_TAG_COLUMNS} FROM filament_tags"
-                " WHERE tag_uid = %s OR tray_uuid = %s FOR UPDATE",
+                " WHERE id IN (SELECT tag_id FROM filament_tag_uids WHERE uid = %s)"
+                " OR tray_uuid = %s FOR UPDATE",
                 (uid, tray),
             ).fetchall()
             if len(found) > 1:
                 raise TagKeysClashError()
-            if found:
-                tag = found[0]
-                if (uid is not None and tag["tag_uid"] is None) or (
-                    tray is not None and tag["tray_uuid"] is None
-                ):
-                    conn.execute(
-                        "UPDATE filament_tags SET tag_uid = coalesce(tag_uid, %s),"
-                        " tray_uuid = coalesce(tray_uuid, %s) WHERE id = %s",
-                        (uid, tray, tag["id"]),
-                    )
-                tag_id: UUID = tag["id"]
-                return tag_id, tag["kind"]
-            made = conn.execute(
-                "INSERT INTO filament_tags (kind, tag_uid, tray_uuid) VALUES (%s, %s, %s)"
-                " ON CONFLICT DO NOTHING RETURNING id",
-                (kind, uid, tray),
-            ).fetchone()
-            if made is not None:
-                new_id: UUID = made["id"]
-                return new_id, kind
+            try:
+                with conn.transaction():
+                    if found:
+                        tag = found[0]
+                        if (uid is not None and tag["tag_uid"] is None) or (
+                            tray is not None and tag["tray_uuid"] is None
+                        ):
+                            conn.execute(
+                                "UPDATE filament_tags SET tag_uid = coalesce(tag_uid, %s),"
+                                " tray_uuid = coalesce(tray_uuid, %s) WHERE id = %s",
+                                (uid, tray, tag["id"]),
+                            )
+                        if uid is not None:
+                            conn.execute(
+                                "INSERT INTO filament_tag_uids (uid, tag_id, source)"
+                                " VALUES (%s, %s, 'tag') ON CONFLICT (uid) DO NOTHING",
+                                (uid, tag["id"]),
+                            )
+                        tag_id: UUID = tag["id"]
+                        return tag_id, tag["kind"]
+                    made = conn.execute(
+                        "INSERT INTO filament_tags (kind, tag_uid, tray_uuid) VALUES (%s, %s, %s)"
+                        " ON CONFLICT DO NOTHING RETURNING id",
+                        (kind, uid, tray),
+                    ).fetchone()
+                    if made is not None:
+                        new_id: UUID = made["id"]
+                        return new_id, kind
+            except errors.UniqueViolation as error:
+                # filament_tag_uids_keep_first: another transaction gave the UID to a tag
+                # meanwhile. The savepoint is gone; the next look finds that tag.
+                if error.diag.constraint_name != "filament_tag_uids_pkey":
+                    raise

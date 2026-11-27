@@ -32,13 +32,19 @@ CI sets `SCADBUDDY_TEST_POSTGRES_REQUIRED`). The Go toolchain is pinned in these
   unsent queue, `internal/telemetry` its spans and metrics; README there). Its unsent
   writes are the only copy of a save, under the state directory, never the cache. `core/`
   is the API in Go (#7667): the areas it has, over Postgres, and a forward of the rest to
-  Python (`internal/crud` the CRUD guard, `internal/<area>` the routes; README there).
+  Python (`internal/crud` the CRUD guard, `internal/<area>` the routes, such as
+  `internal/labelprint`, the IPP client that sends label PDFs to CUPS, #7170; README there).
   `fleetchat/` is the agent fleet chat library (MCP tools over a host's `Store` and `Bus`,
   imports nothing else from this repo; README there). `fleet/` is ScadBuddy's host of it,
   the image `ghcr.io/eh-homelab/scadbuddy-fleet`: `sbfleet` (a `Store` and the session registry's reads, `Registry`, over core's
   `…/crud/fleet/` routes and a `Bus` over the API's fleet change stream, with the `fleet`
-  credential; it imports nothing from `core/`) and the server binary (`/mcp`, `/healthz`,
-  `FLEETCHAT_*` settings; README there).
+  credential; it imports nothing from `core/`), `ghsecrets` (the "ScadBuddy Fleet" GitHub
+  App's Actions secret writer, #8012: a token scoped to each write, a sealed-box `PUT`, and
+  the secret's `updated_at`; no route calls it yet, and it imports nothing else from this
+  repo, so fleetd can reuse it), `ghwebhook` (the App's webhook receiver at
+  `/github/webhook`, #8014: POST only, `X-Hub-Signature-256` first, installation events
+  logged and counted) and the server binary (`/mcp`, `/healthz`, `FLEETCHAT_*` settings;
+  README there).
   `fleetd/` is the fleet's machine service (#7987), a systemd user service on each Linux
   machine: `internal/discover` (the hashed machine id, live sessions from
   `<config dir>/sessions` and `/proc`, transcript paths by name only, git facts, the

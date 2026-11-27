@@ -29,7 +29,7 @@ from scadbuddy.printers.models import LanLink, PrinterCreate
 from scadbuddy.printers.reports import PrinterReportStore
 from scadbuddy.printers.store import PrinterStore
 from tests.conftest import PgPool
-from tests.printers.conftest import KEK
+from tests.printers.conftest import KEK, unkeyed
 
 pytestmark = pytest.mark.requires_postgres
 
@@ -325,7 +325,7 @@ def test_a_report_records_ams_humidity_and_temperature(pg_pool: PgPool) -> None:
 def test_a_recorded_h2c_report_stores_the_percent_not_the_level(pg_pool: PgPool) -> None:
     recorded = json.loads((PRINTER_FIXTURES / "lan-report-h2c-idle.json").read_text("utf-8"))
     pid, reports = _watched(pg_pool)
-    _advance(reports, pid, recorded["print"], T0)
+    _advance(reports, pid, unkeyed(recorded["print"]), T0)
     humidity = {
         unit: values[0]
         for (unit, kind), values in _ams_readings(pg_pool, pid).items()

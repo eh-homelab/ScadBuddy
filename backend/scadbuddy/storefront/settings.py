@@ -65,6 +65,9 @@ class StorefrontSettings(BaseSettings):
     log_level: str = "INFO"
     #: The built page (`static.py`); else the repo's ``frontend/dist`` or the image's.
     frontend_dir: Path | None = None
+    #: The build, for the edge's spans (#8239), as the API's `Settings` reads them.
+    version: str = "dev"
+    revision: str = "unknown"
 
     @field_validator("api_internal_url")
     @classmethod

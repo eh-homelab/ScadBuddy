@@ -250,13 +250,13 @@ describe('the label template (#7157)', () => {
     serveTemplate({ template: 'roll_50x25', width_mm: null, height_mm: null })
     server.use(
       http.post('*/api/v1/filament/labels', () =>
-        HttpResponse.json({ type: 'about:blank', title: 'Conflict', status: 409, detail: 'A place label needs an address: set the label address in Settings, or the public URL.', code: 'no_label_base' }, { status: 409 }),
+        HttpResponse.json({ type: 'about:blank', title: 'Conflict', status: 409, detail: 'A code label needs an address: set the label address in Settings, or the public URL.', code: 'no_label_base' }, { status: 409 }),
       ),
     )
     const { user } = renderPage(<LabelsPage />, { route: `/filament/labels?locations=${L.AMS_A1}` })
     await waitFor(() => expect(screen.getByRole('button', { name: 'Download' })).toBeEnabled())
     await user.click(screen.getByRole('button', { name: 'Download' }))
-    expect(await screen.findByRole('alert')).toHaveTextContent('A place label needs an address')
+    expect(await screen.findByRole('alert')).toHaveTextContent('A code label needs an address')
   })
 
   it('keeps the Download button disabled while the places load', async () => {
@@ -698,7 +698,7 @@ describe('the labels page', () => {
     expect(screen.queryAllByTestId('label')).toHaveLength(0)
     expect(screen.queryAllByTestId('print-label')).toHaveLength(0)
     expect(screen.queryByText(/Labels open/)).toBeNull()
-    expect(screen.getByRole('button', { name: /Print/ })).toBeDisabled()
+    expect(screen.getByRole('button', { name: 'Print' })).toBeDisabled()
   })
 
   it('names the printers with no report', async () => {
@@ -747,7 +747,7 @@ describe('the labels page', () => {
     expect(await screen.findByText('Print at most 100 labels at a time')).toBeInTheDocument()
     expect(screen.queryAllByTestId('label')).toHaveLength(0)
     expect(screen.queryByText('No printers.')).toBeNull()
-    expect(screen.getByRole('button', { name: /Print/ })).toBeDisabled()
+    expect(screen.getByRole('button', { name: 'Print' })).toBeDisabled()
   })
 
   it('goes back to the Locations tab from a place label', () => {
@@ -1124,5 +1124,21 @@ describe('saved sheets (#7216)', () => {
     await user.click(screen.getByRole('button', { name: 'Download' }))
     expect(await screen.findByRole('alert')).toHaveTextContent('The saved sheet was deleted. Choose another template.')
     expect(body!.template).toEqual({ template: 'saved', sheet_id: SHEET_ID })
+  })
+})
+
+describe('the label printer row (#7170)', () => {
+  it('says the label server does not answer and keeps Print and Download enabled', async () => {
+    server.use(
+      http.get('*/api/v1/label-printing/queues', () =>
+        HttpResponse.json({ title: 'Bad Gateway', status: 502, detail: 'The label print server did not answer.', reason: 'label_server_unreachable' }, { status: 502 }),
+      ),
+    )
+    serve()
+    renderPage(<LabelsPage />, { route: '/filament/labels?ids=a,b' })
+    expect(await screen.findByText(/The label print server does not answer/)).toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: 'Print to label printer' })).not.toBeInTheDocument()
+    await waitFor(() => expect(screen.getByRole('button', { name: 'Download' })).toBeEnabled())
+    expect(screen.getByRole('button', { name: 'Print' })).toBeEnabled()
   })
 })

@@ -397,6 +397,13 @@ opens every one and seals it again byte for byte).
   per tool, projected in-process for the harness and over `/mcp` (`src/mcp/http.ts`,
   auth in `src/auth/`); every `/api/v1` operation needs a tool or a
   `src/tools/coverage.ts` entry, or `test/coverage.test.ts` fails.
+  - Unknown spools (#7143): `filament_unknown_trays` (read: the loaded trays no spool holds, with
+    ranked candidates and `made_from_tags`) and `filament_unknown_tray_resolve` (write, linked as a
+    `spool`; it takes `seen_at` as listed and the user's own choice, never a candidate the agent picks)
+    are in `src/tools/filament.ts`. They call the Go routes through `src/api/unknownTrays.ts`, whose
+    types are written by hand, because `pnpm gen:api` exports Python's OpenAPI only. There is no
+    dismiss tool (D10). The Go resolve route is not built yet, so the resolve tool gets a 404 until
+    it is. Tests: `test/filament.test.ts`.
   - Data: the agent has no database ("Database access" above); the API owns the `ai_*`
     tables and applies their migrations (#5299 D6). The tests make their schemas with
     `test/support/migrations.ts` (`test/support/postgres.ts` `migrateSchema`), and
@@ -443,7 +450,8 @@ opens every one and seals it again byte for byte).
     replays. Temporal tests (`test/*temporal*.test.ts`)
     skip unless `SCADBUDDY_TEST_TEMPORAL_DEV_SERVER` names a Temporal CLI (or
     `temporal` is on `PATH`); the `agent` CI job installs the Dockerfile's pinned one.
-    The `@temporalio/*` packages are pinned exactly, all one version.
+    The `@temporalio/*` packages take a `^` range on the newest release and lock to one
+    version; Dependabot's `temporal` group moves them together.
   - The tool-call gate (#1056 phase 5b, spec 2026-10-01 §6.6, plan
     `docs/superpowers/plans/2026-10-08-durable-phase-5b-tool-call-gate.md`) is
     `src/gate/`: request ids (`ids.ts`: `approval:`, `question:`, `durable:<session>:<run>:<tool_use_id>`),
@@ -587,6 +595,12 @@ opens every one and seals it again byte for byte).
     an ended one is answered with no plugin, binding or contact; one with no outcome is sent
     again only when the binding maps `idempotency_key`, with the row's own recipients and text,
     and needs the binding (none is `no_messaging_plugin`) but no contact.
+  - Filament presets (#7204): `filament_preset_list`, `filament_preset_get` and `filament_preset_diff`
+    in `tools/filament.ts`, all `read`. They call Go core's routes under `/api/v1/filament/presets`
+    (`tools/go/core/internal/filamentpresets`), which Python does not serve, so each has
+    `routes: []`. A 404 with no `code` means core does not serve the area yet. `presetOk` then
+    throws a `ToolError` that names the area `filament-presets`. Tests: `test/filament.test.ts`
+    and the wire fixture `test-fixtures/filament/preset-wire.json`.
   - The inventory (#7067, `docs/features/inventory.md`): `tools/inventory.ts`, 18 `inventory_*` tools
     (kinds, items, offers and price points, lots, units, moves), `read` for the lists and gets and
     `write` for the rest, `inventory_lot_recost` included (Ruling 8); each answer carries `ui_path`

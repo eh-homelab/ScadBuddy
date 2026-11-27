@@ -9,6 +9,7 @@ from __future__ import annotations
 import dataclasses
 import json
 import shutil
+import threading
 from collections.abc import Iterator
 from pathlib import Path
 from typing import Any
@@ -534,17 +535,23 @@ def test_list_and_record_agree_on_upstream_state_with_no_row_version(world: Test
 
 
 def _statements(monkeypatch: pytest.MonkeyPatch) -> list[str]:
-    """Every statement sent from here on, as its text."""
+    """Every statement this thread sends from here on, as its text. The app's own
+    background tasks send statements from other threads (the TestClient's portal thread,
+    and the worker threads its event loop hands blocking calls to), and they are not the
+    listing's (#8139, #8164)."""
     sent: list[str] = []
     execute = psycopg.Cursor.execute
     executemany = psycopg.Cursor.executemany
+    caller = threading.get_ident()
 
     def counted(self: psycopg.Cursor[Any], query: Any, *args: Any, **kwargs: Any) -> Any:
-        sent.append(str(query))
+        if threading.get_ident() == caller:
+            sent.append(str(query))
         return execute(self, query, *args, **kwargs)
 
     def counted_many(self: psycopg.Cursor[Any], query: Any, *args: Any, **kwargs: Any) -> Any:
-        sent.append(str(query))
+        if threading.get_ident() == caller:
+            sent.append(str(query))
         return executemany(self, query, *args, **kwargs)
 
     monkeypatch.setattr(psycopg.Cursor, "execute", counted)

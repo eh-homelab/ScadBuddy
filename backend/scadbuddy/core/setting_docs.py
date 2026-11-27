@@ -54,10 +54,9 @@ SETTING_DOCS: Final[Mapping[str, SettingDoc]] = MappingProxyType(
         ),
         "bambuddy_render_api_key": SettingDoc(
             "Render worker API key",
-            "A second key with Manage Library only. Render workers run template code and"
-            " hold this key alone. Unset, standalone render workers get no Bambuddy key, and"
-            " a render inside the API process uses the full key, so template code could"
-            " print.",
+            "A second key with Manage Library only, which a store migration from the"
+            " Bambuddy store reads Bambuddy's library with. Unset, it uses the full key."
+            " Render workers get neither key.",
         ),
         "public_url": SettingDoc(
             "ScadBuddy’s own URL",
@@ -508,6 +507,22 @@ SETTING_DOCS: Final[Mapping[str, SettingDoc]] = MappingProxyType(
             " stays. Without the QR code, the text uses its space. Place labels always print"
             " their code, name and QR code. The Labels page saves the last format, dpi and"
             " fields.",
+        ),
+        "filament_label_server_url": SettingDoc(
+            "Label print server",
+            "The CUPS server that the Labels page prints to, as an http or https URL. The"
+            " default is the cluster's own server, http://cups.cups.svc:8631. Only a person's"
+            " session changes it.",
+        ),
+        "filament_label_queue": SettingDoc(
+            "Label queue",
+            "The CUPS queue that the Labels page printed to last. The Labels page saves it.",
+        ),
+        "filament_label_job_options": SettingDoc(
+            "Label print options",
+            "Thermal transfer or direct thermal, darkness and print speed for a Zebra ZPL"
+            " queue. Printer default leaves the printer's own setting. The Labels page saves"
+            " the last choice.",
         ),
         "filament_shopping_auto_add_empty": SettingDoc(
             "Add empty spools to the shopping list",

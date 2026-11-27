@@ -68,7 +68,6 @@ flowchart LR
     API & RW & PW & PJ & IW & PF & AW & AS & SL --> T[Temporal]
     API & RW --> S3[(Blob store)]
     API & PW --> BB[Bambuddy]
-    RW -->|render key| BB
     PW -->|MQTT 8883, FTPS 990| PR[Printers]
     FS[bambuddy-fs] -->|/api/v1/print/library| API
 ```
@@ -81,6 +80,12 @@ flowchart LR
   the CRUD listener (`scadbuddy/main.py:2163-2339`). Routers under `api/` are mounted
   automatically under `/api/v1` (`scadbuddy/main.py:279-297`); the built frontend is
   mounted last at `/` (`scadbuddy/main.py:2532`).
+- **Go core serves some paths instead.** Core (`tools/go/core`) answers the paths of the areas
+  that `SCADBUDDY_CORE_AREAS` names (`tools/go/core/main.go`). The area `filament-presets`
+  (`tools/go/core/internal/filamentpresets`, #7204) serves the public, read-only
+  `GET /api/v1/filament/presets` routes. It reads the preset rows and each document's blob
+  from the store, and it needs the KEK and an `s3` store (`tools/go/core/README.md`). With
+  the area off, the paths go on to this API, which has no handler for them.
 - **Also runs untrusted code today:** openscad renders for the editor's checks and
   `openscad-lsp`, the latter under a no-network seccomp filter (`scadbuddy/editor/nonet.py:3-6`);
   #5296 moves them out.
@@ -96,20 +101,20 @@ flowchart LR
 
 ## Render worker
 
-- **Runs.** `run_worker` (`scadbuddy/worker.py:1081`) on queue `render`: renders and
+- **Runs.** `run_worker` (`scadbuddy/worker.py:1075`) on queue `render`: renders and
   template pipelines ([workflows.md](workflows.md#render-split-by-colour-3mf)).
 - **Reads.** `SCADBUDDY_API_INTERNAL_URL` and a service proof,
   `SCADBUDDY_SERVICE_TOKEN_FILE` or `SCADBUDDY_SERVICE_BOOTSTRAP_FILE`; without one it
   refuses to start (`scadbuddy/auth/service_auth.py:235-256`). It ignores
-  `SCADBUDDY_DATABASE_URL` (`scadbuddy/worker.py:1097-1100`) and refuses the `local` store
-  (`scadbuddy/worker.py:222-257`). The S3 keys and the Bambuddy render key come from its
-  CRUD settings route (`scadbuddy/api/crud_render.py:215-229`).
+  `SCADBUDDY_DATABASE_URL` (`scadbuddy/worker.py:1091-1094`) and refuses the `local` store
+  (`scadbuddy/worker.py:222-256`). The S3 keys come from its
+  CRUD settings route, which answers no Bambuddy key (#7882) (`scadbuddy/api/crud_render.py:199-220`).
 - **Zone.** Runs template Python and openscad; holds a 15-minute `crud.render` credential
   and the store keys. See trust-boundaries, "Where untrusted code runs".
 
 ## Print worker
 
-- **Runs.** `run_print_worker` (`scadbuddy/worker.py:1521`) on `bambuddy` and
+- **Runs.** `run_print_worker` (`scadbuddy/worker.py:1511`) on `bambuddy` and
   `bambuddy-follow`: print runs, LAN upload and start, follow, printer watches
   ([workflows.md](workflows.md#print-to-the-h2c)), and the filament sync with Bambuddy,
   the Bambuddy pull and the location-sensor alerts (`FilamentBbSync`, `FilamentBbPull`,
@@ -123,10 +128,10 @@ flowchart LR
 
 ## Projects worker
 
-- **Runs.** `run_projects_worker` (`scadbuddy/worker.py:1607`) on `projects`: flow runs
+- **Runs.** `run_projects_worker` (`scadbuddy/worker.py:1597`) on `projects`: flow runs
   ([workflows.md](workflows.md#flows)).
 - **Reads.** The API URL, a service proof, and the KEK (`SCADBUDDY_SECRET_KEY_FILE`,
-  `scadbuddy/worker.py:1627-1632`) for flow payload keys.
+  `scadbuddy/worker.py:1617-1622`) for flow payload keys.
 
 ## Storefront edge
 
@@ -256,11 +261,33 @@ credential at `POST /api/v1/auth/service-token` (a projected token of the Servic
 forwards: the `fleet.*` events of the event log, with `Last-Event-ID` replay) to tell
 subscribed inboxes of new messages. Its other settings are `FLEETCHAT_LISTEN`,
 `FLEETCHAT_CORE_URL`, `FLEETCHAT_MAX_TEXT`, `FLEETCHAT_PAGE_SIZE`,
-`FLEETCHAT_MAX_PAGE_SIZE` and `FLEETCHAT_SESSION_TIMEOUT`
-([`tools/go/fleet/README.md`](../../tools/go/fleet/README.md)). The server has no auth of
-its own: anything on the LAN may call it, directly or through ScadBuddy's `/mcp`
-(the owner's decision of 2026-11-26), and a NetworkPolicy is to admit only ScadBuddy's pods and the LAN's
-Gateway. Neither the server nor that policy is deployed yet.
+`FLEETCHAT_MAX_PAGE_SIZE`, `FLEETCHAT_SESSION_TIMEOUT` and the "ScadBuddy Fleet" GitHub
+App's `FLEETCHAT_GITHUB_APP_ID`, `FLEETCHAT_GITHUB_INSTALLATION_ID`,
+`FLEETCHAT_GITHUB_APP_KEY_FILE` and `FLEETCHAT_GITHUB_WEBHOOK_SECRET_FILE`
+([`tools/go/fleet/README.md`](../../tools/go/fleet/README.md)). With the webhook secret file
+it also serves `/github/webhook` (`tools/go/fleet/ghwebhook`, #8014), which checks
+`X-Hub-Signature-256` before it reads anything; with the App key it holds the Actions secret
+writer (`tools/go/fleet/ghsecrets`, #8012), which no route calls yet. Apart from that
+signature check, the server has no auth of its own. The internet reaches only `/github/webhook`,
+through the SSO host's public Exact route (eh-homelab/clusters#4432), which that signature check
+guards. Every other path is open to the LAN and the cluster only: anything on the LAN may call it,
+directly or through ScadBuddy's `/mcp` (the owner's decision of 2026-11-26). A NetworkPolicy is to
+admit ScadBuddy's pods, the LAN's Gateway and, for `/github/webhook`, the SSO host's Pomerium proxy. Neither the server nor that policy is deployed yet.
+
+### Unknown spools in core (#7143)
+
+Core's area `unknown-trays` (`tools/go/core/internal/unknowntrays`; core serves it when
+`SCADBUDDY_CORE_AREAS` names it) has these routes. `GET /api/v1/filament/unknown-trays` lists the
+trays that a printer reports as loaded and no spool holds, with ranked candidates, and
+`POST …/{id}/dismiss` deletes a row. Both are public routes behind the person-auth gate
+(`internal/auth`). The print worker's block read is `GET
+…/crud/print/filament/printers/{printer_id}/unknown-trays`, a CRUD route of caller `print`. Go
+writes no spool. The resolve write is Python's Temporal activity `filament_resolve_unknown_tray`
+(`backend/scadbuddy/filament/unknown_resolve.py`) on the `library` queue, which the API process
+serves, because the API alone holds the database secret (#5295). The Go resolve route that starts
+the activity is not built yet: it waits for a Temporal client in core (`internal/temporalx`). Until
+it exists, a resolve gets a 404. The feature is in
+[spools-and-filament](../features/spools-and-filament.md#unknown-spools-7143).
 
 ## bambuddy-fs
 

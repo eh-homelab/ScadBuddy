@@ -12,7 +12,7 @@ const FILTERS = [
   { label: 'All', kinds: null },
   { label: 'Prints', kinds: ['print_started', 'print_ended'] },
   { label: 'Weighings', kinds: ['weighed', 'ams_reading'] },
-  { label: 'Edits', kinds: ['edited', 'synced_from_bb', 'archived', 'restored', 'consumed_reset'] },
+  { label: 'Edits', kinds: ['edited', 'synced_from_bb', 'archived', 'restored', 'consumed_reset', 'non_print_waste'] },
   { label: 'Moves', kinds: ['moved', 'loaded', 'unloaded'] },
   { label: 'Tags', kinds: ['tag_bound', 'tag_unbound'] },
 ] as const satisfies readonly { label: string; kinds: readonly SpoolEvent['kind'][] | null }[]

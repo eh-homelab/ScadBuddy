@@ -33,6 +33,7 @@ from scadbuddy.printers.store import PrinterStore
 from scadbuddy.rack.usage import RackUsageStore
 from scadbuddy.render.pg_store import MIGRATIONS, MIGRATIONS_DIR, migrate
 from tests.conftest import UNUSED_TEMPORAL_ADDRESS, PgPool
+from tests.support.printers import MERGED_BY
 
 pytestmark = pytest.mark.requires_postgres
 
@@ -92,7 +93,7 @@ def test_the_load_reads_the_bambuddy_ids_through_the_registry(
 ) -> None:
     """The default printer and a subject's printer are stored by registry id only; the
     load gives the Bambuddy printer each links, and ignores a stale `printer_id` row."""
-    linked = printers.ensure_bambuddy(4, serial=None, name="H2C", model="H2C")
+    linked = printers.ensure_bambuddy(4, serial=None, name="H2C", model="H2C", by=MERGED_BY)
     lan = printers.create(PrinterCreate(serial="0938AB000000020", name="LAN"))
     with pg_pool.connection() as conn:
         conn.execute(
@@ -122,7 +123,7 @@ def test_a_bambuddy_id_saved_is_kept_as_the_registry_printer(
 ) -> None:
     """An older client's `printer_id`: the default printer and a subject's printer are
     kept as the registry printer that links it; a library file's choices too."""
-    linked = printers.ensure_bambuddy(5, serial=None, name="H2C", model="H2C")
+    linked = printers.ensure_bambuddy(5, serial=None, name="H2C", model="H2C", by=MERGED_BY)
 
     saved = store.save(SettingsPatch(printer_id=5))
     assert (saved.default_printer, saved.printer_id) == (linked.id, 5)
@@ -159,7 +160,7 @@ async def test_a_projects_printer_is_kept_by_its_registry_id(
     pg_pool: PgPool, printers: PrinterStore
 ) -> None:
     lan = printers.create(PrinterCreate(serial="0938AB000000022", name="LAN"))
-    linked = printers.ensure_bambuddy(5, serial=None, name="H2C", model="H2C")
+    linked = printers.ensure_bambuddy(5, serial=None, name="H2C", model="H2C", by=MERGED_BY)
     uploads = BambuddyUploadStore(pg_pool)
 
     await uploads.remember_project_target(
@@ -556,7 +557,7 @@ def test_a_merge_moves_the_default_printer_and_its_registry_keyed_entries(
     """The default printer, a map entry keyed by the gone row and a subject's printer
     follow it to the kept row, as a column would; an entry the kept row has of its own
     wins."""
-    synthetic = printers.ensure_bambuddy(4, serial=None, name="H2C", model="H2C")
+    synthetic = printers.ensure_bambuddy(4, serial=None, name="H2C", model="H2C", by=MERGED_BY)
     mine = printers.create(PrinterCreate(serial="0938AB000000026", name="Mine"))
     _put(
         pg_pool,
@@ -573,7 +574,7 @@ def test_a_merge_moves_the_default_printer_and_its_registry_keyed_entries(
             (Jsonb({"printer": synthetic.id, "tier": "fine"}),),
         )
 
-    printers.ensure_bambuddy(4, serial="0938AB000000026", name="H2C", model="H2C")
+    printers.ensure_bambuddy(4, serial="0938AB000000026", name="H2C", model="H2C", by=MERGED_BY)
 
     assert printers.get(synthetic.id) is None
     assert _settings(pg_pool) == {
@@ -632,12 +633,12 @@ def test_the_watchers_skip_list_follows_a_merge_and_forgets_a_delete(
 ) -> None:
     """#4699 phase 4: `print_auto_import_skip_lan_printers` holds registry ids, so a
     merged row's id becomes the kept row's (listed once), and a deleted row's goes."""
-    synthetic = printers.ensure_bambuddy(4, serial=None, name="H2C", model="H2C")
+    synthetic = printers.ensure_bambuddy(4, serial=None, name="H2C", model="H2C", by=MERGED_BY)
     mine = printers.create(PrinterCreate(serial="0938AB000000029", name="Mine"))
     other = printers.create(PrinterCreate(serial="0938AB000000030", name="Other"))
     _put(pg_pool, {"print_auto_import_skip_lan_printers": [synthetic.id, other.id]})
 
-    printers.ensure_bambuddy(4, serial="0938AB000000029", name="H2C", model="H2C")
+    printers.ensure_bambuddy(4, serial="0938AB000000029", name="H2C", model="H2C", by=MERGED_BY)
     assert _settings(pg_pool) == {"print_auto_import_skip_lan_printers": [other.id, mine.id]}
 
     _put(pg_pool, {"print_auto_import_skip_lan_printers": [mine.id, other.id]})

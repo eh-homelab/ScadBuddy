@@ -47,6 +47,7 @@ from scadbuddy.filament.models import (
     SpoolEventAdd,
     SpoolPresetCreate,
 )
+from scadbuddy.filament.unknown_tray_rows import PoolUnknownTrays, UnknownSpoolRef
 from scadbuddy.library.settings_store import S3Settings
 from scadbuddy.main import create_app
 from scadbuddy.print_library.ids import is_native_id
@@ -70,6 +71,7 @@ from tests.support.fake_lan import FakeLan, needs_fake_lan, running_fake_lan
 from tests.support.fake_slicer import FakeSlicer, fake_slicer_worker
 from tests.support.no_bambuddy import BambuddyCalledError, forbid_bambuddy
 from tests.support.operations import press
+from tests.support.printers import MERGED_BY
 from tests.support.saved_outputs import rewrite_model
 
 pytestmark = [pytest.mark.requires_postgres, pytest.mark.requires_temporal, *needs_fake_lan]
@@ -156,7 +158,19 @@ def slicer(native_app: TestClient, settings: Settings) -> Iterator[FakeSlicer]:
 def fake_lan(
     native_app: TestClient, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> Iterator[FakeLan]:
-    """The fake printer, run in the app's own loop."""
+    """The fake printer, run in the app's own loop.
+
+    It answers the print check's unknown-tray read with no trays (#7143). The fake
+    printer reports filled trays with no spool (the untagged ones), and the printer
+    watch's capture records each as an unknown tray, so a check that ran after the
+    capture would refuse and one that ran before it would not: the result would depend on
+    runner speed. These suites test the native hot path; the block has its own tests
+    (`tests/printers/test_unknown_spool_block.py`)."""
+
+    async def no_trays(self: PoolUnknownTrays, printer_id: str) -> list[UnknownSpoolRef]:
+        return []
+
+    monkeypatch.setattr(PoolUnknownTrays, "blocking", no_trays)
     assert native_app.portal is not None
     with native_app.portal.wrap_async_context_manager(
         running_fake_lan(tmp_path / "printer", monkeypatch, print_seconds=2.0)
@@ -195,7 +209,7 @@ def lan_row(
         cert_sha256=lan.cert_sha256,
     )
     if bambuddy_printer_id is not None:
-        printers.store.link_bambuddy(row.id, bambuddy_printer_id)
+        printers.store.link_bambuddy(row.id, bambuddy_printer_id, by=MERGED_BY)
     printers.store.patch(row.id, PrinterPatch(preferred_path=preferred_path))  # type: ignore[arg-type]
     _call(client, printers.watches.ensure, row.id)
     deadline = time.monotonic() + 30
@@ -727,7 +741,7 @@ def test_a_stale_report_runs_the_bambuddy_path(
     printers.store.link_lan(
         row.id, LanLink(host="10.0.0.9", access_code="12345678"), cert_sha256="ab" * 32
     )
-    printers.store.link_bambuddy(row.id, 1)
+    printers.store.link_bambuddy(row.id, 1, by=MERGED_BY)
     printers.reports.put(row.id, {"gcode_state": "IDLE"}, datetime.now(UTC) - timedelta(minutes=2))
     settings = _state(native_app).settings_store.load()
 

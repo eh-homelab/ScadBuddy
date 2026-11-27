@@ -6,6 +6,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"log/slog"
 	"net"
 	"net/http"
@@ -13,6 +14,7 @@ import (
 	"net/url"
 	"os"
 	"os/signal"
+	"path"
 	"strings"
 	"sync/atomic"
 	"syscall"
@@ -28,6 +30,7 @@ import (
 	"github.com/eh-homelab/ScadBuddy/tools/go/core/internal/agentreads"
 	"github.com/eh-homelab/ScadBuddy/tools/go/core/internal/agentstart"
 	"github.com/eh-homelab/ScadBuddy/tools/go/core/internal/approvals"
+	"github.com/eh-homelab/ScadBuddy/tools/go/core/internal/assistantcost"
 	"github.com/eh-homelab/ScadBuddy/tools/go/core/internal/audit"
 	"github.com/eh-homelab/ScadBuddy/tools/go/core/internal/auth"
 	"github.com/eh-homelab/ScadBuddy/tools/go/core/internal/blobs"
@@ -35,13 +38,18 @@ import (
 	"github.com/eh-homelab/ScadBuddy/tools/go/core/internal/bus"
 	"github.com/eh-homelab/ScadBuddy/tools/go/core/internal/changes"
 	"github.com/eh-homelab/ScadBuddy/tools/go/core/internal/crud"
+	"github.com/eh-homelab/ScadBuddy/tools/go/core/internal/devices"
 	"github.com/eh-homelab/ScadBuddy/tools/go/core/internal/edits"
 	"github.com/eh-homelab/ScadBuddy/tools/go/core/internal/escalations"
 	"github.com/eh-homelab/ScadBuddy/tools/go/core/internal/events"
+	"github.com/eh-homelab/ScadBuddy/tools/go/core/internal/fetchgrants"
+	"github.com/eh-homelab/ScadBuddy/tools/go/core/internal/filamentpresets"
 	"github.com/eh-homelab/ScadBuddy/tools/go/core/internal/fleet"
 	"github.com/eh-homelab/ScadBuddy/tools/go/core/internal/forget"
 	"github.com/eh-homelab/ScadBuddy/tools/go/core/internal/front"
 	"github.com/eh-homelab/ScadBuddy/tools/go/core/internal/gate"
+	"github.com/eh-homelab/ScadBuddy/tools/go/core/internal/history"
+	"github.com/eh-homelab/ScadBuddy/tools/go/core/internal/labelprint"
 	"github.com/eh-homelab/ScadBuddy/tools/go/core/internal/mcprelay"
 	"github.com/eh-homelab/ScadBuddy/tools/go/core/internal/notify"
 	"github.com/eh-homelab/ScadBuddy/tools/go/core/internal/ordercosts"
@@ -51,14 +59,17 @@ import (
 	"github.com/eh-homelab/ScadBuddy/tools/go/core/internal/publish"
 	"github.com/eh-homelab/ScadBuddy/tools/go/core/internal/questions"
 	"github.com/eh-homelab/ScadBuddy/tools/go/core/internal/realtime"
+	"github.com/eh-homelab/ScadBuddy/tools/go/core/internal/scan"
 	"github.com/eh-homelab/ScadBuddy/tools/go/core/internal/seal"
 	"github.com/eh-homelab/ScadBuddy/tools/go/core/internal/secrets"
 	"github.com/eh-homelab/ScadBuddy/tools/go/core/internal/sessions"
 	"github.com/eh-homelab/ScadBuddy/tools/go/core/internal/stores"
 	"github.com/eh-homelab/ScadBuddy/tools/go/core/internal/sweeps"
+	"github.com/eh-homelab/ScadBuddy/tools/go/core/internal/tagreads"
 	"github.com/eh-homelab/ScadBuddy/tools/go/core/internal/tasks"
 	"github.com/eh-homelab/ScadBuddy/tools/go/core/internal/transcripts"
 	"github.com/eh-homelab/ScadBuddy/tools/go/core/internal/turns"
+	"github.com/eh-homelab/ScadBuddy/tools/go/core/internal/unknowntrays"
 	"github.com/eh-homelab/ScadBuddy/tools/go/core/internal/workspace"
 )
 
@@ -114,6 +125,19 @@ func run(ctx context.Context, lookupEnv func(string) (string, bool), tel *teleme
 	env := func(name string) string {
 		v, _ := lookupEnv(name)
 		return v
+	}
+	// Set but empty stops the start, as in Python; newRouter reads empty as unset.
+	if _, set := lookupEnv("SCADBUDDY_AUTH_MODE"); set {
+		if _, err := auth.ParseMode(env("SCADBUDDY_AUTH_MODE"), true); err != nil {
+			return fmt.Errorf("SCADBUDDY_AUTH_MODE: %w", err)
+		}
+	}
+	// A value Python refuses at its start stops core's too, not each request later.
+	if err := assistantcost.CheckEnv(lookupEnv); err != nil {
+		return err
+	}
+	if err := devices.CheckEnv(lookupEnv); err != nil {
+		return err
 	}
 	trusted, err := front.ParseNetworks(env("SCADBUDDY_CORE_TRUSTED_PROXIES"))
 	if err != nil {
@@ -186,6 +210,8 @@ func run(ctx context.Context, lookupEnv func(string) (string, bool), tel *teleme
 		}
 		servers[crudAddress] = tel.Server(front.CRUDOnly(crudRouter), untraced...)
 	}
+	// The history subscriber (#6949): every replica runs it, and one at a time applies.
+	go history.Run(ctx, pool, history.Options{})
 	return serve(ctx, servers, tel.Shutdown)
 }
 
@@ -251,6 +277,7 @@ var areaPackages = []areaRoutes{
 	ordercosts.Areas, packages.Areas, pending.Areas, plugins.Areas, publish.Areas,
 	questions.Areas, secrets.Areas, sessions.Areas, stores.Areas, sweeps.Areas, tasks.Areas,
 	transcripts.Areas, workspace.Areas,
+	assistantcost.Areas, fetchgrants.Areas,
 }
 
 // publicAreas is a package's public routes by area name, over the pool, with the KEKs.
@@ -259,12 +286,60 @@ var areaPackages = []areaRoutes{
 type publicAreas func(pool *pgxpool.Pool, keys *seal.Keys) map[string][]auth.Public
 
 // publicPackages are the packages with public areas.
-var publicPackages = []publicAreas{}
+var publicPackages = []publicAreas{scan.PublicAreas, unknowntrays.Public, devices.Routes}
+
+// mirrorBlobs is the blob store as area package-mirrors calls it (packages.Blobs): a
+// publish to a key that names a blob is packages.ErrStale.
+type mirrorBlobs struct{ *blobstore.Blobs }
+
+func (m mirrorBlobs) PublishFile(ctx context.Context, key, name string, file io.ReadSeeker) error {
+	err := m.Blobs.PublishFile(ctx, key, name, file)
+	if errors.Is(err, blobstore.ErrStale) {
+		return packages.ErrStale
+	}
+	return err
+}
+
+func (m mirrorBlobs) ReadFile(ctx context.Context, key, name string, max int64) ([]byte, bool, error) {
+	data, found, err := m.Blobs.ReadFile(ctx, key, name, max)
+	if errors.Is(err, blobstore.ErrTooLarge) {
+		return nil, false, fmt.Errorf("%w: %w", packages.ErrTooLarge, err)
+	}
+	return data, found, err
+}
+
+// workspaceBlobs is the blob store as area workspace calls it (workspace.Store). Python
+// names a store failure by its class in a write's refusal; the classes are its own.
+type workspaceBlobs struct{ *blobstore.Blobs }
+
+func (w workspaceBlobs) Put(ctx context.Context, kind, _ string, data []byte) (string, error) {
+	key, err := w.Blobs.PutContent(ctx, kind, data)
+	switch blobstore.Reason(err) {
+	case "store_full":
+		return "", storeClass{err, "StoreFullError"}
+	case "store_busy":
+		return "", storeClass{err, "StageLockBusyError"}
+	}
+	return key, err
+}
+
+func (w workspaceBlobs) Get(ctx context.Context, key string) (io.ReadCloser, bool, error) {
+	return w.Blobs.Fetch(ctx, key)
+}
+
+// storeClass is a store failure with the name of Python's exception class for it.
+type storeClass struct {
+	error
+	class string
+}
+
+func (e storeClass) Class() string { return e.class }
+func (e storeClass) Unwrap() error { return e.error }
 
 // sealed are the areas that seal or open with the KEK: without one they refuse to start.
 var sealed = map[string]bool{
 	"credentials": true, "payload-keys": true, "keys": true, "notify": true, "transcripts": true,
-	"remote-plugins": true,
+	"remote-plugins": true, "workspace": true,
 }
 
 // streams are what the event stream's areas (changes, ws) share: the process's one hub and
@@ -290,6 +365,11 @@ func newRouter(pool *pgxpool.Pool, next http.Handler, keys *seal.Keys, areas, au
 		return nil, fmt.Errorf("SCADBUDDY_AUTH_MODE: %w", err)
 	}
 	resolver := &auth.Resolver{Pool: pool}
+	if lookupEnv != nil {
+		// Python's own setting: a fleet-rotator credential passes only while its machine's
+		// proof file is there.
+		resolver.BootstrapDir, _ = lookupEnv("SCADBUDDY_SERVICE_BOOTSTRAP_DIR")
+	}
 	var st *streams
 	if len(stream) > 0 {
 		st = stream[0]
@@ -316,13 +396,28 @@ func newRouter(pool *pgxpool.Pool, next http.Handler, keys *seal.Keys, areas, au
 			publics[name] = append(publics[name], routes...)
 		}
 	}
+	// mountPublic serves a named area's public routes behind the gate.
+	mountPublic := func(name string) {
+		for _, p := range publics[name] {
+			public.Handle(p.Pattern, gate.Wrap(p.Route, p.Handler))
+			served = true
+		}
+	}
 	log, turn := &events.Log{Pool: pool}, &turns.Turns{Pool: pool}
 	more := map[string][]crud.Route{}
 	for _, p := range areaPackages {
 		for name, routes := range p(pool, keys) {
-			more[name] = routes
+			// Two packages may serve one area (keys: secrets and fetchgrants).
+			more[name] = append(more[name], routes...)
 		}
 	}
+	// Naming filament-presets twice mounts it once: a pattern given twice panics.
+	presetsMounted := false
+	// Naming both `unknown-trays` and `unknown-trays:read` mounts the area once.
+	unknownTraysMounted := false
+	// Naming label-printing twice mounts it once.
+	labelsMounted := false
+	devicesNamed := false
 	for name := range strings.SplitSeq(areas, ",") {
 		switch name = strings.TrimSpace(name); name {
 		case "":
@@ -347,6 +442,60 @@ func newRouter(pool *pgxpool.Pool, next http.Handler, keys *seal.Keys, areas, au
 				return nil, fmt.Errorf("SCADBUDDY_CORE_AREAS names %q, which needs %s", name, seal.Variable)
 			}
 			router.AddShared(blobstore.Area, blobstore.Routes(pool, keys, lookupEnv, tel)...)
+		case tagreads.Area:
+			// The store's secret key is sealed: the dumps need the KEK, as area blobs does.
+			if keys == nil {
+				return nil, fmt.Errorf("SCADBUDDY_CORE_AREAS names %q, which needs %s", name, seal.Variable)
+			}
+			reads := &tagreads.Reads{Pool: pool, Blobs: blobstore.New(pool, keys, lookupEnv, tel), Upstream: next,
+				Devices: &devices.Store{Pool: pool}}
+			for _, p := range reads.Public()[tagreads.Area] {
+				public.Handle(p.Pattern, gate.Wrap(p.Route, p.Handler))
+				served = true
+			}
+		case filamentpresets.Area:
+			// Public routes that read documents from the blob store, whose S3 secret is
+			// sealed under the KEK. publicPackages pass no lookupEnv or tel, so the case is
+			// its own.
+			if keys == nil {
+				return nil, fmt.Errorf("SCADBUDDY_CORE_AREAS names %q, which needs %s", name, seal.Variable)
+			}
+			if presetsMounted {
+				break
+			}
+			presetsMounted = true
+			store := filamentpresets.Store(blobstore.New(pool, keys, lookupEnv, tel))
+			for _, p := range filamentpresets.Public(pool, store) {
+				// no-store is set outside the gate, so its own 401 and 403 carry it too.
+				public.Handle(p.Pattern, noStore(gate.Wrap(p.Route, p.Handler)))
+				served = true
+			}
+		case labelprint.Area:
+			// Public routes that call the CUPS server through the process's telemetry, so
+			// the case is its own (#7170).
+			if labelsMounted {
+				break
+			}
+			labelsMounted = true
+			for _, p := range labelprint.New(pool, tel).Public() {
+				public.Handle(p.Pattern, gate.Wrap(p.Route, p.Handler))
+				served = true
+			}
+		case packages.MirrorArea:
+			// The blob store in process (#8137); its secret key is sealed under the KEK.
+			if keys == nil {
+				return nil, fmt.Errorf("SCADBUDDY_CORE_AREAS names %q, which needs %s", name, seal.Variable)
+			}
+			store := mirrorBlobs{blobstore.New(pool, keys, lookupEnv, tel)}
+			router.Add("agent", packages.MirrorAreas(pool, store)[packages.MirrorArea]...)
+		case "workspace":
+			// Every route of crud_agent_workspace.py over the blob store in process (#8131):
+			// a file is sealed under the KEK's keys, and the store's secret key is too.
+			if keys == nil {
+				return nil, fmt.Errorf("SCADBUDDY_CORE_AREAS names %q, which needs %s", name, seal.Variable)
+			}
+			store := workspaceBlobs{blobstore.New(pool, keys, lookupEnv, tel)}
+			router.Add("agent", workspace.Routes(pool, keys, store)...)
 		case "changes":
 			s := streamOf()
 			for caller, routes := range changes.Routes(s.hub) {
@@ -355,32 +504,81 @@ func newRouter(pool *pgxpool.Pool, next http.Handler, keys *seal.Keys, areas, au
 		case "ws":
 			streamOf()
 			socket = true
+		case devices.Area:
+			devicesNamed = true
+			mountPublic(name)
+		case unknowntrays.Area, unknowntrays.Read:
+			// Its CRUD route is the print worker's, not the agent's (areaPackages mounts on
+			// the agent), so it has a case of its own.
+			// The full area holds every route of the read-only one.
+			if name == unknowntrays.Read && strings.Contains(","+strings.ReplaceAll(areas, " ", "")+",", ","+unknowntrays.Area+",") {
+				break
+			}
+			if !unknownTraysMounted {
+				unknownTraysMounted = true
+				router.Add(unknowntrays.Caller, unknowntrays.BlockRoutes(pool)...)
+			}
+			mountPublic(name)
 		default:
 			if keys == nil && sealed[strings.TrimSuffix(name, ":read")] {
 				return nil, fmt.Errorf("SCADBUDDY_CORE_AREAS names %q, which needs %s", name, seal.Variable)
 			}
 			routes, ok := more[name]
-			outside, open := publics[name]
+			_, open := publics[name]
 			if !ok && !open {
 				return nil, fmt.Errorf("SCADBUDDY_CORE_AREAS names %q, which this build does not have", name)
 			}
 			router.Add("agent", routes...)
-			for _, p := range outside {
-				public.Handle(p.Pattern, gate.Wrap(p.Route, p.Handler))
-				served = true
-			}
+			mountPublic(name)
 		}
 	}
 	var handler http.Handler = router
 	if served {
-		public.Handle("/", router)
-		handler = public
+		handler = &publicFront{mux: public, next: router}
 	}
 	if socket {
 		// The browser's socket is no CRUD route: it stands in front of the router.
-		return realtime.New(context.Background(), st.hub, pool, handler, st.env, gate)
+		sock, err := realtime.New(context.Background(), st.hub, pool, handler, st.env, gate)
+		if err != nil {
+			return nil, err
+		}
+		if devicesNamed {
+			// A paired device holds the same socket with its device token (#8244).
+			sock.Devices = devices.New(pool, keys, nil, lookupEnv)
+		}
+		return sock, nil
 	}
 	return handler, nil
+}
+
+// publicFront serves a request from the public routes only where its path is canonical and
+// one of them matches it, method included; every other request, a path the mux would answer
+// with its own redirect among them, goes on to next unchanged.
+type publicFront struct {
+	mux  *http.ServeMux
+	next http.Handler
+}
+
+func (f *publicFront) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	if p := r.URL.Path; p == canonical(p) {
+		if _, pattern := f.mux.Handler(r); pattern != "" {
+			f.mux.ServeHTTP(w, r)
+			return
+		}
+	}
+	f.next.ServeHTTP(w, r)
+}
+
+// canonical is p as net/http's mux cleans it: path.Clean, keeping a trailing slash.
+func canonical(p string) string {
+	if p == "" || p[0] != '/' {
+		return "/" + p
+	}
+	c := path.Clean(p)
+	if strings.HasSuffix(p, "/") && c != "/" {
+		c += "/"
+	}
+	return c
 }
 
 // newUpstream forwards to the Python API at an http:// URL or a unix:///path socket. The
@@ -473,4 +671,12 @@ func (u *upstreamWait) dial(dial func(ctx context.Context, network, address stri
 // socket that is not there yet.
 func refused(err error) bool {
 	return errors.Is(err, syscall.ECONNREFUSED) || errors.Is(err, syscall.ENOENT)
+}
+
+// noStore sets Cache-Control: no-store before next answers, whatever it answers.
+func noStore(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Cache-Control", "no-store")
+		next.ServeHTTP(w, r)
+	})
 }

@@ -3,6 +3,13 @@ import { http, HttpResponse } from 'msw'
 import { setupServer } from 'msw/node'
 import { afterAll, afterEach, beforeAll, describe, expect, it } from 'vitest'
 import { z } from 'zod'
+import type {
+  FilamentPresetDetail,
+  FilamentPresetDiff,
+  FilamentPresetKeyChange,
+  FilamentPresetRow,
+  FilamentPresetVersion,
+} from '../src/api/filamentPresets.js'
 import { tiersUpTo } from '../src/auth/principal.js'
 import { TOUCHES_NOTHING } from '../src/sessions/touched.js'
 import { toolActivities, toolCallActivities } from '../src/temporal/toolActivities.js'
@@ -1138,6 +1145,52 @@ describe('filament location tools', () => {
     expect(tool(name).gated).toBe(false)
   })
 
+  it.each([
+    ['filament_unknown_trays', 'read'],
+    ['filament_unknown_tray_resolve', 'write'],
+  ])('%s is %s tier, never gated', (name, risk) => {
+    expect(tool(name).risk).toBe(risk)
+    expect(tool(name).gated).toBe(false)
+  })
+
+  it('lists unknown trays and resolves one by code (#7143)', async () => {
+    const SEEN = '2026-11-26T10:00:00.123456Z'
+    const bodies: unknown[] = []
+    server.use(
+      http.get(`${BACKEND}/api/v1/filament/unknown-trays`, () =>
+        HttpResponse.json({ trays: [{ id: ROW, seen_at: SEEN, candidates: [{ spool_id: ROW }] }], made_from_tags: [] }),
+      ),
+      http.post(`${BACKEND}/api/v1/filament/unknown-trays/${ROW}/resolve`, async ({ request }) => {
+        bodies.push(await request.json())
+        return HttpResponse.json({ id: ROW, number: 12, code: 'S-12', location_id: null })
+      }),
+    )
+    const listed = (await runTool(tool('filament_unknown_trays'), {}, ctx())) as Parameters<typeof firstText>[0]
+    const trays = (firstText(listed) as { trays: { candidates: { spool_ui_path: string }[] }[] }).trays
+    expect(trays[0]?.candidates[0]?.spool_ui_path).toBe(`/filament/spools/${ROW}`)
+    const input = { tray_id: ROW, code: 'S-12', net_weight_g: 980, seen_at: SEEN }
+    const resolved = await runTool(tool('filament_unknown_tray_resolve'), input, ctx())
+    expect(bodies).toEqual([{ code: 'S-12', net_weight_g: 980, seen_at: SEEN }])
+    expect((firstText(resolved) as { ui_path: string }).ui_path).toBe(`/filament/spools/${ROW}`)
+  })
+
+  it('refuses both or neither of spool_id and code', async () => {
+    const base = { tray_id: ROW, net_weight_g: 980, seen_at: 'x' }
+    let posted = false
+    server.use(
+      http.post(`${BACKEND}/api/v1/filament/unknown-trays/${ROW}/resolve`, () => {
+        posted = true
+        return HttpResponse.json({})
+      }),
+    )
+    for (const extra of [{}, { spool_id: ROW, code: 'S-12' }]) {
+      const result = await runTool(tool('filament_unknown_tray_resolve'), { ...base, ...extra }, ctx())
+      expect(result.isError).toBe(true)
+      expect(JSON.stringify(result.content)).toContain('give exactly one of spool_id and code')
+    }
+    expect(posted).toBe(false)
+  })
+
   it('lists the tree, adds a place and edits another', async () => {
     const calls: unknown[] = []
     server.use(
@@ -1293,6 +1346,73 @@ describe('filament location tools', () => {
     const out = { spool_id: ROW, location_id: null }
     expect((await runTool(tool('filament_spool_move'), out, ctx())).isError).toBeFalsy()
     expect(bodies).toEqual([{ location_id: ROW }, { location_id: null }])
+  })
+
+  it('sends if_occupied and answers only when given, for the spool the user identified (#7167)', async () => {
+    const bodies: unknown[] = []
+    server.use(
+      http.post(`${SPOOLS}/${ROW}/move`, async ({ request }) => {
+        bodies.push(await request.json())
+        return HttpResponse.json({ id: ROW })
+      }),
+    )
+    const unloaded = '8d6f3c1e-0000-4000-8000-0000000061a2'
+    const seen = '8d6f3c1e-0000-4000-8000-0000000061a7'
+    const answer = { spool_id: ROW, location_id: ROW, if_occupied: 'replace', answers: unloaded, expected_occupant_id: seen }
+    expect((await runTool(tool('filament_spool_move'), answer, ctx())).isError).toBeFalsy()
+    expect(bodies).toEqual([{ location_id: ROW, if_occupied: 'replace', answers: unloaded, expected_occupant_id: seen }])
+    const bad = { spool_id: ROW, location_id: ROW, if_occupied: 'assume_new' }
+    expect((await runTool(tool('filament_spool_move'), bad, ctx())).isError).toBe(true)
+    expect(bodies).toHaveLength(1)
+    const text = tool('filament_spool_move').description
+    expect(text).toContain('identified')
+    expect(text).toContain('never a guess')
+    expect(text).toContain('non-print waste')
+  })
+
+  it('sends expected_occupant_id, the box spool the user saw, only when given (#7167)', async () => {
+    const bodies: unknown[] = []
+    server.use(
+      http.post(`${SPOOLS}/${ROW}/move`, async ({ request }) => {
+        bodies.push(await request.json())
+        return HttpResponse.json({ id: ROW })
+      }),
+    )
+    const seen = '8d6f3c1e-0000-4000-8000-0000000061a7'
+    const replace = { spool_id: ROW, location_id: ROW, if_occupied: 'replace', expected_occupant_id: seen }
+    expect((await runTool(tool('filament_spool_move'), replace, ctx())).isError).toBeFalsy()
+    expect(bodies).toEqual([{ location_id: ROW, if_occupied: 'replace', expected_occupant_id: seen }])
+    expect(tool('filament_spool_move').description).toContain('expected_occupant_id')
+  })
+
+  it('refuses a replace that names no expected occupant, and sends nothing (#7167)', async () => {
+    const bodies: unknown[] = []
+    server.use(
+      http.post(`${SPOOLS}/${ROW}/move`, async ({ request }) => {
+        bodies.push(await request.json())
+        return HttpResponse.json({ id: ROW })
+      }),
+    )
+    const blind = { spool_id: ROW, location_id: ROW, if_occupied: 'replace' }
+    expect((await runTool(tool('filament_spool_move'), blind, ctx())).isError).toBe(true)
+    expect(bodies).toEqual([])
+    const text = tool('filament_spool_move').description
+    expect(text).toContain('the occupant you read from the box')
+    expect(text).toContain('never a guess')
+  })
+
+  it('lists the spools awaiting their home box (#7167)', async () => {
+    const seen: (string | null)[] = []
+    server.use(
+      http.get(SPOOLS, ({ request }) => {
+        seen.push(new URL(request.url).searchParams.get('awaiting_home'))
+        return HttpResponse.json([])
+      }),
+    )
+    await runTool(tool('filament_spool_list'), { awaiting_home: true }, ctx())
+    await runTool(tool('filament_spool_list'), {}, ctx())
+    expect(seen).toEqual(['true', null])
+    expect(tool('filament_spool_list').description).toContain('awaiting_home')
   })
 
   it("imports Bambuddy's spools and says what it did", async () => {
@@ -2204,5 +2324,123 @@ describe('filament_spool_upsert quantity and copy_of', () => {
     expect(tool('filament_spool_upsert').routes).toEqual(
       expect.arrayContaining(['POST /api/v1/filament/spools/bulk', 'GET /api/v1/filament/spools/{spool_id}/copy']),
     )
+  })
+})
+
+describe('filament preset read tools (#7204)', () => {
+  const wire = JSON.parse(readFileSync(`${import.meta.dirname}/../../test-fixtures/filament/preset-wire.json`, 'utf8')) as {
+    row: Record<string, unknown>
+    detail: Record<string, unknown>
+    diff: Record<string, unknown>
+  }
+  const PRESETS = `${BACKEND}/api/v1/filament/presets`
+  const NAMES = ['filament_preset_list', 'filament_preset_get', 'filament_preset_diff']
+
+  it.each(NAMES)('%s is read tier, never gated, with no OpenAPI route', (name) => {
+    expect(tool(name).risk).toBe('read')
+    expect(tool(name).gated).toBe(false)
+    expect(tool(name).routes).toEqual([])
+  })
+
+  it('keeps the hand-written wire types to the keys Go writes (N8)', () => {
+    const keys = <T,>(all: Record<keyof T, true>) => Object.keys(all).sort()
+    const row = keys<FilamentPresetRow>({
+      id: true, ref: true, name: true, source: true, version: true, type_id: true, printer_model: true,
+      nozzle_diameter: true, filament_type: true, filament_colour: true, compatible_printers: true, sha256: true,
+      bb_preset_id: true, bb_instance: true, mirror: true, mirror_error: true, mirror_error_at: true,
+      used_by_types: true, used_by_spools: true, created_at: true, updated_at: true,
+    })
+    const detail = keys<FilamentPresetDetail>({
+      id: true, ref: true, name: true, source: true, version: true, type_id: true, printer_model: true,
+      nozzle_diameter: true, filament_type: true, filament_colour: true, compatible_printers: true, sha256: true,
+      bb_preset_id: true, bb_instance: true, mirror: true, mirror_error: true, mirror_error_at: true,
+      used_by_types: true, used_by_spools: true, created_at: true, updated_at: true,
+      versions: true, document: true, document_error: true,
+    })
+    const version = keys<FilamentPresetVersion>({
+      version: true, sha256: true, made_by: true, made_at: true, fetch_run_id: true, bb_updated_at: true,
+    })
+    const diff = keys<FilamentPresetDiff>({ preset_id: true, from_version: true, to_version: true, changes: true })
+    const change = keys<FilamentPresetKeyChange>({ key: true, before: true, after: true })
+    const sorted = (o: object) => Object.keys(o).sort()
+    const versions = wire.detail.versions as object[]
+    const changes = wire.diff.changes as object[]
+    expect(sorted(wire.row)).toEqual(row)
+    expect(sorted(wire.detail)).toEqual(detail)
+    expect(sorted(versions[0]!)).toEqual(version)
+    expect(sorted(wire.diff)).toEqual(diff)
+    expect(sorted(changes[0]!)).toEqual(change)
+  })
+
+  it('lists presets with the filters it was given', async () => {
+    const TYPE = '5d0c8f1e-0000-4000-8000-000000007204'
+    server.use(
+      http.get(PRESETS, ({ request }) => {
+        const url = new URL(request.url)
+        expect(url.searchParams.get('source')).toBe('manual')
+        expect(url.searchParams.get('type_id')).toBe(TYPE)
+        return HttpResponse.json([wire.row])
+      }),
+    )
+    const listed = await runTool(tool('filament_preset_list'), { source: 'manual', type_id: TYPE }, ctx())
+    expect(firstText(listed)).toMatchObject([{ id: 7, ui_path: '/filament/presets/7', type_ui_path: expect.any(String) }])
+  })
+
+  it('lower-cases the type id before it is sent', async () => {
+    const TYPE = '5d0c8f1e-0000-4000-8000-00000000ABCD'
+    let sent: string | null = null
+    server.use(
+      http.get(PRESETS, ({ request }) => {
+        sent = new URL(request.url).searchParams.get('type_id')
+        return HttpResponse.json([wire.row])
+      }),
+    )
+    await runTool(tool('filament_preset_list'), { type_id: TYPE }, ctx())
+    expect(sent).toBe(TYPE.toLowerCase())
+  })
+
+  it('reads a preset and diffs two versions', async () => {
+    server.use(
+      http.get(`${PRESETS}/7`, () => HttpResponse.json(wire.detail)),
+      http.get(`${PRESETS}/7/diff`, ({ request }) => {
+        const url = new URL(request.url)
+        expect(url.searchParams.get('from_version')).toBe('2')
+        expect(url.searchParams.get('to_version')).toBe('3')
+        return HttpResponse.json(wire.diff)
+      }),
+    )
+    const one = await runTool(tool('filament_preset_get'), { preset_id: 7 }, ctx())
+    expect(firstText(one)).toMatchObject({ id: 7, ui_path: '/filament/presets/7', document: wire.detail.document })
+    const diff = await runTool(tool('filament_preset_diff'), { preset_id: 7, from_version: 2, to_version: 3 }, ctx())
+    expect(firstText(diff)).toMatchObject({ preset_id: 7, changes: wire.diff.changes })
+  })
+
+  it('says the presets routes are off on a bare 404', async () => {
+    server.use(
+      http.get(PRESETS, () => HttpResponse.json({ detail: 'Not Found' }, { status: 404 })),
+      http.get(`${PRESETS}/8`, () =>
+        HttpResponse.json(
+          { type: 'about:blank', title: 'Not Found', status: 404, code: 'preset_not_found' },
+          { status: 404, headers: { 'content-type': 'application/problem+json' } },
+        ),
+      ),
+    )
+    const off = await runTool(tool('filament_preset_list'), {}, ctx())
+    expect(off.isError).toBe(true)
+    expect(JSON.stringify(off.content)).toContain('the presets routes are not on yet on this server (core area filament-presets)')
+    const missing = await runTool(tool('filament_preset_get'), { preset_id: 8 }, ctx())
+    expect(missing.isError).toBe(true)
+    expect(JSON.stringify(missing.content)).toContain('HTTP 404')
+    expect(JSON.stringify(missing.content)).not.toContain('not on yet')
+  })
+
+  it('the preset tools run in durable mode', () => {
+    const deps = { services: services(), sessions: { ownerOf: async () => undefined } }
+    const activities = toolActivities(ALL_TOOLS, deps)
+    const calls = toolCallActivities(ALL_TOOLS, deps)
+    for (const name of NAMES) {
+      expect(activities[name]).toBeTypeOf('function')
+      expect(calls[toolCallActivity(name)]).toBeTypeOf('function')
+    }
   })
 })

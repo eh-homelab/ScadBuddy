@@ -36,6 +36,8 @@ type api struct {
 	pool  *pgxpool.Pool
 	url   string
 	token string
+	// bootstrap is the router's SCADBUDDY_SERVICE_BOOTSTRAP_DIR.
+	bootstrap string
 }
 
 func newAPI(t *testing.T, areas string) *api {
@@ -45,13 +47,20 @@ func newAPI(t *testing.T, areas string) *api {
 		w.Header().Set("X-From", "python")
 		w.WriteHeader(http.StatusTeapot)
 	})
-	router, err := newRouter(pool, next, nil, areas, "", nil, nil, nil)
+	bootstrap := t.TempDir()
+	lookupEnv := func(name string) (string, bool) {
+		if name == "SCADBUDDY_SERVICE_BOOTSTRAP_DIR" {
+			return bootstrap, true
+		}
+		return "", false
+	}
+	router, err := newRouter(pool, next, nil, areas, "", nil, lookupEnv, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
 	server := httptest.NewServer(router)
 	t.Cleanup(server.Close)
-	a := &api{t: t, pool: pool, url: server.URL}
+	a := &api{t: t, pool: pool, url: server.URL, bootstrap: bootstrap}
 	a.token = a.credential("agent", "api", "crud.agent")
 	return a
 }
@@ -486,10 +495,19 @@ func TestWhatIsNotListedGoesToPython(t *testing.T) {
 	}
 }
 
+func TestNamingTheFullAndTheReadOnlyUnknownTraysAreaMountsItOnce(t *testing.T) {
+	pool := testdb.New(t)
+	for _, areas := range []string{"unknown-trays, unknown-trays:read", "unknown-trays:read, unknown-trays"} {
+		if _, err := newRouter(pool, nil, nil, areas, "", nil, nil, nil); err != nil {
+			t.Errorf("%s: %v", areas, err)
+		}
+	}
+}
+
 func TestASealedAreaNeedsTheKEKAndTheOthersDoNot(t *testing.T) {
 	pool := testdb.New(t)
 	for _, area := range []string{"credentials", "credentials:read", "payload-keys", "keys", "notify",
-		"notify:read", "transcripts", "transcripts:read", "blobs"} {
+		"notify:read", "transcripts", "transcripts:read", "blobs", "filament-tag-reads"} {
 		_, err := newRouter(pool, nil, nil, area, "", nil, nil, nil)
 		if err == nil || !strings.Contains(err.Error(), "SCADBUDDY_SECRET_KEY_FILE") {
 			t.Errorf("%s: %v", area, err)
@@ -509,7 +527,7 @@ func TestASealedAreaNeedsTheKEKAndTheOthersDoNot(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := newRouter(pool, nil, keys, every+", credentials, payload-keys, keys, notify, transcripts, blobs", "", nil, nil, nil); err != nil {
+	if _, err := newRouter(pool, nil, keys, every+", credentials, payload-keys, keys, notify, transcripts, blobs, filament-tag-reads", "", nil, nil, nil); err != nil {
 		t.Fatal(err)
 	}
 }
@@ -695,5 +713,18 @@ func TestTheCRUDPortNeedsPythonsCRUDListener(t *testing.T) {
 	err := run(context.Background(), func(k string) (string, bool) { v, ok := env[k]; return v, ok }, nil)
 	if err == nil || !strings.Contains(err.Error(), "SCADBUDDY_CORE_CRUD_UPSTREAM") {
 		t.Fatalf("got %v", err)
+	}
+}
+
+// A setting Python refuses at its start stops core's start too.
+func TestABadSettingStopsTheStart(t *testing.T) {
+	for name, value := range map[string]string{
+		"SCADBUDDY_AUTH_MODE": "", "SCADBUDDY_PRICING_USD_RATE": "-1", "SCADBUDDY_ORDERS_CURRENCY": "XAU",
+	} {
+		env := map[string]string{name: value}
+		err := run(context.Background(), func(k string) (string, bool) { v, ok := env[k]; return v, ok }, nil)
+		if err == nil || !strings.Contains(err.Error(), name) {
+			t.Errorf("%s=%q: %v", name, value, err)
+		}
 	}
 }

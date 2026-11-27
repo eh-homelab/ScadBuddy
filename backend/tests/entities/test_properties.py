@@ -605,7 +605,7 @@ def test_a_write_raced_by_a_merge_that_deletes_the_owner_is_refused(
 
 def test_an_items_schema_is_its_kinds(pg_pool: PgPool, props: EntityPropertyStore) -> None:
     KindStore(pg_pool).update(
-        "part",
+        "consumable",
         KindPatch(attribute_schema={"type": "object", "properties": {"mpn": {"type": "string"}}}),
         BY,
     )

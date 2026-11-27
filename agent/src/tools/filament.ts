@@ -1,6 +1,8 @@
 import { createHash } from 'node:crypto'
 import { z } from 'zod'
+import { filamentPresetClient } from '../api/filamentPresets.js'
 import type { components } from '../api/schema.js'
+import { unknownTrayClient } from '../api/unknownTrays.js'
 import { ok } from './call.js'
 import { command } from './command.js'
 import { catalogRowRef, PROPERTY_RULES, propertyChanges, propertySet, savedProperties, setPropertiesAfter } from './entities.js'
@@ -29,6 +31,19 @@ import { defineTool, idempotencyKey, json, ToolError, type Tool } from './regist
 // page's NFC jobs (nfc.ts, #7273). Routes: backend/scadbuddy/api/filament.py.
 
 const SOURCE = "ScadBuddy's own filament inventory"
+
+/**
+ * #7204: the preset routes are Go's. Until core serves the area `filament-presets`, the path goes on to
+ * Python, which answers a 404 with no `code`; a real answer of Go's has one (`preset_not_found`).
+ */
+async function presetOk<T>(pending: Promise<{ data?: T; error?: unknown; response: Response }>, what: string): Promise<T> {
+  const result = await pending
+  const code = (result.error as { code?: unknown } | undefined)?.code
+  if (result.response.status === 404 && typeof code !== 'string') {
+    throw new ToolError('the presets routes are not on yet on this server (core area filament-presets)')
+  }
+  return ok(Promise.resolve(result), what)
+}
 
 type SpoolCreate = components['schemas']['SpoolCreate-Input']
 type SpoolDraft = components['schemas']['SpoolDraft']
@@ -101,6 +116,7 @@ const EVENT_KINDS = [
   'restored',
   'synced_from_bb',
   'consumed_reset',
+  'non_print_waste',
 ] as const
 
 /** A calendar day, as the metrics routes' `date` query takes it. */
@@ -179,7 +195,9 @@ const tools: Tool[] = [
       'row frees its name and a 409 means another unarchived row has it. ' +
       '`properties` (#7026) are saved with the row in the same request and the answer carries them; a refused ' +
       'value or a required key left empty (#7703) writes nothing. An edit with only `properties` leaves the row ' +
-      'itself untouched and is not checked for completeness. ' +
+      'itself untouched and is not checked for completeness. A location kind that becomes dry storage ' +
+      '(`dry_storage: true`) while a place of it with capacity 1 holds two spools is a 422 `box_has_many` and ' +
+      'changes nothing. ' +
       `${PROPERTY_RULES} Only what the user says. Writes ScadBuddy only.`,
     input: z.object({
       kind,
@@ -810,12 +828,15 @@ const tools: Tool[] = [
       "override, else its type's), the fields it `overridden`, the `names` behind its ids, `low_stock`, and " +
       '`grams_left` from its ledger. ' +
       '`needs_type: true` lists only spools with no type yet, `false` only typed ones. Archived spools only ' +
-      'with `include_archived`. `q` keeps the spools whose number, brand, material, subtype, colour name, hex, ' +
+      'with `include_archived`. `awaiting_home: true` lists only the spools that came out of a tray and are asked ' +
+      'which spool goes into their home dry box (`home_location_id`, asked at `home_asked_at`); ask the user to ' +
+      'identify the spool, then answer with filament_spool_move `answers`. `q` keeps the spools whose number, brand, material, subtype, colour name, hex, ' +
       "place, tray, type code, type's supplier SKU, one of the spool's property values (a lot) or open tag's UID or " +
       'tray UUID (from 4 hex digits; `:` and `-` are left out, so `04:A1:B2` finds tag `04A1B2…`) match it.',
     input: z.object({
       include_archived: z.boolean().default(false),
       needs_type: z.boolean().optional(),
+      awaiting_home: z.boolean().optional(),
       q: searchQuery,
     }),
     risk: 'read',
@@ -827,9 +848,9 @@ const tools: Tool[] = [
       'GET /api/v1/filament/tags',
       ...SEARCH_ROUTES,
     ],
-    handler: async ({ include_archived, needs_type, q }, { backend }) => {
+    handler: async ({ include_archived, needs_type, awaiting_home, q }, { backend }) => {
       const spools = await ok(
-        backend.GET('/api/v1/filament/spools', { params: { query: { include_archived, needs_type } } }),
+        backend.GET('/api/v1/filament/spools', { params: { query: { include_archived, needs_type, awaiting_home } } }),
         'list the spools',
       )
       const tokens = parseSearch(q)
@@ -902,12 +923,14 @@ const tools: Tool[] = [
       'ledger event. To record a weighing use filament_spool_add_event; to archive use filament_spool_archive. ' +
       'When adding, `quantity` (1 to 100) makes that many identical spools in one request, each with its own number, ' +
       "and `copy_of` (a spool's `id`) starts from that spool: its type, own overrides, note, own presets and K " +
-      'values and its place unless that is a tray, never its number, tag, tray, weight, weight lock or `added_full`; `fields` ' +
+      'values and its place unless that is a tray or a dry box, never its number, tag, tray, weight, weight lock or `added_full`; `fields` ' +
       'then change the copy. `continued_from` (#7684, with `copy_of` the same archived, respooled spool and `grams_left` its final filament) links the two: the new ' +
       "spool's `created` event keeps `continued_from` and the source's `archived` event `continued_as`; 422 `continued_from_not_archived` otherwise, " +
       '`continued_from_taken` for a source a spool already continues (#7909). ' +
       'Either answers the list of spools made, and a resend of the same call makes none twice; ' +
       'a resend of a copy reads the source again, and when the source changed in between it makes a new set from it. ' +
+      'A place that is a dry box (capacity 1) holding another spool is a 409 `box_full` naming it (`occupant_id`), and so is ' +
+      'a restore (`archived: false`) into a box another spool holds; nothing is written. ' +
       '422 when an effective minimum temperature is above its maximum or the spool would have neither type nor ' +
       'material. `properties` (#7026) are saved with the spool, or with each spool made, in the same request and the ' +
       'answer carries them; a refused value or a required key left empty (#7703) writes nothing. A copy does not ' +
@@ -1081,8 +1104,13 @@ const tools: Tool[] = [
       'scale reading with the spool, from which its empty weight is taken as filament_spool_add_event takes it, or ' +
       '`final_grams`, the filament left, or both. The weighing is booked just before the `archived` event, whose ' +
       '`data` keeps the closing: `reason`, `started_g`, `started_from`, `ledger_consumed_g`, `final_filament_g`, ' +
-      '`scale_consumed_g` and `drift_g` (negative: the scale found less than the ledger expected). 422 ' +
+      '`scale_consumed_g`, `drift_g` (negative: the scale found less than the ledger expected) and `non_print_waste_g`. ' +
+      'The grams left after the weighing, unless the reason is `respooled`, are booked as a `non_print_waste` event just ' +
+      'before the `archived` one: the spool then has 0 g left, and `closing.non_print_waste_g` (filament_spool_get on the ' +
+      'archived spool, filament_spool_closing before) says how many. 422 ' +
       '`no_empty_weight` or `reading_below_empty` archives nothing; a restore takes no reason or reading. ' +
+      'A restore of a spool whose place is a dry box that another spool holds is a 409 `box_full` naming that spool ' +
+      '(`occupant_id`) and restores nothing; tell the user. ' +
       'Only what the user says. Writes ScadBuddy; with tag sync on (filament_sync.tags), ' +
       "the archived spool's tag is then cleared in Bambuddy.",
     input: z.object({
@@ -1295,7 +1323,7 @@ const tools: Tool[] = [
     label: 'List a spool tag’s backups',
     description:
       'List what a tag held before each write, newest first: its UID, its NDEF records (record type, media type, ' +
-      'data as hex), why it was written (`spool_write`, `agent_write`, `restore`), who wrote it and when. ' +
+      'data as hex), why it was written (`spool_write`, `agent_write`, `restore`, `place_write`: a place’s tag, written by the swap page), who wrote it and when. ' +
       'A page holds up to `limit` backups (default 50, at most 200); pass the last `id` as `before` for the next page. Reads ScadBuddy only.',
     input: z.object({
       tag_id: z.string().uuid().describe("A tag's `id` from filament_tag_list"),
@@ -1366,7 +1394,7 @@ const tools: Tool[] = [
     label: "Read a spool's history and metrics",
     description:
       "A spool's timeline and metrics: the newest 50 ledger `events` (newest first, with `actor`, `order_id` " +
-      'and `archive_id`), its `metrics` (use, waste, cost used, value left, burn rate, empty day, days since ' +
+      'and `archive_id`), its `metrics` (use, waste, `non_print_waste_g` (grams thrown away off the printer, apart from `wasted_g`), cost used, value left, burn rate, empty day, days since ' +
       'opened and last use, hours outside dry storage, AMS error; the metres its lengthed prints extruded, `used_m`, ' +
       'the density they imply, `implied_density_g_cm3`, against the type\'s `density_g_cm3`, and `density_mismatch` ' +
       'when they are more than 5% apart, a note to check the type or the label, never a booking), `type_ams_error`, `currency` and ' +
@@ -1407,7 +1435,10 @@ const tools: Tool[] = [
     label: 'Read stock, consumption and waste',
     description:
       "The unarchived spools' stock (spools, grams left, value) by `dimension`, the grams used and wasted " +
-      'per `bucket` and dimension, and the waste by material, type and printer. `since` and `until` are ' +
+      '(`wasted_g`: failed and cancelled plates) per `bucket` and dimension, and the waste by material, type and ' +
+      'printer. Filament thrown away off the printer (an archive, a box replacement) is apart: `non_print_waste_g` ' +
+      'is its total and `non_print_waste` its rows by material and type. It is in no `used_g` or `wasted_g`. ' +
+      '`since` and `until` are ' +
       'dates (`YYYY-MM-DD`), both included; default the 180 days before today. 422 when `since` is after ' +
       '`until` or the range is over 1096 days.',
     input: z.object({
@@ -1908,7 +1939,9 @@ const tools: Tool[] = [
     description:
       '`archived: true` takes 1 to 500 spools off the lists in one request; `false` puts them back (#7151). Each spool ' +
       'changed gets its own ledger event, and an archived one loses its open tag binding, as filament_spool_archive does. ' +
-      'Answers `changed`, `unchanged` (already so) and `not_found` (ids with no spool). Only what the user says. Writes ' +
+      'Answers `changed`, `unchanged` (already so) and `not_found` (ids with no spool). A restore of a spool whose place ' +
+      'is a dry box that another spool holds is a 409 `box_full` naming it (`occupant_id`), and none is changed; tell the ' +
+      'user. Only what the user says. Writes ' +
       "ScadBuddy; with tag sync on (filament_sync.tags), an archived spool's tag is then cleared in Bambuddy.",
     input: z.object({
       spool_ids: z.array(z.string().uuid()).min(1).max(500),
@@ -1954,7 +1987,7 @@ const tools: Tool[] = [
     name: 'filament_code_resolve',
     label: 'Resolve a label code',
     description:
-      'What a typed label code names: `L-12` is a place, `S-142` a spool. Any case, with or without the dash. ' +
+      'What a typed label code names: `L-12` is a place, `S-142` a spool, `T-4` a spool type, `I-9` an item, `K-3` an item kind. Any case, with or without the dash. ' +
       'Returns the kind, the id, the name and `archived`; an archived thing still resolves. 404 `code_unknown` ' +
       'for a code that names nothing.',
     input: z.object({ code: z.string().min(1).describe('A label code, such as `L-12` or `s142`') }),
@@ -2007,6 +2040,61 @@ const tools: Tool[] = [
           'list the printer labels',
         ),
       ),
+  }),
+
+  defineTool({
+    name: 'filament_unknown_trays',
+    label: 'List unknown trays',
+    description:
+      'The loaded trays that no spool is linked to (#7143). A row is one tray: its `id`, printer, `slot`, place, ' +
+      '`material`, `colour_rgba`, `remain_pct` and `seen_at`. `candidates` are the spools that may be in it, ranked ' +
+      'by ScadBuddy: spools with no place first, then the same material, then the nearest colour. ' +
+      '`made_from_tags` lists the spools that capture made from RFID tags in the last 24 hours. ScadBuddy refuses a ' +
+      'print to a printer that has a row here (422 `unknown_spool_loaded`). To fix a row, ask the user which spool is ' +
+      "in the tray, then call filament_unknown_tray_resolve with this row's `seen_at` as it is.",
+    input: z.object({}),
+    risk: 'read',
+    source: SOURCE,
+    routes: [],
+    handler: async (_input, { backend }) =>
+      json(await ok(unknownTrayClient(backend).GET('/api/v1/filament/unknown-trays'), 'list the unknown trays')),
+  }),
+
+  defineTool({
+    name: 'filament_unknown_tray_resolve',
+    label: 'Link a spool to an unknown tray',
+    description:
+      'Link a spool to an unknown tray (#7143). Give `tray_id` (filament_unknown_trays `id`), exactly one of ' +
+      "`spool_id` and `code` (a label code such as `S-12`), `net_weight_g` (the spool's weight without its core, " +
+      "more than 0) and `seen_at` (the row's `seen_at`, as listed, never changed). It answers `{id, number, code, " +
+      'location_id}`. 409 `tray_changed`: the tray changed after the list; read the list again. 404 `code_unknown`: ' +
+      'no spool has that code. 409 `spool_archived`. 409 `no_ams_kind`. 404 `spool_missing`: the spool was archived ' +
+      'or deleted while it linked. 409 `tag_clash`: the tag on the tray is on another spool. Use only what the user says: never pick a ' +
+      'candidate yourself. Writes ScadBuddy only.',
+    input: z.object({
+      tray_id: z.string().uuid(),
+      spool_id: z.string().uuid().optional(),
+      code: z.string().min(1).optional(),
+      net_weight_g: z.number().positive(),
+      seen_at: z.string().min(1),
+    }),
+    risk: 'write',
+    source: SOURCE,
+    routes: [],
+    summarize: ({ tray_id, spool_id, code }) => `Link spool ${code ?? spool_id} to unknown tray ${tray_id}`,
+    handler: async ({ tray_id, spool_id, code, net_weight_g, seen_at }, { backend }) => {
+      if ((spool_id === undefined) === (code === undefined)) throw new ToolError('give exactly one of spool_id and code')
+      const body = spool_id !== undefined ? { spool_id, net_weight_g, seen_at } : { code: code as string, net_weight_g, seen_at }
+      return json(
+        await ok(
+          unknownTrayClient(backend).POST('/api/v1/filament/unknown-trays/{tray_id}/resolve', {
+            params: { path: { tray_id } },
+            body,
+          }),
+          `link a spool to unknown tray ${tray_id}`,
+        ),
+      )
+    },
   }),
 
   defineTool({
@@ -2100,7 +2188,9 @@ const tools: Tool[] = [
       'Add a place (no `location_id`), or edit one: only the `fields` given change, and `null` clears a nullable ' +
       'one. A place needs a `name` and a `kind_id` (filament_catalog_list kind `location-kinds`); `parent_id` puts ' +
       'it under another place. `archived: true` takes a place off the tree and frees its name, `false` puts it back. ' +
-      '409 when the name is taken under that parent, or the parent would make the place its own ancestor. Only what ' +
+      '409 when the name is taken under that parent, or the parent would make the place its own ancestor. A change ' +
+      'that makes the place a dry box (capacity 1 and a dry-storage kind) while it holds two spools is a 422 ' +
+      '`box_has_many`. Only what ' +
       'the user says. Writes ScadBuddy only.',
     input: z.object({
       location_id: z.string().uuid().optional().describe("A place's `id` from filament_location_list; omit to add"),
@@ -2135,19 +2225,49 @@ const tools: Tool[] = [
     description:
       'Put a spool in a place (`location_id` from filament_location_list); `null` takes it out of every place. ' +
       "The spool's ledger records the move as `{from, to}`. A spool already there is left as it is. 422 for a place " +
-      'that does not exist or is archived. Only what the user says. Writes ScadBuddy only.',
-    input: z.object({ spool_id: z.string().uuid(), location_id: z.string().uuid().nullable() }),
+      'that does not exist or is archived. A dry box (a dry-storage place of capacity 1) holds one spool: a box that ' +
+      'holds another one is a 409 `box_full` naming that spool (`occupant_id`); tell the user, and do not move that ' +
+      'spool unasked. `spool_id` must be the spool the user identified (a tag scan, a spool code such as `S-12`, or a ' +
+      'spool they named), never a guess: not even the spool that came out of the tray. `if_occupied: "replace"`, only ' +
+      "when the user says the identified spool replaces the box's own spool, archives that spool at 0 g and books its " +
+      'grams left as non-print waste, then moves; tell the user that first. `answers` is the unloaded spool whose ' +
+      'home-return prompt this answers (filament_spool_list `awaiting_home: true`): its prompt clears, and it keeps no ' +
+      'place unless it is `spool_id`; a 422 `not_its_home` when its home is not `location_id`. A replace must send ' +
+      "`expected_occupant_id`: the occupant you read from the box (filament_location_get's `spools`, or the 409's " +
+      '`occupant_id`) and told the user about, never a guess. A box that holds another spool by then is a 409 ' +
+      '`box_full` naming it, and nothing is archived. Only what the user says. Writes ScadBuddy only.',
+    input: z
+      .object({
+        spool_id: z.string().uuid(),
+        location_id: z.string().uuid().nullable(),
+        if_occupied: z.enum(['refuse', 'replace']).optional(),
+        answers: z.string().uuid().optional(),
+        expected_occupant_id: z.string().uuid().optional(),
+      })
+      .refine((o) => o.if_occupied !== 'replace' || o.expected_occupant_id !== undefined, {
+        message: "a replace must name the box's spool it expects in expected_occupant_id",
+        path: ['expected_occupant_id'],
+      }),
     risk: 'write',
     source: SOURCE,
     routes: ['POST /api/v1/filament/spools/{spool_id}/move'],
-    summarize: ({ spool_id, location_id }) =>
-      location_id ? `Move spool ${spool_id} to ${location_id}` : `Take spool ${spool_id} out of its place`,
-    handler: async ({ spool_id, location_id }, { backend }) =>
+    summarize: ({ spool_id, location_id, if_occupied }) =>
+      !location_id
+        ? `Take spool ${spool_id} out of its place`
+        : if_occupied === 'replace'
+          ? `Move spool ${spool_id} to ${location_id}, archiving the spool there`
+          : `Move spool ${spool_id} to ${location_id}`,
+    handler: async ({ spool_id, location_id, if_occupied, answers, expected_occupant_id }, { backend }) =>
       json(
         await ok(
           backend.POST('/api/v1/filament/spools/{spool_id}/move', {
             params: { path: { spool_id } },
-            body: { location_id },
+            body: {
+              location_id,
+              ...(if_occupied === undefined ? {} : { if_occupied }),
+              ...(answers === undefined ? {} : { answers }),
+              ...(expected_occupant_id === undefined ? {} : { expected_occupant_id }),
+            },
           }),
           `move spool ${spool_id}`,
         ),
@@ -2267,6 +2387,80 @@ const tools: Tool[] = [
     summarize: () => "Import Bambuddy's filament presets",
     handler: async (_input, { backend }) =>
       json(await ok(backend.POST('/api/v1/filament/presets/bambuddy-import'), "import Bambuddy's presets")),
+  }),
+
+  defineTool({
+    name: 'filament_preset_list',
+    label: 'List filament presets',
+    description:
+      "ScadBuddy's own filament presets (#7204). A row is one preset: `id`, `ref` (`sb-<id>`), `name`, `source`, " +
+      '`version`, `type_id`, `printer_model`, `nozzle_diameter`, `filament_type`, `mirror`, and how many types and ' +
+      'spools use it. `source` says where the preset came from: `3dfp` (fetched from 3dfilamentprofiles.com), ' +
+      '`bambuddy` (taken from Bambuddy) or `manual` (made in ScadBuddy). Only a `manual` preset can be edited. ' +
+      '`mirror` is the state of its copy in Bambuddy: `sent`, `pending`, `failed` or `bambuddy_owned`. ' +
+      '`source` and `type_id` limit the list. The order is by name. The tools to copy, edit and send again come later. ' +
+      'Writes nothing.',
+    input: z.object({
+      source: z.enum(['3dfp', 'bambuddy', 'manual']).optional(),
+      type_id: z.string().uuid().transform((s) => s.toLowerCase()).optional(),
+    }),
+    risk: 'read',
+    source: SOURCE,
+    routes: [],
+    handler: async ({ source, type_id }, { backend }) =>
+      json(
+        await presetOk(
+          filamentPresetClient(backend).GET('/api/v1/filament/presets', { params: { query: { source, type_id } } }),
+          'list the filament presets',
+        ),
+      ),
+  }),
+
+  defineTool({
+    name: 'filament_preset_get',
+    label: 'Get a filament preset',
+    description:
+      'One filament preset (#7204), as filament_preset_list shows it, with its `versions` and its `document`: the ' +
+      'slicer settings of the current version, as text values. Credentials are never in it. `document` is null when ' +
+      'it cannot be read, and `document_error` says why. Only a `manual` preset can be edited. The tools to copy, ' +
+      'edit and send again come later. 404 `preset_not_found`. Writes nothing.',
+    input: z.object({ preset_id: z.number().int().positive() }),
+    risk: 'read',
+    source: SOURCE,
+    routes: [],
+    handler: async ({ preset_id }, { backend }) =>
+      json(
+        await presetOk(
+          filamentPresetClient(backend).GET('/api/v1/filament/presets/{preset_id}', { params: { path: { preset_id } } }),
+          `read filament preset ${preset_id}`,
+        ),
+      ),
+  }),
+
+  defineTool({
+    name: 'filament_preset_diff',
+    label: 'Diff filament preset versions',
+    description:
+      'The settings that differ between two versions of a filament preset (#7204): `changes`, each with `key`, ' +
+      '`before` and `after`. `to_version` is the current version when left out. `from_version` is the one before `to_version` when left out. ' +
+      '404 `preset_not_found`. 404 `version_not_found`. Writes nothing.',
+    input: z.object({
+      preset_id: z.number().int().positive(),
+      from_version: z.number().int().positive().optional(),
+      to_version: z.number().int().positive().optional(),
+    }),
+    risk: 'read',
+    source: SOURCE,
+    routes: [],
+    handler: async ({ preset_id, from_version, to_version }, { backend }) =>
+      json(
+        await presetOk(
+          filamentPresetClient(backend).GET('/api/v1/filament/presets/{preset_id}/diff', {
+            params: { path: { preset_id }, query: { from_version, to_version } },
+          }),
+          `diff filament preset ${preset_id}`,
+        ),
+      ),
   }),
 
   defineTool({
@@ -2426,7 +2620,10 @@ export const filamentTools: Tool[] = linkingTools(tools, {
   filament_spool_upsert: 'spool',
   filament_spool_archive: 'spool',
   filament_spool_move: 'spool',
+  filament_unknown_tray_resolve: 'spool',
   filament_location_list: 'location',
   filament_location_get: 'location',
   filament_location_upsert: 'location',
+  filament_preset_list: 'preset',
+  filament_preset_get: 'preset',
 })

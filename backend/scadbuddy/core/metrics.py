@@ -130,7 +130,6 @@ ROLE_SERIES: dict[MetricsRole, frozenset[str]] = {
         "worker_cache",
         "worker_cache_bytes",
         "render_data_bytes",
-        "store_render_key_fallback",
         "crud_client_seconds",
         "asset_prune_failures",
     },
@@ -262,6 +261,23 @@ class Metrics:
         self.event_log_pruned = Counter(
             "scadbuddy_event_log_pruned",
             "Rows removed from the event log by SCADBUDDY_EVENT_LOG_RETENTION_*.",
+            registry=r,
+        )
+        # #6949 (design §4.8): each durable subscriber's place in the log (`event_subscribers`;
+        # the history subscriber runs in scadbuddy-core). Read per scrape by the API
+        # (`api/metrics.py` `refresh_subscriber_metrics`).
+        self.event_subscriber_lag_events = Gauge(
+            "scadbuddy_event_subscriber_lag_events",
+            "Events of every kind in the log past the subscriber's cursor, not only the"
+            " kinds it reads: the newest seq less the cursor.",
+            ["subscriber"],
+            registry=r,
+        )
+        self.event_subscriber_lag_seconds = Gauge(
+            "scadbuddy_event_subscriber_lag_seconds",
+            "Seconds since the oldest event past the subscriber's cursor was logged; 0 when"
+            " the subscriber has applied every event.",
+            ["subscriber"],
             registry=r,
         )
         self.render_rejected = Counter(
@@ -470,12 +486,6 @@ class Metrics:
         self.store_max_bytes = Gauge(
             "scadbuddy_store_max_bytes",
             "SCADBUDDY_STORE_MAX_TOTAL_BYTES; 0 is no limit.",
-            registry=r,
-        )
-        self.store_render_key_fallback = Gauge(
-            "scadbuddy_store_render_key_fallback",
-            "1 while this process's store holds the full Bambuddy key because no render key"
-            " is saved (spec 2026-09-27 §9); a standalone render worker never gets it.",
             registry=r,
         )
         self.worker_cache_bytes = Gauge(
@@ -720,6 +730,12 @@ FILAMENT_SERIES: tuple[tuple[str, str, tuple[str, ...]], ...] = (
         "scadbuddy_filament_used_grams",
         "Grams of every plate ever booked, by material and outcome; read with delta().",
         ("material", "outcome"),
+    ),
+    (
+        "scadbuddy_filament_non_print_waste_grams",
+        "Grams thrown away off the printer (archives, box replacements), by material;"
+        " never in scadbuddy_filament_used_grams; read with delta().",
+        ("material",),
     ),
     (
         "scadbuddy_filament_burn_grams_per_day",

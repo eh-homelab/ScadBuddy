@@ -82,6 +82,8 @@ const work = await trace.getTracer('child').startActiveSpan('work', async (span)
     saved: dirBodies(saveDir),
     secrets: () => [],
     actor: { kind: 'browser', id: 'user', label: 'User' },
+    // The target is this test's own loopback server, which a read refuses without it (#8178).
+    allowPrivate: true,
   })
   span.end()
   return { traceId: span.spanContext().traceId, forwardedStatus, requestFailed: requested.isError === true }

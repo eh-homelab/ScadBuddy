@@ -40,6 +40,8 @@ var reasons = map[string]error{
 	"seq-ahead":       fleetchat.ErrBadSeq,
 	"text-too-long":   fleetchat.ErrTooLong,
 	"unknown-session": ErrUnknownSession,
+	// A join that would make a channel with a name valid only before #8149.
+	"legacy-channel-name": fleetchat.ErrBadChannel,
 }
 
 type client struct {
@@ -182,8 +184,11 @@ func NewStore(baseURL string, token func() (string, error), opts ...Option) flee
 
 func agentPath(sessionID string) string { return "/agents/" + url.PathEscape(sessionID) }
 
+// memberPath is a join's or leave's route. A plain name is its own segment; a reference such as
+// owner/repo#123 is "~" and its base64url (fleetchat.ChannelSegment), since its "/" and "#"
+// would need escapes and core leaves a path with an escape in it to Python (#8149).
 func memberPath(sessionID, channel string) string {
-	return "/channels/" + url.PathEscape(channel) + "/members/" + url.PathEscape(sessionID)
+	return "/channels/" + url.PathEscape(fleetchat.ChannelSegment(channel)) + "/members/" + url.PathEscape(sessionID)
 }
 
 // Touch's handle is derived by core from the session id; the argument is not sent.

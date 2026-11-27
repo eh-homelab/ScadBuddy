@@ -1001,6 +1001,19 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
+      # What this part runs, as a hash (#8191): deploy.reusable.yml keeps the
+      # recorder's and edge's pins while it equals the pinned image's, so a
+      # build that changed none of it restarts no camera pod.
+      - name: Hash the camera inputs
+        id: inputs
+        env:
+          PART: ${{ matrix.part }}
+        run: |
+          set -euo pipefail
+          hash=$(bash .github/scripts/camera-inputs.sh "$PART")
+          echo "camera-${PART} inputs: ${hash}"
+          echo "hash=${hash}" >> "$GITHUB_OUTPUT"
+
       - name: Derive tags and labels
         id: meta
         uses: docker/metadata-action@v6
@@ -1016,6 +1029,7 @@ jobs:
           labels: |
             org.opencontainers.image.title=ScadBuddy camera-${{ matrix.part }}
             org.opencontainers.image.description=Printer camera ${{ matrix.part }} for ScadBuddy (MediaMTX and its controller)
+            io.scadbuddy.camera.inputs=${{ steps.inputs.outputs.hash }}
 
       # The same label as the other jobs: `X.Y.Z` for a `vX.Y.Z` tag,
       # `sha-<short>` otherwise.

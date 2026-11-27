@@ -14,9 +14,12 @@ from scadbuddy.codes.parse import Code, format_code
 Conn = Connection[DictRow]
 
 
+Kind = Literal["location", "spool", "item_kind", "spool_type", "item"]
+
+
 class Lookup(NamedTuple):
     table: str
-    kind: Literal["location", "spool"]
+    kind: Kind
 
 
 #: One entry per prefix. A new prefix is a new entry; the SQL below is built from `table`
@@ -24,15 +27,27 @@ class Lookup(NamedTuple):
 PREFIXES: dict[str, Lookup] = {
     "L": Lookup("filament_locations", "location"),
     "S": Lookup("filament_spools", "spool"),
+    "K": Lookup("item_kinds", "item_kind"),
+    "T": Lookup("filament_spool_types", "spool_type"),
+    "I": Lookup("items", "item"),
 }
 
-#: Spools have no name column.
-_NAME = {"filament_locations": "name", "filament_spools": "NULL"}
+#: The SQL for each table's name. Spools have no name; a type's name is its code and colour.
+#: Public because the labels file (`filament/labels.py`) reads it too.
+NAME_SQL: dict[str, str] = {
+    "filament_locations": "name",
+    "filament_spools": "NULL",
+    "item_kinds": "name",
+    "filament_spool_types": "concat_ws(' ', code, colour_name)",
+    "items": "name",
+}
 
 
 class Resolved(BaseModel):
-    kind: Literal["location", "spool"]
-    id: UUID
+    kind: Kind
+    #: A location's, spool's, spool type's and item's id is a uuid; an item kind's is its
+    #: text id (`printer`, `k12`).
+    id: UUID | str
     code: str
     name: str | None
     archived: bool
@@ -44,7 +59,7 @@ def resolve(conn: Conn, code: Code) -> Resolved | None:
         return None
     table, kind = lookup
     row = conn.execute(
-        f"SELECT id, {_NAME[table]} AS name, archived_at FROM {table} WHERE number = %s",
+        f"SELECT id, {NAME_SQL[table]} AS name, archived_at FROM {table} WHERE number = %s",
         (code.number,),
     ).fetchone()
     if row is None:

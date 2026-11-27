@@ -11,6 +11,11 @@ describe('the Filament tab routes in App.tsx', () => {
 })
 
 describe('the Filament tabs', () => {
+  it('puts Presets after Types (#7204)', () => {
+    const ids = FILAMENT_TABS.filter((tab) => tab.available).map((tab) => tab.id)
+    expect(ids.indexOf('presets')).toBe(ids.indexOf('types') + 1)
+  })
+
   it('make Metrics available (#6269), between Catalog and Shopping list', () => {
     const available = FILAMENT_TABS.filter((tab) => tab.available).map((tab) => tab.id)
     expect(available).toContain('metrics')

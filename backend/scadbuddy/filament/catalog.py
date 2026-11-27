@@ -36,11 +36,13 @@ from scadbuddy.entities.registry import KIND_OF_TABLE as ENTITY_KIND_OF_TABLE
 from scadbuddy.entities.required import (
     Marked,
     checks_save,
+    hold_for_properties,
     mark_incomplete,
     save_properties_on,
 )
 from scadbuddy.filament import models as m
 from scadbuddy.filament.bb_sync_models import forget_sync
+from scadbuddy.filament.dry_box import check_kind_flip, lock_kind_places
 from scadbuddy.orders.models import Actor
 
 Conn = Connection[DictRow]
@@ -462,6 +464,7 @@ class CatalogStore:
         with self._pool.connection() as conn:
             try:
                 with conn.transaction():
+                    hold_for_properties(conn, properties, by or Actor(kind="browser"))
                     row = conn.execute(
                         f"INSERT INTO {spec.table} ({', '.join(names)})"
                         f" VALUES ({', '.join('%s' for _ in names)}) RETURNING id",
@@ -505,8 +508,9 @@ class CatalogStore:
         route, #7703 spec 6.3b) a save that leaves the row incomplete is
         `MissingRequiredProperties`, unless it sends only ``sort_order`` or ``archived``.
         `TypeTempError` when a material's or subtype's temperature range would be
-        backwards; `CatalogKeyClashError` when the new name (or a subtype's new material)
-        meets a key another row holds."""
+        backwards; `BoxHasManyError` when a location kind becomes dry storage while a
+        place of it with capacity 1 holds two spools (#7167); `CatalogKeyClashError` when
+        the new name (or a subtype's new material) meets a key another row holds."""
         spec = _spec(kind)
         sent = [n for n in type(patch).model_fields if n in patch.model_fields_set]
         columns = [n for n in sent if n != "archived"]
@@ -532,6 +536,8 @@ class CatalogStore:
         with self._pool.connection() as conn:
             try:
                 with conn.transaction():
+                    # The log before the row (#6949).
+                    hold_for_properties(conn, properties, by or Actor(kind="browser"))
                     if kind in _TEMPS and set(columns) & set(_TEMP_COLUMNS):
                         current = conn.execute(
                             f"SELECT {', '.join(_TEMP_COLUMNS)} FROM {spec.table}"
@@ -540,12 +546,19 @@ class CatalogStore:
                         ).fetchone()
                         if current is not None:
                             check_temps(current | dict(zip(columns, values, strict=True)))
+                    flipping = kind == "location-kinds" and bool(
+                        getattr(patch, "dry_storage", None)
+                    )
+                    # The places before the kind's row, as a move takes them (#7167).
+                    boxes = lock_kind_places(conn, row_id) if flipping else []
                     row = conn.execute(
                         f"UPDATE {spec.table} SET {', '.join(sets)} WHERE id = %s RETURNING id",
                         [*values, row_id],
                     ).fetchone()
                     if row is not None and archived and kind == "insert-types":
                         forget_sync(conn, "insert_type", row_id)
+                    if row is not None and flipping:
+                        check_kind_flip(conn, boxes)
                     fields = set(sent) | ({"properties"} if properties is not None else set())
                     check = checked and checks_save(fields)
                     if row is not None and (properties or check):

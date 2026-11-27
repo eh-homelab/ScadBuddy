@@ -66,7 +66,11 @@ name: Deploy (reusable)
 #      other; both move, and so does the comment that names the API build they
 #      came from ("the build of the API's <version>"). Their `camera` job is
 #      continue-on-error, so a build that published no image for a part keeps
-#      that file's pins and warns. The camera relay is NOT pinned here: a
+#      that file's pins and warns. A part whose new image has the same
+#      `io.scadbuddy.camera.inputs` label (camera-inputs.sh: a hash of what it
+#      runs) as its pinned image keeps its pins too, with a notice, so a build
+#      that changed none of it restarts no camera pod (#8191).
+#      The camera relay is NOT pinned here: a
 #      relay restart is a gap of about 10 to 30 s in every printer's
 #      recording, so its pin in camera-relay.yaml moves by hand, in a reviewed
 #      clusters PR, only when its code or MediaMTX changes (camera spec §6.1).
@@ -657,6 +661,10 @@ jobs:
       # image their continue-on-error `camera` job did not publish is a warning
       # and an empty digest. The legs of that job build side by side, so they
       # share one wait of up to 10 minutes. Not the relay: its pin moves by hand.
+      # A part whose new image has the same `io.scadbuddy.camera.inputs` label
+      # as the image its file pins (camera-inputs.sh, #8191) runs what is
+      # already deployed: its digest output stays empty and `<part>_same`
+      # names the pin, so the pin step keeps it and no camera pod restarts.
       - name: Resolve the camera images
         id: camera
         env:
@@ -695,8 +703,32 @@ jobs:
             [[ "${digest[$part]}" =~ ^sha256:[0-9a-f]{64}$ ]] \
               || echo "::warning::could not resolve ${image[$part]}:${VERSION}; the camera-${part} pins stay as they are"
           done
+          # `inputs <ref>`: the image's camera-inputs label, or nothing.
+          inputs() {
+            docker buildx imagetools inspect "$1" --format '{{json .Image}}' 2>/dev/null \
+              | jq -r '.config.Labels["io.scadbuddy.camera.inputs"] // empty' 2>/dev/null || true
+          }
+          declare -A same=([recorder]="" [edge]="")
+          for part in "${wanted[@]}"; do
+            [[ "${digest[$part]}" =~ ^sha256:[0-9a-f]{64}$ ]] || continue
+            # The first image line, as pin_camera reads it: a comment that names the
+            # image elsewhere in the file is not the pin.
+            pinned=$(grep -m1 -E "^\s*(- )?image:\s*${image[$part]//./\\.}[:@]" "clusters/${manifest[$part]}" \
+              | grep -oE "${image[$part]//./\\.}[:@][^[:space:]\"']+" || true)
+            [ -n "$pinned" ] || continue
+            new_inputs=$(inputs "${image[$part]}:${VERSION}@${digest[$part]}")
+            old_inputs=$(inputs "$pinned")
+            if [[ "$new_inputs" =~ ^[0-9a-f]{64}$ ]] && [ "$new_inputs" = "$old_inputs" ]; then
+              echo "camera-${part}: ${VERSION} runs the same inputs (${new_inputs}) as ${pinned}; keeping its pins"
+              same[$part]=$pinned
+              digest[$part]=""
+            else
+              echo "camera-${part}: inputs '${new_inputs}' for ${VERSION}, '${old_inputs}' for ${pinned}; moving its pins"
+            fi
+          done
           for part in recorder edge; do
             echo "${part}=${digest[$part]}" >> "$GITHUB_OUTPUT"
+            echo "${part}_same=${same[$part]}" >> "$GITHUB_OUTPUT"
           done
 
       # The sessions' shell sandbox (#5864), resolved like the slicer, but only
@@ -824,6 +856,8 @@ jobs:
           CORE_DIGEST: ${{ steps.core.outputs.digest }}
           CAMERA_RECORDER_DIGEST: ${{ steps.camera.outputs.recorder }}
           CAMERA_EDGE_DIGEST: ${{ steps.camera.outputs.edge }}
+          CAMERA_RECORDER_SAME: ${{ steps.camera.outputs.recorder_same }}
+          CAMERA_EDGE_SAME: ${{ steps.camera.outputs.edge_same }}
           SANDBOX_DIGEST: ${{ steps.sandbox.outputs.digest }}
           VERSION: ${{ inputs.version }}
           REVISION: ${{ inputs.revision }}
@@ -1048,10 +1082,12 @@ jobs:
           # pins and warns. A comment that names the API build the pins came
           # from ("the build of the API's sha-<7>") moves with them, so it stays
           # true. A file that does not name its image is skipped, as the resolve
-          # step skips it. Sets $camera to `none`, `pinned` or `kept`.
+          # step skips it. A part whose new image runs the same inputs as its
+          # pin (the resolve step's `<part>_same`, #8191) keeps its pins too,
+          # with a notice. Sets $camera to `none`, `pinned`, `kept` or `same`.
           camera=none
-          pin_camera() { # manifest image digest part
-            local target=$1 cam_image=$2 cam_digest=$3 part=$4 n
+          pin_camera() { # manifest image digest part [same-as]
+            local target=$1 cam_image=$2 cam_digest=$3 part=$4 cam_same=${5:-} n
             camera=none
             local cam_line="^(\s*)image: ${cam_image//./\\.}[:@][^[:space:]]*\$"
             # The resolve step's own test (#8015): a file that does not name the
@@ -1069,6 +1105,11 @@ jobs:
             n=$(grep -E "$cam_line" "$target" | sed -E 's/^\s*image: //' | sort -u | wc -l)
             [ "$n" -eq 1 ] \
               || { echo "::error file=$target::its two camera-${part} image lines differ; both containers must run one image"; exit 1; }
+            if [ -n "$cam_same" ]; then
+              echo "::notice file=$target::camera-${part} for ${VERSION} runs the same inputs as ${cam_same}; keeping the camera-${part} pins"
+              camera=same
+              return 0
+            fi
             if [[ ! "$cam_digest" =~ ^sha256:[0-9a-f]{64}$ ]]; then
               echo "::warning file=$target::no ${cam_image} image was published for ${VERSION}; keeping the camera-${part} pins as they are"
               camera=kept
@@ -1301,11 +1342,11 @@ jobs:
           camera_recorder=none camera_edge=none
           for part in recorder edge; do
             case "$part" in
-              recorder) f=$MANIFEST_CAMERA_RECORDER; img=$CAMERA_RECORDER_IMAGE; dg=${CAMERA_RECORDER_DIGEST:-} ;;
-              edge)     f=$MANIFEST_CAMERA_EDGE;     img=$CAMERA_EDGE_IMAGE;     dg=${CAMERA_EDGE_DIGEST:-} ;;
+              recorder) f=$MANIFEST_CAMERA_RECORDER; img=$CAMERA_RECORDER_IMAGE; dg=${CAMERA_RECORDER_DIGEST:-}; sm=${CAMERA_RECORDER_SAME:-} ;;
+              edge)     f=$MANIFEST_CAMERA_EDGE;     img=$CAMERA_EDGE_IMAGE;     dg=${CAMERA_EDGE_DIGEST:-};     sm=${CAMERA_EDGE_SAME:-} ;;
             esac
             if [ -f "$f" ]; then
-              pin_camera "$f" "$img" "$dg" "$part"
+              pin_camera "$f" "$img" "$dg" "$part" "$sm"
               printf -v "camera_${part}" '%s' "$camera"
               [ "$camera" != pinned ] || manifests+=("$f")
             else
@@ -1425,6 +1466,9 @@ jobs:
               if [ "$f" = "$MANIFEST_CAMERA_RELAY" ] && [[ "$ref" == "${CAMERA_RELAY_IMAGE}"[:@]* ]]; then ok=true; fi
               if [ "$camera_recorder" = kept ] && [ "$f" = "$MANIFEST_CAMERA_RECORDER" ] && [[ "$ref" == "${CAMERA_RECORDER_IMAGE}"[:@]* ]]; then ok=true; fi
               if [ "$camera_edge" = kept ] && [ "$f" = "$MANIFEST_CAMERA_EDGE" ] && [[ "$ref" == "${CAMERA_EDGE_IMAGE}"[:@]* ]]; then ok=true; fi
+              # A pin kept for the same inputs (#8191) passes as that one pin, in its file only.
+              if [ "$camera_recorder" = same ] && [ "$f" = "$MANIFEST_CAMERA_RECORDER" ] && [ "$ref" = "${CAMERA_RECORDER_SAME:-}" ]; then ok=true; fi
+              if [ "$camera_edge" = same ] && [ "$f" = "$MANIFEST_CAMERA_EDGE" ] && [ "$ref" = "${CAMERA_EDGE_SAME:-}" ]; then ok=true; fi
               if [ "$sandbox" = kept ] && [[ "$ref" == "${SANDBOX_IMAGE}"[:@]* ]]; then ok=true; fi
               if [ "$ok" != true ]; then
                 echo "::error file=$f::names ${ref}, which this deploy does not move to ${VERSION}; deploy.reusable.yml must pin this file"
@@ -1537,6 +1581,7 @@ jobs:
             case "$1" in
               pinned) echo "\`${2}:${VERSION}@${3}\`" ;;
               kept)   echo "kept at its current pins: no image was published for ${VERSION}" ;;
+              same)   echo "kept at its current pins: ${VERSION} runs the same inputs (#8191)" ;;
               *)      echo "not run in clusters yet (#7997)" ;;
             esac
           }

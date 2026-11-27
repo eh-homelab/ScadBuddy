@@ -23,6 +23,7 @@ CLAUDE.md of its own, which Claude Code reads when it works on files there:
 - `models/CLAUDE.md`: the template checks (`verify.sh`, the `models` job) and the bundled models.
 - `deploy/CLAUDE.md`: the Grafana dashboards and the browser pods' security profiles (`deploy/security/`).
 - `plugins/CLAUDE.md`: ScadBuddy's Claude plugin.
+- `app/CLAUDE.md`: the phone app (.NET MAUI, Android): its build, layout and rules.
 - `docs/architecture/` (and `docs/features/`): the system map: processes, data, Temporal workflows, frontend, agent, CI and deploy, one page per feature, and where the code has drifted from the specs.
 
 ## Database access (#5295)
@@ -64,8 +65,8 @@ and prod has no `scadbuddy_render`, `scadbuddy_print` or `scadbuddy_projects` ro
 database secret in those pods (measured 2026-11-14, after eh-homelab/clusters#3555,
 #3566 and #3578). The API still revokes those roles at every start where they exist; the
 agent revokes nothing since #6501. Template Python still runs in the render
-worker's pod, which holds no database secret now but holds its `crud.render` credential,
-the S3 keys and the Bambuddy render key. Do the rest in this order: #5297 (authenticate `/api/v1/internal/*`; never `enforce` on prod, the owner's decision
+worker's pod, which holds no database secret now but holds its `crud.render` credential
+and the S3 keys (no Bambuddy key since #7882). Do the rest in this order: #5297 (authenticate `/api/v1/internal/*`; never `enforce` on prod, the owner's decision
 of 2026-11-17), #5296 (untrusted code out of
 pods with a database secret: openscad and `openscad-lsp` still run in the API's), then eh-homelab/clusters#3182 (the network). The evidence and the zones
 are in [docs/security/trust-boundaries.md](docs/security/trust-boundaries.md).
@@ -182,7 +183,7 @@ The backend's migration files and its settings tables: `backend/CLAUDE.md`.
 - Fonts: there is no family "Lobster" in the image, only "Lobster Two"; a missing
   family silently falls back to DejaVu and changes the geometry.
   Fonts named only inside a library checkout are not mirrored to render workers on
-  the bambuddy store (`store/fonts.py` `wanted_families`); pass such a font as a
+  a remote store (`store/fonts.py` `wanted_families`); pass such a font as a
   parameter or name it in the template's own source.
 - Bambu Studio only reads `project_settings.config` if the 3MF claims
   `Application: BambuStudio-…`, and then segfaults unless five options are present
@@ -285,21 +286,23 @@ The backend's migration files and its settings tables: `backend/CLAUDE.md`.
   failure there, a "no Go changes" run a pass. The
   `freshness` job also regenerates the Go client when the API or the client changed and
   pushes it to a same-repo PR with the `RUNNER_APP` token.
-- Python and Rust lanes: `layout` reads the change's paths (`.github/scripts/changed-paths.sh`,
+- Python, Rust and Android lanes: `layout` reads the change's paths (`.github/scripts/changed-paths.sh`,
   shared with `go-select`) and `select-lanes.sh` (tested by `select-lanes.test.sh`) picks
   the lanes: `backend` (`lfs-fixtures`, `backend-pytest`), `agent_durable`, `rust`
   (`rust`, `slicer-image`) and `image` (the app image job, `profile-fetch-image` and
   `camera-image`: any
-  backend change, plus `frontend/` and the Go trees its live mount runs). A lane job skips on a change that
+  backend change, plus `frontend/` and the Go trees its live mount runs), and `android` (the
+  `android` job, the phone app's tests and build: `app/`). A lane job skips on a change that
   does not need it; `CI Summary` re-derives the lanes from its own checkout, so a skip
-  where the lane was needed is a failure. A push, the schedule, a dispatch, the
-  Dockerfile, `ci.yml` or the selector selects every lane. A new cross-tree read (a test
+  where the lane was needed is a failure. A push, the schedule, a dispatch,
+  `ci.yml` or the selector selects every lane; the Dockerfile and `.dockerignore` select every
+  lane but `android`, which selects on `app/`, `ci.yml` and the selector only. A new cross-tree read (a test
   that opens a file outside its tree) needs its path in that lane's pattern; a test that
   reads a doc also needs it in `select-lanes.sh` `read_by_tests` and in `ci.yml`'s push
   `paths`, or a docs-only change skips the test (#7792).
 - Docs-only changes: when every changed path is `docs/**/*.md`, or a `CLAUDE.md` or
   `AGENTS.md` in any directory but a `vendor/` tree (these select no lane), and none is
-  in `read_by_tests` (the design spec, which `agent/test/evalScoring.test.ts` reads), `select-lanes.sh` prints
+  in `read_by_tests` (the design spec, which `agent/test/evalScoring.test.ts` reads, and `docs/inventory-model/README.md`, which the Go proof tests read), `select-lanes.sh` prints
   `docs_only=true`, and the `lint`, `frontend*`, `agent`, `models`, `freshness`,
   `go-select` and `go` jobs skip too; `CI Summary` re-derives it. The `markdown` job
   (markdownlint-cli2 0.20.0 over those files outside `vendor/`, config

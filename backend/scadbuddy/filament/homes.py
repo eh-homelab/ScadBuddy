@@ -1,0 +1,190 @@
+"""The home return (#7167): a spool that came out of its tray, and had gone into the tray
+from a place that is a live dry box now, goes to no place and is asked
+(``home_asked_at``) which spool goes into that box (`filament/capture.py` `_put_back`).
+The person names the spool by a tag scan, a code or a pick by hand; the server never
+picks it, the unloaded spool included.
+
+`move_into` puts the named spool in the box. With ``if_occupied="replace"``, the box's own
+spool is archived first at 0 g and its grams are booked as non-print waste
+(`FilamentSpoolStore.archive_on`, ``cause="replaced"``). Locks, as `LocationStore.move_on`
+takes them, so a plain move and a replace never deadlock: the spools the move writes
+(the mover and the answered spool, in id order), then the box's place, then the box's
+own spool's open tags and then that spool's row. A tag bind takes a tag before its
+spools, so a bind on the same two spools at the same moment can deadlock with a replace;
+Postgres aborts one, and the move route answers it as a 409 `move_conflict` (try again;
+rulings P17, P20).
+
+A move may carry where the caller read the spool (``check_location``,
+``expected_location_id``; #7168): under the spool's row lock, before anything else, a
+spool that is in another place or is archived is `SpoolMovedError` (409 `move_stale`),
+and nothing is written."""
+
+from __future__ import annotations
+
+from uuid import UUID
+
+from psycopg import Connection
+from psycopg.rows import DictRow
+
+from scadbuddy.filament import models as m
+from scadbuddy.filament.dry_box import BoxFullError, occupant_on
+from scadbuddy.filament.locations import LocationStore
+from scadbuddy.filament.spools import FilamentDefaults, FilamentSpoolStore
+
+Conn = Connection[DictRow]
+
+
+class NotItsHomeError(ValueError):
+    """``answers`` names a spool whose home box is not the move's target."""
+
+    def __init__(self, spool_id: UUID) -> None:
+        super().__init__(f"the home of spool {spool_id} is not this place")
+        self.spool_id = spool_id
+
+
+class ExpectedOccupantRequiredError(ValueError):
+    """A ``replace`` that names no ``expected_occupant_id``: ScadBuddy never archives a
+    spool the caller did not name (#7167)."""
+
+    def __init__(self) -> None:
+        super().__init__("a replace must name the box's spool it expects in expected_occupant_id")
+
+
+class SpoolMovedError(ValueError):
+    """The spool is not where the caller read it (#7168): it is in another place, or it is
+    archived. ``location_id`` is where it is now (``None`` for no place)."""
+
+    def __init__(self, spool_id: UUID, location_id: UUID | None, archived: bool) -> None:
+        where = "archived" if archived else f"in {location_id or 'no place'}"
+        super().__init__(f"spool {spool_id} moved since it was read: it is {where} now")
+        self.spool_id = spool_id
+        self.location_id = location_id
+        self.archived = archived
+
+
+def _still_in(conn: Conn, spool_id: UUID, location_id: UUID) -> bool:
+    """Lock the box's own spool as `FilamentSpoolStore.archive_on` takes it (its open
+    tags, then its row), and say whether it is still unarchived in ``location_id``.
+    `occupant_on` read it with no lock on it, and a move out locks its target place, not
+    the box, so the spool may have left by now. In READ COMMITTED, a ``FOR UPDATE`` that
+    waited checks its ``WHERE`` again on the committed row."""
+    conn.execute(
+        "SELECT t.id FROM filament_tags t JOIN filament_tag_bindings b ON b.tag_id = t.id"
+        " WHERE b.spool_id = %s AND b.unbound_at IS NULL ORDER BY t.id FOR UPDATE OF t",
+        (spool_id,),
+    )
+    return (
+        conn.execute(
+            "SELECT 1 FROM filament_spools WHERE id = %s AND location_id = %s"
+            " AND archived_at IS NULL FOR UPDATE",
+            (spool_id, location_id),
+        ).fetchone()
+        is not None
+    )
+
+
+def move_into(
+    conn: Conn,
+    spool_id: UUID,
+    location_id: UUID | None,
+    *,
+    if_occupied: m.IfOccupied,
+    actor: str,
+    spools: FilamentSpoolStore,
+    defaults: FilamentDefaults,
+    answers: UUID | None = None,
+    expected_occupant_id: UUID | None = None,
+    expected_location_id: UUID | None = None,
+    check_location: bool = False,
+) -> m.SpoolEvent | None:
+    """Move ``spool_id``, the spool the person identified, to ``location_id`` on
+    ``conn``, in the caller's transaction. ``refuse`` is `LocationStore.move_on` (a full
+    box is `BoxFullError`). ``replace``, on a dry box that holds another spool, archives
+    that spool (reason ``other``, waste ``cause`` ``replaced``) and then moves; on an
+    empty box, a place that is no box, or a box that holds ``spool_id`` already, it is
+    the plain move. A box's spool that left before its lock is taken is not archived:
+    the move goes into the box, which is empty then (the box's place lock keeps any
+    other spool out). ``answers`` is the unloaded spool whose prompt this answers: its
+    ``home_asked_at`` clears, and it keeps no place unless it is ``spool_id``.
+    ``expected_occupant_id`` is the box's spool the person saw, which ``replace`` must
+    name (`ExpectedOccupantRequiredError`, before anything is read or locked): a box that
+    holds another spool once its lock is taken is `BoxFullError` naming that spool, and
+    nothing is archived. `LookupError` for no such spool, `NotItsHomeError` when
+    ``answers``'s home is not ``location_id``. With ``check_location``, a ``spool_id``
+    that is not in ``expected_location_id`` (``None``: in no place) or is archived once
+    its row lock is taken is `SpoolMovedError` (#7168), before ``answers``, the replace
+    and the move. ``defaults`` is the Filament settings, read before ``conn`` was taken
+    (`FilamentSpoolStore.archive_on`)."""
+    if if_occupied == "replace" and expected_occupant_id is None:
+        raise ExpectedOccupantRequiredError()
+    wanted = sorted({spool_id} if answers is None else {spool_id, answers})
+    found = {
+        row["id"]: row
+        for row in conn.execute(
+            "SELECT id, home_location_id, location_id, archived_at FROM filament_spools"
+            " WHERE id = ANY(%s) ORDER BY id FOR UPDATE",
+            (wanted,),
+        ).fetchall()
+    }
+    for one in wanted:
+        if one not in found:
+            raise LookupError(f"no spool {one}")
+    mover = found[spool_id]
+    if check_location and (
+        mover["location_id"] != expected_location_id or mover["archived_at"] is not None
+    ):
+        raise SpoolMovedError(spool_id, mover["location_id"], mover["archived_at"] is not None)
+    if answers is not None and (
+        location_id is None or found[answers]["home_location_id"] != location_id
+    ):
+        raise NotItsHomeError(answers)
+    if if_occupied == "replace" and location_id is not None:
+        held = occupant_on(conn, location_id, but=spool_id)
+        if held is not None and _still_in(conn, held, location_id):
+            if held != expected_occupant_id:
+                raise BoxFullError(held)
+            spools.archive_on(
+                conn,
+                held,
+                defaults=defaults,
+                reason="other",
+                final_reading_g=None,
+                final_grams=None,
+                actor=actor,
+                cause="replaced",
+            )
+    moved = LocationStore.move_on(conn, spool_id, location_id, actor=actor)
+    if answers is not None and answers != spool_id:
+        conn.execute("UPDATE filament_spools SET home_asked_at = NULL WHERE id = %s", (answers,))
+    return moved
+
+
+def move(
+    spools: FilamentSpoolStore,
+    spool_id: UUID,
+    location_id: UUID | None,
+    *,
+    if_occupied: m.IfOccupied,
+    actor: str,
+    answers: UUID | None = None,
+    expected_occupant_id: UUID | None = None,
+    expected_location_id: UUID | None = None,
+    check_location: bool = False,
+) -> m.SpoolEvent | None:
+    """`move_into` in a transaction of its own (`POST /filament/spools/{id}/move`). The
+    Filament settings are read first, before the transaction's connection is taken."""
+    defaults = spools.defaults()
+    with spools.pool.connection() as conn, conn.transaction():
+        return move_into(
+            conn,
+            spool_id,
+            location_id,
+            if_occupied=if_occupied,
+            actor=actor,
+            spools=spools,
+            defaults=defaults,
+            answers=answers,
+            expected_occupant_id=expected_occupant_id,
+            expected_location_id=expected_location_id,
+            check_location=check_location,
+        )

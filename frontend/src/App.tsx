@@ -2,7 +2,7 @@ import { Suspense, type ReactNode } from 'react'
 import { Navigate, Route, Routes } from 'react-router'
 import { Skeleton } from '@/components/ui/skeleton'
 import { AppShell } from './components/AppShell'
-import { inventoryPaths } from './lib/inventoryLinks'
+import { inventoryPaths, PARTS_KIND } from './lib/inventoryLinks'
 import { lazyRetry } from './lib/lazyRetry'
 import { ActivityPage } from './pages/ActivityPage'
 import { CataloguePage } from './pages/CataloguePage'
@@ -22,8 +22,10 @@ const CustomizePage = lazyRetry(async () => ({ default: (await import('./pages/C
 const EditPage = lazyRetry(async () => ({ default: (await import('./pages/EditPage')).EditPage }))
 const SpoolPage = lazyRetry(async () => ({ default: (await import('./pages/filament/SpoolPage')).SpoolPage }))
 const TypePage = lazyRetry(async () => ({ default: (await import('./pages/filament/TypePage')).TypePage }))
+const PresetPage = lazyRetry(async () => ({ default: (await import('./pages/filament/PresetPage')).PresetPage }))
 const LocationPage = lazyRetry(async () => ({ default: (await import('./pages/filament/LocationPage')).LocationPage }))
 const LabelsPage = lazyRetry(async () => ({ default: (await import('./pages/filament/LabelsPage')).LabelsPage }))
+const SwapPage = lazyRetry(async () => ({ default: (await import('./pages/filament/SwapPage')).SwapPage }))
 const ScanPage = lazyRetry(async () => ({ default: (await import('./pages/filament/ScanPage')).ScanPage }))
 const SupplierPage = lazyRetry(async () => ({ default: (await import('./pages/filament/SupplierPage')).SupplierPage }))
 const InvoicePage = lazyRetry(async () => ({ default: (await import('./pages/filament/InvoicePage')).InvoicePage }))
@@ -128,15 +130,19 @@ export function App() {
         <Route path="filament" element={<Navigate to={FILAMENT_HOME} replace />} />
         <Route path="filament/spools/:id" element={<SpoolPage />} />
         <Route path="filament/labels" element={<LabelsPage />} />
+        {/* The swap wizard (#7168): name a spool, then its new place. */}
+        <Route path="filament/swap" element={<SwapPage />} />
         {/* The hand-held Scan mode (#7273) moved to the top level; the old address redirects. */}
         <Route path="filament/scan" element={<Navigate to="/scan" replace />} />
         <Route path="filament/locations/:id" element={<LocationPage />} />
         <Route path="filament/types/:id" element={<TypePage />} />
+        <Route path="filament/presets/:id" element={<PresetPage />} />
         <Route path="filament/suppliers/:id" element={<SupplierPage />} />
         <Route path="filament/invoices/:id" element={<InvoicePage />} />
         {/* One literal path per available tab (`pages/filament/tabs.ts`): e2e/page-titles.spec.ts reads these. */}
         <Route path="filament/spools" element={<FilamentPage tab="spools" />} />
         <Route path="filament/types" element={<FilamentPage tab="types" />} />
+        <Route path="filament/presets" element={<FilamentPage tab="presets" />} />
         <Route path="filament/tags" element={<FilamentPage tab="tags" />} />
         <Route path="filament/suppliers" element={<FilamentPage tab="suppliers" />} />
         <Route path="filament/invoices" element={<FilamentPage tab="invoices" />} />
@@ -154,8 +160,8 @@ export function App() {
         <Route path="x/:code" element={<CodePage />} />
         <Route path="orders" element={<OrdersPage />} />
         <Route path="orders/profit" element={<ProfitPage />} />
-        {/* #7067, spec §6.11 — the parts page moved into the Inventory, on the Part kind. */}
-        <Route path="orders/parts" element={<Navigate to={inventoryPaths.kind('part')} replace />} />
+        {/* #7067, spec §6.11 — the parts page moved into the Inventory, on the parts' kind (`PARTS_KIND`). */}
+        <Route path="orders/parts" element={<Navigate to={inventoryPaths.kind(PARTS_KIND)} replace />} />
         <Route path="orders/:id" element={<OrderPage />} />
         <Route path="customers" element={<CustomersPage />} />
         <Route path="customers/:id" element={<CustomerPage />} />

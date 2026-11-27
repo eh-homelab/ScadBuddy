@@ -30,16 +30,18 @@ same schema, created by a file in `backend/scadbuddy/migrations/` or
 
 | Domain | Tables (creating migration) | Written by |
 |---|---|---|
-| Render and blobs | `render_jobs` (`20260927T2243Z_render_jobs`), `blob_refs` (`20260928T0900Z_render_jobs_projection`), `store_blobs`, `store_folders` (`20260928T1800Z_blob_store`), `assets` (`20260928T1631Z_assets`), `piece_geometry` (`20261013T0719Z_piece_geometry`), `model_previews`, `template_media`, `saved_presets`, `analyzer_decisions`, `library_leases`, `library_pin_holds`, `library_install_slots`, `transfer_puts` | the API; the render worker through `crud.render` routes (`scadbuddy/api/crud_render.py:89`) |
+| Render and blobs | `render_jobs` (`20260927T2243Z_render_jobs`), `blob_refs` (`20260928T0900Z_render_jobs_projection`), `store_blobs`, `store_folders` (`20260928T1800Z_blob_store`), `assets` (`20260928T1631Z_assets`), `piece_geometry` (`20261013T0719Z_piece_geometry`), `model_previews`, `template_media`, `saved_presets`, `analyzer_decisions`, `library_leases`, `library_pin_holds`, `library_install_slots`, `transfer_puts` | the API; the render worker through `crud.render` routes (`scadbuddy/api/crud_render.py:87`) |
 | Core | `events` (`20260928T0630Z_events`), `settings`, `model_print_choices`, `printer_bed_types` (`20260928T0840Z_settings`), `operations`, `activity` (`20261010T0533Z_activity`), `crud_requests`, `models_repo_head`, `templates`, `template_copy_runs` (`20261124T1824Z_templates`, #7317), `flows_repo_head`, `git_remote_pushes`, `outputs` (`20261124T0053Z_outputs_records`, #7255; `output_index` and `output_hold_slugs` were dropped by `20261125T1737Z_outputs_drop_output_index`, #7257), `output_files`, `output_derived` (`20261124T0245Z_output_bytes`, #7256), `output_claims` (`20261125T0758Z_outputs_cut_over`, #7257; `output_copy_runs`, `output_byte_runs` and `output_cutover` were dropped by `20261127T0259Z_outputs_drop_copy_state`, #7887; see [Saved outputs](#saved-outputs)) | the API |
 | Auth | `auth_sessions`, `auth_login_config`, `auth_break_glass_codes`, `service_credentials`, `personal_access_tokens`, `auth_delegation_codes`, `service_caller_suspensions` (2026-11-02 to 2026-11-06 files) | the API |
 | Printing | `print_runs`, `print_sends`, `print_links`, `output_bambuddy_uploads`, `output_bambuddy_slices`, `output_last_prints`, `print_preview_slices`, `print_slice_starts`, `print_batches`, `print_batch_items`, `print_attachments`, `print_outcomes`, `printers`, `printer_reports` (`20261018T1659Z_printers`), `rack_nozzle_*`, `library_folders`, `library_files` (`20261017T2250Z_print_library`), `native_slices`, `library_copies`, `print_imports`, `print_lan_imports`, `lan_print_archives` and more | the API; the print worker through `crud.print` routes (`scadbuddy/api/crud_print.py:316`) |
-| Spools and filament | `filament_*` (`20261114T1300Z`, `20261114T1301Z` and later), `filament_presets`, `filaments` (the overlay and native spool tables were dropped by `20261118T1235Z_drop_native_spool_tables`, and `held_local_presets` by `20261124T1308Z_drop_held_local_presets`, #7275) | the API; the print worker through CRUD |
+| Spools and filament | `filament_*` (`20261114T1300Z`, `20261114T1301Z` and later; `filament_unknown_trays`, #7143: the loaded trays no spool holds, `20261126T1936Z`), `filament_presets`, `filaments` (the overlay and native spool tables were dropped by `20261118T1235Z_drop_native_spool_tables`, and `held_local_presets` by `20261124T1308Z_drop_held_local_presets`, #7275) | the API; the print worker through CRUD |
 | Label sheets (#7216) | `label_sheets` (`20261125T1454Z_label_sheets`) | the API |
+| Code scans (#8155) | `code_scans` (`20261127T0424Z_code_scans`): each scan's photo (a `scan_image` blob, held in `blob_refs` as `code_scan`), its decoded codes, its source and its place | core (`tools/go/core/internal/scan`, area `scan`) |
 | Flows | `workflow_definitions`, `workflow_runs`, `workflow_run_decisions`, `workflow_flow_states`, `workflow_run_proposals`, `workflow_run_links`, `flow_grants`, `flow_grant_uses`, `flow_triggers`, `flow_trigger_grants`, `flow_trigger_fires`, `tasks` (`20261124T0449Z_tasks`, #7364) | the API; the projects worker through `crud.projects` (`scadbuddy/api/crud_projects.py:71-73`; the tasks: `scadbuddy/api/crud_tasks.py`); the agent's run-grant check reads `flow_grants` and `flow_grant_uses` through `crud.agent` area `gate` (`agent/src/gate/crudStore.ts:13`) |
 | Orders, payments, storefront | `customers*`, `orders`, `order_*` (`20261020T0446Z_orders` and later; `order_item_parts` and `model_part_rules` name `items` since `20261124T0918Z_parts_to_items`), `entity_attachments` (an order's files; `20261024T2050Z_order_attachments`, renamed by `20261122T0426Z_entities`), `parts_retired` and `part_stock_moves_retired` (the old `parts` and `part_stock_moves`, renamed by `20261124T0918Z_parts_to_items`; a follow-up drops them after a prod check, Ruling 6 of #7067), `payment_*`, `bank_*`, `printer_cost_profiles`, `storefront_*` (2026-11-07 to 2026-11-13 files) | the API; the storefront edge through `crud.storefront` (`scadbuddy/api/crud_storefront.py:208`); the intake worker through `crud.intake` (`scadbuddy/api/crud_intake.py:34`) |
 | Entities (files, links and properties on any row, #6950, #7026) | `entities`, `entity_links` (`20261122T0426Z_entities`), `entity_properties` (one row per entity and key) and `entity_property_schemas` (one row per kind, seeded for `spool_type` and `spool`; `20261123T0017Z_entity_properties`), `entity_attachments` (the old `order_attachments`, renamed there; an order's files are its rows with an `order_id`) | the API |
 | Inventory (#7067, spec 2026-11-21 §6.4-6.6) | `item_kinds`, `items`, `supplier_offers`, `offer_price_points`, `stock_lots`, `stock_units`, `stock_moves` (`20261124T0323Z_inventory_core`: also seeds the built-in kinds), and `part_item_map` (`20261124T0918Z_parts_to_items`: each old part id and its item id). `20261124T0918Z_parts_to_items` locks the four part tables `IN EXCLUSIVE MODE`, makes each `parts` row an item of kind `hardware` with an opening lot, converts `part_stock_moves` to `stock_moves`, makes an offer and a price point of each part's supplier and pack price, deletes the `part:` rows of `order_cost_entries` that the moves replace, and renames the old tables `*_retired`. The tables add foreign keys to `filament_suppliers`, `filament_locations`, `filament_invoice_lines` and `printers`, and change no filament table | the API |
+| Devices (#8244) | `devices`, `device_pairings`, `device_tokens`, `device_calls`, `device_reads` (`20261127T0803Z_devices`): paired phones, their one-time codes and tokens (only hashes), the calls of their methods, and what each call read (a `tag_dump` or `scan_image` blob, held in `blob_refs` as `device_call`). A call's events are `device.*` events on the bus | core (`tools/go/core/internal/devices`, area `devices`) |
 | Agent (`ai_*`) | `ai_credentials`, `ai_settings` (`20260927T2349Z_credentials_settings`), `ai_sessions`, `ai_session_entries`, `ai_session_events` (`20260928T0107Z_sessions`), `ai_approvals`, `ai_mcp_tokens`, `ai_plugins`, `ai_audit`, `ai_payload_keys`, `ai_forgotten_subjects`, `ai_session_files`, `ai_flow_blobs`, `ai_push_*`, `ai_notify_channels`, the hosted plugins and feeds (`ai_hosted_plugins`, `ai_hosted_plugin_files`, `ai_hosted_plugin_versions`, `ai_plugin_feeds`, `ai_plugin_feed_packages`) and more | the API, which serves the agent every area through `crud.agent` routes (`scadbuddy/api/crud_agent*.py`, areas listed at `scadbuddy/api/crud_areas.py:202-248`, #5299); the agent's own SQL to these tables remains only as the fallback while an area is unlisted |
 
 ### The two migration ledgers
@@ -72,7 +74,7 @@ The callers are agent, print, projects, render, storefront, intake and profile-f
 (`scadbuddy/auth/service_auth.py:25-27`); their scopes are in
 `scadbuddy/auth/service_credentials.py:100-107`. `GET …/<caller>/areas` lists what each
 caller may use (`scadbuddy/api/crud_areas.py:170-236`); a worker waits for its areas
-before it polls (for example `scadbuddy/worker.py:1106`). Retries are deduplicated by the
+before it polls (for example `scadbuddy/worker.py:1100`). Retries are deduplicated by the
 `crud_requests` ledger (`scadbuddy/crud/idempotency.py`).
 
 ## Blob store
@@ -91,8 +93,8 @@ The stored setting `store_backend` (seeded from the environment, default `local`
 
 | Backend | Where bytes go | Code |
 |---|---|---|
-| `local` | files on the API's data volume; works only with the render worker in-process (a separate render worker refuses it, `scadbuddy/worker.py:222-257`) | `scadbuddy/store/local.py:22-35` |
-| `bambuddy` | Bambuddy's library, one folder per template with a `Work/` folder, recorded in `store_folders`. The API does not start on it since #7257: it holds no saved output ([Saved outputs](#saved-outputs)) | `scadbuddy/store/bambuddy.py:3-15` |
+| `local` | files on the API's data volume; works only with the render worker in-process (a separate render worker refuses it, `scadbuddy/worker.py:222-256`) | `scadbuddy/store/local.py:22-35` |
+| `bambuddy` | Bambuddy's library, one folder per template with a `Work/` folder, recorded in `store_folders`. The API does not start on it since #7257: it holds no saved output ([Saved outputs](#saved-outputs)). It stays only as a store migration's source, on the API (#7882) | `scadbuddy/store/bambuddy.py:10-21` |
 | `s3` | an S3-compatible bucket, object key `<prefix>/<kind>/<sha256>` | `scadbuddy/store/s3.py:4-5`, `:47-48` |
 
 ### Keys and content addressing
@@ -100,13 +102,13 @@ The stored setting `store_backend` (seeded from the environment, default `local`
 `ContentStore` (`scadbuddy/store/content.py`) maps a logical key to a `BlobRef` (sha256,
 kind, backend, backend id, size; `scadbuddy/store/content_models.py` `BlobRef`), indexed in
 `store_blobs`. The kinds are `piece`, `snapshot`, `asset`, `font`, `slice`, `library`,
-`workspace`, `media`, `output` and `tag_dump` (`content_models.py` `BlobKind`). A blob stays alive while a `blob_refs`
+`workspace`, `media`, `output`, `tag_dump` and `scan_image` (`content_models.py` `BlobKind`). A blob stays alive while a `blob_refs`
 row holds it (`scadbuddy/store/refs.py:22-30`); unreferenced blobs of the swept kinds are
 deleted after a grace period.
 
 | Logical key | What | Code |
 |---|---|---|
-| 64-hex, `act-<40hex>`, `output-<32hex>-<n>` | a render job's pieces | `scadbuddy/api/crud_render.py:116` |
+| 64-hex, `act-<40hex>`, `output-<32hex>-<n>` | a render job's pieces | `scadbuddy/api/crud_render.py:114` |
 | `output-<id>-model`, `-preview`, `-thumbnail`, `-file-<hash>` | a saved output's bytes: `model.3mf`, `preview.glb`, `thumbnail.png`, and a `files/` entry, keyed by the first 32 hex digits of its name's sha256 (a save uploads each with no index row first, and the key is indexed in the row's transaction, `OutputBytes.put_folder`) | `scadbuddy/library/output_rows.py` `output_blob_key`, `output_file_key` |
 | `output-<id>-thumbnail-<sha256>`, `output-<id>-plate_cover-<sha256>` | a thumbnail upload before its key names it (held by nothing); the plate cover read once out of the output's 3MF | `scadbuddy/library/output_rows.py` `staged_thumbnail_key`, `plate_cover_key` |
 | `src-<slug>-<revision>` | a template's source snapshot | `scadbuddy/store/snapshots.py:65-66` |
@@ -119,6 +121,7 @@ deleted after a grace period.
 | `customer-preview-<sha256>`, `customer-file-<sha256>`, `listing-media-<sha256>` | storefront uploads and listing media | `scadbuddy/orders/storefront/intake.py:74`, `scadbuddy/orders/storefront/order_page.py:163`, `scadbuddy/orders/storefront/listings.py:963` |
 | `workspace-<sha256>` | an agent workspace file | `scadbuddy/api/internal_workspace.py:43` |
 | `tag_dump-<sha256>` | a Bambu tag's raw dump (#7905), uploaded by a service through core's shared CRUD area `blobs` (#7958); swept unless its caller holds it | `tools/go/core/internal/blobstore` `IndexKey` |
+| `scan_image-<sha256>` | a code scan's photo (#8155), a JPEG, PNG or WebP that core takes from the page and stores with `Blobs.Put`; held by its `code_scans` row (`code_scan`, the scan's id) until the scan is deleted, then swept | `tools/go/core/internal/scan` |
 
 Processes without store credentials (the slicer) get short-lived transfer URLs instead:
 a presigned S3 GET, or the API's `/api/v1/internal/blobs/{key}` with an HMAC transfer
@@ -420,9 +423,9 @@ copy (#7255) ran at each API start and in the housekeeping sweep
 `housekeeping_copy_outputs`; each run was a row of `output_copy_runs`. The byte copy
 (#7256) ran after it, and in the sweep `housekeeping_copy_output_bytes`; each run was a row
 of `output_byte_runs`. A housekeeping run with `OUTPUTS_CUT_OVER_PATCH` schedules neither.
-Both activities stay registered as no-ops that log `CUT_OVER_NOTHING_TO_COPY`, so a run
-recorded before that patch replays (`scadbuddy/workflows/housekeeping.py`). A follow-up
-(#7886) removes them with `workflow.deprecate_patch`.
+#7886 removed both sweeps, their activities and their patches, and retired
+`OUTPUTS_CUT_OVER_PATCH` with `workflow.deprecate_patch`
+(`scadbuddy/workflows/housekeeping.py`).
 
 #7887 (plan D11) removed the copies' state in two releases: first
 `GET /api/v1/outputs/copy-status`, which answered their last runs and the cut-over

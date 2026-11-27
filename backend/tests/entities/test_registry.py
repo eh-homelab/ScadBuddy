@@ -17,6 +17,7 @@ from scadbuddy.entities.registry import (
 )
 from scadbuddy.render.pg_store import MIGRATIONS, migrate
 from tests.conftest import PgPool
+from tests.support.printers import MERGED_BY
 
 pytestmark = pytest.mark.requires_postgres
 
@@ -172,7 +173,7 @@ def test_a_repoint_onto_a_new_ref_keeps_each_files_entity(pg_pool: PgPool) -> No
     the same entity, now named `kept`."""
     entity = _file_on(pg_pool, "f1", "p1")
     with pg_pool.connection() as conn:
-        repoint_entity(conn, "printer", "p1", "p2")
+        repoint_entity(conn, "printer", "p1", "p2", by=MERGED_BY)
     assert _files(pg_pool) == [("f1", "printer:p2", entity, "p2")]
 
 
@@ -181,7 +182,7 @@ def test_a_repoint_onto_an_existing_ref_moves_each_file_to_its_entity(pg_pool: P
     _file_on(pg_pool, "f1", "p1")
     kept = _file_on(pg_pool, "f2", "p2")
     with pg_pool.connection() as conn:
-        repoint_entity(conn, "printer", "p1", "p2")
+        repoint_entity(conn, "printer", "p1", "p2", by=MERGED_BY)
     assert _files(pg_pool) == [
         ("f1", "printer:p2", kept, "p2"),
         ("f2", "printer:p2", kept, "p2"),

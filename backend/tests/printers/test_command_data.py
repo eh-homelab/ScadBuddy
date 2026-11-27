@@ -13,6 +13,7 @@ from scadbuddy.printers.command_data import PrinterCommandData
 from scadbuddy.printers.models import PrinterCreate
 from scadbuddy.printers.store import PrinterStore
 from tests.conftest import PgPool
+from tests.support.printers import MERGED_BY
 
 pytestmark = pytest.mark.requires_postgres
 
@@ -83,7 +84,7 @@ def test_a_printer_delete_takes_its_notes_and_presets(
 def test_a_merge_keeps_the_kept_printers_note_on_a_clash(
     printers: PrinterStore, pg_pool: PgPool
 ) -> None:
-    synthetic = printers.ensure_bambuddy(7, serial=None, name="H2C", model="H2C")
+    synthetic = printers.ensure_bambuddy(7, serial=None, name="H2C", model="H2C", by=MERGED_BY)
     gone = uuid.UUID(synthetic.id)
     kept = _printer(printers)
     data = PrinterCommandData(pg_pool)
@@ -94,7 +95,7 @@ def test_a_merge_keeps_the_kept_printers_note_on_a_clash(
     data.set_slot_preset(kept, 0, 1, _body("KEPT", "kept"))
     data.set_slot_preset(gone, 0, 2, _body("MOVED", "moved"))
 
-    printers.ensure_bambuddy(7, serial=SERIAL, name="H2C", model="H2C")
+    printers.ensure_bambuddy(7, serial=SERIAL, name="H2C", model="H2C", by=MERGED_BY)
 
     assert data.notes(kept) == {"clash": "kept", "only": "moved"}
     presets = data.slot_presets(kept)

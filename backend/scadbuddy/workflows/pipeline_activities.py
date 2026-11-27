@@ -107,7 +107,7 @@ def pack_layout(req: PackRequest) -> Layout:
 class PipelineActivities:
     def __init__(self, deps: WorkerDeps) -> None:
         self.deps = deps
-        #: `prepare`'s snapshot step, shared: a worker on the bambuddy store has no
+        #: `prepare`'s snapshot step, shared: a worker on a remote store has no
         #: source of its own until it materializes the revision.
         self._render = RenderActivities(deps)
         #: One run per `act-` key at a time on this worker: an identical call waits,
@@ -139,7 +139,7 @@ class PipelineActivities:
         workflow runs it in its sandbox, where what raises is a nondeterministic call
         (`os.getpid()`, `random.random()`, `datetime.now()`, `open()`), not an
         import (spec §3.6)."""
-        # Heartbeated: on the bambuddy store this downloads the revision's snapshot.
+        # Heartbeated: on a remote store this downloads the revision's snapshot.
         directory = await _heartbeating(asyncio.create_task(self.model_dir(req.slug, req.revision)))
         try:
             raw = json.loads(await asyncio.to_thread((directory / "model.json").read_text, "utf-8"))
@@ -375,7 +375,7 @@ class PipelineActivities:
 async def _fetched(blobs: BlobStore, key: str) -> None:
     """A blob passed to a template activity must be in the store: its absence is a
     store problem, not the template's line that would then fail to read it. Heartbeated:
-    on the bambuddy store this is a download, which may outlast `HEARTBEAT`."""
+    on a remote store this is a download, which may outlast `HEARTBEAT`."""
     if not await _heartbeating(asyncio.create_task(blobs.fetch(key))):
         raise ApplicationError(
             f"blob {key} is not in the store", type="TemplateActivityError", non_retryable=True

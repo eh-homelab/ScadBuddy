@@ -36,6 +36,11 @@ a `main.go`, except core (`build-go-image.yml:46`, `:133`), as
 `tools/go/core`: `build-image.yml`'s `core` job publishes `scadbuddy-core` with every
 build, and the deploy pins it (#7667).
 
+The phone app's APK is published by `build-app.yml` (#8376) on a push to main that changes
+`app/`: a `FROM scratch` image (`app/Dockerfile`) with only `/scadbuddy.apk` and its SHA-256,
+as `ghcr.io/eh-homelab/scadbuddy-app` (`sha-<7>`, `latest`). Nothing deploys it
+([`app/CLAUDE.md`](../../app/CLAUDE.md)).
+
 ## How an image reaches prod
 
 ```mermaid
@@ -85,7 +90,14 @@ sequenceDiagram
    lines (MediaMTX and the controller run one image), equal to each other. Both lines move,
    and so does the comment that names the API build ("the build of the API's sha-<7>"). The
    `camera` job is continue-on-error, so a build with no image for a part keeps that file's
-   pins and warns. The deploy never moves the camera relay: a relay restart is a gap of
+   pins and warns. Each camera image carries the label `io.scadbuddy.camera.inputs`, a hash
+   of what it runs (`.github/scripts/camera-inputs.sh`: the `scadbuddy` modules the three
+   processes import, `pyproject.toml` and `uv.lock`, the part's MediaMTX config and the
+   Dockerfile's camera stages). The image copies all of `backend/scadbuddy` and carries
+   build labels, so its digest moves with every build. When the new image's hash equals the
+   pinned image's, the deploy keeps that file's pins with a notice, and no recorder or edge
+   pod restarts. Before that, each of the 21 deploys from 22:00 to 06:20 UTC on 2026-11-26/27
+   restarted them (measured on prod, #8191). The deploy never moves the camera relay: a relay restart is a gap of
    about 10 to 30 s in every printer's recording, so its pin in `camera-relay.yaml` moves by
    hand, in a reviewed clusters PR, when its code or MediaMTX changes (camera spec §6.1).
    The final check accepts any relay pin in that file and in no other. Where clusters keeps a
@@ -126,6 +138,7 @@ Summary**, which needs every job except `lfs-fixtures` and `dispatch-review`
 | models | `models` (`:1797`) | `verify-models.sh` over the changed templates on the `base` stage | [`models/CLAUDE.md`](../../models/CLAUDE.md) |
 | go | `go-select` (`:1941`), `go` (`:1964`, calls `go-module-ci.yml`) | gofmt, vet, build, `test -race`, vendor drift, CLI images | [`tools/go/CLAUDE.md`](../../tools/go/CLAUDE.md) |
 | rust | `rust` (`:1976`), `slicer-image` (`:2053`) | the Rust workspace and the `slicer` target | [`workers/rust/CLAUDE.md`](../../workers/rust/CLAUDE.md) |
+| android | `android` (`:2244`) | the phone app's tests (`app/ScadBuddy.Tests`) and its .NET MAUI Android build (`app/`), JDK 17; selected by `app/`, `ci.yml` and the selector only | [`app/CLAUDE.md`](../../app/CLAUDE.md) |
 | profile-fetch | `profile-fetch-image` (`:2112`) | the profile-fetch site tests in the `test` stage | [`backend/CLAUDE.md`](../../backend/CLAUDE.md) |
 | image | `camera-image` (after `67d7ff6`, #7328) | builds the `camera-relay`, `camera-recorder` and `camera-edge` targets, checks MediaMTX, `curl`, `TZ`, the refusals and the relay's and the edge's read users | [`docs/features/printer-cameras.md`](../features/printer-cameras.md) |
 | freshness | `freshness` (`:2255`), `go-client` (`:2642`) | the generated API files ([data.md](data.md#generated-api-files)) and the Go client | root `CLAUDE.md` "Generated API files" |

@@ -19,6 +19,7 @@ from scadbuddy.filament.component import FILAMENT
 from scadbuddy.filament.metrics_models import Snapshot
 from scadbuddy.library.assets import AssetStore
 from tests.api.conftest import wait_for_job
+from tests.conftest import PgPool
 from tests.support.operations import press
 
 
@@ -173,6 +174,7 @@ class _Snapshots:
             days_of_stock={},
             low_stock={},
             reorder={},
+            non_print_waste={},
             currency="USD",
         )
 
@@ -224,3 +226,29 @@ def test_snapshot_is_cached_for_a_minute(
     clock.at += 2
     client.get("/metrics")
     assert snapshots.calls == 2
+
+
+@pytest.mark.requires_postgres
+def test_subscriber_lag_is_exported(pg_pool: PgPool) -> None:
+    """#6949 (design §4.8): how far each event subscriber's cursor is behind the log."""
+    metrics = Metrics()
+    with pg_pool.connection() as conn:
+        conn.execute(
+            "UPDATE event_subscribers SET seq = (SELECT coalesce(max(seq), 0) FROM events)"
+            " WHERE name = 'history'"
+        )
+        for n in range(3):
+            conn.execute(
+                "INSERT INTO events (event_id, kind, at, logged_at, payload)"
+                " VALUES (%s, 'job.progress', now(), now() - interval '5 seconds', '{}')",
+                (f"lag{n}",),
+            )
+    state = cast(
+        AppState, SimpleNamespace(projection=SimpleNamespace(pool=pg_pool), metrics=metrics)
+    )
+    api_metrics.refresh_subscriber_metrics(state)
+    registry = metrics.registry
+    labels = {"subscriber": "history"}
+    assert registry.get_sample_value("scadbuddy_event_subscriber_lag_events", labels) == 3
+    lag = registry.get_sample_value("scadbuddy_event_subscriber_lag_seconds", labels)
+    assert lag is not None and lag >= 5

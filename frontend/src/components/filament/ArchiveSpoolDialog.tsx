@@ -160,6 +160,8 @@ function ArchiveForm({
                   : ''}
             </p>
           )}
+          {/* #7167: the filament left goes as waste, apart from print waste; none for respooled or 0 g. */}
+          {closing?.non_print_waste_g != null && closing.non_print_waste_g > 0 && <p>{grams(closing.non_print_waste_g)} will be booked as non-print waste.</p>}
           {preview?.notices.map((notice) => (
             <p key={notice.code} role="status" className="text-warn">
               {notice.text}

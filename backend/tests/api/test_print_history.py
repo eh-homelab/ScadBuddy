@@ -1333,6 +1333,65 @@ def test_the_list_links_a_native_lan_print_by_its_sliced_file_s_hash(
     assert client.get("/api/v1/prints/40").status_code == 200
 
 
+@respx.mock
+def test_a_scan_with_two_archives_of_one_start_records_neither(
+    client: TestClient, model: str, pg_conninfo: str
+) -> None:
+    """#8316: a failed LAN print printed again from the printer's own storage makes a
+    second archive of the same file. The file name cannot tell which is the start's
+    print, so the scan records neither, as the orders read does (#8306)."""
+    configure(client)
+    output_id = make_output(client, model)
+    native_slice(client, pg_conninfo, output_id)
+    recent_lan_run(client, PrintSubject.output(output_id), model)
+    mock_archive(40, filename="scadbuddy-5661abcd-p1.3mf")
+    mock_archive(41, filename="scadbuddy-5661abcd-p1.3mf")
+    mock_bambuddy_lists(
+        {"id": 40, "printer_id": 1, "status": "failed", "content_hash": NATIVE_HASH},
+        {"id": 41, "printer_id": 1, "status": "completed", "content_hash": NATIVE_HASH},
+    )
+
+    assert client.get("/api/v1/prints").status_code == 200
+
+    assert asyncio.run(state(client).print_links.lan_start(40)) is None
+    assert asyncio.run(state(client).print_links.lan_start(41)) is None
+
+
+@respx.mock
+def test_a_later_scan_leaves_a_start_its_first_archive(
+    client: TestClient, model: str, pg_conninfo: str
+) -> None:
+    """#8329: archive 40 became plate 1's start in an earlier read. A later scan, made for
+    plate 2's start, finds 41 too, a reprint of plate 1's file. The scan alone would give
+    41 to plate 1; `record_lan_start_in` refuses it, so plate 1 keeps 40."""
+    configure(client)
+    output_id = make_output(client, model)
+    native_slice(client, pg_conninfo, output_id)
+    lan_run(
+        client,
+        LAN_RUN,
+        PrintSubject.output(output_id),
+        model,
+        subtask_names=("scadbuddy-5661abcd-p1", "scadbuddy-5661abcd-p2"),
+        started_at=datetime.now(UTC),
+    )
+    first = LanArchiveLink(
+        archive_id=40, run_id=LAN_RUN, subtask_name="scadbuddy-5661abcd-p1", plate_id=1
+    )
+    assert asyncio.run(state(client).print_links.record_lan_start(first))
+    mock_archive(40, filename="scadbuddy-5661abcd-p1.3mf")
+    mock_archive(41, filename="scadbuddy-5661abcd-p1.3mf")
+    mock_bambuddy_lists(
+        {"id": 40, "printer_id": 1, "status": "failed", "content_hash": NATIVE_HASH},
+        {"id": 41, "printer_id": 1, "status": "completed", "content_hash": NATIVE_HASH},
+    )
+
+    assert client.get("/api/v1/prints").status_code == 200
+
+    assert asyncio.run(state(client).print_links.lan_start(40)) == first
+    assert asyncio.run(state(client).print_links.lan_start(41)) is None
+
+
 def test_a_named_lan_start_is_not_looked_for_again(client: TestClient, model: str) -> None:
     """#5724: once an archive names it, a start is not looked for again."""
     configure(client)

@@ -21,7 +21,7 @@ from contextlib import AsyncExitStack, asynccontextmanager, contextmanager, supp
 from datetime import UTC, datetime, timedelta
 from functools import partial
 from types import FrameType
-from typing import Any, Final
+from typing import Any
 
 from fastapi import APIRouter, Depends, FastAPI
 from fastapi.routing import iter_route_contexts
@@ -111,7 +111,7 @@ from scadbuddy.core.paths import BUILTIN_DIR, MODEL_META_NAME
 from scadbuddy.core.pg_events import PgNotifyEventBus
 from scadbuddy.core.problems import ApiError, install_problem_handlers
 from scadbuddy.core.settings import Settings
-from scadbuddy.core.tracing import configure_tracing
+from scadbuddy.core.tracing import EXCLUDED_URLS, configure_tracing
 from scadbuddy.crud import idempotency
 from scadbuddy.crud import listener as crud_listener
 from scadbuddy.entities.component import ENTITIES
@@ -128,6 +128,8 @@ from scadbuddy.filament.print_uses import PoolPrintUses
 from scadbuddy.filament.sb_presets import PresetImport, import_from_bambuddy
 from scadbuddy.filament.sensor_notify import SensorNotifyActivities
 from scadbuddy.filament.sensors import PoolSensorNotifications
+from scadbuddy.filament.unknown_resolve import resolve_unknown_tray_activity
+from scadbuddy.filament.unknown_tray_rows import PoolUnknownTrays
 from scadbuddy.flow_triggers.component import FLOW_TRIGGERS
 from scadbuddy.flow_triggers.events import listen_for_triggers
 from scadbuddy.flow_triggers.fire import TriggerFires, reconcile_trigger_schedules
@@ -140,7 +142,6 @@ from scadbuddy.library.backfill import attach_backfills, attach_job_backfills, f
 from scadbuddy.library.history import GitError
 from scadbuddy.library.library_seed import seed_libraries, seeded_checkouts
 from scadbuddy.library.output_bytes import OutputBytes, usable
-from scadbuddy.library.output_rows import CUT_OVER_NOTHING_TO_COPY
 from scadbuddy.library.outputs import (
     START_NEEDS_A_BLOB_STORE,
     OutputStoreUnusableError,
@@ -185,6 +186,7 @@ from scadbuddy.printers.bambuddy_sync import (
 from scadbuddy.printers.component import PRINTERS
 from scadbuddy.printers.native import LanCommands
 from scadbuddy.printers.print_activities import LanActivities, LanDeps
+from scadbuddy.printers.store import BAMBUDDY_ACTOR
 from scadbuddy.printers.watch import WatchActivities
 from scadbuddy.rack.component import RACK_USAGE
 from scadbuddy.render.agent_migrations import migrate_agent
@@ -258,8 +260,6 @@ from scadbuddy.workflows.housekeeping import (
     NATIVE_COPIES_SWEEP,
     NATIVE_COPIES_TIMEOUT,
     NATIVE_SLICES_SWEEP,
-    OUTPUT_BYTES_SWEEP,
-    OUTPUT_COPY_SWEEP,
     PAYMENT_CAPTURES_SWEEP,
     PAYMENT_CLOSES_SWEEP,
     PREVIEWS_SWEEP,
@@ -299,13 +299,6 @@ from scadbuddy.workflows.staged_file import VersionedStagedFile
 from scadbuddy.workflows.store_migration import VersionedStoreMigration
 
 API_PREFIX = "/api/v1"
-
-#: Never traced (spec §6): set in code so no deployment can drop it.
-#: Regexes searched against the full ``scheme://host/path`` URL, so each is anchored on
-#: both ends: an unanchored ``/metrics`` would also drop ``/api/v1/models/metrics-x``.
-EXCLUDED_URLS: Final = ",".join(
-    f"^[a-z]+://[^/]+{path}$" for path in ("/healthz", "/metrics", "/telemetry/v1/traces")
-)
 
 #: How long a batch print nobody touches is kept (#2718 review): long past any print
 #: it started, which Bambuddy's queue and the print runs keep on their own.
@@ -947,17 +940,6 @@ def _housekeeping_activities(state: AppState) -> list[Callable[..., Any]]:
         # mid-pass is noticed within the heartbeat timeout (`_heartbeating`).
         await _heartbeating(_reap_output_holds_logged(state))
 
-    @activity.defn(name=OUTPUT_COPY_SWEEP)
-    async def copy_outputs_to_rows() -> None:
-        # #7257: retired; registered for one release, for the runs recorded before
-        # `OUTPUTS_CUT_OVER_PATCH` that still schedule it.
-        logger.info(CUT_OVER_NOTHING_TO_COPY)
-
-    @activity.defn(name=OUTPUT_BYTES_SWEEP)
-    async def copy_output_bytes_to_blobs() -> None:
-        # #7257: retired, as `copy_outputs_to_rows`.
-        logger.info(CUT_OVER_NOTHING_TO_COPY)
-
     @activity.defn(name=FLOWS_SWEEP)
     async def sweep_flow_runs() -> None:
         await _heartbeating(_sweep_flow_runs_logged(state))
@@ -1086,8 +1068,6 @@ def _housekeeping_activities(state: AppState) -> list[Callable[..., Any]]:
         sweep_claims,
         sweep_backfills,
         reap_output_holds,
-        copy_outputs_to_rows,
-        copy_output_bytes_to_blobs,
         sweep_flow_runs,
         sweep_preview_slices,
         sweep_lost_slice_starts,
@@ -1179,7 +1159,7 @@ async def _sync_bambuddy_printers_logged(state: AppState) -> None:
 
     async def sweep(client: BambuddyClient) -> None:
         try:
-            result = await sync_printers(registry, client)
+            result = await sync_printers(registry, client, by=BAMBUDDY_ACTOR)
         except Exception:
             logger.exception("could not sync the printers from Bambuddy")
             raise
@@ -2139,6 +2119,7 @@ async def _run_print_worker(state: AppState, stop: asyncio.Event) -> None:
         printers=state.components.get(PRINTERS).store,
         reports=state.components.get(PRINTERS).reports,
         sb_spools=PoolSbSpoolReads.over(state.settings_store.pool),
+        unknown_trays=PoolUnknownTrays(state.settings_store.pool),
     )
     ops = state.components.get(OPERATIONS)
     registry = state.components.get(PRINTERS)
@@ -2170,6 +2151,7 @@ async def _run_print_worker(state: AppState, stop: asyncio.Event) -> None:
         uses=PoolPrintUses(state.settings_store.pool),
         # A run queued on a busy printer says its place (#6871).
         runs=state.print_runs.store,
+        unknown_trays=PoolUnknownTrays(state.settings_store.pool),
     )
     auto_imports = state.components.get(AUTO_IMPORTS)
     activities: list[Callable[..., Any]] = [
@@ -2413,6 +2395,9 @@ async def _run_library_worker(state: AppState, stop: asyncio.Event) -> None:
             LanCommands(lambda: client, settings.temporal_task_queue_bambuddy),
             lambda: state.components.get(SLICING).profiles,
         ),
+        # The activity that links an unknown AMS tray to a spool (#7143, G5). The Go route that
+        # starts it is not built yet.
+        *_unknown_tray_activities(state),
         *operation_activities(ops.store, state.settings_store, _kinds_on(ops, "library")),
         *trigger_activities,
         migrate_activity(lambda: state.settings_store.pool, state.settings),
@@ -2456,6 +2441,15 @@ async def _run_library_worker(state: AppState, stop: asyncio.Event) -> None:
         schedules.cancel()
         boot_nudge.cancel()
         await stop_triggers()
+
+
+def _unknown_tray_activities(state: AppState) -> list[Callable[..., Any]]:
+    """The resolve of an unknown tray (#7143, G5): the API alone holds the database secret."""
+    return [
+        resolve_unknown_tray_activity(
+            lambda: state.components.get(FILAMENT), lambda: state.settings_store.pool
+        )
+    ]
 
 
 def _flow_triggers(

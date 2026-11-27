@@ -130,7 +130,9 @@ No in-memory implementations in the library **(call)**; its tests use small fake
 
 - **Agent:** key `session_id`, a canonical UUID (Claude Code session ids); handle = its first 8
   hex characters. It exists from its first tool call.
-- **Channel:** `[a-z0-9-]{1,40}`; joining creates it.
+- **Channel:** `[a-z0-9-]{1,40}`; joining creates it. (#8149 widened the rule: a GitHub
+  issue, PR or run reference, or a Kubernetes-style name, at most 256 characters;
+  `docs/features/agent-fleet-chat.md` "Channel names".)
 - **Message:** global `seq`, sender, one target (channel or agent), text.
 - **Delivery:** the target of a DM, or the channel's members at send time (sender included).
 - **Cursor:** one per agent; the inbox is deliveries above it; rewind lowers it.
@@ -174,7 +176,10 @@ v1.8.0, the latest stable release on 2026-11-25); the workspace builds with go1.
 imports `fleetchat` and writes its own host. The server has no auth of its own; a
 NetworkPolicy lets in only ScadBuddy's pods, as for the Playwright MCP server. Changed on
 2026-11-26: anything on the LAN may call it, directly or through ScadBuddy's `/mcp`
-**(owner)**, so the policy also admits the LAN's Gateway.
+**(owner)**, so the policy also admits the LAN's Gateway. Changed by #8014: the internet reaches
+`/github/webhook` only, through the SSO host's public Exact route (eh-homelab/clusters#4432), which
+the webhook's signature check (`X-Hub-Signature-256`) guards; the policy also admits the SSO host's
+Pomerium proxy for that path.
 
 ## 7. Non-goals
 

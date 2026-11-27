@@ -3,13 +3,17 @@ import { useCallback, useEffect, useId, useRef, useState, useSyncExternalStore }
 import { useNavigate } from 'react-router'
 import { ApiError } from '../../api/client'
 import { postTagRead, type TagReadResult } from '../../api/filament'
+import { BambuFields, type BambuTag } from '../../components/filament/scan/BambuFields'
 import { CodeCard } from '../../components/filament/scan/CodeCard'
 import { KnownTag } from '../../components/filament/scan/KnownTag'
 import { NfcJobBanner } from '../../components/filament/scan/NfcJobBanner'
 import { DecodedFields, NewTag } from '../../components/filament/scan/NewTag'
 import type { HeldPhotos } from '../../components/filament/scan/PhotoButtons'
+import { ScanCameraProvider } from '../../components/filament/scan/ScanCameraProvider'
+import { ScanCode } from '../../components/filament/scan/ScanCode'
 import { filamentLinks } from '../../lib/filamentLinks'
 import { codeLabel, codeTarget } from '../../lib/resolvedCode'
+import { takeMifare } from '../../lib/nativeMifare'
 import { NfcSession, nfcSupport, type Reading, type WireRecord } from '../../lib/webNfc'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
@@ -79,7 +83,10 @@ export function ScanPage() {
         <h1 className="text-lg font-semibold tracking-tight">Scan</h1>
         <p className="text-muted-foreground">Hold a tag or a label to the phone: a spool's tag, a place's tag, or a label with a code such as L-12 or S-142.</p>
       </div>
-      {support === 'ok' ? <Scanner /> : <Unsupported embedded={support === 'embedded'} />}
+      <ScanCameraProvider>
+        <ScanCode />
+        {support === 'ok' ? <Scanner /> : <Unsupported embedded={support === 'embedded'} />}
+      </ScanCameraProvider>
     </div>
   )
 }
@@ -164,7 +171,21 @@ function Scanner() {
     let alive = true
     let navigated = false
     const off = nfc.onReading((reading: Reading) => {
-      postTagRead({ uid: reading.uid || null, tag_type: null, records: reading.records }).then(
+      // In the ScadBuddy app a Bambu tag's blocks come with the tap; the server decodes them (#8148).
+      // A server that does not decode them yet (core's area off, 503 mifare_needs_core), or
+      // that cannot take these (core's 422 mifare_unreadable or mifare_invalid, a 7-byte UID
+      // say, both before it records anything),
+      // still finds the tag by its UID and records, as before. Any other refusal is the answer:
+      // core may have recorded the read, so a second post would record the tap twice.
+      const mifare = takeMifare(reading.uid)
+      const plain = { uid: reading.uid || null, tag_type: null, records: reading.records }
+      const read = mifare
+        ? postTagRead({ ...mifare, records: [] }).catch((cause: unknown) => {
+            if (cause instanceof ApiError && ((cause.status === 422 && (cause.problem.code === 'mifare_unreadable' || cause.problem.code === 'mifare_invalid')) || (cause.status === 503 && cause.problem.code === 'mifare_needs_core'))) return postTagRead(plain)
+            throw cause
+          })
+        : postTagRead(plain)
+      read.then(
         (result) => {
           if (!alive || navigated) return
           const key = (nextKey.current += 1)
@@ -253,7 +274,8 @@ function Scanner() {
       setEntries((now) => [{ key, at: new Date(), uid, records, result, held: {} }, ...now])
       setOpenKey(key)
     }
-    postTagRead({ uid: from.uid || null, tag_type: null, records: from.records }).then(
+    // A lookup of a tag read before, not a tap: no scan history row.
+    postTagRead({ uid: from.uid || null, tag_type: null, records: from.records, tap: false }).then(
       (old) => setEntries((now) => forTag(now, from.uid, { result: old })),
       (cause: unknown) => setError(`ScadBuddy could not look up the old tag again: ${cause instanceof ApiError ? cause.detail : 'read it again'}.`),
     )
@@ -271,6 +293,7 @@ function Scanner() {
         {announcement}
       </p>
       <NfcJobBanner session={session} onAnnounce={setAnnouncement} />
+      {opened?.result.bambu && <BambuFields bambu={opened.result.bambu as BambuTag} />}
       {opened && (
         <ReadView
           key={opened.key}
