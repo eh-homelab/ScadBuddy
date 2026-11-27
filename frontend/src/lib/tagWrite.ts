@@ -41,6 +41,9 @@ const SENT_MISMATCH = 'The spool changed while the tag was written, so the tag w
 
 const EMPTY_RECORD: WireRecord = { record_type: 'empty', data_hex: '' }
 
+/** Thrown by `prepare` or `confirm` to stop the run with this sentence as its outcome's message. */
+export class WriteRefusedError extends Error {}
+
 const codeOf = (cause: unknown) => (cause instanceof ApiError && cause.status === 409 ? cause.problem.code : undefined)
 
 function detailOf(cause: unknown): string {
@@ -96,6 +99,7 @@ export async function writeWithBackup({ session, reason, jobId, prepare, confirm
       sent = await prepare(now, backupId)
     } catch (cause) {
       if (isAbort(cause, signal)) return stopped('Stopped. Nothing was written.')
+      if (cause instanceof WriteRefusedError) return { status: 'failed', message: cause.message, backupId }
       if (codeOf(cause) === 'backup_mismatch') return { status: 'failed', message: BACKUP_MISMATCH, backupId }
       return { status: 'failed', message: `ScadBuddy did not give the records to write, so nothing was written: ${detailOf(cause)}`, backupId }
     }
@@ -131,6 +135,7 @@ export async function writeWithBackup({ session, reason, jobId, prepare, confirm
     try {
       return { status: 'checked', result: await confirm(now, backupId, sent, back) }
     } catch (cause) {
+      if (cause instanceof WriteRefusedError) return { status: 'failed', message: cause.message, backupId }
       const code = codeOf(cause)
       if (code === 'read_back_mismatch') return { status: 'mismatch', backupId, readBack: back }
       if (code === 'sent_mismatch') return { status: 'failed', message: SENT_MISMATCH, backupId }
