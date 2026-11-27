@@ -401,6 +401,89 @@ vectors `backend/tests/fixtures/auth-vectors.json` hold the two ports equal: the
 `tests/auth/test_auth_vectors.py` writes them from Python's own functions
 (`UPDATE_AUTH_VECTORS=1`), and `internal/auth/vectors_test.go` checks Go against them.
 
+## Devices (#8244)
+
+Area `devices` (`internal/devices`, design `docs/superpowers/specs/2026-11-27-devices-design.md`)
+pairs the phone app to a person as a device, and lets pages, flows and the assistant call its four
+methods: `nfc.read`, `nfc.write`, `code.scan` and `camera.capture`. There are no others. Python has
+no such routes. The tables are `devices`, `device_pairings`, `device_tokens`, `device_calls` and
+`device_reads` (`20261127T0803Z_devices`).
+
+| Setting | Default | What |
+|---|---|---|
+| `SCADBUDDY_DEVICE_IDLE` | `1h` | How long a device token lives unused. Each device request moves its expiry to now + this |
+| `SCADBUDDY_DEVICE_HARD_CAP` | `720h` | How long a pairing lasts at most, from the claim. A bad value of either stops the start |
+| `SCADBUDDY_DEVICE_DELEGATES` | `agent,projects` | The service callers that may call a device for a person they name in `on_behalf_of`. A credential whose scopes hold `devices.call` may too. Set but empty: no caller by its name. Any other service is a 403 `no_delegation` |
+
+Person routes are class `api` and follow `SCADBUDDY_AUTH_MODE`. With auth off, or a signed-out
+request served in `observe`, the person is `anonymous`. Device routes are class `public` to the
+gate: each checks the device token (`Authorization: Bearer sbdev_…`) itself, in every mode, and
+refuses a missing, bad, revoked or expired one with 401 `device_unauthorized`.
+
+| Route | Who | Body | Answer |
+|---|---|---|---|
+| `POST /api/v1/devices/pairings` | person | none | `{code_url, expires_at}`: `code_url` is `https://<request host>/api/v1/devices/pairings/<code>/claim` (`http` for a loopback host). The code is 16 random bytes, single-use, 10 minutes; only its SHA-256 is stored. The page shows `scadbuddy://pair?url=<code_url>` |
+| `POST /api/v1/devices/pairings/{code}/claim` | the app (the code is its credential) | `{name, model?, app_version?, capabilities}` | `{device_id, token, expires_at, hard_cap_at}`. An unknown code is 401, one spent or expired 410 `code_gone`, a capability not of the four 422; none makes a device. The token is `sbdev_` and 32 random bytes; only its SHA-256 is stored |
+| `GET /api/v1/devices` | person | | `{devices: [{id, name, model, app_version, capabilities, created_at, last_seen_at, online, expires_at, hard_cap_at}]}`: the caller's own, not revoked, newest first. `online` is a request in the last 75 s |
+| `DELETE /api/v1/devices/{id}` | person | | 204. The device and its tokens are revoked, its open calls end `offline` (their undecided approvals are `cancelled`, and an approved one not yet used is revoked), and `device.revoked` closes its socket on every pod |
+| `POST /api/v1/devices/heartbeat` | device | none | 204. The app sends it every 30 s while it is in front |
+| `POST /api/v1/devices/{id}/calls[?wait=true]` | person, assistant, flow | `{method, args?, timeout_s?, on_behalf_of?}` | 202 `{call_id}`, or for an assistant's or a flow's `nfc.write` 202 `{call_id, pending_action_id}`. 403 `not_your_device` or `no_delegation`, 409 `offline` (with `"error": "offline"`), 422 `method_not_announced`. `timeout_s` is 60 by default, at most 120. With `wait=true`: 200 with the view (below) when the call ends `done` or `error`, else 504 whose `reason` is the outcome |
+| `GET /api/v1/devices/calls/{id}[?on_behalf_of=]` | the device's owner, or the caller | a delegate service names the person in `on_behalf_of`, as in the call | `{call, events, result}` (below). 403 `no_delegation`, 404 `call_not_found` |
+| `POST /api/v1/devices/calls/{id}/confirm` | the caller that made it | `{on_behalf_of}` for a service | 202 `{call_id}`: the approved call is sent. 409 `approval_pending`, or `no_approval`. 409 `approval_denied`, `approval_cancelled`, `approval_expired`, `approval_used`, `approval_revoked` or `approval_mismatch` end the call `denied` |
+| `POST /api/v1/devices/calls/{id}/events` | the call's device, while the call is open | `{events: [{kind, data?}]}`, at most 20; `kind` `tag_found`, `tag_progress` or `tag_lost`; `data` at most 1 KiB and never `call`, `device`, `id`, `at`, `kind`, `topics` or `retention_seconds` | 204. 409 `call_closed` |
+| `POST /api/v1/devices/uploads?call=&kind=` | the call's device, while the call is open | the raw bytes | `{key, media_type}`: `tag_dump` for an `nfc.*` call, `scan_image` for the others (422 `kind_mismatch`), stored with `Blobs.Put` and held in `blob_refs` as (`device_call`, the call's id). Nothing releases the hold yet (#8251). A photo's type is read from its bytes (JPEG, PNG or WebP, else 415 `not_an_image`). A dump is JSON `{uid, tech, blocks: [{index, data_hex}], records}` with no sector trailer (422 `key_trailer`) |
+| `POST /api/v1/devices/calls/{id}/result` | the call's device, while the call is open | `{outcome: "error", error?}`, or `{outcome: "done", result: {read: {blob_key, uid?, tech?, complete?, missing_blocks?}}}` | 204 for an error. For done, `{read_id, uid?, complete?}`, a `device_reads` row. A blob this call's device did not upload, or of a kind not the method's, is 422 `foreign_blob`: no row, and the call ends `error` |
+| `GET /api/v1/devices/reads/{id}` | the device's owner | | `{id, device_id, call_id, at, kind, uid, tech, blob_key, media_type, complete, missing_blocks}` |
+| `GET /api/v1/devices/reads/{id}/blob` | the device's owner | | the bytes, with their media type and `nosniff` (scriptless) |
+
+A call is `{id, device_id, method, args, caller_kind, outcome, created_at, deadline, sent_at,
+ended_at, pending_action_id}`. `caller_kind` is `person` (a session cookie, or no one with auth
+off), `assistant` (a person's access token, or a delegate service's credential, which names the
+person in `on_behalf_of`) or `flow` (the projects worker's credential, likewise). Only a delegate
+(`SCADBUDDY_DEVICE_DELEGATES`, or scope `devices.call`) may name a person; core has no proof yet
+that the person asked (the agent's CRUD calls carry no turn principal), so the grant is the
+check. By default only
+the device's owner, and the owner's assistant and flows, may call it. `outcome` is null while the
+call is open, then `done`, `error`, `offline` (the device had gone at the deadline), `timeout` (it
+was online at the deadline) or `denied` (its approval never came, or was refused). Core ends a call
+at its deadline: a timer on the pod that took it, and every read of the call. `events` are the
+call's `device.*` events from the event log, oldest first (`{id, kind, at, data}`), at most 1000.
+
+`nfc.write` takes `{records: [...]}`, 1 to 16 NDEF records, and nothing else: core never asks a
+device to write raw blocks, sectors or keys, so it never writes a Bambu tag (the app refuses one
+too). The records are the app's wire records (`NdefWire.cs` `Build`), a strict subset (`ndef.go`):
+`text` (`text`, and `lang` and `encoding` if given), `url` and `absolute-url` (`text`: `scheme://host[:port]` then a path, query or fragment, with no userinfo and no opaque part, so the host an approval shows is the one it names), `mime` (`mediaType` and exactly one of `text` and `hex`), an external type `<domain>:<type>`
+(exactly one of `text` and `hex`) and `empty`. Any other type or key is a 422. Core sends the device
+the parsed form, and the approval's summary is built from that same form. An assistant's or a flow's `nfc.write` makes an `ai_approvals` row outside a session (tool
+`device_call`, tier `outward`, 10 minutes), which the UI lists with the other pending actions. Its
+`input_summary` shows all of what will be written: the record count, and every record's type and
+content. A URI shows its scheme and host in full, the host in punycode; only its path, query and fragment are cut, at 80 characters.
+A write whose summary would pass 2000 characters is refused (422
+`write_too_large_to_approve`), never cut. It needs `SCADBUDDY_SECRET_KEY_FILE` for the input hash
+(the HMAC of the device, the method and the args; 503 `not_configured` without it). The caller
+confirms it once it is approved. The confirm hashes the call's stored args again (under the KEK
+or the one before it) and refuses a mismatch (409 `approval_mismatch`, the call ends `denied`),
+then uses the approval once. A person's own call is
+sent at once: their click is the approval.
+
+A call and its events go over the bus, as opaque events (Python has no model for them), each kept
+7 days (`retention_seconds`). Core publishes `device.call_requested` `{call, device, method, args,
+deadline}` on the topic `device:<device id>` and `device.revoked` `{device}` on the same topic;
+each event a device posts as `device.<kind>` `{call, device, …data}`, and the end as
+`device.call_done` `{call, device, read_id, uid?, complete?}` or `device.call_failed` `{call,
+device, outcome, error}`, on the topics `device:<device id>` and `device:call:<call id>`. Each pod's
+listener hears every event, so a call reaches the device's socket on whichever pod holds it.
+
+The realtime socket (area `ws`) takes a device token too, checked before the gate in every mode
+(401 with no body for a bad one, 403 when `devices` is not named). A device follows only
+`device:<its id>`; any other topic is an `unknown topics` error. Its socket closes with 4401 on
+`device.revoked` for it, and when its token is no longer live, read at each keepalive (25 s) and at
+each resync. The handshake moves the expiry, as every device request does; the keepalive and resync reads do not. A person's socket may follow
+`device:call:<id>` of a call whose device it owns, or that it made. A device event's frame is
+`{"type": "event", "id", "kind", "topics", "data"}` with the event's own fields as `data` (all but
+`id`, `at`, `kind`, `topics` and `retention_seconds`): the device needs a call's method and args.
+Python's socket follows no `device:` topic, so a device needs core's `ws` area.
+
 ## Telemetry
 
 Core sends OpenTelemetry traces, metrics and logs over OTLP/HTTP, set up by the shared
