@@ -509,6 +509,28 @@ function boxHasMany(id: string, place: S['Location']): Response | null {
   return held > 1 ? problem(422, 'the place holds more than one spool, so it cannot be a dry box', { code: 'box_has_many' }) : null
 }
 
+/** `dry_box.py` `occupant_on`: the unarchived spool other than `but` in the dry box `id`, or null. */
+function occupantOf(id: string | null, but: string | null = null): string | null {
+  if (!id || !isDryBox(id)) return null
+  return state.spools.find((one) => one.location_id === id && one.id !== but && one.archived_at === null)?.id ?? null
+}
+
+const boxFull = (occupant: string) => problem(409, `the dry box already holds spool ${occupant}`, { code: 'box_full', occupant_id: occupant })
+
+/** `spools.py` `_archive`: a restore of `row` into a dry box another spool holds is 409 `box_full`. */
+function boxTaken(row: SpoolRow): Response | null {
+  if (row.archived_at === null) return null
+  const occupant = occupantOf(row.location_id, row.id)
+  return occupant ? boxFull(occupant) : null
+}
+
+/** `dry_box.py` `check_kind_flip`: a kind turned dry storage while one of its capacity-1 places holds two spools or more. */
+function kindHasMany(kindId: string): Response | null {
+  const places = state.locations.filter((one) => one.kind_id === kindId && one.capacity === 1 && !one.archived_at && !one.printer_id)
+  const many = places.some((place) => state.spools.filter((one) => one.location_id === place.id && !one.archived_at).length > 1)
+  return many ? problem(422, 'the place holds more than one spool, so it cannot be a dry box', { code: 'box_has_many' }) : null
+}
+
 /** The mock's dry box of one spool (#7167): `Dry box 2`, under the workshop. */
 export const HOME_BOX = '00000000-0000-4000-8000-0000000b0c01'
 
@@ -2325,7 +2347,9 @@ export const handlers = [
     if (clear) return problem(422, clear)
     const next = patched(rows[at]!, body)
     const entity = `${catalogEntity(kind)}:${rows[at]!.id}`
-    const refused = catalogRefusal(kind, next, body, rows[at]!.id) ?? rowPropertiesRefusal(request, entity, properties, checksSave(sent))
+    // #7167 `catalog.py`: a kind's `dry_storage` set true makes its capacity-1 places boxes.
+    const flip = kind === 'location-kinds' && body.dry_storage === true ? kindHasMany(rows[at]!.id) : null
+    const refused = catalogRefusal(kind, next, body, rows[at]!.id) ?? flip ?? rowPropertiesRefusal(request, entity, properties, checksSave(sent))
     if (refused) return refused
     saveRowProperties(entity, properties)
     if (isAliased(kind) && typeof body.name === 'string') {
@@ -2618,6 +2642,9 @@ export const handlers = [
         const row = { ...newSpool(fields), number: Math.max(0, ...state.spools.map((one) => one.number), ...made.map((one) => one.number)) + 1, location_id: place?.id ?? null }
         const refused = spoolRefusal(row)
         if (refused) return refused
+        // #7167 `move_on`: each spool's move into a dry box asks for its occupant, the one before it included.
+        const occupant = place ? (occupantOf(place.id) ?? (isDryBox(place.id, place) ? made[0]?.id : null)) : null
+        if (occupant) return boxFull(occupant)
         made.push(row)
       }
       for (const row of made) {
@@ -2640,7 +2667,8 @@ export const handlers = [
     const row = findSpool(String(params.id))
     if (!row) return problem(404, `no spool ${String(params.id)}`)
     const spool = Object.fromEntries(FIELDS.spoolCreate.filter((field) => field !== 'grams_left' && field !== 'weight_locked' && field !== 'added_full' && row[field as keyof SpoolRow] != null).map((field) => [field, row[field as keyof SpoolRow]]))
-    const place = state.locations.find((one) => one.id === row.location_id && !one.archived_at && one.tray_id == null)
+    // `spools.py` `copy`: not a tray, an archived place or a dry box (the source holds it, #7167).
+    const place = state.locations.find((one) => one.id === row.location_id && !one.archived_at && one.tray_id == null && !isDryBox(one.id, one))
     const draft: S['SpoolDraft'] = {
       spool: { ...spool, weight_locked: false, grams_left: null } as S['SpoolCreate-Output'],
       location_id: place?.id ?? null,
@@ -2726,6 +2754,9 @@ export const handlers = [
       const ids = raw.spool_ids ?? []
       if (ids.length < 1 || ids.length > 500) return problem(422, 'spool_ids: List should have 1 to 500 items')
       const found = state.spools.filter((row) => ids.includes(row.id)).sort((a, b) => a.id.localeCompare(b.id))
+      // #7167: a restore into a dry box another spool holds is 409 `box_full`, and none is changed.
+      const taken = archived ? null : found.map(boxTaken).find((one) => one != null)
+      if (taken) return taken
       const changed: string[] = []
       const unchanged: string[] = []
       for (const row of found) {
@@ -2751,7 +2782,7 @@ export const handlers = [
     const { archived, ...fields } = normalised(body)
     const current = state.spools[at]!
     const next = { ...current, ...(fields as Partial<SpoolRow>) }
-    const refused = spoolRefusal(next) ?? rowPropertiesRefusal(request, `spool:${current.id}`, properties, checksSave(sent))
+    const refused = spoolRefusal(next) ?? (archived === false ? boxTaken(current) : null) ?? rowPropertiesRefusal(request, `spool:${current.id}`, properties, checksSave(sent))
     if (refused) return refused
     saveRowProperties(`spool:${current.id}`, properties)
     const changes = Object.fromEntries(
@@ -2794,6 +2825,8 @@ export const handlers = [
       return problem(422, 'body: Value error, final_reading_g is below final_grams')
     }
     const row = state.spools[at]!
+    const taken = archived ? null : boxTaken(row)
+    if (taken) return taken
     let finalFilament: number | null = null
     if (archived && row.archived_at === null && (body.final_reading_g != null || body.final_grams != null)) {
       // The final weighing first, as `add_event` books one; a refusal archives nothing.
@@ -2980,8 +3013,7 @@ export const handlers = [
     // A replace of another spool than the one the caller expects is refused too.
     if (held >= 0 && (if_occupied !== 'replace' || state.spools[held]!.id !== expected_occupant_id)) {
       // `dry_box.py` `BoxFullError`: a dry box holds one spool.
-      const occupant = state.spools[held]!.id
-      return problem(409, `the dry box already holds spool ${occupant}`, { code: 'box_full', occupant_id: occupant })
+      return boxFull(state.spools[held]!.id)
     }
     // A replace archives the box's other spool (reason `other`, waste `cause` `replaced`) first.
     if (held >= 0) setArchived(held, true, 'other', null, 'replaced')

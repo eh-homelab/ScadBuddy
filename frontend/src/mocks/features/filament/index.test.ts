@@ -1,4 +1,4 @@
-import { describe, expect, it } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { ApiError, api, request } from '../../../api/client'
 import {
   addSpoolEvent,
@@ -275,7 +275,14 @@ describe('the filament mocks', () => {
   })
 
   describe('non-print waste (#7167): the mocks book it as the backend does', () => {
-    const today = () => new Date().toISOString().slice(0, 10)
+    // A fixed clock: the mock stamps the waste with `now()`, and the range below is that day.
+    beforeEach(() => {
+      vi.useFakeTimers({ toFake: ['Date'] }).setSystemTime('2026-12-01T12:00:00Z')
+    })
+    afterEach(() => {
+      vi.useRealTimers()
+    })
+    const today = () => '2026-12-01'
     const waste = async () => (await getMetrics({ since: today(), until: today() })).non_print_waste_g
     const events = async (id: string) => (await listSpoolEvents(id)).filter((one) => one.kind === 'non_print_waste')
 
@@ -367,6 +374,59 @@ describe('the filament mocks', () => {
       expect(unloaded.home_asked_at).toBeNull()
       expect(unloaded.location_id).toBeNull()
       expect(await listSpools({ awaitingHome: true })).toEqual([])
+    })
+
+    it('a copy of a spool in a dry box leaves the box out of the draft', async () => {
+      seedHomeReturn()
+      expect((await copySpool(spoolId(7))).location_id).toBeNull()
+      expect((await copySpool(spoolId(1))).location_id).toBe(L.SHELF_A)
+    })
+
+    it('a bulk create refuses a full box, and two spools into one empty box, and writes nothing', async () => {
+      const { box } = seedHomeReturn()
+      const body = { spool: { material_id: M.PLA, weight_locked: false }, quantity: 1, location_id: box, presets: [], k_values: [] }
+      const before = (await listSpools()).length
+      expect(await refusal(bulkCreateSpools(body, 'box-1'))).toMatchObject({ status: 409, code: 'box_full', occupant_id: spoolId(7) })
+      await moveSpool(spoolId(7), L.SHELF_A)
+      expect(await refusal(bulkCreateSpools({ ...body, quantity: 2 }, 'box-2'))).toMatchObject({ status: 409, code: 'box_full' })
+      expect((await listSpools()).length).toBe(before)
+      const [made] = await bulkCreateSpools(body, 'box-3')
+      expect(made?.location_id).toBe(box)
+    })
+
+    /** S-7 archived in its box (a bulk archive keeps the place), and S-1 moved in after it. */
+    async function boxTakenAfterArchive() {
+      const { box } = seedHomeReturn()
+      await bulkArchiveSpools([spoolId(7)], true)
+      await moveSpool(spoolId(1), box)
+    }
+
+    it('a restore through the archive route into a taken box is box_full, and restores nothing', async () => {
+      await boxTakenAfterArchive()
+      expect(await refusal(archiveSpool(spoolId(7), { archived: false }))).toMatchObject({ status: 409, code: 'box_full', occupant_id: spoolId(1) })
+      expect((await getSpool(spoolId(7))).archived_at).not.toBeNull()
+    })
+
+    it('a restore through PATCH into a taken box is box_full, and writes nothing', async () => {
+      await boxTakenAfterArchive()
+      expect(await refusal(patchSpool(spoolId(7), { archived: false, note: 'back' }))).toMatchObject({ status: 409, code: 'box_full', occupant_id: spoolId(1) })
+      const row = await getSpool(spoolId(7))
+      expect(row.archived_at).not.toBeNull()
+      expect(row.note).not.toBe('back')
+    })
+
+    it('a bulk restore with one spool whose box is taken is box_full, and restores none', async () => {
+      await boxTakenAfterArchive()
+      await bulkArchiveSpools([spoolId(3)], true)
+      expect(await refusal(bulkArchiveSpools([spoolId(3), spoolId(7)], false))).toMatchObject({ status: 409, code: 'box_full', occupant_id: spoolId(1) })
+      expect((await getSpool(spoolId(3))).archived_at).not.toBeNull()
+      expect((await getSpool(spoolId(7))).archived_at).not.toBeNull()
+    })
+
+    it('refuses to make a kind dry storage while one of its capacity-1 places holds several spools (box_has_many)', async () => {
+      await upsertLocation({ capacity: 1 }, L.SHELF_A)
+      expect(await refusal(upsertCatalog('location-kinds', { dry_storage: true }, LK.SHELF))).toMatchObject({ status: 422, code: 'box_has_many' })
+      expect((await listCatalog('location-kinds')).find((one) => one.id === LK.SHELF)?.dry_storage).toBe(false)
     })
 
     it('refuses to make a box of a place that holds several spools (box_has_many)', async () => {
