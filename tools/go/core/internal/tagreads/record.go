@@ -277,6 +277,8 @@ func insertRead(ctx context.Context, tx pgx.Tx, row historyRow) (string, error) 
 		row.tagID, row.source, row.actor, text(row.uid), text(row.tray), row.tagType, records,
 		text(row.dumpKey), decoded, imageKey, imageType, lat, lon, accuracy, at, text(row.scan.deviceRead)).Scan(&id)
 	if errors.Is(err, pgx.ErrNoRows) {
+		// The first row holds its dump. This post's dump has the same bytes, so its Put found
+		// the same content key: nothing new to hold.
 		err = tx.QueryRow(ctx, "SELECT id::text FROM filament_tag_reads WHERE device_read_id = $1::uuid",
 			row.scan.deviceRead).Scan(&id)
 		return id, err

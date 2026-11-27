@@ -891,8 +891,8 @@ func TestTagReadFromDeviceRead(t *testing.T) {
 func TestADeviceReadThatIsNoClassic1KIsAUIDOnlyRead(t *testing.T) {
 	h := newHarness(t)
 	h.who = ada
-	// A 7-byte UID, with a block, and a tech longer than tag_type holds.
-	read := h.deviceDump(ada.Principal, map[string]any{"uid": "04A1B2C3D4E5F6", "tech": strings.Repeat("t", 40),
+	// A 7-byte UID, with a block, and a tech longer than tag_type holds, cut on a rune.
+	read := h.deviceDump(ada.Principal, map[string]any{"uid": "04A1B2C3D4E5F6", "tech": strings.Repeat("t", 31) + "é" + "ttt",
 		"blocks": blocksOf(block0A), "records": []any{}})
 	tag := h.one("INSERT INTO filament_tags (kind, tag_uid) VALUES ('other', '04A1B2C3D4E5F6') RETURNING id::text")
 	h.py.answer = `{"tag":{"id":"` + tag.(string) + `"},"spool":null,"decoded":null,"draft":null,"next":"bind_or_create"}`
@@ -901,7 +901,7 @@ func TestADeviceReadThatIsNoClassic1KIsAUIDOnlyRead(t *testing.T) {
 		t.Fatalf("%d %v", status, answer)
 	}
 	got := h.py.bodies[0]
-	if _, ok := got["mifare_blocks"]; ok || got["uid"] != "04A1B2C3D4E5F6" || got["tag_type"] != strings.Repeat("t", 32) ||
+	if _, ok := got["mifare_blocks"]; ok || got["uid"] != "04A1B2C3D4E5F6" || got["tag_type"] != strings.Repeat("t", 31) ||
 		len(got["records"].([]any)) != 0 {
 		t.Errorf("forwarded %v", got)
 	}

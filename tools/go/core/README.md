@@ -315,7 +315,7 @@ A body with `read_id` (#8244) names a paired device's read in place of `uid`, `t
 `records` and `mifare_blocks` (with any of them it is a 422 `device_read_invalid`). Core loads the
 read (`devices.Store.OwnRead`: a read of a device the caller does not own is a 404
 `read_not_found`, with `code`, as a read that is not there), reads its `tag_dump` blob, and takes the dump's
-UID, its tech as `tag_type` (cut to 32 characters), and its blocks as `mifare_blocks`. A dump
+UID, its tech as `tag_type` (cut to 32 bytes, on a whole character), and its blocks as `mifare_blocks`. A dump
 that is no MIFARE Classic 1K read (no block, a UID that is not 4 bytes, or blocks past 63) gives
 a UID-only read with the dump's records instead. Then it decodes the read as an inline one. The
 history row's source is `app`, and its `device_read_id` names the read. Only the history row is

@@ -8,6 +8,7 @@ import (
 	"io"
 	"log/slog"
 	"net/http"
+	"unicode/utf8"
 
 	"github.com/eh-homelab/ScadBuddy/tools/go/core/internal/bambutag"
 	"github.com/eh-homelab/ScadBuddy/tools/go/core/internal/blobstore"
@@ -49,9 +50,6 @@ func (s *Reads) fromDevice(ctx context.Context, fields map[string]json.RawMessag
 	if err := json.Unmarshal(fields["read_id"], &id); err != nil || id == "" {
 		return refuse("read_id", "read_id is a device read's id")
 	}
-	if s.Devices == nil {
-		return "", problem(http.StatusServiceUnavailable, "devices_off", "device reads need area devices")
-	}
 	rd, err := s.Devices.OwnRead(ctx, id)
 	var p *httpx.Problem
 	if errors.As(err, &p) && p.Status == http.StatusNotFound {
@@ -75,10 +73,10 @@ func (s *Reads) fromDevice(ctx context.Context, fields map[string]json.RawMessag
 	delete(fields, "read_id")
 	fields["uid"], _ = json.Marshal(d.UID)
 	if tech := d.Tech; tech != "" {
-		// A device's tech may be up to 40 characters; tag_type holds 32 (ASCII, as Android
-		// names its techs).
-		if len(tech) > tagTypeMax {
-			tech = tech[:tagTypeMax]
+		// A device's tech may be up to 40 bytes; tag_type holds 32. The cut keeps whole runes.
+		for len(tech) > tagTypeMax {
+			_, size := utf8.DecodeLastRuneInString(tech)
+			tech = tech[:len(tech)-size]
 		}
 		fields["tag_type"], _ = json.Marshal(tech)
 	}
