@@ -74,7 +74,8 @@ flowchart LR
   stall checks in that time share the read, including one still in flight. Each release adds one to `scadbuddy_camera_stall_releases_total`.
   When both recorders cannot index (the bucket is down, or the API answers the lease route but fails the index route), they hand the lease back
   and forth every 25 to 30 s (a leader releases at its sixth stalled tick, and the other
-  recorder takes the lease at its next tick), and that counter shows it (#7998). If the API
+  recorder takes the lease at its next tick), and that counter shows it in the "Stall
+  releases" panel of the dashboard's "Cameras" row (#7998, #8187). If the API
   does not answer at all, no lease moves: the leader stops leading after `LEASE_SECONDS`,
   no recorder takes over, and the counter stays flat.
 - **The edge** (`python -m scadbuddy.camera.edge`, `camera/edge.py`) is the live view's
