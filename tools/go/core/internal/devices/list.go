@@ -89,7 +89,18 @@ func (s *Store) revoke(r *http.Request) (any, error) {
 		if err != nil {
 			return err
 		}
-		ended, err = pgx.CollectRows(rows, pgx.RowTo[string])
+		if ended, err = pgx.CollectRows(rows, pgx.RowTo[string]); err != nil {
+			return err
+		}
+		// An ended call's approval can do nothing now: it leaves the pending actions.
+		if _, err := tx.Exec(ctx, `UPDATE ai_approvals SET decision = 'cancelled', decided_at = $2
+			WHERE decision IS NULL AND id IN (SELECT approval_id FROM device_calls
+				WHERE id = ANY($1::uuid[]) AND approval_id IS NOT NULL)`, ended, now); err != nil {
+			return err
+		}
+		_, err = tx.Exec(ctx, `UPDATE ai_approvals SET revoked_at = $2
+			WHERE decision = 'approved' AND consumed_at IS NULL AND revoked_at IS NULL AND id IN (
+				SELECT approval_id FROM device_calls WHERE id = ANY($1::uuid[]) AND approval_id IS NOT NULL)`, ended, now)
 		return err
 	})
 	if err != nil {

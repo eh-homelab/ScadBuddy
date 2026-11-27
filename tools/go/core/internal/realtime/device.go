@@ -121,7 +121,9 @@ func (x *session) topicAllowed(ctx context.Context, t bus.Value) bool {
 }
 
 // topicShaped says whether t is a topic this socket may name in a check: a check reads no
-// event's fields, only whether a topic changed.
+// event's fields, only whether a topic changed, and it answers "changed" for every topic the
+// socket does not follow. Only topicAllowed lets a socket follow a call's topic, so a check of
+// another person's call tells nothing (devices TestCheckOfAnotherCallTellsNothing).
 func (x *session) topicShaped(t bus.Value) bool {
 	if x.who.device != "" {
 		return t.Kind == 's' && t.Str == DeviceTopicPrefix+x.who.device

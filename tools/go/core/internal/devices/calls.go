@@ -101,13 +101,8 @@ func (s *Store) callerOf(r *http.Request, b *crud.Body) (kind, who string, err e
 	c := auth.CallerOf(r.Context())
 	switch c.Kind {
 	case auth.KindService:
-		if !c.Service.Has(DelegateScope) && !slices.Contains(s.Delegates, c.Service.Caller) {
-			return "", "", httpx.WithReason(http.StatusForbidden,
-				"This service may not call a device for a person.", "no_delegation")
-		}
-		kind = "assistant"
-		if c.Service.Caller == "projects" {
-			kind = "flow"
+		if kind, err = s.delegate(c); err != nil {
+			return "", "", err
 		}
 		if b == nil {
 			return "", "", httpx.Invalid(httpx.Issue{Loc: []string{"body", "on_behalf_of"}, Msg: "Field required"})
@@ -120,6 +115,19 @@ func (s *Store) callerOf(r *http.Request, b *crud.Body) (kind, who string, err e
 		b.Fail([]string{"on_behalf_of"}, "only a service acts on another's behalf")
 	}
 	return "person", principal(r.Context()), nil
+}
+
+// delegate is the caller kind a service acts as for a person (assistant, or flow for the
+// projects worker), or 403 no_delegation when it holds no grant.
+func (s *Store) delegate(c auth.Caller) (string, error) {
+	if !c.Service.Has(DelegateScope) && !slices.Contains(s.Delegates, c.Service.Caller) {
+		return "", httpx.WithReason(http.StatusForbidden,
+			"This service may not call a device for a person.", "no_delegation")
+	}
+	if c.Service.Caller == "projects" {
+		return "flow", nil
+	}
+	return "assistant", nil
 }
 
 func offline() error {
@@ -336,17 +344,29 @@ func (s *Store) view(ctx context.Context, id string) (*View, error) {
 	return out, nil
 }
 
-// getCall answers a call to the person who owns its device.
+// getCall answers a call to the person who owns its device, or to its caller. A delegate
+// service names the person it made the call for in ?on_behalf_of=, as it did in the call.
 func (s *Store) getCall(r *http.Request) (any, error) {
 	id := r.PathValue("id")
 	if !crud.IsUUID(id) {
 		return nil, notFound("call")
 	}
+	c := auth.CallerOf(r.Context())
+	kind, who := "", principal(r.Context())
+	if c.Kind == auth.KindService {
+		var err error
+		if kind, err = s.delegate(c); err != nil {
+			return nil, err
+		}
+		who = r.URL.Query().Get("on_behalf_of")
+	}
 	v, err := s.view(r.Context(), id)
 	if err != nil {
 		return nil, err
 	}
-	if v.Call.owner != principal(r.Context()) && v.Call.caller != principal(r.Context()) {
+	visible := v.Call.caller == who && (kind == "" || v.Call.CallerKind == kind) ||
+		kind == "" && v.Call.owner == who
+	if who == "" || !visible {
 		return nil, notFound("call")
 	}
 	return v, nil
@@ -433,17 +453,12 @@ func (s *Store) events(r *http.Request, d Device) (any, error) {
 	if err := b.Err(); err != nil {
 		return nil, err
 	}
-	var call *Call
-	err = pgx.BeginFunc(ctx, s.Pool, func(tx pgx.Tx) error {
-		call, err = s.openCall(ctx, tx, id, d)
-		return err
-	})
-	if err != nil {
-		return nil, err
+	if !crud.IsUUID(id) {
+		return nil, notFound("call")
 	}
 	var fields [][]httpx.Field
 	for _, p := range all {
-		f := []httpx.Field{{Key: "call", Value: call.ID}, {Key: "device", Value: d.ID}}
+		f := []httpx.Field{{Key: "call", Value: id}, {Key: "device", Value: d.ID}}
 		keys := make([]string, 0, len(p.data))
 		for k := range p.data {
 			keys = append(keys, k)
@@ -452,15 +467,28 @@ func (s *Store) events(r *http.Request, d Device) (any, error) {
 		for _, k := range keys {
 			f = append(f, httpx.Field{Key: k, Value: p.data[k]})
 		}
-		f = append(f, httpx.Field{Key: "topics", Value: []string{"device:" + d.ID, "device:call:" + call.ID}},
+		f = append(f, httpx.Field{Key: "topics", Value: []string{"device:" + d.ID, "device:call:" + id}},
 			httpx.Field{Key: "retention_seconds", Value: Retention})
 		if !bus.Fits("device."+p.kind, f...) {
 			return nil, httpx.WithReason(http.StatusRequestEntityTooLarge, "An event is too large.", "event_too_large")
 		}
 		fields = append(fields, f)
 	}
-	for i, p := range all {
-		bus.Publish(ctx, s.Pool, "device."+p.kind, fields[i]...)
+	// The events are logged while the call's row is locked open, so a result that ends the
+	// call waits for them, and no tag_* event is logged after the call's end.
+	err = pgx.BeginFunc(ctx, s.Pool, func(tx pgx.Tx) error {
+		if _, err := s.openCall(ctx, tx, id, d); err != nil {
+			return err
+		}
+		for i, p := range all {
+			if _, err := bus.PublishIn(ctx, tx, "device."+p.kind, fields[i]...); err != nil {
+				return err
+			}
+		}
+		return nil
+	})
+	if err != nil {
+		return nil, err
 	}
 	return &crud.Reply{Status: http.StatusNoContent}, nil
 }
@@ -548,8 +576,12 @@ func (s *Store) confirm(r *http.Request) (any, error) {
 			return httpx.WithReason(http.StatusConflict, "That call waits for no approval.", "no_approval")
 		}
 		var approved string
-		err = tx.QueryRow(ctx, `SELECT decision, coalesce(decision = 'approved' AND consumed_at IS NULL
-			AND revoked_at IS NULL AND usable_until > $2, false), input_hash FROM ai_approvals WHERE id = $1::uuid`,
+		// An approved approval that can no longer be used says why: used, revoked or expired.
+		err = tx.QueryRow(ctx, `SELECT CASE WHEN decision <> 'approved' THEN decision
+				WHEN consumed_at IS NOT NULL THEN 'used' WHEN revoked_at IS NOT NULL THEN 'revoked'
+				WHEN usable_until <= $2 THEN 'expired' ELSE decision END,
+			coalesce(decision = 'approved' AND consumed_at IS NULL AND revoked_at IS NULL AND usable_until > $2, false),
+			input_hash FROM ai_approvals WHERE id = $1::uuid`,
 			*c.PendingActionID, now).Scan(&decision, &usable, &approved)
 		if errors.Is(err, pgx.ErrNoRows) {
 			decision = ptr("cancelled")
@@ -581,11 +613,14 @@ func (s *Store) confirm(r *http.Request) (any, error) {
 		return nil, httpx.WithReason(http.StatusConflict, "No person has approved the call yet.", "approval_pending")
 	case !sent:
 		s.publishFailed(ctx, id, c.DeviceID, "denied", "the approval was "+*decision)
-		reason := "approval_denied"
-		if *decision == "mismatched" {
-			reason = "approval_mismatch"
+		reason, detail := "approval_"+*decision, "The call was not approved: "+*decision+"."
+		switch *decision {
+		case "mismatched":
+			reason, detail = "approval_mismatch", "The call's args are not the ones that were approved."
+		case "used", "revoked", "expired":
+			detail = "The call's approval was " + *decision + " before the confirm."
 		}
-		return nil, httpx.WithReason(http.StatusConflict, "The call was not approved: "+*decision+".", reason)
+		return nil, httpx.WithReason(http.StatusConflict, detail, reason)
 	}
 	online, err := s.Online(ctx, c.DeviceID)
 	if err != nil {
