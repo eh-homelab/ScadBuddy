@@ -52,8 +52,10 @@ def _workflow_id(history: WorkflowHistory) -> str | None:
     return None
 
 
-@pytest.mark.parametrize("name", sorted(p.stem for p in HISTORIES.glob("*.json")))
+@pytest.mark.parametrize("name", RECORDED)
 async def test_order_stock_replays(name: str) -> None:
+    """Every scene: a scene with no history fails here, never skips."""
+    assert (HISTORIES / f"{name}.json").is_file(), f"no recorded history for {name}"
     text = (HISTORIES / f"{name}.json").read_text()
     history = WorkflowHistory.from_json(
         _workflow_id(WorkflowHistory.from_json("probe", text)) or f"order-stock-{name}", text
@@ -64,6 +66,6 @@ async def test_order_stock_replays(name: str) -> None:
     ).replay_workflow(history)
 
 
-def test_every_history_is_a_recorded_scene() -> None:
+def test_the_histories_are_the_recorded_scenes() -> None:
     names = {p.stem for p in HISTORIES.glob("*.json")}
-    assert names <= set(RECORDED)
+    assert names == set(RECORDED)
