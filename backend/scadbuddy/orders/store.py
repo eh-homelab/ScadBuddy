@@ -2360,8 +2360,10 @@ class OrderStore:
                     # A plate only as `print_links._LAN_JOBS` reads one (#8078, #8083): a
                     # start's bad `plate_id` (2.0, 10**12, 0) is no plate, never an error.
                     " starts AS (SELECT r.run_id, e->>'subtask_name' AS subtask,"
-                    # Ordered as text (#8336): a bad `started_at` must not fail the read,
-                    # and every writer stores one ISO form (`LanStarted.started_at`).
+                    # Ordered as text (#8336): a bad `started_at` must not fail the read.
+                    # The text order is the time order only while every writer stores UTC
+                    # in pydantic's `Z` form (`LanStarted.started_at`, from the reports'
+                    # `received_at`); a writer that keeps another offset changes it.
                     "  e->>'started_at' AS started_at,"
                     "  CASE WHEN jsonb_typeof(e->'plate_id') = 'number'"
                     "   AND e->>'plate_id' ~ '^[1-9][0-9]{0,8}$'"
