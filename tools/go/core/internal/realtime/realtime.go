@@ -73,6 +73,9 @@ type Socket struct {
 	// setting's value when it has no row).
 	AllowedOrigins []string
 	PublicURL      string
+	// Devices is the devices area, nil when SCADBUDDY_CORE_AREAS does not name it: then a
+	// device token's handshake is refused (device.go).
+	Devices DeviceTokens
 	// slots are the sockets that may be open at once (SCADBUDDY_REALTIME_SOCKETS).
 	slots chan struct{}
 	// gated is open behind Gate.
@@ -126,6 +129,11 @@ func (s *Socket) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		s.Next.ServeHTTP(w, r)
 		return
 	}
+	if deviceBearer(r) {
+		// A device's token is checked in every mode, never by the gate (device.go).
+		s.openDevice(w, r)
+		return
+	}
 	telemetry.SetRoute(r.Context(), Path)
 	// In enforce the gate refuses a handshake before it is accepted (403 with no body), as
 	// auth/check.py closes it (1008); in observe it counts it and serves it.
@@ -134,11 +142,18 @@ func (s *Socket) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 // open serves a handshake the gate let through.
 func (s *Socket) open(w http.ResponseWriter, r *http.Request) {
-	var who caller
-	if c := auth.CallerOf(r.Context()); c.Kind == auth.KindPerson {
+	c := auth.CallerOf(r.Context())
+	who := caller{viewer: c.Principal}
+	if c.Kind == auth.KindPerson {
 		// Only a session's socket closes on its revocation (realtime.py _serve).
-		who = caller{session: c.SessionID, principal: c.Principal}
+		who.session, who.principal = c.SessionID, c.Principal
 	}
+	s.accepted(w, r, who)
+}
+
+// accepted serves a handshake whose caller is who: the origin check, the socket cap, the
+// upgrade, then the socket.
+func (s *Socket) accepted(w http.ResponseWriter, r *http.Request, who caller) {
 	if !s.originAllowed(r) {
 		refuse(w)
 		return
@@ -160,9 +175,21 @@ func (s *Socket) open(w http.ResponseWriter, r *http.Request) {
 }
 
 // caller is a session's socket, as realtime.py _serve keeps it: session is the hex SHA-256
-// of the session's token, principal its person. Any other caller's is empty.
+// of the session's token, principal its person. Any other caller's is empty. viewer is the
+// person any person's socket is for (a session's or an access token's), "" when signed out.
+// A device's socket has its device id and the Authorization header it opened with.
 type caller struct {
-	session, principal string
+	session, principal, viewer string
+	device, authorization      string
+}
+
+// person is who a person's socket follows a device call for: "anonymous" when signed out,
+// as the devices area's routes name that caller.
+func (c caller) person() string {
+	if c.viewer == "" {
+		return "anonymous"
+	}
+	return c.viewer
 }
 
 // originAllowed is core/origins.py origin_allowed with the public URL and the allowed
@@ -342,6 +369,10 @@ func (x *session) ping(ctx context.Context) string {
 		case <-ctx.Done():
 			return ""
 		case <-tick.C:
+			// A device's token is read again at each keepalive: an expired one ends the socket.
+			if !x.deviceLive(ctx) {
+				return "signed out"
+			}
 			if x.send("ping", bus.Object("type", "ping")) != nil {
 				return ""
 			}
@@ -369,10 +400,16 @@ func (x *session) pump(ctx context.Context) string {
 		if revocable && e != nil && e.Kind == "auth.session_revoked" && x.revokes(e) {
 			return "signed out"
 		}
+		if x.deviceRevoked(e) {
+			return "signed out"
+		}
 		d := x.sub.Dropped()
 		resync := d != dropped || it.Gap || e != nil && e.Kind == "bus.resync"
 		// Events were lost, a revocation among them maybe: the session is read again.
 		if revocable && resync && !x.live(ctx) {
+			return "signed out"
+		}
+		if resync && !x.deviceLive(ctx) {
 			return "signed out"
 		}
 		if d != dropped {
@@ -391,14 +428,14 @@ func (x *session) pump(ctx context.Context) string {
 		}
 		var matched []string
 		x.mu.Lock()
-		for _, t := range e.Topics() {
+		for _, t := range topicsOf(e) {
 			if x.topics[t] {
 				matched = append(matched, t)
 			}
 		}
 		x.mu.Unlock()
 		if len(matched) > 0 {
-			if x.c.text(e.Frame(matched)) != nil {
+			if x.c.text(frameOf(e, matched)) != nil {
 				return ""
 			}
 			x.s.Hub.Sent(via, "event")
@@ -456,7 +493,7 @@ func (r *rate) take() bool {
 
 // read reads the client's messages. limit is the socket's frame rate, which its pings and
 // pongs take from too.
-func (x *session) read(_ context.Context, limit *rate) string {
+func (x *session) read(ctx context.Context, limit *rate) string {
 	for {
 		m, err := x.c.read()
 		if errors.Is(err, errRate) {
@@ -468,13 +505,13 @@ func (x *session) read(_ context.Context, limit *rate) string {
 		if !limit.take() {
 			return "rate"
 		}
-		if err := x.frame(m); err != nil {
+		if err := x.frame(ctx, m); err != nil {
 			return ""
 		}
 	}
 }
 
-func (x *session) frame(m message) error {
+func (x *session) frame(ctx context.Context, m message) error {
 	if m.binary {
 		return x.sendError("expected a text frame")
 	}
@@ -500,8 +537,18 @@ func (x *session) frame(m message) error {
 		return x.sendError("expected subscribe or unsubscribe")
 	}
 	var bad []bus.Value
+	calls := 0
 	for _, t := range requested.Items {
-		if !ValidTopic(t) {
+		// A device follows its own topic only, and a person a device call's only when it
+		// owns the device or made the call (device.go). Each call topic is one read of the database, so one
+		// frame may name at most MaxCallTopics of them.
+		if kind == "subscribe" && t.Kind == 's' && callTopic.MatchString(t.Str) {
+			if calls++; calls > MaxCallTopics {
+				bad = append(bad, t)
+				continue
+			}
+		}
+		if !x.topicShaped(t) || kind == "subscribe" && !x.topicAllowed(ctx, t) {
 			bad = append(bad, t)
 		}
 	}
@@ -570,7 +617,7 @@ func (x *session) submit(frame bus.Value) error {
 	if isInt(id) && requested != nil && requested.Kind == 'a' {
 		var named []string
 		for _, t := range unique(requested.Items) {
-			if ValidTopic(bus.Value{Kind: 's', Str: t}) {
+			if x.topicShaped(bus.Value{Kind: 's', Str: t}) {
 				named = append(named, t)
 			}
 		}
@@ -608,7 +655,7 @@ func (x *session) check(ctx context.Context, frame bus.Value) error {
 			}
 		}
 		for _, t := range requested.Items {
-			valid = valid && ValidTopic(t)
+			valid = valid && x.topicShaped(t)
 		}
 	}
 	if !valid {
@@ -689,7 +736,7 @@ func (x *session) changedTopics(ctx context.Context, since, topics []string) ([]
 			if err != nil {
 				return nil, err
 			}
-			for _, t := range e.Topics() {
+			for _, t := range topicsOf(e) {
 				if wanted[t] {
 					changed[t] = true
 				}

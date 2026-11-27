@@ -52,6 +52,9 @@ const PAGES = [
   `/filament/spools/${spoolId(3)}`,
   '/filament/types',
   `/filament/types/${T.JADE}`,
+  '/filament/presets',
+  // A seeded preset's page (#7204): its tab is the preset's name.
+  '/filament/presets/3',
   '/filament/tags',
   // Purchasing (#6266): a seeded supplier and a seeded invoice, from
   // src/mocks/features/filamentPurchasingSeed.ts.

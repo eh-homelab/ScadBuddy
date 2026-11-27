@@ -911,6 +911,14 @@ func TestTheStoresCapsRefuseAnUpload(t *testing.T) {
 	}
 }
 
+// #8195: with no cap set, room runs no usage aggregate, as store/content.py
+// `_require_room` does since #8110. The Blobs has no pool, so a query would panic.
+func TestRoomWithNoCapRunsNoUsageQuery(t *testing.T) {
+	if err := (&Blobs{}).room(context.Background(), &Store{}, 1<<30); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func TestACommitRefusesWhatWasNotUploaded(t *testing.T) {
 	h := newHarness(t)
 	body := []byte("the dump asked for")

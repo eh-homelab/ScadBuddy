@@ -61,7 +61,10 @@ from scadbuddy.printers.native import command_response
 from scadbuddy.printers.store import (
     BambuddyLinkTakenError,
     KekMissingError,
+    PrinterDeleteConflictError,
     PrinterNotFoundError,
+    PrinterPlaceNameClashError,
+    PrinterPlacesReferencedError,
     SerialTakenError,
     SerialUnknownError,
     VirtualPrinterRowError,
@@ -79,6 +82,8 @@ SERIAL_UNKNOWN = (
     "this printer's serial is not known (Bambuddy withheld it): create the printer"
     " with its serial and link Bambuddy to it"
 )
+#: The ``code`` of the 409 for a delete that met a concurrent write (#8177): try again.
+PRINTER_DELETE_CONFLICT = "printer_delete_conflict"
 
 
 class DiscoveredPrinter(BaseModel):
@@ -119,6 +124,16 @@ async def _call[T](work: Callable[[], T]) -> T:
         raise ApiError(status.HTTP_503_SERVICE_UNAVAILABLE, KEK_MISSING) from None
     except SerialUnknownError:
         raise ApiError(status.HTTP_422_UNPROCESSABLE_CONTENT, SERIAL_UNKNOWN) from None
+    except PrinterPlacesReferencedError as error:
+        raise ApiError(
+            status.HTTP_409_CONFLICT,
+            str(error),
+            references=[{"kind": kind, "id": str(ref)} for kind, ref in error.references],
+        ) from None
+    except PrinterPlaceNameClashError as error:
+        raise ApiError(status.HTTP_409_CONFLICT, str(error), place_id=str(error.place_id)) from None
+    except PrinterDeleteConflictError as error:
+        raise ApiError(status.HTTP_409_CONFLICT, str(error), code=PRINTER_DELETE_CONFLICT) from None
     except VirtualPrinterRowError as error:
         raise ApiError(
             status.HTTP_409_CONFLICT,
@@ -436,7 +451,15 @@ async def patch_printer(printers: PrintersDep, printer_id: str, body: PrinterPat
     summary="Forget a printer",
     description=(
         "409 while it links a Bambuddy printer: the next read of what the printers are "
-        "doing would make it again, under a new id. Unlink Bambuddy first."
+        "doing would make it again, under a new id. Unlink Bambuddy first. Its places go "
+        "with it: each spool in one moves to no place, and each place under one moves to "
+        "the nearest place above the printer's root that is not the printer's. It moves to "
+        "the top level when the printer has no root, when nothing is above the root, or "
+        "when that place is archived. 409 when such a place would clash by name there "
+        "(`place_id`), or while a stock lot or unit points at one of its places "
+        "(`references`, each a `kind` and an `id`); 409 with `code` "
+        "`printer_delete_conflict` when another write changed its places at the same "
+        "time: try again. After a 409 the delete has changed nothing."
     ),
 )
 async def delete_printer(printers: PrintersDep, printer_id: str) -> Response:

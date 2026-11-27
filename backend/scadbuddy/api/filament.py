@@ -2147,7 +2147,16 @@ async def get_tag(filament: FilamentDep, tag_id: UUID) -> m.TagDetail:
         "first); `bind_or_create` for a tag no spool holds, `none` for a reading with no UID. "
         "404 for an unknown `bind_spool_id`, "
         "422 `no_uid` for a bind with no UID, 409 when the two keys name two tags (a phone "
-        "sends only a UID, so this route never answers it)."
+        "sends only a UID, so this route never answers it). "
+        "A Bambu MIFARE read sends `tag_type` and `mifare_blocks` (64 at most, 16 bytes each, "
+        "no key trailer); core's area `filament-tag-reads` decodes it on the server, keeps the "
+        "raw dump in the blob store, finds the tag by the tray UUID of block 9 (adding the "
+        "UID to it, and folding a UID-only tag of that UID into it), and adds `bambu`, "
+        "`tag_read_id`, `dump_key` and a `draft` from the decoded fields; 409 `tag_keys_clash`, "
+        "`tags_both_bound` or `tag_has_backups` when the tags cannot be folded, 422 "
+        "`mifare_unreadable`, and 503 `mifare_needs_core` when that area does not run. Core "
+        "also keeps each read's `image` (a `scan_image` blob, 422 `image_not_found`) and "
+        "`location` in the scan history, `tag_read_id`."
     ),
 )
 async def read_tag(
@@ -2159,6 +2168,13 @@ async def read_tag(
 ) -> m.TagReadResult:
     # Only a bind changes what the sync pushes (`NOT_NUDGED`).
     setattr(request.state, SKIP_NUDGE, body.bind_spool_id is None)
+    if body.mifare_blocks is not None:
+        # Core's area filament-tag-reads answers a MIFARE read before it reaches Python.
+        raise ApiError(
+            status.HTTP_503_SERVICE_UNAVAILABLE,
+            "a MIFARE read is decoded by core's area filament-tag-reads, which does not run",
+            code="mifare_needs_core",
+        )
     reading = tags.TagRead(
         source="phone", uid=body.uid, tag_type=body.tag_type, records=tuple(body.records)
     )
