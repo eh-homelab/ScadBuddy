@@ -40,7 +40,8 @@ export function nameTarget(chain: Chain, target: string | null): { chain: Chain;
 
 /** "Move O first": the current spool waits for `target`; `occupant`, read in `target`, becomes current. */
 export function moveFirst(chain: Chain, target: string, occupant: Spool): Chain {
-  if (!chain.current) return { current: { spool: occupant, readIn: target }, waiting: chain.waiting }
+  if (!chain.current) throw new Error('no spool is current')
+  if (isWaiting(chain, occupant.id)) throw new Error(`spool ${occupant.id} already waits`)
   const waits: Waiting = { spool: chain.current.spool, readIn: chain.current.readIn, target }
   return { current: { spool: occupant, readIn: target }, waiting: [...chain.waiting, waits] }
 }
@@ -59,12 +60,30 @@ export function takeOutFirst(chain: Chain, waitingSpoolId: string): Next {
  */
 export function afterMove(chain: Chain, moved: Spool): { chain: Chain; next: Next } {
   const readIn = moved.location_id ?? null
-  if (chain.current && chain.current.spool.id === moved.id) {
+  if (!chain.current) throw new Error(`spool ${moved.id} is not in the chain`)
+  if (chain.current.spool.id === moved.id) {
     const rest = chain.waiting.slice(0, -1)
     const popped = chain.waiting.at(-1) ?? null
     return { chain: { current: popped, waiting: rest }, next: nextFor(popped) }
   }
+  if (!isWaiting(chain, moved.id)) throw new Error(`spool ${moved.id} is not in the chain`)
   const waiting = chain.waiting.map((w) => (w.spool.id === moved.id ? { spool: moved, readIn, target: w.target } : w))
+  return { chain: { current: chain.current, waiting }, next: nextFor(chain.current) }
+}
+
+/**
+ * A move came back stale (`move_stale`, D5): the page read the spool again. The spool, current or
+ * waiting, is now read in its new place; target and order stay. The same step is next, now with
+ * the new expected place. An archived spool is the page's choice.
+ */
+export function reread(chain: Chain, spool: Spool): { chain: Chain; next: Next } {
+  const readIn = spool.location_id ?? null
+  if (chain.current && chain.current.spool.id === spool.id) {
+    const current = { ...chain.current, spool, readIn }
+    return { chain: { current, waiting: chain.waiting }, next: nextFor(current) }
+  }
+  if (!isWaiting(chain, spool.id)) throw new Error(`spool ${spool.id} is not in the chain`)
+  const waiting = chain.waiting.map((w) => (w.spool.id === spool.id ? { ...w, spool, readIn } : w))
   return { chain: { current: chain.current, waiting }, next: nextFor(chain.current) }
 }
 
