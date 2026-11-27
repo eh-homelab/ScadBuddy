@@ -202,8 +202,9 @@ gone, `internal/auth` refuses the credential and revokes its row at once. With t
 unset, core refuses every such credential, so the core container needs the API's bootstrap
 secret directory mounted and the variable set.
 
-Every `fleet-rotator` route (the two `PUT`s and `POST /virtual-messages`) also takes a person's
-access token of scope `fleet` (#8041), which `fleetd` sends: `crud.Router.AddForToken` mounts
+The two `fleet-rotator` `PUT`s also take a person's access token of scope `fleet` (#8041), which
+`fleetd` sends; `POST /virtual-messages` does not, so a machine's token never posts as a virtual
+sender such as `rotator` or `github`: `crud.Router.AddForToken` mounts
 them, and `auth.Resolver.Token`, the shared `sbpat_` lookup, reads it. A handler finds the token
 with `auth.CallerOf`; `crud.ServiceOf` is nil then. One token is one machine: the first `PUT
 /machines/{id}` records the token's id in `fleet_machines.token_id`, and every write to that

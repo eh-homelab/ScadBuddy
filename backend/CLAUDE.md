@@ -1291,7 +1291,7 @@ only the sleeps move; a budget on the real clock fails on a slow runner (#6252).
   auth sweep) revokes the rest (`revoke_machines_without_proof`). A `fleet-rotator.*` file
   whose suffix names no machine is skipped with a warning. `fleetd` sends a personal access
   token of scope `fleet` (#8041; `auth/personal_tokens.py` `TokenScope`, migration
-  `20261127T2101Z_fleet_token_scope.sql`), which core's rotator routes take beside the proofs
+  `20261127T2101Z_fleet_token_scope.sql`), which core's two rotator `PUT`s take beside the proofs (not `POST /virtual-messages`, which stays service-only)
   and record as the machine's owner (`fleet_machines.token_id`). Python serves none of those
   routes, so `auth/check.py` `auth_check` refuses a `fleet` token (403 `out_of_scope`) on every
   route Python serves, in every mode, and `auth/routes.py` `would_refuse` says so for every

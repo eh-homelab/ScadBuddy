@@ -49,9 +49,12 @@ func TestAFleetTokenUsesEveryRotatorRoute(t *testing.T) {
 	}
 	ann := a.agent()
 	a.fleet("PUT", "/channels/ops/members/"+ann, "", 200)
+	// Virtual senders are the service credential's only: a machine's token posts as none.
 	post := a.do("POST", virtualBase, object("sender", "rotator", "channel", "ops", "text", "logins moved"), bearer(token))
-	expect(t, post.status, 200)
-	expect(t, len(post.body["recipients"].([]any)), 1)
+	if post.status == 200 {
+		t.Fatalf("a fleet token posted a virtual message: %s", post.raw)
+	}
+	expect(t, a.count(`SELECT count(*) FROM fleet_messages`), 0)
 }
 
 func TestAFleetTokenIsRefusedElsewhere(t *testing.T) {
@@ -80,8 +83,6 @@ func TestAReadOrWriteTokenReachesNoRotatorRoute(t *testing.T) {
 		for name, c := range map[string]struct{ method, path, body string }{
 			"a machine": {"PUT", rotatorBase + "/machines/" + machineID, machineBody()},
 			"a session": {"PUT", rotatorBase + onMachine + uuid(), sessionBody()},
-			"a virtual message": {"POST", virtualBase,
-				object("sender", "rotator", "channel", "ops", "text", "hi")},
 		} {
 			got := a.do(c.method, c.path, c.body, bearer(token))
 			if got.status != 403 || got.body["reason"] != "out_of_scope" {
