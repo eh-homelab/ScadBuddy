@@ -1298,6 +1298,7 @@ export function createType(raw: unknown): S['SpoolType'] | Response {
     ...body,
     drying_hours: body.drying_hours ?? null,
     id: newId(),
+    number: Math.max(0, ...state.types.map((t) => t.number)) + 1,
     filament_id: null,
     archived_at: null,
     created_at: now(),

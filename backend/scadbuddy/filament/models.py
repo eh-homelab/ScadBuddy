@@ -921,6 +921,8 @@ class SpoolTypePatch(_Patch):
 
 
 class SpoolType(_Row):
+    # The typed code is `T-<number>` (#7169); `code` is the maker's.
+    number: int
     code: str
     brand_id: UUID | None
     material_id: UUID
