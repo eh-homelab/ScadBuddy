@@ -91,7 +91,8 @@ the schema and not the field's type (a huge number). It raises `RouteRefusedErro
 run takes no task, because it ended or is gone.
 
 **Who answers.** A person, always (`backend/scadbuddy/core/authorship.py` `by_a_person`). The
-person's setting `flow_answerers` (#7471) may also let in, on the agent's service credential:
+person's setting `flow_answerers` (#7471), or the run's approved grant (its `answers`), may
+also let in, on the agent's service credential:
 
 | Value | Who |
 |---|---|
@@ -99,26 +100,31 @@ person's setting `flow_answerers` (#7471) may also let in, on the agent's servic
 | `sessions` | any session that a browser user owns |
 | `token:<id>` | that MCP token, and the sessions it owns |
 
-Empty, the default, is people only. Only a person changes it (403 `person_only`). A session
+Empty, the default, is people only. Only a person changes it (403 `person_only`). A run
+grant's `answers.who` takes the same values; a person approves it with the grant, an agent
+may only propose it, a child run's grant drops it, and a trigger's standing grant may not
+hold it. The grant admits only while it is approved and in force with its chain. A session
 answers only while it is not archived, is its author's, holds `write`, and is not a flow's
 (`ai_sessions.background_tools`, `turn_flow`). A token answers only while it is not revoked
 or expired and holds `write`. A call from a flow run never answers. A question that the
 script asked with `people_only=True`, or that parked before #7471, is for people only. Any
 other caller gets 403 `flow-answer-not-allowed`, whose detail names the setting or says that
 the question is for people only (`backend/scadbuddy/flows/answerers.py`,
-`backend/scadbuddy/api/flows.py` `answerer` and `admit`). The route reads the setting; the
-operation's check asks again about the question and the session or token, so a Reset that
-parks a people-only question in between is refused. A repeat of a request gets its first
+`backend/scadbuddy/api/flows.py` `answerer` and `admit`). The route reads the setting and
+the grant; the operation's check asks again about the question and the session or token, so
+a Reset that parks a people-only question in between is refused. The decision's
+transaction checks again that the grant is in force (`FlowStore.record_decision`), so a
+grant revoked in between records nothing (403). A repeat of a request gets its first
 answer. Both routes are `api` routes, so `enforce` lets the agent's credential reach them.
 
 The assistant answers with the tool `answer_flow_question` (tier `outward`, so a person
 approves each answer unless they lower it). The decision row names the answerer
 (`responder`: `browser`, `session:<id>` or `token:<id>`) and what admitted it
-(`admitted_by`: `setting`). A task's `answered_by` is that text for an agent. The run's page
-names the assistant and links its session. A person's answer keeps the Update id and the
-operation key it had before. A person may take over an agent's answer that never reached the
-run; an agent only its own. A run grant cannot admit answerers yet (`GrantSpec.answers` is
-refused), a child run's grant never has them, and a trigger's grant may not hold them.
+(`admitted_by`: `setting`, or the grant's id when only the grant let it in). A task's
+`answered_by` is that text for an agent. The run's page names the assistant, links its
+session, and says when the run's grant let it answer. A person's answer keeps the Update id
+and the operation key it had before. A person may take over an agent's answer that never
+reached the run; an agent only its own.
 
 The forms on the page are user-only (`USER_ONLY`): the assistant cannot press or fill them,
 and cannot read the text typed in them

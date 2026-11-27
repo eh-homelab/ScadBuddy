@@ -225,11 +225,30 @@ DECLARE
     clash record;
 BEGIN
     FOR clash IN
+        -- A seeded kind's class read along the seeded chain, so one that inherits its
+        -- counting (`nozzle`) is compared by its parent's.
+        WITH RECURSIVE chain (id, anc, depth) AS (
+            SELECT id, id, 0 FROM inventory_k1_seed
+            UNION ALL
+            SELECT c.id, s.parent_id, c.depth + 1
+            FROM chain c JOIN inventory_k1_seed s ON s.id = c.anc
+            WHERE s.parent_id IS NOT NULL
+        ), resolved AS (
+            SELECT c.id,
+                (array_agg(s.nature ORDER BY c.depth) FILTER (WHERE s.nature IS NOT NULL))[1]
+                    AS nature,
+                (array_agg(s.counting ORDER BY c.depth)
+                    FILTER (WHERE s.counting IS NOT NULL))[1] AS counting,
+                (array_agg(s.billing ORDER BY c.depth)
+                    FILTER (WHERE s.billing IS NOT NULL))[1] AS billing
+            FROM chain c JOIN inventory_k1_seed s ON s.id = c.anc
+            GROUP BY c.id
+        )
         SELECT k.id, k.tracking,
-            CASE WHEN s.nature = 'service' OR s.billing IS NOT NULL THEN 'none'
-                ELSE s.counting END AS seeded,
+            CASE WHEN r.nature = 'service' OR r.billing IS NOT NULL THEN 'none'
+                ELSE r.counting END AS seeded,
             (SELECT count(*) FROM items i WHERE i.kind_id = k.id) AS items
-        FROM inventory_k1_seed s JOIN item_kinds k ON k.id = s.id
+        FROM resolved r JOIN item_kinds k ON k.id = r.id
         WHERE NOT k.builtin
     LOOP
         IF clash.items > 0 AND clash.tracking IS DISTINCT FROM clash.seeded THEN

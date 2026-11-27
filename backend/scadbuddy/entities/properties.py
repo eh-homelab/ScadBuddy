@@ -597,13 +597,24 @@ class EntityPropertyStore:
     def history(self, ref: EntityRef, key: str | None, limit: int) -> builtins.list[PropertyChange]:
         """Up to `limit` changes of `ref`'s keys (only `key`'s when given), newest first.
         Read from `entity_property_history`, which the history subscriber fills about
-        its poll (2 s) after a commit. Kept after the entity goes."""
+        its poll (2 s) after a commit. Kept after the entity goes. The rows of `ref`'s
+        current entity count too: a merge into an owner with no entity row renames the
+        entity (`repoint_entity`), and its older rows keep the old ref."""
         where = " AND key = %s" if key is not None else ""
-        args: tuple[Any, ...] = (ref.kind, ref.ref, *(() if key is None else (key,)), limit)
+        args: tuple[Any, ...] = (
+            ref.kind,
+            ref.ref,
+            ref.kind,
+            ref.ref,
+            *(() if key is None else (key,)),
+            limit,
+        )
         with self.pool.connection() as conn:
             rows = conn.execute(
                 "SELECT key, op, old, new, source, at, actor FROM entity_property_history"
-                f" WHERE kind = %s AND ref = %s{where} ORDER BY event_seq DESC LIMIT %s",
+                " WHERE (kind = %s AND ref = %s OR entity_id ="
+                " (SELECT id FROM entities WHERE kind = %s AND ref = %s))"
+                f"{where} ORDER BY event_seq DESC LIMIT %s",
                 args,
             ).fetchall()
         return [PropertyChange.model_validate(dict(r)) for r in rows]

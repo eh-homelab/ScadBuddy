@@ -13,6 +13,10 @@ import { PACKAGE_NAME_RE } from './store.js'
 // served only while that package's pin or pending re-pin names the sha256) from here,
 // never from the upstream URL, so an approved pin still loads after upstream deletes or
 // changes the file.
+//
+// A commit pin's files go here too (#7907), as a zip (zip.ts `storedZip`), and the
+// package's row records its sha256 (`mirror_sha256`, store.ts `recordMirror`): a pod with a
+// cold cache unpacks that zip and does not fetch the repository again (install.ts).
 
 export interface PackageMirror {
   /** Keeps `bytes` (whose sha256 is `sha256`) for the package `name`. */
@@ -21,7 +25,17 @@ export interface PackageMirror {
   get(name: string, sha256: string): Promise<Buffer>
 }
 
-/** A file of at most `ARCHIVE_MAX_BYTES` (download.ts), at a LAN's speed; the CRUD default of seconds is for rows. */
+/**
+ * The largest mirror the API keeps (backend agent_data/package_mirrors.py `MAX_MIRROR_BYTES`;
+ * keep the two equal): the larger of a downloaded file (`ARCHIVE_MAX_BYTES`, download.ts,
+ * 21 MiB) and a commit pin's stored zip (#7907). That zip holds at most the content hash's
+ * 20 MiB of files (hash.ts) plus 76 bytes and twice the path for each of at most 2,000
+ * entries (zip.ts, no compression and no directory entries), so 4 MiB of room fits paths of
+ * 1,010 bytes on average. A zip past it is never sent.
+ */
+export const MIRROR_MAX_BYTES = 24 * 1024 * 1024
+
+/** A file of at most `MIRROR_MAX_BYTES`, at a LAN's speed; the CRUD default of seconds is for rows. */
 const MIRROR_TIMEOUT_MS = 120_000
 
 export class CrudPackageMirror implements PackageMirror {

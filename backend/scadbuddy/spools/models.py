@@ -16,7 +16,8 @@ at ``0d427510``): hex digits only, upper case, a ``tag_uid`` cut to its last 16 
 and a ``tray_uuid`` to its first 32. ``tray_uuid`` is the reliable key; ``tag_uid`` is a
 fallback, since readers report a tag in different forms (Bambuddy fuzzy-matches it,
 ``spool_tag_matcher.py:438-497``; this never does, so a tag read in another form makes
-no match rather than a wrong one).
+no match rather than a wrong one). The one other form it knows is a phone's 4-byte MIFARE
+UID, which :func:`clean_tag_uid` turns into the AMS's ``<uid>00000100`` (#8042).
 
 A tray's ``state`` is a bitfield (ha-bambulab ``pybambu/const.py:321-328`` at
 ``0e027ff1``, ``AMSTrayStateFlags``: SPOOL 0x01, METADATA 0x02, MOTION 0x04, STEADY
@@ -26,7 +27,14 @@ AMS feeds and scans, so :func:`tray_fingerprint` leaves it out.
 
 from __future__ import annotations
 
+from typing import Final
+
 from pydantic import BaseModel
+
+#: What the AMS reports after a 4-byte MIFARE UID (#8042): every `bambu_mifare` tag on prod
+#: ends with it (38 of 38, read 2026-11-26), and a phone's 4-byte read of the same tag is
+#: the UID alone (6 of 6 phone and Spool Scanner reads matched their AMS row this way).
+MIFARE_UID_SUFFIX: Final = "00000100"
 
 
 def _hex(value: str | None) -> str:
@@ -38,8 +46,15 @@ def _key(text: str) -> str | None:
 
 
 def clean_tag_uid(value: str | None) -> str | None:
-    """A ``tag_uid`` as stored: its last 16 hex digits, or ``None`` for none or zeros."""
-    return _key(_hex(value)[-16:])
+    """A ``tag_uid`` as stored: its last 16 hex digits, or ``None`` for none or zeros. A
+    4-byte UID (8 hex digits) is stored in the AMS's form, the UID and then
+    :data:`MIFARE_UID_SUFFIX`, so a phone's read and the AMS's name one tag (#8042). The
+    browser's copy is `frontend/src/lib/tagUid.ts`; both are held to
+    `test-fixtures/filament/tag-uid-vectors.json`."""
+    hex_digits = _hex(value)[-16:]
+    if _key(hex_digits) is None:
+        return None
+    return hex_digits + MIFARE_UID_SUFFIX if len(hex_digits) == 8 else hex_digits
 
 
 def clean_tray_uuid(value: str | None) -> str | None:

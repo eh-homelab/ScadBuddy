@@ -29,6 +29,7 @@ from scadbuddy.library.settings_store import (
     S3_PREFIX_NOT_READY,
     STORE_READINESS_LOCK,
     ModelPrintChoices,
+    OutputsNeedABlobStoreError,
     RenderStoreSettings,
     S3Settings,
     SettingsPatch,
@@ -443,15 +444,15 @@ def test_the_render_key_is_seeded_stored_and_cleared_like_the_full_key(
         store.close()
 
 
-def test_render_workers_fall_back_to_the_full_key_and_say_so(store: SettingsStore) -> None:
-    assert store.load().render_bambuddy_key() == (None, False)  # no key is not a fallback
+def test_the_bambuddy_store_falls_back_to_the_full_key(store: SettingsStore) -> None:
+    assert store.load().render_bambuddy_key() is None
     store.save(SettingsPatch(bambuddy_api_key="full"))
-    assert store.load().render_bambuddy_key() == ("full", True)
+    assert store.load().render_bambuddy_key() == "full"
     store.save(SettingsPatch(bambuddy_render_api_key="narrow"))
-    assert store.load().render_bambuddy_key() == ("narrow", False)
+    assert store.load().render_bambuddy_key() == "narrow"
 
 
-def test_a_render_worker_gets_the_narrow_key_the_url_and_the_inbox(
+def test_the_api_reads_the_narrow_key_the_url_and_the_inbox(
     store: SettingsStore, settings: Settings
 ) -> None:
     store.save(
@@ -466,7 +467,6 @@ def test_a_render_worker_gets_the_narrow_key_the_url_and_the_inbox(
         store_backend="local",
         bambuddy_url="https://b.test",
         api_key="narrow",
-        key_is_fallback=False,
         library_folder_id=7,
     )
 
@@ -485,22 +485,23 @@ def test_a_render_key_cleared_in_settings_beats_the_env_on_workers(
     store.open()
     try:
         before = load_render_store_settings(store.pool, seeded)
-        assert (before.api_key, before.key_is_fallback) == ("from-env", False)
+        assert before.api_key == "from-env"
         store.save(SettingsPatch(bambuddy_render_api_key=""))
         after = load_render_store_settings(store.pool, seeded)
-        assert (after.api_key, after.key_is_fallback) == ("full", True)
+        assert after.api_key == "full"
     finally:
         store.close()
 
 
-def test_the_bambuddy_store_needs_a_url_and_an_inbox_first(store: SettingsStore) -> None:
-    with pytest.raises(StoreNotReadyError, match="library folder"):
-        store.save(SettingsPatch(store_backend="bambuddy"))
-    store.save(
-        SettingsPatch(bambuddy_url="https://b.test", library_folder_id=7, store_backend="bambuddy")
-    )
-    assert store.load().store_backend == "bambuddy"
-    store.save(SettingsPatch(reset=["store_backend"]))
+def test_the_bambuddy_store_is_refused(store: SettingsStore) -> None:
+    """#7257: the outputs live only in the blob store, and the bambuddy store holds none,
+    so the API would refuse its next start: the save is refused, ready or not."""
+    for patch in (
+        SettingsPatch(store_backend="bambuddy"),
+        SettingsPatch(bambuddy_url="https://b.test", library_folder_id=7, store_backend="bambuddy"),
+    ):
+        with pytest.raises(OutputsNeedABlobStoreError, match="bambuddy store holds none"):
+            store.save(patch)
     assert store.load().store_backend == "local"
 
 
@@ -570,7 +571,7 @@ def test_a_blank_s3_prefix_while_on_the_s3_store_is_refused(store: SettingsStore
 
 
 def test_native_library_is_refused_on_the_local_store(store: SettingsStore) -> None:
-    with pytest.raises(StoreNotReadyError, match="set store_backend to s3 or bambuddy"):
+    with pytest.raises(StoreNotReadyError, match="set store_backend to s3 first"):
         store.save(SettingsPatch(library_backend="native"))
     assert store.load().library_backend == "bambuddy"
 
@@ -584,7 +585,7 @@ def test_native_library_saves_on_s3(store: SettingsStore) -> None:
 def test_back_to_local_is_refused_while_the_library_is_native(store: SettingsStore) -> None:
     store.save(S3_PATCH)
     store.save(SettingsPatch(store_backend="s3", library_backend="native"))
-    with pytest.raises(StoreNotReadyError, match="set store_backend to s3 or bambuddy"):
+    with pytest.raises(StoreNotReadyError, match="set store_backend to s3 first"):
         store.save(SettingsPatch(store_backend="local"))
     assert store.load().store_backend == "s3"
 
@@ -594,7 +595,7 @@ def test_resetting_the_store_to_a_local_default_is_refused_while_native(
 ) -> None:
     store.save(S3_PATCH)
     store.save(SettingsPatch(store_backend="s3", library_backend="native"))
-    with pytest.raises(StoreNotReadyError, match="set store_backend to s3 or bambuddy"):
+    with pytest.raises(StoreNotReadyError, match="set store_backend to s3 first"):
         store.save(SettingsPatch(reset=["store_backend"]))
     assert store.load().store_backend == "s3"
 
@@ -622,12 +623,6 @@ def test_resetting_the_store_to_an_s3_default_keeps_native(
         assert (saved.store_backend, saved.library_backend) == ("s3", "native")
     finally:
         opened.close()
-
-
-def test_native_library_saves_over_the_bambuddy_store(store: SettingsStore) -> None:
-    store.save(SettingsPatch(bambuddy_url="https://b.test", library_folder_id=7))
-    store.save(SettingsPatch(store_backend="bambuddy"))
-    assert store.save(SettingsPatch(library_backend="native")).library_backend == "native"
 
 
 def test_library_backend_applies_on_restart() -> None:
@@ -670,11 +665,11 @@ def test_render_store_settings_carry_s3(store: SettingsStore, settings: Settings
     )
 
 
-def test_the_readiness_check_reads_an_unstored_inbox_as_unset(
+def test_an_env_seeded_bambuddy_store_is_refused_until_left(
     tmp_path: Path, pg_conninfo: str
 ) -> None:
-    """#1253: the inbox is not env-seeded, so with no row its value is StoredSettings'
-    default, not an attribute of the deployment's ``Settings`` (which has none)."""
+    """#7257: a deployment whose environment names the bambuddy store gets no save of
+    what that store reads; a save that moves the store to s3 is the way off it."""
     seeded = Settings(
         data_dir=tmp_path,
         database_url=pg_conninfo,
@@ -684,12 +679,10 @@ def test_the_readiness_check_reads_an_unstored_inbox_as_unset(
     store = SettingsStore(seeded)
     store.open()
     try:
-        with pytest.raises(StoreNotReadyError, match="library folder"):
-            store.save(SettingsPatch(bambuddy_url="https://b.test"))
-        store.save(SettingsPatch(bambuddy_url="https://b.test", library_folder_id=7))
-        # A stored inbox counts: it is not refused as an unknown env setting.
-        store.save(SettingsPatch(bambuddy_url="https://c.test"))
-        assert store.load().bambuddy_url == "https://c.test"
+        with pytest.raises(OutputsNeedABlobStoreError):
+            store.save(SettingsPatch(bambuddy_url="https://b.test", library_folder_id=7))
+        store.save(S3_PATCH.model_copy(update={"store_backend": "s3"}))
+        assert store.load().store_backend == "s3"
     finally:
         store.close()
 
@@ -920,15 +913,15 @@ def test_an_unknown_stored_rack_algorithm_is_dropped_not_fatal() -> None:
 def test_a_save_that_would_leave_the_store_unready_with_another_waits_and_is_refused(
     store: SettingsStore, settings: Settings
 ) -> None:
-    """Clearing the URL and switching to Bambuddy are each safe alone. While one save
-    (here, by hand) holds the readiness lock and has cleared the URL, the switch waits,
-    then sees the clear and is refused: the store is never Bambuddy without a URL."""
-    store.save(SettingsPatch(bambuddy_url="https://b.test", library_folder_id=7))
+    """Clearing the bucket and switching to S3 are each safe alone. While one save
+    (here, by hand) holds the readiness lock and has cleared the bucket, the switch
+    waits, then sees the clear and is refused: the store is never S3 without a bucket."""
+    store.save(S3_PATCH)
     errors: list[Exception] = []
 
     def switch() -> None:
         try:
-            store.save(SettingsPatch(store_backend="bambuddy"))
+            store.save(SettingsPatch(store_backend="s3"))
         except Exception as error:
             errors.append(error)
 
@@ -937,7 +930,7 @@ def test_a_save_that_would_leave_the_store_unready_with_another_waits_and_is_ref
             "SELECT pg_advisory_xact_lock(hashtextextended(%s, 0))", (STORE_READINESS_LOCK,)
         )
         conn.execute(
-            "INSERT INTO settings (name, value) VALUES ('bambuddy_url', 'null'::jsonb)"
+            "INSERT INTO settings (name, value) VALUES ('store_s3_bucket', 'null'::jsonb)"
             " ON CONFLICT (name) DO UPDATE SET value = EXCLUDED.value"
         )
         thread = threading.Thread(target=switch)
@@ -949,7 +942,7 @@ def test_a_save_that_would_leave_the_store_unready_with_another_waits_and_is_ref
     assert not thread.is_alive()
     assert len(errors) == 1 and isinstance(errors[0], StoreNotReadyError)
     loaded = _fresh_load(settings)
-    assert (loaded.store_backend, loaded.bambuddy_url) == ("local", None)
+    assert (loaded.store_backend, loaded.store_s3_bucket) == ("local", None)
 
 
 @pytest.mark.parametrize(

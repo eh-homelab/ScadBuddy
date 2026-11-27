@@ -130,7 +130,6 @@ ROLE_SERIES: dict[MetricsRole, frozenset[str]] = {
         "worker_cache",
         "worker_cache_bytes",
         "render_data_bytes",
-        "store_render_key_fallback",
         "crud_client_seconds",
         "asset_prune_failures",
     },
@@ -269,7 +268,8 @@ class Metrics:
         # (`api/metrics.py` `refresh_subscriber_metrics`).
         self.event_subscriber_lag_events = Gauge(
             "scadbuddy_event_subscriber_lag_events",
-            "Events in the log past the subscriber's cursor: the newest seq less the cursor.",
+            "Events of every kind in the log past the subscriber's cursor, not only the"
+            " kinds it reads: the newest seq less the cursor.",
             ["subscriber"],
             registry=r,
         )
@@ -486,12 +486,6 @@ class Metrics:
         self.store_max_bytes = Gauge(
             "scadbuddy_store_max_bytes",
             "SCADBUDDY_STORE_MAX_TOTAL_BYTES; 0 is no limit.",
-            registry=r,
-        )
-        self.store_render_key_fallback = Gauge(
-            "scadbuddy_store_render_key_fallback",
-            "1 while this process's store holds the full Bambuddy key because no render key"
-            " is saved (spec 2026-09-27 §9); a standalone render worker never gets it.",
             registry=r,
         )
         self.worker_cache_bytes = Gauge(

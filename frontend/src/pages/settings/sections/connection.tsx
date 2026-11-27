@@ -33,24 +33,6 @@ export function Component() {
   const cache = useSettingsCache()
   const { connected, targets, projects, status } = useBambuddyResources()
   const form = useBackendSettings(id, (s) => fieldsOf(id, s), {
-    publish: ['bambuddy_url'],
-    // A Connection save that loses the Bambuddy URL takes the store back to local with it,
-    // or the server would refuse the save (it never keeps an unready Bambuddy store).
-    // Only this save's own change counts: another section's unsaved draft does not.
-    alsoSend: ({ changed, value, settings }) =>
-      changed('bambuddy_url') &&
-      value('bambuddy_url') === '' &&
-      settings.store_backend === 'bambuddy' &&
-      // ScadBuddy's own library cannot sit on the local store: the save goes as it is, the
-      // server's refusal is shown, and the user picks s3 first.
-      settings.library_backend !== 'native'
-        ? { store_backend: 'local' }
-        : {},
-    // Resetting the URL the Bambuddy store needs takes the store back to local with it.
-    alsoReset: (name, s) =>
-      name === 'bambuddy_url' && s.store_backend === 'bambuddy' && s.library_backend !== 'native'
-        ? { store_backend: 'local' }
-        : {},
     onSaved: () => {
       targets.reload()
       projects.reload()
@@ -255,17 +237,6 @@ export function Component() {
             </Button>
           )}
         </div>
-        {settings.render_key_fallback && (
-          <p
-            role="status"
-            data-testid="render-key-fallback"
-            className="mt-1.5 rounded-lg bg-warn/10 px-2.5 py-2 text-xs ring-1 ring-warn/50"
-          >
-            No render key is saved. Render workers get no Bambuddy key, so their renders on the Bambuddy
-            store fail; a worker inside the API process uses the full key, and template code can print.
-            Create a key with only Manage Library in Bambuddy and paste it above as the render key.
-          </p>
-        )}
       </FieldRow>
 
       <FieldRow

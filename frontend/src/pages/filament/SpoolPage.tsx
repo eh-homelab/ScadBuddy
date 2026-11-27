@@ -324,9 +324,13 @@ const created = (body: SpoolPatch, grams: string): SpoolCreate => {
 
 /** `SpoolCopySourceError`'s detail: the bulk create's `copy_of` names no spool (#7150, R-7150-13). */
 const COPY_SOURCE_GONE = 'copy_of names no spool'
+/** #7450-2 — the accept found another mean than the offer showed; the page checks again. */
+const INSERT_WEIGHT_CHANGED = "The insert's empty weight changed since the check. Check the new numbers, then record the weighing again."
 const message = (cause: unknown) => (cause instanceof ApiError ? cause.detail : cause instanceof Error ? cause.message : 'The server could not be reached. Try again.')
 
 const NONE = '__none__'
+/** The filament diameter a spool takes when none is set (the column default, `metrics.DEFAULT_DIAMETER_MM`). */
+const DEFAULT_DIAMETER_MM = 1.75
 
 /**
  * #7149: how the spool's tag came in, in a person's words, from Bambuddy's `data_origin`
@@ -588,7 +592,7 @@ export function SpoolPage() {
   const dryFrom = !dryTouched && dryDefaults ? dryingDefaultsText(dryDefaults) : null
   // #7280: a scale reading of a spool with an insert is checked for an offer of its empty weight.
   const scaleReading = DECIMAL.test(reading.trim()) && Number(reading) > 0 ? Number(reading) : null
-  const { check: insertCheck, pending: checkPending } = useInsertWeightCheck(saved && !saved.archived_at && saved.effective.insert_type_id ? saved.id : undefined, scaleReading)
+  const { check: insertCheck, pending: checkPending, unanswered: checkUnanswered, recheck: recheckInsertWeight } = useInsertWeightCheck(saved && !saved.archived_at && saved.effective.insert_type_id ? saved.id : undefined, scaleReading)
   // #7683: a new spool read under its label weight: the person says what is up before it is recorded.
   const [resolutionChoice, setResolutionChoice] = useState<{ reading: number; resolution: Resolution } | null>(null)
   // #7684: the archive asks for a reason and an optional final weighing.
@@ -752,6 +756,11 @@ export function SpoolPage() {
   const shown = (key: keyof Draft) => advanced || JSON.stringify(draft[key]) !== JSON.stringify(base[key])
   /** The presets and K values: Advanced, an unsaved row, or a first type that drops rows a person should see. */
   const showTables = shown('presets') || shown('k_values') || firstTypeChosen
+  /** A saved diameter other than the database default (1.75 mm) stays on screen with Advanced off. */
+  const savedDiameter = saved?.effective.diameter_mm
+  const oddDiameter = savedDiameter != null && Number(savedDiameter) !== DEFAULT_DIAMETER_MM
+  /** Whether the page shows a measurement: a weighing's breakdown, or a measured weight with its date. */
+  const weighed = saved?.last_weighing?.data.reading_g != null || (saved?.last_weighed_g != null && !!saved.last_weighed_at)
 
   const field = (key: 'colour_name' | 'diameter_mm' | 'density_g_cm3' | 'cost_per_kg' | 'label_weight_g' | 'low_stock_pct' | 'nozzle_temp_min' | 'nozzle_temp_max' | 'bed_temp_min' | 'bed_temp_max' | 'drying_temp_c' | 'drying_hours' | 'extra_colours', label: string, extra: { hint?: string; mode?: 'decimal' | 'numeric' } = {}) => (
     <OverrideField name={key} label={label} value={draft[key]} effective={eff(key)} overridden={own(key)} hasType={hasType} inputMode={extra.mode} hint={extra.hint} onChange={(next) => set(key, next)} onReset={() => void reset(key)} />
@@ -795,7 +804,17 @@ export function SpoolPage() {
     }
     let grams = filament
     if (offer && offerChecked) {
-      const accepted = await acceptInsertWeight(spoolKey, offer.reading_g)
+      let accepted
+      try {
+        accepted = await acceptInsertWeight(spoolKey, offer.reading_g, offer.new_empty_weight_g)
+      } catch (cause) {
+        // #7450-2: another spool's accept or delete moved the mean since this check.
+        if (cause instanceof ApiError && cause.status === 409 && cause.problem.code === 'insert_weight_changed') {
+          recheckInsertWeight()
+          throw new Error(INSERT_WEIGHT_CHANGED, { cause })
+        }
+        throw cause
+      }
       grams = accepted.filament_g
       setLists((was) => (was ? { ...was, insertTypes: was.insertTypes.map((one) => (one.id === accepted.insert_type.id ? accepted.insert_type : one)) } : was))
     }
@@ -1034,7 +1053,7 @@ export function SpoolPage() {
             <div className="grid gap-3 sm:grid-cols-2">
               {field('label_weight_g', 'Label weight (g)', { mode: 'numeric', hint: 'The filament on a full spool.' })}
               {pick('insert_type_id', 'Spool', lists.insertTypes)}
-              {shown('diameter_mm') && field('diameter_mm', 'Diameter (mm)', { mode: 'decimal' })}
+              {(shown('diameter_mm') || oddDiameter) && field('diameter_mm', 'Diameter (mm)', { mode: 'decimal' })}
               {shown('density_g_cm3') && field('density_g_cm3', 'Density (g/cm³)', { mode: 'decimal' })}
               {shown('low_stock_pct') && field('low_stock_pct', 'Low stock at (%)', { mode: 'numeric', hint: 'Of the label weight.' })}
               {shown('added_full') && (
@@ -1058,7 +1077,7 @@ export function SpoolPage() {
             </div>
             <p className="text-[13px] text-muted-foreground">
               {empty
-                ? `Empty spool ${empty.empty_weight_g} g (${empty.name})${empty.empty_weight_basis === 'derived' && empty.derived_count > 0 ? `, from ${empty.derived_count} new ${empty.derived_count === 1 ? 'spool' : 'spools'}` : ''}.`
+                ? `Empty spool ${empty.empty_weight_g} g (${empty.name})${empty.empty_weight_basis !== 'derived' ? '' : empty.derived_count > 0 ? `, from ${empty.derived_count} new ${empty.derived_count === 1 ? 'spool' : 'spools'}` : ', from new-spool readings no longer counted'}.`
                 : 'Empty spool weight not known. Choose its spool.'}
             </p>
             {creating ? (
@@ -1073,7 +1092,7 @@ export function SpoolPage() {
                 <div className="flex flex-col gap-2">
                   <p className="text-2xl font-semibold tracking-tight tabular-nums">{leftNow == null ? 'Not known' : grams(leftNow)}</p>
                   {saved?.archived_at && saved.closing && <ClosingSummary closing={saved.closing} at={saved.archived_at} />}
-                  {saved?.last_weighing && saved.last_weighing.data.reading_g != null ? (
+                  {saved?.last_weighing?.data.reading_g != null ? (
                     <WeighingBreakdown
                       event={saved.last_weighing}
                       // #7685: the drift's likely cause, once the history (the previous anchor, the density) has loaded.
@@ -1086,6 +1105,8 @@ export function SpoolPage() {
                         : 'Never weighed.'}
                     </p>
                   )}
+                  {/* #8107: the same condition as "Never weighed.", and not for an archived spool, which is out of use. */}
+                  {!advanced && saved && !weighed && !saved.archived_at && <p className="text-[13px] text-muted-foreground">To weigh this spool, turn on Advanced.</p>}
                   {saved && <GramsBasis basis={saved.basis} gramsLeft={leftNow} addedFull={saved.added_full ?? null} labelWeight={effective?.label_weight_g ?? null} />}
                 </div>
                 {(advanced || reading.trim() !== '') && (
@@ -1102,6 +1123,7 @@ export function SpoolPage() {
                     <Input id="spool-reading" inputMode="decimal" className="tabular-nums" value={reading} onChange={(e) => setReading(e.target.value)} />
                     {empty && readingOk && <p className="text-[12px] text-muted-foreground tabular-nums">{grams(filament)} of filament.</p>}
                     {empty && reading.trim() !== '' && DECIMAL.test(reading.trim()) && filament < 0 && <p className="text-[12px] text-warn">That is less than the empty spool.</p>}
+                    {checkUnanswered && readingOk && <p className="text-[12px] text-muted-foreground">The empty weight check did not answer. You can record the weighing without it.</p>}
                     {belowLabel && resolution && readingOk && <BelowLabelChoice check={belowLabel} value={resolution} disabled={busy} onChange={(next) => setResolutionChoice({ reading: scale, resolution: next })} />}
                     {offer && readingOk && <InsertWeightOffer offer={offer} checked={offerChecked} disabled={busy} onCheckedChange={(checked) => setOfferChoice({ reading: offer.reading_g, checked })} />}
                     <div>
@@ -1113,7 +1135,7 @@ export function SpoolPage() {
                 )}
               </div>
             )}
-            {shown('weight_locked') && (
+            {(shown('weight_locked') || saved?.weight_locked === true) && (
               <Label className="flex items-start gap-2 text-[13px] font-normal">
                 <Checkbox className="mt-0.5" checked={draft.weight_locked} onCheckedChange={(next) => set('weight_locked', next === true)} />
                 <span>
@@ -1144,14 +1166,14 @@ export function SpoolPage() {
               {field('bed_temp_min', 'Bed temperature, min (°C)', { mode: 'numeric' })}
               {field('bed_temp_max', 'Bed temperature, max (°C)', { mode: 'numeric' })}
             </div>
+            {typeError && (
+              <p role="alert" className="text-[13px] text-warn">
+                The type&apos;s presets and K values could not be loaded: {typeError}
+              </p>
+            )}
             {showTables && (
               <>
                 <div className="flex flex-col gap-2">
-                  {typeError && (
-                    <p role="alert" className="text-[13px] text-warn">
-                      The type&apos;s presets and K values could not be loaded: {typeError}
-                    </p>
-                  )}
                   <h3 className="text-[13px] font-medium">Slicer presets</h3>
                   <p className="text-[12px] text-muted-foreground">The Bambu Studio filament preset to slice with, for each printer model and nozzle. A row you do not set takes the type&apos;s.</p>
                   {firstTypeChosen ? (

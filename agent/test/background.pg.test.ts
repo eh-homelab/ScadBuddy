@@ -14,7 +14,7 @@ import { backgroundActivities, BUSY_GIVE_UP_MS, type FireResult, managerSender }
 import { BackgroundTasks, type TaskRunner } from '../src/background/service.js'
 import { BackgroundTaskStore, MAX_ACTIVE } from '../src/background/store.js'
 import { SqlBackgroundTasks } from './support/sql/backgroundTasks.js'
-import { type BuiltinContext, builtinServer, classicBuiltinServer, MONITOR_IN_SANDBOX } from '../src/builtins/server.js'
+import { type BuiltinContext, builtinServer, sessionBuiltinServer, MONITOR_IN_SANDBOX } from '../src/builtins/server.js'
 import { SandboxClient } from '../src/sandbox/client.js'
 import { LocalSandboxes } from './support/sandbox.js'
 import type { WebContext } from '../src/builtins/web.js'
@@ -431,7 +431,7 @@ describe.skipIf((skip !== undefined) || AGENT_SESSIONS_SKIP !== '')(`a session's
     const once = idOf((await call('CronCreate', { cron: '0 9 * * *', prompt: 'once', recurring: false })).text)
     await acts.bg_fire({ taskId: once, waitedMs: 0 })
     expect(await acts.bg_next({ taskId: once })).toEqual({ end: 'fired' })
-    await acts.bg_finish({ taskId: once, state: 'done', detail: 'fired' })
+    await acts.bg_finish({ taskId: once, state: 'done', detail: 'fired', monitor: false })
     expect(await store.get(once)).toMatchObject({ state: 'done', detail: 'fired' })
     await call('CronDelete', { id: cron })
     expect(await acts.bg_next({ taskId: cron })).toEqual({ end: 'gone' })
@@ -710,7 +710,7 @@ describe.skipIf((skip !== undefined) || AGENT_SESSIONS_SKIP !== '')(`a session's
       allowLoopback,
     })
     const fetchVia = async (allowLoopback: boolean, page: string) => {
-      const client = await connectInProcess(() => classicBuiltinServer(['WebFetch'], { web: web(allowLoopback) }).instance)
+      const client = await connectInProcess(() => sessionBuiltinServer(['WebFetch'], { web: web(allowLoopback) }).instance)
       try {
         const result = (await client.callTool({ name: 'WebFetch', arguments: { url: `http://pages.test:${port}/${page}`, prompt: 'title?' } })) as {
           content: { text: string }[]

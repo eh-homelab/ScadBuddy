@@ -307,18 +307,18 @@ describe('inventory tools', () => {
         return HttpResponse.json({ items: [item()] })
       }),
     )
-    const answer = firstText(await runTool(tool('inventory_item_list'), { kind: 'part', q: 'nut', low: true }, ctx()))
-    expect(search).toBe('?kind=part&q=nut&low=true&limit=200')
+    const answer = firstText(await runTool(tool('inventory_item_list'), { kind: 'hardware', q: 'nut', low: true }, ctx()))
+    expect(search).toBe('?kind=hardware&q=nut&low=true&limit=200')
     expect(answer).toMatchObject({ items: [{ id: ITEM, ui_path: `/inventory/items/${ITEM}`, kind_ui_path: '/inventory?kind=hardware' }] })
   })
 
   it('reads the kinds, or one kind with its merged schema', async () => {
     server.use(
-      http.get(`${INV}/kinds`, ({ request }) => HttpResponse.json({ kinds: [{ id: 'part', archived: new URL(request.url).search }] })),
+      http.get(`${INV}/kinds`, ({ request }) => HttpResponse.json({ kinds: [{ id: 'hardware', archived: new URL(request.url).search }] })),
       http.get(`${INV}/kinds/hardware/schema`, () => HttpResponse.json({ kind_id: 'hardware', schema: {}, own_schema: {}, keys_in_use: [] })),
     )
     expect(firstText(await runTool(tool('inventory_kind_list'), {}, ctx()))).toEqual({
-      kinds: [{ id: 'part', archived: '?archived=false', ui_path: '/inventory?kind=part' }],
+      kinds: [{ id: 'hardware', archived: '?archived=false', ui_path: '/inventory?kind=hardware' }],
     })
     expect(firstText(await runTool(tool('inventory_kind_list'), { kind_id: 'hardware' }, ctx()))).toMatchObject({
       kind_id: 'hardware',

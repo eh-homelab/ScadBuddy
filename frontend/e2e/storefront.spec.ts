@@ -120,4 +120,24 @@ test.describe('the public storefront', () => {
       expect(width, path).toBeLessThanOrEqual(390)
     }
   })
+  test('groups a design with many colours, and sets a group at once (#8127)', async ({ page }) => {
+    await page.goto('/store/l/l5')
+    await expect(page.getByRole('heading', { name: 'Dollhouse kit', level: 1 })).toBeVisible()
+    // The shop's choice is said once, not once per part.
+    await expect(page.getByText("Each part is the shop's choice, unless you pick one.")).toHaveCount(1)
+    const roof = page.getByRole('button', { name: /Roof, stairs & railing colours/ })
+    await expect(roof).toHaveAttribute('aria-expanded', 'false')
+    await roof.click()
+    await page.getByRole('button', { name: /^All 7 parts/ }).click()
+    await page.getByRole('radio', { name: 'Maroon Red · Basic' }).click()
+    await expect(page.getByRole('button', { name: /^Railing spindles/ })).toHaveAccessibleName('Railing spindles Maroon Red · Basic')
+    // One part takes its own colour; the colour in use comes first in its grid.
+    await page.getByRole('button', { name: /^Stair treads/ }).click()
+    const grid = page.getByRole('radiogroup', { name: 'Stair treads' })
+    await expect(grid.getByRole('radio').first()).toHaveAccessibleName('Jade White · Basic')
+    await grid.getByRole('radio', { name: 'Black · Basic' }).click()
+    await expect(page.getByRole('button', { name: /^All 7 parts/ })).toHaveAccessibleName('All 7 parts Mixed colours')
+    await expect(page.getByText('$12.40 for one')).toBeVisible()
+    expect(Number(await page.evaluate('document.documentElement.scrollWidth'))).toBeLessThanOrEqual(390)
+  })
 })

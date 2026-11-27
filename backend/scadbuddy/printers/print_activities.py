@@ -272,7 +272,7 @@ class LanActivities:
             if self.d.blobs is None:
                 raise _failed(
                     "This worker cannot read the native slicer's files: the API has no"
-                    " content store (set store_backend to s3 or bambuddy).",
+                    " content store (set store_backend to s3).",
                     status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
                 )
             async with aclosing(self.d.blobs.stream(sliced.blob_key)) as chunks:

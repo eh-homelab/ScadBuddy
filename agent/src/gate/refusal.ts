@@ -1,9 +1,9 @@
-// What the model is told about a parked call that was not run, in the words a classic turn
+// What the model is told about a parked call that was not run, in the words a session turn
 // uses (approvals/service.ts `refusal`): SessionGate's (the durable session workflows) and an
 // AgentSession turn's, which reads the entry's row as it holds (sessions/turnHost.ts). Free of
 // Node imports: the workflow bundle loads it.
 
-/** What the model is told when its call was not approved, in the words a classic turn uses (approvals/service.ts `refusal`). */
+/** What the model is told when its call was not approved, in the words a session turn uses (approvals/service.ts `refusal`). */
 export function refusal(tool: string, requestId: string, outcome: string, reason?: string | null): string {
   const what = `${tool} (approval ${requestId})`
   if (outcome === 'denied') return `The user denied ${what}; it was not run. Do not retry it unless the user asks you to.`

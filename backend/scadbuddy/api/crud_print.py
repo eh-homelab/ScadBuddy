@@ -338,6 +338,8 @@ router = crud_router("print")
 # The `Operation` records of the Bambuddy kinds the worker runs (Q9).
 router.routes.extend(operations_router("print").routes)
 
+#: The actor of a printer merge the print worker's `ensure-bambuddy` makes (#6949).
+PRINT_ACTOR = Actor(kind="provider", principal="print")
 #: A run the request names that is not kept.
 #: The actor of a printer merge the print worker's `ensure-bambuddy` makes (#6949).
 PRINT_ACTOR = Actor(kind="provider", principal="print")

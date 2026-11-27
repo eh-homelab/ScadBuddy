@@ -46,8 +46,8 @@ export const REFUSED_MESSAGE =
   'The assistant keeps refusing the connection. It only accepts ScadBuddy opened at its public ' +
   'HTTPS address (not a LAN IP or plain http); open it there, or see Settings → Assistant. Retrying…'
 
-/** Frames that decide or stop something: queued apart from, and sent before, the rest. */
-const CONTROL: ReadonlySet<ClientMessage['type']> = new Set(['approval.decision', 'question.answer', 'session.interrupt'])
+/** Frames that stop something: queued apart from, and sent before, the rest. */
+const CONTROL: ReadonlySet<ClientMessage['type']> = new Set(['session.interrupt'])
 
 export interface SocketTransportOptions {
   url?: string

@@ -123,6 +123,7 @@ updates:
       - "/tools/go/core"
       - "/tools/go/fleetchat"
       - "/tools/go/fleet"
+      - "/tools/go/fleetd"
       # The only module that requires the OTel SDK, the OTLP exporters, contrib's
       # runtime instrumentation and otelslog directly.
       - "/tools/go/telemetry"

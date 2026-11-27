@@ -3927,7 +3927,7 @@ export const api = {
   createAiCredential: (body: AiCredentialCreate) =>
     request<AiCredentialEntry>('/ai/credentials/entries', { method: 'POST', body: JSON.stringify(body) }),
 
-  /** Every id exactly once, first tried first; a stale list answers 409. */
+  /** Every credential the assistant uses exactly once (no fleet row), first tried first; a stale list or a fleet row answers 409. */
   reorderAiCredentials: (ids: string[]) =>
     request<AiCredentialList>('/ai/credentials/order', { method: 'PUT', body: JSON.stringify({ ids }) }),
 

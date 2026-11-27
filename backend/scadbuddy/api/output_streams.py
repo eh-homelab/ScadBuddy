@@ -1,5 +1,5 @@
 """An output's bytes as a response (#7256): `OutputStore.open_role` and `open_file` give
-an `OutputStream`, which is the blob or the NFS file, and this sends it.
+an `OutputStream` of the blob (#7257), and this sends it.
 
 It lives apart from `api/outputs.py` because `bambuddy/download.py` uses it too, and
 `api/outputs.py` imports that module; `api/outputs.py` re-exports it.

@@ -24,7 +24,7 @@ async function seeded() {
   )
 }
 
-/** The render key's warning (#426) is a status too, so find the one that says `text`. */
+/** A status that says `text`. */
 function findStatus(text: string) {
   return screen.findByText(
     (_, element) => element?.getAttribute('role') === 'status' && (element.textContent ?? '').includes(text),

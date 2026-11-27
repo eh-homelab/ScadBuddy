@@ -346,6 +346,11 @@ jobs:
       - name: Test the clusters deploy pin
         run: .github/scripts/deploy-pin.test.sh
 
+      # The hash of what each camera image runs, which keeps the recorder's
+      # and edge's pins while it does not change (#8191).
+      - name: Test the camera inputs hash
+        run: .github/scripts/camera-inputs.test.sh
+
       # Runs deploy.reusable.yml's own wait step against a stub gh: an open
       # deploy PR lands before a newer deploy replaces it (#5168).
       - name: Test the deploy PR wait

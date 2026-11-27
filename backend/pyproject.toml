@@ -146,5 +146,4 @@ markers = [
     "pg_empty: `pg_conninfo` gives an empty database, not a clone of the migrated one, for a test that migrates by hand or makes its own tables",
     "agent_migrations: the app applies the agent's migrations at start, as in production (#5299); without it the tests' apps skip them (tests/conftest.py)",
     "template_copy: the app runs its background copy of the templates' files to rows at start, as in production (#7317); without it the tests' apps skip that copy, but still run the first copy before they serve (tests/conftest.py)",
-    "output_copy: the app copies the saved outputs' files to rows at start, as in production (#7255); without it the tests' apps skip the copy (tests/api/conftest.py)",
 ]

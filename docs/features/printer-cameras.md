@@ -10,8 +10,10 @@ records and indexes only. Phase 3
 view" below). Per-print video, timelapses and retention are phases 2, 4 and 5 (spec
 [§9](../superpowers/specs/2026-11-23-printer-camera-recording-design.md#9-phases-each-one-issue-under-one-new-epic)).
 
-A printer qualifies when all three are true (`camera/store.py` `CameraStore.sources`):
+A printer qualifies when all four are true (`camera/store.py` `CameraStore.sources`):
 
+- it is a physical printer (`kind` `physical`). A Bambuddy virtual printer has a LAN link
+  and the report of the printer it forwards to, but no camera (#7996);
 - its LAN link has a sealed access code;
 - its last LAN report's `ipcam.rtsp_url` starts with `rtsps://`;
 - its toggle `printers.camera_recording` is on. The default is on. The API's
@@ -59,7 +61,22 @@ flowchart LR
   first, then indexes it (`POST …/crud/camera/printers/{id}/segments`). The standby keeps the
   segments that the index has not reached yet, so a handover leaves no gap. The object key is
   `<prefix>/camera/<printer_id>/<yyyy>/<mm>/<dd>/<HHMMSS.ffffff>.mp4`, by the segment's UTC
-  start (`camera/uploads.py`).
+  start (`camera/uploads.py`). The API refuses an index call that names a key outside
+  `camera/<printer_id>/` (422 `foreign_object_key`, `store.py` `in_camera_folder`).
+- **A stalled leader (#7407).** The lease renewal runs in a task of its own, so a leader whose
+  uploads or indexes are stuck still renews. When a leader has indexed no segment in 6
+  renewals in a row (`STALLED_LEAD_TICKS`, 30 s) while its MediaMTX says the path is ready
+  (`ready` in `GET /v3/paths/list`), it releases the lease and acquires none for 10 s
+  (`START_HOLDOFF`), so the standby takes over. A path that is not ready (the printer is off)
+  is no stall. 30 s is past the longest a healthy leader goes without an index while video
+  arrives: a lost hook's file waits `ADOPT_AGE` (12 s), then an upload pass (5 s) and at most
+  `INDEX_EVERY` (8 s) of puts. `/v3/paths/list` is read at most once per half tick: the
+  stall checks in that time share the read, including one still in flight. Each release adds one to `scadbuddy_camera_stall_releases_total`.
+  When both recorders cannot index (the bucket is down, or the API answers the lease route but fails the index route), they hand the lease back
+  and forth every 25 to 30 s (a leader releases at its sixth stalled tick, and the other
+  recorder takes the lease at its next tick), and that counter shows it (#7998). If the API
+  does not answer at all, no lease moves: the leader stops leading after `LEASE_SECONDS`,
+  no recorder takes over, and the counter stays flat.
 - **The edge** (`python -m scadbuddy.camera.edge`, `camera/edge.py`) is the live view's
   server. Its controller puts one on-demand path per recorded printer in its MediaMTX
   (`source` is the relay's RTSP URL with the relay read user, `sourceOnDemand: true`,
@@ -95,11 +112,12 @@ flowchart LR
 - **Readiness and rolling updates.** Each controller also answers `/readyz` on 9090
   (`serve_health`'s `ready` check). It answers 503 until the change follower runs, a full
   reconcile has put the API's paths in MediaMTX (`Relay.ready`, `Recorder.ready`), and
-  `/healthz` would answer 200. The recorder is ready only when every recorded printer has
-  delivered a segment since the process started, or has delivered none for 120 s
-  (`STALL_SECONDS`): a printer that is off sends no video to any recorder, so it must not
-  stop a rollout. The relay does not wait for its pulls, so a printer that is off does not
-  take the relay out of its Service.
+  `/healthz` would answer 200. The recorder is ready only when every printer it recorded at
+  its first full reconcile has delivered a segment since the process started, or has
+  delivered none for 120 s (`STALL_SECONDS`): a printer that is off sends no video to any
+  recorder, so it must not stop a rollout. A printer added later does not count, so adding a
+  printer does not take a running recorder out of ready. The relay does not wait for its
+  pulls, so a printer that is off does not take the relay out of its Service.
 
   This is what makes a rolling update of the recorders gapless. The Deployment rolls one pod
   at a time (`maxSurge: 0`, `maxUnavailable: 1`). With a liveness probe only, Kubernetes
@@ -111,8 +129,10 @@ flowchart LR
   end (spec D14), even when the old leader cannot flush at SIGTERM. The probe numbers are in the
   README.
 - **Deleted printers.** The lease and feed routes answer 404 `printer_not_found` for a printer
-  that was deleted (their rows need the printer's row). The feed senders stop on a 4xx, and a
-  recorder that gets a 404 on a lease call leads that printer no more. A recorder that stops
+  that was deleted (their rows need the printer's row). The feed senders stop on a 4xx (a 429
+  is retried with back-off, and a state wanted while the refused post was on its way is still
+  posted), and a recorder that gets a 404 on a lease call leads that printer no more. A
+  recorder that stops
   leading drops the feed state it has not posted yet (`FeedSender.forget`), so it does not
   overwrite the new leader's report.
 - **Clock (spec
@@ -174,6 +194,14 @@ Otherwise the dialog keeps the MJPEG view.
   proxy, and sends it back in the query. The edge admits a request that names it without the
   read password, so only the NetworkPolicy (the API's pods only on 8888) keeps it from being
   used outside the proxy.
+- **The session's address.** MediaMTX also binds an HLS session to the client's IP
+  (`internal/servers/hls/server.go` `findNonCDNSession`). Prod runs three API pods, and one
+  browser's requests reach the edge from each of them. A session made through one pod got 401
+  "session not found" through another, so the player kept starting over (measured 2026-11-26
+  on prod, with `httpx` from two API pods). So the proxy sends the viewer's address in
+  `X-Forwarded-For` (`core/proxies.py` `client_address`: a trusted proxy's last value, else
+  the peer; none when it is not an IP), and the edge believes it from private and loopback
+  addresses (`hlsTrustedProxies`). WHEP sessions are not bound to an address.
 - **Lifetime of a pull** (same date and method). With `hlsMuxerCloseAfter: 10s` the muxer is
   gone 10 s after the last HLS request, the session stays a reader until about 40 s, and the
   relay lost the edge's reader 48.5 s after the last request (69.2 s with the default 60 s).
@@ -231,10 +259,11 @@ The hooks need `curl`, so the camera images take the release binary on
   (each time the pull is ready again after it was not; a replaced path counts too). The
   recorders (`camera/recorder.py`): `scadbuddy_camera_segments_indexed_total`,
   `scadbuddy_camera_upload_lag_seconds`, `scadbuddy_camera_backlog_bytes`,
-  `scadbuddy_camera_leader` and `scadbuddy_camera_last_segment_age_seconds`. All are per
-  printer. The edge (`camera/edge.py` `ViewersCollector`) sets `scadbuddy_camera_viewers`,
-  read from MediaMTX's path list at each scrape. The "Cameras" row of
-  `deploy/grafana/scadbuddy-printing.json` shows them all.
+  `scadbuddy_camera_leader`, `scadbuddy_camera_last_segment_age_seconds` and
+  `scadbuddy_camera_stall_releases_total`. All are per printer. The edge (`camera/edge.py`
+  `ViewersCollector`) sets `scadbuddy_camera_viewers`, read from MediaMTX's path list at
+  each scrape. The "Cameras" row of `deploy/grafana/scadbuddy-printing.json` shows them
+  all but the stall releases.
 
 ## Tests
 
@@ -269,8 +298,10 @@ The hooks need `curl`, so the camera images take the release binary on
   fails enough times to restart it (3 failures, 10 s apart, in the README's probe numbers).
 - No retention: nothing is deleted until phase 5.
 - A relay restart is a gap of about 10 to 30 s in every printer's recording (the spec's
-  estimate, §6.9). So the relay's image is not rolled with ScadBuddy's releases: it changes
-  only when the relay's code or MediaMTX changes (spec §6.1). No deploy pin exists for it yet.
+  estimate, §6.9). So the relay's image is not rolled with ScadBuddy's releases: its pin
+  moves by hand, in a reviewed clusters PR, only when the relay's code or MediaMTX changes
+  (spec §6.1). `deploy.reusable.yml` moves the recorders' and the edge's pins with each build
+  (#7997), and never the relay's.
 - Deployment lives in eh-homelab/clusters; the issue that asks for it is drafted with the
   phase 1 PR. The edge's manifests (the Deployment, two secrets, NetworkPolicies, the UDP
   port) are not made yet.

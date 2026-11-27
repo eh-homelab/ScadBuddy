@@ -57,6 +57,20 @@ hlsAlwaysRemux: no
 # (backend/tests/camera/test_e2e_mediamtx.py, v1.21.4): the relay lost the edge's pull 69 s
 # after the last playlist request at 60s, 48.5 s at 10s.
 hlsMuxerCloseAfter: 10s
+# MediaMTX binds an HLS session to the client's IP (v1.21.4 internal/servers/hls/server.go,
+# `findNonCDNSession`). The API runs several pods, and one browser's requests reach the edge
+# from each of them, so a session made through one pod answered 401 "session not found"
+# through another (measured 2026-11-26 on prod). The API names the viewer in
+# X-Forwarded-For (`api/camera.py` `_viewer`), and the edge believes it from private and
+# loopback addresses. Only the API reaches :8888 (the NetworkPolicy named at the top), and
+# the address only binds the session: the read user allows every address (`ips: []`).
+hlsTrustedProxies:
+  - 10.0.0.0/8
+  - 172.16.0.0/12
+  - 192.168.0.0/16
+  - 127.0.0.0/8
+  - fc00::/7
+  - ::1/128
 
 authMethod: internal
 authInternalUsers:

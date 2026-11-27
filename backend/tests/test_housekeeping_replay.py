@@ -53,7 +53,9 @@ which runs both, and ``template_output_copy`` with ``TEMPLATE_COPY_PATCH``,
 ``OUTPUT_COPY_PATCH`` and ``ATTEMPT_MEDIA_PATCH``, which runs those three, and
 ``template_output_bytes`` with all four, which runs all four, and ``warm_listings`` with
 ``WARM_LISTINGS_PATCH`` (#7665) and every patch before it, which also runs
-``WARM_LISTINGS_SWEEP``
+``WARM_LISTINGS_SWEEP``, and ``outputs_cut_over`` with ``OUTPUTS_CUT_OVER_PATCH`` (#7257)
+and every patch before it, which runs neither ``OUTPUT_COPY_SWEEP`` nor
+``OUTPUT_BYTES_SWEEP``
 (``SCADBUDDY_RECORD_HISTORIES=1`` runs the recording below).
 Never re-record them: a later change adds a history recorded on the changed code beside
 them. ``template_copy``, ``template_copy_attempt_media`` and ``template_output_copy``
@@ -74,7 +76,12 @@ from temporalio import activity
 from temporalio.client import Client, WorkflowHistory
 from temporalio.worker import Replayer, Worker
 
-from scadbuddy.workflows.housekeeping import SWEEPS, Housekeeping
+from scadbuddy.workflows.housekeeping import (
+    OUTPUT_BYTES_SWEEP,
+    OUTPUT_COPY_SWEEP,
+    SWEEPS,
+    Housekeeping,
+)
 from tests.support.temporal import temporal_server
 
 HISTORIES = Path(__file__).parent / "fixtures" / "housekeeping_histories"
@@ -116,6 +123,7 @@ HISTORIES = Path(__file__).parent / "fixtures" / "housekeeping_histories"
         "template_output_copy",
         "template_output_bytes",
         "warm_listings",
+        "outputs_cut_over",
     ],
 )
 async def test_housekeeping_replays_its_recorded_history(name: str) -> None:
@@ -133,7 +141,7 @@ def recording_temporal() -> Iterator[str]:
 
 @pytest.mark.requires_temporal
 @pytest.mark.skipif(os.environ.get("SCADBUDDY_RECORD_HISTORIES") != "1", reason="records a history")
-async def test_record_warm_listings(recording_temporal: str) -> None:
+async def test_record_outputs_cut_over(recording_temporal: str) -> None:
     """Every sweep a stub, so only the workflow's own commands are recorded."""
 
     def stub(name: str) -> Any:
@@ -161,5 +169,6 @@ async def test_record_warm_listings(recording_temporal: str) -> None:
         for e in history.events
         if e.HasField("activity_task_scheduled_event_attributes")
     ]
-    assert names == list(SWEEPS)
-    (HISTORIES / "warm_listings.json").write_text(history.to_json())
+    retired = (OUTPUT_COPY_SWEEP, OUTPUT_BYTES_SWEEP)
+    assert names == [name for name in SWEEPS if name not in retired]
+    (HISTORIES / "outputs_cut_over.json").write_text(history.to_json())

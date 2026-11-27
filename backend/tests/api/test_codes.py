@@ -6,6 +6,7 @@ import pytest
 from fastapi.testclient import TestClient
 
 from tests.api.test_filament import LOCATIONS, _location, _spool
+from tests.conftest import PgPool
 
 pytestmark = pytest.mark.requires_postgres
 
@@ -39,14 +40,16 @@ def test_a_spool_resolves_with_no_name(client: TestClient) -> None:
     }
 
 
-def test_a_seeded_kind_resolves_by_its_k_code(client: TestClient) -> None:
-    kinds = client.get("/api/v1/inventory/kinds")
-    assert kinds.status_code == 200, kinds.text
+def test_a_seeded_kind_resolves_by_its_k_code(client: TestClient, pg_pool: PgPool) -> None:
+    # The kinds route reads through scadbuddy-core since #6949 K1, which these tests do
+    # not run; the seeded rows are read here instead.
+    with pg_pool.connection() as conn:
+        ids = {str(row["id"]) for row in conn.execute("SELECT id FROM item_kinds").fetchall()}
     got = client.get(f"{CODES}/K-1")
     assert got.status_code == 200, got.text
     body = got.json()
     assert body["kind"] == "item_kind" and body["code"] == "K-1"
-    assert body["id"] in {k["id"] for k in kinds.json()["kinds"]}
+    assert body["id"] in ids
     assert client.get(f"{CODES}/k1").json()["id"] == body["id"]
 
 

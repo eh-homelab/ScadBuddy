@@ -6,6 +6,7 @@ import json
 import uuid
 import zipfile
 from pathlib import Path
+from typing import Any, cast
 
 import pytest
 import trimesh
@@ -38,12 +39,19 @@ from scadbuddy.workflows.models import (
 )
 from scadbuddy.workflows.outputs import _materials, manifest_of
 from scadbuddy.workflows.pipeline_activities import PipelineActivities, pack_layout
+from tests.conftest import PgPool
 from tests.support.arrange import saved_output
+from tests.support.row_outputs import update_row
 from tests.test_objects3mf import at, bambu_project
 from tests.test_packing_and_outputs import _deps, _record
 
 GREEN, BLACK, MAGENTA = "#2E8B57", "#000000", "#FF00FF"
 PLATE = PlateSize(key="default", width=256.0, depth=256.0)
+
+
+def _no_outputs(tmp_path: Path) -> OutputStore:
+    """A store for an arrange of library files only: it reads no output."""
+    return OutputStore(DataPaths(tmp_path), rows=cast(Any, None), bytes=None)
 
 
 def _part(key: str = "lib-a", colours: list[str] | None = None) -> Part:
@@ -341,9 +349,7 @@ def test_a_library_file_twice_once_recoloured_is_two_items(tmp_path: Path) -> No
         ],
         slug="demo",
     )
-    _, inputs = arrange_inputs(
-        OutputStore(DataPaths(tmp_path)), body, plate_model=None, library=library
-    )
+    _, inputs = arrange_inputs(_no_outputs(tmp_path), body, plate_model=None, library=library)
     assert [(i.count, i.recolour) for i in inputs.items] == [(1, {}), (1, {GREEN: MAGENTA})]
     assert inputs.colours == [GREEN, BLACK, MAGENTA]
 
@@ -356,7 +362,7 @@ def test_a_colour_the_object_does_not_print_in_is_refused(tmp_path: Path) -> Non
         slug="demo",
     )
     with pytest.raises(ApiError) as raised:
-        arrange_inputs(OutputStore(DataPaths(tmp_path)), body, plate_model=None, library=library)
+        arrange_inputs(_no_outputs(tmp_path), body, plate_model=None, library=library)
     assert raised.value.status == 422
     assert "does not print in #123456" in raised.value.detail
 
@@ -366,19 +372,20 @@ def test_a_swap_to_itself_is_no_swap() -> None:
     assert obj.recolour == {BLACK: MAGENTA}
 
 
-async def test_an_arranged_outputs_colourings_are_chosen_by_their_colours(tmp_path: Path) -> None:
+async def test_an_arranged_outputs_colourings_are_chosen_by_their_colours(
+    tmp_path: Path, pg_pool: PgPool
+) -> None:
     """An output holding one part twice, once recoloured: naming the part without
     colours takes both as they are; naming the colours takes that one."""
-    paths, meta, written = await saved_output(tmp_path, count=1)
+    store, meta, written = await saved_output(tmp_path, pg_pool, count=1)
     [entry] = written.manifest
     own = entry.colours[0].upper()
-    path = OutputStore(paths).directory(meta.id) / "manifest.json"
-    entries = json.loads(path.read_text(encoding="utf-8"))
-    path.write_text(
-        json.dumps([*entries, {**entries[0], "count": 2, "recolour": {own: MAGENTA}}]),
-        encoding="utf-8",
+    entries = _manifest(store, meta.id)
+    update_row(
+        store,
+        meta.id,
+        manifest=[*entries, {**entries[0], "count": 2, "recolour": {own: MAGENTA}}],
     )
-    store = OutputStore(paths)
     both = ArrangeRequest(objects=[ArrangeObject(output_id=meta.id, part=entry.part)])
     _, inputs = arrange_inputs(store, both, plate_model=None)
     assert [(i.count, i.recolour) for i in inputs.items] == [(1, {}), (2, {own: MAGENTA})]
@@ -393,41 +400,48 @@ async def test_an_arranged_outputs_colourings_are_chosen_by_their_colours(tmp_pa
     assert [(i.count, i.recolour) for i in inputs.items] == [(1, {})]
 
 
-async def test_a_colour_every_copy_swaps_away_takes_no_slot(tmp_path: Path) -> None:
-    paths, meta, written = await saved_output(tmp_path, count=1)
+async def test_a_colour_every_copy_swaps_away_takes_no_slot(
+    tmp_path: Path, pg_pool: PgPool
+) -> None:
+    store, meta, written = await saved_output(tmp_path, pg_pool, count=1)
     [entry] = written.manifest
     own = entry.colours[0].upper()
     body = ArrangeRequest(
         objects=[ArrangeObject(output_id=meta.id, part=entry.part, recolour={own: MAGENTA})]
     )
-    _, inputs = arrange_inputs(OutputStore(paths), body, plate_model=None)
+    _, inputs = arrange_inputs(store, body, plate_model=None)
     assert MAGENTA in inputs.colours and own not in [c.upper() for c in inputs.colours]
 
 
 GOLD = "#E4BD68"
 
 
-def _with_a_gold_base(paths: DataPaths, output_id: str) -> None:
+def _manifest(store: OutputStore, output_id: str) -> list[dict[str, Any]]:
+    row = store.rows.get(output_id)
+    assert row is not None and row.manifest is not None
+    return list(row.manifest)
+
+
+def _with_a_gold_base(store: OutputStore, output_id: str) -> None:
     """The output also holds a gold part, first in its colour list: the menorah's base."""
-    directory = OutputStore(paths).directory(output_id)
-    manifest = json.loads((directory / "manifest.json").read_text(encoding="utf-8"))
+    manifest = _manifest(store, output_id)
     gold = {**manifest[0], "part": "gold-base", "colours": [GOLD]}
-    (directory / "manifest.json").write_text(json.dumps([gold, *manifest]), encoding="utf-8")
-    stored = json.loads((directory / "meta.json").read_text(encoding="utf-8"))
+    stored = store.get(output_id).model_dump(mode="json")
     stored["colors"] = [GOLD, *stored["colors"]]
-    (directory / "meta.json").write_text(json.dumps(stored), encoding="utf-8")
+    update_row(store, output_id, manifest=[gold, *manifest], meta=stored)
 
 
-async def test_a_subset_takes_only_the_colours_its_parts_print_in(tmp_path: Path) -> None:
+async def test_a_subset_takes_only_the_colours_its_parts_print_in(
+    tmp_path: Path, pg_pool: PgPool
+) -> None:
     """#4636: the menorah's candles arranged without its gold base kept all ten of the
     source's colours, gold first, so the order item had a slot no plate prints and its
     slice quote refused it. A subset's colours are those its copies print in, in the
     source's order."""
-    paths, meta, written = await saved_output(tmp_path, count=1)
+    store, meta, written = await saved_output(tmp_path, pg_pool, count=1)
     [entry] = written.manifest
     own = entry.colours[0].upper()
-    _with_a_gold_base(paths, meta.id)
-    store = OutputStore(paths)
+    _with_a_gold_base(store, meta.id)
     subset = ArrangeRequest(objects=[ArrangeObject(output_id=meta.id, part=entry.part)])
     _, inputs = arrange_inputs(store, subset, plate_model=None)
     assert [c.upper() for c in inputs.colours] == [own]
@@ -436,19 +450,21 @@ async def test_a_subset_takes_only_the_colours_its_parts_print_in(tmp_path: Path
     assert [c.upper() for c in inputs.colours] == [GOLD, own]
 
 
-async def test_a_subsets_plan_keeps_each_spool_on_its_colour(tmp_path: Path) -> None:
+async def test_a_subsets_plan_keeps_each_spool_on_its_colour(
+    tmp_path: Path, pg_pool: PgPool
+) -> None:
     """#4636: with no colours given, a plan names slots in the source's colour order, so
     a slot the subset drops takes its spool with it and the rest follow their colours."""
-    paths, meta, written = await saved_output(tmp_path, count=1)
+    store, meta, written = await saved_output(tmp_path, pg_pool, count=1)
     [entry] = written.manifest
-    _with_a_gold_base(paths, meta.id)
+    _with_a_gold_base(store, meta.id)
     body = ArrangeRequest(
         objects=[ArrangeObject(output_id=meta.id, part=entry.part)],
         filament_plan=FilamentPlan.model_validate(
             {"slots": [{"slot_id": 1, "spool_id": 7}, {"slot_id": 2, "spool_id": 9}]}
         ),
     )
-    _, inputs = arrange_inputs(OutputStore(paths), body, plate_model=None)
+    _, inputs = arrange_inputs(store, body, plate_model=None)
     assert inputs.filament_plan is not None
     assert inputs.filament_plan.slots == {1: 9}
     # The dropped slot's spool is said, not lost without a word (#4684 review).
@@ -468,11 +484,13 @@ def _arrange_job(inputs: ArrangeInputs) -> Job:
     )
 
 
-async def test_a_plan_with_a_recolour_follows_the_colours_left(tmp_path: Path) -> None:
+async def test_a_plan_with_a_recolour_follows_the_colours_left(
+    tmp_path: Path, pg_pool: PgPool
+) -> None:
     """#4684 review: a recolour and a plan with no colours given. The source's colour is
     swapped away (#3637), so its slot and its spool go, and the new colour's slot,
     numbered after it in the source's order, becomes slot 1."""
-    paths, meta, written = await saved_output(tmp_path, count=1)
+    store, meta, written = await saved_output(tmp_path, pg_pool, count=1)
     [entry] = written.manifest
     own = entry.colours[0].upper()
     body = ArrangeRequest(
@@ -481,7 +499,7 @@ async def test_a_plan_with_a_recolour_follows_the_colours_left(tmp_path: Path) -
             {"slots": [{"slot_id": 1, "spool_id": 7}, {"slot_id": 2, "spool_id": 9}]}
         ),
     )
-    _, inputs = arrange_inputs(OutputStore(paths), body, plate_model=None)
+    _, inputs = arrange_inputs(store, body, plate_model=None)
     assert inputs.colours == [MAGENTA]
     assert inputs.filament_plan is not None
     assert inputs.filament_plan.slots == {1: 9}
@@ -490,10 +508,10 @@ async def test_a_plan_with_a_recolour_follows_the_colours_left(tmp_path: Path) -
     ]
 
 
-async def test_a_planned_slot_past_every_colour_is_said(tmp_path: Path) -> None:
+async def test_a_planned_slot_past_every_colour_is_said(tmp_path: Path, pg_pool: PgPool) -> None:
     """#4702 review: a plan slot past the colour list names no colour; its spool goes
     unused, and a note says so rather than dropping it without a word."""
-    paths, meta, written = await saved_output(tmp_path, count=1)
+    store, meta, written = await saved_output(tmp_path, pg_pool, count=1)
     [entry] = written.manifest
     body = ArrangeRequest(
         objects=[ArrangeObject(output_id=meta.id, part=entry.part)],
@@ -507,7 +525,7 @@ async def test_a_planned_slot_past_every_colour_is_said(tmp_path: Path) -> None:
             }
         ),
     )
-    _, inputs = arrange_inputs(OutputStore(paths), body, plate_model=None)
+    _, inputs = arrange_inputs(store, body, plate_model=None)
     assert inputs.filament_plan is not None
     assert inputs.filament_plan.slots == {1: 7}
     # Below the list as above it (#4704 review): slot 0 names no colour either.

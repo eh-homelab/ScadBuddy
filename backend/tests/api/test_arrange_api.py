@@ -25,9 +25,8 @@ from scadbuddy.bambuddy.filaments import FilamentPlan
 from scadbuddy.bambuddy.models import SlotChoice
 from scadbuddy.bambuddy.prime_tower_choice import PrimeTowerChoice
 from scadbuddy.bambuddy.uploads import LibraryCopy
-from scadbuddy.core.paths import DataPaths
 from scadbuddy.core.problems import ApiError
-from scadbuddy.library.outputs import META_NAME, OutputMeta, OutputStore
+from scadbuddy.library.outputs import OutputMeta, OutputStore
 from scadbuddy.printers.component import PRINTERS
 from scadbuddy.printers.models import PrinterCreate
 from scadbuddy.render.bambu3mf import write_bambu_3mf
@@ -39,22 +38,26 @@ from scadbuddy.workflows.models import ArrangeInputs
 from tests.api.conftest import wait_for_job
 from tests.api.test_print_library import library_file
 from tests.api.test_send import configure
+from tests.conftest import PgPool
 from tests.support.arrange import copied_output, saved_output
 from tests.support.printers import MERGED_BY
+from tests.support.row_outputs import update_row
 
 #: A well-formed output id no output has: each test fails for its own reason, not the id's.
 UNKNOWN = "0" * 32
 
 
-def _rewrite_manifest(paths: DataPaths, meta: OutputMeta, **update: object) -> None:
-    """Change every manifest entry of a saved output on disk."""
-    path = OutputStore(paths).directory(meta.id) / "manifest.json"
-    entries = json.loads(path.read_text(encoding="utf-8"))
-    path.write_text(json.dumps([{**e, **update} for e in entries]), encoding="utf-8")
+def _rewrite_manifest(store: OutputStore, meta: OutputMeta, **update: object) -> None:
+    """Change every manifest entry of a saved output's row."""
+    row = store.rows.get(meta.id)
+    assert row is not None and row.manifest is not None
+    update_row(store, meta.id, manifest=[{**e, **update} for e in row.manifest])
 
 
-async def test_objects_become_pack_items_with_their_provenance(tmp_path: Path) -> None:
-    paths, meta, written = await saved_output(tmp_path, count=3)
+async def test_objects_become_pack_items_with_their_provenance(
+    tmp_path: Path, pg_pool: PgPool
+) -> None:
+    store, meta, written = await saved_output(tmp_path, pg_pool, count=3)
     key = written.manifest[0].part
     body = ArrangeRequest(
         objects=[ArrangeObject(output_id=meta.id, part=key, count=5, group="g")],
@@ -62,7 +65,7 @@ async def test_objects_become_pack_items_with_their_provenance(tmp_path: Path) -
         filament_plan=FilamentPlan(slots=[SlotChoice(slot_id=1, spool_id=9)]),
         name="more",
     )
-    slug, inputs = arrange_inputs(OutputStore(paths), body, plate_model=None)
+    slug, inputs = arrange_inputs(store, body, plate_model=None)
     assert slug == "demo"
     [item] = inputs.items
     assert (item.part.piece_key, item.count, item.group) == (key, 5, "g")
@@ -73,61 +76,63 @@ async def test_objects_become_pack_items_with_their_provenance(tmp_path: Path) -
     assert inputs.sources == [meta.id] and inputs.name == "more"
 
 
-async def test_a_part_not_in_the_output_is_refused(tmp_path: Path) -> None:
-    paths, meta, _ = await saved_output(tmp_path)
+async def test_a_part_not_in_the_output_is_refused(tmp_path: Path, pg_pool: PgPool) -> None:
+    store, meta, _ = await saved_output(tmp_path, pg_pool)
     body = ArrangeRequest(objects=[ArrangeObject(output_id=meta.id, part="nope", count=1)])
     with pytest.raises(ApiError) as raised:
-        arrange_inputs(OutputStore(paths), body, plate_model=None)
+        arrange_inputs(store, body, plate_model=None)
     assert raised.value.status == 422 and "has no object nope" in raised.value.detail
 
 
-async def test_an_output_without_a_manifest_is_refused_up_front(tmp_path: Path) -> None:
-    paths, meta, _ = await saved_output(tmp_path)
-    (OutputStore(paths).directory(meta.id) / "manifest.json").unlink()
+async def test_an_output_without_a_manifest_is_refused_up_front(
+    tmp_path: Path, pg_pool: PgPool
+) -> None:
+    store, meta, _ = await saved_output(tmp_path, pg_pool)
+    update_row(store, meta.id, manifest=None)
     body = ArrangeRequest(objects=[ArrangeObject(output_id=meta.id, part="x", count=1)])
     with pytest.raises(ApiError) as raised:
-        arrange_inputs(OutputStore(paths), body, plate_model=None)
+        arrange_inputs(store, body, plate_model=None)
     assert raised.value.status == 409 and raised.value.type == NEEDS_BACKFILL_PROBLEM
     assert raised.value.extensions == {"code": "needs_backfill", "output_ids": [meta.id]}
 
 
-async def test_nothing_to_place_is_refused(tmp_path: Path) -> None:
-    paths, meta, written = await saved_output(tmp_path)
+async def test_nothing_to_place_is_refused(tmp_path: Path, pg_pool: PgPool) -> None:
+    store, meta, written = await saved_output(tmp_path, pg_pool)
     body = ArrangeRequest(
         objects=[ArrangeObject(output_id=meta.id, part=written.manifest[0].part, count=0)]
     )
     with pytest.raises(ApiError) as raised:
-        arrange_inputs(OutputStore(paths), body, plate_model=None)
+        arrange_inputs(store, body, plate_model=None)
     assert raised.value.status == 422 and "nothing to arrange" in raised.value.detail
 
 
-async def test_an_object_with_its_own_plates_is_refused_by_name(tmp_path: Path) -> None:
+async def test_an_object_with_its_own_plates_is_refused_by_name(
+    tmp_path: Path, pg_pool: PgPool
+) -> None:
     """The packer refuses a multi-plate Part when it shares (allow_own=False): say so
     here, naming it, rather than in a job that fails on a worker."""
-    paths, meta, written = await saved_output(tmp_path)
-    _rewrite_manifest(paths, meta, plates=3)
+    store, meta, written = await saved_output(tmp_path, pg_pool)
+    _rewrite_manifest(store, meta, plates=3)
     key = written.manifest[0].part
     body = ArrangeRequest(objects=[ArrangeObject(output_id=meta.id, part=key, count=1)])
     with pytest.raises(ApiError) as raised:
-        arrange_inputs(OutputStore(paths), body, plate_model=None)
+        arrange_inputs(store, body, plate_model=None)
     assert raised.value.status == 422
     assert f"object {key}" in raised.value.detail and "model.scad" in raised.value.detail
     assert "its own 3 plates" in raised.value.detail
 
 
-async def test_a_planned_slot_no_part_uses_takes_no_slot(tmp_path: Path) -> None:
+async def test_a_planned_slot_no_part_uses_takes_no_slot(tmp_path: Path, pg_pool: PgPool) -> None:
     """An arranged output's `colors` can name a slot no part uses (Task 3), so `colors`
     and `parts` differ in length and are never paired by index. Arranged again with no
     colours given, that slot is left out (#4636): an order item made from the result
     would have a slot no plate prints, which its slice quote refuses."""
-    paths, meta, written = await saved_output(tmp_path)
+    store, meta, written = await saved_output(tmp_path, pg_pool)
     own = written.result.colors[0]
-    store = OutputStore(paths)
-    record = store.directory(meta.id) / META_NAME
-    data = json.loads(record.read_text(encoding="utf-8"))
+    data = store.get(meta.id).model_dump(mode="json")
     data["colors"] = ["#123456", own]
     data["parts"] = [{**data["parts"][0], "extruder": 2}]
-    record.write_text(json.dumps(data), encoding="utf-8")
+    update_row(store, meta.id, meta=data)
     body = ArrangeRequest(
         objects=[ArrangeObject(output_id=meta.id, part=written.manifest[0].part, count=1)]
     )
@@ -135,21 +140,22 @@ async def test_a_planned_slot_no_part_uses_takes_no_slot(tmp_path: Path) -> None
     assert inputs.colours == [own]
 
 
-async def test_a_printer_model_sets_the_plate(tmp_path: Path) -> None:
-    paths, meta, written = await saved_output(tmp_path)
+async def test_a_printer_model_sets_the_plate(tmp_path: Path, pg_pool: PgPool) -> None:
+    store, meta, written = await saved_output(tmp_path, pg_pool)
     body = ArrangeRequest(
         objects=[ArrangeObject(output_id=meta.id, part=written.manifest[0].part, count=2)]
     )
-    _, inputs = arrange_inputs(OutputStore(paths), body, plate_model="H2C")
+    _, inputs = arrange_inputs(store, body, plate_model="H2C")
     assert inputs.plate.key == "Bambu Lab H2C" and inputs.plate_model == "H2C"
 
 
-async def test_the_prime_tower_choice_reaches_the_arrange_job(tmp_path: Path) -> None:
+async def test_the_prime_tower_choice_reaches_the_arrange_job(
+    tmp_path: Path, pg_pool: PgPool
+) -> None:
     """#3770: `prime_tower` as print_output takes it; omitted, the job has none, and so
     does a job queued before the field existed."""
-    paths, meta, written = await saved_output(tmp_path)
+    store, meta, written = await saved_output(tmp_path, pg_pool)
     objects = [ArrangeObject(output_id=meta.id, part=written.manifest[0].part, count=2)]
-    store = OutputStore(paths)
     _, off = arrange_inputs(
         store,
         ArrangeRequest(objects=objects, prime_tower=PrimeTowerChoice(enabled=False)),
@@ -215,9 +221,9 @@ class Arranger:
 
 
 def test_with_no_printer_the_plate_falls_back_to_the_stored_default(
-    client: TestClient, app: FastAPI, tmp_path: Path
+    client: TestClient, app: FastAPI, tmp_path: Path, pg_pool: PgPool
 ) -> None:
-    _, meta, written = asyncio.run(saved_output(tmp_path))
+    _, meta, written = asyncio.run(saved_output(tmp_path, pg_pool))
     arranger = Arranger()
     app.dependency_overrides[get_render] = lambda: arranger
     assert client.put("/api/v1/settings", json={"default_plate": "H2C"}).status_code == 200
@@ -232,9 +238,9 @@ def test_with_no_printer_the_plate_falls_back_to_the_stored_default(
 
 
 def test_the_route_takes_the_prime_tower_choice(
-    client: TestClient, app: FastAPI, tmp_path: Path
+    client: TestClient, app: FastAPI, tmp_path: Path, pg_pool: PgPool
 ) -> None:
-    _, meta, written = asyncio.run(saved_output(tmp_path))
+    _, meta, written = asyncio.run(saved_output(tmp_path, pg_pool))
     arranger = Arranger()
     app.dependency_overrides[get_render] = lambda: arranger
     response = client.post(
@@ -251,11 +257,11 @@ def test_the_route_takes_the_prime_tower_choice(
 
 
 def test_an_arrange_passes_its_idempotency_key_as_the_request_id(
-    client: TestClient, app: FastAPI, tmp_path: Path
+    client: TestClient, app: FastAPI, tmp_path: Path, pg_pool: PgPool
 ) -> None:
     """#2280: a re-send while the start is still accepting keeps its key, so the
     arrange's execution answers it as the same request."""
-    _, meta, written = asyncio.run(saved_output(tmp_path))
+    _, meta, written = asyncio.run(saved_output(tmp_path, pg_pool))
     arranger = Arranger()
     app.dependency_overrides[get_render] = lambda: arranger
     response = client.post(
@@ -268,13 +274,13 @@ def test_an_arrange_passes_its_idempotency_key_as_the_request_id(
 
 
 def test_an_arrange_sent_again_with_its_key_is_the_one_claim_end_to_end(
-    client: TestClient, tmp_path: Path
+    client: TestClient, tmp_path: Path, pg_pool: PgPool
 ) -> None:
     """#2280, through the real route and `RenderService.arrange` (#2749 review): a
     re-send with the first request's Idempotency-Key is answered with the first start's
     job, after that job has finished too, not with a second arrange. Another key is a
     new request."""
-    _, meta, written = asyncio.run(saved_output(tmp_path))
+    _, meta, written = asyncio.run(saved_output(tmp_path, pg_pool))
     body = {"objects": [{"output_id": meta.id, "part": written.manifest[0].part, "count": 1}]}
     key = "e" * 32
     first = client.post("/api/v1/outputs/arrange", json=body, headers={"Idempotency-Key": key})
@@ -289,12 +295,12 @@ def test_an_arrange_sent_again_with_its_key_is_the_one_claim_end_to_end(
 
 
 def test_an_arrange_too_large_to_start_is_a_413_before_any_job(
-    client: TestClient, app: FastAPI, tmp_path: Path
+    client: TestClient, app: FastAPI, tmp_path: Path, pg_pool: PgPool
 ) -> None:
     """As a render's submit: Temporal refuses an input that large outright, so the
     request is refused before a row exists that could never start."""
-    paths, meta, written = asyncio.run(saved_output(tmp_path))
-    _rewrite_manifest(paths, meta, notes=["x" * (1024 * 1024)])
+    store, meta, written = asyncio.run(saved_output(tmp_path, pg_pool))
+    _rewrite_manifest(store, meta, notes=["x" * (1024 * 1024)])
     state: AppState = getattr(app.state, STATE_ATTR)
     before = state.render.store.counts()
     response = client.post(
@@ -307,11 +313,11 @@ def test_an_arrange_too_large_to_start_is_a_413_before_any_job(
 
 
 def test_an_output_id_that_is_not_an_id_is_a_422_before_any_job(
-    client: TestClient, app: FastAPI, tmp_path: Path
+    client: TestClient, app: FastAPI, tmp_path: Path, pg_pool: PgPool
 ) -> None:
-    """The id names a directory to look up: "*" would glob to whichever output comes
-    first and record it in the arranged output's `arranged_from`."""
-    _, _, written = asyncio.run(saved_output(tmp_path))
+    """An id is checked before any lookup: "*" once globbed to whichever output came
+    first and was recorded in the arranged output's `arranged_from`."""
+    _, _, written = asyncio.run(saved_output(tmp_path, pg_pool))
     state: AppState = getattr(app.state, STATE_ATTR)
     before = state.render.store.counts()
     response = client.post(
@@ -338,17 +344,18 @@ SECOND = "b" * 32
 THIRD = "c" * 32
 
 
-async def test_the_result_is_filed_under_the_chosen_template(tmp_path: Path) -> None:
+async def test_the_result_is_filed_under_the_chosen_template(
+    tmp_path: Path, pg_pool: PgPool
+) -> None:
     """#1864: outputs of two templates arrange together; the result is the first
     object's template unless `slug` names another of theirs."""
-    paths, meta, written = await saved_output(tmp_path)
-    other = copied_output(paths, meta, slug="other", output_id=SECOND)
+    store, meta, written = await saved_output(tmp_path, pg_pool)
+    other = copied_output(store, meta, slug="other", output_id=SECOND)
     key = written.manifest[0].part
     objects = [
         ArrangeObject(output_id=meta.id, part=key, count=1),
         ArrangeObject(output_id=other.id, part=key, count=1),
     ]
-    store = OutputStore(paths)
     assert arrange_inputs(store, ArrangeRequest(objects=objects), plate_model=None)[0] == "demo"
     chosen = ArrangeRequest(objects=objects, slug="other")
     slug, inputs = arrange_inputs(store, chosen, plate_model=None)
@@ -358,12 +365,13 @@ async def test_the_result_is_filed_under_the_chosen_template(tmp_path: Path) -> 
     assert raised.value.status == 422 and "third" in raised.value.detail
 
 
-async def test_an_object_without_a_part_is_every_object_of_its_output(tmp_path: Path) -> None:
+async def test_an_object_without_a_part_is_every_object_of_its_output(
+    tmp_path: Path, pg_pool: PgPool
+) -> None:
     """The agent names a source, not its manifest: `part` omitted places every object,
     each at its own count unless `count` says otherwise."""
-    paths, meta, written = await saved_output(tmp_path, count=3)
+    store, meta, written = await saved_output(tmp_path, pg_pool, count=3)
     key = written.manifest[0].part
-    store = OutputStore(paths)
     _, inputs = arrange_inputs(
         store, ArrangeRequest(objects=[ArrangeObject(output_id=meta.id)]), plate_model=None
     )
@@ -376,12 +384,14 @@ async def test_an_object_without_a_part_is_every_object_of_its_output(tmp_path: 
     assert [i.count for i in inputs.items] == [5]
 
 
-async def test_the_copy_cap_holds_once_omitted_counts_are_read(tmp_path: Path) -> None:
-    paths, meta, _ = await saved_output(tmp_path, count=3)
-    _rewrite_manifest(paths, meta, count=500)
+async def test_the_copy_cap_holds_once_omitted_counts_are_read(
+    tmp_path: Path, pg_pool: PgPool
+) -> None:
+    store, meta, _ = await saved_output(tmp_path, pg_pool, count=3)
+    _rewrite_manifest(store, meta, count=500)
     body = ArrangeRequest(objects=[ArrangeObject(output_id=meta.id)] * 5)
     with pytest.raises(ApiError) as raised:
-        arrange_inputs(OutputStore(paths), body, plate_model=None)
+        arrange_inputs(store, body, plate_model=None)
     assert raised.value.status == 422 and "2500 copies" in raised.value.detail
 
 
@@ -394,13 +404,13 @@ def test_an_object_names_one_source(client: TestClient) -> None:
 
 
 def test_two_templates_and_a_library_file_arrange_together(
-    client: TestClient, app: FastAPI, tmp_path: Path
+    client: TestClient, app: FastAPI, tmp_path: Path, pg_pool: PgPool
 ) -> None:
     """#1864: a library file ScadBuddy uploaded arranges through the output it is a copy
     of (`output_bambuddy_uploads`), beside outputs of two templates."""
-    paths, meta, written = asyncio.run(saved_output(tmp_path))
-    other = copied_output(paths, meta, slug="other", output_id=SECOND)
-    uploaded = copied_output(paths, meta, slug="demo", output_id=THIRD)
+    store, meta, written = asyncio.run(saved_output(tmp_path, pg_pool))
+    other = copied_output(store, meta, slug="other", output_id=SECOND)
+    uploaded = copied_output(store, meta, slug="demo", output_id=THIRD)
     state: AppState = getattr(app.state, STATE_ATTR)
     asyncio.run(
         state.uploads.record(uploaded.id, LibraryCopy(id=77, folder_id=None, target_key="H2D"))
@@ -442,12 +452,12 @@ def two_colour_3mf(tmp_path: Path) -> bytes:
 
 @respx.mock
 def test_a_plain_library_file_arranges_beside_an_output(
-    client: TestClient, app: FastAPI, tmp_path: Path
+    client: TestClient, app: FastAPI, tmp_path: Path, pg_pool: PgPool
 ) -> None:
     """#1863: a file no output records is read from its 3MF, its objects stored as
     pieces the job places and holds."""
     configure(client)
-    _, meta, written = asyncio.run(saved_output(tmp_path))
+    _, meta, written = asyncio.run(saved_output(tmp_path, pg_pool))
     library_file(88, content=two_colour_3mf(tmp_path))
     arranger = Arranger()
     app.dependency_overrides[get_render] = lambda: arranger
@@ -478,13 +488,13 @@ def test_a_plain_library_file_arranges_beside_an_output(
 
 @respx.mock
 def test_a_mixed_arrange_is_filed_under_any_template(
-    client: TestClient, app: FastAPI, tmp_path: Path
+    client: TestClient, app: FastAPI, tmp_path: Path, pg_pool: PgPool
 ) -> None:
     """#2284: with a library file in the mix the result may be filed under a template
     none of its outputs is of, so long as it is one."""
     configure(client)
-    paths, meta, written = asyncio.run(saved_output(tmp_path))
-    other = copied_output(paths, meta, slug="other", output_id=SECOND)
+    store, meta, written = asyncio.run(saved_output(tmp_path, pg_pool))
+    other = copied_output(store, meta, slug="other", output_id=SECOND)
     library_file(88, content=two_colour_3mf(tmp_path))
     arranger = Arranger()
     app.dependency_overrides[get_render] = lambda: arranger
@@ -503,13 +513,13 @@ def test_a_mixed_arrange_is_filed_under_any_template(
 
 @respx.mock
 def test_a_library_file_that_places_nothing_is_no_source(
-    client: TestClient, app: FastAPI, tmp_path: Path
+    client: TestClient, app: FastAPI, tmp_path: Path, pg_pool: PgPool
 ) -> None:
     """#2540: a library file whose every object is at count 0 placed nothing, so it
     neither frees the result from its outputs' template nor shows in "Arranged from"."""
     configure(client)
-    paths, meta, written = asyncio.run(saved_output(tmp_path))
-    copied_output(paths, meta, slug="other", output_id=SECOND)
+    store, meta, written = asyncio.run(saved_output(tmp_path, pg_pool))
+    copied_output(store, meta, slug="other", output_id=SECOND)
     library_file(88, content=two_colour_3mf(tmp_path))
     arranger = Arranger()
     app.dependency_overrides[get_render] = lambda: arranger
@@ -529,12 +539,12 @@ def test_a_library_file_that_places_nothing_is_no_source(
 
 @respx.mock
 def test_a_library_file_whose_output_was_deleted_arranges_as_a_plain_file(
-    client: TestClient, app: FastAPI, tmp_path: Path
+    client: TestClient, app: FastAPI, tmp_path: Path, pg_pool: PgPool
 ) -> None:
     """#2138: the upload row outlives a deleted output, so the file is read from its 3MF
     like any other library file, as the listing already shows it."""
     configure(client)
-    asyncio.run(saved_output(tmp_path))
+    asyncio.run(saved_output(tmp_path, pg_pool))
     state: AppState = getattr(app.state, STATE_ATTR)
     asyncio.run(state.uploads.record(UNKNOWN, LibraryCopy(id=88, folder_id=None, target_key="k")))
     library_file(88, content=two_colour_3mf(tmp_path))
@@ -555,10 +565,10 @@ def test_a_library_file_whose_output_was_deleted_arranges_as_a_plain_file(
 
 @respx.mock
 def test_a_library_file_with_part_omitted_keeps_its_own_count(
-    client: TestClient, app: FastAPI, tmp_path: Path
+    client: TestClient, app: FastAPI, tmp_path: Path, pg_pool: PgPool
 ) -> None:
     configure(client)
-    asyncio.run(saved_output(tmp_path))
+    asyncio.run(saved_output(tmp_path, pg_pool))
     library_file(88, content=two_colour_3mf(tmp_path))
     listed = client.get("/api/v1/print/library/88/objects")
     assert listed.status_code == 200, listed.text
@@ -584,12 +594,12 @@ def test_a_library_file_with_part_omitted_keeps_its_own_count(
 
 @respx.mock
 def test_a_library_file_listed_once_is_not_read_again_to_arrange(
-    client: TestClient, app: FastAPI, tmp_path: Path
+    client: TestClient, app: FastAPI, tmp_path: Path, pg_pool: PgPool
 ) -> None:
     """#1973: the dialog's listing reads the file and stores its pieces; listing it
     again and the arrange after it download nothing."""
     configure(client)
-    asyncio.run(saved_output(tmp_path))
+    asyncio.run(saved_output(tmp_path, pg_pool))
     content = two_colour_3mf(tmp_path)
     download = library_file(88, content=content, file_hash=hashlib.sha256(content).hexdigest())
     listed = client.get("/api/v1/print/library/88/objects")
@@ -612,10 +622,10 @@ def test_a_library_file_listed_once_is_not_read_again_to_arrange(
 
 @respx.mock
 def test_library_files_alone_are_filed_under_a_template_named(
-    client: TestClient, app: FastAPI, tmp_path: Path
+    client: TestClient, app: FastAPI, tmp_path: Path, pg_pool: PgPool
 ) -> None:
     configure(client)
-    asyncio.run(saved_output(tmp_path))
+    asyncio.run(saved_output(tmp_path, pg_pool))
     library_file(88, content=two_colour_3mf(tmp_path))
     arranger = Arranger()
     app.dependency_overrides[get_render] = lambda: arranger
@@ -631,12 +641,12 @@ def test_library_files_alone_are_filed_under_a_template_named(
 
 @respx.mock
 def test_a_library_file_that_cannot_be_read_is_refused_saying_why(
-    client: TestClient, app: FastAPI, tmp_path: Path
+    client: TestClient, app: FastAPI, tmp_path: Path, pg_pool: PgPool
 ) -> None:
     """A sliced file, and one that is no 3MF, are refused by a code the UI and the
     agent tell apart, naming every such file and why."""
     configure(client)
-    _, meta, written = asyncio.run(saved_output(tmp_path))
+    _, meta, written = asyncio.run(saved_output(tmp_path, pg_pool))
     library_file(88, file_type="gcode.3mf")
     library_file(89, content=b"not a zip")
     arranger = Arranger()
@@ -674,13 +684,13 @@ def _registry_row(client: TestClient, *, bambuddy_id: int | None = None) -> str:
 
 @respx.mock
 def test_a_registry_printer_sets_the_plate_with_no_bambuddy_call(
-    client: TestClient, app: FastAPI, tmp_path: Path
+    client: TestClient, app: FastAPI, tmp_path: Path, pg_pool: PgPool
 ) -> None:
     """#4551: the dialog's registry `printer` is the plate's printer, read from its row,
     so a printer only the LAN reaches (or a native one) costs no Bambuddy read: respx
     refuses any request it has no route for."""
     configure(client)
-    _, meta, written = asyncio.run(saved_output(tmp_path))
+    _, meta, written = asyncio.run(saved_output(tmp_path, pg_pool))
     arranger = Arranger()
     app.dependency_overrides[get_render] = lambda: arranger
     response = client.post(
@@ -696,10 +706,10 @@ def test_a_registry_printer_sets_the_plate_with_no_bambuddy_call(
 
 
 def test_a_registry_printer_linking_another_bambuddy_printer_is_refused(
-    client: TestClient, app: FastAPI, tmp_path: Path
+    client: TestClient, app: FastAPI, tmp_path: Path, pg_pool: PgPool
 ) -> None:
     """As a run refuses the pair (`DisagreeingPrinterError`): packed for neither."""
-    _, meta, written = asyncio.run(saved_output(tmp_path))
+    _, meta, written = asyncio.run(saved_output(tmp_path, pg_pool))
     arranger = Arranger()
     app.dependency_overrides[get_render] = lambda: arranger
     response = client.post(

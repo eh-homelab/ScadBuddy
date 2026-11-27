@@ -194,7 +194,7 @@ func TestTheDefaultOTLPCopyHasNoPathErrorOrCredentials(t *testing.T) {
 	}
 	got := map[string]string{}
 	r.WalkAttributes(func(kv attribute.KeyValue) bool {
-		got[string(kv.Key)] = kv.Value.Emit()
+		got[string(kv.Key)] = kv.Value.String()
 		return true
 	})
 	for key, value := range got {

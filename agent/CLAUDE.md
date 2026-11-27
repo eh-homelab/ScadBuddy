@@ -46,8 +46,7 @@ Readiness: `src/api/crudAreas.ts` `CrudAreas` reads `GET …/crud/agent/areas` f
 not ready: `/mcp` and the data routes answer 503. It is not ready either until the API has
 released the input-hash key (`InputHashKey.isReleased`, `dataHealthOf`'s `keyReleased`), but only
 `/mcp`, health, the workers and the pending-input respond (an answer is audited with its hash,
-503 with `retry`; the chat socket's `question.answer` gets an `unavailable` error to send again,
-`routes/chat.ts` `errorEvent`) wait for the key, not the other data routes (`AgentData.areasReady`,
+503 with `retry`) wait for the key, not the other data routes (`AgentData.areasReady`,
 `routes/module.ts` `ready`), so Settings still answers on an API with no KEK: a tool
 call hashes its input for the audit log after it ran, so no Temporal worker polls before then
 (`AgentWorker`'s `before`), the worker's `/readyz` names the missing areas or the key, and `ai` says
@@ -425,10 +424,10 @@ opens every one and seals it again byte for byte).
     `scadbuddy-agent` with `agent-sessions` when the build has an id (#2726 Phase 11; the
     host queues stay unversioned, `agent/test/temporal.versioning.temporal.test.ts`):
     every `ALL_TOOLS` entry as an activity under its name (`toolActivities.ts`,
-    `runToolWithOutcome` with `gate: 'workflow'`, only for a `session-<id>` workflow (as the
-    session's owner with its turn's tiers), or a flow run's `flow-<id>` (`flowRuns.ts`, #1057: as the
-    run's starter, in no session; a gated call needs the backend's `workflow_run_decisions`
-    approval; no browser tools)), a turn's other tools (#2320, plan Step 9.3,
+    `runToolWithOutcome` with `gate: 'workflow'`, only for a flow run's `flow-<id>` (`flowRuns.ts`,
+    #1057: as the run's starter, in no session; a gated call needs the backend's
+    `workflow_run_decisions` approval; no browser tools); a session's call is `tool:<name>` in its
+    ToolCall workflow, and a bare one from any other workflow is refused `UnknownSession`, #7323), a turn's other tools (#2320, plan Step 9.3,
     `turnTools.ts`, built by `turnServers.ts`: remote plugins
     through the forwarder, packages' http MCP servers and `http_request`): `listTurnTools` lists them per turn as
     `<server>__<tool>`, `turn_tool_tier` tiers a call from its input before it may park,
@@ -554,7 +553,7 @@ opens every one and seals it again byte for byte).
     colliding tools are hidden. Unlisted plugin tools are `outward`.
     A session's browser options (#7027, `ai_sessions.browser`) go to every remote plugin
     route of its turns as `X-ScadBuddy-Browser` (`forwarder.ts` `BROWSER_HEADER`, their JSON;
-    none when the session has none): a classic turn's from `ClaimedSession.browser`, a durable
+    none when the session has none): a session turn's from `ClaimedSession.browser`, a durable
     turn's and its kept client's from the row its owner is read from (`RowSessionOwners`, into
     `TurnContext.browser`; a listing's from the session the turn holds), never a second read; a
     flow's never. Only the forwarder sets it; a client's own is dropped. The playwright-mcp
@@ -616,8 +615,25 @@ opens every one and seals it again byte for byte).
     `src/routes/pluginPackages.ts`). Postgres holds the pin (a commit, or for an archive
     or npm package the file's sha256, `pin_kind` `bytes`, plus the content hash);
     `<state dir>/plugins/` is only a cache, re-hashed before every load and
-    re-fetched from the pin: a commit from git, a bytes pin from its mirror in the
-    API's area `package-mirrors` (`mirror.ts`), never upstream. Downloads go through
+    rebuilt from the pin's mirror in the API's area `package-mirrors` (`mirror.ts`), never
+    upstream: a bytes pin's file, or a commit pin's files as a deterministic zip (#7907,
+    `zip.ts`; `mirror_sha256`, or `pending_mirror_sha256` for a re-pin), used only when
+    its files hash to the pin. A load (turn, warm-up, file read, header secrets) never runs
+    git (the owner's decision of 2026-11-26 on #7907): with no usable mirror it leaves the
+    package out (`MirrorNotReadyError`: "its mirror is not ready yet", "its mirror failed its
+    check (…)" or "its mirror could not be read (…)") and starts the
+    mirror job (`mirrorJob.ts`): on Temporal the `PackageMirror` workflow on `agent-tools`
+    (`temporal/packageMirror.ts`, id `package-mirror-<name>-<commit>-<16 of the hash>`,
+    `USE_EXISTING` + `ALLOW_DUPLICATE`, so a run open is joined and a finished one can run
+    again), else in this process. Its activity reads the pin from the row, keeps a recorded
+    mirror that reads back, else fetches with `MIRROR_FETCH_TIMEOUT_MS` (10 min), checks
+    the hash, and writes and records the zip (`makeMirror`); a hash mismatch, or a zip
+    past `MIRROR_MAX_BYTES` (24 MiB, the API's `MAX_MIRROR_BYTES`), is `PackageMirrorRefused`,
+    never retried. The zip is unpacked with the content hash's caps (`COMMIT_MIRROR_LIMITS`:
+    2,000 files, 5 MiB each, 20 MiB in all), not a download's (`unpack.ts`
+    `UNPACK_LIMITS`), so every package that can be pinned loads. Install and re-pin put
+    and record their own zip (`recordPreparedMirror`) and start the job only when that
+    failed; approving a commit pin with no mirror starts it. Downloads go through
     the egress check at every hop (`download.ts`), archives are unpacked by
     `unpack.ts` (no links, devices or paths out). Install stores the pin unapproved;
     approving needs the exact commit (or `bytes_sha256`, or `version`) and hash. `vet.ts` adds rules

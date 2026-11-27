@@ -405,7 +405,23 @@ The agent reads no KEK (#5299 step 12).
   credentials with the KEK (areas `credentials` and `payload-keys`,
   [`backend/scadbuddy/api/crud_agent_secrets.py`](../../backend/scadbuddy/api/crud_agent_secrets.py)),
   and the agent never opens one. A turn's credentials come from `POST …/crud/agent/credentials/reveal` (purpose
-  `turn`; `redact` for the scrubbing of tool output, `test` for a connection test), a
+  `turn`; `redact` for the scrubbing of tool output, `test` for a connection test; only the
+  rows whose `scope` is `agent` or `both`, filtered in the reveal's SQL, so a fleet row and every
+  `claude_login` stay closed to the agent and a fleet row's id reads as unknown, #7983; so
+  `redact` leaves fleet secrets out too, which is correct: the agent's process never holds a
+  fleet secret, so it has none to leak. The agent's caller cannot change a fleet row (a
+  `claude_login`, or scope `fleet`) in any way, each refusal the same 409 `credential-refused`:
+  a create or save of a `claude_login`, a save over a fleet row or into scope `fleet`
+  (`agent_data/credentials.py` `_refuse_fleet_rows`, core's `refuseFleetRows`), and a delete,
+  rename, reset or event on a fleet row (`_refuse_if_fleets`, core's `refuseIfFleets`: each
+  write's SQL matches the agent's rows only). Its reorder names the agent's rows only (an
+  order that names a fleet row is the 409), and every fleet row keeps its priority. With no
+  id, its read, save and delete take the first row the agent uses, never a fleet row, so the
+  deprecated single-credential routes act on that row. So a compromised agent pod can neither
+  plant a login that a fleet machine installs nor replace, delete, rename, reset, cool down or
+  disable a fleet login. Only the fleet's own caller (#7984, `agent=False` in the store) writes
+  fleet rows. Any other caller's save that widens a `fleet` row to `agent` or `both` must carry
+  the secret again, else it is a 422), a
   subject's payload data key from `POST …/crud/agent/payload-keys/{subject}`, never the
   KEK. Each answers the `agent` service credential only, writes its `ai_audit` row in the
   same transaction (principal `service:agent`, never the secret), and is `no-store`. A
@@ -660,11 +676,27 @@ same UI guard as credential writes, with the same limitation (Known limitations,
 
 **Pin and cache.** The content hash is SHA-256 over a sorted list of path, executable bit
 and file SHA-256 (`hashTree()`, `hash.ts`). The cached copy is hashed again before every
-load. If it does not match, it is deleted and fetched again at the pinned commit, and the
-package loads only if the new files hash to the pin (`materialise()`, `install.ts`). The
+load. If it does not match, it is deleted and read again from the pin's mirror (below;
+a load never fetches git), and the package loads only if the new files hash to the pin (`materialise()`, `install.ts`). The
 package is also vetted again at every load, so rules that have tightened since approval
 still apply. A process that writes the cache between the check and Claude Code's read is
 not caught; such a process already controls the pod.
+
+**Commit pin mirrors (#7907).** A commit pin's files are also kept in the blob store as a
+zip, through the same area `package-mirrors` and hold rules as a bytes pin (below). The
+row records the zip's SHA-256 (`mirror_sha256`, or `pending_mirror_sha256` for a re-pin)
+through `POST …/plugin-packages/{name}/mirror`, which the API accepts only for the commit
+and content hash that the row names, only while that package holds the zip, and which
+changes no pin, approval or switch. A cache miss unpacks the recorded zip with the
+unpacking rules below, under the content hash's caps (2,000 files, 5 MiB each, 20 MiB in
+all; `install.ts` `COMMIT_MIRROR_LIMITS`) rather than a download's, and uses it only when
+its files hash to `content_hash`; then it is
+vetted as a git copy is. So the mirror can only give back the files that the admin
+approved. A load never fetches git (the owner's
+[decision of 2026-11-26](https://github.com/eh-homelab/ScadBuddy/issues/7907)): with no
+usable mirror the package is left out of the turn, and the `PackageMirror` workflow on
+`agent-tools` fetches the pinned commit, checks the content hash, and only then writes and
+records the zip. A fetch whose files hash to anything else is refused and never recorded.
 
 **Bytes pins (#6935, spec 2026-11-21 §6.6).** An archive or npm package has no commit,
 so it is pinned to the SHA-256 of the file fetched at install (`pin_kind` `bytes`,
@@ -832,7 +864,7 @@ A turn that loads an allowed pin also gets two more things:
   `outward`, and in a session it parks for a human. The session's own built-ins
   (`WebFetch`, `WebSearch` and the background ones, `access/nativeBuiltins.ts`
   `SESSION_BUILTINS`) are never among them: every session turn gets those from the agent's
-  `builtin` server (`builtins/server.ts` `classicBuiltinServer`, `mcp__builtin__<Name>`),
+  `builtin` server (`builtins/server.ts` `sessionBuiltinServer`, `mcp__builtin__<Name>`),
   whether or not a package names them, each at its `builtin:claude-code` item's access
   unless that item is `off` (#5870, [operating.md](operating.md) §9). `CronCreate`,
   `ScheduleWakeup` and `Workflow` run at `write` in every turn (they were `outward` while only

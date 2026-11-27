@@ -1,5 +1,5 @@
 """Answers and approvals for a flow run's parked calls (a person's, or an agent's answer
-that `flow_answerers` admits, #7471), as operations on the
+that `flow_answerers` or the run's grant admits, #7471), as operations on the
 `projects` queue (#1057, plan 2026-10-09-durable-phase-6-flows.md decisions A and B).
 
 Each records the decision in `workflow_run_decisions` first, then tells the harness with
@@ -157,6 +157,7 @@ from scadbuddy.flows.print_binding import (
 )
 from scadbuddy.flows.store import (
     FlowStore,
+    GrantLapsedError,
     HopMovedError,
     ResetBeforeFloorError,
     ResetSupersededError,
@@ -173,8 +174,9 @@ if TYPE_CHECKING:
     from scadbuddy.crud.projects import RemoteFlowStore
 
 FLOW_ANSWER = "flow_answer"
-#: An agent's answer, text or a task's (`task_id`), which the setting `flow_answerers` let
-#: through (#7471). The only kind whose request says who answers: a person's never does.
+#: An agent's answer, text or a task's (`task_id`), which the setting `flow_answerers` or
+#: the run's grant let through (#7471, `admitted_by`). The only kind whose request says
+#: who answers: a person's never does.
 AGENT_ANSWER = "flow_agent_answer"
 FLOW_DECIDE = "flow_decide"
 #: A person's typed answer to a prompt's task (#7364).
@@ -323,11 +325,12 @@ def _resolved() -> ApiError:
 
 
 def not_allowed() -> ApiError:
-    """An answer by an agent that the setting does not let answer (#7471)."""
+    """An answer by an agent that neither the setting nor the run's grant lets answer
+    (#7471)."""
     return ApiError(
         status.HTTP_403_FORBIDDEN,
-        "Only a person answers this flow's questions. The setting flow_answerers says who"
-        " else may.",
+        "Only a person answers this flow's questions. The setting flow_answerers, or the"
+        " run's grant, says who else may.",
         type_=ANSWER_NOT_ALLOWED,
         setting="flow_answerers",
     )
@@ -785,17 +788,22 @@ def flow_kinds(
         if not sent:
             await at_execution(str(checked["workflow_id"]), decision.workflow_run_id)
         replaced = None
-        if not await store.record_decision(decision):
-            again = await store.get_decision(decision.request_id)
-            if again is not None and await decision_update_id(run_keys(), again) == update_id:
-                # Another attempt of this decision recorded it since the read, with what it
-                # replaced: its row stands.
-                decision = again
-                sent = await decision_landed(checked, again) is True
-            else:
-                replaced = await take_over(checked, decision)
-                if replaced is None:
-                    raise taken()
+        try:
+            recorded = await store.record_decision(decision)
+            if not recorded:
+                again = await store.get_decision(decision.request_id)
+                if again is not None and await decision_update_id(run_keys(), again) == update_id:
+                    # Another attempt of this decision recorded it since the read, with what
+                    # it replaced: its row stands.
+                    decision = again
+                    sent = await decision_landed(checked, again) is True
+                else:
+                    replaced = await take_over(checked, decision)
+                    if replaced is None:
+                        raise taken()
+        except GrantLapsedError:
+            # The grant that admitted an agent's answer was revoked or lapsed since the route.
+            raise not_allowed() from None
         if not sent:
             await tell(checked, decision, taken, send, replaced, update_id)
 
@@ -1383,6 +1391,9 @@ def flow_kinds(
             run=run_agent_answer,
             run_attempts=3,
             queue="projects",
+            # A repeat is the same request, whichever of the setting or a grant admits it
+            # now: it gets its first answer.
+            unkeyed=frozenset({"admitted_by"}),
         ),
         OperationKind(
             name=FLOW_DECIDE, check=check_decide, run=run_decide, run_attempts=3, queue="projects"

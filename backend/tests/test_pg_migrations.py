@@ -2282,6 +2282,22 @@ def test_a_person_kind_with_a_seeded_id_and_other_stock_raises(pg_conninfo: str)
 
 
 @pytest.mark.requires_postgres
+def test_a_person_kind_with_a_seeded_id_is_compared_by_its_inherited_counting(
+    pg_conninfo: str,
+) -> None:
+    """`tool` sets no counting of its own; its seeded chain (equipment, durable) counts by
+    unit, so a person's `tool` tracked by unit, with stock, does not stop the migration."""
+    with psycopg.connect(pg_conninfo) as conn:
+        _before_inventory_class(conn)
+        conn.execute("UPDATE item_kinds SET builtin = false, tracking = 'unit' WHERE id = 'tool'")
+        _item(conn, "tool", "Hex key")
+        migrate(conn)
+        assert conn.execute("SELECT builtin FROM item_kinds WHERE id = 'tool'").fetchone() == (
+            True,
+        )
+
+
+@pytest.mark.requires_postgres
 def test_a_moved_kind_keeps_its_old_chains_schema(pg_conninfo: str) -> None:
     """§8 keeps every row's meaning: a kind whose parent changed keeps the properties its
     old chain gave it, in its own schema, and the report names it."""
@@ -2355,3 +2371,37 @@ def test_property_history_backfills_existing_rows(pg_conninfo: str) -> None:
     assert changed_at == [(updated_at,) for _, _, updated_at in rows]
     assert cursor == before
     assert all(seq > before[0] for seq, _, _ in rows)
+
+
+def _late(*slugs: str) -> tuple[Migration, ...]:
+    """Every file but `slugs`, as on a database that ran main before they merged."""
+    late = {MIGRATIONS[_index(s)].id for s in slugs}
+    return tuple(m for m in MIGRATIONS if m.id not in late)
+
+
+@pytest.mark.requires_postgres
+@pytest.mark.parametrize(
+    "first",
+    [MIGRATIONS, _late("inventory_service_caller", "service_callers_inventory_and_rotator")],
+    ids=["fresh", "late inventory files"],
+)
+def test_both_inventory_and_fleet_rotator_are_callers(
+    pg_conninfo: str, first: tuple[Migration, ...]
+) -> None:
+    """#6949: the `inventory` caller and main's `fleet-rotator` both pass both caller
+    CHECKs, whichever order their migrations ran in."""
+    with psycopg.connect(pg_conninfo) as conn:
+        migrate(conn, first)
+        migrate(conn)
+        for n, caller in enumerate(("inventory", "fleet-rotator")):
+            conn.execute(
+                "INSERT INTO service_credentials (id, caller, scopes, secret_hash,"
+                " secret_sealed, dek_sealed, kek_id, expires_at)"
+                " VALUES (%s, %s, '{}', %s, '', '', 'k', now() + interval '1 day')",
+                (f"{n:016x}", caller, bytes([n]) * 32),
+            )
+            conn.execute(
+                "INSERT INTO service_caller_suspensions (caller, suspended_at, suspended_by)"
+                " VALUES (%s, now(), 'test')",
+                (caller,),
+            )

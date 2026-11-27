@@ -44,7 +44,8 @@ import { forwardForRun, PluginForwarder } from './plugins/forwarder.js'
 import { startCredentialGateway, stopCredentialGateway } from './gateway/server.js'
 import { CrudPluginSessions, endOwnSessions, replicaIdentity, runPluginSessionSweep } from './plugins/pluginSessions.js'
 import { GitFetcher } from './plugins/packages/git.js'
-import { loadPackagesForRun, PackageInstaller, packageLoadCheck, verifiedReview, warmPackages } from './plugins/packages/install.js'
+import { localMirrorJobs, packageMirrorActivities, temporalMirrorJobs } from './plugins/packages/mirrorJob.js'
+import { loadPackagesForRun, type MirrorJobs, PackageInstaller, packageLoadCheck, verifiedReview, warmPackages } from './plugins/packages/install.js'
 import { reviewsByHash } from './access/packageProvider.js'
 import { CrudPackageStore } from './plugins/packages/store.js'
 import { CrudPackageMirror } from './plugins/packages/mirror.js'
@@ -462,11 +463,22 @@ const packageMirror = new CrudPackageMirror(crudTarget)
 // A hosted plugin's versions (#6934) are read from the API too (area `hosted-plugins`, one of
 // `STORE_AREAS`).
 const hostedPlugins = new CrudHostedPlugins(crudTarget)
+// A commit pin's mirror job (#7907) fetches with git only there, never on a load: a depth-1
+// fetch of the hindsight monorepo took 132 s on a 2-CPU worker pod, past the install fetcher's
+// 120 s, so the job's fetcher waits 10 minutes (under the PackageMirror activity's 20).
+const MIRROR_FETCH_TIMEOUT_MS = 10 * 60_000
+// The PackageMirror workflow when this process has a Temporal client (it is made below), else
+// the same job in this process.
+const mirrorJobs: { current?: MirrorJobs } = {}
 const packageInstaller = new PackageInstaller({
   fetcher: new GitFetcher(),
+  mirrorFetcher: new GitFetcher({ timeoutMs: MIRROR_FETCH_TIMEOUT_MS }),
   cacheRoot: pluginCacheDir(paths),
   mirror: () => packageMirror,
   hosted: () => hostedPlugins,
+  // A commit pin's files are mirrored too, and recorded on its row (#7907).
+  recordMirror: (name, mirror) => pluginPackages.recordMirror(name, mirror),
+  mirrorJobs: () => mirrorJobs.current,
 })
 // Settings → Tools & plugins (#4757): an older stored review's items read from the cached copy
 // (read only), once per content hash; and what a turn would make of the enabled packages.
@@ -712,7 +724,7 @@ if (role.http) {
   setInterval(sweep, 3600_000).unref()
 }
 // What a durable turn offers beside ScadBuddy's own tools (#2320): the servers a
-// classic turn would hand Claude Code, built again for every listing and call. One whose
+// session turn would hand Claude Code, built again for every listing and call. One whose
 // state lives on this pod (http_request's saved bodies) runs its calls on this replica's
 // own queue, HOST_QUEUE (above), served by `hostWorkers` below.
 // AgentSession's turns on this replica (unified runtime spec 2026-10-13 §5.2): its own queue,
@@ -776,13 +788,13 @@ const turnHost =
         // How each call a lost placement left in flight ended, when it is a ToolCall: its own result (#7874).
         cutCall: (sessionId: string, call: DanglingCall, wait: { waitMs: number; signal: AbortSignal; beat: () => void }) =>
           temporalClient ? cutToolCall({ client: temporalClient, blobs: sessionImages }, sessionId, call, wait) : Promise.resolve({ kind: 'none' as const }),
-        // A `done` summary, posted as a classic turn's (#5003).
+        // A `done` summary, posted as a session turn's (#5003).
         questions: sessions.questions,
         // The session's working directory, a copy of its workspace placed for each turn and written back at its end (Step 9.5).
         ...(sessionDirectory ? { directory: sessionDirectory } : {}),
       })
     : undefined
-// The enabled remote plugins and every usable credential's secret, as a classic turn
+// The enabled remote plugins and every usable credential's secret, as a session turn
 // reads them, for a durable turn's tools and its automatic memory.
 const durableRemotePlugins = async (browser?: SessionBrowser) =>
   forwardForRun(await loadEnabledPlugins(plugins), pluginForwarder, browser ? { browser } : {})
@@ -830,10 +842,10 @@ const turnToolDeps = temporal
       servers: turnServers({
         remotePlugins: durableRemotePlugins,
         access: accessResolver,
-        // The headless browser's lists (#982), as a classic turn's.
+        // The headless browser's lists (#982), as a session turn's.
         browserOrigins,
         credentialSecrets: durableCredentialSecrets,
-        // This pod's own disk, as a classic turn's: the calls are pinned here (hostQueue).
+        // This pod's own disk, as a session turn's: the calls are pinned here (hostQueue).
         httpRequest: { saveRoot: path.join(paths.stateDir, DURABLE_TURNS_DIR), bodies: httpBodies, audit, files: workspace },
         packages: {
           load: () => loadPackagesForRun(pluginPackages, packageInstaller),
@@ -879,6 +891,9 @@ const temporalClient = temporal
       ...(dataConverter ? { dataConverter } : {}),
     })
   : undefined
+mirrorJobs.current = temporalClient
+  ? temporalMirrorJobs(temporalClient)
+  : localMirrorJobs({ packages: pluginPackages, installer: packageInstaller })
 // This process's agent-tools worker (below), once it starts: a turn here starts its calls eagerly on
 // that worker's connection (activityProjection.ts `ToolCallStarterDeps`, #5865).
 const eager: { worker: AgentWorker | undefined } = { worker: undefined }
@@ -976,6 +991,8 @@ const temporalWorker =
           // A flow's agent(...) and ask_session(...) (#1057, 6g): beside the tools, never one.
           ...flowSessionActivities({ sessions: sessionRows, flows: flowRuns, events: eventRows }),
           ...operationActivities(commandKinds, operationStore),
+          // A commit pin's mirror (#7907): the PackageMirror workflow's one activity.
+          ...packageMirrorActivities({ packages: pluginPackages, installer: packageInstaller }),
           ...(background ?? {}),
         },
         ...(workerDataConverter ? { dataConverter: workerDataConverter } : {}),

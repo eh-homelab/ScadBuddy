@@ -174,7 +174,7 @@ func TestTheWorkerRunsOnceTemporalComesUp(t *testing.T) {
 	}
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan error, 1)
-	go func() { done <- run(ctx, func(k string) string { return env[k] }, nil) }()
+	go func() { done <- run(ctx, func(k string) (string, bool) { v, ok := env[k]; return v, ok }, nil) }()
 	t.Cleanup(func() {
 		cancel()
 		select {

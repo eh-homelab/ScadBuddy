@@ -39,7 +39,7 @@ from scadbuddy.render.solids import WRAPPER_PREFIX
 from scadbuddy.workflows.models import piece_key
 from tests.conftest import UNUSED_TEMPORAL_ADDRESS, fake_3mf_openscad
 from tests.crud.crud_support import render_crud_app, static_render_crud
-from tests.support.render_store import fake_bambuddy, pin_snapshot, use_bambuddy_store
+from tests.support.render_store import pin_snapshot, s3_store, use_s3_store
 from tests.support.renders import render_to_end
 from tests.support.temporal import current_address, temporal_client
 
@@ -232,8 +232,8 @@ async def test_a_render_runs_on_a_render_worker_with_no_database(
         created_at=datetime.now(UTC),
     )
     worker_data = tmp_path / "worker-data"
-    with fake_bambuddy() as bambuddy:
-        use_bambuddy_store(projection.pool, bambuddy)
+    with s3_store() as s3:
+        use_s3_store(projection.pool, s3)
         # The API's pin before it starts the render: the worker has no git.
         await pin_snapshot(projection.pool, settings, model, commit)
         async with temporal_client() as client, _api(projection, settings, tmp_path) as api:
@@ -266,7 +266,7 @@ async def test_a_render_runs_on_a_render_worker_with_no_database(
                     stop.set()
                     await asyncio.wait_for(worker, timeout=60)
     assert tried == []
-    assert health["store"]["backend"] == "bambuddy"
+    assert health["store"]["backend"] == "s3"
     stored = projection.read(job.id)
     assert stored.state == "done", stored.error
     # The source came from the store, not a volume the API shares.

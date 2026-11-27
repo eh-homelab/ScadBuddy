@@ -40,6 +40,7 @@ export const PRINT_QUEUE: QueueItem[] = [
       run_id: 'run-luna-2',
       archive_id: null,
       matched_by: 'queue_item',
+      plate: 1,
     },
     // #3742 — ScadBuddy's own picture of its job.
     picture: '/api/v1/outputs/luna-0002/thumbnail',
@@ -121,6 +122,7 @@ export const QUEUE_ITEM_ONLY: QueueItem[] = [
       run_id: 'run-reagan',
       archive_id: null,
       matched_by: 'queue_item',
+      plate: 1,
     },
     picture: `/api/v1/outputs/${outputs[0]!.id}/thumbnail`,
   },
@@ -141,6 +143,7 @@ export const QUEUE_ITEM_ONLY: QueueItem[] = [
       run_id: 'run-luna-2',
       archive_id: 35,
       matched_by: 'queue_item',
+      plate: 1,
     },
     picture: '/api/v1/outputs/luna-0002/thumbnail',
   },

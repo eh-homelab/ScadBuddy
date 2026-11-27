@@ -1,18 +1,20 @@
-"""`OutputStore` reads an output's bytes from the blob store first (#7256, outputs-in-
-Postgres spec 2026-11-23 §4.4): a row that names a blob is read there, and the NFS file
-is the fallback when the row names none or the blob is lost."""
+"""`OutputStore` reads an output's bytes from the blob store only (#7256, #7257,
+outputs-in-Postgres spec 2026-11-23 §4.4): a row that names a blob is read there, and a
+lost blob raises `OutputBytesLostError` (plan D9); no file is read in its place."""
 
 from __future__ import annotations
 
 import asyncio
 import contextlib
+import dataclasses
 import hashlib
+import io
 import logging
-import os
 import threading
+import zipfile
 from collections.abc import AsyncGenerator, Iterator
 from pathlib import Path
-from typing import Any, BinaryIO
+from typing import Any
 
 import psycopg
 import pytest
@@ -23,14 +25,12 @@ from psycopg.errors import DeadlockDetected, UniqueViolation
 from psycopg.rows import DictRow, dict_row
 from psycopg_pool import ConnectionPool
 
-import scadbuddy.library.outputs as outputs_module
 import scadbuddy.store.index as index_module
 from scadbuddy.api.outputs import _listed
 from scadbuddy.core.paths import DataPaths
 from scadbuddy.library.output_bytes import _PREFETCH, OutputBytes
 from scadbuddy.library.output_rows import (
     OUTPUT_HOLDER,
-    ByteWrite,
     OutputRows,
     lock_thumbnail,
     output_blob_key,
@@ -38,16 +38,15 @@ from scadbuddy.library.output_rows import (
 )
 from scadbuddy.library.outputs import (
     FILES_DIR,
-    META_NAME,
     MODEL_NAME,
     PREVIEW_NAME,
     THUMBNAIL_NAME,
+    OutputBytesLostError,
     OutputMeta,
     OutputNotFoundError,
     OutputStore,
-    thumbnail_file_version,
+    OutputStoreUnusableError,
 )
-from scadbuddy.library.outputs import _open_regular as open_regular
 from scadbuddy.render.jobs import Job
 from scadbuddy.render.projection import JobProjection
 from scadbuddy.store.content import ContentStore
@@ -63,7 +62,7 @@ from scadbuddy.store.index import (
 from scadbuddy.store.local import LocalContentBackend
 from tests.support.arrange import finished_job
 from tests.support.output_blobs import put_folder_at_keys
-from tests.support.saved_outputs import save_files
+from tests.support.row_outputs import name_blobs
 from tests.support.store import flip_first_byte, local_content, store_pool
 
 pytestmark = pytest.mark.requires_postgres
@@ -95,35 +94,31 @@ async def content(tmp_path: Path, pool: Pool) -> AsyncGenerator[ContentStore]:
         await store.aclose()
 
 
-async def _saved(
-    tmp_path: Path, projection: JobProjection, content: ContentStore | None
-) -> tuple[OutputStore, OutputMeta]:
-    paths, job, _ = await finished_job(tmp_path / "data")
-    store = OutputStore(paths)
-    store.rows = OutputRows(projection.pool)
-    if content is not None:
-        store.bytes = OutputBytes(content)
-    meta = save_files(store, job, name="first")
-    directory = store.directory(meta.id)
-    (directory / THUMBNAIL_NAME).write_bytes(b"thumbnail png")
-    (directory / FILES_DIR).mkdir(exist_ok=True)
-    (directory / FILES_DIR / "a.stl").write_bytes(b"a stl")
-    return store, meta
-
-
-async def _copy_bytes(store: OutputStore, meta: OutputMeta) -> None:
-    """What the byte copy does: put the folder, then name the blobs in the row."""
-    assert store.bytes is not None and store.rows is not None
-    blobs = await put_folder_at_keys(store.bytes, store.directory(meta.id), meta.id, meta.slug)
-    store.rows.write_byte_copy([ByteWrite(meta.id, blobs, "stamp", [])])
+def _dir(store: OutputStore, output_id: str) -> Path:
+    """The folder a test put the output's bytes from (`copied`): no save writes one on the
+    share since #7257 (task B4), and no reader reads it."""
+    return store.paths.root.parent / "copied" / output_id
 
 
 @pytest.fixture
 async def copied(
     tmp_path: Path, projection: JobProjection, content: ContentStore
 ) -> tuple[OutputStore, OutputMeta]:
-    store, meta = await _saved(tmp_path, projection, content)
-    await _copy_bytes(store, meta)
+    """A saved output with a thumbnail and one file, each named in its row as a blob."""
+    paths, job, _ = await finished_job(tmp_path / "data")
+    store = OutputStore(paths, rows=OutputRows(projection.pool), bytes=OutputBytes(content))
+    meta = await store.save(job, name="first")
+    directory = _dir(store, meta.id)
+    (directory / FILES_DIR).mkdir(parents=True)
+    assert store.bytes is not None
+    row = store.rows.get(meta.id)
+    assert row is not None and row.blobs.model is not None and row.blobs.preview is not None
+    (directory / MODEL_NAME).write_bytes(await store.bytes.read(row.blobs.model))
+    (directory / PREVIEW_NAME).write_bytes(await store.bytes.read(row.blobs.preview))
+    (directory / THUMBNAIL_NAME).write_bytes(b"thumbnail png")
+    (directory / FILES_DIR / "a.stl").write_bytes(b"a stl")
+    blobs = await put_folder_at_keys(store.bytes, directory, meta.id, meta.slug)
+    name_blobs(store.rows, meta.id, blobs)
     return store, meta
 
 
@@ -137,7 +132,7 @@ async def _read(store: OutputStore, output_id: str, role: str = "model") -> byte
 
 async def test_open_role_reads_blob_not_file(copied: tuple[OutputStore, OutputMeta]) -> None:
     store, meta = copied
-    model = store.directory(meta.id) / MODEL_NAME
+    model = _dir(store, meta.id) / MODEL_NAME
     data = model.read_bytes()
     model.unlink()
     stream = await store.open_role(meta.id, "model")
@@ -151,163 +146,70 @@ async def test_open_role_reads_blob_not_file(copied: tuple[OutputStore, OutputMe
     assert store.role_size(meta.id, "model") == len(data)
 
 
-async def test_open_role_falls_back_to_file_without_key(
-    tmp_path: Path, projection: JobProjection, content: ContentStore
-) -> None:
-    store, meta = await _saved(tmp_path, projection, content)
-    data = (store.directory(meta.id) / MODEL_NAME).read_bytes()
-    stream = await store.open_role(meta.id, "model")
-    assert stream is not None and stream.sha256 is None and stream.size == len(data)
-    await stream.aclose()
-    assert await _read(store, meta.id) == data
-    assert await _read(store, meta.id, "thumbnail") == b"thumbnail png"
-    (store.directory(meta.id) / THUMBNAIL_NAME).unlink()
-    # Neither a blob nor a file.
-    assert await store.open_role(meta.id, "thumbnail") is None
-    assert not store.has_role(meta.id, "thumbnail")
-    assert store.role_size(meta.id, "thumbnail") is None
-    assert await store.open_role("0" * 32, "model") is None
-
-
-async def test_open_role_falls_back_when_blob_missing(
+async def test_open_role_of_a_lost_blob_raises(
     copied: tuple[OutputStore, OutputMeta],
     content: ContentStore,
     caplog: pytest.LogCaptureFixture,
 ) -> None:
     store, meta = copied
-    ref = await content.stat(output_blob_key(meta.id, "model"))
+    key = output_blob_key(meta.id, "model")
+    ref = await content.stat(key)
     assert ref is not None
     await content.backend.remove(ref.ref.backend_id)
-    model = store.directory(meta.id) / MODEL_NAME
-    # The file's own bytes, so a read of the blob cannot pass as one of the file.
-    model.write_bytes(b"file bytes")
-    with caplog.at_level(logging.WARNING, logger="scadbuddy.library.outputs"):
-        assert await _read(store, meta.id) == b"file bytes"
-        assert await store.model_3mf(meta.id) == b"file bytes"
-        async with store.local_role(meta.id, "model") as path:
-            assert path == model
-            assert path.read_bytes() == b"file bytes"
+    with caplog.at_level(logging.ERROR, logger="scadbuddy.library.outputs"):
+        with pytest.raises(OutputBytesLostError) as raised:
+            await _read(store, meta.id)
+        assert (raised.value.role, raised.value.key) == ("model", key)
+        with pytest.raises(OutputBytesLostError):
+            await store.model_3mf(meta.id)
+        with pytest.raises(OutputBytesLostError):
+            async with store.local_role(meta.id, "model"):
+                pass
     assert "blob" in caplog.text
 
 
-async def test_open_file_falls_back_when_blob_missing(
+async def test_open_file_of_a_lost_blob_raises(
     copied: tuple[OutputStore, OutputMeta], content: ContentStore
 ) -> None:
     store, meta = copied
     found = await content.stat(output_file_key(meta.id, "a.stl"))
     assert found is not None
     await content.backend.remove(found.ref.backend_id)
-    (store.directory(meta.id) / FILES_DIR / "a.stl").write_bytes(b"file stl")
-    async with await store.open_file(meta.id, "a.stl") as stream:
-        assert b"".join([chunk async for chunk in stream.chunks]) == b"file stl"
+    with pytest.raises(OutputBytesLostError) as raised:
+        await store.open_file(meta.id, "a.stl")
+    assert raised.value.role == "files/a.stl"
 
 
-async def test_open_role_falls_back_when_blob_corrupt(
+async def test_open_role_of_a_corrupt_blob_raises(
     copied: tuple[OutputStore, OutputMeta], content: ContentStore
 ) -> None:
     store, meta = copied
     await flip_first_byte(content, output_blob_key(meta.id, "model"))
-    (store.directory(meta.id) / MODEL_NAME).write_bytes(b"file bytes")
-    assert await _read(store, meta.id) == b"file bytes"
+    with pytest.raises(OutputBytesLostError):
+        await _read(store, meta.id)
 
 
-async def test_local_role_falls_back_when_blob_corrupt(
+async def test_local_role_of_a_corrupt_blob_raises(
     copied: tuple[OutputStore, OutputMeta], content: ContentStore
 ) -> None:
     store, meta = copied
     await flip_first_byte(content, output_blob_key(meta.id, "model"))
-    model = store.directory(meta.id) / MODEL_NAME
-    model.write_bytes(b"file bytes")
-    async with store.local_role(meta.id, "model") as path:
-        assert path == model
+    with pytest.raises(OutputBytesLostError):
+        async with store.local_role(meta.id, "model"):
+            pass
     assert list(content.spool.iterdir()) == []
 
 
-async def test_model_3mf_falls_back_when_blob_corrupt(
+async def test_model_3mf_of_a_corrupt_blob_raises(
     copied: tuple[OutputStore, OutputMeta], content: ContentStore
 ) -> None:
     store, meta = copied
     await flip_first_byte(content, output_blob_key(meta.id, "model"))
-    (store.directory(meta.id) / MODEL_NAME).write_bytes(b"file bytes")
-    assert await store.model_3mf(meta.id) == b"file bytes"
+    with pytest.raises(OutputBytesLostError):
+        await store.model_3mf(meta.id)
 
 
-async def test_open_role_reads_file_while_bytes_at_null(
-    tmp_path: Path, projection: JobProjection, content: ContentStore
-) -> None:
-    store, meta = await _saved(tmp_path, projection, content)
-    assert store.bytes is not None and store.rows is not None
-    key = output_blob_key(meta.id, "model")
-    await store.bytes.put(key, b"blob bytes", slug=meta.slug)
-    # A live writer names a blob on a row the byte copy has not copied yet.
-    assert store.rows.set_blob(meta.id, "model", key)
-    row = store.rows.get(meta.id)
-    assert row is not None and row.bytes_at is None
-    (store.directory(meta.id) / MODEL_NAME).write_bytes(b"newer file")
-    assert await _read(store, meta.id) == b"newer file"
-    assert await store.model_3mf(meta.id) == b"newer file"
-
-
-async def test_file_stream_closes_its_file_unread(
-    tmp_path: Path,
-    projection: JobProjection,
-    content: ContentStore,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    store, meta = await _saved(tmp_path, projection, content)
-    files: list[BinaryIO] = []
-
-    def recorded(path: Path) -> tuple[BinaryIO, os.stat_result] | None:
-        opened = open_regular(path)
-        if opened is not None:
-            files.append(opened[0])
-        return opened
-
-    monkeypatch.setattr(outputs_module, "_open_regular", recorded)
-    stream = await store.open_role(meta.id, "model")
-    assert stream is not None and stream.sha256 is None
-    assert stream.size == (store.directory(meta.id) / MODEL_NAME).stat().st_size
-    assert len(files) == 1 and not files[0].closed
-    await stream.aclose()
-    assert files[0].closed
-
-
-async def test_file_stream_cancelled_during_open_closes_its_file(
-    tmp_path: Path,
-    projection: JobProjection,
-    content: ContentStore,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    store, meta = await _saved(tmp_path, projection, content)
-    started = threading.Event()
-    release = threading.Event()
-    files: list[BinaryIO] = []
-
-    def slow(path: Path) -> tuple[BinaryIO, os.stat_result] | None:
-        opened = open_regular(path)
-        assert opened is not None
-        files.append(opened[0])
-        started.set()
-        release.wait(10)
-        return opened
-
-    monkeypatch.setattr(outputs_module, "_open_regular", slow)
-    task = asyncio.create_task(store.open_role(meta.id, "model"))
-    await asyncio.to_thread(started.wait, 10)
-    task.cancel()
-    with pytest.raises(asyncio.CancelledError):
-        await task
-    assert len(files) == 1 and not files[0].closed
-    release.set()
-    for _ in range(200):
-        if files[0].closed:
-            break
-        await asyncio.sleep(0.01)
-    # The descriptor the thread opened is closed once the thread returns.
-    assert files[0].closed
-
-
-async def test_open_role_falls_back_when_blob_of_exactly_prefetch_corrupt(
+async def test_open_role_of_a_corrupt_blob_of_exactly_prefetch_raises(
     copied: tuple[OutputStore, OutputMeta], content: ContentStore
 ) -> None:
     store, meta = copied
@@ -315,8 +217,8 @@ async def test_open_role_falls_back_when_blob_of_exactly_prefetch_corrupt(
     key = output_blob_key(meta.id, "model")
     await store.bytes.put(key, b"x" * _PREFETCH, slug=meta.slug)
     await flip_first_byte(content, key)
-    (store.directory(meta.id) / MODEL_NAME).write_bytes(b"file bytes")
-    assert await _read(store, meta.id) == b"file bytes"
+    with pytest.raises(OutputBytesLostError):
+        await _read(store, meta.id)
 
 
 def _unreachable(after: list[bytes], error: Exception | None = None) -> Any:
@@ -334,24 +236,32 @@ def _unreachable(after: list[bytes], error: Exception | None = None) -> Any:
     return get
 
 
-async def test_transport_error_in_prefetch_falls_back_to_file(
+async def _none_lost(store: OutputStore, meta: OutputMeta, error: type[Exception]) -> None:
+    """Every reader of the output's bytes raises ``error`` itself, never
+    `OutputBytesLostError`: a store that does not answer now has not lost the blob (#7257
+    B3 review)."""
+    with pytest.raises(error):
+        await _read(store, meta.id)
+    with pytest.raises(error):
+        await store.model_3mf(meta.id)
+    with pytest.raises(error):
+        async with store.local_role(meta.id, "model"):
+            pass
+    with pytest.raises(error):
+        await store.open_file(meta.id, "a.stl")
+
+
+async def test_transport_error_in_prefetch_is_not_a_lost_blob(
     copied: tuple[OutputStore, OutputMeta],
     content: ContentStore,
     caplog: pytest.LogCaptureFixture,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     store, meta = copied
-    model = store.directory(meta.id) / MODEL_NAME
-    model.write_bytes(b"file bytes")
     monkeypatch.setattr(content, "get", _unreachable([b"part"]))
-    with caplog.at_level(logging.WARNING, logger="scadbuddy.library.outputs"):
-        assert await _read(store, meta.id) == b"file bytes"
-        assert await store.model_3mf(meta.id) == b"file bytes"
-        async with store.local_role(meta.id, "model") as path:
-            assert path == model
-        async with await store.open_file(meta.id, "a.stl") as stream:
-            assert b"".join([chunk async for chunk in stream.chunks]) == b"a stl"
-    assert "blob" in caplog.text
+    with caplog.at_level(logging.ERROR, logger="scadbuddy.library.outputs"):
+        await _none_lost(store, meta, EndpointConnectionError)
+    assert "lost" not in caplog.text
 
 
 def _s3_error(status: int, code: str) -> ClientError:
@@ -360,7 +270,7 @@ def _s3_error(status: int, code: str) -> ClientError:
 
 
 @pytest.mark.parametrize(("status", "code"), [(503, "SlowDown"), (500, "InternalError")])
-async def test_s3_server_error_in_prefetch_falls_back_to_file(
+async def test_s3_server_error_in_prefetch_is_not_a_lost_blob(
     copied: tuple[OutputStore, OutputMeta],
     content: ContentStore,
     caplog: pytest.LogCaptureFixture,
@@ -369,17 +279,10 @@ async def test_s3_server_error_in_prefetch_falls_back_to_file(
     code: str,
 ) -> None:
     store, meta = copied
-    model = store.directory(meta.id) / MODEL_NAME
-    model.write_bytes(b"file bytes")
     monkeypatch.setattr(content, "get", _unreachable([], _s3_error(status, code)))
-    with caplog.at_level(logging.WARNING, logger="scadbuddy.library.outputs"):
-        assert await _read(store, meta.id) == b"file bytes"
-        assert await store.model_3mf(meta.id) == b"file bytes"
-        async with store.local_role(meta.id, "model") as path:
-            assert path == model
-        async with await store.open_file(meta.id, "a.stl") as stream:
-            assert b"".join([chunk async for chunk in stream.chunks]) == b"a stl"
-    assert "blob" in caplog.text
+    with caplog.at_level(logging.ERROR, logger="scadbuddy.library.outputs"):
+        await _none_lost(store, meta, ClientError)
+    assert "lost" not in caplog.text
 
 
 async def test_s3_client_error_is_not_a_lost_blob(
@@ -415,7 +318,7 @@ async def test_local_role_gives_blob_temp_file(
     copied: tuple[OutputStore, OutputMeta], content: ContentStore
 ) -> None:
     store, meta = copied
-    data = (store.directory(meta.id) / MODEL_NAME).read_bytes()
+    data = (_dir(store, meta.id) / MODEL_NAME).read_bytes()
     async with store.local_role(meta.id, "model") as path:
         assert path is not None and path.parent == content.spool
         assert path.suffix == ".3mf"
@@ -423,23 +326,25 @@ async def test_local_role_gives_blob_temp_file(
     assert not path.exists()
 
 
-async def test_local_role_gives_nfs_path_without_blob(
-    tmp_path: Path, projection: JobProjection, content: ContentStore
+async def test_local_role_gives_none_when_the_row_names_no_blob(
+    copied: tuple[OutputStore, OutputMeta],
 ) -> None:
-    store, meta = await _saved(tmp_path, projection, content)
-    model = store.directory(meta.id) / MODEL_NAME
-    async with store.local_role(meta.id, "model") as path:
-        assert path == model
-    # Never copied: the NFS file stays.
-    assert model.is_file()
-    model.unlink()
+    store, meta = copied
+    row = store.rows.get(meta.id)
+    assert row is not None
+    blobs = dataclasses.replace(row.blobs, model=None)
+    name_blobs(store.rows, meta.id, blobs)
+    # The folder still holds the 3MF; no reader reads it.
+    assert (_dir(store, meta.id) / MODEL_NAME).is_file()
     async with store.local_role(meta.id, "model") as path:
         assert path is None
+    assert await store.open_role(meta.id, "model") is None
+    assert await store.model_3mf(meta.id) is None
 
 
 async def test_files_from_output_files_rows(copied: tuple[OutputStore, OutputMeta]) -> None:
     store, meta = copied
-    directory = store.directory(meta.id) / FILES_DIR
+    directory = _dir(store, meta.id) / FILES_DIR
     (directory / "a.stl").unlink()
     (directory / "late.stl").write_bytes(b"not in the rows")
     assert store.files(meta.id) == ["a.stl"]
@@ -454,7 +359,6 @@ async def test_open_file_refuses_path_names(
     copied: tuple[OutputStore, OutputMeta], monkeypatch: pytest.MonkeyPatch
 ) -> None:
     store, meta = copied
-    assert store.rows is not None
 
     def no_read(*args: object) -> None:
         raise AssertionError("a path name reached the rows")
@@ -467,46 +371,40 @@ async def test_open_file_refuses_path_names(
 
 async def test_thumbnail_version_is_blob_sha(
     copied: tuple[OutputStore, OutputMeta],
-    tmp_path: Path,
-    projection: JobProjection,
-    content: ContentStore,
 ) -> None:
     store, meta = copied
     assert store.thumbnail_version(meta.id) == hashlib.sha256(b"thumbnail png").hexdigest()[:16]
-    # No blob: the file's identity, as before.
-    other, saved = await _saved(tmp_path / "other", projection, content)
-    thumbnail = other.directory(saved.id) / THUMBNAIL_NAME
-    assert other.thumbnail_version(saved.id) == thumbnail_file_version(thumbnail)
-    thumbnail.unlink()
-    assert other.thumbnail_version(saved.id) is None
+    with store.rows._pool.connection() as conn:
+        conn.execute("UPDATE outputs SET thumbnail_blob = NULL WHERE output_id = %s", (meta.id,))
+    # The file stays; no reader reads it.
+    assert (_dir(store, meta.id) / THUMBNAIL_NAME).is_file()
+    assert store.thumbnail_version(meta.id) is None
 
 
 async def test_model_3mf_from_blob(
     copied: tuple[OutputStore, OutputMeta], content: ContentStore
 ) -> None:
     store, meta = copied
-    data = (store.directory(meta.id) / MODEL_NAME).read_bytes()
-    (store.directory(meta.id) / MODEL_NAME).write_bytes(b"the file moved on")
+    data = (_dir(store, meta.id) / MODEL_NAME).read_bytes()
+    (_dir(store, meta.id) / MODEL_NAME).write_bytes(b"the file moved on")
     assert await store.model_3mf(meta.id) == data
     assert await store.model_3mf("0" * 32) is None
 
 
-async def test_store_without_bytes_reads_files(
-    tmp_path: Path, projection: JobProjection, content: ContentStore
-) -> None:
-    store, meta = await _saved(tmp_path, projection, content)
-    await _copy_bytes(store, meta)
+async def test_store_without_bytes_refuses_reads(copied: tuple[OutputStore, OutputMeta]) -> None:
+    """An app on the bambuddy store does not start (#7257); a store built with no blob
+    store reads no file in their place."""
+    store, meta = copied
     store.bytes = None
-    model = store.directory(meta.id) / MODEL_NAME
-    model.write_bytes(b"file bytes")
-    assert await _read(store, meta.id) == b"file bytes"
-    assert await store.model_3mf(meta.id) == b"file bytes"
-    async with store.local_role(meta.id, "model") as path:
-        assert path == model
-    (store.directory(meta.id) / FILES_DIR / "late.stl").write_bytes(b"late")
-    assert store.files(meta.id) == ["a.stl", "late.stl"]
-    thumbnail = store.directory(meta.id) / THUMBNAIL_NAME
-    assert store.thumbnail_version(meta.id) == thumbnail_file_version(thumbnail)
+    with pytest.raises(OutputStoreUnusableError):
+        await _read(store, meta.id)
+    with pytest.raises(OutputStoreUnusableError):
+        await store.model_3mf(meta.id)
+    with pytest.raises(OutputStoreUnusableError):
+        async with store.local_role(meta.id, "model"):
+            pass
+    with pytest.raises(OutputStoreUnusableError):
+        store.thumbnail_version(meta.id)
 
 
 class _Counted:
@@ -601,12 +499,16 @@ async def _with_files(tmp_path: Path) -> tuple[DataPaths, Job, Path]:
     return paths, job, files
 
 
+def _is_3mf(data: bytes) -> bool:
+    """Whether ``data`` is a 3MF the save staged: a zip with a model part."""
+    with zipfile.ZipFile(io.BytesIO(data)) as archive:
+        return any(name.endswith(".model") for name in archive.namelist())
+
+
 def _store(paths: DataPaths, pool: Any, content: ContentStore | None) -> OutputStore:
-    store = OutputStore(paths)
-    store.rows = OutputRows(pool)
-    if content is not None:
-        store.bytes = OutputBytes(content)
-    return store
+    return OutputStore(
+        paths, rows=OutputRows(pool), bytes=None if content is None else OutputBytes(content)
+    )
 
 
 async def test_save_puts_bytes_and_row_in_one_transaction(
@@ -619,7 +521,7 @@ async def test_save_puts_bytes_and_row_in_one_transaction(
     # One transaction writes the row, its `output_files` rows and the holds.
     assert counted.transactions == 1
     assert counted.writes_outside == []
-    row = store.rows.get(meta.id) if store.rows is not None else None
+    row = store.rows.get(meta.id)
     assert row is not None and row.bytes_at is not None
 
 
@@ -693,11 +595,10 @@ async def test_a_save_whose_reused_object_was_freed_puts_its_own_copies(
     assert copied.attributes["scadbuddy.reused_files"] == sum(reused[0])
     row = store.rows.get(meta.id)
     assert row is not None and row.bytes_at is not None
-    directory = store.directory(meta.id)
     assert store.bytes is not None
     assert row.blobs.model is not None and row.blobs.preview is not None
-    assert await store.bytes.read(row.blobs.model) == (directory / MODEL_NAME).read_bytes()
-    assert await store.bytes.read(row.blobs.preview) == (directory / PREVIEW_NAME).read_bytes()
+    assert _is_3mf(await store.bytes.read(row.blobs.model))
+    assert (await store.bytes.read(row.blobs.preview)).startswith(b"glTF")
     key = output_file_key(meta.id, "a.stl")
     assert await store.bytes.read(key) == b"a stl"
 
@@ -736,10 +637,7 @@ async def test_a_save_runs_its_rows_transaction_again_after_a_deadlock(
     }
     assert _holds(pool, meta.id) == keys
     assert store.bytes is not None and row.blobs.model is not None
-    assert (
-        await store.bytes.read(row.blobs.model)
-        == (store.directory(meta.id) / MODEL_NAME).read_bytes()
-    )
+    assert _is_3mf(await store.bytes.read(row.blobs.model))
 
 
 async def test_a_save_that_deadlocks_every_time_removes_what_it_uploaded(
@@ -771,7 +669,7 @@ async def test_a_save_that_deadlocks_every_time_removes_what_it_uploaded(
     with pytest.raises(DeadlockDetected):
         await store.save(job, name="first", files_dir=files, output_id=output_id)
     monkeypatch.undo()
-    assert not paths.output_dir(job.slug, output_id).exists()
+    assert not (paths.root / "outputs" / job.slug / output_id).exists()
     assert store.rows is not None and store.rows.get(output_id) is None
     assert _holds(pool, output_id) == set()
     assert refs
@@ -820,9 +718,8 @@ async def test_a_failed_save_keeps_an_object_another_save_has_staged(
     meta = await kept
     row = store.rows.get(meta.id)
     assert row is not None and row.bytes_at is not None and row.blobs.model is not None
-    directory = store.directory(meta.id)
     assert store.bytes is not None
-    assert await store.bytes.read(row.blobs.model) == (directory / MODEL_NAME).read_bytes()
+    assert _is_3mf(await store.bytes.read(row.blobs.model))
     assert await store.bytes.read(output_file_key(meta.id, "b.stl")) == b"b stl"
     assert store.rows.get(failed_id) is None
 
@@ -833,7 +730,6 @@ async def test_save_row_names_every_blob_and_holds_it(
     paths, job, files = await _with_files(tmp_path)
     store = _store(paths, projection.pool, content)
     meta = await store.save(job, name="first", files_dir=files)
-    assert store.rows is not None
     row = store.rows.get(meta.id)
     assert row is not None and row.bytes_at is not None
     assert row.blobs.model == output_blob_key(meta.id, "model")
@@ -847,29 +743,26 @@ async def test_save_row_names_every_blob_and_holds_it(
     ]
     keys = {row.blobs.model, row.blobs.preview, *(item.blob_key for item in listed)}
     assert _holds(pool, meta.id) == keys
-    directory = store.directory(meta.id)
-    for key, name in (
-        (row.blobs.model, MODEL_NAME),
-        (row.blobs.preview, PREVIEW_NAME),
-        (output_file_key(meta.id, "b.stl"), f"{FILES_DIR}/b.stl"),
-    ):
-        assert key is not None
-        assert await store.bytes.read(key) == (directory / name).read_bytes()  # type: ignore[union-attr]
+    assert store.bytes is not None and row.blobs.model is not None
+    assert _is_3mf(await store.bytes.read(row.blobs.model))
+    assert row.blobs.preview is not None
+    assert (await store.bytes.read(row.blobs.preview)).startswith(b"glTF")
+    assert await store.bytes.read(output_file_key(meta.id, "b.stl")) == b"b stl"
 
 
-async def test_save_on_bambuddy_store_writes_no_blobs(
+async def test_save_without_a_blob_store_is_refused(
     tmp_path: Path, projection: JobProjection, pool: Pool
 ) -> None:
+    """#7257: the outputs are kept only as blobs, so a save with no blob store writes
+    nothing: no folder and no row."""
     paths, job, files = await _with_files(tmp_path)
     store = _store(paths, projection.pool, None)
-    meta = await store.save(job, name="first", files_dir=files)
-    assert store.rows is not None
-    row = store.rows.get(meta.id)
-    assert row is not None and row.bytes_at is None
-    assert (row.blobs.model, row.blobs.preview, row.blobs.thumbnail) == (None, None, None)
-    assert store.rows.files(meta.id) == []
-    assert _holds(pool, meta.id) == set()
-    assert (store.directory(meta.id) / MODEL_NAME).is_file()
+    output_id = "a" * 32
+    with pytest.raises(OutputStoreUnusableError):
+        await store.save(job, name="first", files_dir=files, output_id=output_id)
+    assert not (paths.root / "outputs" / job.slug / output_id).exists()
+    assert store.rows.get(output_id) is None
+    assert _holds(pool, output_id) == set()
 
 
 async def test_save_put_failure_removes_folder_and_row(
@@ -895,8 +788,8 @@ async def test_save_put_failure_removes_folder_and_row(
     output_id = "f" * 32
     with pytest.raises(OSError, match="the store went away"):
         await store.save(job, name="first", files_dir=files, output_id=output_id)
-    assert not paths.output_dir(job.slug, output_id).exists()
-    assert store.rows is not None and store.rows.get(output_id) is None
+    assert not (paths.root / "outputs" / job.slug / output_id).exists()
+    assert store.rows.get(output_id) is None
     assert _holds(pool, output_id) == set()
     # The first put's object is removed; no index row ever named it.
     assert len(refs) == 1
@@ -948,7 +841,7 @@ async def test_a_save_whose_stage_lock_stays_claimed_fails_and_frees_its_slot(
     assert uploaded
     for backend_id in uploaded:
         assert not await content.backend.exists(backend_id)
-    assert not paths.output_dir(job.slug, output_id).exists()
+    assert not (paths.root / "outputs" / job.slug / output_id).exists()
     assert store.rows is not None and store.rows.get(output_id) is None
     assert _holds(pool, output_id) == set()
     async with asyncio.timeout(30):
@@ -973,8 +866,8 @@ async def test_a_save_that_loses_on_the_id_keeps_the_outputs_bytes(
     other = job.model_copy(update={"slug": "other"})
     with pytest.raises(UniqueViolation):
         await store.save(other, name="second", files_dir=files, output_id=output_id)
-    assert not paths.output_dir("other", output_id).exists()
-    assert store.directory(output_id) == paths.output_dir(job.slug, output_id)
+    assert not (paths.root / "outputs" / "other" / output_id).exists()
+    assert store.get(output_id).slug == job.slug
     assert await store.model_3mf(output_id) == model
     assert _holds(pool, output_id) == keys
     assert {key: await content.stat(key) for key in keys} == before
@@ -986,26 +879,25 @@ async def test_a_save_that_loses_on_the_id_keeps_the_outputs_bytes(
     assert {str(row["key"]) for row in found} == keys
 
 
-async def test_put_thumbnail_puts_blob_then_file(
+async def test_put_thumbnail_puts_blob_then_row(
     copied: tuple[OutputStore, OutputMeta],
     content: ContentStore,
     pool: Pool,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     store, meta = copied
-    thumbnail = store.directory(meta.id) / THUMBNAIL_NAME
-    seen: list[bytes] = []
+    seen: list[bytes | None] = []
     put = content.put
 
     async def blob_first(*args: Any, **kwargs: Any) -> Any:
-        # The file holds the old bytes while the blob is put.
-        seen.append(thumbnail.read_bytes())
+        # The row names the old blob while the new one is put.
+        seen.append(await _read(store, meta.id, "thumbnail"))
         return await put(*args, **kwargs)
 
     monkeypatch.setattr(content, "put", blob_first)
     await store.put_thumbnail(meta.id, b"new png")
     assert seen == [b"thumbnail png"]
-    assert thumbnail.read_bytes() == b"new png"
+    assert not ((store.paths.root / "outputs" / meta.slug / meta.id) / THUMBNAIL_NAME).exists()
     assert await _read(store, meta.id, "thumbnail") == b"new png"
     key = output_blob_key(meta.id, "thumbnail")
     assert key in _holds(pool, meta.id)
@@ -1020,7 +912,6 @@ async def test_put_thumbnail_failed_put_changes_nothing(
     error: Exception,
 ) -> None:
     store, meta = copied
-    assert store.rows is not None
     before = store.rows.get(meta.id)
     version = store.thumbnail_version(meta.id)
 
@@ -1031,8 +922,6 @@ async def test_put_thumbnail_failed_put_changes_nothing(
     with pytest.raises(type(error)):
         await store.put_thumbnail(meta.id, b"new png")
     monkeypatch.undo()
-    thumbnail = store.directory(meta.id) / THUMBNAIL_NAME
-    assert thumbnail.read_bytes() == b"thumbnail png"
     assert await _read(store, meta.id, "thumbnail") == b"thumbnail png"
     after = store.rows.get(meta.id)
     assert after is not None and before is not None
@@ -1040,7 +929,7 @@ async def test_put_thumbnail_failed_put_changes_nothing(
     assert store.thumbnail_version(meta.id) == version
 
 
-async def test_put_thumbnail_calls_at_once_leave_file_and_blob_alike(
+async def test_put_thumbnail_calls_at_once_keep_the_last_step(
     copied: tuple[OutputStore, OutputMeta],
     content: ContentStore,
     monkeypatch: pytest.MonkeyPatch,
@@ -1063,18 +952,16 @@ async def test_put_thumbnail_calls_at_once_leave_file_and_blob_alike(
     await store.put_thumbnail(meta.id, b"second")
     second_done.set()
     await first
-    thumbnail = store.directory(meta.id) / THUMBNAIL_NAME
     assert await _read(store, meta.id, "thumbnail") == b"first"
-    assert thumbnail.read_bytes() == b"first"
 
 
-async def test_put_thumbnail_steps_out_of_order_leave_file_and_blob_alike(
+async def test_put_thumbnail_steps_out_of_order_keep_the_last_step(
     copied: tuple[OutputStore, OutputMeta],
     content: ContentStore,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    # The first put lands first and its step runs last: that step's image is the one in
-    # the file and the blob both.
+    # The first put lands first and its step runs last: that step's image is the one the
+    # row names.
     store, meta = copied
     put = content.put
     first_landed = asyncio.Event()
@@ -1093,103 +980,16 @@ async def test_put_thumbnail_steps_out_of_order_leave_file_and_blob_alike(
     await store.put_thumbnail(meta.id, b"second")
     second_done.set()
     await first
-    thumbnail = store.directory(meta.id) / THUMBNAIL_NAME
     assert await _read(store, meta.id, "thumbnail") == b"first"
-    assert thumbnail.read_bytes() == b"first"
 
 
-async def test_put_thumbnail_lock_holds_across_replicas(
+async def test_put_thumbnail_without_blob_store_is_refused(
     copied: tuple[OutputStore, OutputMeta],
-    pg_conninfo: str,
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    # Two API replicas: each its own store, pools and content store over one database
-    # and one backend. Replica A's put lands first; its step stops before its file write.
-    # Replica B's put lands later, and its step must wait for A's, so the file and the
-    # row name one image.
-    store, meta = copied
-    with store_pool(pg_conninfo) as rows_pool, store_pool(pg_conninfo) as index_pool:
-        other_content = local_content(tmp_path / "remote", index_pool)
-        other_content.spool = tmp_path / "spool-b"
-        other = OutputStore(store.paths)
-        other.rows = OutputRows(rows_pool)
-        other.bytes = OutputBytes(other_content)
-        loop = asyncio.get_running_loop()
-        a_in_step = asyncio.Event()
-        b_done = threading.Event()
-        write = store.write_thumbnail
-
-        def a_waits(output_id: str, png: bytes) -> None:
-            loop.call_soon_threadsafe(a_in_step.set)
-            # Without a lock across replicas, B's whole step runs here.
-            b_done.wait(timeout=1.5)
-            write(output_id, png)
-
-        monkeypatch.setattr(store, "write_thumbnail", a_waits)
-        try:
-            first = asyncio.create_task(store.put_thumbnail(meta.id, b"from a"))
-            await a_in_step.wait()
-            await other.put_thumbnail(meta.id, b"from b")
-            b_done.set()
-            await first
-        finally:
-            b_done.set()
-            await other_content.aclose()
-        thumbnail = store.directory(meta.id) / THUMBNAIL_NAME
-        assert await _read(store, meta.id, "thumbnail") == thumbnail.read_bytes() == b"from b"
-
-
-async def test_put_thumbnail_failed_file_write_keeps_the_old_key(
-    copied: tuple[OutputStore, OutputMeta],
-    pool: Pool,
-    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     store, meta = copied
-    assert store.rows is not None
-    before = store.rows.get(meta.id)
-    version = store.thumbnail_version(meta.id)
-    holds = _holds(pool, meta.id)
-
-    def full(output_id: str, png: bytes) -> None:
-        raise OSError("the share is full")
-
-    monkeypatch.setattr(store, "write_thumbnail", full)
-    with pytest.raises(OSError, match="the share is full"):
+    store.bytes = None
+    with pytest.raises(OutputStoreUnusableError):
         await store.put_thumbnail(meta.id, b"new png")
-    monkeypatch.undo()
-    # The old blob and the old file still agree.
-    thumbnail = store.directory(meta.id) / THUMBNAIL_NAME
-    assert thumbnail.read_bytes() == b"thumbnail png"
-    assert await _read(store, meta.id, "thumbnail") == b"thumbnail png"
-    after = store.rows.get(meta.id)
-    assert after is not None and before is not None
-    assert (after.blobs, after.bytes_at) == (before.blobs, before.bytes_at)
-    assert store.thumbnail_version(meta.id) == version
-    # The new blob is stored and held by nothing: the sweep takes it after its grace.
-    sha = hashlib.sha256(b"new png").hexdigest()
-    with pool.connection() as conn:
-        staged = conn.execute(
-            "SELECT key FROM store_blobs WHERE sha256 = %s AND kind = 'output'", (sha,)
-        ).fetchall()
-    assert staged
-    assert _holds(pool, meta.id) == holds
-    with pool.connection() as conn:
-        held = conn.execute(
-            "SELECT 1 FROM blob_refs WHERE key = ANY(%s)", ([str(row["key"]) for row in staged],)
-        ).fetchall()
-    assert not held
-
-
-async def test_put_thumbnail_without_blob_store_writes_file(
-    tmp_path: Path, projection: JobProjection
-) -> None:
-    store, meta = await _saved(tmp_path, projection, None)
-    await store.put_thumbnail(meta.id, b"new png")
-    assert (store.directory(meta.id) / THUMBNAIL_NAME).read_bytes() == b"new png"
-    assert store.rows is not None
-    row = store.rows.get(meta.id)
-    assert row is not None and row.blobs.thumbnail is None
 
 
 async def test_put_drawn_thumbnail_keeps_upload(
@@ -1198,7 +998,7 @@ async def test_put_drawn_thumbnail_keeps_upload(
     paths, job, files = await _with_files(tmp_path)
     store = _store(paths, projection.pool, content)
     meta = await store.save(job, name="first", files_dir=files)
-    # No thumbnail yet: the draw is kept, file and blob.
+    # No thumbnail yet: the draw is kept.
     assert await store.put_drawn_thumbnail(meta.id, b"drawn") is True
     assert await _read(store, meta.id, "thumbnail") == b"drawn"
     key = output_blob_key(meta.id, "thumbnail")
@@ -1207,10 +1007,9 @@ async def test_put_drawn_thumbnail_keeps_upload(
     await store.put_thumbnail(meta.id, b"uploaded")
     assert await store.put_drawn_thumbnail(meta.id, b"drawn again") is False
     assert await _read(store, meta.id, "thumbnail") == b"uploaded"
-    assert (store.directory(meta.id) / THUMBNAIL_NAME).read_bytes() == b"uploaded"
 
 
-async def test_put_drawn_thumbnail_failed_put_keeps_the_drawn_file(
+async def test_put_drawn_thumbnail_failed_put_names_no_blob(
     tmp_path: Path,
     projection: JobProjection,
     content: ContentStore,
@@ -1227,15 +1026,15 @@ async def test_put_drawn_thumbnail_failed_put_keeps_the_drawn_file(
 
     monkeypatch.setattr(content, "put", refused)
     with caplog.at_level(logging.WARNING, logger="scadbuddy.library.outputs"):
-        assert await store.put_drawn_thumbnail(meta.id, b"drawn") is True
+        assert await store.put_drawn_thumbnail(meta.id, b"drawn") is False
     assert "thumbnail" in caplog.text
     monkeypatch.undo()
-    assert (store.directory(meta.id) / THUMBNAIL_NAME).read_bytes() == b"drawn"
-    # The row names no blob, so readers take the drawn file.
-    assert store.rows is not None
+    # No file is written: none would be read (#7257). The row names no blob, so a
+    # reader finds no thumbnail.
+    assert not ((paths.root / "outputs" / meta.slug / meta.id) / THUMBNAIL_NAME).exists()
     row = store.rows.get(meta.id)
     assert row is not None and row.blobs.thumbnail is None
-    assert await _read(store, meta.id, "thumbnail") == b"drawn"
+    assert await _read(store, meta.id, "thumbnail") is None
     assert output_blob_key(meta.id, "thumbnail") not in _holds(pool, meta.id)
 
 
@@ -1243,11 +1042,8 @@ async def test_put_drawn_thumbnail_waits_for_the_thumbnail_lock(
     copied: tuple[OutputStore, OutputMeta], pool: Pool
 ) -> None:
     """#7256 review A-M1: a drawn thumbnail's step takes the output's thumbnail lock, as
-    every writer of the key and the file does, so the byte copy can rely on it."""
+    every writer of the key does."""
     store, meta = copied
-    assert store.rows is not None
-    thumbnail = store.directory(meta.id) / THUMBNAIL_NAME
-    thumbnail.unlink()
     with pool.connection() as conn:
         conn.execute(
             "DELETE FROM store_blobs WHERE key = %s", (output_blob_key(meta.id, "thumbnail"),)
@@ -1257,11 +1053,10 @@ async def test_put_drawn_thumbnail_waits_for_the_thumbnail_lock(
         lock_thumbnail(held, meta.id)
         draw = asyncio.create_task(store.put_drawn_thumbnail(meta.id, b"drawn"))
         await asyncio.sleep(0.5)
-        # The step waits for the lock: no file and no key yet.
+        # The step waits for the lock: no key yet.
         assert not draw.done()
-        assert not thumbnail.exists()
+        assert await _read(store, meta.id, "thumbnail") is None
     assert await draw is True
-    assert thumbnail.read_bytes() == b"drawn"
     assert await _read(store, meta.id, "thumbnail") == b"drawn"
 
 
@@ -1287,11 +1082,10 @@ async def test_put_thumbnail_retries_a_deadlock(
     await store.put_thumbnail(meta.id, b"new png")
     monkeypatch.undo()
     assert len(calls) == 2
-    thumbnail = store.directory(meta.id) / THUMBNAIL_NAME
-    assert await _read(store, meta.id, "thumbnail") == thumbnail.read_bytes() == b"new png"
+    assert await _read(store, meta.id, "thumbnail") == b"new png"
 
 
-async def test_save_commit_failure_after_puts_discards_folder_and_row(
+async def test_save_commit_failure_after_puts_leaves_no_row(
     tmp_path: Path,
     projection: JobProjection,
     content: ContentStore,
@@ -1300,7 +1094,6 @@ async def test_save_commit_failure_after_puts_discards_folder_and_row(
 ) -> None:
     paths, job, files = await _with_files(tmp_path)
     store = _store(paths, projection.pool, content)
-    assert store.rows is not None
 
     def refused(*args: Any, **kwargs: Any) -> None:
         raise RuntimeError("the insert failed")
@@ -1309,7 +1102,7 @@ async def test_save_commit_failure_after_puts_discards_folder_and_row(
     output_id = "e" * 32
     with pytest.raises(RuntimeError, match="the insert failed"):
         await store.save(job, name="first", files_dir=files, output_id=output_id)
-    assert not paths.output_dir(job.slug, output_id).exists()
+    assert not (paths.root / "outputs" / job.slug / output_id).exists()
     assert store.rows.get(output_id) is None
     assert _holds(pool, output_id) == set()
     # The failed save removed the objects it uploaded; no index row named them.
@@ -1337,7 +1130,7 @@ async def test_a_listing_reads_its_versions_in_one_query(
         meta.id: (store.role_version(meta.id, "thumbnail"), store.role_version(meta.id, "preview"))
         for meta in metas
     }
-    assert store.bytes is not None and store.rows is not None
+    assert store.bytes is not None
     refs: list[str] = []
     real_ref = store.bytes.ref
     batched: list[int] = []
@@ -1483,22 +1276,17 @@ async def test_a_save_cancelled_during_its_commit_holds_its_objects_until_the_co
     row = store.rows.get(output_id)
     assert row is not None and row.blobs.model is not None
     assert store.bytes is not None
-    assert (
-        await store.bytes.read(row.blobs.model)
-        == (store.directory(output_id) / MODEL_NAME).read_bytes()
-    )
+    assert _is_3mf(await store.bytes.read(row.blobs.model))
 
 
-async def test_a_save_cancelled_after_a_lost_reuse_leaves_no_meta(
+async def test_a_save_cancelled_after_a_lost_reuse_leaves_nothing_staged(
     tmp_path: Path,
     projection: JobProjection,
     content: ContentStore,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """#7477 review M4: the first commit wrote ``meta.json`` before its transaction lost a
-    reuse. A cancel while the save puts its own copies skips `discard`; the folder must
-    then hold no ``meta.json``, as after a cancel during the puts, so the hold reaper
-    removes it and no copy run records it as an output."""
+    """#7477 review M4, #7257: a cancel while the save puts its own copies after a lost
+    reuse leaves no row, no folder on the share and nothing staged on the spool."""
     paths, job, files = await _with_files(tmp_path)
     store = _store(paths, projection.pool, content)
     assert store.rows is not None and store.bytes is not None
@@ -1519,6 +1307,51 @@ async def test_a_save_cancelled_after_a_lost_reuse_leaves_no_meta(
     task.cancel()
     with pytest.raises(asyncio.CancelledError):
         await task
-    directory = paths.output_dir(job.slug, output_id)
-    assert directory.is_dir()
-    assert not (directory / META_NAME).exists()
+    assert store.rows.get(output_id) is None
+    assert not (paths.root / "outputs" / job.slug / output_id).exists()
+    assert [p for p in store.bytes.spool.iterdir() if p.is_dir()] == []
+
+
+async def test_put_thumbnail_lock_holds_across_replicas(
+    copied: tuple[OutputStore, OutputMeta],
+    pg_conninfo: str,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """B4 review: two API replicas, each its own store, pools and content store over one
+    database. Replica A's put lands first; its step stops after it took the thumbnail
+    lock, before the key takes its object (`BlobIndex.put_in`). Replica B's put lands
+    later, and its step must wait for A's, so the row names B's image, the later one."""
+    store, meta = copied
+    key = output_blob_key(meta.id, "thumbnail")
+    with store_pool(pg_conninfo) as rows_pool, store_pool(pg_conninfo) as index_pool:
+        other_content = local_content(tmp_path / "remote", index_pool)
+        other_content.spool = tmp_path / "spool-b"
+        other = OutputStore(
+            store.paths, rows=OutputRows(rows_pool), bytes=OutputBytes(other_content)
+        )
+        loop = asyncio.get_running_loop()
+        a_in_step = asyncio.Event()
+        b_done = threading.Event()
+        waited = threading.Event()
+        put_in = index_module.BlobIndex.put_in
+
+        def a_waits(self: Any, conn: Any, at: str, *args: Any, **kwargs: Any) -> Any:
+            if at == key and not waited.is_set():
+                waited.set()
+                loop.call_soon_threadsafe(a_in_step.set)
+                # Without a lock across replicas, B's whole step runs here.
+                b_done.wait(timeout=1.5)
+            return put_in(self, conn, at, *args, **kwargs)
+
+        monkeypatch.setattr(index_module.BlobIndex, "put_in", a_waits)
+        try:
+            first = asyncio.create_task(store.put_thumbnail(meta.id, b"from a"))
+            await a_in_step.wait()
+            await other.put_thumbnail(meta.id, b"from b")
+            b_done.set()
+            await first
+        finally:
+            b_done.set()
+            await other_content.aclose()
+        assert await _read(store, meta.id, "thumbnail") == b"from b"

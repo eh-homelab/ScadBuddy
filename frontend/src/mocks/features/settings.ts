@@ -341,17 +341,15 @@ function putSettings(body: Record<string, unknown>) {
     else next[name] = value
     sources[name] = fromEnv ? 'env' : 'default'
   }
-  // #426 — `SettingsStore.save`: the merged settings may not leave the Bambuddy store
-  // without its URL or inbox, whichever of them this save touched.
-  if (
-    STORE_READINESS.some((name) => name in body || reset.includes(name)) &&
-    next.store_backend === 'bambuddy' &&
-    (!next.bambuddy_url || next.library_folder_id === null || next.library_folder_id === undefined)
-  ) {
+  // #7257 — `SettingsStore.save`: the outputs live only in a blob store, and the Bambuddy
+  // library holds none, so a save whose merged store is `bambuddy` is refused, as the API
+  // does (`OUTPUTS_NEED_A_BLOB_STORE`, reason `outputs-need-a-blob-store`).
+  if (STORE_READINESS.some((name) => name in body || reset.includes(name)) && next.store_backend === 'bambuddy') {
     return problem(
       422,
       'Unprocessable Content',
-      'the Bambuddy store needs a Bambuddy URL and a library folder (its inbox) saved first',
+      'the outputs are kept only in the blob store (#7257), and the bambuddy store holds none (spec 6.4): use the s3 store (or local)',
+      { reason: 'outputs-need-a-blob-store' },
     )
   }
   // The S3 store's: its endpoint, bucket and both keys.
@@ -375,7 +373,7 @@ function putSettings(body: Record<string, unknown>) {
     return problem(
       422,
       'Unprocessable Content',
-      "ScadBuddy's own library keeps its files in the blob store: set store_backend to s3 or bambuddy first",
+      "ScadBuddy's own library keeps its files in the blob store: set store_backend to s3 first",
     )
   }
   // #5283 — `SettingsStore.save`: a login is never sent on a plain connection.
@@ -390,8 +388,6 @@ function putSettings(body: Record<string, unknown>) {
       'a plain connection (storefront_mail_tls none) is for a relay with no login: clear the user, or use starttls or implicit',
     )
   }
-  // #426 — without their own key, render workers are handed the full one.
-  next.render_key_fallback = Boolean(next.has_api_key) && !next.has_render_api_key
   next.sources = sources
   next.restart_required = Object.entries(fixtures.settingsApplies)
     .filter(([name, applies]) => applies === 'restart' && next[name] !== (state.running as Record<string, unknown>)[name])

@@ -1,0 +1,14 @@
+{
+  "comment": "#8042 (#7905): the canonical tag UID. backend/tests/filament/test_tag_uid_vectors.py checks spools/models.py clean_tag_uid and MIFARE_UID_SUFFIX against this file, and frontend/src/lib/tagUid.test.ts checks frontend/src/lib/tagUid.ts cleanTagUid, so the server and the browser clean a UID alike. A 4-byte (8 hex digit) UID is the AMS's form: the UID and then the suffix. None and all zeros are null; any other length is its last 16 hex digits, upper case.",
+  "suffix": "00000100",
+  "cases": [
+    { "in": "7E7482BB", "out": "7E7482BB00000100" },
+    { "in": "7e:74:82:bb", "out": "7E7482BB00000100" },
+    { "in": "7E7482BB00000100", "out": "7E7482BB00000100" },
+    { "in": "53F64B94420001", "out": "53F64B94420001" },
+    { "in": "00000000", "out": null },
+    { "in": "", "out": null },
+    { "in": null, "out": null },
+    { "in": "0123456789ABCDEF01", "out": "23456789ABCDEF01" }
+  ]
+}
