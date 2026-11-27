@@ -58,6 +58,33 @@ describe('the Presets tab', () => {
     expect(screen.queryByText(/^No presets yet/)).not.toBeInTheDocument()
   })
 
+  it('keeps the type filter\'s clear button when the list fails', async () => {
+    server.use(http.get('/api/v1/filament/presets', () => HttpResponse.json({ detail: 'bad type', code: 'invalid_type_id' }, { status: 422 })))
+    const { user } = renderPage(<PresetsTab />, { route: '/?type_id=not-a-uuid' })
+    expect(await screen.findByRole('alert')).toBeInTheDocument()
+    server.resetHandlers()
+    await user.click(screen.getByRole('button', { name: /^Clear the type filter/ }))
+    expect(presetRows(await presets()).length).toBeGreaterThan(1)
+  })
+
+  it('shows no rows of the last type while the new type loads', async () => {
+    let release: () => void = () => {}
+    const { user } = renderPage(<PresetsTab />, { route: `/?type_id=${T.ORANGE}` })
+    expect(presetRows(await presets())).toHaveLength(1)
+    const gate = new Promise<void>((resolve) => (release = resolve))
+    server.use(
+      http.get('/api/v1/filament/presets', async () => {
+        await gate
+        return undefined
+      }),
+    )
+    await user.click(screen.getByRole('button', { name: /^Clear the type filter/ }))
+    expect(await screen.findByText('Loading presets…')).toBeInTheDocument()
+    expect(screen.queryByRole('table', { name: 'Presets' })).not.toBeInTheDocument()
+    release()
+    expect(presetRows(await presets()).length).toBeGreaterThan(1)
+  })
+
   it('uses the singular for a count of one', async () => {
     renderPage(<PresetsTab />)
     await presets()

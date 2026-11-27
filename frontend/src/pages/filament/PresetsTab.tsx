@@ -60,6 +60,9 @@ export function PresetsTab() {
 
   useEffect(() => {
     let live = true
+    // A new filter drops the last answer: the old type's rows never show under the new label.
+    setRows(null)
+    setError(null)
     listPresets({ typeId: typeId ?? undefined }).then(
       (list) => {
         if (!live) return
@@ -90,11 +93,22 @@ export function PresetsTab() {
     setParams(next, { replace: true })
   }
 
+  const typeChip = typeId && (
+    <Button type="button" variant="outline" size="sm" aria-label={`Clear the type filter (Type: ${typeCodes.get(typeId) ?? shortId(typeId)})`} onClick={() => setParam('type_id', null)}>
+      {`Type: ${typeCodes.get(typeId) ?? shortId(typeId)}`}
+      <XIcon />
+    </Button>
+  )
+
   if (error) {
+    // The type chip stays: a type id the server refuses must not leave the URL as the only way out.
     return (
-      <p role="alert" className="text-[13px] text-warn">
-        {error}
-      </p>
+      <div className="flex flex-col items-start gap-2">
+        <p role="alert" className="text-[13px] text-warn">
+          {error}
+        </p>
+        {typeChip}
+      </div>
     )
   }
   if (!rows) return <p className="text-[13px] text-muted-foreground">Loading presets…</p>
@@ -116,12 +130,7 @@ export function PresetsTab() {
             </Button>
           ))}
         </div>
-        {typeId && (
-          <Button type="button" variant="outline" size="sm" aria-label={`Clear the type filter (Type: ${typeCodes.get(typeId) ?? shortId(typeId)})`} onClick={() => setParam('type_id', null)}>
-            {`Type: ${typeCodes.get(typeId) ?? shortId(typeId)}`}
-            <XIcon />
-          </Button>
-        )}
+        {typeChip}
       </div>
       <div className="relative overflow-x-auto rounded-md border">
         <table aria-label="Presets" className="w-full text-left text-[13px]">
