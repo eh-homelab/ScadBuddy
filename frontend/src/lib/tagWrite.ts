@@ -54,7 +54,7 @@ const isAbort = (cause: unknown, signal?: AbortSignal) => signal?.aborted === tr
 
 export interface WriteOptions {
   session: NfcSession
-  reason: 'spool_write' | 'agent_write' | 'restore'
+  reason: 'spool_write' | 'agent_write' | 'restore' | 'place_write'
   jobId?: string
   /** The records to write, for the tag as just read and its backup. */
   prepare: (now: Reading, backupId: string) => Promise<WireRecord[]>

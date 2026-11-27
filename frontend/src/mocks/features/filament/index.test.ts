@@ -30,6 +30,7 @@ import {
   listSpools,
   listTags,
   moveSpool,
+  staleOf,
   patchSpool,
   unbindTag,
   resolveCatalog,
@@ -338,6 +339,35 @@ describe('the filament mocks', () => {
       expect((await closingPreview(spoolId(10), 'damaged', null, null)).closing.non_print_waste_g).toBe(250)
       expect((await closingPreview(spoolId(10), 'respooled', null, null)).closing.non_print_waste_g).toBeNull()
       expect((await closingPreview(spoolId(10), 'finished', null, 0)).closing.non_print_waste_g).toBeNull()
+    })
+  })
+
+  describe('a move that carries the place the spool was read in (#7168)', () => {
+    it('refuses a move whose spool left the place it was read in', async () => {
+      await moveSpool(spoolId(1), L.WORKSHOP)
+      const cause = await moveSpool(spoolId(1), L.SHELF_A, { expectedLocationId: L.SHELF_A }).catch((e: unknown) => e)
+      expect(staleOf(cause)).toEqual({ locationId: L.WORKSHOP, archived: false })
+      expect((await getSpool(spoolId(1))).location_id).toBe(L.WORKSHOP)
+    })
+
+    it('checks an explicit null expected place', async () => {
+      await moveSpool(spoolId(1), L.WORKSHOP)
+      const cause = await moveSpool(spoolId(1), L.SHELF_A, { expectedLocationId: null }).catch((e: unknown) => e)
+      expect(staleOf(cause)).toEqual({ locationId: L.WORKSHOP, archived: false })
+      await moveSpool(spoolId(1), null)
+      expect((await moveSpool(spoolId(1), L.SHELF_A, { expectedLocationId: null })).location_id).toBe(L.SHELF_A)
+    })
+
+    it('refuses a move of an archived spool as stale', async () => {
+      await archiveSpool(spoolId(1))
+      const cause = await moveSpool(spoolId(1), L.WORKSHOP, { expectedLocationId: L.SHELF_A }).catch((e: unknown) => e)
+      expect(staleOf(cause)).toMatchObject({ archived: true })
+    })
+
+    it('keeps the move as it was when no expected place is sent', async () => {
+      await moveSpool(spoolId(1), L.WORKSHOP)
+      expect((await moveSpool(spoolId(1), L.SHELF_A)).location_id).toBe(L.SHELF_A)
+      expect(staleOf(new Error('x'))).toBeNull()
     })
   })
 
