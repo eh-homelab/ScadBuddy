@@ -15,7 +15,7 @@ import contextvars
 from collections.abc import Collection, Iterator, Sequence
 from contextlib import AbstractContextManager, contextmanager
 from dataclasses import dataclass, field
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from enum import Enum
 from typing import Any, Final, NamedTuple, NoReturn
@@ -2202,34 +2202,43 @@ class OrderStore:
             ).fetchall()
         return [int(row["archive_id"]) for row in rows]
 
-    def lan_candidates(self, run_id: str, limit: int) -> tuple[str, list[int]] | None:
+    def lan_candidates(
+        self, run_id: str, limit: int, within: timedelta
+    ) -> tuple[str, list[int]] | None:
         """For a run with a LAN start that no archive names yet (#8281): the run's subject
         (``print_runs.output_id``), and the archives that a link by content hash gives that
         subject and that name no start yet, at most ``limit``, oldest link first. Such a
         link names no queue item, as Bambuddy's hash found it (`linking.link_lan_starts`,
-        `linking.link_archive`). Only the links made since the run was made are taken: the
-        run's archive is made when its print starts, and linked after that. These are
-        candidates only; :meth:`lan_runs` and the file name decide. None for a run with
-        no such start."""
+        `linking.link_archive`). Only the links made from the run's making to ``within``
+        after the newest of those starts are taken (#8306): the run's archive is made when
+        its print starts, and linked after that. So an archive that never matches (a
+        foreign file, a name two runs share) is not read again once that window ends.
+        These are candidates only; :meth:`lan_runs` and the file name decide. None for a
+        run with no such start."""
         with self._read(None) as c:
             run = c.execute(
-                "SELECT r.output_id, r.created_at FROM print_runs r WHERE r.id = %s"
-                " AND EXISTS (SELECT 1 FROM jsonb_array_elements("
+                "SELECT r.output_id, r.created_at,"
+                " max((e->>'started_at')::timestamptz) AS last_start"
+                " FROM print_runs r CROSS JOIN LATERAL jsonb_array_elements("
                 "  CASE WHEN jsonb_typeof(r.result->'lan') = 'array' THEN r.result->'lan' END) e"
-                "  WHERE NOT EXISTS (SELECT 1 FROM lan_print_archives a"
-                "   WHERE a.run_id = r.id AND a.subtask_name = e->>'subtask_name'))",
+                " WHERE r.id = %s AND NOT EXISTS (SELECT 1 FROM lan_print_archives a"
+                "  WHERE a.run_id = r.id AND a.subtask_name = e->>'subtask_name')"
+                " GROUP BY r.output_id, r.created_at",
                 (run_id,),
             ).fetchone()
             if run is None:
                 return None
+            if run["last_start"] is None:
+                return str(run["output_id"]), []
             subject = PrintSubject.from_run_subject(run["output_id"]).key
             rows = c.execute(
                 "SELECT l.archive_id FROM print_links l WHERE l.subject = %s"
                 " AND l.matched_by = 'content_hash' AND l.queue_item_id IS NULL"
-                " AND l.first_seen >= %s AND NOT EXISTS (SELECT 1 FROM lan_print_archives a"
+                " AND l.first_seen >= %s AND l.first_seen <= %s"
+                " AND NOT EXISTS (SELECT 1 FROM lan_print_archives a"
                 "  WHERE a.archive_id = l.archive_id)"
                 " ORDER BY l.first_seen, l.archive_id LIMIT %s",
-                (subject, run["created_at"], limit),
+                (subject, run["created_at"], run["last_start"] + within, limit),
             ).fetchall()
         return str(run["output_id"]), [int(row["archive_id"]) for row in rows]
 
@@ -2239,11 +2248,12 @@ class OrderStore:
         with self._read(None) as c:
             return lan_started_in(c, run_subject, subtask_names)
 
-    def record_lan_start(self, link: LanArchiveLink) -> None:
+    def record_lan_start(self, link: LanArchiveLink) -> bool:
         """Record the LAN start an archive became, as `PrintLinkStore.record_lan_start`
-        does (#8281). The first record is kept."""
+        does (#8281). The first record of the archive and of the start is kept (#8306);
+        False when the archive's record is not this start."""
         with self._write(None) as c:
-            record_lan_start_in(c, link)
+            return record_lan_start_in(c, link)
 
     def archive_origin(self, archive_id: int, *, conn: Conn | None = None) -> ArchiveOrigin | None:
         """What printed Bambuddy archive ``archive_id`` (#4777): the output or library file

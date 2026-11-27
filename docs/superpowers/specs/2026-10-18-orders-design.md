@@ -1225,7 +1225,14 @@ file never mix. That last read is for a LAN print that nobody opened (#8281,
 `archives.link_lan_archives`): it reads the archives that a link by content hash gives the
 run's subject and that name no start yet, through the same seam, and records the start
 that each file name names. It adds no Bambuddy read of a new kind, and it finds nothing
-until a link by hash exists (the print watcher or the Prints list writes it). Once the
+until a link by hash exists (the print watcher or the Prints list writes it). It takes
+only the links made from the run's making to `archives.LAN_LINK_WINDOW` (the print
+watcher's `LOOKBACK`) after the run's newest start that no archive names, so an
+archive that never matches is not read again past that window (#8306). A start gets one
+archive only: a start that another archive became already keeps it, and two archives of
+one read that name one start record neither (`lan_files.starts_by_files`), so the attempt
+never adds two prints' grams and seconds. A database error in that link is logged, and the
+read goes on with the archives already named. Once the
 attempt's print
 settled it copies `archive_ids`, the archives' earliest start and latest end as its
 `started_at`/`finished_at`, and `actual_seconds` and `actual_grams` summed

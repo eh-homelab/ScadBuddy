@@ -46,8 +46,9 @@ hash whose file the start uploaded (`print_history._run_by_file`): on the print'
 read, or as the prints list links the print (`print_history._link_lan_prints`, #5724),
 which looks only for the starts no row here names. An order attempt's archive read
 writes it too, for a print that nobody opened (`orders/archives.py` `link_lan_archives`,
-#8281). Both use one rule (`lan_files.start_by_file`). A LAN start has no queue item, so
-no send names it.
+#8281). Both use one rule (`lan_files.start_by_file`). One archive per start: a start
+that another archive became already gets no second row (`record_lan_start_in`, #8306).
+A LAN start has no queue item, so no send names it.
 
 `PrintLinkStore.jobs` reads these records, with ``print_runs``' LAN starts, to mark the
 queue items and printer jobs ScadBuddy queued or started (#3741, `ScadBuddyJob`). An order
@@ -181,15 +182,33 @@ class LanArchiveLink(BaseModel):
     plate_id: int | None = None
 
 
-def record_lan_start_in(conn: Connection[DictRow], link: LanArchiveLink) -> None:
+def record_lan_start_in(conn: Connection[DictRow], link: LanArchiveLink) -> bool:
     """`PrintLinkStore.record_lan_start` on ``conn``: the order attempt's archive read
     records it in its own connection (`orders/store.py` `OrderStore.record_lan_start`,
-    #8281). The first record is kept."""
+    #8281). One start per archive and one archive per start: the first record is kept.
+    A start that another archive became already gets no second archive (#8306): a failed
+    LAN print printed again from the printer's own storage makes a second archive of the
+    same file, and an order attempt then adds the grams and seconds of both prints. True
+    when the archive's record is this start, written now or before."""
     conn.execute(
         "INSERT INTO lan_print_archives (archive_id, run_id, subtask_name, plate_id)"
-        " VALUES (%s, %s, %s, %s) ON CONFLICT (archive_id) DO NOTHING",
-        (link.archive_id, link.run_id, link.subtask_name, link.plate_id),
+        " SELECT %(archive)s::bigint, %(run)s::text, %(start)s::text, %(plate)s::integer"
+        " WHERE NOT EXISTS (SELECT 1 FROM lan_print_archives"
+        "  WHERE run_id = %(run)s AND subtask_name = %(start)s AND archive_id <> %(archive)s)"
+        " ON CONFLICT (archive_id) DO NOTHING",
+        {
+            "archive": link.archive_id,
+            "run": link.run_id,
+            "start": link.subtask_name,
+            "plate": link.plate_id,
+        },
     )
+    row = conn.execute(
+        "SELECT 1 FROM lan_print_archives"
+        " WHERE archive_id = %s AND run_id = %s AND subtask_name = %s",
+        (link.archive_id, link.run_id, link.subtask_name),
+    ).fetchone()
+    return row is not None
 
 
 class PrintReprint(BaseModel):
@@ -726,9 +745,11 @@ class PrintLinkStore:
         """The LAN start ``archive_id`` became (#5661), or ``None`` when none is recorded."""
         return await asyncio.to_thread(self._lan_start, archive_id)
 
-    async def record_lan_start(self, link: LanArchiveLink) -> None:
-        """Record the LAN start an archive became. The first record is kept."""
-        await asyncio.to_thread(self._record_lan_start, link)
+    async def record_lan_start(self, link: LanArchiveLink) -> bool:
+        """Record the LAN start an archive became (`record_lan_start_in`): the first
+        record of the archive and of the start is kept. False when the archive's record
+        is not this start."""
+        return await asyncio.to_thread(self._record_lan_start, link)
 
     async def jobs(
         self,
@@ -931,9 +952,9 @@ class PrintLinkStore:
             ).fetchone()
         return None if row is None else LanArchiveLink.model_validate(dict(row))
 
-    def _record_lan_start(self, link: LanArchiveLink) -> None:
+    def _record_lan_start(self, link: LanArchiveLink) -> bool:
         with self._pool.connection() as conn:
-            record_lan_start_in(conn, link)
+            return record_lan_start_in(conn, link)
 
     def _jobs(self, queue_items: list[int], lan_starts: list[tuple[str, str]]) -> JobMatches:
         matches = JobMatches()
