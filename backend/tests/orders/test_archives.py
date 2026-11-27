@@ -25,7 +25,7 @@ from scadbuddy.bambuddy.print_links import PrintLinkStore
 from scadbuddy.core.events import OrderItemChanged, PrintOutcome
 from scadbuddy.core.metrics import Metrics
 from scadbuddy.core.problems import ApiError
-from scadbuddy.filament import prints
+from scadbuddy.filament import ledger, prints
 from scadbuddy.filament.catalog import CatalogStore
 from scadbuddy.filament.models import Material, SpoolCreate
 from scadbuddy.filament.print_uses import SlotUse, record_uses, settle_uses
@@ -846,6 +846,106 @@ async def test_a_lan_attempt_takes_its_starts_own_end_and_sliced_grams(
     kept = shop.rows.fulfilments(item.id)[0]
     assert (kept.started_at, kept.finished_at) == (T0, T0 + timedelta(hours=3))
     assert (kept.actual_seconds, kept.actual_grams) == (9000, 17.5)
+
+
+async def test_a_repeated_view_of_a_lan_attempt_only_reads(
+    shop: Shop, pool: PgPool, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#8330: the first view copies the record's facts. A second view finds them on the
+    attempt already, so it writes nothing and does not lock the order."""
+    order, item, attempt, _ = own_lan_print(
+        shop, pool, [timedelta(0)], {1: [4.0]}, settled_after=timedelta(hours=1)
+    )
+    seam = Archives(facts(370, **OTHER))
+    await attempt_archives(
+        shop.lifecycle, seam, order.id, item.id, attempt.id, Starts(), limit=LIMIT
+    )
+    first = shop.rows.fulfilments(item.id)[0]
+    assert (first.actual_seconds, first.actual_grams) == (3600, 4.0)
+    calls: list[object] = []
+
+    def spy(*args: Any, **kwargs: Any) -> Fulfilment:
+        calls.append(args)
+        raise AssertionError("a repeated view wrote the attempt")
+
+    monkeypatch.setattr(shop.lifecycle, "record_archive_facts", spy)
+    read = await attempt_archives(
+        shop.lifecycle, seam, order.id, item.id, attempt.id, Starts(), limit=LIMIT
+    )
+    assert calls == []
+    assert shop.rows.fulfilments(item.id)[0] == first
+    assert read.attempt == first
+
+
+async def test_a_lan_start_that_does_not_parse_falls_back_to_the_archive(
+    shop: Shop, pool: PgPool, caplog: pytest.LogCaptureFixture
+) -> None:
+    """#8330: a ``result.lan`` entry that does not parse gives no record. The error is
+    logged with the run id and without the entry, and the attempt takes its facts from
+    its archive."""
+    order, item, attempt, run_id = own_lan_print(
+        shop, pool, [timedelta(0)], {1: [4.0]}, settled_after=timedelta(hours=1)
+    )
+    # The start keeps its name, so its archive still names it, and the LAN link does
+    # not read the entry.
+    name = f"scadbuddy-{run_id[:8]}-p1"
+    bad = [{"subtask_name": name, "started_at": "not-a-time-8330", "plate_id": 1}]
+    with pool.connection() as conn:
+        conn.execute(
+            "UPDATE print_runs SET result = jsonb_set(result, '{lan}', %s) WHERE id = %s",
+            (Jsonb(bad), run_id),
+        )
+    assert shop.rows.lan_record(run_id) is None
+    assert any(run_id in r.getMessage() for r in caplog.records if r.levelname == "WARNING")
+    assert "not-a-time-8330" not in caplog.text
+    seam = Archives(facts(370, **OTHER))
+    await attempt_archives(
+        shop.lifecycle, seam, order.id, item.id, attempt.id, Starts(), limit=LIMIT
+    )
+    kept = shop.rows.fulfilments(item.id)[0]
+    assert kept.archive_ids == [370]
+    assert (kept.actual_seconds, kept.actual_grams) == (999, 99.0)
+
+
+async def test_a_lan_plate_bambuddy_covered_on_another_spool_takes_the_archives_grams(
+    shop: Shop, pool: PgPool
+) -> None:
+    """Bambuddy booked the plate on another SB spool than SB's estimate names, so
+    `bambuddy_usage._cover` ended the estimate with 0 g and ``basis`` ``covered``. That
+    use is not applied, and the record does not say what the plate used: the grams are
+    the archive's. The start is from before #8321 and has no ``grams_by_slot``. So the
+    sliced grams of a finished run do not decide, and the ledger's rule does."""
+    order, item, attempt, run_id = own_lan_print(
+        shop, pool, [timedelta(0)], {}, settled_after=timedelta(hours=1)
+    )
+    name = f"scadbuddy-{run_id[:8]}-p1"
+    spool = sb_spool(pool)
+    use = SlotUse(slot_id=1, spool_id=spool, grams=8.0, plate_started_at=T0)
+    record_uses(pool, run_id, name, [use])
+    # What `_cover` books on the estimate's spool (#6598).
+    with pool.connection() as conn, conn.transaction():
+        ledger.record(
+            conn,
+            spool,
+            ledger.PRINT_ENDED,
+            source=ledger.PRINT_ACTUAL,
+            delta_g=0.0,
+            ref_kind=ledger.PRINT_RUN,
+            ref_id=f"{run_id}/{name}/1",
+            at=T0 + timedelta(minutes=50),
+            actor="test",
+            data={"basis": "covered", "job": name, "covered_by": str(uuid.uuid4())},
+        )
+    record = shop.rows.lan_record(run_id)
+    assert record is not None and record.outcome == "finished"
+    assert [(u.grams, u.applied) for u in record.uses] == [(0.0, False)]
+    assert lan_facts(record).actual_grams is None
+    seam = Archives(facts(370, **OTHER))
+    await attempt_archives(
+        shop.lifecycle, seam, order.id, item.id, attempt.id, Starts(), limit=LIMIT
+    )
+    kept = shop.rows.fulfilments(item.id)[0]
+    assert (kept.actual_seconds, kept.actual_grams) == (3600, 99.0)
 
 
 def own_start(

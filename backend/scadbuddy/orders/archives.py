@@ -327,7 +327,11 @@ async def _record_facts(
     """The attempt with ``facts`` and ``own`` written (`Lifecycle.record_archive_facts`):
     each of ``own``'s facts, else the archives'. With no archive read (no Bambuddy, none
     linked yet, or a read that failed), the attempt keeps its archives, and its seconds
-    and grams where ``own`` gives none. Nothing is written with neither."""
+    and grams where ``own`` gives none. Nothing is written with neither.
+
+    Nothing is written, and the order is not locked, when the attempt was copied once
+    and already holds these archives, seconds and grams (#8330). A later copy keeps the
+    times, so a repeated view only reads."""
     if own is None and not facts:
         return attempt
     mine = own or OwnFacts(None, None, None, None)
@@ -345,16 +349,22 @@ async def _record_facts(
         # The times are written on the first copy only, and one not given stays.
         theirs = OwnFacts(None, None, attempt.actual_seconds, attempt.actual_grams)
         archive_ids = attempt.archive_ids
+    seconds = theirs.actual_seconds if mine.actual_seconds is None else mine.actual_seconds
+    grams = theirs.actual_grams if mine.actual_grams is None else mine.actual_grams
+    if (
+        list(archive_ids) == attempt.archive_ids
+        and (seconds, grams) == (attempt.actual_seconds, attempt.actual_grams)
+        and await asyncio.to_thread(lifecycle.store.archive_copied, attempt.id)
+    ):
+        return attempt
     return await asyncio.to_thread(
         lifecycle.record_archive_facts,
         attempt,
         archive_ids,
         started_at=mine.started_at or theirs.started_at,
         finished_at=mine.finished_at or theirs.finished_at,
-        actual_seconds=(
-            theirs.actual_seconds if mine.actual_seconds is None else mine.actual_seconds
-        ),
-        actual_grams=theirs.actual_grams if mine.actual_grams is None else mine.actual_grams,
+        actual_seconds=seconds,
+        actual_grams=grams,
     )
 
 

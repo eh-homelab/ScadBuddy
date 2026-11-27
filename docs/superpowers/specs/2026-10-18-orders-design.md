@@ -1256,7 +1256,9 @@ outcome: the attempt's is the print path's (`print_outcomes`), read from the sam
 The times are copied once, told by `archive_copied` (#5273), so one a person corrected
 stands even when the archives give no seconds or grams. An attempt that named archives before that column was
 added is taken as copied (#5276): nothing tells one copied from an archive with neither
-from one never read.
+from one never read. A copy of an attempt copied once that would change nothing writes
+nothing and takes no order lock (#8330). A `result.lan` that does not parse gives no
+record (logged), so the archives give every fact.
 The copy runs on each `print.outcome` heard (`listen_for_prints`' `on_outcome`) and on
 each `GET …/fulfilments/{f}/archives`, which also lists each archive's `finish_` photos
 and whether it has a timelapse, so a link Bambuddy made late is still copied. `POST
