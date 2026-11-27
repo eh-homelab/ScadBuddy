@@ -6,14 +6,8 @@ import (
 	"encoding/hex"
 	"fmt"
 	"net/http"
-	"time"
 
 	"github.com/jackc/pgx/v5"
-	"github.com/jackc/pgx/v5/pgxpool"
-
-	"github.com/eh-homelab/ScadBuddy/tools/go/core/internal/httpx"
-	"github.com/eh-homelab/ScadBuddy/tools/go/core/internal/seal"
-	"github.com/eh-homelab/ScadBuddy/tools/go/telemetry"
 )
 
 // Put stores body as a blob of kind for a route of this process (#8148: a tag read's raw
