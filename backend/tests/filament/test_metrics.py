@@ -12,7 +12,7 @@ import pytest
 
 from scadbuddy.filament import metrics
 from scadbuddy.filament.metrics_models import AmsError, Plate
-from scadbuddy.filament.models import SpoolEvent
+from scadbuddy.filament.models import SpoolEvent, SpoolTypeCreate
 
 NOW = datetime(2026, 11, 18, 12, tzinfo=UTC)
 SPOOL = UUID(int=1)
@@ -464,3 +464,10 @@ def test_a_density_off_by_more_than_five_percent_is_a_mismatch() -> None:
     assert close.density_mismatch is False
     unknown = _metrics([sb_end(days(1), 3.3, "a", length_m=1.0)], density_g_cm3=None)
     assert unknown.density_mismatch is False
+
+
+def test_a_new_types_default_diameter_is_the_one_metrics_reads_by() -> None:
+    """#8196: the request model cannot import `metrics` (it imports the models), so the
+    two defaults are separate literals. A change to one alone fails here."""
+    default = SpoolTypeCreate.model_fields["diameter_mm"].default
+    assert float(default) == metrics.DEFAULT_DIAMETER_MM

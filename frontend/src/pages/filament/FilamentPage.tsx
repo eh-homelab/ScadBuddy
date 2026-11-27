@@ -11,6 +11,7 @@ import { ShoppingListTab } from './ShoppingListTab'
 import { SpoolsTab } from './SpoolsTab'
 import { SuppliersTab } from './SuppliersTab'
 import { TagsTab } from './TagsTab'
+import { PresetsTab } from './PresetsTab'
 import { TypesTab } from './TypesTab'
 import { FILAMENT_TABS, type TabId } from './tabs'
 
@@ -27,6 +28,7 @@ const tabClass = ({ isActive }: { isActive: boolean }) =>
 const INTRO: Record<TabId, string> = {
   spools: 'Every spool on the shelf and in the printers: its colour, what is left, and where it is.',
   types: 'The products your spools are: material, colour, weights, temperatures and price.',
+  presets: 'The slicer presets that types and spools print with, and whether Bambuddy has each.',
   tags: 'The RFID tags read from spools, the spool each is on, and where each has been.',
   suppliers: 'Where you buy filament.',
   invoices: 'Invoices, and the spools each one added.',
@@ -62,6 +64,7 @@ export function FilamentPage({ tab }: { tab: TabId }) {
         </nav>
         {tab === 'spools' && <SpoolsTab />}
         {tab === 'types' && <TypesTab />}
+        {tab === 'presets' && <PresetsTab />}
         {tab === 'tags' && <TagsTab />}
         {tab === 'locations' && <LocationsTab />}
         {tab === 'catalog' && <CatalogTab />}

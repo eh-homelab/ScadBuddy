@@ -3,7 +3,7 @@ import { describe, expect, it } from 'vitest'
 import { filamentLinks } from './filamentLinks'
 
 interface Vector {
-  kind: 'spool' | 'type' | 'supplier' | 'invoice' | 'location' | 'catalog'
+  kind: 'spool' | 'type' | 'supplier' | 'invoice' | 'location' | 'preset' | 'catalog'
   key: string
   path: string
 }
@@ -19,6 +19,7 @@ describe('filamentLinks (#6869)', () => {
       supplier: filamentLinks.supplier,
       invoice: filamentLinks.invoice,
       location: filamentLinks.location,
+      preset: filamentLinks.preset,
       catalog: (kind) => filamentLinks.catalog(kind as Parameters<typeof filamentLinks.catalog>[0]),
     }
     expect(build[kind](key)).toBe(path)

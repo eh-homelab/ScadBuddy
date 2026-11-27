@@ -11,6 +11,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"net/http"
 	"os"
 	"regexp"
@@ -37,6 +38,9 @@ const (
 	mirrorNotFound        = "mirror-not-found"
 	hostedVersionNotFound = "hosted-version-not-found"
 	blobMissing           = "blob-missing" // hosted_plugins/blobs.py BLOB_MISSING
+	// blobTooLarge is a stored blob past the bound a route reads into memory. Python sets no
+	// such bound, so it has no reason of its own.
+	blobTooLarge = "blob-too-large"
 
 	// zipSegment is the version's path segment, "{version}.zip" as Starlette's template
 	// writes it, so the span's http.route is Python's. The router names the parameter by
@@ -57,6 +61,10 @@ var digitsPattern = regexp.MustCompile(`^[0-9]+$`)
 // tried to index it.
 var ErrStale = errors.New("the blob's key was published by another")
 
+// ErrTooLarge is a read refused because the stored file, or its blob, is larger than the
+// bound the route gave (blobstore.ErrTooLarge).
+var ErrTooLarge = errors.New("the stored file is larger than its reader takes")
+
 // Blobs is the blob store as the API's process runs it (store/cache.py CachedBlobStore over
 // its content store). An error that is an *httpx.Problem is answered as it is (a store out of
 // reach as 503 store_unavailable, say); any other is a 500.
@@ -74,7 +82,7 @@ type Blobs interface {
 	// ReadFile is CachedBlobStore.read_file: the file name of the blob key, whole. found is
 	// false when the store holds no blob key on its backend, or the blob holds no such file; a
 	// lost or altered object is forgotten and not found. A file of more than max bytes is
-	// refused (blobstore.ErrTooLarge), since it is held in memory.
+	// refused (ErrTooLarge), since it is held in memory.
 	ReadFile(ctx context.Context, key, name string, max int64) (data []byte, found bool, err error)
 }
 
@@ -227,7 +235,7 @@ func (m *Mirrors) get(r *http.Request, params crud.Params) (any, error) {
 	if !named {
 		return nil, notFound
 	}
-	data, found, err := m.Blobs.ReadFile(ctx, mirrorKey(sum), MirrorFile, MaxMirrorBytes)
+	data, found, err := readFile(ctx, m.Blobs, mirrorKey(sum))
 	if err != nil {
 		return nil, err
 	}
@@ -273,7 +281,7 @@ func (m *Mirrors) hostedZip(r *http.Request, params crud.Params) (any, error) {
 	}
 	// A hosted version's tree is at most hosted_plugins/rules.py MAX_TOTAL_BYTES (20 MiB), below
 	// MaxMirrorBytes; raising that cap past this bound needs a bound of its own here.
-	data, found, err := m.Blobs.ReadFile(ctx, attachmentKey(zipSHA256), MirrorFile, MaxMirrorBytes)
+	data, found, err := readFile(ctx, m.Blobs, attachmentKey(zipSHA256))
 	if err != nil {
 		return nil, err
 	}
@@ -292,6 +300,18 @@ func (m *Mirrors) hostedZip(r *http.Request, params crud.Params) (any, error) {
 			"X-ScadBuddy-Content-Hash": contentHash,
 		},
 	}, nil
+}
+
+// readFile is the one file of the blob key, at most MaxMirrorBytes. A stored blob past that
+// bound is a 500 that says so (blob-too-large), its key logged, never a bare 500.
+func readFile(ctx context.Context, blobs Blobs, key string) ([]byte, bool, error) {
+	data, found, err := blobs.ReadFile(ctx, key, MirrorFile, MaxMirrorBytes)
+	if errors.Is(err, ErrTooLarge) {
+		slog.ErrorContext(ctx, "a stored blob is larger than its route reads", "key", key, "error", err)
+		return nil, false, httpx.WithReason(http.StatusInternalServerError,
+			"a stored blob is larger than this route reads", blobTooLarge)
+	}
+	return data, found, err
 }
 
 // zipVersion is the path's version, an integer of at least 1 (Path(ge=1)).

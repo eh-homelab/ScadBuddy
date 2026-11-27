@@ -594,6 +594,12 @@ opens every one and seals it again byte for byte).
     an ended one is answered with no plugin, binding or contact; one with no outcome is sent
     again only when the binding maps `idempotency_key`, with the row's own recipients and text,
     and needs the binding (none is `no_messaging_plugin`) but no contact.
+  - Filament presets (#7204): `filament_preset_list`, `filament_preset_get` and `filament_preset_diff`
+    in `tools/filament.ts`, all `read`. They call Go core's routes under `/api/v1/filament/presets`
+    (`tools/go/core/internal/filamentpresets`), which Python does not serve, so each has
+    `routes: []`. A 404 with no `code` means core does not serve the area yet. `presetOk` then
+    throws a `ToolError` that names the area `filament-presets`. Tests: `test/filament.test.ts`
+    and the wire fixture `test-fixtures/filament/preset-wire.json`.
   - The inventory (#7067, `docs/features/inventory.md`): `tools/inventory.ts`, 19 `inventory_*` tools
     (kinds, items, offers and price points, lots, units, moves, and `inventory_operation_get`, which reads a write that answered 202), `read` for the lists and gets and
     `write` for the rest, `inventory_lot_recost` included (Ruling 8); each answer but that one's carries `ui_path`

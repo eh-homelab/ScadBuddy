@@ -266,8 +266,12 @@ func (b *Blobs) begin(r *http.Request, _ crud.Params) (any, error) {
 }
 
 // room refuses an upload that would take the store past its caps (store/content.py
-// `_require_room`): checked, not reserved.
+// `_require_room`): checked, not reserved. With no cap set it runs no usage aggregate
+// (#8110, #8195).
 func (b *Blobs) room(ctx context.Context, store *Store, size int64) error {
+	if store.MaxCount <= 0 && store.MaxTotalBytes <= 0 {
+		return nil
+	}
 	count, total, err := usage(ctx, b.Pool, backendS3)
 	if err != nil {
 		return err
