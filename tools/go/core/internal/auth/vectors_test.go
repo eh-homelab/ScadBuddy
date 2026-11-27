@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"log/slog"
 	"net/http"
@@ -467,6 +468,28 @@ func TestNothingSecretIsLogged(t *testing.T) {
 	for _, secret := range []string{v.Sessions[0].Token, v.Tokens[0].Token, v.Credentials[0].Token, "sbpat_", "sbsvc_"} {
 		if strings.Contains(text, secret) {
 			t.Errorf("the log holds %q: %s", secret, text)
+		}
+	}
+}
+
+// SessionID is the hex SHA-256 of the session cookie Caller reads (Python's
+// session.id_hash.hex()): Starlette's parse, a quoted value unquoted, the last of two kept.
+func TestSessionIDIsTheCookieCallerReads(t *testing.T) {
+	token := strings.Repeat("a", 43)
+	sum := sha256.Sum256([]byte(token))
+	want := hex.EncodeToString(sum[:])
+	for _, cookie := range []string{
+		SessionCookie + "=" + token,
+		SessionCookie + `="` + token + `"`,
+		SessionCookie + "=x; other=1; " + SessionCookie + "= " + token + " ",
+	} {
+		if got := SessionID(http.Header{"Cookie": {cookie}}); got != want {
+			t.Errorf("%q: %q, want %q", cookie, got, want)
+		}
+	}
+	for _, h := range []http.Header{{}, {"Cookie": {"other=1"}}, {"Cookie": {SessionCookie + "="}}} {
+		if got := SessionID(h); got != "" {
+			t.Errorf("%v: %q, want none", h, got)
 		}
 	}
 }
