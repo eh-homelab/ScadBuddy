@@ -236,7 +236,7 @@ class Relay:
         if state == "stopped":
             self._pull.pop(printer_id, None)
             self._was_ready.discard(printer_id)
-            for metric in (PULLING, RECONNECTS):
+            for metric in (PULLING, RECONNECTS, SILENT_RESTARTS):
                 with suppress(KeyError):
                     metric.remove(printer_id)
             return
@@ -359,6 +359,12 @@ class Relay:
         for name in sorted(self._lost):
             try:
                 await self.reconcile(name)
+            except SourceError as error:
+                # The API's source cannot be dialled: `reconcile` removed the path, and
+                # `reconcile_all` reports this case at each resync. Trying every tick
+                # would only log it again.
+                self._lost.discard(name)
+                logger.warning("camera relay: %s is not put back: %s", name, error)
             except Exception as error:
                 logger.warning(
                     "camera relay: %s is still not back after a failed restart (%s: %s)",
@@ -375,7 +381,8 @@ class Relay:
         held = set(self._held or ())
         for name in set(self._heard) - (held & set(received)):
             del self._heard[name]
-        for name in set(self._silent_after) - held:
+        # A lost path keeps its wait: it is silent still when it comes back.
+        for name in set(self._silent_after) - held - self._lost:
             del self._silent_after[name]
         silent: list[str] = []
         for name in sorted(held & set(received)):
