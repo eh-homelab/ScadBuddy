@@ -32,13 +32,17 @@ type fakeCUPS struct {
 	// block is closed when the test ends. A handler waits on it when hang is set.
 	block chan struct{}
 	hang  bool // guarded by mu
+	// hangPrint makes only Print-Job wait on block.
+	hangPrint bool // guarded by mu
 
 	mu           sync.Mutex
 	queues       []fakeQueue
 	requests     []fakeRequest
-	printStatus  uint16  // status of the next Print-Job reply
-	printMessage string  // its status-message
-	replyID      *uint32 // when set, the request-id of every reply
+	printStatus  uint16   // status of the next Print-Job reply
+	printMessage string   // its status-message
+	replyID      *uint32  // when set, the request-id of every reply
+	jobState     int32    // job-state of the next accepted job; 0 is 5 (processing)
+	jobReasons   []string // its job-state-reasons; nil is job-printing
 }
 
 func newFakeCUPS(t *testing.T, queues []fakeQueue) *fakeCUPS {
@@ -67,6 +71,18 @@ func (f *fakeCUPS) setHang(v bool) {
 	f.hang = v
 }
 
+func (f *fakeCUPS) setHangPrint(v bool) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.hangPrint = v
+}
+
+func (f *fakeCUPS) setJobState(state int32, reasons ...string) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.jobState, f.jobReasons = state, reasons
+}
+
 func (f *fakeCUPS) setReplyID(id uint32) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
@@ -88,6 +104,8 @@ func (f *fakeCUPS) serve(w http.ResponseWriter, r *http.Request) {
 	f.mu.Lock()
 	f.requests = append(f.requests, fakeRequest{Path: r.URL.EscapedPath(), ContentType: r.Header.Get("Content-Type"), Msg: msg})
 	status, message, hang, replyID := f.printStatus, f.printMessage, f.hang, f.replyID
+	hang = hang || (f.hangPrint && msg.Code == 0x0002)
+	state, reasons := f.jobState, f.jobReasons
 	f.mu.Unlock()
 	if hang {
 		select {
@@ -99,10 +117,16 @@ func (f *fakeCUPS) serve(w http.ResponseWriter, r *http.Request) {
 	if replyID != nil {
 		msg.RequestID = *replyID
 	}
-	f.reply(w, msg, status, message)
+	f.reply(w, msg, status, message, state, reasons)
 }
 
-func (f *fakeCUPS) reply(w http.ResponseWriter, req Message, status uint16, message string) {
+func (f *fakeCUPS) reply(w http.ResponseWriter, req Message, status uint16, message string, state int32, reasons []string) {
+	if state == 0 {
+		state = 5
+	}
+	if reasons == nil {
+		reasons = []string{"job-printing"}
+	}
 	out := Message{Version: [2]byte{1, 1}, RequestID: req.RequestID}
 	out.Attrs = []Attr{
 		StrAttr(TagOperation, "attributes-charset", TagCharset, "utf-8"),
@@ -131,8 +155,8 @@ func (f *fakeCUPS) reply(w http.ResponseWriter, req Message, status uint16, mess
 			out.Attrs = append(out.Attrs,
 				groupStart(TagJob),
 				IntAttr(TagJob, "job-id", TagInteger, 7),
-				IntAttr(TagJob, "job-state", TagEnum, 5),
-				StrAttr(TagJob, "job-state-reasons", TagKeyword, "job-printing"),
+				IntAttr(TagJob, "job-state", TagEnum, state),
+				StrAttr(TagJob, "job-state-reasons", TagKeyword, reasons...),
 			)
 		}
 	}
