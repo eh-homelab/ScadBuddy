@@ -428,7 +428,7 @@ def test_the_reads_the_filament_page_needs(client: TestClient) -> None:
     tag = {"tag_uid": "AABBCCDD", "kind": "bambu_mifare"}
     assert client.post(f"{SPOOLS}/{a['id']}/tags", json=tag).status_code == 201
     detail = client.get(f"{SPOOLS}/{a['id']}").json()
-    assert detail["tag"]["tag_uid"] == "AABBCCDD"
+    assert detail["tag"]["tag_uid"] == "AABBCCDD00000100"
     assert detail["names"]["material"] == "PLA"
     assert detail["basis"]["anchor"]["grams_after"] == 400
     assert detail["in_use"] is False
@@ -1271,7 +1271,7 @@ def test_the_route_binds_even_when_bambuddy_is_down(client: TestClient, pg_conni
     with psycopg.connect(pg_conninfo) as conn:
         row = conn.execute("SELECT attempts FROM filament_bb_tag_pending").fetchone()
     assert row == (1,)
-    assert client.get("/api/v1/filament/tags").json()[0]["tag_uid"] == "AABBCCDD"
+    assert client.get("/api/v1/filament/tags").json()[0]["tag_uid"] == "AABBCCDD00000100"
 
 
 @respx.mock

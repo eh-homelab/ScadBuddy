@@ -394,6 +394,10 @@ class FlowStore:
         """The run's answers on record, every execution's, oldest first (#7471)."""
         return await asyncio.to_thread(self._answers_of, run_id)
 
+    async def answers_of_call(self, run_id: str, call_id: str) -> list[Decision]:
+        """The answers on record for one call of the run, every execution's, oldest first."""
+        return await asyncio.to_thread(self._answers_of_call, run_id, call_id)
+
     async def record_grant_decision(self, decision: Decision) -> bool:
         """Record a run grant's approval of a call (#2481), only if the grant is in force
         now and its recorded use of this request id is for this very input: one statement
@@ -969,7 +973,8 @@ class FlowStore:
     ) -> tuple[Grant | None, bool] | Literal[False]:
         """For an answer that a run grant admitted (`admitted_by` its id): that grant, if it
         is the run's, share-locked so a revocation lands wholly before or after, and whether
-        it and its chain are in force now. False for any other decision."""
+        it and its chain are in force now, by the database's clock. False for any other
+        decision."""
         if decision.kind != "answer" or decision.admitted_by in (None, BY_SETTING):
             return False
         row = conn.execute(
@@ -979,7 +984,7 @@ class FlowStore:
         if row is None:
             return None, False
         grant = Grant.model_validate(row)
-        return grant, grant.in_force(datetime.now(UTC)) and self._chain_in_force(conn, grant)
+        return grant, self._chain_in_force(conn, grant)
 
     @staticmethod
     def _grant_admits(decision: Decision, locked: tuple[Grant | None, bool]) -> None:
@@ -995,6 +1000,15 @@ class FlowStore:
                 f"SELECT {_DECISION} FROM workflow_run_decisions"
                 " WHERE run_id = %s AND kind = 'answer' ORDER BY created_at",
                 (run_id,),
+            ).fetchall()
+        return [Decision.model_validate(row) for row in rows]
+
+    def _answers_of_call(self, run_id: str, call_id: str) -> list[Decision]:
+        with self._pool.connection() as conn:
+            rows = conn.execute(
+                f"SELECT {_DECISION} FROM workflow_run_decisions"
+                " WHERE run_id = %s AND call_id = %s AND kind = 'answer' ORDER BY created_at",
+                (run_id, call_id),
             ).fetchall()
         return [Decision.model_validate(row) for row in rows]
 

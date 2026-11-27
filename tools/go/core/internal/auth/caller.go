@@ -3,6 +3,7 @@ package auth
 import (
 	"context"
 	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -117,6 +118,18 @@ func (r *Resolver) Caller(ctx context.Context, h http.Header) Caller {
 		return Caller{Kind: KindAnonymous}
 	}
 	return *c
+}
+
+// SessionID is the hex SHA-256 of the session cookie Caller reads from h (Python's
+// session.id_hash.hex()), "" when h carries none. A KindPerson caller's session is this one:
+// what an auth.session_revoked names. It is an id, never logged.
+func SessionID(h http.Header) string {
+	token := parseCookies(h.Get("Cookie"))[SessionCookie]
+	if token == "" {
+		return ""
+	}
+	sum := sha256.Sum256([]byte(token))
+	return hex.EncodeToString(sum[:])
 }
 
 func (r *Resolver) now() time.Time {

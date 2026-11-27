@@ -432,10 +432,10 @@ opens every one and seals it again byte for byte).
     `scadbuddy-agent` with `agent-sessions` when the build has an id (#2726 Phase 11; the
     host queues stay unversioned, `agent/test/temporal.versioning.temporal.test.ts`):
     every `ALL_TOOLS` entry as an activity under its name (`toolActivities.ts`,
-    `runToolWithOutcome` with `gate: 'workflow'`, only for a `session-<id>` workflow (as the
-    session's owner with its turn's tiers), or a flow run's `flow-<id>` (`flowRuns.ts`, #1057: as the
-    run's starter, in no session; a gated call needs the backend's `workflow_run_decisions`
-    approval; no browser tools)), a turn's other tools (#2320, plan Step 9.3,
+    `runToolWithOutcome` with `gate: 'workflow'`, only for a flow run's `flow-<id>` (`flowRuns.ts`,
+    #1057: as the run's starter, in no session; a gated call needs the backend's
+    `workflow_run_decisions` approval; no browser tools); a session's call is `tool:<name>` in its
+    ToolCall workflow, and a bare one from any other workflow is refused `UnknownSession`, #7323), a turn's other tools (#2320, plan Step 9.3,
     `turnTools.ts`, built by `turnServers.ts`: remote plugins
     through the forwarder, packages' http MCP servers and `http_request`): `listTurnTools` lists them per turn as
     `<server>__<tool>`, `turn_tool_tier` tiers a call from its input before it may park,

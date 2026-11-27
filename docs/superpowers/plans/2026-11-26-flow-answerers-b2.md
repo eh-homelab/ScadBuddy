@@ -37,7 +37,7 @@ Files: `flows/grants.py`, `flows/answerers.py`, `api/flows.py`, `api/tasks.py`,
 - `FlowStore.record_decision`: for an answer whose `admitted_by` is not `setting`, the same
   transaction locks the grant row (`FOR SHARE`), checks that the grant belongs to the run
   and that `answers` is still set, and runs `_chain_in_force`. If not, it raises
-  `GrantLapsedError`. The CRUD route maps it to 409 `grant-lapsed`, and `RemoteFlowStore`
+  `GrantLapsedError`. The CRUD route maps it to 409 `grant_lapsed`, and `RemoteFlowStore`
   raises it again. `land` turns it into 403 `flow-answer-not-allowed`.
 - Tests:
   - `test_grants.py`: `answers` is valid.

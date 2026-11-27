@@ -10,7 +10,7 @@ import { afterAll, beforeAll, describe, expect, it } from 'vitest'
 import { z } from 'zod'
 import { unwrapUntrusted } from '../src/safety/untrusted.js'
 import { SESSION_TURN_ACTIVITY } from '../src/temporal/session/names.js'
-import { toolActivities } from '../src/temporal/toolActivities.js'
+import { toolActivities, toolCallActivities } from '../src/temporal/toolActivities.js'
 import { AgentWorker } from '../src/temporal/worker.js'
 import { defineTool, json } from '../src/tools/registry.js'
 import { services } from './helpers/mcp.js'
@@ -58,7 +58,7 @@ describe.skipIf(!TEMPORAL_CLI)(`the agent-tools worker${TEMPORAL_SKIP}`, () => {
     const agent = AgentWorker.start({
       address: env.address,
       namespace: 'default',
-      activities: toolActivities([echo], {
+      activities: toolCallActivities([echo], {
         services: services(),
         sessions: { ownerOf: async (id) => (id === SESSION ? { kind: 'browser', id: 'browser', label: 'You' } : undefined) },
       }),
@@ -72,15 +72,18 @@ describe.skipIf(!TEMPORAL_CLI)(`the agent-tools worker${TEMPORAL_SKIP}`, () => {
     try {
       await agent.running()
       expect(agent.state()).toBe('ok')
-      const workflowId = `session-${SESSION}`
+      // A session's call is its own ToolCall workflow (#7323); the codec still keys it by the session.
+      const workflowId = `session-${SESSION}-call-toolu_9`
       const content = await sessionWorker.runUntil(
         env.client.workflow.execute('callTool', {
           workflowId,
           taskQueue: 'durable-session-standin',
-          args: ['echo', { say: 'hi' }, 'toolu_9'],
+          args: ['tool:echo', { tool: 'echo', input: { say: 'hi' } }, 'toolu_9'],
         }),
       )
-      expect(JSON.parse(unwrapUntrusted(content as string))).toEqual({ said: 'hi', session: SESSION })
+      const { ok, content: blocks } = content as { ok: boolean; content: { type: string; text: string }[] }
+      expect(ok).toBe(true)
+      expect(JSON.parse(unwrapUntrusted(blocks[0]!.text))).toEqual({ said: 'hi', session: SESSION })
       // §6.5's gate for phase 4: a codec on this worker learns which workflow a
       // tool's arguments belong to, so it can pick that session's key.
       expect(codec.contexts).toContainEqual(expect.objectContaining({ type: 'activity', workflowId, activityId: 'tool-toolu_9' }))

@@ -2,11 +2,12 @@
 # Prints true when any changed path on stdin is Go's (spec 2026-10-13 §7), or
 # is the `go` job's own wiring (ci.yml, this script, changed-paths.sh), as select-models.sh does.
 # A file outside the Go trees that a Go test reads is Go's too: core's sessions tests read
-# workers/playwright-mcp/browser-vectors.json, core's others the backend's
-# event-stream-vectors.json (#7768) and auth-vectors.json (#8038), and claudecreds' test the
-# agent's rate-limit-reset-vectors.json (#7986).
+# workers/playwright-mcp/browser-vectors.json; core's others read the backend's shared vectors
+# (event-stream, auth, plugin-seal, the gate's pending-input and response-hash, and seal's and
+# secrets' secret, payload, subject and approval-hash); claudecreds' test reads the agent's
+# rate-limit-reset-vectors.json (#7986).
 set -euo pipefail
-if grep -qE '^(go\.work(\.sum)?$|vendor/|tools/go/|backend/scadbuddy/migrations(_agent)?/|workers/playwright-mcp/browser-vectors\.json$|backend/tests/fixtures/(event-stream|auth)-vectors\.json$|scripts/generate-go-client\.(sh|jq)$|\.github/scripts/generate-go-client-jq\.test\.sh$|\.github/workflows/(ci|go-module-ci)\.yml$|\.github/scripts/select-go(\.test)?\.sh$|\.github/scripts/changed-paths\.sh$|agent/test/fixtures/rate-limit-reset-vectors\.json$)'; then
+if grep -qE '^(go\.work(\.sum)?$|vendor/|tools/go/|backend/scadbuddy/migrations(_agent)?/|workers/playwright-mcp/browser-vectors\.json$|backend/tests/fixtures/(event-stream|auth|plugin-seal|pending-input|response-hash|secret|payload|subject|approval-hash)-vectors\.json$|scripts/generate-go-client\.(sh|jq)$|\.github/scripts/generate-go-client-jq\.test\.sh$|\.github/workflows/(ci|go-module-ci)\.yml$|\.github/scripts/select-go(\.test)?\.sh$|\.github/scripts/changed-paths\.sh$|agent/test/fixtures/rate-limit-reset-vectors\.json$)'; then
   echo true
 else
   echo false
