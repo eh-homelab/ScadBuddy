@@ -107,7 +107,9 @@ bytes: Go seals each file with the same IVs to the same bytes, opens Python's, a
 file key alike. Its blob store is `workspace.Store` (`Backend`, `Put`, `Get`): main.go's
 `workspaceBlobs` over `internal/blobstore`'s `Backend`, `PutContent` and `Fetch` (below), which
 names a refusal by Python's class (`StoreFullError`, `StageLockBusyError`) in a write's 503. Like
-`package-mirrors` it needs the KEK, and serves only `store_backend` `s3` or `local`.
+`package-mirrors` it needs the KEK, and serves only `store_backend` `s3` or `local`: on any
+other, `GET …/workspace/status` answers `store` `refused` with the reason. A write with no
+Content-Length is a 411 in `_write_body`'s words (route `OwnLength`).
 
 The `filament-presets` routes use `internal/auth` (see "Public routes"). They have their own
 `case` in `newRouter`, because they need the blob store. The area needs the KEK, and it needs

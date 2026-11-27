@@ -42,7 +42,7 @@ func Reason(err error) string {
 	return ""
 }
 
-// PutContent is `ContentStore.put(kind, data, name=…, scope=BlobScope())` with no key, then
+// PutContent is `ContentStore.put(kind, data, name=…, scope=BlobScope(folder="work"))` with no key (as `_place` calls it), then
 // `touch` of its row: data stored or reused through put (the caps checked only when it
 // uploads), its row at IndexKey(kind, sha256) written as BlobIndex.put_in writes it (no slug,
 // meta {}), and the object the key named before released when it was another of this

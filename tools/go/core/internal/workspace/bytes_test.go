@@ -484,6 +484,15 @@ func TestAWriteBodyIsTwoPartsAndItsMetaIsChecked(t *testing.T) {
 	expect(t, strings.HasPrefix(badExpect.body["detail"].(string), "meta: "), true)
 	badSize := a.write(key, "a", []byte("x"), write{meta: map[string]any{"size": fileBytesCeiling + 1}})
 	expect(t, badSize.body["detail"].(string), fmt.Sprintf("meta: Input should be less than or equal to %d", fileBytesCeiling))
+	// A body of no stated length (chunked) is refused before it is read, as _write_body refuses it.
+	var chunked bytes.Buffer
+	mw := multipart.NewWriter(&chunked)
+	_ = mw.WriteField("meta", "{}")
+	_ = mw.Close()
+	noLength := a.request("POST", "/workspace/file-writes", io.MultiReader(&chunked), mw.FormDataContentType())
+	expect(t, noLength.status, 411)
+	expect(t, noLength.body["detail"].(string), "a write names its Content-Length")
+	expect(t, noLength.body["reason"], nil)
 	listSource := a.write(key, "a", []byte("x"), write{source: map[string]any{"a": []int{1}}})
 	expect(t, listSource.status, 422)
 	bigSource := a.write(key, "a", []byte("x"), write{source: map[string]any{"a": strings.Repeat("é", 2000)}})
@@ -540,6 +549,18 @@ func TestStatusSaysPostgresOnStoreBackendLocal(t *testing.T) {
 	expect(t, read.body["detail"].(string), "a is in the blob store and cannot be read now: the backend keeps"+
 		" files locally (store_backend local)")
 	expect(t, a.post("/workspace/blob-moves", map[string]any{"batch": 0}).status, 422)
+}
+
+func TestStatusSaysRefusedOnAStoreBackendThisAPIDoesNotServe(t *testing.T) {
+	a := newAPI(t, "bambuddy", &seal.Keys{Current: kek})
+	expect(t, a.get("/workspace/status").raw, `{"store":"refused","backend":"bambuddy","reason":"the backend`+
+		` keeps files in its blob store (store_backend bambuddy), and this API serves workspace files only on`+
+		` store_backend s3 or local","unreadable_files":null,"sealed_unreadable":"its bytes are in the blob`+
+		` store (store_backend bambuddy), and this API reads them only on store_backend s3"}`)
+	a.sql(`INSERT INTO ai_session_files (workspace, path, media_type, blob_key, key_sealed, key_kek_id, sha256, size)
+		VALUES ('principal:flow:x', 'a', 'text/plain', $1, '\x00'::bytea, 'k', $2, 1)`,
+		"workspace-"+strings.Repeat("2", 64), strings.Repeat("3", 64))
+	expect(t, a.get("/workspace/status").body["unreadable_files"].(float64), 1.0)
 }
 
 // --- sealed blobs -----------------------------------------------------------------------

@@ -93,7 +93,7 @@ func (b *Bytes) Routes() []crud.Route {
 	return []crud.Route{
 		{Method: "GET", Path: "/workspace/status", Handle: b.status},
 		{Method: "GET", Path: "/workspace/file-bytes", Handle: b.fileBytes},
-		{Method: "POST", Path: "/workspace/file-writes", Handle: b.write, MaxBody: multipartBodyMax},
+		{Method: "POST", Path: "/workspace/file-writes", Handle: b.write, MaxBody: multipartBodyMax, OwnLength: true},
 		{Method: "POST", Path: "/workspace/copies", Handle: b.copy, MaxBody: bodyMax},
 		{Method: "POST", Path: "/workspace/blob-moves", Handle: b.moveToBlobs, MaxBody: bodyMax},
 	}
@@ -145,6 +145,16 @@ func (b *Bytes) status(r *http.Request, _ crud.Params) (any, error) {
 			Reason: text("the backend has no blob store (store_backend local)"),
 			SealedUnreadable: text("its bytes are in the blob store, and the backend now keeps files" +
 				" locally (store_backend local)"),
+		}
+	case backend != "s3":
+		// Python serves any store; here a write or a read of a blob is a 503 not_configured.
+		out = bytesStatus{
+			Store:   "refused",
+			Backend: &backend,
+			Reason: text(fmt.Sprintf("the backend keeps files in its blob store (store_backend %s), and"+
+				" this API serves workspace files only on store_backend s3 or local", backend)),
+			SealedUnreadable: text(fmt.Sprintf("its bytes are in the blob store (store_backend %s), and"+
+				" this API reads them only on store_backend s3", backend)),
 		}
 	case b.current() == nil:
 		out = bytesStatus{
@@ -384,6 +394,10 @@ func writeBody(r *http.Request) (*writeMeta, []byte, error) {
 	kind := r.Header.Get("Content-Type")
 	if strings.TrimSpace(strings.Split(kind, ";")[0]) != "multipart/form-data" {
 		return nil, nil, unprocessable("a write comes as multipart/form-data")
+	}
+	if r.ContentLength < 0 {
+		// Go's server refuses a Content-Length that is not digits; one not sent is -1.
+		return nil, nil, &httpx.Problem{Status: http.StatusLengthRequired, Detail: "a write names its Content-Length"}
 	}
 	if r.ContentLength > fileBytesCeiling+metaBytesMax+framingBytesMax {
 		return nil, nil, httpx.WithReason(http.StatusRequestEntityTooLarge,
