@@ -339,7 +339,12 @@ class Relay:
     async def check_silence(self, now: float) -> None:
         """Restart each ready pull whose ``bytesReceived`` has not changed for the path's
         wait (`SILENT_SECONDS` at first, doubled after each restart up to `SILENT_MAX`, and
-        back to `SILENT_SECONDS` once bytes come). ``now`` is a monotonic time."""
+        back to `SILENT_SECONDS` once bytes come). ``now`` is a monotonic time.
+
+        The read runs outside the lock: a `reconcile_all` that replaces a path between the
+        read and the restart makes the relay restart a fresh pull once, which costs a few
+        seconds. A restart whose CRUD read fails leaves the path deleted until the next
+        `reconcile_all`, as a failed `camera.reconnect` does."""
         try:
             received = await self._mtx.received()
         except httpx.HTTPError as error:

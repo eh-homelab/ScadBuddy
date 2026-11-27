@@ -265,7 +265,7 @@ The hooks need `curl`, so the camera images take the release binary on
 - Metrics. The relay (`camera/relay.py`): `scadbuddy_camera_relay_pulling` (1 while the
   pull is ready, 0 while MediaMTX tries it) and `scadbuddy_camera_relay_reconnects_total`
   (each time the pull is ready again after it was not; a replaced path counts too) and
-  `scadbuddy_camera_relay_silent_restarts_total` (each restart of a silent pull, below). The
+  `scadbuddy_camera_relay_silent_restarts_total` (each restart of a silent pull; see "A silent source" in "How it works"). The
   recorders (`camera/recorder.py`): `scadbuddy_camera_segments_indexed_total`,
   `scadbuddy_camera_upload_lag_seconds`, `scadbuddy_camera_backlog_bytes`,
   `scadbuddy_camera_leader`, `scadbuddy_camera_last_segment_age_seconds` and

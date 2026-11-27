@@ -591,3 +591,24 @@ async def test_the_wait_doubles_while_the_source_stays_silent() -> None:
     await silent_for(SILENT_SECONDS)
     assert restarts(mtx, "p1") == count + 1
     await subject.aclose()
+
+
+async def test_a_failed_restart_does_not_stop_the_others() -> None:
+    api = FakeApi([source("p1"), source("p2")])
+    mtx = FakeMtx()
+    subject = relay(api, mtx)
+    await subject.reconcile_all()
+    mtx.ready.update({"p1": True, "p2": True})
+    mtx.received.update({"p1": 100, "p2": 100})
+    tried: list[str] = []
+
+    async def restart(name: str) -> None:
+        tried.append(name)
+        if name == "p1":
+            raise httpx.ConnectError("api down")
+
+    subject.restart = restart  # type: ignore[method-assign]
+    await subject.check_silence(0.0)
+    await subject.check_silence(SILENT_SECONDS)
+    assert tried == ["p1", "p2"]
+    await subject.aclose()
