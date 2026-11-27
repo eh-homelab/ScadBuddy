@@ -3167,7 +3167,9 @@ export const handlers = [
       const [type, name] = labelPages(choice, body.layout ?? 'roll', count) === 1 ? ['image/png', 'labels.png'] : ['application/zip', 'labels.zip']
       return new HttpResponse(new Blob(['x'], { type }), { headers: { 'Content-Type': type, 'Content-Disposition': `attachment; filename="${name}"` } })
     }
-    return new HttpResponse(new Blob([`%PDF-1.4\n% ${count} labels\n%%EOF\n`], { type: 'application/pdf' }), {
+    // The text itself, not a `Blob`: under jsdom a `Blob` body is sent as "[object Blob]", and #7170's
+    // label print checks that the bytes it sends start with `%PDF-`.
+    return new HttpResponse(`%PDF-1.4\n% ${count} labels\n%%EOF\n`, {
       headers: { 'Content-Type': 'application/pdf', 'Content-Disposition': 'attachment; filename="labels.pdf"' },
     })
   }),

@@ -49,6 +49,7 @@ import (
 	"github.com/eh-homelab/ScadBuddy/tools/go/core/internal/front"
 	"github.com/eh-homelab/ScadBuddy/tools/go/core/internal/gate"
 	"github.com/eh-homelab/ScadBuddy/tools/go/core/internal/history"
+	"github.com/eh-homelab/ScadBuddy/tools/go/core/internal/labelprint"
 	"github.com/eh-homelab/ScadBuddy/tools/go/core/internal/mcprelay"
 	"github.com/eh-homelab/ScadBuddy/tools/go/core/internal/notify"
 	"github.com/eh-homelab/ScadBuddy/tools/go/core/internal/ordercosts"
@@ -414,6 +415,8 @@ func newRouter(pool *pgxpool.Pool, next http.Handler, keys *seal.Keys, areas, au
 	presetsMounted := false
 	// Naming both `unknown-trays` and `unknown-trays:read` mounts the area once.
 	unknownTraysMounted := false
+	// Naming label-printing twice mounts it once.
+	labelsMounted := false
 	devicesNamed := false
 	for name := range strings.SplitSeq(areas, ",") {
 		switch name = strings.TrimSpace(name); name {
@@ -464,6 +467,17 @@ func newRouter(pool *pgxpool.Pool, next http.Handler, keys *seal.Keys, areas, au
 			for _, p := range filamentpresets.Public(pool, store) {
 				// no-store is set outside the gate, so its own 401 and 403 carry it too.
 				public.Handle(p.Pattern, noStore(gate.Wrap(p.Route, p.Handler)))
+				served = true
+			}
+		case labelprint.Area:
+			// Public routes that call the CUPS server through the process's telemetry, so
+			// the case is its own (#7170).
+			if labelsMounted {
+				break
+			}
+			labelsMounted = true
+			for _, p := range labelprint.New(pool, tel).Public() {
+				public.Handle(p.Pattern, gate.Wrap(p.Route, p.Handler))
 				served = true
 			}
 		case packages.MirrorArea:

@@ -371,6 +371,40 @@ transaction, success or not, so the photo is kept until the scan is deleted. `Sc
 body, Input)` is a whole scan from bytes for a Go caller (#8157's result route), and
 `Scans.Decode(ctx, key, Input)` one of a stored photo.
 
+### Label printing (#7170)
+
+Area `label-printing` (`internal/labelprint`, design
+`docs/superpowers/specs/2026-11-27-cups-label-printing-design.md`) is a public area, class `api`.
+It sends a label PDF to a queue of the cluster's CUPS server (`deploy/cups/`) with one IPP
+`Print-Job`. It has its own `case` in `newRouter`, because its client uses the process's
+telemetry (peer `cups`).
+
+The server is the stored setting `filament_label_server_url` (only a person's own session
+writes it). No row, or JSON `null`, is `http://cups.cups.svc:8631`. Core checks the value again
+when it reads it: `http` or `https`, a host, no user, no query, no fragment, and a path of `/`
+or none. A bad value is no server (502). A request never names a server.
+
+| Route | Body | Answer |
+|---|---|---|
+| `GET /api/v1/label-printing/queues` | none | `{queues}`, in CUPS's order. A queue is `{name, info, make_and_model, state, state_reasons, state_message, accepting, media, width_mm, height_mm}`; the size comes from `media`, or is null |
+| `POST /api/v1/label-printing/queues/{queue}/jobs?media_type=&darkness=&print_rate=` | the PDF's bytes, at most 8 MiB | 202 `{queue, job_id, job_state, job_state_reasons}` when CUPS accepts the job, not when the label prints. `media_type` is `Saved`, `Thermal` or `Direct`; `darkness` `-1` or `1` to `30`; `print_rate` `Default` or `1` to `12`. A missing value or the default sends no attribute |
+
+The queue name must be 1 to 127 of `[A-Za-z0-9_-]` and in the list that CUPS gives, before core
+prints. The list times out after 5 s and the print after 30 s. Core follows no redirect, uses no
+proxy, and reads at most 1 MiB of a reply. Each job is logged with its queue, job id, size and
+the caller's kind, never the document.
+
+| Problem | When |
+|---|---|
+| 413 `label_too_large` | the body is past 8 MiB |
+| 415 `label_not_pdf` | the body does not start with `%PDF-` |
+| 422 `label_option_invalid` | an option value is not in the lists above |
+| 422 `label_queue_unknown` | the name is malformed or not in CUPS's list, or CUPS answers `client-error-not-found` |
+| 502 `label_server_unreachable` | no server (a bad stored value), or CUPS does not answer, times out, or answers bytes that are not IPP |
+| 502 `label_print_refused` | CUPS answers another error status, to the queue list too; `detail` is its `status-message` (at most 300 characters) and `ipp_status` the status code |
+
+CUPS owns the size check, the order of the jobs and the retries.
+
 ## Public routes
 
 A public area (a route outside `/internal/crud/`, which a browser, an access token or a
