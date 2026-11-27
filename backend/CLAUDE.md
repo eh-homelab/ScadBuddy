@@ -1318,7 +1318,7 @@ only the sleeps move; a budget on the real clock fails on a slow runner (#6252).
   `docs/superpowers/plans/2026-11-23-label-templates-pdf.md`): `filament/label_templates.py`
   (`TEMPLATES`, SB's 50 x 25 mm roll, the 2 x 1 in roll `roll_2x1in` (50.8 x 25.4 mm, #7170) and Bambuddy's six; `LabelTemplateChoice`, the stored-only
   setting `filament_label_template` and the PDF body's `template`). `label_printing.py` (#7170) holds three stored-only settings for printing labels through CUPS: `filament_label_server_url`, `filament_label_queue` and `filament_label_job_options`. Only a person changes the server (`api/settings.py` `LABEL_PRINTER`, 403 `person_only`). Go's `internal/labelprint` reads `filament_label_server_url` by name; the Labels page reads and saves the queue and the job options. Also in the PDF code: `labels.py` `pdf_labels`
-  (the labels from SB's rows; a place label needs `label_base_url`, else 409 `no_label_base`,
+  (the labels from SB's rows; a code label (a place, spool type, item or kind, #7169) needs `label_base_url`, else 409 `no_label_base`,
   never the request's host) and `label_pdf.py` (ReportLab: the browser label's lines and a vector
   QR code; its text in `label_fonts.py`, below). Routes `GET /filament/label-templates` and `POST
   /filament/labels` (route `render_labels`: the file as the body, at most 100 labels; in
@@ -1346,7 +1346,7 @@ only the sleeps move; a budget on the real clock fails on a slow runner (#6252).
   PDFium holds no worker of the shared `to_thread` pool; each page a
   greyscale PNG that carries its dpi. One page answers `labels.png` (`image/png`), more
   pages `labels.zip` (`application/zip`, stored, every entry dated 1980-01-01; a roll's
-  entries `spool-<number>.png` and `L-<n>.png`, a sheet's `sheet-<n>.png`). `png_pixels`
+  entries `spool-<number>.png` and `<code>.png` (`L-<n>`, `T-<n>`, `I-<n>`, `K-<n>`), a sheet's `sheet-<n>.png`). `png_pixels`
   counts every page before anything is drawn: past `MAX_PNG_PIXELS` (400 megapixels) the
   route answers 422 `png_too_large`. The text (#7216 R-7216-1 to R-7216-4): `label_fonts.py`
   draws each line as runs of one font each, DejaVu Sans (`DEJAVU`), else the first font of the
@@ -1374,11 +1374,12 @@ only the sleeps move; a budget on the real clock fails on a slow runner (#6252).
   R-7216-14); the PDF route has none
   (`agent/src/tools/coverage.ts` `NOT_A_TOOL`, R-7157-10).
 - `backend/scadbuddy/codes/` — typed label codes (#6955). `parse.py` `parse_code` and `format_code`
-  (`L-12`, `S-142`, `K-3`; any case, dash optional, at most 10 digits, number 1 to 2^31-1), `resolve.py` `PREFIXES`
-  (`L` is `filament_locations`, `S` is `filament_spools`, `K` is `item_kinds`, kind `item_kind`,
-  #6949) and `resolve` (`{kind, id, code, name, archived}`; an archived row still resolves; an
+  (`L-12`, `S-142`, `T-4`, `I-9`, `K-3`; any case, dash optional, at most 10 digits, number 1 to 2^31-1), `resolve.py` `PREFIXES`
+  (`L` is `filament_locations`, `S` is `filament_spools`, `K` is `item_kinds`, kind `item_kind`, `T` is `filament_spool_types`, kind `spool_type`, `I` is `items`, kind `item`, #7169;
+  `NAME_SQL` is each table's name; the item kind is #6949) and `resolve` (`{kind, id, code, name, archived}`; an archived row still resolves; an
   item kind's `id` is its text id). Route `GET /api/v1/codes/{code}` (`api/codes.py`,
-  404 `code_unknown`). A new prefix is one entry in `PREFIXES`.
+  404 `code_unknown`). A new prefix is an entry in `codes/resolve.py` `PREFIXES` and in Go
+  `tools/go/core/internal/scan/resolve.go` `prefixes`.
 - `backend/scadbuddy/store/` — the blob store. Phase 1: the directory-shaped `BlobStore`
   Protocol and `LocalBlobStore` (`local.py`, a piece in `data/blobs/<piece_key>/`),
   `BlobRefs` (`refs.py`, the `blob_refs` table that keeps a blob alive) and `sweep_blobs`

@@ -2217,7 +2217,12 @@ async def get_tag(filament: FilamentDep, tag_id: UUID) -> m.TagDetail:
         "`tags_both_bound` or `tag_has_backups` when the tags cannot be folded, 422 "
         "`mifare_unreadable`, and 503 `mifare_needs_core` when that area does not run. Core "
         "also keeps each read's `image` (a `scan_image` blob, 422 `image_not_found`) and "
-        "`location` in the scan history, `tag_read_id`."
+        "`location` in the scan history, `tag_read_id`. "
+        "A `read_id` names a paired device's tag read in place of `uid`, `tag_type`, "
+        "`records` and `mifare_blocks` (#8244): core loads it and decodes it as an inline "
+        "read; 404 `read_not_found` for a read of a device the caller does not own, 422 "
+        "`device_read_invalid` for a photo read or for inline fields beside it, and 503 "
+        "`device_read_needs_core` when that area does not run."
     ),
 )
 async def read_tag(
@@ -2229,6 +2234,13 @@ async def read_tag(
 ) -> m.TagReadResult:
     # Only a bind changes what the sync pushes (`NOT_NUDGED`).
     setattr(request.state, SKIP_NUDGE, body.bind_spool_id is None)
+    if body.read_id is not None:
+        # Core's area filament-tag-reads loads a device read before it reaches Python.
+        raise ApiError(
+            status.HTTP_503_SERVICE_UNAVAILABLE,
+            "a device read is loaded by core's area filament-tag-reads, which does not run",
+            code="device_read_needs_core",
+        )
     if body.mifare_blocks is not None:
         # Core's area filament-tag-reads answers a MIFARE read before it reaches Python.
         raise ApiError(
@@ -3080,8 +3092,9 @@ async def delete_label_sheet(filament: FilamentDep, sheet_id: UUID) -> Response:
     },
     summary="The labels file",
     description=(
-        "The labels of `spool_ids`, then `location_ids` (1 to 100 in all, in the order "
-        "sent; #7157), as Bambuddy's `POST /inventory/labels` gives. A spool label prints "
+        "The labels of `spool_ids`, then `location_ids`, then `type_ids`, `item_ids` and "
+        "`kind_ids` (1 to 100 in all, each list in the order sent; #7157, #7169), as "
+        "Bambuddy's `POST /inventory/labels` gives. A spool label prints "
         "`fields` (else the setting `filament_label_output`'s; #7216), one line each, top to "
         "bottom in this order: `number`, `material` (with its subtype), `colour` (its name), "
         "`hex` (`#RRGGBB`), `brand`, `location` (its place), `temps` (nozzle, "
@@ -3091,7 +3104,9 @@ async def delete_label_sheet(filament: FilamentDep, sheet_id: UUID) -> Response:
         "lines that do not fit the label's height are left off from the bottom; a chosen "
         "number always stays. The default is `number`, `material`, "
         "`colour`, `brand` and `qr`. A place label always prints its code and name with the "
-        "QR code of `<label address>/x/L-<n>`. `template` (else the setting "
+        "QR code of `<label address>/x/L-<n>`; a spool type's, an item's and a kind's label "
+        "is the place label's shape: its code (`T-<n>`, `I-<n>`, `K-<n>`) and name with the "
+        "QR `<label address>/x/<code>`. `template` (else the setting "
         "`filament_label_template`) "
         "sets the size; `layout` `roll` is one label a page and `sheet` packs them on Letter "
         "paper, while a sheet template always prints on its own grid. A saved sheet "
@@ -3101,11 +3116,11 @@ async def delete_label_sheet(filament: FilamentDep, sheet_id: UUID) -> Response:
         "`labels.pdf` (`application/pdf`); `png` is each page as a greyscale PNG at `dpi` "
         "(203, 300 or 600), one page as `labels.png` (`image/png`) and more as `labels.zip` "
         "(`application/zip`, stored), whose entries are `spool-<number>.png` and "
-        "`L-<n>.png` for one label a page and `sheet-<n>.png` for a sheet. It reads "
-        "ScadBuddy's own rows only and writes nothing. 404 for an unknown spool or place, "
-        "409 `no_label_base` for a place label with no label address and no public URL, 409 "
-        "`label_sheet_gone` for a saved sheet that was deleted, 422 "
-        "for a bad body or a place address too long for its QR code, 422 "
+        "`<code>.png` for one label a page and `sheet-<n>.png` for a sheet. It reads "
+        "ScadBuddy's own rows only and writes nothing. 404 for an unknown spool, place, "
+        "type, item or kind, 409 `no_label_base` for a code label with no label address and "
+        "no public URL, 409 `label_sheet_gone` for a saved sheet that was deleted, 422 "
+        "for a bad body or a code label's address too long for its QR code, 422 "
         "`png_too_large` for PNGs of more than 400 megapixels in all, and 503 "
         "`label_font_missing` when the server lacks the labels font (DejaVu Sans), which "
         "the answer names. The text is DejaVu Sans with a Noto fallback; a character no "
@@ -3133,7 +3148,7 @@ async def render_labels(
     output = read.get("filament_label_output") or LabelOutput()
     form = body.format or output.format
     dpi = body.dpi or output.dpi
-    count = len(body.spool_ids) + len(body.location_ids)
+    count = body.count
     if form == "png":
         try:
             label_png.check_png_size(template, body.layout, count, dpi)
@@ -3149,13 +3164,16 @@ async def render_labels(
             body.spool_ids,
             body.location_ids,
             label_base_url(read),
+            type_ids=body.type_ids,
+            item_ids=body.item_ids,
+            kind_ids=body.kind_ids,
         )
     except LabelNotFoundError as exc:
         raise ApiError(status.HTTP_404_NOT_FOUND, str(exc)) from None
     except NoLabelBaseError:
         raise ApiError(
             status.HTTP_409_CONFLICT,
-            "A place label needs an address: set the label address in Settings, or the public URL.",
+            "A code label needs an address: set the label address in Settings, or the public URL.",
             code="no_label_base",
         ) from None
     except LabelPayloadTooLongError as exc:

@@ -268,12 +268,23 @@ func insertRead(ctx context.Context, tx pgx.Tx, row historyRow) (string, error) 
 		decoded = string(row.decoded)
 	}
 	var id string
-	if err := tx.QueryRow(ctx, `INSERT INTO filament_tag_reads
+	// A device read makes one row: a second post of it answers the first row, and holds nothing.
+	err := tx.QueryRow(ctx, `INSERT INTO filament_tag_reads
  (tag_id, source, actor, uid, tray_uuid, tag_type, records, dump_key, decoded, image_key, image_media_type,
-  location_lat, location_lon, location_accuracy_m, location_at)
- VALUES ($1, $2, $3, $4, $5, $6, $7::jsonb, $8, $9::jsonb, $10, $11, $12, $13, $14, $15) RETURNING id::text`,
+  location_lat, location_lon, location_accuracy_m, location_at, device_read_id)
+ VALUES ($1, $2, $3, $4, $5, $6, $7::jsonb, $8, $9::jsonb, $10, $11, $12, $13, $14, $15, $16::uuid)
+ ON CONFLICT (device_read_id) WHERE device_read_id IS NOT NULL DO NOTHING RETURNING id::text`,
 		row.tagID, row.source, row.actor, text(row.uid), text(row.tray), row.tagType, records,
-		text(row.dumpKey), decoded, imageKey, imageType, lat, lon, accuracy, at).Scan(&id); err != nil {
+		text(row.dumpKey), decoded, imageKey, imageType, lat, lon, accuracy, at, text(row.scan.deviceRead)).Scan(&id)
+	if errors.Is(err, pgx.ErrNoRows) {
+		// The first row holds its dump. This post's dump has the same bytes, so its Put found
+		// the same content key: nothing new to hold. The same read finds the same tag (its
+		// tray UUID and UID), and a fold since then moved the first row's tag_id with it.
+		err = tx.QueryRow(ctx, "SELECT id::text FROM filament_tag_reads WHERE device_read_id = $1::uuid",
+			row.scan.deviceRead).Scan(&id)
+		return id, err
+	}
+	if err != nil {
 		return "", err
 	}
 	for _, key := range []any{text(row.dumpKey), imageKey} {

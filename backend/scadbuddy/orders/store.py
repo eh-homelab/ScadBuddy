@@ -2205,7 +2205,9 @@ class OrderStore:
         A LAN start has no queue item (#8124), so its archive is found by the start's
         record, ``lan_print_archives`` by run: the API writes that row only when exactly
         one start of the run has the job name the archive's file carries
-        (`print_history._run_by_file`), so two prints of one file never mix. One an
+        (`lan_files.start_by_file`, from the print read, the prints list's scan and the
+        orders read), and one archive per start (`lan_files.starts_by_files`,
+        `record_lan_start_in`), so two prints of one file never mix. One an
         attempt not of this run names is that attempt's (#5273: named by hand before
         Bambuddy linked it), and left out."""
         with self._read(conn) as c:
@@ -2362,7 +2364,9 @@ class OrderStore:
                     # A plate only as `print_links._LAN_JOBS` reads one (#8078, #8083): a
                     # start's bad `plate_id` (2.0, 10**12, 0) is no plate, never an error.
                     " starts AS (SELECT r.run_id, e->>'subtask_name' AS subtask,"
-                    "  (e->>'started_at')::timestamptz AS started_at,"
+                    # Ordered as text (#8336): a bad `started_at` must not fail the read,
+                    # and every writer stores one ISO form (`LanStarted.started_at`).
+                    "  e->>'started_at' AS started_at,"
                     "  CASE WHEN jsonb_typeof(e->'plate_id') = 'number'"
                     "   AND e->>'plate_id' ~ '^[1-9][0-9]{0,8}$'"
                     "   THEN (e->>'plate_id')::int END AS plate"

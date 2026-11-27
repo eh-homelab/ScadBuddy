@@ -26,7 +26,7 @@ Shells and addons are physical things. They move from spool to spool. The owner 
 
 - The cardboard insert stays a filament catalog (`filament_insert_types`). It is used up with its filament, so there is nothing to trace. Inventory spec §6.5 keeps the door open for it to become an item later.
 - No scale hardware here. Weighing input is #7273, or the readings ScadBuddy already has.
-- No Bambuddy-side model. Bambuddy has one `core_weight` per spool, and the SB→BB sync sends it the total empty weight (G3). Bambuddy is a sync target only (#7276).
+- No Bambuddy-side model. Bambuddy has one `core_weight` per spool, and the SB→BB sync sends it the total empty weight (G3). ScadBuddy integrates with Bambuddy through the sync and does not build on it (#7276; owner, 2026-11-27).
 
 ## 4. Anti-goals
 
