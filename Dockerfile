@@ -569,6 +569,11 @@ RUN apt-get update \
 # linked where the worker's contract names it. VERSION is what a native slice's
 # preset key carries (backend/scadbuddy/slicing/presets.py `native_preset_key`).
 #
+# The chmod: v02.09.02.62's squashfs stores its directories as 0700, so without it the
+# slicer's user (10001) cannot reach bin/ (`--help` exits 126, CI run 46054526262), and the
+# copies made from them for the API would keep that mode. Measured 2026-11-27 with
+# `unsquashfs` of that AppImage (#8325).
+#
 # /opt/slicer-profiles is what the API reads (settings.slicer_profiles_dir): the
 # vendor file BBL.json beside the machine, process and filament presets, laid out
 # as resources/profiles/ is, without the tree's cover images and bed models.
@@ -586,6 +591,7 @@ RUN { curl --fail --silent --show-error --location --retry 3 --retry-all-errors 
          || { echo "ERROR: the AppImage runtime is not a 64-bit ELF; re-measure the squashfs offset." >&2; exit 1; }; } \
     && offset=$(( $(le 40 8) + $(le 60 2) * $(le 58 2) )) \
     && unsquashfs -quiet -no-progress -offset "$offset" -dest bambu-studio bambu-studio.AppImage \
+    && chmod -R a+rX,go-w bambu-studio \
     && ln -s resources/profiles bambu-studio/profiles \
     && test -d bambu-studio/profiles/BBL \
     && rm bambu-studio.AppImage bambu-studio.sha256 \
