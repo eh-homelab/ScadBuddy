@@ -86,6 +86,7 @@ func (s *Scans) Public() []auth.Public {
 		}
 	}
 	return []auth.Public{
+		// The bytes come through core until the page can PUT a presigned upload (#8162).
 		route("POST", "/api/v1/scan/images", s.upload, blobstore.Kinds[Kind], false),
 		route("POST", "/api/v1/scan/codes", s.codes, bodyMax, false),
 		route("GET", "/api/v1/scan/scans", s.list, 0, false),
