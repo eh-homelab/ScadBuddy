@@ -11,9 +11,8 @@ own cost); it writes no cost entry (the plan's Pre-flight 5). It locks the order
 then the items in `item_id` order, so two writers never wait on each other in opposite
 orders.
 
-The `/parts` routes are aliases of the inventory (`inventory/part_alias.py`, #7067 Task 9);
-the models here are their bodies and answers. Every text a body takes refuses a NUL byte,
-which Postgres `text` refuses (R-P2-16).
+The `/parts` alias routes over the inventory are gone (#6949, K1 5/7). Every text a body
+takes refuses a NUL byte, which Postgres `text` refuses (R-P2-16).
 """
 
 from __future__ import annotations
@@ -21,7 +20,7 @@ from __future__ import annotations
 from collections.abc import Iterable, Sequence
 from datetime import datetime
 from decimal import Decimal
-from typing import Annotated, Any, Literal
+from typing import Annotated, Any
 from uuid import UUID
 
 from psycopg.types.json import Jsonb
@@ -36,25 +35,11 @@ from pydantic import (
     field_validator,
 )
 
-from scadbuddy.inventory.models import Text
-from scadbuddy.orders.currency import minor_exponent
-from scadbuddy.orders.models import Actor, Colour, ColourSlot, Money
+from scadbuddy.orders.models import Actor, Colour, ColourSlot
 from scadbuddy.orders.store import Conn, OrderStore
 
 #: The most of one part one unit of an item may use.
 MAX_PER_UNIT = 1000
-#: The most units one "Add stock" may move (its packs times the pack size;
-#: ``StockTooLargeError``), and the most packs one "Add stock" records.
-MAX_COUNT = 1_000_000
-MAX_PACKS = 10_000
-#: The most a part may hold on hand: well inside ``integer``, whatever adds come in turn.
-MAX_ON_HAND = 1_000_000_000
-#: A unit cost is kept to the millionth of a minor unit (``numeric(20, 6)``).
-UNIT_COST = Decimal("0.000001")
-
-#: Why a part's stock moved: a pack bought, a count corrected, an item's fulfilment took
-#: it, or its unfulfil gave it back.
-MoveKind = Literal["add", "adjust", "use", "return"]
 
 
 class PartNotFoundError(Exception):
@@ -63,130 +48,7 @@ class PartNotFoundError(Exception):
         self.part_id = part_id
 
 
-class StockTooLargeError(Exception):
-    """An "Add stock" that would move more than ``MAX_COUNT`` units at once, or leave more
-    than ``MAX_ON_HAND`` on hand."""
-
-
-class PartExistsError(Exception):
-    """Another part has the name (in any case)."""
-
-    def __init__(self, existing_id: str) -> None:
-        super().__init__(f"part {existing_id!r} has that name")
-        self.existing_id = existing_id
-
-
 # -- models -----------------------------------------------------------------------------------
-
-
-class PartPatch(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-
-    name: Text | None = Field(default=None, min_length=1, max_length=200)
-    supplier: Text | None = Field(default=None, max_length=200)
-    #: Where to buy it again; shown as a link, so only http(s).
-    link: Text | None = Field(default=None, max_length=2000, pattern=r"^(https?://\S+)?$")
-    pack_size: int | None = Field(default=None, ge=1, le=MAX_COUNT)
-    pack_price_minor: Money | None = Field(default=None, ge=0, le=10**12)
-    low_stock: int | None = Field(default=None, ge=0, le=MAX_COUNT)
-
-
-class PartInput(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-
-    name: Text = Field(min_length=1, max_length=200)
-    supplier: Text = Field(default="", max_length=200)
-    link: Text = Field(default="", max_length=2000, pattern=r"^(https?://\S+)?$")
-    pack_size: int = Field(ge=1, le=MAX_COUNT)
-    #: The pack's price with tax, in the shop's currency (past what a price point holds:
-    #: 422).
-    pack_price_minor: Money = Field(ge=0, le=10**12)
-    low_stock: int = Field(default=0, ge=0, le=MAX_COUNT)
-    #: The count already on the shelf; received as a `manual` lot at the pack price over
-    #: its size when above zero.
-    on_hand: int = Field(default=0, ge=0, le=MAX_COUNT)
-
-
-class InventoryPart(BaseModel):
-    id: str
-    name: str
-    supplier: str
-    link: str
-    currency: str
-    pack_size: int
-    pack_price_minor: Money
-    #: One unit's cost in minor units, a decimal string with its fraction.
-    unit_cost_minor: Decimal
-    #: Nothing says what a unit costs: no lot of known cost is on hand and the part has no
-    #: price point; `unit_cost_minor` then reads 0 (R-P2-35).
-    cost_unknown: bool = False
-    on_hand: int
-    low_stock: int
-    created_at: datetime
-    updated_at: datetime
-
-    @field_serializer("unit_cost_minor")
-    def _decimal(self, value: Decimal) -> str:
-        return format(value.normalize(), "f")
-
-    @computed_field  # type: ignore[prop-decorator]
-    @property
-    def low(self) -> bool:
-        """On hand at or below the low-stock level, which 0 turns off."""
-        return self.low_stock > 0 and self.on_hand <= self.low_stock
-
-    @computed_field  # type: ignore[prop-decorator]
-    @property
-    def minor_exponent(self) -> int:
-        return minor_exponent(self.currency)
-
-
-class StockAdd(BaseModel):
-    """Packs bought: ``packs`` of the part's pack, at ``pack_price_minor`` each when sent (it
-    becomes the part's pack price when the part has an offer), else at the part's."""
-
-    model_config = ConfigDict(extra="forbid")
-
-    packs: int = Field(default=1, ge=1, le=MAX_PACKS)
-    pack_price_minor: Money | None = Field(default=None, ge=0, le=10**12)
-    note: Text = Field(default="", max_length=1000)
-
-
-class StockAdjust(BaseModel):
-    """A counted shelf: the on-hand count it really is, and why it differs."""
-
-    model_config = ConfigDict(extra="forbid")
-
-    on_hand: int = Field(ge=0, le=MAX_COUNT)
-    note: Text = Field(min_length=1, max_length=1000)
-
-    @field_validator("note")
-    @classmethod
-    def _note(cls, note: str) -> str:
-        """A note of spaces only is no note (R-P2-16), as `CountInput` reads it."""
-        note = note.strip()
-        if not note:
-            raise ValueError("a note is not blank")
-        return note
-
-
-class StockMove(BaseModel):
-    id: str
-    part_id: str
-    kind: MoveKind
-    delta: int
-    on_hand_after: int
-    unit_cost_after_minor: Decimal
-    amount_minor: Money | None
-    note: str
-    order_id: str | None
-    order_item_id: str | None
-    created_by: Actor
-    created_at: datetime
-
-    @field_serializer("unit_cost_after_minor")
-    def _decimal(self, value: Decimal) -> str:
-        return format(value.normalize(), "f")
 
 
 def canonical(item_id: str) -> str:

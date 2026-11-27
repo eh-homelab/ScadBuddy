@@ -592,8 +592,8 @@ opens every one and seals it again byte for byte).
     (kinds, items, offers and price points, lots, units, moves), `read` for the lists and gets and
     `write` for the rest, `inventory_lot_recost` included (Ruling 8); each answer carries `ui_path`
     from `tools/inventoryLinks.ts`, whose vectors `test-fixtures/inventory/ui-paths.json` the frontend's
-    `lib/inventoryLinks.ts` shares. `part_list` and `part_stock_add` (`tools/orders.ts`) are aliases of
-    `inventory_item_list` and `inventory_lot_receive`, and go after one release. Tests:
+    `lib/inventoryLinks.ts` shares. `part_list` (`tools/orders.ts`) lists an order's parts only; the old stock tool is gone
+    (#6949, K1 5/7): `inventory_lot_receive` receives the stock, and `inventory_item_list` with `kind=hardware` or `kind=ams_part` lists every part. Tests:
     `test/inventory.test.ts`, `test/inventoryLinks.test.ts`.
   - The storefront (#6131, design 2026-11-13 §6): `tools/storefront.ts`
     `storefront_listing_draft` (`write`: a listing from an output or a model, unpublished,

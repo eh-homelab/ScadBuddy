@@ -153,7 +153,7 @@ the person entered:
   `receive_in`, `inventory/stock.py:276`). `set_lot_cost` keeps both, for provenance.
 
 The parts migration does the same for a foreign part (R-P2-22). A move of a `cost_unknown`
-lot is `cost_unknown`, and so is a foreign lot's take (R-P2-19). The `/parts` unit cost
+lot is `cost_unknown`, and so is a foreign lot's take (R-P2-19). A part's unit cost
 averages the known lots only, and `cost_unknown` is set when a lot is unknown. The UI shows
 "unknown", never 0 (R-P2-35). A person sets the cost on the lot page; that clears the flag
 for later moves, and "Re-cost past uses" carries it to the past ones.
@@ -185,28 +185,18 @@ R-P2-10). A supplier made for item offers, or from `parts.supplier`, never reach
 Bambuddy. This is the one change phase 2 makes to the filament sync, because spec §6.5 states
 the rule. Phase 2 changes no filament table.
 
-### The `/parts` aliases
+### The `/parts` aliases are gone
 
-The part routes are aliases of the inventory for one release (spec §6.11):
-`GET/POST /parts`, `PATCH /parts/{id}`, and its `stock`, `adjust` and `moves`
-(`backend/scadbuddy/api/parts.py`, `inventory/part_alias.py` `PartAliases`). Each carries
-a description that names it an alias. A part is an item of kind `hardware`, its pack and
-price its newest offer and price point. They read and write through `StockStore`, so the
-two views never differ.
+The `/parts` row routes (`GET/POST /parts`, `PATCH /parts/{id}`, and its `stock`, `adjust` and
+`moves`), the alias class and the agent's stock tool were removed (#6949, K1 5/7,
+R-K1-17). The agent tool `part_list` keeps only its `order_id` form. To list every part, use
+`inventory_item_list` with `kind=hardware` and with `kind=ams_part`. To receive stock, use
+`inventory_lot_receive`. Kept: `GET /orders/{id}/parts`, `PUT /orders/{id}/items/{item}/parts`,
+the rule routes `GET`/`PUT /parts/rules/{slug}` and the tool `order_item_parts_set`.
 
-- A part with no supplier has no offer. It reads as a pack of 1 at 0. A pack on a create or an
-  edit is 422 with loc `supplier` (R-P2-34). Add stock takes the body's price and writes no
-  price point (R-P2-25).
-- The alias currency is the currency of the offer's latest price point, else the newest lot's
-  `cost_currency`, else the shop's (R-P2-36).
-- The agent's `part_list` and `part_stock_add` are aliases of `inventory_item_list` and
-  `inventory_lot_receive` (`agent/src/tools/orders.ts:1572`).
-
-**They go after one release.** That means: delete the `/parts` row routes, `PartAliases`
-and the two agent tools (their `coverage.ts` entries too); keep `GET /orders/{id}/parts`,
-`PUT /orders/{id}/items/{item}/parts` and the rule routes. Also drop `parts_retired` and
-`part_stock_moves_retired` after a prod check (Ruling 6; the pack data of a part with no
-supplier stays only there, R-P2-25). The `part_id` reads in `PartStore` go with them.
+Still to do: drop `parts_retired` and `part_stock_moves_retired` after a prod check (Ruling 6;
+the pack data of a part with no supplier stays only there, R-P2-25). The `part_id` reads in
+`PartStore` go with them.
 
 ### The migrations
 
@@ -265,7 +255,7 @@ The mock is `frontend/src/mocks/features/inventory.ts`.
 ## Code
 
 - Backend: `backend/scadbuddy/inventory/` (`models.py`, `kinds.py`, `items.py`, `offers.py`,
-  `stock.py`, `part_alias.py`, `problems.py`, `component.py`); routes `api/inventory.py`,
+  `stock.py`, `problems.py`, `component.py`); routes `api/inventory.py`,
   `api/inventory_stock.py`, `api/parts.py`.
 - Agent: `agent/src/tools/inventory.ts`, `inventoryLinks.ts`.
 - Frontend: `frontend/src/pages/inventory/`, `frontend/src/lib/inventoryLinks.ts`.
