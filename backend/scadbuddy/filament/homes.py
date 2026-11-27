@@ -11,7 +11,8 @@ takes them, so a plain move and a replace never deadlock: the spools the move wr
 (the mover and the answered spool, in id order), then the box's place, then the box's
 own spool's open tags and then that spool's row. A tag bind takes a tag before its
 spools, so a bind on the same two spools at the same moment can deadlock with a replace;
-Postgres aborts one, which answers the generic 500 (rulings P17, P20)."""
+Postgres aborts one, and the move route answers it as a 409 `move_conflict` (try again;
+rulings P17, P20)."""
 
 from __future__ import annotations
 
@@ -23,7 +24,7 @@ from psycopg.rows import DictRow
 from scadbuddy.filament import models as m
 from scadbuddy.filament.dry_box import BoxFullError, occupant_on
 from scadbuddy.filament.locations import LocationStore
-from scadbuddy.filament.spools import FilamentSpoolStore
+from scadbuddy.filament.spools import FilamentDefaults, FilamentSpoolStore
 
 Conn = Connection[DictRow]
 
@@ -73,6 +74,7 @@ def move_into(
     if_occupied: m.IfOccupied,
     actor: str,
     spools: FilamentSpoolStore,
+    defaults: FilamentDefaults,
     answers: UUID | None = None,
     expected_occupant_id: UUID | None = None,
 ) -> m.SpoolEvent | None:
@@ -89,7 +91,8 @@ def move_into(
     name (`ExpectedOccupantRequiredError`, before anything is read or locked): a box that
     holds another spool once its lock is taken is `BoxFullError` naming that spool, and
     nothing is archived. `LookupError` for no such spool, `NotItsHomeError` when
-    ``answers``'s home is not ``location_id``."""
+    ``answers``'s home is not ``location_id``. ``defaults`` is the Filament settings,
+    read before ``conn`` was taken (`FilamentSpoolStore.archive_on`)."""
     if if_occupied == "replace" and expected_occupant_id is None:
         raise ExpectedOccupantRequiredError()
     wanted = sorted({spool_id} if answers is None else {spool_id, answers})
@@ -114,6 +117,7 @@ def move_into(
             spools.archive_on(
                 conn,
                 held,
+                defaults=defaults,
                 reason="other",
                 final_reading_g=None,
                 final_grams=None,
@@ -136,7 +140,9 @@ def move(
     answers: UUID | None = None,
     expected_occupant_id: UUID | None = None,
 ) -> m.SpoolEvent | None:
-    """`move_into` in a transaction of its own (`POST /filament/spools/{id}/move`)."""
+    """`move_into` in a transaction of its own (`POST /filament/spools/{id}/move`). The
+    Filament settings are read first, before the transaction's connection is taken."""
+    defaults = spools.defaults()
     with spools.pool.connection() as conn, conn.transaction():
         return move_into(
             conn,
@@ -145,6 +151,7 @@ def move(
             if_occupied=if_occupied,
             actor=actor,
             spools=spools,
+            defaults=defaults,
             answers=answers,
             expected_occupant_id=expected_occupant_id,
         )

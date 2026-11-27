@@ -232,3 +232,25 @@ def test_a_replace_that_names_no_occupant_is_a_422(client: TestClient) -> None:
     assert refused.json()["code"] == "expected_occupant_required"
     assert client.get(f"{SPOOLS}/{held['id']}").json()["archived_at"] is None
     assert client.get(f"{SPOOLS}/{new['id']}").json()["location_id"] is None
+
+
+def test_a_move_that_deadlocks_is_a_409_try_again(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#8270 review: a replace and a tag bind on the same spools can deadlock (rulings P17,
+    P20). Postgres aborts one; the move answers 409 `move_conflict` (try again), not a 500.
+    Injected: no race makes one on demand."""
+    from psycopg import errors
+
+    from scadbuddy.filament import homes
+
+    def deadlocked(*_: object, **__: object) -> None:
+        raise errors.DeadlockDetected("injected")
+
+    box = _box(client, "Box D")
+    spool = _spool(client)
+    monkeypatch.setattr(homes, "move", deadlocked)
+    refused = client.post(f"{SPOOLS}/{spool['id']}/move", json={"location_id": box["id"]})
+    assert refused.status_code == 409, refused.text
+    assert refused.json()["code"] == "move_conflict"
+    assert "try again" in refused.json()["detail"]

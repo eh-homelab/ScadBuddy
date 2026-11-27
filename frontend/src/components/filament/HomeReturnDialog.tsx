@@ -103,6 +103,7 @@ function HomeReturnForm({
   }, [home, spool.id])
 
   // A dry box holds one spool at most.
+  // `LocationDetail.spools` lists only the unarchived spools in the box itself, not in places under it.
   const occupant = box?.spools[0] ?? null
   const replaces = chosen !== null && occupant !== null && occupant.id !== chosen.id
   const title = box ? `${code} came out of ${from ?? 'its tray'}. Which spool goes into ${box.name}?` : homeReturnTitle(spool)

@@ -90,6 +90,36 @@ def _move(
     )
 
 
+def _idle_only_defaults(pool: PgPool) -> Any:
+    """A settings reader that fails when a pool connection is in use: the store's
+    ``defaults`` may take a connection of its own, so it must be read before one is held."""
+    from scadbuddy.filament.spools import _setting_defaults
+
+    def read() -> Any:
+        stats = pool.get_stats()
+        assert stats["pool_size"] == stats["pool_available"], "defaults read inside a transaction"
+        return _setting_defaults()
+
+    return read
+
+
+def test_a_replace_reads_the_settings_before_it_takes_a_connection(pg_pool: PgPool) -> None:
+    """#8270 review: the replace's archive reads the settings before the move's
+    transaction, never on a second connection inside it."""
+    box = _place(pg_pool, "Box A", "Dry box", 1)
+    old, new = _spool(pg_pool, 80), _spool(pg_pool)
+    LocationStore(pg_pool).move(old, box, actor="ann")
+    homes.move(
+        FilamentSpoolStore(pg_pool, _idle_only_defaults(pg_pool)),
+        new,
+        box,
+        if_occupied="replace",
+        expected_occupant_id=old,
+        actor="ann",
+    )
+    assert _row(pg_pool, old)["archived_at"] is not None
+
+
 def test_replace_archives_the_occupant_and_books_waste(pg_pool: PgPool) -> None:
     box = _place(pg_pool, "Box A", "Dry box", 1)
     old, new = _spool(pg_pool, 80), _spool(pg_pool)

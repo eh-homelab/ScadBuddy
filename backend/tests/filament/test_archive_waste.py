@@ -7,6 +7,7 @@ Bambuddy pull's archive book none."""
 from __future__ import annotations
 
 from datetime import UTC, datetime
+from typing import Any
 from uuid import UUID
 
 import pytest
@@ -17,7 +18,7 @@ from scadbuddy.filament.catalog import CatalogStore
 from scadbuddy.filament.metrics import plates
 from scadbuddy.filament.purchasing_models import ShoppingItem
 from scadbuddy.filament.shopping import ShoppingStore
-from scadbuddy.filament.spools import FilamentSpoolStore
+from scadbuddy.filament.spools import FilamentSpoolStore, _setting_defaults
 from tests.conftest import PgPool
 
 pytestmark = pytest.mark.requires_postgres
@@ -198,6 +199,20 @@ def test_the_archived_spool_with_no_reading_stays_null(pg_pool: PgPool) -> None:
     assert got is not None and got.grams_left is None
 
 
+def test_an_archive_reads_the_settings_before_it_takes_a_connection(pg_pool: PgPool) -> None:
+    """#8270 review: `archive` reads the settings before its transaction, never on a
+    second connection inside it."""
+    spool = _spool(pg_pool, 80)
+
+    def read() -> Any:
+        stats = pg_pool.get_stats()
+        assert stats["pool_size"] == stats["pool_available"], "defaults read inside a transaction"
+        return _setting_defaults()
+
+    FilamentSpoolStore(pg_pool, read).archive(spool, True, actor="ann", reason="damaged")
+    assert _waste(pg_pool, spool)
+
+
 def test_archive_on_in_a_callers_transaction_keeps_its_cause(pg_pool: PgPool) -> None:
     spool = _spool(pg_pool, 80)
     store = FilamentSpoolStore(pg_pool)
@@ -205,6 +220,7 @@ def test_archive_on_in_a_callers_transaction_keeps_its_cause(pg_pool: PgPool) ->
         got = store.archive_on(
             conn,
             spool,
+            defaults=_setting_defaults(),
             reason="other",
             final_reading_g=None,
             final_grams=None,
@@ -223,6 +239,7 @@ def test_archive_on_rolled_back_writes_no_event(pg_pool: PgPool) -> None:
         store.archive_on(
             conn,
             spool,
+            defaults=_setting_defaults(),
             reason="other",
             final_reading_g=None,
             final_grams=None,

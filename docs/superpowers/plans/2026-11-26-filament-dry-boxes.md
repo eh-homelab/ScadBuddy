@@ -244,7 +244,7 @@ was built; each line here says what was decided and why.
 - P17. A deadlock between a replace and a tag bind of the occupant's tag onto the mover is accepted. It needs two people acting on the same two spools at once, and Postgres aborts one; a full fix is not cheap.
 - P18. Capture parks a spool and asks only when it went into its tray from its home and the home is still a live dry box. A spool taken from a shelf goes back to the shelf, and its home does not change. Returning it where the person took it assumes nothing about a box.
 - P19. "The box's spool" is the box's current occupant. This matches the owner's words on #7167.
-- P20. A P17 deadlock answers the generic 500, with no special code. It is rare and the person can try again.
+- P20. A P17 deadlock on the move route answers 409 `move_conflict` (try again), and nothing is written. P33 replaces the first ruling, which answered the generic 500.
 - P21. The export's separate column is a new Prometheus series, `scadbuddy_filament_non_print_waste_grams`, by material. Prometheus is the only export, and an outcome label on the used grams would mix the two wastes.
 - P22. The mocks' archive and replace move book `non_print_waste` events as the backend does, so the preview shows the figure.
 - P23. `IdentifySpool`'s QR way offers "Take a photo" through #8155's scan routes where `BarcodeDetector` is missing; a 404 from those routes hides the button. The plan named #8155 as the fallback once it landed.
@@ -257,6 +257,7 @@ was built; each line here says what was decided and why.
 - P30. The label pin test is in `tests/api/test_filament_label_pdf.py`, where the place-label route tests are.
 - P31. "Print label" shows on every place row that is not a tray, not only on dry boxes. A place's label is the same for any place.
 - P32. The frontend mocks refuse what the backend refuses, and this replaces P26 (final review I3). A copy leaves a dry box out of the draft. A bulk create into a full box, or of two spools or more into one box, is 409 `box_full`. A restore into a taken box is 409 `box_full` with `occupant_id` on the archive route, PATCH and `bulk-restore`, and nothing is written. A kind's `dry_storage` flip over a capacity-1 place with two spools is 422 `box_has_many`. The constraint is that the mocks match the backend, and each fix is a few lines.
+- P33. The PR review of #8270: `archive_on` and `homes.move_into` take the Filament settings as a parameter, and the caller reads them before it takes its connection, because the settings reader may take a pool connection of its own. A move that Postgres aborts in a deadlock answers 409 `move_conflict`, not a 500 (this changes P20).
 
 ## Open risks
 

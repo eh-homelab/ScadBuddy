@@ -3322,6 +3322,10 @@ def _no_sensor(sensor_id: UUID) -> ApiError:
     return ApiError(status.HTTP_404_NOT_FOUND, f"no sensor {sensor_id}")
 
 
+#: The move route's 409 when Postgres aborted it in a deadlock (#7167, rulings P17, P20).
+MOVE_CONFLICT = "move_conflict"
+
+
 @router.post(
     "/spools/{spool_id}/move",
     response_model=m.Spool,
@@ -3346,7 +3350,9 @@ def _no_sensor(sensor_id: UUID) -> ApiError:
         "`expected_occupant_id` is the box's spool the caller saw, and `replace` must send "
         "it: a replace without it is a 422 with `code` `expected_occupant_required`, and a "
         "box that holds another spool is a 409 `box_full` naming it in `occupant_id`; "
-        "either way nothing is archived or moved."
+        "either way nothing is archived or moved. A move that meets a concurrent change "
+        "to the same spools (a tag bind) is a 409 with `code` `move_conflict`: nothing is "
+        "written, and the caller may try again."
     ),
 )
 async def move_spool(
@@ -3372,6 +3378,14 @@ async def move_spool(
         homes.ExpectedOccupantRequiredError,
     ) as exc:
         raise _refused(exc) from None
+    except pg_errors.DeadlockDetected:
+        # A replace and a tag bind on the same spools (rulings P17, P20): Postgres aborted
+        # this one, and nothing was written.
+        raise ApiError(
+            status.HTTP_409_CONFLICT,
+            "another change to these spools ran at the same time; try again",
+            code=MOVE_CONFLICT,
+        ) from None
     moved = await asyncio.to_thread(filament.spools.get, spool_id)
     if moved is None:
         raise _no_spool(spool_id)

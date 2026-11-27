@@ -1423,10 +1423,12 @@ class FilamentSpoolStore:
         after that weighing are booked as non-print waste (`archive_on`)."""
         if not archived:
             return self.update(spool_id, m.SpoolPatch(archived=False), actor=actor)
+        defaults = self._defaults()
         with self._pool.connection() as conn, conn.transaction():
             return self.archive_on(
                 conn,
                 spool_id,
+                defaults=defaults,
                 reason=reason,
                 final_reading_g=final_reading_g,
                 final_grams=final_grams,
@@ -1438,6 +1440,7 @@ class FilamentSpoolStore:
         conn: Conn,
         spool_id: UUID,
         *,
+        defaults: FilamentDefaults,
         reason: m.ArchiveReason | None,
         final_reading_g: float | None,
         final_grams: float | None,
@@ -1446,6 +1449,8 @@ class FilamentSpoolStore:
     ) -> m.Spool | None:
         """`archive`'s body for ``archived=True``, on ``conn`` in the caller's transaction
         (it opens none and takes no pool connection, #7167); ``None`` for no such spool.
+        ``defaults`` is the Filament settings, which the caller reads (`defaults`) before
+        it takes ``conn``: the reader may take a pool connection of its own.
         Order: the final weighing, then, when grams are left after it and ``reason`` is
         not ``respooled``, one ``non_print_waste`` event (the zero reading, source
         ``person``, ``data.waste_g`` the grams left, ``data.cause`` ``cause`` or
@@ -1453,7 +1458,6 @@ class FilamentSpoolStore:
         never booked twice, so the waste is what is left after it. Only a person's archive
         and a box's replace (``cause="replaced"``) book waste; `bulk_archive`, the pull's
         archive and `respooled` do not."""
-        defaults = self._defaults()
         # The tag before the spool, as every writer of bindings takes them.
         conn.execute(
             "SELECT t.id FROM filament_tags t JOIN filament_tag_bindings b"
