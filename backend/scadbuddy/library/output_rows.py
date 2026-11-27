@@ -179,7 +179,7 @@ class OutputRow:
     #: The blob keys of its bytes. `OutputRows.get` leaves ``files`` empty: read them with
     #: `OutputRows.files`.
     blobs: OutputBlobs = field(default_factory=OutputBlobs)
-    #: When a save or the byte copy put its blobs; ``None`` while the files hold them.
+    #: When a save put its blobs.
     #: The store sets it, so the value given is ignored.
     bytes_at: datetime | None = None
     #: The parameters that differ from the template's defaults, for the list's ``q``

@@ -706,3 +706,16 @@ func TestTheCRUDPortNeedsPythonsCRUDListener(t *testing.T) {
 		t.Fatalf("got %v", err)
 	}
 }
+
+// A setting Python refuses at its start stops core's start too.
+func TestABadSettingStopsTheStart(t *testing.T) {
+	for name, value := range map[string]string{
+		"SCADBUDDY_AUTH_MODE": "", "SCADBUDDY_PRICING_USD_RATE": "-1", "SCADBUDDY_ORDERS_CURRENCY": "XAU",
+	} {
+		env := map[string]string{name: value}
+		err := run(context.Background(), func(k string) (string, bool) { v, ok := env[k]; return v, ok }, nil)
+		if err == nil || !strings.Contains(err.Error(), name) {
+			t.Errorf("%s=%q: %v", name, value, err)
+		}
+	}
+}
