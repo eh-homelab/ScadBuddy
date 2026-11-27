@@ -32,7 +32,7 @@ reads that job cost needs (`stock.py`). The routes are `backend/scadbuddy/api/in
 and `inventory_stock.py`. The code is `backend/scadbuddy/inventory/`, registered as
 `InventoryComponent` (`backend/scadbuddy/inventory/component.py:26`).
 
-#### A write is an activity
+### A write is an activity
 
 Each write is one activity of core's worker, named `inventory.<Name>` (19 names, listed in
 `tools/go/core/README.md`, "The inventory worker"). The activity id is
