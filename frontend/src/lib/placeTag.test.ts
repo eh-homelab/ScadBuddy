@@ -73,6 +73,7 @@ describe('writePlaceTag (#7168 R6)', () => {
   })
 
   it('refuses a tag that a spool holds and writes nothing', async () => {
+    const sent = backups()
     const held = await postTagRead({ uid: HELD, records: [] })
     server.use(http.post('/api/v1/filament/tags/reads', () => HttpResponse.json({ ...held, spool: { ...held.spool!, number: 12 } } satisfies TagReadResult)))
     const outcome = write()
@@ -81,6 +82,19 @@ describe('writePlaceTag (#7168 R6)', () => {
     expect(done.status).toBe('failed')
     expect(done.status === 'failed' && done.message).toContain('Unbind it from S-12 first.')
     expect(stub.writes).toHaveLength(0)
+    expect(done.status === 'failed' && done.backupId).toBeNull()
+    expect(sent).toEqual([])
+  })
+
+  it('refuses an archived place before any backup and writes nothing', async () => {
+    const sent = backups()
+    place = { ...place, archived_at: '2026-11-01T00:00:00Z' }
+    const outcome = write()
+    stub.tap({ serialNumber: FREE, records: [] })
+    const done = await outcome
+    expect(done).toEqual({ status: 'failed', message: `${place.code} is archived. Restore it first. Nothing was written.`, backupId: null })
+    expect(stub.writes).toHaveLength(0)
+    expect(sent).toEqual([])
   })
 
   it('fails when the read-back names another place', async () => {

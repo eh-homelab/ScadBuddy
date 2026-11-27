@@ -59,6 +59,8 @@ export interface WriteOptions {
   session: NfcSession
   reason: 'spool_write' | 'agent_write' | 'restore' | 'place_write'
   jobId?: string
+  /** Runs after the UID check and before the backup; throws `WriteRefusedError` to stop with nothing backed up. */
+  precheck?: (now: Reading) => Promise<void>
   /** The records to write, for the tag as just read and its backup. */
   prepare: (now: Reading, backupId: string) => Promise<WireRecord[]>
   /** Checks the write with the server once the read-back equals what was sent. */
@@ -69,7 +71,7 @@ export interface WriteOptions {
   signal?: AbortSignal
 }
 
-export async function writeWithBackup({ session, reason, jobId, prepare, confirm, onStep, onClaimed, signal }: WriteOptions): Promise<WriteOutcome> {
+export async function writeWithBackup({ session, reason, jobId, precheck, prepare, confirm, onStep, onClaimed, signal }: WriteOptions): Promise<WriteOutcome> {
   const release = session.claim()
   if (!release) return { status: 'failed', message: 'Another write is running. Nothing was written.', backupId: null }
   onClaimed?.()
@@ -84,6 +86,17 @@ export async function writeWithBackup({ session, reason, jobId, prepare, confirm
     }
     if (signal?.aborted) return stopped('Stopped. Nothing was written.')
     if (!now.uid) return { status: 'failed', message: NO_UID, backupId: null }
+
+    if (precheck) {
+      try {
+        await precheck(now)
+      } catch (cause) {
+        if (isAbort(cause, signal)) return stopped('Stopped. Nothing was written.')
+        if (cause instanceof WriteRefusedError) return { status: 'failed', message: cause.message, backupId: null }
+        return { status: 'failed', message: `The tag was not checked, so nothing was written: ${detailOf(cause)}`, backupId: null }
+      }
+      if (signal?.aborted) return stopped('Stopped. Nothing was written.')
+    }
 
     onStep('backing_up')
     try {

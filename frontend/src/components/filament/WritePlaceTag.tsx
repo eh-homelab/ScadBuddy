@@ -20,12 +20,12 @@ export function WritePlaceTag({
   session,
   place,
   onSettled,
-  onClose = () => {},
+  onClose,
 }: {
   session: NfcSession
   place: LocationDetail
   onSettled?: (outcome: WriteOutcome) => void
-  onClose?: () => void
+  onClose: () => void
 }) {
   const [base, setBase] = useState<Base>({ state: 'reading' })
   const [reads, setReads] = useState(0)
@@ -42,7 +42,7 @@ export function WritePlaceTag({
     }
   }, [reads])
 
-  if (base.state === 'reading') return <p className="text-muted-foreground">Reading the label address…</p>
+  if (base.state === 'reading') return <p role="status" className="text-muted-foreground">Reading the label address…</p>
   if (base.state === 'failed') {
     return (
       <div className="flex flex-col gap-3">

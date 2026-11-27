@@ -25,6 +25,7 @@ describe('WritePlaceTag (#7168 R6)', () => {
   })
   afterEach(() => {
     expect(readOnly).toHaveBeenCalledTimes(0)
+    server.resetHandlers()
     session.stop()
     stub.restore()
   })
@@ -33,7 +34,7 @@ describe('WritePlaceTag (#7168 R6)', () => {
 
   it('writes the label URL of the place on the label base from Settings, and checks it', async () => {
     server.use(http.get('*/api/v1/settings', () => HttpResponse.json({ filament_label_base_url: 'https://labels.example', public_url: null })))
-    renderPage(<WritePlaceTag session={session} place={place} />)
+    renderPage(<WritePlaceTag session={session} place={place} onClose={() => {}} />)
     const url = `https://labels.example/x/${place.code}`
     expect(await screen.findByText(url)).toBeInTheDocument()
     expect(screen.getByRole('region', { name: 'Place tag' })).toBeInTheDocument()
@@ -45,9 +46,15 @@ describe('WritePlaceTag (#7168 R6)', () => {
     expect(await screen.findByText('Written and checked.')).toBeInTheDocument()
   })
 
+  it('tells the wait for the label address in a live region', () => {
+    server.use(http.get('*/api/v1/settings', () => new Promise(() => {})))
+    renderPage(<WritePlaceTag session={session} place={place} onClose={() => {}} />)
+    expect(screen.getByRole('status')).toHaveTextContent('Reading the label address…')
+  })
+
   it('writes nothing while the label base cannot be read', async () => {
     server.use(http.get('*/api/v1/settings', () => HttpResponse.json({ detail: 'down' }, { status: 500 })))
-    renderPage(<WritePlaceTag session={session} place={place} />)
+    renderPage(<WritePlaceTag session={session} place={place} onClose={() => {}} />)
     expect(await screen.findByRole('alert')).toHaveTextContent('The label address in Settings could not be read, so nothing was written.')
     expect(screen.queryByRole('list', { name: 'Steps' })).not.toBeInTheDocument()
     expect(stub.writes).toHaveLength(0)

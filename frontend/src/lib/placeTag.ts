@@ -27,11 +27,12 @@ export function writePlaceTag(session: NfcSession, place: LocationDetail, base: 
     onClaimed: hooks.onClaimed,
     signal: hooks.signal,
     // The reads of a write are lookups, not taps: no scan history row (#8148).
-    prepare: async (now) => {
+    precheck: async (now) => {
+      if (place.archived_at) throw new WriteRefusedError(`${place.code} is archived. Restore it first. Nothing was written.`)
       const held = heldBy(await postTagRead({ uid: now.uid, records: now.records, tap: false }))
       if (held) throw new WriteRefusedError(`${held} Nothing was written.`)
-      return records
     },
+    prepare: async () => records,
     confirm: async (_now, _backup, _sent, back) => {
       const result = await postTagRead({ uid: back.uid, records: back.records, tap: false })
       const held = heldBy(result)
