@@ -139,6 +139,8 @@ export const inventoryTools = [
     label: 'Add or edit an inventory kind',
     description:
       'Add a kind (`create: true`, with `name` and `tracking`), or edit one: only the `fields` given change. ' +
+      'A new kind may leave out `kind_id`: it is then numbered, id `k<number>` and code `K-<number>`, which the answer ' +
+      'holds. A `kind_id` of `k` and digits only (`k12`) is 422: that id is a numbered kind\'s. ' +
       '`archived: true` archives it (409 `kind_in_use` while it has unarchived items), `false` restores it. The ' +
       "`attribute_schema` documents and types its items' properties and never refuses a key (422 `bad_property_schema` " +
       'for a keyword outside the subset entity_property_schema_set lists, and the old schema stays); a child kind ' +
@@ -146,8 +148,8 @@ export const inventoryTools = [
       'kind or one with items is 409 `kind_in_use`. Only what the user says. Writes ScadBuddy only.' +
       INVENTORY_UI_PATH_NOTE,
     input: z.object({
-      kind_id: kindId,
-      create: z.boolean().default(false).describe('Add the kind `kind_id`'),
+      kind_id: kindId.optional().describe('The kind; when it is added, leave it out to number the kind (`k<number>`)'),
+      create: z.boolean().default(false).describe('Add the kind `kind_id`, or a numbered kind with no `kind_id`'),
       fields: kindFields.default({}),
       archived: z.boolean().optional(),
     }),
@@ -160,21 +162,26 @@ export const inventoryTools = [
       'POST /api/v1/inventory/kinds/{kind_id}/restore',
     ],
     summarize: ({ kind_id, create, archived }) =>
-      `${create ? 'Add' : 'Edit'} inventory kind ${kind_id}${archived === true ? ' and archive it' : archived === false ? ' and restore it' : ''}`,
-    handler: async ({ kind_id, create, fields, archived }, { backend }) => {
-      const path = { params: { path: { kind_id } } }
+      `${create ? 'Add' : 'Edit'} inventory kind ${kind_id ?? '(numbered)'}${archived === true ? ' and archive it' : archived === false ? ' and restore it' : ''}`,
+    handler: async ({ kind_id: given, create, fields, archived }, { backend }) => {
+      if (!create && given === undefined) throw new ToolError('an edit needs `kind_id`; only a new kind may leave it out')
+      let kind_id = given ?? ''
       let row: unknown
       if (create) {
         const { name, tracking } = fields
         if (name === undefined || tracking === undefined) throw new ToolError('a new kind needs `name` and `tracking`')
         if (archived === false) throw new ToolError('a new kind is not archived: leave out `archived: false`')
-        row = await wrote(backend.POST('/api/v1/inventory/kinds', { body: { ...changes(fields), name, tracking, id: kind_id } }), `add kind ${kind_id}`)
+        const body = { ...changes(fields), name, tracking, ...(given === undefined ? {} : { id: given }) }
+        row = await wrote(backend.POST('/api/v1/inventory/kinds', { body }), `add kind ${given ?? name}`)
+        // A numbered kind's id is in the answer.
+        if (given === undefined && row && typeof row === 'object' && 'id' in row && typeof row.id === 'string') kind_id = row.id
       } else if (!empty(fields)) {
-        row = await wrote(backend.PATCH('/api/v1/inventory/kinds/{kind_id}', { ...path, body: changes(fields) }), `edit kind ${kind_id}`)
+        row = await wrote(backend.PATCH('/api/v1/inventory/kinds/{kind_id}', { params: { path: { kind_id } }, body: changes(fields) }), `edit kind ${kind_id}`)
       } else if (archived === undefined) {
         throw new ToolError('nothing to change: give `fields`, `archived` or `create`')
       }
       if (isRunning(row)) return answer(row)
+      const path = { params: { path: { kind_id } } }
       if (archived === true) row = await wrote(backend.POST('/api/v1/inventory/kinds/{kind_id}/archive', path), `archive kind ${kind_id}`)
       if (archived === false) row = await wrote(backend.POST('/api/v1/inventory/kinds/{kind_id}/restore', path), `restore kind ${kind_id}`)
       return answer(row, 'kind')

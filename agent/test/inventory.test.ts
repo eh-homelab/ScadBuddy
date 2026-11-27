@@ -310,6 +310,21 @@ describe('inventory tools', () => {
     })
   })
 
+  it('adds a numbered kind when no kind_id is given, and names the k-and-digits refusal', async () => {
+    const posted: unknown[] = []
+    server.use(
+      http.post(`${INV}/kinds`, async ({ request }) => {
+        posted.push(await request.clone().json())
+        return HttpResponse.json({ id: 'k31', number: 31, code: 'K-31' }, { status: 201 })
+      }),
+    )
+    const made = firstText(await runTool(tool('inventory_kind_upsert'), { create: true, fields: { name: 'Bearing', tracking: 'lot' } }, ctx()))
+    expect(posted).toEqual([{ name: 'Bearing', tracking: 'lot' }])
+    expect(made).toMatchObject({ id: 'k31', code: 'K-31' })
+    await expect(tool('inventory_kind_upsert').execute({ fields: { name: 'B' } }, ctx())).rejects.toThrow('kind_id')
+    expect(tool('inventory_kind_upsert').description).toContain('`k` and digits')
+  })
+
   it('adds, edits, archives and restores a kind', async () => {
     const calls: string[] = []
     const kind = (request: Request, what: string) => {

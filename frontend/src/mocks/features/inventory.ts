@@ -31,6 +31,7 @@ type MockItem = {
   kind_id: string
   name: string
   manufacturer: string
+  /** The codes as sent. Unlike Go (`store/relations.go` `modelKind`), the mock makes no model kind for a code. */
   compatible_with: string[]
   low_stock: string
   life_hours: string | null
