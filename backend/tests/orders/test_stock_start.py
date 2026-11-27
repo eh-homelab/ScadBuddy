@@ -138,3 +138,11 @@ async def test_a_bound_starter_runs_on_the_apps_loop() -> None:
     done = await asyncio.to_thread(starter.start_and_wait, "FulfilOrderItem", {}, id="w8")
 
     assert done == Done({"ok": 3})
+
+
+def test_the_unfulfil_route_documents_202_409_and_503() -> None:
+    """Fix round 1: the unfulfil route keeps its refusals' 409 beside the new 202 and 503."""
+    from scadbuddy.api.orders import router
+
+    [route] = [r for r in router.routes if getattr(r, "path", "").endswith("/unfulfil")]
+    assert {202, 409, 503} <= set(route.responses)  # type: ignore[attr-defined]

@@ -186,6 +186,22 @@ def test_the_merge_step_refuses_another_pair(printers: PrinterStore) -> None:
     assert printers.get(synthetic.id) is not None and printers.get(mine.id) is not None
 
 
+def test_another_pair_is_merge_changed_even_while_stock_names_the_gone_printer(
+    printers: PrinterStore, pg_pool: PgPool
+) -> None:
+    """Fix round 1 (I2): the pair check comes first. A run whose pair changed answers
+    `merge_changed` at once; it never answers ``again`` and loops on stock its own Repoint
+    does not move."""
+    synthetic = printers.ensure_bambuddy(4, serial=None, name="H2C", model="H2C", by=MERGED_BY)
+    printers.create(PrinterCreate(serial=SERIAL, name="Mine"))
+    _unit(pg_pool, synthetic.id)
+    args = {"bambuddy_printer_id": 4, "serial": SERIAL, "name": "H2C", "model": "H2C"}
+
+    with pytest.raises(MergeChangedError):
+        printers.merge_commit(synthetic.id, "another", "ensure", args, MERGED_BY)
+    assert printers.get(synthetic.id) is not None
+
+
 class ConflictingGo(GoStock):
     """Go's Repoint, after which the kept row is linked to another Bambuddy printer: the
     link's own check refuses in step 2."""

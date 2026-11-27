@@ -8,8 +8,10 @@ beside these.
 
 `tests/workflows/test_order_stock.py` records them on a real Temporal
 (``SCADBUDDY_RECORD_HISTORIES=1``): a fulfil, a refused one, a slow take, a record retry,
-an unfulfil that waits for the fulfil, a re-cost retry, a merge and a refused merge. Each
-file is named after its scene. Never re-record one."""
+an unfulfil that waits for the fulfil, a re-cost retry, a merge, a refused merge, a
+takeover of a terminated fulfil and a failed take. Each file is named after its scene.
+CI records them: dispatch `ci.yml` with the input ``record_histories`` and commit the
+files of the ``order-stock-histories-<shard>`` artifacts here. Never re-record one."""
 
 from __future__ import annotations
 
@@ -33,6 +35,8 @@ RECORDED = (
     "recost_retry",
     "merge",
     "merge_refused",
+    "takeover",
+    "take_failed",
 )
 
 

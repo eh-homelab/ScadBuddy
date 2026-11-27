@@ -32,7 +32,7 @@ from typing import Any
 
 from temporalio import workflow
 from temporalio.common import RetryPolicy, VersioningBehavior
-from temporalio.exceptions import ActivityError, ApplicationError
+from temporalio.exceptions import ActivityError, ApplicationError, CancelledError
 
 with workflow.unsafe.imports_passed_through():
     from scadbuddy.orders.stock_activities import (
@@ -52,6 +52,9 @@ RETRIES = RetryPolicy(maximum_interval=timedelta(seconds=30))
 #: The wait for another open workflow of the item: as long as its Go step may take.
 AWAIT_TIMEOUT = timedelta(hours=24)
 AWAIT_HEARTBEAT = timedelta(seconds=30)
+#: The pause before each wait from the second on: 1 s, doubling to a minute.
+AWAIT_BACKOFF_FIRST = 1.0
+AWAIT_BACKOFF_MAX = 60.0
 #: How often a re-cost runs again after Go's ``recost_orders_moved``.
 RECOST_ROUNDS = 3
 #: Rounds of a merge before it continues as new, which keeps its history small.
@@ -116,6 +119,7 @@ class FulfilOrderItem:
     async def run(self, input: dict[str, Any]) -> Any:
         workflow_id = workflow.info().workflow_id
         step_input = {**input, "workflow_id": workflow_id}
+        backoff = 0.0
         while True:
             try:
                 step = await _python(ORDERS_FULFIL_COMMIT, step_input)
@@ -126,9 +130,18 @@ class FulfilOrderItem:
                 raise refused from None
             if step.get("wait_for") is None:
                 break
+            # From the second wait on, a pause first (1 s doubling to a minute), so a run
+            # the wait cannot end is never asked for in a tight loop.
+            if backoff:
+                await workflow.sleep(backoff)
+            backoff = min(backoff * 2 or AWAIT_BACKOFF_FIRST, AWAIT_BACKOFF_MAX)
             await workflow.execute_activity(
                 ORDERS_AWAIT_WORKFLOW,
-                step["wait_for"],
+                {
+                    "workflow_id": step["wait_for"],
+                    "order_id": input["order_id"],
+                    "inventory_queue": input.get("inventory_queue"),
+                },
                 start_to_close_timeout=AWAIT_TIMEOUT,
                 heartbeat_timeout=AWAIT_HEARTBEAT,
                 retry_policy=RETRIES,
@@ -136,26 +149,7 @@ class FulfilOrderItem:
         unfulfil = input["op"] == "unfulfil"
         results: list[dict[str, Any]] = []
         for call in step["calls"]:
-            if unfulfil:
-                answer = await _go(
-                    input,
-                    "GiveBack",
-                    call["key"],
-                    params={"item_id": call["item_id"]},
-                    body={"order_item_id": call["order_item_id"]},
-                )
-            else:
-                answer = await _go(
-                    input,
-                    "Take",
-                    call["key"],
-                    params={"item_id": call["item_id"]},
-                    body={
-                        "qty": call["qty"],
-                        "order_id": input["order_id"],
-                        "order_item_id": call["order_item_id"],
-                    },
-                )
+            answer = await _go_answer(input, call, unfulfil)
             results.append({**call, "status": answer["status"], "body": answer["body"]})
         return await _python(
             ORDERS_PARTS_RECORD,
@@ -169,6 +163,44 @@ class FulfilOrderItem:
                 "actor": input["actor"],
             },
         )
+
+
+async def _go_answer(input: dict[str, Any], call: dict[str, Any], unfulfil: bool) -> dict[str, Any]:
+    """Go's Take (or GiveBack) of one part. A step that failed rather than answered (past its
+    day's schedule-to-close, or a non-retryable error) is an answer too, 503
+    `inventory_step_failed`, so the record still writes `parts.stock_refused` and clears
+    the item's `parts_workflow_id` (fix round 1). A cancel of the run is not caught."""
+    try:
+        if unfulfil:
+            return await _go(
+                input,
+                "GiveBack",
+                call["key"],
+                params={"item_id": call["item_id"]},
+                body={"order_item_id": call["order_item_id"]},
+            )
+        return await _go(
+            input,
+            "Take",
+            call["key"],
+            params={"item_id": call["item_id"]},
+            body={
+                "qty": call["qty"],
+                "order_id": input["order_id"],
+                "order_item_id": call["order_item_id"],
+            },
+        )
+    except ActivityError as error:
+        if isinstance(error.cause, CancelledError):
+            raise
+        return {
+            "status": 503,
+            "body": {
+                "code": "inventory_step_failed",
+                "status": 503,
+                "detail": f"the stock step failed: {error.cause or error}",
+            },
+        }
 
 
 @workflow.defn(name=FULFIL_ORDER_ITEM, versioning_behavior=VersioningBehavior.AUTO_UPGRADE)
@@ -249,7 +281,9 @@ class MergePrinter:
         chain = workflow.info().first_execution_run_id
         base = f"entity_merge:printer:{gone}:{kept}:{chain}"
         round_ = int(input.get("round", 0))
-        moved: list[dict[str, Any]] = list(input.get("moved") or [])
+        # Only the union of what every round moved is carried through continue_as_new,
+        # so the input stays as small as the stock it names.
+        moved: list[dict[str, Any]] = [input["moved"]] if input.get("moved") else []
         sleep = float(input.get("sleep", MERGE_SLEEP_FIRST))
         for _ in range(MERGE_ROUNDS):
             round_ += 1
@@ -290,7 +324,7 @@ class MergePrinter:
                 return step
             await workflow.sleep(sleep)
             sleep = min(sleep * 2, MERGE_SLEEP_MAX)
-        workflow.continue_as_new({**input, "round": round_, "moved": moved, "sleep": sleep})
+        workflow.continue_as_new({**input, "round": round_, "moved": _union(moved), "sleep": sleep})
 
 
 @workflow.defn(name=MERGE_PRINTER, versioning_behavior=VersioningBehavior.AUTO_UPGRADE)

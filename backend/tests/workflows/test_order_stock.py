@@ -25,6 +25,7 @@ from uuid import UUID
 import pytest
 from temporalio import activity
 from temporalio.client import Client
+from temporalio.exceptions import ApplicationError
 from temporalio.worker import Worker
 
 from scadbuddy.orders.lifecycle import FulfilLine, FulfilmentInput, LifecycleError
@@ -66,6 +67,8 @@ class FakeGo:
     go: GoStock
     runs: Counter[str] = field(default_factory=Counter)
     gates: dict[str, asyncio.Event] = field(default_factory=dict)
+    #: Names whose activity fails (not answers) with a non-retryable error.
+    failing: set[str] = field(default_factory=set)
     after: dict[str, Callable[[dict[str, Any]], None]] = field(default_factory=dict)
 
     def activities(self) -> list[Callable[..., Any]]:
@@ -73,6 +76,8 @@ class FakeGo:
             @activity.defn(name=f"inventory.{name}")
             async def run(input: dict[str, Any]) -> dict[str, Any]:
                 self.runs[name] += 1
+                if name in self.failing:
+                    raise ApplicationError("scadbuddy-core is gone", non_retryable=True)
                 gate = self.gates.get(name)
                 if gate is not None:
                     await gate.wait()
@@ -513,3 +518,47 @@ async def test_the_worker_ensure_waits_for_the_merge(world: World, pg_pool: PgPo
 
     assert row.id == mine.id and wrote
     assert printers.get(synthetic.id) is None
+
+
+# ── fix round 1 (I1) ─────────────────────────────────────────────────────────────────
+
+
+async def test_a_terminated_fulfil_is_taken_over_by_the_next_change(world: World) -> None:
+    """A run that committed and then was terminated still holds its item. The unfulfil
+    that waits for it starts it again; its first step finds its own commit, its Take runs
+    once (the key's ledger), and it records. Then the unfulfil runs."""
+    shop = world.shop
+    order, item, _ = _with_part(shop)
+    world.go.gates["Take"] = asyncio.Event()
+    _, accepted = await _accept(world, order, item)
+    assert isinstance(accepted, WorkflowAccepted)
+    await world.client.get_workflow_handle(accepted.workflow_id).terminate("by hand")
+
+    waiting = await _call(lambda: shop.lifecycle.unfulfil_item(order.id, item.id, BY))
+    assert isinstance(waiting, WorkflowAccepted)
+    world.go.gates["Take"].set()
+
+    await _until(lambda: "parts.returned" in shop.kinds(order), 60.0)
+    kinds = shop.kinds(order)
+    assert kinds.count("parts.used") == 1
+    assert kinds.index("parts.used") < kinds.index("parts.returned")
+    assert len([m for m in shop.go.stock.moves(order_item_id=item.id) if m.kind == "use"]) == 1
+    assert shop.get_item(item).parts_settling is None
+    await _record(world, waiting.workflow_id, "takeover")
+
+
+async def test_a_failed_take_is_recorded_and_frees_the_item(world: World) -> None:
+    """A Go step that fails (past its schedule-to-close, or non-retryable) is recorded as
+    `parts.stock_refused`, and the item no longer settles."""
+    shop = world.shop
+    order, item, _ = _with_part(shop)
+    world.go.failing.add("Take")
+
+    await _accept(world, order, item)
+
+    await _until(lambda: shop.get_item(item).parts_settling is None)
+    [refused] = [e for e in shop.rows.events(order.id) if e.kind == "parts.stock_refused"]
+    assert refused.detail["status"] == 503
+    assert refused.detail["problem"]["code"] == "inventory_step_failed"
+    assert "parts.used" not in shop.kinds(order)
+    await _record(world, f"order_item:{item.id}:parts:1", "take_failed")

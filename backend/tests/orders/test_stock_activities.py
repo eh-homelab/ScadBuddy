@@ -6,18 +6,23 @@ real Temporal are `tests/workflows/test_order_stock.py`'s."""
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from decimal import Decimal
 from typing import Any
 from uuid import UUID
 
 import pytest
-from temporalio.exceptions import ApplicationError
+from temporalio.client import WorkflowFailureError
+from temporalio.common import WorkflowIDReusePolicy
+from temporalio.exceptions import ApplicationError, TerminatedError
+from temporalio.service import RPCError, RPCStatusCode
+from temporalio.testing import ActivityEnvironment
 
 from scadbuddy.orders.lifecycle import FulfilLine, FulfilmentInput, LifecycleError
 from scadbuddy.orders.models import Order, OrderItem
 from scadbuddy.orders.parts import ItemPart
-from scadbuddy.orders.stock_activities import OrderStockSteps
-from scadbuddy.orders.stock_start import WorkflowAccepted
+from scadbuddy.orders.stock_activities import OrderStockSteps, order_stock_activities
+from scadbuddy.orders.stock_start import FULFIL_ORDER_ITEM, WorkflowAccepted
 from scadbuddy.orders.store import OrderStore
 from scadbuddy.store.refs import BlobRefs
 from tests.conftest import PgPool
@@ -318,3 +323,158 @@ def test_unfulfil_then_fulfil_uses_new_keys(shop: Shop) -> None:
         f"order_item:{item.id}:parts:2:{hook}",
     ]
     assert shop.kinds(order).count("parts.returned") == 1
+
+
+# ── fix round 1 (I1): a closed run that still holds its item is taken over ──────────────
+
+
+async def test_the_takeover_input_rebuilds_a_committed_run(
+    shop: Shop, steps: OrderStockSteps
+) -> None:
+    """A run that committed and then closed (terminated, timed out, past retention) still
+    names its items. Its input comes back from the rows it wrote, so a new run of the same
+    id finds its own commit and goes on to Go's steps and the record."""
+    order, item, _ = _with_part(shop)
+    await steps.fulfil_commit(_fulfil_input(order, item, "order:o:fulfil:t1"))
+
+    again = shop.lifecycle.stock_takeover(order.id, "order:o:fulfil:t1")
+
+    assert again is not None
+    assert (again["order_id"], again["op"]) == (order.id, "fulfil")
+    assert again["lines"] == [{"item_id": item.id, "key": f"order_item:{item.id}:parts:1"}]
+    assert again["actor"] == ACTOR
+    step = await steps.fulfil_commit({**again, "workflow_id": "order:o:fulfil:t1"})
+    assert step["done"] and step["wait_for"] is None
+
+
+async def test_no_takeover_once_the_run_recorded(shop: Shop, steps: OrderStockSteps) -> None:
+    order, item, _ = _with_part(shop)
+    step = await steps.fulfil_commit(_fulfil_input(order, item, "order:o:fulfil:t2"))
+    await steps.parts_record(
+        {
+            "workflow_id": "order:o:fulfil:t2",
+            "op": "fulfil",
+            "order_id": order.id,
+            "item_ids": [item.id],
+            "attempts": step["attempts"],
+            "results": [],
+            "actor": ACTOR,
+        }
+    )
+
+    assert shop.lifecycle.stock_takeover(order.id, "order:o:fulfil:t2") is None
+    assert shop.lifecycle.stock_takeover(order.id, "order:o:fulfil:never") is None
+
+
+async def test_an_unfulfil_takeover_keeps_its_op(shop: Shop, steps: OrderStockSteps) -> None:
+    order, item, _ = _with_part(shop)
+    shop.fulfilled(order, item)
+    wid = f"order_item:{item.id}:parts:1:return"
+    await steps.fulfil_commit(
+        {
+            "workflow_id": wid,
+            "order_id": order.id,
+            "op": "unfulfil",
+            "lines": [{"item_id": item.id, "key": wid}],
+            "actor": ACTOR,
+        }
+    )
+
+    again = shop.lifecycle.stock_takeover(order.id, wid)
+
+    assert again is not None and again["op"] == "unfulfil"
+    assert again["lines"] == [{"item_id": item.id, "key": wid}]
+
+
+class _Handle:
+    def __init__(self, outcome: BaseException | None) -> None:
+        self.outcome = outcome
+
+    async def result(self) -> Any:
+        if self.outcome is not None:
+            raise self.outcome
+        return {"ok": True}
+
+
+class _Client:
+    """A Temporal client whose runs of one id end with each ``outcomes`` in turn."""
+
+    def __init__(self, *outcomes: BaseException | None) -> None:
+        self.outcomes = list(outcomes)
+        self.started: list[tuple[str, dict[str, Any], dict[str, Any]]] = []
+
+    def get_workflow_handle(self, workflow_id: str) -> _Handle:
+        return _Handle(self.outcomes.pop(0))
+
+    async def start_workflow(self, workflow: str, arg: dict[str, Any], **options: Any) -> _Handle:
+        self.started.append((workflow, arg, options))
+        return _Handle(None)
+
+
+def _await(steps: OrderStockSteps, client: _Client) -> Callable[..., Any]:
+    [found] = [
+        a
+        for a in order_stock_activities(lambda: steps, lambda: client)  # type: ignore[arg-type,return-value]
+        if a.__name__ == "orders_await_workflow"
+    ]
+    return found
+
+
+def _closed() -> WorkflowFailureError:
+    return WorkflowFailureError(cause=TerminatedError("terminated by hand"))
+
+
+async def test_a_closed_run_that_holds_the_item_is_started_again(
+    shop: Shop, steps: OrderStockSteps
+) -> None:
+    order, item, _ = _with_part(shop)
+    await steps.fulfil_commit(_fulfil_input(order, item, "order:o:fulfil:a1"))
+    client = _Client(_closed(), None)
+
+    outcome = await ActivityEnvironment().run(
+        _await(steps, client),
+        {"workflow_id": "order:o:fulfil:a1", "order_id": order.id, "inventory_queue": "inv"},
+    )
+
+    assert outcome == "taken_over"
+    [(workflow, arg, options)] = client.started
+    assert workflow == FULFIL_ORDER_ITEM and options["id"] == "order:o:fulfil:a1"
+    assert options["task_queue"] == "test"
+    assert options["id_reuse_policy"] == WorkflowIDReusePolicy.ALLOW_DUPLICATE_FAILED_ONLY
+    assert arg["inventory_queue"] == "inv" and arg["op"] == "fulfil"
+
+
+async def test_a_run_past_retention_counts_as_closed(shop: Shop, steps: OrderStockSteps) -> None:
+    order, item, _ = _with_part(shop)
+    await steps.fulfil_commit(_fulfil_input(order, item, "order:o:fulfil:a2"))
+    client = _Client(RPCError("not found", RPCStatusCode.NOT_FOUND, b""), None)
+
+    outcome = await ActivityEnvironment().run(
+        _await(steps, client), {"workflow_id": "order:o:fulfil:a2", "order_id": order.id}
+    )
+
+    assert outcome == "taken_over" and len(client.started) == 1
+
+
+async def test_a_closed_run_that_holds_nothing_is_left_closed(
+    shop: Shop, steps: OrderStockSteps
+) -> None:
+    order, _, _ = _with_part(shop)
+    client = _Client(_closed())
+
+    outcome = await ActivityEnvironment().run(
+        _await(steps, client), {"workflow_id": "order:o:fulfil:a3", "order_id": order.id}
+    )
+
+    assert outcome == "closed" and client.started == []
+
+
+async def test_a_completed_run_ends_the_wait(shop: Shop, steps: OrderStockSteps) -> None:
+    order, _, _ = _with_part(shop)
+    client = _Client(None)
+
+    outcome = await ActivityEnvironment().run(
+        _await(steps, client), {"workflow_id": "order:o:fulfil:a4", "order_id": order.id}
+    )
+
+    assert outcome == "completed" and client.started == []

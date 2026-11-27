@@ -5747,6 +5747,33 @@ class Lifecycle:
         )
         return item, attempt
 
+    def stock_takeover(self, order_id: str, workflow_id: str) -> dict[str, Any] | None:
+        """The input of a new run of ``workflow_id`` when it committed and then closed
+        without its record (terminated, timed out, or past retention, #6949 K1 Task 16 fix
+        round 1): its items still name it. The input comes from its rows, so it needs no
+        history: the items that name it, the op its id gives (``:return`` is an unfulfil),
+        and who started it. The new run's first step finds its own commit and answers its
+        calls, then Go's steps and the record run. None when no item names it (it recorded,
+        or never committed)."""
+        with self.store.transaction() as conn:
+            order = self._lock(conn, order_id)
+            item_ids, actor = self.store.workflow_holds(conn, order.id, workflow_id)
+            if not item_ids or actor is None:
+                return None
+            unfulfil = workflow_id.endswith(":return")
+            return {
+                "order_id": order.id,
+                "op": "unfulfil" if unfulfil else "fulfil",
+                "lines": [
+                    {
+                        "item_id": item_id,
+                        "key": self._parts_key(conn, order.id, item_id, unfulfil=unfulfil),
+                    }
+                    for item_id in item_ids
+                ],
+                "actor": actor,
+            }
+
     def stock_record(
         self,
         workflow_id: str,

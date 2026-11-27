@@ -3559,6 +3559,23 @@ class OrderStore:
         ]
         return sorted(calls, key=lambda c: (c["item_id"], c["order_item_id"])), attempts
 
+    def workflow_holds(
+        self, conn: Conn, order_id: str, workflow_id: str
+    ) -> tuple[list[str], dict[str, Any] | None]:
+        """The order's items whose open stock workflow is ``workflow_id``, in id order, and
+        who started it (the ``by`` of its first audit row that names it); None when none
+        names it."""
+        items = conn.execute(
+            "SELECT id FROM order_items WHERE order_id = %s AND parts_workflow_id = %s ORDER BY id",
+            (order_id, workflow_id),
+        ).fetchall()
+        actor = conn.execute(
+            "SELECT by FROM order_events WHERE order_id = %s AND detail ->> 'workflow' = %s"
+            " ORDER BY id LIMIT 1",
+            (order_id, workflow_id),
+        ).fetchone()
+        return [str(row["id"]) for row in items], None if actor is None else dict(actor["by"])
+
     def set_parts_workflow(
         self, conn: Conn, item_ids: Sequence[str], workflow_id: str | None
     ) -> None:

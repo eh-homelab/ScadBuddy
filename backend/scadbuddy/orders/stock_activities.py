@@ -9,7 +9,8 @@ only the API may write (root CLAUDE.md #5295). Go's steps (`inventory.Take`,
   (``bad_quantity`` refuses as phase 2 did), then commits under the order's lock
   (`Lifecycle.stock_commit`), and reads again when a quantity changed meanwhile.
 - `orders_parts_record`: its last step, Go's answers on the order (`Lifecycle.stock_record`).
-- `orders_await_workflow`: the wait for another open workflow of the item, which heartbeats.
+- `orders_await_workflow`: the wait for another open workflow of the item, which heartbeats,
+  and which starts that workflow again when it closed while it still held the item.
 - `orders_recost_orders` and `orders_recost_record`: `RecostLot`'s first and last steps.
 
 A refusal in a commit step is a non-retryable `ApplicationError` whose type is the problem's
@@ -21,6 +22,7 @@ Temporal in it."""
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import logging
 from collections.abc import Callable, Mapping
 from dataclasses import asdict
@@ -29,12 +31,15 @@ from typing import Any, Protocol
 
 from temporalio import activity
 from temporalio.client import Client, WorkflowFailureError
-from temporalio.exceptions import ApplicationError
+from temporalio.common import WorkflowIDConflictPolicy, WorkflowIDReusePolicy
+from temporalio.exceptions import ApplicationError, WorkflowAlreadyStartedError
+from temporalio.service import RPCError, RPCStatusCode
 
 from scadbuddy.core.problems import ApiError
 from scadbuddy.inventory.models import RecostResult
 from scadbuddy.orders.lifecycle import Lifecycle, LifecycleError, lifecycle_problem
 from scadbuddy.orders.models import Actor
+from scadbuddy.orders.stock_start import FULFIL_ORDER_ITEM
 
 logger = logging.getLogger(__name__)
 
@@ -46,6 +51,8 @@ ORDERS_RECOST_RECORD = "orders_recost_record"
 
 #: How often the first step reads the estimates again when the quantities moved meanwhile.
 REREADS = 5
+#: How often one wait starts a closed run that still holds its items again.
+TAKEOVERS = 3
 #: How often `orders_await_workflow` heartbeats while it waits.
 HEARTBEAT_EVERY = timedelta(seconds=10)
 #: The most moves the re-cost's read of a lot's orders asks Go for. An order it misses is
@@ -122,6 +129,10 @@ class OrderStockSteps:
         except LifecycleError as error:
             raise refusal_of(error) from None
 
+    async def takeover(self, order_id: str, workflow_id: str) -> dict[str, Any] | None:
+        """The input of a new run of a closed workflow that still holds its items."""
+        return await asyncio.to_thread(self._lifecycle().stock_takeover, order_id, workflow_id)
+
     async def parts_record(self, input: Mapping[str, Any]) -> Any:
         lifecycle = self._lifecycle()
         return await asyncio.to_thread(
@@ -177,20 +188,60 @@ def order_stock_activities(
     async def orders_recost_record(input: dict[str, Any]) -> Any:
         return await steps().recost_record(input)
 
-    @activity.defn(name=ORDERS_AWAIT_WORKFLOW)
-    async def orders_await_workflow(workflow_id: str) -> None:
-        """Waits for the item's other open workflow to end, heartbeating as it waits. A
-        run that failed is an end too: the first step then reads the item again."""
+    async def _ended(workflow_id: str) -> bool:
+        """Waits for the run of ``workflow_id`` to close, heartbeating as it waits: True
+        when it completed. A run that failed, was terminated, cancelled or timed out is
+        closed and not completed, and so is one Temporal no longer knows (NOT_FOUND, past
+        retention)."""
         handle = client().get_workflow_handle(workflow_id)
         while True:
             activity.heartbeat()
             try:
                 await asyncio.wait_for(handle.result(), HEARTBEAT_EVERY.total_seconds())
-                return
+                return True
             except TimeoutError:
                 continue
             except WorkflowFailureError:
-                return
+                return False
+            except RPCError as error:
+                if error.status == RPCStatusCode.NOT_FOUND:
+                    return False
+                raise
+
+    @activity.defn(name=ORDERS_AWAIT_WORKFLOW)
+    async def orders_await_workflow(input: dict[str, Any]) -> str:
+        """Waits for the item's other workflow ``{workflow_id, order_id, inventory_queue}``
+        to end: ``completed``, or ``closed`` when it closed and holds no item. A closed run
+        that still holds its items (it committed, then was terminated or timed out, or is
+        past retention) would hold them for ever, so this step takes over (fix round 1 of
+        #6949 K1 Task 16): it starts that id again (`ALLOW_DUPLICATE_FAILED_ONLY` lets it)
+        with the input its rows give (`Lifecycle.stock_takeover`), whose first step finds its
+        own commit, and waits for that run: ``taken_over``. At most `TAKEOVERS` times; then
+        ``closed``, and the workflow waits again after its backoff."""
+        workflow_id = input["workflow_id"]
+        took = False
+        for _ in range(TAKEOVERS + 1):
+            if await _ended(workflow_id):
+                return "taken_over" if took else "completed"
+            again = await steps().takeover(input["order_id"], workflow_id)
+            if again is None:
+                return "taken_over" if took else "closed"
+            logger.warning(
+                "stock workflow %s closed while it held its items; starting it again",
+                workflow_id,
+            )
+            # Another waiter started it first, or it completed meanwhile: either is fine.
+            with contextlib.suppress(WorkflowAlreadyStartedError):
+                await client().start_workflow(
+                    FULFIL_ORDER_ITEM,
+                    {**again, "inventory_queue": input.get("inventory_queue")},
+                    id=workflow_id,
+                    task_queue=activity.info().task_queue,
+                    id_conflict_policy=WorkflowIDConflictPolicy.USE_EXISTING,
+                    id_reuse_policy=WorkflowIDReusePolicy.ALLOW_DUPLICATE_FAILED_ONLY,
+                )
+            took = True
+        return "closed"
 
     return [
         orders_fulfil_commit,

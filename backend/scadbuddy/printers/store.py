@@ -748,11 +748,14 @@ class PrinterStore:
         locks a row (the entities' rows, `entities/actor.py`). `StockNamesPrinterError`
         before anything is written when stock rows still name ``gone``
         (`_no_stock_names`): the caller rolls back and starts `MergePrinter`. ``expect``
-        is the pair a `MergePrinter` run merges: another pair is `MergeChangedError`."""
+        is the pair a `MergePrinter` run merges: another pair is `MergeChangedError`,
+        checked before the stock."""
         set_actor(conn, by)
-        _no_stock_names(conn, gone, kept)
+        # The pair first: a run whose pair changed must answer `merge_changed`, not
+        # ``again`` for stock its own Repoint never moves (fix round 1).
         if expect is not None and expect != (gone, kept):
             raise MergeChangedError(*expect)
+        _no_stock_names(conn, gone, kept)
         for ref in PRINTER_REFERENCES:
             if not isinstance(ref, PrinterReference):
                 ref(conn, gone, kept, by)

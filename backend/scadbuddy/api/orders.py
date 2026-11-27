@@ -3434,7 +3434,15 @@ async def fulfil_items(
         "scadbuddy-core (#6949 K1); a give-back it refuses is recorded on the order as "
         "`parts.stock_refused`."
     ),
-    responses={202: _STOCK_ACCEPTED, 503: _STOCK_UNAVAILABLE},
+    responses={
+        202: _STOCK_ACCEPTED,
+        409: {
+            "description": "A refusal: `item_not_fulfilled`, `order_item_shipped`, "
+            "`order_on_hold`, `order_closed`/`order_cancelled`, `unfulfil_disabled`, or "
+            "`order_item_changed` (it changed while its stock workflow started)."
+        },
+        503: _STOCK_UNAVAILABLE,
+    },
 )
 async def unfulfil_item(
     order_id: str,
