@@ -31,13 +31,14 @@ type fakeCUPS struct {
 
 	// block is closed when the test ends. A handler waits on it when hang is set.
 	block chan struct{}
-	hang  bool
+	hang  bool // guarded by mu
 
 	mu           sync.Mutex
 	queues       []fakeQueue
 	requests     []fakeRequest
-	printStatus  uint16 // status of the next Print-Job reply
-	printMessage string // its status-message
+	printStatus  uint16  // status of the next Print-Job reply
+	printMessage string  // its status-message
+	replyID      *uint32 // when set, the request-id of every reply
 }
 
 func newFakeCUPS(t *testing.T, queues []fakeQueue) *fakeCUPS {
@@ -60,6 +61,18 @@ func (f *fakeCUPS) setPrintReply(status uint16, message string) {
 	f.printStatus, f.printMessage = status, message
 }
 
+func (f *fakeCUPS) setHang(v bool) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.hang = v
+}
+
+func (f *fakeCUPS) setReplyID(id uint32) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.replyID = &id
+}
+
 func (f *fakeCUPS) recorded() []fakeRequest {
 	f.mu.Lock()
 	defer f.mu.Unlock()
@@ -74,14 +87,17 @@ func (f *fakeCUPS) serve(w http.ResponseWriter, r *http.Request) {
 	}
 	f.mu.Lock()
 	f.requests = append(f.requests, fakeRequest{Path: r.URL.EscapedPath(), ContentType: r.Header.Get("Content-Type"), Msg: msg})
-	status, message := f.printStatus, f.printMessage
+	status, message, hang, replyID := f.printStatus, f.printMessage, f.hang, f.replyID
 	f.mu.Unlock()
-	if f.hang {
+	if hang {
 		select {
 		case <-f.block:
 		case <-r.Context().Done():
 		}
 		return
+	}
+	if replyID != nil {
+		msg.RequestID = *replyID
 	}
 	f.reply(w, msg, status, message)
 }

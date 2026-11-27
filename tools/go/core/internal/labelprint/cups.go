@@ -60,11 +60,54 @@ type Job struct {
 	StateReasons []string `json:"job_state_reasons"`
 }
 
-// Client talks IPP to a CUPS server. A zero timeout means none.
+// Default timeouts of a Client. There is no way to turn a timeout off.
+const (
+	defaultListTimeout  = 5 * time.Second
+	defaultPrintTimeout = 30 * time.Second
+)
+
+// queueName is the shape of a queue name core sends to CUPS.
+var queueName = regexp.MustCompile(`^[A-Za-z0-9_-]{1,127}$`)
+
+// ValidQueue reports whether name is a queue name core sends to CUPS.
+func ValidQueue(name string) bool { return queueName.MatchString(name) }
+
+// Client talks IPP to a CUPS server. Base may carry a path prefix. A nil HTTP
+// means a client that ignores the proxy environment variables. A zero
+// ListTimeout is 5 s and a zero PrintTimeout is 30 s.
 type Client struct {
 	Base                      *url.URL
 	HTTP                      *http.Client
 	ListTimeout, PrintTimeout time.Duration
+}
+
+func (c *Client) listTimeout() time.Duration {
+	if c.ListTimeout > 0 {
+		return c.ListTimeout
+	}
+	return defaultListTimeout
+}
+
+func (c *Client) printTimeout() time.Duration {
+	if c.PrintTimeout > 0 {
+		return c.PrintTimeout
+	}
+	return defaultPrintTimeout
+}
+
+// directHTTP is the client used when Client.HTTP is nil. Its transport never
+// uses a proxy, so the label server is never reached through one.
+var directHTTP = func() *http.Client {
+	t := http.DefaultTransport.(*http.Transport).Clone()
+	t.Proxy = nil
+	return &http.Client{Transport: t}
+}()
+
+func (c *Client) client() *http.Client {
+	if c.HTTP != nil {
+		return c.HTTP
+	}
+	return directHTTP
 }
 
 var queueAttrs = []string{
@@ -87,7 +130,7 @@ func (c *Client) Queues(ctx context.Context) ([]Queue, error) {
 		StrAttr(TagOperation, "attributes-natural-language", TagLanguage, "en"),
 		StrAttr(TagOperation, "requested-attributes", TagKeyword, queueAttrs...),
 	}}
-	reply, err := c.do(ctx, c.ListTimeout, c.path("/"), req)
+	reply, err := c.do(ctx, c.listTimeout(), c.path("/"), req)
 	if err != nil {
 		return nil, err
 	}
@@ -130,11 +173,13 @@ func (c *Client) Queues(ctx context.Context) ([]Queue, error) {
 
 // Print sends the document to the queue as one Print-Job.
 func (c *Client) Print(ctx context.Context, queue string, doc []byte, o Options) (Job, error) {
-	escaped := url.PathEscape(queue)
+	if !ValidQueue(queue) {
+		return Job{}, ErrQueueUnknown
+	}
 	req := Message{Version: [2]byte{1, 1}, Code: 0x0002, RequestID: 1, Data: doc, Attrs: []Attr{
 		StrAttr(TagOperation, "attributes-charset", TagCharset, "utf-8"),
 		StrAttr(TagOperation, "attributes-natural-language", TagLanguage, "en"),
-		StrAttr(TagOperation, "printer-uri", TagURI, "ipp://"+c.Base.Host+"/printers/"+escaped),
+		StrAttr(TagOperation, "printer-uri", TagURI, "ipp://"+c.Base.Host+c.basePath()+"/printers/"+queue),
 		StrAttr(TagOperation, "requesting-user-name", TagName, "scadbuddy"),
 		StrAttr(TagOperation, "job-name", TagName, "ScadBuddy labels"),
 		StrAttr(TagOperation, "document-format", TagMimeType, "application/pdf"),
@@ -146,7 +191,7 @@ func (c *Client) Print(ctx context.Context, queue string, doc []byte, o Options)
 			req.Attrs = append(req.Attrs, StrAttr(TagJob, opt.name, TagName, opt.value))
 		}
 	}
-	reply, err := c.do(ctx, c.PrintTimeout, c.path("/printers/"+escaped), req)
+	reply, err := c.do(ctx, c.printTimeout(), c.path("/printers/"+queue), req)
 	if err != nil {
 		return Job{}, err
 	}
@@ -167,21 +212,21 @@ func (c *Client) Print(ctx context.Context, queue string, doc []byte, o Options)
 	return job, nil
 }
 
-// path is the request URL: the base with the given escaped path.
+// basePath is the escaped path of Base without a trailing slash.
+func (c *Client) basePath() string { return strings.TrimSuffix(c.Base.EscapedPath(), "/") }
+
+// path is the request URL: the base with the given escaped path below it.
 func (c *Client) path(escaped string) *url.URL {
 	u := *c.Base
-	u.RawPath = escaped
-	u.Path, _ = url.PathUnescape(escaped)
+	u.RawPath = c.basePath() + escaped
+	u.Path, _ = url.PathUnescape(u.RawPath)
 	u.RawQuery, u.Fragment = "", ""
 	return &u
 }
 
 func (c *Client) do(ctx context.Context, timeout time.Duration, u *url.URL, req Message) (Message, error) {
-	if timeout > 0 {
-		var cancel context.CancelFunc
-		ctx, cancel = context.WithTimeout(ctx, timeout)
-		defer cancel()
-	}
+	ctx, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
 	var body bytes.Buffer
 	if err := req.Encode(&body); err != nil {
 		return Message{}, err
@@ -191,10 +236,7 @@ func (c *Client) do(ctx context.Context, timeout time.Duration, u *url.URL, req 
 		return Message{}, err
 	}
 	hr.Header.Set("Content-Type", "application/ipp")
-	hc := http.Client{}
-	if c.HTTP != nil {
-		hc = *c.HTTP
-	}
+	hc := *c.client()
 	hc.CheckRedirect = func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }
 	resp, err := hc.Do(hr)
 	if err != nil {
@@ -208,6 +250,9 @@ func (c *Client) do(ctx context.Context, timeout time.Duration, u *url.URL, req 
 	reply, err := Decode(resp.Body, replyLimit)
 	if err != nil {
 		return Message{}, fmt.Errorf("%w: %v", ErrUnreachable, err)
+	}
+	if reply.RequestID != req.RequestID {
+		return Message{}, fmt.Errorf("%w: the reply answers request %d, not %d", ErrUnreachable, reply.RequestID, req.RequestID)
 	}
 	return reply, nil
 }

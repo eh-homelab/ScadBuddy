@@ -132,13 +132,76 @@ func TestPrintSendsThePDFAndOptions(t *testing.T) {
 	}
 }
 
-func TestPrintEscapesTheQueueInThePath(t *testing.T) {
+func TestPrintRefusesABadQueueName(t *testing.T) {
 	f := newFakeCUPS(t, nil)
-	if _, err := newClient(f).Print(context.Background(), "a b/c", []byte("%PDF-"), Options{}); err != nil {
+	for _, name := range []string{"..", ".", "a/b", "a b", "", strings.Repeat("a", 128)} {
+		if _, err := newClient(f).Print(context.Background(), name, []byte("%PDF-"), Options{}); !errors.Is(err, ErrQueueUnknown) {
+			t.Errorf("%q: err = %v", name, err)
+		}
+	}
+	if n := len(f.recorded()); n != 0 {
+		t.Errorf("requests = %d", n)
+	}
+	if !ValidQueue("S-EDCDU03-2x1") || !ValidQueue(strings.Repeat("a", 127)) {
+		t.Error("a good name is refused")
+	}
+}
+
+func TestBasePathIsJoined(t *testing.T) {
+	f := newFakeCUPS(t, twoQueues())
+	c := newClient(f)
+	base := *f.URL
+	base.Path = "/cups/"
+	c.Base = &base
+	if _, err := c.Queues(context.Background()); err != nil {
 		t.Fatal(err)
 	}
-	if got := f.recorded()[0].Path; got != "/printers/a%20b%2Fc" {
-		t.Errorf("path = %q", got)
+	if _, err := c.Print(context.Background(), "q", []byte("%PDF-"), Options{}); err != nil {
+		t.Fatal(err)
+	}
+	reqs := f.recorded()
+	if len(reqs) != 2 || reqs[0].Path != "/cups/" || reqs[1].Path != "/cups/printers/q" {
+		t.Fatalf("requests = %+v", reqs)
+	}
+	if got := reqs[1].Msg.Strings(TagOperation, "printer-uri"); len(got) != 1 || got[0] != "ipp://"+f.URL.Host+"/cups/printers/q" {
+		t.Errorf("printer-uri = %v", got)
+	}
+}
+
+func TestZeroTimeoutsUseTheDefaults(t *testing.T) {
+	var c Client
+	if c.listTimeout() != 5*time.Second || c.printTimeout() != 30*time.Second {
+		t.Errorf("defaults = %v, %v", c.listTimeout(), c.printTimeout())
+	}
+	c = Client{ListTimeout: time.Second, PrintTimeout: 2 * time.Second}
+	if c.listTimeout() != time.Second || c.printTimeout() != 2*time.Second {
+		t.Error("a set timeout is not kept")
+	}
+}
+
+func TestNilHTTPIgnoresTheEnvironmentProxy(t *testing.T) {
+	f := newFakeCUPS(t, twoQueues())
+	t.Setenv("HTTP_PROXY", "http://127.0.0.1:1")
+	t.Setenv("http_proxy", "http://127.0.0.1:1")
+	c := &Client{Base: f.URL}
+	tr, ok := c.client().Transport.(*http.Transport)
+	if !ok || tr.Proxy != nil {
+		t.Fatalf("transport = %#v", c.client().Transport)
+	}
+	if _, err := c.Queues(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestWrongRequestIDIsUnreachable(t *testing.T) {
+	f := newFakeCUPS(t, twoQueues())
+	f.setReplyID(99)
+	c := newClient(f)
+	if _, err := c.Queues(context.Background()); !errors.Is(err, ErrUnreachable) {
+		t.Errorf("Queues: %v", err)
+	}
+	if _, err := c.Print(context.Background(), "q", []byte("%PDF-"), Options{}); !errors.Is(err, ErrUnreachable) {
+		t.Errorf("Print: %v", err)
 	}
 }
 
@@ -214,7 +277,7 @@ func TestReplyPastTheLimitIsUnreachable(t *testing.T) {
 
 func TestDeadlineIsUnreachable(t *testing.T) {
 	f := newFakeCUPS(t, nil)
-	f.hang = true
+	f.setHang(true)
 	c := newClient(f)
 	c.ListTimeout = 50 * time.Millisecond
 	c.PrintTimeout = 50 * time.Millisecond
