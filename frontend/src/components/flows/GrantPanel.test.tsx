@@ -60,6 +60,59 @@ describe('GrantPanel', () => {
     ).toBeInTheDocument()
   })
 
+  it.each([
+    ['requested', { status: 'requested', in_force: false }, /^If you approve it, besides you, any of your assistant sessions may answer/],
+    ['in force', { status: 'approved', in_force: true }, /^Besides you, any of your assistant sessions may answer/],
+    [
+      'expired',
+      { status: 'approved', in_force: false, expired: true },
+      /^Expired: any of your assistant sessions may no longer answer/,
+    ],
+    [
+      'revoked',
+      { status: 'approved', in_force: false, revoked_at: '2026-11-27T00:00:00Z', revoked_by: 'browser' },
+      /^Revoked: any of your assistant sessions may no longer answer/,
+    ],
+  ] as const)('says who may answer only as a %s grant allows it (#8045)', async (_, state, text) => {
+    const grant = await grantOf('run-done')
+    renderPage(
+      <GrantPanel runId="run-done" grant={{ ...grant, ...state, spec: { ...grant.spec, answers: { who: ['sessions'] } } }} onChange={vi.fn()} />,
+    )
+    expect(screen.getByText(text)).toBeInTheDocument()
+  })
+
+  it('says a grant that lost force with a grant above it is no longer in force, not expired (#8188)', async () => {
+    const grant = await grantOf('run-done')
+    renderPage(
+      <GrantPanel
+        runId="run-done"
+        grant={{
+          ...grant,
+          status: 'approved',
+          in_force: false,
+          revoked_at: null,
+          expired: false,
+          spec: { ...grant.spec, answers: { who: ['sessions'] } },
+        }}
+        onChange={vi.fn()}
+      />,
+    )
+    expect(screen.getByTestId('grant-status')).toHaveTextContent('No longer in force')
+    expect(screen.getByText(/^No longer in force: any of your assistant sessions may no longer answer/)).toBeInTheDocument()
+  })
+
+  it('says nothing of answerers for a declined grant (#8045)', async () => {
+    const grant = await grantOf('run-done')
+    renderPage(
+      <GrantPanel
+        runId="run-done"
+        grant={{ ...grant, status: 'declined', in_force: false, spec: { ...grant.spec, answers: { who: ['sessions'] } } }}
+        onChange={vi.fn()}
+      />,
+    )
+    expect(screen.queryByText(/answer its questions/)).not.toBeInTheDocument()
+  })
+
   it('revokes only after a confirmation', async () => {
     const { user, onChange } = await render('run-done')
     await user.click(screen.getByRole('button', { name: 'Revoke grant' }))

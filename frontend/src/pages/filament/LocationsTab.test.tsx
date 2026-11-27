@@ -2,6 +2,8 @@ import { screen, waitFor, within } from '@testing-library/react'
 import { describe, expect, it } from 'vitest'
 import { listLocations } from '../../api/filament'
 import { L, spoolId } from '../../mocks/features/filament/seed'
+import { seedUnknownTray } from '../../mocks/features/filament/unknownTrays'
+import { NeedsYouHarness } from '../../test/needsYou'
 import { renderPage } from '../../test/utils'
 import { choose } from '../../test/select'
 import { LocationsTab } from './LocationsTab'
@@ -120,5 +122,18 @@ describe('the Locations tab', () => {
     await user.click(station)
     await user.click(screen.getByRole('button', { name: 'Save' }))
     await waitFor(async () => expect((await listLocations({ station: true })).map((node) => node.id)).toEqual([L.WORKSHOP]))
+  })
+})
+
+describe('the Locations tab · unknown trays (#7143)', () => {
+  it('lists the unknown trays above the tree', async () => {
+    seedUnknownTray()
+    renderPage(
+      <NeedsYouHarness>
+        <LocationsTab />
+      </NeedsYouHarness>,
+    )
+    expect(await screen.findByText('Unknown spool in 3DP-31B-598 AMS-A slot 2')).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: 'Tell ScadBuddy which spool…' })).toBeInTheDocument()
   })
 })

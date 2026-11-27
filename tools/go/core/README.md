@@ -25,8 +25,8 @@ unchanged, to the Python API: WebSockets, SSE and large bodies included. On prod
 | `settings`, `settings:read` | `GET`, `POST` `/settings` |
 | `credentials` †, `credentials:read` † | `GET` `/credentials`, `…/one`, `…/key`; `POST` `/credentials` and `…/save`, `…/delete`, `…/order`, `…/reset`, `…/name`, `…/events`, `…/reveal` |
 | `payload-keys` † | `POST /payload-keys/{subject}` |
-| `keys` † | `GET /keys/input-hash` (`POST /fetch-grants` stays in Python) |
-| `notify` †, `notify:read` † | `/push/vapid`, `/push/subscriptions` (and `…/remove`), `/push/sent`, `/push/poll-lease`, `/notify-channels` and every route under it (`GET /push/waiting` stays in Python) |
+| `keys` † | `GET /keys/input-hash` (`internal/secrets`) and `POST /fetch-grants` (`internal/fetchgrants`) |
+| `notify` †, `notify:read` † | `/push/vapid`, `/push/subscriptions` (and `…/remove`), `/push/sent`, `/push/poll-lease`, `/notify-channels` and every route under it, and `GET /push/waiting` |
 | `transcripts` †, `transcripts:read` † | `/sessions/{id}/entries` (and `…/last`, `…/landed`, `…/delete`), `…/transcript` (and `…/head`, `…/moved`), `…/cwd`, `…/subkeys`, `/transcripts` |
 | `access`, `access:read` | `/access/rows`, `/access/row`, `/access/write`, `/tool-listings/*`, `/leases/{key}` |
 | `plugin-sessions`, `plugin-sessions:read` | `/plugin-sessions/seen`, `…/ended`, `…/mark`, `…/dead`, `…/own` |
@@ -39,18 +39,21 @@ unchanged, to the Python API: WebSockets, SSE and large bodies included. On prod
 | `http-bodies` | those, and `POST /http-bodies` |
 | `background-tasks:read` | every `GET` under `/background-tasks` |
 | `background-tasks` | every route under `/background-tasks` |
-| `operations:read` | `GET /operations/{id}` and `…/by-key/{key}`. The insert and the end stay Python's: they write the activity row |
+| `operations:read` | `GET /operations/{id}` and `…/by-key/{key}` |
+| `operations` | those, and `POST /operations` and `…/{id}/finish`, each with its `activity` row and `activity.changed` event in its transaction (`internal/activity`) |
 | `workspace:read` | `GET /workspace/files`, `…/file`, `…/usage`, and `POST …/session-files` |
-| `workspace:sql` | those, and `POST /workspace/file-deletes`, `…/sweeps` and `…/reconciles`. The status, the bytes, a write, a copy and the move to blobs stay Python's: they need the blob store or the KEK |
+| `workspace:sql` | those, and `POST /workspace/file-deletes`, `…/sweeps` and `…/reconciles` |
+| `workspace` † | every route of `crud_agent_workspace.py`: those, and `GET /workspace/status`, `…/file-bytes`, `POST …/file-writes`, `…/copies`, `…/blob-moves` (below), over the blob store in process |
 | `activity-kinds` | `POST /activity-kinds` |
 | `browser-origins` | `GET` `/browser-origins`, `…/approved`; `POST` `…/approve`, `…/revoke` |
 | `bridge-tabs` | `/session-tabs`, `/tab-owners` and its `claim`, `refresh`, `release`, `release-all`; `PUT /tab-images/{name}`, `POST …/{name}/take` |
 | `pairings` | `/pairings` and every route under it |
 | `mcp-tokens` | `/mcp-tokens` and every route under it |
 | `plugins` | `POST` `/plugins/{name}/delete`, `/plugin-oauth/grants/{plugin}/mark`, `…/forget` only: the routes that need no KEK |
-| `remote-plugins` † | every route of `crud_agent_plugins.py`: `/plugins` (`GET`, `POST`), `GET /plugins/{name}`, `POST` `/plugins/open-enabled`, `…/{name}/update`, `…/tool-access`, `…/reveal`, `…/delete`; `POST` `/plugin-oauth/flows` and its `…/authorize`, `…/take`; `/plugin-oauth/grants` and its `…/{plugin}/open`, `…/refreshed` (only while the lease `plugin-oauth:<plugin>` holds), `…/mark`, `…/forget`; `/plugin-oauth/stored-secrets` |
+| `remote-plugins` † | replaces `plugins` (name one of the two): every route of `crud_agent_plugins.py`: `/plugins` (`GET`, `POST`), `GET /plugins/{name}`, `POST` `/plugins/open-enabled`, `…/{name}/update`, `…/tool-access`, `…/reveal`, `…/delete`; `POST` `/plugin-oauth/flows` and its `…/authorize`, `…/take`; `/plugin-oauth/grants` and its `…/{plugin}/open`, `…/refreshed` (only while the lease `plugin-oauth:<plugin>` holds), `…/mark`, `…/forget`; `/plugin-oauth/stored-secrets` |
 | `plugin-packages` | `/plugin-packages` and every route under it |
-| `hosted-plugins:read` | `GET /hosted-plugins/{name}`. A version's zip (the blob store) stays Python's |
+| `hosted-plugins:read` | `GET /hosted-plugins/{name}`. A version's zip is area `package-mirrors` |
+| `package-mirrors` † | `POST /package-mirrors/{name}`, `GET /package-mirrors/{name}/{sha256}`, `GET /hosted-plugins/{name}/versions/{version}.zip`: the routes that need the blob store (below) |
 | `plugin-feeds` | `GET /plugin-feeds/{feed}`; `PUT`, `DELETE` `…/packages/{name}` |
 | `sessions:read` | `GET /session-starts`, `GET /sessions/{id}`, `POST /sessions/list` |
 | `sessions` | those, and `POST /sessions`, `…/{id}/agent`, `…/offer`, `…/offer/cancel`, `…/owner`, `…/budget`, `…/discard` |
@@ -65,7 +68,7 @@ unchanged, to the Python API: WebSockets, SSE and large bodies included. On prod
 | `migrations` | `POST /migrations/ledger` |
 | `auth-sessions` | `POST /auth-sessions/lookup` |
 | `forget:read` | `GET /flow-blobs/{subject}/{name}` |
-| `forget` | that, and `POST /payload-keys/{subject}/drop`, `/payload-key-sweeps`, `/flow-blobs/{subject}`; `POST /forgotten-subjects/{subject}` stays Python's (it opens transcripts under the KEK) |
+| `forget` | that, and `POST /payload-keys/{subject}/drop`, `/payload-key-sweeps`, `/flow-blobs/{subject}`, `/forgotten-subjects/{subject}` (a session's forks take their ranges first, opened and sealed under the KEK; with none, a fork that takes transcript entries is 409 `forks-take-ranges`) |
 | `workspace-blob-refs:read` | `GET /workspace-blob-refs` |
 | `workspace-blob-refs` | that, and `POST /workspace-blob-refs`, `…/release` |
 | `events` | `GET /events/head`, `GET /events` |
@@ -76,6 +79,45 @@ unchanged, to the Python API: WebSockets, SSE and large bodies included. On prod
 | `questions` | `/questions/*`: the `done` summaries read, dismissed and posted, and the attention count |
 | `escalations` | `/escalations/*`: a flow run's calls passed up, denied, moved, delivered, and a run's entries |
 | `audit` | `POST` `/audit/record`, `…/list`, `…/prune` |
+| `order-costs` | `POST /orders/{id}/assistant-cost`: the cost entry, its `order_events` row and, after the commit, `order.changed` and `order_item.changed`. It reads `pricing_usd_rate` and `orders_currency` from `settings`, else `SCADBUDDY_PRICING_USD_RATE` and `SCADBUDDY_ORDERS_CURRENCY` from core's own environment, else `1` and `USD`, so core needs the API's values of those two |
+| `unknown-trays:read` | `GET /api/v1/filament/unknown-trays` (public, caller `api`), and the print worker's `GET …/crud/print/filament/printers/{printer_id}/unknown-trays` (caller `print`) |
+| `unknown-trays` | those, and `POST /api/v1/filament/unknown-trays/{id}/dismiss` (public). Go writes no spool here (#7143). The resolve route (`POST …/{id}/resolve`, which would start Python's activity `filament_resolve_unknown_tray` on queue `library`) is not built yet: it waits for `internal/temporalx`, so a resolve gets a 404 |
+| `filament-presets` † | Public, class `api`: `GET /api/v1/filament/presets` (`?source=`, `?type_id=`), `GET …/presets/{preset_id}` and `GET …/presets/{preset_id}/diff` (`?from_version=`, `?to_version=`). `POST …/presets/bambuddy-import` stays Python's. Go writes no preset row (#7204) |
+
+The `unknown-trays` public routes use `internal/auth` (see "Public routes"). Their CRUD route is caller `print`'s, so it has its own `case` in `newRouter` (areaPackages mounts on caller `agent`).
+
+Area `workspace` † (`internal/workspace`, #8131) serves a file's bytes, sealed as Python seals
+them: on a backend with a blob store, a file is the blob `workspace-<sha256 of the sealed bytes>`,
+sealed under a file key of its own in segments of 1 MiB, segment i in the context
+`workspace-file:<sha256>:<i>:<more|end>`; the row keeps the file key wrapped in the context
+`workspace-file-key:<workspace>:<path>:<blob key>`, under the session's payload data key (made by
+the write while the session stands, no audit row) or, for a principal's file, under the KEK
+(`key_kek_id`; the previous KEK still opens one). On `store_backend` `local` the bytes stay in
+Postgres, one `ai_session_file_bytes` row per sha256. A write is one transaction: the session's
+row first when it logs events, the workspace's advisory lock, the conflict, quota and
+directory checks, the row, its blob's `blob_refs` hold (and the old blob's release) and its
+`workspace.file` events; on a blob store the checks also run before the upload, so a refused
+write stores nothing. A fork's copy wraps every file key again first, then writes the rows
+under the parent's lock while its blob rows are the ones wrapped (3 tries, then 409
+`conflict`). A read streams a segment at a time and reads the row again between segments: a
+file replaced meanwhile ends the stream short. The rotation's re-wrap stays Python's.
+`backend/tests/fixtures/workspace-seal-vectors.json`, which `tests/test_workspace_seal_vectors.py`
+writes from Python's own functions (`UPDATE_WORKSPACE_SEAL_VECTORS=1`), holds Go to Python's
+bytes: Go seals each file with the same IVs to the same bytes, opens Python's, and wraps each
+file key alike. Its blob store is `workspace.Store` (`Backend`, `Put`, `Get`): main.go's
+`workspaceBlobs` over `internal/blobstore`'s `Backend`, `PutContent` and `Fetch` (below), which
+names a refusal by Python's class (`StoreFullError`, `StageLockBusyError`) in a write's 503. Like
+`package-mirrors` it needs the KEK, and serves only `store_backend` `s3` or `local`: on any
+other, `GET …/workspace/status` answers `store` `refused` with the reason. A write with no
+Content-Length is a 411 in `_write_body`'s words (route `OwnLength`).
+
+The `filament-presets` routes use `internal/auth` (see "Public routes"). They have their own
+`case` in `newRouter`, because they need the blob store. The area needs the KEK, and it needs
+an `s3` store to read documents. It reads each document with `Blobs.OpenKey` (#8129), and it
+reads the blob's size from its `store_blobs` row first, so a blob over the cap gets no GET.
+The document is the zip member `file`. Its credential keys are stripped, as
+`core/credentials.py` strips them. A document that is not read leaves the detail's
+`document` null and names why in `document_error`; the diff answers that code as a problem.
 
 Area `fleet` (`internal/fleet`) is caller `fleet`'s (scope `crud.fleet`), under
 `/api/v1/internal/crud/fleet`: `POST /agents/{session_id}/touch`, `GET /agents`, `PUT` and
@@ -88,7 +130,7 @@ the messages returned. A text over 16 MiB is a 422 whose detail names the limit 
 `text-too-long`). A cursor `PUT` only moves it back: a `seq` past the cursor is a 422
 (reason `seq-ahead`). Its `GET /changes` is area `changes` (below).
 
-### The event stream (#7768)
+## The event stream (#7768)
 
 `internal/bus` publishes on the event bus and reads it. One `LISTEN` connection per process,
 outside the request pool, hears `scadbuddy_events` and the agent's five channels
@@ -144,9 +186,12 @@ first `PUT /machines/{id}` records the caller's proof name in `fleet_machines.pr
 `machine-of-another-proof`), and so is a session `PUT` whose machine is registered to
 another proof. So two machines of different proofs each hold a row of the same session id,
 and neither changes the other's. A `fleet-rotator` credential with no machine writes
-nothing (403 `no-machine`). Core reads no bootstrap directory: a credential whose machine's file
-went is refused here once the API revokes its row, at the API's first resolve of it or its next
-start or auth sweep (at most 5 minutes; `docs/security/trust-boundaries.md`). `fleetd` sends a
+nothing (403 `no-machine`). Core reads Python's `SCADBUDDY_SERVICE_BOOTSTRAP_DIR` (#8172): a
+credential that names a machine passes only while `fleet-rotator.<machine>` is a regular file
+there (one stat per resolve, as `exchange.py` `BootstrapVerifier.has_machine`). When the file is
+gone, `internal/auth` refuses the credential and revokes its row at once. With the variable
+unset, core refuses every such credential, so the core container needs the API's bootstrap
+secret directory mounted and the variable set. `fleetd` sends a
 `fleet` PAT today, which these routes refuse until #8041.
 
 Area `blobs` † (`internal/blobstore`, #7958) is a shared area: any service credential whose scopes
@@ -154,8 +199,11 @@ hold `crud.blobs` may call it, under `/api/v1/internal/crud/blobs`; no caller is
 yet. Python has no such routes. `POST /uploads` with `{kind, size, sha256, media_type}` answers
 `{upload_id, url, headers, expires_at}`: the caller PUTs exactly the bytes to `url` with `headers`,
 then `POST /uploads/{upload_id}/commit` answers `{key, sha256, size}`, the blob indexed in
-`store_blobs` under its kind (again, the same answer). The kinds are an allowlist with a size each:
-`tag_dump`, 64 KiB. Only `store_backend` `s3` takes uploads: core reads the store's settings as
+`store_blobs` under its kind (again, the same answer). The kinds are an allowlist with a size each
+(`blobstore.UploadKinds`): only `tag_dump`, 64 KiB. Core's own `Put` also stores `scan_image`, 12 MiB
+(a code scan's photo, #8155: a 12 MP phone JPEG is 3 to 6 MiB and a phone's PNG screenshot under
+10 MiB, and `Put` holds the whole blob in memory), and a presigned upload refuses it
+(`kind_not_allowed`): `Put` reads a photo's type from its bytes, a presigned PUT reads none. Only `store_backend` `s3` takes uploads: core reads the store's settings as
 Python resolves them (the `settings` row, else `SCADBUDDY_STORE_*`, set even when empty, else the
 default; the secret key opened with the KEK; path-style URLs, as botocore makes them for either
 `store_s3_path_style`) and presigns the PUT itself, with the length, the type, the SHA-256 checksum
@@ -180,6 +228,12 @@ stands for an upload: its URL lasts 15 minutes and its commit an hour more, and 
 commit of it is a 404. Refusals carry a `reason`: 422 `kind_not_allowed`, 413 `upload_too_large`,
 507 `store_full`, 404 `upload_not_found`, 410 `upload_expired`, 409 `upload_not_received`, 422
 `upload_mismatch`, 409 `store_object_mismatch`, 503 `store_unavailable` or `store_busy`.
+A Go handler in core reads a blob in-process with `Blobs.OpenKey(ctx, key)` (a `store_blobs` key, the form Python's `blob_key` and `blob_refs` hold) or `Blobs.Open(ctx, kind, sha256)`. It adds no route. The read looks up the row, sends a presigned GET to the row's S3 object, waits at most a minute for its headers, and streams the bytes with their `Ref` for as long as the caller's context allows. The stream checks size and SHA-256 and ends with `ErrBlobMismatch` on a wrong object. A missing row or object is `ErrBlobNotFound`. A store that is not S3, or a row on another backend, is `ErrNotConfigured`.
+A Go handler in core that took the bytes itself stores them with `Blobs.Put(ctx, kind, mediaType, body)`:
+the commit's own steps with no staging object (the kind's limit, the store's caps, the stage lock, a
+content object that is there never written, the same row), with the same refusals.
+
+`Blobs.Claim`, `Blobs.PublishFile` and `Blobs.ReadFile` (#8137) are the rest of the store in process, for area `package-mirrors` (above). A publish goes through `put`: the bytes spooled and hashed, the object's stage lock held shared as a commit holds it, the object reused or stored with the caps checked (`stage`), the row written by the caller's `indexer`, and the object removed again when that writes no row and no other row names it (`removeUnnamed`). It adds no route; the upload routes and their kinds are as above. `Blobs.Backend`, `Blobs.PutContent` and `Blobs.Fetch` (#8131) are ContentStore's backend name, `put` with no key then `touch`, and `stat` then `get`, for area `workspace`: a put goes through `put` too, its row written by `putIn` at `<kind>-<sha256>` in a transaction, and the object the key named before released when it was another of this store's (`release_replaced`); a fetch of a lost object forgets its row. They take any kind, `workspace` among them; the upload routes' kinds stay as above. Area `package-mirrors` answers a stored blob past its read bound (`ErrTooLarge`) as a 500 with reason `blob-too-large`, its key logged.
 `internal/blobclient` is its Go client: `New(baseURL, token, tel)`, `Upload(ctx, kind, mediaType, body)`; each call to core may take 2 minutes, longer than a busy commit takes to answer `store_busy`.
 Both sides trace their requests with `telemetry`'s `Transport`: each span records the method, the
 status and the peer (`s3` for the store), never a URL, so a presigned query is never recorded. A
@@ -195,8 +249,23 @@ channel's members, or as a DM to one agent by its handle. An unknown sender is a
 sender has its name as `from`.
 
 Each of `browser-origins`, `bridge-tabs`, `pairings`, `mcp-tokens`, `plugin-packages` and
-`plugin-feeds` also has a `:read` form, its GETs only. Area `package-mirrors` (the blob store)
-is Python's.
+`plugin-feeds` also has a `:read` form, its GETs only. Area `package-mirrors`
+(`internal/packages` `MirrorAreas`, #8137) reads and publishes in process through
+`internal/blobstore`'s `Claim`, `PublishFile` and `ReadFile`, which are store/cache.py
+`CachedBlobStore`'s `claim`, `publish_fresh` (with `expected=None`) and `read_file` on the S3
+store only (any other `store_backend` is 503 `not_configured`); it needs `SCADBUDDY_SECRET_KEY_FILE`,
+as area `blobs` does. A published mirror is a `piece` blob, a zip of one entry with Python's
+`pack_dir` header, directory, date and mode (`backend/tests/fixtures/pack-dir-vectors.json`);
+its deflate stream is Go's `compress/flate`, not zlib's, so Go and Python pack the same file to
+different bytes, and each reads the other's. As `api/crud_agent_packages.py` and `agent_data/package_mirrors.py` do, a mirror's `POST` spools
+the body to a temporary file and hashes it as it streams, refused 413 past 24 MiB (on a declared
+`Content-Length` before the body is read, or as it streams without one), keeps it as the blob
+`plugin-mirror-<sha256>` (claimed when the store holds it, else published), then holds it in
+`blob_refs` for `<name>/<sha256>` and releases every hold no row names past its day, in one
+transaction. A mirror's `GET` serves the bytes only while the package's row names the sha256 in
+`bytes_sha256`, `pending_bytes_sha256`, `mirror_sha256` or `pending_mirror_sha256` (404
+`mirror-not-found`). A hosted version's zip is the blob `attachment-<zip_sha256>`, checked
+against its sha256 (500 `blob-missing`), with its sha256 and content hash in the headers.
 
 An area Go answers in part leaves its other routes to Python: name it only where Python still runs.
 
@@ -209,6 +278,28 @@ open every vector in `backend/tests/fixtures/`. `internal/gate` is the gate's va
 keys from the UID, after the [RFID Tag Guide](https://github.com/Bambu-Research-Group/RFID-Tag-Guide/blob/a26cf83d7b296b71c558f8c332d464f4e5b9c314/BambuLabRfid.md)
 (#8058). It is pure: no I/O and no SQL, and it never writes a tag. Its `Tag` JSON is what a scan
 record stores; `testdata/*.json` pins it, and a change bumps `DecoderVersion`.
+
+Area `filament-tag-reads` † (`internal/tagreads`, #8148) is a public area: `POST
+/api/v1/filament/tags/reads`, class `api`, at Python's path. A body with `mifare_blocks` is
+core's: it checks the blocks (at most 64, index 0 to 63, 16 bytes each), drops every sector
+trailer, decodes the tag with `internal/bambutag`, stores the dump as a `tag_dump` blob
+(`blobstore.Blobs.Put`, the upload commit's checks with no presigned PUT), and in one
+transaction finds or makes the tag by tray UUID and UID (`filament_tag_uids`), folds a UID-only
+tag of the same tray into it, and appends a `filament_tag_reads` row. Then it forwards a UID-only
+read to Python, which writes the last-seen, the bind and the answer, and adds `bambu`,
+`tag_read_id`, `dump_key` and, for a tag with no spool, `draft`. Any other body goes to Python
+unchanged (with `image` and `location` taken off), and an answered tag gets its history row after.
+A read of either kind writes no history row (nor, for MIFARE, a `raw_blob` or a hold) when the
+body says `tap: false` (a page's lookup of a tag it read before) or binds a spool
+(`bind_spool_id`, the page binding a tag it just read). Core's own refusals of a MIFARE read,
+422 `mifare_invalid` (its shape) and 422 `mifare_unreadable` (the decode), come before it records
+anything. A bound tag that gains a tray UUID (set on it, or by a fold) is queued in
+`filament_bb_tag_pending`. A MIFARE read locks the tags of its tray UUID and UID in id order.
+A MIFARE read makes its tag `bambu_mifare` only when it decodes to a tray UUID or a filament type.
+A read's source is the caller's: an access token or a service credential is `agent`.
+`image` (a committed `scan_image` blob) and `location` are checked and stored on the row.
+`Reads.RecordMifare(ctx, body, actor, source)` is the same write for a Go caller (#8157). With
+the area off, Python answers a MIFARE read 503 `mifare_needs_core`.
 
 A request that reaches Python carries one `X-Forwarded-For` value: its client, as the trusted
 proxies name it (`core/proxies.py`). So Python runs with `SCADBUDDY_TRUSTED_PROXIES=127.0.0.1`
@@ -227,6 +318,43 @@ until Python has taken one connection: after that, Python is up, and a refusal (
 is a 502 at once. Only the
 dial is tried again, so no request reaches Python twice.
 
+### Code scans (#8155)
+
+Area `scan` (`internal/scan`) is a public area (below, "Public routes"), class `api`: a person
+scans a code from a photo, and core decodes it. The page cannot PUT to the bucket (the bucket's
+CORS rule and the app's CSP admit only the storefront), so core takes the photo's bytes:
+
+| Route | Body | Answer |
+|---|---|---|
+| `POST /api/v1/scan/images` | the photo's bytes (JPEG, PNG or WebP; at most 12 MiB) | `{key, media_type, sha256, size}`: a `scan_image` blob, its type read from its bytes, never from a header. 415 `image_not_supported` for any other bytes; a HEIC, HEIF or AVIF photo is refused with its own words (no decoder in pure Go reads one: the page draws a chosen photo on a canvas and sends a JPEG) |
+| `POST /api/v1/scan/codes` | `{key, source?, location?}`: `source` `shutter` (the default), `nfc`, `file` or `app`; `location` `{lat, lon, accuracy_m?, at?}`, lat -90 to 90, lon -180 to 180, accuracy 0 to 1,000,000 m | a scan (below), recorded. 404 `image_not_found` for a key that is no `scan_image` blob |
+| `GET /api/v1/scan/scans?limit=&before=` | | `{scans}`, newest first, at most 100 (50 by default); `before` is a scan id. A person sees only their own scans (a scan holds its photo and GPS fix); a service sees all; any other caller (anonymous, as under auth `off` or `observe`) sees only the scans made with no actor. The same holds for every route below: another person's scan is a 404 |
+| `GET /api/v1/scan/scans/{id}` | | a scan, or 404 `scan_not_found` |
+| `GET /api/v1/scan/scans/{id}/image` | | the photo's bytes with its media type, `nosniff` (scriptless, for an `<img>`) |
+| `POST /api/v1/scan/scans/{id}/decode` | | the scan, decoded again |
+| `DELETE /api/v1/scan/scans/{id}` | | 204: the row and its photo's hold go; the sweep takes the photo after its grace |
+
+A scan is `{id, at, source, actor, image: {key, media_type}, width, height, codes, error, location,
+decoded_at}`. Each of `codes` is `{format, text, resolved}`: `format` as the browser's
+`BarcodeDetector` names it (`qr_code`, `data_matrix`, `ean_13`, `ean_8`, `upc_a`, `upc_e`,
+`code_128`), `text` at most 4096 bytes of valid UTF-8 with no NUL, and `resolved` the thing it names
+in `GET /api/v1/codes/{code}`'s shape, or null: a spool label's `scadbuddy:spool:<id>` names its
+spool, a place label's `http(s)://<any host>/x/<code>` or a bare typed code (`L-12`, `S-142`) what
+the code names (`resolve.go` keeps `codes/resolve.py` `PREFIXES`: a new prefix there is one here
+too). Each read resolves again, so an archive since the scan shows. `error` is `image_unreadable`
+or `image_too_large`, else null: the photo's header is read first, and one past 24 MP or 12,000
+pixels on a side is never decoded (a decompression bomb). At most 2 photos decode at once (a 24 MP
+photo is 96 MiB of RGBA); a scan that waits 10 s for a slot is 503 `scan_busy`.
+
+The decoder is `github.com/makiuchi-d/gozxing` (pure Go): every QR code (its multi reader), one Data
+Matrix, one EAN or UPC and one Code 128, at most 16 codes. The 1D readers try the photo turned 90°;
+the 2D detectors find a code at any angle. A 1D result counts only when a row beside it reads the
+same text (a photo's grain passes an EAN's check digit on about one row in ten). Each scan is a
+`code_scans` row that holds its photo in `blob_refs` (`code_scan`, the scan's id) in the same
+transaction, success or not, so the photo is kept until the scan is deleted. `Scans.Record(ctx,
+body, Input)` is a whole scan from bytes for a Go caller (#8157's result route), and
+`Scans.Decode(ctx, key, Input)` one of a stored photo.
+
 ## Public routes
 
 A public area (a route outside `/internal/crud/`, which a browser, an access token or a
@@ -239,13 +367,16 @@ other path still goes on to Python. An area may have CRUD routes, public routes 
 
 ```go
 func PublicAreas(pool *pgxpool.Pool, _ *seal.Keys) map[string][]auth.Public {
-	return map[string][]auth.Public{"filament-presets": {{
-		Pattern: "GET /api/v1/filament/presets",
-		Route:   auth.Route{Class: "api", Template: "/api/v1/filament/presets"},
+	return map[string][]auth.Public{"examples": {{
+		Pattern: "GET /api/v1/examples",
+		Route:   auth.Route{Class: "api", Template: "/api/v1/examples"},
 		Handler: http.HandlerFunc(list),
 	}}}
 }
 ```
+
+An area that needs more than the pool and the KEK has its own `case` in `newRouter` and
+mounts its routes on the same gate there. `filament-presets` does this: it reads the blob store.
 
 - `auth.ParseMode(value, set)` reads `SCADBUDDY_AUTH_MODE` as Python does: unset is `off`,
   and a value other than `off`, `observe` or `enforce` stops the start. Never `enforce` on
@@ -269,6 +400,89 @@ func PublicAreas(pool *pgxpool.Pool, _ *seal.Keys) map[string][]auth.Public {
 vectors `backend/tests/fixtures/auth-vectors.json` hold the two ports equal: the backend's
 `tests/auth/test_auth_vectors.py` writes them from Python's own functions
 (`UPDATE_AUTH_VECTORS=1`), and `internal/auth/vectors_test.go` checks Go against them.
+
+## Devices (#8244)
+
+Area `devices` (`internal/devices`, design `docs/superpowers/specs/2026-11-27-devices-design.md`)
+pairs the phone app to a person as a device, and lets pages, flows and the assistant call its four
+methods: `nfc.read`, `nfc.write`, `code.scan` and `camera.capture`. There are no others. Python has
+no such routes. The tables are `devices`, `device_pairings`, `device_tokens`, `device_calls` and
+`device_reads` (`20261127T0803Z_devices`).
+
+| Setting | Default | What |
+|---|---|---|
+| `SCADBUDDY_DEVICE_IDLE` | `1h` | How long a device token lives unused. Each device request moves its expiry to now + this |
+| `SCADBUDDY_DEVICE_HARD_CAP` | `720h` | How long a pairing lasts at most, from the claim. A bad value of either stops the start |
+| `SCADBUDDY_DEVICE_DELEGATES` | `agent,projects` | The service callers that may call a device for a person they name in `on_behalf_of`. A credential whose scopes hold `devices.call` may too. Set but empty: no caller by its name. Any other service is a 403 `no_delegation` |
+
+Person routes are class `api` and follow `SCADBUDDY_AUTH_MODE`. With auth off, or a signed-out
+request served in `observe`, the person is `anonymous`. Device routes are class `public` to the
+gate: each checks the device token (`Authorization: Bearer sbdev_…`) itself, in every mode, and
+refuses a missing, bad, revoked or expired one with 401 `device_unauthorized`.
+
+| Route | Who | Body | Answer |
+|---|---|---|---|
+| `POST /api/v1/devices/pairings` | person | none | `{code_url, expires_at}`: `code_url` is `https://<request host>/api/v1/devices/pairings/<code>/claim` (`http` for a loopback host). The code is 16 random bytes, single-use, 10 minutes; only its SHA-256 is stored. The page shows `scadbuddy://pair?url=<code_url>` |
+| `POST /api/v1/devices/pairings/{code}/claim` | the app (the code is its credential) | `{name, model?, app_version?, capabilities}` | `{device_id, token, expires_at, hard_cap_at}`. An unknown code is 401, one spent or expired 410 `code_gone`, a capability not of the four 422; none makes a device. The token is `sbdev_` and 32 random bytes; only its SHA-256 is stored |
+| `GET /api/v1/devices` | person | | `{devices: [{id, name, model, app_version, capabilities, created_at, last_seen_at, online, expires_at, hard_cap_at}]}`: the caller's own, not revoked, newest first. `online` is a request in the last 75 s |
+| `DELETE /api/v1/devices/{id}` | person | | 204. The device and its tokens are revoked, its open calls end `offline` (their undecided approvals are `cancelled`, and an approved one not yet used is revoked), and `device.revoked` closes its socket on every pod |
+| `POST /api/v1/devices/heartbeat` | device | none | 204. The app sends it every 30 s while it is in front |
+| `POST /api/v1/devices/{id}/calls[?wait=true]` | person, assistant, flow | `{method, args?, timeout_s?, on_behalf_of?}` | 202 `{call_id}`, or for an assistant's or a flow's `nfc.write` 202 `{call_id, pending_action_id}`. 403 `not_your_device` or `no_delegation`, 409 `offline` (with `"error": "offline"`), 422 `method_not_announced`. `timeout_s` is 60 by default, at most 120. With `wait=true`: 200 with the view (below) when the call ends `done` or `error`, else 504 whose `reason` is the outcome |
+| `GET /api/v1/devices/calls/{id}[?on_behalf_of=]` | the device's owner, or the caller | a delegate service names the person in `on_behalf_of`, as in the call | `{call, events, result}` (below). 403 `no_delegation`, 404 `call_not_found` |
+| `POST /api/v1/devices/calls/{id}/confirm` | the caller that made it | `{on_behalf_of}` for a service | 202 `{call_id}`: the approved call is sent. 409 `approval_pending`, or `no_approval`. 409 `approval_denied`, `approval_cancelled`, `approval_expired`, `approval_used`, `approval_revoked` or `approval_mismatch` end the call `denied` |
+| `POST /api/v1/devices/calls/{id}/events` | the call's device, while the call is open | `{events: [{kind, data?}]}`, at most 20; `kind` `tag_found`, `tag_progress` or `tag_lost`; `data` at most 1 KiB and never `call`, `device`, `id`, `at`, `kind`, `topics` or `retention_seconds` | 204. 409 `call_closed` |
+| `POST /api/v1/devices/uploads?call=&kind=` | the call's device, while the call is open | the raw bytes | `{key, media_type}`: `tag_dump` for an `nfc.*` call, `scan_image` for the others (422 `kind_mismatch`), stored with `Blobs.Put` and held in `blob_refs` as (`device_call`, the call's id). Nothing releases the hold yet (#8251). A photo's type is read from its bytes (JPEG, PNG or WebP, else 415 `not_an_image`). A dump is JSON `{uid, tech, blocks: [{index, data_hex}], records}` with no sector trailer (422 `key_trailer`) |
+| `POST /api/v1/devices/calls/{id}/result` | the call's device, while the call is open | `{outcome: "error", error?}`, or `{outcome: "done", result: {read: {blob_key, uid?, tech?, complete?, missing_blocks?}}}` | 204 for an error. For done, `{read_id, uid?, complete?}`, a `device_reads` row. A blob this call's device did not upload, or of a kind not the method's, is 422 `foreign_blob`: no row, and the call ends `error` |
+| `GET /api/v1/devices/reads/{id}` | as the read's call: the device's owner, or the caller | a delegate service names the person in `?on_behalf_of=` | `{id, device_id, call_id, at, kind, uid, tech, blob_key, media_type, complete, missing_blocks}` |
+| `GET /api/v1/devices/reads/{id}/blob` | as the read above | `?on_behalf_of=` for a delegate | the bytes, with their media type and `nosniff` (scriptless) |
+
+A call is `{id, device_id, method, args, caller_kind, outcome, created_at, deadline, sent_at,
+ended_at, pending_action_id}`. `caller_kind` is `person` (a session cookie, or no one with auth
+off), `assistant` (a person's access token, or a delegate service's credential, which names the
+person in `on_behalf_of`) or `flow` (the projects worker's credential, likewise). Only a delegate
+(`SCADBUDDY_DEVICE_DELEGATES`, or scope `devices.call`) may name a person; core has no proof yet
+that the person asked (the agent's CRUD calls carry no turn principal), so the grant is the
+check. By default only
+the device's owner, and the owner's assistant and flows, may call it. `outcome` is null while the
+call is open, then `done`, `error`, `offline` (the device had gone at the deadline), `timeout` (it
+was online at the deadline) or `denied` (its approval never came, or was refused). Core ends a call
+at its deadline: a timer on the pod that took it, and every read of the call. `events` are the
+call's `device.*` events from the event log, oldest first (`{id, kind, at, data}`), at most 1000.
+
+`nfc.write` takes `{records: [...]}`, 1 to 16 NDEF records, and nothing else: core never asks a
+device to write raw blocks, sectors or keys, so it never writes a Bambu tag (the app refuses one
+too). The records are the app's wire records (`NdefWire.cs` `Build`), a strict subset (`ndef.go`):
+`text` (`text`, and `lang` and `encoding` if given), `url` and `absolute-url` (`text`: `scheme://host[:port]` then a path, query or fragment, with no userinfo and no opaque part, so the host an approval shows is the one it names), `mime` (`mediaType` and exactly one of `text` and `hex`), an external type `<domain>:<type>`
+(exactly one of `text` and `hex`) and `empty`. Any other type or key is a 422. Core sends the device
+the parsed form, and the approval's summary is built from that same form. An assistant's or a flow's `nfc.write` makes an `ai_approvals` row outside a session (tool
+`device_call`, tier `outward`, 10 minutes), which the UI lists with the other pending actions. Its
+`input_summary` shows all of what will be written: the record count, and every record's type and
+content. A URI shows its scheme and host in full, the host in punycode; only its path, query and fragment are cut, at 80 characters.
+A write whose summary would pass 2000 characters is refused (422
+`write_too_large_to_approve`), never cut. It needs `SCADBUDDY_SECRET_KEY_FILE` for the input hash
+(the HMAC of the device, the method and the args; 503 `not_configured` without it). The caller
+confirms it once it is approved. The confirm hashes the call's stored args again (under the KEK
+or the one before it) and refuses a mismatch (409 `approval_mismatch`, the call ends `denied`),
+then uses the approval once. A person's own call is
+sent at once: their click is the approval.
+
+A call and its events go over the bus, as opaque events (Python has no model for them), each kept
+7 days (`retention_seconds`). Core publishes `device.call_requested` `{call, device, method, args,
+deadline}` on the topic `device:<device id>` and `device.revoked` `{device}` on the same topic;
+each event a device posts as `device.<kind>` `{call, device, …data}`, and the end as
+`device.call_done` `{call, device, read_id, uid?, complete?}` or `device.call_failed` `{call,
+device, outcome, error}`, on the topics `device:<device id>` and `device:call:<call id>`. Each pod's
+listener hears every event, so a call reaches the device's socket on whichever pod holds it.
+
+The realtime socket (area `ws`) takes a device token too, checked before the gate in every mode
+(401 with no body for a bad one, 403 when `devices` is not named). A device follows only
+`device:<its id>`; any other topic is an `unknown topics` error. Its socket closes with 4401 on
+`device.revoked` for it, and when its token is no longer live, read at each keepalive (25 s) and at
+each resync. The handshake moves the expiry, as every device request does; the keepalive and resync reads do not. A person's socket may follow
+`device:call:<id>` of a call whose device it owns, or that it made, at most 8 distinct call topics in one subscribe frame (a topic named more than once is read once). A device event's frame is
+`{"type": "event", "id", "kind", "topics", "data"}` with the event's own fields as `data` (all but
+`id`, `at`, `kind`, `topics` and `retention_seconds`): the device needs a call's method and args.
+Python's socket follows no `device:` topic, so a device needs core's `ws` area.
 
 ## Telemetry
 
@@ -339,9 +553,10 @@ At a stop, the servers drain and the three signals flush within the 20 s shutdow
   answers 503 `kek-missing` while it has none; here a sealed area without a KEK does not start.
 - Times are written in UTC. Python writes them in the database session's time zone, which is UTC
   on prod. A time sent with no offset is read as UTC, not in the database's zone.
-- A body bound refuses a body with no `Content-Length` (411) on the routes with one. Python's
-  JSON gate counts a chunked body instead. A multipart write with no `Content-Length` is 411
-  before its Content-Type is checked.
+- A body bound refuses a body with no `Content-Length` (411) on the routes with one, except
+  `workspace/file-writes`, which answers it in `_write_body`'s words after its Content-Type
+  check (see the workspace area). Python's JSON gate counts a chunked body instead. Any other
+  multipart write with no `Content-Length` is 411 before its Content-Type is checked.
 - A number, boolean or UUID in a body is read strictly: pydantic's lax mode also takes a numeric
   string. A UUID in another spelling is still read and written lower-case with hyphens. The
   blob, background-task and workspace areas refuse `5.0` for an integer (422), and a time given
@@ -364,6 +579,37 @@ At a stop, the servers drain and the three signals flush within the 20 s shutdow
 - `POST /sessions`: a scope's size counts each number as it was sent; Python counted its own
   spelling of it (`1e3` as `1000.0`).
 - `POST /workspace-blob-refs` answers 204 with no `Content-Type`.
+- `POST /workspace/file-writes`: a body over 32 MiB is refused (413) by core's body bound in its
+  words; Python's body gate refuses it in its own. A store failure's 503 names the store error's
+  class (`Class()`), else `Exception`, where Python names the exception's type. A meta that is no
+  JSON says `JSON decode error`, and an event that is no JSON names Go's parse error.
+- `POST /fetch-grants`: a host that is not ASCII, or one that starts `xn--`, is checked by
+  `golang.org/x/net/idna`'s registration profile, not Python's `idna` package. Both apply IDNA
+  2008; a rare label may be taken by one and refused by the other. A port that `int()` reads
+  with non-ASCII digits counts as one.
+- An operation's request, result and error, and a fork's copied events, are written as
+  Python's `json.loads` and `json.dumps` write them (`jsonv.Loads`), but `NaN` and `Infinity`
+  in the JSON text are refused.
+- An operation's activity title capitalises the kind as `str.capitalize` does for the simple
+  case mappings, the final sigma and a few full title mappings; a rare character outside them
+  may differ.
+- `POST /forgotten-subjects/{subject}`: an ancestor whose key went while its fork's range is
+  read is a 500, as in Python; a NaN in a copied event is a 500, where Python copied it.
+- `filament-presets`' diff compares two values by their JSON text, not by Python's `!=`. So
+  `1` and `1.0` are a change in Go. So are two nested objects that differ only in key order,
+  which Python's `!=` calls equal. Bambu Studio's values are strings and string lists, and
+  there the two agree.
+- `filament-presets` reads a document blob of at most 1 MiB, and an unzipped member `file`
+  of at most 1 MiB. A larger one is `document_too_large`. Python reads with no cap.
+- `filament-presets` gives `document_unreadable` for a document that is JSON but no object.
+  Python's `FilamentPresetStore.read` reads it as `{}`.
+- A `filament-presets` read of a lost blob changes no row. Python's read forgets the
+  `store_blobs` row.
+- `package-mirrors`: a mirror past its limit is refused with the CRUD headers (Python's body gate
+  answered without them). A mirror's `GET` is the whole body with no `ETag`, `Last-Modified` or
+  range answers (Python's `FileResponse`). A version in a zip's path is decimal digits only
+  (pydantic's lax mode also took a sign or spaces), and a last segment that does not end `.zip` is
+  a 404 from Go.
 - The event stream: a replayed typed event takes what pydantic's lax mode takes for its fields
   (an int as a whole float or a text of digits, a bool as `0`, `1` or a word), but not every
   other coercion pydantic makes; an event it does not take is a `resync`, as in Python. A lone

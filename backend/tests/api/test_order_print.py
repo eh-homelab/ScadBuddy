@@ -55,6 +55,7 @@ from tests.api.test_print_run_native import (
     _app,
     _lan_routed,
     library,  # noqa: F401
+    no_unknown_trays,  # noqa: F401
 )
 from tests.api.test_send import API, configure, make_output, upload_route
 from tests.api.test_settings_runtime import _state
@@ -661,6 +662,7 @@ LAN_CHOICES: dict[str, Any] = {
 }
 
 
+@pytest.mark.usefixtures("no_unknown_trays")  # LAN_REPORT's filled trays hold no SB spool
 def test_a_quote_sliced_over_the_lan_prints_through_bambuddys_queue_by_a_second_slice(
     model: str,
     settings: Settings,

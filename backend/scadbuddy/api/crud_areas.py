@@ -180,9 +180,13 @@ from scadbuddy.crud.guard import CrudCaller, crud_router
 #: ScadBuddy presets (#7176), and its failure (#6625, `api/crud_profile_fetch.py`).
 #: The projects ``tasks`` area is ``…/projects/tasks`` and its ``/{id}/close`` and
 #: ``/{id}/answered``: the typed questions a flow asks (#7364, `api/crud_tasks.py`).
+#: The print ``unknown-trays`` area is ``…/print/filament/printers/{id}/unknown-trays``
+#: (#7143): `scadbuddy-core` serves it when ``SCADBUDDY_CORE_AREAS`` names it. Python has
+#: no route for it, and lists the name here, as it lists every area, so a worker's wait
+#: cannot see the Go switch. A worker whose route is missing runs on (G3).
 CRUD_AREAS: dict[CrudCaller, list[str]] = {
     "projects": ["flows", "operations", "payload-keys", "tasks"],
-    "render": ["settings", "jobs", "refs", "blob-index", "store-folders", "assets", "libraries"],
+    "render": ["settings", "jobs", "refs", "blob-index", "assets", "libraries"],
     "print": [
         "settings",
         "runs",
@@ -205,6 +209,7 @@ CRUD_AREAS: dict[CrudCaller, list[str]] = {
         "filament-pull",
         "sensor-notify",
         "own-presets",
+        "unknown-trays",
     ],
     "storefront": [
         "listings",

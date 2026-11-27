@@ -140,8 +140,9 @@ Anti-goals (a failure even if it works)
   `outputs` and `output_index` are both empty) or while a row has `bytes_at` NULL. Then it
   fills `params_text` of the rows a phase 2 pod saved from their `output_index` rows, makes
   it `NOT NULL DEFAULT ''`, and drops `output_index` and `output_hold_slugs`. `copied_at`,
-  `files_stamp`, `bytes_stamp`, `output_copy_runs` and `output_byte_runs` stay, unwritten,
-  until a follow-up drops them (plan D11).
+  `files_stamp`, `bytes_stamp`, `output_copy_runs` and `output_byte_runs` stayed, unwritten,
+  until `migrations/20261127T0259Z_outputs_drop_copy_state.sql` (#7887, plan D11) dropped
+  them, with `damaged` and `output_cutover`.
 
 ### 4.3 Blobs
 

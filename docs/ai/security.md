@@ -405,7 +405,23 @@ The agent reads no KEK (#5299 step 12).
   credentials with the KEK (areas `credentials` and `payload-keys`,
   [`backend/scadbuddy/api/crud_agent_secrets.py`](../../backend/scadbuddy/api/crud_agent_secrets.py)),
   and the agent never opens one. A turn's credentials come from `POST …/crud/agent/credentials/reveal` (purpose
-  `turn`; `redact` for the scrubbing of tool output, `test` for a connection test), a
+  `turn`; `redact` for the scrubbing of tool output, `test` for a connection test; only the
+  rows whose `scope` is `agent` or `both`, filtered in the reveal's SQL, so a fleet row and every
+  `claude_login` stay closed to the agent and a fleet row's id reads as unknown, #7983; so
+  `redact` leaves fleet secrets out too, which is correct: the agent's process never holds a
+  fleet secret, so it has none to leak. The agent's caller cannot change a fleet row (a
+  `claude_login`, or scope `fleet`) in any way, each refusal the same 409 `credential-refused`:
+  a create or save of a `claude_login`, a save over a fleet row or into scope `fleet`
+  (`agent_data/credentials.py` `_refuse_fleet_rows`, core's `refuseFleetRows`), and a delete,
+  rename, reset or event on a fleet row (`_refuse_if_fleets`, core's `refuseIfFleets`: each
+  write's SQL matches the agent's rows only). Its reorder names the agent's rows only (an
+  order that names a fleet row is the 409), and every fleet row keeps its priority. With no
+  id, its read, save and delete take the first row the agent uses, never a fleet row, so the
+  deprecated single-credential routes act on that row. So a compromised agent pod can neither
+  plant a login that a fleet machine installs nor replace, delete, rename, reset, cool down or
+  disable a fleet login. Only the fleet's own caller (#7984, `agent=False` in the store) writes
+  fleet rows. Any other caller's save that widens a `fleet` row to `agent` or `both` must carry
+  the secret again, else it is a 422), a
   subject's payload data key from `POST …/crud/agent/payload-keys/{subject}`, never the
   KEK. Each answers the `agent` service credential only, writes its `ai_audit` row in the
   same transaction (principal `service:agent`, never the secret), and is `no-store`. A
@@ -1095,21 +1111,33 @@ server in [`agent/src/harness/httpRequest.ts`](../../agent/src/harness/httpReque
 with `mcp__scadbuddy_http__http_response_read` beside it to page through a saved body.
 It is offered to session turns only, not over `/mcp`.
 
-**Reach is open until the sandbox. Decided by the owner on 2026-09-30 (#827).** The
-tool may reach the internet and the LAN: private ranges (`10/8`, `172.16/12`,
-`192.168/16`, `fc00::/7`), loopback, `*.internal` names, and plain `http:` to any host,
-since LAN services are mostly plain http. There is deliberately **no private-range
-block**; security for this tool is to come from running it in a sandbox, and until then
-anything on the agent pod's network is reachable, including the backend, Bambuddy and
-other cluster services. The one refusal it shares with every URL the agent fetches is
-`assertHostAllowed()` ([Egress check](#egress-check-on-gateway-urls)): link-local
-addresses and the cloud metadata hosts, where a node's own cloud credentials live.
-Every hop goes through `assertHttpUrl()` (http or https, no `user:password@`) and
-`assertHostAllowed()`, and connects to exactly the address that was checked
-(`pinnedRequestOptions()` in [`agent/src/http/pinned.ts`](../../agent/src/http/pinned.ts)),
-so a name re-pointed between check and connect reaches nothing new.
+**Reach (#827, #8178).** The tool may reach the internet, `*.internal` names, and
+plain `http:` to any host, since LAN services are mostly plain http. A `GET` or `HEAD`
+to a host that is, or resolves to, a private or loopback address (`10/8`, `172.16/12`,
+`192.168/16`, `fc00::/7`, CGNAT `100.64/10`, `127/8`, `::1`, and the name `localhost`;
+`isInternalAddress()` in [`agent/src/http/egress.ts`](../../agent/src/http/egress.ts),
+also as the IPv4 address an IPv6 form embeds) is refused, unless the call names that
+host as `allow_private_host`. Such a call is outward whatever its method or access
+tier ([`agent/src/tools/pinnedOutward.ts`](../../agent/src/tools/pinnedOutward.ts)), so
+it parks for a person's approval of that one request, in a session and in a flow run.
+A flow run's grant does not cover it: the durable call runs only when a person approved
+it in the UI (`needsPersonsApproval()` in `pinnedOutward.ts`, checked in
+[`agent/src/temporal/turnTools.ts`](../../agent/src/temporal/turnTools.ts)).
+So a turn, or injected content in one, cannot read the backend, Bambuddy or other
+cluster services alone. A write (`POST` and the rest) is outward anyway (a person
+approves it, or in a flow run the run's grant), so it may reach such a host without
+the argument. The one refusal it shares with every
+URL the agent fetches is `assertHostAllowed()`
+([Egress check](#egress-check-on-gateway-urls)): link-local addresses and the cloud
+metadata hosts, where a node's own cloud credentials live. Every hop goes through
+`assertHttpUrl()` (http or https, no `user:password@`), `assertHostAllowed()` and, for
+a `GET` or `HEAD`, the private-host check, and connects to exactly the address that was
+checked (`pinnedRequestOptions()` in
+[`agent/src/http/pinned.ts`](../../agent/src/http/pinned.ts)), so a name re-pointed
+between check and connect reaches nothing new. A redirect to a private host other than
+`allow_private_host` is refused.
 
-- **Tiers by method.** `GET` and `HEAD` are `read` and run at once; `POST`, `PUT`,
+- **Tiers by method.** `GET` and `HEAD` to a public host are `read` and run at once; `POST`, `PUT`,
   `PATCH` and `DELETE` are `outward` and park for a human approval bound to the exact
   input, like every outward tool. This is the one tool whose tier reads its input:
   `TierResolver` takes the call's input (`permissions.ts`), and `httpTierOf()` answers
@@ -1565,13 +1593,12 @@ From the merged code and PR bodies:
     headless browser is gone; Playwright MCP, added as a plugin, runs wherever it is
     deployed, and ScadBuddy does not limit what it opens
     ([A browser plugin](#a-browser-plugin-playwright-mcp)).
-13. **The `http_request` tool's reach is open until it runs in a sandbox** (#827,
-    decided 2026-09-30; [HTTP request tool](#http-request-tool-827)). A `GET` runs
-    without a human, so injected content can make the model read anything on the
-    pod's network, and put data it already holds into a URL's query string. The
-    turn's own secrets are refused in any request, and every request is audited, but
-    neither is a network boundary; an egress NetworkPolicy on the pod, or the sandbox,
-    is.
+13. **The `http_request` tool's `GET` to a public host needs no human** (#827, #8178;
+    [HTTP request tool](#http-request-tool-827)). Injected content can make the model
+    read any public URL and put data it already holds into a URL's query string. A
+    private or loopback host needs a person's approval of that call. The turn's own
+    secrets are refused in any request, and every request is audited, but neither is a
+    network boundary; an egress NetworkPolicy on the pod (eh-homelab/clusters#3182) is.
 
 ## Spec §3.2 items still open
 

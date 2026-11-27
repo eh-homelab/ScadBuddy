@@ -26,7 +26,12 @@ from pydantic import JsonValue
 from scadbuddy.core.settings import Settings
 from scadbuddy.core.tracing import traced_transaction
 from scadbuddy.entities.refs import EntityRef
-from scadbuddy.entities.required import checks_save, mark_incomplete, save_properties_on
+from scadbuddy.entities.required import (
+    checks_save,
+    hold_for_properties,
+    mark_incomplete,
+    save_properties_on,
+)
 from scadbuddy.filament import dry_hours, ledger, metrics
 from scadbuddy.filament import models as m
 from scadbuddy.filament import presets as p
@@ -295,6 +300,11 @@ _SETTING_DEFAULTS = FilamentDefaults(
 
 def _setting_defaults() -> FilamentDefaults:
     return _SETTING_DEFAULTS
+
+
+def _hold(conn: Conn, properties: dict[str, JsonValue] | None, by: Actor | None) -> None:
+    """`hold_for_properties` for `_properties`' write, first in the transaction."""
+    hold_for_properties(conn, properties, by or Actor(kind="browser"))
 
 
 def _properties(
@@ -897,6 +907,7 @@ class FilamentSpoolStore:
         defaults = self._defaults()
         try:
             with self._pool.connection() as conn, conn.transaction():
+                _hold(conn, body.properties, by)
                 bare = body.model_copy(update={"properties": None})
                 spool_id = self.create_on(conn, bare, actor=actor)
                 _properties(conn, spool_id, body.properties, by, checked)
@@ -971,6 +982,8 @@ class FilamentSpoolStore:
         copy and the save, an unchanged copied row stops being ``migrated``. That is
         intended. Each spool gets the draft's ``properties``, by ``by``; with ``checked``
         (#7703) an incomplete spool is `MissingRequiredProperties`."""
+        # The log before any row this locks; the caller has locked none a merge takes.
+        _hold(conn, body.spool.properties, by)
         carried: set[_PresetValues] = set()
         continued: UUID | None = None
         if body.continued_from is not None:
@@ -1102,6 +1115,8 @@ class FilamentSpoolStore:
         defaults = self._defaults()
         try:
             with self._pool.connection() as conn, conn.transaction():
+                # The log before the spool row `update_on` locks (#6949).
+                _hold(conn, patch.properties, by)
                 if not self.update_on(conn, spool_id, patch, actor=actor):
                     return None
                 _properties(
@@ -2092,33 +2107,49 @@ class FilamentSpoolStore:
     @staticmethod
     def _tag(conn: Conn, uid: str | None, tray: str | None, kind: m.TagKind) -> tuple[UUID, str]:
         """The id and kind of the tag either key names, locked and given the key it lacked;
-        else a new tag of ``kind``. A tag another transaction makes first is found on the
-        second look."""
+        else a new tag of ``kind``. The UID is any of a tag's UIDs (`filament_tag_uids`,
+        #8148); one the tag lacks is added to it, so a Bambu spool's second side names its
+        tray's tag. A tag another transaction makes first, or a UID it adds to a tag first,
+        is found on the second look."""
         while True:
             found = conn.execute(
                 f"SELECT {_TAG_COLUMNS} FROM filament_tags"
-                " WHERE tag_uid = %s OR tray_uuid = %s FOR UPDATE",
+                " WHERE id IN (SELECT tag_id FROM filament_tag_uids WHERE uid = %s)"
+                " OR tray_uuid = %s FOR UPDATE",
                 (uid, tray),
             ).fetchall()
             if len(found) > 1:
                 raise TagKeysClashError()
-            if found:
-                tag = found[0]
-                if (uid is not None and tag["tag_uid"] is None) or (
-                    tray is not None and tag["tray_uuid"] is None
-                ):
-                    conn.execute(
-                        "UPDATE filament_tags SET tag_uid = coalesce(tag_uid, %s),"
-                        " tray_uuid = coalesce(tray_uuid, %s) WHERE id = %s",
-                        (uid, tray, tag["id"]),
-                    )
-                tag_id: UUID = tag["id"]
-                return tag_id, tag["kind"]
-            made = conn.execute(
-                "INSERT INTO filament_tags (kind, tag_uid, tray_uuid) VALUES (%s, %s, %s)"
-                " ON CONFLICT DO NOTHING RETURNING id",
-                (kind, uid, tray),
-            ).fetchone()
-            if made is not None:
-                new_id: UUID = made["id"]
-                return new_id, kind
+            try:
+                with conn.transaction():
+                    if found:
+                        tag = found[0]
+                        if (uid is not None and tag["tag_uid"] is None) or (
+                            tray is not None and tag["tray_uuid"] is None
+                        ):
+                            conn.execute(
+                                "UPDATE filament_tags SET tag_uid = coalesce(tag_uid, %s),"
+                                " tray_uuid = coalesce(tray_uuid, %s) WHERE id = %s",
+                                (uid, tray, tag["id"]),
+                            )
+                        if uid is not None:
+                            conn.execute(
+                                "INSERT INTO filament_tag_uids (uid, tag_id, source)"
+                                " VALUES (%s, %s, 'tag') ON CONFLICT (uid) DO NOTHING",
+                                (uid, tag["id"]),
+                            )
+                        tag_id: UUID = tag["id"]
+                        return tag_id, tag["kind"]
+                    made = conn.execute(
+                        "INSERT INTO filament_tags (kind, tag_uid, tray_uuid) VALUES (%s, %s, %s)"
+                        " ON CONFLICT DO NOTHING RETURNING id",
+                        (kind, uid, tray),
+                    ).fetchone()
+                    if made is not None:
+                        new_id: UUID = made["id"]
+                        return new_id, kind
+            except errors.UniqueViolation as error:
+                # filament_tag_uids_keep_first: another transaction gave the UID to a tag
+                # meanwhile. The savepoint is gone; the next look finds that tag.
+                if error.diag.constraint_name != "filament_tag_uids_pkey":
+                    raise

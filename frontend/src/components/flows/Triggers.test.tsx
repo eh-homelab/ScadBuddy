@@ -8,6 +8,7 @@ import {
   changeFlowTrigger,
   flowTriggerRequests,
   reset as resetFlowTriggers,
+  standingGrant,
 } from '../../mocks/features/flowTriggers'
 import { choose } from '../../test/select'
 import { renderPage } from '../../test/utils'
@@ -55,6 +56,15 @@ describe('FlowTriggers', () => {
     const render_ = await row(/When a render finishes \(coaster\)/)
     expect(within(render_).getByTestId('standing-grant-status')).toHaveTextContent('Requested by an assistant')
     expect(within(render_).getByText(/outward calls wait for you/)).toBeInTheDocument()
+  })
+
+  // #8221: a standing grant has no chain above it, so out of force means expired, and
+  // one whose expiry has passed still says Expired (#8188 changed grantStatus, #8220 made
+  // `expired` the server's).
+  it('says Expired for a standing grant whose expiry has passed', async () => {
+    changeFlowTrigger('trig-hourly', { grant: standingGrant('sg-1', { in_force: false, expired: true }) })
+    render()
+    expect(within(await row(/Every hour/)).getByTestId('standing-grant-status')).toHaveTextContent(/^Expired$/)
   })
 
   // #4673: a trigger of an older built-in version the upgrade did not move says so.

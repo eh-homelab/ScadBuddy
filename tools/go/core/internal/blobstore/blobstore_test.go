@@ -441,6 +441,10 @@ func (f *fakeS3) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		if f.afterGet != nil {
 			f.afterGet(r.URL.Path)
 		}
+	case http.MethodHead:
+		if _, ok := f.objects[r.URL.Path]; !ok {
+			w.WriteHeader(http.StatusNotFound)
+		}
 	case http.MethodDelete:
 		delete(f.objects, r.URL.Path)
 		w.WriteHeader(http.StatusNoContent)
@@ -487,6 +491,8 @@ type harness struct {
 	blobs  *Blobs
 	now    time.Time
 	bucket string
+	// env is the store's settings the harness started with.
+	env map[string]string
 }
 
 func newHarness(t *testing.T) *harness {
@@ -504,8 +510,9 @@ func newHarness(t *testing.T) *harness {
 		"SCADBUDDY_STORE_S3_ACCESS_KEY_ID":     "testing",
 		"SCADBUDDY_STORE_S3_SECRET_ACCESS_KEY": "testing",
 	}
+	h.env = env
 	h.blobs = &Blobs{Pool: pool, Keys: testKeys(t), LookupEnv: lookup(env),
-		HTTP: store.Client(), Now: func() time.Time { return h.now }}
+		HTTP: store.Client(), Stream: store.Client(), Now: func() time.Time { return h.now }}
 	router := &crud.Router{Resolver: resolver{}, Next: http.NotFoundHandler()}
 	router.AddShared(Area, h.blobs.Routes()...)
 	api := httptest.NewServer(router)
@@ -871,10 +878,11 @@ func TestARefusedUpload(t *testing.T) {
 		status     int
 		reason     string
 	}{
-		"no credential":     {"", ask(body), 401, "no_credential"},
-		"another scope":     {"fleet:crud.fleet", ask(body), 403, "out_of_scope"},
-		"a kind not listed": {core, map[string]any{"kind": "piece", "size": 4, "sha256": ask(body)["sha256"], "media_type": "a/b"}, 422, "kind_not_allowed"},
-		"too large":         {core, map[string]any{"kind": "tag_dump", "size": 64<<10 + 1, "sha256": ask(body)["sha256"], "media_type": "a/b"}, 413, "upload_too_large"},
+		"no credential":                  {"", ask(body), 401, "no_credential"},
+		"another scope":                  {"fleet:crud.fleet", ask(body), 403, "out_of_scope"},
+		"a kind not listed":              {core, map[string]any{"kind": "piece", "size": 4, "sha256": ask(body)["sha256"], "media_type": "a/b"}, 422, "kind_not_allowed"},
+		"a photo, which only Put stores": {core, map[string]any{"kind": "scan_image", "size": 4, "sha256": ask(body)["sha256"], "media_type": "image/jpeg"}, 422, "kind_not_allowed"},
+		"too large":                      {core, map[string]any{"kind": "tag_dump", "size": 64<<10 + 1, "sha256": ask(body)["sha256"], "media_type": "a/b"}, 413, "upload_too_large"},
 	} {
 		status, got := h.post("/uploads", c.credential, c.body)
 		if status != c.status || got["reason"] != c.reason {
@@ -900,6 +908,14 @@ func TestTheStoresCapsRefuseAnUpload(t *testing.T) {
 	status, got := h.post("/uploads", core, ask([]byte("x")))
 	if status != http.StatusInsufficientStorage || got["reason"] != "store_full" {
 		t.Fatal(status, got)
+	}
+}
+
+// #8195: with no cap set, room runs no usage aggregate, as store/content.py
+// `_require_room` does since #8110. The Blobs has no pool, so a query would panic.
+func TestRoomWithNoCapRunsNoUsageQuery(t *testing.T) {
+	if err := (&Blobs{}).room(context.Background(), &Store{}, 1<<30); err != nil {
+		t.Fatal(err)
 	}
 }
 

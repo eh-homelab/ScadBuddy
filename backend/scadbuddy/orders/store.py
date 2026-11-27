@@ -2156,33 +2156,45 @@ class OrderStore:
 
     def archive_claimed(self, conn: Conn, archive_id: int) -> bool:
         """Whether an attempt already has Bambuddy archive ``archive_id``: one that named
-        it, or one whose print run made it (:meth:`run_archives`'s link). Asked under a
-        transaction-scoped lock on the archive, so two records naming it at once cannot
-        both see it free."""
+        it, or one whose print run made it (:meth:`run_archives`'s two links: a queue
+        item's send, or a LAN start's record). Asked under a transaction-scoped lock on the
+        archive, so two records naming it at once cannot both see it free."""
         conn.execute("SELECT pg_advisory_xact_lock(hashtext('order_archive'), %s)", (archive_id,))
         row = conn.execute(
             "SELECT EXISTS (SELECT 1 FROM order_item_fulfilments WHERE %(a)s = ANY(archive_ids))"
             " OR EXISTS (SELECT 1 FROM print_links l JOIN print_sends s"
             " ON s.subject = l.subject AND s.queue_item_id = l.queue_item_id"
             " JOIN order_item_fulfilments f ON f.print_run_id = s.run_id"
-            " WHERE l.archive_id = %(a)s) AS claimed",
+            " WHERE l.archive_id = %(a)s)"
+            " OR EXISTS (SELECT 1 FROM lan_print_archives a"
+            " JOIN order_item_fulfilments f ON f.print_run_id = a.run_id"
+            " WHERE a.archive_id = %(a)s) AS claimed",
             {"a": archive_id},
         ).fetchone()
         return bool(row and row["claimed"])
 
     def run_archives(self, run_id: str, *, conn: Conn | None = None) -> list[int]:
-        """The Bambuddy archives a print run's queue items made (§8.2): ``print_sends``
-        by the run, then ``print_links`` by queue item, oldest first. One an attempt not
-        of this run names is that attempt's (#5273: named by hand before Bambuddy linked
-        it), and left out."""
+        """The Bambuddy archives a print run made (§8.2), oldest first. A queue item's
+        archive is found by ``print_sends`` of the run, then ``print_links`` by queue item.
+        A LAN start has no queue item (#8124), so its archive is found by the start's
+        record, ``lan_print_archives`` by run: the API writes that row only when exactly
+        one start of the run has the job name the archive's file carries
+        (`print_history._run_by_file`), so two prints of one file never mix. One an
+        attempt not of this run names is that attempt's (#5273: named by hand before
+        Bambuddy linked it), and left out."""
         with self._read(conn) as c:
             rows = c.execute(
-                "SELECT l.archive_id, min(l.first_seen) AS seen FROM print_sends s"
-                " JOIN print_links l ON l.subject = s.subject AND l.queue_item_id = s.queue_item_id"
-                " WHERE s.run_id = %(run)s AND NOT EXISTS (SELECT 1 FROM order_item_fulfilments f"
-                "  WHERE l.archive_id = ANY(f.archive_ids)"
+                "WITH found AS (SELECT l.archive_id, l.first_seen FROM print_sends s"
+                "  JOIN print_links l"
+                "  ON l.subject = s.subject AND l.queue_item_id = s.queue_item_id"
+                "  WHERE s.run_id = %(run)s"
+                " UNION ALL SELECT a.archive_id, a.first_seen FROM lan_print_archives a"
+                "  WHERE a.run_id = %(run)s)"
+                " SELECT x.archive_id, min(x.first_seen) AS seen FROM found x"
+                " WHERE NOT EXISTS (SELECT 1 FROM order_item_fulfilments f"
+                "  WHERE x.archive_id = ANY(f.archive_ids)"
                 "  AND f.print_run_id IS DISTINCT FROM %(run)s)"
-                " GROUP BY l.archive_id ORDER BY seen, l.archive_id",
+                " GROUP BY x.archive_id ORDER BY seen, x.archive_id",
                 {"run": run_id},
             ).fetchall()
         return [int(row["archive_id"]) for row in rows]

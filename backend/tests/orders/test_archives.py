@@ -499,6 +499,95 @@ async def test_an_archive_named_by_hand_is_not_a_later_runs(shop: Shop, pool: Pg
     assert shop.rows.fulfilments(item.id)[0].archive_ids == [81]
 
 
+def lan_link(pool: PgPool, run_id: str, archive_id: int, plate: int = 1) -> None:
+    """A LAN start's archive (#8124): the link Bambuddy's hash gave, with no queue item and
+    no send, and the start the archive became, as `print_history._run_by_file` records it
+    from the job name the archive's file carries."""
+    subject = f"output:{SUBJECT}"
+    with pool.connection() as conn:
+        conn.execute(
+            "INSERT INTO print_links (subject, archive_id, matched_by)"
+            " VALUES (%s, %s, 'content_hash')",
+            (subject, archive_id),
+        )
+        conn.execute(
+            "INSERT INTO lan_print_archives (archive_id, run_id, subtask_name, plate_id)"
+            " VALUES (%s, %s, %s, %s)",
+            (archive_id, run_id, f"scadbuddy-{run_id[:8]}-p{plate}", plate),
+        )
+
+
+def lan_printed(shop: Shop, pool: PgPool, archive_id: int) -> tuple[Order, OrderItem, Fulfilment]:
+    """An attempt whose LAN print settled, its archive recorded as the run's start."""
+    order, item = shop.accepted()
+    run_id = run_row(pool)
+    started(shop, order, item, run_id)
+    lan_link(pool, run_id, archive_id)
+    settle(pool, run_id, "finished")
+    attempt = shop.lifecycle.follow_print(run_id)
+    assert attempt is not None and attempt.finished_at is not None
+    return order, item, attempt
+
+
+async def test_a_lan_attempt_copies_what_its_archive_says(shop: Shop, pool: PgPool) -> None:
+    """#8124: a LAN start sends no queue item, so its archive is found by the start's
+    record, never by a send."""
+    order, item, attempt = lan_printed(shop, pool, 360)
+    seam = Archives(facts(360, actual_seconds=3489, grams=14.91))
+    read = await attempt_archives(
+        shop.lifecycle, seam, order.id, item.id, attempt.id, Starts(), limit=LIMIT
+    )
+    assert [a.archive_id for a in read.archives] == [360]
+    kept = shop.rows.fulfilments(item.id)[0]
+    assert (kept.archive_ids, kept.actual_seconds, kept.actual_grams) == ([360], 3489, 14.91)
+    # Another order cannot name it by hand: the run's attempt holds it.
+    other, other_item = shop.accepted()
+    with pytest.raises(LifecycleError) as raised:
+        shop.lifecycle.record_fulfilment(
+            other.id,
+            other_item.id,
+            FulfilmentInput(quantity=1, outcome="succeeded", archive_id=360),
+            BY,
+        )
+    assert raised.value.slug == "archive_claimed"
+
+
+async def test_two_lan_prints_of_one_file_each_get_their_own_archive(
+    shop: Shop, pool: PgPool
+) -> None:
+    """Two LAN runs of one subject: each archive goes to the run whose start it became,
+    never to both, though the two links carry the same file."""
+    first_order, first_item, first = lan_printed(shop, pool, 361)
+    second_order, second_item, second = lan_printed(shop, pool, 362)
+    seam = Archives(facts(361, grams=3.0), facts(362, grams=4.0))
+    read_first = await attempt_archives(
+        shop.lifecycle, seam, first_order.id, first_item.id, first.id, Starts(), limit=LIMIT
+    )
+    read_second = await attempt_archives(
+        shop.lifecycle, seam, second_order.id, second_item.id, second.id, Starts(), limit=LIMIT
+    )
+    assert [a.archive_id for a in read_first.archives] == [361]
+    assert [a.archive_id for a in read_second.archives] == [362]
+    assert shop.rows.fulfilments(first_item.id)[0].archive_ids == [361]
+    assert shop.rows.fulfilments(second_item.id)[0].archive_ids == [362]
+
+
+async def test_a_queue_attempt_takes_no_lan_archive_of_another_run(
+    shop: Shop, pool: PgPool
+) -> None:
+    """The queue path is unchanged: a run's sends name its archives, and a LAN start's
+    record of another run adds none."""
+    lan_printed(shop, pool, 363)
+    order, item, attempt, run_id = printed(shop, pool)
+    assert shop.rows.run_archives(run_id) == [81, 82]
+    seam = Archives(facts(81), facts(82), facts(363))
+    read = await attempt_archives(
+        shop.lifecycle, seam, order.id, item.id, attempt.id, Starts(), limit=LIMIT
+    )
+    assert [a.archive_id for a in read.archives] == [81, 82]
+    assert shop.rows.fulfilments(item.id)[0].archive_ids == [81, 82]
+
+
 def test_a_hand_attempt_cannot_name_another_attempts_archive(shop: Shop, pool: PgPool) -> None:
     """#5268 security review: naming an archive another order's print made would copy
     that customer's photo and timelapse into this order."""

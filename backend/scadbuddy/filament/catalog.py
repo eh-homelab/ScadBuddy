@@ -36,6 +36,7 @@ from scadbuddy.entities.registry import KIND_OF_TABLE as ENTITY_KIND_OF_TABLE
 from scadbuddy.entities.required import (
     Marked,
     checks_save,
+    hold_for_properties,
     mark_incomplete,
     save_properties_on,
 )
@@ -462,6 +463,7 @@ class CatalogStore:
         with self._pool.connection() as conn:
             try:
                 with conn.transaction():
+                    hold_for_properties(conn, properties, by or Actor(kind="browser"))
                     row = conn.execute(
                         f"INSERT INTO {spec.table} ({', '.join(names)})"
                         f" VALUES ({', '.join('%s' for _ in names)}) RETURNING id",
@@ -532,6 +534,8 @@ class CatalogStore:
         with self._pool.connection() as conn:
             try:
                 with conn.transaction():
+                    # The log before the row (#6949).
+                    hold_for_properties(conn, properties, by or Actor(kind="browser"))
                     if kind in _TEMPS and set(columns) & set(_TEMP_COLUMNS):
                         current = conn.execute(
                             f"SELECT {', '.join(_TEMP_COLUMNS)} FROM {spec.table}"

@@ -11,6 +11,8 @@ import { changeFlowTrigger } from '../../mocks/features/flowTriggers'
 import { resetMockState } from '../../mocks/handlers'
 import { NeedsYouHarness } from '../../test/needsYou'
 import { renderPage } from '../../test/utils'
+import { listUnknownTrays } from '../../api/unknownTrays'
+import { seedUnknownTray } from '../../mocks/features/filament/unknownTrays'
 import { NeedsYouSection } from './NeedsYou'
 
 const items = () => screen.queryAllByTestId('needs-you-item')
@@ -23,6 +25,53 @@ const item = (label: string) => {
 describe('NeedsYouSection (#6399)', () => {
   beforeEach(() => {
     resetMockState()
+  })
+
+  it('shows nothing, and no error, when the unknown-tray list route is a 404', async () => {
+    server.use(http.get('/api/v1/filament/unknown-trays', () => HttpResponse.json({ title: 'Not Found', status: 404, detail: 'not found' }, { status: 404 })))
+    renderPage(
+      <NeedsYouHarness>
+        <NeedsYouSection />
+      </NeedsYouHarness>,
+    )
+    await waitFor(() => expect(items()).toHaveLength(2))
+    expect(screen.queryByRole('heading', { name: 'Unknown spool' })).not.toBeInTheDocument()
+    expect(screen.queryByRole('alert')).not.toBeInTheDocument()
+  })
+
+  it('shows an unknown spool and opens its dialog', async () => {
+    seedUnknownTray()
+    const listed = await listUnknownTrays()
+    server.use(http.get('/api/v1/filament/unknown-trays', () => HttpResponse.json({ ...listed, trays: listed.trays.map((tray) => ({ ...tray, printer_name: 'H2C' })) })))
+    const { user } = renderPage(
+      <NeedsYouHarness>
+        <NeedsYouSection />
+      </NeedsYouHarness>,
+    )
+    const row = await waitFor(() => item('Unknown spool'))
+    expect(row).toHaveTextContent('H2C AMS-A slot 2')
+    expect(row).toHaveTextContent('Prints to H2C wait until you link the spool in AMS-A slot 2.')
+    await user.click(within(row).getByRole('button', { name: 'Tell ScadBuddy which spool…' }))
+    expect(await screen.findByRole('dialog', { name: 'Unknown spool in H2C AMS-A slot 2' })).toBeInTheDocument()
+  })
+
+  it('keeps the dialog open, on the tray as it was, when its row goes away', async () => {
+    seedUnknownTray()
+    const { user } = renderPage(
+      <NeedsYouHarness>
+        <NeedsYouSection />
+      </NeedsYouHarness>,
+    )
+    const row = await waitFor(() => item('Unknown spool'))
+    await user.click(within(row).getByRole('button', { name: 'Tell ScadBuddy which spool…' }))
+    const dialog = await screen.findByRole('dialog', { name: /^Unknown spool in/ })
+    // Another client links the tray: the next read no longer lists it.
+    server.use(http.get('/api/v1/filament/unknown-trays', () => HttpResponse.json({ trays: [], made_from_tags: [] })))
+    window.dispatchEvent(new Event('focus'))
+    await waitFor(() => expect(within(dialog).getByRole('status')).toHaveTextContent('This tray is not waiting any more.'))
+    expect(screen.queryByRole('heading', { name: 'Unknown spool' })).not.toBeInTheDocument()
+    await user.click(within(dialog).getByRole('button', { name: 'Close dialog' }))
+    await waitFor(() => expect(screen.queryByRole('dialog')).not.toBeInTheDocument())
   })
 
   it('lists every kind that waits on the person, each with its source and how long it has waited', async () => {

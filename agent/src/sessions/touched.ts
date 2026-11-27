@@ -811,6 +811,8 @@ export const TOUCHES_NOTHING: ReadonlySet<string> = new Set([
   'filament_spools_bulk_archive',
   'filament_location_upsert',
   'filament_spool_move',
+  // #7143: linking a spool to a tray is no recorded resource kind.
+  'filament_unknown_tray_resolve',
   'filament_bambuddy_import',
   // #7244: the presets import makes ScadBuddy presets and renames bindings, no recorded kind.
   'filament_bambuddy_presets_import',

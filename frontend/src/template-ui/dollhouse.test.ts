@@ -27,6 +27,8 @@ const load = async () =>
     pieceParams: (e: Entry) => object
     pieceTotal: (pieces: Entry[]) => number
     pieceText: (e: Entry) => string
+    SCALES: { id: string; params: Record<string, number> }[]
+    currentScale: (params: object | undefined, initial: Record<string, unknown>) => { id: string } | null
   }
 
 describe('housePieces', () => {
@@ -100,6 +102,19 @@ describe('housePieces', () => {
     expect(show(afterLower, 'corner_post:upper')).toMatchObject({ piece: 'corner_post', course: 'upper' })
     expect(show(afterLower, 'wall_window')).toMatchObject({ piece: 'wall_window', course: 'upper' })
     expect(show(show({}, 'wall:upper'), 'corner_post:lower')).toMatchObject({ piece: 'corner_post', course: 'lower' })
+  })
+})
+
+describe('scale presets', () => {
+  it('names 1:6 as the defaults and 1:12 as the half-size house', async () => {
+    const { SCALES, currentScale } = await load()
+    const [six, twelve] = SCALES
+    if (!six || !twelve) throw new Error('two scales expected')
+    expect(currentScale({}, six.params)?.id).toBe('1:6')
+    expect(currentScale(twelve.params, six.params)?.id).toBe('1:12')
+    expect(twelve.params).toMatchObject({ module_size: 75, course_height: 105, door_height: 165 })
+    // One value off either set is neither scale.
+    expect(currentScale({ ...twelve.params, module_size: 80 }, six.params)).toBeNull()
   })
 })
 
@@ -186,6 +201,18 @@ describe('the designer', () => {
     expect(set).toHaveBeenLastCalledWith({
       params: { piece: 'floor_tile', course: 'upper', width_units: 1, depth_units: 1 },
     })
+  })
+
+  it('sets every size of a scale with one press, and marks the scale the params hold', async () => {
+    const { root, set, get } = await mounted({ params: {} })
+    const scale = (id: string) => root.querySelector(`button[data-scale="${id}"]`) as HTMLButtonElement
+    // The schema holds module_size 150 only; the rest are missing, so no preset matches.
+    expect(scale('1:6').getAttribute('aria-pressed')).toBe('false')
+    scale('1:12').click()
+    expect(set).toHaveBeenLastCalledWith({ params: expect.objectContaining({ module_size: 75, course_height: 105 }) })
+    expect(get()['params']).toMatchObject({ module_size: 75, door_width: 40, stair_width: 50 })
+    expect(scale('1:12').getAttribute('aria-pressed')).toBe('true')
+    expect(scale('1:6').getAttribute('aria-pressed')).toBe('false')
   })
 
   it('never writes inputs just by opening, and reads a missing house as the default', async () => {

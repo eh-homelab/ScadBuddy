@@ -1032,6 +1032,50 @@ def test_one_loaded_petg_closest_to_one_slot_does_not_make_the_plate_petg() -> N
     assert {choice.slot_id: choice.spool_id for choice in built.suggested} == {1: 5, 2: 1, 3: 3}
 
 
+def test_a_fallback_never_takes_a_later_slots_match() -> None:
+    """#8264: the real-stack hot path's trays (`e2e-stack/fake-printer/report.json`). Slot
+    1 (#0047BB) matches none and slot 2 (#FF1493) matches the pink. The fallback ran in
+    slot order, so slot 1 took the pink, the loaded spool nearest its blue, and slot 2 then
+    shared it: both slots printed pink. Slot 2 keeps its match, and slot 1 takes a free
+    loaded tray, the white PLA (the PETG black is nearer but in another family)."""
+    shelf = [
+        _spool(1, "F5547CFF"),  # PLA pink, loaded, AMS-A slot 1
+        _spool(2, "FFFFFFFF"),  # PLA white, loaded, AMS-A slot 2
+        _spool(4, "000000FF", "PETG"),  # PETG black, loaded, AMS-A slot 4
+    ]
+    built = _built(
+        library_file_id=1,
+        spools=shelf,
+        assignments=[_loaded(1, 0), _loaded(2, 1), _loaded(4, 3)],
+        requirements=keychain_slots(),
+        printer=printer(),
+    )
+    assert {choice.slot_id: choice.spool_id for choice in built.suggested} == {1: 2, 2: 1}
+
+
+def test_fallbacks_around_a_matched_slot_go_in_slot_order() -> None:
+    """#8264 review: slot 2 matches the pink; slots 1 and 3 match nothing and want almost
+    the same blue. Slot 2 keeps its match, and the fallbacks run in slot order: slot 1
+    takes the free tray nearest its blue, and slot 3 the one left."""
+    shelf = [
+        _spool(1, "F5547CFF"),  # PLA pink, loaded, AMS-A slot 1
+        _spool(2, "FFFFFFFF"),  # PLA white, loaded, AMS-A slot 2
+        _spool(3, "A7AEB2FF"),  # PLA grey, loaded, AMS-A slot 3
+    ]
+    built = _built(
+        library_file_id=1,
+        spools=shelf,
+        assignments=[_loaded(1, 0), _loaded(2, 1), _loaded(3, 2)],
+        requirements=[
+            SlotNeed(slot_id=1, material="PLA", colour="#0047BB"),
+            SlotNeed(slot_id=2, material="PLA", colour="#FF1493"),
+            SlotNeed(slot_id=3, material="PLA", colour="#0048BC"),
+        ],
+        printer=printer(),
+    )
+    assert {choice.slot_id: choice.spool_id for choice in built.suggested} == {1: 3, 2: 1, 3: 2}
+
+
 def test_an_undeclared_slot_follows_the_declared_material_not_its_best_match() -> None:
     """Regression cover for the declared path beside #2850's fix: with a slot declaring
     PLA, an undeclared one is suggested a PLA, not the PETG that matches its colour

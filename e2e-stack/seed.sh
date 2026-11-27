@@ -19,7 +19,13 @@
 #      #6262), then spool_overlay_refresh_seconds=0, which applies at a start
 #      (`core/settings.py`), so the app restarts once more and its Schedule is deleted;
 #      then the recorder's POST /__reset;
-#   5. the printer's POST /__reset, so its lists hold only what the test sends.
+#   5. a spool for each untagged filled tray the fake reports, as a person sets up a printer
+#      (#7143): POST /printers/{id}/trays/{ams}/{tray}/new-spool ("New spool from this
+#      tray") makes it from the report and places it, which clears the tray's unknown row.
+#      Without it the print is refused with 422 `unknown_spool_loaded`. The tagged tray
+#      gets its spool from capture. The seed then waits until `filament_unknown_trays` is
+#      empty;
+#   6. the printer's POST /__reset, so its lists hold only what the test sends.
 #
 # run.sh calls it with the stack up. It talks to the app on SB_HOTPATH_API
 # (http://127.0.0.1:18080) and reaches the other services through `docker compose exec`.
@@ -150,6 +156,43 @@ if [ "$mode" = recorder ]; then
   call PUT /settings '{"spool_overlay_refresh_seconds": 0}' >/dev/null
   restart_app
   curl --fail --silent --show-error -X POST "http://127.0.0.1:${SB_HOTPATH_RECORDER_PORT:-18000}/__reset" >/dev/null
+fi
+
+# The untagged filled trays of fake-printer/report.json: AMS 0 trays 1 and 3. Its AMS-HT
+# 128 tray 0 is not one: `tray_exist_bits` ("b") has no AMS-HT bit (16), so the app reads
+# that tray as empty and new-spool answers 409 for it
+# (backend/tests/printers/test_e2e_seed_trays.py checks this list).
+# The route answers 409 until the printer's first report has arrived, so it is retried.
+log "a spool for each untagged filled tray"
+for tray in "0 1" "0 3"; do
+  read -r ams_id tray_id <<<"$tray"
+  key="seed-${printer_id}-${ams_id}-${tray_id}"
+  made=""
+  for _ in $(seq 1 60); do
+    if made="$(curl --silent --fail -X POST -H "Idempotency-Key: ${key}" \
+      "${api}/printers/${printer_id}/trays/${ams_id}/${tray_id}/new-spool")"; then
+      break
+    fi
+    made=""
+    sleep 1
+  done
+  if [ -z "$made" ]; then
+    echo "seed($mode): no spool made for AMS ${ams_id} tray ${tray_id}" >&2
+    exit 1
+  fi
+done
+
+# No tray is unknown now, so the print check will not answer `unknown_spool_loaded`.
+unknown=""
+for _ in $(seq 1 60); do
+  unknown="$(psql_value "SELECT count(*) FROM filament_unknown_trays")"
+  [ "$unknown" = 0 ] && break
+  sleep 1
+done
+if [ "$unknown" != 0 ]; then
+  echo "seed($mode): ${unknown} unknown trays remain:" >&2
+  psql_value "SELECT ams_id, tray_id, material, colour_rgba FROM filament_unknown_trays" >&2 || true
+  exit 1
 fi
 
 curl --fail --silent --show-error -X POST http://127.0.0.1:18081/__reset >/dev/null

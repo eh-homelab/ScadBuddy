@@ -2133,6 +2133,7 @@ def test_the_check_gives_the_runs_choice_refusal_word_for_word(
     assert run.status_code == 422, run.text
     assert check.json() == {
         "errors": [run.json()["detail"]],
+        "unknown_trays": [],
         "warnings": [],
         "rack": None,
         "nozzle_plan": None,

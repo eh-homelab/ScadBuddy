@@ -11,7 +11,7 @@ import { BACKEND, firstText, services } from './helpers/mcp.js'
 // #6869 (R-6869-4): the filament tools answer each entity's page as `ui_path`.
 
 interface Vector {
-  kind: 'spool' | 'type' | 'supplier' | 'invoice' | 'location' | 'catalog'
+  kind: 'spool' | 'type' | 'supplier' | 'invoice' | 'location' | 'preset' | 'catalog'
   key: string
   path: string
 }

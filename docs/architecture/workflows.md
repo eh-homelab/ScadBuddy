@@ -17,11 +17,11 @@ Queue names are settings (`scadbuddy/core/config.py:40`, `scadbuddy/core/setting
 
 | Queue | Served by | Workflows |
 |---|---|---|
-| `render` | render worker, `python -m scadbuddy.worker` (`scadbuddy/worker.py:1081`) | `RenderPiece`, `RenderPreview`, `TemplatePipeline`, `MigrateInputs` (`scadbuddy/workflows/client.py:143`) |
-| `bambuddy` | print worker, `--queue bambuddy` (`scadbuddy/worker.py:1521`) | `PrintRun`, `PrintLanSequence`, `Operation` (bambuddy kinds), `FollowPrint`, `PrinterWatch`, `LanAutoImport`, `FilamentBbSync`, `FilamentBbPull`, `SensorNotifyPass`, `LanCommand` (a printer's K-profile and AMS commands over its LAN link, #7276; started and awaited by the API, `scadbuddy/workflows/lan_command.py`) (`scadbuddy/workflows/client.py:202-224`) |
+| `render` | render worker, `python -m scadbuddy.worker` (`scadbuddy/worker.py:1075`) | `RenderPiece`, `RenderPreview`, `TemplatePipeline`, `MigrateInputs` (`scadbuddy/workflows/client.py:143`) |
+| `bambuddy` | print worker, `--queue bambuddy` (`scadbuddy/worker.py:1511`) | `PrintRun`, `PrintLanSequence`, `Operation` (bambuddy kinds), `FollowPrint`, `PrinterWatch`, `LanAutoImport`, `FilamentBbSync`, `FilamentBbPull`, `SensorNotifyPass`, `LanCommand` (a printer's K-profile and AMS commands over its LAN link, #7276; started and awaited by the API, `scadbuddy/workflows/lan_command.py`) (`scadbuddy/workflows/client.py:202-224`) |
 | `bambuddy-follow` | print worker | activities only: `follow_print`, `printer_watch` (`scadbuddy/workflows/client.py:229-250`) |
 | `library` | the API process (`scadbuddy/main.py:1899-1989`) | `Housekeeping`, `PreviewBackfill`, `Operation` (library kinds), `FlowTriggerFire`, `StoreMigration`, `LibraryCopy`, `SliceWorkflow`, `SpoolRefresh`, `StagedFile`, `PrepareListing`, `AttemptMedia` (`scadbuddy/main.py:1832-1842`) |
-| `projects` | projects worker, `--queue projects` (`scadbuddy/worker.py:1607`) | `ProjectWorkflow` (flow runs), `Operation` (flow kinds) (`scadbuddy/workflows/projects_worker.py:81-110`) |
+| `projects` | projects worker, `--queue projects` (`scadbuddy/worker.py:1597`) | `ProjectWorkflow` (flow runs), `Operation` (flow kinds) (`scadbuddy/workflows/projects_worker.py:81-110`) |
 | `slicer` | the Rust slicer (`workers/rust/bins/scadbuddy-slicer/src/main.rs:103-107`) | activity `slice_plate` only (`workers/rust/crates/sb-slicer/src/activity.rs:22-23`) |
 | `profile-fetch` | profile-fetch worker, `python -m scadbuddy.profile_fetch` (`scadbuddy/profile_fetch/worker.py:92`) | `ProfileFetch`, started by the API per run (`scadbuddy/profile_fetch/workflow.py:126`); `TdfpSearch` and `TdfpCreate`, started by the API per 3DFP search or add and awaited (#7025, `scadbuddy/filament/tdfp.py`) |
 | `profile-fetch-search` | the same process, a second worker (`scadbuddy/profile_fetch/worker.py:102`) | no workflow: a `TdfpSearch`'s activity only, so a search never waits for a preset fetch's export (#7062, `workflow.search_queue`) |
@@ -35,7 +35,7 @@ In development (`SCADBUDDY_TEMPORAL_WORKER_INPROCESS`), the API also serves `ren
 
 Versioned deployments: `scadbuddy-library`, `scadbuddy-render`, `scadbuddy-projects`
 (`scadbuddy/workflows/client.py:63-68`), `scadbuddy-print` for the print worker given a
-build id (`scadbuddy/workflows/client.py:256-265`, `scadbuddy/worker.py:1557-1581`) and the
+build id (`scadbuddy/workflows/client.py:256-265`, `scadbuddy/worker.py:1543-1567`) and the
 agent's `scadbuddy-agent`. Unversioned: the API's in-process print worker in development
 (`scadbuddy/main.py:1703-1791`) and the slicer
 (`workers/rust/bins/scadbuddy-slicer/src/lib.rs:1-2`).
@@ -296,10 +296,10 @@ See [features/flows.md](../features/flows.md#questions-to-a-person).
 
 ## Housekeeping
 
-`Housekeeping` (`scadbuddy/workflows/housekeeping.py:469`) runs on Schedules the API
-creates (`_set_up_housekeeping`, `scadbuddy/main.py:2038`) and calls the sweeps: printer watches, native
+`Housekeeping` (`scadbuddy/workflows/housekeeping.py:541`) runs on Schedules the API
+creates (`_set_up_housekeeping`, `scadbuddy/main.py:2469`) and calls the sweeps: printer watches, native
 copies, print auto-import, quote holds, payment closes and captures, bank deposits,
-storefront drafts and mail, published listings with no price, git remote pushes, blob sweeps (the sweep names start at `scadbuddy/workflows/housekeeping.py:142`).
+storefront drafts and mail, published listings with no price, git remote pushes, blob sweeps (the sweep names start at `scadbuddy/workflows/housekeeping.py:85`).
 
 ## Tests
 

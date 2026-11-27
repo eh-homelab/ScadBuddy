@@ -48,7 +48,8 @@ which looks only for the starts no row here names. A LAN start has no queue item
 send names it.
 
 `PrintLinkStore.jobs` reads these records, with ``print_runs``' LAN starts, to mark the
-queue items and printer jobs ScadBuddy queued or started (#3741, `ScadBuddyJob`).
+queue items and printer jobs ScadBuddy queued or started (#3741, `ScadBuddyJob`). An order
+attempt finds its LAN run's archives through them (`OrderStore.run_archives`, #8124).
 """
 
 from __future__ import annotations

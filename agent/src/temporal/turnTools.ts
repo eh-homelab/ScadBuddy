@@ -20,6 +20,7 @@ import { redact } from '../secrets.js'
 import type { Owner } from '../sessions/protocol.js'
 import type { SessionBrowser } from '../sessions/rows.js'
 import { turnPrincipal } from '../tools/harness.js'
+import { needsPersonsApproval } from '../tools/pinnedOutward.js'
 import type { FlowBlobStore } from './flowBlobs.js'
 import { type FlowRuns, flowOf } from './flowRuns.js'
 import { endClient, type KeptClient, type KeptConnection, neverSent, type SessionClients, sessionGone, transportBroken } from './sessionClients.js'
@@ -458,6 +459,8 @@ type TurnCaller = {
   approved(requestId: string, binding: { inputHash: string } | undefined): Promise<boolean>
   /** Whether a call approved by a grant now revoked or expired would otherwise have run (#2871). */
   lapsed(requestId: string, binding: { inputHash: string } | undefined): Promise<boolean>
+  /** Whether the call's approval was a person's in the UI, not a run grant's (#959, #8178). */
+  byPerson(requestId: string, binding: { inputHash: string } | undefined): Promise<boolean>
 }
 
 async function turnCaller(deps: TurnToolsDeps, name: string, toolUseId: string): Promise<TurnCaller> {
@@ -484,6 +487,7 @@ async function turnCaller(deps: TurnToolsDeps, name: string, toolUseId: string):
       tiers: owner.kind === 'browser' ? undefined : await deps.currentTiers?.(owner),
       approved: (requestId, binding) => flows.approved(requestId, binding?.inputHash),
       lapsed: async (requestId, binding) => (await flows.lapsed?.(requestId, binding?.inputHash)) ?? false,
+      byPerson: async (requestId, binding) => (await flows.byPerson?.(requestId, binding?.inputHash)) ?? false,
     }
   }
   const { session, owner, turnTiers: sent, turnId, browser } = await durableSession(name, deps.sessions)
@@ -495,6 +499,7 @@ async function turnCaller(deps: TurnToolsDeps, name: string, toolUseId: string):
     tiers: await turnTiers(owner, sent, deps),
     approved: async (requestId, binding) => (await deps.approvals?.approved(requestId, binding)) ?? false,
     lapsed: async (requestId, binding) => (await deps.approvals?.lapsed?.(requestId, binding)) ?? false,
+    byPerson: async (requestId, binding) => (await deps.approvals?.byPerson?.(requestId, binding)) ?? false,
   }
 }
 
@@ -690,6 +695,7 @@ async function toolCallCaller(deps: TurnToolsDeps, name: string, call: { session
     tiers: await turnTiers(owner, sent ?? undefined, deps),
     approved: async (id, binding) => (await deps.approvals?.approved(id, binding)) ?? false,
     lapsed: async (id, binding) => (await deps.approvals?.lapsed?.(id, binding)) ?? false,
+    byPerson: async (id, binding) => (await deps.approvals?.byPerson?.(id, binding)) ?? false,
   }
 }
 
@@ -768,6 +774,14 @@ async function runTurnTool(
             await refuse(`${name}: the run's grant was revoked or expired before this call ran`, GRANT_REVOKED)
           }
           await refuse(`${name} needs an approval, and none is recorded for this call`, NOT_APPROVED)
+        }
+        // A private host's read (#8178) and a one-off asset host (#959): a person's own
+        // approval of this call, never a run grant's. The tool's handler cannot see who approved.
+        if (needsPersonsApproval(harnessName, input) && !(await caller.byPerson(requestId, binding))) {
+          await refuse(
+            `${name} needs a person's own approval of this call in the ScadBuddy UI; a run grant or another decider does not cover it. Nothing was sent`,
+            NOT_APPROVED,
+          )
         }
       }
       const heartbeat = setInterval(() => context.heartbeat(), 10_000)

@@ -87,6 +87,112 @@ _NOT_ABOVE = (
 )
 
 
+#: The ``data.reason`` of the ``moved`` event a printer's delete books for each spool in
+#: one of its places (`release_printer_spools_on`).
+PRINTER_DELETED = "printer_deleted"
+
+
+def release_printer_spools_on(conn: Conn, printer_id: UUID, *, actor: str) -> int:
+    """Move each spool in one of ``printer_id``'s places to no place, on ``conn``'s
+    transaction, just before the printer's row is deleted. Its places go with the row
+    (`filament_locations.printer_id` is ON DELETE CASCADE), and a spool still in one would
+    fail the delete on `filament_spools.location_id`. Each move is `LocationStore.move_on`,
+    a ``moved`` event with ``data.reason`` `PRINTER_DELETED`. Capture makes a spool for a
+    tagged tray at once (#7143), so most printers hold one. Locks the spools in id order.
+    Returns how many moved."""
+    spools = conn.execute(
+        "SELECT s.id FROM filament_spools s JOIN filament_locations l ON l.id = s.location_id"
+        " WHERE l.printer_id = %s ORDER BY s.id FOR UPDATE OF s",
+        (printer_id,),
+    ).fetchall()
+    for spool in spools:
+        LocationStore.move_on(conn, spool["id"], None, actor=actor, reason=PRINTER_DELETED)
+    return len(spools)
+
+
+class ChildPlaceClashError(LocationExistsError):
+    """A place under one of a printer's places cannot move to the place above the printer
+    (#8177): an unarchived place of its name is there already, or ``other_id``, another
+    place that moves there too, has its name."""
+
+    def __init__(self, place_id: UUID, name: str, other_id: UUID | None = None) -> None:
+        super().__init__()
+        self.place_id = place_id
+        self.name = name
+        self.other_id = other_id
+
+
+def lock_printer_places_on(conn: Conn, printer_id: UUID) -> None:
+    """Take the tree lock, then lock every place of ``printer_id`` in id order, to the end
+    of ``conn``'s transaction (#8177). Taken after the spools (`release_printer_spools_on`),
+    as `LocationStore.move` locks the spool before the place. While they are held, no other
+    transaction can make a spool, a stock row or a child place point at one of them: its
+    foreign key check waits. A write that passed that check before the lock was taken has
+    committed when the lock is given. So the spools must be read again after this lock (a
+    spool can move in after the first `release_printer_spools_on`); the references and
+    child places read after it are what the cascade meets."""
+    conn.execute("SELECT pg_advisory_xact_lock(hashtext(%s))", (_TREE_LOCK,))
+    conn.execute(
+        "SELECT id FROM filament_locations WHERE printer_id = %s ORDER BY id FOR UPDATE",
+        (printer_id,),
+    )
+
+
+def release_printer_child_places_on(conn: Conn, printer_id: UUID) -> int:
+    """Move each place that is not ``printer_id``'s but sits under one of its places, on
+    ``conn``'s transaction, just before the printer's row is deleted (#8177): its parent
+    goes with the row, and `filament_locations.parent_id` has no ON DELETE rule. Each goes
+    to the place above the printer: the nearest place above the printer's unarchived root
+    that is not the printer's (the walk up skips the printer's own places). Each goes to
+    the top level when the printer has no unarchived root, when nothing is above it, or
+    when that place is archived (an archived place is out of the tree, as an archived
+    parent of a printer's unit counts as none, `LocationStore.ensure_ams_unit_on`). That
+    place is locked ``FOR SHARE``, so it stays as read. Each move is
+    `LocationStore.update_on`, the write path of a person's own move. Locks the places in
+    id order. `ChildPlaceClashError` when a place of that name is there already, or when
+    two of the places that move have one name; the caller's transaction then writes
+    nothing. Returns how many moved."""
+    above = conn.execute(
+        "WITH RECURSIVE up AS ("
+        " SELECT parent_id AS id FROM filament_locations"
+        " WHERE printer_id = %s AND printer_root AND archived_at IS NULL"
+        " UNION SELECT l.parent_id FROM filament_locations l JOIN up ON l.id = up.id"
+        " WHERE l.printer_id = %s)"
+        " SELECT l.id FROM up JOIN filament_locations l ON l.id = up.id"
+        " WHERE l.printer_id IS DISTINCT FROM %s",
+        (printer_id, printer_id, printer_id),
+    ).fetchone()
+    parent: UUID | None = None
+    if above is not None:
+        live = conn.execute(
+            "SELECT archived_at IS NULL AS live FROM filament_locations WHERE id = %s FOR SHARE",
+            (above["id"],),
+        ).fetchone()
+        if live is not None and live["live"]:
+            parent = above["id"]
+    children = conn.execute(
+        "SELECT c.id, c.name, c.printer_id IS NULL AND c.archived_at IS NULL AS named"
+        " FROM filament_locations c JOIN filament_locations p ON p.id = c.parent_id"
+        " WHERE p.printer_id = %s AND c.printer_id IS DISTINCT FROM %s"
+        " ORDER BY c.id FOR UPDATE OF c",
+        (printer_id, printer_id),
+    ).fetchall()
+    # Only these rows are in `filament_locations_name`.
+    first: dict[str, UUID] = {}
+    for child in children:
+        if not child["named"]:
+            continue
+        other = first.setdefault(child["name"].upper(), child["id"])
+        if other != child["id"]:
+            raise ChildPlaceClashError(child["id"], child["name"], other)
+    for child in children:
+        try:
+            LocationStore.update_on(conn, child["id"], m.LocationPatch(parent_id=parent))
+        except LocationExistsError:
+            raise ChildPlaceClashError(child["id"], child["name"]) from None
+    return len(children)
+
+
 class LocationStore:
     """The location tables over a pool whose connections autocommit and return dict rows
     (the settings store's). Synchronous: callers run it in a thread."""
@@ -256,6 +362,14 @@ class LocationStore:
         A new parent that is the place or one of its descendants is `LocationCycleError`;
         the ancestors of the new parent are walked in the transaction that writes it, with
         the tree lock and the place's row held."""
+        with self._pool.connection() as conn, conn.transaction():
+            return self.update_on(conn, location_id, patch)
+
+    @staticmethod
+    def update_on(conn: Conn, location_id: UUID, patch: m.LocationPatch) -> m.Location | None:
+        """`update` on ``conn``, in the caller's transaction (a printer's delete,
+        `release_printer_child_places_on`). `LocationExistsError` or `CatalogRefError`
+        leaves that transaction aborted: the caller rolls it back."""
         sent = [n for n in type(patch).model_fields if n in patch.model_fields_set]
         columns = [n for n in sent if n != "archived"]
         sets = [f"{name} = %s" for name in columns]
@@ -268,20 +382,19 @@ class LocationStore:
             )
         sets.append("updated_at = now()")
         try:
-            with self._pool.connection() as conn, conn.transaction():
-                if "parent_id" in patch.model_fields_set:
-                    conn.execute("SELECT pg_advisory_xact_lock(hashtext(%s))", (_TREE_LOCK,))
-                if self._lock(conn, location_id) is None:
-                    return None
-                if patch.parent_id is not None and "parent_id" in patch.model_fields_set:
-                    self._no_cycle(conn, location_id, patch.parent_id)
-                row = conn.execute(
-                    f"UPDATE filament_locations SET {', '.join(sets)} WHERE id = %s"
-                    f" RETURNING {_COLUMNS}",
-                    [*values, location_id],
-                ).fetchone()
-                if patch.archived:
-                    forget_sync(conn, "location", location_id)
+            if "parent_id" in patch.model_fields_set:
+                conn.execute("SELECT pg_advisory_xact_lock(hashtext(%s))", (_TREE_LOCK,))
+            if LocationStore._lock(conn, location_id) is None:
+                return None
+            if patch.parent_id is not None and "parent_id" in patch.model_fields_set:
+                LocationStore._no_cycle(conn, location_id, patch.parent_id)
+            row = conn.execute(
+                f"UPDATE filament_locations SET {', '.join(sets)} WHERE id = %s"
+                f" RETURNING {_COLUMNS}",
+                [*values, location_id],
+            ).fetchone()
+            if patch.archived:
+                forget_sync(conn, "location", location_id)
         except errors.UniqueViolation:
             raise LocationExistsError() from None
         except errors.ForeignKeyViolation:

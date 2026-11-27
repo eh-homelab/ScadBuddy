@@ -12,7 +12,7 @@ import { linkTypeFilament } from '../orders/priceBook'
 // Also a cycle (`filamentPurchasing.ts` calls `addInvoicedSpools`): only inside functions.
 import { invoiceRefOf, typeSuppliersOf } from '../filamentPurchasing'
 import { printersState } from '../printers'
-import { H2C, seed, spoolId, type Catalogs, type Seed, type SpoolRow } from './seed'
+import { H2C, LK, seed, spoolId, type Catalogs, type Seed, type SpoolRow } from './seed'
 import { jobOf } from '../../../components/filament/eventText'
 import { CATALOGS } from '../../../components/filament/catalogs'
 import { checksSave, marksOf, rowPropertiesRefusal, saveRowProperties } from '../entities'
@@ -2098,6 +2098,50 @@ export const tagOf = (tagId: string): S['Tag'] | undefined => tagById(tagId)
 
 /** `catalog.find_by_key`: the id of the row whose name or alias has `name`'s key (a subtype's within `material`). */
 export const findByKey = (kind: Aliased, name: string, material: string | null = null) => keyHolder(kind, name, material, undefined, false)?.id ?? null
+
+/**
+ * #7143 — links a spool to a printer's tray, as `link_on` does: the spool moves to the tray's
+ * place (made as the AMS tray places of `seed.ts` are, under the AMS unit's place when it has
+ * one), and the tray's other spool, if any, moves to no place. Null when no spool has the id.
+ */
+export function placeSpoolAtTray(spool: string, printer: string, ams: number, tray: number): { id: string; number: number; code: string; location_id: string } | null {
+  const at = state.spools.findIndex((row) => row.id === spool)
+  if (at < 0) return null
+  let place = state.locations.find((one) => one.printer_id === printer && one.ams_id === ams && one.tray_id === tray && !one.archived_at)
+  if (!place) {
+    const unit = state.locations.find((one) => one.printer_id === printer && one.ams_id === ams && one.tray_id == null && !one.archived_at)
+    place = {
+      number: Math.max(0, ...state.locations.map((one) => one.number)) + 1,
+      printer_root: false,
+      parent_id: unit?.id ?? null,
+      identifier: null,
+      capacity: null,
+      note: null,
+      sort_order: 10 + tray,
+      name: `${unit?.name ?? `AMS ${ams}`} slot ${tray + 1}`,
+      kind_id: LK.AMS,
+      printer_id: printer,
+      ams_id: ams,
+      tray_id: tray,
+      id: newId(),
+      archived_at: null,
+      created_at: now(),
+      updated_at: now(),
+    }
+    state.locations.push(place)
+  }
+  const there = place.id
+  for (const [i, other] of state.spools.entries()) {
+    if (other.location_id !== there || other.id === spool) continue
+    state.spools[i] = { ...other, location_id: null, updated_at: now() }
+    addEvent(other.id, 'moved', { data: { from: there, to: null } })
+  }
+  const row = state.spools[at]!
+  const from = row.location_id
+  state.spools[at] = { ...row, location_id: there, updated_at: now() }
+  addEvent(row.id, 'moved', { data: { from, to: there } })
+  return { id: row.id, number: row.number, code: `S-${row.number}`, location_id: there }
+}
 
 export const handlers = [
   // -- catalogs --

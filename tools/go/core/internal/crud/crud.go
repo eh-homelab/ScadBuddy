@@ -42,6 +42,9 @@ type Route struct {
 	Handle Handler
 	// MaxBody is the route's body bound, 0 for a route with none.
 	MaxBody int64
+	// OwnLength says the handler refuses a body of no Content-Length itself, in its own
+	// words and after its own checks; MaxBody still bounds the bytes read.
+	OwnLength bool
 	// Status is the status of an answer that is no problem, 0 for 200.
 	Status int
 }
@@ -138,7 +141,7 @@ func (rt *Router) answer(route *mounted, r *http.Request, params Params) (any, e
 	}
 	r = r.WithContext(auth.WithService(r.Context(), service))
 	if route.MaxBody > 0 {
-		if r.ContentLength < 0 {
+		if r.ContentLength < 0 && !route.OwnLength {
 			return nil, &httpx.Problem{
 				Status: http.StatusLengthRequired, Detail: "a body names its Content-Length",
 			}
@@ -217,6 +220,10 @@ func (rt *Router) refusal(route *mounted, r *http.Request) (*auth.Service, *http
 	p.Type = problems + "forbidden"
 	return nil, p
 }
+
+// ProblemOf is the answer to a handler's error, for a public route that shares the CRUD
+// routes' mapping and logging: a database out of reach is a 503, anything else a logged 500.
+func ProblemOf(r *http.Request, err error) *httpx.Problem { return problemOf(r, err) }
 
 // problemOf is the answer to a handler's error.
 func problemOf(r *http.Request, err error) *httpx.Problem {

@@ -14,7 +14,8 @@ The **Filament** section is ScadBuddy's own filament inventory. It covers:
 - a printer's AMS slots over ScadBuddy's own LAN link: configure a slot by hand, refresh and reset,
   load and unload; and ScadBuddy's own saved slicer preset per slot and label per AMS unit;
 - a ledger of spool events, with history, metrics and a forecast;
-- key-value properties on spools and spool types (#7026).
+- key-value properties on spools and spool types (#7026);
+- unknown spools: a loaded tray that no spool holds is listed, blocks a print to its printer, and the owner links a spool to it (#7143).
 
 The print dialog picks from these spools (ScadBuddy's own, "SB" spools). Tray changes and
 finished prints are recorded against them. The inventory can sync with Bambuddy's in
@@ -145,6 +146,31 @@ twice; when a newer version was written since, it is created again and its `mirr
 names the copy the lost create left (#7343); one preset's failure, a Bambuddy id another ScadBuddy preset holds included, is its
 own `mirror_error` and never stops the rest.
 
+The Presets view (#7204, plan `docs/superpowers/plans/2026-11-26-filament-presets-view.md`) is
+read-only. Go core serves it, not Python: area `filament-presets` in
+`tools/go/core/internal/filamentpresets`, with `GET /api/v1/filament/presets` (`?source=`,
+`?type_id=`), `GET …/presets/{preset_id}` and `GET …/presets/{preset_id}/diff`
+(`tools/go/core/README.md`). The area is on only when `SCADBUDDY_CORE_AREAS` names it
+(`tools/go/core/main.go`). Until then the paths go on to Python, which has a handler for none
+of them and answers a 404 with no `code`. The Presets tab and the preset page tell that apart
+from a Go 404, which has a `code`, and show "Presets are not on yet on this server"
+(`frontend/src/pages/filament/PresetsTab.tsx`, `PresetPage.tsx`). The agent tools say the same
+in a `ToolError` that names the area (`agent/src/tools/filament.ts` `presetOk`). Go computes
+the mirror state of each preset and stores none: `bambuddy_owned` for source `bambuddy`,
+`failed` when `mirror_error` is set and `mirrored_sha256` differs from `sha256`, `pending` when
+only the hashes differ, and else `sent`. A `sent` preset can still carry a `mirror_error`: it is
+the note of a lost create (`tools/go/core/internal/filamentpresets/mirror.go`). Go strips the
+print-host credential keys from every document it returns, as Python does. Python and Go keep
+the same rule through shared vectors
+(`backend/tests/fixtures/filament-preset-vectors.json`,
+`backend/tests/filament/test_filament_preset_vectors.py`, `test-fixtures/filament/preset-wire.json`).
+Every answer is `no-store`, and a document over 1 MiB is not read
+(`tools/go/core/internal/filamentpresets/document.go`). Only a `manual` preset can be edited,
+when the edit routes come: a `3dfp` preset would get a new version from the next fetch, and a
+`bambuddy` preset from the next Bambuddy refresh, so each of them is copied first (plan R3). The
+page and the three read tools `filament_preset_list`, `filament_preset_get` and
+`filament_preset_diff` change nothing (`agent/src/tools/filament.ts`).
+
 A fetch writes ScadBuddy only: each file is the type's `3dfp` preset of its key, a changed
 one a new version with its changed keys in the run's notes, and the type's own nozzle range
 wins over 3DFP's (#7142). Fetching presets is the `ProfileFetch` workflow on the
@@ -191,6 +217,53 @@ tray in ScadBuddy and writes Bambuddy's assignment for a linked spool, after whi
 configures the tray over MQTT. #7641 moves it. The K-profile read for the profile fill
 (`BambuddyClient.k_profiles`, `filament/profile_fetch.py`) also stays on Bambuddy until
 [#7604](https://github.com/eh-homelab/ScadBuddy/issues/7604).
+
+### Unknown spools (#7143)
+
+Spec: [unknown-spool-flow](../superpowers/specs/2026-11-23-unknown-spool-flow-design.md).
+A tray that a printer reports as loaded, with no spool in it, is an unknown spool.
+
+- **The row.** Capture writes a row in `filament_unknown_trays` for an untagged AMS tray that
+  no spool holds. `seen_at` moves only when a reported field changes (D1): it is the version of
+  the tray, not a heartbeat. The owner's resolve sends `seen_at` back, and a changed tray is
+  refused as `tray_changed`. A tray that is empty, or that a spool holds, loses its row when its tray lock is free. A busy
+  lock (D11) means a link or a resolve is settling the tray, so capture keeps the row and looks
+  again on the next report. The
+  external holder never gets a row (D2). `remain_pct` is stored, but it is null in practice for
+  an untagged tray (D3).
+- **A tray with an RFID key** gets a spool at once, with no question. Capture takes the spool type
+  that `match_tray` finds, or makes a spool with a material and a colour only. The `created` event
+  has `data.by` `rfid_capture`. The list shows these spools for 24 hours as `made_from_tags`
+  (D5), and the page shows one toast for each new one.
+- **Capture** (`backend/scadbuddy/filament/capture.py` `note_unknown`) runs after `reconcile` in
+  the report write and in the backstop. It takes the tray's try-lock before it makes a spool or
+  clears a row. A busy lock leaves the tray to the next report.
+- **Routes** (Go, area `unknown-trays`, behind the person-auth gate of #8038):
+  `GET /api/v1/filament/unknown-trays` lists the rows. Each row has the printer, the slot, the
+  place, the reported material and colour, `seen_at` and up to 10 ranked `candidates`. The rank
+  key is: spools with no place first, then spools of the reported material, then the nearest
+  colour (a spool with no colour last), then the spool number; archived spools are left out.
+  `POST …/{id}/dismiss` deletes a row (204, or 404 `tray_gone`). A dismiss is only for a slot
+  that is no longer there: a spool that is still loaded comes back on the next report.
+- **Resolve** links a spool to the tray, books the typed net weight as a `weighed` reading and
+  deletes the row, in one transaction. It is a Temporal activity, `filament_resolve_unknown_tray`,
+  on the `library` queue (G5), so the Python write that links a spool stays the only one. Only a
+  spool with no reading, use or load yet takes the net weight as its label weight (D4). The lock
+  order stays in Python (G9). **The Go route that starts the activity is not built yet.** It waits
+  for a Temporal client in Go (`tools/go/core/internal/temporalx`). Until then, the dialog's and
+  the tool's resolve get a 404 and cannot resolve a tray. The existing link paths still clear the
+  row: the print dialog's tray question, the place page's "New spool from this tray" and the
+  agent's `link_tray_spool`.
+- **The block.** A print to a printer that has a row is refused with 422 `unknown_spool_loaded`.
+  `prepare_run` and the print check do it (`PrintCheck.unknown_trays` names the trays), and so does
+  `lan_print`. On Bambuddy's path, a tray that the inventory read gives an SB spool is not counted
+  (D9). The print worker reads the block from a CRUD route of caller `print`. Both checks go on
+  when that route is missing (G3), so the worker-side block works only once
+  `SCADBUDDY_CORE_AREAS` names `unknown-trays`.
+- **The owner is asked** in four places: the "Needs you" list (a source with the agent requests,
+  the flow grants and the pairings, read every 15 s), Filament → Locations, the page of a place,
+  and the print dialog's verdict. All four open one dialog. The assistant has two tools:
+  `filament_unknown_trays` and `filament_unknown_tray_resolve`.
 
 ### Weighing breakdown (#7682)
 
@@ -448,6 +521,12 @@ matches `[a-z][a-z0-9_]{0,63}`. Limits: 200 keys per entity, 2000 characters per
   - `profile_fetch.py`, `sb_presets.py` (ScadBuddy's presets) and
     `backend/scadbuddy/slicing/own_presets.py` (their refs, as the native slicer reads them);
   - a printer's K-profiles: `backend/scadbuddy/printers/kprofiles.py` (the bodies and the LAN steps) and `backend/scadbuddy/api/printer_kprofiles.py` (over ScadBuddy's own LAN link, #7276); `BambuddyClient` has no printer K-profile write, slot command, slot preset or AMS label call any more (removed in #7276; it keeps the K-table read `k_profiles` that `profile_fetch.py` uses, until #7604, `put_spool_k_profiles` for the sync's spool K values, and `assign_spool` for the tray question, until #7641).
+- Unknown spools (#7143):
+  - `tools/go/core/internal/unknowntrays` (list, rank, dismiss, and the print worker's block read);
+  - `backend/scadbuddy/filament/unknown_tray_rows.py` (the rows and the block text) and `unknown_resolve.py` (the resolve activity);
+  - the capture step `note_unknown` in `backend/scadbuddy/filament/capture.py`, called from `backend/scadbuddy/printers/reports.py`, and the block in `backend/scadbuddy/bambuddy/print_run.py` and `backend/scadbuddy/printers/print_activities.py`;
+  - the UI: `frontend/src/components/filament/UnknownSpoolDialog.tsx`, `useUnknownSpoolDialog.tsx` and `UnknownSpoolButton.tsx`, with `frontend/src/lib/unknownSpools.ts` and `frontend/src/api/unknownTrays.ts`;
+  - the agent tools `filament_unknown_trays` and `filament_unknown_tray_resolve` in `agent/src/tools/filament.ts`.
 - Workflows:
   - `backend/scadbuddy/workflows/spool_refresh.py:104`;
   - `filament_sync.py:68`, `filament_pull.py:43`, `sensor_notify.py:58`.
@@ -463,6 +542,12 @@ matches `[a-z][a-z0-9_]{0,63}`. Limits: 200 keys per entity, 2000 characters per
   presets `filament_presets` and `filament_preset_versions`
   (`20261123T0711Z_filament_presets.sql`; blobs held by `filament_preset`). The price
   book is `filaments`.
+- `filament_unknown_trays` (#7143, `20261126T1936Z_filament_unknown_trays.sql`): one row for each
+  `(printer_id, ams_id, tray_id)` while the tray is loaded and no spool holds it. It has the
+  reported tag keys, material, colour and remain percent, `first_seen_at` and `seen_at`. The row
+  goes with its printer (`ON DELETE CASCADE`). The API and `tools/go/core` read it (the
+  one #5295 exception, #7667): core lists the rows and deletes one on dismiss, and serves the
+  print worker's block read. The print worker gets the block from a CRUD route.
 - The old spool overlay and native spool tables were dropped
   (`backend/scadbuddy/migrations/20261118T1235Z_drop_native_spool_tables.sql`).
 - Settings: `spool_overlay_refresh_seconds` (the refresh Schedule), `filament_sync`,
@@ -519,6 +604,18 @@ matches `[a-z][a-z0-9_]{0,63}`. Limits: 200 keys per entity, 2000 characters per
   (`LocationStore.ensure_printer_on`, `backend/scadbuddy/filament/locations.py`). A printer
   label request makes the place when it is missing, and so does a tray capture whose printer
   has a unit place or external holder with no live parent (`LocationStore.hang_orphans_on`).
+  A printer's places go when the printer is deleted (`PrinterStore.delete`,
+  `backend/scadbuddy/printers/store.py`). First each spool in one moves to no place, with a
+  `moved` event (#7143). Then each other place under one moves to the nearest place above
+  the printer's place that is not the printer's (#8177). It moves to the top level when the
+  printer has no unarchived place of its own, when nothing is above that place, or when the
+  place above is archived. The delete is refused with 409, and changes nothing, when such a
+  place would clash by name there (with a place already there, or with another place that
+  moves there), or while a stock lot or unit points at one of the printer's places. The
+  inventory has no move path with an event for those rows, so a person moves them first. The
+  delete locks in the order a report write takes: the printer's report, its place lock, its
+  spools, then its places (the order is in `PrinterStore.delete`). A delete that still meets
+  a concurrent write answers 409 `printer_delete_conflict`, and the person tries again.
 - Labels: a place's QR is `<base>/x/L-<n>`. The labels page (`/filament/labels`) prints places
   with `?locations=` and printers with `?printers=` (one printer's from its place page, every
   printer's from the Locations tab). The printer labels first make the place of each AMS unit,
@@ -620,6 +717,15 @@ matches `[a-z][a-z0-9_]{0,63}`. Limits: 200 keys per entity, 2000 characters per
   - `backend/tests/profile_fetch/`;
   - `backend/tests/api/test_printer_kprofiles.py`;
   - `backend/tests/api/test_printer_slots.py`.
+- Unknown spools (#7143): `backend/tests/filament/test_capture_unknown.py`,
+  `test_unknown_tray_rows.py`, `test_unknown_resolve.py`, `test_link_clears_unknown_row.py` and
+  `test_unknown_tray_vectors.py`; `backend/tests/printers/test_unknown_spool_block.py`;
+  `backend/tests/crud/test_crud_unknown_trays.py`; the Go tests in
+  `tools/go/core/internal/unknowntrays/` and `tools/go/core/unknown_trays_test.go`; the dialog's
+  tests in `frontend/src/components/filament/UnknownSpool*.test.tsx` and
+  `frontend/src/lib/unknownSpools.test.ts`; the tools in `agent/test/filament.test.ts`. Python
+  and Go share `backend/tests/fixtures/unknown-tray-vectors.json` (colour distance and labels)
+  and `unknown-trays-block.json` (the block's JSON).
 - Frontend: `frontend/src/components/settings/PrinterKProfiles.test.tsx` (mocks `frontend/src/mocks/features/printerKProfiles.ts`),
   `frontend/src/components/settings/PrinterAmsSlots.test.tsx` (mocks `frontend/src/mocks/features/printerAmsSlots.ts`),
   and the AMS unit place's rename in `frontend/src/pages/filament/LocationsTab.test.tsx`;
@@ -629,6 +735,11 @@ matches `[a-z][a-z0-9_]{0,63}`. Limits: 200 keys per entity, 2000 characters per
 
 ## Limits and known issues
 
+- Before core serves the area `unknown-trays`, the print block already holds (the API reads the rows
+  itself), but the list and resolve routes answer 404. The print dialog's button then says to link
+  the spool from the slot's page (Filament → Locations → the place: "New spool from this tray" or the
+  tray question). The Needs-you list and the Locations and place callouts stay empty, because they
+  cannot know the trays.
 - The filament epic is [#6260](https://github.com/eh-homelab/ScadBuddy/issues/6260).
 - K-profiles and slot commands need a printer linked over ScadBuddy's LAN link: a printer
   linked only through Bambuddy is refused 409 `not_lan_linked`
@@ -643,6 +754,10 @@ matches `[a-z][a-z0-9_]{0,63}`. Limits: 200 keys per entity, 2000 characters per
   that report is not caught by ScadBuddy's guard (`backend/scadbuddy/printers/ams_slots.py`
   `guard`), whose refusals are its own 409 codes (`printer_busy`, `ams_busy`, `no_slot`,
   `printer_offline` and the rest above).
+- Unknown spools (#7143): the Go resolve route is not built yet (above). A print started in
+  Bambuddy, or on the printer itself, is not blocked: only ScadBuddy's own prints check. A tray
+  of the external holder (D2) gets no row, so it never blocks a print. A row whose unit the
+  report no longer shows stays until that unit returns; deleting or merging the printer drops it.
 - Parity with Bambuddy 1.2.6b1 (#6270) is not complete yet: [filament-parity.md](filament-parity.md)
   lists every §11 item, its evidence, and the gap issue for each miss.
 - Filament profiles in Postgres, and their follow-ups, are still open:

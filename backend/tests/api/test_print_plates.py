@@ -38,7 +38,7 @@ from tests.api.test_print_run_choices import run_print, run_request, run_routes
 from tests.api.test_send import configure, make_output, upload_route
 from tests.bambuddy.conftest import recording
 from tests.support.operations import press
-from tests.support.printers import linked_printer
+from tests.support.printers import MERGED_BY, linked_printer
 from tests.support.row_outputs import update_row
 from tests.support.saved_outputs import rewrite_model
 from tests.test_bambu3mf import add_plate
@@ -84,7 +84,7 @@ def test_the_plate_is_remembered_by_the_registry_printer(client: TestClient) -> 
     linked = client.post("/api/v1/printers", json={"serial": "0938AB000000012", "name": "Both"})
     linked_id = linked.json()["id"]
     registry: Printers = getattr(client.app.state, STATE_ATTR).components.get(PRINTERS)  # type: ignore[attr-defined]
-    registry.store.link_bambuddy(linked_id, 4)
+    registry.store.link_bambuddy(linked_id, 4, by=MERGED_BY)
 
     answer = client.put(
         f"/api/v1/print/printers/{lan_id}/bed-type", json={"bed_type": "Cool Plate"}

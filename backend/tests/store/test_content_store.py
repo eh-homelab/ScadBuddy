@@ -171,8 +171,9 @@ async def test_put_refuses_past_the_byte_cap_except_a_re_put(tmp_path: Path, poo
 async def test_a_put_with_no_cap_reads_no_usage(
     tmp_path: Path, pool: Pool, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """#8110: with neither cap set, a put checks nothing, so it runs no aggregate over the
-    backend's rows; with either cap, it reads the usage to check it."""
+    """#8110: with neither cap set, a put or a stage (the #7477 output save, #8133)
+    checks nothing, so it runs no aggregate over the backend's rows; with either cap, it
+    reads the usage to check it."""
     cases: list[tuple[dict[str, int], bool]] = [
         ({}, False),
         ({"max_count": 10}, True),
@@ -189,7 +190,13 @@ async def test_a_put_with_no_cap_reads_no_usage(
 
         monkeypatch.setattr(store.index, "usage", usage)
         await store.put("asset", f"{caps}".encode(), name=f"n{caps}", scope=SCOPE)
-        assert bool(calls) == reads, caps
+        assert bool(calls) == reads, ("put", caps)
+        calls.clear()
+        ref, reused = await store.stage(
+            "asset", f"staged {caps}".encode(), name=f"s{caps}", scope=SCOPE
+        )
+        assert bool(calls) == reads, ("stage", caps)
+        await store.release_unindexed(ref, reused)
 
 
 async def test_altered_or_missing_bytes_are_reported_not_returned(content: ContentStore) -> None:

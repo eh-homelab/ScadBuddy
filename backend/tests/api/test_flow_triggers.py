@@ -450,6 +450,8 @@ def test_an_edit_returns_the_standing_grant_to_requested(
     # (review of #5668: the view checks the chain, as a call does).
     fired_grant = run_view(client, fired["run_id"])["grant"]
     assert (fired_grant["status"], fired_grant["in_force"]) == ("approved", False)
+    # Out of force by its chain, not by its own expiry (#8220).
+    assert fired_grant["expired"] is False
     # The next fire gets none until a person approves it again.
     later = fire(workflow_reaper, client, trigger["id"])
     assert run_view(client, later["run_id"])["grant"] is None

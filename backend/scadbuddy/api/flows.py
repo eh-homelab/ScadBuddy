@@ -331,6 +331,9 @@ class GrantView(BaseModel):
     #: the standing grant it was seeded from (`FlowStore.grant_in_force`): calls inside
     #: it run without asking.
     in_force: bool
+    #: Its own expiry has passed, by the server's clock (#8220). Out of force and not
+    #: expired: a grant it inherits from, or its standing grant, ended.
+    expired: bool
     uses: list[GrantUseView] = []
     #: On approval: the parked calls it let through.
     released: list[str] = []
@@ -341,6 +344,7 @@ def run_grant_view(grant: Grant, uses: list[GrantUse], in_force: bool) -> GrantV
         **grant.model_dump(exclude={"run_id"}),
         # The whole chain's (`FlowStore.grant_in_force`), as each call is checked.
         in_force=in_force,
+        expired=grant.expired(datetime.now(UTC)),
         uses=[GrantUseView.model_validate(u.model_dump()) for u in uses],
     )
 

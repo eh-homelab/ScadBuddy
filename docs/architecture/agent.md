@@ -102,7 +102,7 @@ printers, spools, orders (68), flows, sessions, browser and more. They are serve
 `scadbuddy` (`tools/projections.ts:90-114`). Each tool calls the backend API; the agent
 never calls Bambuddy or a printer itself (`tools/makerworld.ts:6-8`). Turns also get:
 
-- `scadbuddy_http` (`http_request`, `harness/httpRequest.ts:79-81`) and
+- `scadbuddy_http` (`http_request`, `harness/httpRequest.ts:87-89`) and
   `scadbuddy_questions` (`ask_user`, `harness/questions.ts:34-37`);
 - the `builtin` server: WebFetch, WebSearch, Cron, Monitor, Workflow and, with the
   sandbox, `Bash` and `PowerShell` (`builtins/server.ts:36`, `builtins/sandboxShell.ts:88`);
@@ -201,6 +201,15 @@ security: [browser-bridge.md](../ai/browser-bridge.md).
 - **Claude credentials.** Kinds `anthropic_api_key`, `claude_oauth_token` and `gateway`
   (`credentials.ts`), each sealed with a per-row key under the API's KEK. The API seals and
   opens them, and the agent reads them through area `credentials` (`CrudCredentials`).
+  The pool is shared with the fleet's login rotator (#7983): kind `claude_login` (a whole
+  Claude Code `claudeAiOauth` login, its account in clear columns, with a machine lease) and
+  column `scope` (`agent`, `fleet` or `both`; a `claude_login` is `fleet` only). The API's
+  reveal answers the agent only rows of scope `agent` or `both`, in its SQL; the agent's own
+  `agentUses` check is a second, defensive one. The agent's caller cannot change a
+  `claude_login` or a `fleet` row in any way: a create, save, delete, rename, reset or event
+  on one is a 409 from the API, a reorder names the agent's rows only (fleet rows keep their
+  priorities), and a call with no id (the deprecated single-credential routes) takes the first
+  row the agent uses. Settings shows fleet rows read-only.
 
 ## Tests and evals
 

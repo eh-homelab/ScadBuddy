@@ -21,6 +21,7 @@ from scadbuddy.printers.lan_models import LanReport
 from tests.api.test_send import API, configure
 from tests.bambuddy.conftest import recording
 from tests.printers.conftest import KEK
+from tests.support.printers import MERGED_BY
 
 pytestmark = pytest.mark.requires_postgres
 
@@ -414,7 +415,7 @@ def test_a_lan_link_on_a_withheld_serial_is_422_before_any_dial(client: TestClie
     printers.store.kek = KEK
     calls: list[tuple[str, str, str]] = []
     printers.probe = _probe_ok(calls)
-    row = printers.store.ensure_bambuddy(7, serial=None, name="H2C", model=None)
+    row = printers.store.ensure_bambuddy(7, serial=None, name="H2C", model=None, by=MERGED_BY)
 
     response = client.put(
         f"/api/v1/printers/{row.id}/lan", json={"host": "10.0.0.9", "access_code": CODE}
@@ -439,6 +440,80 @@ def test_a_bambuddy_linked_printer_is_not_deleted(client: TestClient) -> None:
     assert "unlink" in refused.json()["detail"]
     client.delete(f"/api/v1/printers/{row['id']}/bambuddy")
     assert client.delete(f"/api/v1/printers/{row['id']}").status_code == 204
+
+
+def test_a_delete_refused_by_a_reference_to_a_printers_place_is_409(client: TestClient) -> None:
+    """#8177: a stock lot in one of the printer's places refuses the delete with a 409
+    that names the lot, not a 500 from its foreign key."""
+    row = create(client)
+    with registry(client).store.pool.connection() as conn:
+        lot = conn.execute(
+            "WITH tray AS (INSERT INTO filament_locations (name, kind_id, printer_id, ams_id,"
+            " tray_id) VALUES ('H2C AMS-A slot 1',"
+            " (SELECT id FROM filament_location_kinds LIMIT 1), %s, 0, 0) RETURNING id),"
+            " item AS (INSERT INTO items (kind_id, name) VALUES ('part', 'Belt') RETURNING id)"
+            " INSERT INTO stock_lots (item_id, location_id, received_qty, on_hand,"
+            " unit_cost_minor, origin, created_by)"
+            " SELECT item.id, tray.id, 1, 1, 0, 'manual', '{}' FROM tray, item RETURNING id",
+            (row["id"],),
+        ).fetchone()
+        assert lot is not None
+
+    refused = client.delete(f"/api/v1/printers/{row['id']}")
+
+    assert refused.status_code == 409, refused.text
+    assert str(lot["id"]) in refused.json()["detail"]
+    assert refused.json()["references"] == [
+        {"kind": "stock_lots.location_id", "id": str(lot["id"])}
+    ]
+    assert client.get(f"/api/v1/printers/{row['id']}").status_code == 200
+
+
+def test_a_delete_refused_by_a_child_places_name_is_409(client: TestClient) -> None:
+    """#8177 review M1: a child place that would clash by name where it moves refuses the
+    delete with a 409 that names the place, not a 500."""
+    row = create(client)
+    with registry(client).store.pool.connection() as conn:
+        child = conn.execute(
+            "WITH kind AS (SELECT id FROM filament_location_kinds LIMIT 1),"
+            " shelf AS (INSERT INTO filament_locations (name, kind_id)"
+            " SELECT 'Bin', id FROM kind),"
+            " root AS (INSERT INTO filament_locations (name, kind_id, printer_id, printer_root)"
+            " SELECT 'H2C', id, %s, true FROM kind RETURNING id)"
+            " INSERT INTO filament_locations (name, kind_id, parent_id)"
+            " SELECT 'BIN', kind.id, root.id FROM kind, root RETURNING id",
+            (row["id"],),
+        ).fetchone()
+        assert child is not None
+
+    refused = client.delete(f"/api/v1/printers/{row['id']}")
+
+    assert refused.status_code == 409, refused.text
+    assert refused.json()["place_id"] == str(child["id"])
+    assert client.get(f"/api/v1/printers/{row['id']}").status_code == 200
+
+
+def test_a_delete_that_meets_a_concurrent_write_is_409_try_again(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#8177 review I2: a deadlock during the delete (injected here) is a 409 that says to
+    try again, not a 500."""
+    import psycopg
+
+    from scadbuddy.printers import store as store_module
+
+    row = create(client)
+
+    def deadlocked(*_: Any) -> list[Any]:
+        raise psycopg.errors.DeadlockDetected("injected")
+
+    monkeypatch.setattr(store_module, "_place_references", deadlocked)
+    refused = client.delete(f"/api/v1/printers/{row['id']}")
+
+    assert refused.status_code == 409, refused.text
+    assert refused.json()["code"] == "printer_delete_conflict"
+    assert "try again" in refused.json()["detail"]
+    assert client.get(f"/api/v1/printers/{row['id']}").status_code == 200
 
 
 async def test_a_watch_call_never_hangs_a_route(

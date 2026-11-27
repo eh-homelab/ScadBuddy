@@ -6,6 +6,8 @@ import (
 	"encoding/base64"
 	"encoding/hex"
 	"net/http"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -68,9 +70,13 @@ func newRegistry(t *testing.T) *registry {
 }
 
 // rotatorCredential is a fleet-rotator credential as the exchange issues it for the proof
-// file fleet-rotator.<machine>: the row names the machine.
+// file fleet-rotator.<machine>: the row names the machine, whose file is in the bootstrap
+// directory.
 func rotatorCredential(a *api, machine string) string {
 	a.t.Helper()
+	if err := os.WriteFile(filepath.Join(a.bootstrap, "fleet-rotator."+machine), []byte("a-bootstrap-secret-of-at-least-32-characters"), 0o600); err != nil {
+		a.t.Fatal(err)
+	}
 	id, secret := make([]byte, 8), make([]byte, 32)
 	_, _ = rand.Read(id)
 	_, _ = rand.Read(secret)
@@ -409,6 +415,17 @@ func TestAMachineBelongsToItsProof(t *testing.T) {
 	got = put(onMachine+uuid(), sessionBody(), unbound)
 	expect(t, got.status, 403)
 	expect(t, got.body["reason"], "no-machine")
+}
+
+// A machine whose proof file is gone from SCADBUDDY_SERVICE_BOOTSTRAP_DIR is refused at
+// once, as Python's resolve refuses it (#8172).
+func TestARevokedMachineIsRefused(t *testing.T) {
+	g := newRegistry(t)
+	g.write("/machines/"+machineID, machineBody(), 200)
+	if err := os.Remove(filepath.Join(g.bootstrap, "fleet-rotator.devbox")); err != nil {
+		t.Fatal(err)
+	}
+	g.write("/machines/"+machineID, machineBody(), 401)
 }
 
 // One Claude Code session id can run on two machines at once. Each machine writes its own

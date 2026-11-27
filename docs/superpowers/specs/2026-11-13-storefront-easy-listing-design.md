@@ -141,7 +141,8 @@ filaments into the parameters and filaments, and `sellMedia` picks the pictures:
   template's default while the bounds allow it, and the listing's own `default` otherwise.
   The listing's own default is set only when it must be (`fittedDefault`): a smart default
   for a colour whose template default no colour on offer has starts at the value the person
-  was looking at, else the first colour on offer; bounds narrowed past the starting value
+  was looking at, else the colour on offer closest to it (#8126, the closest-colour rule of
+  #6258, `storefront/closestColour.ts`); bounds narrowed past the starting value
   move it to the nearest value they allow (a number in the range and on the step, the first
   choice left). Each bound change fits again from the person's own choice, or the template's
   when they made none, never from a value an earlier change forced, so typing "12" through

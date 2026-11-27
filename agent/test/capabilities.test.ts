@@ -206,7 +206,7 @@ describe('the capabilities tree', () => {
       default: null,
       access: null,
       overridden: false,
-      default_note: 'read for GET and HEAD, outward (asks first) for anything else',
+      default_note: 'read for GET and HEAD to a public host, outward (asks first) for anything else',
     })
     const set = await caps.setItem(BUILTIN_SOURCES.http, 'http_request', 'outward', ctx)
     expect(rows).toEqual([{ source: BUILTIN_SOURCES.http, item: 'http_request', access: 'outward', updated_by: 'browser:browser' }])
