@@ -277,7 +277,7 @@ same way, `vite.config.ts`).
   "Link spool" gets a 404 and names the same path (Filament → Locations → the place). The print
   verdict e2e is `e2e/unknown-spool.spec.ts` (the mock tray: `unknownTrays.ts` `UNKNOWN_TRAY_SEED_KEY`).
 - Devices (#7905, spec `docs/superpowers/specs/2026-11-27-devices-design.md`, plan Task 9): `api/devices.ts`
-  (Go core's `/devices` routes, typed by hand as `unknownTrays.ts` is), `pages/DevicesPage.tsx` at `/devices`
+  (Go core's `/devices` routes, typed by hand because Python's spec has none; the decoders' bodies and answers are the spec's `TagReadIn`/`TagReadResult` and `api/scan.ts` `CodeScan`), `pages/DevicesPage.tsx` at `/devices`
   (nav "Devices": each paired phone online or offline, its methods, its idle expiry and pairing end, Revoke),
   and `components/devices/`: `AddDevice` (`POST /devices/pairings`; the code as `scadbuddy://pair?url=<encoded>`,
   a QR code and a tap link, moved onto `window.location`'s host by `onThisHost`; `USER_ONLY`, as the code is a
@@ -287,7 +287,8 @@ same way, `vite.config.ts`).
   `code.scan` on an online phone, then the read to `POST /filament/tags/reads {read_id}` or
   `POST /scan/codes {read_id}`; the pairing button when no phone is online; nothing on a 404. Mocks
   `src/mocks/features/devices.ts` (`PHONE` online, `OLD_PHONE` offline; a call plays its events 400 ms apart
-  on the mock socket, `setStepMs` in tests); e2e `e2e/devices.spec.ts`.
+  on the mock socket, `setStepMs` in tests); e2e `e2e/devices.spec.ts`. After a reconnect `lib/realtime.ts`
+  resubscribes the `device:call:<id>` topics in frames of at most `MAX_CALL_TOPICS` (8, core's `MaxCallTopics`; a frame with more is refused whole), apart from the other topics.
 - Dry boxes and the home return (#7167): a dry box is a dry-storage place of capacity 1 (the
   "Dry box" switch in Filament → Locations' place form, shown only for a dry-storage kind, sets
   capacity 1; a 422 `box_has_many` shows its text). `lib/homeReturns.ts` `useHomeReturns` reads

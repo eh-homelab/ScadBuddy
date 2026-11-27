@@ -1,12 +1,16 @@
 import { ApiError, request } from './client'
-import type { Resolved, TagReadResult } from './filament'
+import { postTagRead } from './filament'
+import type { CodeScan } from './scan'
 
 /**
  * #7905 — the devices routes (plan `docs/superpowers/plans/2026-11-27-devices.md` Tasks 2 to 6).
- * Go core serves them (`tools/go/core/internal/devices`), so `pnpm gen:api`, which exports
- * Python's OpenAPI only, has no types for them. These types are written by hand from the plan's
- * route and event shapes. When the core devices PR merges, check them against its JSON and
- * change them here, in this one module.
+ * Go core serves them (`tools/go/core/internal/devices`). `pnpm gen:api` exports Python's
+ * OpenAPI spec, and Python serves no `/devices` route, so `schema.d.ts` has no types for them:
+ * the types below stay hand-written. They follow core's JSON on main: `list.go` `Listed`,
+ * `pair.go` (`{code_url, expires_at}`), `calls.go` `Call`, `Event` and `View`, and `reads.go`
+ * `doneResult`. The two decoders that take a device read do have generated types:
+ * `POST /filament/tags/reads` is in the spec (`TagReadIn.read_id`, `TagReadResult`), and
+ * `POST /scan/codes` uses `api/scan.ts`'s `CodeScan`.
  */
 
 /** The four methods a device can announce (spec §Capabilities). */
@@ -35,7 +39,11 @@ export interface Pairing {
   expires_at: string
 }
 
-/** How a call ended. `null` while it is open. */
+/**
+ * How a call ended; `null` while it is open. A deadline ends it `timeout` (device online),
+ * `offline` (device gone) or `denied` (never sent: its approval did not come); a revoke ends it
+ * `offline`.
+ */
 export type CallOutcome = 'done' | 'error' | 'offline' | 'timeout' | 'denied'
 
 export interface DeviceCallRow {
@@ -52,7 +60,10 @@ export interface DeviceCallRow {
   pending_action_id: string | null
 }
 
-/** The end of a read call: the stored read's id, and for `nfc.read` the tag's UID and whether every block was read. */
+/**
+ * A call's `result`: for a read, the stored read's id, and for `nfc.read` the tag's UID and
+ * whether every block was read; for a call core ended, `error` (`offline`, `approval_<why>`).
+ */
 export interface CallResult {
   read_id?: string
   uid?: string
@@ -130,19 +141,11 @@ export async function startCall(deviceId: string, method: DeviceMethod, args: Re
 export const getCall = (callId: string) => request<CallView>(`/devices/calls/${seg(callId)}`)
 
 /** Task 6: the tag decoder takes a device read in place of inline records. */
-export const tagReadFromDevice = (readId: string) =>
-  request<TagReadResult>('/filament/tags/reads', { method: 'POST', body: JSON.stringify({ read_id: readId }) })
-
-/** One code a scan read (#8155), and the thing it names. */
-export interface ScannedCode {
-  format: string
-  text: string
-  resolved: Resolved | null
-}
+export const tagReadFromDevice = (readId: string) => postTagRead({ read_id: readId })
 
 /** Task 6: the code decoder (#8155) takes a device read in place of a blob key. */
 export const codeScanFromDevice = (readId: string) =>
-  request<{ id: string; codes: ScannedCode[]; error: string | null }>('/scan/codes', {
+  request<CodeScan>('/scan/codes', {
     method: 'POST',
     body: JSON.stringify({ read_id: readId, source: 'app', location: null }),
   })
