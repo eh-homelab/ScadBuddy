@@ -31,8 +31,9 @@ cd app/ScadBuddy.Tests && dotnet test
 `CLAUDE.md`), and on a dispatch. It runs the tests and the `android` job's build with the same
 pins, with version code `github.run_number` and version name `1.0.<run number>`. Then it
 pushes `app/Dockerfile`, a `FROM scratch` image with only `/scadbuddy.apk` and
-`/scadbuddy.apk.sha256`, to `ghcr.io/eh-homelab/scadbuddy-app`, tagged `sha-<7>` and
-`latest`. It publishes no GitHub release. To install the latest:
+`/scadbuddy.apk.sha256`, to `ghcr.io/eh-homelab/scadbuddy-app`, tagged `sha-<7>`, and
+`latest` only for a main build: a dispatch of another branch publishes `sha-<7>` alone.
+It publishes no GitHub release. To install the latest:
 
 ```bash
 crane export ghcr.io/eh-homelab/scadbuddy-app:latest - | tar -x scadbuddy.apk scadbuddy.apk.sha256

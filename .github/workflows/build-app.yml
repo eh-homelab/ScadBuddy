@@ -67,6 +67,8 @@ jobs:
         run: dotnet test
       - name: Install the maui-android workload
         run: dotnet workload install maui-android --version 10.0.303.1
+      # A re-run keeps github.run_number, so it republishes the same version over the same
+      # `sha-<7>`: intended, the commit and its APK do not change.
       - name: Build (Release)
         env:
           RUN_NUMBER: ${{ github.run_number }}
