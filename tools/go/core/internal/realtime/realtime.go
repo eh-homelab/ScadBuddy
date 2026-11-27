@@ -546,8 +546,9 @@ func (x *session) frame(ctx context.Context, m message) error {
 		// database, so one frame may name at most MaxCallTopics distinct ones.
 		if kind == "subscribe" && t.Kind == 's' && callTopic.MatchString(t.Str) {
 			ok, seen := allowed[t.Str]
-			if !seen {
-				ok = len(allowed) < MaxCallTopics && x.topicAllowed(ctx, t)
+			if !seen && len(allowed) < MaxCallTopics {
+				// Past the cap a topic is refused unread, and the map stays at the cap.
+				ok = x.topicAllowed(ctx, t)
 				allowed[t.Str] = ok
 			}
 			if !ok {

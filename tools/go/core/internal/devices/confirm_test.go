@@ -146,7 +146,7 @@ func TestExpireCancelsTheApproval(t *testing.T) {
 	expect(t, h.count(`SELECT count(*) FROM ai_approvals WHERE decision = 'cancelled'`), 1)
 }
 
-// One subscribe frame may name at most realtime.MaxCallTopics call topics.
+// One subscribe frame may name at most realtime.MaxCallTopics distinct call topics.
 func TestSubscribeCapsCallTopics(t *testing.T) {
 	h := newHarness(t, auth.Observe)
 	me := h.person("user:i#me")
