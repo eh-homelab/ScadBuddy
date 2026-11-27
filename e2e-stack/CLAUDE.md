@@ -12,8 +12,9 @@ images; weekly and on dispatch in `hot-path-e2e.yml`'s `stack` job, never on PRs
 also runs `e2e/inventory-core.spec.ts` (#6949 K1, `E2E_INVENTORY_CORE=1`; it skips without
 it): a kind, an item, a lot received and 1 used, all writes through Temporal to
 scadbuddy-core's worker; the item reads 1 less, and the Activities tab lists
-`inventory.ReceiveLot` and `inventory.Take` as succeeded. Its logs go to
-`frontend/test-results/inventory-core/stack.log`.
+`inventory.ReceiveLot` and `inventory.Take` as succeeded. `run.sh` fails that run when its
+JSON report (`frontend/test-results/inventory-core.json`) counts no passed test, or a skipped
+or failed one. Its logs go to `frontend/test-results/inventory-core/stack.log`.
 
 ## Layout
 - `e2e-stack/` — the real-stack e2e of the hot path (#4602): `compose.yaml` (ScadBuddy on
