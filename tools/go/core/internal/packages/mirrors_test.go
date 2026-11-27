@@ -56,6 +56,8 @@ type fakeBlobs struct {
 	publishes int
 	// stale makes the next publish lose to another that indexed want.
 	stale []byte
+	// tooLarge are the keys whose read is refused as larger than its bound.
+	tooLarge map[string]bool
 }
 
 func newFakeBlobs() *fakeBlobs { return &fakeBlobs{files: map[string][]byte{}} }
@@ -93,6 +95,9 @@ func (f *fakeBlobs) PublishFile(_ context.Context, key, name string, file io.Rea
 func (f *fakeBlobs) ReadFile(_ context.Context, key, name string, _ int64) ([]byte, bool, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	if f.tooLarge[key] {
+		return nil, false, fmt.Errorf("%w: the blob %s", ErrTooLarge, key)
+	}
 	data, ok := f.files[key]
 	return data, ok && name == MirrorFile, nil
 }
@@ -452,6 +457,22 @@ func TestAHostedZipTheStoreLostOrAlteredIsA500(t *testing.T) {
 	wantRefusal(t, lost, 500, blobMissing)
 	if lost.body["detail"] != "the store has lost a file's bytes" {
 		t.Fatalf("got %s", lost.raw)
+	}
+}
+
+// A stored blob larger than the route reads is a 500 that names it, never a bare one.
+func TestAStoredBlobPastTheReadBoundIsANamedProblem(t *testing.T) {
+	a := newMirrorAPI(t)
+	sum := a.mirror(zipBytes, "big")
+	a.bytesPinned("big", sum)
+	zip := a.hosted("greeter", 1, zipBytes)
+	a.blobs.tooLarge = map[string]bool{"plugin-mirror-" + sum: true, "attachment-" + zip: true}
+	for _, path := range []string{mirrors + "/big/" + sum, hostedP + "/greeter/versions/1.zip"} {
+		got := a.send("agent", "GET", path, nil, 0)
+		wantRefusal(t, got, 500, blobTooLarge)
+		if got.body["detail"] != "a stored blob is larger than this route reads" {
+			t.Fatalf("%s: %s", path, got.raw)
+		}
 	}
 }
 
