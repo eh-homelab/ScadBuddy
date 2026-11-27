@@ -1,4 +1,4 @@
-import { render as rtlRender, screen, waitFor, within } from '@testing-library/react'
+import { act, render as rtlRender, screen, waitFor, within } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { MemoryRouter, Route, Routes, useLocation, useNavigate, useParams } from 'react-router'
 import { http, HttpResponse } from 'msw'
@@ -153,21 +153,21 @@ function renderScan(route = SCAN, strict = false) {
   const user = userEvent.setup()
   rtlRender(
     <Wrap>
-    <MemoryRouter initialEntries={['/start', route]} initialIndex={1}>
-      <Routes>
-        <Route path="/start" element={<h1>Start</h1>} />
-        <Route
-          path="/filament/spools"
-          element={
-            <>
-              <SpoolsTab />
-              <Search />
-            </>
-          }
-        />
-        <Route path="/filament/spools/:id" element={<SpoolPageStub />} />
-      </Routes>
-    </MemoryRouter>
+      <MemoryRouter initialEntries={['/start', route]} initialIndex={1}>
+        <Routes>
+          <Route path="/start" element={<h1>Start</h1>} />
+          <Route
+            path="/filament/spools"
+            element={
+              <>
+                <SpoolsTab />
+                <Search />
+              </>
+            }
+          />
+          <Route path="/filament/spools/:id" element={<SpoolPageStub />} />
+        </Routes>
+      </MemoryRouter>
     </Wrap>,
   )
   return { user }
@@ -236,10 +236,25 @@ describe('a scan-made spool search (#8372)', () => {
         return undefined
       }),
     )
-    renderScan(SCAN, true)
-    await waitFor(() => expect(reads).toBe(2))
-    // Let the list and the first load's answer settle.
-    await new Promise((resolve) => setTimeout(resolve, 100))
+    // The reads of both loads: the first load's answers all come back while the second's type
+    // read is held. Counted as the mock answers them, with no wait on the clock.
+    const answered = { list: 0, typeProperties: 0 }
+    const onAnswer = ({ request }: { request: Request }) => {
+      const { pathname } = new URL(request.url)
+      if (request.method !== 'GET') return
+      if (pathname.endsWith('/filament/spools')) answered.list++
+      if (pathname.endsWith('/entity-kinds/spool_type/properties') && reads === 1) answered.typeProperties++
+    }
+    server.events.on('response:mocked', onAnswer)
+    try {
+      renderScan(SCAN, true)
+      await waitFor(() => expect(reads).toBe(2))
+      await waitFor(() => expect(answered).toEqual({ list: 2, typeProperties: 1 }))
+      // Let React take the answers in.
+      await act(async () => {})
+    } finally {
+      server.events.removeListener('response:mocked', onAnswer)
+    }
     expect(screen.getByText(`Looking for “gtin:${GTIN}”…`)).toBeInTheDocument()
     expect(screen.getByTestId('search').textContent).toContain('from=scan')
     release()
