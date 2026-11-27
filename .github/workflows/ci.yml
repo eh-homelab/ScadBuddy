@@ -2635,7 +2635,10 @@ jobs:
   # a printer or disable a queue without the admin login; the web page's admin asks for
   # the mounted password and pauses a queue with it; a custom size prints at the queue's
   # width; a mounted snmp.conf reaches cupsd's ServerRoot; a waiting job and a queue
-  # added outside CUPS_QUEUES survive a restart on a PVC-like volume.
+  # added outside CUPS_QUEUES survive a restart on a PVC-like volume. Then core's IPP
+  # client (`TestLiveCUPS`) lists the queues, reads the 2 x 1 queue's size from its
+  # media-default, prints with Darkness and MediaType, which reach the ZPL, and gets
+  # "queue unknown" for a queue CUPS does not have.
   # In the `image` lane, and in `CI Summary`'s needs.
   cups-image:
     name: CUPS image build and smoke
@@ -2767,6 +2770,30 @@ jobs:
           docker exec cups-state lpstat -p Other >/dev/null
           docker exec cups-state lpstat -d | grep -q 'S-EDCDU03-2x1$'
           echo "CUPS image OK"
+
+      # core's IPP client (tools/go/core/internal/labelprint) against the smoke's `cups`
+      # and `fakezebra`, which still run with 2 x 1 labels loaded. The golang image is
+      # core's Dockerfile's, so there is no second toolchain pin; the build uses the
+      # root vendor/ through go.work, offline.
+      - name: core's IPP client against CUPS
+        run: |
+          set -euo pipefail
+          fz="$RUNNER_TEMP/fakezebra"
+          # shellcheck disable=SC2016 # $BUILDPLATFORM is the Dockerfile's text, not the shell's
+          img=$(sed -n 's/^FROM --platform=\$BUILDPLATFORM \(golang:[^ ]*\) AS build$/\1/p' tools/go/core/Dockerfile)
+          test -n "$img"
+          docker run --rm --entrypoint sh scadbuddy-cups:ci -c \
+            'printf "%%!PS\n/Helvetica findfont 14 scalefont setfont 10 30 moveto (ScadBuddy) show showpage\n" > /tmp/t.ps && gs -q -sDEVICE=pdfwrite -o - /tmp/t.ps' \
+            > "$RUNNER_TEMP/live.pdf"
+          before=$(grep -c '\^XZ' "$fz/out.zpl")
+          docker run --rm --network cupsci -v "$PWD:/src" -v "$RUNNER_TEMP/live.pdf:/live.pdf:ro" -w /src/tools/go/core \
+            -e GOTOOLCHAIN=local -e SCADBUDDY_TEST_CUPS_URL=http://cups:8631 \
+            -e SCADBUDDY_TEST_CUPS_PDF=/live.pdf "$img" go test ./internal/labelprint/ -run TestLiveCUPS -v
+          # The job's Darkness and MediaType reach the ZPL.
+          for _ in $(seq 30); do [ "$(grep -c '\^XZ' "$fz/out.zpl")" -gt "$before" ] && break; sleep 1; done
+          if ! tail -c 2000 "$fz/out.zpl" | grep -q '~SD30' || ! tail -c 2000 "$fz/out.zpl" | grep -q '\^MTT'; then
+            docker logs cups; tail -c 2000 "$fz/out.zpl"; exit 1
+          fi
 
   # PR-only, and ALWAYS on a PR. A push has no base to diff against and no PR
   # to comment on. Never path-gated: `CI Summary` counts a SKIPPED job as
