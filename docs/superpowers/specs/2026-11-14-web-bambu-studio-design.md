@@ -475,7 +475,8 @@ a pending action. Printing stays one.
 
 ## 11. Assumptions (calls made without an owner answer)
 
-1. Rules are cited at the native slicer's pinned tag `v02.08.02.61`, not `master`.
+1. Rules are cited at `v02.08.02.61`, the tag the native slicer pinned when this was
+   written, not `master`.
 2. The rules module is ported to TypeScript for live halos, with shared test vectors; the
    server result is the one that counts.
 3. A template plate with no declaration splits by connected shells, with shells closer

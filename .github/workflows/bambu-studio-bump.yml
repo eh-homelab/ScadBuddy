@@ -34,6 +34,11 @@ concurrency:
 jobs:
   bump:
     runs-on: ubuntu-latest
+    # `shell: bash` runs each step with pipefail; the default `bash -e` does not, so
+    # a failed lookup piped into `tee` would pass green.
+    defaults:
+      run:
+        shell: bash
     timeout-minutes: 30
     steps:
       - name: Generate app token
@@ -66,15 +71,20 @@ jobs:
           set -euo pipefail
           branch="chore/bambu-studio-$VERSION"
           # One PR per release: a rerun, or next week's run while this one is
-          # still open, finds the branch and leaves it alone.
+          # still open, finds the branch and leaves it alone. A PR for the
+          # release in any state counts too, so a closed one is not reopened.
           if git ls-remote --exit-code --heads origin "$branch" >/dev/null; then
             echo "$branch already exists; nothing to do."
+            exit 0
+          fi
+          if [ -n "$(gh pr list --state all --head "$branch" --json number --jq '.[].number')" ]; then
+            echo "a PR for $branch exists; nothing to do."
             exit 0
           fi
           git switch -c "$branch"
           git -c user.name="scadbuddy-bambu-studio-bump" \
               -c user.email="scadbuddy-bambu-studio-bump@users.noreply.github.com" \
-              commit -am "fix(slicer): bump Bambu Studio to $VERSION"
+              commit -am "chore(slicer): bump Bambu Studio to $VERSION"
           git push origin "$branch"
           body="$RUNNER_TEMP/body.md"
           cat > "$body" <<EOF
@@ -98,5 +108,5 @@ jobs:
           - [ ] Re-measure what \`backend/scadbuddy/slicing/profiles.py\` says of the tree (\`_PER_FILAMENT\`, the include counts) and fix anything that moved here.
           EOF
           gh pr create --base main --head "$branch" \
-            --title "fix(slicer): bump Bambu Studio to $VERSION" \
+            --title "chore(slicer): bump Bambu Studio to $VERSION" \
             --body-file "$body"

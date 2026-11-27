@@ -56,7 +56,7 @@ function fillType(type: S['SpoolType'], options: { refresh?: boolean; apply?: Pa
   const result: S['TypeFill'] = { type_id: type.id, code: type.code, filled: {}, previous: {}, skipped: {}, k_values: [], written: false }
   const found = profileOf(type)
   if (!found) return { ...result, reason: 'the type has no slicer preset' }
-  if (!found.profile) return { ...result, reason: `Bambu Studio 02.09.02.62 has no filament preset ${found.preset.slicer_filament}` }
+  if (!found.profile) return { ...result, reason: `Bambu Studio has no filament preset ${found.preset.slicer_filament}` }
   result.source = { preset_id: found.preset.slicer_filament, name: found.profile.name, origin: 'system', printer_model: found.preset.printer_model, nozzle_diameter: found.preset.nozzle_diameter }
   result.cost_hint = found.profile.cost_hint
   const at = state.types.findIndex((one) => one.id === type.id)
