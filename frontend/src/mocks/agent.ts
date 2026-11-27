@@ -14,8 +14,7 @@
  * request (#815); one that names a web address has the headless browser ask to open it
  * (#982: a site on neither of its lists). The panel answers
  * both over HTTP (`POST /api/v1/ai/pending-input/{id}`, #815: `features/pendingInput.ts`
- * calls `respond` below); the socket's `approval.decision` and `question.answer` still
- * work, as the real agent's do. It also lists a session an external MCP agent owns, so the picker's
+ * calls `respond` below), as the real agent's panel does (#7323). It also lists a session an external MCP agent owns, so the picker's
  * "controlled by …" badge and Take over have something to act on.
  *
  * Each chat has a budget (#790, `budgetUsd`, $1.00 by default) that every turn spends
@@ -348,7 +347,7 @@ export function createMockAgentTransport({
         })
         setStatus(s, 'waiting_approval')
       },
-      // Parked. Only a respond (or `approval.decision`) moves the script on.
+      // Parked. Only a respond moves the script on.
     ]
   }
 
@@ -419,7 +418,7 @@ export function createMockAgentTransport({
         emit({ type: 'question.asked', sessionId: s.sessionId, id: questionId, tool: askId, questions })
         setStatus(s, 'waiting_input')
       },
-      // Parked. Only a respond (or `question.answer`) moves the script on.
+      // Parked. Only a respond moves the script on.
     ]
   }
 
@@ -671,16 +670,6 @@ export function createMockAgentTransport({
                 ? attentionTurn(s, /post a summary/i.test(msg.text))
                 : firstTurn(s),
         )
-        return
-      }
-      case 'question.answer': {
-        const s = sessions.get(msg.sessionId)
-        if (s?.asking?.id === msg.id) resolveQuestion(s, msg.answers)
-        return
-      }
-      case 'approval.decision': {
-        const s = sessions.get(msg.sessionId)
-        if (s?.pending?.id === msg.id) resolveApproval(s, msg.approve)
         return
       }
       case 'session.interrupt': {

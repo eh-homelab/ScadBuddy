@@ -529,7 +529,7 @@ export class WarmSessions {
    * Puts the session's process on this replica, whichever placement spawned it, under `fence`:
    * a new placement of the session here holds it now, so what the old process writes as it is
    * reused or recycled (its exit's `last-prompt` and `cost-state`, which the next process loads)
-   * lands as a classic process's does. A process cut off stays cut off.
+   * lands as a session's process's does. A process cut off stays cut off.
    */
   refence(sessionId: string, fence: AppendFence): void {
     const slot = this.slots.get(sessionId)

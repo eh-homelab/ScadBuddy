@@ -53,7 +53,8 @@ type Store interface {
 	// Send stores the message and delivers it: to the agent of a DM, or to
 	// the channel's members at send time (sender included). It returns the
 	// message's seq and the recipients' session ids. It returns
-	// ErrUnknownAgent for a handle no agent has, ErrUnknownChannel for a
+	// ErrUnknownAgent for a handle or name no agent has, a VirtualSenderError
+	// for a virtual sender's name, ErrUnknownChannel for a
 	// channel name no channel has, and ErrNotMember when the sender is not in
 	// the channel.
 	Send(ctx context.Context, sessionID string, t Target, text string) (int64, []string, error)
@@ -68,7 +69,7 @@ type Store interface {
 var (
 	ErrBadSession   = errors.New("session_id must be a canonical lower-case UUID")
 	ErrBadChannel   = errors.New("channel must match ^[a-z0-9-]{1,40}$")
-	ErrBadTarget    = errors.New("give exactly one of channel or agent; agent is an 8-character lower-case hex handle")
+	ErrBadTarget    = errors.New("give exactly one of channel or agent; agent is an 8-character lower-case hex handle or a name like a channel's")
 	ErrEmptyText    = errors.New("text is empty")
 	ErrTooLong      = errors.New("text is longer than the largest message allowed")
 	ErrBadSeq       = errors.New("seq must be 0 or more, and not past your cursor")
@@ -76,4 +77,22 @@ var (
 	ErrNotMember    = errors.New("not a member of that channel")
 	// ErrUnknownChannel is a channel nobody has joined: fleet_join creates it.
 	ErrUnknownChannel = errors.New("no channel has that name; fleet_join creates it")
+	// ErrVirtualSender is a DM to a virtual sender: a reserved name that only posts, such
+	// as "rotator" or "github". A Store returns it as VirtualSenderError, whose text is the
+	// sender's own reject message.
+	ErrVirtualSender = errors.New("that name is a virtual sender, which reads no messages")
 )
+
+// VirtualSenderError is ErrVirtualSender with the virtual sender's reject message as its
+// text, so fleet_send returns that text as its tool error.
+func VirtualSenderError(reject string) error {
+	if reject == "" {
+		return ErrVirtualSender
+	}
+	return virtualSenderError(reject)
+}
+
+type virtualSenderError string
+
+func (e virtualSenderError) Error() string        { return string(e) }
+func (e virtualSenderError) Is(target error) bool { return target == ErrVirtualSender }

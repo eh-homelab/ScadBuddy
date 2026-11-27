@@ -848,7 +848,7 @@ A turn that loads an allowed pin also gets two more things:
   `outward`, and in a session it parks for a human. The session's own built-ins
   (`WebFetch`, `WebSearch` and the background ones, `access/nativeBuiltins.ts`
   `SESSION_BUILTINS`) are never among them: every session turn gets those from the agent's
-  `builtin` server (`builtins/server.ts` `classicBuiltinServer`, `mcp__builtin__<Name>`),
+  `builtin` server (`builtins/server.ts` `sessionBuiltinServer`, `mcp__builtin__<Name>`),
   whether or not a package names them, each at its `builtin:claude-code` item's access
   unless that item is `off` (#5870, [operating.md](operating.md) §9). `CronCreate`,
   `ScheduleWakeup` and `Workflow` run at `write` in every turn (they were `outward` while only

@@ -13,8 +13,9 @@ expect false backend/scadbuddy/migrationsx/a.sql
 # core's sessions tests read the browser options' shared vectors.
 expect true  workers/playwright-mcp/browser-vectors.json
 expect false workers/playwright-mcp/options.mjs
+expect true  backend/tests/fixtures/blob-upload-vectors.json
+expect false backend/tests/fixturesx/a.json
 expect true  backend/tests/fixtures/event-stream-vectors.json
-expect false backend/tests/fixtures/event-stream-vectors.json.bak
 expect true  go.work
 expect true  go.work.sum
 expect true  vendor/modules.txt

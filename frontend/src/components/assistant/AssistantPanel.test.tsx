@@ -310,9 +310,8 @@ describe('assistant panel', () => {
     expect(screen.getByTestId('agent-status')).toHaveTextContent('Waiting for approval')
 
     await user.click(approve)
-    // Through the one respond route (#815), not the socket.
+    // Through the one respond route (#815).
     expect(respondRequests()).toEqual([{ id: expect.stringMatching(/^approval:/), body: { kind: 'approval', decision: 'approve' } }])
-    expect(sentOf('approval.decision')).toEqual([])
     // #782: the call says it is done; what it returned is behind its Details.
     const print = () => screen.getAllByTestId('agent-tool').find((t) => t.textContent?.includes('Print name-keychain × 2'))
     await waitFor(() => expect(print()).toHaveAttribute('data-status', 'done'))
