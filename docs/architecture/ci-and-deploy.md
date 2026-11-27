@@ -85,7 +85,14 @@ sequenceDiagram
    lines (MediaMTX and the controller run one image), equal to each other. Both lines move,
    and so does the comment that names the API build ("the build of the API's sha-<7>"). The
    `camera` job is continue-on-error, so a build with no image for a part keeps that file's
-   pins and warns. The deploy never moves the camera relay: a relay restart is a gap of
+   pins and warns. Each camera image carries the label `io.scadbuddy.camera.inputs`, a hash
+   of what it runs (`.github/scripts/camera-inputs.sh`: the `scadbuddy` modules the three
+   processes import, `pyproject.toml` and `uv.lock`, the part's MediaMTX config and the
+   Dockerfile's camera stages). The image copies all of `backend/scadbuddy` and carries
+   build labels, so its digest moves with every build. When the new image's hash equals the
+   pinned image's, the deploy keeps that file's pins with a notice, and no recorder or edge
+   pod restarts. Before that, each of the 21 deploys from 22:00 to 06:20 UTC on 2026-11-26/27
+   restarted them (measured on prod, #8191). The deploy never moves the camera relay: a relay restart is a gap of
    about 10 to 30 s in every printer's recording, so its pin in `camera-relay.yaml` moves by
    hand, in a reviewed clusters PR, when its code or MediaMTX changes (camera spec §6.1).
    The final check accepts any relay pin in that file and in no other. Where clusters keeps a
