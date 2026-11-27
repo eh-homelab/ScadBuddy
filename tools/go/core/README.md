@@ -42,7 +42,8 @@ unchanged, to the Python API: WebSockets, SSE and large bodies included. On prod
 | `operations:read` | `GET /operations/{id}` and `…/by-key/{key}` |
 | `operations` | those, and `POST /operations` and `…/{id}/finish`, each with its `activity` row and `activity.changed` event in its transaction (`internal/activity`) |
 | `workspace:read` | `GET /workspace/files`, `…/file`, `…/usage`, and `POST …/session-files` |
-| `workspace:sql` | those, and `POST /workspace/file-deletes`, `…/sweeps` and `…/reconciles`. The status, the bytes, a write, a copy and the move to blobs stay Python's: they need the blob store or the KEK |
+| `workspace:sql` | those, and `POST /workspace/file-deletes`, `…/sweeps` and `…/reconciles` |
+| `workspace` † | every route of `crud_agent_workspace.py`: those, and `GET /workspace/status`, `…/file-bytes`, `POST …/file-writes`, `…/copies`, `…/blob-moves` (below), over the blob store in process |
 | `activity-kinds` | `POST /activity-kinds` |
 | `browser-origins` | `GET` `/browser-origins`, `…/approved`; `POST` `…/approve`, `…/revoke` |
 | `bridge-tabs` | `/session-tabs`, `/tab-owners` and its `claim`, `refresh`, `release`, `release-all`; `PUT /tab-images/{name}`, `POST …/{name}/take` |
@@ -84,6 +85,31 @@ unchanged, to the Python API: WebSockets, SSE and large bodies included. On prod
 | `filament-presets` † | Public, class `api`: `GET /api/v1/filament/presets` (`?source=`, `?type_id=`), `GET …/presets/{preset_id}` and `GET …/presets/{preset_id}/diff` (`?from_version=`, `?to_version=`). `POST …/presets/bambuddy-import` stays Python's. Go writes no preset row (#7204) |
 
 The `unknown-trays` public routes use `internal/auth` (see "Public routes"). Their CRUD route is caller `print`'s, so it has its own `case` in `newRouter` (areaPackages mounts on caller `agent`).
+
+Area `workspace` † (`internal/workspace`, #8131) serves a file's bytes, sealed as Python seals
+them: on a backend with a blob store, a file is the blob `workspace-<sha256 of the sealed bytes>`,
+sealed under a file key of its own in segments of 1 MiB, segment i in the context
+`workspace-file:<sha256>:<i>:<more|end>`; the row keeps the file key wrapped in the context
+`workspace-file-key:<workspace>:<path>:<blob key>`, under the session's payload data key (made by
+the write while the session stands, no audit row) or, for a principal's file, under the KEK
+(`key_kek_id`; the previous KEK still opens one). On `store_backend` `local` the bytes stay in
+Postgres, one `ai_session_file_bytes` row per sha256. A write is one transaction: the session's
+row first when it logs events, the workspace's advisory lock, the conflict, quota and
+directory checks, the row, its blob's `blob_refs` hold (and the old blob's release) and its
+`workspace.file` events; on a blob store the checks also run before the upload, so a refused
+write stores nothing. A fork's copy wraps every file key again first, then writes the rows
+under the parent's lock while its blob rows are the ones wrapped (3 tries, then 409
+`conflict`). A read streams a segment at a time and reads the row again between segments: a
+file replaced meanwhile ends the stream short. The rotation's re-wrap stays Python's.
+`backend/tests/fixtures/workspace-seal-vectors.json`, which `tests/test_workspace_seal_vectors.py`
+writes from Python's own functions (`UPDATE_WORKSPACE_SEAL_VECTORS=1`), holds Go to Python's
+bytes: Go seals each file with the same IVs to the same bytes, opens Python's, and wraps each
+file key alike. Its blob store is `workspace.Store` (`Backend`, `Put`, `Get`): main.go's
+`workspaceBlobs` over `internal/blobstore`'s `Backend`, `PutContent` and `Fetch` (below), which
+names a refusal by Python's class (`StoreFullError`, `StageLockBusyError`) in a write's 503. Like
+`package-mirrors` it needs the KEK, and serves only `store_backend` `s3` or `local`: on any
+other, `GET …/workspace/status` answers `store` `refused` with the reason. A write with no
+Content-Length is a 411 in `_write_body`'s words (route `OwnLength`).
 
 The `filament-presets` routes use `internal/auth` (see "Public routes"). They have their own
 `case` in `newRouter`, because they need the blob store. The area needs the KEK, and it needs
@@ -207,7 +233,7 @@ A Go handler in core that took the bytes itself stores them with `Blobs.Put(ctx,
 the commit's own steps with no staging object (the kind's limit, the store's caps, the stage lock, a
 content object that is there never written, the same row), with the same refusals.
 
-`Blobs.Claim`, `Blobs.PublishFile` and `Blobs.ReadFile` (#8137) are the rest of the store in process, for area `package-mirrors` (above). A publish goes through `put`: the bytes spooled and hashed, the object's stage lock held shared as a commit holds it, the object reused or stored with the caps checked (`stage`), the row written by the caller's `indexer`, and the object removed again when that writes no row and no other row names it (`removeUnnamed`). It adds no route; the upload routes and their kinds are as above.
+`Blobs.Claim`, `Blobs.PublishFile` and `Blobs.ReadFile` (#8137) are the rest of the store in process, for area `package-mirrors` (above). A publish goes through `put`: the bytes spooled and hashed, the object's stage lock held shared as a commit holds it, the object reused or stored with the caps checked (`stage`), the row written by the caller's `indexer`, and the object removed again when that writes no row and no other row names it (`removeUnnamed`). It adds no route; the upload routes and their kinds are as above. `Blobs.Backend`, `Blobs.PutContent` and `Blobs.Fetch` (#8131) are ContentStore's backend name, `put` with no key then `touch`, and `stat` then `get`, for area `workspace`: a put goes through `put` too, its row written by `putIn` at `<kind>-<sha256>` in a transaction, and the object the key named before released when it was another of this store's (`release_replaced`); a fetch of a lost object forgets its row. They take any kind, `workspace` among them; the upload routes' kinds stay as above. Area `package-mirrors` answers a stored blob past its read bound (`ErrTooLarge`) as a 500 with reason `blob-too-large`, its key logged.
 `internal/blobclient` is its Go client: `New(baseURL, token, tel)`, `Upload(ctx, kind, mediaType, body)`; each call to core may take 2 minutes, longer than a busy commit takes to answer `store_busy`.
 Both sides trace their requests with `telemetry`'s `Transport`: each span records the method, the
 status and the peer (`s3` for the store), never a URL, so a presigned query is never recorded. A
@@ -444,9 +470,10 @@ At a stop, the servers drain and the three signals flush within the 20 s shutdow
   answers 503 `kek-missing` while it has none; here a sealed area without a KEK does not start.
 - Times are written in UTC. Python writes them in the database session's time zone, which is UTC
   on prod. A time sent with no offset is read as UTC, not in the database's zone.
-- A body bound refuses a body with no `Content-Length` (411) on the routes with one. Python's
-  JSON gate counts a chunked body instead. A multipart write with no `Content-Length` is 411
-  before its Content-Type is checked.
+- A body bound refuses a body with no `Content-Length` (411) on the routes with one, except
+  `workspace/file-writes`, which answers it in `_write_body`'s words after its Content-Type
+  check (see the workspace area). Python's JSON gate counts a chunked body instead. Any other
+  multipart write with no `Content-Length` is 411 before its Content-Type is checked.
 - A number, boolean or UUID in a body is read strictly: pydantic's lax mode also takes a numeric
   string. A UUID in another spelling is still read and written lower-case with hyphens. The
   blob, background-task and workspace areas refuse `5.0` for an integer (422), and a time given
@@ -469,6 +496,10 @@ At a stop, the servers drain and the three signals flush within the 20 s shutdow
 - `POST /sessions`: a scope's size counts each number as it was sent; Python counted its own
   spelling of it (`1e3` as `1000.0`).
 - `POST /workspace-blob-refs` answers 204 with no `Content-Type`.
+- `POST /workspace/file-writes`: a body over 32 MiB is refused (413) by core's body bound in its
+  words; Python's body gate refuses it in its own. A store failure's 503 names the store error's
+  class (`Class()`), else `Exception`, where Python names the exception's type. A meta that is no
+  JSON says `JSON decode error`, and an event that is no JSON names Go's parse error.
 - `POST /fetch-grants`: a host that is not ASCII, or one that starts `xn--`, is checked by
   `golang.org/x/net/idna`'s registration profile, not Python's `idna` package. Both apply IDNA
   2008; a rare label may be taken by one and refused by the other. A port that `int()` reads

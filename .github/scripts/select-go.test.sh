@@ -30,6 +30,7 @@ expect true  .github/scripts/select-go.test.sh
 expect true  .github/scripts/changed-paths.sh
 expect true  agent/test/fixtures/rate-limit-reset-vectors.json
 expect true  backend/tests/fixtures/plugin-seal-vectors.json
+expect true  backend/tests/fixtures/workspace-seal-vectors.json
 expect true  backend/tests/fixtures/auth-vectors.json
 expect true  backend/tests/fixtures/filament-preset-vectors.json
 expect true  test-fixtures/filament/preset-wire.json
