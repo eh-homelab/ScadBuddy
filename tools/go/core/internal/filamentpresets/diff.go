@@ -99,8 +99,15 @@ func serveDiff(w http.ResponseWriter, r *http.Request, pool *pgxpool.Pool, blobs
 		return
 	}
 	ctx := r.Context()
+	// One read-only snapshot, as read does: the current version and the blob keys agree.
+	tx, err := pool.BeginTx(ctx, pgx.TxOptions{IsoLevel: pgx.RepeatableRead, AccessMode: pgx.ReadOnly})
+	if err != nil {
+		failed(w, r, err)
+		return
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
 	var current int64
-	err := pool.QueryRow(ctx, `SELECT version FROM filament_presets WHERE id = $1`, id).Scan(&current)
+	err = tx.QueryRow(ctx, `SELECT version FROM filament_presets WHERE id = $1`, id).Scan(&current)
 	if errors.Is(err, pgx.ErrNoRows) {
 		writeCode(w, r, presetNotFound)
 		return
@@ -116,7 +123,7 @@ func serveDiff(w http.ResponseWriter, r *http.Request, pool *pgxpool.Pool, blobs
 		from = max(to-1, 1)
 	}
 	keys := map[int64]string{}
-	res, err := pool.Query(ctx, `SELECT version, blob_key FROM filament_preset_versions
+	res, err := tx.Query(ctx, `SELECT version, blob_key FROM filament_preset_versions
 		WHERE preset_id = $1 AND version = ANY($2::bigint[])`, id, []int64{from, to})
 	if err != nil {
 		failed(w, r, err)
@@ -134,6 +141,11 @@ func serveDiff(w http.ResponseWriter, r *http.Request, pool *pgxpool.Pool, blobs
 	}
 	res.Close()
 	if err := res.Err(); err != nil {
+		failed(w, r, err)
+		return
+	}
+	// The blob reads below need no database.
+	if err := tx.Rollback(ctx); err != nil && !errors.Is(err, pgx.ErrTxClosed) {
 		failed(w, r, err)
 		return
 	}

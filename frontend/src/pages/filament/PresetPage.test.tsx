@@ -126,6 +126,24 @@ describe('the preset page', () => {
     expect(await within(compare).findByText('No key changed.')).toBeInTheDocument()
   })
 
+  it('asks again when Try again is clicked after a failure', async () => {
+    let calls = 0
+    server.use(
+      http.get('/api/v1/filament/presets/3/diff', () => {
+        calls += 1
+        return calls === 1 ? problem(503, 'store_unavailable', 'down') : HttpResponse.json({ preset_id: 3, from_version: 1, to_version: 2, changes: [{ key: 'nozzle_temperature', before: '200', after: '210' }] })
+      }),
+    )
+    const { user } = show(3)
+    const compare = await screen.findByRole('region', { name: 'Compare versions' })
+    expect(await within(compare).findByText('The blob store did not answer. Try again.')).toBeInTheDocument()
+    expect(calls).toBe(1)
+    await user.click(within(compare).getByRole('button', { name: 'Try again' }))
+    await waitFor(() => expect(calls).toBe(2))
+    expect(await within(compare).findByRole('table', { name: 'Changed keys, v1 to v2' })).toBeInTheDocument()
+    expect(within(compare).queryByRole('button', { name: 'Try again' })).not.toBeInTheDocument()
+  })
+
   it('says presets are not on when the area is off', async () => {
     presetsOff()
     show(3)
