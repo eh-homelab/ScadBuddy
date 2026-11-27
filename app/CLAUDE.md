@@ -22,13 +22,13 @@ CI's `android` job (`ci.yml`, lane `android` in `select-lanes.sh`) runs the same
 - `Platforms/Android/NfcBridge.cs`: reader mode, MIFARE reads (keys from the
   [RFID Tag Guide](https://github.com/Bambu-Research-Group/RFID-Tag-Guide)'s HKDF), NDEF
   reads and writes, and the bridge to `Resources/Raw/nfc-polyfill.js` (Web NFC's `NDEFReader`).
-- `Platforms/Android/ScanChromeClient.cs`: the camera and the location, for an accepted origin only.
+- `Platforms/Android/ScanChromeClient.cs`: the camera and the location, for the set origin only.
 - `Telemetry.cs`: OTLP/HTTP traces, metrics and logs (`scadbuddy-app`).
 
 ## Rules
 
 - A Bambu tag is never written.
-- Only the set origin, and an origin the person accepted once, gets the NFC bridge, the
-  camera, the location or a scan's bytes.
+- Only the set origin's page gets the NFC bridge, the camera and the location. A scan
+  link's read or photo goes only to the set origin, or to one the person accepted once.
 - Telemetry (spans, metrics, OTLP logs) never carries a UID or block data. The local
   logcat line (tag `ScadBuddyNfc`) names the UID and the block counts, never block data.
