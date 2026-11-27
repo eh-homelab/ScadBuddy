@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"context"
 	"crypto/rand"
+	"crypto/sha256"
 	"encoding/base64"
 	"encoding/binary"
 	"encoding/hex"
@@ -427,6 +428,44 @@ func TestTheRealtimeSocketRefusesAForeignOriginAndASignedOutCaller(t *testing.T)
 	expect(t, res.StatusCode, 403)
 	_, res = enforced.dial(map[string]string{"Authorization": "Bearer " + enforced.credential("agent", "api")})
 	expect(t, res.StatusCode, 101)
+}
+
+// A person's access token opens the socket here, through the same gate as the public
+// routes: a live one is served in enforce, a revoked one refused before the handshake.
+func TestAnAccessTokenOpensTheSocketHere(t *testing.T) {
+	s := newStreams(t, map[string]string{"SCADBUDDY_AUTH_MODE": "enforce"})
+	live := "sbpat_0000000000000001." + strings.Repeat("a", 43)
+	dead := "sbpat_0000000000000002." + strings.Repeat("b", 43)
+	for _, row := range []struct {
+		id, token, revoked string
+	}{{"0000000000000001", live, "NULL"}, {"0000000000000002", dead, "now()"}} {
+		s.sql(`INSERT INTO personal_access_tokens (id, principal, name, scope, token_hash, expires_at, revoked_at)
+			VALUES ($1, 'user:i#s', 'n', 'read', sha256($2::bytea), now() + interval '1 day', `+row.revoked+`)`,
+			row.id, []byte(row.token))
+	}
+	_, res := s.dial(map[string]string{"Authorization": "Bearer " + live})
+	expect(t, res.StatusCode, 101)
+	_, res = s.dial(map[string]string{"Authorization": "Bearer " + dead})
+	expect(t, res.StatusCode, 403)
+}
+
+// An auth.session_revoked that names the socket's session (its hex SHA-256) closes it.
+func TestASessionRevokedByIDClosesItsSocket(t *testing.T) {
+	s := newStreams(t, map[string]string{"SCADBUDDY_AUTH_MODE": "observe"})
+	token := strings.Repeat("c", 43)
+	s.sql(`INSERT INTO auth_sessions (id_hash, principal, issuer, subject, kind, created_at, last_seen_at,
+		idle_expires_at, absolute_expires_at) VALUES (sha256($1::bytea), 'user:i#s', 'i', 's', 'login', now(), now(),
+		now() + interval '1 day', now() + interval '2 days')`, []byte(token))
+	sock, res := s.dial(map[string]string{"Cookie": `__Host-scadbuddy_session="` + token + `"`})
+	expect(t, res.StatusCode, 101)
+	sum := sha256.Sum256([]byte(token))
+	s.publish("auth.session_revoked", httpx.Field{Key: "principal", Value: "user:i#s"},
+		httpx.Field{Key: "session_id", Value: strings.Repeat("0", 64)})
+	s.publish("auth.session_revoked", httpx.Field{Key: "principal", Value: "user:i#s"},
+		httpx.Field{Key: "session_id", Value: hex.EncodeToString(sum[:])})
+	op, payload := sock.next()
+	expect(t, op, byte(8))
+	expect(t, int(binary.BigEndian.Uint16([]byte(payload))), 4401)
 }
 
 func TestARevokedSessionClosesItsSocket(t *testing.T) {

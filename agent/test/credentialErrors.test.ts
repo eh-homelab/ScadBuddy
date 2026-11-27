@@ -94,10 +94,13 @@ describe('describeApiFailure (#1101)', () => {
 })
 
 describe('IANA_ZONE_NAMES (#8023)', () => {
-  // The list is tzdata's, pasted; these fail when the runtime's ICU moves past it.
+  // The list is tzdata's, pasted; these fail when the runtime's ICU moves past it (a
+  // Node bump). The fix is to update the list, not to look for a bug (#8082).
+  const fix = `update src/harness/ianaZoneNames.ts from tzdata ${process.versions.tz ?? '(this runtime\'s)'} tzdata.zi`
+
   it('holds every zone ICU names with a slash', () => {
     const missing = Intl.supportedValuesOf('timeZone').filter((z) => z.includes('/') && !IANA_ZONE_NAMES.has(z))
-    expect(missing).toEqual([])
+    expect(missing, fix).toEqual([])
   })
 
   it('holds only names ICU reads', () => {
@@ -109,7 +112,7 @@ describe('IANA_ZONE_NAMES (#8023)', () => {
         return true
       }
     })
-    expect(unread).toEqual([])
+    expect(unread, fix).toEqual([])
   })
 })
 

@@ -6,7 +6,7 @@ in its own transaction (D7)."""
 from __future__ import annotations
 
 from collections.abc import AsyncIterator, Iterator
-from datetime import timedelta
+from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
 from typing import Any
 
@@ -24,8 +24,9 @@ from scadbuddy.core.problems import install_problem_handlers
 from scadbuddy.crud.client import CrudClient
 from scadbuddy.crud.projects import RemoteFlowStore
 from scadbuddy.flows.component import FLOWS
+from scadbuddy.flows.grants import GrantAnswers, GrantSpec
 from scadbuddy.flows.models import Decision, Proposal
-from scadbuddy.flows.store import FlowStore, HopMovedError
+from scadbuddy.flows.store import FlowStore, GrantLapsedError, HopMovedError
 from scadbuddy.render.projection import JobProjection
 from scadbuddy.workflows.flow_models import FlowRecord, FlowWaiting, HopRecord, ProjectionWrite
 from tests.flows.flows_support import define, parent_session
@@ -344,6 +345,43 @@ async def test_an_answer_is_taken_over_and_withdrawn(
     await remote.withdraw_decision(two)
     await remote.withdraw_decision(two)
     assert await remote.get_decision(one.request_id) is None
+
+
+async def test_a_take_over_under_a_lapsed_grant_is_409_and_the_client_raises_it_again(
+    remote: RemoteFlowStore, store: FlowStore, http: httpx.AsyncClient
+) -> None:
+    await started(store)
+    grant = await store.insert_grant(
+        "r1",
+        GrantSpec(
+            expires_at=datetime.now(UTC) + timedelta(hours=1),
+            answers=GrantAnswers(who=["sessions"]),
+        ),
+        status="approved",
+        requested_by={"kind": "browser"},
+    )
+    held = _decision(
+        kind="answer",
+        outcome="answered",
+        response={"answer": "one"},
+        responder="session:s",
+        admitted_by=grant.id,
+    )
+    assert await remote.record_decision(held) is True
+    await store.revoke_grant("r1", revoked_by="browser")
+    again = held.model_copy(update={"response": {"answer": "two"}})
+    body = {
+        "decision": again.model_dump(mode="json"),
+        "held": held.model_dump(mode="json"),
+        "seen": [],
+    }
+    raw = await http.post(f"{BASE}/decisions/take-over", json=body)
+    assert raw.status_code == 409, raw.text
+    assert raw.json()["reason"] == "grant_lapsed"
+    with pytest.raises(GrantLapsedError):
+        await remote.take_over_decision(again, held=held, seen=[])
+    kept = await store.get_decision(held.request_id)
+    assert kept is not None and kept.response == {"answer": "one"}
 
 
 async def test_a_request_id_with_a_slash_reaches_its_route(

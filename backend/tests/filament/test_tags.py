@@ -86,6 +86,31 @@ def test_a_read_of_a_bound_uid_names_its_spool(pg_pool: PgPool) -> None:
     assert result.spool is not None and result.spool.id == spool and result.next == "open_spool"
 
 
+def test_a_phone_uid_finds_the_ams_tag_and_its_spool(pg_pool: PgPool) -> None:
+    """#8042: a phone reads a Bambu tag's 4-byte UID; the AMS reports it as
+    `<uid>00000100`. Both name one tag, so the phone's read opens the spool and makes no
+    second row (prod tags `a167982e…` and `becfa1bf…`, read 2026-11-26)."""
+    store = FilamentSpoolStore(pg_pool)
+    spool = _spool(store, pg_pool)
+    store.bind_tag(
+        spool,
+        tag_uid="7E7482BB00000100",
+        tray_uuid="D3B5D4BCA6044374A9B52E9C2DC9AC6A",
+        kind="bambu_mifare",
+        actor="ann",
+    )
+    with pg_pool.connection() as conn:
+        found = conn.execute("SELECT id FROM filament_tags").fetchone()
+    assert found is not None
+    result = tags.read(
+        store, TagRead(source="phone", uid="7E7482BB"), actor="ann", defaults=DEFAULTS
+    )
+    assert result.tag is not None and result.tag.id == found["id"]
+    assert result.spool is not None and result.spool.id == spool
+    assert result.next == "open_spool"
+    assert _count(pg_pool, "filament_tags") == 1
+
+
 def test_a_read_with_no_uid_makes_no_tag(pg_pool: PgPool) -> None:
     store = FilamentSpoolStore(pg_pool)
     result = tags.read(store, TagRead(source="phone", uid=""), actor="ann", defaults=DEFAULTS)

@@ -4,6 +4,7 @@ import type { components } from '../../../api/schema'
 import type { FilamentInventorySpool, FilamentInventoryView, FilamentSpool } from '../../../api/types'
 import { divDecimal, mulDecimal } from '../../../lib/decimal'
 import { parseRgba } from '../../../lib/rgba'
+import { cleanTagUid } from '../../../lib/tagUid'
 // Also a cycle (`handlers.ts` loads every feature): only inside functions.
 import { mockSettings } from '../../handlers'
 // A module cycle (`orders/priceBook.ts` imports `inventoryRows` from here): use it only inside functions.
@@ -2052,8 +2053,8 @@ export function setOrigin(spoolId: string, origin: string, tagEncodedAt?: string
   if (tagEncodedAt !== undefined) row.tag_encoded_at = tagEncodedAt
 }
 
-/** `clean_tag_uid`: hex digits only, the last 16, upper case; none when empty or all zeros. */
-export const cleanTagUid = (uid: string | null | undefined) => keyOf(hexOf(uid).slice(-16))
+/** `clean_tag_uid`, from the browser's one copy (`lib/tagUid.ts`, #8042), for `tags.ts`. */
+export { cleanTagUid }
 
 /**
  * #7273 `seen_on` for a phone's or an agent's read: the tag with this cleaned UID, made when none
@@ -2688,7 +2689,7 @@ export const handlers = [
     const body = (await request.json()) as S['TagBind']
     const extra = extraKeys(body, FIELDS.tag)
     if (extra) return extra
-    const uid = keyOf(hexOf(body.tag_uid).slice(-16))
+    const uid = cleanTagUid(body.tag_uid)
     const tray = keyOf(hexOf(body.tray_uuid).slice(0, 32))
     if (uid === null && tray === null) return problem(422, REFUSED.tagUnnamed)
     const row = findSpool(String(params.id))

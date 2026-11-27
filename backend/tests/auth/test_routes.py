@@ -84,6 +84,7 @@ def test_every_route_has_a_class() -> None:
             "crud.camera",
             "crud.camera-relay",
             "crud.fleet",
+            "crud.fleet-rotator",
             "flow.host",
         )
 
@@ -396,5 +397,26 @@ def test_fleet_scope_and_route_class() -> None:
     assert would_refuse("crud.fleet", fleet, request_header=False, header_needed=False) is None
     assert (
         would_refuse("crud.fleet", camera, request_header=False, header_needed=False)
+        == "wrong_caller"
+    )
+
+
+def test_fleet_rotator_scope_and_route_class() -> None:
+    assert SCOPES["fleet-rotator"] == frozenset({"crud.fleet-rotator"})
+    match = CRUD_PATH.match("/api/v1/internal/crud/fleet-rotator/machines/x")
+    assert match is not None
+    assert CRUD_CLASSES[match.group(1)] == "crud.fleet-rotator"
+    rotator = Service("fleet-rotator", frozenset({"crud.fleet-rotator"}))
+    fleet = Service("fleet", frozenset({"crud.fleet"}))
+    assert (
+        would_refuse("crud.fleet-rotator", rotator, request_header=False, header_needed=False)
+        is None
+    )
+    assert (
+        would_refuse("crud.fleet-rotator", fleet, request_header=False, header_needed=False)
+        == "wrong_caller"
+    )
+    assert (
+        would_refuse("crud.fleet", rotator, request_header=False, header_needed=False)
         == "wrong_caller"
     )

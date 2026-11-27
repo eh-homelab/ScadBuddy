@@ -389,14 +389,16 @@ async def test_a_lan_start_with_a_bad_plate_costs_only_its_own(
     links: PrintLinkStore, jobs: JobProjection
 ) -> None:
     """#8078: a recorded plate that is not a whole number counts as none; it does not
-    fail the read, so every other LAN start keeps its job and plate."""
+    fail the read, so every other LAN start keeps its job and plate. #8083: plates start
+    at 1, so a plate of 0 or below counts as none too."""
     printer = "00000000-0000-4000-8000-000000008078"
-    _lan_runs(jobs, printer, {"good": 2, "frac": 2.0, "huge": 10**12})
-    names = [(printer, f"scadbuddy-{run}-p1") for run in ("good", "frac", "huge")]
+    runs: dict[str, object] = {"good": 2, "frac": 2.0, "huge": 10**12, "zero": 0, "neg": -1}
+    _lan_runs(jobs, printer, runs)
+    names = [(printer, f"scadbuddy-{run}-p1") for run in runs]
 
     starts = (await links.jobs(lan_starts=names)).lan_starts
 
-    assert [starts[name].plate for name in names] == [2, None, None]
+    assert [starts[name].plate for name in names] == [2, None, None, None, None]
 
 
 async def test_a_library_send_is_pending_until_its_archive_is_linked(
