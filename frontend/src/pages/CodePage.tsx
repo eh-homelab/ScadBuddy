@@ -1,24 +1,79 @@
 import { useState, type FormEvent } from 'react'
-import { Navigate, useNavigate, useParams } from 'react-router'
-import { ApiError } from '../api/client'
+import { Link, Navigate, useNavigate, useParams } from 'react-router'
+import { api, ApiError } from '../api/client'
 import { resolveCode } from '../api/filament'
+import type { TaskQuestion } from '../api/types'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
+import { Card, CardContent } from '@/components/ui/card'
 import { Skeleton } from '@/components/ui/skeleton'
+import { TaskPanel } from '../components/flows/TaskPanel'
+import { inputFields } from '../lib/flowInputs'
+import { flowRunPath } from '../lib/flows'
 import { useAsync } from '../lib/useAsync'
 
-/** #6955 — `/x/<code>`: the address a label's QR holds. It opens the place or spool the code names. */
+/** #6955 — `/x/<code>`: the address a label's QR holds. It opens the place or spool the code names. #8062: an open task that waits for the code comes first. */
 export function CodePage() {
   const { code = '' } = useParams()
   const navigate = useNavigate()
   const [typed, setTyped] = useState('')
   const found = useAsync(() => resolveCode(code), [code])
 
-  if (found.data) {
-    const to = found.data.kind === 'location' ? `/filament/locations/${found.data.id}` : `/filament/spools/${found.data.id}`
-    return <Navigate to={to} replace />
+  // A failed read is logged and leaves today's navigation.
+  const waiting = useAsync(
+    () =>
+      api.listTasks({ code }).catch((cause: unknown) => {
+        console.warn('code page: could not read the tasks that wait for the code', cause)
+        return [] as TaskQuestion[]
+      }),
+    [code],
+  )
+
+  const to = found.data ? (found.data.kind === 'location' ? `/filament/locations/${found.data.id}` : `/filament/spools/${found.data.id}`) : null
+  const tasks = waiting.data ?? []
+  if (!found.loading && !waiting.loading && tasks.length > 0) {
+    const instead = to && (
+      <Link to={to} className="text-sm underline">{`Open ${code} instead`}</Link>
+    )
+    const scan = tasks.length === 1 ? inputFields(tasks[0]!.schema).find((field) => field.widget === 'scan') : undefined
+    return (
+      <div className="mx-auto flex w-full max-w-md flex-col gap-4 p-4">
+        {tasks.length === 1 ? (
+          <Card size="sm" role="region" aria-label={tasks[0]!.title}>
+            <CardContent className="flex flex-col gap-2 text-base">
+              <h1 className="text-lg font-semibold break-words">{tasks[0]!.title}</h1>
+              <TaskPanel
+                task={tasks[0]!}
+                open
+                respond={async (send) => {
+                  await send()
+                }}
+                onClosed={() => undefined}
+                onSettled={() => waiting.refresh()}
+                offer={scan ? { field: scan.name, code: found.data?.code ?? code, n: 1 } : undefined}
+              />
+            </CardContent>
+          </Card>
+        ) : (
+          <>
+            <h1 className="text-lg font-semibold">{`${tasks.length} tasks wait for ${code}`}</h1>
+            <ul className="flex flex-col gap-2">
+              {tasks.map((task) => (
+                <li key={task.id}>
+                  <Link to={flowRunPath(task.run_id)} className="text-base underline">
+                    {task.title}
+                  </Link>
+                </li>
+              ))}
+            </ul>
+          </>
+        )}
+        {instead}
+      </div>
+    )
   }
-  if (found.loading) return <Skeleton role="status" aria-label="Looking up the code" className="m-4 h-8 w-48" />
+  if (to) return <Navigate to={to} replace />
+  if (found.loading || waiting.loading) return <Skeleton role="status" aria-label="Looking up the code" className="m-4 h-8 w-48" />
 
   const unknown = found.error instanceof ApiError && found.error.status === 404
   const go = (event: FormEvent) => {
