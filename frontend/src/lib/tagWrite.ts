@@ -172,7 +172,8 @@ export function restoreBackup(options: {
     reason: 'restore',
     prepare: (now, fresh) => restoreTagBackup(tagId, backupId, { uid: now.uid, records: now.records, backup_id: fresh }).then((answer) => answer.records),
     confirm: async (_now, _backup, _sent, back) => {
-      await postTagRead({ uid: back.uid, records: back.records })
+      // The read back is no tap: no scan history row (#8148).
+      await postTagRead({ uid: back.uid, records: back.records, tap: false })
       return null
     },
   })

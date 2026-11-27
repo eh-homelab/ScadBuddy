@@ -253,6 +253,28 @@ keys from the UID, after the [RFID Tag Guide](https://github.com/Bambu-Research-
 (#8058). It is pure: no I/O and no SQL, and it never writes a tag. Its `Tag` JSON is what a scan
 record stores; `testdata/*.json` pins it, and a change bumps `DecoderVersion`.
 
+Area `filament-tag-reads` † (`internal/tagreads`, #8148) is a public area: `POST
+/api/v1/filament/tags/reads`, class `api`, at Python's path. A body with `mifare_blocks` is
+core's: it checks the blocks (at most 64, index 0 to 63, 16 bytes each), drops every sector
+trailer, decodes the tag with `internal/bambutag`, stores the dump as a `tag_dump` blob
+(`blobstore.Blobs.Put`, the upload commit's checks with no presigned PUT), and in one
+transaction finds or makes the tag by tray UUID and UID (`filament_tag_uids`), folds a UID-only
+tag of the same tray into it, and appends a `filament_tag_reads` row. Then it forwards a UID-only
+read to Python, which writes the last-seen, the bind and the answer, and adds `bambu`,
+`tag_read_id`, `dump_key` and, for a tag with no spool, `draft`. Any other body goes to Python
+unchanged (with `image` and `location` taken off), and an answered tag gets its history row after.
+A read of either kind writes no history row (nor, for MIFARE, a `raw_blob` or a hold) when the
+body says `tap: false` (a page's lookup of a tag it read before) or binds a spool
+(`bind_spool_id`, the page binding a tag it just read). Core's own refusals of a MIFARE read,
+422 `mifare_invalid` (its shape) and 422 `mifare_unreadable` (the decode), come before it records
+anything. A bound tag that gains a tray UUID (set on it, or by a fold) is queued in
+`filament_bb_tag_pending`. A MIFARE read locks the tags of its tray UUID and UID in id order.
+A MIFARE read makes its tag `bambu_mifare` only when it decodes to a tray UUID or a filament type.
+A read's source is the caller's: an access token or a service credential is `agent`.
+`image` (a committed `scan_image` blob) and `location` are checked and stored on the row.
+`Reads.RecordMifare(ctx, body, actor, source)` is the same write for a Go caller (#8157). With
+the area off, Python answers a MIFARE read 503 `mifare_needs_core`.
+
 A request that reaches Python carries one `X-Forwarded-For` value: its client, as the trusted
 proxies name it (`core/proxies.py`). So Python runs with `SCADBUDDY_TRUSTED_PROXIES=127.0.0.1`
 (and `SCADBUDDY_CORE_UPSTREAM` names the literal `127.0.0.1`, not `localhost`, which may connect over
