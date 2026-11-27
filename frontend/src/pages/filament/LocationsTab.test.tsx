@@ -115,6 +115,13 @@ describe('the Locations tab', () => {
 })
 
 describe('the Locations tab · dry boxes (#7167)', () => {
+  it('offers Print label on a dry box row, which opens the place label flow, and on no tray', async () => {
+    renderPage(<LocationsTab />)
+    const box = await place(L.DRY_BOX)
+    expect(within(box).getByRole('link', { name: 'Print label for Dry box 1' })).toHaveAttribute('href', `/filament/labels?locations=${L.DRY_BOX}`)
+    expect(within(await place(L.AMS_A1)).queryByRole('link', { name: /Print label/ })).toBeNull()
+  })
+
   it('offers the Dry box switch only for a dry-storage kind, and sets capacity 1', async () => {
     const { user } = renderPage(<LocationsTab />)
     await tree()

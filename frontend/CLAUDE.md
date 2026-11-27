@@ -282,7 +282,8 @@ same way, `vite.config.ts`).
   `GET /filament/spools?awaiting_home=true` as the unknown trays are read; `needsYou.ts` lists each
   as the kind `home-return` (source `homes`, since `home_asked_at`). The shell owns the dialog
   (`components/filament/useHomeReturnDialog.tsx`, `NeedsYou.answerHome`); the spool page's "Dry box"
-  banner opens the same `HomeReturnDialog`. The person always names the spool that goes in, through
+  banner opens the same `HomeReturnDialog`. Each place row of the Locations tab that is not a tray
+  (a dry box included) has a "Print label" link to the place label (`LocationTree.tsx`). The person always names the spool that goes in, through
   `components/filament/IdentifySpool.tsx` (Scan tag only where Web NFC is; a code field always, with
   "Use camera" where `window.BarcodeDetector` exists, else "Take a photo" through `api/scan.ts`, which
   a 404 hides; Pick by hand): nothing is preselected, the unloaded spool included. The box's spool or

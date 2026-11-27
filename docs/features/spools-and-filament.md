@@ -343,6 +343,16 @@ own series, `scadbuddy_filament_non_print_waste_grams`, by material. The reader 
 `metrics_export.py`. The Metrics tab shows a "Non-print waste" block under "Waste" only when
 the range has some (`frontend/src/pages/filament/MetricsTab.tsx`).
 
+A dry box is a place of a dry-storage kind (`dry_storage` on the kind), with capacity 1, not
+archived, and with no printer (#7167, `backend/scadbuddy/filament/dry_box.py` `BOX`). Capacity
+was only a number before; for a dry box it is now enforced. A box holds one spool. A move into
+a box that holds another spool is a 409 `box_full` naming it (`occupant_id`), and so are a
+bulk create and a bulk restore. A change that makes a place a box while it holds two spools or
+more (its kind, its capacity or its kind's `dry_storage` flag) is a 422 `box_has_many`. A
+place of another kind, or with another capacity, keeps capacity as a number only. A box is a
+place, so its label is the place label, `L-<n>`; the row of every place on the Locations tab
+has a "Print label" link to it (`frontend/src/components/filament/LocationTree.tsx`).
+
 A spool's home is the last dry box it sat in (#7167). When a spool that went into its tray
 from a place that is a live dry box now comes out of the tray, capture puts it in no place,
 makes that box its home and sets `home_asked_at`: ScadBuddy never assumes which spool goes into
