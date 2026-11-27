@@ -315,10 +315,14 @@ A body with `read_id` (#8244) names a paired device's read in place of `uid`, `t
 `records` and `mifare_blocks` (with any of them it is a 422 `device_read_invalid`). Core loads the
 read (`devices.Store.OwnRead`: a read of a device the caller does not own is a 404
 `read_not_found`, with `code`, as a read that is not there), reads its `tag_dump` blob, and takes the dump's
-UID, its tech as `tag_type`, and its blocks as `mifare_blocks` (or its records, when it holds no
-block). Then it decodes the read as an inline one. The history row's source is `app`, and its
-`device_read_id` names the read. A device read makes at most one row: a second post of it
-answers the first row's `tag_read_id`.
+UID, its tech as `tag_type` (cut to 32 characters), and its blocks as `mifare_blocks`. A dump
+that is no MIFARE Classic 1K read (no block, a UID that is not 4 bytes, or blocks past 63) gives
+a UID-only read with the dump's records instead. Then it decodes the read as an inline one. The
+history row's source is `app`, and its `device_read_id` names the read. Only the history row is
+idempotent: a second post of the same read answers the first row's `tag_read_id` and writes no
+second row, but the rest runs again (Python's answer and last-seen mark, the tag's update), and
+an `image` sent with it is not kept. With the area off, Python answers a `read_id` 503
+`device_read_needs_core`.
 
 A request that reaches Python carries one `X-Forwarded-For` value: its client, as the trusted
 proxies name it (`core/proxies.py`). So Python runs with `SCADBUDDY_TRUSTED_PROXIES=127.0.0.1`
@@ -346,7 +350,7 @@ CORS rule and the app's CSP admit only the storefront), so core takes the photo'
 | Route | Body | Answer |
 |---|---|---|
 | `POST /api/v1/scan/images` | the photo's bytes (JPEG, PNG or WebP; at most 12 MiB) | `{key, media_type, sha256, size}`: a `scan_image` blob, its type read from its bytes, never from a header. 415 `image_not_supported` for any other bytes; a HEIC, HEIF or AVIF photo is refused with its own words (no decoder in pure Go reads one: the page draws a chosen photo on a canvas and sends a JPEG) |
-| `POST /api/v1/scan/codes` | `{key, source?, location?}`, or `{read_id, source?, location?}` (#8244: a paired device's photo read in place of `key`; its `source` defaults to `app`): `source` `shutter` (the default), `nfc`, `file` or `app`; `location` `{lat, lon, accuracy_m?, at?}`, lat -90 to 90, lon -180 to 180, accuracy 0 to 1,000,000 m | a scan (below), recorded. 404 `image_not_found` for a key that is no `scan_image` blob; 404 `read_not_found` for a read of a device the caller does not own, as for one that is not there; 422 `read_not_a_photo` for a tag read |
+| `POST /api/v1/scan/codes` | `{key, source?, location?}`, or `{read_id, source?, location?}` (#8244: a paired device's photo read in place of `key`; its `source` defaults to `app`): `source` `shutter` (the default), `nfc`, `file` or `app`; `location` `{lat, lon, accuracy_m?, at?}`, lat -90 to 90, lon -180 to 180, accuracy 0 to 1,000,000 m | a scan (below), recorded. 404 `image_not_found` for a key that is no `scan_image` blob; 404 `read_not_found` for a read of a device the caller does not own, as for one that is not there; 422 `read_not_a_photo` for a tag read. Each post is a new scan, of a `read_id` as of a `key` |
 | `GET /api/v1/scan/scans?limit=&before=` | | `{scans}`, newest first, at most 100 (50 by default); `before` is a scan id. A person sees only their own scans (a scan holds its photo and GPS fix); a service sees all; any other caller (anonymous, as under auth `off` or `observe`) sees only the scans made with no actor. The same holds for every route below: another person's scan is a 404 |
 | `GET /api/v1/scan/scans/{id}` | | a scan, or 404 `scan_not_found` |
 | `GET /api/v1/scan/scans/{id}/image` | | the photo's bytes with its media type, `nosniff` (scriptless, for an `<img>`) |

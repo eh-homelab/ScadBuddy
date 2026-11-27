@@ -1,6 +1,7 @@
 package tagreads
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -8,6 +9,7 @@ import (
 	"log/slog"
 	"net/http"
 
+	"github.com/eh-homelab/ScadBuddy/tools/go/core/internal/bambutag"
 	"github.com/eh-homelab/ScadBuddy/tools/go/core/internal/blobstore"
 	"github.com/eh-homelab/ScadBuddy/tools/go/core/internal/httpx"
 )
@@ -38,7 +40,8 @@ func (s *Reads) fromDevice(ctx context.Context, fields map[string]json.RawMessag
 		return "", p
 	}
 	for _, k := range inlineFields {
-		if _, ok := fields[k]; ok {
+		// An empty records is the Python model's default, which a generated client may send.
+		if v, ok := fields[k]; ok && !(k == "records" && (isNull(v) || string(bytes.TrimSpace(v)) == "[]")) {
 			return refuse(k, "read_id comes in place of the read's own fields")
 		}
 	}
@@ -71,12 +74,19 @@ func (s *Reads) fromDevice(ctx context.Context, fields map[string]json.RawMessag
 	}
 	delete(fields, "read_id")
 	fields["uid"], _ = json.Marshal(d.UID)
-	if d.Tech != "" && len(d.Tech) <= tagTypeMax {
-		fields["tag_type"], _ = json.Marshal(d.Tech)
+	if tech := d.Tech; tech != "" {
+		// A device's tech may be up to 40 characters; tag_type holds 32 (ASCII, as Android
+		// names its techs).
+		if len(tech) > tagTypeMax {
+			tech = tech[:tagTypeMax]
+		}
+		fields["tag_type"], _ = json.Marshal(tech)
 	}
-	if len(d.Blocks) > 0 {
+	if classic1K(d) {
 		fields["mifare_blocks"], _ = json.Marshal(d.Blocks)
 	} else {
+		// No MIFARE Classic 1K read (no block, a UID that is not 4 bytes, or a 4K's blocks):
+		// a UID-only read with the dump's records, as the page's fallback posts it.
 		records := d.Records
 		if records == nil {
 			records = []json.RawMessage{}
@@ -84,6 +94,20 @@ func (s *Reads) fromDevice(ctx context.Context, fields map[string]json.RawMessag
 		fields["records"], _ = json.Marshal(records)
 	}
 	return rd.ID, nil
+}
+
+// classic1K says whether d is a MIFARE Classic 1K read that parse takes: a 4-byte UID and
+// blocks 0 to 63 only.
+func classic1K(d deviceDump) bool {
+	if len(d.Blocks) == 0 || len(hexDigits(d.UID)) != 8 {
+		return false
+	}
+	for _, b := range d.Blocks {
+		if b.Index == nil || *b.Index >= bambutag.BlockCount {
+			return false
+		}
+	}
+	return true
 }
 
 // readDump is the bytes of the tag_dump blob key.

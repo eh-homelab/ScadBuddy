@@ -749,6 +749,13 @@ def test_a_mifare_read_that_reaches_python_needs_core(client: TestClient) -> Non
     assert client.post(READS, json=body).status_code == 422
 
 
+def test_a_device_read_that_reaches_python_needs_core(client: TestClient) -> None:
+    """#8244: core's area `filament-tag-reads` loads a device read; Python never does."""
+    got = client.post(READS, json={"read_id": "00000000-0000-0000-0000-000000000001"})
+    assert got.status_code == 503, got.text
+    assert got.json()["code"] == "device_read_needs_core"
+
+
 def test_python_checks_a_reads_photo_and_position_and_leaves_them_to_core(
     client: TestClient,
 ) -> None:

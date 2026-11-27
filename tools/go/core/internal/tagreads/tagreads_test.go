@@ -808,8 +808,15 @@ func TestCleanUIDIsPythons(t *testing.T) {
 // (#8244): the dump stored as a tag_dump blob, and its device and call.
 func (h *harness) deviceRead(owner, uid, blocks string) string {
 	h.t.Helper()
+	return h.deviceDump(owner, map[string]any{"uid": uid, "tech": "MifareClassic", "blocks": blocksOf(blocks), "records": []any{}})
+}
+
+// deviceDump is a paired device's tag read for owner of the dump d.
+func (h *harness) deviceDump(owner string, d map[string]any) string {
+	h.t.Helper()
 	ctx := context.Background()
-	body, _ := json.Marshal(map[string]any{"uid": uid, "tech": "MifareClassic", "blocks": blocksOf(blocks), "records": []any{}})
+	body, _ := json.Marshal(d)
+	uid := d["uid"]
 	put, err := h.reads.Blobs.Put(ctx, dumpKind, mediaType, body)
 	if err != nil {
 		h.t.Fatal(err)
@@ -871,9 +878,35 @@ func TestTagReadFromDeviceRead(t *testing.T) {
 	if got := h.one("SELECT count(*) FROM filament_tag_reads"); got != int64(2) {
 		t.Errorf("%v reads, want 2", got)
 	}
-	// A read_id comes in place of the inline read.
+	// A read_id comes in place of the inline read; an empty records (the model's default) may
+	// come with it.
 	if status, answer := h.post(map[string]any{"read_id": readA, "uid": uidA}); status != http.StatusUnprocessableEntity {
 		t.Errorf("read_id and uid: %d %v", status, answer)
+	}
+	if status, answer := h.post(map[string]any{"read_id": readA, "records": []any{}}); status != http.StatusOK {
+		t.Errorf("read_id and records []: %d %v", status, answer)
+	}
+}
+
+func TestADeviceReadThatIsNoClassic1KIsAUIDOnlyRead(t *testing.T) {
+	h := newHarness(t)
+	h.who = ada
+	// A 7-byte UID, with a block, and a tech longer than tag_type holds.
+	read := h.deviceDump(ada.Principal, map[string]any{"uid": "04A1B2C3D4E5F6", "tech": strings.Repeat("t", 40),
+		"blocks": blocksOf(block0A), "records": []any{}})
+	tag := h.one("INSERT INTO filament_tags (kind, tag_uid) VALUES ('other', '04A1B2C3D4E5F6') RETURNING id::text")
+	h.py.answer = `{"tag":{"id":"` + tag.(string) + `"},"spool":null,"decoded":null,"draft":null,"next":"bind_or_create"}`
+	status, answer := h.post(map[string]any{"read_id": read})
+	if status != http.StatusOK {
+		t.Fatalf("%d %v", status, answer)
+	}
+	got := h.py.bodies[0]
+	if _, ok := got["mifare_blocks"]; ok || got["uid"] != "04A1B2C3D4E5F6" || got["tag_type"] != strings.Repeat("t", 32) ||
+		len(got["records"].([]any)) != 0 {
+		t.Errorf("forwarded %v", got)
+	}
+	if got := h.one("SELECT source FROM filament_tag_reads WHERE device_read_id = $1::uuid", read); got != "app" {
+		t.Errorf("source = %v", got)
 	}
 }
 

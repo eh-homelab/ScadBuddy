@@ -2192,8 +2192,14 @@ class ScanLocation(_In):
 class TagReadIn(_FitsOneTag):
     """What a phone reads from a tag: its UID and its NDEF records, or its MIFARE blocks."""
 
+    #: Empty for a read that names a device read (`read_id`) instead.
+    records: Annotated[list[NdefRecord], Field(max_length=MAX_RECORDS)] = []
     uid: Annotated[str, Field(max_length=64)] | None = None
     tag_type: Annotated[str, Field(max_length=32)] | None = None
+    #: A paired device's tag read (#8244), in place of `uid`, `tag_type`, `records` and
+    #: `mifare_blocks`. Core's area `filament-tag-reads` loads and decodes it; a read with
+    #: `read_id` that reaches Python is a 503 `device_read_needs_core`.
+    read_id: UUID | None = None
     #: Bind the tag to this spool as part of the read.
     bind_spool_id: UUID | None = None
     #: A Bambu tag's data blocks (key trailers left out), which core's area
