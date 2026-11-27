@@ -38,18 +38,18 @@ it('shows a pairing code as a QR code and a scadbuddy://pair link on this host',
   expect(href.startsWith('scadbuddy://pair?url=')).toBe(true)
   const target = new URL(decodeURIComponent(href.slice('scadbuddy://pair?url='.length)))
   expect(target.origin).toBe(window.location.origin)
-  expect(target.pathname).toMatch(/^\/api\/v1\/devices\/pair\/mock-pairing-code-/)
+  expect(target.pathname).toMatch(/^\/api\/v1\/devices\/pairings\/mock-pairing-code-\d+\/claim$/)
   await user.click(within(pairing).getByRole('button', { name: 'Cancel' }))
   expect(screen.queryByRole('region', { name: 'Pair a device' })).not.toBeInTheDocument()
 })
 
 it('moves a pairing link core made on another host onto the host the page is on', async () => {
-  server.use(http.post('*/api/v1/devices/pairings', () => HttpResponse.json({ code_url: 'http://10.0.0.5:8000/api/v1/devices/pair/abc', expires_at: '2099-01-01T00:00:00Z' })))
+  server.use(http.post('*/api/v1/devices/pairings', () => HttpResponse.json({ code_url: 'http://10.0.0.5:8000/api/v1/devices/pairings/abc/claim', expires_at: '2099-01-01T00:00:00Z' })))
   const { user } = renderPage(<DevicesPage />)
   await row(PHONE.name)
   await user.click(screen.getByRole('button', { name: 'Add a device' }))
   const link = await screen.findByRole('link', { name: 'Open the pairing link' })
-  expect(link).toHaveAttribute('href', `scadbuddy://pair?url=${encodeURIComponent(`${window.location.origin}/api/v1/devices/pair/abc`)}`)
+  expect(link).toHaveAttribute('href', `scadbuddy://pair?url=${encodeURIComponent(`${window.location.origin}/api/v1/devices/pairings/abc/claim`)}`)
 })
 
 it('revokes a device after a confirm', async () => {

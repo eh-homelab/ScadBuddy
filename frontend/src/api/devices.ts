@@ -30,7 +30,7 @@ export interface Device {
 }
 
 export interface Pairing {
-  /** `https://<request host>/api/v1/devices/pair/<code>`. */
+  /** `https://<request host>/api/v1/devices/pairings/<code>/claim`, the device's claim. */
   code_url: string
   expires_at: string
 }

@@ -118,7 +118,7 @@ export const handlers = [
 
   http.post(`${BASE}/pairings`, () =>
     HttpResponse.json({
-      code_url: `${location.origin}${BASE}/pair/mock-pairing-code-${++seq}`,
+      code_url: `${location.origin}${BASE}/pairings/mock-pairing-code-${++seq}/claim`,
       expires_at: new Date(Date.now() + 10 * 60_000).toISOString(),
     }),
   ),
