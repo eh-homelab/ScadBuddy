@@ -285,7 +285,8 @@ public sealed class NfcBridge : Java.Lang.Object, NfcAdapter.IReaderCallback, We
 			$"read {Convert.ToHexString(uid)} techs={string.Join(',', techs.Select(t => t.Split('.').Last()))} records={records.Count} " +
 			(mifare is null ? "mifare=none" : $"blocks={mifare["blocks"]!.AsArray().Count} refused={mifare["refusedSectors"]!.ToJsonString()} error={mifare["error"]?.ToString() ?? "none"}"));
 		Record(span, started, techs, records.Count, isClassic, ndefFailed, resumed, mifare);
-		if (mifare is not null)
+		// A device call's read shows its progress on the call's screen instead.
+		if (mifare is not null && progress is null)
 		{
 			var count = mifare["blocks"]!.AsArray().Count;
 			// Sectors 0-4 (blocks 1-18) hold every field that names the filament; the rest is

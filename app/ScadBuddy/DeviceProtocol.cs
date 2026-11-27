@@ -207,6 +207,26 @@ public static class DeviceProtocol
 
 	static JsonObject Done(JsonObject read) => new() { ["outcome"] = "done", ["result"] = new JsonObject { ["read"] = read } };
 
+	/// <summary>
+	/// Why a read that ended (by its last tap, or at the deadline) is not sent, or null to send it.
+	/// A MIFARE Classic read cut short is sent: its <c>missing_blocks</c> say it is partial. An
+	/// NDEF read whose last tap failed holds no records worth sending: it is a failed call.
+	/// </summary>
+	public static string? UnsentRead(bool classic, string? lostError) =>
+		lostError is null || classic ? null : "tag_lost: the tag moved before its records were read";
+
+	/// <summary>The last tap an nfc.write saw before its deadline.</summary>
+	public enum WriteTap { None, Classic, Lost, Written }
+
+	/// <summary>The error of an nfc.write whose deadline came: what its last tap was says why.</summary>
+	public static string WriteTimedOut(WriteTap last) => last switch
+	{
+		WriteTap.Written => "no_read_back: the tag was written, but not read back before the deadline",
+		WriteTap.Classic => "bambu_tag: the last tag tapped was MIFARE Classic, such as a Bambu spool's; ScadBuddy never writes one",
+		WriteTap.Lost => "tag_lost: the tag moved before it was written",
+		_ => "no_tag: no tag was tapped before the deadline",
+	};
+
 	/// <summary>A failed call's result. The error starts with its code, as <c>no_tag: …</c>.</summary>
 	public static JsonObject Failed(string error) => new() { ["outcome"] = "error", ["error"] = Cut(error, ErrorMax) };
 

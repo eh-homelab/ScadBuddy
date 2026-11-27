@@ -51,6 +51,7 @@ static class DeviceMethods
 			}
 			if (call.CancelledByPerson) return DeviceProtocol.Failed("cancelled: the person stopped the read on the phone");
 			if (last is not { } done) return DeviceProtocol.Failed("no_tag: no tag was tapped before the deadline");
+			if (DeviceProtocol.UnsentRead(NfcBridge.IsClassic(done.Tag), progress.LostError) is { } unsent) return DeviceProtocol.Failed(unsent);
 			screen.Say("Sending the read.");
 			var (key, uid, tech, missing) = await SendDump(call, done.Tag, done.Reading);
 			return DeviceProtocol.NfcResult(key, uid, tech, missing);
@@ -78,8 +79,9 @@ static class DeviceMethods
 		try
 		{
 			string? written = null;
-			// A MIFARE Classic tap is refused on the screen, and the call waits for another tag.
-			var refusedClassic = false;
+			// What the last tap did, for the error at the deadline. A MIFARE Classic tap is refused
+			// on the screen, and the call waits for another tag.
+			var lastTap = DeviceProtocol.WriteTap.None;
 			while (true)
 			{
 				Tag tag;
@@ -87,14 +89,11 @@ static class DeviceMethods
 				catch (OperationCanceledException)
 				{
 					if (call.CancelledByPerson) return DeviceProtocol.Failed("cancelled: the person stopped the write on the phone");
-					if (written is not null) return DeviceProtocol.Failed("no_read_back: the tag was written, but not read back before the deadline");
-					return DeviceProtocol.Failed(refusedClassic
-						? "bambu_tag: only a MIFARE Classic tag, such as a Bambu spool's, was tapped; ScadBuddy never writes one"
-						: "no_tag: no tag was tapped before the deadline");
+					return DeviceProtocol.Failed(DeviceProtocol.WriteTimedOut(written is not null ? DeviceProtocol.WriteTap.Written : lastTap));
 				}
 				if (NfcBridge.IsClassic(tag))
 				{
-					refusedClassic = true;
+					lastTap = DeviceProtocol.WriteTap.Classic;
 					screen.Say("That is a MIFARE Classic tag, such as a Bambu spool's. ScadBuddy never writes one. Tap another tag.");
 					continue;
 				}
@@ -103,6 +102,7 @@ static class DeviceMethods
 				var quiet = new CallProgress(call, null);
 				if (written is null)
 				{
+					lastTap = DeviceProtocol.WriteTap.Lost;
 					var before = await Task.Run(() => NfcBridge.ReadTag(tag, quiet));
 					if (quiet.LostError is { } lost)
 					{

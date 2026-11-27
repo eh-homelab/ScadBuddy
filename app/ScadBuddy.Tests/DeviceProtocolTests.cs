@@ -190,6 +190,25 @@ public class DeviceProtocolTests
 		Assert.Equal(DeviceProtocol.ErrorMax, failed["error"]!.GetValue<string>().Length);
 	}
 
+	[Fact]
+	public void AReadIsSentUnlessItsNdefReadFailed()
+	{
+		Assert.Null(DeviceProtocol.UnsentRead(classic: false, lostError: null));
+		Assert.Null(DeviceProtocol.UnsentRead(classic: true, lostError: null));
+		// A MIFARE read cut short is sent: its missing_blocks say it is partial.
+		Assert.Null(DeviceProtocol.UnsentRead(classic: true, lostError: "sector 2: IOException"));
+		// An NDEF read that failed has no records: it is no complete read of an empty tag.
+		Assert.Equal("tag_lost", DeviceProtocol.CodeOf(DeviceProtocol.UnsentRead(classic: false, lostError: "ndef: IOException")!));
+	}
+
+	[Theory]
+	[InlineData(DeviceProtocol.WriteTap.None, "no_tag")]
+	[InlineData(DeviceProtocol.WriteTap.Classic, "bambu_tag")]
+	[InlineData(DeviceProtocol.WriteTap.Lost, "tag_lost")]
+	[InlineData(DeviceProtocol.WriteTap.Written, "no_read_back")]
+	public void AWriteAtItsDeadlineSaysWhatItsLastTapDid(DeviceProtocol.WriteTap last, string code) =>
+		Assert.Equal(code, DeviceProtocol.CodeOf(DeviceProtocol.WriteTimedOut(last)));
+
 	[Theory]
 	[InlineData("no_tag: no tag was tapped", "no_tag")]
 	[InlineData("bambu_tag: this is a MIFARE Classic tag", "bambu_tag")]

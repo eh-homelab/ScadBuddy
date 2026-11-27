@@ -68,6 +68,8 @@ public sealed class DeviceLink
 		if (!answer.IsSuccessStatusCode) throw new InvalidOperationException($"ScadBuddy answered {(int)answer.StatusCode}.");
 		var paired = DeviceProtocol.PairingOf(text, claim) ?? throw new InvalidOperationException("ScadBuddy's answer was not a pairing.");
 		Close();
+		// A call of the old pairing stops, so the new one's calls are not busy.
+		lock (gate) running?.Cancel.Cancel();
 		// The phone keeps one pairing: a new one replaces the old, which expires after its idle hour.
 		await SecureStorage.Default.SetAsync(StoreKey, DeviceProtocol.Stored(paired));
 		lock (gate) { pairing = paired; loaded = true; }
@@ -307,6 +309,7 @@ public sealed class DeviceCall
 	readonly Channel<JsonObject> events = Channel.CreateUnbounded<JsonObject>(new UnboundedChannelOptions { SingleReader = true });
 	readonly Task pump;
 	readonly CancellationTokenSource cancel;
+	static readonly HttpClient Uploads = new() { Timeout = Timeout.InfiniteTimeSpan };
 
 	internal DeviceCall(DeviceLink link, Pairing pairing, CallRequest call, CancellationToken token)
 	{
@@ -373,7 +376,11 @@ public sealed class DeviceCall
 		using var request = DeviceLink.Request(pairing, HttpMethod.Post, $"/api/v1/devices/uploads?call={Request.Call}&kind={kind}");
 		request.Content = new ByteArrayContent(body);
 		request.Content.Headers.ContentType = new MediaTypeHeaderValue(mediaType);
-		using var answer = await DeviceLink.Client.SendAsync(request);
+		// A photo on a slow link takes longer than the shared client's 30 s, and core takes the
+		// upload only until the call's deadline.
+		var left = Request.Deadline - DateTimeOffset.UtcNow;
+		using var until = new CancellationTokenSource(left > TimeSpan.FromSeconds(1) ? left : TimeSpan.FromSeconds(1));
+		using var answer = await Uploads.SendAsync(request, until.Token);
 		if (answer.StatusCode == HttpStatusCode.Unauthorized) link.Ended(pairing, null);
 		if (!answer.IsSuccessStatusCode) throw new UploadFailed((int)answer.StatusCode);
 		var key = (JsonNode.Parse(await answer.Content.ReadAsStringAsync()) as JsonObject)?["key"]?.GetValue<string>();
