@@ -78,6 +78,12 @@ The path is `/filament/spools?q=<query>&from=scan`, with the query encoded by
   An unresolved text switches to "Pick by hand" with the scan query in its search box. One
   match is named at once; several show the filtered list; none shows the empty list. The place
   step (`IdentifyPlace`) does not change: a barcode names no place.
+- **The swap step's camera:** the spool step's camera reads EAN-13, EAN-8, UPC-A and UPC-E
+  as well as QR codes, kept to the formats `BarcodeDetector.getSupportedFormats()` gives where
+  the browser has it (`identify/camera.ts` `SPOOL_FORMATS`). The place step's camera reads QR
+  codes only.
+- **The dry-box home-return dialog (`HomeReturnDialog`):** it uses the same spool step
+  (`IdentifySpool`), so a scanned barcode becomes the same "Pick by hand" search there.
 
 ### The spool list
 

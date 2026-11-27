@@ -587,6 +587,9 @@ matches `[a-z][a-z0-9_]{0,63}`. Limits: 200 keys per entity, 2000 characters per
   `frontend/src/components/entities/api.ts`). The agent's search matches them too
   (`agent/src/tools/filament.ts` loads them, `agent/src/tools/filamentSearch.ts` matches); both use the shared vectors
   `test-fixtures/filament/search-vectors.json`.
+  A `key:value` token (#8372, such as `gtin:06975337041234`) also matches a property with that
+  key whose whole value, or one list item, equals the value; 8 to 14 digits compare as GTIN-14,
+  and a spool also matches by its type's property values.
 - Agent: `entity_property_list`, `entity_property_set`, `entity_property_schema_get` and
   `entity_property_schema_set` (`agent/src/tools/entities.ts`), and a `properties` field on
   `filament_type_upsert` and `filament_spool_upsert` (`agent/src/tools/filament.ts`). An
@@ -697,7 +700,9 @@ matches `[a-z][a-z0-9_]{0,63}`. Limits: 200 keys per entity, 2000 characters per
   item kind `K-<n>` (#6949; it opens the inventory list of the kind's items). A code
   opens at `/x/<code>` (`frontend/src/pages/CodePage.tsx`; route `GET /api/v1/codes/{code}`,
   `backend/scadbuddy/api/codes.py`). Any case works, with or without the dash. A number is
-  never reused, and an archived thing still resolves.
+  never reused, and an archived thing still resolves. A `/x/<text>` that names nothing and has
+  no code shape (a maker's barcode), and the scan page's "Search spools for" link, go to the
+  Spools tab's search with `from=scan`, which opens the spool when only one matches (#8372).
 - Printer places: a printer has its own place (`filament_locations.printer_root`, kind
   "Printer"). Its AMS units and external holder hang under it
   (`LocationStore.ensure_printer_on`, `backend/scadbuddy/filament/locations.py`). A printer
