@@ -76,6 +76,7 @@ func (s *Reads) recordMifare(ctx context.Context, rd read, scan scanFacts, actor
 	saved, err := record(ctx, s.Pool, recordIn{
 		uid: CleanUID(tag.UID), tray: tray, tagType: rd.tagType, actor: actor, source: source,
 		dumpKey: key, complete: tag.Complete, decoded: decoded, scan: scan,
+		bambu: tray != "" || tag.FilamentType != nil,
 	})
 	if err != nil {
 		return Recorded{}, err

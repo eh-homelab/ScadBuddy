@@ -167,13 +167,13 @@ function Scanner() {
     let navigated = false
     const off = nfc.onReading((reading: Reading) => {
       // In the ScadBuddy app a Bambu tag's blocks come with the tap; the server decodes them (#8148).
-      // A server that does not decode them yet (core's area off) answers 503 mifare_needs_core:
-      // the tap is then posted again by its UID and records, as before.
+      // A server that does not decode them yet (core's area off, 503 mifare_needs_core), or
+      // that cannot decode these (a 422), still finds the tag by its UID and records, as before.
       const mifare = takeMifare(reading.uid)
       const plain = { uid: reading.uid || null, tag_type: null, records: reading.records }
       const read = mifare
         ? postTagRead({ ...mifare, records: [] }).catch((cause: unknown) => {
-            if (cause instanceof ApiError && cause.status === 503 && cause.problem.code === 'mifare_needs_core') return postTagRead(plain)
+            if (cause instanceof ApiError && (cause.status === 422 || (cause.status === 503 && cause.problem.code === 'mifare_needs_core'))) return postTagRead(plain)
             throw cause
           })
         : postTagRead(plain)
@@ -266,7 +266,8 @@ function Scanner() {
       setEntries((now) => [{ key, at: new Date(), uid, records, result, held: {} }, ...now])
       setOpenKey(key)
     }
-    postTagRead({ uid: from.uid || null, tag_type: null, records: from.records }).then(
+    // A lookup of a tag read before, not a tap: no scan history row.
+    postTagRead({ uid: from.uid || null, tag_type: null, records: from.records, tap: false }).then(
       (old) => setEntries((now) => forTag(now, from.uid, { result: old })),
       (cause: unknown) => setError(`ScadBuddy could not look up the old tag again: ${cause instanceof ApiError ? cause.detail : 'read it again'}.`),
     )

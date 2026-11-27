@@ -757,6 +757,8 @@ def test_python_checks_a_reads_photo_and_position_and_leaves_them_to_core(
         "records": [],
         "image": {"key": "scan_image-" + "ab" * 32, "media_type": "image/jpeg"},
         "location": {"lat": 51.5, "lon": -0.12, "accuracy_m": 12.5, "at": "2026-11-27T04:00:00Z"},
+        # A lookup that is no tap (#8148 review): core writes no history row; Python takes it.
+        "tap": False,
     }
     got = client.post(READS, json=body)
     assert got.status_code == 200, got.text

@@ -2179,6 +2179,9 @@ class TagReadIn(_FitsOneTag):
     #: read's `filament_tag_reads` row. Python only checks their shape.
     image: ScanImage | None = None
     location: ScanLocation | None = None
+    #: False for a page's lookup of a tag it read before (the old tag after a move, a
+    #: restore's read back): core then writes no `filament_tag_reads` row for it (#8148).
+    tap: bool = True
 
 
 BackupReason = Literal["spool_write", "agent_write", "restore"]

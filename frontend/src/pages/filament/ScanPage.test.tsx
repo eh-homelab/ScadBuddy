@@ -117,15 +117,18 @@ describe('the scan page (#7273)', () => {
     expect(await screen.findByLabelText('Gross weight (g)')).toBeInTheDocument()
   })
 
-  it("posts the app's blocks, and the UID and records again when the server does not decode them (#8148)", async () => {
+  it.each([
+    { status: 503, code: 'mifare_needs_core' },
+    { status: 422, code: 'mifare_unreadable' },
+  ])("posts the app's blocks, and the UID and records again on a $status $code (#8148)", async ({ status, code }) => {
     const log = sent()
     server.use(
       http.post('/api/v1/filament/tags/reads', async ({ request }) => {
         const body = (await request.clone().json()) as { mifare_blocks?: unknown }
         if (body.mifare_blocks)
           return HttpResponse.json(
-            { type: 'about:blank', title: 'Service Unavailable', status: 503, detail: 'core decodes MIFARE reads', code: 'mifare_needs_core' },
-            { status: 503, headers: { 'Content-Type': 'application/problem+json' } },
+            { type: 'about:blank', title: 'Refused', status, detail: 'core does not decode this read', code },
+            { status, headers: { 'Content-Type': 'application/problem+json' } },
           )
         // Falls through to the filament mock's own answer.
       }),

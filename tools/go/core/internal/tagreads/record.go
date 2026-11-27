@@ -22,6 +22,9 @@ type recordIn struct {
 	source   string
 	dumpKey  string
 	complete bool
+	// bambu is a read that decodes to Bambu fields (a tray UUID or a filament type): only it
+	// makes the tag a bambu_mifare tag.
+	bambu bool
 	// decoded is the decoder's JSON without the raw blocks, which the dump holds.
 	decoded []byte
 	scan    scanFacts
@@ -84,10 +87,15 @@ func write(ctx context.Context, tx pgx.Tx, in recordIn) (recorded, error) {
 		if in.tray != "" {
 			tray = in.tray
 		}
-		// The UID is set below, after its filament_tag_uids row, so that row keeps this read's
-		// source and actor (the trigger filament_tag_uids_keep_first would add it as 'tag').
-		if err := tx.QueryRow(ctx, `INSERT INTO filament_tags (kind, tray_uuid)
- VALUES ('bambu_mifare', $1) RETURNING id::text`, tray).Scan(&tagID); err != nil {
+		// The trigger filament_tag_uids_keep_first adds the UID as 'tag'; this new tag's row is
+		// this read's, so it takes the read's source and actor.
+		if err := tx.QueryRow(ctx, `INSERT INTO filament_tags (kind, tag_uid, tray_uuid)
+ VALUES (CASE WHEN $3 THEN 'bambu_mifare' ELSE 'other' END, $1, $2) RETURNING id::text`,
+			in.uid, tray, in.bambu).Scan(&tagID); err != nil {
+			return recorded{}, err
+		}
+		if _, err := tx.Exec(ctx, `UPDATE filament_tag_uids SET source = $3, added_by = $4
+ WHERE uid = $1 AND tag_id = $2::uuid`, in.uid, tagID, in.source, in.actor); err != nil {
 			return recorded{}, err
 		}
 	case byTray == nil:
@@ -119,13 +127,23 @@ func write(ctx context.Context, tx pgx.Tx, in recordIn) (recorded, error) {
  VALUES ($1, $2, $3, $4) ON CONFLICT (uid) DO NOTHING`, in.uid, tagID, in.source, in.actor); err != nil {
 		return recorded{}, err
 	}
+	// A read that committed meanwhile may have given the UID to another tag: then the insert
+	// did nothing, and the transaction is tried again, as the trigger's refusal would be.
+	var holder string
+	if err := tx.QueryRow(ctx, `SELECT tag_id::text FROM filament_tag_uids WHERE uid = $1`, in.uid).Scan(&holder); err != nil {
+		return recorded{}, err
+	}
+	if holder != tagID {
+		return recorded{}, &pgconn.PgError{Code: "23505", ConstraintName: "filament_tag_uids_pkey",
+			Message: "the UID was given to another tag meanwhile"}
+	}
 	if _, err := tx.Exec(ctx, `UPDATE filament_tags SET tag_uid = $2 WHERE id = $1 AND tag_uid IS NULL`,
 		tagID, in.uid); err != nil {
 		return recorded{}, err
 	}
-	// A Bambu read names a Bambu tag; its raw dump only from a complete read.
-	if _, err := tx.Exec(ctx, `UPDATE filament_tags SET kind = 'bambu_mifare',
- raw_blob = CASE WHEN $2 THEN $3 ELSE raw_blob END WHERE id = $1`, tagID, in.complete, in.dumpKey); err != nil {
+	// A read with Bambu fields names a Bambu tag; its raw dump only from a complete read.
+	if _, err := tx.Exec(ctx, `UPDATE filament_tags SET kind = CASE WHEN $4 THEN 'bambu_mifare' ELSE kind END,
+ raw_blob = CASE WHEN $2 THEN $3 ELSE raw_blob END WHERE id = $1`, tagID, in.complete, in.dumpKey, in.bambu); err != nil {
 		return recorded{}, err
 	}
 	readID, err := insertRead(ctx, tx, historyRow{

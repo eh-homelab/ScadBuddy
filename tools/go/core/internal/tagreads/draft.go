@@ -65,9 +65,7 @@ func draftOf(ctx context.Context, pool *pgxpool.Pool, tag bambutag.Tag) (*draft,
 	if tag.Color != nil {
 		d.Rgba = tag.Color
 	}
-	if v := tag.FilamentDiameterMM; v != nil && *v > 0 && *v < 100 {
-		d.DiameterMM = ptr(math.Round(float64(*v)*100) / 100)
-	}
+	d.DiameterMM = diameter(tag.FilamentDiameterMM)
 	lo, hi := temp(tag.HotendMinTemperatureC), temp(tag.HotendMaxTemperatureC)
 	if lo != nil && hi != nil && *lo > *hi {
 		lo, hi = nil, nil
@@ -81,6 +79,19 @@ func draftOf(ctx context.Context, pool *pgxpool.Pool, tag bambutag.Tag) (*draft,
 		d.LabelWeightG = ptr(int(*v))
 	}
 	return d, nil
+}
+
+// diameter is a diameter SpoolCreate takes (more than 0 and less than 100 mm), to 0.01 mm. It
+// is rounded first and then checked, so a value that rounds to 0 or 100 is none.
+func diameter[F ~float32 | ~float64](v *F) *float64 {
+	if v == nil {
+		return nil
+	}
+	mm := math.Round(float64(*v)*100) / 100
+	if !(mm > 0 && mm < 100) {
+		return nil
+	}
+	return &mm
 }
 
 // temp is a temperature SpoolCreate takes (0 to 1000 °C); a blank 0 is none.

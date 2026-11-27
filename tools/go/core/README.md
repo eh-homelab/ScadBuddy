@@ -229,7 +229,10 @@ transaction finds or makes the tag by tray UUID and UID (`filament_tag_uids`), f
 tag of the same tray into it, and appends a `filament_tag_reads` row. Then it forwards a UID-only
 read to Python, which writes the last-seen, the bind and the answer, and adds `bambu`,
 `tag_read_id`, `dump_key` and, for a tag with no spool, `draft`. Any other body goes to Python
-unchanged (with `image` and `location` taken off), and an answered tag gets its history row after.
+unchanged (with `image` and `location` taken off), and an answered tag gets its history row after,
+unless the body says `tap: false` (a page's lookup of a tag it read before) or binds a spool. A
+MIFARE read makes its tag `bambu_mifare` only when it decodes to a tray UUID or a filament type.
+A read's source is the caller's: an access token or a service credential is `agent`.
 `image` (a committed `scan_image` blob) and `location` are checked and stored on the row.
 `Reads.RecordMifare(ctx, body, actor, source)` is the same write for a Go caller (#8157). With
 the area off, Python answers a MIFARE read 503 `mifare_needs_core`.

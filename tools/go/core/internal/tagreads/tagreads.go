@@ -194,9 +194,11 @@ func (s *Reads) ndef(w http.ResponseWriter, r *http.Request, fields map[string]j
 	var tag struct {
 		ID *string `json:"id"`
 	}
-	// A bind_spool_id is the page binding a tag it read a moment ago (the New tag card): no
-	// second tap, so no second history row.
-	if err := json.Unmarshal(answer["tag"], &tag); err == nil && tag.ID != nil && isNull(fields["bind_spool_id"]) {
+	// A bind_spool_id is the page binding a tag it read a moment ago (the New tag card), and
+	// tap false a page's lookup of a tag it read before: no tap, so no history row.
+	var tap *bool
+	_ = json.Unmarshal(fields["tap"], &tap)
+	if err := json.Unmarshal(answer["tag"], &tag); err == nil && tag.ID != nil && isNull(fields["bind_spool_id"]) && (tap == nil || *tap) {
 		var uid, tagType *string
 		_ = json.Unmarshal(fields["uid"], &uid)
 		_ = json.Unmarshal(fields["tag_type"], &tagType)

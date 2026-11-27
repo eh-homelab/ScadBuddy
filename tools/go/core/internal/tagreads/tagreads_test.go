@@ -363,6 +363,21 @@ func TestANewTagsUIDKeepsTheReadsSource(t *testing.T) {
 	}
 }
 
+// Review of #8161: the diameter is rounded before its bounds are checked, so the draft never
+// holds one SpoolCreate (more than 0, less than 100) refuses.
+func TestADraftsDiameterIsRoundedThenChecked(t *testing.T) {
+	for in, want := range map[float32]string{1.749: "1.75", 99.994: "99.99", 99.996: "none", 0.004: "none", 0.006: "0.01", -1: "none"} {
+		v := in
+		got := "none"
+		if d := diameter(&v); d != nil {
+			got = strconv.FormatFloat(*d, 'f', -1, 64)
+		}
+		if got != want {
+			t.Errorf("%v: %s, want %s", in, got, want)
+		}
+	}
+}
+
 func TestATokenOrServiceReadIsAnAgents(t *testing.T) {
 	for kind, want := range map[auth.Kind]string{auth.KindPerson: "phone", auth.KindAnonymous: "phone", auth.KindToken: "agent", auth.KindService: "agent"} {
 		if got := sourceOf(auth.Caller{Kind: kind}, "phone"); got != want {
@@ -458,6 +473,31 @@ func TestAnNDEFReadIsInTheHistoryOfPythonsTag(t *testing.T) {
  FROM filament_tag_reads WHERE tag_id = $1::uuid`, tag)
 	if got != "phone 53F64B94420001 7b7d true" {
 		t.Errorf("row = %v", got)
+	}
+}
+
+// Review of #8161: a read with no Bambu field (no tray UUID, no filament type) is no Bambu tag.
+func TestAReadWithNoBambuFieldsMakesNoBambuTag(t *testing.T) {
+	h := newHarness(t)
+	if status, answer := h.post(mifareRead(uidA, block0A+" 8:00000000000000000000000000000000")); status != http.StatusOK {
+		t.Fatalf("%d %v", status, answer)
+	}
+	if got := h.one("SELECT kind FROM filament_tags"); got != "other" {
+		t.Errorf("kind = %v", got)
+	}
+}
+
+// Review of #8161: a page's lookup of a tag it read before (tap false) is no tap.
+func TestALookupThatIsNoTapIsNotInTheHistory(t *testing.T) {
+	h := newHarness(t)
+	tag := h.one("INSERT INTO filament_tags (kind, tag_uid) VALUES ('ntag_openspool', '53F64B94420001') RETURNING id::text")
+	h.py.answer = `{"tag":{"id":"` + tag.(string) + `"},"spool":null,"decoded":null,"draft":null,"next":"bind_or_create"}`
+	status, answer := h.post(map[string]any{"uid": "53:f6:4b:94:42:00:01", "tag_type": nil, "records": []any{}, "tap": false})
+	if status != http.StatusOK || answer["tag_read_id"] != nil {
+		t.Fatalf("%d %v", status, answer)
+	}
+	if got := h.one("SELECT count(*) FROM filament_tag_reads"); got != int64(0) {
+		t.Errorf("rows = %v", got)
 	}
 }
 
