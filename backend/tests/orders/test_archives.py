@@ -15,6 +15,7 @@ from types import SimpleNamespace
 from typing import Any, cast
 
 import pytest
+from psycopg.types.json import Jsonb
 
 from scadbuddy import main
 from scadbuddy.api.orders import record_fulfilment, update_fulfilment
@@ -586,6 +587,130 @@ async def test_a_queue_attempt_takes_no_lan_archive_of_another_run(
     )
     assert [a.archive_id for a in read.archives] == [81, 82]
     assert shop.rows.fulfilments(item.id)[0].archive_ids == [81, 82]
+
+
+def lan_run(pool: PgPool, run_id: str) -> str:
+    """Make ``run_id`` a native run that started plate 1 over the LAN, as its result
+    records it; the start's name."""
+    name = f"scadbuddy-{run_id[:8]}-p1"
+    result = {
+        "library_file_id": 0,
+        "copies": 1,
+        "path": "native",
+        "lan": [{"subtask_name": name, "started_at": "2026-11-01T10:00:00+00:00", "plate_id": 1}],
+    }
+    with pool.connection() as conn:
+        conn.execute("UPDATE print_runs SET result = %s WHERE id = %s", (Jsonb(result), run_id))
+    return name
+
+
+def hash_link(pool: PgPool, archive_id: int) -> None:
+    """The link Bambuddy's hash gave a LAN print (#5724), with no queue item and no send:
+    what the print watcher's link pass or the Prints list writes before anyone reads the
+    print, so no LAN start is recorded for it yet."""
+    with pool.connection() as conn:
+        conn.execute(
+            "INSERT INTO print_links (subject, archive_id, matched_by)"
+            " VALUES (%s, %s, 'content_hash')",
+            (f"output:{SUBJECT}", archive_id),
+        )
+
+
+def lan_unopened(
+    shop: Shop, pool: PgPool, archive_id: int
+) -> tuple[Order, OrderItem, Fulfilment, str]:
+    """An attempt whose LAN print settled and nobody opened: its archive is linked by
+    hash, and no start is recorded for it."""
+    order, item = shop.accepted()
+    run_id = run_row(pool)
+    lan_run(pool, run_id)
+    started(shop, order, item, run_id)
+    hash_link(pool, archive_id)
+    settle(pool, run_id, "finished")
+    attempt = shop.lifecycle.follow_print(run_id)
+    assert attempt is not None and attempt.finished_at is not None
+    return order, item, attempt, run_id
+
+
+def recorded_start(pool: PgPool, archive_id: int) -> str | None:
+    with pool.connection() as conn:
+        row = conn.execute(
+            "SELECT run_id FROM lan_print_archives WHERE archive_id = %s", (archive_id,)
+        ).fetchone()
+    return None if row is None else str(row["run_id"])
+
+
+async def test_the_sweep_links_the_archive_of_a_lan_print_nobody_opened(
+    shop: Shop, pool: PgPool, step: Step
+) -> None:
+    """#8281: the media sweep's step records the start the archive became, from the
+    name of the file it printed, so the attempt gets its archive and media."""
+    order, item, attempt, run_id = lan_unopened(shop, pool, 364)
+    assert shop.rows.run_archives(run_id) == []
+    seam = Archives(facts(364, filename=f"scadbuddy-{run_id[:8]}-p1.3mf", grams=6.5))
+
+    found = await step(seam, attempt.id)
+
+    assert not found.missing
+    assert recorded_start(pool, 364) == run_id
+    assert shop.rows.run_archives(run_id) == [364]
+    kept = shop.rows.fulfilments(item.id)[0]
+    assert (kept.archive_ids, kept.actual_grams) == ([364], 6.5)
+    assert media(shop, order.id) == [
+        (attempt.id, 364, "finished_photo", "finish_2_bb.jpg"),
+        (attempt.id, 364, "timelapse", "timelapse-364.avi"),
+    ]
+
+
+async def test_two_unopened_lan_prints_of_one_file_each_get_their_own_archive(
+    shop: Shop, pool: PgPool, step: Step
+) -> None:
+    """Two LAN runs of one subject, both archives linked by the same hash: each archive
+    goes to the run its file names, never to both."""
+    _, first_item, first, first_run = lan_unopened(shop, pool, 365)
+    _, second_item, second, second_run = lan_unopened(shop, pool, 366)
+    seam = Archives(
+        facts(365, filename=f"scadbuddy-{first_run[:8]}-p1.3mf"),
+        facts(366, filename=f"scadbuddy-{second_run[:8]}-p1-2.3mf"),
+    )
+
+    await step(seam, first.id)
+    await step(seam, second.id)
+
+    assert (recorded_start(pool, 365), recorded_start(pool, 366)) == (first_run, second_run)
+    assert shop.rows.fulfilments(first_item.id)[0].archive_ids == [365]
+    assert shop.rows.fulfilments(second_item.id)[0].archive_ids == [366]
+
+
+async def test_an_archive_whose_file_names_no_single_start_is_not_linked(
+    shop: Shop, pool: PgPool, step: Step
+) -> None:
+    """A file no start uploaded, a plate the run never started, and a name two runs'
+    starts share are never a guess: no start is recorded, and the attempt has no archive."""
+    _, item, attempt, run_id = lan_unopened(shop, pool, 367)
+    hash_link(pool, 368)
+    hash_link(pool, 369)
+    # A run whose id shares the attempt's run's first eight characters, with the same start.
+    twin = run_id[:8] + uuid.uuid4().hex[8:]
+    with pool.connection() as conn:
+        conn.execute(
+            "INSERT INTO print_runs (id, output_id, idempotency_key, status)"
+            " VALUES (%s, %s, %s, 'succeeded')",
+            (twin, SUBJECT, twin),
+        )
+    lan_run(pool, twin)
+    seam = Archives(
+        facts(367, filename=f"scadbuddy-{run_id[:8]}-p1.3mf"),
+        facts(368, filename="benchy.3mf"),
+        facts(369, filename=f"scadbuddy-{run_id[:8]}-p2.3mf"),
+    )
+
+    found = await step(seam, attempt.id)
+
+    assert found.missing
+    assert [recorded_start(pool, a) for a in (367, 368, 369)] == [None, None, None]
+    assert shop.rows.run_archives(run_id) == []
+    assert shop.rows.fulfilments(item.id)[0].archive_ids == []
 
 
 def test_a_hand_attempt_cannot_name_another_attempts_archive(shop: Shop, pool: PgPool) -> None:
