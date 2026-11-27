@@ -18,6 +18,7 @@ namespace ScadBuddy;
 /// (Resources/Raw/nfc-polyfill.js); both are offered only to the configured ScadBuddy origin.
 /// A MIFARE Classic tag is read with the Bambu keys, derived from its UID
 /// (https://github.com/Bambu-Research-Group/RFID-Tag-Guide/blob/main/deriveKeys.py).
+/// A device call (<see cref="DeviceMethods"/>) takes the taps while it runs (<see cref="StartCall"/>).
 /// </summary>
 public sealed class NfcBridge : Java.Lang.Object, NfcAdapter.IReaderCallback, WebViewCompat.IWebMessageListener
 {
@@ -50,59 +51,18 @@ public sealed class NfcBridge : Java.Lang.Object, NfcAdapter.IReaderCallback, We
 		WebViewCompat.AddDocumentStartJavaScript(webView, text.ReadToEnd(), rules);
 	}
 
-	Uri? job;
-	DateTime jobUntil;
-	bool sending;
-	// A scan link's one-time result URL lives about as long (the page's job expires too).
-	static readonly TimeSpan JobFor = TimeSpan.FromMinutes(5);
-	static readonly HttpClient Http = new() { Timeout = TimeSpan.FromSeconds(30) };
+	// The running device call's taps (DeviceMethods): while one is set, every tap goes to it.
+	Action<Tag>? callTaps;
 
-	/// <summary>
-	/// A scan link's job (<see cref="DeepLink"/>): the next tag read goes to <paramref name="result"/>,
-	/// not to the page. A partial MIFARE read waits for the next tap, which resumes it.
-	/// </summary>
-	public void StartJob(Uri result)
+	/// <summary>Sends every tap to <paramref name="taps"/> until <see cref="EndCall"/>: the page's scan and write get none meanwhile.</summary>
+	public void StartCall(Action<Tag> taps)
 	{
-		lock (gate) { job = result; jobUntil = DateTime.UtcNow + JobFor; }
-		Notify("Tap the tag on the back of the phone.");
+		lock (gate) callTaps = taps;
 	}
 
-	async Task Send(Uri result, Tag tag)
+	public void EndCall(Action<Tag> taps)
 	{
-		try { await SendJob(result, Read(tag)); }
-		finally { lock (gate) sending = false; }
-	}
-
-	async Task SendJob(Uri result, JsonObject reading)
-	{
-		var mifare = reading["mifare"] as JsonObject;
-		if (mifare?["error"] is not null) return;
-		var body = new JsonObject
-		{
-			["uid"] = reading["serialNumber"]?.GetValue<string>(),
-			["tag_type"] = mifare is null ? null : "mifare_classic",
-			["records"] = reading["records"]!.DeepClone(),
-		};
-		if (mifare is not null)
-			body["mifare_blocks"] = new JsonArray(mifare["blocks"]!.AsArray().Select(b => (JsonNode)new JsonObject { ["index"] = b!["index"]!.GetValue<int>(), ["data_hex"] = b["dataHex"]!.GetValue<string>() }).ToArray());
-		try
-		{
-			using var content = new StringContent(body.ToJsonString(), Encoding.UTF8, "application/json");
-			using var answer = await Http.PostAsync(result, content);
-			if (!answer.IsSuccessStatusCode)
-			{
-				Notify($"Not sent: ScadBuddy answered {(int)answer.StatusCode}. Start the scan again from the page.");
-				lock (gate) if (job == result) job = null;
-				return;
-			}
-			lock (gate) if (job == result) job = null;
-			Notify("Sent. Back to the page.");
-			MainThread.BeginInvokeOnMainThread(() => activity?.MoveTaskToBack(true));
-		}
-		catch (Exception error)
-		{
-			Notify($"Not sent: {error.Message}. Tap the tag again.");
-		}
+		lock (gate) if (callTaps == taps) callTaps = null;
 	}
 
 	public void Resume(Activity resumed)
@@ -188,18 +148,11 @@ public sealed class NfcBridge : Java.Lang.Object, NfcAdapter.IReaderCallback, We
 		if (tag is null) return;
 		PendingWrite? pending;
 		bool reading;
-		Uri? job;
-		lock (gate)
+		Action<Tag>? call;
+		lock (gate) { lastTag = tag; pending = write; reading = scanning; call = callTaps; }
+		if (call is not null)
 		{
-			// A scan link the person left takes no tap after JobFor: the page's own scan gets it.
-			if (this.job is not null && DateTime.UtcNow >= jobUntil) this.job = null;
-			lastTag = tag; pending = write; reading = scanning; job = this.job;
-		}
-		if (job is not null)
-		{
-			// One send per job at a time: a second tap while the one-time URL is in flight is dropped.
-			lock (gate) { if (sending) return; sending = true; }
-			_ = Send(job, tag);
+			call(tag);
 			return;
 		}
 		if (pending is not null) { TryWrite(tag, fromTap: true); return; }
@@ -213,32 +166,7 @@ public sealed class NfcBridge : Java.Lang.Object, NfcAdapter.IReaderCallback, We
 		if (pending is null) return;
 		try
 		{
-			// A Bambu spool's tag is MIFARE Classic, and a Bambu tag is never written: refuse every
-			// MIFARE Classic tag, before NdefFormatable could format it.
-			if (tag.GetTechList()?.Contains("android.nfc.tech.MifareClassic") == true)
-				throw new BridgeError("NotAllowedError", "This is a MIFARE Classic tag, such as a Bambu spool's. ScadBuddy never writes one.");
-			var ndef = Ndef.Get(tag);
-			if (ndef is not null)
-			{
-				try
-				{
-					ndef.Connect();
-					if (!ndef.IsWritable) throw new BridgeError("NotAllowedError", "This tag is read-only.");
-					ndef.WriteNdefMessage(pending.Message);
-				}
-				finally { Close(ndef); }
-			}
-			else
-			{
-				var formatable = NdefFormatable.Get(tag) ??
-					throw new BridgeError("NotSupportedError", "This tag cannot hold NDEF records.");
-				try
-				{
-					formatable.Connect();
-					formatable.Format(pending.Message);
-				}
-				finally { Close(formatable); }
-			}
+			WriteNdef(tag, pending.Message);
 			lock (gate) if (write == pending) write = null; else return;
 			Reply(pending.JsId, true);
 			// The read-back the page waits for next (tagWrite.ts `readBack`).
@@ -260,6 +188,58 @@ public sealed class NfcBridge : Java.Lang.Object, NfcAdapter.IReaderCallback, We
 		}
 	}
 
+	/// <summary>
+	/// Writes an NDEF message to the tag. A refusal (a MIFARE Classic tag, a read-only tag, a tag
+	/// with no NDEF) is a <see cref="BridgeError"/>; any other exception is a failed transfer.
+	/// </summary>
+	public static void WriteNdef(Tag tag, NdefMessage message)
+	{
+		// A Bambu spool's tag is MIFARE Classic, and a Bambu tag is never written: refuse every
+		// MIFARE Classic tag, before NdefFormatable could format it.
+		if (IsClassic(tag))
+			throw new BridgeError("NotAllowedError", "This is a MIFARE Classic tag, such as a Bambu spool's. ScadBuddy never writes one.");
+		var ndef = Ndef.Get(tag);
+		if (ndef is not null)
+		{
+			try
+			{
+				ndef.Connect();
+				if (!ndef.IsWritable) throw new BridgeError("NotAllowedError", "This tag is read-only.");
+				ndef.WriteNdefMessage(message);
+			}
+			finally { Close(ndef); }
+			return;
+		}
+		var formatable = NdefFormatable.Get(tag) ??
+			throw new BridgeError("NotSupportedError", "This tag cannot hold NDEF records.");
+		try
+		{
+			formatable.Connect();
+			formatable.Format(message);
+		}
+		finally { Close(formatable); }
+	}
+
+	public static bool IsClassic(Tag tag) => tag.GetTechList()?.Contains("android.nfc.tech.MifareClassic") == true;
+
+	public static bool HasNdef(Tag tag) => tag.GetTechList()?.Contains("android.nfc.tech.Ndef") == true;
+
+	/// <summary>The tag's tech, as a device read names it: mifare_classic, ndef, ndef_formatable, or Android's first tech.</summary>
+	public static string TechOf(Tag tag)
+	{
+		var techs = tag.GetTechList() ?? [];
+		if (techs.Contains("android.nfc.tech.MifareClassic")) return "mifare_classic";
+		if (techs.Contains("android.nfc.tech.Ndef")) return "ndef";
+		if (techs.Contains("android.nfc.tech.NdefFormatable")) return "ndef_formatable";
+		return techs.FirstOrDefault()?.Split('.').Last().ToLowerInvariant() ?? "unknown";
+	}
+
+	/// <summary>
+	/// A device call's read: the page's reading (<c>serialNumber</c>, <c>records</c>, and
+	/// <c>mifare</c> for a MIFARE Classic tag), with its progress told to <paramref name="progress"/>.
+	/// </summary>
+	public static JsonObject ReadTag(Tag tag, ITagProgress progress) => Read(tag, progress);
+
 	// Reads by kind (mifare_classic or ndef) and outcome: complete, partial (a sector refused,
 	// or the read stopped and the next tap resumes it) or error.
 	static readonly Counter<long> Reads = Telemetry.Meter.CreateCounter<long>("scadbuddy_app.nfc.reads");
@@ -267,7 +247,7 @@ public sealed class NfcBridge : Java.Lang.Object, NfcAdapter.IReaderCallback, We
 	// MIFARE reads that started from the sectors an earlier, partial read of the same tag kept.
 	static readonly Counter<long> ResumedReads = Telemetry.Meter.CreateCounter<long>("scadbuddy_app.nfc.resumed_reads");
 
-	static JsonObject Read(Tag tag)
+	static JsonObject Read(Tag tag, ITagProgress? progress = null)
 	{
 		using var span = Telemetry.Source.StartActivity("nfc.read");
 		var started = System.Diagnostics.Stopwatch.GetTimestamp();
@@ -291,16 +271,22 @@ public sealed class NfcBridge : Java.Lang.Object, NfcAdapter.IReaderCallback, We
 				foreach (var record in message?.GetRecords() ?? []) records.Add(NdefWire.Parse(record));
 			}
 		}
-		catch (Exception) { ndefFailed = true; }
+		catch (Exception error)
+		{
+			ndefFailed = true;
+			if (!isClassic) progress?.Lost(0, $"ndef: {error.GetType().Name}: {error.Message}");
+		}
 		// A Tag has one connected technology at a time: close Ndef before MifareClassic connects,
 		// and before a write or the next read connects again.
 		finally { Close(ndef); }
-		if (isClassic) mifare = ReadClassic(tag, uid, out resumed);
+		if (!isClassic && !ndefFailed) progress?.Found(Convert.ToHexString(uid), TechOf(tag), 0, 0);
+		if (isClassic) mifare = ReadClassic(tag, uid, out resumed, progress);
 		Android.Util.Log.Info("ScadBuddyNfc",
 			$"read {Convert.ToHexString(uid)} techs={string.Join(',', techs.Select(t => t.Split('.').Last()))} records={records.Count} " +
 			(mifare is null ? "mifare=none" : $"blocks={mifare["blocks"]!.AsArray().Count} refused={mifare["refusedSectors"]!.ToJsonString()} error={mifare["error"]?.ToString() ?? "none"}"));
 		Record(span, started, techs, records.Count, isClassic, ndefFailed, resumed, mifare);
-		if (mifare is not null)
+		// A device call's read shows its progress on the call's screen instead.
+		if (mifare is not null && progress is null)
 		{
 			var count = mifare["blocks"]!.AsArray().Count;
 			// Sectors 0-4 (blocks 1-18) hold every field that names the filament; the rest is
@@ -350,7 +336,7 @@ public sealed class NfcBridge : Java.Lang.Object, NfcAdapter.IReaderCallback, We
 			kind, outcome, shortTechs, records, blocks, refused, resumed, error ?? "none");
 	}
 
-	static JsonObject? ReadClassic(Tag tag, byte[] uid, out bool resumed)
+	static JsonObject? ReadClassic(Tag tag, byte[] uid, out bool resumed, ITagProgress? progress)
 	{
 		resumed = false;
 		MifareClassic? classic;
@@ -373,23 +359,30 @@ public sealed class NfcBridge : Java.Lang.Object, NfcAdapter.IReaderCallback, We
 		var refused = new JsonArray();
 		var at = -1;
 		string? failure = null;
+		var of = DeviceProtocol.DataBlocks(classic.BlockCount);
+		int Have() => sectors.Values.Sum(s => s.Count);
 		{
 			try
 			{
 				classic.Timeout = 1000;
 				classic.Connect();
+				progress?.Found(hex, "mifare_classic", of, Have());
 				for (var sector = 0; sector < classic.SectorCount; sector++)
 				{
 					at = sector;
 					if (sectors.ContainsKey(sector)) continue;
+					// The call's deadline is near: stop with what was read, which the dump keeps.
+					if (progress?.Stopped == true) throw new OperationCanceledException("the call stopped the read");
 					var key = sector < 16 ? keys.AsSpan(sector * 6, 6).ToArray() : null;
 					var read = key is null ? null : ReadSector(classic, sector, key);
 					if (read is null) refused.Add(sector); else sectors[sector] = read;
+					progress?.Read(Have(), of);
 				}
 			}
 			catch (Exception error)
 			{
 				failure = $"sector {at}: {error.GetType().Name}: {error.Message}";
+				progress?.Lost(Have(), failure);
 			}
 			finally { Close(classic); }
 		}
@@ -454,8 +447,19 @@ public sealed class NfcBridge : Java.Lang.Object, NfcAdapter.IReaderCallback, We
 		MainThread.BeginInvokeOnMainThread(() => proxy.PostMessage(json));
 	}
 
-	sealed class BridgeError(string name, string message) : Exception(message)
+	internal sealed class BridgeError(string name, string message) : Exception(message)
 	{
 		public string Name { get; } = name;
 	}
+}
+
+/// <summary>What a device call's read tells as it goes (tag_found, tag_progress, tag_lost). The UID is hex; telemetry never gets it.</summary>
+public interface ITagProgress
+{
+	void Found(string uid, string tech, int blocks, int resumeFrom);
+	void Read(int read, int of);
+	void Lost(int read, string error);
+
+	/// <summary>Whether the call wants the read to stop before its next sector.</summary>
+	bool Stopped { get; }
 }
