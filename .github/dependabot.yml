@@ -155,6 +155,9 @@ updates:
       # each other's matching versions, so they move together.
       opentelemetry:
         patterns: ["go.opentelemetry.io/*"]
+      # The Temporal Go SDK and its API module (#8313).
+      temporal:
+        patterns: ["go.temporal.io/*"]
 
   # Rust (#8313): the workers/rust workspace. Without an entry its Temporal crates
   # (=1.1.2) fell two releases behind the other SDKs. The rust-toolchain.toml
