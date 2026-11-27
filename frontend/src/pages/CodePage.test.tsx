@@ -75,4 +75,27 @@ describe('the code page', () => {
     expect(warn).toHaveBeenCalledWith(expect.stringContaining('tasks'), expect.anything())
     warn.mockRestore()
   })
+
+  it('fills the scan field the code fits', async () => {
+    const field = (title: string, kinds: string[]) => ({ type: 'string', title, 'x-sb-widget': 'scan', expects: { kinds } })
+    addTask({
+      id: 'two',
+      title: 'Two scans',
+      schema: { type: 'object', properties: { spool: field('Spool', ['spool']), box: field('Box', ['location']) } },
+    })
+    render('/x/L-3')
+    await waitFor(() => expect(screen.getByRole('textbox', { name: /Box/ })).toHaveValue('L-3'))
+    expect(screen.getByRole('textbox', { name: /Spool/ })).toHaveValue('')
+  })
+
+  it('shows the result after the answer, and links to the entity', async () => {
+    addTask({ id: 'scan-1', title: 'Check the box', schema: scanSchema })
+    const { user } = render('/x/L-3')
+    await waitFor(() => expect(screen.getByRole('textbox', { name: /Spool/ })).toHaveValue('L-3'))
+    await waitFor(() => expect(screen.getAllByRole('status')[0]).toBeInTheDocument())
+    await user.click(screen.getByRole('button', { name: 'Answer' }))
+    expect(await screen.findByText('Answered.')).toBeInTheDocument()
+    expect(screen.getByRole('link', { name: 'Open L-3' })).toHaveAttribute('href', `/filament/locations/${L.DRY_BOX}`)
+    expect(screen.queryByTestId('where')).toBeNull()
+  })
 })

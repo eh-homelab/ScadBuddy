@@ -10,6 +10,7 @@ import { Skeleton } from '@/components/ui/skeleton'
 import { TaskPanel } from '../components/flows/TaskPanel'
 import { inputFields } from '../lib/flowInputs'
 import { flowRunPath } from '../lib/flows'
+import { misfit } from '../lib/scanMisfit'
 import { useAsync } from '../lib/useAsync'
 
 /** #6955 — `/x/<code>`: the address a label's QR holds. It opens the place or spool the code names. #8062: an open task that waits for the code comes first. */
@@ -29,13 +30,24 @@ export function CodePage() {
     [code],
   )
 
+  const [done, setDone] = useState(false)
+
   const to = found.data ? (found.data.kind === 'location' ? `/filament/locations/${found.data.id}` : `/filament/spools/${found.data.id}`) : null
   const tasks = waiting.data ?? []
   if (!found.loading && !waiting.loading && tasks.length > 0) {
-    const instead = to && (
-      <Link to={to} className="text-sm underline">{`Open ${code} instead`}</Link>
-    )
-    const scan = tasks.length === 1 ? inputFields(tasks[0]!.schema).find((field) => field.widget === 'scan') : undefined
+    const open = (word: string) => to && <Link to={to} className="text-sm underline">{`Open ${code}${word}`}</Link>
+    const instead = open(' instead')
+    // The field the code fits (the server's rule); the first scan field when the code did not resolve or fits none.
+    const fields = tasks.length === 1 ? inputFields(tasks[0]!.schema).filter((field) => field.widget === 'scan') : []
+    const scan = (found.data && fields.find((field) => misfit(found.data!, field.expects) === null)) ?? fields[0]
+    if (done) {
+      return (
+        <div className="mx-auto flex w-full max-w-md flex-col gap-4 p-4">
+          <h1 role="status" className="text-lg font-semibold">Answered.</h1>
+          {open('')}
+        </div>
+      )
+    }
     return (
       <div className="mx-auto flex w-full max-w-md flex-col gap-4 p-4">
         {tasks.length === 1 ? (
@@ -48,8 +60,8 @@ export function CodePage() {
                 respond={async (send) => {
                   await send()
                 }}
-                onClosed={() => undefined}
-                onSettled={() => waiting.refresh()}
+                onClosed={() => setDone(true)}
+                onSettled={() => undefined}
                 offer={scan ? { field: scan.name, code: found.data?.code ?? code, n: 1 } : undefined}
               />
             </CardContent>
