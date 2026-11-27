@@ -31,7 +31,13 @@ expect true  .github/scripts/changed-paths.sh
 expect true  agent/test/fixtures/rate-limit-reset-vectors.json
 expect true  backend/tests/fixtures/plugin-seal-vectors.json
 expect true  backend/tests/fixtures/auth-vectors.json
-expect false backend/tests/fixtures/secret-vectors.json
+expect true  backend/tests/fixtures/secret-vectors.json
+expect true  backend/tests/fixtures/pending-input-vectors.json
+expect true  backend/tests/fixtures/response-hash-vectors.json
+expect true  backend/tests/fixtures/payload-vectors.json
+expect true  backend/tests/fixtures/subject-vectors.json
+expect true  backend/tests/fixtures/approval-hash-vectors.json
+expect false backend/tests/fixtures/hosted-plugin-hash-vectors.json
 expect false agent/test/fixtures/secret-vectors.json
 expect false agent/src/harness/credentialErrors.ts
 expect false Dockerfile

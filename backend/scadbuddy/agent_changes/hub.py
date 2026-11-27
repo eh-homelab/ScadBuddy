@@ -80,7 +80,7 @@ logger = logging.getLogger(__name__)
 #: The agent's channels besides the event bus's: the gate's input (`tools/go/core/internal/gate`),
 #: the pending-input tables' ticks (migration ``20261103T1944Z_pending_input_notify.sql``), the MCP
 #: relay (`tools/go/core/internal/mcprelay`), the warm process cache's evictions and the runtime
-#: settings (`agent_data/settings.py`).
+#: settings (`tools/go/core/internal/secrets`).
 CHANNELS: Final = (
     "scadbuddy_input",
     "scadbuddy_pending",

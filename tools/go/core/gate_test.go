@@ -522,7 +522,7 @@ func TestThePruneDeletesOnlyPastTheRetention(t *testing.T) {
 // (flows/store.py chain_in_force, #5685).
 func TestAGrantApprovesOnlyWhileItsWholeChainIsInForce(t *testing.T) {
 	for broken, granted := range map[string]bool{"none": true, "parent revoked": false,
-		"standing revoked": false, "standing expired": false} {
+		"standing revoked": false, "standing expired": false, "standing re-approved": false} {
 		t.Run(broken, func(t *testing.T) {
 			a := gateAPI(t)
 			s := a.gateSession("running")
@@ -534,8 +534,9 @@ func TestAGrantApprovesOnlyWhileItsWholeChainIsInForce(t *testing.T) {
 			a.sql(`INSERT INTO flow_trigger_grants (id, trigger_id, status, spec, requested_by,
 				revoked_at, expires_at, approval_id) VALUES ('standing', 'trig-1', 'approved', '{}', '{}',
 				CASE WHEN $1 THEN now() END,
-				now() + CASE WHEN $2 THEN interval '-1 second' ELSE interval '1 hour' END, 'a1')`,
-				broken == "standing revoked", broken == "standing expired")
+				now() + CASE WHEN $2 THEN interval '-1 second' ELSE interval '1 hour' END,
+				CASE WHEN $3 THEN 'a2' ELSE 'a1' END)`,
+				broken == "standing revoked", broken == "standing expired", broken == "standing re-approved")
 			a.sql(`INSERT INTO flow_grants (id, run_id, status, spec, requested_by, revoked_at,
 				expires_at, standing_grant_id, standing_approval_id) VALUES ('parent', 'run-parent',
 				'approved', '{}', '{}', CASE WHEN $1 THEN now() END, now() + interval '1 hour',
