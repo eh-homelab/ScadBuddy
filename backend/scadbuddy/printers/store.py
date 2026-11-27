@@ -176,6 +176,10 @@ def _drop_override_slots(conn: Connection[DictRow], merged: str, into: str) -> N
     conn.execute("DELETE FROM filament_override_slots WHERE printer_id = %s", (merged,))
 
 
+#: The actor of the spool moves a printer's delete books (`PrinterStore.delete`).
+PRINTER_DELETE_ACTOR = "system:printer-delete"
+
+
 def _drop_unknown_trays(conn: Connection[DictRow], merged: str, into: str) -> None:
     """#7143: the merged printer's unknown-tray rows are dropped, not moved. The kept
     printer's next report records what it shows."""
@@ -1208,7 +1212,11 @@ class PrinterStore:
         key = printer_uuid(printer_id)
         if key is None:
             raise PrinterNotFoundError(printer_id)
+        from scadbuddy.filament.locations import release_printer_spools_on
+
         with self.pool.connection() as conn:
+            # The printer's places go with its row; its spools leave them first (#7143).
+            release_printer_spools_on(conn, key, actor=PRINTER_DELETE_ACTOR)
             gone = conn.execute("DELETE FROM printers WHERE id = %s", (key,))
             if gone.rowcount == 0:
                 raise PrinterNotFoundError(printer_id)

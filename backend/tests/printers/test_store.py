@@ -283,6 +283,41 @@ def test_delete(printers: PrinterStore) -> None:
         printers.delete(row.id)
 
 
+def test_a_delete_moves_the_spools_out_of_the_printers_places(printers: PrinterStore) -> None:
+    """#7143: the printer's places go with its row, so a spool in one would fail the
+    delete on its foreign key. Capture puts a tagged tray's spool there at once. The
+    delete moves it to no place first, with a ``moved`` event."""
+    row = printers.create(PrinterCreate(serial=SERIAL, name="A"))
+    with printers.pool.connection() as conn:
+        place = conn.execute(
+            "INSERT INTO filament_locations (name, kind_id, printer_id, ams_id, tray_id)"
+            " VALUES ('A AMS-A slot 1', (SELECT id FROM filament_location_kinds LIMIT 1),"
+            " %s, 0, 0) RETURNING id",
+            (row.id,),
+        ).fetchone()
+        assert place is not None
+        spool = conn.execute(
+            "INSERT INTO filament_spools (location_id, material_id)"
+            " VALUES (%s, (SELECT id FROM filament_materials LIMIT 1)) RETURNING id",
+            (place["id"],),
+        ).fetchone()
+        assert spool is not None
+    printers.delete(row.id)
+    assert printers.get(row.id) is None
+    with printers.pool.connection() as conn:
+        after = conn.execute(
+            "SELECT location_id FROM filament_spools WHERE id = %s", (spool["id"],)
+        ).fetchone()
+        moved = conn.execute(
+            "SELECT actor, data FROM filament_spool_events WHERE spool_id = %s AND kind = 'moved'",
+            (spool["id"],),
+        ).fetchall()
+    assert after is not None and after["location_id"] is None
+    assert [(m["actor"], m["data"]["reason"]) for m in moved] == [
+        ("system:printer-delete", "printer_deleted")
+    ]
+
+
 # ── #4186 review ─────────────────────────────────────────────────────────────────────
 
 
