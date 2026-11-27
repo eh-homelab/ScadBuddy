@@ -157,6 +157,37 @@ describe('NfcJobBanner (#7273)', () => {
     await waitFor(() => expect(screen.queryByRole('heading', { name: /Agent wants/ })).toBeNull())
   })
 
+  it('cancels a pending job without arming it', async () => {
+    const job = seedNfcJob({ kind: 'write', records: RECORDS })
+    const { user, onAnnounce } = render()
+    await user.click(await screen.findByRole('button', { name: 'Cancel job' }))
+    await waitFor(() => expect(log.lines()).toContain(`POST ${JOBS}/${job.id}/cancel`))
+    expect(log.lines()).not.toContain(`POST ${JOBS}/${job.id}/claim`)
+    expect(stub.writes).toHaveLength(0)
+    await waitFor(() => expect(onAnnounce).toHaveBeenLastCalledWith('Cancelled. The agent was told.'))
+    expect(screen.queryByRole('heading', { name: /Agent wants/ })).toBeNull()
+  })
+
+  it('cancels a job that cannot be written from this page', async () => {
+    // A smart poster that holds an absolute-URL record, which Web NFC refuses inside one.
+    const job = seedNfcJob({ kind: 'write', records: [{ record_type: 'smart-poster', data_hex: 'd3010078' }] })
+    const { user } = render()
+    expect(await screen.findByText(/This job cannot be written from this page/)).toBeInTheDocument()
+    const cancel = await screen.findByRole('button', { name: 'Cancel job' })
+    expect(cancel).toBeEnabled()
+    await user.click(cancel)
+    await waitFor(() => expect(log.lines()).toContain(`POST ${JOBS}/${job.id}/cancel`))
+  })
+
+  it('says why when ScadBuddy refuses the cancel, and keeps the job', async () => {
+    seedNfcJob({ kind: 'read' })
+    server.use(http.post(`${JOBS}/:id/cancel`, () => HttpResponse.json({ detail: 'boom' }, { status: 500 })))
+    const { user } = render()
+    await user.click(await screen.findByRole('button', { name: 'Cancel job' }))
+    expect(await screen.findByText(/could not cancel the job: boom/)).toBeInTheDocument()
+    expect(screen.getByRole('heading', { name: 'Agent wants to read a tag' })).toBeInTheDocument()
+  })
+
   it("posts the browser's error as a failed job", async () => {
     const job = seedNfcJob({ kind: 'write', records: RECORDS })
     const { user } = render()
