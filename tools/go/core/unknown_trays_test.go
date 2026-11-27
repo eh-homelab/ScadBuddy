@@ -88,7 +88,7 @@ func TestAnUnswitchedAreaForwardsToNext(t *testing.T) {
 func TestAnUnknownAreaNameStillStopsTheStart(t *testing.T) {
 	pool := testdb.New(t)
 	next := http.HandlerFunc(func(http.ResponseWriter, *http.Request) {})
-	if _, err := newRouter(pool, next, nil, "unknown-trayz", "", nil); err == nil {
+	if _, err := newRouter(pool, next, nil, "unknown-trayz", "", nil, nil, nil); err == nil {
 		t.Fatal("an unknown area name was taken")
 	}
 }
@@ -98,7 +98,7 @@ func TestPublicRoutesUseTheGate(t *testing.T) {
 	a := &api{t: t, pool: pool}
 	seedTrays(a)
 	next := http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusTeapot) })
-	router, err := newRouter(pool, next, nil, "unknown-trays", "enforce", nil)
+	router, err := newRouter(pool, next, nil, "unknown-trays", "enforce", nil, nil, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
