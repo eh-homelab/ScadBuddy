@@ -111,8 +111,9 @@ type Blobs struct {
 	// sent (httpx.Outside); its spans carry the method, the status and the peer "s3", never
 	// the URL, whose query is the presigned signature.
 	HTTP *http.Client
-	// Stream sends a read's GET (OpenKey), whose body the caller reads, and a publish's PUT
-	// (PublishFile), whose body streams from a spooled file: it has no total
+	// Stream sends a read's GET (OpenKey), whose body the caller reads, and put's GET of an
+	// object it checks and its PUT (Put, PublishFile, PutContent), whose body streams from a
+	// spooled file: it has no total
 	// timeout, since http.Client.Timeout also covers reading the body. fetch bounds the wait
 	// for the response headers (HeaderWait), and the caller's ctx and Close bound the rest.
 	Stream *http.Client
@@ -486,8 +487,14 @@ func stored(ctx context.Context, body []byte, t ticket) error {
 	if matches(body, t) {
 		return nil
 	}
+	return mismatched(ctx, t.Kind, t.SHA256)
+}
+
+// mismatched is stored's refusal of a content object of kind's blob of sha256 that is other
+// bytes, logged; a commit and stage (held) both answer it.
+func mismatched(ctx context.Context, kind, sha string) error {
 	slog.WarnContext(ctx, "the store's object is not the bytes its key names; it is left as it is",
-		"kind", t.Kind, "sha256", t.SHA256)
+		"kind", kind, "sha256", sha)
 	// 409, not 503: only a repair of the object fixes it, so it is no passing failure to retry
 	// (Python's `_verified` answers 403 ref_mismatch for the same case).
 	return refused(http.StatusConflict, "store_object_mismatch",

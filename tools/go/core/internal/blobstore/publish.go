@@ -159,7 +159,7 @@ func (b *Blobs) PublishFile(ctx context.Context, key, name string, file io.ReadS
 	if _, err := packFile(spool, name, file); err != nil {
 		return err
 	}
-	landed, err := b.put(ctx, store, pieceKind, spool, func(ctx context.Context, ref Ref) (bool, error) {
+	landed, err := b.put(ctx, store, pieceKind, "", spool, func(ctx context.Context, ref Ref) (bool, error) {
 		tag, err := b.Pool.Exec(ctx, `INSERT INTO store_blobs (sha256, kind, backend, backend_id, size, slug, meta, key)
  VALUES ($1, $2, $3, $4, $5, NULL, '{}'::jsonb, $6) ON CONFLICT (key) DO NOTHING`,
 			ref.SHA256, ref.Kind, ref.Backend, ref.BackendID, ref.Size, key)
@@ -180,8 +180,11 @@ type indexer func(ctx context.Context, ref Ref) (bool, error)
 // until index has written its rows, the object stored or reused (stage), then index run.
 // When index writes nothing, the object goes unless a row names it (removeUnnamed, Python's
 // `_release`), once this call's own hold is dropped. It answers what index answered.
-// PublishFile and PutContent call it; the commit route indexes through index/putIn.
-func (b *Blobs) put(ctx context.Context, store *Store, kind string, body *os.File, index indexer) (bool, error) {
+// It is core's one in-process write path (#8250): Put, PublishFile and PutContent call it;
+// the commit route, whose bytes come from a staging object, indexes through index/putIn.
+// mediaType, when set, is the PUT's Content-Type, and the object is PUT private, as a
+// commit PUTs it.
+func (b *Blobs) put(ctx context.Context, store *Store, kind, mediaType string, body *os.File, index indexer) (bool, error) {
 	sha, size, err := digest(body)
 	if err != nil {
 		return false, err
@@ -191,7 +194,7 @@ func (b *Blobs) put(ctx context.Context, store *Store, kind string, body *os.Fil
 		return false, err
 	}
 	defer release()
-	ref, err := b.stage(ctx, store, kind, sha, size, body)
+	ref, err := b.stage(ctx, store, kind, mediaType, sha, size, body)
 	if err != nil {
 		return false, err
 	}
@@ -205,38 +208,43 @@ func (b *Blobs) put(ctx context.Context, store *Store, kind string, body *os.Fil
 
 // stage is ContentStore._store for kind's blob of sha256 and size: an object of the same
 // bytes and kind a row names and the store holds is reused; otherwise the caps are checked
-// and the bytes PUT, unless the content object is there already (store/s3.py `upload`).
-func (b *Blobs) stage(ctx context.Context, store *Store, kind, sha string, size int64, body *os.File) (Ref, error) {
+// (room, which runs no aggregate with no cap set) and the bytes PUT, unless the content
+// object is there already (store/s3.py `upload`). Unlike Python, which trusts an object it
+// finds, every object stage would use is read and hashed first: one that is not sha256's
+// bytes is a 409 store_object_mismatch, left as it is and never indexed (held), for every
+// caller (#8250).
+func (b *Blobs) stage(ctx context.Context, store *Store, kind, mediaType, sha string, size int64, body *os.File) (Ref, error) {
 	var existing Ref
 	err := b.Pool.QueryRow(ctx, `SELECT sha256, kind, backend, backend_id, size FROM store_blobs
  WHERE sha256 = $1 AND kind = $2 AND backend = $3 LIMIT 1`, sha, kind, backendS3).
 		Scan(&existing.SHA256, &existing.Kind, &existing.Backend, &existing.BackendID, &existing.Size)
 	switch {
 	case err == nil:
-		held, err := b.exists(ctx, store.S3, existing.BackendID)
+		there, err := b.held(ctx, store.S3, kind, existing.BackendID, sha, size)
 		if err != nil {
 			return Ref{}, err
 		}
-		if held {
+		if there {
 			return existing, nil
 		}
 	case !errors.Is(err, pgx.ErrNoRows):
 		return Ref{}, err
 	}
-	// store/content.py `_require_room`: no cap set, no aggregate (#8110).
-	if store.MaxCount > 0 || store.MaxTotalBytes > 0 {
-		if err := b.room(ctx, store, size); err != nil {
-			return Ref{}, err
-		}
+	if err := b.room(ctx, store, size); err != nil {
+		return Ref{}, err
 	}
 	objectKey := ObjectKey(store.S3.Prefix, kind, sha)
 	ref := Ref{SHA256: sha, Kind: kind, Backend: backendS3, BackendID: objectKey, Size: size}
-	there, err := b.exists(ctx, store.S3, objectKey)
+	there, err := b.held(ctx, store.S3, kind, objectKey, sha, size)
 	if err != nil || there {
 		return ref, err
 	}
 	sum, _ := hex.DecodeString(sha)
 	headers := map[string]string{"x-amz-checksum-sha256": base64.StdEncoding.EncodeToString(sum)}
+	if mediaType != "" {
+		headers["Content-Type"] = mediaType
+		headers["x-amz-acl"] = acl
+	}
 	signed := map[string]string{"content-length": strconv.FormatInt(size, 10)}
 	for k, v := range headers {
 		signed[k] = v
@@ -257,6 +265,39 @@ func (b *Blobs) stage(ctx context.Context, store *Store, kind, sha string, size 
 		return Ref{}, unavailable(fmt.Sprintf("the S3 store answered %d to the blob's PUT", res.StatusCode))
 	}
 	return ref, nil
+}
+
+// held is whether the store holds objectKey as kind's blob of sha256 and size, read whole
+// and hashed as it streams (fetch): false when there is no object, and a 409
+// store_object_mismatch (mismatched) when the object is other bytes.
+func (b *Blobs) held(ctx context.Context, s3 *S3, kind, objectKey, sha string, size int64) (bool, error) {
+	rc, err := b.fetch(ctx, s3, Ref{SHA256: sha, Kind: kind, Backend: backendS3, BackendID: objectKey, Size: size})
+	switch {
+	case errors.Is(err, ErrBlobNotFound):
+		return false, nil
+	case errors.Is(err, ErrNotConfigured):
+		return false, notConfigured(err.Error())
+	case err != nil:
+		return false, storeFailed(ctx, err)
+	}
+	defer rc.Close()
+	_, err = io.Copy(io.Discard, rc)
+	switch {
+	case errors.Is(err, ErrBlobMismatch):
+		return false, mismatched(ctx, kind, sha)
+	case err != nil:
+		return false, storeFailed(ctx, err)
+	}
+	return true, nil
+}
+
+// storeFailed is err as a 503 store_unavailable, unless it is a refusal already or the
+// caller's ctx ended. err never names a URL (fetch's errors do not).
+func storeFailed(ctx context.Context, err error) error {
+	if Reason(err) != "" || ctx.Err() != nil {
+		return err
+	}
+	return unavailable(err.Error())
 }
 
 // removeUnnamed is ContentStore._release over the index's `claim_unnamed`: ref's object is
