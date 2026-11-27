@@ -90,6 +90,23 @@ def test_a_priced_type_writes_its_price_book_row(pg_pool: PgPool) -> None:
 
 
 @pg
+def test_a_new_type_takes_the_next_shared_number(pg_pool: PgPool) -> None:
+    store = SpoolTypeStore(pg_pool)
+    with pg_pool.connection() as conn:
+        row = conn.execute(
+            "INSERT INTO items (kind_id, name) VALUES ('hardware', 'Grease') RETURNING number"
+        ).fetchone()
+    assert row is not None
+    first = store.create(_body(pg_pool))
+    second = store.create(_body(pg_pool, code="OTHER"))
+    assert first.number > row["number"]
+    assert second.number > first.number
+    got = store.get(first.id)
+    assert got is not None
+    assert got.number == first.number
+
+
+@pg
 def test_an_unpriced_type_makes_no_price_book_row(pg_pool: PgPool) -> None:
     made = SpoolTypeStore(pg_pool).create(_body(pg_pool))
     assert made.filament_id is None

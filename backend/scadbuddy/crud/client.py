@@ -51,6 +51,7 @@ from dataclasses import dataclass
 from typing import Any, Literal
 
 import httpx
+from opentelemetry import propagate
 from temporalio import activity
 
 from scadbuddy.auth.service_auth import ServiceAuth
@@ -301,6 +302,9 @@ class _Base:
             sent["Content-Type"] = "application/json"
         if key is not None:
             sent[IDEMPOTENCY_HEADER] = key
+        # The caller's span, so the CRUD side's spans continue its trace (#8239). Nothing
+        # is added outside a span, or with tracing off.
+        propagate.inject(sent)
         if sent:
             kwargs["headers"] = sent
         if timeout is not None:
