@@ -140,7 +140,6 @@ from scadbuddy.library.backfill import attach_backfills, attach_job_backfills, f
 from scadbuddy.library.history import GitError
 from scadbuddy.library.library_seed import seed_libraries, seeded_checkouts
 from scadbuddy.library.output_bytes import OutputBytes, usable
-from scadbuddy.library.output_rows import CUT_OVER_NOTHING_TO_COPY
 from scadbuddy.library.outputs import (
     START_NEEDS_A_BLOB_STORE,
     OutputStoreUnusableError,
@@ -258,8 +257,6 @@ from scadbuddy.workflows.housekeeping import (
     NATIVE_COPIES_SWEEP,
     NATIVE_COPIES_TIMEOUT,
     NATIVE_SLICES_SWEEP,
-    OUTPUT_BYTES_SWEEP,
-    OUTPUT_COPY_SWEEP,
     PAYMENT_CAPTURES_SWEEP,
     PAYMENT_CLOSES_SWEEP,
     PREVIEWS_SWEEP,
@@ -947,17 +944,6 @@ def _housekeeping_activities(state: AppState) -> list[Callable[..., Any]]:
         # mid-pass is noticed within the heartbeat timeout (`_heartbeating`).
         await _heartbeating(_reap_output_holds_logged(state))
 
-    @activity.defn(name=OUTPUT_COPY_SWEEP)
-    async def copy_outputs_to_rows() -> None:
-        # #7257: retired; registered for one release, for the runs recorded before
-        # `OUTPUTS_CUT_OVER_PATCH` that still schedule it.
-        logger.info(CUT_OVER_NOTHING_TO_COPY)
-
-    @activity.defn(name=OUTPUT_BYTES_SWEEP)
-    async def copy_output_bytes_to_blobs() -> None:
-        # #7257: retired, as `copy_outputs_to_rows`.
-        logger.info(CUT_OVER_NOTHING_TO_COPY)
-
     @activity.defn(name=FLOWS_SWEEP)
     async def sweep_flow_runs() -> None:
         await _heartbeating(_sweep_flow_runs_logged(state))
@@ -1086,8 +1072,6 @@ def _housekeeping_activities(state: AppState) -> list[Callable[..., Any]]:
         sweep_claims,
         sweep_backfills,
         reap_output_holds,
-        copy_outputs_to_rows,
-        copy_output_bytes_to_blobs,
         sweep_flow_runs,
         sweep_preview_slices,
         sweep_lost_slice_starts,
