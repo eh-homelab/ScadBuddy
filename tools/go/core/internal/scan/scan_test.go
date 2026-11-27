@@ -491,6 +491,76 @@ func TestAKindsCodeResolvesAsPythonsDoes(t *testing.T) {
 	}
 }
 
+func (h *harness) spoolType(code string, colourName *string) (id string, number int) {
+	h.t.Helper()
+	err := h.pool.QueryRow(context.Background(), `INSERT INTO filament_spool_types (code, material_id, rgba, label_weight_g, colour_name)
+		SELECT $1, id, '#FFFFFFFF', 1000, $2 FROM filament_materials WHERE name = 'PLA' RETURNING id::text, number`,
+		code, colourName).Scan(&id, &number)
+	if err != nil {
+		h.t.Fatal(err)
+	}
+	return id, number
+}
+
+func (h *harness) item(archived bool) (id string, number int) {
+	h.t.Helper()
+	err := h.pool.QueryRow(context.Background(), `INSERT INTO items (kind_id, name, archived_at)
+		VALUES ('hardware', 'Grease', CASE WHEN $1 THEN now() END) RETURNING id::text, number`, archived).Scan(&id, &number)
+	if err != nil {
+		h.t.Fatal(err)
+	}
+	return id, number
+}
+
+func TestATypeCodeResolvesAsPythonsDoes(t *testing.T) {
+	h := newHarness(t)
+	colour := "Charcoal"
+	id, number := h.spoolType("10101", &colour)
+	r, err := resolve(context.Background(), h.pool, "t"+jsonInt(number))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if r == nil || r.Kind != "spool_type" || r.ID != id || r.Code != "T-"+jsonInt(number) ||
+		r.Name == nil || *r.Name != "10101 Charcoal" || r.Archived {
+		t.Errorf("resolved %+v", r)
+	}
+	_, bare := h.spoolType("10102", nil)
+	r, err = resolve(context.Background(), h.pool, "T-"+jsonInt(bare))
+	if err != nil || r == nil || r.Name == nil || *r.Name != "10102" {
+		t.Errorf("a type with no colour name: %+v, %v", r, err)
+	}
+}
+
+func TestAnItemCodeResolvesAsPythonsDoes(t *testing.T) {
+	h := newHarness(t)
+	id, number := h.item(false)
+	r, err := resolve(context.Background(), h.pool, "i"+jsonInt(number))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if r == nil || r.Kind != "item" || r.ID != id || r.Code != "I-"+jsonInt(number) ||
+		r.Name == nil || *r.Name != "Grease" || r.Archived {
+		t.Errorf("resolved %+v", r)
+	}
+	_, gone := h.item(true)
+	r, err = resolve(context.Background(), h.pool, "I-"+jsonInt(gone))
+	if err != nil || r == nil || !r.Archived {
+		t.Errorf("an archived item: %+v, %v", r, err)
+	}
+}
+
+func TestATypeCodeNeverNamesAnItem(t *testing.T) {
+	h := newHarness(t)
+	_, typeNumber := h.spoolType("10102", nil)
+	_, itemNumber := h.item(false)
+	if r, err := resolve(context.Background(), h.pool, "T-"+jsonInt(itemNumber)); err != nil || r != nil {
+		t.Errorf("T with an item's number: %+v, %v", r, err)
+	}
+	if r, err := resolve(context.Background(), h.pool, "I-"+jsonInt(typeNumber)); err != nil || r != nil {
+		t.Errorf("I with a type's number: %+v, %v", r, err)
+	}
+}
+
 func TestAScanThatReadsNothingIsKeptWithItsPhoto(t *testing.T) {
 	h := newHarness(t)
 	for _, c := range []struct {
