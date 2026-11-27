@@ -1916,7 +1916,9 @@ const tools: Tool[] = [
     description:
       '`archived: true` takes 1 to 500 spools off the lists in one request; `false` puts them back (#7151). Each spool ' +
       'changed gets its own ledger event, and an archived one loses its open tag binding, as filament_spool_archive does. ' +
-      'Answers `changed`, `unchanged` (already so) and `not_found` (ids with no spool). Only what the user says. Writes ' +
+      'Answers `changed`, `unchanged` (already so) and `not_found` (ids with no spool). A restore of a spool whose place ' +
+      'is a dry box that another spool holds is a 409 `box_full` naming it (`occupant_id`), and none is changed; tell the ' +
+      'user. Only what the user says. Writes ' +
       "ScadBuddy; with tag sync on (filament_sync.tags), an archived spool's tag is then cleared in Bambuddy.",
     input: z.object({
       spool_ids: z.array(z.string().uuid()).min(1).max(500),

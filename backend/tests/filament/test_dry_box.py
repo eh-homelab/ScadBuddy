@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import threading
+import time
 from pathlib import Path
 from uuid import UUID
 
@@ -417,3 +418,52 @@ def test_the_bambuddy_pull_keeps_a_shelved_spool_where_it_was_when_the_box_is_fu
     spool = f.spools.get(made)
     assert spool is not None and spool.location_id == shelf
     assert report.moved == 0
+
+
+def test_a_move_that_waited_on_a_kind_flip_sees_the_box(pg_pool: PgPool) -> None:
+    """The flip locks the place before it writes the kind. `occupant_on` waits on that lock;
+    when the flip commits, its next statement reads the box condition afresh and sees a
+    box that holds a spool (the lock statement does not join the kind row)."""
+    kind = _kind(pg_pool, "Cabinet", dry=False)
+    cabinet = LocationStore(pg_pool).create(LocationCreate(name="Cab", kind_id=kind, capacity=1)).id
+    holder, mover = _spool(pg_pool), _spool(pg_pool)
+    with pg_pool.connection() as conn:
+        conn.execute("UPDATE filament_spools SET location_id = %s WHERE id = %s", (cabinet, holder))
+    locked, waiting = threading.Event(), threading.Event()
+    outcome: list[str] = []
+
+    def move() -> None:
+        assert locked.wait(timeout=30)
+        with pg_pool.connection() as conn, conn.transaction():
+            row = conn.execute("SELECT pg_backend_pid() AS pid").fetchone()
+            assert row is not None
+            pids.append(row["pid"])
+            waiting.set()
+            held = occupant_on(conn, cabinet, but=mover)
+            outcome.append("full" if held == holder else "empty")
+
+    pids: list[int] = []
+    thread = threading.Thread(target=move)
+    thread.start()
+    with pg_pool.connection() as conn, conn.transaction():
+        conn.execute(
+            "SELECT id FROM filament_locations WHERE kind_id = %s AND capacity = 1"
+            " ORDER BY id FOR NO KEY UPDATE",
+            (kind,),
+        )
+        locked.set()
+        assert waiting.wait(timeout=30)
+        # Commit only once the move is blocked on the place lock (a poll, not a delay).
+        deadline = time.monotonic() + 30
+        while time.monotonic() < deadline:
+            blocked = conn.execute(
+                "SELECT 1 FROM pg_stat_activity WHERE pid = %s AND wait_event_type = 'Lock'",
+                (pids[0],),
+            ).fetchone()
+            if blocked is not None:
+                break
+            time.sleep(0.01)
+        assert blocked is not None
+        conn.execute("UPDATE filament_location_kinds SET dry_storage = true WHERE id = %s", (kind,))
+    thread.join(timeout=60)
+    assert outcome == ["full"]

@@ -42,7 +42,7 @@ from scadbuddy.entities.required import (
 )
 from scadbuddy.filament import models as m
 from scadbuddy.filament.bb_sync_models import forget_sync
-from scadbuddy.filament.dry_box import check_kind_flip
+from scadbuddy.filament.dry_box import check_kind_flip, lock_kind_places
 from scadbuddy.orders.models import Actor
 
 Conn = Connection[DictRow]
@@ -546,18 +546,19 @@ class CatalogStore:
                         ).fetchone()
                         if current is not None:
                             check_temps(current | dict(zip(columns, values, strict=True)))
+                    flipping = kind == "location-kinds" and bool(
+                        getattr(patch, "dry_storage", None)
+                    )
+                    # The places before the kind's row, as a move takes them (#7167).
+                    boxes = lock_kind_places(conn, row_id) if flipping else []
                     row = conn.execute(
                         f"UPDATE {spec.table} SET {', '.join(sets)} WHERE id = %s RETURNING id",
                         [*values, row_id],
                     ).fetchone()
                     if row is not None and archived and kind == "insert-types":
                         forget_sync(conn, "insert_type", row_id)
-                    if (
-                        row is not None
-                        and kind == "location-kinds"
-                        and (getattr(patch, "dry_storage", None))
-                    ):
-                        check_kind_flip(conn, row_id)
+                    if row is not None and flipping:
+                        check_kind_flip(conn, boxes)
                     fields = set(sent) | ({"properties"} if properties is not None else set())
                     check = checked and checks_save(fields)
                     if row is not None and (properties or check):

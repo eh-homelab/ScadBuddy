@@ -55,12 +55,12 @@ def occupant_on(conn: Conn, location_id: UUID, *, but: UUID | None = None) -> UU
     empty box and for a place that is no box. Locks the box's row ``FOR NO KEY UPDATE``
     first (the lock `LocationStore.move_on` takes on every target, so none is upgraded),
     then reads, in the caller's transaction."""
-    box = conn.execute(
-        "SELECT l.id FROM filament_locations l JOIN filament_location_kinds k"
-        f" ON k.id = l.kind_id WHERE l.id = %s AND {BOX} FOR NO KEY UPDATE OF l",
-        (location_id,),
-    ).fetchone()
-    if box is None:
+    # Two statements: in READ COMMITTED the second takes a new snapshot, so it sees a kind
+    # flip (`check_kind_flip`) that committed while the first waited for the lock.
+    conn.execute(
+        "SELECT id FROM filament_locations WHERE id = %s FOR NO KEY UPDATE", (location_id,)
+    )
+    if not is_dry_box(conn, location_id):
         return None
     row = conn.execute(
         "SELECT id FROM filament_spools WHERE location_id = %s AND archived_at IS NULL"
@@ -96,22 +96,28 @@ def check_not_many(conn: Conn, location_id: UUID) -> None:
         raise BoxHasManyError()
 
 
-def check_kind_flip(conn: Conn, kind_id: UUID) -> None:
-    """`BoxHasManyError` when ``kind_id`` is now dry storage and one of its places of
-    capacity 1 (no printer's, not archived) holds two unarchived spools or more. Call it in
-    the transaction that wrote the kind's flag: the places are locked before the spools
-    are read, so a move that waits on its lock then sees the box."""
-    places = conn.execute(
+def lock_kind_places(conn: Conn, kind_id: UUID) -> list[UUID]:
+    """Lock (FOR NO KEY UPDATE, in id order) the places of ``kind_id`` that may become
+    dry boxes: capacity 1, no printer, not archived. Call it before the kind's row is
+    written, so the order is a move's (place, then the kind): a move that waits on the
+    lock then sees the new flag."""
+    rows = conn.execute(
         "SELECT id FROM filament_locations WHERE kind_id = %s AND capacity = 1"
         " AND archived_at IS NULL AND printer_id IS NULL ORDER BY id FOR NO KEY UPDATE",
         (kind_id,),
     ).fetchall()
+    return [row["id"] for row in rows]
+
+
+def check_kind_flip(conn: Conn, places: list[UUID]) -> None:
+    """`BoxHasManyError` when one of ``places`` (`lock_kind_places`) holds two unarchived
+    spools or more."""
     if not places:
         return
     many = conn.execute(
         "SELECT 1 FROM filament_spools WHERE location_id = ANY(%s) AND archived_at IS NULL"
         " GROUP BY location_id HAVING count(*) > 1 LIMIT 1",
-        ([row["id"] for row in places],),
+        (places,),
     ).fetchone()
     if many is not None:
         raise BoxHasManyError()

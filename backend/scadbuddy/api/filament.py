@@ -2088,9 +2088,7 @@ _BULK_ARCHIVE_DESCRIPTION = (
     "each spool of `spool_ids` (1 to 500), in one transaction (#7151). Each spool it "
     "changes gets its own `{event}` ledger event{extra}. The answer lists, in id order, "
     "the spools it changed (`changed`), those already so (`unchanged`) and the ids that "
-    "name no spool (`not_found`); none of them is refused. A restore of a spool whose "
-    "place is a dry box that another spool holds is a 409 with `code` `box_full` and "
-    "`occupant_id`, and then none is changed (#7167)."
+    "name no spool (`not_found`); no spool is refused singly{refusal}"
 )
 
 
@@ -2102,6 +2100,7 @@ _BULK_ARCHIVE_DESCRIPTION = (
     + _BULK_ARCHIVE_DESCRIPTION.format(
         event="archived",
         extra=", and its open tag binding closes, as `POST /spools/{id}/archive` does",
+        refusal=".",
     ),
 )
 async def bulk_archive_spools(
@@ -2117,7 +2116,14 @@ async def bulk_archive_spools(
     response_model=m.SpoolsArchived,
     summary="Restore several spools",
     description="Restores "
-    + _BULK_ARCHIVE_DESCRIPTION.format(event="restored", extra="; no tag is bound back"),
+    + _BULK_ARCHIVE_DESCRIPTION.format(
+        event="restored",
+        extra="; no tag is bound back",
+        refusal=(
+            ", but a spool whose place is a dry box that another spool holds is a 409 with "
+            "`code` `box_full` and `occupant_id`, and then none is changed (#7167)."
+        ),
+    ),
 )
 async def bulk_restore_spools(
     filament: FilamentDep, caller: CallerDep, body: m.SpoolIds
