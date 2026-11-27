@@ -72,6 +72,8 @@ const PAGES = [
   '/filament/ledger',
   // Spool labels (#6264): with no spools chosen; the route check below reads paths, not queries.
   '/filament/labels',
+  // The swap wizard (#7168): without Web NFC it keeps the QR code and the pick by hand.
+  '/filament/swap',
   // The phone page that reads tags (#7273, the hand-held Scan mode): without Web NFC it shows
   // how to open it on a phone. `/filament/scan`, its old address, redirects to it.
   '/scan',
