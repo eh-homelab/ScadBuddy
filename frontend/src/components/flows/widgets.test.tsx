@@ -123,24 +123,31 @@ describe('task widgets (#8062)', () => {
     expect(box).toHaveValue('S-2')
   })
 
-  it('moves and chooses with the arrow keys, Home and End', async () => {
+  it('moves and chooses with the arrow keys, and Home and End move the focus', async () => {
     const { user } = draw({ size: { type: 'string', enum: ['S', 'M', 'L'], title: 'Size' } })
     const radio = (name: string) => screen.getByRole('radio', { name })
-    expect(radio('S')).toHaveAttribute('tabindex', '0')
-    expect(radio('M')).toHaveAttribute('tabindex', '-1')
+    // Radix reads an arrow key as held while it moves the focus, so hold it until the focus lands.
+    const arrow = async (key: string, to: string) => {
+      await user.keyboard(`{${key}>}`)
+      await waitFor(() => expect(radio(to)).toHaveFocus())
+      await user.keyboard(`{/${key}}`)
+    }
     await user.tab()
     expect(radio('S')).toHaveFocus()
-    await user.keyboard('{ArrowRight}')
+    await arrow('ArrowRight', 'M')
     expect(radio('M')).toBeChecked()
-    expect(radio('M')).toHaveFocus()
     expect(radio('M')).toHaveAttribute('tabindex', '0')
     await user.keyboard('{End}')
+    await waitFor(() => expect(radio('L')).toHaveFocus())
+    await user.keyboard(' ')
     expect(radio('L')).toBeChecked()
-    await user.keyboard('{ArrowDown}')
+    await arrow('ArrowDown', 'S')
     expect(radio('S')).toBeChecked()
-    await user.keyboard('{ArrowLeft}')
+    await arrow('ArrowLeft', 'L')
     expect(radio('L')).toBeChecked()
     await user.keyboard('{Home}')
+    await waitFor(() => expect(radio('S')).toHaveFocus())
+    await user.keyboard(' ')
     expect(radio('S')).toBeChecked()
   })
 

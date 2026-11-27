@@ -4,6 +4,7 @@ import { Markdown } from '../../agent/chat/Markdown'
 import type { TaskQuestion } from '../../api/types'
 import { expectedText } from '../../lib/flowInputs'
 import { entityApi, entityParts } from '../entities/api'
+import { Checkbox } from '@/components/ui/checkbox'
 import { INSET } from './pendingParts'
 
 const isObject = (value: unknown): value is Record<string, unknown> =>
@@ -38,14 +39,14 @@ function Checklist({ items }: { items: string[] }) {
       {items.map((item, i) => (
         <li key={i}>
           <label className="flex min-h-9 items-start gap-2 py-1 text-[13px]">
-            <input
-              type="checkbox"
-              className="mt-0.5 size-5 shrink-0 accent-primary"
+            <Checkbox
+              className="mt-0.5 size-5 shrink-0"
+              aria-label={item}
               checked={ticked.has(i)}
-              onChange={(event) =>
+              onCheckedChange={(on) =>
                 setTicked((now) => {
                   const next = new Set(now)
-                  if (event.target.checked) next.add(i)
+                  if (on === true) next.add(i)
                   else next.delete(i)
                   return next
                 })
