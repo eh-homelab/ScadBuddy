@@ -117,7 +117,7 @@ export type DurableMessage = {
   flow?: FlowTurn
   /** The user's words, which memory is recalled against. */
   words: string
-  /** The sender's trace, so the turn's spans are its children as a classic turn's are. */
+  /** The sender's trace, so the turn's spans are its children as a session turn's are. */
   traceparent?: string
 }
 type SendAnswer = { accepted: boolean; turn_id: string }
@@ -577,7 +577,7 @@ export class DurableTurns {
       max_turns: session.maxTurns,
       system_append: turn.systemAppend,
     }
-    // The sender's context, which a classic turn starts its spans in (turnCore.ts `TurnTrace`).
+    // The sender's context, which a session turn starts its spans in (turnCore.ts `TurnTrace`).
     const traceparent = traceparentOf(trace.getSpan(otelContext.active()))
     const message: DurableMessage = {
       turn_id: turn.turnId,
@@ -711,7 +711,7 @@ export class DurableTurns {
     if (error?.code === 'turn_failed' || status === 'failed') {
       return { kind: 'failed', message: error?.message ?? 'the turn failed' }
     }
-    // The outcome carries the session's own spend, as a classic turn's does: its event's is the
+    // The outcome carries the session's own spend, as a session turn's does: its event's is the
     // lineage's (the meter), which a fork shares with its parent (#823).
     const own = await this.#turns.state(id)
     return {

@@ -4,7 +4,7 @@ import { ErrorCode, McpError } from '@modelcontextprotocol/sdk/types.js'
 
 // One MCP session per (durable session, plugin) on the replica that holds it (#2581).
 //
-// A classic turn's Claude Code keeps one MCP session per plugin for the whole turn, so
+// A session turn's Claude Code keeps one MCP session per plugin for the whole turn, so
 // a stateful plugin (Playwright MCP run `--isolated`: one browser context per MCP
 // session) keeps its page from one call to the next. A durable turn's calls are
 // activities, each of which used to open its own client and drop it without the

@@ -15,7 +15,7 @@ import {
 } from './origins.js'
 
 // The headless browser's navigation policy as a turn applies it (#982), the same for a
-// classic turn (harness/run.ts: the permission seam's input guard and a PostToolUse
+// session turn (harness/run.ts: the permission seam's input guard and a PostToolUse
 // hook) and a durable one (temporal/turnServers.ts: the turn tools' guard and screen).
 //
 // The browser is any remote plugin's `browser_*` tools (Playwright MCP's names).

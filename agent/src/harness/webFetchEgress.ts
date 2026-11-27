@@ -1,7 +1,7 @@
 import type { HookCallbackMatcher } from '@anthropic-ai/claude-agent-sdk'
 import { assertHostAllowed, assertHttpUrl, embeddedIPv4, isLoopbackHost, type Resolver, systemResolver } from '../http/egress.js'
 
-// Claude Code's WebFetch, which a classic turn offers when an allowed plugin package
+// Claude Code's WebFetch, which a session turn offers when an allowed plugin package
 // names it (run.ts `builtinTools`), fetches inside Claude Code, where none of the
 // agent's egress checks apply: measured on 2.1.296, a call to 127.0.0.1:9 tried to
 // connect (#2393's probe). Every URL the agent itself fetches is checked
@@ -13,7 +13,7 @@ import { assertHostAllowed, assertHttpUrl, embeddedIPv4, isLoopbackHost, type Re
 // own services (the plugin forwarder, the subagent MCP route).
 //
 // Claude Code resolves the name again when it connects, so a name re-pointed between
-// this check and that connection is not caught here. Since #2684 a classic turn is never
+// this check and that connection is not caught here. Since #2684 a session turn is never
 // offered Claude Code's WebFetch: it gets the agent's (builtins/web.ts), which connects to
 // the checked address, as a durable turn does. This hook stays as a second line.
 
