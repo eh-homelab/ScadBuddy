@@ -118,7 +118,8 @@ export function liveAccess(
     if (harnessName === HTTP_TOOL_NAME) {
       const { enabled, access } = await resolver.entry(BUILTIN_SOURCES.http, HTTP_TOOL)
       if (!enabled) return 'off'
-      // A call with allow_private_host is outward whatever its access (#8178).
+      // A call with allow_private_host is outward whatever its access (#8178). permissions.ts
+      // `decide` pins every such call too; both read `pinnedOutward`, so a change to one rule changes both.
       if (access !== 'off' && pinnedOutward(HTTP_TOOL_NAME, input)) return 'outward'
       return access ?? httpTierOf(HTTP_TOOL_NAME, input)
     }

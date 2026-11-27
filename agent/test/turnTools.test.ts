@@ -410,6 +410,28 @@ describe('turn tools in a durable session', () => {
     expect(refused.type).toBe('NotApproved')
   })
 
+  it("runs a private host's read only on a person's own approval, never a run grant's (review of #8178)", async () => {
+    const saveRoot = await mkdtemp(path.join(os.tmpdir(), 'turn-http-'))
+    const call = (byPerson: boolean) => {
+      const deps: TurnToolsDeps = {
+        sessions: { ownerOf: async (id) => (id === SESSION ? (BROWSER as never) : undefined) },
+        servers: turnServers({ httpRequest: { saveRoot, bodies: noBodies() } }),
+        // Approved either way; only who approved it differs.
+        approvals: { approved: async () => true, byPerson: async () => byPerson },
+      }
+      // Port 9 on loopback: nothing answers, so a call the gate lets through fails as a request, not NotApproved.
+      return env(`turn:${HTTP_SERVER}__${HTTP_TOOL}`).run(turnToolActivity(deps), { url: 'http://127.0.0.1:9/', allow_private_host: '127.0.0.1' })
+    }
+    const byGrant = await failure(call(false))
+    expect(byGrant.type).toBe('NotApproved')
+    expect(byGrant.message).toMatch(/a person's own approval/)
+    const byPerson = await call(true).then(
+      () => undefined,
+      (err: unknown) => err as { type?: string },
+    )
+    expect(byPerson?.type).not.toBe('NotApproved')
+  })
+
   it("takes http_request's switch and tier from ai_access (#2171): off hides it, an item set to outward parks a GET", async () => {
     const saveRoot = await mkdtemp(path.join(os.tmpdir(), 'turn-http-'))
     const run = async (initial: AccessRow[]) => {

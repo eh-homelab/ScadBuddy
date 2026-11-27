@@ -24,10 +24,11 @@ import type { RiskTier, TierResolver } from './permissions.js'
 // A GET or HEAD to a private or loopback host (10/8, 172.16/12, 192.168/16,
 // fc00::/7, CGNAT 100.64/10, 127/8, ::1, `localhost`) is refused (#8178), unless
 // the call names that host as `allow_private_host`, which pins the call outward
-// (tools/pinnedOutward.ts): a person approves that one call to that one host. So a
+// (tools/pinnedOutward.ts): a person approves that one call to that one host, and a
+// flow run's grant does not cover it (`needsPersonsApproval`, temporal/turnTools.ts). So a
 // turn, or a prompt that got into one, cannot read in-cluster services alone. A
-// write (POST and the rest) is approved by a person anyway, so it may reach such a
-// host without the argument. What egress.ts refuses for every URL the agent itself
+// write (POST and the rest) is outward anyway (a person's approval, or a flow run's
+// grant), so it may reach such a host without the argument. What egress.ts refuses for every URL the agent itself
 // fetches stays refused here: link-local addresses (169.254/16, fe80::/10) and the
 // cloud metadata hosts, where a node's own cloud credentials live, and URLs
 // carrying user:password.
@@ -149,7 +150,7 @@ const FORBIDDEN_HEADERS: ReadonlySet<string> = new Set([
 const CREDENTIAL_HEADERS: ReadonlySet<string> = new Set(['authorization', 'cookie', 'proxy-authorization'])
 
 export const HttpRequestInput = {
-  method: z.enum(METHODS).optional().describe('HTTP method (default GET); GET and HEAD run at once, the others wait for the user to approve'),
+  method: z.enum(METHODS).optional().describe('HTTP method (default GET); GET and HEAD to a public host run at once, the others wait for the user to approve'),
   url: z
     .string()
     .max(8192)

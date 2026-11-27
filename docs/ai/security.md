@@ -1120,9 +1120,13 @@ also as the IPv4 address an IPv6 form embeds) is refused, unless the call names 
 host as `allow_private_host`. Such a call is outward whatever its method or access
 tier ([`agent/src/tools/pinnedOutward.ts`](../../agent/src/tools/pinnedOutward.ts)), so
 it parks for a person's approval of that one request, in a session and in a flow run.
+A flow run's grant does not cover it: the durable call runs only when a person approved
+it in the UI (`needsPersonsApproval()` in `pinnedOutward.ts`, checked in
+[`agent/src/temporal/turnTools.ts`](../../agent/src/temporal/turnTools.ts)).
 So a turn, or injected content in one, cannot read the backend, Bambuddy or other
-cluster services alone. A write (`POST` and the rest) is approved by a person anyway,
-so it may reach such a host without the argument. The one refusal it shares with every
+cluster services alone. A write (`POST` and the rest) is outward anyway (a person
+approves it, or in a flow run the run's grant), so it may reach such a host without
+the argument. The one refusal it shares with every
 URL the agent fetches is `assertHostAllowed()`
 ([Egress check](#egress-check-on-gateway-urls)): link-local addresses and the cloud
 metadata hosts, where a node's own cloud credentials live. Every hop goes through
@@ -1133,7 +1137,7 @@ checked (`pinnedRequestOptions()` in
 between check and connect reaches nothing new. A redirect to a private host other than
 `allow_private_host` is refused.
 
-- **Tiers by method.** `GET` and `HEAD` are `read` and run at once; `POST`, `PUT`,
+- **Tiers by method.** `GET` and `HEAD` to a public host are `read` and run at once; `POST`, `PUT`,
   `PATCH` and `DELETE` are `outward` and park for a human approval bound to the exact
   input, like every outward tool. This is the one tool whose tier reads its input:
   `TierResolver` takes the call's input (`permissions.ts`), and `httpTierOf()` answers

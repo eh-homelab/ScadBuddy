@@ -63,3 +63,13 @@ function readsPrinter(source: unknown): boolean {
 export function pinnedOutward(toolName: string, input: unknown): boolean {
   return pinnedOutwardReason(toolName, input) !== null
 }
+
+/**
+ * Whether only a person's own approval of this very call may run it, never a run grant
+ * or another decider (#959, #8178): a one-off host off the asset allowlist, and a read of
+ * a private or loopback host. Fails closed as `pinnedOutwardReason` does.
+ */
+export function needsPersonsApproval(toolName: string, input: unknown): boolean {
+  const name = bareName(toolName)
+  return (name === 'fetch_asset' && field(input, 'allow_host') !== undefined) || (name === 'http_request' && field(input, 'allow_private_host') !== undefined)
+}
