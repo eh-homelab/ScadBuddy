@@ -476,6 +476,7 @@ async def test_a_tool_the_agent_raises_in_settings_waits_for_approval(
     assert served.calls == []
 
 
+@pytest.mark.usefixtures("waits_before_8062")
 async def test_a_tier_lowered_while_the_run_is_under_way_takes_effect_on_its_next_call(
     outward: Outward, tools: tuple[Tools, str], agent: AgentTiers
 ) -> None:

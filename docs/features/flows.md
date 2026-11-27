@@ -41,15 +41,20 @@ A script asks with a host function (`backend/scadbuddy/workflows/flow_tools.py`)
 
 | | `wait_for_human(question, timeout_s=None, people_only=False)` | `prompt(title, schema, context=None, place=None, ui=None, timeout_s=None, people_only=False)` |
 |---|---|---|
-| The question | a text | a title and a form |
+| The question | a text, the task's title | a title and a form |
 | The answer | `{answer}`, a text | a dict by field name |
-| Row in `tasks` | none | one, opened before the call waits |
-| Answer route | `POST /api/v1/workflow-runs/{run_id}/answer` | `POST /api/v1/tasks/{task_id}/answer` |
-| Operation kind | `flow_answer`; an agent's: `flow_agent_answer` | `task_answer`; an agent's: `flow_agent_answer` |
-| Harness callback | `human_answer_open` (`human_answer` in a replay of an older call) | `task_answer` |
+| Row in `tasks` | one, with the one text field `answer` | one, opened before the call waits |
+| Answer route | `POST /api/v1/tasks/{task_id}/answer` | `POST /api/v1/tasks/{task_id}/answer` |
+| Operation kind | `task_answer`; an agent's: `flow_agent_answer` | `task_answer`; an agent's: `flow_agent_answer` |
+| Harness callback | `task_answer` | `task_answer` |
 
-The text route refuses a prompt's call with 409 `flow-answer-is-a-task`
-(`backend/scadbuddy/api/flows.py` `ANSWER_IS_A_TASK`).
+Since #8062 a `wait_for_human` opens a task as a prompt does (`HUMAN_PROMPT_PATCH`, a patch
+id per call), with the schema `HUMAN_ANSWER_SCHEMA` and the question as its title. Its step
+is still `wait_for_human`. A call from before replays with no task: it waits on
+`human_answer_open` (`human_answer` for an older one) and takes its answer at
+`POST /api/v1/workflow-runs/{run_id}/answer`, operation kind `flow_answer`. The run page shows
+it with `CallCard`. The text route refuses a call with a task with 409
+`flow-answer-is-a-task` (`backend/scadbuddy/api/flows.py` `ANSWER_IS_A_TASK`).
 
 **No default limit.** Both wait with no limit unless `timeout_s` sets one (`_wait_s`). The
 floor is 10 seconds (`MIN_WAIT_S`): less raises `ValueError`, and a literal that is too
@@ -266,4 +271,3 @@ change: the call does what the new decision says.
 - Some rare Resets can leave a task row behind its run: one made by hand in Temporal, and one
   through ScadBuddy whose commit was lost and which was then tried again
   ([#7413](https://github.com/eh-homelab/ScadBuddy/issues/7413)).
-- `wait_for_human` opens no task yet.

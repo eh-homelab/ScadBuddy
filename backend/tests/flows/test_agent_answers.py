@@ -34,7 +34,12 @@ from tests.flows.test_flow_operations import (
     two_questions,
 )
 
-pytestmark = [pytest.mark.requires_temporal, pytest.mark.requires_postgres]
+#: Their `wait_for_human` takes a text: the path of a call from before #8062.
+pytestmark = [
+    pytest.mark.requires_temporal,
+    pytest.mark.requires_postgres,
+    pytest.mark.usefixtures("waits_before_8062"),
+]
 
 S1 = "5e551011-0000-4000-8000-000000000001"
 S2 = "5e551011-0000-4000-8000-000000000002"

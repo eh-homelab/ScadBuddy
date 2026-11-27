@@ -626,6 +626,7 @@ class TestWithoutAKey:
         assert response.json()["type"].endswith("/flows-unavailable")
 
 
+@pytest.mark.usefixtures("waits_before_8062")
 def test_an_answer_reaches_the_run_once(client: TestClient) -> None:
     definition = register(
         client, script("a = await wait_for_human('Swap to pink?', 600)", "return a['answer']")
@@ -648,6 +649,7 @@ def test_an_answer_reaches_the_run_once(client: TestClient) -> None:
     assert again.status_code == 409
 
 
+@pytest.mark.usefixtures("waits_before_8062")
 def test_an_answer_is_sealed_before_the_operation_records_it(
     client: TestClient, pg_conninfo: str
 ) -> None:

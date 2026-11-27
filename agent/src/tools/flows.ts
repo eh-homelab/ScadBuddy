@@ -587,8 +587,9 @@ export const flowTools: Tool[] = [
     name: 'answer_flow_question',
     label: "Answer a flow's question",
     description:
-      "Answer a flow run's question (#7471): a `wait_for_human` with a text, a `prompt` with an object of its " +
-      "task's fields (get_flow_run's `pending` names the call and its `task`). Allowed only when the user's " +
+      "Answer a flow run's question (#7471): one with a `task` (a `prompt`, or a `wait_for_human` since #8062, " +
+      "whose one field is `answer`) with an object of the task's fields, an older `wait_for_human` with no " +
+      "`task` with a text (get_flow_run's `pending` names the call and its `task`). Allowed only when the user's " +
       "setting flow_answerers, or the run's approved grant (`answers`), names this session (or its MCP token) and " +
       'the question is not `people_only`; else a ' +
       '403 says why. The first answer wins: a later one is told that it was answered already. Not for flow runs.',
@@ -597,7 +598,7 @@ export const flowTools: Tool[] = [
       call_id: z.string().uuid().describe("The question's call id, from get_flow_run's `pending`"),
       answer: z
         .union([z.string().min(1).max(10_000), z.record(z.string(), z.unknown())])
-        .describe("A text for wait_for_human; for prompt, an object of the task's fields"),
+        .describe("An object of the task's fields; a text for a wait_for_human with no task"),
     }),
     risk: 'outward',
     routes: ['POST /api/v1/workflow-runs/{run_id}/answer', 'GET /api/v1/tasks/{task_id}', 'POST /api/v1/tasks/{task_id}/answer'],

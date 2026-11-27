@@ -272,9 +272,10 @@ output, queue a print, arrange. `tool(...)` and `agent_session(...)` go to the a
 `agent-tools` queue. Triggers start `FlowTriggerFire` (`scadbuddy/workflows/flow_triggers.py:55`)
 from a Temporal Schedule or a bus event (`scadbuddy/flow_triggers/events.py:166-196`).
 
-A script's question to a person is a harness callback tool. `wait_for_human` waits on
-`human_answer_open` and `prompt` on `task_answer` (`flow_tools.py`), both with no default
-limit. A prompt also has a row in `tasks`, which the activities `flow_task_open`,
+A script's question to a person is a harness callback tool. `prompt`, and since #8062
+`wait_for_human` (`HUMAN_PROMPT_PATCH`), wait on `task_answer` (`flow_tools.py`), with no
+default limit; a `wait_for_human` from before replays on `human_answer_open` or
+`human_answer`. Such a question also has a row in `tasks`, which the activities `flow_task_open`,
 `flow_task_answered` and `flow_task_close` write through the API
 (`scadbuddy/workflows/flow_activities.py` `FlowTaskActivities`). The answers are the
 operation kinds `flow_answer` and `task_answer` on `projects`, and `flow_agent_answer` for an

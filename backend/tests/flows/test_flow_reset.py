@@ -24,7 +24,12 @@ from scadbuddy.operations.kinds import OperationKind
 from tests.flows.fake_api import PLAN, FakeApi, Outward
 from tests.flows.flows_support import HASH_KEY, Keys, script
 
-pytestmark = [pytest.mark.requires_temporal, pytest.mark.requires_postgres]
+#: Their `wait_for_human` takes a text: the path of a call from before #8062.
+pytestmark = [
+    pytest.mark.requires_temporal,
+    pytest.mark.requires_postgres,
+    pytest.mark.usefixtures("waits_before_8062"),
+]
 
 
 def kind(flows: Outward, name: str) -> OperationKind:

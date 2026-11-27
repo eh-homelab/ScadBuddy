@@ -672,7 +672,7 @@ async def test_a_reset_before_the_answer_opens_the_task_again(outward: Outward) 
     await give(outward, again, call_id, JANE)
     second = await outward.row(run_id, lambda r: [w.prompt for w in r.waiting_on] == ["Second?"])
     await parked(outward, run_id)
-    await give(outward, second, second.waiting_on[0].call_id, "go")
+    await give(outward, second, second.waiting_on[0].call_id, {"answer": "go"})
     done = await outward.finished(run_id)
     assert done.result == "result: ['jane@example.com', 'go']"
     task = await task_of(outward, call_id)
@@ -749,10 +749,13 @@ async def test_a_reset_after_the_answer_leaves_the_task_answered(outward: Outwar
 
 
 # -- wait_for_human -----------------------------------------------------------------
+# The first two are a call from before #8062, with no task: `test_wait_for_human_prompt.py`
+# has a new one.
 
 
 @temporal
 @postgres
+@pytest.mark.usefixtures("waits_before_8062")
 async def test_wait_for_human_has_no_default_limit(flows: Flows) -> None:
     body = script("a = await wait_for_human('Swap to pink?')", "return a['answer']")
     assert await check_script(body) == []
@@ -769,6 +772,7 @@ async def test_wait_for_human_has_no_default_limit(flows: Flows) -> None:
 
 @temporal
 @postgres
+@pytest.mark.usefixtures("waits_before_8062")
 async def test_wait_for_human_takes_a_timeout_past_a_day(flows: Flows) -> None:
     body = script("a = await wait_for_human('q?', timeout_s=200_000)", "return a['answer']")
     assert await check_script(body) == []
@@ -791,7 +795,7 @@ async def test_a_timeout_past_open_wait_is_open_wait(flows: Flows, call: str) ->
     run_id = await flows.start(script(f"await {call}", "return 1"))
     run = await parked(flows, run_id)
     assert max(await timers(flows, run_id)) == OPEN_WAIT
-    answer: Any = "ok" if call.startswith("wait") else JANE
+    answer: Any = {"answer": "ok"} if call.startswith("wait") else JANE
     await give(flows, run, run.waiting_on[0].call_id, answer)
     assert (await flows.finished(run_id)).result == "result: 1"
 

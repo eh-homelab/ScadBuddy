@@ -78,6 +78,15 @@ OPEN_WAIT = timedelta(days=3650)
 #: `wait_for_human` has no limit but its `timeout_s` (#7364). One id per call, as
 #: `FLOW_PINNED_CALL_PATCH`, so that a run from before asks its next question openly.
 WAIT_OPEN_PATCH = "flow-open-wait-7364"
+#: `wait_for_human` opens a task with one text field, as `prompt()` does (#8062). One id
+#: per call, as `WAIT_OPEN_PATCH`: a run from before asks its next question as a task.
+HUMAN_PROMPT_PATCH = "flow-human-prompt-8062"
+#: The task of a `wait_for_human` under `HUMAN_PROMPT_PATCH`.
+HUMAN_ANSWER_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "properties": {"answer": {"type": "string", "title": "Answer"}},
+    "required": ["answer"],
+}
 #: One try of a prompt's task write, past the CRUD client's own budget
 #: (`crud/client.UNAVAILABLE_BUDGET`). Tried again without limit: the task and the run
 #: must agree.
@@ -128,14 +137,29 @@ async def wait_for_human(
     question: str, timeout_s: int | None = None, people_only: bool = False
 ) -> HumanAnswer:
     """Ask a person `question` and wait for the answer, with no limit unless `timeout_s`
-    (at least 10 seconds) sets one. Raises TimeoutError if nobody answers in that time.
-    With `people_only`, only a person may answer; otherwise the setting `flow_answerers`
-    or the run's grant may also let an assistant answer."""
+    (at least 10 seconds) sets one. The question is a task with one text field, as a
+    `prompt` is, and is limited in size as a prompt's title. Raises ValueError for a
+    question or timeout_s it does not take, and TimeoutError if nobody answers in that
+    time. With `people_only`, only a person may answer; otherwise the setting
+    `flow_answerers` or the run's grant may also let an assistant answer."""
     people_only = _people_only(people_only)
     timeout_s = _wait_s(timeout_s)
     owner: StepOwner = workflow.instance()
     drawn = workflow.random().getstate() if timeout_s and timeout_s > MAX_WAIT_S else None
     call_id = str(workflow.uuid4())
+    if workflow.patched(f"{HUMAN_PROMPT_PATCH}:{call_id}"):
+        asked = await _task_wait(
+            owner,
+            call_id,
+            "wait_for_human",
+            question,
+            HUMAN_ANSWER_SCHEMA,
+            timeout_s,
+            people_only,
+            context=[],
+        )
+        return HumanAnswer(answer=asked["answer"])
+    # Replaying a call from before #8062: the callback path, as it was.
     callback = human_answer_open
     if not workflow.patched(f"{WAIT_OPEN_PATCH}:{call_id}"):
         # Replaying a call from before it.
@@ -237,22 +261,46 @@ async def prompt(
     timeout_s = _wait_s(timeout_s)
     owner: StepOwner = workflow.instance()
     call_id = str(workflow.uuid4())
-    expires = None if timeout_s is None else workflow.now() + timedelta(seconds=timeout_s)
-    task = _prompt_task(
+    answer = await _task_wait(
+        owner,
         call_id,
-        owner.run_id,
-        title=title,
-        schema=schema,
+        "prompt",
+        title,
+        schema,
+        timeout_s,
+        people_only,
         context=[] if context is None else context,
         place=place,
         ui=ui,
         assignee=assignee,
-        expires_at=expires,
+    )
+    try:
+        return filled(schema, answer)
+    except InputsError as err:
+        # A number that fits the schema and not the model's type.
+        raise ValueError(f"the answer does not fit: {err}") from None
+
+
+async def _task_wait(
+    owner: StepOwner,
+    call_id: str,
+    fn: str,
+    title: str,
+    schema: dict[str, Any],
+    timeout_s: int | None,
+    people_only: bool,
+    **fields: Any,
+) -> dict[str, Any]:
+    """Open the task `call_id` and wait for its answer, in the step `fn`. Returns the
+    answer as its answerer sent it. `fields` are the task's other fields."""
+    expires = None if timeout_s is None else workflow.now() + timedelta(seconds=timeout_s)
+    task = _prompt_task(
+        call_id, owner.run_id, title=title, schema=schema, expires_at=expires, **fields
     )
     await _open_task(task)
     try:
         async with step(
-            "prompt",
+            fn,
             call_id,
             outward=False,
             waiting="answer",
@@ -278,11 +326,7 @@ async def prompt(
         await _task_write(FLOW_TASK_CLOSE, call_id, "cancelled")
         raise
     await _task_write(FLOW_TASK_ANSWERED, call_id, answered.answer)
-    try:
-        return filled(schema, answered.answer)
-    except InputsError as err:
-        # A number that fits the schema and not the model's type.
-        raise ValueError(f"the answer does not fit: {err}") from None
+    return answered.answer
 
 
 @agent.tool_defn(inherently_safe=True)
