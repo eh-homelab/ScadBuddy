@@ -12,6 +12,9 @@ from scadbuddy.auth.service_credentials import ServiceAuth
 from scadbuddy.camera.follow import ChangeFollower
 from scadbuddy.camera.relay import (
     HOOK_URL,
+    SILENT_MAX,
+    SILENT_RESTARTS,
+    SILENT_SECONDS,
     Relay,
     SourceError,
     rtsps_source,
@@ -510,3 +513,81 @@ async def test_restart_of_a_printer_no_longer_recorded_only_removes() -> None:
     await subject.restart("p1")
     assert mtx.calls == [("delete", "p1")]
     assert mtx.paths == {}
+
+
+def restarts(mtx: FakeMtx, name: str) -> int:
+    return mtx.calls.count(("delete", name))
+
+
+async def test_a_ready_pull_with_no_bytes_is_restarted() -> None:
+    api = FakeApi([source("p1"), source("p2")])
+    mtx = FakeMtx()
+    subject = relay(api, mtx)
+    await subject.reconcile_all()
+    mtx.ready.update({"p1": True, "p2": True})
+    mtx.received.update({"p1": 100, "p2": 100})
+    mtx.calls.clear()
+    before = SILENT_RESTARTS.labels("p1")._value.get()
+    await subject.check_silence(0.0)
+    mtx.received["p2"] += 10
+    await subject.check_silence(SILENT_SECONDS - 1)
+    assert restarts(mtx, "p1") == 0
+    mtx.received["p2"] += 10
+    await subject.check_silence(SILENT_SECONDS)
+    # p1 is open and sends nothing: the relay dials it afresh. p2 still sends.
+    assert restarts(mtx, "p1") == 1
+    assert restarts(mtx, "p2") == 0
+    assert SILENT_RESTARTS.labels("p1")._value.get() == before + 1
+    await subject.flushed()
+    assert api.states("p1")[-1] == "retrying"
+    await subject.aclose()
+
+
+async def test_a_pull_that_is_not_ready_is_left_to_mediamtx() -> None:
+    api = FakeApi([source("p1")])
+    mtx = FakeMtx()
+    subject = relay(api, mtx)
+    await subject.reconcile_all()
+    mtx.calls.clear()
+    for now in (0.0, SILENT_SECONDS, 10 * SILENT_SECONDS):
+        await subject.check_silence(now)
+    assert restarts(mtx, "p1") == 0
+    await subject.aclose()
+
+
+async def test_the_wait_doubles_while_the_source_stays_silent() -> None:
+    api = FakeApi([source("p1")])
+    mtx = FakeMtx()
+    subject = relay(api, mtx)
+    await subject.reconcile_all()
+    mtx.ready["p1"] = True
+    mtx.received["p1"] = 100
+    mtx.calls.clear()
+    now = 0.0
+
+    async def silent_for(seconds: float) -> None:
+        nonlocal now
+        await subject.check_silence(now)
+        await subject.check_silence(now + seconds - 1)
+        assert restarts(mtx, "p1") == count, f"restarted before {seconds} s"
+        now += seconds
+        await subject.check_silence(now)
+
+    count = 0
+    for wait in (SILENT_SECONDS, 2 * SILENT_SECONDS, 4 * SILENT_SECONDS):
+        await silent_for(wait)
+        count += 1
+        assert restarts(mtx, "p1") == count
+    # The wait stops growing at SILENT_MAX.
+    for _ in range(5):
+        await silent_for(min(2 ** (count) * SILENT_SECONDS, SILENT_MAX))
+        count += 1
+    assert restarts(mtx, "p1") == count
+    # Bytes again: the next silence waits SILENT_SECONDS once more.
+    await subject.check_silence(now)
+    mtx.received["p1"] += 1
+    now += 1
+    await subject.check_silence(now)
+    await silent_for(SILENT_SECONDS)
+    assert restarts(mtx, "p1") == count + 1
+    await subject.aclose()
