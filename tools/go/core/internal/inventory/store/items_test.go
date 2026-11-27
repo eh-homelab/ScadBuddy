@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"reflect"
+	"regexp"
 	"slices"
 	"strings"
 	"sync"
@@ -383,9 +384,81 @@ func TestAnEmptyLotOfUnknownCostIsNotUnknown(t *testing.T) {
 
 // What K1 adds.
 
+var opaqueKindID = regexp.MustCompile(`^k[0-9a-f]{32}$`)
+
+func TestACodeFindsAKindByNameInAnyCase(t *testing.T) {
+	pool, s := testdb.New(t), itemStore()
+	if _, err := pool.Exec(context.Background(), `INSERT INTO item_kinds (id, name, parent_id, tracking, life_basis)
+		VALUES ('k0123456789abcdef0123456789abcdef', 'P1S', 'printer', 'unit', 'none')`); err != nil {
+		t.Fatal(err)
+	}
+	made := must(createItem(t, pool, s, wire.ItemInput{KindID: "nozzle", Name: "nozzle", CompatibleWith: []string{" p1s "}}))
+	if n := count(t, pool, `SELECT count(*) FROM item_kinds WHERE parent_id = 'printer' AND lower(name) = 'p1s'`); n != 1 {
+		t.Fatalf("%d kinds for p1s", n)
+	}
+	if !reflect.DeepEqual(made.CompatibleWith, []string{"P1S"}) {
+		t.Fatalf("made %v", made.CompatibleWith)
+	}
+	if n := count(t, pool, `SELECT count(*) FROM relations r JOIN entities o ON o.id = r.to_entity
+		WHERE r.type_id = 'compatible_with' AND o.kind = 'item_kind' AND o.ref = 'k0123456789abcdef0123456789abcdef'`); n != 1 {
+		t.Fatalf("%d relations to the existing kind", n)
+	}
+}
+
+func TestCompatibleFilterMatchesTheNameInAnyCase(t *testing.T) {
+	pool, s := testdb.New(t), itemStore()
+	made := must(createItem(t, pool, s, wire.ItemInput{KindID: "nozzle", Name: "nozzle", CompatibleWith: []string{"H2C"}}))
+	for _, code := range []string{"h2c", " H2c "} {
+		if got := itemIDs(listItems(t, pool, s, ItemFilter{Compatible: code})); !reflect.DeepEqual(got, []string{made.ID}) {
+			t.Fatalf("%q lists %v", code, got)
+		}
+	}
+	// A kind's id is never a code.
+	var id string
+	if err := pool.QueryRow(context.Background(), `SELECT id FROM item_kinds WHERE parent_id = 'printer' AND name = 'H2C'`).Scan(&id); err != nil {
+		t.Fatal(err)
+	}
+	if got := listItems(t, pool, s, ItemFilter{Compatible: id}); len(got) != 0 {
+		t.Fatalf("the id lists %v", itemIDs(got))
+	}
+}
+
+func TestTwoWritesOfOneNewCodeMakeOneKind(t *testing.T) {
+	pool, s := testdb.New(t), itemStore()
+	var wg sync.WaitGroup
+	errs := make([]error, 8)
+	for i := range errs {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			code := "X1C"
+			if i%2 == 1 {
+				code = " x1c"
+			}
+			_, errs[i] = createItem(t, pool, s, wire.ItemInput{KindID: "nozzle", Name: fmt.Sprintf("nozzle %d", i), CompatibleWith: []string{code}})
+		}()
+	}
+	wg.Wait()
+	for _, err := range errs {
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+	if n := count(t, pool, `SELECT count(*) FROM item_kinds WHERE parent_id = 'printer' AND lower(name) = 'x1c'`); n != 1 {
+		t.Fatalf("%d kinds for x1c", n)
+	}
+}
+
 func TestCompatibleWithBecomesRelations(t *testing.T) {
 	pool, s, k := testdb.New(t), itemStore(), kindStore()
 	made := must(createItem(t, pool, s, wire.ItemInput{KindID: "nozzle", Name: "0.4 nozzle", CompatibleWith: []string{"H2C"}}))
+	var h2c string
+	if err := pool.QueryRow(context.Background(), `SELECT id FROM item_kinds WHERE parent_id = 'printer' AND name = 'H2C'`).Scan(&h2c); err != nil {
+		t.Fatal(err)
+	}
+	if !opaqueKindID.MatchString(h2c) {
+		t.Fatalf("the model kind id %q is not opaque", h2c)
+	}
 	if !reflect.DeepEqual(made.CompatibleWith, []string{"H2C"}) {
 		t.Fatalf("made %v", made.CompatibleWith)
 	}
@@ -397,7 +470,7 @@ func TestCompatibleWithBecomesRelations(t *testing.T) {
 	}
 	if n := count(t, pool, `SELECT count(*) FROM relations r JOIN entities f ON f.id = r.from_entity
 		JOIN entities o ON o.id = r.to_entity WHERE r.type_id = 'compatible_with' AND r.ended_at IS NULL
-		AND f.kind = 'item' AND f.ref = $1 AND o.kind = 'item_kind' AND o.ref = 'printer_h2c'`, made.ID); n != 1 {
+		AND f.kind = 'item' AND f.ref = $1 AND o.kind = 'item_kind' AND o.ref = $2`, made.ID, h2c); n != 1 {
 		t.Fatalf("%d relations", n)
 	}
 
@@ -405,9 +478,13 @@ func TestCompatibleWithBecomesRelations(t *testing.T) {
 	if !reflect.DeepEqual(updated.CompatibleWith, []string{"H2C", "P1S"}) {
 		t.Fatalf("updated %v", updated.CompatibleWith)
 	}
-	p1s := getKind(t, pool, k, "printer_p1s")
-	if p1s.Name != "P1S" || p1s.ParentID == nil || *p1s.ParentID != "printer" || p1s.Tracking != "unit" || p1s.LifeBasis != "hours" {
-		t.Fatalf("printer_p1s %+v", p1s)
+	var p1sID string
+	if err := pool.QueryRow(context.Background(), `SELECT id FROM item_kinds WHERE parent_id = 'printer' AND name = 'P1S'`).Scan(&p1sID); err != nil {
+		t.Fatal(err)
+	}
+	p1s := getKind(t, pool, k, p1sID)
+	if !opaqueKindID.MatchString(p1s.ID) || p1s.Name != "P1S" || p1s.ParentID == nil || *p1s.ParentID != "printer" || p1s.Tracking != "unit" || p1s.LifeBasis != "hours" {
+		t.Fatalf("P1S kind %+v", p1s)
 	}
 	updated = must(updateItem(t, pool, s, made.ID, wire.InventoryItemPatch{CompatibleWith: &[]string{"P1S"}}))
 	if !reflect.DeepEqual(updated.CompatibleWith, []string{"P1S"}) {

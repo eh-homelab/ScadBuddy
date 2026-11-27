@@ -2,6 +2,7 @@ package store
 
 import (
 	"context"
+	"errors"
 	"strings"
 
 	"github.com/jackc/pgx/v5"
@@ -11,22 +12,31 @@ import (
 // code names a kind under printer, made when it is missing, and the item has one open
 // compatible_with relation to each.
 
-// modelKindID is the §8 id rule, as the migration's model_codes step writes it: printer_ and
-// the code in lower case, runs of other characters as _, at most 32.
-const modelKindID = `'printer_' || left(regexp_replace(lower(btrim($1)), '[^a-z0-9]+', '_', 'g'), 32)`
-
-// modelKind is the id of the code's model kind, made under printer (named the code) when
-// it is missing. A new kind publishes its handler_config.changed events, as a kind save does.
+// modelKind is the id of the code's model kind: the kind under printer whose name is the
+// code in any case. The id is never built from the code. A missing kind is made with an
+// opaque id and the trimmed code as its name; it publishes its handler_config.changed
+// events, as a kind save does. No unique index covers (parent_id, lower(name)), and this
+// layer adds no migration, so a transaction-scoped advisory lock on the lower-cased code
+// makes the find and the insert one step: a second write of a new code waits for the first
+// to commit, then finds its kind.
 func modelKind(ctx context.Context, tx pgx.Tx, cat Catalog, code string, by Actor) (string, error) {
+	if _, err := tx.Exec(ctx, `SELECT pg_advisory_xact_lock(hashtextextended('model_kind:' || lower(btrim($1)), 0))`,
+		code); err != nil {
+		return "", err
+	}
 	var id string
-	var made bool
-	err := tx.QueryRow(ctx, `WITH made AS (
-			INSERT INTO item_kinds (id, name, parent_id, tracking, life_basis)
-			VALUES (`+modelKindID+`, left(btrim($1), 100), 'printer', 'unit', 'none')
-			ON CONFLICT (id) DO NOTHING RETURNING id)
-		SELECT `+modelKindID+`, EXISTS (SELECT 1 FROM made)`, code).Scan(&id, &made)
-	if err != nil || !made {
-		return id, err
+	err := tx.QueryRow(ctx, `SELECT id FROM item_kinds
+		WHERE parent_id = 'printer' AND lower(name) = lower(btrim($1)) ORDER BY created_at, id LIMIT 1`, code).Scan(&id)
+	if err == nil {
+		return id, nil
+	}
+	if !errors.Is(err, pgx.ErrNoRows) {
+		return "", err
+	}
+	if err := tx.QueryRow(ctx, `INSERT INTO item_kinds (id, name, parent_id, tracking, life_basis)
+		VALUES ('k' || replace(gen_random_uuid()::text, '-', ''), left(btrim($1), 100), 'printer', 'unit', 'none')
+		RETURNING id`, code).Scan(&id); err != nil {
+		return "", err
 	}
 	set, err := loadKinds(ctx, tx)
 	if err != nil {

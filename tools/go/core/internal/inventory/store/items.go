@@ -160,7 +160,7 @@ func (s *Items) List(ctx context.Context, q Querier, f ItemFilter) ([]wire.Item,
 			" JOIN entities te ON te.id = r.to_entity AND te.kind = 'item_kind'"+
 			" JOIN item_kinds mk ON mk.id = te.ref"+
 			" WHERE r.type_id = 'compatible_with' AND r.ended_at IS NULL"+
-			" AND (mk.name = "+code+" OR mk.id = "+strings.ReplaceAll(modelKindID, "$1", code)+"))")
+			" AND mk.parent_id = 'printer' AND lower(mk.name) = lower(btrim("+code+")))")
 	}
 	clause := ""
 	if len(where) > 0 {
