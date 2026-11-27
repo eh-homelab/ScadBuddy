@@ -41,7 +41,7 @@ from collections.abc import Callable, Iterable
 from dataclasses import dataclass
 from typing import Any, Literal
 
-from psycopg import Connection
+from psycopg import Connection, errors
 from psycopg.rows import DictRow
 from psycopg.types.json import Jsonb
 from psycopg_pool import ConnectionPool
@@ -96,17 +96,43 @@ class PrinterPlacesReferencedError(Exception):
 
 
 class PrinterPlaceNameClashError(Exception):
-    """A place under one of the printer's places cannot move under the printer root's
-    parent: an unarchived place of that name is there already (#8177)."""
+    """A place under one of the printer's places cannot move to the place above the
+    printer (#8177): an unarchived place of that name is there already, or ``other_id``,
+    another place under the printer's places, has that name and moves there too."""
 
-    def __init__(self, printer_id: str, place_id: uuid.UUID, name: str) -> None:
-        super().__init__(
-            f"place {place_id} ({name!r}) is under printer {printer_id}'s places and cannot"
-            " move out: a place of that name is there already; rename one first"
-        )
+    def __init__(
+        self, printer_id: str, place_id: uuid.UUID, name: str, other_id: uuid.UUID | None = None
+    ) -> None:
+        if other_id is None:
+            why = (
+                f"place {place_id} ({name!r}) is under printer {printer_id}'s places and"
+                " cannot move to the place above the printer: a place of that name is there"
+                " already; rename one first"
+            )
+        else:
+            why = (
+                f"places {other_id} and {place_id} ({name!r}) are under printer"
+                f" {printer_id}'s places and both move to the place above the printer, where"
+                " two places cannot have one name; rename one first"
+            )
+        super().__init__(why)
         self.printer_id = printer_id
         self.place_id = place_id
         self.name = name
+        self.other_id = other_id
+
+
+class PrinterDeleteConflictError(Exception):
+    """Another write changed the printer's places while its delete ran (#8177): Postgres
+    stopped the delete on a deadlock, or a row still pointed at one of its places when
+    the cascade ran. The delete wrote nothing; it can be tried again."""
+
+    def __init__(self, printer_id: str) -> None:
+        super().__init__(
+            f"printer {printer_id} changed while it was being deleted; nothing was deleted,"
+            " try again"
+        )
+        self.printer_id = printer_id
 
 
 class SerialTakenError(Exception):
@@ -392,7 +418,13 @@ def _place_references(
     conn: Connection[DictRow], printer_id: uuid.UUID
 ) -> list[tuple[str, uuid.UUID]]:
     """Each ``(table.column, id)`` of `_PLACE_REFERENCES` that points at one of the
-    printer's places, by kind then id."""
+    printer's places, by kind then id. Read after the places are locked
+    (`lock_printer_places_on`): a lot or unit that would point at one of them waits on its
+    foreign key check, and one that passed it has committed, so no row can appear between
+    this read and the cascade. The rows themselves are not locked: a row found refuses the
+    delete, which then writes nothing, and a lock here would deadlock with a stock patch
+    that holds its lot and waits on one of the printer's places (`inventory/stock.py`
+    locks the lot, then its new place's key)."""
     found: list[tuple[str, uuid.UUID]] = []
     for table, column in _PLACE_REFERENCES:
         rows = conn.execute(
@@ -1290,35 +1322,76 @@ class PrinterStore:
         return _row(data), "created" if holder is None else "conflict", True
 
     def delete(self, printer_id: str) -> None:
+        """Delete the printer's row; its places go with it (ON DELETE CASCADE). One
+        transaction: a refusal writes nothing.
+
+        Lock order (#8177), the order a report write and the capture backstop take:
+
+        1. The printer's report lock and its report row (`reports.lock_report_on`), which
+           a report write (`PrinterReportStore.advance_in`), `capture.reconcile_all` and
+           `capture.sync_ams_weights` take before any spool or place. So none of them
+           waits on a lock below while it holds the report that the cascade must delete.
+        2. The printer's place lock (`LocationStore.lock_printer_on`), which every
+           `ensure_*` takes before it makes or changes one of the printer's places. No new
+           place of the printer appears after this. A tray resolve
+           (`filament/unknown_resolve.py`) takes it before its spools, so it is taken
+           before the spools here too. A capture takes it after its spools, but under the
+           report row of step 1.
+        3. The spools in the printer's places, in id order, each moved to no place
+           (`release_printer_spools_on`), as `LocationStore.move` locks a spool before
+           its place.
+        4. The tree lock, then the printer's places in id order
+           (`lock_printer_places_on`), as a parent change (`LocationStore.update_on`)
+           takes the tree lock before its place.
+        5. The spools again: one that moved in between 3 and 4 has committed by now, and
+           no other can move in.
+        6. The stock rows that point at a place (`_place_references`): any refuses with
+           `PrinterPlacesReferencedError`.
+        7. The places under the printer's places, and the place they move to
+           (`release_printer_child_places_on`); a name clash refuses with
+           `PrinterPlaceNameClashError`.
+        8. The printer's row, and the cascade.
+
+        A deadlock, or a row that still points at a place when the cascade runs, is
+        `PrinterDeleteConflictError`: the transaction rolled back, and it can be tried
+        again."""
         key = printer_uuid(printer_id)
         if key is None:
             raise PrinterNotFoundError(printer_id)
         from scadbuddy.filament.locations import (
             ChildPlaceClashError,
+            LocationStore,
             lock_printer_places_on,
             release_printer_child_places_on,
             release_printer_spools_on,
         )
+        from scadbuddy.printers.reports import lock_report_on
 
-        with self.pool.connection() as conn, conn.transaction():
-            # The printer's places go with its row. Its spools leave them first (#7143),
-            # then the places under them (#8177); a row with no move path refuses it.
-            release_printer_spools_on(conn, key, actor=PRINTER_DELETE_ACTOR)
-            lock_printer_places_on(conn, key)
-            refs = _place_references(conn, key)
-            if refs:
-                raise PrinterPlacesReferencedError(str(key), refs)
-            try:
-                release_printer_child_places_on(conn, key)
-            except ChildPlaceClashError as clash:
-                raise PrinterPlaceNameClashError(str(key), clash.place_id, clash.name) from None
-            gone = conn.execute("DELETE FROM printers WHERE id = %s", (key,))
-            if gone.rowcount == 0:
-                raise PrinterNotFoundError(printer_id)
-            # `print_runs.printer` goes null with the row (ON DELETE SET NULL); its runs'
-            # activity facets follow in the same transaction, so the Printer filter never
-            # offers a printer that is gone (#4442 M3).
-            _forget_run_activity(conn, str(key))
-            _forget_settings(conn, str(key))
+        try:
+            with self.pool.connection() as conn, conn.transaction():
+                lock_report_on(conn, str(key))
+                LocationStore.lock_printer_on(conn, key)
+                release_printer_spools_on(conn, key, actor=PRINTER_DELETE_ACTOR)
+                lock_printer_places_on(conn, key)
+                release_printer_spools_on(conn, key, actor=PRINTER_DELETE_ACTOR)
+                refs = _place_references(conn, key)
+                if refs:
+                    raise PrinterPlacesReferencedError(str(key), refs)
+                try:
+                    release_printer_child_places_on(conn, key)
+                except ChildPlaceClashError as clash:
+                    raise PrinterPlaceNameClashError(
+                        str(key), clash.place_id, clash.name, clash.other_id
+                    ) from None
+                gone = conn.execute("DELETE FROM printers WHERE id = %s", (key,))
+                if gone.rowcount == 0:
+                    raise PrinterNotFoundError(printer_id)
+                # `print_runs.printer` goes null with the row (ON DELETE SET NULL); its runs'
+                # activity facets follow in the same transaction, so the Printer filter never
+                # offers a printer that is gone (#4442 M3).
+                _forget_run_activity(conn, str(key))
+                _forget_settings(conn, str(key))
+        except (errors.DeadlockDetected, errors.ForeignKeyViolation):
+            raise PrinterDeleteConflictError(str(key)) from None
         # After the commit (#7384), as in `link_bambuddy`.
         settings_written()

@@ -169,6 +169,19 @@ def read_view(report: dict[str, Any]) -> tuple[Any, ...]:
 REPORT_LOCK_CLASS = 0x5342_5052
 
 
+def lock_report_on(conn: Connection[DictRow], printer_id: str) -> None:
+    """Take the printer's report lock (`REPORT_LOCK_CLASS`), then its report row
+    ``FOR UPDATE`` when it has one, to the end of ``conn``'s transaction: what a report
+    write (`PrinterReportStore.advance_in`) takes first, and the row the capture backstop
+    (`filament/capture.py` `reconcile_all`, `sync_ams_weights`) locks first. A printer's
+    delete takes them before anything else, so it never holds a spool or a place that a
+    write holding the report waits on (#8177)."""
+    conn.execute(
+        "SELECT pg_advisory_xact_lock(%s::integer, hashtext(%s))", (REPORT_LOCK_CLASS, printer_id)
+    )
+    conn.execute("SELECT 1 FROM printer_reports WHERE printer_id = %s FOR UPDATE", (printer_id,))
+
+
 def stale(stored: datetime | None, seen_at: datetime, now: datetime) -> bool:
     """Whether a report seen at ``seen_at`` is older than the row's ``stored``: then it
     is not written (`PrinterReportStore.advance_in`). A ``stored`` time more than

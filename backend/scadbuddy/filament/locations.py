@@ -111,21 +111,26 @@ def release_printer_spools_on(conn: Conn, printer_id: UUID, *, actor: str) -> in
 
 
 class ChildPlaceClashError(LocationExistsError):
-    """A place under one of a printer's places cannot move under the printer root's
-    parent: an unarchived place of its name is there already (#8177)."""
+    """A place under one of a printer's places cannot move to the place above the printer
+    (#8177): an unarchived place of its name is there already, or ``other_id``, another
+    place that moves there too, has its name."""
 
-    def __init__(self, place_id: UUID, name: str) -> None:
+    def __init__(self, place_id: UUID, name: str, other_id: UUID | None = None) -> None:
         super().__init__()
         self.place_id = place_id
         self.name = name
+        self.other_id = other_id
 
 
 def lock_printer_places_on(conn: Conn, printer_id: UUID) -> None:
     """Take the tree lock, then lock every place of ``printer_id`` in id order, to the end
     of ``conn``'s transaction (#8177). Taken after the spools (`release_printer_spools_on`),
     as `LocationStore.move` locks the spool before the place. While they are held, no other
-    transaction can make a row that points at one of them (its foreign key check waits),
-    so what a printer's delete reads next is what its cascade meets."""
+    transaction can make a spool, a stock row or a child place point at one of them: its
+    foreign key check waits. A write that passed that check before the lock was taken has
+    committed when the lock is given. So the spools must be read again after this lock (a
+    spool can move in after the first `release_printer_spools_on`); the references and
+    child places read after it are what the cascade meets."""
     conn.execute("SELECT pg_advisory_xact_lock(hashtext(%s))", (_TREE_LOCK,))
     conn.execute(
         "SELECT id FROM filament_locations WHERE printer_id = %s ORDER BY id FOR UPDATE",
@@ -137,11 +142,16 @@ def release_printer_child_places_on(conn: Conn, printer_id: UUID) -> int:
     """Move each place that is not ``printer_id``'s but sits under one of its places, on
     ``conn``'s transaction, just before the printer's row is deleted (#8177): its parent
     goes with the row, and `filament_locations.parent_id` has no ON DELETE rule. Each goes
-    under the printer root's parent: the nearest place above the printer's unarchived root
-    that is not the printer's, or no parent when there is none. Each move is
+    to the place above the printer: the nearest place above the printer's unarchived root
+    that is not the printer's (the walk up skips the printer's own places). Each goes to
+    the top level when the printer has no unarchived root, when nothing is above it, or
+    when that place is archived (an archived place is out of the tree, as an archived
+    parent of a printer's unit counts as none, `LocationStore.ensure_ams_unit_on`). That
+    place is locked ``FOR SHARE``, so it stays as read. Each move is
     `LocationStore.update_on`, the write path of a person's own move. Locks the places in
-    id order. `ChildPlaceClashError` when a place of that name is there already; the
-    caller's transaction then writes nothing. Returns how many moved."""
+    id order. `ChildPlaceClashError` when a place of that name is there already, or when
+    two of the places that move have one name; the caller's transaction then writes
+    nothing. Returns how many moved."""
     above = conn.execute(
         "WITH RECURSIVE up AS ("
         " SELECT parent_id AS id FROM filament_locations"
@@ -152,14 +162,29 @@ def release_printer_child_places_on(conn: Conn, printer_id: UUID) -> int:
         " WHERE l.printer_id IS DISTINCT FROM %s",
         (printer_id, printer_id, printer_id),
     ).fetchone()
-    parent: UUID | None = None if above is None else above["id"]
+    parent: UUID | None = None
+    if above is not None:
+        live = conn.execute(
+            "SELECT archived_at IS NULL AS live FROM filament_locations WHERE id = %s FOR SHARE",
+            (above["id"],),
+        ).fetchone()
+        if live is not None and live["live"]:
+            parent = above["id"]
     children = conn.execute(
-        "SELECT c.id, c.name FROM filament_locations c"
-        " JOIN filament_locations p ON p.id = c.parent_id"
+        "SELECT c.id, c.name, c.printer_id IS NULL AND c.archived_at IS NULL AS named"
+        " FROM filament_locations c JOIN filament_locations p ON p.id = c.parent_id"
         " WHERE p.printer_id = %s AND c.printer_id IS DISTINCT FROM %s"
         " ORDER BY c.id FOR UPDATE OF c",
         (printer_id, printer_id),
     ).fetchall()
+    # Only these rows are in `filament_locations_name`.
+    first: dict[str, UUID] = {}
+    for child in children:
+        if not child["named"]:
+            continue
+        other = first.setdefault(child["name"].upper(), child["id"])
+        if other != child["id"]:
+            raise ChildPlaceClashError(child["id"], child["name"], other)
     for child in children:
         try:
             LocationStore.update_on(conn, child["id"], m.LocationPatch(parent_id=parent))

@@ -33,6 +33,7 @@ from scadbuddy.printers.store import (
     BambuddyLinkTakenError,
     KekMissingError,
     NoAccessCodeError,
+    PrinterDeleteConflictError,
     PrinterNotFoundError,
     PrinterPlaceNameClashError,
     PrinterPlacesReferencedError,
@@ -503,6 +504,228 @@ def test_a_delete_is_refused_while_a_stock_unit_is_one_of_the_printers_places(
         ).fetchone()
         assert unit is not None
     _assert_refused_naming(printers, row.id, tray, "stock_units.location_ref_id", unit["id"])
+
+
+def test_a_grandchild_place_keeps_its_parent(printers: PrinterStore) -> None:
+    """#8177 review M2: only the place right under the printer's place moves; a place
+    under that one stays under it."""
+    row = printers.create(PrinterCreate(serial=SERIAL, name="A"))
+    with printers.pool.connection() as conn:
+        room = _place(conn, "Room")
+        root = _place(conn, "A", parent=room, printer=row.id, root=True)
+        tray = _place(conn, "A AMS-A slot 1", parent=root, printer=row.id, tray=0)
+        bin_ = _place(conn, "Bin", parent=tray)
+        inner = _place(conn, "Inner", parent=bin_)
+    printers.delete(row.id)
+    with printers.pool.connection() as conn:
+        assert _row(conn, "filament_locations", bin_)["parent_id"] == room
+        assert _row(conn, "filament_locations", inner)["parent_id"] == bin_
+
+
+def test_another_printers_place_under_a_tray_moves_out_and_stays_its_printers(
+    printers: PrinterStore,
+) -> None:
+    """#8177 review M2: a place of printer B under printer A's tray moves like a person's
+    place, and B keeps it."""
+    a = printers.create(PrinterCreate(serial=SERIAL, name="A"))
+    b = printers.create(PrinterCreate(serial="01P00A000000002", name="B"))
+    with printers.pool.connection() as conn:
+        room = _place(conn, "Room")
+        root = _place(conn, "A", parent=room, printer=a.id, root=True)
+        tray = _place(conn, "A AMS-A slot 1", parent=root, printer=a.id, tray=0)
+        other = _place(conn, "B", parent=tray, printer=b.id, root=True)
+    printers.delete(a.id)
+    with printers.pool.connection() as conn:
+        moved = _row(conn, "filament_locations", other)
+    assert moved["parent_id"] == room and str(moved["printer_id"]) == b.id
+
+
+def test_a_root_under_the_printers_own_place_climbs_past_it(printers: PrinterStore) -> None:
+    """#8177 review M2: a person hung the printer's root under one of the printer's own
+    places. The child goes to the first place above them that is not the printer's."""
+    row = printers.create(PrinterCreate(serial=SERIAL, name="A"))
+    with printers.pool.connection() as conn:
+        room = _place(conn, "Room")
+        unit = _place(conn, "A AMS-A", parent=room, printer=row.id)
+        root = _place(conn, "A", parent=unit, printer=row.id, root=True)
+        bin_ = _place(conn, "Bin", parent=root)
+    printers.delete(row.id)
+    with printers.pool.connection() as conn:
+        assert _row(conn, "filament_locations", bin_)["parent_id"] == room
+
+
+def test_a_printer_with_only_an_archived_root_puts_its_child_at_the_top(
+    printers: PrinterStore,
+) -> None:
+    """#8177 review M2: with no unarchived root there is no place above it, so the child
+    goes to the top level."""
+    row = printers.create(PrinterCreate(serial=SERIAL, name="A"))
+    with printers.pool.connection() as conn:
+        room = _place(conn, "Room")
+        root = _place(conn, "A", parent=room, printer=row.id, root=True)
+        conn.execute("UPDATE filament_locations SET archived_at = now() WHERE id = %s", (root,))
+        bin_ = _place(conn, "Bin", parent=root)
+    printers.delete(row.id)
+    with printers.pool.connection() as conn:
+        assert _row(conn, "filament_locations", bin_)["parent_id"] is None
+
+
+def test_a_child_whose_target_is_archived_goes_to_the_top(printers: PrinterStore) -> None:
+    """#8177 review M6: the place above the printer's root is archived. An archived place
+    is out of the tree, so the child goes to the top level, as a printer's unit with an
+    archived parent counts as one with none (`LocationStore.ensure_ams_unit_on`)."""
+    row = printers.create(PrinterCreate(serial=SERIAL, name="A"))
+    with printers.pool.connection() as conn:
+        room = _place(conn, "Room")
+        root = _place(conn, "A", parent=room, printer=row.id, root=True)
+        bin_ = _place(conn, "Bin", parent=root)
+        conn.execute("UPDATE filament_locations SET archived_at = now() WHERE id = %s", (room,))
+    printers.delete(row.id)
+    with printers.pool.connection() as conn:
+        assert _row(conn, "filament_locations", bin_)["parent_id"] is None
+
+
+def test_two_child_places_of_one_name_refuse_the_delete_naming_both(
+    printers: PrinterStore,
+) -> None:
+    """#8177 review M3: "Bin" under two trays would both move to one parent. No place of
+    that name is there now, so the refusal names the two places, not one already there."""
+    row = printers.create(PrinterCreate(serial=SERIAL, name="A"))
+    with printers.pool.connection() as conn:
+        root = _place(conn, "A", printer=row.id, root=True)
+        one = _place(conn, "A AMS-A slot 1", parent=root, printer=row.id, tray=0)
+        two = _place(conn, "A AMS-A slot 2", parent=root, printer=row.id, tray=1)
+        first = _place(conn, "Bin", parent=one)
+        second = _place(conn, "BIN", parent=two)
+    with pytest.raises(PrinterPlaceNameClashError) as refused:
+        printers.delete(row.id)
+    lo, hi = sorted([first, second])
+    assert refused.value.place_id == hi and refused.value.other_id == lo
+    assert str(lo) in str(refused.value) and str(hi) in str(refused.value)
+    assert "already" not in str(refused.value)
+    assert printers.get(row.id) is not None
+
+
+def test_a_spool_moved_into_a_printers_place_before_its_lock_moves_out_too(
+    printers: PrinterStore, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#8177 review I2: a spool moves into the printer's tray after the delete moved the
+    tray's spools out and before it locked the places. The delete moves it out again under
+    the place lock, so the cascade never fails on `filament_spools.location_id`."""
+    from scadbuddy.filament import locations
+
+    row = printers.create(PrinterCreate(serial=SERIAL, name="A"))
+    with printers.pool.connection() as conn:
+        tray = _place(conn, "A AMS-A slot 1", printer=row.id, tray=0)
+        shelf = _place(conn, "Shelf")
+        late = _spool_in(conn, shelf)
+    real = locations.lock_printer_places_on
+
+    def moved_in_first(conn: psycopg.Connection[Any], printer_id: uuid.UUID) -> None:
+        locations.LocationStore(printers.pool).move(late, tray, actor="ann")
+        real(conn, printer_id)
+
+    monkeypatch.setattr(locations, "lock_printer_places_on", moved_in_first)
+    printers.delete(row.id)
+    assert printers.get(row.id) is None
+    with printers.pool.connection() as conn:
+        assert _row(conn, "filament_spools", late)["location_id"] is None
+
+
+@pytest.mark.parametrize("with_row", [True, False], ids=["report", "no-report"])
+def test_a_delete_waits_for_a_report_write_before_it_locks_a_spool_or_a_place(
+    printers: PrinterStore, pg_conninfo: str, with_row: bool
+) -> None:
+    """#8177 review I1: the watch's write (`PrinterReportStore.advance_in`) takes the
+    printer's report lock and its report row, then the spools, then the places. The delete
+    takes them in that order too: while a write holds the report, the delete waits and
+    holds no spool, no place and no place lock, so the write never waits on the delete.
+    Without a report row the report lock alone stands for a write that would insert one."""
+    from scadbuddy.printers.reports import REPORT_LOCK_CLASS
+
+    row = printers.create(PrinterCreate(serial=SERIAL, name="A"))
+    with printers.pool.connection() as conn:
+        root = _place(conn, "A", printer=row.id, root=True)
+        tray = _place(conn, "A AMS-A slot 1", parent=root, printer=row.id, tray=0)
+        spool = _spool_in(conn, tray)
+        if with_row:
+            conn.execute(
+                "INSERT INTO printer_reports (printer_id, report, seen_at)"
+                " VALUES (%s, '{}', now())",
+                (row.id,),
+            )
+    with psycopg.connect(pg_conninfo) as holder, ThreadPoolExecutor(1) as ex:
+        with holder.transaction():
+            holder.execute(
+                "SELECT pg_advisory_xact_lock(%s::integer, hashtext(%s))",
+                (REPORT_LOCK_CLASS, row.id),
+            )
+            if with_row:
+                holder.execute(
+                    "SELECT 1 FROM printer_reports WHERE printer_id = %s FOR UPDATE", (row.id,)
+                )
+            done = ex.submit(printers.delete, row.id)
+            _wait_until_blocked_by(printers, holder.info.backend_pid, done)
+            # What the write takes next: none of it is the delete's yet.
+            holder.execute(
+                "SELECT 1 FROM filament_spools WHERE id = %s FOR UPDATE NOWAIT", (spool,)
+            )
+            holder.execute(
+                "SELECT 1 FROM filament_locations WHERE printer_id = %s FOR UPDATE NOWAIT",
+                (row.id,),
+            )
+            took = holder.execute(
+                "SELECT pg_try_advisory_xact_lock(hashtext(%s))",
+                (f"filament_printer_places:{row.id}",),
+            ).fetchone()
+            assert took is not None and took[0]
+        done.result(timeout=30)
+    assert printers.get(row.id) is None
+
+
+def _wait_until_blocked_by(printers: PrinterStore, holder: int, done: Any) -> None:
+    for _ in range(600):
+        with printers.pool.connection() as conn:
+            row = conn.execute(
+                "SELECT count(*) AS n FROM pg_stat_activity WHERE %s = ANY(pg_blocking_pids(pid))",
+                (holder,),
+            ).fetchone()
+        if row is not None and row["n"] > 0:
+            return
+        if done.done():
+            done.result()
+            raise AssertionError("the delete never waited on the report write")
+        threading.Event().wait(0.05)
+    raise AssertionError("the delete never waited on the report write")
+
+
+@pytest.mark.parametrize(
+    "error",
+    [psycopg.errors.DeadlockDetected, psycopg.errors.ForeignKeyViolation],
+    ids=["deadlock", "foreign-key"],
+)
+def test_a_delete_that_meets_a_concurrent_write_is_a_typed_conflict(
+    printers: PrinterStore, monkeypatch: pytest.MonkeyPatch, error: type[Exception]
+) -> None:
+    """#8177 review I2 backstop: a deadlock, or a row that still points at one of the
+    printer's places when the cascade runs, ends the delete with `PrinterDeleteConflictError`
+    (try again), never a raw database error. Injected: no race makes one on demand. Nothing
+    is written."""
+    row = printers.create(PrinterCreate(serial=SERIAL, name="A"))
+    with printers.pool.connection() as conn:
+        tray = _place(conn, "A AMS-A slot 1", printer=row.id, tray=0)
+        spool = _spool_in(conn, tray)
+
+    def raises(*_: Any) -> list[Any]:
+        raise error("injected")
+
+    monkeypatch.setattr(store_module, "_place_references", raises)
+    with pytest.raises(PrinterDeleteConflictError) as refused:
+        printers.delete(row.id)
+    assert "try again" in str(refused.value)
+    assert printers.get(row.id) is not None
+    with printers.pool.connection() as conn:
+        assert _row(conn, "filament_spools", spool)["location_id"] == tray
 
 
 # ── #4186 review ─────────────────────────────────────────────────────────────────────
