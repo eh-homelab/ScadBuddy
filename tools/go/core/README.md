@@ -79,6 +79,10 @@ unchanged, to the Python API: WebSockets, SSE and large bodies included. On prod
 | `escalations` | `/escalations/*`: a flow run's calls passed up, denied, moved, delivered, and a run's entries |
 | `audit` | `POST` `/audit/record`, `…/list`, `…/prune` |
 | `order-costs` | `POST /orders/{id}/assistant-cost`: the cost entry, its `order_events` row and, after the commit, `order.changed` and `order_item.changed`. It reads `pricing_usd_rate` and `orders_currency` from `settings`, else `SCADBUDDY_PRICING_USD_RATE` and `SCADBUDDY_ORDERS_CURRENCY` from core's own environment, else `1` and `USD`, so core needs the API's values of those two |
+| `unknown-trays:read` | `GET /api/v1/filament/unknown-trays` (public, caller `api`), and the print worker's `GET …/crud/print/filament/printers/{printer_id}/unknown-trays` (caller `print`) |
+| `unknown-trays` | those, and `POST /api/v1/filament/unknown-trays/{id}/dismiss` (public). Go writes no spool here (#7143). The resolve route (`POST …/{id}/resolve`, which would start Python's activity `filament_resolve_unknown_tray` on queue `library`) is not built yet: it waits for `internal/temporalx`, so a resolve gets a 404 |
+
+The `unknown-trays` public routes use `internal/auth` (see "Public routes"). Their CRUD route is caller `print`'s, so it has its own `case` in `newRouter` (areaPackages mounts on caller `agent`).
 
 Area `fleet` (`internal/fleet`) is caller `fleet`'s (scope `crud.fleet`), under
 `/api/v1/internal/crud/fleet`: `POST /agents/{session_id}/touch`, `GET /agents`, `PUT` and
@@ -91,7 +95,7 @@ the messages returned. A text over 16 MiB is a 422 whose detail names the limit 
 `text-too-long`). A cursor `PUT` only moves it back: a `seq` past the cursor is a 422
 (reason `seq-ahead`). Its `GET /changes` is area `changes` (below).
 
-### The event stream (#7768)
+## The event stream (#7768)
 
 `internal/bus` publishes on the event bus and reads it. One `LISTEN` connection per process,
 outside the request pool, hears `scadbuddy_events` and the agent's five channels
@@ -147,9 +151,12 @@ first `PUT /machines/{id}` records the caller's proof name in `fleet_machines.pr
 `machine-of-another-proof`), and so is a session `PUT` whose machine is registered to
 another proof. So two machines of different proofs each hold a row of the same session id,
 and neither changes the other's. A `fleet-rotator` credential with no machine writes
-nothing (403 `no-machine`). Core reads no bootstrap directory: a credential whose machine's file
-went is refused here once the API revokes its row, at the API's first resolve of it or its next
-start or auth sweep (at most 5 minutes; `docs/security/trust-boundaries.md`). `fleetd` sends a
+nothing (403 `no-machine`). Core reads Python's `SCADBUDDY_SERVICE_BOOTSTRAP_DIR` (#8172): a
+credential that names a machine passes only while `fleet-rotator.<machine>` is a regular file
+there (one stat per resolve, as `exchange.py` `BootstrapVerifier.has_machine`). When the file is
+gone, `internal/auth` refuses the credential and revokes its row at once. With the variable
+unset, core refuses every such credential, so the core container needs the API's bootstrap
+secret directory mounted and the variable set. `fleetd` sends a
 `fleet` PAT today, which these routes refuse until #8041.
 
 Area `blobs` † (`internal/blobstore`, #7958) is a shared area: any service credential whose scopes

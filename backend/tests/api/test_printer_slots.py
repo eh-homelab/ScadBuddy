@@ -37,18 +37,21 @@ from scadbuddy.slicing.component import Slicing
 from scadbuddy.slicing.own_presets import sb_ref
 from scadbuddy.workflows import lan_command as lan_command_module
 from tests.api.test_send import BASE, configure
-from tests.printers.conftest import KEK
+from tests.printers.conftest import KEK, unkeyed
 from tests.support.lan_script import Scripted, script_printer
 from tests.support.no_bambuddy import forbid_bambuddy
+from tests.support.printers import MERGED_BY
 
 pytestmark = pytest.mark.requires_postgres
 
 SERIAL = "01P00A000000071"
-RECORDED: dict[str, Any] = json.loads(
-    (Path(__file__).parents[1] / "printers" / "fixtures" / "lan-report-h2c-idle.json").read_text(
-        encoding="utf-8"
-    )
-)["print"]
+RECORDED: dict[str, Any] = unkeyed(
+    json.loads(
+        (
+            Path(__file__).parents[1] / "printers" / "fixtures" / "lan-report-h2c-idle.json"
+        ).read_text(encoding="utf-8")
+    )["print"]
+)
 BODY = {"material": "PLA", "colour": "#FFFFFF", "nozzle_temp_min": 190, "nozzle_temp_max": 220}
 BASIC = "Bambu PLA Basic @BBL H2C"
 
@@ -1094,7 +1097,7 @@ def test_an_unknown_printer_is_a_404(client: TestClient, scripted: Scripted) -> 
 def bb_only(client: TestClient) -> Iterator[str]:
     printers = printers_of(client)
     row = printers.store.create(PrinterCreate(serial=SERIAL, name="Bare"))
-    printers.store.link_bambuddy(row.id, 3)
+    printers.store.link_bambuddy(row.id, 3, by=MERGED_BY)
     yield row.id
 
 
@@ -1117,7 +1120,7 @@ def test_a_printer_linked_both_ways_never_calls_bambuddy(
     """Bambuddy has a URL and the row its id, and still no route calls it."""
     configure(client)
     pid = lan_printer(client, feeding(idle(), 1 << 8 | 1, tray_now=5))
-    printers_of(client).store.link_bambuddy(pid, 3)
+    printers_of(client).store.link_bambuddy(pid, 3, by=MERGED_BY)
     preset = {"preset_id": "GFSA00", "preset_name": "Basic"}
     with forbid_bambuddy(spans, BASE):
         answers = [

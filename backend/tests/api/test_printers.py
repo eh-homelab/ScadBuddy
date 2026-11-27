@@ -21,6 +21,7 @@ from scadbuddy.printers.lan_models import LanReport
 from tests.api.test_send import API, configure
 from tests.bambuddy.conftest import recording
 from tests.printers.conftest import KEK
+from tests.support.printers import MERGED_BY
 
 pytestmark = pytest.mark.requires_postgres
 
@@ -414,7 +415,7 @@ def test_a_lan_link_on_a_withheld_serial_is_422_before_any_dial(client: TestClie
     printers.store.kek = KEK
     calls: list[tuple[str, str, str]] = []
     printers.probe = _probe_ok(calls)
-    row = printers.store.ensure_bambuddy(7, serial=None, name="H2C", model=None)
+    row = printers.store.ensure_bambuddy(7, serial=None, name="H2C", model=None, by=MERGED_BY)
 
     response = client.put(
         f"/api/v1/printers/{row.id}/lan", json={"host": "10.0.0.9", "access_code": CODE}

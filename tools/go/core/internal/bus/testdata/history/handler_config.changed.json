@@ -1,0 +1,18 @@
+{
+  "at": "2026-11-26T03:16:20.019258+00:00",
+  "id": "0937aee1c3bd4da2bef2d50f0c2b0cf1",
+  "new": {
+    "hours": 2000
+  },
+  "old": {
+    "hours": 1500
+  },
+  "kind": "handler_config.changed",
+  "step": "life",
+  "actor": {
+    "kind": "browser"
+  },
+  "owner": "item:00000000-0000-0000-0000-000000000001",
+  "handler": "life.hours",
+  "retention_seconds": 0
+}

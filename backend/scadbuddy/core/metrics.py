@@ -263,6 +263,23 @@ class Metrics:
             "Rows removed from the event log by SCADBUDDY_EVENT_LOG_RETENTION_*.",
             registry=r,
         )
+        # #6949 (design §4.8): each durable subscriber's place in the log (`event_subscribers`;
+        # the history subscriber runs in scadbuddy-core). Read per scrape by the API
+        # (`api/metrics.py` `refresh_subscriber_metrics`).
+        self.event_subscriber_lag_events = Gauge(
+            "scadbuddy_event_subscriber_lag_events",
+            "Events of every kind in the log past the subscriber's cursor, not only the"
+            " kinds it reads: the newest seq less the cursor.",
+            ["subscriber"],
+            registry=r,
+        )
+        self.event_subscriber_lag_seconds = Gauge(
+            "scadbuddy_event_subscriber_lag_seconds",
+            "Seconds since the oldest event past the subscriber's cursor was logged; 0 when"
+            " the subscriber has applied every event.",
+            ["subscriber"],
+            registry=r,
+        )
         self.render_rejected = Counter(
             "scadbuddy_render_jobs_rejected",
             "Render requests refused (503) because SCADBUDDY_RENDER_QUEUE_MAX were waiting."

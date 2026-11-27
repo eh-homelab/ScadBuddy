@@ -19,6 +19,7 @@ from psycopg_pool import PoolTimeout
 from pydantic import ValidationError
 
 from scadbuddy.core.secrets import SealError
+from scadbuddy.orders.models import Actor
 from scadbuddy.printers import store as store_module
 from scadbuddy.printers.models import (
     ACCESS_CODE_MAX_LENGTH,
@@ -40,6 +41,7 @@ from scadbuddy.printers.store import (
 )
 from tests.conftest import PgPool
 from tests.printers.conftest import RecordingBus
+from tests.support.printers import MERGED_BY
 
 pytestmark = pytest.mark.requires_postgres
 
@@ -199,7 +201,7 @@ def test_unlink_lan_forgets_the_code(printers_with_kek: PrinterStore) -> None:
 
 
 def test_a_synthetic_serial_takes_no_lan_link(printers_with_kek: PrinterStore) -> None:
-    row = printers_with_kek.ensure_bambuddy(4, serial=None, name="H2C", model="H2C")
+    row = printers_with_kek.ensure_bambuddy(4, serial=None, name="H2C", model="H2C", by=MERGED_BY)
     with pytest.raises(SerialUnknownError):
         printers_with_kek.link_lan(
             row.id, LanLink(host="10.0.0.9", access_code=CODE), cert_sha256=CERT
@@ -207,31 +209,33 @@ def test_a_synthetic_serial_takes_no_lan_link(printers_with_kek: PrinterStore) -
 
 
 def test_ensure_bambuddy_is_idempotent_and_adopts_serial(printers: PrinterStore) -> None:
-    a = printers.ensure_bambuddy(4, serial=None, name="H2C", model="H2C")
+    a = printers.ensure_bambuddy(4, serial=None, name="H2C", model="H2C", by=MERGED_BY)
     assert a.serial == "bambuddy-4" and a.preferred_path == "bambuddy"
-    assert printers.ensure_bambuddy(4, serial=None, name="H2C", model="H2C").id == a.id
-    b = printers.ensure_bambuddy(4, serial=SERIAL, name="H2C", model="H2C")
+    assert (
+        printers.ensure_bambuddy(4, serial=None, name="H2C", model="H2C", by=MERGED_BY).id == a.id
+    )
+    b = printers.ensure_bambuddy(4, serial=SERIAL, name="H2C", model="H2C", by=MERGED_BY)
     assert a.id == b.id and b.serial == SERIAL
     assert len(printers.list()) == 1
 
 
 def test_ensure_bambuddy_links_the_row_holding_the_serial(printers: PrinterStore) -> None:
     mine = printers.create(PrinterCreate(serial=SERIAL, name="Mine"))
-    row = printers.ensure_bambuddy(4, serial=SERIAL, name="H2C", model="H2C")
+    row = printers.ensure_bambuddy(4, serial=SERIAL, name="H2C", model="H2C", by=MERGED_BY)
     assert row.id == mine.id and row.bambuddy_printer_id == 4 and row.name == "Mine"
 
 
 def test_a_synthetic_row_gives_way_to_the_row_holding_the_serial(printers: PrinterStore) -> None:
-    printers.ensure_bambuddy(4, serial=None, name="H2C", model="H2C")
+    printers.ensure_bambuddy(4, serial=None, name="H2C", model="H2C", by=MERGED_BY)
     mine = printers.create(PrinterCreate(serial=SERIAL, name="Mine"))
-    row = printers.ensure_bambuddy(4, serial=SERIAL, name="H2C", model="H2C")
+    row = printers.ensure_bambuddy(4, serial=SERIAL, name="H2C", model="H2C", by=MERGED_BY)
     assert row.id == mine.id and row.bambuddy_printer_id == 4
     assert [r.id for r in printers.list()] == [mine.id]
 
 
 def test_a_re_added_printer_gets_a_row_of_its_own(printers: PrinterStore) -> None:
-    first = printers.ensure_bambuddy(1, serial=SERIAL, name="Old", model="H2C")
-    second = printers.ensure_bambuddy(2, serial=SERIAL, name="New", model="H2C")
+    first = printers.ensure_bambuddy(1, serial=SERIAL, name="Old", model="H2C", by=MERGED_BY)
+    second = printers.ensure_bambuddy(2, serial=SERIAL, name="New", model="H2C", by=MERGED_BY)
     assert first.id != second.id and second.serial == "bambuddy-2"
     assert printers.by_bambuddy_id(1) == first
 
@@ -240,7 +244,9 @@ def test_concurrent_ensures_make_one_row(printers: PrinterStore) -> None:
     with ThreadPoolExecutor(4) as pool:
         rows = list(
             pool.map(
-                lambda _: printers.ensure_bambuddy(7, serial=SERIAL, name="x", model=None),
+                lambda _: printers.ensure_bambuddy(
+                    7, serial=SERIAL, name="x", model=None, by=MERGED_BY
+                ),
                 range(8),
             )
         )
@@ -250,26 +256,26 @@ def test_concurrent_ensures_make_one_row(printers: PrinterStore) -> None:
 def test_link_bambuddy_refuses_a_taken_id(printers: PrinterStore) -> None:
     a = printers.create(PrinterCreate(serial=SERIAL, name="A"))
     b = printers.create(PrinterCreate(serial="01P00A000000002", name="B"))
-    printers.link_bambuddy(a.id, 3)
-    assert printers.link_bambuddy(a.id, 3).bambuddy_printer_id == 3
+    printers.link_bambuddy(a.id, 3, by=MERGED_BY)
+    assert printers.link_bambuddy(a.id, 3, by=MERGED_BY).bambuddy_printer_id == 3
     with pytest.raises(BambuddyLinkTakenError) as raised:
-        printers.link_bambuddy(b.id, 3)
+        printers.link_bambuddy(b.id, 3, by=MERGED_BY)
     assert raised.value.existing_id == a.id
     with pytest.raises(BambuddyLinkTakenError) as again:
-        printers.link_bambuddy(a.id, 5)
+        printers.link_bambuddy(a.id, 5, by=MERGED_BY)
     assert again.value.existing_id == a.id
 
 
 def test_link_bambuddy_takes_over_a_synthetic_row(printers: PrinterStore) -> None:
-    synthetic = printers.ensure_bambuddy(3, serial=None, name="H2C", model=None)
+    synthetic = printers.ensure_bambuddy(3, serial=None, name="H2C", model=None, by=MERGED_BY)
     mine = printers.create(PrinterCreate(serial=SERIAL, name="Mine"))
-    assert printers.link_bambuddy(mine.id, 3).bambuddy_printer_id == 3
+    assert printers.link_bambuddy(mine.id, 3, by=MERGED_BY).bambuddy_printer_id == 3
     assert printers.get(synthetic.id) is None
 
 
 def test_unlink_bambuddy(printers: PrinterStore) -> None:
     row = printers.create(PrinterCreate(serial=SERIAL, name="A"))
-    printers.link_bambuddy(row.id, 3)
+    printers.link_bambuddy(row.id, 3, by=MERGED_BY)
     assert printers.by_bambuddy_id(3) == printers.get(row.id)
     assert printers.unlink_bambuddy(row.id).bambuddy_printer_id is None
     assert printers.by_bambuddy_id(3) is None
@@ -281,6 +287,41 @@ def test_delete(printers: PrinterStore) -> None:
     assert printers.get(row.id) is None
     with pytest.raises(PrinterNotFoundError):
         printers.delete(row.id)
+
+
+def test_a_delete_moves_the_spools_out_of_the_printers_places(printers: PrinterStore) -> None:
+    """#7143: the printer's places go with its row, so a spool in one would fail the
+    delete on its foreign key. Capture puts a tagged tray's spool there at once. The
+    delete moves it to no place first, with a ``moved`` event."""
+    row = printers.create(PrinterCreate(serial=SERIAL, name="A"))
+    with printers.pool.connection() as conn:
+        place = conn.execute(
+            "INSERT INTO filament_locations (name, kind_id, printer_id, ams_id, tray_id)"
+            " VALUES ('A AMS-A slot 1', (SELECT id FROM filament_location_kinds LIMIT 1),"
+            " %s, 0, 0) RETURNING id",
+            (row.id,),
+        ).fetchone()
+        assert place is not None
+        spool = conn.execute(
+            "INSERT INTO filament_spools (location_id, material_id)"
+            " VALUES (%s, (SELECT id FROM filament_materials LIMIT 1)) RETURNING id",
+            (place["id"],),
+        ).fetchone()
+        assert spool is not None
+    printers.delete(row.id)
+    assert printers.get(row.id) is None
+    with printers.pool.connection() as conn:
+        after = conn.execute(
+            "SELECT location_id FROM filament_spools WHERE id = %s", (spool["id"],)
+        ).fetchone()
+        moved = conn.execute(
+            "SELECT actor, data FROM filament_spool_events WHERE spool_id = %s AND kind = 'moved'",
+            (spool["id"],),
+        ).fetchall()
+    assert after is not None and after["location_id"] is None
+    assert [(m["actor"], m["data"]["reason"]) for m in moved] == [
+        ("system:printer-delete", "printer_deleted")
+    ]
 
 
 # ── #4186 review ─────────────────────────────────────────────────────────────────────
@@ -319,7 +360,7 @@ def test_a_synthetic_row_merges_into_the_row_holding_the_serial(
 ) -> None:
     """I7: the synthetic row's dependents move to the row that keeps the printer, and
     both ids are announced so a page drops the gone one."""
-    synthetic = printers.ensure_bambuddy(4, serial=None, name="H2C", model="H2C")
+    synthetic = printers.ensure_bambuddy(4, serial=None, name="H2C", model="H2C", by=MERGED_BY)
     reports = PrinterReportStore(pg_pool)
     with pg_pool.connection() as conn:  # a synthetic row takes no LAN link; a report is
         conn.execute(  # the dependent at hand, written as a merge would find it
@@ -329,7 +370,7 @@ def test_a_synthetic_row_merges_into_the_row_holding_the_serial(
     mine = printers.create(PrinterCreate(serial=SERIAL, name="Mine"))
     bus.events.clear()
 
-    kept = printers.ensure_bambuddy(4, serial=SERIAL, name="H2C", model="H2C")
+    kept = printers.ensure_bambuddy(4, serial=SERIAL, name="H2C", model="H2C", by=MERGED_BY)
 
     assert kept.id == mine.id and kept.bambuddy_printer_id == 4
     assert printers.get(synthetic.id) is None
@@ -341,7 +382,7 @@ def test_a_merge_moves_a_stock_unit_to_the_kept_printer(
     printers: PrinterStore, pg_pool: PgPool
 ) -> None:
     """#7067: `stock_units.printer_id` names the printer a unit is; a merge repoints it."""
-    synthetic = printers.ensure_bambuddy(4, serial=None, name="H2C", model="H2C")
+    synthetic = printers.ensure_bambuddy(4, serial=None, name="H2C", model="H2C", by=MERGED_BY)
     with pg_pool.connection() as conn:
         item = conn.execute(
             "INSERT INTO items (kind_id, name) VALUES ('printer', 'H2C') RETURNING id"
@@ -355,7 +396,7 @@ def test_a_merge_moves_a_stock_unit_to_the_kept_printer(
         assert unit is not None
     mine = printers.create(PrinterCreate(serial=SERIAL, name="Mine"))
 
-    printers.ensure_bambuddy(4, serial=SERIAL, name="H2C", model="H2C")
+    printers.ensure_bambuddy(4, serial=SERIAL, name="H2C", model="H2C", by=MERGED_BY)
 
     with pg_pool.connection() as conn:
         row = conn.execute(
@@ -373,7 +414,7 @@ def test_a_merge_drops_the_gone_printers_override_slots_and_keeps_the_kept_ones(
     from scadbuddy.filament.models import Material, SpoolCreate
     from scadbuddy.filament.spools import FilamentSpoolStore
 
-    synthetic = printers.ensure_bambuddy(4, serial=None, name="H2C", model="H2C")
+    synthetic = printers.ensure_bambuddy(4, serial=None, name="H2C", model="H2C", by=MERGED_BY)
     mine = printers.create(PrinterCreate(serial=SERIAL, name="Mine"))
     material = next(
         r.id
@@ -389,7 +430,7 @@ def test_a_merge_drops_the_gone_printers_override_slots_and_keeps_the_kept_ones(
                 (printer, tray, spool),
             )
 
-    printers.ensure_bambuddy(4, serial=SERIAL, name="H2C", model="H2C")
+    printers.ensure_bambuddy(4, serial=SERIAL, name="H2C", model="H2C", by=MERGED_BY)
 
     with pg_pool.connection() as conn:
         rows = conn.execute("SELECT printer_id::text AS p, tray_id FROM filament_override_slots")
@@ -410,7 +451,7 @@ def test_a_merge_moves_a_lan_records_key_unless_the_kept_printer_has_the_job(
     """#6045: a LAN-only printer's print record is found by ``printer_key``. A merge moves
     the key with the row, so a job recorded again under the kept id finds it. A job the
     kept printer recorded too keeps its old key: the unique index takes a job once."""
-    synthetic = printers.ensure_bambuddy(4, serial=None, name="H2C", model="H2C")
+    synthetic = printers.ensure_bambuddy(4, serial=None, name="H2C", model="H2C", by=MERGED_BY)
     mine = printers.create(PrinterCreate(serial=SERIAL, name="Mine"))
     started = datetime(2026, 11, 11, 9, 0, tzinfo=UTC)
     with pg_pool.connection() as conn:
@@ -418,7 +459,7 @@ def test_a_merge_moves_a_lan_records_key_unless_the_kept_printer_has_the_job(
         _lan_import(conn, synthetic.id, "clash", started)
         _lan_import(conn, mine.id, "clash", started)
 
-    printers.ensure_bambuddy(4, serial=SERIAL, name="H2C", model="H2C")
+    printers.ensure_bambuddy(4, serial=SERIAL, name="H2C", model="H2C", by=MERGED_BY)
 
     with pg_pool.connection() as conn:
         rows = conn.execute(
@@ -437,7 +478,7 @@ def test_a_merge_moves_one_key_of_two_gone_lan_records_of_one_job(
 ) -> None:
     """#6045: a gone printer may hold two rows of one job (an earlier merge left one with
     its old key). Only one moves to the kept key, the one keyed by the gone printer."""
-    synthetic = printers.ensure_bambuddy(4, serial=None, name="H2C", model="H2C")
+    synthetic = printers.ensure_bambuddy(4, serial=None, name="H2C", model="H2C", by=MERGED_BY)
     mine = printers.create(PrinterCreate(serial=SERIAL, name="Mine"))
     earlier = str(uuid.uuid4())
     started = datetime(2026, 11, 11, 9, 0, tzinfo=UTC)
@@ -449,7 +490,7 @@ def test_a_merge_moves_one_key_of_two_gone_lan_records_of_one_job(
         )
         _lan_import(conn, synthetic.id, "job", started)
 
-    printers.ensure_bambuddy(4, serial=SERIAL, name="H2C", model="H2C")
+    printers.ensure_bambuddy(4, serial=SERIAL, name="H2C", model="H2C", by=MERGED_BY)
 
     with pg_pool.connection() as conn:
         keys = conn.execute("SELECT printer_key AS k FROM print_lan_imports ORDER BY id").fetchall()
@@ -461,7 +502,7 @@ def test_a_merge_moves_a_lone_gone_lan_record_keyed_by_an_older_id(
 ) -> None:
     """#6049: a gone printer's row keyed by an older id (an earlier merge left it), of a
     job the kept printer has no row of, moves to the kept key."""
-    synthetic = printers.ensure_bambuddy(4, serial=None, name="H2C", model="H2C")
+    synthetic = printers.ensure_bambuddy(4, serial=None, name="H2C", model="H2C", by=MERGED_BY)
     mine = printers.create(PrinterCreate(serial=SERIAL, name="Mine"))
     earlier = str(uuid.uuid4())
     started = datetime(2026, 11, 11, 9, 0, tzinfo=UTC)
@@ -472,7 +513,7 @@ def test_a_merge_moves_a_lone_gone_lan_record_keyed_by_an_older_id(
             (synthetic.id, earlier, started),
         )
 
-    printers.ensure_bambuddy(4, serial=SERIAL, name="H2C", model="H2C")
+    printers.ensure_bambuddy(4, serial=SERIAL, name="H2C", model="H2C", by=MERGED_BY)
 
     with pg_pool.connection() as conn:
         rows = conn.execute(
@@ -486,7 +527,7 @@ def test_a_merge_moves_the_runs_that_printed_on_the_gone_row(
 ) -> None:
     """#3823 Task 8: a run names its registry printer in ``print_runs.printer`` and in its
     activity row's ``printer`` facet; a merge repoints both, as it does every reference."""
-    synthetic = printers.ensure_bambuddy(4, serial=None, name="H2C", model="H2C")
+    synthetic = printers.ensure_bambuddy(4, serial=None, name="H2C", model="H2C", by=MERGED_BY)
     with pg_pool.connection() as conn:
         conn.execute(
             "INSERT INTO print_runs (id, output_id, idempotency_key, status, printer)"
@@ -500,7 +541,7 @@ def test_a_merge_moves_the_runs_that_printed_on_the_gone_row(
         )
     mine = printers.create(PrinterCreate(serial=SERIAL, name="Mine"))
 
-    printers.ensure_bambuddy(4, serial=SERIAL, name="H2C", model="H2C")
+    printers.ensure_bambuddy(4, serial=SERIAL, name="H2C", model="H2C", by=MERGED_BY)
 
     with pg_pool.connection() as conn:
         run = conn.execute("SELECT printer::text AS p FROM print_runs WHERE id = 'r1'").fetchone()
@@ -536,10 +577,10 @@ def test_deleting_a_printer_forgets_it_on_its_runs(printers: PrinterStore, pg_po
 def test_link_bambuddy_takeover_merges_and_announces(
     printers: PrinterStore, bus: RecordingBus
 ) -> None:
-    synthetic = printers.ensure_bambuddy(3, serial=None, name="H2C", model=None)
+    synthetic = printers.ensure_bambuddy(3, serial=None, name="H2C", model=None, by=MERGED_BY)
     mine = printers.create(PrinterCreate(serial=SERIAL, name="Mine"))
     bus.events.clear()
-    printers.link_bambuddy(mine.id, 3)
+    printers.link_bambuddy(mine.id, 3, by=MERGED_BY)
     assert set(bus.changed()) == {synthetic.id, mine.id}
 
 
@@ -547,8 +588,10 @@ def test_a_re_added_printer_moves_the_link_when_the_old_one_is_gone(
     printers: PrinterStore,
 ) -> None:
     """M7: Bambuddy lists the printer under a new id only; its row moves to it."""
-    first = printers.ensure_bambuddy(1, serial=SERIAL, name="Old", model="H2C")
-    moved = printers.ensure_bambuddy(2, serial=SERIAL, name="New", model="H2C", listed={2})
+    first = printers.ensure_bambuddy(1, serial=SERIAL, name="Old", model="H2C", by=MERGED_BY)
+    moved = printers.ensure_bambuddy(
+        2, serial=SERIAL, name="New", model="H2C", listed={2}, by=MERGED_BY
+    )
     assert moved.id == first.id and moved.bambuddy_printer_id == 2
     assert [row.id for row in printers.list()] == [first.id]
 
@@ -568,12 +611,12 @@ def test_a_report_after_unlink_is_not_written(
 
 def test_ensure_takes_no_lock_when_nothing_changes(printers: PrinterStore, pg_pool: PgPool) -> None:
     """M13: a strip read for a known printer waits on no writer."""
-    printers.ensure_bambuddy(4, serial=SERIAL, name="H2C", model=None)
+    printers.ensure_bambuddy(4, serial=SERIAL, name="H2C", model=None, by=MERGED_BY)
     with pg_pool.connection() as conn, conn.transaction():
         conn.execute("SELECT pg_advisory_xact_lock(hashtextextended('scadbuddy:printers', 0))")
         with ThreadPoolExecutor(1) as pool:
             found = pool.submit(
-                printers.ensure_bambuddy, 4, serial=SERIAL, name="H2C", model=None
+                printers.ensure_bambuddy, 4, serial=SERIAL, name="H2C", model=None, by=MERGED_BY
             ).result(timeout=5)
     assert found.bambuddy_printer_id == 4
 
@@ -582,7 +625,7 @@ def test_ensure_takes_no_lock_when_nothing_changes(printers: PrinterStore, pg_po
 
 
 def _two_rows(printers: PrinterStore) -> tuple[str, str]:
-    synthetic = printers.ensure_bambuddy(4, serial=None, name="H2C", model="H2C")
+    synthetic = printers.ensure_bambuddy(4, serial=None, name="H2C", model="H2C", by=MERGED_BY)
     mine = printers.create(PrinterCreate(serial=SERIAL, name="Mine"))
     return synthetic.id, mine.id
 
@@ -595,7 +638,7 @@ def test_a_repoint_hook_runs_inside_the_merge_transaction(
     gone, kept = _two_rows(printers)
     calls: list[tuple[str, str, bool, bool]] = []
 
-    def hook(conn: Any, merged: str, into: str) -> None:
+    def hook(conn: Any, merged: str, into: str, by: Actor) -> None:
         in_tx = conn.info.transaction_status == psycopg.pq.TransactionStatus.INTRANS
         both = conn.execute(
             "SELECT count(*) AS n FROM printers WHERE id IN (%s, %s)", (merged, into)
@@ -603,7 +646,7 @@ def test_a_repoint_hook_runs_inside_the_merge_transaction(
         calls.append((merged, into, in_tx, both == 2))
 
     monkeypatch.setattr(store_module, "PRINTER_REFERENCES", (*PRINTER_REFERENCES, hook))
-    printers.ensure_bambuddy(4, serial=SERIAL, name="H2C", model="H2C")
+    printers.ensure_bambuddy(4, serial=SERIAL, name="H2C", model="H2C", by=MERGED_BY)
     assert calls == [(gone, kept, True, True)]
 
 
@@ -612,20 +655,20 @@ def test_a_failing_repoint_hook_undoes_the_merge(
 ) -> None:
     gone, kept = _two_rows(printers)
 
-    def hook(conn: Any, merged: str, into: str) -> None:
+    def hook(conn: Any, merged: str, into: str, by: Actor) -> None:
         raise RuntimeError("conflict")
 
     monkeypatch.setattr(store_module, "PRINTER_REFERENCES", (*PRINTER_REFERENCES, hook))
     with pytest.raises(RuntimeError):
-        printers.ensure_bambuddy(4, serial=SERIAL, name="H2C", model="H2C")
+        printers.ensure_bambuddy(4, serial=SERIAL, name="H2C", model="H2C", by=MERGED_BY)
     assert printers.get(gone) is not None
     assert printers.require(kept).bambuddy_printer_id is None
 
 
 def test_the_rows_remember_which_bambuddy_printers_were_active(printers: PrinterStore) -> None:
     """N4: what Bambuddy last listed as active, for when it is down."""
-    a = printers.ensure_bambuddy(1, serial=None, name="A", model=None)
-    b = printers.ensure_bambuddy(2, serial=None, name="B", model=None)
+    a = printers.ensure_bambuddy(1, serial=None, name="A", model=None, by=MERGED_BY)
+    b = printers.ensure_bambuddy(2, serial=None, name="B", model=None, by=MERGED_BY)
     printers.mark_bambuddy_active({1})
     assert printers.require(a.id).bambuddy_active is True
     assert printers.require(b.id).bambuddy_active is False
@@ -637,13 +680,13 @@ def test_an_unlinked_serial_is_not_linked_again_by_ensure(printers: PrinterStore
     """The unlink is remembered (`bambuddy_unlinked_id`): the Bambuddy printer gets its
     synthetic row instead, and a later link by the user clears the memory."""
     row = printers.create(PrinterCreate(serial=SERIAL, name="Mine"))
-    printers.link_bambuddy(row.id, 1)
+    printers.link_bambuddy(row.id, 1, by=MERGED_BY)
     printers.unlink_bambuddy(row.id)
     for _ in range(2):
-        other = printers.ensure_bambuddy(1, serial=SERIAL, name="P1", model=None)
+        other = printers.ensure_bambuddy(1, serial=SERIAL, name="P1", model=None, by=MERGED_BY)
         assert other.id != row.id and other.serial == "bambuddy-1"
         assert printers.require(row.id).bambuddy_printer_id is None
-    relinked = printers.link_bambuddy(row.id, 1)
+    relinked = printers.link_bambuddy(row.id, 1, by=MERGED_BY)
     assert relinked.bambuddy_printer_id == 1 and relinked.bambuddy_unlinked_id is None
     assert printers.get(other.id) is None  # the synthetic row merged into it
 
@@ -652,7 +695,7 @@ def test_an_unlink_racing_an_ensure_stays_unlinked(printers: PrinterStore) -> No
     for attempt in range(8):
         serial = f"01P00A00000010{attempt}"
         row = printers.create(PrinterCreate(serial=serial, name=f"R{attempt}"))
-        printers.link_bambuddy(row.id, 100 + attempt)
+        printers.link_bambuddy(row.id, 100 + attempt, by=MERGED_BY)
         barrier = threading.Barrier(2)
 
         def unlink(row_id: str = row.id, barrier: threading.Barrier = barrier) -> None:
@@ -663,10 +706,10 @@ def test_an_unlink_racing_an_ensure_stays_unlinked(printers: PrinterStore) -> No
             bid: int = 100 + attempt, serial: str = serial, barrier: threading.Barrier = barrier
         ) -> None:
             barrier.wait()
-            printers.ensure_bambuddy(bid, serial=serial, name="P", model=None)
+            printers.ensure_bambuddy(bid, serial=serial, name="P", model=None, by=MERGED_BY)
 
         with ThreadPoolExecutor(2) as pool:
             for done in [pool.submit(unlink), pool.submit(ensure)]:
                 done.result(timeout=10)
-        printers.ensure_bambuddy(100 + attempt, serial=serial, name="P", model=None)
+        printers.ensure_bambuddy(100 + attempt, serial=serial, name="P", model=None, by=MERGED_BY)
         assert printers.require(row.id).bambuddy_printer_id is None

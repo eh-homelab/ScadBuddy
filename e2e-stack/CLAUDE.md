@@ -15,7 +15,9 @@ images; weekly and on dispatch in `hot-path-e2e.yml`'s `stack` job, never on PRs
   moto's S3, the Temporal dev server, the slicer worker, a fake LAN printer and a
   Bambuddy recorder that fails every call), `run.sh` (builds, brings up, seeds with
   `seed.sh`, runs `frontend/e2e/real-hot-path.spec.ts`, tears down by compose project),
-  `fake-printer/` (MQTT and FTPS) and `bambuddy-recorder/`; their tests are
+  `fake-printer/` (MQTT and FTPS) and `bambuddy-recorder/`; `seed.sh` makes a spool
+  (`new-spool`) for each untagged filled tray in `fake-printer/report.json`, as a set-up
+  printer has, or the print is refused with `unknown_spool_loaded` (#7143); their tests are
   `backend/tests/printers/test_fake_printer.py` and `backend/tests/test_bambuddy_recorder.py`.
   `.github/workflows/hot-path-e2e.yml` runs the stack (its `stack` job) weekly and on
   dispatch, never on a PR. Its `fakes` job (those two tests, ruff and mypy over the fakes)

@@ -714,6 +714,23 @@
           "legendFormat": "{{printer}}"
         }
       ]
+    },
+    {
+      "id": 39,
+      "type": "timeseries",
+      "title": "Stall releases",
+      "description": "Leases a stalled leader gave back, by printer (#7998). A release every 25 to 30 s on one printer means no recorder can index: the bucket is down, or the API answers the lease route but fails the index route.",
+      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+      "gridPos": { "x": 8, "y": 87, "w": 8, "h": 8 },
+      "fieldConfig": { "defaults": { "min": 0 }, "overrides": [] },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+          "expr": "sum by (printer) (increase(scadbuddy_camera_stall_releases_total{namespace=\"$namespace\"}[$__rate_interval]))",
+          "legendFormat": "{{printer}}"
+        }
+      ]
     }
   ]
 }

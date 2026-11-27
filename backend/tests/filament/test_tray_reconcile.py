@@ -1,8 +1,10 @@
 """An untagged tray reconciled with the printer's report and Bambuddy's assignment
 (#6713): the spool placed at a tray must agree with what the printer reports there. When
 it does not and Bambuddy assigns an agreeing linked spool to the tray, that spool moves in
-and the stale one moves to no place; when neither agrees, nothing moves and the tray view
-flags the tray (`FilamentInventory.reconcile_trays`, `FilamentInventory.view`)."""
+and the stale one moves to no place; for a tray no spool holds (D9, #7143) the assigned
+spool that agrees moves in and the tray's unknown row goes; when neither agrees, nothing
+moves and the tray view flags the tray (`FilamentInventory.reconcile_trays`,
+`FilamentInventory.view`)."""
 
 from __future__ import annotations
 

@@ -301,5 +301,5 @@ These steps are for release B's deploy only. #7887 (D11) later removed `GET /api
 
 ### Follow-up issues to file with release B
 
-- Remove the no-op copy activities and replace `workflow.patched(OUTPUTS_CUT_OVER_PATCH)` with `workflow.deprecate_patch`, then drop `OUTPUT_COPY_PATCH`, `OUTPUT_BYTES_PATCH` and the two names from `SWEEPS`, once no recorded run that names them can replay (one `housekeeping_timeout` after release B), with the replay fixtures that still name them.
+- Remove the no-op copy activities and replace `workflow.patched(OUTPUTS_CUT_OVER_PATCH)` with `workflow.deprecate_patch`, then drop `OUTPUT_COPY_PATCH`, `OUTPUT_BYTES_PATCH` and the two names from `SWEEPS`, once no recorded run that names them can replay (one `housekeeping_timeout` after release B), with the replay fixtures that still name them. Done in #7886.
 - Drop `outputs.copied_at`, `files_stamp`, `bytes_stamp` and (once copy-status no longer reports them) `output_copy_runs` and `output_byte_runs` (D11).

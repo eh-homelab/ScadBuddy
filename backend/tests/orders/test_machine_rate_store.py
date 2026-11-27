@@ -50,6 +50,7 @@ from scadbuddy.orders.machine_rate import (
 from scadbuddy.printers.models import PrinterCreate, PrinterRow
 from scadbuddy.printers.store import PrinterStore
 from tests.conftest import UNUSED_TEMPORAL_ADDRESS, PgPool
+from tests.support.printers import MERGED_BY
 
 pytestmark = pytest.mark.requires_postgres
 
@@ -170,7 +171,7 @@ def lan_printer(printers: PrinterStore) -> PrinterRow:
 
 
 def linked_printer(printers: PrinterStore) -> PrinterRow:
-    return printers.ensure_bambuddy(7, serial="31B598000000", name="H2C", model="H2C")
+    return printers.ensure_bambuddy(7, serial="31B598000000", name="H2C", model="H2C", by=MERGED_BY)
 
 
 def rates(
@@ -452,7 +453,7 @@ async def test_a_relinked_printer_counts_no_interval_until_it_is_read_again(
     )
     await rates(store, printers, settings_store, live).breakdown(printer)
     printers.unlink_bambuddy(printer.id)
-    relinked = printers.link_bambuddy(printer.id, 8)
+    relinked = printers.link_bambuddy(printer.id, 8, by=MERGED_BY)
     # The old link's interval is not taken for one read from the new link.
     rate = await rates(store, printers, settings_store, live).breakdown(relinked, live=False)
     assert rate.intervals == "stored"
@@ -472,7 +473,7 @@ async def test_a_read_that_ends_after_an_unlink_keeps_nothing(
         7,
         [MaintenanceTask(task="Lubricate rods", interval_hours=50, interval_type="hours")],
     )
-    relinked = printers.link_bambuddy(printer.id, 7)
+    relinked = printers.link_bambuddy(printer.id, 7, by=MERGED_BY)
     rate = await rates(store, printers, settings_store).breakdown(relinked, live=False)
     assert [part.why for part in rate.maintenance] == ["not_read"]
 
@@ -490,7 +491,7 @@ async def test_a_printer_the_sync_links_to_another_bambuddy_printer_counts_no_ol
     assert [part.why for part in read.maintenance] == [None]
     # Bambuddy printer 7 is gone from the strip; its serial now reports as printer 8.
     relinked = printers.ensure_bambuddy(
-        8, serial=printer.serial, name="H2C", model="H2C", listed={8}
+        8, serial=printer.serial, name="H2C", model="H2C", listed={8}, by=MERGED_BY
     )
     assert relinked.id == printer.id and relinked.bambuddy_printer_id == 8
     rate = await rates(store, printers, settings_store, live).breakdown(relinked, live=False)
@@ -503,7 +504,7 @@ async def test_intervals_read_on_the_synthetic_row_survive_its_merge_into_a_reli
     printer = linked_printer(printers)
     # Bambuddy printer 8 is listed before its serial is known: a synthetic row, whose
     # intervals are read from printer 8.
-    synthetic = printers.ensure_bambuddy(8, serial=None, name="H2C", model="H2C")
+    synthetic = printers.ensure_bambuddy(8, serial=None, name="H2C", model="H2C", by=MERGED_BY)
     assert synthetic.id != printer.id
     store.replace(synthetic.id, INPUTS)
     live = FakeBambuddy(
@@ -512,7 +513,7 @@ async def test_intervals_read_on_the_synthetic_row_survive_its_merge_into_a_reli
     await rates(store, printers, settings_store, live).breakdown(synthetic)
     # Printer 8 reports the serial of printer 7's row: the synthetic row merges into it.
     relinked = printers.ensure_bambuddy(
-        8, serial=printer.serial, name="H2C", model="H2C", listed={8}
+        8, serial=printer.serial, name="H2C", model="H2C", listed={8}, by=MERGED_BY
     )
     assert relinked.id == printer.id and printers.get(synthetic.id) is None
     rate = await rates(store, printers, settings_store).breakdown(relinked, live=False)
@@ -743,12 +744,14 @@ def test_the_check_reads_the_quotes_printers_stored_rate(
 def _merge(printers: PrinterStore, store: MachineRateStore, kept: MachineRateInputs | None) -> str:
     """A synthetic Bambuddy row with inputs merged into the row holding the serial, which
     has ``kept``; the kept row's id."""
-    gone = printers.ensure_bambuddy(4, serial=None, name="H2C", model="H2C")
+    gone = printers.ensure_bambuddy(4, serial=None, name="H2C", model="H2C", by=MERGED_BY)
     store.replace(gone.id, INPUTS)
     mine = printers.create(PrinterCreate(serial="01P00A000000001", name="Mine"))
     if kept is not None:
         store.replace(mine.id, kept)
-    merged = printers.ensure_bambuddy(4, serial="01P00A000000001", name="H2C", model="H2C")
+    merged = printers.ensure_bambuddy(
+        4, serial="01P00A000000001", name="H2C", model="H2C", by=MERGED_BY
+    )
     assert merged.id == mine.id and printers.get(gone.id) is None
     return mine.id
 
@@ -898,7 +901,7 @@ async def test_a_rename_moves_the_events_and_a_deleted_row_leaves_them_orphaned(
 def test_a_merge_moves_events_and_skips_the_kept_printers_own(
     store: MachineRateStore, printers: PrinterStore, pg_pool: PgPool
 ) -> None:
-    gone = printers.ensure_bambuddy(4, serial=None, name="H2C", model="H2C")
+    gone = printers.ensure_bambuddy(4, serial=None, name="H2C", model="H2C", by=MERGED_BY)
     mine = printers.create(PrinterCreate(serial="01P00A000000001", name="Mine"))
     for printer in (gone, mine):
         store.replace(printer.id, INPUTS)
@@ -914,7 +917,9 @@ def test_a_merge_moves_events_and_skips_the_kept_printers_own(
                 " %s, 'import')",
                 (uuid.uuid4(), owner, history, f"bambuddy:{history}:{owner}"),
             )
-    merged = printers.ensure_bambuddy(4, serial="01P00A000000001", name="H2C", model="H2C")
+    merged = printers.ensure_bambuddy(
+        4, serial="01P00A000000001", name="H2C", model="H2C", by=MERGED_BY
+    )
     assert merged.id == mine.id
     logged = store.stored(mine.id).logged
     assert sorted(e.source for e in logged if e.kind == "part") == ["form:gone", "form:shared"]
@@ -927,7 +932,7 @@ def test_a_merge_drops_a_gone_event_whose_source_the_kept_printer_holds_in_eithe
 ) -> None:
     """A ``source`` names one event across both kinds, so a merge drops a gone printer's
     event of one kind when the kept printer holds its source on an event of the other."""
-    gone = printers.ensure_bambuddy(4, serial=None, name="H2C", model="H2C")
+    gone = printers.ensure_bambuddy(4, serial=None, name="H2C", model="H2C", by=MERGED_BY)
     mine = printers.create(PrinterCreate(serial="01P00A000000001", name="Mine"))
     for printer in (gone, mine):
         store.replace(printer.id, INPUTS)
@@ -940,7 +945,9 @@ def test_a_merge_drops_a_gone_event_whose_source_the_kept_printer_holds_in_eithe
     log_part(store, mine.id, "30", source="form:task-gone")
     log_part(store, gone.id, "10", source="form:part-gone")
     log_task(mine.id, "form:part-gone")
-    merged = printers.ensure_bambuddy(4, serial="01P00A000000001", name="H2C", model="H2C")
+    merged = printers.ensure_bambuddy(
+        4, serial="01P00A000000001", name="H2C", model="H2C", by=MERGED_BY
+    )
     assert merged.id == mine.id
     logged = store.stored(mine.id).logged
     assert sorted((e.source, e.kind) for e in logged) == [
@@ -1450,7 +1457,9 @@ async def test_a_printer_that_breaks_does_not_stop_the_sweep(
     """#6663 review: any error in one printer's read is counted as a failure, and the
     next printer is still read."""
     # Named first, so the sweep reaches it first.
-    broken = printers.ensure_bambuddy(8, serial="01P00A000000008", name="A1", model="P1S")
+    broken = printers.ensure_bambuddy(
+        8, serial="01P00A000000008", name="A1", model="P1S", by=MERGED_BY
+    )
     store.replace(broken.id, PLATE_INPUTS)
     printer = linked_printer(printers)
     store.replace(printer.id, PLATE_INPUTS)
@@ -1548,7 +1557,9 @@ async def test_the_sweep_stops_at_its_deadline_and_leaves_the_rest_for_the_next_
     Bambuddy cannot push the activity past its start-to-close; the printers left are
     logged and read on the next tick."""
     for bid, serial in ((7, "01P00A000000007"), (8, "01P00A000000008"), (9, "01P00A000000009")):
-        row = printers.ensure_bambuddy(bid, serial=serial, name=f"P{bid}", model="P1S")
+        row = printers.ensure_bambuddy(
+            bid, serial=serial, name=f"P{bid}", model="P1S", by=MERGED_BY
+        )
         store.replace(row.id, PLATE_INPUTS)
     clock = Clock()
 

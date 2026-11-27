@@ -63,7 +63,11 @@ describe('GrantPanel', () => {
   it.each([
     ['requested', { status: 'requested', in_force: false }, /^If you approve it, besides you, any of your assistant sessions may answer/],
     ['in force', { status: 'approved', in_force: true }, /^Besides you, any of your assistant sessions may answer/],
-    ['expired', { status: 'approved', in_force: false }, /^Expired: any of your assistant sessions may no longer answer/],
+    [
+      'expired',
+      { status: 'approved', in_force: false, expires_at: '2026-01-01T00:00:00Z' },
+      /^Expired: any of your assistant sessions may no longer answer/,
+    ],
     [
       'revoked',
       { status: 'approved', in_force: false, revoked_at: '2026-11-27T00:00:00Z', revoked_by: 'browser' },
@@ -75,6 +79,26 @@ describe('GrantPanel', () => {
       <GrantPanel runId="run-done" grant={{ ...grant, ...state, spec: { ...grant.spec, answers: { who: ['sessions'] } } }} onChange={vi.fn()} />,
     )
     expect(screen.getByText(text)).toBeInTheDocument()
+  })
+
+  it('says a grant that lost force with a grant above it is no longer in force, not expired (#8188)', async () => {
+    const grant = await grantOf('run-done')
+    renderPage(
+      <GrantPanel
+        runId="run-done"
+        grant={{
+          ...grant,
+          status: 'approved',
+          in_force: false,
+          revoked_at: null,
+          expires_at: '2999-01-01T00:00:00Z',
+          spec: { ...grant.spec, answers: { who: ['sessions'] } },
+        }}
+        onChange={vi.fn()}
+      />,
+    )
+    expect(screen.getByTestId('grant-status')).toHaveTextContent('No longer in force')
+    expect(screen.getByText(/^No longer in force: any of your assistant sessions may no longer answer/)).toBeInTheDocument()
   })
 
   it('says nothing of answerers for a declined grant (#8045)', async () => {

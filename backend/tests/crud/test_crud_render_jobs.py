@@ -242,9 +242,9 @@ async def test_a_500_from_the_accept_route_does_not_pass(
     # A try an earlier accept gave up on can still reach the route later, so only that
     # the route ran is counted; its answer ending the budget is the failure's name.
     ran_out = accepts == 5 and failed.value.failure == "transport"
-    assert tries, (accepts, failed.value.failure, "all five accepts timed out" if ran_out else "")
-    assert not ran_out, (
-        f"all five accepts timed out before the route answered ({len(tries)} tries reached it)"
+    assert tries and not ran_out, (
+        f"{accepts} accepts ended on {failed.value.failure!r} before the route answered"
+        f" ({len(tries)} tries reached it)"
     )
     assert failed.value.failure == "unavailable", (accepts, len(tries), failed.value.failure)
     assert not failed.value.passes

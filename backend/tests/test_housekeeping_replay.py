@@ -38,29 +38,26 @@ which also runs ``AUTH_SESSIONS_SWEEP``, and ``payment_closes`` with
 and ``run_holds`` with ``RUN_HOLDS_PATCH`` (#6122), which also runs ``RUN_HOLDS_SWEEP``,
 and ``maintenance_import`` with ``MAINTENANCE_IMPORT_PATCH`` (#5774), which also runs
 ``MAINTENANCE_IMPORT_SWEEP``, and ``entity_orphans`` with ``ENTITY_ORPHANS_PATCH``
-(#6950), which also runs ``ENTITY_ORPHANS_SWEEP``, and ``output_copy`` with
-``OUTPUT_COPY_PATCH`` (#7255), which also runs ``OUTPUT_COPY_SWEEP``, and
-``attempt_media`` with ``ATTEMPT_MEDIA_PATCH`` (#7234), which also runs
-``ATTEMPT_MEDIA_SWEEP``, and ``output_copy_attempt_media`` with both, which runs both
-sweeps, and ``output_bytes`` with ``OUTPUT_BYTES_PATCH`` (#7256, recorded without
-``ATTEMPT_MEDIA_PATCH``), which also runs ``OUTPUT_BYTES_SWEEP``, and
-``output_bytes_attempt_media`` with ``OUTPUT_COPY_PATCH``, ``OUTPUT_BYTES_PATCH`` and
-``ATTEMPT_MEDIA_PATCH``, which runs all three, and ``template_copy`` with
-``TEMPLATE_COPY_PATCH`` (#7317, recorded without ``OUTPUT_COPY_PATCH`` and
+(#6950), which also runs ``ENTITY_ORPHANS_SWEEP``, and ``attempt_media`` with
+``ATTEMPT_MEDIA_PATCH`` (#7234), which also runs ``ATTEMPT_MEDIA_SWEEP``, and
+``template_copy`` with ``TEMPLATE_COPY_PATCH`` (#7317, recorded without
 ``ATTEMPT_MEDIA_PATCH``), which also runs ``TEMPLATE_COPY_SWEEP``, and
 ``template_copy_attempt_media`` with ``TEMPLATE_COPY_PATCH`` and ``ATTEMPT_MEDIA_PATCH``,
-which runs both, and ``template_output_copy`` with ``TEMPLATE_COPY_PATCH``,
-``OUTPUT_COPY_PATCH`` and ``ATTEMPT_MEDIA_PATCH``, which runs those three, and
-``template_output_bytes`` with all four, which runs all four, and ``warm_listings`` with
-``WARM_LISTINGS_PATCH`` (#7665) and every patch before it, which also runs
-``WARM_LISTINGS_SWEEP``, and ``outputs_cut_over`` with ``OUTPUTS_CUT_OVER_PATCH`` (#7257)
-and every patch before it, which runs neither ``OUTPUT_COPY_SWEEP`` nor
-``OUTPUT_BYTES_SWEEP``
-(``SCADBUDDY_RECORD_HISTORIES=1`` runs the recording below).
+which runs both, and ``outputs_cut_over`` with ``OUTPUTS_CUT_OVER_PATCH`` (#7257) and
+every patch before it, ``WARM_LISTINGS_PATCH`` (#7665) among them, which also runs
+``WARM_LISTINGS_SWEEP``. #7886 removed the outputs' two copy sweeps (#7255, #7256), their
+patches and their activities, and retired ``OUTPUTS_CUT_OVER_PATCH`` with
+``workflow.deprecate_patch``. The histories that scheduled a copy went with them:
+``output_copy``, ``output_copy_attempt_media``, ``output_bytes``,
+``output_bytes_attempt_media``, ``template_output_copy``, ``template_output_bytes`` and
+``warm_listings``. No run recorded before ``OUTPUTS_CUT_OVER_PATCH`` was still open on
+prod then. ``SCADBUDDY_RECORD_HISTORIES=1`` runs the recording below, which writes a
+history of the code as it is now (``output_copies_removed.json``).
 Never re-record them: a later change adds a history recorded on the changed code beside
-them. ``template_copy``, ``template_copy_attempt_media`` and ``template_output_copy``
-were recorded again before #7317 merged, when ``TEMPLATE_COPY_SWEEP`` moved after
-``ACTIVITY_SWEEP``: no deployed build had run the old order.
+them. ``template_copy`` and ``template_copy_attempt_media`` (and the removed
+``template_output_copy``) were recorded again before #7317 merged, when
+``TEMPLATE_COPY_SWEEP`` moved after ``ACTIVITY_SWEEP``: no deployed build had run the old
+order.
 """
 
 from __future__ import annotations
@@ -76,12 +73,7 @@ from temporalio import activity
 from temporalio.client import Client, WorkflowHistory
 from temporalio.worker import Replayer, Worker
 
-from scadbuddy.workflows.housekeeping import (
-    OUTPUT_BYTES_SWEEP,
-    OUTPUT_COPY_SWEEP,
-    SWEEPS,
-    Housekeeping,
-)
+from scadbuddy.workflows.housekeeping import SWEEPS, Housekeeping
 from tests.support.temporal import temporal_server
 
 HISTORIES = Path(__file__).parent / "fixtures" / "housekeeping_histories"
@@ -113,16 +105,9 @@ HISTORIES = Path(__file__).parent / "fixtures" / "housekeeping_histories"
         "run_holds",
         "maintenance_import",
         "entity_orphans",
-        "output_copy",
         "attempt_media",
-        "output_copy_attempt_media",
-        "output_bytes",
-        "output_bytes_attempt_media",
         "template_copy",
         "template_copy_attempt_media",
-        "template_output_copy",
-        "template_output_bytes",
-        "warm_listings",
         "outputs_cut_over",
     ],
 )
@@ -141,7 +126,7 @@ def recording_temporal() -> Iterator[str]:
 
 @pytest.mark.requires_temporal
 @pytest.mark.skipif(os.environ.get("SCADBUDDY_RECORD_HISTORIES") != "1", reason="records a history")
-async def test_record_outputs_cut_over(recording_temporal: str) -> None:
+async def test_record_output_copies_removed(recording_temporal: str) -> None:
     """Every sweep a stub, so only the workflow's own commands are recorded."""
 
     def stub(name: str) -> Any:
@@ -169,6 +154,5 @@ async def test_record_outputs_cut_over(recording_temporal: str) -> None:
         for e in history.events
         if e.HasField("activity_task_scheduled_event_attributes")
     ]
-    retired = (OUTPUT_COPY_SWEEP, OUTPUT_BYTES_SWEEP)
-    assert names == [name for name in SWEEPS if name not in retired]
-    (HISTORIES / "outputs_cut_over.json").write_text(history.to_json())
+    assert names == list(SWEEPS)
+    (HISTORIES / "output_copies_removed.json").write_text(history.to_json())
