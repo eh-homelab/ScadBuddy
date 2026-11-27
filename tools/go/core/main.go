@@ -6,6 +6,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"log/slog"
 	"net"
 	"net/http"
@@ -55,6 +56,7 @@ import (
 	"github.com/eh-homelab/ScadBuddy/tools/go/core/internal/publish"
 	"github.com/eh-homelab/ScadBuddy/tools/go/core/internal/questions"
 	"github.com/eh-homelab/ScadBuddy/tools/go/core/internal/realtime"
+	"github.com/eh-homelab/ScadBuddy/tools/go/core/internal/scan"
 	"github.com/eh-homelab/ScadBuddy/tools/go/core/internal/seal"
 	"github.com/eh-homelab/ScadBuddy/tools/go/core/internal/secrets"
 	"github.com/eh-homelab/ScadBuddy/tools/go/core/internal/sessions"
@@ -277,7 +279,19 @@ var areaPackages = []areaRoutes{
 type publicAreas func(pool *pgxpool.Pool, keys *seal.Keys) map[string][]auth.Public
 
 // publicPackages are the packages with public areas.
-var publicPackages = []publicAreas{unknowntrays.Public}
+var publicPackages = []publicAreas{scan.PublicAreas, unknowntrays.Public}
+
+// mirrorBlobs is the blob store as area package-mirrors calls it (packages.Blobs): a
+// publish to a key that names a blob is packages.ErrStale.
+type mirrorBlobs struct{ *blobstore.Blobs }
+
+func (m mirrorBlobs) PublishFile(ctx context.Context, key, name string, file io.ReadSeeker) error {
+	err := m.Blobs.PublishFile(ctx, key, name, file)
+	if errors.Is(err, blobstore.ErrStale) {
+		return packages.ErrStale
+	}
+	return err
+}
 
 // sealed are the areas that seal or open with the KEK: without one they refuse to start.
 var sealed = map[string]bool{
@@ -380,6 +394,13 @@ func newRouter(pool *pgxpool.Pool, next http.Handler, keys *seal.Keys, areas, au
 				return nil, fmt.Errorf("SCADBUDDY_CORE_AREAS names %q, which needs %s", name, seal.Variable)
 			}
 			router.AddShared(blobstore.Area, blobstore.Routes(pool, keys, lookupEnv, tel)...)
+		case packages.MirrorArea:
+			// The blob store in process (#8137); its secret key is sealed under the KEK.
+			if keys == nil {
+				return nil, fmt.Errorf("SCADBUDDY_CORE_AREAS names %q, which needs %s", name, seal.Variable)
+			}
+			store := mirrorBlobs{blobstore.New(pool, keys, lookupEnv, tel)}
+			router.Add("agent", packages.MirrorAreas(pool, store)[packages.MirrorArea]...)
 		case "changes":
 			s := streamOf()
 			for caller, routes := range changes.Routes(s.hub) {
