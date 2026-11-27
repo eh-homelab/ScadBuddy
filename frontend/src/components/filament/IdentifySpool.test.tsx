@@ -465,6 +465,17 @@ describe('IdentifySpool (#7167)', () => {
       expect(identified(onIdentified)).toHaveLength(0)
     })
 
+    it('keeps the sentence for a photo of an unknown ScadBuddy code (D11)', async () => {
+      queueScanCodes([{ format: 'qr_code', text: 'S-999' }])
+      const { user, onIdentified } = show()
+      await user.click(screen.getByRole('radio', { name: 'QR code' }))
+      await user.upload(screen.getByLabelText('Photo of the label'), new File([new Uint8Array([0xff, 0xd8])], 'label.jpg', { type: 'image/jpeg' }))
+      expect(await screen.findByText('No spool label was found in the photo. Take it again, or type the code.')).toBeInTheDocument()
+      expect(screen.queryByRole('searchbox', { name: 'Find a spool' })).toBeNull()
+      expect(screen.getByRole('radio', { name: 'QR code' })).toHaveAttribute('aria-checked', 'true')
+      expect(identified(onIdentified)).toHaveLength(0)
+    })
+
     it('names no spool when the box is edited before the property reads settle', async () => {
       seedEntityProperties(`spool_type:${T.ORANGE}`, { gtin: [GTIN] })
       let release!: () => void

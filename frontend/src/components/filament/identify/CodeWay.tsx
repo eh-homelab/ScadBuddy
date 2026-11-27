@@ -2,7 +2,8 @@ import { CameraIcon, ImageUpIcon } from 'lucide-react'
 import { useId, useRef, useState, type ReactNode } from 'react'
 import { ApiError } from '../../../api/client'
 import { decodeScan, storeScanImage } from '../../../api/scan'
-import { scanSearchQuery } from '../../../lib/scanSearch'
+import { isScadBuddyCode, scanSearchQuery } from '../../../lib/scanSearch'
+import { codeFromScan } from '../../../lib/unknownSpools'
 import { detectorClass, jpegOf } from './camera'
 import { CameraReader } from './CameraReader'
 import { reasonOf } from './reason'
@@ -99,7 +100,7 @@ export function CodeWay<T extends object>({
       const stored = await storeScanImage(await jpegOf(file))
       const scan = await decodeScan({ key: stored.key, source: 'shutter', location: null })
       const first = scan.codes.find((code) => code.resolved?.kind === kind)
-      const unknown = onSearch ? scan.codes.find((code) => !code.resolved) : undefined
+      const unknown = onSearch ? scan.codes.find((code) => !code.resolved && !isScadBuddyCode(code.text) && codeFromScan(code.text) === null) : undefined
       if (first?.resolved) answer(await fromCode(first.resolved.code))
       else if (unknown) search = scanSearchQuery(unknown.text)
       else answer(scan.error ? 'The photo could not be read. Take it again, closer to the label.' : copy.noLabel)
