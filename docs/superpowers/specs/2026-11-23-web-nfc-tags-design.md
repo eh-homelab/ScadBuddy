@@ -4,7 +4,7 @@ Issue #7273, epic #6260. The owner made the decisions on 2026-11-23. They are re
 
 ## Intent
 
-The owner wants to read and write spool tags now, from an Android phone, with no SpoolBuddy and no Bambuddy in the path. ScadBuddy is moving away from Bambuddy, which stays a sync target only (#7276). The owner's words: "I prefer web for now... I want a single code path in terms of inputs." ScadBuddy agents must also be able to read and write any tag, for debugging and for work outside spools.
+The owner wants to read and write spool tags now, from an Android phone, with no SpoolBuddy and no Bambuddy in the path. ScadBuddy integrates with Bambuddy and does not build on it (owner, 2026-11-27), so ScadBuddy does not act on hardware through Bambuddy (#7276). The owner's words: "I prefer web for now... I want a single code path in terms of inputs." ScadBuddy agents must also be able to read and write any tag, for debugging and for work outside spools.
 
 ## Goals
 
