@@ -405,7 +405,10 @@ only the sleeps move; a budget on the real clock fails on a slow runner (#6252).
   wrapped and opened here under the session's payload key (`payload_keys.py` `key_in`, no
   audit row: the key never leaves the API) or the KEK; each write's row, its blob's
   `blob_refs` hold and its `workspace.file` events in one transaction, the reconcile one
-  transaction under `RECONCILE_LOCK`, and `rewrap` at a rotation. `api/crud_agent_blobs.py`
+  transaction under `RECONCILE_LOCK`, and `rewrap` at a rotation. Go's copy is
+  `tools/go/core/internal/workspace` (area `workspace`, #8131), held to Python's sealing by
+  `tests/fixtures/workspace-seal-vectors.json`, which `tests/test_workspace_seal_vectors.py` writes
+  with `UPDATE_WORKSPACE_SEAL_VECTORS=1`. `api/crud_agent_blobs.py`
   (areas `session-blobs`, `attachments`, `http-bodies`, #5299 step 7) is the agent's
   `sessions/blobs.ts`, `attachments/store.ts` and `sessions/httpBodies.ts` statement for
   statement: an image's name and signature checked from its bytes, a tool call's images
