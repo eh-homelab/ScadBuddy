@@ -461,7 +461,8 @@ func TestABadReadIsRefused(t *testing.T) {
 		"long type":    {"uid": uidA, "tag_type": strings.Repeat("x", 33), "mifare_blocks": blocksOf(shared)},
 		"not a list":   {"uid": uidA, "mifare_blocks": "1:00"},
 	} {
-		if status, answer := h.post(body); status != http.StatusUnprocessableEntity {
+		// Core's own check, before it records: the page may post the read again by its UID.
+		if status, answer := h.post(body); status != http.StatusUnprocessableEntity || answer["code"] != "mifare_invalid" {
 			t.Errorf("%s: %d %v", name, status, answer)
 		}
 	}

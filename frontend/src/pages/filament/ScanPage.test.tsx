@@ -120,6 +120,7 @@ describe('the scan page (#7273)', () => {
   it.each([
     { status: 503, code: 'mifare_needs_core' },
     { status: 422, code: 'mifare_unreadable' },
+    { status: 422, code: 'mifare_invalid' },
   ])("posts the app's blocks, and the UID and records again on a $status $code (#8148)", async ({ status, code }) => {
     const log = sent()
     server.use(

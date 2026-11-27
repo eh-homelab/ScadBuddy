@@ -223,11 +223,17 @@ type read struct {
 	blocks  []bambutag.Block
 }
 
+// invalidCode is the code of every refusal of parse: core's own check, before it records
+// anything, so the page may post the read again as a UID-only read (a 7-byte UID, say).
+const invalidCode = "mifare_invalid"
+
 // parse checks a MIFARE read's body. Key trailers are dropped, never stored.
 func parse(fields map[string]json.RawMessage) (read, *httpx.Problem) {
 	var out read
 	invalid := func(loc, msg string) (read, *httpx.Problem) {
-		return read{}, httpx.Invalid(httpx.Issue{Loc: []string{"body", loc}, Msg: msg})
+		p := httpx.Invalid(httpx.Issue{Loc: []string{"body", loc}, Msg: msg})
+		p.Extensions = append(p.Extensions, httpx.Field{Key: "code", Value: invalidCode})
+		return read{}, p
 	}
 	var uid *string
 	if err := json.Unmarshal(fields["uid"], &uid); err != nil || uid == nil {

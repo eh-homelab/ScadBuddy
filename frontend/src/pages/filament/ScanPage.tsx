@@ -168,14 +168,15 @@ function Scanner() {
     const off = nfc.onReading((reading: Reading) => {
       // In the ScadBuddy app a Bambu tag's blocks come with the tap; the server decodes them (#8148).
       // A server that does not decode them yet (core's area off, 503 mifare_needs_core), or
-      // that cannot decode these (core's 422 mifare_unreadable, before it records anything),
+      // that cannot take these (core's 422 mifare_unreadable or mifare_invalid, a 7-byte UID
+      // say, both before it records anything),
       // still finds the tag by its UID and records, as before. Any other refusal is the answer:
       // core may have recorded the read, so a second post would record the tap twice.
       const mifare = takeMifare(reading.uid)
       const plain = { uid: reading.uid || null, tag_type: null, records: reading.records }
       const read = mifare
         ? postTagRead({ ...mifare, records: [] }).catch((cause: unknown) => {
-            if (cause instanceof ApiError && ((cause.status === 422 && cause.problem.code === 'mifare_unreadable') || (cause.status === 503 && cause.problem.code === 'mifare_needs_core'))) return postTagRead(plain)
+            if (cause instanceof ApiError && ((cause.status === 422 && (cause.problem.code === 'mifare_unreadable' || cause.problem.code === 'mifare_invalid')) || (cause.status === 503 && cause.problem.code === 'mifare_needs_core'))) return postTagRead(plain)
             throw cause
           })
         : postTagRead(plain)
