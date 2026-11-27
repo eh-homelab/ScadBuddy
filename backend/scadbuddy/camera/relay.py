@@ -96,6 +96,11 @@ class SourceError(Exception):
     """The API sent a source the relay cannot read. It names fields, never values."""
 
 
+class SourceRefusedError(SourceError):
+    """The source itself is refused: its fields do not validate, or its host is not on the
+    local network. Trying it again gives the same answer until the API's source changes."""
+
+
 def rtsps_source(source: CameraSourceWithCode) -> str:
     """The printer's RTSPS URL, with its access code. Only MediaMTX gets it."""
     code = quote(source.access_code.get_secret_value(), safe="")
@@ -110,7 +115,7 @@ def _parse(item: object) -> CameraSourceWithCode:
         fields = sorted({".".join(str(p) for p in e["loc"]) or "source" for e in invalid.errors()})
         printer_id = item.get("printer_id") if isinstance(item, dict) else None
         name = printer_id if isinstance(printer_id, str) else "unknown"
-        raise SourceError(
+        raise SourceRefusedError(
             f"the API sent a camera source for {name} the relay cannot read: {', '.join(fields)}"
         ) from None
 
@@ -122,7 +127,7 @@ async def _dialable(source: CameraSourceWithCode) -> CameraSourceWithCode:
     try:
         address = await lan_address(source.host)
     except UnsafeAddressError:
-        raise SourceError(
+        raise SourceRefusedError(
             f"the camera source for {source.printer_id} is not on the local network"
         ) from None
     except OSError:
@@ -354,15 +359,16 @@ class Relay:
         read and the restart makes the relay restart a fresh pull once, which costs a few
         seconds. A restart that fails after its delete (the CRUD read or the put) leaves the
         path out of MediaMTX: the name goes in `_lost`, and each later call reconciles it
-        until that succeeds. The change follower knows nothing of these restarts, so it
-        would not resync."""
+        until that succeeds or the source is refused (`SourceRefusedError`). A refused name
+        leaves `_lost`; only a resync, or a change to that printer, puts it back. The
+        change follower knows nothing of these restarts, so it would not resync."""
         for name in sorted(self._lost):
             try:
                 await self.reconcile(name)
-            except SourceError as error:
-                # The API's source cannot be dialled: `reconcile` removed the path, and
-                # `reconcile_all` reports this case at each resync. Trying every tick
-                # would only log it again.
+            except SourceRefusedError as error:
+                # The source does not validate or is off the LAN, so each try gives the
+                # same answer. A host that does not resolve, or a body that does not
+                # decode, can pass on a later try: those stay in `_lost`.
                 self._lost.discard(name)
                 logger.warning("camera relay: %s is not put back: %s", name, error)
             except Exception as error:

@@ -675,6 +675,38 @@ async def test_a_lost_path_with_an_undialable_source_is_not_tried_each_tick(
     await subject.aclose()
 
 
+async def test_a_lost_path_whose_host_does_not_resolve_once_is_put_back(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from scadbuddy.printers import address
+
+    failures = {"left": 0}
+
+    async def resolve(host: str, port: Any, **kwargs: Any) -> list[Any]:
+        if failures["left"]:
+            failures["left"] -= 1
+            raise OSError("temporary failure in name resolution")
+        return [(0, 0, 0, "", ("10.0.0.8", 0))]
+
+    monkeypatch.setattr(address, "_getaddrinfo", resolve)
+    api = FakeApi([source("p1", host="printer.lan")])
+    mtx = FakeMtx()
+    subject = relay(api, mtx)
+    await subject.reconcile_all()
+    mtx.ready["p1"] = True
+    mtx.received["p1"] = 100
+    await subject.check_silence(0.0)
+    api.source_failures = 1
+    await subject.check_silence(SILENT_SECONDS)
+    assert "p1" not in mtx.paths
+    failures["left"] = 1
+    await subject.check_silence(SILENT_SECONDS + SILENT_TICK)
+    assert "p1" not in mtx.paths
+    await subject.check_silence(SILENT_SECONDS + 2 * SILENT_TICK)
+    assert mtx.paths["p1"]["source"] == "rtsps://bblp:12345678@10.0.0.8:322/streaming/live/1"
+    await subject.aclose()
+
+
 async def test_a_stopped_printer_loses_its_silent_series() -> None:
     api = FakeApi([source("p1")])
     mtx = FakeMtx()
