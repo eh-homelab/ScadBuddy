@@ -355,64 +355,65 @@ func (k *Kinds) Get(ctx context.Context, q Querier, id string) (wire.ItemKind, e
 	return out[0], nil
 }
 
-// Schema is the kind's merged schema, its own, and each property key its items and its
-// descendants' items have (archived ones too), with how many, by key (phase 2 schema_of).
-// ItemRequired is the keys an item of the kind id must have a value for (R-K1-33): its
-// kinds' merged required keys, ancestor first, then its special type's
-// requires_properties, each once.
-func (k *Kinds) ItemRequired(ctx context.Context, q Querier, id string) ([]string, error) {
-	set, err := loadKinds(ctx, q)
-	if err != nil {
-		return nil, err
-	}
-	if _, ok := set[id]; !ok {
-		return nil, notFound(id)
-	}
-	var required []string
-	if k.Cat != nil {
-		_, required = itemSchema(k.Cat, set.chain(id))
-	} else {
-		_, required = mergedSchema(set.chain(id))
-	}
-	out := []string{}
-	for _, key := range required {
-		if !slices.Contains(out, key) {
-			out = append(out, key)
-		}
-	}
-	return out, nil
+// KindSchema is what Schema answers for a kind.
+type KindSchema struct {
+	Merged    json.RawMessage
+	Own       json.RawMessage
+	KeysInUse [][2]any
+	// ItemRequired is the keys an item of the kind must have a value for (R-K1-33): its
+	// kinds' merged required keys, ancestor first, then its special type's
+	// requires_properties, each once.
+	ItemRequired []string
 }
 
-func (k *Kinds) Schema(ctx context.Context, q Querier, id string) (merged, own json.RawMessage, keysInUse [][2]any, err error) {
+// Schema is the kind's merged schema, its own, and each property key its items and its
+// descendants' items have (archived ones too), with how many, by key (phase 2 schema_of).
+// It loads the kind set once.
+func (k *Kinds) Schema(ctx context.Context, q Querier, id string) (KindSchema, error) {
+	var out KindSchema
 	set, err := loadKinds(ctx, q)
 	if err != nil {
-		return nil, nil, nil, err
+		return out, err
 	}
 	kind, ok := set[id]
 	if !ok {
-		return nil, nil, nil, notFound(id)
+		return out, notFound(id)
 	}
-	if merged, err = schemaJSON(mergedSchema(set.chain(id))); err != nil {
-		return nil, nil, nil, err
+	chain := set.chain(id)
+	if out.Merged, err = schemaJSON(mergedSchema(chain)); err != nil {
+		return out, err
+	}
+	out.Own = kind.Schema
+	var required []string
+	if k.Cat != nil {
+		_, required = itemSchema(k.Cat, chain)
+	} else {
+		_, required = mergedSchema(chain)
+	}
+	out.ItemRequired = []string{}
+	for _, key := range required {
+		if !slices.Contains(out.ItemRequired, key) {
+			out.ItemRequired = append(out.ItemRequired, key)
+		}
 	}
 	rows, err := q.Query(ctx, `SELECT p.key, count(*) FROM entity_properties p
 		JOIN entities e ON e.id = p.entity_id AND e.kind = 'item'
 		JOIN items i ON i.id::text = e.ref
 		WHERE i.kind_id = ANY($1) GROUP BY p.key ORDER BY p.key COLLATE "C"`, set.subtree(id))
 	if err != nil {
-		return nil, nil, nil, err
+		return out, err
 	}
-	keysInUse = [][2]any{}
+	out.KeysInUse = [][2]any{}
 	for rows.Next() {
 		var key string
 		var n int64
 		if err := rows.Scan(&key, &n); err != nil {
 			rows.Close()
-			return nil, nil, nil, err
+			return out, err
 		}
-		keysInUse = append(keysInUse, [2]any{key, n})
+		out.KeysInUse = append(out.KeysInUse, [2]any{key, n})
 	}
-	return merged, kind.Schema, keysInUse, rows.Err()
+	return out, rows.Err()
 }
 
 // lockParent is phase 2's _lock_parent: one tree change at a time, so two moves cannot each
