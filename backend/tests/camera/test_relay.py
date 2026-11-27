@@ -707,6 +707,27 @@ async def test_a_lost_path_whose_host_does_not_resolve_once_is_put_back(
     await subject.aclose()
 
 
+async def test_a_lost_path_with_a_source_that_does_not_validate_reports_stopped() -> None:
+    api = FakeApi([source("p1")])
+    mtx = FakeMtx()
+    subject = relay(api, mtx)
+    await subject.reconcile_all()
+    mtx.ready["p1"] = True
+    mtx.received["p1"] = 100
+    await subject.check_silence(0.0)
+    api.source_failures = 1
+    await subject.check_silence(SILENT_SECONDS)
+    broken = source("p1")
+    del broken["cert_sha256"]
+    api.sources = [broken]
+    for tick in range(1, 3):
+        await subject.check_silence(SILENT_SECONDS + tick * SILENT_TICK)
+    await subject.flushed()
+    assert "p1" not in mtx.paths
+    assert api.states("p1")[-1] == "stopped"
+    await subject.aclose()
+
+
 async def test_a_stopped_printer_loses_its_silent_series() -> None:
     api = FakeApi([source("p1")])
     mtx = FakeMtx()
