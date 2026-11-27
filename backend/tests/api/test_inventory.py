@@ -210,14 +210,61 @@ def test_an_item_patch_and_its_archive_start_their_activities(client: TestClient
     ]
 
 
-def test_an_item_input_has_no_properties_yet(client: TestClient, go: Go) -> None:
-    """#7950's `properties` is a later task's: the input still refuses the key."""
-    made = client.post(
+def test_an_item_create_sends_its_properties_with_it(client: TestClient, go: Go) -> None:
+    """R-K1-33: the properties go in the activity's body, so Go writes the item and its
+    properties in one transaction."""
+    go.temporal.answers.append(done(201, answer("ItemCreate")))
+    body = {"kind_id": "hardware", "name": "N", "properties": {"mpn": "x", "thread": None}}
+
+    made = client.post(f"{API}/items", json=body, headers=press())
+
+    assert made.status_code == 201, made.text
+    assert go.start.arg["body"] == body
+
+
+def test_an_item_patch_sends_only_what_was_set(client: TestClient, go: Go) -> None:
+    """An empty patch stays empty, so Go does not check it; `properties: null` alone is no
+    patch of the properties and is not sent."""
+    item_id = answer("Item")["id"]
+    go.temporal.answers += [done(200, answer("ItemUpdate"))] * 3
+
+    for sent in ({}, {"properties": None}, {"name": "N", "properties": None}):
+        response = client.patch(f"{API}/items/{item_id}", json=sent, headers=press())
+        assert response.status_code == 200, response.text
+
+    assert [s.arg["body"] for s in go.temporal.starts] == [{}, {}, {"name": "N"}]
+
+
+def test_an_item_patch_sends_its_properties(client: TestClient, go: Go) -> None:
+    item_id = answer("Item")["id"]
+    go.temporal.answers.append(done(200, answer("ItemUpdate")))
+
+    client.patch(f"{API}/items/{item_id}", json={"properties": {"mpn": None}}, headers=press())
+
+    assert go.start.arg["body"] == {"properties": {"mpn": None}}
+
+
+@pytest.mark.parametrize("name", ["ItemCreateMissingProperties", "ItemCreateBadPropertyValue"])
+def test_an_items_property_refusal_passes_through(client: TestClient, go: Go, name: str) -> None:
+    problem = answer(name)
+    go.temporal.answers.append(done(422, problem))
+
+    refused = client.post(f"{API}/items", json={"kind_id": "strict", "name": "N"}, headers=press())
+
+    assert refused.status_code == 422, refused.text
+    assert {k: v for k, v in refused.json().items() if k != "instance"} == problem
+
+
+def test_an_items_properties_are_bounded(client: TestClient, go: Go) -> None:
+    too_many = {f"k{i}": 1 for i in range(201)}
+
+    refused = client.post(
         f"{API}/items",
-        json={"kind_id": "hardware", "name": "N", "properties": {"mpn": "x"}},
+        json={"kind_id": "hardware", "name": "N", "properties": too_many},
         headers=press(),
     )
-    assert made.status_code == 422, made.text
+
+    assert refused.status_code == 422, refused.text
     assert go.temporal.starts == []
 
 

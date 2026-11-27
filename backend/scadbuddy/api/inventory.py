@@ -97,7 +97,7 @@ async def forward(
     key: str | None,
     subject: str,
     params: Mapping[str, str] | None = None,
-    body: BaseModel | None = None,
+    body: BaseModel | Mapping[str, Any] | None = None,
 ) -> JSONResponse:
     """Go's `inventory.{name}` for this request: its answer as `model` at Go's status, or
     202 with the operation to follow."""
@@ -126,6 +126,11 @@ class KindSchema(BaseModel):
     schema_: dict[str, Any] = Field(alias="schema")
     own_schema: dict[str, Any]
     keys_in_use: list[KeyInUse]
+    #: The keys an item of the kind must have a value for (R-K1-33): the schema's
+    #: `required` keys, then its special type's required properties (a printer's
+    #: `model_code`), each once. An item save without one is 422
+    #: `missing_required_properties`.
+    item_required: list[str] = Field(default_factory=list)
 
 
 @router.get(
@@ -304,6 +309,23 @@ async def get_kind_schema_history(
 
 # -- items -------------------------------------------------------------------------------
 
+#: The refusals of an item create or save that its properties cause (R-K1-33), as the spool
+#: routes of `api/filament.py` name them.
+_PROPERTY_REFUSALS = (
+    "`missing_required_properties` (with `missing` and `invalid` keys) when the item would "
+    "be left without a required property or with a stored value that does not fit; "
+    "`bad_property_value` when a sent value does not fit its key"
+)
+
+
+def _item_body(body: ItemInput | InventoryItemPatch) -> dict[str, Any]:
+    """The fields the request set, as Go takes them. `properties: null` is no patch of the
+    properties, so it is not sent: a patch of it alone stays empty, and Go checks nothing."""
+    sent = body.model_dump(mode="json", exclude_unset=True)
+    if "properties" in sent and sent["properties"] is None:
+        del sent["properties"]
+    return sent
+
 
 class ItemList(BaseModel):
     items: list[Item]
@@ -356,15 +378,22 @@ async def list_items(
     summary="Add an inventory item",
     description=(
         "An item of one kind. Its attributes (a manufacturer part number, a thread size) "
-        "are its properties, set on `/entities/item:<id>/properties` and typed by the "
-        "kind's merged schema; a required one it lacks is listed in `missing_properties`. "
-        "`steps` sets the item's own handlers and parameters. Items of a filament spool "
-        "wait for the filament phase (409 `filament_item_refused`)."
+        "are its properties, typed by the kind's merged schema. `properties` sets them with "
+        "the item, in one write; a key set to null is left out. The item must have a value "
+        "for each key its kind requires (`GET /inventory/kinds/{kind_id}/schema` "
+        "`item_required`, a printer's `model_code` among them), else 422 "
+        + _PROPERTY_REFUSALS
+        + ", and nothing is written. `steps` sets the item's own handlers and parameters. "
+        "Items of a filament spool wait for the filament phase (409 `filament_item_refused`)."
     ),
     responses=write_codes(
         (404, "`kind_not_found`"),
         (409, "`item_exists`, `kind_archived` or `filament_item_refused`"),
-        (422, "`steps_invalid`, `class_open` or `bad_input`"),
+        (
+            422,
+            "`steps_invalid`, `class_open`, `bad_input`, `missing_required_properties` or "
+            "`bad_property_value`",
+        ),
     ),
 )
 async def create_item(
@@ -376,7 +405,7 @@ async def create_item(
         Item,
         key=idempotency_key,
         subject=f"item_kind:{body.kind_id}",
-        body=body,
+        body=_item_body(body),
     )
 
 
@@ -397,14 +426,22 @@ async def get_item(item_id: UUID, inventory: InventoryDep) -> Item:
     summary="Edit an inventory item",
     description=(
         "Only what is sent changes; `life_hours`, `life_months` and `saleable` null clear "
-        "it, and `steps` replaces the item's own steps. On an imported item each field that "
-        "changes joins `edited_fields`, which a later import leaves alone. The kind does not "
-        "change here."
+        "it, and `steps` replaces the item's own steps. `properties` is a patch of the "
+        "item's properties, written with the item: a key set to null is removed. A save "
+        "that sends a field is checked as a create is: 422 "
+        + _PROPERTY_REFUSALS
+        + ", and nothing is written. A patch that sends no field is not checked. On an "
+        "imported item each field that changes joins `edited_fields`, which a later import "
+        "leaves alone. The kind does not change here."
     ),
     responses=write_codes(
         (404, "`item_not_found`"),
         (409, "`item_exists`"),
-        (422, "`steps_invalid`, `class_open` or `bad_input`"),
+        (
+            422,
+            "`steps_invalid`, `class_open`, `bad_input`, `missing_required_properties` or "
+            "`bad_property_value`",
+        ),
     ),
 )
 async def patch_item(
@@ -420,7 +457,7 @@ async def patch_item(
         key=idempotency_key,
         subject=f"item:{item_id}",
         params={"item_id": str(item_id)},
-        body=body,
+        body=_item_body(body),
     )
 
 

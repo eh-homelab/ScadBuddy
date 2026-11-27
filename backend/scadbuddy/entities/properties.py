@@ -52,10 +52,12 @@ TOP_KEYWORDS = frozenset(
     }
 )
 #: The kinds whose create and save check required keys (#7703, spec 6.3b): only their
-#: schema may hold `required`, so a mark never promises a check that does not run. Items join
-#: when their create and save check too.
+#: schema may hold `required`, so a mark never promises a check that does not run. `item`
+#: joined with R-K1-33 (#7950): Go's item create and save check, and Go writes the item
+#: kinds' schemas, so `set_schema` still refuses `item` (`SchemaOwnedByKind`).
 REQUIRED_KINDS = frozenset(
     {
+        "item",
         "spool",
         "spool_type",
         "material",

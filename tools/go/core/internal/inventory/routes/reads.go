@@ -162,11 +162,14 @@ type keyInUse struct {
 	Count int64  `json:"count"`
 }
 
+// kindSchema is models.py KindSchema. ItemRequired is the keys an item of the kind must
+// have (store.Kinds.ItemRequired): the schema's required keys and the special type's.
 type kindSchema struct {
-	KindID    string     `json:"kind_id"`
-	Schema    any        `json:"schema"`
-	OwnSchema any        `json:"own_schema"`
-	KeysInUse []keyInUse `json:"keys_in_use"`
+	KindID       string     `json:"kind_id"`
+	Schema       any        `json:"schema"`
+	OwnSchema    any        `json:"own_schema"`
+	KeysInUse    []keyInUse `json:"keys_in_use"`
+	ItemRequired []string   `json:"item_required"`
 }
 
 func (s *reads) kindSchema(r *http.Request, p crud.Params) (any, error) {
@@ -178,7 +181,11 @@ func (s *reads) kindSchema(r *http.Request, p crud.Params) (any, error) {
 	if err != nil {
 		return nil, err
 	}
-	out := kindSchema{KindID: id, Schema: merged, OwnSchema: own, KeysInUse: []keyInUse{}}
+	required, err := s.kinds.ItemRequired(r.Context(), s.pool, id)
+	if err != nil {
+		return nil, err
+	}
+	out := kindSchema{KindID: id, Schema: merged, OwnSchema: own, KeysInUse: []keyInUse{}, ItemRequired: required}
 	if len(own) == 0 || string(own) == "null" {
 		out.OwnSchema = map[string]any{}
 	}

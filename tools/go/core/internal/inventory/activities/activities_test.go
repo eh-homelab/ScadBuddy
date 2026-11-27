@@ -654,6 +654,7 @@ func TestTheAnswersMatchTheirGoldenFiles(t *testing.T) {
 		func(t *testing.T) *fixture { return golden(t, TestAKindRoundTrips) },
 		func(t *testing.T) *fixture { return golden(t, TestAnItemRoundTrips) },
 		func(t *testing.T) *fixture { return golden(t, TestAMissingPropertyIsAnAnswerNotAFailure) },
+		func(t *testing.T) *fixture { return golden(t, TestABadPropertyValueIsAnAnswer) },
 	} {
 		for k, v := range run(t).answers {
 			if _, ok := all[k]; !ok {
@@ -661,7 +662,7 @@ func TestTheAnswersMatchTheirGoldenFiles(t *testing.T) {
 			}
 		}
 	}
-	want := []string{"ItemKind", "KindList", "Item", "ItemList", "Lot", "LotList", "Unit", "UnitList", "MoveList", "KindSchema", "RecostResult", "ItemCreateMissingProperties"}
+	want := []string{"ItemKind", "KindList", "Item", "ItemList", "Lot", "LotList", "Unit", "UnitList", "MoveList", "KindSchema", "RecostResult", "ItemCreateMissingProperties", "ItemCreateBadPropertyValue"}
 	for _, n := range names {
 		want = append(want, strings.TrimPrefix(n, "inventory."))
 	}
@@ -711,4 +712,57 @@ type anyone struct{}
 
 func (anyone) Resolve(context.Context, string) *auth.Service {
 	return &auth.Service{Caller: "inventory", Scopes: []string{"crud.inventory"}}
+}
+
+// The kind schema names the keys an item of the kind must have: its kinds' merged required
+// keys and its special type's requires_properties (R-K1-33), so a form can ask for them
+// before the save, as a printer's model_code.
+func TestAKindSchemaNamesTheItemsRequiredKeys(t *testing.T) {
+	f := newFixture(t)
+	strictKind(f)
+	if got := fmt.Sprint(f.read("/kinds/strict/schema", 200)["item_required"]); got != "[material]" {
+		t.Fatalf("strict: %s", got)
+	}
+	// The built-in printer kind names no special type; a kind under it that names the
+	// printer special type requires its model_code.
+	f.call("inventory.KindCreate", 201, nil, map[string]any{"id": "fdm", "name": "FDM printer", "parent_id": "printer",
+		"counting": "unit", "special_type": "printer"})
+	if got := fmt.Sprint(f.read("/kinds/fdm/schema", 200)["item_required"]); got != "[model_code]" {
+		t.Fatalf("printer: %s", got)
+	}
+	if got := fmt.Sprint(f.read("/kinds/hardware/schema", 200)["item_required"]); got != "[]" {
+		t.Fatalf("hardware: %s", got)
+	}
+}
+
+// A sent value that does not fit its key is an answer: 422 bad_property_value, the entities'
+// problem type, and nothing is written.
+func TestABadPropertyValueIsAnAnswer(t *testing.T) {
+	f := newFixture(t)
+	strictKind(f)
+	answer, err := f.try("inventory.ItemCreate", nil, map[string]any{"kind_id": "strict", "name": "Bolt", "properties": map[string]any{"material": 7}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var problem map[string]any
+	if err := json.Unmarshal(answer.Body, &problem); err != nil {
+		t.Fatal(err)
+	}
+	if answer.Status != 422 || problem["code"] != "bad_property_value" ||
+		problem["type"] != "https://scadbuddy.dev/problems/entities/bad_property_value" {
+		t.Fatalf("%d %s", answer.Status, answer.Body)
+	}
+	f.keep("ItemCreateBadPropertyValue", answer.Body)
+	if n := countRows(t, f, `SELECT count(*) FROM items WHERE name = 'Bolt'`); n != 0 {
+		t.Fatalf("%d items", n)
+	}
+}
+
+func countRows(t *testing.T, f *fixture, sql string) int {
+	t.Helper()
+	var n int
+	if err := f.pool.QueryRow(context.Background(), sql).Scan(&n); err != nil {
+		t.Fatal(err)
+	}
+	return n
 }

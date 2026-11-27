@@ -12,12 +12,14 @@ from pydantic import (
     BaseModel,
     ConfigDict,
     Field,
+    JsonValue,
     field_serializer,
     field_validator,
     model_validator,
 )
 
 from scadbuddy.entities.links import MAX_URL, is_web_url
+from scadbuddy.entities.properties import MAX_KEYS
 from scadbuddy.orders.models import Actor
 
 #: How a kind's items are counted; `none` is "not counted" (the owner's amendment to
@@ -206,8 +208,11 @@ class Item(_Decimals):
     class_: ItemClass = Field(default_factory=ItemClass, alias="class")
     special_type: str | None = None
     #: The keys the special type and the kinds' schemas require that the item has no
-    #: value for, read on every read (Task 10).
+    #: value for, read on every read (Task 10); empty for an archived item (R-K1-33).
     missing_properties: list[str] = Field(default_factory=list)
+    #: The keys the kinds' schemas define whose stored value does not fit, sorted; empty
+    #: for an archived item (R-K1-33).
+    invalid_properties: list[str] = Field(default_factory=list)
 
     @field_serializer("low_stock", "life_hours", "on_hand", "stock_value_minor")
     def _decimals(self, value: Decimal | None) -> str | None:
@@ -220,6 +225,10 @@ ModelCode = Annotated[Text, Field(min_length=1, max_length=100)]
 MAX_COMPATIBLE = 100
 #: A hundred years.
 MAX_LIFE_MONTHS = 1200
+#: The item's properties, written with it in one transaction (R-K1-33): a key set to null
+#: is removed. At most `MAX_KEYS` keys, as `PropertyPatch.set`; Go checks the keys and the
+#: values (422 `bad_property_value`).
+ItemProperties = Annotated[dict[str, JsonValue], Field(max_length=MAX_KEYS)]
 
 
 class ItemInput(BaseModel):
@@ -238,11 +247,13 @@ class ItemInput(BaseModel):
     source_ref: Text | None = Field(default=None, max_length=200)
     note: Text = Field(default="", max_length=4000)
     steps: Steps | None = None
+    properties: ItemProperties | None = None
 
 
 class InventoryItemPatch(BaseModel):
     """The fields a person changes; an absent field keeps its value. `life_hours`,
-    `life_months` and `saleable` null clear it; `steps` replaces the item's own steps."""
+    `life_months` and `saleable` null clear it; `steps` replaces the item's own steps.
+    `properties` is a patch of the item's properties; null sends no patch."""
 
     model_config = ConfigDict(extra="forbid")
 
@@ -255,6 +266,7 @@ class InventoryItemPatch(BaseModel):
     saleable: bool | None = None
     note: Text | None = Field(default=None, max_length=4000)
     steps: Steps | None = None
+    properties: ItemProperties | None = None
 
 
 #: The ISO code of `offer_price_points.currency`.

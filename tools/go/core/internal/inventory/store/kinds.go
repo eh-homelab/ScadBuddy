@@ -357,6 +357,32 @@ func (k *Kinds) Get(ctx context.Context, q Querier, id string) (wire.ItemKind, e
 
 // Schema is the kind's merged schema, its own, and each property key its items and its
 // descendants' items have (archived ones too), with how many, by key (phase 2 schema_of).
+// ItemRequired is the keys an item of the kind id must have a value for (R-K1-33): its
+// kinds' merged required keys, ancestor first, then its special type's
+// requires_properties, each once.
+func (k *Kinds) ItemRequired(ctx context.Context, q Querier, id string) ([]string, error) {
+	set, err := loadKinds(ctx, q)
+	if err != nil {
+		return nil, err
+	}
+	if _, ok := set[id]; !ok {
+		return nil, notFound(id)
+	}
+	var required []string
+	if k.Cat != nil {
+		_, required = itemSchema(k.Cat, set.chain(id))
+	} else {
+		_, required = mergedSchema(set.chain(id))
+	}
+	out := []string{}
+	for _, key := range required {
+		if !slices.Contains(out, key) {
+			out = append(out, key)
+		}
+	}
+	return out, nil
+}
+
 func (k *Kinds) Schema(ctx context.Context, q Querier, id string) (merged, own json.RawMessage, keysInUse [][2]any, err error) {
 	set, err := loadKinds(ctx, q)
 	if err != nil {

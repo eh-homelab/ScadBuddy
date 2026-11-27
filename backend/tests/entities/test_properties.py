@@ -10,9 +10,12 @@ from psycopg.types.json import Jsonb
 from pydantic import JsonValue
 
 from scadbuddy.entities.properties import (
+    ITEM,
+    REQUIRED_KINDS,
     BadPropertySchema,
     BadPropertyValue,
     EntityPropertyStore,
+    MissingRequiredProperties,
     PropertyPatch,
     SchemaOwnedByKind,
     check_schema,
@@ -20,6 +23,7 @@ from scadbuddy.entities.properties import (
 )
 from scadbuddy.entities.refs import EntityRef
 from scadbuddy.entities.registry import EntityNotFound, EntityStore, UnknownEntityKind
+from scadbuddy.inventory.kinds import merged_schema
 from tests.conftest import PgPool
 from tests.entities.test_sweep import BY
 from tests.support.inventory_rows import insert_item
@@ -620,6 +624,43 @@ def test_an_items_schema_is_its_kinds(pg_pool: PgPool, props: EntityPropertyStor
         props.set_schema("item", {"type": "object", "properties": {}}, BY)
     with pytest.raises(SchemaOwnedByKind):
         props.schema("item")
+
+
+def test_an_items_schema_carries_its_kinds_required_keys(
+    pg_pool: PgPool, props: EntityPropertyStore
+) -> None:
+    """R-K1-33: the merged schema names the chain's required keys, ancestor first, each
+    once, so the property route refuses emptying one; a key still missing refuses
+    nothing there (the item save is Go's check)."""
+    with pg_pool.connection() as conn:
+        conn.execute(
+            "UPDATE item_kinds SET attribute_schema = %s WHERE id = 'consumable'",
+            (
+                Jsonb(
+                    {
+                        "type": "object",
+                        "properties": {"mpn": {"type": "string"}, "brand": {"type": "string"}},
+                        "required": ["mpn"],
+                    }
+                ),
+            ),
+        )
+        conn.execute(
+            "UPDATE item_kinds SET attribute_schema = %s WHERE id = 'hardware'",
+            (Jsonb({"type": "object", "properties": {}, "required": ["brand", "mpn"]}),),
+        )
+        assert merged_schema(conn, "hardware")["required"] == ["mpn", "brand"]
+        assert "required" not in merged_schema(conn, "part")
+    item = EntityRef("item", str(insert_item(pg_pool, "hardware", name="M3 nut")))
+
+    props.apply(item, _patch({"brand": "Acme"}), BY)
+    props.apply(item, _patch({"mpn": "M3-1"}), BY)
+    with pytest.raises(MissingRequiredProperties) as refused:
+        props.apply(item, _patch({"mpn": None}), BY)
+
+    assert refused.value.missing == ("mpn",)
+    assert _values(props, item) == {"brand": "Acme", "mpn": "M3-1"}
+    assert ITEM in REQUIRED_KINDS
 
 
 def test_schema_for_reads_the_kinds_schema_for_other_kinds(

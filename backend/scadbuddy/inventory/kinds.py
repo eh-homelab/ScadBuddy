@@ -28,14 +28,21 @@ _ANCESTORS = (
 
 def merged_schema(conn: Conn, kind_id: str) -> dict[str, Any]:
     """The kind's schema merged down from its root: each ancestor's `properties`, then the
-    kind's own, so a child's key wins. The empty object schema for no such kind."""
+    kind's own, so a child's key wins, and (R-K1-33) each `required` key, ancestor first
+    and once, as Go's `mergedSchema`; no `required` when none is. The empty object schema
+    for no such kind."""
     rows = conn.execute(
         _ANCESTORS + " SELECT attribute_schema FROM up ORDER BY depth DESC", (kind_id,)
     ).fetchall()
     properties: dict[str, Any] = {}
+    required: list[str] = []
     for row in rows:
         properties.update(row["attribute_schema"].get("properties", {}))
-    return {"type": "object", "properties": properties}
+        required += [k for k in row["attribute_schema"].get("required") or () if k not in required]
+    merged: dict[str, Any] = {"type": "object", "properties": properties}
+    if required:
+        merged["required"] = required
+    return merged
 
 
 def item_schema(conn: Conn, item_id: str) -> dict[str, Any]:

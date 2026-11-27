@@ -15,6 +15,9 @@ from pydantic import BaseModel
 from scadbuddy.api.inventory import ItemList, KindList, KindSchema
 from scadbuddy.api.inventory_stock import LotList, MoveList, UnitList
 from scadbuddy.core.events import InventoryOperationEvent, decode_event
+from scadbuddy.core.problems import ApiError
+from scadbuddy.entities.problems import bad_property_value, missing_required
+from scadbuddy.entities.properties import MissingRequiredProperties
 from scadbuddy.inventory.models import Item, ItemKind, Lot, Moved, RecostResult, Unit
 
 ROOT = Path(__file__).resolve().parents[3]
@@ -56,8 +59,30 @@ MODELS: dict[str, type[BaseModel]] = {
 }
 
 
+#: Each recorded refusal, as Python's own builder of that problem writes it (R-K1-33): Go's
+#: port answers what `apply_on` and `check_row` answer.
+PROBLEMS: dict[str, ApiError] = {
+    "ItemCreateMissingProperties": missing_required(MissingRequiredProperties(("material",))),
+    "ItemCreateBadPropertyValue": bad_property_value("material", "does not fit 'type'"),
+}
+
+
 def test_every_answer_has_a_model() -> None:
-    assert {p.stem for p in ANSWERS.glob("*.json")} == set(MODELS)
+    assert {p.stem for p in ANSWERS.glob("*.json")} == set(MODELS) | set(PROBLEMS)
+
+
+@pytest.mark.parametrize("name", sorted(PROBLEMS))
+def test_gos_refusals_are_pythons_problems(name: str) -> None:
+    recorded = json.loads((ANSWERS / f"{name}.json").read_text(encoding="utf-8"))
+    error = PROBLEMS[name]
+
+    assert recorded == {
+        "type": error.type,
+        "title": error.title,
+        "status": error.status,
+        "detail": error.detail,
+        **error.extensions,
+    }
 
 
 @pytest.mark.parametrize("name", sorted(MODELS))
