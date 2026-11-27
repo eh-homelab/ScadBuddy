@@ -2201,7 +2201,9 @@ class OrderStore:
         A LAN start has no queue item (#8124), so its archive is found by the start's
         record, ``lan_print_archives`` by run: the API writes that row only when exactly
         one start of the run has the job name the archive's file carries
-        (`print_history._run_by_file`), so two prints of one file never mix. One an
+        (`lan_files.start_by_file`, from the print read, the prints list's scan and the
+        orders read), and one archive per start (`lan_files.starts_by_files`,
+        `record_lan_start_in`), so two prints of one file never mix. One an
         attempt not of this run names is that attempt's (#5273: named by hand before
         Bambuddy linked it), and left out."""
         with self._read(conn) as c:
