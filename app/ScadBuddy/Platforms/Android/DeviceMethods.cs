@@ -104,6 +104,8 @@ static class DeviceMethods
 					var (backup, _, _, _) = await SendDump(call, tag, before);
 					call.Event(DeviceProtocol.TagFound(uid, tech, 0, 0, backup));
 					screen.Say("Backup kept. Writing.");
+					// A blank tag is formatted, and this Tag still lists no Ndef: only the next tap reads it back.
+					var formatted = !NfcBridge.HasNdef(tag);
 					try { await Task.Run(() => NfcBridge.WriteNdef(tag, message)); }
 					catch (NfcBridge.BridgeError error) { return DeviceProtocol.Failed($"refused: {error.Message}"); }
 					catch (Exception error)
@@ -113,6 +115,11 @@ static class DeviceMethods
 						continue;
 					}
 					written = uid;
+					if (formatted)
+					{
+						screen.Say("Written. Tap the tag again to read it back.");
+						continue;
+					}
 				}
 				else if (uid != written)
 				{

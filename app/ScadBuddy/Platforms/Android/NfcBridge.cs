@@ -222,6 +222,8 @@ public sealed class NfcBridge : Java.Lang.Object, NfcAdapter.IReaderCallback, We
 
 	public static bool IsClassic(Tag tag) => tag.GetTechList()?.Contains("android.nfc.tech.MifareClassic") == true;
 
+	public static bool HasNdef(Tag tag) => tag.GetTechList()?.Contains("android.nfc.tech.Ndef") == true;
+
 	/// <summary>The tag's tech, as a device read names it: mifare_classic, ndef, ndef_formatable, or Android's first tech.</summary>
 	public static string TechOf(Tag tag)
 	{
