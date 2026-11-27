@@ -41,8 +41,9 @@ func (s *Reads) fromDevice(ctx context.Context, fields map[string]json.RawMessag
 		return "", p
 	}
 	for _, k := range inlineFields {
-		// An empty records is the Python model's default, which a generated client may send.
-		if v, ok := fields[k]; ok && !(k == "records" && (isNull(v) || string(bytes.TrimSpace(v)) == "[]")) {
+		// A null field, or an empty records, is the Python model's default, which a generated
+		// client may send.
+		if v, ok := fields[k]; ok && !isNull(v) && !(k == "records" && string(bytes.TrimSpace(v)) == "[]") {
 			return refuse(k, "read_id comes in place of the read's own fields")
 		}
 	}

@@ -652,7 +652,7 @@ func TestCodeScanFromDeviceRead(t *testing.T) {
 		t.Errorf("image %v", img)
 	}
 	// The body may name its source; a key with a read_id is refused.
-	if status, sc := h.json("POST", "/api/v1/scan/codes", map[string]any{"read_id": read, "source": "nfc"}); status != 200 || sc["source"] != "nfc" {
+	if status, sc := h.json("POST", "/api/v1/scan/codes", map[string]any{"read_id": read, "key": nil, "source": "nfc"}); status != 200 || sc["source"] != "nfc" {
 		t.Errorf("source: %d %v", status, sc)
 	}
 	if status, _ := h.json("POST", "/api/v1/scan/codes", map[string]any{"read_id": read, "key": "scan_image-x"}); status != 422 {

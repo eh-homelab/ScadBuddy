@@ -883,7 +883,8 @@ func TestTagReadFromDeviceRead(t *testing.T) {
 	if status, answer := h.post(map[string]any{"read_id": readA, "uid": uidA}); status != http.StatusUnprocessableEntity {
 		t.Errorf("read_id and uid: %d %v", status, answer)
 	}
-	if status, answer := h.post(map[string]any{"read_id": readA, "records": []any{}}); status != http.StatusOK {
+	if status, answer := h.post(map[string]any{"read_id": readA, "records": []any{}, "uid": nil, "tag_type": nil,
+		"mifare_blocks": nil}); status != http.StatusOK {
 		t.Errorf("read_id and records []: %d %v", status, answer)
 	}
 	// A second post with a photo keeps no photo: the first row stands.

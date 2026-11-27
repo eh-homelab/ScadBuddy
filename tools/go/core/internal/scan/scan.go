@@ -463,7 +463,7 @@ func (s *Scans) codes(r *http.Request) (any, error) {
 	if !body.Null("read_id") {
 		source = "app"
 		readID = body.Text("read_id", 1, 64)
-		if body.Present("key") {
+		if !body.Null("key") {
 			body.Fail([]string{"key"}, "read_id comes in place of key")
 		}
 	} else {
