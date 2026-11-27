@@ -87,6 +87,29 @@ _NOT_ABOVE = (
 )
 
 
+#: The ``data.reason`` of the ``moved`` event a printer's delete books for each spool in
+#: one of its places (`release_printer_spools_on`).
+PRINTER_DELETED = "printer_deleted"
+
+
+def release_printer_spools_on(conn: Conn, printer_id: UUID, *, actor: str) -> int:
+    """Move each spool in one of ``printer_id``'s places to no place, on ``conn``'s
+    transaction, just before the printer's row is deleted. Its places go with the row
+    (`filament_locations.printer_id` is ON DELETE CASCADE), and a spool still in one would
+    fail the delete on `filament_spools.location_id`. Each move is `LocationStore.move_on`,
+    a ``moved`` event with ``data.reason`` `PRINTER_DELETED`. Capture makes a spool for a
+    tagged tray at once (#7143), so most printers hold one. Locks the spools in id order.
+    Returns how many moved."""
+    spools = conn.execute(
+        "SELECT s.id FROM filament_spools s JOIN filament_locations l ON l.id = s.location_id"
+        " WHERE l.printer_id = %s ORDER BY s.id FOR UPDATE OF s",
+        (printer_id,),
+    ).fetchall()
+    for spool in spools:
+        LocationStore.move_on(conn, spool["id"], None, actor=actor, reason=PRINTER_DELETED)
+    return len(spools)
+
+
 class LocationStore:
     """The location tables over a pool whose connections autocommit and return dict rows
     (the settings store's). Synchronous: callers run it in a thread."""

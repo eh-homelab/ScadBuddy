@@ -164,6 +164,7 @@ from scadbuddy.dialog_reads.reads import dialog_client, maybe_dialog_client
 from scadbuddy.filament.component import FilamentDep
 from scadbuddy.filament.inventory import FilamentInventory, route_trays
 from scadbuddy.filament.models import TrayView
+from scadbuddy.filament.unknown_tray_rows import PoolUnknownTrays
 from scadbuddy.library.outputs import require_output
 from scadbuddy.library.presets import TEMPLATE_ID_PREFIX
 from scadbuddy.library.settings_store import (
@@ -1599,6 +1600,7 @@ async def post_check(
             sb_trays=filament.inventory,
             sb_presets=filament.presets,
             sb_reads=filament.reads,
+            unknown_trays=PoolUnknownTrays(filament.spools.pool),
         )
     if refusal is not None:
         check.errors.insert(0, refusal)

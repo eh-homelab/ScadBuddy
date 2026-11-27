@@ -173,12 +173,27 @@ for index in "${!modes[@]}"; do
   # The inventory through scadbuddy-core, once: on the first mode's stack, after the hot
   # path. bambuddy_url does not change what it does. A failure here does not stop the
   # next mode; the run fails at the end.
+  # A run that skipped the spec, or ran no test of it, fails too: its JSON report must count
+  # at least one passed test, and none skipped or failed.
   if [ "$index" = 0 ]; then
+    inventory_report="$repo/frontend/test-results/inventory-core.json"
+    rm -f "$inventory_report"
+    reporters=list,json
+    if [ -n "${CI:-}" ]; then
+      reporters=github,list,json
+    fi
     if (
       cd "$repo/frontend"
       E2E_BASE_URL=http://127.0.0.1:18080 E2E_INVENTORY_CORE=1 \
-        pnpm exec playwright test e2e/inventory-core.spec.ts --output test-results/inventory-core
-    ); then
+        PLAYWRIGHT_JSON_OUTPUT_NAME="$inventory_report" \
+        pnpm exec playwright test e2e/inventory-core.spec.ts --output test-results/inventory-core \
+        --reporter="$reporters"
+    ) && node -e '
+      const s = require(process.argv[1]).stats;
+      if (s.expected + s.flaky < 1 || s.skipped > 0 || s.unexpected > 0) {
+        console.error("inventory-core.spec.ts did not run: " + JSON.stringify(s));
+        process.exit(1);
+      }' "$inventory_report"; then
       results+=("inventory-core (${current}): passed")
     else
       results+=("inventory-core (${current}): FAILED")

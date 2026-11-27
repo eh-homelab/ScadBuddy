@@ -12,8 +12,9 @@ images; weekly and on dispatch in `hot-path-e2e.yml`'s `stack` job, never on PRs
 also runs `e2e/inventory-core.spec.ts` (#6949 K1, `E2E_INVENTORY_CORE=1`; it skips without
 it): a kind, an item, a lot received and 1 used, all writes through Temporal to
 scadbuddy-core's worker; the item reads 1 less, and the Activities tab lists
-`inventory.ReceiveLot` and `inventory.Take` as succeeded. Its logs go to
-`frontend/test-results/inventory-core/stack.log`.
+`inventory.ReceiveLot` and `inventory.Take` as succeeded. `run.sh` fails that run when its
+JSON report (`frontend/test-results/inventory-core.json`) counts no passed test, or a skipped
+or failed one. Its logs go to `frontend/test-results/inventory-core/stack.log`.
 
 ## Layout
 - `e2e-stack/` — the real-stack e2e of the hot path (#4602): `compose.yaml` (ScadBuddy on
@@ -24,7 +25,9 @@ scadbuddy-core's worker; the item reads 1 less, and the Activities tab lists
   `inventory`; it has no healthcheck, since its image has no curl), `run.sh` (builds, brings up, seeds with
   `seed.sh`, runs `frontend/e2e/real-hot-path.spec.ts` and, on the first stack,
   `frontend/e2e/inventory-core.spec.ts`, tears down by compose project),
-  `fake-printer/` (MQTT and FTPS) and `bambuddy-recorder/`; their tests are
+  `fake-printer/` (MQTT and FTPS) and `bambuddy-recorder/`; `seed.sh` makes a spool
+  (`new-spool`) for each untagged filled tray in `fake-printer/report.json`, as a set-up
+  printer has, or the print is refused with `unknown_spool_loaded` (#7143); their tests are
   `backend/tests/printers/test_fake_printer.py` and `backend/tests/test_bambuddy_recorder.py`.
   `.github/workflows/hot-path-e2e.yml` runs the stack (its `stack` job) weekly and on
   dispatch, never on a PR. Its `fakes` job (those two tests, ruff and mypy over the fakes)

@@ -7,7 +7,9 @@ import { AttachmentsPanel } from '../../components/entities/AttachmentsPanel'
 import { LinksPanel } from '../../components/entities/LinksPanel'
 import { RgbaSwatch } from '../../components/filament/RgbaSwatch'
 import { SpoolLink } from '../../components/filament/SpoolLink'
+import { UnknownSpoolButton } from '../../components/filament/UnknownSpoolButton'
 import { filamentLinks } from '../../lib/filamentLinks'
+import { useUnknownTrayList } from '../../lib/unknownSpools'
 import { Button } from '@/components/ui/button'
 
 /** #6955 — a place's page: what `/x/L-12` opens. Its path, what is inside it, and the link to its label. */
@@ -16,6 +18,10 @@ export function LocationPage() {
   const [place, setPlace] = useState<LocationDetail | null>(null)
   const [error, setError] = useState<string | null>(null)
   const navigate = useNavigate()
+  const { trays: unknownTrays, reload: reloadUnknown } = useUnknownTrayList()
+  const here = place?.printer_id
+    ? unknownTrays.find((tray) => tray.printer_id === place.printer_id && tray.ams_id === place.ams_id && tray.tray_id === place.tray_id)
+    : undefined
   /** #7150 — one `Idempotency-Key` per opened place: a second click makes no second spool. */
   const [slotKey, setSlotKey] = useState(() => crypto.randomUUID())
   const [making, setMaking] = useState(false)
@@ -131,6 +137,18 @@ export function LocationPage() {
                 ))}
               </ul>
             </section>
+          )}
+          {here && (
+            <div className="flex flex-col items-start gap-2 rounded-lg border border-primary/50 bg-primary/10 px-3 py-2">
+              <p>An unknown spool is loaded here. Prints to this printer wait until you link it.</p>
+              <UnknownSpoolButton
+                trayId={here.id}
+                onResolved={() => {
+                  reloadUnknown()
+                  void getLocation(id).then(setPlace, () => {})
+                }}
+              />
+            </div>
           )}
           <section aria-label="Spools" className="flex flex-col gap-1">
             <h2 className="font-medium">Spools</h2>

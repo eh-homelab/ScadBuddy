@@ -73,6 +73,7 @@ from scadbuddy.core.problems import ApiError
 from scadbuddy.crud.client import CrudRefusedError, CrudUnavailableError
 from scadbuddy.filament.inventory import SbSpoolReads, read_sb_spools
 from scadbuddy.filament.models import SbSpools
+from scadbuddy.filament.unknown_tray_rows import UnknownSpoolReads
 from scadbuddy.library.output_prints import OutputPrintStore
 from scadbuddy.library.outputs import LanPlateSend, PlateSend
 from scadbuddy.library.settings_store import PrintSettings, SettingsReader, StoredSettings
@@ -176,6 +177,9 @@ class PrintDeps:
     #: Task 6): the API's Postgres in-process, the CRUD routes on the print worker
     #: (#5295). ``None`` plans on the trays alone.
     sb_spools: SbSpoolReads | None = None
+    #: The printer's unknown trays (#7143): the API's Postgres in-process, the CRUD route
+    #: on the print worker. ``None`` blocks nothing.
+    unknown_trays: UnknownSpoolReads | None = None
 
 
 def lan_plates(result: PrintRunResult) -> list[LanPlateSend]:
@@ -394,6 +398,8 @@ class PrintActivities:
                     reports=self.d.reports,
                     catalogue=self._native_catalogue() if native else None,
                     route=route,
+                    unknown_trays=self.d.unknown_trays,
+                    sb_reads=self.d.sb_spools,
                 )
                 checked = PreparedPlates.of(prepared)
                 if checked.path == "native" and not native:
