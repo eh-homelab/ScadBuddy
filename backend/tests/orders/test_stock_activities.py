@@ -6,6 +6,7 @@ real Temporal are `tests/workflows/test_order_stock.py`'s."""
 
 from __future__ import annotations
 
+import asyncio
 from collections.abc import Callable
 from decimal import Decimal
 from typing import Any
@@ -573,3 +574,57 @@ async def test_a_fulfil_while_the_unfulfil_settles_commits_after_it(
     assert step["wait_for"] is None
     assert [c["key"] for c in step["calls"]] == [f"order_item:{item.id}:parts:2:{hook}"]
     assert shop.get_item(item).status == "fulfilled"
+
+
+def _record_between_reads(
+    shop: Shop, steps: OrderStockSteps, order: Order, item: OrderItem, wid: str
+) -> None:
+    """The unfulfil's `stock_record` commits on its own connection right after the key's
+    first read of the cycle (the race of PR #8323's second review): a key read in two
+    snapshots sees `parts.returned` not yet written and then the item no longer held."""
+    fired = False
+
+    def wrap(name: str) -> None:
+        real = getattr(shop.rows, name)
+
+        def read(*args: Any, **kwargs: Any) -> Any:
+            nonlocal fired
+            answer = real(*args, **kwargs)
+            if not fired:
+                fired = True
+                asyncio.run(_unfulfil_recorded(steps, order, item, wid))
+            return answer
+
+        setattr(shop.rows, name, read)
+
+    wrap("parts_cycle")
+
+
+@pytest.mark.parametrize("op", ["accept", "fulfil"])
+async def test_the_key_reads_the_cycle_in_one_snapshot(
+    shop: Shop, steps: OrderStockSteps, op: str
+) -> None:
+    order, item, _ = _with_part(shop)
+    shop.fulfilled(order, item)
+    wid = await _unfulfil_committed(shop, steps, order, item)
+    attempt = shop.lifecycle.record_fulfilment(
+        order.id, item.id, FulfilmentInput(quantity=1, outcome="succeeded"), BY
+    )
+    started = shop.lifecycle.starter
+    assert isinstance(started, InlineStarter)
+    started.accept = True
+    _record_between_reads(shop, steps, order, item, wid)
+
+    def send() -> Any:
+        if op == "accept":
+            return shop.lifecycle.accept_fulfilment(order.id, item.id, attempt.id, BY)
+        return shop.lifecycle.fulfil_items(
+            order.id, [FulfilLine(item_id=item.id, quantity=1)], BY, request_key="race"
+        )
+
+    answer = await asyncio.to_thread(send)
+
+    assert isinstance(answer, WorkflowAccepted)
+    assert shop.get_item(item).parts_settling is None  # the unfulfil recorded meanwhile
+    run = next(s for s in started.started if s.id == answer.workflow_id)
+    assert run.arg["lines"][0]["key"] == f"order_item:{item.id}:parts:2"

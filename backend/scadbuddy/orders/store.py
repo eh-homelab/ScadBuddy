@@ -3698,15 +3698,20 @@ class OrderStore:
 
     # -- the stock workflows' marks (#6949 K1 Task 16) -----------------------------------
 
-    def parts_returned(self, conn: Conn, order_id: str, item_id: str) -> int:
-        """How many `parts.returned` events the item has: each unfulfil writes one."""
+    def parts_cycle(self, conn: Conn, order_id: str, item_id: str) -> tuple[int, bool]:
+        """How many `parts.returned` events the item has (each unfulfil writes one), and
+        whether an unfulfil holds it (its `parts_workflow_id` names an ``:return`` run).
+        One statement, so one snapshot: an unfulfil's record writes its event and clears
+        the hold in one commit, and the pair never sees one without the other."""
         row = conn.execute(
-            "SELECT count(*) AS n FROM order_events WHERE order_id = %s"
-            " AND kind = 'parts.returned' AND detail ->> 'item_id' = %s",
-            (order_id, item_id),
+            "SELECT (SELECT count(*) FROM order_events WHERE order_id = %s"
+            " AND kind = 'parts.returned' AND detail ->> 'item_id' = %s) AS n,"
+            " COALESCE((SELECT parts_workflow_id LIKE '%%:return' FROM order_items"
+            " WHERE id = %s), false) AS returning",
+            (order_id, item_id, item_id),
         ).fetchone()
         assert row is not None
-        return int(row["n"])
+        return int(row["n"]), bool(row["returning"])
 
     def workflow_commit(
         self, conn: Conn, order_id: str, workflow_id: str

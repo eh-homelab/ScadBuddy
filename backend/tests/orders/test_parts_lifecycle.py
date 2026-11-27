@@ -425,6 +425,21 @@ def test_an_item_fulfilled_before_the_migration_unfulfils_to_zero(
             store_module._ITEM.replace(", parts_workflow_id", ", NULL::text AS parts_workflow_id"),
         )
         monkeypatch.setattr(shop.rows, "set_parts_workflow", lambda *args: None)
+        # `parts_cycle` reads the column too: no unfulfil holds an item here.
+        monkeypatch.setattr(
+            shop.rows,
+            "parts_cycle",
+            lambda conn, order_id, item_id: (
+                int(
+                    conn.execute(
+                        "SELECT count(*) AS n FROM order_events WHERE order_id = %s"
+                        " AND kind = 'parts.returned' AND detail ->> 'item_id' = %s",
+                        (order_id, item_id),
+                    ).fetchone()["n"]
+                ),
+                False,
+            ),
+        )
         order, item = shop.accepted(quantity=2)
         shop.fulfilled(order, item)
         with pool.connection() as conn:

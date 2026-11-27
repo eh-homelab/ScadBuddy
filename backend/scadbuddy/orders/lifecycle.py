@@ -5510,12 +5510,10 @@ class Lifecycle:
         meanwhile is the next cycle's, never the ended one's (PR #8323). Its run waits for
         the unfulfil, and then its key is the one its commit computes. An unfulfil's own
         key does not count it, so a resend of that unfulfil attaches to its run."""
-        n = 1 + self.store.parts_returned(conn, order_id, item_id)
-        if not unfulfil:
-            item = self.store.item(item_id, conn=conn)
-            settling = None if item is None else item.parts_settling
-            if settling is not None and settling.workflow_id.endswith(":return"):
-                n += 1
+        # One snapshot (`parts_cycle`): two reads could straddle the unfulfil's record and
+        # see neither its event nor its hold.
+        returned, returning = self.store.parts_cycle(conn, order_id, item_id)
+        n = 1 + returned + (1 if returning and not unfulfil else 0)
         return f"order_item:{item_id}:parts:{n}" + (":return" if unfulfil else "")
 
     def _checked(
