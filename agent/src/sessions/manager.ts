@@ -536,7 +536,7 @@ export async function runningDurableTurn(
 ): Promise<{ session: ClaimedSession; principal: TurnPrincipal } | undefined> {
   const row = await rows.get(id)
   if (!row || row.durable_turn_id !== turnId || !TURN_HOLDS.includes(row.status)) return undefined
-  // A claim's shape, so a Workflow agent's model, effort and type assemble as its classic turns do.
+  // A claim's shape, so a Workflow agent's model, effort and type assemble as its session turns do.
   const tiers = row.turn_tiers?.tiers as Tier[] | undefined
   return { session: claimed({ ...row, background_tools: offeredBackground(row) }), principal: tiers ? { tiers } : {} }
 }
@@ -1622,7 +1622,7 @@ export class SessionManager {
     const fresh = options.freshBudget === true && principal.kind === 'browser'
     const parent = await this.get(id, principal)
     // The parent's conversation is its transcript in ai_session_entries: a classic session's, and
-    // an AgentSession's, whose turns write it as a classic turn does (turnHost.ts), a migrated
+    // an AgentSession's, whose turns write it as a session turn does (turnHost.ts), a migrated
     // DurableSession's among them (plan Step 7.2). A DurableSession that closed before that
     // migration (`runtime` still `durable`, durable.ts) has none, and no worker can read its
     // workflow now (plan Step 8.1): its child keeps the panel's history and starts with no model

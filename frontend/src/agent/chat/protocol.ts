@@ -92,7 +92,7 @@ export type VersionLink = z.infer<typeof VersionLinkSchema>
 
 /**
  * The longest answer the agent takes (agent `src/harness/questions.ts` `ANSWER_MAX`). A
- * longer one is refused as a malformed frame and never reaches the question, so the
+ * longer one is refused by the respond route and never reaches the question, so the
  * panel never sends one: the card treats a longer answer (typed words plus any picked
  * labels) as unfinished.
  */
@@ -512,8 +512,6 @@ export const ServerEventSchema = z.discriminatedUnion('type', [
     sessionId: sessionId.optional(),
     code: z.string().optional(),
     message: z.string().min(1),
-    /** #940 — the error refused the panel's answer to this question: its card is answerable again. */
-    questionId: z.string().min(1).optional(),
     /** #6386 — the error refused the panel's remove or edit of this queued message, which stays queued. */
     queuedId: z.string().min(1).optional(),
     /** #3710 — `message` with the credential named by its name: shown in its place. */
@@ -580,21 +578,6 @@ export const ClientMessageSchema = z.discriminatedUnion('type', [
       .string()
       .regex(/^00-[0-9a-f]{32}-[0-9a-f]{16}-[0-9a-f]{2}$/)
       .optional(),
-  }),
-  z.object({
-    v,
-    type: z.literal('approval.decision'),
-    sessionId,
-    id: z.string().min(1),
-    approve: z.boolean(),
-  }),
-  /** #940 — the user's answer to a `question.asked`: one per question, in order. */
-  z.object({
-    v,
-    type: z.literal('question.answer'),
-    sessionId,
-    id: z.string().min(1),
-    answers: z.array(z.string().min(1).max(ANSWER_MAX)).min(1).max(QUESTIONS_MAX),
   }),
   z.object({ v, type: z.literal('session.interrupt'), sessionId }),
   /** #6386 — remove a queued message, or give it new words, before it starts. */

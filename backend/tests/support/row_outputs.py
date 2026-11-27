@@ -114,9 +114,7 @@ def insert_row(store: OutputStore, meta: OutputMeta, **columns: Any) -> None:
         "has_plate_cover": False,
         **columns,
     }
-    store.rows.insert(
-        OutputRow(output_id=meta.id, slug=meta.slug, meta=meta, copied_at=meta.created_at, **fields)
-    )
+    store.rows.insert(OutputRow(output_id=meta.id, slug=meta.slug, meta=meta, **fields))
 
 
 def app_outputs(client: TestClient) -> OutputStore:
@@ -137,8 +135,6 @@ def name_blobs(
     rows: OutputRows,
     output_id: str,
     blobs: OutputBlobs,
-    *,
-    damaged: list[dict[str, Any]] | None = None,
 ) -> bool:
     """Name ``blobs`` as the output's bytes, its ``output_files`` rows too, and hold each
     key, in one transaction: a test's stand-in for an output whose bytes it put itself
@@ -148,8 +144,8 @@ def name_blobs(
     with rows._pool.connection() as conn, conn.transaction():
         cursor = conn.execute(
             "UPDATE outputs SET model_blob = %s, preview_blob = %s, thumbnail_blob = %s,"
-            " damaged = %s, bytes_at = clock_timestamp() WHERE output_id = %s",
-            (blobs.model, blobs.preview, blobs.thumbnail, Jsonb(damaged or []), output_id),
+            " bytes_at = clock_timestamp() WHERE output_id = %s",
+            (blobs.model, blobs.preview, blobs.thumbnail, output_id),
         )
         if not cursor.rowcount:
             return False
@@ -173,49 +169,6 @@ def name_blobs(
                 (key, OUTPUT_HOLDER, output_id),
             )
     return True
-
-
-def _record_run(rows: OutputRows, table: str, columns: dict[str, Any]) -> int:
-    """Insert one run row; ``finished_at`` is the database's clock unless given, so it is
-    never before the row's own ``started_at``."""
-    values = {
-        name: Jsonb(value) if isinstance(value, (list, dict)) else value
-        for name, value in columns.items()
-    }
-    names = [sql.Identifier(name) for name in values]
-    slots: list[sql.Composable] = [sql.Placeholder() for _ in values]
-    if "finished_at" not in values:
-        names.append(sql.Identifier("finished_at"))
-        slots.append(sql.SQL("clock_timestamp()"))
-    query = sql.SQL("INSERT INTO {} ({}) VALUES ({}) RETURNING id").format(
-        sql.Identifier(table), sql.SQL(", ").join(names), sql.SQL(", ").join(slots)
-    )
-    with rows._pool.connection() as conn:
-        found = conn.execute(query, list(values.values())).fetchone()
-    assert found is not None
-    return int(found["id"])
-
-
-def record_copy_run(rows: OutputRows, **columns: Any) -> int:
-    """A row copy run as release A recorded it (#7255); its id. Release B writes none
-    (#7257), but `GET /outputs/copy-status` still reads the last one. ``columns`` are
-    ``output_copy_runs`` columns; ``finished_at`` is now unless given."""
-    return _record_run(rows, "output_copy_runs", columns)
-
-
-def record_byte_run(rows: OutputRows, **columns: Any) -> int:
-    """A byte copy run as release A recorded it (#7256); its id. ``columns`` are
-    ``output_byte_runs`` columns; ``finished_at`` is now unless given."""
-    return _record_run(rows, "output_byte_runs", columns)
-
-
-def mark_cut_over(rows: OutputRows) -> None:
-    """The cut-over mark as release A wrote it (#7257): a finished row copy run, then a
-    finished byte run, and the mark that names it."""
-    record_copy_run(rows)
-    byte_run = record_byte_run(rows)
-    with rows._pool.connection() as conn:
-        conn.execute("INSERT INTO output_cutover (byte_run_id) VALUES (%s)", (byte_run,))
 
 
 def name_blob(rows: OutputRows, output_id: str, role: Role, key: str) -> None:

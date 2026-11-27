@@ -53,7 +53,7 @@ import { type WorkspaceFiles, withWorkspaceSize } from '../workspace/store.js'
 export interface SessionOwners {
   /**
    * The owner, the tiers its current turn was sent with (`ai_sessions.turn_tiers`, #2320),
-   * and that turn (`durable_turn_id`), which its calls' audit rows carry as a classic turn's do;
+   * and that turn (`durable_turn_id`), which its calls' audit rows carry as a session turn's do;
    * and its browser options (`ai_sessions.browser`, #7027) from the same row, for its plugins' routes.
    */
   ownerOf(
@@ -256,7 +256,7 @@ function namedImages(content: readonly Block[]): { parts: string[]; images: Sess
  * string, so content blocks would reach the model as JSON, an image as its base64.
  * So each image is kept in the session's blobs, named by its bytes (sessions/blobs.ts),
  * and named in the text, which tells the model to call `view_tool_images` with the
- * names: that tool returns them as image blocks, as a classic turn's tool result is.
+ * names: that tool returns them as image blocks, as a session turn's tool result is.
  * At most RESULT_IMAGES_MAX are kept; one past it is a placeholder, and with nowhere to
  * keep them every image is FLOW_IMAGE. They are kept as what call `toolUseId` produced,
  * which follow_session names on that call's `tool.result` for the panel (#2478).
@@ -434,7 +434,7 @@ async function runAsActivity(
   if (flow === undefined) {
     // A session's call runs as `tool:<name>` in its ToolCall workflow; no session is read from this id (#7323).
     throw ApplicationFailure.nonRetryable(
-      `${tool.name} runs only for a flow run; no session is found from workflow ${workflowExecution?.workflowId ?? '(none)'}: ` +
+      `a bare ${tool.name} activity runs only for a flow run, and workflow ${workflowExecution?.workflowId ?? '(none)'} is not a flow run's: ` +
         `a session's call runs as ${toolCallActivity(tool.name)} in its ToolCall workflow`,
       UNKNOWN_SESSION,
     )
@@ -692,7 +692,7 @@ async function runGated(
   try {
     run = await runToolWithOutcome(tool, runInput, {
       ...services,
-      // The tab paired with this session (#254), as for a classic turn; a flow has none.
+      // The tab paired with this session (#254), as for a session turn; a flow has none.
       ...(services.browser && session !== undefined ? { browser: services.browser.forSession(session) } : {}),
       // A flow's own images, which its calls may name as `flow_image` references (#2477).
       ...(flow !== undefined && deps.flowBlobs ? { flowImages: flowImagesOf(deps.flowBlobs, `flow-${flow}`) } : {}),

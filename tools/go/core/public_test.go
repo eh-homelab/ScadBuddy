@@ -30,7 +30,7 @@ func TestAPublicAreaIsServedBehindTheGate(t *testing.T) {
 	})
 	next := http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusTeapot) })
 	get := func(mode, path string) (int, string) {
-		router, err := newRouter(pool, next, nil, "test-public", mode, nil)
+		router, err := newRouter(pool, next, nil, "test-public", mode, nil, nil, nil)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -62,13 +62,13 @@ func TestAPublicAreaIsServedBehindTheGate(t *testing.T) {
 		}
 	}
 	// A public pattern's other methods go to Python too.
-	router, _ := newRouter(pool, next, nil, "test-public", "", nil)
+	router, _ := newRouter(pool, next, nil, "test-public", "", nil, nil, nil)
 	rec := httptest.NewRecorder()
 	router.ServeHTTP(rec, httptest.NewRequest(http.MethodPost, "/api/v1/test-public", nil))
 	if rec.Code != http.StatusTeapot {
 		t.Errorf("POST to a GET pattern: %d, not Python's", rec.Code)
 	}
-	if _, err := newRouter(pool, next, nil, "test-public", "enforced", nil); err == nil {
+	if _, err := newRouter(pool, next, nil, "test-public", "enforced", nil, nil, nil); err == nil {
 		t.Error("an unknown SCADBUDDY_AUTH_MODE was taken")
 	}
 }

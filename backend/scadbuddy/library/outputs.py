@@ -934,7 +934,6 @@ class OutputStore:
             arranged_from=list(prepared.arranged_from) or None,
             backfill=None,
             has_plate_cover=_holds_plate_cover(directory / MODEL_NAME),
-            copied_at=meta.created_at,
             blobs=blobs or OutputBlobs(),
             # The list's text on the row (#7257), which `GET /outputs`'s `q` matches.
             params_text=params_text(prepared.params, cached_defaults(self.paths, meta.slug)),
