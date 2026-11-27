@@ -15,9 +15,7 @@ import { schemaProperty } from '../../test/spec'
 /** `LanLink.access_code`'s `maxLength` in the spec `pnpm gen:api` (run before `pnpm test`)
  * exported: the backend's bound, read rather than restated (#4497 review). */
 function specAccessCodeMax(): number {
-  const max = schemaProperty('LanLink', 'access_code').maxLength
-  if (typeof max !== 'number') throw new Error(`LanLink.access_code.maxLength is ${JSON.stringify(max)}, not a number`)
-  return max
+  return schemaProperty('LanLink', 'access_code', 'maxLength', 'number')
 }
 
 const H2C = 'Printer 3DP-31B-598'
