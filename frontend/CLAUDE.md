@@ -416,7 +416,15 @@ same way, `vite.config.ts`).
   read and starts the scan by itself when the page opens, falling back to the Scan button with
   the reason when the browser refuses. A spool's "Write tag" and a backup's restore go through
   `lib/tagWrite.ts` `writeWithBackup` (backup, write, read back), and an agent's NFC job shows
-  in `NfcJobBanner` (`components/filament/scan/`); tests stub Web NFC with `src/test/ndefStub.ts`. e2e: `e2e/filament.spec.ts`, `e2e/filament-rfid.spec.ts`,
+  in `NfcJobBanner` (`components/filament/scan/`); tests stub Web NFC with `src/test/ndefStub.ts`.
+  "Scan code" (#8155, `components/filament/scan/ScanCode.tsx`) shows the rear camera's live
+  preview, or a chosen photo where the browser gives no camera (inside Bambuddy's frame too).
+  `ScanCameraProvider` wraps the page; `useScanCamera()` (`scanCamera.ts`) gives any read the
+  camera: `capture(source)` takes a still of the preview as a JPEG (canvas `toBlob`), stores it
+  (`POST /scan/images`, the bytes as the body) and decodes it on the server (`POST /scan/codes`
+  with the key, the source and a GPS fix that waits at most 3 s), and answers `{key, mediaType,
+  scan}`. These routes are core's (Go), so `api/scan.ts` writes their shapes by hand; mocks
+  `src/mocks/features/scan.ts` (`queueScanCodes`: the mock reads no image). e2e: `e2e/filament.spec.ts`, `e2e/filament-rfid.spec.ts`,
   `e2e/filament-sensors.spec.ts` (a place's sensor, its limit and history, #6268) and
   `e2e/filament-purchasing.spec.ts` (a supplier, a price, an invoice confirmed into spools, and a
   total that cannot be confirmed), plus `hot-path.spec.ts` (SB spool numbers in the trays, no Bambuddy

@@ -878,10 +878,11 @@ func TestARefusedUpload(t *testing.T) {
 		status     int
 		reason     string
 	}{
-		"no credential":     {"", ask(body), 401, "no_credential"},
-		"another scope":     {"fleet:crud.fleet", ask(body), 403, "out_of_scope"},
-		"a kind not listed": {core, map[string]any{"kind": "piece", "size": 4, "sha256": ask(body)["sha256"], "media_type": "a/b"}, 422, "kind_not_allowed"},
-		"too large":         {core, map[string]any{"kind": "tag_dump", "size": 64<<10 + 1, "sha256": ask(body)["sha256"], "media_type": "a/b"}, 413, "upload_too_large"},
+		"no credential":                  {"", ask(body), 401, "no_credential"},
+		"another scope":                  {"fleet:crud.fleet", ask(body), 403, "out_of_scope"},
+		"a kind not listed":              {core, map[string]any{"kind": "piece", "size": 4, "sha256": ask(body)["sha256"], "media_type": "a/b"}, 422, "kind_not_allowed"},
+		"a photo, which only Put stores": {core, map[string]any{"kind": "scan_image", "size": 4, "sha256": ask(body)["sha256"], "media_type": "image/jpeg"}, 422, "kind_not_allowed"},
+		"too large":                      {core, map[string]any{"kind": "tag_dump", "size": 64<<10 + 1, "sha256": ask(body)["sha256"], "media_type": "a/b"}, 413, "upload_too_large"},
 	} {
 		status, got := h.post("/uploads", c.credential, c.body)
 		if status != c.status || got["reason"] != c.reason {
