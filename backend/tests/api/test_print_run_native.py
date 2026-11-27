@@ -34,6 +34,7 @@ from scadbuddy.bambuddy.options import (
 )
 from scadbuddy.core.problems import ApiError
 from scadbuddy.core.settings import Settings
+from scadbuddy.filament.unknown_tray_rows import PoolUnknownTrays, UnknownSpoolRef
 from scadbuddy.library.settings_store import S3Settings
 from scadbuddy.printers.component import PRINTERS, Printers
 from scadbuddy.printers.models import LanLink, PrinterCreate, PrinterPatch
@@ -685,12 +686,27 @@ def _lan_routed(client: TestClient) -> str:
     return row.id
 
 
+@pytest.fixture
+def no_unknown_trays(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The check's unknown-tray read answers no trays (#7143). `LAN_REPORT` has filled,
+    untagged trays that no SB spool holds, so the report's capture records them as unknown
+    and the check would refuse before Bambuddy's status read. These tests are about the
+    path a check takes; the block has its own tests
+    (`tests/printers/test_unknown_spool_block.py`)."""
+
+    async def no_trays(self: PoolUnknownTrays, printer_id: str) -> list[UnknownSpoolRef]:
+        return []
+
+    monkeypatch.setattr(PoolUnknownTrays, "blocking", no_trays)
+
+
 def _status_reads() -> int:
     """How many times Bambuddy's status of printer 1 was read: only the Bambuddy check
     reads it (the native check reads the LAN report)."""
     return sum(1 for call in respx.calls if call.request.url.path == "/api/v1/printers/1/status")
 
 
+@pytest.mark.usefixtures("no_unknown_trays")
 def test_an_outputs_check_asked_through_bambuddy_is_bambuddys_check(
     model: str,
     settings: Settings,
@@ -715,6 +731,7 @@ def test_an_outputs_check_asked_through_bambuddy_is_bambuddys_check(
         assert _status_reads() > before
 
 
+@pytest.mark.usefixtures("no_unknown_trays")
 def test_a_library_files_check_asked_through_bambuddy_is_bambuddys_check(
     model: str,
     settings: Settings,
