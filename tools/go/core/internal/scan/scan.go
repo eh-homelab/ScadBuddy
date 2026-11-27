@@ -288,7 +288,7 @@ func (s *Scans) scan(ctx context.Context, key string, body []byte, in Input) (Sc
 	if err != nil {
 		return Scan{}, err
 	}
-	return s.one(ctx, id)
+	return s.find(ctx, id, true, nil)
 }
 
 func nonNil(codes []Code) []Code {
@@ -372,12 +372,19 @@ func whose(ctx context.Context) (all bool, me *string) {
 	return false, nil
 }
 
-// one is the scan id, or the 404.
+// one is the scan id as the caller on ctx may see it (whose), or the 404.
 func (s *Scans) one(ctx context.Context, id string) (Scan, error) {
+	everyone, me := whose(ctx)
+	return s.find(ctx, id, everyone, me)
+}
+
+// find is the scan id, for everyone or for actor me only, or the 404. A scan just recorded
+// is read back with everyone: its own writer reads it, a Go caller in core too, whose ctx
+// names no caller (Record).
+func (s *Scans) find(ctx context.Context, id string, everyone bool, me *string) (Scan, error) {
 	if !crud.IsUUID(id) {
 		return Scan{}, notFound()
 	}
-	everyone, me := whose(ctx)
 	sc, codes, err := scanRow(s.Pool.QueryRow(ctx, "SELECT "+columns+
 		" FROM code_scans WHERE id = $1 AND ($2 OR actor IS NOT DISTINCT FROM $3)", id, everyone, me))
 	if errors.Is(err, pgx.ErrNoRows) {
