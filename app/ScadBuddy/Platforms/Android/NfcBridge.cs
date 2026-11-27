@@ -276,7 +276,13 @@ public sealed class NfcBridge : Java.Lang.Object, NfcAdapter.IReaderCallback, We
 		// stops partway keeps its sectors and the next tap of the same tag reads only the rest.
 		Dictionary<int, JsonArray> sectors;
 		lock (PartialGate)
-			sectors = partial is { } p && p.Uid == hex && DateTime.UtcNow - p.At < PartialFor ? p.Sectors : [];
+		{
+			// One partial read per UID: a Bambu spool has two tags, and a tap on one side must not
+			// drop what the other side's last tap read.
+			foreach (var old in Partials.Where(e => DateTime.UtcNow - e.Value.At >= PartialFor).Select(e => e.Key).ToList())
+				Partials.Remove(old);
+			sectors = Partials.TryGetValue(hex, out var p) ? p.Sectors : [];
+		}
 		resumed = sectors.Count > 0;
 		var refused = new JsonArray();
 		var at = -1;
@@ -301,7 +307,8 @@ public sealed class NfcBridge : Java.Lang.Object, NfcAdapter.IReaderCallback, We
 				failure = $"sector {at}: {error.GetType().Name}: {error.Message}";
 			}
 		}
-		lock (PartialGate) partial = failure is null ? null : (hex, sectors, DateTime.UtcNow);
+		lock (PartialGate)
+			if (failure is null) Partials.Remove(hex); else Partials[hex] = (sectors, DateTime.UtcNow);
 		var blocks = new JsonArray();
 		foreach (var sector in sectors.Keys.Order())
 			foreach (var block in sectors[sector]) blocks.Add(block!.DeepClone());
@@ -312,7 +319,7 @@ public sealed class NfcBridge : Java.Lang.Object, NfcAdapter.IReaderCallback, We
 
 	static readonly object PartialGate = new();
 	static readonly TimeSpan PartialFor = TimeSpan.FromMinutes(2);
-	static (string Uid, Dictionary<int, JsonArray> Sectors, DateTime At)? partial;
+	static readonly Dictionary<string, (Dictionary<int, JsonArray> Sectors, DateTime At)> Partials = [];
 
 	/// <summary>A sector's data blocks, or null when the key is refused. The last block of a sector is its key trailer: never read.</summary>
 	static JsonArray? ReadSector(MifareClassic classic, int sector, byte[] key)
