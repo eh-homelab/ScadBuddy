@@ -57,17 +57,17 @@ type Locker interface {
 
 // LockChainInForce is ChainInForce inside a transaction, with a share lock on every row the
 // answer reads: the grant, the grants it inherits from and the standing grants they were
-// seeded from. A revocation of any of them lands wholly before or after the caller's
-// transaction (#5685).
+// seeded from, taken in id order so a revocation of several links cannot deadlock with it. A
+// revocation of any of them lands wholly before or after the caller's transaction (#5685).
 func LockChainInForce(ctx context.Context, tx Locker, id string) (bool, error) {
 	var grants, standing []string
 	if err := tx.QueryRow(ctx, links, id).Scan(&grants, &standing); err != nil {
 		return false, err
 	}
-	if _, err := tx.Exec(ctx, `SELECT 1 FROM flow_grants WHERE id = ANY($1) FOR SHARE`, grants); err != nil {
+	if _, err := tx.Exec(ctx, `SELECT 1 FROM flow_grants WHERE id = ANY($1) ORDER BY id FOR SHARE`, grants); err != nil {
 		return false, err
 	}
-	if _, err := tx.Exec(ctx, `SELECT 1 FROM flow_trigger_grants WHERE id = ANY($1) FOR SHARE`, standing); err != nil {
+	if _, err := tx.Exec(ctx, `SELECT 1 FROM flow_trigger_grants WHERE id = ANY($1) ORDER BY id FOR SHARE`, standing); err != nil {
 		return false, err
 	}
 	return ChainInForce(ctx, tx, id)
