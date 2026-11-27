@@ -283,6 +283,11 @@ assistant that the setting `flow_answerers` or the run's grant admits (#7471;
 `scadbuddy/flows/operations.py` `flow_kinds`). A grant-admitted answer is recorded only
 while the grant chain is in force (`FlowStore.record_decision`, 409 `grant_lapsed` over the
 CRUD route).
+A prompt's scan fields that name `expects` also put `kind:<kind>` and `code:<CODE>` entries in
+the task's `expects` column (`scadbuddy/tasks/widgets.py` `expects_entries`), which
+`GET /tasks?code=` reads, and the task keeps its `assignee`. A change of what `prompt` or
+`wait_for_human` checks or opens is a Temporal patch (`HUMAN_PROMPT_PATCH`), because a
+refusal there schedules nothing and a replayed run must refuse as it did.
 See [features/flows.md](../features/flows.md#questions-to-a-person).
 
 ## Housekeeping

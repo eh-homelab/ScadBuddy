@@ -424,7 +424,17 @@ same way, `vite.config.ts`).
   `SchemaForm` draws a form from a schema, for an answer (`answer`) and
   for Start run; `inputsForm.tsx` `useInputs` holds the fields, `lib/flowInputs.ts` the parse:
   an answer leaves out a blank field, Start run sends a cleared text. Mocks:
-  `src/mocks/features/tasks.ts` (the task of `run-prompt`). e2e `e2e/workflows.spec.ts`.
+  `src/mocks/features/tasks.ts` (the task of `run-prompt`, and a scan task at the Workshop).
+  e2e `e2e/workflows.spec.ts`.
+  Task screens (#8062): `components/flows/TaskPanel.tsx` is a task's context and answer form,
+  shared by `TaskCard`, the station and the code page. `ContextBlocks.tsx` draws the checked
+  context blocks. `components/flows/widgets/` holds the controls of `x-sb-widget`
+  (`ScanField`, `UploadField`, `LibraryField`, `Stepper`, `Segmented`); `lib/flowInputs.ts`
+  reads `widget`, `expects` and `kind`, and `lib/scanMisfit.ts` says why a code does not fit.
+  `pages/StationPage.tsx` is `/station` and `/station/:place`, and `pages/CodePage.tsx` offers
+  the task that waits for a scanned code before it opens the place or spool. The place's
+  "Station for flow tasks" switch is in `pages/filament/LocationsTab.tsx`. e2e
+  `e2e/flow-station.spec.ts`.
 - "Needs you" (#6399): `lib/needsYou.ts` is every request that waits on the person in one list
   (the agent's pending input, `attention.ts` `WaitingEntry`; the flow grants of
   `GET /api/v1/flow-grant-requests`; the tab's pairing requests, from `AgentLink`'s

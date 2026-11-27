@@ -1,5 +1,6 @@
 import { HttpResponse, http } from 'msw'
 import { resolveCodeText } from './filament'
+import { L } from './filament/seed'
 import type { AnswerProblem, Task, TaskQuestion } from '../../api/types'
 
 /**
@@ -13,6 +14,9 @@ import type { AnswerProblem, Task, TaskQuestion } from '../../api/types'
 
 /** The task `run-prompt` (`flows.ts`) waits on. */
 export const PROMPT_TASK_ID = '5f0c7a52-3c1d-4c53-9d0e-7b1a2f6e8c41'
+
+/** The scan task waiting at the Workshop station (#8062): it expects spool S-9. */
+export const STATION_TASK_ID = '8062a2a2-0000-4000-8000-000000000001'
 
 const INVALID = 'https://scadbuddy.dev/problems/tasks/invalid-answer'
 const NOT_OPEN = 'https://scadbuddy.dev/problems/tasks/not-open'
@@ -67,6 +71,28 @@ function defaults(): Task[] {
       admitted_by: null,
       created_at: at(2),
       updated_at: at(2),
+    },
+    {
+      id: STATION_TASK_ID,
+      run_id: 'run-station',
+      title: 'Shelve the new spool',
+      schema: {
+        type: 'object',
+        properties: {
+          spool: { type: 'string', title: 'Spool', 'x-sb-widget': 'scan', expects: { codes: ['S-9'] } },
+        },
+        required: ['spool'],
+      },
+      context: [{ text: 'Scan the gold spool, then put it on the shelf.' }],
+      place: L.WORKSHOP,
+      ui: null,
+      expires_at: null,
+      state: 'open',
+      answer: null,
+      answered_by: null,
+      admitted_by: null,
+      created_at: at(1),
+      updated_at: at(1),
     },
   ]
 }

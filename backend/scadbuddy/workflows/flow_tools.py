@@ -271,7 +271,16 @@ async def prompt(
     `people_only`, only a person may answer; otherwise the setting `flow_answerers` or
     the run's grant may also let an assistant answer. `assignee` names who the task is for:
     the task card shows it and `GET /tasks?assignee=me` lists it. It does not limit who
-    may answer."""
+    may answer.
+
+    A property may add `x-sb-widget` to draw a control for its type: `scan` (a string, a
+    code; `expects` `{"kinds": ["spool"], "codes": ["S-3"]}` limits it), `photo` or `file`
+    (a string, an attachment's id), `entity` (a string, with `kind` of `library_file`,
+    `location` or `spool`), `weight` (a number, in grams) and `confirm` (a boolean). A
+    `context` item with one key may be a block: `entity` (`"<kind>:<ref>"`), `text`,
+    `image` (`{entity, attachment_id}`), `table` (`{columns, rows}`), `checklist` (a list
+    of texts) or `expect` (`{weight_g, tolerance_g}`). A widget on a type it does not fit,
+    or a malformed block, raises ValueError."""
     people_only = _people_only(people_only)
     timeout_s = _wait_s(timeout_s)
     owner: StepOwner = workflow.instance()
