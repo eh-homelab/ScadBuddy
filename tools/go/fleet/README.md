@@ -47,7 +47,10 @@ telemetry's `Transport`); `(*Exchange).WrapTransport` does the same for the exch
   `handle-taken` (409, two session ids that share their first 8 hex characters) to
   `sbfleet.ErrHandleTaken`, `seq-ahead` (422, a rewind past the cursor) to
   `fleetchat.ErrBadSeq`, and `text-too-long` (422, a text over core's 16 MiB, detail
-  `text is longer than 16777216 bytes`) to `fleetchat.ErrTooLong`. Any other answer is an error that names the status. A 403
+  `text is longer than 16777216 bytes`) to `fleetchat.ErrTooLong`. `virtual-sender` (422,
+  a DM to a virtual sender's name such as `rotator`) is `fleetchat.ErrVirtualSender`, as a
+  `fleetchat.VirtualSenderError` whose text is core's detail, the sender's reject message
+  alone, so `fleet_send` shows that text. Any other answer is an error that names the status. A 403
   with no `not-member` reason (the CRUD guard's refusal) is not `ErrNotMember`. Every
   request has a 30 s timeout.
 - `NewBus(coreURL, token)`: a `fleetchat.Bus`. `Publish` does nothing: core publishes
@@ -82,6 +85,29 @@ The token function is called for every request. A read error fails that request 
 for the stream, that attempt). Both take `OnUnauthorized(f)`: a request core refuses
 with 401 calls `f` with the refused credential and is sent once more with the next one
 (core's CRUD guard refuses before a route runs, so no route runs twice).
+
+- `NewRegistry(coreURL, token)`: a `*Registry`, the session registry's reads over core's
+  routes under `/api/v1/internal/crud/fleet/` (caller `fleet`;
+  `tools/go/core/internal/fleet/registry.go`, spec
+  `2026-11-26-fleet-session-registry-and-rotator-design` §6.3). The machine service writes
+  the registry with its own caller, `fleet-rotator`; the `fleet` caller only reads it.
+
+  | Method | Route |
+  |---|---|
+  | `Sessions(ctx, limit)` | `GET /sessions?limit=` (`{"sessions", "more"}`; the most recently seen first, by the newest host; a `limit` of 0 sends none, core's 50; core gives at most 200) |
+  | `Session(ctx, sessionID)` | `GET /sessions/{session_id}` (one `Session`, with all its hosts) |
+
+  One session id can run on several machines at once. A `Session` is its id, handle,
+  `LastSeen` (the newest host's) and `Hosts`, one `Host` per machine, the most recently
+  seen first. A `Host` is where the session runs on that machine: its `Machine` (the id is
+  a SHA-256 of the machine's `/etc/machine-id` and the user, never the raw id), pid and
+  `ProcStart`, paths, git facts, Claude Code facts, the last rate limit and its reset, and
+  `PreviousSessionID` (the session of the same process on the same machine before a
+  `/clear`). A nil pointer is a fact the machine service did not send. `Credential` names the credential in use by its id, name, kind and
+  last 4 characters, never its secret; it is nil when `CredentialID` is nil or names no
+  credential that still exists. A 404 with reason `unknown-session` is
+  `sbfleet.ErrUnknownSession`; other answers map as the `Store`'s do. It takes the same
+  options as `NewStore`.
 
 - `NewExchange(coreURL, proofFile, proof)`: the `fleet` service credential from the
   service-token exchange (root `README.md`, "The service-token exchange"). `Token`

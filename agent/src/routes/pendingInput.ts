@@ -63,9 +63,8 @@ import { SSE_KEEPALIVE_MS } from './sessions.js'
 // as the browser user, like the approval decisions. Those routes
 // (/api/v1/ai/approvals/:id/approve|deny, `ai_approvals` ids only) and
 // `sessions_approve` / `sessions_deny` (any approval id, `durable:` included) stay
-// as aliases for the `approval` kind (§6.6, "Classic sessions"), as do the chat
-// socket's `approval.decision` and `question.answer`, which a panel loaded before
-// this route existed still sends.
+// as aliases for the `approval` kind (§6.6, "Classic sessions"). The chat socket's
+// old `approval.decision` and `question.answer` are gone (#7323).
 
 export type { PendingInputEntry }
 

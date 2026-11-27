@@ -11,7 +11,7 @@ import { unwrapUntrusted } from '../src/safety/untrusted.js'
 import type { Owner } from '../src/sessions/protocol.js'
 import type { TouchedCall } from '../src/sessions/touched.js'
 import type { FlowRuns } from '../src/temporal/flowRuns.js'
-import { BACKEND_UNAVAILABLE, decidedCalls, DESCRIBE_CALL_ACTIVITY, FLOW_IMAGES_FULL, flowCallSpan, gateActivities, TOOL_IMAGES_TOOL, toolActivities, type ToolActivityDeps } from '../src/temporal/toolActivities.js'
+import { BACKEND_UNAVAILABLE, decidedCalls, DESCRIBE_CALL_ACTIVITY, FLOW_IMAGES_FULL, flowCallSpan, gateActivities, toolActivities, type ToolActivityDeps, toolCallActivities } from '../src/temporal/toolActivities.js'
 import { AUTHOR_SESSION_HEADER } from '../src/tools/authorship.js'
 import { browserTools } from '../src/tools/browser.js'
 import { ALL_TOOLS } from '../src/tools/index.js'
@@ -82,6 +82,8 @@ const TOOLS: readonly Tool[] = [whoami, boom, send, slow]
 
 type Harness = {
   activities: Record<string, (input: unknown) => Promise<unknown>>
+  /** Each tool as `tool:<name>`, a session's call in its ToolCall workflow. */
+  calls: Record<string, (input: unknown) => Promise<unknown>>
   audits: AuditEntry[]
   touched: TouchedCall[]
   headers: Headers[]
@@ -106,7 +108,7 @@ function harness(overrides: Partial<ToolActivityDeps> = {}, tools: readonly Tool
     },
     ...overrides,
   }
-  return { activities: toolActivities(tools, deps), audits, touched, headers }
+  return { activities: toolActivities(tools, deps), calls: toolCallActivities(tools, deps), audits, touched, headers }
 }
 
 function env(workflowId = `session-${SESSION}`, activityId = 'tool-toolu_01', runId = 'run-1') {
@@ -122,6 +124,22 @@ function env(workflowId = `session-${SESSION}`, activityId = 'tool-toolu_01', ru
 function text(content: unknown): string {
   expect(typeof content).toBe('string')
   return unwrapUntrusted(content as string)
+}
+
+/** A session's call as it runs now: `tool:<name>` in its own ToolCall workflow, `session-<id>-call-<tool_use_id>`. */
+function callEnv(toolUseId = 'toolu_01', session = SESSION) {
+  return new MockActivityEnvironment({
+    activityId: 'call',
+    workflowExecution: { workflowId: `session-${session}-call-${toolUseId}`, runId: 'call-run' },
+    activityType: 'tool:whoami',
+    taskQueue: 'agent-tools',
+  })
+}
+
+/** Runs `name` as a session's call: whether it succeeded, and what the model reads of it, out of its envelope. */
+async function sessionCall(h: Harness, name: string, input: unknown, toolUseId = 'toolu_01', e = callEnv(toolUseId)): Promise<{ ok: boolean; text: string }> {
+  const result = (await e.run(h.calls[`tool:${name}`]!, { tool: name, input })) as { ok: boolean; content: { type: string; text?: string; name?: string }[] }
+  return { ok: result.ok, text: result.content.map((b) => (b.type === 'text' ? unwrapUntrusted(b.text ?? '') : `[image ${b.name}]`)).join('\n') }
 }
 
 async function failure(promise: Promise<unknown>): Promise<ApplicationFailure> {
@@ -157,38 +175,43 @@ describe('tool activities', () => {
     expect((await failure(env().run(tier, { tool: 'Bash', packages: [1] }))).type).toBe('ToolError')
   })
 
-  it("runs the tool as the session's owner, in the session, and returns its content", async () => {
+  // #7323: a session's call runs as `tool:<name>` in its ToolCall workflow; a bare tool activity
+  // is a flow run's only. The retired Python worker's `activity_as_tool` was its last session caller.
+  it('refuses a bare tool activity from a session workflow, and runs nothing', async () => {
     const h = harness()
-    const content = await env().run(h.activities.whoami!, {})
-    expect(text(content)).toContain('"session": "' + SESSION)
-    expect(text(content)).toContain('"gate": "workflow"')
-    expect(text(content)).toContain('"id": "browser"')
+    for (const workflowId of [`session-${SESSION}`, `session-${SESSION}-call-toolu_01`, 'other']) {
+      const refused = await failure(env(workflowId).run(h.activities.whoami!, {}))
+      expect(refused.nonRetryable).toBe(true)
+      expect(refused.type).toBe('UnknownSession')
+      expect(refused.message).toContain(`runs only for a flow run, and workflow ${workflowId} is not a flow run's`)
+      expect(refused.message).toContain('tool:whoami')
+    }
+    expect(h.headers).toEqual([])
+    expect(h.audits).toEqual([])
+    expect(h.touched).toEqual([])
+  })
+
+  it("runs a session's call as the session's owner, in the session, and returns its content", async () => {
+    const h = harness()
+    const ran = await sessionCall(h, 'whoami', {})
+    expect(ran.ok).toBe(true)
+    expect(ran.text).toContain('"session": "' + SESSION)
+    expect(ran.text).toContain('"gate": "workflow"')
+    expect(ran.text).toContain('"id": "browser"')
     // A session's own call is no flow's: a turn it sends is never marked a flow turn (#2481).
-    expect(JSON.parse(text(content)).flowTurn).toBeNull()
+    expect(JSON.parse(ran.text).flowTurn).toBeNull()
     // The commit trailer names the session (authorship.ts, #252).
     expect(h.headers[0]!.get(AUTHOR_SESSION_HEADER)).toBe(SESSION)
-    // What the session touched (#931), and the audit row the harness would write.
+    // What the session touched (#931); the audit row is the turn's (audit/turn.ts), not the call's.
     expect(h.touched).toEqual([expect.objectContaining({ sessionId: SESSION, ok: true, input: { n: 1 } })])
-    expect(h.audits).toEqual([
-      expect.objectContaining({
-        kind: 'tool_call',
-        action: 'whoami',
-        surface: 'harness',
-        actor: BROWSER,
-        sessionId: SESSION,
-        toolUseId: 'toolu_01',
-        tier: 'read',
-        inputHash: 'hash:whoami',
-        outcome: 'ok',
-      }),
-    ])
+    expect(h.audits).toEqual([])
   })
 
   it('runs an approved outward tool without preparing an approval: the workflow decided it', async () => {
     const pending = new PendingActionStore()
     const h = harness({ services: services({ pending }) })
-    const content = await env(undefined, 'tool-toolu_approved').run(h.activities.send!, { to: 'printer' })
-    expect(text(content)).toContain('"sent": "printer"')
+    const ran = await sessionCall(h, 'send', { to: 'printer' }, 'toolu_approved')
+    expect(ran.text).toContain('"sent": "printer"')
     // /mcp, with no gate, still only prepares it.
     const run = await runToolWithOutcome(send, { to: 'printer' }, {
       ...services({ pending }),
@@ -200,25 +223,20 @@ describe('tool activities', () => {
     expect(JSON.stringify(run.result)).toContain('pending_approval')
   })
 
-  it("fails without a retry when the tool's result is an error, a refusal or bad arguments", async () => {
+  it("answers the tool's error, a refusal or bad arguments as a result the model reads", async () => {
     const h = harness()
-    const broke = await failure(env().run(h.activities.boom!, {}))
-    expect(broke.nonRetryable).toBe(true)
-    expect(broke.type).toBe('ToolError')
-    expect(broke.message).toContain('it broke')
-    const invalid = await failure(env(undefined, 'tool-toolu_approved').run(h.activities.send!, { to: 3 }))
-    expect(invalid.nonRetryable).toBe(true)
-    expect(invalid.message).toContain('invalid arguments')
+    const broke = await sessionCall(h, 'boom', {})
+    expect(broke).toEqual({ ok: false, text: expect.stringContaining('it broke') })
+    const invalid = await sessionCall(h, 'send', { to: 3 }, 'toolu_approved')
+    expect(invalid).toEqual({ ok: false, text: expect.stringContaining('invalid arguments') })
     // A token owner holds `read` only (harnessPrincipal), so an outward tool is refused.
-    const refused = await failure(env(undefined, 'tool-toolu_approved').run(harness({}, TOOLS, BEARER).activities.send!, { to: 'x' }))
-    expect(refused.nonRetryable).toBe(true)
-    expect(refused.message).toContain('needs the "outward" tier')
-    expect(h.audits.map((a) => a.outcome)).toEqual(['error', 'error'])
+    const refused = await sessionCall(harness({}, TOOLS, BEARER), 'send', { to: 'x' }, 'toolu_approved')
+    expect(refused).toEqual({ ok: false, text: expect.stringContaining('needs the "outward" tier') })
   })
 
   // Security review of 5b (missing-authorization): `gate: 'workflow'` must not be
   // borrowed by any workflow named after a durable session. A gated call runs only
-  // with an `approved` outcome recorded for its own request id (session, run, call).
+  // with an `approved` outcome recorded for its own request id (session and call).
   it('refuses a gated call with no approval recorded for its request id, and runs nothing', async () => {
     const asked: string[] = []
     const h = harness({
@@ -229,17 +247,15 @@ describe('tool activities', () => {
         },
       },
     })
-    const refused = await failure(env(undefined, 'tool-toolu_07').run(h.activities.send!, { to: 'printer' }))
-    expect(refused.nonRetryable).toBe(true)
-    expect(refused.type).toBe('NotApproved')
-    expect(asked).toEqual([`durable:${SESSION}:run-1:toolu_07`])
-    expect(h.audits).toEqual([expect.objectContaining({ action: 'send', outcome: 'refused', requestId: `durable:${SESSION}:run-1:toolu_07` })])
+    const refused = await sessionCall(h, 'send', { to: 'printer' }, 'toolu_07')
+    expect(refused).toEqual({ ok: false, text: expect.stringContaining('none is recorded for this call') })
+    expect(asked).toEqual([`call:${SESSION}:toolu_07`])
     // An ungated tool never asks.
-    await env().run(h.activities.whoami!, {})
+    await sessionCall(h, 'whoami', {})
     expect(asked).toHaveLength(1)
     // Without the record store, a gated call cannot be checked, so it is refused.
-    const none = await failure(env(undefined, 'tool-toolu_approved').run(harness({ approvals: undefined }).activities.send!, { to: 'x' }))
-    expect(none.type).toBe('NotApproved')
+    const none = await sessionCall(harness({ approvals: undefined }), 'send', { to: 'x' }, 'toolu_approved')
+    expect(none.ok).toBe(false)
   })
 
   it("keeps a result's images in the session's blobs and names them for view_tool_images (#2320)", async () => {
@@ -266,28 +282,22 @@ describe('tool activities', () => {
       put: async (session: string, images: readonly { name: string }[], toolUseId?: string) =>
         void stored.push({ session, names: images.map((i) => i.name), toolUseId }),
     }
-    const out = String(await env().run(harness({ blobs }, [pic]).activities.pic as (input: unknown) => Promise<unknown>, {}))
+    const out = (await sessionCall(harness({ blobs }, [pic]), 'pic', {})).text
     const name = `${createHash('sha256').update(Buffer.from(PNG, 'base64')).digest('hex')}.png`
     // Recorded under the call that produced it, which the panel's tool.result names it under (#2478).
     expect(stored).toEqual([{ session: SESSION, names: [name], toolUseId: 'toolu_01' }])
     expect(out).toContain('first')
     expect(out).toContain('second')
     expect(out).toContain(`[image ${name}]`)
-    expect(out).toContain(TOOL_IMAGES_TOOL)
     expect(out).toContain('[an image the model cannot take]')
     expect(out).not.toContain(PNG)
-    expect(out).not.toContain('classic session')
   })
 
-  it('refuses a workflow that is not a known session, and runs nothing', async () => {
+  it("answers a session's call whose session is gone, and runs nothing", async () => {
     const h = harness()
-    for (const workflowId of [`session-${'1'.repeat(8)}-0000-4000-8000-000000000000`, 'flow-abc', 'session-not-a-uuid', `session-${SESSION.toUpperCase()}`]) {
-      const refused = await failure(env(workflowId).run(h.activities.whoami!, {}))
-      expect(refused.nonRetryable).toBe(true)
-      expect(refused.type).toBe('UnknownSession')
-    }
+    const gone = await sessionCall(h, 'whoami', {}, 'toolu_01', callEnv('toolu_01', `${'1'.repeat(8)}-0000-4000-8000-000000000000`))
+    expect(gone).toEqual({ ok: false, text: expect.stringContaining('is gone') })
     expect(h.headers).toEqual([])
-    expect(h.audits).toEqual([])
   })
 
   it('leaves a failed owner lookup to the retry policy', async () => {
@@ -298,21 +308,19 @@ describe('tool activities', () => {
         },
       },
     })
-    const err = await env()
-      .run(h.activities.whoami!, {})
-      .catch((e: unknown) => e)
+    const err = await sessionCall(h, 'whoami', {}).catch((e: unknown) => e)
     expect(err).toBeInstanceOf(Error)
     expect(err).not.toBeInstanceOf(ApplicationFailure)
   })
 
-  it('fails a browser tool at once when the session has no paired tab', async () => {
+  it('answers a browser tool at once when the session has no paired tab', async () => {
     const tabs = new TabHub()
     try {
       const h = harness({ services: services({ browser: tabs }) }, browserTools)
-      const name = 'browser_snapshot'
       const started = Date.now()
-      const err = await failure(env().run(h.activities[name]!, {}))
-      expect(err.message).toMatch(/no browser|paired/i)
+      const ran = await sessionCall(h, 'browser_snapshot', {})
+      expect(ran.ok).toBe(false)
+      expect(ran.text).toMatch(/no browser|paired/i)
       expect(Date.now() - started).toBeLessThan(2000)
     } finally {
       tabs.close()
@@ -322,22 +330,19 @@ describe('tool activities', () => {
   it("runs a turn sent with its sender's tiers with those tiers, cut to what the owner holds now (#2320)", async () => {
     const sent = { ...BEARER, turnTiers: ['read', 'write', 'outward'] as const }
     const h = harness({ currentTiers: async () => ['read', 'write', 'outward'] }, TOOLS, sent)
-    const content = await env(`session-${SESSION}`, 'tool-toolu_approved').run(h.activities.send!, { to: 'x' })
-    expect(text(content)).toContain('"sent": "x"')
+    expect((await sessionCall(h, 'send', { to: 'x' }, 'toolu_approved')).text).toContain('"sent": "x"')
     // The token was cut to read since the turn was sent.
     const cut = harness({ currentTiers: async () => ['read'] }, TOOLS, sent)
-    const refused = await failure(env(`session-${SESSION}`, 'tool-toolu_approved').run(cut.activities.send!, { to: 'x' }))
-    expect(refused.message).toContain('needs the "outward" tier')
+    expect((await sessionCall(cut, 'send', { to: 'x' }, 'toolu_approved')).text).toContain('needs the "outward" tier')
     // A turn sent with no tiers keeps the owner's default: a token owner reads only.
     const plain = harness({}, TOOLS, BEARER)
-    const read = await failure(env(`session-${SESSION}`, 'tool-toolu_approved').run(plain.activities.send!, { to: 'x' }))
-    expect(read.message).toContain('needs the "outward" tier')
+    expect((await sessionCall(plain, 'send', { to: 'x' }, 'toolu_approved')).text).toContain('needs the "outward" tier')
   })
 
   it("aborts the tool's signal when the activity is cancelled", async () => {
     const h = harness({ heartbeatMs: 5 })
-    const e = env()
-    const running = e.run(h.activities.slow!, {})
+    const e = callEnv()
+    const running = sessionCall(h, 'slow', {}, 'toolu_01', e)
     setTimeout(() => e.cancel(), 20)
     await expect(running).rejects.toBeInstanceOf(CancelledFailure)
   })
@@ -656,7 +661,7 @@ describe('flow runs in tool activities', () => {
     const other = `flow-${'1'.repeat(8)}-0000-4000-8000-000000000000`
     const elsewhere = harness({ flows: { ...flowRuns(), startedBy: async () => BROWSER }, flowBlobs }, [peek])
     expect(text(await env(other, 'tool-call_1').run(elsewhere.activities.peek!, { name: PNG_NAME }))).toContain('"found": null')
-    expect(text(await env().run(h.activities.peek!, { name: PNG_NAME }))).toContain('"has": false')
+    expect((await sessionCall(h, 'peek', { name: PNG_NAME })).text).toContain('"has": false')
   })
 })
 
@@ -664,14 +669,6 @@ describe('flow runs in tool activities', () => {
 // an `answer` tool's result is the recorded answer, and gate.describe_call gives
 // DurableSession an approval's summary and hash.
 describe('the gate in tool activities', () => {
-  const REQUEST = `durable:${SESSION}:run-1:toolu_01`
-
-  it("names the call's request id on its audit row", async () => {
-    const h = harness()
-    await env().run(h.activities.whoami!, {})
-    expect(h.audits[0]).toMatchObject({ requestId: REQUEST, toolUseId: 'toolu_01' })
-  })
-
   it('describes a call with the summary and hash a classic approval would carry', async () => {
     const audit = { record: async () => {}, hash: (tool: string) => `hash:${tool}`, summarise: (tool: string) => `summary:${tool}` }
     const sessions = { ownerOf: async (id: string) => (id === SESSION ? BROWSER : undefined) }
@@ -745,14 +742,10 @@ describe("a call whose tool resolves what it names (#4442)", () => {
     expect(refused.nonRetryable).toBe(true)
     expect(refused.type).toBe('ToolError')
     expect(refused.message).toContain('changed the supplied argument printer_id')
+    expect(audits.map((a) => [a.action, a.outcome])).toEqual([['bent', 'refused']])
     const h = harness({ audit: recording, approvals: { approved: async () => true } }, [bent])
-    const ran = await failure(env(undefined, 'tool-toolu_16').run(h.activities.bent!, { printer: PRINTER, printer_id: 2 }))
-    expect(ran.nonRetryable).toBe(true)
-    expect(ran.type).toBe('ToolError')
-    expect(audits.map((a) => [a.action, a.outcome])).toEqual([
-      ['bent', 'refused'],
-      ['bent', 'refused'],
-    ])
+    const ran = await sessionCall(h, 'bent', { printer: PRINTER, printer_id: 2 }, 'toolu_16')
+    expect(ran).toEqual({ ok: false, text: expect.stringContaining('changed the supplied argument printer_id') })
   })
 
   it("describes the call by the printer that prints, and hashes the pair it approves", async () => {
@@ -779,24 +772,22 @@ describe("a call whose tool resolves what it names (#4442)", () => {
     const linked = { id: 2 }
     const backend = registry(linked)
     const describeCall = gateActivities({ audit, sessions, tools: [aim], services: services({ backend }) })[DESCRIBE_CALL_ACTIVITY]!
-    const described: unknown = await env().run(describeCall, { tool: 'aim', input: { printer: PRINTER } })
+    const described: unknown = await env().run(describeCall, { tool: 'mcp__scadbuddy__aim', input: { printer: PRINTER } })
     const parked = (described as { input_hash: string }).input_hash
     // The person approved the parked hash: only a call that hashes to it runs.
     const approvals = { approved: async (_id: string, call?: { inputHash: string }) => call?.inputHash === parked }
     const h = harness({ approvals, audit, services: services({ backend }) }, [aim])
-    const content = await env(undefined, 'tool-toolu_09').run(h.activities.aim!, { printer: PRINTER })
-    expect(text(content)).toContain(`"printer_id": 2`)
+    expect((await sessionCall(h, 'aim', { printer: PRINTER }, 'toolu_09')).text).toContain(`"printer_id": 2`)
     // Re-linked after the approval: the pair it would print on now is not the one approved.
     linked.id = 5
-    const moved = await failure(env(undefined, 'tool-toolu_09').run(h.activities.aim!, { printer: PRINTER }))
-    expect(moved.type).toBe('NotApproved')
+    const moved = await sessionCall(h, 'aim', { printer: PRINTER }, 'toolu_09')
+    expect(moved).toEqual({ ok: false, text: expect.stringContaining('no approval matches what it names now') })
   })
 
   it('refuses a mismatched pair when it runs, and runs nothing', async () => {
     const h = harness({ audit, services: services({ backend: registry({ id: 2 }) }) }, [aim])
-    const refused = await failure(env(undefined, 'tool-toolu_approved').run(h.activities.aim!, { printer: PRINTER, printer_id: 3 }))
-    expect(refused.nonRetryable).toBe(true)
-    expect(refused.message).toContain('not printer_id 3')
+    const refused = await sessionCall(h, 'aim', { printer: PRINTER, printer_id: 3 }, 'toolu_approved')
+    expect(refused).toEqual({ ok: false, text: expect.stringContaining('not printer_id 3') })
   })
 })
 
@@ -865,18 +856,16 @@ describe('print_output through the durable gate (#4442 gate review)', () => {
   it('runs the pair a person approved, and refuses one whose row was deleted since, audited', async () => {
     const state = registry()
     const audits: AuditEntry[] = []
-    const raw: unknown = await env().run(describeWith(state), { tool: 'print_output', input: { ...chosen, printer: PRINTER } })
+    const raw: unknown = await env().run(describeWith(state), { tool: 'mcp__scadbuddy__print_output', input: { ...chosen, printer: PRINTER } })
     const described = raw as { input_hash: string }
     const approvals = { approved: async (_id: string, call?: { inputHash: string }) => call?.inputHash === described.input_hash }
     const h = harness({ approvals, audit: auditInto(audits), services: services({ backend: backendOf(state) }) }, [printOutput])
-    await env(undefined, 'tool-toolu_11').run(h.activities.print_output!, { ...chosen, printer: PRINTER })
+    expect((await sessionCall(h, 'print_output', { ...chosen, printer: PRINTER }, 'toolu_11')).ok).toBe(true)
     expect(state.posted).toEqual([expect.objectContaining({ printer: PRINTER, printer_id: 2 })])
     // Deleted (or merged away) after the approval: the read is a 404, the tool's own refusal.
     state.status = 404
-    const gone = await failure(env(undefined, 'tool-toolu_12').run(h.activities.print_output!, { ...chosen, printer: PRINTER }))
-    expect(gone.nonRetryable).toBe(true)
-    expect(gone.type).toBe('ToolError')
-    expect(audits.at(-1)).toMatchObject({ action: 'print_output', outcome: 'refused' })
+    const gone = await sessionCall(h, 'print_output', { ...chosen, printer: PRINTER }, 'toolu_12')
+    expect(gone).toEqual({ ok: false, text: expect.stringContaining('print_output was not run') })
     expect(state.posted).toHaveLength(1)
   })
 
@@ -897,7 +886,7 @@ describe('print_output through the durable gate (#4442 gate review)', () => {
     for (const status of [503, 429]) {
       const state: Registry = { ...registry(), status, failures: 2 }
       const audits: AuditEntry[] = []
-      const raw: unknown = await env().run(describeWith(registry()), { tool: 'print_output', input: { ...chosen, printer: PRINTER } })
+      const raw: unknown = await env().run(describeWith(registry()), { tool: 'mcp__scadbuddy__print_output', input: { ...chosen, printer: PRINTER } })
       const described = raw as { input_hash: string }
       const checked: (string | undefined)[] = []
       const approvals = {
@@ -907,10 +896,9 @@ describe('print_output through the durable gate (#4442 gate review)', () => {
         },
       }
       const h = harness({ approvals, audit: auditInto(audits), services: services({ backend: backendOf(state) }), resolveBackoffMs: [0, 0] }, [printOutput])
-      await env(undefined, 'tool-toolu_14').run(h.activities.print_output!, { ...chosen, printer: PRINTER })
+      expect((await sessionCall(h, 'print_output', { ...chosen, printer: PRINTER }, 'toolu_14')).ok).toBe(true)
       expect(checked).toEqual([described.input_hash])
       expect(state.posted).toEqual([expect.objectContaining({ printer: PRINTER, printer_id: 2 })])
-      expect(audits.filter((a) => a.outcome !== 'ok')).toEqual([])
     }
   })
 
@@ -920,28 +908,25 @@ describe('print_output through the durable gate (#4442 gate review)', () => {
     let asked = 0
     const approvals = { approved: async () => (asked++, true) }
     const h = harness({ approvals, audit: auditInto(audits), services: services({ backend: backendOf(state) }), resolveBackoffMs: [0, 0] }, [printOutput])
-    const ran = await failure(env(undefined, 'tool-toolu_15').run(h.activities.print_output!, { ...chosen, printer: PRINTER }))
-    expect(ran.nonRetryable).toBe(true)
-    expect(ran.type).toBe(BACKEND_UNAVAILABLE)
-    expect(ran.message).toMatch(/approval .*spent.*call it again/)
+    const ran = await sessionCall(h, 'print_output', { ...chosen, printer: PRINTER }, 'toolu_15')
+    expect(ran.ok).toBe(false)
+    expect(ran.text).toMatch(/approval .*spent.*call it again/)
     expect(state.reads).toBe(3)
     expect(asked).toBe(0)
     expect(state.posted).toEqual([])
-    expect(audits).toEqual([expect.objectContaining({ action: 'print_output', outcome: 'error', toolUseId: 'toolu_15' })])
   })
 
   it('refuses a call cancelled while it waits to retry, with no further read', async () => {
     const state: Registry = { ...registry(), status: 503 }
     const audits: AuditEntry[] = []
     const h = harness({ approvals: { approved: async () => true }, audit: auditInto(audits), services: services({ backend: backendOf(state) }), resolveBackoffMs: [60_000, 60_000] }, [printOutput])
-    const e = env(undefined, 'tool-toolu_16')
-    const running = e.run(h.activities.print_output!, { ...chosen, printer: PRINTER })
+    const e = callEnv('toolu_16')
+    const running = sessionCall(h, 'print_output', { ...chosen, printer: PRINTER }, 'toolu_16', e)
     setTimeout(() => e.cancel(), 20)
-    const ran = await failure(running)
-    expect(ran.type).toBe(BACKEND_UNAVAILABLE)
+    // A ToolCall answers a refusal the model reads; the workflow is cancelled anyway.
+    expect((await running).ok).toBe(false)
     expect(state.reads).toBe(1)
     expect(state.posted).toEqual([])
-    expect(audits).toEqual([expect.objectContaining({ action: 'print_output', outcome: 'error', toolUseId: 'toolu_16' })])
   })
 
   it('audits a refusal at describe time, its backend detail in the untrusted envelope (M3, M5)', async () => {
@@ -984,13 +969,13 @@ describe('print_output through the durable gate (#4442 gate review)', () => {
   // #4442 review: the printers list is read only to name a bare printer_id in the line a person sees.
   it('names a bare printer_id at describe, and runs it reading no printers list', async () => {
     const state = registry()
-    const raw: unknown = await env().run(describeWith(state), { tool: 'print_output', input: { ...chosen, printer_id: 2 } })
+    const raw: unknown = await env().run(describeWith(state), { tool: 'mcp__scadbuddy__print_output', input: { ...chosen, printer_id: 2 } })
     const described = raw as { summary: string; input_hash: string }
     expect(described.summary).toContain('on printer "Garage"')
     expect(state.listReads).toBe(1)
     const approvals = { approved: async (_id: string, call?: { inputHash: string }) => call?.inputHash === described.input_hash }
     const h = harness({ approvals, audit: auditInto([]), services: services({ backend: backendOf(state) }) }, [printOutput])
-    await env(undefined, 'tool-toolu_17').run(h.activities.print_output!, { ...chosen, printer_id: 2 })
+    expect((await sessionCall(h, 'print_output', { ...chosen, printer_id: 2 }, 'toolu_17')).ok).toBe(true)
     expect(state.posted).toEqual([expect.objectContaining({ printer_id: 2 })])
     expect(state.listReads).toBe(1)
     expect(state.reads).toBe(0)
@@ -1003,16 +988,14 @@ describe('print_output through the durable gate (#4442 gate review)', () => {
     let asked = 0
     const approvals = { approved: async () => (asked++, true) }
     const h = harness({ approvals, audit: auditInto(audits), services: services({ backend: backendOf(state) }), resolveBackoffMs: [60_000, 60_000] }, [printOutput])
-    const ran = await failure(env(undefined, 'tool-toolu_18').run(h.activities.print_output!, { ...chosen, printer: PRINTER, copies: 'two' }))
-    expect(ran.nonRetryable).toBe(true)
-    expect(ran.type).toBe('ToolError')
-    expect(ran.message).toContain('print_output was not run: its arguments are not valid')
-    expect(ran.message).toContain('copies')
-    expect(ran.message).not.toContain('unavailable')
+    const ran = await sessionCall(h, 'print_output', { ...chosen, printer: PRINTER, copies: 'two' }, 'toolu_18')
+    expect(ran.ok).toBe(false)
+    expect(ran.text).toContain('print_output was not run: its arguments are not valid')
+    expect(ran.text).toContain('copies')
+    expect(ran.text).not.toContain('unavailable')
     expect(state.reads).toBe(0)
     expect(asked).toBe(0)
     expect(state.posted).toEqual([])
-    expect(audits).toEqual([expect.objectContaining({ action: 'print_output', outcome: 'refused', toolUseId: 'toolu_18' })])
   })
 
   it('refuses arguments that do not parse at describe, audited, rather than retrying', async () => {
@@ -1214,34 +1197,32 @@ describe("hosted_plugin_publish's draft binding (#7199)", () => {
     const state: Drafts = { digest: DIGEST, published: [] }
     const backend = backendOf(state)
     const describeCall = gateActivities({ audit, sessions, tools: [publishTool], services: services({ backend }) })[DESCRIBE_CALL_ACTIVITY]!
-    const described: unknown = await env().run(describeCall, { tool: 'hosted_plugin_publish', input: { name: 'shop-notes' } })
+    const described: unknown = await env().run(describeCall, { tool: 'mcp__scadbuddy__hosted_plugin_publish', input: { name: 'shop-notes' } })
     const parked = (described as { input_hash: string }).input_hash
-    expect(parked).toBe(hash('hosted_plugin_publish', { name: 'shop-notes', draft: DIGEST }))
+    expect(parked).toBe(hash('mcp__scadbuddy__hosted_plugin_publish', { name: 'shop-notes', draft: DIGEST }))
     // The person approved the parked hash; then the draft changed.
     const approvals = { approved: async (_id: string, call?: { inputHash: string }) => call?.inputHash === parked }
     const h = harness({ approvals, audit, services: services({ backend, hostedPackages }) }, [publishTool])
     state.digest = MOVED
-    const moved = await failure(env(undefined, 'tool-toolu_20').run(h.activities.hosted_plugin_publish!, { name: 'shop-notes' }))
-    expect(moved.nonRetryable).toBe(true)
-    expect(moved.type).toBe('NotApproved')
+    const moved = await sessionCall(h, 'hosted_plugin_publish', { name: 'shop-notes' }, 'toolu_20')
+    expect(moved.ok).toBe(false)
     // The gate cannot tell a changed draft from no approval at all, so it claims neither (#7211).
-    expect(moved.message).toContain('hosted_plugin_publish was not run: no approval matches what it names now')
-    expect(moved.message).toContain('if a person approved this publish, the draft, its description or its versions changed since')
-    expect(moved.message).toContain('Call hosted_plugin_publish again')
-    expect(moved.message).not.toContain('none is recorded')
+    expect(moved.text).toContain('hosted_plugin_publish was not run: no approval matches what it names now')
+    expect(moved.text).toContain('if a person approved this publish, the draft, its description or its versions changed since')
+    expect(moved.text).toContain('Call hosted_plugin_publish again')
+    expect(moved.text).not.toContain('none is recorded')
     expect(state.published).toEqual([])
     // The draft as it was approved: it runs, and sends the approved digest.
     state.digest = DIGEST
-    await env(undefined, 'tool-toolu_20').run(h.activities.hosted_plugin_publish!, { name: 'shop-notes' })
+    expect((await sessionCall(h, 'hosted_plugin_publish', { name: 'shop-notes' }, 'toolu_20')).ok).toBe(true)
     expect(state.published).toEqual([DIGEST])
   })
 
   it('still says none is recorded for a call whose input the resolution left as it was', async () => {
     const state: Drafts = { digest: DIGEST, published: [] }
     const h = harness({ approvals: { approved: async () => false }, audit, services: services({ backend: backendOf(state), hostedPackages }) }, [publishTool])
-    const refused = await failure(env(undefined, 'tool-toolu_21').run(h.activities.hosted_plugin_publish!, { name: 'shop-notes', draft: DIGEST }))
-    expect(refused.type).toBe('NotApproved')
-    expect(refused.message).toContain('none is recorded for this call')
+    const refused = await sessionCall(h, 'hosted_plugin_publish', { name: 'shop-notes', draft: DIGEST }, 'toolu_21')
+    expect(refused).toEqual({ ok: false, text: expect.stringContaining('none is recorded for this call') })
     expect(state.published).toEqual([])
   })
 

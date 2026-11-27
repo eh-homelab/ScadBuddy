@@ -18,7 +18,8 @@ from scadbuddy.flows.grants import (
     Outside,
     match_grant,
 )
-from scadbuddy.flows.store import FlowStore, GrantStateError
+from scadbuddy.flows.models import Decision
+from scadbuddy.flows.store import FlowStore, GrantLapsedError, GrantStateError
 from scadbuddy.render.projection import JobProjection
 from scadbuddy.workflows.flow_grants import FlowGrants
 from scadbuddy.workflows.flow_models import FlowRecord, FlowStep, ProjectionWrite
@@ -435,3 +436,59 @@ async def test_a_line_items_prints_count_the_accepted_quotes_plates(store: FlowS
         )
     assert facts.prints == 6
     assert not [p for p in seen if p.startswith("/api/v1/outputs/")]
+
+
+def _answer(run_id: str, by: str, call_id: str = "c", answer: str = "yes") -> Decision:
+    return Decision(
+        request_id=f"flow:{run_id}:wr1:{call_id}",
+        run_id=run_id,
+        workflow_run_id="wr1",
+        call_id=call_id,
+        kind="answer",
+        outcome="answered",
+        response={"answer": answer},
+        responder="session:s",
+        admitted_by=by,
+    )
+
+
+async def test_the_database_s_clock_alone_decides_an_answer_grant_s_expiry(
+    store: FlowStore, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The app's clock is far in the future: a grant the database finds in force still
+    admits, and one it finds expired does not."""
+
+    class Late(datetime):
+        @classmethod
+        def now(cls, tz: Any = None) -> "Late":
+            return cls(2100, 1, 1, tzinfo=tz)
+
+    monkeypatch.setattr("scadbuddy.flows.store.datetime", Late)
+    run_id = await run_row(store)
+    live = await store.insert_grant(
+        run_id,
+        spec(answers={"who": ["sessions"]}),
+        status="approved",
+        requested_by={"kind": "browser"},
+    )
+    assert await store.record_decision(_answer(run_id, live.id)) is True
+    other = await run_row(store)
+    lapsed = await store.insert_grant(
+        other,
+        spec(answers={"who": ["sessions"]}, expires_at=datetime.now(UTC) - timedelta(minutes=1)),
+        status="approved",
+        requested_by={"kind": "browser"},
+    )
+    with pytest.raises(GrantLapsedError):
+        await store.record_decision(_answer(other, lapsed.id))
+    assert await store.get_decision(_answer(other, lapsed.id).request_id) is None
+
+
+async def test_one_call_s_answers_are_read_alone(store: FlowStore) -> None:
+    run_id = await run_row(store)
+    await store.record_decision(_answer(run_id, "setting", "c1", "a"))
+    await store.record_decision(_answer(run_id, "setting", "c2", "b"))
+    one = await store.answers_of_call(run_id, "c1")
+    assert [d.call_id for d in one] == ["c1"]
+    assert await store.answers_of_call(run_id, "none") == []
+    assert len(await store.answers_of(run_id)) == 2

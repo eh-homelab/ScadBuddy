@@ -517,13 +517,6 @@ export const NOT_A_TOOL: readonly { operation: Operation; reason: string }[] = [
     reason: 'binary download; the agent reads `bom` and `files` from GET /outputs/{id}',
   },
   {
-    operation: 'GET /api/v1/outputs/copy-status',
-    reason:
-      "The last runs of the copies of the outputs' files to rows and blobs (#7255, #7256), which #7257 " +
-      'retired, and `cut_over_at`: an operator\'s check after a deploy. Nothing runs any more, so an agent ' +
-      'has nothing to act on; the outputs are in the output tools.',
-  },
-  {
     operation: 'POST /api/v1/outputs/{output_id}/backfill',
     reason:
       'Re-renders an output saved before Arrange so Arrange can use it (#902); the History and Print ' +

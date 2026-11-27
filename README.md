@@ -879,7 +879,7 @@ database (render, print, projects and the agent, #5299 step 12):
 | Proof | On the caller | On the API |
 |---|---|---|
 | Kubernetes | `SCADBUDDY_SERVICE_TOKEN_FILE`: a projected ServiceAccount token, audience `scadbuddy`, from a projected volume (not `subPath`) | `SCADBUDDY_SERVICE_ACCOUNT_NAMESPACE` (e.g. `bambuddy`); the API asks the apiserver with a TokenReview, with its own token, and reads the cluster's issuer discovery and JWKS. The API needs two roles: `system:auth-delegator` (TokenReview) and `system:service-account-issuer-discovery` (the discovery and the JWKS). A default ClusterRoleBinding [gives the second to every ServiceAccount](https://kubernetes.io/docs/tasks/configure-pod-container/configure-service-account/#service-account-issuer-discovery) (`system:serviceaccounts`); an explicit binding to the API's ServiceAccount (eh-homelab/clusters#3246) keeps the JWKS read from depending on that default |
-| Bootstrap (compose, a laptop) | `SCADBUDDY_SERVICE_BOOTSTRAP_FILE`: its random secret, at least 32 characters | `SCADBUDDY_SERVICE_BOOTSTRAP_DIR`: one file per caller, named `render`, `print`, `projects` or `agent`; only the hashes are kept |
+| Bootstrap (compose, a laptop) | `SCADBUDDY_SERVICE_BOOTSTRAP_FILE`: its random secret, at least 32 characters | `SCADBUDDY_SERVICE_BOOTSTRAP_DIR`: one file per caller, named after it (`render`, `print`, `projects`, `agent` …); the fleet's machine service has one per machine, `fleet-rotator.<machine>`, so one machine can be revoked alone; only the hashes are kept |
 
 The API takes a proof only when its own variable is set. The ServiceAccounts it maps are
 `scadbuddy-render` (caller `render`), `scadbuddy-print`, `scadbuddy-projects`,
@@ -1112,8 +1112,10 @@ from #4090 on needs nothing: its pods make their own build current.
 output's row and blobs are its only record, and no copy runs. Its migration refuses to
 run until the first release wrote the cut-over mark and every row's bytes are blobs: a
 refused pod restarts, and the pods of the first release go on serving. Upgrade from the
-first release only, once `GET /api/v1/outputs/copy-status` names `cut_over_at` and
-`bytes.pending` is 0 ([The cut-over](docs/architecture/data.md#the-cut-over)).
+first release only, once `GET /api/v1/outputs/copy-status` named `cut_over_at` and
+`bytes.pending` was 0 ([The cut-over](docs/architecture/data.md#the-cut-over)). #7887
+removed that route after the second release, and its second step drops the mark's table
+after the second release's migration has read it.
 
 ### Render worker (#424)
 
@@ -2153,8 +2155,8 @@ the backend on `http://127.0.0.1:8080` (§4.3).
   and the agent's questions are answered through
   `POST /api/v1/ai/pending-input/{request_id}` (the panel's one respond route, #815),
   which works while the panel's socket is down;
-  `/api/v1/ai/approvals` and the socket's `approval.decision` / `question.answer`
-  still work. A chat
+  `/api/v1/ai/approvals` still works; the socket's old `approval.decision` /
+  `question.answer` are refused as malformed (#7323). A chat
   session's model gets the ScadBuddy tools in-process (`mcp__scadbuddy__*`, at
   their tiers), plus enabled plugins. Every agent response carries
   `X-ScadBuddy-Service: agent`.

@@ -132,7 +132,7 @@ from scadbuddy.filament.csv_import import (
     import_on,
     import_rows,
 )
-from scadbuddy.filament.insert_weights import NoInsertWeightOfferError
+from scadbuddy.filament.insert_weights import InsertWeightChangedError, NoInsertWeightOfferError
 from scadbuddy.filament.label_output import LabelOutput
 from scadbuddy.filament.label_sheets import (
     LabelSheetGoneError,
@@ -1917,16 +1917,21 @@ async def add_spool_event(
 _INSERT_WEIGHT_RULE = (
     "A reading is from a new, unused spool when the spool's ledger shows no use (no print, "
     "no print's grams, no delta down, no reading below the label weight) and its grams left "
-    "still equal the label weight (the spool's own, else its type's). Only then is an offer "
-    "made, and only when the reading is above the label weight and the derived weight "
-    "(`reading_g - label_weight_g`) is at most the label weight. A new spool read under "
-    "its label weight is `reason` `below_label` (#7683): `shortfall_g` is "
+    "still equal the label weight (the spool's own, else its type's) within 0.5 g. A spool "
+    "with no grams left and no use counts as full. Only then is an offer made, and only "
+    "when the spool's insert is not archived, the reading is above the label weight, the "
+    "derived weight (`reading_g - label_weight_g`) is at most the label weight, and the new "
+    "mean is at least 1 g. A new spool read under its label weight is `reason` "
+    "`below_label` (#7683): `shortfall_g` is "
     "`label_weight_g - reading_g`, `resolutions` lists the readings of it with their "
     "filament grams (`tared`: the scale was tared on the empty spool; `short` and "
     "`label_wrong`, each the reading less the insert's empty weight, only when that is "
     "not negative; `label_wrong` also names `new_label_weight_g`), and `default` the one "
     "to preselect (`tared` within 10 % of the label, else `short`; a reading under the "
-    "empty weight offers `tared` alone, so the default is `tared`)."
+    "empty weight offers `tared` alone, so the default is `tared`). "
+    "The other reasons: `archived` (the spool), `no_insert` (no insert, or an archived "
+    "one), `no_label_weight`, `used`, `not_full`, `not_above_label`, `derived_too_heavy`, "
+    "`mean_below_1g`."
 )
 
 
@@ -1973,7 +1978,10 @@ async def insert_weight_offer(
         "insert's row locks.\n\n"
         "Accept before the weighing, then record the weighing with "
         "`POST /filament/spools/{spool_id}/events` and the answer's `filament_g` as its "
-        "`grams`; that route is unchanged. 404 for no such spool; 409 with `code` "
+        "`grams`; that route is unchanged. Send the offer's `new_empty_weight_g` too: when "
+        "the mean under the locks is another (another spool's accept or delete moved it), "
+        "the answer is 409 with `code` `insert_weight_changed` and the `new_empty_weight_g` "
+        "now, and nothing is written; check again. 404 for no such spool; 409 with `code` "
         "`no_insert_weight_offer` and the `reason` when no offer holds now."
     ),
 )
@@ -1981,7 +1989,19 @@ async def accept_insert_weight(
     filament: FilamentDep, spool_id: UUID, body: m.InsertWeightAccept
 ) -> m.InsertWeightAccepted:
     try:
-        accepted = await asyncio.to_thread(filament.insert_weights.accept, spool_id, body.reading_g)
+        accepted = await asyncio.to_thread(
+            filament.insert_weights.accept,
+            spool_id,
+            body.reading_g,
+            expected_g=body.new_empty_weight_g,
+        )
+    except InsertWeightChangedError as exc:
+        raise ApiError(
+            status.HTTP_409_CONFLICT,
+            f"the insert weight of spool {spool_id} is now {exc.new_empty_weight_g} g; check again",
+            code="insert_weight_changed",
+            new_empty_weight_g=exc.new_empty_weight_g,
+        ) from None
     except NoInsertWeightOfferError as exc:
         raise ApiError(
             status.HTTP_409_CONFLICT,

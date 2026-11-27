@@ -263,7 +263,6 @@ def output(world: World, slug: str, number: int, version: str | None, inputs: An
         arranged_from=None,
         backfill=None,
         has_plate_cover=False,
-        copied_at=AT,
     )
     with world.outputs() as (store, _):
         store.rows.insert(row)
@@ -396,7 +395,6 @@ def world(made: Made, tmp_path: Path, pg_conninfo: str) -> World:
     old.data, old.root, old.clock = data, data / "models", 1_800_000_000
     copy = World(data, pg_conninfo, old, made.commits, made.ids, data / "switch-1")
     seed(copy)
-    copy_run_recorded(copy)
     start_copies(copy)
     copy.before = {**snapshot(copy), "others": others(copy)}
     copy.before_metas = dict(copy.sql("SELECT output_id, meta FROM outputs"))
@@ -419,12 +417,6 @@ def catalogue(world: World, pool: PgPool) -> tuple[Catalogue, TemplateRows, Temp
     found.refresh = refresh
     history.template_rows = refresh
     return found, rows, refresh
-
-
-def copy_run_recorded(world: World) -> None:
-    """A finished copy run, as release A's copy of the outputs left the database (#7255).
-    Release B retired that copy (#7257)."""
-    world.sql("INSERT INTO output_copy_runs (finished_at) VALUES (clock_timestamp())")
 
 
 def start_copies(world: World) -> TemplateCopyResult:

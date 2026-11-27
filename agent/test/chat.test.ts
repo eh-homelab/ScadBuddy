@@ -64,7 +64,6 @@ describe('client messages', () => {
     const built = [
       clientMessage({ type: 'user.message', text: 'hi', context: { route: '/', tools: ['navigate'], page: { a: 1 } } }),
       clientMessage({ type: 'user.message', sessionId: 's1', text: 'hi', context: { route: '/models/x', modelSlug: 'x' } }),
-      clientMessage({ type: 'approval.decision', sessionId: 's1', id: 'a1', approve: true }),
       clientMessage({ type: 'session.interrupt', sessionId: 's1' }),
       clientMessage({ type: 'queue.remove', sessionId: 's1', id: 'q1' }),
       clientMessage({ type: 'queue.edit', sessionId: 's1', id: 'q1', text: 'new words' }),

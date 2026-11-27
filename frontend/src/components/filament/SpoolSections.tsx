@@ -71,7 +71,7 @@ export function SectionIndex({ advanced, onToggleAdvanced }: { advanced: boolean
         </ul>
         <AdvancedToggle advanced={advanced} onToggle={onToggleAdvanced} className="mt-3 pl-3" />
       </nav>
-      <div className="flex items-center gap-4 lg:hidden">
+      <div data-testid="section-index-narrow" className="flex items-center gap-4 lg:hidden">
         <Select value="" onValueChange={jump}>
           <SelectTrigger aria-label="Go to section" className="w-full">
             <SelectValue placeholder="Go to section" />

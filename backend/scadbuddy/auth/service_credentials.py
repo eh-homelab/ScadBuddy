@@ -27,7 +27,7 @@ import math
 import secrets
 import threading
 import time
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Collection, Mapping
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING, Any, Literal, get_args
@@ -99,7 +99,8 @@ ExchangedProof = Literal["k8s", "bootstrap", "inprocess"]
 #: profile-fetch worker (#6625) reaches only `/internal/crud/profile-fetch/`. The camera
 #: recorders and live edge reach only `/internal/crud/camera/`; the camera relay only
 #: `/internal/crud/camera-relay/`. The fleet MCP server (agent fleet chat) reaches only
-#: `/internal/crud/fleet/`.
+#: `/internal/crud/fleet/`. The machine service (the fleet's session registry and login
+#: rotator) reaches only `/internal/crud/fleet-rotator/`.
 SCOPES: Mapping[ServiceCaller, frozenset[str]] = {
     "agent": frozenset({"api", "internal.workspace", "crud.agent"}),
     "print": frozenset({"internal.outputs", "internal.library", "crud.print"}),
@@ -111,6 +112,7 @@ SCOPES: Mapping[ServiceCaller, frozenset[str]] = {
     "camera": frozenset({"crud.camera"}),
     "camera-relay": frozenset({"crud.camera-relay"}),
     "fleet": frozenset({"crud.fleet"}),
+    "fleet-rotator": frozenset({"crud.fleet-rotator"}),
 }
 PREFIX = "sbsvc_"
 LIFETIME = timedelta(days=30)
@@ -148,6 +150,7 @@ class CredentialInfo:
     proof: Proof
     pod_name: str | None
     pod_uid: str | None
+    machine: str | None
 
 
 @dataclass(frozen=True)
@@ -257,6 +260,10 @@ class ServiceCredentialStore:
     def __init__(self, pool: Pool) -> None:
         self._pool = pool
         self._listeners: builtins.list[Callable[[ServiceCaller], None]] = []
+        #: Whether ``(caller, machine)``'s bootstrap proof file is still there
+        #: (`exchange.py` ``BootstrapVerifier.has_machine``); None: no bootstrap
+        #: directory, so no machine has one.
+        self.machine_present: Callable[[str, str], bool] | None = None
 
     def on_suspension_change(self, listener: Callable[[ServiceCaller], None]) -> None:
         """Calls ``listener`` with the caller after each :meth:`suspend` and :meth:`resume`
@@ -326,11 +333,13 @@ class ServiceCredentialStore:
         *,
         pod_name: str | None = None,
         pod_uid: str | None = None,
+        machine: str | None = None,
         rate_limited: bool = True,
         now: datetime | None = None,
     ) -> Issued:
         """An exchanged credential for ``caller`` (spec 2026-11-05 §6.2): no sealed copy,
-        :data:`EXCHANGE_LIFETIME`, bound to the pod a Kubernetes proof named. Under the
+        :data:`EXCHANGE_LIFETIME`, bound to the pod a Kubernetes proof named, or to the
+        machine of a per-machine bootstrap proof (``fleet-rotator.<machine>``). Under the
         caller's lock, so every replica counts the same rows. Raises
         :class:`CallerSuspendedError`, or :class:`RateLimitedError` past
         :data:`RATE_PER_POD` a minute per pod (a bootstrap caller is one pod) or
@@ -362,8 +371,8 @@ class ServiceCredentialStore:
             expires_at = at + EXCHANGE_LIFETIME
             conn.execute(
                 "INSERT INTO service_credentials (id, caller, scopes, secret_hash, created_at,"
-                " expires_at, proof, pod_name, pod_uid)"
-                " VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)",
+                " expires_at, proof, pod_name, pod_uid, machine)"
+                " VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)",
                 (
                     credential_id,
                     caller,
@@ -374,6 +383,7 @@ class ServiceCredentialStore:
                     proof,
                     pod_name,
                     pod_uid,
+                    machine,
                 ),
             )
         return Issued(token, credential_id, scopes, expires_at)
@@ -385,13 +395,25 @@ class ServiceCredentialStore:
         at = _now(now)
         with self._pool.connection() as conn:
             row = conn.execute(
-                "SELECT id, caller, scopes, last_used_at FROM service_credentials c"
+                "SELECT id, caller, scopes, machine, last_used_at FROM service_credentials c"
                 " WHERE secret_hash = %s AND revoked_at IS NULL AND expires_at > %s"
                 " AND NOT EXISTS (SELECT 1 FROM service_caller_suspensions s"
                 " WHERE s.caller = c.caller)",
                 (credential_hash, at),
             ).fetchone()
             if row is None:
+                return None
+            machine = row["machine"]
+            if machine is not None and (
+                self.machine_present is None or not self.machine_present(row["caller"], machine)
+            ):
+                # The machine was revoked (its proof file went): refused now, not at the
+                # next sweep, and revoked, so core's resolver refuses it too.
+                conn.execute(
+                    "UPDATE service_credentials SET revoked_at = %s"
+                    " WHERE id = %s AND revoked_at IS NULL",
+                    (at, row["id"]),
+                )
                 return None
             last = row["last_used_at"]
             if last is None or at - last >= TOUCH_INTERVAL:
@@ -405,7 +427,7 @@ class ServiceCredentialStore:
         with self._pool.connection() as conn:
             rows = conn.execute(
                 "SELECT id, caller, scopes, created_at, expires_at, revoked_at, last_used_at,"
-                " proof, pod_name, pod_uid"
+                " proof, pod_name, pod_uid, machine"
                 " FROM service_credentials ORDER BY caller, created_at DESC"
             ).fetchall()
         return [CredentialInfo(**row) for row in rows]
@@ -428,6 +450,26 @@ class ServiceCredentialStore:
                 "UPDATE service_credentials SET revoked_at = %s WHERE proof = 'legacy'"
                 " AND revoked_at IS NULL AND NOT (caller = ANY(%s))",
                 (_now(now), list(LEGACY_CALLERS)),
+            )
+        return cur.rowcount
+
+    def revoke_machines_without_proof(
+        self,
+        caller: ServiceCaller,
+        machines: Collection[str],
+        *,
+        now: datetime | None = None,
+    ) -> int:
+        """Revokes every live credential of a per-machine ``caller`` (``fleet-rotator``)
+        whose machine is not in ``machines``, the machines that still have a proof file,
+        or that names no machine; how many. Idempotent."""
+        at = _now(now)
+        with self._pool.connection() as conn:
+            cur = conn.execute(
+                "UPDATE service_credentials SET revoked_at = %s"
+                " WHERE caller = %s AND revoked_at IS NULL AND expires_at > %s"
+                " AND (machine IS NULL OR NOT (machine = ANY(%s)))",
+                (at, caller, at, sorted(machines)),
             )
         return cur.rowcount
 

@@ -1,5 +1,4 @@
 import { MockActivityEnvironment } from '@temporalio/testing'
-import { ApplicationFailure } from '@temporalio/common'
 import { Client } from '@modelcontextprotocol/sdk/client/index.js'
 import { InMemoryTransport } from '@modelcontextprotocol/sdk/inMemory.js'
 import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js'
@@ -15,7 +14,7 @@ import { BuiltInTools, builtInToolSets, type BuiltInToolSet } from '../src/plugi
 import { BUILT_INS } from '../src/plugins/packages/builtins.js'
 import type { PluginRepo } from '../src/plugins/registry.js'
 import type { SettingsRepo } from '../src/credentials.js'
-import { toolActivities } from '../src/temporal/toolActivities.js'
+import { toolCallActivities } from '../src/temporal/toolActivities.js'
 import { harnessTools } from '../src/tools/harness.js'
 import { ALL_TOOLS } from '../src/tools/index.js'
 import { createExternalServer, refreshOfferedTools } from '../src/tools/projections.js'
@@ -407,6 +406,7 @@ describe('/mcp', () => {
   })
 })
 
+// #7323: a session's call runs as `tool:<name>` in its own ToolCall workflow.
 describe('the durable activities', () => {
   const SESSION = '0b6c1e4e-7d3a-4f5e-9a51-3f1c2d4e5f60'
   const whoamiSpec = {
@@ -419,17 +419,22 @@ describe('the durable activities', () => {
     handler: async () => json({ ok: true }),
   }
   const whoami: Tool = defineTool(whoamiSpec)
-  const env = (activityId: string) =>
-    new MockActivityEnvironment({
-      activityId,
-      workflowExecution: { workflowId: `session-${SESSION}`, runId: 'run-1' },
-      activityType: 'whoami',
+  /** Runs `name` as the session's call `toolUseId`: whether it ran, and the text the model reads. */
+  async function call(a: Record<string, (input: unknown) => Promise<unknown>>, name: string, toolUseId: string, input: unknown = {}) {
+    const env = new MockActivityEnvironment({
+      activityId: 'call',
+      workflowExecution: { workflowId: `session-${SESSION}-call-${toolUseId}`, runId: 'call-run' },
+      activityType: `tool:${name}`,
       taskQueue: 'agent-tools',
     })
+    const result = (await env.run(a[`tool:${name}`]!, { tool: name, input })) as { ok: boolean; content: { type: string; text?: string }[] }
+    return { ok: result.ok, text: result.content.map((b) => b.text ?? '').join('\n') }
+  }
+  const NOT_APPROVED = /none is recorded for this call/
 
   function activities(tool_tiers: Record<string, string>, disabled_tools: string[], tool: Tool = whoami) {
     const { access } = memoryAccess(rowsFromOverrides(OWN_SOURCE, tool_tiers, disabled_tools))
-    return toolActivities([tool], {
+    return toolCallActivities([tool], {
       services: services({ toolOverrides: new BuiltInTools(access, ownSet([tool])).registryOverrides() }),
       sessions: { ownerOf: async () => ({ kind: 'browser', id: 'browser', label: 'You' }) },
       approvals: { approved: async (requestId) => requestId.endsWith(':toolu_approved') },
@@ -438,39 +443,27 @@ describe('the durable activities', () => {
 
   it('need an approval for a tool raised to outward', async () => {
     const a = activities({ whoami: 'outward' }, [])
-    const err = await env('tool-toolu_01').run(a.whoami!, {}).then(
-      () => undefined,
-      (e: unknown) => e,
-    )
-    expect(err).toBeInstanceOf(ApplicationFailure)
-    expect((err as ApplicationFailure).type).toBe('NotApproved')
-    expect(await env('tool-toolu_approved').run(a.whoami!, {})).toMatch(/ok/)
+    expect(await call(a, 'whoami', 'toolu_01')).toEqual({ ok: false, text: expect.stringMatching(NOT_APPROVED) })
+    expect(await call(a, 'whoami', 'toolu_approved')).toEqual({ ok: true, text: expect.stringMatching(/ok/) })
   })
 
   it('refuse a disabled tool', async () => {
     const a = activities({}, ['whoami'])
-    const err = await env('tool-toolu_02').run(a.whoami!, {}).then(
-      () => undefined,
-      (e: unknown) => e,
-    )
-    expect((err as ApplicationFailure).message).toMatch(/disabled in Settings/)
+    expect(await call(a, 'whoami', 'toolu_02')).toEqual({ ok: false, text: expect.stringMatching(/disabled in Settings/) })
   })
 
   it('refuse a disabled tool raised to outward as disabled, not as unapproved (#2088)', async () => {
     // The durable gate never parks a disabled tool, so no approval is ever recorded for it.
     const a = activities({ whoami: 'outward' }, ['whoami'])
-    const err = await env('tool-toolu_03').run(a.whoami!, {}).then(
-      () => undefined,
-      (e: unknown) => e,
-    )
-    expect((err as ApplicationFailure).type).toBe('ToolError')
-    expect((err as ApplicationFailure).message).toMatch(/disabled in Settings/)
+    const refused = await call(a, 'whoami', 'toolu_03')
+    expect(refused).toEqual({ ok: false, text: expect.stringMatching(/disabled in Settings/) })
+    expect(refused.text).not.toMatch(NOT_APPROVED)
   })
 
   it('the durable activities run a lowered outward tool with no approval recorded', async () => {
     const outwardWhoami = defineTool({ ...whoamiSpec, risk: 'outward' })
     const a = activities({ whoami: 'write' }, [], outwardWhoami)
-    expect(await env('tool-toolu_04').run(a.whoami!, {})).toMatch(/ok/)
+    expect(await call(a, 'whoami', 'toolu_04')).toEqual({ ok: true, text: expect.stringMatching(/ok/) })
   })
 
   // #2088: the workflow decides whether to park from the overrides as its turn started;
@@ -480,18 +473,14 @@ describe('the durable activities', () => {
       const { access, reads } = memoryAccess()
       const handler = vi.fn(async () => json({ ok: true }))
       const counted = defineTool({ name: 'counted', label: 'counted', description: 'counts', input: z.object({ n: z.number().optional() }), risk: 'read', routes: [], handler })
-      const a = toolActivities([counted], {
+      const a = toolCallActivities([counted], {
         services: services({ toolOverrides: new BuiltInTools(access, ownSet([counted])).registryOverrides() }),
         sessions: { ownerOf: async () => ({ kind: 'browser', id: 'browser', label: 'You' }) },
         approvals: { approved: async (requestId, call) => approve(requestId, call) },
         audit: { record: vi.fn(async () => {}), hash: (t, i) => `${t}:${JSON.stringify(i)}`, summarise: () => '' },
       })
       const set = (tool_tiers: Record<string, string>, disabled_tools: string[]) => access.replaceTools(OWN_SOURCE, toolRows(tool_tiers, disabled_tools))
-      const run = (id: string, input: Record<string, unknown> = {}) =>
-        env(`tool-${id}`).run(a.counted!, input).then(
-          (v: unknown) => v,
-          (e: unknown) => e,
-        )
+      const run = (id: string, input: Record<string, unknown> = {}) => call(a, 'counted', id, input)
       return { set, run, handler, reads }
     }
 
@@ -500,24 +489,21 @@ describe('the durable activities', () => {
       // The turn read no override, so the workflow scheduled the call without parking it;
       // Settings raises the tool before the activity runs.
       await r.set({ counted: 'outward' }, [])
-      const err = await r.run('toolu_raised')
-      expect((err as ApplicationFailure).type).toBe('NotApproved')
+      expect(await r.run('toolu_raised')).toEqual({ ok: false, text: expect.stringMatching(NOT_APPROVED) })
       expect(r.handler).not.toHaveBeenCalled()
     })
 
     it('refuse a call disabled between its approval and its run', async () => {
       const r = rig(() => true)
       await r.set({ counted: 'outward' }, ['counted'])
-      const err = await r.run('toolu_approved_then_disabled')
-      expect((err as ApplicationFailure).type).toBe('ToolError')
-      expect((err as ApplicationFailure).message).toMatch(/disabled in Settings/)
+      expect(await r.run('toolu_approved_then_disabled')).toEqual({ ok: false, text: expect.stringMatching(/disabled in Settings/) })
       expect(r.handler).not.toHaveBeenCalled()
     })
 
     it('read the overrides once per call, so the check and the run cannot disagree', async () => {
       const r = rig(() => true)
       await r.set({ counted: 'outward' }, [])
-      expect(await r.run('toolu_once')).toMatch(/ok/)
+      expect(await r.run('toolu_once')).toEqual({ ok: true, text: expect.stringMatching(/ok/) })
       expect(r.handler).toHaveBeenCalledTimes(1)
       expect(r.reads.n).toBe(1)
     })
@@ -526,13 +512,12 @@ describe('the durable activities', () => {
       const seen: (string | undefined)[] = []
       const r = rig((_, call) => {
         seen.push(call?.inputHash)
-        return call?.inputHash === 'counted:{"n":1}'
+        return call?.inputHash === 'mcp__scadbuddy__counted:{"n":1}'
       })
       await r.set({ counted: 'outward' }, [])
-      expect(await r.run('toolu_same', { n: 1 })).toMatch(/ok/)
-      const err = await r.run('toolu_other', { n: 2 })
-      expect((err as ApplicationFailure).type).toBe('NotApproved')
-      expect(seen).toEqual(['counted:{"n":1}', 'counted:{"n":2}'])
+      expect(await r.run('toolu_same', { n: 1 })).toEqual({ ok: true, text: expect.stringMatching(/ok/) })
+      expect(await r.run('toolu_other', { n: 2 })).toEqual({ ok: false, text: expect.stringMatching(NOT_APPROVED) })
+      expect(seen).toEqual(['mcp__scadbuddy__counted:{"n":1}', 'mcp__scadbuddy__counted:{"n":2}'])
       expect(r.handler).toHaveBeenCalledTimes(1)
     })
   })

@@ -296,13 +296,17 @@ _QUEUE_JOBS = (
 #: The runs on these printers whose result records a LAN start under one of these
 #: names that the run has not seen end (`LanStarted.ended`), with the archive that
 #: start became when one is recorded, and the plate the start recorded
-#: (`LanStarted.plate_id`), else the plate its archive link recorded.
+#: (`LanStarted.plate_id`), else the plate its archive link recorded. A recorded plate
+#: that is not a whole number from 1 with at most nine digits counts as none, so one bad
+#: entry cannot fail the query for every card (#8078), and plate 0, which is no plate
+#: (plates start at 1), falls back to the archive's (#8083).
 _LAN_JOBS = (
     "SELECT r.id AS run_id, r.output_id AS run_subject, r.printer::text AS printer,"
     " e.name, COALESCE(o.slug, r.slug) AS slug, a.archive_id,"
     " COALESCE(e.plate_id, a.plate_id) AS plate_id"
     " FROM print_runs r CROSS JOIN LATERAL (SELECT x->>'subtask_name' AS name,"
-    "  CASE WHEN jsonb_typeof(x->'plate_id') = 'number' THEN (x->>'plate_id')::int END"
+    "  CASE WHEN jsonb_typeof(x->'plate_id') = 'number'"
+    "   AND x->>'plate_id' ~ '^[1-9][0-9]{0,8}$' THEN (x->>'plate_id')::int END"
     "  AS plate_id"
     "  FROM jsonb_array_elements(CASE WHEN jsonb_typeof(r.result->'lan') = 'array'"
     "   THEN r.result->'lan' END) AS x WHERE x->>'ended' IS NULL) AS e"
