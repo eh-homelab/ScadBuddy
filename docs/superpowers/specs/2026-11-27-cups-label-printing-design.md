@@ -152,8 +152,8 @@ server. The owner asked "Don't we use cups?" (2026-11-27). The ruling: print thr
   label size for `layout: "roll"` with a one-label template. Otherwise it is the sheet's page
   (Letter 215.9 x 279.4 mm, A4 210 x 297 mm). So a sheet never goes to a 2 x 1 queue, and a
   Letter queue on the same server can take a sheet. Core does not refuse a size: CUPS's queue
-  owns that. When the remembered queue does not fit, no queue is picked. When exactly one queue
-  fits, it is picked.
+  owns that. The picked queue is the remembered queue when it fits the page, else the only queue
+  that fits, else none. A picked queue always fits the page.
 - **R8.** Errors are problems with a `reason`:
   - no server (a bad stored value), or CUPS does not answer, times out, or answers bytes that
     are not IPP: 502 `label_server_unreachable`;

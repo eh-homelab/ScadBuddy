@@ -232,6 +232,7 @@ export function LabelsPage() {
   const [pdfProblem, setPdfProblem] = useState<string | null>(null)
   const [pdfBusy, setPdfBusy] = useState(false)
   const size = sizeOf(choice, templates)
+  const queuePage = pageSizeOf(cleanChoice(choice), layout, templates)
   // #7216 — the saved sheet chosen, the editor open (`new` or a sheet), and the sheet a delete waits to confirm.
   const chosenSheet = savedSheetOf(choice, templates)
   const [editing, setEditing] = useState<SavedLabelSheet | 'new' | null>(null)
@@ -691,7 +692,12 @@ export function LabelsPage() {
           <Button type="button" size="sm" disabled={count === 0 || printing} onClick={() => void print()}>
             <PrinterIcon /> Print
           </Button>
-          <LabelQueuePrint body={fileBody} page={pageSizeOf(cleanChoice(choice), layout, templates)} disabled={count === 0 || pdfNeedsBase} />
+          <LabelQueuePrint
+            body={fileBody}
+            page={queuePage}
+            sizeUnset={templates !== null && queuePage === null}
+            disabled={count === 0 || pdfNeedsBase}
+          />
           {pdfNeedsBase && (
             <p id="labels-pdf-needs-base" className="basis-full text-right text-[13px] text-muted-foreground">
               A download of place labels needs a label address. Set one in Settings, or an https public URL.

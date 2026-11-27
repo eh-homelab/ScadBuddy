@@ -6,7 +6,7 @@ import { type LabelQueue, ZEBRA_ZPL } from '../../api/labelPrinting'
  * server with a 2 x 1 in queue (idle) and a 4 x 6 in queue that waits for its labels (`processing`,
  * `media-needed`, the zebra backend's message, `deploy/cups/README.md`). A job answers 202 for a
  * listed queue, 422 `label_queue_unknown` for another name and 415 `label_not_pdf` for a body that
- * is not a PDF.
+ * is not a PDF, and 422 `label_option_invalid` for an option outside the PPD's lists.
  */
 
 const BASE = '/api/v1/label-printing/queues'
@@ -51,6 +51,21 @@ export function removeMockLabelQueue(name: string) {
   queues = queues.filter((queue) => queue.name !== name)
 }
 
+const DARKNESS = /^([1-9]|[12][0-9]|30)$/
+const PRINT_RATE = /^([1-9]|1[0-2])$/
+
+/** The PPD's lists, as `labelprint/routes.go` `options` reads them: a missing value or the default choice is fine. */
+function optionsValid(query: URLSearchParams): boolean {
+  const mediaType = query.get('media_type')
+  const darkness = query.get('darkness')
+  const printRate = query.get('print_rate')
+  return (
+    (mediaType === null || ['', 'Saved', 'Thermal', 'Direct'].includes(mediaType)) &&
+    (darkness === null || darkness === '' || darkness === '-1' || DARKNESS.test(darkness)) &&
+    (printRate === null || printRate === '' || printRate === 'Default' || PRINT_RATE.test(printRate))
+  )
+}
+
 const problem = (status: number, detail: string, reason: string) =>
   HttpResponse.json({ title: detail, status, detail, reason }, { status, headers: { 'Content-Type': 'application/problem+json' } })
 
@@ -59,6 +74,12 @@ export const handlers = [
   http.post(`${BASE}/:queue/jobs`, async ({ params, request }) => {
     const body = new Uint8Array(await request.arrayBuffer())
     if (new TextDecoder().decode(body.slice(0, 5)) !== '%PDF-') return problem(415, 'The body is not a PDF.', 'label_not_pdf')
+    if (!optionsValid(new URL(request.url).searchParams))
+      return problem(
+        422,
+        'media_type is Saved, Thermal or Direct; darkness is -1 or 1 to 30; print_rate is Default or 1 to 12.',
+        'label_option_invalid',
+      )
     const queue = queues.find((one) => one.name === params.queue)
     if (!queue) return problem(422, 'The label print server has no such queue.', 'label_queue_unknown')
     return HttpResponse.json({ queue: queue.name, job_id: nextJob++, job_state: 'pending', job_state_reasons: ['none'] }, { status: 202 })

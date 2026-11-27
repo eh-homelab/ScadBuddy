@@ -21,15 +21,16 @@ const MEDIA_TYPES: { value: LabelJobOptions['media_type']; label: string }[] = [
 const DARKNESS = [-1, ...Array.from({ length: 30 }, (_, at) => at + 1)]
 const RATES = ['Default', ...Array.from({ length: 12 }, (_, at) => String(at + 1))]
 
-const STATE_TEXT: Record<LabelQueue['state'], string> = { idle: 'Idle', processing: 'Busy', stopped: 'Stopped' }
-const STATE_DOT: Record<LabelQueue['state'], string> = { idle: 'bg-ok', processing: 'bg-warn', stopped: 'bg-destructive' }
+const STATE_TEXT: Record<LabelQueue['state'], string> = { idle: 'Idle', processing: 'Busy', stopped: 'Stopped', '': 'Unknown' }
+const STATE_DOT: Record<LabelQueue['state'], string> = { idle: 'bg-ok', processing: 'bg-warn', stopped: 'bg-destructive', '': 'bg-muted-foreground' }
 
 const nameOf = (queue: LabelQueue) => queue.info || queue.name
+const shorten = (text: string) => (text.length > 60 ? `${text.slice(0, 57)}…` : text)
 const mm = (n: number) => String(Math.round(n * 10) / 10)
 
 /**
  * R7 — the queue shown: the stored one when it fits the page, else the only queue that fits,
- * else none.
+ * else none. A queue shown always fits the page.
  */
 function pickOf(fitting: LabelQueue[], stored: string | null): LabelQueue | null {
   return fitting.find((queue) => queue.name === stored) ?? (fitting.length === 1 ? fitting[0]! : null)
@@ -40,7 +41,18 @@ function pickOf(fitting: LabelQueue[], stored: string | null): LabelQueue | null
  * options, and a button that asks for the labels' PDF and sends it to the queue. The queue
  * (`filament_label_queue`) and the options (`filament_label_job_options`) are saved at each change.
  */
-export function LabelQueuePrint({ body, page, disabled = false }: { body: LabelsRequest; page: Page | null; disabled?: boolean }) {
+export function LabelQueuePrint({
+  body,
+  page,
+  sizeUnset = false,
+  disabled = false,
+}: {
+  body: LabelsRequest
+  page: Page | null
+  /** True when the templates are read and the labels still have no page size (a custom size not set, or a saved sheet that is gone). */
+  sizeUnset?: boolean
+  disabled?: boolean
+}) {
   const [queues, setQueues] = useState<Queues>({ state: 'reading' })
   // Undefined until the settings answer (or fail): no queue is picked before the stored one is known.
   const [stored, setStored] = useState<string | null | undefined>(undefined)
@@ -158,6 +170,9 @@ export function LabelQueuePrint({ body, page, disabled = false }: { body: Labels
             </Button>
           </>
         )}
+        {queues.state === 'read' && page === null && (
+          <span className="text-muted-foreground">{sizeUnset ? 'Choose a label size first.' : 'Reading the label sizes…'}</span>
+        )}
         {queues.state === 'read' && page !== null && fitting.length === 0 && (
           <span className="text-muted-foreground">
             {list.length === 0
@@ -169,12 +184,16 @@ export function LabelQueuePrint({ body, page, disabled = false }: { body: Labels
           <>
             <Select value={chosen?.name ?? ''} onValueChange={pickQueue}>
               <SelectTrigger aria-label="Label queue" size="sm" className="w-auto min-w-56">
-                <SelectValue placeholder="Choose a queue" />
+                <SelectValue placeholder="Choose a queue">{chosen ? nameOf(chosen) : null}</SelectValue>
               </SelectTrigger>
               <SelectContent>
                 {fitting.map((queue) => (
                   <SelectItem key={queue.name} value={queue.name}>
-                    {nameOf(queue)}
+                    <span>{nameOf(queue)}</span>{' '}
+                    <span className="text-muted-foreground">
+                      {STATE_TEXT[queue.state]}
+                      {queue.state_message && <>. {shorten(queue.state_message)}</>}
+                    </span>
                   </SelectItem>
                 ))}
               </SelectContent>

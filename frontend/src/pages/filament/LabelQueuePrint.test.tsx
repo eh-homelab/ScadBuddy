@@ -95,9 +95,9 @@ describe('LabelQueuePrint (#7170 R7, R9)', () => {
     // Two queues fit and none is stored, so none is picked until the person picks one.
     const picker = await queuePicker()
     expect(picker).toHaveTextContent('Choose a queue')
-    expect(await optionsOf(user, picker)).toEqual(['Zebra ZD421, 2 x 1 in labels', 'Zebra GK420t, 2 x 1 in labels'])
+    expect(await optionsOf(user, picker)).toEqual(['Zebra ZD421, 2 x 1 in labels Idle', 'Zebra GK420t, 2 x 1 in labels Idle'])
     expect(screen.getByRole('button', { name: 'Print to label printer' })).toBeDisabled()
-    await choose(user, picker, 'Zebra GK420t, 2 x 1 in labels')
+    await choose(user, picker, 'Zebra GK420t, 2 x 1 in labels Idle')
     await waitFor(() => expect(mockSettings().filament_label_queue).toBe('S-EDCDU03-2x1'))
 
     await choose(user, screen.getByRole('combobox', { name: 'Print mode' }), 'Thermal transfer')
@@ -132,22 +132,29 @@ describe('LabelQueuePrint (#7170 R7, R9)', () => {
     expect(await screen.findByText(/No label queue fits this page/)).toBeInTheDocument()
   })
 
-  it('says the label server does not answer', async () => {
-    server.use(
-      http.get('*/api/v1/label-printing/queues', () =>
-        HttpResponse.json({ title: 'Bad Gateway', status: 502, detail: 'The label print server did not answer.', reason: 'label_server_unreachable' }, { status: 502 }),
-      ),
-    )
-    renderPage(
-      <div>
-        <button type="button">Download</button>
-        <button type="button">Print</button>
-        <LabelQueuePrint body={BODY} page={TWO_BY_ONE} />
-      </div>,
-    )
-    expect(await screen.findByText(/The label print server does not answer/)).toBeInTheDocument()
-    expect(screen.getByRole('button', { name: 'Download' })).toBeInTheDocument()
-    expect(screen.getByRole('button', { name: 'Print' })).toBeInTheDocument()
-    expect(screen.queryByRole('button', { name: 'Print to label printer' })).not.toBeInTheDocument()
+  it('shows Unknown with a neutral dot when CUPS gives no state', async () => {
+    const listed = (await labelQueues())[0]!
+    server.use(http.get('*/api/v1/label-printing/queues', () => HttpResponse.json({ queues: [{ ...listed, state: '' }] })))
+    renderPage(<LabelQueuePrint body={BODY} page={TWO_BY_ONE} />)
+    await waitFor(async () => expect(await queuePicker()).toHaveTextContent('Zebra GK420t, 2 x 1 in labels'))
+    const word = screen.getByText('Unknown')
+    expect(word.parentElement?.previousElementSibling).toHaveClass('bg-muted-foreground')
+  })
+
+  it('shows each queue\'s state and message in the picker', async () => {
+    const listed = (await labelQueues())[0]!
+    const stopped = { ...listed, name: 'ZD421-2x1', info: 'Zebra ZD421, 2 x 1 in labels', state: 'stopped', state_message: 'Paused by the operator.' }
+    server.use(http.get('*/api/v1/label-printing/queues', () => HttpResponse.json({ queues: [stopped, listed] })))
+    const { user } = renderPage(<LabelQueuePrint body={BODY} page={TWO_BY_ONE} />)
+    const picker = await queuePicker()
+    expect(await optionsOf(user, picker)).toEqual(['Zebra ZD421, 2 x 1 in labels Stopped. Paused by the operator.', 'Zebra GK420t, 2 x 1 in labels Idle'])
+  })
+
+  it('says why no queue shows while the page is unknown', async () => {
+    const { rerender } = renderPage(<LabelQueuePrint body={BODY} page={null} />)
+    expect(await screen.findByText('Reading the label sizes…')).toBeInTheDocument()
+    rerender(<LabelQueuePrint body={BODY} page={null} sizeUnset />)
+    expect(await screen.findByText('Choose a label size first.')).toBeInTheDocument()
+    expect(screen.queryByRole('combobox', { name: 'Label queue' })).not.toBeInTheDocument()
   })
 })

@@ -2,7 +2,7 @@ import { http, HttpResponse } from 'msw'
 import { describe, expect, it } from 'vitest'
 import { LABEL_TEMPLATES } from '../mocks/features/filament'
 import { server } from '../mocks/server'
-import { fits, type LabelQueue, pageSizeOf, printLabels } from './labelPrinting'
+import { fits, labelProblem, type LabelQueue, pageSizeOf, printLabels } from './labelPrinting'
 
 const queue = (width_mm: number | null, height_mm: number | null): LabelQueue => ({
   name: 'zebra_2x1',
@@ -77,5 +77,30 @@ describe('printLabels (#7170)', () => {
     expect(url.search).toBe('?media_type=Thermal&darkness=20')
     expect(seen!.type).toBe('application/pdf')
     expect(seen!.body).toBe('%PDF-1.4\n%%EOF\n')
+  })
+})
+
+describe('the label-printing mock (#7170)', () => {
+  const pdf = new Blob(['%PDF-1.4\n%%EOF\n'], { type: 'application/pdf' })
+
+  it('answers 422 label_option_invalid for an option outside the PPD lists, as core does', async () => {
+    for (const options of [
+      { media_type: 'Fancy' as 'Saved', darkness: -1, print_rate: 'Default' },
+      { media_type: 'Saved' as const, darkness: 31, print_rate: 'Default' },
+      { media_type: 'Saved' as const, darkness: 0, print_rate: 'Default' },
+      { media_type: 'Saved' as const, darkness: -1, print_rate: '13' },
+      { media_type: 'Saved' as const, darkness: -1, print_rate: 'fast' },
+    ]) {
+      const cause = await printLabels('S-EDCDU03-2x1', pdf, options).then(
+        () => null,
+        (error: unknown) => error,
+      )
+      expect(labelProblem(cause)).toBe('label_option_invalid')
+    }
+  })
+
+  it('takes the PPD lists\' own values', async () => {
+    const job = await printLabels('S-EDCDU03-2x1', pdf, { media_type: 'Direct', darkness: 30, print_rate: '12' })
+    expect(job.queue).toBe('S-EDCDU03-2x1')
   })
 })

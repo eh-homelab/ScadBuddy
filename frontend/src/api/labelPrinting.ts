@@ -13,7 +13,8 @@ export interface LabelQueue {
   name: string
   info: string
   make_and_model: string
-  state: 'idle' | 'processing' | 'stopped'
+  /** Empty when CUPS gives no printer-state. */
+  state: 'idle' | 'processing' | 'stopped' | ''
   state_reasons: string[]
   /** CUPS's message for the queue, such as the zebra backend's "1.02 in labels are loaded; …". */
   state_message: string

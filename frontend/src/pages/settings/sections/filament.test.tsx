@@ -729,6 +729,22 @@ describe('Filament (#6262)', () => {
     await waitFor(() => expect(mockSettings().filament_label_server_url).toBe('http://cups.example.lan:631'))
   })
 
+  it('shows the alert when a person-only refusal answers the label print server save (#7170)', async () => {
+    server.use(
+      http.put('*/api/v1/settings', () =>
+        HttpResponse.json({ title: 'Forbidden', status: 403, detail: 'Only a person may change this setting.', reason: 'person_only' }, { status: 403, headers: { 'Content-Type': 'application/problem+json' } }),
+      ),
+    )
+    const { user } = renderSettingsSection(<Filament />, { route: '/settings/printing' })
+    await seeded()
+    const field = within(region('Filament')).getByLabelText('Label print server')
+    await user.clear(field)
+    await enter(user, field, 'http://cups.example.lan:631')
+    await user.click(within(region('Filament')).getByRole('button', { name: 'Save Filament' }))
+    expect(await within(region('Filament')).findByRole('alert')).toBeInTheDocument()
+    expect(mockSettings().filament_label_server_url).toBe('http://cups.cups.svc:8631')
+  })
+
   it('saves an empty label address as unset (#6955)', async () => {
     await api.putSettings({ filament_label_base_url: 'https://sb.example.com' })
     const { user } = renderSettingsSection(<Filament />, { route: '/settings/printing' })
