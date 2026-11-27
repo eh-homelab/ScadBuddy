@@ -622,3 +622,14 @@ From a signed-in browser on the Labels page, the queue list shows `S-EDCDU03-2x1
 4. **Review Focus.** Each line names its test and the task that owns it.
 5. **Proportion.** The plan holds signatures and test assertions; the only code block of a body
    is the CI step, which the tests do not determine.
+
+## Decisions made while building
+
+- B1 (2026-11-27, after the owner asked "Don't we use cups?"): labels print through the existing CUPS server (`deploy/cups/`, `http://cups.cups.svc:8631`), not as raw ZPL on port 9100 from core. CUPS already owns the Zebra: the label size check, the job order, the retries and a queue per stock. The API pod then needs no LAN path to the printer. A first raw-ZPL design and its Task 1 were dropped; this plan replaced them.
+- B2: the clusters PR (Task 7) and the prod check run after this PR merges. They are a change in another repository.
+- B3: the IPP codec's RFC 8010 examples are copied from the RFC text, never rebuilt from its structure. A first version had invented two of them.
+- B4: the CUPS client checks the queue name itself (`ValidQueue`), keeps a path in the server URL, always has a timeout (5 s for the list, 30 s for a job; zero means these defaults), never uses a proxy from the environment, follows no redirect, and refuses a reply to another request id.
+- B5: a stored server URL that breaks the rule gives 502 `label_server_unreachable` with a fixed message, never the stored value (it can hold a secret). Python and Go refuse the same URLs, including an empty `?` or `#`.
+- B6: CUPS refusing the queue list also answers 502 `label_print_refused`. A body past the bound is 413 `label_too_large`.
+- B7: the page picks the remembered queue when it fits the page, else the only queue that fits, else none (design R7). A picked queue always fits.
+- B8: the CI live check fails when `TestLiveCUPS` does not run, and reads every new ZPL byte. The optional README wording about the 1 mm fit was not changed: nothing in it is false.
