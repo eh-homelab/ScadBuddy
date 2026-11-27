@@ -1,7 +1,8 @@
 import { expect, test } from '@playwright/test'
 
 // #8062 — a station: the open tasks of one place, and a scan that answers one of them. The
-// msw seed (`src/mocks/features/tasks.ts`) holds a scan task at the Workshop that expects S-9.
+// msw seed (`src/mocks/features/tasks.ts`) holds a scan task at the Workshop (place L-1) that
+// expects S-9.
 
 const WORKSHOP = '62620003-0000-4000-8000-000000000001'
 

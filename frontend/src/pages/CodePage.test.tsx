@@ -52,6 +52,27 @@ describe('the code page', () => {
     expect(screen.queryByTestId('where')).toBeNull()
   })
 
+  it('waits for the task list before it opens the entity', async () => {
+    addTask({ id: 'scan-1', title: 'Check the box', schema: scanSchema })
+    const listTasks = api.listTasks.bind(api)
+    let release: () => void = () => undefined
+    const held = new Promise<void>((resolve) => {
+      release = resolve
+    })
+    vi.spyOn(api, 'listTasks').mockImplementationOnce(async (...args) => {
+      await held
+      return listTasks(...args)
+    })
+    render('/x/L-3')
+    expect(await screen.findByRole('status', { name: 'Looking up the code' })).toBeInTheDocument()
+    // The code's own lookup answers first; the page stays.
+    await new Promise((resolve) => setTimeout(resolve, 50))
+    expect(screen.queryByTestId('where')).toBeNull()
+    release()
+    expect(await screen.findByRole('heading', { name: 'Check the box' })).toBeInTheDocument()
+    expect(screen.queryByTestId('where')).toBeNull()
+  })
+
   it('lists several tasks with a link to each run', async () => {
     addTask({ id: 'scan-1', title: 'Check the box', run_id: 'run-a', schema: scanSchema })
     addTask({ id: 'scan-2', title: 'Dry the box', run_id: 'run-b', schema: scanSchema })

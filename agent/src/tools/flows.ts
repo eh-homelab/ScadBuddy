@@ -127,7 +127,8 @@ export const flowTools: Tool[] = [
       "a property may add `x-sb-widget` to draw a control: `scan` (a code; `expects` {kinds, codes} limits it, as in {kinds: ['spool']} or {codes: ['S-3']}), " +
       "`photo` or `file` (an attachment id), `entity` (with `kind` of library_file, location or spool), `weight` (grams) or `confirm` (a boolean); " +
       "a `context` item of one key may be a block: entity ('<kind>:<ref>'), text, image ({entity, attachment_id}), table ({columns, rows}), " +
-      'checklist (a list of texts) or expect ({weight_g, tolerance_g}); `assignee` names who the task is for and limits no one; ' +
+      'checklist (a list of texts) or expect ({weight_g, tolerance_g}); `place` is the code of the station that shows the task, ' +
+      "a location's code such as L-7 (l7 is stored as L-7); `assignee` names who the task is for and limits no one; " +
       'both with no limit unless `timeout_s` (at least 10 s; then a TimeoutError) sets one, and answered by a person; ' +
       "with people_only False the user's setting flow_answerers or the run's grant may also let an assistant answer, " +
       '`render(slug, params)` (returns {job_id, status, error}; status done, failed or cancelled), ' +

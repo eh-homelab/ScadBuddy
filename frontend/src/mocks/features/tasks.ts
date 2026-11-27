@@ -1,6 +1,5 @@
 import { HttpResponse, http } from 'msw'
 import { resolveCodeText } from './filament'
-import { L } from './filament/seed'
 import type { AnswerProblem, Task, TaskQuestion } from '../../api/types'
 
 /**
@@ -84,7 +83,8 @@ function defaults(): Task[] {
         required: ['spool'],
       },
       context: [{ text: 'Scan the gold spool, then put it on the shelf.' }],
-      place: L.WORKSHOP,
+      // A station's place is its location's code: the Workshop is L-1.
+      place: 'L-1',
       ui: null,
       expires_at: null,
       state: 'open',

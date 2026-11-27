@@ -431,7 +431,8 @@ same way, `vite.config.ts`).
   context blocks. `components/flows/widgets/` holds the controls of `x-sb-widget`
   (`ScanField`, `UploadField`, `LibraryField`, `Stepper`, `Segmented`); `lib/flowInputs.ts`
   reads `widget`, `expects` and `kind`, and `lib/scanMisfit.ts` says why a code does not fit.
-  `pages/StationPage.tsx` is `/station` and `/station/:place`, and `pages/CodePage.tsx` offers
+  `pages/StationPage.tsx` is `/station` and `/station/:place` (a location's id; it lists the
+  tasks whose place is that location's code, `L-7`), and `pages/CodePage.tsx` offers
   the task that waits for a scanned code before it opens the place or spool. The place's
   "Station for flow tasks" switch is in `pages/filament/LocationsTab.tsx`. e2e
   `e2e/flow-station.spec.ts`.

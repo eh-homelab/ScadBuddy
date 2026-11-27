@@ -24,7 +24,8 @@ export type Closed = { by: 'sent' | 'elsewhere'; at: string }
 /**
  * #8062 — a task's context, its time limit and its answer form, with no run page around
  * it: the run's card and the station page both draw it. `open` false leaves out the limit
- * and the form. `offer` hands a scanned code to the form's scan field.
+ * and the form. `offer` hands a scanned code to the form's scan field. A task with an
+ * `assignee` names who it is for; anyone may still answer it.
  */
 export function TaskPanel({
   task,
@@ -47,6 +48,7 @@ export function TaskPanel({
   const none = useRef<HTMLElement | null>(null)
   return (
     <>
+      {task.assignee && <p className="text-[12px] text-muted-foreground break-words">{`For ${task.assignee}`}</p>}
       <ContextBlocks items={task.context} />
       {open && (
         <>

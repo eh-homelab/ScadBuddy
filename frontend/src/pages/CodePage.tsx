@@ -34,7 +34,9 @@ export function CodePage() {
 
   const to = found.data ? (found.data.kind === 'location' ? `/filament/locations/${found.data.id}` : `/filament/spools/${found.data.id}`) : null
   const tasks = waiting.data ?? []
-  if (!found.loading && !waiting.loading && tasks.length > 0) {
+  // Both reads first: a task that waits for the code comes before the code's own page.
+  if (found.loading || waiting.loading) return <Skeleton role="status" aria-label="Looking up the code" className="m-4 h-8 w-48" />
+  if (tasks.length > 0) {
     const open = (word: string) => to && <Link to={to} className="text-sm underline">{`Open ${code}${word}`}</Link>
     const instead = open(' instead')
     // The field the code fits (the server's rule); the first scan field when the code did not resolve or fits none.
@@ -85,7 +87,6 @@ export function CodePage() {
     )
   }
   if (to) return <Navigate to={to} replace />
-  if (found.loading || waiting.loading) return <Skeleton role="status" aria-label="Looking up the code" className="m-4 h-8 w-48" />
 
   const unknown = found.error instanceof ApiError && found.error.status === 404
   const go = (event: FormEvent) => {

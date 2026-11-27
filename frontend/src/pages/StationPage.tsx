@@ -13,7 +13,7 @@ import { inputFields } from '../lib/flowInputs'
 import { misfit } from '../lib/scanMisfit'
 import { useAsync } from '../lib/useAsync'
 
-/** `tasks:<place>`: the topic a place's task changes are published on. */
+/** `tasks:<place>`: the topic a place's task changes are published on. A station's place is its location's code (`L-7`). */
 const placeTopic = (place: string) => `tasks:${place}`
 
 type Offer = ScanOffer & { taskId: string }
@@ -27,14 +27,14 @@ function scanFields(task: TaskQuestion) {
 const LIST_MAX = 200
 
 /**
- * #8062 (spec §6.3) — `/station/<place>`: the open tasks at one place, oldest first, for a
- * person standing at the bench. The scan field at the top keeps the focus. A code scanned
+ * #8062 (spec §6.3) — `/station/<location id>`: the open tasks whose place is that
+ * location's code (`L-7`), oldest first, for a person standing at the bench. The scan field at the top keeps the focus. A code scanned
  * there goes to the one task whose scan field expects it. The page is an ordinary signed-in
  * session, so each answer is the signed-in person's own. `/station` lists the stations.
  */
 export function StationPage() {
   const { place } = useParams()
-  return place ? <Station key={place} place={place} /> : <Stations />
+  return place ? <StationAt key={place} id={place} /> : <Stations />
 }
 
 function Stations() {
@@ -69,8 +69,21 @@ function Stations() {
   )
 }
 
-function Station({ place }: { place: string }) {
-  const where = useAsync(() => getLocation(place), [place])
+/** A task's place names the station by its code, so the location is read first. */
+function StationAt({ id }: { id: string }) {
+  const where = useAsync(() => getLocation(id), [id])
+  if (where.loading) return <Skeleton role="status" aria-label="Loading the station" className="m-4 h-8 w-48" />
+  if (!where.data) {
+    return (
+      <p role="alert" className="p-4 text-sm text-destructive">
+        The station could not be loaded. Try again.
+      </p>
+    )
+  }
+  return <Station name={where.data.name} place={where.data.code} />
+}
+
+function Station({ name, place }: { name: string; place: string }) {
   const tasks = useAsync(() => api.listTasks({ place, limit: LIST_MAX }), [place], [placeTopic(place)])
   const scan = useRef<HTMLInputElement>(null)
   const [code, setCode] = useState('')
@@ -79,6 +92,8 @@ function Station({ place }: { place: string }) {
   /** Tasks that wait for one scan: the person picks. */
   const [choices, setChoices] = useState<{ code: string; fits: { task: TaskQuestion; field: string }[] } | null>(null)
   const count = useRef(0)
+  /** Tasks answered here whose refresh has not landed: their form is closed. */
+  const [sent, setSent] = useState<ReadonlySet<string>>(new Set())
   const open = tasks.data ?? []
 
   // The scan field holds the focus: a task that goes (answered here or elsewhere) takes
@@ -134,7 +149,7 @@ function Station({ place }: { place: string }) {
 
   return (
     <div className="mx-auto flex w-full max-w-2xl flex-col gap-5 p-4">
-      <h1 className="text-2xl font-semibold break-words">{where.data?.name ?? 'Station'}</h1>
+      <h1 className="text-2xl font-semibold break-words">{name}</h1>
       <form onSubmit={(event) => void scanned(event)} className="flex flex-col gap-2">
         <Input
           ref={scan}
@@ -186,14 +201,21 @@ function Station({ place }: { place: string }) {
             <h2 className="text-lg font-semibold break-words">{task.title}</h2>
             <TaskPanel
               task={task}
-              open
+              open={!sent.has(task.id)}
               respond={async (send) => {
                 await send()
               }}
-              onClosed={() => undefined}
+              onClosed={(by) => {
+                if (by === 'sent') setSent((was) => new Set(was).add(task.id))
+              }}
               onSettled={() => tasks.refresh()}
               offer={offer?.taskId === task.id ? offer : undefined}
             />
+            {sent.has(task.id) && (
+              <p role="status" className="text-sm text-muted-foreground">
+                Answer sent.
+              </p>
+            )}
           </CardContent>
         </Card>
       ))}

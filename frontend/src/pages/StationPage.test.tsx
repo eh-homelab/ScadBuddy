@@ -2,6 +2,7 @@ import { screen, waitFor, within } from '@testing-library/react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { fakeRealtime } from '../lib/realtime.fake'
 import { L } from '../mocks/features/filament/seed'
+import { api } from '../api/client'
 import { addTask, setTask } from '../mocks/features/tasks'
 import { upsertLocation } from '../api/filament'
 import { renderPage } from '../test/utils'
@@ -16,22 +17,22 @@ const scanSchema = (expects: Record<string, unknown>) => ({
 })
 
 function seed() {
-  addTask({ id: 'st-2', title: 'Second job', place: L.SHELF_A, created_at: '2026-10-10T09:05:00Z' })
+  addTask({ id: 'st-2', title: 'Second job', place: 'L-2', created_at: '2026-10-10T09:05:00Z' })
   addTask({
     id: 'st-1',
     title: 'First job',
-    place: L.SHELF_A,
+    place: 'L-2',
     created_at: '2026-10-10T09:01:00Z',
     schema: scanSchema({ kinds: ['spool'] }),
   })
   addTask({
     id: 'st-3',
     title: 'Check the shelf',
-    place: L.SHELF_A,
+    place: 'L-2',
     created_at: '2026-10-10T09:09:00Z',
     schema: scanSchema({ kinds: ['location'] }),
   })
-  addTask({ id: 'other', title: 'Elsewhere job', place: L.DRY_BOX })
+  addTask({ id: 'other', title: 'Elsewhere job', place: 'L-3' })
 }
 
 const station = () => renderPage(<StationPage />, { route: `/station/${L.SHELF_A}`, path: '/station/:place?' })
@@ -61,9 +62,9 @@ describe('the station page', () => {
     station()
     const scan = await screen.findByRole('textbox', { name: 'Scan a code' })
     await waitFor(() => expect(scan).toHaveFocus())
-    expect(realtime.following()).toContain(`tasks:${L.SHELF_A}`)
+    expect(realtime.following()).toContain('tasks:L-2')
     setTask('st-2', { state: 'answered' })
-    await realtime.signal(`tasks:${L.SHELF_A}`, 'task.changed')
+    await realtime.signal('tasks:L-2', 'task.changed')
     await waitFor(() => expect(screen.queryByRole('region', { name: 'Second job' })).toBeNull())
     expect(screen.getByRole('region', { name: 'First job' })).toBeInTheDocument()
     expect(screen.getByRole('textbox', { name: 'Scan a code' })).toHaveFocus()
@@ -98,7 +99,7 @@ describe('the station page', () => {
   })
 
   it('matches a code the schema wrote in lower case', async () => {
-    addTask({ id: 'lc', title: 'Lower case', place: L.SHELF_A, schema: scanSchema({ codes: ['l-2'] }) })
+    addTask({ id: 'lc', title: 'Lower case', place: 'L-2', schema: scanSchema({ codes: ['l-2'] }) })
     const { user } = station()
     await user.type(await screen.findByRole('textbox', { name: 'Scan a code' }), 'L-2{Enter}')
     const field = within(await screen.findByRole('region', { name: 'Lower case' })).getByRole('textbox', { name: /Spool/ })
@@ -106,7 +107,7 @@ describe('the station page', () => {
   })
 
   it('takes a field that names both a kind and a code by either', async () => {
-    addTask({ id: 'both', title: 'Either', place: L.SHELF_A, schema: scanSchema({ kinds: ['spool'], codes: ['L-2'] }) })
+    addTask({ id: 'both', title: 'Either', place: 'L-2', schema: scanSchema({ kinds: ['spool'], codes: ['L-2'] }) })
     const { user } = station()
     const scan = await screen.findByRole('textbox', { name: 'Scan a code' })
     await user.type(scan, 'L-2{Enter}')
@@ -120,7 +121,7 @@ describe('the station page', () => {
     addTask({
       id: 'ent',
       title: 'Pick a spool',
-      place: L.SHELF_A,
+      place: 'L-2',
       schema: { type: 'object', properties: { spool: { type: 'string', title: 'Spool', 'x-sb-widget': 'entity', kind: 'spool' } } },
     })
     const { user } = station()
@@ -129,14 +130,39 @@ describe('the station page', () => {
   })
 
   it('lets the person pick when several tasks wait for a code', async () => {
-    addTask({ id: 'a', title: 'Job A', place: L.SHELF_A, schema: scanSchema({ kinds: ['spool'] }) })
-    addTask({ id: 'b', title: 'Job B', place: L.SHELF_A, schema: scanSchema({ kinds: ['spool'] }) })
+    addTask({ id: 'a', title: 'Job A', place: 'L-2', schema: scanSchema({ kinds: ['spool'] }) })
+    addTask({ id: 'b', title: 'Job B', place: 'L-2', schema: scanSchema({ kinds: ['spool'] }) })
     const { user } = station()
     await user.type(await screen.findByRole('textbox', { name: 'Scan a code' }), 'S-1{Enter}')
     await user.click(await screen.findByRole('button', { name: 'Job B' }))
     const field = within(screen.getByRole('region', { name: 'Job B' })).getByRole('textbox', { name: /Spool/ })
     await waitFor(() => expect(field).toHaveValue('S-1'))
     expect(within(screen.getByRole('region', { name: 'Job A' })).getByRole('textbox', { name: /Spool/ })).toHaveValue('')
+  })
+
+  it('lists the tasks whose place is the location code, not its id', async () => {
+    addTask({ id: 'by-code', title: 'By code', place: 'L-2' })
+    addTask({ id: 'by-id', title: 'By id', place: L.SHELF_A })
+    station()
+    expect(await screen.findByRole('region', { name: 'By code' })).toBeInTheDocument()
+    expect(screen.queryByRole('region', { name: 'By id' })).toBeNull()
+  })
+
+  it('names who a task is for', async () => {
+    addTask({ id: 'for-jo', title: 'For Jo', place: 'L-2', assignee: 'browser:jo' })
+    station()
+    expect(within(await screen.findByRole('region', { name: 'For Jo' })).getByText('For browser:jo')).toBeInTheDocument()
+  })
+
+  it('closes the form of a task once its answer is sent, before the list is read again', async () => {
+    seed()
+    const { user } = station()
+    const task = within(await screen.findByRole('region', { name: 'Second job' }))
+    const held = vi.spyOn(api, 'listTasks').mockImplementation(() => new Promise(() => undefined))
+    await user.click(task.getByRole('button', { name: 'Answer' }))
+    expect(await task.findByRole('status')).toHaveTextContent('Answer sent.')
+    expect(task.queryByRole('button', { name: 'Answer' })).toBeNull()
+    held.mockRestore()
   })
 
   it('says what to do when the place has no tasks', async () => {
