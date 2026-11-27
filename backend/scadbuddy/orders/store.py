@@ -2229,6 +2229,9 @@ class OrderStore:
             if run is None:
                 return None
             if run["last_start"] is None:
+                # No unnamed start has a time, so there is no window to read in. Every
+                # writer of `result.lan` sets `started_at` (`LanStarted.started_at` is
+                # required), so this holds only for a row written by hand (#8316).
                 return str(run["output_id"]), []
             subject = PrintSubject.from_run_subject(run["output_id"]).key
             rows = c.execute(

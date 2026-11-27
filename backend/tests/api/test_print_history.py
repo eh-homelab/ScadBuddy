@@ -1333,6 +1333,30 @@ def test_the_list_links_a_native_lan_print_by_its_sliced_file_s_hash(
     assert client.get("/api/v1/prints/40").status_code == 200
 
 
+@respx.mock
+def test_a_scan_with_two_archives_of_one_start_records_neither(
+    client: TestClient, model: str, pg_conninfo: str
+) -> None:
+    """#8316: a failed LAN print printed again from the printer's own storage makes a
+    second archive of the same file. The file name cannot tell which is the start's
+    print, so the scan records neither, as the orders read does (#8306)."""
+    configure(client)
+    output_id = make_output(client, model)
+    native_slice(client, pg_conninfo, output_id)
+    recent_lan_run(client, PrintSubject.output(output_id), model)
+    mock_archive(40, filename="scadbuddy-5661abcd-p1.3mf")
+    mock_archive(41, filename="scadbuddy-5661abcd-p1.3mf")
+    mock_bambuddy_lists(
+        {"id": 40, "printer_id": 1, "status": "failed", "content_hash": NATIVE_HASH},
+        {"id": 41, "printer_id": 1, "status": "completed", "content_hash": NATIVE_HASH},
+    )
+
+    assert client.get("/api/v1/prints").status_code == 200
+
+    assert asyncio.run(state(client).print_links.lan_start(40)) is None
+    assert asyncio.run(state(client).print_links.lan_start(41)) is None
+
+
 def test_a_named_lan_start_is_not_looked_for_again(client: TestClient, model: str) -> None:
     """#5724: once an archive names it, a start is not looked for again."""
     configure(client)
