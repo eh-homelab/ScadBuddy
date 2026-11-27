@@ -165,8 +165,8 @@ async def _view(tasks: TasksComponent, flows: Flows, task_id: str) -> TaskView:
     if task.answered_by is not None and task.answered_by.startswith(("session:", "token:")):
         answers = [
             d
-            for d in await flows.store.answers_of(task.run_id)
-            if d.call_id == task.id and d.responder == task.answered_by
+            for d in await flows.store.answers_of_call(task.run_id, task.id)
+            if d.responder == task.answered_by
         ]
         view.admitted_by = answers[-1].admitted_by if answers else None
     return view

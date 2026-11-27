@@ -1,11 +1,17 @@
-// Package plugins is the routes of backend/scadbuddy/api/crud_agent_plugins.py (area
-// plugins) that neither seal nor open a value with the KEK: a plugin's delete, and a
-// sign-in's mark and forget. Statement for statement, with the warm-evict NOTIFY in the
-// transaction where Python sends it.
+// Package plugins is the agent's remote plugins and their OAuth sign-ins:
+// backend/scadbuddy/api/crud_agent_plugins.py, statement for statement, with the warm-evict
+// NOTIFY in the transaction where Python sends it.
 //
-// Still Python's, as they seal or open with the KEK or answer whether the KEK opens a row
-// (opens): the plugin reads, create, update, tool-access, reveal and open-enabled, and the
-// sign-in flows, the grant's store, open and refresh, and stored-secrets.
+// Area plugins is the routes that neither seal nor open a value with the KEK: a plugin's
+// delete, and a sign-in's mark and forget. Area remote-plugins is every route of the file:
+// those, the plugin reads, create, update, tool-access, reveal and open-enabled, and the
+// sign-in flows, the grant's store, open and refresh, and stored-secrets. These seal and
+// open with the KEK under the agent's own AADs (agent_data/plugins.py, aad.go), so a row
+// Python or Go writes opens on the other. A row sealed under the previous KEK opens too,
+// during a rotation; Python's start (agent_data/rotation.py) re-wraps it.
+//
+// Only a route's own opened value carries a plaintext: no log record, span or refusal
+// holds a token, a secret, a sealed value or an OAuth state.
 package plugins
 
 import (
@@ -22,19 +28,50 @@ import (
 )
 
 const (
+	urlMax       = 2048
 	textMax      = 2048
+	tokenMax     = 16384
+	byMax        = 600
+	toolMax      = 128
 	bodyBytesMax = 8 * 1024 * 1024 // api/limits.py MAX_TEXT_BODY_BYTES
 )
 
 // namePattern is registry.ts PLUGIN_NAME_RE.
 var namePattern = regexp.MustCompile(`^[a-z][a-z0-9-]{0,30}[a-z0-9]$`)
 
-// Plugins is the area's routes Go has.
-type Plugins struct{ Pool *pgxpool.Pool }
+// Plugins is the areas' routes.
+type Plugins struct {
+	Pool *pgxpool.Pool
+	Keys *seal.Keys
+}
 
 // Areas are the package's routes by area name.
-func Areas(pool *pgxpool.Pool, _ *seal.Keys) map[string][]crud.Route {
-	return map[string][]crud.Route{"plugins": (&Plugins{Pool: pool}).Routes()}
+func Areas(pool *pgxpool.Pool, keys *seal.Keys) map[string][]crud.Route {
+	s := &Plugins{Pool: pool, Keys: keys}
+	return map[string][]crud.Route{"plugins": s.Routes(), "remote-plugins": s.AllRoutes()}
+}
+
+// AllRoutes are every route of crud_agent_plugins.py.
+func (s *Plugins) AllRoutes() []crud.Route {
+	post := func(path string, h crud.Handler, status int) crud.Route {
+		return crud.Route{Method: "POST", Path: path, Handle: h, MaxBody: bodyBytesMax, Status: status}
+	}
+	return append(s.Routes(),
+		crud.Route{Method: "GET", Path: "/plugins", Handle: s.list},
+		crud.Route{Method: "GET", Path: "/plugins/{name}", Handle: s.one},
+		post("/plugins", s.create, http.StatusCreated),
+		crud.Route{Method: "POST", Path: "/plugins/open-enabled", Handle: s.openEnabled},
+		post("/plugins/{name}/update", s.update, 0),
+		post("/plugins/{name}/tool-access", s.toolAccess, 0),
+		crud.Route{Method: "POST", Path: "/plugins/{name}/reveal", Handle: s.reveal},
+		post("/plugin-oauth/flows", s.flowStart, http.StatusCreated),
+		post("/plugin-oauth/flows/authorize", s.flowAuthorize, 0),
+		post("/plugin-oauth/flows/take", s.flowTake, 0),
+		post("/plugin-oauth/grants", s.grantStore, 0),
+		post("/plugin-oauth/grants/{plugin}/open", s.grantOpen, 0),
+		post("/plugin-oauth/grants/{plugin}/refreshed", s.grantRefreshed, 0),
+		crud.Route{Method: "POST", Path: "/plugin-oauth/stored-secrets", Handle: s.storedSecrets},
+	)
 }
 
 // Routes are the plugins area's routes that need no KEK.

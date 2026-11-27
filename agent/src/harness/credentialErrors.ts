@@ -1,6 +1,7 @@
 import type { SDKAssistantMessageError } from '@anthropic-ai/claude-agent-sdk'
 import type { Credential } from '../credentials.js'
 import { assertGatewayHostAllowed, type Resolver, systemResolver } from '../http/egress.js'
+import { IANA_ZONE_NAMES } from './ianaZoneNames.js'
 
 // Why a query failed, per credential (#1093). Claude Code reports a failed
 // model request three ways, all measured against test/support/fakeAnthropic.ts
@@ -192,10 +193,9 @@ function zoneFormat(zone: string): Intl.DateTimeFormat | undefined {
       minute: 'numeric',
       second: 'numeric',
     })
-    // ICU reads a name in any case; Go and Python read it only as written.
-    const resolved = fmt.resolvedOptions().timeZone
-    const wrongCase = resolved !== zone && resolved.toLowerCase() === zone.toLowerCase()
-    return wrongCase ? undefined : fmt
+    // ICU reads a name in any case and may answer another ID for it; Go and Python
+    // read it only as written. So the name must be ICU's own ID or a known exact spelling.
+    return fmt.resolvedOptions().timeZone === zone || IANA_ZONE_NAMES.has(zone) ? fmt : undefined
   } catch {
     return undefined
   }
@@ -230,7 +230,7 @@ function zoned(fmt: Intl.DateTimeFormat, year: number, month: number, day: numbe
  * The reset a rate-limited turn's text names (#4107), as the next such time after
  * `now` (epoch ms): a time alone is today's or tomorrow's, a date this year's or,
  * across the new year, next year's. Undefined when the text names none, or one that
- * is not a time; the caller then keeps the default cooldown. A classic turn's text is
+ * is not a time; the caller then keeps the default cooldown. A session turn's text is
  * Claude Code's, the same as a durable segment's result, so it names the reset an
  * OAuth key's probe cannot ask for (`probeCredential`): measured on Claude Code 2.1.296,
  * an OAuth key's 429 with `anthropic-ratelimit-unified-status: rejected` ends in

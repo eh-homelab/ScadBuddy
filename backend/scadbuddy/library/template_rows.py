@@ -3,7 +3,7 @@
 
 ``model.json`` in git stays each template's record. A row is only ever written from the
 template's files, so any row can be rebuilt from the tree and dropping the table loses
-nothing (spec §7.1). Synchronous, like `OutputIndex`: callers on the loop use a thread.
+nothing (spec §7.1). Synchronous, like `OutputRows`: callers on the loop use a thread.
 """
 
 from __future__ import annotations

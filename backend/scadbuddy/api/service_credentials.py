@@ -43,6 +43,9 @@ class ServiceCredentialView(BaseModel):
     #: The pod a `k8s` credential is bound to.
     pod_name: str | None
     pod_uid: str | None
+    #: The machine a `fleet-rotator` credential is bound to: its proof file was
+    #: `fleet-rotator.<machine>`.
+    machine: str | None
     #: Live: neither revoked nor expired.
     live: bool
 

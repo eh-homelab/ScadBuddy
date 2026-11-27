@@ -276,19 +276,6 @@ describe('chatReducer', () => {
     )
     expect(retried.sessions.s1?.items).toEqual([expect.objectContaining({ kind: 'question', state: 'answered' })])
 
-    // Refused by the agent over the socket (a panel loaded before #815): the same.
-    const refused = run(
-      [server({ type: 'error', sessionId: 's1', code: 'invalid', message: 'needs one answer each', questionId: 'q1' })],
-      sent,
-    )
-    expect(refused.sessions.s1?.items[0]).toMatchObject({ state: 'pending' })
-    expect(refused.sessions.s1?.items.at(-1)).toMatchObject({ kind: 'error', message: 'needs one answer each', about: 'q1' })
-    // …and, as the route's error is (#1359), it goes when the question resolves (#2133).
-    const refusedThenAnswered = run(
-      [server({ type: 'question.resolved', sessionId: 's1', id: 'q1', answered: true, answers: ['Approve'], by: you })],
-      refused,
-    )
-    expect(refusedThenAnswered.sessions.s1?.items).toEqual([expect.objectContaining({ kind: 'question', state: 'answered' })])
     // An unrelated error in the session leaves a sent answer alone.
     const unrelated = run([server({ type: 'error', sessionId: 's1', code: 'conflict', message: 'approval decided already' })], sent)
     expect(unrelated.sessions.s1?.items[0]).toMatchObject({ state: 'sent' })

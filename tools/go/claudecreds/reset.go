@@ -3,6 +3,8 @@
 package claudecreds
 
 import (
+	"os"
+	"path/filepath"
 	"regexp"
 	"slices"
 	"strconv"
@@ -105,7 +107,46 @@ func location(name string) (*time.Location, bool) {
 		return time.UTC, true
 	}
 	loc, err := time.LoadLocation(name)
-	return loc, err == nil
+	if err != nil || !writtenAsFiled(name) {
+		return nil, false
+	}
+	return loc, true
+}
+
+// zoneDirs are the directories time.LoadLocation reads before its embedded data
+// (zoneinfo_unix.go's platformZoneSources, which darwin uses too; iOS has none). It
+// reads $ZONEINFO before them; writtenAsFiled checks that too.
+var zoneDirs = []string{"/usr/share/zoneinfo", "/usr/share/lib/zoneinfo", "/usr/lib/locale/TZ", "/etc/zoneinfo"}
+
+// writtenAsFiled reports whether no zone directory holds name in another case. On a
+// case-insensitive filesystem (macOS) time.LoadLocation opens "america/new_york" from
+// /usr/share/zoneinfo, which Linux, the embedded data and the other two ports refuse
+// (#8023). It reads each directory's entries, so the answer is the same on any
+// filesystem.
+func writtenAsFiled(name string) bool {
+	dirs := zoneDirs
+	// time.LoadLocation reads $ZONEINFO once per process; this reads it on each call, so
+	// the test can point it at a stand-in. Nothing here changes it after start (#8082).
+	if env := os.Getenv("ZONEINFO"); env != "" {
+		// A zip file there is read by exact name; os.ReadDir fails on it and skips it.
+		dirs = append([]string{env}, dirs...)
+	}
+	for _, dir := range dirs {
+		for _, part := range strings.Split(name, "/") {
+			entries, err := os.ReadDir(dir)
+			if err != nil {
+				break
+			}
+			if !slices.ContainsFunc(entries, func(e os.DirEntry) bool { return e.Name() == part }) {
+				if slices.ContainsFunc(entries, func(e os.DirEntry) bool { return strings.EqualFold(e.Name(), part) }) {
+					return false
+				}
+				break
+			}
+			dir = filepath.Join(dir, part)
+		}
+	}
+	return true
 }
 
 // zoned returns that date and wall clock time in loc, in UTC. It returns false when

@@ -9,6 +9,7 @@ from fastapi.testclient import TestClient
 from scadbuddy.activity.index import ActivityIndex
 from scadbuddy.api.deps import get_render
 from tests.api.test_arrange_api import Arranger
+from tests.conftest import PgPool
 from tests.support.arrange import saved_output
 
 
@@ -88,9 +89,9 @@ def test_a_failing_ingest_is_counted_not_lost(client: TestClient) -> None:
 
 
 def test_an_arrange_is_attributed_to_who_started_it(
-    client: TestClient, app: FastAPI, activity_index: ActivityIndex, tmp_path: Path
+    client: TestClient, app: FastAPI, activity_index: ActivityIndex, tmp_path: Path, pg_pool: PgPool
 ) -> None:
-    _, meta, written = asyncio.run(saved_output(tmp_path))
+    _, meta, written = asyncio.run(saved_output(tmp_path, pg_pool))
     arranger = Arranger()
     app.dependency_overrides[get_render] = lambda: arranger
     response = client.post(

@@ -18,6 +18,7 @@ from tests.api.test_analyzers import _run_library, bambuddy_routes, library_rout
 from tests.api.test_arrange_api import Arranger, two_colour_3mf
 from tests.api.test_print_library import library_file
 from tests.api.test_send import configure
+from tests.conftest import PgPool
 from tests.support.arrange import saved_output
 
 #: two_colour_3mf's boxes: 12 triangles each.
@@ -105,10 +106,10 @@ def test_no_override_goes_past_its_ceiling(
 
 @respx.mock
 def test_an_arrange_reads_within_its_own_budget(
-    client: TestClient, app: FastAPI, tmp_path: Path
+    client: TestClient, app: FastAPI, tmp_path: Path, pg_pool: PgPool
 ) -> None:
     configure(client)
-    asyncio.run(saved_output(tmp_path))  # the template the result is filed under
+    asyncio.run(saved_output(tmp_path, pg_pool))  # the template the result is filed under
     _hashed(88, tmp_path)
     arranger = Arranger()
     app.dependency_overrides[get_render] = lambda: arranger

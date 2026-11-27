@@ -50,7 +50,7 @@ export type PackageServers = {
   plugins: HarnessPlugin[]
   /** Each of `plugins`, in order: its package and server, whose ai_access source the seam reads per call (access/live.ts). */
   servers: { name: string; pkg: string; server: string }[]
-  /** The servers known and switched off (#4757 final review M2), refused in a classic turn's words rather than unknown. */
+  /** The servers known and switched off (#4757 final review M2), refused in a session turn's words rather than unknown. */
   off?: { name: string; pkg: string; server: string }[]
   /** Each server's `pluginEndpoint` (its declared URL and header), in `plugins` order. */
   endpoints?: PluginEndpoint[]
@@ -117,7 +117,7 @@ export function collidingServerNames(loaded: readonly LoadedPackage[]): Map<stri
 }
 
 /**
- * The local (stdio) servers Claude Code starts for a classic turn's allowed packages, with
+ * The local (stdio) servers Claude Code starts for a session turn's allowed packages, with
  * the names their tools carry, leaving out those whose names another package server
  * carries (they are left out of the copies too, #4757).
  */

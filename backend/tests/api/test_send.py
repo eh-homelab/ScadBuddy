@@ -6,6 +6,7 @@ import hashlib
 import io
 import json
 import zipfile
+from pathlib import Path
 from typing import Any
 from xml.etree import ElementTree as ET
 
@@ -21,10 +22,11 @@ from scadbuddy.bambuddy.uploads import BambuddyUploadStore, LibraryCopy
 from scadbuddy.core.paths import DataPaths
 from scadbuddy.render.bambu3mf import write_bambu_3mf
 from scadbuddy.render.split import ColourPart
-from tests.api.conftest import files_only, wait_for_job
+from tests.api.conftest import wait_for_job
 from tests.conftest import wait_for_span
 from tests.support.operations import press
 from tests.support.printers import linked_printer
+from tests.support.saved_outputs import rewrite_model
 
 BASE = "https://bambuddy.test"
 API = f"{BASE}/api/v1"
@@ -194,13 +196,8 @@ def test_library_mode_uploads_to_the_configured_folder_and_records_the_id(
     assert request.headers["X-API-Key"] == "s3cret"
     assert b"demo-elan.3mf" in request.content
 
-    # Recorded in Postgres, not in meta.json (#455)...
-    meta = json.loads(
-        (paths.output_dir(model, output_id) / "meta.json").read_text(encoding="utf-8")
-    )
-    assert "library_files" not in meta
-
-    # ...and the detail route reports it, so the UI can deep-link without re-sending.
+    # Recorded in Postgres (#455), and the detail route reports it, so the UI can
+    # deep-link without re-sending.
     rows = client.get(f"/api/v1/outputs/{output_id}").json()["library_files"]
     assert [(row["id"], row["folder_id"]) for row in rows] == [(41, 2)]
 
@@ -441,6 +438,16 @@ def test_an_unknown_printer_model_still_uploads_on_the_default_plate(
     assert [float(v) for v in (item.get("transform") or "").split()][9:11] == [128.0, 128.0]
 
 
+def _too_big(path: Path, model: str) -> None:
+    """A 3MF 200 mm across, which fits no A1 mini."""
+    write_bambu_3mf(
+        [ColourPart(1, "Color 1", "#FF0000", trimesh.creation.box(extents=(200, 200, 4)))],
+        path,
+        thumbnails=None,
+        model_name=model,
+    )
+
+
 @pytest.mark.requires_postgres
 @respx.mock
 def test_a_model_too_big_for_the_printer_is_refused_before_the_upload(
@@ -448,15 +455,9 @@ def test_a_model_too_big_for_the_printer_is_refused_before_the_upload(
 ) -> None:
     configure(client, printer_id=1)
     plate_routes(printer_id=1, model="A1 mini")
-    files_only(client)
     output_id = make_output(client, model)
     # 200 mm across does not fit an A1 mini's 180 mm bed.
-    write_bambu_3mf(
-        [ColourPart(1, "Color 1", "#FF0000", trimesh.creation.box(extents=(200, 200, 4)))],
-        paths.output_dir(model, output_id) / "model.3mf",
-        thumbnails=None,
-        model_name=model,
-    )
+    rewrite_model(client, output_id, lambda path: _too_big(path, model))
     upload = upload_route()
 
     response = client.post(
@@ -534,7 +535,6 @@ def test_a_refused_re_send_leaves_the_previous_file_in_place(
         )
     )
     configure(client, printer_id=1)
-    files_only(client)
     output_id = make_output(client, model)
     upload_route()
     assert (
@@ -546,12 +546,7 @@ def test_a_refused_re_send_leaves_the_previous_file_in_place(
 
     delete = respx.delete(f"{API}/library/files/41").mock(return_value=httpx.Response(200, json={}))
     # Same output, but now aimed at a printer it cannot possibly fit on.
-    write_bambu_3mf(
-        [ColourPart(1, "Color 1", "#FF0000", trimesh.creation.box(extents=(200, 200, 4)))],
-        paths.output_dir(model, output_id) / "model.3mf",
-        thumbnails=None,
-        model_name=model,
-    )
+    rewrite_model(client, output_id, lambda path: _too_big(path, model))
     configure(client, printer_id=2)
 
     response = client.post(

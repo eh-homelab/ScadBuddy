@@ -66,6 +66,7 @@ export const PRINTERS_NOW: PrinterNow[] = [
       run_id: 'run-luna',
       archive_id: 37,
       matched_by: 'queue_item',
+      plate: 1,
     },
     // #3742 — ScadBuddy's own picture of its job.
     picture: '/api/v1/outputs/luna-0001/thumbnail',

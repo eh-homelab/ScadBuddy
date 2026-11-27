@@ -46,7 +46,7 @@ from scadbuddy.bambuddy.print_run import RunRoute
 from scadbuddy.bambuddy.resolver import DEFAULT_BED, PRINTER_MODEL, PrintChoices
 from scadbuddy.core.problems import ApiError
 from scadbuddy.filament.presets import preset_for
-from scadbuddy.library.outputs import MODEL_NAME, OutputMeta, OutputStore
+from scadbuddy.library.outputs import OutputMeta, OutputStore
 from scadbuddy.library.settings_store import ModelPrintChoices, StoredSettings
 from scadbuddy.print_library.reads import LibraryReads, served_reads
 from scadbuddy.render.bambu3mf import plates_of
@@ -83,11 +83,11 @@ async def gather_context(
     trays: Callable[[], Awaitable[FilamentOptions | None]] | None = None,
     refused: str | None = None,
     reads: SbRows | None = None,
-    stack: AsyncExitStack | None = None,
+    stack: AsyncExitStack,
 ) -> AnalysisContext:
     """``stack`` holds the output's 3MF (`AnalysisContext.model_3mf`) while the caller
     runs the analyzers: the model blob's temporary file, removed when the caller closes
-    it (#7256). Without one the 3MF is the output's NFS file.
+    it (#7256, #7257).
 
     ``library_file_id`` is one of the output's copies in Bambuddy's library (#316):
     the plate's filament slots are read off an uploaded file. ``remembered`` is what the
@@ -169,20 +169,10 @@ async def gather_context(
     return context
 
 
-async def _model_path(
-    outputs: OutputStore, meta: OutputMeta, stack: AsyncExitStack | None
-) -> Path | None:
-    """The output's 3MF as a path the analyzers read: with ``stack``, the model blob's
-    temporary file (removed when the caller closes ``stack``), else the NFS file
-    (#7256)."""
-    if stack is not None:
-        return await stack.enter_async_context(outputs.local_role(meta.id, "model"))
-    return await asyncio.to_thread(_model_file, outputs, meta)
-
-
-def _model_file(outputs: OutputStore, meta: OutputMeta) -> Path | None:
-    path = outputs.directory(meta.id) / MODEL_NAME
-    return path if path.is_file() else None
+async def _model_path(outputs: OutputStore, meta: OutputMeta, stack: AsyncExitStack) -> Path | None:
+    """The output's 3MF as a path the analyzers read: the model blob's temporary file,
+    removed when the caller closes ``stack`` (#7256, #7257)."""
+    return await stack.enter_async_context(outputs.local_role(meta.id, "model"))
 
 
 async def _read_geometry(context: AnalysisContext, outputs: OutputStore, meta: OutputMeta) -> None:

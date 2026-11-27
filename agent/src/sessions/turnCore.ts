@@ -215,7 +215,7 @@ export class CoreTurn {
   readonly #served: WarmEntry[] = []
   /** The model requests of the turn's stream, priced at the table as they go (#991). */
   readonly #unpriced = new UnpricedSpend()
-  /** What the session's own WebFetch model calls cost this turn (classicBuiltinServer, through the slot). */
+  /** What the session's own WebFetch model calls cost this turn (sessionBuiltinServer, through the slot). */
   readonly #nested = { usd: 0 }
   /** What the credential gateway metered for the process this turn (through the slot, turnRunner.ts `onSpend`). */
   readonly #metered = { usd: 0 }
@@ -519,7 +519,7 @@ export type TurnTally = {
 }
 
 /**
- * The end of a turn as a classic turn writes it (manager.ts `finish`), from how its stream
+ * The end of a turn as a session turn writes it (manager.ts `finish`), from how its stream
  * ended. `stopped` is why it was aborted, when it was; `interrupted` the `interrupted`
  * error's message then.
  */
