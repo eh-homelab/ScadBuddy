@@ -215,15 +215,41 @@ func TestAPublishIsIndexedAsPythonIndexesAPiece(t *testing.T) {
 		}
 	}
 	// It reads back as the blob's one file.
-	read, found, err := h.blobs.ReadFile(ctx, "plugin-mirror-x", "file")
+	read, found, err := h.blobs.ReadFile(ctx, "plugin-mirror-x", "file", 1<<20)
 	if err != nil || !found || !bytes.Equal(read, data) {
 		t.Fatal(found, err, len(read))
 	}
-	if _, found, err := h.blobs.ReadFile(ctx, "plugin-mirror-x", "other"); err != nil || found {
+	if _, found, err := h.blobs.ReadFile(ctx, "plugin-mirror-x", "other", 1<<20); err != nil || found {
 		t.Fatal(found, err)
 	}
 	if held, err := h.blobs.Claim(ctx, "plugin-mirror-x"); err != nil || !held {
 		t.Fatal(held, err)
+	}
+}
+
+// ReadFile holds a blob in memory, so a file past the caller's bound is refused, and so is a
+// stored zip too large to hold such a file, before its bytes are read.
+func TestReadFileRefusesAFilePastItsBound(t *testing.T) {
+	h := newHarness(t)
+	ctx := context.Background()
+	data := bytes.Repeat([]byte("x"), 1000)
+	if err := h.publish("plugin-mirror-big", data); err != nil {
+		t.Fatal(err)
+	}
+	if read, found, err := h.blobs.ReadFile(ctx, "plugin-mirror-big", "file", 1000); err != nil || !found || !bytes.Equal(read, data) {
+		t.Fatal(found, err, len(read))
+	}
+	if _, found, err := h.blobs.ReadFile(ctx, "plugin-mirror-big", "file", 999); !errors.Is(err, ErrTooLarge) || found {
+		t.Fatal(found, err)
+	}
+	// A row whose stored zip is far larger than the bound allows: refused from the row alone.
+	h.insertRow("plugin-mirror-huge", sum([]byte("x")), "s3", "t/piece/huge", 10<<20)
+	h.putObject("t/piece/huge", []byte("x"))
+	if _, found, err := h.blobs.ReadFile(ctx, "plugin-mirror-huge", "file", 1000); !errors.Is(err, ErrTooLarge) || found {
+		t.Fatal(found, err)
+	}
+	if got := h.blobRow("plugin-mirror-huge"); got["key"] != "plugin-mirror-huge" {
+		t.Fatal("a refused read forgot the row", got)
 	}
 }
 
@@ -342,7 +368,7 @@ func TestAReadOfALostOrAlteredObjectForgetsTheRow(t *testing.T) {
 			t.Fatal(err)
 		}
 		spoil(h.blobRow(key)["backend_id"].(string))
-		if data, found, err := h.blobs.ReadFile(ctx, key, "file"); err != nil || found {
+		if data, found, err := h.blobs.ReadFile(ctx, key, "file", 1<<20); err != nil || found {
 			t.Fatal(name, data, found, err)
 		}
 		if got := h.blobRow(key); got != nil {
@@ -350,11 +376,11 @@ func TestAReadOfALostOrAlteredObjectForgetsTheRow(t *testing.T) {
 		}
 	}
 	// No row, and a row of another backend, which stays: not found.
-	if _, found, err := h.blobs.ReadFile(ctx, "plugin-mirror-none", "file"); err != nil || found {
+	if _, found, err := h.blobs.ReadFile(ctx, "plugin-mirror-none", "file", 1<<20); err != nil || found {
 		t.Fatal(found, err)
 	}
 	h.insertRow("plugin-mirror-bb", sum([]byte("b")), "bambuddy", "7", 1)
-	if _, found, err := h.blobs.ReadFile(ctx, "plugin-mirror-bb", "file"); err != nil || found {
+	if _, found, err := h.blobs.ReadFile(ctx, "plugin-mirror-bb", "file", 1<<20); err != nil || found {
 		t.Fatal(found, err)
 	}
 	if h.blobRow("plugin-mirror-bb") == nil {
@@ -376,7 +402,7 @@ func TestOnlyTheS3StoreServesTheCallsInProcess(t *testing.T) {
 	if err := h.publish("k", []byte("x")); !refused(err) {
 		t.Error(err)
 	}
-	if _, _, err := h.blobs.ReadFile(ctx, "k", "file"); !refused(err) {
+	if _, _, err := h.blobs.ReadFile(ctx, "k", "file", 1<<20); !refused(err) {
 		t.Error(err)
 	}
 }

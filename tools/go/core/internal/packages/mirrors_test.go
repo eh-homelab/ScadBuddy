@@ -89,7 +89,7 @@ func (f *fakeBlobs) PublishFile(_ context.Context, key, name string, file io.Rea
 	return nil
 }
 
-func (f *fakeBlobs) ReadFile(_ context.Context, key, name string) ([]byte, bool, error) {
+func (f *fakeBlobs) ReadFile(_ context.Context, key, name string, _ int64) ([]byte, bool, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	data, ok := f.files[key]

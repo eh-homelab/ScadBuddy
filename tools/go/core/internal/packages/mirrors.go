@@ -73,8 +73,9 @@ type Blobs interface {
 	PublishFile(ctx context.Context, key, name string, file io.ReadSeeker) error
 	// ReadFile is CachedBlobStore.read_file: the file name of the blob key, whole. found is
 	// false when the store holds no blob key on its backend, or the blob holds no such file; a
-	// lost or altered object is forgotten and not found.
-	ReadFile(ctx context.Context, key, name string) (data []byte, found bool, err error)
+	// lost or altered object is forgotten and not found. A file of more than max bytes is
+	// refused (blobstore.ErrTooLarge), since it is held in memory.
+	ReadFile(ctx context.Context, key, name string, max int64) (data []byte, found bool, err error)
 }
 
 // Mirrors is the routes that need the blob store.
@@ -222,7 +223,7 @@ func (m *Mirrors) get(r *http.Request, params crud.Params) (any, error) {
 	if !named {
 		return nil, notFound
 	}
-	data, found, err := m.Blobs.ReadFile(ctx, mirrorKey(sum), MirrorFile)
+	data, found, err := m.Blobs.ReadFile(ctx, mirrorKey(sum), MirrorFile, MaxMirrorBytes)
 	if err != nil {
 		return nil, err
 	}
@@ -266,7 +267,7 @@ func (m *Mirrors) hostedZip(r *http.Request, params crud.Params) (any, error) {
 	if err != nil {
 		return nil, err
 	}
-	data, found, err := m.Blobs.ReadFile(ctx, attachmentKey(zipSHA256), MirrorFile)
+	data, found, err := m.Blobs.ReadFile(ctx, attachmentKey(zipSHA256), MirrorFile, MaxMirrorBytes)
 	if err != nil {
 		return nil, err
 	}

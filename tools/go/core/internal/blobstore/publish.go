@@ -31,6 +31,10 @@ import (
 // index it.
 var ErrStale = errors.New("blobstore: the key names another blob")
 
+// ErrTooLarge is a ReadFile refused because the file, or the blob that holds it, is larger than
+// the bound its caller gave.
+var ErrTooLarge = errors.New("blobstore: the file is larger than its reader takes")
+
 // pieceKind is the kind every published directory is stored as (store/cache.py `_publish`).
 const pieceKind = "piece"
 
@@ -61,12 +65,15 @@ func (b *Blobs) Claim(ctx context.Context, key string) (bool, error) {
 
 // ReadFile is CachedBlobStore.read_file: the file name of the blob key, whole. found is
 // false when no row of this store names key, the store has lost its object or holds other
-// bytes there (the row is then forgotten), or the blob has no such file.
-func (b *Blobs) ReadFile(ctx context.Context, key, name string) ([]byte, bool, error) {
+// bytes there (the row is then forgotten), or the blob has no such file. The blob is held in
+// memory, and Python sets kind piece no size limit, so the caller bounds it: a file of more
+// than max bytes, or a stored zip larger than one holding such a file can be, is ErrTooLarge
+// (the zip is refused from its row, before a byte is read).
+func (b *Blobs) ReadFile(ctx context.Context, key, name string, max int64) ([]byte, bool, error) {
 	if _, err := b.s3Store(ctx); err != nil {
 		return nil, false, err
 	}
-	rc, _, err := b.OpenKey(ctx, key)
+	rc, ref, err := b.OpenKey(ctx, key)
 	switch {
 	case errors.Is(err, ErrNotConfigured):
 		// The store is S3, so the row is another backend's: not this store's blob.
@@ -76,6 +83,11 @@ func (b *Blobs) ReadFile(ctx context.Context, key, name string) ([]byte, bool, e
 		return nil, false, b.forget(ctx, key)
 	case err != nil:
 		return nil, false, err
+	}
+	if most := packedMax(max, name); ref.Size > most {
+		rc.Close()
+		return nil, false, fmt.Errorf("%w: the blob %s is %d bytes, and a zip of a file of at most %d bytes is at most %d",
+			ErrTooLarge, key, ref.Size, max, most)
 	}
 	archive, err := io.ReadAll(rc)
 	rc.Close()
@@ -93,15 +105,30 @@ func (b *Blobs) ReadFile(ctx context.Context, key, name string) ([]byte, bool, e
 		if f.Name != name {
 			continue
 		}
+		if f.UncompressedSize64 > uint64(max) {
+			return nil, false, fmt.Errorf("%w: the file %q of the blob %s is %d bytes, at most %d",
+				ErrTooLarge, name, key, f.UncompressedSize64, max)
+		}
 		entry, err := f.Open()
 		if err != nil {
 			return nil, false, err
 		}
 		defer entry.Close()
-		data, err := io.ReadAll(entry)
+		data, err := io.ReadAll(io.LimitReader(entry, max+1))
+		if err == nil && int64(len(data)) > max {
+			return nil, false, fmt.Errorf("%w: the file %q of the blob %s is more than %d bytes",
+				ErrTooLarge, name, key, max)
+		}
 		return data, err == nil, err
 	}
 	return nil, false, nil
+}
+
+// packedMax is the most bytes a zip of one file name of at most max bytes takes, as packFile
+// or Python's zipfile packs it: deflate's stored blocks (5 bytes per 65,535 when the bytes do
+// not compress), the local header, the central directory and room for extra fields.
+func packedMax(max int64, name string) int64 {
+	return max + (max/65535+1)*5 + 2*int64(len(name)) + 64<<10
 }
 
 // PublishFile is package_mirrors.py `_place` then CachedBlobStore.publish_fresh(key,
