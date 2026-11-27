@@ -23,9 +23,10 @@ VECTORS: dict[str, Any] = json.loads(
 CASES = VECTORS["cases"]
 
 
-def test_a_tag_dump_is_a_kind_the_sweep_decides() -> None:
-    assert "tag_dump" in get_args(BlobKind)
-    assert "tag_dump" in SWEPT_KINDS
+@pytest.mark.parametrize("kind", ["tag_dump", "scan_image"])
+def test_a_kind_core_stores_is_one_the_sweep_decides(kind: str) -> None:
+    assert kind in get_args(BlobKind)
+    assert kind in SWEPT_KINDS
 
 
 def test_an_uploads_staging_key_is_one_only_the_staging_sweep_takes() -> None:
