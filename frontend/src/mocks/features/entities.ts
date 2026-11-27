@@ -51,8 +51,6 @@ function fresh() {
     /** Each entity's property changes, newest first. */
     history: new Map<string, PropertyChange[]>(),
     /** Each PATCH's `set`, as the route received it. */
-    /** Each entity's property changes, newest first. */
-    history: new Map<string, PropertyChange[]>(),
     propertyPatches: [] as { entity: string; set: Record<string, unknown> }[],
     schemas: seededSchemas(),
   }
