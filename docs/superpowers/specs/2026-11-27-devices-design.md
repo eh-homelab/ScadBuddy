@@ -10,7 +10,9 @@ On 2026-11-27 the owner described the phone app as a device that is attached to 
 
 How long a pairing lasts: "paired until the token expires", with "default 1 hour unless not idle". Off the LAN: "yes". How a call behaves: "i want them to behave like devices": a call reports what the device is doing as it goes ("found tag id XXX 38 blocks... got 8", "failed", "found it again, starting at 8, got 16"). The raw result is stored as a blob with its info. The caller gets the read's id, queries it directly, and feeds it to the filament decoder. The scan link stays: "we still want the scan link", "that is how the initial pair will happen".
 
-So the phone stops being a page that has to be in the right state. It becomes hardware that ScadBuddy can use: an NFC reader and writer, a code scanner, a camera and a GPS. A web page, a flow or the assistant can ask it for a reading. The same model covers other hardware later.
+The scope for now (owner, 2026-11-27): "ok, scope creep. for today just stick with what we have for nfc.read and write code scan and capture", "simple.", "nothing more than that".
+
+So the phone stops being a page that has to be in the right state. It becomes hardware that ScadBuddy can use: an NFC reader and writer, a code scanner and a camera. A web page, a flow or the assistant can ask it for a reading.
 
 ## Goals
 
@@ -27,7 +29,7 @@ So the phone stops being a page that has to be in the right state. It becomes ha
 
 - Waking a device that is not open. Android needs the app in front for NFC. A call to an offline device fails at once, and the caller can show the app's open link.
 - iOS. The model allows it, as a second app.
-- Hardware other than the phone in this work: scales, Home Assistant entities and printers stay where they are. The model must not rule them out.
+- A device platform. ScadBuddy is not one. The only capabilities are `nfc.read`, `nfc.write`, `code.scan` and `camera.capture`. There is no `location.get`, no other phone sensor, no Home Assistant link (no reads of HA sensors, no publishing to HA, no HA wake notifications), and no registry of other hardware (scales and printers stay where they are).
 - Moving the existing `nfc-jobs` routes now. They stay until a later change makes them device calls.
 
 ## Anti-goals
@@ -87,7 +89,6 @@ So the phone stops being a page that has to be in the right state. It becomes ha
 | `nfc.write` | outward | NDEF records | the read-back. It never writes a Bambu tag; backup and read-back as in #8069. |
 | `code.scan` | read | none | `{read_id}`; #8155's decoder takes it |
 | `camera.capture` | read | none | `{read_id}` |
-| `location.get` | read | `max_age_s` | `{lat, lon, accuracy_m, at}` |
 
 The RFID reader is listed as a sensor with a writer, as the owner put it.
 
@@ -108,7 +109,7 @@ Every call has an ordered event log, `device_call_events` (call, seq, at, kind, 
 The result is generic and knows nothing of filament:
 
 1. The device uploads the raw read as one blob, kind `tag_dump`. It holds the UID, the tag's tech, every data block it read (never a key trailer), and any NDEF records.
-2. Core writes a `device_reads` row: id, device, call, at, UID, tech, blob key, `complete`, missing blocks, and location when the call asked for it.
+2. Core writes a `device_reads` row: id, device, call, at, UID, tech, blob key, `complete`, missing blocks.
 3. The call ends with `{read_id, uid, complete}`.
 4. A consumer takes the `read_id`. `GET /api/v1/devices/reads/{id}` gives the info and the blob. The filament decoder accepts `{read_id}` in place of inline blocks (the tag decode route). It decodes the read, finds or makes the tag, and writes the `filament_tag_reads` row that points at the device read.
 
@@ -145,7 +146,7 @@ Core owns three new tables:
 - `device_tokens`: device, token hash, created, expires, hard cap, revoked.
 - `device_calls`: id, device, caller, method, arguments (bounded), outcome, result pointer, created, ended.
 - `device_call_events`: call, seq, at, kind, data (bounded jsonb).
-- `device_reads`: id, device, call, at, kind (`nfc`, `photo`), UID, tech, blob key, media type, complete, missing blocks, location.
+- `device_reads`: id, device, call, at, kind (`nfc`, `photo`), UID, tech, blob key, media type, complete, missing blocks.
 
 One migration creates them.
 
@@ -172,4 +173,4 @@ One migration creates them.
 
 - The exact frame fields, and how a page waits for a call (polling the call row, or the change stream).
 - How the app shows an incoming call: a toast, or a full-screen "Tap the tag" view.
-- The PR order. A sensible one: pairing, tokens and the Devices list first; then the socket and `location.get`; then `nfc.read` and `code.scan`; then `nfc.write`.
+- The PR order. A sensible one: pairing, tokens and the Devices list first; then the socket and the call events; then `nfc.read` and `code.scan`; then `nfc.write`.
