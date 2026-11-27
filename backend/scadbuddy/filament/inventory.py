@@ -246,14 +246,16 @@ class _Keys:
         self.by_tray_uuid: dict[str, UUID] = {}
         self.by_tag_uid: dict[str, UUID] = {}
         for row in conn.execute(
-            "SELECT t.tray_uuid, t.tag_uid, b.spool_id FROM filament_tags t"
+            # Every UID of a tag (`filament_tag_uids`, #8148): a tray may show either side.
+            "SELECT t.tray_uuid, u.uid, b.spool_id FROM filament_tags t"
             " JOIN filament_tag_bindings b ON b.tag_id = t.id AND b.unbound_at IS NULL"
             " JOIN filament_spools s ON s.id = b.spool_id AND s.archived_at IS NULL"
+            " LEFT JOIN filament_tag_uids u ON u.tag_id = t.id"
         ).fetchall():
             if row["tray_uuid"] is not None:
                 self.by_tray_uuid[row["tray_uuid"]] = row["spool_id"]
-            if row["tag_uid"] is not None:
-                self.by_tag_uid[row["tag_uid"]] = row["spool_id"]
+            if row["uid"] is not None:
+                self.by_tag_uid[row["uid"]] = row["spool_id"]
         placed: dict[tuple[UUID, int, int], list[tuple[UUID, str]]] = {}
         for row in conn.execute(
             "SELECT s.id, s.tray_fingerprint, l.printer_id, l.ams_id, l.tray_id"
@@ -955,8 +957,13 @@ class FilamentInventory:
         for column, key in (("tray_uuid", seen.tray_uuid), ("tag_uid", seen.tag_uid)):
             if key is None:
                 continue
+            where = (
+                "tray_uuid = %s"
+                if column == "tray_uuid"
+                else "id IN (SELECT tag_id FROM filament_tag_uids WHERE uid = %s)"
+            )
             tag = conn.execute(
-                f"SELECT id FROM filament_tags WHERE {column} = %s FOR UPDATE", (key,)
+                f"SELECT id FROM filament_tags WHERE {where} FOR UPDATE", (key,)
             ).fetchone()
             if tag is None:
                 continue

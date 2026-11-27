@@ -6,10 +6,11 @@ import logging
 import os
 import secrets
 import shutil
+import threading
 import time
 import uuid
 from collections.abc import AsyncIterator, Callable, Iterator, Mapping, Sequence
-from concurrent.futures import Executor, Future
+from concurrent.futures import CancelledError, Executor, Future
 from contextlib import (
     AbstractContextManager,
     AsyncExitStack,
@@ -867,14 +868,24 @@ async def plates_thumbnails(
     # Covers show what prints: a negative part is cut out.
     plates = [[part for part in parts if not part.negative] for parts in plates]
     faces = sum(len(part.mesh.faces) for parts in plates for part in parts)
+    # Set before the cancels below, and read by each plate as it starts: the pool can take
+    # a plate off its queue between one future's cancel and the next, and that plate
+    # would start drawing (#8254).
+    stop = threading.Event()
+
+    def draw(parts: Sequence[ColourPart]) -> PlateThumbnails:
+        if stop.is_set():
+            raise CancelledError
+        return render_plate_thumbnails(parts)
+
     # The pool's own futures, so a cancel reaches a queued plate at once, not on the
     # loop's next pass (an asyncio wrapper's cancel is a callback).
     queued: list[Future[PlateThumbnails]] = []
     if executor is not None:
-        queued = [executor.submit(render_plate_thumbnails, parts) for parts in plates]
+        queued = [executor.submit(draw, parts) for parts in plates]
         drawing = [asyncio.wrap_future(future) for future in queued]
     else:
-        drawing = [loop.run_in_executor(None, render_plate_thumbnails, parts) for parts in plates]
+        drawing = [loop.run_in_executor(None, draw, parts) for parts in plates]
     try:
         rendered = await asyncio.wait_for(asyncio.gather(*drawing), timeout=config.render_timeout)
     except TimeoutError:
@@ -894,6 +905,7 @@ async def plates_thumbnails(
     finally:
         # All or none: once one plate fails or the budget ends, a plate still queued
         # is never drawn. A plate already drawing runs to its end, as before.
+        stop.set()
         for future in queued:
             future.cancel()
         for wrapped in drawing:

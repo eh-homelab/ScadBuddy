@@ -2107,33 +2107,49 @@ class FilamentSpoolStore:
     @staticmethod
     def _tag(conn: Conn, uid: str | None, tray: str | None, kind: m.TagKind) -> tuple[UUID, str]:
         """The id and kind of the tag either key names, locked and given the key it lacked;
-        else a new tag of ``kind``. A tag another transaction makes first is found on the
-        second look."""
+        else a new tag of ``kind``. The UID is any of a tag's UIDs (`filament_tag_uids`,
+        #8148); one the tag lacks is added to it, so a Bambu spool's second side names its
+        tray's tag. A tag another transaction makes first, or a UID it adds to a tag first,
+        is found on the second look."""
         while True:
             found = conn.execute(
                 f"SELECT {_TAG_COLUMNS} FROM filament_tags"
-                " WHERE tag_uid = %s OR tray_uuid = %s FOR UPDATE",
+                " WHERE id IN (SELECT tag_id FROM filament_tag_uids WHERE uid = %s)"
+                " OR tray_uuid = %s FOR UPDATE",
                 (uid, tray),
             ).fetchall()
             if len(found) > 1:
                 raise TagKeysClashError()
-            if found:
-                tag = found[0]
-                if (uid is not None and tag["tag_uid"] is None) or (
-                    tray is not None and tag["tray_uuid"] is None
-                ):
-                    conn.execute(
-                        "UPDATE filament_tags SET tag_uid = coalesce(tag_uid, %s),"
-                        " tray_uuid = coalesce(tray_uuid, %s) WHERE id = %s",
-                        (uid, tray, tag["id"]),
-                    )
-                tag_id: UUID = tag["id"]
-                return tag_id, tag["kind"]
-            made = conn.execute(
-                "INSERT INTO filament_tags (kind, tag_uid, tray_uuid) VALUES (%s, %s, %s)"
-                " ON CONFLICT DO NOTHING RETURNING id",
-                (kind, uid, tray),
-            ).fetchone()
-            if made is not None:
-                new_id: UUID = made["id"]
-                return new_id, kind
+            try:
+                with conn.transaction():
+                    if found:
+                        tag = found[0]
+                        if (uid is not None and tag["tag_uid"] is None) or (
+                            tray is not None and tag["tray_uuid"] is None
+                        ):
+                            conn.execute(
+                                "UPDATE filament_tags SET tag_uid = coalesce(tag_uid, %s),"
+                                " tray_uuid = coalesce(tray_uuid, %s) WHERE id = %s",
+                                (uid, tray, tag["id"]),
+                            )
+                        if uid is not None:
+                            conn.execute(
+                                "INSERT INTO filament_tag_uids (uid, tag_id, source)"
+                                " VALUES (%s, %s, 'tag') ON CONFLICT (uid) DO NOTHING",
+                                (uid, tag["id"]),
+                            )
+                        tag_id: UUID = tag["id"]
+                        return tag_id, tag["kind"]
+                    made = conn.execute(
+                        "INSERT INTO filament_tags (kind, tag_uid, tray_uuid) VALUES (%s, %s, %s)"
+                        " ON CONFLICT DO NOTHING RETURNING id",
+                        (kind, uid, tray),
+                    ).fetchone()
+                    if made is not None:
+                        new_id: UUID = made["id"]
+                        return new_id, kind
+            except errors.UniqueViolation as error:
+                # filament_tag_uids_keep_first: another transaction gave the UID to a tag
+                # meanwhile. The savepoint is gone; the next look finds that tag.
+                if error.diag.constraint_name != "filament_tag_uids_pkey":
+                    raise
