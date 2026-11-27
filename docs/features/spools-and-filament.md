@@ -499,8 +499,9 @@ No step has a default answer. When both are named, "Move" sends one
   to the place named instead of to no place. Each new step moves the focus to its heading; the
   short "Moving…" step does not.
 - **A full dry box.** A move into a dry box sends `if_occupied: refuse`. A 409 `box_full` shows
-  the box's spool and three choices: "Archive S-n" (a `replace` with `expected_occupant_id`, as
-  #7167 does it), "Move S-n first", or "Choose another place". "Move S-n first" makes the box's
+  the box's spool and its choices: "Archive S-n" (a `replace` with `expected_occupant_id`, as
+  #7167 does it), "Move S-n first", or "Choose another place". The page offers "Move S-n first"
+  only for the current spool's move, not for a waiting spool's move. "Move S-n first" makes the box's
   spool the next one to place, and the first spool waits (`lib/swapChain.ts`). After each move
   that succeeds, the newest waiting spool's move goes out by itself, with the place it was read
   in. When the box's spool is itself waiting (a cycle), the page offers "Take S-n out first": it

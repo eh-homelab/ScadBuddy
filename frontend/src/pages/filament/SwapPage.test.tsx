@@ -374,6 +374,23 @@ describe('SwapPage (#7168)', () => {
     ])
   })
 
+  it('a full box for a waiting spool offers no "Move first"', async () => {
+    await seedBoxes()
+    const c = await box('Dry box C')
+    await moveSpool(spoolId(3), c.id)
+    const { user } = renderPage(<SwapPage />)
+    const out = await toCycle(user)
+    server.use(http.post('/api/v1/filament/spools/:id/move', () => HttpResponse.error(), { once: true }))
+    await user.click(out)
+    await screen.findByRole('alert')
+    await user.click(screen.getByRole('button', { name: 'Choose another place' }))
+    await pickPlace(user, 'Dry box C')
+    await user.click(await screen.findByRole('button', { name: 'Move' }))
+    expect(await screen.findByRole('button', { name: 'Archive S-3' })).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: 'Choose another place' })).toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: 'Move S-3 first' })).toBeNull()
+  })
+
   it('a retry that finds the spool already in its target counts the move as done', async () => {
     server.use(http.post('/api/v1/filament/spools/:id/move', () => HttpResponse.error(), { once: true }))
     const { user } = renderPage(<SwapPage />)
