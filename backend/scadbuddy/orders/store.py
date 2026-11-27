@@ -2254,14 +2254,23 @@ class OrderStore:
             ).fetchall()
             if not rows:
                 rows = c.execute(
-                    "WITH run AS (SELECT run_id FROM lan_print_archives WHERE archive_id = %(a)s)"
-                    " SELECT (e->>'plate_id')::int AS plate_id, (SELECT min(l.archive_id)"
-                    "  FROM lan_print_archives l WHERE l.run_id = r.run_id"
-                    "  AND l.subtask_name = e->>'subtask_name') AS archive_id"
-                    " FROM run r JOIN print_runs p ON p.id = r.run_id,"
-                    " jsonb_array_elements(CASE WHEN jsonb_typeof(p.result->'lan') = 'array'"
-                    "  THEN p.result->'lan' END) AS e"
-                    " ORDER BY (e->>'plate_id')::int NULLS LAST, e->>'started_at'",
+                    "WITH run AS (SELECT run_id FROM lan_print_archives WHERE archive_id = %(a)s),"
+                    # A plate only as `print_links._LAN_JOBS` reads one (#8078, #8083): a
+                    # start's bad `plate_id` (2.0, 10**12, 0) is no plate, never an error.
+                    " starts AS (SELECT r.run_id, e->>'subtask_name' AS subtask,"
+                    "  e->>'started_at' AS started_at,"
+                    "  CASE WHEN jsonb_typeof(e->'plate_id') = 'number'"
+                    "   AND e->>'plate_id' ~ '^[1-9][0-9]{0,8}$'"
+                    "   THEN (e->>'plate_id')::int END AS plate"
+                    "  FROM run r JOIN print_runs p ON p.id = r.run_id,"
+                    "  jsonb_array_elements(CASE WHEN jsonb_typeof(p.result->'lan') = 'array'"
+                    "   THEN p.result->'lan' END) AS e)"
+                    # A start from before #4541 has no plate: the recorded archive's, if any.
+                    " SELECT COALESCE(s.plate, a.plate_id) AS plate_id, a.archive_id"
+                    " FROM starts s LEFT JOIN LATERAL (SELECT min(l.archive_id) AS archive_id,"
+                    "  min(l.plate_id) AS plate_id FROM lan_print_archives l"
+                    "  WHERE l.run_id = s.run_id AND l.subtask_name = s.subtask) a ON true"
+                    " ORDER BY 1 NULLS LAST, s.started_at",
                     {"a": archive_id},
                 ).fetchall()
             if not rows:

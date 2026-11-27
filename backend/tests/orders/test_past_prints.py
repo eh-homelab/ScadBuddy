@@ -181,6 +181,38 @@ def test_a_lan_runs_archive_lists_every_plate_of_its_run(rows: OrderStore, pool:
     assert rows.archive_run_plates(370) == [(1, 370)]
 
 
+def test_a_lan_start_with_a_bad_plate_is_no_plate_not_an_error(
+    rows: OrderStore, pool: PgPool
+) -> None:
+    """Review of #8295: a start's ``plate_id`` read as `print_links._LAN_JOBS` reads it
+    (#8083). 2.0, 10**12 and 0 are no plate; a start with none takes its recorded
+    archive's plate."""
+    run_id = "aef57e988a3073ccc863f29c2c2i2ad"
+    starts = [
+        {
+            "subtask_name": f"scadbuddy-{run_id[:8]}-p{n}",
+            "started_at": f"2026-11-26T1{n}:00:00Z",
+            "plate_id": bad,
+        }
+        for n, bad in ((1, 2.0), (2, 10**12), (3, 0))
+    ]
+    starts.append(
+        {"subtask_name": f"scadbuddy-{run_id[:8]}-p4", "started_at": "2026-11-26T14:00:00Z"}
+    )
+    with pool.connection() as conn:
+        conn.execute(
+            "INSERT INTO print_runs (id, output_id, idempotency_key, status, result)"
+            " VALUES (%s, %s, %s, 'succeeded', %s)",
+            (run_id, OUTPUT, f"k-{run_id}", Jsonb({"lan": starts})),
+        )
+        conn.execute(
+            "INSERT INTO lan_print_archives (archive_id, run_id, subtask_name, plate_id)"
+            " VALUES (%s, %s, %s, %s)",
+            (390, run_id, f"scadbuddy-{run_id[:8]}-p4", 4),
+        )
+    assert rows.archive_run_plates(390) == [(4, 390), (None, None), (None, None), (None, None)]
+
+
 def test_a_lan_archive_whose_run_was_pruned_lists_the_recorded_starts(
     rows: OrderStore, pool: PgPool
 ) -> None:
