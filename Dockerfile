@@ -1325,10 +1325,11 @@ COPY workers/playwright-mcp/browser-vectors.json /app/workers/playwright-mcp/bro
 COPY tools/go/core/internal/bus/testdata/history /app/tools/go/core/internal/bus/testdata/history
 
 # The fakes the tests load from the repo layout (fake_lan.py's PRINTER_PY,
-# test_bambuddy_recorder.py's RECORDER_PY), beside the backend. Last, so a change to a
-# fake rebuilds no other layer.
+# test_bambuddy_recorder.py's RECORDER_PY, test_e2e_seed_trays.py's seed.sh), beside
+# the backend. Last, so a change to a fake rebuilds no other layer.
 COPY e2e-stack/fake-printer /app/e2e-stack/fake-printer
 COPY e2e-stack/bambuddy-recorder /app/e2e-stack/bambuddy-recorder
+COPY e2e-stack/seed.sh /app/e2e-stack/seed.sh
 # The dashboards whose operation panels name the workers' kinds
 # (test_dashboard_operation_kinds.py, #5298).
 COPY deploy/grafana /app/deploy/grafana
