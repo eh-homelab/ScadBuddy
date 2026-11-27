@@ -1,0 +1,494 @@
+{
+  "decoder_version": 1,
+  "guide_commit": "a26cf83d7b296b71c558f8c332d464f4e5b9c314",
+  "uid": "DC999BE3",
+  "complete": true,
+  "missing_blocks": [],
+  "block0_uid": "DC999BE3",
+  "manufacturer_data": "3D080400054073123440CC90",
+  "variant_id": "A00-N0",
+  "material_id": "GFA00",
+  "filament_type": "PLA",
+  "detailed_filament_type": "PLA Basic",
+  "color": "#9D432CFF",
+  "spool_weight_g": 1000,
+  "filament_diameter_mm": 1.75,
+  "drying_temperature_c": 55,
+  "drying_time_h": 8,
+  "bed_temperature_type": 0,
+  "bed_temperature_c": 0,
+  "hotend_max_temperature_c": 230,
+  "hotend_min_temperature_c": 190,
+  "x_cam_info": "3421100EE803E803CDCC4C3F",
+  "nozzle_diameter_mm": 0.2,
+  "tray_uid": "D3B5D4BCA6044374A9B52E9C2DC9AC6A",
+  "spool_width_mm": 66.25,
+  "production_date": "2026_05_08_23_15",
+  "production_datetime": "2026-05-08T23:15:00",
+  "short_production_date": "26_05_08_23",
+  "filament_length_m": 330,
+  "extra_color_format": 2,
+  "extra_color_count": 1,
+  "unknown": [
+    {
+      "block": 5,
+      "offset": 6,
+      "length": 2,
+      "kind": "undocumented",
+      "hex": "0000"
+    },
+    {
+      "block": 5,
+      "offset": 12,
+      "length": 4,
+      "kind": "undocumented",
+      "hex": "00000000"
+    },
+    {
+      "block": 6,
+      "offset": 12,
+      "length": 4,
+      "kind": "undocumented",
+      "hex": "00000000"
+    },
+    {
+      "block": 10,
+      "offset": 0,
+      "length": 4,
+      "kind": "undocumented",
+      "hex": "00000000"
+    },
+    {
+      "block": 10,
+      "offset": 6,
+      "length": 10,
+      "kind": "undocumented",
+      "hex": "00000000000000000000"
+    },
+    {
+      "block": 14,
+      "offset": 0,
+      "length": 4,
+      "kind": "undocumented",
+      "hex": "00000000"
+    },
+    {
+      "block": 14,
+      "offset": 6,
+      "length": 10,
+      "kind": "undocumented",
+      "hex": "00000000000000000000"
+    },
+    {
+      "block": 16,
+      "offset": 4,
+      "length": 4,
+      "kind": "undocumented",
+      "hex": "00000000"
+    },
+    {
+      "block": 16,
+      "offset": 8,
+      "length": 8,
+      "kind": "undocumented",
+      "hex": "0000000000000000"
+    },
+    {
+      "block": 17,
+      "offset": 0,
+      "length": 2,
+      "kind": "unknown",
+      "hex": "0000"
+    },
+    {
+      "block": 17,
+      "offset": 2,
+      "length": 14,
+      "kind": "undocumented",
+      "hex": "0000000000000000000000000000"
+    },
+    {
+      "block": 18,
+      "offset": 0,
+      "length": 16,
+      "kind": "empty",
+      "hex": "00000000000000000000000000000000"
+    },
+    {
+      "block": 20,
+      "offset": 0,
+      "length": 16,
+      "kind": "empty",
+      "hex": "00000000000000000000000000000000"
+    },
+    {
+      "block": 21,
+      "offset": 0,
+      "length": 16,
+      "kind": "empty",
+      "hex": "00000000000000000000000000000000"
+    },
+    {
+      "block": 22,
+      "offset": 0,
+      "length": 16,
+      "kind": "empty",
+      "hex": "00000000000000000000000000000000"
+    },
+    {
+      "block": 24,
+      "offset": 0,
+      "length": 16,
+      "kind": "empty",
+      "hex": "00000000000000000000000000000000"
+    },
+    {
+      "block": 25,
+      "offset": 0,
+      "length": 16,
+      "kind": "empty",
+      "hex": "00000000000000000000000000000000"
+    },
+    {
+      "block": 26,
+      "offset": 0,
+      "length": 16,
+      "kind": "empty",
+      "hex": "00000000000000000000000000000000"
+    },
+    {
+      "block": 28,
+      "offset": 0,
+      "length": 16,
+      "kind": "empty",
+      "hex": "00000000000000000000000000000000"
+    },
+    {
+      "block": 29,
+      "offset": 0,
+      "length": 16,
+      "kind": "empty",
+      "hex": "00000000000000000000000000000000"
+    },
+    {
+      "block": 30,
+      "offset": 0,
+      "length": 16,
+      "kind": "empty",
+      "hex": "00000000000000000000000000000000"
+    },
+    {
+      "block": 32,
+      "offset": 0,
+      "length": 16,
+      "kind": "empty",
+      "hex": "00000000000000000000000000000000"
+    },
+    {
+      "block": 33,
+      "offset": 0,
+      "length": 16,
+      "kind": "empty",
+      "hex": "00000000000000000000000000000000"
+    },
+    {
+      "block": 34,
+      "offset": 0,
+      "length": 16,
+      "kind": "empty",
+      "hex": "00000000000000000000000000000000"
+    },
+    {
+      "block": 36,
+      "offset": 0,
+      "length": 16,
+      "kind": "empty",
+      "hex": "00000000000000000000000000000000"
+    },
+    {
+      "block": 37,
+      "offset": 0,
+      "length": 16,
+      "kind": "empty",
+      "hex": "00000000000000000000000000000000"
+    },
+    {
+      "block": 38,
+      "offset": 0,
+      "length": 16,
+      "kind": "empty",
+      "hex": "00000000000000000000000000000000"
+    }
+  ],
+  "signature": {
+    "verified": false,
+    "blocks": [
+      {
+        "block": 40,
+        "hex": "01000000000000000000000000000000"
+      },
+      {
+        "block": 41,
+        "hex": "00000000000000000000000000000000"
+      },
+      {
+        "block": 42,
+        "hex": "7F1F76F9BA5C7ABAA533D9CAD36A8BDD"
+      },
+      {
+        "block": 44,
+        "hex": "4E6758B06A03984A4A9E2F2975B1E252"
+      },
+      {
+        "block": 45,
+        "hex": "305CDFE6AFAFAF6EBD93FE51FB59842E"
+      },
+      {
+        "block": 46,
+        "hex": "24D84D670694F8159AEE87110D242E86"
+      },
+      {
+        "block": 48,
+        "hex": "58B4A4F92B1134738A00D672E93266AD"
+      },
+      {
+        "block": 49,
+        "hex": "82B83C1A22D70386C657C647D76C3593"
+      },
+      {
+        "block": 50,
+        "hex": "87E7065427EFDFE48B459748CC4A1110"
+      },
+      {
+        "block": 52,
+        "hex": "9EF770B3B22D905E7893A5DEE77DE827"
+      },
+      {
+        "block": 53,
+        "hex": "C021630119A582CA2BFA6F7E76E5C5B5"
+      },
+      {
+        "block": 54,
+        "hex": "E677FB12CB9F9DD84015FFF323BD75B2"
+      },
+      {
+        "block": 56,
+        "hex": "6748195D3C0D806761A49F621988AA9A"
+      },
+      {
+        "block": 57,
+        "hex": "BD22AD9BD557F31B389672C8013B10AC"
+      },
+      {
+        "block": 58,
+        "hex": "264E50D7D54CC40ECD9616498E2DEB0B"
+      },
+      {
+        "block": 60,
+        "hex": "8278E2D28068D43A6F21E93CB33C584D"
+      },
+      {
+        "block": 61,
+        "hex": "B89F0037BCA6F591FB16E64A3A1ECA19"
+      },
+      {
+        "block": 62,
+        "hex": "FF6DC849A9C96E11A0267E5CBFD3A0F7"
+      }
+    ]
+  },
+  "blocks": [
+    {
+      "block": 0,
+      "hex": "DC999BE33D080400054073123440CC90"
+    },
+    {
+      "block": 1,
+      "hex": "4130302D4E3000004746413030000000"
+    },
+    {
+      "block": 2,
+      "hex": "504C4100000000000000000000000000"
+    },
+    {
+      "block": 4,
+      "hex": "504C4120426173696300000000000000"
+    },
+    {
+      "block": 5,
+      "hex": "9D432CFFE80300000000E03F00000000"
+    },
+    {
+      "block": 6,
+      "hex": "3700080000000000E600BE0000000000"
+    },
+    {
+      "block": 8,
+      "hex": "3421100EE803E803CDCC4C3FCDCC4C3E"
+    },
+    {
+      "block": 9,
+      "hex": "D3B5D4BCA6044374A9B52E9C2DC9AC6A"
+    },
+    {
+      "block": 10,
+      "hex": "00000000E11900000000000000000000"
+    },
+    {
+      "block": 12,
+      "hex": "323032365F30355F30385F32335F3135"
+    },
+    {
+      "block": 13,
+      "hex": "32365F30355F30385F32330000000000"
+    },
+    {
+      "block": 14,
+      "hex": "000000004A0100000000000000000000"
+    },
+    {
+      "block": 16,
+      "hex": "02000100000000000000000000000000"
+    },
+    {
+      "block": 17,
+      "hex": "00000000000000000000000000000000"
+    },
+    {
+      "block": 18,
+      "hex": "00000000000000000000000000000000"
+    },
+    {
+      "block": 20,
+      "hex": "00000000000000000000000000000000"
+    },
+    {
+      "block": 21,
+      "hex": "00000000000000000000000000000000"
+    },
+    {
+      "block": 22,
+      "hex": "00000000000000000000000000000000"
+    },
+    {
+      "block": 24,
+      "hex": "00000000000000000000000000000000"
+    },
+    {
+      "block": 25,
+      "hex": "00000000000000000000000000000000"
+    },
+    {
+      "block": 26,
+      "hex": "00000000000000000000000000000000"
+    },
+    {
+      "block": 28,
+      "hex": "00000000000000000000000000000000"
+    },
+    {
+      "block": 29,
+      "hex": "00000000000000000000000000000000"
+    },
+    {
+      "block": 30,
+      "hex": "00000000000000000000000000000000"
+    },
+    {
+      "block": 32,
+      "hex": "00000000000000000000000000000000"
+    },
+    {
+      "block": 33,
+      "hex": "00000000000000000000000000000000"
+    },
+    {
+      "block": 34,
+      "hex": "00000000000000000000000000000000"
+    },
+    {
+      "block": 36,
+      "hex": "00000000000000000000000000000000"
+    },
+    {
+      "block": 37,
+      "hex": "00000000000000000000000000000000"
+    },
+    {
+      "block": 38,
+      "hex": "00000000000000000000000000000000"
+    },
+    {
+      "block": 40,
+      "hex": "01000000000000000000000000000000"
+    },
+    {
+      "block": 41,
+      "hex": "00000000000000000000000000000000"
+    },
+    {
+      "block": 42,
+      "hex": "7F1F76F9BA5C7ABAA533D9CAD36A8BDD"
+    },
+    {
+      "block": 44,
+      "hex": "4E6758B06A03984A4A9E2F2975B1E252"
+    },
+    {
+      "block": 45,
+      "hex": "305CDFE6AFAFAF6EBD93FE51FB59842E"
+    },
+    {
+      "block": 46,
+      "hex": "24D84D670694F8159AEE87110D242E86"
+    },
+    {
+      "block": 48,
+      "hex": "58B4A4F92B1134738A00D672E93266AD"
+    },
+    {
+      "block": 49,
+      "hex": "82B83C1A22D70386C657C647D76C3593"
+    },
+    {
+      "block": 50,
+      "hex": "87E7065427EFDFE48B459748CC4A1110"
+    },
+    {
+      "block": 52,
+      "hex": "9EF770B3B22D905E7893A5DEE77DE827"
+    },
+    {
+      "block": 53,
+      "hex": "C021630119A582CA2BFA6F7E76E5C5B5"
+    },
+    {
+      "block": 54,
+      "hex": "E677FB12CB9F9DD84015FFF323BD75B2"
+    },
+    {
+      "block": 56,
+      "hex": "6748195D3C0D806761A49F621988AA9A"
+    },
+    {
+      "block": 57,
+      "hex": "BD22AD9BD557F31B389672C8013B10AC"
+    },
+    {
+      "block": 58,
+      "hex": "264E50D7D54CC40ECD9616498E2DEB0B"
+    },
+    {
+      "block": 60,
+      "hex": "8278E2D28068D43A6F21E93CB33C584D"
+    },
+    {
+      "block": 61,
+      "hex": "B89F0037BCA6F591FB16E64A3A1ECA19"
+    },
+    {
+      "block": 62,
+      "hex": "FF6DC849A9C96E11A0267E5CBFD3A0F7"
+    }
+  ]
+}

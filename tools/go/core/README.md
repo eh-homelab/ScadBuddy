@@ -99,7 +99,7 @@ back after a drop, every subscriber gets a gap. Two areas read it; each is off u
 | Area | What |
 |---|---|
 | `changes` | `GET /api/v1/internal/crud/<caller>/changes` for the callers `agent`, `fleet`, `camera` and `camera-relay`, as `agent_changes/hub.py` serves them: the same frames (`change`, `ready`, `reconnected`, the keepalive every 15 s), the `Last-Event-ID` replay (at most 1000 events, else `resync`), the gap's replay, and the filters (`fleet.*` kinds only to `fleet`; `printer.changed` and `camera.reconnect` only to the camera callers; the other channels only to `agent`). At most 4 streams per credential and peer address (the TCP peer, never `X-Forwarded-For`, as uvicorn `--no-proxy-headers` gives it to Python) and 64 in all (429); `fleet` and the two camera callers have budgets of their own, 8 each |
-| `ws` | `WS /api/v1/ws`, the browser's realtime socket, as `api/realtime.py` serves it: the topic protocol (`subscribe`, `unsubscribe`, `check`; `subscribed` with `last`, `changed`, `event`, `resync`, `ping` every 25 s, `error`), the origin check, `SCADBUDDY_AUTH_MODE=enforce`'s refusal before the handshake, a revoked session's close (4401), and the socket cap. In `observe`, a socket that `enforce` would refuse is counted in `scadbuddy.auth.would_refuse` (by `class` and `reason`), as `auth/check.py` counts it. A handshake with a personal access token (`sbpat_`) goes to Python, which resolves those |
+| `ws` | `WS /api/v1/ws`, the browser's realtime socket, as `api/realtime.py` serves it: the topic protocol (`subscribe`, `unsubscribe`, `check`; `subscribed` with `last`, `changed`, `event`, `resync`, `ping` every 25 s, `error`), the origin check, `SCADBUDDY_AUTH_MODE=enforce`'s refusal before the handshake, a revoked session's close (4401), and the socket cap. The handshake goes through `internal/auth`'s gate as an `api` route (the caller from a session cookie, an `sbpat_` access token or an `sbsvc_` credential), so `observe` counts a socket that `enforce` would refuse in the gate's `scadbuddy.auth.would_refuse`, as `auth/check.py` counts it |
 
 `ws` reads `SCADBUDDY_PUBLIC_URL` (the setting `public_url`'s stored value comes first, read
 at each handshake), `SCADBUDDY_ALLOWED_ORIGINS` and `SCADBUDDY_REALTIME_SOCKETS` (default 256;
@@ -162,6 +162,11 @@ An area Go answers in part leaves its other routes to Python: name it only where
 codec's subjects and payloads, and the canonical JSON of the input and response hashes; its tests
 open every vector in `backend/tests/fixtures/`. `internal/gate` is the gate's validator, pinned by
 `pending-input-vectors.json` and `response-hash-vectors.json`, and the `gate` area's routes.
+
+`internal/bambutag` decodes a Bambu Lab MIFARE Classic 1K filament tag and derives its sector
+keys from the UID, after the [RFID Tag Guide](https://github.com/Bambu-Research-Group/RFID-Tag-Guide/blob/a26cf83d7b296b71c558f8c332d464f4e5b9c314/BambuLabRfid.md)
+(#8058). It is pure: no I/O and no SQL, and it never writes a tag. Its `Tag` JSON is what a scan
+record stores; `testdata/*.json` pins it, and a change bumps `DecoderVersion`.
 
 A request that reaches Python carries one `X-Forwarded-For` value: its client, as the trusted
 proxies name it (`core/proxies.py`). So Python runs with `SCADBUDDY_TRUSTED_PROXIES=127.0.0.1`
@@ -264,7 +269,8 @@ A setting telemetry cannot use (such as a malformed endpoint URL) is logged once
   `scadbuddy.events.frames` (by `transport` and `frame`), `scadbuddy.events.resyncs` (by
   `transport` and `reason`: `place`, `gap` or `overflow`) and
   `scadbuddy.events.listener.reconnects`. `scadbuddy.auth.would_refuse` (by `class` and
-  `reason`) counts the sockets `observe` serves that `enforce` would refuse. Always cumulative.
+  `reason`) counts the requests and sockets `observe` serves that `enforce` would refuse
+  (the gate's one instrument). Always cumulative.
 - **Streams.** A change stream or a socket ends its server span when it starts
   (`telemetry.Streaming`), so no span stays open for the hours a stream lasts; its
   `http.server.request.duration` is the time to its start. A socket's span has status 101.

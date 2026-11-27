@@ -1,14 +1,17 @@
 package main
 
 import (
+	"context"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 
 	"github.com/jackc/pgx/v5/pgxpool"
 	"go.opentelemetry.io/otel/sdk/metric/metricdata"
 
+	"github.com/eh-homelab/ScadBuddy/tools/go/core/internal/auth"
 	"github.com/eh-homelab/ScadBuddy/tools/go/core/internal/bus"
 	"github.com/eh-homelab/ScadBuddy/tools/go/core/internal/httpx"
 	"github.com/eh-homelab/ScadBuddy/tools/go/core/internal/realtime"
@@ -79,8 +82,8 @@ func socketTelemetry(t *testing.T, env map[string]string) (*recorded, *streamAPI
 	})
 	hub := bus.NewHub(pool, rec.tel.Meter())
 	t.Cleanup(hub.Close)
-	st := &streams{hub: hub, meter: rec.tel.Meter(), env: func(name string) string { return env[name] }}
-	router, err := newRouter(pool, http.NotFoundHandler(), nil, "ws", env["SCADBUDDY_AUTH_MODE"], nil, nil, nil, st)
+	st := &streams{hub: hub, env: func(name string) string { return env[name] }}
+	router, err := newRouter(pool, http.NotFoundHandler(), nil, "ws", env["SCADBUDDY_AUTH_MODE"], rec.tel.Meter(), nil, nil, st)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -114,6 +117,20 @@ func TestAnObservedSocketCountsWhatEnforceWouldRefuse(t *testing.T) {
 	expect(t, len(counts), 2)
 	expect(t, counts["api signed_out"], int64(1))
 	expect(t, counts["api out_of_scope"], int64(1))
+	// One instrument in the process: the gate's, which the public routes count in too.
+	var rm metricdata.ResourceMetrics
+	if err := rec.reader.Collect(context.Background(), &rm); err != nil {
+		t.Fatal(err)
+	}
+	var scopes []string
+	for _, sm := range rm.ScopeMetrics {
+		for _, m := range sm.Metrics {
+			if m.Name == auth.WouldRefuseMetric {
+				scopes = append(scopes, sm.Scope.Name)
+			}
+		}
+	}
+	expect(t, strings.Join(scopes, ","), "github.com/eh-homelab/ScadBuddy/tools/go/core/internal/auth")
 }
 
 // A socket's span ends as it is accepted, with status 101. A check's queries run later, so

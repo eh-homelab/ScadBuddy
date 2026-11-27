@@ -57,7 +57,8 @@ describe('TagPanel', () => {
     await user.type(screen.getByLabelText('Tag UID'), '04 AA BB CC')
     await user.click(screen.getByRole('button', { name: 'Bind tag' }))
     await waitFor(() => expect(onChanged).toHaveBeenCalled())
-    expect((await getSpool(spoolId(2))).tag?.tag_uid).toBe('04AABBCC')
+    // A 4-byte UID is stored in the AMS's form, `<uid>00000100` (#8042).
+    expect((await getSpool(spoolId(2))).tag?.tag_uid).toBe('04AABBCC00000100')
   })
 
   it('test_move_it_here_is_not_an_override', async () => {

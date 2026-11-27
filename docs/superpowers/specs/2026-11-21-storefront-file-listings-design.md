@@ -1204,6 +1204,33 @@ colour each slot needs, and "Wait for the right colour" (#6218) is on by default
   price, order it, and print the item: the print puts the held copy into "Storefront"
   and prints it. Record the new file id and the run id in the go-live PR.
 
+#### 11.4.1 Results (measured on prod, 2026-11-26)
+
+Measured with the agent's MCP tools, the storefront edge at `/api/store/v1` with `curl`,
+and reads of prod's `operations`, `storefront_slice_prices`, `library_files` and
+`order_item_fulfilments` rows (`deploy/CLAUDE.md` "Prod checks").
+
+- The listing: `4dfb08f8-a60e-445d-b8a5-6d9cd926cc0d`, library file 1000001775 (a
+  three-part cap keychain 3MF, sha256 `b81265e1…0191cb`; no two-part file was at hand,
+  and publish kept all three parts). The H2C (`3DP-31B-598`), two 0.4 mm High Flow
+  nozzles, standard tier, Textured PEI plate, colours Turquoise, Jade White and Hot Pink
+  (PLA Basic).
+- The visitor's price (`POST …/listings/{id}/price`): $2.00, source `slice`, operation
+  `ca585b51010640e596eae956975e1cf8` (cost $0.62, 1987 s, 8.0 / 1.6 / 2.6 g).
+- The back-office quote (`order_item_quote` `slice`, order ORD-2026-19, spools from the
+  H2C's trays: Silver for the Turquoise slot, which no tray held, Jade White, Hot Pink):
+  $2.00, operation `77cbfa9092f54dd3b100be004797daae` (cost $0.79, 2466 s,
+  7.3 / 5.1 / 2.5 g).
+- The totals match, but only because both round up to $2.00. The visitor's slice names
+  no tray (`orders/storefront/slice_profile.py`), so the slicer places the slots on the
+  extruders itself; the back office slices with the trays' sides. Here that gave 3.5 g
+  more white and 8 minutes more in the back office. A larger print can price differently.
+- After the file was trashed (18:02 UTC), the visitor's price was the same firm $2.00
+  and its cart line `firm`. The visitor's order: ORD-2026-20 (`pay_now: true`).
+- `order_item_print` put the held copy in "Storefront" as library file **1000001779**
+  (same sha256) and printed it as run **`7cb24b655d0740999b530c96fb9f8f7a`** (per-print
+  copy 1000001780). The attempt succeeded at 20:17 UTC, and the item is `printed`.
+
 ## 12. PR split
 
 Each PR is a reviewable step. A file listing cannot be published, or is not shown to a
