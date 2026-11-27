@@ -97,14 +97,14 @@ function play(call: MockCall, steps: Step[]) {
     timers.delete(timer)
     const [kind, fields] = step
     const data = { call: call.row.id, device: call.row.device_id, ...fields }
-    const event: CallEvent = { id: String(++seq), kind, at: new Date().toISOString(), data }
+    const event: CallEvent = { id: `device-event-${++seq}`, kind, at: new Date().toISOString(), data }
     call.events.push(event)
     if (kind === 'device.call_done') {
       call.row.outcome = 'done'
       call.row.ended_at = event.at ?? null
       call.result = fields as CallResult
     }
-    emitRealtime(kind, [`device:${call.row.device_id}`, `device:call:${call.row.id}`], data)
+    emitRealtime(kind, [`device:${call.row.device_id}`, `device:call:${call.row.id}`], data, event.id)
     play(call, rest)
   }, stepMs)
   timers.add(timer)

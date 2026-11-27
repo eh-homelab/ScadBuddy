@@ -57,7 +57,7 @@ it('offers the pairing code when no phone is online', async () => {
 it('lets the person choose between two online phones', async () => {
   setDevices([PHONE, { ...OLD_PHONE, online: true }])
   renderPage(<UseMyPhone />)
-  expect(await screen.findByRole('combobox', { name: 'Phone' })).toHaveValue(PHONE.id)
+  expect(await screen.findByRole('combobox', { name: 'Phone' })).toHaveTextContent(PHONE.name)
 })
 
 it('shows nothing where core does not serve the devices routes', async () => {

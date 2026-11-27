@@ -10,6 +10,7 @@ import { AddDevice } from './AddDevice'
 import { DeviceCall, type CallEnd } from './DeviceCall'
 import { LIST_POLL_MS, PAIRING_POLL_MS, usePolledDevices } from './useDevices'
 import { Button } from '@/components/ui/button'
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select'
 
 /** The methods this block offers, with their button. */
 const OFFERED: { method: DeviceMethod; label: string; icon: typeof NfcIcon }[] = [
@@ -88,19 +89,19 @@ export function UseMyPhone() {
         <>
           {usable.length > 1 && (
             <div className="flex items-center gap-2">
-              <label htmlFor={pickerId}>Phone</label>
-              <select
-                id={pickerId}
-                value={device.id}
-                onChange={(event) => setChosen(event.target.value)}
-                className="h-9 min-w-0 rounded-md border border-input bg-transparent px-2"
-              >
-                {usable.map((one) => (
-                  <option key={one.id} value={one.id}>
-                    {one.name}
-                  </option>
-                ))}
-              </select>
+              <span id={`${pickerId}-label`}>Phone</span>
+              <Select value={device.id} onValueChange={setChosen}>
+                <SelectTrigger aria-labelledby={`${pickerId}-label`} className="min-w-0">
+                  <SelectValue />
+                </SelectTrigger>
+                <SelectContent>
+                  {usable.map((one) => (
+                    <SelectItem key={one.id} value={one.id}>
+                      {one.name}
+                    </SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
             </div>
           )}
           <div className="flex flex-wrap gap-2">
