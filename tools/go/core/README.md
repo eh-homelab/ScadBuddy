@@ -43,7 +43,7 @@ unchanged, to the Python API: WebSockets, SSE and large bodies included. On prod
 | `operations` | those, and `POST /operations` and `…/{id}/finish`, each with its `activity` row and `activity.changed` event in its transaction (`internal/activity`) |
 | `workspace:read` | `GET /workspace/files`, `…/file`, `…/usage`, and `POST …/session-files` |
 | `workspace:sql` | those, and `POST /workspace/file-deletes`, `…/sweeps` and `…/reconciles` |
-| `workspace` † | every route of `crud_agent_workspace.py`: those, and `GET /workspace/status`, `…/file-bytes`, `POST …/file-writes`, `…/copies`, `…/blob-moves` (below). Not in this build's `SCADBUDDY_CORE_AREAS` yet: its blob store needs `internal/blobstore`'s read and write by key |
+| `workspace` † | every route of `crud_agent_workspace.py`: those, and `GET /workspace/status`, `…/file-bytes`, `POST …/file-writes`, `…/copies`, `…/blob-moves` (below), over the blob store in process |
 | `activity-kinds` | `POST /activity-kinds` |
 | `browser-origins` | `GET` `/browser-origins`, `…/approved`; `POST` `…/approve`, `…/revoke` |
 | `bridge-tabs` | `/session-tabs`, `/tab-owners` and its `claim`, `refresh`, `release`, `release-all`; `PUT /tab-images/{name}`, `POST …/{name}/take` |
@@ -103,8 +103,10 @@ file replaced meanwhile ends the stream short. The rotation's re-wrap stays Pyth
 `backend/tests/fixtures/workspace-seal-vectors.json`, which `tests/test_workspace_seal_vectors.py`
 writes from Python's own functions (`UPDATE_WORKSPACE_SEAL_VECTORS=1`), holds Go to Python's
 bytes: Go seals each file with the same IVs to the same bytes, opens Python's, and wraps each
-file key alike. Its blob store is `workspace.Store` (`Backend`, `Put`, `Get`), which
-`internal/blobstore` is to provide.
+file key alike. Its blob store is `workspace.Store` (`Backend`, `Put`, `Get`): main.go's
+`workspaceBlobs` over `internal/blobstore`'s `Backend`, `PutContent` and `Fetch` (below), which
+names a refusal by Python's class (`StoreFullError`, `StageLockBusyError`) in a write's 503. Like
+`package-mirrors` it needs the KEK, and serves only `store_backend` `s3` or `local`.
 
 Area `fleet` (`internal/fleet`) is caller `fleet`'s (scope `crud.fleet`), under
 `/api/v1/internal/crud/fleet`: `POST /agents/{session_id}/touch`, `GET /agents`, `PUT` and
@@ -213,7 +215,7 @@ commit of it is a 404. Refusals carry a `reason`: 422 `kind_not_allowed`, 413 `u
 507 `store_full`, 404 `upload_not_found`, 410 `upload_expired`, 409 `upload_not_received`, 422
 `upload_mismatch`, 409 `store_object_mismatch`, 503 `store_unavailable` or `store_busy`.
 A Go handler in core reads a blob in-process with `Blobs.OpenKey(ctx, key)` (a `store_blobs` key, the form Python's `blob_key` and `blob_refs` hold) or `Blobs.Open(ctx, kind, sha256)`. It adds no route. The read looks up the row, sends a presigned GET to the row's S3 object, waits at most a minute for its headers, and streams the bytes with their `Ref` for as long as the caller's context allows. The stream checks size and SHA-256 and ends with `ErrBlobMismatch` on a wrong object. A missing row or object is `ErrBlobNotFound`. A store that is not S3, or a row on another backend, is `ErrNotConfigured`.
-`Blobs.Claim`, `Blobs.PublishFile` and `Blobs.ReadFile` (#8137) are the rest of the store in process, for area `package-mirrors` (above). A publish goes through `put`: the bytes spooled and hashed, the object's stage lock held shared as a commit holds it, the object reused or stored with the caps checked (`stage`), the row written by the caller's `indexer`, and the object removed again when that writes no row and no other row names it (`removeUnnamed`). It adds no route; the upload routes and their kinds are as above.
+`Blobs.Claim`, `Blobs.PublishFile` and `Blobs.ReadFile` (#8137) are the rest of the store in process, for area `package-mirrors` (above). A publish goes through `put`: the bytes spooled and hashed, the object's stage lock held shared as a commit holds it, the object reused or stored with the caps checked (`stage`), the row written by the caller's `indexer`, and the object removed again when that writes no row and no other row names it (`removeUnnamed`). It adds no route; the upload routes and their kinds are as above. `Blobs.Backend`, `Blobs.PutContent` and `Blobs.Fetch` (#8131) are ContentStore's backend name, `put` with no key then `touch`, and `stat` then `get`, for area `workspace`: a put goes through `put` too, its row written by `putIn` at `<kind>-<sha256>` in a transaction, and the object the key named before released when it was another of this store's (`release_replaced`); a fetch of a lost object forgets its row. They take any kind, `workspace` among them; the upload routes' kinds stay as above. Area `package-mirrors` answers a stored blob past its read bound (`ErrTooLarge`) as a 500 with reason `blob-too-large`, its key logged.
 `internal/blobclient` is its Go client: `New(baseURL, token, tel)`, `Upload(ctx, kind, mediaType, body)`; each call to core may take 2 minutes, longer than a busy commit takes to answer `store_busy`.
 Both sides trace their requests with `telemetry`'s `Transport`: each span records the method, the
 status and the peer (`s3` for the store), never a URL, so a presigned query is never recorded. A

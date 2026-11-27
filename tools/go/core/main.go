@@ -292,6 +292,42 @@ func (m mirrorBlobs) PublishFile(ctx context.Context, key, name string, file io.
 	return err
 }
 
+func (m mirrorBlobs) ReadFile(ctx context.Context, key, name string, max int64) ([]byte, bool, error) {
+	data, found, err := m.Blobs.ReadFile(ctx, key, name, max)
+	if errors.Is(err, blobstore.ErrTooLarge) {
+		return nil, false, fmt.Errorf("%w: %w", packages.ErrTooLarge, err)
+	}
+	return data, found, err
+}
+
+// workspaceBlobs is the blob store as area workspace calls it (workspace.Store). Python
+// names a store failure by its class in a write's refusal; the classes are its own.
+type workspaceBlobs struct{ *blobstore.Blobs }
+
+func (w workspaceBlobs) Put(ctx context.Context, kind, _ string, data []byte) (string, error) {
+	key, err := w.Blobs.PutContent(ctx, kind, data)
+	switch blobstore.Reason(err) {
+	case "store_full":
+		return "", storeClass{err, "StoreFullError"}
+	case "store_busy":
+		return "", storeClass{err, "StageLockBusyError"}
+	}
+	return key, err
+}
+
+func (w workspaceBlobs) Get(ctx context.Context, key string) (io.ReadCloser, bool, error) {
+	return w.Blobs.Fetch(ctx, key)
+}
+
+// storeClass is a store failure with the name of Python's exception class for it.
+type storeClass struct {
+	error
+	class string
+}
+
+func (e storeClass) Class() string { return e.class }
+func (e storeClass) Unwrap() error { return e.error }
+
 // sealed are the areas that seal or open with the KEK: without one they refuse to start.
 var sealed = map[string]bool{
 	"credentials": true, "payload-keys": true, "keys": true, "notify": true, "transcripts": true,
@@ -400,6 +436,14 @@ func newRouter(pool *pgxpool.Pool, next http.Handler, keys *seal.Keys, areas, au
 			}
 			store := mirrorBlobs{blobstore.New(pool, keys, lookupEnv, tel)}
 			router.Add("agent", packages.MirrorAreas(pool, store)[packages.MirrorArea]...)
+		case "workspace":
+			// Every route of crud_agent_workspace.py over the blob store in process (#8131):
+			// a file is sealed under the KEK's keys, and the store's secret key is too.
+			if keys == nil {
+				return nil, fmt.Errorf("SCADBUDDY_CORE_AREAS names %q, which needs %s", name, seal.Variable)
+			}
+			store := workspaceBlobs{blobstore.New(pool, keys, lookupEnv, tel)}
+			router.Add("agent", workspace.Routes(pool, keys, store)...)
 		case "changes":
 			s := streamOf()
 			for caller, routes := range changes.Routes(s.hub) {
