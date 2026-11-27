@@ -16,13 +16,6 @@ import (
 	"github.com/eh-homelab/ScadBuddy/tools/go/telemetry"
 )
 
-// New is the store over pool for a route of this process, as Routes builds it: keys may not
-// be nil (the store's secret key is sealed), tel is the process's telemetry, nil for none.
-func New(pool *pgxpool.Pool, keys *seal.Keys, lookupEnv func(string) (string, bool), tel *telemetry.Telemetry) *Blobs {
-	client := &http.Client{Timeout: readTTL, Transport: tel.Transport(httpx.Outside(nil), storePeer)}
-	return &Blobs{Pool: pool, Keys: keys, LookupEnv: lookupEnv, HTTP: client, Now: time.Now}
-}
-
 // Put stores body as a blob of kind for a route of this process (#8148: a tag read's raw
 // dump), as a commit does with the bytes already in hand: no staging object and no URL. It
 // takes the same kinds and limits, the store's caps, the object's stage lock, and never
