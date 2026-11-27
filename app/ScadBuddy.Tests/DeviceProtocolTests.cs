@@ -215,6 +215,7 @@ public class DeviceProtocolTests
 	[InlineData(false, false, "timeout")]
 	public void AWriteStoppedBeforeItWroteSaysWhyAndThatNothingWasWritten(bool byPerson, bool ended, string code)
 	{
+		Assert.Equal(code, DeviceProtocol.CodeOf(DeviceProtocol.CallStopped(byPerson, ended)));
 		var error = DeviceProtocol.WriteStopped(byPerson, ended);
 		Assert.Equal(code, DeviceProtocol.CodeOf(error));
 		Assert.Contains("nothing was written", error);

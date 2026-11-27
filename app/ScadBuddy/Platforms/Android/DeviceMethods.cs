@@ -111,7 +111,12 @@ static class DeviceMethods
 						continue;
 					}
 					// No write without its backup: an upload that fails ends the call.
-					var (backup, _, _, _) = await SendDump(call, tag, before);
+					string backup;
+					try { (backup, _, _, _) = await SendDump(call, tag, before); }
+					catch (OperationCanceledException) when (call.Token.IsCancellationRequested)
+					{
+						return DeviceProtocol.Failed(DeviceProtocol.WriteStopped(call.CancelledByPerson, call.Ended));
+					}
 					call.Event(DeviceProtocol.TagFound(uid, tech, 0, 0, backup));
 					// A write needs time for its read-back: it does not start when too little is left.
 					if (call.Request.Deadline - DateTimeOffset.UtcNow < WriteNeeds)

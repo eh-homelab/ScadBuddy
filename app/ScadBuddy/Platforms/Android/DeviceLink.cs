@@ -25,7 +25,7 @@ public sealed class DeviceLink
 	static readonly TimeSpan Margin = TimeSpan.FromSeconds(5);
 	const int FrameMax = 64 << 10;
 	static readonly TimeSpan StableFor = TimeSpan.FromMinutes(1);
-	static readonly TimeSpan MaxCall = TimeSpan.FromMinutes(10);
+	static readonly TimeSpan MaxCall = TimeSpan.FromMilliseconds(int.MaxValue - 1);
 	// RFC 6455 close code realtime.SignedOut: the pairing ended (revoked, or its token expired).
 	const int SignedOut = 4401;
 
@@ -223,7 +223,13 @@ public sealed class DeviceLink
 			if (seen.Contains(call.Call)) return;
 			seen.Enqueue(call.Call);
 			if (seen.Count > 64) seen.Dequeue();
-			if (running is null) running = started = new RunningCall(call, new CancellationTokenSource());
+			if (running is null)
+			{
+				// The call's context is made here, under the lock, so an end that comes at once
+				// (core's call_done, a new pairing) always reaches it.
+				var cancel = new CancellationTokenSource();
+				running = started = new RunningCall(call, cancel) { Context = new DeviceCall(this, p, call, cancel.Token) };
+			}
 		}
 		if (started is null)
 		{
@@ -239,13 +245,17 @@ public sealed class DeviceLink
 		using var span = Telemetry.Source.StartActivity("device.call");
 		span?.SetTag("device.method", call.Method);
 		var until = call.Deadline - Margin - DateTimeOffset.UtcNow;
-		// Core's deadlines are at most 2 minutes; a far one is held to MaxCall, which CancelAfter takes.
+		// CancelAfter takes at most int.MaxValue ms (about 24 days); core's deadlines are at most 2 minutes.
 		run.Cancel.CancelAfter(until <= TimeSpan.Zero ? TimeSpan.Zero : until > MaxCall ? MaxCall : until);
-		var context = new DeviceCall(this, p, call, run.Cancel.Token);
-		lock (gate) run.Context = context;
+		var context = run.Context!;
 		JsonObject result;
 		try { result = await DeviceMethods.Run(context); }
 		catch (Exception error) when (error is CallFailed or UploadFailed) { result = DeviceProtocol.Failed(error.Message); }
+		// An upload stopped by a Cancel, by core, or by a new pairing.
+		catch (OperationCanceledException) when (context.Token.IsCancellationRequested)
+		{
+			result = DeviceProtocol.Failed(DeviceProtocol.CallStopped(context.CancelledByPerson, context.Ended));
+		}
 		catch (Exception error) { result = DeviceProtocol.Failed($"failed: {error.GetType().Name}"); }
 		await context.Flush();
 		var outcome = result["outcome"]?.GetValue<string>() ?? "error";
@@ -302,7 +312,7 @@ public sealed class DeviceLink
 	{
 		public CallRequest Call { get; } = call;
 		public CancellationTokenSource Cancel { get; } = cancel;
-		public DeviceCall? Context { get; set; }
+		public DeviceCall? Context { get; init; }
 
 		/// <summary>Core ended the call, or a new pairing replaced its own: stop it, uploads too.</summary>
 		public void End()

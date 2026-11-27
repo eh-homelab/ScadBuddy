@@ -227,6 +227,12 @@ public static class DeviceProtocol
 		_ => "no_tag: no tag was tapped before the deadline",
 	};
 
+	/// <summary>The error of a call stopped before its deadline's margin, or at it: who or what stopped it.</summary>
+	public static string CallStopped(bool byPerson, bool ended) =>
+		byPerson ? "cancelled: the person stopped the call on the phone"
+		: ended ? "ended: the call ended before the phone was done"
+		: "timeout: the call's deadline came before the phone was done";
+
 	/// <summary>The error of an nfc.write stopped after its backup and before it wrote: nothing was written.</summary>
 	public static string WriteStopped(bool byPerson, bool ended) =>
 		byPerson ? "cancelled: the person stopped the write on the phone; nothing was written"
