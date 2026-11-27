@@ -35,6 +35,7 @@ from scadbuddy.printers.models import (
 from scadbuddy.printers.store import PrinterStore
 from tests.conftest import PgPool
 from tests.printers.conftest import KEK
+from tests.support.printers import MERGED_BY
 
 pytestmark = pytest.mark.requires_postgres
 
@@ -160,7 +161,9 @@ def printers(store: PrinterStore) -> FakePrinters:
 async def run(
     printers: FakePrinters, client: FakeClient, *, dry_run: bool = False
 ) -> PrinterSyncResult:
-    return await sync_printers(cast(Printers, printers), cast(Any, client), dry_run=dry_run)
+    return await sync_printers(
+        cast(Printers, printers), cast(Any, client), dry_run=dry_run, by=MERGED_BY
+    )
 
 
 async def test_an_empty_registry_fills_with_linked_printers_and_their_lan_links(
@@ -242,7 +245,7 @@ async def test_an_adoption_the_strip_made_meanwhile_is_not_the_syncs_change(
     """#4861 review: the pass read the row with its synthetic serial, then the strip's own
     `ensure_bambuddy` adopted the real one before the sync's. The sync wrote nothing, so
     its entry is not `changed`, though the serial it read did change."""
-    synthetic = store.ensure_bambuddy(1, serial=None, name="P1", model="H2C")
+    synthetic = store.ensure_bambuddy(1, serial=None, name="P1", model="H2C", by=MERGED_BY)
     printer = Printer.model_validate(bambuddy(1, SERIAL, ip=None))
     store.record_bambuddy_view(synthetic.id, printer_view(printer, datetime.now(UTC)))
     real_list = store.list
@@ -250,7 +253,7 @@ async def test_an_adoption_the_strip_made_meanwhile_is_not_the_syncs_change(
     def listed_then_adopted() -> list[PrinterRow]:
         rows = real_list()
         monkeypatch.setattr(store, "list", real_list)
-        store.ensure_bambuddy(1, serial=SERIAL, name="P1", model="H2C")  # the strip
+        store.ensure_bambuddy(1, serial=SERIAL, name="P1", model="H2C", by=MERGED_BY)  # the strip
         return rows
 
     monkeypatch.setattr(store, "list", listed_then_adopted)
@@ -263,7 +266,7 @@ async def test_an_adoption_the_strip_made_meanwhile_is_not_the_syncs_change(
 async def test_the_syncs_own_adoption_is_its_change(
     printers: FakePrinters, store: PrinterStore
 ) -> None:
-    synthetic = store.ensure_bambuddy(1, serial=None, name="P1", model="H2C")
+    synthetic = store.ensure_bambuddy(1, serial=None, name="P1", model="H2C", by=MERGED_BY)
     printer = Printer.model_validate(bambuddy(1, SERIAL, ip=None))
     store.record_bambuddy_view(synthetic.id, printer_view(printer, datetime.now(UTC)))
     # #4864 review: the view the sync records is the one already there, so the adoption
@@ -283,7 +286,7 @@ async def test_the_syncs_merge_into_the_serials_row_is_its_change(
     """#4864 review: `_ensure_locked`'s merge path. The Bambuddy printer's synthetic row
     learns its serial, which an unlinked physical row already holds: the synthetic row is
     merged into that one, which takes the link, and both are announced."""
-    synthetic = store.ensure_bambuddy(1, serial=None, name="P1", model="H2C")
+    synthetic = store.ensure_bambuddy(1, serial=None, name="P1", model="H2C", by=MERGED_BY)
     printer = Printer.model_validate(bambuddy(1, SERIAL, ip=None))
     store.record_bambuddy_view(synthetic.id, printer_view(printer, datetime.now(UTC)))
     holder = store.create(PrinterCreate(serial=SERIAL, name="Mine", model="H2C"))
@@ -359,9 +362,9 @@ async def test_conflicts_are_reported_never_overwritten(
     printers: FakePrinters, store: PrinterStore
 ) -> None:
     held = store.create(PrinterCreate(serial=SERIAL, name="Held"))
-    store.link_bambuddy(held.id, 7)
+    store.link_bambuddy(held.id, 7, by=MERGED_BY)
     unlinked = store.create(PrinterCreate(serial=OTHER_SERIAL, name="Unlinked"))
-    store.link_bambuddy(unlinked.id, 2)
+    store.link_bambuddy(unlinked.id, 2, by=MERGED_BY)
     store.unlink_bambuddy(unlinked.id)
     result = await run(printers, FakeClient([bambuddy(1, SERIAL), bambuddy(2, OTHER_SERIAL)]))
     assert [e.action for e in result.entries] == ["conflict", "skipped"]
@@ -715,7 +718,7 @@ async def test_a_vp_never_adopts_a_row_the_user_unlinked_from_bambuddy(
     printers: FakePrinters, store: PrinterStore
 ) -> None:
     unlinked = store.create(PrinterCreate(serial=VP_SERIAL, name="Unlinked"))
-    store.link_bambuddy(unlinked.id, 4)
+    store.link_bambuddy(unlinked.id, 4, by=MERGED_BY)
     store.unlink_bambuddy(unlinked.id)
     result = await run(printers, FakeClient([], [vp(1, VP_SERIAL, None)]))
     assert [e.action for e in result.entries] == ["conflict"]
@@ -735,7 +738,7 @@ async def test_a_vp_never_adopts_a_serial_a_bambuddy_printer_reports(
         may_adopt(VirtualPrinter.model_validate(vp(1, SERIAL, None, mode="proxy")), set()) is False
     )
     held = store.create(PrinterCreate(serial=SERIAL, name="Held"))
-    store.link_bambuddy(held.id, 1)
+    store.link_bambuddy(held.id, 1, by=MERGED_BY)
     store.unlink_bambuddy(held.id)  # the physical pass then skips it, unlinked
     result = await run(printers, FakeClient([bambuddy(1, SERIAL)], [vp(2, SERIAL, None)]))
     assert [e.action for e in result.entries] == ["skipped", "conflict"]
@@ -845,7 +848,7 @@ def _prods_registry(store: PrinterStore) -> str:
     """Prod on 2026-11-03: the H2C linked to Bambuddy printer 1, and the row made and
     LAN-linked by hand for Bambuddy's VP 1, which forwards to it."""
     h2c = store.create(PrinterCreate(serial=SERIAL, name="3DP-31B-598"))
-    store.link_bambuddy(h2c.id, 1)
+    store.link_bambuddy(h2c.id, 1, by=MERGED_BY)
     made = store.create(PrinterCreate(serial=VP_SERIAL, name="Bambuddy (virtual)"))
     store.link_lan(made.id, LanLink(host="192.168.10.9", access_code="vpcode12"), cert_sha256=CERT)
     return made.id
@@ -886,7 +889,7 @@ async def test_the_boot_asks_bambuddy_nothing_when_no_adoption_is_due(
 
     made = store.create(PrinterCreate(serial=SERIAL, name="H2C"))
     if registry == "bambuddy_linked_only":
-        store.link_bambuddy(made.id, 1)
+        store.link_bambuddy(made.id, 1, by=MERGED_BY)
     else:
         store.link_lan(made.id, LanLink(host="10.0.0.9", access_code="12345678"), cert_sha256=CERT)
     used = _boot_client(monkeypatch, FakeClient([], []))
@@ -923,7 +926,7 @@ def test_a_row_unlinked_from_bambuddy_does_not_follow_it_for_the_boot_pass(
     from scadbuddy.printers.bambuddy_sync import boot_adoption_due
 
     h2c = store.create(PrinterCreate(serial=SERIAL, name="H2C"))
-    store.link_bambuddy(h2c.id, 1)
+    store.link_bambuddy(h2c.id, 1, by=MERGED_BY)
     store.create(PrinterCreate(serial=VP_SERIAL, name="hand-made"))
     assert boot_adoption_due(store.list()) is True
     unlinked = store.unlink_bambuddy(h2c.id)
@@ -1048,7 +1051,7 @@ async def test_the_housekeeping_sweep_logs_a_missing_target_quietly_unless_there
     created = SyncEntry(kind="physical", name="P1", bambuddy_printer_id=1, action="created")
     result = PrinterSyncResult(dry_run=False, entries=[missing])
 
-    async def synced(*_: object) -> PrinterSyncResult:
+    async def synced(*_: object, **__: object) -> PrinterSyncResult:
         return result
 
     async def with_bambuddy(_state: object, sweep: Callable[[Any], Any]) -> None:

@@ -9,6 +9,7 @@ from typing import Any
 from fastapi.testclient import TestClient
 
 from tests.api.test_settings_runtime import _state
+from tests.conftest import HistoryRows
 from tests.support.operations import press
 
 PROBLEMS = "https://scadbuddy.dev/problems/entities/"
@@ -168,3 +169,52 @@ def test_required_is_refused_on_a_kind_that_does_not_check(client: TestClient) -
         "/api/v1/entity-kinds/supplier/property-schema", json={"schema": schema}, headers=press()
     )
     _code(put, 422, "bad_property_schema")
+
+
+def test_history_route_lists_newest_first(client: TestClient, history_rows: HistoryRows) -> None:
+    """#6949: the rows the history subscriber wrote, newest first (by `event_seq`)."""
+    entity = _spool_type(client)
+    kind, ref = entity.split(":", 1)
+    base = {"entity_id": str(uuid.uuid4()), "kind": kind, "ref": ref, "key": "colour_name"}
+    with _state(client).refs.pool.connection() as conn:
+        history_rows(
+            conn,
+            {**base, "event_seq": 1, "op": "set", "new": "Gold", "source": "manual"},
+            {**base, "event_seq": 2, "op": "set", "old": "Gold", "new": "Red", "source": "manual"},
+            {**base, "event_seq": 3, "op": "remove", "old": "Red"},
+        )
+    url = f"/api/v1/entities/{entity}/properties/history"
+    listed = client.get(url)
+    assert listed.status_code == 200, listed.text
+    changes = listed.json()["changes"]
+    assert [(c["op"], c["old"], c["new"]) for c in changes] == [
+        ("remove", "Red", None),
+        ("set", "Gold", "Red"),
+        ("set", None, "Gold"),
+    ]
+    assert changes[0]["actor"]["kind"] == "browser"
+    assert client.get(url, params={"key": "other"}).json() == {"changes": []}
+    assert client.get(url, params={"limit": 0}).status_code == 422
+    assert client.get(url, params={"limit": 501}).status_code == 422
+    assert len(client.get(url, params={"limit": 2}).json()["changes"]) == 2
+    _code(client.get("/api/v1/entities/nope/properties/history"), 422, "bad_entity_ref")
+
+
+def test_schema_history_route(client: TestClient, history_rows: HistoryRows) -> None:
+    one = {"type": "object"}
+    two = {"type": "object", "properties": {"a": {"type": "string"}}}
+    with _state(client).refs.pool.connection() as conn:
+        history_rows(
+            conn,
+            {"event_seq": 1, "owner": "kind:spool", "new": one},
+            {"event_seq": 2, "owner": "kind:spool", "old": one, "new": two},
+            {"event_seq": 3, "owner": "kind:printer", "new": one},
+        )
+    listed = client.get("/api/v1/entity-kinds/spool/property-schema/history")
+    assert listed.status_code == 200, listed.text
+    assert [(c["old"], c["new"]) for c in listed.json()["changes"]] == [(one, two), (None, one)]
+    item = client.get("/api/v1/entity-kinds/item/property-schema/history")
+    _code(item, 409, "schema_owned_by_item_kind")
+    _code(
+        client.get("/api/v1/entity-kinds/nope/property-schema/history"), 422, "unknown_entity_kind"
+    )

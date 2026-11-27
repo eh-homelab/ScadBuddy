@@ -835,6 +835,40 @@
           "legendFormat": "{{class}} {{reason}}"
         }
       ]
+    },
+    {
+      "id": 34,
+      "type": "timeseries",
+      "title": "Event subscriber lag",
+      "description": "How far each durable event subscriber's cursor is behind the event log (#6949, design §4.8): the events past its cursor, and the age of the oldest of them (right axis). The history subscriber runs in scadbuddy-core and writes the property history. A lag that only grows means it has stopped: a payload it cannot store stops it, and its log names the event's seq.",
+      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+      "gridPos": { "x": 0, "y": 93, "w": 24, "h": 8 },
+      "fieldConfig": {
+        "defaults": { "unit": "short", "min": 0 },
+        "overrides": [
+          {
+            "matcher": { "id": "byFrameRefID", "options": "B" },
+            "properties": [
+              { "id": "unit", "value": "s" },
+              { "id": "custom.axisPlacement", "value": "right" }
+            ]
+          }
+        ]
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+          "expr": "max by (subscriber) (scadbuddy_event_subscriber_lag_events{namespace=\"$namespace\"})",
+          "legendFormat": "{{subscriber}} events"
+        },
+        {
+          "refId": "B",
+          "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+          "expr": "max by (subscriber) (scadbuddy_event_subscriber_lag_seconds{namespace=\"$namespace\"})",
+          "legendFormat": "{{subscriber}} seconds"
+        }
+      ]
     }
   ]
 }

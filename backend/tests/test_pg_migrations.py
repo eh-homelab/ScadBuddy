@@ -130,7 +130,10 @@ def test_positional_ledger_applies_what_it_had_not_run(pg_conninfo: str) -> None
     _positional_ledger(pg_conninfo, [1, 2])
     with psycopg.connect(pg_conninfo) as conn:
         assert migrate(conn) == [m.id for m in MIGRATIONS[2:]]
-        assert conn.execute("SELECT count(*) FROM events").fetchone() == (0,)
+        # The only events are the property history's back-fill of the kinds' schemas (#6949).
+        assert conn.execute(
+            "SELECT count(*) FROM events WHERE kind <> 'entity_property_schema.changed'"
+        ).fetchone() == (0,)
 
 
 @pytest.mark.requires_postgres
@@ -2279,6 +2282,22 @@ def test_a_person_kind_with_a_seeded_id_and_other_stock_raises(pg_conninfo: str)
 
 
 @pytest.mark.requires_postgres
+def test_a_person_kind_with_a_seeded_id_is_compared_by_its_inherited_counting(
+    pg_conninfo: str,
+) -> None:
+    """`tool` sets no counting of its own; its seeded chain (equipment, durable) counts by
+    unit, so a person's `tool` tracked by unit, with stock, does not stop the migration."""
+    with psycopg.connect(pg_conninfo) as conn:
+        _before_inventory_class(conn)
+        conn.execute("UPDATE item_kinds SET builtin = false, tracking = 'unit' WHERE id = 'tool'")
+        _item(conn, "tool", "Hex key")
+        migrate(conn)
+        assert conn.execute("SELECT builtin FROM item_kinds WHERE id = 'tool'").fetchone() == (
+            True,
+        )
+
+
+@pytest.mark.requires_postgres
 def test_a_moved_kind_keeps_its_old_chains_schema(pg_conninfo: str) -> None:
     """§8 keeps every row's meaning: a kind whose parent changed keeps the properties its
     old chain gave it, in its own schema, and the report names it."""
@@ -2308,3 +2327,81 @@ def test_a_moved_kind_keeps_its_old_chains_schema(pg_conninfo: str) -> None:
             "hardware": ["mpn"],
             "ams_part": ["mpn"],
         }
+
+
+@pytest.mark.requires_postgres
+def test_property_history_backfills_existing_rows(pg_conninfo: str) -> None:
+    """#6949 (design §4.8): each property that exists before the history is one `set` event
+    at its own `updated_at`, past the history subscriber's starting cursor."""
+    history = _index("property_history_events")
+    with psycopg.connect(pg_conninfo) as conn:
+        migrate(conn, MIGRATIONS[:history])
+        before = conn.execute(
+            "INSERT INTO events (event_id, kind, at, payload) VALUES ('e0', 'job.progress',"
+            ' now(), \'{"id": "e0", "at": "2026-11-25T00:00:00Z", "kind": "job.progress"}\')'
+            " RETURNING seq"
+        ).fetchone()
+        assert before is not None
+        entity = conn.execute(
+            "INSERT INTO entities (kind, ref) VALUES ('item', 'i1') RETURNING id"
+        ).fetchone()
+        assert entity is not None
+        conn.execute(
+            "INSERT INTO entity_properties (entity_id, key, value, updated_at, updated_by)"
+            " VALUES (%s, 'b', '2', '2026-11-01T00:00:00Z', '{\"kind\": \"browser\"}'),"
+            " (%s, 'a', '\"x\"', '2026-11-02T00:00:00Z', '{\"kind\": \"browser\"}')",
+            (entity[0], entity[0]),
+        )
+        assert migrate(conn)[0] == MIGRATIONS[history].id
+        rows = conn.execute(
+            "SELECT e.seq, e.payload, p.updated_at FROM events e JOIN entity_properties p"
+            " ON p.entity_id = (e.payload->>'entity_id')::uuid AND p.key = e.payload->>'key'"
+            " WHERE e.kind = 'entity_property.changed' ORDER BY e.seq"
+        ).fetchall()
+        cursor = conn.execute("SELECT seq FROM event_subscribers WHERE name = 'history'").fetchone()
+        changed_at = [
+            conn.execute("SELECT %s::timestamptz", (p["changed_at"],)).fetchone()
+            for _, p, _ in rows
+        ]
+    assert [(p["key"], p["op"], p["old"], p["new"], p["ref"]) for _, p, _ in rows] == [
+        ("a", "set", None, "x", "i1"),
+        ("b", "set", None, 2, "i1"),
+    ]
+    assert [p["actor"] for _, p, _ in rows] == [{"kind": "browser"}] * 2
+    assert changed_at == [(updated_at,) for _, _, updated_at in rows]
+    assert cursor == before
+    assert all(seq > before[0] for seq, _, _ in rows)
+
+
+def _late(*slugs: str) -> tuple[Migration, ...]:
+    """Every file but `slugs`, as on a database that ran main before they merged."""
+    late = {MIGRATIONS[_index(s)].id for s in slugs}
+    return tuple(m for m in MIGRATIONS if m.id not in late)
+
+
+@pytest.mark.requires_postgres
+@pytest.mark.parametrize(
+    "first",
+    [MIGRATIONS, _late("inventory_service_caller", "service_callers_inventory_and_rotator")],
+    ids=["fresh", "late inventory files"],
+)
+def test_both_inventory_and_fleet_rotator_are_callers(
+    pg_conninfo: str, first: tuple[Migration, ...]
+) -> None:
+    """#6949: the `inventory` caller and main's `fleet-rotator` both pass both caller
+    CHECKs, whichever order their migrations ran in."""
+    with psycopg.connect(pg_conninfo) as conn:
+        migrate(conn, first)
+        migrate(conn)
+        for n, caller in enumerate(("inventory", "fleet-rotator")):
+            conn.execute(
+                "INSERT INTO service_credentials (id, caller, scopes, secret_hash,"
+                " secret_sealed, dek_sealed, kek_id, expires_at)"
+                " VALUES (%s, %s, '{}', %s, '', '', 'k', now() + interval '1 day')",
+                (f"{n:016x}", caller, bytes([n]) * 32),
+            )
+            conn.execute(
+                "INSERT INTO service_caller_suspensions (caller, suspended_at, suspended_by)"
+                " VALUES (%s, now(), 'test')",
+                (caller,),
+            )
