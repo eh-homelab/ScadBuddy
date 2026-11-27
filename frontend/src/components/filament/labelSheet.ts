@@ -263,6 +263,10 @@ export function httpsOrigin(candidate: string | null | undefined): string | null
   }
 }
 
+/** The label base of the settings (`filament_label_base_url`, else `public_url`), or null. */
+export const settingsLabelBase = (settings: { filament_label_base_url?: string | null; public_url?: string | null }): string | null =>
+  httpsOrigin(settings.filament_label_base_url) ?? httpsOrigin(settings.public_url)
+
 /** The address a place label opens: the https origin of the configured base, else this page's own origin. */
 export const labelBase = (baseUrl: string | null): string => httpsOrigin(baseUrl) ?? window.location.origin
 

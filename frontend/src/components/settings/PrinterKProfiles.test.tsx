@@ -173,6 +173,53 @@ describe('PrinterKProfiles (#7154)', () => {
     expect(mockKProfileNotes().PFUS1).toBeUndefined()
   })
 
+  it("deletes a cleared note through its own route, under the note's key", async () => {
+    const writes: string[] = []
+    server.events.on('request:start', ({ request }) => {
+      if (request.method !== 'GET') writes.push(`${request.method} ${new URL(request.url).pathname}`)
+    })
+    const { user } = await opened()
+    await user.click(await screen.findByRole('button', { name: 'Edit Bambu PLA Basic' }))
+    const form = screen.getByRole('form', { name: 'Edit Bambu PLA Basic' })
+    await user.clear(within(form).getByLabelText('Note'))
+    await user.click(within(form).getByRole('button', { name: 'Save K-profile' }))
+
+    await said('Deleted the note on Bambu PLA Basic.')
+    expect(writes).toEqual([expect.stringMatching(/^DELETE \/api\/v1\/printers\/[^/]+\/kprofiles\/notes\/PFUS1$/)])
+    expect(mockKProfileNotes().PFUS1).toBeUndefined()
+  })
+
+  it('deletes a note from the form with Delete note', async () => {
+    const { user } = await opened()
+    await user.click(await screen.findByRole('button', { name: 'Edit Bambu PLA Basic' }))
+    const form = screen.getByRole('form', { name: 'Edit Bambu PLA Basic' })
+    await user.click(within(form).getByRole('button', { name: 'Delete note' }))
+
+    await said('Deleted the note on Bambu PLA Basic.')
+    expect(mockKProfileNotes().PFUS1).toBeUndefined()
+    expect(screen.queryByRole('form', { name: 'Edit Bambu PLA Basic' })).not.toBeInTheDocument()
+  })
+
+  it('keeps the form open and says why when a note delete fails', async () => {
+    server.use(
+      http.delete('/api/v1/printers/:id/kprofiles/notes/:key', () => HttpResponse.json({ detail: 'boom' }, { status: 500 })),
+    )
+    const { user } = await opened()
+    await user.click(await screen.findByRole('button', { name: 'Edit Bambu PLA Basic' }))
+    const form = screen.getByRole('form', { name: 'Edit Bambu PLA Basic' })
+    await user.click(within(form).getByRole('button', { name: 'Delete note' }))
+
+    expect(await within(form).findByRole('alert')).toHaveTextContent('boom')
+    expect(mockKProfileNotes().PFUS1).toBeDefined()
+  })
+
+  it('offers Delete note only on a profile that has a note', async () => {
+    const { user } = await opened()
+    await user.click(await screen.findByRole('button', { name: 'Edit High Flow_Bambu PETG HF' }))
+    const form = screen.getByRole('form', { name: 'Edit High Flow_Bambu PETG HF' })
+    expect(within(form).queryByRole('button', { name: 'Delete note' })).not.toBeInTheDocument()
+  })
+
   it('edits only the note without writing the profile, so K keeps all six places', async () => {
     const writes: string[] = []
     server.events.on('request:start', ({ request }) => {

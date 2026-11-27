@@ -316,6 +316,18 @@ A read's source is the caller's: an access token or a service credential is `age
 `image` (a committed `scan_image` blob) and `location` are checked and stored on the row.
 `Reads.RecordMifare(ctx, body, actor, source)` is the same write for a Go caller (#8157). With
 the area off, Python answers a MIFARE read 503 `mifare_needs_core`.
+A body with a `read_id` that is not null (#8244) names a paired device's read in place of `uid`, `tag_type`,
+`records` and `mifare_blocks` (with any of them not null, or a `records` that is not empty, it is a 422 `device_read_invalid`, as is a photo read). Core loads the
+read (`devices.Store.OwnRead`: a read of a device the caller does not own is a 404
+`read_not_found`, with `code`, as a read that is not there), reads its `tag_dump` blob, and takes the dump's
+UID, its tech as `tag_type` (cut to 32 bytes, on a whole character), and its blocks as `mifare_blocks`. A dump
+that is no MIFARE Classic 1K read (no block, a UID that is not 4 bytes, or blocks past 63) gives
+a UID-only read with the dump's records instead. Then it decodes the read as an inline one. The
+history row's source is `app`, and its `device_read_id` names the read. Only the history row is
+idempotent: a second post of the same read answers the first row's `tag_read_id` and writes no
+second row, but the rest runs again (Python's answer and last-seen mark, the tag's update), and
+an `image` sent with it is not kept. With the area off, Python answers a `read_id` 503
+`device_read_needs_core`.
 
 A request that reaches Python carries one `X-Forwarded-For` value: its client, as the trusted
 proxies name it (`core/proxies.py`). So Python runs with `SCADBUDDY_TRUSTED_PROXIES=127.0.0.1`
@@ -343,7 +355,7 @@ CORS rule and the app's CSP admit only the storefront), so core takes the photo'
 | Route | Body | Answer |
 |---|---|---|
 | `POST /api/v1/scan/images` | the photo's bytes (JPEG, PNG or WebP; at most 12 MiB) | `{key, media_type, sha256, size}`: a `scan_image` blob, its type read from its bytes, never from a header. 415 `image_not_supported` for any other bytes; a HEIC, HEIF or AVIF photo is refused with its own words (no decoder in pure Go reads one: the page draws a chosen photo on a canvas and sends a JPEG) |
-| `POST /api/v1/scan/codes` | `{key, source?, location?}`: `source` `shutter` (the default), `nfc`, `file` or `app`; `location` `{lat, lon, accuracy_m?, at?}`, lat -90 to 90, lon -180 to 180, accuracy 0 to 1,000,000 m | a scan (below), recorded. 404 `image_not_found` for a key that is no `scan_image` blob |
+| `POST /api/v1/scan/codes` | `{key, source?, location?}`, or `{read_id, source?, location?}` (#8244: a paired device's photo read in place of `key`, a null `read_id` as none; its `source` defaults to `app`): `source` `shutter` (the default), `nfc`, `file` or `app`; `location` `{lat, lon, accuracy_m?, at?}`, lat -90 to 90, lon -180 to 180, accuracy 0 to 1,000,000 m | a scan (below), recorded. 404 `image_not_found` for a key that is no `scan_image` blob; 404 `read_not_found` for a read of a device the caller does not own, as for one that is not there; 422 `read_not_a_photo` for a tag read. Each post is a new scan, of a `read_id` as of a `key` |
 | `GET /api/v1/scan/scans?limit=&before=` | | `{scans}`, newest first, at most 100 (50 by default); `before` is a scan id. A person sees only their own scans (a scan holds its photo and GPS fix); a service sees all; any other caller (anonymous, as under auth `off` or `observe`) sees only the scans made with no actor. The same holds for every route below: another person's scan is a 404 |
 | `GET /api/v1/scan/scans/{id}` | | a scan, or 404 `scan_not_found` |
 | `GET /api/v1/scan/scans/{id}/image` | | the photo's bytes with its media type, `nosniff` (scriptless, for an `<img>`) |
@@ -370,6 +382,40 @@ same text (a photo's grain passes an EAN's check digit on about one row in ten).
 transaction, success or not, so the photo is kept until the scan is deleted. `Scans.Record(ctx,
 body, Input)` is a whole scan from bytes for a Go caller (#8157's result route), and
 `Scans.Decode(ctx, key, Input)` one of a stored photo.
+
+### Label printing (#7170)
+
+Area `label-printing` (`internal/labelprint`, design
+`docs/superpowers/specs/2026-11-27-cups-label-printing-design.md`) is a public area, class `api`.
+It sends a label PDF to a queue of the cluster's CUPS server (`deploy/cups/`) with one IPP
+`Print-Job`. It has its own `case` in `newRouter`, because its client uses the process's
+telemetry (peer `cups`).
+
+The server is the stored setting `filament_label_server_url` (only a person's own session
+writes it). No row, or JSON `null`, is `http://cups.cups.svc:8631`. Core checks the value again
+when it reads it: `http` or `https`, a host, no user, no query, no fragment, and a path of `/`
+or none. A bad value is no server (502). A request never names a server.
+
+| Route | Body | Answer |
+|---|---|---|
+| `GET /api/v1/label-printing/queues` | none | `{queues}`, in CUPS's order. A queue is `{name, info, make_and_model, state, state_reasons, state_message, accepting, media, width_mm, height_mm}`; the size comes from `media`, or is null |
+| `POST /api/v1/label-printing/queues/{queue}/jobs?media_type=&darkness=&print_rate=` | the PDF's bytes, at most 8 MiB | 202 `{queue, job_id, job_state, job_state_reasons}` when CUPS accepts the job, not when the label prints. `media_type` is `Saved`, `Thermal` or `Direct`; `darkness` `-1` or `1` to `30`; `print_rate` `Default` or `1` to `12`. A missing value or the default sends no attribute |
+
+The queue name must be 1 to 127 of `[A-Za-z0-9_-]` and in the list that CUPS gives, before core
+prints. The list times out after 5 s and the print after 30 s. Core follows no redirect, uses no
+proxy, and reads at most 1 MiB of a reply. Each job is logged with its queue, job id, size and
+the caller's kind, never the document.
+
+| Problem | When |
+|---|---|
+| 413 `label_too_large` | the body is past 8 MiB |
+| 415 `label_not_pdf` | the body does not start with `%PDF-` |
+| 422 `label_option_invalid` | an option value is not in the lists above |
+| 422 `label_queue_unknown` | the name is malformed or not in CUPS's list, or CUPS answers `client-error-not-found` |
+| 502 `label_server_unreachable` | no server (a bad stored value), or CUPS does not answer, times out, or answers bytes that are not IPP |
+| 502 `label_print_refused` | CUPS answers another error status, to the queue list too; `detail` is its `status-message` (at most 300 characters) and `ipp_status` the status code |
+
+CUPS owns the size check, the order of the jobs and the retries.
 
 ## Public routes
 

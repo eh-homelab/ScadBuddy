@@ -42,12 +42,15 @@ trash keeps them, so a restore loses nothing.
 ``lan_print_archives`` holds the LAN start each archive became (#5661). It is keyed by
 the archive, has no subject column, and is created by
 ``20261108T1604Z_lan_print_archives.sql``. The API writes it as it reads a link found by
-hash whose file the start uploaded (`print_history._run_by_file`): on the print's first
-read, or as the prints list links the print (`print_history._link_lan_prints`, #5724),
-which looks only for the starts no row here names. An order attempt's archive read
-writes it too, for a print that nobody opened (`orders/archives.py` `link_lan_archives`,
-#8281). Both use one rule (`lan_files.start_by_file`). One archive per start: a start
-that another archive became already gets no second row (`record_lan_start_in`, #8306).
+hash whose file the start uploaded: on the print's first read
+(`print_history._run_by_file`, rule `lan_files.start_by_file`), or as the prints list
+links the print (`print_history._link_lan_prints`, #5724), which looks only for the
+starts no row here names. An order attempt's archive read writes it too, for a print that
+nobody opened (`orders/archives.py` `link_lan_archives`, #8281). The list's scan and the
+orders read match all the archives of one read together (`lan_files.starts_by_files`,
+#8316): two archives of one read that name one start record neither. One archive per
+start: a start that another archive became already gets no second row
+(`record_lan_start_in`, held by the unique index of #8312).
 A LAN start has no queue item, so no send names it.
 
 `PrintLinkStore.jobs` reads these records, with ``print_runs``' LAN starts, to mark the
@@ -188,14 +191,14 @@ def record_lan_start_in(conn: Connection[DictRow], link: LanArchiveLink) -> bool
     #8281). One start per archive and one archive per start: the first record is kept.
     A start that another archive became already gets no second archive (#8306): a failed
     LAN print printed again from the printer's own storage makes a second archive of the
-    same file, and an order attempt then adds the grams and seconds of both prints. True
-    when the archive's record is this start, written now or before."""
+    same file, and an order attempt then adds the grams and seconds of both prints. The
+    table's unique index on the start (#8312) holds this for two records at the same
+    moment too, so a conflict on either key writes nothing. True when the archive's
+    record is this start, written now or before."""
     conn.execute(
         "INSERT INTO lan_print_archives (archive_id, run_id, subtask_name, plate_id)"
-        " SELECT %(archive)s::bigint, %(run)s::text, %(start)s::text, %(plate)s::integer"
-        " WHERE NOT EXISTS (SELECT 1 FROM lan_print_archives"
-        "  WHERE run_id = %(run)s AND subtask_name = %(start)s AND archive_id <> %(archive)s)"
-        " ON CONFLICT (archive_id) DO NOTHING",
+        " VALUES (%(archive)s, %(run)s, %(start)s, %(plate)s)"
+        " ON CONFLICT DO NOTHING",
         {
             "archive": link.archive_id,
             "run": link.run_id,

@@ -385,12 +385,15 @@ function KProfileForm({
       return
     }
     const saved = was ? `Saved ${name.trim()}` : `Added ${name.trim()}`
+    // A note cleared to blank is deleted under the key it was read from.
+    const noteDeleted = noteChanged && note !== undefined && !text.trim()
     if (noteChanged) {
       // The key the note was read under; else, for a new profile, the one Bambuddy's page
       // gives it (its slot and setting are not known until the printer answers).
       const key = note?.key ?? (was ? noteKeyFor(was) : `name_${name.trim()}_${filament.trim()}`)
       try {
-        await api.setKProfileNote(row.id, key, text)
+        if (noteDeleted) await api.deleteKProfileNote(row.id, key)
+        else await api.setKProfileNote(row.id, key, text)
       } catch (cause) {
         // The profile write is done and must not be sent again: close, and say what failed.
         onDone({ text: `${saved}, but not its note: ${problem(cause, 'the note could not be saved')}.`, warn: true })
@@ -398,10 +401,27 @@ function KProfileForm({
       }
     }
     if (!result) {
-      onDone({ text: noteChanged ? `Saved the note on ${was?.name}.` : 'Nothing changed.', warn: false })
+      onDone({
+        text: !noteChanged ? 'Nothing changed.' : noteDeleted ? `Deleted the note on ${was?.name}.` : `Saved the note on ${was?.name}.`,
+        warn: false,
+      })
       return
     }
     onDone(said(result, `${saved}.`))
+  }
+
+  async function deleteNote() {
+    if (!note || !was) return
+    setBusy(true)
+    setError(null)
+    try {
+      await api.deleteKProfileNote(row.id, note.key)
+    } catch (cause) {
+      setError(problem(cause, 'The note could not be deleted.'))
+      setBusy(false)
+      return
+    }
+    onDone({ text: `Deleted the note on ${was.name}.`, warn: false })
   }
 
   return (
@@ -470,6 +490,11 @@ function KProfileForm({
         <Button type="button" size="sm" variant="ghost" disabled={busy} onClick={onCancel}>
           Cancel
         </Button>
+        {note && was && (
+          <Button type="button" size="sm" variant="ghost" className="ml-auto" disabled={busy} onClick={() => void deleteNote()}>
+            <Trash2Icon /> Delete note
+          </Button>
+        )}
         {busy && <Spinner />}
       </div>
     </form>

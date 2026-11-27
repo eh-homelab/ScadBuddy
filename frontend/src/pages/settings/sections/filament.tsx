@@ -864,6 +864,28 @@ function SyncPassTtlRow({ form }: { form: BackendSettings }) {
   )
 }
 
+/**
+ * #7170 — the CUPS server the Labels page prints to. A stored choice with no env seed, so no
+ * source badge and no reset; only a person's session saves it.
+ */
+function LabelServerRow({ form }: { form: BackendSettings }) {
+  return (
+    <FieldRow
+      id="setting-filament_label_server_url"
+      {...docOf(form.settings, 'filament_label_server_url')}
+      error={form.errors.filament_label_server_url}
+    >
+      <Input
+        id="setting-filament_label_server_url"
+        type="text"
+        value={form.value('filament_label_server_url')}
+        onChange={(event) => form.setField('filament_label_server_url', event.target.value)}
+        className="sb-num"
+      />
+    </FieldRow>
+  )
+}
+
 /** #6905 — the passes one page of the history holds. */
 const PASS_PAGE = 10
 
@@ -1064,6 +1086,7 @@ export function Component() {
       }
     >
       <RuntimeRows form={form} section="filament" />
+      <LabelServerRow form={form} />
       <SyncRows form={form} />
       <PresetsImportRow />
       <SyncStatusRow status={syncStatus} mirror={form.settings.filament_preset_mirror} />

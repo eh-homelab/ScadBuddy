@@ -50,8 +50,12 @@ updates:
   # uv.lock, and the `pip` ecosystem would edit pyproject.toml while leaving
   # the lockfile stale — which then fails `uv sync --frozen` in CI and in the
   # Docker build, i.e. an update PR that cannot possibly go green.
+  # agent-durable is here too (#8313): with no entry, its temporalio stayed on 1.34.0
+  # while the backend's moved to 1.36.0. A group is one PR across both directories.
   - package-ecosystem: "uv"
-    directory: "/backend"
+    directories:
+      - "/backend"
+      - "/agent-durable"
     schedule:
       interval: "weekly"
       day: "monday"
@@ -111,6 +115,9 @@ updates:
       # and share opentelemetry-semantic-conventions, so they move together.
       opentelemetry:
         patterns: ["opentelemetry-*"]
+      # The Temporal SDK and nexus-rpc, which it requires, in both directories at once.
+      temporal:
+        patterns: ["temporalio", "temporalio-*", "nexus-rpc"]
 
   # Go (#2686): the modules of the go.work workspace. A bump edits only
   # the module's go.mod/go.sum; it does not run `go work vendor`, so the root
@@ -148,6 +155,35 @@ updates:
       # each other's matching versions, so they move together.
       opentelemetry:
         patterns: ["go.opentelemetry.io/*"]
+      # The Temporal Go SDK and its API module (#8313).
+      temporal:
+        patterns: ["go.temporal.io/*"]
+
+  # Rust (#8313): the workers/rust workspace. Without an entry its Temporal crates
+  # (=1.1.2) fell two releases behind the other SDKs. The rust-toolchain.toml
+  # channel is not a Cargo dependency; rust-toolchain-pin.yml watches the action.
+  - package-ecosystem: "cargo"
+    directory: "/workers/rust"
+    schedule:
+      interval: "weekly"
+      day: "monday"
+      time: "04:00"
+    open-pull-requests-limit: 10
+    reviewers:
+      - "ElanHasson"
+    commit-message:
+      prefix: "deps"
+      include: "scope"
+    labels: ["dependencies", "rust"]
+    groups:
+      # temporalio-sdk, -client, -common, -workflow and -macros release together
+      # and require each other's minor (temporalio-sdk 1.3.0: `~1.3.0`).
+      temporal:
+        patterns: ["temporalio-*"]
+      # temporalio-sdk's `opentelemetry` feature fixes the OTel major (Cargo.toml),
+      # so the exporter and the tracing bridge move with it.
+      opentelemetry:
+        patterns: ["opentelemetry*", "tracing-opentelemetry"]
 
   # The frontend and the AI agent service (#261), one entry for both. A group
   # in a multi-directory entry is one PR across every directory it touches,

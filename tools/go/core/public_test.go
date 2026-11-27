@@ -111,3 +111,30 @@ func TestTheTagReadAreaForwardsAnNDEFRead(t *testing.T) {
 		t.Errorf("off: %d, Python got %q", status, got)
 	}
 }
+
+// Area label-printing serves its queue list from Go, and without it the path goes on to
+// Python (#7170). The stored server is bad, so Go answers 502 at once.
+func TestTheLabelPrintingAreaServesItsQueues(t *testing.T) {
+	pool := testdb.New(t)
+	next := http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusTeapot) })
+	if _, err := pool.Exec(t.Context(), `INSERT INTO settings (name, value) VALUES ('filament_label_server_url', '"cups:631"'::jsonb)`); err != nil {
+		t.Fatal(err)
+	}
+	for _, c := range []struct {
+		areas  string
+		status int
+	}{{"label-printing, label-printing", http.StatusBadGateway}, {"", http.StatusTeapot}} {
+		router, err := newRouter(pool, next, nil, c.areas, "", nil, nil, nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		rec := httptest.NewRecorder()
+		router.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/api/v1/label-printing/queues", nil))
+		if rec.Code != c.status {
+			t.Errorf("areas %q: %d, want %d (%s)", c.areas, rec.Code, c.status, rec.Body)
+		}
+		if c.status == http.StatusBadGateway && !strings.Contains(rec.Body.String(), `"reason":"label_server_unreachable"`) {
+			t.Errorf("body %s", rec.Body)
+		}
+	}
+}

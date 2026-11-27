@@ -382,7 +382,7 @@ const FIELDS = {
   kValue: ['printer_id', 'extruder', 'nozzle_diameter', 'nozzle_type', 'k_value', 'name', 'cali_idx', 'setting_id'],
   typeCreate: ['code', 'material_id', 'subtype_id', 'brand_id', 'category_id', 'effect_id', 'insert_type_id', 'rgba', 'colour_name', 'extra_colours', 'diameter_mm', 'density_g_cm3', 'cost_per_kg', 'lead_time_days', 'safety_margin_days', 'label_weight_g', 'low_stock_pct', 'nozzle_temp_min', 'nozzle_temp_max', 'bed_temp_min', 'bed_temp_max', 'drying_temp_c', 'drying_hours', 'tdfp_id', 'note'],
   spoolCreate: ['type_id', 'brand_id', 'material_id', 'subtype_id', 'category_id', 'effect_id', 'colour_name', 'rgba', 'extra_colours', 'diameter_mm', 'density_g_cm3', 'nozzle_temp_min', 'nozzle_temp_max', 'bed_temp_min', 'bed_temp_max', 'drying_temp_c', 'drying_hours', 'label_weight_g', 'insert_type_id', 'low_stock_pct', 'cost_per_kg', 'weight_locked', 'note', 'grams_left', 'added_full'],
-  move: ['location_id', 'if_occupied', 'answers', 'expected_occupant_id'],
+  move: ['location_id', 'if_occupied', 'answers', 'expected_occupant_id', 'expected_location_id'],
   csvImport: ['rows', 'dry_run'],
   proposalPick: ['brand_id', 'material_id', 'subtype_id', 'rgba', 'label_weight_g', 'material_number', 'code', 'spool_ids'],
   archive: ['archived', 'reason', 'final_reading_g', 'final_grams'],
@@ -1298,6 +1298,7 @@ export function createType(raw: unknown): S['SpoolType'] | Response {
     ...body,
     drying_hours: body.drying_hours ?? null,
     id: newId(),
+    number: Math.max(0, ...state.types.map((t) => t.number)) + 1,
     filament_id: null,
     archived_at: null,
     created_at: now(),
@@ -3005,10 +3006,17 @@ export const handlers = [
     const sent = await request.json()
     const extra = extraKeys(sent, FIELDS.move)
     if (extra) return extra
-    const { location_id, if_occupied, answers, expected_occupant_id } = sent as S['SpoolMove']
+    const { location_id, if_occupied, answers, expected_occupant_id, expected_location_id } = sent as S['SpoolMove']
     // `homes.py` `ExpectedOccupantRequiredError`: a replace names the box's spool it expects.
     if (if_occupied === 'replace' && expected_occupant_id == null) {
       return problem(422, "a replace must name the box's spool it expects in expected_occupant_id", { code: 'expected_occupant_required' })
+    }
+    // #7168 `homes.py` `move_into`: a key that is present (null too) is checked first under the spool's row lock: before the target, `answers`, the box and the move.
+    if ('expected_location_id' in (sent as object)) {
+      const mover = state.spools[at]!
+      if ((mover.location_id ?? null) !== (expected_location_id ?? null) || mover.archived_at !== null) {
+        return problem(409, `spool ${mover.id} is not where it was read`, { code: 'move_stale', location_id: mover.location_id ?? null, archived: mover.archived_at !== null })
+      }
     }
     if (location_id && !state.locations.some((place) => place.id === location_id && !place.archived_at)) {
       return problem(422, REFUSED.moveTarget)
@@ -3147,8 +3155,9 @@ export const handlers = [
     const body = (await request.json()) as S['LabelsRequest']
     const spools = body.spool_ids ?? []
     const places = body.location_ids ?? []
-    const count = spools.length + places.length
-    if (count < 1 || count > 100) return problem(422, 'name 1 to 100 spools and places')
+    const codes = (body.type_ids?.length ?? 0) + (body.item_ids?.length ?? 0) + (body.kind_ids?.length ?? 0)
+    const count = spools.length + places.length + codes
+    if (count < 1 || count > 100) return problem(422, 'name 1 to 100 spools, places, types, items and kinds')
     const noSpool = spools.find((id) => !findSpool(id))
     if (noSpool) return problem(404, `no spool ${noSpool}`)
     const noPlace = places.find((id) => !state.locations.some((one) => one.id === id))
@@ -3158,8 +3167,8 @@ export const handlers = [
     const chosen = body.template ?? settings.filament_label_template
     if (chosen?.template === 'saved' && !savedSheets.some((one) => one.id === chosen.sheet_id))
       return problem(409, 'The saved sheet was deleted. Choose another template.', { code: 'label_sheet_gone' })
-    if (places.length > 0 && !settings.filament_label_base_url && !settings.public_url?.startsWith('https://'))
-      return problem(409, 'A place label needs an address: set the label address in Settings, or the public URL.', { code: 'no_label_base' })
+    if (places.length + codes > 0 && !settings.filament_label_base_url && !settings.public_url?.startsWith('https://'))
+      return problem(409, 'A code label needs an address: set the label address in Settings, or the public URL.', { code: 'no_label_base' })
     // #7216 — a PNG answer is one byte of the type the real route gives: one page is one PNG, more pages are a ZIP
     // (R-7216-6). The real route reads the stored settings when the request names no format or template.
     if ((body.format ?? settings.filament_label_output?.format) === 'png') {
@@ -3167,7 +3176,9 @@ export const handlers = [
       const [type, name] = labelPages(choice, body.layout ?? 'roll', count) === 1 ? ['image/png', 'labels.png'] : ['application/zip', 'labels.zip']
       return new HttpResponse(new Blob(['x'], { type }), { headers: { 'Content-Type': type, 'Content-Disposition': `attachment; filename="${name}"` } })
     }
-    return new HttpResponse(new Blob([`%PDF-1.4\n% ${count} labels\n%%EOF\n`], { type: 'application/pdf' }), {
+    // The text itself, not a `Blob`: under jsdom a `Blob` body is sent as "[object Blob]", and #7170's
+    // label print checks that the bytes it sends start with `%PDF-`.
+    return new HttpResponse(`%PDF-1.4\n% ${count} labels\n%%EOF\n`, {
       headers: { 'Content-Type': 'application/pdf', 'Content-Disposition': 'attachment; filename="labels.pdf"' },
     })
   }),

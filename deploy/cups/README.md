@@ -23,6 +23,15 @@ the client.
   in; the size in points, 72 a inch). Each queue's PPD keeps only its own size and no
   custom size, so a print dialog offers nothing else.
 
+ScadBuddy prints labels over IPP, from core (`tools/go/core/README.md`, "Label printing"):
+it lists the queues with `CUPS-Get-Printers` and reads each label size from the queue's
+`media-default`, then sends the PDF with one `Print-Job`. The job attributes `MediaType`,
+`Darkness` and `zePrintRate` are the Zebra PPD's options, so the driver writes them into
+the ZPL. `ci.yml`'s `cups-image` job runs core's client against this image
+(`TestLiveCUPS`). It logs each queue's `media-default`: `custom_2x1in_2x1in` for `w144h72`
+and `na_index-4x6_4x6in` for `w288h432` (measured 2026-11-27 with `TestLiveCUPS` on a
+local arm64 build of the `cups` stage).
+
 ## Label sizes
 
 One queue per label size, and a job prints only on its own labels. The `zebra` backend

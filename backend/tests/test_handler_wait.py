@@ -15,6 +15,7 @@ from temporalio.client import Client, WorkflowUpdateStage
 from temporalio.worker import UnsandboxedWorkflowRunner, Worker
 
 from scadbuddy.workflows.handlers import handler_wait
+from tests.support.temporal import single_batch as with_flag_2
 from tests.support.temporal import temporal_available, temporal_client
 
 #: One dev server for the module's tests, on one loop.
@@ -88,17 +89,23 @@ async def client() -> AsyncIterator[Client]:
         yield connected
 
 
+@pytest.mark.parametrize("single_batch", [False, True], ids=["flag-2-off", "flag-2-on"])
 async def test_a_workflow_cancel_while_the_condition_is_false_leaves_the_handler_to_answer(
-    client: Client,
+    client: Client, single_batch: bool
 ) -> None:
-    """The wait began before the cancel and its condition held after it: temporalio
-    1.36's `wait_condition` raises then, and the handler answers instead. A cancel that
-    arrives while the condition is false does not end the wait. A plain `wait_condition`
-    under the same cancel must raise, so an SDK that drops the raise fails here too."""
+    """The wait began before the cancel and its condition held after it; the handler
+    answers in both activation orders (#8318). With workflow logic flag 2 on (temporalio
+    1.36's default, and every history recorded on 1.36), a plain `wait_condition` raises
+    then; with it off (1.37's default for a new run) it does not. Both are pinned, so an
+    SDK that changes either fails here. A cancel that arrives while the condition is
+    false does not end the wait."""
     queue = f"hw-{uuid.uuid4().hex[:8]}"
-    async with Worker(
+    worker = Worker(
         client, task_queue=queue, workflows=[_Waits], workflow_runner=UnsandboxedWorkflowRunner()
-    ):
+    )
+    if single_batch:
+        with_flag_2(worker)
+    async with worker:
         handle = await client.start_workflow(_Waits.run, id=queue, task_queue=queue)
         update = await handle.start_update(
             _Waits.wait_for_go, wait_for_stage=WorkflowUpdateStage.ACCEPTED
@@ -113,7 +120,9 @@ async def test_a_workflow_cancel_while_the_condition_is_false_leaves_the_handler
         await handle.signal(_Waits.release)
 
         assert await asyncio.wait_for(update.result(), timeout=10) == "answered"
-        assert await asyncio.wait_for(plain.result(), timeout=10) == "raised"
+        assert await asyncio.wait_for(plain.result(), timeout=10) == (
+            "raised" if single_batch else "answered"
+        )
         assert await handle.result() == "done"
 
 

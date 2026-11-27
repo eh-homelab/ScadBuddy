@@ -547,7 +547,7 @@ RUN cargo build --release --locked -p scadbuddy-slicer
 # Upstream publishes no arm64 AppImage, so this stage always takes the amd64 one,
 # whatever TARGETARCH is: the profiles are JSON and serve every app image, and only
 # `slicer`, which runs the CLI, refuses another architecture.
-FROM ubuntu:24.04@sha256:9c7f200c07e3d4a03e7249d2c16bf66a51120fb876aa2242cf31451412543289 AS slicer-dist
+FROM ubuntu:24.04@sha256:562111b88caa79c71391c0c4d3c2114a7d5c35915c20561fd893cb1e07929e6b AS slicer-dist
 
 ARG BAMBU_STUDIO_VERSION
 ARG BAMBU_STUDIO_ASSET
@@ -609,7 +609,7 @@ RUN { curl --fail --silent --show-error --location --retry 3 --retry-all-errors 
 # by tag and index digest, as `base` is, so the glibc the CLI was checked
 # against cannot move under a build. The worker built on bookworm (glibc 2.36)
 # runs on 24.04's 2.39.
-FROM ubuntu:24.04@sha256:9c7f200c07e3d4a03e7249d2c16bf66a51120fb876aa2242cf31451412543289 AS slicer
+FROM ubuntu:24.04@sha256:562111b88caa79c71391c0c4d3c2114a7d5c35915c20561fd893cb1e07929e6b AS slicer
 
 ARG TARGETARCH
 ARG BAMBU_STUDIO_VERSION
@@ -688,7 +688,7 @@ CMD ["scadbuddy-slicer"]
 # `profile-fetch-image` job, and is never published.
 # The base is python:3.12, the backend's `requires-python`, by tag and index digest
 # (Docker Hub through the buildx mirror; Dependabot moves it).
-FROM python:3.12-slim-bookworm@sha256:935c3c5b12357a7e10caa9c1e6ca5692344d97cf229832ef584be2cec9fc03df AS profile-fetch-deps
+FROM python:3.12-slim-bookworm@sha256:44cf1793efa7c7a476bb0f2cff81443f4a072c90c1cb127e2924933daa3e8c64 AS profile-fetch-deps
 
 # hadolint ignore=DL3008
 RUN apt-get update \
@@ -710,7 +710,7 @@ COPY backend/scadbuddy ./scadbuddy
 RUN uv sync --frozen --no-dev --group profile-fetch --no-editable \
     --no-install-package psycopg --no-install-package psycopg-binary --no-install-package psycopg-pool
 
-FROM python:3.12-slim-bookworm@sha256:935c3c5b12357a7e10caa9c1e6ca5692344d97cf229832ef584be2cec9fc03df AS profile-fetch
+FROM python:3.12-slim-bookworm@sha256:44cf1793efa7c7a476bb0f2cff81443f4a072c90c1cb127e2924933daa3e8c64 AS profile-fetch
 
 ARG TARGETARCH
 # Playwright publishes Chromium for amd64 and arm64, but no CI job builds arm64 and the
@@ -869,7 +869,7 @@ CMD ["/usr/local/bin/cups-start"]
 # `MEDIAMTX_VERSION` and `MEDIAMTX_SHA256`. Move the three ARGs and those two together,
 # and re-measure the MediaMTX facts in the camera spec §2
 # (docs/superpowers/specs/2026-11-23-printer-camera-recording-design.md).
-FROM python:3.12-slim-bookworm@sha256:935c3c5b12357a7e10caa9c1e6ca5692344d97cf229832ef584be2cec9fc03df AS mediamtx
+FROM python:3.12-slim-bookworm@sha256:44cf1793efa7c7a476bb0f2cff81443f4a072c90c1cb127e2924933daa3e8c64 AS mediamtx
 
 ARG TARGETARCH
 ARG MEDIAMTX_VERSION=v1.21.4
@@ -904,7 +904,7 @@ RUN case "$TARGETARCH" in \
 # `camera-deps` builds the venv as `profile-fetch-deps` does: no dev group, no editable
 # install, and no psycopg package. It needs git for the git-pinned
 # temporal-agent-harness. `camera` is the common runtime.
-FROM python:3.12-slim-bookworm@sha256:935c3c5b12357a7e10caa9c1e6ca5692344d97cf229832ef584be2cec9fc03df AS camera-deps
+FROM python:3.12-slim-bookworm@sha256:44cf1793efa7c7a476bb0f2cff81443f4a072c90c1cb127e2924933daa3e8c64 AS camera-deps
 
 # hadolint ignore=DL3008
 RUN apt-get update \
@@ -923,7 +923,7 @@ COPY backend/scadbuddy ./scadbuddy
 RUN uv sync --frozen --no-dev --no-editable \
     --no-install-package psycopg --no-install-package psycopg-binary --no-install-package psycopg-pool
 
-FROM python:3.12-slim-bookworm@sha256:935c3c5b12357a7e10caa9c1e6ca5692344d97cf229832ef584be2cec9fc03df AS camera
+FROM python:3.12-slim-bookworm@sha256:44cf1793efa7c7a476bb0f2cff81443f4a072c90c1cb127e2924933daa3e8c64 AS camera
 
 # CI builds and publishes amd64 only. Nothing here is arch-specific beyond the `mediamtx`
 # stage's per-arch pin, so arm64 builds too (both targets built and run on an arm64 host,
@@ -1271,10 +1271,10 @@ USER root
 # anonymous `curl -H "Accept: application/octet-stream"` with the pinned sha256
 # (measured with curl and sha256sum).
 ARG TARGETARCH
-ARG TEMPORAL_CLI_VERSION=1.9.1
-ARG TEMPORAL_CLI_SHA256_AMD64=09a0326a51db84d02735e53542b9ebd8c4758daf47482a9ab0abce15844e60d5
-ARG TEMPORAL_CLI_SHA256_ARM64=6c57c352d52fc3df34412376fd9ba6f74b7e3ace8e426e6cba8600156d36a145
-ARG TEMPORAL_CLI_ASSET_ARM64=564294917
+ARG TEMPORAL_CLI_VERSION=1.10.1
+ARG TEMPORAL_CLI_SHA256_AMD64=4c1500e2ce2d4de136e5fe8852d9b7f82eb62f19b6b383b3e0c040519a9d20b1
+ARG TEMPORAL_CLI_SHA256_ARM64=2f748e9411b37c9cabb57f1f08e37765388c12b5534432c7aea28b593df9145d
+ARG TEMPORAL_CLI_ASSET_ARM64=744972367
 RUN case "$TARGETARCH" in \
       amd64) sha="$TEMPORAL_CLI_SHA256_AMD64" \
              fallback="https://temporal.download/cli/archive/v${TEMPORAL_CLI_VERSION}?platform=linux&arch=amd64" ;; \

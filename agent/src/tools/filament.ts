@@ -1323,7 +1323,7 @@ const tools: Tool[] = [
     label: 'List a spool tag’s backups',
     description:
       'List what a tag held before each write, newest first: its UID, its NDEF records (record type, media type, ' +
-      'data as hex), why it was written (`spool_write`, `agent_write`, `restore`), who wrote it and when. ' +
+      'data as hex), why it was written (`spool_write`, `agent_write`, `restore`, `place_write`: a place’s tag, written by the swap page), who wrote it and when. ' +
       'A page holds up to `limit` backups (default 50, at most 200); pass the last `id` as `before` for the next page. Reads ScadBuddy only.',
     input: z.object({
       tag_id: z.string().uuid().describe("A tag's `id` from filament_tag_list"),
@@ -1987,7 +1987,7 @@ const tools: Tool[] = [
     name: 'filament_code_resolve',
     label: 'Resolve a label code',
     description:
-      'What a typed label code names: `L-12` is a place, `S-142` a spool. Any case, with or without the dash. ' +
+      'What a typed label code names: `L-12` is a place, `S-142` a spool, `T-4` a spool type, `I-9` an item, `K-3` an item kind. Any case, with or without the dash. ' +
       'Returns the kind, the id, the name and `archived`; an archived thing still resolves. 404 `code_unknown` ' +
       'for a code that names nothing.',
     input: z.object({ code: z.string().min(1).describe('A label code, such as `L-12` or `s142`') }),

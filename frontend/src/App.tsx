@@ -25,6 +25,7 @@ const TypePage = lazyRetry(async () => ({ default: (await import('./pages/filame
 const PresetPage = lazyRetry(async () => ({ default: (await import('./pages/filament/PresetPage')).PresetPage }))
 const LocationPage = lazyRetry(async () => ({ default: (await import('./pages/filament/LocationPage')).LocationPage }))
 const LabelsPage = lazyRetry(async () => ({ default: (await import('./pages/filament/LabelsPage')).LabelsPage }))
+const SwapPage = lazyRetry(async () => ({ default: (await import('./pages/filament/SwapPage')).SwapPage }))
 const ScanPage = lazyRetry(async () => ({ default: (await import('./pages/filament/ScanPage')).ScanPage }))
 const SupplierPage = lazyRetry(async () => ({ default: (await import('./pages/filament/SupplierPage')).SupplierPage }))
 const InvoicePage = lazyRetry(async () => ({ default: (await import('./pages/filament/InvoicePage')).InvoicePage }))
@@ -129,6 +130,8 @@ export function App() {
         <Route path="filament" element={<Navigate to={FILAMENT_HOME} replace />} />
         <Route path="filament/spools/:id" element={<SpoolPage />} />
         <Route path="filament/labels" element={<LabelsPage />} />
+        {/* The swap wizard (#7168): name a spool, then its new place. */}
+        <Route path="filament/swap" element={<SwapPage />} />
         {/* The hand-held Scan mode (#7273) moved to the top level; the old address redirects. */}
         <Route path="filament/scan" element={<Navigate to="/scan" replace />} />
         <Route path="filament/locations/:id" element={<LocationPage />} />

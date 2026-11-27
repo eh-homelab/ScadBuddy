@@ -60,7 +60,7 @@ from scadbuddy.bambuddy.attachments import Attachment, AttachmentStore
 from scadbuddy.bambuddy.client import BambuddyClient, client_for
 from scadbuddy.bambuddy.component import ArchiveCacheDep
 from scadbuddy.bambuddy.costs import archive_cost, run_cost
-from scadbuddy.bambuddy.lan_files import lan_subtask, start_by_file
+from scadbuddy.bambuddy.lan_files import lan_subtask, start_by_file, starts_by_files
 from scadbuddy.bambuddy.linking import link_library_prints, scan_library_by_hash
 from scadbuddy.bambuddy.models import (
     ArchiveDetail,
@@ -644,8 +644,10 @@ async def _link_lan_prints(
     `linking.LAN_LINK_WINDOW` is scanned by its slices' hashes
     (`linking.link_lan_starts`), at most `linking.LAN_SCANS_PER_CALL` per call and once per
     `linking.LAN_SCAN_INTERVAL`; the read skips the subjects scanned within it (#5749).
-    Each archive found that names no start yet is read once, and its file name names the
-    start (`_run_by_file`, the exactly-one rule), so the start is not looked for again. A
+    Each archive found that names no start yet is read once, and the scan's archives are
+    matched together (`lan_files.starts_by_files`, #8316): a start that exactly one of them
+    names gets it, and one that two name (a reprint from the printer's own storage) gets
+    neither, as the orders read decides (`orders/archives.py` `link_lan_archives`). A
     failure is logged, never raised: the list still loads, and a later call tries again."""
     now = time.monotonic()
     try:
@@ -672,12 +674,20 @@ async def _link_lan_prints(
                 found = await linking.link_lan_starts(
                     client, uploads, links, subject, row.first, row.last
                 )
+                filenames: dict[int, str | None] = {}
                 for link in found:
                     if await links.lan_start(link.archive_id) is not None:
                         continue
                     archive = await cache.archive(client, link.archive_id)
-                    linked = LinkedPrint(**link.model_dump(), subject=subject.key)
-                    await _run_by_file(links, runs, linked, archive)
+                    filenames[link.archive_id] = None if archive is None else archive.filename
+                subtasks = sorted(
+                    {name for f in filenames.values() if (name := lan_subtask(f)) is not None}
+                )
+                started = await runs.lan_started(row.subject, subtasks)
+                for recorded in starts_by_files(filenames, started):
+                    await links.record_lan_start(recorded)
+            # One failed record ends this subject's scan (#8316), on purpose: the claim
+            # is released, so a later call scans the subject again.
             except (ApiError, psycopg.Error, ValueError):
                 linking.release_lan_scan(row.subject)
                 logger.exception("could not link a LAN print", extra={"subject": subject.key})
