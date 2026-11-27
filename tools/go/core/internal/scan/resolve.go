@@ -28,6 +28,7 @@ type lookup struct{ table, kind, name string }
 var prefixes = map[string]lookup{
 	"L": {"filament_locations", "location", "name"},
 	"S": {"filament_spools", "spool", ""},
+	"K": {"item_kinds", "item_kind", "name"},
 }
 
 // maxNumber is PostgreSQL's integer maximum (codes/parse.py MAX_NUMBER).
