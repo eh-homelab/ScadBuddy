@@ -1,11 +1,10 @@
-import { CameraIcon, ImageUpIcon, ListIcon, NfcIcon, QrCodeIcon } from 'lucide-react'
+import { ListIcon, NfcIcon, QrCodeIcon } from 'lucide-react'
 import { useEffect, useId, useMemo, useRef, useState, type ReactNode } from 'react'
 import { ApiError } from '../../api/client'
 import { getLocation, listLocations, postTagRead, resolveCode, type LocationDetail, type LocationNode, type TagReadResult } from '../../api/filament'
-import { decodeScan, storeScanImage } from '../../api/scan'
-import { NfcSession } from '../../lib/webNfc'
-import { CameraReader, detectorClass, jpegOf } from './identify/CameraReader'
-import { Button } from '@/components/ui/button'
+import { CodeWay, Said, type CodeCopy } from './identify/CodeWay'
+import { reasonOf } from './identify/reason'
+import { useTagReads } from './identify/useTagReads'
 import { Input } from '@/components/ui/input'
 import { Label } from '@/components/ui/label'
 import { RadioGroup, RadioGroupItem } from '@/components/ui/radio-group'
@@ -33,8 +32,6 @@ function usable<P extends Place>(place: P): P | string {
   if (amsUnit(place)) return `${place.code} is an AMS unit. Choose one of its slots, or another place.`
   return place
 }
-
-const reasonOf = (cause: unknown, fallback: string) => (cause instanceof ApiError ? cause.detail : cause instanceof Error && cause.message ? cause.message : fallback)
 
 /** A spool label's QR text (`labelPayload`). */
 const SPOOL_TEXT = /^scadbuddy:spool:[0-9a-f-]{36}$/i
@@ -67,6 +64,8 @@ async function placeFromText(text: string): Promise<LocationDetail | string> {
   return /^S-\d+$/.test(code) ? `${code} is a spool, not a place.` : placeOfCode(code)
 }
 
+const PLACE_COPY: CodeCopy = { label: 'Place code', placeholder: 'L-4', noLabel: 'No place label was found in the photo. Take it again, or type the code.' }
+
 export function IdentifyPlace({ onIdentified, nfc }: { onIdentified: OnIdentified; nfc: 'ok' | 'no_api' | 'embedded' }) {
   const [way, setWay] = useState<Way | ''>('')
   const change = (next: Way | '') => {
@@ -90,7 +89,7 @@ export function IdentifyPlace({ onIdentified, nfc }: { onIdentified: OnIdentifie
         </ToggleGroupItem>
       </ToggleGroup>
       {way === 'tag' && <TagWay onIdentified={onIdentified} />}
-      {way === 'code' && <CodeWay onIdentified={onIdentified} camera={nfc !== 'embedded'} />}
+      {way === 'code' && <CodeWay kind="location" copy={PLACE_COPY} fromText={placeFromText} fromCode={placeOfCode} onIdentified={onIdentified} camera={nfc !== 'embedded'} />}
       {way === 'hand' && <HandWay onIdentified={onIdentified} />}
     </div>
   )
@@ -100,14 +99,6 @@ function Note({ children }: { children: ReactNode }) {
   return <p className="text-[13px] text-muted-foreground">{children}</p>
 }
 
-function Said({ children }: { children: ReactNode }) {
-  return (
-    <p role="alert" className="text-[13px] text-warn">
-      {children}
-    </p>
-  )
-}
-
 /** What a tag read names: the place, or the sentence why none. */
 async function placeOfRead(result: TagReadResult): Promise<LocationDetail | string> {
   if (result.next === 'open_spool' || (result.next === 'open_code' && result.resolved?.kind === 'spool')) return "This tag is a spool's tag."
@@ -115,46 +106,14 @@ async function placeOfRead(result: TagReadResult): Promise<LocationDetail | stri
   return "This tag names no place. Use the QR code on the place's label, or pick the place by hand."
 }
 
-/** Web NFC: one scan while the way is open; each tap posts the read to `POST /filament/tags/reads`. */
+/** Web NFC: each tap posts the read to `POST /filament/tags/reads`; the newest tap's answer names the place. */
 function TagWay({ onIdentified }: { onIdentified: OnIdentified }) {
-  const [error, setError] = useState<string | null>(null)
-  const identify = useRef(onIdentified)
-  useEffect(() => {
-    identify.current = onIdentified
-  }, [onIdentified])
-
-  useEffect(() => {
-    const session = new NfcSession()
-    let alive = true
-    const off = session.onReading((reading) => {
-      // A new read: until it names a place, none is named.
-      identify.current(null)
-      postTagRead({ uid: reading.uid || null, tag_type: null, records: reading.records })
-        .then(placeOfRead)
-        .then(
-          (found) => {
-            if (!alive) return
-            if (typeof found === 'string') return setError(found)
-            setError(null)
-            identify.current(found)
-          },
-          (cause: unknown) => {
-            if (alive) setError(`ScadBuddy could not look up the tag: ${reasonOf(cause, 'try the tag again')}.`)
-          },
-        )
-    })
-    const offError = session.onReadingError(() => setError('This tag could not be read. Hold it to the phone again.'))
-    session.start().catch((cause: unknown) => {
-      if (!alive) return
-      setError(cause instanceof DOMException && cause.name === 'NotAllowedError' ? "Allow NFC for this site in Chrome's settings, then choose Scan tag again." : `NFC could not start: ${reasonOf(cause, 'try again')}.`)
-    })
-    return () => {
-      alive = false
-      off()
-      offError()
-      session.stop()
-    }
-  }, [])
+  const { error, setError } = useTagReads({
+    read: async (reading) => placeOfRead(await postTagRead({ uid: reading.uid || null, tag_type: null, records: reading.records })),
+    // A new read: until it names a place, none is named.
+    onTap: () => onIdentified(null),
+    onAnswer: (found) => (typeof found === 'string' ? setError(found) : onIdentified(found)),
+  })
 
   return (
     <div className="flex flex-col gap-2 rounded-lg border border-dashed px-3 py-2.5">
@@ -163,139 +122,6 @@ function TagWay({ onIdentified }: { onIdentified: OnIdentified }) {
         Hold the place's tag to the phone.
       </p>
       {error && <Said>{error}</Said>}
-    </div>
-  )
-}
-
-/** A typed code, always; the camera where `BarcodeDetector` exists and `camera` allows it, else a photo the server reads. */
-function CodeWay({ onIdentified, camera: cameraAllowed }: { onIdentified: OnIdentified; camera: boolean }) {
-  const [text, setText] = useState('')
-  const [said, setSaid] = useState<string | null>(null)
-  const [looking, setLooking] = useState(false)
-  const [photoBusy, setPhotoBusy] = useState(false)
-  const [camera, setCamera] = useState(false)
-  const [photosOff, setPhotosOff] = useState(false)
-  const [Detector] = useState(() => (cameraAllowed ? detectorClass() : null))
-  const photo = useRef<HTMLInputElement>(null)
-  const ids = useId()
-
-  function answer(found: LocationDetail | string) {
-    if (typeof found === 'string') {
-      setSaid(found)
-      onIdentified(null)
-    } else onIdentified(found)
-  }
-
-  async function look(raw: string) {
-    setLooking(true)
-    setSaid(null)
-    onIdentified(null)
-    const found = await placeFromText(raw)
-    setLooking(false)
-    answer(found)
-  }
-
-  async function readPhoto(file: File) {
-    setPhotoBusy(true)
-    setSaid(null)
-    onIdentified(null)
-    try {
-      const stored = await storeScanImage(await jpegOf(file))
-      const scan = await decodeScan({ key: stored.key, source: 'shutter', location: null })
-      const first = scan.codes.find((code) => code.resolved?.kind === 'location')
-      if (!first?.resolved) {
-        answer(scan.error ? 'The photo could not be read. Take it again, closer to the label.' : 'No place label was found in the photo. Take it again, or type the code.')
-        return
-      }
-      answer(await placeOfCode(first.resolved.code))
-    } catch (cause) {
-      // The core area is off: no photo route on this server.
-      if (cause instanceof ApiError && cause.status === 404) {
-        setPhotosOff(true)
-        answer('This server reads no photos. Type the code from the label.')
-      } else answer(cause instanceof ApiError ? `The photo did not go through: ${cause.detail}.` : reasonOf(cause, 'The photo did not go through. Try again.'))
-    } finally {
-      setPhotoBusy(false)
-    }
-  }
-
-  return (
-    <div className="flex flex-col gap-2 rounded-lg border border-dashed px-3 py-2.5">
-      <form
-        className="flex flex-wrap items-end gap-2"
-        onSubmit={(event) => {
-          event.preventDefault()
-          if (text.trim()) void look(text)
-        }}
-      >
-        <div className="flex flex-col gap-1">
-          <Label htmlFor={`${ids}-code`}>Place code</Label>
-          <Input
-            id={`${ids}-code`}
-            value={text}
-            placeholder="L-4"
-            autoComplete="off"
-            onChange={(event) => {
-              setText(event.target.value)
-              setSaid(null)
-              // Another code: the place the old one named is no longer named.
-              onIdentified(null)
-            }}
-            className="w-40"
-          />
-        </div>
-        <Button type="submit" variant="outline" disabled={looking || !text.trim()}>
-          Find
-        </Button>
-        {Detector && !camera && (
-          <Button
-            type="button"
-            variant="outline"
-            onClick={() => {
-              setCamera(true)
-              onIdentified(null)
-            }}
-          >
-            <CameraIcon /> Use camera
-          </Button>
-        )}
-        {!Detector && !photosOff && (
-          <>
-            <Button type="button" variant="outline" disabled={photoBusy} onClick={() => photo.current?.click()}>
-              <ImageUpIcon /> {photoBusy ? 'Reading the photo…' : 'Take a photo'}
-            </Button>
-            <input
-              ref={photo}
-              type="file"
-              accept="image/*"
-              capture="environment"
-              aria-label="Photo of the label"
-              className="sr-only"
-              tabIndex={-1}
-              onChange={(event) => {
-                const file = event.target.files?.[0]
-                event.target.value = ''
-                if (file) void readPhoto(file)
-              }}
-            />
-          </>
-        )}
-      </form>
-      {camera && Detector && (
-        <CameraReader
-          Detector={Detector}
-          onRead={(raw) => {
-            setCamera(false)
-            void look(raw)
-          }}
-          onStop={() => setCamera(false)}
-          onFail={(reason) => {
-            setCamera(false)
-            setSaid(reason)
-          }}
-        />
-      )}
-      {said && <Said>{said}</Said>}
     </div>
   )
 }

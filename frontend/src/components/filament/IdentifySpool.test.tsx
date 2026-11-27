@@ -267,6 +267,29 @@ describe('IdentifySpool (#7167)', () => {
       expect(identified(onIdentified)).toHaveLength(0)
     })
 
+    it('names the spool of the newest tap when an older read answers last (review 6)', async () => {
+      let release!: () => void
+      const held = new Promise<void>((resolve) => (release = resolve))
+      server.use(
+        http.post('/api/v1/filament/tags/reads', async ({ request }) => {
+          const body = (await request.clone().json()) as { uid: string }
+          const number = body.uid === '04:05:05:05:05:05:05' ? 5 : 3
+          if (number === 3) await held
+          return HttpResponse.json({ next: 'open_spool', spool: { id: spoolId(number), number, archived_at: null }, tag: null, decoded: null, draft: null })
+        }),
+      )
+      const { user, onIdentified } = show()
+      await user.click(screen.getByRole('radio', { name: 'Scan tag' }))
+      await waitFor(() => expect(stub.scanning).toBe(true))
+      stub.tap({ serialNumber: '04:03:03:03:03:03:03', records: [] })
+      stub.tap({ serialNumber: '04:05:05:05:05:05:05', records: [] })
+      await waitFor(() => expect(identified(onIdentified)).toHaveLength(1))
+      release()
+      await new Promise((resolve) => setTimeout(resolve, 50))
+      expect(identified(onIdentified)).toEqual([expect.objectContaining({ id: spoolId(5) })])
+      expect(last(onIdentified)).toMatchObject({ id: spoolId(5) })
+    })
+
     it('keeps the spool a failed bind made, and binds it on the retry without a second one', async () => {
       const log = paths()
       let binds = 0
@@ -322,16 +345,19 @@ describe('IdentifySpool (#7167)', () => {
       expect(bodies[0]).toEqual({ uid: '1A2B3C4D', tag_type: 'mifare_classic', mifare_blocks: [{ index: 1, data_hex: '4131372d503100004746413137000000' }], records: [] })
     })
 
-    it('posts no blocks without the app, and says what to do for an unknown side', async () => {
+    it('posts no blocks without the app, and offers the pick by hand for an unknown side', async () => {
       const { user, onIdentified } = show()
       await user.click(screen.getByRole('radio', { name: 'Scan tag' }))
       await waitFor(() => expect(stub.scanning).toBe(true))
       stub.tap({ serialNumber: '1a:2b:3c:4d', records: [] })
-      expect(await screen.findByText('This side of the Bambu tag is on no spool yet. Tap the other side, use the QR code, or pick the spool by hand.')).toBeInTheDocument()
+      expect(await screen.findByText("This tag's side has not been seen in an AMS, so ScadBuddy cannot tell which spool it is.")).toBeInTheDocument()
       expect(bodies).toHaveLength(1)
       expect(bodies[0]).not.toHaveProperty('mifare_blocks')
       expect(screen.queryByText('This tag is not on a spool yet.')).toBeNull()
       expect(identified(onIdentified)).toHaveLength(0)
+      await user.click(screen.getByRole('button', { name: 'Pick it by hand' }))
+      expect(await screen.findByRole('searchbox', { name: 'Find a spool' })).toBeInTheDocument()
+      expect(screen.getByRole('radio', { name: 'Pick by hand' })).toHaveAttribute('aria-checked', 'true')
     })
 
     it('posts the read again without blocks when the server cannot decode them', async () => {

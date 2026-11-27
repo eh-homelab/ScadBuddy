@@ -74,6 +74,29 @@ describe('IdentifyPlace (#7168)', () => {
       expect(identified(onIdentified)[0]).toMatchObject({ id: L.DRY_BOX, code: 'L-3' })
     })
 
+    it('names the place of the newest tap when an older read answers last (review 6)', async () => {
+      let release!: () => void
+      const held = new Promise<void>((resolve) => (release = resolve))
+      server.use(
+        http.post('/api/v1/filament/tags/reads', async ({ request }) => {
+          const body = (await request.clone().json()) as { uid: string }
+          if (body.uid === '04:33:33:33:33:33:33') await held
+          return undefined
+        }),
+      )
+      const { user, onIdentified } = show()
+      await user.click(screen.getByRole('radio', { name: 'Scan tag' }))
+      await waitFor(() => expect(stub.scanning).toBe(true))
+      stub.tap({ serialNumber: '04:33:33:33:33:33:33', records: [urlRecord('https://sb.example/x/L-3')] })
+      stub.tap({ serialNumber: '04:44:44:44:44:44:44', records: [urlRecord('https://sb.example/x/L-4')] })
+      await waitFor(() => expect(identified(onIdentified)).toHaveLength(1))
+      expect(identified(onIdentified)[0]).toMatchObject({ id: L.AMS_A1 })
+      release()
+      await new Promise((resolve) => setTimeout(resolve, 50))
+      expect(identified(onIdentified)).toHaveLength(1)
+      expect(last(onIdentified)).toMatchObject({ id: L.AMS_A1 })
+    })
+
     it("names no place for a spool's tag", async () => {
       const { user, onIdentified } = show()
       await user.click(screen.getByRole('radio', { name: 'Scan tag' }))
