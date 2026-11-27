@@ -76,7 +76,7 @@ INTERNAL.addSubnet('0.0.0.0', 8, 'ipv4')
 INTERNAL.addSubnet('fc00::', 7, 'ipv6')
 INTERNAL.addAddress('::1', 'ipv6')
 
-/** Whether `address` is private, CGNAT or loopback, also as the IPv4 address an IPv6 form embeds. Not an address: true (fail closed). */
+/** Whether `address` is private, CGNAT, loopback or in 0/8, also as the IPv4 address an IPv6 form embeds. Not an address: true (fail closed). */
 export function isInternalAddress(address: string): boolean {
   const plain = plainAddress(address.replace(/^\[|\]$/g, ''))
   const family = isIP(plain)

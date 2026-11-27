@@ -1114,7 +1114,8 @@ It is offered to session turns only, not over `/mcp`.
 **Reach (#827, #8178).** The tool may reach the internet, `*.internal` names, and
 plain `http:` to any host, since LAN services are mostly plain http. A `GET` or `HEAD`
 to a host that is, or resolves to, a private or loopback address (`10/8`, `172.16/12`,
-`192.168/16`, `fc00::/7`, CGNAT `100.64/10`, `127/8`, `::1`, and the name `localhost`;
+`192.168/16`, `fc00::/7`, CGNAT `100.64/10`, `127/8`, `::1`, "this network" `0/8`,
+and the name `localhost`;
 `isInternalAddress()` in [`agent/src/http/egress.ts`](../../agent/src/http/egress.ts),
 also as the IPv4 address an IPv6 form embeds) is refused, unless the call names that
 host as `allow_private_host`. Such a call is outward whatever its method or access
