@@ -42,10 +42,10 @@ function usage(rule: FlowGrantRule, used: FlowGrantView['used'][string] | undefi
  * grant in force admits an answerer (#8045). A declined grant never admitted one. */
 function answersText(grant: FlowGrantView, who: string): string | null {
   const rest = 'answer its questions, except those it asks of people only.'
-  if (grant.revoked_at) return `Revoked: ${who} may no longer ${rest}`
+  if (grant.revoked_at) return `Revoked: ${who} may no longer answer its questions.`
   if (grant.status === 'requested') return `If you approve it, besides you, ${who} may ${rest}`
   if (grant.status === 'declined') return null
-  return grant.in_force ? `Besides you, ${who} may ${rest}` : `Expired: ${who} may no longer ${rest}`
+  return grant.in_force ? `Besides you, ${who} may ${rest}` : `Expired: ${who} may no longer answer its questions.`
 }
 
 interface Props {
