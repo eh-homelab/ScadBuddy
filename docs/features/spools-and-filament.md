@@ -77,6 +77,10 @@ The Spools tab's bulk bar acts on the selected spools (#7151, plan
 - **Archive and Restore.** One request each, `POST /filament/spools/bulk-archive` and
   `/bulk-restore`. The answer lists the spools changed, those already so and the ids that
   name no spool, and the bar reports it once.
+- **Reset used.** After a confirm, `POST /filament/spools/reset-consumed` puts a
+  `consumed_reset` event on each selected spool (#7149), in requests of at most 500 ids. The
+  grams left stay; the report says how many counters were reset and names each spool that no
+  longer exists.
 
 An AMS tray's place page that holds a spool has "Take the spool out of this tray"
 (`DELETE /printers/{id}/trays/{ams}/{tray}/spool`): the spool moves to no place.

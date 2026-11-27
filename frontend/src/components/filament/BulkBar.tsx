@@ -35,6 +35,8 @@ interface Props {
 
 /** The refusal's words without a closing full stop; the report adds its own. */
 const why = (cause: unknown) => (cause instanceof ApiError ? cause.detail : 'the request failed').replace(/\.+$/, '')
+/** `POST /filament/spools/reset-consumed` takes 1 to 500 ids. */
+const RESET_BATCH = 500
 const spools = (count: number) => (count === 1 ? '1 spool' : `${count} spools`)
 
 /** "#4", "#4 and #5", "#4, #5 and #6". */
@@ -87,7 +89,14 @@ export function BulkBar({ selected, places, types, onDone, onClear }: Props) {
   const resetAll = async () => {
     setBusy(true)
     try {
-      const done = await resetSpoolsConsumed(ordered.map((spool) => spool.id))
+      // The route takes at most 500 ids, so a larger selection goes in requests of 500.
+      const ids = ordered.map((spool) => spool.id)
+      const done = { reset: 0, not_found: [] as string[] }
+      for (let at = 0; at < ids.length; at += RESET_BATCH) {
+        const part = await resetSpoolsConsumed(ids.slice(at, at + RESET_BATCH))
+        done.reset += part.reset
+        done.not_found.push(...part.not_found)
+      }
       const notes = [`Reset the used counter of ${spools(done.reset)}.`]
       if (done.not_found.length) notes.push(`${numbers(done.not_found)} no longer ${done.not_found.length === 1 ? 'exists' : 'exist'}.`)
       onDone(notes.join(' '))

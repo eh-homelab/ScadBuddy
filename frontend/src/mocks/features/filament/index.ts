@@ -2756,7 +2756,7 @@ export const handlers = [
     const found = new Set(state.spools.filter((row) => ids.includes(row.id)).map((row) => row.id))
     const at = now()
     found.forEach((id) => addEvent(id, 'consumed_reset', { at, source: 'person' }))
-    return HttpResponse.json({ reset: found.size, not_found: ids.filter((id) => !found.has(id)) } satisfies S['ConsumedResetDone'])
+    return HttpResponse.json({ reset: found.size, not_found: [...new Set(ids)].filter((id) => !found.has(id)) } satisfies S['ConsumedResetDone'])
   }),
   // #7151 — `POST /filament/spools/bulk-archive` and `bulk-restore`: each spool's outcome, reported once.
   ...([true, false] as const).map((archived) =>

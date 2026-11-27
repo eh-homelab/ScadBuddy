@@ -76,6 +76,24 @@ describe('the bulk bar', () => {
     expect(posts).toEqual([])
   })
 
+  it('resets a selection of more than 500 spools in requests of 500 (#7149)', async () => {
+    const sizes: number[] = []
+    server.use(
+      http.post('/api/v1/filament/spools/reset-consumed', async ({ request }) => {
+        const { spool_ids } = (await request.json()) as { spool_ids: string[] }
+        sizes.push(spool_ids.length)
+        return HttpResponse.json({ reset: spool_ids.length, not_found: [] })
+      }),
+    )
+    const many = Array.from({ length: 501 }, (_, at) => ({ id: `s${at}`, number: at + 1 }) as Spool)
+    const onDone = vi.fn()
+    const { user } = renderPage(<BulkBar selected={many} places={[]} types={[]} onDone={onDone} onClear={() => {}} />)
+    await user.click(screen.getByRole('button', { name: 'Reset used' }))
+    await user.click(within(await screen.findByRole('alertdialog')).getByRole('button', { name: 'Reset counters' }))
+    await waitFor(() => expect(onDone).toHaveBeenCalledWith('Reset the used counter of 501 spools.'))
+    expect(sizes).toEqual([500, 1])
+  })
+
   it('reports a refused reset once (#7149)', async () => {
     server.use(http.post('/api/v1/filament/spools/reset-consumed', () => problem(503, 'Unavailable', 'The database is busy.')))
     const onDone = vi.fn()
