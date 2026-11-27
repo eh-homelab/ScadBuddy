@@ -77,7 +77,7 @@ unchanged, to the Python API: WebSockets, SSE and large bodies included. On prod
 | `escalations` | `/escalations/*`: a flow run's calls passed up, denied, moved, delivered, and a run's entries |
 | `audit` | `POST` `/audit/record`, `…/list`, `…/prune` |
 | `unknown-trays:read` | `GET /api/v1/filament/unknown-trays` (public, caller `api`), and the print worker's `GET …/crud/print/filament/printers/{printer_id}/unknown-trays` (caller `print`) |
-| `unknown-trays` | those, and `POST /api/v1/filament/unknown-trays/{id}/dismiss` (public). Go writes no spool here (#7143) |
+| `unknown-trays` | those, and `POST /api/v1/filament/unknown-trays/{id}/dismiss` (public). Go writes no spool here (#7143). The resolve route (`POST …/{id}/resolve`, which would start Python's activity `filament_resolve_unknown_tray` on queue `library`) is not built yet: it waits for `internal/temporalx`, so a resolve gets a 404 |
 
 The `unknown-trays` public routes use `internal/auth` (see "Public routes"). Their CRUD route is caller `print`'s, so it has its own `case` in `newRouter` (areaPackages mounts on caller `agent`).
 

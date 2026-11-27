@@ -262,6 +262,21 @@ its own: anything on the LAN may call it, directly or through ScadBuddy's `/mcp`
 (the owner's decision of 2026-11-26), and a NetworkPolicy is to admit only ScadBuddy's pods and the LAN's
 Gateway. Neither the server nor that policy is deployed yet.
 
+### Unknown spools in core (#7143)
+
+Core's area `unknown-trays` (`tools/go/core/internal/unknowntrays`; core serves it when
+`SCADBUDDY_CORE_AREAS` names it) has three routes. `GET /api/v1/filament/unknown-trays` lists the
+trays that a printer reports as loaded and no spool holds, with ranked candidates, and
+`POST …/{id}/dismiss` deletes a row. Both are public routes behind the person-auth gate
+(`internal/auth`). The third is the print worker's block read, `GET
+…/crud/print/filament/printers/{printer_id}/unknown-trays`, a CRUD route of caller `print`. Go
+writes no spool. The resolve write is Python's Temporal activity `filament_resolve_unknown_tray`
+(`backend/scadbuddy/filament/unknown_resolve.py`) on the `library` queue, which the API process
+serves, because the API alone holds the database secret (#5295). The Go resolve route that starts
+the activity is not built yet: it waits for a Temporal client in core (`internal/temporalx`). Until
+it exists, a resolve gets a 404. The feature is in
+[spools-and-filament](../features/spools-and-filament.md#unknown-spools-7143).
+
 ## bambuddy-fs
 
 A FUSE mount of the print library on a person's own machine, through ScadBuddy's
