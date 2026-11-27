@@ -397,6 +397,8 @@ type fakeS3 struct {
 	beforeGet func(path string)
 	// requests are each request's method and path.
 	requests []string
+	// lastPut is the last PUT's headers.
+	lastPut http.Header
 }
 
 func (f *fakeS3) ServeHTTP(w http.ResponseWriter, r *http.Request) {
@@ -411,6 +413,7 @@ func (f *fakeS3) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	switch r.Method {
 	case http.MethodPut:
 		f.puts++
+		f.lastPut = r.Header.Clone()
 		if f.status != 0 {
 			w.WriteHeader(f.status)
 			return

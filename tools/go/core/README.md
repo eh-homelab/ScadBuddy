@@ -230,10 +230,21 @@ commit of it is a 404. Refusals carry a `reason`: 422 `kind_not_allowed`, 413 `u
 `upload_mismatch`, 409 `store_object_mismatch`, 503 `store_unavailable` or `store_busy`.
 A Go handler in core reads a blob in-process with `Blobs.OpenKey(ctx, key)` (a `store_blobs` key, the form Python's `blob_key` and `blob_refs` hold) or `Blobs.Open(ctx, kind, sha256)`. It adds no route. The read looks up the row, sends a presigned GET to the row's S3 object, waits at most a minute for its headers, and streams the bytes with their `Ref` for as long as the caller's context allows. The stream checks size and SHA-256 and ends with `ErrBlobMismatch` on a wrong object. A missing row or object is `ErrBlobNotFound`. A store that is not S3, or a row on another backend, is `ErrNotConfigured`.
 A Go handler in core that took the bytes itself stores them with `Blobs.Put(ctx, kind, mediaType, body)`:
-the commit's own steps with no staging object (the kind's limit, the store's caps, the stage lock, a
-content object that is there never written, the same row), with the same refusals.
+the kind's limit checked, then the bytes spooled to a temporary file and stored through `put` (below)
+with the commit's row (`record`, with `verified_at`), the object PUT typed and private as a commit's is.
+Like `PublishFile` and `PutContent`, it checks the store's caps only when it uploads, so the same bytes
+stored again are never refused `store_full`.
 
-`Blobs.Claim`, `Blobs.PublishFile` and `Blobs.ReadFile` (#8137) are the rest of the store in process, for area `package-mirrors` (above). A publish goes through `put`: the bytes spooled and hashed, the object's stage lock held shared as a commit holds it, the object reused or stored with the caps checked (`stage`), the row written by the caller's `indexer`, and the object removed again when that writes no row and no other row names it (`removeUnnamed`). It adds no route; the upload routes and their kinds are as above. `Blobs.Backend`, `Blobs.PutContent` and `Blobs.Fetch` (#8131) are ContentStore's backend name, `put` with no key then `touch`, and `stat` then `get`, for area `workspace`: a put goes through `put` too, its row written by `putIn` at `<kind>-<sha256>` in a transaction, and the object the key named before released when it was another of this store's (`release_replaced`); a fetch of a lost object forgets its row. They take any kind, `workspace` among them; the upload routes' kinds stay as above. Area `package-mirrors` answers a stored blob past its read bound (`ErrTooLarge`) as a 500 with reason `blob-too-large`, its key logged.
+`put` is core's one in-process write path (#8250): `Put`, `PublishFile` and `PutContent` all go
+through it. Its `stage` checks every object it would use, the one a row names and the content
+object alike, where Python's `store/s3.py` `upload` trusts one it finds: a GET that declares
+another size is a mismatch with no byte read, else the object is read and hashed, within a minute
+plus a second per MiB. A row-named object that is not the blob's bytes is logged and passed over,
+so the content object is checked or written instead and the row moves to it. Only a content
+object that is not the blob's bytes is a 409 `store_object_mismatch`, left as it is, with nothing
+indexed, for every caller.
+
+`Blobs.Claim`, `Blobs.PublishFile` and `Blobs.ReadFile` (#8137) are the rest of the store in process, for area `package-mirrors` (above). A publish goes through `put`: the bytes spooled and hashed, the object's stage lock held shared as a commit holds it, the object reused or stored, read and checked first and the caps checked when it uploads (`stage`, above), the row written by the caller's `indexer`, and the object removed again when that writes no row and no other row names it (`removeUnnamed`). It adds no route; the upload routes and their kinds are as above. `Blobs.Backend`, `Blobs.PutContent` and `Blobs.Fetch` (#8131) are ContentStore's backend name, `put` with no key then `touch`, and `stat` then `get`, for area `workspace`: a put goes through `put` too, its row written by `putIn` at `<kind>-<sha256>` in a transaction, and the object the key named before released when it was another of this store's (`release_replaced`); a fetch of a lost object forgets its row. They take any kind, `workspace` among them; the upload routes' kinds stay as above. Area `package-mirrors` answers a stored blob past its read bound (`ErrTooLarge`) as a 500 with reason `blob-too-large`, its key logged.
 `internal/blobclient` is its Go client: `New(baseURL, token, tel)`, `Upload(ctx, kind, mediaType, body)`; each call to core may take 2 minutes, longer than a busy commit takes to answer `store_busy`.
 Both sides trace their requests with `telemetry`'s `Transport`: each span records the method, the
 status and the peer (`s3` for the store), never a URL, so a presigned query is never recorded. A
