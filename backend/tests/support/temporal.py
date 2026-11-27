@@ -354,13 +354,17 @@ def single_batch(worker: Worker) -> Worker:
             _WorkflowLogicFlag,
         )
 
-        worker._set_default_workflow_logic_flag(
-            _WorkflowLogicFlag.PROCESS_WORKFLOW_ACTIVATION_JOBS_AS_SINGLE_BATCH, enabled=True
-        )
+        flag = _WorkflowLogicFlag.PROCESS_WORKFLOW_ACTIVATION_JOBS_AS_SINGLE_BATCH
     except (ImportError, AttributeError) as error:
-        raise RuntimeError(
-            "temporalio no longer has the private switch for workflow logic flag 2"
-            " (PROCESS_WORKFLOW_ACTIVATION_JOBS_AS_SINGLE_BATCH); update"
-            " tests/support/temporal.py `single_batch`"
-        ) from error
+        raise RuntimeError(_SWITCH_GONE) from error
+    if not hasattr(worker, "_set_default_workflow_logic_flag"):
+        raise RuntimeError(_SWITCH_GONE)
+    worker._set_default_workflow_logic_flag(flag, enabled=True)
     return worker
+
+
+_SWITCH_GONE = (
+    "temporalio no longer has the private switch for workflow logic flag 2"
+    " (PROCESS_WORKFLOW_ACTIVATION_JOBS_AS_SINGLE_BATCH); update"
+    " tests/support/temporal.py `single_batch`"
+)
