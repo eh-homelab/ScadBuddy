@@ -98,6 +98,8 @@ export function inputFields(schema: unknown): InputField[] {
     const type = prop['type']
     if (typeof type !== 'string' || !(SCALARS.has(type) || type === 'array')) return []
     const items = prop['items']
+    const widget = widgetOf(name, prop)
+    const expects = expectsOf(prop['expects'])
     const itemType = isObject(items) && typeof items['type'] === 'string' ? (items['type'] as InputScalar) : undefined
     return [
       {
@@ -112,9 +114,9 @@ export function inputFields(schema: unknown): InputField[] {
         ...(type === 'string' && FORMATS.has(prop['format']) ? { format: prop['format'] as InputFormat } : {}),
         ...(typeof prop['minimum'] === 'number' ? { minimum: prop['minimum'] } : {}),
         ...(typeof prop['maximum'] === 'number' ? { maximum: prop['maximum'] } : {}),
-        ...(widgetOf(name, prop) ? { widget: widgetOf(name, prop) } : {}),
+        ...(widget ? { widget } : {}),
         ...(typeof prop['kind'] === 'string' ? { kind: prop['kind'] } : {}),
-        ...(expectsOf(prop['expects']) ? { expects: expectsOf(prop['expects']) } : {}),
+        ...(expects ? { expects } : {}),
       },
     ]
   })

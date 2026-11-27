@@ -1,4 +1,4 @@
-import { useState } from 'react'
+import { useRef, useState } from 'react'
 import { ApiError } from '../../../api/client'
 import { resolveCode } from '../../../api/filament'
 import { Input } from '@/components/ui/input'
@@ -42,21 +42,29 @@ export function ScanField({
   common?: Record<string, unknown>
 }) {
   const [looked, setLooked] = useState<Looked>(null)
+  // What the person typed; the answer is only a code the lookup accepted.
+  const [text, setText] = useState(value)
+  // Counts edits and lookups: a result that is not the latest is dropped.
+  const latest = useRef(0)
 
-  async function look(text: string) {
-    const code = text.trim()
+  async function look(typed: string) {
+    const code = typed.trim()
+    const mine = ++latest.current
     if (!code) return setLooked(null)
     setLooked({ kind: 'busy' })
     try {
       const found = await resolveCode(code)
+      if (mine !== latest.current) return
       const why = misfit(found, expects)
       if (why) {
         setLooked({ kind: 'no', text: why })
         return
       }
       onChange(found.code)
+      setText(found.code)
       setLooked({ kind: 'ok', text: found.name || found.code })
     } catch (caught) {
+      if (mine !== latest.current) return
       const unknown = caught instanceof ApiError && caught.status === 404
       setLooked({ kind: 'no', text: unknown ? 'No thing has this code' : caught instanceof Error ? caught.message : String(caught) })
     }
@@ -67,26 +75,29 @@ export function ScanField({
       <Input
         {...common}
         id={id}
+        aria-invalid={looked?.kind === 'no' ? true : common?.['aria-invalid'] ? true : undefined}
         data-widget="scan"
         type="text"
         autoComplete="off"
         autoCapitalize="characters"
         spellCheck={false}
         autoFocus={autoFocus}
-        value={value}
+        value={text}
         className="h-11 font-mono text-base"
         onChange={(event) => {
+          latest.current++
           setLooked(null)
-          onChange(event.target.value)
+          setText(event.target.value)
+          onChange('')
         }}
         onKeyDown={(event) => {
           // Enter ends a scan; it never submits the form.
           if (event.key !== 'Enter') return
           event.preventDefault()
-          void look(value)
+          void look(text)
         }}
         onBlur={() => {
-          if (looked === null && value.trim()) void look(value)
+          if (looked === null && value.trim()) void look(text)
         }}
       />
       {looked?.kind === 'busy' && (

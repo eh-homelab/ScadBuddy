@@ -1,5 +1,5 @@
 import { fireEvent, screen, waitFor } from '@testing-library/react'
-import { HttpResponse, http } from 'msw'
+import { HttpResponse, delay, http } from 'msw'
 import { describe, expect, it, vi } from 'vitest'
 import { server } from '../../mocks/server'
 import { renderPage } from '../../test/utils'
@@ -77,7 +77,7 @@ describe('task widgets (#8062)', () => {
   })
 
   it('says what a code of the wrong kind should have been', async () => {
-    const { user } = draw({ spool: { 'x-sb-widget': 'scan', type: 'string', title: 'Spool', expects: { kinds: ['spool'] } } })
+    const { user, onSubmit } = draw({ spool: { 'x-sb-widget': 'scan', type: 'string', title: 'Spool', expects: { kinds: ['spool'] } } }, { required: ['spool'] })
     server.use(
       http.get('/api/v1/codes/:code', () =>
         HttpResponse.json({ kind: 'location', id: 'l7', code: 'L-7', name: 'Shelf seven', archived: false }),
@@ -85,6 +85,58 @@ describe('task widgets (#8062)', () => {
     )
     await user.type(screen.getByLabelText(/Spool/), 'L-7{Enter}')
     expect(await screen.findByText('Expected a spool')).toBeInTheDocument()
+    expect(screen.getByLabelText(/Spool/)).toHaveAttribute('aria-invalid', 'true')
+    // The rejected code is no answer.
+    await user.click(press())
+    expect(onSubmit).not.toHaveBeenCalled()
+  })
+
+  it('drops a lookup that the person has typed past', async () => {
+    const { user } = draw({ spool: { 'x-sb-widget': 'scan', type: 'string', title: 'Spool' } })
+    server.use(
+      http.get('/api/v1/codes/:code', async ({ params }) => {
+        if (params['code'] === 'S-1') await delay(150)
+        return HttpResponse.json({ kind: 'spool', id: 'x', code: String(params['code']), name: `Name of ${String(params['code'])}`, archived: false })
+      }),
+    )
+    const box = screen.getByLabelText(/Spool/)
+    await user.type(box, 'S-1{Enter}')
+    await user.clear(box)
+    await user.type(box, 'S-2{Enter}')
+    expect(await screen.findByText('Name of S-2')).toBeInTheDocument()
+    await delay(300)
+    expect(screen.queryByText('Name of S-1')).not.toBeInTheDocument()
+    expect(box).toHaveValue('S-2')
+  })
+
+  it('moves and chooses with the arrow keys, Home and End', async () => {
+    const { user } = draw({ size: { type: 'string', enum: ['S', 'M', 'L'], title: 'Size' } })
+    const radio = (name: string) => screen.getByRole('radio', { name })
+    expect(radio('S')).toHaveAttribute('tabindex', '0')
+    expect(radio('M')).toHaveAttribute('tabindex', '-1')
+    await user.tab()
+    expect(radio('S')).toHaveFocus()
+    await user.keyboard('{ArrowRight}')
+    expect(radio('M')).toBeChecked()
+    expect(radio('M')).toHaveFocus()
+    expect(radio('M')).toHaveAttribute('tabindex', '0')
+    await user.keyboard('{End}')
+    expect(radio('L')).toBeChecked()
+    await user.keyboard('{ArrowDown}')
+    expect(radio('S')).toBeChecked()
+    await user.keyboard('{ArrowLeft}')
+    expect(radio('L')).toBeChecked()
+    await user.keyboard('{Home}')
+    expect(radio('S')).toBeChecked()
+  })
+
+  it('shows a failed upload and leaves the answer empty', async () => {
+    const { user, onSubmit } = draw({ shot: { 'x-sb-widget': 'photo', type: 'string', title: 'Photo' } }, { required: ['shot'] })
+    server.use(http.post('/api/v1/entities/:ref/attachments', () => HttpResponse.json({ title: 'Too large', status: 413, detail: 'the file is too large' }, { status: 413 })))
+    await user.upload(screen.getByLabelText(/Photo/), new File(['x'], 'big.jpg', { type: 'image/jpeg' }))
+    expect(await screen.findByRole('alert')).toHaveTextContent(/too large/i)
+    await user.click(press())
+    expect(onSubmit).not.toHaveBeenCalled()
   })
 
   it('says when no thing has the code', async () => {
