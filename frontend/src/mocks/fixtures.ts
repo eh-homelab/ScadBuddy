@@ -1236,7 +1236,6 @@ export const settings: Settings = {
   bambuddy_url: 'https://bambuddy.internal.nullreference.io',
   has_api_key: true,
   has_render_api_key: false,
-  render_key_fallback: true,
   store_backend: 'local',
   public_url: 'https://scadbuddy.internal.nullreference.io',
   library_folder_id: 2,
