@@ -47,6 +47,7 @@ from scadbuddy.filament.models import (
     SpoolEventAdd,
     SpoolPresetCreate,
 )
+from scadbuddy.filament.unknown_tray_rows import PoolUnknownTrays, UnknownSpoolRef
 from scadbuddy.library.settings_store import S3Settings
 from scadbuddy.main import create_app
 from scadbuddy.print_library.ids import is_native_id
@@ -156,7 +157,19 @@ def slicer(native_app: TestClient, settings: Settings) -> Iterator[FakeSlicer]:
 def fake_lan(
     native_app: TestClient, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> Iterator[FakeLan]:
-    """The fake printer, run in the app's own loop."""
+    """The fake printer, run in the app's own loop.
+
+    It answers the print check's unknown-tray read with no trays (#7143). The fake
+    printer reports filled trays with no spool (the untagged ones), and the printer
+    watch's capture records each as an unknown tray, so a check that ran after the
+    capture would refuse and one that ran before it would not: the result would depend on
+    runner speed. These suites test the native hot path; the block has its own tests
+    (`tests/printers/test_unknown_spool_block.py`)."""
+
+    async def no_trays(self: PoolUnknownTrays, printer_id: str) -> list[UnknownSpoolRef]:
+        return []
+
+    monkeypatch.setattr(PoolUnknownTrays, "blocking", no_trays)
     assert native_app.portal is not None
     with native_app.portal.wrap_async_context_manager(
         running_fake_lan(tmp_path / "printer", monkeypatch, print_seconds=2.0)
