@@ -50,6 +50,11 @@ func (s *Reads) fromDevice(ctx context.Context, fields map[string]json.RawMessag
 		return "", problem(http.StatusServiceUnavailable, "devices_off", "device reads need area devices")
 	}
 	rd, err := s.Devices.OwnRead(ctx, id)
+	var p *httpx.Problem
+	if errors.As(err, &p) && p.Status == http.StatusNotFound {
+		// The tag routes' refusals carry a code (problem).
+		return "", problem(http.StatusNotFound, "read_not_found", "That read is not there.")
+	}
 	if err != nil {
 		return "", asProblem(ctx, err)
 	}

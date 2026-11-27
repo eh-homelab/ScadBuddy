@@ -882,7 +882,7 @@ func TestTagReadFromAnotherPersonsDeviceReadIsNotFound(t *testing.T) {
 	h.who = ada
 	bobs := h.deviceRead("user:test#bob", uidA, block0A+" "+shared)
 	for _, id := range []string{bobs, "not-an-id", "00000000-0000-0000-0000-000000000000"} {
-		if status, answer := h.post(map[string]any{"read_id": id}); status != http.StatusNotFound {
+		if status, answer := h.post(map[string]any{"read_id": id}); status != http.StatusNotFound || answer["code"] != "read_not_found" {
 			t.Errorf("read %s: %d %v", id, status, answer)
 		}
 	}

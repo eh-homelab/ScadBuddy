@@ -314,7 +314,7 @@ the area off, Python answers a MIFARE read 503 `mifare_needs_core`.
 A body with `read_id` (#8244) names a paired device's read in place of `uid`, `tag_type`,
 `records` and `mifare_blocks` (with any of them it is a 422 `device_read_invalid`). Core loads the
 read (`devices.Store.OwnRead`: a read of a device the caller does not own is a 404
-`read_not_found`, as a read that is not there), reads its `tag_dump` blob, and takes the dump's
+`read_not_found`, with `code`, as a read that is not there), reads its `tag_dump` blob, and takes the dump's
 UID, its tech as `tag_type`, and its blocks as `mifare_blocks` (or its records, when it holds no
 block). Then it decodes the read as an inline one. The history row's source is `app`, and its
 `device_read_id` names the read. A device read makes at most one row: a second post of it
