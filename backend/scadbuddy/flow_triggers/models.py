@@ -295,6 +295,11 @@ class StandingGrant(BaseModel):
             and now < self.expires_at
         )
 
+    def expired(self, now: datetime) -> bool:
+        """Its own expiry has passed: the approved one, else the one it asks for (#8220).
+        `in_force` also needs the rest of its chain, so out of force is not expired."""
+        return (self.expires_at or self.spec.expires_at) <= now
+
 
 class Fire(BaseModel):
     """One fire of a trigger, and its run's status once the run has a row."""

@@ -266,3 +266,22 @@ def test_a_stored_spec_with_answers_still_loads() -> None:
 
 def test_a_child_runs_grant_has_no_answers() -> None:
     assert inherited(_plain(answers=ANSWERS), None).answers is None
+
+
+def test_expired_reads_the_grants_own_expiry_by_the_clock_it_is_given() -> None:
+    """#8220: the view says expired from the server's clock. An approved grant reads its
+    own `expires_at`; a requested one, the expiry it asks for."""
+    approved = Grant(
+        id="g",
+        run_id="r",
+        status="approved",
+        spec=spec({"fn": "queue_print"}),
+        requested_by={"kind": "browser"},
+        expires_at=NOW + timedelta(hours=1),
+        created_at=NOW,
+    )
+    assert not approved.expired(NOW)
+    assert approved.expired(NOW + timedelta(hours=1))
+    requested = approved.model_copy(update={"status": "requested", "expires_at": None})
+    assert not requested.expired(NOW + timedelta(hours=23))
+    assert requested.expired(NOW + timedelta(hours=24))
