@@ -1236,7 +1236,19 @@ read goes on with the archives already named. Once the
 attempt's print
 settled it copies `archive_ids`, the archives' earliest start and latest end as its
 `started_at`/`finished_at`, and `actual_seconds` and `actual_grams` summed
-(`total_filament_actual_grams`, else `filament_used_grams`). It does not copy the
+(`total_filament_actual_grams`, else `filament_used_grams`). That is the queue path's
+rule. A LAN attempt (#8282) takes each of these facts from ScadBuddy's own record of the
+run instead (`OrderStore.lan_record`, `archives.lan_facts`), and an archive's only where
+that record gives none; the archive gives its media. The start is the first start's
+`started_at` in `print_runs.result.lan`. Each start ends at the printer report that
+showed its plate end, as the filament ledger booked it (`filament/prints.py`
+`plate_ended`), and the last start with no such end ends at `print_outcomes.settled_at`;
+the end is the last start's end. The seconds are the sum of each start's span; an earlier
+start with no timed end gives none. The grams are the ledger's `print_ended` grams of the
+run's uses (`prints.run_uses`): each start books its sliced grams per slot whose tray
+holds an SB spool, so there are none when a start booked no use, a use is still open, or
+a plate did not finish (its end drops the estimate). A LAN attempt writes these with no
+Bambuddy and no archive too. It does not copy the
 outcome: the attempt's is the print path's (`print_outcomes`), read from the same print.
 The times are copied once, told by `archive_copied` (#5273), so one a person corrected
 stands even when the archives give no seconds or grams. An attempt that named archives before that column was

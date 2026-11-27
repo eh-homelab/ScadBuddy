@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+from collections.abc import Awaitable
 from datetime import timedelta
 from typing import Any
 
@@ -126,6 +127,13 @@ PIECE_LOOKUP_PATCH = "piece-lookup-4199"
 #: `PIECE_RECHECK`. A piece pinned to a build no worker serves then ends, and its waiters
 #: start it again soon after.
 PIECE_TIMEOUT_PATCH = "piece-timeout-5104"
+#: #8318: with temporalio 1.37's default activation order (workflow logic flag 2 off,
+#: https://github.com/temporalio/sdk-python/pull/2121) a release's handler runs before the
+#: answers that arrived in the same workflow task. An activity's answer then wins over
+#: the cancel the release sent, and the render would go on to its next step. Each step
+#: of the render looks at `_released` once its answer is in (`TemplatePipeline.step`).
+#: Histories without the marker replay as they ran.
+RELEASED_STEP_PATCH = "released-step-8318"
 #: How often a job waiting on another job's piece looks again: a piece that closed
 #: without telling it (timed out, terminated) is started again by the next look. A look
 #: at a live piece is harmless: its start is refused and the re-signal is idempotent.
@@ -577,20 +585,24 @@ class TemplatePipeline:
 
     async def activity_call(self, name: str, arg: Any, *, result_type: type[Any]) -> Any:
         if name == "pack":
-            return await _pack(arg)
+            return await self.step(_pack(arg))
         # `write_output` loads meshes, renders every plate's thumbnails (bounded by the
         # render timeout) and writes the 3MF: it gets the openscad bound and heartbeats.
         if name == "write_output":
-            return await workflow.execute_activity(
-                name,
-                arg,
-                result_type=result_type,
-                start_to_close_timeout=_output_timeout(arg),
-                heartbeat_timeout=HEARTBEAT,
-                retry_policy=RETRY,
+            return await self.step(
+                workflow.execute_activity(
+                    name,
+                    arg,
+                    result_type=result_type,
+                    start_to_close_timeout=_output_timeout(arg),
+                    heartbeat_timeout=HEARTBEAT,
+                    retry_policy=RETRY,
+                )
             )
-        return await workflow.execute_activity(
-            name, arg, result_type=result_type, start_to_close_timeout=SHORT, retry_policy=RETRY
+        return await self.step(
+            workflow.execute_activity(
+                name, arg, result_type=result_type, start_to_close_timeout=SHORT, retry_policy=RETRY
+            )
         )
 
     def _projection(self, fields: dict[str, Any]) -> Projection:
@@ -756,6 +768,14 @@ class TemplatePipeline:
             work is not None and work.done() and (work.cancelled() or work.exception() is not None)
         )
 
+    async def step[T](self, call: Awaitable[T]) -> T:
+        """``call``'s answer, unless a release or the workflow's cancel arrived with it:
+        then that cancellation (`RELEASED_STEP_PATCH`)."""
+        answer = await call
+        if workflow.patched(RELEASED_STEP_PATCH):
+            self._raise_if_released()
+        return answer
+
     def _raise_if_released(self) -> None:
         """Raise a release's (or the workflow's) cancellation. A release cancels the
         render task, and temporalio (1.34) shields a child start or a signal in flight
@@ -864,7 +884,7 @@ class TemplatePipeline:
         steps = [StepInfo(name="render", state="running", done=0, total=None)]
         version = "default"
         try:
-            if not await self._project(state="running"):
+            if not await self.step(self._project(state="running")):
                 # Settled before this run began: an older build's API commits the row
                 # before it starts the run, and a release in between cancels the row
                 # with no run to cancel. Nothing to render (#603). In this build's
@@ -873,14 +893,16 @@ class TemplatePipeline:
                 # status here is "settled": it cancelled nothing.
                 return
             self._upsert(STATUS.value_set("running"))
-            await self._project(steps=steps)
-            loaded: LoadedPipeline = await workflow.execute_activity(
-                "load_pipeline",
-                LoadRequest(slug=job.slug, revision=job.model_version),
-                result_type=LoadedPipeline,
-                start_to_close_timeout=_load_timeout(),
-                heartbeat_timeout=HEARTBEAT,
-                retry_policy=RETRY,
+            await self.step(self._project(steps=steps))
+            loaded: LoadedPipeline = await self.step(
+                workflow.execute_activity(
+                    "load_pipeline",
+                    LoadRequest(slug=job.slug, revision=job.model_version),
+                    result_type=LoadedPipeline,
+                    start_to_close_timeout=_load_timeout(),
+                    heartbeat_timeout=HEARTBEAT,
+                    retry_policy=RETRY,
+                )
             )
             version = loaded.version
             inputs = job.inputs or {"params": job.params, "v": 0}
@@ -1015,25 +1037,29 @@ class TemplatePipeline:
         inputs = ArrangeInputs.model_validate(job.inputs)
         steps = [StepInfo(name="arrange", state="running", done=0, total=2)]
         try:
-            if not await self._project(state="running", pipeline_version=ARRANGE_VERSION):
+            if not await self.step(
+                self._project(state="running", pipeline_version=ARRANGE_VERSION)
+            ):
                 return  # settled before this run began, as in `_render` (#603)
             self._upsert(STATUS.value_set("running"))
-            await self._project(steps=steps)
-            layout = await _pack(
-                # Always plates, never the piece as rendered: only the writer applies
-                # the pinned colour order (Review Focus 4).
-                PackRequest(
-                    items=inputs.items,
-                    plate=inputs.plate,
-                    goal=inputs.goal,
-                    filament_plan=inputs.filament_plan,
-                    colours=inputs.colours,
-                    allow_own=False,
-                    prime_tower=inputs.prime_tower,
+            await self.step(self._project(steps=steps))
+            layout = await self.step(
+                _pack(
+                    # Always plates, never the piece as rendered: only the writer applies
+                    # the pinned colour order (Review Focus 4).
+                    PackRequest(
+                        items=inputs.items,
+                        plate=inputs.plate,
+                        goal=inputs.goal,
+                        filament_plan=inputs.filament_plan,
+                        colours=inputs.colours,
+                        allow_own=False,
+                        prime_tower=inputs.prime_tower,
+                    )
                 )
             )
             steps[0].done = 1
-            await self._project(steps=steps)
+            await self.step(self._project(steps=steps))
             parts = list({item.part.piece_key: item.part for item in inputs.items}.values())
             keys = [p.piece_key for p in parts]
             req = OutputRequest(
@@ -1059,15 +1085,17 @@ class TemplatePipeline:
                     parts=keys,
                 ),
             )
-            written = await workflow.execute_activity(
-                "write_output",
-                req,
-                result_type=PipelineOutput,
-                # Every Part is fetched from the store: the writer's bound, as a
-                # pipeline's `ctx.output` gets it, and it heartbeats.
-                start_to_close_timeout=_output_timeout(req),
-                heartbeat_timeout=HEARTBEAT,
-                retry_policy=RETRY,
+            written = await self.step(
+                workflow.execute_activity(
+                    "write_output",
+                    req,
+                    result_type=PipelineOutput,
+                    # Every Part is fetched from the store: the writer's bound, as a
+                    # pipeline's `ctx.output` gets it, and it heartbeats.
+                    start_to_close_timeout=_output_timeout(req),
+                    heartbeat_timeout=HEARTBEAT,
+                    retry_policy=RETRY,
+                )
             )
             steps[0].state, steps[0].done = "done", 2
             await self._project(

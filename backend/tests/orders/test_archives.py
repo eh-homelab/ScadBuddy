@@ -25,6 +25,11 @@ from scadbuddy.bambuddy.print_links import PrintLinkStore
 from scadbuddy.core.events import OrderItemChanged, PrintOutcome
 from scadbuddy.core.metrics import Metrics
 from scadbuddy.core.problems import ApiError
+from scadbuddy.filament import prints
+from scadbuddy.filament.catalog import CatalogStore
+from scadbuddy.filament.models import Material, SpoolCreate
+from scadbuddy.filament.print_uses import SlotUse, record_uses, settle_uses
+from scadbuddy.filament.spools import FilamentSpoolStore
 from scadbuddy.operations.claims import ClaimStore
 from scadbuddy.orders import archives as archives_module
 from scadbuddy.orders import attempt_media as attempt_media_module
@@ -541,7 +546,8 @@ def lan_printed(
 
 async def test_a_lan_attempt_copies_what_its_archive_says(shop: Shop, pool: PgPool) -> None:
     """#8124: a LAN start sends no queue item, so its archive is found by the start's
-    record, never by a send."""
+    record, never by a send. This run's result lists no start, so ScadBuddy has no
+    record of its own, and every fact is the archive's (#8282)."""
     order, item, attempt = lan_printed(shop, pool, 360)
     seam = Archives(facts(360, actual_seconds=3489, grams=14.91))
     read = await attempt_archives(
@@ -595,7 +601,211 @@ async def test_a_queue_attempt_takes_no_lan_archive_of_another_run(
         shop.lifecycle, seam, order.id, item.id, attempt.id, Starts(), limit=LIMIT
     )
     assert [a.archive_id for a in read.archives] == [81, 82]
-    assert shop.rows.fulfilments(item.id)[0].archive_ids == [81, 82]
+    kept = shop.rows.fulfilments(item.id)[0]
+    assert kept.archive_ids == [81, 82]
+    # #8282: a queue attempt still takes its seconds and grams from its archives.
+    assert (kept.actual_seconds, kept.actual_grams) == (14400, 25.0)
+
+
+T0 = datetime(2026, 11, 27, 8, tzinfo=UTC)
+
+
+def sb_spool(pool: PgPool) -> uuid.UUID:
+    """An SB spool, as a LAN start finds one in a tray."""
+    material = next(
+        r.id
+        for r in CatalogStore(pool).list("materials")
+        if isinstance(r, Material) and r.name == "PLA"
+    )
+    return (
+        FilamentSpoolStore(pool)
+        .create(SpoolCreate(material_id=material, grams_left=1000.0), actor="test")
+        .id
+    )
+
+
+def own_lan_print(
+    shop: Shop,
+    pool: PgPool,
+    starts: Sequence[timedelta],
+    uses: dict[int, list[float]],
+    *,
+    timed_ends: dict[int, timedelta] | None = None,
+    settled_after: timedelta,
+    archive_id: int | None = 370,
+) -> tuple[Order, OrderItem, Fulfilment, str]:
+    """An attempt whose LAN run started a plate at each of ``starts`` after `T0` (plate
+    numbers from 1), as its result records them (#8282). ``uses`` gives the grams each
+    plate's slots booked on SB spools; ``timed_ends`` the plates a printer report ended,
+    after `T0`. The follow reads the print settled ``settled_after`` `T0`, and the settle
+    books every use the reports did not end. With ``archive_id``, the archive the first
+    start became."""
+    order, item = shop.accepted()
+    run_id = run_row(pool)
+    names = [f"scadbuddy-{run_id[:8]}-p{n}" for n in range(1, len(starts) + 1)]
+    result = {
+        "library_file_id": 0,
+        "copies": 1,
+        "path": "native",
+        "lan": [
+            {"subtask_name": name, "started_at": (T0 + at).isoformat(), "plate_id": n}
+            for n, (name, at) in enumerate(zip(names, starts, strict=True), start=1)
+        ],
+    }
+    with pool.connection() as conn:
+        conn.execute("UPDATE print_runs SET result = %s WHERE id = %s", (Jsonb(result), run_id))
+    started(shop, order, item, run_id)
+    if archive_id is not None:
+        lan_link(pool, run_id, archive_id)
+    for plate, grams in uses.items():
+        record_uses(
+            pool,
+            run_id,
+            names[plate - 1],
+            [
+                SlotUse(
+                    slot_id=slot,
+                    spool_id=sb_spool(pool),
+                    grams=g,
+                    plate_started_at=T0 + starts[plate - 1],
+                )
+                for slot, g in enumerate(grams, start=1)
+            ],
+        )
+    for plate, at in (timed_ends or {}).items():
+        with pool.connection() as conn, conn.transaction():
+            prints.plate_ended(conn, str(uuid.uuid4()), names[plate - 1], "FINISH", T0 + at)
+    settle_uses(pool, run_id, ["done"] * len(starts))
+    settle(pool, run_id, "finished")
+    with pool.connection() as conn:
+        conn.execute(
+            "UPDATE print_outcomes SET settled_at = %s WHERE run_id = %s",
+            (T0 + settled_after, run_id),
+        )
+    attempt = shop.lifecycle.follow_print(run_id)
+    assert attempt is not None and attempt.finished_at is not None
+    return order, item, attempt, run_id
+
+
+#: An archive that says otherwise than the run's own record, in every fact.
+OTHER = {
+    "started_at": datetime(2026, 11, 1, 10, tzinfo=UTC),
+    "completed_at": datetime(2026, 11, 1, 12, tzinfo=UTC),
+    "actual_seconds": 999,
+    "grams": 99.0,
+}
+
+
+async def test_a_lan_attempt_takes_its_times_and_grams_from_its_own_record(
+    shop: Shop, pool: PgPool
+) -> None:
+    """#8282: the start is the first plate's, each plate ends at the report that showed
+    its end (the last one, with none, when the follow read it settled), the seconds are
+    the plates' spans, and the grams are what the ledger booked. The archive gives its
+    media only."""
+    order, item, attempt, _ = own_lan_print(
+        shop,
+        pool,
+        [timedelta(0), timedelta(hours=2)],
+        {1: [10.0], 2: [5.0, 2.5]},
+        timed_ends={1: timedelta(hours=1)},
+        settled_after=timedelta(hours=3),
+    )
+    seam = Archives(facts(370, **OTHER))
+    read = await attempt_archives(
+        shop.lifecycle, seam, order.id, item.id, attempt.id, Starts(), limit=LIMIT
+    )
+    assert [a.archive_id for a in read.archives] == [370]
+    assert read.archives[0].finish_photos and read.archives[0].timelapse
+    kept = shop.rows.fulfilments(item.id)[0]
+    assert kept.archive_ids == [370]
+    assert (kept.started_at, kept.finished_at) == (T0, T0 + timedelta(hours=3))
+    assert (kept.actual_seconds, kept.actual_grams) == (7200, 17.5)
+    assert read.attempt == kept
+
+
+async def test_a_lan_attempt_takes_from_its_archive_only_what_its_record_lacks(
+    shop: Shop, pool: PgPool
+) -> None:
+    """No plate booked a use (no SB spool in its trays), and the first plate's end was
+    timed by no report: the record gives the times, the archive the seconds and grams."""
+    order, item, attempt, _ = own_lan_print(
+        shop, pool, [timedelta(0), timedelta(hours=2)], {}, settled_after=timedelta(hours=3)
+    )
+    seam = Archives(facts(370, **OTHER))
+    await attempt_archives(
+        shop.lifecycle, seam, order.id, item.id, attempt.id, Starts(), limit=LIMIT
+    )
+    kept = shop.rows.fulfilments(item.id)[0]
+    assert (kept.started_at, kept.finished_at) == (T0, T0 + timedelta(hours=3))
+    assert (kept.actual_seconds, kept.actual_grams) == (999, 99.0)
+
+
+async def test_a_lan_attempt_whose_plate_did_not_finish_takes_the_archives_grams(
+    shop: Shop, pool: PgPool
+) -> None:
+    """A plate that did not finish drops its estimate: the record does not say what it
+    used, so the grams are the archive's, and the seconds stay the record's."""
+    order, item, attempt, run_id = own_lan_print(
+        shop, pool, [timedelta(0)], {}, settled_after=timedelta(hours=1)
+    )
+    # Its use booked, and ended as not applied, as a failed plate's settle books it.
+    with pool.connection() as conn:
+        name = conn.execute(
+            "SELECT result -> 'lan' -> 0 ->> 'subtask_name' AS n FROM print_runs WHERE id = %s",
+            (run_id,),
+        ).fetchone()
+    assert name is not None
+    use = SlotUse(slot_id=1, spool_id=sb_spool(pool), grams=8.0, plate_started_at=T0)
+    record_uses(pool, run_id, name["n"], [use])
+    settle_uses(pool, run_id, ["failed"])
+    seam = Archives(facts(370, **OTHER))
+    await attempt_archives(
+        shop.lifecycle, seam, order.id, item.id, attempt.id, Starts(), limit=LIMIT
+    )
+    kept = shop.rows.fulfilments(item.id)[0]
+    assert (kept.actual_seconds, kept.actual_grams) == (3600, 99.0)
+
+
+async def test_a_lan_attempt_keeps_a_time_a_person_corrected(shop: Shop, pool: PgPool) -> None:
+    """#5273: the times are written on the first copy only, so a person's correction
+    stands when the record is read again."""
+    order, item, attempt, _ = own_lan_print(
+        shop, pool, [timedelta(0)], {1: [4.0]}, settled_after=timedelta(hours=1)
+    )
+    seam = Archives(facts(370, **OTHER))
+    await attempt_archives(
+        shop.lifecycle, seam, order.id, item.id, attempt.id, Starts(), limit=LIMIT
+    )
+    assert shop.rows.fulfilments(item.id)[0].finished_at == T0 + timedelta(hours=1)
+    corrected = T0 + timedelta(hours=2)
+    with shop.rows.transaction() as conn:
+        shop.rows.update_fulfilment(conn, attempt.id, finished_at=corrected)
+    await attempt_archives(
+        shop.lifecycle, seam, order.id, item.id, attempt.id, Starts(), limit=LIMIT
+    )
+    kept = shop.rows.fulfilments(item.id)[0]
+    assert (kept.finished_at, kept.actual_seconds, kept.actual_grams) == (corrected, 3600, 4.0)
+
+
+async def test_a_lan_attempt_takes_its_own_record_without_bambuddy(
+    shop: Shop, pool: PgPool
+) -> None:
+    """With no Bambuddy and no archive, the heard outcome still writes the record's
+    facts, and asks nothing."""
+    _, item, _, run_id = own_lan_print(
+        shop,
+        pool,
+        [timedelta(0)],
+        {1: [4.0]},
+        settled_after=timedelta(minutes=30),
+        archive_id=None,
+    )
+    await mirror_run(shop.lifecycle, NOT_LINKED, run_id, Starts())
+    kept = shop.rows.fulfilments(item.id)[0]
+    assert kept.archive_ids == []
+    assert (kept.started_at, kept.finished_at) == (T0, T0 + timedelta(minutes=30))
+    assert (kept.actual_seconds, kept.actual_grams) == (1800, 4.0)
 
 
 def lan_run(
