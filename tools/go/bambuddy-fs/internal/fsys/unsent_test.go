@@ -68,7 +68,14 @@ func libraryHas(lib *fakeLibrary, want map[string]string) bool {
 	lib.locked(func() {
 		got := map[string]string{}
 		for id, f := range lib.files {
-			got[strconv.Itoa(f.FolderID)+"/"+f.Name] = string(lib.data[id])
+			key := strconv.Itoa(f.FolderID) + "/" + f.Name
+			if _, twice := got[key]; twice {
+				// Two files of one name (a new upload before the old one's delete) are not
+				// the library wanted; the map would keep either at random (#8103).
+				ok = false
+				return
+			}
+			got[key] = string(lib.data[id])
 		}
 		if len(got) != len(want) {
 			ok = false
