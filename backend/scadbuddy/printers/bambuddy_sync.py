@@ -37,6 +37,7 @@ from pydantic import BaseModel, ValidationError, computed_field
 from scadbuddy.bambuddy.client import BambuddyClient
 from scadbuddy.bambuddy.models import Printer, VirtualPrinter
 from scadbuddy.core.problems import ApiError
+from scadbuddy.orders.models import Actor
 from scadbuddy.printers.address import UnsafeAddressError
 from scadbuddy.printers.component import Printers
 from scadbuddy.printers.lan_link import LanProbeFailedError, probe_and_link
@@ -283,11 +284,11 @@ def virtual_view(vp: VirtualPrinter, now: datetime) -> BambuddyView:
 
 
 async def sync_printers(
-    printers: Printers, client: BambuddyClient, *, dry_run: bool = False
+    printers: Printers, client: BambuddyClient, *, by: Actor, dry_run: bool = False
 ) -> PrinterSyncResult:
     """One pass (module docstring). Bambuddy's printer list failing fails the pass
     (an `ApiError`); its virtual-printer list failing is reported and the printers
-    still sync."""
+    still sync. ``by`` is the actor of a printer merge the pass makes (#6949)."""
     now = datetime.now(UTC)
     active = [printer for printer in await client.printers() if printer.is_active]
     vp_error: str | None = None
@@ -300,7 +301,9 @@ async def sync_printers(
     rows = await asyncio.to_thread(store.list)
     entries: list[SyncEntry] = []
     for printer in active:
-        entries.append(await _sync_printer(printers, client, printer, rows, now, dry_run=dry_run))
+        entries.append(
+            await _sync_printer(printers, client, printer, rows, now, by=by, dry_run=dry_run)
+        )
     rows = await asyncio.to_thread(store.list)
     physical_serials = {p.serial_number for p in active if p.serial_number is not None}
     # The Bambuddy printers this pass gives a row: a dry run wrote none, so a VP's target
@@ -341,6 +344,7 @@ async def _sync_printer(
     rows: list[PrinterRow],
     now: datetime,
     *,
+    by: Actor,
     dry_run: bool,
 ) -> SyncEntry:
     store = printers.store
@@ -382,7 +386,7 @@ async def _sync_printer(
             )
         elif action == "linked":
             assert row is not None
-            row = await asyncio.to_thread(store.link_bambuddy, row.id, printer.id)
+            row = await asyncio.to_thread(store.link_bambuddy, row.id, printer.id, by)
         else:
             assert row is not None
             if printer.serial_number is not None and is_synthetic_serial(row.serial):
@@ -393,6 +397,7 @@ async def _sync_printer(
                     serial=printer.serial_number,
                     name=printer.name,
                     model=printer.model,
+                    by=by,
                 )
     except (SerialTakenError, BambuddyLinkTakenError, VirtualPrinterRowError):
         entry.action, entry.reason = "conflict", RACE

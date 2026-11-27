@@ -1,0 +1,23 @@
+{
+  "at": "2026-11-26T03:16:24.730753+00:00",
+  "id": "973d00be2c084830b766a325a8ca9d1c",
+  "new": {
+    "type": "object",
+    "properties": {}
+  },
+  "old": {
+    "type": "object",
+    "properties": {
+      "lot_number": {
+        "type": "string",
+        "description": "Lot or batch number printed on the label"
+      }
+    }
+  },
+  "kind": "entity_property_schema.changed",
+  "actor": {
+    "kind": "browser"
+  },
+  "owner": "kind:spool",
+  "retention_seconds": 0
+}

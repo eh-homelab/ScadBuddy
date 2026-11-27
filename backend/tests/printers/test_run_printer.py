@@ -61,6 +61,7 @@ from scadbuddy.workflows.print_activities import PrintActivities, PrintDeps
 from scadbuddy.workflows.print_models import AcceptAnswer, CheckInput, SourceSpec
 from tests.bambuddy.conftest import recording
 from tests.conftest import PgPool
+from tests.support.printers import MERGED_BY
 from tests.test_print_workflow import run_input
 
 pytestmark = pytest.mark.requires_postgres
@@ -154,7 +155,7 @@ async def prepare(
 
 def lan_linked(printers: PrinterStore, reports: PrinterReportStore, **patch: Any) -> str:
     """A row for Bambuddy printer 1, linked over the LAN, that reported just now."""
-    row = printers.ensure_bambuddy(1, serial=SERIAL, name="Garage", model="H2C")
+    row = printers.ensure_bambuddy(1, serial=SERIAL, name="Garage", model="H2C", by=MERGED_BY)
     printers.link_lan(row.id, LanLink(host="10.0.0.9", access_code="12345678"), cert_sha256=CERT)
     printers.patch(row.id, PrinterPatch.model_validate(patch or {"preferred_path": "auto"}))
     reports.put(row.id, REPORT["print"], datetime.now(UTC))
@@ -178,7 +179,7 @@ async def test_run_refuses_disagreeing_printer_fields(
     """The named row links another Bambuddy printer now: the one conflict refused, and it
     says which printer the registry links (#4442 I1)."""
     bambuddy_routes()
-    row = printers.ensure_bambuddy(1, serial=SERIAL, name="Garage", model="H2C")
+    row = printers.ensure_bambuddy(1, serial=SERIAL, name="Garage", model="H2C", by=MERGED_BY)
 
     with pytest.raises(ApiError) as refused:
         await prepare(printers, reports, run_request(printer=row.id, printer_id=2))
@@ -195,9 +196,12 @@ async def test_a_printer_merged_away_falls_back_to_the_bambuddy_printers_row(
     """#4442 I1: the strip's synthetic row was merged into the row added by serial; a
     body still naming it prints on the kept row, as ``printer_id`` says."""
     status = bambuddy_routes()
-    synthetic = printers.ensure_bambuddy(1, serial=None, name="H2C", model="H2C")
+    synthetic = printers.ensure_bambuddy(1, serial=None, name="H2C", model="H2C", by=MERGED_BY)
     mine = printers.create(PrinterCreate(serial=SERIAL, name="Mine"))
-    assert printers.ensure_bambuddy(1, serial=SERIAL, name="H2C", model="H2C").id == mine.id
+    assert (
+        printers.ensure_bambuddy(1, serial=SERIAL, name="H2C", model="H2C", by=MERGED_BY).id
+        == mine.id
+    )
     assert printers.get(synthetic.id) is None
 
     prepared = await prepare(printers, reports, run_request(printer=synthetic.id, printer_id=1))
@@ -213,7 +217,7 @@ async def test_a_printer_unlinked_since_is_a_disagreement(
     """#4516: a named row that links no Bambuddy printer (one only the LAN reaches, or
     unlinked since) never prints on the ``printer_id`` sent beside it."""
     bambuddy_routes()
-    row = printers.ensure_bambuddy(1, serial=SERIAL, name="Garage", model="H2C")
+    row = printers.ensure_bambuddy(1, serial=SERIAL, name="Garage", model="H2C", by=MERGED_BY)
     printers.unlink_bambuddy(row.id)
 
     with pytest.raises(ApiError) as refused:
@@ -341,9 +345,9 @@ async def test_a_printer_re_linked_elsewhere_is_a_disagreement(
     printers: PrinterStore, reports: PrinterReportStore
 ) -> None:
     bambuddy_routes()
-    row = printers.ensure_bambuddy(1, serial=SERIAL, name="Garage", model="H2C")
+    row = printers.ensure_bambuddy(1, serial=SERIAL, name="Garage", model="H2C", by=MERGED_BY)
     printers.unlink_bambuddy(row.id)
-    printers.link_bambuddy(row.id, 2)
+    printers.link_bambuddy(row.id, 2, by=MERGED_BY)
 
     with pytest.raises(ApiError) as refused:
         await prepare(printers, reports, run_request(printer=row.id, printer_id=1))
@@ -400,7 +404,7 @@ async def test_a_named_printer_prints_on_its_bambuddy_printer(
     printers: PrinterStore, reports: PrinterReportStore
 ) -> None:
     bambuddy_routes()
-    row = printers.ensure_bambuddy(1, serial=SERIAL, name="Garage", model="H2C")
+    row = printers.ensure_bambuddy(1, serial=SERIAL, name="Garage", model="H2C", by=MERGED_BY)
 
     prepared = await prepare(printers, reports, run_request(printer=row.id))
 
@@ -485,7 +489,9 @@ async def test_a_native_printer_that_never_reported_is_refused(
     printers_with_kek: PrinterStore, reports: PrinterReportStore
 ) -> None:
     status = bambuddy_routes()
-    row = printers_with_kek.ensure_bambuddy(1, serial=SERIAL, name="Garage", model="H2C")
+    row = printers_with_kek.ensure_bambuddy(
+        1, serial=SERIAL, name="Garage", model="H2C", by=MERGED_BY
+    )
     printers_with_kek.patch(row.id, PrinterPatch.model_validate({"preferred_path": "native"}))
 
     with pytest.raises(ApiError) as refused:
@@ -572,7 +578,7 @@ async def test_a_printer_bambuddy_does_not_reach_is_refused_on_the_bambuddy_path
     printers: PrinterStore, reports: PrinterReportStore
 ) -> None:
     bambuddy_routes()
-    row = printers.ensure_bambuddy(1, serial=SERIAL, name="Garage", model="H2C")
+    row = printers.ensure_bambuddy(1, serial=SERIAL, name="Garage", model="H2C", by=MERGED_BY)
     printers.unlink_bambuddy(row.id)
 
     with pytest.raises(ApiError) as refused:
@@ -603,10 +609,10 @@ def refusal(scenario: str, printers: PrinterStore, reports: PrinterReportStore) 
     if scenario == "unknown":
         return run_request(printer="00000000-0000-4000-8000-000000000009")
     if scenario == "disagreeing":
-        row = printers.ensure_bambuddy(1, serial=SERIAL, name="Garage", model="H2C")
+        row = printers.ensure_bambuddy(1, serial=SERIAL, name="Garage", model="H2C", by=MERGED_BY)
         return run_request(printer=row.id, printer_id=2)
     if scenario == "not-linked":
-        row = printers.ensure_bambuddy(1, serial=SERIAL, name="Garage", model="H2C")
+        row = printers.ensure_bambuddy(1, serial=SERIAL, name="Garage", model="H2C", by=MERGED_BY)
         printers.unlink_bambuddy(row.id)
         return run_request(printer=row.id)
     pid = lan_linked(printers, reports, preferred_path="native")

@@ -615,9 +615,9 @@ class FixedToken:
 
 def static_render_crud(current: RenderStoreSettings | None = None) -> CrudClient:
     """A render worker's client of an API that lists the ``settings``, ``jobs``, ``refs``,
-    ``blob-index``, ``store-folders``, ``assets`` and ``libraries`` areas and answers
-    ``current`` (the defaults: the local store) as the store settings. Its job, ref,
-    geometry, index, folder, upload and library routes are missing (a 404)."""
+    ``blob-index``, ``assets`` and ``libraries`` areas and answers ``current`` (the
+    defaults: the local store) as the store settings. Its job, ref, geometry, index,
+    upload and library routes are missing (a 404)."""
     body = (current or RenderStoreSettings()).model_dump(mode="json")
 
     def answer(request: httpx.Request) -> httpx.Response:
@@ -630,7 +630,6 @@ def static_render_crud(current: RenderStoreSettings | None = None) -> CrudClient
                         "jobs",
                         "refs",
                         "blob-index",
-                        "store-folders",
                         "assets",
                         "libraries",
                     ]

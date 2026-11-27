@@ -65,8 +65,8 @@ and prod has no `scadbuddy_render`, `scadbuddy_print` or `scadbuddy_projects` ro
 database secret in those pods (measured 2026-11-14, after eh-homelab/clusters#3555,
 #3566 and #3578). The API still revokes those roles at every start where they exist; the
 agent revokes nothing since #6501. Template Python still runs in the render
-worker's pod, which holds no database secret now but holds its `crud.render` credential,
-the S3 keys and the Bambuddy render key. Do the rest in this order: #5297 (authenticate `/api/v1/internal/*`; never `enforce` on prod, the owner's decision
+worker's pod, which holds no database secret now but holds its `crud.render` credential
+and the S3 keys (no Bambuddy key since #7882). Do the rest in this order: #5297 (authenticate `/api/v1/internal/*`; never `enforce` on prod, the owner's decision
 of 2026-11-17), #5296 (untrusted code out of
 pods with a database secret: openscad and `openscad-lsp` still run in the API's), then eh-homelab/clusters#3182 (the network). The evidence and the zones
 are in [docs/security/trust-boundaries.md](docs/security/trust-boundaries.md).
@@ -183,7 +183,7 @@ The backend's migration files and its settings tables: `backend/CLAUDE.md`.
 - Fonts: there is no family "Lobster" in the image, only "Lobster Two"; a missing
   family silently falls back to DejaVu and changes the geometry.
   Fonts named only inside a library checkout are not mirrored to render workers on
-  the bambuddy store (`store/fonts.py` `wanted_families`); pass such a font as a
+  a remote store (`store/fonts.py` `wanted_families`); pass such a font as a
   parameter or name it in the template's own source.
 - Bambu Studio only reads `project_settings.config` if the 3MF claims
   `Application: BambuStudio-…`, and then segfaults unless five options are present

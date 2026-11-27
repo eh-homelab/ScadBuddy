@@ -159,13 +159,13 @@ def output_kinds(state: AppState, components: Components) -> list[OperationKind]
         result = chosen.result if chosen is not None else job.result
         assert result is not None  # `_done` refuses a job without one
         blobs = state.store.blobs
-        # The copy reads the job's files, which on the bambuddy backend come through the
-        # cache. Not in the check: a fetch from Bambuddy may take longer than its budget.
-        # #2755: the fetch (a download from Bambuddy when this process has not got the
-        # piece) and the write are the save's two long steps; each is its own span.
+        # The copy reads the job's files, which on a remote store come through the
+        # cache. Not in the check: a fetch may take longer than its budget.
+        # #2755: the fetch (a download when this process has not got the piece) and the
+        # write are the save's two long steps; each is its own span.
         with span("output.fetch_result", attributes={"scadbuddy.job_id": job.id}):
             await materialize_result(blobs, result)
-        # A piece the store no longer has (aged out, or the Bambuddy store unreachable)
+        # A piece the store no longer has (aged out, or the store unreachable)
         # is not fetched, and the copy would fail with a server path in its message.
         files = (result.model_3mf, result.preview_glb)
         root = state.outputs.paths.root
