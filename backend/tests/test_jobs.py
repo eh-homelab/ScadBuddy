@@ -295,6 +295,27 @@ async def test_a_plate_the_pool_took_before_the_cancel_is_not_drawn() -> None:
     assert drawn == ["Plate 0"]
 
 
+async def test_a_plate_the_pool_took_before_the_budget_ran_out_is_not_drawn() -> None:
+    """#8266: the budget's end stops the plates too. The taken plates never finish, so
+    the budget runs out, and a plate that starts after that draws nothing."""
+    plates = [[ColourPart(1, f"Plate {n}", "#FF6AC1", trimesh.creation.box())] for n in range(3)]
+    drawn: list[str] = []
+
+    def drawing(parts: list[ColourPart]) -> str:
+        drawn.append(parts[0].name)
+        return parts[0].name
+
+    pool = _TakenExecutor()
+    with mock.patch.object(jobs, "render_plate_thumbnails", drawing):
+        rendered, warnings = await jobs.plates_thumbnails(
+            plates, config=replace(CONFIG, render_timeout=0.05), executor=pool
+        )
+        pool.run_taken()
+
+    assert (rendered, warnings) == (None, [THUMBNAIL_TIMEOUT_WARNING])
+    assert drawn == ["Plate 0"]
+
+
 def _colour_schema(*colours: tuple[str, str]) -> CustomizerSchema:
     return CustomizerSchema(
         parameters=[

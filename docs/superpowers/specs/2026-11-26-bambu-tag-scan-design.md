@@ -108,9 +108,10 @@ The owner's decisions (2026-11-26):
 
 ## Constraints
 
-- New backend routes go in Go (#7667), and `tools/go/core` is not deployed yet. This design
-  adds no route: it adds fields to the existing read bodies and answers, one table and one
-  column change (new Python inside the existing `tags` area, which moves to Go with it).
+- New backend routes go in Go (#7667). This design adds no route path: it adds fields to the
+  existing read bodies and answers, and two tables. As built (#8148, "As built: the route and
+  the split" below), core's area `filament-tag-reads` answers the read path in Go in front of
+  Python.
 - Only the API holds SQL (root CLAUDE.md). The app reaches ScadBuddy as the page does, on the
   LAN host.
 - Bytes travel as hex in JSON only where NDEF records already do (`data_hex`): at most 64
@@ -154,9 +155,12 @@ The owner's decisions (2026-11-26):
 - A new append-only table `filament_tag_reads`: `id`, `tag_id`, `at`, `source` (`phone`,
   `app`, `agent`, `ams`), `actor`, `uid`, `tray_uuid`, `records` (jsonb, NDEF), `blocks`
   (jsonb, MIFARE, key trailers never stored), `decoded` (jsonb), `printer_id`, `ams_id`,
-  `tray_id`, `job_id`. Rows are never updated; a tag merge moves them.
-- `read_on` writes the row for a phone, app or agent read. The AMS capture writes one when a
-  tag appears in a tray (`capture.py`'s `loaded`), not on every report.
+  `tray_id`, `job_id`. Rows are never updated; a tag merge moves them. As built (#8148):
+  `dump_key` (the `tag_dump` blob) stands for `blocks`, and `image_key`, `image_media_type`
+  and `location_*` keep the scan's photo and position.
+- The phone's reads write a row; the AMS capture writes one when a tag appears in a tray
+  (`capture.py`'s `loaded`), not on every report. As built (#8148), core writes the phone's
+  rows; the agent's NFC jobs and the AMS write none yet.
 - Routes: `GET /filament/tags/{id}/reads` (paged, newest first) and `GET /filament/tag-reads`
   (the latest scans across tags, for the scan page). Agent tool `filament_tag_reads` (`read`).
 
@@ -179,14 +183,60 @@ stored in the blob store", "implement 100% of the rfid tag guide"; decisions on 
 - The route is Go, behind the shared person auth (#8053). The Python notes below give the
   behaviour it keeps.
 - `TagReadIn` and `NfcJobResultIn` get `tag_type` and `mifare_blocks: [{index, data_hex}]`
-  (64 at most, 16 bytes each).
+  (64 at most, 16 bytes each). As built (#8148): `TagReadIn` only; the NFC jobs come later.
 - A tag is untrusted: strings and numbers are bounded before use, as `tag_formats.py` does.
-- `read_on` decodes a Bambu read, takes block 9 as the read's `tray_uuid`, and gives
+- The read (as built, core's, not `read_on`) decodes a Bambu read, takes block 9 as the read's `tray_uuid`, and gives
   `decoded` and `draft` as for an NDEF read: the material, brand and subtype found in the
   catalog by `fila_id` and type name, the colour from block 5 (and its Bambu colour code,
   `ColourCodes`), the label weight from block 5. The answer gets `bambu`, the decoded fields.
   The tag's kind is `bambu_mifare`.
 - Tested against the published dumps.
+
+### As built: the route and the split (#8148)
+
+The decision of #8148 (2026-11-27). The route keeps its path, `POST /api/v1/filament/tags/reads`
+(G2), and its answer is a superset of `TagReadResult`. Core's area `filament-tag-reads`
+(`tools/go/core/internal/tagreads`) stands in front of Python on that path. Each table has one
+writer:
+
+- Core writes the tag identity and the history: `filament_tags` (a new Bambu tag, its tray UUID,
+  kind `bambu_mifare`, `raw_blob` from a complete read), `filament_tag_uids`,
+  `filament_tag_reads`, the `blob_refs` holds of the dump and the photo, and the fold of a UID-only
+  tag into its tray's tag ("Same spool as…": its UIDs, bindings, reads, the ledger's copies of its
+  id and its Bambuddy queue row move, then the row goes; 409 `tags_both_bound` when both tags hold
+  an open binding, 409 `tag_has_backups` when the UID-only tag has backups, 409 `tag_keys_clash`
+  when the UID names a tag of another tray).
+- Python keeps the rest of a read: the last-seen mark, the bind (`bind_spool_id`), the answer's
+  `tag`, `spool`, `resolved` and `next`. Core hands it each MIFARE read as a UID-only read (no
+  blocks, no records), and each NDEF read as it is. Core writes no spool, binding or ledger event.
+- A MIFARE read (`mifare_blocks`): core checks and decodes it, stores the dump (the UID and the
+  data blocks, JSON, format `scadbuddy.mifare_classic_1k.v1`, kind `tag_dump`), records it, then
+  asks Python, and adds `bambu` (the decoder's JSON), `tag_read_id`, `dump_key` and, when no spool
+  holds the tag, a `draft` (material by the filament type, subtype by the rest of the detailed
+  type, brand Bambu Lab, colour, weight, diameter, nozzle and drying values). The Bambu colour
+  code is not in the draft yet. A key trailer in the body is dropped, never stored.
+- An NDEF read: Python answers first; core then writes its history row (records, source
+  `phone`) on the tag Python names and adds `tag_read_id`. A read with `bind_spool_id` is the page
+  binding a tag it just read, so it writes no second row.
+- A read with `tap: false` is the page's lookup of a tag it read before (after a move, a
+  restore's confirm). It writes no history row and no hold, and a MIFARE one sets no `raw_blob`.
+  A MIFARE read with `bind_spool_id` is the same as an NDEF one: no second row.
+- A bound tag that gains a tray UUID (set on it, or by a fold) is queued for the Bambuddy tag
+  push (`filament_bb_tag_pending`), as `enqueue_tag` does in Python.
+- Core's own refusals of a MIFARE read come before it records anything: 422 `mifare_invalid`
+  (the body's shape, a 7-byte UID say) and 422 `mifare_unreadable` (the decode). On those, and on
+  503 `mifare_needs_core`, the page posts the read again as a UID-only read.
+- Every read may carry `image` (`{key, media_type}`, a committed `scan_image` blob, 422
+  `image_not_found` otherwise) and `location` (`{lat, lon, accuracy_m, at}`, `at` within a day of
+  now), the owner's decisions of 2026-11-27. Core keeps them on the history row; Python checks
+  their shape only.
+- `tagreads.Reads.RecordMifare(ctx, body, actor, source)` records a MIFARE read from another Go
+  route (#8157, a scan job's result) with the same body shape, without Python's part.
+- With the area off, Python answers a MIFARE read 503 `mifare_needs_core` and writes no history.
+- Both sides find a UID through `filament_tag_uids`. A trigger keeps each tag's `tag_uid` there.
+
+Left for later PRs: history rows for the agent's NFC jobs and the AMS, the read history routes
+and the agent tool, the hex view, and the Bambu colour code in the draft.
 
 ### The app (G5)
 
