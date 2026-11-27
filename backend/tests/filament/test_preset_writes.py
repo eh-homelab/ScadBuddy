@@ -27,8 +27,10 @@ from scadbuddy.filament.preset_writes import (
     PRESET_WRITE_ACTIVITIES,
     PresetCopyInput,
     PresetEditInput,
+    PresetMirrorInput,
     PresetWritten,
     _edited,
+    _parsed,
     copy_preset,
     edit_preset,
     preset_write_activities,
@@ -521,3 +523,59 @@ async def test_an_activity_refuses_a_payload_that_is_no_object(name: str) -> Non
     error = await _refused(fn(raw))
 
     assert error.type == "invalid_input"
+
+
+@pytest.mark.parametrize(
+    ("name", "model", "valid"),
+    [
+        (
+            COPY_ACTIVITY,
+            PresetCopyInput,
+            {"preset_id": 3, "name": " Copy ", "actor": "ann", "idempotency_key": "k"},
+        ),
+        (
+            EDIT_ACTIVITY,
+            PresetEditInput,
+            _EDIT | {"set": {"a": "1", "b": ["2", "3"]}, "unset": ["c"], "name": "New"},
+        ),
+        (MIRROR_AGAIN_ACTIVITY, PresetMirrorInput, {"preset_id": 3}),
+    ],
+    ids=["copy", "edit", "mirror again"],
+)
+def test_a_valid_object_decodes_and_reaches_the_body_as_the_model(
+    name: str, model: type[Any], valid: dict[str, Any]
+) -> None:
+    """The same decode as the list test, with a valid object: the activity's own type
+    hints keep it a dict, and `_parsed` makes the model."""
+    defn = activity._Definition.must_from_callable(_ACTIVITIES[name])
+    converter = default_converter().payload_converter
+    (raw,) = converter.from_payloads(converter.to_payloads([valid]), defn.arg_types)
+
+    parsed = _parsed(model, raw)
+
+    assert isinstance(parsed, model)
+    assert parsed.preset_id == valid["preset_id"]
+    assert parsed == model.model_validate(valid)
+    if "name" in valid:
+        assert parsed.name == valid["name"].strip()
+
+
+async def test_a_new_body_under_an_old_key_is_refused_after_the_first_edit_committed(
+    pg_pool: PgPool, tmp_path: Path
+) -> None:
+    """The M1 path: the retry's version check fails (`version_moved`), the stored reply
+    is read once more, and its body differs from the first, so the key is refused."""
+    blobs = LocalBlobStore(tmp_path / "blobs")
+    made = await _make(pg_pool, blobs, {"name": "Reused", "a": "1"})
+    first = PresetEditInput(
+        preset_id=made, expected_version=1, set={"a": "2"}, actor="ann", idempotency_key="e1"
+    )
+    await edit_preset(pg_pool, blobs, OFF, first)
+    other = first.model_copy(update={"set": {"a": "3"}})
+
+    error = await _refused(
+        _edited(pg_pool, blobs, FilamentPresetStore(pg_pool, lambda: blobs), other)
+    )
+
+    assert error.type == "idempotency_key_reused"
+    assert _row(pg_pool, made)["version"] == 2
