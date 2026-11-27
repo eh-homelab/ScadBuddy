@@ -98,7 +98,7 @@ async def rasterise(pdf: bytes, dpi: int) -> list[bytes]:
 
 
 def png_names(labels: Sequence[Label], sheet: bool, pages: int) -> list[str]:
-    """The ZIP's entry names: a roll's by the label (`spool-<number>.png`, `L-<n>.png`), a
+    """The ZIP's entry names: a roll's by the label (`spool-<number>.png`, `<code>.png`), a
     sheet's by the page (`sheet-<n>.png`). A label used again gets `-2`, `-3` before
     `.png`, so every page is its own entry."""
     if sheet:

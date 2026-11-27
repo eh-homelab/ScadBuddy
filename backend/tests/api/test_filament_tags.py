@@ -38,6 +38,13 @@ def test_a_phone_read_answers_the_tag_and_next(client: TestClient) -> None:
     assert got.json()["tag"]["tag_uid"] == "04A2B3C400000100"
 
 
+def test_a_read_with_no_records_is_a_uid_only_read(client: TestClient) -> None:
+    """#8244: `records` defaults to none, so a body with only a UID is a UID-only read."""
+    got = client.post(READS, json={"uid": "04:a2:b3:c5"})
+    assert got.status_code == 200, got.text
+    assert got.json()["tag"]["tag_uid"] == "04A2B3C500000100"
+
+
 def test_a_read_of_a_place_label_answers_open_code_and_the_place(client: TestClient) -> None:
     place = _location(client, "Shelf 9")
     href = f"https://scadbuddy.example/x/L-{place['number']}?from=label"
@@ -747,6 +754,13 @@ def test_a_mifare_read_that_reaches_python_needs_core(client: TestClient) -> Non
     assert got.json()["code"] == "mifare_needs_core"
     body["mifare_blocks"] = [{"index": 64, "data_hex": "00"}]
     assert client.post(READS, json=body).status_code == 422
+
+
+def test_a_device_read_that_reaches_python_needs_core(client: TestClient) -> None:
+    """#8244: core's area `filament-tag-reads` loads a device read; Python never does."""
+    got = client.post(READS, json={"read_id": "00000000-0000-0000-0000-000000000001"})
+    assert got.status_code == 503, got.text
+    assert got.json()["code"] == "device_read_needs_core"
 
 
 def test_python_checks_a_reads_photo_and_position_and_leaves_them_to_core(
