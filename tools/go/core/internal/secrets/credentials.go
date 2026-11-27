@@ -32,13 +32,34 @@ const (
 	redactAuditWindow = "10 minutes"
 
 	tooManyMessage    = "at most 100 Claude credentials can be stored; delete one first"
-	staleOrderMessage = "the order must name every stored credential exactly once; the list changed since it" +
-		" was read, so reload it"
+	staleOrderMessage = "the order must name every credential this caller may order exactly once (the" +
+		" assistant's caller: every credential the assistant uses, no fleet row); the list" +
+		" changed since it was read, so reload it"
 	legacyFormatMessage = "the stored credential was saved in an older format that did not bind its kind and" +
 		" base URL; save it again"
+	wideningMessage = "to share a fleet credential with the agent, enter its secret again"
+	// fleetRowMessage refuses the agent's caller a fleet row (#7983): a fleet machine installs a
+	// claude_login, so the agent's caller never creates, saves, deletes, renames, resets or
+	// records an event on a claude_login or a row whose scope is fleet, never names one in a
+	// reorder (which leaves their priorities alone), and never saves a row into scope fleet.
+	fleetRowMessage = "the fleet's credentials are not changed here: the assistant may not save, delete," +
+		" rename, reset, reorder or record an event on a claude_login or a credential whose" +
+		" scope is fleet"
 )
 
-var kinds = []string{"anthropic_api_key", "claude_oauth_token", "gateway"}
+var kinds = []string{"anthropic_api_key", "claude_login", "claude_oauth_token", "gateway"}
+
+// scopes say who may use a credential (#7983): ScadBuddy's agent, the fleet's login rotator, or both.
+var scopes = []string{"agent", "fleet", "both"}
+
+// claudeLogin is the kind whose secret is a whole Claude Code claudeAiOauth object. Only the
+// fleet uses one; its account is stored in clear, and only it holds a machine lease.
+const claudeLogin = "claude_login"
+
+const (
+	accountFieldMax = 200
+	emailMax        = 320
+)
 
 // refused is a request the credential store refuses (CredentialRefusedError).
 func refused(status int, detail string) error {
@@ -129,7 +150,8 @@ const columns = `id, priority, kind, name, base_url, last4, updated_at, kek_id,
 	get_byte(secret_sealed, 0) AS seal_version,
 	CASE WHEN status = 'cooling_down' AND cooldown_until <= now() THEN 'active' ELSE status END AS status,
 	CASE WHEN status = 'cooling_down' AND cooldown_until > now() THEN cooldown_until END AS cooldown_until,
-	last_error, last_error_at, last_used_at, epoch`
+	last_error, last_error_at, last_used_at, epoch, scope, account_uuid, organization_uuid,
+	subscription_type, rate_limit_tier, email, leased_to, leased_at, lease_epoch`
 
 type row struct {
 	ID            string
@@ -147,26 +169,57 @@ type row struct {
 	LastErrorAt   *time.Time
 	LastUsedAt    *time.Time
 	Epoch         int
-	SecretSealed  []byte
-	DEKSealed     []byte
+	Scope         string
+	account
+	Email        *string
+	LeasedTo     *string
+	LeasedAt     *time.Time
+	LeaseEpoch   int64
+	SecretSealed []byte
+	DEKSealed    []byte
+}
+
+// account is a claude_login's account, in clear: never secret.
+type account struct {
+	AccountUUID      *string
+	OrganizationUUID *string
+	SubscriptionType *string
+	RateLimitTier    *string
 }
 
 type querier interface {
 	Query(ctx context.Context, sql string, args ...any) (pgx.Rows, error)
 }
 
+// agentsOwn is the agent's rows only (#7983): never a fleet row. The reveal is the agent's, so
+// every read of sealed bytes takes it, in the SQL: a fleet row reads as no row.
+const agentsOwn = "scope IN ('agent', 'both') AND kind <> 'claude_login'"
+
 // rows are the credentials as of the database's clock: an expired cooldown reads as active.
+// With sealed, the sealed bytes too, of the agent's own rows only.
 func rows(ctx context.Context, q querier, id *string, sealed bool) ([]row, error) {
-	cols, where, args := columns, "", []any{}
+	return rowsOf(ctx, q, id, sealed, false)
+}
+
+// rowsOf is rows; with own, the agent's own rows only.
+func rowsOf(ctx context.Context, q querier, id *string, sealed, own bool) ([]row, error) {
+	cols, where, args := columns, []string{}, []any{}
 	if sealed {
 		cols += ", secret_sealed, dek_sealed"
 	} else {
 		cols += ", NULL::bytea, NULL::bytea"
 	}
-	if id != nil {
-		where, args = " WHERE id = $1", []any{*id}
+	if sealed || own {
+		where = append(where, agentsOwn)
 	}
-	found, err := q.Query(ctx, "SELECT "+cols+" FROM ai_credentials"+where+" ORDER BY priority", args...)
+	if id != nil {
+		where, args = append(where, "id = $1"), []any{*id}
+	}
+	filter := ""
+	if len(where) > 0 {
+		filter = " WHERE " + strings.Join(where, " AND ")
+	}
+	found, err := q.Query(ctx, "SELECT "+cols+" FROM ai_credentials"+filter+" ORDER BY priority", args...)
 	if err != nil {
 		return nil, err
 	}
@@ -174,11 +227,42 @@ func rows(ctx context.Context, q querier, id *string, sealed bool) ([]row, error
 }
 
 func first(ctx context.Context, q querier, id *string) (*row, error) {
-	found, err := rows(ctx, q, id, false)
+	return firstOf(ctx, q, id, false)
+}
+
+// firstOf is one credential; the first by priority when id is nil, and with agent (the agent's
+// caller) the first one the agent uses: never a fleet row (#7983).
+func firstOf(ctx context.Context, q querier, id *string, agent bool) (*row, error) {
+	found, err := rowsOf(ctx, q, id, false, agent && id == nil)
 	if err != nil || len(found) == 0 {
 		return nil, err
 	}
 	return &found[0], nil
+}
+
+// fleets is whether the row is the fleet's (#7983): a claude_login, or scope fleet. Every other
+// row is one that agentsOwn matches.
+func (r *row) fleets() bool { return r.Kind == claudeLogin || r.Scope == "fleet" }
+
+// refuseIfFleets runs after a write of the agent's caller that matched no row of agentsOwn: a 409
+// when the row is the fleet's, so the caller tells a fleet row from a row that is gone.
+func refuseIfFleets(ctx context.Context, q querier, id string) error {
+	found, err := first(ctx, q, &id)
+	if err != nil {
+		return err
+	}
+	if found != nil && found.fleets() {
+		return refused(409, fleetRowMessage)
+	}
+	return nil
+}
+
+// ownOnly is the agentsOwn condition a write of the agent's caller adds to its WHERE.
+func ownOnly(agent bool) string {
+	if agent {
+		return " AND " + agentsOwn
+	}
+	return ""
 }
 
 // iso is Python's datetime.isoformat, in UTC.
@@ -213,6 +297,16 @@ type stored struct {
 	Epoch         int     `json:"epoch"`
 	KEKID         string  `json:"kek_id"`
 	LegacyFormat  bool    `json:"legacy_format"`
+	// #7983: who may use it, a claude_login's account and its machine lease.
+	Scope            string  `json:"scope"`
+	AccountUUID      *string `json:"account_uuid"`
+	OrganizationUUID *string `json:"organization_uuid"`
+	SubscriptionType *string `json:"subscription_type"`
+	RateLimitTier    *string `json:"rate_limit_tier"`
+	Email            *string `json:"email"`
+	LeasedTo         *string `json:"leased_to"`
+	LeasedAt         *string `json:"leased_at"`
+	LeaseEpoch       int64   `json:"lease_epoch"`
 }
 
 func (r *row) stored() stored {
@@ -221,6 +315,9 @@ func (r *row) stored() stored {
 		Last4: r.Last4, UpdatedAt: *iso(&r.UpdatedAt), Status: r.Status,
 		CooldownUntil: iso(r.CooldownUntil), LastError: r.LastError, LastErrorAt: iso(r.LastErrorAt),
 		LastUsedAt: iso(r.LastUsedAt), Epoch: r.Epoch, KEKID: r.KEKID, LegacyFormat: r.SealVersion == seal.V1,
+		Scope: r.Scope, AccountUUID: r.AccountUUID, OrganizationUUID: r.OrganizationUUID,
+		SubscriptionType: r.SubscriptionType, RateLimitTier: r.RateLimitTier, Email: r.Email,
+		LeasedTo: r.LeasedTo, LeasedAt: iso(r.LeasedAt), LeaseEpoch: r.LeaseEpoch,
 	}
 }
 
@@ -235,6 +332,8 @@ func (r *row) label() string {
 		}
 	case "claude_oauth_token":
 		what = "OAuth token"
+	case claudeLogin:
+		what = "Claude login"
 	}
 	tail := ""
 	if r.Last4 != "" {
@@ -303,7 +402,7 @@ func (s *Store) get(r *http.Request, _ crud.Params) (any, error) {
 		}
 		id = &v
 	}
-	found, err := first(r.Context(), s.Pool, id)
+	found, err := firstOf(r.Context(), s.Pool, id, true)
 	if err != nil {
 		return nil, err
 	}
@@ -315,28 +414,160 @@ type update struct {
 	kind            string
 	baseURL, secret *string
 	name            *string
+	// scope nil keeps the stored one (a new row: agent, or fleet for a claude_login).
+	scope *string
+	// email nil keeps the stored one; "" clears it. A claude_login's only.
+	email *string
 }
 
 func readUpdate(f *form) update {
-	return update{
+	u := update{
 		kind:    f.choice("kind", nil, kinds...),
 		baseURL: f.text("base_url", 0, 2048, nil),
 		secret:  f.text("secret", 1, 4096, nil),
 		name:    f.text("name", 0, 1024, nil),
+		email:   f.text("email", 0, 1024, nil),
 	}
+	if f.raw("scope") != nil {
+		scope := f.choice("scope", nil, scopes...)
+		u.scope = &scope
+	}
+	return u
 }
 
-var updateFields = []string{"kind", "base_url", "secret", "name"}
+var updateFields = []string{"kind", "base_url", "secret", "name", "scope", "email"}
 
 type plan struct {
-	baseURL  *string
-	envelope seal.Envelope
+	baseURL *string
+	// envelope nil keeps the stored secret.
+	envelope *seal.Envelope
 	last4    string
+	scope    string
+	account  account
+	email    *string
 }
 
-// plan is credentials.ts planPut: nil to keep the stored secret (only when neither kind nor
-// base_url changes).
-func (s *Store) plan(u update, current *row, id string) (*plan, error) {
+// changes says whether a plan that keeps the secret still writes the scope or the email.
+func (p *plan) changes(current *row) bool {
+	return p.scope != current.Scope || !equal(p.email, current.Email)
+}
+
+// planScope is the row's scope after u: the one asked, else the stored one, else agent. A
+// claude_login is the fleet's only: its scope is fleet, and any other scope asked is a 422.
+func planScope(u update, current *row) (string, error) {
+	if u.kind == claudeLogin {
+		if u.scope != nil && *u.scope != "fleet" {
+			return "", refused(422, `kind "claude_login" is the fleet's only: its scope must be "fleet"`)
+		}
+		return "fleet", nil
+	}
+	scope := "agent"
+	if current != nil {
+		scope = current.Scope
+	}
+	if u.scope != nil {
+		scope = *u.scope
+	}
+	return scope, nil
+}
+
+// planEmail is a claude_login's email after u: the one asked ("" clears it), else the stored one.
+func planEmail(u update, current *row) (*string, error) {
+	if u.kind != claudeLogin {
+		if u.email != nil && *u.email != "" {
+			return nil, refused(400, `email applies to kind "claude_login" only`)
+		}
+		return nil, nil
+	}
+	if u.email == nil {
+		if current != nil && current.Kind == claudeLogin {
+			return current.Email, nil
+		}
+		return nil, nil
+	}
+	email := *u.email
+	if email == "" {
+		return nil, nil
+	}
+	if utf8.RuneCountInString(email) > emailMax || !strings.Contains(email, "@") ||
+		strings.IndexFunc(email, func(r rune) bool { return pyIsSpace(r) || unicode.IsControl(r) }) >= 0 {
+		return nil, refused(400, emailMessage)
+	}
+	return &email, nil
+}
+
+const (
+	emailMessage   = "email must be one address, at most 320 characters, with no space or control character"
+	loginMessage   = "a claude_login secret must be a claudeAiOauth JSON object"
+	loginNeeds     = "a claude_login secret needs accessToken and refreshToken as text and expiresAt as a number"
+	accountMessage = "%s must be text of at most 200 characters"
+)
+
+// loginAccount reads a claude_login's secret: a claudeAiOauth object with accessToken and
+// refreshToken as text and expiresAt as a number. It answers the account in it and the last
+// four characters of its access token.
+func loginAccount(secret string) (account, string, error) {
+	var o map[string]json.RawMessage
+	if json.Unmarshal([]byte(secret), &o) != nil || o == nil {
+		return account{}, "", refused(400, loginMessage)
+	}
+	var access, refresh string
+	var expires float64
+	for _, need := range []struct {
+		name string
+		into any
+	}{{"accessToken", &access}, {"refreshToken", &refresh}, {"expiresAt", &expires}} {
+		raw, ok := o[need.name]
+		if !ok || string(raw) == "null" || json.Unmarshal(raw, need.into) != nil {
+			return account{}, "", refused(400, loginNeeds)
+		}
+	}
+	if access == "" || refresh == "" {
+		return account{}, "", refused(400, loginNeeds)
+	}
+	var a account
+	for _, field := range []struct {
+		name string
+		into **string
+	}{
+		{"accountUuid", &a.AccountUUID}, {"organizationUuid", &a.OrganizationUUID},
+		{"subscriptionType", &a.SubscriptionType}, {"rateLimitTier", &a.RateLimitTier},
+	} {
+		raw, ok := o[field.name]
+		if !ok || string(raw) == "null" {
+			continue
+		}
+		var v string
+		if json.Unmarshal(raw, &v) != nil || utf8.RuneCountInString(v) > accountFieldMax {
+			return account{}, "", refused(400, fmt.Sprintf(accountMessage, field.name))
+		}
+		*field.into = &v
+	}
+	return a, last4(access), nil
+}
+
+// refuseFleetRows is a create or save of the agent's caller (#7983): never a claude_login, never a
+// row whose scope is or becomes fleet. A 409, which the agent's store passes on. Its delete,
+// rename, reset and events refuse a fleet row with the same 409 (refuseIfFleets), and so does a
+// reorder that names one.
+func refuseFleetRows(u update, current *row) error {
+	if u.kind == claudeLogin || (u.scope != nil && *u.scope == "fleet") {
+		return refused(409, fleetRowMessage)
+	}
+	if current != nil && (current.Kind == claudeLogin || current.Scope == "fleet") {
+		return refused(409, fleetRowMessage)
+	}
+	return nil
+}
+
+// plan is credentials.ts planPut: its envelope nil to keep the stored secret (only when
+// neither kind nor base_url changes). agent: the agent's caller saves, so a fleet row is refused.
+func (s *Store) plan(u update, current *row, id string, agent bool) (*plan, error) {
+	if agent {
+		if err := refuseFleetRows(u, current); err != nil {
+			return nil, err
+		}
+	}
 	var baseURL *string
 	if u.kind == "gateway" {
 		if u.baseURL == nil || *u.baseURL == "" {
@@ -350,6 +581,15 @@ func (s *Store) plan(u update, current *row, id string) (*plan, error) {
 	} else if u.baseURL != nil && *u.baseURL != "" {
 		return nil, refused(400, `base_url applies to kind "gateway" only`)
 	}
+	scope, err := planScope(u, current)
+	if err != nil {
+		return nil, err
+	}
+	email, err := planEmail(u, current)
+	if err != nil {
+		return nil, err
+	}
+	p := &plan{baseURL: baseURL, scope: scope, email: email}
 	if u.secret == nil {
 		if current == nil {
 			return nil, refused(400, "no credential is stored yet; secret is required")
@@ -361,25 +601,37 @@ func (s *Store) plan(u update, current *row, id string) (*plan, error) {
 		if current.SealVersion == seal.V1 {
 			return nil, refused(409, legacyFormatMessage)
 		}
-		return nil, nil
+		// The agent's reveal opens agent and both rows only. A caller that widens a fleet row (never
+		// the agent's: refuseFleetRows) must carry its secret, so the agent's reveal never opens a
+		// secret the widening caller did not know.
+		if current.Scope == "fleet" && scope != "fleet" {
+			return nil, refused(422, wideningMessage)
+		}
+		return p, nil
 	}
 	secret := pyStrip(*u.secret)
 	if secret == "" {
 		return nil, refused(400, "secret is empty")
 	}
-	if strings.IndexFunc(secret, pyIsSpace) >= 0 {
-		return nil, refused(400, "secret must not contain whitespace")
+	if u.kind == claudeLogin {
+		// A claudeAiOauth object as Claude Code writes it: its whitespace is JSON's, not the token's.
+		if p.account, p.last4, err = loginAccount(secret); err != nil {
+			return nil, err
+		}
+	} else {
+		if strings.IndexFunc(secret, pyIsSpace) >= 0 {
+			return nil, refused(400, "secret must not contain whitespace")
+		}
+		p.last4 = last4(secret)
 	}
-	return &plan{
-		baseURL:  baseURL,
-		envelope: seal.SealSecret(s.Keys.Current, secret, credentialAAD(id, u.kind, baseURL)),
-		last4:    last4(secret),
-	}, nil
+	envelope := seal.SealSecret(s.Keys.Current, secret, credentialAAD(id, u.kind, baseURL))
+	p.envelope = &envelope
+	return p, nil
 }
 
 func equal(a, b *string) bool { return (a == nil) == (b == nil) && (a == nil || *a == *b) }
 
-func (s *Store) insert(ctx context.Context, tx pgx.Tx, u update) (*row, error) {
+func (s *Store) insert(ctx context.Context, tx pgx.Tx, u update, agent bool) (*row, error) {
 	// Under the table lock, so racing creates cannot pass the cap together.
 	var n int
 	if err := tx.QueryRow(ctx, `SELECT count(*) AS n FROM ai_credentials`).Scan(&n); err != nil {
@@ -393,14 +645,20 @@ func (s *Store) insert(ctx context.Context, tx pgx.Tx, u update) (*row, error) {
 	if err != nil {
 		return nil, err
 	}
-	p, err := s.plan(u, nil, id)
+	p, err := s.plan(u, nil, id, agent)
 	if err != nil {
 		return nil, err
 	}
+	if p.envelope == nil {
+		return nil, errors.New("a create kept a secret that does not exist")
+	}
 	if _, err := tx.Exec(ctx, `INSERT INTO ai_credentials (id, priority, kind, name, base_url, secret_sealed,
-		dek_sealed, kek_id, last4) VALUES ($1, (SELECT COALESCE(MAX(priority) + 1, 0)
-		FROM ai_credentials), $2, $3, $4, $5, $6, $7, $8)`,
+		dek_sealed, kek_id, last4, scope, account_uuid, organization_uuid, subscription_type,
+		rate_limit_tier, email) VALUES ($1, (SELECT COALESCE(MAX(priority) + 1, 0)
+		FROM ai_credentials), $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)`,
 		id, u.kind, name, p.baseURL, p.envelope.SecretSealed, p.envelope.DEKSealed, p.envelope.KEKID, p.last4,
+		p.scope, p.account.AccountUUID, p.account.OrganizationUUID, p.account.SubscriptionType,
+		p.account.RateLimitTier, p.email,
 	); err != nil {
 		return nil, err
 	}
@@ -419,21 +677,29 @@ func (s *Store) create(r *http.Request, _ crud.Params) (any, error) {
 	if err := f.err(); err != nil {
 		return nil, err
 	}
-	if u.secret == nil {
-		return nil, refused(400, "secret is required for a new credential")
-	}
-	var out *row
-	err = pgx.BeginFunc(r.Context(), s.Pool, func(tx pgx.Tx) error {
-		if err := lock(r.Context(), tx); err != nil {
-			return err
-		}
-		out, err = s.insert(r.Context(), tx, u)
-		return err
-	})
+	out, err := s.createRow(r.Context(), u, true)
 	if err != nil {
 		return nil, err
 	}
 	return one(out), nil
+}
+
+// createRow is a new credential, in its own transaction. agent: the agent's caller creates it, so
+// a claude_login or a fleet row is refused (#7983); only the fleet's own caller passes false.
+func (s *Store) createRow(ctx context.Context, u update, agent bool) (*row, error) {
+	if u.secret == nil {
+		return nil, refused(400, "secret is required for a new credential")
+	}
+	var out *row
+	err := pgx.BeginFunc(ctx, s.Pool, func(tx pgx.Tx) error {
+		if err := lock(ctx, tx); err != nil {
+			return err
+		}
+		var err error
+		out, err = s.insert(ctx, tx, u, agent)
+		return err
+	})
+	return out, err
 }
 
 // id is the optional credential id name of f.
@@ -459,13 +725,23 @@ func (s *Store) save(r *http.Request, _ crud.Params) (any, error) {
 	if err := f.err(); err != nil {
 		return nil, err
 	}
+	out, err := s.saveRow(r.Context(), id, u, true)
+	if err != nil {
+		return nil, err
+	}
+	return one(out), nil
+}
+
+// saveRow is a save over a credential (the first by priority when id is nil; one is created when
+// there is none), in its own transaction. agent as for createRow: the agent's caller never saves
+// over a claude_login or a fleet row, and its save with no id goes to the first row the agent uses.
+func (s *Store) saveRow(ctx context.Context, id *string, u update, agent bool) (*row, error) {
 	var out *row
-	err = pgx.BeginFunc(r.Context(), s.Pool, func(tx pgx.Tx) error {
-		ctx := r.Context()
+	err := pgx.BeginFunc(ctx, s.Pool, func(tx pgx.Tx) error {
 		if err := lock(ctx, tx); err != nil {
 			return err
 		}
-		current, err := first(ctx, tx, id)
+		current, err := firstOf(ctx, tx, id, agent)
 		if err != nil {
 			return err
 		}
@@ -473,21 +749,41 @@ func (s *Store) save(r *http.Request, _ crud.Params) (any, error) {
 			if id != nil {
 				return refused(404, "no credential "+*id)
 			}
-			out, err = s.insert(ctx, tx, u)
+			out, err = s.insert(ctx, tx, u, agent)
 			return err
 		}
-		p, err := s.plan(u, current, current.ID)
-		if err != nil || p == nil {
+		p, err := s.plan(u, current, current.ID, agent)
+		if err != nil {
+			return err
+		}
+		switch {
+		case p.envelope == nil && !p.changes(current):
 			out = current
-			return err
-		}
-		if _, err := tx.Exec(ctx, `UPDATE ai_credentials SET kind = $1, base_url = $2, secret_sealed = $3,
-			dek_sealed = $4, kek_id = $5, last4 = $6, updated_at = now(),
-			status = 'active', cooldown_until = NULL, last_error = NULL,
-			last_error_at = NULL, epoch = epoch + 1 WHERE id = $7`,
-			u.kind, p.baseURL, p.envelope.SecretSealed, p.envelope.DEKSealed, p.envelope.KEKID, p.last4,
-			current.ID); err != nil {
-			return err
+			return nil
+		case p.envelope == nil:
+			// The scope or the email only: the secret and its epoch stay.
+			if _, err := tx.Exec(ctx, `UPDATE ai_credentials SET scope = $1, email = $2, updated_at = now()
+				WHERE id = $3`,
+				p.scope, p.email, current.ID); err != nil {
+				return err
+			}
+		default:
+			// A kind other than claude_login holds no lease: a lease it held ends, and each lease
+			// change bumps lease_epoch.
+			if _, err := tx.Exec(ctx, `UPDATE ai_credentials SET kind = $1, base_url = $2, secret_sealed = $3,
+				dek_sealed = $4, kek_id = $5, last4 = $6, updated_at = now(),
+				status = 'active', cooldown_until = NULL, last_error = NULL,
+				last_error_at = NULL, epoch = epoch + 1, scope = $7, account_uuid = $8,
+				organization_uuid = $9, subscription_type = $10, rate_limit_tier = $11, email = $12,
+				leased_to = CASE WHEN $1 = 'claude_login' THEN leased_to END,
+				leased_at = CASE WHEN $1 = 'claude_login' THEN leased_at END,
+				lease_epoch = CASE WHEN $1 <> 'claude_login' AND leased_to IS NOT NULL
+					THEN lease_epoch + 1 ELSE lease_epoch END WHERE id = $13`,
+				u.kind, p.baseURL, p.envelope.SecretSealed, p.envelope.DEKSealed, p.envelope.KEKID, p.last4,
+				p.scope, p.account.AccountUUID, p.account.OrganizationUUID, p.account.SubscriptionType,
+				p.account.RateLimitTier, p.email, current.ID); err != nil {
+				return err
+			}
 		}
 		if err := evict(ctx, tx); err != nil {
 			return err
@@ -495,10 +791,7 @@ func (s *Store) save(r *http.Request, _ crud.Params) (any, error) {
 		out, err = first(ctx, tx, &current.ID)
 		return err
 	})
-	if err != nil {
-		return nil, err
-	}
-	return one(out), nil
+	return out, err
 }
 
 func (s *Store) delete(r *http.Request, _ crud.Params) (any, error) {
@@ -510,23 +803,41 @@ func (s *Store) delete(r *http.Request, _ crud.Params) (any, error) {
 	if err := f.err(); err != nil {
 		return nil, err
 	}
+	deleted, err := s.deleteRow(r.Context(), id, true)
+	if err != nil {
+		return nil, err
+	}
+	return struct {
+		Deleted bool `json:"deleted"`
+	}{deleted}, nil
+}
+
+// deleteRow deletes a credential (the first by priority when id is nil); the rest close up.
+// agent: the agent's caller deletes the agent's rows only, a fleet row is a 409, and with no id it
+// deletes the first row the agent uses.
+func (s *Store) deleteRow(ctx context.Context, id *string, agent bool) (bool, error) {
 	deleted := false
-	err = pgx.BeginFunc(r.Context(), s.Pool, func(tx pgx.Tx) error {
-		ctx := r.Context()
+	err := pgx.BeginFunc(ctx, s.Pool, func(tx pgx.Tx) error {
 		if err := lock(ctx, tx); err != nil {
 			return err
 		}
 		target := id
 		if target == nil {
-			current, err := first(ctx, tx, nil)
+			current, err := firstOf(ctx, tx, nil, agent)
 			if err != nil || current == nil {
 				return err
 			}
 			target = &current.ID
 		}
-		tag, err := tx.Exec(ctx, `DELETE FROM ai_credentials WHERE id = $1`, *target)
-		if err != nil || tag.RowsAffected() == 0 {
+		tag, err := tx.Exec(ctx, `DELETE FROM ai_credentials WHERE id = $1`+ownOnly(agent), *target)
+		if err != nil {
 			return err
+		}
+		if tag.RowsAffected() == 0 {
+			if agent {
+				return refuseIfFleets(ctx, tx, *target)
+			}
+			return nil
 		}
 		if _, err := tx.Exec(ctx, `UPDATE ai_credentials c SET priority = n.rn - 1 FROM (SELECT id,
 			row_number() OVER (ORDER BY priority) AS rn FROM ai_credentials) n
@@ -536,12 +847,7 @@ func (s *Store) delete(r *http.Request, _ crud.Params) (any, error) {
 		deleted = true
 		return evict(ctx, tx)
 	})
-	if err != nil {
-		return nil, err
-	}
-	return struct {
-		Deleted bool `json:"deleted"`
-	}{deleted}, nil
+	return deleted, err
 }
 
 func (s *Store) order(r *http.Request, _ crud.Params) (any, error) {
@@ -567,9 +873,20 @@ func (s *Store) order(r *http.Request, _ crud.Params) (any, error) {
 	if err := f.err(); err != nil {
 		return nil, err
 	}
+	out, err := s.orderRows(r.Context(), ids, true)
+	if err != nil {
+		return nil, err
+	}
+	return listOf(out), nil
+}
+
+// orderRows puts the credentials in this order; ids must name every row this caller may order
+// exactly once. With agent,
+// the agent's rows only: ids names every row the agent uses and no fleet row (a 409), those rows
+// take the priorities they hold between them in that order, and every fleet row keeps its own.
+func (s *Store) orderRows(ctx context.Context, ids []string, agent bool) ([]row, error) {
 	var out []row
-	err = pgx.BeginFunc(r.Context(), s.Pool, func(tx pgx.Tx) error {
-		ctx := r.Context()
+	err := pgx.BeginFunc(ctx, s.Pool, func(tx pgx.Tx) error {
 		if err := lock(ctx, tx); err != nil {
 			return err
 		}
@@ -577,18 +894,25 @@ func (s *Store) order(r *http.Request, _ crud.Params) (any, error) {
 		if err != nil {
 			return err
 		}
-		have := make([]string, 0, len(current))
+		have, slots := make([]string, 0, len(current)), make([]int, 0, len(current))
 		for _, c := range current {
-			have = append(have, c.ID)
+			if agent && c.fleets() {
+				if slices.Contains(ids, c.ID) {
+					return refused(409, fleetRowMessage)
+				}
+				continue
+			}
+			have, slots = append(have, c.ID), append(slots, c.Priority)
 		}
 		wanted := slices.Clone(ids)
 		slices.Sort(wanted)
 		slices.Sort(have)
+		slices.Sort(slots)
 		if len(slices.Compact(slices.Clone(wanted))) != len(ids) || !slices.Equal(wanted, have) {
 			return refused(409, staleOrderMessage)
 		}
-		if _, err := tx.Exec(ctx, `UPDATE ai_credentials c SET priority = v.ord - 1 FROM unnest($1::text[])
-			WITH ORDINALITY AS v(id, ord) WHERE c.id = v.id`, ids); err != nil {
+		if _, err := tx.Exec(ctx, `UPDATE ai_credentials c SET priority = v.priority
+			FROM unnest($1::text[], $2::int[]) AS v(id, priority) WHERE c.id = v.id`, ids, slots); err != nil {
 			return err
 		}
 		if err := evict(ctx, tx); err != nil {
@@ -597,10 +921,7 @@ func (s *Store) order(r *http.Request, _ crud.Params) (any, error) {
 		out, err = rows(ctx, tx, nil, false)
 		return err
 	})
-	if err != nil {
-		return nil, err
-	}
-	return listOf(out), nil
+	return out, err
 }
 
 func (s *Store) reset(r *http.Request, _ crud.Params) (any, error) {
@@ -612,24 +933,36 @@ func (s *Store) reset(r *http.Request, _ crud.Params) (any, error) {
 	if err := f.err(); err != nil {
 		return nil, err
 	}
-	var out *row
-	err = pgx.BeginFunc(r.Context(), s.Pool, func(tx pgx.Tx) error {
-		ctx := r.Context()
-		tag, err := tx.Exec(ctx, `UPDATE ai_credentials SET status = 'active', cooldown_until = NULL,
-			last_error = NULL, last_error_at = NULL, epoch = epoch + 1 WHERE id = $1`, *id)
-		if err != nil || tag.RowsAffected() == 0 {
-			return err
-		}
-		if err := evict(ctx, tx); err != nil {
-			return err
-		}
-		out, err = first(ctx, tx, id)
-		return err
-	})
+	out, err := s.resetRow(r.Context(), *id, true)
 	if err != nil {
 		return nil, err
 	}
 	return one(out), nil
+}
+
+// resetRow makes a credential active again, ending a cooldown or a disable. agent: the agent's rows
+// only, a fleet row is a 409.
+func (s *Store) resetRow(ctx context.Context, id string, agent bool) (*row, error) {
+	var out *row
+	err := pgx.BeginFunc(ctx, s.Pool, func(tx pgx.Tx) error {
+		tag, err := tx.Exec(ctx, `UPDATE ai_credentials SET status = 'active', cooldown_until = NULL,
+			last_error = NULL, last_error_at = NULL, epoch = epoch + 1 WHERE id = $1`+ownOnly(agent), id)
+		if err != nil {
+			return err
+		}
+		if tag.RowsAffected() == 0 {
+			if agent {
+				return refuseIfFleets(ctx, tx, id)
+			}
+			return nil
+		}
+		if err := evict(ctx, tx); err != nil {
+			return err
+		}
+		out, err = first(ctx, tx, &id)
+		return err
+	})
+	return out, err
 }
 
 func (s *Store) rename(r *http.Request, _ crud.Params) (any, error) {
@@ -642,29 +975,44 @@ func (s *Store) rename(r *http.Request, _ crud.Params) (any, error) {
 	if err := f.err(); err != nil {
 		return nil, err
 	}
-	var out *row
-	err = pgx.BeginFunc(r.Context(), s.Pool, func(tx pgx.Tx) error {
-		ctx := r.Context()
-		checked, err := checkName(name)
-		if err != nil {
-			return err
-		}
-		tag, err := tx.Exec(ctx, `UPDATE ai_credentials SET name = $1 WHERE id = $2`, checked, *id)
-		if err != nil || tag.RowsAffected() == 0 {
-			return err
-		}
-		out, err = first(ctx, tx, id)
-		return err
-	})
+	out, err := s.renameRow(r.Context(), *id, name, true)
 	if err != nil {
 		return nil, err
 	}
 	return one(out), nil
 }
 
-const before = `SELECT id, status AS raw, CASE WHEN status = 'cooling_down' AND cooldown_until <= now()
+// renameRow sets or clears the name, and nothing else. No warm eviction: a Claude Code process
+// never sees the name. agent: the agent's rows only, a fleet row is a 409.
+func (s *Store) renameRow(ctx context.Context, id string, name *string, agent bool) (*row, error) {
+	var out *row
+	err := pgx.BeginFunc(ctx, s.Pool, func(tx pgx.Tx) error {
+		checked, err := checkName(name)
+		if err != nil {
+			return err
+		}
+		tag, err := tx.Exec(ctx, `UPDATE ai_credentials SET name = $1 WHERE id = $2`+ownOnly(agent), checked, id)
+		if err != nil {
+			return err
+		}
+		if tag.RowsAffected() == 0 {
+			if agent {
+				return refuseIfFleets(ctx, tx, id)
+			}
+			return nil
+		}
+		out, err = first(ctx, tx, &id)
+		return err
+	})
+	return out, err
+}
+
+// before locks the row an event is recorded on; with agent, a row of the agent's only.
+func before(agent bool) string {
+	return `SELECT id, status AS raw, CASE WHEN status = 'cooling_down' AND cooldown_until <= now()
 	THEN 'active' ELSE status END AS status FROM ai_credentials
-	WHERE id = @id AND epoch = @epoch FOR UPDATE`
+	WHERE id = @id AND epoch = @epoch` + ownOnly(agent) + ` FOR UPDATE`
+}
 
 var record = map[string]string{
 	"used": `UPDATE ai_credentials c SET last_used_at = now(),
@@ -729,20 +1077,7 @@ func (s *Store) events(r *http.Request, _ crud.Params) (any, error) {
 	if kind == "cooling_down" && until == nil {
 		return nil, httpx.WithReason(422, "a cooling_down event needs until", credentialRefused)
 	}
-	sql := "WITH b AS (" + before + ") " + record[kind] +
-		" FROM b WHERE c.id = b.id RETURNING b.status AS before, b.raw AS raw, c.status AS after"
-	var found *struct{ before, raw, after string }
-	err = pgx.BeginFunc(r.Context(), s.Pool, func(tx pgx.Tx) error {
-		var b, raw, after string
-		err := tx.QueryRow(r.Context(), sql, pgx.NamedArgs{
-			"id": *id, "epoch": epoch, "reason": reason, "until": until, "replacing": replacing,
-		}).Scan(&b, &raw, &after)
-		if errors.Is(err, pgx.ErrNoRows) {
-			return nil
-		}
-		found = &struct{ before, raw, after string }{b, raw, after}
-		return err
-	})
+	found, err := s.recordEvent(r.Context(), *id, epoch, kind, reason, until, replacing, true)
 	if err != nil {
 		return nil, err
 	}
@@ -755,10 +1090,39 @@ func (s *Store) events(r *http.Request, _ crud.Params) (any, error) {
 		Transition *transition `json:"transition"`
 	}{}
 	if found != nil {
-		out.Transition = &transition{found.before, found.after,
-			found.raw == "cooling_down" && found.after == "active"}
+		out.Transition = &transition{found.Before, found.After,
+			found.Raw == "cooling_down" && found.After == "active"}
 	}
 	return out, nil
+}
+
+// recorded is an event's transition: the status before (as read) and its raw value, and after.
+type recorded struct{ Before, Raw, After string }
+
+// recordEvent records what a query learned; nil when the row is gone or its epoch moved on. before
+// locks the row, so the transition answered is the one written even when several pods report at
+// once. agent: the agent's rows only, a fleet row is a 409, so the agent's caller never cools down
+// or disables a fleet login.
+func (s *Store) recordEvent(ctx context.Context, id string, epoch int64, kind string, reason *string,
+	until, replacing *time.Time, agent bool) (*recorded, error) {
+	sql := "WITH b AS (" + before(agent) + ") " + record[kind] +
+		" FROM b WHERE c.id = b.id RETURNING b.status AS before, b.raw AS raw, c.status AS after"
+	var found *recorded
+	err := pgx.BeginFunc(ctx, s.Pool, func(tx pgx.Tx) error {
+		var r recorded
+		err := tx.QueryRow(ctx, sql, pgx.NamedArgs{
+			"id": id, "epoch": epoch, "reason": reason, "until": until, "replacing": replacing,
+		}).Scan(&r.Before, &r.Raw, &r.After)
+		if errors.Is(err, pgx.ErrNoRows) {
+			if agent {
+				return refuseIfFleets(ctx, tx, id)
+			}
+			return nil
+		}
+		found = &r
+		return err
+	})
+	return found, err
 }
 
 // opened is the agent's Credential: the secret in plaintext.
@@ -855,6 +1219,8 @@ func (s *Store) reveal(r *http.Request, _ crud.Params) (any, error) {
 			}
 			out.Credentials = &list
 			// Redaction reads every credential at tool-call rate: one row a window says it did.
+			// It gets the agent's own rows only. That is correct: the agent's process never holds
+			// a fleet secret, so it has none to redact.
 			if purpose == "redact" {
 				lately, err := recordedLately(ctx, tx, "credential", []string{action}, redactAuditWindow, nil)
 				if err != nil || lately {

@@ -21,7 +21,12 @@ from psycopg.rows import DictRow
 from psycopg_pool import ConnectionPool
 
 from scadbuddy.entities.refs import EntityRef
-from scadbuddy.entities.required import checks_save, mark_incomplete, save_properties_on
+from scadbuddy.entities.required import (
+    checks_save,
+    hold_for_properties,
+    mark_incomplete,
+    save_properties_on,
+)
 from scadbuddy.filament import ledger
 from scadbuddy.filament import models as m
 from scadbuddy.filament.bb_sync_models import forget_sync
@@ -246,6 +251,7 @@ class SpoolTypeStore:
         nothing is written."""
         try:
             with self._orders.transaction() as conn:
+                hold_for_properties(conn, body.properties, by or Actor(kind="browser"))
                 made = self.create_on(conn, body.model_copy(update={"properties": None}))
                 if body.properties or checked:
                     save_properties_on(
@@ -309,6 +315,8 @@ class SpoolTypeStore:
         sets.append("updated_at = now()")
         try:
             with self._orders.transaction() as conn:
+                # The log before the type row (#6949).
+                hold_for_properties(conn, patch.properties, by or Actor(kind="browser"))
                 current = self._row(conn, type_id, lock=True)
                 if current is None:
                     return None

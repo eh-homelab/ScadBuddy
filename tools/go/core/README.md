@@ -25,8 +25,8 @@ unchanged, to the Python API: WebSockets, SSE and large bodies included. On prod
 | `settings`, `settings:read` | `GET`, `POST` `/settings` |
 | `credentials` †, `credentials:read` † | `GET` `/credentials`, `…/one`, `…/key`; `POST` `/credentials` and `…/save`, `…/delete`, `…/order`, `…/reset`, `…/name`, `…/events`, `…/reveal` |
 | `payload-keys` † | `POST /payload-keys/{subject}` |
-| `keys` † | `GET /keys/input-hash` (`POST /fetch-grants` stays in Python) |
-| `notify` †, `notify:read` † | `/push/vapid`, `/push/subscriptions` (and `…/remove`), `/push/sent`, `/push/poll-lease`, `/notify-channels` and every route under it (`GET /push/waiting` stays in Python) |
+| `keys` † | `GET /keys/input-hash` (`internal/secrets`) and `POST /fetch-grants` (`internal/fetchgrants`) |
+| `notify` †, `notify:read` † | `/push/vapid`, `/push/subscriptions` (and `…/remove`), `/push/sent`, `/push/poll-lease`, `/notify-channels` and every route under it, and `GET /push/waiting` |
 | `transcripts` †, `transcripts:read` † | `/sessions/{id}/entries` (and `…/last`, `…/landed`, `…/delete`), `…/transcript` (and `…/head`, `…/moved`), `…/cwd`, `…/subkeys`, `/transcripts` |
 | `access`, `access:read` | `/access/rows`, `/access/row`, `/access/write`, `/tool-listings/*`, `/leases/{key}` |
 | `plugin-sessions`, `plugin-sessions:read` | `/plugin-sessions/seen`, `…/ended`, `…/mark`, `…/dead`, `…/own` |
@@ -39,7 +39,8 @@ unchanged, to the Python API: WebSockets, SSE and large bodies included. On prod
 | `http-bodies` | those, and `POST /http-bodies` |
 | `background-tasks:read` | every `GET` under `/background-tasks` |
 | `background-tasks` | every route under `/background-tasks` |
-| `operations:read` | `GET /operations/{id}` and `…/by-key/{key}`. The insert and the end stay Python's: they write the activity row |
+| `operations:read` | `GET /operations/{id}` and `…/by-key/{key}` |
+| `operations` | those, and `POST /operations` and `…/{id}/finish`, each with its `activity` row and `activity.changed` event in its transaction (`internal/activity`) |
 | `workspace:read` | `GET /workspace/files`, `…/file`, `…/usage`, and `POST …/session-files` |
 | `workspace:sql` | those, and `POST /workspace/file-deletes`, `…/sweeps` and `…/reconciles` |
 | `workspace` † | every route of `crud_agent_workspace.py`: those, and `GET /workspace/status`, `…/file-bytes`, `POST …/file-writes`, `…/copies`, `…/blob-moves` (below). Not in this build's `SCADBUDDY_CORE_AREAS` yet: its blob store needs `internal/blobstore`'s read and write by key |
@@ -49,7 +50,7 @@ unchanged, to the Python API: WebSockets, SSE and large bodies included. On prod
 | `pairings` | `/pairings` and every route under it |
 | `mcp-tokens` | `/mcp-tokens` and every route under it |
 | `plugins` | `POST` `/plugins/{name}/delete`, `/plugin-oauth/grants/{plugin}/mark`, `…/forget` only: the routes that need no KEK |
-| `remote-plugins` † | every route of `crud_agent_plugins.py`: `/plugins` (`GET`, `POST`), `GET /plugins/{name}`, `POST` `/plugins/open-enabled`, `…/{name}/update`, `…/tool-access`, `…/reveal`, `…/delete`; `POST` `/plugin-oauth/flows` and its `…/authorize`, `…/take`; `/plugin-oauth/grants` and its `…/{plugin}/open`, `…/refreshed` (only while the lease `plugin-oauth:<plugin>` holds), `…/mark`, `…/forget`; `/plugin-oauth/stored-secrets` |
+| `remote-plugins` † | replaces `plugins` (name one of the two): every route of `crud_agent_plugins.py`: `/plugins` (`GET`, `POST`), `GET /plugins/{name}`, `POST` `/plugins/open-enabled`, `…/{name}/update`, `…/tool-access`, `…/reveal`, `…/delete`; `POST` `/plugin-oauth/flows` and its `…/authorize`, `…/take`; `/plugin-oauth/grants` and its `…/{plugin}/open`, `…/refreshed` (only while the lease `plugin-oauth:<plugin>` holds), `…/mark`, `…/forget`; `/plugin-oauth/stored-secrets` |
 | `plugin-packages` | `/plugin-packages` and every route under it |
 | `hosted-plugins:read` | `GET /hosted-plugins/{name}`. A version's zip (the blob store) stays Python's |
 | `plugin-feeds` | `GET /plugin-feeds/{feed}`; `PUT`, `DELETE` `…/packages/{name}` |
@@ -66,7 +67,7 @@ unchanged, to the Python API: WebSockets, SSE and large bodies included. On prod
 | `migrations` | `POST /migrations/ledger` |
 | `auth-sessions` | `POST /auth-sessions/lookup` |
 | `forget:read` | `GET /flow-blobs/{subject}/{name}` |
-| `forget` | that, and `POST /payload-keys/{subject}/drop`, `/payload-key-sweeps`, `/flow-blobs/{subject}`; `POST /forgotten-subjects/{subject}` stays Python's (it opens transcripts under the KEK) |
+| `forget` | that, and `POST /payload-keys/{subject}/drop`, `/payload-key-sweeps`, `/flow-blobs/{subject}`, `/forgotten-subjects/{subject}` (a session's forks take their ranges first, opened and sealed under the KEK; with none, a fork that takes transcript entries is 409 `forks-take-ranges`) |
 | `workspace-blob-refs:read` | `GET /workspace-blob-refs` |
 | `workspace-blob-refs` | that, and `POST /workspace-blob-refs`, `…/release` |
 | `events` | `GET /events/head`, `GET /events` |
@@ -77,6 +78,7 @@ unchanged, to the Python API: WebSockets, SSE and large bodies included. On prod
 | `questions` | `/questions/*`: the `done` summaries read, dismissed and posted, and the attention count |
 | `escalations` | `/escalations/*`: a flow run's calls passed up, denied, moved, delivered, and a run's entries |
 | `audit` | `POST` `/audit/record`, `…/list`, `…/prune` |
+| `order-costs` | `POST /orders/{id}/assistant-cost`: the cost entry, its `order_events` row and, after the commit, `order.changed` and `order_item.changed`. It reads `pricing_usd_rate` and `orders_currency` from `settings`, else `SCADBUDDY_PRICING_USD_RATE` and `SCADBUDDY_ORDERS_CURRENCY` from core's own environment, else `1` and `USD`, so core needs the API's values of those two |
 
 Area `workspace` † (`internal/workspace`, #8131) serves a file's bytes, sealed as Python seals
 them: on a backend with a blob store, a file is the blob `workspace-<sha256 of the sealed bytes>`,
@@ -138,6 +140,39 @@ socket frame, the typed kinds' fields, and the topic rules. The backend's
 `model_dump_json` does (`internal/bus/kinds.go` holds each kind's fields) and an opaque one as
 `json.dumps` does, both from the log's `jsonb`.
 
+The same area serves the session registry (`internal/fleet/registry.go`, #7985). Caller
+`fleet` reads `GET /sessions` (`?limit=`, as the inbox: the most recently seen session
+first, by its newest host, and `more`) and `GET /sessions/{session_id}` (404 reason
+`unknown-session`). One session id can run on several machines at once, so each session is
+its `session_id`, `handle`, `last_seen` (the newest host's) and `hosts`, one per machine,
+the most recently seen first: each host with its machine and its credential's `id`,
+`name`, `kind` and `last4` only, joined from `ai_credentials`, never a secret column. Caller `fleet-rotator` (scope `crud.fleet-rotator`),
+under `/api/v1/internal/crud/fleet-rotator`, writes `PUT /machines/{id}` (the id is 64
+lower-case hex: a SHA-256, never the raw machine id) and `PUT
+/machines/{machine_id}/sessions/{session_id}` (the session's row on that machine, keyed by
+both ids; the whole row: an optional field left out is cleared). A session `PUT` makes the
+session's fleet agent as `touch` does (409 `handle-taken`), needs its machine (404
+`unknown-machine`), links a new row to the newest row of the same machine, pid and
+`proc_start` (`previous_session_id`, the session before a `/clear`), and answers that one
+row only, never another machine's. Every field is checked: lengths,
+absolute paths, no control characters, a full `git_head`. `git_remote` is an `http(s)://`,
+`ssh://` or `git://` URL with no query and no fragment, or the scp-like `user@host:path`
+(user `[A-Za-z0-9._-]+`). Only an `ssh://` URL may name a user, with no password; anything
+else (a token in the user part, a local path, `file://`, `ext::`) is a 422.
+
+A `fleet-rotator` credential names its machine: the `<machine>` of the bootstrap proof file
+`fleet-rotator.<machine>` it was exchanged for (`service_credentials.machine`; `crud.ServiceOf`
+gives a handler the verified service). The machine's `id` is the service's own hash, so the
+first `PUT /machines/{id}` records the caller's proof name in `fleet_machines.proof_name`. A
+`PUT /machines/{id}` of a row another proof registered is a 403 (reason
+`machine-of-another-proof`), and so is a session `PUT` whose machine is registered to
+another proof. So two machines of different proofs each hold a row of the same session id,
+and neither changes the other's. A `fleet-rotator` credential with no machine writes
+nothing (403 `no-machine`). Core reads no bootstrap directory: a credential whose machine's file
+went is refused here once the API revokes its row, at the API's first resolve of it or its next
+start or auth sweep (at most 5 minutes; `docs/security/trust-boundaries.md`). `fleetd` sends a
+`fleet` PAT today, which these routes refuse until #8041.
+
 Area `blobs` † (`internal/blobstore`, #7958) is a shared area: any service credential whose scopes
 hold `crud.blobs` may call it, under `/api/v1/internal/crud/blobs`; no caller is granted that scope
 yet. Python has no such routes. `POST /uploads` with `{kind, size, sha256, media_type}` answers
@@ -169,6 +204,7 @@ stands for an upload: its URL lasts 15 minutes and its commit an hour more, and 
 commit of it is a 404. Refusals carry a `reason`: 422 `kind_not_allowed`, 413 `upload_too_large`,
 507 `store_full`, 404 `upload_not_found`, 410 `upload_expired`, 409 `upload_not_received`, 422
 `upload_mismatch`, 409 `store_object_mismatch`, 503 `store_unavailable` or `store_busy`.
+A Go handler in core reads a blob in-process with `Blobs.OpenKey(ctx, key)` (a `store_blobs` key, the form Python's `blob_key` and `blob_refs` hold) or `Blobs.Open(ctx, kind, sha256)`. It adds no route. The read looks up the row, sends a presigned GET to the row's S3 object, waits at most a minute for its headers, and streams the bytes with their `Ref` for as long as the caller's context allows. The stream checks size and SHA-256 and ends with `ErrBlobMismatch` on a wrong object. A missing row or object is `ErrBlobNotFound`. A store that is not S3, or a row on another backend, is `ErrNotConfigured`.
 `internal/blobclient` is its Go client: `New(baseURL, token, tel)`, `Upload(ctx, kind, mediaType, body)`; each call to core may take 2 minutes, longer than a busy commit takes to answer `store_busy`.
 Both sides trace their requests with `telemetry`'s `Transport`: each span records the method, the
 status and the peer (`s3` for the store), never a URL, so a presigned query is never recorded. A
@@ -357,6 +393,18 @@ At a stop, the servers drain and the three signals flush within the 20 s shutdow
   words; Python's body gate refuses it in its own. A store failure's 503 names the store error's
   class (`Class()`), else `Exception`, where Python names the exception's type. A meta that is no
   JSON says `JSON decode error`, and an event that is no JSON names Go's parse error.
+- `POST /fetch-grants`: a host that is not ASCII, or one that starts `xn--`, is checked by
+  `golang.org/x/net/idna`'s registration profile, not Python's `idna` package. Both apply IDNA
+  2008; a rare label may be taken by one and refused by the other. A port that `int()` reads
+  with non-ASCII digits counts as one.
+- An operation's request, result and error, and a fork's copied events, are written as
+  Python's `json.loads` and `json.dumps` write them (`jsonv.Loads`), but `NaN` and `Infinity`
+  in the JSON text are refused.
+- An operation's activity title capitalises the kind as `str.capitalize` does for the simple
+  case mappings, the final sigma and a few full title mappings; a rare character outside them
+  may differ.
+- `POST /forgotten-subjects/{subject}`: an ancestor whose key went while its fork's range is
+  read is a 500, as in Python; a NaN in a copied event is a 500, where Python copied it.
 - The event stream: a replayed typed event takes what pydantic's lax mode takes for its fields
   (an int as a whole float or a text of digits, a bool as `0`, `1` or a word), but not every
   other coercion pydantic makes; an event it does not take is a `resync`, as in Python. A lone

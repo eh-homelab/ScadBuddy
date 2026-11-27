@@ -14,6 +14,7 @@ from psycopg import Connection
 from psycopg.rows import DictRow
 from psycopg.types.json import Jsonb
 
+from scadbuddy.entities.actor import set_actor
 from scadbuddy.entities.properties import check_schema
 from scadbuddy.inventory.models import ItemKind, KindInput, KindPatch, empty_schema
 from scadbuddy.orders.models import Actor
@@ -133,6 +134,8 @@ class KindStore:
         id."""
         check_schema(body.attribute_schema)
         with self.pool.connection() as conn, conn.transaction():
+            # The schema's history names `by`; the log's lock first (`entities/actor.py`).
+            set_actor(conn, by)
             if body.parent_id is not None:
                 self._lock_parent(conn, body.parent_id)
             try:
@@ -167,6 +170,7 @@ class KindStore:
         # Only `parent_id` may be set to null; another null keeps the value.
         changes = {k: v for k, v in fields.items() if v is not None or k == "parent_id"}
         with self.pool.connection() as conn, conn.transaction():
+            set_actor(conn, by)
             row = conn.execute(
                 "SELECT tracking, builtin FROM item_kinds WHERE id = %s FOR UPDATE", (kind_id,)
             ).fetchone()

@@ -40,6 +40,7 @@ from tests.api.test_print_library import library_file
 from tests.api.test_send import configure
 from tests.conftest import PgPool
 from tests.support.arrange import copied_output, saved_output
+from tests.support.printers import MERGED_BY
 from tests.support.row_outputs import update_row
 
 #: A well-formed output id no output has: each test fails for its own reason, not the id's.
@@ -677,7 +678,7 @@ def _registry_row(client: TestClient, *, bambuddy_id: int | None = None) -> str:
     printers = state.components.get(PRINTERS)
     row = printers.store.create(PrinterCreate(serial="01P00A000000009", name="Attic", model="H2C"))
     if bambuddy_id is not None:
-        printers.store.link_bambuddy(row.id, bambuddy_id)
+        printers.store.link_bambuddy(row.id, bambuddy_id, by=MERGED_BY)
     return row.id
 
 

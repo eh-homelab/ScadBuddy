@@ -288,6 +288,7 @@ from scadbuddy.library.settings_store import (
     PrintSettings,
     print_projection,
 )
+from scadbuddy.orders.models import Actor
 from scadbuddy.print_watch.component import AutoImportsDep
 from scadbuddy.print_watch.lan import LanCapture, LanImport
 from scadbuddy.print_watch.lan_store import StoreLanRecorder
@@ -336,6 +337,8 @@ router = crud_router("print")
 # The `Operation` records of the Bambuddy kinds the worker runs (Q9).
 router.routes.extend(operations_router("print").routes)
 
+#: The actor of a printer merge the print worker's `ensure-bambuddy` makes (#6949).
+PRINT_ACTOR = Actor(kind="provider", principal="print")
 #: A run the request names that is not kept.
 NO_SUCH_RUN = "no-such-run"
 #: An event of a kind the print worker does not publish.
@@ -798,6 +801,7 @@ async def ensure_bambuddy(body: EnsureBambuddy, printers: PrintersDep) -> Ensure
         name=body.name,
         model=body.model,
         listed=None if body.listed is None else frozenset(body.listed),
+        by=PRINT_ACTOR,
     )
     return EnsuredPrinter(row=row, written=written)
 

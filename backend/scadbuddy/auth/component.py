@@ -82,7 +82,9 @@ class AuthComponent:
         if review is not None:
             self.verifiers["k8s"] = review
         if settings.service_bootstrap_dir is not None:
-            self.verifiers["bootstrap"] = BootstrapVerifier.from_dir(settings.service_bootstrap_dir)
+            bootstrap = BootstrapVerifier.from_dir(settings.service_bootstrap_dir)
+            self.verifiers["bootstrap"] = bootstrap
+            self._credentials.machine_present = bootstrap.has_machine
 
     def _open(self) -> None:
         with self._lock:

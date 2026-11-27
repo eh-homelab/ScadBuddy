@@ -134,7 +134,7 @@ export function withDesign(draft: ListingDraft, schema: DesignSchema, filaments:
     if (bound) {
       const { default: _own, ...rest } = bound
       const start = same(param.initial) ? rest : { ...rest, default: next }
-      params[param.name] = fittedDefault(param, start as typeof bound, colours, next)
+      params[param.name] = fittedDefault(param, start as typeof bound, colours, next, filaments.filter((filament) => draft.colours.includes(filament.id)))
     } else {
       fixed[param.name] = next
     }

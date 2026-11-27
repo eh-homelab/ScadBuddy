@@ -183,7 +183,7 @@ describe('tool activities', () => {
       const refused = await failure(env(workflowId).run(h.activities.whoami!, {}))
       expect(refused.nonRetryable).toBe(true)
       expect(refused.type).toBe('UnknownSession')
-      expect(refused.message).toContain(`runs only for a flow run, and workflow ${workflowId} is none`)
+      expect(refused.message).toContain(`runs only for a flow run, and workflow ${workflowId} is not a flow run's`)
       expect(refused.message).toContain('tool:whoami')
     }
     expect(h.headers).toEqual([])

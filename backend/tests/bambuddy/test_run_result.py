@@ -132,7 +132,7 @@ def test_the_reports_are_read_in_one_query() -> None:
     ("change", "path", "native"),
     [
         ({}, "native", True),
-        ({"store_backend": "bambuddy"}, "native", True),
+        ({"store_backend": "bambuddy"}, "native", False),
         ({}, "bambuddy", False),
         ({"store_backend": "local"}, "native", False),
         ({"slicer_backend": "bambuddy"}, "native", False),

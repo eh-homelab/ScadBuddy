@@ -971,7 +971,7 @@ async def revision_export(
         # render that is still browsing it.
         await asyncio.to_thread(_touch, directory)
     else:
-        # A worker on the bambuddy store has no history: a snapshot it materialized is
+        # A worker on a remote store has no history: a snapshot it materialized is
         # a populated export and needs none. Without one here (the prune took it after
         # `materialize`), there is nothing to export it from: say so; a retry brings the
         # snapshot in again.

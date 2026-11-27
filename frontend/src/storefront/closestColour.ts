@@ -1,8 +1,9 @@
 /**
  * #6258: the closest colour: the colour a part moves to when the material it prints in
  * does not offer its colour. This is the twin of the backend's
- * `backend/scadbuddy/orders/storefront/closest_colour.py`. The shared vectors in
- * `test-fixtures/storefront/closest-colour.json` pin both. Change them together.
+ * `backend/scadbuddy/orders/storefront/closest_colour.py` and of the agent's
+ * `agent/src/tools/closestColour.ts`. The shared vectors in
+ * `test-fixtures/storefront/closest-colour.json` pin all three. Change them together.
  *
  * The rule, in order:
  * 1. The first candidate with the same colour name (case aside, never a missing name) or
