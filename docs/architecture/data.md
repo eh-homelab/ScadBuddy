@@ -72,7 +72,7 @@ The callers are agent, print, projects, render, storefront, intake and profile-f
 (`scadbuddy/auth/service_auth.py:25-27`); their scopes are in
 `scadbuddy/auth/service_credentials.py:100-107`. `GET …/<caller>/areas` lists what each
 caller may use (`scadbuddy/api/crud_areas.py:170-236`); a worker waits for its areas
-before it polls (for example `scadbuddy/worker.py:1099`). Retries are deduplicated by the
+before it polls (for example `scadbuddy/worker.py:1100`). Retries are deduplicated by the
 `crud_requests` ledger (`scadbuddy/crud/idempotency.py`).
 
 ## Blob store
