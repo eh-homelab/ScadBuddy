@@ -104,6 +104,13 @@ func TestAnObservedSocketCountsWhatEnforceWouldRefuse(t *testing.T) {
 	expect(t, res.StatusCode, 101)
 	_, res = s.dial(map[string]string{"Authorization": "Bearer " + s.credential("agent", "api")})
 	expect(t, res.StatusCode, 101)
+	// A revoked access token: served in observe, and counted signed out as enforce would refuse it.
+	dead := "sbpat_0000000000000002." + strings.Repeat("b", 43)
+	s.sql(`INSERT INTO personal_access_tokens (id, principal, name, scope, token_hash, expires_at, revoked_at)
+		VALUES ('0000000000000002', 'user:i#s', 'n', 'read', sha256($1::bytea), now() + interval '1 day', now())`,
+		[]byte(dead))
+	_, res = s.dial(map[string]string{"Authorization": "Bearer " + dead})
+	expect(t, res.StatusCode, 101)
 	got, ok := rec.metrics(t)["scadbuddy.auth.would_refuse"].Data.(metricdata.Sum[int64])
 	if !ok {
 		t.Fatal("no scadbuddy.auth.would_refuse")
@@ -115,7 +122,7 @@ func TestAnObservedSocketCountsWhatEnforceWouldRefuse(t *testing.T) {
 		counts[class.AsString()+" "+reason.AsString()] = p.Value
 	}
 	expect(t, len(counts), 2)
-	expect(t, counts["api signed_out"], int64(1))
+	expect(t, counts["api signed_out"], int64(2))
 	expect(t, counts["api out_of_scope"], int64(1))
 	// One instrument in the process: the gate's, which the public routes count in too.
 	var rm metricdata.ResourceMetrics

@@ -137,7 +137,7 @@ func (s *Socket) open(w http.ResponseWriter, r *http.Request) {
 	var who caller
 	if c := auth.CallerOf(r.Context()); c.Kind == auth.KindPerson {
 		// Only a session's socket closes on its revocation (realtime.py _serve).
-		who = caller{session: auth.SessionID(r.Header), principal: c.Principal}
+		who = caller{session: c.SessionID, principal: c.Principal}
 	}
 	if !s.originAllowed(r) {
 		refuse(w)
