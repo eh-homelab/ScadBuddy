@@ -164,3 +164,15 @@ R2: this task is small and separate so c4f175d1 can take it; c4f175d1 agreed we 
 - Spec coverage: the token (Task 1), type properties reach spools (Tasks 1 and 2), the scan query and path (Task 2), one/several/none and `from=scan` (Task 2), `/x` and the swap step (Task 3), the scan page (Task 4), the agent (Task 1). Non-goals have no task.
 - Types: `PropertyText`, `typeProperties`, `scanSearchQuery`, `scanSearchPath`, `isScadBuddyCode`, `onSearch` and `{ search }` are named the same in every task.
 - Review Focus: each line has its test in the owning task.
+
+## Rulings made during the build
+
+- Task 1: the `a1:b2:c3:d4` false case went into a new vector group. The old tagged group's tag holds `a1b2c3d4`, so D7 makes it true there.
+- Task 2: the type property read keeps its last values when a reload fails, as the spool read does. A failure still counts as settled.
+- Task 2: the held-read test checks that no spool opens and `from=scan` stays in the address while the read is held. It uses no delay.
+- Task 2: only the newest load settles the scan decision (React StrictMode runs the load twice).
+- Task 3: the photo way of the spool step also searches an unresolved code, and it keeps D11 for a code with the ScadBuddy shape.
+- Final review: one helper, `searchesSpools` in `lib/scanSearch.ts`, holds D11 for every reader. It also covers a label address such as `/x/L-99` and a `scadbuddy:` label.
+- Final review: the swap step's camera reads EAN and UPC as well as QR. A late answer from the code way is dropped after the person changes the way.
+- Final review: the dry-box home-return dialog uses the same spool step, so it gets the same search.
+- Final review: the agent's `filament_spool_list` always reads the type properties. This costs one more request for each search, and a plain value then finds a spool by its type's values (D9).
