@@ -3,14 +3,11 @@ task's context. This module does no I/O at import: a workflow imports it."""
 
 from __future__ import annotations
 
-import logging
 from typing import Any, TypedDict
 
 from scadbuddy.codes.parse import format_code, parse_code
 from scadbuddy.codes.resolve import PREFIXES
 from scadbuddy.entities.registry import KINDS
-
-log = logging.getLogger(__name__)
 
 WIDGETS = ("scan", "photo", "file", "entity", "weight", "confirm")
 #: The keys a property may add to its type's own, for a prompt.
@@ -48,10 +45,8 @@ def widget_problems(prop: dict[str, Any], type_: str) -> list[str]:
     if "x-sb-widget" in prop:
         if not isinstance(widget, str):
             problems.append("'x-sb-widget' must be text")
-        elif widget not in WIDGETS:
-            # A form shows the plain type's control for it.
-            log.warning("a task schema has an unknown x-sb-widget; the plain control is used")
-        elif type_ not in _TYPES[widget]:
+        # An unknown widget is no problem: a form shows the plain type's control for it.
+        elif widget in WIDGETS and type_ not in _TYPES[widget]:
             problems.append(f"'x-sb-widget' {widget} needs {' or '.join(_TYPES[widget])}")
     if "kind" in prop:
         if widget != "entity":

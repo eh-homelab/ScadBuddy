@@ -214,3 +214,12 @@ def test_list_by_place_folds_a_location_code(client: TestClient, rows: Rows) -> 
     rows.conn.execute("UPDATE tasks SET place = 'L-7' WHERE id = %s", (task_id,))
     assert listed(client, "place=l07") == [task_id]
     assert listed(client, "place=L-7") == [task_id]
+
+
+def test_list_by_place_finds_a_place_kept_as_it_was_given(client: TestClient, rows: Rows) -> None:
+    """A task opened before #8062 kept its place as it was given."""
+    run_id, _ = parked(client)
+    task_id = add(rows, run_id, box_schema())
+    rows.conn.execute("UPDATE tasks SET place = 'l7' WHERE id = %s", (task_id,))
+    assert listed(client, "place=l7") == [task_id]
+    assert listed(client, "place=L-7") == []

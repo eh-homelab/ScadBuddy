@@ -150,24 +150,24 @@ class TaskStore:
         self,
         *,
         state: TaskState | None = "open",
-        place: str | None = None,
+        places: tuple[str, ...] | None = None,
         code: Code | None = None,
         assignee: str | None = None,
         limit: int = 100,
     ) -> list[TaskQuestion]:
-        """Tasks without their answers, oldest first. ``code`` is a parsed code: only
-        open tasks that expect its kind or the code itself."""
+        """Tasks without their answers, oldest first. ``places``: the tasks at any of them.
+        ``code`` is a parsed code: only open tasks that expect its kind or the code itself."""
         with self._pool.connection() as conn:
             rows = conn.execute(
                 f"SELECT {_QUESTION} FROM tasks"
                 " WHERE (%(state)s::text IS NULL OR state = %(state)s)"
-                " AND (%(place)s::text IS NULL OR place = %(place)s)"
+                " AND (%(places)s::text[] IS NULL OR place = ANY(%(places)s))"
                 " AND (%(assignee)s::text IS NULL OR assignee = %(assignee)s)"
                 " AND (%(code)s::text[] IS NULL OR (state = 'open' AND expects && %(code)s))"
                 " ORDER BY created_at, id LIMIT %(limit)s",
                 {
                     "state": state,
-                    "place": place,
+                    "places": None if places is None else list(places),
                     "assignee": assignee,
                     "code": _code_entries(code),
                     "limit": limit,

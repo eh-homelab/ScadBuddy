@@ -38,11 +38,11 @@ def test_widgets_pass_for_prompts(prop: dict[str, Any]) -> None:
     assert prompt_schema_problems(_asks(prop)) == []
 
 
-def test_unknown_widget_passes_and_is_logged(caplog: pytest.LogCaptureFixture) -> None:
+def test_unknown_widget_passes_unlogged(caplog: pytest.LogCaptureFixture) -> None:
+    """A workflow runs the check, so a log line would repeat on every replay."""
     with caplog.at_level(logging.WARNING):
         assert prompt_schema_problems(_asks({"type": "string", "x-sb-widget": "dial"})) == []
-    assert "x-sb-widget" in caplog.text
-    assert "dial" not in caplog.text
+    assert caplog.text == ""
 
 
 def test_widget_on_wrong_type_is_refused() -> None:

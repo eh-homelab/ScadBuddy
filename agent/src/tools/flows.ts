@@ -118,7 +118,7 @@ export const flowTools: Tool[] = [
     label: 'Register a flow',
     description:
       'Register a flow: a Python script that runs durably, for as long as it needs, over the host functions ' +
-      '`sleep(seconds)`, `wait_for_human(question, timeout_s=None, people_only=False)` (returns {answer}; a long question is cut in the title and shown whole in the task), ' +
+      '`sleep(seconds)`, `wait_for_human(question, timeout_s=None, people_only=False)` (returns {answer}; a long question is cut in the title and shown whole in the task; an empty question, or one over 4000 characters, raises ValueError), ' +
       '`prompt(title, schema, context=None, place=None, ui=None, timeout_s=None, people_only=False, assignee=None)` (a question with typed fields: ' +
       "`schema` declares them as `inputs_schema` does, and a string may have a `format` of email, date or date-time; " +
       'returns the answer as a dict by field: a field left out is its default, and with no default a boolean is False ' +

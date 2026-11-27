@@ -38,6 +38,15 @@ UNCHECKED_DEFAULTS = {"defaults": False}
 #: schema, and the context's blocks are not checked. A workflow replays an older
 #: `prompt` call with these (`flow_tools.PROMPT_WIDGETS_PATCH`).
 BEFORE_WIDGETS = {"defaults": False, "widgets": False}
+#: The task of a `wait_for_human` under `flow_tools.HUMAN_PROMPT_PATCH` (#8062).
+#: `validate.validate_answer` also refuses an answer with no character but spaces, as the
+#: text answer's route does (#2379): a schema's `pattern` would need a `maxLength` of at
+#: most 1024.
+HUMAN_ANSWER_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "properties": {"answer": {"type": "string", "title": "Answer", "minLength": 1}},
+    "required": ["answer"],
+}
 
 
 def folded_place(place: str) -> str:

@@ -29,6 +29,7 @@ with workflow.unsafe.imports_passed_through():
     from scadbuddy.flows.inputs import InputsError, filled, inputs_model
     from scadbuddy.tasks.models import (
         BEFORE_WIDGETS,
+        HUMAN_ANSWER_SCHEMA,
         TASK_TITLE_MAX,
         UNCHECKED_DEFAULTS,
         TaskOpen,
@@ -87,13 +88,6 @@ WAIT_OPEN_PATCH = "flow-open-wait-7364"
 #: `wait_for_human` opens a task with one text field, as `prompt()` does (#8062). One id
 #: per call, as `WAIT_OPEN_PATCH`: a run from before asks its next question as a task.
 HUMAN_PROMPT_PATCH = "flow-human-prompt-8062"
-#: The task of a `wait_for_human` under `HUMAN_PROMPT_PATCH`. A blank answer is refused,
-#: as the text answer's route refuses one (#2379).
-HUMAN_ANSWER_SCHEMA: dict[str, Any] = {
-    "type": "object",
-    "properties": {"answer": {"type": "string", "title": "Answer", "minLength": 1}},
-    "required": ["answer"],
-}
 #: `prompt()` takes the widget keys of a property (`x-sb-widget`, `expects`, `kind`) and
 #: checks its context's blocks (#8062). One id per call, as `HUMAN_PROMPT_PATCH`: a call
 #: from before replays with the rules it was checked by (`tasks/models.BEFORE_WIDGETS`).

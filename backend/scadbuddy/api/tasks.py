@@ -138,7 +138,8 @@ def list_tasks(
     return TaskList(
         tasks=tasks.store.list(
             state=state,
-            place=None if place is None else folded_place(place),
+            # A task opened before #8062 kept its place as it was given (`l7`).
+            places=None if place is None else (place, folded_place(place)),
             code=parsed,
             assignee=browser_principal()[:MAX_BY_CHARS] if assignee == "me" else None,
             limit=limit,

@@ -169,9 +169,10 @@ def test_a_wait_for_human_is_a_task_answered_through_its_route(
         headers={"Idempotency-Key": "t"},
     )
     assert text.status_code == 409 and text.json()["task_id"] == call_id
-    # A blank answer is refused, as the text route refuses one (#2379).
-    blank = answer(client, call_id, {"answer": ""}, "blank")
-    assert blank.status_code == 422, blank.text
+    # A blank answer is refused, as the text route refuses one (#2379): empty, or only spaces.
+    for n, blank in enumerate(["", "   ", "\n", "\t \n"]):
+        refused = answer(client, call_id, {"answer": blank}, f"blank-{n}")
+        assert refused.status_code == 422, refused.text
     given = answer(client, call_id, {"answer": "yes"})
     assert given.status_code == 200, given.text
     done = finished(client, run_id)
