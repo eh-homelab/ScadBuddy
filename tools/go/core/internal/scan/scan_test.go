@@ -315,7 +315,7 @@ func newHarness(t *testing.T) *harness {
 	key := make([]byte, 32)
 	blobs := &blobstore.Blobs{Pool: pool, Keys: &seal.Keys{Current: seal.NewKEK(key)},
 		LookupEnv: func(name string) (string, bool) { v, ok := env[name]; return v, ok },
-		HTTP:      server.Client(), Now: time.Now}
+		HTTP:      server.Client(), Stream: server.Client(), Now: time.Now}
 	scans := New(pool, blobs)
 	mux := http.NewServeMux()
 	person := auth.Caller{Kind: auth.KindPerson, Principal: "user:test#ada", SessionKind: "login"}
