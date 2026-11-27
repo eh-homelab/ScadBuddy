@@ -36,13 +36,17 @@ def json_fits(value: Any) -> bool:
     return len(json.dumps(value, ensure_ascii=False).encode("utf-8", "replace")) <= MAX_JSON_BYTES
 
 
+#: The longest task title.
+TASK_TITLE_MAX = 500
+
+
 class _TaskFields(BaseModel):
     model_config = ConfigDict(populate_by_name=True)
 
     #: The harness call id.
     id: str
     run_id: str
-    title: str = Field(min_length=1, max_length=500)
+    title: str = Field(min_length=1, max_length=TASK_TITLE_MAX)
     #: The closed JSON Schema subset of `core/input_schema.py`.
     schema_: dict[str, Any] = Field(alias="schema")
     context: list[dict[str, Any]] = []

@@ -115,3 +115,36 @@ async def test_a_timeout_too_short_is_refused_before_any_task(flows: Flows) -> N
     assert "at least 10 seconds" in (done.result or "")
     assert done.steps == [] and await run_tasks(flows, run_id) == []
     assert "flow_task_open" not in await activities(flows, run_id)
+
+
+@temporal
+@postgres
+async def test_a_long_question_is_cut_in_the_title_and_whole_in_the_context(flows: Flows) -> None:
+    question = "Which spool? " + "x" * 1187
+    assert len(question) == 1200
+    run_id = await flows.start(
+        script(f"a = await wait_for_human({question!r})", "return a['answer']")
+    )
+    run = await parked(flows, run_id)
+    task = await task_of(flows, run.waiting_on[0].call_id)
+    assert len(task.title) == 500 and task.title.endswith("…")
+    assert question.startswith(task.title[:-1])
+    assert task.context == [{"text": question}]
+    await give(flows, run, run.waiting_on[0].call_id, {"answer": "red"})
+    assert (await flows.finished(run_id)).result == "result: 'red'"
+
+
+@temporal
+@postgres
+async def test_a_question_too_long_for_its_context_is_refused(flows: Flows) -> None:
+    run_id = await flows.start(
+        script(
+            "try:",
+            "    await wait_for_human('x' * 4001)",
+            "except ValueError as e:",
+            "    return str(e)",
+        )
+    )
+    done = await flows.finished(run_id)
+    assert "4000 characters" in (done.result or ""), done.result
+    assert done.steps == [] and await run_tasks(flows, run_id) == []

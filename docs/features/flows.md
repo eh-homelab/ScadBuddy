@@ -49,8 +49,11 @@ A script asks with a host function (`backend/scadbuddy/workflows/flow_tools.py`)
 | Harness callback | `task_answer` | `task_answer` |
 
 Since #8062 a `wait_for_human` opens a task as a prompt does (`HUMAN_PROMPT_PATCH`, a patch
-id per call), with the schema `HUMAN_ANSWER_SCHEMA` and the question as its title. Its step
-is still `wait_for_human`. A call from before replays with no task: it waits on
+id per call), with the schema `HUMAN_ANSWER_SCHEMA` and the question as its title. A
+question longer than a title (`TASK_TITLE_MAX`, 500 characters) is cut to fit, ending with
+"…", and the whole question is a `text` block of the task's context (at most 4000
+characters; a longer one raises `ValueError`; `_human_question`). Its step is still
+`wait_for_human`. A call from before replays with no task: it waits on
 `human_answer_open` (`human_answer` for an older one) and takes its answer at
 `POST /api/v1/workflow-runs/{run_id}/answer`, operation kind `flow_answer`. The run page shows
 it with `CallCard`. The text route refuses a call with a task with 409

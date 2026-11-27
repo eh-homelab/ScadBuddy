@@ -27,7 +27,12 @@ with workflow.unsafe.imports_passed_through():
     from temporal_agent_harness.harness.agent_workflow import AgentWorkflowRunner
 
     from scadbuddy.flows.inputs import InputsError, filled, inputs_model
-    from scadbuddy.tasks.models import UNCHECKED_DEFAULTS, TaskOpen, open_problems
+    from scadbuddy.tasks.models import (
+        TASK_TITLE_MAX,
+        UNCHECKED_DEFAULTS,
+        TaskOpen,
+        open_problems,
+    )
     from scadbuddy.workflows.flow_activities import (
         FLOW_TASK_ANSWERED,
         FLOW_TASK_CLOSE,
@@ -132,13 +137,22 @@ def _people_only(people_only: bool) -> bool:
     return people_only
 
 
+def _human_question(question: str) -> tuple[str, list[dict[str, Any]]]:
+    """The title and context of a `wait_for_human`'s task. A question longer than a title
+    is cut to fit, and the whole question is a text block of the context."""
+    if len(question) <= TASK_TITLE_MAX:
+        return question, []
+    return question[: TASK_TITLE_MAX - 1] + "…", [{"text": question}]
+
+
 @agent.tool_defn(inherently_safe=True)
 async def wait_for_human(
     question: str, timeout_s: int | None = None, people_only: bool = False
 ) -> HumanAnswer:
     """Ask a person `question` and wait for the answer, with no limit unless `timeout_s`
     (at least 10 seconds) sets one. The question is a task with one text field, as a
-    `prompt` is, and is limited in size as a prompt's title. Raises ValueError for a
+    `prompt` is. A question longer than a task title (500 characters) is cut in the title
+    and shown whole in the task's context, up to 4000 characters. Raises ValueError for a
     question or timeout_s it does not take, and TimeoutError if nobody answers in that
     time. With `people_only`, only a person may answer; otherwise the setting
     `flow_answerers` or the run's grant may also let an assistant answer."""
@@ -148,15 +162,16 @@ async def wait_for_human(
     drawn = workflow.random().getstate() if timeout_s and timeout_s > MAX_WAIT_S else None
     call_id = str(workflow.uuid4())
     if workflow.patched(f"{HUMAN_PROMPT_PATCH}:{call_id}"):
+        title, context = _human_question(question)
         asked = await _task_wait(
             owner,
             call_id,
             "wait_for_human",
-            question,
+            title,
             HUMAN_ANSWER_SCHEMA,
             timeout_s,
             people_only,
-            context=[],
+            context=context,
         )
         return HumanAnswer(answer=asked["answer"])
     # Replaying a call from before #8062: the callback path, as it was.
