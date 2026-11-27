@@ -355,15 +355,21 @@ func (s *Scans) withResolved(ctx context.Context, sc Scan, codes []Code) (Scan, 
 	return sc, nil
 }
 
-// whose is the scans a caller may see: a person or a token sees only its own (a scan
-// carries the photo and its GPS fix); a service, or anyone while auth is off, sees all.
-// all is true for every scan, and me is the caller's actor otherwise.
-func whose(ctx context.Context) (all bool, me string) {
+// whose is the scans a caller may see. A service sees all. A person or a token sees only its
+// own: a scan carries its photo and its GPS fix. Any other caller (anonymous, as every caller
+// is while auth is off) sees only scans that no one made: actor NULL, what such a caller's own
+// scans record. all is true for every scan; me is the actor to match otherwise, nil for NULL.
+func whose(ctx context.Context) (all bool, me *string) {
 	c := auth.CallerOf(ctx)
-	if c.Kind != auth.KindPerson && c.Kind != auth.KindToken {
-		return true, ""
+	switch c.Kind {
+	case auth.KindService:
+		return true, nil
+	case auth.KindPerson, auth.KindToken:
+		if c.Principal != "" {
+			return false, &c.Principal
+		}
 	}
-	return false, c.Principal
+	return false, nil
 }
 
 // one is the scan id, or the 404.
@@ -373,7 +379,7 @@ func (s *Scans) one(ctx context.Context, id string) (Scan, error) {
 	}
 	everyone, me := whose(ctx)
 	sc, codes, err := scanRow(s.Pool.QueryRow(ctx, "SELECT "+columns+
-		" FROM code_scans WHERE id = $1 AND ($2 OR actor = $3)", id, everyone, me))
+		" FROM code_scans WHERE id = $1 AND ($2 OR actor IS NOT DISTINCT FROM $3)", id, everyone, me))
 	if errors.Is(err, pgx.ErrNoRows) {
 		return Scan{}, notFound()
 	}
@@ -463,11 +469,11 @@ func (s *Scans) list(r *http.Request) (any, error) {
 			return nil, notFound()
 		}
 		rows, err = s.Pool.Query(r.Context(), "SELECT "+columns+` FROM code_scans
-			WHERE (at, id) < (SELECT at, id FROM code_scans WHERE id = $1) AND ($3 OR actor = $4)
+			WHERE (at, id) < (SELECT at, id FROM code_scans WHERE id = $1) AND ($3 OR actor IS NOT DISTINCT FROM $4)
 			ORDER BY at DESC, id DESC LIMIT $2`, before, limit, everyone, me)
 	} else {
 		rows, err = s.Pool.Query(r.Context(), "SELECT "+columns+
-			" FROM code_scans WHERE ($2 OR actor = $3) ORDER BY at DESC, id DESC LIMIT $1", limit, everyone, me)
+			" FROM code_scans WHERE ($2 OR actor IS NOT DISTINCT FROM $3) ORDER BY at DESC, id DESC LIMIT $1", limit, everyone, me)
 	}
 	if err != nil {
 		return nil, err
@@ -560,7 +566,7 @@ func (s *Scans) remove(r *http.Request) (any, error) {
 	everyone, me := whose(ctx)
 	var gone bool
 	err := pgx.BeginFunc(ctx, s.Pool, func(tx pgx.Tx) error {
-		tag, err := tx.Exec(ctx, "DELETE FROM code_scans WHERE id = $1 AND ($2 OR actor = $3)", id, everyone, me)
+		tag, err := tx.Exec(ctx, "DELETE FROM code_scans WHERE id = $1 AND ($2 OR actor IS NOT DISTINCT FROM $3)", id, everyone, me)
 		if err != nil {
 			return err
 		}
