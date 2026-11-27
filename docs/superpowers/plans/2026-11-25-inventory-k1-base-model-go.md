@@ -486,7 +486,7 @@ K1 ports `check.py` up to the README table (R-K1-19). Its relation checks and it
 
 **Files:**
 - Create: `backend/scadbuddy/migrations/<UTC>_inventory_class.sql`
-- Modify: `backend/scadbuddy/entities/registry.py` (`KINDS` gets `_kind("item_kind", "item_kinds")`; `orphans` skips an entity a `relations` row names), `backend/scadbuddy/entities/sweep.py` (the same skip under the lock), `backend/scadbuddy/codes/resolve.py` (`PREFIXES["K"]` → `item_kind`, R-K1-11), `backend/scadbuddy/inventory/models.py` (`KindInput.id` becomes optional, `str | None = None`, and refuses `k` and digits; `ItemKind` gains `number: int` and `code: str`)
+- Modify: `backend/scadbuddy/entities/registry.py` (`KINDS` gets `_kind("item_kind", "item_kinds")`; `orphans` skips an entity a `relations` row names), `backend/scadbuddy/entities/sweep.py` (the same skip under the lock), `backend/scadbuddy/codes/resolve.py` (`PREFIXES["K"]` → `item_kind`, R-K1-11), `backend/scadbuddy/inventory/models.py` (`KindInput.id` refuses `k` and digits; it stays required here, because Python's `KindStore` serves the kind routes until Task 13, which makes it optional and adds `number` and `code` to `ItemKind`)
 - Test: `backend/tests/test_pg_migrations.py`, `backend/tests/codes/test_resolve.py`, `backend/tests/api/test_codes.py`, `tools/go/core/internal/inventory/modeldata/seed_test.go`, `backend/tests/entities/test_sweep.py`
 
 **Interfaces:**
