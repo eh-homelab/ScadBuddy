@@ -1,6 +1,7 @@
 import { beforeEach, describe, expect, it } from 'vitest'
 import { ApiError } from '../../api/client'
 import { inventoryApi } from '../../pages/inventory/api'
+import { resolveCode } from '../../api/filament'
 import { resetMockState } from '../handlers'
 import { INVENTORY, seedItem, seedLot, seedOffer, takeStock } from './inventory'
 import { SUPPLIER } from './filamentPurchasingSeed'
@@ -90,6 +91,18 @@ describe('inventory mock', () => {
     const refused = await inventoryApi.createItem({ kind_id: 'fdm', name: 'H2C' }).catch((e: unknown) => e as ApiError)
     expect((refused as ApiError).problem).toMatchObject({ code: 'missing_required_properties', missing: ['model_code'] })
     expect((await inventoryApi.createItem({ kind_id: 'fdm', name: 'H2C', properties: { model_code: 'O1C' } })).missing_properties).toEqual([])
+  })
+
+  it('numbers every kind, makes a kind with no id k<number>, and resolves K-<number> (the owner, 2026-11-27)', async () => {
+    const kinds = await inventoryApi.kinds()
+    expect(new Set(kinds.map((k) => k.number)).size).toBe(kinds.length)
+    expect(kinds.every((k) => k.code === `K-${k.number}`)).toBe(true)
+    const made = await inventoryApi.createKind({ name: 'Magnet', parent_id: 'hardware' })
+    expect(made.id).toBe(`k${made.number}`)
+    expect(made.number).toBe(Math.max(...kinds.map((k) => k.number)) + 1)
+    expect(await resolveCode(made.code)).toEqual({ kind: 'item_kind', id: made.id, code: made.code, name: 'Magnet', archived: false })
+    const typed = await inventoryApi.createKind({ id: 'k12', name: 'X' }).catch((e: unknown) => e as ApiError)
+    expect((typed as ApiError).status).toBe(422)
   })
 
   it('answers offer decimals normalized, as `_Decimals` writes them (R-P2-40)', async () => {

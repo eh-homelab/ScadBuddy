@@ -44,6 +44,14 @@ describe('ItemPage (#7067)', () => {
     expect(document.getElementById(`offer-${INVENTORY.HOOK_OFFER}`)).not.toBeNull()
   })
 
+  it("shows the item kind's code by its name (the owner, 2026-11-27)", async () => {
+    render(INVENTORY.HOOK)
+    await screen.findByRole('heading', { level: 1, name: 'Silver keychain hook' })
+    const hardware = inventoryMock.kinds.find((k) => k.id === 'hardware')!
+    const path = screen.getByRole('navigation', { name: 'Kind' })
+    expect(await within(path).findByText(`K-${hardware.number}`)).toBeInTheDocument()
+  })
+
   it('lists the lots and receives one at the newest offer price for the quantity (Ruling 4)', async () => {
     const { user } = render(INVENTORY.HOOK)
     const lots = await screen.findByRole('table', { name: 'Lots' })

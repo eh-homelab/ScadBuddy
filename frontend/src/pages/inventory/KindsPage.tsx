@@ -119,6 +119,9 @@ function Node({ node, kinds, editing, onEdit, onArchive, onSaved }: NodeProps) {
         <Link to={inventoryPaths.kind(kind.id)} className="font-medium underline-offset-4 hover:underline">
           {kind.name}
         </Link>
+        <span className="font-mono text-[12px] text-muted-foreground" title="The kind's code">
+          {kind.code}
+        </span>
         <span className="text-muted-foreground">{TRACKING_LABELS[kind.tracking]}</span>
         {kind.uom !== 'each' && <span className="text-muted-foreground">in {kind.uom}</span>}
         {kind.saleable && <span className="text-muted-foreground">for sale</span>}
@@ -244,11 +247,14 @@ function AddKindForm({ kinds, onDone, onCancel }: { kinds: ItemKind[]; onDone: (
 
   async function submit(event: FormEvent) {
     event.preventDefault()
-    if (!/^[a-z][a-z0-9_]{0,39}$/.test(kindId.trim())) return setError('The id is lower-case letters, digits and _, starting with a letter, such as magnet.')
+    const typed = kindId.trim()
+    // The owner's kind numbers (2026-11-27): an empty id numbers the kind (k12, code K-12).
+    if (typed && !/^[a-z][a-z0-9_]{0,39}$/.test(typed)) return setError('The id is lower-case letters, digits and _, starting with a letter, such as magnet.')
+    if (/^k[0-9]+$/.test(typed)) return setError("An id of k and digits is a made kind's id. Leave the id empty to number the kind.")
     if (!name.trim()) return setError('Give the kind a name.')
     setError(null)
     try {
-      const body = { id: kindId.trim(), name: name.trim(), parent_id: parent, tracking: counted, uom: uom.trim() || 'each', life_basis: life, saleable }
+      const body = { ...(typed ? { id: typed } : {}), name: name.trim(), parent_id: parent, tracking: counted, uom: uom.trim() || 'each', life_basis: life, saleable }
       await press((o) => inventoryApi.createKind(body, o), body)
       onDone()
     } catch (cause) {
@@ -260,8 +266,11 @@ function AddKindForm({ kinds, onDone, onCancel }: { kinds: ItemKind[]; onDone: (
     <form aria-label="Add kind" onSubmit={(event) => void submit(event)} className="mb-4 flex flex-col gap-3 rounded-md border p-3">
       <div className="flex flex-wrap items-end gap-3">
         <div className="flex flex-col gap-1">
-          <Label htmlFor={`${id}-id`}>Id</Label>
-          <Input id={`${id}-id`} value={kindId} onChange={(e) => setKindId(e.target.value)} className="w-36" placeholder="magnet" />
+          <Label htmlFor={`${id}-id`}>Id (optional)</Label>
+          <Input id={`${id}-id`} value={kindId} onChange={(e) => setKindId(e.target.value)} className="w-36" placeholder="magnet" aria-describedby={`${id}-id-hint`} />
+          <span id={`${id}-id-hint`} className="text-[12px] text-muted-foreground">
+            Leave empty to number it
+          </span>
         </div>
         <div className="flex flex-col gap-1">
           <Label htmlFor={`${id}-name`}>Name</Label>
@@ -307,10 +316,11 @@ function AddKindForm({ kinds, onDone, onCancel }: { kinds: ItemKind[]; onDone: (
  * R-K1-33 — for each key, about how many items of the kind and of the kinds below it have no
  * row for it: their count less the key's `keys_in_use` count. Two reads, not one per item. It
  * is an estimate: `keys_in_use` counts archived items and blank values too (Go's
- * `Kinds.Schema` counts every row), so the items are counted with the archived ones.
+ * `Kinds.Schema` counts every row), so the items are counted with the archived ones. The
+ * item read asks for the route's most, 5000 items, so a larger kind's count is capped there.
  */
 async function lacking(kindId: string, keys: string[]): Promise<Map<string, number>> {
-  const [items, schema] = await Promise.all([inventoryApi.items({ kind: kindId, archived: true }), inventoryApi.kindSchema(kindId)])
+  const [items, schema] = await Promise.all([inventoryApi.items({ kind: kindId, archived: true, limit: 5000 }), inventoryApi.kindSchema(kindId)])
   const inUse = new Map(schema.keys_in_use.map((k) => [k.key, k.count]))
   return new Map(keys.map((key) => [key, Math.max(0, items.length - (inUse.get(key) ?? 0))]))
 }

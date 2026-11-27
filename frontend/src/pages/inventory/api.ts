@@ -85,6 +85,8 @@ export interface ItemFilter {
   q?: string | null
   low?: boolean
   archived?: boolean
+  /** 1 to 5000; the route answers 1000 when absent. */
+  limit?: number
 }
 
 export const inventoryApi = {
@@ -98,7 +100,7 @@ export const inventoryApi = {
 
   /** `kind` takes the kind with its descendants. */
   items: (filter: ItemFilter = {}) =>
-    request<{ items: Item[] }>(`${BASE}/items${query({ kind: filter.kind, q: filter.q?.trim(), low: filter.low, archived: filter.archived })}`).then((body) => body.items),
+    request<{ items: Item[] }>(`${BASE}/items${query({ kind: filter.kind, q: filter.q?.trim(), low: filter.low, archived: filter.archived, limit: filter.limit })}`).then((body) => body.items),
   item: (id: string) => request<Item>(`${BASE}/items/${seg(id)}`),
   createItem: (body: ItemInput, o?: WriteOptions) => write<Item>(`${BASE}/items`, json('POST', body), o),
   patchItem: (id: string, body: ItemPatch, o?: WriteOptions) => write<Item>(`${BASE}/items/${seg(id)}`, json('PATCH', body), o),

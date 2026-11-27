@@ -25,7 +25,7 @@ type Tracking = S['ItemKind']['tracking']
 const PROBLEMS = 'https://scadbuddy.dev/problems/inventory/'
 const KIND_ID = /^[a-z][a-z0-9_]{0,39}$/
 
-type MockKind = Omit<S['ItemKind'], 'item_count'>
+type MockKind = Omit<S['ItemKind'], 'item_count' | 'code'>
 type MockItem = {
   id: string
   kind_id: string
@@ -81,7 +81,7 @@ export { INVENTORY }
 const SEEDED_AT = '2026-11-20T09:00:00Z'
 
 function kind(id: string, name: string, parent_id: string | null, tracking: Tracking, uom: string, life_basis: MockKind['life_basis'], saleable = false): MockKind {
-  return { id, name, parent_id, tracking, uom, attribute_schema: { type: 'object', properties: {} }, life_basis, saleable, builtin: true, archived_at: null }
+  return { id, name, parent_id, tracking, uom, attribute_schema: { type: 'object', properties: {} }, life_basis, saleable, builtin: true, archived_at: null, number: 0 }
 }
 
 /** The built-in kinds as `20261126T0218Z_inventory_class.sql` (inventory K1) leaves them:
@@ -115,6 +115,8 @@ function builtinKinds(): MockKind[] {
     kind('labour', 'Labour', 'service', 'none', 'each', 'none'),
     kind('flat_service', 'Flat-rate service', 'service', 'none', 'each', 'none'),
   ]
+  // The migration numbers the seeded kinds in order (`item_kinds_number_seq`).
+  kinds.forEach((k, at) => (k.number = at + 1))
   kinds.find((k) => k.id === 'spool_part')!.attribute_schema = {
     type: 'object',
     properties: {
@@ -386,8 +388,17 @@ export function inventoryItem(itemId: string): S['Item'] | undefined {
   return item ? answerItem(item) : undefined
 }
 
+/** The kind a K-<number> code names (`codes/resolve.py`), or undefined. */
+export const kindByNumber = (number: number): MockKind | undefined => {
+  ready()
+  return inventoryMock.kinds.find((k) => k.number === number)
+}
+
+/** A made kind's id: k and its number (`item_kinds_made_id_check`). */
+const MADE_KIND_ID = /^k[0-9]+$/
+
 function answerKind(k: MockKind): S['ItemKind'] {
-  return { ...k, item_count: inventoryMock.items.filter((i) => i.kind_id === k.id && !i.archived_at).length }
+  return { ...k, code: `K-${k.number}`, item_count: inventoryMock.items.filter((i) => i.kind_id === k.id && !i.archived_at).length }
 }
 
 function latestPrice(offerId: string): S['OfferPricePoint'] | null {
@@ -836,11 +847,15 @@ export const handlers = [
     return answer(
       request,
       () => {
-        if (!KIND_ID.test(input.id)) throw new FieldRefused('id', "String should match pattern '^[a-z][a-z0-9_]{0,39}$'")
-        if (kindOf(input.id)) throw new Refused(409, 'kind_exists', `an item kind has that id: ${input.id}`)
+        if (input.id != null && !KIND_ID.test(input.id)) throw new FieldRefused('id', "String should match pattern '^[a-z][a-z0-9_]{0,39}$'")
+        if (input.id != null && MADE_KIND_ID.test(input.id)) throw new FieldRefused('id', "Value error, an id of k and digits is a made kind's id: k and its number")
+        if (input.id != null && kindOf(input.id)) throw new Refused(409, 'kind_exists', `an item kind has that id: ${input.id}`)
         kindProblem(input, null)
+        // The next number of `item_kinds_number_seq`; with no id, the kind is k<number>.
+        const number = Math.max(0, ...inventoryMock.kinds.map((k) => k.number)) + 1
         const made: MockKind = {
-          id: input.id,
+          id: input.id ?? `k${number}`,
+          number,
           name: input.name,
           parent_id: input.parent_id ?? null,
           // #6949 K1: a kind sent with no tracking is counted as its parent is.

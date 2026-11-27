@@ -106,6 +106,11 @@ export function ItemPage() {
             </Link>
           </span>
         ))}
+        {kind && (
+          <span className="ml-1 font-mono text-[12px]" title="The kind's code">
+            {kind.code}
+          </span>
+        )}
       </nav>
       <header className="mt-1 mb-4 flex flex-wrap items-center gap-3">
         <div className="min-w-0 flex-1">

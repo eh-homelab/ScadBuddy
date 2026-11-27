@@ -33,12 +33,41 @@ describe('KindsPage (#7067)', () => {
     await kindList()
     await user.click(screen.getByRole('button', { name: 'Add kind' }))
     const form = screen.getByRole('form', { name: 'Add kind' })
-    await user.type(within(form).getByLabelText('Id'), 'magnet')
+    await user.type(within(form).getByLabelText(/^Id/), 'magnet')
     await user.type(within(form).getByLabelText('Name'), 'Magnet')
     await choose(user, within(form).getByRole('combobox', { name: 'Parent' }), 'Hardware')
     await user.click(within(form).getByRole('button', { name: 'Add kind' }))
     expect(await screen.findByRole('link', { name: 'Magnet' })).toBeInTheDocument()
     expect(bodyOf('createKind')).toEqual([{ id: 'magnet', name: 'Magnet', parent_id: 'hardware', tracking: 'lot', uom: 'each', life_basis: 'none', saleable: false }])
+  })
+
+  it('numbers a kind added with no id, and shows each kind\'s code (the owner, 2026-11-27)', async () => {
+    const { user } = renderPage(<KindsPage />)
+    const tree = await kindList()
+    const printer = inventoryMock.kinds.find((k) => k.id === 'printer')!
+    expect(kindItem(tree, 'Printer')).toHaveTextContent(`K-${printer.number}`)
+    await user.click(screen.getByRole('button', { name: 'Add kind' }))
+    const form = screen.getByRole('form', { name: 'Add kind' })
+    expect(within(form).getByText('Leave empty to number it')).toBeInTheDocument()
+    await user.type(within(form).getByLabelText('Name'), 'Magnet')
+    await user.click(within(form).getByRole('button', { name: 'Add kind' }))
+    const link = await screen.findByRole('link', { name: 'Magnet' })
+    const made = inventoryMock.kinds.find((k) => k.name === 'Magnet')!
+    expect(made.id).toBe(`k${made.number}`)
+    expect(link.closest('li')).toHaveTextContent(`K-${made.number}`)
+    expect(bodyOf('createKind')).toEqual([{ name: 'Magnet', parent_id: null, tracking: 'lot', uom: 'each', life_basis: 'none', saleable: false }])
+  })
+
+  it('refuses a typed id of k and digits before it sends', async () => {
+    const { user } = renderPage(<KindsPage />)
+    await kindList()
+    await user.click(screen.getByRole('button', { name: 'Add kind' }))
+    const form = screen.getByRole('form', { name: 'Add kind' })
+    await user.type(within(form).getByLabelText(/^Id/), 'k12')
+    await user.type(within(form).getByLabelText('Name'), 'Magnet')
+    await user.click(within(form).getByRole('button', { name: 'Add kind' }))
+    expect(await within(form).findByText(/k and digits is a made kind's id/)).toBeInTheDocument()
+    expect(bodyOf('createKind')).toEqual([])
   })
 
   it("edits a kind's schema as a key table and saves it", async () => {
@@ -118,18 +147,20 @@ describe('KindsPage (#7067)', () => {
     seedEntityProperties(`item:${one.id}`, { role: 'shell' })
     seedEntityProperties(`item:${gone.id}`, { role: 'shell' })
     const reads: string[] = []
-    const onStart = ({ request }: { request: Request }) => void reads.push(new URL(request.url).pathname)
+    const onStart = ({ request }: { request: Request }) => void reads.push(new URL(request.url).pathname + new URL(request.url).search)
     server.events.on('request:start', onStart)
     try {
       const { user } = renderPage(<KindsPage />)
       const tree = await kindList()
-      await user.click(within(tree).getByRole('button', { name: 'Edit Spool part' }))
-      const form = screen.getByRole('form', { name: 'Edit Spool part' })
+      await user.click(within(tree).getByRole('button', { name: 'Edit Spool insert' }))
+      const form = screen.getByRole('form', { name: 'Edit Spool insert' })
       await user.click(within(form).getByRole('checkbox', { name: 'Key 2 is required' }))
       // Three items, archived one too, and keys_in_use counts two rows of `role`.
       expect(await within(form).findByText('About 1 item lacks role')).toBeInTheDocument()
       expect(reads.filter((path) => path.includes('/entities/'))).toEqual([])
       expect(reads).toContain('/api/v1/inventory/kinds/spool_part/schema')
+      // The route's highest limit, so the estimate counts up to 5000 items.
+      expect(reads.find((path) => path.startsWith('/api/v1/inventory/items?'))).toMatch(/[?&]limit=5000(&|$)/)
       await user.click(within(form).getByRole('button', { name: 'Save kind' }))
       await waitFor(() => expect(bodyOf('patchKind')).toHaveLength(1))
       expect((bodyOf('patchKind')[0] as { attribute_schema: { required?: string[] } }).attribute_schema.required).toEqual(['role'])
