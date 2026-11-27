@@ -12,7 +12,7 @@ from psycopg.types.json import Jsonb
 
 from scadbuddy.render.pg_store import MIGRATIONS, migrate
 
-MIGRATION_ID = "20261126T1043Z_outputs_drop_copy_state"
+MIGRATION_ID = "20261127T0259Z_outputs_drop_copy_state"
 DROPPED_TABLES = ("output_cutover", "output_byte_runs", "output_copy_runs")
 DROPPED_COLUMNS = ("copied_at", "files_stamp", "bytes_stamp", "damaged")
 

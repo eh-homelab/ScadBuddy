@@ -1699,7 +1699,7 @@ only the sleeps move; a budget on the real clock fails on a slow runner (#6252).
   are kept only while they are younger than the grace. The release's migration
   (`20261125T1737Z_outputs_drop_output_index.sql`) refuses to run without the cut-over
   mark, and drops `output_index` and `output_hold_slugs`. The next one
-  (`20261126T1043Z_outputs_drop_copy_state.sql`, #7887) drops the mark, the copies' run
+  (`20261127T0259Z_outputs_drop_copy_state.sql`, #7887) drops the mark, the copies' run
   tables and the copy-only columns of `outputs`, and `GET /outputs/copy-status` is gone. A
   reader that needs a path
   opens `OutputStore.local_role` or `read_role` (`async with`: the blob as a temporary
