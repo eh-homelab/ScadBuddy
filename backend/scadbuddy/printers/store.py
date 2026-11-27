@@ -35,6 +35,7 @@ own, and the test leaves that table out until the PR that drops it."""
 
 from __future__ import annotations
 
+import logging
 import time
 import uuid
 from collections.abc import Callable, Iterable
@@ -62,6 +63,8 @@ from scadbuddy.printers.models import (
     synthetic_serial,
     synthetic_vp_serial,
 )
+
+logger = logging.getLogger(__name__)
 
 Pool = ConnectionPool[Connection[DictRow]]
 
@@ -1383,7 +1386,20 @@ class PrinterStore:
                     raise PrinterPlaceNameClashError(
                         str(key), clash.place_id, clash.name, clash.other_id
                     ) from None
-                gone = conn.execute("DELETE FROM printers WHERE id = %s", (key,))
+                try:
+                    gone = conn.execute("DELETE FROM printers WHERE id = %s", (key,))
+                except errors.ForeignKeyViolation as fk:
+                    # A row reached one of the printer's places after the checks above: the
+                    # cascade meets it. Only this statement maps a foreign key error; one
+                    # from any other step is a bug and stays a database error.
+                    logger.warning(
+                        "printer %s: its delete met a new reference to its places (%s on %s);"
+                        " the caller may try again",
+                        key,
+                        fk.diag.constraint_name,
+                        fk.diag.table_name,
+                    )
+                    raise PrinterDeleteConflictError(str(key)) from None
                 if gone.rowcount == 0:
                     raise PrinterNotFoundError(printer_id)
                 # `print_runs.printer` goes null with the row (ON DELETE SET NULL); its runs'
@@ -1391,7 +1407,8 @@ class PrinterStore:
                 # offers a printer that is gone (#4442 M3).
                 _forget_run_activity(conn, str(key))
                 _forget_settings(conn, str(key))
-        except (errors.DeadlockDetected, errors.ForeignKeyViolation):
+        except errors.DeadlockDetected:
+            logger.warning("printer %s: its delete hit a deadlock; the caller may try again", key)
             raise PrinterDeleteConflictError(str(key)) from None
         # After the commit (#7384), as in `link_bambuddy`.
         settings_written()

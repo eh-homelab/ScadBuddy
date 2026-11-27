@@ -699,33 +699,65 @@ def _wait_until_blocked_by(printers: PrinterStore, holder: int, done: Any) -> No
     raise AssertionError("the delete never waited on the report write")
 
 
-@pytest.mark.parametrize(
-    "error",
-    [psycopg.errors.DeadlockDetected, psycopg.errors.ForeignKeyViolation],
-    ids=["deadlock", "foreign-key"],
-)
-def test_a_delete_that_meets_a_concurrent_write_is_a_typed_conflict(
-    printers: PrinterStore, monkeypatch: pytest.MonkeyPatch, error: type[Exception]
+def test_a_delete_that_deadlocks_is_a_typed_conflict(
+    printers: PrinterStore, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
 ) -> None:
-    """#8177 review I2 backstop: a deadlock, or a row that still points at one of the
-    printer's places when the cascade runs, ends the delete with `PrinterDeleteConflictError`
-    (try again), never a raw database error. Injected: no race makes one on demand. Nothing
-    is written."""
+    """#8177 review I2 backstop: a deadlock during the delete ends it with
+    `PrinterDeleteConflictError` (try again), never a raw database error, and is logged.
+    Injected: no race makes one on demand. Nothing is written."""
     row = printers.create(PrinterCreate(serial=SERIAL, name="A"))
     with printers.pool.connection() as conn:
         tray = _place(conn, "A AMS-A slot 1", printer=row.id, tray=0)
         spool = _spool_in(conn, tray)
 
     def raises(*_: Any) -> list[Any]:
-        raise error("injected")
+        raise psycopg.errors.DeadlockDetected("injected")
 
     monkeypatch.setattr(store_module, "_place_references", raises)
     with pytest.raises(PrinterDeleteConflictError) as refused:
         printers.delete(row.id)
     assert "try again" in str(refused.value)
+    assert any("deadlock" in r.getMessage() for r in caplog.records)
     assert printers.get(row.id) is not None
     with printers.pool.connection() as conn:
         assert _row(conn, "filament_spools", spool)["location_id"] == tray
+
+
+def test_a_row_that_reaches_a_printer_place_before_the_cascade_is_a_logged_conflict(
+    printers: PrinterStore, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """#8177 re-review N1: a row the checks did not see (here the reference check finds none,
+    as when a write lands between it and the cascade) fails the cascade's foreign key. That
+    is a conflict, logged with the constraint's name. Nothing is written."""
+    row = printers.create(PrinterCreate(serial=SERIAL, name="A"))
+    with printers.pool.connection() as conn:
+        tray = _place(conn, "A AMS-A slot 1", printer=row.id, tray=0)
+        conn.execute(
+            "INSERT INTO stock_lots (item_id, location_id, received_qty, on_hand,"
+            " unit_cost_minor, origin, created_by) VALUES (%s, %s, 1, 1, 0, 'manual', '{}')",
+            (_item(conn, "part"), tray),
+        )
+    monkeypatch.setattr(store_module, "_place_references", lambda *_: [])
+    with pytest.raises(PrinterDeleteConflictError):
+        printers.delete(row.id)
+    assert any("stock_lots" in r.getMessage() for r in caplog.records)
+    assert printers.get(row.id) is not None
+
+
+def test_a_foreign_key_error_outside_the_cascade_is_not_a_conflict(
+    printers: PrinterStore, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#8177 re-review N1: only the printer row's own DELETE maps a foreign key error to a
+    conflict. One from another step is a bug, and it stays a database error (a 500)."""
+    row = printers.create(PrinterCreate(serial=SERIAL, name="A"))
+
+    def raises(*_: Any) -> list[Any]:
+        raise psycopg.errors.ForeignKeyViolation("injected")
+
+    monkeypatch.setattr(store_module, "_place_references", raises)
+    with pytest.raises(psycopg.errors.ForeignKeyViolation):
+        printers.delete(row.id)
+    assert printers.get(row.id) is not None
 
 
 # ── #4186 review ─────────────────────────────────────────────────────────────────────

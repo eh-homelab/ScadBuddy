@@ -175,7 +175,9 @@ def lock_report_on(conn: Connection[DictRow], printer_id: str) -> None:
     write (`PrinterReportStore.advance_in`) takes first, and the row the capture backstop
     (`filament/capture.py` `reconcile_all`, `sync_ams_weights`) locks first. A printer's
     delete takes them before anything else, so it never holds a spool or a place that a
-    write holding the report waits on (#8177)."""
+    write holding the report waits on (#8177). The advisory key hashes ``printer_id`` as
+    text, so every caller passes the canonical lowercase uuid (``str(uuid.UUID(...))``, the
+    form the rows store); another spelling of the same id takes a different lock."""
     conn.execute(
         "SELECT pg_advisory_xact_lock(%s::integer, hashtext(%s))", (REPORT_LOCK_CLASS, printer_id)
     )
