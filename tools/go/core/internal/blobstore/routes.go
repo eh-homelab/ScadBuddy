@@ -53,9 +53,17 @@ import (
 // route class crud.blobs.
 const Area = "blobs"
 
-// Kinds are the blob kinds a service may upload, each with the most bytes one blob of it
-// holds. A Bambu tag's raw dump (#7905) is about 1 KiB.
-var Kinds = map[string]int64{"tag_dump": 64 << 10}
+// Kinds are the blob kinds core stores (Put), each with the most bytes one blob of it
+// holds. UploadKinds are the ones a service may also upload through a presigned URL
+// (POST /uploads), which reads no bytes: a scan's photo comes only through Put, which
+// reads its type from its bytes. A Bambu tag's raw dump (#7905) is about 1 KiB. A scan's photo (#8155) is a JPEG,
+// PNG or WebP still: a 12 MP phone JPEG is about 3 to 6 MiB and a phone's PNG screenshot
+// is under 10 MiB, so 12 MiB takes every photo a phone makes and still bounds what one
+// upload holds in memory (Put and a commit hold the whole blob).
+var Kinds = map[string]int64{"tag_dump": 64 << 10, "scan_image": 12 << 20}
+
+// UploadKinds are the kinds a presigned upload takes, with Kinds' limits.
+var UploadKinds = map[string]int64{"tag_dump": Kinds["tag_dump"]}
 
 const (
 	// urlTTL is how long an upload's URL may start (S3 checks the expiry when a request starts).
@@ -156,8 +164,8 @@ type upload struct {
 	ExpiresAt crud.Time         `json:"expires_at"`
 }
 
-// committed is the answer to a commit.
-type committed struct {
+// Committed is the answer to a commit, and Put's.
+type Committed struct {
 	Key    string `json:"key"`
 	SHA256 string `json:"sha256"`
 	Size   int64  `json:"size"`
@@ -227,7 +235,7 @@ func (b *Blobs) begin(r *http.Request, _ crud.Params) (any, error) {
 	if err := body.Err(); err != nil {
 		return nil, err
 	}
-	limit, ok := Kinds[kind]
+	limit, ok := UploadKinds[kind]
 	if !ok {
 		return nil, refused(http.StatusUnprocessableEntity, "kind_not_allowed",
 			fmt.Sprintf("no service may upload a blob of kind %q", kind))
@@ -288,7 +296,7 @@ func (b *Blobs) commit(r *http.Request, p crud.Params) (any, error) {
 	if err != nil || t.Caller != crud.ServiceOf(r).Caller {
 		return nil, unknownUpload()
 	}
-	limit, ok := Kinds[t.Kind]
+	limit, ok := UploadKinds[t.Kind]
 	if !ok {
 		return nil, unknownUpload()
 	}
@@ -314,7 +322,18 @@ func (b *Blobs) commit(r *http.Request, p crud.Params) (any, error) {
 	if err := b.place(ctx, store.S3, objectKey, staging, t, limit); err != nil {
 		return nil, err
 	}
-	err = pgx.BeginFunc(ctx, b.Pool, func(tx pgx.Tx) error {
+	if err := b.record(ctx, key, ref); err != nil {
+		return nil, err
+	}
+	release()
+	b.remove(ctx, store.S3, staging)
+	return Committed{Key: key, SHA256: t.SHA256, Size: t.Size}, nil
+}
+
+// record writes key's row for ref, as Python's BlobIndex.put does, while the caller holds
+// the object's stage lock.
+func (b *Blobs) record(ctx context.Context, key string, ref Ref) error {
+	return pgx.BeginFunc(ctx, b.Pool, func(tx pgx.Tx) error {
 		before, err := index(ctx, tx, key, ref)
 		if err != nil {
 			return err
@@ -326,12 +345,6 @@ func (b *Blobs) commit(r *http.Request, p crud.Params) (any, error) {
 		}
 		return nil
 	})
-	if err != nil {
-		return nil, err
-	}
-	release()
-	b.remove(ctx, store.S3, staging)
-	return committed{Key: key, SHA256: t.SHA256, Size: t.Size}, nil
 }
 
 // hold takes the stage lock of the objects of sha256 shared (store/index.py `StageHold`,
@@ -440,6 +453,11 @@ func (b *Blobs) place(ctx context.Context, s3 *S3, objectKey, staging string, t 
 		return refused(http.StatusUnprocessableEntity, "upload_mismatch",
 			"what was uploaded is not the size and sha256 asked for")
 	}
+	return b.write(ctx, s3, objectKey, t, body)
+}
+
+// write PUTs body, already checked to be t's bytes, to the content key objectKey.
+func (b *Blobs) write(ctx context.Context, s3 *S3, objectKey string, t ticket, body []byte) error {
 	url, headers, err := b.presignPut(s3, objectKey, t, readTTL)
 	if err != nil {
 		return notConfigured(err.Error())
