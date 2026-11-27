@@ -604,6 +604,18 @@ matches `[a-z][a-z0-9_]{0,63}`. Limits: 200 keys per entity, 2000 characters per
   (`LocationStore.ensure_printer_on`, `backend/scadbuddy/filament/locations.py`). A printer
   label request makes the place when it is missing, and so does a tray capture whose printer
   has a unit place or external holder with no live parent (`LocationStore.hang_orphans_on`).
+  A printer's places go when the printer is deleted (`PrinterStore.delete`,
+  `backend/scadbuddy/printers/store.py`). First each spool in one moves to no place, with a
+  `moved` event (#7143). Then each other place under one moves to the nearest place above
+  the printer's place that is not the printer's (#8177). It moves to the top level when the
+  printer has no unarchived place of its own, when nothing is above that place, or when the
+  place above is archived. The delete is refused with 409, and changes nothing, when such a
+  place would clash by name there (with a place already there, or with another place that
+  moves there), or while a stock lot or unit points at one of the printer's places. The
+  inventory has no move path with an event for those rows, so a person moves them first. The
+  delete locks in the order a report write takes: the printer's report, its place lock, its
+  spools, then its places (the order is in `PrinterStore.delete`). A delete that still meets
+  a concurrent write answers 409 `printer_delete_conflict`, and the person tries again.
 - Labels: a place's QR is `<base>/x/L-<n>`. The labels page (`/filament/labels`) prints places
   with `?locations=` and printers with `?printers=` (one printer's from its place page, every
   printer's from the Locations tab). The printer labels first make the place of each AMS unit,
