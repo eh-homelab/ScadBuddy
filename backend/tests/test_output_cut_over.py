@@ -94,7 +94,7 @@ async def test_copy_sweeps_do_nothing(
     caplog: pytest.LogCaptureFixture,
 ) -> None:
     """Plan Task B2: both copy activities return, log that the outputs are cut over, and
-    touch no row, though no output has a folder. (The run tables are unused since #7887.)"""
+    touch no row, though no output has a folder. (#7887 dropped the run tables.)"""
     store, metas = saved
     before = _outputs(pool)
     assert not _folder(store, metas[0]).exists()
