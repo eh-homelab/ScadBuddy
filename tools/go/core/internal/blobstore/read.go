@@ -9,7 +9,6 @@ import (
 	"hash"
 	"io"
 	"net/http"
-	"net/url"
 
 	"github.com/jackc/pgx/v5"
 )
@@ -77,18 +76,10 @@ func (b *Blobs) fetch(ctx context.Context, s3 *S3, ref Ref) (io.ReadCloser, erro
 	if err != nil {
 		return nil, fmt.Errorf("%w: %v", ErrNotConfigured, err)
 	}
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, signed, nil)
+	// send's errors never name the URL, which carries a signature.
+	res, err := b.send(ctx, http.MethodGet, signed, nil, nil)
 	if err != nil {
-		return nil, errors.New("blobstore: the S3 store's URL is not a URL")
-	}
-	// The error never names the URL, which carries a signature.
-	res, err := b.HTTP.Do(req)
-	if err != nil {
-		var uerr *url.Error
-		if errors.As(err, &uerr) {
-			err = uerr.Err
-		}
-		return nil, fmt.Errorf("blobstore: the S3 store did not answer: %w", err)
+		return nil, err
 	}
 	switch {
 	case res.StatusCode == http.StatusNotFound:

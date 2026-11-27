@@ -122,9 +122,15 @@ const storePeer = "s3"
 // tel is the process's telemetry, nil for none.
 func Routes(pool *pgxpool.Pool, keys *seal.Keys, lookupEnv func(string) (string, bool),
 	tel *telemetry.Telemetry) []crud.Route {
+	return New(pool, keys, lookupEnv, tel).Routes()
+}
+
+// New is the store as the area and a Go handler that reads a blob (OpenKey) use it: its
+// client is traced as Routes says. tel is the process's telemetry, nil for none.
+func New(pool *pgxpool.Pool, keys *seal.Keys, lookupEnv func(string) (string, bool),
+	tel *telemetry.Telemetry) *Blobs {
 	client := &http.Client{Timeout: readTTL, Transport: tel.Transport(httpx.Outside(nil), storePeer)}
-	b := &Blobs{Pool: pool, Keys: keys, LookupEnv: lookupEnv, HTTP: client, Now: time.Now}
-	return b.Routes()
+	return &Blobs{Pool: pool, Keys: keys, LookupEnv: lookupEnv, HTTP: client, Now: time.Now}
 }
 
 // Routes are b's routes.
