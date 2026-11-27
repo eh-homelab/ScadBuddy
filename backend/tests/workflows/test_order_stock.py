@@ -644,3 +644,5 @@ async def test_recost_goes_on_while_go_names_new_orders(world: World) -> None:
     [last] = shop.go.named("inventory.Recost")[-1:]
     assert set(last.arg["body"]["orders"]) >= {f"order-unseen-{n}" for n in range(4)}
     assert shop.kinds(order).count("item.parts_recosted") == 1
+    # The `recost-until-no-new-orders` patch's scene, for `test_order_stock_replay.py`.
+    await _record(world, f"lot:{lot.id}:recost:r3", "recost_rounds")
