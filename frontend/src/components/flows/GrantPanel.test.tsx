@@ -65,7 +65,7 @@ describe('GrantPanel', () => {
     ['in force', { status: 'approved', in_force: true }, /^Besides you, any of your assistant sessions may answer/],
     [
       'expired',
-      { status: 'approved', in_force: false, expires_at: '2026-01-01T00:00:00Z' },
+      { status: 'approved', in_force: false, expired: true },
       /^Expired: any of your assistant sessions may no longer answer/,
     ],
     [
@@ -91,7 +91,7 @@ describe('GrantPanel', () => {
           status: 'approved',
           in_force: false,
           revoked_at: null,
-          expires_at: '2999-01-01T00:00:00Z',
+          expired: false,
           spec: { ...grant.spec, answers: { who: ['sessions'] } },
         }}
         onChange={vi.fn()}

@@ -38,6 +38,7 @@ function standing(id: string, fields: Partial<FlowStandingGrant>): FlowStandingG
     created_at: at(0),
     requested_at: at(0),
     in_force: true,
+    expired: false,
     ...fields,
   }
 }
