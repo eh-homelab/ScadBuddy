@@ -3161,7 +3161,7 @@ async def render_labels(
     except NoLabelBaseError:
         raise ApiError(
             status.HTTP_409_CONFLICT,
-            "A place label needs an address: set the label address in Settings, or the public URL.",
+            "A code label needs an address: set the label address in Settings, or the public URL.",
             code="no_label_base",
         ) from None
     except LabelPayloadTooLongError as exc:

@@ -613,7 +613,9 @@ class LabelsRequest(_In):
     type_ids: list[UUID] = Field(default_factory=list, max_length=MAX_LABELS)
     item_ids: list[UUID] = Field(default_factory=list, max_length=MAX_LABELS)
     #: An item kind's id is its text id (`printer`, `k12`).
-    kind_ids: list[str] = Field(default_factory=list, max_length=MAX_LABELS)
+    kind_ids: list[Annotated[str, Field(max_length=40)]] = Field(
+        default_factory=list, max_length=MAX_LABELS
+    )
     #: ``None``: the stored setting `filament_label_template`.
     template: LabelTemplateChoice | None = None
     #: A one-label template: one label a page (``roll``) or packed on Letter paper

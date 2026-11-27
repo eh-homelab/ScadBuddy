@@ -725,8 +725,8 @@ matches `[a-z][a-z0-9_]{0,63}`. Limits: 200 keys per entity, 2000 characters per
   `/filament/locations/<id>`. `POST /api/v1/filament/labels` also takes `type_ids`, `item_ids`
   and `kind_ids` (#7169), after the spools and places. A spool type's, an item's and a kind's
   label is the place label's shape: its code (`T-<n>`, `I-<n>`, `K-<n>`), its name and the QR
-  `<base>/x/<code>`. A type's name is its code and colour name, as `GET /api/v1/codes` gives
-  it (`codes/resolve.py` `NAME_SQL`). An archived row still gets its label.
+  `<base>/x/<code>`. A type's name is its code and colour name, as `GET /api/v1/codes/{code}`
+  gives it (`codes/resolve.py` `NAME_SQL`). An archived row still gets its label.
 - Label templates and the PDF (#7157, plan
   `docs/superpowers/plans/2026-11-23-label-templates-pdf.md`): the labels page offers SB's
   50 x 25 mm roll label, Bambuddy's six templates (two box labels, two AMS holder labels and
@@ -734,8 +734,8 @@ matches `[a-z][a-z0-9_]{0,63}`. Limits: 200 keys per entity, 2000 characters per
   `filament_label_template`. A sheet template prints on its own grid. "Download" asks
   `POST /api/v1/filament/labels` (`backend/scadbuddy/filament/label_pdf.py`, ReportLab) for
   the same labels at the same template and saves it through `downloadBlob`, so it works
-  inside Bambuddy's frame. A place label's PDF needs the label address or an https public
-  URL (409 `no_label_base` otherwise). The browser print stays.
+  inside Bambuddy's frame. A code label's PDF (a place, type, item or kind label) needs the label address or an https
+  public URL (409 `no_label_base` otherwise). The browser print stays.
   The agent reads codes with `filament_code_resolve`, `filament_location_get` and
   `filament_printer_labels`, and the label sizes with `filament_label_templates`. It saves
   and deletes saved sheets with `filament_label_sheet_upsert` and

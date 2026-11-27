@@ -281,6 +281,7 @@ def test_a_type_label_needs_the_label_address(client: TestClient) -> None:
     refused = client.post(PDF, json={"type_ids": [made["id"]]})
     assert refused.status_code == 409, refused.text
     assert refused.json()["code"] == "no_label_base"
+    assert refused.json()["detail"].startswith("A code label needs an address")
 
 
 def test_an_item_and_a_kind_get_code_labels(
@@ -356,6 +357,39 @@ def test_the_cap_counts_every_list(client: TestClient) -> None:
     }
     answer = client.post(PDF, json=body)
     assert answer.status_code == 422, answer.text
+
+
+def test_an_empty_request_is_422(client: TestClient) -> None:
+    answer = client.post(PDF, json={})
+    assert answer.status_code == 422, answer.text
+    assert "spools, places, types, items and kinds" in answer.text
+
+
+def test_the_cap_counts_types_items_and_kinds(client: TestClient) -> None:
+    body = {
+        "type_ids": [str(uuid4()) for _ in range(40)],
+        "item_ids": [str(uuid4()) for _ in range(40)],
+        "kind_ids": ["printer"] * 21,
+    }
+    answer = client.post(PDF, json=body)
+    assert answer.status_code == 422, answer.text
+    assert "spools, places, types, items and kinds" in answer.text
+
+
+def test_a_kind_id_is_bounded(client: TestClient) -> None:
+    answer = client.post(PDF, json={"kind_ids": ["k" * 41]})
+    assert answer.status_code == 422, answer.text
+
+
+def test_a_repeated_type_id_gives_two_labels(
+    client: TestClient, drawn: list[tuple[list[Label], LabelTemplate, Layout]]
+) -> None:
+    made = _type(client)
+    assert client.put(SETTINGS, json=BASE).status_code == 200
+    answer = client.post(PDF, json={"type_ids": [made["id"], made["id"]]})
+    assert answer.status_code == 200, answer.text
+    assert len(drawn[-1][0]) == 2
+    assert drawn[-1][0][0] == drawn[-1][0][1]
 
 
 def test_a_png_of_one_type_label_is_named_by_its_code(client: TestClient) -> None:
