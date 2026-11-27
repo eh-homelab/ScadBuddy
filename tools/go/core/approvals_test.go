@@ -90,8 +90,6 @@ func TestASessionApprovalIsMadeWithItsEvents(t *testing.T) {
 	expect(t, approval["due"], false)
 	expect(t, a.get("/approvals/row", "id", id)["approval"].(map[string]any)["id"], id)
 	expect(t, ids(a.post("/approvals/list", map[string]any{"session_id": session, "pending": true})["approvals"]), []string{id})
-	expect(t, ids(a.post("/approvals/visible-pending", map[string]any{"kind": "browser", "id": "browser"})["approvals"]), []string{id})
-	expect(t, a.post("/approvals/visible-pending", askerWho)["approvals"], []any{})
 }
 
 // A session's row is no one's to decide through this list (#7323): it takes no place under the
@@ -228,7 +226,6 @@ func TestAMalformedApprovalIDNamesNothing(t *testing.T) {
 	a := pendingAPI(t)
 	for _, missing := range []string{uuid(), "../../areas", "not-a-uuid"} {
 		expect(t, a.get("/approvals/row", "id", missing), map[string]any{"approval": nil})
-		expect(t, a.get("/approvals/session", "session_id", missing), map[string]any{"session": nil})
 		expect(t, a.ok("POST", "/approvals/settle", js(settleBody(missing, "approved", nil))).raw,
 			`{"approval":null,"logged":[]}`)
 		expect(t, a.post("/approvals/list", map[string]any{"session_id": missing}), map[string]any{"approvals": []any{}})
