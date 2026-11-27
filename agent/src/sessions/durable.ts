@@ -696,7 +696,8 @@ export class DurableTurns {
     try {
       for await (const { event: e } of this.#events.follow(id, afterSeq, controller.signal)) {
         if (e.type === 'session.result') result = { costUsd: e.costUsd ?? 0, turns: e.turns }
-        else if (e.type === 'error' && e.questionId === undefined) error = { ...(e.code ? { code: e.code } : {}), message: e.message }
+        // An older log's refused-answer error (`questionId`, the socket's old `question.answer`, #7323) is no turn's.
+        else if (e.type === 'error' && !('questionId' in e)) error = { ...(e.code ? { code: e.code } : {}), message: e.message }
         else if (e.type === 'session.status' && SETTLED.includes(e.status)) {
           status = e.status
           break

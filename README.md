@@ -2153,8 +2153,8 @@ the backend on `http://127.0.0.1:8080` (§4.3).
   and the agent's questions are answered through
   `POST /api/v1/ai/pending-input/{request_id}` (the panel's one respond route, #815),
   which works while the panel's socket is down;
-  `/api/v1/ai/approvals` and the socket's `approval.decision` / `question.answer`
-  still work. A chat
+  `/api/v1/ai/approvals` still works; the socket's old `approval.decision` /
+  `question.answer` are refused as malformed (#7323). A chat
   session's model gets the ScadBuddy tools in-process (`mcp__scadbuddy__*`, at
   their tiers), plus enabled plugins. Every agent response carries
   `X-ScadBuddy-Service: agent`.

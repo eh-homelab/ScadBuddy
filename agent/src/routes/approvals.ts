@@ -8,8 +8,8 @@ import { ready, type RouteModule } from './module.js'
 import { browserUser } from '../auth/browserSession.js'
 
 // /api/v1/ai/approvals (#258): the tests' and HTTP clients' way to see and decide
-// approvals of outward tool calls; the panel decides over #266's socket instead
-// (`approval.decision`, routes/chat.ts, which calls ApprovalService.decision directly).
+// approvals of outward tool calls; the panel decides through the pending-input
+// respond route (routes/pendingInput.ts).
 //
 //   GET  /api/v1/ai/approvals                              every pending MCP prepare (browser view)
 //   POST /api/v1/ai/approvals/:id/approve                  body: optional {"input_hash": "…"}

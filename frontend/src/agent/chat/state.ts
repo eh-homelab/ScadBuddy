@@ -583,12 +583,6 @@ function applyServer(state: ChatState, event: ServerEvent): ChatState {
       }
       // #3710: the agent's words that name the credential, when it gives them.
       const message = errorMessage(event.code, event.shown ?? event.message)
-      // #940: an answer the agent refused resolves nothing, and a question has no
-      // expiry, so its card must be answerable again. The agent names the question
-      // (`questionId`) on every error that refused an answer, even a malformed one; no
-      // other error touches a sent answer, which may already have been accepted.
-      const reopen = (s: SessionState, id: string): SessionState =>
-        mapItems(s, (i) => (i.kind === 'question' && i.id === id && i.state === 'sent' ? { ...i, state: 'pending' } : i))
       // #6386: a refused remove or edit of a queued message: that entry's buttons work again. One
       // refused after its entry left the queue (it started, or another tab removed it) counts for
       // nothing: no entry shows it, and only the error is shown.
@@ -596,13 +590,10 @@ function applyServer(state: ChatState, event: ServerEvent): ChatState {
         s.queued?.some((q) => q.id === id) ? { ...s, queueRefusals: { ...s.queueRefusals, [id]: (s.queueRefusals?.[id] ?? 0) + 1 } } : s
       if (event.sessionId && state.sessions[event.sessionId]) {
         return patchSession(state, event.sessionId, (s) =>
-          push(event.questionId ? reopen(s, event.questionId) : event.queuedId ? refused(s, event.queuedId) : s, {
+          push(event.queuedId ? refused(s, event.queuedId) : s, {
             kind: 'error',
             id: errorId(s),
             message,
-            // #2133: an error that refused an answer is about that question, so its
-            // resolution drops it, as a respond route's error is (#1359).
-            ...(event.questionId ? { about: event.questionId } : {}),
             ...(event.code ? { code: event.code } : {}),
           }),
         )
