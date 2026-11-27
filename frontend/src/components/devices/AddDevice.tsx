@@ -29,6 +29,15 @@ export function AddDevice({ devices, onPairing }: { devices: readonly Device[] |
   useEffect(() => {
     latestOnPairing.current = onPairing
   })
+  // A code that comes back after the block went away (the Scan page drops it once a phone is
+  // online) is never shown and never tells the parent it is open.
+  const mounted = useRef(true)
+  useEffect(() => {
+    mounted.current = true
+    return () => {
+      mounted.current = false
+    }
+  }, [])
 
   async function start() {
     setBusy(true)
@@ -41,6 +50,7 @@ export function AddDevice({ devices, onPairing }: { devices: readonly Device[] |
       const made: Pairing = await createPairing()
       const link = pairLink(onThisHost(made.code_url))
       const svg = await QRCode.toString(link, { type: 'svg', errorCorrectionLevel: 'M', margin: 0 })
+      if (!mounted.current) return
       known.current = new Set(before.map((one) => one.id))
       setPairing({ link, expiresAt: made.expires_at, svg })
       latestOnPairing.current?.(true)

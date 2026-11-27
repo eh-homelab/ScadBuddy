@@ -111,6 +111,40 @@ it('goes back to the slow poll once a phone it is pairing comes online', async (
   await waitFor(() => expect(reads).toBe(before + 1))
 })
 
+it('stays on the slow poll when a code comes back after a phone came online', async () => {
+  vi.useFakeTimers({ shouldAdvanceTime: true })
+  onTestFinished(() => {
+    vi.useRealTimers()
+  })
+  setDevices([OLD_PHONE])
+  let release: () => void = () => {}
+  const held = new Promise<void>((resolve) => {
+    release = resolve
+  })
+  server.use(
+    http.post('*/api/v1/devices/pairings', async () => {
+      await held
+      return HttpResponse.json({ code_url: `${location.origin}/api/v1/devices/pairings/late/claim`, expires_at: '2099-01-01T00:00:00Z' })
+    }),
+  )
+  let reads = 0
+  const count = ({ request }: { request: Request }) => {
+    if (request.method === 'GET' && new URL(request.url).pathname === '/api/v1/devices') reads += 1
+  }
+  server.events.on('request:start', count)
+  onTestFinished(() => server.events.removeListener('request:start', count))
+  const { user } = renderPage(<UseMyPhone />, { userEventOptions: { advanceTimers: vi.advanceTimersByTime } })
+  await user.click(await screen.findByRole('button', { name: 'Add a device' }))
+  setDevices([OLD_PHONE, PHONE])
+  await vi.advanceTimersByTimeAsync(LIST_POLL_MS)
+  await screen.findByRole('button', { name: 'Read a tag' })
+  release()
+  await vi.advanceTimersByTimeAsync(100)
+  const before = reads
+  await vi.advanceTimersByTimeAsync(LIST_POLL_MS - 1_000)
+  expect(reads).toBe(before)
+})
+
 it('shows nothing where core does not serve the devices routes', async () => {
   let asked = false
   server.use(
