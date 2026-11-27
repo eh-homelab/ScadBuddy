@@ -1,10 +1,11 @@
 import { ChevronLeftIcon } from 'lucide-react'
-import { useEffect, useMemo, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { Link, useParams } from 'react-router'
 import { ApiError } from '../../api/client'
 import { diffPreset, getPreset, problemCode, routeMissing, type PresetDetail, type PresetDiff, type PresetKeyChange, type PresetMirror, type PresetSource } from '../../api/filamentPresets'
 import { FilamentSearchBox } from '../../components/filament/FilamentSearchBox'
 import { filamentLinks } from '../../lib/filamentLinks'
+import { Button } from '@/components/ui/button'
 import { cn } from '@/lib/utils'
 
 const SOURCE_LABEL: Record<PresetSource, string> = { '3dfp': '3DFP', bambuddy: 'Bambuddy', manual: 'Manual' }
@@ -34,6 +35,8 @@ const diffMessage = (cause: unknown) => {
   if (code && DIFF_ERROR[code]) return DIFF_ERROR[code]
   return cause instanceof ApiError ? cause.detail : 'The versions could not be compared. Try again.'
 }
+
+const count = (n: number, noun: string) => `${n} ${noun}${n === 1 ? '' : 's'}`
 
 const date = (iso: string) => new Date(iso).toLocaleString(undefined, { dateStyle: 'medium', timeStyle: 'short' })
 
@@ -82,39 +85,51 @@ function ChangesTable({ label, changes }: { label: string; changes: PresetKeyCha
   )
 }
 
-type VersionDiff = { changes: PresetKeyChange[] } | { error: string }
+type DiffResult = { diff: PresetDiff } | { error: string }
 
-/** The keys each version changed from the one before it. A version that cannot be diffed shows why, and the rest still show. */
-function useVersionDiffs(preset: PresetDetail | null) {
-  const [diffs, setDiffs] = useState<Map<number, VersionDiff>>(new Map())
-  const id = preset?.id
-  const numbers = preset?.versions.map((one) => one.version).join(',')
-  useEffect(() => {
-    if (id === undefined || !numbers) return
-    let live = true
-    const wanted = numbers.split(',').map(Number).filter((n) => n > 1)
-    for (const to of wanted) {
-      diffPreset(id, to - 1, to).then(
-        (diff) => live && setDiffs((was) => new Map(was).set(to, { changes: diff.changes })),
-        (cause: unknown) => live && setDiffs((was) => new Map(was).set(to, { error: diffMessage(cause) })),
+/** Every diff the page asks for, by `from:to`: one request for a pair, whoever asks for it. */
+function useDiffCache(id: number) {
+  const [results, setResults] = useState<Map<string, DiffResult>>(new Map())
+  const asked = useRef(new Set<string>())
+  const ask = useCallback(
+    (from: number, to: number) => {
+      const key = `${from}:${to}`
+      if (asked.current.has(key)) return
+      asked.current.add(key)
+      diffPreset(id, from, to).then(
+        (diff) => setResults((was) => new Map(was).set(key, { diff })),
+        (cause: unknown) => setResults((was) => new Map(was).set(key, { error: diffMessage(cause) })),
       )
-    }
-    return () => {
-      live = false
-    }
-  }, [id, numbers])
-  return diffs
+    },
+    [id],
+  )
+  return { results, ask }
 }
 
-function Versions({ preset }: { preset: PresetDetail }) {
-  const diffs = useVersionDiffs(preset)
-  const versions = [...preset.versions].sort((a, b) => b.version - a.version)
+type Diffs = ReturnType<typeof useDiffCache>
+
+/** How many versions show their changed keys at first, and how many more each "Show more" adds. */
+const PAGE = 10
+
+/** The keys each version changed from the one before it. A version that cannot be diffed shows why, and the rest still show. */
+function Versions({ preset, diffs }: { preset: PresetDetail; diffs: Diffs }) {
+  const [count, setCount] = useState(PAGE)
+  const versions = useMemo(() => [...preset.versions].sort((a, b) => b.version - a.version), [preset.versions])
+  const shown = useMemo(() => versions.slice(0, count), [versions, count])
+  const { ask } = diffs
+  useEffect(() => {
+    shown.forEach((one, at) => {
+      const before = versions[at + 1]
+      if (before) ask(before.version, one.version)
+    })
+  }, [shown, versions, ask])
   return (
     <section aria-labelledby="preset-versions" className="flex flex-col gap-2">
       <h2 id="preset-versions" className="text-sm font-semibold">Versions</h2>
       <ol aria-label="Versions" className="flex flex-col gap-2">
-        {versions.map((one) => {
-          const diff = diffs.get(one.version)
+        {shown.map((one, at) => {
+          const before = versions[at + 1]
+          const result = before ? diffs.results.get(`${before.version}:${one.version}`) : undefined
           return (
             <li key={one.version} className="rounded-md border p-3">
               <div className="flex flex-wrap items-baseline gap-x-3 gap-y-0.5 text-[13px]">
@@ -125,17 +140,17 @@ function Versions({ preset }: { preset: PresetDetail }) {
                 <span className="font-mono text-[12px] text-muted-foreground" title={one.sha256}>{one.sha256.slice(0, 8)}</span>
               </div>
               <div className="mt-2">
-                {one.version === 1 ? (
+                {!before ? (
                   <p className="text-[13px] text-muted-foreground">First version.</p>
-                ) : !diff ? (
+                ) : !result ? (
                   <p className="text-[13px] text-muted-foreground">Loading changes…</p>
-                ) : 'error' in diff ? (
-                  <p className="text-[13px] text-warn">{diff.error}</p>
-                ) : diff.changes.length === 0 ? (
+                ) : 'error' in result ? (
+                  <p className="text-[13px] text-warn">{result.error}</p>
+                ) : result.diff.changes.length === 0 ? (
                   <p className="text-[13px] text-muted-foreground">No key changed.</p>
                 ) : (
                   <ul aria-label={`Keys changed in v${one.version}`} className="flex flex-wrap gap-1.5">
-                    {diff.changes.map((change) => (
+                    {result.diff.changes.map((change) => (
                       <li key={change.key} className="rounded border bg-muted/40 px-1.5 py-0.5 font-mono text-[12px]">
                         {change.key}
                       </li>
@@ -147,6 +162,13 @@ function Versions({ preset }: { preset: PresetDetail }) {
           )
         })}
       </ol>
+      {versions.length > count && (
+        <div>
+          <Button type="button" variant="outline" size="sm" onClick={() => setCount(count + PAGE)}>
+            Show more
+          </Button>
+        </div>
+      )}
     </section>
   )
 }
@@ -168,25 +190,20 @@ function VersionSelect({ label, value, versions, onChange }: { label: string; va
   )
 }
 
-function Compare({ preset }: { preset: PresetDetail }) {
+function Compare({ preset, diffs }: { preset: PresetDetail; diffs: Diffs }) {
   const numbers = useMemo(() => preset.versions.map((one) => one.version).sort((a, b) => a - b), [preset.versions])
   const [to, setTo] = useState(preset.version)
-  const [from, setFrom] = useState(Math.max(numbers[0] ?? 1, preset.version - 1))
-  const [result, setResult] = useState<{ key: string; diff?: PresetDiff; error?: string } | null>(null)
+  // The newest version before the current one: version numbers may have gaps.
+  const [from, setFrom] = useState(numbers.filter((n) => n < preset.version).pop() ?? preset.version)
   const key = `${from}:${to}`
   const same = from === to
+  const { ask } = diffs
 
   useEffect(() => {
-    if (from === to) return
-    let live = true
-    diffPreset(preset.id, from, to).then(
-      (diff) => live && setResult({ key: `${from}:${to}`, diff }),
-      (cause: unknown) => live && setResult({ key: `${from}:${to}`, error: diffMessage(cause) }),
-    )
-    return () => {
-      live = false
-    }
-  }, [preset.id, from, to])
+    if (from !== to) ask(from, to)
+  }, [ask, from, to])
+
+  const result = diffs.results.get(key)
 
   return (
     <section aria-labelledby="preset-compare" className="flex flex-col gap-2">
@@ -201,12 +218,12 @@ function Compare({ preset }: { preset: PresetDetail }) {
           </div>
           {same ? (
             <p className="text-[13px] text-muted-foreground">Pick two different versions.</p>
-          ) : result?.key !== key ? (
+          ) : !result ? (
             <p className="text-[13px] text-muted-foreground">Loading changes…</p>
-          ) : result.error ? (
+          ) : 'error' in result ? (
             <p role="alert" className="text-[13px] text-warn">{result.error}</p>
           ) : (
-            <ChangesTable label={`Changed keys, v${from} to v${to}`} changes={result.diff?.changes ?? []} />
+            <ChangesTable label={`Changed keys, v${from} to v${to}`} changes={result.diff.changes} />
           )}
         </div>
       )}
@@ -268,6 +285,37 @@ function Shell({ children }: { children: React.ReactNode }) {
 
 type Load = { state: 'loading' } | { state: 'off' } | { state: 'missing' } | { state: 'error'; message: string } | { state: 'ready'; preset: PresetDetail }
 
+function Loaded({ preset }: { preset: PresetDetail }) {
+  const diffs = useDiffCache(preset.id)
+  const where = [preset.printer_model, preset.nozzle_diameter && `${preset.nozzle_diameter} mm`, preset.filament_type].filter(Boolean).join(', ')
+  return (
+    <Shell>
+      <header className="mb-4 flex flex-col gap-1">
+        <h1 className="text-lg font-semibold tracking-tight">{preset.name}</h1>
+        <p className="flex flex-wrap items-center gap-x-3 gap-y-0.5 text-[13px] text-muted-foreground">
+          <span>{SOURCE_LABEL[preset.source]}</span>
+          <span className="tabular-nums">{`v${preset.version}`}</span>
+          <span className="font-mono">{preset.ref}</span>
+          {where && <span>{where}</span>}
+          {preset.type_id && (
+            <Link to={filamentLinks.type(preset.type_id)} className="underline-offset-4 hover:underline">
+              Type
+            </Link>
+          )}
+          <span className={cn(preset.mirror === 'failed' && 'font-medium text-warn')}>{MIRROR_LABEL[preset.mirror]}</span>
+          <span className="tabular-nums">{`Used by ${count(preset.used_by_types, 'type')}, ${count(preset.used_by_spools, 'spool')}`}</span>
+        </p>
+        {preset.mirror_error && <p className="text-[13px] text-muted-foreground">{preset.mirror_error}</p>}
+      </header>
+      <div className="flex flex-col gap-6">
+        <Versions preset={preset} diffs={diffs} />
+        <Compare preset={preset} diffs={diffs} />
+        <Document preset={preset} />
+      </div>
+    </Shell>
+  )
+}
+
 /** #7204 — one filament preset, read only: its versions with the keys each changed, a compare of any two, and the current document. */
 export function PresetPage() {
   const { id } = useParams()
@@ -304,7 +352,8 @@ export function PresetPage() {
   if (value.state === 'off')
     return (
       <Shell>
-        <p className="text-[13px] text-muted-foreground">Presets are not on yet on this server.</p>
+        <h1 className="text-lg font-semibold tracking-tight">Presets</h1>
+        <p className="mt-1 text-[13px] text-muted-foreground">Presets are not on yet on this server.</p>
       </Shell>
     )
   if (value.state === 'missing')
@@ -321,32 +370,5 @@ export function PresetPage() {
       </Shell>
     )
 
-  const preset = value.preset
-  const where = [preset.printer_model, preset.nozzle_diameter && `${preset.nozzle_diameter} mm`, preset.filament_type].filter(Boolean).join(', ')
-  return (
-    <Shell>
-      <header className="mb-4 flex flex-col gap-1">
-        <h1 className="text-lg font-semibold tracking-tight">{preset.name}</h1>
-        <p className="flex flex-wrap items-center gap-x-3 gap-y-0.5 text-[13px] text-muted-foreground">
-          <span>{SOURCE_LABEL[preset.source]}</span>
-          <span className="tabular-nums">{`v${preset.version}`}</span>
-          <span className="font-mono">{preset.ref}</span>
-          {where && <span>{where}</span>}
-          {preset.type_id && (
-            <Link to={filamentLinks.type(preset.type_id)} className="underline-offset-4 hover:underline">
-              Type
-            </Link>
-          )}
-          <span className={cn(preset.mirror === 'failed' && 'font-medium text-warn')}>{MIRROR_LABEL[preset.mirror]}</span>
-          <span className="tabular-nums">{`Used by ${preset.used_by_types} types, ${preset.used_by_spools} spools`}</span>
-        </p>
-        {preset.mirror_error && <p className="text-[13px] text-muted-foreground">{preset.mirror_error}</p>}
-      </header>
-      <div className="flex flex-col gap-6">
-        <Versions preset={preset} />
-        <Compare preset={preset} />
-        <Document preset={preset} />
-      </div>
-    </Shell>
-  )
+  return <Loaded key={value.preset.id} preset={value.preset} />
 }

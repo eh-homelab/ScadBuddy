@@ -111,11 +111,76 @@ describe('the preset page', () => {
     presetsOff()
     show(3)
     expect(await screen.findByText('Presets are not on yet on this server.')).toBeInTheDocument()
+    expect(screen.getByRole('heading', { level: 1, name: 'Presets' })).toBeInTheDocument()
     expect(screen.queryByRole('list', { name: 'Versions' })).not.toBeInTheDocument()
   })
 
   it('says there is no such preset on a 404 with a code', async () => {
     show(999)
     expect(await screen.findByText('There is no such preset.')).toBeInTheDocument()
+  })
+
+  const versionsOf = (numbers: number[]) => numbers.map((version) => ({ version, sha256: `a${version}`, made_by: null, made_at: '2026-11-26T10:00:00Z', fetch_run_id: null, bb_updated_at: null }))
+
+  it('asks for the changed keys of the newest 10 versions until Show more is clicked', async () => {
+    const numbers = Array.from({ length: 12 }, (_, at) => 12 - at)
+    const asked: string[] = []
+    server.use(
+      http.get('/api/v1/filament/presets/3', () => HttpResponse.json(detail({ version: 12, versions: versionsOf(numbers), document: {} }))),
+      http.get('/api/v1/filament/presets/3/diff', ({ request }) => {
+        const url = new URL(request.url)
+        asked.push(`${url.searchParams.get('from_version')}:${url.searchParams.get('to_version')}`)
+        return HttpResponse.json({ preset_id: 3, from_version: 0, to_version: 0, changes: [] })
+      }),
+    )
+    const { user } = show(3)
+    const list = await screen.findByRole('list', { name: 'Versions' })
+    await waitFor(() => expect(within(list).getAllByText('No key changed.').length).toBeGreaterThan(0))
+    // 10 versions shown: 9 diffs inside the page, and the Compare pair is one of them.
+    expect(list.children).toHaveLength(10)
+    expect(asked.length).toBeLessThanOrEqual(10)
+    expect(asked).not.toContain('1:2')
+    await user.click(screen.getByRole('button', { name: 'Show more' }))
+    await waitFor(() => expect(list.children).toHaveLength(12))
+    await waitFor(() => expect(asked).toContain('1:2'))
+    expect(asked.length).toBeLessThanOrEqual(12)
+    expect(screen.queryByRole('button', { name: 'Show more' })).not.toBeInTheDocument()
+  })
+
+  it('asks for the pair of the newest two versions once', async () => {
+    const asked: string[] = []
+    server.use(
+      http.get('/api/v1/filament/presets/3/diff', ({ request }) => {
+        const url = new URL(request.url)
+        asked.push(`${url.searchParams.get('from_version')}:${url.searchParams.get('to_version')}`)
+        return HttpResponse.json({ preset_id: 3, from_version: 1, to_version: 2, changes: [] })
+      }),
+    )
+    show(3)
+    const compare = await screen.findByRole('region', { name: 'Compare versions' })
+    await within(compare).findByRole('table', { name: 'Changed keys, v1 to v2' }).catch(() => within(compare).findByText('No key changed.'))
+    expect(asked.filter((pair) => pair === '1:2')).toHaveLength(1)
+  })
+
+  it('starts the compare from the newest version before the current one when numbers have a gap', async () => {
+    const asked: string[] = []
+    server.use(
+      http.get('/api/v1/filament/presets/3', () => HttpResponse.json(detail({ version: 3, versions: versionsOf([3, 1]), document: {} }))),
+      http.get('/api/v1/filament/presets/3/diff', ({ request }) => {
+        const url = new URL(request.url)
+        asked.push(`${url.searchParams.get('from_version')}:${url.searchParams.get('to_version')}`)
+        return HttpResponse.json({ preset_id: 3, from_version: 1, to_version: 3, changes: [] })
+      }),
+    )
+    show(3)
+    const compare = await screen.findByRole('region', { name: 'Compare versions' })
+    expect(within(compare).getByLabelText('From')).toHaveValue('1')
+    await waitFor(() => expect(asked).toEqual(['1:3']))
+  })
+
+  it('uses the singular for one type and one spool', async () => {
+    server.use(http.get('/api/v1/filament/presets/3', () => HttpResponse.json(detail({ used_by_types: 1, used_by_spools: 1 }))))
+    show(3)
+    expect(await screen.findByText('Used by 1 type, 1 spool')).toBeInTheDocument()
   })
 })
