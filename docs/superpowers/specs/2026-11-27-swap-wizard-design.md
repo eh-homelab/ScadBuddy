@@ -263,8 +263,9 @@ My calls:
 - D12 (my call). The agent's `filament_spool_move` tool does not get the new field in this
   issue. An agent reads and moves in one turn; the page is where minutes pass between steps.
 - D13 (my call). The race tests in Python hold one transaction open and wait for the second
-  session to block on a lock (`pg_stat_activity.wait_event_type = 'Lock'`, as
-  `tests/filament/test_dry_box.py` does), so no test depends on how fast the runner is.
+  session to block on a lock. They wait through `tests/filament/lock_support.py` `waits_for`
+  (the #7167 helper: `pg_stat_activity` with `pg_blocking_pids`), so no test depends on how
+  fast the runner is.
 
 ## Risks
 

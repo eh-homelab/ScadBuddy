@@ -500,7 +500,7 @@ def test_a_replace_and_a_move_of_the_occupant_race(pg_pool: PgPool) -> None:
     LocationStore(pg_pool).move(spool, a, actor="ann")
     first = _wizard(pg_pool, spool, box, a, "replace", occupant)
     second = _in_own_transaction(pg_pool, _wizard(pg_pool, occupant, shelf, box))
-    outcome = waits_for(pg_pool, first, second)
-    assert outcome.startswith("stale:") and outcome.endswith(":True")
+    # An archive keeps the spool's place, so the stale report names the box.
+    assert waits_for(pg_pool, first, second) == f"stale:{box}:True"
     assert _row(pg_pool, occupant)["archived_at"] is not None
     assert _row(pg_pool, spool)["location_id"] == box

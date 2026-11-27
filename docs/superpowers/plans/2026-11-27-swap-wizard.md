@@ -23,7 +23,7 @@
 - No Web NFC and no camera when `nfcSupport()` is `embedded`; the page links to itself in a new tab with `openExternal` (`frontend/src/lib/embed.ts`).
 - Do not change `frontend/src/pages/filament/ScanPage.tsx` or `tools/go/core/internal/tagreads` (c4f175d1's, R2).
 - Fixed copy: page `<h1>` "Swap spools"; steps "Which spool?" and "Where does it go?"; box choices "Archive S-<n>", "Move S-<n> first", "Choose another place"; cycle choice "Take S-<n> out first"; frame link "Open the swap page in its own tab"; no-NFC note "Tags need Chrome on Android or the ScadBuddy app."; Bambu unknown side "This side of the Bambu tag is on no spool yet. Tap the other side, use the QR code, or pick the spool by hand."
-- Tests never depend on runner speed or the date (R9). A race test waits for a lock (`pg_stat_activity.wait_event_type = 'Lock'`), never for a delay.
+- Tests never depend on runner speed or the date (R9). A race test waits for a lock through `tests/filament/lock_support.py` `waits_for` (`pg_stat_activity` with `pg_blocking_pids`), never for a delay.
 - Locally run only lint, types and the focused tests named in each task (memory "Offload tests to CI"). Backend tests need a Postgres in Docker on a unique port, as `CLAUDE.local.md` says.
 - Simplified Technical English in docs and copy. No counts in docs.
 
