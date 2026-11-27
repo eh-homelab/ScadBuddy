@@ -70,7 +70,11 @@ export function UseMyPhone() {
   async function ended(method: DeviceMethod, end: CallEnd) {
     setCalling(false)
     const readId = end.result?.read_id
-    if (end.outcome !== 'done' || !readId) return
+    if (end.outcome !== 'done') return
+    if (!readId) {
+      setDecoded({ kind: 'failed', message: 'The phone finished but stored no read, so there is nothing to open. Try again.' })
+      return
+    }
     setDecoding(true)
     try {
       if (method === 'nfc.read') {

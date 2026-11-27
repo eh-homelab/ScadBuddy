@@ -62,7 +62,8 @@ export function progressOf(events: CallEvent[]): { read: number; of: number } | 
     if (!event) continue
     const of = num(event.data.of) ?? num(event.data.blocks)
     if ((event.kind === 'device.tag_progress' || event.kind === 'device.tag_found') && of !== undefined) {
-      return { read: num(event.data.read) ?? 0, of }
+      // A tag found again resumes where the read stopped.
+      return { read: num(event.data.read) ?? num(event.data.resume_from) ?? 0, of }
     }
   }
   return undefined

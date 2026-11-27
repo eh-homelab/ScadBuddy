@@ -56,6 +56,22 @@ it('offers the pairing code when no phone is online', async () => {
   expect(screen.queryByRole('button', { name: 'Read a tag' })).not.toBeInTheDocument()
 })
 
+it('says so when the phone finishes without a stored read', async () => {
+  server.use(
+    http.post('*/api/v1/devices/:id/calls', () => HttpResponse.json({ call_id: 'c3' }, { status: 202 })),
+    http.get('*/api/v1/devices/calls/c3', () =>
+      HttpResponse.json({
+        call: { id: 'c3', device_id: PHONE.id, method: 'code.scan', args: {}, caller_kind: 'person', outcome: 'done', created_at: '2026-11-27T10:00:00Z', deadline: '2099-01-01T00:00:00Z', sent_at: null, ended_at: '2026-11-27T10:00:05Z', pending_action_id: null },
+        events: [],
+        result: {},
+      }),
+    ),
+  )
+  const { user } = renderPage(<UseMyPhone />)
+  await user.click(await screen.findByRole('button', { name: 'Scan a code' }))
+  expect(await screen.findByRole('alert')).toHaveTextContent('The phone finished but stored no read, so there is nothing to open. Try again.')
+})
+
 it('says why the code decoder read nothing', async () => {
   setStepMs(10)
   server.use(http.post('*/api/v1/scan/codes', () => HttpResponse.json({ id: 's2', error: 'image_too_large', codes: [] })))
