@@ -395,9 +395,7 @@ export class ApprovalService {
     await this.expireDue()
     const everything = principal.kind === 'browser' || (await this.hasGrant(principal))
     const rows = everything ? await this.deps.routes.pending() : await this.deps.routes.prepared(principal)
-    // The API's list leaves session rows out since #7323; an API pod from before it, still
-    // answering during a roll, does not, so keep this filter.
-    return rows.map(record).filter((a) => a.sessionId === null)
+    return rows.map(record)
   }
 
   private async hasGrant(principal: Owner): Promise<boolean> {
