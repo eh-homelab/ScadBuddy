@@ -137,6 +137,7 @@ export function App() {
         {/* One literal path per available tab (`pages/filament/tabs.ts`): e2e/page-titles.spec.ts reads these. */}
         <Route path="filament/spools" element={<FilamentPage tab="spools" />} />
         <Route path="filament/types" element={<FilamentPage tab="types" />} />
+        <Route path="filament/presets" element={<FilamentPage tab="presets" />} />
         <Route path="filament/tags" element={<FilamentPage tab="tags" />} />
         <Route path="filament/suppliers" element={<FilamentPage tab="suppliers" />} />
         <Route path="filament/invoices" element={<FilamentPage tab="invoices" />} />

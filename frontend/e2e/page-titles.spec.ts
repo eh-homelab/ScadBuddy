@@ -52,6 +52,7 @@ const PAGES = [
   `/filament/spools/${spoolId(3)}`,
   '/filament/types',
   `/filament/types/${T.JADE}`,
+  '/filament/presets',
   '/filament/tags',
   // Purchasing (#6266): a seeded supplier and a seeded invoice, from
   // src/mocks/features/filamentPurchasingSeed.ts.

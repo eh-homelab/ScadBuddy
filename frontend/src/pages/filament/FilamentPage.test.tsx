@@ -22,6 +22,7 @@ describe('the Filament section', () => {
     expect(FILAMENT_TABS.map((tab) => tab.id)).toEqual([
       'spools',
       'types',
+      'presets',
       'tags',
       'suppliers',
       'invoices',
@@ -35,14 +36,15 @@ describe('the Filament section', () => {
     for (const tab of FILAMENT_TABS) expect(tab.path).toBe(`/filament/${tab.id}`)
   })
 
-  it('shows the ten tabs in spec order, with "Invoices" and "Metrics"', () => {
+  it('shows the eleven tabs in spec order, with "Invoices" and "Metrics"', () => {
     render('/filament/spools')
     const tabs = screen.getByRole('navigation', { name: 'Filament' })
     const links = within(tabs).getAllByRole('link')
-    expect(links.map((link) => link.textContent)).toEqual(['Spools', 'Types', 'Tags', 'Suppliers', 'Invoices', 'Locations', 'Catalog', 'Metrics', 'Shopping list', 'Ledger'])
+    expect(links.map((link) => link.textContent)).toEqual(['Spools', 'Types', 'Presets', 'Tags', 'Suppliers', 'Invoices', 'Locations', 'Catalog', 'Metrics', 'Shopping list', 'Ledger'])
     expect(links.map((link) => link.getAttribute('href'))).toEqual([
       '/filament/spools',
       '/filament/types',
+      '/filament/presets',
       '/filament/tags',
       '/filament/suppliers',
       '/filament/invoices',

@@ -9,6 +9,7 @@ import { filamentLinks } from '../../lib/filamentLinks'
 export type TabId =
   | 'spools'
   | 'types'
+  | 'presets'
   | 'tags'
   | 'suppliers'
   | 'invoices'
@@ -30,6 +31,7 @@ const tab = (id: TabId, title: string, available: boolean): FilamentTab => ({ id
 export const FILAMENT_TABS: readonly FilamentTab[] = [
   tab('spools', 'Spools', true),
   tab('types', 'Types', true),
+  tab('presets', 'Presets', true),
   tab('tags', 'Tags', true),
   tab('suppliers', 'Suppliers', true),
   tab('invoices', 'Invoices', true),
