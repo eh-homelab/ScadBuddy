@@ -441,7 +441,9 @@ async def test_a_lan_start_s_archive_keeps_its_first_record(links: PrintLinkStor
 
 async def test_a_lan_start_keeps_its_first_archive(links: PrintLinkStore) -> None:
     """#8306: one archive per start. A second archive of the start's file (a reprint
-    from the printer's own storage) gets no record, so no attempt sums both prints."""
+    from the printer's own storage) gets no record, so no attempt sums both prints. Only
+    the unique index of #8312 refuses it, through `record_lan_start_in`'s untargeted
+    ``ON CONFLICT DO NOTHING`` (#8331)."""
     first = LanArchiveLink(archive_id=40, run_id="r1", subtask_name="scadbuddy-r1-p1", plate_id=1)
     assert await links.record_lan_start(first)
 
