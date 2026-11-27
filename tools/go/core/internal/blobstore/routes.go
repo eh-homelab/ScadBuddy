@@ -379,11 +379,15 @@ func (b *Blobs) hold(ctx context.Context, sha256 string) (release func(), err er
 		<-b.slots
 		return nil, err
 	}
+	name := objectLock(backendS3, sha256)
 	var once sync.Once
 	release = func() {
 		once.Do(func() {
 			closing, cancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
 			defer cancel()
+			// Unlock before the close: the server frees a closed session's locks only once its
+			// backend exits, after Close returns, so a removal's try-lock could still fail.
+			_, _ = conn.Exec(closing, "SELECT pg_advisory_unlock_all()")
 			_ = conn.Close(closing)
 			<-b.slots
 		})
@@ -395,7 +399,6 @@ func (b *Blobs) hold(ctx context.Context, sha256 string) (release func(), err er
 	if tries <= 0 {
 		tries = stageLockTries
 	}
-	name := objectLock(backendS3, sha256)
 	for range tries {
 		err = pgx.BeginFunc(ctx, conn, func(tx pgx.Tx) error {
 			if _, err := tx.Exec(ctx, "SELECT set_config('lock_timeout', $1, true)",
