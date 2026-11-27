@@ -25,6 +25,27 @@ Android) compile the app's pure files by link, today `DeepLink.Links.cs` and `De
 cd app/ScadBuddy.Tests && dotnet test
 ```
 
+## The published APK
+
+`build-app.yml` (#8376) runs on every push to main that changes `app/` (not only a
+`CLAUDE.md`), and on a dispatch. It runs the tests and the `android` job's build with the same
+pins, with version code `github.run_number` and version name `1.0.<run number>`. Then it
+pushes `app/Dockerfile`, a `FROM scratch` image with only `/scadbuddy.apk` and
+`/scadbuddy.apk.sha256`, to `ghcr.io/eh-homelab/scadbuddy-app`, tagged `sha-<7>` and
+`latest`. It publishes no GitHub release. To install the latest:
+
+```bash
+crane export ghcr.io/eh-homelab/scadbuddy-app:latest - | tar -x scadbuddy.apk scadbuddy.apk.sha256
+# or: id=$(docker create ghcr.io/eh-homelab/scadbuddy-app:latest x) && docker cp "$id:/scadbuddy.apk" . && docker rm "$id"
+sha256sum -c scadbuddy.apk.sha256
+adb -P 5039 install -r scadbuddy.apk
+```
+
+CI builds are signed with the runner's debug key, and each runner makes its own. So
+`install -r` over an earlier build (CI's or a local one) fails on the signature: uninstall
+first (`adb -P 5039 uninstall com.ehhomelab.scadbuddy`), which drops the stored pairing.
+That stays until a release key signs every build (the #8376 follow-up).
+
 ## Layout
 
 - `MainPage.xaml.cs`: loads the set ScadBuddy address, and runs pairing links (from the
