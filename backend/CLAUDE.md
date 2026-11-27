@@ -2411,8 +2411,8 @@ only the sleeps move; a budget on the real clock fails on a slow runner (#6252).
   the input `record_histories`. Each backend shard sets `SCADBUDDY_RECORD_HISTORIES=1` and
   uploads the artifact `order-stock-histories-<shard>`. Download the artifacts and commit their
   files into `tests/fixtures/order_stock_histories/`; `tests/test_order_stock_replay.py` replays
-  them on every run. A closed stock workflow that holds its item is taken over by the next
-  change (the `takeover` history). The kind `inventory_operation.changed` is a typed,
+  them on every run. A closed stock workflow that holds its item is taken over: the waiting
+  workflow's step restarts it, at most 3 times (`TAKEOVERS`; the `takeover` history). The kind `inventory_operation.changed` is a typed,
   NOTIFY-only event that scadbuddy-core sends (`tools/go/core/internal/bus/event.go`,
   `agent_changes/hub.py`); `activity/` ingests it as the Activities tab rows. The test image
   copies the Go vectors that the backend reads (the `COPY tools/go/core/internal/...` lines

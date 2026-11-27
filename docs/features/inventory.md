@@ -58,7 +58,9 @@ design §3): `nature` (`physical` or `service`), `role` (`consumable` or `durabl
 (`lot` or `unit`) and `billing` (`term`, `hourly` or `flat`). A child kind may answer a key
 its parent left open. It may not change a key its parent set (`class_changed`). A durable
 thing is counted by unit (`class_invalid`). An item of a kind whose class is open is refused
-(`class_open`). A kind also names one optional special type (`filament_spool` in K1).
+(`class_open`). A kind also names at most one special type. The Go catalog has two: `filament_spool` and
+`printer`. The handlers of `printer` are `handler_not_built` in K1, so the seeded `printer`
+kind keeps `special_type` NULL until K6 (R-K1-7).
 
 A kind, an item and a unit can set `steps`: which handler runs each step (receive, count,
 consume, and so on). The registry resolves the steps from the class defaults down to the
@@ -107,8 +109,8 @@ cannot choose one (`KindInput`, 422; owner, 2026-11-27).
 The migration seeds the built-in kinds (`20261124T0323Z_inventory_core.sql:189`): filament,
 printer, part (with nozzle, hotend, belt, build plate, AMS part and hardware under it),
 consumable (with desiccant, packaging and lubricant), equipment (with dry bin and tool),
-printed part, assembly, service and spool part. A built-in kind cannot change its tracking.
-A kind with items cannot either (409 `kind_in_use`, Go `store/kinds.go`). Kinds are rows, never
+printed part, assembly, service and spool part. A built-in kind cannot change its tracking, its class or its special type, and neither can a
+kind with items (409 `kind_in_use`, Go `store/kinds.go`). Kinds are rows, never
 a list in code (spec §4). A kind archives and restores; it never deletes.
 
 An item's property schema is its kind's `attribute_schema`. So `GET` and `PUT
@@ -158,8 +160,10 @@ unit and move, and the orders reach it through Temporal workflows
 `inventory.GiveBack`, `RecostLot` calls `inventory.Recost`, `MergePrinter` calls
 `inventory.Repoint`). `backend/tests/test_no_python_stock_writes.py` keeps it so. The rules
 below are phase 2's, which Go ported; the Python names in them (`StockStore`, `take`,
-`lock_items`, `inventory/stock.py` lines) are phase 2's code, kept now only as the tests'
-stand-in for Go (`backend/tests/support/python_stock.py`).
+`lock_items`, `count_item`, `_open_lots`) are phase 2's code. It lives now only in
+`backend/tests/support/python_stock.py`, the tests' stand-in for Go; `inventory/stock.py`
+keeps `estimate_unit_cost` and `PartsMoved`. The line numbers below are in that file unless
+they name another.
 
 A **move** (`stock_moves`) is the only thing that changes stock. Its `qty` is signed. Its
 kinds are `receive`, `use`, `return`, `adjust`, `produce`, `transfer`, `sell`, `retire` and
@@ -167,7 +171,7 @@ kinds are `receive`, `use`, `return`, `adjust`, `produce`, `transfer`, `sell`, `
 both (`stock_moves_one_holder`).
 
 - **FIFO.** `StockStore.take` takes from the lots in receive order (`stock_lots_fifo`;
-  `inventory/stock.py:142` `_fifo`). A move that names a lot takes that lot first. If the lot
+  `inventory/stock.py:108` `_fifo`). A move that names a lot takes that lot first. If the lot
   holds less, the rest spills FIFO into the other lots. A named lot with nothing on hand is
   409 `lot_empty` (R-P2-14). A shortfall goes on the newest lot at its cost and sets
   `needs_review`. An item with no lot opens a zero-cost `adjustment` lot of unknown cost
@@ -179,17 +183,17 @@ both (`stock_moves_one_holder`).
 - **Reversal.** `give_back` writes one `return` for each `use` of an order item that no
   `return` names yet: the same lot, the same quantity, the use's own cost. Only a return
   names a move it reverses, and each move is reversed once (`reverses_move_id` is unique
-  and checked). A second call writes nothing (`inventory/stock.py:557`).
+  and checked). A second call writes nothing (`python_stock.py:427` `give_back`).
 - **Count.** `count_item` zeroes the negative lots first. Then it takes the difference FIFO,
   or adds it to the newest lot. No lot keeps an offsetting negative balance (R-P2-15).
 - **Re-cost.** `POST /inventory/lots/{id}/recost` ("Re-cost past uses") rewrites the cost
   of every `use`, `return` and `adjust` move of the lot to the lot's cost now. It answers
   each order item whose parts cost changed, with both figures (R-P2-31; `recost_lot`,
-  `inventory/stock.py:435`). It is tier `write` (Ruling 8). The orders layer audits it as
+  `python_stock.py:305`). It is tier `write` (Ruling 8). The orders layer audits it as
   `item.parts_recosted`.
 - **The open lock and the lock order.** Two callers that both find no lot must not both open
   one. Every lot insert (`receive_in`, `_open_lots`) first takes a transaction advisory lock
-  on the item (`_open_lock`, `inventory/stock.py:819`). `lock_items` takes, for each item in
+  on the item (`_open_lock`, `python_stock.py:666`). `lock_items` takes, for each item in
   `item_id` order: the item row `FOR SHARE`, the open lock, then the item's lots `FOR UPDATE`
   in FIFO order. `take` locks the lots in the same order; it relies on its caller's
   `lock_items` for the open lock first. So no receive or count adds a lot
@@ -213,7 +217,7 @@ the person entered:
 
 - `cost_currency` is the currency the lot was bought in (NULL means the shop's);
 - `foreign_unit_cost_minor` is one unit's cost in that currency (R-P2-11, R-P2-12;
-  `receive_in`, `inventory/stock.py:276`). `set_lot_cost` keeps both, for provenance.
+  `receive_in`, `python_stock.py:146`). `set_lot_cost` keeps both, for provenance.
 
 The parts migration does the same for a foreign part (R-P2-22). A move of a `cost_unknown`
 lot is `cost_unknown`, and so is a foreign lot's take (R-P2-19). A part's unit cost
@@ -229,7 +233,7 @@ an item `fulfilled`, it takes each part from the lots (`parts.used`). `unfulfil_
 each use back at its own cost (`parts.returned`). No cost entry is written (see
 [orders-and-quotes.md](orders-and-quotes.md)).
 
-Job cost reads the moves. `PartsMoved` (`inventory/stock.py:903`) is `-sum(amount_minor)`
+Job cost reads the moves. `PartsMoved` (`inventory/stock.py:186`) is `-sum(amount_minor)`
 of the known-cost `use` and `return` moves, and `unknown` is true for a `use` of unknown
 cost that no `return` names (R-P2-19). The figure is `Margin.parts_minor` (on `ItemCost` too)
 (`backend/scadbuddy/orders/costs.py:183`). Job cost and the profit report share one reader
@@ -254,10 +258,9 @@ The `/parts` row routes (`GET/POST /parts`, `PATCH /parts/{id}`, and its `stock`
 `moves`), the alias class and the agent's stock tool were removed (#6949, K1 5/7,
 R-K1-17). The agent tool `part_list` keeps only its `order_id` form. To list every part, use
 `inventory_item_list` with `kind=hardware` and with `kind=ams_part`. To receive stock, use
-`inventory_lot_receive`. Kept: `GET /orders/{id}/parts`, `PUT /orders/{id}/items/{item}/parts`,
+`inventory_lot_receive`. The parts kinds are `hardware` and `ams_part`, and the agent tool
+`part_stock_add` is gone. Kept: `GET /orders/{id}/parts`, `PUT /orders/{id}/items/{item}/parts`,
 the rule routes `GET`/`PUT /parts/rules/{slug}` and the tool `order_item_parts_set`.
-
-The parts kinds are `hardware` and `ams_part`. The agent tool `part_stock_add` is gone.
 
 Still to do: drop `parts_retired` and `part_stock_moves_retired` after a prod check (Ruling 6;
 the pack data of a part with no supplier stays only there, R-P2-25). The `part_id` reads in
@@ -369,7 +372,7 @@ then Go's `Take` or `GiveBack`, then record `parts.used` or `parts.returned`), `
 (Go's `Recost`, then the cost events) and `MergePrinter` (Go's `Repoint`, then the merge). A
 route starts the workflow first and waits 15 s; then it answers 202 and the item shows "stock
 still settling". A refusal in a Python commit step fails the workflow, so the same id can start
-again (R-K1-32). A closed stock workflow that holds its item is taken over by the next change.
+again (R-K1-32). A closed stock workflow that holds its item is taken over: the waiting workflow's step restarts it, at most 3 times (`TAKEOVERS`, `backend/scadbuddy/orders/stock_activities.py`).
 There is no outbox, no sweep and no manual retry.
 
 ## Limits and known issues
