@@ -597,4 +597,17 @@ func TestAPersonSeesOnlyTheirOwnScans(t *testing.T) {
 	if _, out := h.json("GET", "/api/v1/scan/scans", nil); len(out["scans"].([]any)) != 1 {
 		t.Errorf("a service sees every scan: %v", out)
 	}
+	// Anyone else (anonymous, as under auth off or observe) sees no person's scan, and only the
+	// scans made with no actor.
+	h.who = auth.Caller{Kind: auth.KindAnonymous}
+	if _, out := h.json("GET", "/api/v1/scan/scans", nil); len(out["scans"].([]any)) != 0 {
+		t.Errorf("an anonymous caller lists ada's scan: %v", out)
+	}
+	if status, _ := h.json("GET", "/api/v1/scan/scans/"+id, nil); status != 404 {
+		t.Errorf("an anonymous caller reads ada's scan: %d", status)
+	}
+	_, mine := h.json("POST", "/api/v1/scan/codes", map[string]any{"key": key})
+	if _, out := h.json("GET", "/api/v1/scan/scans", nil); len(out["scans"].([]any)) != 1 || out["scans"].([]any)[0].(map[string]any)["id"] != mine["id"] {
+		t.Errorf("an anonymous caller lists its own scan only: %v", out)
+	}
 }
