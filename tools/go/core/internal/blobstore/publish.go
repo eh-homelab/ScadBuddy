@@ -180,7 +180,7 @@ type indexer func(ctx context.Context, ref Ref) (bool, error)
 // until index has written its rows, the object stored or reused (stage), then index run.
 // When index writes nothing, the object goes unless a row names it (removeUnnamed, Python's
 // `_release`), once this call's own hold is dropped. It answers what index answered.
-// PublishFile is its only caller today; the commit route indexes through index/putIn.
+// PublishFile and PutContent call it; the commit route indexes through index/putIn.
 func (b *Blobs) put(ctx context.Context, store *Store, kind string, body *os.File, index indexer) (bool, error) {
 	sha, size, err := digest(body)
 	if err != nil {

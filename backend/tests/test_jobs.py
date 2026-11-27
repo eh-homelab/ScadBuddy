@@ -7,12 +7,12 @@ import threading
 import xml.etree.ElementTree as ET
 import zipfile
 from collections.abc import Callable
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import Executor, Future, ThreadPoolExecutor
 from contextlib import ExitStack
 from dataclasses import replace
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import cast
+from typing import Any, cast
 from unittest import mock
 
 import psycopg
@@ -222,7 +222,8 @@ async def test_a_plate_that_fails_leaves_the_queued_plates_undrawn() -> None:
     plates = [[ColourPart(1, f"Plate {n}", "#FF6AC1", trimesh.creation.box())] for n in range(3)]
     drawn: list[str] = []
     # Plate 1 may already be on the one thread when plate 0's failure is seen; it holds
-    # there until the test has its answer, so plate 2 is still queued at the cancel.
+    # there until the test has its answer. Plate 2 is either still queued at the cancel
+    # or taken after it, and the stop flag keeps it from drawing (#8254).
     released = threading.Event()
 
     def broken(parts: list[ColourPart]) -> object:
@@ -243,6 +244,76 @@ async def test_a_plate_that_fails_leaves_the_queued_plates_undrawn() -> None:
     assert rendered is None
     assert warnings == [THUMBNAIL_FAILED_WARNING]
     assert "Plate 2" not in drawn
+
+
+class _TakenExecutor(Executor):
+    """Runs the first task at once and holds the rest as tasks the pool has already taken
+    off its queue: their futures are running, so a cancel no longer reaches them. That is
+    the window between one future's cancel and the next (#8254)."""
+
+    def __init__(self) -> None:
+        self.taken: list[tuple[Future[Any], Callable[..., Any], tuple[Any, ...]]] = []
+        self.ran_first = False
+
+    def submit(self, fn: Callable[..., Any], /, *args: Any, **kwargs: Any) -> Future[Any]:
+        future: Future[Any] = Future()
+        future.set_running_or_notify_cancel()
+        if self.ran_first:
+            self.taken.append((future, fn, args))
+            return future
+        self.ran_first = True
+        try:
+            future.set_result(fn(*args))
+        except Exception as failed:
+            future.set_exception(failed)
+        return future
+
+    def run_taken(self) -> None:
+        for future, fn, args in self.taken:
+            try:
+                future.set_result(fn(*args))
+            except BaseException as failed:
+                future.set_exception(failed)
+
+
+async def test_a_plate_the_pool_took_before_the_cancel_is_not_drawn() -> None:
+    """#8254: a plate that starts after another plate failed draws nothing, even when the
+    pool took it off its queue before its future's cancel."""
+    plates = [[ColourPart(1, f"Plate {n}", "#FF6AC1", trimesh.creation.box())] for n in range(3)]
+    drawn: list[str] = []
+
+    def broken(parts: list[ColourPart]) -> object:
+        drawn.append(parts[0].name)
+        raise ValueError("degenerate face")
+
+    pool = _TakenExecutor()
+    with mock.patch.object(jobs, "render_plate_thumbnails", broken):
+        rendered, warnings = await jobs.plates_thumbnails(plates, config=CONFIG, executor=pool)
+        pool.run_taken()
+
+    assert (rendered, warnings) == (None, [THUMBNAIL_FAILED_WARNING])
+    assert drawn == ["Plate 0"]
+
+
+async def test_a_plate_the_pool_took_before_the_budget_ran_out_is_not_drawn() -> None:
+    """#8266: the budget's end stops the plates too. The taken plates never finish, so
+    the budget runs out, and a plate that starts after that draws nothing."""
+    plates = [[ColourPart(1, f"Plate {n}", "#FF6AC1", trimesh.creation.box())] for n in range(3)]
+    drawn: list[str] = []
+
+    def drawing(parts: list[ColourPart]) -> str:
+        drawn.append(parts[0].name)
+        return parts[0].name
+
+    pool = _TakenExecutor()
+    with mock.patch.object(jobs, "render_plate_thumbnails", drawing):
+        rendered, warnings = await jobs.plates_thumbnails(
+            plates, config=replace(CONFIG, render_timeout=0.05), executor=pool
+        )
+        pool.run_taken()
+
+    assert (rendered, warnings) == (None, [THUMBNAIL_TIMEOUT_WARNING])
+    assert drawn == ["Plate 0"]
 
 
 def _colour_schema(*colours: tuple[str, str]) -> CustomizerSchema:

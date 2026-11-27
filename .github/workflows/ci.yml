@@ -136,6 +136,7 @@ jobs:
       run_agent_durable: ${{ steps.lanes.outputs.agent_durable }}
       run_rust: ${{ steps.lanes.outputs.rust }}
       run_image: ${{ steps.lanes.outputs.image }}
+      run_android: ${{ steps.lanes.outputs.android }}
       docs_only: ${{ steps.lanes.outputs.docs_only }}
     steps:
       - uses: actions/checkout@v7
@@ -2274,6 +2275,39 @@ jobs:
           SCADBUDDY_TEST_TEMPORAL_DEV_SERVER: ${{ runner.temp }}/temporal
         run: cargo test --workspace --locked
 
+  # ── The phone app (app/, #7905) ────────────────────────────────────────────
+  # A .NET MAUI Android app. Path-selected: it runs when `layout`'s `run_android`
+  # lane does (select-lanes.sh). The hosted runner has the Android SDK
+  # ($ANDROID_HOME); the job adds the .NET SDK, the maui-android workload and a JDK.
+  android:
+    name: Android app build
+    needs: layout
+    if: ${{ needs.layout.outputs.run_android == 'true' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    defaults:
+      run:
+        working-directory: app/ScadBuddy
+    steps:
+      - uses: actions/checkout@v7
+      # The SDK (here and in app/global.json) and the workload set are pinned (app/CLAUDE.md): a new release must not break
+      # an unchanged commit. Move both together.
+      - uses: actions/setup-dotnet@v5
+        with:
+          dotnet-version: 10.0.301
+      - uses: actions/setup-java@v5
+        with:
+          distribution: microsoft
+          java-version: '17'
+      # The app's pure .NET parts (the scan links and their origins), on net10.0 with no Android.
+      - name: Test
+        working-directory: app/ScadBuddy.Tests
+        run: dotnet test
+      - name: Install the maui-android workload
+        run: dotnet workload install maui-android --version 10.0.303.1
+      - name: Build (Release)
+        run: dotnet build -f net10.0-android -c Release -p:AndroidSdkDirectory="$ANDROID_HOME" -p:JavaSdkDirectory="$JAVA_HOME"
+
   # ── The slicer worker's image (#3821) ─────────────────────────────────────
   #
   # The Dockerfile's `slicer` target: the Rust worker and the pinned Bambu Studio
@@ -3195,7 +3229,7 @@ jobs:
     # THIS display name is the required status-check context. Renaming it
     # silently unsatisfiable-ifies branch protection.
     name: CI Summary
-    needs: [layout, lint, markdown, frontend, frontend-unit, frontend-e2e, frontend-e2e-split, agent, agent-durable, image, backend-pytest, backend-pytest-split, models, go-select, go, rust, slicer-image, profile-fetch-image, camera-image, cups-image, freshness, go-client]
+    needs: [layout, lint, markdown, frontend, frontend-unit, frontend-e2e, frontend-e2e-split, agent, agent-durable, image, backend-pytest, backend-pytest-split, models, go-select, go, rust, slicer-image, android, profile-fetch-image, camera-image, cups-image, freshness, go-client]
     # `!cancelled()`, not a bare `needs:`. A bare `needs:` SKIPS this job when
     # an upstream job fails, and GitHub counts a SKIPPED REQUIRED CHECK AS
     # SATISFIED — a failing build would report green on the one check that
@@ -3235,6 +3269,7 @@ jobs:
           GO_RESULT: ${{ needs.go.result }}
           RUST_RESULT: ${{ needs.rust.result }}
           SLICER_IMAGE_RESULT: ${{ needs.slicer-image.result }}
+          ANDROID_RESULT: ${{ needs.android.result }}
           PROFILE_FETCH_IMAGE_RESULT: ${{ needs.profile-fetch-image.result }}
           CAMERA_IMAGE_RESULT: ${{ needs.camera-image.result }}
           CUPS_IMAGE_RESULT: ${{ needs.cups-image.result }}
@@ -3296,6 +3331,7 @@ jobs:
           need_agent_durable=false
           if [ "$has_agent_durable" = true ] && [ "$(lane agent_durable)" = true ]; then need_agent_durable=true; fi
           need_rust=$(lane rust)
+          need_android=$(lane android)
           # A docs-only change (select-lanes.sh `docs_only`) needs only `markdown`.
           not_docs=true
           if [ "$(lane docs_only)" = true ]; then not_docs=false; fi
@@ -3335,6 +3371,8 @@ jobs:
           # Required when this change touches Rust (select-lanes.sh).
           assert "Rust workers"                           "$RUST_RESULT"     "$need_rust"
           assert "Slicer image build and smoke"           "$SLICER_IMAGE_RESULT" "$need_rust"
+          # Required when this change touches the phone app (select-lanes.sh).
+          assert "Android app build"                      "$ANDROID_RESULT"  "$need_android"
 
           # `freshness` is PR-only — it diffs the API against the PR's base and
           # comments on the PR, and a push to main has neither. It is therefore

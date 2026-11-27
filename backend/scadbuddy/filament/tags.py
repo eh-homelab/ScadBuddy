@@ -92,6 +92,14 @@ class TagRead:
     tray_id: int | None = None
 
 
+#: The tag a tray UUID names, and the tag a UID names: any of a tag's UIDs, through
+#: `filament_tag_uids` (#8148, spec G3), so both sides of a Bambu spool find one tag.
+_TAG_BY_KEY: Final = {
+    "tray_uuid": "SELECT id FROM filament_tags WHERE tray_uuid = %s",
+    "tag_uid": "SELECT tag_id FROM filament_tag_uids WHERE uid = %s",
+}
+
+
 def holder_by_keys(conn: Conn, tray_uuid: str | None, tag_uid: str | None) -> UUID | None:
     """The unarchived spool with an open binding of the tray UUID, else of the UID, on
     ``conn``. The keys are cleaned already."""
@@ -99,10 +107,9 @@ def holder_by_keys(conn: Conn, tray_uuid: str | None, tag_uid: str | None) -> UU
         if key is None:
             continue
         row = conn.execute(
-            "SELECT b.spool_id FROM filament_tags t"
-            " JOIN filament_tag_bindings b ON b.tag_id = t.id AND b.unbound_at IS NULL"
+            "SELECT b.spool_id FROM filament_tag_bindings b"
             " JOIN filament_spools s ON s.id = b.spool_id AND s.archived_at IS NULL"
-            f" WHERE t.{column} = %s",
+            f" WHERE b.unbound_at IS NULL AND b.tag_id = ({_TAG_BY_KEY[column]})",
             (key,),
         ).fetchone()
         if row is not None:
@@ -215,8 +222,8 @@ def _find(conn: Conn, uid: str | None, tray: str | None) -> UUID | None:
     for column, key in (("tray_uuid", tray), ("tag_uid", uid)):
         if key is None:
             continue
-        row = conn.execute(f"SELECT id FROM filament_tags WHERE {column} = %s", (key,)).fetchone()
-        if row is not None:
+        row = conn.execute(f"SELECT ({_TAG_BY_KEY[column]}) AS id", (key,)).fetchone()
+        if row is not None and row["id"] is not None:
             found: UUID = row["id"]
             return found
     return None

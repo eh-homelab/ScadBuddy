@@ -146,6 +146,31 @@ twice; when a newer version was written since, it is created again and its `mirr
 names the copy the lost create left (#7343); one preset's failure, a Bambuddy id another ScadBuddy preset holds included, is its
 own `mirror_error` and never stops the rest.
 
+The Presets view (#7204, plan `docs/superpowers/plans/2026-11-26-filament-presets-view.md`) is
+read-only. Go core serves it, not Python: area `filament-presets` in
+`tools/go/core/internal/filamentpresets`, with `GET /api/v1/filament/presets` (`?source=`,
+`?type_id=`), `GET …/presets/{preset_id}` and `GET …/presets/{preset_id}/diff`
+(`tools/go/core/README.md`). The area is on only when `SCADBUDDY_CORE_AREAS` names it
+(`tools/go/core/main.go`). Until then the paths go on to Python, which has a handler for none
+of them and answers a 404 with no `code`. The Presets tab and the preset page tell that apart
+from a Go 404, which has a `code`, and show "Presets are not on yet on this server"
+(`frontend/src/pages/filament/PresetsTab.tsx`, `PresetPage.tsx`). The agent tools say the same
+in a `ToolError` that names the area (`agent/src/tools/filament.ts` `presetOk`). Go computes
+the mirror state of each preset and stores none: `bambuddy_owned` for source `bambuddy`,
+`failed` when `mirror_error` is set and `mirrored_sha256` differs from `sha256`, `pending` when
+only the hashes differ, and else `sent`. A `sent` preset can still carry a `mirror_error`: it is
+the note of a lost create (`tools/go/core/internal/filamentpresets/mirror.go`). Go strips the
+print-host credential keys from every document it returns, as Python does. Python and Go keep
+the same rule through shared vectors
+(`backend/tests/fixtures/filament-preset-vectors.json`,
+`backend/tests/filament/test_filament_preset_vectors.py`, `test-fixtures/filament/preset-wire.json`).
+Every answer is `no-store`, and a document over 1 MiB is not read
+(`tools/go/core/internal/filamentpresets/document.go`). Only a `manual` preset can be edited,
+when the edit routes come: a `3dfp` preset would get a new version from the next fetch, and a
+`bambuddy` preset from the next Bambuddy refresh, so each of them is copied first (plan R3). The
+page and the three read tools `filament_preset_list`, `filament_preset_get` and
+`filament_preset_diff` change nothing (`agent/src/tools/filament.ts`).
+
 A fetch writes ScadBuddy only: each file is the type's `3dfp` preset of its key, a changed
 one a new version with its changed keys in the run's notes, and the type's own nozzle range
 wins over 3DFP's (#7142). Fetching presets is the `ProfileFetch` workflow on the
@@ -580,6 +605,18 @@ matches `[a-z][a-z0-9_]{0,63}`. Limits: 200 keys per entity, 2000 characters per
   (`LocationStore.ensure_printer_on`, `backend/scadbuddy/filament/locations.py`). A printer
   label request makes the place when it is missing, and so does a tray capture whose printer
   has a unit place or external holder with no live parent (`LocationStore.hang_orphans_on`).
+  A printer's places go when the printer is deleted (`PrinterStore.delete`,
+  `backend/scadbuddy/printers/store.py`). First each spool in one moves to no place, with a
+  `moved` event (#7143). Then each other place under one moves to the nearest place above
+  the printer's place that is not the printer's (#8177). It moves to the top level when the
+  printer has no unarchived place of its own, when nothing is above that place, or when the
+  place above is archived. The delete is refused with 409, and changes nothing, when such a
+  place would clash by name there (with a place already there, or with another place that
+  moves there), or while a stock lot or unit points at one of the printer's places. The
+  inventory has no move path with an event for those rows, so a person moves them first. The
+  delete locks in the order a report write takes: the printer's report, its place lock, its
+  spools, then its places (the order is in `PrinterStore.delete`). A delete that still meets
+  a concurrent write answers 409 `printer_delete_conflict`, and the person tries again.
 - Labels: a place's QR is `<base>/x/L-<n>`. The labels page (`/filament/labels`) prints places
   with `?locations=` and printers with `?printers=` (one printer's from its place page, every
   printer's from the Locations tab). The printer labels first make the place of each AMS unit,

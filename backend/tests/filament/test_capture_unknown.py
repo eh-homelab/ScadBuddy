@@ -316,3 +316,37 @@ def test_match_tray_prefers_the_preset_of_the_trays_idx(pg_pool: PgPool) -> None
     assert found is not None and found.id == newer
     assert plain is not None and plain.id == older
     assert other is None
+
+
+def test_a_folded_uid_finds_its_tag_and_a_locked_one_waits(pg_pool: PgPool) -> None:
+    """Review of #8161: an AMS report of a tag's second UID (`filament_tag_uids`, #8148)
+    finds that tag for the guard too, so a locked tag is skipped, never waited on, and the
+    next report binds the tag it found, with no new tag."""
+    from scadbuddy.filament.spools import FilamentSpoolStore
+
+    old = _spool(pg_pool, tray_uuid=U1)
+    FilamentSpoolStore(pg_pool).archive(old, True, actor="t")
+    second = "DC999BE300000100"
+    with pg_pool.connection() as conn:
+        tag = conn.execute("SELECT id FROM filament_tags WHERE tray_uuid = %s", (U1,)).fetchone()
+        assert tag is not None
+        conn.execute(
+            "INSERT INTO filament_tag_uids (uid, tag_id, source) VALUES (%s, %s, 'app')",
+            (second, tag["id"]),
+        )
+    pid, _ = _printer(pg_pool)
+    with pg_pool.connection() as holder, holder.transaction():
+        holder.execute("SELECT id FROM filament_tags WHERE id = %s FOR UPDATE", (tag["id"],))
+        _advance(pg_pool, pid, _report(_tray(1, tag_uid=second)))
+    assert len(_spools(pg_pool)) == 1 and _rows(pg_pool, pid) == []
+    _advance(pg_pool, pid, _report(_tray(1, tag_uid=second, remain=50)), T0 + timedelta(minutes=1))
+    spools = _spools(pg_pool)
+    assert len(spools) == 2
+    with pg_pool.connection() as conn:
+        tags = conn.execute("SELECT count(*) AS n FROM filament_tags").fetchone()
+        bound = conn.execute(
+            "SELECT tag_id FROM filament_tag_bindings WHERE spool_id = %s AND unbound_at IS NULL",
+            (spools[1]["id"],),
+        ).fetchone()
+    assert tags is not None and tags["n"] == 1
+    assert bound is not None and bound["tag_id"] == tag["id"]
