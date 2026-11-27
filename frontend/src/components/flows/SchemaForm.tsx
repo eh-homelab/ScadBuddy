@@ -5,6 +5,7 @@ import { Button } from '@/components/ui/button'
 import { cn } from '@/lib/utils'
 import { Spinner } from '../ui/spinner'
 import { useInputs } from './inputsForm'
+import type { ScanOffer } from './widgets/ScanField'
 
 /** Why the server refused the form. */
 export function FormError({ error }: { error?: string }) {
@@ -30,6 +31,7 @@ export function SchemaForm({
   answer = false,
   taskId,
   expect,
+  offer,
   actions,
   onSubmit,
 }: {
@@ -44,6 +46,8 @@ export function SchemaForm({
   taskId?: string
   /** #8062 — the weight the task expects. */
   expect?: { weight_g: number; tolerance_g?: number }
+  /** #8062 — a code scanned elsewhere, for the scan field of this name. */
+  offer?: ScanOffer
   /** Puts the submit button elsewhere, after the form: a dialog's footer. */
   actions?: (submit: ReactNode) => ReactNode
   onSubmit: (values: Record<string, unknown>) => void
@@ -51,7 +55,7 @@ export function SchemaForm({
   const id = useId()
   const form = useRef<HTMLFormElement>(null)
   const fields = inputFields(schema)
-  const { parse, rendered, errors, rest } = useInputs(fields, { answer, problems, taskId, expect })
+  const { parse, rendered, errors, rest } = useInputs(fields, { answer, problems, taskId, expect, offer })
   const undrawn = answer ? undrawnFields(schema) : []
 
   // An answer that does not fit moves to its first bad field, whoever found it.

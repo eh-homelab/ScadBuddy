@@ -371,7 +371,7 @@ const FIELDS = {
   archive: ['archived', 'reason', 'final_reading_g', 'final_grams'],
   tag: ['tag_uid', 'tray_uuid', 'kind', 'override'],
   event: ['kind', 'source', 'at', 'grams', 'reading_g', 'resolution', 'temp_c', 'hours', 'note'],
-  locationCreate: ['name', 'kind_id', 'parent_id', 'identifier', 'capacity', 'printer_id', 'ams_id', 'tray_id', 'note', 'sort_order'],
+  locationCreate: ['name', 'kind_id', 'parent_id', 'identifier', 'capacity', 'printer_id', 'ams_id', 'tray_id', 'note', 'sort_order', 'station'],
 } as const
 /** A row not made yet holds no properties: its checks run against this entity (#7703). */
 const UNMADE = '00000000-0000-4000-8000-0000000000ff'
@@ -2946,7 +2946,16 @@ export const handlers = [
       headers: { 'Content-Type': 'application/pdf', 'Content-Disposition': 'attachment; filename="labels.pdf"' },
     })
   }),
-  http.get(`${BASE}/locations`, ({ request }) => HttpResponse.json(tree(flag(request, 'include_archived')))),
+  http.get(`${BASE}/locations`, ({ request }) =>
+    flag(request, 'station')
+      ? HttpResponse.json(
+          state.locations
+            .filter((place) => place.station && !place.archived_at)
+            .sort((a, b) => a.name.localeCompare(b.name))
+            .map((place) => ({ ...place, spool_count: 0, children: [] })),
+        )
+      : HttpResponse.json(tree(flag(request, 'include_archived'))),
+  ),
   http.post(`${BASE}/locations`, async ({ request }) => {
     const body = (await request.json()) as S['LocationCreate']
     const extra = extraKeys(body, FIELDS.locationCreate)

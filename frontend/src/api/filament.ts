@@ -477,8 +477,9 @@ export const upsertCatalog = <K extends CatalogKind>(kind: K, body: CatalogInput
     ? request<CatalogRows[K]>(`${BASE}/catalog/${seg(kind)}`, json('POST', body))
     : request<CatalogRows[K]>(`${BASE}/catalog/${seg(kind)}/${seg(id)}`, json('PATCH', body))
 
-export const listLocations = (options: { includeArchived?: boolean } = {}) =>
-  request<LocationNode[]>(`${BASE}/locations${query({ include_archived: options.includeArchived || undefined })}`)
+/** With `station`, only the stations for flow tasks (#8062), flat and by name. */
+export const listLocations = (options: { includeArchived?: boolean; station?: boolean } = {}) =>
+  request<LocationNode[]>(`${BASE}/locations${query({ include_archived: options.includeArchived || undefined, station: options.station || undefined })}`)
 
 /** #6955 — one place with its code, kind, path, children and spools; an archived place still answers. */
 export const getLocation = (id: string) => request<LocationDetail>(`${BASE}/locations/${seg(id)}`)

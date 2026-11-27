@@ -96,6 +96,27 @@ export function setTask(id: string, fields: Partial<Task>): void {
   tasks = tasks.map((task) => (task.id === id ? { ...task, updated_at: new Date().toISOString(), ...fields } : task))
 }
 
+/** Tests: adds a task, as the server would hold it. */
+export function addTask(task: Partial<Task> & Pick<Task, 'id' | 'title'>): Task {
+  const made: Task = {
+    run_id: 'run-station',
+    schema: { type: 'object', properties: {} },
+    context: [],
+    place: null,
+    ui: null,
+    expires_at: null,
+    state: 'open',
+    answer: null,
+    answered_by: null,
+    admitted_by: null,
+    created_at: at(1),
+    updated_at: at(1),
+    ...task,
+  }
+  tasks = [...tasks, made]
+  return made
+}
+
 /** A task as a run's page has it: without its answer. Null for a call that has none. */
 export function taskQuestion(id: string): TaskQuestion | null {
   const found = tasks.find((task) => task.id === id)
@@ -149,6 +170,16 @@ function problemsOf(schema: Task['schema'], answer: Record<string, unknown>): An
 }
 
 export const handlers = [
+  http.get('/api/v1/tasks', ({ request }) => {
+    const query = new URL(request.url).searchParams
+    const state = query.get('state') ?? 'open'
+    const place = query.get('place')
+    const found = tasks
+      .filter((task) => task.state === state && (!place || task.place === place))
+      .sort((a, b) => a.created_at.localeCompare(b.created_at))
+      .map(({ answer: _answer, answered_by: _by, ...question }) => question)
+    return HttpResponse.json(found)
+  }),
   http.get('/api/v1/tasks/:id', ({ params }) => {
     const found = tasks.find((task) => task.id === params['id'])
     return found ? HttpResponse.json(found) : problem(404, 'No such task.')

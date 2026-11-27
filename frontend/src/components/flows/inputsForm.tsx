@@ -4,7 +4,7 @@ import { defaultText, expectedText, initialValues, itemLines, noErrors, toInputs
 import { Button } from '@/components/ui/button'
 import { Switch } from '@/components/ui/switch'
 import { LibraryField } from './widgets/LibraryField'
-import { ScanField } from './widgets/ScanField'
+import { ScanField, type ScanOffer } from './widgets/ScanField'
 import { Segmented } from './widgets/Segmented'
 import { Stepper } from './widgets/Stepper'
 import { UploadField } from './widgets/UploadField'
@@ -28,6 +28,8 @@ interface InputsOptions {
   taskId?: string
   /** #8062 — the weight the task's context expects, shown beside a weight field. */
   expect?: { weight_g: number; tolerance_g?: number }
+  /** #8062 — a code scanned elsewhere, for the scan field of this name. */
+  offer?: ScanOffer
 }
 
 /** A string enum of up to this many options is drawn as buttons, more as a select (spec §6.3). */
@@ -59,7 +61,7 @@ function placed(fields: InputField[], sent: InputValues, problems: readonly Answ
  * the browser could not read (a date with no time), which are never sent as blank. `rest`
  * are the problems that are no field's.
  */
-export function useInputs(fields: InputField[], { answer = false, problems = [], values: starts, names = true, onChange, taskId, expect }: InputsOptions = {}) {
+export function useInputs(fields: InputField[], { answer = false, problems = [], values: starts, names = true, onChange, taskId, expect, offer }: InputsOptions = {}) {
   const [values, setValues] = useState<InputValues>(() =>
     initialValues(starts ? fields.map((field) => ({ ...field, default: starts[field.name] })) : fields),
   )
@@ -83,6 +85,7 @@ export function useInputs(fields: InputField[], { answer = false, problems = [],
       names={names}
       taskId={taskId}
       expect={expect}
+      offer={offer?.field === field.name ? offer : undefined}
       onChange={(next) => {
         onChange?.()
         setValues((now) => ({ ...now, [field.name]: next }))
@@ -111,8 +114,10 @@ function Field({
   names,
   taskId,
   expect,
+  offer,
   onChange,
 }: {
+  offer?: ScanOffer
   taskId?: string
   expect?: InputsOptions['expect']
   field: InputField
@@ -217,7 +222,7 @@ function Field({
 
   let control
   if (plain && (field.widget === 'scan' || scanKinds)) {
-    control = <ScanField common={common} id={id} expects={scanKinds ? { kinds: scanKinds } : field.expects} value={String(value)} onChange={onChange} />
+    control = <ScanField common={common} id={id} expects={scanKinds ? { kinds: scanKinds } : field.expects} value={String(value)} onChange={onChange} offer={offer} />
   } else if (plain && taskId && (field.widget === 'photo' || field.widget === 'file')) {
     control = (
       <UploadField

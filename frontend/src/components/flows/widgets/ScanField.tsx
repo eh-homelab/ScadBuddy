@@ -1,22 +1,15 @@
-import { useRef, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import { ApiError } from '../../../api/client'
 import { resolveCode } from '../../../api/filament'
 import { Input } from '@/components/ui/input'
 import type { InputField } from '../../../lib/flowInputs'
+import { misfit } from '../../../lib/scanMisfit'
 
-const KIND_WORD: Record<string, string> = { location: 'location', spool: 'spool' }
-const article = (word: string) => (/^[aeiou]/i.test(word) ? 'an' : 'a')
-
-/** Why a resolved code does not fit what the field expects, or null. */
-function misfit(found: { kind: string; code: string }, expects: InputField['expects']): string | null {
-  const kinds = expects?.kinds
-  if (kinds && kinds.length > 0 && !kinds.includes(found.kind)) {
-    const words = kinds.map((kind) => KIND_WORD[kind] ?? kind)
-    return `Expected ${words.map((word) => `${article(word)} ${word}`).join(' or ')}`
-  }
-  const codes = expects?.codes
-  if (codes && codes.length > 0 && !codes.includes(found.code)) return `Expected ${codes.join(' or ')}`
-  return null
+/** #8062 — a code scanned elsewhere (a station's own field) for the field named `field`; `n` counts the scans. */
+export interface ScanOffer {
+  field: string
+  code: string
+  n: number
 }
 
 type Looked = { kind: 'ok'; text: string } | { kind: 'no'; text: string } | { kind: 'busy' } | null
@@ -33,6 +26,7 @@ export function ScanField({
   onChange,
   autoFocus,
   common,
+  offer,
 }: {
   id?: string
   expects?: InputField['expects']
@@ -40,12 +34,14 @@ export function ScanField({
   onChange: (next: string) => void
   autoFocus?: boolean
   common?: Record<string, unknown>
+  offer?: ScanOffer
 }) {
   const [looked, setLooked] = useState<Looked>(null)
   // What the person typed; the answer is only a code the lookup accepted.
   const [text, setText] = useState(value)
   // Counts edits and lookups: a result that is not the latest is dropped.
   const latest = useRef(0)
+  const input = useRef<HTMLInputElement>(null)
 
   async function look(typed: string) {
     const code = typed.trim()
@@ -70,10 +66,22 @@ export function ScanField({
     }
   }
 
+  // A scan made elsewhere fills this field and looks it up as if it was typed here.
+  const offered = offer?.n
+  useEffect(() => {
+    if (!offer || offered === undefined) return
+    setText(offer.code)
+    input.current?.focus()
+    void look(offer.code)
+    // Only a new scan (its number) acts; the offer's other parts come with it.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [offered])
+
   return (
     <div className="flex flex-col gap-1.5">
       <Input
         {...common}
+        ref={input}
         id={id}
         aria-invalid={looked?.kind === 'no' ? true : common?.['aria-invalid'] ? true : undefined}
         data-widget="scan"

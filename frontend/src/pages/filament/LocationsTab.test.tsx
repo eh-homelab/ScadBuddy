@@ -110,4 +110,15 @@ describe('the Locations tab', () => {
     await user.click(within(await place(L.DRY_BOX)).getByRole('button', { name: 'Archive Dry box 1' }))
     await waitFor(() => expect(within(screen.getByRole('list', { name: 'Locations' })).queryByText('Dry box 1')).toBeNull())
   })
+
+  it('sets a place as a station for flow tasks', async () => {
+    const { user } = renderPage(<LocationsTab />)
+    const workshop = await place(L.WORKSHOP)
+    await user.click(within(workshop).getByRole('button', { name: 'Edit Workshop' }))
+    const station = await screen.findByRole('switch', { name: 'Station for flow tasks' })
+    expect(station).not.toBeChecked()
+    await user.click(station)
+    await user.click(screen.getByRole('button', { name: 'Save' }))
+    await waitFor(async () => expect((await listLocations({ station: true })).map((node) => node.id)).toEqual([L.WORKSHOP]))
+  })
 })
