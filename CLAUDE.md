@@ -305,6 +305,11 @@ The backend's migration files and its settings tables: `backend/CLAUDE.md`.
   (markdownlint-cli2 0.20.0 over those files outside `vendor/`, config
   `.markdownlint-cli2.jsonc`, style rules off) runs on every change. A docs-only push to `main` starts neither `ci.yml`
   nor `build-image.yml` (their push `paths` exclude those files), so it builds and deploys nothing.
+- `ci.yml`'s `workflow_dispatch` input `record_histories` (#6949 K1 Task 16) runs the
+  backend shards with `SCADBUDDY_RECORD_HISTORIES=1` and uploads
+  `backend/tests/fixtures/order_stock_histories/` as one artifact per shard
+  (`order-stock-histories-<n>`): the stock workflows' replay histories, which no laptop
+  without Temporal can record. Commit the files; never re-record one.
 - `build-go-image.yml` publishes each `tools/go/*` CLI (every one with a `main.go`
   must have a Dockerfile) as `ghcr.io/eh-homelab/scadbuddy-<module>` on a push to main
   touching Go (a `CLAUDE.md` or `AGENTS.md` outside `vendor/` aside), a `v*` tag or a dispatch, for amd64 only: `sha-<7>` always,
