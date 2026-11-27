@@ -493,8 +493,11 @@ that run's settings (the rule is `bambuddy/lan_files.py` `start_by_file`; an ord
 attempt's archive read records the start by the same rule, #8281). Later reads follow the record (`print_history._named_run`), also once
 Bambuddy has deleted the archive, and list none once the run is pruned or the archive
 belongs to another subject. A send or a recorded start is read while the archive is
-fetched; only the file name waits for the archive (#5733). Any other case (no such name, no such start, two runs that share the name)
-records nothing and lists none: the link is never a guess. A LAN print reaches `/prints`
+fetched; only the file name waits for the archive (#5733). Any other case (no such name, no such start, two runs that share the name,
+a start that another archive became already, #8306) records nothing and lists none: the
+link is never a guess. A start keeps its first archive: a failed LAN print printed again
+from the printer's own storage makes a second archive of the same file, and that one names
+no run. A LAN print reaches `/prints`
 only through a content hash link. A native run uploads its slice straight to the printer,
 so no file in Bambuddy's library has its hash, and the queue path's scan
 (`linking.link_subject_by_hash`) never finds it (#5724). Bambuddy computes an archive's
