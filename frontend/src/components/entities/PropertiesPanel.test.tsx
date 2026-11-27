@@ -467,7 +467,7 @@ describe('PropertiesPanel (#7026)', () => {
   })
 
   it("types an item's keys by its item kind's schema, merged down the kind tree (#7067)", async () => {
-    await fetch('/api/v1/inventory/kinds/part', { method: 'PATCH', body: JSON.stringify({ attribute_schema: { type: 'object', properties: { thread: { type: 'string', description: 'Thread size, such as M3' } } } }) })
+    await fetch('/api/v1/inventory/kinds/consumable', { method: 'PATCH', body: JSON.stringify({ attribute_schema: { type: 'object', properties: { thread: { type: 'string', description: 'Thread size, such as M3' } } } }) })
     const item = seedItem({ kind_id: 'hardware', name: 'Bolt' })
     seedEntityProperties(`item:${item.id}`, { thread: 'M3' })
     const { user } = renderPage(<PropertiesPanel entity={`item:${item.id}`} />)
