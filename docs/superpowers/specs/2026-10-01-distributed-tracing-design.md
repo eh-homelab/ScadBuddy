@@ -63,7 +63,8 @@ cluster does not run and which covers neither the browser nor Temporal context.
 - **Resource.** Each process sets `service.name`: `scadbuddy-api`, each worker
   its Deployment's name (`scadbuddy-render`, `scadbuddy-print`,
   `scadbuddy-projects`, by `--queue`; one shared `scadbuddy-worker` until #2292),
-  `scadbuddy-agent`, `scadbuddy-web`. `service.version` is
+  `scadbuddy-agent`, `scadbuddy-web`, and the storefront edge's
+  `scadbuddy-storefront` (#8239). `service.version` is
   the build's version, and `service.instance.id` the process's host name
   (Python `socket.gethostname()`, Node `os.hostname()`), with the build's
   `SCADBUDDY_REVISION` as `scadbuddy.revision`. The in-process worker
@@ -92,6 +93,13 @@ operation one of a closed set the client names, such as `printers.list` or
 code and the client's `Scope`) and **injects no headers**. A test
 asserts that a Bambuddy request carries no `traceparent`. The relay's
 forwarder to the collector is not instrumented at all (§6).
+
+The CRUD client (`crud/client.py`) injects the caller's context into every
+call to the CRUD service, so a worker's or the storefront edge's call is a
+child of its span there (#8239). The storefront edge faces the internet, so it
+drops a visitor's `traceparent`, `tracestate` and `baggage` before its server
+span reads them (`storefront/app.py` `_UntrustedTraceContext`): its server
+span is always a root. The storefront page starts no tracer.
 
 ```
 browser ──fetch/WS(traceparent)──▶ API ──Temporal headers──▶ workflow ──▶ activities (worker)

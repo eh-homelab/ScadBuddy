@@ -42,12 +42,15 @@ trash keeps them, so a restore loses nothing.
 ``lan_print_archives`` holds the LAN start each archive became (#5661). It is keyed by
 the archive, has no subject column, and is created by
 ``20261108T1604Z_lan_print_archives.sql``. The API writes it as it reads a link found by
-hash whose file the start uploaded (`print_history._run_by_file`): on the print's first
-read, or as the prints list links the print (`print_history._link_lan_prints`, #5724),
-which looks only for the starts no row here names. An order attempt's archive read
-writes it too, for a print that nobody opened (`orders/archives.py` `link_lan_archives`,
-#8281). Both use one rule (`lan_files.start_by_file`). One archive per start: a start
-that another archive became already gets no second row (`record_lan_start_in`, #8306).
+hash whose file the start uploaded: on the print's first read
+(`print_history._run_by_file`, rule `lan_files.start_by_file`), or as the prints list
+links the print (`print_history._link_lan_prints`, #5724), which looks only for the
+starts no row here names. An order attempt's archive read writes it too, for a print that
+nobody opened (`orders/archives.py` `link_lan_archives`, #8281). The list's scan and the
+orders read match all the archives of one read together (`lan_files.starts_by_files`,
+#8316): two archives of one read that name one start record neither. One archive per
+start: a start that another archive became already gets no second row
+(`record_lan_start_in`, held by the unique index of #8312).
 A LAN start has no queue item, so no send names it.
 
 `PrintLinkStore.jobs` reads these records, with ``print_runs``' LAN starts, to mark the

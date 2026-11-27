@@ -439,7 +439,7 @@ same way, `vite.config.ts`).
   `POST /tags/reads`, which opens what the tag names: the spool that holds it (`KnownTag`), the
   thing a typed code or `scadbuddy:spool:<id>` text in its records names (`next` `open_code`,
   `resolved` in the `/codes/{code}` shape; `components/filament/scan/CodeCard.tsx`, with
-  `lib/resolvedCode.ts` for the label "Place L-4" / "Spool S-142" / "Kind K-3" and the target page; a kind opens `inventoryPaths.kind`), or the
+  `lib/resolvedCode.ts` for the label "Place L-4" / "Spool S-142" / "Type T-4" / "Item I-7" / "Kind K-3" and the target page; a kind opens `inventoryPaths.kind`), or the
   New tag card. The switch "Open what I scan at once" (localStorage `scadbuddy.scan.openAtOnce`,
   `"1"` when on, read in try/catch) navigates to the thing on each `open_spool` or `open_code`
   read and starts the scan by itself when the page opens, falling back to the Scan button with

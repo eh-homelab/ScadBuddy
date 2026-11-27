@@ -1987,7 +1987,7 @@ const tools: Tool[] = [
     name: 'filament_code_resolve',
     label: 'Resolve a label code',
     description:
-      'What a typed label code names: `L-12` is a place, `S-142` a spool. Any case, with or without the dash. ' +
+      'What a typed label code names: `L-12` is a place, `S-142` a spool, `T-4` a spool type, `I-9` an item, `K-3` an item kind. Any case, with or without the dash. ' +
       'Returns the kind, the id, the name and `archived`; an archived thing still resolves. 404 `code_unknown` ' +
       'for a code that names nothing.',
     input: z.object({ code: z.string().min(1).describe('A label code, such as `L-12` or `s142`') }),

@@ -14,10 +14,11 @@ from psycopg.rows import DictRow
 
 from scadbuddy.bambuddy.trays import EXTERNAL, place_label
 from scadbuddy.codes.parse import format_code
+from scadbuddy.codes.resolve import NAME_SQL, PREFIXES
 from scadbuddy.filament import models as m
 from scadbuddy.filament import prints
 from scadbuddy.filament.catalog import CatalogRefError
-from scadbuddy.filament.label_pdf import Label, PlaceLabel, SpoolLabel
+from scadbuddy.filament.label_pdf import CodeLabel, Label, SpoolLabel
 from scadbuddy.filament.locations import LocationStore, NoAmsKindError
 from scadbuddy.filament.spools import FilamentSpoolStore
 from scadbuddy.printers.lan_models import LanReport
@@ -166,14 +167,14 @@ MAX_PAYLOAD_BYTES = 84
 
 
 class LabelNotFoundError(LookupError):
-    """A spool or place a labels PDF names does not exist."""
+    """A spool, place, spool type, item or item kind a labels file names does not exist."""
 
-    def __init__(self, what: str, row_id: UUID) -> None:
+    def __init__(self, what: str, row_id: UUID | str) -> None:
         super().__init__(f"no {what} {row_id}")
 
 
 class NoLabelBaseError(Exception):
-    """A place label needs an address, and neither the label address nor the public URL
+    """A code label needs an address, and neither the label address nor the public URL
     gives one (#7157, R-7157-5)."""
 
 
@@ -201,14 +202,19 @@ def pdf_labels(
     spool_ids: Sequence[UUID],
     location_ids: Sequence[UUID],
     base: str | None,
+    *,
+    type_ids: Sequence[UUID] = (),
+    item_ids: Sequence[UUID] = (),
+    kind_ids: Sequence[str] = (),
 ) -> list[Label]:
-    """The labels of ``spool_ids``, then ``location_ids``, from SB's own rows, with what the
+    """The labels of ``spool_ids``, then ``location_ids``, ``type_ids``, ``item_ids`` and
+    ``kind_ids`` (#7169), from SB's own rows, with what the
     browser label carries (`frontend/src/components/filament/Label.tsx`): a spool's number,
     material and subtype, colour name and brand, its QR `scadbuddy:spool:<id>`, and the values
     of the other fields a spool label can print (#7216, R-7216-9: the effective colour as
     `#RRGGBB`, its place's name, nozzle temperatures, label weight, the note's first line and
-    the row's `created_at` day in UTC); a place's code and name, its QR `<base>/x/L-<n>`. An
-    archived row still gets its label."""
+    the row's `created_at` day in UTC); a place's, a spool type's, an item's and a kind's
+    code and name, its QR `<base>/x/<code>`. An archived row still gets its label."""
     labels: list[Label] = []
     # One read per kind (at most `MAX_LABELS` ids); the labels keep the request's order.
     found_spools = spools.get_many(spool_ids) if spool_ids else {}
@@ -243,11 +249,46 @@ def pdf_labels(
         place = found_places.get(location_id)
         if place is None:
             raise LabelNotFoundError("location", location_id)
-        if base is None:
-            raise NoLabelBaseError()
-        code = format_code("L", place.number)
-        payload = f"{base.rstrip('/')}/x/{code}"
-        if len(payload.encode()) > MAX_PAYLOAD_BYTES:
-            raise LabelPayloadTooLongError(code)
-        labels.append(PlaceLabel(code=code, name=place.name, qr=payload))
+        labels.append(_code_label(format_code("L", place.number), place.name, base))
+    if type_ids or item_ids or kind_ids:
+        with locations.pool.connection() as conn:
+            labels += _code_labels(conn, "T", "spool type", type_ids, base)
+            labels += _code_labels(conn, "I", "item", item_ids, base)
+            labels += _code_labels(conn, "K", "item kind", kind_ids, base)
+    return labels
+
+
+def _code_label(code: str, name: str, base: str | None) -> CodeLabel:
+    """A code label with its QR `<base>/x/<code>`."""
+    if base is None:
+        raise NoLabelBaseError()
+    payload = f"{base.rstrip('/')}/x/{code}"
+    if len(payload.encode()) > MAX_PAYLOAD_BYTES:
+        raise LabelPayloadTooLongError(code)
+    return CodeLabel(code=code, name=name, qr=payload)
+
+
+def _code_labels(
+    conn: Connection[DictRow],
+    prefix: str,
+    what: str,
+    ids: Sequence[UUID] | Sequence[str],
+    base: str | None,
+) -> list[CodeLabel]:
+    """The labels of ``ids`` in their order, from one read of the prefix's table."""
+    if not ids:
+        return []
+    table = PREFIXES[prefix].table
+    # The table and the name fragment come from code, never from the request.
+    rows = conn.execute(
+        f"SELECT id, number, {NAME_SQL[table]} AS name FROM {table} WHERE id = ANY(%s)",
+        (list(ids),),
+    ).fetchall()
+    found = {row["id"]: row for row in rows}
+    labels: list[CodeLabel] = []
+    for row_id in ids:
+        row = found.get(row_id)
+        if row is None:
+            raise LabelNotFoundError(what, row_id)
+        labels.append(_code_label(format_code(prefix, row["number"]), row["name"], base))
     return labels

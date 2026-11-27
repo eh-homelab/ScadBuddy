@@ -686,6 +686,8 @@ async def _link_lan_prints(
                 started = await runs.lan_started(row.subject, subtasks)
                 for recorded in starts_by_files(filenames, started):
                     await links.record_lan_start(recorded)
+            # One failed record ends this subject's scan (#8316), on purpose: the claim
+            # is released, so a later call scans the subject again.
             except (ApiError, psycopg.Error, ValueError):
                 linking.release_lan_scan(row.subject)
                 logger.exception("could not link a LAN print", extra={"subject": subject.key})

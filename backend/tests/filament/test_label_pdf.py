@@ -14,7 +14,7 @@ from reportlab.pdfbase.pdfmetrics import stringWidth
 from scadbuddy.filament import label_pdf, label_png
 from scadbuddy.filament.label_fonts import width_mm
 from scadbuddy.filament.label_output import ALL_FIELDS, LabelOutput
-from scadbuddy.filament.label_pdf import PlaceLabel, SpoolLabel, render_pdf
+from scadbuddy.filament.label_pdf import CodeLabel, SpoolLabel, render_pdf
 from scadbuddy.filament.label_templates import BY_ID, LabelTemplateChoice
 from scadbuddy.filament.labels import temps_text
 from tests.filament.test_label_fonts import needs_font
@@ -24,7 +24,7 @@ MM = 72 / 25.4
 SPOOL = SpoolLabel(
     number=12, material="PLA Basic", colour="Jade White", brand="Bambu Lab", qr="scadbuddy:spool:x"
 )
-PLACE = PlaceLabel(code="L-7", name="H2C AMS 1 slot 2", qr="https://sb.example/x/L-7")
+PLACE = CodeLabel(code="L-7", name="H2C AMS 1 slot 2", qr="https://sb.example/x/L-7")
 FULL = SpoolLabel(
     number=12,
     material="PLA Basic",
@@ -179,7 +179,7 @@ def test_a_place_name_of_one_long_word_runs_onto_the_second_line() -> None:
     assert lines[1].endswith(label_pdf.ELLIPSIS)
     assert word[len(lines[0]) :].startswith(lines[1][:-1])
     drawn = _lines(
-        render_pdf([PlaceLabel("L-1", word, "https://x/x/L-1")], BY_ID["roll_50x25"], "roll")
+        render_pdf([CodeLabel("L-1", word, "https://x/x/L-1")], BY_ID["roll_50x25"], "roll")
     )
     assert drawn[1] == lines[0]
 

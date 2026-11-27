@@ -292,6 +292,45 @@ def _index(slug: str) -> int:
     return next(i for i, m in enumerate(MIGRATIONS) if m.id.endswith(f"_{slug}"))
 
 
+@pytest.mark.requires_postgres
+def test_the_label_numbers_migration_numbers_types_then_items(pg_conninfo: str) -> None:
+    # #7169 D3, D4: one sequence; the types first, then the items, each by created_at.
+    at = _index("label_numbers")
+    with psycopg.connect(pg_conninfo) as conn:
+        migrate(conn, MIGRATIONS[:at])
+        material = conn.execute("SELECT id FROM filament_materials LIMIT 1").fetchone()
+        assert material is not None
+        types = {}
+        for code, created in (("NEWER", "2026-01-02"), ("OLDER", "2026-01-01")):
+            row = conn.execute(
+                "INSERT INTO filament_spool_types (code, material_id, rgba, label_weight_g,"
+                " created_at) VALUES (%s, %s, '#FFFFFFFF', 1000, %s) RETURNING id",
+                (code, material[0], created),
+            ).fetchone()
+            assert row is not None
+            types[code] = row[0]
+        items = {}
+        for name, created in (("newer", "2026-01-03"), ("older", "2026-01-01")):
+            row = conn.execute(
+                "INSERT INTO items (kind_id, name, created_at) VALUES ('hardware', %s, %s)"
+                " RETURNING id",
+                (name, created),
+            ).fetchone()
+            assert row is not None
+            items[name] = row[0]
+        assert migrate(conn)[0] == MIGRATIONS[at].id
+        type_numbers: dict[object, object] = dict(
+            conn.execute("SELECT id, number FROM filament_spool_types").fetchall()
+        )
+        item_numbers: dict[object, object] = dict(
+            conn.execute("SELECT id, number FROM items").fetchall()
+        )
+        following = conn.execute("SELECT nextval('item_numbers_seq')").fetchone()
+    assert type_numbers == {types["OLDER"]: 1, types["NEWER"]: 2}
+    assert item_numbers == {items["older"]: 3, items["newer"]: 4}
+    assert following == (5,)
+
+
 _DOT3 = "\u2022\u2022\u2022"
 
 
