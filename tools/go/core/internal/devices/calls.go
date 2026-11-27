@@ -252,8 +252,13 @@ func requested(call, device, method string, args json.RawMessage, deadline time.
 // send marks the call sent and publishes device.call_requested on the device's topic: the
 // device's realtime socket, on whichever pod holds it, delivers it.
 func (s *Store) send(ctx context.Context, call, device, method string, args json.RawMessage, deadline time.Time) error {
-	if _, err := s.Pool.Exec(ctx, `UPDATE device_calls SET sent_at = $2, deadline = $3 WHERE id = $1::uuid`,
-		call, s.now(), deadline); err != nil {
+	err := pgx.BeginFunc(ctx, s.Pool, func(tx pgx.Tx) error {
+		return sendIn(ctx, tx, call, device, method, args, s.now(), deadline)
+	})
+	if errors.Is(err, errNotOpen) {
+		return httpx.WithReason(http.StatusConflict, "That call ended before it was sent.", "call_closed")
+	}
+	if err != nil {
 		// The call was not sent: it ends error, not denied at its deadline.
 		ctx := context.WithoutCancel(ctx)
 		if e := pgx.BeginFunc(ctx, s.Pool, func(tx pgx.Tx) error {
@@ -263,10 +268,27 @@ func (s *Store) send(ctx context.Context, call, device, method string, args json
 		} else {
 			s.publishFailed(ctx, call, device, "error", "the call could not be sent")
 		}
+	}
+	return err
+}
+
+// errNotOpen is a call that ended, or was sent, before sendIn could send it.
+var errNotOpen = errors.New("devices: the call is not open to send")
+
+// sendIn sends the call in tx: sent_at and the deadline are set only while the call is open
+// and unsent, and device.call_requested is logged with that write, so a call that has ended
+// never reaches its device.
+func sendIn(ctx context.Context, tx pgx.Tx, call, device, method string, args json.RawMessage, now, deadline time.Time) error {
+	tag, err := tx.Exec(ctx, `UPDATE device_calls SET sent_at = $2, deadline = $3
+		WHERE id = $1::uuid AND outcome IS NULL AND sent_at IS NULL`, call, now, deadline)
+	if err != nil {
 		return err
 	}
-	bus.Publish(ctx, s.Pool, "device.call_requested", requested(call, device, method, args, deadline)...)
-	return nil
+	if tag.RowsAffected() != 1 {
+		return errNotOpen
+	}
+	_, err = bus.PublishIn(ctx, tx, "device.call_requested", requested(call, device, method, args, deadline)...)
+	return err
 }
 
 // schedule ends the call at its deadline if it is still open then. A pod that stops before
@@ -287,16 +309,32 @@ func (s *Store) schedule(call string, deadline time.Time) {
 func (s *Store) expire(ctx context.Context, call string) (bool, error) {
 	now := s.now()
 	var outcome, device string
-	err := s.Pool.QueryRow(ctx, `UPDATE device_calls c SET ended_at = $2, outcome = CASE
-			WHEN c.sent_at IS NULL THEN 'denied'
-			WHEN d.revoked_at IS NULL AND d.last_seen_at > $3 THEN 'timeout'
-			ELSE 'offline' END
-		FROM devices d WHERE c.id = $1::uuid AND d.id = c.device_id AND c.outcome IS NULL AND c.deadline <= $2
-		RETURNING c.outcome, c.device_id::text`, call, now, now.Add(-OnlineWindow)).Scan(&outcome, &device)
-	if errors.Is(err, pgx.ErrNoRows) {
-		return false, nil
-	}
-	if err != nil {
+	ended := false
+	err := pgx.BeginFunc(ctx, s.Pool, func(tx pgx.Tx) error {
+		var approval *string
+		err := tx.QueryRow(ctx, `UPDATE device_calls c SET ended_at = $2, outcome = CASE
+				WHEN c.sent_at IS NULL THEN 'denied'
+				WHEN d.revoked_at IS NULL AND d.last_seen_at > $3 THEN 'timeout'
+				ELSE 'offline' END
+			FROM devices d WHERE c.id = $1::uuid AND d.id = c.device_id AND c.outcome IS NULL AND c.deadline <= $2
+			RETURNING c.outcome, c.device_id::text, c.approval_id::text`, call, now, now.Add(-OnlineWindow)).
+			Scan(&outcome, &device, &approval)
+		if errors.Is(err, pgx.ErrNoRows) {
+			return nil
+		}
+		if err != nil {
+			return err
+		}
+		ended = true
+		if approval == nil {
+			return nil
+		}
+		// The call's approval can do nothing now: it leaves the pending actions, as at a revoke.
+		_, err = tx.Exec(ctx, `UPDATE ai_approvals SET decision = 'cancelled', decided_at = $2
+			WHERE id = $1::uuid AND decision IS NULL`, *approval, now)
+		return err
+	})
+	if err != nil || !ended {
 		return false, err
 	}
 	s.publishFailed(ctx, call, device, outcome, "the call's deadline passed")
@@ -582,8 +620,8 @@ func (s *Store) confirm(r *http.Request) (any, error) {
 	now := s.now()
 	var c *Call
 	var decision *string
-	usable := false
-	sent := false
+	usable, online, sent := false, false, false
+	var deadline time.Time
 	err = pgx.BeginFunc(ctx, s.Pool, func(tx pgx.Tx) error {
 		var err error
 		c, err = s.loadCall(ctx, tx, id, " FOR UPDATE OF c")
@@ -608,8 +646,16 @@ func (s *Store) confirm(r *http.Request) (any, error) {
 			decision = ptr("cancelled")
 			err = nil
 		}
-		if err != nil || decision == nil {
+		if err != nil {
 			return err
+		}
+		// The approval wait is the call's deadline: past it, the call has timed out even when
+		// no timer has ended it yet.
+		if !now.Before(time.Time(c.Deadline)) {
+			decision, usable = ptr("expired"), false
+		}
+		if decision == nil {
+			return nil
 		}
 		// What is sent must be what was approved: the call's args hash again to the
 		// approval's input hash, under the KEK or the one before it.
@@ -619,8 +665,21 @@ func (s *Store) confirm(r *http.Request) (any, error) {
 		if !usable {
 			return end(ctx, tx, id, "denied", map[string]any{"error": "approval_" + *decision}, now)
 		}
+		if err := tx.QueryRow(ctx, `SELECT EXISTS (SELECT 1 FROM devices WHERE id = $1::uuid
+			AND revoked_at IS NULL AND last_seen_at > $2)`, c.DeviceID, now.Add(-OnlineWindow)).Scan(&online); err != nil {
+			return err
+		}
+		if !online {
+			return end(ctx, tx, id, "offline", map[string]any{"error": "offline"}, now)
+		}
+		// The approval is used, and the call sent, in one transaction with the call's row
+		// locked: no expire can end the call between the two.
 		if _, err := tx.Exec(ctx, `UPDATE ai_approvals SET consumed_at = $2 WHERE id = $1::uuid`,
 			*c.PendingActionID, now); err != nil {
+			return err
+		}
+		deadline = now.Add(time.Duration(c.timeoutS) * time.Second)
+		if err := sendIn(ctx, tx, id, c.DeviceID, c.Method, c.Args, now, deadline); err != nil {
 			return err
 		}
 		sent = true
@@ -632,7 +691,7 @@ func (s *Store) confirm(r *http.Request) (any, error) {
 	switch {
 	case decision == nil:
 		return nil, httpx.WithReason(http.StatusConflict, "No person has approved the call yet.", "approval_pending")
-	case !sent:
+	case !usable:
 		s.publishFailed(ctx, id, c.DeviceID, "denied", "the approval was "+*decision)
 		reason, detail := "approval_"+*decision, "The call was not approved: "+*decision+"."
 		switch *decision {
@@ -642,24 +701,9 @@ func (s *Store) confirm(r *http.Request) (any, error) {
 			detail = "The call's approval was " + *decision + " before the confirm."
 		}
 		return nil, httpx.WithReason(http.StatusConflict, detail, reason)
-	}
-	online, err := s.Online(ctx, c.DeviceID)
-	if err != nil {
-		return nil, err
-	}
-	if !online {
-		err = pgx.BeginFunc(ctx, s.Pool, func(tx pgx.Tx) error {
-			return end(ctx, tx, id, "offline", map[string]any{"error": "offline"}, now)
-		})
-		if err != nil {
-			return nil, err
-		}
+	case !sent:
 		s.publishFailed(ctx, id, c.DeviceID, "offline", "the device was offline at the confirm")
 		return nil, offline()
-	}
-	deadline := now.Add(time.Duration(c.timeoutS) * time.Second)
-	if err := s.send(ctx, id, c.DeviceID, c.Method, c.Args, deadline); err != nil {
-		return nil, err
 	}
 	s.schedule(id, deadline)
 	return &crud.Reply{Status: http.StatusAccepted, Value: map[string]any{"call_id": id}}, nil

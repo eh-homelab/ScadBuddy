@@ -143,6 +143,8 @@ func (s *Store) upload(r *http.Request, d Device) (any, error) {
 	} else if mediaType = sniff(body); mediaType == "" {
 		return nil, httpx.WithReason(http.StatusUnsupportedMediaType, "A photo is a JPEG, PNG or WebP.", "not_an_image")
 	}
+	// Put commits the blob before the hold below: a crash between the two leaves it unheld,
+	// and the sweep takes it after its grace. The call stays open, so the device uploads again.
 	stored, err := s.Blobs.Put(ctx, kind, mediaType, body)
 	if err != nil {
 		return nil, err

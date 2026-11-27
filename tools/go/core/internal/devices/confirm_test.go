@@ -1,8 +1,12 @@
 package devices
 
 import (
+	"errors"
 	"fmt"
 	"testing"
+	"time"
+
+	"github.com/jackc/pgx/v5"
 
 	"github.com/eh-homelab/ScadBuddy/tools/go/core/internal/auth"
 )
@@ -92,6 +96,52 @@ func TestCheckOfAnotherCallTellsNothing(t *testing.T) {
 	expectStatus(t, h.post(d, call, "events", `{"events":[{"kind":"tag_found","data":{"uid":"9CC69CE3"}}]}`), 204)
 	expect(t, check("2"), before)
 	expect(t, before, "[device:call:"+call+"]")
+}
+
+// A call whose approval wait has passed is never sent, even when no timer ended it: the
+// confirm ends it denied, and no device.call_requested is logged. sendIn sends only an open,
+// unsent call.
+func TestConfirmAfterTheDeadlineSendsNothing(t *testing.T) {
+	h := newHarness(t, auth.Observe)
+	me := h.person("user:i#me")
+	d := h.pair(me)
+	bot := h.assistant("user:i#me")
+	got := h.do("POST", "/api/v1/devices/"+d.id+"/calls", bot,
+		`{"method":"nfc.write","args":{"records":[{"recordType":"text","text":"PLA"}]}}`)
+	expectStatus(t, got, 202)
+	call := got.body["call_id"].(string)
+	approve(h, call, "approved")
+	h.sql(`UPDATE ai_approvals a SET usable_until = now() + interval '1 day' FROM device_calls c
+		WHERE c.id = $1::uuid AND a.id = c.approval_id`, call)
+	h.clock.add(ApprovalTTL + time.Second)
+	c := h.do("POST", "/api/v1/devices/calls/"+call+"/confirm", bot, "")
+	expectStatus(t, c, 409)
+	expect(t, c.body["reason"], any("approval_expired"))
+	expect(t, h.count(`SELECT count(*) FROM events WHERE kind = 'device.call_requested' AND payload ->> 'call' = $1`, call), 0)
+	expect(t, h.count(`SELECT count(*) FROM ai_approvals WHERE consumed_at IS NOT NULL`), 0)
+	err := pgx.BeginFunc(t.Context(), h.pool, func(tx pgx.Tx) error {
+		return sendIn(t.Context(), tx, call, d.id, "nfc.write", []byte(`{}`), h.clock.now(), h.clock.now().Add(time.Minute))
+	})
+	if !errors.Is(err, errNotOpen) {
+		t.Fatalf("sendIn on an ended call: %v", err)
+	}
+	expect(t, h.count(`SELECT count(*) FROM events WHERE kind = 'device.call_requested' AND payload ->> 'call' = $1`, call), 0)
+}
+
+// A call that ends while it waits for its approval takes the approval out of the pending
+// actions.
+func TestExpireCancelsTheApproval(t *testing.T) {
+	h := newHarness(t, auth.Observe)
+	me := h.person("user:i#me")
+	d := h.pair(me)
+	bot := h.assistant("user:i#me")
+	got := h.do("POST", "/api/v1/devices/"+d.id+"/calls", bot,
+		`{"method":"nfc.write","args":{"records":[{"recordType":"text","text":"PLA"}]}}`)
+	expectStatus(t, got, 202)
+	call := got.body["call_id"].(string)
+	h.clock.add(ApprovalTTL + time.Second)
+	expect(t, outcome(h.view(me, call)), any("denied"))
+	expect(t, h.count(`SELECT count(*) FROM ai_approvals WHERE decision = 'cancelled'`), 1)
 }
 
 // One rule says who may read a call and who may follow its events.
