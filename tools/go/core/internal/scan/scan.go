@@ -565,6 +565,9 @@ func (s *Scans) remove(r *http.Request) (any, error) {
 			return err
 		}
 		gone = tag.RowsAffected() == 1
+		if !gone {
+			return nil
+		}
 		_, err = tx.Exec(ctx, "DELETE FROM blob_refs WHERE holder_kind = $1 AND holder_id = $2", Holder, id)
 		return err
 	})

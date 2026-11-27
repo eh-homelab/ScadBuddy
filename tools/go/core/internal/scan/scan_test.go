@@ -589,6 +589,10 @@ func TestAPersonSeesOnlyTheirOwnScans(t *testing.T) {
 			t.Errorf("bob %s %s: %d", method, path, status)
 		}
 	}
+	var holds int
+	if err := h.pool.QueryRow(context.Background(), "SELECT count(*) FROM blob_refs WHERE holder_kind = $1 AND holder_id = $2", Holder, id).Scan(&holds); err != nil || holds != 1 {
+		t.Errorf("bob's delete dropped ada's photo hold: %d %v", holds, err)
+	}
 	h.who = auth.Caller{Kind: auth.KindService, Service: &auth.Service{Caller: "agent"}}
 	if _, out := h.json("GET", "/api/v1/scan/scans", nil); len(out["scans"].([]any)) != 1 {
 		t.Errorf("a service sees every scan: %v", out)
