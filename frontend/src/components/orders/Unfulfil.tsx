@@ -39,8 +39,9 @@ export function UnfulfilDialog({
     setBusy(true)
     setError(null)
     try {
-      // A 202 (#6949 K1 Task 16) counts as done: the parts go back by themselves, and the
-      // table says the stock still settles until they have.
+      // A 202 (#6949 K1 Task 16) closes the dialog: the run goes on by itself. It may not have
+      // committed yet (it waits while the item's fulfil still settles), so the item can still
+      // read fulfilled until it does; the parts go back after that.
       await api.unfulfilOrderItem(orderId, item.id)
       onOpenChange(false)
       onChanged()

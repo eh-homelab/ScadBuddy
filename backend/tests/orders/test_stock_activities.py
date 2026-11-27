@@ -478,3 +478,98 @@ async def test_a_completed_run_ends_the_wait(shop: Shop, steps: OrderStockSteps)
     )
 
     assert outcome == "completed" and client.started == []
+
+
+# ── fix round (PR #8323): a change sent while an unfulfil still settles ─────────────────
+
+
+async def _unfulfil_committed(
+    shop: Shop, steps: OrderStockSteps, order: Order, item: OrderItem
+) -> str:
+    """The item's unfulfil past its commit and before its record: Go's `GiveBack` is
+    slow. The item is `approved` again, and its `parts_workflow_id` names the unfulfil."""
+    wid = f"order_item:{item.id}:parts:1:return"
+    await steps.fulfil_commit(
+        {
+            "workflow_id": wid,
+            "order_id": order.id,
+            "op": "unfulfil",
+            "lines": [{"item_id": item.id, "key": wid}],
+            "actor": ACTOR,
+        }
+    )
+    settling = shop.get_item(item)
+    assert settling.status == "approved" and settling.parts_settling is not None
+    return wid
+
+
+async def _unfulfil_recorded(
+    steps: OrderStockSteps, order: Order, item: OrderItem, wid: str
+) -> None:
+    await steps.parts_record(
+        {
+            "workflow_id": wid,
+            "op": "unfulfil",
+            "order_id": order.id,
+            "item_ids": [item.id],
+            "attempts": [],
+            "results": [],
+            "actor": ACTOR,
+        }
+    )
+
+
+async def test_an_accept_while_the_unfulfil_settles_starts_the_next_cycle(
+    shop: Shop, steps: OrderStockSteps
+) -> None:
+    """The first cycle's accept is the completed run `parts:1`. An accept sent while the
+    unfulfil settles is cycle 2's (`parts:2`), never a replay of `parts:1`'s answer; it
+    commits once the unfulfil records. A resend of the unfulfil still attaches to its own
+    run."""
+    order, item, _ = _with_part(shop)
+    shop.fulfilled(order, item)
+    wid = await _unfulfil_committed(shop, steps, order, item)
+    attempt = shop.lifecycle.record_fulfilment(
+        order.id, item.id, FulfilmentInput(quantity=1, outcome="succeeded"), BY
+    )
+    started = shop.lifecycle.starter
+    assert isinstance(started, InlineStarter)
+    started.accept = True
+
+    accepted = shop.lifecycle.accept_fulfilment(order.id, item.id, attempt.id, BY)
+    again = shop.lifecycle.unfulfil_item(order.id, item.id, BY)
+
+    assert isinstance(accepted, WorkflowAccepted)
+    assert accepted.workflow_id == f"order_item:{item.id}:parts:2"
+    assert isinstance(again, WorkflowAccepted) and again.workflow_id == wid
+    await _unfulfil_recorded(steps, order, item, wid)
+    run = next(s for s in started.started if s.id == accepted.workflow_id)
+    step = await steps.fulfil_commit({**run.arg, "workflow_id": run.id})
+    assert step["wait_for"] is None and not step["done"]
+    assert shop.get_item(item).status == "fulfilled"
+
+
+async def test_a_fulfil_while_the_unfulfil_settles_commits_after_it(
+    shop: Shop, steps: OrderStockSteps
+) -> None:
+    """A fulfil sent while the unfulfil settles takes cycle 2's key, so its run commits
+    once the unfulfil records, rather than failing `order_item_changed` unseen."""
+    order, item, hook = _with_part(shop)
+    shop.fulfilled(order, item)
+    wid = await _unfulfil_committed(shop, steps, order, item)
+    started = shop.lifecycle.starter
+    assert isinstance(started, InlineStarter)
+    started.accept = True
+
+    answer = shop.lifecycle.fulfil_items(
+        order.id, [FulfilLine(item_id=item.id, quantity=1)], BY, request_key="w1"
+    )
+
+    assert isinstance(answer, WorkflowAccepted)
+    run = next(s for s in started.started if s.id == answer.workflow_id)
+    assert run.arg["lines"][0]["key"] == f"order_item:{item.id}:parts:2"
+    await _unfulfil_recorded(steps, order, item, wid)
+    step = await steps.fulfil_commit({**run.arg, "workflow_id": run.id})
+    assert step["wait_for"] is None
+    assert [c["key"] for c in step["calls"]] == [f"order_item:{item.id}:parts:2:{hook}"]
+    assert shop.get_item(item).status == "fulfilled"

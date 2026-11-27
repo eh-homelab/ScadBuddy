@@ -5502,8 +5502,20 @@ class Lifecycle:
         """The item key of a change that moves the item's stock once per fulfilment cycle
         (R-K1-31, C9): ``order_item:<item_id>:parts:<n>`` for a fulfil, with ``:return`` for
         an unfulfil, where ``n`` is 1 plus the item's `parts.returned` events. Each
-        unfulfil records exactly one, so each finished cycle moves ``n``."""
+        unfulfil records exactly one, so each finished cycle moves ``n``.
+
+        An unfulfil that committed and has not recorded yet (the item's
+        `parts_workflow_id` names an ``:return`` run) has ended its cycle: the item is
+        `approved` again. So a fulfil's key counts it too, and a fulfil or an accept sent
+        meanwhile is the next cycle's, never the ended one's (PR #8323). Its run waits for
+        the unfulfil, and then its key is the one its commit computes. An unfulfil's own
+        key does not count it, so a resend of that unfulfil attaches to its run."""
         n = 1 + self.store.parts_returned(conn, order_id, item_id)
+        if not unfulfil:
+            item = self.store.item(item_id, conn=conn)
+            settling = None if item is None else item.parts_settling
+            if settling is not None and settling.workflow_id.endswith(":return"):
+                n += 1
         return f"order_item:{item_id}:parts:{n}" + (":return" if unfulfil else "")
 
     def _checked(
