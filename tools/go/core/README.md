@@ -81,8 +81,17 @@ unchanged, to the Python API: WebSockets, SSE and large bodies included. On prod
 | `order-costs` | `POST /orders/{id}/assistant-cost`: the cost entry, its `order_events` row and, after the commit, `order.changed` and `order_item.changed`. It reads `pricing_usd_rate` and `orders_currency` from `settings`, else `SCADBUDDY_PRICING_USD_RATE` and `SCADBUDDY_ORDERS_CURRENCY` from core's own environment, else `1` and `USD`, so core needs the API's values of those two |
 | `unknown-trays:read` | `GET /api/v1/filament/unknown-trays` (public, caller `api`), and the print worker's `GET …/crud/print/filament/printers/{printer_id}/unknown-trays` (caller `print`) |
 | `unknown-trays` | those, and `POST /api/v1/filament/unknown-trays/{id}/dismiss` (public). Go writes no spool here (#7143). The resolve route (`POST …/{id}/resolve`, which would start Python's activity `filament_resolve_unknown_tray` on queue `library`) is not built yet: it waits for `internal/temporalx`, so a resolve gets a 404 |
+| `filament-presets` † | Public, class `api`: `GET /api/v1/filament/presets` (`?source=`, `?type_id=`), `GET …/presets/{preset_id}` and `GET …/presets/{preset_id}/diff` (`?from_version=`, `?to_version=`). `POST …/presets/bambuddy-import` stays Python's. Go writes no preset row (#7204) |
 
 The `unknown-trays` public routes use `internal/auth` (see "Public routes"). Their CRUD route is caller `print`'s, so it has its own `case` in `newRouter` (areaPackages mounts on caller `agent`).
+
+The `filament-presets` routes use `internal/auth` (see "Public routes"). They have their own
+`case` in `newRouter`, because they need the blob store. The area needs the KEK, and it needs
+an `s3` store to read documents. It reads each document with `Blobs.OpenKey` (#8129), and it
+reads the blob's size from its `store_blobs` row first, so a blob over the cap gets no GET.
+The document is the zip member `file`. Its credential keys are stripped, as
+`core/credentials.py` strips them. A document that is not read leaves the detail's
+`document` null and names why in `document_error`; the diff answers that code as a problem.
 
 Area `fleet` (`internal/fleet`) is caller `fleet`'s (scope `crud.fleet`), under
 `/api/v1/internal/crud/fleet`: `POST /agents/{session_id}/touch`, `GET /agents`, `PUT` and
@@ -271,7 +280,7 @@ CORS rule and the app's CSP admit only the storefront), so core takes the photo'
 |---|---|---|
 | `POST /api/v1/scan/images` | the photo's bytes (JPEG, PNG or WebP; at most 12 MiB) | `{key, media_type, sha256, size}`: a `scan_image` blob, its type read from its bytes, never from a header. 415 `image_not_supported` for any other bytes; a HEIC, HEIF or AVIF photo is refused with its own words (no decoder in pure Go reads one: the page draws a chosen photo on a canvas and sends a JPEG) |
 | `POST /api/v1/scan/codes` | `{key, source?, location?}`: `source` `shutter` (the default), `nfc`, `file` or `app`; `location` `{lat, lon, accuracy_m?, at?}`, lat -90 to 90, lon -180 to 180, accuracy 0 to 1,000,000 m | a scan (below), recorded. 404 `image_not_found` for a key that is no `scan_image` blob |
-| `GET /api/v1/scan/scans?limit=&before=` | | `{scans}`, newest first, at most 100 (50 by default); `before` is a scan id. A person sees only their own scans (a scan holds its photo and GPS fix); a service sees all. The same holds for every route below: another person's scan is a 404 |
+| `GET /api/v1/scan/scans?limit=&before=` | | `{scans}`, newest first, at most 100 (50 by default); `before` is a scan id. A person sees only their own scans (a scan holds its photo and GPS fix); a service sees all; any other caller (anonymous, as under auth `off` or `observe`) sees only the scans made with no actor. The same holds for every route below: another person's scan is a 404 |
 | `GET /api/v1/scan/scans/{id}` | | a scan, or 404 `scan_not_found` |
 | `GET /api/v1/scan/scans/{id}/image` | | the photo's bytes with its media type, `nosniff` (scriptless, for an `<img>`) |
 | `POST /api/v1/scan/scans/{id}/decode` | | the scan, decoded again |
@@ -310,13 +319,16 @@ other path still goes on to Python. An area may have CRUD routes, public routes 
 
 ```go
 func PublicAreas(pool *pgxpool.Pool, _ *seal.Keys) map[string][]auth.Public {
-	return map[string][]auth.Public{"filament-presets": {{
-		Pattern: "GET /api/v1/filament/presets",
-		Route:   auth.Route{Class: "api", Template: "/api/v1/filament/presets"},
+	return map[string][]auth.Public{"examples": {{
+		Pattern: "GET /api/v1/examples",
+		Route:   auth.Route{Class: "api", Template: "/api/v1/examples"},
 		Handler: http.HandlerFunc(list),
 	}}}
 }
 ```
+
+An area that needs more than the pool and the KEK has its own `case` in `newRouter` and
+mounts its routes on the same gate there. `filament-presets` does this: it reads the blob store.
 
 - `auth.ParseMode(value, set)` reads `SCADBUDDY_AUTH_MODE` as Python does: unset is `off`,
   and a value other than `off`, `observe` or `enforce` stops the start. Never `enforce` on
@@ -447,6 +459,16 @@ At a stop, the servers drain and the three signals flush within the 20 s shutdow
   may differ.
 - `POST /forgotten-subjects/{subject}`: an ancestor whose key went while its fork's range is
   read is a 500, as in Python; a NaN in a copied event is a 500, where Python copied it.
+- `filament-presets`' diff compares two values by their JSON text, not by Python's `!=`. So
+  `1` and `1.0` are a change in Go. So are two nested objects that differ only in key order,
+  which Python's `!=` calls equal. Bambu Studio's values are strings and string lists, and
+  there the two agree.
+- `filament-presets` reads a document blob of at most 1 MiB, and an unzipped member `file`
+  of at most 1 MiB. A larger one is `document_too_large`. Python reads with no cap.
+- `filament-presets` gives `document_unreadable` for a document that is JSON but no object.
+  Python's `FilamentPresetStore.read` reads it as `{}`.
+- A `filament-presets` read of a lost blob changes no row. Python's read forgets the
+  `store_blobs` row.
 - `package-mirrors`: a mirror past its limit is refused with the CRUD headers (Python's body gate
   answered without them). A mirror's `GET` is the whole body with no `ETag`, `Last-Modified` or
   range answers (Python's `FileResponse`). A version in a zip's path is decimal digits only

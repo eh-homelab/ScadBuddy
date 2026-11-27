@@ -1,5 +1,6 @@
 import { createHash } from 'node:crypto'
 import { z } from 'zod'
+import { filamentPresetClient } from '../api/filamentPresets.js'
 import type { components } from '../api/schema.js'
 import { unknownTrayClient } from '../api/unknownTrays.js'
 import { ok } from './call.js'
@@ -30,6 +31,19 @@ import { defineTool, idempotencyKey, json, ToolError, type Tool } from './regist
 // page's NFC jobs (nfc.ts, #7273). Routes: backend/scadbuddy/api/filament.py.
 
 const SOURCE = "ScadBuddy's own filament inventory"
+
+/**
+ * #7204: the preset routes are Go's. Until core serves the area `filament-presets`, the path goes on to
+ * Python, which answers a 404 with no `code`; a real answer of Go's has one (`preset_not_found`).
+ */
+async function presetOk<T>(pending: Promise<{ data?: T; error?: unknown; response: Response }>, what: string): Promise<T> {
+  const result = await pending
+  const code = (result.error as { code?: unknown } | undefined)?.code
+  if (result.response.status === 404 && typeof code !== 'string') {
+    throw new ToolError('the presets routes are not on yet on this server (core area filament-presets)')
+  }
+  return ok(Promise.resolve(result), what)
+}
 
 type SpoolCreate = components['schemas']['SpoolCreate-Input']
 type SpoolDraft = components['schemas']['SpoolDraft']
@@ -2376,6 +2390,80 @@ const tools: Tool[] = [
   }),
 
   defineTool({
+    name: 'filament_preset_list',
+    label: 'List filament presets',
+    description:
+      "ScadBuddy's own filament presets (#7204). A row is one preset: `id`, `ref` (`sb-<id>`), `name`, `source`, " +
+      '`version`, `type_id`, `printer_model`, `nozzle_diameter`, `filament_type`, `mirror`, and how many types and ' +
+      'spools use it. `source` says where the preset came from: `3dfp` (fetched from 3dfilamentprofiles.com), ' +
+      '`bambuddy` (taken from Bambuddy) or `manual` (made in ScadBuddy). Only a `manual` preset can be edited. ' +
+      '`mirror` is the state of its copy in Bambuddy: `sent`, `pending`, `failed` or `bambuddy_owned`. ' +
+      '`source` and `type_id` limit the list. The order is by name. The tools to copy, edit and send again come later. ' +
+      'Writes nothing.',
+    input: z.object({
+      source: z.enum(['3dfp', 'bambuddy', 'manual']).optional(),
+      type_id: z.string().uuid().transform((s) => s.toLowerCase()).optional(),
+    }),
+    risk: 'read',
+    source: SOURCE,
+    routes: [],
+    handler: async ({ source, type_id }, { backend }) =>
+      json(
+        await presetOk(
+          filamentPresetClient(backend).GET('/api/v1/filament/presets', { params: { query: { source, type_id } } }),
+          'list the filament presets',
+        ),
+      ),
+  }),
+
+  defineTool({
+    name: 'filament_preset_get',
+    label: 'Get a filament preset',
+    description:
+      'One filament preset (#7204), as filament_preset_list shows it, with its `versions` and its `document`: the ' +
+      'slicer settings of the current version, as text values. Credentials are never in it. `document` is null when ' +
+      'it cannot be read, and `document_error` says why. Only a `manual` preset can be edited. The tools to copy, ' +
+      'edit and send again come later. 404 `preset_not_found`. Writes nothing.',
+    input: z.object({ preset_id: z.number().int().positive() }),
+    risk: 'read',
+    source: SOURCE,
+    routes: [],
+    handler: async ({ preset_id }, { backend }) =>
+      json(
+        await presetOk(
+          filamentPresetClient(backend).GET('/api/v1/filament/presets/{preset_id}', { params: { path: { preset_id } } }),
+          `read filament preset ${preset_id}`,
+        ),
+      ),
+  }),
+
+  defineTool({
+    name: 'filament_preset_diff',
+    label: 'Diff filament preset versions',
+    description:
+      'The settings that differ between two versions of a filament preset (#7204): `changes`, each with `key`, ' +
+      '`before` and `after`. `to_version` is the current version when left out. `from_version` is the one before `to_version` when left out. ' +
+      '404 `preset_not_found`. 404 `version_not_found`. Writes nothing.',
+    input: z.object({
+      preset_id: z.number().int().positive(),
+      from_version: z.number().int().positive().optional(),
+      to_version: z.number().int().positive().optional(),
+    }),
+    risk: 'read',
+    source: SOURCE,
+    routes: [],
+    handler: async ({ preset_id, from_version, to_version }, { backend }) =>
+      json(
+        await presetOk(
+          filamentPresetClient(backend).GET('/api/v1/filament/presets/{preset_id}/diff', {
+            params: { path: { preset_id }, query: { from_version, to_version } },
+          }),
+          `diff filament preset ${preset_id}`,
+        ),
+      ),
+  }),
+
+  defineTool({
     name: 'filament_sync_ams_weights',
     label: 'Sync spool weights from the AMS',
     description:
@@ -2536,4 +2624,6 @@ export const filamentTools: Tool[] = linkingTools(tools, {
   filament_location_list: 'location',
   filament_location_get: 'location',
   filament_location_upsert: 'location',
+  filament_preset_list: 'preset',
+  filament_preset_get: 'preset',
 })
