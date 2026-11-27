@@ -41,8 +41,8 @@ class Expects(TypedDict):
     codes: tuple[str, ...]
 
 
-def widget_problems(prop: dict[str, Any], kind: str) -> list[str]:
-    """What is wrong with the widget keys of one property of type ``kind``."""
+def widget_problems(prop: dict[str, Any], type_: str) -> list[str]:
+    """What is wrong with the widget keys of one property of JSON type ``type_``."""
     widget = prop.get("x-sb-widget")
     problems: list[str] = []
     if "x-sb-widget" in prop:
@@ -51,7 +51,7 @@ def widget_problems(prop: dict[str, Any], kind: str) -> list[str]:
         elif widget not in WIDGETS:
             # A form shows the plain type's control for it.
             log.warning("a task schema has an unknown x-sb-widget; the plain control is used")
-        elif kind not in _TYPES[widget]:
+        elif type_ not in _TYPES[widget]:
             problems.append(f"'x-sb-widget' {widget} needs {' or '.join(_TYPES[widget])}")
     if "kind" in prop:
         if widget != "entity":
