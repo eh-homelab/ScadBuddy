@@ -89,8 +89,10 @@ class _TaskFields(BaseModel):
     ui: str | None = None
     expires_at: datetime | None = None
     #: Who it is for, a principal string. It filters a list; it refuses no one's answer.
+    #: No control character: the range of `TASK_PLACE_CHAR`, which matches the column's
+    #: CHECK, so the store never refuses what this takes.
     assignee: str | None = Field(
-        default=None, min_length=1, max_length=MAX_BY_CHARS, pattern=r"^[^\x00-\x1f\x7f]+$"
+        default=None, min_length=1, max_length=MAX_BY_CHARS, pattern=rf"^{TASK_PLACE_CHAR}+$"
     )
 
 

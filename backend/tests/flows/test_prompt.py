@@ -350,7 +350,9 @@ class Tasks:
         self.error = error
         self.calls: list[tuple[Any, ...]] = []
 
-    async def open(self, task: TaskOpen, *, workflow_run_id: str | None = None) -> Any:
+    async def open(
+        self, task: TaskOpen, *, widgets: bool = False, workflow_run_id: str | None = None
+    ) -> Any:
         self.calls.append(("open", task.id, workflow_run_id))
         if self.error is not None:
             raise self.error

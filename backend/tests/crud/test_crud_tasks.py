@@ -237,12 +237,26 @@ async def test_open_carries_the_assignee_and_the_scan_expects(
         },
     }
     task = _task(T1).model_copy(update={"schema_": scan, "assignee": "user:alice"})
-    opened = await remote.open(task)
+    opened = await remote.open(task, widgets=True)
     assert opened.assignee == "user:alice"
     assert store.get(T1) == opened
     with store._pool.connection() as conn:
         row = conn.execute("SELECT expects FROM tasks WHERE id = %s", (T1,)).fetchone()
     assert row == {"expects": ["kind:location"]}
+
+
+async def test_open_checks_by_the_rules_the_worker_names(
+    http: httpx.AsyncClient, store: TaskStore
+) -> None:
+    """A worker from before #8062 sends no `widgets`: a context item its rules took, such
+    as an A1 `entity` text, still opens. With the rules of #8062 it is refused."""
+    old = _wire(T1) | {"context": [{"entity": "spool 3"}]}
+    assert (await http.post(BASE, json=old)).status_code == 200
+    new = _wire(T2) | {"context": [{"entity": "spool 3"}], "widgets": True}
+    refused = await http.post(BASE, json=new)
+    assert refused.status_code == 422
+    assert [e["loc"][:2] for e in refused.json()["errors"]] == [["body", "context"]]
+    assert [t.id for t in store.list(state=None)] == [T1]
 
 
 async def test_open_on_an_unknown_run_is_a_typed_404(

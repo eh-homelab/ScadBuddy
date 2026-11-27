@@ -594,7 +594,8 @@ export const flowTools: Tool[] = [
     description:
       "Answer a flow run's question (#7471): one with a `task` (a `prompt`, or a `wait_for_human` since #8062, " +
       "whose one field is `answer`) with an object of the task's fields, an older `wait_for_human` with no " +
-      "`task` with a text (get_flow_run's `pending` names the call and its `task`). Allowed only when the user's " +
+      "`task` with a text (get_flow_run's `pending` names the call and its `task`). A text for a question with " +
+      "a task is sent as its `answer` field. Allowed only when the user's " +
       "setting flow_answerers, or the run's approved grant (`answers`), names this session (or its MCP token) and " +
       'the question is not `people_only`; else a ' +
       '403 says why. The first answer wins: a later one is told that it was answered already. Not for flow runs.',
@@ -609,7 +610,10 @@ export const flowTools: Tool[] = [
     routes: ['POST /api/v1/workflow-runs/{run_id}/answer', 'GET /api/v1/tasks/{task_id}', 'POST /api/v1/tasks/{task_id}/answer'],
     summarize: ({ run_id, call_id }) => `Answer question ${call_id} of flow run ${run_id}`,
     handler: async ({ run_id, call_id, answer }, ctx) => {
-      if (typeof answer === 'string') {
+      // A prompt's task, or a wait_for_human's since #8062: its id is the call's.
+      const found = await ctx.backend.GET('/api/v1/tasks/{task_id}', { params: { path: { task_id: call_id } } })
+      if (typeof answer === 'string' && found.response.status === 404) {
+        // A wait_for_human from before #8062: it has no task, and takes a text.
         return json(
           await command(ctx, `answer flow run ${run_id}`, (headers) =>
             ctx.backend.POST('/api/v1/workflow-runs/{run_id}/answer', {
@@ -620,17 +624,15 @@ export const flowTools: Tool[] = [
           ),
         )
       }
-      // A prompt's task: its id is the call's. Only one of this run's.
-      const task = await ok(
-        ctx.backend.GET('/api/v1/tasks/{task_id}', { params: { path: { task_id: call_id } } }),
-        `get task ${call_id}`,
-      )
+      // Only one of this run's.
+      const task = await ok(Promise.resolve(found), `get task ${call_id}`)
       if (task.run_id !== run_id) throw new ToolError(`task ${call_id} is not a question of flow run ${run_id}`)
       return json(
         await command(ctx, `answer task ${call_id}`, (headers) =>
           ctx.backend.POST('/api/v1/tasks/{task_id}/answer', {
             params: { path: { task_id: call_id } },
-            body: { answer },
+            // A text is the answer of a wait_for_human's one field, as an agent sent it before #8062.
+            body: { answer: typeof answer === 'string' ? { answer } : answer },
             headers,
           }),
         ),

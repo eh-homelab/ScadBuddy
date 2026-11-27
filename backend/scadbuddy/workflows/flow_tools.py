@@ -226,7 +226,10 @@ def _prompt_task(call_id: str, run_id: str, *, widgets: bool, **fields: Any) -> 
             {"id": call_id, "run_id": run_id, **fields},
             context=UNCHECKED_DEFAULTS if widgets else BEFORE_WIDGETS,
         )
-        return task.model_dump(mode="json", by_alias=True)
+        dumped = task.model_dump(mode="json", by_alias=True)
+        # The open activity and the route check it by the same rules. A call from before
+        # #8062 adds no key, so its activity's input is as it was.
+        return dumped | {"widgets": True} if widgets else dumped
     except ValidationError as err:
         raise ValueError(open_problems(err)) from None
     except TypeError:

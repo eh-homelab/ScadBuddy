@@ -443,7 +443,8 @@ same way, `vite.config.ts`).
   `GET /filament/type-proposals` and its confirm; the mocks group the seed's untyped spools (#6 is one
   group, #7 lacks a label weight).
 - A flow run's questions (#7364): `components/flows/PendingCard.tsx` draws `TaskCard` for an
-  entry with a `task` (a `prompt`) and the text answer for a `wait_for_human`, on the run's
+  entry with a `task` (a `prompt`, or a `wait_for_human` since #8062) and the text answer for a
+  `wait_for_human` from before #8062, on the run's
   page and the order's (`OrderFlowRuns`). The card's key is the run's execution and the task's
   id, so a Reset gives a new form. `TaskCard` reads the task again on `task:<id>`
   (`lib/flows.ts` `taskTopic`) and shows the newer of its read and the page's. Both answer

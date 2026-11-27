@@ -184,3 +184,12 @@ def test_a_place_that_is_a_location_code_is_stored_canonical(place: str, stored:
     assert (
         _opened(UNCHECKED_DEFAULTS, schema=_asks({"type": "string"}), place=place).place == stored
     )
+
+
+@pytest.mark.parametrize("control", ["\x00", "\x1f", "\x7f", "\x85", "\x9f"])
+def test_an_assignee_with_a_control_character_is_refused(control: str) -> None:
+    """The range of the place's, which matches the column's CHECK: the store never refuses
+    an assignee this takes, which would retry the open without end."""
+    with pytest.raises(ValidationError, match="assignee"):
+        _opened(UNCHECKED_DEFAULTS, schema=_asks({"type": "string"}), assignee=f"user{control}")
+    assert _opened(UNCHECKED_DEFAULTS, schema=_asks({"type": "string"}), assignee="user:é").assignee

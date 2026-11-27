@@ -290,8 +290,11 @@ the task's `expects` column (`scadbuddy/tasks/widgets.py` `expects_entries`), wh
 nothing and a replayed run must refuse as it did. `HUMAN_PROMPT_PATCH` gates the task of a
 `wait_for_human`, and `PROMPT_WIDGETS_PATCH` (a patch id per call) gates the widget keys
 and the checked context blocks of a `prompt`: a call from before replays with the rules it
-was checked by (`scadbuddy/tasks/models.py` `BEFORE_WIDGETS`). The CRUD route that opens the
-task is not replayed, so it checks by the new rules.
+was checked by (`scadbuddy/tasks/models.py` `BEFORE_WIDGETS`). The open activity and the CRUD
+route that opens the task check by the same rules: a call under `PROMPT_WIDGETS_PATCH` puts
+`widgets: true` in the activity's input, which the client sends on
+(`backend/scadbuddy/api/crud_tasks.py` `OpenWrite`). A task without it, from an older call or
+from a worker from before #8062 during a rollout, is checked by the rules from before.
 See [features/flows.md](../features/flows.md#questions-to-a-person).
 
 ## Housekeeping

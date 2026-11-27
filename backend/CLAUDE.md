@@ -332,7 +332,7 @@ only the sleeps move; a budget on the real clock fails on a slow runner (#6252).
   #2320, behind `patched("flow-turn-tools-2320")`) that the agent's `turn_tool_tier`
   tiers and names the queue of, as the run's starter;
   `flow_activities.py` (the run's row, and the `flow_task_open`, `flow_task_answered` and
-  `flow_task_close` of a prompt's task), `flow_models.py`,
+  `flow_task_close` of a prompt's or a `wait_for_human`'s task), `flow_models.py`,
   `projects_worker.py`, on the `projects` queue
   (`SCADBUDDY_TEMPORAL_TASK_QUEUE_PROJECTS`), versioned AUTO_UPGRADE in its own
   Deployment (#4146, `client.projects_deployment`, never pinned; unversioned in-process),
@@ -357,14 +357,16 @@ only the sleeps move; a budget on the real clock fails on a slow runner (#6252).
   /workflow-runs/{id}`: key, then workflow, then row), `sweep.py` (the housekeeping
   sweep for runs whose execution closed). Routes `api/flows.py`. An outward call's
   approval timeout resolves from the run, its flow, then `flow_approval_timeout_seconds`
-  (0 is never). `operations.py` has the answers: `flow_answer` (a text), `task_answer` (a
-  prompt's, #7364) and `flow_agent_answer` (an agent's answer, text or task, that
+  (0 is never). `operations.py` has the answers: `flow_answer` (a text, for a
+  `wait_for_human` from before #8062), `task_answer` (a prompt's or, since #8062, a
+  `wait_for_human`'s, #7364) and `flow_agent_answer` (an agent's answer, text or task, that
   `flow_answerers` or the run's grant admitted, #7471), and the decisions: `flow_decide` (a person's) and `flow_escalate` (the
   starter session's). A print, an arrange or a ScadBuddy tool runs only on an approval on
   record (`flow_decision`, #7588); the agent checks the row for its own tools and a plugin's. `store.py` moves a run's tasks in the transaction of the run's own write:
   an end cancels the open ones, a Reset makes them match (`TaskStore.cancel_for_run_in`,
   `match_waiting_in`, `reopen_in`).
-- Tasks (#7364): `backend/scadbuddy/tasks/`, the typed questions that flows ask (`prompt`);
+- Tasks (#7364): `backend/scadbuddy/tasks/`, the typed questions that flows ask (`prompt`, and
+  `wait_for_human` since #8062);
   the rules a person sees are in `docs/features/flows.md` "Questions to a person".
   `models.py` (`TaskOpen` checks what a flow gives; `TaskQuestion` is a `Task` without its
   answer), `schema.py` (`prompt_schema_problems`: `core/input_schema.py` with `formats`),

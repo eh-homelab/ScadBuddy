@@ -101,17 +101,10 @@ async def test_a_prompt_from_before_8062_refuses_a_widget_schema(flows: Flows) -
 @postgres
 @pytest.mark.usefixtures("prompts_before_8062")
 async def test_a_prompt_from_before_8062_does_not_check_its_blocks(flows: Flows) -> None:
-    """The workflow takes the block as before #8062 and opens the task. The server keeps
-    the new rule (it is not replayed), so the open is refused there."""
+    """The workflow, the open activity and the CRUD route all take the block as before
+    #8062: the task opens with it."""
     plain = {"type": "object", "properties": {"x": {"type": "string"}}}
-    run_id = await flows.start(
-        script(
-            "try:",
-            f"    await prompt('q', {plain!r}, context=[{{'entity': 'SB-1042'}}])",
-            "except ValueError as e:",
-            "    return str(e)",
-        )
-    )
-    done = await flows.finished(run_id)
-    assert done.status == "succeeded" and "entity" in (done.result or ""), done.result
-    assert "flow_task_open" in await activities(flows, run_id)
+    old = [{"entity": "SB-1042"}]
+    run_id = await flows.start(script(f"await prompt('q', {plain!r}, context={old!r})"))
+    run = await parked(flows, run_id)
+    assert (await task_of(flows, run.waiting_on[0].call_id)).context == old
