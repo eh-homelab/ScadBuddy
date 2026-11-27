@@ -247,7 +247,10 @@ The sidebar entry is **Inventory**. The routes are in `frontend/src/App.tsx:147-
 - `/inventory/units/:id` (`UnitPage`) and `/inventory/lots/:id` (`LotPage`): a lot's path
   opens its item's page at the lot's row, where its cost, "Re-cost past uses" and its
   result show.
-- `/orders/parts` redirects to `/inventory?kind=part` (`frontend/src/App.tsx:156`).
+- `/orders/parts` redirects to `/inventory?kind=hardware` (`PARTS_KIND`,
+  `frontend/src/App.tsx:158`). The parts are the lot items under `hardware` and `ams_part`
+  (`PART_KINDS`, `frontend/src/lib/inventoryLinks.ts`), which inventory K1 put under
+  `consumable`.
 
 The mock is `frontend/src/mocks/features/inventory.ts`.
 
