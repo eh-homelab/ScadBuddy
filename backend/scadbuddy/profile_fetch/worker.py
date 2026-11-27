@@ -45,6 +45,7 @@ from scadbuddy.profile_fetch.remote import RemoteSite
 from scadbuddy.profile_fetch.settings import HEALTH_PORT, ProfileFetchSettings
 from scadbuddy.profile_fetch.wire import AREAS
 from scadbuddy.profile_fetch.workflow import ProfileFetch, TdfpCreate, TdfpSearch, search_queue
+from scadbuddy.workflows.logic_flags import single_batch
 
 logger = logging.getLogger(__name__)
 
@@ -89,15 +90,17 @@ def temporal_workers(
     a `TdfpSearch` that started before the patch, whose activity is on ``queue``, still runs
     during a roll (R-7062-1). ``options`` go to both (a test's runner)."""
     return [
-        Worker(
-            client,
-            task_queue=queue,
-            workflows=[ProfileFetch, TdfpSearch, TdfpCreate],
-            # The search too: an unpatched `TdfpSearch` schedules it here (R-7062-1).
-            activities=[*fetch, create, search],
-            # One browser, one login: one export at a time (Decision 16).
-            max_concurrent_activities=1,
-            **options,
+        single_batch(
+            Worker(
+                client,
+                task_queue=queue,
+                workflows=[ProfileFetch, TdfpSearch, TdfpCreate],
+                # The search too: an unpatched `TdfpSearch` schedules it here (R-7062-1).
+                activities=[*fetch, create, search],
+                # One browser, one login: one export at a time (Decision 16).
+                max_concurrent_activities=1,
+                **options,
+            )
         ),
         Worker(
             client,

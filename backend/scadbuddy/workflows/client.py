@@ -45,6 +45,7 @@ from scadbuddy.workflows.filament_sync import FilamentBbSync
 from scadbuddy.workflows.follow import FollowPrint, VersionedFollowPrint, follow_queue
 from scadbuddy.workflows.lan_auto_import import LanAutoImport
 from scadbuddy.workflows.lan_command import LanCommandWorkflow
+from scadbuddy.workflows.logic_flags import single_batch
 from scadbuddy.workflows.operation import OperationWorkflow
 from scadbuddy.workflows.operation_models import HEARTBEAT_THROTTLE
 from scadbuddy.workflows.pipeline_activities import PipelineActivities
@@ -139,19 +140,21 @@ def render_worker(
 ) -> Worker:
     """The render worker (spec §3.5): versioned by build id so a rolling deploy lets
     old workers drain the workflows they started."""
-    return Worker(
-        client,
-        task_queue=task_queue,
-        workflows=[TemplatePipeline, RenderPiece, RenderPreview, MigrateInputs],
-        activities=[*activities.all(), *pipeline.all()],
-        workflow_runner=sandboxed_runner(),
-        max_concurrent_activities=max_concurrent_activities,
-        graceful_shutdown_timeout=graceful_shutdown_timeout,
-        deployment_config=WorkerDeploymentConfig(
-            version=WorkerDeploymentVersion(deployment_name=DEPLOYMENT_NAME, build_id=build_id),
-            use_worker_versioning=True,
-            default_versioning_behavior=VersioningBehavior.PINNED,
-        ),
+    return single_batch(
+        Worker(
+            client,
+            task_queue=task_queue,
+            workflows=[TemplatePipeline, RenderPiece, RenderPreview, MigrateInputs],
+            activities=[*activities.all(), *pipeline.all()],
+            workflow_runner=sandboxed_runner(),
+            max_concurrent_activities=max_concurrent_activities,
+            graceful_shutdown_timeout=graceful_shutdown_timeout,
+            deployment_config=WorkerDeploymentConfig(
+                version=WorkerDeploymentVersion(deployment_name=DEPLOYMENT_NAME, build_id=build_id),
+                use_worker_versioning=True,
+                default_versioning_behavior=VersioningBehavior.PINNED,
+            ),
+        )
     )
 
 
@@ -196,39 +199,41 @@ def bambuddy_worker(
     `RegisteredActivities`. The Deployment may then roll with ``RollingUpdate``. A new
     workflow type is still only safe once no old build is current (README, "Rolling
     it")."""
-    return Worker(
-        client,
-        task_queue=task_queue,
-        workflows=[
-            PrintRunWorkflow,
-            # A LAN run's later plate copies (#4541); AUTO_UPGRADE by the worker's default.
-            LanSequenceWorkflow,
-            OperationWorkflow,
-            FollowPrint if build_id is None else VersionedFollowPrint,
-            # Each LAN printer's report (#3823); AUTO_UPGRADE by the worker's default.
-            PrinterWatch,
-            # A LAN-only printer's job, recorded by the print watcher (#4699 phase 4).
-            LanAutoImport,
-            # ScadBuddy's filament pushed to Bambuddy, one per instance (#6265); beside
-            # its pass activity, AUTO_UPGRADE by the worker's default.
-            FilamentBbSync,
-            # One Bambuddy pull, read here for the API (#6772); AUTO_UPGRADE by the
-            # worker's default.
-            FilamentBbPull,
-            # The sensors' alert notifications sent through Bambuddy, a pass a minute on
-            # its Schedule (#6646); AUTO_UPGRADE by the worker's default.
-            SensorNotifyPass,
-            # One request's commands to a printer over its LAN link (#7276); AUTO_UPGRADE
-            # by the worker's default.
-            LanCommandWorkflow,
-        ],
-        activities=activities,
-        workflow_runner=sandboxed_runner(),
-        graceful_shutdown_timeout=graceful_shutdown_timeout,
-        deployment_config=print_deployment(build_id),
-        interceptors=[RegisteredActivities(activities)],
-        # An operation's run heartbeats against a 30 s timeout (#4635).
-        max_heartbeat_throttle_interval=HEARTBEAT_THROTTLE,
+    return single_batch(
+        Worker(
+            client,
+            task_queue=task_queue,
+            workflows=[
+                PrintRunWorkflow,
+                # A LAN run's later plate copies (#4541); AUTO_UPGRADE by the worker's default.
+                LanSequenceWorkflow,
+                OperationWorkflow,
+                FollowPrint if build_id is None else VersionedFollowPrint,
+                # Each LAN printer's report (#3823); AUTO_UPGRADE by the worker's default.
+                PrinterWatch,
+                # A LAN-only printer's job, recorded by the print watcher (#4699 phase 4).
+                LanAutoImport,
+                # ScadBuddy's filament pushed to Bambuddy, one per instance (#6265); beside
+                # its pass activity, AUTO_UPGRADE by the worker's default.
+                FilamentBbSync,
+                # One Bambuddy pull, read here for the API (#6772); AUTO_UPGRADE by the
+                # worker's default.
+                FilamentBbPull,
+                # The sensors' alert notifications sent through Bambuddy, a pass a minute on
+                # its Schedule (#6646); AUTO_UPGRADE by the worker's default.
+                SensorNotifyPass,
+                # One request's commands to a printer over its LAN link (#7276); AUTO_UPGRADE
+                # by the worker's default.
+                LanCommandWorkflow,
+            ],
+            activities=activities,
+            workflow_runner=sandboxed_runner(),
+            graceful_shutdown_timeout=graceful_shutdown_timeout,
+            deployment_config=print_deployment(build_id),
+            interceptors=[RegisteredActivities(activities)],
+            # An operation's run heartbeats against a 30 s timeout (#4635).
+            max_heartbeat_throttle_interval=HEARTBEAT_THROTTLE,
+        )
     )
 
 

@@ -2292,9 +2292,10 @@ async def test_a_release_that_lands_with_the_load_answer_cancels_before_the_piec
     """#1832: the release and `load_pipeline`'s answer in one workflow task. Before
     temporalio 1.36 the release's handler ran first and cancelled the render task while
     it still waited on the load, so the answer won, the task went on to start the piece
-    child, and the cancel was dropped while that start was in flight (ABANDON). Since
-    1.36 every job of the task is applied before any task runs (workflow logic flag 2,
-    https://github.com/temporalio/sdk-python/releases/tag/1.36.0), so the cancel lands
+    child, and the cancel was dropped while that start was in flight (ABANDON). With
+    workflow logic flag 2 every job of the task is applied before any task runs (1.36's
+    default, https://github.com/temporalio/sdk-python/releases/tag/1.36.0; 1.37 dropped
+    it and `logic_flags.py` turns it back on, #8313), so the cancel lands
     on the load already answered: the render is released and no piece starts. The
     release after a start in flight is still handled (`_raise_if_released`).
 

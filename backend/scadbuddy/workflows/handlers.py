@@ -11,8 +11,9 @@ from temporalio import workflow
 async def handler_wait(condition: Callable[[], bool]) -> None:
     """Wait in an Update handler until ``condition`` holds.
 
-    A workflow cancel goes to the run's own task, never to a handler's. Since temporalio
-    1.36 (activation jobs in one batch, workflow logic flag 2), `wait_condition` raises
+    A workflow cancel goes to the run's own task, never to a handler's. With workflow
+    logic flag 2 (activation jobs in one batch: temporalio 1.36's default, which 1.37
+    dropped and `logic_flags.py` turns back on, #8313), `wait_condition` raises
     `CancelledError` in any task when the cancel request arrived after the wait began
     and before its condition held, so that a run can catch the cancel and go on
     (`workflow_wait_condition`'s `cancellation_arrived`;

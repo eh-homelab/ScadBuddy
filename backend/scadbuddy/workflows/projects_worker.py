@@ -17,6 +17,7 @@ from temporalio.worker.workflow_sandbox import SandboxedWorkflowRunner, SandboxR
 from scadbuddy.workflows.flow_entries import flow_entry_timeout
 from scadbuddy.workflows.flow_tools import FLOW_TOOLS, HOST_FUNCTION_NAMES, run_flow_tool
 from scadbuddy.workflows.flows_client import harness_plugins
+from scadbuddy.workflows.logic_flags import single_batch
 from scadbuddy.workflows.operation import OperationWorkflow
 from scadbuddy.workflows.project import ProjectWorkflow
 from scadbuddy.workflows.registered import RegisteredActivities
@@ -100,14 +101,16 @@ def projects_worker(
     wait for a build that has them instead of failing here. With ``deployment_config``
     (`client.projects_deployment`) it is versioned."""
     all_activities = [*activities, flow_entry_timeout]
-    return Worker(
-        client,
-        task_queue=task_queue,
-        workflows=list(workflows),
-        activities=all_activities,
-        plugins=harness_plugins(FLOW_TOOLS),
-        workflow_runner=projects_runner(),
-        graceful_shutdown_timeout=graceful_shutdown_timeout,
-        deployment_config=deployment_config,
-        interceptors=[RegisteredActivities(all_activities, host_functions)],
+    return single_batch(
+        Worker(
+            client,
+            task_queue=task_queue,
+            workflows=list(workflows),
+            activities=all_activities,
+            plugins=harness_plugins(FLOW_TOOLS),
+            workflow_runner=projects_runner(),
+            graceful_shutdown_timeout=graceful_shutdown_timeout,
+            deployment_config=deployment_config,
+            interceptors=[RegisteredActivities(all_activities, host_functions)],
+        )
     )
