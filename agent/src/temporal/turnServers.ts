@@ -112,6 +112,8 @@ export type TurnServerDeps = {
         audit?: AuditSink | undefined
         resolve?: Resolver
         limits?: Partial<HttpLimits>
+        /** Tests only: a GET may reach a private or loopback host unapproved (#8178). */
+        allowPrivate?: boolean
         /** The sessions' workspaces, where `save_to_workspace` stores a body (#2496), as a session turn's. */
         files?: WorkspaceFiles | undefined
         /** A session's saved bodies. */
@@ -233,6 +235,7 @@ export function turnServers(deps: TurnServerDeps): (context: TurnContext) => Pro
                 signal: context.signal,
                 ...(http.resolve ? { resolve: http.resolve } : {}),
                 ...(http.limits ? { limits: http.limits } : {}),
+                ...(http.allowPrivate ? { allowPrivate: true } : {}),
               }).instance,
           ),
         tierOf: (name, input) => httpTier(name, input) ?? 'outward',

@@ -797,6 +797,8 @@ export type SessionManagerDeps = {
     resolve?: Resolver
     /** Tests only: smaller caps. */
     limits?: Partial<HttpLimits>
+    /** Tests only: a GET may reach a private or loopback host unapproved (#8178). */
+    allowPrivate?: boolean
   }
   /**
    * The assistant's workspace (#2329, workspace/crudStore.ts): where http_request's
