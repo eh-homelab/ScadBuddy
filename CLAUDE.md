@@ -285,12 +285,13 @@ The backend's migration files and its settings tables: `backend/CLAUDE.md`.
   failure there, a "no Go changes" run a pass. The
   `freshness` job also regenerates the Go client when the API or the client changed and
   pushes it to a same-repo PR with the `RUNNER_APP` token.
-- Python and Rust lanes: `layout` reads the change's paths (`.github/scripts/changed-paths.sh`,
+- Python, Rust and Android lanes: `layout` reads the change's paths (`.github/scripts/changed-paths.sh`,
   shared with `go-select`) and `select-lanes.sh` (tested by `select-lanes.test.sh`) picks
   the lanes: `backend` (`lfs-fixtures`, `backend-pytest`), `agent_durable`, `rust`
   (`rust`, `slicer-image`) and `image` (the app image job, `profile-fetch-image` and
   `camera-image`: any
-  backend change, plus `frontend/` and the Go trees its live mount runs). A lane job skips on a change that
+  backend change, plus `frontend/` and the Go trees its live mount runs), and `android` (the
+  `android` job, the phone app's build: `app/`). A lane job skips on a change that
   does not need it; `CI Summary` re-derives the lanes from its own checkout, so a skip
   where the lane was needed is a failure. A push, the schedule, a dispatch, the
   Dockerfile, `ci.yml` or the selector selects every lane. A new cross-tree read (a test
