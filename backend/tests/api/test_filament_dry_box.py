@@ -254,3 +254,46 @@ def test_a_move_that_deadlocks_is_a_409_try_again(
     assert refused.status_code == 409, refused.text
     assert refused.json()["code"] == "move_conflict"
     assert "try again" in refused.json()["detail"]
+
+
+def _stale_setup(client: TestClient) -> tuple[str, str, str, str]:
+    """A spool read in shelf A that someone moved to shelf B since (#7168)."""
+    shelf = _kind_id(client, "Shelf")
+    shelf_a = str(_location(client, "Shelf SA", kind_id=shelf)["id"])
+    shelf_b = str(_location(client, "Shelf SB", kind_id=shelf)["id"])
+    box = str(_box(client, "Box ST")["id"])
+    spool = str(_spool(client)["id"])
+    for place in (shelf_a, shelf_b):
+        moved = client.post(f"{SPOOLS}/{spool}/move", json={"location_id": place})
+        assert moved.status_code == 200, moved.text
+    return spool, shelf_a, shelf_b, box
+
+
+def test_a_stale_move_is_a_409_move_stale(client: TestClient) -> None:
+    spool, shelf_a, shelf_b, box = _stale_setup(client)
+    r = client.post(
+        f"{SPOOLS}/{spool}/move", json={"location_id": box, "expected_location_id": shelf_a}
+    )
+    assert r.status_code == 409, r.text
+    assert r.json()["code"] == "move_stale"
+    assert r.json()["location_id"] == shelf_b and r.json()["archived"] is False
+    assert client.get(f"{SPOOLS}/{spool}").json()["location_id"] == shelf_b
+
+
+def test_an_explicit_null_expected_location_is_checked(client: TestClient) -> None:
+    spool, _, shelf_b, box = _stale_setup(client)
+    r = client.post(
+        f"{SPOOLS}/{spool}/move", json={"location_id": box, "expected_location_id": None}
+    )
+    assert r.status_code == 409, r.text
+    assert r.json()["code"] == "move_stale"
+    assert r.json()["location_id"] == shelf_b and r.json()["archived"] is False
+
+
+def test_a_matching_expected_location_moves(client: TestClient) -> None:
+    spool, _, shelf_b, box = _stale_setup(client)
+    r = client.post(
+        f"{SPOOLS}/{spool}/move", json={"location_id": box, "expected_location_id": shelf_b}
+    )
+    assert r.status_code == 200, r.text
+    assert r.json()["location_id"] == box

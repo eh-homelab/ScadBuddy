@@ -503,6 +503,17 @@ def _armed_job(store: FilamentSpoolStore, kind: str = "write") -> UUID:
     return tags.claim_job(store, job.id, claim, actor="ann").id
 
 
+def test_a_place_write_backup_is_stored(pg_pool: PgPool) -> None:
+    store = FilamentSpoolStore(pg_pool)
+    made = tags.back_up(store, TagBackupIn(uid="04AA", records=[], reason="place_write"), actor="t")
+    assert made.id is not None
+    with pg_pool.connection() as conn:
+        row = conn.execute(
+            "SELECT reason FROM filament_tag_backups WHERE id = %s", (made.id,)
+        ).fetchone()
+    assert row is not None and row["reason"] == "place_write"
+
+
 def test_an_agent_backup_must_match_its_job(pg_pool: PgPool) -> None:
     store = FilamentSpoolStore(pg_pool)
     job = _armed_job(store)

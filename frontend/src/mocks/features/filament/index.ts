@@ -382,7 +382,7 @@ const FIELDS = {
   kValue: ['printer_id', 'extruder', 'nozzle_diameter', 'nozzle_type', 'k_value', 'name', 'cali_idx', 'setting_id'],
   typeCreate: ['code', 'material_id', 'subtype_id', 'brand_id', 'category_id', 'effect_id', 'insert_type_id', 'rgba', 'colour_name', 'extra_colours', 'diameter_mm', 'density_g_cm3', 'cost_per_kg', 'lead_time_days', 'safety_margin_days', 'label_weight_g', 'low_stock_pct', 'nozzle_temp_min', 'nozzle_temp_max', 'bed_temp_min', 'bed_temp_max', 'drying_temp_c', 'drying_hours', 'tdfp_id', 'note'],
   spoolCreate: ['type_id', 'brand_id', 'material_id', 'subtype_id', 'category_id', 'effect_id', 'colour_name', 'rgba', 'extra_colours', 'diameter_mm', 'density_g_cm3', 'nozzle_temp_min', 'nozzle_temp_max', 'bed_temp_min', 'bed_temp_max', 'drying_temp_c', 'drying_hours', 'label_weight_g', 'insert_type_id', 'low_stock_pct', 'cost_per_kg', 'weight_locked', 'note', 'grams_left', 'added_full'],
-  move: ['location_id', 'if_occupied', 'answers', 'expected_occupant_id'],
+  move: ['location_id', 'if_occupied', 'answers', 'expected_occupant_id', 'expected_location_id'],
   csvImport: ['rows', 'dry_run'],
   proposalPick: ['brand_id', 'material_id', 'subtype_id', 'rgba', 'label_weight_g', 'material_number', 'code', 'spool_ids'],
   archive: ['archived', 'reason', 'final_reading_g', 'final_grams'],
@@ -3005,10 +3005,17 @@ export const handlers = [
     const sent = await request.json()
     const extra = extraKeys(sent, FIELDS.move)
     if (extra) return extra
-    const { location_id, if_occupied, answers, expected_occupant_id } = sent as S['SpoolMove']
+    const { location_id, if_occupied, answers, expected_occupant_id, expected_location_id } = sent as S['SpoolMove']
     // `homes.py` `ExpectedOccupantRequiredError`: a replace names the box's spool it expects.
     if (if_occupied === 'replace' && expected_occupant_id == null) {
       return problem(422, "a replace must name the box's spool it expects in expected_occupant_id", { code: 'expected_occupant_required' })
+    }
+    // #7168 `homes.py` `move_into`: a key that is present (null too) is checked first under the spool's row lock: before the target, `answers`, the box and the move.
+    if ('expected_location_id' in (sent as object)) {
+      const mover = state.spools[at]!
+      if ((mover.location_id ?? null) !== (expected_location_id ?? null) || mover.archived_at !== null) {
+        return problem(409, `spool ${mover.id} is not where it was read`, { code: 'move_stale', location_id: mover.location_id ?? null, archived: mover.archived_at !== null })
+      }
     }
     if (location_id && !state.locations.some((place) => place.id === location_id && !place.archived_at)) {
       return problem(422, REFUSED.moveTarget)

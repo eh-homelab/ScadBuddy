@@ -1,13 +1,15 @@
-import { CameraIcon, CameraOffIcon, ImageUpIcon, ListIcon, NfcIcon, QrCodeIcon } from 'lucide-react'
+import { ListIcon, NfcIcon, QrCodeIcon } from 'lucide-react'
 import { useEffect, useId, useMemo, useRef, useState, type ReactNode } from 'react'
 import { ApiError } from '../../api/client'
 import { getSpool, listSpools, postTagRead, resolveCode, type NdefRecord, type Spool, type TagReadResult } from '../../api/filament'
-import { decodeScan, storeScanImage } from '../../api/scan'
 import { spoolCode } from '../../lib/homeReturns'
 import { codeFromScan } from '../../lib/unknownSpools'
-import { NfcSession, nfcSupport } from '../../lib/webNfc'
+import { takeMifare } from '../../lib/nativeMifare'
+import { nfcSupport, type Reading } from '../../lib/webNfc'
 import { DefinedFields } from '../entities/DefinedFields'
-import { FILE_STILL_MAX, stillOf } from './scan/scanCamera'
+import { CodeWay, Said, type CodeCopy } from './identify/CodeWay'
+import { reasonOf } from './identify/reason'
+import { useTagReads } from './identify/useTagReads'
 import { useSpoolFromTag } from './scan/useSpoolFromTag'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
@@ -23,6 +25,7 @@ import { RgbaSwatch } from './RgbaSwatch'
  * `onIdentified` gets each spool the person names, and null as soon as none is named any more
  * (the way changes, the code is edited, a lookup, a photo or a tag read names no spool), so the
  * caller never acts on a spool the person has since replaced. An archived spool is never named.
+ * `nfc` is the page's `nfcSupport()`: in a frame (`embedded`) there is no tag way and no camera.
  */
 
 type Way = 'tag' | 'code' | 'hand'
@@ -30,8 +33,6 @@ type OnIdentified = (spool: Spool | null) => void
 
 /** The spool, or why it cannot be the one: an archived spool is in no box. */
 const usable = (spool: Spool): Spool | string => (spool.archived_at ? `${spoolCode(spool)} is archived.` : spool)
-
-const reasonOf = (cause: unknown, fallback: string) => (cause instanceof ApiError ? cause.detail : cause instanceof Error && cause.message ? cause.message : fallback)
 
 /** A label's QR text: `scadbuddy:spool:<id>` (`labelPayload`). */
 const SPOOL_TEXT = /^scadbuddy:spool:([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})$/i
@@ -64,8 +65,11 @@ async function spoolFromText(text: string): Promise<Spool | string> {
   }
 }
 
-export function IdentifySpool({ onIdentified }: { onIdentified: OnIdentified }) {
-  const [support] = useState(nfcSupport)
+const SPOOL_COPY: CodeCopy = { label: 'Spool code', placeholder: 'S-142', noLabel: 'No spool label was found in the photo. Take it again, or type the code.' }
+
+export function IdentifySpool({ onIdentified, nfc }: { onIdentified: OnIdentified; nfc?: ReturnType<typeof nfcSupport> }) {
+  // Asked once for the component's life, not on each render (#7168 review 3).
+  const [support] = useState(() => nfc ?? nfcSupport())
   const [way, setWay] = useState<Way | ''>('')
   const change = (next: Way | '') => {
     setWay(next)
@@ -95,7 +99,7 @@ export function IdentifySpool({ onIdentified }: { onIdentified: OnIdentified }) 
         </ToggleGroupItem>
       </ToggleGroup>
       {way === 'tag' && <TagWay onIdentified={onIdentified} onPickByHand={() => change('hand')} />}
-      {way === 'code' && <CodeWay onIdentified={onIdentified} />}
+      {way === 'code' && <CodeWay kind="spool" copy={SPOOL_COPY} fromText={spoolFromText} fromCode={spoolFromText} onIdentified={onIdentified} camera={support !== 'embedded'} />}
       {way === 'hand' && <HandWay onIdentified={onIdentified} />}
     </div>
   )
@@ -105,57 +109,69 @@ function Note({ children }: { children: ReactNode }) {
   return <p className="text-[13px] text-muted-foreground">{children}</p>
 }
 
-/** Web NFC: one scan while the way is open; each tap posts the read to `POST /filament/tags/reads`. */
-function TagWay({ onIdentified, onPickByHand }: { onIdentified: OnIdentified; onPickByHand: () => void }) {
-  const [error, setError] = useState<string | null>(null)
-  const [unknown, setUnknown] = useState<{ key: number; uid: string; records: NdefRecord[]; result: TagReadResult } | null>(null)
-  const reads = useRef(0)
-  const identify = useRef(onIdentified)
-  useEffect(() => {
-    identify.current = onIdentified
-  }, [onIdentified])
+/** A 4-byte UID with no NDEF records, as a Bambu tag's side gives: a browser reads no more of it (Web NFC is NDEF only). */
+const bambuSide = (uid: string, records: NdefRecord[]) => records.length === 0 && uid.replace(/[^0-9a-f]/gi, '').length === 8
 
-  useEffect(() => {
-    const session = new NfcSession()
-    let alive = true
-    const off = session.onReading((reading) => {
-      postTagRead({ uid: reading.uid || null, tag_type: null, records: reading.records }).then(
-        async (result) => {
-          if (!alive) return
-          setError(null)
-          setUnknown(null)
-          // A new read: until it names a spool, none is named.
-          identify.current(null)
-          const found =
-            result.next === 'open_spool' && result.spool
-              ? usable(result.spool)
-              : result.next === 'open_code' && result.resolved
-                ? await spoolFromText(result.resolved.code)
-                : null
-          if (!alive) return
-          if (found !== null) return typeof found === 'string' ? setError(found) : identify.current(found)
-          if (result.next === 'bind_or_create') return setUnknown({ key: (reads.current += 1), uid: reading.uid, records: reading.records, result })
-          setError('This tag has no serial number. Pick the spool by hand.')
-        },
-        (cause: unknown) => {
-          if (!alive) return
-          identify.current(null)
-          setError(`ScadBuddy could not look up the tag: ${reasonOf(cause, 'try the tag again')}.`)
-        },
-      )
-    })
-    const offError = session.onReadingError(() => setError('This tag could not be read. Hold it to the phone again.'))
-    session.start().catch((cause: unknown) => {
-      if (!alive) return
-      setError(cause instanceof DOMException && cause.name === 'NotAllowedError' ? "Allow NFC for this site in Chrome's settings, then choose Scan tag again." : `NFC could not start: ${reasonOf(cause, 'try again')}.`)
-    })
-    return () => {
-      alive = false
-      off()
-      offError()
-      session.stop()
-    }
-  }, [])
+/**
+ * One tap's read. In the ScadBuddy app a Bambu tag's MIFARE blocks come with the tap, and core
+ * finds the spool by its tray UUID, so either side names it (#8148). A server that does not
+ * decode them (503 `mifare_needs_core`, 422 `mifare_unreadable` or `mifare_invalid`, refused
+ * before anything is recorded) gets the plain read, as the scan page does it. `blocks` says
+ * whether the answer came from the blocks.
+ */
+async function postTap(uid: string, records: NdefRecord[]): Promise<{ result: TagReadResult; blocks: boolean }> {
+  const plain = { uid: uid || null, tag_type: null, records }
+  const mifare = takeMifare(uid)
+  if (!mifare) return { result: await postTagRead(plain), blocks: false }
+  try {
+    return { result: await postTagRead({ ...mifare, records: [] }), blocks: true }
+  } catch (cause) {
+    const undecoded = cause instanceof ApiError && ((cause.status === 422 && (cause.problem.code === 'mifare_unreadable' || cause.problem.code === 'mifare_invalid')) || (cause.status === 503 && cause.problem.code === 'mifare_needs_core'))
+    if (!undecoded) throw cause
+    return { result: await postTagRead(plain), blocks: false }
+  }
+}
+
+/** One tap's answer: the spool or the sentence why none (`found`, null when the read names nothing), and the read. */
+interface TapAnswer {
+  reading: Reading
+  result: TagReadResult
+  blocks: boolean
+  found: Spool | string | null
+}
+
+async function readTap(reading: Reading): Promise<TapAnswer> {
+  const { result, blocks } = await postTap(reading.uid, reading.records)
+  const found =
+    result.next === 'open_spool' && result.spool
+      ? usable(result.spool)
+      : result.next === 'open_code' && result.resolved
+        ? await spoolFromText(result.resolved.code)
+        : null
+  return { reading, result, blocks, found }
+}
+
+/** Web NFC: each tap posts the read to `POST /filament/tags/reads`; the newest tap's answer names the spool. */
+function TagWay({ onIdentified, onPickByHand }: { onIdentified: OnIdentified; onPickByHand: () => void }) {
+  const [unknown, setUnknown] = useState<{ key: number; uid: string; records: NdefRecord[]; result: TagReadResult } | null>(null)
+  const [unseenSide, setUnseenSide] = useState(false)
+  const unknowns = useRef(0)
+  const { error, setError } = useTagReads({
+    read: readTap,
+    onTap: () => {
+      setUnknown(null)
+      setUnseenSide(false)
+      // A new read: until it names a spool, none is named.
+      onIdentified(null)
+    },
+    onAnswer: ({ reading, result, blocks, found }) => {
+      if (found !== null) return typeof found === 'string' ? setError(found) : onIdentified(found)
+      // A 4-byte UID with no records, read without the app: no spool holds it, and making one could duplicate a spool.
+      if (result.next === 'bind_or_create' && !blocks && bambuSide(reading.uid, reading.records)) return setUnseenSide(true)
+      if (result.next === 'bind_or_create') return setUnknown({ key: (unknowns.current += 1), uid: reading.uid, records: reading.records, result })
+      setError('This tag has no serial number. Pick the spool by hand.')
+    },
+  })
 
   return (
     <div className="flex flex-col gap-2 rounded-lg border border-dashed px-3 py-2.5">
@@ -163,6 +179,14 @@ function TagWay({ onIdentified, onPickByHand }: { onIdentified: OnIdentified; on
         <NfcIcon aria-hidden="true" className="size-4 text-primary motion-safe:animate-pulse" />
         Hold the spool's tag to the phone.
       </p>
+      {unseenSide && (
+        <div className="flex flex-wrap items-center gap-x-2 gap-y-1">
+          <Said>This side of the Bambu tag is on no spool yet. Tap the other side, use the QR code, or pick the spool by hand.</Said>
+          <Button type="button" size="sm" variant="link" className="h-auto px-0" onClick={onPickByHand}>
+            Pick it by hand
+          </Button>
+        </div>
+      )}
       {unknown && (
         <UnknownTag
           key={unknown.key}
@@ -217,233 +241,6 @@ function UnknownTag({ uid, records, result, onMade, onPickByHand }: { uid: strin
           {error}
         </p>
       )}
-    </div>
-  )
-}
-
-/** The Shape Detection API's detector, where the browser has one (Chrome on Android). */
-interface BarcodeDetectorLike {
-  detect(source: HTMLVideoElement): Promise<{ rawValue: string }[]>
-}
-type BarcodeDetectorClass = new (options?: { formats: string[] }) => BarcodeDetectorLike
-
-const detectorClass = (): BarcodeDetectorClass | null => (window as unknown as { BarcodeDetector?: BarcodeDetectorClass }).BarcodeDetector ?? null
-
-/** A typed code, always; the camera where `BarcodeDetector` exists, else a photo the server reads (#8155). */
-function CodeWay({ onIdentified }: { onIdentified: OnIdentified }) {
-  const [text, setText] = useState('')
-  const [said, setSaid] = useState<string | null>(null)
-  const [looking, setLooking] = useState(false)
-  const [photoBusy, setPhotoBusy] = useState(false)
-  const [camera, setCamera] = useState(false)
-  const [photosOff, setPhotosOff] = useState(false)
-  const [Detector] = useState(detectorClass)
-  const photo = useRef<HTMLInputElement>(null)
-  const ids = useId()
-
-  /** The answer of a lookup: the spool, or the sentence why none, which also names none. */
-  function answer(found: Spool | string) {
-    if (typeof found === 'string') {
-      setSaid(found)
-      onIdentified(null)
-    } else onIdentified(found)
-  }
-
-  async function look(raw: string) {
-    setLooking(true)
-    setSaid(null)
-    onIdentified(null)
-    const found = await spoolFromText(raw)
-    setLooking(false)
-    answer(found)
-  }
-
-  /** The photo drawn again as a JPEG of a known size (core takes JPEG, PNG or WebP; a phone may give HEIC). */
-  async function jpegOf(file: File): Promise<Blob> {
-    let bitmap: ImageBitmap
-    try {
-      bitmap = await createImageBitmap(file)
-    } catch {
-      throw new Error('This browser cannot open that photo. Type the code from the label.')
-    }
-    try {
-      return await stillOf(bitmap, bitmap.width, bitmap.height, FILE_STILL_MAX)
-    } finally {
-      bitmap.close()
-    }
-  }
-
-  async function readPhoto(file: File) {
-    setPhotoBusy(true)
-    setSaid(null)
-    onIdentified(null)
-    try {
-      const stored = await storeScanImage(await jpegOf(file))
-      const scan = await decodeScan({ key: stored.key, source: 'shutter', location: null })
-      const first = scan.codes.find((code) => code.resolved?.kind === 'spool')
-      if (!first?.resolved) {
-        answer(scan.error ? 'The photo could not be read. Take it again, closer to the label.' : 'No spool label was found in the photo. Take it again, or type the code.')
-        return
-      }
-      answer(await spoolFromText(first.resolved.code))
-    } catch (cause) {
-      // The core area is off: no photo route on this server.
-      if (cause instanceof ApiError && cause.status === 404) {
-        setPhotosOff(true)
-        answer('This server reads no photos. Type the code from the label.')
-      } else answer(cause instanceof ApiError ? `The photo did not go through: ${cause.detail}.` : reasonOf(cause, 'The photo did not go through. Try again.'))
-    } finally {
-      setPhotoBusy(false)
-    }
-  }
-
-  return (
-    <div className="flex flex-col gap-2 rounded-lg border border-dashed px-3 py-2.5">
-      <form
-        className="flex flex-wrap items-end gap-2"
-        onSubmit={(event) => {
-          event.preventDefault()
-          if (text.trim()) void look(text)
-        }}
-      >
-        <div className="flex flex-col gap-1">
-          <Label htmlFor={`${ids}-code`}>Spool code</Label>
-          <Input
-            id={`${ids}-code`}
-            value={text}
-            placeholder="S-142"
-            autoComplete="off"
-            onChange={(event) => {
-              setText(event.target.value)
-              setSaid(null)
-              // Another code: the spool the old one named is no longer named.
-              onIdentified(null)
-            }}
-            className="w-40"
-          />
-        </div>
-        <Button type="submit" variant="outline" disabled={looking || !text.trim()}>
-          Find
-        </Button>
-        {Detector && !camera && (
-          <Button type="button" variant="outline" onClick={() => {
-              setCamera(true)
-              onIdentified(null)
-            }}
-          >
-            <CameraIcon /> Use camera
-          </Button>
-        )}
-        {!Detector && !photosOff && (
-          <>
-            <Button type="button" variant="outline" disabled={photoBusy} onClick={() => photo.current?.click()}>
-              <ImageUpIcon /> {photoBusy ? 'Reading the photo…' : 'Take a photo'}
-            </Button>
-            <input
-              ref={photo}
-              type="file"
-              accept="image/*"
-              capture="environment"
-              aria-label="Photo of the label"
-              className="sr-only"
-              tabIndex={-1}
-              onChange={(event) => {
-                const file = event.target.files?.[0]
-                event.target.value = ''
-                if (file) void readPhoto(file)
-              }}
-            />
-          </>
-        )}
-      </form>
-      {camera && Detector && (
-        <CameraReader
-          Detector={Detector}
-          onRead={(raw) => {
-            setCamera(false)
-            void look(raw)
-          }}
-          onStop={() => setCamera(false)}
-          onFail={(reason) => {
-            setCamera(false)
-            setSaid(reason)
-          }}
-        />
-      )}
-      {said && (
-        <p role="alert" className="text-[13px] text-warn">
-          {said}
-        </p>
-      )}
-    </div>
-  )
-}
-
-/** The rear camera, read in the browser by `BarcodeDetector` until it finds a code; the camera stops then. */
-function CameraReader({ Detector, onRead, onStop, onFail }: { Detector: BarcodeDetectorClass; onRead: (raw: string) => void; onStop: () => void; onFail: (reason: string) => void }) {
-  const video = useRef<HTMLVideoElement>(null)
-  const done = useRef({ onRead, onFail })
-  useEffect(() => {
-    done.current = { onRead, onFail }
-  }, [onRead, onFail])
-
-  useEffect(() => {
-    let alive = true
-    let stream: MediaStream | null = null
-    let timer: ReturnType<typeof setTimeout> | undefined
-    const stop = () => stream?.getTracks().forEach((track) => track.stop())
-    const detector = new Detector({ formats: ['qr_code'] })
-    async function tick() {
-      if (!alive || !video.current) return
-      try {
-        const found = await detector.detect(video.current)
-        const raw = found.find((one) => one.rawValue)?.rawValue
-        if (raw && alive) {
-          alive = false
-          stop()
-          done.current.onRead(raw)
-          return
-        }
-      } catch {
-        // A frame not ready yet: try the next one.
-      }
-      if (alive) timer = setTimeout(() => void tick(), 300)
-    }
-    navigator.mediaDevices
-      .getUserMedia({ video: { facingMode: 'environment' } })
-      .then((got) => {
-        stream = got
-        if (!alive) return stop()
-        const element = video.current
-        if (element) {
-          element.srcObject = got
-          try {
-            void Promise.resolve(element.play()).catch(() => {})
-          } catch {
-            // The preview may stay still; the detector reads the frames anyway.
-          }
-        }
-        void tick()
-      })
-      .catch((cause: unknown) => {
-        if (alive) done.current.onFail(cause instanceof DOMException && cause.name === 'NotAllowedError' ? 'The camera is not allowed for this page. Type the code from the label, or allow the camera in the browser’s site settings.' : 'The camera did not start. Type the code from the label.')
-      })
-    return () => {
-      alive = false
-      clearTimeout(timer)
-      stop()
-    }
-  }, [Detector])
-
-  return (
-    <div className="flex flex-col gap-2">
-      <div className="relative aspect-[4/3] max-h-56 overflow-hidden rounded-lg bg-black">
-        <video ref={video} muted playsInline aria-label="Camera preview" className="size-full object-cover" />
-        <div aria-hidden="true" className="pointer-events-none absolute inset-[18%] rounded-md border-2 border-white/80" />
-      </div>
-      <Button type="button" variant="ghost" size="sm" className="self-start" onClick={onStop}>
-        <CameraOffIcon /> Stop camera
-      </Button>
     </div>
   )
 }

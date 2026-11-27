@@ -12,7 +12,12 @@ takes them, so a plain move and a replace never deadlock: the spools the move wr
 own spool's open tags and then that spool's row. A tag bind takes a tag before its
 spools, so a bind on the same two spools at the same moment can deadlock with a replace;
 Postgres aborts one, and the move route answers it as a 409 `move_conflict` (try again;
-rulings P17, P20)."""
+rulings P17, P20).
+
+A move may carry where the caller read the spool (``check_location``,
+``expected_location_id``; #7168): under the spool's row lock, before anything else, a
+spool that is in another place or is archived is `SpoolMovedError` (409 `move_stale`),
+and nothing is written."""
 
 from __future__ import annotations
 
@@ -43,6 +48,18 @@ class ExpectedOccupantRequiredError(ValueError):
 
     def __init__(self) -> None:
         super().__init__("a replace must name the box's spool it expects in expected_occupant_id")
+
+
+class SpoolMovedError(ValueError):
+    """The spool is not where the caller read it (#7168): it is in another place, or it is
+    archived. ``location_id`` is where it is now (``None`` for no place)."""
+
+    def __init__(self, spool_id: UUID, location_id: UUID | None, archived: bool) -> None:
+        where = "archived" if archived else f"in {location_id or 'no place'}"
+        super().__init__(f"spool {spool_id} moved since it was read: it is {where} now")
+        self.spool_id = spool_id
+        self.location_id = location_id
+        self.archived = archived
 
 
 def _still_in(conn: Conn, spool_id: UUID, location_id: UUID) -> bool:
@@ -77,6 +94,8 @@ def move_into(
     defaults: FilamentDefaults,
     answers: UUID | None = None,
     expected_occupant_id: UUID | None = None,
+    expected_location_id: UUID | None = None,
+    check_location: bool = False,
 ) -> m.SpoolEvent | None:
     """Move ``spool_id``, the spool the person identified, to ``location_id`` on
     ``conn``, in the caller's transaction. ``refuse`` is `LocationStore.move_on` (a full
@@ -91,23 +110,33 @@ def move_into(
     name (`ExpectedOccupantRequiredError`, before anything is read or locked): a box that
     holds another spool once its lock is taken is `BoxFullError` naming that spool, and
     nothing is archived. `LookupError` for no such spool, `NotItsHomeError` when
-    ``answers``'s home is not ``location_id``. ``defaults`` is the Filament settings,
-    read before ``conn`` was taken (`FilamentSpoolStore.archive_on`)."""
+    ``answers``'s home is not ``location_id``. With ``check_location``, a ``spool_id``
+    that is not in ``expected_location_id`` (``None``: in no place) or is archived once
+    its row lock is taken is `SpoolMovedError` (#7168), before ``answers``, the replace
+    and the move. ``defaults`` is the Filament settings, read before ``conn`` was taken
+    (`FilamentSpoolStore.archive_on`)."""
     if if_occupied == "replace" and expected_occupant_id is None:
         raise ExpectedOccupantRequiredError()
     wanted = sorted({spool_id} if answers is None else {spool_id, answers})
     found = {
-        row["id"]: row["home_location_id"]
+        row["id"]: row
         for row in conn.execute(
-            "SELECT id, home_location_id FROM filament_spools WHERE id = ANY(%s)"
-            " ORDER BY id FOR UPDATE",
+            "SELECT id, home_location_id, location_id, archived_at FROM filament_spools"
+            " WHERE id = ANY(%s) ORDER BY id FOR UPDATE",
             (wanted,),
         ).fetchall()
     }
     for one in wanted:
         if one not in found:
             raise LookupError(f"no spool {one}")
-    if answers is not None and (location_id is None or found[answers] != location_id):
+    mover = found[spool_id]
+    if check_location and (
+        mover["location_id"] != expected_location_id or mover["archived_at"] is not None
+    ):
+        raise SpoolMovedError(spool_id, mover["location_id"], mover["archived_at"] is not None)
+    if answers is not None and (
+        location_id is None or found[answers]["home_location_id"] != location_id
+    ):
         raise NotItsHomeError(answers)
     if if_occupied == "replace" and location_id is not None:
         held = occupant_on(conn, location_id, but=spool_id)
@@ -139,6 +168,8 @@ def move(
     actor: str,
     answers: UUID | None = None,
     expected_occupant_id: UUID | None = None,
+    expected_location_id: UUID | None = None,
+    check_location: bool = False,
 ) -> m.SpoolEvent | None:
     """`move_into` in a transaction of its own (`POST /filament/spools/{id}/move`). The
     Filament settings are read first, before the transaction's connection is taken."""
@@ -154,4 +185,6 @@ def move(
             defaults=defaults,
             answers=answers,
             expected_occupant_id=expected_occupant_id,
+            expected_location_id=expected_location_id,
+            check_location=check_location,
         )

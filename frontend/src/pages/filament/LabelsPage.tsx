@@ -21,7 +21,7 @@ import { Label, LocationLabel } from '../../components/filament/Label'
 import { LabelOutputPicker } from '../../components/filament/LabelOutputPicker'
 import { LabelFieldsPicker } from '../../components/filament/LabelFieldsPicker'
 import { LabelSheetEditor } from '../../components/filament/LabelSheetEditor'
-import { DEFAULT_FIELDS, DEFAULT_SIZE, httpsOrigin, labelBase, type LabelField, labelPayload, type LabelSize, locationPayload, MAX_LABELS, MAX_PAYLOAD_BYTES, PAGE_MM, pagesOf, printTiming, qrSvg, tickField } from '../../components/filament/labelSheet'
+import { DEFAULT_FIELDS, DEFAULT_SIZE, labelBase, type LabelField, labelPayload, type LabelSize, locationPayload, MAX_LABELS, MAX_PAYLOAD_BYTES, PAGE_MM, pagesOf, printTiming, qrSvg, settingsLabelBase, tickField } from '../../components/filament/labelSheet'
 import { AlertDialog, AlertDialogAction, AlertDialogCancel, AlertDialogContent, AlertDialogDescription, AlertDialogFooter, AlertDialogHeader, AlertDialogTitle } from '@/components/ui/alert-dialog'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
@@ -186,11 +186,8 @@ class SettingsReadError extends Error {
   }
 }
 
-/** The label base of the settings (`filament_label_base_url`, else `public_url`), or null. */
-async function settingsBase(): Promise<string | null> {
-  const settings = await api.getSettings()
-  return httpsOrigin(settings.filament_label_base_url) ?? httpsOrigin(settings.public_url)
-}
+/** The label base of the settings (`labelSheet.ts` `settingsLabelBase`), or null. */
+const settingsBase = async (): Promise<string | null> => settingsLabelBase(await api.getSettings())
 
 /**
  * #6264 — `/filament/labels?ids=<id>,<id>`: spool labels to print. Each spool is read

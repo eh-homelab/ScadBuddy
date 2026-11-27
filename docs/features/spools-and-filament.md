@@ -472,6 +472,54 @@ page's error), or, when none comes within 10 minutes of the backup, `failed` wit
 `no_read_back` (the tag may hold the new records, and its backup can restore it). The agent
 waits for either.
 
+### The swap wizard (#7168)
+
+`/filament/swap` ("Swap spools" on the Spools tab's toolbar; `pages/filament/SwapPage.tsx`) is a
+phone page that moves spools by hand, one after the other (spec
+`docs/superpowers/specs/2026-11-27-swap-wizard-design.md`; plan
+`docs/superpowers/plans/2026-11-27-swap-wizard.md`). It asks two questions in turn: "Which
+spool?" and "Where does it go?". The person answers each one with a tag tap, a QR code (the
+camera, or a photo the server reads) or a pick by hand (`IdentifySpool`, `IdentifyPlace`).
+No step has a default answer. When both are named, "Move" sends one
+`POST /filament/spools/{id}/move`. A log under the steps lists each move of this visit.
+
+- **The stale rule.** Each move sends `expected_location_id`: the place the spool was in when the
+  person named it, or `null` for no place. When the spool is somewhere else by then, or archived,
+  the server refuses the move with 409 `move_stale` (`location_id`, `archived`) and moves
+  nothing. The page reads the spool again and shows what changed ("S-12 is now in Shelf 2"). It
+  never sends the move again by itself: the person confirms it. When no spool waits, an archived
+  spool goes back to "Which spool?". When a spool waits, the page says "S-n was archived." and
+  shows the waiting spool's move; that move goes out only when the person confirms it. A 409
+  `move_conflict`, or a move that got no answer, offers "Try again", which sends the same move.
+  When a `move_stale` spool is already in the move's target (the first move went through, but
+  its answer was lost), the move is done: the log lists it, the page says so ("S-12 is already in
+  Shelf 2.") and goes on with the chain. After "Archive S-n", "Try again" keeps the archive, so
+  the log says "S-n archived". "Choose another place" names a place for the spool whose move did
+  not go through: after a failed "Take S-n out first", that is the waiting spool, which then goes
+  to the place named instead of to no place. Each new step moves the focus to its heading; the
+  short "Moving…" step does not.
+- **A full dry box.** A move into a dry box sends `if_occupied: refuse`. A 409 `box_full` shows
+  the box's spool and its choices: "Archive S-n" (a `replace` with `expected_occupant_id`, as
+  #7167 does it), "Move S-n first", or "Choose another place". The page offers "Move S-n first"
+  only for the current spool's move, not for a waiting spool's move. "Move S-n first" makes the box's
+  spool the next one to place, and the first spool waits (`lib/swapChain.ts`). After each move
+  that succeeds, the newest waiting spool's move goes out by itself, with the place it was read
+  in. When the box's spool is itself waiting (a cycle), the page offers "Take S-n out first": it
+  moves that spool to no place, then the other moves follow. Each step is its own request, so a
+  failure in the middle leaves every spool in a real place or in none; the page shows the moves
+  that still wait, and "Clear" drops them.
+- **Tags.** Where Web NFC works, "Write tag" writes a spool's tag (the spool write of the Scan
+  mode) or a place's tag (one NDEF `url` record, the place label's URL `<label base>/x/L-<n>`,
+  `WritePlaceTag`). Each write backs the tag up first and reads it back. The page never makes a
+  tag read-only, so a tag stays reusable. In a browser a Bambu tag gives its UID only (Web NFC
+  reads NDEF only, https://w3c.github.io/web-nfc/), so it names a spool only for a side the AMS
+  saw. In the ScadBuddy app the read also carries the tag's blocks, so either side names it.
+- **The frame rule.** Web NFC and the camera run only on ScadBuddy's own origin, at the top
+  level. Inside Bambuddy's frame the page offers "Open the swap page in its own tab"
+  (`openExternal`, a new tab) and keeps only the typed code, the photo and the pick by hand.
+  Without Web NFC (iOS, a desktop browser) it says "Tags need Chrome on Android or the
+  ScadBuddy app." and keeps the QR code and the pick by hand.
+
 ### Properties (#7026)
 
 Design: [inventory spec §6.3a](../superpowers/specs/2026-11-21-inventory-and-purchasing-design.md), D17.
