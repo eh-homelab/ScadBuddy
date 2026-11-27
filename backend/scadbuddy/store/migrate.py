@@ -22,6 +22,7 @@ from temporalio.exceptions import ApplicationError
 from scadbuddy.core.config import StoreBackend
 from scadbuddy.core.settings import Settings
 from scadbuddy.library.settings_store import (
+    BAMBUDDY_KEY_NOT_READY,
     BAMBUDDY_NOT_READY,
     OUTPUTS_NEED_A_BLOB_STORE,
     S3_NOT_READY,
@@ -264,6 +265,10 @@ async def check_backends(
             raise StoreNotReadyError(S3_PREFIX_NOT_READY)
         if name == "bambuddy" and (not current.bambuddy_url or current.library_folder_id is None):
             raise StoreNotReadyError(BAMBUDDY_NOT_READY)
+        if name == "bambuddy" and not current.api_key:
+            # #7882: the source is read with the API's own key; without one every read
+            # would be Bambuddy's 401.
+            raise StoreNotReadyError(BAMBUDDY_KEY_NOT_READY)
     settings = RenderSettingsSource(pool, defaults)
     settings.seed(current)
     async with AsyncExitStack() as stack:

@@ -331,7 +331,7 @@ same way, `vite.config.ts`).
   this server." in place of the table, and the page shows it in place of the versions and the
   document (`PresetsTab.tsx`, `PresetPage.tsx`).
   Codes and labels (#6955): `/x/:code` (`pages/CodePage.tsx`) asks `GET /api/v1/codes/{code}` and opens
-  the spool or place; `filament/locations/:id` (`pages/filament/LocationPage.tsx`) is a place's page, with its files and links (entity `location:<id>`, #6950). The
+  the spool, place or item kind (`codeTarget`, `inventoryPaths.kind`); `filament/locations/:id` (`pages/filament/LocationPage.tsx`) is a place's page, with its files and links (entity `location:<id>`, #6950). The
   Locations tab's name opens that page, its count badge opens the spools filter, and "Print printer
   labels" opens the labels page with `?printers=`. The labels page also takes `?locations=<id>,<id>`
   (`LocationLabel`; a place that cannot be read is named and the rest are drawn;
@@ -439,7 +439,7 @@ same way, `vite.config.ts`).
   `POST /tags/reads`, which opens what the tag names: the spool that holds it (`KnownTag`), the
   thing a typed code or `scadbuddy:spool:<id>` text in its records names (`next` `open_code`,
   `resolved` in the `/codes/{code}` shape; `components/filament/scan/CodeCard.tsx`, with
-  `lib/resolvedCode.ts` for the label "Place L-4" / "Spool S-142" and the target page), or the
+  `lib/resolvedCode.ts` for the label "Place L-4" / "Spool S-142" / "Kind K-3" and the target page; a kind opens `inventoryPaths.kind`), or the
   New tag card. The switch "Open what I scan at once" (localStorage `scadbuddy.scan.openAtOnce`,
   `"1"` when on, read in try/catch) navigates to the thing on each `open_spool` or `open_code`
   read and starts the scan by itself when the page opens, falling back to the Scan button with

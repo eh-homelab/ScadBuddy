@@ -2,7 +2,7 @@ import { Suspense, type ReactNode } from 'react'
 import { Navigate, Route, Routes } from 'react-router'
 import { Skeleton } from '@/components/ui/skeleton'
 import { AppShell } from './components/AppShell'
-import { inventoryPaths } from './lib/inventoryLinks'
+import { inventoryPaths, PARTS_KIND } from './lib/inventoryLinks'
 import { lazyRetry } from './lib/lazyRetry'
 import { ActivityPage } from './pages/ActivityPage'
 import { CataloguePage } from './pages/CataloguePage'
@@ -160,8 +160,8 @@ export function App() {
         <Route path="x/:code" element={<CodePage />} />
         <Route path="orders" element={<OrdersPage />} />
         <Route path="orders/profit" element={<ProfitPage />} />
-        {/* #7067, spec §6.11 — the parts page moved into the Inventory, on the Part kind. */}
-        <Route path="orders/parts" element={<Navigate to={inventoryPaths.kind('part')} replace />} />
+        {/* #7067, spec §6.11 — the parts page moved into the Inventory, on the parts' kind (`PARTS_KIND`). */}
+        <Route path="orders/parts" element={<Navigate to={inventoryPaths.kind(PARTS_KIND)} replace />} />
         <Route path="orders/:id" element={<OrderPage />} />
         <Route path="customers" element={<CustomersPage />} />
         <Route path="customers/:id" element={<CustomerPage />} />

@@ -68,10 +68,9 @@ class MediaMtx:
             if page >= body.get("pageCount", 1):
                 return found
 
-    async def ready(self) -> dict[str, bool]:
-        """Each running path's ``ready`` flag, from the runtime list ``/v3/paths/list``
-        (fields ``name`` and ``ready``, measured on MediaMTX v1.21.4)."""
-        found: dict[str, bool] = {}
+    async def _runtime(self) -> list[dict[str, Any]]:
+        """The runtime list ``/v3/paths/list``, every page."""
+        found: list[dict[str, Any]] = []
         page = 0
         while True:
             response = await self._http.get(
@@ -79,11 +78,25 @@ class MediaMtx:
             )
             response.raise_for_status()
             body = response.json()
-            for item in body.get("items") or []:
-                found[item["name"]] = item.get("ready") is True
+            found.extend(body.get("items") or [])
             page += 1
             if page >= body.get("pageCount", 1):
                 return found
+
+    async def ready(self) -> dict[str, bool]:
+        """Each running path's ``ready`` flag, from the runtime list ``/v3/paths/list``
+        (fields ``name`` and ``ready``, measured on MediaMTX v1.21.4)."""
+        return {item["name"]: item.get("ready") is True for item in await self._runtime()}
+
+    async def received(self) -> dict[str, int]:
+        """Each ready path's ``bytesReceived`` from its source, from the runtime list (the
+        field is there on prod's MediaMTX, measured 2026-11-27 UTC). A path that is not ready,
+        or lists no count, is left out."""
+        return {
+            item["name"]: item["bytesReceived"]
+            for item in await self._runtime()
+            if item.get("ready") is True and isinstance(item.get("bytesReceived"), int)
+        }
 
     async def put_path(self, name: str, conf: dict[str, Any]) -> None:
         """Add the path, or replace it when it exists."""

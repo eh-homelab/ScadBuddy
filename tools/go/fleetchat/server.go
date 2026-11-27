@@ -181,12 +181,12 @@ type sessionArgs struct {
 
 type channelArgs struct {
 	SessionID string `json:"session_id" jsonschema:"Your Claude Code session id (a lower-case UUID). Your handle is its first 8 characters."`
-	Channel   string `json:"channel" jsonschema:"The channel name, ^[a-z0-9-]{1,40}$."`
+	Channel   string `json:"channel" jsonschema:"The channel, in lower case, at most 256 characters: a GitHub issue or PR reference (owner/repo#123, such as eh-homelab/clusters#1234), an Actions run reference (owner/repo/runs/123), or a name under Kubernetes' naming rules (a DNS-1123 subdomain such as agent-fleet: a-z, 0-9, - and ., each dot-separated part 1-63 characters that starts and ends with a letter or digit)."`
 }
 
 type sendArgs struct {
 	SessionID string `json:"session_id" jsonschema:"Your Claude Code session id (a lower-case UUID). Your handle is its first 8 characters."`
-	Channel   string `json:"channel,omitempty" jsonschema:"Post to this channel (you must be a member). Give channel or agent, not both."`
+	Channel   string `json:"channel,omitempty" jsonschema:"Post to this channel (you must be a member): a name, or an issue, PR or run reference such as eh-homelab/clusters#1234. Give channel or agent, not both."`
 	Agent     string `json:"agent,omitempty" jsonschema:"Send a direct message to the agent with this 8-character handle. Give channel or agent, not both. A virtual sender's name (such as rotator) takes no messages."`
 	Text      string `json:"text" jsonschema:"The message text."`
 }

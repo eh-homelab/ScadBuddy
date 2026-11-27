@@ -26,7 +26,7 @@ import { formatMoney } from '../lib/money'
 import { DEFAULT_ORDERS_QUERY, isReportFiltered, LOSS_OR_THIN, moreFiltersOn, parseOrdersQuery, REPORT_KEYS, statusesOf, toOrdersParams, type OrdersQuery } from '../lib/ordersQuery'
 import { applyView, endedSince, HIDE_DAYS, ORDER_VIEWS, readOrdersMemory, storeOrdersMemory, viewOf } from '../lib/orderViews'
 import { useAsync } from '../lib/useAsync'
-import { inventoryPaths } from '../lib/inventoryLinks'
+import { inventoryPaths, PART_KINDS, PARTS_KIND } from '../lib/inventoryLinks'
 import { inventoryApi, type Item } from './inventory/api'
 
 const PAGE = 50
@@ -83,7 +83,7 @@ function reportFilterText(query: OrdersQuery): string {
   return parts.join(', ')
 }
 
-/** #5543, job cost spec §11: the parts (items under the Part kind, #7067, R-P2-39) at or below their low-stock level, each linked to its page. */
+/** #5543, job cost spec §11: the parts (the items under `PART_KINDS`, #7067, R-P2-39) at or below their low-stock level, each linked to its page. */
 function LowStock({ items }: { items: Item[] }) {
   if (items.length === 0) return null
   return (
@@ -99,7 +99,7 @@ function LowStock({ items }: { items: Item[] }) {
         </span>
       ))}
       .{' '}
-      <Link to={`${inventoryPaths.kind('part')}&low=true`} className="underline underline-offset-4">
+      <Link to={`${inventoryPaths.kind(PARTS_KIND)}&low=true`} className="underline underline-offset-4">
         Inventory
       </Link>
     </p>
@@ -207,8 +207,12 @@ export function OrdersPage() {
   const customers = useAsync(() => api.customers({ includeArchived: true, limit: 500 }), [])
   const list = useAsync(() => api.orders(query, { limit: PAGE }), [key], ['orders'])
   // #5543: a fulfilment takes parts out of stock, so the low parts are read again on an order's change.
-  // R-P2-39: the parts an order uses are the items under the Part kind.
-  const lowItems = useAsync(() => inventoryApi.items({ kind: 'part', low: true }), [], ['orders'])
+  // R-P2-39: the parts an order uses are the items under `PART_KINDS`. The list takes one kind, so one read per kind.
+  const lowItems = useAsync(
+    () => Promise.all(PART_KINDS.map((kind) => inventoryApi.items({ kind, low: true }))).then((lists) => lists.flat().sort((a, b) => a.name.localeCompare(b.name))),
+    [],
+    ['orders'],
+  )
   const [older, setOlder] = useState<{ key: string; items: OrderRow[]; cursor: string | null } | null>(null)
   const [sort, setSort] = useState<MarginSort>('none')
   const [loadingMore, setLoadingMore] = useState(false)

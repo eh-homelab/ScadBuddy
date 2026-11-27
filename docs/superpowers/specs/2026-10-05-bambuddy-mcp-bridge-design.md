@@ -90,6 +90,9 @@ from live Bambuddy 1.2.6b1.
 - **Render key precedent.** `library/settings_store.py` `render_bambuddy_key()` returns the
   render key, or else the full key with a fallback flag. The Settings view exposes
   `has_render_api_key` and `render_key_fallback` (`api/settings.py`).
+  Since #7882 neither stands: the render worker gets no Bambuddy key at all (the CRUD
+  route's `withheld`), and the fallback flag and `render_key_fallback` are gone. Do not
+  follow this precedent as written.
 - **Settings events.**
   - They go out on the Postgres bus (`core/pg_events.py`: `pg_notify`, and every
     replica LISTENs).

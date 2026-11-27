@@ -111,8 +111,9 @@ type Blobs struct {
 	// sent (httpx.Outside); its spans carry the method, the status and the peer "s3", never
 	// the URL, whose query is the presigned signature.
 	HTTP *http.Client
-	// Stream sends a read's GET (OpenKey), whose body the caller reads, and a publish's PUT
-	// (PublishFile), whose body streams from a spooled file: it has no total
+	// Stream sends a read's GET (OpenKey), whose body the caller reads, and put's GET of an
+	// object it checks and its PUT (Put, PublishFile, PutContent), whose body streams from a
+	// spooled file: it has no total
 	// timeout, since http.Client.Timeout also covers reading the body. fetch bounds the wait
 	// for the response headers (HeaderWait), and the caller's ctx and Close bound the rest.
 	Stream *http.Client
@@ -378,11 +379,15 @@ func (b *Blobs) hold(ctx context.Context, sha256 string) (release func(), err er
 		<-b.slots
 		return nil, err
 	}
+	name := objectLock(backendS3, sha256)
 	var once sync.Once
 	release = func() {
 		once.Do(func() {
 			closing, cancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
 			defer cancel()
+			// Unlock before the close: the server frees a closed session's locks only once its
+			// backend exits, after Close returns, so a removal's try-lock could still fail.
+			_, _ = conn.Exec(closing, "SELECT pg_advisory_unlock_all()")
 			_ = conn.Close(closing)
 			<-b.slots
 		})
@@ -394,7 +399,6 @@ func (b *Blobs) hold(ctx context.Context, sha256 string) (release func(), err er
 	if tries <= 0 {
 		tries = stageLockTries
 	}
-	name := objectLock(backendS3, sha256)
 	for range tries {
 		err = pgx.BeginFunc(ctx, conn, func(tx pgx.Tx) error {
 			if _, err := tx.Exec(ctx, "SELECT set_config('lock_timeout', $1, true)",
@@ -486,8 +490,14 @@ func stored(ctx context.Context, body []byte, t ticket) error {
 	if matches(body, t) {
 		return nil
 	}
+	return mismatched(ctx, t.Kind, t.SHA256)
+}
+
+// mismatched is stored's refusal of a content object of kind's blob of sha256 that is other
+// bytes, logged; a commit and stage (held) both answer it.
+func mismatched(ctx context.Context, kind, sha string) error {
 	slog.WarnContext(ctx, "the store's object is not the bytes its key names; it is left as it is",
-		"kind", t.Kind, "sha256", t.SHA256)
+		"kind", kind, "sha256", sha)
 	// 409, not 503: only a repair of the object fixes it, so it is no passing failure to retry
 	// (Python's `_verified` answers 403 ref_mismatch for the same case).
 	return refused(http.StatusConflict, "store_object_mismatch",

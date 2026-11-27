@@ -1,6 +1,6 @@
 import { NavLink } from 'react-router'
 import { tabsListVariants } from '@/components/ui/tabs'
-import { inventoryPaths } from '../../lib/inventoryLinks'
+import { inventoryPaths, PARTS_KIND } from '../../lib/inventoryLinks'
 import { cn } from '@/lib/utils'
 
 /** shadcn's tabs, as links, as the Workflows page's are. */
@@ -13,7 +13,7 @@ const tabClass = ({ isActive }: { isActive: boolean }) =>
   )
 
 /** #5329 — the orders list and the profit report (`/orders/profit`), one tab each; Parts opens
- * the Inventory on the Part kind (#7067), where the parts and the model rules moved. */
+ * the Inventory on the parts' kind (`PARTS_KIND`, #7067), where the parts and the model rules moved. */
 export function OrdersTabs() {
   return (
     <nav aria-label="Orders views" className={cn(tabsListVariants(), 'h-9')}>
@@ -23,7 +23,7 @@ export function OrdersTabs() {
       <NavLink to="/orders/profit" className={tabClass}>
         Profit
       </NavLink>
-      <NavLink to={inventoryPaths.kind('part')} className={tabClass}>
+      <NavLink to={inventoryPaths.kind(PARTS_KIND)} className={tabClass}>
         Parts
       </NavLink>
     </nav>

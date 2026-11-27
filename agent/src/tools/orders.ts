@@ -1568,7 +1568,8 @@ export const orderTools: Tool[] = [
       ),
   }),
   // Parts inventory (#5543, job cost spec §11): the hooks, rings and magnets an item uses
-  // beside its filament. Since #7067 a part is an inventory item of a kind under `part`, and
+  // beside its filament. Since #7067 a part is an inventory item of a kind under `hardware` or
+  // `ams_part` (inventory K1 put both under `consumable`), and
   // part_list and part_stock_add are aliases of inventory_item_list and inventory_lot_receive.
   // They keep their old answers, which only the `/parts` alias routes build (the pack, its
   // price and its currency, inventory/part_alias.py), so they call those; both the tools
@@ -1577,7 +1578,7 @@ export const orderTools: Tool[] = [
     name: 'part_list',
     label: 'List parts',
     description:
-      'Alias of inventory_item_list; goes after one release (#7067): use inventory_item_list with `kind: "part"`. ' +
+      'Alias of inventory_item_list; goes after one release (#7067): use inventory_item_list with `kind: "hardware"` or `kind: "ams_part"`. ' +
       'The parts inventory (keychain hooks, rings, magnets), each part an inventory item: its pack, its unit cost (a ' +
       'decimal string in minor units, the weighted average of the stock on hand of known cost; `cost_unknown` when ' +
       'nothing says what a unit costs), what is `on_hand` (below zero when more was used ' +
@@ -1636,7 +1637,7 @@ export const orderTools: Tool[] = [
     label: "Set a line item's parts",
     description:
       'The parts one unit of a line item uses, replaced whole (an empty list clears them). Each part is an inventory ' +
-      'item whose kind tracks lots, named `item_id` (inventory_item_list with `kind: "part"` lists them; `part_id` is ' +
+      'item whose kind tracks lots, named `item_id` (inventory_item_list with `kind: "hardware"` or `kind: "ams_part"` lists them; `part_id` is ' +
       "its old name, read the same for one release). A new item takes its model's rule; this changes it. When the item is fulfilled " +
       "its parts times its quantity leave the item's lots (FIFO, at each lot's cost), and job cost counts them as " +
       "the item's `parts_minor`; they come back to the same lots when it is unfulfilled. Refused (409 " +

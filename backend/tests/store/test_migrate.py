@@ -682,3 +682,39 @@ async def test_migrate_to_bambuddy_refused_with_output_blobs(pool: Pool, tmp_pat
     assert index.migration_counts("local", "bambuddy") == (1, 0, 0)
     # Another target takes them.
     await migrate.refuse_outputs_to_bambuddy(index, "s3")
+
+
+async def test_a_bambuddy_source_with_no_key_is_refused_by_name(pool: Pool) -> None:
+    """#8073 review: since #7882 the Bambuddy source is read with the API's own key. With
+    none saved, the check names the key instead of a migration failing on Bambuddy's 401."""
+    current = RenderStoreSettings(
+        store_backend="bambuddy", bambuddy_url="http://bambuddy.test", library_folder_id=1
+    )
+    with pytest.raises(StoreNotReadyError, match="Bambuddy API key"):
+        await migrate.check_backends(current, pool, cast(Settings, None), "bambuddy", "local")
+
+
+async def test_a_bambuddy_source_with_a_key_passes_the_key_check(
+    pool: Pool, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The companion of the refusal above (#8294 review): a saved key gets past the check,
+    and both backends are built."""
+    built: list[str] = []
+
+    class Built:
+        async def aclose(self) -> None:
+            return None
+
+    def build(name: str, *_: Any) -> Built:
+        built.append(name)
+        return Built()
+
+    monkeypatch.setattr(migrate, "build_backend", build)
+    current = RenderStoreSettings(
+        store_backend="bambuddy",
+        bambuddy_url="http://bambuddy.test",
+        library_folder_id=1,
+        api_key="k",
+    )
+    await migrate.check_backends(current, pool, cast(Settings, None), "bambuddy", "local")
+    assert built == ["local", "bambuddy"]

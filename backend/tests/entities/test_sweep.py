@@ -344,6 +344,40 @@ def test_a_printer_merge_moves_the_stock_moves_to_the_kept_printer(pg_pool: PgPo
     assert row is not None and row["entity_id"] == kept_id
 
 
+def test_an_entity_a_relation_names_survives_the_sweep(
+    pg_pool: PgPool, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """`relations` has plain foreign keys to `entities` (design §6.3), so the sweep leaves
+    an orphan that a relation names, as it leaves one a stock move names (R-P2-4), and
+    checks again under its lock."""
+    entities = EntityStore(pg_pool)
+    attachments = EntityAttachmentStore(pg_pool, entities)
+    links = EntityLinkStore(pg_pool, entities)
+    named, bare = _spool(pg_pool), _spool(pg_pool)
+    with pg_pool.connection() as conn, conn.transaction():
+        from_id = entities.ensure(conn, named)
+        to_id = entities.ensure(conn, EntityRef("item_kind", "printer"))
+        conn.execute(
+            "INSERT INTO relations (type_id, from_entity, to_entity, created_by)"
+            " VALUES ('compatible_with', %s, %s, '{}')",
+            (from_id, to_id),
+        )
+    links.add(bare, LinkInput(url="https://example.com/bare"), BY)
+    with pg_pool.connection() as conn:
+        conn.execute(
+            "DELETE FROM filament_spools WHERE id = ANY(%s)",
+            ([uuid.UUID(named.ref), uuid.UUID(bare.ref)],),
+        )
+
+    assert sweep_orphan_entities(entities, attachments) == 1
+
+    with pg_pool.connection() as conn:
+        assert entities.find(conn, named) == from_id
+        assert entities.find(conn, bare) is None
+    monkeypatch.setattr(entities, "orphans", lambda conn, limit, guarded=(): [(from_id, named)])
+    assert sweep_orphan_entities(entities, attachments) == 0
+
+
 def test_the_sweep_publishes_what_it_removes(pg_pool: PgPool) -> None:
     """#6949: the orphan's key goes as one `remove` event, credited to the sweep."""
     entities = EntityStore(pg_pool)

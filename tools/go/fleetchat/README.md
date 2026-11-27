@@ -43,9 +43,37 @@ no binary and no storage of its own: **the host supplies the `Store` and the
   as activity, so a timeout also ends a session that only holds a GET stream.
 
 An agent is its Claude Code `session_id`, a canonical lower-case UUID; its
-handle is the first 8 hex characters. A channel is `^[a-z0-9-]{1,40}$`. A DM's
-`agent` is a handle, or a name: the channel pattern with a character that is no hex
-digit, so no name is ever a handle. The service passes a name to the store, which
+handle is the first 8 hex characters.
+
+A channel's name (#8149) is lower case and at most 256 characters (`MaxChannel`), and
+is one of these (`ValidChannel`):
+
+- a GitHub issue or PR reference, `owner/repo#number`, or an Actions run reference,
+  `owner/repo/runs/id`, such as `eh-homelab/clusters#1234`
+  (`RefChannelPattern`,
+  `^[a-z0-9][a-z0-9-]{0,38}/[a-z0-9._-]{1,100}(?:#[1-9][0-9]{0,9}|/runs/[1-9][0-9]{0,19})$`);
+- a plain name under Kubernetes' naming rules, a
+  [DNS-1123 subdomain](https://kubernetes.io/docs/concepts/overview/working-with-objects/names/#dns-subdomain-names)
+  such as `agent-fleet` or `fleet.ops`, except that the whole may be 256 characters, not 253
+  (`NameChannelPattern`,
+  `^[a-z0-9](?:[-a-z0-9]{0,61}[a-z0-9])?(?:\.[a-z0-9](?:[-a-z0-9]{0,61}[a-z0-9])?)*$`).
+
+Before #8149 a channel was `^[a-z0-9-]{1,40}$` (`LegacyChannelPattern`), which also
+allows a leading or trailing `-`. A channel that already has such a name keeps it: a join,
+a leave and a post take it, but a join that would make a new channel with it is
+`ErrBadChannel`. Upper case is refused, never lower-cased, and the error gives the
+lower-case form. `testdata/channel-vectors.json` holds the cases, and ScadBuddy's core
+and its `fleet_channels` CHECK are tested against the same file.
+
+A store that puts a channel in a URL path segment uses `ChannelSegment`: a name of
+`[a-z0-9.-]` only is its own segment; any other is `SegmentPrefix` (`~`) and the unpadded
+base64url (RFC 4648 §5) of its UTF-8 bytes, so a reference needs no percent escape.
+`ParseChannelSegment` reads one back; it is `ErrBadChannel` for base64url that is padded,
+not canonical or not in the URL-safe alphabet, and for a name no channel can have. The
+vectors' `segments` and `badSegments` hold the cases.
+
+A DM's `agent` is a handle, or a name: `LegacyChannelPattern` with a character that is no
+hex digit, so no name is ever a handle. The service passes a name to the store, which
 refuses a virtual sender's with its reject message.
 
 ## Tools

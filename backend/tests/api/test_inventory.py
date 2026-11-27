@@ -122,7 +122,7 @@ def test_kind_refusals(client: TestClient) -> None:
         f"{API}/kinds/{kind['id']}", json={"parent_id": child["id"]}, headers=press()
     )
     _code(cycle, 422, "kind_cycle")
-    builtin = client.patch(f"{API}/kinds/part", json={"tracking": "unit"}, headers=press())
+    builtin = client.patch(f"{API}/kinds/part", json={"tracking": "lot"}, headers=press())
     _code(builtin, 409, "kind_in_use")
     _item(client, kind["id"])
     _code(client.post(f"{API}/kinds/{kind['id']}/archive", headers=press()), 409, "kind_in_use")
@@ -167,7 +167,7 @@ def test_an_item_round_trips(client: TestClient) -> None:
     kind = _kind(client, parent_id="part")
     item = _item(client, kind["id"], name="Brass insert M3", low_stock="5", manufacturer="Ruthex")
     assert (item["kind_id"], item["tracking"], item["on_hand"]) == (kind["id"], "lot", "0")
-    assert item["kind_path"] == ["part", kind["id"]]
+    assert item["kind_path"] == ["durable", "part", kind["id"]]
     assert item["low"] is True
 
     got = client.get(f"{API}/items/{item['id']}")

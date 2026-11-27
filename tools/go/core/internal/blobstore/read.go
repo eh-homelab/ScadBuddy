@@ -120,7 +120,7 @@ func (b *Blobs) fetch(ctx context.Context, s3 *S3, ref Ref) (io.ReadCloser, erro
 		return nil, fmt.Errorf("blobstore: the S3 store answered %d", res.StatusCode)
 	}
 	return &verified{src: res.Body, cancel: cancel, limited: io.LimitReader(res.Body, ref.Size+1),
-		sum: sha256.New(), ref: ref}, nil
+		sum: sha256.New(), ref: ref, declared: res.ContentLength}, nil
 }
 
 // verified hashes what it reads and, at the end, compares it with the row.
@@ -132,6 +132,8 @@ type verified struct {
 	n       int64
 	ref     Ref
 	done    error
+	// declared is the GET's Content-Length, or -1 when it sent none.
+	declared int64
 }
 
 func (v *verified) Read(p []byte) (int, error) {

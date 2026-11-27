@@ -3,14 +3,17 @@
 A print run queues one item per plate, and each queue item's print is an archive, which
 ``print_links`` names once Bambuddy reports it (``print_sends`` by ``run_id``, then the
 link by queue item: ``OrderStore.run_archives``). A LAN start has no queue item: its
-archive is the one ``lan_print_archives`` records for the run (#8124). Once the
-attempt's print settled, the attempt copies what the archives say: their ids, the
-printer's start and end, the seconds and grams summed (:func:`mirror_archives`). That
-runs when the print's outcome is heard (``printing.py`` ``listen_for_prints``) and again
-whenever the attempt's archives are read (``GET …/fulfilments/{f}/archives``), so a link
-Bambuddy made late is still copied. An attempt by hand that names its archives copies
-them when it is recorded or edited too (``api/orders.py`` ``record_fulfilment``,
-``update_fulfilment``, #6132).
+archive is the one ``lan_print_archives`` records for the run (#8124). When nobody read
+the print yet, the attempt's read records it first (:func:`link_lan_archives`, #8281):
+from the archives a link by content hash gives the run's subject, by the name of the
+file each one printed, as the print's read does. Once the attempt's print settled, the
+attempt copies what the archives say: their ids, the printer's start and end, the
+seconds and grams summed (:func:`mirror_archives`). That runs when the print's outcome
+is heard (``printing.py`` ``listen_for_prints``) and again whenever the attempt's
+archives are read (``GET …/fulfilments/{f}/archives``) or the media sweep steps its
+import, so a link Bambuddy made late is still copied. An attempt by hand that names its
+archives copies them when it is recorded or edited too (``api/orders.py``
+``record_fulfilment``, ``update_fulfilment``, #6132).
 
 An archive's ``finish_`` photo and its timelapse are copied into the attempt's
 attachments (§6.2, #4251): the bytes are pulled once through the seam into the claim store,
@@ -28,9 +31,11 @@ import logging
 import uuid
 from datetime import UTC, datetime, timedelta
 
+import psycopg
 from fastapi import status
 from pydantic import BaseModel, Field
 
+from scadbuddy.bambuddy.lan_files import lan_subtask, starts_by_files
 from scadbuddy.core.problems import ApiError
 from scadbuddy.operations.claims import ClaimStore
 from scadbuddy.orders import attachments
@@ -57,6 +62,7 @@ from scadbuddy.orders.store import (
     fulfilment_subject,
     item_subject,
 )
+from scadbuddy.print_watch.sweep import LOOKBACK
 from scadbuddy.store import BlobStore
 from scadbuddy.workflows.attempt_media import AttemptMediaStep
 
@@ -70,6 +76,16 @@ SWEEP_CHECK_EVERY = timedelta(hours=1)
 #: so 40 take at most 200 s of the sweep's `ATTEMPT_MEDIA_TIMEOUT` (5 min), with room for
 #: the read; the rest wait for the next pass.
 SWEEP_BATCH = 40
+#: How many archives that may be a LAN run's one read looks at, at most (#8281,
+#: `link_lan_archives`): each is one archive read of Bambuddy.
+LAN_CANDIDATES = 20
+#: How long after a LAN start a link by content hash can still be its archive's, for
+#: `link_lan_archives` (#8306). The links it reads are the ones the print watcher makes
+#: (`print_watch/sweep.py`: a pass every 300 s takes the archives Bambuddy made at most
+#: `LOOKBACK` back), and Bambuddy makes the archive when the print starts. The Prints
+#: list makes its own links later, but records each start itself
+#: (`print_history._link_lan_prints`).
+LAN_LINK_WINDOW = LOOKBACK
 #: How long after its print completed an archive can still gain a timelapse (spec
 #: 2026-11-05 §4.4): Bambuddy writes it minutes after, and the UI says "waiting" till then.
 FRESH = timedelta(hours=1)
@@ -144,6 +160,37 @@ async def _facts(integrations: OrderIntegrations, archive_ids: list[int]) -> lis
     return facts
 
 
+async def link_lan_archives(
+    lifecycle: Lifecycle, integrations: OrderIntegrations, run_id: str
+) -> dict[int, ArchiveFacts]:
+    """Record which archive each LAN start of ``run_id`` became, when nobody read the
+    print yet (#8281): only the print's read records it there (`print_history._run_by_file`).
+    The candidates are the archives that a link by content hash gives the run's subject
+    and that name no start yet, linked within `LAN_LINK_WINDOW` of the run's newest
+    start that no archive names (`OrderStore.lan_candidates`, at most `LAN_CANDIDATES`),
+    so an archive that never matches is not read again past that window. Each is read
+    through the seam, as the attempt reads its own archives, and its file name names its
+    start by the print read's own rule (`lan_files.start_by_file`): exactly one start of
+    one run of the subject, never a guess. One archive per start (#8306): two candidates
+    that name one start record neither (`lan_files.starts_by_files`), and a start that
+    another archive became already keeps it (`OrderStore.record_lan_start`). Returns the
+    facts read, by archive id, so the attempt does not read them again."""
+    store = lifecycle.store
+    found = await asyncio.to_thread(store.lan_candidates, run_id, LAN_CANDIDATES, LAN_LINK_WINDOW)
+    if found is None or not found[1]:
+        return {}
+    subject, archive_ids = found
+    read = {f.archive_id: f for f in await _facts(integrations, archive_ids)}
+    subtasks = sorted({s for f in read.values() if (s := lan_subtask(f.filename)) is not None})
+    if not subtasks:
+        return read
+    runs = await asyncio.to_thread(store.lan_runs, subject, subtasks)
+    for link in starts_by_files({a: f.filename for a, f in read.items()}, runs):
+        # False when another archive became the start already: it keeps that one.
+        await asyncio.to_thread(store.record_lan_start, link)
+    return read
+
+
 async def mirror_archives(
     lifecycle: Lifecycle,
     integrations: OrderIntegrations,
@@ -155,17 +202,34 @@ async def mirror_archives(
     the item from its own page) copies that archive's, its print being over. Nothing is
     asked without a Bambuddy, for an attempt by hand naming none, or one whose run
     Bambuddy has linked no archive to yet. A read of Bambuddy slower than
-    ``read_timeout`` raises ``TimeoutError`` before anything is written (#6167)."""
+    ``read_timeout`` raises ``TimeoutError`` before anything is written (#6167). A
+    database error in the LAN link (:func:`link_lan_archives`) is logged, and the read
+    goes on without it (#8306)."""
     if not integrations.linked:
         return attempt, []
+    read: dict[int, ArchiveFacts] = {}
     if attempt.print_run_id is None:
         archive_ids, settled = attempt.archive_ids, True
     else:
+        try:
+            read = await asyncio.wait_for(
+                link_lan_archives(lifecycle, integrations, attempt.print_run_id), read_timeout
+            )
+        except psycopg.Error:
+            # Only the LAN link is lost; the archives already named are read as before,
+            # and the next read tries the link again.
+            logger.exception(
+                "could not link the LAN archives of print run %s", attempt.print_run_id
+            )
         archive_ids = await asyncio.to_thread(lifecycle.store.run_archives, attempt.print_run_id)
         settled = attempt.finished_at is not None
     if not archive_ids:
         return attempt, []
-    facts = await asyncio.wait_for(_facts(integrations, archive_ids), read_timeout)
+    fetched = await asyncio.wait_for(
+        _facts(integrations, [a for a in archive_ids if a not in read]), read_timeout
+    )
+    by_id = {**read, **{f.archive_id: f for f in fetched}}
+    facts = [by_id[a] for a in archive_ids if a in by_id]
     if not settled or not facts:
         return attempt, facts
     started = [f.started_at for f in facts if f.started_at is not None]

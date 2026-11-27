@@ -275,6 +275,22 @@ class PrintRuns(LatestRuns, Protocol):
     ) -> PrintRun: ...
 
 
+def lan_started_in(
+    conn: Connection[DictRow], run_subject: str, subtask_names: list[str]
+) -> list[PrintRun]:
+    """`PrintRunStore.lan_started` on ``conn``: the API's order reads ask it in their own
+    connection (`orders/store.py` `OrderStore.lan_runs`, #8281)."""
+    rows = conn.execute(
+        f"SELECT {_COLUMNS} FROM print_runs WHERE output_id = %s"
+        " AND EXISTS (SELECT 1 FROM"
+        " jsonb_array_elements(result->'lan') AS start"
+        " WHERE start->>'subtask_name' = ANY(%s))"
+        " ORDER BY created_at",
+        (run_subject, subtask_names),
+    ).fetchall()
+    return [PrintRun.model_validate(row) for row in rows]
+
+
 class PrintRunStore:
     """``print_runs`` (migrations ``20260928T1200Z_print_runs``,
     ``*_print_runs_on_temporal``), on the process's pool. Every method runs its queries
@@ -500,15 +516,7 @@ class PrintRunStore:
 
     def _lan_started(self, run_subject: str, subtask_names: list[str]) -> list[PrintRun]:
         with self._pool.connection() as conn:
-            rows = conn.execute(
-                f"SELECT {_COLUMNS} FROM print_runs WHERE output_id = %s"
-                " AND EXISTS (SELECT 1 FROM"
-                " jsonb_array_elements(result->'lan') AS start"
-                " WHERE start->>'subtask_name' = ANY(%s))"
-                " ORDER BY created_at",
-                (run_subject, subtask_names),
-            ).fetchall()
-        return [PrintRun.model_validate(row) for row in rows]
+            return lan_started_in(conn, run_subject, subtask_names)
 
     def _lan_unnamed(self, since: datetime, limit: int, skip: list[str]) -> list[LanPending]:
         with self._pool.connection() as conn:

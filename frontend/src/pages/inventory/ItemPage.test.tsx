@@ -31,7 +31,7 @@ describe('ItemPage (#7067)', () => {
     render(INVENTORY.HOOK)
     expect(await screen.findByRole('heading', { level: 1, name: 'Silver keychain hook' })).toBeInTheDocument()
     const path = screen.getByRole('navigation', { name: 'Kind' })
-    expect(within(path).getByRole('link', { name: 'Part' })).toHaveAttribute('href', '/inventory?kind=part')
+    expect(within(path).getByRole('link', { name: 'Consumable' })).toHaveAttribute('href', '/inventory?kind=consumable')
     expect(within(path).getByRole('link', { name: 'Hardware' })).toHaveAttribute('href', '/inventory?kind=hardware')
     const offers = await screen.findByRole('table', { name: 'Offers' })
     const link = within(offers).getByRole('link', { name: /amazon\.com/ })

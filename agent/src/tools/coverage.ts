@@ -152,11 +152,11 @@ export const NOT_A_TOOL: readonly { operation: Operation; reason: string }[] = [
   },
   {
     operation: 'GET /api/v1/parts/rules/{slug}',
-    reason: "The model rules in Inventory, under the Part kind (#5543, #7067, job cost spec §11): a new item takes its rule, and order_item_parts_set changes an item's parts.",
+    reason: "The model rules in Inventory, under the Hardware and AMS part kinds (#5543, #7067, job cost spec §11): a new item takes its rule, and order_item_parts_set changes an item's parts.",
   },
   {
     operation: 'PUT /api/v1/parts/rules/{slug}',
-    reason: "The model rules in Inventory, under the Part kind (#5543, #7067, job cost spec §11): a new item takes its rule, and order_item_parts_set changes an item's parts.",
+    reason: "The model rules in Inventory, under the Hardware and AMS part kinds (#5543, #7067, job cost spec §11): a new item takes its rule, and order_item_parts_set changes an item's parts.",
   },
   {
     operation: 'GET /api/v1/print/library-copies',
