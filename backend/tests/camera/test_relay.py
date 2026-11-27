@@ -625,3 +625,99 @@ async def test_a_failed_silent_restart_puts_the_path_back_later() -> None:
     assert "stopped" not in api.states("p1")
     assert "stopped" not in api.states("p2")
     await subject.aclose()
+
+
+async def test_a_path_put_back_after_a_failed_restart_keeps_its_doubled_wait() -> None:
+    api = FakeApi([source("p1")])
+    mtx = FakeMtx()
+    subject = relay(api, mtx)
+    await subject.reconcile_all()
+    mtx.ready["p1"] = True
+    mtx.received["p1"] = 100
+    await subject.check_silence(0.0)
+    # The restart's source read fails, and so does the first try to put p1 back.
+    api.source_failures = 2
+    await subject.check_silence(SILENT_SECONDS)
+    await subject.check_silence(SILENT_SECONDS + SILENT_TICK)
+    assert "p1" not in mtx.paths
+    now = SILENT_SECONDS + 2 * SILENT_TICK
+    await subject.check_silence(now)  # puts p1 back
+    assert "p1" in mtx.paths
+    await subject.check_silence(now + SILENT_TICK)
+    before = restarts(mtx, "p1")
+    # Still silent: the next restart waits 2 * SILENT_SECONDS, not SILENT_SECONDS.
+    await subject.check_silence(now + SILENT_TICK + SILENT_SECONDS)
+    assert restarts(mtx, "p1") == before
+    await subject.check_silence(now + SILENT_TICK + 2 * SILENT_SECONDS)
+    assert restarts(mtx, "p1") == before + 1
+    await subject.aclose()
+
+
+async def test_a_lost_path_with_an_undialable_source_is_not_tried_each_tick(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    api = FakeApi([source("p1")])
+    mtx = FakeMtx()
+    subject = relay(api, mtx)
+    await subject.reconcile_all()
+    mtx.ready["p1"] = True
+    mtx.received["p1"] = 100
+    await subject.check_silence(0.0)
+    api.source_failures = 1
+    await subject.check_silence(SILENT_SECONDS)
+    # The source now names a host off the LAN: reconcile refuses it once, then stops.
+    api.sources = [source("p1", host="8.8.8.8")]
+    for tick in range(1, 4):
+        await subject.check_silence(SILENT_SECONDS + tick * SILENT_TICK)
+    assert "p1" not in mtx.paths
+    assert caplog.text.count("is not put back") == 1
+    assert "still not back" not in caplog.text
+    await subject.aclose()
+
+
+async def test_a_lost_path_whose_host_does_not_resolve_once_is_put_back(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from scadbuddy.printers import address
+
+    failures = {"left": 0}
+
+    async def resolve(host: str, port: Any, **kwargs: Any) -> list[Any]:
+        if failures["left"]:
+            failures["left"] -= 1
+            raise OSError("temporary failure in name resolution")
+        return [(0, 0, 0, "", ("10.0.0.8", 0))]
+
+    monkeypatch.setattr(address, "_getaddrinfo", resolve)
+    api = FakeApi([source("p1", host="printer.lan")])
+    mtx = FakeMtx()
+    subject = relay(api, mtx)
+    await subject.reconcile_all()
+    mtx.ready["p1"] = True
+    mtx.received["p1"] = 100
+    await subject.check_silence(0.0)
+    api.source_failures = 1
+    await subject.check_silence(SILENT_SECONDS)
+    assert "p1" not in mtx.paths
+    failures["left"] = 1
+    await subject.check_silence(SILENT_SECONDS + SILENT_TICK)
+    assert "p1" not in mtx.paths
+    await subject.check_silence(SILENT_SECONDS + 2 * SILENT_TICK)
+    assert mtx.paths["p1"]["source"] == "rtsps://bblp:12345678@10.0.0.8:322/streaming/live/1"
+    await subject.aclose()
+
+
+async def test_a_stopped_printer_loses_its_silent_series() -> None:
+    api = FakeApi([source("p1")])
+    mtx = FakeMtx()
+    subject = relay(api, mtx)
+    await subject.reconcile_all()
+    mtx.ready["p1"] = True
+    mtx.received["p1"] = 100
+    await subject.check_silence(0.0)
+    await subject.check_silence(SILENT_SECONDS)
+    assert REGISTRY.get_sample_value(SAMPLE, {"printer": "p1"}) is not None
+    api.sources = []
+    await subject.reconcile_all()
+    assert REGISTRY.get_sample_value(SAMPLE, {"printer": "p1"}) is None
+    await subject.aclose()
