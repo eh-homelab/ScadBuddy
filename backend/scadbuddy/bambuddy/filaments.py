@@ -739,11 +739,11 @@ def _fallback(
     opened empty. The dialog says why the choice differs from the file (its material, or
     its colour outside ``colour_matches``); every slot stays editable.
 
-    Lower is better, in this order: a spool no earlier slot took, the slot's opacity, a
+    Lower is better, in this order: a spool no other slot took, the slot's opacity, a
     colour within :data:`COLOUR_MATCH_DISTANCE`, the slot's material family (the plate's
     for an undeclared slot), then the colour distance. So a close colour in another
-    material beats a far colour in the same one. A slot shares a tray an earlier slot
-    took only when every free tray is gone and that tray's colour is close: one spool for
+    material beats a far colour in the same one. A slot shares a tray another slot took
+    (an earlier slot's fallback, or any slot's match) only when every free tray is gone and that tray's colour is close: one spool for
     two colours that differ would print the plate in one colour."""
     wanted = {family(slot.material)} if slot.material else families
     ranked: list[tuple[tuple[bool, bool, bool, bool, float], int]] = []

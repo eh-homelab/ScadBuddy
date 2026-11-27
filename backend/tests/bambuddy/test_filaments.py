@@ -1053,6 +1053,29 @@ def test_a_fallback_never_takes_a_later_slots_match() -> None:
     assert {choice.slot_id: choice.spool_id for choice in built.suggested} == {1: 2, 2: 1}
 
 
+def test_fallbacks_around_a_matched_slot_go_in_slot_order() -> None:
+    """#8264 review: slot 2 matches the pink; slots 1 and 3 match nothing and want almost
+    the same blue. Slot 2 keeps its match, and the fallbacks run in slot order: slot 1
+    takes the free tray nearest its blue, and slot 3 the one left."""
+    shelf = [
+        _spool(1, "F5547CFF"),  # PLA pink, loaded, AMS-A slot 1
+        _spool(2, "FFFFFFFF"),  # PLA white, loaded, AMS-A slot 2
+        _spool(3, "A7AEB2FF"),  # PLA grey, loaded, AMS-A slot 3
+    ]
+    built = _built(
+        library_file_id=1,
+        spools=shelf,
+        assignments=[_loaded(1, 0), _loaded(2, 1), _loaded(3, 2)],
+        requirements=[
+            SlotNeed(slot_id=1, material="PLA", colour="#0047BB"),
+            SlotNeed(slot_id=2, material="PLA", colour="#FF1493"),
+            SlotNeed(slot_id=3, material="PLA", colour="#0048BC"),
+        ],
+        printer=printer(),
+    )
+    assert {choice.slot_id: choice.spool_id for choice in built.suggested} == {1: 3, 2: 1, 3: 2}
+
+
 def test_an_undeclared_slot_follows_the_declared_material_not_its_best_match() -> None:
     """Regression cover for the declared path beside #2850's fix: with a slot declaring
     PLA, an undeclared one is suggested a PLA, not the PETG that matches its colour
