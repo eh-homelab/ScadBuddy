@@ -34,6 +34,7 @@ from opentelemetry.trace import SpanKind
 from psycopg import Connection, sql
 from psycopg.conninfo import conninfo_to_dict, make_conninfo
 from psycopg.rows import DictRow, dict_row
+from psycopg.types.json import Jsonb
 from psycopg_pool import ConnectionPool
 from temporalio.worker import _workflow as temporal_workflow_worker
 
@@ -523,6 +524,10 @@ def _pg_template(_pg_database_url: str | None) -> Iterator[str | None]:
     try:
         with psycopg.connect(make_conninfo(url, dbname=name), autocommit=True) as conn:
             migrate(conn)
+            # The migrations publish history events (#6949: the property history's
+            # back-fill, the item kinds' schemas). A test starts with the log as it was
+            # before them: empty, from seq 1, behind the history subscriber's cursor.
+            conn.execute("TRUNCATE events RESTART IDENTITY")
         yield name
     finally:
         with psycopg.connect(url, autocommit=True) as conn:
@@ -586,6 +591,42 @@ def pg_pool(pg_conninfo: str) -> Iterator[PgPool]:
         yield pool
     finally:
         pool.close()
+
+
+HistoryRows = Callable[..., None]
+
+_PROPERTY_HISTORY = ("event_seq", "entity_id", "kind", "ref", "key", "op", "old", "new", "source")
+_SCHEMA_HISTORY = ("event_seq", "owner", "old", "new")
+
+
+def _history_rows(conn: Connection[Any], *rows: Mapping[str, Any]) -> None:
+    """Insert history rows as the history subscriber (scadbuddy-core, Go) writes them: a
+    row with an ``owner`` into `entity_property_schema_history`, any other into
+    `entity_property_history`. ``at`` is now and ``actor`` the browser unless given; the
+    JSON columns take Python values."""
+    for row in rows:
+        schema = "owner" in row
+        columns = _SCHEMA_HISTORY if schema else _PROPERTY_HISTORY
+        values = [
+            Jsonb(row.get(c)) if c in ("old", "new") and row.get(c) is not None else row.get(c)
+            for c in columns
+        ]
+        table = "entity_property_schema_history" if schema else "entity_property_history"
+        conn.execute(
+            sql.SQL("INSERT INTO {} ({}, at, actor) VALUES ({}, coalesce(%s, now()), %s)").format(
+                sql.Identifier(table),
+                sql.SQL(", ").join(map(sql.Identifier, columns)),
+                sql.SQL(", ").join(sql.Placeholder() * len(columns)),
+            ),
+            (*values, row.get("at"), Jsonb(row.get("actor", {"kind": "browser"}))),
+        )
+
+
+@pytest.fixture
+def history_rows() -> HistoryRows:
+    """`_history_rows`: Python does not run the Go history subscriber, so a test of a
+    history read writes its rows."""
+    return _history_rows
 
 
 MODEL_SLUG = "demo"

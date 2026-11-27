@@ -21,6 +21,7 @@ from scadbuddy.printers.models import PrinterCreate
 from scadbuddy.printers.store import PrinterStore
 from scadbuddy.render.pg_store import MIGRATIONS, MIGRATIONS_DIR, migrate
 from tests.conftest import UNUSED_TEMPORAL_ADDRESS, PgPool
+from tests.support.printers import MERGED_BY
 
 pytestmark = pytest.mark.requires_postgres
 
@@ -72,7 +73,7 @@ def test_a_linked_printer_is_listed_under_its_bambuddy_id(
     store: SettingsStore, printers: PrinterStore
 ) -> None:
     row = printers.create(PrinterCreate(serial="0938AB000000002", name="H2C"))
-    printers.link_bambuddy(row.id, 3)
+    printers.link_bambuddy(row.id, 3, by=MERGED_BY)
 
     store.set_printer_bed_type(row.id, "Textured PEI Plate")
 
@@ -91,7 +92,7 @@ def test_a_plate_follows_the_registry_link_not_a_stale_bambuddy_id(
     store: SettingsStore, printers: PrinterStore
 ) -> None:
     row = printers.create(PrinterCreate(serial="0938AB000000004", name="H2C"))
-    printers.link_bambuddy(row.id, 7)
+    printers.link_bambuddy(row.id, 7, by=MERGED_BY)
     store.set_printer_bed_type(row.id, "Cool Plate")
 
     printers.unlink_bambuddy(row.id)
@@ -104,11 +105,13 @@ def test_a_plate_follows_the_registry_link_not_a_stale_bambuddy_id(
 def test_a_merge_moves_the_plate_and_the_kept_printers_wins(
     store: SettingsStore, printers: PrinterStore
 ) -> None:
-    synthetic = printers.ensure_bambuddy(4, serial=None, name="H2C", model="H2C")
+    synthetic = printers.ensure_bambuddy(4, serial=None, name="H2C", model="H2C", by=MERGED_BY)
     store.set_printer_bed_type(synthetic.id, "Cool Plate")
     mine = printers.create(PrinterCreate(serial="0938AB000000006", name="Mine"))
 
-    kept = printers.ensure_bambuddy(4, serial="0938AB000000006", name="H2C", model="H2C")
+    kept = printers.ensure_bambuddy(
+        4, serial="0938AB000000006", name="H2C", model="H2C", by=MERGED_BY
+    )
 
     assert kept.id == mine.id
     assert store.load().bed_type_of(printer=mine.id) == "Cool Plate"

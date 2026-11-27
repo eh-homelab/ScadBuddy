@@ -205,6 +205,7 @@ from scadbuddy.filament.unknown_tray_rows import UnknownSpoolBlock, UnknownSpool
 from scadbuddy.library.output_prints import OutputPrintStore
 from scadbuddy.library.outputs import LanPlateSend, PlateSend
 from scadbuddy.library.settings_store import PrintSettings
+from scadbuddy.orders.models import Actor
 from scadbuddy.print_watch.lan import LanCapture, LanImport
 from scadbuddy.printers.lan_models import LanStopped
 from scadbuddy.printers.models import BambuddyView, PrinterRow
@@ -1041,7 +1042,11 @@ class RemotePrinterStore(PrinterStore):
         name: str,
         model: str | None,
         listed: set[int] | frozenset[int] | None = None,
+        by: Actor,
     ) -> tuple[PrinterRow, bool]:
+        # ``by`` stays here: the route names the print worker (`print`) as the merge's
+        # actor, whoever this process says it is (#6949).
+        del by
         body = {
             "bambuddy_printer_id": bambuddy_printer_id,
             "serial": serial,

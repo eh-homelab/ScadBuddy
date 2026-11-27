@@ -18,7 +18,7 @@ a table that names a printer adds itself there (`tests/printers/test_store.py` c
 that every foreign key to ``printers`` is listed), in one of two forms:
 
 - a `PrinterReference` (table, column), for a plain column or one row per printer;
-- a `PrinterReference` with ``repoint``, a `RepointHook` ``hook(conn, merged, into)``,
+- a `PrinterReference` with ``repoint``, a `RepointHook` ``hook(conn, merged, into, by)``,
   for a table whose key holds more than the printer and whose conflicts only it can
   settle. It runs on the merge's connection, inside its transaction, while both rows
   still exist; raising undoes the merge. The filament inventory's AMS tray places and K
@@ -49,7 +49,9 @@ from psycopg_pool import ConnectionPool
 from scadbuddy.core.events import EventBus, PrinterEvent, emit
 from scadbuddy.core.secrets import Envelope, Kek, open_secret, seal_secret
 from scadbuddy.core.settings_cache import settings_written
+from scadbuddy.entities.actor import set_actor
 from scadbuddy.entities.registry import repoint_entity
+from scadbuddy.orders.models import Actor
 from scadbuddy.printers.models import (
     BambuddyView,
     LanLink,
@@ -138,9 +140,15 @@ class SerialUnknownError(ValueError):
         self.printer_id = printer_id
 
 
-#: ``hook(conn, merged, into)``: repoint one table's references from ``merged`` to
-#: ``into`` inside the merge's transaction (module docstring).
-RepointHook = Callable[[Connection[DictRow], str, str], None]
+#: The actor of a printer merge that Bambuddy's own listing causes (#6949): the periodic
+#: sync, a strip read or a run that finds the serial of a row it made without one.
+BAMBUDDY_ACTOR = Actor(kind="provider", principal="bambuddy")
+
+
+#: ``hook(conn, merged, into, by)``: repoint one table's references from ``merged`` to
+#: ``into`` inside the merge's transaction (module docstring); ``by`` is who merged, the
+#: actor of the history a hook's writes publish (#6949).
+RepointHook = Callable[[Connection[DictRow], str, str, Actor], None]
 
 
 @dataclass(frozen=True)
@@ -155,7 +163,9 @@ class PrinterReference:
     repoint: RepointHook | None = None
 
 
-def _repoint_filament_locations(conn: Connection[DictRow], merged: str, into: str) -> None:
+def _repoint_filament_locations(
+    conn: Connection[DictRow], merged: str, into: str, by: Actor
+) -> None:
     # Imported here: the filament inventory is a feature of its own, and the registry
     # needs it only while merging.
     from scadbuddy.filament.locations import repoint_printer_locations
@@ -163,13 +173,13 @@ def _repoint_filament_locations(conn: Connection[DictRow], merged: str, into: st
     repoint_printer_locations(conn, uuid.UUID(merged), uuid.UUID(into))
 
 
-def _repoint_filament_sensors(conn: Connection[DictRow], merged: str, into: str) -> None:
+def _repoint_filament_sensors(conn: Connection[DictRow], merged: str, into: str, by: Actor) -> None:
     from scadbuddy.filament.sensors import repoint_printer_sensors
 
     repoint_printer_sensors(conn, uuid.UUID(merged), uuid.UUID(into))
 
 
-def _drop_override_slots(conn: Connection[DictRow], merged: str, into: str) -> None:
+def _drop_override_slots(conn: Connection[DictRow], merged: str, into: str, by: Actor) -> None:
     """#6264: the merged printer's override-slot rows are dropped, not moved: a row is only
     the attempt guard of a slot the AMS may have reset, and the kept printer's next
     reconcile reads its report and configures what differs."""
@@ -187,7 +197,7 @@ def _drop_unknown_trays(conn: Connection[DictRow], merged: str, into: str) -> No
 
 
 def _repoint_k_values(table: str) -> RepointHook:
-    def repoint(conn: Connection[DictRow], merged: str, into: str) -> None:
+    def repoint(conn: Connection[DictRow], merged: str, into: str, by: Actor) -> None:
         from scadbuddy.filament.types import repoint_k_values
 
         repoint_k_values(conn, table, uuid.UUID(merged), uuid.UUID(into))
@@ -195,7 +205,7 @@ def _repoint_k_values(table: str) -> RepointHook:
     return repoint
 
 
-def _repoint_run_activity(conn: Connection[DictRow], merged: str, into: str) -> None:
+def _repoint_run_activity(conn: Connection[DictRow], merged: str, into: str, by: Actor) -> None:
     # A print run's activity row names its printer in the ``printer`` facet (#3823 Task
     # 8), a JSON value rather than a column, so no foreign key keeps it.
     conn.execute(
@@ -210,7 +220,7 @@ def _repoint_keyed(table: str, keys: tuple[str, ...]) -> RepointHook:
     whose ``keys`` the kept printer already has: the kept printer's stands."""
     same = " AND ".join(f"kept.{key} = gone.{key}" for key in keys)
 
-    def repoint(conn: Connection[DictRow], merged: str, into: str) -> None:
+    def repoint(conn: Connection[DictRow], merged: str, into: str, by: Actor) -> None:
         conn.execute(
             f"DELETE FROM {table} AS gone WHERE gone.printer_id = %(merged)s::uuid"
             f" AND EXISTS (SELECT 1 FROM {table} AS kept"
@@ -230,7 +240,7 @@ def _forget_run_activity(conn: Connection[DictRow], printer_id: str) -> None:
     )
 
 
-def _repoint_lan_imports(conn: Connection[DictRow], merged: str, into: str) -> None:
+def _repoint_lan_imports(conn: Connection[DictRow], merged: str, into: str, by: Actor) -> None:
     # #6045: a LAN-only printer's print record (#4699 phase 4) is found by
     # ``printer_key``, so the key follows the row to the kept printer, and a job recorded
     # again after the merge (under the kept id) finds its row. A job the kept printer
@@ -254,7 +264,7 @@ def _repoint_lan_imports(conn: Connection[DictRow], merged: str, into: str) -> N
 MACHINE_RATE_TABLES = ("printer_cost_profiles", "printer_wear_parts", "printer_maintenance_costs")
 
 
-def _repoint_machine_rate(conn: Connection[DictRow], merged: str, into: str) -> None:
+def _repoint_machine_rate(conn: Connection[DictRow], merged: str, into: str, by: Actor) -> None:
     # The three tables are one set of inputs: when the kept printer has a profile, all of
     # the gone printer's rows go; otherwise all of them move. Never a mix of the two.
     kept = conn.execute(
@@ -274,7 +284,7 @@ def _repoint_rate_events(table: str) -> RepointHook:
     ``source`` names one event across both tables, so it is looked up in both."""
     history = table == "printer_maintenance_events"
 
-    def repoint(conn: Connection[DictRow], merged: str, into: str) -> None:
+    def repoint(conn: Connection[DictRow], merged: str, into: str, by: Actor) -> None:
         same_history = (
             " OR EXISTS (SELECT 1 FROM printer_maintenance_events AS kept"
             " WHERE kept.printer = %(into)s"
@@ -308,7 +318,7 @@ PRINTER_KEYED_SETTINGS = (
 PRINTER_LISTED_SETTINGS = ("print_auto_import_skip_lan_printers",)
 
 
-def _repoint_settings(conn: Connection[DictRow], merged: str, into: str) -> None:
+def _repoint_settings(conn: Connection[DictRow], merged: str, into: str, by: Actor) -> None:
     # The default printer, the registry-keyed map entries and each subject's
     # remembered printer are JSON values (#4971, #5167), so no foreign key keeps them. A
     # map entry ``into`` has of its own wins.
@@ -359,8 +369,8 @@ def _forget_settings(conn: Connection[DictRow], printer_id: str) -> None:
     )
 
 
-def _repoint_entity(conn: Connection[DictRow], gone: str, into: str) -> None:
-    repoint_entity(conn, "printer", gone, into)
+def _repoint_entity(conn: Connection[DictRow], gone: str, into: str, by: Actor) -> None:
+    repoint_entity(conn, "printer", gone, into, by)
 
 
 #: Everything a merge repoints (I7 of the #4186 review). The extension point for every
@@ -641,16 +651,19 @@ class PrinterStore:
             raise PrinterNotFoundError(printer_id)
         return _row(data)
 
-    def _merge(self, conn: Connection[DictRow], gone: str, kept: str) -> None:
+    def _merge(self, conn: Connection[DictRow], gone: str, kept: str, by: Actor) -> None:
         """Make ``kept`` the printer ``gone`` was: every `PRINTER_REFERENCES` row naming
         ``gone`` names ``kept`` (a unique one is dropped when ``kept`` has its own), then
-        ``gone`` is deleted. In the caller's transaction, under its lock."""
+        ``gone`` is deleted. In the caller's transaction, under its lock. ``by`` is who
+        merged: `set_actor` names it, and takes the event log's lock, before any hook
+        locks a row (the entities' rows, `entities/actor.py`)."""
+        set_actor(conn, by)
         for ref in PRINTER_REFERENCES:
             if not isinstance(ref, PrinterReference):
-                ref(conn, gone, kept)
+                ref(conn, gone, kept, by)
                 continue
             if ref.repoint is not None:
-                ref.repoint(conn, gone, kept)
+                ref.repoint(conn, gone, kept, by)
                 continue
             if ref.unique:
                 conn.execute(
@@ -685,10 +698,10 @@ class PrinterStore:
                 ),
             )
 
-    def link_bambuddy(self, printer_id: str, bambuddy_printer_id: int) -> PrinterRow:
+    def link_bambuddy(self, printer_id: str, bambuddy_printer_id: int, by: Actor) -> PrinterRow:
         """Link ``printer_id`` to a Bambuddy printer. A row `ensure_bambuddy` made for
         that Bambuddy printer while its serial was withheld (a synthetic serial, no LAN
-        link) is merged into this one (`_merge`); any other holder refuses."""
+        link) is merged into this one (`_merge`, by ``by``); any other holder refuses."""
         merged: str | None = None
         with self.pool.connection() as conn, conn.transaction():
             conn.execute(_LOCK)
@@ -705,7 +718,7 @@ class PrinterStore:
             if holder is not None:
                 if not (is_synthetic_serial(holder.serial) and holder.lan_host is None):
                     raise BambuddyLinkTakenError(holder.id, bambuddy_printer_id)
-                self._merge(conn, holder.id, row.id)
+                self._merge(conn, holder.id, row.id, by)
                 merged = holder.id
             linked = self._update(
                 conn,
@@ -886,10 +899,11 @@ class PrinterStore:
         name: str,
         model: str | None,
         listed: set[int] | frozenset[int] | None = None,
+        by: Actor,
     ) -> PrinterRow:
         """`ensure_bambuddy_written`'s row, for the callers that need only the row."""
         row, _ = self.ensure_bambuddy_written(
-            bambuddy_printer_id, serial=serial, name=name, model=model, listed=listed
+            bambuddy_printer_id, serial=serial, name=name, model=model, listed=listed, by=by
         )
         return row
 
@@ -901,6 +915,7 @@ class PrinterStore:
         name: str,
         model: str | None,
         listed: set[int] | frozenset[int] | None = None,
+        by: Actor,
     ) -> tuple[PrinterRow, bool]:
         """The row for a Bambuddy printer, and whether this call wrote anything, decided
         under the lock (#4861: an adoption another caller made meanwhile is not this
@@ -910,7 +925,7 @@ class PrinterStore:
         row, ``preferred_path`` ``bambuddy``. Without a serial (Bambuddy withheld it) the
         new row's serial is `synthetic_serial`, so an unlinked Bambuddy printer still
         gets exactly one row; once the serial is known a synthetic row adopts it, or is
-        merged into the row that already holds it (`_merge`).
+        merged into the row that already holds it (`_merge`, by ``by``).
 
         ``listed`` is every id Bambuddy lists now; ``None`` treats every link as live.
         The known case (a row links this id and has nothing to adopt) is read without
@@ -932,8 +947,17 @@ class PrinterStore:
         merged: tuple[str, str] | None = None
         with self.pool.connection() as conn, conn.transaction():
             conn.execute(_LOCK)
+            # The event log's lock before any row a merge writes, `_forget_read_intervals`'
+            # too (`entities/actor.py`).
+            set_actor(conn, by)
             row, merged, wrote = self._ensure_locked(
-                conn, bambuddy_printer_id, serial=serial, name=name, model=model, listed=listed
+                conn,
+                bambuddy_printer_id,
+                serial=serial,
+                name=name,
+                model=model,
+                listed=listed,
+                by=by,
             )
         if merged is not None:
             settings_written()  # after the commit, as in `link_bambuddy`
@@ -954,6 +978,7 @@ class PrinterStore:
         name: str,
         model: str | None,
         listed: set[int] | frozenset[int] | None,
+        by: Actor,
     ) -> tuple[PrinterRow, tuple[str, str] | None, bool]:
         """The row, the merge it made (gone, kept), and whether it wrote."""
 
@@ -987,7 +1012,7 @@ class PrinterStore:
                     _forget_read_intervals(conn, holder.id)
                 merged = None
                 if linked is not None:  # the synthetic row made meanwhile is this printer
-                    self._merge(conn, linked.id, holder.id)
+                    self._merge(conn, linked.id, holder.id, by)
                     merged = (linked.id, holder.id)
                 row = self._update(
                     conn, holder.id, "bambuddy_printer_id = %s", (bambuddy_printer_id,)

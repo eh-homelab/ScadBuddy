@@ -35,6 +35,31 @@ def refresh_asset_metrics(state: AppState) -> None:
     state.metrics.assets_max_bytes.set(usage.max_total_bytes)
 
 
+#: Each subscriber's lag in one read: the newest seq less its cursor, and the age of the
+#: oldest event past it (both read the primary key).
+_SUBSCRIBER_LAG = (
+    "SELECT s.name,"
+    " greatest(coalesce((SELECT max(seq) FROM events), 0) - s.seq, 0) AS lag_events,"
+    " coalesce(extract(epoch FROM clock_timestamp() - (SELECT e.logged_at FROM events e"
+    " WHERE e.seq > s.seq ORDER BY e.seq LIMIT 1)), 0)::float8 AS lag_seconds"
+    " FROM event_subscribers s"
+)
+
+
+def refresh_subscriber_metrics(state: AppState) -> None:
+    """Each event subscriber's lag (#6949, design §4.8), read per scrape. A failed read
+    keeps the last values, as `refresh_asset_metrics` does."""
+    try:
+        with state.projection.pool.connection() as conn:
+            rows = conn.execute(_SUBSCRIBER_LAG).fetchall()
+    except psycopg.Error:
+        logger.exception("could not read the event subscribers' lag")
+        return
+    for row in rows:
+        state.metrics.event_subscriber_lag_events.labels(row["name"]).set(row["lag_events"])
+        state.metrics.event_subscriber_lag_seconds.labels(row["name"]).set(row["lag_seconds"])
+
+
 #: Seconds a local store walk answers the scraper for.
 STORE_USAGE_MAX_AGE = 60.0
 #: Seconds a walk of the piece cache answers the scraper for (#6354): it is a walk of
@@ -98,6 +123,7 @@ async def metrics(state: StateDep) -> Response:
     # reported as scadbuddy_render_store_up 0 rather than failing the scrape.
     await asyncio.to_thread(state.render.refresh_metrics)
     await asyncio.to_thread(refresh_asset_metrics, state)
+    await asyncio.to_thread(refresh_subscriber_metrics, state)
     try:
         await refresh_store_metrics(state)
     except Exception:

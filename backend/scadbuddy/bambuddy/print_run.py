@@ -3479,12 +3479,16 @@ async def _ensure_row(
     there is none (`PrinterStore.ensure_bambuddy`)."""
     if printers is None or row is not None:
         return row
+    # Imported here, as the store's type above: `printers.store` reads Postgres.
+    from scadbuddy.printers.store import BAMBUDDY_ACTOR
+
     return await asyncio.to_thread(
         printers.ensure_bambuddy,
         printer.id,
         serial=printer.serial_number,
         name=printer.name,
         model=printer.model,
+        by=BAMBUDDY_ACTOR,
     )
 
 
