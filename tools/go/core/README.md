@@ -266,6 +266,12 @@ At a stop, the servers drain and the three signals flush within the 20 s shutdow
   run. Where a list's string does not fit, the keyword is that string's keyword, as
   `best_match` names it, not `items`. A patch with more than one bad key names the first key
   in key order; Python names the first in the order sent.
+- Inventory: `GET /kinds/{kind_id}/schema` also answers `item_required` (R-K1-33): the keys an
+  item of the kind must have a value for. They are the kinds' merged `required` keys, ancestor
+  first, then the special type's `requires_properties`, each once (`store.Kinds.Schema`).
+  `backend/scadbuddy/inventory/kinds.py` `kind_item_schema` gives the same keys;
+  `store/testdata/special_requires.json` holds the `requires_properties` that both languages
+  test.
 
 ## Tests
 

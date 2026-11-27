@@ -462,8 +462,8 @@ class SchemaOwnedByKind(ValueError):  # noqa: N818
 
 
 def schema_for(conn: Conn, ref: EntityRef) -> dict[str, Any]:
-    """The schema that types `ref`'s properties: an item's kind's merged schema, else the
-    entity kind's own."""
+    """The schema that types `ref`'s properties: an item's kind's merged schema with its
+    special type's required keys (`kind_item_schema`), else the entity kind's own."""
     if ref.kind == ITEM:
         # Imported here: the inventory imports this module's schema check.
         from scadbuddy.inventory.kinds import item_schema

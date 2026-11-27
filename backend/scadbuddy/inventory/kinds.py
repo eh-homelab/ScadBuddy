@@ -45,15 +45,47 @@ def merged_schema(conn: Conn, kind_id: str) -> dict[str, Any]:
     return merged
 
 
+#: Each special type's `requires_properties`, as Go's catalog (`handlers.Builtin`) has them;
+#: `tools/go/core/internal/inventory/store/testdata/special_requires.json` holds both sides'
+#: test vector.
+SPECIAL_REQUIRES: dict[str, list[str]] = {
+    "filament_spool": ["rgba", "diameter_mm"],
+    "printer": ["model_code"],
+}
+
+
+def kind_item_schema(conn: Conn, kind_id: str) -> dict[str, Any]:
+    """What an item of the kind is checked against (R-K1-33), as Go's `itemSchema`: the
+    merged schema, its `required` followed by the special type's `requires_properties`,
+    each key once. A chain sets at most one special type; with two, Go resolves none and
+    adds no key, and so does this."""
+    schema = merged_schema(conn, kind_id)
+    rows = conn.execute(
+        "WITH RECURSIVE up (id, parent_id, special_type, depth) AS ("
+        " SELECT id, parent_id, special_type, 0 FROM item_kinds WHERE id = %s"
+        " UNION ALL SELECT k.id, k.parent_id, k.special_type, up.depth + 1"
+        " FROM item_kinds k JOIN up ON k.id = up.parent_id WHERE up.depth < 100)"
+        " SELECT special_type FROM up WHERE special_type IS NOT NULL",
+        (kind_id,),
+    ).fetchall()
+    if len(rows) != 1:
+        return schema
+    required = list(schema.get("required", []))
+    required += [k for k in SPECIAL_REQUIRES.get(rows[0]["special_type"], ()) if k not in required]
+    if required:
+        schema["required"] = required
+    return schema
+
+
 def item_schema(conn: Conn, item_id: str) -> dict[str, Any]:
-    """The merged schema of the item's kind; the empty object schema for an id that names
+    """The item's kind's `kind_item_schema`; the empty object schema for an id that names
     no item."""
     try:
         value = UUID(item_id)
     except ValueError:
         return empty_schema()
     row = conn.execute("SELECT kind_id FROM items WHERE id = %s", (value,)).fetchone()
-    return empty_schema() if row is None else merged_schema(conn, row["kind_id"])
+    return empty_schema() if row is None else kind_item_schema(conn, row["kind_id"])
 
 
 def keys_in_use(conn: Conn, kind_id: str) -> list[tuple[str, int]]:
