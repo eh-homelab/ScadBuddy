@@ -2252,7 +2252,7 @@ jobs:
         working-directory: app/ScadBuddy
     steps:
       - uses: actions/checkout@v7
-      # The SDK and the workload set are pinned (app/CLAUDE.md): a new release must not break
+      # The SDK (here and in app/global.json) and the workload set are pinned (app/CLAUDE.md): a new release must not break
       # an unchanged commit. Move both together.
       - uses: actions/setup-dotnet@v5
         with:

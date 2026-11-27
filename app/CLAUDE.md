@@ -13,7 +13,8 @@ adb install -r bin/Release/net10.0-android/com.ehhomelab.scadbuddy-Signed.apk
 ```
 
 CI's `android` job (`ci.yml`, lane `android` in `select-lanes.sh`) runs the tests and the same
-build on `ubuntu-latest` with JDK 17. It pins the .NET SDK (`10.0.301`) and the workload set
+build on `ubuntu-latest` with JDK 17. It pins the .NET SDK (`10.0.301`, in `app/global.json` too: the runner image also has a .NET 11
+SDK, which `dotnet` would otherwise pick, and whose manifests conflict with this workload set) and the workload set
 (`dotnet workload install maui-android --version 10.0.303.1`), the pair measured working here on
 2026-11-27 (`dotnet --version`, `dotnet workload --version`); move them together. The tests (`app/ScadBuddy.Tests`, xunit on `net10.0`, no
 Android) compile the app's pure files by link, today `DeepLink.Links.cs`:
