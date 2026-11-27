@@ -38,6 +38,7 @@ import (
 	"github.com/eh-homelab/ScadBuddy/tools/go/core/internal/bus"
 	"github.com/eh-homelab/ScadBuddy/tools/go/core/internal/changes"
 	"github.com/eh-homelab/ScadBuddy/tools/go/core/internal/crud"
+	"github.com/eh-homelab/ScadBuddy/tools/go/core/internal/devices"
 	"github.com/eh-homelab/ScadBuddy/tools/go/core/internal/edits"
 	"github.com/eh-homelab/ScadBuddy/tools/go/core/internal/escalations"
 	"github.com/eh-homelab/ScadBuddy/tools/go/core/internal/events"
@@ -63,6 +64,7 @@ import (
 	"github.com/eh-homelab/ScadBuddy/tools/go/core/internal/sessions"
 	"github.com/eh-homelab/ScadBuddy/tools/go/core/internal/stores"
 	"github.com/eh-homelab/ScadBuddy/tools/go/core/internal/sweeps"
+	"github.com/eh-homelab/ScadBuddy/tools/go/core/internal/tagreads"
 	"github.com/eh-homelab/ScadBuddy/tools/go/core/internal/tasks"
 	"github.com/eh-homelab/ScadBuddy/tools/go/core/internal/transcripts"
 	"github.com/eh-homelab/ScadBuddy/tools/go/core/internal/turns"
@@ -131,6 +133,9 @@ func run(ctx context.Context, lookupEnv func(string) (string, bool), tel *teleme
 	}
 	// A value Python refuses at its start stops core's too, not each request later.
 	if err := assistantcost.CheckEnv(lookupEnv); err != nil {
+		return err
+	}
+	if err := devices.CheckEnv(lookupEnv); err != nil {
 		return err
 	}
 	trusted, err := front.ParseNetworks(env("SCADBUDDY_CORE_TRUSTED_PROXIES"))
@@ -280,7 +285,7 @@ var areaPackages = []areaRoutes{
 type publicAreas func(pool *pgxpool.Pool, keys *seal.Keys) map[string][]auth.Public
 
 // publicPackages are the packages with public areas.
-var publicPackages = []publicAreas{scan.PublicAreas, unknowntrays.Public}
+var publicPackages = []publicAreas{scan.PublicAreas, unknowntrays.Public, devices.Routes}
 
 // mirrorBlobs is the blob store as area package-mirrors calls it (packages.Blobs): a
 // publish to a key that names a blob is packages.ErrStale.
@@ -294,10 +299,46 @@ func (m mirrorBlobs) PublishFile(ctx context.Context, key, name string, file io.
 	return err
 }
 
+func (m mirrorBlobs) ReadFile(ctx context.Context, key, name string, max int64) ([]byte, bool, error) {
+	data, found, err := m.Blobs.ReadFile(ctx, key, name, max)
+	if errors.Is(err, blobstore.ErrTooLarge) {
+		return nil, false, fmt.Errorf("%w: %w", packages.ErrTooLarge, err)
+	}
+	return data, found, err
+}
+
+// workspaceBlobs is the blob store as area workspace calls it (workspace.Store). Python
+// names a store failure by its class in a write's refusal; the classes are its own.
+type workspaceBlobs struct{ *blobstore.Blobs }
+
+func (w workspaceBlobs) Put(ctx context.Context, kind, _ string, data []byte) (string, error) {
+	key, err := w.Blobs.PutContent(ctx, kind, data)
+	switch blobstore.Reason(err) {
+	case "store_full":
+		return "", storeClass{err, "StoreFullError"}
+	case "store_busy":
+		return "", storeClass{err, "StageLockBusyError"}
+	}
+	return key, err
+}
+
+func (w workspaceBlobs) Get(ctx context.Context, key string) (io.ReadCloser, bool, error) {
+	return w.Blobs.Fetch(ctx, key)
+}
+
+// storeClass is a store failure with the name of Python's exception class for it.
+type storeClass struct {
+	error
+	class string
+}
+
+func (e storeClass) Class() string { return e.class }
+func (e storeClass) Unwrap() error { return e.error }
+
 // sealed are the areas that seal or open with the KEK: without one they refuse to start.
 var sealed = map[string]bool{
 	"credentials": true, "payload-keys": true, "keys": true, "notify": true, "transcripts": true,
-	"remote-plugins": true,
+	"remote-plugins": true, "workspace": true,
 }
 
 // streams are what the event stream's areas (changes, ws) share: the process's one hub and
@@ -373,6 +414,7 @@ func newRouter(pool *pgxpool.Pool, next http.Handler, keys *seal.Keys, areas, au
 	presetsMounted := false
 	// Naming both `unknown-trays` and `unknown-trays:read` mounts the area once.
 	unknownTraysMounted := false
+	devicesNamed := false
 	for name := range strings.SplitSeq(areas, ",") {
 		switch name = strings.TrimSpace(name); name {
 		case "":
@@ -397,6 +439,16 @@ func newRouter(pool *pgxpool.Pool, next http.Handler, keys *seal.Keys, areas, au
 				return nil, fmt.Errorf("SCADBUDDY_CORE_AREAS names %q, which needs %s", name, seal.Variable)
 			}
 			router.AddShared(blobstore.Area, blobstore.Routes(pool, keys, lookupEnv, tel)...)
+		case tagreads.Area:
+			// The store's secret key is sealed: the dumps need the KEK, as area blobs does.
+			if keys == nil {
+				return nil, fmt.Errorf("SCADBUDDY_CORE_AREAS names %q, which needs %s", name, seal.Variable)
+			}
+			reads := &tagreads.Reads{Pool: pool, Blobs: blobstore.New(pool, keys, lookupEnv, tel), Upstream: next}
+			for _, p := range reads.Public()[tagreads.Area] {
+				public.Handle(p.Pattern, gate.Wrap(p.Route, p.Handler))
+				served = true
+			}
 		case filamentpresets.Area:
 			// Public routes that read documents from the blob store, whose S3 secret is
 			// sealed under the KEK. publicPackages pass no lookupEnv or tel, so the case is
@@ -421,6 +473,14 @@ func newRouter(pool *pgxpool.Pool, next http.Handler, keys *seal.Keys, areas, au
 			}
 			store := mirrorBlobs{blobstore.New(pool, keys, lookupEnv, tel)}
 			router.Add("agent", packages.MirrorAreas(pool, store)[packages.MirrorArea]...)
+		case "workspace":
+			// Every route of crud_agent_workspace.py over the blob store in process (#8131):
+			// a file is sealed under the KEK's keys, and the store's secret key is too.
+			if keys == nil {
+				return nil, fmt.Errorf("SCADBUDDY_CORE_AREAS names %q, which needs %s", name, seal.Variable)
+			}
+			store := workspaceBlobs{blobstore.New(pool, keys, lookupEnv, tel)}
+			router.Add("agent", workspace.Routes(pool, keys, store)...)
 		case "changes":
 			s := streamOf()
 			for caller, routes := range changes.Routes(s.hub) {
@@ -429,6 +489,9 @@ func newRouter(pool *pgxpool.Pool, next http.Handler, keys *seal.Keys, areas, au
 		case "ws":
 			streamOf()
 			socket = true
+		case devices.Area:
+			devicesNamed = true
+			mountPublic(name)
 		case unknowntrays.Area, unknowntrays.Read:
 			// Its CRUD route is the print worker's, not the agent's (areaPackages mounts on
 			// the agent), so it has a case of its own.
@@ -460,7 +523,15 @@ func newRouter(pool *pgxpool.Pool, next http.Handler, keys *seal.Keys, areas, au
 	}
 	if socket {
 		// The browser's socket is no CRUD route: it stands in front of the router.
-		return realtime.New(context.Background(), st.hub, pool, handler, st.env, gate)
+		sock, err := realtime.New(context.Background(), st.hub, pool, handler, st.env, gate)
+		if err != nil {
+			return nil, err
+		}
+		if devicesNamed {
+			// A paired device holds the same socket with its device token (#8244).
+			sock.Devices = devices.New(pool, keys, nil, lookupEnv)
+		}
+		return sock, nil
 	}
 	return handler, nil
 }

@@ -257,7 +257,7 @@ def spool_metrics(
     label_weight_g: int | None,
     window_days: int,
     now: datetime,
-    diameter_mm: float = 1.75,
+    diameter_mm: float = DEFAULT_DIAMETER_MM,
     density_g_cm3: float | None = None,
 ) -> SpoolMetrics:
     """One spool's metrics. "Opened" is its first ``loaded`` event, else its first plate

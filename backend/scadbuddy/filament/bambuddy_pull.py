@@ -1131,7 +1131,8 @@ def _tag_holders(conn: Conn, uid: str | None, tray: str | None) -> list[dict[str
         " EXISTS (SELECT 1 FROM filament_bb_links l WHERE l.spool_id = b.spool_id) AS linked"
         " FROM filament_tag_bindings b JOIN filament_tags t ON t.id = b.tag_id"
         " JOIN filament_spools s ON s.id = b.spool_id"
-        " WHERE b.unbound_at IS NULL AND (t.tag_uid = %s OR t.tray_uuid = %s)"
+        " WHERE b.unbound_at IS NULL"
+        " AND (t.id IN (SELECT tag_id FROM filament_tag_uids WHERE uid = %s) OR t.tray_uuid = %s)"
         " ORDER BY b.bound_at, b.id",
         (uid, tray),
     ).fetchall()
@@ -1168,7 +1169,7 @@ def _linked_holder(conn: Conn, after: dict[str, Any]) -> UUID | None:
         "SELECT b.spool_id FROM filament_tag_bindings b JOIN filament_tags t ON t.id = b.tag_id"
         " JOIN filament_spools s ON s.id = b.spool_id"
         " WHERE b.unbound_at IS NULL AND s.archived_at IS NULL"
-        " AND (t.tag_uid = %s OR t.tray_uuid = %s)"
+        " AND (t.id IN (SELECT tag_id FROM filament_tag_uids WHERE uid = %s) OR t.tray_uuid = %s)"
         " AND EXISTS (SELECT 1 FROM filament_bb_links l WHERE l.spool_id = b.spool_id)"
         " ORDER BY b.bound_at, b.id LIMIT 1",
         (uid, tray),
@@ -1518,7 +1519,8 @@ def _update(
     if retag:
         # The tags before the spool, as every writer of bindings takes them (`bind_tag`).
         conn.execute(
-            "SELECT id FROM filament_tags WHERE tag_uid = %s OR tray_uuid = %s"
+            "SELECT id FROM filament_tags"
+            " WHERE id IN (SELECT tag_id FROM filament_tag_uids WHERE uid = %s) OR tray_uuid = %s"
             " ORDER BY id FOR UPDATE",
             keys,
         )

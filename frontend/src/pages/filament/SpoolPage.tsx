@@ -767,8 +767,10 @@ export function SpoolPage() {
   /** A saved diameter other than the database default (1.75 mm) stays on screen with Advanced off. */
   const savedDiameter = saved?.effective.diameter_mm
   const oddDiameter = savedDiameter != null && Number(savedDiameter) !== DEFAULT_DIAMETER_MM
+  /** A measured weight with its date, when the spool has one. */
+  const measured = saved?.last_weighed_g != null && saved.last_weighed_at ? { g: saved.last_weighed_g, at: saved.last_weighed_at } : null
   /** Whether the page shows a measurement: a weighing's breakdown, or a measured weight with its date. */
-  const weighed = saved?.last_weighing?.data.reading_g != null || (saved?.last_weighed_g != null && !!saved.last_weighed_at)
+  const weighed = saved?.last_weighing?.data.reading_g != null || measured != null
 
   const field = (key: 'colour_name' | 'diameter_mm' | 'density_g_cm3' | 'cost_per_kg' | 'label_weight_g' | 'low_stock_pct' | 'nozzle_temp_min' | 'nozzle_temp_max' | 'bed_temp_min' | 'bed_temp_max' | 'drying_temp_c' | 'drying_hours' | 'extra_colours', label: string, extra: { hint?: string; mode?: 'decimal' | 'numeric' } = {}) => (
     <OverrideField name={key} label={label} value={draft[key]} effective={eff(key)} overridden={own(key)} hasType={hasType} inputMode={extra.mode} hint={extra.hint} onChange={(next) => set(key, next)} onReset={() => void reset(key)} />
@@ -1129,12 +1131,13 @@ export function SpoolPage() {
                     />
                   ) : (
                     <p className="text-[13px] text-muted-foreground">
-                      {saved?.last_weighed_g != null && saved.last_weighed_at
-                        ? `Measured ${grams(saved.last_weighed_g)} on ${new Date(saved.last_weighed_at).toLocaleDateString(undefined, { dateStyle: 'medium' })}.`
+                      {/* #8196: `measured`, which `weighed` (the hint below) is read from. */}
+                      {measured
+                        ? `Measured ${grams(measured.g)} on ${new Date(measured.at).toLocaleDateString(undefined, { dateStyle: 'medium' })}.`
                         : 'Never weighed.'}
                     </p>
                   )}
-                  {/* #8107: the same condition as "Never weighed.", and not for an archived spool, which is out of use. */}
+                  {/* #8107: the same boolean as "Never weighed.", and not for an archived spool, which is out of use. */}
                   {!advanced && saved && !weighed && !saved.archived_at && <p className="text-[13px] text-muted-foreground">To weigh this spool, turn on Advanced.</p>}
                   {saved && <GramsBasis basis={saved.basis} gramsLeft={leftNow} addedFull={saved.added_full ?? null} labelWeight={effective?.label_weight_g ?? null} />}
                 </div>

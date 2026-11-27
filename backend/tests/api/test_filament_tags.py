@@ -731,3 +731,36 @@ def test_a_job_error_with_a_lone_surrogate_is_422(client: TestClient) -> None:
         headers={"content-type": "application/json"},
     )
     assert got.status_code == 422, got.text
+
+
+def test_a_mifare_read_that_reaches_python_needs_core(client: TestClient) -> None:
+    """#8148: core's area `filament-tag-reads` decodes a MIFARE read; Python never does."""
+    block = {"index": 1, "data_hex": "4131372d503100004746413137000000"}
+    body = {
+        "uid": "9CC69CE3",
+        "tag_type": "mifare_classic",
+        "records": [],
+        "mifare_blocks": [block],
+    }
+    got = client.post(READS, json=body)
+    assert got.status_code == 503, got.text
+    assert got.json()["code"] == "mifare_needs_core"
+    body["mifare_blocks"] = [{"index": 64, "data_hex": "00"}]
+    assert client.post(READS, json=body).status_code == 422
+
+
+def test_python_checks_a_reads_photo_and_position_and_leaves_them_to_core(
+    client: TestClient,
+) -> None:
+    body: dict[str, Any] = {
+        "uid": "04:a2:b3:c4",
+        "records": [],
+        "image": {"key": "scan_image-" + "ab" * 32, "media_type": "image/jpeg"},
+        "location": {"lat": 51.5, "lon": -0.12, "accuracy_m": 12.5, "at": "2026-11-27T04:00:00Z"},
+        # A lookup that is no tap (#8148 review): core writes no history row; Python takes it.
+        "tap": False,
+    }
+    got = client.post(READS, json=body)
+    assert got.status_code == 200, got.text
+    body["location"] = {"lat": 91, "lon": 0, "at": "2026-11-27T04:00:00Z"}
+    assert client.post(READS, json=body).status_code == 422

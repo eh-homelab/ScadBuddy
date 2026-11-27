@@ -676,6 +676,9 @@ def suggest(
     :func:`_fallback`), whatever its material or colour: an empty slot holds Print until
     someone picks, and the dialog says why the choice differs from the file. A slot is
     left empty only when no free spool is loaded in this printer and none taken is close.
+    The fallback runs only after every slot has had its match (#8264): run in slot order,
+    an earlier slot with no match took the spool a later slot matched, and both printed
+    in that one colour.
     """
     scored = [
         (score, index, option)
@@ -686,7 +689,7 @@ def suggest(
     declared = {family(slot.material) for slot in slots if slot.material}
     families = declared or _anchor_family(scored, printer_id)
     taken: set[int] = set()
-    chosen: list[SlotChoice] = []
+    picked: dict[int, int] = {}
     for slot in slots:
         best: tuple[float, int] | None = None
         shared: tuple[float, int] | None = None
@@ -707,13 +710,20 @@ def suggest(
                 shared = (score, option.spool_id)
         if best is not None:
             taken.add(best[1])
-            chosen.append(SlotChoice(slot_id=slot.slot_id, spool_id=best[1]))
+            picked[slot.slot_id] = best[1]
         elif shared is not None:
-            chosen.append(SlotChoice(slot_id=slot.slot_id, spool_id=shared[1]))
-        elif (fallback := _fallback(slot, spools, families, taken, printer_id)) is not None:
+            picked[slot.slot_id] = shared[1]
+    for slot in slots:
+        if slot.slot_id in picked:
+            continue
+        if (fallback := _fallback(slot, spools, families, taken, printer_id)) is not None:
             taken.add(fallback)
-            chosen.append(SlotChoice(slot_id=slot.slot_id, spool_id=fallback))
-    return chosen
+            picked[slot.slot_id] = fallback
+    return [
+        SlotChoice(slot_id=slot.slot_id, spool_id=picked[slot.slot_id])
+        for slot in slots
+        if slot.slot_id in picked
+    ]
 
 
 def _fallback(
@@ -729,12 +739,13 @@ def _fallback(
     opened empty. The dialog says why the choice differs from the file (its material, or
     its colour outside ``colour_matches``); every slot stays editable.
 
-    Lower is better, in this order: a spool no earlier slot took, the slot's opacity, a
+    Lower is better, in this order: a spool no other slot took, the slot's opacity, a
     colour within :data:`COLOUR_MATCH_DISTANCE`, the slot's material family (the plate's
     for an undeclared slot), then the colour distance. So a close colour in another
-    material beats a far colour in the same one. A slot shares a tray an earlier slot
-    took only when every free tray is gone and that tray's colour is close: one spool for
-    two colours that differ would print the plate in one colour."""
+    material beats a far colour in the same one. A slot shares a tray another slot took
+    (an earlier slot's fallback, or any slot's match) only when every free tray is gone
+    and that tray's colour is close: one spool for two colours that differ would print
+    the plate in one colour."""
     wanted = {family(slot.material)} if slot.material else families
     ranked: list[tuple[tuple[bool, bool, bool, bool, float], int]] = []
     for option in spools:

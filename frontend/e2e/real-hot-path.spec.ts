@@ -80,10 +80,11 @@ test.describe('native hot path (real stack)', () => {
     })
 
     // The trays are the fake printer's report. Slot 2 (#FF1493) is matched to the pink
-    // tray. Slot 1 (#0047BB) matches none; since #6885 the suggestion takes the free
-    // loaded tray, the white, rather than leaving the slot empty. The tile names a tray
-    // by the SB spool's colour name ("Hot Pink") or the colour word ("pink"), so the
-    // labels are matched without case.
+    // tray. Slot 1 (#0047BB) matches none; since #6885 the suggestion takes a free
+    // loaded tray, the white, rather than leaving the slot empty, and only after every
+    // slot had its match, so it never takes slot 2's pink (#8264). The tile names a tray
+    // by the SB spool's colour name or the colour word ("pink"), so the labels are
+    // matched without case.
     const first = dialog.getByTestId('filament-slot-1')
     const second = dialog.getByTestId('filament-slot-2')
     // The native slicer worker's progress bar: watched before the dialog's choices are
@@ -94,14 +95,14 @@ test.describe('native hot path (real stack)', () => {
     await progress
     await expect(dialog.getByTestId('slice-time')).toHaveText(/\d/, { timeout: 300_000 })
 
-    // The tagged tray holds the SB spool the seed's refresh pulled from the recorder's
-    // spool 2 and bound to its RFID tag (#6262): its `#N` and name, read from Postgres,
-    // not from Bambuddy. With no Bambuddy nothing was pulled, so the tray holds none.
+    // The tagged tray holds the SB spool capture made from its RFID tag (#7143), its `#N`
+    // read from Postgres, not from Bambuddy. With the recorder the seed's refresh then
+    // linked the recorder's spool 2, which holds that tag, to it (`bambuddy_pull.py` step
+    // 2), and took its weight: 1000 g on the label, 70 g used. The link takes no colour name,
+    // so the tile says "pink", not Bambuddy's "Hot Pink" (hot-path-e2e run 45990206423).
+    await expect(second.getByTestId(/^sb-spool-/)).toHaveText(/^#\d+$/)
     if (mode === 'recorder') {
-      await expect(second.getByTestId(/^sb-spool-/)).toHaveText(/^#\d+$/)
-      await expect(second).toContainText('Hot Pink')
-    } else {
-      await expect(second.getByTestId(/^sb-spool-/)).toHaveCount(0)
+      await expect(second).toContainText('930 g')
     }
 
     await dialog.getByRole('button', { name: 'Print', exact: true }).click()

@@ -54,7 +54,9 @@ def blob_digest(data: BlobData) -> tuple[str, int]:
 #: saved output's bytes (#7256, held `(output, <output_id>)`) and a Bambu tag's raw dump
 #: (#7958, a service's upload through core's area `blobs`, `tools/go/core/internal/blobstore`)
 #: and a code scan's photo (#8155, held `(code_scan, <scan id>)` by core's
-#: `tools/go/core/internal/scan` until the scan is deleted) by `blob_refs` and grace.
+#: `tools/go/core/internal/scan` until the scan is deleted; a paired device's upload of
+#: either kind is held `(device_call, <call id>)` by `tools/go/core/internal/devices`, #8244)
+#: by `blob_refs` and grace.
 #: Assets have `AssetStore.sweep`; fonts and library files are skipped here:
 #: `print_library/sweep.py` `sweep_library` purges their trash and collects the blobs no
 #: row names.

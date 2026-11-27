@@ -489,7 +489,12 @@ def _spool_from_tag(
     # A bind locks the tag before its spools (#6261), but the caller holds spools already,
     # so a locked tag is skipped, not waited on (as `tags.seen_on` skips it). The tag is
     # locked before the holder is read, so a bind that commits first is seen.
-    keyed = "SELECT id FROM filament_tags WHERE tag_uid = %s OR tray_uuid = %s"
+    # By any of the tag's UIDs (`filament_tag_uids`, #8148), as `FilamentSpoolStore.tag_on`
+    # finds it.
+    keyed = (
+        "SELECT id FROM filament_tags"
+        " WHERE id IN (SELECT tag_id FROM filament_tag_uids WHERE uid = %s) OR tray_uuid = %s"
+    )
     exists = conn.execute(keyed, (uid, tray)).fetchall()
     free = conn.execute(keyed + " FOR UPDATE SKIP LOCKED", (uid, tray)).fetchall()
     if len(free) < len(exists):
