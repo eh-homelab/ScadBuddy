@@ -7,8 +7,8 @@ import { defineTool, json, ToolError } from './registry.js'
 // The inventory (#7067, spec 2026-11-21-inventory-and-purchasing-design.md §6.4–6.6): item
 // kinds, items, supplier offers and their pack prices, and the stock of each item in lots or
 // units, changed only by moves (backend/scadbuddy/api/inventory.py, inventory_stock.py).
-// Reads are `read`; every write is `write`: it writes ScadBuddy only,
-// and nothing here reaches Bambuddy (spec D16). "Re-cost past uses" is `write` too (the
+// Reads are `read`; every write is `write`. Every write changes ScadBuddy only:
+// nothing here reaches Bambuddy (spec D16). "Re-cost past uses" is `write` too (the
 // owner's Ruling 8 on #7067), though it changes the parts cost of orders already fulfilled.
 
 const SOURCE = "ScadBuddy's own inventory"

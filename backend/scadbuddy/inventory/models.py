@@ -172,8 +172,8 @@ class KindPatch(BaseModel):
 
 
 class _Decimals(BaseModel):
-    """Decimals on the wire as plain strings with their fraction (as `orders/parts.py`
-    `InventoryPart` writes `unit_cost_minor`)."""
+    """Decimals on the wire as plain strings with their fraction (as `Lot` writes
+    `unit_cost_minor`)."""
 
     @staticmethod
     def _decimal(value: Decimal | None) -> str | None:

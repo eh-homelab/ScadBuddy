@@ -19,8 +19,7 @@ export const inventoryAnchors = {
 const item = (id: string) => at(`${BASE}/items`, id)
 
 /** The kinds whose lot items, with the kinds below them, are an order's parts (R-P2-39).
- * Inventory K1
- * put both under `consumable`: `part` holds durable units now. */
+ * Inventory K1 put both under `consumable`: `part` holds durable units now. */
 export const PART_KINDS = ['hardware', 'ams_part'] as const
 
 /** The kind the Parts views open. The list takes one kind, so they open `hardware`, the kind of

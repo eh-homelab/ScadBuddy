@@ -213,7 +213,7 @@ stops the migration (R-P2-24).
 
 ## The agent tools
 
-`agent/src/tools/inventory.ts` has 18 tools. Each answers a `ui_path` beside an id
+`agent/src/tools/inventory.ts` has 19 tools. Each answer but `inventory_operation_get`'s has a `ui_path` beside an id
 (`agent/src/tools/inventoryLinks.ts`; the vectors are shared with the frontend in
 `test-fixtures/inventory/ui-paths.json`). Reads are `read`; every write is `write`,
 including `inventory_lot_recost` (Ruling 8). None reaches Bambuddy.
@@ -226,6 +226,7 @@ including `inventory_lot_recost` (Ruling 8). None reaches Bambuddy.
 | Lots | `inventory_lot_receive`, `inventory_lot_update`, `inventory_lot_recost` |
 | Units | `inventory_unit_receive`, `inventory_unit_update`, `inventory_unit_status` |
 | Moves | `inventory_move_list`, `inventory_move_use`, `inventory_move_count` |
+| Operations | `inventory_operation_get` (reads a write that answered 202 "still working") |
 
 `order_item_parts_set` sets an order item's parts by item.
 
