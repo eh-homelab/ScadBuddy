@@ -35,7 +35,8 @@ from temporalio.client import (
 from temporalio.exceptions import ApplicationError, TimeoutType
 from temporalio.exceptions import TimeoutError as TemporalTimeoutError
 from temporalio.service import RPCError, RPCStatusCode
-from temporalio.worker import Worker
+from temporalio.worker import Replayer, Worker
+from temporalio.worker._workflow_instance import _WorkflowLogicFlag  # type: ignore[attr-defined]
 
 from scadbuddy.auth.service_credentials import ServiceAuth
 from scadbuddy.core.config import load_config
@@ -2286,17 +2287,22 @@ def _release_with_load_answer(history: WorkflowHistory) -> tuple[bool, list[str]
     return bool(accepted & load_answered), children
 
 
+@pytest.mark.parametrize("single_batch", [False, True], ids=["flag-2-off", "flag-2-on"])
 async def test_a_release_that_lands_with_the_load_answer_cancels_before_the_piece(
-    make_service: ServiceFactory, deps: WorkerDeps, projection: JobProjection
+    make_service: ServiceFactory, deps: WorkerDeps, projection: JobProjection, single_batch: bool
 ) -> None:
     """#1832: the release and `load_pipeline`'s answer in one workflow task. Before
     temporalio 1.36 the release's handler ran first and cancelled the render task while
     it still waited on the load, so the answer won, the task went on to start the piece
     child, and the cancel was dropped while that start was in flight (ABANDON). With
-    workflow logic flag 2 every job of the task is applied before any task runs (1.36's
-    default, https://github.com/temporalio/sdk-python/releases/tag/1.36.0; 1.37 dropped
-    it and `logic_flags.py` turns it back on, #8313), so the cancel lands
-    on the load already answered: the render is released and no piece starts. The
+    workflow logic flag 2 on (1.36's default, and every history recorded on 1.36) every
+    job of the task is applied before any task runs
+    (https://github.com/temporalio/sdk-python/releases/tag/1.36.0), so the cancel lands
+    on the load already answered. With it off (1.37's default for a new run,
+    https://github.com/temporalio/sdk-python/pull/2121) the handler runs first again, and
+    the render's step looks at the release once the load has answered
+    (`RELEASED_STEP_PATCH`, #8318). In both orders the render is released and no piece
+    starts, and the recorded history replays. The
     release after a start in flight is still handled (`_raise_if_released`).
 
     Made deterministic by taking the workflow worker away while `load_pipeline`
@@ -2307,7 +2313,7 @@ async def test_a_release_that_lands_with_the_load_answer_cancels_before_the_piec
     def workflows() -> Worker:
         # Not sticky: the next worker gets the task at once, not after a sticky timeout.
         # The local activities run on the worker that runs the workflow.
-        return Worker(
+        worker = Worker(
             client,
             task_queue=queue,
             workflows=[TemplatePipeline, RenderPiece],
@@ -2315,6 +2321,13 @@ async def test_a_release_that_lands_with_the_load_answer_cancels_before_the_piec
             no_remote_activities=True,
             max_cached_workflows=0,
         )
+        if single_batch:
+            # The SDK's only switch for it, as its own tests use it (1.37.0
+            # tests/worker/test_workflow.py).
+            worker._set_default_workflow_logic_flag(
+                _WorkflowLogicFlag.PROCESS_WORKFLOW_ACTIVATION_JOBS_AS_SINGLE_BATCH, enabled=True
+            )
+        return worker
 
     async with temporal_client() as client:
         queue = f"t-{uuid.uuid4().hex[:8]}"
@@ -2352,13 +2365,17 @@ async def test_a_release_that_lands_with_the_load_answer_cancels_before_the_piec
                 # on the server, which hands it that task, so the task is only given to
                 # this worker once its 10 s timeout passes.
                 answer = await asyncio.wait_for(release, timeout=30)
-            raced, children = _release_with_load_answer(await handle.fetch_history())
+            history = await handle.fetch_history()
+            raced, children = _release_with_load_answer(history)
             # The ABANDONed piece and its held `render_main` would stay open on the dev
             # server after this test (#2126).
             for child in children:
                 with suppress(RPCError):  # it may have closed on its own
                     await client.get_workflow_handle(child).terminate()
             gate.set()
+            await Replayer(
+                workflows=[TemplatePipeline, RenderPiece], data_converter=client.data_converter
+            ).replay_workflow(history)
         await service.aclose()
 
     # Only the race leaves this behind: the release and the load's answer taken by one

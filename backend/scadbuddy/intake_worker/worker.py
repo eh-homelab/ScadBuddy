@@ -29,7 +29,6 @@ from scadbuddy.intake_worker.activities import IntakeActivities
 from scadbuddy.intake_worker.settings import HEALTH_PORT, IntakeSettings
 from scadbuddy.intake_worker.wire import INTAKE_AREAS
 from scadbuddy.intake_worker.workflow import CustomerFileCheck
-from scadbuddy.workflows.logic_flags import single_batch
 
 logger = logging.getLogger(__name__)
 
@@ -92,16 +91,14 @@ async def run(
             data_converter=pydantic_data_converter,
             interceptors=[TracingInterceptor()],
         )
-        worker = single_batch(
-            Worker(
-                client,
-                task_queue=settings.temporal_task_queue_customer_files,
-                workflows=[CustomerFileCheck],
-                activities=[activities.check, activities.failed],
-                # One customer's file per pod at any moment (spec §7, the isolation rule):
-                # scale with replicas, never with checks at once.
-                max_concurrent_activities=1,
-            )
+        worker = Worker(
+            client,
+            task_queue=settings.temporal_task_queue_customer_files,
+            workflows=[CustomerFileCheck],
+            activities=[activities.check, activities.failed],
+            # One customer's file per pod at any moment (spec §7, the isolation rule):
+            # scale with replicas, never with checks at once.
+            max_concurrent_activities=1,
         )
         async with worker:
             logger.info("intake worker polling %s", settings.temporal_task_queue_customer_files)

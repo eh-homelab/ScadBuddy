@@ -51,8 +51,6 @@ from temporalio.service import RPCError, RPCStatusCode
 from temporalio.worker import Worker, WorkerDeploymentConfig, WorkflowRunner
 from temporalio.worker.workflow_sandbox import SandboxedWorkflowRunner
 
-from scadbuddy.workflows.logic_flags import single_batch
-
 with workflow.unsafe.imports_passed_through():
     from scadbuddy.render.submit import DESCRIBE_BOUND, SETTLE_DESCRIBES
     from scadbuddy.workflows.operation_models import HEARTBEAT_THROTTLE
@@ -659,21 +657,19 @@ def library_worker(
     versioning behavior: the deployment has no default, so the SDK refuses one that
     does not."""
     housekeeping = Housekeeping if deployment_config is None else VersionedHousekeeping
-    return single_batch(
-        Worker(
-            client,
-            task_queue=task_queue,
-            workflows=[housekeeping, *workflows],
-            activities=activities,
-            workflow_runner=workflow_runner or SandboxedWorkflowRunner(),
-            graceful_shutdown_timeout=graceful_shutdown_timeout,
-            deployment_config=deployment_config,
-            # A library command of a kind this build lacks waits for the build that has it
-            # (#4139): a new API replica's request in the second before its build is current.
-            interceptors=[RegisteredActivities(activities)],
-            # The library commands' ``Operation`` runs heartbeat against a 30 s timeout (#4635).
-            max_heartbeat_throttle_interval=HEARTBEAT_THROTTLE,
-        )
+    return Worker(
+        client,
+        task_queue=task_queue,
+        workflows=[housekeeping, *workflows],
+        activities=activities,
+        workflow_runner=workflow_runner or SandboxedWorkflowRunner(),
+        graceful_shutdown_timeout=graceful_shutdown_timeout,
+        deployment_config=deployment_config,
+        # A library command of a kind this build lacks waits for the build that has it
+        # (#4139): a new API replica's request in the second before its build is current.
+        interceptors=[RegisteredActivities(activities)],
+        # The library commands' ``Operation`` runs heartbeat against a 30 s timeout (#4635).
+        max_heartbeat_throttle_interval=HEARTBEAT_THROTTLE,
     )
 
 

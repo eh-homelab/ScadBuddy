@@ -59,7 +59,6 @@ from scadbuddy.render.jobs import render_job
 from scadbuddy.render.pg_store import migrate
 from scadbuddy.render.schema import ParamValue
 from scadbuddy.workflows.commands import start_command
-from scadbuddy.workflows.logic_flags import single_batch_by_default
 from tests.support import shared_routes
 from tests.support.rack_guard import foreign_rack_errors
 from tests.support.temporal import (
@@ -67,9 +66,6 @@ from tests.support.temporal import (
     TEST_TEMPORAL_DEV_SERVER_ENV,
     temporal_available,
 )
-
-# The workers the tests build themselves run workflows as the backend's do (#8313).
-single_batch_by_default()
 
 shared_routes.install()
 

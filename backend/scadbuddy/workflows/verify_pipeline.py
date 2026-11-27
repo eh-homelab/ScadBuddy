@@ -36,7 +36,6 @@ from scadbuddy.render.job_models import Job
 from scadbuddy.store.local import LocalBlobStore
 from scadbuddy.workflows.activities import RenderActivities, WorkerDeps
 from scadbuddy.workflows.client import pydantic_data_converter
-from scadbuddy.workflows.logic_flags import single_batch
 from scadbuddy.workflows.models import Projection
 from scadbuddy.workflows.pipeline_activities import PipelineActivities
 from scadbuddy.workflows.pipelines import RenderPiece, TemplatePipeline
@@ -99,13 +98,11 @@ async def verify(template: Path, cases: list[dict[str, Any]], *, config: Config)
             dev_server_existing_path=binary, data_converter=pydantic_data_converter
         )
         try:
-            async with single_batch(
-                Worker(
-                    env.client,
-                    task_queue=TASK_QUEUE,
-                    workflows=[TemplatePipeline, RenderPiece],
-                    activities=acts,
-                )
+            async with Worker(
+                env.client,
+                task_queue=TASK_QUEUE,
+                workflows=[TemplatePipeline, RenderPiece],
+                activities=acts,
             ):
                 # Production's bound on every pipeline (`RenderService`), so a `run` that
                 # never yields is that case's failure, not a hang.
