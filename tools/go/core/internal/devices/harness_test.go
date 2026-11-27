@@ -17,6 +17,7 @@ import (
 	"os"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -49,6 +50,17 @@ func (c *clock) add(d time.Duration) {
 	c.mu.Lock()
 	c.at = c.at.Add(d)
 	c.mu.Unlock()
+}
+
+// countingTokens is the store as a socket uses it, counting its CallVisible reads.
+type countingTokens struct {
+	*Store
+	visible *atomic.Int64
+}
+
+func (c countingTokens) CallVisible(ctx context.Context, call, principal string) bool {
+	c.visible.Add(1)
+	return c.Store.CallVisible(ctx, call, principal)
 }
 
 // memBlobs is the blob store in memory.
@@ -97,6 +109,8 @@ type harness struct {
 	store *Store
 	clock *clock
 	blobs *memBlobs
+	// visibleReads counts the sockets' CallVisible reads.
+	visibleReads atomic.Int64
 	// timers are the deadline checks the store scheduled; fire runs them.
 	mu     sync.Mutex
 	timers []func()
@@ -155,7 +169,7 @@ func (h *harness) addPod(mode auth.Mode) *pod {
 	if err != nil {
 		h.t.Fatal(err)
 	}
-	sock.Devices = h.store
+	sock.Devices = countingTokens{Store: h.store, visible: &h.visibleReads}
 	hub.Start(5 * time.Second)
 	server := httptest.NewServer(sock)
 	h.t.Cleanup(server.Close)
