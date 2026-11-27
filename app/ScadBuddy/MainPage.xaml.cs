@@ -35,7 +35,13 @@ public partial class MainPage : ContentPage
 			Web.Source = url;
 			if (DeepLink.Take() is { } first) Dispatcher.Dispatch(() => Scan(first));
 		};
-		Loaded += (_, _) => DeepLink.Opened += Scan;
+		// A cold start's link was raised after the handler took it (MAUI builds the page inside
+		// base.OnCreate, before MainActivity raises it), so take it again once subscribed.
+		Loaded += (_, _) =>
+		{
+			DeepLink.Opened += Scan;
+			if (DeepLink.Take() is { } late) Scan(late);
+		};
 		Unloaded += (_, _) => DeepLink.Opened -= Scan;
 	}
 
@@ -118,6 +124,8 @@ public partial class MainPage : ContentPage
 		}
 		Preferences.Set(UrlKey, parsed.ToString());
 		Preferences.Remove(OriginsKey);
+		// Trusted() compares with this field: the old origin stops being the app's own at once.
+		url = parsed.ToString();
 		await DisplayAlertAsync("Saved", "Close the app and open it again to use the new address.", "OK");
 	}
 

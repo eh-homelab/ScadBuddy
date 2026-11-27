@@ -294,8 +294,9 @@ The backend's migration files and its settings tables: `backend/CLAUDE.md`.
   backend change, plus `frontend/` and the Go trees its live mount runs), and `android` (the
   `android` job, the phone app's build: `app/`). A lane job skips on a change that
   does not need it; `CI Summary` re-derives the lanes from its own checkout, so a skip
-  where the lane was needed is a failure. A push, the schedule, a dispatch, the
-  Dockerfile, `ci.yml` or the selector selects every lane. A new cross-tree read (a test
+  where the lane was needed is a failure. A push, the schedule, a dispatch,
+  `ci.yml` or the selector selects every lane; the Dockerfile and `.dockerignore` select every
+  lane but `android`, which selects on `app/`, `ci.yml` and the selector only. A new cross-tree read (a test
   that opens a file outside its tree) needs its path in that lane's pattern; a test that
   reads a doc also needs it in `select-lanes.sh` `read_by_tests` and in `ci.yml`'s push
   `paths`, or a docs-only change skips the test (#7792).

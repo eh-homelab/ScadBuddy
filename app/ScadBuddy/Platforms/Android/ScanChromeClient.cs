@@ -6,7 +6,7 @@ namespace ScadBuddy;
 
 /// <summary>
 /// Gives a ScadBuddy page the camera (#8155: every scan keeps a photo) and the phone's location
-/// (every scan records where it was made). Only an origin the person accepted gets them, and only
+/// (every scan records where it was made). Only the set ScadBuddy origin gets them, and only
 /// video capture of the page's permissions; any other request is denied. The file chooser and the
 /// rest stay MAUI's.
 /// </summary>

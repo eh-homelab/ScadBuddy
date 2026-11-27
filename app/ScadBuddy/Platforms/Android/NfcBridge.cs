@@ -51,6 +51,7 @@ public sealed class NfcBridge : Java.Lang.Object, NfcAdapter.IReaderCallback, We
 	}
 
 	Uri? job;
+	bool sending;
 	static readonly HttpClient Http = new() { Timeout = TimeSpan.FromSeconds(30) };
 
 	/// <summary>
@@ -180,7 +181,13 @@ public sealed class NfcBridge : Java.Lang.Object, NfcAdapter.IReaderCallback, We
 		bool reading;
 		Uri? job;
 		lock (gate) { lastTag = tag; pending = write; reading = scanning; job = this.job; }
-		if (job is not null) { _ = SendJob(job, Read(tag)); return; }
+		if (job is not null)
+		{
+			// One send per job at a time: a second tap while the one-time URL is in flight is dropped.
+			lock (gate) { if (sending) return; sending = true; }
+			_ = SendJob(job, Read(tag)).ContinueWith(_ => { lock (gate) sending = false; });
+			return;
+		}
 		if (pending is not null) { TryWrite(tag, fromTap: true); return; }
 		if (reading) Emit(Read(tag));
 	}
@@ -192,6 +199,10 @@ public sealed class NfcBridge : Java.Lang.Object, NfcAdapter.IReaderCallback, We
 		if (pending is null) return;
 		try
 		{
+			// A Bambu spool's tag is MIFARE Classic, and a Bambu tag is never written: refuse every
+			// MIFARE Classic tag, before NdefFormatable could format it.
+			if (tag.GetTechList()?.Contains("android.nfc.tech.MifareClassic") == true)
+				throw new BridgeError("NotAllowedError", "This is a MIFARE Classic tag, such as a Bambu spool's. ScadBuddy never writes one.");
 			using (var ndef = Ndef.Get(tag))
 			{
 				if (ndef is not null)

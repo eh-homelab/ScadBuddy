@@ -121,7 +121,7 @@ The owner's decisions (2026-11-26):
 ## Approaches
 
 1. **A MAUI app whose screens are the web page** (picked by the owner, 2026-11-26: "Web for
-   now"). A MAUI app hosts `/scan` in a HybridWebView and
+   now"). A MAUI app hosts `/scan` in a plain `WebView` and
    gives it a native NFC service through a bridge. One UI; iOS later is a second NFC service,
    not new screens.
 2. **A MAUI app with native screens.** A real app look, offline use. Two UIs to keep in step
@@ -193,21 +193,21 @@ stored in the blob store", "implement 100% of the rfid tag guide"; decisions on 
 - .NET MAUI, `app/` in this repo, Android first, min SDK 29.
 - It opens the LAN host's `/scan` page (the URL set once in the app). Navigation stays on that
   origin; another origin opens in the browser.
-- The bridge (`window.ScadBuddyNfc`) is offered only to that origin. It has `read()` and
-  `write(records)`, each answered once:
-  - `read()` turns on reader mode until a tag is tapped or the page cancels. For a MIFARE
-    Classic tag, it derives the 16 keys, authenticates each sector with key A, and reads its
-    blocks; a sector that refuses is left out, and key trailers are never sent. It answers
-    `{kind: 'mifare_classic', uid, blocks}`. For an NDEF tag it answers `{kind: 'ndef', uid,
-    records}` in the page's `WireRecord` shape.
-  - `write(records)` writes NDEF records, reads them back and answers what it read, so the
-    page's backup-first write (#7273 G7) runs as it does with Web NFC.
+- The bridge is offered only to that origin. As built (`app/ScadBuddy/Resources/Raw/nfc-polyfill.js`),
+  it installs Web NFC's `NDEFReader` (`scan()`, `write()`), backed by Android's NFC, so the page
+  runs unchanged; `window.ScadBuddyNfc` is `{native, lastMifare, close}`:
+  - A tap answers `reading` as Chrome does. For a MIFARE Classic tag, the app derives the 16
+    keys, authenticates each sector with key A, and reads its blocks; a sector that refuses is
+    left out, and key trailers are never sent. Those blocks go to `window.ScadBuddyNfc.lastMifare`
+    and a `scadbuddy-mifare` window event as `{uid, blocks, refusedSectors, error?}`.
+  - `write()` writes NDEF records (never to a MIFARE Classic tag), and the page reads them back,
+    so its backup-first write (#7273 G7) runs as it does with Web NFC.
 - `lib/webNfc.ts` gets a reader seam: `nfcSupport()` answers `native` when the bridge exists,
   and `NfcSession` uses it then, Web NFC otherwise. A MIFARE read posts the raw blocks; the
   screen shows the server's answer. No decoder in the page.
 - The release APK is signed with a key kept in 1Password and in the repo's Actions secrets.
-  A workflow `app.yml` builds and tests on `ubuntu-latest` for changes under `app/`, and
-  attaches the APK to a release on an `app-v*` tag.
+  As built, `ci.yml`'s `android` job (lane `android`) builds it on `ubuntu-latest` for changes
+  under `app/`; attaching the APK to a release on an `app-v*` tag is not built yet.
 
 ### The app's telemetry
 
@@ -236,8 +236,9 @@ The app sends traces, metrics and logs as `tools/go/bambuddy-fs` sends its own (
 - Metrics: `scadbuddy_app.nfc.reads` and `scadbuddy_app.nfc.read.duration` (by `kind` and
   `outcome`: `complete`, `partial` or `error`), and `scadbuddy_app.nfc.resumed_reads`.
 - Logs: `Microsoft.Extensions.Logging` goes to OTLP. The bridge logs each read on the category
-  `ScadBuddy.Nfc`. Logcat keeps its `ScadBuddyNfc` lines, with the UID and the blocks.
-- The app makes no HTTP call of its own, so it propagates no `traceparent`. The page in the
+  `ScadBuddy.Nfc`. Logcat keeps its `ScadBuddyNfc` lines, with the UID and the block counts, never block data.
+- A scan link's result (a tag read or a photo) is the app's own HTTP POST, to the link's
+  result URL (`NfcBridge.SendJob`, `MainPage.Scan`); it propagates no `traceparent`. The page in the
   WebView keeps its own browser tracing (`frontend/src/lib/tracing.ts`). The app does not
   instrument the page.
 

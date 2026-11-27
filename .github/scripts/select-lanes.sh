@@ -25,6 +25,8 @@
 #
 # Each lane also selects on the shared build inputs (Dockerfile, .dockerignore) and
 # on its own wiring (ci.yml, this script, changed-paths.sh), as select-go.sh does.
+# The android lane is the exception: the app builds with no image, so it selects on
+# app/ and its wiring only, never on the Dockerfile or .dockerignore.
 set -euo pipefail
 
 lanes=(backend agent_durable rust image android)
