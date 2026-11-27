@@ -1307,7 +1307,7 @@ only the sleeps move; a budget on the real clock fails on a slow runner (#6252).
   for an unknown printer; in `NOT_NUDGED`). The labels PDF (#7157, plan
   `docs/superpowers/plans/2026-11-23-label-templates-pdf.md`): `filament/label_templates.py`
   (`TEMPLATES`, SB's 50 x 25 mm roll, the 2 x 1 in roll `roll_2x1in` (50.8 x 25.4 mm, #7170) and Bambuddy's six; `LabelTemplateChoice`, the stored-only
-  setting `filament_label_template` and the PDF body's `template`; `label_printer.py` (#7170): the four stored-only settings of the network Zebra, `filament_label_printer_host`, `_port` (9100), `_media` (`direct` or `transfer`) and `_darkness` (0 to 30, 10), with `printer_host` as the host check; the host and the port are a person's to change (`api/settings.py` `LABEL_PRINTER`, 403 `person_only`), and Go's `internal/labelprinter` reads the four rows by name), `labels.py` `pdf_labels`
+  setting `filament_label_template` and the PDF body's `template`). `label_printer.py` (#7170) holds four stored-only settings for the network Zebra: `filament_label_printer_host`, `_port` (9100), `_media` (`direct` or `transfer`) and `_darkness` (0 to 30, 10). `printer_host` checks the host. A person changes the host and the port (`api/settings.py` `LABEL_PRINTER`, 403 `person_only`). Go's `internal/labelprinter` reads the four rows by name. Also in the PDF code: `labels.py` `pdf_labels`
   (the labels from SB's rows; a place label needs `label_base_url`, else 409 `no_label_base`,
   never the request's host) and `label_pdf.py` (ReportLab: the browser label's lines and a vector
   QR code; its text in `label_fonts.py`, below). Routes `GET /filament/label-templates` and `POST

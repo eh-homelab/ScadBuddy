@@ -242,7 +242,9 @@ function putSettings(body: Record<string, unknown>) {
                 ? (value ?? { template: 'roll_50x25', width_mm: null, height_mm: null })
                 : name === 'filament_label_output'
                   ? (value ?? structuredClone(fixtures.settings.filament_label_output))
-                  : name === 'filament_label_printer_port' || name === 'filament_label_printer_media' || name === 'filament_label_printer_darkness'
+                  : name === 'filament_label_printer_port' ||
+                      name === 'filament_label_printer_media' ||
+                      name === 'filament_label_printer_darkness'
                     ? (value ?? fixtures.settings[name])
                     : value
       continue

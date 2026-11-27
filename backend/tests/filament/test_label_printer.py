@@ -24,6 +24,10 @@ def test_a_host_is_a_name_or_an_ip() -> None:
         "-zebra",
         "zebra lan",
         "[fe80::1]",
+        "999.999.999.999",
+        "1234",
+        "zebra.123",
+        "fe80::1%eth0",
         ("a" * 63 + ".") * 4 + "a",
     ],
 )
