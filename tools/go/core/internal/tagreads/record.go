@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"net/http"
+	"slices"
 	"strings"
 
 	"github.com/jackc/pgx/v5"
@@ -58,8 +59,9 @@ func record(ctx context.Context, pool *pgxpool.Pool, in recordIn) (recorded, err
 			return err
 		})
 		var pg *pgconn.PgError
-		if errors.As(err, &pg) && pg.Code == "23505" {
-			// Another read made the tag or took the UID first: look again.
+		if errors.As(err, &pg) && (pg.Code == "23505" || pg.Code == "40P01") {
+			// Another read made the tag or took the UID first, or two reads that cross locked
+			// the tray's tag and the UID's tag in turn (a deadlock): look again.
 			continue
 		}
 		return out, err
@@ -67,7 +69,45 @@ func record(ctx context.Context, pool *pgxpool.Pool, in recordIn) (recorded, err
 	return out, err
 }
 
+// trayTag and uidTag find the tag of a tray UUID and of a UID, without a lock.
+const (
+	trayTag = "SELECT id::text FROM filament_tags WHERE tray_uuid = $1"
+	uidTag  = "SELECT tag_id::text FROM filament_tag_uids WHERE uid = $1"
+)
+
+// lockInOrder locks the tags of the read's tray UUID and UID in id order, so two reads that
+// cross (each with the other's tray and UID) never wait on each other in turn. It answers
+// the ids it locked; write checks them again under the locks.
+func lockInOrder(ctx context.Context, tx pgx.Tx, in recordIn) ([]string, error) {
+	var ids []string
+	for _, q := range []struct{ sql, arg string }{{trayTag, in.tray}, {uidTag, in.uid}} {
+		if q.arg == "" {
+			continue
+		}
+		var id string
+		err := tx.QueryRow(ctx, q.sql, q.arg).Scan(&id)
+		if errors.Is(err, pgx.ErrNoRows) {
+			continue
+		}
+		if err != nil {
+			return nil, err
+		}
+		ids = append(ids, id)
+	}
+	slices.Sort(ids)
+	ids = slices.Compact(ids)
+	if len(ids) == 0 {
+		return ids, nil
+	}
+	_, err := tx.Exec(ctx, "SELECT 1 FROM filament_tags WHERE id = ANY($1::uuid[]) ORDER BY id FOR UPDATE", ids)
+	return ids, err
+}
+
 func write(ctx context.Context, tx pgx.Tx, in recordIn) (recorded, error) {
+	locked, err := lockInOrder(ctx, tx, in)
+	if err != nil {
+		return recorded{}, err
+	}
 	var byTray, byUID *tagRow
 	if in.tray != "" {
 		row, err := lock(ctx, tx, "SELECT id::text, tray_uuid FROM filament_tags WHERE tray_uuid = $1 FOR UPDATE", in.tray)
@@ -82,6 +122,13 @@ func write(ctx context.Context, tx pgx.Tx, in recordIn) (recorded, error) {
 		return recorded{}, err
 	}
 	byUID = row
+	// A tag that a commit gave the tray UUID or the UID between the lookup and the lock was not
+	// locked in order: try the transaction again.
+	for _, r := range []*tagRow{byTray, byUID} {
+		if r != nil && !slices.Contains(locked, r.id) {
+			return recorded{}, &pgconn.PgError{Code: "40P01", Message: "the read's tags moved before their locks"}
+		}
+	}
 
 	var tagID string
 	switch {
@@ -111,6 +158,9 @@ func write(ctx context.Context, tx pgx.Tx, in recordIn) (recorded, error) {
 			if _, err := tx.Exec(ctx, "UPDATE filament_tags SET tray_uuid = $2 WHERE id = $1", tagID, in.tray); err != nil {
 				return recorded{}, err
 			}
+			if err := enqueue(ctx, tx, tagID); err != nil {
+				return recorded{}, err
+			}
 		}
 	default:
 		tagID = byTray.id
@@ -120,6 +170,9 @@ func write(ctx context.Context, tx pgx.Tx, in recordIn) (recorded, error) {
 					"this UID belongs to a tag of another tray UUID")
 			}
 			if err := fold(ctx, tx, byUID.id, byTray.id); err != nil {
+				return recorded{}, err
+			}
+			if err := enqueue(ctx, tx, tagID); err != nil {
 				return recorded{}, err
 			}
 		}
@@ -245,6 +298,16 @@ func lock(ctx context.Context, tx pgx.Tx, sql string, arg string) (*tagRow, erro
 		return nil, err
 	}
 	return &row, nil
+}
+
+// enqueue queues tagID for the Bambuddy tag push when it holds an open binding, as Python's
+// filament/rfid_push.py enqueue_tag does: a bound tag that gains a tray UUID (set on it, or
+// by a fold) changes what Bambuddy's link should say.
+func enqueue(ctx context.Context, tx pgx.Tx, tagID string) error {
+	_, err := tx.Exec(ctx, `INSERT INTO filament_bb_tag_pending (tag_id)
+ SELECT $1::uuid WHERE EXISTS (SELECT 1 FROM filament_tag_bindings WHERE tag_id = $1::uuid AND unbound_at IS NULL)
+ ON CONFLICT (tag_id) DO UPDATE SET queued_at = now(), attempts = 0, last_error = NULL`, tagID)
+	return err
 }
 
 // fold moves a UID-only tag into the tag of its spool's tray ("Same spool as…", spec G3), as

@@ -427,6 +427,10 @@ func TestTheFoldMovesABindingAndRefusesTwo(t *testing.T) {
 	if got := h.one("SELECT tag_id::text FROM filament_tag_bindings WHERE spool_id = $1::uuid", spool); got != tag {
 		t.Errorf("the binding is on %v, want %v", got, tag)
 	}
+	// Review of #8161: the bound tag gained a tray UUID, so Bambuddy's link is pushed again.
+	if got := h.one("SELECT count(*) FROM filament_bb_tag_pending WHERE tag_id = $1::uuid", tag); got != int64(1) {
+		t.Errorf("%v pending rows for the folded tag, want 1", got)
+	}
 
 	// Two bound tags are never folded.
 	h.exec("INSERT INTO filament_tags (kind, tag_uid) VALUES ('other', 'AABBCCDD00000100')")
@@ -438,6 +442,51 @@ func TestTheFoldMovesABindingAndRefusesTwo(t *testing.T) {
 	}
 	if got := h.one("SELECT count(*) FROM filament_tag_reads"); got != int64(1) {
 		t.Errorf("a refused read left %v rows", got)
+	}
+}
+
+// Review of #8161: a bound UID-only tag that a read gives a tray UUID is queued for the push;
+// an unbound one is not.
+func TestABoundTagThatGainsATrayIsQueued(t *testing.T) {
+	for _, bound := range []bool{true, false} {
+		h := newHarness(t)
+		tag := h.one("INSERT INTO filament_tags (kind, tag_uid) VALUES ('other', $1) RETURNING id::text", uidA+"00000100")
+		if bound {
+			material := h.one("INSERT INTO filament_materials (name) VALUES ('Queue test') RETURNING id::text")
+			spool := h.one("INSERT INTO filament_spools (material_id) VALUES ($1::uuid) RETURNING id::text", material)
+			h.exec("INSERT INTO filament_tag_bindings (tag_id, spool_id) VALUES ($1::uuid, $2::uuid)", tag, spool)
+			h.exec("DELETE FROM filament_bb_tag_pending")
+		}
+		if status, answer := h.post(mifareRead(uidA, block0A+" "+shared)); status != http.StatusOK {
+			t.Fatalf("%d %v", status, answer)
+		}
+		if got := h.one("SELECT tray_uuid FROM filament_tags WHERE id = $1::uuid", tag); got != tray {
+			t.Errorf("tray_uuid = %v", got)
+		}
+		want := int64(0)
+		if bound {
+			want = 1
+		}
+		if got := h.one("SELECT count(*) FROM filament_bb_tag_pending WHERE tag_id = $1::uuid", tag); got != want {
+			t.Errorf("bound %v: %v pending rows, want %v", bound, got, want)
+		}
+	}
+}
+
+// Review of #8161: a MIFARE read that binds a spool is the page binding a tag it just read, as
+// for an NDEF read: no second history row.
+func TestAMifareReadThatBindsWritesNoRow(t *testing.T) {
+	h := newHarness(t)
+	body := mifareRead(uidA, block0A+" "+shared)
+	body["bind_spool_id"] = "00000000-0000-0000-0000-000000000001"
+	if status, answer := h.post(body); status != http.StatusOK || answer["tag_read_id"] != nil {
+		t.Fatalf("%d %v", status, answer)
+	}
+	if got := h.one("SELECT count(*) FROM filament_tag_reads"); got != int64(0) {
+		t.Errorf("rows = %v", got)
+	}
+	if h.py.bodies[0]["bind_spool_id"] == nil {
+		t.Errorf("python did not get the bind: %v", h.py.bodies[0])
 	}
 }
 

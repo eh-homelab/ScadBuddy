@@ -9,9 +9,11 @@
 //   - stores the raw dump (the UID and the data blocks, never a key trailer) in the blob store
 //     as kind tag_dump, complete or partial;
 //   - in one transaction, finds the tag by the tray UUID of block 9, else by the UID through
-//     filament_tag_uids, makes it when there is none (kind bambu_mifare), adds the UID to it,
-//     folds a UID-only tag of that UID into it ("Same spool as…"), writes raw_blob from a
-//     complete read only, appends a filament_tag_reads row and holds the dump in blob_refs;
+//     filament_tag_uids, makes it when there is none (kind bambu_mifare when the read decodes
+//     to a tray UUID or a filament type, else other), adds the UID to it, folds a UID-only tag
+//     of that UID into it ("Same spool as…"), and, for a tap (not tap false, no
+//     bind_spool_id), writes raw_blob from a complete read, appends a filament_tag_reads row
+//     and holds the dump in blob_refs;
 //   - hands the read to Python as a UID-only read (no blocks, no records), which marks the tag
 //     seen, binds it when bind_spool_id is set, and answers TagReadResult;
 //   - adds bambu (the decoder's JSON), tag_read_id, dump_key and, when no spool holds the tag,
@@ -306,7 +308,10 @@ const dumpFormat = "scadbuddy.mifare_classic_1k.v1"
 func (s *Reads) mifare(w http.ResponseWriter, r *http.Request, fields map[string]json.RawMessage, rd read, scan scanFacts) {
 	ctx := r.Context()
 	caller := auth.CallerOf(ctx)
-	saved, err := s.recordMifare(ctx, rd, scan, actorOf(caller), sourceOf(caller, "app"), !tapped(fields))
+	// As for an NDEF read, a bind_spool_id is the page binding a tag it read a moment ago: no
+	// second history row.
+	noTap := !tapped(fields) || !isNull(fields["bind_spool_id"])
+	saved, err := s.recordMifare(ctx, rd, scan, actorOf(caller), sourceOf(caller, "app"), noTap)
 	if err != nil {
 		writeError(w, r, err)
 		return

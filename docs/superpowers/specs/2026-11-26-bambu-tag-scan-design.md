@@ -220,6 +220,9 @@ writer:
   binding a tag it just read, so it writes no second row.
 - A read with `tap: false` is the page's lookup of a tag it read before (after a move, a
   restore's confirm). It writes no history row and no hold, and a MIFARE one sets no `raw_blob`.
+  A MIFARE read with `bind_spool_id` is the same as an NDEF one: no second row.
+- A bound tag that gains a tray UUID (set on it, or by a fold) is queued for the Bambuddy tag
+  push (`filament_bb_tag_pending`), as `enqueue_tag` does in Python.
 - Core's own refusals of a MIFARE read come before it records anything: 422 `mifare_invalid`
   (the body's shape, a 7-byte UID say) and 422 `mifare_unreadable` (the decode). On those, and on
   503 `mifare_needs_core`, the page posts the read again as a UID-only read.
