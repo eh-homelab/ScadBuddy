@@ -52,7 +52,9 @@ Since #8062 a `wait_for_human` opens a task as a prompt does (`HUMAN_PROMPT_PATC
 id per call), with the schema `HUMAN_ANSWER_SCHEMA` and the question as its title. A
 question longer than a title (`TASK_TITLE_MAX`, 500 characters) is cut to fit, ending with
 "…", and the whole question is a `text` block of the task's context (at most 4000
-characters; a longer one raises `ValueError`; `_human_question`). Its step is still
+characters; a longer one raises `ValueError`; `_human_question`). `wait_for_human("")` raises
+`ValueError`, because a task title needs a character. An empty answer text is accepted: the
+schema has no `minLength`, where the text route refuses a blank answer. Its step is still
 `wait_for_human`. A call from before replays with no task: it waits on
 `human_answer_open` (`human_answer` for an older one) and takes its answer at
 `POST /api/v1/workflow-runs/{run_id}/answer`, operation kind `flow_answer`. The run page shows
