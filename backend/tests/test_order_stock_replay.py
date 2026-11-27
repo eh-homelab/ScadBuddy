@@ -40,10 +40,23 @@ RECORDED = (
 )
 
 
+def _workflow_id(history: WorkflowHistory) -> str | None:
+    """The id the run had, where its commands name it: `RecostLot` keys each Go step
+    ``<workflow id>:<round>``, so a replay under another id schedules other activity ids.
+    The history keeps no id of its own; the first ``inventory.Recost`` step's gives it."""
+    for event in history.events:
+        if event.HasField("activity_task_scheduled_event_attributes"):
+            scheduled = event.activity_task_scheduled_event_attributes
+            if scheduled.activity_type.name == "inventory.Recost":
+                return scheduled.activity_id.rsplit(":", 1)[0]
+    return None
+
+
 @pytest.mark.parametrize("name", sorted(p.stem for p in HISTORIES.glob("*.json")))
 async def test_order_stock_replays(name: str) -> None:
+    text = (HISTORIES / f"{name}.json").read_text()
     history = WorkflowHistory.from_json(
-        f"order-stock-{name}", (HISTORIES / f"{name}.json").read_text()
+        _workflow_id(WorkflowHistory.from_json("probe", text)) or f"order-stock-{name}", text
     )
     await Replayer(
         workflows=[FulfilOrderItem, RecostLot, MergePrinter],
