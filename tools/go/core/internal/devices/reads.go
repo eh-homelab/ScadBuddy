@@ -380,6 +380,20 @@ func (s *Store) ownRead(r *http.Request) (Read, error) {
 	return read, nil
 }
 
+// OwnRead is a device read for a Go consumer that acts for the person on ctx (the tag and
+// code decoders, #8244): only the device's owner may use it. Any other read is a 404, as a
+// read that is not there.
+func (s *Store) OwnRead(ctx context.Context, id string) (Read, error) {
+	read, err := s.ReadOf(ctx, id)
+	if err != nil {
+		return read, err
+	}
+	if read.owner != principal(ctx) {
+		return Read{}, notFound("read")
+	}
+	return read, nil
+}
+
 func (s *Store) getRead(r *http.Request) (any, error) {
 	return s.ownRead(r)
 }

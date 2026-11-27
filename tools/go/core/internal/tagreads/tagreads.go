@@ -3,7 +3,9 @@
 //
 // It answers POST /api/v1/filament/tags/reads, the one input path of every tag read (spec
 // 2026-11-26-bambu-tag-scan-design.md G2), only for a body that carries mifare_blocks. Any
-// other body goes to Python unchanged. For a MIFARE read it:
+// other body goes to Python unchanged. A body with read_id (#8244) names a paired device's
+// read in place of the read's own fields: core puts the read's dump in the body first
+// (fromDevice), then goes on as for an inline read. For a MIFARE read it:
 //
 //   - checks the read and decodes it with internal/bambutag, every string and number bounded;
 //   - stores the raw dump (the UID and the data blocks, never a key trailer) in the blob store
@@ -42,6 +44,7 @@ import (
 	"github.com/eh-homelab/ScadBuddy/tools/go/core/internal/auth"
 	"github.com/eh-homelab/ScadBuddy/tools/go/core/internal/bambutag"
 	"github.com/eh-homelab/ScadBuddy/tools/go/core/internal/blobstore"
+	"github.com/eh-homelab/ScadBuddy/tools/go/core/internal/devices"
 	"github.com/eh-homelab/ScadBuddy/tools/go/core/internal/httpx"
 )
 
@@ -65,16 +68,20 @@ const (
 	holderKind = "tag_read"
 )
 
-// Putter stores a blob; its Key is the content index key (blobstore.Blobs.Put).
-type Putter interface {
+// BlobStore stores a blob, whose Key is the content index key (blobstore.Blobs.Put), and
+// opens one by that key (a device read's dump).
+type BlobStore interface {
 	Put(ctx context.Context, kind, mediaType string, body []byte) (blobstore.Committed, error)
+	OpenKey(ctx context.Context, key string) (io.ReadCloser, blobstore.Ref, error)
 }
 
 // Reads serves the area.
 type Reads struct {
 	Pool *pgxpool.Pool
-	// Blobs stores the dumps.
-	Blobs Putter
+	// Blobs stores the dumps, and reads a device read's dump.
+	Blobs BlobStore
+	// Devices loads a body's read_id, a paired device's read (#8244).
+	Devices *devices.Store
 	// Upstream is the Python API: every body without mifare_blocks, and each MIFARE read's
 	// UID-only read, go there.
 	Upstream http.Handler
@@ -112,6 +119,16 @@ func (s *Reads) serve(w http.ResponseWriter, r *http.Request) {
 		s.forward(w, r, io.MultiReader(bytes.NewReader(raw), r.Body), r.ContentLength)
 		return
 	}
+	var deviceRead string
+	if _, ok := fields["read_id"]; ok {
+		id, perr := s.fromDevice(r.Context(), fields)
+		if perr != nil {
+			httpx.WriteProblem(w, r, perr)
+			return
+		}
+		deviceRead = id
+		raw, _ = json.Marshal(fields)
+	}
 	img, perr := s.imageOf(r.Context(), fields)
 	if perr != nil {
 		httpx.WriteProblem(w, r, perr)
@@ -122,7 +139,7 @@ func (s *Reads) serve(w http.ResponseWriter, r *http.Request) {
 		httpx.WriteProblem(w, r, perr)
 		return
 	}
-	scan := scanFacts{image: img, location: at}
+	scan := scanFacts{image: img, location: at, deviceRead: deviceRead}
 	if !isNull(fields["mifare_blocks"]) {
 		read, perr := parse(fields)
 		if perr != nil {
@@ -135,10 +152,12 @@ func (s *Reads) serve(w http.ResponseWriter, r *http.Request) {
 	s.ndef(w, r, fields, raw, scan)
 }
 
-// scanFacts are what core records of a scan and Python does not: its photo and its position.
+// scanFacts are what core records of a scan and Python does not: its photo, its position,
+// and the paired device's read it came from ("" for an inline read).
 type scanFacts struct {
-	image    *image
-	location *location
+	image      *image
+	location   *location
+	deviceRead string
 }
 
 // stripScan takes the scan's photo and position out of a body for Python, and says whether
@@ -204,7 +223,11 @@ func (s *Reads) ndef(w http.ResponseWriter, r *http.Request, fields map[string]j
 		_ = json.Unmarshal(fields["uid"], &uid)
 		_ = json.Unmarshal(fields["tag_type"], &tagType)
 		caller := auth.CallerOf(ctx)
-		row := historyRow{tagID: *tag.ID, source: sourceOf(caller, "phone"), actor: actorOf(caller),
+		page := "phone"
+		if scan.deviceRead != "" {
+			page = "app"
+		}
+		row := historyRow{tagID: *tag.ID, source: sourceOf(caller, page), actor: actorOf(caller),
 			tagType: tagType, records: fields["records"], scan: scan}
 		if uid != nil {
 			row.uid = CleanUID(*uid)

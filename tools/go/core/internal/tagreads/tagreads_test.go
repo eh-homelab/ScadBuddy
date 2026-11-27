@@ -20,6 +20,7 @@ import (
 
 	"github.com/eh-homelab/ScadBuddy/tools/go/core/internal/auth"
 	"github.com/eh-homelab/ScadBuddy/tools/go/core/internal/blobstore"
+	"github.com/eh-homelab/ScadBuddy/tools/go/core/internal/devices"
 	"github.com/eh-homelab/ScadBuddy/tools/go/core/internal/seal"
 	"github.com/eh-homelab/ScadBuddy/tools/go/core/internal/testdb"
 )
@@ -107,6 +108,8 @@ func (p *python) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 }
 
 type harness struct {
+	// who is the caller of each request; the zero Caller is none (auth off).
+	who   auth.Caller
 	t     *testing.T
 	pool  *pgxpool.Pool
 	s3    *fakeS3
@@ -134,14 +137,22 @@ func newHarness(t *testing.T) *harness {
 		LookupEnv: func(n string) (string, bool) { v, ok := env[n]; return v, ok },
 		HTTP:      store.Client(), Stream: store.Client(), Now: time.Now}
 	py := &python{}
-	reads := &Reads{Pool: pool, Blobs: blobs, Upstream: py}
+	reads := &Reads{Pool: pool, Blobs: blobs, Upstream: py, Devices: &devices.Store{Pool: pool}}
+	h := &harness{t: t, pool: pool, s3: s3, py: py, reads: reads}
 	mux := http.NewServeMux()
 	for _, p := range reads.Public()[Area] {
-		mux.Handle(p.Pattern, p.Handler)
+		handler := p.Handler
+		mux.Handle(p.Pattern, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if h.who.Kind != "" {
+				r = r.WithContext(auth.WithCaller(r.Context(), h.who))
+			}
+			handler.ServeHTTP(w, r)
+		}))
 	}
 	api := httptest.NewServer(mux)
 	t.Cleanup(api.Close)
-	return &harness{t: t, pool: pool, s3: s3, py: py, url: api.URL + Path, reads: reads}
+	h.url = api.URL + Path
+	return h
 }
 
 func (h *harness) post(body any) (int, map[string]any) {
@@ -790,5 +801,95 @@ func TestCleanUIDIsPythons(t *testing.T) {
 		if got := CleanUID(in); got != want {
 			t.Errorf("CleanUID(%q) = %q, want %q", in, got, want)
 		}
+	}
+}
+
+// deviceRead is a paired device's tag read for owner, as the devices area's result writes it
+// (#8244): the dump stored as a tag_dump blob, and its device and call.
+func (h *harness) deviceRead(owner, uid, blocks string) string {
+	h.t.Helper()
+	ctx := context.Background()
+	body, _ := json.Marshal(map[string]any{"uid": uid, "tech": "MifareClassic", "blocks": blocksOf(blocks), "records": []any{}})
+	put, err := h.reads.Blobs.Put(ctx, dumpKind, mediaType, body)
+	if err != nil {
+		h.t.Fatal(err)
+	}
+	var id string
+	if err := h.pool.QueryRow(ctx, `WITH d AS (
+		INSERT INTO devices (owner, name, model, app_version, capabilities)
+		VALUES ($1, 'Phone', 'Pixel', '1.0', ARRAY['nfc.read']) RETURNING id),
+	c AS (INSERT INTO device_calls (device_id, caller, caller_kind, method, timeout_s, deadline, outcome, ended_at)
+		SELECT id, $1, 'person', 'nfc.read', 60, now(), 'done', now() FROM d RETURNING id, device_id)
+	INSERT INTO device_reads (device_id, call_id, kind, uid, tech, blob_key, media_type, complete)
+		SELECT device_id, id, 'nfc', $2, 'MifareClassic', $3, $4, false FROM c RETURNING id::text`,
+		owner, uid, put.Key, mediaType).Scan(&id); err != nil {
+		h.t.Fatal(err)
+	}
+	return id
+}
+
+var ada = auth.Caller{Kind: auth.KindPerson, Principal: "user:test#ada", SessionKind: "login"}
+
+func TestTagReadFromDeviceRead(t *testing.T) {
+	h := newHarness(t)
+	h.who = ada
+	readA := h.deviceRead(ada.Principal, uidA, block0A+" "+shared)
+	readB := h.deviceRead(ada.Principal, uidB, block0B+" "+shared)
+	for _, read := range []string{readA, readB} {
+		status, answer := h.post(map[string]any{"read_id": read})
+		if status != http.StatusOK {
+			t.Fatalf("%s: %d %v", read, status, answer)
+		}
+		if bambu := answer["bambu"].(map[string]any); bambu["tray_uid"] != tray || answer["tag_read_id"] == nil {
+			t.Errorf("answer = %v", answer)
+		}
+	}
+	tag := h.tagOf(uidA + "00000100")
+	if got := h.tagOf(uidB + "00000100"); got != tag {
+		t.Fatalf("the two sides are tags %s and %s", tag, got)
+	}
+	if got := h.one("SELECT tray_uuid FROM filament_tags WHERE id = $1::uuid", tag); got != tray {
+		t.Errorf("tray_uuid = %v", got)
+	}
+	for _, read := range []string{readA, readB} {
+		if got := h.one(`SELECT source || ' ' || tag_type FROM filament_tag_reads
+			WHERE device_read_id = $1::uuid AND tag_id = $2::uuid`, read, tag); got != "app MifareClassic" {
+			t.Errorf("read %s: %v", read, got)
+		}
+	}
+	// Python got UID-only reads, without the read_id.
+	for _, b := range h.py.bodies {
+		if _, ok := b["read_id"]; ok || b["mifare_blocks"] != nil {
+			t.Errorf("forwarded %v", b)
+		}
+	}
+	// The same read posted again answers its first row and writes no second one.
+	first := h.one("SELECT id::text FROM filament_tag_reads WHERE device_read_id = $1::uuid", readA)
+	if status, answer := h.post(map[string]any{"read_id": readA}); status != http.StatusOK || answer["tag_read_id"] != first {
+		t.Errorf("again: %d %v, want row %v", status, answer, first)
+	}
+	if got := h.one("SELECT count(*) FROM filament_tag_reads"); got != int64(2) {
+		t.Errorf("%v reads, want 2", got)
+	}
+	// A read_id comes in place of the inline read.
+	if status, answer := h.post(map[string]any{"read_id": readA, "uid": uidA}); status != http.StatusUnprocessableEntity {
+		t.Errorf("read_id and uid: %d %v", status, answer)
+	}
+}
+
+func TestTagReadFromAnotherPersonsDeviceReadIsNotFound(t *testing.T) {
+	h := newHarness(t)
+	h.who = ada
+	bobs := h.deviceRead("user:test#bob", uidA, block0A+" "+shared)
+	for _, id := range []string{bobs, "not-an-id", "00000000-0000-0000-0000-000000000000"} {
+		if status, answer := h.post(map[string]any{"read_id": id}); status != http.StatusNotFound {
+			t.Errorf("read %s: %d %v", id, status, answer)
+		}
+	}
+	if got := h.one("SELECT count(*) FROM filament_tags"); got != int64(0) {
+		t.Errorf("%v tags from another person's read", got)
+	}
+	if len(h.py.bodies) != 0 {
+		t.Errorf("Python got %v", h.py.bodies)
 	}
 }

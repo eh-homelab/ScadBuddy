@@ -611,3 +611,66 @@ func TestAPersonSeesOnlyTheirOwnScans(t *testing.T) {
 		t.Errorf("an anonymous caller lists its own scan only: %v", out)
 	}
 }
+
+// devicePhoto is a paired device's photo read for owner, as the devices area's result writes
+// it (#8244): the photo stored as a scan_image blob, and its device and call.
+func (h *harness) devicePhoto(owner string, body []byte) string {
+	h.t.Helper()
+	stored, err := h.scans.Store(context.Background(), body)
+	if err != nil {
+		h.t.Fatal(err)
+	}
+	var id string
+	if err := h.pool.QueryRow(context.Background(), `WITH d AS (
+		INSERT INTO devices (owner, name, model, app_version, capabilities)
+		VALUES ($1, 'Phone', 'Pixel', '1.0', ARRAY['code.scan']) RETURNING id),
+	c AS (INSERT INTO device_calls (device_id, caller, caller_kind, method, timeout_s, deadline, outcome, ended_at)
+		SELECT id, $1, 'person', 'code.scan', 60, now(), 'done', now() FROM d RETURNING id, device_id)
+	INSERT INTO device_reads (device_id, call_id, kind, blob_key, media_type)
+		SELECT device_id, id, 'photo', $2, $3 FROM c RETURNING id::text`,
+		owner, stored.Key, stored.MediaType).Scan(&id); err != nil {
+		h.t.Fatal(err)
+	}
+	return id
+}
+
+func TestCodeScanFromDeviceRead(t *testing.T) {
+	h := newHarness(t)
+	_, number := h.spool()
+	body := encodePNG(t, qr(t, "S-"+jsonInt(number), 300))
+	read := h.devicePhoto(h.who.Principal, body)
+	status, sc := h.json("POST", "/api/v1/scan/codes", map[string]any{"read_id": read})
+	if status != 200 {
+		t.Fatalf("%d %v", status, sc)
+	}
+	codes := sc["codes"].([]any)
+	if sc["source"] != "app" || sc["actor"] != h.who.Principal || len(codes) != 1 ||
+		codes[0].(map[string]any)["resolved"].(map[string]any)["kind"] != "spool" {
+		t.Errorf("scan %v", sc)
+	}
+	if img := sc["image"].(map[string]any); !strings.HasPrefix(img["key"].(string), "scan_image-") || img["media_type"] != "image/png" {
+		t.Errorf("image %v", img)
+	}
+	// The body may name its source; a key with a read_id is refused.
+	if status, sc := h.json("POST", "/api/v1/scan/codes", map[string]any{"read_id": read, "source": "nfc"}); status != 200 || sc["source"] != "nfc" {
+		t.Errorf("source: %d %v", status, sc)
+	}
+	if status, _ := h.json("POST", "/api/v1/scan/codes", map[string]any{"read_id": read, "key": "scan_image-x"}); status != 422 {
+		t.Errorf("read_id and key: %d", status)
+	}
+}
+
+func TestCodeScanFromAnotherPersonsDeviceReadIsNotFound(t *testing.T) {
+	h := newHarness(t)
+	read := h.devicePhoto("user:test#bob", encodePNG(t, qr(t, "S-1", 200)))
+	for _, id := range []string{read, "not-an-id", "00000000-0000-0000-0000-000000000000"} {
+		if status, out := h.json("POST", "/api/v1/scan/codes", map[string]any{"read_id": id}); status != 404 {
+			t.Errorf("read %s: %d %v", id, status, out)
+		}
+	}
+	var rows int
+	_ = h.pool.QueryRow(context.Background(), "SELECT count(*) FROM code_scans").Scan(&rows)
+	if rows != 0 {
+		t.Errorf("%d scans of another person's read", rows)
+	}
+}

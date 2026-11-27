@@ -444,7 +444,8 @@ func newRouter(pool *pgxpool.Pool, next http.Handler, keys *seal.Keys, areas, au
 			if keys == nil {
 				return nil, fmt.Errorf("SCADBUDDY_CORE_AREAS names %q, which needs %s", name, seal.Variable)
 			}
-			reads := &tagreads.Reads{Pool: pool, Blobs: blobstore.New(pool, keys, lookupEnv, tel), Upstream: next}
+			reads := &tagreads.Reads{Pool: pool, Blobs: blobstore.New(pool, keys, lookupEnv, tel), Upstream: next,
+				Devices: &devices.Store{Pool: pool}}
 			for _, p := range reads.Public()[tagreads.Area] {
 				public.Handle(p.Pattern, gate.Wrap(p.Route, p.Handler))
 				served = true
