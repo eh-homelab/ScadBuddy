@@ -15,6 +15,11 @@ import, so a link Bambuddy made late is still copied. An attempt by hand that na
 archives copies them when it is recorded or edited too (``api/orders.py``
 ``record_fulfilment``, ``update_fulfilment``, #6132).
 
+A LAN attempt takes its start, end, seconds and grams from ScadBuddy's own record of the
+run (#8282, :func:`lan_facts`), with or without a Bambuddy and an archive; an archive
+gives only a fact that record lacks, and its media. A queue attempt copies all of them
+from its archives, as before.
+
 An archive's ``finish_`` photo and its timelapse are copied into the attempt's
 attachments (§6.2, #4251): the bytes are pulled once through the seam into the claim store,
 kept as ScadBuddy's own blob and recorded as the attachment, with the role ``finished`` or
@@ -29,6 +34,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import uuid
+from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 
 import psycopg
@@ -58,6 +64,7 @@ from scadbuddy.orders.models import (
 from scadbuddy.orders.problems import PROBLEMS
 from scadbuddy.orders.store import (
     ArchiveCopyExistsError,
+    LanRecord,
     OrderStore,
     fulfilment_subject,
     item_subject,
@@ -143,6 +150,69 @@ def _sum[T: (int, float)](values: list[T | None]) -> T | None:
     return sum(known) if known else None
 
 
+@dataclass(frozen=True)
+class OwnFacts:
+    """What ScadBuddy's own record says of a LAN run (:func:`lan_facts`); ``None`` for a
+    fact the record does not give."""
+
+    started_at: datetime | None
+    finished_at: datetime | None
+    actual_seconds: int | None
+    actual_grams: float | None
+
+
+def lan_facts(record: LanRecord) -> OwnFacts:
+    """A LAN run's facts from ScadBuddy's own record (#8282, `OrderStore.lan_record`).
+
+    - The start is the first start's ``started_at``: the report that showed the printer
+      take the plate.
+    - Each start ends at the printer report that showed its plate end, which the ledger
+      booked (`filament/prints.py` `plate_ended`, ``data.ended`` ``report``). The last
+      start with no such end ends when the run's follow read the print settled
+      (``print_outcomes.settled_at``). The end is the last start's end.
+    - The seconds are the sum over the starts of the end less the start. An earlier start
+      with no timed end has no end in the record, so there are no seconds.
+    - The grams are what the ledger booked as used: each start books the sliced grams of
+      each slot whose tray holds an SB spool, and its end books them as the actual when
+      the plate printed to the end (`filament/print_uses.py`). The ledger is ScadBuddy's
+      record of what each plate took off a spool, so it is the record closest to what
+      printed. There are no grams when a start booked no use, when a use is still open,
+      or when an end dropped its estimate (a plate that did not finish): the record does
+      not say what such a plate used.
+    """
+    starts = record.starts
+    timed: dict[str, datetime] = {}
+    for use in record.uses:
+        if use.timed and use.ended_at is not None:
+            first = timed.get(use.subtask)
+            timed[use.subtask] = use.ended_at if first is None else min(first, use.ended_at)
+    ends = [timed.get(start.subtask_name) for start in starts]
+    if ends[-1] is None:
+        ends[-1] = record.settled_at
+    seconds: int | None = None
+    spans = [
+        (end - start.started_at).total_seconds()
+        for start, end in zip(starts, ends, strict=True)
+        if end is not None
+    ]
+    if len(spans) == len(starts) and all(span >= 0 for span in spans):
+        seconds = round(sum(spans))
+    booked = {use.subtask for use in record.uses}
+    grams: float | None = None
+    if (
+        record.uses
+        and all(start.subtask_name in booked for start in starts)
+        and all(use.grams is not None and use.applied for use in record.uses)
+    ):
+        grams = sum(use.grams or 0.0 for use in record.uses)
+    return OwnFacts(
+        started_at=min(start.started_at for start in starts),
+        finished_at=ends[-1],
+        actual_seconds=seconds,
+        actual_grams=grams,
+    )
+
+
 async def _facts(integrations: OrderIntegrations, archive_ids: list[int]) -> list[ArchiveFacts]:
     """Each archive Bambuddy still has; one that fails to read is left out (logged), so
     the other plates still offer their copies."""
@@ -204,9 +274,17 @@ async def mirror_archives(
     Bambuddy has linked no archive to yet. A read of Bambuddy slower than
     ``read_timeout`` raises ``TimeoutError`` before anything is written (#6167). A
     database error in the LAN link (:func:`link_lan_archives`) is logged, and the read
-    goes on without it (#8306)."""
+    goes on without it (#8306).
+
+    A settled LAN attempt (#8282) takes each fact :func:`lan_facts` gives from ScadBuddy's
+    own record, and an archive's only where that record gives none. It writes them with no
+    Bambuddy and no archive too."""
+    own: OwnFacts | None = None
+    if attempt.print_run_id is not None and attempt.finished_at is not None:
+        record = await asyncio.to_thread(lifecycle.store.lan_record, attempt.print_run_id)
+        own = None if record is None else lan_facts(record)
     if not integrations.linked:
-        return attempt, []
+        return await _record_facts(lifecycle, attempt, own, []), []
     read: dict[int, ArchiveFacts] = {}
     if attempt.print_run_id is None:
         archive_ids, settled = attempt.archive_ids, True
@@ -224,26 +302,52 @@ async def mirror_archives(
         archive_ids = await asyncio.to_thread(lifecycle.store.run_archives, attempt.print_run_id)
         settled = attempt.finished_at is not None
     if not archive_ids:
-        return attempt, []
+        return await _record_facts(lifecycle, attempt, own, []), []
     fetched = await asyncio.wait_for(
         _facts(integrations, [a for a in archive_ids if a not in read]), read_timeout
     )
     by_id = {**read, **{f.archive_id: f for f in fetched}}
     facts = [by_id[a] for a in archive_ids if a in by_id]
     if not settled or not facts:
-        return attempt, facts
-    started = [f.started_at for f in facts if f.started_at is not None]
-    completed = [f.completed_at for f in facts if f.completed_at is not None]
-    written = await asyncio.to_thread(
+        return await _record_facts(lifecycle, attempt, own, []), facts
+    return await _record_facts(lifecycle, attempt, own, facts), facts
+
+
+async def _record_facts(
+    lifecycle: Lifecycle, attempt: Fulfilment, own: OwnFacts | None, facts: list[ArchiveFacts]
+) -> Fulfilment:
+    """The attempt with ``facts`` and ``own`` written (`Lifecycle.record_archive_facts`):
+    each of ``own``'s facts, else the archives'. With no archive read (no Bambuddy, none
+    linked yet, or a read that failed), the attempt keeps its archives, and its seconds
+    and grams where ``own`` gives none. Nothing is written with neither."""
+    if own is None and not facts:
+        return attempt
+    mine = own or OwnFacts(None, None, None, None)
+    if facts:
+        started = [f.started_at for f in facts if f.started_at is not None]
+        completed = [f.completed_at for f in facts if f.completed_at is not None]
+        theirs = OwnFacts(
+            started_at=min(started) if started else None,
+            finished_at=max(completed) if completed else None,
+            actual_seconds=_sum([f.actual_seconds for f in facts]),
+            actual_grams=_sum([f.grams for f in facts]),
+        )
+        archive_ids = [f.archive_id for f in facts]
+    else:
+        # The times are written on the first copy only, and one not given stays.
+        theirs = OwnFacts(None, None, attempt.actual_seconds, attempt.actual_grams)
+        archive_ids = attempt.archive_ids
+    return await asyncio.to_thread(
         lifecycle.record_archive_facts,
         attempt,
-        [f.archive_id for f in facts],
-        started_at=min(started) if started else None,
-        finished_at=max(completed) if completed else None,
-        actual_seconds=_sum([f.actual_seconds for f in facts]),
-        actual_grams=_sum([f.grams for f in facts]),
+        archive_ids,
+        started_at=mine.started_at or theirs.started_at,
+        finished_at=mine.finished_at or theirs.finished_at,
+        actual_seconds=(
+            theirs.actual_seconds if mine.actual_seconds is None else mine.actual_seconds
+        ),
+        actual_grams=theirs.actual_grams if mine.actual_grams is None else mine.actual_grams,
     )
-    return written, facts
 
 
 async def mirror_run(

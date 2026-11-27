@@ -25,12 +25,14 @@ from psycopg import Connection, errors, sql
 from psycopg.rows import DictRow
 from psycopg.types.json import Jsonb
 from psycopg_pool import ConnectionPool
+from pydantic import TypeAdapter
 
 from scadbuddy.bambuddy.print_links import LanArchiveLink, record_lan_start_in
 from scadbuddy.bambuddy.runs import PrintRun, lan_started_in
 from scadbuddy.bambuddy.subject import PrintSubject
 from scadbuddy.entities.refs import EntityRef
 from scadbuddy.entities.registry import EntityStore
+from scadbuddy.filament.prints import RunUse, run_uses
 from scadbuddy.inventory.stock import PartsMoved, parts_moved, parts_moves
 from scadbuddy.orders.models import (
     IMPORT_STUCK,
@@ -88,6 +90,7 @@ from scadbuddy.orders.models import (
     TimeEntryInput,
 )
 from scadbuddy.orders.numbers import next_number
+from scadbuddy.printers.lan_models import LanStarted
 
 Conn = Connection[DictRow]
 Pool = ConnectionPool[Conn]
@@ -143,6 +146,22 @@ class RowNotOwnedError(LookupError):
         self.table = table
         self.row_id = row_id
         self.customer_id = customer_id
+
+
+#: A run's ``result.lan``, as `OrderStore.lan_record` reads it.
+_LAN_STARTS = TypeAdapter(list[LanStarted])
+
+
+@dataclass(frozen=True)
+class LanRecord:
+    """What ScadBuddy itself recorded of a LAN run (#8282, `OrderStore.lan_record`)."""
+
+    #: Each plate the printer took, in the order the run started them.
+    starts: list[LanStarted]
+    #: When the run's follow read its print settled; ``None`` until then.
+    settled_at: datetime | None
+    #: What the starts booked in the filament ledger, one per start and slot.
+    uses: list[RunUse]
 
 
 class ArchiveCopyExistsError(ValueError):
@@ -2241,6 +2260,24 @@ class OrderStore:
                 (subject, run["created_at"], run["last_start"] + within, limit),
             ).fetchall()
         return str(run["output_id"]), [int(row["archive_id"]) for row in rows]
+
+    def lan_record(self, run_id: str) -> LanRecord | None:
+        """ScadBuddy's own record of a LAN run (#8282): the starts its result lists
+        (``print_runs.result.lan``), when its follow read the print settled
+        (``print_outcomes.settled_at``), and what its starts booked in the filament ledger
+        (`filament/prints.py` `run_uses`). None for a run with no LAN start (Bambuddy's
+        queue), or whose row is pruned."""
+        with self._read(None) as c:
+            row = c.execute(
+                "SELECT r.result -> 'lan' AS lan, o.settled_at FROM print_runs r"
+                " LEFT JOIN print_outcomes o ON o.run_id = r.id WHERE r.id = %s",
+                (run_id,),
+            ).fetchone()
+            if row is None or not isinstance(row["lan"], list) or not row["lan"]:
+                return None
+            starts = _LAN_STARTS.validate_python(row["lan"])
+            uses = run_uses(c, run_id)
+        return LanRecord(starts=starts, settled_at=row["settled_at"], uses=uses)
 
     def lan_runs(self, run_subject: str, subtask_names: list[str]) -> list[PrintRun]:
         """The subject's runs with a LAN start under one of ``subtask_names``, as
