@@ -1,7 +1,7 @@
 import { screen, waitFor, within } from '@testing-library/react'
 import { http, HttpResponse } from 'msw'
 import { useLocation } from 'react-router'
-import { describe, expect, it, vi } from 'vitest'
+import { afterEach, describe, expect, it, vi } from 'vitest'
 import { listSpoolEvents, type Spool } from '../../api/filament'
 import { spoolId } from '../../mocks/features/filament/seed'
 import { server } from '../../mocks/server'
@@ -10,6 +10,9 @@ import { renderPage } from '../../test/utils'
 import { BulkBar } from './BulkBar'
 
 describe('the bulk bar', () => {
+  // The request listeners each test adds end with it.
+  afterEach(() => server.events.removeAllListeners())
+
   const two = [{ id: 's2', number: 5 } as Spool, { id: 's1', number: 4 } as Spool]
 
   it('archives the selection in one request and reports each spool once (#7151)', async () => {
