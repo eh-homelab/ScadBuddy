@@ -2212,7 +2212,8 @@ async def get_tag(filament: FilamentDep, tag_id: UUID) -> m.TagDetail:
         "`location` in the scan history, `tag_read_id`. "
         "A `read_id` names a paired device's tag read in place of `uid`, `tag_type`, "
         "`records` and `mifare_blocks` (#8244): core loads it and decodes it as an inline "
-        "read; 404 `read_not_found` for a read of a device the caller does not own, and 503 "
+        "read; 404 `read_not_found` for a read of a device the caller does not own, 422 "
+        "`device_read_invalid` for a photo read or for inline fields beside it, and 503 "
         "`device_read_needs_core` when that area does not run."
     ),
 )

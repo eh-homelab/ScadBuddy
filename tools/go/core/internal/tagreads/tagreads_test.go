@@ -840,6 +840,8 @@ var ada = auth.Caller{Kind: auth.KindPerson, Principal: "user:test#ada", Session
 func TestTagReadFromDeviceRead(t *testing.T) {
 	h := newHarness(t)
 	h.who = ada
+	// A phone's Web NFC scan made a UID-only tag of side B: B's read folds it in.
+	h.exec("INSERT INTO filament_tags (kind, tag_uid) VALUES ('other', $1)", uidB+"00000100")
 	readA := h.deviceRead(ada.Principal, uidA, block0A+" "+shared)
 	readB := h.deviceRead(ada.Principal, uidB, block0B+" "+shared)
 	for _, read := range []string{readA, readB} {
@@ -874,6 +876,14 @@ func TestTagReadFromDeviceRead(t *testing.T) {
 	first := h.one("SELECT id::text FROM filament_tag_reads WHERE device_read_id = $1::uuid", readA)
 	if status, answer := h.post(map[string]any{"read_id": readA}); status != http.StatusOK || answer["tag_read_id"] != first {
 		t.Errorf("again: %d %v, want row %v", status, answer, first)
+	}
+	// B posted again after its fold: its first row names the tag the fold kept.
+	firstB := h.one("SELECT id::text FROM filament_tag_reads WHERE device_read_id = $1::uuid", readB)
+	if status, answer := h.post(map[string]any{"read_id": readB}); status != http.StatusOK || answer["tag_read_id"] != firstB {
+		t.Errorf("B again: %d %v, want row %v", status, answer, firstB)
+	}
+	if got := h.one("SELECT tag_id::text FROM filament_tag_reads WHERE device_read_id = $1::uuid", readB); got != tag {
+		t.Errorf("B's row names tag %v, want %s", got, tag)
 	}
 	if got := h.one("SELECT count(*) FROM filament_tag_reads"); got != int64(2) {
 		t.Errorf("%v reads, want 2", got)

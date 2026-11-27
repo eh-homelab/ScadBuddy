@@ -312,7 +312,7 @@ A read's source is the caller's: an access token or a service credential is `age
 `Reads.RecordMifare(ctx, body, actor, source)` is the same write for a Go caller (#8157). With
 the area off, Python answers a MIFARE read 503 `mifare_needs_core`.
 A body with a `read_id` that is not null (#8244) names a paired device's read in place of `uid`, `tag_type`,
-`records` and `mifare_blocks` (with any of them not null, or a `records` that is not empty, it is a 422 `device_read_invalid`). Core loads the
+`records` and `mifare_blocks` (with any of them not null, or a `records` that is not empty, it is a 422 `device_read_invalid`, as is a photo read). Core loads the
 read (`devices.Store.OwnRead`: a read of a device the caller does not own is a 404
 `read_not_found`, with `code`, as a read that is not there), reads its `tag_dump` blob, and takes the dump's
 UID, its tech as `tag_type` (cut to 32 bytes, on a whole character), and its blocks as `mifare_blocks`. A dump

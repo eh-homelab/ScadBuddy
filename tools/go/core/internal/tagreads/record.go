@@ -278,7 +278,8 @@ func insertRead(ctx context.Context, tx pgx.Tx, row historyRow) (string, error) 
 		text(row.dumpKey), decoded, imageKey, imageType, lat, lon, accuracy, at, text(row.scan.deviceRead)).Scan(&id)
 	if errors.Is(err, pgx.ErrNoRows) {
 		// The first row holds its dump. This post's dump has the same bytes, so its Put found
-		// the same content key: nothing new to hold.
+		// the same content key: nothing new to hold. The same read finds the same tag (its
+		// tray UUID and UID), and a fold since then moved the first row's tag_id with it.
 		err = tx.QueryRow(ctx, "SELECT id::text FROM filament_tag_reads WHERE device_read_id = $1::uuid",
 			row.scan.deviceRead).Scan(&id)
 		return id, err

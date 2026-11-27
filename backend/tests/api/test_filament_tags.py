@@ -38,6 +38,13 @@ def test_a_phone_read_answers_the_tag_and_next(client: TestClient) -> None:
     assert got.json()["tag"]["tag_uid"] == "04A2B3C400000100"
 
 
+def test_a_read_with_no_records_is_a_uid_only_read(client: TestClient) -> None:
+    """#8244: `records` defaults to none, so a body with only a UID is a UID-only read."""
+    got = client.post(READS, json={"uid": "04:a2:b3:c5"})
+    assert got.status_code == 200, got.text
+    assert got.json()["tag"]["tag_uid"] == "04A2B3C500000100"
+
+
 def test_a_read_of_a_place_label_answers_open_code_and_the_place(client: TestClient) -> None:
     place = _location(client, "Shelf 9")
     href = f"https://scadbuddy.example/x/L-{place['number']}?from=label"
