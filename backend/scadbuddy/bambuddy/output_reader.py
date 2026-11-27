@@ -291,10 +291,9 @@ BLOB_TIMEOUT = httpx.Timeout(600.0, connect=10.0)
 #: The print worker's route that mints a read URL (`api/crud_print.py` `transfer_url`).
 TRANSFER_URLS = f"/api/v1{PREFIX}/print/transfer-urls"
 #: The CRUD client's retry budget for the read URL, and each try's timeout. The route
-#: stats the blob, which on the Bambuddy store is a Bambuddy call that a watched camera
-#: can slow past several seconds, so a try waits 20 s for the answer (5 s to connect),
-#: and tries go on for 60 s. While it waits the activity heartbeats every
-#: `TRANSFER_URL_HEARTBEAT`, so a slow API or Bambuddy never meets the LAN upload's
+#: stats the blob, so a try waits 20 s for the answer (5 s to connect), and tries go on
+#: for 60 s. While it waits the activity heartbeats every
+#: `TRANSFER_URL_HEARTBEAT`, so a slow API never meets the LAN upload's
 #: heartbeat timeout (`workflows/printing.py` `HEARTBEAT`, 30 s). The bound: the last try
 #: starts within the budget and a hung answer ends at its 20 s read timeout, about 80 s
 #: in all; httpx times each phase apart (pool, connect, write, read), so a try that also

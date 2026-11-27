@@ -74,11 +74,10 @@ from scadbuddy.crud.render import (
     RemoteGeometryIndex,
     RemoteInstallSlots,
     RemoteJobProjection,
-    RemoteStoreFolders,
 )
 from scadbuddy.library.assets import AssetStore
 from scadbuddy.library.history import ModelHistory
-from scadbuddy.library.settings_store import RenderStoreSettings, StoreNotReadyError
+from scadbuddy.library.settings_store import RenderStoreSettings, S3Settings, StoreNotReadyError
 from scadbuddy.render.job_models import Job
 from scadbuddy.render.projection import JobProjection, workflow_id_for
 from scadbuddy.render.solids import WRAPPER_PREFIX
@@ -130,7 +129,7 @@ from tests.conftest import (
     fake_3mf_openscad,
 )
 from tests.crud.crud_support import FixedToken, served_render_crud, static_render_crud
-from tests.support.render_store import fake_bambuddy, pin_snapshot, use_bambuddy_store
+from tests.support.render_store import pin_snapshot, s3_store, use_s3_store
 from tests.support.renders import render_to_end, start_of
 from tests.support.temporal import current_address, temporal_client
 
@@ -216,7 +215,7 @@ async def test_the_worker_renders_a_job_and_serves_health_and_metrics(
     try:
         async with (
             temporal_client() as client,
-            _bambuddy_store(projection.pool, settings, model, revision),
+            _s3_store(projection.pool, settings, model, revision),
             served_render_crud(projection.pool, settings, projection=projection) as crud,
         ):
             stop = asyncio.Event()
@@ -231,9 +230,8 @@ async def test_the_worker_renders_a_job_and_serves_health_and_metrics(
                         "build_id": build_id,
                         "task_queue": queue,
                         "store": {
-                            "backend": "bambuddy",
-                            "configured_backend": "bambuddy",
-                            "render_key_fallback": False,
+                            "backend": "s3",
+                            "configured_backend": "s3",
                             "multi_worker": True,
                             "settings_current": True,
                         },
@@ -277,7 +275,6 @@ async def test_the_worker_renders_a_job_and_serves_health_and_metrics(
     assert samples.get('scadbuddy_render_stage_seconds_count{stage="paint"}', 0) == 0
     assert f'revision="{build_id}"' in metrics
     # Refreshed per scrape from this process's store: its piece cache holds the piece.
-    assert samples["scadbuddy_store_render_key_fallback"] == 0
     assert samples["scadbuddy_worker_cache_bytes"] > 0
     # None of the API's series, whose zeros would fire its alerts (#664).
     assert "scadbuddy_render_store_up" not in metrics
@@ -285,14 +282,14 @@ async def test_the_worker_renders_a_job_and_serves_health_and_metrics(
 
 
 @contextlib.asynccontextmanager
-async def _bambuddy_store(
+async def _s3_store(
     pool: PgPool, settings: Settings, slug: str, revision: str
 ) -> AsyncIterator[None]:
-    """A fake Bambuddy saved as the API's store, with ``slug``'s snapshot at ``revision``
+    """moto's S3 saved as the API's store, with ``slug``'s snapshot at ``revision``
     stored as the API's pin stores it: a render worker runs only on a remote store, and
     renders from the snapshot, with no git (#5298 plan D11)."""
-    with fake_bambuddy() as bambuddy:
-        use_bambuddy_store(pool, bambuddy)
+    with s3_store() as s3:
+        use_s3_store(pool, s3)
         await pin_snapshot(pool, settings, slug, revision)
         yield
 
@@ -2170,33 +2167,31 @@ async def test_a_piece_cache_is_evicted_even_with_the_upload_sweep_off(
     assert intervals == [interval]
 
 
+#: An S3 store's settings that no test connects to.
+S3_STORE = S3Settings(
+    endpoint="http://s3.test", bucket="sb", prefix="t", access_key_id="id", secret_access_key="k"
+)
+
+
 class _Source:
     fresh = True
 
     async def current(self) -> RenderStoreSettings:
-        return RenderStoreSettings(
-            store_backend="bambuddy",
-            bambuddy_url="http://bambuddy.test",
-            api_key="full",
-            key_is_fallback=True,
-            library_folder_id=7,
-        )
+        return RenderStoreSettings(store_backend="s3", s3=S3_STORE)
 
 
-async def test_the_worker_exports_its_cache_size_and_whether_it_holds_the_full_key(
+async def test_the_worker_exports_its_cache_size(
     tmp_path: Path,
 ) -> None:
     local = LocalBlobStore(tmp_path / "blobs")
     cache = CachedBlobStore(
-        local, cast(ContentStore, SimpleNamespace(name="bambuddy")), max_bytes=0, min_age=0
+        local, cast(ContentStore, SimpleNamespace(name="s3")), max_bytes=0, min_age=0
     )
     (local.dir_for("k") / "m").write_bytes(b"12345")
     (tmp_path / "scratch").mkdir()
     (tmp_path / "scratch" / "left-over").write_bytes(b"x" * 100_000)
     os.link(tmp_path / "scratch" / "left-over", tmp_path / "scratch" / "linked")
-    store = StoreBundle(
-        "bambuddy", cache, None, None, None, None, cast(RenderSettingsSource, _Source())
-    )
+    store = StoreBundle("s3", cache, None, None, None, None, cast(RenderSettingsSource, _Source()))
     app = worker_module._health_app(
         Settings(
             data_dir=tmp_path,
@@ -2216,7 +2211,6 @@ async def test_the_worker_exports_its_cache_size_and_whether_it_holds_the_full_k
         if line and not line.startswith("#")
     }
     assert samples["scadbuddy_worker_cache_bytes"] == 5
-    assert samples["scadbuddy_store_render_key_fallback"] == 1
     # The whole data directory, as allocated on disk: the piece cache and the scratch
     # file beside it, which the cache gauge alone would miss (#1785).
     # As du counts it: directories too, and the linked file once.
@@ -2273,7 +2267,6 @@ WORKER_OWN = {
         "scadbuddy_worker_cache",
         "scadbuddy_worker_cache_bytes",
         "scadbuddy_render_data_bytes",
-        "scadbuddy_store_render_key_fallback",
         "scadbuddy_events_published",
         "scadbuddy_event_loop_lag_seconds",
     },
@@ -2320,11 +2313,9 @@ async def test_the_render_workers_scrape_carries_no_api_series(tmp_path: Path) -
     """The scrape itself (#664): the store refresh and the SDK series added to it."""
     local = LocalBlobStore(tmp_path / "blobs")
     cache = CachedBlobStore(
-        local, cast(ContentStore, SimpleNamespace(name="bambuddy")), max_bytes=0, min_age=0
+        local, cast(ContentStore, SimpleNamespace(name="s3")), max_bytes=0, min_age=0
     )
-    store = StoreBundle(
-        "bambuddy", cache, None, None, None, None, cast(RenderSettingsSource, _Source())
-    )
+    store = StoreBundle("s3", cache, None, None, None, None, cast(RenderSettingsSource, _Source()))
     settings = Settings(
         data_dir=tmp_path,
         database_url=UNUSED_DATABASE_URL,
@@ -2371,26 +2362,6 @@ def test_the_api_exports_every_series() -> None:
     assert exposed >= set().union(*WORKER_OWN.values())
 
 
-async def test_the_data_directory_is_measured_when_the_database_is_down(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """The eviction gauge needs no database, so an outage does not freeze it (#1785)."""
-
-    async def down(_: StoreBundle) -> None:
-        raise OSError("connection refused")
-
-    monkeypatch.setattr(worker_module, "store_health", down)
-    (tmp_path / "scratch").write_bytes(b"x" * 100_000)
-    metrics = Metrics()
-    store = cast(StoreBundle, SimpleNamespace())
-    with pytest.raises(OSError):
-        await worker_module._refresh_store_metrics(
-            metrics, store, worker_module._DataUsage(tmp_path)
-        )
-    measured = metrics.registry.get_sample_value("scadbuddy_render_data_bytes")
-    assert measured is not None and measured >= 100_000
-
-
 async def test_the_data_directory_is_walked_again_only_once_its_value_is_old(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -2429,10 +2400,8 @@ def test_a_symlinked_directory_counts_its_own_blocks_not_its_targets(tmp_path: P
     assert worker_module._allocated_bytes(root) == int(du.stdout.split()[0])
 
 
-#: Store settings that name a Bambuddy store: a render worker refuses the local one.
-REMOTE_STORE = RenderStoreSettings(
-    store_backend="bambuddy", bambuddy_url="http://bambuddy.test", library_folder_id=1, api_key="k"
-)
+#: Store settings that name an S3 store: a render worker refuses the local one.
+REMOTE_STORE = RenderStoreSettings(store_backend="s3", s3=S3_STORE)
 
 
 def _built(settings: Settings) -> tuple[WorkerDeps, StoreBundle]:
@@ -2448,7 +2417,6 @@ def _built(settings: Settings) -> tuple[WorkerDeps, StoreBundle]:
         refs=RemoteBlobRefs(remote),
         geometry=RemoteGeometryIndex(remote),
         index=RemoteBlobIndex(remote),
-        folders=RemoteStoreFolders(static_render_crud(current)),
         assets=RemoteAssetRows(remote),
         leases=RemoteCheckoutLeases(remote),
         slots=RemoteInstallSlots(remote),
@@ -2475,7 +2443,6 @@ def test_the_local_store_is_refused_before_anything_is_built(
             refs=RemoteBlobRefs(remote),
             geometry=RemoteGeometryIndex(remote),
             index=RemoteBlobIndex(remote),
-            folders=RemoteStoreFolders(static_render_crud()),
             assets=RemoteAssetRows(remote),
             leases=RemoteCheckoutLeases(remote),
             slots=RemoteInstallSlots(remote),

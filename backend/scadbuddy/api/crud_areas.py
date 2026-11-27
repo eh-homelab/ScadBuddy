@@ -186,7 +186,7 @@ from scadbuddy.crud.guard import CrudCaller, crud_router
 #: cannot see the Go switch. A worker whose route is missing runs on (G3).
 CRUD_AREAS: dict[CrudCaller, list[str]] = {
     "projects": ["flows", "operations", "payload-keys", "tasks"],
-    "render": ["settings", "jobs", "refs", "blob-index", "store-folders", "assets", "libraries"],
+    "render": ["settings", "jobs", "refs", "blob-index", "assets", "libraries"],
     "print": [
         "settings",
         "runs",

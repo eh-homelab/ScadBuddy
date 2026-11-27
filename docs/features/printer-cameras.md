@@ -70,7 +70,13 @@ flowchart LR
   (`START_HOLDOFF`), so the standby takes over. A path that is not ready (the printer is off)
   is no stall. 30 s is past the longest a healthy leader goes without an index while video
   arrives: a lost hook's file waits `ADOPT_AGE` (12 s), then an upload pass (5 s) and at most
-  `INDEX_EVERY` (8 s) of puts.
+  `INDEX_EVERY` (8 s) of puts. `/v3/paths/list` is read at most once per half tick: the
+  stall checks in that time share the read, including one still in flight. Each release adds one to `scadbuddy_camera_stall_releases_total`.
+  When both recorders cannot index (the bucket is down, or the API answers the lease route but fails the index route), they hand the lease back
+  and forth every 25 to 30 s (a leader releases at its sixth stalled tick, and the other
+  recorder takes the lease at its next tick), and that counter shows it (#7998). If the API
+  does not answer at all, no lease moves: the leader stops leading after `LEASE_SECONDS`,
+  no recorder takes over, and the counter stays flat.
 - **The edge** (`python -m scadbuddy.camera.edge`, `camera/edge.py`) is the live view's
   server. Its controller puts one on-demand path per recorded printer in its MediaMTX
   (`source` is the relay's RTSP URL with the relay read user, `sourceOnDemand: true`,
@@ -253,10 +259,11 @@ The hooks need `curl`, so the camera images take the release binary on
   (each time the pull is ready again after it was not; a replaced path counts too). The
   recorders (`camera/recorder.py`): `scadbuddy_camera_segments_indexed_total`,
   `scadbuddy_camera_upload_lag_seconds`, `scadbuddy_camera_backlog_bytes`,
-  `scadbuddy_camera_leader` and `scadbuddy_camera_last_segment_age_seconds`. All are per
-  printer. The edge (`camera/edge.py` `ViewersCollector`) sets `scadbuddy_camera_viewers`,
-  read from MediaMTX's path list at each scrape. The "Cameras" row of
-  `deploy/grafana/scadbuddy-printing.json` shows them all.
+  `scadbuddy_camera_leader`, `scadbuddy_camera_last_segment_age_seconds` and
+  `scadbuddy_camera_stall_releases_total`. All are per printer. The edge (`camera/edge.py`
+  `ViewersCollector`) sets `scadbuddy_camera_viewers`, read from MediaMTX's path list at
+  each scrape. The "Cameras" row of `deploy/grafana/scadbuddy-printing.json` shows them
+  all but the stall releases.
 
 ## Tests
 

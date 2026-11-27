@@ -61,7 +61,6 @@ DEFAULTS: dict[str, object] = {
     "last_project_id": None,
     "temporal_ui_url": None,
     "has_render_api_key": False,
-    "render_key_fallback": False,
     "store_backend": "local",
     "library_backend": "bambuddy",
     "orders_currency": "USD",
@@ -616,17 +615,15 @@ def test_a_temporal_ui_url_that_is_not_http_is_a_422(client: TestClient) -> None
     assert response.json()["errors"][0]["loc"] == ["body", "temporal_ui_url"]
 
 
-def test_the_render_key_is_write_only_and_its_absence_is_flagged(client: TestClient) -> None:
+def test_the_render_key_is_write_only(client: TestClient) -> None:
     body = client.put(
         "/api/v1/settings",
         json={"bambuddy_url": "https://bambuddy.test", "bambuddy_api_key": "full"},
     ).json()
-    assert body["render_key_fallback"] is True
     assert body["has_render_api_key"] is False
     response = client.put("/api/v1/settings", json={"bambuddy_render_api_key": "narrow"})
     body = response.json()
     assert body["has_render_api_key"] is True
-    assert body["render_key_fallback"] is False
     assert "narrow" not in response.text
     # Named in `sources` and `applies` like every env-seeded field, never as a value.
     assert "bambuddy_render_api_key" not in body

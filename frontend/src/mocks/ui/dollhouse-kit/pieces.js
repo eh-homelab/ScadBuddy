@@ -87,6 +87,35 @@ export function pieceText(entry) {
   return entry.count === null ? `${entry.label}: set the type and count yourself` : `${entry.count} × ${entry.label}`
 }
 
+// The two dollhouse scales (README "Scales"): the Grid, door, window, stairs and
+// decoration sizes for each. 1:6 is the model's own defaults. A preset is a merge patch
+// for `params`, so it changes these values only.
+export const SCALES = [
+  {
+    id: '1:6',
+    label: '1:6, 29-30 cm dolls',
+    params: {
+      module_size: 150, course_height: 210, texture_size: 12, wainscot_height: 90,
+      window_width: 70, window_height: 120, window_sill: 40, door_width: 100, door_height: 330,
+      stair_width: 100, tread_depth: 24, railing_height: 150,
+    },
+  },
+  {
+    id: '1:12',
+    label: '1:12, 10-15 cm dolls',
+    params: {
+      module_size: 75, course_height: 105, texture_size: 6, wainscot_height: 45,
+      window_width: 35, window_height: 60, window_sill: 20, door_width: 40, door_height: 165,
+      stair_width: 50, tread_depth: 12, railing_height: 75,
+    },
+  },
+]
+
+/** The scale whose every value the params hold (a missing value is the model's default, `initial`); else null. */
+export function currentScale(params, initial) {
+  return SCALES.find((scale) => Object.entries(scale.params).every(([key, value]) => (params?.[key] ?? initial[key]) === value)) ?? null
+}
+
 // The model's default course. A piece the model renders the same in either course still
 // writes one: `inputs.set` is a merge patch, so leaving `course` out would keep the last
 // piece's, and the same piece would get two render keys.
