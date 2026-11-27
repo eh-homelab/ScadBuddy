@@ -448,9 +448,10 @@ At a stop, the servers drain and the three signals flush within the 20 s shutdow
   answers 503 `kek-missing` while it has none; here a sealed area without a KEK does not start.
 - Times are written in UTC. Python writes them in the database session's time zone, which is UTC
   on prod. A time sent with no offset is read as UTC, not in the database's zone.
-- A body bound refuses a body with no `Content-Length` (411) on the routes with one. Python's
-  JSON gate counts a chunked body instead. A multipart write with no `Content-Length` is 411
-  before its Content-Type is checked.
+- A body bound refuses a body with no `Content-Length` (411) on the routes with one, except
+  `workspace/file-writes`, which answers it in `_write_body`'s words after its Content-Type
+  check (see the workspace area). Python's JSON gate counts a chunked body instead. Any other
+  multipart write with no `Content-Length` is 411 before its Content-Type is checked.
 - A number, boolean or UUID in a body is read strictly: pydantic's lax mode also takes a numeric
   string. A UUID in another spelling is still read and written lower-case with hyphens. The
   blob, background-task and workspace areas refuse `5.0` for an integer (422), and a time given
