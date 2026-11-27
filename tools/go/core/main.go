@@ -61,6 +61,7 @@ import (
 	"github.com/eh-homelab/ScadBuddy/tools/go/core/internal/publish"
 	"github.com/eh-homelab/ScadBuddy/tools/go/core/internal/questions"
 	"github.com/eh-homelab/ScadBuddy/tools/go/core/internal/realtime"
+	"github.com/eh-homelab/ScadBuddy/tools/go/core/internal/scan"
 	"github.com/eh-homelab/ScadBuddy/tools/go/core/internal/seal"
 	"github.com/eh-homelab/ScadBuddy/tools/go/core/internal/secrets"
 	"github.com/eh-homelab/ScadBuddy/tools/go/core/internal/sessions"
@@ -396,7 +397,7 @@ var callerPackages = map[string]areaRoutes{inventory.Caller: inventory.Areas}
 type publicAreas func(pool *pgxpool.Pool, keys *seal.Keys) map[string][]auth.Public
 
 // publicPackages are the packages with public areas.
-var publicPackages = []publicAreas{unknowntrays.Public}
+var publicPackages = []publicAreas{scan.PublicAreas, unknowntrays.Public}
 
 // mirrorBlobs is the blob store as area package-mirrors calls it (packages.Blobs): a
 // publish to a key that names a blob is packages.ErrStale.
