@@ -3,7 +3,7 @@ import { api, ApiError } from '../../api/client'
 import type { FlowGrantRule, FlowGrantSpec, FlowGrantView } from '../../api/types'
 import { USER_ONLY } from '../../agent/dom'
 import { actorText, answerersText } from '../../lib/flows'
-import { grantExpired, grantStatus, isUnbounded, unboundedText } from '../../lib/grants'
+import { grantStatus, isUnbounded, unboundedText } from '../../lib/grants'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card'
@@ -47,7 +47,7 @@ function answersText(grant: FlowGrantView, who: string): string | null {
   if (grant.status === 'requested') return `If you approve it, besides you, ${who} may ${rest}`
   if (grant.status === 'declined') return null
   if (grant.in_force) return `Besides you, ${who} may ${rest}`
-  return `${grantExpired(grant) ? 'Expired' : 'No longer in force'}: ${who} may no longer answer its questions.`
+  return `${grant.expired ? 'Expired' : 'No longer in force'}: ${who} may no longer answer its questions.`
 }
 
 interface Props {
