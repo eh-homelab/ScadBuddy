@@ -1,6 +1,6 @@
 import { useEffect, useId, useRef, useState, type FormEvent, type ReactNode } from 'react'
 import { Link } from 'react-router'
-import { isWorkflowAccepted } from '../../api/client'
+import { settled } from '../../api/client'
 import type { OperationAccepted } from '../../api/types'
 import type { ShopMoney } from '../../components/filament/purchasing/useMoney'
 import { DataTable, type Column } from '../../components/records/DataTable'
@@ -120,23 +120,31 @@ export function LotStock({ item, offers, money, moved, version, onChanged }: { i
   const [recost, setRecost] = useState<RecostResult | null>(null)
   const [recosting, setRecosting] = useState<string | null>(null)
   const [recostRunning, setRecostRunning] = useState<string | null>(null)
+  // Ends the follow of a re-cost's 202 when the page goes.
+  const leaving = useRef(new AbortController())
+  useEffect(() => {
+    const controller = new AbortController()
+    leaving.current = controller
+    return () => controller.abort()
+  }, [])
   const priced = offers ? pricedOffer(offers, money.currency) : undefined
 
   async function recostLot(lotId: string) {
     if (recosting) return
     setRecosting(lotId)
-    setRecostRunning(null)
     setError(null)
     try {
-      const answer = await inventoryApi.recostLot(lotId)
-      // A 202: the `RecostLot` workflow runs on and ends by itself (#6949 K1 Task 16).
-      if (isWorkflowAccepted(answer)) setRecostRunning(answer.workflow_id)
-      else setRecost(answer)
+      // A 202: the `RecostLot` workflow runs on (#6949 K1 Task 16). The same request, with
+      // its key, goes again until it answers with what the re-cost changed.
+      const key = crypto.randomUUID()
+      const answer = await settled(() => inventoryApi.recostLot(lotId, key), (running) => setRecostRunning(running.workflow_id), leaving.current.signal)
+      setRecost(answer)
       onChanged()
     } catch (cause) {
-      setError(failed(cause, 'The past uses could not be re-costed. Try again.'))
+      if (!leaving.current.signal.aborted) setError(failed(cause, 'The past uses could not be re-costed. Try again.'))
     } finally {
       setRecosting(null)
+      setRecostRunning(null)
     }
   }
 

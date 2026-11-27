@@ -469,8 +469,30 @@ export async function requestWithStatus<T>(path: string, init?: RequestInit): Pr
  * item again once its `parts_settling` clears.
  */
 export async function stockWrite<T>(path: string, init: RequestInit, key: string = crypto.randomUUID()): Promise<T | WorkflowAccepted> {
-  const answer = await requestWithStatus<T | WorkflowAccepted>(path, { ...init, headers: { ...init.headers, 'Idempotency-Key': key } })
+  // `new Headers` reads a Headers instance, a pair list and a record alike; a spread reads only a record.
+  const headers = Object.fromEntries(new Headers(init.headers).entries())
+  const answer = await requestWithStatus<T | WorkflowAccepted>(path, { ...init, headers: { ...headers, 'Idempotency-Key': key } })
   return answer.body
+}
+
+/** The pause between two sends of a stock write that answered 202 (a test shortens it). */
+export const stockFollow = { intervalMs: 2000 }
+
+/**
+ * Follows a stock write's 202 to its end: `send` (the same write, with the same
+ * `Idempotency-Key`) goes again until it answers with its body. Each send attaches to the
+ * workflow and waits on the server, and a send after the run ended reads its result, so the
+ * last answer is the write's own. `onAccepted` hears the first 202, for `StillWorking`.
+ */
+export async function settled<T>(send: () => Promise<T | WorkflowAccepted>, onAccepted?: (accepted: WorkflowAccepted) => void, signal?: AbortSignal): Promise<T> {
+  let answer = await send()
+  if (isWorkflowAccepted(answer)) onAccepted?.(answer)
+  while (isWorkflowAccepted(answer)) {
+    await new Promise((resolve) => setTimeout(resolve, stockFollow.intervalMs))
+    signal?.throwIfAborted()
+    answer = await send()
+  }
+  return answer
 }
 
 /** Whether a stock write's answer is the 202 of a workflow that still runs. */
@@ -2636,11 +2658,15 @@ export const api = {
   syncPrintersFromBambuddy: (dryRun = false) =>
     request<PrinterSyncResult>(`/printers/sync-bambuddy?dry_run=${dryRun}`, { method: 'POST' }),
   /** A link that merges a printer stock names answers 202 while its `MergePrinter` runs (#6949 K1). */
-  linkPrinterBambuddy: (id: string, bambuddyPrinterId: number) =>
-    stockWrite<PrinterRow>(`/printers/${seg(id)}/bambuddy`, {
-      method: 'PUT',
-      body: JSON.stringify({ bambuddy_printer_id: bambuddyPrinterId }),
-    }),
+  linkPrinterBambuddy: (id: string, bambuddyPrinterId: number, key?: string) =>
+    stockWrite<PrinterRow>(
+      `/printers/${seg(id)}/bambuddy`,
+      {
+        method: 'PUT',
+        body: JSON.stringify({ bambuddy_printer_id: bambuddyPrinterId }),
+      },
+      key,
+    ),
   unlinkPrinterBambuddy: (id: string) => request<PrinterRow>(`/printers/${seg(id)}/bambuddy`, { method: 'DELETE' }),
   linkPrinterLan: (id: string, body: LanLink) =>
     request<PrinterRow>(`/printers/${seg(id)}/lan`, { method: 'PUT', body: JSON.stringify(body) }),

@@ -6,6 +6,7 @@ import { resetMockState } from '../../mocks/handlers'
 import { failNextRecost, INVENTORY, inventoryMock, seedItem, seedLot, takeStock } from '../../mocks/features/inventory'
 import { seedEntityProperties } from '../../mocks/features/entities'
 import { inventoryApi } from './api'
+import { stockFollow } from '../../api/client'
 import { server } from '../../mocks/server'
 import { L } from '../../mocks/features/filament/seed'
 import { ITEM_APPROVED, ORDER_ACCEPTED } from '../../mocks/features/orders/state'
@@ -273,6 +274,37 @@ describe('ItemPage (#7067)', () => {
     expect(await within(row).findByRole('button', { name: 'Re-costing…' })).toBeDisabled()
     await user.click(within(row).getByRole('button', { name: 'Re-costing…' }))
     expect(calls).toBe(1)
+  })
+
+  // #6949 K1 Task 16, fix round 1: a re-cost still running answers 202; the page follows it
+  // with the same key until the answer comes, then says what it changed.
+  it('follows a re-cost that answers 202 to its end', async () => {
+    stockFollow.intervalMs = 1
+    const ring = seedItem({ kind_id: 'hardware', name: 'Split ring' })
+    const lot = seedLot(ring.id, 10, 25)
+    takeStock(ring.id, 4, { order_id: ORDER_ACCEPTED, order_item_id: ITEM_APPROVED })
+    const keys: (string | null)[] = []
+    let release = () => {}
+    const held = new Promise<void>((resolve) => (release = resolve))
+    server.use(
+      http.post('/api/v1/inventory/lots/:id/recost', async ({ request }) => {
+        keys.push(request.headers.get('Idempotency-Key'))
+        if (keys.length === 1) return HttpResponse.json({ workflow_id: `lot:${lot.id}:recost:k`, kind: 'RecostLot', started_at: '2026-11-27T00:00:00Z', repeated: false }, { status: 202 })
+        await held
+        return undefined
+      }),
+    )
+    const { user } = render(ring.id)
+    const row = await screen.findByTestId(`lot-row-${lot.id}`)
+    await user.click(within(row).getByRole('button', { name: 'Re-cost past uses' }))
+
+    const working = await screen.findByText(/Still working/)
+    expect(working.closest('[data-operation]')).toHaveAttribute('data-operation', `lot:${lot.id}:recost:k`)
+    release()
+
+    await waitFor(() => expect(screen.queryByText(/Still working/)).toBeNull())
+    expect(keys.length).toBe(2)
+    expect(keys[1]).toBe(keys[0])
   })
 
   it('offers no re-cost on a lot nothing has taken from', async () => {
