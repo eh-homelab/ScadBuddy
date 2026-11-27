@@ -67,6 +67,12 @@ public sealed class NfcBridge : Java.Lang.Object, NfcAdapter.IReaderCallback, We
 		Notify("Tap the tag on the back of the phone.");
 	}
 
+	async Task Send(Uri result, Tag tag)
+	{
+		try { await SendJob(result, Read(tag)); }
+		finally { lock (gate) sending = false; }
+	}
+
 	async Task SendJob(Uri result, JsonObject reading)
 	{
 		var mifare = reading["mifare"] as JsonObject;
@@ -193,7 +199,7 @@ public sealed class NfcBridge : Java.Lang.Object, NfcAdapter.IReaderCallback, We
 		{
 			// One send per job at a time: a second tap while the one-time URL is in flight is dropped.
 			lock (gate) { if (sending) return; sending = true; }
-			_ = SendJob(job, Read(tag)).ContinueWith(_ => { lock (gate) sending = false; });
+			_ = Send(job, tag);
 			return;
 		}
 		if (pending is not null) { TryWrite(tag, fromTap: true); return; }

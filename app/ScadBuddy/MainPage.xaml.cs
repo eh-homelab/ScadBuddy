@@ -10,8 +10,11 @@ public partial class MainPage : ContentPage
 	const string UrlKey = "scadbuddy.url";
 	const string DefaultUrl = "https://scadbuddy.internal.nullreference.io/scan";
 
+	// The loaded page's address: its bridge, camera and links keep it until the app restarts.
 	string url = Preferences.Get(UrlKey, DefaultUrl);
-	bool addressChanged;
+	// The set ScadBuddy's origin, which a scan link's result may go to without asking: the new
+	// address as soon as the person sets it, before the restart loads it.
+	string ownOrigin = DeepLink.OriginOf(new Uri(Preferences.Get(UrlKey, DefaultUrl)));
 
 	public MainPage()
 	{
@@ -56,8 +59,8 @@ public partial class MainPage : ContentPage
 	async Task<bool> Trusted(string origin)
 	{
 		var accepted = Preferences.Get(OriginsKey, "").Split('\n', StringSplitOptions.RemoveEmptyEntries).ToHashSet(StringComparer.OrdinalIgnoreCase);
-		if ((!addressChanged && string.Equals(origin, OriginOf(url), StringComparison.OrdinalIgnoreCase)) || accepted.Contains(origin)) return true;
-		var yes = await DisplayAlertAsync("Send scans to this server?", $"A link asks this app to send a tag read or a photo to\n{origin}\n\nThis app's ScadBuddy is\n{OriginOf(url)}\n\nThey differ. Accept only a ScadBuddy you run. Changing the ScadBuddy address forgets every server accepted here.", "Accept", "Cancel");
+		if (string.Equals(origin, ownOrigin, StringComparison.OrdinalIgnoreCase) || accepted.Contains(origin)) return true;
+		var yes = await DisplayAlertAsync("Send scans to this server?", $"A link asks this app to send a tag read or a photo to\n{origin}\n\nThis app's ScadBuddy is\n{ownOrigin}\n\nThey differ. Accept only a ScadBuddy you run. Changing the ScadBuddy address forgets every server accepted here.", "Accept", "Cancel");
 		if (!yes) return false;
 		accepted.Add(origin);
 		Preferences.Set(OriginsKey, string.Join('\n', accepted));
@@ -105,7 +108,8 @@ public partial class MainPage : ContentPage
 	{
 		if (!Uri.TryCreate(e.Url, UriKind.Absolute, out var target)) return;
 		if (target.Scheme is not ("http" or "https")) return;
-		if (string.Equals(target.GetLeftPart(UriPartial.Authority), OriginOf(url), StringComparison.OrdinalIgnoreCase)) return;
+		// Both sides in punycode, so an international ScadBuddy host keeps its own links in the app.
+		if (string.Equals(DeepLink.OriginOf(target), OriginOf(url), StringComparison.OrdinalIgnoreCase)) return;
 		e.Cancel = true;
 		_ = Launcher.OpenAsync(target);
 	}
@@ -125,9 +129,9 @@ public partial class MainPage : ContentPage
 		}
 		Preferences.Set(UrlKey, parsed.ToString());
 		Preferences.Remove(OriginsKey);
-		// The loaded page, its bridge and its links keep the old address until the restart, but a
-		// scan link's result no longer counts the old origin as the app's own (Trusted).
-		addressChanged = true;
+		// The loaded page keeps the old address until the restart; a scan link's result counts the
+		// new one as the app's own at once, and the old one no longer (Trusted).
+		ownOrigin = DeepLink.OriginOf(parsed);
 		await DisplayAlertAsync("Saved", "Close the app and open it again to use the new address.", "OK");
 	}
 
