@@ -379,8 +379,8 @@ export const acceptInsertWeight = (spoolId: string, readingG: number, newEmptyWe
   request<InsertWeightAccepted>(`${BASE}/spools/${seg(spoolId)}/insert-weight`, json('POST', { reading_g: readingG, new_empty_weight_g: newEmptyWeightG }))
 
 /** `null` takes it out of every place. */
-export const moveSpool = (id: string, locationId: string | null) =>
-  request<Spool>(`${BASE}/spools/${seg(id)}/move`, json('POST', { location_id: locationId }))
+export const moveSpool = (id: string, locationId: string | null, options: { ifOccupied?: 'refuse' | 'replace' } = {}) =>
+  request<Spool>(`${BASE}/spools/${seg(id)}/move`, json('POST', { location_id: locationId, if_occupied: options.ifOccupied }))
 
 /** Books each loaded spool's AMS remaining percent (#6268); the answer counts what it did and what it skipped. */
 export const syncAmsWeights = () => request<AmsSyncResult>(`${BASE}/spools/sync-ams-weights`, { method: 'POST' })

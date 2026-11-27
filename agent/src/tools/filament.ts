@@ -1380,7 +1380,7 @@ const tools: Tool[] = [
     label: "Read a spool's history and metrics",
     description:
       "A spool's timeline and metrics: the newest 50 ledger `events` (newest first, with `actor`, `order_id` " +
-      'and `archive_id`), its `metrics` (use, waste, cost used, value left, burn rate, empty day, days since ' +
+      'and `archive_id`), its `metrics` (use, waste, `non_print_waste_g` (grams thrown away off the printer, apart from `wasted_g`), cost used, value left, burn rate, empty day, days since ' +
       'opened and last use, hours outside dry storage, AMS error; the metres its lengthed prints extruded, `used_m`, ' +
       'the density they imply, `implied_density_g_cm3`, against the type\'s `density_g_cm3`, and `density_mismatch` ' +
       'when they are more than 5% apart, a note to check the type or the label, never a booking), `type_ams_error`, `currency` and ' +

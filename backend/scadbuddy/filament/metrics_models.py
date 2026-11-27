@@ -307,4 +307,4 @@ class Snapshot(BaseModel):
     reorder: dict[str | None, int]
     currency: str
     #: Grams of every ``non_print_waste`` event by material (#7167).
-    non_print_waste: dict[str | None, float] = {}
+    non_print_waste: dict[str | None, float]

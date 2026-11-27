@@ -23,6 +23,7 @@ def _snapshot(**over: object) -> Snapshot:
         "low_stock": {},
         "reorder": {},
         "currency": "USD",
+        "non_print_waste": {},
     }
     body.update(over)
     return Snapshot.model_validate(body)

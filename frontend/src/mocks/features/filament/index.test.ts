@@ -263,13 +263,52 @@ describe('the filament mocks', () => {
     expect((await closingPreview(spoolId(1), 'damaged', 253, null)).notices.map((one) => one.code)).toEqual(['not_finished_but_empty'])
     const done = await archiveSpool(spoolId(1), { archived: true, reason: 'finished', final_reading_g: 280 })
     expect(done.archived_at).not.toBeNull()
-    expect(done.grams_left).toBe(30)
+    // The 30 g left are written off (#7167): the spool has none left.
+    expect(done.grams_left).toBe(0)
     const events = await listSpoolEvents(spoolId(1))
-    expect(events.slice(-2).map((one) => one.kind)).toEqual(['weighed', 'archived'])
+    expect(events.slice(-3).map((one) => one.kind)).toEqual(['weighed', 'non_print_waste', 'archived'])
     expect(events.at(-1)?.data).toMatchObject({ reason: 'finished', final_filament_g: 30, scale_consumed_g: (preview.closing.started_g ?? 0) - 30, ledger_consumed_g: preview.closing.ledger_consumed_g })
     expect(await refusal(archiveSpool(spoolId(2), { archived: false, reason: 'finished' }))).toMatchObject({ status: 422 })
     expect(await refusal(archiveSpool(spoolId(2), { archived: true, reason: 'damaged', final_reading_g: 100 }))).toMatchObject({ status: 422, code: 'reading_below_empty' })
     expect((await getSpool(spoolId(2))).archived_at).toBeNull()
+  })
+
+  describe('non-print waste (#7167): the mocks book it as the backend does', () => {
+    const today = () => new Date().toISOString().slice(0, 10)
+    const waste = async () => (await getMetrics({ since: today(), until: today() })).non_print_waste_g
+    const events = async (id: string) => (await listSpoolEvents(id)).filter((one) => one.kind === 'non_print_waste')
+
+    it('an archive books the grams left after the final weighing, before the archived event', async () => {
+      expect(await waste()).toBe(0)
+      await archiveSpool(spoolId(1), { archived: true, reason: 'finished', final_grams: 30 })
+      const kinds = (await listSpoolEvents(spoolId(1))).map((one) => one.kind)
+      expect(kinds.slice(-3)).toEqual(['weighed', 'non_print_waste', 'archived'])
+      expect((await events(spoolId(1)))[0]).toMatchObject({ source: 'person', grams_after: 0, data: { waste_g: 30, cause: 'archive' } })
+      expect((await getSpool(spoolId(1))).grams_left).toBe(0)
+      const found = await getMetrics({ since: today(), until: today() })
+      expect(found.non_print_waste_g).toBe(30)
+      expect(found.non_print_waste.filter((row) => row.dimension === 'material').map((row) => row.wasted_g)).toEqual([30])
+      expect(found.non_print_waste.some((row) => row.dimension === 'type' && row.key === T.JADE && row.wasted_g === 30)).toBe(true)
+      expect(found.waste.every((row) => row.wasted_g === 0)).toBe(true)
+      expect((await getMetrics({ since: '2020-01-01', until: '2020-01-02' })).non_print_waste_g).toBe(0)
+    })
+
+    it('books nothing for respooled, a bulk archive, a plain PATCH or 0 g left', async () => {
+      await archiveSpool(spoolId(1), { archived: true, reason: 'respooled' })
+      await bulkArchiveSpools([spoolId(2)], true)
+      await patchSpool(spoolId(3), { archived: true })
+      await archiveSpool(spoolId(4), { archived: true, reason: 'finished', final_grams: 0 })
+      expect(await waste()).toBe(0)
+    })
+
+    it('a replace move archives the box spool and books its grams with cause replaced', async () => {
+      expect((await getSpool(spoolId(2))).location_id).toBe(L.DRY_BOX)
+      await moveSpool(spoolId(1), L.DRY_BOX, { ifOccupied: 'replace' })
+      expect((await getSpool(spoolId(2))).archived_at).not.toBeNull()
+      expect((await events(spoolId(2)))[0]?.data).toMatchObject({ waste_g: 820, cause: 'replaced' })
+      expect((await getSpool(spoolId(1))).location_id).toBe(L.DRY_BOX)
+      expect(await waste()).toBe(820)
+    })
   })
 
   it('moves a spool, and refuses a place that does not exist', async () => {

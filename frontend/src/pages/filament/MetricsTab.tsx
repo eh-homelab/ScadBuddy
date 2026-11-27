@@ -466,7 +466,7 @@ export function MetricsTab() {
                 {g(metrics.non_print_waste_g)} thrown away off the printer, {span}: what was left on archived spools and replaced boxes. It is not in the print waste above.
               </p>
             </div>
-            <div className="grid gap-6 sm:grid-cols-3">
+            <div className="grid gap-6 sm:grid-cols-2">
               {(['material', 'type'] as const).map((name) => (
                 <div key={name} className="flex min-w-0 flex-col gap-2">
                   <h4 className="text-[12px] text-muted-foreground">{NON_PRINT_WASTE_TITLES[name]}</h4>

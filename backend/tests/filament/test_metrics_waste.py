@@ -73,6 +73,16 @@ def test_non_print_waste_by_material_and_type_in_range(pg_pool: PgPool) -> None:
     assert 999 not in rows.values()
 
 
+def test_snapshot_sums_waste_by_material_with_archived_spools(pg_pool: PgPool) -> None:
+    one = _spool(pg_pool)
+    two = _spool(pg_pool)
+    _waste(pg_pool, one, 20)
+    _waste(pg_pool, two, 5.5)
+    _waste(pg_pool, two, 4, at=datetime(2026, 9, 1, tzinfo=UTC))
+    FilamentSpoolStore(pg_pool).archive(two, True, actor="ann")
+    assert _store(pg_pool).snapshot().non_print_waste == {"PLA": 29.5}
+
+
 def test_export_has_a_separate_column() -> None:
     body: dict[str, object] = {
         "stock": [], "used": {("PLA", "failed"): 5.0}, "burn": {}, "days_of_stock": {},

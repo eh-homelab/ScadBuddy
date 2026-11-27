@@ -381,7 +381,7 @@ const FIELDS = {
   kValue: ['printer_id', 'extruder', 'nozzle_diameter', 'nozzle_type', 'k_value', 'name', 'cali_idx', 'setting_id'],
   typeCreate: ['code', 'material_id', 'subtype_id', 'brand_id', 'category_id', 'effect_id', 'insert_type_id', 'rgba', 'colour_name', 'extra_colours', 'diameter_mm', 'density_g_cm3', 'cost_per_kg', 'lead_time_days', 'safety_margin_days', 'label_weight_g', 'low_stock_pct', 'nozzle_temp_min', 'nozzle_temp_max', 'bed_temp_min', 'bed_temp_max', 'drying_temp_c', 'drying_hours', 'tdfp_id', 'note'],
   spoolCreate: ['type_id', 'brand_id', 'material_id', 'subtype_id', 'category_id', 'effect_id', 'colour_name', 'rgba', 'extra_colours', 'diameter_mm', 'density_g_cm3', 'nozzle_temp_min', 'nozzle_temp_max', 'bed_temp_min', 'bed_temp_max', 'drying_temp_c', 'drying_hours', 'label_weight_g', 'insert_type_id', 'low_stock_pct', 'cost_per_kg', 'weight_locked', 'note', 'grams_left', 'added_full'],
-  move: ['location_id'],
+  move: ['location_id', 'if_occupied', 'answers'],
   csvImport: ['rows', 'dry_run'],
   proposalPick: ['brand_id', 'material_id', 'subtype_id', 'rgba', 'label_weight_g', 'material_number', 'code', 'spool_ids'],
   archive: ['archived', 'reason', 'final_reading_g', 'final_grams'],
@@ -998,7 +998,7 @@ function weighOn(at: number, body: { kind: 'weighed'; source?: S['SpoolEventAdd'
  * `archived` event keeps the closing (#7684): `reason` and the final weighing's filament
  * when one was booked, else the ledger's grams left with no scale side.
  */
-function setArchived(at: number, archived: boolean, reason: ArchiveReason | null = null, finalFilament: number | null = null) {
+function setArchived(at: number, archived: boolean, reason: ArchiveReason | null = null, finalFilament: number | null = null, cause: 'archive' | 'replaced' | null = null) {
   const row = state.spools[at]!
   if ((row.archived_at !== null) === archived) return
   if (archived) {
@@ -1014,7 +1014,17 @@ function setArchived(at: number, archived: boolean, reason: ArchiveReason | null
     return
   }
   const events = state.events.filter((event) => event.spool_id === row.id)
-  addEvent(row.id, 'archived', { data: closingOf(events, row, reason, finalFilament, finalFilament == null ? row.grams_left : null) })
+  const closing = closingOf(events, row, reason, finalFilament, finalFilament == null ? row.grams_left : null)
+  // #7167 (`spools.py` `archive_on`): the grams left after the final weighing are one `non_print_waste` event
+  // before the `archived` one, for a person's archive (`cause` `archive`) and a box's replace (`replaced`);
+  // never for `respooled`, the bulk archive, a plain PATCH or 0 g left. The closing is read before it.
+  const left = state.spools[at]!.grams_left ?? 0
+  const waste = cause != null && reason !== 'respooled' && left > 0 ? left : null
+  if (waste != null) {
+    addEvent(row.id, 'non_print_waste', { grams_before: waste, grams_after: 0, data: { waste_g: waste, cause } })
+    state.spools[at] = { ...state.spools[at]!, grams_left: 0 }
+  }
+  addEvent(row.id, 'archived', { data: { ...closing, non_print_waste_g: waste } })
 }
 
 const tenth = (value: number | null) => (value == null ? null : Math.round(value * 10) / 10)
@@ -2717,7 +2727,7 @@ export const handlers = [
       if (weighed instanceof Response) return weighed
       finalFilament = weighed.grams_after ?? null
     }
-    setArchived(at, archived, body.reason ?? null, finalFilament)
+    setArchived(at, archived, body.reason ?? null, finalFilament, 'archive')
     return HttpResponse.json(view(state.spools[at]!))
   }),
   // #7684 — `GET /filament/spools/{id}/closing`: the archive dialog's preview, reads only.
@@ -2875,9 +2885,14 @@ export const handlers = [
     const sent = await request.json()
     const extra = extraKeys(sent, FIELDS.move)
     if (extra) return extra
-    const { location_id } = sent as S['SpoolMove']
+    const { location_id, if_occupied } = sent as S['SpoolMove']
     if (location_id && !state.locations.some((place) => place.id === location_id && !place.archived_at)) {
       return problem(422, REFUSED.moveTarget)
+    }
+    if (if_occupied === 'replace' && location_id) {
+      // `homes.py` `move_into`: the box's other spool is archived (reason `other`, waste `cause` `replaced`) first.
+      const held = state.spools.findIndex((one) => one.location_id === location_id && one.id !== params.id && one.archived_at === null)
+      if (held >= 0) setArchived(held, true, 'other', null, 'replaced')
     }
     const row = state.spools[at]!
     if (row.location_id !== location_id) {
