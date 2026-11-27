@@ -230,7 +230,9 @@ def test_cannot_make_a_place_with_two_spools_a_box(pg_pool: PgPool) -> None:
     assert changed is not None and changed.capacity == 1
 
 
-def test_the_bambuddy_pull_leaves_a_spool_unplaced_when_the_box_is_full(pg_pool: PgPool) -> None:
+def test_the_bambuddy_pull_leaves_a_spool_where_it_was_when_the_box_is_full(
+    pg_pool: PgPool,
+) -> None:
     """BB moves a linked spool into a box that holds another: the pull logs it, leaves the
     spool where it was and does not fail."""
     f = _filament(pg_pool)

@@ -1393,10 +1393,12 @@ class Spool(_Row):
     added_full: bool | None = None
     #: When its tag was written (Bambuddy's ``encode_time``, R-7149-3). Read only.
     tag_encoded_at: datetime | None = None
-    #: The dry box the spool lives in (#7167): where it goes back to after a print. Null when
-    #: it has none; it clears when the box is deleted.
+    #: The last dry box the spool sat in (#7167). When the spool comes out of its tray and
+    #: it went in from this box, the person is asked which spool goes into the box. Null
+    #: when it has none; it clears when the box is deleted.
     home_location_id: UUID | None = None
-    #: When the person was last asked to pick a home for the spool (#7167).
+    #: When capture asked which spool goes into the spool's home box (#7167); null once a
+    #: move, an archive or a load answers it.
     home_asked_at: datetime | None = None
     #: The values the spool has after its overrides over its type's.
     effective: EffectiveValues = Field(default_factory=EffectiveValues)
@@ -1912,7 +1914,9 @@ class Closing(BaseModel):
     final_filament_g: float | None = None
     scale_consumed_g: float | None = None
     drift_g: float | None = None
-    #: Grams the scale says went to no print (purge, a jam, a failed start), #7167.
+    #: Grams left on the spool at the archive, written off as non-print waste
+    #: (`ledger.closing` with ``waste``); null when none is booked (0 g, ``respooled``, or
+    #: an archive that books no waste), #7167.
     non_print_waste_g: float | None = None
 
 

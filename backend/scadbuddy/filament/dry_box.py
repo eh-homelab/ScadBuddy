@@ -1,11 +1,12 @@
 """Dry boxes (#7167): a place whose kind is dry storage and whose capacity is 1 holds one
 spool, and a spool keeps the last dry box it sat in as its home (``home_location_id``).
 
-Every writer of ``filament_spools.location_id`` goes through `LocationStore.move_on`,
-which asks `occupant_on` before it writes. The place's row is locked ``FOR UPDATE`` first
-and the occupant read after, so two moves into one box serialize and the second sees the
-first's spool. A tray place and the external holder are never boxes (their kinds are not
-dry storage)."""
+Every writer that can put a spool in a box goes through `LocationStore.move_on`, which
+asks `occupant_on` before it writes. (`locations.repoint_printer_locations` writes
+``location_id`` directly, but it moves spools between printer places only, and those are
+never boxes.) The place's row is locked ``FOR NO KEY UPDATE`` first and the occupant read
+after, so two moves into one box serialize and the second sees the first's spool. A tray
+place and the external holder are never boxes (their kinds are not dry storage)."""
 
 from __future__ import annotations
 

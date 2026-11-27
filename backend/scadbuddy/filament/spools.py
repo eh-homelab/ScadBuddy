@@ -2129,7 +2129,13 @@ class FilamentSpoolStore:
     ) -> None:
         """Archive or restore the locked row ``current``. ``data`` is the ``archived``
         event's closing (`ledger.closing`, #7684); a restore carries none. A restore into
-        a dry box another spool holds is `BoxFullError`, and nothing is written (#7167)."""
+        a dry box another spool holds is `BoxFullError`, and nothing is written (#7167).
+
+        `bulk_archive` restores many spools: it locks each spool and then its place in
+        turn. A move into one of those boxes at the same time can deadlock with it, and
+        Postgres aborts one of the two (a 500 the person retries). This is the class of
+        P17 and P20 in the dry-box plan, accepted on the same terms: it needs two people
+        acting on the same spools and box at once."""
         if (current["archived_at"] is not None) == archived:
             return
         if not archived:
