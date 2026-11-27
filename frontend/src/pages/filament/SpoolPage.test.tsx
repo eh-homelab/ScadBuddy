@@ -870,8 +870,7 @@ describe("the spool page's Advanced toggle", () => {
 
   it('shows a saved diameter other than the default with Advanced off, and hides the default (#7642)', async () => {
     // #8107: the backend's default, read from the spec, so a change there fails here.
-    const fallback = schemaProperty('SpoolTypeCreate-Input', 'diameter_mm').default
-    if (typeof fallback !== 'string') throw new Error(`SpoolTypeCreate-Input.diameter_mm.default is ${JSON.stringify(fallback)}, not a string`)
+    const fallback = schemaProperty('SpoolTypeCreate-Input', 'diameter_mm', 'default', 'string')
     await patchSpool(spoolId(2), { diameter_mm: fallback })
     const { unmount } = open(2)
     await heading(2)

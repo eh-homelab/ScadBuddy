@@ -301,7 +301,7 @@ The backend's migration files and its settings tables: `backend/CLAUDE.md`.
   `paths`, or a docs-only change skips the test (#7792).
 - Docs-only changes: when every changed path is `docs/**/*.md`, or a `CLAUDE.md` or
   `AGENTS.md` in any directory but a `vendor/` tree (these select no lane), and none is
-  in `read_by_tests` (the design spec, which `agent/test/evalScoring.test.ts` reads), `select-lanes.sh` prints
+  in `read_by_tests` (the design spec, which `agent/test/evalScoring.test.ts` reads, and `docs/inventory-model/README.md`, which the Go proof tests read), `select-lanes.sh` prints
   `docs_only=true`, and the `lint`, `frontend*`, `agent`, `models`, `freshness`,
   `go-select` and `go` jobs skip too; `CI Summary` re-derives it. The `markdown` job
   (markdownlint-cli2 0.20.0 over those files outside `vendor/`, config

@@ -68,6 +68,7 @@ on:
       - "!**/AGENTS.md"
       - "**/vendor/**"
       - "docs/superpowers/specs/2026-09-22-scadbuddy-design.md"
+      - "docs/inventory-model/README.md"
   # Weekly, and on demand, so every template's verify.sh runs against the image
   # even in a week when nothing merged (#229). The template checks are the
   # reason; the rest of CI rides along because it is cheap and it is the same

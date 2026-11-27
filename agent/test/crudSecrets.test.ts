@@ -10,6 +10,7 @@ import {
   CredentialError,
   CrudCredentials,
   CrudSettings,
+  STALE_ORDER_MESSAGE,
   type CredentialRepo,
   SETTINGS_CAS_TRIES,
   SETTINGS_READ_MAX,
@@ -156,7 +157,7 @@ class FakeApi {
     }
     if (method === 'POST' && path === '/credentials/order') {
       const ids = body.ids as string[]
-      if (ids.length !== this.credentials.length) return this.#refused(409, 'the order must name every stored credential exactly once')
+      if (ids.length !== this.credentials.length) return this.#refused(409, STALE_ORDER_MESSAGE)
       this.credentials = ids.map((id, i) => Object.assign(this.credentials.find((c) => c.id === id) as Stored, { priority: i }))
       return { body: { credentials: this.credentials.map((c) => this.#wire(c)) } }
     }

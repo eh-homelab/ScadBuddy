@@ -2,8 +2,9 @@
 
 ![Window wall rendered with the default parameters](thumbnail.png)
 
-A modular 1:6 ("playscale") dollhouse for 29-30 cm fashion dolls, printed as
-panels on one grid and keyed together into as big a house as you want. One
+A modular dollhouse at 1:6 ("playscale", 29-30 cm fashion dolls) or at 1:12
+(10-15 cm dolls), printed as panels on one grid and keyed together into as big
+a house as you want. See [Scales](#scales) for the two sets of values. One
 template, one dropdown: walls, window walls, door walls, door leaves, corner
 posts, floor tiles, roof panels, stairs, railings and the connectors. Every
 piece made with the same **Grid** settings joins every other piece.
@@ -20,7 +21,8 @@ The second picture is the hidden `preview = "room"` mode: one back corner of a
 
 **House designer.** ScadBuddy opens this template in its own designer (`ui/`).
 You enter a box house: modules wide and deep (at the Grid panel's module size), storeys, and windows
-per storey. It lists every piece that house needs, with counts. **Show** puts
+per storey. The **Scale** buttons fill in every size of a 1:6 or a 1:12 house in one
+press (the [Scales](#scales) table); each value stays editable. It lists every piece that house needs, with counts. **Show** puts
 one piece in the preview on the one-module grid, and the page's Generate keeps the piece
 shown, so a house is generated one piece at a time. The Grid sizes (module,
 course height, wall and floor thickness) and the style parameters (exterior,
@@ -43,11 +45,60 @@ What the popular printable dollhouses do (checked 2026-09-26):
 | #NoWalls Standard Dungeon Tiles (OpenLock/MagBall, #11945) | Printables | 2.4k | OpenLOCK: a clip slid into bow-tie slots that straddle the joint of two tiles, the most-used printable panel connector. The hourglass key here is the same idea. |
 | Barbies dollhouse furniture (#1029620) | Printables | 527 | The most-downloaded explicitly 1:6 dollhouse item on Printables; there is no popular 1:6 *house* there. |
 
-Playscale numbers: 1 ft = 50.8 mm at 1:6, so a 30 cm doll is a 5'9" person.
-The grid module is 150 mm (0.9 m); a course is 210 mm and a room two courses,
-420 mm (a 2.5 m ceiling); the door is 330 mm clear (1.98 m), which a 30 cm doll
-walks through; the default window sits in the upper course 250-370 mm above the
+## Scales
+
+The defaults are 1:6. The same template makes a 1:12 house for small dolls
+(LOL Surprise, Polly Pocket, Calico Critters and other 10-15 cm dolls): set
+these values (the designer's **1:12** button does it), and keep them for every
+piece of that house. A 1:6 piece and a 1:12 piece do not join.
+
+| Parameter | 1:6 (defaults) | 1:12 | What it is at 1:12 |
+|---|---|---|---|
+| `module_size` | `150` | `75` | 0.9 m |
+| `course_height` | `210` | `105` | a room is 210 mm, a 2.5 m ceiling |
+| `wall_thickness` | `6` | `6` | keep 6: the keys and pegs stay full size |
+| `floor_thickness` | `6` | `6` | |
+| `texture_size` | `12` | `6` | brick courses of 72 mm |
+| `pattern_repeats` | `6` | `6` | per module, so the pattern is half size |
+| `wainscot_height` | `90` | `45` | 0.54 m |
+| `window_width` | `70` | `35` | 0.42 m |
+| `window_height` | `120` | `60` | 0.72 m |
+| `window_sill` | `40` | `20` | the upper-course window is 125-185 mm above the floor |
+| `door_width` | `100` | `40` | the widest door a 1-unit door wall takes (44 mm) |
+| `door_height` | `330` | `165` | 1.98 m: a 15 cm doll walks through |
+| `stair_width` | `100` | `50` | fits the stairwell of a 1-unit floor tile (57 mm) |
+| `tread_depth` | `24` | `12` | the 12 steps rise 18 mm each |
+| `railing_height` | `150` | `75` | 0.9 m |
+
+1:6 numbers: 1 ft = 50.8 mm, so a 30 cm doll is a 5'9" person. The grid
+module is 150 mm (0.9 m); a course is 210 mm and a room two courses, 420 mm (a
+2.5 m ceiling); the door is 330 mm clear (1.98 m), which a 30 cm doll walks
+through; the default window sits in the upper course 250-370 mm above the
 floor, around the doll's eye height (about 280 mm).
+
+1:12 numbers: 1 ft = 25.4 mm, so a 15 cm doll is a 5'9" person. Every length
+above is half its 1:6 value: the module is 75 mm, a course 105 mm, a room
+210 mm, the door 165 mm clear, and the window 125-185 mm above the floor,
+around a 15 cm doll's eye (about 140 mm).
+
+What changes below a 180 mm course: the trim and decoration scale by
+`course_height` / 210 (one half at 1:12), with a printable minimum for each
+(features at least 1 mm wide, most 1.6 mm or more, for a 0.4 mm nozzle). That
+covers the architrave, sills, glazing bars, shutters and their louvres, the
+flower box and its blossoms and leaves, baseboard, wainscot rail and crown,
+door panels, glazing margins and knob, the rug border, the flat-roof border,
+railing spindles and handrail, and the stair step count (12 steps at both
+scales). At 180 mm and above nothing changes, so every 1:6 piece is the same as
+before. The joints do not scale: the 14 x 20 x 3 mm hourglass keys, the 3 mm
+pegs, the 2.4 mm hinge pins, the 12 mm peg holes, the 0.4 mm joint gap,
+`clip_clearance` and the 25 mm door header stay the same at 1:12, so the keys
+and pegs are as strong as at 1:6.
+
+At 1:12 a door wall of 1 unit (75 mm) takes a door up to 44 mm wide (the end
+keys need 15 mm each side). The designer builds every wall of one module, so
+its door is 40 mm wide. For an 80 mm door, make the door walls and leaves in
+the customizer with `width_units = 1.5` and `door_width = 80`, and plan the
+walls beside it for the extra half module.
 
 Bed: the Bambu H2C's build volume is 330 x 320 x 325 mm, or 300 x 320 x
 325 mm when both nozzles print. Every piece here, at every setting, fits a
@@ -164,10 +215,10 @@ Keep these the same for every piece of one house.
 
 | Parameter | Default | What it does |
 |---|---|---|
-| `module_size` | `150` | Grid module, 100-150 mm. |
+| `module_size` | `150` | Grid module, 75-150 mm (75 at 1:12). |
 | `width_units` | `1` | Length of walls, railings, floor tiles and roof panels in modules, 0.5-2. |
 | `depth_units` | `2` | Depth of floor tiles and roof panels, 0.5-2. |
-| `course_height` | `210` | One wall course; a room is two. 180-240. |
+| `course_height` | `210` | One wall course; a room is two. 105-240 (105 at 1:12). Below 180 the trim and decoration get smaller ([Scales](#scales)). |
 | `wall_thickness` | `6` | Walls, corner posts and railings, 4-10. Keys are half of it (up to 3 mm) thick; below 5 mm the pegs and hinge pins get thin. |
 | `floor_thickness` | `6` | Floor tiles and roof panels, 5-10. |
 
@@ -176,7 +227,7 @@ Keep these the same for every piece of one house.
 | Parameter | Default | What it does |
 |---|---|---|
 | `exterior` | `plain` | `siding` (clapboards, thick edge down), `brick` (running bond), `stone` (random widths), `stucco` (fine bumps), or `plain`. |
-| `texture_size` | `12` | Brick course height; siding boards are 1.6x and stone rows 2.2x. |
+| `texture_size` | `12` | Brick course height, 5-20 mm (6 at 1:12); siding boards are 1.6x and stone rows 2.2x. |
 
 ### Interior
 
@@ -185,21 +236,21 @@ Keep these the same for every piece of one house.
 | `wallpaper` | `stripes` | `stripes` (with a pinstripe), `polka_dots`, `diamonds`, `hearts`, `stars` in two colours, or `none`. |
 | `pattern_repeats` | `6` | Repeats per module. Patterns are anchored to the grid and continue across wall joints and courses. |
 | `wainscoting` | `true` | Lower courses: panelling up to `wainscot_height` with a rail. |
-| `wainscot_height` | `90` | From the floor. |
-| `baseboard` | `true` | Lower courses: 14 mm baseboard. |
-| `crown_moulding` | `true` | Upper courses: 12 mm crown. |
+| `wainscot_height` | `90` | From the floor, 20-150 mm (45 at 1:12). |
+| `baseboard` | `true` | Lower courses: 14 mm baseboard (7 mm at 1:12). |
+| `crown_moulding` | `true` | Upper courses: 12 mm crown (6 mm at 1:12). |
 
 ### Windows
 
 | Parameter | Default | What it does |
 |---|---|---|
 | `window_style` | `square` | `square`, `arched` (round top), `round`. |
-| `window_width` | `70` | Opening width (round: diameter). Shrinks to leave room for the end keys; an arched or round window also shrinks to fit the height it gets (`window_height`, or the room above `window_sill`). Whenever a window setting, the shutters or the flower box cannot be honoured, the render prints a `NOTE:` saying what was made instead. |
-| `window_height` | `120` | Opening height; limited so the top clears the top-edge pegs and keys. |
-| `window_sill` | `40` | Bottom of the opening above the bottom of the course. |
+| `window_width` | `70` | Opening width (round: diameter), 20-180 mm. Shrinks to leave room for the end keys; an arched or round window also shrinks to fit the height it gets (`window_height`, or the room above `window_sill`). Whenever a window setting, the shutters or the flower box cannot be honoured, the render prints a `NOTE:` saying what was made instead. |
+| `window_height` | `120` | Opening height, 20-200 mm; limited so the top clears the top-edge pegs and keys. |
+| `window_sill` | `40` | Bottom of the opening above the bottom of the course, 10-120 mm. |
 | `window_panes_x`, `window_panes_y` | `2`, `2` | Glazing bars. |
 | `glass` | `true` | 0.6 mm pane on the inside face, in `window_pane_color` (translucent filament looks best). |
-| `shutters` | `true` | Louvred shutters either side, as wide as there is room for (none on round windows or when under 10 mm). |
+| `shutters` | `true` | Louvred shutters either side, as wide as there is room for (none on round windows or when under 10 mm, 5 mm at 1:12). |
 | `flower_box` | `true` | A box under the sill with blossoms in two colours and leaves. |
 | `trim` | `true` | Frame lining in the opening, architrave (flush inside, raised outside), sill, door threshold and hinge blocks in their own colours. Off: all wall colour, except the glazing bars, which stay in `window_frame_color`. |
 
@@ -208,8 +259,8 @@ Keep these the same for every piece of one house.
 | Parameter | Default | What it does |
 |---|---|---|
 | `door_style` | `plain` | `plain` and `arched` hang one Dutch-door leaf; `french` a glazed pair. |
-| `door_width` | `100` | Clear width. A width, height or `width_units` the wall cannot take is reduced (or raised to 1 unit) with a `NOTE:`. |
-| `door_height` | `330` | Clear height above the threshold; the header keeps at least 25 mm. |
+| `door_width` | `100` | Clear width, 40-140 mm. A width, height or `width_units` the wall cannot take is reduced (or raised to 1 unit) with a `NOTE:`. |
+| `door_height` | `330` | Clear height above the threshold, 160-400 mm; the header keeps at least 25 mm. |
 | `door_panels` | `2` | Raised panels per leaf half. |
 
 ### Floors & roof
@@ -227,9 +278,9 @@ Keep these the same for every piece of one house.
 
 | Parameter | Default | What it does |
 |---|---|---|
-| `stair_width` | `100` | Including both 6 mm stringers. |
-| `tread_depth` | `24` | Tread; reduced if a half would be longer than 290 mm. |
-| `railing_height` | `150` | 0.9 m at 1:6. |
+| `stair_width` | `100` | Including both 6 mm stringers, 40-140 mm. |
+| `tread_depth` | `24` | Tread, 10-32 mm; reduced if a half would be longer than 290 mm. |
+| `railing_height` | `150` | 70-180 mm: 0.9 m is 150 at 1:6 and 75 at 1:12. |
 
 ### Connectors
 
@@ -370,6 +421,9 @@ railing bottom edge, and one per hole between storeys and under the roof.
 - The stairs' top stringer bridges over 30-40 mm gaps.
 - The 23 mm legs either side of a 1-unit door wall's opening are stiff enough
   once keyed to their neighbours, but floppy on their own.
+- At 1:12: the corner post on its 37 x 37 mm L footprint, the 15 mm legs beside
+  a 1-unit door, the 1.6 mm glazing bars and the flower box blossoms (about
+  5 mm across). The keys and pegs are the 1:6 ones, so their fit is the same.
 
 ## Verifying
 
@@ -378,15 +432,19 @@ railing bottom edge, and one per hole between storeys and under the roof.
 ```
 
 Renders every piece with its defaults, the style variations above, every
-piece at its largest settings, eight "max colour" cases with all 31 colours
-distinct, three cases whose settings cannot all be honoured, and the room
-preview (69 cases), renders the closed per-colour
-solids of 21 of them, then runs 26 fit probes. It
-checks colour parts and no Default geometry, that the per-colour closed solids
-add up to the whole piece (no two colours overlap), the 300 mm bed envelope,
-exact grid lengths, key and peg play, mated pieces not intersecting, a
-320 mm-tall doll-sized box passing through the door (and a 331 mm one not),
-the window height against a doll's eye, the NOTE lines a piece prints when it
-cannot be what was asked for (and that the defaults print none), and render
-time per piece. Output goes
+piece at its largest settings, "max colour" cases with all 31 colours
+distinct, cases whose settings cannot all be honoured, the room preview, every
+piece and style at the 1:12 set (`s12-*`), and every piece at the smallest
+settings the customizer allows (`min12-*`: module 75, course 105, 4 mm walls,
+5 mm floors and the smallest window, door, stairs and railing). It renders the
+closed per-colour solids of a sample of them, then runs the fit probes at 1:6
+and at 1:12. It checks colour parts and no Default geometry (a 1:12 piece makes
+the same colours as its 1:6 twin, so the shutters and flower box are still
+there), that the per-colour closed solids add up to the whole piece (no two
+colours overlap), the 300 mm bed envelope, exact grid lengths, key and peg
+play, mated pieces not intersecting, a doll-sized box passing through the door
+(320 mm at 1:6, 160 mm at 1:12, and one 1 mm taller than the door not), the
+window height against a doll's eye, the NOTE lines a piece prints when it
+cannot be what was asked for (and that the defaults and the 1:12 set print
+none), and render time per piece. Output goes
 to `.verify/`; it exits non-zero on any failure.
