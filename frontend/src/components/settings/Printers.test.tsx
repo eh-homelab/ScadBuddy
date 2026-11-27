@@ -10,17 +10,13 @@ import { renderPage } from '../../test/utils'
 import { choose } from '../../test/select'
 import { SIGNAL_READ_MIN_MS } from '../../lib/useAsync'
 import { PrintersPanel } from './Printers'
-import { readSpec } from '../../test/spec'
+import { schemaProperty } from '../../test/spec'
 
 /** `LanLink.access_code`'s `maxLength` in the spec `pnpm gen:api` (run before `pnpm test`)
  * exported: the backend's bound, read rather than restated (#4497 review). */
 function specAccessCodeMax(): number {
-  const { json, path } = readSpec()
-  const spec = json as {
-    components?: { schemas?: { LanLink?: { properties?: { access_code?: { maxLength?: unknown } } } } }
-  }
-  const max = spec.components?.schemas?.LanLink?.properties?.access_code?.maxLength
-  if (typeof max !== 'number') throw new Error(`LanLink.access_code.maxLength not in the spec at ${path}`)
+  const max = schemaProperty('LanLink', 'access_code').maxLength
+  if (typeof max !== 'number') throw new Error(`LanLink.access_code.maxLength is ${JSON.stringify(max)}, not a number`)
   return max
 }
 
