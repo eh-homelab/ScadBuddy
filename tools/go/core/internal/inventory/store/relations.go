@@ -13,12 +13,12 @@ import (
 // compatible_with relation to each.
 
 // modelKind is the id of the code's model kind: the kind under printer whose name is the
-// code in any case. The id is never built from the code. A missing kind is made with an
-// the id k<number>, from item_kinds_number_seq, and the trimmed code as its name; it publishes its handler_config.changed
-// events, as a kind save does. No unique index covers (parent_id, lower(name)), and this
-// layer adds no migration, so a transaction-scoped advisory lock on the lower-cased code
-// makes the find and the insert one step: a second write of a new code waits for the first
-// to commit, then finds its kind.
+// code in any case. The id is never built from the code. A missing kind is made with the id
+// k<number>, from item_kinds_number_seq, and the trimmed code as its name; it publishes its
+// handler_config.changed events, as a kind save does. No unique index covers
+// (parent_id, lower(name)), and this layer adds no migration, so a transaction-scoped
+// advisory lock on the lower-cased code makes the find and the insert one step: a second
+// write of a new code waits for the first to commit, then finds its kind.
 func modelKind(ctx context.Context, tx pgx.Tx, cat Catalog, code string, by Actor) (string, error) {
 	if _, err := tx.Exec(ctx, `SELECT pg_advisory_xact_lock(hashtextextended('model_kind:' || lower(btrim($1)), 0))`,
 		code); err != nil {
