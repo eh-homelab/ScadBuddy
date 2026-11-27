@@ -178,6 +178,10 @@ func keep(ctx context.Context, blobs Blobs, file io.ReadSeeker, sha256 string) e
 		if held {
 			return nil
 		}
+		// The key names a blob this call can neither claim nor replace (a row on another
+		// store backend): a 503 that says so, not a bare 500.
+		return &httpx.Problem{Status: http.StatusServiceUnavailable,
+			Detail: "the store names this mirror's blob but cannot claim it (another backend?)"}
 	}
 	return err
 }
@@ -267,6 +271,8 @@ func (m *Mirrors) hostedZip(r *http.Request, params crud.Params) (any, error) {
 	if err != nil {
 		return nil, err
 	}
+	// A hosted version's tree is at most hosted_plugins/rules.py MAX_TOTAL_BYTES (20 MiB), below
+	// MaxMirrorBytes; raising that cap past this bound needs a bound of its own here.
 	data, found, err := m.Blobs.ReadFile(ctx, attachmentKey(zipSHA256), MirrorFile, MaxMirrorBytes)
 	if err != nil {
 		return nil, err

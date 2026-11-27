@@ -24,6 +24,7 @@ import (
 
 	"github.com/eh-homelab/ScadBuddy/tools/go/core/internal/auth"
 	"github.com/eh-homelab/ScadBuddy/tools/go/core/internal/crud"
+	"github.com/eh-homelab/ScadBuddy/tools/go/core/internal/httpx"
 	"github.com/eh-homelab/ScadBuddy/tools/go/core/internal/testdb"
 )
 
@@ -365,10 +366,13 @@ func TestKeptBytesAreNotPublishedAgain(t *testing.T) {
 	}
 }
 
-func TestAStalePublishWithNothingKeptFails(t *testing.T) {
+// A key that names a blob this call can neither claim nor replace (a row on another backend)
+// is a 503 that says so, not a bare 500.
+func TestAStalePublishWithNothingKeptIsA503(t *testing.T) {
 	blobs := &staleForever{fakeBlobs: newFakeBlobs()}
 	err := keep(context.Background(), blobs, bytes.NewReader(zipBytes), hexSum(zipBytes))
-	if !errors.Is(err, ErrStale) {
+	var problem *httpx.Problem
+	if !errors.As(err, &problem) || problem.Status != http.StatusServiceUnavailable {
 		t.Fatalf("got %v", err)
 	}
 }

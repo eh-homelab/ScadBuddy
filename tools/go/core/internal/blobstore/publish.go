@@ -179,9 +179,8 @@ type indexer func(ctx context.Context, ref Ref) (bool, error)
 // spooled file) hashed, its object's stage lock held shared (hold) from before the lookup
 // until index has written its rows, the object stored or reused (stage), then index run.
 // When index writes nothing, the object goes unless a row names it (removeUnnamed, Python's
-// `_release`), once this call's own hold is dropped. It answers what index answered. A
-// caller that indexes under a content key (IndexKey, with putIn) and one that indexes a key
-// only while it names nothing (PublishFile) share it.
+// `_release`), once this call's own hold is dropped. It answers what index answered.
+// PublishFile is its only caller today; the commit route indexes through index/putIn.
 func (b *Blobs) put(ctx context.Context, store *Store, kind string, body *os.File, index indexer) (bool, error) {
 	sha, size, err := digest(body)
 	if err != nil {
