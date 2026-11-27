@@ -283,7 +283,7 @@ var sizePart = regexp.MustCompile(`^(\d+(?:\.\d+)?)x(\d+(?:\.\d+)?)(in|mm)$`)
 
 // SizeOf reads the size, in mm, from the last part of a PWG self-describing
 // media name, such as oe_2x1-label_2x1in.
-// https://ftp.pwg.org/pub/pwg/candidates/cs-pwgmsn10-20020226-5101.1.pdf
+// https://ftp.pwg.org/pub/pwg/candidates/cs-pwgmsn20-20130328-5101.1.pdf
 func SizeOf(media string) (w, h float64, ok bool) {
 	m := sizePart.FindStringSubmatch(media[strings.LastIndex(media, "_")+1:])
 	if m == nil {

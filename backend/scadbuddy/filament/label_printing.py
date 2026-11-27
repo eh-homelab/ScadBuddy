@@ -1,6 +1,7 @@
 """#7170: the settings for printing labels through CUPS (spec
 `docs/superpowers/specs/2026-11-27-cups-label-printing-design.md`). Stored only: Go's
-`internal/labelprint` reads the rows by name."""
+`internal/labelprint` reads `filament_label_server_url` by name; the Labels page reads and
+saves the queue and the job options."""
 
 from __future__ import annotations
 

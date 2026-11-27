@@ -552,7 +552,9 @@ class StoredSettings(BambuddyIds):
     filament_label_output: LabelOutput | None = None
     #: #7170: the CUPS server's URL, the queue the Labels page printed to last and its job
     #: options. ``None``: `label_printing.DEFAULT_SERVER_URL`, no queue and
-    #: `LabelJobOptions()`. Stored only: Go's `internal/labelprint` reads them by name.
+    #: `LabelJobOptions()`. Stored only: Go's `internal/labelprint` reads
+    #: `filament_label_server_url` by name; the Labels page reads and saves the queue and
+    #: the job options.
     filament_label_server_url: str | None = None
     filament_label_queue: str | None = None
     filament_label_job_options: LabelJobOptions | None = None

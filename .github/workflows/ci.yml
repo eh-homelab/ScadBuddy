@@ -2785,7 +2785,7 @@ jobs:
           docker run --rm --entrypoint sh scadbuddy-cups:ci -c \
             'printf "%%!PS\n/Helvetica findfont 14 scalefont setfont 10 30 moveto (ScadBuddy) show showpage\n" > /tmp/t.ps && gs -q -sDEVICE=pdfwrite -o - /tmp/t.ps' \
             > "$RUNNER_TEMP/live.pdf"
-          before=$(grep -c '\^XZ' "$fz/out.zpl")
+          before=$(grep -c '\^XZ' "$fz/out.zpl" || true)
           size=$(wc -c < "$fz/out.zpl")
           docker run --rm --network cupsci -v "$PWD:/src" -v "$RUNNER_TEMP/live.pdf:/live.pdf:ro" -w /src/tools/go/core \
             -e GOTOOLCHAIN=local -e SCADBUDDY_TEST_CUPS_URL=http://cups:8631 \

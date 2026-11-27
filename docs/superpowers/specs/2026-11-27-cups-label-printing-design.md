@@ -80,7 +80,8 @@ server. The owner asked "Don't we use cups?" (2026-11-27). The ruling: print thr
 - A queue's size is in `media-default`, a PWG self-describing media name whose last part is
   `<width>x<height><unit>`, the unit `in` or `mm`
   ([PWG 5101.1](https://ftp.pwg.org/pub/pwg/candidates/cs-pwgmsn20-20130328-5101.1.pdf)).
-  The exact name that CUPS gives for `w144h72` is not measured. Task 5's live check reads it.
+  CUPS gives `custom_2x1in_2x1in` for `w144h72` and `na_index-4x6_4x6in` for 4 x 6 in
+  (measured 2026-11-27 with `TestLiveCUPS`; see `deploy/cups/README.md`).
 - The label layer (#7216): `POST /api/v1/filament/labels` answers `application/pdf` by
   default. With `layout: "roll"` and a one-label template, a page is one label of the
   template's size. A sheet template, or `layout: "sheet"`, gives Letter or A4 pages

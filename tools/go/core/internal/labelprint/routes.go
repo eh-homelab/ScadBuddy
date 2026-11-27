@@ -81,8 +81,9 @@ var errBadServer = errors.New("the stored label server URL is not valid")
 // ParseServer checks a CUPS server's URL: http or https, a host, no user, no query, no
 // fragment, and a path of "/" or none. It is the rule of Python's label_printing.server_url.
 func ParseServer(raw string) (*url.URL, error) {
-	u, err := url.Parse(strings.TrimSpace(raw))
-	if err != nil {
+	text := strings.TrimSpace(raw)
+	u, err := url.Parse(text)
+	if err != nil || strings.ContainsAny(text, "?#") {
 		return nil, errBadServer
 	}
 	bad := (u.Scheme != "http" && u.Scheme != "https") || u.Opaque != "" || u.Hostname() == "" ||

@@ -122,6 +122,22 @@ describe('LabelQueuePrint (#7170 R7, R9)', () => {
     expect(seen.jobs).toEqual(['/api/v1/label-printing/queues/S-EDCDU03-4x6/jobs?media_type=Direct&darkness=12'])
   })
 
+  it('keeps the sent message and the list when the refresh after a send fails', async () => {
+    const seen = watch()
+    const { user } = renderPage(<LabelQueuePrint body={BODY} page={FOUR_BY_SIX} />)
+    await waitFor(async () => expect(await queuePicker()).toHaveTextContent('Zebra GK420t, 4 x 6 in labels'))
+    server.use(
+      http.get('*/api/v1/label-printing/queues', () =>
+        HttpResponse.json({ title: 'down', status: 502, detail: 'down', reason: 'label_server_unreachable' }, { status: 502, headers: { 'Content-Type': 'application/problem+json' } }),
+      ),
+    )
+    await user.click(screen.getByRole('button', { name: 'Print to label printer' }))
+    await waitFor(() => expect(seen.jobs).toHaveLength(1))
+    expect(await screen.findByRole('status')).toHaveTextContent('Sent to Zebra GK420t, 4 x 6 in labels (job 101).')
+    expect(screen.queryByText(/does not answer/)).not.toBeInTheDocument()
+    expect(screen.getByRole('combobox', { name: 'Label queue' })).toHaveTextContent('Zebra GK420t, 4 x 6 in labels')
+  })
+
   it('refreshes the queues after label_queue_unknown', async () => {
     const { user } = renderPage(<LabelQueuePrint body={BODY} page={TWO_BY_ONE} />)
     await waitFor(async () => expect(await queuePicker()).toHaveTextContent('Zebra GK420t, 2 x 1 in labels'))

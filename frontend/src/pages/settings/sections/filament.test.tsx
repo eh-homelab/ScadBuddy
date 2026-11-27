@@ -729,6 +729,15 @@ describe('Filament (#6262)', () => {
     await waitFor(() => expect(mockSettings().filament_label_server_url).toBe('http://cups.example.lan:631'))
   })
 
+  it('the mock trims the label print server and refuses what Python refuses (#7170)', async () => {
+    await api.putSettings({ filament_label_server_url: ' http://cups.example.lan:631/ ' })
+    expect(mockSettings().filament_label_server_url).toBe('http://cups.example.lan:631')
+    for (const bad of ['cups:631', 'ftp://cups', 'http://', 'http://u:p@cups', 'http://cups/printers', 'http://cups?', 'http://cups#', 'http://cups?x=1']) {
+      await expect(api.putSettings({ filament_label_server_url: bad })).rejects.toThrow()
+    }
+    expect(mockSettings().filament_label_server_url).toBe('http://cups.example.lan:631')
+  })
+
   it('shows the alert when a person-only refusal answers the label print server save (#7170)', async () => {
     server.use(
       http.put('*/api/v1/settings', () =>

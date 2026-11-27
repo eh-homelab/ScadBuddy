@@ -65,14 +65,15 @@ export function LabelQueuePrint({
   const reads = useRef(0)
 
   /** Reads the queue list; only the newest read's answer lands. */
-  const readQueues = async (): Promise<LabelQueue[] | null> => {
+  const readQueues = async (quiet = false): Promise<LabelQueue[] | null> => {
     const read = ++reads.current
     try {
       const list = await labelQueues()
       if (read === reads.current) setQueues({ state: 'read', list })
       return list
     } catch (cause) {
-      if (read === reads.current)
+      // A quiet read (after a send) keeps the last list when it fails.
+      if (read === reads.current && !quiet)
         setQueues(
           labelProblem(cause) === 'label_server_unreachable'
             ? { state: 'down' }
@@ -130,7 +131,7 @@ export function LabelQueuePrint({
     try {
       const pdf = await labelsFile({ ...body, format: 'pdf' })
       const job = await printLabels(queue.name, pdf, zebra ? options : DEFAULT_JOB_OPTIONS)
-      const now = (await readQueues())?.find((one) => one.name === queue.name) ?? queue
+      const now = (await readQueues(true))?.find((one) => one.name === queue.name) ?? queue
       setSent({ text: `Sent to ${nameOf(queue)} (job ${job.job_id}).`, message: now.state !== 'idle' && now.state_message ? now.state_message : null })
     } catch (cause) {
       const reason = labelProblem(cause)

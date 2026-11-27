@@ -286,7 +286,7 @@ func TestParseServer(t *testing.T) {
 		}
 	}
 	for _, v := range []string{"", "cups:631", "ftp://cups", "http://", "http://u:p@cups", "http://cups/printers",
-		"http://cups?x=1", "http://cups#f", "javascript:alert(1)", "http://cups:99999"} {
+		"http://cups?x=1", "http://cups#f", "http://cups#", "http://cups?", "javascript:alert(1)", "http://cups:99999"} {
 		if u, err := ParseServer(v); err == nil {
 			t.Errorf("ParseServer(%q) = %s", v, u)
 		}
