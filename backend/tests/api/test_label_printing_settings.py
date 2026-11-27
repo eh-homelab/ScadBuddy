@@ -60,6 +60,10 @@ def test_an_agent_may_pick_the_queue_and_options(client: TestClient) -> None:
         {"filament_label_job_options": {"media_type": "Ribbon"}},
         {"filament_label_job_options": {"print_rate": "13"}},
         {"filament_label_job_options": {"extra": 1}},
+        {"filament_label_queue": "a b"},
+        {"filament_label_queue": ""},
+        {"filament_label_queue": "a" * 128},
+        {"filament_label_queue": "q/../x"},
     ],
 )
 def test_bad_values_are_a_422(client: TestClient, body: dict[str, object]) -> None:

@@ -2,10 +2,12 @@
 
 from __future__ import annotations
 
+from typing import get_args
+
 import pytest
 from pydantic import ValidationError
 
-from scadbuddy.filament.label_printing import LabelJobOptions, server_url
+from scadbuddy.filament.label_printing import LabelJobOptions, PrintRate, server_url
 
 
 @pytest.mark.parametrize(
@@ -39,3 +41,13 @@ def test_other_values_are_refused(value: str) -> None:
 def test_darkness_is_minus_one_or_1_to_30(darkness: int) -> None:
     with pytest.raises(ValidationError):
         LabelJobOptions(darkness=darkness)
+
+
+@pytest.mark.parametrize("darkness", [-1, 1, 30])
+def test_darkness_values_that_are_allowed(darkness: int) -> None:
+    assert LabelJobOptions(darkness=darkness).darkness == darkness
+
+
+@pytest.mark.parametrize("print_rate", get_args(PrintRate))
+def test_every_print_rate_is_allowed(print_rate: str) -> None:
+    assert LabelJobOptions(print_rate=print_rate).print_rate == print_rate  # type: ignore[arg-type]
