@@ -49,6 +49,21 @@ var (
 type Store struct {
 	Pool *pgxpool.Pool
 	Keys *seal.Keys
+	// tx, when set, is the caller's transaction a fork copy reads in (forks.go).
+	tx pgx.Tx
+}
+
+// querier is the pool, or the caller's transaction.
+type querier interface {
+	Begin(ctx context.Context) (pgx.Tx, error)
+	Query(ctx context.Context, sql string, args ...any) (pgx.Rows, error)
+}
+
+func (s *Store) db() querier {
+	if s.tx != nil {
+		return s.tx
+	}
+	return s.Pool
 }
 
 // Reads are the area's GET routes.
@@ -175,7 +190,7 @@ func keyRow(ctx context.Context, tx pgx.Tx, subject string) ([]byte, string, err
 // key is a session's data key for a read: never made.
 func (s *Store) key(ctx context.Context, session string) ([]byte, error) {
 	var dek []byte
-	err := pgx.BeginFunc(ctx, s.Pool, func(tx pgx.Tx) (err error) {
+	err := pgx.BeginFunc(ctx, s.db(), func(tx pgx.Tx) (err error) {
 		dek, err = s.keyIn(ctx, tx, "session-"+session, false)
 		return err
 	})
@@ -378,7 +393,7 @@ func firstRows(segments []segment, n int64) []segment {
 // segments is segmentsOf: the rows of the main transcript in the order it loads, each run
 // with its owner: inherited rows, then the parent's through the cut, then its own.
 func (s *Store) segments(ctx context.Context, session string) ([]segment, error) {
-	found, err := s.Pool.Query(ctx, chainRows, session)
+	found, err := s.db().Query(ctx, chainRows, session)
 	if err != nil {
 		return nil, err
 	}
@@ -407,7 +422,7 @@ func (s *Store) segments(ctx context.Context, session string) ([]segment, error)
 	if len(chain) == 0 {
 		// No session row: the plain rows of the key, as before forks.
 		chain = []link{{session, nil}}
-		plain, err := s.Pool.Query(ctx, `SELECT id, uuid, entry, sealed, inherited
+		plain, err := s.db().Query(ctx, `SELECT id, uuid, entry, sealed, inherited
 			FROM ai_session_entries WHERE session_id = $1 AND subpath = '' ORDER BY inherited DESC, id`,
 			session)
 		if err != nil {

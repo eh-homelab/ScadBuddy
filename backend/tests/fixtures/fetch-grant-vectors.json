@@ -1,0 +1,212 @@
+{
+ "kek": "AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8=",
+ "hosts": [
+  {
+   "url": "https://example.com/a.stl",
+   "host": "example.com"
+  },
+  {
+   "url": "  https://Example.COM./a  ",
+   "host": "example.com"
+  },
+  {
+   "url": "https://example.com:443/a",
+   "host": "example.com"
+  },
+  {
+   "url": "https://example.com:8443/a",
+   "host": "example.com"
+  },
+  {
+   "url": "https://example.com:/a",
+   "host": "example.com"
+  },
+  {
+   "url": "https://example.com:abc/a",
+   "host": null
+  },
+  {
+   "url": "https://example.com: 8_0 /a",
+   "host": "example.com"
+  },
+  {
+   "url": "https://user@example.com/a",
+   "host": null
+  },
+  {
+   "url": "https://@example.com/a",
+   "host": "example.com"
+  },
+  {
+   "url": "https://a@b@example.com/a",
+   "host": null
+  },
+  {
+   "url": "http://example.com/a",
+   "host": null
+  },
+  {
+   "url": "HTTPS://example.com",
+   "host": "example.com"
+  },
+  {
+   "url": "https:example.com",
+   "host": null
+  },
+  {
+   "url": "https:///a",
+   "host": null
+  },
+  {
+   "url": "https://[::1]:443/a",
+   "host": "::1"
+  },
+  {
+   "url": "https://[::1]443/a",
+   "host": "::1"
+  },
+  {
+   "url": "https://[::1]x/a",
+   "host": null
+  },
+  {
+   "url": "https://[fe80::1%25eth0]/a",
+   "host": "fe80::1%25eth0"
+  },
+  {
+   "url": "https://[::ffff:1.2.3.4]/a",
+   "host": "::ffff:1.2.3.4"
+  },
+  {
+   "url": "https://[nope]/a",
+   "host": null
+  },
+  {
+   "url": "https://1.2.3.4/a",
+   "host": "1.2.3.4"
+  },
+  {
+   "url": "https://01.2.3.4/a",
+   "host": null
+  },
+  {
+   "url": "https://256.2.3.4/a",
+   "host": null
+  },
+  {
+   "url": "https://1.2.3/a",
+   "host": "1.2.3"
+  },
+  {
+   "url": "https://a b.com/a",
+   "host": "a%20b.com"
+  },
+  {
+   "url": "https://a%20b.com/a",
+   "host": "a%20b.com"
+  },
+  {
+   "url": "https://[abc/a",
+   "host": "%5babc"
+  },
+  {
+   "url": "https://a]b.com/a",
+   "host": "a%5db.com"
+  },
+  {
+   "url": "https://ex^ample.com/a",
+   "host": "ex%5eample.com"
+  },
+  {
+   "url": "https://exa_mple.com/a",
+   "host": "exa_mple.com"
+  },
+  {
+   "url": "https://bücher.example/a",
+   "host": "xn--bcher-kva.example"
+  },
+  {
+   "url": "https://BÜCHER.example/a",
+   "host": "xn--bcher-kva.example"
+  },
+  {
+   "url": "https://xn--bcher-kva.example/a",
+   "host": "xn--bcher-kva.example"
+  },
+  {
+   "url": "https://xn--zz.example/a",
+   "host": null
+  },
+  {
+   "url": "https://xn--bcher-kva.exa_mple/a",
+   "host": null
+  },
+  {
+   "url": "https://ü_x.example/a",
+   "host": null
+  },
+  {
+   "url": "https://example.com\\@evil.com/a",
+   "host": null
+  },
+  {
+   "url": "https://exam\tple.com/a",
+   "host": null
+  },
+  {
+   "url": "https://example.com?x=1",
+   "host": "example.com"
+  },
+  {
+   "url": "https://example.com#frag",
+   "host": "example.com"
+  },
+  {
+   "url": "ftp://example.com",
+   "host": null
+  },
+  {
+   "url": "//example.com/a",
+   "host": null
+  },
+  {
+   "url": "example.com",
+   "host": null
+  },
+  {
+   "url": "",
+   "host": null
+  },
+  {
+   "url": "https://.",
+   "host": ""
+  },
+  {
+   "url": "https://a..b/x",
+   "host": "a..b"
+  }
+ ],
+ "grants": [
+  {
+   "host": "example.com",
+   "url": "https://example.com/a.stl",
+   "expires": 1800000000,
+   "nonce": "00000000000000000000000000000000",
+   "grant": "YXNzZXQtZmV0Y2gtb25jZQpleGFtcGxlLmNvbQo3ZDhkM2QyNmVjNTkwNDA1YzQ0OTE3Njk4NzRkNjFiYzc4ZjRkZjY0N2RjYzI5YzAzMmJjN2Q4MTE1YmExZjRkCjE4MDAwMDAwMDAKMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDA.SLcvZW2JkStxsPClu-aw4A-xk6ANHN3wPuOpr893zsc"
+  },
+  {
+   "host": "xn--bcher-kva.example",
+   "url": "https://bücher.example/x",
+   "expires": 1800000600,
+   "nonce": "0123456789abcdef0123456789abcdef",
+   "grant": "YXNzZXQtZmV0Y2gtb25jZQp4bi0tYmNoZXIta3ZhLmV4YW1wbGUKMDY3YjY0ODM1NDUwYzkyZTRjZjBiNzcwNDkxMjZkNjY3OTAwNGQ3YTFhNzI1MDc5ZTU0OGUyMzZmNjlmM2RhZQoxODAwMDAwNjAwCjAxMjM0NTY3ODlhYmNkZWYwMTIzNDU2Nzg5YWJjZGVm._JZ6gWAubb8B0phLRtYnOVnn_yhqDXgcTLze0U0SEzA"
+  },
+  {
+   "host": "::1",
+   "url": "https://[::1]/a?b=c#d",
+   "expires": 1,
+   "nonce": "ffffffffffffffffffffffffffffffff",
+   "grant": "YXNzZXQtZmV0Y2gtb25jZQo6OjEKZmZlMTlhNjhmY2I2M2Y1ZjExZDc2OTAyMjEzMTAyYzZhMjA3MjkxNDYzYWI4ZGYzNGI5ZGM0YzUyYjllN2VjOQoxCmZmZmZmZmZmZmZmZmZmZmZmZmZmZmZmZmZmZmZmZmZm.rETZ3LSWwZvKsAMqL6jA-Yc6lsqEGRR_EsKzpWIjzlM"
+  }
+ ]
+}
