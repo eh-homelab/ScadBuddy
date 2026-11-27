@@ -35,11 +35,15 @@ const gramsText = (grams: number | null) => (grams === null ? 'grams not known' 
  */
 export function UnknownSpoolDialog({
   tray,
+  gone = false,
   open,
   onOpenChange,
   onResolved,
 }: {
+  /** The tray as it was listed when the person opened the dialog; the dialog keeps that copy (see the form). */
   tray: UnknownSpoolTray
+  /** The list no longer has the tray: another client linked it, or the slot was emptied. */
+  gone?: boolean
   open: boolean
   onOpenChange: (open: boolean) => void
   onResolved: (resolved: UnknownTrayResolved) => void
@@ -48,26 +52,32 @@ export function UnknownSpoolDialog({
   return (
     <Dialog open={open} onOpenChange={(next) => !busy && onOpenChange(next)}>
       <DialogContent className="sm:max-w-lg">
-        <UnknownSpoolForm tray={tray} busy={busy} setBusy={setBusy} onOpenChange={onOpenChange} onResolved={onResolved} />
+        <UnknownSpoolForm tray={tray} gone={gone} busy={busy} setBusy={setBusy} onOpenChange={onOpenChange} onResolved={onResolved} />
       </DialogContent>
     </Dialog>
   )
 }
 
 function UnknownSpoolForm({
-  tray,
+  tray: listed,
+  gone,
   busy,
   setBusy,
   onOpenChange,
   onResolved,
 }: {
   tray: UnknownSpoolTray
+  gone: boolean
   busy: boolean
   setBusy: (busy: boolean) => void
   onOpenChange: (open: boolean) => void
   onResolved: (resolved: UnknownTrayResolved) => void
 }) {
   const ctx = useContext(NeedsYouContext)
+  // The tray as it was when the dialog opened. A later poll changes `listed`, but the person
+  // decides on what they saw: the `seen_at` sent is this copy's, so the server's check still
+  // guards the tray they saw. After a `tray_changed` they close the dialog and open it again.
+  const [tray] = useState(listed)
   const [code, setCode] = useState('')
   const [picked, setPicked] = useState<string | null>(null)
   const [weight, setWeight] = useState('')
@@ -78,7 +88,7 @@ function UnknownSpoolForm({
   const trimmedWeight = weight.trim()
   const weightOk = DECIMAL.test(trimmedWeight) && Number(trimmedWeight) > 0
   const hasTarget = typed !== '' || picked !== null
-  const ready = hasTarget && weightOk && !busy
+  const ready = hasTarget && weightOk && !busy && !gone
 
   function changeCode(text: string) {
     setCode(codeFromScan(text) ?? text)
@@ -132,7 +142,13 @@ function UnknownSpoolForm({
   }
 
   return (
-    <>
+    <form
+      className="contents"
+      onSubmit={(event) => {
+        event.preventDefault()
+        void link()
+      }}
+    >
       <DialogHeader>
         <DialogTitle>{unknownSpoolTitle(tray)}</DialogTitle>
         <DialogDescription className="flex flex-wrap items-center gap-x-2">
@@ -202,6 +218,11 @@ function UnknownSpoolForm({
             Add from an invoice
           </Link>
         </p>
+        {gone && (
+          <p role="status" className="text-[13px] text-warn">
+            This tray is not waiting any more. Someone linked a spool to it, or the slot was emptied. Close this dialog.
+          </p>
+        )}
         {error && (
           <p role="alert" className="text-[13px] text-warn">
             {error}
@@ -210,20 +231,20 @@ function UnknownSpoolForm({
       </div>
       <DialogFooter className="sm:justify-between">
         <div className="flex flex-col gap-1 sm:max-w-56">
-          <Button type="button" variant="ghost" size="sm" className="self-start" disabled={busy} onClick={() => void dismiss()}>
+          <Button type="button" variant="ghost" size="sm" className="self-start" disabled={busy || gone} onClick={() => void dismiss()}>
             Dismiss
           </Button>
           <p className="text-xs text-muted-foreground">Only for a slot that is no longer there; if a spool is still loaded, it comes back on the next report.</p>
         </div>
         <div className="flex gap-2">
           <Button type="button" variant="outline" disabled={busy} onClick={() => onOpenChange(false)}>
-            Cancel
+            {gone ? 'Close dialog' : 'Cancel'}
           </Button>
-          <Button type="button" disabled={!ready} onClick={() => void link()}>
+          <Button type="submit" disabled={!ready}>
             Link spool
           </Button>
         </div>
       </DialogFooter>
-    </>
+    </form>
   )
 }

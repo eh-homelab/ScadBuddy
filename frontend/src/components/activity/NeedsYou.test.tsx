@@ -55,6 +55,25 @@ describe('NeedsYouSection (#6399)', () => {
     expect(await screen.findByRole('dialog', { name: 'Unknown spool in H2C AMS-A slot 2' })).toBeInTheDocument()
   })
 
+  it('keeps the dialog open, on the tray as it was, when its row goes away', async () => {
+    seedUnknownTray()
+    const { user } = renderPage(
+      <NeedsYouHarness>
+        <NeedsYouSection />
+      </NeedsYouHarness>,
+    )
+    const row = await waitFor(() => item('Unknown spool'))
+    await user.click(within(row).getByRole('button', { name: 'Tell ScadBuddy which spool…' }))
+    const dialog = await screen.findByRole('dialog', { name: /^Unknown spool in/ })
+    // Another client links the tray: the next read no longer lists it.
+    server.use(http.get('/api/v1/filament/unknown-trays', () => HttpResponse.json({ trays: [], made_from_tags: [] })))
+    window.dispatchEvent(new Event('focus'))
+    await waitFor(() => expect(within(dialog).getByRole('status')).toHaveTextContent('This tray is not waiting any more.'))
+    expect(screen.queryByRole('heading', { name: 'Unknown spool' })).not.toBeInTheDocument()
+    await user.click(within(dialog).getByRole('button', { name: 'Close dialog' }))
+    await waitFor(() => expect(screen.queryByRole('dialog')).not.toBeInTheDocument())
+  })
+
   it('lists every kind that waits on the person, each with its source and how long it has waited', async () => {
     setPendingApprovals(1)
     setPendingAnswers(1, 1)

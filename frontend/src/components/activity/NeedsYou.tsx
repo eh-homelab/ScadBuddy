@@ -17,7 +17,6 @@ import { Spinner } from '../ui/spinner'
 // only when a person opens one.
 const GrantPanel = lazy(async () => ({ default: (await import('../flows/GrantPanel')).GrantPanel }))
 const TriggerList = lazy(async () => ({ default: (await import('../flows/Triggers')).TriggerList }))
-const UnknownSpoolDialog = lazy(async () => ({ default: (await import('../filament/UnknownSpoolDialog')).UnknownSpoolDialog }))
 
 /**
  * #6399 — what waits on the person, of every kind (`lib/needsYou.ts`), each with its kind, where
@@ -115,7 +114,6 @@ export function NeedsYouRow({
   const ctx = useContext(NeedsYouContext)
   const [state, setState] = useState<RowState>({ kind: 'idle' })
   const [reviewing, setReviewing] = useState(open)
-  const [linking, setLinking] = useState(false)
   // The bell's "Review" on this page changes `REVIEW_PARAM` under a row already shown.
   useEffect(() => {
     if (open) setReviewing(true)
@@ -243,11 +241,13 @@ export function NeedsYouRow({
       )
     }
     if (item.kind === 'unknown_spool') {
-      return (
-        <Button size="sm" aria-haspopup="dialog" onClick={() => setLinking(true)}>
+      // The shell owns the dialog: this row goes away when its tray does.
+      const { tray } = item
+      return ctx?.answerSpool ? (
+        <Button size="sm" aria-haspopup="dialog" onClick={() => ctx.answerSpool?.(tray)}>
           Tell ScadBuddy which spool…
         </Button>
-      )
+      ) : null
     }
     return null
   })()
@@ -286,20 +286,6 @@ export function NeedsYouRow({
         <p role="alert" className="text-xs text-warn">
           {state.error}
         </p>
-      )}
-      {linking && item.kind === 'unknown_spool' && (
-        <Suspense fallback={null}>
-          <UnknownSpoolDialog
-            tray={item.tray}
-            open
-            onOpenChange={setLinking}
-            onResolved={(resolved) => {
-              setLinking(false)
-              setState({ kind: 'done', text: `Linked ${resolved.code} to ${item.tray.slot}.` })
-              refresh()
-            }}
-          />
-        </Suspense>
       )}
       {reviewing && (
         <Suspense fallback={<Spinner />}>

@@ -51,6 +51,7 @@ import {
   type NeedsYou,
 } from '../lib/needsYou'
 import { useTagMadeToasts, useUnknownSpools } from '../lib/unknownSpools'
+import { useUnknownSpoolDialog } from './filament/useUnknownSpoolDialog'
 import { useAttentionNotifications } from '../agent/attentionNotifications'
 import { useWebPush } from '../agent/webPush'
 import { useAiAvailability } from '../agent/chat/availability'
@@ -322,11 +323,13 @@ export function AppShell({ embedded = isEmbedded(), assistantTransport, tabLink 
         : null,
     [shown, openPanel],
   )
+  const { open: answerSpool, dialog: unknownSpoolDialog } = useUnknownSpoolDialog(needsItems, refreshNeeds)
   const needsYou = useMemo<NeedsYou>(
     () => ({
       items: needsItems,
       more: notListed(grants),
       refresh: refreshNeeds,
+      answerSpool,
       openSession: shown
         ? (sessionId) => {
             if (sessionId) setOpenRequest({ sessionId })
@@ -334,7 +337,7 @@ export function AppShell({ embedded = isEmbedded(), assistantTransport, tabLink 
           }
         : null,
     }),
-    [needsItems, grants, refreshNeeds, shown, openPanel],
+    [needsItems, grants, refreshNeeds, answerSpool, shown, openPanel],
   )
   const closePanel = useCallback(() => {
     setOpen(false)
@@ -576,6 +579,7 @@ export function AppShell({ embedded = isEmbedded(), assistantTransport, tabLink 
             </div>
           </div>
         </SidebarProvider>
+        {unknownSpoolDialog}
       </TooltipProvider>
       </ModalCompanionContext.Provider>
       </NeedsYouContext.Provider>

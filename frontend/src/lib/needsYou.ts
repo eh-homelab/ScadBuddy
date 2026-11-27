@@ -112,6 +112,8 @@ export interface NeedsYou {
   refresh: () => void
   /** Opens the assistant panel, on the session when one is named; null while the assistant is not there. */
   openSession: ((sessionId: string | null) => void) | null
+  /** Opens the dialog that asks which spool is in an unknown tray (`useUnknownSpoolDialog`); absent where there is none. */
+  answerSpool?: (tray: UnknownSpoolTray) => void
 }
 
 export const NeedsYouContext = createContext<NeedsYou | null>(null)
