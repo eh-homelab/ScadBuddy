@@ -2,6 +2,7 @@ package realtime
 
 import (
 	"context"
+	"log/slog"
 	"net/http"
 	"regexp"
 	"slices"
@@ -28,8 +29,9 @@ type DeviceTokens interface {
 	// DeviceOf is the device the Authorization header's token names; it moves the token's
 	// expiry, as every device request does.
 	DeviceOf(ctx context.Context, authorization string) (string, error)
-	// Live says whether the token is live now, without moving its expiry.
-	Live(ctx context.Context, authorization string) (string, bool)
+	// Live says whether the token is live now, without moving its expiry. An error is a
+	// failed read, which says nothing about the token.
+	Live(ctx context.Context, authorization string) (string, bool, error)
 	// CallVisible says whether principal may follow the call's events.
 	CallVisible(ctx context.Context, call, principal string) bool
 }
@@ -99,7 +101,13 @@ func (x *session) deviceLive(ctx context.Context) bool {
 	}
 	ctx, cancel := context.WithTimeout(ctx, 5*time.Second)
 	defer cancel()
-	id, ok := x.s.Devices.Live(ctx, x.who.authorization)
+	id, ok, err := x.s.Devices.Live(ctx, x.who.authorization)
+	if err != nil {
+		// A failed read is no proof of a revoked token: the socket stays, and the next
+		// keepalive or resync reads again.
+		slog.WarnContext(ctx, "could not read a device token", "error", err.Error())
+		return true
+	}
 	return ok && id == x.who.device
 }
 

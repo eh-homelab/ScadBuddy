@@ -254,6 +254,15 @@ func requested(call, device, method string, args json.RawMessage, deadline time.
 func (s *Store) send(ctx context.Context, call, device, method string, args json.RawMessage, deadline time.Time) error {
 	if _, err := s.Pool.Exec(ctx, `UPDATE device_calls SET sent_at = $2, deadline = $3 WHERE id = $1::uuid`,
 		call, s.now(), deadline); err != nil {
+		// The call was not sent: it ends error, not denied at its deadline.
+		ctx := context.WithoutCancel(ctx)
+		if e := pgx.BeginFunc(ctx, s.Pool, func(tx pgx.Tx) error {
+			return end(ctx, tx, call, "error", map[string]any{"error": "not_sent"}, s.now())
+		}); e != nil {
+			logFailed(ctx, "could not end a call that was not sent", e)
+		} else {
+			s.publishFailed(ctx, call, device, "error", "the call could not be sent")
+		}
 		return err
 	}
 	bus.Publish(ctx, s.Pool, "device.call_requested", requested(call, device, method, args, deadline)...)
@@ -360,16 +369,28 @@ func (s *Store) getCall(r *http.Request) (any, error) {
 		}
 		who = r.URL.Query().Get("on_behalf_of")
 	}
-	v, err := s.view(r.Context(), id)
+	// Visibility first, so a caller that gets a 404 writes nothing (view may expire the call).
+	call, err := s.loadCall(r.Context(), s.Pool, id, "")
 	if err != nil {
 		return nil, err
 	}
-	visible := v.Call.caller == who && (kind == "" || v.Call.CallerKind == kind) ||
-		kind == "" && v.Call.owner == who
-	if who == "" || !visible {
+	if !visibleTo(call.owner, call.caller, call.CallerKind, kind, who) {
 		return nil, notFound("call")
 	}
-	return v, nil
+	return s.view(r.Context(), id)
+}
+
+// visibleTo is the one rule of who may read a call or follow its events: a person (kind "")
+// who owns its device or made it, or a delegate (kind assistant or flow) that made it as that
+// kind for the person who.
+func visibleTo(owner, caller, callerKind, kind, who string) bool {
+	if who == "" {
+		return false
+	}
+	if kind == "" {
+		return owner == who || caller == who
+	}
+	return caller == who && callerKind == kind
 }
 
 // wait holds the request until the call ends (200 with the view) or its deadline passes (504).

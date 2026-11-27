@@ -2,7 +2,10 @@ package devices
 
 import (
 	"context"
+	"errors"
 	"net/http"
+
+	"github.com/jackc/pgx/v5"
 
 	"github.com/eh-homelab/ScadBuddy/tools/go/core/internal/crud"
 )
@@ -27,12 +30,15 @@ func (s *Store) CallVisible(ctx context.Context, call, principal string) bool {
 	if !crud.IsUUID(call) {
 		return false
 	}
-	var visible bool
-	err := s.Pool.QueryRow(ctx, `SELECT EXISTS (SELECT 1 FROM device_calls c JOIN devices d ON d.id = c.device_id
-		WHERE c.id = $1::uuid AND (d.owner = $2 OR c.caller = $2))`, call, principal).Scan(&visible)
+	var owner, caller, kind string
+	err := s.Pool.QueryRow(ctx, `SELECT d.owner, c.caller, c.caller_kind FROM device_calls c
+		JOIN devices d ON d.id = c.device_id WHERE c.id = $1::uuid`, call).Scan(&owner, &caller, &kind)
 	if err != nil {
-		logFailed(ctx, "could not read who may follow a call", err)
+		if !errors.Is(err, pgx.ErrNoRows) {
+			logFailed(ctx, "could not read who may follow a call", err)
+		}
 		return false
 	}
-	return visible
+	// A socket is a person's (a cookie or a person's token): the person rule of getCall.
+	return visibleTo(owner, caller, kind, "", principal)
 }

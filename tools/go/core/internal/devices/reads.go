@@ -20,8 +20,8 @@ import (
 )
 
 const (
-	// Holder is an upload's holder kind in blob_refs, with its call's id: the blob is kept
-	// while the call's row lives, and the hold says which call's device uploaded it.
+	// Holder is an upload's holder kind in blob_refs, with its call's id: the hold says which
+	// call's device uploaded it. Nothing releases it yet (#8251).
 	Holder = "device_call"
 	// The blob kinds a device uploads (blobstore.Kinds has their limits).
 	KindDump  = "tag_dump"

@@ -93,3 +93,23 @@ func TestCheckOfAnotherCallTellsNothing(t *testing.T) {
 	expect(t, check("2"), before)
 	expect(t, before, "[device:call:"+call+"]")
 }
+
+// One rule says who may read a call and who may follow its events.
+func TestVisibleTo(t *testing.T) {
+	for _, tc := range []struct {
+		kind, who, callerKind string
+		want                  bool
+	}{
+		{"", "user:i#owner", "person", true},
+		{"", "user:i#me", "flow", true},
+		{"", "user:i#you", "person", false},
+		{"assistant", "user:i#me", "assistant", true},
+		{"assistant", "user:i#me", "flow", false},
+		{"flow", "user:i#owner", "flow", false},
+		{"", "", "person", false},
+	} {
+		if got := visibleTo("user:i#owner", "user:i#me", tc.callerKind, tc.kind, tc.who); got != tc.want {
+			t.Errorf("%+v: %v", tc, got)
+		}
+	}
+}

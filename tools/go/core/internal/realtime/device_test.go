@@ -36,8 +36,8 @@ func (tokens) DeviceOf(_ context.Context, authorization string) (string, error) 
 	return ownID, nil
 }
 
-func (tokens) Live(_ context.Context, authorization string) (string, bool) {
-	return ownID, authorization == token
+func (tokens) Live(_ context.Context, authorization string) (string, bool, error) {
+	return ownID, authorization == token, nil
 }
 
 func (tokens) CallVisible(context.Context, string, string) bool { return true }

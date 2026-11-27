@@ -61,22 +61,22 @@ func (s *Store) Authenticate(ctx context.Context, authorization string) (Device,
 
 // Live says whether the token is live now, and whose device it is. It does not move the
 // expiry: an open socket alone keeps no token alive.
-func (s *Store) Live(ctx context.Context, authorization string) (string, bool) {
+func (s *Store) Live(ctx context.Context, authorization string) (string, bool, error) {
 	token := bearer(authorization)
 	if token == "" {
-		return "", false
+		return "", false, nil
 	}
 	var id string
 	err := s.Pool.QueryRow(ctx, `SELECT d.id::text FROM device_tokens t JOIN devices d ON d.id = t.device_id
 		WHERE t.token_hash = $1 AND t.revoked_at IS NULL AND d.revoked_at IS NULL
 		AND t.expires_at > $2 AND t.hard_cap_at > $2`, hash(token), s.now()).Scan(&id)
-	if err != nil {
-		if !errors.Is(err, pgx.ErrNoRows) {
-			logFailed(ctx, "could not read a device token", err)
-		}
-		return "", false
+	if errors.Is(err, pgx.ErrNoRows) {
+		return "", false, nil
 	}
-	return id, true
+	if err != nil {
+		return "", false, err
+	}
+	return id, true, nil
 }
 
 // Online says whether the device made a request in the last OnlineWindow and is not revoked.
