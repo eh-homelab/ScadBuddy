@@ -1968,11 +1968,14 @@ def test_items_on_roots_stop_on_a_name_the_leaf_has(pg_conninfo: str) -> None:
     with psycopg.connect(pg_conninfo) as conn:
         _before_inventory_class(conn)
         conn.execute(
-            "INSERT INTO item_kinds (id, name, tracking) VALUES ('general_consumable', 'Mine', 'lot')"
+            "INSERT INTO item_kinds (id, name, tracking)"
+            " VALUES ('general_consumable', 'Mine', 'lot')"
         )
         _item(conn, "general_consumable", "Tape")
         _item(conn, "consumable", "tape")
-        with pytest.raises(psycopg.errors.RaiseException, match="inventory K1: .*general_consumable"):
+        with pytest.raises(
+            psycopg.errors.RaiseException, match=r"inventory K1: .*general_consumable"
+        ):
             migrate(conn)
 
 
@@ -1988,7 +1991,7 @@ def test_model_codes_stop_on_a_name_the_model_kind_has(pg_conninfo: str) -> None
         )
         _item(conn, "printer_h2c", "Mine")
         _item(conn, "printer", "MINE", compatible=["H2C"])
-        with pytest.raises(psycopg.errors.RaiseException, match="inventory K1: .*printer_h2c"):
+        with pytest.raises(psycopg.errors.RaiseException, match=r"inventory K1: .*printer_h2c"):
             migrate(conn)
 
 
