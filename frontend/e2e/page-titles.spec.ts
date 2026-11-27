@@ -73,6 +73,8 @@ const PAGES = [
   // how to open it on a phone. `/filament/scan`, its old address, redirects to it.
   '/scan',
   '/filament/scan',
+  // Paired phones (#7905), with the mock's two devices (src/mocks/features/devices.ts).
+  '/devices',
   // The Inventory area (#7067), with the mock's seeded items (src/mocks/features/inventorySeed.ts).
   '/inventory',
   '/inventory/kinds',

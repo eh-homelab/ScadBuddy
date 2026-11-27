@@ -276,6 +276,18 @@ same way, `vite.config.ts`).
   `src/mocks/features/filament/unknownTrays.ts`. Until the Go resolve route exists, the dialog's
   "Link spool" gets a 404 and names the same path (Filament → Locations → the place). The print
   verdict e2e is `e2e/unknown-spool.spec.ts` (the mock tray: `unknownTrays.ts` `UNKNOWN_TRAY_SEED_KEY`).
+- Devices (#7905, spec `docs/superpowers/specs/2026-11-27-devices-design.md`, plan Task 9): `api/devices.ts`
+  (Go core's `/devices` routes, typed by hand as `unknownTrays.ts` is), `pages/DevicesPage.tsx` at `/devices`
+  (nav "Devices": each paired phone online or offline, its methods, its idle expiry and pairing end, Revoke),
+  and `components/devices/`: `AddDevice` (`POST /devices/pairings`; the code as `scadbuddy://pair?url=<encoded>`,
+  a QR code and a tap link, moved onto `window.location`'s host by `onThisHost`; `USER_ONLY`, as the code is a
+  credential), `DeviceCall` (starts one call, follows `device:call:<id>` with `useSubscription`, reads
+  `GET /devices/calls/{id}` on each `'resync'` for the events in log order, polls while the socket is down,
+  and gives the parent the result's `read_id`) and `UseMyPhone`, the Scan page's one mount: `nfc.read` or
+  `code.scan` on an online phone, then the read to `POST /filament/tags/reads {read_id}` or
+  `POST /scan/codes {read_id}`; the pairing button when no phone is online; nothing on a 404. Mocks
+  `src/mocks/features/devices.ts` (`PHONE` online, `OLD_PHONE` offline; a call plays its events 400 ms apart
+  on the mock socket, `setStepMs` in tests); e2e `e2e/devices.spec.ts`.
 - The print watcher (#4699 phase 2): Settings → Printing's "Print watcher"
   (`pages/settings/sections/print-watcher.tsx`; the list fields' form values are
   comma-joined, `values.ts` `sourcesValue`, `printerIdsValue`, `registryIdsValue`), and the Prints page's
