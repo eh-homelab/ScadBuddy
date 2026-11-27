@@ -104,7 +104,7 @@ from scadbuddy.core.settings import (
 )
 from scadbuddy.core.settings_cache import SETTINGS_CACHE_TTL, SettingsCache
 from scadbuddy.filament.label_output import LabelOutput
-from scadbuddy.filament.label_printer import MediaType, printer_host
+from scadbuddy.filament.label_printing import LabelJobOptions, server_url
 from scadbuddy.filament.label_templates import LabelTemplateChoice
 from scadbuddy.flows.answerers import MAX_ANSWERERS, AnswererRule
 from scadbuddy.library.asset_fetch import DEFAULT_ASSET_FETCH_DOMAINS, normalise_domain
@@ -550,13 +550,12 @@ class StoredSettings(BambuddyIds):
     #: #7216: the labels file's format, its PNG dpi and the spool label's fields
     #: (R-7216-8). ``None``: `LabelOutput()`, a PDF. Stored only.
     filament_label_output: LabelOutput | None = None
-    #: #7170: the network Zebra's address, raw ZPL port, print mode and darkness. ``None``:
-    #: no printer, 9100 (`label_printer.DEFAULT_PORT`), direct thermal and 10. Stored only:
-    #: Go's `internal/labelprinter` reads them by name.
-    filament_label_printer_host: str | None = None
-    filament_label_printer_port: int | None = None
-    filament_label_printer_media: MediaType | None = None
-    filament_label_printer_darkness: int | None = None
+    #: #7170: the CUPS server's URL, the queue the Labels page printed to last and its job
+    #: options. ``None``: `label_printing.DEFAULT_SERVER_URL`, no queue and
+    #: `LabelJobOptions()`. Stored only: Go's `internal/labelprint` reads them by name.
+    filament_label_server_url: str | None = None
+    filament_label_queue: str | None = None
+    filament_label_job_options: LabelJobOptions | None = None
 
     # -- the shop's money rules (#5281), stored only: no environment seeds them --------
     #: The deposit policy's rules; ``None`` asks no deposit.
@@ -892,12 +891,11 @@ class SettingsPatch(BaseModel):
     filament_label_template: LabelTemplateChoice | None = None
     #: #7216: the labels output; ``null`` puts back a PDF at 300 dpi.
     filament_label_output: LabelOutput | None = None
-    #: #7170: the label printer; ``null`` puts back no printer, port 9100, direct thermal
-    #: and darkness 10. Only a person changes the host and the port.
-    filament_label_printer_host: str | None = None
-    filament_label_printer_port: int | None = Field(default=None, ge=1, le=65535)
-    filament_label_printer_media: MediaType | None = None
-    filament_label_printer_darkness: int | None = Field(default=None, ge=0, le=30)
+    #: #7170: the label print settings; ``null`` puts back the default server, no queue and
+    #: the default job options. Only a person changes the server.
+    filament_label_server_url: str | None = None
+    filament_label_queue: str | None = Field(default=None, pattern=r"^[A-Za-z0-9_-]{1,127}$")
+    filament_label_job_options: LabelJobOptions | None = None
 
     # -- the shop's money rules (#5281), stored only; only the user sets them ----------
     #: ``null`` asks no deposit.
@@ -1064,10 +1062,10 @@ class SettingsPatch(BaseModel):
             return None
         return list(dict.fromkeys(normalise_domain(domain) for domain in domains))
 
-    @field_validator("filament_label_printer_host")
+    @field_validator("filament_label_server_url")
     @classmethod
-    def _printer_host(cls, host: str | None) -> str | None:
-        return None if host is None else printer_host(host)
+    def _server_url(cls, url: str | None) -> str | None:
+        return None if url is None else server_url(url)
 
     @field_validator("flow_answerers")
     @classmethod

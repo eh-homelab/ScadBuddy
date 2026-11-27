@@ -508,25 +508,21 @@ SETTING_DOCS: Final[Mapping[str, SettingDoc]] = MappingProxyType(
             " their code, name and QR code. The Labels page saves the last format, dpi and"
             " fields.",
         ),
-        "filament_label_printer_host": SettingDoc(
-            "Label printer host",
-            "The LAN name or IP address of the Zebra label printer. Only a person's session"
-            ' changes it. When it is not set, the Labels page hides "Print to Zebra".',
-        ),
-        "filament_label_printer_port": SettingDoc(
-            "Label printer port",
-            "The port of the label printer for raw ZPL. The default is 9100. Only a person's"
+        "filament_label_server_url": SettingDoc(
+            "Label print server",
+            "The CUPS server that the Labels page prints to, as an http or https URL. The"
+            " default is the cluster's own server, http://cups.cups.svc:8631. Only a person's"
             " session changes it.",
         ),
-        "filament_label_printer_media": SettingDoc(
-            "Label print mode",
-            "Direct thermal, or thermal transfer with a ribbon for labels that see heat. The"
-            " Labels page saves the last choice.",
+        "filament_label_queue": SettingDoc(
+            "Label queue",
+            "The CUPS queue that the Labels page printed to last. The Labels page saves it.",
         ),
-        "filament_label_printer_darkness": SettingDoc(
-            "Label darkness",
-            "From 0 to 30. This is the printer's ~SD value. 10 is the GK420t's own default. The"
-            " Labels page saves the last choice.",
+        "filament_label_job_options": SettingDoc(
+            "Label print options",
+            "Thermal transfer or direct thermal, darkness and print speed for a Zebra ZPL"
+            " queue. Printer default leaves the printer's own setting. The Labels page saves"
+            " the last choice.",
         ),
         "filament_shopping_auto_add_empty": SettingDoc(
             "Add empty spools to the shopping list",

@@ -58,7 +58,7 @@ from scadbuddy.core.settings import (
 from scadbuddy.filament.bb_sync_models import pushes_anything
 from scadbuddy.filament.component import FilamentDep
 from scadbuddy.filament.label_output import LabelOutput
-from scadbuddy.filament.label_printer import DEFAULT_DARKNESS, DEFAULT_PORT, MediaType
+from scadbuddy.filament.label_printing import DEFAULT_SERVER_URL, LabelJobOptions
 from scadbuddy.filament.label_templates import LabelTemplateChoice
 from scadbuddy.filament.rfid_mode import (
     AUTO_ADD_SETTING,
@@ -275,12 +275,11 @@ class SettingsView(BaseModel):
     filament_label_template: LabelTemplateChoice = Field(default_factory=LabelTemplateChoice)
     #: #7216: the format, PNG dpi and fields of `POST /filament/labels`.
     filament_label_output: LabelOutput = Field(default_factory=LabelOutput)
-    #: #7170: the network Zebra: its host (``None``: no printer), raw ZPL port, print mode
-    #: and darkness (`filament/label_printer.py`).
-    filament_label_printer_host: str | None = None
-    filament_label_printer_port: int = DEFAULT_PORT
-    filament_label_printer_media: MediaType = "direct"
-    filament_label_printer_darkness: int = DEFAULT_DARKNESS
+    #: #7170: the CUPS server's URL, the queue the Labels page printed to last (``None``:
+    #: none) and the job options (`filament/label_printing.py`).
+    filament_label_server_url: str = DEFAULT_SERVER_URL
+    filament_label_queue: str | None = None
+    filament_label_job_options: LabelJobOptions = Field(default_factory=LabelJobOptions)
     #: The largest media upload (#274), in bytes, which the UI checks a file against
     #: before sending it.
     media_upload_max_bytes: int
@@ -569,14 +568,9 @@ def _view(snapshot: SettingsSnapshot, state: AppState) -> SettingsView:
         filament_sync_pass_ttl_days=stored.filament_sync_pass_ttl_days,
         filament_label_template=stored.filament_label_template or LabelTemplateChoice(),
         filament_label_output=stored.filament_label_output or LabelOutput(),
-        filament_label_printer_host=stored.filament_label_printer_host,
-        filament_label_printer_port=stored.filament_label_printer_port or DEFAULT_PORT,
-        filament_label_printer_media=stored.filament_label_printer_media or "direct",
-        filament_label_printer_darkness=(
-            DEFAULT_DARKNESS
-            if stored.filament_label_printer_darkness is None
-            else stored.filament_label_printer_darkness
-        ),
+        filament_label_server_url=stored.filament_label_server_url or DEFAULT_SERVER_URL,
+        filament_label_queue=stored.filament_label_queue,
+        filament_label_job_options=stored.filament_label_job_options or LabelJobOptions(),
         orders_deposit_policy=stored.orders_deposit_policy or [],
         storefront_shipping_options=stored.storefront_shipping_options or [],
         storefront_payment_instructions=stored.storefront_payment_instructions,
@@ -829,19 +823,19 @@ def _flow_access_by_a_person(patch: SettingsPatch) -> None:
         )
 
 
-#: The label printer's address (#7170). A person's to change, so that no agent aims a
-#: raw print at another host.
-LABEL_PRINTER = frozenset({"filament_label_printer_host", "filament_label_printer_port"})
+#: The label print server (#7170). A person's to change, so that no agent aims a
+#: print at another host.
+LABEL_PRINTER = frozenset({"filament_label_server_url"})
 
 
 def _label_printer_by_a_person(patch: SettingsPatch) -> None:
-    """403 ``person_only`` for a change (or reset) of the label printer's address by
+    """403 ``person_only`` for a change (or reset) of the label print server by
     anyone but a person's own session (`core.authorship.by_a_person`)."""
     touched = (patch.model_fields_set | set(patch.reset)) & LABEL_PRINTER
     if touched and not by_a_person():
         raise ApiError(
             status.HTTP_403_FORBIDDEN,
-            "Only a person changes the label printer's address: " + ", ".join(sorted(touched)),
+            "Only a person changes the label print server: " + ", ".join(sorted(touched)),
             type_=PERSON_ONLY,
         )
 
