@@ -487,8 +487,12 @@ No step has a default answer. When both are named, "Move" sends one
   person named it, or `null` for no place. When the spool is somewhere else by then, or archived,
   the server refuses the move with 409 `move_stale` (`location_id`, `archived`) and moves
   nothing. The page reads the spool again and shows what changed ("S-12 is now in Shelf 2"). It
-  never sends the move again by itself: the person confirms it. An archived spool goes back to
-  "Which spool?". A 409 `move_conflict` offers "Try again", which sends the same move.
+  never sends the move again by itself: the person confirms it. When no spool waits, an archived
+  spool goes back to "Which spool?". When a spool waits, the page says "S-n was archived." and
+  shows the waiting spool's move; that move goes out only when the person confirms it. A 409
+  `move_conflict`, or a move that got no answer, offers "Try again", which sends the same move.
+  After "Archive S-n", "Try again" keeps the archive, so the log says "S-n archived". Each new
+  step moves the focus to its heading.
 - **A full dry box.** A move into a dry box sends `if_occupied: refuse`. A 409 `box_full` shows
   the box's spool and three choices: "Archive S-n" (a `replace` with `expected_occupant_id`, as
   #7167 does it), "Move S-n first", or "Choose another place". "Move S-n first" makes the box's

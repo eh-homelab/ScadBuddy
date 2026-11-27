@@ -1,5 +1,5 @@
 import { ArrowDownIcon, ExternalLinkIcon, NfcIcon, PackageIcon } from 'lucide-react'
-import { useEffect, useRef, useState, type ReactNode } from 'react'
+import { useEffect, useLayoutEffect, useRef, useState, type ReactNode } from 'react'
 import { ApiError } from '../../api/client'
 import { getSpool, moveSpool, staleOf, type LocationDetail, type Spool } from '../../api/filament'
 import { problemCode } from '../../api/filamentPresets'
@@ -25,12 +25,14 @@ type Phase =
   | { kind: 'sending' }
   | { kind: 'stale'; next: Move; said: string }
   | { kind: 'full'; next: Move; occupant: Spool; cycle: boolean }
-  | { kind: 'conflict'; next: Move }
-  | { kind: 'failed'; next: Move; said: string }
+  | { kind: 'conflict'; next: Move; archives?: string }
+  | { kind: 'failed'; next: Move; said: string; retry: boolean; archives?: string }
 
 const EMPTY: Chain = { current: null, waiting: [] }
 const grams = (value: number) => `${Number(value.toFixed(1))} g`
-const reasonOf = (cause: unknown) => (cause instanceof ApiError ? cause.detail : 'The server could not be reached. Try again.')
+const reasonOf = (cause: unknown) => (cause instanceof ApiError ? cause.detail : 'The server could not be reached.')
+/** True when the request got no answer (the client's status 0): the same move may go through when sent again. */
+const unanswered = (cause: unknown) => !(cause instanceof ApiError) || cause.status === 0
 const colourOf = (spool: Spool) => spool.effective?.colour_name ?? spool.colour_name ?? spool.names?.material ?? 'No colour yet'
 
 /** The spool of `id` in the chain, current or waiting. */
@@ -77,6 +79,15 @@ export function SwapPage() {
 
   useEffect(() => () => session?.stop(), [session])
 
+  // A new step moves focus to its heading, so a screen reader reads the step; the first view keeps the page's focus.
+  const heading = useRef<HTMLHeadingElement>(null)
+  const shown = useRef(phase.kind)
+  useLayoutEffect(() => {
+    if (shown.current === phase.kind) return
+    shown.current = phase.kind
+    heading.current?.focus()
+  }, [phase.kind])
+
   const setChain = (next: Chain) => {
     chainRef.current = next
     setChainState(next)
@@ -110,11 +121,12 @@ export function SwapPage() {
       setChain(after.chain)
       toStep(after.next)
     } catch (cause) {
-      await refused(next, code, cause)
+      await refused(next, code, cause, archives)
     }
   }
 
-  async function refused(next: Move, code: string, cause: unknown) {
+  async function refused(next: Move, code: string, cause: unknown, archives?: string) {
+    const failed = (again: unknown) => setPhase({ kind: 'failed', next, said: reasonOf(again), retry: unanswered(again), archives })
     const stale = staleOf(cause)
     if (stale) {
       try {
@@ -122,14 +134,15 @@ export function SwapPage() {
         if (stale.archived || spool.archived_at) {
           const left = without(chainRef.current, next.spoolId)
           setChain(left)
-          setNotice(`${code} was archived.`)
           setPlace(null)
-          // The next waiting spool's move waits for the person too.
-          if (!left.current) setPhase({ kind: 'spool' })
-          else if ('target' in left.current) {
-            const waits = left.current as Waiting
-            setPhase({ kind: 'stale', next: { kind: 'move', spoolId: waits.spool.id, target: waits.target, expectedLocationId: waits.readIn, ifOccupied: 'refuse' }, said: `${code} was archived.` })
-          } else setPhase({ kind: 'place' })
+          if (!left.current) {
+            setNotice(`${code} was archived.`)
+            setPhase({ kind: 'spool' })
+            return
+          }
+          // A move goes out only after its target is named, so the spool left current has one; its move waits for the person too.
+          const waits = left.current as Waiting
+          setPhase({ kind: 'stale', next: { kind: 'move', spoolId: waits.spool.id, target: waits.target, expectedLocationId: waits.readIn, ifOccupied: 'refuse' }, said: `${code} was archived.` })
           return
         }
         const again = reread(chainRef.current, spool)
@@ -142,7 +155,7 @@ export function SwapPage() {
           setPhase({ kind: 'place' })
         }
       } catch (again) {
-        setPhase({ kind: 'failed', next, said: reasonOf(again) })
+        failed(again)
       }
       return
     }
@@ -153,12 +166,12 @@ export function SwapPage() {
         const occupant = await getSpool(String(occupantId))
         setPhase({ kind: 'full', next, occupant, cycle: isWaiting(chainRef.current, occupant.id) })
       } catch (again) {
-        setPhase({ kind: 'failed', next, said: reasonOf(again) })
+        failed(again)
       }
       return
     }
-    if (code409 === 'move_conflict') setPhase({ kind: 'conflict', next })
-    else setPhase({ kind: 'failed', next, said: reasonOf(cause) })
+    if (code409 === 'move_conflict') setPhase({ kind: 'conflict', next, archives })
+    else failed(cause)
   }
 
   function spoolNamed(spool: Spool | null) {
@@ -196,12 +209,14 @@ export function SwapPage() {
 
   const current = chain.current
   const busy = phase.kind === 'sending'
+  // The text that says why the step is shown, read with its heading.
+  const described = phase.kind === 'stale' || phase.kind === 'full' || phase.kind === 'conflict' || phase.kind === 'failed'
 
   return (
-    <div className="mx-auto flex min-h-full w-full max-w-md min-w-0 flex-col gap-5 px-4 pt-4 pb-8 text-[13px]">
+    <div className="mx-auto flex min-h-full w-full max-w-md min-w-0 flex-col gap-5 px-4 pt-4 pb-8">
       <div className="flex flex-col gap-1">
         <h1 className="text-lg font-semibold tracking-tight">Swap spools</h1>
-        <p className="text-muted-foreground">Name a spool, then the place it goes to. Then the next spool.</p>
+        <p className="text-sm text-muted-foreground">Name a spool, then the place it goes to. Then the next spool.</p>
       </div>
 
       {nfc === 'embedded' && (
@@ -212,11 +227,11 @@ export function SwapPage() {
           </Button>
         </div>
       )}
-      {nfc === 'no_api' && <p className="text-muted-foreground">Tags need Chrome on Android or the ScadBuddy app.</p>}
+      {nfc === 'no_api' && <p className="text-sm text-muted-foreground">Tags need Chrome on Android or the ScadBuddy app.</p>}
 
       <section aria-labelledby="swap-step" className="flex flex-col gap-4 rounded-xl border bg-card p-4 shadow-xs">
         <Ticket spool={current?.spool ?? null} readIn={current ? placeName(current.readIn, current.spool.names?.location) : null} place={phase.kind === 'place' ? (place?.name ?? null) : null} />
-        <h2 id="swap-step" className="text-xl font-semibold tracking-tight text-balance">
+        <h2 id="swap-step" ref={heading} tabIndex={-1} aria-describedby={described ? 'swap-said' : undefined} className="text-xl font-semibold tracking-tight text-balance outline-none">
           {HEADINGS[phase.kind]}
         </h2>
         {notice && (
@@ -232,7 +247,7 @@ export function SwapPage() {
             <div className="flex flex-wrap gap-2">
               {session && (
                 <Button type="button" variant="outline" className="h-11" disabled={writing !== null} onClick={() => setWriting('spool')}>
-                  <NfcIcon /> Write {spoolCode(current.spool)}'s tag
+                  <NfcIcon /> Write tag
                 </Button>
               )}
               {chain.waiting.length === 0 && (
@@ -249,7 +264,7 @@ export function SwapPage() {
                   <PackageIcon aria-hidden="true" className="size-4 text-muted-foreground" />
                   <span className="font-medium tabular-nums">{place.code}</span>
                   <span>{place.name}</span>
-                  <Button type="button" variant="link" className="ml-auto h-auto px-0" disabled={writing !== null} onClick={() => setPlace(null)}>
+                  <Button type="button" variant="link" className="ml-auto h-11 px-0" disabled={writing !== null} onClick={() => setPlace(null)}>
                     Change place
                   </Button>
                 </div>
@@ -267,12 +282,12 @@ export function SwapPage() {
           </>
         )}
 
-        {busy && <p role="status" className="text-muted-foreground">Sending the move…</p>}
+        {busy && <p role="status" className="text-sm text-muted-foreground">Sending the move…</p>}
 
         {phase.kind === 'stale' && (
           <div className="flex flex-col gap-3">
-            <p className="text-base">{phase.said}</p>
-            <p className="text-muted-foreground">Check the spool, then move it again.</p>
+            <p id="swap-said">{phase.said}</p>
+            <p className="text-sm text-muted-foreground">Check the spool, then move it again.</p>
             <Actions>
               <Button type="button" className="h-12 text-base" onClick={() => void send(phase.next)}>
                 Move {spoolCode(heldOf(chain, phase.next.spoolId) ?? { number: 0 })} to {placeName(phase.next.target)}
@@ -288,9 +303,9 @@ export function SwapPage() {
 
         {phase.kind === 'conflict' && (
           <div className="flex flex-col gap-3">
-            <p>Another move changed the same spools at the same time. Nothing moved.</p>
+            <p id="swap-said">Another move changed the same spools at the same time. Nothing moved.</p>
             <Actions>
-              <Button type="button" className="h-12 text-base" onClick={() => void send(phase.next)}>
+              <Button type="button" className="h-12 text-base" onClick={() => void send(phase.next, phase.archives)}>
                 Try again
               </Button>
               <Button type="button" variant="outline" className="h-11" onClick={chooseAnother}>
@@ -302,10 +317,15 @@ export function SwapPage() {
 
         {phase.kind === 'failed' && (
           <div className="flex flex-col gap-3">
-            <p role="alert" className="text-warn">
+            <p id="swap-said" role="alert" className="text-warn">
               {phase.said}
             </p>
             <Actions>
+              {phase.retry && (
+                <Button type="button" className="h-12 text-base" onClick={() => void send(phase.next, phase.archives)}>
+                  Try again
+                </Button>
+              )}
               <Button type="button" variant="outline" className="h-11" onClick={chooseAnother}>
                 Choose another place
               </Button>
@@ -320,7 +340,7 @@ export function SwapPage() {
             <h2 id="swap-waiting" className="text-sm font-semibold">
               Waiting
             </h2>
-            <Button type="button" variant="ghost" size="sm" disabled={busy} onClick={clear}>
+            <Button type="button" variant="ghost" className="h-11" disabled={busy} onClick={clear}>
               Clear
             </Button>
           </div>
@@ -341,7 +361,7 @@ export function SwapPage() {
         <h2 id="swap-log" className="text-sm font-semibold">
           Done this visit
         </h2>
-        {log.length === 0 && <p className="text-muted-foreground">No spool moved yet.</p>}
+        {log.length === 0 && <p className="text-sm text-muted-foreground">No spool moved yet.</p>}
         <ul aria-label="Moves done" className="flex flex-col divide-y">
           {log.map((row) => (
             <li key={row.key} className="py-1.5 tabular-nums">
@@ -370,8 +390,8 @@ function Ticket({ spool, readIn, place }: { spool: Spool | null; readIn: string 
         {rgba ? <RgbaSwatch rgba={rgba} /> : <span aria-hidden="true" className="size-6 rounded-full border-2 border-dashed" />}
         {spool ? (
           <span className="flex min-w-0 flex-col">
-            <span className="text-base font-semibold tabular-nums">{spoolCode(spool)}</span>
-            <span className="truncate text-muted-foreground">
+            <span className="text-lg font-semibold tabular-nums">{spoolCode(spool)}</span>
+            <span className="truncate text-sm text-muted-foreground">
               {colourOf(spool)}, in {readIn}
               {spool.grams_left != null ? `, ${grams(spool.grams_left)} left` : ''}
             </span>
@@ -383,7 +403,7 @@ function Ticket({ spool, readIn, place }: { spool: Spool | null; readIn: string 
       <ArrowDownIcon aria-hidden="true" className="mx-auto size-4 text-muted-foreground" />
       <div className={cn('flex min-h-14 items-center gap-3 rounded-lg px-3 py-2', place ? 'bg-primary/10' : 'border-2 border-dashed text-muted-foreground')}>
         <PackageIcon aria-hidden="true" className="size-5 shrink-0" />
-        <span className={place ? 'text-base font-semibold' : undefined}>{place ?? 'Its new place'}</span>
+        <span className={place ? 'text-lg font-semibold' : undefined}>{place ?? 'Its new place'}</span>
       </div>
     </div>
   )
@@ -417,7 +437,7 @@ function FullBox({
   const rgba = occupant.effective?.rgba ?? occupant.rgba
   return (
     <div className="flex flex-col gap-3">
-      <p className="flex flex-wrap items-center gap-2 rounded-lg bg-muted px-3 py-2">
+      <p id="swap-said" className="flex flex-wrap items-center gap-2 rounded-lg bg-muted px-3 py-2">
         {rgba && <RgbaSwatch rgba={rgba} size="sm" />}
         <span>
           {code} is in {box} now{occupant.grams_left != null ? `, with ${grams(occupant.grams_left)} left` : ''}.
@@ -426,7 +446,7 @@ function FullBox({
       <Actions>
         {cycle ? (
           <>
-            <p className="text-muted-foreground">{code} waits to go somewhere else. Take it out of {box} first: it waits in no place, then goes on.</p>
+            <p className="text-sm text-muted-foreground">{code} waits to go somewhere else. Take it out of {box} first: it waits in no place, then goes on.</p>
             <Button
               type="button"
               className="h-12 text-base"
