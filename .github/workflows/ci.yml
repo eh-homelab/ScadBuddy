@@ -68,6 +68,7 @@ on:
       - "!**/AGENTS.md"
       - "**/vendor/**"
       - "docs/superpowers/specs/2026-09-22-scadbuddy-design.md"
+      - "docs/inventory-model/README.md"
   # Weekly, and on demand, so every template's verify.sh runs against the image
   # even in a week when nothing merged (#229). The template checks are the
   # reason; the rest of CI rides along because it is cheap and it is the same
@@ -334,6 +335,11 @@ jobs:
       # including the agent sidecar's image beside the API's (#720).
       - name: Test the clusters deploy pin
         run: .github/scripts/deploy-pin.test.sh
+
+      # The hash of what each camera image runs, which keeps the recorder's
+      # and edge's pins while it does not change (#8191).
+      - name: Test the camera inputs hash
+        run: .github/scripts/camera-inputs.test.sh
 
       # Runs deploy.reusable.yml's own wait step against a stub gh: an open
       # deploy PR lands before a newer deploy replaces it (#5168).

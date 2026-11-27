@@ -23,6 +23,7 @@ from tests.api.test_print_library import SLICED_RUN, sliced_file
 from tests.api.test_print_run_choices import body, follow_run, run_routes
 from tests.api.test_send import API, configure, upload_route
 from tests.bambuddy.conftest import recording
+from tests.support.printers import MERGED_BY
 
 #: Bambuddy printer 1's serial, as `serial_listing` lists it (the recording's is redacted).
 SERIAL = "01P00A0000000AA"
@@ -83,7 +84,9 @@ def test_a_run_naming_a_printer_queues_on_its_bambuddy_printer(
     run_routes()
     slice_routes()
     queued = queue_route()
-    row = registry(client).ensure_bambuddy(1, serial="01P00A0000000AA", name="H2C", model="H2C")
+    row = registry(client).ensure_bambuddy(
+        1, serial="01P00A0000000AA", name="H2C", model="H2C", by=MERGED_BY
+    )
     request = {**body(), "printer": row.id}
     del request["printer_id"]
 
@@ -99,7 +102,9 @@ def test_run_refuses_disagreeing_printer_fields(client: TestClient, model: str) 
     output_id = prepared(client, model)
     uploaded = upload_route()
     run_routes()
-    row = registry(client).ensure_bambuddy(1, serial="01P00A0000000AA", name="H2C", model="H2C")
+    row = registry(client).ensure_bambuddy(
+        1, serial="01P00A0000000AA", name="H2C", model="H2C", by=MERGED_BY
+    )
 
     response = client.post(
         f"/api/v1/print/outputs/{output_id}/run",
@@ -119,7 +124,7 @@ def test_the_check_refuses_disagreeing_printer_fields_as_the_run_does(
     output_id = prepared(client, model)
     uploaded = upload_route()
     run_routes()
-    row = registry(client).ensure_bambuddy(1, serial=SERIAL, name="H2C", model="H2C")
+    row = registry(client).ensure_bambuddy(1, serial=SERIAL, name="H2C", model="H2C", by=MERGED_BY)
     request = {**body(), "printer": row.id, "printer_id": 2}
 
     checked = client.post(f"/api/v1/print/outputs/{output_id}/check", json=request)
@@ -166,11 +171,14 @@ def test_a_stored_batch_step_naming_a_merged_printer_still_queues(client: TestCl
     slice_routes()
     queued = queue_route()
     printers = registry(client)
-    synthetic = printers.ensure_bambuddy(1, serial=None, name="H2C", model="H2C")
+    synthetic = printers.ensure_bambuddy(1, serial=None, name="H2C", model="H2C", by=MERGED_BY)
     batch = new_batch(client, 104)
     choose(client, batch["id"], 0, request={**SLICED_RUN, "printer": synthetic.id})
     mine = printers.create(PrinterCreate(serial=SERIAL, name="Mine"))
-    assert printers.ensure_bambuddy(1, serial=SERIAL, name="H2C", model="H2C").id == mine.id
+    assert (
+        printers.ensure_bambuddy(1, serial=SERIAL, name="H2C", model="H2C", by=MERGED_BY).id
+        == mine.id
+    )
 
     done = client.post(f"{BATCHES}/{batch['id']}/queue")
 

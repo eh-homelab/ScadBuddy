@@ -54,10 +54,9 @@ SETTING_DOCS: Final[Mapping[str, SettingDoc]] = MappingProxyType(
         ),
         "bambuddy_render_api_key": SettingDoc(
             "Render worker API key",
-            "A second key with Manage Library only. Render workers run template code and"
-            " hold this key alone. Unset, standalone render workers get no Bambuddy key, and"
-            " a render inside the API process uses the full key, so template code could"
-            " print.",
+            "A second key with Manage Library only, which a store migration from the"
+            " Bambuddy store reads Bambuddy's library with. Unset, it uses the full key."
+            " Render workers get neither key.",
         ),
         "public_url": SettingDoc(
             "ScadBuddy’s own URL",

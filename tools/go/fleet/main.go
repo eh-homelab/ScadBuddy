@@ -1,6 +1,7 @@
 // Command fleet is ScadBuddy's agent fleet chat server: fleetchat's MCP server over
 // sbfleet's Store and Bus, served at /mcp, with /healthz (spec
-// 2026-11-25-agent-fleet-messaging-design §6.5, §6.6). Its settings are in README.md.
+// 2026-11-25-agent-fleet-messaging-design §6.5, §6.6), and, with a webhook secret, the
+// GitHub App's webhook receiver at /github/webhook (#8014). Its settings are in README.md.
 package main
 
 import (
@@ -21,9 +22,12 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/eh-homelab/ScadBuddy/tools/go/fleet/ghsecrets"
+	"github.com/eh-homelab/ScadBuddy/tools/go/fleet/ghwebhook"
 	"github.com/eh-homelab/ScadBuddy/tools/go/fleet/sbfleet"
 	"github.com/eh-homelab/ScadBuddy/tools/go/fleetchat"
 	"github.com/eh-homelab/ScadBuddy/tools/go/telemetry"
+	"go.opentelemetry.io/otel/metric"
 )
 
 const (
@@ -44,6 +48,12 @@ type config struct {
 	PageSize       int
 	MaxPageSize    int
 	SessionTimeout time.Duration
+	// The "ScadBuddy Fleet" GitHub App (#8012, #8014). Each part is off when its file is
+	// not set.
+	GitHubAppID             int64
+	GitHubInstallationID    int64
+	GitHubAppKeyFile        string
+	GitHubWebhookSecretFile string
 }
 
 func main() {
@@ -114,6 +124,20 @@ func parseConfigTo(args []string, getenv func(string) string, out io.Writer) (co
 			return nil
 		}
 	}
+	id := func(p *int64) func(string) error {
+		return func(v string) error {
+			if strings.TrimSpace(v) == "" {
+				*p = 0
+				return nil
+			}
+			n, err := strconv.ParseInt(strings.TrimSpace(v), 10, 64)
+			if err != nil || n <= 0 {
+				return errors.New("not a GitHub id (a whole number more than 0)")
+			}
+			*p = n
+			return nil
+		}
+	}
 	dur := func(p *time.Duration) func(string) error {
 		return func(v string) error {
 			d, err := time.ParseDuration(strings.TrimSpace(v))
@@ -134,6 +158,10 @@ func parseConfigTo(args []string, getenv func(string) string, out io.Writer) (co
 		{"page-size", "FLEETCHAT_PAGE_SIZE", "the inbox page when a call gives no limit", num(&c.PageSize), "50"},
 		{"max-page-size", "FLEETCHAT_MAX_PAGE_SIZE", "the largest inbox page", num(&c.MaxPageSize), "200"},
 		{"session-timeout", "FLEETCHAT_SESSION_TIMEOUT", "close an MCP session after this long without a POST (Claude Code never sends DELETE /mcp); 0 never does", dur(&c.SessionTimeout), "24h"},
+		{"github-app-id", "FLEETCHAT_GITHUB_APP_ID", "the GitHub App's id (with -github-app-key-file)", id(&c.GitHubAppID), ""},
+		{"github-installation-id", "FLEETCHAT_GITHUB_INSTALLATION_ID", "the GitHub App's installation id (with -github-app-key-file)", id(&c.GitHubInstallationID), ""},
+		{"github-app-key-file", "FLEETCHAT_GITHUB_APP_KEY_FILE", "the GitHub App's private key (PEM), read at start; unset turns the secret writer off", str(&c.GitHubAppKeyFile), ""},
+		{"github-webhook-secret-file", "FLEETCHAT_GITHUB_WEBHOOK_SECRET_FILE", "the GitHub App's webhook secret, read at start; unset leaves /github/webhook unserved", str(&c.GitHubWebhookSecretFile), ""},
 	}
 	fs := flag.NewFlagSet("fleet", flag.ContinueOnError)
 	fs.SetOutput(out)
@@ -193,6 +221,9 @@ func (c config) check() error {
 	if c.SessionTimeout < 0 {
 		return errors.New("the session timeout must be 0 or more")
 	}
+	if (c.GitHubAppKeyFile != "") != (c.GitHubAppID != 0) || (c.GitHubAppKeyFile != "") != (c.GitHubInstallationID != 0) {
+		return errors.New("give the GitHub App's key file, id and installation id together, or none of them")
+	}
 	return nil
 }
 
@@ -236,9 +267,55 @@ func credentialFile(path string) func() (string, error) {
 	}
 }
 
-func newMux(ctx context.Context, svc *fleetchat.Service) http.Handler {
+// secretFile reads a secret file at start. An error names the path only, never the content.
+func secretFile(what, path string) ([]byte, error) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return nil, fmt.Errorf("read the %s file: %w", what, err)
+	}
+	data = []byte(strings.TrimSpace(string(data)))
+	if len(data) == 0 {
+		return nil, fmt.Errorf("the %s file %s is empty", what, path)
+	}
+	return data, nil
+}
+
+// githubWebhook is the receiver at /github/webhook, or nil when no webhook secret file is set.
+func githubWebhook(c config, meter metric.MeterProvider) (http.Handler, error) {
+	if c.GitHubWebhookSecretFile == "" {
+		return nil, nil
+	}
+	secret, err := secretFile("GitHub webhook secret", c.GitHubWebhookSecretFile)
+	if err != nil {
+		return nil, err
+	}
+	return ghwebhook.New(secret, ghwebhook.Options{Meter: meter})
+}
+
+// githubWriter is the GitHub secret writer, or nil when no App key file is set. No route
+// uses it yet: #8011's rotation targets will.
+func githubWriter(c config, wrap func(http.RoundTripper) http.RoundTripper) (*ghsecrets.Writer, error) {
+	if c.GitHubAppKeyFile == "" {
+		return nil, nil
+	}
+	data, err := secretFile("GitHub App key", c.GitHubAppKeyFile)
+	if err != nil {
+		return nil, err
+	}
+	key, err := ghsecrets.ParsePrivateKey(data)
+	if err != nil {
+		return nil, err
+	}
+	return ghsecrets.New(ghsecrets.Config{AppID: c.GitHubAppID, InstallationID: c.GitHubInstallationID, PrivateKey: key, WrapTransport: wrap})
+}
+
+// newMux serves /mcp and /healthz, and /github/webhook when webhook is not nil.
+func newMux(ctx context.Context, svc *fleetchat.Service, webhook http.Handler) http.Handler {
 	mux := http.NewServeMux()
 	mux.Handle("/mcp", fleetchat.NewHandler(ctx, svc, serverName, buildVersion()))
+	if webhook != nil {
+		mux.Handle("/github/webhook", webhook)
+	}
 	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, _ *http.Request) {
 		_, _ = io.WriteString(w, "ok\n")
 	})
@@ -256,12 +333,26 @@ func run(ctx context.Context, c config, tel *telemetry.Telemetry) error {
 	svc := fleetchat.NewService(sbfleet.NewStore(c.CoreURL, token, opts...), sbfleet.NewBus(c.CoreURL, token, opts...), fleetchat.Config{
 		MaxText: c.MaxText, PageSize: c.PageSize, MaxPageSize: c.MaxPageSize, SessionTimeout: c.SessionTimeout,
 	})
+	webhook, err := githubWebhook(c, tel.Meter())
+	if err != nil {
+		return err
+	}
+	// A CLIENT span for each request to GitHub; the writer strips the trace context the
+	// span's transport adds, so GitHub gets no traceparent.
+	writer, err := githubWriter(c, func(base http.RoundTripper) http.RoundTripper {
+		return tel.Transport(base, "api.github.com")
+	})
+	if err != nil {
+		return err
+	}
+	slog.Info("github app", "webhook", webhook != nil, "secret_writer", writer != nil,
+		"app_id", c.GitHubAppID, "installation_id", c.GitHubInstallationID)
 	listener, err := net.Listen("tcp", c.Listen)
 	if err != nil {
 		return err
 	}
 	slog.Info("fleet listens", "address", listener.Addr().String(), "version", buildVersion())
-	return serve(ctx, listener, tel.Server(newMux(ctx, svc), "/healthz"), shutdownGrace, shutdownTimeout)
+	return serve(ctx, listener, tel.Server(newMux(ctx, svc, webhook), "/healthz"), shutdownGrace, shutdownTimeout)
 }
 
 // serve serves handler on listener until ctx ends. Then it stops taking requests and lets

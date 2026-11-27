@@ -10,6 +10,7 @@ expect true  tools/go/bambuddy-fs/main.go
 expect true  backend/scadbuddy/migrations/20261102T0645Z_service_credentials.sql
 expect true  backend/scadbuddy/migrations_agent/20260928T0107Z_sessions.sql
 expect false backend/scadbuddy/migrationsx/a.sql
+expect true  docs/inventory-model/kinds.yaml
 expect true  backend/tests/fixtures/blob-upload-vectors.json
 expect false backend/tests/fixturesx/a.json
 expect true  backend/tests/fixtures/event-stream-vectors.json
@@ -31,6 +32,11 @@ expect true  backend/tests/fixtures/plugin-seal-vectors.json
 expect true  backend/tests/fixtures/auth-vectors.json
 expect false backend/tests/fixtures/secret-vectors.json
 expect false agent/test/fixtures/secret-vectors.json
+expect true  backend/tests/fixtures/python-json-vectors.json
+expect true  backend/tests/fixtures/activity-title-vectors.json
+expect true  backend/tests/fixtures/fetch-grant-vectors.json
+expect true  backend/tests/fixtures/assistant-cost-vectors.json
+expect false backend/tests/fixtures/assistant-cost-vectors.jsonx
 expect false agent/src/harness/credentialErrors.ts
 expect false Dockerfile
 expect false backend/scadbuddy/api/library_print.py

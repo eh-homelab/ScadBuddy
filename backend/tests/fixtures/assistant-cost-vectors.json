@@ -1,0 +1,2814 @@
+[
+ {
+  "cost_usd": "0.5",
+  "rate": "1",
+  "shop_currency": "USD",
+  "order_currency": "USD",
+  "valid": true,
+  "convertible": true,
+  "amount_minor": 50,
+  "note": "assistant session 00000000-0000-4000-8000-000000000000: 0.5 USD"
+ },
+ {
+  "cost_usd": "0.5",
+  "rate": "1.35",
+  "shop_currency": "EUR",
+  "order_currency": "EUR",
+  "valid": true,
+  "convertible": true,
+  "amount_minor": 68,
+  "note": "assistant session 00000000-0000-4000-8000-000000000000: 0.5 USD"
+ },
+ {
+  "cost_usd": "0.5",
+  "rate": "1.35",
+  "shop_currency": "EUR",
+  "order_currency": "USD",
+  "valid": true,
+  "convertible": true,
+  "amount_minor": 50,
+  "note": "assistant session 00000000-0000-4000-8000-000000000000: 0.5 USD"
+ },
+ {
+  "cost_usd": "0.5",
+  "rate": "1.35",
+  "shop_currency": "EUR",
+  "order_currency": "GBP",
+  "valid": true,
+  "convertible": false
+ },
+ {
+  "cost_usd": "0.5",
+  "rate": "150.123456789",
+  "shop_currency": "JPY",
+  "order_currency": "JPY",
+  "valid": true,
+  "convertible": true,
+  "amount_minor": 75,
+  "note": "assistant session 00000000-0000-4000-8000-000000000000: 0.5 USD"
+ },
+ {
+  "cost_usd": "0.5",
+  "rate": " 0.377 ",
+  "shop_currency": "KWD",
+  "order_currency": "KWD",
+  "valid": true,
+  "convertible": true,
+  "amount_minor": 189,
+  "note": "assistant session 00000000-0000-4000-8000-000000000000: 0.5 USD"
+ },
+ {
+  "cost_usd": "0.5",
+  "rate": "1.123456789012345678901234567",
+  "shop_currency": "EUR",
+  "order_currency": "EUR",
+  "valid": true,
+  "convertible": true,
+  "amount_minor": 56,
+  "note": "assistant session 00000000-0000-4000-8000-000000000000: 0.5 USD"
+ },
+ {
+  "cost_usd": "0.5",
+  "rate": "999999999.999999999",
+  "shop_currency": "CLF",
+  "order_currency": "CLF",
+  "valid": true,
+  "convertible": true,
+  "amount_minor": 5000000000000,
+  "note": "assistant session 00000000-0000-4000-8000-000000000000: 0.5 USD"
+ },
+ {
+  "cost_usd": "1e-3",
+  "rate": "1",
+  "shop_currency": "USD",
+  "order_currency": "USD",
+  "valid": true,
+  "convertible": true,
+  "amount_minor": 0,
+  "note": "assistant session 00000000-0000-4000-8000-000000000000: 0.001 USD"
+ },
+ {
+  "cost_usd": "1e-3",
+  "rate": "1.35",
+  "shop_currency": "EUR",
+  "order_currency": "EUR",
+  "valid": true,
+  "convertible": true,
+  "amount_minor": 0,
+  "note": "assistant session 00000000-0000-4000-8000-000000000000: 0.001 USD"
+ },
+ {
+  "cost_usd": "1e-3",
+  "rate": "1.35",
+  "shop_currency": "EUR",
+  "order_currency": "USD",
+  "valid": true,
+  "convertible": true,
+  "amount_minor": 0,
+  "note": "assistant session 00000000-0000-4000-8000-000000000000: 0.001 USD"
+ },
+ {
+  "cost_usd": "1e-3",
+  "rate": "1.35",
+  "shop_currency": "EUR",
+  "order_currency": "GBP",
+  "valid": true,
+  "convertible": false
+ },
+ {
+  "cost_usd": "1e-3",
+  "rate": "150.123456789",
+  "shop_currency": "JPY",
+  "order_currency": "JPY",
+  "valid": true,
+  "convertible": true,
+  "amount_minor": 0,
+  "note": "assistant session 00000000-0000-4000-8000-000000000000: 0.001 USD"
+ },
+ {
+  "cost_usd": "1e-3",
+  "rate": " 0.377 ",
+  "shop_currency": "KWD",
+  "order_currency": "KWD",
+  "valid": true,
+  "convertible": true,
+  "amount_minor": 0,
+  "note": "assistant session 00000000-0000-4000-8000-000000000000: 0.001 USD"
+ },
+ {
+  "cost_usd": "1e-3",
+  "rate": "1.123456789012345678901234567",
+  "shop_currency": "EUR",
+  "order_currency": "EUR",
+  "valid": true,
+  "convertible": true,
+  "amount_minor": 0,
+  "note": "assistant session 00000000-0000-4000-8000-000000000000: 0.001 USD"
+ },
+ {
+  "cost_usd": "1e-3",
+  "rate": "999999999.999999999",
+  "shop_currency": "CLF",
+  "order_currency": "CLF",
+  "valid": true,
+  "convertible": true,
+  "amount_minor": 10000000000,
+  "note": "assistant session 00000000-0000-4000-8000-000000000000: 0.001 USD"
+ },
+ {
+  "cost_usd": "0.00000001",
+  "rate": "1",
+  "shop_currency": "USD",
+  "order_currency": "USD",
+  "valid": true,
+  "convertible": true,
+  "amount_minor": 0,
+  "note": "assistant session 00000000-0000-4000-8000-000000000000: 1E-8 USD"
+ },
+ {
+  "cost_usd": "0.00000001",
+  "rate": "1.35",
+  "shop_currency": "EUR",
+  "order_currency": "EUR",
+  "valid": true,
+  "convertible": true,
+  "amount_minor": 0,
+  "note": "assistant session 00000000-0000-4000-8000-000000000000: 1E-8 USD"
+ },
+ {
+  "cost_usd": "0.00000001",
+  "rate": "1.35",
+  "shop_currency": "EUR",
+  "order_currency": "USD",
+  "valid": true,
+  "convertible": true,
+  "amount_minor": 0,
+  "note": "assistant session 00000000-0000-4000-8000-000000000000: 1E-8 USD"
+ },
+ {
+  "cost_usd": "0.00000001",
+  "rate": "1.35",
+  "shop_currency": "EUR",
+  "order_currency": "GBP",
+  "valid": true,
+  "convertible": false
+ },
+ {
+  "cost_usd": "0.00000001",
+  "rate": "150.123456789",
+  "shop_currency": "JPY",
+  "order_currency": "JPY",
+  "valid": true,
+  "convertible": true,
+  "amount_minor": 0,
+  "note": "assistant session 00000000-0000-4000-8000-000000000000: 1E-8 USD"
+ },
+ {
+  "cost_usd": "0.00000001",
+  "rate": " 0.377 ",
+  "shop_currency": "KWD",
+  "order_currency": "KWD",
+  "valid": true,
+  "convertible": true,
+  "amount_minor": 0,
+  "note": "assistant session 00000000-0000-4000-8000-000000000000: 1E-8 USD"
+ },
+ {
+  "cost_usd": "0.00000001",
+  "rate": "1.123456789012345678901234567",
+  "shop_currency": "EUR",
+  "order_currency": "EUR",
+  "valid": true,
+  "convertible": true,
+  "amount_minor": 0,
+  "note": "assistant session 00000000-0000-4000-8000-000000000000: 1E-8 USD"
+ },
+ {
+  "cost_usd": "0.00000001",
+  "rate": "999999999.999999999",
+  "shop_currency": "CLF",
+  "order_currency": "CLF",
+  "valid": true,
+  "convertible": true,
+  "amount_minor": 100000,
+  "note": "assistant session 00000000-0000-4000-8000-000000000000: 1E-8 USD"
+ },
+ {
+  "cost_usd": "0.000000001",
+  "rate": "1",
+  "shop_currency": "USD",
+  "order_currency": "USD",
+  "valid": false
+ },
+ {
+  "cost_usd": "0.000000001",
+  "rate": "1.35",
+  "shop_currency": "EUR",
+  "order_currency": "EUR",
+  "valid": false
+ },
+ {
+  "cost_usd": "0.000000001",
+  "rate": "1.35",
+  "shop_currency": "EUR",
+  "order_currency": "USD",
+  "valid": false
+ },
+ {
+  "cost_usd": "0.000000001",
+  "rate": "1.35",
+  "shop_currency": "EUR",
+  "order_currency": "GBP",
+  "valid": false
+ },
+ {
+  "cost_usd": "0.000000001",
+  "rate": "150.123456789",
+  "shop_currency": "JPY",
+  "order_currency": "JPY",
+  "valid": false
+ },
+ {
+  "cost_usd": "0.000000001",
+  "rate": " 0.377 ",
+  "shop_currency": "KWD",
+  "order_currency": "KWD",
+  "valid": false
+ },
+ {
+  "cost_usd": "0.000000001",
+  "rate": "1.123456789012345678901234567",
+  "shop_currency": "EUR",
+  "order_currency": "EUR",
+  "valid": false
+ },
+ {
+  "cost_usd": "0.000000001",
+  "rate": "999999999.999999999",
+  "shop_currency": "CLF",
+  "order_currency": "CLF",
+  "valid": false
+ },
+ {
+  "cost_usd": "0.10",
+  "rate": "1",
+  "shop_currency": "USD",
+  "order_currency": "USD",
+  "valid": true,
+  "convertible": true,
+  "amount_minor": 10,
+  "note": "assistant session 00000000-0000-4000-8000-000000000000: 0.1 USD"
+ },
+ {
+  "cost_usd": "0.10",
+  "rate": "1.35",
+  "shop_currency": "EUR",
+  "order_currency": "EUR",
+  "valid": true,
+  "convertible": true,
+  "amount_minor": 14,
+  "note": "assistant session 00000000-0000-4000-8000-000000000000: 0.1 USD"
+ },
+ {
+  "cost_usd": "0.10",
+  "rate": "1.35",
+  "shop_currency": "EUR",
+  "order_currency": "USD",
+  "valid": true,
+  "convertible": true,
+  "amount_minor": 10,
+  "note": "assistant session 00000000-0000-4000-8000-000000000000: 0.1 USD"
+ },
+ {
+  "cost_usd": "0.10",
+  "rate": "1.35",
+  "shop_currency": "EUR",
+  "order_currency": "GBP",
+  "valid": true,
+  "convertible": false
+ },
+ {
+  "cost_usd": "0.10",
+  "rate": "150.123456789",
+  "shop_currency": "JPY",
+  "order_currency": "JPY",
+  "valid": true,
+  "convertible": true,
+  "amount_minor": 15,
+  "note": "assistant session 00000000-0000-4000-8000-000000000000: 0.1 USD"
+ },
+ {
+  "cost_usd": "0.10",
+  "rate": " 0.377 ",
+  "shop_currency": "KWD",
+  "order_currency": "KWD",
+  "valid": true,
+  "convertible": true,
+  "amount_minor": 38,
+  "note": "assistant session 00000000-0000-4000-8000-000000000000: 0.1 USD"
+ },
+ {
+  "cost_usd": "0.10",
+  "rate": "1.123456789012345678901234567",
+  "shop_currency": "EUR",
+  "order_currency": "EUR",
+  "valid": true,
+  "convertible": true,
+  "amount_minor": 11,
+  "note": "assistant session 00000000-0000-4000-8000-000000000000: 0.1 USD"
+ },
+ {
+  "cost_usd": "0.10",
+  "rate": "999999999.999999999",
+  "shop_currency": "CLF",
+  "order_currency": "CLF",
+  "valid": true,
+  "convertible": true,
+  "amount_minor": 1000000000000,
+  "note": "assistant session 00000000-0000-4000-8000-000000000000: 0.1 USD"
+ },
+ {
+  "cost_usd": "1.000000000",
+  "rate": "1",
+  "shop_currency": "USD",
+  "order_currency": "USD",
+  "valid": true,
+  "convertible": true,
+  "amount_minor": 100,
+  "note": "assistant session 00000000-0000-4000-8000-000000000000: 1 USD"
+ },
+ {
+  "cost_usd": "1.000000000",
+  "rate": "1.35",
+  "shop_currency": "EUR",
+  "order_currency": "EUR",
+  "valid": true,
+  "convertible": true,
+  "amount_minor": 135,
+  "note": "assistant session 00000000-0000-4000-8000-000000000000: 1 USD"
+ },
+ {
+  "cost_usd": "1.000000000",
+  "rate": "1.35",
+  "shop_currency": "EUR",
+  "order_currency": "USD",
+  "valid": true,
+  "convertible": true,
+  "amount_minor": 100,
+  "note": "assistant session 00000000-0000-4000-8000-000000000000: 1 USD"
+ },
+ {
+  "cost_usd": "1.000000000",
+  "rate": "1.35",
+  "shop_currency": "EUR",
+  "order_currency": "GBP",
+  "valid": true,
+  "convertible": false
+ },
+ {
+  "cost_usd": "1.000000000",
+  "rate": "150.123456789",
+  "shop_currency": "JPY",
+  "order_currency": "JPY",
+  "valid": true,
+  "convertible": true,
+  "amount_minor": 150,
+  "note": "assistant session 00000000-0000-4000-8000-000000000000: 1 USD"
+ },
+ {
+  "cost_usd": "1.000000000",
+  "rate": " 0.377 ",
+  "shop_currency": "KWD",
+  "order_currency": "KWD",
+  "valid": true,
+  "convertible": true,
+  "amount_minor": 377,
+  "note": "assistant session 00000000-0000-4000-8000-000000000000: 1 USD"
+ },
+ {
+  "cost_usd": "1.000000000",
+  "rate": "1.123456789012345678901234567",
+  "shop_currency": "EUR",
+  "order_currency": "EUR",
+  "valid": true,
+  "convertible": true,
+  "amount_minor": 112,
+  "note": "assistant session 00000000-0000-4000-8000-000000000000: 1 USD"
+ },
+ {
+  "cost_usd": "1.000000000",
+  "rate": "999999999.999999999",
+  "shop_currency": "CLF",
+  "order_currency": "CLF",
+  "valid": true,
+  "convertible": true,
+  "amount_minor": 10000000000000,
+  "note": "assistant session 00000000-0000-4000-8000-000000000000: 1 USD"
+ },
+ {
+  "cost_usd": "\"0.5\"",
+  "rate": "1",
+  "shop_currency": "USD",
+  "order_currency": "USD",
+  "valid": true,
+  "convertible": true,
+  "amount_minor": 50,
+  "note": "assistant session 00000000-0000-4000-8000-000000000000: 0.5 USD"
+ },
+ {
+  "cost_usd": "\"0.5\"",
+  "rate": "1.35",
+  "shop_currency": "EUR",
+  "order_currency": "EUR",
+  "valid": true,
+  "convertible": true,
+  "amount_minor": 68,
+  "note": "assistant session 00000000-0000-4000-8000-000000000000: 0.5 USD"
+ },
+ {
+  "cost_usd": "\"0.5\"",
+  "rate": "1.35",
+  "shop_currency": "EUR",
+  "order_currency": "USD",
+  "valid": true,
+  "convertible": true,
+  "amount_minor": 50,
+  "note": "assistant session 00000000-0000-4000-8000-000000000000: 0.5 USD"
+ },
+ {
+  "cost_usd": "\"0.5\"",
+  "rate": "1.35",
+  "shop_currency": "EUR",
+  "order_currency": "GBP",
+  "valid": true,
+  "convertible": false
+ },
+ {
+  "cost_usd": "\"0.5\"",
+  "rate": "150.123456789",
+  "shop_currency": "JPY",
+  "order_currency": "JPY",
+  "valid": true,
+  "convertible": true,
+  "amount_minor": 75,
+  "note": "assistant session 00000000-0000-4000-8000-000000000000: 0.5 USD"
+ },
+ {
+  "cost_usd": "\"0.5\"",
+  "rate": " 0.377 ",
+  "shop_currency": "KWD",
+  "order_currency": "KWD",
+  "valid": true,
+  "convertible": true,
+  "amount_minor": 189,
+  "note": "assistant session 00000000-0000-4000-8000-000000000000: 0.5 USD"
+ },
+ {
+  "cost_usd": "\"0.5\"",
+  "rate": "1.123456789012345678901234567",
+  "shop_currency": "EUR",
+  "order_currency": "EUR",
+  "valid": true,
+  "convertible": true,
+  "amount_minor": 56,
+  "note": "assistant session 00000000-0000-4000-8000-000000000000: 0.5 USD"
+ },
+ {
+  "cost_usd": "\"0.5\"",
+  "rate": "999999999.999999999",
+  "shop_currency": "CLF",
+  "order_currency": "CLF",
+  "valid": true,
+  "convertible": true,
+  "amount_minor": 5000000000000,
+  "note": "assistant session 00000000-0000-4000-8000-000000000000: 0.5 USD"
+ },
+ {
+  "cost_usd": "1E2",
+  "rate": "1",
+  "shop_currency": "USD",
+  "order_currency": "USD",
+  "valid": true,
+  "convertible": true,
+  "amount_minor": 10000,
+  "note": "assistant session 00000000-0000-4000-8000-000000000000: 100 USD"
+ },
+ {
+  "cost_usd": "1E2",
+  "rate": "1.35",
+  "shop_currency": "EUR",
+  "order_currency": "EUR",
+  "valid": true,
+  "convertible": true,
+  "amount_minor": 13500,
+  "note": "assistant session 00000000-0000-4000-8000-000000000000: 100 USD"
+ },
+ {
+  "cost_usd": "1E2",
+  "rate": "1.35",
+  "shop_currency": "EUR",
+  "order_currency": "USD",
+  "valid": true,
+  "convertible": true,
+  "amount_minor": 10000,
+  "note": "assistant session 00000000-0000-4000-8000-000000000000: 100 USD"
+ },
+ {
+  "cost_usd": "1E2",
+  "rate": "1.35",
+  "shop_currency": "EUR",
+  "order_currency": "GBP",
+  "valid": true,
+  "convertible": false
+ },
+ {
+  "cost_usd": "1E2",
+  "rate": "150.123456789",
+  "shop_currency": "JPY",
+  "order_currency": "JPY",
+  "valid": true,
+  "convertible": true,
+  "amount_minor": 15012,
+  "note": "assistant session 00000000-0000-4000-8000-000000000000: 100 USD"
+ },
+ {
+  "cost_usd": "1E2",
+  "rate": " 0.377 ",
+  "shop_currency": "KWD",
+  "order_currency": "KWD",
+  "valid": true,
+  "convertible": true,
+  "amount_minor": 37700,
+  "note": "assistant session 00000000-0000-4000-8000-000000000000: 100 USD"
+ },
+ {
+  "cost_usd": "1E2",
+  "rate": "1.123456789012345678901234567",
+  "shop_currency": "EUR",
+  "order_currency": "EUR",
+  "valid": true,
+  "convertible": true,
+  "amount_minor": 11235,
+  "note": "assistant session 00000000-0000-4000-8000-000000000000: 100 USD"
+ },
+ {
+  "cost_usd": "1E2",
+  "rate": "999999999.999999999",
+  "shop_currency": "CLF",
+  "order_currency": "CLF",
+  "valid": true,
+  "convertible": true,
+  "amount_minor": 1000000000000000,
+  "note": "assistant session 00000000-0000-4000-8000-000000000000: 100 USD"
+ },
+ {
+  "cost_usd": "1000000",
+  "rate": "1",
+  "shop_currency": "USD",
+  "order_currency": "USD",
+  "valid": true,
+  "convertible": true,
+  "amount_minor": 100000000,
+  "note": "assistant session 00000000-0000-4000-8000-000000000000: 1000000 USD"
+ },
+ {
+  "cost_usd": "1000000",
+  "rate": "1.35",
+  "shop_currency": "EUR",
+  "order_currency": "EUR",
+  "valid": true,
+  "convertible": true,
+  "amount_minor": 135000000,
+  "note": "assistant session 00000000-0000-4000-8000-000000000000: 1000000 USD"
+ },
+ {
+  "cost_usd": "1000000",
+  "rate": "1.35",
+  "shop_currency": "EUR",
+  "order_currency": "USD",
+  "valid": true,
+  "convertible": true,
+  "amount_minor": 100000000,
+  "note": "assistant session 00000000-0000-4000-8000-000000000000: 1000000 USD"
+ },
+ {
+  "cost_usd": "1000000",
+  "rate": "1.35",
+  "shop_currency": "EUR",
+  "order_currency": "GBP",
+  "valid": true,
+  "convertible": false
+ },
+ {
+  "cost_usd": "1000000",
+  "rate": "150.123456789",
+  "shop_currency": "JPY",
+  "order_currency": "JPY",
+  "valid": true,
+  "convertible": true,
+  "amount_minor": 150123457,
+  "note": "assistant session 00000000-0000-4000-8000-000000000000: 1000000 USD"
+ },
+ {
+  "cost_usd": "1000000",
+  "rate": " 0.377 ",
+  "shop_currency": "KWD",
+  "order_currency": "KWD",
+  "valid": true,
+  "convertible": true,
+  "amount_minor": 377000000,
+  "note": "assistant session 00000000-0000-4000-8000-000000000000: 1000000 USD"
+ },
+ {
+  "cost_usd": "1000000",
+  "rate": "1.123456789012345678901234567",
+  "shop_currency": "EUR",
+  "order_currency": "EUR",
+  "valid": true,
+  "convertible": true,
+  "amount_minor": 112345679,
+  "note": "assistant session 00000000-0000-4000-8000-000000000000: 1000000 USD"
+ },
+ {
+  "cost_usd": "1000000",
+  "rate": "999999999.999999999",
+  "shop_currency": "CLF",
+  "order_currency": "CLF",
+  "valid": true,
+  "convertible": true,
+  "amount_minor": 9999999999999999990,
+  "note": "assistant session 00000000-0000-4000-8000-000000000000: 1000000 USD"
+ },
+ {
+  "cost_usd": "1000000.0000000001",
+  "rate": "1",
+  "shop_currency": "USD",
+  "order_currency": "USD",
+  "valid": false
+ },
+ {
+  "cost_usd": "1000000.0000000001",
+  "rate": "1.35",
+  "shop_currency": "EUR",
+  "order_currency": "EUR",
+  "valid": false
+ },
+ {
+  "cost_usd": "1000000.0000000001",
+  "rate": "1.35",
+  "shop_currency": "EUR",
+  "order_currency": "USD",
+  "valid": false
+ },
+ {
+  "cost_usd": "1000000.0000000001",
+  "rate": "1.35",
+  "shop_currency": "EUR",
+  "order_currency": "GBP",
+  "valid": false
+ },
+ {
+  "cost_usd": "1000000.0000000001",
+  "rate": "150.123456789",
+  "shop_currency": "JPY",
+  "order_currency": "JPY",
+  "valid": false
+ },
+ {
+  "cost_usd": "1000000.0000000001",
+  "rate": " 0.377 ",
+  "shop_currency": "KWD",
+  "order_currency": "KWD",
+  "valid": false
+ },
+ {
+  "cost_usd": "1000000.0000000001",
+  "rate": "1.123456789012345678901234567",
+  "shop_currency": "EUR",
+  "order_currency": "EUR",
+  "valid": false
+ },
+ {
+  "cost_usd": "1000000.0000000001",
+  "rate": "999999999.999999999",
+  "shop_currency": "CLF",
+  "order_currency": "CLF",
+  "valid": false
+ },
+ {
+  "cost_usd": "-0",
+  "rate": "1",
+  "shop_currency": "USD",
+  "order_currency": "USD",
+  "valid": true,
+  "convertible": true,
+  "amount_minor": 0,
+  "note": "assistant session 00000000-0000-4000-8000-000000000000: 0 USD"
+ },
+ {
+  "cost_usd": "-0",
+  "rate": "1.35",
+  "shop_currency": "EUR",
+  "order_currency": "EUR",
+  "valid": true,
+  "convertible": true,
+  "amount_minor": 0,
+  "note": "assistant session 00000000-0000-4000-8000-000000000000: 0 USD"
+ },
+ {
+  "cost_usd": "-0",
+  "rate": "1.35",
+  "shop_currency": "EUR",
+  "order_currency": "USD",
+  "valid": true,
+  "convertible": true,
+  "amount_minor": 0,
+  "note": "assistant session 00000000-0000-4000-8000-000000000000: 0 USD"
+ },
+ {
+  "cost_usd": "-0",
+  "rate": "1.35",
+  "shop_currency": "EUR",
+  "order_currency": "GBP",
+  "valid": true,
+  "convertible": false
+ },
+ {
+  "cost_usd": "-0",
+  "rate": "150.123456789",
+  "shop_currency": "JPY",
+  "order_currency": "JPY",
+  "valid": true,
+  "convertible": true,
+  "amount_minor": 0,
+  "note": "assistant session 00000000-0000-4000-8000-000000000000: 0 USD"
+ },
+ {
+  "cost_usd": "-0",
+  "rate": " 0.377 ",
+  "shop_currency": "KWD",
+  "order_currency": "KWD",
+  "valid": true,
+  "convertible": true,
+  "amount_minor": 0,
+  "note": "assistant session 00000000-0000-4000-8000-000000000000: 0 USD"
+ },
+ {
+  "cost_usd": "-0",
+  "rate": "1.123456789012345678901234567",
+  "shop_currency": "EUR",
+  "order_currency": "EUR",
+  "valid": true,
+  "convertible": true,
+  "amount_minor": 0,
+  "note": "assistant session 00000000-0000-4000-8000-000000000000: 0 USD"
+ },
+ {
+  "cost_usd": "-0",
+  "rate": "999999999.999999999",
+  "shop_currency": "CLF",
+  "order_currency": "CLF",
+  "valid": true,
+  "convertible": true,
+  "amount_minor": 0,
+  "note": "assistant session 00000000-0000-4000-8000-000000000000: 0 USD"
+ },
+ {
+  "cost_usd": "-0.0",
+  "rate": "1",
+  "shop_currency": "USD",
+  "order_currency": "USD",
+  "valid": true,
+  "convertible": true,
+  "amount_minor": 0,
+  "note": "assistant session 00000000-0000-4000-8000-000000000000: -0 USD"
+ },
+ {
+  "cost_usd": "-0.0",
+  "rate": "1.35",
+  "shop_currency": "EUR",
+  "order_currency": "EUR",
+  "valid": true,
+  "convertible": true,
+  "amount_minor": 0,
+  "note": "assistant session 00000000-0000-4000-8000-000000000000: -0 USD"
+ },
+ {
+  "cost_usd": "-0.0",
+  "rate": "1.35",
+  "shop_currency": "EUR",
+  "order_currency": "USD",
+  "valid": true,
+  "convertible": true,
+  "amount_minor": 0,
+  "note": "assistant session 00000000-0000-4000-8000-000000000000: -0 USD"
+ },
+ {
+  "cost_usd": "-0.0",
+  "rate": "1.35",
+  "shop_currency": "EUR",
+  "order_currency": "GBP",
+  "valid": true,
+  "convertible": false
+ },
+ {
+  "cost_usd": "-0.0",
+  "rate": "150.123456789",
+  "shop_currency": "JPY",
+  "order_currency": "JPY",
+  "valid": true,
+  "convertible": true,
+  "amount_minor": 0,
+  "note": "assistant session 00000000-0000-4000-8000-000000000000: -0 USD"
+ },
+ {
+  "cost_usd": "-0.0",
+  "rate": " 0.377 ",
+  "shop_currency": "KWD",
+  "order_currency": "KWD",
+  "valid": true,
+  "convertible": true,
+  "amount_minor": 0,
+  "note": "assistant session 00000000-0000-4000-8000-000000000000: -0 USD"
+ },
+ {
+  "cost_usd": "-0.0",
+  "rate": "1.123456789012345678901234567",
+  "shop_currency": "EUR",
+  "order_currency": "EUR",
+  "valid": true,
+  "convertible": true,
+  "amount_minor": 0,
+  "note": "assistant session 00000000-0000-4000-8000-000000000000: -0 USD"
+ },
+ {
+  "cost_usd": "-0.0",
+  "rate": "999999999.999999999",
+  "shop_currency": "CLF",
+  "order_currency": "CLF",
+  "valid": true,
+  "convertible": true,
+  "amount_minor": 0,
+  "note": "assistant session 00000000-0000-4000-8000-000000000000: -0 USD"
+ },
+ {
+  "cost_usd": "0",
+  "rate": "1",
+  "shop_currency": "USD",
+  "order_currency": "USD",
+  "valid": true,
+  "convertible": true,
+  "amount_minor": 0,
+  "note": "assistant session 00000000-0000-4000-8000-000000000000: 0 USD"
+ },
+ {
+  "cost_usd": "0",
+  "rate": "1.35",
+  "shop_currency": "EUR",
+  "order_currency": "EUR",
+  "valid": true,
+  "convertible": true,
+  "amount_minor": 0,
+  "note": "assistant session 00000000-0000-4000-8000-000000000000: 0 USD"
+ },
+ {
+  "cost_usd": "0",
+  "rate": "1.35",
+  "shop_currency": "EUR",
+  "order_currency": "USD",
+  "valid": true,
+  "convertible": true,
+  "amount_minor": 0,
+  "note": "assistant session 00000000-0000-4000-8000-000000000000: 0 USD"
+ },
+ {
+  "cost_usd": "0",
+  "rate": "1.35",
+  "shop_currency": "EUR",
+  "order_currency": "GBP",
+  "valid": true,
+  "convertible": false
+ },
+ {
+  "cost_usd": "0",
+  "rate": "150.123456789",
+  "shop_currency": "JPY",
+  "order_currency": "JPY",
+  "valid": true,
+  "convertible": true,
+  "amount_minor": 0,
+  "note": "assistant session 00000000-0000-4000-8000-000000000000: 0 USD"
+ },
+ {
+  "cost_usd": "0",
+  "rate": " 0.377 ",
+  "shop_currency": "KWD",
+  "order_currency": "KWD",
+  "valid": true,
+  "convertible": true,
+  "amount_minor": 0,
+  "note": "assistant session 00000000-0000-4000-8000-000000000000: 0 USD"
+ },
+ {
+  "cost_usd": "0",
+  "rate": "1.123456789012345678901234567",
+  "shop_currency": "EUR",
+  "order_currency": "EUR",
+  "valid": true,
+  "convertible": true,
+  "amount_minor": 0,
+  "note": "assistant session 00000000-0000-4000-8000-000000000000: 0 USD"
+ },
+ {
+  "cost_usd": "0",
+  "rate": "999999999.999999999",
+  "shop_currency": "CLF",
+  "order_currency": "CLF",
+  "valid": true,
+  "convertible": true,
+  "amount_minor": 0,
+  "note": "assistant session 00000000-0000-4000-8000-000000000000: 0 USD"
+ },
+ {
+  "cost_usd": "\"1_0\"",
+  "rate": "1",
+  "shop_currency": "USD",
+  "order_currency": "USD",
+  "valid": true,
+  "convertible": true,
+  "amount_minor": 1000,
+  "note": "assistant session 00000000-0000-4000-8000-000000000000: 10 USD"
+ },
+ {
+  "cost_usd": "\"1_0\"",
+  "rate": "1.35",
+  "shop_currency": "EUR",
+  "order_currency": "EUR",
+  "valid": true,
+  "convertible": true,
+  "amount_minor": 1350,
+  "note": "assistant session 00000000-0000-4000-8000-000000000000: 10 USD"
+ },
+ {
+  "cost_usd": "\"1_0\"",
+  "rate": "1.35",
+  "shop_currency": "EUR",
+  "order_currency": "USD",
+  "valid": true,
+  "convertible": true,
+  "amount_minor": 1000,
+  "note": "assistant session 00000000-0000-4000-8000-000000000000: 10 USD"
+ },
+ {
+  "cost_usd": "\"1_0\"",
+  "rate": "1.35",
+  "shop_currency": "EUR",
+  "order_currency": "GBP",
+  "valid": true,
+  "convertible": false
+ },
+ {
+  "cost_usd": "\"1_0\"",
+  "rate": "150.123456789",
+  "shop_currency": "JPY",
+  "order_currency": "JPY",
+  "valid": true,
+  "convertible": true,
+  "amount_minor": 1501,
+  "note": "assistant session 00000000-0000-4000-8000-000000000000: 10 USD"
+ },
+ {
+  "cost_usd": "\"1_0\"",
+  "rate": " 0.377 ",
+  "shop_currency": "KWD",
+  "order_currency": "KWD",
+  "valid": true,
+  "convertible": true,
+  "amount_minor": 3770,
+  "note": "assistant session 00000000-0000-4000-8000-000000000000: 10 USD"
+ },
+ {
+  "cost_usd": "\"1_0\"",
+  "rate": "1.123456789012345678901234567",
+  "shop_currency": "EUR",
+  "order_currency": "EUR",
+  "valid": true,
+  "convertible": true,
+  "amount_minor": 1123,
+  "note": "assistant session 00000000-0000-4000-8000-000000000000: 10 USD"
+ },
+ {
+  "cost_usd": "\"1_0\"",
+  "rate": "999999999.999999999",
+  "shop_currency": "CLF",
+  "order_currency": "CLF",
+  "valid": true,
+  "convertible": true,
+  "amount_minor": 100000000000000,
+  "note": "assistant session 00000000-0000-4000-8000-000000000000: 10 USD"
+ },
+ {
+  "cost_usd": "\" 2 \"",
+  "rate": "1",
+  "shop_currency": "USD",
+  "order_currency": "USD",
+  "valid": true,
+  "convertible": true,
+  "amount_minor": 200,
+  "note": "assistant session 00000000-0000-4000-8000-000000000000: 2 USD"
+ },
+ {
+  "cost_usd": "\" 2 \"",
+  "rate": "1.35",
+  "shop_currency": "EUR",
+  "order_currency": "EUR",
+  "valid": true,
+  "convertible": true,
+  "amount_minor": 270,
+  "note": "assistant session 00000000-0000-4000-8000-000000000000: 2 USD"
+ },
+ {
+  "cost_usd": "\" 2 \"",
+  "rate": "1.35",
+  "shop_currency": "EUR",
+  "order_currency": "USD",
+  "valid": true,
+  "convertible": true,
+  "amount_minor": 200,
+  "note": "assistant session 00000000-0000-4000-8000-000000000000: 2 USD"
+ },
+ {
+  "cost_usd": "\" 2 \"",
+  "rate": "1.35",
+  "shop_currency": "EUR",
+  "order_currency": "GBP",
+  "valid": true,
+  "convertible": false
+ },
+ {
+  "cost_usd": "\" 2 \"",
+  "rate": "150.123456789",
+  "shop_currency": "JPY",
+  "order_currency": "JPY",
+  "valid": true,
+  "convertible": true,
+  "amount_minor": 300,
+  "note": "assistant session 00000000-0000-4000-8000-000000000000: 2 USD"
+ },
+ {
+  "cost_usd": "\" 2 \"",
+  "rate": " 0.377 ",
+  "shop_currency": "KWD",
+  "order_currency": "KWD",
+  "valid": true,
+  "convertible": true,
+  "amount_minor": 754,
+  "note": "assistant session 00000000-0000-4000-8000-000000000000: 2 USD"
+ },
+ {
+  "cost_usd": "\" 2 \"",
+  "rate": "1.123456789012345678901234567",
+  "shop_currency": "EUR",
+  "order_currency": "EUR",
+  "valid": true,
+  "convertible": true,
+  "amount_minor": 225,
+  "note": "assistant session 00000000-0000-4000-8000-000000000000: 2 USD"
+ },
+ {
+  "cost_usd": "\" 2 \"",
+  "rate": "999999999.999999999",
+  "shop_currency": "CLF",
+  "order_currency": "CLF",
+  "valid": true,
+  "convertible": true,
+  "amount_minor": 20000000000000,
+  "note": "assistant session 00000000-0000-4000-8000-000000000000: 2 USD"
+ },
+ {
+  "cost_usd": "1e6",
+  "rate": "1",
+  "shop_currency": "USD",
+  "order_currency": "USD",
+  "valid": true,
+  "convertible": true,
+  "amount_minor": 100000000,
+  "note": "assistant session 00000000-0000-4000-8000-000000000000: 1000000 USD"
+ },
+ {
+  "cost_usd": "1e6",
+  "rate": "1.35",
+  "shop_currency": "EUR",
+  "order_currency": "EUR",
+  "valid": true,
+  "convertible": true,
+  "amount_minor": 135000000,
+  "note": "assistant session 00000000-0000-4000-8000-000000000000: 1000000 USD"
+ },
+ {
+  "cost_usd": "1e6",
+  "rate": "1.35",
+  "shop_currency": "EUR",
+  "order_currency": "USD",
+  "valid": true,
+  "convertible": true,
+  "amount_minor": 100000000,
+  "note": "assistant session 00000000-0000-4000-8000-000000000000: 1000000 USD"
+ },
+ {
+  "cost_usd": "1e6",
+  "rate": "1.35",
+  "shop_currency": "EUR",
+  "order_currency": "GBP",
+  "valid": true,
+  "convertible": false
+ },
+ {
+  "cost_usd": "1e6",
+  "rate": "150.123456789",
+  "shop_currency": "JPY",
+  "order_currency": "JPY",
+  "valid": true,
+  "convertible": true,
+  "amount_minor": 150123457,
+  "note": "assistant session 00000000-0000-4000-8000-000000000000: 1000000 USD"
+ },
+ {
+  "cost_usd": "1e6",
+  "rate": " 0.377 ",
+  "shop_currency": "KWD",
+  "order_currency": "KWD",
+  "valid": true,
+  "convertible": true,
+  "amount_minor": 377000000,
+  "note": "assistant session 00000000-0000-4000-8000-000000000000: 1000000 USD"
+ },
+ {
+  "cost_usd": "1e6",
+  "rate": "1.123456789012345678901234567",
+  "shop_currency": "EUR",
+  "order_currency": "EUR",
+  "valid": true,
+  "convertible": true,
+  "amount_minor": 112345679,
+  "note": "assistant session 00000000-0000-4000-8000-000000000000: 1000000 USD"
+ },
+ {
+  "cost_usd": "1e6",
+  "rate": "999999999.999999999",
+  "shop_currency": "CLF",
+  "order_currency": "CLF",
+  "valid": true,
+  "convertible": true,
+  "amount_minor": 9999999999999999990,
+  "note": "assistant session 00000000-0000-4000-8000-000000000000: 1000000 USD"
+ },
+ {
+  "cost_usd": "1.5e-7",
+  "rate": "1",
+  "shop_currency": "USD",
+  "order_currency": "USD",
+  "valid": true,
+  "convertible": true,
+  "amount_minor": 0,
+  "note": "assistant session 00000000-0000-4000-8000-000000000000: 1.5E-7 USD"
+ },
+ {
+  "cost_usd": "1.5e-7",
+  "rate": "1.35",
+  "shop_currency": "EUR",
+  "order_currency": "EUR",
+  "valid": true,
+  "convertible": true,
+  "amount_minor": 0,
+  "note": "assistant session 00000000-0000-4000-8000-000000000000: 1.5E-7 USD"
+ },
+ {
+  "cost_usd": "1.5e-7",
+  "rate": "1.35",
+  "shop_currency": "EUR",
+  "order_currency": "USD",
+  "valid": true,
+  "convertible": true,
+  "amount_minor": 0,
+  "note": "assistant session 00000000-0000-4000-8000-000000000000: 1.5E-7 USD"
+ },
+ {
+  "cost_usd": "1.5e-7",
+  "rate": "1.35",
+  "shop_currency": "EUR",
+  "order_currency": "GBP",
+  "valid": true,
+  "convertible": false
+ },
+ {
+  "cost_usd": "1.5e-7",
+  "rate": "150.123456789",
+  "shop_currency": "JPY",
+  "order_currency": "JPY",
+  "valid": true,
+  "convertible": true,
+  "amount_minor": 0,
+  "note": "assistant session 00000000-0000-4000-8000-000000000000: 1.5E-7 USD"
+ },
+ {
+  "cost_usd": "1.5e-7",
+  "rate": " 0.377 ",
+  "shop_currency": "KWD",
+  "order_currency": "KWD",
+  "valid": true,
+  "convertible": true,
+  "amount_minor": 0,
+  "note": "assistant session 00000000-0000-4000-8000-000000000000: 1.5E-7 USD"
+ },
+ {
+  "cost_usd": "1.5e-7",
+  "rate": "1.123456789012345678901234567",
+  "shop_currency": "EUR",
+  "order_currency": "EUR",
+  "valid": true,
+  "convertible": true,
+  "amount_minor": 0,
+  "note": "assistant session 00000000-0000-4000-8000-000000000000: 1.5E-7 USD"
+ },
+ {
+  "cost_usd": "1.5e-7",
+  "rate": "999999999.999999999",
+  "shop_currency": "CLF",
+  "order_currency": "CLF",
+  "valid": true,
+  "convertible": true,
+  "amount_minor": 1500000,
+  "note": "assistant session 00000000-0000-4000-8000-000000000000: 1.5E-7 USD"
+ },
+ {
+  "cost_usd": "true",
+  "rate": "1",
+  "shop_currency": "USD",
+  "order_currency": "USD",
+  "valid": false
+ },
+ {
+  "cost_usd": "true",
+  "rate": "1.35",
+  "shop_currency": "EUR",
+  "order_currency": "EUR",
+  "valid": false
+ },
+ {
+  "cost_usd": "true",
+  "rate": "1.35",
+  "shop_currency": "EUR",
+  "order_currency": "USD",
+  "valid": false
+ },
+ {
+  "cost_usd": "true",
+  "rate": "1.35",
+  "shop_currency": "EUR",
+  "order_currency": "GBP",
+  "valid": false
+ },
+ {
+  "cost_usd": "true",
+  "rate": "150.123456789",
+  "shop_currency": "JPY",
+  "order_currency": "JPY",
+  "valid": false
+ },
+ {
+  "cost_usd": "true",
+  "rate": " 0.377 ",
+  "shop_currency": "KWD",
+  "order_currency": "KWD",
+  "valid": false
+ },
+ {
+  "cost_usd": "true",
+  "rate": "1.123456789012345678901234567",
+  "shop_currency": "EUR",
+  "order_currency": "EUR",
+  "valid": false
+ },
+ {
+  "cost_usd": "true",
+  "rate": "999999999.999999999",
+  "shop_currency": "CLF",
+  "order_currency": "CLF",
+  "valid": false
+ },
+ {
+  "cost_usd": "null",
+  "rate": "1",
+  "shop_currency": "USD",
+  "order_currency": "USD",
+  "valid": false
+ },
+ {
+  "cost_usd": "null",
+  "rate": "1.35",
+  "shop_currency": "EUR",
+  "order_currency": "EUR",
+  "valid": false
+ },
+ {
+  "cost_usd": "null",
+  "rate": "1.35",
+  "shop_currency": "EUR",
+  "order_currency": "USD",
+  "valid": false
+ },
+ {
+  "cost_usd": "null",
+  "rate": "1.35",
+  "shop_currency": "EUR",
+  "order_currency": "GBP",
+  "valid": false
+ },
+ {
+  "cost_usd": "null",
+  "rate": "150.123456789",
+  "shop_currency": "JPY",
+  "order_currency": "JPY",
+  "valid": false
+ },
+ {
+  "cost_usd": "null",
+  "rate": " 0.377 ",
+  "shop_currency": "KWD",
+  "order_currency": "KWD",
+  "valid": false
+ },
+ {
+  "cost_usd": "null",
+  "rate": "1.123456789012345678901234567",
+  "shop_currency": "EUR",
+  "order_currency": "EUR",
+  "valid": false
+ },
+ {
+  "cost_usd": "null",
+  "rate": "999999999.999999999",
+  "shop_currency": "CLF",
+  "order_currency": "CLF",
+  "valid": false
+ },
+ {
+  "cost_usd": "\"nan\"",
+  "rate": "1",
+  "shop_currency": "USD",
+  "order_currency": "USD",
+  "valid": false
+ },
+ {
+  "cost_usd": "\"nan\"",
+  "rate": "1.35",
+  "shop_currency": "EUR",
+  "order_currency": "EUR",
+  "valid": false
+ },
+ {
+  "cost_usd": "\"nan\"",
+  "rate": "1.35",
+  "shop_currency": "EUR",
+  "order_currency": "USD",
+  "valid": false
+ },
+ {
+  "cost_usd": "\"nan\"",
+  "rate": "1.35",
+  "shop_currency": "EUR",
+  "order_currency": "GBP",
+  "valid": false
+ },
+ {
+  "cost_usd": "\"nan\"",
+  "rate": "150.123456789",
+  "shop_currency": "JPY",
+  "order_currency": "JPY",
+  "valid": false
+ },
+ {
+  "cost_usd": "\"nan\"",
+  "rate": " 0.377 ",
+  "shop_currency": "KWD",
+  "order_currency": "KWD",
+  "valid": false
+ },
+ {
+  "cost_usd": "\"nan\"",
+  "rate": "1.123456789012345678901234567",
+  "shop_currency": "EUR",
+  "order_currency": "EUR",
+  "valid": false
+ },
+ {
+  "cost_usd": "\"nan\"",
+  "rate": "999999999.999999999",
+  "shop_currency": "CLF",
+  "order_currency": "CLF",
+  "valid": false
+ },
+ {
+  "cost_usd": "\"inf\"",
+  "rate": "1",
+  "shop_currency": "USD",
+  "order_currency": "USD",
+  "valid": false
+ },
+ {
+  "cost_usd": "\"inf\"",
+  "rate": "1.35",
+  "shop_currency": "EUR",
+  "order_currency": "EUR",
+  "valid": false
+ },
+ {
+  "cost_usd": "\"inf\"",
+  "rate": "1.35",
+  "shop_currency": "EUR",
+  "order_currency": "USD",
+  "valid": false
+ },
+ {
+  "cost_usd": "\"inf\"",
+  "rate": "1.35",
+  "shop_currency": "EUR",
+  "order_currency": "GBP",
+  "valid": false
+ },
+ {
+  "cost_usd": "\"inf\"",
+  "rate": "150.123456789",
+  "shop_currency": "JPY",
+  "order_currency": "JPY",
+  "valid": false
+ },
+ {
+  "cost_usd": "\"inf\"",
+  "rate": " 0.377 ",
+  "shop_currency": "KWD",
+  "order_currency": "KWD",
+  "valid": false
+ },
+ {
+  "cost_usd": "\"inf\"",
+  "rate": "1.123456789012345678901234567",
+  "shop_currency": "EUR",
+  "order_currency": "EUR",
+  "valid": false
+ },
+ {
+  "cost_usd": "\"inf\"",
+  "rate": "999999999.999999999",
+  "shop_currency": "CLF",
+  "order_currency": "CLF",
+  "valid": false
+ },
+ {
+  "cost_usd": "\"abc\"",
+  "rate": "1",
+  "shop_currency": "USD",
+  "order_currency": "USD",
+  "valid": false
+ },
+ {
+  "cost_usd": "\"abc\"",
+  "rate": "1.35",
+  "shop_currency": "EUR",
+  "order_currency": "EUR",
+  "valid": false
+ },
+ {
+  "cost_usd": "\"abc\"",
+  "rate": "1.35",
+  "shop_currency": "EUR",
+  "order_currency": "USD",
+  "valid": false
+ },
+ {
+  "cost_usd": "\"abc\"",
+  "rate": "1.35",
+  "shop_currency": "EUR",
+  "order_currency": "GBP",
+  "valid": false
+ },
+ {
+  "cost_usd": "\"abc\"",
+  "rate": "150.123456789",
+  "shop_currency": "JPY",
+  "order_currency": "JPY",
+  "valid": false
+ },
+ {
+  "cost_usd": "\"abc\"",
+  "rate": " 0.377 ",
+  "shop_currency": "KWD",
+  "order_currency": "KWD",
+  "valid": false
+ },
+ {
+  "cost_usd": "\"abc\"",
+  "rate": "1.123456789012345678901234567",
+  "shop_currency": "EUR",
+  "order_currency": "EUR",
+  "valid": false
+ },
+ {
+  "cost_usd": "\"abc\"",
+  "rate": "999999999.999999999",
+  "shop_currency": "CLF",
+  "order_currency": "CLF",
+  "valid": false
+ },
+ {
+  "cost_usd": "123456.123456789",
+  "rate": "1",
+  "shop_currency": "USD",
+  "order_currency": "USD",
+  "valid": false
+ },
+ {
+  "cost_usd": "123456.123456789",
+  "rate": "1.35",
+  "shop_currency": "EUR",
+  "order_currency": "EUR",
+  "valid": false
+ },
+ {
+  "cost_usd": "123456.123456789",
+  "rate": "1.35",
+  "shop_currency": "EUR",
+  "order_currency": "USD",
+  "valid": false
+ },
+ {
+  "cost_usd": "123456.123456789",
+  "rate": "1.35",
+  "shop_currency": "EUR",
+  "order_currency": "GBP",
+  "valid": false
+ },
+ {
+  "cost_usd": "123456.123456789",
+  "rate": "150.123456789",
+  "shop_currency": "JPY",
+  "order_currency": "JPY",
+  "valid": false
+ },
+ {
+  "cost_usd": "123456.123456789",
+  "rate": " 0.377 ",
+  "shop_currency": "KWD",
+  "order_currency": "KWD",
+  "valid": false
+ },
+ {
+  "cost_usd": "123456.123456789",
+  "rate": "1.123456789012345678901234567",
+  "shop_currency": "EUR",
+  "order_currency": "EUR",
+  "valid": false
+ },
+ {
+  "cost_usd": "123456.123456789",
+  "rate": "999999999.999999999",
+  "shop_currency": "CLF",
+  "order_currency": "CLF",
+  "valid": false
+ },
+ {
+  "cost_usd": "2.5",
+  "rate": "1",
+  "shop_currency": "USD",
+  "order_currency": "USD",
+  "valid": true,
+  "convertible": true,
+  "amount_minor": 250,
+  "note": "assistant session 00000000-0000-4000-8000-000000000000: 2.5 USD"
+ },
+ {
+  "cost_usd": "2.5",
+  "rate": "1.35",
+  "shop_currency": "EUR",
+  "order_currency": "EUR",
+  "valid": true,
+  "convertible": true,
+  "amount_minor": 338,
+  "note": "assistant session 00000000-0000-4000-8000-000000000000: 2.5 USD"
+ },
+ {
+  "cost_usd": "2.5",
+  "rate": "1.35",
+  "shop_currency": "EUR",
+  "order_currency": "USD",
+  "valid": true,
+  "convertible": true,
+  "amount_minor": 250,
+  "note": "assistant session 00000000-0000-4000-8000-000000000000: 2.5 USD"
+ },
+ {
+  "cost_usd": "2.5",
+  "rate": "1.35",
+  "shop_currency": "EUR",
+  "order_currency": "GBP",
+  "valid": true,
+  "convertible": false
+ },
+ {
+  "cost_usd": "2.5",
+  "rate": "150.123456789",
+  "shop_currency": "JPY",
+  "order_currency": "JPY",
+  "valid": true,
+  "convertible": true,
+  "amount_minor": 375,
+  "note": "assistant session 00000000-0000-4000-8000-000000000000: 2.5 USD"
+ },
+ {
+  "cost_usd": "2.5",
+  "rate": " 0.377 ",
+  "shop_currency": "KWD",
+  "order_currency": "KWD",
+  "valid": true,
+  "convertible": true,
+  "amount_minor": 943,
+  "note": "assistant session 00000000-0000-4000-8000-000000000000: 2.5 USD"
+ },
+ {
+  "cost_usd": "2.5",
+  "rate": "1.123456789012345678901234567",
+  "shop_currency": "EUR",
+  "order_currency": "EUR",
+  "valid": true,
+  "convertible": true,
+  "amount_minor": 281,
+  "note": "assistant session 00000000-0000-4000-8000-000000000000: 2.5 USD"
+ },
+ {
+  "cost_usd": "2.5",
+  "rate": "999999999.999999999",
+  "shop_currency": "CLF",
+  "order_currency": "CLF",
+  "valid": true,
+  "convertible": true,
+  "amount_minor": 25000000000000,
+  "note": "assistant session 00000000-0000-4000-8000-000000000000: 2.5 USD"
+ },
+ {
+  "cost_usd": "0.123456780",
+  "rate": "1",
+  "shop_currency": "USD",
+  "order_currency": "USD",
+  "valid": true,
+  "convertible": true,
+  "amount_minor": 12,
+  "note": "assistant session 00000000-0000-4000-8000-000000000000: 0.12345678 USD"
+ },
+ {
+  "cost_usd": "0.123456780",
+  "rate": "1.35",
+  "shop_currency": "EUR",
+  "order_currency": "EUR",
+  "valid": true,
+  "convertible": true,
+  "amount_minor": 17,
+  "note": "assistant session 00000000-0000-4000-8000-000000000000: 0.12345678 USD"
+ },
+ {
+  "cost_usd": "0.123456780",
+  "rate": "1.35",
+  "shop_currency": "EUR",
+  "order_currency": "USD",
+  "valid": true,
+  "convertible": true,
+  "amount_minor": 12,
+  "note": "assistant session 00000000-0000-4000-8000-000000000000: 0.12345678 USD"
+ },
+ {
+  "cost_usd": "0.123456780",
+  "rate": "1.35",
+  "shop_currency": "EUR",
+  "order_currency": "GBP",
+  "valid": true,
+  "convertible": false
+ },
+ {
+  "cost_usd": "0.123456780",
+  "rate": "150.123456789",
+  "shop_currency": "JPY",
+  "order_currency": "JPY",
+  "valid": true,
+  "convertible": true,
+  "amount_minor": 19,
+  "note": "assistant session 00000000-0000-4000-8000-000000000000: 0.12345678 USD"
+ },
+ {
+  "cost_usd": "0.123456780",
+  "rate": " 0.377 ",
+  "shop_currency": "KWD",
+  "order_currency": "KWD",
+  "valid": true,
+  "convertible": true,
+  "amount_minor": 47,
+  "note": "assistant session 00000000-0000-4000-8000-000000000000: 0.12345678 USD"
+ },
+ {
+  "cost_usd": "0.123456780",
+  "rate": "1.123456789012345678901234567",
+  "shop_currency": "EUR",
+  "order_currency": "EUR",
+  "valid": true,
+  "convertible": true,
+  "amount_minor": 14,
+  "note": "assistant session 00000000-0000-4000-8000-000000000000: 0.12345678 USD"
+ },
+ {
+  "cost_usd": "0.123456780",
+  "rate": "999999999.999999999",
+  "shop_currency": "CLF",
+  "order_currency": "CLF",
+  "valid": true,
+  "convertible": true,
+  "amount_minor": 1234567800000,
+  "note": "assistant session 00000000-0000-4000-8000-000000000000: 0.12345678 USD"
+ },
+ {
+  "cost_usd": "12345678901234567890.5",
+  "rate": "1",
+  "shop_currency": "USD",
+  "order_currency": "USD",
+  "valid": false
+ },
+ {
+  "cost_usd": "12345678901234567890.5",
+  "rate": "1.35",
+  "shop_currency": "EUR",
+  "order_currency": "EUR",
+  "valid": false
+ },
+ {
+  "cost_usd": "12345678901234567890.5",
+  "rate": "1.35",
+  "shop_currency": "EUR",
+  "order_currency": "USD",
+  "valid": false
+ },
+ {
+  "cost_usd": "12345678901234567890.5",
+  "rate": "1.35",
+  "shop_currency": "EUR",
+  "order_currency": "GBP",
+  "valid": false
+ },
+ {
+  "cost_usd": "12345678901234567890.5",
+  "rate": "150.123456789",
+  "shop_currency": "JPY",
+  "order_currency": "JPY",
+  "valid": false
+ },
+ {
+  "cost_usd": "12345678901234567890.5",
+  "rate": " 0.377 ",
+  "shop_currency": "KWD",
+  "order_currency": "KWD",
+  "valid": false
+ },
+ {
+  "cost_usd": "12345678901234567890.5",
+  "rate": "1.123456789012345678901234567",
+  "shop_currency": "EUR",
+  "order_currency": "EUR",
+  "valid": false
+ },
+ {
+  "cost_usd": "12345678901234567890.5",
+  "rate": "999999999.999999999",
+  "shop_currency": "CLF",
+  "order_currency": "CLF",
+  "valid": false
+ },
+ {
+  "cost_usd": "0.1000000000",
+  "rate": "1",
+  "shop_currency": "USD",
+  "order_currency": "USD",
+  "valid": true,
+  "convertible": true,
+  "amount_minor": 10,
+  "note": "assistant session 00000000-0000-4000-8000-000000000000: 0.1 USD"
+ },
+ {
+  "cost_usd": "0.1000000000",
+  "rate": "1.35",
+  "shop_currency": "EUR",
+  "order_currency": "EUR",
+  "valid": true,
+  "convertible": true,
+  "amount_minor": 14,
+  "note": "assistant session 00000000-0000-4000-8000-000000000000: 0.1 USD"
+ },
+ {
+  "cost_usd": "0.1000000000",
+  "rate": "1.35",
+  "shop_currency": "EUR",
+  "order_currency": "USD",
+  "valid": true,
+  "convertible": true,
+  "amount_minor": 10,
+  "note": "assistant session 00000000-0000-4000-8000-000000000000: 0.1 USD"
+ },
+ {
+  "cost_usd": "0.1000000000",
+  "rate": "1.35",
+  "shop_currency": "EUR",
+  "order_currency": "GBP",
+  "valid": true,
+  "convertible": false
+ },
+ {
+  "cost_usd": "0.1000000000",
+  "rate": "150.123456789",
+  "shop_currency": "JPY",
+  "order_currency": "JPY",
+  "valid": true,
+  "convertible": true,
+  "amount_minor": 15,
+  "note": "assistant session 00000000-0000-4000-8000-000000000000: 0.1 USD"
+ },
+ {
+  "cost_usd": "0.1000000000",
+  "rate": " 0.377 ",
+  "shop_currency": "KWD",
+  "order_currency": "KWD",
+  "valid": true,
+  "convertible": true,
+  "amount_minor": 38,
+  "note": "assistant session 00000000-0000-4000-8000-000000000000: 0.1 USD"
+ },
+ {
+  "cost_usd": "0.1000000000",
+  "rate": "1.123456789012345678901234567",
+  "shop_currency": "EUR",
+  "order_currency": "EUR",
+  "valid": true,
+  "convertible": true,
+  "amount_minor": 11,
+  "note": "assistant session 00000000-0000-4000-8000-000000000000: 0.1 USD"
+ },
+ {
+  "cost_usd": "0.1000000000",
+  "rate": "999999999.999999999",
+  "shop_currency": "CLF",
+  "order_currency": "CLF",
+  "valid": true,
+  "convertible": true,
+  "amount_minor": 1000000000000,
+  "note": "assistant session 00000000-0000-4000-8000-000000000000: 0.1 USD"
+ },
+ {
+  "cost_usd": "1e-8",
+  "rate": "1",
+  "shop_currency": "USD",
+  "order_currency": "USD",
+  "valid": true,
+  "convertible": true,
+  "amount_minor": 0,
+  "note": "assistant session 00000000-0000-4000-8000-000000000000: 1E-8 USD"
+ },
+ {
+  "cost_usd": "1e-8",
+  "rate": "1.35",
+  "shop_currency": "EUR",
+  "order_currency": "EUR",
+  "valid": true,
+  "convertible": true,
+  "amount_minor": 0,
+  "note": "assistant session 00000000-0000-4000-8000-000000000000: 1E-8 USD"
+ },
+ {
+  "cost_usd": "1e-8",
+  "rate": "1.35",
+  "shop_currency": "EUR",
+  "order_currency": "USD",
+  "valid": true,
+  "convertible": true,
+  "amount_minor": 0,
+  "note": "assistant session 00000000-0000-4000-8000-000000000000: 1E-8 USD"
+ },
+ {
+  "cost_usd": "1e-8",
+  "rate": "1.35",
+  "shop_currency": "EUR",
+  "order_currency": "GBP",
+  "valid": true,
+  "convertible": false
+ },
+ {
+  "cost_usd": "1e-8",
+  "rate": "150.123456789",
+  "shop_currency": "JPY",
+  "order_currency": "JPY",
+  "valid": true,
+  "convertible": true,
+  "amount_minor": 0,
+  "note": "assistant session 00000000-0000-4000-8000-000000000000: 1E-8 USD"
+ },
+ {
+  "cost_usd": "1e-8",
+  "rate": " 0.377 ",
+  "shop_currency": "KWD",
+  "order_currency": "KWD",
+  "valid": true,
+  "convertible": true,
+  "amount_minor": 0,
+  "note": "assistant session 00000000-0000-4000-8000-000000000000: 1E-8 USD"
+ },
+ {
+  "cost_usd": "1e-8",
+  "rate": "1.123456789012345678901234567",
+  "shop_currency": "EUR",
+  "order_currency": "EUR",
+  "valid": true,
+  "convertible": true,
+  "amount_minor": 0,
+  "note": "assistant session 00000000-0000-4000-8000-000000000000: 1E-8 USD"
+ },
+ {
+  "cost_usd": "1e-8",
+  "rate": "999999999.999999999",
+  "shop_currency": "CLF",
+  "order_currency": "CLF",
+  "valid": true,
+  "convertible": true,
+  "amount_minor": 100000,
+  "note": "assistant session 00000000-0000-4000-8000-000000000000: 1E-8 USD"
+ },
+ {
+  "cost_usd": "5e-9",
+  "rate": "1",
+  "shop_currency": "USD",
+  "order_currency": "USD",
+  "valid": false
+ },
+ {
+  "cost_usd": "5e-9",
+  "rate": "1.35",
+  "shop_currency": "EUR",
+  "order_currency": "EUR",
+  "valid": false
+ },
+ {
+  "cost_usd": "5e-9",
+  "rate": "1.35",
+  "shop_currency": "EUR",
+  "order_currency": "USD",
+  "valid": false
+ },
+ {
+  "cost_usd": "5e-9",
+  "rate": "1.35",
+  "shop_currency": "EUR",
+  "order_currency": "GBP",
+  "valid": false
+ },
+ {
+  "cost_usd": "5e-9",
+  "rate": "150.123456789",
+  "shop_currency": "JPY",
+  "order_currency": "JPY",
+  "valid": false
+ },
+ {
+  "cost_usd": "5e-9",
+  "rate": " 0.377 ",
+  "shop_currency": "KWD",
+  "order_currency": "KWD",
+  "valid": false
+ },
+ {
+  "cost_usd": "5e-9",
+  "rate": "1.123456789012345678901234567",
+  "shop_currency": "EUR",
+  "order_currency": "EUR",
+  "valid": false
+ },
+ {
+  "cost_usd": "5e-9",
+  "rate": "999999999.999999999",
+  "shop_currency": "CLF",
+  "order_currency": "CLF",
+  "valid": false
+ },
+ {
+  "cost_usd": "\"1e-8\"",
+  "rate": "1",
+  "shop_currency": "USD",
+  "order_currency": "USD",
+  "valid": true,
+  "convertible": true,
+  "amount_minor": 0,
+  "note": "assistant session 00000000-0000-4000-8000-000000000000: 1E-8 USD"
+ },
+ {
+  "cost_usd": "\"1e-8\"",
+  "rate": "1.35",
+  "shop_currency": "EUR",
+  "order_currency": "EUR",
+  "valid": true,
+  "convertible": true,
+  "amount_minor": 0,
+  "note": "assistant session 00000000-0000-4000-8000-000000000000: 1E-8 USD"
+ },
+ {
+  "cost_usd": "\"1e-8\"",
+  "rate": "1.35",
+  "shop_currency": "EUR",
+  "order_currency": "USD",
+  "valid": true,
+  "convertible": true,
+  "amount_minor": 0,
+  "note": "assistant session 00000000-0000-4000-8000-000000000000: 1E-8 USD"
+ },
+ {
+  "cost_usd": "\"1e-8\"",
+  "rate": "1.35",
+  "shop_currency": "EUR",
+  "order_currency": "GBP",
+  "valid": true,
+  "convertible": false
+ },
+ {
+  "cost_usd": "\"1e-8\"",
+  "rate": "150.123456789",
+  "shop_currency": "JPY",
+  "order_currency": "JPY",
+  "valid": true,
+  "convertible": true,
+  "amount_minor": 0,
+  "note": "assistant session 00000000-0000-4000-8000-000000000000: 1E-8 USD"
+ },
+ {
+  "cost_usd": "\"1e-8\"",
+  "rate": " 0.377 ",
+  "shop_currency": "KWD",
+  "order_currency": "KWD",
+  "valid": true,
+  "convertible": true,
+  "amount_minor": 0,
+  "note": "assistant session 00000000-0000-4000-8000-000000000000: 1E-8 USD"
+ },
+ {
+  "cost_usd": "\"1e-8\"",
+  "rate": "1.123456789012345678901234567",
+  "shop_currency": "EUR",
+  "order_currency": "EUR",
+  "valid": true,
+  "convertible": true,
+  "amount_minor": 0,
+  "note": "assistant session 00000000-0000-4000-8000-000000000000: 1E-8 USD"
+ },
+ {
+  "cost_usd": "\"1e-8\"",
+  "rate": "999999999.999999999",
+  "shop_currency": "CLF",
+  "order_currency": "CLF",
+  "valid": true,
+  "convertible": true,
+  "amount_minor": 100000,
+  "note": "assistant session 00000000-0000-4000-8000-000000000000: 1E-8 USD"
+ },
+ {
+  "cost_usd": "1.0e0",
+  "rate": "1",
+  "shop_currency": "USD",
+  "order_currency": "USD",
+  "valid": true,
+  "convertible": true,
+  "amount_minor": 100,
+  "note": "assistant session 00000000-0000-4000-8000-000000000000: 1 USD"
+ },
+ {
+  "cost_usd": "1.0e0",
+  "rate": "1.35",
+  "shop_currency": "EUR",
+  "order_currency": "EUR",
+  "valid": true,
+  "convertible": true,
+  "amount_minor": 135,
+  "note": "assistant session 00000000-0000-4000-8000-000000000000: 1 USD"
+ },
+ {
+  "cost_usd": "1.0e0",
+  "rate": "1.35",
+  "shop_currency": "EUR",
+  "order_currency": "USD",
+  "valid": true,
+  "convertible": true,
+  "amount_minor": 100,
+  "note": "assistant session 00000000-0000-4000-8000-000000000000: 1 USD"
+ },
+ {
+  "cost_usd": "1.0e0",
+  "rate": "1.35",
+  "shop_currency": "EUR",
+  "order_currency": "GBP",
+  "valid": true,
+  "convertible": false
+ },
+ {
+  "cost_usd": "1.0e0",
+  "rate": "150.123456789",
+  "shop_currency": "JPY",
+  "order_currency": "JPY",
+  "valid": true,
+  "convertible": true,
+  "amount_minor": 150,
+  "note": "assistant session 00000000-0000-4000-8000-000000000000: 1 USD"
+ },
+ {
+  "cost_usd": "1.0e0",
+  "rate": " 0.377 ",
+  "shop_currency": "KWD",
+  "order_currency": "KWD",
+  "valid": true,
+  "convertible": true,
+  "amount_minor": 377,
+  "note": "assistant session 00000000-0000-4000-8000-000000000000: 1 USD"
+ },
+ {
+  "cost_usd": "1.0e0",
+  "rate": "1.123456789012345678901234567",
+  "shop_currency": "EUR",
+  "order_currency": "EUR",
+  "valid": true,
+  "convertible": true,
+  "amount_minor": 112,
+  "note": "assistant session 00000000-0000-4000-8000-000000000000: 1 USD"
+ },
+ {
+  "cost_usd": "1.0e0",
+  "rate": "999999999.999999999",
+  "shop_currency": "CLF",
+  "order_currency": "CLF",
+  "valid": true,
+  "convertible": true,
+  "amount_minor": 10000000000000,
+  "note": "assistant session 00000000-0000-4000-8000-000000000000: 1 USD"
+ },
+ {
+  "cost_usd": "100",
+  "rate": "1",
+  "shop_currency": "USD",
+  "order_currency": "USD",
+  "valid": true,
+  "convertible": true,
+  "amount_minor": 10000,
+  "note": "assistant session 00000000-0000-4000-8000-000000000000: 100 USD"
+ },
+ {
+  "cost_usd": "100",
+  "rate": "1.35",
+  "shop_currency": "EUR",
+  "order_currency": "EUR",
+  "valid": true,
+  "convertible": true,
+  "amount_minor": 13500,
+  "note": "assistant session 00000000-0000-4000-8000-000000000000: 100 USD"
+ },
+ {
+  "cost_usd": "100",
+  "rate": "1.35",
+  "shop_currency": "EUR",
+  "order_currency": "USD",
+  "valid": true,
+  "convertible": true,
+  "amount_minor": 10000,
+  "note": "assistant session 00000000-0000-4000-8000-000000000000: 100 USD"
+ },
+ {
+  "cost_usd": "100",
+  "rate": "1.35",
+  "shop_currency": "EUR",
+  "order_currency": "GBP",
+  "valid": true,
+  "convertible": false
+ },
+ {
+  "cost_usd": "100",
+  "rate": "150.123456789",
+  "shop_currency": "JPY",
+  "order_currency": "JPY",
+  "valid": true,
+  "convertible": true,
+  "amount_minor": 15012,
+  "note": "assistant session 00000000-0000-4000-8000-000000000000: 100 USD"
+ },
+ {
+  "cost_usd": "100",
+  "rate": " 0.377 ",
+  "shop_currency": "KWD",
+  "order_currency": "KWD",
+  "valid": true,
+  "convertible": true,
+  "amount_minor": 37700,
+  "note": "assistant session 00000000-0000-4000-8000-000000000000: 100 USD"
+ },
+ {
+  "cost_usd": "100",
+  "rate": "1.123456789012345678901234567",
+  "shop_currency": "EUR",
+  "order_currency": "EUR",
+  "valid": true,
+  "convertible": true,
+  "amount_minor": 11235,
+  "note": "assistant session 00000000-0000-4000-8000-000000000000: 100 USD"
+ },
+ {
+  "cost_usd": "100",
+  "rate": "999999999.999999999",
+  "shop_currency": "CLF",
+  "order_currency": "CLF",
+  "valid": true,
+  "convertible": true,
+  "amount_minor": 1000000000000000,
+  "note": "assistant session 00000000-0000-4000-8000-000000000000: 100 USD"
+ },
+ {
+  "cost_usd": "0.005",
+  "rate": "1",
+  "shop_currency": "USD",
+  "order_currency": "USD",
+  "valid": true,
+  "convertible": true,
+  "amount_minor": 1,
+  "note": "assistant session 00000000-0000-4000-8000-000000000000: 0.005 USD"
+ },
+ {
+  "cost_usd": "0.005",
+  "rate": "1.35",
+  "shop_currency": "EUR",
+  "order_currency": "EUR",
+  "valid": true,
+  "convertible": true,
+  "amount_minor": 1,
+  "note": "assistant session 00000000-0000-4000-8000-000000000000: 0.005 USD"
+ },
+ {
+  "cost_usd": "0.005",
+  "rate": "1.35",
+  "shop_currency": "EUR",
+  "order_currency": "USD",
+  "valid": true,
+  "convertible": true,
+  "amount_minor": 1,
+  "note": "assistant session 00000000-0000-4000-8000-000000000000: 0.005 USD"
+ },
+ {
+  "cost_usd": "0.005",
+  "rate": "1.35",
+  "shop_currency": "EUR",
+  "order_currency": "GBP",
+  "valid": true,
+  "convertible": false
+ },
+ {
+  "cost_usd": "0.005",
+  "rate": "150.123456789",
+  "shop_currency": "JPY",
+  "order_currency": "JPY",
+  "valid": true,
+  "convertible": true,
+  "amount_minor": 1,
+  "note": "assistant session 00000000-0000-4000-8000-000000000000: 0.005 USD"
+ },
+ {
+  "cost_usd": "0.005",
+  "rate": " 0.377 ",
+  "shop_currency": "KWD",
+  "order_currency": "KWD",
+  "valid": true,
+  "convertible": true,
+  "amount_minor": 2,
+  "note": "assistant session 00000000-0000-4000-8000-000000000000: 0.005 USD"
+ },
+ {
+  "cost_usd": "0.005",
+  "rate": "1.123456789012345678901234567",
+  "shop_currency": "EUR",
+  "order_currency": "EUR",
+  "valid": true,
+  "convertible": true,
+  "amount_minor": 1,
+  "note": "assistant session 00000000-0000-4000-8000-000000000000: 0.005 USD"
+ },
+ {
+  "cost_usd": "0.005",
+  "rate": "999999999.999999999",
+  "shop_currency": "CLF",
+  "order_currency": "CLF",
+  "valid": true,
+  "convertible": true,
+  "amount_minor": 50000000000,
+  "note": "assistant session 00000000-0000-4000-8000-000000000000: 0.005 USD"
+ },
+ {
+  "cost_usd": "0.015",
+  "rate": "1",
+  "shop_currency": "USD",
+  "order_currency": "USD",
+  "valid": true,
+  "convertible": true,
+  "amount_minor": 2,
+  "note": "assistant session 00000000-0000-4000-8000-000000000000: 0.015 USD"
+ },
+ {
+  "cost_usd": "0.015",
+  "rate": "1.35",
+  "shop_currency": "EUR",
+  "order_currency": "EUR",
+  "valid": true,
+  "convertible": true,
+  "amount_minor": 2,
+  "note": "assistant session 00000000-0000-4000-8000-000000000000: 0.015 USD"
+ },
+ {
+  "cost_usd": "0.015",
+  "rate": "1.35",
+  "shop_currency": "EUR",
+  "order_currency": "USD",
+  "valid": true,
+  "convertible": true,
+  "amount_minor": 2,
+  "note": "assistant session 00000000-0000-4000-8000-000000000000: 0.015 USD"
+ },
+ {
+  "cost_usd": "0.015",
+  "rate": "1.35",
+  "shop_currency": "EUR",
+  "order_currency": "GBP",
+  "valid": true,
+  "convertible": false
+ },
+ {
+  "cost_usd": "0.015",
+  "rate": "150.123456789",
+  "shop_currency": "JPY",
+  "order_currency": "JPY",
+  "valid": true,
+  "convertible": true,
+  "amount_minor": 2,
+  "note": "assistant session 00000000-0000-4000-8000-000000000000: 0.015 USD"
+ },
+ {
+  "cost_usd": "0.015",
+  "rate": " 0.377 ",
+  "shop_currency": "KWD",
+  "order_currency": "KWD",
+  "valid": true,
+  "convertible": true,
+  "amount_minor": 6,
+  "note": "assistant session 00000000-0000-4000-8000-000000000000: 0.015 USD"
+ },
+ {
+  "cost_usd": "0.015",
+  "rate": "1.123456789012345678901234567",
+  "shop_currency": "EUR",
+  "order_currency": "EUR",
+  "valid": true,
+  "convertible": true,
+  "amount_minor": 2,
+  "note": "assistant session 00000000-0000-4000-8000-000000000000: 0.015 USD"
+ },
+ {
+  "cost_usd": "0.015",
+  "rate": "999999999.999999999",
+  "shop_currency": "CLF",
+  "order_currency": "CLF",
+  "valid": true,
+  "convertible": true,
+  "amount_minor": 150000000000,
+  "note": "assistant session 00000000-0000-4000-8000-000000000000: 0.015 USD"
+ },
+ {
+  "cost_usd": "0.0049",
+  "rate": "1",
+  "shop_currency": "USD",
+  "order_currency": "USD",
+  "valid": true,
+  "convertible": true,
+  "amount_minor": 0,
+  "note": "assistant session 00000000-0000-4000-8000-000000000000: 0.0049 USD"
+ },
+ {
+  "cost_usd": "0.0049",
+  "rate": "1.35",
+  "shop_currency": "EUR",
+  "order_currency": "EUR",
+  "valid": true,
+  "convertible": true,
+  "amount_minor": 1,
+  "note": "assistant session 00000000-0000-4000-8000-000000000000: 0.0049 USD"
+ },
+ {
+  "cost_usd": "0.0049",
+  "rate": "1.35",
+  "shop_currency": "EUR",
+  "order_currency": "USD",
+  "valid": true,
+  "convertible": true,
+  "amount_minor": 0,
+  "note": "assistant session 00000000-0000-4000-8000-000000000000: 0.0049 USD"
+ },
+ {
+  "cost_usd": "0.0049",
+  "rate": "1.35",
+  "shop_currency": "EUR",
+  "order_currency": "GBP",
+  "valid": true,
+  "convertible": false
+ },
+ {
+  "cost_usd": "0.0049",
+  "rate": "150.123456789",
+  "shop_currency": "JPY",
+  "order_currency": "JPY",
+  "valid": true,
+  "convertible": true,
+  "amount_minor": 1,
+  "note": "assistant session 00000000-0000-4000-8000-000000000000: 0.0049 USD"
+ },
+ {
+  "cost_usd": "0.0049",
+  "rate": " 0.377 ",
+  "shop_currency": "KWD",
+  "order_currency": "KWD",
+  "valid": true,
+  "convertible": true,
+  "amount_minor": 2,
+  "note": "assistant session 00000000-0000-4000-8000-000000000000: 0.0049 USD"
+ },
+ {
+  "cost_usd": "0.0049",
+  "rate": "1.123456789012345678901234567",
+  "shop_currency": "EUR",
+  "order_currency": "EUR",
+  "valid": true,
+  "convertible": true,
+  "amount_minor": 1,
+  "note": "assistant session 00000000-0000-4000-8000-000000000000: 0.0049 USD"
+ },
+ {
+  "cost_usd": "0.0049",
+  "rate": "999999999.999999999",
+  "shop_currency": "CLF",
+  "order_currency": "CLF",
+  "valid": true,
+  "convertible": true,
+  "amount_minor": 49000000000,
+  "note": "assistant session 00000000-0000-4000-8000-000000000000: 0.0049 USD"
+ },
+ {
+  "cost_usd": "\"0.10000000000000000000000000001\"",
+  "rate": "1",
+  "shop_currency": "USD",
+  "order_currency": "USD",
+  "valid": false
+ },
+ {
+  "cost_usd": "\"0.10000000000000000000000000001\"",
+  "rate": "1.35",
+  "shop_currency": "EUR",
+  "order_currency": "EUR",
+  "valid": false
+ },
+ {
+  "cost_usd": "\"0.10000000000000000000000000001\"",
+  "rate": "1.35",
+  "shop_currency": "EUR",
+  "order_currency": "USD",
+  "valid": false
+ },
+ {
+  "cost_usd": "\"0.10000000000000000000000000001\"",
+  "rate": "1.35",
+  "shop_currency": "EUR",
+  "order_currency": "GBP",
+  "valid": false
+ },
+ {
+  "cost_usd": "\"0.10000000000000000000000000001\"",
+  "rate": "150.123456789",
+  "shop_currency": "JPY",
+  "order_currency": "JPY",
+  "valid": false
+ },
+ {
+  "cost_usd": "\"0.10000000000000000000000000001\"",
+  "rate": " 0.377 ",
+  "shop_currency": "KWD",
+  "order_currency": "KWD",
+  "valid": false
+ },
+ {
+  "cost_usd": "\"0.10000000000000000000000000001\"",
+  "rate": "1.123456789012345678901234567",
+  "shop_currency": "EUR",
+  "order_currency": "EUR",
+  "valid": false
+ },
+ {
+  "cost_usd": "\"0.10000000000000000000000000001\"",
+  "rate": "999999999.999999999",
+  "shop_currency": "CLF",
+  "order_currency": "CLF",
+  "valid": false
+ },
+ {
+  "cost_usd": "-1",
+  "rate": "1",
+  "shop_currency": "USD",
+  "order_currency": "USD",
+  "valid": false
+ },
+ {
+  "cost_usd": "-1",
+  "rate": "1.35",
+  "shop_currency": "EUR",
+  "order_currency": "EUR",
+  "valid": false
+ },
+ {
+  "cost_usd": "-1",
+  "rate": "1.35",
+  "shop_currency": "EUR",
+  "order_currency": "USD",
+  "valid": false
+ },
+ {
+  "cost_usd": "-1",
+  "rate": "1.35",
+  "shop_currency": "EUR",
+  "order_currency": "GBP",
+  "valid": false
+ },
+ {
+  "cost_usd": "-1",
+  "rate": "150.123456789",
+  "shop_currency": "JPY",
+  "order_currency": "JPY",
+  "valid": false
+ },
+ {
+  "cost_usd": "-1",
+  "rate": " 0.377 ",
+  "shop_currency": "KWD",
+  "order_currency": "KWD",
+  "valid": false
+ },
+ {
+  "cost_usd": "-1",
+  "rate": "1.123456789012345678901234567",
+  "shop_currency": "EUR",
+  "order_currency": "EUR",
+  "valid": false
+ },
+ {
+  "cost_usd": "-1",
+  "rate": "999999999.999999999",
+  "shop_currency": "CLF",
+  "order_currency": "CLF",
+  "valid": false
+ },
+ {
+  "cost_usd": "1e400",
+  "rate": "1",
+  "shop_currency": "USD",
+  "order_currency": "USD",
+  "valid": false
+ },
+ {
+  "cost_usd": "1e400",
+  "rate": "1.35",
+  "shop_currency": "EUR",
+  "order_currency": "EUR",
+  "valid": false
+ },
+ {
+  "cost_usd": "1e400",
+  "rate": "1.35",
+  "shop_currency": "EUR",
+  "order_currency": "USD",
+  "valid": false
+ },
+ {
+  "cost_usd": "1e400",
+  "rate": "1.35",
+  "shop_currency": "EUR",
+  "order_currency": "GBP",
+  "valid": false
+ },
+ {
+  "cost_usd": "1e400",
+  "rate": "150.123456789",
+  "shop_currency": "JPY",
+  "order_currency": "JPY",
+  "valid": false
+ },
+ {
+  "cost_usd": "1e400",
+  "rate": " 0.377 ",
+  "shop_currency": "KWD",
+  "order_currency": "KWD",
+  "valid": false
+ },
+ {
+  "cost_usd": "1e400",
+  "rate": "1.123456789012345678901234567",
+  "shop_currency": "EUR",
+  "order_currency": "EUR",
+  "valid": false
+ },
+ {
+  "cost_usd": "1e400",
+  "rate": "999999999.999999999",
+  "shop_currency": "CLF",
+  "order_currency": "CLF",
+  "valid": false
+ },
+ {
+  "cost_usd": "999999.99999999",
+  "rate": "1",
+  "shop_currency": "USD",
+  "order_currency": "USD",
+  "valid": true,
+  "convertible": true,
+  "amount_minor": 100000000,
+  "note": "assistant session 00000000-0000-4000-8000-000000000000: 999999.99999999 USD"
+ },
+ {
+  "cost_usd": "999999.99999999",
+  "rate": "1.35",
+  "shop_currency": "EUR",
+  "order_currency": "EUR",
+  "valid": true,
+  "convertible": true,
+  "amount_minor": 135000000,
+  "note": "assistant session 00000000-0000-4000-8000-000000000000: 999999.99999999 USD"
+ },
+ {
+  "cost_usd": "999999.99999999",
+  "rate": "1.35",
+  "shop_currency": "EUR",
+  "order_currency": "USD",
+  "valid": true,
+  "convertible": true,
+  "amount_minor": 100000000,
+  "note": "assistant session 00000000-0000-4000-8000-000000000000: 999999.99999999 USD"
+ },
+ {
+  "cost_usd": "999999.99999999",
+  "rate": "1.35",
+  "shop_currency": "EUR",
+  "order_currency": "GBP",
+  "valid": true,
+  "convertible": false
+ },
+ {
+  "cost_usd": "999999.99999999",
+  "rate": "150.123456789",
+  "shop_currency": "JPY",
+  "order_currency": "JPY",
+  "valid": true,
+  "convertible": true,
+  "amount_minor": 150123457,
+  "note": "assistant session 00000000-0000-4000-8000-000000000000: 999999.99999999 USD"
+ },
+ {
+  "cost_usd": "999999.99999999",
+  "rate": " 0.377 ",
+  "shop_currency": "KWD",
+  "order_currency": "KWD",
+  "valid": true,
+  "convertible": true,
+  "amount_minor": 377000000,
+  "note": "assistant session 00000000-0000-4000-8000-000000000000: 999999.99999999 USD"
+ },
+ {
+  "cost_usd": "999999.99999999",
+  "rate": "1.123456789012345678901234567",
+  "shop_currency": "EUR",
+  "order_currency": "EUR",
+  "valid": true,
+  "convertible": true,
+  "amount_minor": 112345679,
+  "note": "assistant session 00000000-0000-4000-8000-000000000000: 999999.99999999 USD"
+ },
+ {
+  "cost_usd": "999999.99999999",
+  "rate": "999999999.999999999",
+  "shop_currency": "CLF",
+  "order_currency": "CLF",
+  "valid": true,
+  "convertible": true,
+  "amount_minor": 9999999999999899990,
+  "note": "assistant session 00000000-0000-4000-8000-000000000000: 999999.99999999 USD"
+ },
+ {
+  "cost_usd": "0.30000000000000004",
+  "rate": "1",
+  "shop_currency": "USD",
+  "order_currency": "USD",
+  "valid": false
+ },
+ {
+  "cost_usd": "0.30000000000000004",
+  "rate": "1.35",
+  "shop_currency": "EUR",
+  "order_currency": "EUR",
+  "valid": false
+ },
+ {
+  "cost_usd": "0.30000000000000004",
+  "rate": "1.35",
+  "shop_currency": "EUR",
+  "order_currency": "USD",
+  "valid": false
+ },
+ {
+  "cost_usd": "0.30000000000000004",
+  "rate": "1.35",
+  "shop_currency": "EUR",
+  "order_currency": "GBP",
+  "valid": false
+ },
+ {
+  "cost_usd": "0.30000000000000004",
+  "rate": "150.123456789",
+  "shop_currency": "JPY",
+  "order_currency": "JPY",
+  "valid": false
+ },
+ {
+  "cost_usd": "0.30000000000000004",
+  "rate": " 0.377 ",
+  "shop_currency": "KWD",
+  "order_currency": "KWD",
+  "valid": false
+ },
+ {
+  "cost_usd": "0.30000000000000004",
+  "rate": "1.123456789012345678901234567",
+  "shop_currency": "EUR",
+  "order_currency": "EUR",
+  "valid": false
+ },
+ {
+  "cost_usd": "0.30000000000000004",
+  "rate": "999999999.999999999",
+  "shop_currency": "CLF",
+  "order_currency": "CLF",
+  "valid": false
+ }
+]

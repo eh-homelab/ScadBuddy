@@ -33,7 +33,7 @@ if [ "${1:-}" = all ]; then
 fi
 
 wiring='Dockerfile$|\.dockerignore$|\.github/workflows/ci\.yml$|\.github/scripts/(select-lanes|changed-paths)(\.test)?\.sh$'
-backend="^(backend/|models/|deploy/camera/|deploy/grafana/|deploy/security/|test-fixtures/|e2e-stack/|workers/rust/vectors/|workers/playwright-mcp/browser-vectors\.json$|frontend/page-csp\.txt$|THIRD_PARTY_NOTICES\.md$|\.gitattributes$|\.github/scripts/merge-test-durations\.sh$|$wiring)"
+backend="^(backend/|models/|deploy/camera/|deploy/grafana/|deploy/security/|test-fixtures/|e2e-stack/|workers/rust/vectors/|workers/playwright-mcp/browser-vectors\.json$|tools/go/core/internal/bus/testdata/|frontend/page-csp\.txt$|THIRD_PARTY_NOTICES\.md$|\.gitattributes$|\.github/scripts/merge-test-durations\.sh$|$wiring)"
 # agent-durable's tests read agent/ (fixtures, vectors) and the agent's migrations in
 # backend/scadbuddy/migrations_agent/ (#5299). The job also checks the backend's harness pin.
 agent_durable="^(agent-durable/|agent/|backend/scadbuddy/migrations_agent/|backend/(pyproject\.toml|uv\.lock)$|\.github/scripts/(uv-git-pin|harness-pin)(\.test)?\.sh$|$wiring)"
@@ -42,8 +42,10 @@ image_extra='^(frontend/|deploy/cups/|scripts/gen-api-request-defaults\.mjs$|too
 
 docs='^(docs/.+\.md|(.+/)?(CLAUDE|AGENTS)\.md)$'
 # A doc a test reads is code, not docs-only: `agent/test/evalScoring.test.ts` resolves
-# the design spec's §6.2 from disk (#7792). A new test that reads a doc adds its path here.
-read_by_tests='^docs/superpowers/specs/2026-09-22-scadbuddy-design\.md$'
+# the design spec's §6.2 from disk (#7792), and the Go proof tests in
+# `tools/go/core/internal/inventory/modeldata/` read `docs/inventory-model/README.md` (#6949).
+# A new test that reads a doc adds its path here.
+read_by_tests='^docs/superpowers/specs/2026-09-22-scadbuddy-design\.md$|^docs/inventory-model/README\.md$'
 paths=$(cat)
 code=$(grep -vE "$docs" <<<"$paths" || true; grep -E "(^|/)vendor/|$read_by_tests" <<<"$paths" || true)
 pick() { if grep -qE "$1" <<<"$code"; then echo true; else echo false; fi; }

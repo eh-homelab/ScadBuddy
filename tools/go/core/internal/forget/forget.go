@@ -1,9 +1,8 @@
 // Package forget is area forget of backend/scadbuddy/api/crud_agent_forget.py, with
-// agent_data/forget.py and agent_data/flow_blobs.py, statement for statement: a browser call's
-// key dropped, the keys no forget deletes swept, and a flow run's images kept and read.
-//
-// POST …/forgotten-subjects/{subject} stays Python's: a session's forks take their ranges of
-// its transcript there, opened and sealed under the KEK, which Go does not hold.
+// agent_data/forget.py and agent_data/flow_blobs.py, statement for statement: a subject
+// forgotten (subject.go: a session's forks first take their ranges of its transcript, opened
+// and sealed under the KEK), a browser call's key dropped, the keys no forget deletes swept,
+// and a flow run's images kept and read.
 package forget
 
 import (
@@ -24,6 +23,7 @@ import (
 
 	"github.com/eh-homelab/ScadBuddy/tools/go/core/internal/crud"
 	"github.com/eh-homelab/ScadBuddy/tools/go/core/internal/httpx"
+	"github.com/eh-homelab/ScadBuddy/tools/go/core/internal/seal"
 )
 
 const (
@@ -54,17 +54,22 @@ var (
 	extensions    = map[string]string{"image/png": "png", "image/jpeg": "jpg", "image/gif": "gif", "image/webp": "webp"}
 )
 
-// Forget is the area's routes but the forget itself.
-type Forget struct{ Pool *pgxpool.Pool }
+// Forget is the area's routes. Keys may be nil: a forget whose forks take transcript entries
+// is then refused.
+type Forget struct {
+	Pool *pgxpool.Pool
+	Keys *seal.Keys
+}
 
 // Reads are the area's GET route.
 func (f *Forget) Reads() []crud.Route {
 	return []crud.Route{{Method: "GET", Path: "/flow-blobs/{subject}/{name}", Handle: f.getBlob}}
 }
 
-// Writes are the area's writes Go answers.
+// Writes are the area's writes.
 func (f *Forget) Writes() []crud.Route {
 	return []crud.Route{
+		{Method: "POST", Path: "/forgotten-subjects/{subject}", Handle: f.forget},
 		{Method: "POST", Path: "/payload-keys/{subject}/drop", Handle: f.drop},
 		{Method: "POST", Path: "/payload-key-sweeps", Handle: f.sweep, MaxBody: jsonBodyBytesMax},
 		{Method: "POST", Path: "/flow-blobs/{subject}", Handle: f.put, MaxBody: multipartBodyMax},

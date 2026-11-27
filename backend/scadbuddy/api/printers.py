@@ -39,6 +39,7 @@ from scadbuddy.bambuddy.virtual_printers import (
 )
 from scadbuddy.core.problems import ApiError
 from scadbuddy.operations.component import OperationsDep
+from scadbuddy.orders.actor import current_actor
 from scadbuddy.printers.address import UnsafeAddressError
 from scadbuddy.printers.ams_slots import SlotCommandSent, SlotConfigured
 from scadbuddy.printers.bambuddy_sync import (
@@ -200,7 +201,7 @@ async def sync_bambuddy(
 ) -> PrinterSyncResult:
     settings = await asyncio.to_thread(store.load)
     async with client_for(settings) as client:
-        return await sync_printers(printers, client, dry_run=dry_run)
+        return await sync_printers(printers, client, by=current_actor(), dry_run=dry_run)
 
 
 # ── Bambuddy's virtual printers (#4747 item 4) ───────────────────────────────────────
@@ -481,8 +482,9 @@ async def link_bambuddy(
                 status.HTTP_422_UNPROCESSABLE_CONTENT,
                 f"Bambuddy printer {printer.id} reports another serial than this printer's",
             )
+        by = current_actor()
         linked = await _call(
-            lambda: printers.store.link_bambuddy(printer_id, body.bambuddy_printer_id)
+            lambda: printers.store.link_bambuddy(printer_id, body.bambuddy_printer_id, by)
         )
         printers.changed(printer_id)
         try:

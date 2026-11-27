@@ -39,6 +39,7 @@ var reasons = map[string]error{
 	"handle-taken":    ErrHandleTaken,
 	"seq-ahead":       fleetchat.ErrBadSeq,
 	"text-too-long":   fleetchat.ErrTooLong,
+	"unknown-session": ErrUnknownSession,
 	// A join that would make a channel with a name valid only before #8149.
 	"legacy-channel-name": fleetchat.ErrBadChannel,
 }

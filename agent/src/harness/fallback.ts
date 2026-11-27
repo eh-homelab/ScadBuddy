@@ -1,6 +1,7 @@
 import type { SDKMessage, SDKResultMessage } from '@anthropic-ai/claude-agent-sdk'
 import { type AuditSink, SYSTEM_ACTOR } from '../audit/log.js'
 import {
+  agentUses,
   type Credential,
   type CredentialEvent,
   type CredentialRepo,
@@ -595,7 +596,10 @@ export class CredentialPool implements CredentialSource {
     // One read of every row, its state, epoch and sealed secret together (one transaction on the
     // API, which audits the reveal): the epoch recorded against is always that of the secret the
     // turn runs on.
-    const rows = await this.repo.revealAll('turn', { sessionId: options.sessionId, turnId: options.turnId })
+    // #7983: only the agent's rows; a `claude_login` or a `fleet` row is the fleet's.
+    const rows = (await this.repo.revealAll('turn', { sessionId: options.sessionId, turnId: options.turnId })).filter((r) =>
+      agentUses(r.stored),
+    )
     const list = rows.map((r) => r.stored)
     const out: PooledCredential[] = []
     for (const { stored: c, credential } of rows) {

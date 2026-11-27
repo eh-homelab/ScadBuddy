@@ -89,6 +89,7 @@ from scadbuddy.attachments.component import PRINT_ATTACHMENTS
 from scadbuddy.auth.authorship_rule import AuthorshipRule
 from scadbuddy.auth.check import auth_check
 from scadbuddy.auth.component import AUTH
+from scadbuddy.auth.exchange import PER_MACHINE_CALLERS, BootstrapVerifier
 from scadbuddy.auth.gate import AuthGate
 from scadbuddy.auth.revoke import RetiredState, retired_state, revoke_retired
 from scadbuddy.auth.start_check import check_enforce
@@ -184,6 +185,7 @@ from scadbuddy.printers.bambuddy_sync import (
 from scadbuddy.printers.component import PRINTERS
 from scadbuddy.printers.native import LanCommands
 from scadbuddy.printers.print_activities import LanActivities, LanDeps
+from scadbuddy.printers.store import BAMBUDDY_ACTOR
 from scadbuddy.printers.watch import WatchActivities
 from scadbuddy.rack.component import RACK_USAGE
 from scadbuddy.render.agent_migrations import migrate_agent
@@ -1178,7 +1180,7 @@ async def _sync_bambuddy_printers_logged(state: AppState) -> None:
 
     async def sweep(client: BambuddyClient) -> None:
         try:
-            result = await sync_printers(registry, client)
+            result = await sync_printers(registry, client, by=BAMBUDDY_ACTOR)
         except Exception:
             logger.exception("could not sync the printers from Bambuddy")
             raise
@@ -1539,8 +1541,25 @@ def _rotate_service_credentials(state: AppState) -> None:
     """#4975 phase 4 (spec 2026-11-01 §7.2): each caller's next credential when its
     newest has under seven days left, and the long-dead ones forgotten. Without the KEK
     none can be sealed, so none are issued. First, a sealed credential of a caller that
-    reads none any more (the projects and print workers', #5298) is revoked, KEK or not."""
+    reads none any more (the projects and print workers', #5298) is revoked, KEK or not,
+    and so is a per-machine caller's credential whose machine has no bootstrap proof file
+    now (`fleet-rotator.<machine>`: the machine was revoked)."""
     auth = state.components.get(AUTH)
+    bootstrap = auth.verifiers.get("bootstrap")
+    for caller in PER_MACHINE_CALLERS:
+        machines = bootstrap.machines(caller) if isinstance(bootstrap, BootstrapVerifier) else set()
+        try:
+            revoked = auth.credentials.revoke_machines_without_proof(caller, machines)
+        except Exception:
+            logger.warning(
+                "could not revoke the credentials of machines with no proof", exc_info=True
+            )
+        else:
+            if revoked:
+                logger.info(
+                    "revoked the credentials of machines with no proof",
+                    extra={"caller": caller, "credentials": revoked},
+                )
     try:
         retired = auth.credentials.revoke_retired_legacy()
     except Exception:

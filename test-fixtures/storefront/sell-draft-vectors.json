@@ -29,7 +29,7 @@
     }
   },
   {
-    "name": "a blank listing: the template's defaults; a colour whose template default no filament has is still offered, starting at the first colour on offer (#6144)",
+    "name": "a blank listing: the template's defaults; a colour whose template default no filament has is still offered, starting at the closest colour on offer (#6144, #8126)",
     "schema": {
       "groups": ["Size", "Colours"],
       "parameters": [
@@ -49,7 +49,7 @@
     }
   },
   {
-    "name": "no colour matches: every priced filament, of any material; the colour starts at the first of them (#6144)",
+    "name": "no colour matches: every priced filament, of any material; the colour starts at the closest of them (#6144, #8126)",
     "schema": {
       "groups": ["Colours"],
       "parameters": [{ "name": "body", "type": "color", "group": "Colours", "caption": "Body", "initial": "#123456" }]
@@ -60,9 +60,30 @@
     ],
     "values": {},
     "expected": {
-      "params": { "body": { "kind": "choice", "choices": [], "default": "#F9D72C" } },
+      "params": { "body": { "kind": "choice", "choices": [], "default": "#1E1E1E" } },
       "fixed": {},
       "colours": ["f-pla", "f-petg"]
+    }
+  },
+  {
+    "name": "a colour whose template default no filament has starts at the closest colour on offer, not the first: the dollhouse's roof and walls (#6144, #8126)",
+    "schema": {
+      "groups": ["Colours"],
+      "parameters": [
+        { "name": "roof", "type": "color", "group": "Colours", "caption": "Roof", "initial": "#7E57C2" },
+        { "name": "walls", "type": "color", "group": "Colours", "caption": "Walls", "initial": "#F8BBD0" }
+      ]
+    },
+    "filaments": [
+      { "id": "f-white", "material": "PLA", "subtype": null, "brand": null, "colour_name": "Jade White", "colour": "#FFFFFF", "cost_per_kg": "20", "density_g_cm3": "1.24", "archived_at": null, "created_at": "2026-11-01T00:00:00Z", "updated_at": "2026-11-01T00:00:00Z" },
+      { "id": "f-purple", "material": "PLA", "subtype": null, "brand": null, "colour_name": "Purple", "colour": "#694ED4", "cost_per_kg": "20", "density_g_cm3": "1.24", "archived_at": null, "created_at": "2026-11-01T00:00:00Z", "updated_at": "2026-11-01T00:00:00Z" },
+      { "id": "f-pink", "material": "PLA", "subtype": null, "brand": null, "colour_name": "Pink", "colour": "#FC97B0", "cost_per_kg": "20", "density_g_cm3": "1.24", "archived_at": null, "created_at": "2026-11-01T00:00:00Z", "updated_at": "2026-11-01T00:00:00Z" }
+    ],
+    "values": {},
+    "expected": {
+      "params": { "roof": { "kind": "choice", "choices": [], "default": "#694ED4" }, "walls": { "kind": "choice", "choices": [], "default": "#FC97B0" } },
+      "fixed": {},
+      "colours": ["f-white", "f-purple", "f-pink"]
     }
   },
   {
@@ -186,7 +207,7 @@
     "input": { "body": { "kind": "choice", "choices": ["#ffffff"], "default": "#ffffff" } }
   },
   {
-    "name": "a colour starts at the first colour on offer that is not a support material, even when the support material comes first (#6144, #6402 review)",
+    "name": "a colour starts at the closest colour on offer that is not a support material, even when the support material comes first (#6144, #6402 review)",
     "schema": {
       "groups": ["Colours"],
       "parameters": [{ "name": "body", "type": "color", "group": "Colours", "caption": "Body", "initial": "#123456" }]
@@ -204,7 +225,7 @@
     "input": { "body": { "kind": "choice", "choices": ["#ffffff"], "default": "#ffffff" } }
   },
   {
-    "name": "a colour starts at the first colour on offer that is not a support-only filament's: one of another material whose colour only a support setting uses (#6144, #6402 review)",
+    "name": "a colour starts at the closest colour on offer that is not a support-only filament's: one of another material whose colour only a support setting uses (#6144, #6402 review)",
     "schema": {
       "groups": ["Supports", "Colours"],
       "parameters": [

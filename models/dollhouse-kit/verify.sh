@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # Render models/dollhouse-kit: every piece with its defaults, the main style
-# variations, every piece at its largest settings, and "max colour" cases with
-# all 32 colours distinct. Then check concrete facts:
+# variations, every piece at its largest settings, "max colour" cases with
+# all colours distinct, every piece and style at the 1:12 set (s12-*), and
+# every piece at the smallest settings (min12-*). Then check concrete facts:
 #   * colour parts: exactly the colours the piece should use, none uncoloured
 #   * no two colours overlap: the per-colour closed solids (rendered the way
 #     ScadBuddy renders them) add up to the volume of the whole piece
@@ -12,8 +13,9 @@
 #     tile to tile, stair halves, door leaves) do not intersect; a key in its
 #     pocket does not intersect, and the same key moved clearance + 0.05 mm
 #     does, so the play is the clip_clearance parameter
-#   * the door opening is at least 320 mm clear across its two courses; the
-#     default window spans a 30 cm doll's eye height
+#   * the door opening is at least 320 mm clear across its two courses (160 mm
+#     at 1:12); the default window spans a 30 cm doll's eye height (a 15 cm
+#     doll's at 1:12). The fit probes run at both scales.
 #   * each piece renders in under 10 s
 #
 # The checking runs on the host with python3 and the standard library only:
@@ -193,11 +195,91 @@ for pc in PIECES:
         tag = "-".join(str(v) for v in e.values())
         CASES.append(("max-%s%s" % (pc, "-" + tag if tag else ""), dict(MAXSET, piece=pc, **e), None))
 CASES.append(("room-preview", dict(preview="room"), None))
+
+# ---- 1:12 (10-15 cm dolls): the README's 1:12 set, every piece and its styles. Each
+# case must make the same colour parts as its 1:6 twin (shutters, flower box and
+# flowers included) and print no NOTE.
+S12 = dict(module_size=75, course_height=105, texture_size=6, wainscot_height=45, window_width=35,
+           window_height=60, window_sill=20, door_width=40, door_height=165, stair_width=50, tread_depth=12,
+           railing_height=75)
+S12_CASES = [
+    ("s12-window", {}, W_IN_UP + WIN + ["shutter_color", "trim_color"]),
+    ("s12-window-arched-stone-lower", dict(window_style="arched", exterior="stone", course="lower", wallpaper="stars"),
+     W_IN_LO + WIN + ["shutter_color", "trim_color", "exterior_color", "mortar_color"]),
+    ("s12-window-round-stucco", dict(window_style="round", exterior="stucco", width_units=2, wallpaper="polka_dots"),
+     W_IN_UP + WIN + ["exterior_color"]),
+    ("s12-wall-brick-lower", dict(piece="wall", course="lower", exterior="brick", wallpaper="diamonds"),
+     W_IN_LO + ["exterior_color", "mortar_color"]),
+    ("s12-wall-half-siding", dict(piece="wall", width_units=0.5, exterior="siding", wallpaper="hearts"),
+     W_IN_UP + ["exterior_color"]),
+    ("s12-door-lower", dict(piece="wall_door_lower"), W_IN_LO + ["door_frame_color", "trim_color"]),
+    ("s12-door-upper", dict(piece="wall_door_upper"), W_IN_UP + ["door_frame_color"]),
+    ("s12-door-lower-arched", dict(piece="wall_door_lower", door_style="arched"), W_IN_LO + ["door_frame_color", "trim_color"]),
+    ("s12-door-upper-arched", dict(piece="wall_door_upper", door_style="arched"), W_IN_UP + ["door_frame_color"]),
+    ("s12-door-lower-french", dict(piece="wall_door_lower", door_style="french"), W_IN_LO + ["door_frame_color", "trim_color"]),
+    ("s12-door-upper-french", dict(piece="wall_door_upper", door_style="french"), W_IN_UP + ["door_frame_color"]),
+    ("s12-door-lower-wide", dict(piece="wall_door_lower", width_units=1.5, door_width=80),
+     W_IN_LO + ["door_frame_color", "trim_color"]),
+    ("s12-leaf-lower", dict(piece="door_leaf_lower"), ["door_color", "door_knob_color"]),
+    ("s12-leaf-upper", dict(piece="door_leaf_upper"), ["door_color"]),
+    ("s12-leaf-lower-arched", dict(piece="door_leaf_lower", door_style="arched"), ["door_color", "door_knob_color"]),
+    ("s12-leaf-upper-arched", dict(piece="door_leaf_upper", door_style="arched"), ["door_color"]),
+    ("s12-leaf-lower-french", dict(piece="door_leaf_lower", door_style="french"),
+     ["door_color", "window_pane_color", "door_knob_color"]),
+    ("s12-leaf-upper-french", dict(piece="door_leaf_upper", door_style="french"), ["door_color", "window_pane_color"]),
+    ("s12-corner-upper", dict(piece="corner_post"), ["wall_color", "wall_inside_color", "crown_color"]),
+    ("s12-corner-brick-lower", dict(piece="corner_post", course="lower", exterior="brick"),
+     ["exterior_color", "mortar_color", "wall_inside_color", "wainscot_color", "baseboard_color"]),
+    ("s12-corner-siding", dict(piece="corner_post", exterior="siding"), ["exterior_color", "wall_inside_color", "crown_color"]),
+    ("s12-floor", dict(piece="floor_tile", depth_units=1), ["floor_color", "floor_accent_color"]),
+    ("s12-floor-stairwell", dict(piece="floor_tile", depth_units=2, stairwell=True, floor_texture="herringbone"),
+     ["floor_color", "floor_accent_color"]),
+    ("s12-floor-herringbone-rug", dict(piece="floor_tile", width_units=2, floor_texture="herringbone", rug="oval"),
+     ["floor_color", "floor_accent_color", "rug_color", "rug_border_color"]),
+    ("s12-floor-tiles-rug", dict(piece="floor_tile", depth_units=1, floor_texture="tiles", rug="rectangle"),
+     ["floor_color", "floor_accent_color", "rug_color", "rug_border_color"]),
+    ("s12-roof-shingles", dict(piece="roof_panel", depth_units=1), ["roof_color", "roof_accent_color"]),
+    ("s12-roof-tiles", dict(piece="roof_panel", roof_style="tiles"), ["roof_color", "roof_accent_color"]),
+    ("s12-roof-flat", dict(piece="roof_panel", roof_style="flat", depth_units=1), ["roof_color", "roof_accent_color"]),
+    ("s12-stairs-lower", dict(piece="stairs_lower"), ["stair_tread_color", "stair_riser_color"]),
+    ("s12-stairs-upper", dict(piece="stairs_upper"), ["stair_tread_color", "stair_riser_color"]),
+    ("s12-railing", dict(piece="railing", width_units=1.5), ["railing_color", "spindle_color"]),
+    ("s12-keys", dict(piece="connectors"), ["clip_color"]),
+    ("s12-pegs", dict(piece="connectors", connector_type="pegs"), ["clip_color"]),
+    ("s12-hinge-pins", dict(piece="connectors", connector_type="hinge_pins", connector_count=2), ["clip_color"]),
+]
+for name, ov, want in S12_CASES:
+    CASES.append((name, dict(S12, **ov), want))
+CASES.append(("s12-room-preview", dict(S12, preview="room"), None))
+# Every piece at the smallest settings the customizer allows: 1:12 Grid, the thinnest
+# walls and floors, the smallest window, door, stairs, railing and texture, the
+# finest patterns, the widest clearance and half-module pieces.
+MIN12 = dict(S12, wall_thickness=4, floor_thickness=5, texture_size=5, wainscot_height=20, window_width=20,
+             window_height=20, window_sill=10, door_width=40, door_height=160, stair_width=40, tread_depth=10,
+             railing_height=70, pattern_repeats=12, planks_per_module=12, tiles_per_module=10, clip_clearance=0.5,
+             width_units=0.5, depth_units=0.5, connector_count=30, exterior="brick", wallpaper="stars")
+for pc in PIECES:
+    extra = [dict(door_style=s) for s in ("plain", "arched", "french")] if "door" in pc else [{}]
+    if pc == "connectors":
+        extra = [dict(connector_type=t) for t in ("keys", "pegs", "hinge_pins")]
+    if pc == "floor_tile":
+        extra = [dict(stairwell=True, rug="oval", floor_texture="herringbone")]
+    if pc == "roof_panel":
+        extra = [dict(roof_style=s) for s in ("shingles", "tiles", "flat")]
+    if pc in ("wall", "wall_window", "corner_post"):
+        extra = [dict(course="lower"), dict(course="upper", exterior="siding")]
+    for e in extra:
+        tag = "-".join(str(v) for v in e.values())
+        CASES.append(("min12-%s%s" % (pc, "-" + tag if tag else ""), dict(MIN12, piece=pc, **e), None))
+
 # the closed-solid overlap check runs on these (plus every maxcol case)
 OVERLAP = {"defaults", "wall-brick-lower", "window-arched-siding", "window-round-stone", "door-lower",
            "door-upper-arched", "arch-stars-sliver-415", "round-dots-sliver-415", "leaf-lower", "corner-siding",
            "floor-herringbone-rug", "roof-tiles",
-           "stairs-upper", "railing", "thin-walls"}
+           "stairs-upper", "railing", "thin-walls",
+           "s12-window", "s12-window-arched-stone-lower", "s12-door-lower", "s12-door-upper-arched",
+           "s12-leaf-lower-french", "s12-corner-brick-lower", "s12-floor-herringbone-rug", "s12-stairs-lower",
+           "s12-railing", "min12-wall_window-lower", "min12-wall_door_upper-arched"}
 
 
 def scad(v):
@@ -324,7 +406,7 @@ NOTES = {
 # cases whose NOTEs are exactly the listed ones: the wall NOTE must not also blame the wall
 NOTES_EXACT = {"note-window-arch-short", "note-window-arch-high-sill", "note-window-round-high-sill"}
 NOTE_FREE = {"defaults", "door-lower", "door-upper-arched", "leaf-lower", "floor-herringbone-rug", "floor-stairwell",
-             "hinge-pins", "room-preview"}
+             "hinge-pins", "room-preview"} | {name for name, _, _ in CASES if name.startswith("s12-")}
 
 # ---- checks per case
 for name, ov, want in CASES:
@@ -344,7 +426,7 @@ for name, ov, want in CASES:
     if name in NOTE_FREE:
         check(not log_notes, "reports no NOTE (got %s)" % log_notes)
     check(abs(min(zs)) <= TOL, "sits on z=0 (min z %.3f)" % min(zs))
-    if name != "room-preview":
+    if "preview" not in ov:
         check(secs.get(name, 99) < 10, "renders in under 10 s (%.1f s)" % secs.get(name, 99))
     if name.startswith("max-"):
         check(all(e <= BED + TOL for e in ext),
@@ -358,20 +440,21 @@ for name, ov, want in CASES:
 
     # grid dimensions
     pc = ov.get("piece", "wall_window")
+    grid = want is not None or name.startswith("min12-")
     M, u, v, CH, T = P(ov, "module_size"), P(ov, "width_units"), P(ov, "depth_units"), P(ov, "course_height"), P(ov, "wall_thickness")
-    if want is not None and pc in WALLS and "preview" not in ov:
+    if grid and pc in WALLS and "preview" not in ov:
         uu = max(u, 1) if "door" in pc else u
         check(abs(ext[0] - (uu * M - G)) <= TOL, "wall length %.2f == %g x %g - 0.4" % (ext[0], uu, M))
         check(abs(ext[1] - CH) <= TOL, "wall course height %.2f == %g" % (ext[1], CH))
-    if want is not None and pc in ("floor_tile", "roof_panel"):
+    if grid and pc in ("floor_tile", "roof_panel"):
         check(abs(ext[0] - (u * M - G)) <= TOL and abs(ext[1] - (v * M - G)) <= TOL,
               "tile %.2f x %.2f == (%g x %g, %g x %g) - 0.4" % (ext[0], ext[1], u, M, v, M))
-    if want is not None and pc == "floor_tile":
+    if grid and pc == "floor_tile":
         check(abs(ext[2] - P(ov, "floor_thickness")) <= TOL, "floor tile %.2f thick" % ext[2])
-    if want is not None and pc == "railing":
+    if grid and pc == "railing":
         check(abs(ext[0] - (u * M - G)) <= TOL and abs(ext[1] - P(ov, "railing_height")) <= TOL
               and abs(ext[2] - T) <= TOL, "railing %.2f x %.2f x %.2f" % ext)
-    if want is not None and pc == "corner_post":
+    if grid and pc == "corner_post":
         check(abs(max(xs) - (M / 2 - G)) <= TOL and abs(max(ys) - (M / 2 - G)) <= TOL and abs(ext[2] - CH) <= TOL,
               "corner arms reach %.2f / %.2f == %g, one course (%.2f) tall" % (max(xs), max(ys), M / 2 - G, ext[2]))
 
@@ -383,13 +466,19 @@ for name, ov, want in CASES:
               "colours do not overlap: sum of %d closed parts %.1f == whole %.1f mm3" % (len(named), parts, whole))
 
 # ---- phase 3: fit probes. Each is an intersection that must be empty (or
-# must not be). Built by including the model with piece="none".
-Mw, CHd, Td, C = D["module_size"], D["course_height"], D["wall_thickness"], D["clip_clearance"]
-Lw = Mw - G
+# must not be). Built by including the model with piece="none". They run at
+# the 1:6 defaults and again at the 1:12 set (S12), where the door box is a
+# 160 mm doll instead of a 320 mm one.
+C = D["clip_clearance"]
 SHIFT = C + 0.05
 SHIFT_45 = C * math.sqrt(2) + 0.05     # across a 45-degree flare the play is C x sqrt(2)
 KEY = "linear_extrude(KT) key2d(0);"
-probes = {
+
+
+def make_probes(DD, clear, arch_w):
+    Mw, CHd, Td = DD["module_size"], DD["course_height"], DD["wall_thickness"]
+    Lw = Mw - G
+    return {
     # two 1-unit walls at exactly module pitch
     "inline": "intersection() { wall_piece(\"wall\", 1); translate([%g, 0, 0]) wall_piece(\"wall\", 1); }" % Mw,
     "inline-key": "intersection() { union() { wall_piece(\"wall\", 1); translate([%g, 0, 0]) wall_piece(\"wall\", 1); } "
@@ -445,18 +534,18 @@ probes = {
     # a 320 mm doll-sized box through the door, from the hinge block to the far jamb
     "door-clear": "let (u = 1, a = dr_axes(u)[0]) intersection() { union() { wall_piece(\"door_lower\", u); "
                   "translate([0, CH, 0]) wall_piece(\"door_upper\", u); } "
-                  "translate([a + 3.01, THR + 0.01, -5]) cube([dr_cx(u) + dr_w(u) / 2 - a - 3.02, 320, T + 20]); }",
+                  "translate([a + 3.01, THR + 0.01, -5]) cube([dr_cx(u) + dr_w(u) / 2 - a - 3.02, %g, T + 20]); }" % clear,
     "door-clear-french": "let (u = 1.5, a = dr_axes(u)[0], b = dr_axes(u)[1]) intersection() { union() { wall_piece(\"door_lower\", u); "
                          "translate([0, CH, 0]) wall_piece(\"door_upper\", u); } "
-                         "translate([a + 3.01, THR + 0.01, -5]) cube([b - a - 6.02, 320, T + 20]); }",
+                         "translate([a + 3.01, THR + 0.01, -5]) cube([b - a - 6.02, %g, T + 20]); }" % clear,
     "door-clear-arched": "let (u = 1, a = dr_axes(u)[0]) intersection() { union() { wall_piece(\"door_lower\", u); "
                          "translate([0, CH, 0]) wall_piece(\"door_upper\", u); } "
-                         "translate([dr_cx(u) - 20, THR + 0.01, -5]) cube([40, 320, T + 20]); }",
+                         "translate([dr_cx(u) - %g, THR + 0.01, -5]) cube([%g, %g, T + 20]); }" % (arch_w / 2, arch_w, clear),
     # positive controls: 1 mm taller than the clear height hits the header,
     # leaves pushed 1.2 mm towards the hinge jamb hit it
     "door-clear-331": "let (u = 1, a = dr_axes(u)[0]) intersection() { union() { wall_piece(\"door_lower\", u); "
                       "translate([0, CH, 0]) wall_piece(\"door_upper\", u); } "
-                      "translate([a + 3.01, THR + 0.01, -5]) cube([dr_cx(u) + dr_w(u) / 2 - a - 3.02, %g, T + 20]); }" % (D["door_height"] + 1),
+                      "translate([a + 3.01, THR + 0.01, -5]) cube([dr_cx(u) + dr_w(u) / 2 - a - 3.02, %g, T + 20]); }" % (DD["door_height"] + 1),
     "door-leaves-x": "let (u = 1) intersection() { union() { wall_piece(\"door_lower\", u); translate([0, CH, 0]) wall_piece(\"door_upper\", u); } "
                      "translate([-1.2, 0, 0]) for (h = [\"lower\", \"upper\"]) translate([0, 0, (T - LT) / 2]) one_leaf(u, h, dr_axes(u)[0]); }",
     # rail on the floor edge, in line with the next rail
@@ -466,36 +555,44 @@ PROBE_DEFS = {"door-clear-french": dict(door_style="french", door_width=140),
               "door-clear-arched": dict(door_style="arched")}
 EXPECT_SOLID = {"door-clear-331", "door-leaves-x", "inline-key-x", "inline-key-y", "inline-key-z", "course-key-x", "corner-key-x",
                 "floor-peg-x", "tiles-key-x"}
+# (name prefix, Grid set, its -D overrides, door box height, arched-door box width)
+PROBE_SETS = [("", D, {}, 320, 40), ("s12-", dict(D, **S12), S12, 160, 16)]
+probes = {}
 jobs = []
-for name, body in probes.items():
-    with open("%s/probe_%s.scad" % (OUT, name), "w") as f:
-        f.write('include <../model.scad>\n%s\n' % body)
-    jobs.append('openscad --backend=Manifold -D \'piece="none"\' %s -o %s/probe_%s.stl %s/probe_%s.scad >%s/probe_%s.log 2>&1 || true'
-                % (defines(PROBE_DEFS.get(name, {})), OUT, name, OUT, name, OUT, name))
+for prefix, DD, ov, clear, arch_w in PROBE_SETS:
+    for name, body in make_probes(DD, clear, arch_w).items():
+        probes[prefix + name] = name
+        with open("%s/probe_%s%s.scad" % (OUT, prefix, name), "w") as f:
+            f.write('include <../model.scad>\n%s\n' % body)
+        jobs.append('openscad --backend=Manifold -D \'piece="none"\' %s -o %s/probe_%s%s.stl %s/probe_%s%s.scad >%s/probe_%s%s.log 2>&1 || true'
+                    % (defines(dict(ov, **PROBE_DEFS.get(name, {}))), OUT, prefix, name, OUT, prefix, name, OUT, prefix, name))
 docker("\n".join(jobs))
 print("\nfit probes (clearance %.2f, moved keys shifted %.2f mm):" % (C, SHIFT))
-for name in probes:
+for name, base in probes.items():
     logt = open("%s/probe_%s.log" % (OUT, name)).read()
     empty = "top level object is empty" in logt.lower() or "empty" in logt.lower() and not os.path.exists("%s/probe_%s.stl" % (OUT, name))
     vol = 0.0
     if not empty and os.path.exists("%s/probe_%s.stl" % (OUT, name)):
         vol = abs(volume(read_stl("%s/probe_%s.stl" % (OUT, name))))
         empty = vol < 1e-6
-    if name in EXPECT_SOLID:
-        check(not empty and vol > 0, "%-18s moved by clearance+0.05 it binds (%.3f mm3 overlap)" % (name, vol))
+    if base in EXPECT_SOLID:
+        check(not empty and vol > 0, "%-22s moved by clearance+0.05 it binds (%.3f mm3 overlap)" % (name, vol))
     else:
-        check(empty, "%-18s mated pieces do not intersect%s" % (name, "" if empty else " (%.3f mm3)" % vol))
+        check(empty, "%-22s mated pieces do not intersect%s" % (name, "" if empty else " (%.3f mm3)" % vol))
 
-# ---- door and window facts from the model's own numbers
-H_DOOR = min(D["door_height"], 2 * CHd - 25 - THR)
-check(H_DOOR >= 320, "default door is %g mm clear above the threshold across two courses (>= 320)" % H_DOOR)
+# ---- door and window facts from the model's own numbers, at 1:6 (a 30 cm doll)
+# and at 1:12 (a 15 cm doll)
 LIN, PD_ = 1.6, PD
-top_max = CHd - PD_ - 4 - LIN
-sill = min(D["window_sill"], top_max - 30)
-w_sill, w_top = CHd + sill, CHd + sill + min(D["window_height"], top_max - sill)
-check(20 <= sill and w_sill <= 0.93 * 300 <= w_top,
-      "default window (upper course) spans %g..%g mm above the floor, around a 30 cm doll's eye (279 mm)"
-      % (w_sill, w_top))
+for label, DD, doll, door_min in (("default", D, 300, 320), ("1:12", dict(D, **S12), 150, 160)):
+    CHd = DD["course_height"]
+    H_DOOR = min(DD["door_height"], 2 * CHd - 25 - THR)
+    check(H_DOOR >= door_min, "%s door is %g mm clear above the threshold across two courses (>= %g)" % (label, H_DOOR, door_min))
+    top_max = CHd - PD_ - 4 - LIN
+    sill = min(DD["window_sill"], top_max - 30)
+    w_sill, w_top = CHd + sill, CHd + sill + min(DD["window_height"], top_max - sill)
+    check(sill == DD["window_sill"] and w_sill <= 0.93 * doll <= w_top,
+          "%s window (upper course) spans %g..%g mm above the floor, around a %g cm doll's eye (%g mm)"
+          % (label, w_sill, w_top, doll / 10, 0.93 * doll))
 
 if failures:
     print("\nFAILED: %d check(s)" % len(failures))
