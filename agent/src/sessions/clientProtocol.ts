@@ -17,7 +17,7 @@ export const MESSAGE_MAX = 32_000
 const v = z.literal(PROTOCOL_VERSION)
 const sessionId = z.string().min(1).max(200)
 /** The id of a queued message the client removes or edits. */
-const answerId = z.string().min(1).max(200)
+const queuedId = z.string().min(1).max(200)
 
 /**
  * Whether a refused frame's `sessionId` is one the schema would take, so a
@@ -63,8 +63,8 @@ export const ClientMessageSchema = z.discriminatedUnion('type', [
   }),
   z.object({ v, type: z.literal('session.interrupt'), sessionId }),
   // #6386: a message queued while a turn runs, removed or given new words before it starts.
-  z.object({ v, type: z.literal('queue.remove'), sessionId, id: answerId }),
-  z.object({ v, type: z.literal('queue.edit'), sessionId, id: answerId, text: z.string().min(1).max(MESSAGE_MAX) }),
+  z.object({ v, type: z.literal('queue.remove'), sessionId, id: queuedId }),
+  z.object({ v, type: z.literal('queue.edit'), sessionId, id: queuedId, text: z.string().min(1).max(MESSAGE_MAX) }),
   z.object({ v, type: z.literal('session.handoff'), sessionId }),
   z.object({ v, type: z.literal('session.attach'), sessionId }),
   // The browser bridge (#254): which tab this panel is in (frontend

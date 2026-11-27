@@ -49,8 +49,6 @@ const QUESTIONS: UserQuestion[] = [
 const answerBody = (answers: string[], questions: UserQuestion[] = QUESTIONS) =>
   ({ kind: 'answer', answers: Object.fromEntries(questions.map((q, i) => [q.question, answers[i]!])) }) as const
 
-/** A question frame as an older panel sends it on the chat socket. */
-
 const result = (run: HarnessRun) =>
   ({ type: 'result', subtype: 'success', is_error: false, num_turns: 1, total_cost_usd: 0.01, session_id: run.sessionId ?? run.resume }) as unknown as SDKMessage
 
