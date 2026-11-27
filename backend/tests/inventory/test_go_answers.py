@@ -68,8 +68,6 @@ MODELS: dict[str, type[BaseModel]] = {
 }
 
 
-#: Each recorded refusal, as Python's own builder of that problem writes it (R-K1-33): Go's
-#: port answers what `apply_on` and `check_row` answer.
 def _made_id_refusal() -> str:
     """KindInput's own message for a typed id of k and digits, which Go's 422 repeats."""
     try:
@@ -79,6 +77,8 @@ def _made_id_refusal() -> str:
     raise AssertionError("KindInput took k12")
 
 
+#: Each recorded refusal, as Python's own builder of that problem writes it (R-K1-33): Go's
+#: port answers what `apply_on` and `check_row` answer.
 PROBLEMS: dict[str, ApiError] = {
     "ItemCreateMissingProperties": missing_required(MissingRequiredProperties(("material",))),
     "ItemCreateBadPropertyValue": bad_property_value("material", "does not fit 'type'"),

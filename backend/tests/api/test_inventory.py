@@ -136,6 +136,12 @@ def test_a_typed_id_of_k_and_digits_is_refused(client: TestClient, go: Go, kind_
     assert refused.status_code == 422, refused.text
     assert "made kind" in refused.text
     assert go.temporal.starts == []
+    # A k that digits do not end is an id a person may type.
+    go.temporal.answers.append(done(201, answer("KindCreate")))
+    assert (
+        client.post(f"{API}/kinds", json={"id": "k1a", "name": "X"}, headers=press()).status_code
+        == 201
+    )
 
 
 def test_gos_made_id_refusal_passes_through(client: TestClient, go: Go) -> None:
