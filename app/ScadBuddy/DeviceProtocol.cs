@@ -134,7 +134,11 @@ public static class DeviceProtocol
 	static bool TryTime(string? text, out DateTimeOffset at) =>
 		DateTimeOffset.TryParse(text, CultureInfo.InvariantCulture, DateTimeStyles.AssumeUniversal, out at);
 
-	/// <summary>tag_found: the tag, its tech, its data blocks, and the block a resumed read starts from.</summary>
+	/// <summary>
+	/// tag_found: the tag, its tech, and its data blocks. A resumed read names in
+	/// <c>resume_from</c> how many data blocks it has already, a count as <c>tag_progress.read</c>
+	/// is (spec: <c>read: 8</c>, then <c>resume_from: 8</c>), not a block index.
+	/// </summary>
 	public static JsonObject TagFound(string uid, string tech, int blocks, int resumeFrom, string? backup = null)
 	{
 		var data = new JsonObject { ["uid"] = uid, ["tech"] = tech, ["blocks"] = blocks };

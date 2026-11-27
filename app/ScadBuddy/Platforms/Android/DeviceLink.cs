@@ -24,6 +24,7 @@ public sealed class DeviceLink
 	// A call's method stops this long before core's deadline, so its upload and result get there in time.
 	static readonly TimeSpan Margin = TimeSpan.FromSeconds(5);
 	const int FrameMax = 64 << 10;
+	static readonly TimeSpan StableFor = TimeSpan.FromMinutes(1);
 	// RFC 6455 close code realtime.SignedOut: the pairing ended (revoked, or its token expired).
 	const int SignedOut = 4401;
 
@@ -36,6 +37,9 @@ public sealed class DeviceLink
 	bool front;
 	CancellationTokenSource? link;
 	RunningCall? running;
+	// The calls already run: a call is never run twice, even if its frame comes again.
+	// A reconnect gets no replay (core's "check" tells only that a topic changed, not its
+	// events), so a call published while the socket is down ends at its deadline, offline.
 	readonly Queue<string> seen = new();
 
 	/// <summary>The pairing, read from SecureStorage once.</summary>
@@ -146,9 +150,12 @@ public sealed class DeviceLink
 			try
 			{
 				await ws.ConnectAsync(DeviceProtocol.SocketOf(p.Origin), stop);
-				wait = TimeSpan.FromSeconds(2);
+				var opened = DateTime.UtcNow;
 				await SendText(ws, DeviceProtocol.Subscribe(p.DeviceId), stop);
 				await Listen(ws, p, stop);
+				// The backoff starts again only after a socket that stayed open: a server that
+				// closes at once is not dialled every 2 s.
+				if (DateTime.UtcNow - opened >= StableFor) wait = TimeSpan.FromSeconds(2);
 				if (ws.CloseStatus is (WebSocketCloseStatus)SignedOut)
 				{
 					Ended(p, null);

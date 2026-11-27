@@ -78,6 +78,8 @@ static class DeviceMethods
 		try
 		{
 			string? written = null;
+			// A MIFARE Classic tap is refused on the screen, and the call waits for another tag.
+			var refusedClassic = false;
 			while (true)
 			{
 				Tag tag;
@@ -85,9 +87,17 @@ static class DeviceMethods
 				catch (OperationCanceledException)
 				{
 					if (call.CancelledByPerson) return DeviceProtocol.Failed("cancelled: the person stopped the write on the phone");
-					return DeviceProtocol.Failed(written is null ? "no_tag: no tag was tapped before the deadline" : "no_read_back: the tag was written, but not read back before the deadline");
+					if (written is not null) return DeviceProtocol.Failed("no_read_back: the tag was written, but not read back before the deadline");
+					return DeviceProtocol.Failed(refusedClassic
+						? "bambu_tag: only a MIFARE Classic tag, such as a Bambu spool's, was tapped; ScadBuddy never writes one"
+						: "no_tag: no tag was tapped before the deadline");
 				}
-				if (NfcBridge.IsClassic(tag)) return DeviceProtocol.Failed("bambu_tag: this is a MIFARE Classic tag, such as a Bambu spool's; ScadBuddy never writes one");
+				if (NfcBridge.IsClassic(tag))
+				{
+					refusedClassic = true;
+					screen.Say("That is a MIFARE Classic tag, such as a Bambu spool's. ScadBuddy never writes one. Tap another tag.");
+					continue;
+				}
 				var uid = Convert.ToHexString(tag.GetId() ?? []);
 				var tech = NfcBridge.TechOf(tag);
 				var quiet = new CallProgress(call, null);
@@ -175,6 +185,9 @@ static class DeviceMethods
 		}
 		catch (PermissionException) { return DeviceProtocol.Failed("no_camera: the app may not use the camera; allow it in Android's settings"); }
 		catch (FeatureNotSupportedException) { return DeviceProtocol.Failed("no_camera: this phone has no camera the app can use"); }
+		// The camera cannot be stopped from here: a photo taken after the deadline, or after core
+		// ended the call, is not sent.
+		if (call.Token.IsCancellationRequested) return DeviceProtocol.Failed("timeout: the photo came after the call's deadline");
 		if (photo is null) return DeviceProtocol.Failed("cancelled: no photo was taken");
 		await using var stream = await photo.OpenReadAsync();
 		using var copy = new MemoryStream();
@@ -185,6 +198,7 @@ static class DeviceMethods
 			copy.Write(buffer, 0, n);
 			if (copy.Length > DeviceProtocol.PhotoMax) return DeviceProtocol.Failed("too_large: the photo is larger than 12 MiB");
 		}
+		if (call.Token.IsCancellationRequested) return DeviceProtocol.Failed("timeout: the photo came after the call's deadline");
 		var type = photo.ContentType ?? "image/jpeg";
 		var key = await call.Upload(DeviceProtocol.ScanImage, copy.ToArray(), type);
 		return DeviceProtocol.PhotoResult(key, type);
