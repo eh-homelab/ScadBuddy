@@ -283,7 +283,7 @@ describe('the agent’s protocol mirror', () => {
     event({ type: 'workspace.file', sessionId: S, path: 'uploads/part.stl', change: 'uploaded', by: { kind: 'browser', id: 'browser', label: 'You' }, size: 12, mediaType: 'model/stl', sha256: 'a'.repeat(64) }),
     event({ type: 'workspace.file', sessionId: S, path: 'uploads/part.stl', change: 'deleted', by: { kind: 'browser', id: 'browser', label: 'You' } }),
     event({ type: 'error', sessionId: S, code: 'interrupted', message: 'the turn was interrupted' }),
-    event({ type: 'error', sessionId: S, code: 'conflict', message: 'no longer waiting', questionId: 'q1' }),
+    event({ type: 'error', sessionId: S, code: 'conflict', message: 'no longer queued', queuedId: 'q1' }),
     // #5772: the same text with the credential's name, which the panel shows in place of `message`.
     event({
       type: 'error',

@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import asyncio
-import json
 import time
 
 import httpx
@@ -23,6 +22,7 @@ from scadbuddy.workflows.follow import follow_id
 from tests.api.test_print_filaments import queue_route, slice_routes
 from tests.api.test_print_run_choices import run_print, run_request, run_routes
 from tests.api.test_send import BASE, configure, make_output, upload_route
+from tests.support.row_outputs import app_outputs, update_row
 
 pytestmark = pytest.mark.usefixtures("recorded_sb_spools")
 API = f"{BASE}/api/v1"
@@ -139,12 +139,11 @@ def test_an_output_last_printed_by_a_pipeline_run_still_opens(
     """#312: a record written by the old send bar must not become unreadable."""
     configure(client)
     output_id = make_output(client, model)
-    path = paths.output_dir(model, output_id) / "meta.json"
-    record = json.loads(path.read_text(encoding="utf-8"))
+    outputs = app_outputs(client)
+    record = outputs.get(output_id).model_dump(mode="json")
     record.update(print_route="pipeline", pipeline_run_id=12, queue_item_id=7, library_file_id=41)
-    path.write_text(json.dumps(record), encoding="utf-8")
-    # A record that old has no row until the copy (#7255): its file answers.
-    getattr(client.app.state, STATE_ATTR).outputs.rows.delete(output_id)  # type: ignore[attr-defined]
+    # The copy carried such a record into its row as it was (#7255).
+    update_row(outputs, output_id, meta=record)
 
     detail = client.get(f"/api/v1/outputs/{output_id}")
     assert detail.status_code == 200

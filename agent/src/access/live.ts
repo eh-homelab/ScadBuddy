@@ -43,11 +43,7 @@ export type LiveTurn = {
 
 /** Why a Monitor `command` call is refused while Bash is off. */
 export const MONITOR_SHELL_OFF =
-  "Monitor's command runs a shell where Bash runs, and Bash is off in Settings → Tools & plugins (no sandbox, #779). Watch a WebSocket (`ws`) instead."
-
-/** Why a Monitor `command` call is refused where the session's Bash runs in a sandbox pod (#5864, #5916). */
-export const MONITOR_SANDBOXED =
-  "This session's Bash runs in a sandbox pod, and a Monitor command would not run there, so it is not available. Watch a WebSocket (`ws`) instead."
+  "Monitor's command runs a shell where Bash runs, and Bash is off in Settings → Tools & plugins. Watch a WebSocket (`ws`) instead."
 
 /** Why a Monitor `command` call is refused when Bash is on now but was off when the turn started (its server has no command queue). */
 export const MONITOR_SHELL_NEXT_TURN =
@@ -101,9 +97,8 @@ export function liveAccess(
       const access = await resolver.native(own.name, own.access, builtins.get(own.name) ?? [])
       if (own.name !== MONITOR || access === 'off') return access
       const command = typeof input === 'object' && input !== null && (input as Record<string, unknown>).command !== undefined
-      // With a sandbox the session's Bash runs in its pod, and a monitor command would not (#5916).
-      if (command && turn.sandboxShell) return { off: MONITOR_SANDBOXED }
-      const shell = command ? await resolver.native(BASH, bashDeclared, builtins.get(BASH) ?? []) : undefined
+      // With a sandbox the session's Bash runs in its pod, and so does a Monitor's command (#5916): Bash's item there, `outward` by default.
+      const shell = command ? await resolver.native(BASH, turn.sandboxShell ? SANDBOXED_ACCESS : bashDeclared, builtins.get(BASH) ?? []) : undefined
       if (shell === 'off') return { off: MONITOR_SHELL_OFF }
       // Bash on now but off when the turn was assembled: its server has no command queue, so refused, never asked.
       if (command && !turn.shell) return { off: MONITOR_SHELL_NEXT_TURN }

@@ -1,4 +1,5 @@
 import type { Settings } from '../../api/types'
+import { answerersOrder } from '../../lib/flows'
 import { RUNTIME_FIELDS, serverValue, type FieldName, type FieldSpec, type SectionId } from './fields'
 
 /** #296 — `used` of `limit`, where a limit of 0 means none. */
@@ -62,6 +63,8 @@ export const HAND_LAID: Partial<Record<SectionId, readonly FieldName[]>> = {
     'print_auto_import_skip_printers',
     'print_auto_import_skip_lan_printers',
   ],
+  // #7471 — who besides a person answers a flow's question; only a person saves it.
+  'flow-answerers': ['flow_answerers'],
   // #426 — the blob store beside the inbox folder it needs.
   projects: [
     'library_folder_id',
@@ -208,6 +211,11 @@ export function printerIdsValue(ids: readonly number[]): string {
   return [...new Set(ids)].sort((a, b) => a - b).join(',')
 }
 
+/** #7471 — `flow_answerers` as the form holds it: `starter`, `sessions`, then the tokens, once each. */
+export function answerersValue(rules: readonly string[]): string {
+  return answerersOrder(rules).join(',')
+}
+
 /** #6041 — the form's value for a list of registry printer ids (uuids): sorted, comma-joined. */
 export function registryIdsValue(ids: readonly string[]): string {
   return [...new Set(ids)].sort().join(',')
@@ -221,6 +229,7 @@ export function baseline(settings: Settings, name: FieldName): string {
   if (name === 'filament_preset_mirror') return settings.filament_preset_mirror === false ? 'false' : 'true'
   // #7156 — on until the settings say otherwise, as the backend's default.
   if (name === 'filament_auto_add_unknown_rfid') return settings.filament_auto_add_unknown_rfid === false ? 'false' : 'true'
+  if (name === 'flow_answerers') return answerersValue(settings.flow_answerers ?? [])
   if (name === 'print_auto_import_sources') return sourcesValue(settings.print_auto_import_sources ?? [])
   if (name === 'print_auto_import_skip_printers') return printerIdsValue(settings.print_auto_import_skip_printers ?? [])
   if (name === 'print_auto_import_skip_lan_printers')
@@ -283,6 +292,8 @@ export function toPatchValue(name: FieldName, raw: string, settings: Settings): 
   }
   // #6265 — one direction per data type: the form's six-part string, split.
   if (name === 'filament_sync') return syncParts(raw)
+  // #7471 — an empty list is people only.
+  if (name === 'flow_answerers') return raw === '' ? [] : raw.split(',')
   // #4699 — an empty list allows no source (each print goes to Unsorted imports) or skips no printer.
   if (name === 'print_auto_import_sources') return raw === '' ? [] : raw.split(',')
   if (name === 'print_auto_import_skip_printers') return raw === '' ? [] : raw.split(',').map(Number)
@@ -352,21 +363,17 @@ export function isProblem(value: unknown): value is Problem {
 
 
 export type StoreChoice = {
-  backend: 'local' | 'bambuddy' | 's3'
-  savedBambuddyUrl: boolean
-  bambuddyReady: boolean
+  backend: 'local' | 's3'
   s3Ready: boolean
 }
 
 /**
- * #426 — the Bambuddy store needs a SAVED Bambuddy URL and an inbox folder in the form:
- * until then the Blob store choice shows, sends and compares the local store. The URL is
- * the saved one, never Connection's unsaved draft: a Projects & files save cannot commit
- * it, so what the choice shows and what that save sends always agree.
+ * #426 — the Blob store choice shows, sends and compares the local store until the S3
+ * store is ready. The Bambuddy library is no choice: outputs live only in a blob store
+ * that holds them, and the server refuses `store_backend=bambuddy` (#7257, reason
+ * `outputs-need-a-blob-store`), so a stored or chosen `bambuddy` reads as local here.
  */
 export function storeChoice(settings: Settings, value: (name: FieldName) => string): StoreChoice {
-  const savedBambuddyUrl = baseline(settings, 'bambuddy_url') !== ''
-  const bambuddyReady = savedBambuddyUrl && value('library_folder_id') !== ''
   // The S3 store needs its SAVED endpoint, bucket and both keys, as the server does.
   const savedS3 = (name: FieldName) => baseline(settings, name) !== ''
   const s3Ready =
@@ -374,8 +381,6 @@ export function storeChoice(settings: Settings, value: (name: FieldName) => stri
     savedS3('store_s3_bucket') &&
     savedS3('store_s3_access_key_id') &&
     Boolean(settings.has_store_s3_secret_access_key)
-  const chosen = value('store_backend')
-  const backend =
-    chosen === 's3' ? (s3Ready ? 's3' : 'local') : bambuddyReady && chosen === 'bambuddy' ? 'bambuddy' : 'local'
-  return { backend, savedBambuddyUrl, bambuddyReady, s3Ready }
+  const backend = value('store_backend') === 's3' && s3Ready ? 's3' : 'local'
+  return { backend, s3Ready }
 }

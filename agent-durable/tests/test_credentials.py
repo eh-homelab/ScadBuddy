@@ -193,9 +193,10 @@ RESET_VECTORS = json.loads(
 
 @pytest.mark.parametrize("case", RESET_VECTORS, ids=lambda c: f"{c['text']!r}@{c['now']}")
 def test_a_rate_limit_reset_is_read_from_the_result_text(case: dict[str, Any]) -> None:
-    """#4088: the reset Claude Code's result names, the next such time in UTC; `at`
-    null keeps the default cooldown. credentialErrors.ts `rateLimitResetFromText` is
-    held to the same vectors (#4121 review)."""
+    """#4088: the reset Claude Code's result names, the next such time in the zone it
+    names (#7986); `at` null keeps the default cooldown. credentialErrors.ts
+    `rateLimitResetFromText` and claudecreds `ResetFromText` are held to the same
+    vectors (#4121 review)."""
     now = datetime.fromisoformat(case["now"])
     reset = rate_limit_reset(case["text"], now)
     if case["at"] is None:
@@ -203,6 +204,23 @@ def test_a_rate_limit_reset_is_read_from_the_result_text(case: dict[str, Any]) -
         assert cooldown_until(now, reset) == now + timedelta(seconds=60)
     else:
         assert reset == datetime.fromisoformat(case["at"])
+
+
+def test_a_zone_name_in_another_case_is_refused_where_the_filesystem_would_open_it(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """#8023: on a case-insensitive filesystem (macOS) ZoneInfo opens "america/new_york".
+    The stand-in below opens any case, so the test gives the same answer on Linux."""
+    from zoneinfo import ZoneInfo
+
+    import scadbuddy_durable.credentials as credentials
+
+    monkeypatch.setattr(credentials, "ZoneInfo", lambda name: ZoneInfo("America/New_York"))
+    now = datetime(2026, 10, 17, 22, 16, 5, tzinfo=UTC)
+    assert rate_limit_reset("resets 1pm (america/new_york)", now) is None
+    assert rate_limit_reset("resets 1pm (America/New_York)", now) == datetime(
+        2026, 10, 18, 17, 0, tzinfo=UTC
+    )
 
 
 def test_a_named_reset_is_still_held_to_a_day() -> None:

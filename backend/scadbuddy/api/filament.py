@@ -9,8 +9,9 @@ Writes, each with its own rule: a tag change (`POST /filament/spools/{id}/tags` 
 `filament/rfid_push.py`, #6264) tells Bambuddy only while ``filament_sync.tags`` pushes
 (``sb_to_bb`` or ``two_way``);
 `PUT /rfid/override-mode` writes Bambuddy's auto-add setting (`filament/rfid_mode.py`) and
-`POST /rfid/reconcile` runs the mode, the tag push and the AMS slot configure of each override
-tag (`filament/rfid_slots.py`), whatever ``tags`` says.
+`POST /rfid/reconcile` runs the mode and the tag push, whatever ``tags`` says, and then
+configures the AMS slot of each override tag over ScadBuddy's own LAN link, never through
+Bambuddy (`filament/rfid_slots.py`, #7276).
 `POST /filament/presets/bambuddy-import` reads Bambuddy's local presets and writes
 ScadBuddy's own presets only (#7244).
 `POST /filament/sync/run` asks the ScadBuddy-to-Bambuddy sync for a full pass (#6265),
@@ -28,6 +29,7 @@ from __future__ import annotations
 import asyncio
 import dataclasses
 import logging
+import time
 from collections.abc import AsyncIterator, Callable
 from datetime import UTC, date, datetime, timedelta
 from functools import partial
@@ -130,7 +132,7 @@ from scadbuddy.filament.csv_import import (
     import_on,
     import_rows,
 )
-from scadbuddy.filament.insert_weights import NoInsertWeightOfferError
+from scadbuddy.filament.insert_weights import InsertWeightChangedError, NoInsertWeightOfferError
 from scadbuddy.filament.label_output import LabelOutput
 from scadbuddy.filament.label_sheets import (
     LabelSheetGoneError,
@@ -179,7 +181,7 @@ from scadbuddy.filament.profile_fill import (
 )
 from scadbuddy.filament.rfid_mode import read_status, reconcile_mode_now
 from scadbuddy.filament.rfid_push import failure_label, push_pending
-from scadbuddy.filament.rfid_slots import reconcile_slots_now
+from scadbuddy.filament.rfid_slots import ROUTE_BUDGET_S, reconcile_slots_now, start_deadline
 from scadbuddy.filament.sb_presets import PresetImport, import_from_bambuddy
 from scadbuddy.filament.sensors import SensorBandError
 from scadbuddy.filament.spools import (
@@ -221,6 +223,7 @@ from scadbuddy.profile_fetch.wire import (
 )
 from scadbuddy.profile_fetch.workflow import NOT_STARTED as TDFP_NOT_STARTED
 from scadbuddy.rows.component import ROWS, Rows
+from scadbuddy.slicing.component import SlicingDep
 from scadbuddy.workflows.commands import (
     TemporalUnavailableError,
     TemporalUnreachableError,
@@ -259,8 +262,12 @@ NOT_NUDGED = frozenset(
         "claim_nfc_job",
         "cancel_nfc_job",
         "finish_nfc_job",
-        # #7153: these write the printer or Bambuddy's slot presets, no ScadBuddy row
-        # (`api/printer_slots.py`); the AMS label routes rename a place, so they nudge.
+        # #7153, #7276: the slot commands write the printer over its LAN link, no
+        # ScadBuddy row (`api/printer_slots.py`; a reset the printer acknowledged also
+        # clears the slot's preset row). The slot preset routes write ScadBuddy's
+        # `printer_slot_presets` row, which the filament sync does not send to Bambuddy,
+        # so they do not nudge either. The AMS label routes rename a place, which the
+        # sync sends, so they nudge.
         "configure_printer_slot",
         "reset_printer_slot",
         "refresh_printer_slot",
@@ -1910,16 +1917,21 @@ async def add_spool_event(
 _INSERT_WEIGHT_RULE = (
     "A reading is from a new, unused spool when the spool's ledger shows no use (no print, "
     "no print's grams, no delta down, no reading below the label weight) and its grams left "
-    "still equal the label weight (the spool's own, else its type's). Only then is an offer "
-    "made, and only when the reading is above the label weight and the derived weight "
-    "(`reading_g - label_weight_g`) is at most the label weight. A new spool read under "
-    "its label weight is `reason` `below_label` (#7683): `shortfall_g` is "
+    "still equal the label weight (the spool's own, else its type's) within 0.5 g. A spool "
+    "with no grams left and no use counts as full. Only then is an offer made, and only "
+    "when the spool's insert is not archived, the reading is above the label weight, the "
+    "derived weight (`reading_g - label_weight_g`) is at most the label weight, and the new "
+    "mean is at least 1 g. A new spool read under its label weight is `reason` "
+    "`below_label` (#7683): `shortfall_g` is "
     "`label_weight_g - reading_g`, `resolutions` lists the readings of it with their "
     "filament grams (`tared`: the scale was tared on the empty spool; `short` and "
     "`label_wrong`, each the reading less the insert's empty weight, only when that is "
     "not negative; `label_wrong` also names `new_label_weight_g`), and `default` the one "
     "to preselect (`tared` within 10 % of the label, else `short`; a reading under the "
-    "empty weight offers `tared` alone, so the default is `tared`)."
+    "empty weight offers `tared` alone, so the default is `tared`). "
+    "The other reasons: `archived` (the spool), `no_insert` (no insert, or an archived "
+    "one), `no_label_weight`, `used`, `not_full`, `not_above_label`, `derived_too_heavy`, "
+    "`mean_below_1g`."
 )
 
 
@@ -1966,7 +1978,10 @@ async def insert_weight_offer(
         "insert's row locks.\n\n"
         "Accept before the weighing, then record the weighing with "
         "`POST /filament/spools/{spool_id}/events` and the answer's `filament_g` as its "
-        "`grams`; that route is unchanged. 404 for no such spool; 409 with `code` "
+        "`grams`; that route is unchanged. Send the offer's `new_empty_weight_g` too: when "
+        "the mean under the locks is another (another spool's accept or delete moved it), "
+        "the answer is 409 with `code` `insert_weight_changed` and the `new_empty_weight_g` "
+        "now, and nothing is written; check again. 404 for no such spool; 409 with `code` "
         "`no_insert_weight_offer` and the `reason` when no offer holds now."
     ),
 )
@@ -1974,7 +1989,19 @@ async def accept_insert_weight(
     filament: FilamentDep, spool_id: UUID, body: m.InsertWeightAccept
 ) -> m.InsertWeightAccepted:
     try:
-        accepted = await asyncio.to_thread(filament.insert_weights.accept, spool_id, body.reading_g)
+        accepted = await asyncio.to_thread(
+            filament.insert_weights.accept,
+            spool_id,
+            body.reading_g,
+            expected_g=body.new_empty_weight_g,
+        )
+    except InsertWeightChangedError as exc:
+        raise ApiError(
+            status.HTTP_409_CONFLICT,
+            f"the insert weight of spool {spool_id} is now {exc.new_empty_weight_g} g; check again",
+            code="insert_weight_changed",
+            new_empty_weight_g=exc.new_empty_weight_g,
+        ) from None
     except NoInsertWeightOfferError as exc:
         raise ApiError(
             status.HTTP_409_CONFLICT,
@@ -3454,14 +3481,21 @@ async def set_rfid_override_mode(
         "is brought to the override mode and the setting `filament_auto_add_unknown_rfid`, "
         "then the queued tag changes are pushed (only with "
         "`filament_sync.tags` `sb_to_bb` or `two_way`), then the AMS slot of each override tag is "
-        "configured with its type's preset. Answers the mode's status and the tag push "
-        "counts, and the override slots' counts (`slots` is null with no Bambuddy)."
+        "configured with its type's preset over ScadBuddy's own LAN link (Bambuddy is not "
+        "called for it; only LAN-linked printers with a fresh report count). Answers the "
+        "mode's status and the tag push counts, and the override slots' counts: `unconfirmed` "
+        "counts a configure sent that the printer had not acknowledged in time; `waiting` a "
+        "slot not sent because its printer was printing or its AMS busy, or the route's time "
+        "ran out (it is sent on a later pass). `slots` is null when another reconcile holds "
+        "the slots."
     ),
 )
 async def reconcile_rfid(
-    filament: FilamentDep, store: SettingsStoreDep, printers: PrintersDep
+    filament: FilamentDep, store: SettingsStoreDep, printers: PrintersDep, slicing: SlicingDep
 ) -> m.RfidReconcileReport:
     # Each step fails alone, as in the activity: one broken step never skips the others.
+    # The slots start no run that could outlast the route's budget (P46).
+    deadline = start_deadline(time.monotonic(), ROUTE_BUDGET_S)
     try:
         mode = await reconcile_mode_now(filament.rfid, store.load)
     except Exception as error:
@@ -3480,7 +3514,12 @@ async def reconcile_rfid(
         tags = m.TagPushReport(failed=1)
     try:
         slots = await reconcile_slots_now(
-            filament, store.load, printers=printers.store, reports=printers.reports
+            filament,
+            printers=printers.store,
+            reports=printers.reports,
+            commands=printers.lan_commands,
+            profiles=slicing.profiles,
+            deadline=deadline,
         )
     except Exception as error:
         logger.warning("could not configure the slots", extra={"error": type(error).__name__})

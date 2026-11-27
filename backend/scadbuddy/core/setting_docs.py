@@ -126,6 +126,12 @@ SETTING_DOCS: Final[Mapping[str, SettingDoc]] = MappingProxyType(
             " itself, and keeps the printer's file in ScadBuddy's own library. It records no"
             " print from a printer checked here.",
         ),
+        "flow_answerers": SettingDoc(
+            "Who else may answer a flow's question",
+            "A person always may. By default, nobody else may. Add `starter` for the session"
+            " that started the run, `sessions` for any session that a person owns, or"
+            " `token:<id>` for one MCP token and its sessions. Only a person can change this.",
+        ),
         # -- Projects & files ----------------------------------------------------------
         "library_folder_id": SettingDoc(
             "Inbox folder, for sends without a project",
@@ -145,8 +151,9 @@ SETTING_DOCS: Final[Mapping[str, SettingDoc]] = MappingProxyType(
         "store_backend": SettingDoc(
             "Blob store",
             "Where rendered pieces and other files are kept. This server's volume works with"
-            " renders in the API only; the Bambuddy library and an S3 store work with any"
-            " number of render workers. Takes effect when ScadBuddy and its render workers"
+            " renders in the API only; an S3 store works with any number of render workers."
+            " The Bambuddy library cannot be chosen: saved outputs are kept only in the blob"
+            " store, and it holds none. Takes effect when ScadBuddy and its render workers"
             " restart.",
         ),
         "library_backend": SettingDoc(
@@ -980,7 +987,7 @@ SETTING_DOCS: Final[Mapping[str, SettingDoc]] = MappingProxyType(
         "blob_cache_dir": SettingDoc(
             "Piece cache folder",
             "Where the API, and a render worker where it is set, keeps its copies of"
-            " rendered pieces and other blobs on the S3 or Bambuddy store. Unset, the data"
+            " rendered pieces and other blobs on the S3 store. Unset, the data"
             " volume's blobs folder. A node-local folder, such as an emptyDir, keeps them off"
             " a shared volume. Ignored on the local store, where that folder is the store.",
         ),

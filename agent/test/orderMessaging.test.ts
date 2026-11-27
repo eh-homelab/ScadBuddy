@@ -1,7 +1,6 @@
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js'
 import { Server } from '@modelcontextprotocol/sdk/server/index.js'
 import { CallToolRequestSchema, ErrorCode, ListToolsRequestSchema, McpError } from '@modelcontextprotocol/sdk/types.js'
-import { ApplicationFailure } from '@temporalio/common'
 import { MockActivityEnvironment } from '@temporalio/testing'
 import { describe, expect, it } from 'vitest'
 import { z } from 'zod'
@@ -20,7 +19,7 @@ import {
 import { unwrapUntrusted } from '../src/safety/untrusted.js'
 import type { Owner } from '../src/sessions/protocol.js'
 import { connectInProcess } from '../src/temporal/turnTools.js'
-import { DESCRIBE_CALL_ACTIVITY, gateActivities, toolActivities } from '../src/temporal/toolActivities.js'
+import { DESCRIBE_CALL_ACTIVITY, gateActivities, toolCallActivities } from '../src/temporal/toolActivities.js'
 import { ALL_TOOLS } from '../src/tools/index.js'
 import { PendingActionStore } from '../src/tools/pending.js'
 import { runToolWithOutcome, type Tool, type ToolContext, ToolError } from '../src/tools/registry.js'
@@ -396,14 +395,17 @@ describe('order_notify_customer_send and storefront mail (#5660)', () => {
 // Every tool works in every mode (#2171): the durable path is a ToolCall activity whose
 // approval binds the parked message (#4442).
 describe('order_notify_customer_send as a ToolCall activity (#5660)', () => {
-  function env(activityId: string) {
+  // describe_call runs in the session's workflow; the call itself in its own ToolCall workflow (#7323).
+  function env(activityId: string, workflowId = `session-${SESSION}`) {
     return new MockActivityEnvironment({
       activityId,
-      workflowExecution: { workflowId: `session-${SESSION}`, runId: 'run-1' },
+      workflowExecution: { workflowId, runId: 'run-1' },
       activityType: 'order_notify_customer_send',
       taskQueue: 'agent-tools',
     })
   }
+  const CALL = `session-${SESSION}-call-toolu_01`
+  const NAME = 'tool:order_notify_customer_send'
   const audit = {
     record: async () => {},
     hash: (name: string, input: Record<string, unknown>) => `${name}:${JSON.stringify(input)}`,
@@ -416,28 +418,26 @@ describe('order_notify_customer_send as a ToolCall activity (#5660)', () => {
     const { messaging, sends } = fakeMessaging()
     const svc = services({ backend, messaging })
     const describeCall = gateActivities({ audit, sessions, tools: [send], services: svc })[DESCRIBE_CALL_ACTIVITY]!
-    const raw: unknown = await env('tool-toolu_01').run(describeCall, { tool: 'order_notify_customer_send', input: ARGS })
+    const raw: unknown = await env('tool-toolu_01').run(describeCall, { tool: 'mcp__scadbuddy__order_notify_customer_send', input: ARGS })
     const described = raw as { summary: string; input_hash: string }
     expect(described.summary).toContain('to ada@example.com through remote:mail')
     expect(described.input_hash).toContain('"approved"')
     const approvals = { approved: async (_id: string, call?: { inputHash: string }) => call?.inputHash === described.input_hash }
-    const activities = toolActivities([send], { services: svc, sessions, approvals, audit })
-    const content = await env('tool-toolu_01').run(activities.order_notify_customer_send!, ARGS)
-    expect(JSON.parse(unwrapUntrusted(content as string))).toMatchObject({ sent: true })
+    const activities = toolCallActivities([send], { services: svc, sessions, approvals, audit })
+    const ran = (await env('call', CALL).run(activities[NAME]!, { tool: 'order_notify_customer_send', input: ARGS })) as {
+      ok: boolean
+      content: { text: string }[]
+    }
+    expect(ran.ok).toBe(true)
+    expect(JSON.parse(unwrapUntrusted(ran.content[0]!.text))).toMatchObject({ sent: true })
     expect(sends).toHaveLength(1)
     expect(writes.filter((w) => w.path.endsWith('/messages'))).toHaveLength(1)
 
     // The customer's contact changed since: the hash no longer matches what was approved.
     const changed = fakeBackend({ binding: { ...BINDING, contact_kind: 'phone' } })
-    const moved = toolActivities([send], { services: services({ backend: changed.backend, messaging }), sessions, approvals, audit })
-    const err = await env('tool-toolu_01')
-      .run(moved.order_notify_customer_send!, ARGS)
-      .then(
-        () => undefined,
-        (e: unknown) => e,
-      )
-    expect(err).toBeInstanceOf(ApplicationFailure)
-    expect((err as ApplicationFailure).type).toBe('NotApproved')
+    const moved = toolCallActivities([send], { services: services({ backend: changed.backend, messaging }), sessions, approvals, audit })
+    const refused = (await env('call', CALL).run(moved[NAME]!, { tool: 'order_notify_customer_send', input: ARGS })) as { ok: boolean }
+    expect(refused.ok).toBe(false)
     expect(sends).toHaveLength(1)
   })
 })

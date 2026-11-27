@@ -386,23 +386,11 @@ export const NOT_A_TOOL: readonly { operation: Operation; reason: string }[] = [
       'it is not an action of its own.',
   },
   {
-    operation: 'POST /api/v1/workflow-runs/{run_id}/answer',
+    operation: 'GET /api/v1/tasks',
     reason:
-      "A flow's entries are answered by the browser user on the Workflows page only (spec §6.6, plan 6 " +
-      'Ruling 6); the route refuses an agent-authored request.',
+      "The questions flows ask (#7364), for the screens that show and answer them; it has no answers. The " +
+      'assistant reads what a run waits on with get_flow_run, and answers with answer_flow_question.',
   },
-  {
-    operation: 'POST /api/v1/tasks/{task_id}/answer',
-    reason:
-      "A flow prompt's typed answer (#7364) is the browser user's, as a flow's other answers are; the route " +
-      'refuses an agent-authored request.',
-  },
-  ...(['GET /api/v1/tasks', 'GET /api/v1/tasks/{task_id}'] as const).map((operation) => ({
-    operation,
-    reason:
-      "The questions flows ask a person (#7364), for the screens that show and answer them; the list has no answers, " +
-      'and one task has its own. The assistant reads what a run waits on with get_flow_run, and only a person answers.',
-  })),
   {
     operation: 'POST /api/v1/workflow-runs/{run_id}/decide',
     reason:
@@ -529,13 +517,6 @@ export const NOT_A_TOOL: readonly { operation: Operation; reason: string }[] = [
     reason: 'binary download; the agent reads `bom` and `files` from GET /outputs/{id}',
   },
   {
-    operation: 'GET /api/v1/outputs/copy-status',
-    reason:
-      "The last run of the copy of the outputs' files to rows (#7255), at an API start or in a housekeeping " +
-      "sweep: an operator's check after a deploy. The copy runs by itself, so an agent has nothing to act " +
-      'on; the outputs it copied are in the output tools.',
-  },
-  {
     operation: 'POST /api/v1/outputs/{output_id}/backfill',
     reason:
       'Re-renders an output saved before Arrange so Arrange can use it (#902); the History and Print ' +
@@ -602,6 +583,8 @@ export const NOT_A_TOOL: readonly { operation: Operation; reason: string }[] = [
     [
       'GET /api/v1/farm/library/{file_id}/thumbnail',
       'GET /api/v1/farm/archives/{archive_id}/thumbnail',
+      'GET /api/v1/farm/library/{file_id}/plates/{plate}/thumbnail',
+      'GET /api/v1/farm/archives/{archive_id}/plates/{plate}/thumbnail',
       'GET /api/v1/farm/printers/{printer_id}/cover',
     ] as const
   ).map((operation) => ({
@@ -743,22 +726,6 @@ export const NOT_A_TOOL: readonly { operation: Operation; reason: string }[] = [
       "The camera dialog's live view (#7330): a WebRTC (WHEP) exchange and an LL-HLS stream that never ends, " +
       "proxied to the live edge for the browser's player. An agent reads the camera a frame at a time through " +
       'get_printer_camera.',
-  })),
-  ...(
-    [
-      'GET /api/v1/printers/{printer_id}/kprofiles',
-      'POST /api/v1/printers/{printer_id}/kprofiles',
-      'POST /api/v1/printers/{printer_id}/kprofiles/batch',
-      'POST /api/v1/printers/{printer_id}/kprofiles/delete',
-      'GET /api/v1/printers/{printer_id}/kprofiles/notes',
-      'PUT /api/v1/printers/{printer_id}/kprofiles/notes',
-      'DELETE /api/v1/printers/{printer_id}/kprofiles/notes/{setting_id}',
-    ] as const
-  ).map((operation) => ({
-    operation,
-    reason:
-      "A printer's K-profiles through Bambuddy (#7154), on Settings > Printers. The tools follow in #7162 " +
-      '(plan 2026-11-23-printer-kprofiles R-7154-10).',
   })),
   {
     operation: 'PUT /api/v1/printers/{printer_id}/lan',

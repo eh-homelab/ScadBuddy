@@ -18,6 +18,7 @@ const SCOPES: Record<ServiceCaller, string[]> = {
   'camera-relay': ['crud.camera-relay'],
   fleet: ['crud.fleet'],
   inventory: ['crud.inventory'],
+  'fleet-rotator': ['crud.fleet-rotator'],
 }
 
 /** The callers that read a sealed credential; the rest exchange a proof (#5298). */

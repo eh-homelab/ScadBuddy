@@ -561,7 +561,7 @@ def test_the_answer_route_refuses_a_service_caller(
     for headers in ({"Authorization": f"Bearer {issued.token}"}, AGENT):
         response = post(client, task, GOOD, **headers)
         assert response.status_code == 403, response.text
-        assert response.json()["type"].endswith("/flow-entry-browser-only")
+        assert response.json()["type"].endswith("/flow-answer-not-allowed")
         # Who asks is checked before the size.
         assert post(client, task, {"note": "x" * 17 * 1024}, **headers).status_code == 403
     assert rows.task(task)[0] == "open"
@@ -607,10 +607,10 @@ def test_the_list_has_no_answer_and_not_who_gave_it(
     client: TestClient, task: str, harness: Harness
 ) -> None:
     held = post(client, task, GOOD).json()
-    assert (held["answer"], held["answered_by"]) == (GOOD, "browser")
+    assert (held["answer"], held["answered_by"], held["admitted_by"]) == (GOOD, "browser", None)
     assert client.get(f"/api/v1/tasks/{task}").json() == held
     response = client.get("/api/v1/tasks", params={"state": "answered"})
-    del held["answer"], held["answered_by"]
+    del held["answer"], held["answered_by"], held["admitted_by"]
     assert response.json() == {"tasks": [held]}
     assert GOOD["email"] not in response.text
 

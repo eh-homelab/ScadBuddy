@@ -93,6 +93,38 @@ from #7703), `special` (a special type, §4.4), and `steps` (handlers and parame
 The categories people know, `Filament > PLA > Matte` and `Paper`, are kinds in the same
 tree. A category below the class roots changes no behaviour unless it sets `steps`.
 
+**Required properties (owner, 2026-11-26, [#7950](https://github.com/eh-homelab/ScadBuddy/issues/7950)).**
+Items follow the spool rule of spec
+[§6.3b](2026-11-21-inventory-and-purchasing-design.md) (#7703). The Python reference is
+`backend/scadbuddy/entities/required.py` and `entities/properties.py`.
+
+- A kind's schema may mark keys `required`. The required keys merge down the kind tree: a
+  child keeps its ancestors' required keys and may add its own. A child may require a key
+  that it only inherits. A kind change that would leave a kind below it requiring a key
+  that its merged schema no longer defines (an ancestor drops the key, or a kind moves) is
+  refused with 422 `bad_property_schema`. The problem names that kind and the key.
+- An item's required keys are the merged `required` keys of its kind chain, plus the
+  `requires_properties` of its special type (§4.4).
+- The item create and save take an optional `properties` patch. Go writes the item and
+  its properties in one transaction. The property triggers publish their history events,
+  as for every writer (§4.8).
+- An item create or save is refused when the item is not complete after it: a required
+  key has no value, or a stored value does not fit the subschema of its key. The answer is
+  422 `missing_required_properties` with `missing` (the keys) and `invalid` (each key with
+  its reason), as the spool routes answer
+  ([#7729](https://github.com/eh-homelab/ScadBuddy/pull/7729),
+  [#7809](https://github.com/eh-homelab/ScadBuddy/pull/7809),
+  [#7910](https://github.com/eh-homelab/ScadBuddy/pull/7910)). Nothing is written. A value
+  that the caller sends and that does not fit stays 422 `bad_property_value`.
+- These writes are not checked: an item `PATCH` that sends no field; an item archive and
+  an item restore (their own activities; items have no `archived` or `sort_order`
+  field); stock steps and other events; syncs and imports. They write the item, and the
+  item reads incomplete.
+- Every item read carries `missing_properties` and `invalid_properties` (keys). A read
+  computes them; nothing stores them. An archived item is never marked.
+- This replaces the first K1 rule (plan R-K1-8), which saved the item and only listed the
+  missing keys.
+
 ## 4. Handlers: what a thing does
 
 ### 4.1 Steps
@@ -146,7 +178,8 @@ A special type is a named set of handlers. It says:
 
 - `needs`: the class it requires (`filament_spool`: physical, consumable, unit).
 - `handlers`: the steps it overrides.
-- `requires_properties`: properties its items must have.
+- `requires_properties`: properties its items must have. An item create or save without
+  one is refused (§3, "Required properties").
 - `panels`: the UI panels the frontend shows for its units (a frontend registry keyed
   by panel id).
 - `tools`: its agent tools.
@@ -368,7 +401,7 @@ Go owns stock; Python calls it.
   write takes an `Idempotency-Key`. The ledger is the existing `crud_requests`
   (`migrations/20261106T1836Z_crud_requests.sql`, `crud/idempotency.py`), kept 7 days for
   the caller `inventory` (24 hours for the others); a repeat returns the stored result.
-  The caller starts its workflow first, and the workflow's first activity writes the
+  The caller starts its workflow first, and the fulfil workflow's first activity writes the
   caller's row (§6.1a "Nothing manual, no sweeps"); Go is called with a key derived from
   that row (the workflow `order_item:<id>:parts:<n>`, each `inventory.Take`
   `order_item:<id>:parts:<n>:<item>`), and Temporal retries a failed call. A refusal in
@@ -414,7 +447,10 @@ gives us the visibility into the Activities tab in SB".
   answers the stored result. So repeated tries cause no extra work.
 - **Nothing manual, no sweeps** (owner, 2026-11-25: "nothing manual here should happen
   for sweeps"). A change that crosses a boundary starts its workflow *before* it commits
-  anything, and the workflow's own first activity commits the local change. So a failed
+  anything, and only the workflow's own activities commit. `FulfilOrderItem`'s first
+  activity commits the order change, then Go's `Take` runs; `RecostLot` reads the orders,
+  then Go's `Recost` runs, then an activity records the cost; `MergePrinter` runs Go's
+  `Repoint`, then the merge commits. So a failed
   start leaves nothing half done (the person gets an error, and nothing was written), and
   no state ever needs a sweep, a backstop, a repair loop or a person to settle it.
 - **Orders.** Fulfilling an order item starts the workflow `FulfilOrderItem` with the
@@ -438,8 +474,11 @@ gives us the visibility into the Activities tab in SB".
   fail. So the printer merge locks the gone printer's row `FOR UPDATE`, then checks
   whether a stock row names it; if one does, it rolls back, and the workflow executes
   `inventory.Repoint` again (with a new key per round) and runs the merge again. There is
-  no cap: only a stock write racing the merge repeats it, and the workflow ends only once
-  the merge has committed (owner, 2026-11-25; plan K1, R-K1-29). A round repeats only
+  no cap: only a stock write racing the merge repeats it. The workflow ends when the merge
+  commits, or when the merge step refuses (one of the caller's checks fails): then it
+  executes `inventory.Repoint` back, for exactly the rows it moved, and the run fails with
+  that problem, so the same id can start again (owner, 2026-11-25; plan K1, R-K1-29,
+  R-K1-32). A round repeats only
   after a new stock write named the gone printer, and the workflow waits between rounds
   (`workflow.sleep`, doubling from 1 s to 60 s), so a busy stock writer cannot spin it. The callers that need the
   kept row (`link_bambuddy`, `ensure_bambuddy_written`) wait on the workflow's result.
@@ -586,6 +625,8 @@ Each is an issue under #6949, with layers as stacked PRs.
   units, moves, the internal routes, the Python forwarders for the phase 2 routes, the
   idempotency keys, and the migration of §8. The YAML test. It needs `scadbuddy-core`
   deployed with its CRUD port (#7702), not the front process: Python calls Go directly.
+  K1 also checks the required properties of an item when the item is created or saved
+  (§3, "Required properties"; owner, 2026-11-26, #7950).
 - K1 also adds the property history (§4.8): it touches only `entity_properties` and
   `entities`, so it can land first, on its own. K1 also creates the relationship tables
   and `handler_config_history` (§6.3, §4.7).

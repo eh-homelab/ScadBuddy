@@ -528,6 +528,43 @@ describe('PropertiesPanel (#7026)', () => {
       expect(first).toHaveValue('Bad Key')
     })
 
+    const keyAt = (form: HTMLElement, key: string) =>
+      within(form)
+        .getAllByRole('textbox', { name: /^Key \d+$/ })
+        .findIndex((input) => (input as HTMLInputElement).value === key) + 1
+
+    it('marks a key required and saves required (#7703)', async () => {
+      const { user } = renderPage(<PropertiesPanel entity={TYPE} />)
+      const form = await open(user)
+      await user.click(within(form).getByRole('checkbox', { name: `Key ${keyAt(form, 'mpn')} is required` }))
+      await user.click(within(form).getByRole('button', { name: 'Save keys' }))
+      await waitFor(() => expect(entityMock.schemas.spool_type!.required).toEqual(['mpn']))
+      const again = await open(user)
+      expect(within(again).getByRole('checkbox', { name: `Key ${keyAt(again, 'mpn')} is required` })).toBeChecked()
+      await user.click(within(again).getByRole('checkbox', { name: `Key ${keyAt(again, 'mpn')} is required` }))
+      await user.click(within(again).getByRole('button', { name: 'Save keys' }))
+      await waitFor(() => expect(entityMock.schemas.spool_type!).not.toHaveProperty('required'))
+    })
+
+    it('says how many rows lack a key before it is saved as required (#7703)', async () => {
+      const row = (id: string, archived = false) => ({ id: `7a000000-0000-4000-8000-00000000000${id}`, archived_at: archived ? '2026-11-01T00:00:00Z' : null })
+      server.use(http.get('/api/v1/filament/types', () => HttpResponse.json([row('1'), row('2'), row('3'), row('4', true)])))
+      seedEntityProperties(TYPE, { mpn: 'A00' })
+      seedEntityProperties('spool_type:7a000000-0000-4000-8000-000000000002', { mpn: '  ' })
+      const { user } = renderPage(<PropertiesPanel entity={TYPE} />)
+      const form = await open(user)
+      await user.click(within(form).getByRole('checkbox', { name: `Key ${keyAt(form, 'mpn')} is required` }))
+      expect(await within(form).findByText('2 rows lack mpn')).toBeVisible()
+    })
+
+    it('a kind that does not check has no Required box (#7703)', async () => {
+      const { user } = renderPage(<PropertiesPanel entity="supplier:5a000000-0000-4000-8000-000000000001" />)
+      await user.click(await screen.findByRole('button', { name: "Edit the kind's keys" }))
+      const form = await screen.findByRole('form', { name: 'Keys of supplier' })
+      await user.click(within(form).getByRole('button', { name: 'Add key' }))
+      expect(within(form).queryByRole('checkbox')).toBeNull()
+    })
+
     it("sends an item to its kinds page, whose keys are its item kind's", async () => {
       renderPage(<PropertiesPanel entity="item:5d1c0000-0000-4000-8000-000000000001" />)
       expect(await screen.findByRole('link', { name: "Edit the kind's keys" })).toHaveAttribute('href', '/inventory/kinds')

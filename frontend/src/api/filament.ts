@@ -371,9 +371,12 @@ export const addSpoolEvent = (id: string, body: SpoolEventAdd) => request<SpoolE
 export const insertWeightOffer = (spoolId: string, readingG: number) =>
   request<InsertWeightCheck>(`${BASE}/spools/${seg(spoolId)}/insert-weight-offer?reading_g=${encodeURIComponent(String(readingG))}`)
 
-/** Accepts the offer: the insert's empty weight becomes the mean of its new-spool readings. Run it before the weighing. */
-export const acceptInsertWeight = (spoolId: string, readingG: number) =>
-  request<InsertWeightAccepted>(`${BASE}/spools/${seg(spoolId)}/insert-weight`, json('POST', { reading_g: readingG }))
+/**
+ * Accepts the offer: the insert's empty weight becomes the mean of its new-spool readings. Run it before the weighing.
+ * `newEmptyWeightG` is the offer's weight; a mean that moved since is a 409 `insert_weight_changed` (#7450-2).
+ */
+export const acceptInsertWeight = (spoolId: string, readingG: number, newEmptyWeightG?: number) =>
+  request<InsertWeightAccepted>(`${BASE}/spools/${seg(spoolId)}/insert-weight`, json('POST', { reading_g: readingG, new_empty_weight_g: newEmptyWeightG }))
 
 /** `null` takes it out of every place. */
 export const moveSpool = (id: string, locationId: string | null) =>
@@ -397,6 +400,9 @@ export function upsertType(body: SpoolTypeCreate | SpoolTypePatch, id?: string):
     ? request<SpoolType>(`${BASE}/types`, json('POST', body))
     : request<SpoolType>(`${BASE}/types/${seg(id)}`, json('PATCH', body))
 }
+
+/** #7703 — only a type's cost (`null` clears it), not checked for required properties: a one-field action. */
+export const setTypeCost = (id: string, costPerKg: string | null) => request<SpoolType>(`${BASE}/types/${seg(id)}/cost-per-kg`, json('PUT', { cost_per_kg: costPerKg }))
 
 export const setTypePresets = (id: string, rows: TypePresetInput[]) =>
   request<TypePreset[]>(`${BASE}/types/${seg(id)}/presets`, json('PUT', rows))

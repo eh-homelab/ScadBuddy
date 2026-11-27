@@ -14,7 +14,7 @@ import {
 import { SESSION_BEGIN_TURN_ACTIVITY, SESSION_FINISH_ACTIVITY, SESSION_QUEUE_CHANGED_ACTIVITY } from './names.js'
 
 // A turn's end (`session.finish_turn`), the port of agent-durable's `finish_turn`
-// (session/activities.py): what a classic turn's end writes (manager.ts): the turn's own
+// (session/activities.py): what a session turn's end writes (manager.ts): the turn's own
 // closing events when its activity built them (`tail`), else built here, worded by the end (turnRows.ts) as the
 // `session.result` with the lineage's spend and budget, the error when the turn did not
 // end well, and the final `session.status`, in the transaction that sets the status. It
@@ -82,7 +82,7 @@ export function sessionFinishActivities(rows: TurnRows, events: EventLog, costs?
     [SESSION_FINISH_ACTIVITY]: async (args: FinishTurnInput): Promise<boolean | FinishTurnResult> => {
       const sessionId = args.sessionId
       const { next } = args
-      // The turn's own closing events, as a classic turn builds them (turnCore.ts `tallyTurn`), or
+      // The turn's own closing events, as a session turn builds them (turnCore.ts `tallyTurn`), or
       // built here for an end the workflow decided; the end words them with the row's spend and budget.
       const tail = args.tail?.length ? args.tail : turnEvents(sessionId, args, 0, 0, 0)
       const done = await rows.finish(sessionId, args.turnId, tail, next ? headClaim(sessionId, next) : undefined)

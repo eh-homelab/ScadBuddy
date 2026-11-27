@@ -1,7 +1,7 @@
 import { proxyActivities } from '@temporalio/workflow'
 
-// A stand-in for the durable session's workflow (phase 5): it calls one tool on
-// `agent-tools` by name, with the activity ID `activity_as_tool` gives it.
+// A stand-in for a workflow that calls one tool on `agent-tools` by name: a flow run's,
+// or a session's ToolCall (`tool:<name>`), with the activity ID `tool-<tool_use_id>`.
 
 export async function callTool(name: string, input: unknown, toolUseId: string): Promise<unknown> {
   const tools = proxyActivities<Record<string, (input: unknown) => Promise<unknown>>>({

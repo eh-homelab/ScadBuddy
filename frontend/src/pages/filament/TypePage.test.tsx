@@ -6,6 +6,7 @@ import { getType, listTypes, startProfileFetch, upsertType } from '../../api/fil
 import { listShopping, patchSupplier } from '../../api/filamentPurchasing'
 import { SUPPLIER } from '../../mocks/features/filamentPurchasingSeed'
 import { server } from '../../mocks/server'
+import { entityMock } from '../../mocks/features/entities'
 import { T } from '../../mocks/features/filament/seed'
 import { choose } from '../../test/select'
 import { renderPage } from '../../test/utils'
@@ -516,5 +517,45 @@ describe('the 3DFP id and fetch (#6625)', () => {
     await waitFor(() => expect(within(table).getAllByDisplayValue('H2C')).toHaveLength(4))
     for (const nozzle of ['0.2', '0.4', '0.6', '0.8']) expect(within(table).getByDisplayValue(nozzle)).toBeInTheDocument()
     expect(screen.getByLabelText('Colour name')).toHaveValue('Jade')
+  })
+
+  describe('defined and required properties (#7703)', () => {
+    it('saves the row and its defined properties with one request', async () => {
+      const patches: Record<string, unknown>[] = []
+      server.events.on('request:start', ({ request }) => {
+        if (request.method === 'PATCH' && new URL(request.url).pathname === `/api/v1/filament/types/${T.JADE}`) void request.clone().json().then((body) => patches.push(body as Record<string, unknown>))
+      })
+      entityMock.schemas.spool_type = { ...entityMock.schemas.spool_type!, required: ['mpn'] }
+      const { user } = render(`/filament/types/${T.JADE}`)
+      const note = await screen.findByLabelText('Note')
+      await user.type(note, 'x')
+      await user.click(screen.getByRole('button', { name: 'Save type' }))
+      expect(await screen.findByText('Fill the required properties first: mpn.')).toBeVisible()
+      expect(screen.getByLabelText('mpn')).toHaveAttribute('aria-invalid', 'true')
+      await user.type(screen.getByLabelText('mpn'), 'A00-W1')
+      await user.click(screen.getByRole('button', { name: 'Save type' }))
+      await waitFor(() => expect(entityMock.properties.get(`spool_type:${T.JADE}`)?.map((p) => [p.key, p.value])).toEqual([['mpn', 'A00-W1']]))
+      expect(patches.at(-1)).toEqual({ note: 'x', properties: { mpn: 'A00-W1' } })
+      expect((await getType(T.JADE)).note).toBe('x')
+    })
+
+    // #7951: the type opens when only its properties cannot be read.
+    it('opens the type and says so when its properties cannot be read (#7951)', async () => {
+      server.use(http.get(`*/api/v1/entities/${encodeURIComponent(`spool_type:${T.JADE}`)}/properties`, () => HttpResponse.json({ detail: 'down' }, { status: 500 })))
+      render(`/filament/types/${T.JADE}`)
+      expect(await screen.findByLabelText('Note')).toBeVisible()
+      expect(await screen.findByText(/The type's properties could not be loaded/)).toBeVisible()
+      expect(screen.queryByText(/The type could not be loaded/)).toBeNull()
+    })
+
+    // #7809 review: `before` is what was sent, so a blank list item does not keep the form dirty.
+    it('is clean after saving a list with a blank trailing item', async () => {
+      const { user } = render(`/filament/types/${T.JADE}`)
+      await user.type(await screen.findByLabelText('gtin item 1'), '0123')
+      await user.click(screen.getByRole('button', { name: 'Add gtin item' }))
+      await user.click(screen.getByRole('button', { name: 'Save type' }))
+      await waitFor(() => expect(entityMock.properties.get(`spool_type:${T.JADE}`)?.map((p) => [p.key, p.value])).toEqual([['gtin', ['0123']]]))
+      await waitFor(() => expect(screen.getByRole('button', { name: 'Save type' })).toBeDisabled())
+    })
   })
 })

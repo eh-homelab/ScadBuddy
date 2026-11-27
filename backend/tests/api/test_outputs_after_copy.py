@@ -1,6 +1,6 @@
-"""The outputs routes in the steady state (#7255): a copy run has finished, so the rows
-answer every read and a missing row is a missing output. `test_outputs.py` runs the same
-routes before any copy (its app's start copy is off, `app_output_copy_off`)."""
+"""The outputs routes in the steady state (#7255): the rows answer every read and a
+missing row is a missing output. Release B retired the copy (#7257), and #7887 removed
+what read its run tables."""
 
 from __future__ import annotations
 
@@ -11,8 +11,7 @@ import pytest
 from fastapi.testclient import TestClient
 
 from scadbuddy.api.deps import STATE_ATTR
-from scadbuddy.library.output_copy import copy_outputs
-from scadbuddy.library.outputs import META_NAME, OutputStore
+from scadbuddy.library.outputs import OutputStore
 from tests.api.conftest import wait_for_job
 from tests.support.operations import press
 
@@ -40,19 +39,12 @@ def _save(client: TestClient, model: str, width: float, name: str | None = None)
 
 @pytest.fixture
 def first(client: TestClient, model: str, monkeypatch: pytest.MonkeyPatch) -> Iterator[str]:
-    """One output saved, then one finished copy run; after it, nothing globs the
-    outputs for a record."""
+    """One output saved; after it, nothing globs the outputs for a record."""
     output_id = _save(client, model, 1, "first")
-    store = _store(client)
-    assert store.rows is not None
-    state = getattr(client.app.state, STATE_ATTR)  # type: ignore[attr-defined]
-    result = copy_outputs(store, store.rows, state.projection.conninfo)
-    assert result is not None and not result.incomplete
-    assert store.rows.copied()
     real_glob = Path.glob
 
     def no_meta_glob(self: Path, pattern: str, **kwargs: object) -> Iterator[Path]:
-        if pattern.endswith(META_NAME):
+        if pattern.endswith("meta.json"):
             raise AssertionError(f"globbed {self} for {pattern}")
         return real_glob(self, pattern, **kwargs)  # type: ignore[arg-type]
 

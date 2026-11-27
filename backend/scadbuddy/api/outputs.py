@@ -6,12 +6,12 @@ import logging
 import re
 import tarfile
 import zipfile
-from collections.abc import AsyncIterator, Callable, Iterable, Mapping
+from collections.abc import AsyncIterator, Iterable, Mapping
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Annotated, Any, Literal, get_args
 
-from fastapi import APIRouter, File, Query, Request, Response, UploadFile, status
+from fastapi import APIRouter, FastAPI, File, Query, Request, Response, UploadFile, status
 from fastapi.responses import FileResponse, JSONResponse
 from opentelemetry import trace
 from pydantic import BaseModel, ConfigDict, Field, model_validator
@@ -98,7 +98,12 @@ from scadbuddy.core.config import Config
 from scadbuddy.core.events import EventBus, OutputEvent, emit
 from scadbuddy.core.gitrepo import GitError, RevisionNotFoundError
 from scadbuddy.core.paths import DataPaths
-from scadbuddy.core.problems import DATABASE_ERRORS, PROBLEM_MEDIA_TYPE, ApiError
+from scadbuddy.core.problems import (
+    DATABASE_ERRORS,
+    PROBLEM_MEDIA_TYPE,
+    ApiError,
+    problem_response,
+)
 from scadbuddy.core.tracing import span, traced_thread
 from scadbuddy.library.catalogue import Catalogue
 from scadbuddy.library.history import COMMIT_ID_PATTERN, ModelHistory
@@ -108,6 +113,7 @@ from scadbuddy.library.outputs import (
     BACK_OFFICE,
     OUTPUT_ID_PATTERN,
     BackfillState,
+    OutputBytesLostError,
     OutputMeta,
     OutputNotFoundError,
     OutputStore,
@@ -125,9 +131,6 @@ from scadbuddy.print_library.store import NativeFile, NativeListedFile
 from scadbuddy.printers.component import PrintersDep
 from scadbuddy.render.bambu3mf import plates_of
 from scadbuddy.render.geometry import GeometryAnalysis, NoSuchPlateError
-from scadbuddy.render.inputs import (
-    legacy_inputs,
-)
 from scadbuddy.render.job_models import BomEntry, JobNotFoundError, ManifestObject, OutputRecord
 from scadbuddy.render.jobs import SnapshotUnavailableError, source_directory
 from scadbuddy.render.objects3mf import UnreadableObjectsError
@@ -141,6 +144,22 @@ from scadbuddy.workflows.pipeline_activities import plate_size
 logger = logging.getLogger(__name__)
 
 router = APIRouter(tags=["outputs"])
+
+
+def install_output_handlers(app: FastAPI) -> None:
+    """A blob the store lost after #7257 is a 500 from every route that reads it (plan
+    D9): the output exists, so a 404 would be false, and no file is read in its place.
+    The store has logged it at error level (`OutputBytesLostError`)."""
+
+    @app.exception_handler(OutputBytesLostError)
+    async def _lost_bytes(request: Request, exc: OutputBytesLostError) -> JSONResponse:
+        return problem_response(
+            request,
+            status.HTTP_500_INTERNAL_SERVER_ERROR,
+            f"the blob store has lost this output's {exc.role}; the old outputs share may"
+            " still hold a copy",
+        )
+
 
 THREE_MF_MEDIA_TYPE = "model/3mf"
 
@@ -216,8 +235,9 @@ class EditTarget(BaseModel):
     params: dict[str, ParamValue] = Field(default_factory=dict)
     inputs: dict[str, Any] = Field(default_factory=dict)
     model_version: str | None = None
-    #: ``record`` when the output is still saved, ``3mf`` when only the file survives.
-    source: Literal["record", "3mf"]
+    #: Always ``record``: read from the output's row. ``3mf`` (the 3MF alone, with no
+    #: record) is gone since #7257, which reads no folder.
+    source: Literal["record"]
     #: An arranged output's sources (spec 2026-09-27 §7): it has no one template state
     #: to reopen, so the page says where its objects came from instead.
     arranged_from: list[str] = Field(default_factory=list)
@@ -499,9 +519,7 @@ async def native_outputs_for_files(
 
 
 async def _live(outputs: OutputStore, output_ids: set[str]) -> set[str]:
-    """`_existing` on a thread, in a span (#7245): before a copy run finished (#7255),
-    each output it does not remember is a glob of the NFS share
-    (`OutputStore._files_dir`, a child span), and a miss is never remembered."""
+    """`_existing` on a thread, in a span (#7245): one query of the rows (#7257)."""
     return await traced_thread(
         "outputs.existing",
         _existing,
@@ -1084,18 +1102,8 @@ async def list_recent_outputs(
     an output id; a page is `limit` outputs (50 when omitted) and `X-Total-Count` counts
     what the filters select. Outputs carry no tags: `tag` matches the model's catalogue
     tags, case and accents folded. The storefront slice run's outputs are left out unless
-    `include_storefront` (#6371). Once a row copy run has finished, the list reads the
-    ``outputs`` rows; before that, ``output_index`` (#7257). `OutputRows.copied` queries
-    only until it first reads true; it then answers from memory, so a request on a
-    copied store runs no query for it."""
+    `include_storefront` (#6371). The list reads the ``outputs`` rows (#7257)."""
     rows = outputs.rows
-    run: Callable[[OutputQuery], tuple[list[str], int]]
-    if rows is not None and await asyncio.to_thread(rows.copied):
-        run, on_index = rows.query, False
-    elif outputs.index is not None:
-        run, on_index = outputs.index.query, True
-    else:
-        raise ApiError(status.HTTP_503_SERVICE_UNAVAILABLE, "outputs are not indexed here")
     slugs: list[str] | None = list(slug) if slug else None
     if tag is not None:
         records = await asyncio.to_thread(catalogue.list_summaries)
@@ -1112,132 +1120,30 @@ async def list_recent_outputs(
         limit=limit,
     )
     try:
-        ids, total = await asyncio.to_thread(run, query)
+        ids, total = await asyncio.to_thread(rows.query, query)
     except AfterNotListedError:
         raise ApiError(
             status.HTTP_409_CONFLICT,
             f"no output {after!r} is listed any more to page after; list again without `after`",
         ) from None
     response.headers[TOTAL_COUNT_HEADER] = str(total)
-    metas = await asyncio.to_thread(_metas_or_forget, outputs, ids, forget=on_index)
+    metas = await asyncio.to_thread(_metas, outputs, ids)
     return await _details(outputs, uploads, state.print_runs.store, metas)
 
 
-def _metas_or_forget(outputs: OutputStore, ids: list[str], *, forget: bool) -> list[OutputMeta]:
-    """The outputs ``ids`` name, in order; a row whose output is gone is left off the
-    page. With ``forget`` (the list read ``output_index``) it is dropped from the index
-    too: its model was deleted with its directory. An ``outputs`` row is the record, so
-    the list on rows forgets nothing (#7257)."""
+def _metas(outputs: OutputStore, ids: list[str]) -> list[OutputMeta]:
+    """The outputs ``ids`` name, in order; one deleted since the query, or unreadable,
+    is left off the page. An ``outputs`` row is the record, so it forgets nothing
+    (#7257)."""
     metas: list[OutputMeta] = []
-    gone: list[str] = []
     for output_id in ids:
         try:
             metas.append(outputs.get(output_id))
         except OutputNotFoundError:
-            gone.append(output_id)
+            pass
         except (OSError, ValueError):
             logger.warning("outputs: %s is unreadable; left out of the list", output_id)
-    if forget and gone and outputs.index is not None:
-        outputs.index.forget(*gone)
     return metas
-
-
-#: How many damaged rows `GET /outputs/copy-status` names (``bytes.damaged_sample``).
-DAMAGED_SAMPLE = 50
-
-
-class OutputBytesStatus(BaseModel):
-    """The last run of the copy of the saved outputs' bytes to the blob store (#7256): at an
-    API start, or in a housekeeping sweep."""
-
-    started_at: datetime
-    #: ``None`` while the run goes on, when it stopped before its end, when an output
-    #: ``failed``, when it is ``incomplete``, or when it was ``refused``.
-    finished_at: datetime | None
-    #: A folder could not be read (a failed stat), an output's folder is missing, or the
-    #: outputs folder is missing or lists no slug folder while rows exist (the run then
-    #: writes nothing). The next run tries again.
-    incomplete: bool
-    #: Why the run copied nothing: no content store, the ``bambuddy`` store, or
-    #: a quota the bytes do not fit in (with the shortfall). ``None`` when it ran.
-    refused: str | None
-    #: Outputs whose row the run wrote with a blob it put or a key the row did not name
-    #: before.
-    copied: int
-    verified: int
-    #: Outputs whose files did not change since the copy put their bytes.
-    skipped: int
-    #: What the outputs still in files need of the quota, or more, never less: blobs that a
-    #: failed run already put are counted again until the sweep removes them.
-    needed_bytes: int
-    needed_count: int
-    #: ``{output_id, role, error}`` for each output whose bytes could not be read, put or
-    #: verified. The output gets no write; the next run tries again.
-    failed: list[dict[str, Any]]
-    #: ``{output_id, role, error}`` for each missing byte file this run found, and
-    #: ``names`` too for a ``files/`` folder with a name an output may not hold. A later
-    #: run skips an output whose files did not change, so it does not name it again:
-    #: read ``damaged_rows`` and ``damaged_sample`` for every output that is damaged now.
-    damaged: list[dict[str, Any]]
-    #: How many rows the files still hold the bytes of now.
-    pending: int
-    #: How many rows name damage now (their ``damaged`` is not empty), from every run.
-    damaged_rows: int = 0
-    #: ``{output_id, damaged}`` of the first `DAMAGED_SAMPLE` of those rows, by output
-    #: id: each ``damaged`` is ``[{role, error}]`` (``names`` too for ``files``).
-    damaged_sample: list[dict[str, Any]] = []
-
-
-class OutputCopyStatus(BaseModel):
-    """The last run of the copy of the saved outputs' files to rows (#7255): at an API start,
-    or in a housekeeping sweep."""
-
-    started_at: datetime
-    #: ``None`` while the run goes on, when it stopped before its end, or when it is
-    #: ``incomplete``.
-    finished_at: datetime | None
-    #: The run walked to its end but may have missed folders (a listing failed, the
-    #: outputs folder read empty while rows exist, or a first run found no outputs
-    #: folder). It does not end the fallback to the files; the next run tries again.
-    incomplete: bool
-    copied: int
-    refreshed: int
-    dropped: int
-    #: ``<slug>/<id>`` of each folder with no readable ``meta.json``: it has no row.
-    not_copied: list[str]
-    #: ``{output_id, slug, file, error}`` for each side file left out of its row.
-    damaged: list[dict[str, Any]]
-    #: The last run of the byte copy (#7256); ``None`` before any.
-    bytes: OutputBytesStatus | None = None
-    #: When the cut-over mark was written (#7257): the copies are done and stopped, and
-    #: the files are no longer the record. ``None`` before it.
-    cut_over_at: datetime | None = None
-
-
-# Before `/outputs/{output_id}`, which would take `copy-status` for an id.
-@router.get(
-    "/outputs/copy-status",
-    response_model=OutputCopyStatus,
-    summary="The last copy of the outputs' files to rows",
-)
-async def output_copy_status(outputs: OutputsDep) -> OutputCopyStatus:
-    """The last run of the copy of the outputs' files to rows (#7255), at an API start or in
-    a housekeeping sweep: when it started and finished, what it copied, refreshed and
-    dropped, the folders it could not copy and the side files it left out. 404 before any
-    run. ``bytes``: the last run of the copy of their bytes to the blob store (#7256), how
-    many rows the files still hold the bytes of, and the rows that name damage now.
-    ``cut_over_at``: when the cut-over mark was written (#7257); the copies stop at it."""
-    rows = outputs.rows
-    last = None if rows is None else await asyncio.to_thread(rows.last_run)
-    if rows is None or last is None:
-        raise ApiError(status.HTTP_404_NOT_FOUND, "no copy of the outputs to rows has run")
-    byte_run = await asyncio.to_thread(rows.last_byte_run)
-    if byte_run is not None:
-        byte_run["pending"] = await asyncio.to_thread(rows.pending_bytes)
-        count, sample = await asyncio.to_thread(rows.damage, DAMAGED_SAMPLE)
-        byte_run["damaged_rows"], byte_run["damaged_sample"] = count, sample
-    cut_over_at = await asyncio.to_thread(rows.cut_over_at)
-    return OutputCopyStatus.model_validate({**last, "bytes": byte_run, "cut_over_at": cut_over_at})
 
 
 @router.get("/outputs/{output_id}", response_model=OutputDetail, summary="Output detail")
@@ -1257,34 +1163,11 @@ async def get_output(
 async def get_edit_target(
     output_id: OutputIdPath, catalogue: CatalogueDep, outputs: OutputsDep
 ) -> EditTarget:
-    """Where ``/edit/{output_id}`` should land, and with which values.
-
-    The record answers first. When it is gone — the directory restored without its
-    sidecars, or hand-pruned — the 3MF still carries the same provenance, so the
-    link keeps working from the file alone.
-    """
-    try:
-        meta = await asyncio.to_thread(outputs.get, output_id)
-    except OutputNotFoundError:
-        stamped = await outputs.provenance(output_id)
-        if stamped is None:
-            raise ApiError(
-                status.HTTP_404_NOT_FOUND,
-                f"no output with id {output_id!r}, and no 3MF left to read it from",
-            ) from None
-        await asyncio.to_thread(require_model, catalogue, stamped.model)
-        return EditTarget(
-            output_id=output_id,
-            slug=stamped.model,
-            name=None,
-            params=stamped.params,
-            inputs=legacy_inputs(stamped.params),
-            model_version=stamped.version,
-            source="3mf",
-        )
-    # Every other route through a slug asks the catalogue first. A link is allowed to
-    # outlive its output — that is the point of the 3MF fallback — but not its model:
-    # answering 200 would send the customizer somewhere it cannot load.
+    """Where ``/edit/{output_id}`` should land, and with which values: from the output's
+    row. An output with no row is a 404 (#7257: no folder is searched for its 3MF)."""
+    meta = await asyncio.to_thread(require_output, outputs, output_id)
+    # Every other route through a slug asks the catalogue first: answering 200 for a
+    # model that is gone would send the customizer somewhere it cannot load.
     return await asyncio.to_thread(_recorded_target, catalogue, outputs, meta)
 
 
@@ -1498,8 +1381,8 @@ async def _draw_thumbnail(
     await slots.acquire()
     try:
         # Another read drew it, or its draw came to nothing, while this one waited. A
-        # thumbnail counts only when it can be read: a blob the index names but the store
-        # lost, with no file, is drawn again.
+        # thumbnail blob the store lost raises `OutputBytesLostError` (#7257, plan D9):
+        # it is never drawn over.
         drawn_meanwhile = await _readable(outputs, output_id)
         drawable = await asyncio.to_thread(outputs.drawable_thumbnail, output_id)
     except BaseException:
@@ -1585,10 +1468,11 @@ _DRAWING: set[asyncio.Future[bool]] = set()
 
 
 async def _draw_and_keep(outputs: OutputStore, output_id: str) -> bool:
-    """The `iso` view of the output's preview mesh (its blob's temporary file, else its
-    file), drawn in a thread and kept as its thumbnail, file and blob
-    (`put_drawn_thumbnail`), unless one landed first; False, and remembered, when the
-    mesh has nothing to draw. False, not remembered, when the preview is gone."""
+    """The `iso` view of the output's preview mesh (its blob's temporary file), drawn in
+    a thread and kept as its thumbnail (`put_drawn_thumbnail`), unless one landed
+    first; False, and remembered, when the mesh has nothing to draw, or for
+    `RETRY_DRAW_AFTER` when its put failed. False, not remembered, when the preview is
+    gone."""
     async with outputs.local_role(output_id, "preview") as glb:
         if glb is None:
             return False
@@ -1596,8 +1480,14 @@ async def _draw_and_keep(outputs: OutputStore, output_id: str) -> bool:
     if png is None:
         outputs.remember_undrawable(output_id)
         return False
-    await outputs.put_drawn_thumbnail(output_id, png)
-    return True
+    if await outputs.put_drawn_thumbnail(output_id, png):
+        return True
+    # False: an upload landed first (it stays), or the put failed (a full store), which
+    # keeps nothing: then not drawn again until `RETRY_DRAW_AFTER` (#7257 B3 review).
+    if await asyncio.to_thread(outputs.has_role, output_id, "thumbnail"):
+        return True
+    outputs.remember_undrawable(output_id, retry_after=RETRY_DRAW_AFTER)
+    return False
 
 
 @router.get(
@@ -1659,13 +1549,26 @@ async def get_output_plates(output_id: OutputIdPath, outputs: OutputsDep) -> lis
     summary="A plate's cover image",
 )
 async def get_output_plate_thumbnail(
-    output_id: OutputIdPath, index: int, outputs: OutputsDep
+    output_id: OutputIdPath,
+    index: int,
+    outputs: OutputsDep,
+    config: ConfigDep,
+    events: EventsDep,
+    request: Request,
+    cover_if_missing: Annotated[
+        bool,
+        Query(description="The output's thumbnail when the plate has no cover (#7939)"),
+    ] = False,
 ) -> Response:
-    """The plate's own cover from inside the 3MF, the one Bambu Studio would show."""
+    """The plate's own cover from inside the 3MF, the one Bambu Studio would show. A
+    queue item's picture asks with ``cover_if_missing``: a plate with no cover then shows
+    the output's thumbnail, never nothing."""
     await asyncio.to_thread(require_output, outputs, output_id)
     async with _model_3mf(outputs, output_id) as path:
         image = await asyncio.to_thread(_plate_cover, path, index)
     if image is None:
+        if cover_if_missing:
+            return await get_output_thumbnail(output_id, outputs, config, events, request, None)
         raise ApiError(status.HTTP_404_NOT_FOUND, f"plate {index} of {output_id!r} has no cover")
     return Response(image, media_type="image/png")
 

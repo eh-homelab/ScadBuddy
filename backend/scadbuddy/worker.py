@@ -228,7 +228,7 @@ LOCAL_STORE_REFUSED = (
     "store_backend is local, and the render worker holds no database (#5298): the local"
     " backend runs only in-process, in the API (SCADBUDDY_TEMPORAL_WORKER_INPROCESS), whose"
     " volume and git it shares (plan D11). A render worker Deployment needs a remote store:"
-    " choose bambuddy or s3 in Settings, or run the renders in-process."
+    " choose s3 in Settings, or run the renders in-process."
 )
 
 
@@ -1051,7 +1051,7 @@ def _start_housekeeping(deps: WorkerDeps, sweep_interval: float) -> asyncio.Task
     """Housekeep the worker's piece cache on a timer: every SCADBUDDY_ASSET_SWEEP_INTERVAL
     when that is on, else every `WORKER_CACHE_EVICT_INTERVAL`. Turning the upload sweep
     off never stops eviction. A render worker's blobs are always a `CachedBlobStore` (it
-    runs only on `bambuddy` or `s3`, #5298 plan D11); other blobs get None."""
+    runs only on a remote store, #5298 plan D11); other blobs get None."""
     if not isinstance(deps.blobs, CachedBlobStore):
         return None
     interval = sweep_interval if sweep_interval > 0 else WORKER_CACHE_EVICT_INTERVAL

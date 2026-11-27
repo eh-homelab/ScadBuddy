@@ -18,6 +18,11 @@ import { AgentWorker } from '../src/temporal/worker.js'
 import { TEST_DATABASE_URL, throwawayDatabase } from './support/postgres.js'
 import { browser, manager, scriptedRunner, tempPaths } from './support/sessions.js'
 import { localTemporal, TEMPORAL_CLI, TEMPORAL_SKIP } from './support/temporal.js'
+import { Worker } from '@temporalio/worker'
+import { LocalSandboxes } from './support/sandbox.js'
+import { type Sandboxes, SandboxClient, startInSandbox } from '../src/sandbox/client.js'
+import { ensureSessionDir } from '../src/harness/stateDirs.js'
+import type { HarnessPaths } from '../src/harness/options.js'
 
 // A background task's workflow (temporal/backgroundTask.ts) on a Temporal dev server and
 // Postgres: it waits for the task's time, sends its prompt once the session is not busy,
@@ -37,6 +42,10 @@ describe.skipIf(!TEMPORAL_CLI || !TEST_DATABASE_URL)(`a background task's workfl
   // agent() calls the stand-in agents saw, and what each answers.
   const ran: { prompt: string; opts: Record<string, unknown> }[] = []
   let agentAnswer: (prompt: string) => AgentResult = (p) => ({ ok: true, result: `did ${p}` })
+  // The sessions' sandbox pods (#5916, #7310), local exec servers; and where the activities keep session directories.
+  let boxes: LocalSandboxes
+  let workPaths: HarnessPaths
+  const limits = { fileMaxBytes: 1024 * 1024, workspaceMaxBytes: 4 * 1024 * 1024 }
 
   beforeAll(async () => {
     env = await localTemporal()
@@ -54,13 +63,16 @@ describe.skipIf(!TEMPORAL_CLI || !TEST_DATABASE_URL)(`a background task's workfl
     answers = []
     ran.length = 0
     agentAnswer = (p) => ({ ok: true, result: `did ${p}` })
+    boxes = new LocalSandboxes()
+    workPaths = await tempPaths()
     worker = AgentWorker.start({
       address: env.address,
       namespace: 'default',
       activities: backgroundActivities({
         store,
         tz: 'UTC',
-        paths: await tempPaths(),
+        paths: workPaths,
+        sandbox: { sandboxes: boxes, limits: async () => limits },
         agents: {
           run: async (call) => {
             expect(call.sessionId).toBe(sessionId)
@@ -86,6 +98,8 @@ describe.skipIf(!TEMPORAL_CLI || !TEST_DATABASE_URL)(`a background task's workfl
   }, 90_000)
   afterEach(async () => {
     await worker.stop()
+    for (const b of boxes.started.values()) b.server.closeAllConnections()
+    await boxes.close()
     await drop()
   }, 30_000)
 
@@ -142,6 +156,137 @@ describe.skipIf(!TEMPORAL_CLI || !TEST_DATABASE_URL)(`a background task's workfl
     expect(await store.pendingEvents(t.id)).toEqual([])
     expect(await store.get(t.id)).toMatchObject({ state: 'done', detail: 'exited' })
   }, 60_000)
+
+  it("runs a Monitor's command in the session's sandbox pod, sends its events and its end, and brings its files back (#5916)", async () => {
+    const dir = await ensureSessionDir(workPaths, sessionId)
+    const { slot } = await startInSandbox({ sandboxes: boxes, sessionId, dir, limits, signal: AbortSignal.timeout(30_000) }, 'bash', 'echo step one; echo made > made.txt; sleep 0.6; echo step two; exit 2', 20_000)
+    const t = (await store.create({
+      sessionId,
+      kind: 'monitor',
+      description: 'build',
+      spec: { description: 'build', command: 'echo …', queue: TASK_QUEUE, timeoutMs: 20_000, sandbox: { slot: slot.id, shell: 'bash', outputFile: slot.output_file } },
+      createdBy: browser,
+    }))!
+    await (
+      await env.client.workflow.start(BACKGROUND_WORKFLOW, {
+        workflowId: backgroundWorkflowId(sessionId, t.id),
+        taskQueue: TASK_QUEUE,
+        args: [{ taskId: t.id, kind: 'monitor', retryMs: 200 }],
+      })
+    ).result()
+    const all = sent.map((m) => unwrapUntrusted(m)).join('\n\n')
+    // Output the pod held before the watch began arrives at once, so on a slow machine both lines may be one event.
+    expect(all).toMatch(/<event>step one(\n|<\/event>)/)
+    expect(all).toMatch(/step two<\/event>/)
+    expect(all).toMatch(/<summary>Monitor "build" stream ended<\/summary>\n<event>exit code 2 · [12] events?<\/event>/)
+    expect(await store.get(t.id)).toMatchObject({ state: 'done', detail: 'exited' })
+    expect(await readFile(path.join(dir, 'made.txt'), 'utf8')).toBe('made\n')
+  }, 60_000)
+
+  it("reports a background Bash's end with its output, and stops its slot when it is cancelled (#7310)", async () => {
+    const dir = await ensureSessionDir(workPaths, sessionId)
+    const call = { sandboxes: boxes, sessionId, dir, limits, signal: AbortSignal.timeout(30_000) }
+    const { slot } = await startInSandbox(call, 'bash', 'echo compiled; exit 0', 3_600_000)
+    const t = (await store.create({
+      sessionId,
+      kind: 'monitor',
+      description: 'make',
+      spec: { description: 'make', command: 'make', queue: TASK_QUEUE, timeoutMs: 3_600_000, background: 'shell', sandbox: { slot: slot.id, shell: 'bash', outputFile: slot.output_file } },
+      createdBy: browser,
+    }))!
+    await (
+      await env.client.workflow.start(BACKGROUND_WORKFLOW, {
+        workflowId: backgroundWorkflowId(sessionId, t.id),
+        taskQueue: TASK_QUEUE,
+        args: [{ taskId: t.id, kind: 'monitor', retryMs: 200 }],
+      })
+    ).result()
+    expect(sent).toHaveLength(1)
+    const notice = unwrapUntrusted(sent[0]!)
+    expect(notice).toContain('<summary>Background command "make" completed (exit code 0)</summary>')
+    expect(notice).toContain('<output>compiled\n</output>')
+    expect(await store.get(t.id)).toMatchObject({ state: 'done', detail: 'exited' })
+
+    // A long one, stopped through the service: its slot is stopped in the pod.
+    const tasks = new BackgroundTasks({ store, runner: temporalTaskRunner(env.client, TASK_QUEUE) })
+    const long = await startInSandbox(call, 'bash', 'sleep 120', 3_600_000)
+    const t2 = (await tasks.create({
+      sessionId,
+      kind: 'monitor',
+      description: 'serve',
+      spec: { description: 'serve', command: 'serve', queue: TASK_QUEUE, timeoutMs: 3_600_000, background: 'shell', sandbox: { slot: long.slot.id, shell: 'bash', outputFile: long.slot.output_file } },
+      createdBy: browser,
+    }))!
+    const client = new SandboxClient(boxes.started.get(sessionId)!.endpoint, AbortSignal.timeout(30_000))
+    await new Promise((r) => setTimeout(r, 1000))
+    expect(await client.slotStatus(long.slot.id)).toMatchObject({ running: true })
+    await tasks.cancel(sessionId, t2.id, 'the test')
+    await expect.poll(async () => (await client.slotStatus(long.slot.id))?.running ?? false, { timeout: 30_000 }).toBe(false)
+  }, 90_000)
+
+  it('stops a sandbox slot whose task is cancelled before its watch starts (a panel cancel, #5916)', async () => {
+    const dir = await ensureSessionDir(workPaths, sessionId)
+    const { slot } = await startInSandbox({ sandboxes: boxes, sessionId, dir, limits, signal: AbortSignal.timeout(30_000) }, 'bash', 'sleep 120', 3_600_000)
+    const tasks = new BackgroundTasks({ store, runner: temporalTaskRunner(env.client, TASK_QUEUE) })
+    // The replica that ran the turn is gone: nothing polls its queue, so the watch never starts.
+    const t = (await tasks.create({
+      sessionId,
+      kind: 'monitor',
+      description: 'serve',
+      spec: { description: 'serve', command: 'serve', queue: `${TASK_QUEUE}.gone-replica`, timeoutMs: 3_600_000, background: 'shell', sandbox: { slot: slot.id, shell: 'bash', outputFile: slot.output_file } },
+      createdBy: browser,
+    }))!
+    const client = new SandboxClient(boxes.started.get(sessionId)!.endpoint, AbortSignal.timeout(90_000))
+    await new Promise((r) => setTimeout(r, 1000))
+    expect(await client.slotStatus(slot.id)).toMatchObject({ running: true })
+    // The panel's cancel goes through the service alone (routes/backgroundTasks.ts), not TaskStop.
+    await tasks.cancel(sessionId, t.id, 'the user in the panel')
+    await expect.poll(async () => (await client.slotStatus(slot.id))?.running ?? false, { timeout: 30_000 }).toBe(false)
+  }, 90_000)
+
+  it('stops a sandbox slot whose watch failed and could not stop it: the task ends done, the slot stops anyway (#5916)', async () => {
+    const dir = await ensureSessionDir(workPaths, sessionId)
+    const { slot } = await startInSandbox({ sandboxes: boxes, sessionId, dir, limits, signal: AbortSignal.timeout(30_000) }, 'bash', 'sleep 120', 3_600_000)
+    // The replica that ran the turn cannot reach the pod: its watch fails, and so does its own stop.
+    const queue = `${TASK_QUEUE}.cut-off-replica`
+    const unreachable: Sandboxes = {
+      acquire: async () => {
+        throw new Error('unreachable')
+      },
+      find: async () => {
+        throw new Error('unreachable')
+      },
+    }
+    const replica = await Worker.create({
+      connection: env.nativeConnection,
+      taskQueue: queue,
+      activities: backgroundActivities({ store, tz: 'UTC', paths: workPaths, sandbox: { sandboxes: unreachable, limits: async () => limits }, send: async () => ({ result: 'sent' }) }),
+    })
+    const running = replica.run()
+    try {
+      const t = (await store.create({
+        sessionId,
+        kind: 'monitor',
+        description: 'serve',
+        spec: { description: 'serve', command: 'serve', queue, timeoutMs: 3_600_000, background: 'shell', sandbox: { slot: slot.id, shell: 'bash', outputFile: slot.output_file } },
+        createdBy: browser,
+      }))!
+      await (
+        await env.client.workflow.start(BACKGROUND_WORKFLOW, {
+          workflowId: backgroundWorkflowId(sessionId, t.id),
+          taskQueue: TASK_QUEUE,
+          args: [{ taskId: t.id, kind: 'monitor', retryMs: 200 }],
+        })
+      ).result()
+      // The workflow finishes a failed watch as done (its end is the detail), never as failed.
+      expect(await store.get(t.id)).toMatchObject({ state: 'done', detail: 'failed' })
+      const client = new SandboxClient(boxes.started.get(sessionId)!.endpoint, AbortSignal.timeout(30_000))
+      expect((await client.slotStatus(slot.id))?.running ?? false).toBe(false)
+    } finally {
+      replica.shutdown()
+      await running
+    }
+  }, 90_000)
 
   it('sends a backlog past one delivery\'s budget over several messages, none past it', async () => {
     // 12 events of ~7000 characters each, recorded while the session is busy: ~84k

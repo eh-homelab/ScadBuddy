@@ -12,7 +12,6 @@ import { useSettingsAgentField } from '../agentFields'
 import { useBambuddyResources } from '../bambuddyResources'
 import { FieldRow } from '../controls'
 import { docOf } from '../fields'
-import { usePeerDraft } from '../dirty'
 import { FieldBadge, RuntimeRows, SavedSection } from '../formParts'
 import type { AreaId } from '../registry'
 import { useBackendSettings } from '../useBackendSettings'
@@ -29,17 +28,9 @@ export function Component() {
   const form = useBackendSettings(id, (s) => fieldsOf(id, s), {
     // The Blob store choice sends and compares what it shows: local until the chosen store is ready.
     effective: (name, raw, f) => (name === 'store_backend' ? storeChoice(f.settings, f.value).backend : raw),
-    // Resetting the inbox the Bambuddy store needs takes the store back to local with it, as a
-    // save that loses it does: the server refuses an unready Bambuddy store.
-    alsoReset: (name, s) =>
-      name === 'library_folder_id' && s.store_backend === 'bambuddy' && s.library_backend !== 'native'
-        ? { store_backend: 'local' }
-        : {},
   })
   const { settings, value, setField, errors, clearing, clearSecret } = form
   const store = storeChoice(settings, value)
-  // Connection's unsaved Bambuddy URL, when Connection is mounted.
-  const bambuddyUrlDraft = usePeerDraft('bambuddy_url') ?? ''
   const storeUsage = useAsync(() => api.getStoreUsage(), []).data
 
   const folders = targets.data?.folders ?? []
@@ -121,24 +112,12 @@ export function Component() {
           choices={[
             { value: 'local', label: 'This server’s volume (renders in the API only)' },
             {
-              value: 'bambuddy',
-              label: 'Bambuddy library (any number of render workers)',
-              disabled: !store.bambuddyReady,
-            },
-            {
               value: 's3',
               label: 'S3-compatible object store (any number of render workers)',
               disabled: !store.s3Ready,
             },
           ]}
         />
-        {!store.bambuddyReady && (
-          <p className="mt-1.5 text-xs text-muted-foreground" data-testid="store-backend-hint">
-            {!store.savedBambuddyUrl && bambuddyUrlDraft !== ''
-              ? 'The Bambuddy URL is not saved yet: save Connection to choose the Bambuddy library.'
-              : 'The Bambuddy library needs a saved Bambuddy URL and an inbox folder.'}
-          </p>
-        )}
         {!store.s3Ready && (
           <p className="mt-1.5 text-xs text-muted-foreground" data-testid="store-s3-hint">
             The S3 store needs its endpoint, bucket and keys saved first.
@@ -163,7 +142,7 @@ export function Component() {
         />
         {store.backend === 'local' && (
           <p className="mt-1.5 text-xs text-muted-foreground" data-testid="library-backend-hint">
-            ScadBuddy’s own library keeps its files in the blob store: choose the S3 or Bambuddy store first.
+            ScadBuddy’s own library keeps its files in the blob store: choose the S3 store first.
           </p>
         )}
       </FieldRow>

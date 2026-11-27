@@ -13,7 +13,7 @@ import json
 import re
 import threading
 import time
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from dataclasses import dataclass
 from decimal import Decimal
 from pathlib import Path
@@ -981,15 +981,29 @@ def test_a_waiting_import_holds_no_pool_connection(
     def call(name: str) -> None:
         replies[name] = fetch.import_()
 
-    first = threading.Thread(target=call, args=("first",))
-    first.start()
-    assert reached.wait(30)
-    second = threading.Thread(target=call, args=("second",))
-    second.start()
-
     def polls() -> int:
         with lock:
             return len(held)
+
+    def until(done: Callable[[], bool], deadline: float) -> bool:
+        while not done():
+            if time.monotonic() > deadline:
+                return False
+            time.sleep(0.02)
+        return True
+
+    first = threading.Thread(target=call, args=("first",))
+    first.start()
+    assert reached.wait(30)
+    # The holder now waits on Bambuddy with no checkout, so every new one is the waiter's.
+    seen = polls()
+    second = threading.Thread(target=call, args=("second",))
+    second.start()
+    # The window opens at the waiter's first poll: on a loaded runner its request can take
+    # longer than the window to reach the lease at all (#8010).
+    # 20 s, well inside the holder's own 30 s wait on Bambuddy (`_slow_k_tables`), so the
+    # window below opens while the waiter still waits (#8104).
+    assert until(lambda: polls() > seen, time.monotonic() + 20), "the waiting import never polled"
 
     def longest(since: float) -> float:
         """The longest part of the time since ``since`` that one checkout covered."""
@@ -1002,12 +1016,17 @@ def test_a_waiting_import_holds_no_pool_connection(
     wait = 1.5
     polls_before, start = polls(), time.monotonic()
     time.sleep(wait)
-    covered, polls_after = longest(start), polls()
+    covered = longest(start)
+    # It keeps polling, every LEASE_POLL_SECONDS (0.1 s). How many polls fit in the window
+    # depends on the runner's load, so three are due by 5 s past it: a waiter that polls
+    # every few seconds still fails, and a loaded runner has room (#8104).
+    kept_polling = until(lambda: polls() - polls_before >= 3, start + wait + 5)
+    polls_after = polls()
     release.set()
     first.join(timeout=60)
     second.join(timeout=60)
     assert replies["second"].json() == replies["first"].json()
-    assert polls_after - polls_before >= 3, (polls_before, polls_after)
+    assert kept_polling, (polls_before, polls_after)
     assert covered < wait / 2, covered
 
 

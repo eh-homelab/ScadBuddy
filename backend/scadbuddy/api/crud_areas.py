@@ -277,6 +277,7 @@ CRUD_AREAS: dict[CrudCaller, list[str]] = {
     "fleet": ["changes", "fleet"],
     # #6949 K1: the areas arrive with the inventory routes (layer 4).
     "inventory": [],
+    "fleet-rotator": ["fleet"],
 }
 
 

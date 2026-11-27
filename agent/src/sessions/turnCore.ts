@@ -93,8 +93,12 @@ export function withNote(prompt: string | AsyncIterable<SDKUserMessage>, note: s
 export type TurnCoreDeps = {
   /** The sessions' rows (rows.ts): a turn's claim as its placement reads it (turnHost.ts). */
   rows: Pick<SessionRows, 'get'>
-  /** The transcript store (store.ts): whether a user entry landed after a placement's mark (turnHost.ts). */
-  transcripts: Pick<TranscriptStore, 'userLanded'>
+  /**
+   * The transcript store (store.ts): whether a user entry landed after a placement's mark, and a
+   * restarted placement's read of the transcript and its fenced append of the results of the calls
+   * its lost placement left in flight (turnHost.ts).
+   */
+  transcripts: Pick<TranscriptStore, 'userLanded' | 'load' | 'appendIf'>
   runner: Pick<TurnRunner, 'assemble'>
   warm: WarmSessions
   events: Pick<EventLog, 'append' | 'committed' | 'appendFenced'>
@@ -152,6 +156,14 @@ export type CoreTurnArgs = {
   appendEvents?: (events: ServerEvent[]) => Promise<boolean>
   /** How a tool result's images are stored, when not `deps.blobs.put` (the same placement's hold, checked in the store's transaction). False when refused. */
   storeImages?: (images: SessionImage[]) => Promise<boolean>
+  /**
+   * Messages shown before the stream's, once the turn is assembled: a restarted placement's
+   * results for the calls its lost placement left in flight (turnHost.ts, #7874), already in the
+   * transcript, so their `tool.result` events go out as any result's do.
+   */
+  shownFirst?: readonly SDKMessage[]
+  /** True for an event the turn does not write: once a shutdown cut it, the error results Claude Code gives the calls it stopped (#7874). */
+  drops?: (e: ServerEvent) => boolean
 }
 
 /** How the turn's stream ended. */
@@ -203,7 +215,7 @@ export class CoreTurn {
   readonly #served: WarmEntry[] = []
   /** The model requests of the turn's stream, priced at the table as they go (#991). */
   readonly #unpriced = new UnpricedSpend()
-  /** What the session's own WebFetch model calls cost this turn (classicBuiltinServer, through the slot). */
+  /** What the session's own WebFetch model calls cost this turn (sessionBuiltinServer, through the slot). */
   readonly #nested = { usd: 0 }
   /** What the credential gateway metered for the process this turn (through the slot, turnRunner.ts `onSpend`). */
   readonly #metered = { usd: 0 }
@@ -272,10 +284,17 @@ export class CoreTurn {
     const show = async (message: SDKMessage) => {
       await this.#turn?.observe(message)
       let events = mapper.map(message)
+      let images = mapper.takeImages()
+      const drops = this.#args.drops
+      if (drops && events.some(drops)) {
+        events = events.filter((e) => !drops(e))
+        // A dropped result's images are not stored either: only those a kept result names.
+        const named = new Set(events.flatMap((e) => (e.type === 'tool.result' ? (e.images ?? []).map((i) => i.name) : [])))
+        images = images.filter((i) => named.has(i.name))
+      }
       // A result's images are stored before the event that names them is
       // logged (#782), so no watcher sees a name it cannot load. If they cannot
       // be, the event goes without them: the call is still shown.
-      const images = mapper.takeImages()
       if (images.length && mayWrite()) {
         try {
           if (this.#args.storeImages) {
@@ -352,6 +371,7 @@ export class CoreTurn {
         trace: traced,
       })
       attempts = warm
+      for (const message of this.#args.shownFirst ?? []) await show(message)
       const resume = turn.run.resume !== undefined
       const stream = runWithFallback(
         { ...turn.run, prompt: withNote(prompt, turn.directoryNote), signal },
@@ -499,7 +519,7 @@ export type TurnTally = {
 }
 
 /**
- * The end of a turn as a classic turn writes it (manager.ts `finish`), from how its stream
+ * The end of a turn as a session turn writes it (manager.ts `finish`), from how its stream
  * ended. `stopped` is why it was aborted, when it was; `interrupted` the `interrupted`
  * error's message then.
  */

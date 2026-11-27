@@ -11,7 +11,7 @@ import { turnServers } from '../src/temporal/turnServers.js'
 import { unwrapUntrusted } from '../src/safety/untrusted.js'
 import { ApprovalActions, ownerOf } from '../src/approvals/mcp.js'
 import { canonicalJson } from '../src/approvals/service.js'
-import { DESCRIBE_CALL_ACTIVITY, gateActivities, toolActivities } from '../src/temporal/toolActivities.js'
+import { DESCRIBE_CALL_ACTIVITY, gateActivities, toolCallActivities } from '../src/temporal/toolActivities.js'
 import { ALL_TOOLS } from '../src/tools/index.js'
 import { runTool, type ToolContext } from '../src/tools/registry.js'
 import { forgetSubject } from '../src/sessions/forget.js'
@@ -625,40 +625,37 @@ describe.skipIf(skip !== undefined)(`the session workspace${skip ? ` (skipped: $
   })
 
   describe('as durable activities on agent-tools', () => {
+    type Blocks = { ok: boolean; content: { type: string; text?: string; name?: string }[] }
+    /** Runs `name` as the session's call `toolUseId`, in its own ToolCall workflow (#7323). */
+    const sessionCall = async (activities: Record<string, (input: unknown) => Promise<unknown>>, name: string, toolUseId: string, input: unknown) =>
+      (await new MockActivityEnvironment({
+        activityId: 'call',
+        workflowExecution: { workflowId: `session-${sessionId}-call-${toolUseId}`, runId: 'call-run' },
+        activityType: `tool:${name}`,
+        taskQueue: 'agent-tools',
+      }).run(activities[`tool:${name}`]!, { tool: name, input })) as Blocks
+
     it("write into the durable session's own workspace, and read it back", async () => {
-      const activities = toolActivities(ALL_TOOLS, {
+      const activities = toolCallActivities(ALL_TOOLS, {
         services: services({ workspace: files }),
         sessions: { ownerOf: async (id) => (id === sessionId ? browser : undefined) },
       })
-      const env = (activityId: string) =>
-        new MockActivityEnvironment({
-          activityId,
-          workflowExecution: { workflowId: `session-${sessionId}`, runId: 'run-1' },
-          activityType: 'workspace_write',
-          taskQueue: 'agent-tools',
-        })
-      await env('tool-toolu_w').run(activities.workspace_write!, { path: 'd.txt', content: 'durable' })
+      expect((await sessionCall(activities, 'workspace_write', 'toolu_w', { path: 'd.txt', content: 'durable' })).ok).toBe(true)
       expect((await files.read(ws, 'd.txt'))?.bytes.toString()).toBe('durable')
-      const read = await env('tool-toolu_r').run(activities.workspace_read!, { path: 'd.txt' })
-      expect(unwrapUntrusted(read as string)).toContain('     1\tdurable')
+      const read = await sessionCall(activities, 'workspace_read', 'toolu_r', { path: 'd.txt' })
+      expect(unwrapUntrusted(read.content[0]!.text!)).toContain('     1\tdurable')
     })
 
     it('reads an image back for view_tool_images, kept as the session\'s blob (#2402)', async () => {
       await files.write(ws, 'p.png', PNG, { mediaType: 'image/png' })
       const kept: string[] = []
-      const activities = toolActivities(ALL_TOOLS, {
+      const activities = toolCallActivities(ALL_TOOLS, {
         services: services({ workspace: files }),
         sessions: { ownerOf: async (id) => (id === sessionId ? browser : undefined) },
         blobs: { put: async (session, images) => void kept.push(...images.map((i) => `${session}/${i.mediaType}`)) },
       })
-      const read = await new MockActivityEnvironment({
-        activityId: 'tool-toolu_img',
-        workflowExecution: { workflowId: `session-${sessionId}`, runId: 'run-1' },
-        activityType: 'workspace_read',
-        taskQueue: 'agent-tools',
-      }).run(activities.workspace_read!, { path: 'p.png' })
-      expect(read as string).toMatch(/\[image [0-9a-f]+\.png\]/)
-      expect(read as string).toContain('view_tool_images')
+      const read = await sessionCall(activities, 'workspace_read', 'toolu_img', { path: 'p.png' })
+      expect(read.content).toContainEqual(expect.objectContaining({ type: 'image', name: expect.stringMatching(/^[0-9a-f]+\.png$/) }))
       expect(kept).toEqual([`${sessionId}/image/png`])
     })
 
@@ -717,18 +714,13 @@ describe.skipIf(skip !== undefined)(`the session workspace${skip ? ` (skipped: $
       expect(out).not.toContain(PNG.toString('base64').slice(0, 16))
       expect(out).toContain(NAME)
       expect((await files.read(ws, NAME))?.bytes.equals(PNG)).toBe(true)
-      const activities = toolActivities(ALL_TOOLS, {
+      const activities = toolCallActivities(ALL_TOOLS, {
         services: services({ workspace: files }),
         sessions: { ownerOf: async (id) => (id === sessionId ? browser : undefined) },
         blobs: { put: async () => {} },
       })
-      const read = await new MockActivityEnvironment({
-        activityId: 'tool-toolu_bin_read',
-        workflowExecution: { workflowId: `session-${sessionId}`, runId: 'run-1' },
-        activityType: 'workspace_read',
-        taskQueue: 'agent-tools',
-      }).run(activities.workspace_read!, { path: NAME })
-      expect(read as string).toMatch(/\[image [0-9a-f]+\.png\]/)
+      const read = await sessionCall(activities, 'workspace_read', 'toolu_bin_read', { path: NAME })
+      expect(read.content).toContainEqual(expect.objectContaining({ type: 'image', name: expect.stringMatching(/^[0-9a-f]+\.png$/) }))
     })
 
     it("stores a flow run's binary body in its starter's own workspace, which its workspace_read reads (#2511)", async () => {

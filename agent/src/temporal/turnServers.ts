@@ -96,14 +96,14 @@ export type TurnServerDeps = {
   /**
    * The headless browser's lists and the sessions' approved origins (#982,
    * browser/store.ts): the remote plugins' browser_* calls are judged by them, as a
-   * classic turn's are (browser/guard.ts). Without it they run at their tiers.
+   * session turn's are (browser/guard.ts). Without it they run at their tiers.
    */
   browserOrigins?: BrowserOriginsAccess | undefined
   /** Every usable credential's secret (fallback.ts candidates): never in a request, never in a result. */
   credentialSecrets?: (() => Promise<readonly string[]>) | undefined
   /**
-   * http_request, as a classic turn has it. A session's saved bodies are the API's
-   * (`bodies`, #2374), as a classic turn's are; a flow's, which has no session, under
+   * http_request, as a session turn has it. A session's saved bodies are the API's
+   * (`bodies`, #2374), as a session turn's are; a flow's, which has no session, under
    * `saveRoot/flow-<run>/http` on this pod's own disk (never the shared payload volume).
    */
   httpRequest?:
@@ -112,7 +112,7 @@ export type TurnServerDeps = {
         audit?: AuditSink | undefined
         resolve?: Resolver
         limits?: Partial<HttpLimits>
-        /** The sessions' workspaces, where `save_to_workspace` stores a body (#2496), as a classic turn's. */
+        /** The sessions' workspaces, where `save_to_workspace` stores a body (#2496), as a session turn's. */
         files?: WorkspaceFiles | undefined
         /** A session's saved bodies. */
         bodies: HttpBodiesFor
@@ -172,7 +172,7 @@ export function turnServers(deps: TurnServerDeps): (context: TurnContext) => Pro
       : {}
     for (const plugin of forwarded?.plugins ?? []) {
       const tiers = pluginTierResolver([plugin])
-      // An unlisted plugin tool is outward (registry.ts), as in a classic turn. One
+      // An unlisted plugin tool is outward (registry.ts), as in a session turn. One
       // function for the label, the park and the call, so they cannot disagree (#2838).
       const tierOf = (name: string) => tiers(name) ?? 'outward'
       const keep = forwarded?.keep?.(plugin.name)
@@ -239,7 +239,7 @@ export function turnServers(deps: TurnServerDeps): (context: TurnContext) => Pro
         // Its method's tier, whatever its access: a POST lowered to read is still a POST.
         declaredTierOf: (name, input) => httpTierOf(name, input) ?? 'outward',
         // http_request may park whatever its access at the listing: a raise to outward later in
-        // the turn is asked about, as in a classic turn. Reading a saved body never parks.
+        // the turn is asked about, as in a session turn. Reading a saved body never parks.
         mayPark: (name) => name !== HTTP_READ_TOOL_NAME,
         // http_request's tier is its method's, unless its access is a tier; reading a saved body is always read.
         fixedTier: (name) => (name === HTTP_READ_TOOL_NAME ? 'read' : name === HTTP_TOOL_NAME ? fixedHttpTier : undefined),
@@ -285,7 +285,7 @@ export function turnServers(deps: TurnServerDeps): (context: TurnContext) => Pro
           ...browserParts,
         })
       }
-      // Known and switched off (#4757 final review M2): refused in a classic turn's words, never connected to.
+      // Known and switched off (#4757 final review M2): refused in a session turn's words, never connected to.
       for (const off of forwardedPackages.off ?? []) servers.push(switchedOffServer(off.name))
     }
     return {

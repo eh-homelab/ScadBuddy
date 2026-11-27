@@ -48,7 +48,7 @@ func newBus(baseURL string, token func() (string, error), opts ...Option) *bus {
 	c := newClient(baseURL, token, 0, opts)
 	transport := http.DefaultTransport.(*http.Transport).Clone()
 	transport.ResponseHeaderTimeout = requestTimeout
-	c.http.Transport = transport
+	c.setTransport(transport)
 	return &bus{c: c, minDelay: minDelay, maxDelay: maxDelay, silence: silence}
 }
 

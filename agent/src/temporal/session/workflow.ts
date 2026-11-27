@@ -718,7 +718,7 @@ export async function AgentSession(started: SessionStart): Promise<void> {
         result = await running.run(() => placeTurn(input, settings))
       }
       if (result.hostQueue) home = result.hostQueue
-      // The classic turn's error code, when it wrote one (turnCore.ts `tallyTurn`), is the session's too.
+      // The session turn's error code, when it wrote one (turnCore.ts `tallyTurn`), is the session's too.
       const said = result.code !== undefined ? { code: result.code, ...(result.error !== undefined ? { message: result.error.slice(0, MESSAGE_MAX) } : {}) } : {}
       const tail = result.tail?.length ? { tail: result.tail } : {}
       // The loop above continues every release; the types cannot see that a Stop's `break` set `interrupted`.

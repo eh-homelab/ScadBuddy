@@ -105,10 +105,6 @@ class DataPaths:
         return self.root / "flows"
 
     @property
-    def outputs(self) -> Path:
-        return self.root / "outputs"
-
-    @property
     def output_blobs(self) -> Path:
         """The saved outputs' blobs on the `local` store (#7257, plan D7): that store has
         no content store of its own, so outputs get one here."""
@@ -207,16 +203,12 @@ class DataPaths:
         """
         return self.model_revisions / slug / commit
 
-    def output_dir(self, slug: str, output_id: str) -> Path:
-        return self.outputs / slug / output_id
-
     def ensure(self, *, output_blobs: bool = False) -> None:
         """Make the data volume's folders. ``output_blobs``: also `output_blobs`, which
         only the `local` store uses (#7257, plan D7); on `s3` and `bambuddy` the share
         gets no such folder."""
         for directory in (
             self.models,
-            self.outputs,
             self.blobs,
             self.cache,
             self.fonts,

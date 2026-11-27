@@ -1,7 +1,7 @@
 # scadbuddy-core
 
 ScadBuddy's API in Go (#7667). It answers the areas it has and gives every other request,
-unchanged, to the Python API: WebSockets, SSE and large bodies included. It is not deployed yet.
+unchanged, to the Python API: WebSockets, SSE and large bodies included. On prod it is the API pod's front on 8080 and 8082 (eh-homelab/clusters#4334, #4366).
 
 | Variable | Default | What |
 |---|---|---|
@@ -47,7 +47,8 @@ unchanged, to the Python API: WebSockets, SSE and large bodies included. It is n
 | `bridge-tabs` | `/session-tabs`, `/tab-owners` and its `claim`, `refresh`, `release`, `release-all`; `PUT /tab-images/{name}`, `POST …/{name}/take` |
 | `pairings` | `/pairings` and every route under it |
 | `mcp-tokens` | `/mcp-tokens` and every route under it |
-| `plugins` | `POST` `/plugins/{name}/delete`, `/plugin-oauth/grants/{plugin}/mark`, `…/forget` only. The rest seal or open with the KEK, and stay Python's |
+| `plugins` | `POST` `/plugins/{name}/delete`, `/plugin-oauth/grants/{plugin}/mark`, `…/forget` only: the routes that need no KEK |
+| `remote-plugins` † | every route of `crud_agent_plugins.py`: `/plugins` (`GET`, `POST`), `GET /plugins/{name}`, `POST` `/plugins/open-enabled`, `…/{name}/update`, `…/tool-access`, `…/reveal`, `…/delete`; `POST` `/plugin-oauth/flows` and its `…/authorize`, `…/take`; `/plugin-oauth/grants` and its `…/{plugin}/open`, `…/refreshed` (only while the lease `plugin-oauth:<plugin>` holds), `…/mark`, `…/forget`; `/plugin-oauth/stored-secrets` |
 | `plugin-packages` | `/plugin-packages` and every route under it |
 | `hosted-plugins:read` | `GET /hosted-plugins/{name}`. A version's zip (the blob store) stays Python's |
 | `plugin-feeds` | `GET /plugin-feeds/{feed}`; `PUT`, `DELETE` `…/packages/{name}` |
@@ -85,7 +86,80 @@ default, at most 200) and at most 4 MiB of message text: it stops before the mes
 would pass 4 MiB, always holds at least one, and then says `more`; the cursor moves only past
 the messages returned. A text over 16 MiB is a 422 whose detail names the limit (reason
 `text-too-long`). A cursor `PUT` only moves it back: a `seq` past the cursor is a 422
-(reason `seq-ahead`). `GET /changes` stays Python's.
+(reason `seq-ahead`). Its `GET /changes` is area `changes` (below).
+
+### The event stream (#7768)
+
+`internal/bus` publishes on the event bus and reads it. One `LISTEN` connection per process,
+outside the request pool, hears `scadbuddy_events` and the agent's five channels
+(`scadbuddy_input`, `_pending`, `_mcp`, `_warm_evict`, `_settings`) and hands each NOTIFY to
+every subscriber's bounded queue. It never waits on a subscriber. When the connection comes
+back after a drop, every subscriber gets a gap. Two areas read it; each is off until
+`SCADBUDDY_CORE_AREAS` names it:
+
+| Area | What |
+|---|---|
+| `changes` | `GET /api/v1/internal/crud/<caller>/changes` for the callers `agent`, `fleet`, `camera` and `camera-relay`, as `agent_changes/hub.py` serves them: the same frames (`change`, `ready`, `reconnected`, the keepalive every 15 s), the `Last-Event-ID` replay (at most 1000 events, else `resync`), the gap's replay, and the filters (`fleet.*` kinds only to `fleet`; `printer.changed` and `camera.reconnect` only to the camera callers; the other channels only to `agent`). At most 4 streams per credential and peer address (the TCP peer, never `X-Forwarded-For`, as uvicorn `--no-proxy-headers` gives it to Python) and 64 in all (429); `fleet` and the two camera callers have budgets of their own, 8 each |
+| `ws` | `WS /api/v1/ws`, the browser's realtime socket, as `api/realtime.py` serves it: the topic protocol (`subscribe`, `unsubscribe`, `check`; `subscribed` with `last`, `changed`, `event`, `resync`, `ping` every 25 s, `error`), the origin check, `SCADBUDDY_AUTH_MODE=enforce`'s refusal before the handshake, a revoked session's close (4401), and the socket cap. The handshake goes through `internal/auth`'s gate as an `api` route (the caller from a session cookie, an `sbpat_` access token or an `sbsvc_` credential), so `observe` counts a socket that `enforce` would refuse in the gate's `scadbuddy.auth.would_refuse`, as `auth/check.py` counts it |
+
+`ws` reads `SCADBUDDY_PUBLIC_URL` (the setting `public_url`'s stored value comes first, read
+at each handshake), `SCADBUDDY_ALLOWED_ORIGINS` and `SCADBUDDY_REALTIME_SOCKETS` (default 256;
+the stored setting comes first, read at the start), as the API does. A refused handshake is a
+403 with no body, as uvicorn answers a socket closed before it was accepted.
+
+Python's frames and core's are the same bytes: `backend/tests/fixtures/event-stream-vectors.json`
+holds each payload's change frame live and in replay, which callers keep it, its topics and its
+socket frame, the typed kinds' fields, and the topic rules. The backend's
+`tests/test_event_stream_vectors.py` writes it from Python's own code
+(`UPDATE_EVENT_STREAM_VECTORS=1`) and checks it; `internal/bus`, `internal/changes` and
+`internal/realtime` check core against it. A replay writes a typed event as pydantic's
+`model_dump_json` does (`internal/bus/kinds.go` holds each kind's fields) and an opaque one as
+`json.dumps` does, both from the log's `jsonb`.
+
+Area `blobs` † (`internal/blobstore`, #7958) is a shared area: any service credential whose scopes
+hold `crud.blobs` may call it, under `/api/v1/internal/crud/blobs`; no caller is granted that scope
+yet. Python has no such routes. `POST /uploads` with `{kind, size, sha256, media_type}` answers
+`{upload_id, url, headers, expires_at}`: the caller PUTs exactly the bytes to `url` with `headers`,
+then `POST /uploads/{upload_id}/commit` answers `{key, sha256, size}`, the blob indexed in
+`store_blobs` under its kind (again, the same answer). The kinds are an allowlist with a size each:
+`tag_dump`, 64 KiB. Only `store_backend` `s3` takes uploads: core reads the store's settings as
+Python resolves them (the `settings` row, else `SCADBUDDY_STORE_*`, set even when empty, else the
+default; the secret key opened with the KEK; path-style URLs, as botocore makes them for either
+`store_s3_path_style`) and presigns the PUT itself, with the length, the type, the SHA-256 checksum
+and the ACL `private` signed (Signature V4, pinned against botocore's answer in its tests). The PUT
+goes to the upload's own staging object, `<prefix>/staging/<32 random hex>` (the storefront's
+staging form, `store/s3.py` `staging_key`), never to the content key. The commit holds the
+object's stage lock shared (`blob-object:s3:<sha256>`, a session lock on a connection of its own
+outside the pool, at most 3 at once, a slot waited for at most 10 s; 6 tries of 5 s, then 503
+`store_busy`, as `StageHold`). It reads the content object: one that is there is never written, as
+`store/s3.py` `upload` does not, and one that is not the key's bytes is a 409
+`store_object_mismatch` (only a repair fixes it; Python's `_verified` answers 403 `ref_mismatch`), with nothing indexed (a row that named it stays as it was) and the staging
+object kept, so the commit goes through once the object is repaired. Otherwise it reads the staging
+object (at most the kind's limit), checks its size and SHA-256, and PUTs those verified bytes to the
+content key, so a later PUT to the staging key changes nothing indexed; a staging object gone (another
+commit of the upload took it) sends it back to the content object. Then it writes the row as
+Python's `BlobIndex.put` does, with `verified_at`, as `mark_verified_in` sets it (`backend/tests/fixtures/blob-upload-vectors.json`,
+which both sides' tests check), and deletes the staging object. One left behind (no commit, or a PUT
+sent again after it) goes with the storefront's backstop, `sweep_staged`, a day old; Python's
+unrecorded sweep takes content keys only. Any other backend is a 503 `not_configured`. The
+upload's id is a ticket MACed under the KEK (HKDF label `scadbuddy:blobs:upload:v1`), so no row
+stands for an upload: its URL lasts 15 minutes and its commit an hour more, and another caller's
+commit of it is a 404. Refusals carry a `reason`: 422 `kind_not_allowed`, 413 `upload_too_large`,
+507 `store_full`, 404 `upload_not_found`, 410 `upload_expired`, 409 `upload_not_received`, 422
+`upload_mismatch`, 409 `store_object_mismatch`, 503 `store_unavailable` or `store_busy`.
+`internal/blobclient` is its Go client: `New(baseURL, token, tel)`, `Upload(ctx, kind, mediaType, body)`; each call to core may take 2 minutes, longer than a busy commit takes to answer `store_busy`.
+Both sides trace their requests with `telemetry`'s `Transport`: each span records the method, the
+status and the peer (`s3` for the store), never a URL, so a presigned query is never recorded. A
+request to the store carries no trace context (`internal/httpx` `Outside`), as Python's S3 spans
+send none.
+
+The `fleet` area also serves caller `fleet-rotator` (scope `crud.fleet-rotator`, #8026):
+`POST /api/v1/internal/crud/fleet-rotator/virtual-messages` `{sender, channel | agent, text}`
+posts as a virtual sender (a row of `fleet_virtual_senders`, such as `rotator`): to a
+channel's members, or as a DM to one agent by its handle. An unknown sender is a 404 (reason
+`unknown-sender`). A `POST /messages` DM to a virtual sender's name is a 422 (reason
+`virtual-sender`) whose detail is the sender's reject message. An inbox entry from a virtual
+sender has its name as `from`.
 
 Each of `browser-origins`, `bridge-tabs`, `pairings`, `mcp-tokens`, `plugin-packages` and
 `plugin-feeds` also has a `:read` form, its GETs only. Area `package-mirrors` (the blob store)
@@ -98,6 +172,11 @@ codec's subjects and payloads, and the canonical JSON of the input and response 
 open every vector in `backend/tests/fixtures/`. `internal/gate` is the gate's validator, pinned by
 `pending-input-vectors.json` and `response-hash-vectors.json`, and the `gate` area's routes.
 
+`internal/bambutag` decodes a Bambu Lab MIFARE Classic 1K filament tag and derives its sector
+keys from the UID, after the [RFID Tag Guide](https://github.com/Bambu-Research-Group/RFID-Tag-Guide/blob/a26cf83d7b296b71c558f8c332d464f4e5b9c314/BambuLabRfid.md)
+(#8058). It is pure: no I/O and no SQL, and it never writes a tag. Its `Tag` JSON is what a scan
+record stores; `testdata/*.json` pins it, and a change bumps `DecoderVersion`.
+
 A request that reaches Python carries one `X-Forwarded-For` value: its client, as the trusted
 proxies name it (`core/proxies.py`). So Python runs with `SCADBUDDY_TRUSTED_PROXIES=127.0.0.1`
 (and `SCADBUDDY_CORE_UPSTREAM` names the literal `127.0.0.1`, not `localhost`, which may connect over
@@ -108,6 +187,112 @@ admits only 8080 and 8082, is what keeps other pods off it.
 Loopback, not a Unix socket: `openscad-lsp` in Python's container may open `AF_UNIX` sockets but
 no TCP ones (`editor/nonet.py`). Over a `unix://` upstream uvicorn gives Python no client
 address, so `core/proxies.py` ignores the `X-Forwarded-For` the front sets: use TCP.
+
+A forward that Python refuses (nothing listens yet, at a pod's start) is dialled again every
+250 ms, for at most 30 s or until its client goes away; then the answer is 502. This holds only
+until Python has taken one connection: after that, Python is up, and a refusal (Python restarted)
+is a 502 at once. Only the
+dial is tried again, so no request reaches Python twice.
+
+## Public routes
+
+A public area (a route outside `/internal/crud/`, which a browser, an access token or a
+service calls) checks its caller with `internal/auth` (#8038), never with a check of its
+own. The check is Python's (`backend/scadbuddy/auth/`: `gate.py`, `check.py`, `routes.py`):
+
+An area's package serves them from one function in `main.go` `publicPackages`; `newRouter`
+puts each named area's routes behind the one gate, in front of the CRUD router, and every
+other path still goes on to Python. An area may have CRUD routes, public routes or both:
+
+```go
+func PublicAreas(pool *pgxpool.Pool, _ *seal.Keys) map[string][]auth.Public {
+	return map[string][]auth.Public{"filament-presets": {{
+		Pattern: "GET /api/v1/filament/presets",
+		Route:   auth.Route{Class: "api", Template: "/api/v1/filament/presets"},
+		Handler: http.HandlerFunc(list),
+	}}}
+}
+```
+
+- `auth.ParseMode(value, set)` reads `SCADBUDDY_AUTH_MODE` as Python does: unset is `off`,
+  and a value other than `off`, `observe` or `enforce` stops the start. Never `enforce` on
+  prod (the owner's decision of 2026-11-17).
+- `Wrap` resolves the caller in every mode, as `AuthGate` does: a bearer `sbsvc_…` (a service
+  credential) or `sbpat_…` (a person's access token), else the cookie
+  `__Host-scadbuddy_session` (a person's session; its idle deadline slides once a minute).
+  A revoked, expired or malformed credential, and a lookup that fails, is anonymous.
+- In `observe`, a request that `enforce` would refuse is served, counted as
+  `scadbuddy_auth_would_refuse_total{class, reason}` and logged once a minute per class and
+  reason with the route's template. In `enforce`, it is refused with Python's problem
+  (401 `…/auth/signed-out`, 403 `…/auth/forbidden`), or a WebSocket handshake with a 403.
+- `Class` is the route's class in `auth/routes.py`: `api` for most routes, `person` for
+  what only a person signed in themselves may do. `Scriptless` marks a GET that a browser
+  makes with no script, which carries no `X-ScadBuddy-Request: 1`.
+- A handler reads `auth.CallerOf(ctx)` (the kind, the principal, the session kind, a token's
+  id and scope, a service's caller and scopes) and `auth.HasScope(ctx, scope)`. A caller
+  holds no credential: never log a token, a cookie value or a hash.
+
+`auth.WouldRefuse` and `auth.Refusal` are Python's `would_refuse` and `refusal`. The shared
+vectors `backend/tests/fixtures/auth-vectors.json` hold the two ports equal: the backend's
+`tests/auth/test_auth_vectors.py` writes them from Python's own functions
+(`UPDATE_AUTH_VECTORS=1`), and `internal/auth/vectors_test.go` checks Go against them.
+
+## Telemetry
+
+Core sends OpenTelemetry traces, metrics and logs over OTLP/HTTP, set up by the shared
+`tools/go/telemetry` module (#7667, epic #988). Only the standard `OTEL_*` variables set it:
+
+| Variable | What |
+|---|---|
+| `OTEL_EXPORTER_OTLP_ENDPOINT` | The collector's base URL: `/v1/traces`, `/v1/metrics` and `/v1/logs` go there. Unset, with no signal's own endpoint, telemetry is off and costs nothing |
+| `OTEL_EXPORTER_OTLP_TRACES_ENDPOINT`, `…_METRICS_ENDPOINT`, `…_LOGS_ENDPOINT` | One signal's full URL, used as is |
+| `OTEL_TRACES_EXPORTER`, `OTEL_METRICS_EXPORTER`, `OTEL_LOGS_EXPORTER` | Unset or a list that names `otlp`: on. `none` turns that signal off; any other value too, with a warning |
+| `OTEL_SDK_DISABLED` | `true` turns every signal off |
+| `OTEL_SERVICE_NAME` | Default `scadbuddy-core` |
+| `OTEL_RESOURCE_ATTRIBUTES` | Added to the resource, as for the API (`deployment.environment=prod`) |
+| `OTEL_TRACES_SAMPLER`, `…_ARG` | Replace the default sampler, which is the API's: a client span with no parent (a query from a background loop) is dropped |
+| `OTEL_EXPORTER_OTLP_HEADERS`, `…_TIMEOUT`, `…_CERTIFICATE`, `OTEL_METRIC_EXPORT_INTERVAL`, `OTEL_BSP_*`, `OTEL_BLRP_*` | As the SDK reads them |
+
+A setting telemetry cannot use (such as a malformed endpoint URL) is logged once as
+"telemetry is off", and core runs with every signal off; it never stops core.
+
+- **Traces.** Each request on both listeners is a server span, a child of the `traceparent` it
+  carries. A route Go answers names it as the API's FastAPI spans are (`GET
+  /api/v1/internal/crud/agent/sessions/{session_id}/events/last-seq`) and sets `http.route`;
+  spans carry `http.method`, `http.status_code` and `http.request.method`,
+  `http.response.status_code`. A forward is a client span to the upstream, and Python gets its
+  `traceparent`, so Python's span is a child of core's: one trace. Every query, batch and pool
+  wait is a span (`db.system=postgresql`, the statement's text with its values bound apart, named
+  by `db.query.summary`). A 5xx is an error; a problem records `scadbuddy.failure_class` and
+  `scadbuddy.problem.reason`. `/healthz`, `/metrics` and `/telemetry/v1/traces` are not traced,
+  as in Python. No path, query string or header is recorded.
+- **Metrics.** `http.server.request.duration`, `http.server.request.body.size`,
+  `http.server.response.body.size` (by method, route, status), the same three as
+  `http.client.*` for the forward, `db.client.operation.duration`,
+  `db.client.connection.count` (used, idle), `db.client.connection.max` and
+  `pgxpool.acquire.waits`, `…wait_time`, `…canceled`; the Go runtime's (`go.goroutine.count`,
+  `go.memory.used`, `go.memory.class`, `go.gc.count`, `go.gc.pause.time`, `go.processor.limit`,
+  `go.schedule.duration`, …) and the process's (`process.cpu.time`, `process.memory.usage`,
+  `process.unix.file_descriptor.count`, `process.uptime`). The event stream's:
+  `scadbuddy.events.subscribers` (open, by `transport`: `changes` or `ws`),
+  `scadbuddy.events.frames` (by `transport` and `frame`), `scadbuddy.events.resyncs` (by
+  `transport` and `reason`: `place`, `gap` or `overflow`) and
+  `scadbuddy.events.listener.reconnects`. `scadbuddy.auth.would_refuse` (by `class` and
+  `reason`) counts the requests and sockets `observe` serves that `enforce` would refuse
+  (the gate's one instrument). Always cumulative.
+- **Streams.** A change stream or a socket ends its server span when it starts
+  (`telemetry.Streaming`), so no span stays open for the hours a stream lasts; its
+  `http.server.request.duration` is the time to its start. A socket's span has status 101.
+  What a socket does later (a `check`, a session read) is a root span of its own (`ws check`,
+  `ws session`), linked to the socket's span.
+- **Logs.** The JSON on stderr stays, with every attribute. With logs on, each record also goes
+  over OTLP, and a record logged in a request carries its `trace_id` and `span_id` (on stderr
+  too). The OTLP copy leaves out the attributes `path`, `error`, `err`, `url`, `query` and
+  `dsn`, and any value that is a URL with credentials; a message's credentials are replaced
+  (`telemetry.DefaultKeep`). The `log` package's lines (net/http's and the forward's, which
+  can hold client addresses and upstream errors) stay on stderr only (`SetDefaultLogger`).
+
+At a stop, the servers drain and the three signals flush within the 20 s shutdown.
 
 ## Where it differs from Python
 
@@ -146,6 +331,20 @@ address, so `core/proxies.py` ignores the `X-Forwarded-For` the front sets: use 
 - `POST /sessions`: a scope's size counts each number as it was sent; Python counted its own
   spelling of it (`1e3` as `1000.0`).
 - `POST /workspace-blob-refs` answers 204 with no `Content-Type`.
+- The event stream: a replayed typed event takes what pydantic's lax mode takes for its fields
+  (an int as a whole float or a text of digits, a bool as `0`, `1` or a word), but not every
+  other coercion pydantic makes; an event it does not take is a `resync`, as in Python. A lone
+  surrogate escape in a socket frame reads as U+FFFD. The socket offers no compression
+  (`permessage-deflate`); the messages are the same. Each process caps its own sockets: with
+  core in front, Python's cap no longer counts them.
+- The socket reads a message of at most 64 KiB, which holds Python's largest frame (16,384
+  characters of up to 4 bytes each). A bigger one closes the socket with 1009; Python read up
+  to 8 MiB and answered `frame too large`. Pings and pongs take from the frame rate, as
+  messages do, and a pong counts only after a keepalive ping. A session's socket reads the
+  session again at each `resync` and closes with 4401 when it was revoked, so a lost
+  `auth.session_revoked` does not leave it open.
+- A change stream ends when a frame's write waits 30 s for a client that reads nothing, and
+  frees its place under the caps. Python waits on such a client.
 
 ## Tests
 

@@ -15,7 +15,7 @@ import asyncio
 import uuid
 from collections.abc import Callable, Coroutine
 from datetime import UTC, datetime, timedelta
-from typing import Any
+from typing import Any, Literal
 from urllib.parse import quote
 
 import psycopg
@@ -26,6 +26,7 @@ from psycopg_pool import ConnectionPool
 
 from scadbuddy.bambuddy.runs import TransactionalEvents
 from scadbuddy.core.events import FlowRunEvent
+from scadbuddy.flows.answerers import BY_SETTING, SessionOwner
 from scadbuddy.flows.grants import (
     ConsumeRequest,
     Consumption,
@@ -59,7 +60,7 @@ from scadbuddy.workflows.flow_models import (
 
 _DECISION = (
     "request_id, run_id, workflow_run_id, call_id, kind, outcome, response, responder,"
-    " input_hash, hops, created_at"
+    " input_hash, hops, created_at, admitted_by"
 )
 _DEFINITION = "id, name, version, commit, approval_timeout_s, created_by, created_at"
 #: The decision that a row has, by `_decided`'s values.
@@ -117,6 +118,11 @@ class GrantStateError(Exception):
 class HopMovedError(Exception):
     """The parked call is no longer at the hop the decision was made for (#2482): the
     starter session's hop ended, or a person decided it first."""
+
+
+class GrantLapsedError(Exception):
+    """The run grant that admitted an agent's answer (#7471, spec 2026-11-25 §4.3) is no
+    longer in force with its chain, or no longer lets anyone answer: nothing was recorded."""
 
 
 #: `approval_expiry_seconds` (the agent's Settings → Assistant) when it is not set.
@@ -372,14 +378,25 @@ class FlowStore:
     # -- decisions ---------------------------------------------------------------
 
     async def record_decision(self, decision: Decision, *, at_hop: Hop | None = None) -> bool:
-        """Record a person's answer before the harness is told. True when recorded, or
+        """Record an answer or approval before the harness is told. True when recorded, or
         when this same decision is there already (a retried run resends it); False when
         another decision holds the request id. With `at_hop`, only while the call waits
-        at that hop, checked under the run's row lock: `HopMovedError` otherwise."""
+        at that hop, checked under the run's row lock: `HopMovedError` otherwise. A new
+        answer that a grant admitted (`admitted_by` its id) is recorded only while the
+        grant and its chain are in force, under the grant row's share lock:
+        `GrantLapsedError` otherwise."""
         return await asyncio.to_thread(self._record_decision, decision, at_hop)
 
     async def get_decision(self, request_id: str) -> Decision | None:
         return await asyncio.to_thread(self._get_decision, request_id)
+
+    async def answers_of(self, run_id: str) -> list[Decision]:
+        """The run's answers on record, every execution's, oldest first (#7471)."""
+        return await asyncio.to_thread(self._answers_of, run_id)
+
+    async def answers_of_call(self, run_id: str, call_id: str) -> list[Decision]:
+        """The answers on record for one call of the run, every execution's, oldest first."""
+        return await asyncio.to_thread(self._answers_of_call, run_id, call_id)
 
     async def record_grant_decision(self, decision: Decision) -> bool:
         """Record a run grant's approval of a call (#2481), only if the grant is in force
@@ -432,6 +449,30 @@ class FlowStore:
         archived, or no longer the run starter's (a handoff): it is no parent then."""
         return await asyncio.to_thread(self._parent_tiers, session, principal)
 
+    async def answer_session(self, session: str, principal: str) -> SessionOwner | None:
+        """Who owns session `session`, when it may answer a flow's question now (#7471, spec
+        §4.1.1): it is not archived, its owner is `principal`, it is not a flow's
+        (`background_tools` and not `turn_flow`), and its owner holds `write`: a token
+        owner's tier is checked (`answer_token`); a browser user holds every tier, so a
+        browser-owned session needs no check. None otherwise, and when no agent service
+        has migrated this database."""
+        return await asyncio.to_thread(self._answer_session, session, principal)
+
+    async def answer_token(self, token_id: str) -> bool:
+        """Whether MCP token `token_id` may answer a flow's question now: it is not revoked
+        or expired, and its tier holds `write`."""
+        return await asyncio.to_thread(self._answer_token, token_id)
+
+    async def answer_allowed(self, responder: str, principal: str | None) -> bool:
+        """Whether the agent answerer `responder` (`session:<id>`, `token:<id>`) may still
+        answer, as `answer_session` and `answer_token` say."""
+        kind, _, id_ = responder.partition(":")
+        if kind == "session" and principal is not None:
+            return await self.answer_session(id_, principal) is not None
+        if kind == "token":
+            return await self.answer_token(id_)
+        return False
+
     async def approval_expiry_s(self) -> int:
         """How long a parent hop lasts when the run never times out (spec §4.6): the
         agent's `approval_expiry_seconds`, else its default."""
@@ -444,12 +485,13 @@ class FlowStore:
     async def take_over_decision(
         self, decision: Decision, *, held: Decision, seen: list[str] | None
     ) -> bool:
-        """Put a person's `decision` in the row of `held`, another of theirs (#7575, #7588),
-        only while the row has `held` and the call has no operation but those `seen`, under
-        the row's lock. An approval or denial only while the call waits too, under the run's
-        lock. With `seen` None, whatever operations it has: `decision`'s Update is in the
-        run; an approval is never put back so. True too when the row has `decision` already;
-        False otherwise."""
+        """Put `decision` in the row of `held`, which it may take over (`may_take_over`;
+        #7575, #7588, #7471), only while the row has `held` and the call has no operation
+        but those `seen`, under the row's lock. An approval or denial only while the call
+        waits too, under the run's lock. With `seen` None, whatever operations it has:
+        `decision`'s Update is in the run; an approval is never put back so. True too when
+        the row has `decision` already; False otherwise. A take-over by an answer that a
+        grant admitted raises `GrantLapsedError` unless the grant is in force."""
         return await asyncio.to_thread(self._take_over_decision, decision, held, seen)
 
     async def withdraw_decision(self, decision: Decision) -> None:
@@ -877,6 +919,9 @@ class FlowStore:
 
     def _record_decision(self, decision: Decision, at_hop: Hop | None = None) -> bool:
         with self._pool.connection() as conn, conn.transaction():
+            # Before the insert, which key-share-locks the run's row: the grant first, as
+            # `_record_grant_decision` and `_delete_run` lock them.
+            grant = self._lock_admitting_grant(conn, decision)
             if at_hop is not None:
                 locked = conn.execute(
                     "SELECT waiting_on FROM workflow_runs WHERE id = %s FOR UPDATE",
@@ -891,8 +936,8 @@ class FlowStore:
                     raise HopMovedError(decision.request_id)
             row = conn.execute(
                 "INSERT INTO workflow_run_decisions (request_id, run_id, workflow_run_id,"
-                " call_id, kind, outcome, response, responder, input_hash, hops)"
-                " VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)"
+                " call_id, kind, outcome, response, responder, input_hash, hops, admitted_by)"
+                " VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)"
                 " ON CONFLICT (request_id) DO NOTHING RETURNING request_id",
                 (
                     decision.request_id,
@@ -905,9 +950,13 @@ class FlowStore:
                     decision.responder,
                     decision.input_hash,
                     _hops(decision.hops),
+                    decision.admitted_by,
                 ),
             ).fetchone()
             if row is not None:
+                if grant is not False:
+                    # Only a new answer: one recorded already stands, whatever the grant is now.
+                    self._grant_admits(decision, grant)
                 return True
             # In SQL: jsonb writes some numbers (1e23) another way than they came. Locked: a
             # take-over under way ends first, and a later one sees this caller's operation.
@@ -918,6 +967,50 @@ class FlowStore:
                 (*_decided(decision), decision.input_hash, decision.request_id),
             ).fetchone()
         return held is not None and bool(held["same"])
+
+    def _lock_admitting_grant(
+        self, conn: Connection[DictRow], decision: Decision
+    ) -> tuple[Grant | None, bool] | Literal[False]:
+        """For an answer that a run grant admitted (`admitted_by` its id): that grant, if it
+        is the run's, share-locked so a revocation lands wholly before or after, and whether
+        it and its chain are in force now, by the database's clock. False for any other
+        decision."""
+        if decision.kind != "answer" or decision.admitted_by in (None, BY_SETTING):
+            return False
+        row = conn.execute(
+            f"SELECT {_GRANT} FROM flow_grants WHERE id = %s AND run_id = %s FOR SHARE",
+            (decision.admitted_by, decision.run_id),
+        ).fetchone()
+        if row is None:
+            return None, False
+        grant = Grant.model_validate(row)
+        return grant, self._chain_in_force(conn, grant)
+
+    @staticmethod
+    def _grant_admits(decision: Decision, locked: tuple[Grant | None, bool]) -> None:
+        """`GrantLapsedError` (which rolls the write back) unless the grant locked by
+        `_lock_admitting_grant` still lets agents answer and is in force with its chain."""
+        grant, in_force = locked
+        if grant is None or grant.spec.answers is None or not in_force:
+            raise GrantLapsedError(decision.request_id)
+
+    def _answers_of(self, run_id: str) -> list[Decision]:
+        with self._pool.connection() as conn:
+            rows = conn.execute(
+                f"SELECT {_DECISION} FROM workflow_run_decisions"
+                " WHERE run_id = %s AND kind = 'answer' ORDER BY created_at",
+                (run_id,),
+            ).fetchall()
+        return [Decision.model_validate(row) for row in rows]
+
+    def _answers_of_call(self, run_id: str, call_id: str) -> list[Decision]:
+        with self._pool.connection() as conn:
+            rows = conn.execute(
+                f"SELECT {_DECISION} FROM workflow_run_decisions"
+                " WHERE run_id = %s AND call_id = %s AND kind = 'answer' ORDER BY created_at",
+                (run_id, call_id),
+            ).fetchall()
+        return [Decision.model_validate(row) for row in rows]
 
     def _get_decision(self, request_id: str) -> Decision | None:
         with self._pool.connection() as conn:
@@ -1101,6 +1194,41 @@ class FlowStore:
             return []
         return list(TIERS[: TIERS.index(held["tier"]) + 1])
 
+    def _answer_session(self, session: str, principal: str) -> SessionOwner | None:
+        with self._pool.connection() as conn:
+            try:
+                row = conn.execute(
+                    "SELECT owner_kind, owner_id FROM ai_sessions"
+                    " WHERE id::text = %s AND archived_at IS NULL"
+                    " AND background_tools AND NOT turn_flow",
+                    (session,),
+                ).fetchone()
+            except psycopg.errors.UndefinedTable:
+                return None
+        if row is None or author_principal(str(row["owner_id"])) != principal:
+            return None
+        if row["owner_kind"] == "browser":
+            return SessionOwner(kind="browser")
+        token = str(row["owner_id"])
+        if row["owner_kind"] != "bearer" or not token.startswith("token:"):
+            return None
+        token_id = token.removeprefix("token:")
+        if not self._answer_token(token_id):
+            return None
+        return SessionOwner(kind="token", token_id=token_id)
+
+    def _answer_token(self, token_id: str) -> bool:
+        with self._pool.connection() as conn:
+            try:
+                row = conn.execute(
+                    "SELECT tier FROM ai_mcp_tokens WHERE id::text = %s AND revoked_at IS NULL"
+                    " AND (expires_at IS NULL OR expires_at > now())",
+                    (token_id,),
+                ).fetchone()
+            except psycopg.errors.UndefinedTable:
+                return False
+        return row is not None and row["tier"] in TIERS[TIERS.index("write") :]
+
     def _approval_expiry_s(self) -> int:
         with self._pool.connection() as conn:
             try:
@@ -1117,7 +1245,8 @@ class FlowStore:
     def _call_operations(self, run_id: str, call_id: str) -> list[CallOperation]:
         with self._pool.connection() as conn:
             rows = conn.execute(
-                "SELECT id, workflow_id, CASE WHEN status = 'running' THEN request END AS request"
+                "SELECT id, workflow_id, kind,"
+                " CASE WHEN status = 'running' THEN request END AS request"
                 f" FROM operations WHERE {_ON_CALL}",
                 (f"flow:{run_id}", call_id),
             ).fetchall()
@@ -1126,25 +1255,22 @@ class FlowStore:
     def _take_over_decision(
         self, decision: Decision, held: Decision, seen: list[str] | None
     ) -> bool:
-        if decision.responder != "browser":
+        if not may_take_over(decision, held, seen):
             return False
         # A call that is let through may have read its row. One that is denied reads none.
         if decision.kind == "approval" and seen is None and decision.outcome != "denied":
             return False
         with self._pool.connection() as conn, conn.transaction():
+            # A take-over is a new answer, so its grant is checked as `_record_decision`
+            # checks it, and locked first as there. Putting back (`seen` None) restores an
+            # answer that landed, whatever its grant is now.
+            grant = self._lock_admitting_grant(conn, decision) if seen is not None else False
             # The run's row first, as `_record_decision` locks them.
             waits = decision.kind == "answer" or seen is None or self._waits(conn, decision)
             row = conn.execute(
                 f"SELECT {_SAME} AS same, {_SAME} AS held"
-                " FROM workflow_run_decisions WHERE request_id = %s AND kind = %s"
-                " AND responder = %s FOR UPDATE",
-                (
-                    *_decided(decision),
-                    *_decided(held),
-                    decision.request_id,
-                    decision.kind,
-                    decision.responder,
-                ),
+                " FROM workflow_run_decisions WHERE request_id = %s AND kind = %s FOR UPDATE",
+                (*_decided(decision), *_decided(held), decision.request_id, decision.kind),
             ).fetchone()
             if row is None:
                 return False
@@ -1158,15 +1284,20 @@ class FlowStore:
             ).fetchone()
             if not waits or not row["held"] or unseen is not None:
                 return False
+            if grant is not False:
+                self._grant_admits(decision, grant)
             conn.execute(
                 "UPDATE workflow_run_decisions SET outcome = %s, response = %s, input_hash = %s,"
-                " hops = %s, created_at = coalesce(%s, now()) WHERE request_id = %s",
+                " hops = %s, created_at = coalesce(%s, now()), responder = %s, admitted_by = %s"
+                " WHERE request_id = %s",
                 (
                     decision.outcome,
                     Jsonb(decision.response),
                     decision.input_hash,
                     _hops(decision.hops),
                     decision.created_at,
+                    decision.responder,
+                    decision.admitted_by,
                     decision.request_id,
                 ),
             )
@@ -1505,6 +1636,17 @@ class FlowStore:
             # Last: it takes the event log's lock, and everything above takes row locks.
             self._tasks.announce_cancelled_in(conn, tasks)
         return cur.rowcount > 0
+
+
+def may_take_over(decision: Decision, held: Decision, seen: list[str] | None) -> bool:
+    """Whether `decision` may take the row of `held` over: an approval, a person's from a
+    person's; an answer, a person's from any answerer's and an agent's from its own (#7471),
+    never a run grant's. Putting back (`seen` None) restores the answer that landed."""
+    if decision.kind != held.kind or held.responder.startswith("grant:"):
+        return False
+    if decision.kind == "approval":
+        return decision.responder == held.responder == "browser"
+    return seen is None or decision.responder in ("browser", held.responder)
 
 
 def _decided(decision: Decision) -> tuple[Any, ...]:

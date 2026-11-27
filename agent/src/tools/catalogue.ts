@@ -1,10 +1,10 @@
 import { z } from 'zod'
-import { binary } from './binary.js'
+import { binaryImage } from './binary.js'
 import { staleBase } from './authoring.js'
 import { command, commandAnswer, isRunning } from './command.js'
 import { ok } from './call.js'
 import { commit, slug } from './common.js'
-import { defineTool, image, json, text, type Tool } from './registry.js'
+import { defineTool, json, text, type Tool } from './registry.js'
 import { backendPage, PAGED, pageInput, totalCount } from './pagination.js'
 import {
   fromWorkspace,
@@ -358,12 +358,11 @@ export const catalogueTools: Tool[] = [
     risk: 'read',
     routes: ['GET /api/v1/models/{slug}/thumbnail'],
     handler: async ({ slug }, ctx) =>
-      binary(
+      binaryImage(
         ctx.backend.GET('/api/v1/models/{slug}/thumbnail', { params: { path: { slug } }, parseAs: 'stream' }),
         `get thumbnail of ${slug}`,
         ctx,
         { path: `/api/v1/models/${slug}/thumbnail`, name: `${slug}-thumbnail.png`, fallbackType: 'image/png' },
-        image,
       ),
   }),
 

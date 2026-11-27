@@ -96,9 +96,10 @@ export function PrintItem({ order, item, onChanged, testRevision }: { order: Ord
 function KitPrints({ item, onChanged }: { item: OrderItemDetail; onChanged: () => void }) {
   const [printing, setPrinting] = useState<string | null>(null)
   const [details, setDetails] = useState<Record<string, Output>>({})
-  // Keyed by the ids, not the array: each refetch of the order makes a new array.
-  const key = (item.kit_outputs ?? []).join(',')
-  const outputs = useMemo(() => (key ? key.split(',') : []), [key])
+  // Keyed by the ids, not the array: each refetch of the order makes a new array. JSON keeps
+  // each id whole, whatever characters it holds.
+  const key = JSON.stringify(item.kit_outputs ?? [])
+  const outputs = useMemo(() => JSON.parse(key) as string[], [key])
   const count = Math.max(item.kit_count ?? 0, outputs.length)
   const slug = item.reference?.slug
   useEffect(() => {

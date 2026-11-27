@@ -17,7 +17,7 @@ import { toast } from '../../lib/toast'
 import { useAsync } from '../../lib/useAsync'
 import { useLatest } from '../../lib/useLatest'
 import { usePassed } from '../../lib/usePassed'
-import { INSET, StepLine, WAITING, type CardProps } from './pendingParts'
+import { AnsweredBy, INSET, PeopleOnly, StepLine, WAITING, type CardProps } from './pendingParts'
 import { SchemaForm } from './SchemaForm'
 
 const STATE_TEXT: Record<Exclude<TaskQuestion['state'], 'open'>, string> = {
@@ -90,6 +90,7 @@ export function TaskCard({ entry, task: listed, step, respond }: CardProps & { t
         <p className="mb-2 text-[13px] font-medium break-words">{heading}</p>
         {step && <StepLine step={step} />}
         {entry.summary && <p className="mb-2 text-[12.5px]">{entry.summary}</p>}
+        {open && entry.people_only && <PeopleOnly />}
         <Context items={task.context} />
         {open && (
           <>
@@ -107,6 +108,12 @@ export function TaskCard({ entry, task: listed, step, respond }: CardProps & { t
         <p role="status" className="text-[12.5px] text-muted-foreground">
           {said}
         </p>
+        {/* #7471: an agent's answer names it; a person's is the person's own. */}
+        {task.state === 'answered' && /^(session|token):/.test(read.data?.answered_by ?? '') && (
+          <p className="text-[12.5px] text-muted-foreground">
+            <AnsweredBy by={read.data?.answered_by} admittedBy={read.data?.admitted_by} />
+          </p>
+        )}
       </CardContent>
     </Card>
   )

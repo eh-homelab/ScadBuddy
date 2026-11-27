@@ -7,6 +7,7 @@ import {
   addSpoolEvent,
   archiveSpool,
   bulkCreateSpools,
+  bulkUpdateSpools,
   copySpool,
   deleteSpool,
   getSpool,
@@ -60,6 +61,11 @@ import { TagPanel } from '../../components/filament/TagPanel'
 import { AttachmentsPanel } from '../../components/entities/AttachmentsPanel'
 import { LinksPanel } from '../../components/entities/LinksPanel'
 import { PropertiesPanel } from '../../components/entities/PropertiesPanel'
+import { entityApi, type PropertyValue } from '../../components/entities/api'
+import { DefinedFields } from '../../components/entities/DefinedFields'
+import { fieldErrorsOf, propertiesPatch, refusalText, sentValues, requiredOf, type FieldErrors } from '../../components/entities/definedProperties'
+import { RequiredKeysDialog } from '../../components/entities/RequiredKeysDialog'
+import { useAsync } from '../../lib/useAsync'
 import { AlertDialog, AlertDialogCancel, AlertDialogContent, AlertDialogDescription, AlertDialogFooter, AlertDialogHeader, AlertDialogTitle } from '@/components/ui/alert-dialog'
 import { Button } from '@/components/ui/button'
 import { Checkbox } from '@/components/ui/checkbox'
@@ -318,9 +324,13 @@ const created = (body: SpoolPatch, grams: string): SpoolCreate => {
 
 /** `SpoolCopySourceError`'s detail: the bulk create's `copy_of` names no spool (#7150, R-7150-13). */
 const COPY_SOURCE_GONE = 'copy_of names no spool'
+/** #7450-2 — the accept found another mean than the offer showed; the page checks again. */
+const INSERT_WEIGHT_CHANGED = "The insert's empty weight changed since the check. Check the new numbers, then record the weighing again."
 const message = (cause: unknown) => (cause instanceof ApiError ? cause.detail : cause instanceof Error ? cause.message : 'The server could not be reached. Try again.')
 
 const NONE = '__none__'
+/** The filament diameter a spool takes when none is set (the column default, `metrics.DEFAULT_DIAMETER_MM`). */
+const DEFAULT_DIAMETER_MM = 1.75
 
 /**
  * #7149: how the spool's tag came in, in a person's words, from Bambuddy's `data_origin`
@@ -466,6 +476,17 @@ export function SpoolPage() {
   const [typeDetail, setTypeDetail] = useState<SpoolTypeDetail | null>(null)
   const [typeError, setTypeError] = useState<string | null>(null)
   const [advanced, toggleAdvanced] = useAdvanced(SPOOL_ADVANCED_KEY)
+  // #7703: the spool's defined keys are fields of this form, saved with it. A copy starts with none.
+  const keys = useAsync(() => entityApi.propertySchema('spool'), [])
+  const schema = keys.data?.schema ?? {}
+  const [defined, setDefined] = useState<Record<string, PropertyValue | undefined>>({})
+  const [definedBefore, setDefinedBefore] = useState<Record<string, PropertyValue | undefined>>({})
+  const [propertiesError, setPropertiesError] = useState<string | null>(null)
+  const [fieldErrors, setFieldErrors] = useState<FieldErrors | undefined>()
+  // #7703: "Create type from this spool" asks first for the keys a type requires.
+  const typeKeys = useAsync(() => entityApi.propertySchema('spool_type'), [])
+  const typeSchema = typeKeys.data?.schema ?? {}
+  const [askType, setAskType] = useState(false)
 
   useEffect(() => {
     let live = true
@@ -479,6 +500,21 @@ export function SpoolPage() {
     setCreateKey(crypto.randomUUID())
     setSourceGone(false)
     setSourceNumber(null)
+    setDefined({})
+    setDefinedBefore({})
+    setFieldErrors(undefined)
+    setPropertiesError(null)
+    if (id !== 'new')
+      entityApi.properties(`spool:${id}`).then(
+        (own) => {
+          if (!live) return
+          const values = Object.fromEntries(own.map((p) => [p.key, p.value]))
+          // A key typed before the read answered keeps what was typed (#7951).
+          setDefined((typed) => ({ ...values, ...typed }))
+          setDefinedBefore(values)
+        },
+        (cause: unknown) => live && setPropertiesError(`The spool's properties could not be loaded: ${message(cause)}`),
+      )
     Promise.all([
       id === 'new' ? Promise.resolve(null) : getSpool(id),
       asked ? copySpool(asked) : Promise.resolve(null),
@@ -532,7 +568,8 @@ export function SpoolPage() {
     for (const type of lists.types) hrefs.set(type.id, filamentLinks.type(type.id))
     return hrefs
   }, [lists])
-  const dirty = JSON.stringify(draft) !== JSON.stringify(base)
+  const properties = propertiesPatch(schema, definedBefore, defined)
+  const dirty = JSON.stringify(draft) !== JSON.stringify(base) || Object.keys(properties).length > 0
   const presetsDirty = JSON.stringify(draft.presets) !== JSON.stringify(base.presets)
   const typeId = draft.type_id
   useEffect(() => {
@@ -555,7 +592,7 @@ export function SpoolPage() {
   const dryFrom = !dryTouched && dryDefaults ? dryingDefaultsText(dryDefaults) : null
   // #7280: a scale reading of a spool with an insert is checked for an offer of its empty weight.
   const scaleReading = DECIMAL.test(reading.trim()) && Number(reading) > 0 ? Number(reading) : null
-  const { check: insertCheck, pending: checkPending } = useInsertWeightCheck(saved && !saved.archived_at && saved.effective.insert_type_id ? saved.id : undefined, scaleReading)
+  const { check: insertCheck, pending: checkPending, unanswered: checkUnanswered, recheck: recheckInsertWeight } = useInsertWeightCheck(saved && !saved.archived_at && saved.effective.insert_type_id ? saved.id : undefined, scaleReading)
   // #7683: a new spool read under its label weight: the person says what is up before it is recorded.
   const [resolutionChoice, setResolutionChoice] = useState<{ reading: number; resolution: Resolution } | null>(null)
   // #7684: the archive asks for a reason and an optional final weighing.
@@ -621,18 +658,21 @@ export function SpoolPage() {
     setNotice(null)
     const spoolId = spoolKey
     const firstType = !creating && saved !== null && !saved.type_id && draft.type_id !== ''
+    const withProperties = Object.keys(properties).length > 0 ? { properties } : {}
+    setFieldErrors(undefined)
     try {
       if (creating) {
-        // One request makes every spool with its place, presets and K values (#7150).
-        const made = await bulkCreateSpools({ spool: created(body, draft.grams_left), quantity: count, location_id: draft.location_id || null, presets: draft.presets, k_values: draft.k_values, copy_of: copyOf, continued_from: continuedFrom }, createKey)
+        // One request makes every spool with its place, presets, K values and properties (#7150, #7703).
+        const made = await bulkCreateSpools({ spool: { ...created(body, draft.grams_left), ...withProperties }, quantity: count, location_id: draft.location_id || null, presets: draft.presets, k_values: draft.k_values, copy_of: copyOf, continued_from: continuedFrom }, createKey)
         const first = made[0]!
         setMadeId(first.id)
         setNotice(made.length > 1 ? `Saved ${made.length} spools, #${first.number} to #${made[made.length - 1]!.number}` : 'Saved')
         guard.leaveTo(made.length > 1 ? listPath : filamentLinks.spool(first.id), { replace: true, state: location.state })
         return
       }
-      const patch = changed(body, bodyOf(base))
+      const patch = { ...changed(body, bodyOf(base)), ...withProperties }
       if (Object.keys(patch).length > 0) await patchSpool(spoolId, patch)
+      setDefinedBefore(sentValues(defined))
       if (draft.location_id !== base.location_id) await moveSpool(spoolId, draft.location_id || null)
       // The first type drops the carried-over presets: the form's copy of them is not written back.
       if (!firstType && JSON.stringify(draft.presets) !== JSON.stringify(base.presets)) await setSpoolPresets(spoolId, draft.presets)
@@ -648,7 +688,9 @@ export function SpoolPage() {
         setError('The spool this form copied was deleted after the form opened. Save again to make this one a new spool without a link to it.')
         return
       }
-      setError(message(cause))
+      const refusedKeys = fieldErrorsOf(cause)
+      setFieldErrors(refusedKeys ?? undefined)
+      setError(refusedKeys ? refusalText(refusedKeys) : message(cause))
       // A write that did land is shown as it now is, unsaved edits kept.
       if (spoolId !== 'new') await Promise.all([getSpool(spoolId).then(setSaved, () => {}), readHistory(spoolId)])
     } finally {
@@ -659,7 +701,8 @@ export function SpoolPage() {
   /** "Reset to type": `null` for the one field, at once; other unsaved edits stay. */
   const reset = (name: keyof Draft & keyof SpoolPatch) =>
     act(async () => {
-      await patchSpool(spoolKey, { [name]: null })
+      // The unchecked bulk route (#7703): a one-field action works on an incomplete spool.
+      await bulkUpdateSpools([spoolKey], { [name]: null })
       const fresh = await reload(true)
       setDraft((was) => ({ ...was, [name]: draftOf(fresh)[name] }))
     })
@@ -713,6 +756,11 @@ export function SpoolPage() {
   const shown = (key: keyof Draft) => advanced || JSON.stringify(draft[key]) !== JSON.stringify(base[key])
   /** The presets and K values: Advanced, an unsaved row, or a first type that drops rows a person should see. */
   const showTables = shown('presets') || shown('k_values') || firstTypeChosen
+  /** A saved diameter other than the database default (1.75 mm) stays on screen with Advanced off. */
+  const savedDiameter = saved?.effective.diameter_mm
+  const oddDiameter = savedDiameter != null && Number(savedDiameter) !== DEFAULT_DIAMETER_MM
+  /** Whether the page shows a measurement: a weighing's breakdown, or a measured weight with its date. */
+  const weighed = saved?.last_weighing?.data.reading_g != null || (saved?.last_weighed_g != null && !!saved.last_weighed_at)
 
   const field = (key: 'colour_name' | 'diameter_mm' | 'density_g_cm3' | 'cost_per_kg' | 'label_weight_g' | 'low_stock_pct' | 'nozzle_temp_min' | 'nozzle_temp_max' | 'bed_temp_min' | 'bed_temp_max' | 'drying_temp_c' | 'drying_hours' | 'extra_colours', label: string, extra: { hint?: string; mode?: 'decimal' | 'numeric' } = {}) => (
     <OverrideField name={key} label={label} value={draft[key]} effective={eff(key)} overridden={own(key)} hasType={hasType} inputMode={extra.mode} hint={extra.hint} onChange={(next) => set(key, next)} onReset={() => void reset(key)} />
@@ -756,7 +804,17 @@ export function SpoolPage() {
     }
     let grams = filament
     if (offer && offerChecked) {
-      const accepted = await acceptInsertWeight(spoolKey, offer.reading_g)
+      let accepted
+      try {
+        accepted = await acceptInsertWeight(spoolKey, offer.reading_g, offer.new_empty_weight_g)
+      } catch (cause) {
+        // #7450-2: another spool's accept or delete moved the mean since this check.
+        if (cause instanceof ApiError && cause.status === 409 && cause.problem.code === 'insert_weight_changed') {
+          recheckInsertWeight()
+          throw new Error(INSERT_WEIGHT_CHANGED, { cause })
+        }
+        throw cause
+      }
       grams = accepted.filament_g
       setLists((was) => (was ? { ...was, insertTypes: was.insertTypes.map((one) => (one.id === accepted.insert_type.id ? accepted.insert_type : one)) } : was))
     }
@@ -886,11 +944,26 @@ export function SpoolPage() {
                       type="button"
                       size="xs"
                       variant="outline"
-                      disabled={busy || dirty}
-                      onClick={() => void act(async () => { await makeTypeFromSpool(saved); await reload(false) }, 'Type created')}
+                      disabled={busy || dirty || typeKeys.loading}
+                      onClick={() =>
+                        requiredOf(typeSchema).length > 0 ? setAskType(true) : void act(async () => { await makeTypeFromSpool(saved); await reload(false) }, 'Type created')
+                      }
                     >
                       Create type from this spool
                     </Button>
+                    <RequiredKeysDialog
+                      schema={typeSchema}
+                      title="The new type needs these properties"
+                      action="Create type"
+                      open={askType}
+                      onCancel={() => setAskType(false)}
+                      onSubmit={async (properties) => {
+                        await makeTypeFromSpool(saved, properties)
+                        setAskType(false)
+                        setNotice('Type created')
+                        await reload(false)
+                      }}
+                    />
                     {dirty && <span className="text-[12px] text-muted-foreground">Save the spool first.</span>}
                   </div>
                 )}
@@ -913,6 +986,20 @@ export function SpoolPage() {
               </Label>
               <Textarea id="spool-note" rows={2} value={draft.note} onChange={(e) => set('note', e.target.value)} />
             </div>
+            {propertiesError && (
+              <p role="alert" className="text-[13px] text-warn">
+                {propertiesError}
+              </p>
+            )}
+            <DefinedFields
+              schema={schema}
+              values={defined}
+              onChange={(next) => {
+                setNotice(null)
+                setDefined(next)
+              }}
+              errors={fieldErrors}
+            />
             <div className="flex flex-col gap-2">
               <h3 className="text-[13px] font-medium">Tag</h3>
               {saved && !creating ? (
@@ -966,7 +1053,7 @@ export function SpoolPage() {
             <div className="grid gap-3 sm:grid-cols-2">
               {field('label_weight_g', 'Label weight (g)', { mode: 'numeric', hint: 'The filament on a full spool.' })}
               {pick('insert_type_id', 'Spool', lists.insertTypes)}
-              {shown('diameter_mm') && field('diameter_mm', 'Diameter (mm)', { mode: 'decimal' })}
+              {(shown('diameter_mm') || oddDiameter) && field('diameter_mm', 'Diameter (mm)', { mode: 'decimal' })}
               {shown('density_g_cm3') && field('density_g_cm3', 'Density (g/cm³)', { mode: 'decimal' })}
               {shown('low_stock_pct') && field('low_stock_pct', 'Low stock at (%)', { mode: 'numeric', hint: 'Of the label weight.' })}
               {shown('added_full') && (
@@ -990,7 +1077,7 @@ export function SpoolPage() {
             </div>
             <p className="text-[13px] text-muted-foreground">
               {empty
-                ? `Empty spool ${empty.empty_weight_g} g (${empty.name})${empty.empty_weight_basis === 'derived' && empty.derived_count > 0 ? `, from ${empty.derived_count} new ${empty.derived_count === 1 ? 'spool' : 'spools'}` : ''}.`
+                ? `Empty spool ${empty.empty_weight_g} g (${empty.name})${empty.empty_weight_basis !== 'derived' ? '' : empty.derived_count > 0 ? `, from ${empty.derived_count} new ${empty.derived_count === 1 ? 'spool' : 'spools'}` : ', from new-spool readings no longer counted'}.`
                 : 'Empty spool weight not known. Choose its spool.'}
             </p>
             {creating ? (
@@ -1005,7 +1092,7 @@ export function SpoolPage() {
                 <div className="flex flex-col gap-2">
                   <p className="text-2xl font-semibold tracking-tight tabular-nums">{leftNow == null ? 'Not known' : grams(leftNow)}</p>
                   {saved?.archived_at && saved.closing && <ClosingSummary closing={saved.closing} at={saved.archived_at} />}
-                  {saved?.last_weighing && saved.last_weighing.data.reading_g != null ? (
+                  {saved?.last_weighing?.data.reading_g != null ? (
                     <WeighingBreakdown
                       event={saved.last_weighing}
                       // #7685: the drift's likely cause, once the history (the previous anchor, the density) has loaded.
@@ -1018,6 +1105,8 @@ export function SpoolPage() {
                         : 'Never weighed.'}
                     </p>
                   )}
+                  {/* #8107: the same condition as "Never weighed.", and not for an archived spool, which is out of use. */}
+                  {!advanced && saved && !weighed && !saved.archived_at && <p className="text-[13px] text-muted-foreground">To weigh this spool, turn on Advanced.</p>}
                   {saved && <GramsBasis basis={saved.basis} gramsLeft={leftNow} addedFull={saved.added_full ?? null} labelWeight={effective?.label_weight_g ?? null} />}
                 </div>
                 {(advanced || reading.trim() !== '') && (
@@ -1034,6 +1123,7 @@ export function SpoolPage() {
                     <Input id="spool-reading" inputMode="decimal" className="tabular-nums" value={reading} onChange={(e) => setReading(e.target.value)} />
                     {empty && readingOk && <p className="text-[12px] text-muted-foreground tabular-nums">{grams(filament)} of filament.</p>}
                     {empty && reading.trim() !== '' && DECIMAL.test(reading.trim()) && filament < 0 && <p className="text-[12px] text-warn">That is less than the empty spool.</p>}
+                    {checkUnanswered && readingOk && <p className="text-[12px] text-muted-foreground">The empty weight check did not answer. You can record the weighing without it.</p>}
                     {belowLabel && resolution && readingOk && <BelowLabelChoice check={belowLabel} value={resolution} disabled={busy} onChange={(next) => setResolutionChoice({ reading: scale, resolution: next })} />}
                     {offer && readingOk && <InsertWeightOffer offer={offer} checked={offerChecked} disabled={busy} onCheckedChange={(checked) => setOfferChoice({ reading: offer.reading_g, checked })} />}
                     <div>
@@ -1045,7 +1135,7 @@ export function SpoolPage() {
                 )}
               </div>
             )}
-            {shown('weight_locked') && (
+            {(shown('weight_locked') || saved?.weight_locked === true) && (
               <Label className="flex items-start gap-2 text-[13px] font-normal">
                 <Checkbox className="mt-0.5" checked={draft.weight_locked} onCheckedChange={(next) => set('weight_locked', next === true)} />
                 <span>
@@ -1076,14 +1166,14 @@ export function SpoolPage() {
               {field('bed_temp_min', 'Bed temperature, min (°C)', { mode: 'numeric' })}
               {field('bed_temp_max', 'Bed temperature, max (°C)', { mode: 'numeric' })}
             </div>
+            {typeError && (
+              <p role="alert" className="text-[13px] text-warn">
+                The type&apos;s presets and K values could not be loaded: {typeError}
+              </p>
+            )}
             {showTables && (
               <>
                 <div className="flex flex-col gap-2">
-                  {typeError && (
-                    <p role="alert" className="text-[13px] text-warn">
-                      The type&apos;s presets and K values could not be loaded: {typeError}
-                    </p>
-                  )}
                   <h3 className="text-[13px] font-medium">Slicer presets</h3>
                   <p className="text-[12px] text-muted-foreground">The Bambu Studio filament preset to slice with, for each printer model and nozzle. A row you do not set takes the type&apos;s.</p>
                   {firstTypeChosen ? (

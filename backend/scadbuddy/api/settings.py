@@ -67,11 +67,13 @@ from scadbuddy.filament.rfid_mode import (
 from scadbuddy.library.catalogue import Catalogue
 from scadbuddy.library.presets import PresetStore, TemplatePresetsUnreadableError
 from scadbuddy.library.settings_store import (
+    OUTPUTS_NEED_A_BLOB_STORE_REASON,
     DestinationSort,
     DisplayUnit,
     MailLoginNeedsTlsError,
     ModelPrintChoices,
     ModelProject,
+    OutputsNeedABlobStoreError,
     PrinterPlate,
     SettingSource,
     SettingsPatch,
@@ -260,6 +262,8 @@ class SettingsView(BaseModel):
     print_auto_import: bool = False
     print_auto_import_sources: list[ImportSource] = Field(default_factory=list)
     print_auto_import_skip_printers: list[int] = Field(default_factory=list)
+    #: #7471: who besides a person may answer a flow's question; empty is people only.
+    flow_answerers: list[str] = Field(default_factory=list)
     #: The LAN-only printers it leaves alone, by registry id (#4699 phase 4).
     print_auto_import_skip_lan_printers: list[str] = Field(default_factory=list)
     #: #6868: whether an empty spool adds its type to the shopping list.
@@ -555,6 +559,7 @@ def _view(snapshot: SettingsSnapshot, state: AppState) -> SettingsView:
         print_auto_import=stored.print_auto_import,
         print_auto_import_sources=list(stored.auto_import_sources()),
         print_auto_import_skip_printers=stored.print_auto_import_skip_printers or [],
+        flow_answerers=stored.flow_answerers or [],
         print_auto_import_skip_lan_printers=stored.print_auto_import_skip_lan_printers or [],
         filament_shopping_auto_add_empty=stored.filament_shopping_auto_add_empty,
         filament_preset_mirror=stored.filament_preset_mirror,
@@ -652,6 +657,7 @@ async def put_settings(
     filament type that is archived or gone (#6153, #6574)."""
     _mail_connection_by_a_person(patch)
     _print_watch_by_a_person(patch)
+    _flow_access_by_a_person(patch)
     patch = await asyncio.to_thread(_default_printer, patch, registry)
     if patch.storefront_slice_profile is not None:
         await check_profile(patch.storefront_slice_profile, registry, filament)
@@ -688,6 +694,12 @@ async def put_settings(
     timer_before = await asyncio.to_thread(store.read, timer_keys) if timer_keys else {}
     try:
         await asyncio.to_thread(store.save, patch)
+    except OutputsNeedABlobStoreError as error:
+        raise ApiError(
+            status.HTTP_422_UNPROCESSABLE_CONTENT,
+            str(error),
+            reason=OUTPUTS_NEED_A_BLOB_STORE_REASON,
+        ) from None
     except (StoreNotReadyError, MailLoginNeedsTlsError) as error:
         raise ApiError(status.HTTP_422_UNPROCESSABLE_CONTENT, str(error)) from None
     snapshot = await asyncio.to_thread(store.snapshot)
@@ -785,6 +797,23 @@ def _print_watch_by_a_person(patch: SettingsPatch) -> None:
         raise ApiError(
             status.HTTP_403_FORBIDDEN,
             "Only a person changes the print watcher: " + ", ".join(sorted(touched)),
+            type_=PERSON_ONLY,
+        )
+
+
+#: Who may answer a flow's question (#7471). A person's to change, so that no agent widens
+#: its own access.
+FLOW_ACCESS = frozenset({"flow_answerers"})
+
+
+def _flow_access_by_a_person(patch: SettingsPatch) -> None:
+    """403 ``person_only`` for a change (or reset) of the flow answerers by anyone but a
+    person's own session (`core.authorship.by_a_person`)."""
+    touched = (patch.model_fields_set | set(patch.reset)) & FLOW_ACCESS
+    if touched and not by_a_person():
+        raise ApiError(
+            status.HTTP_403_FORBIDDEN,
+            "Only a person changes who answers a flow's question: " + ", ".join(sorted(touched)),
             type_=PERSON_ONLY,
         )
 

@@ -172,7 +172,8 @@ class Proposal(BaseModel):
 
 
 class Decision(BaseModel):
-    """A person's answer to one parked call of a run (`workflow_run_decisions`)."""
+    """An answer to one parked call of a run (`workflow_run_decisions`): a person's, a run
+    grant's (`responder` `grant:<id>`) or an admitted agent's (#7471)."""
 
     request_id: str
     run_id: str
@@ -188,6 +189,9 @@ class Decision(BaseModel):
     #: The entry's way up before it was decided (#2482), and the decision's own step.
     hops: list[HopRecord] = []
     created_at: datetime | None = None
+    #: What let an agent answer (#7471): `setting` (`flow_answerers`), or a run grant's id
+    #: once grants may. None for a person's answer and for an approval.
+    admitted_by: str | None = None
 
 
 class CallOperation(BaseModel):
@@ -199,3 +203,5 @@ class CallOperation(BaseModel):
     #: Its workflow's id, by which an operation knows its own record (#7588); None from an
     #: API from before it.
     workflow_id: str | None = None
+    #: Its operation kind, which says who answers (#7471); None from an API from before it.
+    kind: str | None = None

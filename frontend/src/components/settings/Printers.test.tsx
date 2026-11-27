@@ -3,7 +3,7 @@ import { HttpResponse, http } from 'msw'
 import { describe, expect, it } from 'vitest'
 import { isUserOnly } from '../../agent/dom'
 import { takeSnapshot } from '../../agent/snapshot'
-import { PROBE_FAILED, UNREACHABLE, printersState } from '../../mocks/features/printers'
+import { PROBE_FAILED, UNREACHABLE, printersState, setLanLinked } from '../../mocks/features/printers'
 import { emitRealtime } from '../../mocks/realtime'
 import { server } from '../../mocks/server'
 import { renderPage } from '../../test/utils'
@@ -188,6 +188,21 @@ describe('PrintersPanel (#3823)', () => {
     await user.click(within(h2c).getByRole('button', { name: 'Forget 3DP-31B-598' }))
 
     expect(await within(h2c).findByRole('alert')).toHaveTextContent('unlink it first')
+  })
+
+  it('shows the K-profiles and AMS slots on a LAN-linked printer with no Bambuddy link (#7276)', async () => {
+    setLanLinked(printersState()[1]!.id)
+    renderPage(<PrintersPanel />)
+    const garage = await screen.findByRole('listitem', { name: GARAGE })
+    expect(within(garage).getByRole('button', { name: 'K-profiles' })).toBeInTheDocument()
+    expect(within(garage).getByRole('button', { name: 'AMS slots' })).toBeInTheDocument()
+  })
+
+  it('hides them on a printer linked to Bambuddy only (#7276)', async () => {
+    renderPage(<PrintersPanel />)
+    const h2c = await screen.findByRole('listitem', { name: H2C })
+    expect(within(h2c).queryByRole('button', { name: 'K-profiles' })).not.toBeInTheDocument()
+    expect(within(h2c).queryByRole('button', { name: 'AMS slots' })).not.toBeInTheDocument()
   })
 
   it("shows Bambuddy's view of a linked printer, marking a difference (#4747)", async () => {

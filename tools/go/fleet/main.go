@@ -23,6 +23,7 @@ import (
 
 	"github.com/eh-homelab/ScadBuddy/tools/go/fleet/sbfleet"
 	"github.com/eh-homelab/ScadBuddy/tools/go/fleetchat"
+	"github.com/eh-homelab/ScadBuddy/tools/go/telemetry"
 )
 
 const (
@@ -59,9 +60,25 @@ func realMain(args []string, getenv func(string) string, stderr io.Writer) int {
 		return 2
 	}
 	slog.SetDefault(slog.New(slog.NewJSONHandler(os.Stderr, nil)))
+	tel, err := telemetry.Start(telemetry.Options{ServiceName: serverName})
+	if err != nil {
+		// A bad OTEL_* variable turns telemetry off, as a collector outage does, and never
+		// stops the server.
+		slog.Error("telemetry is off", "reason", err.Error())
+		tel = &telemetry.Telemetry{}
+	}
+	// The JSON on stderr stays, for kubectl logs; with logs on, each record also goes over
+	// OTLP, and a record logged inside a request carries its trace_id and span_id. The log
+	// package's lines (net/http's) go to stderr only.
+	tel.SetDefaultLogger(slog.NewJSONHandler(os.Stderr, nil), serverName, nil)
+	defer func() {
+		flush, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		tel.Shutdown(flush)
+	}()
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
-	if err := run(ctx, cfg); err != nil {
+	if err := run(ctx, cfg, tel); err != nil {
 		slog.Error("fleet stopped", "err", err.Error())
 		return 1
 	}
@@ -190,7 +207,7 @@ func buildVersion() string {
 // credential is the fleet credential and, for an exchanged one, the function told of a
 // credential core refused. A proof is exchanged at core (sbfleet.Exchange); a fixed
 // credential file is read at every call.
-func credential(c config) (func() (string, error), []sbfleet.Option) {
+func credential(c config, wrap func(http.RoundTripper) http.RoundTripper) (func() (string, error), []sbfleet.Option) {
 	var e *sbfleet.Exchange
 	switch {
 	case c.TokenFile != "":
@@ -198,9 +215,10 @@ func credential(c config) (func() (string, error), []sbfleet.Option) {
 	case c.BootstrapFile != "":
 		e = sbfleet.NewExchange(c.CoreURL, c.BootstrapFile, sbfleet.ProofBootstrap)
 	default:
-		return credentialFile(c.CredentialFile), nil
+		return credentialFile(c.CredentialFile), []sbfleet.Option{sbfleet.WrapTransport(wrap)}
 	}
-	return e.Token, []sbfleet.Option{sbfleet.OnUnauthorized(e.Invalidate)}
+	e.WrapTransport(wrap)
+	return e.Token, []sbfleet.Option{sbfleet.OnUnauthorized(e.Invalidate), sbfleet.WrapTransport(wrap)}
 }
 
 // credentialFile reads the file at every call: the credential may be rotated.
@@ -227,8 +245,14 @@ func newMux(ctx context.Context, svc *fleetchat.Service) http.Handler {
 	return mux
 }
 
-func run(ctx context.Context, c config) error {
-	token, opts := credential(c)
+func run(ctx context.Context, c config, tel *telemetry.Telemetry) error {
+	core, err := url.Parse(c.CoreURL)
+	if err != nil {
+		return err
+	}
+	token, opts := credential(c, func(base http.RoundTripper) http.RoundTripper {
+		return tel.Transport(base, core.Hostname())
+	})
 	svc := fleetchat.NewService(sbfleet.NewStore(c.CoreURL, token, opts...), sbfleet.NewBus(c.CoreURL, token, opts...), fleetchat.Config{
 		MaxText: c.MaxText, PageSize: c.PageSize, MaxPageSize: c.MaxPageSize, SessionTimeout: c.SessionTimeout,
 	})
@@ -237,7 +261,7 @@ func run(ctx context.Context, c config) error {
 		return err
 	}
 	slog.Info("fleet listens", "address", listener.Addr().String(), "version", buildVersion())
-	return serve(ctx, listener, newMux(ctx, svc), shutdownGrace, shutdownTimeout)
+	return serve(ctx, listener, tel.Server(newMux(ctx, svc), "/healthz"), shutdownGrace, shutdownTimeout)
 }
 
 // serve serves handler on listener until ctx ends. Then it stops taking requests and lets

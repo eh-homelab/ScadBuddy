@@ -31,35 +31,29 @@ import { turnPrincipal } from '../tools/harness.js'
 import { FLOW_IMAGES_MAX, type FlowBlobStore, type FlowImage, flowImageOf } from './flowBlobs.js'
 import type { FlowRunReads } from '../flows/backendReads.js'
 import { flowOf, type FlowRuns } from './flowRuns.js'
-import { FLOW_TOOL_TIER_ACTIVITY, flowToolTierActivity } from './flowTools.js'
+import { FLOW_TOOL_TIER_ACTIVITY, flowToolTierActivity, forFlows } from './flowTools.js'
 import { BUILTIN_TIER_ACTIVITY, builtinTier, TOOL_TIER_ACTIVITY, toolTierActivity } from './toolTier.js'
 import type { AccessResolver } from '../access/resolver.js'
 import { type WorkspaceFiles, withWorkspaceSize } from '../workspace/store.js'
 
 // Every tool as an activity on `agent-tools` (spec 2026-10-01 §6.3, #1055), registered
-// under the tool's name, which is how the durable worker's `activity_as_tool` stubs
-// reach it (temporalio/ai-integrations `claude_agent_sdk`: `execute_activity(fn,
-// call.input, activity_id="tool-<tool_use_id>", task_queue=...)`, one dict in).
+// under the tool's name, for a flow run's workflow (`flow-<run id>`, #1057): it runs as the
+// run's starter, in no session, and a gated call needs a person's decision in the backend's
+// `workflow_run_decisions` (flowRuns.ts). A session's call is no such activity: it is
+// `tool:<name>` in its own ToolCall workflow (`toolCallActivities` below). Any other caller,
+// a `session-<id>` workflow too (the retired Python worker's `activity_as_tool` was the
+// last, #7323), is refused.
 //
 // Each runs `runToolWithOutcome`, the entry point /mcp uses, so parsing, tiers, scope
-// and the untrusted-data envelope are unchanged; and with the context
-// `createHarnessServer` gives a classic turn (tools/harness.ts): the session owner's
-// principal, `session` (commit trailers, #252; what it touched, #931), the tab paired
-// with the session, `lookup` for confirm_action. `gate: 'workflow'`: the session
-// workflow approved an outward call before scheduling it (§6.4), so it is not
-// prepared again.
-//
-// The session is the workflow's: an activity of `session-<id>` runs as that session.
-// Every session runs on a session workflow (plan Step 6.3), so no session's calls are
-// gated in-process any more and none is refused here by its mode. A flow run's workflow (`flow-<run id>`, #1057) runs as the run's
-// starter, in no session, and a gated call needs a person's decision in the backend's
-// `workflow_run_decisions` (flowRuns.ts). Any other caller is refused.
+// and the untrusted-data envelope are unchanged. `gate: 'workflow'`: the workflow
+// parked an outward call and a person approved it before it was scheduled (§6.4), so
+// it is not prepared again.
 
 /** Where a session's owner is read; undefined when there is no such session. */
 export interface SessionOwners {
   /**
    * The owner, the tiers its current turn was sent with (`ai_sessions.turn_tiers`, #2320),
-   * and that turn (`durable_turn_id`), which its calls' audit rows carry as a classic turn's do;
+   * and that turn (`durable_turn_id`), which its calls' audit rows carry as a session turn's do;
    * and its browser options (`ai_sessions.browser`, #7027) from the same row, for its plugins' routes.
    */
   ownerOf(
@@ -207,7 +201,7 @@ export const BACKEND_UNAVAILABLE = 'BackendUnavailable'
  * away (#4442 gate re-review): a gated call's activity runs once, so these are its only retries.
  */
 export const RESOLVE_BACKOFF_MS: readonly number[] = [500, 2000]
-/** The failure type of a call from a workflow that is no known session. */
+/** The failure type of a call from a workflow that is no known session, and of a bare tool activity from any workflow but a flow run's (#7323). */
 export const UNKNOWN_SESSION = 'UnknownSession'
 /** The failure type of a gated call with no approval recorded for it. */
 export const NOT_APPROVED = 'NotApproved'
@@ -262,7 +256,7 @@ function namedImages(content: readonly Block[]): { parts: string[]; images: Sess
  * string, so content blocks would reach the model as JSON, an image as its base64.
  * So each image is kept in the session's blobs, named by its bytes (sessions/blobs.ts),
  * and named in the text, which tells the model to call `view_tool_images` with the
- * names: that tool returns them as image blocks, as a classic turn's tool result is.
+ * names: that tool returns them as image blocks, as a session turn's tool result is.
  * At most RESULT_IMAGES_MAX are kept; one past it is a placeholder, and with nowhere to
  * keep them every image is FLOW_IMAGE. They are kept as what call `toolUseId` produced,
  * which follow_session names on that call's `tool.result` for the panel (#2478).
@@ -383,8 +377,11 @@ type Caller = {
  * was given, so an approval of the parked call authorises no other tool or input.
  */
 async function flowCaller(tool: Tool, flow: string, deps: ToolActivityDeps, toolUseId: string): Promise<Caller> {
-  if (tool.name.startsWith('browser_')) {
-    throw ApplicationFailure.nonRetryable(`${tool.name} is not for flows: a flow has no session and no browser tab`, NOT_FOR_FLOWS)
+  if (!forFlows(tool)) {
+    throw ApplicationFailure.nonRetryable(
+      `${tool.name} is not for flows: a flow has no session or browser tab, and never answers its own questions`,
+      NOT_FOR_FLOWS,
+    )
   }
   // #2258: without the execution's run id the request id (`flow:<run>:<execution>:<call>`)
   // matches no decision, so the call would be refused NotApproved with no reason given.
@@ -434,7 +431,14 @@ async function runAsActivity(
   const { workflowExecution, activityId } = context.info
   const toolUseId = activityId.startsWith('tool-') ? activityId.slice('tool-'.length) : activityId
   const flow = flowOf(workflowExecution?.workflowId)
-  if (flow === undefined) return runCall(tool, input, deps, lookup, toolUseId, undefined, undefined)
+  if (flow === undefined) {
+    // A session's call runs as `tool:<name>` in its ToolCall workflow; no session is read from this id (#7323).
+    throw ApplicationFailure.nonRetryable(
+      `a bare ${tool.name} activity runs only for a flow run, and workflow ${workflowExecution?.workflowId ?? '(none)'} is not a flow run's: ` +
+        `a session's call runs as ${toolCallActivity(tool.name)} in its ToolCall workflow`,
+      UNKNOWN_SESSION,
+    )
+  }
   // A flow run's call is no session's ToolCall, so it gets its `agent.tool/<name>` span here (#6123).
   // No declared tier here: the span takes the effective one once `runGated` knows it, so
   // a call that fails before (its run gone) has no tier, as on the `turn:` path.
@@ -479,27 +483,18 @@ export function flowCallAttributes(tool: string, flow: string, toolUseId: string
   }
 }
 
+/** A flow run's call (runAsActivity): run as the run's starter, gated on the run's decisions. */
 async function runCall(
   tool: Tool,
   input: unknown,
   deps: ToolActivityDeps,
   lookup: (name: string) => Tool | undefined,
   toolUseId: string,
-  flow: string | undefined,
-  span: CallSpan | undefined,
+  flow: string,
+  span: CallSpan,
 ): Promise<unknown> {
   const context = Context.current()
-  const { workflowExecution } = context.info
-  let caller: Caller
-  if (flow !== undefined) {
-    caller = await flowCaller(tool, flow, deps, toolUseId)
-  } else {
-    const { session, owner, turnTiers: sent, turnId } = await durableSession(tool.name, deps.sessions)
-    // The call's gate entry, if it parked (spec §6.6): its approver, or its answer, is recorded under this id.
-    const requestId = durableRequestId(session, workflowExecution?.runId ?? '', toolUseId)
-    caller = { owner, session, requestId, approvals: deps.approvals, tiers: await turnTiers(owner, sent, deps), turnId }
-  }
-  const { session } = caller
+  const caller = await flowCaller(tool, flow, deps, toolUseId)
   const run = await runGated(tool, input, deps, lookup, caller, {
     toolUseId,
     flow,
@@ -511,17 +506,14 @@ async function runCall(
     callKey: caller.requestId,
     span,
   })
-  if (context.cancellationSignal.aborted || run.outcome !== 'ok') span?.setAttribute('scadbuddy.outcome', run.outcome)
+  if (context.cancellationSignal.aborted || run.outcome !== 'ok') span.setAttribute('scadbuddy.outcome', run.outcome)
   if (context.cancellationSignal.aborted) throw new CancelledFailure('the call was cancelled')
   if (run.outcome !== 'ok') throw ApplicationFailure.nonRetryable(failureText(run), TOOL_ERROR)
   // `ok` once the result is built, as the `turn:` path records it: a flow result that
   // throws (its images not kept) is left to `flowCallSpan`, which reads it as `error`.
-  if (flow !== undefined) {
-    const result = await flowResult(run.result.content, deps.flowBlobs ? { subject: `flow-${flow}`, blobs: deps.flowBlobs } : undefined)
-    span?.setAttribute('scadbuddy.outcome', 'ok')
-    return result
-  }
-  return resultText(run.result.content, session !== undefined && deps.blobs ? { session, blobs: deps.blobs, toolUseId } : undefined)
+  const result = await flowResult(run.result.content, deps.flowBlobs ? { subject: `flow-${flow}`, blobs: deps.flowBlobs } : undefined)
+  span.setAttribute('scadbuddy.outcome', 'ok')
+  return result
 }
 
 /** How a gated call is run: its tool_use id, its flow if any, and its activity's signal and heartbeat. */
@@ -700,7 +692,7 @@ async function runGated(
   try {
     run = await runToolWithOutcome(tool, runInput, {
       ...services,
-      // The tab paired with this session (#254), as for a classic turn; a flow has none.
+      // The tab paired with this session (#254), as for a session turn; a flow has none.
       ...(services.browser && session !== undefined ? { browser: services.browser.forSession(session) } : {}),
       // A flow's own images, which its calls may name as `flow_image` references (#2477).
       ...(flow !== undefined && deps.flowBlobs ? { flowImages: flowImagesOf(deps.flowBlobs, `flow-${flow}`) } : {}),
@@ -762,7 +754,7 @@ const HARNESS_PREFIX = 'mcp__scadbuddy__'
 
 /**
  * Runs a released turn's approved call once, outside the model, through the same gated path as
- * a durable session's tool activity: the approval is checked against this call's request id and
+ * a session's ToolCall: the approval is checked against this call's request id and
  * the hash describe_call gave it, the tool's Settings state is read as it runs, the turn's tiers
  * apply, and its audit row is written. Its Idempotency-Key is the request id (spec §7), so a
  * placement retried after the call ran is answered from the backend's operation record. A call
@@ -777,7 +769,7 @@ export function decidedCalls(tools: readonly Tool[], deps: ToolActivityDeps): (c
       return { ran: false, text: `${call.tool} cannot be run outside the conversation, so it was not run` }
     }
     // The approval is looked up by request id, so the id must be this session's entry for this
-    // call (gate/ids.ts durableRequestId), as runAsActivity derives it: another session's approval
+    // call (gate/ids.ts durableRequestId), as the session's gate made it: another session's approval
     // of the same tool and input authorises nothing here.
     const prefix = `durable:${call.sessionId.toLowerCase()}:`
     const runId = call.requestId.startsWith(prefix) ? call.requestId.slice(prefix.length, -(call.toolUseId.length + 1)) : ''

@@ -74,6 +74,22 @@ func unknownAgent() error {
 	return httpx.WithReason(http.StatusNotFound, "no fleet agent has that session id or handle", "unknown-agent")
 }
 
+func unknownChannel(channel string) error {
+	return httpx.WithReason(http.StatusNotFound,
+		fmt.Sprintf(`no channel is named "%s"; joining creates it`, channel), "unknown-channel")
+}
+
+// channelExists is unknownChannel when no channel has the name. Channels are never deleted, so
+// the answer holds for the rest of the transaction.
+func channelExists(ctx context.Context, tx pgx.Tx, channel string) error {
+	var one int
+	err := tx.QueryRow(ctx, `SELECT 1 FROM fleet_channels WHERE name = $1`, channel).Scan(&one)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return unknownChannel(channel)
+	}
+	return err
+}
+
 func notMember(channel string) error {
 	return httpx.WithReason(http.StatusForbidden,
 		fmt.Sprintf(`the agent is not a member of channel "%s"`, channel), "not-member")
@@ -197,7 +213,9 @@ func (f *Fleet) leave(r *http.Request, p crud.Params) (any, error) {
 		tag, err := tx.Exec(r.Context(),
 			`DELETE FROM fleet_members WHERE channel = $1 AND session_id = $2`, channel, session)
 		if err == nil && tag.RowsAffected() == 0 {
-			err = notMember(channel)
+			if err = channelExists(r.Context(), tx, channel); err == nil {
+				err = notMember(channel)
+			}
 		}
 		return err
 	})
@@ -263,7 +281,8 @@ func (f *Fleet) send(r *http.Request, _ crud.Params) (any, error) {
 	}
 	from := b.UUID("from")
 	channel := b.OptText("channel", 1, 40, channelPattern)
-	agent := b.OptText("agent", 8, 8, handlePattern)
+	// An agent is a handle, or a name: a DM to a virtual sender's name is refused below.
+	agent := b.OptText("agent", 1, 40, channelPattern)
 	// The length is checked below, in bytes, with a detail that names the limit.
 	text := b.Text("text", 1, math.MaxInt)
 	if err := b.Err(); err != nil {
@@ -273,12 +292,7 @@ func (f *Fleet) send(r *http.Request, _ crud.Params) (any, error) {
 		return nil, httpx.Invalid(httpx.Issue{Loc: []string{"body"}, Msg: "give exactly one of channel or agent"})
 	}
 	if len(text) > textMax {
-		p := httpx.WithReason(http.StatusUnprocessableEntity,
-			fmt.Sprintf("text is longer than %d bytes", textMax), "text-too-long")
-		p.Extensions = append(p.Extensions, httpx.Field{Key: "errors", Value: []httpx.Issue{{
-			Loc: []string{"body", "text"}, Msg: fmt.Sprintf("text is at most %d bytes", textMax),
-		}}})
-		return nil, p
+		return nil, textTooLong()
 	}
 	ctx := r.Context()
 	var seq int64
@@ -291,6 +305,10 @@ func (f *Fleet) send(r *http.Request, _ crud.Params) (any, error) {
 			return err
 		}
 		if agent != nil {
+			// A name that is no handle can only be a virtual sender's (or no one's).
+			if !handlePattern.MatchString(*agent) {
+				return virtualRefusal(ctx, tx, *agent)
+			}
 			var to string
 			err := tx.QueryRow(ctx, `SELECT session_id FROM fleet_agents WHERE handle = $1`, *agent).Scan(&to)
 			if errors.Is(err, pgx.ErrNoRows) {
@@ -308,6 +326,9 @@ func (f *Fleet) send(r *http.Request, _ crud.Params) (any, error) {
 				return err
 			}
 		} else {
+			if err := channelExists(ctx, tx, *channel); err != nil {
+				return err
+			}
 			// The sender's member row is locked FOR SHARE, so a leave cannot slip between this
 			// check and the deliveries below.
 			var one int
@@ -449,12 +470,12 @@ func (f *Fleet) inbox(r *http.Request, p crud.Params) (any, error) {
 				SELECT x.seq, row_number() OVER w AS n, sum(octet_length(m.text)) OVER w AS bytes
 				FROM next x JOIN fleet_messages m USING (seq)
 				WINDOW w AS (ORDER BY x.seq))
-			SELECT p.n = 1 OR p.bytes <= $4, m.seq, f.handle, coalesce(m.channel, ''),
+			SELECT p.n = 1 OR p.bytes <= $4, m.seq, coalesce(f.handle, m.from_sender), coalesce(m.channel, ''),
 				coalesce(t.handle, ''), CASE WHEN p.n = 1 OR p.bytes <= $4 THEN m.text ELSE '' END,
 				m.sent_at
 			FROM page p
 			JOIN fleet_messages m USING (seq)
-			JOIN fleet_agents f ON f.session_id = m.from_session
+			LEFT JOIN fleet_agents f ON f.session_id = m.from_session
 			LEFT JOIN fleet_agents t ON t.session_id = m.to_session
 			ORDER BY p.seq`, session, cursor, limit+1, pageBytes)
 		if err != nil {
@@ -479,7 +500,8 @@ func (f *Fleet) inbox(r *http.Request, p crud.Params) (any, error) {
 		if peek || len(out) == 0 {
 			return nil
 		}
-		_, err = tx.Exec(ctx, `UPDATE fleet_agents SET cursor = $2 WHERE session_id = $1`,
+		// updated_at is when the cursor last moved: every write of cursor sets it (#7968).
+		_, err = tx.Exec(ctx, `UPDATE fleet_agents SET cursor = $2, updated_at = now() WHERE session_id = $1`,
 			session, out[len(out)-1].Seq)
 		return err
 	})
@@ -518,7 +540,8 @@ func (f *Fleet) rewind(r *http.Request, p crud.Params) (any, error) {
 				fmt.Sprintf("seq %d is past the agent's cursor (%d): a rewind only moves it back", seq, cursor),
 				"seq-ahead")
 		}
-		_, err = tx.Exec(ctx, `UPDATE fleet_agents SET cursor = $2 WHERE session_id = $1`, session, seq)
+		// updated_at is when the cursor last moved: every write of cursor sets it (#7968).
+		_, err = tx.Exec(ctx, `UPDATE fleet_agents SET cursor = $2, updated_at = now() WHERE session_id = $1`, session, seq)
 		return err
 	})
 	if err != nil {

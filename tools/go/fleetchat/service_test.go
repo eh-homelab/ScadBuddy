@@ -76,6 +76,24 @@ func TestValidation(t *testing.T) {
 	if _, err := svc.Send(ctx, sidA, Target{Agent: "ffffffff"}, "hi"); !errors.Is(err, ErrUnknownAgent) {
 		t.Errorf("Send to an unknown agent: %v; want ErrUnknownAgent", err)
 	}
+	if _, err := svc.Send(ctx, sidA, Target{Channel: "nobody-joined"}, "hi"); !errors.Is(err, ErrUnknownChannel) {
+		t.Errorf("Send to an unknown channel: %v; want ErrUnknownChannel", err)
+	}
+	// A name that is no handle reaches the store, which knows the virtual senders.
+	if _, err := svc.Send(ctx, sidA, Target{Agent: "rotator"}, "hi"); !errors.Is(err, ErrVirtualSender) || err.Error() != rotatorReject {
+		t.Errorf("Send to a virtual sender: %v; want ErrVirtualSender with its reject message", err)
+	}
+	if _, err := svc.Send(ctx, sidA, Target{Agent: "nobody"}, "hi"); !errors.Is(err, ErrUnknownAgent) {
+		t.Errorf("Send to an unknown name: %v; want ErrUnknownAgent", err)
+	}
+	for _, name := range []string{"Rotator", "a_b", "1b2c3d4", "deadbeef0", strings.Repeat("z", 41)} {
+		if _, err := svc.Send(ctx, sidA, Target{Agent: name}, "hi"); !errors.Is(err, ErrBadTarget) {
+			t.Errorf("Send to %q: %v; want ErrBadTarget", name, err)
+		}
+	}
+	if err := svc.Leave(ctx, sidA, "nobody-joined"); !errors.Is(err, ErrUnknownChannel) {
+		t.Errorf("Leave an unknown channel: %v; want ErrUnknownChannel", err)
+	}
 }
 
 func TestSendPublishes(t *testing.T) {

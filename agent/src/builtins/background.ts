@@ -10,13 +10,15 @@ import { readDirFile, writeDirFile } from '../workspace/directory.js'
 import { readScript } from '../background/workflowRunner.js'
 import { WORKFLOW_CONCURRENCY, WORKFLOW_MAX_AGENTS, WORKFLOW_SCRIPT_MAX } from '../background/workflowScript.js'
 import type { BuiltinResult } from './result.js'
+import type { SandboxStarter } from './sandboxShell.js'
+import type { SlotRun } from '../sandbox/client.js'
 
 // Claude Code's background built-ins, as the session keeps them (src/background/):
 // CronCreate, CronDelete, CronList, ScheduleWakeup and TaskStop. Claude Code keeps its
 // jobs in its own process ("Session-only (not written to disk, dies when Claude
 // exits)"), which a turn ends; these last as long as the session, survive restarts, and
 // fire the prompt as the session's next message once it is idle. Their answers are
-// Claude Code's (measured on 2.1.296 in a classic turn), saying so where it differs.
+// Claude Code's (measured on 2.1.296 in a session turn), saying so where it differs.
 
 export type BackgroundContext = {
   tasks: BackgroundTasks
@@ -26,10 +28,15 @@ export type BackgroundContext = {
   tz: string
   now: () => Date
   /**
-   * The queue a Monitor's command runs on: the replica that ran the turn. None: no commands,
-   * as where a sandbox is set up (#5864: the session's Bash runs in its pod, not here).
+   * The queue a Monitor's command, or a background Bash's, is followed on: the replica that ran
+   * the turn. None: no commands (Bash is off).
    */
   commandQueue?: string | undefined
+  /**
+   * Where the session's Bash runs in a sandbox pod (#5864): a Monitor's command runs there too, in
+   * a background slot, and the replica only follows it (#5916; background/sandboxSource.ts).
+   */
+  sandbox?: SandboxStarter | undefined
   /** The session workspace: a Workflow's script is kept there without a working directory, and a scriptPath read from it. */
   workspace?: Pick<WorkspaceFiles, 'read' | 'write'> | undefined
   /**
@@ -148,11 +155,15 @@ export async function taskStop(ctx: BackgroundContext, input: { task_id?: string
   const id = input.task_id ?? input.shell_id ?? ''
   const stopped = await ctx.tasks.cancel(ctx.sessionId, id, 'TaskStop')
   if (!stopped) return error(`No task found with ID: ${id}`)
+  // A command in the sandbox stops there now too: its watch may not have begun, and the cancel reaches only the watch.
+  const slot = (stopped.spec.sandbox as { slot?: unknown } | undefined)?.slot
+  if (typeof slot === 'string' && ctx.sandbox) await ctx.sandbox.stop(slot)
   return {
     text: JSON.stringify({
       message: `Successfully stopped task: ${id} (${stopped.kind === 'monitor' ? String(stopped.spec.command ?? (stopped.spec.ws as { url?: string } | undefined)?.url ?? stopped.description) : stopped.description})`,
       task_id: id,
-      task_type: stopped.kind,
+      // A background Bash or PowerShell is Claude Code's `local_bash` task (sandboxShell.ts runInBackground).
+      task_type: stopped.kind === 'monitor' && stopped.spec.background === 'shell' ? 'local_bash' : stopped.kind,
     }),
   }
 }
@@ -174,19 +185,39 @@ export async function monitor(
     if (refused) return error(refused)
   }
   const timeoutMs = Math.round(Math.min(MONITOR_MAX_MS, Math.max(1000, input.timeout_ms ?? MONITOR_DEFAULT_MS)))
-  const t = await ctx.tasks.create({
-    sessionId: ctx.sessionId,
-    kind: 'monitor',
-    description: input.description.slice(0, 500) || 'monitor',
-    spec: {
-      description: input.description,
-      timeoutMs,
-      ...(input.command !== undefined ? { command: input.command, queue: ctx.commandQueue } : { ws: input.ws }),
-    },
-    createdBy: ctx.owner,
-    expiresAt: new Date(ctx.now().getTime() + timeoutMs),
-  })
-  if (!t) return full()
+  // In the session's sandbox (#5916): started now, in a background slot of its pod, under the same timeout.
+  let run: SlotRun | undefined
+  if (input.command !== undefined && ctx.sandbox) {
+    if ((await ctx.tasks.store.list(ctx.sessionId)).length >= MAX_ACTIVE) return full()
+    try {
+      run = await ctx.sandbox.start('bash', input.command, timeoutMs)
+    } catch (err) {
+      return error(`Monitor could not start the command: the session's sandbox failed: ${err instanceof Error ? err.message : String(err)}`)
+    }
+  }
+  let t: BackgroundTask | undefined
+  try {
+    t = await ctx.tasks.create({
+      sessionId: ctx.sessionId,
+      kind: 'monitor',
+      description: input.description.slice(0, 500) || 'monitor',
+      spec: {
+        description: input.description,
+        timeoutMs,
+        ...(input.command !== undefined ? { command: input.command, queue: ctx.commandQueue } : { ws: input.ws }),
+        ...(run ? { sandbox: { slot: run.slot.id, shell: 'bash', outputFile: run.slot.output_file } } : {}),
+      },
+      createdBy: ctx.owner,
+      expiresAt: new Date(ctx.now().getTime() + timeoutMs),
+    })
+  } catch (err) {
+    if (run) await ctx.sandbox!.stop(run.slot.id)
+    throw err
+  }
+  if (!t) {
+    if (run) await ctx.sandbox!.stop(run.slot.id)
+    return full()
+  }
   return {
     text:
       `Monitor started (task ${t.id}, expires in ${shortDuration(timeoutMs)} unless the source ends first; you get one notice at expiry — ` +
