@@ -543,7 +543,7 @@ RUN cargo build --release --locked -p scadbuddy-slicer
 # Upstream publishes no arm64 AppImage, so this stage always takes the amd64 one,
 # whatever TARGETARCH is: the profiles are JSON and serve every app image, and only
 # `slicer`, which runs the CLI, refuses another architecture.
-FROM ubuntu:24.04@sha256:9c7f200c07e3d4a03e7249d2c16bf66a51120fb876aa2242cf31451412543289 AS slicer-dist
+FROM ubuntu:24.04@sha256:562111b88caa79c71391c0c4d3c2114a7d5c35915c20561fd893cb1e07929e6b AS slicer-dist
 
 ARG BAMBU_STUDIO_VERSION
 ARG BAMBU_STUDIO_ASSET
@@ -599,7 +599,7 @@ RUN { curl --fail --silent --show-error --location --retry 3 --retry-all-errors 
 # by tag and index digest, as `base` is, so the glibc the CLI was checked
 # against cannot move under a build. The worker built on bookworm (glibc 2.36)
 # runs on 24.04's 2.39.
-FROM ubuntu:24.04@sha256:9c7f200c07e3d4a03e7249d2c16bf66a51120fb876aa2242cf31451412543289 AS slicer
+FROM ubuntu:24.04@sha256:562111b88caa79c71391c0c4d3c2114a7d5c35915c20561fd893cb1e07929e6b AS slicer
 
 ARG TARGETARCH
 ARG BAMBU_STUDIO_VERSION
