@@ -1884,12 +1884,15 @@ list is fixed when the turn starts (`agent/src/sessions/turnRunner.ts`), so turn
 tool on or off changes what the next turn offers. The access of each call is read per
 call (`agent/src/access/live.ts`), so `off` refuses a call in a turn under way.
 
-- **Reach is open until the sandbox** (decided 2026-09-30): the internet, the LAN and
-  cluster services, plain `http:` included. Only link-local and cloud metadata
-  addresses are refused. If the pod must not reach something, an egress NetworkPolicy
-  is the way to say so; see [security.md](security.md#http-request-tool-827).
-- `GET` and `HEAD` run at once; `POST`, `PUT`, `PATCH` and `DELETE` wait for an
-  approval in the UI.
+- **Reach** (#827, #8178): the internet and plain `http:` to any host. A `GET` or `HEAD`
+  to a private or loopback address (RFC 1918, `fc00::/7`, CGNAT `100.64/10`, `127/8`,
+  `::1`, `0/8`, `localhost`) is refused unless the call names that host as
+  `allow_private_host`; that call then waits for a person to approve it in the UI.
+  Link-local and cloud metadata addresses are always refused. If the pod must not reach
+  something, an egress NetworkPolicy is the way to say so; see
+  [security.md](security.md#http-request-tool-827).
+- `GET` and `HEAD` to a public host run at once; `POST`, `PUT`, `PATCH` and `DELETE` wait
+  for an approval in the UI.
 - Limits: 30 s per request by default (the model may ask for up to 120 s), 5
   redirects, 1 MiB inline and 20 MiB read. A binary body is a workspace file (§13,
   #2511), never base64 in the result. A longer text body is saved in

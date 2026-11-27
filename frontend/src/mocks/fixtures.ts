@@ -1269,6 +1269,10 @@ export const settings: Settings = {
   filament_label_template: { template: 'roll_50x25', width_mm: null, height_mm: null, sheet_id: null },
   // #7216 — the labels output; stored only, a PDF at 300 dpi with the default fields by default.
   filament_label_output: { format: 'pdf', dpi: 300, fields: ['number', 'material', 'colour', 'brand', 'qr'] },
+  // #7170 — the label print settings; stored only: the cluster's CUPS server, no queue, saved job options.
+  filament_label_server_url: 'http://cups.cups.svc:8631',
+  filament_label_queue: null,
+  filament_label_job_options: { media_type: 'Saved', darkness: -1, print_rate: 'Default' },
   activity_ttl_seconds: null,
   activity_repair_window_seconds: null,
   has_google_fonts_api_key: false,

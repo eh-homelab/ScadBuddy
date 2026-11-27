@@ -104,6 +104,7 @@ def test_each_caller_reads_its_own_areas(monkeypatch: pytest.MonkeyPatch) -> Non
         "camera",
         "camera-relay",
         "fleet",
+        "inventory",
         "fleet-rotator",
     }
     monkeypatch.setitem(CRUD_AREAS, "render", ["blob-index"])

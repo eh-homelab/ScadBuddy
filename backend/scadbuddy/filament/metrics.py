@@ -257,7 +257,7 @@ def spool_metrics(
     label_weight_g: int | None,
     window_days: int,
     now: datetime,
-    diameter_mm: float = 1.75,
+    diameter_mm: float = DEFAULT_DIAMETER_MM,
     density_g_cm3: float | None = None,
 ) -> SpoolMetrics:
     """One spool's metrics. "Opened" is its first ``loaded`` event, else its first plate
@@ -294,6 +294,9 @@ def spool_metrics(
         prints=len(found),
         grams_per_print=used / len(found) if found else None,
         wasted_g=sum(p.grams for p in found if p.outcome in ("failed", "cancelled")),
+        non_print_waste_g=sum(
+            ledger.waste_grams(e) for e in events if e.kind == ledger.NON_PRINT_WASTE
+        ),
         cost_used=None if cost_per_kg is None else _money(used, cost_per_kg),
         value_left=(
             None if cost_per_kg is None or grams_left is None else _money(grams_left, cost_per_kg)

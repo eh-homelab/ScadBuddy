@@ -153,9 +153,11 @@ func TestASocketIsTracedAs101AndItsChecksApart(t *testing.T) {
 	server := servers[0]
 	expect(t, value(server, "http.status_code").AsInt64(), int64(101))
 
-	id := s.publish("model.updated", httpx.Field{Key: "slug", Value: "a"})
+	// Subscribed first, so the event's frame comes before the check's answer, never after it.
 	sock.send(1, `{"type":"subscribe","topics":["models"]}`)
-	sock.text()
+	expect(t, sock.text(), `{"type":"subscribed","topics":["models"]}`)
+	id := s.publish("model.updated", httpx.Field{Key: "slug", Value: "a"})
+	expect(t, sock.text(), `{"type":"event","id":"`+id+`","kind":"model.updated","topics":["models"],"data":{"slug":"a"}}`)
 	sock.send(1, `{"type":"check","id":1,"since":["`+id+`"],"topics":["models"]}`)
 	expect(t, sock.text(), `{"type":"changed","id":1,"topics":[]}`)
 	checks := rec.named("ws check")

@@ -1,14 +1,16 @@
 """The `/parts` routes as aliases of the inventory (#7067 Task 9, spec §6.11; they go after
 one release).
 
-A part is an item of a kind under `part` (`hardware` for every part the aliases or the parts
-migration made). Its `InventoryPart` view is read from the item, its newest unarchived
-offer (supplier, link, pack size) and that offer's latest price point (pack price and
-currency), and its lots (`on_hand`; `unit_cost_minor` is the on-hand lots' weighted average,
-each lot at the cost it was bought at: `foreign_unit_cost_minor` for a lot bought in another
-currency; a lot of unknown cost with no cost entered is left out, as `estimate_unit_cost`
-leaves it, R-P2-35). With no such lot on hand the unit cost is the pack price over the pack
-size, and with no price point either it is unknown (`cost_unknown`, read as 0).
+A part is an item of a kind under `hardware` or `ams_part` (`hardware` for every part the
+aliases or the parts migration made; inventory K1 moved both from under `part` to under
+`consumable`, since `part` is durable now). Its `InventoryPart` view is read from the
+item, its newest unarchived offer (supplier, link, pack size) and that offer's latest
+price point (pack price and currency), and its lots (`on_hand`; `unit_cost_minor` is the
+on-hand lots' weighted average, each lot at the cost it was bought at:
+`foreign_unit_cost_minor` for a lot bought in another currency; a lot of unknown cost
+with no cost entered is left out, as `estimate_unit_cost` leaves it, R-P2-35). With no
+such lot on hand the unit cost is the pack price over the pack size, and with no price
+point either it is unknown (`cost_unknown`, read as 0).
 
 A part with no supplier has no offer (owner Ruling 5, R-P2-25): it reads as a pack of 1 at
 0, its link is its newest `purchase` entity link, and "Add stock" takes the body's pack
@@ -71,7 +73,7 @@ class PartHasNoOffer(ValueError):  # noqa: N818
 #: Every part with its offer, price point, link and stock, by name.
 _PARTS = """
 WITH RECURSIVE under (id, tracking) AS (
-    SELECT id, tracking FROM item_kinds WHERE id = 'part'
+    SELECT id, tracking FROM item_kinds WHERE id IN ('hardware', 'ams_part')
     UNION SELECT k.id, k.tracking FROM item_kinds k JOIN under u ON k.parent_id = u.id
 )
 SELECT i.id, i.kind_id, i.name, i.low_stock, i.created_at, i.updated_at,

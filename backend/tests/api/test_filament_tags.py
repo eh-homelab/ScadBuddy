@@ -38,6 +38,13 @@ def test_a_phone_read_answers_the_tag_and_next(client: TestClient) -> None:
     assert got.json()["tag"]["tag_uid"] == "04A2B3C400000100"
 
 
+def test_a_read_with_no_records_is_a_uid_only_read(client: TestClient) -> None:
+    """#8244: `records` defaults to none, so a body with only a UID is a UID-only read."""
+    got = client.post(READS, json={"uid": "04:a2:b3:c5"})
+    assert got.status_code == 200, got.text
+    assert got.json()["tag"]["tag_uid"] == "04A2B3C500000100"
+
+
 def test_a_read_of_a_place_label_answers_open_code_and_the_place(client: TestClient) -> None:
     place = _location(client, "Shelf 9")
     href = f"https://scadbuddy.example/x/L-{place['number']}?from=label"
@@ -731,3 +738,43 @@ def test_a_job_error_with_a_lone_surrogate_is_422(client: TestClient) -> None:
         headers={"content-type": "application/json"},
     )
     assert got.status_code == 422, got.text
+
+
+def test_a_mifare_read_that_reaches_python_needs_core(client: TestClient) -> None:
+    """#8148: core's area `filament-tag-reads` decodes a MIFARE read; Python never does."""
+    block = {"index": 1, "data_hex": "4131372d503100004746413137000000"}
+    body = {
+        "uid": "9CC69CE3",
+        "tag_type": "mifare_classic",
+        "records": [],
+        "mifare_blocks": [block],
+    }
+    got = client.post(READS, json=body)
+    assert got.status_code == 503, got.text
+    assert got.json()["code"] == "mifare_needs_core"
+    body["mifare_blocks"] = [{"index": 64, "data_hex": "00"}]
+    assert client.post(READS, json=body).status_code == 422
+
+
+def test_a_device_read_that_reaches_python_needs_core(client: TestClient) -> None:
+    """#8244: core's area `filament-tag-reads` loads a device read; Python never does."""
+    got = client.post(READS, json={"read_id": "00000000-0000-0000-0000-000000000001"})
+    assert got.status_code == 503, got.text
+    assert got.json()["code"] == "device_read_needs_core"
+
+
+def test_python_checks_a_reads_photo_and_position_and_leaves_them_to_core(
+    client: TestClient,
+) -> None:
+    body: dict[str, Any] = {
+        "uid": "04:a2:b3:c4",
+        "records": [],
+        "image": {"key": "scan_image-" + "ab" * 32, "media_type": "image/jpeg"},
+        "location": {"lat": 51.5, "lon": -0.12, "accuracy_m": 12.5, "at": "2026-11-27T04:00:00Z"},
+        # A lookup that is no tap (#8148 review): core writes no history row; Python takes it.
+        "tap": False,
+    }
+    got = client.post(READS, json=body)
+    assert got.status_code == 200, got.text
+    body["location"] = {"lat": 91, "lon": 0, "at": "2026-11-27T04:00:00Z"}
+    assert client.post(READS, json=body).status_code == 422

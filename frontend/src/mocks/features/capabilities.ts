@@ -122,7 +122,7 @@ const OWN_PLUGIN = 'builtin:own-plugin'
 const OWN_PLUGIN_NAME = 'scadbuddy'
 
 const HTTP_TOOL = 'http_request'
-const HTTP_NOTE = 'read for GET and HEAD, outward (asks first) for anything else'
+const HTTP_NOTE = 'read for GET and HEAD to a public host, outward (asks first) for anything else'
 
 /** The tools that take a loading (#838), and which of the mock's tools are base by default (the agent's `UPFRONT_TOOLS`). */
 const LOADING_SOURCES = new Set(['builtin:scadbuddy', 'builtin:browser'])
@@ -325,7 +325,7 @@ function httpItem(): ItemView {
     name: HTTP_TOOL,
     harness_name: `mcp__scadbuddy_http__${HTTP_TOOL}`,
     label: 'Make an HTTP request',
-    description: 'Make one HTTP request, like curl, to any http or https URL: the internet or the local network.',
+    description: 'Make one HTTP request, like curl, to any http or https URL. A GET or HEAD to a private or loopback host needs approval from the user.',
     default: null,
     default_note: HTTP_NOTE,
     suggested: null,

@@ -1,7 +1,9 @@
-// Package workspace is the routes of backend/scadbuddy/api/crud_agent_workspace.py that
-// need neither the blob store nor the KEK, over agent_data/workspace.py, statement for
-// statement: the metadata reads, a delete, the sweep and the reconcile. The status, the
-// bytes, a write, a fork's copy and the move to blobs stay Python's.
+// Package workspace is the routes of backend/scadbuddy/api/crud_agent_workspace.py, over
+// agent_data/workspace.py, statement for statement. Areas workspace:read and workspace:sql
+// are the routes that need neither the blob store nor the KEK: the metadata reads, a
+// delete, the sweep and the reconcile. Area workspace (Routes, bytes.go) is every route:
+// those, and the status, a file's bytes, a write, a fork's copy and the move to blobs,
+// sealed as Python seals them (seal.go). The KEK rotation's rewrap stays Python's.
 //
 // A refusal is a problem whose reason is the agent's WorkspaceErrorCode.
 package workspace
@@ -90,6 +92,9 @@ var statuses = map[string]int{
 	"invalid_path": http.StatusUnprocessableEntity,
 	"not_found":    http.StatusNotFound,
 	"conflict":     http.StatusConflict,
+	"too_large":    http.StatusRequestEntityTooLarge,
+	"quota":        http.StatusConflict,
+	"unavailable":  http.StatusServiceUnavailable,
 }
 
 func refused(code, message string) error { return httpx.WithReason(statuses[code], message, code) }

@@ -288,6 +288,26 @@ same way, `vite.config.ts`).
   `POST /scan/codes {read_id}`; the pairing button when no phone is online; nothing on a 404. Mocks
   `src/mocks/features/devices.ts` (`PHONE` online, `OLD_PHONE` offline; a call plays its events 400 ms apart
   on the mock socket, `setStepMs` in tests); e2e `e2e/devices.spec.ts`.
+- Dry boxes and the home return (#7167): a dry box is a dry-storage place of capacity 1 (the
+  "Dry box" switch in Filament → Locations' place form, shown only for a dry-storage kind, sets
+  capacity 1; a 422 `box_has_many` shows its text). `lib/homeReturns.ts` `useHomeReturns` reads
+  `GET /filament/spools?awaiting_home=true` as the unknown trays are read; `needsYou.ts` lists each
+  as the kind `home-return` (source `homes`, since `home_asked_at`). The shell owns the dialog
+  (`components/filament/useHomeReturnDialog.tsx`, `NeedsYou.answerHome`); the spool page's "Dry box"
+  banner opens the same `HomeReturnDialog`. Each place row of the Locations tab that is not a tray
+  (a dry box included) has a "Print label" link to the place label (`LocationTree.tsx`). The person always names the spool that goes in, through
+  `components/filament/IdentifySpool.tsx` (Scan tag only where Web NFC is; a code field always, with
+  "Use camera" where `window.BarcodeDetector` exists, else "Take a photo" through `api/scan.ts`, which
+  a 404 hides; Pick by hand): nothing is preselected, the unloaded spool included. The box's spool or
+  an empty box moves with `if_occupied: 'refuse'`, any other spool with `replace` and
+  `expected_occupant_id` (the box's spool it showed; a replace without it is a 422 `expected_occupant_required`), each with `answers`; a 409 `box_full` reads
+  the box again. `IdentifySpool` calls `onIdentified(null)` whenever no spool is named any more (a
+  new way, an edited code, a failed lookup or read), and a tag's new spool is made through
+  `scan/useSpoolFromTag.ts`, which the scan page's `NewTag` shares (required properties; a failed
+  bind keeps the made spool). The archive dialog says the grams it books as
+  non-print waste (`closing.non_print_waste_g`). Mocks: `mocks/features/filament/index.ts`
+  `seedHomeReturn` (S-11 out of the H2C's AMS-A slot 1, home `Dry box 2` holding S-7), or `"1"` under
+  `sessionStorage` `HOME_RETURN_SEED_KEY` for the dev preview.
 - The print watcher (#4699 phase 2): Settings → Printing's "Print watcher"
   (`pages/settings/sections/print-watcher.tsx`; the list fields' form values are
   comma-joined, `values.ts` `sourcesValue`, `printerIdsValue`, `registryIdsValue`), and the Prints page's
@@ -311,10 +331,19 @@ same way, `vite.config.ts`).
   model's Prints tab does when the model has such a print (`PrintsPage.tsx`
   `LanPrintsNote`).
 - `frontend/src/pages/filament/` and `components/filament/` — the Filament section (#6262, spec
-  2026-11-14 §10). `/filament` opens Spools; the tabs are Spools, Types, Tags, Suppliers, Invoices, Locations,
-  Catalog, Metrics, Shopping list and Ledger.
+  2026-11-14 §10). `/filament` opens Spools; the tabs are Spools, Types, Presets, Tags, Suppliers, Invoices, Locations,
+  Catalog, Metrics, Shopping list and Ledger (`pages/filament/tabs.ts`).
+  Presets (#7204, read-only, Go core's area `filament-presets`): the Presets tab
+  (`pages/filament/PresetsTab.tsx`) lists each preset with its source, version and mirror
+  state, and filters by source and by type. A preset's page `/filament/presets/:id`
+  (`PresetPage.tsx`) shows its versions, newest first, 10 at a time with "Show more", the
+  diff between two versions and the document. Links come from `lib/filamentLinks.ts`. The
+  mock is `mocks/features/filament/presets.ts`. A 404 with no `code` means Python answered
+  because core does not serve the area yet. The tab then shows "Presets are not on yet on
+  this server." in place of the table, and the page shows it in place of the versions and the
+  document (`PresetsTab.tsx`, `PresetPage.tsx`).
   Codes and labels (#6955): `/x/:code` (`pages/CodePage.tsx`) asks `GET /api/v1/codes/{code}` and opens
-  the spool or place; `filament/locations/:id` (`pages/filament/LocationPage.tsx`) is a place's page, with its files and links (entity `location:<id>`, #6950). The
+  the spool, place or item kind (`codeTarget`, `inventoryPaths.kind`); `filament/locations/:id` (`pages/filament/LocationPage.tsx`) is a place's page, with its files and links (entity `location:<id>`, #6950). The
   Locations tab's name opens that page, its count badge opens the spools filter, and "Print printer
   labels" opens the labels page with `?printers=`. The labels page also takes `?locations=<id>,<id>`
   (`LocationLabel`; a place that cannot be read is named and the rest are drawn;
@@ -422,13 +451,21 @@ same way, `vite.config.ts`).
   `POST /tags/reads`, which opens what the tag names: the spool that holds it (`KnownTag`), the
   thing a typed code or `scadbuddy:spool:<id>` text in its records names (`next` `open_code`,
   `resolved` in the `/codes/{code}` shape; `components/filament/scan/CodeCard.tsx`, with
-  `lib/resolvedCode.ts` for the label "Place L-4" / "Spool S-142" and the target page), or the
+  `lib/resolvedCode.ts` for the label "Place L-4" / "Spool S-142" / "Type T-4" / "Item I-7" / "Kind K-3" and the target page; a kind opens `inventoryPaths.kind`), or the
   New tag card. The switch "Open what I scan at once" (localStorage `scadbuddy.scan.openAtOnce`,
   `"1"` when on, read in try/catch) navigates to the thing on each `open_spool` or `open_code`
   read and starts the scan by itself when the page opens, falling back to the Scan button with
   the reason when the browser refuses. A spool's "Write tag" and a backup's restore go through
   `lib/tagWrite.ts` `writeWithBackup` (backup, write, read back), and an agent's NFC job shows
-  in `NfcJobBanner` (`components/filament/scan/`); tests stub Web NFC with `src/test/ndefStub.ts`. e2e: `e2e/filament.spec.ts`, `e2e/filament-rfid.spec.ts`,
+  in `NfcJobBanner` (`components/filament/scan/`); tests stub Web NFC with `src/test/ndefStub.ts`.
+  "Scan code" (#8155, `components/filament/scan/ScanCode.tsx`) shows the rear camera's live
+  preview, or a chosen photo where the browser gives no camera (inside Bambuddy's frame too).
+  `ScanCameraProvider` wraps the page; `useScanCamera()` (`scanCamera.ts`) gives any read the
+  camera: `capture(source)` takes a still of the preview as a JPEG (canvas `toBlob`), stores it
+  (`POST /scan/images`, the bytes as the body) and decodes it on the server (`POST /scan/codes`
+  with the key, the source and a GPS fix that waits at most 3 s), and answers `{key, mediaType,
+  scan}`. These routes are core's (Go), so `api/scan.ts` writes their shapes by hand; mocks
+  `src/mocks/features/scan.ts` (`queueScanCodes`: the mock reads no image). e2e: `e2e/filament.spec.ts`, `e2e/filament-rfid.spec.ts`,
   `e2e/filament-sensors.spec.ts` (a place's sensor, its limit and history, #6268) and
   `e2e/filament-purchasing.spec.ts` (a supplier, a price, an invoice confirmed into spools, and a
   total that cannot be confirmed), plus `hot-path.spec.ts` (SB spool numbers in the trays, no Bambuddy

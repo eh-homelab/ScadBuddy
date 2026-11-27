@@ -6,10 +6,11 @@ import logging
 import os
 import secrets
 import shutil
+import threading
 import time
 import uuid
 from collections.abc import AsyncIterator, Callable, Iterator, Mapping, Sequence
-from concurrent.futures import Executor
+from concurrent.futures import CancelledError, Executor, Future
 from contextlib import (
     AbstractContextManager,
     AsyncExitStack,
@@ -856,20 +857,37 @@ async def plates_thumbnails(
 ) -> tuple[list[PlateThumbnails] | None, list[str]]:
     """Every plate's cover images, under the ONE budget :func:`plate_thumbnails`
     documents: a multi-plate render (spec §6.4) is still one job to bound. All or
-    none, as the 3MF writer takes them."""
+    none, as the 3MF writer takes them.
+
+    Each plate is a task of its own on ``executor`` (#8238), so the pool's threads draw
+    the plates side by side: numpy releases the GIL for most of a cover. The pool's size
+    still caps how many covers are drawn at once, so memory stays bounded (#2573). A
+    17-plate kit (#8238, measured on a 22-core WSL2 machine) took 24.6 s one plate at a
+    time and 15.0 s on a pool of two."""
     loop = asyncio.get_running_loop()
     # Covers show what prints: a negative part is cut out.
     plates = [[part for part in parts if not part.negative] for parts in plates]
     faces = sum(len(part.mesh.faces) for parts in plates for part in parts)
+    # Set before the cancels below, and read by each plate as it starts: the pool can take
+    # a plate off its queue between one future's cancel and the next, and that plate
+    # would start drawing (#8254).
+    stop = threading.Event()
 
-    def render_all() -> list[PlateThumbnails]:
-        return [render_plate_thumbnails(parts) for parts in plates]
+    def draw(parts: Sequence[ColourPart]) -> PlateThumbnails:
+        if stop.is_set():
+            raise CancelledError
+        return render_plate_thumbnails(parts)
 
+    # The pool's own futures, so a cancel reaches a queued plate at once, not on the
+    # loop's next pass (an asyncio wrapper's cancel is a callback).
+    queued: list[Future[PlateThumbnails]] = []
+    if executor is not None:
+        queued = [executor.submit(draw, parts) for parts in plates]
+        drawing = [asyncio.wrap_future(future) for future in queued]
+    else:
+        drawing = [loop.run_in_executor(None, draw, parts) for parts in plates]
     try:
-        rendered = await asyncio.wait_for(
-            loop.run_in_executor(executor, render_all),
-            timeout=config.render_timeout,
-        )
+        rendered = await asyncio.wait_for(asyncio.gather(*drawing), timeout=config.render_timeout)
     except TimeoutError:
         logger.warning(
             "plate thumbnail render exceeded the budget; writing the 3MF without cover images",
@@ -884,7 +902,15 @@ async def plates_thumbnails(
             extra={"faces": faces},
         )
         return None, [THUMBNAIL_FAILED_WARNING]
-    return rendered, []
+    finally:
+        # All or none: once one plate fails or the budget ends, a plate still queued
+        # is never drawn. A plate already drawing runs to its end, as before.
+        stop.set()
+        for future in queued:
+            future.cancel()
+        for wrapped in drawing:
+            wrapped.cancel()
+    return list(rendered), []
 
 
 @asynccontextmanager

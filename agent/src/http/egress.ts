@@ -60,6 +60,32 @@ export function isPrivateAddress(address: string): boolean {
   return family !== 0 && PRIVATE.check(plain, family === 4 ? 'ipv4' : 'ipv6')
 }
 
+/**
+ * Addresses inside the cluster, the LAN or the pod (#8178): the private ranges above,
+ * CGNAT 100.64/10 (RFC 6598), loopback (127/8, ::1) and "this network" 0/8 (RFC 1122),
+ * so the check does not depend on the kernel refusing it. `http_request` reads such a host
+ * only when a person approved that host for the call.
+ */
+const INTERNAL = new BlockList()
+INTERNAL.addSubnet('10.0.0.0', 8, 'ipv4')
+INTERNAL.addSubnet('172.16.0.0', 12, 'ipv4')
+INTERNAL.addSubnet('192.168.0.0', 16, 'ipv4')
+INTERNAL.addSubnet('100.64.0.0', 10, 'ipv4')
+INTERNAL.addSubnet('127.0.0.0', 8, 'ipv4')
+INTERNAL.addSubnet('0.0.0.0', 8, 'ipv4')
+INTERNAL.addSubnet('fc00::', 7, 'ipv6')
+INTERNAL.addAddress('::1', 'ipv6')
+
+/** Whether `address` is private, CGNAT, loopback or in 0/8, also as the IPv4 address an IPv6 form embeds. Not an address: true (fail closed). */
+export function isInternalAddress(address: string): boolean {
+  const plain = plainAddress(address.replace(/^\[|\]$/g, ''))
+  const family = isIP(plain)
+  if (family === 0) return true
+  if (INTERNAL.check(plain, family === 4 ? 'ipv4' : 'ipv6')) return true
+  const inner = family === 6 ? embeddedIPv4(plain) : undefined
+  return inner !== undefined && INTERNAL.check(inner, 'ipv4')
+}
+
 export type Resolver = (hostname: string) => Promise<string[]>
 
 export const systemResolver: Resolver = async (hostname) =>
@@ -215,10 +241,11 @@ export function assertSecureUrl(url: string, label: string): URL {
 
 /**
  * `http:` or `https:` to ANY host; anything else throws EgressError. For the
- * assistant's `http_request` tool (#827, harness/httpRequest.ts), whose reach
- * is open until it runs in a sandbox: LAN services are mostly plain http, so
- * the scheme check here is only "an HTTP URL, with no credentials in it".
- * The host is still checked, resolved and pinned by `assertHostAllowed`.
+ * assistant's `http_request` tool (#827, harness/httpRequest.ts): LAN services
+ * are mostly plain http, so the scheme check here is only "an HTTP URL, with no
+ * credentials in it". The host is still checked, resolved and pinned by
+ * `assertHostAllowed`; http_request also refuses a private or loopback host that
+ * a person did not approve (#8178, `isInternalAddress`).
  */
 export function assertHttpUrl(url: string, label: string): URL {
   let target: URL

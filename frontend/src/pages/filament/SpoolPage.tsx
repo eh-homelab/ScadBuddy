@@ -1,5 +1,5 @@
 import { ArchiveIcon, ArchiveRestoreIcon, ChevronLeftIcon, CopyIcon, PrinterIcon, Trash2Icon } from 'lucide-react'
-import { useEffect, useMemo, useState, type ReactNode } from 'react'
+import { useContext, useEffect, useMemo, useState, type ReactNode } from 'react'
 import { Link, useLocation, useParams, useSearchParams } from 'react-router'
 import { api, ApiError } from '../../api/client'
 import {
@@ -33,6 +33,9 @@ import {
   type SpoolTypeDetail,
 } from '../../api/filament'
 import { ArchiveSpoolDialog } from '../../components/filament/ArchiveSpoolDialog'
+import { HomeReturnDialog } from '../../components/filament/HomeReturnDialog'
+import { homeReturnTitle, spoolCode, useHomeReturns } from '../../lib/homeReturns'
+import { NeedsYouContext } from '../../lib/needsYou'
 import { ClosingSummary } from '../../components/filament/ClosingSummary'
 import { weighingCause } from '../../components/filament/driftCause'
 import { GramsBasis } from '../../components/filament/GramsBasis'
@@ -456,6 +459,11 @@ export function SpoolPage() {
   const spoolKey = madeId ?? id
   const [notice, setNotice] = useState<string | null>(null)
   const [saved, setSaved] = useState<SpoolDetail | null>(null)
+  /** #7167 — the home-return dialog, open from the page's banner. */
+  const [homeOpen, setHomeOpen] = useState(false)
+  const needsYou = useContext(NeedsYouContext)
+  // #7167 review M5: the banner shows for the spools Needs you lists (its home still a live dry box).
+  const { spools: awaiting, refresh: refreshAwaiting } = useHomeReturns()
   const [draft, setDraft] = useState<Draft>(BLANK)
   const [lists, setLists] = useState<Lists | null>(null)
   const [history, setHistory] = useState<SpoolHistory | null>(null)
@@ -759,8 +767,10 @@ export function SpoolPage() {
   /** A saved diameter other than the database default (1.75 mm) stays on screen with Advanced off. */
   const savedDiameter = saved?.effective.diameter_mm
   const oddDiameter = savedDiameter != null && Number(savedDiameter) !== DEFAULT_DIAMETER_MM
+  /** A measured weight with its date, when the spool has one. */
+  const measured = saved?.last_weighed_g != null && saved.last_weighed_at ? { g: saved.last_weighed_g, at: saved.last_weighed_at } : null
   /** Whether the page shows a measurement: a weighing's breakdown, or a measured weight with its date. */
-  const weighed = saved?.last_weighing?.data.reading_g != null || (saved?.last_weighed_g != null && !!saved.last_weighed_at)
+  const weighed = saved?.last_weighing?.data.reading_g != null || measured != null
 
   const field = (key: 'colour_name' | 'diameter_mm' | 'density_g_cm3' | 'cost_per_kg' | 'label_weight_g' | 'low_stock_pct' | 'nozzle_temp_min' | 'nozzle_temp_max' | 'bed_temp_min' | 'bed_temp_max' | 'drying_temp_c' | 'drying_hours' | 'extra_colours', label: string, extra: { hint?: string; mode?: 'decimal' | 'numeric' } = {}) => (
     <OverrideField name={key} label={label} value={draft[key]} effective={eff(key)} overridden={own(key)} hasType={hasType} inputMode={extra.mode} hint={extra.hint} onChange={(next) => set(key, next)} onReset={() => void reset(key)} />
@@ -878,6 +888,27 @@ export function SpoolPage() {
       <p role="status" className="mb-2 min-h-5 text-[13px] text-muted-foreground">
         {notice}
       </p>
+      {/* #7167 — the spool came out of its tray, and its home dry box waits to be told which spool goes in. */}
+      {!creating && saved && awaiting?.some((one) => one.id === saved.id) && (
+        <section aria-label="Dry box" className="mb-4 flex flex-wrap items-center gap-x-3 gap-y-2 rounded-r-lg border-l-[3px] border-needs bg-card px-3 py-2 text-[13px] ring-1 ring-foreground/10">
+          <p className="min-w-0 flex-1 font-medium text-needs">{homeReturnTitle(saved)}</p>
+          <Button type="button" size="sm" aria-haspopup="dialog" onClick={() => setHomeOpen(true)}>
+            Choose the spool…
+          </Button>
+          <HomeReturnDialog
+            spool={saved}
+            open={homeOpen}
+            onOpenChange={setHomeOpen}
+            onDone={(moved, box) => {
+              setHomeOpen(false)
+              setNotice(`Put ${spoolCode(moved)} in ${box}`)
+              needsYou?.refresh()
+              refreshAwaiting()
+              void reload(true).catch((cause: unknown) => setError(message(cause)))
+            }}
+          />
+        </section>
+      )}
       {creating && copyOf && continues && (
         <p className="mb-4 text-[13px] text-muted-foreground">
           Continues <Link to={filamentLinks.spool(copyOf)} className="underline">spool #{sourceNumber ?? '…'}</Link>: its filament, respooled.
@@ -1100,12 +1131,13 @@ export function SpoolPage() {
                     />
                   ) : (
                     <p className="text-[13px] text-muted-foreground">
-                      {saved?.last_weighed_g != null && saved.last_weighed_at
-                        ? `Measured ${grams(saved.last_weighed_g)} on ${new Date(saved.last_weighed_at).toLocaleDateString(undefined, { dateStyle: 'medium' })}.`
+                      {/* #8196: `measured`, which `weighed` (the hint below) is read from. */}
+                      {measured
+                        ? `Measured ${grams(measured.g)} on ${new Date(measured.at).toLocaleDateString(undefined, { dateStyle: 'medium' })}.`
                         : 'Never weighed.'}
                     </p>
                   )}
-                  {/* #8107: the same condition as "Never weighed.", and not for an archived spool, which is out of use. */}
+                  {/* #8107: the same boolean as "Never weighed.", and not for an archived spool, which is out of use. */}
                   {!advanced && saved && !weighed && !saved.archived_at && <p className="text-[13px] text-muted-foreground">To weigh this spool, turn on Advanced.</p>}
                   {saved && <GramsBasis basis={saved.basis} gramsLeft={leftNow} addedFull={saved.added_full ?? null} labelWeight={effective?.label_weight_g ?? null} />}
                 </div>

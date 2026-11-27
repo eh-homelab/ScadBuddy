@@ -60,6 +60,7 @@ from scadbuddy.bambuddy.attachments import Attachment, AttachmentStore
 from scadbuddy.bambuddy.client import BambuddyClient, client_for
 from scadbuddy.bambuddy.component import ArchiveCacheDep
 from scadbuddy.bambuddy.costs import archive_cost, run_cost
+from scadbuddy.bambuddy.lan_files import lan_subtask, start_by_file, starts_by_files
 from scadbuddy.bambuddy.linking import link_library_prints, scan_library_by_hash
 from scadbuddy.bambuddy.models import (
     ArchiveDetail,
@@ -71,7 +72,6 @@ from scadbuddy.bambuddy.models import (
 )
 from scadbuddy.bambuddy.part_settings import PartSettingsMap, parts_set_only
 from scadbuddy.bambuddy.print_links import (
-    LanArchiveLink,
     LinkedPrint,
     PrintImport,
     PrintLinkStore,
@@ -597,13 +597,6 @@ async def _named_run(
     return run if run is not None and run.output_id == subject else None
 
 
-#: The file name a LAN start uploads (`workflows/printing.py` `_start_lan`):
-#: ``scadbuddy-<run id[:8]>-p<plate>``, then ``-c<copy>`` past the first copy (together
-#: the start's ``subtask_name``), then ``-<attempt>`` past the first attempt, then
-#: ``.3mf``. A stem never ends in ``-<digits>``, so the attempt is read without doubt.
-_LAN_FILE = re.compile(r"(?P<subtask>scadbuddy-(?P<run>[0-9a-f]{8})-p\d+(?:-c\d+)?)(?:-\d+)?\.3mf")
-
-
 async def _run_by_file(
     links: PrintLinkStore,
     runs: PrintRunStore,
@@ -611,39 +604,26 @@ async def _run_by_file(
     archive: ArchiveDetail | None,
 ) -> PrintRun | None:
     """The run whose LAN start ``link``'s archive became (#5661), from the archive's file
-    name: Bambuddy archives a print it did not queue under the name of the file the
-    printer printed (``services/archive.py`` ``archive_print``,
-    ``filename=original_filename or source_file.name``, maziggy/bambuddy@2ce0d93). That
-    name is the one the run uploaded, and it names the start. The link is recorded only
-    when exactly one start of one run of the link's own subject has that name, whatever
-    the run's status: never a guess. The recorded link is kept when the archive is
-    deleted later, and `_named_run` follows it."""
+    name (`lan_files.start_by_file`: exactly one start of one run of the link's own
+    subject has that name, whatever the run's status: never a guess). None when another
+    archive became that start already (#8306: a reprint of the file from the printer's
+    own storage): the start keeps its first archive. The recorded link is kept when the
+    archive is deleted later, and `_named_run` follows it."""
     subject = PrintSubject.parse(link.subject).run_subject
-    if archive is None or archive.filename is None:
+    if archive is None:
         return None
-    named = _LAN_FILE.fullmatch(archive.filename)
-    if named is None:
+    subtask = lan_subtask(archive.filename)
+    if subtask is None:
         return None
-    subtask = named["subtask"]
-    found = [
-        (run, start)
-        for run in await runs.lan_started(subject, [subtask])
-        if run.id.startswith(named["run"]) and run.result is not None
-        for start in run.result.lan
-        if start.subtask_name == subtask
-    ]
-    if len(found) != 1:
+    found = start_by_file(
+        link.archive_id, archive.filename, await runs.lan_started(subject, [subtask])
+    )
+    if found is None:
         return None
-    run, start = found[0]
+    run, recorded = found
     try:
-        await links.record_lan_start(
-            LanArchiveLink(
-                archive_id=link.archive_id,
-                run_id=run.id,
-                subtask_name=subtask,
-                plate_id=start.plate_id,
-            )
-        )
+        if not await links.record_lan_start(recorded):
+            return None
     except psycopg.Error:
         # The run is found exactly; only the record is lost, and the next read tries again.
         logger.warning(
@@ -664,8 +644,10 @@ async def _link_lan_prints(
     `linking.LAN_LINK_WINDOW` is scanned by its slices' hashes
     (`linking.link_lan_starts`), at most `linking.LAN_SCANS_PER_CALL` per call and once per
     `linking.LAN_SCAN_INTERVAL`; the read skips the subjects scanned within it (#5749).
-    Each archive found that names no start yet is read once, and its file name names the
-    start (`_run_by_file`, the exactly-one rule), so the start is not looked for again. A
+    Each archive found that names no start yet is read once, and the scan's archives are
+    matched together (`lan_files.starts_by_files`, #8316): a start that exactly one of them
+    names gets it, and one that two name (a reprint from the printer's own storage) gets
+    neither, as the orders read decides (`orders/archives.py` `link_lan_archives`). A
     failure is logged, never raised: the list still loads, and a later call tries again."""
     now = time.monotonic()
     try:
@@ -692,12 +674,20 @@ async def _link_lan_prints(
                 found = await linking.link_lan_starts(
                     client, uploads, links, subject, row.first, row.last
                 )
+                filenames: dict[int, str | None] = {}
                 for link in found:
                     if await links.lan_start(link.archive_id) is not None:
                         continue
                     archive = await cache.archive(client, link.archive_id)
-                    linked = LinkedPrint(**link.model_dump(), subject=subject.key)
-                    await _run_by_file(links, runs, linked, archive)
+                    filenames[link.archive_id] = None if archive is None else archive.filename
+                subtasks = sorted(
+                    {name for f in filenames.values() if (name := lan_subtask(f)) is not None}
+                )
+                started = await runs.lan_started(row.subject, subtasks)
+                for recorded in starts_by_files(filenames, started):
+                    await links.record_lan_start(recorded)
+            # One failed record ends this subject's scan (#8316), on purpose: the claim
+            # is released, so a later call scans the subject again.
             except (ApiError, psycopg.Error, ValueError):
                 linking.release_lan_scan(row.subject)
                 logger.exception("could not link a LAN print", extra={"subject": subject.key})

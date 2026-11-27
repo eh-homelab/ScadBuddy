@@ -24,6 +24,11 @@
 # - the Dockerfile's stages the image is built from: `uv`, `mediamtx`,
 #   `camera-deps`, `camera` and `camera-<part>`.
 #
+# Not an input: the Debian packages the `camera` and `camera-deps` stages
+# install with apt (curl, tini, ca-certificates, git) are not pinned. So while a
+# part's pins are kept, it gets no Debian security update to them until a
+# hashed input changes (#8202 review).
+#
 # With --files, it prints the input paths (Dockerfile stages as
 # `Dockerfile#<stage>`), one per line, instead of the hash.
 set -euo pipefail
@@ -96,6 +101,8 @@ def imported(path: pathlib.Path, name: str) -> tuple[set[str], set[str]]:
                         lazy.update(targets(sub))
             elif isinstance(node, ast.If) and "TYPE_CHECKING" in ast.unparse(node.test):
                 visit(node.orelse, into)
+            elif isinstance(node, ast.Match):
+                visit([s for case in node.cases for s in case.body], into)
             else:
                 for field in ("body", "orelse", "finalbody", "handlers"):
                     block = getattr(node, field, None)

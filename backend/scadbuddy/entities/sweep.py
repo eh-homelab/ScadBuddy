@@ -18,8 +18,8 @@ def sweep_orphan_entities(
     the row, which takes its links. An order's kinds (a swept cart, a deleted draft item,
     a released claim) go too, but only once they hold no file: their files are the order
     code's, which removes or moves them before the owner's row goes. An orphan that a
-    stock move names stays: the move's foreign key keeps it as history (R-P2-4, #7067).
-    Each key an orphan loses is a history remove by `SWEEP_ACTOR` (#6949)."""
+    stock move or a relationship names stays: their foreign keys keep it (R-P2-4, #7067;
+    inventory K1). Each key an orphan loses is a history remove by `SWEEP_ACTOR` (#6949)."""
     removed = 0
     with entities.pool.connection() as conn:
         for entity_id, ref in entities.orphans(conn, limit, guarded=ORDER_KINDS):
@@ -33,6 +33,10 @@ def sweep_orphan_entities(
                     entities.exists(conn, ref)
                     or conn.execute(
                         "SELECT 1 FROM stock_moves WHERE entity_id = %s LIMIT 1", (entity_id,)
+                    ).fetchone()
+                    or conn.execute(
+                        "SELECT 1 FROM relations WHERE from_entity = %s OR to_entity = %s LIMIT 1",
+                        (entity_id, entity_id),
                     ).fetchone()
                 ):
                     continue

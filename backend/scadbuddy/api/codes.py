@@ -1,5 +1,5 @@
-"""`GET /api/v1/codes/{code}` (#6955): what a typed code (`L-12`, `S-142`) names. A label's
-QR opens `/x/<code>`, which asks this."""
+"""`GET /api/v1/codes/{code}` (#6955): what a typed code (`L-12`, `S-142`, `T-4`, `I-9`, `K-3`)
+names. A label's QR opens `/x/<code>`, which asks this."""
 
 from __future__ import annotations
 
@@ -33,7 +33,9 @@ def _resolve(rows: Rows, text: str) -> Resolved | None:
     response_model=Resolved,
     summary="Resolve a typed code",
     description=(
-        "`L-<n>` is a location and `S-<n>` a spool, in any case, with or without the dash. "
+        "`L-<n>` is a location, `S-<n>` a spool, `T-<n>` a spool type (`kind` "
+        "`spool_type`), `I-<n>` an item and `K-<n>` an item kind (`kind` "
+        "`item_kind`, `id` the kind's text id), in any case, with or without the dash. "
         "An archived thing still resolves, with `archived` set. 404 with `code` "
         "`code_unknown` for a code that does not parse, has an unknown prefix or names no row."
     ),

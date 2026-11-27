@@ -100,7 +100,8 @@ ExchangedProof = Literal["k8s", "bootstrap", "inprocess"]
 #: recorders and live edge reach only `/internal/crud/camera/`; the camera relay only
 #: `/internal/crud/camera-relay/`. The fleet MCP server (agent fleet chat) reaches only
 #: `/internal/crud/fleet/`. The machine service (the fleet's session registry and login
-#: rotator) reaches only `/internal/crud/fleet-rotator/`.
+#: rotator) reaches only `/internal/crud/fleet-rotator/`. The inventory caller (#6949) is
+#: minted in process by the API and reaches only `/internal/crud/inventory/`.
 SCOPES: Mapping[ServiceCaller, frozenset[str]] = {
     "agent": frozenset({"api", "internal.workspace", "crud.agent"}),
     "print": frozenset({"internal.outputs", "internal.library", "crud.print"}),
@@ -112,6 +113,7 @@ SCOPES: Mapping[ServiceCaller, frozenset[str]] = {
     "camera": frozenset({"crud.camera"}),
     "camera-relay": frozenset({"crud.camera-relay"}),
     "fleet": frozenset({"crud.fleet"}),
+    "inventory": frozenset({"crud.inventory"}),
     "fleet-rotator": frozenset({"crud.fleet-rotator"}),
 }
 PREFIX = "sbsvc_"

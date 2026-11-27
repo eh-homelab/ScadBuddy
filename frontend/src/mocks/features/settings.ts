@@ -228,6 +228,20 @@ function putSettings(body: Record<string, unknown>) {
     // #6905 — `SettingsPatch`'s bounds: 1 to 3650 days.
     if (name === 'filament_sync_pass_ttl_days' && typeof value === 'number' && (value < 1 || value > 3650))
       return refused(name, value < 1 ? 'Input should be greater than or equal to 1' : 'Input should be less than or equal to 3650')
+    // #7170 — `label_printing.server_url`: http or https, a host, no login, path, query or fragment.
+    if (name === 'filament_label_server_url' && typeof value === 'string') {
+      const text = value.trim()
+      let ok = !/[?#]/.test(text)
+      try {
+        const parsed = new URL(text)
+        ok = ok && (parsed.protocol === 'http:' || parsed.protocol === 'https:') && parsed.hostname !== '' && parsed.username === '' && parsed.password === '' && (parsed.pathname === '' || parsed.pathname === '/') && /^https?:\/\/[^/]/.test(text)
+      } catch {
+        ok = false
+      }
+      if (!ok) return refused(name, 'Value error, a label print server is an http or https URL with a host only')
+      next[name] = text.replace(/\/+$/, '')
+      continue
+    }
     if (!envSeeded.has(name)) {
       next[name] =
         name === 'display_unit'
@@ -242,7 +256,10 @@ function putSettings(body: Record<string, unknown>) {
                 ? (value ?? { template: 'roll_50x25', width_mm: null, height_mm: null })
                 : name === 'filament_label_output'
                   ? (value ?? structuredClone(fixtures.settings.filament_label_output))
-                  : value
+                  : name === 'filament_label_server_url' ||
+                      name === 'filament_label_job_options'
+                    ? (value ?? structuredClone(fixtures.settings[name]))
+                    : value
       continue
     }
     if (value === null && !NULLABLE.has(name)) {

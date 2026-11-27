@@ -1,0 +1,232 @@
+{
+  "credential_keys": [
+    {
+      "key": "printhost_apikey",
+      "credential": true
+    },
+    {
+      "key": "PrintHost_Password",
+      "credential": true
+    },
+    {
+      "key": "api_token",
+      "credential": true
+    },
+    {
+      "key": "secret_sauce",
+      "credential": true
+    },
+    {
+      "key": "nozzle_temperature",
+      "credential": false
+    },
+    {
+      "key": "print_host",
+      "credential": false
+    },
+    {
+      "key": "",
+      "credential": false
+    },
+    {
+      "key": "PRİNTHOST_APİKEY",
+      "credential": false
+    },
+    {
+      "key": "Düse_Temperatur",
+      "credential": false
+    }
+  ],
+  "documents": [
+    {
+      "in": {
+        "name": "PLA",
+        "nozzle_temperature": [
+          "220"
+        ],
+        "printhost_apikey": "k"
+      },
+      "out": {
+        "name": "PLA",
+        "nozzle_temperature": [
+          "220"
+        ]
+      }
+    },
+    {
+      "in": {
+        "name": "nested",
+        "a": {
+          "b": {
+            "c": "1",
+            "api_token": "t",
+            "keep": [
+              "1",
+              "2"
+            ]
+          },
+          "PrintHost_Password": "p"
+        },
+        "list": [
+          {
+            "x": "1",
+            "secret_sauce": "s"
+          },
+          {
+            "y": [
+              {
+                "z": "2",
+                "printhost_apikey": "k"
+              }
+            ]
+          }
+        ],
+        "plain": [
+          "1",
+          "two",
+          "null",
+          "true"
+        ]
+      },
+      "out": {
+        "name": "nested",
+        "a": {
+          "b": {
+            "c": "1",
+            "keep": [
+              "1",
+              "2"
+            ]
+          }
+        },
+        "list": [
+          {
+            "x": "1"
+          },
+          {
+            "y": [
+              {
+                "z": "2"
+              }
+            ]
+          }
+        ],
+        "plain": [
+          "1",
+          "two",
+          "null",
+          "true"
+        ]
+      }
+    },
+    {
+      "in": {
+        "l1": {
+          "l2": {
+            "l3": {
+              "printhost_password": "deep",
+              "ok": "yes"
+            }
+          }
+        }
+      },
+      "out": {
+        "l1": {
+          "l2": {
+            "l3": {
+              "ok": "yes"
+            }
+          }
+        }
+      }
+    },
+    {
+      "in": {},
+      "out": {}
+    }
+  ],
+  "diffs": [
+    {
+      "old": {
+        "a": "1",
+        "b": "2"
+      },
+      "new": {
+        "a": "1",
+        "b": "3"
+      },
+      "changed": [
+        "b"
+      ]
+    },
+    {
+      "old": {
+        "a": "1"
+      },
+      "new": {
+        "a": "1",
+        "b": "2"
+      },
+      "changed": [
+        "b"
+      ]
+    },
+    {
+      "old": {
+        "a": "1",
+        "b": "2"
+      },
+      "new": {
+        "a": "1"
+      },
+      "changed": [
+        "b"
+      ]
+    },
+    {
+      "old": {
+        "t": [
+          "220",
+          "230"
+        ]
+      },
+      "new": {
+        "t": [
+          "220",
+          "240"
+        ]
+      },
+      "changed": [
+        "t"
+      ]
+    },
+    {
+      "old": {
+        "a": "1",
+        "printhost_apikey": "old"
+      },
+      "new": {
+        "a": "1"
+      },
+      "changed": []
+    },
+    {
+      "old": {
+        "a": "1",
+        "printhost_apikey": "old"
+      },
+      "new": {
+        "a": "2",
+        "printhost_apikey": "new"
+      },
+      "changed": [
+        "a"
+      ]
+    },
+    {
+      "old": {},
+      "new": {},
+      "changed": []
+    }
+  ]
+}

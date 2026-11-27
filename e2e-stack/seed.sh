@@ -158,10 +158,13 @@ if [ "$mode" = recorder ]; then
   curl --fail --silent --show-error -X POST "http://127.0.0.1:${SB_HOTPATH_RECORDER_PORT:-18000}/__reset" >/dev/null
 fi
 
-# The untagged filled trays of fake-printer/report.json: AMS 0 trays 1 and 3, AMS-HT 128 tray 0.
+# The untagged filled trays of fake-printer/report.json: AMS 0 trays 1 and 3. Its AMS-HT
+# 128 tray 0 is not one: `tray_exist_bits` ("b") has no AMS-HT bit (16), so the app reads
+# that tray as empty and new-spool answers 409 for it
+# (backend/tests/printers/test_e2e_seed_trays.py checks this list).
 # The route answers 409 until the printer's first report has arrived, so it is retried.
 log "a spool for each untagged filled tray"
-for tray in "0 1" "0 3" "128 0"; do
+for tray in "0 1" "0 3"; do
   read -r ams_id tray_id <<<"$tray"
   key="seed-${printer_id}-${ams_id}-${tray_id}"
   made=""

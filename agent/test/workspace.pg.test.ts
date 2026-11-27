@@ -670,7 +670,7 @@ describe.skipIf(skip !== undefined)(`the session workspace${skip ? ` (skipped: $
       const deps = {
         sessions: { ownerOf: async (id: string) => (id === sessionId ? browser : undefined) },
         servers: turnServers({
-          httpRequest: { saveRoot: (await tempPaths()).stateDir, bodies: pgHttpBodies(db.sql), files },
+          httpRequest: { saveRoot: (await tempPaths()).stateDir, bodies: pgHttpBodies(db.sql), files, allowPrivate: true },
         }),
       }
       const out = await turnToolEnv({
@@ -700,7 +700,7 @@ describe.skipIf(skip !== undefined)(`the session workspace${skip ? ` (skipped: $
       const deps = {
         sessions: { ownerOf: async (id: string) => (id === sessionId ? browser : undefined) },
         servers: turnServers({
-          httpRequest: { saveRoot: (await tempPaths()).stateDir, bodies: pgHttpBodies(db.sql), files },
+          httpRequest: { saveRoot: (await tempPaths()).stateDir, bodies: pgHttpBodies(db.sql), files, allowPrivate: true },
         }),
       }
       const out = String(
@@ -730,7 +730,7 @@ describe.skipIf(skip !== undefined)(`the session workspace${skip ? ` (skipped: $
         sessions: { ownerOf: async () => undefined },
         flows: { startedBy: async (run: string) => (run === flow ? browser : undefined), approved: async () => false },
         servers: turnServers({
-          httpRequest: { saveRoot: (await tempPaths()).stateDir, bodies: pgHttpBodies(db.sql), files },
+          httpRequest: { saveRoot: (await tempPaths()).stateDir, bodies: pgHttpBodies(db.sql), files, allowPrivate: true },
         }),
       }
       const out = String(
@@ -774,6 +774,8 @@ describe.skipIf(skip !== undefined)(`the session workspace${skip ? ` (skipped: $
       secrets: () => [],
       actor: browser,
       workspace: { files, ref: ws },
+      // The test server listens on loopback (#8178).
+      allowPrivate: true,
     })
 
     it('stores the body as a workspace file, not on the disk, without the query in its source', async () => {

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 from datetime import date, datetime
 from decimal import Decimal
 from typing import Annotated, Any, Literal
@@ -28,6 +29,8 @@ LifeBasis = Literal["none", "hours", "months"]
 #: The column CHECKs of `item_kinds` (migration `20261124T0323Z_inventory_core.sql`).
 KIND_ID = r"^[a-z][a-z0-9_]{0,39}$"
 UOM = r"^[a-z]{1,8}$"
+#: The id of a kind that ScadBuddy makes: `k` and the kind's number (#6949, #6955).
+MADE_KIND_ID = re.compile(r"k[0-9]+")
 #: The longest `kind:ref` a use or a status change names.
 MAX_ENTITY_REF = 200
 
@@ -64,7 +67,10 @@ class ItemKind(BaseModel):
 class KindInput(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    id: str = Field(pattern=KIND_ID)
+    id: str = Field(
+        pattern=KIND_ID,
+        description="Not `k` and digits only: that id is a made kind's, `k` and its number.",
+    )
     name: Text = Field(min_length=1, max_length=100)
     parent_id: str | None = Field(default=None, pattern=KIND_ID)
     tracking: Tracking
@@ -72,6 +78,14 @@ class KindInput(BaseModel):
     attribute_schema: dict[str, Any] = Field(default_factory=empty_schema)
     life_basis: LifeBasis = "none"
     saleable: bool = False
+
+    @field_validator("id")
+    @classmethod
+    def _not_a_made_id(cls, value: str) -> str:
+        # `item_kinds_made_id_check` (migration `20261126T0218Z_inventory_class.sql`).
+        if MADE_KIND_ID.fullmatch(value):
+            raise ValueError("an id of k and digits is a made kind's id: k and its number")
+        return value
 
 
 class KindPatch(BaseModel):

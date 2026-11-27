@@ -154,6 +154,7 @@ from scadbuddy.filament.bb_sync_models import (
 from scadbuddy.filament.catalog import KIND_OF_TABLE, lookup_key, resolve_or_add
 from scadbuddy.filament.colour import canonical_colours, canonical_rgba
 from scadbuddy.filament.component import Filament
+from scadbuddy.filament.dry_box import BoxFullError, occupant_on
 from scadbuddy.filament.locations import LocationStore
 from scadbuddy.filament.presets import drop_migrated, effective_k_values, own_k_values, own_presets
 from scadbuddy.filament.sb_presets import by_bb_id_on, links_elsewhere_on
@@ -1130,7 +1131,8 @@ def _tag_holders(conn: Conn, uid: str | None, tray: str | None) -> list[dict[str
         " EXISTS (SELECT 1 FROM filament_bb_links l WHERE l.spool_id = b.spool_id) AS linked"
         " FROM filament_tag_bindings b JOIN filament_tags t ON t.id = b.tag_id"
         " JOIN filament_spools s ON s.id = b.spool_id"
-        " WHERE b.unbound_at IS NULL AND (t.tag_uid = %s OR t.tray_uuid = %s)"
+        " WHERE b.unbound_at IS NULL"
+        " AND (t.id IN (SELECT tag_id FROM filament_tag_uids WHERE uid = %s) OR t.tray_uuid = %s)"
         " ORDER BY b.bound_at, b.id",
         (uid, tray),
     ).fetchall()
@@ -1167,7 +1169,7 @@ def _linked_holder(conn: Conn, after: dict[str, Any]) -> UUID | None:
         "SELECT b.spool_id FROM filament_tag_bindings b JOIN filament_tags t ON t.id = b.tag_id"
         " JOIN filament_spools s ON s.id = b.spool_id"
         " WHERE b.unbound_at IS NULL AND s.archived_at IS NULL"
-        " AND (t.tag_uid = %s OR t.tray_uuid = %s)"
+        " AND (t.id IN (SELECT tag_id FROM filament_tag_uids WHERE uid = %s) OR t.tray_uuid = %s)"
         " AND EXISTS (SELECT 1 FROM filament_bb_links l WHERE l.spool_id = b.spool_id)"
         " ORDER BY b.bound_at, b.id LIMIT 1",
         (uid, tray),
@@ -1517,7 +1519,8 @@ def _update(
     if retag:
         # The tags before the spool, as every writer of bindings takes them (`bind_tag`).
         conn.execute(
-            "SELECT id FROM filament_tags WHERE tag_uid = %s OR tray_uuid = %s"
+            "SELECT id FROM filament_tags"
+            " WHERE id IN (SELECT tag_id FROM filament_tag_uids WHERE uid = %s) OR tray_uuid = %s"
             " ORDER BY id FOR UPDATE",
             keys,
         )
@@ -1934,6 +1937,8 @@ def _archive_state(conn: Conn, run: _Run, spool_id: UUID, bb: BbSpool, *, archiv
     at = max(times) if times else run.now
     if _sb_newer(conn, spool_id, "archived_at", at):
         return False
+    if not bb_archived:
+        _free_taken_box(conn, run, spool_id, at)
     run.store.spools.update_on(
         conn,
         spool_id,
@@ -1942,6 +1947,30 @@ def _archive_state(conn: Conn, run: _Run, spool_id: UUID, bb: BbSpool, *, archiv
         at=_bb_event_at(conn, spool_id, at),
     )
     return True
+
+
+def _free_taken_box(conn: Conn, run: _Run, spool_id: UUID, at: datetime) -> None:
+    """A restore (#7167): an archived spool keeps its place, and when that is a dry box
+    another spool holds now, the restore would be `BoxFullError`. The pull never fails
+    over it: the spool is moved to no place first, and the pull logs it. The spool is
+    locked, then its place, as `LocationStore.move_on` does."""
+    row = conn.execute(
+        "SELECT location_id FROM filament_spools WHERE id = %s FOR UPDATE", (spool_id,)
+    ).fetchone()
+    if row is None or row["location_id"] is None:
+        return
+    held = occupant_on(conn, row["location_id"], but=spool_id)
+    if held is None:
+        return
+    logger.warning(
+        "BB restored spool %s, whose dry box %s holds %s: restored with no place",
+        spool_id,
+        row["location_id"],
+        held,
+    )
+    LocationStore.move_on(
+        conn, spool_id, None, actor=run.actor, at=_bb_event_at(conn, spool_id, at)
+    )
 
 
 def _bb_event_at(conn: Conn, spool_id: UUID, bb_at: datetime) -> datetime:
@@ -1995,9 +2024,19 @@ def _follow_location(
     at = as_utc(bb.updated_at) or run.now
     if _sb_newer(conn, spool_id, "location_id", at):
         return False
-    LocationStore.move_on(
-        conn, spool_id, target, actor=run.actor, at=_bb_event_at(conn, spool_id, at)
-    )
+    try:
+        LocationStore.move_on(
+            conn, spool_id, target, actor=run.actor, at=_bb_event_at(conn, spool_id, at)
+        )
+    except BoxFullError as full:
+        # #7167: the pull never fails over a full dry box; the spool is left where it was.
+        logger.warning(
+            "BB placed spool %s in dry box %s, which holds %s: left where it was",
+            spool_id,
+            target,
+            full.occupant,
+        )
+        return False
     taken.add("location_id")
     run.moved += 1
     return True

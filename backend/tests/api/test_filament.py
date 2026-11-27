@@ -273,9 +273,15 @@ def test_an_archive_takes_a_reason_and_a_final_reading(client: TestClient) -> No
         f"{one}/archive", json={"archived": True, "reason": "finished", "final_reading_g": 230}
     )
     assert done.status_code == 200, done.text
-    assert done.json()["archived_at"] is not None and done.json()["grams_left"] == 30
+    assert done.json()["archived_at"] is not None and done.json()["grams_left"] == 0
     events = client.get(f"{one}/events").json()
-    assert [e["kind"] for e in events] == ["created", "weighed", "weighed", "archived"]
+    assert [e["kind"] for e in events] == [
+        "created",
+        "weighed",
+        "weighed",
+        "non_print_waste",
+        "archived",
+    ]
     assert events[-1]["data"]["reason"] == "finished"
     assert events[-1]["data"]["scale_consumed_g"] == 970 and events[-1]["data"]["drift_g"] == -970
     refused = client.post(f"{one}/archive", json={"archived": False, "reason": "finished"})

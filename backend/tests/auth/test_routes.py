@@ -84,6 +84,7 @@ def test_every_route_has_a_class() -> None:
             "crud.camera",
             "crud.camera-relay",
             "crud.fleet",
+            "crud.inventory",
             "crud.fleet-rotator",
             "flow.host",
         )

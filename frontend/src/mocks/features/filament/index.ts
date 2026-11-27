@@ -12,7 +12,7 @@ import { linkTypeFilament } from '../orders/priceBook'
 // Also a cycle (`filamentPurchasing.ts` calls `addInvoicedSpools`): only inside functions.
 import { invoiceRefOf, typeSuppliersOf } from '../filamentPurchasing'
 import { printersState } from '../printers'
-import { H2C, LK, seed, spoolId, type Catalogs, type Seed, type SpoolRow } from './seed'
+import { H2C, L, LK, seed, spoolId, type Catalogs, type Seed, type SpoolRow } from './seed'
 import { jobOf } from '../../../components/filament/eventText'
 import { CATALOGS } from '../../../components/filament/catalogs'
 import { checksSave, marksOf, rowPropertiesRefusal, saveRowProperties } from '../entities'
@@ -146,6 +146,7 @@ export function reset() {
   fetches.clear()
   insertReadings.clear()
   savedSheets = []
+  seedHomeReturnFromStorage()
 }
 
 type InsertBasis = S['InsertType']['empty_weight_basis']
@@ -381,7 +382,7 @@ const FIELDS = {
   kValue: ['printer_id', 'extruder', 'nozzle_diameter', 'nozzle_type', 'k_value', 'name', 'cali_idx', 'setting_id'],
   typeCreate: ['code', 'material_id', 'subtype_id', 'brand_id', 'category_id', 'effect_id', 'insert_type_id', 'rgba', 'colour_name', 'extra_colours', 'diameter_mm', 'density_g_cm3', 'cost_per_kg', 'lead_time_days', 'safety_margin_days', 'label_weight_g', 'low_stock_pct', 'nozzle_temp_min', 'nozzle_temp_max', 'bed_temp_min', 'bed_temp_max', 'drying_temp_c', 'drying_hours', 'tdfp_id', 'note'],
   spoolCreate: ['type_id', 'brand_id', 'material_id', 'subtype_id', 'category_id', 'effect_id', 'colour_name', 'rgba', 'extra_colours', 'diameter_mm', 'density_g_cm3', 'nozzle_temp_min', 'nozzle_temp_max', 'bed_temp_min', 'bed_temp_max', 'drying_temp_c', 'drying_hours', 'label_weight_g', 'insert_type_id', 'low_stock_pct', 'cost_per_kg', 'weight_locked', 'note', 'grams_left', 'added_full'],
-  move: ['location_id'],
+  move: ['location_id', 'if_occupied', 'answers', 'expected_occupant_id', 'expected_location_id'],
   csvImport: ['rows', 'dry_run'],
   proposalPick: ['brand_id', 'material_id', 'subtype_id', 'rgba', 'label_weight_g', 'material_number', 'code', 'spool_ids'],
   archive: ['archived', 'reason', 'final_reading_g', 'final_grams'],
@@ -490,6 +491,98 @@ const findSpool = (id: string) => state.spools.find((row) => row.id === id)
 
 function listed(includeArchived: boolean) {
   return state.spools.filter((row) => includeArchived || !row.archived_at).sort((a, b) => a.number - b.number)
+}
+
+/** #7167 `dry_box.py` `BOX`: a live dry-storage place of capacity 1 that is no printer's. */
+function isDryBox(id: string, place: Pick<S['Location'], 'kind_id' | 'capacity' | 'archived_at' | 'printer_id'> | undefined = state.locations.find((one) => one.id === id)): boolean {
+  if (!place || place.archived_at || place.printer_id || place.capacity !== 1) return false
+  return state.catalogs['location-kinds'].some((kind) => kind.id === place.kind_id && kind.dry_storage)
+}
+
+/** `spools.py` `_AWAITING_HOME`: asked, in no place, and its home still a live dry box. */
+const awaitsHome = (row: SpoolRow) => row.home_asked_at != null && row.location_id == null && row.home_location_id != null && isDryBox(row.home_location_id)
+
+/** `dry_box.py` `check_not_many`: a place that would be a dry box while it holds two spools or more. */
+function boxHasMany(id: string, place: S['Location']): Response | null {
+  if (!isDryBox(id, place)) return null
+  const held = state.spools.filter((one) => one.location_id === id && !one.archived_at).length
+  return held > 1 ? problem(422, 'the place holds more than one spool, so it cannot be a dry box', { code: 'box_has_many' }) : null
+}
+
+/** `dry_box.py` `occupant_on`: the unarchived spool other than `but` in the dry box `id`, or null. */
+function occupantOf(id: string | null, but: string | null = null): string | null {
+  if (!id || !isDryBox(id)) return null
+  return state.spools.find((one) => one.location_id === id && one.id !== but && one.archived_at === null)?.id ?? null
+}
+
+const boxFull = (occupant: string) => problem(409, `the dry box already holds spool ${occupant}`, { code: 'box_full', occupant_id: occupant })
+
+/** `spools.py` `_archive`: a restore of `row` into a dry box another spool holds is 409 `box_full`. */
+function boxTaken(row: SpoolRow): Response | null {
+  if (row.archived_at === null) return null
+  const occupant = occupantOf(row.location_id, row.id)
+  return occupant ? boxFull(occupant) : null
+}
+
+/** `dry_box.py` `check_kind_flip`: a kind turned dry storage while one of its capacity-1 places holds two spools or more. */
+function kindHasMany(kindId: string): Response | null {
+  const places = state.locations.filter((one) => one.kind_id === kindId && one.capacity === 1 && !one.archived_at && !one.printer_id)
+  const many = places.some((place) => state.spools.filter((one) => one.location_id === place.id && !one.archived_at).length > 1)
+  return many ? problem(422, 'the place holds more than one spool, so it cannot be a dry box', { code: 'box_has_many' }) : null
+}
+
+/** The mock's dry box of one spool (#7167): `Dry box 2`, under the workshop. */
+export const HOME_BOX = '00000000-0000-4000-8000-0000000b0c01'
+
+/**
+ * #7167 — a spool waiting for its home answer: S-11 came out of the H2C's AMS-A slot 1 and was
+ * parked (no place), and its home `Dry box 2` (capacity 1) holds S-7, unless `empty`. Returns the box.
+ */
+export function seedHomeReturn({ empty = false }: { empty?: boolean } = {}): { box: string } {
+  if (!state.locations.some((one) => one.id === HOME_BOX)) {
+    state.locations.push({
+      id: HOME_BOX,
+      number: Math.max(0, ...state.locations.map((place) => place.number)) + 1,
+      name: 'Dry box 2',
+      kind_id: LK.DRY_BOX,
+      parent_id: L.WORKSHOP,
+      printer_root: false,
+      identifier: null,
+      capacity: 1,
+      printer_id: null,
+      ams_id: null,
+      tray_id: null,
+      note: null,
+      sort_order: 2,
+      archived_at: null,
+      created_at: '2026-11-20T09:00:00Z',
+      updated_at: '2026-11-20T09:00:00Z',
+    })
+  }
+  const asked = '2026-11-26T08:00:00Z'
+  const set = (n: number, change: Partial<SpoolRow>) => {
+    const at = state.spools.findIndex((one) => one.id === spoolId(n))
+    state.spools[at] = { ...state.spools[at]!, ...change }
+  }
+  if (!empty) set(7, { location_id: HOME_BOX, home_location_id: HOME_BOX })
+  set(11, { location_id: null, home_location_id: HOME_BOX, home_asked_at: asked })
+  const tray = { source: 'ams_remain' as const, printer_id: H2C.printer_id, ams_id: 0, tray_id: 0, at: asked }
+  addEvent(spoolId(11), 'unloaded', { ...tray, data: { by: 'tag' } })
+  addEvent(spoolId(11), 'moved', { at: asked, source: null, data: { from: L.AMS_A1, to: null } })
+  return { box: HOME_BOX }
+}
+
+/**
+ * A Playwright run or the dev preview puts the waiting spool in before the page loads: `"1"`
+ * under this `sessionStorage` key, read at load and at each reset.
+ */
+export const HOME_RETURN_SEED_KEY = 'scadbuddy.mock.home-return'
+function seedHomeReturnFromStorage() {
+  try {
+    if (typeof sessionStorage !== 'undefined' && sessionStorage.getItem(HOME_RETURN_SEED_KEY) === '1') seedHomeReturn()
+  } catch {
+    // Nothing seeded.
+  }
 }
 
 function trayOf(row: SpoolRow): S['TrayPlace'] | null {
@@ -998,7 +1091,7 @@ function weighOn(at: number, body: { kind: 'weighed'; source?: S['SpoolEventAdd'
  * `archived` event keeps the closing (#7684): `reason` and the final weighing's filament
  * when one was booked, else the ledger's grams left with no scale side.
  */
-function setArchived(at: number, archived: boolean, reason: ArchiveReason | null = null, finalFilament: number | null = null) {
+function setArchived(at: number, archived: boolean, reason: ArchiveReason | null = null, finalFilament: number | null = null, cause: 'archive' | 'replaced' | null = null) {
   const row = state.spools[at]!
   if ((row.archived_at !== null) === archived) return
   if (archived) {
@@ -1008,13 +1101,24 @@ function setArchived(at: number, archived: boolean, reason: ArchiveReason | null
       addEvent(row.id, 'tag_unbound', { data: { tag_id: open.tag_id, reason: 'archived' } })
     }
   }
-  state.spools[at] = { ...state.spools[at]!, archived_at: archived ? now() : null, updated_at: now() }
+  // #7167: an archived spool is asked about its home no more (`spools.py` `_archive`).
+  state.spools[at] = { ...state.spools[at]!, archived_at: archived ? now() : null, ...(archived ? { home_asked_at: null } : {}), updated_at: now() }
   if (!archived) {
     addEvent(row.id, 'restored')
     return
   }
   const events = state.events.filter((event) => event.spool_id === row.id)
-  addEvent(row.id, 'archived', { data: closingOf(events, row, reason, finalFilament, finalFilament == null ? row.grams_left : null) })
+  const closing = closingOf(events, row, reason, finalFilament, finalFilament == null ? row.grams_left : null)
+  // #7167 (`spools.py` `archive_on`): the grams left after the final weighing are one `non_print_waste` event
+  // before the `archived` one, for a person's archive (`cause` `archive`) and a box's replace (`replaced`);
+  // never for `respooled`, the bulk archive, a plain PATCH or 0 g left. The closing is read before it.
+  const left = state.spools[at]!.grams_left ?? 0
+  const waste = cause != null && reason !== 'respooled' && left > 0 ? left : null
+  if (waste != null) {
+    addEvent(row.id, 'non_print_waste', { grams_before: waste, grams_after: 0, data: { waste_g: waste, cause } })
+    state.spools[at] = { ...state.spools[at]!, grams_left: 0 }
+  }
+  addEvent(row.id, 'archived', { data: { ...closing, non_print_waste_g: waste } })
 }
 
 const tenth = (value: number | null) => (value == null ? null : Math.round(value * 10) / 10)
@@ -1194,6 +1298,7 @@ export function createType(raw: unknown): S['SpoolType'] | Response {
     ...body,
     drying_hours: body.drying_hours ?? null,
     id: newId(),
+    number: Math.max(0, ...state.types.map((t) => t.number)) + 1,
     filament_id: null,
     archived_at: null,
     created_at: now(),
@@ -1381,6 +1486,12 @@ export interface MockPlate {
  * `not_applied` one a failed 0 g plate). An open `print_started` estimate and a `print`
  * ref are no plate. The one plate rule of the mock: the history and `consumed_g` use it.
  */
+/** `ledger.waste_grams`: a `non_print_waste` event's `data.waste_g`, raw; 0 when it is not a number. */
+export function nonPrintWaste(event: S['SpoolEvent']): number {
+  const grams = event.data?.waste_g
+  return typeof grams === 'number' ? grams : 0
+}
+
 function platesOf(events: readonly S['SpoolEvent'][]): MockPlate[] {
   const bbJobs = new Set(events.filter((event) => event.ref_kind === 'bb_usage' && event.kind === 'print_ended').map(jobOf))
   const lengthOf = (event: S['SpoolEvent']) => (typeof event.data?.length_m === 'number' ? event.data.length_m : null)
@@ -1538,6 +1649,7 @@ function spoolHistory(row: SpoolRow): S['SpoolHistory'] {
       prints: plates.length,
       grams_per_print: plates.length > 0 ? used / plates.length : null,
       wasted_g: wasted,
+      non_print_waste_g: events.filter((event) => event.kind === 'non_print_waste').reduce((sum, event) => sum + nonPrintWaste(event), 0),
       cost_used: perKg != null ? costOf(perKg, used) : null,
       value_left: perKg != null && left != null ? costOf(perKg, left) : null,
       burn_g_per_day: burn,
@@ -1586,6 +1698,8 @@ export function metricsInput() {
   return {
     spools,
     plates: new Map(spools.map((spool) => [spool.id, platesOf(state.events.filter((event) => event.spool_id === spool.id))])),
+    /** #7167: a spool's `non_print_waste` events, apart from its plates. */
+    waste: new Map(spools.map((spool) => [spool.id, state.events.filter((event) => event.spool_id === spool.id && event.kind === 'non_print_waste')])),
     suppliers,
     types: state.types.map((type) => ({ ...type, material: nameOf('materials', type.material_id) })),
     printers: new Map([[H2C.printer_id, H2C.printer_name]]),
@@ -2234,7 +2348,9 @@ export const handlers = [
     if (clear) return problem(422, clear)
     const next = patched(rows[at]!, body)
     const entity = `${catalogEntity(kind)}:${rows[at]!.id}`
-    const refused = catalogRefusal(kind, next, body, rows[at]!.id) ?? rowPropertiesRefusal(request, entity, properties, checksSave(sent))
+    // #7167 `catalog.py`: a kind's `dry_storage` set true makes its capacity-1 places boxes.
+    const flip = kind === 'location-kinds' && body.dry_storage === true ? kindHasMany(rows[at]!.id) : null
+    const refused = catalogRefusal(kind, next, body, rows[at]!.id) ?? flip ?? rowPropertiesRefusal(request, entity, properties, checksSave(sent))
     if (refused) return refused
     saveRowProperties(entity, properties)
     if (isAliased(kind) && typeof body.name === 'string') {
@@ -2443,9 +2559,11 @@ export const handlers = [
   http.get(`${BASE}/spools`, ({ request }) => {
     const search = new URL(request.url).searchParams
     const needsType = search.get('needs_type')
+    const awaitingHome = search.get('awaiting_home')
     return HttpResponse.json(
       listed(flag(request, 'include_archived'))
         .filter((row) => needsType === null || (needsType === 'true') === !row.type_id)
+        .filter((row) => awaitingHome === null || (awaitingHome === 'true') === awaitsHome(row))
         .map(view),
     )
   }),
@@ -2525,6 +2643,9 @@ export const handlers = [
         const row = { ...newSpool(fields), number: Math.max(0, ...state.spools.map((one) => one.number), ...made.map((one) => one.number)) + 1, location_id: place?.id ?? null }
         const refused = spoolRefusal(row)
         if (refused) return refused
+        // #7167 `move_on`: each spool's move into a dry box asks for its occupant, the one before it included.
+        const occupant = place ? (occupantOf(place.id) ?? (isDryBox(place.id, place) ? made[0]?.id : null)) : null
+        if (occupant) return boxFull(occupant)
         made.push(row)
       }
       for (const row of made) {
@@ -2547,7 +2668,8 @@ export const handlers = [
     const row = findSpool(String(params.id))
     if (!row) return problem(404, `no spool ${String(params.id)}`)
     const spool = Object.fromEntries(FIELDS.spoolCreate.filter((field) => field !== 'grams_left' && field !== 'weight_locked' && field !== 'added_full' && row[field as keyof SpoolRow] != null).map((field) => [field, row[field as keyof SpoolRow]]))
-    const place = state.locations.find((one) => one.id === row.location_id && !one.archived_at && one.tray_id == null)
+    // `spools.py` `copy`: not a tray, an archived place or a dry box (the source holds it, #7167).
+    const place = state.locations.find((one) => one.id === row.location_id && !one.archived_at && one.tray_id == null && !isDryBox(one.id, one))
     const draft: S['SpoolDraft'] = {
       spool: { ...spool, weight_locked: false, grams_left: null } as S['SpoolCreate-Output'],
       location_id: place?.id ?? null,
@@ -2633,6 +2755,19 @@ export const handlers = [
       const ids = raw.spool_ids ?? []
       if (ids.length < 1 || ids.length > 500) return problem(422, 'spool_ids: List should have 1 to 500 items')
       const found = state.spools.filter((row) => ids.includes(row.id)).sort((a, b) => a.id.localeCompare(b.id))
+      // #7167: a restore into a dry box another spool holds is 409 `box_full`, and none is changed.
+      // The backend restores in id order, so a spool restored earlier in the same call is an occupant too.
+      if (!archived) {
+        const claimed = new Map<string, string>()
+        for (const row of found) {
+          const taken = boxTaken(row)
+          if (taken) return taken
+          if (row.archived_at === null || !row.location_id || !isDryBox(row.location_id)) continue
+          const earlier = claimed.get(row.location_id)
+          if (earlier) return boxFull(earlier)
+          claimed.set(row.location_id, row.id)
+        }
+      }
       const changed: string[] = []
       const unchanged: string[] = []
       for (const row of found) {
@@ -2658,7 +2793,7 @@ export const handlers = [
     const { archived, ...fields } = normalised(body)
     const current = state.spools[at]!
     const next = { ...current, ...(fields as Partial<SpoolRow>) }
-    const refused = spoolRefusal(next) ?? rowPropertiesRefusal(request, `spool:${current.id}`, properties, checksSave(sent))
+    const refused = spoolRefusal(next) ?? (archived === false ? boxTaken(current) : null) ?? rowPropertiesRefusal(request, `spool:${current.id}`, properties, checksSave(sent))
     if (refused) return refused
     saveRowProperties(`spool:${current.id}`, properties)
     const changes = Object.fromEntries(
@@ -2701,6 +2836,8 @@ export const handlers = [
       return problem(422, 'body: Value error, final_reading_g is below final_grams')
     }
     const row = state.spools[at]!
+    const taken = archived ? null : boxTaken(row)
+    if (taken) return taken
     let finalFilament: number | null = null
     if (archived && row.archived_at === null && (body.final_reading_g != null || body.final_grams != null)) {
       // The final weighing first, as `add_event` books one; a refusal archives nothing.
@@ -2708,7 +2845,7 @@ export const handlers = [
       if (weighed instanceof Response) return weighed
       finalFilament = weighed.grams_after ?? null
     }
-    setArchived(at, archived, body.reason ?? null, finalFilament)
+    setArchived(at, archived, body.reason ?? null, finalFilament, 'archive')
     return HttpResponse.json(view(state.spools[at]!))
   }),
   // #7684 — `GET /filament/spools/{id}/closing`: the archive dialog's preview, reads only.
@@ -2725,7 +2862,10 @@ export const handlers = [
     const finalFilament = grams != null ? (readingG != null && readingG < grams ? null : grams) : readingG != null && insert && readingG >= insert.empty_weight_g ? readingG - insert.empty_weight_g : null
     const weighed = readingG != null || grams != null
     const events = state.events.filter((event) => event.spool_id === row.id)
-    const closing = closingOf(events, row, (reason as ArchiveReason | null) ?? null, finalFilament, weighed ? null : row.grams_left)
+    const base = closingOf(events, row, (reason as ArchiveReason | null) ?? null, finalFilament, weighed ? null : row.grams_left)
+    // `ledger.closing(waste=True)` (#7167): the raw final filament above 0, unless respooled.
+    const final = finalFilament ?? (weighed ? null : row.grams_left)
+    const closing = { ...base, non_print_waste_g: final != null && final > 0 && reason !== 'respooled' ? final : null }
     const notices = [...readingNotice(readingG, grams, insert?.empty_weight_g ?? null), ...closingNotices((reason as ArchiveReason | null) ?? null, closing.final_filament_g ?? null)]
     return HttpResponse.json({ closing, final_filament_g: closing.final_filament_g ?? null, empty_g: insert?.empty_weight_g ?? null, notices } satisfies S['ClosingPreview'])
   }),
@@ -2866,13 +3006,41 @@ export const handlers = [
     const sent = await request.json()
     const extra = extraKeys(sent, FIELDS.move)
     if (extra) return extra
-    const { location_id } = sent as S['SpoolMove']
+    const { location_id, if_occupied, answers, expected_occupant_id, expected_location_id } = sent as S['SpoolMove']
+    // `homes.py` `ExpectedOccupantRequiredError`: a replace names the box's spool it expects.
+    if (if_occupied === 'replace' && expected_occupant_id == null) {
+      return problem(422, "a replace must name the box's spool it expects in expected_occupant_id", { code: 'expected_occupant_required' })
+    }
+    // #7168 `homes.py` `move_into`: a key that is present (null too) is checked first under the spool's row lock: before the target, `answers`, the box and the move.
+    if ('expected_location_id' in (sent as object)) {
+      const mover = state.spools[at]!
+      if ((mover.location_id ?? null) !== (expected_location_id ?? null) || mover.archived_at !== null) {
+        return problem(409, `spool ${mover.id} is not where it was read`, { code: 'move_stale', location_id: mover.location_id ?? null, archived: mover.archived_at !== null })
+      }
+    }
     if (location_id && !state.locations.some((place) => place.id === location_id && !place.archived_at)) {
       return problem(422, REFUSED.moveTarget)
     }
+    // #7167 `homes.py` `move_into`: `answers` names the unloaded spool whose prompt this answers.
+    const answered = answers ? state.spools.findIndex((one) => one.id === answers) : -1
+    if (answers && answered < 0) return problem(404, `no spool ${answers}`)
+    if (answers && (location_id == null || state.spools[answered]!.home_location_id !== location_id)) {
+      return problem(422, `the home of spool ${answers} is not this place`, { code: 'not_its_home' })
+    }
+    const held = location_id && isDryBox(location_id) ? state.spools.findIndex((one) => one.location_id === location_id && one.id !== params.id && one.archived_at === null) : -1
+    // A replace of another spool than the one the caller expects is refused too.
+    if (held >= 0 && (if_occupied !== 'replace' || state.spools[held]!.id !== expected_occupant_id)) {
+      // `dry_box.py` `BoxFullError`: a dry box holds one spool.
+      return boxFull(state.spools[held]!.id)
+    }
+    // A replace archives the box's other spool (reason `other`, waste `cause` `replaced`) first.
+    if (held >= 0) setArchived(held, true, 'other', null, 'replaced')
+    if (answered >= 0 && answers !== params.id) state.spools[answered] = { ...state.spools[answered]!, home_asked_at: null }
     const row = state.spools[at]!
     if (row.location_id !== location_id) {
-      state.spools[at] = { ...row, location_id, updated_at: now() }
+      // `dry_box.py` `keep_home_on`: a dry box becomes the spool's home, and it is asked about its home no more.
+      const home = location_id && isDryBox(location_id) ? location_id : (row.home_location_id ?? null)
+      state.spools[at] = { ...row, location_id, home_location_id: home, home_asked_at: null, updated_at: now() }
       addEvent(row.id, 'moved', { data: { from: row.location_id, to: location_id } })
     }
     return HttpResponse.json(view(state.spools[at]!))
@@ -2987,8 +3155,9 @@ export const handlers = [
     const body = (await request.json()) as S['LabelsRequest']
     const spools = body.spool_ids ?? []
     const places = body.location_ids ?? []
-    const count = spools.length + places.length
-    if (count < 1 || count > 100) return problem(422, 'name 1 to 100 spools and places')
+    const codes = (body.type_ids?.length ?? 0) + (body.item_ids?.length ?? 0) + (body.kind_ids?.length ?? 0)
+    const count = spools.length + places.length + codes
+    if (count < 1 || count > 100) return problem(422, 'name 1 to 100 spools, places, types, items and kinds')
     const noSpool = spools.find((id) => !findSpool(id))
     if (noSpool) return problem(404, `no spool ${noSpool}`)
     const noPlace = places.find((id) => !state.locations.some((one) => one.id === id))
@@ -2998,8 +3167,8 @@ export const handlers = [
     const chosen = body.template ?? settings.filament_label_template
     if (chosen?.template === 'saved' && !savedSheets.some((one) => one.id === chosen.sheet_id))
       return problem(409, 'The saved sheet was deleted. Choose another template.', { code: 'label_sheet_gone' })
-    if (places.length > 0 && !settings.filament_label_base_url && !settings.public_url?.startsWith('https://'))
-      return problem(409, 'A place label needs an address: set the label address in Settings, or the public URL.', { code: 'no_label_base' })
+    if (places.length + codes > 0 && !settings.filament_label_base_url && !settings.public_url?.startsWith('https://'))
+      return problem(409, 'A code label needs an address: set the label address in Settings, or the public URL.', { code: 'no_label_base' })
     // #7216 — a PNG answer is one byte of the type the real route gives: one page is one PNG, more pages are a ZIP
     // (R-7216-6). The real route reads the stored settings when the request names no format or template.
     if ((body.format ?? settings.filament_label_output?.format) === 'png') {
@@ -3007,7 +3176,9 @@ export const handlers = [
       const [type, name] = labelPages(choice, body.layout ?? 'roll', count) === 1 ? ['image/png', 'labels.png'] : ['application/zip', 'labels.zip']
       return new HttpResponse(new Blob(['x'], { type }), { headers: { 'Content-Type': type, 'Content-Disposition': `attachment; filename="${name}"` } })
     }
-    return new HttpResponse(new Blob([`%PDF-1.4\n% ${count} labels\n%%EOF\n`], { type: 'application/pdf' }), {
+    // The text itself, not a `Blob`: under jsdom a `Blob` body is sent as "[object Blob]", and #7170's
+    // label print checks that the bytes it sends start with `%PDF-`.
+    return new HttpResponse(`%PDF-1.4\n% ${count} labels\n%%EOF\n`, {
       headers: { 'Content-Type': 'application/pdf', 'Content-Disposition': 'attachment; filename="labels.pdf"' },
     })
   }),
@@ -3053,6 +3224,8 @@ export const handlers = [
     const next = patched(state.locations[at]!, body)
     if (!next.archived_at && placeTaken(next, self)) return problem(409, REFUSED.locationExists)
     if (badRef(next, LOCATION_REFS)) return problem(422, REFUSED.catalogRef)
+    const many = boxHasMany(self, next)
+    if (many) return many
     state.locations[at] = next
     return HttpResponse.json(next)
   }),
@@ -3205,4 +3378,7 @@ function spoolSummary(row: SpoolRow): S['FilamentSpoolSummary'] {
     },
   }
 }
+
+// Last: the seed helper reads constants defined above.
+seedHomeReturnFromStorage()
 

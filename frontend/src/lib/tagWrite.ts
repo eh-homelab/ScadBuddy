@@ -41,6 +41,9 @@ const SENT_MISMATCH = 'The spool changed while the tag was written, so the tag w
 
 const EMPTY_RECORD: WireRecord = { record_type: 'empty', data_hex: '' }
 
+/** Thrown by `prepare` or `confirm` to stop the run with this sentence as its outcome's message. */
+export class WriteRefusedError extends Error {}
+
 const codeOf = (cause: unknown) => (cause instanceof ApiError && cause.status === 409 ? cause.problem.code : undefined)
 
 function detailOf(cause: unknown): string {
@@ -54,8 +57,10 @@ const isAbort = (cause: unknown, signal?: AbortSignal) => signal?.aborted === tr
 
 export interface WriteOptions {
   session: NfcSession
-  reason: 'spool_write' | 'agent_write' | 'restore'
+  reason: 'spool_write' | 'agent_write' | 'restore' | 'place_write'
   jobId?: string
+  /** Runs after the UID check and before the backup; throws `WriteRefusedError` to stop with nothing backed up. */
+  precheck?: (now: Reading) => Promise<void>
   /** The records to write, for the tag as just read and its backup. */
   prepare: (now: Reading, backupId: string) => Promise<WireRecord[]>
   /** Checks the write with the server once the read-back equals what was sent. */
@@ -66,7 +71,7 @@ export interface WriteOptions {
   signal?: AbortSignal
 }
 
-export async function writeWithBackup({ session, reason, jobId, prepare, confirm, onStep, onClaimed, signal }: WriteOptions): Promise<WriteOutcome> {
+export async function writeWithBackup({ session, reason, jobId, precheck, prepare, confirm, onStep, onClaimed, signal }: WriteOptions): Promise<WriteOutcome> {
   const release = session.claim()
   if (!release) return { status: 'failed', message: 'Another write is running. Nothing was written.', backupId: null }
   onClaimed?.()
@@ -82,6 +87,17 @@ export async function writeWithBackup({ session, reason, jobId, prepare, confirm
     if (signal?.aborted) return stopped('Stopped. Nothing was written.')
     if (!now.uid) return { status: 'failed', message: NO_UID, backupId: null }
 
+    if (precheck) {
+      try {
+        await precheck(now)
+      } catch (cause) {
+        if (isAbort(cause, signal)) return stopped('Stopped. Nothing was written.')
+        if (cause instanceof WriteRefusedError) return { status: 'failed', message: cause.message, backupId: null }
+        return { status: 'failed', message: `The tag was not checked, so nothing was written: ${detailOf(cause)}`, backupId: null }
+      }
+      if (signal?.aborted) return stopped('Stopped. Nothing was written.')
+    }
+
     onStep('backing_up')
     try {
       backupId = (await createTagBackup({ uid: now.uid, records: now.records, reason, ...(jobId ? { job_id: jobId } : {}) }, signal)).backup_id
@@ -96,6 +112,7 @@ export async function writeWithBackup({ session, reason, jobId, prepare, confirm
       sent = await prepare(now, backupId)
     } catch (cause) {
       if (isAbort(cause, signal)) return stopped('Stopped. Nothing was written.')
+      if (cause instanceof WriteRefusedError) return { status: 'failed', message: cause.message, backupId }
       if (codeOf(cause) === 'backup_mismatch') return { status: 'failed', message: BACKUP_MISMATCH, backupId }
       return { status: 'failed', message: `ScadBuddy did not give the records to write, so nothing was written: ${detailOf(cause)}`, backupId }
     }
@@ -131,6 +148,7 @@ export async function writeWithBackup({ session, reason, jobId, prepare, confirm
     try {
       return { status: 'checked', result: await confirm(now, backupId, sent, back) }
     } catch (cause) {
+      if (cause instanceof WriteRefusedError) return { status: 'failed', message: cause.message, backupId }
       const code = codeOf(cause)
       if (code === 'read_back_mismatch') return { status: 'mismatch', backupId, readBack: back }
       if (code === 'sent_mismatch') return { status: 'failed', message: SENT_MISMATCH, backupId }
@@ -172,7 +190,8 @@ export function restoreBackup(options: {
     reason: 'restore',
     prepare: (now, fresh) => restoreTagBackup(tagId, backupId, { uid: now.uid, records: now.records, backup_id: fresh }).then((answer) => answer.records),
     confirm: async (_now, _backup, _sent, back) => {
-      await postTagRead({ uid: back.uid, records: back.records })
+      // The read back is no tap: no scan history row (#8148).
+      await postTagRead({ uid: back.uid, records: back.records, tap: false })
       return null
     },
   })
