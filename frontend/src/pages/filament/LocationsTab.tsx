@@ -173,9 +173,10 @@ export function LocationsTab() {
       if (was) {
         // Only what changed: a patch that names a field the place keeps still counts as an edit.
         const changed: LocationPatch = {}
-        for (const key of Object.keys(values) as (keyof typeof values)[]) {
+        for (const key of Object.keys(values).filter((name) => name !== 'station') as Exclude<keyof typeof values, 'station'>[]) {
           if (values[key] !== (was[key] ?? null)) Object.assign(changed, { [key]: values[key] })
         }
+        if (values.station !== (was.station ?? false)) changed.station = values.station
         if (Object.keys(changed).length > 0) await upsertLocation(changed, was.id)
       } else {
         const body: LocationCreate = { name: values.name, kind_id: values.kind_id, sort_order: 0 }

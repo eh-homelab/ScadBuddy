@@ -97,6 +97,48 @@ describe('the station page', () => {
     expect(await screen.findByRole('alert')).toHaveTextContent('No code NOPE-1')
   })
 
+  it('matches a code the schema wrote in lower case', async () => {
+    addTask({ id: 'lc', title: 'Lower case', place: L.SHELF_A, schema: scanSchema({ codes: ['l-2'] }) })
+    const { user } = station()
+    await user.type(await screen.findByRole('textbox', { name: 'Scan a code' }), 'L-2{Enter}')
+    const field = within(await screen.findByRole('region', { name: 'Lower case' })).getByRole('textbox', { name: /Spool/ })
+    await waitFor(() => expect(field).toHaveValue('L-2'))
+  })
+
+  it('takes a field that names both a kind and a code by either', async () => {
+    addTask({ id: 'both', title: 'Either', place: L.SHELF_A, schema: scanSchema({ kinds: ['spool'], codes: ['L-2'] }) })
+    const { user } = station()
+    const scan = await screen.findByRole('textbox', { name: 'Scan a code' })
+    await user.type(scan, 'L-2{Enter}')
+    const field = within(await screen.findByRole('region', { name: 'Either' })).getByRole('textbox', { name: /Spool/ })
+    await waitFor(() => expect(field).toHaveValue('L-2'))
+    await user.type(scan, 'S-1{Enter}')
+    await waitFor(() => expect(field).toHaveValue('S-1'))
+  })
+
+  it('never offers a scan to an entity field', async () => {
+    addTask({
+      id: 'ent',
+      title: 'Pick a spool',
+      place: L.SHELF_A,
+      schema: { type: 'object', properties: { spool: { type: 'string', title: 'Spool', 'x-sb-widget': 'entity', kind: 'spool' } } },
+    })
+    const { user } = station()
+    await user.type(await screen.findByRole('textbox', { name: 'Scan a code' }), 'S-1{Enter}')
+    expect(await screen.findByRole('alert')).toHaveTextContent('No task here waits for S-1')
+  })
+
+  it('lets the person pick when several tasks wait for a code', async () => {
+    addTask({ id: 'a', title: 'Job A', place: L.SHELF_A, schema: scanSchema({ kinds: ['spool'] }) })
+    addTask({ id: 'b', title: 'Job B', place: L.SHELF_A, schema: scanSchema({ kinds: ['spool'] }) })
+    const { user } = station()
+    await user.type(await screen.findByRole('textbox', { name: 'Scan a code' }), 'S-1{Enter}')
+    await user.click(await screen.findByRole('button', { name: 'Job B' }))
+    const field = within(screen.getByRole('region', { name: 'Job B' })).getByRole('textbox', { name: /Spool/ })
+    await waitFor(() => expect(field).toHaveValue('S-1'))
+    expect(within(screen.getByRole('region', { name: 'Job A' })).getByRole('textbox', { name: /Spool/ })).toHaveValue('')
+  })
+
   it('says what to do when the place has no tasks', async () => {
     station()
     expect(await screen.findByText(/No open tasks/)).toBeInTheDocument()

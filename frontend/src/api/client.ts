@@ -1230,11 +1230,11 @@ export const api = {
     }),
 
   /** #8062 — the open tasks at a place, for a code, or for the signed-in person; oldest first. */
-  listTasks: (filter: { place?: string; code?: string; assignee?: 'me' }) => {
+  listTasks: (filter: { place?: string; code?: string; assignee?: 'me'; limit?: number }) => {
     const params = new URLSearchParams()
-    for (const [name, value] of Object.entries(filter)) if (value) params.set(name, value)
+    for (const [name, value] of Object.entries(filter)) if (value) params.set(name, String(value))
     const text = params.toString()
-    return request<TaskQuestion[]>(`/tasks${text ? `?${text}` : ''}`)
+    return request<{ tasks: TaskQuestion[] }>(`/tasks${text ? `?${text}` : ''}`).then((body) => body.tasks)
   },
 
   /** #7364 — a flow prompt's task, its answer too. */

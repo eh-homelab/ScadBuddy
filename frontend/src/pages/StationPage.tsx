@@ -3,6 +3,7 @@ import { Link, useParams } from 'react-router'
 import { api, ApiError } from '../api/client'
 import { getLocation, listLocations, resolveCode } from '../api/filament'
 import type { TaskQuestion } from '../api/types'
+import { Button } from '@/components/ui/button'
 import { Card, CardContent } from '@/components/ui/card'
 import { Input } from '@/components/ui/input'
 import { Skeleton } from '@/components/ui/skeleton'
@@ -17,15 +18,13 @@ const placeTopic = (place: string) => `tasks:${place}`
 
 type Offer = ScanOffer & { taskId: string }
 
-/** What each of a task's scan fields accepts, by field name. */
+/** A task's scan fields (the server's too: an entity field is never offered a scan) and what each expects. */
 function scanFields(task: TaskQuestion) {
-  return inputFields(task.schema).flatMap((field) => {
-    const kinds = field.kind === 'location' || field.kind === 'spool' ? [field.kind] : undefined
-    if (field.widget !== 'scan' && !(field.widget === 'entity' && kinds)) return []
-    const expects = kinds ? { kinds } : field.expects
-    return expects && ((expects.kinds?.length ?? 0) > 0 || (expects.codes?.length ?? 0) > 0) ? [{ name: field.name, expects }] : []
-  })
+  return inputFields(task.schema).filter((field) => field.widget === 'scan')
 }
+
+/** The most the route returns (`MAX_TASKS`): a list this long may be cut. */
+const LIST_MAX = 200
 
 /**
  * #8062 (spec §6.3) — `/station/<place>`: the open tasks at one place, oldest first, for a
@@ -35,7 +34,7 @@ function scanFields(task: TaskQuestion) {
  */
 export function StationPage() {
   const { place } = useParams()
-  return place ? <Station place={place} /> : <Stations />
+  return place ? <Station key={place} place={place} /> : <Stations />
 }
 
 function Stations() {
@@ -72,11 +71,13 @@ function Stations() {
 
 function Station({ place }: { place: string }) {
   const where = useAsync(() => getLocation(place), [place])
-  const tasks = useAsync(() => api.listTasks({ place }), [place], [placeTopic(place)])
+  const tasks = useAsync(() => api.listTasks({ place, limit: LIST_MAX }), [place], [placeTopic(place)])
   const scan = useRef<HTMLInputElement>(null)
   const [code, setCode] = useState('')
   const [said, setSaid] = useState('')
   const [offer, setOffer] = useState<Offer | null>(null)
+  /** Tasks that wait for one scan: the person picks. */
+  const [choices, setChoices] = useState<{ code: string; fits: { task: TaskQuestion; field: string }[] } | null>(null)
   const count = useRef(0)
   const open = tasks.data ?? []
 
@@ -91,6 +92,7 @@ function Station({ place }: { place: string }) {
     const typed = code.trim()
     if (!typed) return
     setSaid('')
+    setChoices(null)
     let found
     try {
       found = await resolveCode(typed)
@@ -99,21 +101,35 @@ function Station({ place }: { place: string }) {
       scan.current?.focus()
       return
     }
-    const fits = open.flatMap((task) =>
-      scanFields(task).flatMap((field) => (misfit(found, field.expects) === null ? [{ task, field: field.name }] : [])),
-    )
-    const tasksFit = new Set(fits.map(({ task }) => task.id))
-    if (tasksFit.size === 0) {
-      setSaid(`No open task here expects ${found.code}.`)
+    // The server decides which tasks wait for the code, by the rule it answers with.
+    let waiting: TaskQuestion[]
+    try {
+      waiting = await api.listTasks({ place, code: found.code, limit: LIST_MAX })
+    } catch {
+      setSaid('The tasks could not be checked. Try again.')
       scan.current?.focus()
-    } else if (tasksFit.size > 1) {
-      setSaid(`${tasksFit.size} tasks expect ${found.code}. Scan it in the task you mean.`)
-      scan.current?.focus()
-    } else {
-      const [first] = fits
-      setOffer({ taskId: first!.task.id, field: first!.field, code: found.code, n: ++count.current })
-      setCode('')
+      return
     }
+    const fits = waiting.flatMap((task) => {
+      const fields = scanFields(task)
+      const field = fields.find((one) => misfit(found, one.expects) === null) ?? fields[0]
+      return field ? [{ task, field: field.name }] : []
+    })
+    if (fits.length === 0) {
+      setSaid(`No task here waits for ${found.code}.`)
+      scan.current?.focus()
+    } else if (fits.length > 1) {
+      setChoices({ code: found.code, fits })
+      setCode('')
+    } else {
+      give(fits[0]!.task.id, fits[0]!.field, found.code)
+    }
+  }
+
+  function give(taskId: string, field: string, scanned: string) {
+    setChoices(null)
+    setOffer({ taskId, field, code: scanned, n: ++count.current })
+    setCode('')
   }
 
   return (
@@ -143,6 +159,16 @@ function Station({ place }: { place: string }) {
         <p role="alert" className="min-h-5 text-sm text-destructive">
           {said}
         </p>
+        {choices && (
+          <div role="group" aria-label={`Tasks that wait for ${choices.code}`} className="flex flex-col gap-2">
+            <p className="text-sm">{`${choices.fits.length} tasks wait for ${choices.code}. Choose one.`}</p>
+            {choices.fits.map(({ task, field }) => (
+              <Button key={task.id} type="button" variant="outline" size="lg" className="h-14 justify-start text-base" onClick={() => give(task.id, field, choices.code)}>
+                {task.title}
+              </Button>
+            ))}
+          </div>
+        )}
       </form>
       {tasks.loading && <Skeleton role="status" aria-label="Loading tasks" className="h-24 w-full" />}
       {tasks.error && (
@@ -153,6 +179,7 @@ function Station({ place }: { place: string }) {
       {tasks.data && open.length === 0 && (
         <p className="text-base text-muted-foreground">No open tasks here. This page shows a new one as soon as it arrives.</p>
       )}
+      {open.length >= LIST_MAX && <p className="text-sm text-muted-foreground">More tasks wait. Answer these first.</p>}
       {open.map((task) => (
         <Card key={task.id} size="sm" role="region" aria-label={task.title}>
           <CardContent className="flex flex-col gap-2 text-base">

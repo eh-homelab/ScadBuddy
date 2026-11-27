@@ -1,4 +1,5 @@
 import { HttpResponse, http } from 'msw'
+import { resolveCodeText } from './filament'
 import type { AnswerProblem, Task, TaskQuestion } from '../../api/types'
 
 /**
@@ -174,11 +175,25 @@ export const handlers = [
     const query = new URL(request.url).searchParams
     const state = query.get('state') ?? 'open'
     const place = query.get('place')
+    const code = query.get('code')
+    const resolved = code ? resolveCodeText(code) : null
+    if (code && !resolved) return problem(422, 'That is not a code.')
+    // The server's rule: the code is one of a scan field's `codes`, or its kind one of `kinds`.
+    const waits = (task: Task) =>
+      Object.values((task.schema['properties'] ?? {}) as Record<string, Record<string, unknown>>).some((prop) => {
+        const expects = prop['expects'] as { kinds?: string[]; codes?: string[] } | undefined
+        return (
+          prop['x-sb-widget'] === 'scan' &&
+          !!expects &&
+          !!resolved &&
+          (!!expects.kinds?.includes(resolved.kind) || !!expects.codes?.some((one) => one.toUpperCase() === resolved.code))
+        )
+      })
     const found = tasks
-      .filter((task) => task.state === state && (!place || task.place === place))
+      .filter((task) => task.state === state && (!place || task.place === place) && (!code || (task.state === 'open' && waits(task))))
       .sort((a, b) => a.created_at.localeCompare(b.created_at))
       .map(({ answer: _answer, answered_by: _by, ...question }) => question)
-    return HttpResponse.json(found)
+    return HttpResponse.json({ tasks: found })
   }),
   http.get('/api/v1/tasks/:id', ({ params }) => {
     const found = tasks.find((task) => task.id === params['id'])
