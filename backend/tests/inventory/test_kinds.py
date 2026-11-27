@@ -200,3 +200,15 @@ def test_an_archived_parent_is_refused(kinds: KindStore) -> None:
     _fastener(kinds)
     with pytest.raises(KindArchived):
         kinds.update("fastener", KindPatch(parent_id="widget"), BY)
+
+
+@pytest.mark.parametrize("kind_id", ["k1", "k12", "k007"])
+def test_an_id_of_k_and_digits_is_refused(kind_id: str) -> None:
+    """`k<number>` is the id of a kind that ScadBuddy makes (#6949, #6955): a kind with
+    that id must have that number, so a person may not choose it."""
+    from pydantic import ValidationError
+
+    with pytest.raises(ValidationError):
+        KindInput(id=kind_id, name="X", tracking="lot")
+    KindInput(id="k1a", name="X", tracking="lot")
+    KindInput(id="kit", name="X", tracking="lot")

@@ -61,7 +61,7 @@ describe('App routes (#2356)', () => {
     // #7067 — the Inventory area.
     ['/inventory', 'Inventory'],
     ['/inventory/kinds', 'Item kinds'],
-    // #7067 — the old parts page opens the Inventory on the Part kind.
+    // #7067 — the old parts page opens the Inventory on the parts' kind (`PARTS_KIND`).
     ['/orders/parts', 'Inventory'],
     // The hand-held Scan mode (#7273): top-level, with a nav entry.
     ['/scan', 'Scan'],
