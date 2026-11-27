@@ -289,3 +289,17 @@ Load `frontend-design:frontend-design` first.
 - Spec coverage: G1 Task 7; G2 Tasks 5 and 7; G3 Tasks 4 and 7; G4 Tasks 1, 3 and 7 (D1-D5); G5 Tasks 2, 6 and 7; G6 Task 7; the tag-read rule Task 5 (D9); D10 Task 5; D11 Task 7; D12 and the Go port need no task.
 - Types: `expectedLocationId` (TS) maps to `expected_location_id` (wire, Python); `SpoolMovedError.location_id`/`.archived` map to the 409's `location_id`/`archived` and to `staleOf`'s `locationId`/`archived`. `Next.move` carries the same option names as `moveSpool`.
 - Review Focus: item 1 Tasks 1 and 3, item 2 Task 1, item 3 Tasks 5 and 6, item 4 Task 4, item 5 Task 7.
+
+## Decisions made while building
+
+- B1 (Task 1): the race tests pin the exact `move_stale` body. They wait for a lock with `pg_blocking_pids`, not with `wait_event_type`.
+- B2 (Task 4): after `move_stale` the page reads the spool again (`reread`) before it goes on. `afterMove` alone would put a wrong reading in the chain. The stack throws on a spool it does not know, on a spool it holds twice, and on a chain with no current spool.
+- B3 (Task 5): both identify steps share `CodeWay`, `camera.ts` and one Web NFC support check. The newest tap wins. A 4-byte UID gets neutral copy.
+- B4 (Task 6): `writeWithBackup` checks the tag before it makes a backup. It refuses a tag that a spool holds and an archived place, so a refused write leaves no backup row.
+- B5 (Task 7): no "Archive" in a swap cycle. Archiving a spool that waits would leave it in the stack. The cycle offers only "Take S-n out first".
+- B6 (Task 7): `move_conflict` and a move that got no answer offer "Try again", which sends the same body with the same archives. Other refusals offer "Choose another place".
+- B7 (Task 7): when a step changes, focus moves to the step's heading, and the heading is described by the step's text. Focus does not move on the first view or during "Moving…".
+- B8 (final review): "Choose another place" after a failed take-out opens the place step for the spool that was taken out. In that case the full-box panel does not offer "Move S-n first", because it would move the wrong spool.
+- B9 (final review): a `move_stale` for a spool that is already in its target, and not archived, counts as done. The page says "S-n is already in <place>." and goes on. This covers a lost answer and a spool another wizard moved there. If this is wrong, the log says "moved" for a move that another wizard made.
+- B10 (final review): the two "Write tag" buttons have the accessible names "Write tag for S-n" and "Write tag for <place>".
+- B11 (final review): the mocks check `expected_location_id` before the target, in the same order as the server.
