@@ -33,6 +33,7 @@ ServiceCaller = Literal[
     "camera",
     "camera-relay",
     "fleet",
+    "fleet-rotator",
 ]
 
 _TOKEN_RE = re.compile(r"sbsvc_([0-9a-f]{16})\.([A-Za-z0-9_-]{43})")

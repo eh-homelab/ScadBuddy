@@ -153,6 +153,14 @@ status and the peer (`s3` for the store), never a URL, so a presigned query is n
 request to the store carries no trace context (`internal/httpx` `Outside`), as Python's S3 spans
 send none.
 
+The `fleet` area also serves caller `fleet-rotator` (scope `crud.fleet-rotator`, #8026):
+`POST /api/v1/internal/crud/fleet-rotator/virtual-messages` `{sender, channel | agent, text}`
+posts as a virtual sender (a row of `fleet_virtual_senders`, such as `rotator`): to a
+channel's members, or as a DM to one agent by its handle. An unknown sender is a 404 (reason
+`unknown-sender`). A `POST /messages` DM to a virtual sender's name is a 422 (reason
+`virtual-sender`) whose detail is the sender's reject message. An inbox entry from a virtual
+sender has its name as `from`.
+
 Each of `browser-origins`, `bridge-tabs`, `pairings`, `mcp-tokens`, `plugin-packages` and
 `plugin-feeds` also has a `:read` form, its GETs only. Area `package-mirrors` (the blob store)
 is Python's.

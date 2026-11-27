@@ -99,7 +99,8 @@ ExchangedProof = Literal["k8s", "bootstrap", "inprocess"]
 #: profile-fetch worker (#6625) reaches only `/internal/crud/profile-fetch/`. The camera
 #: recorders and live edge reach only `/internal/crud/camera/`; the camera relay only
 #: `/internal/crud/camera-relay/`. The fleet MCP server (agent fleet chat) reaches only
-#: `/internal/crud/fleet/`.
+#: `/internal/crud/fleet/`. The machine service (the fleet's session registry and login
+#: rotator) reaches only `/internal/crud/fleet-rotator/`.
 SCOPES: Mapping[ServiceCaller, frozenset[str]] = {
     "agent": frozenset({"api", "internal.workspace", "crud.agent"}),
     "print": frozenset({"internal.outputs", "internal.library", "crud.print"}),
@@ -111,6 +112,7 @@ SCOPES: Mapping[ServiceCaller, frozenset[str]] = {
     "camera": frozenset({"crud.camera"}),
     "camera-relay": frozenset({"crud.camera-relay"}),
     "fleet": frozenset({"crud.fleet"}),
+    "fleet-rotator": frozenset({"crud.fleet-rotator"}),
 }
 PREFIX = "sbsvc_"
 LIFETIME = timedelta(days=30)
