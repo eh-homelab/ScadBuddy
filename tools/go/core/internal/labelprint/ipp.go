@@ -6,6 +6,7 @@ import (
 	"encoding/binary"
 	"errors"
 	"io"
+	"math"
 )
 
 // Tag is an IPP delimiter or value tag.
@@ -36,12 +37,31 @@ const (
 // ErrNotIPP means the bytes are not a whole IPP message within the limit.
 var ErrNotIPP = errors.New("not an IPP message")
 
-// Attr is one attribute with all its values.
+// Attr is one attribute with all its values. Each additional value has its
+// own value-tag (RFC 8010 section 3.1.5): ValueTags holds the tag of each
+// value when they differ, and is nil when every value has Tag.
 type Attr struct {
-	Group  Tag
-	Name   string
-	Tag    Tag
-	Values [][]byte
+	Group     Tag
+	Name      string
+	Tag       Tag
+	Values    [][]byte
+	ValueTags []Tag
+
+	member bool // a record inside a collection (Decode sets it)
+}
+
+// valueTag is the tag of value i.
+func (a Attr) valueTag(i int) Tag {
+	if i < len(a.ValueTags) {
+		return a.ValueTags[i]
+	}
+	return a.Tag
+}
+
+// collection is true for a collection record: a begCollection, a member
+// name, an endCollection or a member value.
+func (a Attr) collection() bool {
+	return a.member || isRecordTag(a.Tag)
 }
 
 // Message is an IPP request or reply. Code is the operation or the status.
@@ -99,7 +119,7 @@ func (m Message) Encode(w io.Writer) error {
 			if len(name) > 0xFFFF || len(v) > 0xFFFF {
 				return errors.New("ipp: attribute too long")
 			}
-			b.WriteByte(byte(a.Tag))
+			b.WriteByte(byte(a.valueTag(i)))
 			_ = binary.Write(&b, binary.BigEndian, uint16(len(name)))
 			b.WriteString(name)
 			_ = binary.Write(&b, binary.BigEndian, uint16(len(v)))
@@ -115,7 +135,11 @@ func (m Message) Encode(w io.Writer) error {
 // Decode reads a message of at most limit bytes. A collection's member
 // records stay plain records of the group; they are never nested.
 func Decode(r io.Reader, limit int64) (Message, error) {
-	raw, err := io.ReadAll(io.LimitReader(r, limit+1))
+	n := limit
+	if n < math.MaxInt64 {
+		n++ // one byte more, to see a stream past limit
+	}
+	raw, err := io.ReadAll(io.LimitReader(r, n))
 	if err != nil {
 		return Message{}, err
 	}
@@ -137,6 +161,9 @@ func Decode(r io.Reader, limit int64) (Message, error) {
 		tag := Tag(p[0])
 		p = p[1:]
 		if tag <= 0x0F {
+			if depth != 0 {
+				return Message{}, ErrNotIPP // an unclosed collection
+			}
 			if tag == TagEnd {
 				m.Data = append([]byte(nil), p...)
 				return m, nil
@@ -159,20 +186,32 @@ func Decode(r io.Reader, limit int64) (Message, error) {
 		case tagBegCollection:
 			depth++
 		case tagEndCollection:
-			if depth > 0 {
-				depth--
+			if depth == 0 {
+				return Message{}, ErrNotIPP // an end with no begin
 			}
+			depth--
 		}
-		isRecord := inCollection || tag == tagBegCollection || tag == tagEndCollection || tag == tagMemberName
-		if !isRecord && len(name) == 0 && len(m.Attrs) > 0 {
+		if !inCollection && !isRecordTag(tag) && len(name) == 0 {
+			if len(m.Attrs) == 0 {
+				return Message{}, ErrNotIPP
+			}
 			last := &m.Attrs[len(m.Attrs)-1]
-			if last.Group == group && last.Tag == tag {
-				last.Values = append(last.Values, append([]byte(nil), value...))
-				continue
+			if last.Group != group || last.Tag == 0 || last.collection() {
+				return Message{}, ErrNotIPP // an additional value with no attribute
 			}
-			return Message{}, ErrNotIPP
+			if tag != last.Tag && last.ValueTags == nil {
+				last.ValueTags = make([]Tag, len(last.Values))
+				for i := range last.ValueTags {
+					last.ValueTags[i] = last.Tag
+				}
+			}
+			if last.ValueTags != nil {
+				last.ValueTags = append(last.ValueTags, tag)
+			}
+			last.Values = append(last.Values, append([]byte(nil), value...))
+			continue
 		}
-		m.Attrs = append(m.Attrs, Attr{Group: group, Name: string(name), Tag: tag, Values: [][]byte{append([]byte(nil), value...)}})
+		m.Attrs = append(m.Attrs, Attr{Group: group, Name: string(name), Tag: tag, Values: [][]byte{append([]byte(nil), value...)}, member: inCollection})
 	}
 }
 
@@ -196,16 +235,28 @@ func isRecordTag(t Tag) bool {
 	return t == tagBegCollection || t == tagMemberName || t == tagEndCollection
 }
 
-// Strings returns the string values of the named attribute in the group.
-// A collection, an integer, an enum and a boolean give none.
+// Strings returns the character-string values of the named attribute in the
+// group: tags 0x41 to 0x49, and the text of 0x35 textWithLanguage and 0x36
+// nameWithLanguage (RFC 8010 section 3.9). A collection, an integer, an
+// octetString syntax (dateTime, resolution, rangeOfInteger) and an
+// out-of-band value give none.
 func (m Message) Strings(group Tag, name string) []string {
 	var out []string
 	for _, a := range m.Attrs {
-		if a.Group != group || a.Name != name || isRecordTag(a.Tag) || (a.Tag >= 0x20 && a.Tag <= 0x2F) {
+		if a.Group != group || a.Name != name || a.collection() {
 			continue
 		}
-		for _, v := range a.Values {
-			out = append(out, string(v))
+		for i, v := range a.Values {
+			switch t := a.valueTag(i); {
+			case t >= 0x41 && t <= 0x49:
+				out = append(out, string(v))
+			case t == 0x35 || t == 0x36:
+				if _, rest, ok := lenPrefixed(v); ok {
+					if text, rest, ok := lenPrefixed(rest); ok && len(rest) == 0 {
+						out = append(out, string(text))
+					}
+				}
+			}
 		}
 	}
 	return out
@@ -214,7 +265,10 @@ func (m Message) Strings(group Tag, name string) []string {
 // Int returns the first integer, enum or boolean value of the named attribute.
 func (m Message) Int(group Tag, name string) (int32, bool) {
 	for _, a := range m.Attrs {
-		if a.Group != group || a.Name != name || len(a.Values) == 0 {
+		if a.Group != group || a.Name != name || len(a.Values) == 0 || a.collection() {
+			continue
+		}
+		if t := a.Tag; t != TagInteger && t != TagBoolean && t != TagEnum {
 			continue
 		}
 		switch v := a.Values[0]; len(v) {
@@ -229,7 +283,8 @@ func (m Message) Int(group Tag, name string) (int32, bool) {
 
 // Groups returns one slice per group of the tag, in stream order. A group
 // starts at a marker (see groupStart) or at a change of Group, so two printers
-// are two slices. The markers are left out of the slices.
+// are two slices. The markers and the collection records are left out of
+// the slices.
 func (m Message) Groups(group Tag) [][]Attr {
 	var out [][]Attr
 	open := false
@@ -240,6 +295,9 @@ func (m Message) Groups(group Tag) [][]Attr {
 		}
 		if a.Tag == 0 {
 			open = false
+			continue
+		}
+		if a.collection() {
 			continue
 		}
 		if !open {
