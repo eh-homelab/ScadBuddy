@@ -307,6 +307,11 @@ func newRouter(pool *pgxpool.Pool, next http.Handler, keys *seal.Keys, areas, au
 		return nil, fmt.Errorf("SCADBUDDY_AUTH_MODE: %w", err)
 	}
 	resolver := &auth.Resolver{Pool: pool}
+	if lookupEnv != nil {
+		// Python's own setting: a fleet-rotator credential passes only while its machine's
+		// proof file is there.
+		resolver.BootstrapDir, _ = lookupEnv("SCADBUDDY_SERVICE_BOOTSTRAP_DIR")
+	}
 	var st *streams
 	if len(stream) > 0 {
 		st = stream[0]

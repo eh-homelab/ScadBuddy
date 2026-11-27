@@ -36,6 +36,8 @@ type api struct {
 	pool  *pgxpool.Pool
 	url   string
 	token string
+	// bootstrap is the router's SCADBUDDY_SERVICE_BOOTSTRAP_DIR.
+	bootstrap string
 }
 
 func newAPI(t *testing.T, areas string) *api {
@@ -45,13 +47,20 @@ func newAPI(t *testing.T, areas string) *api {
 		w.Header().Set("X-From", "python")
 		w.WriteHeader(http.StatusTeapot)
 	})
-	router, err := newRouter(pool, next, nil, areas, "", nil, nil, nil)
+	bootstrap := t.TempDir()
+	lookupEnv := func(name string) (string, bool) {
+		if name == "SCADBUDDY_SERVICE_BOOTSTRAP_DIR" {
+			return bootstrap, true
+		}
+		return "", false
+	}
+	router, err := newRouter(pool, next, nil, areas, "", nil, lookupEnv, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
 	server := httptest.NewServer(router)
 	t.Cleanup(server.Close)
-	a := &api{t: t, pool: pool, url: server.URL}
+	a := &api{t: t, pool: pool, url: server.URL, bootstrap: bootstrap}
 	a.token = a.credential("agent", "api", "crud.agent")
 	return a
 }
