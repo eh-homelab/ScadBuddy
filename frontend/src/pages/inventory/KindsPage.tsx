@@ -246,7 +246,8 @@ function AddKindForm({ kinds, onDone, onCancel }: { kinds: ItemKind[]; onDone: (
     if (!name.trim()) return setError('Give the kind a name.')
     setError(null)
     try {
-      await press((o) => inventoryApi.createKind({ id: kindId.trim(), name: name.trim(), parent_id: parent, tracking: counted, uom: uom.trim() || 'each', life_basis: life, saleable }, o))
+      const body = { id: kindId.trim(), name: name.trim(), parent_id: parent, tracking: counted, uom: uom.trim() || 'each', life_basis: life, saleable }
+      await press((o) => inventoryApi.createKind(body, o), body)
       onDone()
     } catch (cause) {
       setError(failed(cause, 'The kind could not be added. Try again.'))
@@ -322,7 +323,7 @@ function EditKindForm({ kind, kinds, onDone, onCancel }: { kind: ItemKind; kinds
     if (tracking !== kind.tracking) body.tracking = tracking
     setError(null)
     try {
-      await press((o) => inventoryApi.patchKind(kind.id, body, o))
+      await press((o) => inventoryApi.patchKind(kind.id, body, o), body)
       onDone()
     } catch (cause) {
       setError(failed(cause, 'The kind could not be saved. Try again.'))

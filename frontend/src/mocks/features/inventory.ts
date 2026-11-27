@@ -142,7 +142,7 @@ interface SlowWrite {
   id: string
   key: string | null
   created_at: string
-  result: Record<string, unknown>
+  result: Record<string, unknown> | null
   settled: boolean
 }
 
@@ -170,9 +170,9 @@ let slowWrites = 0
 export function slowNextWrite(n = 1): void {
   slowWrites = n
 }
-/** Ends every slow write's operation with its result. */
-export function settleSlowWrites(): void {
-  for (const op of inventoryMock.slow) op.settled = true
+/** Ends every slow write's operation with its result, or (`gone`) with none, as a pruned answer reads. */
+export function settleSlowWrites({ gone = false }: { gone?: boolean } = {}): void {
+  for (const op of inventoryMock.slow) Object.assign(op, { settled: true }, gone ? { result: null } : {})
 }
 
 // -- seeds ----------------------------------------------------------------------------------

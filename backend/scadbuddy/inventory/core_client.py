@@ -4,10 +4,14 @@ writer of the kind, item and stock tables, so the public routes only parse, then
 - read over Go's CRUD routes (`/api/v1/internal/crud/inventory/…`, caller `inventory`, a
   credential minted in this process), at ``SCADBUDDY_CORE_CRUD_URL`` (R-K1-4);
 - write by starting Go's activity ``inventory.<Name>`` on the task queue
-  ``SCADBUDDY_TEMPORAL_TASK_QUEUE_INVENTORY`` as a standalone activity whose id is the
-  idempotency key (R-K1-24). The route waits for it up to ``wait`` seconds; then it answers
-  202 with the operation to follow (`api/inventory_operations.py`), and the activity runs
-  on. A start while the activity runs attaches (Use Existing); a start after it failed
+  ``SCADBUDDY_TEMPORAL_TASK_QUEUE_INVENTORY`` as a standalone activity (R-K1-24). Its id is
+  ``inventory.<Name>:<key>`` (`activity_id`), and its input's ``key`` is the idempotency
+  key, which is the operation's id and Go's ``crud_requests`` key. So a key sent again on
+  another write starts another activity, and Go's ledger answers it 422
+  idempotency-key-reused; it never attaches to the first write. The route waits for it up
+  to ``wait`` seconds; then it answers 202 with the operation to follow
+  (`api/inventory_operations.py`), and the activity runs on. A start of the same activity
+  and key while it runs attaches (Use Existing); a start after it failed
   runs it again (Allow Duplicate Failed Only); a start after it succeeded reads its stored
   answer. Go's `crud_requests` row stops a second commit.
 
@@ -83,6 +87,11 @@ def operation_key(by: Actor, idempotency_key: str | None) -> str:
     if idempotency_key is None:
         return f"req:{uuid4()}"
     return f"{by.kind}:{by.principal or ''}:{idempotency_key}"
+
+
+def activity_id(name: str, key: str) -> str:
+    """The Temporal activity id of ``inventory.{name}`` for the operation ``key``."""
+    return f"inventory.{name}:{key}"
 
 
 def unavailable(detail: str) -> ApiError:
@@ -167,7 +176,7 @@ class InventoryCore:
         params: Mapping[str, str] | None = None,
         body: BaseModel | Mapping[str, Any] | None = None,
     ) -> Done | OperationAccepted:
-        """Runs ``inventory.{name}`` with id ``key`` and answers it, or 202 when it takes
+        """Runs ``inventory.{name}`` for the operation ``key`` and answers it, or 202 when it takes
         longer than the wait. A model ``body`` goes as the fields the request set."""
         sent = (
             body.model_dump(mode="json", exclude_unset=True)
@@ -181,12 +190,13 @@ class InventoryCore:
             "body": None if sent is None else dict(sent),
         }
         activity = f"inventory.{name}"
+        started = activity_id(name, key)
         repeated = False
         try:
             handle = await self._temporal.start_activity(
                 activity,
                 arg,
-                id=key,
+                id=started,
                 task_queue=self._queue,
                 schedule_to_close_timeout=SCHEDULE_TO_CLOSE,
                 start_to_close_timeout=START_TO_CLOSE,
@@ -197,7 +207,7 @@ class InventoryCore:
             )
         except ActivityAlreadyStartedError:
             # It succeeded before: its stored answer is the answer.
-            handle = self._temporal.get_activity_handle(key)
+            handle = self._temporal.get_activity_handle(started)
             repeated = True
         except (RPCError, RuntimeError, OSError) as error:
             logger.warning("could not start %s: %s", activity, error)

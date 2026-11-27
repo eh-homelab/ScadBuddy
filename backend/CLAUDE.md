@@ -1829,8 +1829,9 @@ only the sleeps move; a budget on the real clock fails on a slow runner (#6252).
   `docs/features/inventory.md`): `models.py` (the Pydantic models), `core_client.py`
   (`InventoryCore`, #6949 K1: the kind, item, lot, unit and move routes read over
   scadbuddy-core's CRUD routes and write by starting its `inventory.<Name>` activity on the
-  queue `inventory`, with the `Idempotency-Key` as the activity id; a write past the 15 s wait
-  answers 202, followed at `GET /inventory/operations/{id}`), `activity.py` (the Activities
+  queue `inventory`, with the id `inventory.<Name>:<key>`; the input's `key` (the operation
+  id) is the scoped `Idempotency-Key`; a write past the 15 s wait answers 202, followed at
+  `GET /inventory/operations/{id}`), `activity.py` (the Activities
   tab's `inventory.<Name>` kinds), `kinds.py` (`merged_schema`, `item_schema` and
   `keys_in_use` of the `item_kinds` tree; Go writes the kinds and items now),
   `offers.py` (`OfferStore`: `supplier_offers` and

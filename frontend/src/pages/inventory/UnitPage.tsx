@@ -137,7 +137,8 @@ function DetailsForm({ unit, places, onChanged }: { unit: Unit; places: Place[];
     setError(null)
     setSaved(false)
     try {
-      onChanged(await press((o) => inventoryApi.patchUnit(unit.id, { name: name.trim(), serial: serial.trim() || null, location_id: place }, o)))
+      const body = { name: name.trim(), serial: serial.trim() || null, location_id: place }
+      onChanged(await press((o) => inventoryApi.patchUnit(unit.id, body, o), body))
       setSaved(true)
     } catch (cause) {
       setError(failed(cause, 'The unit could not be saved. Try again.'))
@@ -191,7 +192,8 @@ function StatusForm({ unit, onChanged }: { unit: Unit; onChanged: (unit: Unit) =
     if (!status) return
     setError(null)
     try {
-      onChanged(await press((o) => inventoryApi.setUnitStatus(unit.id, { status, ...(note.trim() ? { note: note.trim() } : {}) }, o), status))
+      const body = { status, ...(note.trim() ? { note: note.trim() } : {}) }
+      onChanged(await press((o) => inventoryApi.setUnitStatus(unit.id, body, o), body))
       setNote('')
     } catch (cause) {
       setError(failed(cause, 'The status could not be changed. Try again.'))

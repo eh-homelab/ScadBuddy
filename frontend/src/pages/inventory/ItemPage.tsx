@@ -238,10 +238,7 @@ function DetailsForm({ item, kind, onDone, onCancel }: { item: Item; kind: ItemK
     if (months && !(/^\d+$/.test(months) && Number(months) > 0 && Number(months) <= 1200)) return setError('The life in months is a whole number from 1 to 1200, or empty.')
     setError(null)
     try {
-      await press((o) =>
-        inventoryApi.patchItem(
-          item.id,
-          {
+      const body = {
         name: name.trim(),
         manufacturer: manufacturer.trim(),
         low_stock: lowStock.trim(),
@@ -249,10 +246,8 @@ function DetailsForm({ item, kind, onDone, onCancel }: { item: Item; kind: ItemK
         note,
         life_hours: hours || null,
         life_months: months ? Number(months) : null,
-          },
-          o,
-        ),
-      )
+      }
+      await press((o) => inventoryApi.patchItem(item.id, body, o), body)
       onDone()
     } catch (cause) {
       setError(failed(cause, 'The item could not be saved. Try again.'))

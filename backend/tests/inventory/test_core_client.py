@@ -65,7 +65,7 @@ async def test_a_write_starts_its_activity_on_the_inventory_queue() -> None:
         "body": {"qty": "2"},
     }
     options = start.options
-    assert options["id"] == "browser:p1:k1"
+    assert options["id"] == "inventory.ReceiveLot:browser:p1:k1"
     assert options["task_queue"] == "inventory"
     assert options["id_conflict_policy"] == ActivityIDConflictPolicy.USE_EXISTING
     assert options["id_reuse_policy"] == ActivityIDReusePolicy.ALLOW_DUPLICATE_FAILED_ONLY
@@ -105,25 +105,56 @@ async def test_a_slow_write_answers_202_and_a_repeat_202_again() -> None:
             "item:x",
             "running",
         )
-    assert [s.options["id"] for s in temporal.starts] == ["browser:p1:k"] * 2
+    assert [s.options["id"] for s in temporal.starts] == ["inventory.Take:browser:p1:k"] * 2
+    assert [s.arg["key"] for s in temporal.starts] == ["browser:p1:k"] * 2
+
+
+async def test_one_key_on_two_writes_starts_two_activities_and_go_refuses_the_second() -> None:
+    """The activity id names the activity and the key, so a key reused on another write never
+    attaches to the first (Use Existing attaches by id). Both runs carry the same `key`, so
+    Go's `crud_requests` ledger answers the second 422 idempotency-key-reused."""
+    reused = {
+        "type": "https://scadbuddy.dev/problems/crud/idempotency-key-reused",
+        "title": "Unprocessable Content",
+        "status": 422,
+        "detail": "the key was used for another request",
+    }
+    temporal = FakeTemporal(
+        answers=[{"status": 201, "body": {"id": "lot"}}, {"status": 422, "body": reused}]
+    )
+    inventory = core(temporal)
+
+    done = await inventory.write("ReceiveLot", key="browser:p1:k", by=BY, subject="item:x")
+    with pytest.raises(ApiError) as refused:
+        await inventory.write("Take", key="browser:p1:k", by=BY, subject="item:x")
+
+    assert done == Done({"id": "lot"}, 201)
+    assert [s.options["id"] for s in temporal.starts] == [
+        "inventory.ReceiveLot:browser:p1:k",
+        "inventory.Take:browser:p1:k",
+    ]
+    assert [s.arg["key"] for s in temporal.starts] == ["browser:p1:k"] * 2
+    assert refused.value.status == 422
+    assert refused.value.type == reused["type"]
 
 
 async def test_a_done_write_answers_the_stored_result() -> None:
-    temporal = FakeTemporal(done={"k": {"status": 201, "body": {"id": "lot"}}})
+    temporal = FakeTemporal(done={"inventory.ReceiveLot:k": {"status": 201, "body": {"id": "lot"}}})
 
     done = await core(temporal).write("ReceiveLot", key="k", by=BY, subject="item:x")
 
     assert done == Done({"id": "lot"}, 201)
-    assert temporal.handles == ["k"]
+    assert temporal.handles == ["inventory.ReceiveLot:k"]
 
 
 async def test_a_done_write_still_running_answers_202_repeated() -> None:
-    temporal = FakeTemporal(done={"k": HANG})
+    temporal = FakeTemporal(done={"inventory.ReceiveLot:k": HANG})
 
     accepted = await core(temporal).write("ReceiveLot", key="k", by=BY, subject="item:x")
 
     assert isinstance(accepted, OperationAccepted)
     assert accepted.repeated is True
+    assert accepted.id == "k"
 
 
 async def test_a_failed_activity_runs_again() -> None:

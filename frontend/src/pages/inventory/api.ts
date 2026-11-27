@@ -9,7 +9,7 @@
  * followed at `GET /inventory/operations/{id}` to its result or its problem. `onAccepted`
  * hears that 202; a press while the write runs passes the same `key`, so it attaches.
  */
-import { command, request } from '../../api/client'
+import { ApiError, command, request } from '../../api/client'
 import type { components } from '../../api/schema'
 import type { OperationAccepted } from '../../api/types'
 
@@ -60,7 +60,24 @@ export interface WriteOptions {
   onAccepted?: (operation: OperationAccepted) => void
 }
 
-const write = <T>(path: string, init: RequestInit, { key, onAccepted }: WriteOptions = {}) => command<T>(path, init, `${BASE}/operations`, key, onAccepted)
+/**
+ * The `type` of the problem a write throws when its operation succeeded but no longer holds
+ * the answer (Go prunes a `crud_requests` row after 7 days): the change was made.
+ */
+export const RESULT_GONE = 'urn:scadbuddy:inventory-result-gone'
+
+async function write<T>(path: string, init: RequestInit, { key, onAccepted }: WriteOptions = {}): Promise<T> {
+  const answer = await command<T | null | undefined>(path, init, `${BASE}/operations`, key, onAccepted)
+  if (answer == null) {
+    throw new ApiError({
+      type: RESULT_GONE,
+      title: 'Gone',
+      status: 410,
+      detail: 'The change was saved, but ScadBuddy no longer has its answer. Reload the page to see it.',
+    })
+  }
+  return answer
+}
 const post: RequestInit = { method: 'POST' }
 
 export interface ItemFilter {

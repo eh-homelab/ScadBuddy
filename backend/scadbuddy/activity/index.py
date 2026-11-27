@@ -205,7 +205,9 @@ def _conditions(filters: ActivityFilter) -> tuple[list[sql.Composable], list[Any
             where.append(sql.SQL("{} = %s").format(sql.Identifier(column)))
             params.append(value)
     if filters.q is not None:
-        add("(title ILIKE '%%' || %s || '%%' OR source_id = %s)", _escape_like(filters.q), filters.q)
+        add(
+            "(title ILIKE '%%' || %s || '%%' OR source_id = %s)", _escape_like(filters.q), filters.q
+        )
     if filters.since is not None:
         add("created_at >= %s", filters.since)
     if filters.until is not None:

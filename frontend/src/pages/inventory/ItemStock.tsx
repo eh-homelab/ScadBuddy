@@ -68,10 +68,11 @@ function useWrite(onDone: () => void) {
     running,
     error,
     fail: setError,
-    async run(write: (options: WriteOptions) => Promise<unknown>, fallback: string) {
+    /** `what` is the write's body: the same body pressed again while it runs attaches. */
+    async run(write: (options: WriteOptions) => Promise<unknown>, fallback: string, what: unknown) {
       setError(null)
       try {
-        await press(write)
+        await press(write, what)
         onDone()
       } catch (cause) {
         setError(failed(cause, fallback))
@@ -259,7 +260,8 @@ function LotCostEditor({ lot, money, onCancel, onSaved }: { lot: Lot; money: Sho
     if (!money.currency) return
     const minor = majorToMinor(cost, money.exponent, money.exponent + UNIT_COST_PLACES)
     if (minor === null) return write.fail(`Enter the cost of one unit, such as 0.25, with up to ${money.exponent + UNIT_COST_PLACES} decimals.`)
-    void write.run((o) => inventoryApi.patchLot(lot.id, { unit_cost_minor: minor }, o), 'The cost could not be saved. Try again.')
+    const body = { unit_cost_minor: minor }
+    void write.run((o) => inventoryApi.patchLot(lot.id, body, o), 'The cost could not be saved. Try again.', ['patchLot', lot.id, body])
   }
 
   return (
@@ -291,7 +293,7 @@ function LotPlaceEditor({ lot, places, onCancel, onSaved }: { lot: Lot; places: 
   return (
     <span className="flex flex-wrap items-center gap-1">
       <PlaceSelect label="Place of the lot" places={places} value={place} onChange={setPlace} />
-      <Button size="xs" disabled={write.busy} onClick={() => void write.run((o) => inventoryApi.patchLot(lot.id, { location_id: place }, o), 'The place could not be saved. Try again.')}>
+      <Button size="xs" disabled={write.busy} onClick={() => void write.run((o) => inventoryApi.patchLot(lot.id, { location_id: place }, o), 'The place could not be saved. Try again.', ['patchLot', lot.id, place])}>
         Save place
       </Button>
       <Button size="xs" variant="ghost" onClick={onCancel}>
@@ -354,7 +356,8 @@ function ReceiveLotForm({ item, offer, money, places, onDone }: { item: Item; of
       total = majorToMinor(shown, money.exponent)
       if (total === null) return write.fail(`Enter the total cost, such as 12.50, with up to ${money.exponent} decimals, or leave it empty.`)
     }
-    void write.run((o) => inventoryApi.receiveLot(item.id, { qty: parsedQty, ...(total !== null ? { total_cost_minor: total } : {}), ...(place ? { location_id: place } : {}), note: note.trim() }, o), 'The lot could not be received. Try again.')
+    const body = { qty: parsedQty, ...(total !== null ? { total_cost_minor: total } : {}), ...(place ? { location_id: place } : {}), note: note.trim() }
+    void write.run((o) => inventoryApi.receiveLot(item.id, body, o), 'The lot could not be received. Try again.', ['receiveLot', item.id, body])
   }
 
   return (
@@ -392,7 +395,8 @@ function UseForm({ item, onDone }: { item: Item; onDone: () => void }) {
   function submit() {
     const parsed = parseDecimal(qty)
     if (parsed === null || Number(parsed) <= 0) return write.fail('Enter how many you used, such as 2.')
-    void write.run((o) => inventoryApi.use(item.id, { qty: parsed, reason: reason.trim() }, o), 'The use could not be saved. Try again.')
+    const body = { qty: parsed, reason: reason.trim() }
+    void write.run((o) => inventoryApi.use(item.id, body, o), 'The use could not be saved. Try again.', ['use', item.id, body])
   }
 
   return (
@@ -421,7 +425,8 @@ function CountForm({ item, onDone }: { item: Item; onDone: () => void }) {
     const parsed = parseDecimal(count)
     if (parsed === null) return write.fail('Enter the count on the shelf, 0 or more.')
     if (!note.trim()) return write.fail('Say why the count changed.')
-    void write.run((o) => inventoryApi.count(item.id, { on_hand: parsed, note: note.trim() }, o), 'The count could not be saved. Try again.')
+    const body = { on_hand: parsed, note: note.trim() }
+    void write.run((o) => inventoryApi.count(item.id, body, o), 'The count could not be saved. Try again.', ['count', item.id, body])
   }
 
   return (
@@ -446,17 +451,6 @@ export function UnitStock({ item, money, version, onChanged }: { item: Item; mon
   const places = usePlaces()
   const [error, setError] = useState<string | null>(null)
   const [receiving, setReceiving] = useState(false)
-  const changing = usePress()
-
-  async function status(unit: Unit, next: SettableStatus) {
-    setError(null)
-    try {
-      await changing.press((o) => inventoryApi.setUnitStatus(unit.id, { status: next }, o), `${unit.id}:${next}`)
-      onChanged()
-    } catch (cause) {
-      setError(failed(cause, 'The status could not be changed. Try again.'))
-    }
-  }
 
   const rows = units.data ?? []
   const columns: Column<Unit>[] = [
@@ -474,18 +468,15 @@ export function UnitStock({ item, money, version, onChanged }: { item: Item; mon
       key: 'status',
       header: 'Status',
       cell: (unit) => (
-        <Select value={unit.status} onValueChange={(next) => void status(unit, next as SettableStatus)}>
-          <SelectTrigger size="sm" aria-label={`Status of ${unitLabel(unit, rows.indexOf(unit))}`} className="w-36">
-            <SelectValue />
-          </SelectTrigger>
-          <SelectContent position="popper">
-            {SETTABLE_STATUSES.map((value) => (
-              <SelectItem key={value} value={value}>
-                {STATUS_LABELS[value]}
-              </SelectItem>
-            ))}
-          </SelectContent>
-        </Select>
+        <UnitStatusCell
+          unit={unit}
+          label={unitLabel(unit, rows.indexOf(unit))}
+          onChanged={() => {
+            setError(null)
+            onChanged()
+          }}
+          onError={setError}
+        />
       ),
     },
     { key: 'place', header: 'Place', className: 'break-words', cell: (unit) => placeName(places.data, unit.location_id) },
@@ -513,7 +504,6 @@ export function UnitStock({ item, money, version, onChanged }: { item: Item; mon
         />
       )}
       <PlacesError error={places.error} />
-      {changing.running && <StillWorking id={changing.running.id} href={activityHref(changing.running.id)} />}
       {(error ?? units.error) && (
         <p role="alert" className="text-[13px] text-warn">
           {error ?? `The units could not be loaded: ${units.error!.message}`}
@@ -521,6 +511,39 @@ export function UnitStock({ item, money, version, onChanged }: { item: Item; mon
       )}
       {units.data && <DataTable label="Units" columns={columns} rows={rows} rowKey={(unit) => unit.id} empty="No units yet. Receive them when they arrive." />}
     </section>
+  )
+}
+
+/** One unit's status select: each row keeps its own write, so one slow change shows in its row. */
+function UnitStatusCell({ unit, label, onChanged, onError }: { unit: Unit; label: string; onChanged: () => void; onError: (message: string) => void }) {
+  const { running, press } = usePress()
+
+  async function status(next: SettableStatus) {
+    const body = { status: next }
+    try {
+      await press((o) => inventoryApi.setUnitStatus(unit.id, body, o), [unit.id, body])
+      onChanged()
+    } catch (cause) {
+      onError(failed(cause, 'The status could not be changed. Try again.'))
+    }
+  }
+
+  return (
+    <div className="flex flex-col gap-1">
+      <Select value={unit.status} onValueChange={(next) => void status(next as SettableStatus)}>
+        <SelectTrigger size="sm" aria-label={`Status of ${label}`} className="w-36">
+          <SelectValue />
+        </SelectTrigger>
+        <SelectContent position="popper">
+          {SETTABLE_STATUSES.map((value) => (
+            <SelectItem key={value} value={value}>
+              {STATUS_LABELS[value]}
+            </SelectItem>
+          ))}
+        </SelectContent>
+      </Select>
+      {running && <StillWorking id={running.id} href={activityHref(running.id)} />}
+    </div>
   )
 }
 
@@ -543,7 +566,8 @@ function ReceiveUnitsForm({ item, money, places, onDone }: { item: Item; money: 
     const listed = serials.split('\n').map((line) => line.trim())
     const named = listed.some((line) => line !== '')
     if (named && listed.length !== n) return write.fail(`Give one serial a line for each of the ${n} units, or none.`)
-    void write.run((o) => inventoryApi.receiveUnits(item.id, { count: n, ...(each !== null ? { cost_minor: each } : {}), ...(named ? { serials: listed } : {}), ...(place ? { location_id: place } : {}) }, o), 'The units could not be received. Try again.')
+    const body = { count: n, ...(each !== null ? { cost_minor: each } : {}), ...(named ? { serials: listed } : {}), ...(place ? { location_id: place } : {}) }
+    void write.run((o) => inventoryApi.receiveUnits(item.id, body, o), 'The units could not be received. Try again.', ['receiveUnits', item.id, body])
   }
 
   return (

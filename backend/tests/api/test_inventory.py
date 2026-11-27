@@ -265,7 +265,9 @@ def test_a_slow_write_answers_202_and_a_repeat_202_again(client: TestClient, go:
         )
         assert body["id"].endswith(":k-slow")
     assert len(go.temporal.starts) == 2
-    assert {s.options["id"] for s in go.temporal.starts} == {first.json()["id"]}
+    assert {s.options["id"] for s in go.temporal.starts} == {
+        f"inventory.KindArchive:{first.json()['id']}"
+    }
 
 
 def test_a_done_write_answers_the_stored_result(client: TestClient, go: Go) -> None:
@@ -273,13 +275,13 @@ def test_a_done_write_answers_the_stored_result(client: TestClient, go: Go) -> N
     sent = {"kind_id": "hardware", "name": "N"}
     first = client.post(f"{API}/items", json=sent, headers={"Idempotency-Key": "k-done"})
     key = first.json()["id"]
-    go.temporal.done[key] = done(201, answer("ItemCreate"))
+    go.temporal.done[f"inventory.ItemCreate:{key}"] = done(201, answer("ItemCreate"))
 
     again = client.post(f"{API}/items", json=sent, headers={"Idempotency-Key": "k-done"})
 
     assert again.status_code == 201, again.text
     assert again.json() == answer("ItemCreate")
-    assert go.temporal.handles == [key]
+    assert go.temporal.handles == [f"inventory.ItemCreate:{key}"]
 
 
 def test_a_failed_activity_runs_again(client: TestClient, go: Go) -> None:
@@ -333,7 +335,7 @@ def test_a_write_with_no_key_gets_its_own(client: TestClient, go: Go) -> None:
     client.post(f"{API}/kinds/bolt/archive")
 
     ids = [s.options["id"] for s in go.temporal.starts]
-    assert all(i.startswith("req:") for i in ids) and ids[0] != ids[1]
+    assert all(i.startswith("inventory.KindArchive:req:") for i in ids) and ids[0] != ids[1]
 
 
 def test_the_operation_route_reads_go(client: TestClient, go: Go) -> None:
