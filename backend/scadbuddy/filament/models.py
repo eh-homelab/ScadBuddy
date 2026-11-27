@@ -2141,13 +2141,44 @@ class _FitsOneTag(_In):
         return self
 
 
+class MifareBlock(_In):
+    """One data block of a MIFARE Classic 1K read (#8148): its index and 16 bytes as hex."""
+
+    index: Annotated[int, Field(ge=0, le=63)]
+    data_hex: Annotated[str, Field(pattern=r"^[0-9a-fA-F]{32}$")]
+
+
+class ScanImage(_In):
+    """The photo taken with a scan: a committed ``scan_image`` blob."""
+
+    key: Annotated[str, Field(pattern=r"^scan_image-[0-9a-f]{64}$")]
+    media_type: Annotated[str, Field(pattern=r"^image/(jpeg|png|webp)$")]
+
+
+class ScanLocation(_In):
+    """Where a scan was made: the phone's position, its accuracy and when it was taken."""
+
+    lat: Annotated[float, Field(ge=-90, le=90)]
+    lon: Annotated[float, Field(ge=-180, le=180)]
+    accuracy_m: Annotated[float, Field(ge=0, le=100_000)] | None = None
+    at: datetime
+
+
 class TagReadIn(_FitsOneTag):
-    """What a phone reads from a tag: its UID and its NDEF records."""
+    """What a phone reads from a tag: its UID and its NDEF records, or its MIFARE blocks."""
 
     uid: Annotated[str, Field(max_length=64)] | None = None
     tag_type: Annotated[str, Field(max_length=32)] | None = None
     #: Bind the tag to this spool as part of the read.
     bind_spool_id: UUID | None = None
+    #: A Bambu tag's data blocks (key trailers left out), which core's area
+    #: `filament-tag-reads` decodes (#8148). Python never decodes them: a read with blocks
+    #: that reaches Python is a 503 `mifare_needs_core`.
+    mifare_blocks: Annotated[list[MifareBlock], Field(max_length=64)] | None = None
+    #: The scan's photo and position, which core's area `filament-tag-reads` keeps on the
+    #: read's `filament_tag_reads` row. Python only checks their shape.
+    image: ScanImage | None = None
+    location: ScanLocation | None = None
 
 
 BackupReason = Literal["spool_write", "agent_write", "restore"]
@@ -2346,6 +2377,14 @@ class TagReadResult(BaseModel):
     #: `/codes/{code}` shape; set only with `next` of `open_code`.
     resolved: Resolved | None = None
     next: Literal["open_spool", "open_code", "bind_or_create", "none"]
+    #: Set by core's area `filament-tag-reads` (#8148), never by Python. A MIFARE read's
+    #: decoded fields: `tools/go/core/internal/bambutag` `Tag`, with `decoder_version`,
+    #: `complete` and `missing_blocks`; a field whose block was not read is absent.
+    bambu: dict[str, Any] | None = None
+    #: The read's row in the scan history (`filament_tag_reads`).
+    tag_read_id: UUID | None = None
+    #: A MIFARE read's raw dump: the content index key of its `tag_dump` blob.
+    dump_key: str | None = None
 
 
 class LedgerRow(SpoolEvent):

@@ -507,7 +507,7 @@ func TestNamingTheFullAndTheReadOnlyUnknownTraysAreaMountsItOnce(t *testing.T) {
 func TestASealedAreaNeedsTheKEKAndTheOthersDoNot(t *testing.T) {
 	pool := testdb.New(t)
 	for _, area := range []string{"credentials", "credentials:read", "payload-keys", "keys", "notify",
-		"notify:read", "transcripts", "transcripts:read", "blobs"} {
+		"notify:read", "transcripts", "transcripts:read", "blobs", "filament-tag-reads"} {
 		_, err := newRouter(pool, nil, nil, area, "", nil, nil, nil)
 		if err == nil || !strings.Contains(err.Error(), "SCADBUDDY_SECRET_KEY_FILE") {
 			t.Errorf("%s: %v", area, err)
@@ -527,7 +527,7 @@ func TestASealedAreaNeedsTheKEKAndTheOthersDoNot(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := newRouter(pool, nil, keys, every+", credentials, payload-keys, keys, notify, transcripts, blobs", "", nil, nil, nil); err != nil {
+	if _, err := newRouter(pool, nil, keys, every+", credentials, payload-keys, keys, notify, transcripts, blobs, filament-tag-reads", "", nil, nil, nil); err != nil {
 		t.Fatal(err)
 	}
 }

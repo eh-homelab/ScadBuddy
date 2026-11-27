@@ -4,6 +4,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -70,5 +71,43 @@ func TestAPublicAreaIsServedBehindTheGate(t *testing.T) {
 	}
 	if _, err := newRouter(pool, next, nil, "test-public", "enforced", nil, nil, nil); err == nil {
 		t.Error("an unknown SCADBUDDY_AUTH_MODE was taken")
+	}
+}
+
+// Area filament-tag-reads stands behind the gate on the tag read's path, and hands a read
+// with no MIFARE blocks to Python unchanged (#8148).
+func TestTheTagReadAreaForwardsAnNDEFRead(t *testing.T) {
+	pool := testdb.New(t)
+	var got string
+	next := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, _ := io.ReadAll(r.Body)
+		got = r.URL.Path + " " + string(body)
+		w.WriteHeader(http.StatusTeapot)
+	})
+	keys := &seal.Keys{Current: seal.NewKEK(make([]byte, 32))}
+	router, err := newRouter(pool, next, keys, "filament-tag-reads", "enforce", nil, nil, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	server := httptest.NewServer(router)
+	defer server.Close()
+	post := func() int {
+		req, _ := http.NewRequest(http.MethodPost, server.URL+"/api/v1/filament/tags/reads",
+			strings.NewReader(`{"uid":"53F64B94420001","records":[]}`))
+		req.Header.Set(auth.RequestHeader, "1")
+		res, err := http.DefaultClient.Do(req)
+		if err != nil {
+			t.Fatal(err)
+		}
+		res.Body.Close()
+		return res.StatusCode
+	}
+	if status := post(); status != http.StatusUnauthorized || got != "" {
+		t.Errorf("enforce, signed out: %d, Python got %q", status, got)
+	}
+	router, _ = newRouter(pool, next, keys, "filament-tag-reads", "", nil, nil, nil)
+	server.Config.Handler = router
+	if status := post(); status != http.StatusTeapot || got != `/api/v1/filament/tags/reads {"uid":"53F64B94420001","records":[]}` {
+		t.Errorf("off: %d, Python got %q", status, got)
 	}
 }

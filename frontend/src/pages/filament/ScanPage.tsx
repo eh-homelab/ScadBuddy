@@ -3,6 +3,7 @@ import { useCallback, useEffect, useId, useRef, useState, useSyncExternalStore }
 import { useNavigate } from 'react-router'
 import { ApiError } from '../../api/client'
 import { postTagRead, type TagReadResult } from '../../api/filament'
+import { BambuFields, type BambuTag } from '../../components/filament/scan/BambuFields'
 import { CodeCard } from '../../components/filament/scan/CodeCard'
 import { KnownTag } from '../../components/filament/scan/KnownTag'
 import { NfcJobBanner } from '../../components/filament/scan/NfcJobBanner'
@@ -10,6 +11,7 @@ import { DecodedFields, NewTag } from '../../components/filament/scan/NewTag'
 import type { HeldPhotos } from '../../components/filament/scan/PhotoButtons'
 import { filamentLinks } from '../../lib/filamentLinks'
 import { codeLabel, codeTarget } from '../../lib/resolvedCode'
+import { takeMifare } from '../../lib/nativeMifare'
 import { NfcSession, nfcSupport, type Reading, type WireRecord } from '../../lib/webNfc'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
@@ -164,7 +166,9 @@ function Scanner() {
     let alive = true
     let navigated = false
     const off = nfc.onReading((reading: Reading) => {
-      postTagRead({ uid: reading.uid || null, tag_type: null, records: reading.records }).then(
+      // In the ScadBuddy app a Bambu tag's blocks come with the tap; the server decodes them (#8148).
+      const mifare = takeMifare(reading.uid)
+      postTagRead(mifare ? { ...mifare, records: [] } : { uid: reading.uid || null, tag_type: null, records: reading.records }).then(
         (result) => {
           if (!alive || navigated) return
           const key = (nextKey.current += 1)
@@ -271,6 +275,7 @@ function Scanner() {
         {announcement}
       </p>
       <NfcJobBanner session={session} onAnnounce={setAnnouncement} />
+      {opened?.result.bambu && <BambuFields bambu={opened.result.bambu as BambuTag} />}
       {opened && (
         <ReadView
           key={opened.key}

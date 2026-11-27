@@ -2107,12 +2107,14 @@ class FilamentSpoolStore:
     @staticmethod
     def _tag(conn: Conn, uid: str | None, tray: str | None, kind: m.TagKind) -> tuple[UUID, str]:
         """The id and kind of the tag either key names, locked and given the key it lacked;
-        else a new tag of ``kind``. A tag another transaction makes first is found on the
-        second look."""
+        else a new tag of ``kind``. The UID is any of a tag's UIDs (`filament_tag_uids`,
+        #8148); one the tag lacks is added to it, so a Bambu spool's second side names its
+        tray's tag. A tag another transaction makes first is found on the second look."""
         while True:
             found = conn.execute(
                 f"SELECT {_TAG_COLUMNS} FROM filament_tags"
-                " WHERE tag_uid = %s OR tray_uuid = %s FOR UPDATE",
+                " WHERE id IN (SELECT tag_id FROM filament_tag_uids WHERE uid = %s)"
+                " OR tray_uuid = %s FOR UPDATE",
                 (uid, tray),
             ).fetchall()
             if len(found) > 1:
@@ -2126,6 +2128,12 @@ class FilamentSpoolStore:
                         "UPDATE filament_tags SET tag_uid = coalesce(tag_uid, %s),"
                         " tray_uuid = coalesce(tray_uuid, %s) WHERE id = %s",
                         (uid, tray, tag["id"]),
+                    )
+                if uid is not None:
+                    conn.execute(
+                        "INSERT INTO filament_tag_uids (uid, tag_id, source) VALUES (%s, %s, 'tag')"
+                        " ON CONFLICT (uid) DO NOTHING",
+                        (uid, tag["id"]),
                     )
                 tag_id: UUID = tag["id"]
                 return tag_id, tag["kind"]

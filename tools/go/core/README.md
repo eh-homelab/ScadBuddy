@@ -220,6 +220,20 @@ keys from the UID, after the [RFID Tag Guide](https://github.com/Bambu-Research-
 (#8058). It is pure: no I/O and no SQL, and it never writes a tag. Its `Tag` JSON is what a scan
 record stores; `testdata/*.json` pins it, and a change bumps `DecoderVersion`.
 
+Area `filament-tag-reads` † (`internal/tagreads`, #8148) is a public area: `POST
+/api/v1/filament/tags/reads`, class `api`, at Python's path. A body with `mifare_blocks` is
+core's: it checks the blocks (at most 64, index 0 to 63, 16 bytes each), drops every sector
+trailer, decodes the tag with `internal/bambutag`, stores the dump as a `tag_dump` blob
+(`blobstore.Blobs.Put`, the upload commit's checks with no presigned PUT), and in one
+transaction finds or makes the tag by tray UUID and UID (`filament_tag_uids`), folds a UID-only
+tag of the same tray into it, and appends a `filament_tag_reads` row. Then it forwards a UID-only
+read to Python, which writes the last-seen, the bind and the answer, and adds `bambu`,
+`tag_read_id`, `dump_key` and, for a tag with no spool, `draft`. Any other body goes to Python
+unchanged (with `image` and `location` taken off), and an answered tag gets its history row after.
+`image` (a committed `scan_image` blob) and `location` are checked and stored on the row.
+`Reads.RecordMifare(ctx, body, actor, source)` is the same write for a Go caller (#8157). With
+the area off, Python answers a MIFARE read 503 `mifare_needs_core`.
+
 A request that reaches Python carries one `X-Forwarded-For` value: its client, as the trusted
 proxies name it (`core/proxies.py`). So Python runs with `SCADBUDDY_TRUSTED_PROXIES=127.0.0.1`
 (and `SCADBUDDY_CORE_UPSTREAM` names the literal `127.0.0.1`, not `localhost`, which may connect over
