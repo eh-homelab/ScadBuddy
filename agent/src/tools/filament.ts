@@ -1087,7 +1087,10 @@ const tools: Tool[] = [
       'scale reading with the spool, from which its empty weight is taken as filament_spool_add_event takes it, or ' +
       '`final_grams`, the filament left, or both. The weighing is booked just before the `archived` event, whose ' +
       '`data` keeps the closing: `reason`, `started_g`, `started_from`, `ledger_consumed_g`, `final_filament_g`, ' +
-      '`scale_consumed_g` and `drift_g` (negative: the scale found less than the ledger expected). 422 ' +
+      '`scale_consumed_g`, `drift_g` (negative: the scale found less than the ledger expected) and `non_print_waste_g`. ' +
+      'The grams left after the weighing, unless the reason is `respooled`, are booked as a `non_print_waste` event just ' +
+      'before the `archived` one: the spool then has 0 g left, and `closing.non_print_waste_g` (filament_spool_get on the ' +
+      'archived spool, filament_spool_closing before) says how many. 422 ' +
       '`no_empty_weight` or `reading_below_empty` archives nothing; a restore takes no reason or reading. ' +
       'A restore of a spool whose place is a dry box that another spool holds is a 409 `box_full` naming that spool ' +
       '(`occupant_id`) and restores nothing; tell the user. ' +

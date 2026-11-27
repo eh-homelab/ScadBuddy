@@ -478,6 +478,7 @@ def _closing_on(
     *,
     grams_left: bool = True,
     events: Sequence[m.SpoolEvent] | None = None,
+    waste: bool = False,
 ) -> dict[str, Any]:
     """The spool's closing now (`ledger.closing`, #7684): with ``final_filament_g`` the
     final weighing's filament, else, when ``grams_left``, on the spool's grams left.
@@ -492,6 +493,7 @@ def _closing_on(
         final_filament_g=final_filament_g,
         reason=reason,
         grams_left=spool["grams_left"] if grams_left else None,
+        waste=waste,
     )
 
 
@@ -1374,7 +1376,7 @@ class FilamentSpoolStore:
             final = _final_filament(final_reading_g, final_grams, empty)
             # A reading that cannot be resolved closes on nothing, not on the ledger.
             weighed = final_reading_g is not None or final_grams is not None
-            closed = _closing_on(conn, spool_id, reason, final, grams_left=not weighed)
+            closed = _closing_on(conn, spool_id, reason, final, grams_left=not weighed, waste=True)
         left = closed["final_filament_g"]
         refused = _reading_notice(final_reading_g, final_grams, empty)
         return m.ClosingPreview(
@@ -1399,43 +1401,84 @@ class FilamentSpoolStore:
         spool. Nothing is written when it is already so. An archive (#7684) first books the
         final weighing when one is sent, as `add_event` books one (`_weigh_on`:
         `NoEmptyWeightError`, `ReadingBelowEmptyError`), then the ``archived`` event with
-        the closing (`ledger.closing`) as its ``data``, in one transaction."""
+        the closing (`ledger.closing`) as its ``data``, in one transaction. The grams left
+        after that weighing are booked as non-print waste (`archive_on`)."""
         if not archived:
             return self.update(spool_id, m.SpoolPatch(archived=False), actor=actor)
-        defaults = self._defaults()
         with self._pool.connection() as conn, conn.transaction():
-            # The tag before the spool, as every writer of bindings takes them.
-            conn.execute(
-                "SELECT t.id FROM filament_tags t JOIN filament_tag_bindings b"
-                " ON b.tag_id = t.id WHERE b.spool_id = %s AND b.unbound_at IS NULL"
-                " ORDER BY t.id FOR UPDATE OF t",
-                (spool_id,),
+            return self.archive_on(
+                conn,
+                spool_id,
+                reason=reason,
+                final_reading_g=final_reading_g,
+                final_grams=final_grams,
+                actor=actor,
             )
-            current = conn.execute(
-                f"SELECT {_SPOOL_COLUMNS} FROM filament_spools WHERE id = %s FOR UPDATE",
-                (spool_id,),
-            ).fetchone()
-            if current is None:
-                return None
-            if current["archived_at"] is None:
-                # The ledger before the final weighing: `ledger.closing` starts from the
-                # first manual reading, which the final weighing would otherwise be on a
-                # spool never weighed before (the review of #7844).
-                before = ledger.events(conn, spool_id)
-                final: float | None = None
-                if final_reading_g is not None or final_grams is not None:
-                    weighing = m.SpoolEventAdd(
-                        kind="weighed",
-                        source="scale" if final_reading_g is not None else "person",
-                        grams=final_grams,
-                        reading_g=final_reading_g,
-                    )
-                    weighed = self._weigh_on(conn, spool_id, weighing, actor, {})
-                    assert weighed is not None
-                    final = weighed.grams_after
-                closing = _closing_on(conn, spool_id, reason, final, events=before)
-                self._archive(conn, current, True, actor, data=closing)
-            return self._spool(conn, spool_id, defaults, self._clock())
+
+    def archive_on(
+        self,
+        conn: Conn,
+        spool_id: UUID,
+        *,
+        reason: m.ArchiveReason | None,
+        final_reading_g: float | None,
+        final_grams: float | None,
+        actor: str,
+        cause: str | None = None,
+    ) -> m.Spool | None:
+        """`archive`'s body for ``archived=True``, on ``conn`` in the caller's transaction
+        (it opens none and takes no pool connection, #7167); ``None`` for no such spool.
+        Order: the final weighing, then, when grams are left after it and ``reason`` is
+        not ``respooled``, one ``non_print_waste`` event (the zero reading, source
+        ``person``, ``data.waste_g`` the grams left, ``data.cause`` ``cause`` or
+        ``archive``), then the ``archived`` event. One fact is one event: the weighing is
+        never booked twice, so the waste is what is left after it. Only a person's archive
+        and a box's replace (``cause="replaced"``) book waste; `bulk_archive`, the pull's
+        archive and `respooled` do not."""
+        defaults = self._defaults()
+        # The tag before the spool, as every writer of bindings takes them.
+        conn.execute(
+            "SELECT t.id FROM filament_tags t JOIN filament_tag_bindings b"
+            " ON b.tag_id = t.id WHERE b.spool_id = %s AND b.unbound_at IS NULL"
+            " ORDER BY t.id FOR UPDATE OF t",
+            (spool_id,),
+        )
+        current = conn.execute(
+            f"SELECT {_SPOOL_COLUMNS} FROM filament_spools WHERE id = %s FOR UPDATE",
+            (spool_id,),
+        ).fetchone()
+        if current is None:
+            return None
+        if current["archived_at"] is None:
+            # The ledger before the final weighing: `ledger.closing` starts from the
+            # first manual reading, which the final weighing would otherwise be on a
+            # spool never weighed before (the review of #7844).
+            before = ledger.events(conn, spool_id)
+            final: float | None = None
+            if final_reading_g is not None or final_grams is not None:
+                weighing = m.SpoolEventAdd(
+                    kind="weighed",
+                    source="scale" if final_reading_g is not None else "person",
+                    grams=final_grams,
+                    reading_g=final_reading_g,
+                )
+                weighed = self._weigh_on(conn, spool_id, weighing, actor, {})
+                assert weighed is not None
+                final = weighed.grams_after
+            closing = _closing_on(conn, spool_id, reason, final, events=before, waste=True)
+            waste = closing["non_print_waste_g"]
+            if waste is not None:
+                ledger.record(
+                    conn,
+                    spool_id,
+                    "non_print_waste",
+                    source="person",
+                    absolute_g=0,
+                    actor=actor,
+                    data={"waste_g": waste, "cause": cause or "archive"},
+                )
+            self._archive(conn, current, True, actor, data=closing)
+        return self._spool(conn, spool_id, defaults, self._clock())
 
     def delete(self, spool_id: UUID, *, refusing: Iterable[m.EventKind] = _USED) -> bool:
         """Remove a spool that never printed, with its events, tag bindings and Bambuddy

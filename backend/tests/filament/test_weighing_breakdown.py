@@ -508,15 +508,15 @@ def test_archiving_with_a_final_reading_books_the_weighing_then_the_closing(
     archived_spool = store.archive(spool, True, actor="t", reason="finished", final_reading_g=230)
     assert archived_spool is not None and archived_spool.archived_at is not None
     events = store.events(spool)
-    assert [e.kind for e in events][-2:] == ["weighed", "archived"]
-    weighed, archived = events[-2], events[-1]
+    assert [e.kind for e in events][-3:] == ["weighed", "non_print_waste", "archived"]
+    weighed, archived = events[-3], events[-1]
     assert weighed.grams_after == 30 and weighed.data["reading_g"] == 230
     assert weighed.data["expected_g"] == 992 and weighed.at < archived.at
     assert archived.data["reason"] == "finished" and archived.data["final_filament_g"] == 30
     assert archived.data["started_g"] == 1000 and archived.data["started_from"] == "reading"
     assert archived.data["ledger_consumed_g"] == 8 and archived.data["scale_consumed_g"] == 970
     assert archived.data["drift_g"] == pytest.approx(-962)
-    assert archived_spool.grams_left == 30
+    assert archived_spool.grams_left == 0  # the 30 g left are non-print waste (#7167)
 
 
 @pg
@@ -584,7 +584,7 @@ def test_final_grams_are_the_filament_and_a_reading_with_them_is_the_net(pg_pool
     _weighed_once(pg_pool, spool)
     store = FilamentSpoolStore(pg_pool)
     store.archive(spool, True, actor="t", reason="finished", final_reading_g=240, final_grams=30)
-    weighed = store.events(spool)[-2]
+    weighed = store.events(spool)[-3]
     assert weighed.grams_after == 30 and weighed.data["empty_g"] == 210
     assert weighed.data["empty_source"] == "person"
 

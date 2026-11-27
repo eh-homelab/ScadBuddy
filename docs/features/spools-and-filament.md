@@ -320,6 +320,15 @@ label), the ledger used 508 g, the scale says 520 g were used; 12 g less than th
 expected." or "…the ledger used 508 g; not weighed at the end."), and the timeline shows
 the reason on the archive.
 
+Grams left at the end are waste (#7167). A person's archive books them as one
+`non_print_waste` event, the zero reading, after the final weighing and before the
+`archived` event. The waste is what is left after that weighing, so no gram is counted
+twice. The spool then has 0 g left, and `non_print_waste_g` in the closing says how many
+grams were written off. A `respooled` archive books none: the filament moves to the new
+reel. The bulk archive and the Bambuddy pull's archive book none. The event is not a
+plate, and it adds no shopping item of its own. The code is in
+`backend/scadbuddy/filament/spools.py` (`archive_on`).
+
 Respooled offers "Archive and continue as a new spool": the copy flow opens with the final
 filament as the new spool's grams and "Added full: No", and the save sends `continued_from`
 with `copy_of`. The source must be archived (422 `continued_from_not_archived`) and not

@@ -203,9 +203,15 @@ def _check_empty(conn: Conn, spool_id: UUID, event: m.SpoolEvent, now: Derived) 
     spool not already empty. Unknown grams that become 0 are no move (an import or the
     first reading of an old reel), nor is the pull's archived import of a spool Bambuddy
     had archived (``data.bb_archived_at``). Later writes on an empty spool add nothing."""
+    if event.kind == "non_print_waste":
+        # #7167: the archive's own zero reading is no run-out; the `archived` event decides.
+        return
     before = event.grams_before
     was_empty = before is not None and before <= 0
     if event.kind == "archived":
+        # The waste event before it took the spool to 0 g; what it wrote off was there.
+        if (event.data.get("non_print_waste_g") or 0) > 0:
+            was_empty = False
         if was_empty or "bb_archived_at" in event.data:
             return
         add_for_empty_on(conn, spool_id, cause="archived", at=event.at)
@@ -382,6 +388,7 @@ def closing(
     final_filament_g: float | None,
     reason: m.ArchiveReason | None,
     grams_left: float | None = None,
+    waste: bool = False,
 ) -> dict[str, Any]:
     """An ``archived`` event's ``data`` (#7684, spec §5.4): the reason and the lifetime
     reconciliation. ``started_g`` is the first ``scale`` or ``person`` reading
@@ -392,11 +399,21 @@ def closing(
     final weighing's filament, else ``grams_left`` (the spool's at the archive).
     ``scale_consumed_g`` is ``started_g`` less the final weighing's filament and ``drift_g``
     is ``ledger_consumed_g - scale_consumed_g`` (negative: the scale found less filament
-    than the ledger expected), both null without a weighing or a start. Grams to 0.1 g."""
+    than the ledger expected), both null without a weighing or a start. Grams to 0.1 g.
+    With ``waste`` (an archive that books it, #7167) it also holds ``non_print_waste_g``:
+    the final filament when above 0 and the reason is not ``respooled`` (the filament
+    moved to another reel), else null."""
     from scadbuddy.filament.metrics import plates  # metrics imports this module
 
     ordered = sorted(events, key=lambda e: (e.at, e.seq))
-    first = next((e for e in ordered if e.source in _MANUAL and e.grams_after is not None), None)
+    first = next(
+        (
+            e
+            for e in ordered
+            if e.source in _MANUAL and e.grams_after is not None and e.kind != "non_print_waste"
+        ),
+        None,
+    )
     started: float | None
     started_from: str | None
     since: datetime | None
@@ -415,7 +432,7 @@ def closing(
     if started is not None and final_filament_g is not None:
         scale = started - final_filament_g
         drift = None if consumed is None else consumed - scale
-    return {
+    data: dict[str, Any] = {
         "reason": reason,
         "started_g": _tenth(started),
         "started_from": started_from,
@@ -424,6 +441,11 @@ def closing(
         "scale_consumed_g": _tenth(scale),
         "drift_g": _tenth(drift),
     }
+    if waste:
+        left = _tenth(final)
+        booked = left is not None and left > 0 and reason != "respooled"
+        data["non_print_waste_g"] = left if booked else None
+    return data
 
 
 def _tenth(value: float | None) -> float | None:
