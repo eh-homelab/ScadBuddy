@@ -676,7 +676,7 @@ CMD ["scadbuddy-slicer"]
 # `profile-fetch-image` job, and is never published.
 # The base is python:3.12, the backend's `requires-python`, by tag and index digest
 # (Docker Hub through the buildx mirror; Dependabot moves it).
-FROM python:3.12-slim-bookworm@sha256:935c3c5b12357a7e10caa9c1e6ca5692344d97cf229832ef584be2cec9fc03df AS profile-fetch-deps
+FROM python:3.12-slim-bookworm@sha256:44cf1793efa7c7a476bb0f2cff81443f4a072c90c1cb127e2924933daa3e8c64 AS profile-fetch-deps
 
 # hadolint ignore=DL3008
 RUN apt-get update \
@@ -698,7 +698,7 @@ COPY backend/scadbuddy ./scadbuddy
 RUN uv sync --frozen --no-dev --group profile-fetch --no-editable \
     --no-install-package psycopg --no-install-package psycopg-binary --no-install-package psycopg-pool
 
-FROM python:3.12-slim-bookworm@sha256:935c3c5b12357a7e10caa9c1e6ca5692344d97cf229832ef584be2cec9fc03df AS profile-fetch
+FROM python:3.12-slim-bookworm@sha256:44cf1793efa7c7a476bb0f2cff81443f4a072c90c1cb127e2924933daa3e8c64 AS profile-fetch
 
 ARG TARGETARCH
 # Playwright publishes Chromium for amd64 and arm64, but no CI job builds arm64 and the
@@ -857,7 +857,7 @@ CMD ["/usr/local/bin/cups-start"]
 # `MEDIAMTX_VERSION` and `MEDIAMTX_SHA256`. Move the three ARGs and those two together,
 # and re-measure the MediaMTX facts in the camera spec §2
 # (docs/superpowers/specs/2026-11-23-printer-camera-recording-design.md).
-FROM python:3.12-slim-bookworm@sha256:935c3c5b12357a7e10caa9c1e6ca5692344d97cf229832ef584be2cec9fc03df AS mediamtx
+FROM python:3.12-slim-bookworm@sha256:44cf1793efa7c7a476bb0f2cff81443f4a072c90c1cb127e2924933daa3e8c64 AS mediamtx
 
 ARG TARGETARCH
 ARG MEDIAMTX_VERSION=v1.21.4
@@ -892,7 +892,7 @@ RUN case "$TARGETARCH" in \
 # `camera-deps` builds the venv as `profile-fetch-deps` does: no dev group, no editable
 # install, and no psycopg package. It needs git for the git-pinned
 # temporal-agent-harness. `camera` is the common runtime.
-FROM python:3.12-slim-bookworm@sha256:935c3c5b12357a7e10caa9c1e6ca5692344d97cf229832ef584be2cec9fc03df AS camera-deps
+FROM python:3.12-slim-bookworm@sha256:44cf1793efa7c7a476bb0f2cff81443f4a072c90c1cb127e2924933daa3e8c64 AS camera-deps
 
 # hadolint ignore=DL3008
 RUN apt-get update \
@@ -911,7 +911,7 @@ COPY backend/scadbuddy ./scadbuddy
 RUN uv sync --frozen --no-dev --no-editable \
     --no-install-package psycopg --no-install-package psycopg-binary --no-install-package psycopg-pool
 
-FROM python:3.12-slim-bookworm@sha256:935c3c5b12357a7e10caa9c1e6ca5692344d97cf229832ef584be2cec9fc03df AS camera
+FROM python:3.12-slim-bookworm@sha256:44cf1793efa7c7a476bb0f2cff81443f4a072c90c1cb127e2924933daa3e8c64 AS camera
 
 # CI builds and publishes amd64 only. Nothing here is arch-specific beyond the `mediamtx`
 # stage's per-arch pin, so arm64 builds too (both targets built and run on an arm64 host,
