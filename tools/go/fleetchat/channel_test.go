@@ -5,12 +5,17 @@ import (
 	"encoding/json"
 	"errors"
 	"os"
+	"slices"
 	"strings"
 	"testing"
 )
 
 // channelVectors are testdata/channel-vectors.json, which core's internal/fleet reads too.
-type channelVectors struct{ Valid, Legacy, Invalid []string }
+type channelVectors struct {
+	Valid, Legacy, Invalid []string
+	Segments               map[string]string // a reference's path segment
+	BadSegments            []string
+}
 
 func readChannelVectors(t *testing.T) channelVectors {
 	t.Helper()
@@ -22,7 +27,7 @@ func readChannelVectors(t *testing.T) channelVectors {
 	if err := json.Unmarshal(raw, &v); err != nil {
 		t.Fatal(err)
 	}
-	if len(v.Valid) == 0 || len(v.Legacy) == 0 || len(v.Invalid) == 0 {
+	if len(v.Valid) == 0 || len(v.Legacy) == 0 || len(v.Invalid) == 0 || len(v.Segments) == 0 || len(v.BadSegments) == 0 {
 		t.Fatal("channel-vectors.json lacks a list")
 	}
 	return v
@@ -45,6 +50,48 @@ func TestChannelRulesHoldToTheVectors(t *testing.T) {
 		if ValidChannel(ch) || legacyOnly(ch) || !errors.Is(checkChannel(ch), ErrBadChannel) {
 			t.Errorf("%q: ValidChannel %v, legacyOnly %v, checkChannel %v; want invalid",
 				ch, ValidChannel(ch), legacyOnly(ch), checkChannel(ch))
+		}
+	}
+}
+
+func TestAChannelSegmentRoundTrips(t *testing.T) {
+	v := readChannelVectors(t)
+	for _, ch := range append(append([]string{}, v.Valid...), v.Legacy...) {
+		want, encoded := v.Segments[ch]
+		if !encoded {
+			if strings.ContainsAny(ch, "/#") {
+				t.Errorf("%q has no entry in segments", ch)
+			}
+			want = ch
+		}
+		got := ChannelSegment(ch)
+		if got != want {
+			t.Errorf("ChannelSegment(%q) = %q; want %q", ch, got, want)
+		}
+		if back, err := ParseChannelSegment(got); err != nil || back != ch {
+			t.Errorf("ParseChannelSegment(%q) = %q, %v; want %q", got, back, err, ch)
+		}
+	}
+	for ch := range v.Segments {
+		if !slices.Contains(v.Valid, ch) {
+			t.Errorf("segments names %q, which is not a valid name", ch)
+		}
+	}
+	// A plain name sent encoded is the same channel.
+	if got, err := ParseChannelSegment(SegmentPrefix + "b3Bz"); err != nil || got != "ops" {
+		t.Errorf("ParseChannelSegment(\"~b3Bz\") = %q, %v; want \"ops\"", got, err)
+	}
+}
+
+func TestABadChannelSegmentIsRefused(t *testing.T) {
+	for _, seg := range readChannelVectors(t).BadSegments {
+		if got, err := ParseChannelSegment(seg); !errors.Is(err, ErrBadChannel) {
+			t.Errorf("ParseChannelSegment(%q) = %q, %v; want ErrBadChannel", seg, got, err)
+		}
+	}
+	for _, ch := range readChannelVectors(t).Invalid {
+		if _, err := ParseChannelSegment(ChannelSegment(ch)); !errors.Is(err, ErrBadChannel) {
+			t.Errorf("the segment of invalid %q was taken", ch)
 		}
 	}
 }

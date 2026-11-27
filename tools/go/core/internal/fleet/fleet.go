@@ -5,6 +5,7 @@ package fleet
 
 import (
 	"context"
+	"encoding/base64"
 	"errors"
 	"fmt"
 	"math"
@@ -93,10 +94,6 @@ func Routes(pool *pgxpool.Pool) []crud.Route {
 		{Method: "GET", Path: "/agents", Handle: f.agents},
 		{Method: "PUT", Path: "/channels/{name}/members/{session_id}", Handle: f.join},
 		{Method: "DELETE", Path: "/channels/{name}/members/{session_id}", Handle: f.leave},
-		// The same, with the channel in the query: a name with "/" or "#" must be escaped in a
-		// path, and the router leaves an escaped path to Python.
-		{Method: "PUT", Path: "/members/{session_id}", Handle: f.join},
-		{Method: "DELETE", Path: "/members/{session_id}", Handle: f.leave},
 		{Method: "GET", Path: "/agents/{session_id}/channels", Handle: f.channels},
 		{Method: "POST", Path: "/messages", Handle: f.send, MaxBody: messageBodyMax},
 		{Method: "GET", Path: "/agents/{session_id}/inbox", Handle: f.inbox},
@@ -129,17 +126,28 @@ func notMember(channel string) error {
 		fmt.Sprintf(`the agent is not a member of channel "%s"`, channel), "not-member")
 }
 
-// channelOf is a join's or leave's channel: the path's name, or else the query's channel.
-func channelOf(r *http.Request, p crud.Params) (string, error) {
+// segmentPrefix leads a path segment that carries a channel's name as the unpadded base64url
+// (RFC 4648 §5) of its UTF-8 bytes (#8149). A GitHub reference's "/" and "#" would need escapes
+// in the segment, and the router leaves a path with an escape in it to Python. "~" is unreserved
+// (RFC 3986), so no client escapes it, and neither a channel name nor base64url holds it. A
+// segment without it is the name itself. fleetchat's ChannelSegment and ParseChannelSegment
+// are the same rule, both held to tools/go/fleetchat/testdata/channel-vectors.json.
+const segmentPrefix = "~"
+
+// channelOf is a join's or leave's channel, from the path's {name} segment.
+func channelOf(p crud.Params) (string, error) {
 	loc := []string{"path", "name"}
-	name, inPath := p["name"]
-	if !inPath {
-		loc = []string{"query", "channel"}
-		values := r.URL.Query()["channel"]
-		if len(values) == 0 {
-			return "", httpx.Invalid(httpx.Issue{Loc: loc, Msg: "Field required"})
+	name := p["name"]
+	if enc, ok := strings.CutPrefix(name, segmentPrefix); ok {
+		raw, err := base64.RawURLEncoding.Strict().DecodeString(enc)
+		// The decoder skips CR and LF; only the one canonical encoding is taken.
+		if err != nil || base64.RawURLEncoding.EncodeToString(raw) != enc {
+			return "", httpx.Invalid(httpx.Issue{
+				Loc: loc,
+				Msg: fmt.Sprintf(`String after "%s" should be unpadded base64url`, segmentPrefix),
+			})
 		}
-		name = values[len(values)-1]
+		name = string(raw)
 	}
 	if isChannel(name) {
 		return name, nil
@@ -211,7 +219,7 @@ func (f *Fleet) agents(r *http.Request, _ crud.Params) (any, error) {
 
 // membership is the channel and the agent of a join or leave, the agent's row checked.
 func membership(r *http.Request, tx pgx.Tx, p crud.Params) (string, string, error) {
-	channel, err := channelOf(r, p)
+	channel, err := channelOf(p)
 	if err != nil {
 		return "", "", err
 	}

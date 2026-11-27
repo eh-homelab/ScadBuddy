@@ -65,9 +65,20 @@ leading or trailing `-`. A channel made with such a name keeps it (a join, leave
 works), but no new channel gets one (core: 422, reason `legacy-channel-name`). The rules are
 in `tools/go/fleetchat/service.go`, `tools/go/core/internal/fleet/fleet.go` and the
 `fleet_channels` CHECK (migration `20261127T0415Z_fleet_channel_names.sql`), all three tested
-against `tools/go/fleetchat/testdata/channel-vectors.json`. A join or leave of a reference
-puts the channel in the query (`…/fleet/members/{session_id}?channel=`), since core leaves a
-path with an escaped `/` or `#` to Python.
+against `tools/go/fleetchat/testdata/channel-vectors.json`. Existing channels keep their names.
+
+A join or leave names the channel in the `{name}` segment of
+`…/fleet/channels/{name}/members/{session_id}`. A plain name goes there as it is. A GitHub
+reference holds `/` and `#`, which a segment carries only percent-escaped, and core leaves a
+path with an escape in it to Python. So a reference goes as `~` followed by the unpadded
+base64url ([RFC 4648 §5](https://www.rfc-editor.org/rfc/rfc4648#section-5)) of its UTF-8 name:
+`eh-homelab/clusters#1234` is `~ZWgtaG9tZWxhYi9jbHVzdGVycyMxMjM0`. `~` is unreserved
+([RFC 3986 §2.3](https://www.rfc-editor.org/rfc/rfc3986#section-2.3)), so no client escapes it,
+and neither a channel name nor base64url holds it. Core refuses a padded, non-canonical or
+non-base64url `~` segment, and one whose name breaks the rule, with 422. fleetchat's
+`ChannelSegment` and `ParseChannelSegment` and core's `channelOf` hold to the vectors' `segments`
+and `badSegments` (owner decision 2026-11-27: the encoding goes in the existing segment, and no
+route is added).
 
 ### Virtual senders
 

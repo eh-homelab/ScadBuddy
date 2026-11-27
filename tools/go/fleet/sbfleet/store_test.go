@@ -87,9 +87,9 @@ func TestStoreRequests(t *testing.T) {
 		{"leave", `{"left":true}`, func(s fleetchat.Store) error { return s.Leave(ctx, sid, "ops") },
 			"DELETE", base + "/channels/ops/members/" + sid, "", ""},
 		{"join a reference", `{"joined":true}`, func(s fleetchat.Store) error { return s.Join(ctx, sid, "eh-homelab/clusters#1234") },
-			"PUT", base + "/members/" + sid, "channel=eh-homelab%2Fclusters%231234", ""},
+			"PUT", base + "/channels/~ZWgtaG9tZWxhYi9jbHVzdGVycyMxMjM0/members/" + sid, "", ""},
 		{"leave a run", `{"left":true}`, func(s fleetchat.Store) error { return s.Leave(ctx, sid, "eh-homelab/clusters/runs/99") },
-			"DELETE", base + "/members/" + sid, "channel=eh-homelab%2Fclusters%2Fruns%2F99", ""},
+			"DELETE", base + "/channels/~ZWgtaG9tZWxhYi9jbHVzdGVycy9ydW5zLzk5/members/" + sid, "", ""},
 		{"rewind", `{"seq":7}`, func(s fleetchat.Store) error { return s.Rewind(ctx, sid, 7) },
 			"PUT", base + "/agents/" + sid + "/cursor", "", `{"seq":7}`},
 	}

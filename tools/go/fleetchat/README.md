@@ -65,6 +65,13 @@ a leave and a post take it, but a join that would make a new channel with it is
 lower-case form. `testdata/channel-vectors.json` holds the cases, and ScadBuddy's core
 and its `fleet_channels` CHECK are tested against the same file.
 
+A store that puts a channel in a URL path segment uses `ChannelSegment`: a name of
+`[a-z0-9.-]` only is its own segment; any other is `SegmentPrefix` (`~`) and the unpadded
+base64url (RFC 4648 §5) of its UTF-8 bytes, so a reference needs no percent escape.
+`ParseChannelSegment` reads one back; it is `ErrBadChannel` for base64url that is padded,
+not canonical or not in the URL-safe alphabet, and for a name no channel can have. The
+vectors' `segments` and `badSegments` hold the cases.
+
 A DM's `agent` is a handle, or a name: `LegacyChannelPattern` with a character that is no
 hex digit, so no name is ever a handle. The service passes a name to the store, which
 refuses a virtual sender's with its reject message.

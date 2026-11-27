@@ -1,5 +1,5 @@
 {
-  "comment": "Fleet chat channel names (#8149). valid: a new channel may have it. legacy: valid only under the rule before #8149, kept by a channel that already exists. invalid: neither. fleetchat, core's internal/fleet and the fleet_channels CHECK hold to these.",
+  "comment": "Fleet chat channel names (#8149). valid: a new channel may have it. legacy: valid only under the rule before #8149, kept by a channel that already exists. invalid: neither. fleetchat, core's internal/fleet and the fleet_channels CHECK hold to these. segments: the URL path segment of each valid name that is not plain (a GitHub reference): \"~\" and the unpadded base64url of its UTF-8 bytes; every other valid or legacy name is its own segment. badSegments: segments that fleetchat's ParseChannelSegment and core's routes refuse.",
   "valid": [
     "ops",
     "a",
@@ -84,5 +84,36 @@
     "éh/clusters#1",
     "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa/b#1",
     "a/rrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrr#1"
+  ],
+  "segments": {
+    "eh-homelab/clusters#1234": "~ZWgtaG9tZWxhYi9jbHVzdGVycyMxMjM0",
+    "eh-homelab/scadbuddy#1": "~ZWgtaG9tZWxhYi9zY2FkYnVkZHkjMQ",
+    "a/b#1": "~YS9iIzE",
+    "0/0#9": "~MC8wIzk",
+    "eh-homelab/.github#9999999999": "~ZWgtaG9tZWxhYi8uZ2l0aHViIzk5OTk5OTk5OTk",
+    "eh-homelab/repo.name_x-y#42": "~ZWgtaG9tZWxhYi9yZXBvLm5hbWVfeC15IzQy",
+    "eh-homelab/-#1": "~ZWgtaG9tZWxhYi8tIzE",
+    "eh-homelab/clusters/runs/12345678901": "~ZWgtaG9tZWxhYi9jbHVzdGVycy9ydW5zLzEyMzQ1Njc4OTAx",
+    "a/b/runs/99999999999999999999": "~YS9iL3J1bnMvOTk5OTk5OTk5OTk5OTk5OTk5OTk",
+    "abbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb/rrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrr#1234567890": "~YWJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiL3JycnJycnJycnJycnJycnJycnJycnJycnJycnJycnJycnJycnJycnJycnJycnJycnJycnJycnJycnJycnJycnJycnJycnJycnJycnJycnJycnJycnJycnJycnJycnJycnJycnIjMTIzNDU2Nzg5MA",
+    "abbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb/rrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrr/runs/11111111111111111111": "~YWJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiL3JycnJycnJycnJycnJycnJycnJycnJycnJycnJycnJycnJycnJycnJycnJycnJycnJycnJycnJycnJycnJycnJycnJycnJycnJycnJycnJycnJycnJycnJycnJycnJycnJycnIvcnVucy8xMTExMTExMTExMTExMTExMTExMQ"
+  },
+  "badSegments": [
+    "~",
+    "~~YS9iIzE",
+    "~YS9iIzE=",
+    "~ZWgvY2x1c3RlcnMjMQ==",
+    "~ZWgvY2x1c3RlcnMjMTIzND4/",
+    "~ZWgvY2x1c3RlcnMjMT4+",
+    "~ZWgvY2x1c3RlcnMjMQAAA",
+    "~YR",
+    "~YQ\n",
+    "~Y Q",
+    "~_w",
+    "~RWgtaG9tZWxhYi9jbHVzdGVycyMx",
+    "~ZWgvY2x1c3RlcnMjMA",
+    "~YSBi",
+    "Ops",
+    "a b"
   ]
 }
