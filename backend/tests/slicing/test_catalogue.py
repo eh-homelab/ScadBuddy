@@ -548,14 +548,23 @@ def test_each_presets_own_setting_id_is_its_flattened_one() -> None:
             assert profiles.find(kind, own) == row.name
 
 
+#: The H2C 0.4 presets the image's tree has and Bambuddy's v02.08.02.61 recording
+#: (``slicer-presets-h2c.json``) lacks: v02.09.02.62 added the colour-mixing kit's
+#: filament (measured 2026-11-27 on that release's AppImage, #8325).
+H2C_ADDED_SINCE_RECORDING: dict[str, set[str]] = {
+    "process": set(),
+    "filament": {"Bambu PLA Palette @BBL H2C"},
+}
+
+
 @pytest.mark.requires_slicer_profiles
 def test_the_native_catalogue_matches_bambuddys_for_the_h2c() -> None:
     """Measured against ``slicer-presets-h2c.json`` (Bambuddy's catalogue for the H2C):
     every standard and cloud process and filament row is in the native catalogue with the
     same name and ``compatible_printers``, each cloud id maps to its name, and for the
-    H2C 0.4 the native catalogue offers every preset Bambuddy's does. The recording is
-    Bambuddy's catalogue of v02.08.02.61; a later image may add presets (v02.09.02.62 adds
-    ``Bambu PLA Palette @BBL H2C``, #8325), so the native side may offer more."""
+    H2C 0.4 the native catalogue offers Bambuddy's presets plus exactly
+    :data:`H2C_ADDED_SINCE_RECORDING`. The recording is Bambuddy's catalogue of
+    v02.08.02.61, so a bump that adds an H2C preset fails here until it is named there."""
     catalogue = native_catalogue(Profiles(SLICER_PROFILES_DIR))
     bambuddy = recording("slicer-presets-h2c.json")
     for field in ("process", "filament"):
@@ -573,6 +582,7 @@ def test_the_native_catalogue_matches_bambuddys_for_the_h2c() -> None:
         theirs = {row["name"] for row in rows if h2c in (row["compatible_printers"] or [])}
         ours = {name for name, row in native_rows.items() if h2c in row.compatible_printers}
         assert theirs <= ours, (field, sorted(theirs - ours))
+        assert ours - theirs == H2C_ADDED_SINCE_RECORDING[field], field
     for row in bambuddy["cloud"]["printer"]:
         assert catalogue.native_ref(PresetRef(source="cloud", id=row["id"])) == PresetRef(
             source="standard", id=row["name"]

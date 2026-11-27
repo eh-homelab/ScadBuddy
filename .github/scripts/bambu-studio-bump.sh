@@ -23,7 +23,7 @@ set -euo pipefail
 
 root="${1:-.}"
 dockerfile="$root/Dockerfile"
-releases_url="${BAMBU_STUDIO_RELEASES_URL:-https://api.github.com/repos/bambulab/BambuStudio/releases?per_page=30}"
+releases_url="${BAMBU_STUDIO_RELEASES_URL:-https://api.github.com/repos/bambulab/BambuStudio/releases?per_page=100}"
 work="$(mktemp -d)"
 trap 'rm -rf "$work"' EXIT
 
@@ -57,6 +57,11 @@ version="$(jq -r '.[] | select(.draft == false and .prerelease == false) | .tag_
 if [ -z "$version" ]; then
   echo "bambu-studio-bump: no stable vNN.NN.NN.NN release in the listing" >&2
   exit 1
+fi
+
+# A listing that no longer reaches the pinned release may hide a newer one too.
+if ! jq -e --arg tag "v$current" 'any(.[]; .tag_name == $tag)' "$work/releases.json" >/dev/null; then
+  echo "bambu-studio-bump: v$current, the pinned release, is not in the listing" >&2
 fi
 
 # Equal or older is no bump.
