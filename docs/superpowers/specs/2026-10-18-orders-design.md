@@ -1216,7 +1216,11 @@ makes is that feature's, not this one's.
 
 **As built (#4253).** `orders/archives.py`. A print run queues one item per plate, so an
 attempt has one archive per plate: `OrderStore.run_archives` finds them through
-`print_sends` (by `run_id`) and `print_links` (by queue item). Once the attempt's print
+`print_sends` (by `run_id`) and `print_links` (by queue item). A LAN start has no queue
+item, so its archive is found by the start's record, `lan_print_archives` (by `run_id`,
+#8124). The API writes that row when exactly one start of the run has the job name that
+the archive's file carries (`print_history._run_by_file`), on the print's read or as the
+Prints list links it, so two prints of one file never mix. Once the attempt's print
 settled it copies `archive_ids`, the archives' earliest start and latest end as its
 `started_at`/`finished_at`, and `actual_seconds` and `actual_grams` summed
 (`total_filament_actual_grams`, else `filament_used_grams`). It does not copy the
