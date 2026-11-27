@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"maps"
 	"slices"
 	"unicode/utf16"
 
@@ -326,9 +327,10 @@ func writeTools(ctx context.Context, tx pgx.Tx, source string, tools []entry, by
 // toolRows is registry.ts toolRows: a disabled tool is off, whatever its tier.
 func toolRows(tiers map[string]string, disabled []string) []entry {
 	out := []entry{}
-	for tool, tier := range tiers {
+	// In name order, so a write's rows are the same each time (a Go map has no order).
+	for _, tool := range slices.Sorted(maps.Keys(tiers)) {
 		if !slices.Contains(disabled, tool) {
-			out = append(out, entry{tool, tier})
+			out = append(out, entry{tool, tiers[tool]})
 		}
 	}
 	for _, tool := range disabled {
