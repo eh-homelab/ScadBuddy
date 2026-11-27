@@ -3,6 +3,7 @@ import { http, HttpResponse } from 'msw'
 import { describe, expect, it } from 'vitest'
 import { LOST_PRESET, presetsOff } from '../../mocks/features/filament/presets'
 import { server } from '../../mocks/server'
+import { choose } from '../../test/select'
 import { renderPage } from '../../test/utils'
 import { PresetPage } from './PresetPage'
 
@@ -55,8 +56,8 @@ describe('the preset page', () => {
   it('compares any two versions the person picks', async () => {
     const { user } = show(3)
     const compare = await screen.findByRole('region', { name: 'Compare versions' })
-    await user.selectOptions(within(compare).getByLabelText('From'), '2')
-    await user.selectOptions(within(compare).getByLabelText('To'), '1')
+    await choose(user, within(compare).getByRole('combobox', { name: 'From' }), 'v2')
+    await choose(user, within(compare).getByRole('combobox', { name: 'To' }), 'v1')
     const table = await within(compare).findByRole('table', { name: 'Changed keys, v2 to v1' })
     const row = within(table).getByText('nozzle_temperature').closest('tr')!
     expect(within(row).getByText('220')).toBeInTheDocument()
@@ -88,7 +89,7 @@ describe('the preset page', () => {
   it("shows a message when a version's document is missing", async () => {
     show(LOST_PRESET)
     const compare = await screen.findByRole('region', { name: 'Compare versions' })
-    await waitFor(() => expect(within(compare).getByLabelText('To')).toHaveValue('2'))
+    await waitFor(() => expect(within(compare).getByRole('combobox', { name: 'To' })).toHaveTextContent('v2'))
     expect(await within(compare).findByText('The document of one of these versions is not in the store.')).toBeInTheDocument()
     expect(screen.getByRole('list', { name: 'Versions' })).toBeInTheDocument()
   })
@@ -119,8 +120,8 @@ describe('the preset page', () => {
     const compare = await screen.findByRole('region', { name: 'Compare versions' })
     expect(await within(compare).findByText('The blob store did not answer. Try again.')).toBeInTheDocument()
     expect(calls).toBe(1)
-    await user.selectOptions(within(compare).getByLabelText('From'), '2')
-    await user.selectOptions(within(compare).getByLabelText('From'), '1')
+    await choose(user, within(compare).getByRole('combobox', { name: 'From' }), 'v2')
+    await choose(user, within(compare).getByRole('combobox', { name: 'From' }), 'v1')
     await waitFor(() => expect(calls).toBe(2))
     expect(await within(compare).findByText('No key changed.')).toBeInTheDocument()
   })
@@ -192,7 +193,7 @@ describe('the preset page', () => {
     )
     show(3)
     const compare = await screen.findByRole('region', { name: 'Compare versions' })
-    expect(within(compare).getByLabelText('From')).toHaveValue('1')
+    expect(within(compare).getByRole('combobox', { name: 'From' })).toHaveTextContent('v1')
     await waitFor(() => expect(asked).toEqual(['1:3']))
   })
 

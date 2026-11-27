@@ -6,6 +6,7 @@ import { diffPreset, getPreset, problemCode, routeMissing, type PresetDetail, ty
 import { FilamentSearchBox } from '../../components/filament/FilamentSearchBox'
 import { filamentLinks } from '../../lib/filamentLinks'
 import { Button } from '@/components/ui/button'
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select'
 import { cn } from '@/lib/utils'
 import { count } from './plural'
 
@@ -177,18 +178,19 @@ function Versions({ preset, diffs }: { preset: PresetDetail; diffs: Diffs }) {
 
 function VersionSelect({ label, value, versions, onChange }: { label: string; value: number; versions: number[]; onChange: (version: number) => void }) {
   return (
-    <label className="flex items-center gap-2 text-[13px]">
-      {label}
-      <select
-        value={value}
-        onChange={(event) => onChange(Number(event.target.value))}
-        className="h-7 rounded-md border border-input bg-background px-2 text-[13px] tabular-nums outline-none focus-visible:ring-2 focus-visible:ring-ring/50"
-      >
-        {versions.map((n) => (
-          <option key={n} value={n}>{`v${n}`}</option>
-        ))}
-      </select>
-    </label>
+    <div className="flex items-center gap-2 text-[13px]">
+      <span aria-hidden="true">{label}</span>
+      <Select value={String(value)} onValueChange={(next) => onChange(Number(next))}>
+        <SelectTrigger aria-label={label} className="h-7 w-auto text-[13px] tabular-nums">
+          <SelectValue />
+        </SelectTrigger>
+        <SelectContent>
+          {versions.map((n) => (
+            <SelectItem key={n} value={String(n)} className="tabular-nums">{`v${n}`}</SelectItem>
+          ))}
+        </SelectContent>
+      </Select>
+    </div>
   )
 }
 
