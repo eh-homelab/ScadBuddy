@@ -722,7 +722,11 @@ matches `[a-z][a-z0-9_]{0,63}`. Limits: 200 keys per entity, 2000 characters per
   printer's from the Locations tab). The printer labels first make the place of each AMS unit,
   slot and external holder the printer's latest report lists; a printer with no such report is
   named on the page. Spool labels keep `scadbuddy:spool:<id>`. A place links to its own page,
-  `/filament/locations/<id>`.
+  `/filament/locations/<id>`. `POST /api/v1/filament/labels` also takes `type_ids`, `item_ids`
+  and `kind_ids` (#7169), after the spools and places. A spool type's, an item's and a kind's
+  label is the place label's shape: its code (`T-<n>`, `I-<n>`, `K-<n>`), its name and the QR
+  `<base>/x/<code>`. A type's name is its code and colour name, as `GET /api/v1/codes` gives
+  it (`codes/resolve.py` `NAME_SQL`). An archived row still gets its label.
 - Label templates and the PDF (#7157, plan
   `docs/superpowers/plans/2026-11-23-label-templates-pdf.md`): the labels page offers SB's
   50 x 25 mm roll label, Bambuddy's six templates (two box labels, two AMS holder labels and
@@ -742,7 +746,7 @@ matches `[a-z][a-z0-9_]{0,63}`. Limits: 200 keys per entity, 2000 characters per
   gives each page of the PDF as a greyscale PNG at the chosen dpi, drawn by PDFium
   (`backend/scadbuddy/filament/label_png.py`), so the PNG and the PDF never disagree. Each PNG
   carries its dpi, so label printer software prints it at its size. One page is `labels.png`;
-  more pages are `labels.zip`, a stored ZIP of `spool-<number>.png` and `L-<n>.png` (one label
+  more pages are `labels.zip`, a stored ZIP of `spool-<number>.png` and `<code>.png` (one label
   a page) or `sheet-<n>.png` (a sheet). Past 400 megapixels in all, the route answers 422
   `png_too_large`: choose PDF, a lower dpi or fewer labels. The labels page has the choice
   beside the template: PDF or PNG, and for PNG the dpi (203, 300 or 600). It saves each change

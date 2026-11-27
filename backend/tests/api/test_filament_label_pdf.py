@@ -22,6 +22,10 @@ from scadbuddy.filament import label_fonts, label_pdf, label_png
 from scadbuddy.filament.label_output import ALL_FIELDS, DEFAULT_FIELDS, LabelField
 from scadbuddy.filament.label_pdf import Label, Layout
 from scadbuddy.filament.label_templates import LabelTemplate
+from tests.api.test_filament import _type
+from tests.api.test_inventory import _item, _kind
+from tests.api.test_settings_runtime import _state
+from tests.support.operations import press
 
 pytestmark = pytest.mark.requires_postgres
 
@@ -180,7 +184,7 @@ def test_a_place_label_opens_the_label_address(
     assert client.post(PDF, json=body).status_code == 200
     code = f"L-{place['number']}"
     assert drawn[-1][0] == [
-        label_pdf.PlaceLabel(code=code, name="Dry box", qr=f"https://sb.example.com/x/{code}")
+        label_pdf.CodeLabel(code=code, name="Dry box", qr=f"https://sb.example.com/x/{code}")
     ]
 
 
@@ -204,7 +208,7 @@ def test_a_dry_box_gets_a_place_label(
     assert client.post(PDF, json={"location_ids": [box["id"]]}).status_code == 200
     code = f"L-{box['number']}"
     assert drawn[-1][0] == [
-        label_pdf.PlaceLabel(code=code, name="Box 7", qr=f"https://sb.example.com/x/{code}")
+        label_pdf.CodeLabel(code=code, name="Box 7", qr=f"https://sb.example.com/x/{code}")
     ]
 
 
@@ -246,6 +250,122 @@ def test_an_unknown_id_is_a_404_that_names_it(client: TestClient) -> None:
     )
     assert answer.status_code == 404, answer.text
     assert gone in answer.text
+
+
+BASE = {"filament_label_base_url": "https://sb.example.com"}
+
+
+def _number(client: TestClient, table: str, row_id: object) -> int:
+    """An item's or a kind's number: their read models do not carry it (#8323 adds it)."""
+    with _state(client).refs.pool.connection() as conn:
+        row = conn.execute(f"SELECT number FROM {table} WHERE id = %s", (row_id,)).fetchone()
+    assert row is not None
+    return int(row["number"])
+
+
+def test_a_type_label_opens_the_label_address(
+    client: TestClient, drawn: list[tuple[list[Label], LabelTemplate, Layout]]
+) -> None:
+    made = _type(client, code="10101", colour_name="Charcoal")
+    assert client.put(SETTINGS, json=BASE).status_code == 200
+    answer = client.post(PDF, json={"type_ids": [made["id"]]})
+    assert answer.status_code == 200, answer.text
+    code = f"T-{made['number']}"
+    assert drawn[-1][0] == [
+        label_pdf.CodeLabel(code=code, name="10101 Charcoal", qr=f"https://sb.example.com/x/{code}")
+    ]
+
+
+def test_a_type_label_needs_the_label_address(client: TestClient) -> None:
+    made = _type(client)
+    refused = client.post(PDF, json={"type_ids": [made["id"]]})
+    assert refused.status_code == 409, refused.text
+    assert refused.json()["code"] == "no_label_base"
+
+
+def test_an_item_and_a_kind_get_code_labels(
+    client: TestClient, drawn: list[tuple[list[Label], LabelTemplate, Layout]]
+) -> None:
+    kind = _kind(client, name=f"Fasteners {uuid4().hex[:6]}")
+    item = _item(client, kind["id"])
+    assert client.put(SETTINGS, json=BASE).status_code == 200
+    answer = client.post(PDF, json={"item_ids": [item["id"]], "kind_ids": [kind["id"]]})
+    assert answer.status_code == 200, answer.text
+    item_code = f"I-{_number(client, 'items', item['id'])}"
+    kind_code = f"K-{_number(client, 'item_kinds', kind['id'])}"
+    assert drawn[-1][0] == [
+        label_pdf.CodeLabel(
+            code=item_code, name=item["name"], qr=f"https://sb.example.com/x/{item_code}"
+        ),
+        label_pdf.CodeLabel(
+            code=kind_code, name=kind["name"], qr=f"https://sb.example.com/x/{kind_code}"
+        ),
+    ]
+
+
+def test_an_archived_item_still_gets_its_label(
+    client: TestClient, drawn: list[tuple[list[Label], LabelTemplate, Layout]]
+) -> None:
+    item = _item(client)
+    archived = client.post(f"/api/v1/inventory/items/{item['id']}/archive", headers=press())
+    assert archived.status_code == 200, archived.text
+    assert client.put(SETTINGS, json=BASE).status_code == 200
+    answer = client.post(PDF, json={"item_ids": [item["id"]]})
+    assert answer.status_code == 200, answer.text
+    assert [label.name for label in drawn[-1][0] if isinstance(label, label_pdf.CodeLabel)] == [
+        item["name"]
+    ]
+
+
+def test_an_unknown_type_is_404(client: TestClient) -> None:
+    assert client.put(SETTINGS, json=BASE).status_code == 200
+    gone = str(uuid4())
+    answer = client.post(PDF, json={"type_ids": [_type(client)["id"], gone]})
+    assert answer.status_code == 404, answer.text
+    assert f"no spool type {gone}" in answer.text
+
+
+def test_the_labels_keep_the_subject_order(
+    client: TestClient, drawn: list[tuple[list[Label], LabelTemplate, Layout]]
+) -> None:
+    spool, place, made = _spool(client), _place(client, "Shelf 4"), _type(client)
+    kind = _kind(client, name=f"Fasteners {uuid4().hex[:6]}")
+    item = _item(client, kind["id"])
+    assert client.put(SETTINGS, json=BASE).status_code == 200
+    body = {
+        "kind_ids": [kind["id"]],
+        "item_ids": [item["id"]],
+        "type_ids": [made["id"]],
+        "location_ids": [place["id"]],
+        "spool_ids": [spool["id"]],
+    }
+    assert client.post(PDF, json=body).status_code == 200
+    assert [label.qr for label in drawn[-1][0]] == [
+        f"scadbuddy:spool:{spool['id']}",
+        f"https://sb.example.com/x/L-{place['number']}",
+        f"https://sb.example.com/x/T-{made['number']}",
+        f"https://sb.example.com/x/I-{_number(client, 'items', item['id'])}",
+        f"https://sb.example.com/x/K-{_number(client, 'item_kinds', kind['id'])}",
+    ]
+
+
+def test_the_cap_counts_every_list(client: TestClient) -> None:
+    body = {
+        "spool_ids": [str(uuid4()) for _ in range(60)],
+        "item_ids": [str(uuid4()) for _ in range(41)],
+    }
+    answer = client.post(PDF, json=body)
+    assert answer.status_code == 422, answer.text
+
+
+def test_a_png_of_one_type_label_is_named_by_its_code(client: TestClient) -> None:
+    first, second = _type(client, code="A1"), _type(client, code="B2")
+    assert client.put(SETTINGS, json=BASE).status_code == 200
+    body = {"type_ids": [first["id"], second["id"]], "format": "png", "layout": "roll"}
+    answer = client.post(PDF, json=body)
+    assert answer.status_code == 200, answer.text
+    with zipfile.ZipFile(io.BytesIO(answer.content)) as archive:
+        assert archive.namelist() == [f"T-{first['number']}.png", f"T-{second['number']}.png"]
 
 
 @pytest.mark.parametrize(

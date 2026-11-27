@@ -605,10 +605,15 @@ MAX_LABELS = 100
 
 
 class LabelsRequest(_In):
-    """#7157: the labels of these spools, then these places, in the order sent."""
+    """#7157: the labels of these spools, then these places, in the order sent. #7169: then
+    these spool types, items and item kinds."""
 
     spool_ids: list[UUID] = Field(default_factory=list, max_length=MAX_LABELS)
     location_ids: list[UUID] = Field(default_factory=list, max_length=MAX_LABELS)
+    type_ids: list[UUID] = Field(default_factory=list, max_length=MAX_LABELS)
+    item_ids: list[UUID] = Field(default_factory=list, max_length=MAX_LABELS)
+    #: An item kind's id is its text id (`printer`, `k12`).
+    kind_ids: list[str] = Field(default_factory=list, max_length=MAX_LABELS)
     #: ``None``: the stored setting `filament_label_template`.
     template: LabelTemplateChoice | None = None
     #: A one-label template: one label a page (``roll``) or packed on Letter paper
@@ -620,11 +625,21 @@ class LabelsRequest(_In):
     #: The spool label's fields (R-7216-9), put in their print order; ``None``: the setting's.
     fields: LabelFields | None = None
 
+    @property
+    def count(self) -> int:
+        """How many labels the request names."""
+        return (
+            len(self.spool_ids)
+            + len(self.location_ids)
+            + len(self.type_ids)
+            + len(self.item_ids)
+            + len(self.kind_ids)
+        )
+
     @model_validator(mode="after")
     def _one_to_max(self) -> LabelsRequest:
-        count = len(self.spool_ids) + len(self.location_ids)
-        if not 1 <= count <= MAX_LABELS:
-            raise ValueError(f"name 1 to {MAX_LABELS} spools and places")
+        if not 1 <= self.count <= MAX_LABELS:
+            raise ValueError(f"name 1 to {MAX_LABELS} spools, places, types, items and kinds")
         return self
 
 
