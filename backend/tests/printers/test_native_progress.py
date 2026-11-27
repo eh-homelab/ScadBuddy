@@ -384,6 +384,19 @@ def test_a_start_ends_when_the_printer_stops_printing(
 
 
 @pytest.mark.parametrize(
+    "data",
+    [{"gcode_state": "FINISH"}, {"gcode_state": "FAILED"}, {"gcode_state": "IDLE"}],
+    ids=["finish", "failed", "idle"],
+)
+def test_a_start_records_when_the_report_that_ended_it_was_seen(data: dict[str, Any]) -> None:
+    """#8321: the end is the time of the report that shows it, not the clock of the
+    wait, so an order attempt reads each plate's seconds from it."""
+    assert OURS.ended_at is None
+    ended = lan_ended(report(seconds=600, **data), OURS, seen=True)
+    assert ended is not None and ended.ended_at == at(seconds=600)
+
+
+@pytest.mark.parametrize(
     "value",
     [
         None,

@@ -166,19 +166,24 @@ def lan_facts(record: LanRecord) -> OwnFacts:
 
     - The start is the first start's ``started_at``: the report that showed the printer
       take the plate.
-    - Each start ends at the printer report that showed its plate end, which the ledger
-      booked (`filament/prints.py` `plate_ended`, ``data.ended`` ``report``). The last
-      start with no such end ends when the run's follow read the print settled
+    - Each start ends at the printer report that showed its plate end. The start records
+      that time itself (``LanStarted.ended_at``, #8321) once a later start of the run
+      waited for it. A start with no such time ends where the ledger booked its end at a
+      report (`filament/prints.py` `plate_ended`, ``data.ended`` ``report``). The last
+      start with neither ends when the run's follow read the print settled
       (``print_outcomes.settled_at``). The end is the last start's end.
     - The seconds are the sum over the starts of the end less the start. An earlier start
       with no timed end has no end in the record, so there are no seconds.
-    - The grams are what the ledger booked as used: each start books the sliced grams of
-      each slot whose tray holds an SB spool, and its end books them as the actual when
-      the plate printed to the end (`filament/print_uses.py`). The ledger is ScadBuddy's
-      record of what each plate took off a spool, so it is the record closest to what
-      printed. There are no grams when a start booked no use, when a use is still open,
-      or when an end dropped its estimate (a plate that did not finish): the record does
-      not say what such a plate used.
+    - The grams are the plates' sliced grams (``LanStarted.grams_by_slot``, #8321, every
+      slot whatever its tray holds) when every plate printed to the end: each earlier
+      start ended ``done`` and the run's outcome is ``finished``. Sliced grams are what
+      the ledger books as the actual for such a plate too.
+    - Else the grams are what the ledger booked as used: each start books the sliced grams
+      of each slot whose tray holds an SB spool, and its end books them as the actual when
+      the plate printed to the end (`filament/print_uses.py`). There are no grams when a
+      start booked no use, when a use is still open, or when an end dropped its estimate
+      (a plate that did not finish): the record does not say what such a plate used. A
+      start from before #8321 has no sliced grams, so its run takes this rule.
     """
     starts = record.starts
     timed: dict[str, datetime] = {}
@@ -186,7 +191,7 @@ def lan_facts(record: LanRecord) -> OwnFacts:
         if use.timed and use.ended_at is not None:
             first = timed.get(use.subtask)
             timed[use.subtask] = use.ended_at if first is None else min(first, use.ended_at)
-    ends = [timed.get(start.subtask_name) for start in starts]
+    ends = [start.ended_at or timed.get(start.subtask_name) for start in starts]
     if ends[-1] is None:
         ends[-1] = record.settled_at
     seconds: int | None = None
@@ -199,7 +204,10 @@ def lan_facts(record: LanRecord) -> OwnFacts:
         seconds = round(sum(spans))
     booked = {use.subtask for use in record.uses}
     grams: float | None = None
-    if (
+    printed = record.outcome == "finished" and all(start.ended == "done" for start in starts[:-1])
+    if printed and all(start.grams_by_slot for start in starts):
+        grams = sum(sum(start.grams_by_slot.values()) for start in starts)
+    elif (
         record.uses
         and all(start.subtask_name in booked for start in starts)
         and all(use.grams is not None and use.applied for use in record.uses)

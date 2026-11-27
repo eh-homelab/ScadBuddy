@@ -162,6 +162,9 @@ class LanRecord:
     settled_at: datetime | None
     #: What the starts booked in the filament ledger, one per start and slot.
     uses: list[RunUse]
+    #: How the run's follow read the print end (``print_outcomes.outcome``:
+    #: ``finished``, ``failed``, ``cancelled`` or ``unknown``); ``None`` until then.
+    outcome: str | None = None
 
 
 class ArchiveCopyExistsError(ValueError):
@@ -2264,12 +2267,12 @@ class OrderStore:
     def lan_record(self, run_id: str) -> LanRecord | None:
         """ScadBuddy's own record of a LAN run (#8282): the starts its result lists
         (``print_runs.result.lan``), when its follow read the print settled
-        (``print_outcomes.settled_at``), and what its starts booked in the filament ledger
-        (`filament/prints.py` `run_uses`). None for a run with no LAN start (Bambuddy's
-        queue), or whose row is pruned."""
+        (``print_outcomes.settled_at``) and how it ended (``print_outcomes.outcome``), and
+        what its starts booked in the filament ledger (`filament/prints.py` `run_uses`).
+        None for a run with no LAN start (Bambuddy's queue), or whose row is pruned."""
         with self._read(None) as c:
             row = c.execute(
-                "SELECT r.result -> 'lan' AS lan, o.settled_at FROM print_runs r"
+                "SELECT r.result -> 'lan' AS lan, o.settled_at, o.outcome FROM print_runs r"
                 " LEFT JOIN print_outcomes o ON o.run_id = r.id WHERE r.id = %s",
                 (run_id,),
             ).fetchone()
@@ -2277,7 +2280,9 @@ class OrderStore:
                 return None
             starts = _LAN_STARTS.validate_python(row["lan"])
             uses = run_uses(c, run_id)
-        return LanRecord(starts=starts, settled_at=row["settled_at"], uses=uses)
+        return LanRecord(
+            starts=starts, settled_at=row["settled_at"], uses=uses, outcome=row["outcome"]
+        )
 
     def lan_runs(self, run_subject: str, subtask_names: list[str]) -> list[PrintRun]:
         """The subject's runs with a LAN start under one of ``subtask_names``, as

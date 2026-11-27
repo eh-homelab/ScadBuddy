@@ -1241,13 +1241,16 @@ rule. A LAN attempt (#8282) takes each of these facts from ScadBuddy's own recor
 run instead (`OrderStore.lan_record`, `archives.lan_facts`), and an archive's only where
 that record gives none; the archive gives its media. The start is the first start's
 `started_at` in `print_runs.result.lan`. Each start ends at the printer report that
-showed its plate end, as the filament ledger booked it (`filament/prints.py`
-`plate_ended`), and the last start with no such end ends at `print_outcomes.settled_at`;
+showed its plate end: the start's own `ended_at` (#8321, set when a later start waited
+for it), else that end as the filament ledger booked it (`filament/prints.py`
+`plate_ended`), and the last start with neither ends at `print_outcomes.settled_at`;
 the end is the last start's end. The seconds are the sum of each start's span; an earlier
-start with no timed end gives none. The grams are the ledger's `print_ended` grams of the
-run's uses (`prints.run_uses`): each start books its sliced grams per slot whose tray
-holds an SB spool, so there are none when a start booked no use, a use is still open, or
-a plate did not finish (its end drops the estimate). A LAN attempt writes these with no
+start with no timed end gives none. The grams are the starts' own sliced grams
+(`grams_by_slot`, #8321, every slot) when every plate printed to the end (each earlier
+start ended `done` and the outcome is `finished`). Else they are the ledger's
+`print_ended` grams of the run's uses (`prints.run_uses`): each start books its sliced
+grams per slot whose tray holds an SB spool, so there are none when a start booked no
+use, a use is still open, or a plate did not finish (its end drops the estimate). A LAN attempt writes these with no
 Bambuddy and no archive too. It does not copy the
 outcome: the attempt's is the print path's (`print_outcomes`), read from the same print.
 The times are copied once, told by `archive_copied` (#5273), so one a person corrected

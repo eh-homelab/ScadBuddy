@@ -60,6 +60,14 @@ class LanStarted(BaseModel):
     #: while it is the printer's print, read from the report.
     ended: Stage | None = None
     ended_message: str | None = None
+    #: When the report that showed its end was seen (#8321), set with ``ended``. An
+    #: order attempt reads its seconds by it (`orders/archives.py` `lan_facts`). ``None``
+    #: while ``ended`` is, and on a start from before it.
+    ended_at: datetime | None = None
+    #: The plate's sliced grams per filament slot (#8321), from its upload
+    #: (`LanUploaded.grams_by_slot`), for every slot whatever its tray holds. Empty on a
+    #: start from before it, or for a file that does not say.
+    grams_by_slot: dict[int, float] = Field(default_factory=dict)
     #: The run that started it (#4543): its rack picks are keyed by the run and
     #: ``subtask_name``, and settled by ``lan_wait`` as it waits it out. ``None`` on a
     #: start from before it.

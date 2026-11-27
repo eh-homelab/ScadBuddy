@@ -29,6 +29,7 @@ from scadbuddy.filament import prints
 from scadbuddy.filament.catalog import CatalogStore
 from scadbuddy.filament.models import Material, SpoolCreate
 from scadbuddy.filament.print_uses import SlotUse, record_uses, settle_uses
+from scadbuddy.filament.prints import RunUse
 from scadbuddy.filament.spools import FilamentSpoolStore
 from scadbuddy.operations.claims import ClaimStore
 from scadbuddy.orders import archives as archives_module
@@ -38,6 +39,7 @@ from scadbuddy.orders.archives import (
     attempt_archives,
     copy_check,
     copy_in,
+    lan_facts,
     mirror_archives,
     mirror_attempt,
     mirror_run,
@@ -64,7 +66,8 @@ from scadbuddy.orders.models import (
     OrderItem,
 )
 from scadbuddy.orders.printing import listen_for_prints
-from scadbuddy.orders.store import OrderStore
+from scadbuddy.orders.store import LanRecord, OrderStore
+from scadbuddy.printers.lan_models import LanStarted
 from scadbuddy.store.cache import CachedBlobStore
 from scadbuddy.store.content import ContentStore
 from scadbuddy.store.local import LocalBlobStore
@@ -633,13 +636,14 @@ def own_lan_print(
     timed_ends: dict[int, timedelta] | None = None,
     settled_after: timedelta,
     archive_id: int | None = 370,
+    fields: dict[int, dict[str, Any]] | None = None,
 ) -> tuple[Order, OrderItem, Fulfilment, str]:
     """An attempt whose LAN run started a plate at each of ``starts`` after `T0` (plate
     numbers from 1), as its result records them (#8282). ``uses`` gives the grams each
     plate's slots booked on SB spools; ``timed_ends`` the plates a printer report ended,
     after `T0`. The follow reads the print settled ``settled_after`` `T0`, and the settle
     books every use the reports did not end. With ``archive_id``, the archive the first
-    start became."""
+    start became. ``fields`` adds fields to a plate's start in the result (#8321)."""
     order, item = shop.accepted()
     run_id = run_row(pool)
     names = [f"scadbuddy-{run_id[:8]}-p{n}" for n in range(1, len(starts) + 1)]
@@ -648,7 +652,12 @@ def own_lan_print(
         "copies": 1,
         "path": "native",
         "lan": [
-            {"subtask_name": name, "started_at": (T0 + at).isoformat(), "plate_id": n}
+            {
+                "subtask_name": name,
+                "started_at": (T0 + at).isoformat(),
+                "plate_id": n,
+                **(fields or {}).get(n, {}),
+            }
             for n, (name, at) in enumerate(zip(names, starts, strict=True), start=1)
         ],
     }
@@ -806,6 +815,135 @@ async def test_a_lan_attempt_takes_its_own_record_without_bambuddy(
     assert kept.archive_ids == []
     assert (kept.started_at, kept.finished_at) == (T0, T0 + timedelta(minutes=30))
     assert (kept.actual_seconds, kept.actual_grams) == (1800, 4.0)
+
+
+async def test_a_lan_attempt_takes_its_starts_own_end_and_sliced_grams(
+    shop: Shop, pool: PgPool
+) -> None:
+    """#8321: the first plate records its own end, which wins over the ledger's, and
+    both plates record their sliced grams. The second plate used no SB spool, so the
+    ledger alone would give no grams; the starts give them for every slot."""
+    order, item, attempt, _ = own_lan_print(
+        shop,
+        pool,
+        [timedelta(0), timedelta(hours=2)],
+        {1: [10.0]},
+        timed_ends={1: timedelta(hours=1)},
+        settled_after=timedelta(hours=3),
+        fields={
+            1: {
+                "ended": "done",
+                "ended_at": (T0 + timedelta(minutes=90)).isoformat(),
+                "grams_by_slot": {"1": 10.0, "2": 1.5},
+            },
+            2: {"grams_by_slot": {"1": 6.0}},
+        },
+    )
+    seam = Archives(facts(370, **OTHER))
+    await attempt_archives(
+        shop.lifecycle, seam, order.id, item.id, attempt.id, Starts(), limit=LIMIT
+    )
+    kept = shop.rows.fulfilments(item.id)[0]
+    assert (kept.started_at, kept.finished_at) == (T0, T0 + timedelta(hours=3))
+    assert (kept.actual_seconds, kept.actual_grams) == (9000, 17.5)
+
+
+def own_start(
+    n: int,
+    *,
+    ended: str | None = None,
+    ended_at: timedelta | None = None,
+    grams: dict[int, float] | None = None,
+) -> LanStarted:
+    """Plate ``n``'s start, ``n - 1`` hours after `T0`."""
+    return LanStarted(
+        subtask_name=f"p{n}",
+        started_at=T0 + timedelta(hours=n - 1),
+        plate_id=n,
+        ended=cast(Any, ended),
+        ended_at=None if ended_at is None else T0 + ended_at,
+        grams_by_slot=grams or {},
+    )
+
+
+def ledger_use(subtask: str, grams: float, at: timedelta | None = None) -> RunUse:
+    """A use the ledger settled as applied; timed at a report when ``at`` is given."""
+    return RunUse(
+        subtask=subtask,
+        grams=grams,
+        applied=True,
+        ended_at=T0 + (at or timedelta(hours=9)),
+        timed=at is not None,
+    )
+
+
+def test_lan_facts_prefer_a_starts_own_end_to_the_ledgers() -> None:
+    """#8321: the start's ``ended_at`` wins over the ledger's timed end of its plate."""
+    record = LanRecord(
+        starts=[
+            own_start(1, ended="done", ended_at=timedelta(minutes=40)),
+            own_start(2),
+        ],
+        settled_at=T0 + timedelta(hours=2),
+        uses=[ledger_use("p1", 3.0, timedelta(minutes=50)), ledger_use("p2", 2.0)],
+        outcome="finished",
+    )
+    facts = lan_facts(record)
+    assert facts.actual_seconds == 40 * 60 + 3600
+    assert facts.finished_at == T0 + timedelta(hours=2)
+
+
+def test_lan_facts_time_a_plate_no_sb_spool_ended() -> None:
+    """#8321: a plate with no SB spool books no ledger end, so before ``ended_at`` an
+    earlier plate gave no seconds. Its own end gives them now."""
+    starts = [own_start(1, ended="done", ended_at=timedelta(minutes=30)), own_start(2)]
+    record = LanRecord(starts=starts, settled_at=T0 + timedelta(hours=2), uses=[])
+    assert lan_facts(record).actual_seconds == 30 * 60 + 3600
+    old = [own_start(1, ended="done"), own_start(2)]
+    record = LanRecord(starts=old, settled_at=T0 + timedelta(hours=2), uses=[])
+    assert lan_facts(record).actual_seconds is None
+
+
+def test_lan_facts_prefer_the_sliced_grams_of_a_finished_run() -> None:
+    """#8321: every plate printed to the end, so its sliced grams of every slot are what
+    it used, also of a slot with no SB spool, which the ledger never booked."""
+    record = LanRecord(
+        starts=[
+            own_start(1, ended="done", ended_at=timedelta(minutes=30), grams={1: 4.0, 2: 1.0}),
+            own_start(2, grams={1: 2.5}),
+        ],
+        settled_at=T0 + timedelta(hours=2),
+        uses=[ledger_use("p1", 4.0)],
+        outcome="finished",
+    )
+    assert lan_facts(record).actual_grams == 7.5
+
+
+@pytest.mark.parametrize(
+    ("first", "outcome", "second"),
+    [
+        ("failed", "finished", {1: 2.5}),
+        ("done", "failed", {1: 2.5}),
+        ("done", None, {1: 2.5}),
+        ("done", "finished", {}),
+    ],
+    ids=["an earlier plate failed", "the run failed", "not settled", "a start before #8321"],
+)
+def test_lan_facts_keep_the_ledger_when_the_sliced_grams_do_not_hold(
+    first: str, outcome: str | None, second: dict[int, float]
+) -> None:
+    """A plate that did not print to the end did not use its sliced grams, and a start
+    from before #8321 has none: the ledger's rule stands, and it gives what it booked."""
+    record = LanRecord(
+        starts=[
+            own_start(1, ended=first, ended_at=timedelta(minutes=30), grams={1: 4.0}),
+            own_start(2, grams=second),
+        ],
+        settled_at=T0 + timedelta(hours=2),
+        uses=[ledger_use("p1", 3.0), ledger_use("p2", 2.0)],
+        outcome=outcome,
+    )
+    assert lan_facts(record).actual_grams == 5.0
 
 
 def lan_run(

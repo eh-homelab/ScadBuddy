@@ -128,8 +128,9 @@ def shows(report: tuple[dict[str, Any], datetime] | None, started: LanStarted) -
 def lan_ended(
     report: tuple[dict[str, Any], datetime] | None, started: LanStarted, *, seen: bool
 ) -> LanStarted | None:
-    """``started`` with how it ended (`LanStarted.ended`), once a report seen after the
-    start shows the printer no longer printing: its own ``FINISH`` or ``FAILED``, or
+    """``started`` with how it ended (`LanStarted.ended`) and when the report that shows
+    it was seen (`LanStarted.ended_at`), once a report seen after the start shows the
+    printer no longer printing: its own ``FINISH`` or ``FAILED``, or
     another print's end, or ``IDLE``. ``None`` while it, or a print started since, runs,
     and while no report has been seen since the start. A report that stops is waited
     out, never read as an end: the next start needs the printer to answer anyway.
@@ -159,9 +160,13 @@ def lan_ended(
     if progress.settled:
         detail = progress.copies_detail
         message = detail[0].message if detail else progress.error_message
-        return started.model_copy(update={"ended": progress.stage, "ended_message": message})
+        return started.model_copy(
+            update={"ended": progress.stage, "ended_message": message, "ended_at": seen_at}
+        )
     if state == "IDLE":
-        return started.model_copy(update={"ended": "unknown", "ended_message": IDLE_SINCE})
+        return started.model_copy(
+            update={"ended": "unknown", "ended_message": IDLE_SINCE, "ended_at": seen_at}
+        )
     return None
 
 
