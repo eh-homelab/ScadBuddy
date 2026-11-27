@@ -4,9 +4,10 @@
 # It also matches `docs/inventory-model/` and the migrations: Go tests read them.
 # claudecreds' test reads the agent's rate-limit-reset-vectors.json (#7986); core's read the
 # backend's event-stream-vectors.json (#7768), auth-vectors.json (#8038),
-# plugin-seal-vectors.json (#8048) and blob-upload-vectors.json (#7958).
+# plugin-seal-vectors.json (#8048), blob-upload-vectors.json (#7958) and the python-json,
+# activity-title, fetch-grant and assistant-cost vectors (#8046).
 set -euo pipefail
-if grep -qE '^(go\.work(\.sum)?$|vendor/|tools/go/|backend/scadbuddy/migrations(_agent)?/|backend/tests/fixtures/(event-stream|auth|plugin-seal|blob-upload)-vectors\.json$|docs/inventory-model/|scripts/generate-go-client\.(sh|jq)$|\.github/scripts/generate-go-client-jq\.test\.sh$|\.github/workflows/(ci|go-module-ci)\.yml$|\.github/scripts/select-go(\.test)?\.sh$|\.github/scripts/changed-paths\.sh$|agent/test/fixtures/rate-limit-reset-vectors\.json$)'; then
+if grep -qE '^(go\.work(\.sum)?$|vendor/|tools/go/|backend/scadbuddy/migrations(_agent)?/|backend/tests/fixtures/(event-stream|auth|plugin-seal|blob-upload|python-json|activity-title|fetch-grant|assistant-cost)-vectors\.json$|docs/inventory-model/|scripts/generate-go-client\.(sh|jq)$|\.github/scripts/generate-go-client-jq\.test\.sh$|\.github/workflows/(ci|go-module-ci)\.yml$|\.github/scripts/select-go(\.test)?\.sh$|\.github/scripts/changed-paths\.sh$|agent/test/fixtures/rate-limit-reset-vectors\.json$)'; then
   echo true
 else
   echo false

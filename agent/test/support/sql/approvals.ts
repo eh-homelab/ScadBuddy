@@ -56,7 +56,7 @@ export class SqlApprovals implements ApprovalRoutes {
   }
 
   async pending(): Promise<ApprovalRow[]> {
-    return await this.#sql.unsafe<ApprovalRow[]>(`SELECT ${COLUMNS} FROM ai_approvals WHERE decision IS NULL ORDER BY created_at, id LIMIT 500`)
+    return await this.#sql.unsafe<ApprovalRow[]>(`SELECT ${COLUMNS} FROM ai_approvals WHERE decision IS NULL AND session_id IS NULL ORDER BY created_at, id LIMIT 500`)
   }
 
   async prepared(who: Pick<Owner, 'kind' | 'id'>): Promise<ApprovalRow[]> {

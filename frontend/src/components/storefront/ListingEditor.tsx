@@ -377,6 +377,7 @@ function ParamRow({
   // saved body locks (`listingInput`), as publish refuses to offer it.
   const supportLabel = bound !== undefined && !isSupport(param) && isSupport(param, bound.label)
   const colours = pickableColours(draft, schema, filaments)
+  const listed = filaments.filter((filament) => draft.colours.includes(filament.id))
   // #6144: what publish refused about this parameter, until the next edit.
   const refused = refusal?.kind === 'param' && refusal.name === param.name ? refusal : null
   const setBound = (next: ListingBound) => onChange({ ...draft, params: { ...draft.params, [param.name]: next } })
@@ -391,7 +392,7 @@ function ParamRow({
     const current = bound?.default ?? undefined
     const own = current === undefined ? (forced.current === DROPPED ? chosen.current : undefined) : current === forced.current ? chosen.current : current
     chosen.current = own
-    const fitted = fittedDefault(param, (own === undefined ? rest : { ...rest, default: own }) as ListingBound, colours, own ?? param.initial)
+    const fitted = fittedDefault(param, (own === undefined ? rest : { ...rest, default: own }) as ListingBound, colours, own ?? param.initial, listed)
     const start = fitted.default ?? undefined
     forced.current = start === own ? undefined : start === undefined ? DROPPED : start
     return fitted
@@ -409,7 +410,7 @@ function ParamRow({
   function offer() {
     const { [param.name]: _dropped, ...fixed } = draft.fixed
     chosen.current = undefined
-    const fitted = fittedDefault(param, schemaBound(param), colours, value)
+    const fitted = fittedDefault(param, schemaBound(param), colours, value, listed)
     forced.current = fitted.default ?? undefined
     onChange({ ...draft, fixed, params: { ...draft.params, [param.name]: fitted } })
   }

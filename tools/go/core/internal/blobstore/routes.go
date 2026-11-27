@@ -103,7 +103,13 @@ type Blobs struct {
 	// sent (httpx.Outside); its spans carry the method, the status and the peer "s3", never
 	// the URL, whose query is the presigned signature.
 	HTTP *http.Client
-	Now  func() time.Time
+	// Stream sends a read's GET (OpenKey), whose body the caller reads: it has no total
+	// timeout, since http.Client.Timeout also covers reading the body. fetch bounds the wait
+	// for the response headers (HeaderWait), and the caller's ctx and Close bound the rest.
+	Stream *http.Client
+	Now    func() time.Time
+	// HeaderWait, when set, replaces readTTL as a read's wait for the response headers.
+	HeaderWait time.Duration
 	// LockTimeout, LockTries and SlotWait, when set, replace stageLockTimeout,
 	// stageLockTries and slotWait.
 	LockTimeout time.Duration
@@ -122,9 +128,16 @@ const storePeer = "s3"
 // tel is the process's telemetry, nil for none.
 func Routes(pool *pgxpool.Pool, keys *seal.Keys, lookupEnv func(string) (string, bool),
 	tel *telemetry.Telemetry) []crud.Route {
-	client := &http.Client{Timeout: readTTL, Transport: tel.Transport(httpx.Outside(nil), storePeer)}
-	b := &Blobs{Pool: pool, Keys: keys, LookupEnv: lookupEnv, HTTP: client, Now: time.Now}
-	return b.Routes()
+	return New(pool, keys, lookupEnv, tel).Routes()
+}
+
+// New is the store as the area and a Go handler that reads a blob (OpenKey) use it: its
+// client is traced as Routes says. tel is the process's telemetry, nil for none.
+func New(pool *pgxpool.Pool, keys *seal.Keys, lookupEnv func(string) (string, bool),
+	tel *telemetry.Telemetry) *Blobs {
+	transport := tel.Transport(httpx.Outside(nil), storePeer)
+	return &Blobs{Pool: pool, Keys: keys, LookupEnv: lookupEnv, Now: time.Now,
+		HTTP: &http.Client{Timeout: readTTL, Transport: transport}, Stream: &http.Client{Transport: transport}}
 }
 
 // Routes are b's routes.
@@ -460,6 +473,11 @@ func stored(ctx context.Context, body []byte, t ticket) error {
 
 // send is one request to the store. Its error never names the URL, which carries a signature.
 func (b *Blobs) send(ctx context.Context, method, url string, body []byte, headers map[string]string) (*http.Response, error) {
+	return do(ctx, b.HTTP, method, url, body, headers)
+}
+
+// do is one request to the store through client, with send's errors.
+func do(ctx context.Context, client *http.Client, method, url string, body []byte, headers map[string]string) (*http.Response, error) {
 	var reader io.Reader
 	if body != nil {
 		reader = bytes.NewReader(body)
@@ -471,7 +489,7 @@ func (b *Blobs) send(ctx context.Context, method, url string, body []byte, heade
 	for name, value := range headers {
 		req.Header.Set(name, value)
 	}
-	res, err := b.HTTP.Do(req)
+	res, err := client.Do(req)
 	if err != nil {
 		if ctx.Err() != nil {
 			return nil, ctx.Err()

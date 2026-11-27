@@ -13,13 +13,23 @@ export function readSpec(): { json: unknown; path: string } {
   return { json: JSON.parse(text), path }
 }
 
-/** One property of a component schema in the exported spec, as the spec writes it (its
- * `default`, `maxLength` and so on). Throws, naming the spec's path, when the schema or the
- * property is not there, so a renamed backend field fails the test that reads it (#8134). */
-export function schemaProperty(schema: string, property: string): Record<string, unknown> {
+/** One keyword (`default`, `maxLength` and so on) of a property of a component schema in the
+ * exported spec, checked to be of the type `kind` names. Throws, naming the spec's path, when
+ * the schema, the property or the keyword is not there, or is of another type, so a renamed
+ * or retyped backend field fails the test that reads it (#8134, #8152). */
+export function schemaProperty<K extends keyof Kinds>(schema: string, property: string, keyword: string, kind: K): Kinds[K] {
   const { json, path } = readSpec()
   const spec = json as { components?: { schemas?: Record<string, { properties?: Record<string, Record<string, unknown>> }> } }
   const found = spec.components?.schemas?.[schema]?.properties?.[property]
   if (found === undefined) throw new Error(`${schema}.${property} not in the spec at ${path}`)
-  return found
+  const value = found[keyword]
+  if (typeof value !== kind) {
+    throw new Error(`${schema}.${property}.${keyword} is ${JSON.stringify(value)}, not a ${kind}, in the spec at ${path}`)
+  }
+  return value as Kinds[K]
+}
+
+interface Kinds {
+  string: string
+  number: number
 }

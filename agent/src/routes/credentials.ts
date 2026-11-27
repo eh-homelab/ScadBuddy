@@ -1,9 +1,11 @@
 import type { Context, Hono, MiddlewareHandler } from 'hono'
 import { z } from 'zod'
 import {
+  AGENT_CREDENTIAL_KINDS,
+  agentUses,
   type Credential,
-  CREDENTIAL_KINDS,
   CredentialError,
+  credentialLabel,
   type CredentialRepo,
   MAX_CREDENTIALS,
   normaliseBaseUrl,
@@ -32,13 +34,18 @@ import { ready, type RouteModule } from './module.js'
 //     DEPRECATED (#2768): the single-credential routes #255 began with. Settings
 //     no longer calls them (it uses the routes below); they are kept for scripts
 //     written against them and answer with a `Deprecation` header (RFC 9745)
-//     naming `/entries` as the successor. They act on the FIRST credential by
-//     priority: PUT saves over it (creating one when there is none), DELETE
-//     removes it (so the next one moves up), test tests it.
+//     naming `/entries` as the successor. They act on the FIRST credential the
+//     agent uses (#7983: never a fleet row): PUT saves over it (creating one when
+//     there is none), DELETE removes it (so the next one moves up), test tests it.
 //
 //   /api/v1/ai/credentials/entries[/:id[/test|/reset|/name]], /api/v1/ai/credentials/order
 //     Every credential (#1093): list, create, save, delete, test, reset, rename
 //     (#3710), and the order a query tries them in.
+//
+// The pool is shared with the fleet's login rotator (#7983): the list shows each row's scope,
+// and a row the agent does not use (`agentUses`: a `claude_login`, or scope `fleet`) is never
+// tested here and never counts as usable now. The API refuses this caller every change to such
+// a row (save, delete, rename, reset, reorder, events: a 409), so Settings shows it read-only.
 
 export type CredentialRouteDeps = {
   /** Undefined when this process was not given it (tests). */
@@ -90,12 +97,18 @@ export type CredentialEntryView = {
   last_error: string | null
   last_error_at: string | null
   last_used_at: string | null
+  /** Who may use it (#7983): `agent`, `fleet` or `both`. The agent uses it only when `agent_uses`. */
+  scope: StoredCredential['scope']
+  agent_uses: boolean
+  /** A `claude_login`'s account (#7983), in clear: null on every other kind. */
+  email: string | null
+  subscription_type: string | null
 }
 
 export type CredentialListView = {
   /** In priority order. */
   credentials: CredentialEntryView[]
-  /** Whether any credential can be used now. */
+  /** Whether any credential the agent uses can be used now. */
   usable_now: boolean
   /** When none can: the soonest a rate-limited one is usable again; null if every one needs a reset. */
   recovers_at: string | null
@@ -105,7 +118,7 @@ export type CredentialListView = {
 }
 
 const SaveBody = z.strictObject({
-  kind: z.enum(CREDENTIAL_KINDS),
+  kind: z.enum(AGENT_CREDENTIAL_KINDS),
   base_url: z.string().max(2048).nullable().optional(),
   secret: z.string().min(1).max(4096).optional(),
 })
@@ -168,15 +181,20 @@ export function entryView(stored: StoredCredential, kek: OpenerStatus): Credenti
     last_error: stored.last_error,
     last_error_at: stored.last_error_at,
     last_used_at: stored.last_used_at,
+    scope: stored.scope,
+    agent_uses: agentUses(stored),
+    email: stored.email,
+    subscription_type: stored.subscription_type,
   }
 }
 
 export function listView(list: readonly StoredCredential[], kek: OpenerStatus): CredentialListView {
-  const usableNow = list.some((c) => c.status === 'active' && opensWith(c, kek))
+  const own = list.filter(agentUses)
+  const usableNow = own.some((c) => c.status === 'active' && opensWith(c, kek))
   return {
     credentials: list.map((c) => entryView(c, kek)),
     usable_now: usableNow,
-    recovers_at: usableNow ? null : (soonestRecovery(list, kek)?.toISOString() ?? null),
+    recovers_at: usableNow ? null : (soonestRecovery(own, kek)?.toISOString() ?? null),
     can_save: kek.ok,
     cannot_save_reason: cannotSave(kek),
   }
@@ -246,7 +264,7 @@ export function registerCredentialRoutes(app: Hono, deps: CredentialRouteDeps): 
     ...(body.name === undefined ? {} : { name: body.name }),
   })
 
-  // --- The single-credential routes (#255): the first credential by priority.
+  // --- The single-credential routes (#255): the first credential the agent uses.
 
   // Deprecated (#2768): every answer from the single-credential routes says so, a guard's
   // 403 included (so registered before the guards), and names the routes that replace
@@ -374,6 +392,11 @@ export function registerCredentialRoutes(app: Hono, deps: CredentialRouteDeps): 
       try {
         const kek = await repo.opener()
         if (!kek.ok) return c.json({ detail: `no key-encryption key: ${kek.reason}` }, 503)
+        // #7983: the fleet's rows are never opened here.
+        const stored = await repo.get(id)
+        if (stored && !agentUses(stored)) {
+          return c.json({ detail: `${credentialLabel(stored)} is the fleet's (scope ${stored.scope}): the assistant does not use it, so it is not tested here` }, 409)
+        }
         credential = await repo.reveal(id, 'test')
       } catch (err) {
         if (err instanceof SealError) {
