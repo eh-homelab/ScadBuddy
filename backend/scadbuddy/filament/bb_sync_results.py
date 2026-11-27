@@ -913,7 +913,8 @@ def reset_links(
     (#6773): the
     spool links, each supplier's, location's, insert type's and spool type's Bambuddy id
     with its hashes and seen copy, the open create intents, the error rows, the ignored
-    Bambuddy spools, the state row's ``instance`` and its usage mark (R-7002-6). No
+    Bambuddy spools, the state row's ``instance`` and its usage mark (R-7002-6), and the
+    old Bambuddy's preset ids in profile fetch runs' ``files`` (#7223). No
     ScadBuddy spool, type, supplier or location is deleted, and none of their own fields
     changes."""
     with store.spools.transaction() as conn:
@@ -980,6 +981,18 @@ def reset_links(
             " source = CASE WHEN source = 'bambuddy' THEN 'manual' ELSE source END"
             " WHERE bb_preset_id IS NOT NULL AND (bb_instance IS NULL OR bb_instance = %s)",
             (instance,),
+        )
+        # A profile fetch run's ``preset_id``s name presets of the old Bambuddy too; the new
+        # one's ids would match them and make an adopted preset ``3dfp`` of the old run's
+        # key (`sb_presets._fetched_key`, #7223). Runs since #7201 write none.
+        conn.execute(
+            "UPDATE filament_profile_fetches SET files = ("
+            " SELECT coalesce(jsonb_object_agg(m.key, CASE WHEN jsonb_typeof(m.value) = 'object'"
+            " THEN (SELECT coalesce(jsonb_object_agg(n.key, CASE WHEN jsonb_typeof(n.value)"
+            " = 'object' THEN n.value - 'preset_id' ELSE n.value END), '{}'::jsonb)"
+            " FROM jsonb_each(m.value) AS n) ELSE m.value END), '{}'::jsonb)"
+            " FROM jsonb_each(files) AS m)"
+            " WHERE jsonb_typeof(files) = 'object' AND jsonb_path_exists(files, '$.*.*.preset_id')"
         )
         conn.execute(
             "UPDATE filament_bb_sync_state SET instance = NULL, usage_read_instance = NULL,"

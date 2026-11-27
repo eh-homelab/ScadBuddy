@@ -1,8 +1,9 @@
 """The camera store: which printers record, the segment index, the feed leases and the
 feed state (plan 2026-11-23 camera recording, phase 1).
 
-A printer qualifies when its LAN link has a sealed code, its last report names an
-``rtsps://`` camera (`models.rtsp_url`) and ``printers.camera_recording`` is on. One
+A printer qualifies when it is a physical printer (``printers.kind`` ``physical``), its LAN
+link has a sealed code, its last report names an ``rtsps://`` camera (`models.rtsp_url`) and
+``printers.camera_recording`` is on. One
 recorder at a time holds a printer's lease. The lease is one statement, so two recorders
 that ask at once cannot both get it."""
 
@@ -20,6 +21,7 @@ from psycopg_pool import ConnectionPool
 from pydantic import SecretStr
 
 from scadbuddy.camera.models import (
+    CameraFeed,
     CameraSource,
     CameraSourceWithCode,
     FeedReport,
@@ -34,8 +36,9 @@ LEASE_SECONDS = 20
 #: The end of a printer's index. It reads only the rows that start in the 5 minutes before
 #: the newest start (found through ``camera_segments_printer_started``), not the printer's
 #: whole index, on every lease call. The result is the full scan's: MediaMTX cuts a segment
-#: every 4 s at a key frame (``recordSegmentDuration``), so an older segment that ends after
-#: the newest one would have to be more than 5 minutes long.
+#: at the first key frame after 4 s (``recordSegmentDuration`` is a minimum,
+#: https://github.com/bluenviron/mediamtx/blob/v1.21.4/mediamtx.yml), so an older segment
+#: that ends after the newest one would have to be more than 5 minutes long.
 INDEXED_UNTIL = (
     "(SELECT max(started_at + duration_ms * interval '1 millisecond')"
     " FROM camera_segments WHERE printer_id = %(pid)s AND started_at >="
@@ -46,6 +49,22 @@ INDEXED_UNTIL = (
 
 class NotLeaderError(Exception):
     """The recorder holds no live lease for the printer."""
+
+
+class ObjectKeyError(Exception):
+    """A segment's object key is not in the printer's camera folder."""
+
+
+def in_camera_folder(printer_id: str, key: str) -> bool:
+    """Whether ``key`` is a ``.mp4`` under ``[<prefix>/]camera/<printer_id>/``, the folder
+    `uploads.object_key` puts the printer's segments in. The API does not know the
+    recorders' prefix, so any prefix passes; an empty, ``.`` or ``..`` part does not."""
+    parts = key.split("/")
+    if not key.endswith(".mp4") or any(part in ("", ".", "..") for part in parts):
+        return False
+    return any(
+        parts[at] == "camera" and parts[at + 1] == printer_id for at in range(len(parts) - 2)
+    )
 
 
 class CameraStore:
@@ -83,7 +102,9 @@ class CameraStore:
             rows = conn.execute(
                 "SELECT p.id, p.lan_host, p.lan_cert_sha256, r.report FROM printers p"
                 " JOIN printer_reports r ON r.printer_id = p.id"
-                " WHERE p.camera_recording AND p.lan_host IS NOT NULL"
+                # A Bambuddy virtual printer has the forwarded printer's report, so an
+                # RTSP URL, but no camera (#7996).
+                " WHERE p.kind = 'physical' AND p.camera_recording AND p.lan_host IS NOT NULL"
                 " AND p.access_code_sealed IS NOT NULL AND p.lan_cert_sha256 IS NOT NULL"
                 f"{where} ORDER BY p.created_at, p.id",
                 args,
@@ -117,6 +138,8 @@ class CameraStore:
         key = printer_uuid(printer_id)
         if key is None:
             raise NotLeaderError(printer_id)
+        if not all(in_camera_folder(str(key), s.object_key) for s in segments):
+            raise ObjectKeyError(printer_id)
         with self._pool.connection() as conn, conn.transaction():
             held = conn.execute(
                 "SELECT 1 FROM camera_leases WHERE printer_id = %s AND holder = %s"
@@ -203,6 +226,28 @@ class CameraStore:
             expires_at=current["expires_at"],
             indexed_until=current["indexed_until"],
         )
+
+    def recorded(self, printer_id: str) -> bool:
+        """Whether the printer qualifies for recording: false for anything else, a printer
+        that is gone or an id that is no uuid included."""
+        return bool(self._sources(printer_id))
+
+    def camera_state(self, printer_id: str) -> tuple[bool, list[CameraFeed]]:
+        """Whether the printer is recorded, and its stored feed states (relay first).
+        Raises `PrinterNotFoundError` when the printer is gone."""
+        if self._printers is not None:
+            self._printers.require(printer_id)
+        recorded = bool(self._sources(printer_id))
+        key = printer_uuid(printer_id)
+        if key is None:
+            raise PrinterNotFoundError(printer_id)
+        with self._pool.connection() as conn:
+            rows = conn.execute(
+                "SELECT part, report->>'state' AS state, report->>'error' AS detail, updated_at"
+                " FROM camera_feeds WHERE printer_id = %s ORDER BY part DESC",
+                (key,),
+            ).fetchall()
+        return recorded, [CameraFeed(**row) for row in rows]
 
     def report_feed(self, printer_id: str, report: FeedReport) -> bool:
         """Store the part's feed state; true when its state changed. Raises

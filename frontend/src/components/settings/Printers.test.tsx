@@ -3,24 +3,20 @@ import { HttpResponse, http } from 'msw'
 import { describe, expect, it } from 'vitest'
 import { isUserOnly } from '../../agent/dom'
 import { takeSnapshot } from '../../agent/snapshot'
-import { PROBE_FAILED, UNREACHABLE, printersState } from '../../mocks/features/printers'
+import { PROBE_FAILED, UNREACHABLE, printersState, setLanLinked } from '../../mocks/features/printers'
 import { emitRealtime } from '../../mocks/realtime'
 import { server } from '../../mocks/server'
 import { renderPage } from '../../test/utils'
 import { choose } from '../../test/select'
 import { SIGNAL_READ_MIN_MS } from '../../lib/useAsync'
 import { PrintersPanel } from './Printers'
-import { readSpec } from '../../test/spec'
+import { schemaProperty } from '../../test/spec'
 
 /** `LanLink.access_code`'s `maxLength` in the spec `pnpm gen:api` (run before `pnpm test`)
  * exported: the backend's bound, read rather than restated (#4497 review). */
 function specAccessCodeMax(): number {
-  const { json, path } = readSpec()
-  const spec = json as {
-    components?: { schemas?: { LanLink?: { properties?: { access_code?: { maxLength?: unknown } } } } }
-  }
-  const max = spec.components?.schemas?.LanLink?.properties?.access_code?.maxLength
-  if (typeof max !== 'number') throw new Error(`LanLink.access_code.maxLength not in the spec at ${path}`)
+  const max = schemaProperty('LanLink', 'access_code').maxLength
+  if (typeof max !== 'number') throw new Error(`LanLink.access_code.maxLength is ${JSON.stringify(max)}, not a number`)
   return max
 }
 
@@ -188,6 +184,21 @@ describe('PrintersPanel (#3823)', () => {
     await user.click(within(h2c).getByRole('button', { name: 'Forget 3DP-31B-598' }))
 
     expect(await within(h2c).findByRole('alert')).toHaveTextContent('unlink it first')
+  })
+
+  it('shows the K-profiles and AMS slots on a LAN-linked printer with no Bambuddy link (#7276)', async () => {
+    setLanLinked(printersState()[1]!.id)
+    renderPage(<PrintersPanel />)
+    const garage = await screen.findByRole('listitem', { name: GARAGE })
+    expect(within(garage).getByRole('button', { name: 'K-profiles' })).toBeInTheDocument()
+    expect(within(garage).getByRole('button', { name: 'AMS slots' })).toBeInTheDocument()
+  })
+
+  it('hides them on a printer linked to Bambuddy only (#7276)', async () => {
+    renderPage(<PrintersPanel />)
+    const h2c = await screen.findByRole('listitem', { name: H2C })
+    expect(within(h2c).queryByRole('button', { name: 'K-profiles' })).not.toBeInTheDocument()
+    expect(within(h2c).queryByRole('button', { name: 'AMS slots' })).not.toBeInTheDocument()
   })
 
   it("shows Bambuddy's view of a linked printer, marking a difference (#4747)", async () => {

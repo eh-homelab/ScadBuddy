@@ -2,6 +2,16 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
+> **As built (#8042, 2026-11-26).** Tasks 1 and 2 shipped as written, in their own branch
+> `feat/7905-tag-uid-canonical` (not `feat/7905-bambu-tag-scan`, which holds the app). The spec
+> named below is still only on `feat/7905-bambu-tag-scan`, so its Task 3 edit waits for that
+> branch. Before the deploy, the owner fixed prod by hand (2026-11-26): the short rows `7E7482BB`
+> and `DC999BE3` were deleted (each had a full-UID twin and no references) and `9CC69CE3` was
+> re-keyed to `9CC69CE300000100`. Prod holds no short UID, so the migration is a no-op there; the
+> prod merge and re-keys named in Task 3 Step 3 no longer happen. The issue is #8042, a sub-issue
+> of #7905. The TagPanel and `tests/api/test_filament_tags.py` reads that expected a short UID to
+> stay short now expect the long form, as Step 5 says.
+
 **Goal:** A phone's 4-byte tag UID and the AMS's `<uid>00000100` name one tag, so a web scan of a Bambu spool finds its spool, and the duplicate rows web scans already made are merged.
 
 **Architecture:** Every lookup, bind and write of a tag cleans its UID through `spools/models.py` `clean_tag_uid` first, so one canonical form there fixes them all with no SQL change. The canonical form of an 8-hex-digit (4-byte) UID is the AMS's: the UID followed by `00000100`. A migration rewrites the rows already stored: a short row whose long twin exists is merged into it, any other short row is re-keyed. The browser's two copies of the rule (`WriteTag.tsx`, the msw mocks) change with it, pinned by one vector file both sides read.

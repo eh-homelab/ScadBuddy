@@ -23,6 +23,8 @@ from pydantic import (
     StringConstraints,
 )
 
+from scadbuddy.flows.answerers import MAX_ANSWERERS, AnswererRule
+
 if TYPE_CHECKING:
     from scadbuddy.flows.models import Run
 
@@ -85,6 +87,15 @@ class GrantRule(BaseModel):
     orders: OrderIds | Literal["any"] | None = Field(default=None)
 
 
+class GrantAnswers(BaseModel):
+    """Who besides a person may answer the run's questions under the grant (#7471, spec
+    2026-11-25 §4.3): the values of the setting `flow_answerers`."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    who: list[AnswererRule] = Field(min_length=1, max_length=MAX_ANSWERERS)
+
+
 class GrantSpec(BaseModel):
     """A run grant as a person approves it (§3.1)."""
 
@@ -96,6 +107,11 @@ class GrantSpec(BaseModel):
     #: Whether a call outside it goes to the starter session before the person (§4.4).
     ask_starter_session: bool = True
     rules: list[GrantRule] = Field(default_factory=list, max_length=MAX_RULES)
+    #: Who else may answer the run's questions (#7471, spec 2026-11-25 §4.3): the values of
+    #: the setting `flow_answerers`. A child run's grant drops it (`inherited`), and a
+    #: trigger's standing grant may not hold it.
+    #: Left out of a dump when empty: a worker from before #7471 refuses an unknown field.
+    answers: GrantAnswers | None = Field(default=None, exclude_if=lambda v: v is None)
 
 
 class Narrowing(BaseModel):
@@ -388,7 +404,8 @@ def inherited(spec: GrantSpec, order_id: str | None, *, approved: bool = True) -
     (`max_calls`, `max_prints`, `max_filament_g`) admits nothing (`max_calls` 0), so runs
     started from a run never spend more than the run's own limits allow; only requested,
     the limits stay as they are, for the person who approves it to see and edit (review
-    of #5668). No starter session is asked. Every rule keeps its index."""
+    of #5668). No starter session is asked, and no answerer is let in (`answers`, #7471):
+    each child would open runs that the person did not look at. Every rule keeps its index."""
     rules = [
         rule.model_copy(update={"max_calls": 0})
         if approved
@@ -400,7 +417,7 @@ def inherited(spec: GrantSpec, order_id: str | None, *, approved: bool = True) -
         else rule
         for rule in spec.rules
     ]
-    child = spec.model_copy(update={"rules": rules, "ask_starter_session": False})
+    child = spec.model_copy(update={"rules": rules, "ask_starter_session": False, "answers": None})
     return child if order_id is None else narrowed_to_order(child, order_id)
 
 

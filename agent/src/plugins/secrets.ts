@@ -13,7 +13,8 @@ export type PackageSecretSource = {
 
 /**
  * Every plugin secret the agent holds, read from its own stores and its packages' pinned
- * files (fetched again from the pin when no verified copy is cached): no address check, no
+ * files (read again from the pin's mirror when no verified copy is cached, never from git):
+ * no address check, no
  * forwarder route, no plugin or token endpoint contacted.
  *
  * - each enabled remote plugin's header value (`ai_plugins`, opened by the API);

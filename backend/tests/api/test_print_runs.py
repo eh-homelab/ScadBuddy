@@ -52,7 +52,6 @@ from scadbuddy.workflows.commands import (
 )
 from scadbuddy.workflows.print_models import AcceptAnswer
 from scadbuddy.workflows.printing import CANCELLED_QUEUEING, CANCELLED_UNQUEUED
-from tests.api.conftest import files_only
 from tests.api.test_print_filaments import prepared, queue_route, slice_kept, slice_routes
 from tests.api.test_print_run_choices import (
     API,
@@ -63,6 +62,7 @@ from tests.api.test_print_run_choices import (
 )
 from tests.api.test_send import configure, died_after_the_upload, stored_files, upload_route
 from tests.bambuddy.conftest import recording
+from tests.support.saved_outputs import rewrite_model
 from tests.support.sb_rows import seed_app_sb_spools
 from tests.support.temporal import WorkflowReaper, namespace_not_found_error
 from tests.test_bambu3mf import add_plate
@@ -520,10 +520,8 @@ def test_a_later_plate_failing_after_an_earlier_one_queued_holds_the_key(
 ) -> None:
     """All plates: plate 1 is queued, then plate 2's slice fails. A retry must not
     queue plate 1 again."""
-    files_only(client)
     output_id = prepared(client, model)
-    [path] = paths.outputs.glob(f"*/{output_id}/model.3mf")
-    add_plate(path, 2)
+    rewrite_model(client, output_id, lambda path: add_plate(path, 2))
     upload_route()
     run_routes()
     respx.route(method="POST", path__regex=r"/api/v1/library/files/\d+/slice").mock(
@@ -1265,10 +1263,8 @@ def test_a_cancel_after_plate_1_is_queued_says_it_may_be_queued_and_queues_no_mo
 ) -> None:
     """#1312: all plates; plate 1 is queued, then the run is cancelled while plate 2
     slices. The run is a 409 that says a plate may be queued, and plate 2 is not."""
-    files_only(client)
     output_id = prepared(client, model)
-    [path] = paths.outputs.glob(f"*/{output_id}/model.3mf")
-    add_plate(path, 2)
+    rewrite_model(client, output_id, lambda path: add_plate(path, 2))
     upload_route()
     run_routes()
     respx.route(method="POST", path__regex=r"/api/v1/library/files/\d+/slice").mock(

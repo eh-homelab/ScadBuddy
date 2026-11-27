@@ -1,12 +1,13 @@
 import { useState } from 'react'
 import { Link, useParams } from 'react-router'
 import { api, ApiError } from '../api/client'
-import type { FlowRunView, FlowStep } from '../api/types'
+import type { FlowAnswerBy, FlowRunView, FlowStep } from '../api/types'
 import { FlowScript } from '../components/flows/FlowScript'
 import { ForgetRun } from '../components/flows/ForgetRun'
 import { GrantPanel } from '../components/flows/GrantPanel'
 import { ResetPanel } from '../components/flows/ResetPanel'
 import { ChildCard, type ChildEntry, PendingCard } from '../components/flows/PendingCard'
+import { AnsweredBy } from '../components/flows/pendingParts'
 import { ChevronRightIcon } from 'lucide-react'
 import { Badge } from '@/components/ui/badge'
 import { Card } from '@/components/ui/card'
@@ -181,7 +182,7 @@ export function WorkflowRunPage() {
               {children.map((entry) => (
                 <ChildCard key={entry.id} entry={entry} respond={respond} />
               ))}
-              {run && run.steps.length > 0 && <Steps steps={run.steps} />}
+              {run && run.steps.length > 0 && <Steps steps={run.steps} answers={view.data?.answers ?? []} />}
               {view.data.images && view.data.images.length > 0 && <Images runId={id} images={view.data.images} />}
               {run?.result && (
                 <section aria-label="Result" className="mt-4">
@@ -287,7 +288,17 @@ function LoadedScript({ definitionId }: { definitionId: string }) {
   )
 }
 
-function Steps({ steps }: { steps: FlowStep[] }) {
+/** Whether an answer could have ended `step`: one never ends it running, cancelled or timed out. */
+function answerable(step: FlowStep): boolean {
+  if (step.status === 'running') return false
+  return step.status !== 'failed' || (step.error !== 'CancelledError' && step.error !== 'TimeoutError')
+}
+
+function Steps({ steps, answers }: { steps: FlowStep[]; answers: FlowAnswerBy[] }) {
+  // #7471: the latest answer of each question (a Reset may answer it again). A Reset to
+  // before an answer parks its question again, so an answer on record is in effect only on
+  // a step an answer could have ended: not one still running, cancelled or timed out.
+  const by = new Map(answers.map((a) => [a.call_id, a] as const))
   return (
     <Card size="sm" className="px-3">
       <table aria-label="Steps" className="w-full text-left text-[12.5px]">
@@ -305,7 +316,14 @@ function Steps({ steps }: { steps: FlowStep[] }) {
             <tr key={step.call_id} className="border-t">
               <td className="py-1 pr-3">{step.seq}</td>
               <td className="py-1 pr-3 font-mono">{step.fn}</td>
-              <td className="py-1 pr-3">{step.error ? `${step.status} (${step.error})` : step.status}</td>
+              <td className="py-1 pr-3">
+                {step.error ? `${step.status} (${step.error})` : step.status}
+                {answerable(step) && by.has(step.call_id) && (
+                  <span className="block text-muted-foreground">
+                    <AnsweredBy by={by.get(step.call_id)?.answered_by} admittedBy={by.get(step.call_id)?.admitted_by} />
+                  </span>
+                )}
+              </td>
               <td className="py-1 pr-3">{new Date(step.started_at).toLocaleString()}</td>
               <td className="py-1 pr-3">
                 {step.ended_at

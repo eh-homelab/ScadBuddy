@@ -19,6 +19,41 @@ export function waitingText(entry: Pick<FlowPending, 'kind' | 'fn' | 'prompt'>):
     : `Waiting for approval: ${entry.fn}`
 }
 
+/**
+ * #7471 — who answered a flow's question, as the run (`answers[].answered_by`) or the task
+ * (`answered_by`) records it: a person (`browser`, or a task's principal), the assistant in a
+ * session, or an MCP token. `sessionId` is the assistant's session, to open it.
+ */
+export function answererLabel(by: string | null | undefined): { text: string; sessionId?: string } {
+  if (by?.startsWith('session:')) return { text: 'Answered by the assistant', sessionId: by.slice('session:'.length) }
+  if (by?.startsWith('token:')) return { text: `Answered by MCP token ${by.slice('token:'.length, 'token:'.length + 8)}` }
+  return { text: 'Answered by a person' }
+}
+
+/** #7471 — who a run grant's `answers` (or the setting) lets answer, in words. */
+export function answerersText(who: readonly string[]): string {
+  const names = answerersOrder(who).map((rule) =>
+    rule === 'starter'
+      ? 'the session that started the run'
+      : rule === 'sessions'
+        ? 'any of your assistant sessions'
+        : `MCP token ${rule.slice('token:'.length, 'token:'.length + 8)}`,
+  )
+  return names.length > 1 ? `${names.slice(0, -1).join(', ')} and ${names[names.length - 1]}` : (names[0] ?? '')
+}
+
+/** #7471 — `rules` in the order the API keeps them: `starter`, `sessions`, then the tokens, once each. */
+export function answerersOrder(rules: readonly string[]): string[] {
+  const unique = [...new Set(rules)]
+  const fixed = ['starter', 'sessions'].filter((rule) => unique.includes(rule))
+  return [...fixed, ...unique.filter((rule) => !fixed.includes(rule)).sort()]
+}
+
+/** A link that opens an assistant session on this page (`?assistant-session=<id>`, `agent/webPush.ts`). */
+export function sessionHref(sessionId: string): string {
+  return `${window.location.pathname}?assistant-session=${encodeURIComponent(sessionId)}`
+}
+
 /** One difference between a call's arguments and a parent's proposal (#2482). */
 export type ProposalChange = { path: string; was: string; now: string }
 

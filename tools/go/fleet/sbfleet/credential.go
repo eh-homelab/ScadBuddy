@@ -81,6 +81,12 @@ func NewExchange(coreURL, proofFile string, proof Proof) *Exchange {
 	}
 }
 
+// WrapTransport wraps the transport of the exchange's requests, as the Option of the same
+// name does for NewStore and NewBus.
+func (e *Exchange) WrapTransport(wrap func(http.RoundTripper) http.RoundTripper) {
+	e.http.Transport = wrap(http.DefaultTransport)
+}
+
 // Token returns the credential, exchanging the proof first when none is held, at
 // half-life, and after Invalidate. While a renewal fails, the credential it holds serves
 // until it expires; with none, Token returns the last exchange's error.

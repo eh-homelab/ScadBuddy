@@ -29,7 +29,12 @@ from scadbuddy.flows.component import FlowsDep
 from scadbuddy.flows.grants import ConsumeRequest, Grant, GrantUse
 from scadbuddy.flows.models import CallOperation, Decision, Proposal, Run
 from scadbuddy.flows.operations import reset_execution
-from scadbuddy.flows.store import HopMovedError, ResetBeforeFloorError, ResetSupersededError
+from scadbuddy.flows.store import (
+    GrantLapsedError,
+    HopMovedError,
+    ResetBeforeFloorError,
+    ResetSupersededError,
+)
 from scadbuddy.workflows.flow_models import (
     FlowRecord,
     FlowWaiting,
@@ -40,6 +45,8 @@ from scadbuddy.workflows.flow_models import (
 
 #: A decision refused because its call left the hop it was made for.
 HOP_MOVED = "hop_moved"
+#: The grant that admitted an agent's answer lapsed before it was recorded (#7471).
+GRANT_LAPSED = "grant_lapsed"
 #: A Reset refused because another Reset replaced the execution first.
 RESET_SUPERSEDED = "reset-superseded"
 #: A Reset refused because its point is before the entries the row keeps.
@@ -96,6 +103,17 @@ class TakeOver(BaseModel):
 
 class Recorded(BaseModel):
     recorded: bool
+
+
+class AnswererAsk(BaseModel):
+    """An agent answerer (`session:<id>`, `token:<id>`) and its author's principal."""
+
+    responder: str
+    principal: str | None = None
+
+
+class Allowed(BaseModel):
+    allowed: bool
 
 
 class Used(BaseModel):
@@ -260,6 +278,16 @@ async def record_decision(body: DecisionWrite, flows: FlowsDep) -> Recorded:
             "The call is no longer at the hop the decision was made for.",
             reason=HOP_MOVED,
         ) from None
+    except GrantLapsedError:
+        raise _grant_lapsed() from None
+
+
+def _grant_lapsed() -> ApiError:
+    return ApiError(
+        status.HTTP_409_CONFLICT,
+        "The run grant that let this answer through is no longer in force.",
+        reason=GRANT_LAPSED,
+    )
 
 
 @router.post("/decisions/grant", name="crud_projects_record_grant_decision")
@@ -272,9 +300,19 @@ async def call_operations(run_id: str, call_id: str, flows: FlowsDep) -> list[Ca
     return await flows.store.call_operations(run_id, call_id)
 
 
+@router.post("/decisions/answerer", name="crud_projects_answer_allowed")
+async def answer_allowed(body: AnswererAsk, flows: FlowsDep) -> Allowed:
+    """Whether an agent's session or token may still answer a flow's question (#7471,
+    spec §4.4): the operation's check asks it again, after the route."""
+    return Allowed(allowed=await flows.store.answer_allowed(body.responder, body.principal))
+
+
 @router.post("/decisions/take-over", name="crud_projects_take_over_decision")
 async def take_over_decision(body: TakeOver, flows: FlowsDep) -> Recorded:
-    taken = await flows.store.take_over_decision(body.decision, held=body.held, seen=body.seen)
+    try:
+        taken = await flows.store.take_over_decision(body.decision, held=body.held, seen=body.seen)
+    except GrantLapsedError:
+        raise _grant_lapsed() from None
     return Recorded(recorded=taken)
 
 

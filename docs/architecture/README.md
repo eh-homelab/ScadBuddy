@@ -41,7 +41,7 @@ flowchart TB
     SL[slicer worker<br/>Rust + Bambu Studio CLI]
     PG[(Postgres<br/>backend + ai_* tables)]
     T[(Temporal)]
-    BS[(Blob store<br/>S3, Bambuddy or local)]
+    BS[(Blob store<br/>S3 or local)]
     BB[Bambuddy]
     PR[Bambu printers<br/>MQTT 8883, FTPS 990]
     ANT[Anthropic API]
@@ -303,7 +303,5 @@ document's claim and the code. These specs and docs were not changed in this PR.
   agent pin is required (`.github/workflows/deploy.reusable.yml:925`) but the job keeps it
   (`.github/workflows/build-image.yml:221`).
 - `README.md:2781-2784` one dashboard / seven (`deploy/grafana/kustomization.yaml:33-89`).
-- `README.md:2718` the API, render worker and agent export traces / the slicer does too
-  (`workers/rust/crates/sb-temporal/src/telemetry.rs`).
 - `.github/workflows/build-image.yml:317-320` agent-durable as a third container in the
   pod / its own Deployment (`Dockerfile:373`).

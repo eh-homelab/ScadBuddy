@@ -12,8 +12,9 @@ name: Build Image
 # ghcr.io/eh-homelab/scadbuddy-profile-fetch (the `profile-fetch` job, #6625),
 # the agent's Playwright MCP browser as
 # ghcr.io/eh-homelab/scadbuddy-playwright-mcp (the `playwright-mcp` job, #7027),
-# the printer camera relay and recorder as ghcr.io/eh-homelab/scadbuddy-camera-relay
-# and ghcr.io/eh-homelab/scadbuddy-camera-recorder (the `camera` job, #7328), and the
+# the printer camera relay, recorder and live edge as
+# ghcr.io/eh-homelab/scadbuddy-camera-relay, ghcr.io/eh-homelab/scadbuddy-camera-recorder
+# and ghcr.io/eh-homelab/scadbuddy-camera-edge (the `camera` job, #7328, #7330), and the
 # label print server as ghcr.io/eh-homelab/scadbuddy-cups (the `cups` job, #7807).
 #
 # THE PACKAGE MUST BE PUBLIC. Nodes on the target cluster pull ghcr.io through
@@ -961,10 +962,10 @@ jobs:
             echo '```'
           } >> "$GITHUB_STEP_SUMMARY"
 
-  # The printer camera relay and recorder (#7328, docs/features/printer-cameras.md): the
-  # Dockerfile's `camera-relay` and `camera-recorder` targets, each the controller plus the
-  # pinned MediaMTX and curl, published as ghcr.io/eh-homelab/scadbuddy-camera-relay and
-  # ghcr.io/eh-homelab/scadbuddy-camera-recorder. Each pod runs its image twice: MediaMTX
+  # The printer camera relay, recorder and live edge (#7328, #7330,
+  # docs/features/printer-cameras.md): the Dockerfile's `camera-relay`, `camera-recorder` and
+  # `camera-edge` targets, each the controller plus the pinned MediaMTX and curl, published as
+  # ghcr.io/eh-homelab/scadbuddy-camera-<part>. Each pod runs its image twice: MediaMTX
   # and the controller (README.md, "Printer cameras"). Same tag scheme as the other images.
   # `continue-on-error` for the slicer's reason: a first publish of a new package (private
   # until its visibility is changed, see the header) must not hold back a backend deploy.
@@ -979,7 +980,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        part: [relay, recorder]
+        part: [relay, recorder, edge]
     steps:
       - uses: actions/checkout@v7
         with:
@@ -1033,9 +1034,12 @@ jobs:
           echo "version=$version" | tee -a "$GITHUB_OUTPUT"
 
       # The build checks MediaMTX's version and that the controller imports no Postgres
-      # code. `type=gha` on a hosted runner only. One scope for both parts, which ci.yml's
+      # code. `type=gha` on a hosted runner only. One scope for every part, which ci.yml's
       # `camera-image` job reads and writes too, at mode=min (the repo's Actions cache is
-      # at its ceiling, #743).
+      # at its ceiling, #743). Only the relay leg writes it, as in ci.yml: a second write
+      # to the scope would replace the relay's cache entry. The recorder and the edge build
+      # the `camera` stage the relay caches, plus a config COPY (and, in the recorder, its
+      # ENV TZ) that takes no time.
       - name: Build and push
         id: build
         uses: docker/build-push-action@v7
@@ -1051,7 +1055,7 @@ jobs:
             SCADBUDDY_VERSION=${{ steps.label.outputs.version }}
           provenance: false
           cache-from: type=gha,scope=camera
-          cache-to: type=gha,scope=camera,mode=min
+          cache-to: ${{ matrix.part == 'relay' && 'type=gha,scope=camera,mode=min' || '' }}
 
       - name: Report the published digest
         env:

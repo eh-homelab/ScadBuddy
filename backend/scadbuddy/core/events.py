@@ -214,6 +214,15 @@ class CameraFeedEvent(BaseEvent):
     printer_id: str
 
 
+class CameraReconnectEvent(BaseEvent):
+    """A person asked to restart a printer's camera pull (camera live view, phase 3). The
+    relay restarts that printer's pull. Published on ``printers`` and
+    ``printer:<printer id>``."""
+
+    kind: Literal["camera.reconnect"] = "camera.reconnect"
+    printer_id: str
+
+
 class OperationEvent(BaseEvent):
     """An operation (#1053, spec 2026-10-01 §4.2) was accepted or ended: re-read
     ``GET /operations/{operation_id}``."""
@@ -464,6 +473,7 @@ Event = Annotated[
     | PrintOutcome
     | PrinterEvent
     | CameraFeedEvent
+    | CameraReconnectEvent
     | OperationEvent
     | FlowRunEvent
     | FlowChanged

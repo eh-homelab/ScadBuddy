@@ -81,6 +81,11 @@ same way, `vite.config.ts`).
   only the back office fetches the stored one (`lib/loadDisplayUnit.ts`). The customer's
   form is `components/ListingView.tsx`, which the back office's Storefront page mounts as
   its live preview (the back office may import from `src/storefront`, never the reverse).
+  Its colour parts are one block, `components/ColourParts.tsx` (#8127): from `colourParts.ts`
+  `GROUP_FROM` parts in two or more groups it shows the schema's groups, the first open, a
+  closed one as a strip of its colours, and an "All N parts" row; each part is a compact
+  `ColourPicker` row whose grid shows the colours the design uses first. The mock `l5`
+  (`DOLLHOUSE`) has 31 parts in five groups.
   `vite dev` and
   `vite preview` serve the page under `/store` (`storefrontPreview`); its mocks are
   `src/mocks/features/storefrontPublic.ts`, its e2e `e2e/storefront.spec.ts` (390 px wide).
@@ -410,7 +415,13 @@ same way, `vite.config.ts`).
   page and the order's (`OrderFlowRuns`). The card's key is the run's execution and the task's
   id, so a Reset gives a new form. `TaskCard` reads the task again on `task:<id>`
   (`lib/flows.ts` `taskTopic`) and shows the newer of its read and the page's. Both answer
-  forms are `USER_ONLY`. `SchemaForm` draws a form from a schema, for an answer (`answer`) and
+  forms are `USER_ONLY`. A question the flow asked of people only says so (`pendingParts.tsx`
+  `PeopleOnly`); the run's steps and the task card name an assistant that answered and link its
+  session (`AnsweredBy`, `lib/flows.ts` `answererLabel`), and say when the run's grant let it
+  answer. Settings, Assistant, "Flows' questions" (`pages/settings/sections/flow-answerers.tsx`)
+  is `flow_answerers` (#7471); it and a run grant's `answers` in `GrantEditor` share
+  `components/flows/AnswerersPicker.tsx`.
+  `SchemaForm` draws a form from a schema, for an answer (`answer`) and
   for Start run; `inputsForm.tsx` `useInputs` holds the fields, `lib/flowInputs.ts` the parse:
   an answer leaves out a blank field, Start run sends a cleared text. Mocks:
   `src/mocks/features/tasks.ts` (the task of `run-prompt`). e2e `e2e/workflows.spec.ts`.

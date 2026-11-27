@@ -75,9 +75,11 @@ export function previousAnchor(events: readonly SpoolEvent[], weighing: SpoolEve
  * what the ledger expected at the weighing (`expected_g`, the anchor less the deltas after
  * it), never negative; `null` when either is unknown.
  */
-export function gramsSinceAnchor(anchor: SpoolEvent | null, expectedG: number | null): number | null {
-  if (anchor?.grams_after == null || expectedG == null) return null
-  return Math.max(0, anchor.grams_after - expectedG)
+export function gramsSinceAnchor(anchor: SpoolEvent | null, expectedG: number | null, labelWeight: number | null): number | null {
+  // The anchor's grams as `readingOf` reads them (#7932): a percentage-only AMS reading counts through the label weight.
+  const found = anchor ? readingOf(anchor, labelWeight) : null
+  if (found == null || expectedG == null) return null
+  return Math.max(0, found - expectedG)
 }
 
 export type DriftCause = { kind: 'start_amount'; gap: number } | { kind: 'density'; implied: number; type: number } | { kind: 'empty_weight' }
@@ -121,7 +123,7 @@ export function weighingCause(weighing: SpoolEvent, history: SpoolHistory, facts
     driftG: typeof data.drift_g === 'number' ? data.drift_g : null,
     emptyBasis: typeof data.empty_basis === 'string' ? data.empty_basis : null,
     startGapG: startGapG(anchor, facts.addedFull, facts.labelWeight),
-    usedG: gramsSinceAnchor(anchor, typeof data.expected_g === 'number' ? data.expected_g : null),
+    usedG: gramsSinceAnchor(anchor, typeof data.expected_g === 'number' ? data.expected_g : null, facts.labelWeight),
     impliedDensity: history.metrics.implied_density_g_cm3 ?? null,
     typeDensity: history.metrics.density_g_cm3 ?? null,
     densityMismatch: history.metrics.density_mismatch ?? false,

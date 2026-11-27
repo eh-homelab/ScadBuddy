@@ -1291,8 +1291,8 @@ def _library_files(
 
 
 def _output_files(outputs: OutputStore, meta: OutputMeta) -> list[PrintFile]:
-    """The output's 3MF and preview, each sized from the blob index, else its file
-    (#7256). Blocking."""
+    """The output's 3MF and preview, each sized from the blob index (#7256, #7257).
+    Blocking."""
     files: list[PrintFile] = []
     name = download_filename(meta)
     own: tuple[tuple[Literal["output_3mf", "preview_glb"], Role, str, str], ...] = (

@@ -208,6 +208,7 @@ func TestStoreErrors(t *testing.T) {
 	}{
 		{"unknown agent", 404, "unknown-agent", fleetchat.ErrUnknownAgent},
 		{"not member", 403, "not-member", fleetchat.ErrNotMember},
+		{"unknown channel", 404, "unknown-channel", fleetchat.ErrUnknownChannel},
 		{"handle taken", 409, "handle-taken", ErrHandleTaken},
 	}
 	t.Run("text too long", func(t *testing.T) {
@@ -215,6 +216,14 @@ func TestStoreErrors(t *testing.T) {
 		_, _, err := s.Send(ctx, sid, fleetchat.Target{Channel: "ops"}, "x")
 		if !errors.Is(err, fleetchat.ErrTooLong) || !strings.Contains(err.Error(), "16777216 bytes") {
 			t.Fatalf("err %v, want ErrTooLong naming core's limit", err)
+		}
+	})
+	t.Run("virtual sender", func(t *testing.T) {
+		reject := `"rotator" is the login rotator, a virtual sender.`
+		s, _ := newStore(t, 422, `{"detail":"\"rotator\" is the login rotator, a virtual sender.","reason":"virtual-sender"}`)
+		_, _, err := s.Send(ctx, sid, fleetchat.Target{Agent: "rotator"}, "x")
+		if !errors.Is(err, fleetchat.ErrVirtualSender) || err.Error() != reject {
+			t.Fatalf("err %v, want ErrVirtualSender whose text is the reject message", err)
 		}
 	})
 	t.Run("seq ahead", func(t *testing.T) {

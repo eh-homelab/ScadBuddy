@@ -335,9 +335,12 @@ class InsertType(_Checked):
     derived_count: int = 0
 
 
-#: Why a weighing offers no derived insert weight (#7280 R-7280-1, D2). ``below_label``
-#: (#7683): a new spool read under its label weight, and `InsertWeightCheck` names the
-#: shortfall and the resolutions.
+#: Why a weighing offers no derived insert weight (#7280 R-7280-1, D2). ``no_insert``: the
+#: spool has no insert, or its insert is archived. ``not_full``: the grams left are more
+#: than 0.5 g from the label weight; a spool with no grams left and no use counts as full.
+#: ``below_label`` (#7683): a new spool read under its label weight, and
+#: `InsertWeightCheck` names the shortfall and the resolutions. ``mean_below_1g``: the new
+#: mean rounds below 1 g, which no insert weight may be.
 NoOfferReason = Literal[
     "archived",
     "no_insert",
@@ -347,6 +350,7 @@ NoOfferReason = Literal[
     "below_label",
     "not_above_label",
     "derived_too_heavy",
+    "mean_below_1g",
 ]
 
 #: How a new spool's reading under its label weight is read (#7683, spec §5.3): the
@@ -407,6 +411,9 @@ class InsertWeightAccept(_In):
     """A new spool's weighing: the filament, the empty spool and its insert."""
 
     reading_g: Annotated[float, Field(gt=0, le=100_000)]
+    #: The offer's ``new_empty_weight_g``: when the mean under the locks is another, the
+    #: accept is refused (409 ``insert_weight_changed``) and nothing is written (#7450-2).
+    new_empty_weight_g: Annotated[int, Field(gt=0)] | None = None
 
 
 class InsertWeightAccepted(BaseModel):
@@ -2413,15 +2420,27 @@ class TagPushReport(BaseModel):
 
 
 class SlotReport(BaseModel):
-    """What one reconcile of the override slots did (#6264). ``no_preset``: the type has no
-    preset for the nozzle. ``no_temps``: the spool has no nozzle temperatures, the tray
-    reports none, or the spool has no material or colour to send. Neither calls Bambuddy."""
+    """What one reconcile of the override slots did (#6264, #7276). ``no_preset``: the type
+    has no preset for the nozzle, or the preset has no Bambu filament id ScadBuddy knows.
+    ``no_temps``: the spool has no nozzle temperatures, the tray reports none, or the spool
+    has no material or colour to send. ``invalid_temps``: the temperatures' minimum is above
+    their maximum. ``no_nozzle``: the report does not say which nozzle the tray feeds.
+    ``unsupported_unit``: the slot is on a unit ScadBuddy's LAN commands cannot address.
+    None of these sends a command. ``waiting``: the printer is printing or its AMS is busy
+    (`ams_slots.guard`), or the pass ran out of time before the slot's turn; a later pass configures
+    it. ``unconfirmed``: the configure was sent, but the printer had not acknowledged it
+    when ScadBuddy stopped waiting (P36); it may still apply, and a later pass joins a run
+    still open or sends it again unless the tray shows it."""
 
     configured: int = 0
+    unconfirmed: int = 0
+    waiting: int = 0
     unchanged: int = 0
     no_preset: int = 0
     no_temps: int = 0
+    invalid_temps: int = 0
     no_nozzle: int = 0
+    unsupported_unit: int = 0
     failed: int = 0
 
 
@@ -2470,8 +2489,8 @@ class RfidModeSet(BaseModel):
 
 
 class RfidReconcileReport(BaseModel):
-    """What one reconcile did: the mode, the tags and the override slots (``None`` when no
-    Bambuddy is configured: the step is skipped)."""
+    """What one reconcile did: the mode, the tags and the override slots (``None`` when
+    another reconcile holds the slots: the step is skipped)."""
 
     mode: RfidStatus
     tags: TagPushReport

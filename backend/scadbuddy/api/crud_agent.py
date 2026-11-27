@@ -382,6 +382,8 @@ class WaitingCall(_Answer):
     hop_until: str | None
     reason: str | None
     proposed: bool
+    #: False only when the script lets another answerer answer it (#7471).
+    people_only: bool
     hops: list[HopOut]
 
 

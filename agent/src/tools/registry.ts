@@ -102,6 +102,12 @@ export type ToolServices = {
   toolDeadlineMs?: number
   /** Binary results above this are returned as a link, not inline (binary.ts; 8 MiB by default). */
   maxInlineBytes?: number
+  /**
+   * The inline limit for an image a tool shows the model (#7745), read at each call
+   * (Settings → Assistant → Images); over it the image goes to the workspace
+   * (tools/imageResult.ts). Undefined: the default.
+   */
+  toolImageInlineMaxBytes?: (() => Promise<number>) | undefined
   /** SCADBUDDY_PUBLIC_URL, so a link to a backend route can be absolute. */
   publicBaseUrl?: string | undefined
   /** Bounds the renders each principal starts (renderLimits.ts, #252); the process default when unset. */
@@ -325,8 +331,11 @@ export type ToolSpec<S extends z.ZodRawShape> = {
    * Every write the handler makes is one `command()` (tools/command.ts) to a route that runs
    * it as an operation keyed by the call's Idempotency-Key (backend api/operations.py:
    * workflow `op-<kind>-<key>`), so a second run of the same call, with the same `callKey`,
-   * is answered from the first's operation and does nothing twice. A flow's call whose only
-   * attempt lost its heartbeat is asked once more on that (backend workflows/flow_tools.py
+   * is answered from the first's operation and does nothing twice. Or every write is one
+   * printer command sent through `printerCommand` (tools/printerCommand.ts) with the call's
+   * Idempotency-Key: the printer route answers a resend under that key from the first run
+   * (backend printers/native.py `command_response`; #7276 P38, P41, P53). A flow's call whose
+   * only attempt lost its heartbeat is asked once more on that (backend workflows/flow_tools.py
    * FLOW_KEYED_RETRY_PATCH, #6345). Only for a handler that writes nothing any other way.
    */
   keyed?: boolean

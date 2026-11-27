@@ -1,0 +1,76 @@
+# Relationship types (design §5). A relationship joins two entities. Its type says what
+# may stand on each end and which handler runs when it is added, removed, or checked on
+# the daily schedule. A type with no handler is shown only.
+#
+# `from` and `to`:
+#   target   - what the end is: `unit` (one instance), `item` (an item type such as
+#              "Bambu PLA Matte Charcoal"), `kind` (a kind such as "Filament"), or a list.
+#   class    - the class the end's kind must have (any key left out is free).
+#   special  - the special type the end's kind must have.
+# `max_from_per_to`: how many `from` ends one `to` end may have at a time (1: a nozzle is
+# in one printer at a time).
+# A person may add a type with `handler: null` in the UI (a show-only link, such as
+# "spare for"). A type with a handler comes with Go code (design §5).
+
+relation_types:
+  - id: accepts
+    label: accepts
+    inverse_label: fits in
+    from: {target: [kind, item, unit], class: {nature: physical}}
+    to: {target: [kind, item]}
+    handler: null
+    attrs: [max, where]
+    does: >-
+      A container field: what may go into this thing, and how many. `max: 1` is a single
+      field on the page (the roll in a label printer, the insert in a spool); a larger
+      `max`, or none, is a list (the nozzles in an H2C: 2). `contains` checks it. A `where`
+      narrows the accepted things by property (label rolls of width 62 mm).
+
+  - id: contains
+    label: contains
+    inverse_label: installed in
+    from: {target: [unit], class: {nature: physical}}
+    to: {target: [unit], class: {nature: physical}}
+    max_from_per_to: 1
+    handler: relation.contains
+    does: >-
+      On add: refuses a unit that no `accepts` of the container allows, one that would pass
+      that rule's `max`, or one that is in another container. Sets the unit `in_service` and starts its life. From then on the
+      container's consume handler books a use on the unit, and a printer's machine rate
+      carries its cost. On remove: back to `in_stock`, or retired with a reason.
+
+  - id: covers
+    label: covers
+    inverse_label: covered by
+    from: {target: [unit], class: {nature: service, billing: term}}
+    to: {target: [unit, item]}
+    handler: relation.covers
+    does: >-
+      The schedule checks each covering service's life. It raises a notice `warn_days`
+      before the end and another at the end. A covered unit's page shows what covers it
+      and until when.
+
+  - id: compatible_with
+    label: compatible with
+    inverse_label: takes
+    from: {target: [item, kind]}
+    to: {target: [item, kind]}
+    handler: null
+    does: >-
+      Which items or kinds work together (a hardened nozzle with the H2C). It replaces
+      `items.compatible_with text[]`. `contains` reads it as a warning, not a refusal.
+
+  - id: continues_from
+    label: continues from
+    inverse_label: continued as
+    from: {target: [unit]}
+    to: {target: [unit]}
+    max_from_per_to: 1
+    handler: null
+    does: A unit that continues another (a respooled spool, a replaced roll core).
+
+handlers:
+  - id: relation.contains
+    on: [add, remove]
+  - id: relation.covers
+    on: [add, remove, schedule]

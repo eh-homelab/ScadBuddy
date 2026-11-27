@@ -18,6 +18,7 @@ import {
   toolCallActivity,
   toolCallWorkflowId,
 } from '../temporal/toolCall.js'
+import type { CallEnd } from '../sessions/restartedCalls.js'
 import { errorResult } from './registry.js'
 
 // A turn's ScadBuddy tool calls as activities (unified runtime plan 2026-10-13 Step 9.2, R1 of
@@ -110,6 +111,12 @@ export type ToolCallStarterDeps = {
   timeoutMs?: number
   queue?: string
   eager?: () => Client | undefined
+  /**
+   * Whether a call of this session stays running when its turn stops: a turn a shutdown cut
+   * (sessions/turnHost.ts `keepsCalls`, #7874). Its restarted placement reads the result
+   * (`cutToolCall`), so the call is never cancelled and never run twice.
+   */
+  keeps?: (sessionId: string) => boolean
 }
 
 /** Starts (or finds) each call's ToolCall on `client` and answers with its result; on `queue` (agent-tools by default), the workflow and its activity. */
@@ -148,7 +155,9 @@ export function toolCallStarter(deps: ToolCallStarterDeps): ToolCallStarter {
       if (!(err instanceof WorkflowExecutionAlreadyStartedError)) throw err
       handle = deps.client.workflow.getHandle(workflowId)
     }
-    const cancel = () => void handle.cancel().catch(() => {})
+    const cancel = () => {
+      if (!deps.keeps?.(request.sessionId)) void handle.cancel().catch(() => {})
+    }
     request.signal.addEventListener('abort', cancel, { once: true })
     if (request.signal.aborted) cancel()
     try {
@@ -230,6 +239,61 @@ export async function finishedToolCalls(deps: { reads: Pick<SessionReads, 'openC
     }
   }
   return out
+}
+
+/** How often `cutToolCall` reads a running call's state. */
+export const CUT_CALL_POLL_MS = 1_000
+
+/**
+ * How a call that a lost placement left in flight ended (#7874, sessions/restartedCalls.ts): its
+ * ToolCall's result once it completes, read as the model reads one (`callToolResult`), or its
+ * failure as the starter gives it; `running` when it still runs after `waitMs` or once `signal`
+ * aborts; `ended` when it ended with no result; `none` when no ToolCall has its id (a Claude Code
+ * built-in, an in-process call). Its state is read every `pollMs`, and `beat` is called each time.
+ */
+export async function cutToolCall(
+  deps: { client: Client; blobs: Pick<SessionImages, 'get'> },
+  sessionId: string,
+  call: { id: string; name: string },
+  wait: { waitMs: number; signal: AbortSignal; beat?: () => void; pollMs?: number },
+): Promise<CallEnd> {
+  const handle = deps.client.workflow.getHandle(toolCallWorkflowId(sessionId, call.id))
+  const deadline = Date.now() + wait.waitMs
+  let status: string
+  try {
+    status = (await handle.describe()).status.name
+  } catch (err) {
+    if (workflowNotFound(err)) return { kind: 'none' }
+    throw err
+  }
+  while (status === 'RUNNING') {
+    if (wait.signal.aborted || Date.now() >= deadline) return { kind: 'running' }
+    wait.beat?.()
+    await pause(Math.min(wait.pollMs ?? CUT_CALL_POLL_MS, Math.max(deadline - Date.now(), 0)), wait.signal)
+    status = (await handle.describe()).status.name
+  }
+  if (status === 'COMPLETED') return { kind: 'result', result: await callToolResult(sessionId, (await handle.result()) as ToolCallResult, deps.blobs) }
+  if (status === 'FAILED') {
+    try {
+      await handle.result()
+    } catch (err) {
+      return { kind: 'result', result: errorResult(`${call.name} failed: ${failureMessage(err)}`) }
+    }
+  }
+  return { kind: 'ended', status: status.toLowerCase().replace(/_/g, ' ') }
+}
+
+/** Resolves after `ms`, or at once when `signal` aborts. */
+function pause(ms: number, signal: AbortSignal): Promise<void> {
+  return new Promise((resolve) => {
+    const done = () => {
+      clearTimeout(timer)
+      signal.removeEventListener('abort', done)
+      resolve()
+    }
+    const timer = setTimeout(done, ms)
+    signal.addEventListener('abort', done, { once: true })
+  })
 }
 
 /** What a session's completed ToolCall returned, as the model reads a tool result (`tool_call_result`); undefined while it runs, or when it never ran or failed. */

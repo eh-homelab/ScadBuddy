@@ -177,6 +177,10 @@ func TestSendInboxOverMCP(t *testing.T) {
 	if !res.IsError || !strings.Contains(resultText(res), "exactly one") {
 		t.Errorf("fleet_send with both targets: IsError=%v %q", res.IsError, resultText(res))
 	}
+	res = h.call(t, "fleet_send", map[string]any{"session_id": sidA, "agent": "rotator", "text": "x"})
+	if !res.IsError || resultText(res) != rotatorReject {
+		t.Errorf("fleet_send to a virtual sender: IsError=%v %q; want %q", res.IsError, resultText(res), rotatorReject)
+	}
 	res = h.call(t, "fleet_join", map[string]any{"session_id": "not-a-uuid", "channel": "ops"})
 	if !res.IsError {
 		t.Errorf("fleet_join with a bad session_id did not fail")

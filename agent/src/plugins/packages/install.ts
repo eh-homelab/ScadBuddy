@@ -6,10 +6,10 @@ import { EgressError, type Resolver, systemResolver } from '../../http/egress.js
 import { assertEndpointAllowed, PluginError } from '../registry.js'
 import { ARCHIVE_LIMITS, type Downloader, egressDownload, MARKETPLACE_LIMITS } from './download.js'
 import { type Checkout, extractSubdir, FetchError, type RepoFetcher } from './git.js'
-import { hashTree, PackageContentError, type TreeHash } from './hash.js'
+import { hashTree, MAX_FILE_BYTES, MAX_FILES, MAX_TOTAL_BYTES, PackageContentError, type TreeHash } from './hash.js'
 import type { HostedPlugins } from './hosted.js'
 import { declaredHeaderSecrets } from './mcp.js'
-import type { PackageMirror } from './mirror.js'
+import { MIRROR_MAX_BYTES, type PackageMirror } from './mirror.js'
 import { fetchNpmTarball } from './npm.js'
 import {
   DEFAULT_REF,
@@ -20,8 +20,9 @@ import {
   validateRef,
   validateSource,
 } from './source.js'
-import { entryPath, pluginRoot, unpackArchive, UnpackError } from './unpack.js'
-import type { PackagePin, PackageRepo, PreparedPackage } from './store.js'
+import { entryPath, pluginRoot, type UnpackLimits, unpackArchive, UnpackError } from './unpack.js'
+import type { MirrorRecord, PackagePin, PackageRepo, PreparedPackage } from './store.js'
+import { storedZip } from './zip.js'
 import { builtInNamed } from './builtins.js'
 import { capProblems, type Endpoint, itemsOfPlugin, LISTING_PACKAGES_BUDGET, listedPackageSize, type PackageReview, vetPackage } from './vet.js'
 
@@ -36,8 +37,28 @@ import { capProblems, type Endpoint, itemsOfPlugin, LISTING_PACKAGES_BUDGET, lis
 // asks `materialise` for each enabled pin: the cached directory
 // `<cacheRoot>/<name>/<commit>-<hash prefix>` is used only when every file in
 // it hashes to the pin; a missing, partial or altered copy is removed and
-// fetched again from the pin (same commit; the new files must hash the same,
-// or the package is not loaded). The cache can be an emptyDir.
+// read again from the pin's copy in the blob store (the new files must hash
+// the same, or the package is not loaded; a commit pin's copy is its mirror,
+// below). The cache can be an emptyDir.
+//
+// COMMIT PINS LOAD FROM THEIR MIRROR, NEVER FROM GIT (#7907; the owner's decision of
+// 2026-11-26 on the issue). A git fetch can take minutes (a depth-1 fetch of a large
+// monorepo, checked with `transfer.fsckObjects`, git.ts), and an emptyDir is empty after
+// every restart. So the files of a commit pin are kept in the blob store as a deterministic
+// zip (zip.ts `storedZip`) through the API's area `package-mirrors` (mirror.ts), and the row
+// records its sha256 (`mirror_sha256`, or `pending_mirror_sha256` for a re-pin; store.ts
+// `recordMirror`). A load (a turn, the warm-up, a file read for review, `headerSecrets`) reads
+// the cache, else that zip, and uses the zip only when its files hash to the pin. It never
+// runs git: with no mirror recorded, or one that is missing or fails the check, the package
+// is not loaded (`MirrorNotReadyError`) and the load starts the mirror job (`wantMirror`,
+// not awaited), which fetches the commit, checks the hash, and writes and records the mirror
+// (`makeMirror`; on Temporal the `PackageMirror` workflow, temporal/packageMirror.ts and
+// mirrorJob.ts). Install and re-pin still fetch git to vet and hash the package; that fetch
+// also puts the zip, and the caller records it once the pin is stored, or starts the job
+// when it could not (`recordPreparedMirror`). The zip is unpacked with the content hash's
+// caps (`COMMIT_MIRROR_LIMITS`, hash.ts), not a download's stricter ones, so every package
+// that can be pinned can be mirrored; only a zip past the API's `MIRROR_MAX_BYTES`
+// (mirror.ts: paths of over 1,010 bytes on average at the largest size) is not.
 //
 // BYTES PINS (#6935, spec 2026-11-21 §6.6): an `archive` or `npm` source, or a
 // marketplace entry of either (a `marketplace-url` source is a bare `marketplace.json`
@@ -99,6 +120,41 @@ export type InstallerOptions = {
   download?: Downloader
   /** The hosted plugins' versions (the API's area `hosted-plugins`); without them a hosted install or load is a 503. */
   hosted?: () => HostedPlugins | undefined
+  /**
+   * Records a commit pin's mirror on its row (#7907, the package store's `recordMirror`). A
+   * commit pin is mirrored only with this and `mirror`.
+   */
+  recordMirror?: (name: string, mirror: MirrorRecord) => Promise<void>
+  /** The fetcher of the mirror job (`makeMirror`): a background job's, with a longer time limit; `fetcher` by default. */
+  mirrorFetcher?: RepoFetcher
+  /** Starts the job that makes a commit pin's mirror (mirrorJob.ts); without it a load only says the mirror is not ready. */
+  mirrorJobs?: () => MirrorJobs | undefined
+  /** Where a mirror that was not read or sent is told; `console.warn` by default. */
+  warn?: (message: string) => void
+}
+
+/** The commit pin whose mirror a job makes: the job reads the rest of the pin from the row. */
+export type MirrorJob = { name: string; commit: string; contentHash: string }
+
+/** Starts a mirror job; never throws, and joins a job already running for the same pin. */
+export interface MirrorJobs {
+  start(job: MirrorJob): void
+}
+
+/** A commit pin with no usable mirror yet: not loaded, never fetched from git on the load path. */
+export class MirrorNotReadyError extends PluginError {
+  override name = 'MirrorNotReadyError'
+  constructor(message: string) {
+    super(message, 503)
+  }
+}
+
+/** A commit pin's mirror is unpacked with the content hash's caps (hash.ts): its files passed them when pinned. */
+export const COMMIT_MIRROR_LIMITS: UnpackLimits = { files: MAX_FILES, fileBytes: MAX_FILE_BYTES, totalBytes: MAX_TOTAL_BYTES }
+
+/** The mirror job fetched files that are not the pin's, or whose zip is past `MIRROR_MAX_BYTES`: trying again gives the same. */
+export class MirrorRefusedError extends Error {
+  override name = 'MirrorRefusedError'
 }
 
 type GitTarget = { kind: 'git'; url: string; ref: string; path: string; sameRepo: boolean }
@@ -228,6 +284,10 @@ export class PackageInstaller {
   private readonly mirrorOf: () => PackageMirror | undefined
   private readonly hostedOf: () => HostedPlugins | undefined
   private readonly download: Downloader
+  private readonly recordMirror: ((name: string, mirror: MirrorRecord) => Promise<void>) | undefined
+  private readonly warn: (message: string) => void
+  private readonly mirrorFetcher: RepoFetcher
+  private readonly mirrorJobsOf: () => MirrorJobs | undefined
   /** Per package, the tail of its queue: materialising and pruning run one at a time. */
   private readonly queues = new Map<string, Promise<unknown>>()
   /** Turns using each cached directory; a leased directory is never pruned. */
@@ -246,6 +306,150 @@ export class PackageInstaller {
     this.mirrorOf = options.mirror ?? (() => undefined)
     this.hostedOf = options.hosted ?? (() => undefined)
     this.download = options.download ?? egressDownload
+    this.recordMirror = options.recordMirror
+    this.warn = options.warn ?? ((message) => console.warn(message))
+    this.mirrorFetcher = options.mirrorFetcher ?? options.fetcher
+    this.mirrorJobsOf = options.mirrorJobs ?? (() => undefined)
+  }
+
+  /**
+   * Starts the job that makes `job`'s mirror (not awaited; the job checks a recorded mirror
+   * first, so starting one for a pin that has a good mirror fetches nothing). False when this
+   * process has no mirror job.
+   */
+  wantMirror(job: MirrorJob): boolean {
+    const jobs = this.mirrorJobsOf()
+    if (!jobs) return false
+    jobs.start(job)
+    return true
+  }
+
+  /** The files of `pin`'s mirror, unpacked into `dest` (with the hash's caps) and hashed against the pin; throws why not. */
+  private async readMirror(pin: PackagePin & { mirrorSha256: string }, dest: string): Promise<TreeHash> {
+    const mirror = this.mirrorOf()
+    if (!mirror) throw new PluginError('this API does not keep mirrors (CRUD area package-mirrors)', 503)
+    await unpackArchive(await mirror.get(pin.name, pin.mirrorSha256), dest, COMMIT_MIRROR_LIMITS)
+    const tree = await hashTree(dest)
+    if (tree.hash !== pin.contentHash) throw new PluginError(`its files hash to ${tree.hash}, not the pinned ${pin.contentHash}`, 502)
+    return tree
+  }
+
+  /**
+   * The mirror job's work (mirrorJob.ts): ends at once when `pin`'s recorded mirror reads back
+   * and hashes to the pin (`kept`); else fetches the commit with the job's fetcher, checks the
+   * files against the pin, and writes and records the mirror again (`mirrored`), over a bad
+   * record. A fetch that gives other files, or a zip past `MIRROR_MAX_BYTES`, is a
+   * MirrorRefusedError; any other failure may pass on a later try.
+   */
+  async makeMirror(pin: PackagePin, signal?: AbortSignal): Promise<{ outcome: 'kept' | 'mirrored'; sha256: string }> {
+    if (!this.recordMirror) throw new PluginError('this process cannot record a mirror', 503)
+    const tmp = await this.tempDir()
+    try {
+      if (pin.mirrorSha256) {
+        try {
+          await this.readMirror({ ...pin, mirrorSha256: pin.mirrorSha256 }, path.join(tmp, 'kept'))
+          return { outcome: 'kept', sha256: pin.mirrorSha256 }
+        } catch (err) {
+          if (!(err instanceof PluginError || err instanceof UnpackError || err instanceof PackageContentError)) throw err
+          this.warn(`plugin package ${pin.name}: the mirror ${pin.mirrorSha256} of commit ${pin.commit} is made again: ${err.message}`)
+        }
+      }
+      await this.egress(pin.fetchUrl, 'plugin url')
+      let checkout: Checkout
+      try {
+        checkout = await this.mirrorFetcher.checkout(pin.fetchUrl, pin.commit, path.join(tmp, 'repo'), signal, pin.fetchPath)
+      } catch (err) {
+        if (err instanceof FetchError) throw new PluginError(err.message, 502)
+        throw err
+      }
+      if (checkout.commit !== pin.commit) throw new MirrorRefusedError(`fetched commit ${checkout.commit}, the pin is ${pin.commit}`)
+      const pkg = path.join(tmp, 'pkg')
+      let tree: TreeHash
+      try {
+        tree = await this.extract(checkout, pin.fetchPath, pkg)
+      } catch (err) {
+        if (err instanceof PackageRefusedError) throw new MirrorRefusedError(err.problems.join('; '))
+        throw err
+      }
+      if (tree.hash !== pin.contentHash) {
+        throw new MirrorRefusedError(`the files at commit ${pin.commit} hash to ${tree.hash}, not the pinned ${pin.contentHash}`)
+      }
+      const zip = await this.commitZip(tree, pkg)
+      if (!zip) throw new MirrorRefusedError(`the zip of its files is larger than the API keeps (${MIRROR_MAX_BYTES} bytes)`)
+      const sha256 = sha256Hex(zip)
+      await this.mirror().put(pin.name, sha256, zip, signal)
+      await this.recordMirror(pin.name, { commit: pin.commit, contentHash: pin.contentHash, sha256 })
+      return { outcome: 'mirrored', sha256 }
+    } finally {
+      await rm(tmp, { recursive: true, force: true })
+    }
+  }
+
+  /**
+   * The deterministic zip of a commit pin's files at `dir` (hashed as `tree`), or undefined
+   * when no mirror can take it: no mirror or no record, or a zip past `MIRROR_MAX_BYTES`.
+   * `tree` passed the content hash's caps, which `COMMIT_MIRROR_LIMITS` unpacks it under.
+   */
+  private async commitZip(tree: TreeHash, dir: string): Promise<Buffer | undefined> {
+    if (!this.mirrorOf() || !this.recordMirror) return undefined
+    const files = await Promise.all(
+      Object.entries(tree.files).map(async ([rel, f]) => ({ path: rel, data: await readFile(path.join(dir, rel)), executable: f.executable })),
+    )
+    const zip = storedZip(files)
+    return zip.length > MIRROR_MAX_BYTES ? undefined : zip
+  }
+
+  /**
+   * A commit pin's files at `dir` sent to the mirror (best effort): its sha256, or undefined
+   * when there is no mirror to take it or the send failed (logged).
+   */
+  private async sendCommitMirror(name: string, commit: string, tree: TreeHash, dir: string, signal?: AbortSignal): Promise<string | undefined> {
+    try {
+      const zip = await this.commitZip(tree, dir)
+      if (!zip) {
+        if (this.mirrorOf() && this.recordMirror) this.warn(`plugin package ${name}: the zip of commit ${commit} is larger than the API keeps (${MIRROR_MAX_BYTES} bytes), so it is not mirrored`)
+        return undefined
+      }
+      const sha = sha256Hex(zip)
+      await this.mirror().put(name, sha, zip, signal)
+      return sha
+    } catch (err) {
+      this.warn(`plugin package ${name}: the files of commit ${commit} were not mirrored: ${(err as Error).message}`)
+      return undefined
+    }
+  }
+
+  /**
+   * Places `pin`'s recorded mirror in the cache: unpacked, hashed against the pin, and vetted
+   * unless `vet` is false. Else a MirrorNotReadyError, after the mirror job is started.
+   */
+  private async fromCommitMirror(pin: PackagePin, options: { vet?: boolean }): Promise<void> {
+    const job = { name: pin.name, commit: pin.commit, contentHash: pin.contentHash }
+    const notReady = (why: string): MirrorNotReadyError => {
+      const started = this.wantMirror(job)
+      return new MirrorNotReadyError(started ? `${why}; a new one is being made in the background` : why)
+    }
+    if (!pin.mirrorSha256) throw notReady('its mirror is not ready yet')
+    const tmp = await this.tempDir()
+    try {
+      const pkg = path.join(tmp, 'pkg')
+      let tree: TreeHash
+      try {
+        tree = await this.readMirror({ ...pin, mirrorSha256: pin.mirrorSha256 }, pkg)
+      } catch (err) {
+        // Any failure to read the mirror (a refusal, a bad zip, a transport error) starts the
+        // job, so no load fails without one being started.
+        if (err instanceof PluginError || err instanceof UnpackError || err instanceof PackageContentError) {
+          throw notReady(`its mirror failed its check (${err.message})`)
+        }
+        throw notReady(`its mirror could not be read (${(err as Error).message})`)
+      }
+      // The pinned files themselves: a refusal here is the one git's copy would get too.
+      if (options.vet !== false) await this.vetTree(tree, pkg, pin.name)
+      await this.place(pin, pkg)
+    } finally {
+      await rm(tmp, { recursive: true, force: true })
+    }
   }
 
   private mirror(): PackageMirror {
@@ -299,9 +503,10 @@ export class PackageInstaller {
     return problems
   }
 
-  private async checkout(url: string, ref: string, into: string, signal?: AbortSignal): Promise<Checkout> {
+  /** `subpath`: the one folder used from the checkout, so only its files are fetched (#7908); '' for all. */
+  private async checkout(url: string, ref: string, into: string, signal: AbortSignal | undefined, subpath: string): Promise<Checkout> {
     try {
-      return await this.fetcher.checkout(url, ref, into, signal)
+      return await this.fetcher.checkout(url, ref, into, signal, subpath)
     } catch (err) {
       if (err instanceof FetchError) throw new PluginError(err.message, 502)
       throw err
@@ -500,14 +705,16 @@ export class PackageInstaller {
     await this.egress(fetchUrl, `marketplace entry "${fallbackName}"`)
     const tmp = await this.tempDir()
     try {
-      const checkout = await this.checkout(fetchUrl, ref, path.join(tmp, 'repo'), signal)
+      const checkout = await this.checkout(fetchUrl, ref, path.join(tmp, 'repo'), signal, fetchPath)
       const pkg = path.join(tmp, 'pkg')
       const { tree, review } = await this.extractAndVet(checkout, fetchPath, pkg, fallbackName)
+      const mirrorSha256 = await this.sendCommitMirror(review.name, checkout.commit, tree, pkg, signal)
       const prepared: PreparedPackage = {
         source,
         fetchUrl,
         fetchPath,
         commit: checkout.commit,
+        ...(mirrorSha256 ? { mirrorSha256 } : {}),
         contentHash: tree.hash,
         files: tree.files,
         review: marketplaceSha ? { ...review, marketplace_sha256: marketplaceSha } : review,
@@ -522,7 +729,9 @@ export class PackageInstaller {
   /**
    * Fetches `source`, pins its commit (or for an archive or npm package, its bytes), and
    * vets and hashes the plugin. Nothing is stored: the caller stores the result
-   * (unapproved) for the admin to review; a bytes pin's file is mirrored first. The
+   * (unapproved) for the admin to review; a bytes pin's file is mirrored first, and a commit
+   * pin's files are sent to the mirror too when one takes them (`mirrorSha256`, which the
+   * caller records once the pin is stored, `recordPreparedMirror`). The
    * fetched copy is kept in the cache for the first run. `signal` stops the fetch (an
    * AgentOperation run that is cancelled).
    */
@@ -533,7 +742,9 @@ export class PackageInstaller {
     await this.egress(source.url, 'source url')
     const tmp = await this.tempDir()
     try {
-      const repo = await this.checkout(source.url, source.ref, path.join(tmp, 'repo'), signal)
+      // A marketplace's own repository is fetched whole: its entry's folder is not known until
+      // marketplace.json is read, and a relative entry is a folder of this same checkout.
+      const repo = await this.checkout(source.url, source.ref, path.join(tmp, 'repo'), signal, source.kind === 'git' ? source.path : '')
       let checkout = repo
       let fetchUrl = source.url
       let fetchPath = source.kind === 'git' ? source.path : ''
@@ -552,7 +763,7 @@ export class PackageInstaller {
         fetchPath = target.path
         if (!target.sameRepo) {
           await this.egress(target.url, `marketplace entry "${source.entry}"`)
-          checkout = await this.checkout(target.url, target.ref, path.join(tmp, 'plugin-repo'), signal)
+          checkout = await this.checkout(target.url, target.ref, path.join(tmp, 'plugin-repo'), signal, target.path)
         }
         fallbackName = source.entry
       } else {
@@ -562,11 +773,13 @@ export class PackageInstaller {
       }
       const pkg = path.join(tmp, 'pkg')
       const { tree, review } = await this.extractAndVet(checkout, fetchPath, pkg, fallbackName)
+      const mirrorSha256 = await this.sendCommitMirror(review.name, checkout.commit, tree, pkg, signal)
       const prepared: PreparedPackage = {
         source,
         fetchUrl,
         fetchPath,
         commit: checkout.commit,
+        ...(mirrorSha256 ? { mirrorSha256 } : {}),
         contentHash: tree.hash,
         files: tree.files,
         review,
@@ -615,7 +828,7 @@ export class PackageInstaller {
 
   /**
    * The local directory for `pin`, verified against it: the cached copy when
-   * it hashes to the pin, else fetched again at the pinned commit. Re-vetted
+   * it hashes to the pin, else rebuilt from its mirror, never git (#7907). Re-vetted
    * either way. Throws PluginError / PackageRefusedError when it cannot be
    * loaded.
    */
@@ -667,7 +880,8 @@ export class PackageInstaller {
 
   /**
    * One file of `pin`, for review (#1029, routes/pluginPackages.ts): read from the
-   * copy that hashes to the pin, fetched again when it does not, but never vetted
+   * copy that hashes to the pin, read again from the pin's mirror when it does not (a
+   * commit pin's from its recorded mirror, never git), but never vetted
    * for loading, since a package the rules refuse is the one that most needs reading.
    * `rel` must be a path in the pin's file list (the route checks). Runs in the
    * package's queue, so a prune cannot remove the copy mid-read.
@@ -691,12 +905,13 @@ export class PackageInstaller {
 
   /**
    * The header values `pin`'s http MCP servers declare (#5485, mcp.ts `declaredHeaderSecrets`),
-   * read from the copy that hashes to the pin, fetched again when there is none. Never vetted and
-   * never checked for address or listing size, so a package that fails to load still gives them:
-   * they stay secrets that every tool redacts and every upload refuses. Throws when no copy can
-   * be had (the fetch fails, or the files do not hash to the pin), so the secrets read fails
-   * closed; for `PACKAGE_SECRETS_FAILURE_MS` after, it throws the same error again without a
-   * fetch (a refusal, never an empty list), unless a copy that hashes to the pin is cached by
+   * read from the copy that hashes to the pin, read again from the pin's mirror when there is
+   * none. Never vetted and never checked for address or listing size, so a package that fails to
+   * load still gives them: they stay secrets that every tool redacts and every upload refuses.
+   * Throws when no copy can be had (no usable mirror, a commit pin's `MirrorNotReadyError`, or
+   * files that do not hash to the pin), so the secrets read fails closed; for
+   * `PACKAGE_SECRETS_FAILURE_MS` after, it throws the same error again without reading the
+   * mirror (a refusal, never an empty list), unless a copy that hashes to the pin is cached by
    * then, which ends the refusal at once. Runs in the package's queue.
    */
   headerSecrets(pin: PackagePin): Promise<string[]> {
@@ -722,8 +937,9 @@ export class PackageInstaller {
   }
 
   /**
-   * The cached directory of `pin` when every file hashes to it, else fetched again at the pinned
-   * commit, vetted unless `vet` is false (a load re-vets the copy anyway, `materialiseNow`).
+   * The cached directory of `pin` when every file hashes to it, else read again from its
+   * mirror, its hosted version or (a commit pin, #7907) its recorded mirror, never from git;
+   * vetted unless `vet` is false (a load re-vets the copy anyway, `materialiseNow`).
    */
   private async verifiedCopy(pin: PackagePin, options: { vet?: boolean } = {}): Promise<string> {
     const dir = this.cacheDir(pin)
@@ -743,30 +959,9 @@ export class PackageInstaller {
     }
     if (!(await this.cacheMatches(dir, pin))) {
       await rm(dir, { recursive: true, force: true })
-      await this.egress(pin.fetchUrl, 'plugin url')
-      const tmp = await this.tempDir()
-      try {
-        const checkout = await this.checkout(pin.fetchUrl, pin.commit, path.join(tmp, 'repo'))
-        if (checkout.commit !== pin.commit) {
-          throw new PluginError(`fetched commit ${checkout.commit}, the pin is ${pin.commit}`, 502)
-        }
-        const pkg = path.join(tmp, 'pkg')
-        const tree =
-          options.vet === false
-            ? await this.extract(checkout, pin.fetchPath, pkg)
-            : (await this.extractAndVet(checkout, pin.fetchPath, pkg, pin.name)).tree
-        if (tree.hash !== pin.contentHash) {
-          throw new PluginError(
-            `the files at commit ${pin.commit} hash to ${tree.hash}, not the pinned ${pin.contentHash}`,
-            502,
-          )
-        }
-        await this.place(pin, pkg)
-      } finally {
-        await rm(tmp, { recursive: true, force: true })
-      }
+      await this.fromCommitMirror(pin, options)
       if (!(await this.cacheMatches(dir, pin))) {
-        throw new PluginError(`the cached copy of ${pin.name} does not match its pin after fetching`, 502)
+        throw new PluginError(`the cached copy of ${pin.name} does not match its pin after unpacking its mirror`, 502)
       }
     }
     return dir
@@ -842,6 +1037,32 @@ export class PackageInstaller {
       await this.prune(name)
     })
   }
+}
+
+/**
+ * Records a prepared commit pin's mirror (`PreparedPackage.mirrorSha256`) once its pin or
+ * re-pin is stored under `options.name` (#7907); when there is none, or the record fails (told to `warn`), starts
+ * the mirror job instead, so the pin can load without git.
+ */
+export async function recordPreparedMirror(
+  packages: Pick<PackageRepo, 'recordMirror'>,
+  installer: Partial<Pick<PackageInstaller, 'wantMirror'>>,
+  prepared: PreparedPackage,
+  options: { name?: string; warn?: (message: string) => void } = {},
+): Promise<void> {
+  if (!prepared.commit || prepared.bytesSha256 !== undefined || prepared.version !== undefined) return
+  // The stored row's name (a re-pin is stored under the request's), not the review's.
+  const name = options.name ?? prepared.review.name
+  const warn = options.warn ?? ((message: string) => console.warn(message))
+  if (prepared.mirrorSha256) {
+    try {
+      await packages.recordMirror(name, { commit: prepared.commit, contentHash: prepared.contentHash, sha256: prepared.mirrorSha256 })
+      return
+    } catch (err) {
+      warn(`plugin package ${name}: the mirror of commit ${prepared.commit} was not recorded: ${(err as Error).message}`)
+    }
+  }
+  installer.wantMirror?.({ name, commit: prepared.commit, contentHash: prepared.contentHash })
 }
 
 /** The pin a prepared package will be stored as. */
@@ -944,12 +1165,15 @@ export async function loadPackagesForRun(
 }
 
 /**
- * Fetches every enabled package into this replica's cache (#4217), so its first turn finds
- * them there instead of fetching. The cache is the pod's scratch, empty after every deploy,
- * and a fetch is the pinned commit's whole repository (hindsight's is 183 MB for a 24 KB
- * package): durable turns' listings waited 22-113 s on it. A turn that loads during the
- * warm-up waits on the same fetch, since a package's steps run one at a time. Returns what
- * a turn would report: a package refused here is refused there too.
+ * Reads every enabled package into this replica's cache (#4217), so its first turn finds
+ * them there. The cache is the pod's scratch, empty after every deploy. A git fetch of a
+ * pinned commit was the whole repository (hindsight's is 183 MB for a 24 KB package), and
+ * durable turns' listings waited 22-113 s on it, so a load now reads the mirror only. A turn
+ * that loads during the warm-up waits on the same read, since a package's steps run one at a
+ * time. Returns what
+ * a turn would report: a package refused here is refused there too. A commit pin is read from
+ * its mirror in the blob store, never fetched (#7907); one with no mirror yet is reported and
+ * its mirror job started.
  */
 export async function warmPackages(
   store: Pick<PackageRepo, 'enabledPins'>,

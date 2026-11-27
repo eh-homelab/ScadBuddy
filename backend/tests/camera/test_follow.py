@@ -1,51 +1,24 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import json
-from collections.abc import AsyncIterator, Callable
+from collections.abc import Callable
 from typing import Any
 
 import httpx
 
 from scadbuddy.auth.service_credentials import ServiceAuth
-from scadbuddy.camera.follow import ChangeFollower
+from scadbuddy.camera.follow import IDLE, ChangeFollower
 from scadbuddy.crud.client import CrudClient
+from tests.camera.support import Token, frame, sse, until
 
 PATH = "/api/v1/internal/crud/camera/changes"
-
-
-class Token:
-    def token(self) -> str | None:
-        return "t"
-
-    def invalidate(self, token: str) -> None:
-        pass
-
-
-def frame(event: str, data: dict[str, Any], id: str | None = None) -> bytes:
-    head = f"id: {id}\n" if id else ""
-    return f"{head}event: {event}\ndata: {json.dumps(data)}\n\n".encode()
 
 
 def change(kind: str, printer_id: str, id: str) -> bytes:
     payload = json.dumps({"kind": kind, "printer_id": printer_id})
     return frame("change", {"c": "scadbuddy_events", "p": payload}, id)
-
-
-class Body(httpx.AsyncByteStream):
-    def __init__(self, chunks: list[bytes], hold: asyncio.Event | None = None) -> None:
-        self.chunks, self.hold = chunks, hold
-
-    async def __aiter__(self) -> AsyncIterator[bytes]:
-        for chunk in self.chunks:
-            yield chunk
-        if self.hold is not None:
-            await self.hold.wait()
-
-
-def sse(chunks: list[bytes], hold: asyncio.Event | None = None) -> httpx.Response:
-    headers = {"X-ScadBuddy-Crud": "1", "Content-Type": "text/event-stream"}
-    return httpx.Response(200, headers=headers, stream=Body(chunks, hold))
 
 
 def follower(
@@ -69,12 +42,6 @@ def follower(
     )
 
 
-async def until(predicate: Callable[[], object], timeout: float = 5.0) -> None:
-    async with asyncio.timeout(timeout):
-        while not predicate():
-            await asyncio.sleep(0.01)
-
-
 async def test_follower_rereads_on_resync() -> None:
     hold = asyncio.Event()
     body = [
@@ -84,9 +51,11 @@ async def test_follower_rereads_on_resync() -> None:
     ]
     changes: list[str] = []
     resyncs: list[int] = []
-    task = asyncio.create_task(follower(lambda request: sse(body, hold), changes, resyncs).run())
-    await until(lambda: changes)
-    await asyncio.sleep(0.05)
+    drained = asyncio.Event()
+    task = asyncio.create_task(
+        follower(lambda request: sse(body, hold, drained), changes, resyncs).run()
+    )
+    await asyncio.wait_for(drained.wait(), 5)
     task.cancel()
     assert resyncs == [1]
     assert changes == ["p1"]
@@ -159,12 +128,16 @@ async def test_follower_retries_a_failed_resync() -> None:
     requests: list[httpx.Request] = []
     calls: list[int] = []
 
+    drained = asyncio.Event()
+
     def handler(request: httpx.Request) -> httpx.Response:
         requests.append(request)
         body = [
             frame("ready", {"resync": len(requests) == 1, "reconnect": False}, str(len(requests)))
         ]
-        return sse(body, hold if len(requests) > 2 else None)
+        if len(requests) > 2:
+            return sse(body, hold, drained)
+        return sse(body)
 
     client = CrudClient(
         "http://api", "camera", ServiceAuth(Token()), transport=httpx.MockTransport(handler)
@@ -181,8 +154,8 @@ async def test_follower_retries_a_failed_resync() -> None:
     task = asyncio.create_task(
         ChangeFollower(client, PATH, on_change, on_resync, retry_min=0.01, retry_max=0.02).run()
     )
-    await until(lambda: len(calls) >= 2)
-    await asyncio.sleep(0.1)
+    # The third stream's ready, handled with no third resync.
+    await asyncio.wait_for(drained.wait(), 5)
     assert not task.done()
     task.cancel()
     assert len(calls) == 2
@@ -222,11 +195,11 @@ async def test_follower_resync_first() -> None:
     hold = asyncio.Event()
     body = [frame("ready", {"resync": False, "reconnect": False}, "5")]
     resyncs: list[int] = []
+    drained = asyncio.Event()
     task = asyncio.create_task(
-        follower(lambda request: sse(body, hold), [], resyncs, resync_first=True).run()
+        follower(lambda request: sse(body, hold, drained), [], resyncs, resync_first=True).run()
     )
-    await until(lambda: resyncs)
-    await asyncio.sleep(0.05)
+    await asyncio.wait_for(drained.wait(), 5)
     task.cancel()
     assert resyncs == [1]
 
@@ -235,13 +208,120 @@ async def test_follower_without_resync_first_does_not_resync() -> None:
     hold = asyncio.Event()
     requests: list[httpx.Request] = []
 
+    drained = asyncio.Event()
+
     def handler(request: httpx.Request) -> httpx.Response:
         requests.append(request)
-        return sse([frame("ready", {"resync": False, "reconnect": False}, "5")], hold)
+        return sse([frame("ready", {"resync": False, "reconnect": False}, "5")], hold, drained)
 
     resyncs: list[int] = []
     task = asyncio.create_task(follower(handler, [], resyncs).run())
-    await until(lambda: requests)
-    await asyncio.sleep(0.05)
+    await asyncio.wait_for(drained.wait(), 5)
     task.cancel()
     assert resyncs == []
+
+
+async def test_a_reconnect_change_calls_on_reconnect() -> None:
+    hold = asyncio.Event()
+    body = [
+        frame("ready", {"resync": False, "reconnect": False}, "5"),
+        change("camera.reconnect", "p3", "6"),
+        change("printer.changed", "p4", "7"),
+    ]
+    changes: list[str] = []
+    reconnects: list[str] = []
+
+    async def on_reconnect(printer_id: str) -> None:
+        reconnects.append(printer_id)
+
+    task = asyncio.create_task(
+        follower(lambda request: sse(body, hold), changes, [], on_reconnect=on_reconnect).run()
+    )
+    await until(lambda: changes)
+    task.cancel()
+    assert reconnects == ["p3"]
+    assert changes == ["p4"]
+
+
+async def test_a_reconnect_without_a_handler_is_a_change() -> None:
+    hold = asyncio.Event()
+    body = [
+        frame("ready", {"resync": False, "reconnect": False}, "5"),
+        change("camera.reconnect", "p3", "6"),
+    ]
+    changes: list[str] = []
+    task = asyncio.create_task(follower(lambda request: sse(body, hold), changes, []).run())
+    await until(lambda: changes)
+    task.cancel()
+    assert changes == ["p3"]
+
+
+async def test_a_failed_reconnect_resyncs_at_the_next_ready() -> None:
+    bodies = [
+        [change("camera.reconnect", "p3", "6")],
+        [frame("ready", {"resync": False, "reconnect": False}, "7")],
+    ]
+    resyncs: list[int] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return sse(bodies.pop(0) if len(bodies) > 1 else bodies[0], asyncio.Event())
+
+    async def on_reconnect(printer_id: str) -> None:
+        raise RuntimeError("boom")
+
+    task = asyncio.create_task(follower(handler, [], resyncs, on_reconnect=on_reconnect).run())
+    await until(lambda: resyncs)
+    task.cancel()
+    assert resyncs == [1]
+
+
+async def test_a_reconnect_event_through_keep_camera_reaches_on_reconnect() -> None:
+    from scadbuddy.agent_changes.hub import Change
+    from scadbuddy.api.crud_camera import keep_camera
+    from scadbuddy.core.events import PG_CHANNEL, CameraReconnectEvent
+
+    event = CameraReconnectEvent(printer_id="p9")
+    payload = event.model_dump_json()
+    assert keep_camera(Change(PG_CHANNEL, payload))
+    # What the stream sends is the change's payload as the frame's ``p``.
+    body = [
+        frame("ready", {"resync": False, "reconnect": False}, "5"),
+        frame("change", {"c": PG_CHANNEL, "p": payload}, "6"),
+    ]
+    reconnects: list[str] = []
+
+    async def on_reconnect(printer_id: str) -> None:
+        reconnects.append(printer_id)
+
+    task = asyncio.create_task(
+        follower(
+            lambda request: sse(body, asyncio.Event()), [], [], on_reconnect=on_reconnect
+        ).run()
+    )
+    await until(lambda: reconnects)
+    task.cancel()
+    assert reconnects == ["p9"]
+
+
+async def test_the_stream_reads_past_the_keepalive_gap() -> None:
+    """The API sends a keepalive every 15 s. The stream's read timeout is ``IDLE``, not the
+    client's per-request 10 s, which ended every quiet stream on prod (#7980)."""
+    seen: list[dict[str, float | None]] = []
+    hold = asyncio.Event()
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen.append(request.extensions["timeout"])
+        return sse([frame("ready", {}, "1")], hold)
+
+    resyncs: list[int] = []
+    follow = follower(handler, [], resyncs)
+    task = asyncio.create_task(follow.run())
+    try:
+        await until(lambda: seen)
+    finally:
+        hold.set()
+        task.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await task
+    assert seen[0]["read"] == IDLE
+    assert seen[0]["connect"] == 10.0

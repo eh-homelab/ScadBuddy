@@ -73,6 +73,13 @@ async def test_a_prompts_answer_is_a_dict() -> None:
     assert await check_script(_script("await prompt('q')"))
 
 
+async def test_a_question_may_be_for_people_only() -> None:
+    schema = "{'type': 'object'}"
+    assert await check_script(_script("await wait_for_human('q', people_only=True)")) == []
+    assert await check_script(_script(f"await prompt('q', {schema}, people_only=True)")) == []
+    assert await check_script(_script("await wait_for_human('q', people_only='yes')"))
+
+
 async def test_an_oversized_script() -> None:
     problems = await check_script("#" * (MAX_SCRIPT_BYTES + 1))
     assert [p.message for p in problems] == ["script is over 64 KiB"]

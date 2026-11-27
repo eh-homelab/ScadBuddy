@@ -57,6 +57,20 @@ name: Deploy (reusable)
 #      `ghcr.io/eh-homelab/scadbuddy-core:<version>@sha256:<its digest>`, in
 #      scadbuddy.yaml, once that file names it; a build that published no core
 #      image keeps the pin and warns.
+#      The printer camera recorders and live edge (#7328, #7330, #7997) are
+#      pinned the same way, to
+#      `ghcr.io/eh-homelab/scadbuddy-camera-<part>:<version>@sha256:<its digest>`,
+#      in applications/scadbuddy-camera/camera-<part>.yaml, once that file
+#      exists. Each file runs its image in two containers (MediaMTX and the
+#      controller), so it must have exactly two image lines, equal to each
+#      other; both move, and so does the comment that names the API build they
+#      came from ("the build of the API's <version>"). Their `camera` job is
+#      continue-on-error, so a build that published no image for a part keeps
+#      that file's pins and warns. The camera relay is NOT pinned here: a
+#      relay restart is a gap of about 10 to 30 s in every printer's
+#      recording, so its pin in camera-relay.yaml moves by hand, in a reviewed
+#      clusters PR, only when its code or MediaMTX changes (camera spec §6.1).
+#      The final check accepts any relay pin in that file, and only there.
 #      Digest-pinned on purpose — nodes pull ghcr.io through a Nexus proxy that
 #      caches tag metadata for 24 h, so a tag alone can serve yesterday's image.
 #      And, when clusters has it, the vendored copy of this repo's
@@ -67,8 +81,9 @@ name: Deploy (reusable)
 #      for the build that serves. The overlay no longer pulls deploy/grafana
 #      in as a remote resource (Argo CD's repo-server failed to fetch it), and
 #      an overlay that still names it fails the deploy.
-#      Last, every ScadBuddy image named anywhere under applications/scadbuddy/
-#      or the overlay's directory must be one this run pinned, or the deploy
+#      Last, every ScadBuddy image named anywhere under applications/scadbuddy/,
+#      applications/scadbuddy-camera/ or the overlay's directory must be one
+#      this run pinned, or the deploy
 #      fails: no Deployment stays behind on an old build unnoticed (#5037).
 #      The check parses every *.yaml/*.yml there, so a file that is not
 #      valid YAML (a template, say) fails every deploy, closed on purpose:
@@ -175,6 +190,19 @@ env:
   # $MANIFEST. Optional until that file names it; resolved and pinned like the
   # slicer, so its absence for a build keeps the pin.
   CORE_IMAGE: ghcr.io/eh-homelab/scadbuddy-core
+  # The printer camera recorders and live edge (#7328, #7330, #7997), same
+  # run, same tags, each its own Deployment in a directory of their own
+  # (eh-homelab/clusters#4331, #4367). Optional until clusters has the files;
+  # resolved and pinned like the slicer, so a part with no image keeps its pins.
+  # The relay (same directory) is never pinned or resolved here: its pin moves
+  # by hand (camera spec §6.1), and the final check accepts it in its file only.
+  CAMERA_DIR: applications/scadbuddy-camera
+  CAMERA_RELAY_IMAGE: ghcr.io/eh-homelab/scadbuddy-camera-relay
+  MANIFEST_CAMERA_RELAY: applications/scadbuddy-camera/camera-relay.yaml
+  CAMERA_RECORDER_IMAGE: ghcr.io/eh-homelab/scadbuddy-camera-recorder
+  MANIFEST_CAMERA_RECORDER: applications/scadbuddy-camera/camera-recorder.yaml
+  CAMERA_EDGE_IMAGE: ghcr.io/eh-homelab/scadbuddy-camera-edge
+  MANIFEST_CAMERA_EDGE: applications/scadbuddy-camera/camera-edge.yaml
   DEPLOY_BRANCH: deploy/scadbuddy
   IMAGE: ghcr.io/eh-homelab/scadbuddy
   # The agent sidecar (#261), built by the same Build Image run under the same
@@ -198,8 +226,9 @@ jobs:
     runs-on: ubuntu-latest
     # The agent wait below can take up to 10 of these, the open deploy PR's
     # 45 (90 when the first round times out, #6368), the agent-durable one
-    # 20, the slicer 10, the profile-fetch worker 10, playwright-mcp 10, core 10.
-    timeout-minutes: 170
+    # 20, the slicer 10, the profile-fetch worker 10, playwright-mcp 10, core 10,
+    # the camera images 10 (one wait for both).
+    timeout-minutes: 180
     # The one place the two callers can race: this job waits for the open
     # deploy PR, closes it if it cannot land, replaces the `deploy/scadbuddy`
     # branch and opens a new PR. Job-level, so deploy-release's image wait and
@@ -623,6 +652,53 @@ jobs:
           fi
           echo "digest=$digest" >> "$GITHUB_OUTPUT"
 
+      # The printer camera recorders and live edge (#7997), resolved like the
+      # slicer: each only when its file exists and names its image, and an
+      # image their continue-on-error `camera` job did not publish is a warning
+      # and an empty digest. The legs of that job build side by side, so they
+      # share one wait of up to 10 minutes. Not the relay: its pin moves by hand.
+      - name: Resolve the camera images
+        id: camera
+        env:
+          VERSION: ${{ inputs.version }}
+        run: |
+          set -euo pipefail
+          declare -A image=([recorder]=$CAMERA_RECORDER_IMAGE [edge]=$CAMERA_EDGE_IMAGE)
+          declare -A manifest=([recorder]=$MANIFEST_CAMERA_RECORDER [edge]=$MANIFEST_CAMERA_EDGE)
+          declare -A digest=([recorder]="" [edge]="")
+          wanted=()
+          for part in recorder edge; do
+            if grep -sqE "^\s*(- )?image:.*${image[$part]//./\\.}" "clusters/${manifest[$part]}"; then
+              wanted+=("$part")
+            else
+              echo "clusters/${manifest[$part]} is absent or does not run ${image[$part]}; not resolving it"
+            fi
+          done
+          for _ in $(seq 60); do
+            left=()
+            for part in "${wanted[@]}"; do
+              [[ "${digest[$part]}" =~ ^sha256:[0-9a-f]{64}$ ]] && continue
+              ref="${image[$part]}:${VERSION}"
+              d=$(docker buildx imagetools inspect "$ref" 2>/dev/null | awk '/^Digest:/ {print $2; exit}' || true)
+              if [[ "$d" =~ ^sha256:[0-9a-f]{64}$ ]]; then
+                digest[$part]=$d
+                echo "$ref -> $d"
+              else
+                left+=("$part")
+              fi
+            done
+            [ "${#left[@]}" -gt 0 ] || break
+            echo "$(date -u +%H:%M:%S) not published yet for ${VERSION}: ${left[*]}; waiting"
+            sleep 10
+          done
+          for part in "${wanted[@]}"; do
+            [[ "${digest[$part]}" =~ ^sha256:[0-9a-f]{64}$ ]] \
+              || echo "::warning::could not resolve ${image[$part]}:${VERSION}; the camera-${part} pins stay as they are"
+          done
+          for part in recorder edge; do
+            echo "${part}=${digest[$part]}" >> "$GITHUB_OUTPUT"
+          done
+
       # The sessions' shell sandbox (#5864), resolved like the slicer, but only
       # when a file under the manifests' or the overlay's directory names it.
       - name: Resolve the sandbox image
@@ -631,7 +707,7 @@ jobs:
           VERSION: ${{ inputs.version }}
         run: |
           set -euo pipefail
-          if ! grep -rsqF "${SANDBOX_IMAGE}" "clusters/$(dirname "$MANIFEST")" "clusters/$(dirname "$KUSTOMIZATION")"; then
+          if ! grep -rsqF "${SANDBOX_IMAGE}" "clusters/$(dirname "$MANIFEST")" "clusters/$(dirname "$KUSTOMIZATION")" "clusters/${CAMERA_DIR}"; then
             echo "clusters does not run ${SANDBOX_IMAGE}; not resolving it"
             echo "digest=" >> "$GITHUB_OUTPUT"
             exit 0
@@ -746,6 +822,8 @@ jobs:
           PLAYWRIGHT_MCP_DIGEST: ${{ steps.playwright-mcp.outputs.digest }}
           FLEET_DIGEST: ${{ steps.fleet.outputs.digest }}
           CORE_DIGEST: ${{ steps.core.outputs.digest }}
+          CAMERA_RECORDER_DIGEST: ${{ steps.camera.outputs.recorder }}
+          CAMERA_EDGE_DIGEST: ${{ steps.camera.outputs.edge }}
           SANDBOX_DIGEST: ${{ steps.sandbox.outputs.digest }}
           VERSION: ${{ inputs.version }}
           REVISION: ${{ inputs.revision }}
@@ -963,6 +1041,51 @@ jobs:
             core=pinned
           }
 
+          # The camera recorder's and live edge's lines (#7997), each in
+          # its own Deployment's file under $CAMERA_DIR: optional until clusters
+          # has the file, then exactly two lines (MediaMTX and the controller run
+          # one image), equal to each other, and a build with no image keeps the
+          # pins and warns. A comment that names the API build the pins came
+          # from ("the build of the API's sha-<7>") moves with them, so it stays
+          # true. A file that does not name its image is skipped, as the resolve
+          # step skips it. Sets $camera to `none`, `pinned` or `kept`.
+          camera=none
+          pin_camera() { # manifest image digest part
+            local target=$1 cam_image=$2 cam_digest=$3 part=$4 n
+            camera=none
+            local cam_line="^(\s*)image: ${cam_image//./\\.}[:@][^[:space:]]*\$"
+            # The resolve step's own test (#8015): a file that does not name the
+            # image at all was not resolved, so it is skipped here too.
+            local any_line="^\s*(- )?image:.*${cam_image//./\\.}"
+            if ! grep -qE "$any_line" "$target"; then
+              echo "::notice::${target} does not run ${cam_image}; not pinning it"
+              return 0
+            fi
+            n=$(grep -cE "$cam_line" "$target" || true)
+            [ "$n" -eq "$(grep -cE "$any_line" "$target")" ] \
+              || { echo "::error file=$target::has an image line for ${cam_image} that is not exactly 'image: ${cam_image}:<tag>@<digest>'"; exit 1; }
+            [ "$n" -eq 2 ] \
+              || { echo "::error file=$target::expected exactly two camera-${part} image lines (mediamtx and controller), found $n"; exit 1; }
+            n=$(grep -E "$cam_line" "$target" | sed -E 's/^\s*image: //' | sort -u | wc -l)
+            [ "$n" -eq 1 ] \
+              || { echo "::error file=$target::its two camera-${part} image lines differ; both containers must run one image"; exit 1; }
+            if [[ ! "$cam_digest" =~ ^sha256:[0-9a-f]{64}$ ]]; then
+              echo "::warning file=$target::no ${cam_image} image was published for ${VERSION}; keeping the camera-${part} pins as they are"
+              camera=kept
+              return 0
+            fi
+            # The version ends at the first character a tag cannot hold, and
+            # never at a dot: a sentence's full stop follows it.
+            sed -i -E \
+              -e "s|${cam_line}|\1image: ${cam_image}:${VERSION}@${cam_digest}|" \
+              -e "s|^(\s*#.*the build of the API's )[A-Za-z0-9._-]*[A-Za-z0-9_-]|\1${VERSION}|" \
+              "$target"
+            n=$(grep -cE "^\s*image: ${cam_image//./\\.}:${VERSION//./\\.}@${cam_digest}\$" "$target" || true)
+            [ "$n" -eq 2 ] \
+              || { echo "::error file=$target::expected exactly two pinned camera-${part} image lines, found $n"; exit 1; }
+            camera=pinned
+          }
+
           # True when transformers[] holds a NamespaceTransformer with
           # `unsetOnly` the YAML boolean true: as a map, as an inline YAML
           # string, or as a relative path (resolved against the overlay's
@@ -1100,10 +1223,13 @@ jobs:
             REF_RE="^${IMAGE//./\\.}([-:@]|\$)" yq eval-all -N \
               'explode(.) | .. | select(tag == "!!str") | select(test(strenv(REF_RE)))' "$1"
           }
-          # The files the final check reads: the manifests' directory and the
-          # overlay's, where a kustomize `images:` entry could also name one.
+          # The files the final check reads: the manifests' directory, the
+          # overlay's, where a kustomize `images:` entry could also name one,
+          # and the camera Deployments' (#7997) once clusters has it.
           scanned() {
-            find "$(dirname "$MANIFEST")" "$(dirname "$KUSTOMIZATION")" -type f \( -name '*.yaml' -o -name '*.yml' \) | sort -u
+            local dirs=("$(dirname "$MANIFEST")" "$(dirname "$KUSTOMIZATION")")
+            [ ! -d "$CAMERA_DIR" ] || dirs+=("$CAMERA_DIR")
+            find "${dirs[@]}" -type f \( -name '*.yaml' -o -name '*.yml' \) | sort -u
           }
 
           manifests=("$MANIFEST")
@@ -1170,6 +1296,26 @@ jobs:
             echo "::notice::${MANIFEST_FLEET} is not in clusters yet; not pinning it"
           fi
           echo "fleet=$fleet" >> "$GITHUB_OUTPUT"
+          # Not the relay: its pin moves by hand (camera spec §6.1), and the
+          # final check accepts it in its own file.
+          camera_recorder=none camera_edge=none
+          for part in recorder edge; do
+            case "$part" in
+              recorder) f=$MANIFEST_CAMERA_RECORDER; img=$CAMERA_RECORDER_IMAGE; dg=${CAMERA_RECORDER_DIGEST:-} ;;
+              edge)     f=$MANIFEST_CAMERA_EDGE;     img=$CAMERA_EDGE_IMAGE;     dg=${CAMERA_EDGE_DIGEST:-} ;;
+            esac
+            if [ -f "$f" ]; then
+              pin_camera "$f" "$img" "$dg" "$part"
+              printf -v "camera_${part}" '%s' "$camera"
+              [ "$camera" != pinned ] || manifests+=("$f")
+            else
+              echo "::notice::${f} is not in clusters yet; not pinning it"
+            fi
+          done
+          {
+            echo "camera_recorder=$camera_recorder"
+            echo "camera_edge=$camera_edge"
+          } >> "$GITHUB_OUTPUT"
           # The sessions' shell sandbox (#5864): every scanned file that names
           # it, each such line an `image:` or a `value:` (the agent worker's
           # SCADBUDDY_SANDBOX_IMAGE) holding the image alone. A build with no
@@ -1249,8 +1395,10 @@ jobs:
           # workflow does not resolve, or a second copy of a pin outside its
           # file fails the deploy here, rather than staying on its old build.
           # The exceptions are a slicer pin kept on purpose (pin_slicer), a
-          # profile-fetch, playwright-mcp, fleet and core pins kept the same way, and
-          # the sandbox pins.
+          # profile-fetch, playwright-mcp, fleet and core pins kept the same way,
+          # the camera pins kept the same way, each in its own file, any camera
+          # relay pin in the relay's own file (it moves by hand, camera spec
+          # §6.1), and the sandbox pins.
           allowed=("${IMAGE}:${VERSION}@${DIGEST}" "${AGENT_IMAGE}:${VERSION}@${AGENT_DIGEST}")
           [ "$durable" != pinned ] || allowed+=("${AGENT_DURABLE_IMAGE}:${VERSION}@${AGENT_DURABLE_DIGEST}")
           [ "$slicer" != pinned ] || allowed+=("${SLICER_IMAGE}:${VERSION}@${SLICER_DIGEST}")
@@ -1258,6 +1406,8 @@ jobs:
           [ "$playwright_mcp" != pinned ] || allowed+=("${PLAYWRIGHT_MCP_IMAGE}:${VERSION}@${PLAYWRIGHT_MCP_DIGEST}")
           [ "$fleet" != pinned ] || allowed+=("${FLEET_IMAGE}:${VERSION}@${FLEET_DIGEST}")
           [ "$core" != pinned ] || allowed+=("${CORE_IMAGE}:${VERSION}@${CORE_DIGEST}")
+          [ "$camera_recorder" != pinned ] || allowed+=("${CAMERA_RECORDER_IMAGE}:${VERSION}@${CAMERA_RECORDER_DIGEST}")
+          [ "$camera_edge" != pinned ] || allowed+=("${CAMERA_EDGE_IMAGE}:${VERSION}@${CAMERA_EDGE_DIGEST}")
           [ "$sandbox" != pinned ] || allowed+=("${SANDBOX_IMAGE}:${VERSION}@${SANDBOX_DIGEST}")
           stale=0
           while IFS= read -r f; do
@@ -1272,6 +1422,9 @@ jobs:
               if [ "$playwright_mcp" = kept ] && [ "$f" = "$MANIFEST_PLAYWRIGHT_MCP" ] && [[ "$ref" == "${PLAYWRIGHT_MCP_IMAGE}"[:@]* ]]; then ok=true; fi
               if [ "$fleet" = kept ] && [ "$f" = "$MANIFEST_FLEET" ] && [[ "$ref" == "${FLEET_IMAGE}"[:@]* ]]; then ok=true; fi
               if [ "$core" = kept ] && [ "$f" = "$MANIFEST" ] && [[ "$ref" == "${CORE_IMAGE}"[:@]* ]]; then ok=true; fi
+              if [ "$f" = "$MANIFEST_CAMERA_RELAY" ] && [[ "$ref" == "${CAMERA_RELAY_IMAGE}"[:@]* ]]; then ok=true; fi
+              if [ "$camera_recorder" = kept ] && [ "$f" = "$MANIFEST_CAMERA_RECORDER" ] && [[ "$ref" == "${CAMERA_RECORDER_IMAGE}"[:@]* ]]; then ok=true; fi
+              if [ "$camera_edge" = kept ] && [ "$f" = "$MANIFEST_CAMERA_EDGE" ] && [[ "$ref" == "${CAMERA_EDGE_IMAGE}"[:@]* ]]; then ok=true; fi
               if [ "$sandbox" = kept ] && [[ "$ref" == "${SANDBOX_IMAGE}"[:@]* ]]; then ok=true; fi
               if [ "$ok" != true ]; then
                 echo "::error file=$f::names ${ref}, which this deploy does not move to ${VERSION}; deploy.reusable.yml must pin this file"
@@ -1312,6 +1465,10 @@ jobs:
           FLEET: ${{ steps.edit.outputs.fleet }}
           CORE_DIGEST: ${{ steps.core.outputs.digest }}
           CORE: ${{ steps.edit.outputs.core }}
+          CAMERA_RECORDER_DIGEST: ${{ steps.camera.outputs.recorder }}
+          CAMERA_RECORDER: ${{ steps.edit.outputs.camera_recorder }}
+          CAMERA_EDGE_DIGEST: ${{ steps.camera.outputs.edge }}
+          CAMERA_EDGE: ${{ steps.edit.outputs.camera_edge }}
           SANDBOX_DIGEST: ${{ steps.sandbox.outputs.digest }}
           SANDBOX: ${{ steps.edit.outputs.sandbox }}
           VERSION: ${{ inputs.version }}
@@ -1375,6 +1532,16 @@ jobs:
             kept)   core_note="kept at its current pin: no image was published for ${VERSION}" ;;
             *)      core_note="not run in clusters yet (#7667)" ;;
           esac
+          # `camera_note <state> <image> <digest>`: one part's line.
+          camera_note() {
+            case "$1" in
+              pinned) echo "\`${2}:${VERSION}@${3}\`" ;;
+              kept)   echo "kept at its current pins: no image was published for ${VERSION}" ;;
+              *)      echo "not run in clusters yet (#7997)" ;;
+            esac
+          }
+          camera_recorder_note=$(camera_note "$CAMERA_RECORDER" "$CAMERA_RECORDER_IMAGE" "$CAMERA_RECORDER_DIGEST")
+          camera_edge_note=$(camera_note "$CAMERA_EDGE" "$CAMERA_EDGE_IMAGE" "$CAMERA_EDGE_DIGEST")
           case "$SANDBOX" in
             pinned) sandbox_note="\`${SANDBOX_IMAGE}:${VERSION}@${SANDBOX_DIGEST}\`" ;;
             kept)   sandbox_note="kept at its current pins: no image was published for ${VERSION}" ;;
@@ -1387,7 +1554,7 @@ jobs:
 
           Pin ${IMAGE}:${VERSION}@${DIGEST}
           and ${AGENT_IMAGE}:${VERSION}@${AGENT_DIGEST}
-          (agent-durable: ${durable_note}; slicer: ${slicer_note}; profile-fetch: ${profile_fetch_note}; playwright-mcp: ${playwright_mcp_note}; fleet: ${fleet_note}; core: ${core_note}; sandbox: ${sandbox_note}; dashboard: ${dashboard_note})
+          (agent-durable: ${durable_note}; slicer: ${slicer_note}; profile-fetch: ${profile_fetch_note}; playwright-mcp: ${playwright_mcp_note}; fleet: ${fleet_note}; core: ${core_note}; camera-relay: not moved, its pin moves by hand; camera-recorder: ${camera_recorder_note}; camera-edge: ${camera_edge_note}; sandbox: ${sandbox_note}; dashboard: ${dashboard_note})
           built from eh-homelab/ScadBuddy@${REVISION} (${KIND}),
           in ${manifest_files[*]}.
 
@@ -1413,6 +1580,9 @@ jobs:
           - **Playwright MCP:** ${playwright_mcp_note}
           - **Fleet:** ${fleet_note}
           - **Core:** ${core_note}
+          - **Camera relay:** not moved: its pin moves by hand, in a reviewed PR, when its code or MediaMTX changes (a relay restart is a 10 to 30 s gap in every recording)
+          - **Camera recorder:** ${camera_recorder_note}
+          - **Camera edge:** ${camera_edge_note}
           - **Sandbox:** ${sandbox_note}
           - **Dashboard:** ${dashboard_note}
           - **Files:** ${listed}

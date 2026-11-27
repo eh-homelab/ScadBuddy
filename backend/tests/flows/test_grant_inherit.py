@@ -321,3 +321,16 @@ def test_a_run_s_calls_are_vouched_for_by_the_agent_or_match_its_recorded_princi
     assert runs_as(ANONYMOUS, browser, "user:a")
     assert not runs_as(ANONYMOUS, browser, "user:b")
     assert runs_as(ANONYMOUS, {"kind": "browser"}, "browser")
+
+
+@pg
+async def test_a_grant_in_force_is_decided_by_the_databases_clock(store: FlowStore) -> None:
+    """#7922: `grant_in_force` reads the grant's expiry from its row by the database's
+    clock, never from the caller's copy by the API's clock: a copy that reads expired on
+    this clock is still in force while its row is."""
+    run = await run_row(store)
+    granted = await store.insert_grant(
+        run, spec({"fn": "queue_print"}), status="approved", requested_by={"kind": "browser"}
+    )
+    stale = granted.model_copy(update={"expires_at": datetime.now(UTC) - timedelta(seconds=1)})
+    assert await store.grant_in_force(stale)

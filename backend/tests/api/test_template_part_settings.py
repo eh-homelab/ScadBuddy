@@ -17,7 +17,6 @@ from fastapi.testclient import TestClient
 
 from scadbuddy.bambuddy.part_settings import PartSettings
 from scadbuddy.core.paths import DataPaths
-from scadbuddy.library.outputs import PARAMS_NAME
 from scadbuddy.render.bambu3mf import MODEL_SETTINGS_NAME
 from tests.api.conftest import follow_operation
 from tests.api.test_filament_profiles import preset_values
@@ -32,6 +31,7 @@ from tests.api.test_print_supports import routes
 from tests.api.test_send import _uploaded_3mf, upload_route
 from tests.api.test_versions import SLUG
 from tests.support.operations import press
+from tests.support.row_outputs import update_row
 from tests.support.template_rows import sync_template_rows
 
 pytestmark = [pytest.mark.requires_postgres, pytest.mark.usefixtures("recorded_sb_spools")]
@@ -51,14 +51,10 @@ def declare(
         encoding="utf-8",
     )
     outputs = state(client).outputs
-    params_file = outputs.directory(output_id) / PARAMS_NAME
-    params = json.loads(params_file.read_text(encoding="utf-8"))
+    params = outputs.params(output_id)
     params["label_color"] = colour or outputs.get(output_id).colors[0]
-    params_file.write_text(json.dumps(params), encoding="utf-8")
-    # The row is the record a read answers from (#7255): it is read again from the files.
-    row, _ = outputs.row_from_files(outputs.directory(output_id), model)
-    assert row is not None and outputs.rows is not None
-    outputs.rows.write_copy([], [row], outputs.rows.clock())
+    # The row is the record a read answers from (#7255, #7257).
+    update_row(outputs, output_id, params=params)
     # The template's hand edits: the next copy run repairs its row (#7317 phase 3).
     sync_template_rows(client)
 

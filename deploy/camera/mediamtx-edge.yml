@@ -1,0 +1,93 @@
+# MediaMTX in the camera live edge's pod (printer camera live view, phase 3). The edge process
+# (`backend/scadbuddy/camera/edge.py`) adds one path per recorded printer through the control
+# API, which listens on localhost only. Each path reads the relay's path of that printer over
+# RTSP with the relay read user, on demand (`sourceOnDemand`), and serves it to the API as
+# WebRTC (WHEP, :8889, ICE over UDP :8189) and LL-HLS (:8888). Keys:
+# https://github.com/bluenviron/mediamtx/blob/v1.21.4/mediamtx.yml
+#
+# The browser never reaches this pod's HTTP ports (:8888, :8889): the API proxies
+# `/api/v1/camera/live/{printer_id}/...` to them. Browsers reach only UDP :8189 (WebRTC
+# media). A NetworkPolicy in eh-homelab/clusters admits only the API to :8888 and :8889, and
+# the API must also send the edge read user's password (HTTP Basic). A request that names an
+# HLS session id passes without that password, and the browser gets the id in the proxied
+# playlists, so only the NetworkPolicy keeps such a request from other pods.
+#
+# The read user and the address browsers reach for ICE come from the environment. MediaMTX
+# reads no variables inside this file; it overrides a key from `MTX_<KEY>`, and a list entry
+# by its index (https://mediamtx.org/docs/features/configuration). So the pod sets
+#   MTX_AUTHINTERNALUSERS_0_USER=$(MTX_READ_USER)
+#   MTX_AUTHINTERNALUSERS_0_PASS=$(MTX_READ_PASS)
+#   MTX_WEBRTCADDITIONALHOSTS=<the address browsers reach>
+# Without the first two, entry 0 keeps the placeholder below: its pass is the sha256 of a
+# random value that nobody kept, so no client can read.
+#
+# The edge serves no RTSP, RTMP, SRT or MoQ listener.
+
+logLevel: info
+
+# The timeout of read operations, at MediaMTX's default: the v1.21.4 release's mediamtx.yml
+# (https://github.com/bluenviron/mediamtx/blob/v1.21.4/mediamtx.yml). Pinned here, so an
+# upstream change of the default cannot change it, as in mediamtx-relay.yml.
+readTimeout: 10s
+
+api: yes
+apiAddress: 127.0.0.1:9997
+metrics: yes
+metricsAddress: 127.0.0.1:9998
+
+rtsp: no
+rtmp: no
+srt: no
+moq: no
+
+webrtc: yes
+webrtcAddress: :8889
+webrtcLocalUDPAddress: :8189
+webrtcLocalTCPAddress: ""
+webrtcIPsFromInterfaces: yes
+webrtcAdditionalHosts: []
+
+hls: yes
+hlsAddress: :8888
+hlsVariant: lowLatency
+hlsAlwaysRemux: no
+# Close a muxer 10 s after its last request (default 60s). The HLS session still reads the
+# path for about 30 s after its muxer closes, and has no key of its own in v1.21.4; then the
+# path's on-demand pull closes 10 s later. Measured 2026-11-25 with the edge e2e
+# (backend/tests/camera/test_e2e_mediamtx.py, v1.21.4): the relay lost the edge's pull 69 s
+# after the last playlist request at 60s, 48.5 s at 10s.
+hlsMuxerCloseAfter: 10s
+# MediaMTX binds an HLS session to the client's IP (v1.21.4 internal/servers/hls/server.go,
+# `findNonCDNSession`). The API runs several pods, and one browser's requests reach the edge
+# from each of them, so a session made through one pod answered 401 "session not found"
+# through another (measured 2026-11-26 on prod). The API names the viewer in
+# X-Forwarded-For (`api/camera.py` `_viewer`), and the edge believes it from private and
+# loopback addresses. Only the API reaches :8888 (the NetworkPolicy named at the top), and
+# the address only binds the session: the read user allows every address (`ips: []`).
+hlsTrustedProxies:
+  - 10.0.0.0/8
+  - 172.16.0.0/12
+  - 192.168.0.0/16
+  - 127.0.0.0/8
+  - fc00::/7
+  - ::1/128
+
+authMethod: internal
+authInternalUsers:
+  # Entry 0: the API's read user, for WHEP and HLS (see above).
+  - user: read-user-unset
+    pass: sha256:Wbdt6Pfz3S83QDssMcx0gtQt06QotiJ7mTUszfkUehU=
+    ips: []
+    permissions:
+      - action: read
+        path:
+  # The edge process, from localhost only: the control API and the metrics.
+  - user: any
+    pass:
+    ips: ["127.0.0.1", "::1"]
+    permissions:
+      - action: api
+      - action: metrics
+
+# The edge adds every path through the API, with the relay read password in its source.
+paths: {}

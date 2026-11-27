@@ -78,7 +78,10 @@ def object_key(prefix: str, kind: BlobKind, sha256: str) -> str:
 
 #: The storefront's staging area (#6133, spec 2026-11-13 §6): an upload slot's object, and
 #: its preview beside it. Nothing here is content-addressed, so `sweep_unrecorded` (which
-#: takes `_OBJECT` keys only) never touches it; `storefront_uploads` rows own it.
+#: takes `_OBJECT` keys only) never touches it; `storefront_uploads` rows own it. Core's
+#: blob uploads (#7958, `tools/go/core/internal/blobstore` `StagingKey`) PUT to a
+#: `staging/<32 hex>` key no row names, which their commit deletes; one left behind goes
+#: with `orders/storefront/staged_files.py` `sweep_staged` past its `ORPHAN_AGE`.
 _STAGED = re.compile(r"(staging/[0-9a-f]{32})(?:\.png|\.[0-9a-f]{16}\.frozen)?")
 
 

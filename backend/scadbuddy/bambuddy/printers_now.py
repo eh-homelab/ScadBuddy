@@ -25,6 +25,7 @@ import asyncio
 import logging
 import re
 from collections.abc import Mapping
+from collections.abc import Set as AbstractSet
 from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Any, Literal
@@ -146,6 +147,9 @@ class PrinterNow(BaseModel):
     #: (`bambuddy/pictures.py`). ``None`` when there is none: a LAN card asks Bambuddy
     #: nothing, so only ScadBuddy's own job there has one.
     picture: str | None = None
+    #: The camera dialog shows the live view (#7330): the printer is recorded and the
+    #: live edge is set up (`api/camera.py` `PrinterCamera.live`).
+    camera_live: bool = False
 
 
 class PrintersNow(BaseModel):
@@ -249,8 +253,9 @@ def with_scadbuddy_jobs(
         if job is None:
             return printer
         update: dict[str, Any] = {"scadbuddy": job}
-        # #3742: ScadBuddy's own picture of its job, over Bambuddy's cover.
-        if (picture := scadbuddy_picture(job)) is not None:
+        # #3742: ScadBuddy's own picture of its job, over Bambuddy's cover; the
+        # running plate's image for plate 2 or later (#8031).
+        if (picture := scadbuddy_picture(job, job.plate)) is not None:
             update["picture"] = picture
         return printer.model_copy(update=update)
 
@@ -272,6 +277,16 @@ def with_lan_runs(now: PrintersNow, runs: Mapping[str, LanRunControl]) -> Printe
         return printer.model_copy(update=update)
 
     return PrintersNow(printers=[card(printer) for printer in now.printers])
+
+
+def with_camera_live(now: PrintersNow, live: AbstractSet[str]) -> PrintersNow:
+    """``now`` with ``camera_live`` set on each printer in ``live`` (by registry id)."""
+    return PrintersNow(
+        printers=[
+            printer.model_copy(update={"camera_live": True}) if printer.id in live else printer
+            for printer in now.printers
+        ]
+    )
 
 
 def has_archive_page(version: str | None) -> bool:

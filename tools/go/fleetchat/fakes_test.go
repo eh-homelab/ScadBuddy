@@ -19,7 +19,10 @@ type fakeStore struct {
 	cursor    map[string]int64
 	lastLimit int
 	touches   int
+	virtual   map[string]string // virtual sender name -> reject message
 }
+
+const rotatorReject = `"rotator" is the login rotator, a virtual sender: it reads no messages.`
 
 func newFakeStore() *fakeStore {
 	return &fakeStore{
@@ -27,6 +30,7 @@ func newFakeStore() *fakeStore {
 		members:   map[string]map[string]struct{}{},
 		delivered: map[string][]int64{},
 		cursor:    map[string]int64{},
+		virtual:   map[string]string{"rotator": rotatorReject},
 	}
 }
 
@@ -62,6 +66,9 @@ func (f *fakeStore) Join(_ context.Context, sessionID, channel string) error {
 func (f *fakeStore) Leave(_ context.Context, sessionID, channel string) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	if _, ok := f.members[channel]; !ok {
+		return ErrUnknownChannel
+	}
 	if _, ok := f.members[channel][sessionID]; !ok {
 		return ErrNotMember
 	}
@@ -94,6 +101,9 @@ func (f *fakeStore) Send(_ context.Context, sessionID string, t Target, text str
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	var recipients []string
+	if reject, ok := f.virtual[t.Agent]; ok {
+		return 0, nil, VirtualSenderError(reject)
+	}
 	if t.Agent != "" {
 		for sid, a := range f.agents {
 			if a.Handle == t.Agent {
@@ -104,6 +114,9 @@ func (f *fakeStore) Send(_ context.Context, sessionID string, t Target, text str
 			return 0, nil, ErrUnknownAgent
 		}
 	} else {
+		if _, ok := f.members[t.Channel]; !ok {
+			return 0, nil, ErrUnknownChannel
+		}
 		if _, ok := f.members[t.Channel][sessionID]; !ok {
 			return 0, nil, ErrNotMember
 		}

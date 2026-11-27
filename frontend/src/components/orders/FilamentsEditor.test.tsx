@@ -1,11 +1,12 @@
 import { screen, waitFor, within } from '@testing-library/react'
-import { http } from 'msw'
+import { http, HttpResponse } from 'msw'
 import { beforeEach, describe, expect, it } from 'vitest'
 import { api } from '../../api/client'
 import { listTypes } from '../../api/filament'
 import { T } from '../../mocks/features/filament/seed'
 import { server } from '../../mocks/server'
 import { mockSettings, resetMockState, setMockSettings } from '../../mocks/handlers'
+import { entityMock } from '../../mocks/features/entities'
 import { FILAMENT_PLA, seedOrders, state as orders } from '../../mocks/features/orders/state'
 import { renderPage } from '../../test/utils'
 import { FilamentsEditor } from './FilamentsEditor'
@@ -209,5 +210,38 @@ describe('FilamentsEditor (#4250)', () => {
     release()
     await waitFor(async () => expect((await listTypes()).some((type) => type.filament_id === row.id)).toBe(true))
     expect(screen.queryByRole('dialog')).toBeNull()
+  })
+
+  // #7703: "Make a type" asks for the keys a type requires before it makes one.
+  it('make a type asks for the required keys and sends them', async () => {
+    entityMock.schemas.spool_type = { ...entityMock.schemas.spool_type!, required: ['mpn'] }
+    const row = await api.createFilament({ material: 'PETG', brand: 'Polymaker', colour: '#102030', cost_per_kg: '24' })
+    const { user } = renderPage(<FilamentsEditor types={[]} />)
+    await user.click(await within(await screen.findByTestId(`filament-${row.id}`)).findByRole('button', { name: /Make a type/ }))
+    const dialog = await screen.findByRole('dialog', { name: 'The new type needs these properties' })
+    await user.type(within(dialog).getByLabelText('mpn'), 'P-1')
+    await user.click(within(dialog).getByRole('button', { name: 'Create type' }))
+    await waitFor(async () => expect((await listTypes()).some((type) => type.filament_id === row.id)).toBe(true))
+    const made = (await listTypes()).find((type) => type.filament_id === row.id)!
+    expect(entityMock.properties.get(`spool_type:${made.id}`)?.map((p) => [p.key, p.value])).toEqual([['mpn', 'P-1']])
+  })
+
+  // #7952: a refused create in the dialog still names the catalog rows it added.
+  it('the dialog says which catalog rows stay when the type is refused (#7952)', async () => {
+    entityMock.schemas.spool_type = { ...entityMock.schemas.spool_type!, required: ['mpn'] }
+    server.use(
+      http.post('/api/v1/filament/types', () =>
+        HttpResponse.json({ code: 'missing_required_properties', detail: 'refused', missing: ['mpn'], invalid: [] }, { status: 422 }),
+      ),
+    )
+    const row = await api.createFilament({ material: 'PLA', brand: 'Zed', colour: '#FF0000', cost_per_kg: '20' })
+    const { user } = renderPage(<FilamentsEditor types={[]} />)
+    await user.click(await within(await screen.findByTestId(`filament-${row.id}`)).findByRole('button', { name: /Make a type/ }))
+    const dialog = await screen.findByRole('dialog', { name: 'The new type needs these properties' })
+    await user.type(within(dialog).getByLabelText('mpn'), 'P-1')
+    await user.click(within(dialog).getByRole('button', { name: 'Create type' }))
+    const alert = await within(dialog).findByRole('alert')
+    expect(alert).toHaveTextContent('Fill the required properties first: mpn.')
+    expect(alert).toHaveTextContent('Zed stays in the catalog.')
   })
 })

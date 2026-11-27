@@ -39,6 +39,7 @@ RouteClass = Literal[
     "crud.camera",
     "crud.camera-relay",
     "crud.fleet",
+    "crud.fleet-rotator",
     # The projects worker's flow host routes (#5298): `api` routes it may call too.
     "flow.host",
 ]
@@ -82,14 +83,12 @@ EXCHANGE_ENDPOINTS = frozenset({"scadbuddy.api.service_token.exchange_service_to
 #: A person's own session only (§8.1): what an agent must never do for them.
 PERSON_ENDPOINTS = frozenset(
     {
-        # `browser_only` today (`api/flows.py`): a flow's answers, approvals and grants.
-        "scadbuddy.api.flows.answer_flow_run",
+        # `browser_only` today (`api/flows.py`): a flow's approvals and grants. Its answers
+        # are `api` routes, which ask `flow_answerers` and the run's grant (#7471).
         "scadbuddy.api.flows.decide_flow_run",
         "scadbuddy.api.flows.get_flow_run_proposal",
         "scadbuddy.api.flows.approve_flow_grant",
         "scadbuddy.api.flows.decline_flow_grant",
-        # A prompt's typed answer (#7364), as a flow's answer.
-        "scadbuddy.api.tasks.answer_task",
         "scadbuddy.api.flow_triggers.approve_flow_trigger_grant",
         "scadbuddy.api.flow_triggers.decline_flow_trigger_grant",
         # Sign-out, the person's sessions and the login's configuration.
@@ -200,6 +199,8 @@ SCRIPTLESS_GETS = frozenset(
         ("scadbuddy.api.print_history", "/prints/{archive_id}/timelapse/frames/{index}"),
         ("scadbuddy.api.printing", "/print/printers/{printer_id}/camera"),
         ("scadbuddy.api.printing", "/print/printers/{printer_id}/camera/stream"),
+        # hls.js and Safari's native <video> send no header (camera live view).
+        ("scadbuddy.api.camera", "/camera/live/{printer_id}/hls/{name}"),
         (
             "scadbuddy.api.order_attachments",
             "/orders/{order_id}/attachments/{attachment_id}/content",
@@ -233,6 +234,7 @@ CRUD_CLASSES: dict[str, RouteClass] = {
     "camera": "crud.camera",
     "camera-relay": "crud.camera-relay",
     "fleet": "crud.fleet",
+    "fleet-rotator": "crud.fleet-rotator",
 }
 CRUD_CALLERS = frozenset(CRUD_CLASSES)
 
