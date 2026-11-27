@@ -559,3 +559,102 @@ describe('the 3DFP id and fetch (#6625)', () => {
     })
   })
 })
+
+describe('finding and adding the 3DFP filament (#7025)', () => {
+  /** Each 3DFP request the page sends: its path, body and Idempotency-Key. */
+  function tdfpRequests() {
+    const sent: { path: string; body: Record<string, unknown>; key: string | null }[] = []
+    server.events.on('request:start', async ({ request }) => {
+      const path = new URL(request.url).pathname
+      if (request.method === 'POST' && path.startsWith('/api/v1/filament/tdfp/'))
+        sent.push({ path, body: (await request.clone().json()) as Record<string, unknown>, key: request.headers.get('Idempotency-Key') })
+    })
+    return sent
+  }
+  const finder = () => screen.getByRole('region', { name: 'Find on 3DFP' })
+
+  it('searches with the type’s brand, material, subtype and colour, and a match fills the 3DFP id', async () => {
+    const sent = tdfpRequests()
+    const { user } = render(`/filament/types/${T.JADE}`)
+    await code()
+    await user.click(screen.getByRole('button', { name: 'Find on 3DFP' }))
+    expect(within(finder()).getByLabelText('Brand')).toHaveValue('Bambu Lab')
+    await user.click(within(finder()).getByRole('button', { name: 'Search 3DFP' }))
+    const match = await within(finder()).findByRole('listitem', { name: /3DFP 4411/ })
+    expect(sent[0]).toMatchObject({ path: '/api/v1/filament/tdfp/search', body: { brand: 'Bambu Lab', material: 'PLA', material_type: 'Basic', colour: 'Jade White' } })
+    expect(match).toHaveTextContent('Jade White')
+    expect(match).toHaveTextContent('1000 g')
+    await user.click(within(match).getByRole('button', { name: 'Use this id' }))
+    expect(screen.getByLabelText('3DFP id')).toHaveValue('4411')
+    expect(screen.getByRole('status')).toHaveTextContent('The 3DFP id is now 4411. Save the type to keep it.')
+    // Nothing was saved yet: the person saves the id with the type.
+    expect((await getType(T.JADE)).tdfp_id).toBeNull()
+  })
+
+  it('says a search found nothing without saying 3DFP lacks it, and adds the missing filament to the type', async () => {
+    const sent = tdfpRequests()
+    const { user } = render(`/filament/types/${T.JADE}`)
+    await code()
+    await user.click(screen.getByRole('button', { name: 'Find on 3DFP' }))
+    await user.clear(within(finder()).getByLabelText('Colour'))
+    await user.type(within(finder()).getByLabelText('Colour'), 'Moon Rock')
+    await user.click(within(finder()).getByRole('button', { name: 'Search 3DFP' }))
+    expect(await within(finder()).findByText(/3DFP found no match\. Its index misses some brands/)).toBeInTheDocument()
+    await user.click(within(finder()).getByRole('button', { name: 'Add the missing filament' }))
+    const form = within(finder()).getByRole('form', { name: 'Add to 3DFP' })
+    expect(within(form).getByLabelText('Colour name')).toHaveValue('Moon Rock')
+    expect(within(form).getByLabelText('Hexes')).toHaveValue('#FFFFFF')
+    await user.clear(within(form).getByLabelText('Hexes'))
+    await user.type(within(form).getByLabelText('Hexes'), '#8A8D8F')
+    await user.click(within(form).getByRole('button', { name: 'Add to 3DFP' }))
+    expect(await screen.findByText('Added to 3DFP as 38600. The type’s 3DFP id is now 38600.')).toBeInTheDocument()
+    const create = sent.find((one) => one.path === '/api/v1/filament/tdfp/filaments')!
+    expect(create.key).toBeTruthy()
+    expect(create.body).toMatchObject({ brand: 'Bambu Lab', material: 'PLA', material_type: 'Basic', colour: 'Moon Rock', hexes: ['#8A8D8F'], nominal_weight_g: 1000, type_id: T.JADE })
+    expect((await getType(T.JADE)).tdfp_id).toBe(38600)
+    await waitFor(() => expect(screen.getByLabelText('3DFP id')).toHaveValue('38600'))
+  })
+
+  it('shows what 3DFP may already have, and adds anyway with a new key once the person says they differ', async () => {
+    const sent = tdfpRequests()
+    const { user } = render(`/filament/types/${T.JADE}`)
+    await code()
+    await user.click(screen.getByRole('button', { name: 'Find on 3DFP' }))
+    await user.click(within(finder()).getByRole('button', { name: 'Add the missing filament' }))
+    const form = within(finder()).getByRole('form', { name: 'Add to 3DFP' })
+    await user.click(within(form).getByRole('button', { name: 'Add to 3DFP' }))
+    const dupes = await within(finder()).findByRole('list', { name: '3DFP may already have it' })
+    expect(within(dupes).getByRole('listitem', { name: /3DFP 4411/ })).toHaveTextContent('same colour')
+    expect((await getType(T.JADE)).tdfp_id).toBeNull()
+    await user.click(within(dupes).getByRole('checkbox', { name: 'Not the same filament' }))
+    await user.click(within(finder()).getByRole('button', { name: 'Add anyway' }))
+    expect(await screen.findByText('Added to 3DFP as 38600. The type’s 3DFP id is now 38600.')).toBeInTheDocument()
+    const creates = sent.filter((one) => one.path === '/api/v1/filament/tdfp/filaments')
+    expect(creates).toHaveLength(2)
+    expect(creates[1]!.body.not_duplicates).toEqual([4411])
+    expect(creates[1]!.key).not.toBe(creates[0]!.key)
+  })
+
+  it('says why a search failed', async () => {
+    server.use(
+      http.post('/api/v1/filament/tdfp/search', () =>
+        HttpResponse.json({ type: 'about:blank', title: 'Service Unavailable', status: 503, detail: 'no profile-fetch worker runs', code: 'no_worker' }, { status: 503 }),
+      ),
+    )
+    const { user } = render(`/filament/types/${T.JADE}`)
+    await code()
+    await user.click(screen.getByRole('button', { name: 'Find on 3DFP' }))
+    await user.click(within(finder()).getByRole('button', { name: 'Search 3DFP' }))
+    expect(await within(finder()).findByRole('alert')).toHaveTextContent('no profile-fetch worker runs')
+  })
+
+  it('offers no add for a type that already has a saved 3DFP id', async () => {
+    await upsertType({ tdfp_id: 1234 }, T.JADE)
+    const { user } = render(`/filament/types/${T.JADE}`)
+    await code()
+    await user.click(screen.getByRole('button', { name: 'Find on 3DFP' }))
+    await user.click(within(finder()).getByRole('button', { name: 'Search 3DFP' }))
+    await within(finder()).findByRole('listitem', { name: /3DFP 4411/ })
+    expect(within(finder()).queryByRole('button', { name: 'Add the missing filament' })).not.toBeInTheDocument()
+  })
+})
