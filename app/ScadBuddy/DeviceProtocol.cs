@@ -96,6 +96,22 @@ public static class DeviceProtocol
 	/// <summary>The realtime socket's address on the device's origin.</summary>
 	public static Uri SocketOf(string origin) => new($"wss://{new Uri(origin).Authority}{SocketPath}");
 
+	/// <summary>The first wait before the socket dials again, and the longest.</summary>
+	public static readonly TimeSpan RedialFirst = TimeSpan.FromSeconds(2), RedialMax = TimeSpan.FromSeconds(30);
+
+	/// <summary>A socket open this long was a good connection: the backoff starts again after it.</summary>
+	public static readonly TimeSpan StableFor = TimeSpan.FromMinutes(1);
+
+	/// <summary>
+	/// The wait before the socket dials again. <paramref name="last"/> is the wait before this
+	/// dial (zero before the first). <paramref name="openFor"/> is how long the socket stayed
+	/// open (zero when the dial failed). A server that accepts and then closes at once does
+	/// not reset the backoff, so it is not dialled every 2 s.
+	/// </summary>
+	public static TimeSpan RedialWait(TimeSpan last, TimeSpan openFor) =>
+		last <= TimeSpan.Zero || openFor >= StableFor ? RedialFirst
+		: last * 2 < RedialMax ? last * 2 : RedialMax;
+
 	/// <summary>The subscribe frame for the device's own topic, the only one core lets it follow.</summary>
 	public static string Subscribe(string deviceId) =>
 		new JsonObject { ["type"] = "subscribe", ["topics"] = new JsonArray("device:" + deviceId) }.ToJsonString();

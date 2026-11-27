@@ -223,6 +223,21 @@ public class DeviceProtocolTests
 	}
 
 	[Theory]
+	// The first dial that fails waits 2 s, then each wait doubles, up to 30 s.
+	[InlineData(0, 0, 2)]
+	[InlineData(2, 0, 4)]
+	[InlineData(16, 0, 30)]
+	[InlineData(30, 0, 30)]
+	// A server that accepts and then closes at once does not reset the backoff.
+	[InlineData(8, 1, 16)]
+	[InlineData(8, 59, 16)]
+	// A socket that stayed open a minute was a good connection: the backoff starts again.
+	[InlineData(30, 60, 2)]
+	public void TheSocketRedialsWithABackoffThatResetsOnlyAfterAStableSocket(int lastSeconds, int openSeconds, int waitSeconds) =>
+		Assert.Equal(TimeSpan.FromSeconds(waitSeconds),
+			DeviceProtocol.RedialWait(TimeSpan.FromSeconds(lastSeconds), TimeSpan.FromSeconds(openSeconds)));
+
+	[Theory]
 	[InlineData("no_tag: no tag was tapped", "no_tag")]
 	[InlineData("bambu_tag: this is a MIFARE Classic tag", "bambu_tag")]
 	[InlineData("sector 2: IOException: 9CC69CE3", "error")]

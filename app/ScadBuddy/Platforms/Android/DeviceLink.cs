@@ -24,7 +24,6 @@ public sealed class DeviceLink
 	// A call's method stops this long before core's deadline, so its upload and result get there in time.
 	static readonly TimeSpan Margin = TimeSpan.FromSeconds(5);
 	const int FrameMax = 64 << 10;
-	static readonly TimeSpan StableFor = TimeSpan.FromMinutes(1);
 	static readonly TimeSpan MaxCall = TimeSpan.FromMilliseconds(int.MaxValue - 1);
 	// RFC 6455 close code realtime.SignedOut: the pairing ended (revoked, or its token expired).
 	const int SignedOut = 4401;
@@ -39,8 +38,9 @@ public sealed class DeviceLink
 	CancellationTokenSource? link;
 	RunningCall? running;
 	// The calls already run: a call is never run twice, even if its frame comes again.
-	// A reconnect gets no replay (core's "check" tells only that a topic changed, not its
-	// events), so a call published while the socket is down ends at its deadline, offline.
+	// A reconnect or a "resync" gets no replay: core's subscribe takes no "since", its "check"
+	// tells only that a topic changed, not its events, and no device route lists the device's
+	// open calls (#8263). So a call published while the socket is down ends at its deadline.
 	readonly Queue<string> seen = new();
 
 	/// <summary>The pairing, read from SecureStorage once.</summary>
@@ -144,21 +144,19 @@ public sealed class DeviceLink
 
 	async Task Socket(Pairing p, CancellationToken stop)
 	{
-		var wait = TimeSpan.FromSeconds(2);
+		var wait = TimeSpan.Zero;
 		while (!stop.IsCancellationRequested)
 		{
 			using var ws = new ClientWebSocket();
 			ws.Options.SetRequestHeader("Authorization", "Bearer " + p.Token);
 			ws.Options.CollectHttpResponseDetails = true;
+			DateTime? opened = null;
 			try
 			{
 				await ws.ConnectAsync(DeviceProtocol.SocketOf(p.Origin), stop);
-				var opened = DateTime.UtcNow;
+				opened = DateTime.UtcNow;
 				await SendText(ws, DeviceProtocol.Subscribe(p.DeviceId), stop);
 				await Listen(ws, p, stop);
-				// The backoff starts again only after a socket that stayed open: a server that
-				// closes at once is not dialled every 2 s.
-				if (DateTime.UtcNow - opened >= StableFor) wait = TimeSpan.FromSeconds(2);
 				if (ws.CloseStatus is (WebSocketCloseStatus)SignedOut)
 				{
 					Ended(p, null);
@@ -178,8 +176,9 @@ public sealed class DeviceLink
 					try { await ws.CloseOutputAsync(WebSocketCloseStatus.NormalClosure, "", CancellationToken.None); } catch (Exception) { }
 			}
 			if (stop.IsCancellationRequested) return;
+			// A socket that failed partway (a frame too large) counts its open time too.
+			wait = DeviceProtocol.RedialWait(wait, opened is { } at ? DateTime.UtcNow - at : TimeSpan.Zero);
 			try { await Task.Delay(wait, stop); } catch (OperationCanceledException) { return; }
-			wait = TimeSpan.FromSeconds(Math.Min(wait.TotalSeconds * 2, 30));
 		}
 	}
 
