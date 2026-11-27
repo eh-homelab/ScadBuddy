@@ -76,7 +76,7 @@ class ResolvedReference:
 
 @dataclass(frozen=True)
 class OutputFacts:
-    """What an output's ``meta.json`` and ``inputs.json`` say a reference is."""
+    """What an output's row (its ``meta`` and ``inputs``) says a reference is."""
 
     slug: str
     commit: str | None
@@ -93,7 +93,7 @@ def colours_of(colors: Sequence[str]) -> list[ColourSlot]:
 
 
 def reference_from_output(meta: OutputMeta, inputs: Mapping[str, Any]) -> OutputFacts:
-    """``meta.json``'s slug, ``model_version``, libraries and colours, with ``inputs.json``."""
+    """The row ``meta``'s slug, ``model_version``, libraries and colours, with its ``inputs``."""
     return OutputFacts(
         slug=meta.slug,
         commit=meta.model_version,

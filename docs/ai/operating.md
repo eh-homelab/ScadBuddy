@@ -258,8 +258,8 @@ main on 2026-11-01:
   There is no session mode: plan Phase 10 dropped the `ai_sessions.mode` column and the
   `session_mode` setting (migrations `20261101T2300Z_drop_session_mode.sql` and
   `20261101T2000Z_drop_durable_settings.sql`), the panel has no mode picker, and
-  nothing answers a mode. `POST /api/v1/ai/sessions` and the chat socket still take one from an
-  earlier client and ignore it, with a log line for each (#7323). The Python `DurableSession` retired in
+  nothing answers a mode. `POST /api/v1/ai/sessions` and the chat socket drop a `mode` key that an
+  earlier client still sends, as they drop any key they do not name (#7323). The Python `DurableSession` retired in
   Phase 8, and its open sessions moved to `AgentSession` in Phase 7 (the prod backfill of plan Step 7.2 moved 62 of 62 and left
   none open, as #2726's checklist records). `agent-durable` runs no turn and stays at zero
   replicas.
@@ -500,8 +500,8 @@ If the previous file cannot be loaded, the API's log says so and nothing is re-w
 ## 4. Setting up the Claude credential
 
 There can be several credentials, one row each in `ai_credentials`, in priority order
-(#1093). Each is of one of three kinds (`CREDENTIAL_KINDS`,
-[`agent/src/credentials.ts`](../../agent/src/credentials.ts); spec D2):
+(#1093). Each credential the assistant runs is of one of three kinds
+(`AGENT_CREDENTIAL_KINDS`, [`agent/src/credentials.ts`](../../agent/src/credentials.ts); spec D2):
 
 - `anthropic_api_key`: a Console key (`sk-ant-api03-…`), passed to Claude Code as
   `ANTHROPIC_API_KEY`.
@@ -511,6 +511,18 @@ There can be several credentials, one row each in `ai_credentials`, in priority 
   read Anthropic's terms for subscription credentials before using it.
 - `gateway`: a `base_url` plus a token, passed as `ANTHROPIC_BASE_URL` and
   `ANTHROPIC_AUTH_TOKEN`.
+
+The pool also holds the fleet's rows (#7983): kind `claude_login` (a whole Claude Code
+`claudeAiOauth` login, which only the fleet's login rotator uses) and any row whose `scope`
+is `fleet`. The assistant never uses or tests those rows; Settings lists them with their
+scope. A row's `scope` is `agent` by default; a `claude_login` is always `fleet`. The API's
+reveal answers the assistant only the rows whose scope is `agent` or `both`. The API also
+refuses the assistant's caller (409) every change to a `claude_login` or a `fleet` row: a
+save that creates or changes one or makes a row `fleet`, and a delete, rename, reset or
+health event on one. A reorder names the assistant's rows only, and the fleet's rows keep
+their priorities. So the assistant cannot plant a login that a fleet machine installs, nor
+delete, disable or replace a fleet login. Settings shows the fleet's rows read-only ("Managed
+by the fleet"); the fleet manages them (#7984).
 
 The mapping is in `credentialEnv()` in [`agent/src/harness/run.ts`](../../agent/src/harness/run.ts).
 Its sources are the [LLM gateway docs](https://code.claude.com/docs/en/llm-gateway-connect)
@@ -585,7 +597,8 @@ cooldown ends, since the status is worked out at read time. The `curl` below is 
 fallback when there is no UI.
 
 The routes without `/entries` are the single-credential routes from #1000. They act on
-the first credential by priority, for scripts written against them. They are
+the first credential the assistant uses (never a fleet row, #7983), for scripts written
+against them. They are
 **deprecated** (#2768): the UI no longer uses them, and every answer carries
 `Deprecation: @1791936000` (RFC 9745: deprecated at 2026-10-14T00:00:00Z) and a `Link`
 header naming `/api/v1/ai/credentials/entries` as the
@@ -596,10 +609,10 @@ in anything new.
 |---|---|---|
 | `GET /api/v1/ai/credentials` | Read guard (#989) | Returns `configured`, `kind`, `base_url`, `last4`, `updated_at`, `usable`, `can_save` and `cannot_save_reason` (`view()`). It never returns the secret. `last4` is empty for a secret shorter than 12 characters (`last4()`, `secrets.ts`). |
 | `PUT /api/v1/ai/credentials` | Yes | Body `{ kind, base_url?, secret? }`, strict (`PutBody`). A `gateway` needs `base_url`, and `anthropic_api_key` and `claude_oauth_token` must not have one. `base_url` must be http(s), with no userinfo, query or fragment. It is normalised without a trailing slash (`normaliseBaseUrl()`). A gateway host is checked against the egress rules first (§5 of [security.md](security.md#egress-check-on-gateway-urls)). The secret must not contain whitespace. **Omitting `secret` keeps the stored one only if `kind` and `base_url` are unchanged**; otherwise the route answers `409` (`planPut()`). |
-| `DELETE /api/v1/ai/credentials` | Yes | Deletes the first credential and answers with the one that moved up into its place (`configured: false` when none is left). |
-| `GET /api/v1/ai/credentials/entries` | Read guard (#989) | Every credential in priority order, as `{ credentials, usable_now, recovers_at, can_save, cannot_save_reason }`. Each entry has `id`, `priority`, `kind`, `name`, `base_url`, `last4`, `updated_at`, `usable`, `status` (`active`, `cooling_down` or `disabled`), `cooldown_until`, `last_error`, `last_error_at` and `last_used_at` (`entryView()`). |
+| `DELETE /api/v1/ai/credentials` | Yes | Deletes the first credential the assistant uses and answers with the one that moved up into its place (`configured: false` when none is left). |
+| `GET /api/v1/ai/credentials/entries` | Read guard (#989) | Every credential in priority order, as `{ credentials, usable_now, recovers_at, can_save, cannot_save_reason }`. Each entry has `id`, `priority`, `kind`, `name`, `base_url`, `last4`, `updated_at`, `usable`, `status` (`active`, `cooling_down` or `disabled`), `cooldown_until`, `last_error`, `last_error_at`, `last_used_at`, `scope` (`agent`, `fleet` or `both`), `agent_uses` (whether the assistant uses it, `agentUses()`), and `email` and `subscription_type` (a `claude_login`'s account, else `null`) (`entryView()`). |
 | `POST /api/v1/ai/credentials/entries` | Yes | Body `{ kind, base_url?, secret, name? }`; adds a credential last in priority and answers `201` with its entry. `name` is optional, as for the rename route below. At most 100 are stored (`MAX_CREDENTIALS`); past that it answers `409`. |
-| `PUT /api/v1/ai/credentials/order` | Yes | Body `{ ids }`, every credential's id exactly once, first to last; otherwise `409`. Answers with the list. |
+| `PUT /api/v1/ai/credentials/order` | Yes | Body `{ ids }`, the id of every credential the assistant uses exactly once, first to last, and no fleet row; otherwise `409`. Fleet rows keep their priorities. Answers with the list. |
 | `PUT /api/v1/ai/credentials/entries/{id}` | Yes | Same body and rules as `PUT /api/v1/ai/credentials`, for one credential. A new secret makes it `active` again. |
 | `DELETE /api/v1/ai/credentials/entries/{id}` | Yes | Deletes one credential and answers with the list. |
 | `PUT /api/v1/ai/credentials/entries/{id}/name` | Yes | Body `{ name }`, strict (#3710). Sets the credential's name, or clears it with `null` or a blank string, and answers with its entry. The secret, status and `epoch` do not change. The name is trimmed. It is refused with `400` past 60 characters (`CREDENTIAL_NAME_MAX`) or with a control, format or line separator character (`normaliseCredentialName()`). It is a display label only: it need not be unique, it is not in the AAD, and it is not written to logs, audit rows or prompts (the audit row names the route, not the body). |
@@ -1064,8 +1077,8 @@ path" ([Agent SDK plugins](https://code.claude.com/docs/en/agent-sdk/plugins)).
 - **Disk is a cache.** Packages are materialised under `<state dir>/plugins/<name>/<commit>-<hash prefix>`
   (`pluginCacheDir()` in [`agent/src/harness/options.ts`](../../agent/src/harness/options.ts)).
   Before each load, every file is hashed and compared with the pin. A missing, partial
-  or altered copy is deleted and fetched again at the pinned commit. If the new files do
-  not hash to the pin, the package is not loaded (`materialise()` in
+  or altered copy is deleted and read again from the pin's mirror (below); a load never
+  fetches git. If the new files do not hash to the pin, the package is not loaded (`materialise()` in
   [`agent/src/plugins/packages/install.ts`](../../agent/src/plugins/packages/install.ts)).
   The cache can be the same `emptyDir` as the rest of the state directory.
 - **A bytes pin loads from its mirror.** The file of an archive or npm package is kept in
@@ -1076,6 +1089,46 @@ path" ([Agent SDK plugins](https://code.claude.com/docs/en/agent-sdk/plugins)).
   `<name>/b<first 40 of the sha256>-<hash prefix>`, and a cache miss unpacks the mirrored
   copy, never the upstream URL. The area is one of `STORE_AREAS`, so the agent is not ready
   (its data routes answer 503) until the API lists it.
+- **A commit pin loads from its mirror, never from git** (#7907; the owner's
+  [decision of 2026-11-26](https://github.com/eh-homelab/ScadBuddy/issues/7907): no git
+  fetch on the turn path). A depth-1 fetch of a large repository took 132 s on a 2-CPU
+  worker pod (measured on prod for #7907), and the cache is empty after every restart. So
+  the agent keeps a deterministic zip of a commit pin's files in `package-mirrors` and
+  records its SHA-256 on the row (`POST …/plugin-packages/{name}/mirror`; `mirror_sha256`,
+  or `pending_mirror_sha256` for a re-pin, which its approval moves to `mirror_sha256`).
+  The API records it only for the commit and content hash the row names, and only while
+  the package holds the zip. A load (a turn, the warm-up, a file read, the header secrets)
+  unpacks the recorded zip on a cache miss and uses it only when its files hash to the pin.
+  With no mirror recorded, or one that is missing, unreadable or hashes to other files, the
+  package is not loaded: the problem reads `plugin package <name> was not loaded: its
+  mirror is not ready yet` (or `its mirror failed its check (…)` for a mirror that does not
+  unpack or hash to the pin, or `its mirror could not be read (…)` for a transport error),
+  and the load starts the
+  mirror job.
+- **The mirror job** (`agent/src/plugins/packages/mirrorJob.ts`) is the only place a commit
+  is fetched after install. On Temporal it is the `PackageMirror` workflow on `agent-tools`
+  (`agent/src/temporal/packageMirror.ts`), one per pin across the cluster: workflow id
+  `package-mirror-<name>-<commit>-<first 16 hex digits of the content hash>`, started with
+  the conflict policy `USE_EXISTING` (a start while a run is open joins it) and the reuse
+  policy `ALLOW_DUPLICATE` (a start after a finished run begins a new one, so a mirror lost
+  or spoiled after a good run is made again). Its activity reads the pin from the row
+  (`not-pinned` when the row no longer names that commit and hash), ends at once when the
+  recorded mirror reads back and hashes to the pin, and else fetches the commit with git
+  (a 10-minute limit, `MIRROR_FETCH_TIMEOUT_MS`, against install's 120 s), checks the
+  content hash, and writes and records the zip again over a bad record. It is tried again
+  with back-off (30 s doubling to 10 min, 6 tries); files that do not hash to the pin, or
+  whose zip is past the API's 24 MiB cap (`MAX_MIRROR_BYTES`), fail it for good
+  (`PackageMirrorRefused`). The zip is unpacked with the content hash's caps (2,000 files,
+  5 MiB each, 20 MiB in all), not an archive download's (500 files, 2 MiB each), so every
+  package that can be pinned can load. A stored zip adds 76 bytes and twice the path to
+  each file, so the largest package (2,000 files, 20 MiB) fits the cap while its paths
+  average up to 1,010 bytes. Install and
+  re-pin still put and record the zip they fetched, inline, and start the job only when
+  that failed; approving a commit pin with no recorded mirror starts it too. A pin made
+  before #7907 has no mirror: its first load after this deploy leaves it out and starts the
+  job, and the next load after the job reads it. Without Temporal (no
+  `SCADBUDDY_TEMPORAL_ADDRESS`) the same job runs in the agent's own process, one per pin
+  at a time, never awaited by the load; a load still never fetches git.
 - **A hosted plugin loads from its version** (#6934, spec 2026-11-21 §6.5). A `hosted`
   source is a plugin published under Settings → Tools & plugins → Hosted plugins. It is
   always installed at its latest published version, read with its zip through the API's
@@ -1117,7 +1170,7 @@ other Settings writes
 |---|---|
 | `POST /` with `{ "source": { "kind": "git", "url", "ref"?, "path"? } }`, `{ "kind": "marketplace", "url", "ref"?, "entry" }`, `{ "kind": "marketplace-url", "url", "entry" }`, `{ "kind": "archive", "url", "sha256"? }` `{ "kind": "npm", "package", "version"?, "registry"? }` or `{ "kind": "hosted", "name" }` | Fetches, pins the commit (or the file's SHA-256, which it mirrors first, or a hosted plugin's latest version), vets, and stores the package **unapproved and disabled** (201), with what the rules refuse in `review.refused`. A `hosted` source *offers* the latest version: when the hosted package is installed, it is re-pinned into a pending pin instead (still answered 201). A hosted package's view has `not_offered`, the latest version when neither its pin nor its pending pin is that version. A marketplace entry may be a `github`, `url`, `git-subdir`, `archive` or `npm` source (a `command` source is refused; a relative path only from a marketplace repository). An npm `package` is a registry name (with `@version` or `version`: an exact version or a dist-tag; `latest` by default) or an https tarball link. A package no approval can allow (its name, a path outside it, a symlink, an endpoint the egress check refuses) gets 422 with every problem. |
 | `GET /`, `GET /:name` | The pin, the review (skills as `<name>:<skill>`, commands, agents, hooks, MCP servers, files), and any pending re-pin with its file diff. |
-| `GET /:name/files`, `GET /:name/file?path=` (each with `pending=true` for the re-pin's) | Every file of the pin with its size, and one file's content for Settings to show before approval (#1029). Only a path in the pin's own file list is read, from the cached copy that hashes to the pin (fetched again when it does not; never vetted for loading, so a refused package can be read). Text is cut at 64 KiB unless `full=true`; a file that is not UTF-8 is `binary` with no `content`. A built-in's files are read from the image. |
+| `GET /:name/files`, `GET /:name/file?path=` (each with `pending=true` for the re-pin's) | Every file of the pin with its size, and one file's content for Settings to show before approval (#1029). Only a path in the pin's own file list is read, from the cached copy that hashes to the pin (read again from its mirror when it does not; never vetted for loading, so a refused package can be read). Text is cut at 64 KiB unless `full=true`; a file that is not UTF-8 is `binary` with no `content`. A built-in's files are read from the image. |
 | `POST /:name/approve` with `{ "commit_sha", "bytes_sha256" or "version", "content_hash", "allow_refused"? }` | Approves exactly the pin the review showed. A mismatch is a 409. So is a pin whose `review.refused` is not empty, unless `allow_refused` is `true`: that loads the package as it is, its code running with the Claude credential in its environment ([security.md](security.md#plugin-packages)). |
 | `PATCH /:name` | Gone (#4828). A package's switch is `PUT /api/v1/ai/capabilities/package:<name>` (#4757), which Settings uses; it enables an approved pin only, and the table enforces this with a `CHECK` too. |
 | `POST /:name/repin` with `{ "ref"? }` | Fetches the new commit into a *pending* pin (for an npm package, `ref` is a version or dist-tag; an archive, a tarball link or a bare marketplace URL takes none and is fetched again; a hosted plugin takes none and is re-pinned to its latest version; an archive installed with its `sha256` is refused 409 `repin-fixed-sha256`, since it could only find the same file). The current pin keeps loading until the pending one is approved. |
@@ -2060,11 +2113,11 @@ files ([`agent/src/workspace/store.ts`](../../agent/src/workspace/store.ts), too
   load (vetting, the egress check of its endpoints, or the listing budget refuses it)
   stays in the list, and the package's load check in Settings shows why it is not loaded
   (`routes/pluginPackages.ts`, `packageLoadCheck`). When no verified copy is cached, the
-  read fetches the pin again without vetting it. When that fetch fails too (the git host
-  is down, the pinned commit is gone, or the files do not hash to the pin), the read
-  fails, and so do `workspace_read` and every upload until a fetch succeeds. For 30 s after
+  read reads the pin's mirror again without vetting it, never git. When that fails too (no
+  mirror is recorded yet, the API does not answer, or the files do not hash to the pin), the
+  read fails, and so do `workspace_read` and every upload until a read succeeds. For 30 s after
   a failure (`PACKAGE_SECRETS_FAILURE_MS`) that pin is refused again at once, with no new
-  fetch, so the calls do not each wait for a fetch to time out. It is still a refusal,
+  read, so the calls do not each wait for a read to time out. It is still a refusal,
   never an empty list (#5488), and it covers the UI's pick too. A copy that hashes to the
   pin ends it at once: a turn's load that fetches the package, or a copy already in the
   cache, is read first (#5490). The operator fixes the fetch, or disables or

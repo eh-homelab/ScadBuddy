@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import json
 import os
-import threading
 import time
 import uuid
 import zipfile
@@ -289,31 +288,6 @@ def app_warm_listings_sweep_off(
 
     monkeypatch.setattr(main_module, "_warm_listings_logged", off)
     return real
-
-
-def files_only(client: TestClient) -> None:
-    """The app saves as a build before #7256 did: files and rows, no blobs. On `local` the
-    outputs have a blob store of their own (#7257, plan D7); a test that rewrites or
-    removes an output's files after its save calls this first, so reads take the files."""
-    state: AppState = getattr(client.app.state, STATE_ATTR)  # type: ignore[attr-defined]
-    state.outputs.bytes = None
-
-
-@pytest.fixture(autouse=True)
-def app_output_copy_off(request: pytest.FixtureRequest, monkeypatch: pytest.MonkeyPatch) -> None:
-    """#7255: the app's start copy of the outputs' files to rows does nothing, unless the
-    test is marked `output_copy`. A finished copy ends the files' fallback for a missing
-    row, at a time the test does not choose, and many tests make an output with no row
-    to stand for one saved before the rows (`OutputStore._row_of`). #7256: the start's
-    byte copy to the blob store does nothing in every test, for the same reason: it
-    names blobs in rows at a time the test does not choose."""
-
-    async def off(state: AppState, *, stop: threading.Event) -> None:
-        return None
-
-    monkeypatch.setattr(main_module, "_copy_output_bytes_logged", off)
-    if request.node.get_closest_marker("output_copy") is None:
-        monkeypatch.setattr(main_module, "_copy_outputs_logged", off)
 
 
 @pytest.fixture(autouse=True)

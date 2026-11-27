@@ -2,8 +2,9 @@
 
 An answer is checked here against the task's schema, then given to the run by an
 operation (`flows/operations.py`): `task_answer` for a person's, `flow_agent_answer` for
-an assistant session's or MCP token's that `flow_answerers` admits (#7471). It reaches the
-operation sealed under the run's key, so it is in no history, record or log in the clear.
+an assistant session's or MCP token's that `flow_answerers` or the run's grant admits
+(#7471). It reaches the operation sealed under the run's key, so it is in no history,
+record or log in the clear.
 """
 
 from __future__ import annotations
@@ -20,7 +21,7 @@ from pydantic import BaseModel
 
 from scadbuddy.api.crud_agent_events import UUID_PATTERN
 from scadbuddy.api.deps import SettingsStoreDep
-from scadbuddy.api.flows import admit, agent_answer, answerer, unavailable
+from scadbuddy.api.flows import admission, agent_answer, answerer, unavailable
 from scadbuddy.api.limits import RouteLimit
 from scadbuddy.api.operations import (
     OPERATION_RESPONSES,
@@ -32,7 +33,8 @@ from scadbuddy.auth.component import CallerDep
 from scadbuddy.core.authorship import browser_principal
 from scadbuddy.core.events import TASK_PLACE_CHAR, TASK_PLACE_MAX
 from scadbuddy.core.problems import PROBLEM_MEDIA_TYPE, ApiError
-from scadbuddy.flows.component import FlowsDep
+from scadbuddy.flows.answerers import BY_SETTING
+from scadbuddy.flows.component import Flows, FlowsDep
 from scadbuddy.flows.operations import (
     AGENT_ANSWER,
     TASK_ANSWER,
@@ -77,6 +79,13 @@ class TaskList(BaseModel):
     tasks: list[TaskQuestion]
 
 
+class TaskView(Task):
+    """A task, and for an agent's answer what admitted it (#7471): `setting`, or the id of
+    the run's grant."""
+
+    admitted_by: str | None = None
+
+
 class TaskAnswerBody(BaseModel):
     """An answer to a task: a person's, or an admitted assistant's (#7471)."""
 
@@ -119,11 +128,26 @@ def list_tasks(
     responses={status.HTTP_404_NOT_FOUND: {"description": "No such task"}},
     summary="Get a task",
 )
-async def get_task(task_id: TaskIdPath, tasks: TasksDep) -> Task:
+async def get_task(task_id: TaskIdPath, tasks: TasksDep, flows: FlowsDep) -> TaskView:
     # The answer and who gave it too, for every caller of an `api` route
     # (`auth/routes.py`). No task route is a person's alone: an agent answers only when
-    # `flow_answerers` admits it (`api/flows.py` `answerer` and `admit`, #7471).
-    return await _found(tasks, task_id)
+    # the setting `flow_answerers` or the run's grant admits it (`api/flows.py` `answerer`
+    # and `admit`, #7471).
+    return await _view(tasks, flows, task_id)
+
+
+async def _view(tasks: TasksComponent, flows: Flows, task_id: str) -> TaskView:
+    """The task, with what admitted an agent's answer from its decision's row."""
+    task = await _found(tasks, task_id)
+    view = TaskView.model_validate(task.model_dump(by_alias=True))
+    if task.answered_by is not None and task.answered_by.startswith(("session:", "token:")):
+        answers = [
+            d
+            for d in await flows.store.answers_of_call(task.run_id, task.id)
+            if d.responder == task.answered_by
+        ]
+        view.admitted_by = answers[-1].admitted_by if answers else None
+    return view
 
 
 def _fits(answer: dict[str, Any]) -> bool:
@@ -135,7 +159,7 @@ def _fits(answer: dict[str, Any]) -> bool:
 
 @router.post(
     "/{task_id}/answer",
-    response_model=Task,
+    response_model=TaskView,
     responses={
         **OPERATION_RESPONSES,
         status.HTTP_404_NOT_FOUND: {"description": "No such task"},
@@ -166,14 +190,14 @@ async def answer_task(
     settings: SettingsStoreDep,
     caller: CallerDep,
     idempotency_key: IdempotencyKey = None,
-) -> Task | JSONResponse:
+) -> TaskView | JSONResponse:
     """Check the answer against the task's schema and give it to the run. The same request
     again returns the task as it stands. A 202's operation says only that it was answered:
     read the task itself at ``GET /tasks/{id}``. Read it again after a 409 too. A 409
     ``not-open`` has the task's own ``state``, which is ``open`` for a moment when the run
     has another answer that is not marked yet. A person answers; an assistant session or
-    MCP token only when the setting ``flow_answerers`` names it and the question is not for
-    people only (#7471)."""
+    MCP token only when the setting ``flow_answerers`` or the run's approved grant names it and the
+    question is not for people only (#7471). The task read says which (``admitted_by``)."""
     found = answerer(caller)
     answer = body.answer
     # First: nothing below walks an answer that is too large.
@@ -196,13 +220,18 @@ async def answer_task(
         raise unavailable() from None
 
     person = found.kind == "person"
+    # A task's id is its prompt's call id (`workflows/flow_tools.py` `_prompt_task`): the
+    # parked entry's key.
+    admitted_by, refusal = (
+        (BY_SETTING, None)
+        if person
+        else await admission(found, settings, flows, task.run_id, task.id)
+    )
 
     async def refuse() -> None:
         # Not for a repeat, which is its first answer however the task stands now.
-        if not person:
-            # A task's id is its prompt's call id (`workflows/flow_tools.py` `_prompt_task`):
-            # the parked entry's key.
-            await admit(found, settings, flows, task.run_id, task.id)
+        if refusal is not None:
+            raise refusal
         if task.state != "open":
             raise task_not_open(task.state)
         problems = await asyncio.to_thread(validate_answer, task.schema_, answer)
@@ -232,7 +261,7 @@ async def answer_task(
                     "run_id": task.run_id,
                     "task_id": task.id,
                     "answer_sealed": sealed,
-                    **agent_answer(found),
+                    **agent_answer(found, admitted_by),
                 }
             ),
             idempotency_key=idempotency_key,
@@ -246,4 +275,4 @@ async def answer_task(
     answered = operation_answer(result, TaskAnswered)
     if isinstance(answered, JSONResponse):
         return answered
-    return await _found(tasks, task_id)
+    return await _view(tasks, flows, task_id)

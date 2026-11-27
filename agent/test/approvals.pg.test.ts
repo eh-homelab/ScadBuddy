@@ -1,4 +1,4 @@
-import { createHash, randomUUID } from 'node:crypto'
+import { createHash } from 'node:crypto'
 import type { SDKMessage } from '@anthropic-ai/claude-agent-sdk'
 import { Hono } from 'hono'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
@@ -322,10 +322,6 @@ describe.skipIf(!TEST_DATABASE_URL)(`approvals in Postgres${TEST_DATABASE_URL ? 
     expect((await m.approvals.listVisiblePending(agentA)).map((a) => a.id)).toEqual([mine.approval.id])
     await expect(m.approvals.get(theirs.approval.id, agentA)).rejects.toMatchObject({ code: 'not_found' })
     await expect(m.approvals.decide(browser, 'not-a-uuid', true)).rejects.toMatchObject({ code: 'not_found' })
-    // The panel's old decision frame names a session, which no approval has.
-    await expect(
-      m.approvals.decision(browser, { v: 1, type: 'approval.decision', sessionId: randomUUID(), id: mine.approval.id, approve: true }),
-    ).rejects.toMatchObject({ code: 'not_found' })
   })
 
   // #7323: a session's rows are its history. Nothing parks on one now (prod had none pending

@@ -263,6 +263,13 @@ class OutputBytes:
     def __init__(self, content: ContentStore) -> None:
         self.content = content
 
+    @property
+    def spool(self) -> Path:
+        """Where a save stages its files and a read makes its temporary file: the content
+        store's spool, ``SCADBUDDY_SPOOL_DIR``, a node-local ``emptyDir`` on prod, never
+        the share (#7257, plan D8). Made on first use."""
+        return self.content.spool
+
     async def put(self, key: str, data: BlobData, *, slug: str) -> BlobRef:
         return await self.content.put("output", data, name=key, scope=BlobScope(slug=slug), key=key)
 
@@ -512,8 +519,8 @@ class OutputBytes:
 
     def _temporary(self, suffix: str) -> tuple[BinaryIO, Path]:
         """A new empty file under the spool, open for writing, and its path. Blocking."""
-        self.content.spool.mkdir(parents=True, exist_ok=True)
-        fd, name = tempfile.mkstemp(suffix=suffix, dir=self.content.spool)
+        self.spool.mkdir(parents=True, exist_ok=True)
+        fd, name = tempfile.mkstemp(suffix=suffix, dir=self.spool)
         return os.fdopen(fd, "wb"), Path(name)
 
     async def _download_to(self, ref: BlobRef, file: BinaryIO) -> None:

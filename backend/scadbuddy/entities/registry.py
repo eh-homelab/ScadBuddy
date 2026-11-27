@@ -114,7 +114,8 @@ def repoint_entity(conn: Conn, kind: str, gone: str, kept: str, by: Actor) -> No
     deletes `gone`'s row and keeps `kept`'s (the printers' `PRINTER_REFERENCES`), in its
     transaction; without it the sweep would take them as an orphan's. ``by`` is the
     history's actor of each key moved or removed (`set_actor`, which takes the event
-    log's lock before the rows below)."""
+    log's lock before the rows below). A printer merge's caller set it already; the
+    second call is harmless, as the lock is re-entrant."""
     set_actor(conn, by)
     # Locked in id order, as `apply` locks an entity, so a property write on `gone` cannot
     # commit between the copy below and the delete, which cascades.

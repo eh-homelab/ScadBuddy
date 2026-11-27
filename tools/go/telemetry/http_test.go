@@ -1,6 +1,8 @@
 package telemetry
 
 import (
+	"context"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -9,6 +11,8 @@ import (
 
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/codes"
+	sdkmetric "go.opentelemetry.io/otel/sdk/metric"
+	"go.opentelemetry.io/otel/sdk/metric/metricdata"
 	sdktrace "go.opentelemetry.io/otel/sdk/trace"
 	"go.opentelemetry.io/otel/sdk/trace/tracetest"
 	"go.opentelemetry.io/otel/trace"
@@ -78,8 +82,8 @@ func TestAServerSpanIsNamedByItsRouteAndContinuesTheCallersTrace(t *testing.T) {
 		t.Errorf("status %v", s.Status)
 	}
 	for _, kv := range s.Attributes {
-		if strings.Contains(kv.Value.Emit(), "secret") || strings.Contains(kv.Value.Emit(), "42") {
-			t.Errorf("%s holds the path or query: %s", kv.Key, kv.Value.Emit())
+		if strings.Contains(kv.Value.String(), "secret") || strings.Contains(kv.Value.String(), "42") {
+			t.Errorf("%s holds the path or query: %s", kv.Key, kv.Value.String())
 		}
 	}
 }
@@ -141,29 +145,72 @@ func TestAClientThatGetsNoAnswerIsAnError(t *testing.T) {
 }
 
 func TestAnAbortedHandlerIsAClientCancelNotAnError(t *testing.T) {
+	wrapped := fmt.Errorf("the client left: %w", http.ErrAbortHandler)
+	for _, abort := range []error{http.ErrAbortHandler, wrapped} {
+		tel, exp := recording(t)
+		reader := sdkmetric.NewManualReader()
+		mp := sdkmetric.NewMeterProvider(sdkmetric.WithReader(reader))
+		t.Cleanup(func() { _ = mp.Shutdown(context.Background()) })
+		tel.Meters = mp
+		h := tel.Server(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			SetRoute(r.Context(), "/api/v1/progress")
+			w.WriteHeader(http.StatusOK)
+			panic(abort)
+		}))
+		var p any
+		func() {
+			defer func() { p = recover() }()
+			h.ServeHTTP(httptest.NewRecorder(), httptest.NewRequest("GET", "/api/v1/progress", nil))
+		}()
+		if p != abort {
+			t.Fatalf("recovered %v, want %v again, so net/http aborts the connection", p, abort)
+		}
+		spans := exp.GetSpans()
+		if len(spans) != 1 {
+			t.Fatalf("%d spans", len(spans))
+		}
+		if spans[0].Status.Code == codes.Error {
+			t.Errorf("%v: status %v", abort, spans[0].Status)
+		}
+		if got := attr(spans[0], "error.type"); got.Type() != attribute.EMPTY {
+			t.Errorf("%v: error.type = %v", abort, got.String())
+		}
+		d, ok := collect(t, reader)["http.server.request.duration"].Data.(metricdata.Histogram[float64])
+		if !ok || len(d.DataPoints) != 1 {
+			t.Fatalf("%v: duration %+v", abort, d)
+		}
+		if v, ok := d.DataPoints[0].Attributes.Value("error.type"); ok {
+			t.Errorf("%v: the duration carries error.type=%s", abort, v.String())
+		}
+	}
+}
+
+func TestAStreamEndsItsSpanWhenItStarts(t *testing.T) {
 	tel, exp := recording(t)
+	started, finish := make(chan struct{}), make(chan struct{})
 	h := tel.Server(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		SetRoute(r.Context(), "/api/v1/progress")
-		w.WriteHeader(http.StatusOK)
-		panic(http.ErrAbortHandler)
+		SetRoute(r.Context(), "/api/v1/stream")
+		_, _ = w.Write([]byte("ready\n"))
+		Streaming(r.Context())
+		Streaming(r.Context())
+		close(started)
+		<-finish
+		_, _ = w.Write([]byte("later\n"))
 	}))
-	var p any
-	func() {
-		defer func() { p = recover() }()
-		h.ServeHTTP(httptest.NewRecorder(), httptest.NewRequest("GET", "/api/v1/progress", nil))
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		h.ServeHTTP(httptest.NewRecorder(), httptest.NewRequest("GET", "/api/v1/stream", nil))
 	}()
-	if p != http.ErrAbortHandler {
-		t.Fatalf("recovered %v, want http.ErrAbortHandler again, so net/http aborts the connection", p)
-	}
+	<-started
 	spans := exp.GetSpans()
-	if len(spans) != 1 {
-		t.Fatalf("%d spans", len(spans))
+	if len(spans) != 1 || spans[0].Name != "GET /api/v1/stream" || attr(spans[0], "http.status_code").AsInt64() != 200 {
+		t.Fatalf("spans while the stream is open: %v", spans)
 	}
-	if spans[0].Status.Code == codes.Error {
-		t.Errorf("status %v", spans[0].Status)
-	}
-	if got := attr(spans[0], "error.type"); got.Type() != attribute.INVALID {
-		t.Errorf("error.type = %v", got.Emit())
+	close(finish)
+	<-done
+	if n := len(exp.GetSpans()); n != 1 {
+		t.Fatalf("%d spans after the stream ended", n)
 	}
 }
 

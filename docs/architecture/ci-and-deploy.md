@@ -52,7 +52,7 @@ sequenceDiagram
     BI-->>DM: workflow_run completed (main only)
     DM->>GHCR: digest of scadbuddy:sha-<7>
     DM->>DR: digest, version, revision
-    DR->>GHCR: agent, agent-durable, slicer, sandbox, profile-fetch, playwright-mcp, fleet, core digests
+    DR->>GHCR: agent, agent-durable, slicer, sandbox, profile-fetch, playwright-mcp, fleet, core, camera-recorder, camera-edge digests
     DR->>CL: PR on deploy/scadbuddy, image@sha256 pins, auto-merge armed
     CL->>Argo: merge (after clusters' own checks)
     Argo->>Argo: sync the scadbuddy Application
@@ -79,10 +79,27 @@ sequenceDiagram
    build with no core image keeps the pin and warns. The fleet chat server's pin in
    `applications/scadbuddy/scadbuddy-fleet.yaml` (#7903) moves the same way, but its image
    comes from `build-go-image.yml`, only for a push that touches Go, so it is looked up
-   once with no wait, and a build with no fleet image keeps the pin. Where clusters keeps a
+   once with no wait, and a build with no fleet image keeps the pin. The camera recorders
+   and live edge (#7997) are pinned in `applications/scadbuddy-camera/camera-recorder.yaml`
+   and `camera-edge.yaml`, a directory of their own. Each file must have exactly two image
+   lines (MediaMTX and the controller run one image), equal to each other. Both lines move,
+   and so does the comment that names the API build ("the build of the API's sha-<7>"). The
+   `camera` job is continue-on-error, so a build with no image for a part keeps that file's
+   pins and warns. Each camera image carries the label `io.scadbuddy.camera.inputs`, a hash
+   of what it runs (`.github/scripts/camera-inputs.sh`: the `scadbuddy` modules the three
+   processes import, `pyproject.toml` and `uv.lock`, the part's MediaMTX config and the
+   Dockerfile's camera stages). The image copies all of `backend/scadbuddy` and carries
+   build labels, so its digest moves with every build. When the new image's hash equals the
+   pinned image's, the deploy keeps that file's pins with a notice, and no recorder or edge
+   pod restarts. Before that, each of the 21 deploys from 22:00 to 06:20 UTC on 2026-11-26/27
+   restarted them (measured on prod, #8191). The deploy never moves the camera relay: a relay restart is a gap of
+   about 10 to 30 s in every printer's recording, so its pin in `camera-relay.yaml` moves by
+   hand, in a reviewed clusters PR, when its code or MediaMTX changes (camera spec §6.1).
+   The final check accepts any relay pin in that file and in no other. Where clusters keeps a
    copy of `deploy/grafana`, it replaces that copy with the files at the deployed revision
    and writes the revision into its `.revision` file (`:818-831`, `:997`). It fails on any `ghcr.io/eh-homelab/scadbuddy*` reference
-   it did not pin (`:1044-1071`), then opens or replaces the PR on the fixed branch
+   it did not pin under `applications/scadbuddy/`, `applications/scadbuddy-camera/` or the
+   overlay's directory (`:1044-1071`), then opens or replaces the PR on the fixed branch
    `deploy/scadbuddy` and arms auto-merge (`:1085-1206`). Runs share one concurrency
    group that is never cancelled (`:174-189`).
 5. Once the PR merges, Argo CD syncs the `scadbuddy` Application. A workflow in

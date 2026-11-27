@@ -197,7 +197,7 @@ export function builtinServer(names: readonly string[], context: () => BuiltinCo
 }
 
 /**
- * The built-ins a classic turn gets from the session instead of Claude Code, served
+ * The built-ins a session turn gets from the session instead of Claude Code, served
  * in-process: every one of BUILTINS. The background ones (CronCreate and the rest) live in
  * Claude Code's own process, which the turn ends ("Session-only (not written to disk, dies
  * when Claude exits)"), while these are kept by the session (src/background/). WebFetch's
@@ -205,7 +205,7 @@ export function builtinServer(names: readonly string[], context: () => BuiltinCo
  * resolves the name again as it connects), and WebSearch is ScadBuddy's too (decision Q2).
  * Each call is at its item's tier (access/nativeBuiltins.ts `sessionTierOf`).
  */
-export const CLASSIC_BUILTINS: readonly string[] = Object.keys(BUILTINS)
+export const SERVED_BUILTINS: readonly string[] = Object.keys(BUILTINS)
 
 /**
  * Monitor's description where the session's Bash runs in a sandbox pod (#5864): its `command`
@@ -221,15 +221,15 @@ export const MONITOR_IN_SANDBOX =
   'you as a new message once the session is idle. Use TaskStop to cancel it early. For one notification ("tell me when X is ' +
   'ready"), prefer a command that exits when the condition holds.'
 
-/** A classic turn's in-process `builtin` server, serving the CLASSIC_BUILTINS of `names`, and Bash and PowerShell with a sandbox (#5864). */
-export function classicBuiltinServer(
+/** A session turn's in-process `builtin` server, serving the SERVED_BUILTINS of `names`, and Bash and PowerShell with a sandbox (#5864). */
+export function sessionBuiltinServer(
   names: readonly string[],
   context: { background?: BackgroundContext | undefined; web?: WebContext | undefined; shell?: ShellContext | undefined },
 ): McpSdkServerConfigWithInstance {
   return createSdkMcpServer({
     name: BUILTIN_SERVER,
     tools: names
-      .filter((n) => CLASSIC_BUILTINS.includes(n) || (context.shell !== undefined && SHELL_BUILTINS.includes(n)))
+      .filter((n) => SERVED_BUILTINS.includes(n) || (context.shell !== undefined && SHELL_BUILTINS.includes(n)))
       .map((name) => {
         const builtin = BUILTINS[name]!
         const description = name === 'Monitor' && context.shell !== undefined ? MONITOR_IN_SANDBOX : builtin.description
@@ -244,11 +244,11 @@ export function classicBuiltinServer(
 }
 
 /**
- * What a classic turn's model is told about the built-ins it gets that way: `served` with
+ * What a session turn's model is told about the built-ins it gets that way: `served` with
  * their tiers, and `shell`, Bash's tier when Bash is on (Claude Code's own, or the session's in
  * its sandbox pod: a Monitor may run a command, at the stricter of the two), else undefined.
  */
-export function classicBuiltinNote(served: readonly { name: string; tier: string }[], shell: string | undefined): string {
+export function sessionBuiltinNote(served: readonly { name: string; tier: string }[], shell: string | undefined): string {
   const names = served.map((t) => t.name)
   const tools = names.map((n) => `${n} (mcp__${BUILTIN_SERVER}__${n})`).join(', ')
   const asking = served.filter((t) => t.tier === 'outward').map((t) => t.name)

@@ -414,7 +414,7 @@ def plain_render() -> bool:
         },
         status.HTTP_409_CONFLICT: {
             "description": (
-                "the Bambuddy blob store has no commit of the template to snapshot for the"
+                "a remote blob store has no commit of the template to snapshot for the"
                 " render (`code` `snapshot_unavailable`)"
             )
         },
@@ -428,8 +428,8 @@ def plain_render() -> bool:
                 "the render is "
                 "still being accepted (`command-still-accepting`: send the same request "
                 "again, with the same `Idempotency-Key`, to follow it as one request; "
-                "without a key, each send is one more claim on the job); or, on the "
-                "Bambuddy blob store, the revision's first snapshot is still uploading "
+                "without a key, each send is one more claim on the job); or, on a "
+                "remote blob store, the revision's first snapshot is still uploading "
                 "(problem `code` `snapshot_pending`). Retry after `Retry-After` seconds"
             )
         },
@@ -586,7 +586,7 @@ def submit_problems() -> Iterator[None]:
             f"the blob store has no room for this template's source: {error}",
         ) from None
     except SnapshotUnavailableError as error:
-        # The bambuddy store renders from a snapshot of a commit, and there is none.
+        # A remote store renders from a snapshot of a commit, and there is none.
         raise ApiError(status.HTTP_409_CONFLICT, str(error), code=SNAPSHOT_UNAVAILABLE) from None
     except SnapshotPendingError as error:
         # The revision's first snapshot is still uploading (#686); it carries on.

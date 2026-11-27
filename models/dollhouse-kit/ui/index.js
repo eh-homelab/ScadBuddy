@@ -2,7 +2,18 @@
 // a house designer. It lists the pieces a box house needs and previews one at a time;
 // Generate keeps the piece on screen. The whole house in one Generate is phase 4's pipeline.
 
-import { DEFAULT_HOUSE, LIMITS, clampHouse, housePieces, pieceLabel, pieceParams, pieceText, pieceTotal } from './pieces.js'
+import {
+  DEFAULT_HOUSE,
+  LIMITS,
+  SCALES,
+  clampHouse,
+  currentScale,
+  housePieces,
+  pieceLabel,
+  pieceParams,
+  pieceText,
+  pieceTotal,
+} from './pieces.js'
 
 const DRIVEN = new Set(['piece', 'course', 'width_units', 'depth_units'])
 const HOUSE_LABELS = {
@@ -28,6 +39,8 @@ const CSS = `
 .pieces li { display: flex; align-items: center; justify-content: space-between; gap: 8px; padding: 4px 12px; border-top: 1px solid var(--sb-line); }
 /* #1739 — fields and buttons that look like them, 32 px tall (44 px for a finger): the base sheet's. */
 .form input { width: 5.5em; }
+/* The scale presets: two buttons that fill the Grid, door, window and stairs sizes. */
+.scales { display: flex; flex-wrap: wrap; gap: 8px; }
 .pieces button { flex: none; min-width: 5.5em; }
 .pieces li:has(button[aria-pressed='true']) { background: var(--sb-surface-2); }
 /* #362, #1737 — a phone has no room for the form beside the preview: one column the box
@@ -64,6 +77,17 @@ export async function mount(root, host) {
     numbers[key] = input
     form.append(element('label', {}, HOUSE_LABELS[key], input))
   }
+
+  // The scale presets: one press sets every size of a 1:6 or a 1:12 house (the
+  // host's widgets below still show and change each value).
+  const initial = Object.fromEntries((schema.parameters ?? []).map((param) => [param.name, param.initial]))
+  const scaleButtons = SCALES.map((scale) => {
+    const button = element('button', { type: 'button', textContent: scale.label })
+    button.dataset.scale = scale.id
+    button.addEventListener('click', () => host.inputs.set({ params: scale.params }))
+    return button
+  })
+  form.append(element('p', { className: 'sb-label', textContent: 'Scale' }), element('div', { className: 'scales' }, ...scaleButtons))
 
   // Every other parameter is the host's own widget, the Grid sizes included (one value
   // for every piece of a house); the piece, its course and its size in modules are the
@@ -115,6 +139,8 @@ export async function mount(root, host) {
   function draw(inputs) {
     const house = clampHouse(inputs.house ?? DEFAULT_HOUSE)
     for (const [key, input] of Object.entries(numbers)) input.value = String(house[key])
+    const scale = currentScale(inputs.params, initial)
+    for (const button of scaleButtons) button.setAttribute('aria-pressed', String(scale?.id === button.dataset.scale))
     const pieces = housePieces(house)
     total.textContent = `${pieceTotal(pieces)} pieces; Generate keeps the one shown.`
     const wanted = new Set(pieces.map((entry) => entry.id))

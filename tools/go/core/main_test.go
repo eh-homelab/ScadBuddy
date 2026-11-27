@@ -46,7 +46,7 @@ func newAPI(t *testing.T, areas string) *api {
 		w.Header().Set("X-From", "python")
 		w.WriteHeader(http.StatusTeapot)
 	})
-	router, err := newRouter(pool, next, nil, areas, "", callerPackages)
+	router, err := newRouter(pool, next, nil, areas, "", callerPackages, nil, nil, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -482,7 +482,7 @@ func TestWhatIsNotListedGoesToPython(t *testing.T) {
 			t.Errorf("%s %s has the CRUD header", c.method, c.path)
 		}
 	}
-	if _, err := newRouter(a.pool, nil, nil, "session-evnets", "", callerPackages); err == nil {
+	if _, err := newRouter(a.pool, nil, nil, "session-evnets", "", callerPackages, nil, nil, nil); err == nil {
 		t.Error("an unknown area was taken")
 	}
 }
@@ -490,14 +490,14 @@ func TestWhatIsNotListedGoesToPython(t *testing.T) {
 func TestASealedAreaNeedsTheKEKAndTheOthersDoNot(t *testing.T) {
 	pool := testdb.New(t)
 	for _, area := range []string{"credentials", "credentials:read", "payload-keys", "keys", "notify",
-		"notify:read", "transcripts", "transcripts:read"} {
-		_, err := newRouter(pool, nil, nil, area, "", callerPackages)
+		"notify:read", "transcripts", "transcripts:read", "blobs"} {
+		_, err := newRouter(pool, nil, nil, area, "", callerPackages, nil, nil, nil)
 		if err == nil || !strings.Contains(err.Error(), "SCADBUDDY_SECRET_KEY_FILE") {
 			t.Errorf("%s: %v", area, err)
 		}
 	}
 	every := "settings, access, plugin-sessions, mcp-relay, session-events, session-turns:read"
-	if _, err := newRouter(pool, nil, nil, every, "", callerPackages); err != nil {
+	if _, err := newRouter(pool, nil, nil, every, "", callerPackages, nil, nil, nil); err != nil {
 		t.Fatal(err)
 	}
 	key := filepath.Join(t.TempDir(), "kek")
@@ -510,7 +510,7 @@ func TestASealedAreaNeedsTheKEKAndTheOthersDoNot(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := newRouter(pool, nil, keys, every+", credentials, payload-keys, keys, notify, transcripts", "", callerPackages); err != nil {
+	if _, err := newRouter(pool, nil, keys, every+", credentials, payload-keys, keys, notify, transcripts, blobs", "", callerPackages, nil, nil, nil); err != nil {
 		t.Fatal(err)
 	}
 }
@@ -655,7 +655,7 @@ func TestTheCRUDPortMayNotBeTheMainAddress(t *testing.T) {
 		"SCADBUDDY_CORE_CRUD_LISTEN":   "127.0.0.1:0",
 		"SCADBUDDY_CORE_CRUD_UPSTREAM": "http://127.0.0.1:2",
 	}
-	err := run(context.Background(), func(k string) string { return env[k] }, nil)
+	err := run(context.Background(), func(k string) (string, bool) { v, ok := env[k]; return v, ok }, nil)
 	if err == nil || !strings.Contains(err.Error(), "needs its own") {
 		t.Fatalf("got %v", err)
 	}
@@ -693,7 +693,7 @@ func TestTheCRUDPortNeedsPythonsCRUDListener(t *testing.T) {
 		"SCADBUDDY_CORE_LISTEN":      "127.0.0.1:0",
 		"SCADBUDDY_CORE_CRUD_LISTEN": "127.0.0.1:1",
 	}
-	err := run(context.Background(), func(k string) string { return env[k] }, nil)
+	err := run(context.Background(), func(k string) (string, bool) { v, ok := env[k]; return v, ok }, nil)
 	if err == nil || !strings.Contains(err.Error(), "SCADBUDDY_CORE_CRUD_UPSTREAM") {
 		t.Fatalf("got %v", err)
 	}
@@ -720,7 +720,7 @@ func TestTheInventoryAreaAnswersOnlyItsCaller(t *testing.T) {
 func TestAnAreaInTwoPackagesStopsTheStart(t *testing.T) {
 	pool := testdb.New(t)
 	twice := map[string]areaRoutes{"inventory": inventory.Areas, "other": inventory.Areas}
-	if _, err := newRouter(pool, nil, nil, "", "", twice); err == nil || !strings.Contains(err.Error(), "two packages") {
+	if _, err := newRouter(pool, nil, nil, "", "", twice, nil, nil, nil); err == nil || !strings.Contains(err.Error(), "two packages") {
 		t.Fatalf("got %v", err)
 	}
 }
@@ -732,7 +732,7 @@ func TestInventoryNeedsTemporal(t *testing.T) {
 		"SCADBUDDY_CORE_LISTEN":   "127.0.0.1:0",
 		"SCADBUDDY_CORE_AREAS":    "session-events, inventory",
 	}
-	err := run(context.Background(), func(k string) string { return env[k] }, nil)
+	err := run(context.Background(), func(k string) (string, bool) { v, ok := env[k]; return v, ok }, nil)
 	if err == nil || !strings.Contains(err.Error(), "SCADBUDDY_TEMPORAL_ADDRESS") {
 		t.Fatalf("got %v", err)
 	}
@@ -756,7 +756,7 @@ func TestTheInventoryWorkerStartsAndStopsWithTheServers(t *testing.T) {
 	setWorkerRetry(t, 10*time.Millisecond)
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan error, 1)
-	go func() { done <- run(ctx, func(k string) string { return env[k] }, nil) }()
+	go func() { done <- run(ctx, func(k string) (string, bool) { v, ok := env[k]; return v, ok }, nil) }()
 	// Temporal out of reach does not stop core: its routes answer.
 	deadline := time.Now().Add(10 * time.Second)
 	for {
@@ -779,5 +779,18 @@ func TestTheInventoryWorkerStartsAndStopsWithTheServers(t *testing.T) {
 		}
 	case <-time.After(30 * time.Second):
 		t.Fatal("run did not stop")
+	}
+}
+
+// A setting Python refuses at its start stops core's start too.
+func TestABadSettingStopsTheStart(t *testing.T) {
+	for name, value := range map[string]string{
+		"SCADBUDDY_AUTH_MODE": "", "SCADBUDDY_PRICING_USD_RATE": "-1", "SCADBUDDY_ORDERS_CURRENCY": "XAU",
+	} {
+		env := map[string]string{name: value}
+		err := run(context.Background(), func(k string) (string, bool) { v, ok := env[k]; return v, ok }, nil)
+		if err == nil || !strings.Contains(err.Error(), name) {
+			t.Errorf("%s=%q: %v", name, value, err)
+		}
 	}
 }

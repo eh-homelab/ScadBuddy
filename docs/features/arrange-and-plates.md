@@ -27,7 +27,7 @@ keep-out) see the repo skill `.claude/skills/h2c-plate-layout`.
 ## Data
 
 - Outputs (each one's record is its `outputs` row, #7255, which also lists them, #7257;
-  `output_index` is still written until #7257's second release), blob keys `output-<job>-<i>`; library pieces read through
+  its bytes are blobs of kind `output`, #7256), blob keys `output-<job>-<i>`; library pieces read through
   `backend/scadbuddy/render/objects3mf.py`.
 
 ## Tests

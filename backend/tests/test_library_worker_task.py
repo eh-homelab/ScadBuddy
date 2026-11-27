@@ -26,6 +26,8 @@ from scadbuddy.workflows.housekeeping import (
     GIT_SWEEP,
     LIBRARY_SWEEP,
     LOST_SLICES_SWEEP,
+    OUTPUT_BYTES_SWEEP,
+    OUTPUT_COPY_SWEEP,
     PREVIEWS_SWEEP,
     PRINTER_WATCHES_SWEEP,
     PRUNE_SWEEPS,
@@ -280,8 +282,13 @@ async def _a_client(settings: object) -> AsyncIterator[object]:
     yield object()
 
 
+#: #7257: the copies are retired; their activities do nothing, so they cannot fail
+#: (`tests/test_output_cut_over.py` `test_copy_sweeps_do_nothing`).
+RETIRED_SWEEPS = (OUTPUT_COPY_SWEEP, OUTPUT_BYTES_SWEEP)
+
+
 @pytest.mark.parametrize("staging_error", [OSError("read-only"), ValueError("a bad name")])
-@pytest.mark.parametrize("sweep", SWEEPS)
+@pytest.mark.parametrize("sweep", [sweep for sweep in SWEEPS if sweep not in RETIRED_SWEEPS])
 async def test_a_failing_sweep_fails_its_activity(
     sweep: str,
     staging_error: Exception,
@@ -315,10 +322,6 @@ async def test_a_failing_sweep_fails_its_activity(
     monkeypatch.setattr(main, "_sweep_storefront", _broken(OSError("the database is gone")))
     # #6950: the entities whose owner is gone.
     monkeypatch.setattr(main, "sweep_orphan_entities", _broken(OSError("the database is gone")))
-    # #7255: the copy of the saved outputs' files to rows.
-    monkeypatch.setattr(main, "copy_outputs", _broken(OSError("the volume is gone")))
-    # #7256: the copy of the saved outputs' bytes to the blob store.
-    monkeypatch.setattr(main, "copy_output_bytes", _broken_async)
     # #7234: the order attempts' missed media, one read and a start per attempt.
     monkeypatch.setattr(main, "sweep_media", _broken_async)
     # #7665: the published listings with no price, one read and a start of each.
@@ -578,6 +581,8 @@ async def test_the_prune_sweeps_heartbeat_while_they_run(
             delete_spent_delegations=lambda: time.sleep(0.1),
             tokens=SimpleNamespace(delete_expired=lambda: time.sleep(0.1)),
             kek=None,  # no service credentials to rotate without the KEK
+            # #7985: no bootstrap proof directory, so no machine's credentials to revoke.
+            verifiers={},
             # #5700: the payment pages whose close failed, a provider call per page.
             # #4959: the pending captures, a provider read or two per request.
             service=SimpleNamespace(retry_closes=slow_closes, settle_captures=slow_closes),

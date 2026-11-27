@@ -25,8 +25,17 @@ type Reply struct {
 	Body      []byte
 }
 
-// writeAnswer writes a handler's answer: a *Reply as it says, else status with the value.
+// Stream is an answer the route writes itself, for as long as it lasts: a server-sent event
+// stream. The CRUD headers are already set.
+type Stream func(w http.ResponseWriter)
+
+// writeAnswer writes a handler's answer: a *Reply as it says, a Stream by itself, else status
+// with the value.
 func writeAnswer(w http.ResponseWriter, status int, answer any) error {
+	if stream, ok := answer.(Stream); ok {
+		stream(w)
+		return nil
+	}
 	reply, ok := answer.(*Reply)
 	if !ok {
 		return httpx.WriteJSONStatus(w, status, answer)

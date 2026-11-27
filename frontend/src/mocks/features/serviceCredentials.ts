@@ -18,6 +18,7 @@ const SCOPES: Record<ServiceCaller, string[]> = {
   'camera-relay': ['crud.camera-relay'],
   fleet: ['crud.fleet'],
   inventory: ['crud.inventory'],
+  'fleet-rotator': ['crud.fleet-rotator'],
 }
 
 /** The callers that read a sealed credential; the rest exchange a proof (#5298). */
@@ -36,6 +37,7 @@ function credential(caller: ServiceCaller): ServiceCredentialView {
     proof: SEALED.includes(caller) ? 'legacy' : 'k8s',
     pod_name: SEALED.includes(caller) ? null : `scadbuddy-${caller}-0`,
     pod_uid: SEALED.includes(caller) ? null : `0000000${counter}-0000-4000-8000-000000000000`,
+    machine: null,
     live: true,
   }
 }

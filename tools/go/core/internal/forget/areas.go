@@ -8,8 +8,8 @@ import (
 )
 
 // Areas are this package's areas and their routes.
-func Areas(pool *pgxpool.Pool, _ *seal.Keys) map[string][]crud.Route {
-	drop := &Forget{Pool: pool}
+func Areas(pool *pgxpool.Pool, keys *seal.Keys) map[string][]crud.Route {
+	drop := &Forget{Pool: pool, Keys: keys}
 	return map[string][]crud.Route{
 		"forget:read": drop.Reads(),
 		"forget":      append(drop.Reads(), drop.Writes()...),

@@ -33,12 +33,13 @@ from scadbuddy.library.outputs import OutputMeta, OutputStore
 from scadbuddy.render.bambu3mf import write_bambu_3mf
 from scadbuddy.render.schema import CustomizerSchema, Parameter, ParamValue
 from scadbuddy.render.split import ColourPart
-from tests.api.conftest import files_only, wait_for_job
+from tests.api.conftest import wait_for_job
 from tests.api.test_events import Recorded
 from tests.api.test_send import BASE, configure, make_output
 from tests.bambuddy.conftest import recording
 from tests.support.operations import press
 from tests.support.printers import linked_printer
+from tests.support.saved_outputs import rewrite_model
 from tests.test_bambu3mf import add_plate
 
 API = f"{BASE}/api/v1"
@@ -445,11 +446,13 @@ def test_an_all_plates_print_is_judged_on_every_plates_filament(
     plates (#3652) are judged on just theirs: plates 1 and 3's 1200 g, never plate 2's."""
     configure(client)
     routes = bambuddy_routes()
-    files_only(client)
     output_id = make_output(client, model)
-    [path] = paths.outputs.glob(f"*/{output_id}/model.3mf")
-    add_plate(path, 2)
-    add_plate(path, 3)
+
+    def three_plates(path: Path) -> None:
+        add_plate(path, 2)
+        add_plate(path, 3)
+
+    rewrite_model(client, output_id, three_plates)
     uploads = getattr(app.state, STATE_ATTR).uploads
     asyncio.run(uploads.record(output_id, LibraryCopy(id=41, folder_id=2, target_key="H2C")))
     asked: list[int] = []
@@ -515,11 +518,13 @@ def test_an_all_plates_print_whose_plates_cannot_be_listed_says_so(
     every other unreadable input does, rather than failing the whole run."""
     configure(client)
     bambuddy_routes()
-    files_only(client)
     output_id = make_output(client, model)
-    [path] = paths.outputs.glob(f"*/{output_id}/model.3mf")
-    add_plate(path, 2)
-    _strip_plater_id(path, 2)
+
+    def two_plates(path: Path) -> None:
+        add_plate(path, 2)
+        _strip_plater_id(path, 2)
+
+    rewrite_model(client, output_id, two_plates)
     uploads = getattr(app.state, STATE_ATTR).uploads
     asyncio.run(uploads.record(output_id, LibraryCopy(id=41, folder_id=2, target_key="H2C")))
     requirements = respx.get(f"{API}/library/files/41/filament-requirements").mock(

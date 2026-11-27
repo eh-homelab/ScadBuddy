@@ -22,13 +22,19 @@ from scadbuddy.bambuddy.print_links import ScadBuddyJob
 FARM = "/api/v1/farm"
 
 
-def scadbuddy_picture(job: ScadBuddyJob) -> str | None:
+def scadbuddy_picture(job: ScadBuddyJob, plate: int | None = None) -> str | None:
     """ScadBuddy's own picture of its job: the output's thumbnail, else the library
-    file's, from the library that serves (`api/library_print.py`)."""
+    file's, from the library that serves (`api/library_print.py`). For plate 2 or later
+    it is that plate's image, and the thumbnail when the plate has none (#7939)."""
+    picture = (
+        "thumbnail"
+        if plate is None or plate < 2
+        else f"plates/{plate}/thumbnail?cover_if_missing=true"
+    )
     if job.output_id is not None:
-        return f"/api/v1/outputs/{quote(job.output_id, safe='')}/thumbnail"
+        return f"/api/v1/outputs/{quote(job.output_id, safe='')}/{picture}"
     if job.library_file_id is not None:
-        return f"/api/v1/print/library/{job.library_file_id}/thumbnail"
+        return f"/api/v1/print/library/{job.library_file_id}/{picture}"
     return None
 
 
@@ -37,7 +43,7 @@ def queue_item_picture(item: QueueItem, job: ScadBuddyJob | None) -> str | None:
     of the item's library file, else of its archive, where Bambuddy has one. An item for
     plate 2 or later shows that plate's image, not the cover, which is plate 1's (#7458);
     the farm serves the cover when Bambuddy has no image of the plate."""
-    ours = scadbuddy_picture(job) if job is not None else None
+    ours = scadbuddy_picture(job, item.plate_id) if job is not None else None
     if ours is not None:
         return ours
     picture = (

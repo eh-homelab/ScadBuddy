@@ -19,6 +19,7 @@ CrudCaller = Literal[
     "camera-relay",
     "fleet",
     "inventory",
+    "fleet-rotator",
 ]
 CRUD_HEADER = "X-ScadBuddy-Crud"
 CRUD_HEADERS = {CRUD_HEADER: "1", "Cache-Control": "no-store"}

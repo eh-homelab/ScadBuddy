@@ -81,6 +81,11 @@ same way, `vite.config.ts`).
   only the back office fetches the stored one (`lib/loadDisplayUnit.ts`). The customer's
   form is `components/ListingView.tsx`, which the back office's Storefront page mounts as
   its live preview (the back office may import from `src/storefront`, never the reverse).
+  Its colour parts are one block, `components/ColourParts.tsx` (#8127): from `colourParts.ts`
+  `GROUP_FROM` parts in two or more groups it shows the schema's groups, the first open, a
+  closed one as a strip of its colours, and an "All N parts" row; each part is a compact
+  `ColourPicker` row whose grid shows the colours the design uses first. The mock `l5`
+  (`DOLLHOUSE`) has 31 parts in five groups.
   `vite dev` and
   `vite preview` serve the page under `/store` (`storefrontPreview`); its mocks are
   `src/mocks/features/storefrontPublic.ts`, its e2e `e2e/storefront.spec.ts` (390 px wide).
@@ -163,7 +168,8 @@ same way, `vite.config.ts`).
   `/storefront/listings/new?sell=…`); `?listing=<id>` redirects to a saved one's editor. The smart defaults are `listingDraft.ts` `defaultsFor` (free text and
   every colour offered, from the priced filaments of the design's material, the rest locked;
   a support setting is never offered, `isSupport`; an offered colour whose template default
-  no colour on offer has starts at one that is, `fittedDefault`, #6144), pinned by
+  no colour on offer has starts at the closest one on offer, `fittedDefault`, #6144, #8126, by
+  `storefront/closestColour.ts`, whose agent twin is `agent/src/tools/closestColour.ts`), pinned by
   `test-fixtures/storefront/sell-draft-vectors.json`, which the agent's copy
   (`agent/src/tools/storefrontDraft.ts`) is tested against too (its case with `file` is a new
   file listing's body, #6710: `fileTitle`, `fileColours` over `declaredSlots`, `platePictures`; its
@@ -282,7 +288,7 @@ same way, `vite.config.ts`).
   2026-11-14 §10). `/filament` opens Spools; the tabs are Spools, Types, Tags, Suppliers, Invoices, Locations,
   Catalog, Metrics, Shopping list and Ledger.
   Codes and labels (#6955): `/x/:code` (`pages/CodePage.tsx`) asks `GET /api/v1/codes/{code}` and opens
-  the spool or place; `filament/locations/:id` (`pages/filament/LocationPage.tsx`) is a place's page, with its files and links (entity `location:<id>`, #6950). The
+  the spool, place or item kind (`codeTarget`, `inventoryPaths.kind`); `filament/locations/:id` (`pages/filament/LocationPage.tsx`) is a place's page, with its files and links (entity `location:<id>`, #6950). The
   Locations tab's name opens that page, its count badge opens the spools filter, and "Print printer
   labels" opens the labels page with `?printers=`. The labels page also takes `?locations=<id>,<id>`
   (`LocationLabel`; a place that cannot be read is named and the rest are drawn;
@@ -412,8 +418,10 @@ same way, `vite.config.ts`).
   (`lib/flows.ts` `taskTopic`) and shows the newer of its read and the page's. Both answer
   forms are `USER_ONLY`. A question the flow asked of people only says so (`pendingParts.tsx`
   `PeopleOnly`); the run's steps and the task card name an assistant that answered and link its
-  session (`AnsweredBy`, `lib/flows.ts` `answererLabel`). Settings, Assistant, "Flows'
-  questions" (`pages/settings/sections/flow-answerers.tsx`) is `flow_answerers` (#7471).
+  session (`AnsweredBy`, `lib/flows.ts` `answererLabel`), and say when the run's grant let it
+  answer. Settings, Assistant, "Flows' questions" (`pages/settings/sections/flow-answerers.tsx`)
+  is `flow_answerers` (#7471); it and a run grant's `answers` in `GrantEditor` share
+  `components/flows/AnswerersPicker.tsx`.
   `SchemaForm` draws a form from a schema, for an answer (`answer`) and
   for Start run; `inputsForm.tsx` `useInputs` holds the fields, `lib/flowInputs.ts` the parse:
   an answer leaves out a blank field, Start run sends a cleared text. Mocks:

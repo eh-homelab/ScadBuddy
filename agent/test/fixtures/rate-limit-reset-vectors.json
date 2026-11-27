@@ -1,5 +1,5 @@
 {
-  "_comment": "The reset a rate limit's text names: agent/src/harness/credentialErrors.ts rateLimitResetFromText and agent-durable credentials.py rate_limit_reset are both held to these (#4121 review). `at` null means none, so the default cooldown. `why` is the case's provenance, read by neither suite.",
+  "_comment": "The reset a rate limit's text names: agent/src/harness/credentialErrors.ts rateLimitResetFromText, agent-durable credentials.py rate_limit_reset and tools/go/claudecreds ResetFromText are all held to these (#4121 review, #7986). The zone in the parentheses is UTC or an IANA zone such as America/New_York; today, tomorrow and a date are that zone's, with its DST rules. `at` null means none, so the default cooldown. `why` is the case's provenance, read by no suite.",
   "cases": [
     {
       "text": "You've hit your weekly limit · resets 1pm (UTC)",
@@ -162,6 +162,84 @@
       "now": "2026-10-17T22:16:05Z",
       "at": null,
       "why": "no reset named, or one that is not a time or date: the default cooldown"
+    },
+    {
+      "text": "You've hit your session limit · resets 1:30am (America/New_York)",
+      "now": "2026-08-01T04:16:10.610Z",
+      "at": "2026-08-01T05:30:00Z",
+      "why": "#7986: measured 2026-11-26 in this machine's ~/.claude/projects transcripts (Claude Code rate_limit entries); `now` is the entry's timestamp; the entry has no resetsAt, so `at` is 1:30am EDT (UTC-4)"
+    },
+    {
+      "text": "You've hit your weekly limit · resets Nov 29, 8am (America/New_York)",
+      "now": "2026-11-25T13:14:01.860Z",
+      "at": "2026-11-29T13:00:00Z",
+      "why": "#7986: measured 2026-11-26 in this machine's ~/.claude/projects transcripts (Claude Code rate_limit entries); `now` is the entry's timestamp; `at` is the entry's apiErrorParams.rate_limit_info.resetsAt (8am EST)"
+    },
+    {
+      "text": "You've hit your 5-hour limit · resets 8pm (America/New_York)",
+      "now": "2026-11-21T23:41:15.577Z",
+      "at": "2026-11-22T01:00:00Z",
+      "why": "#7986: measured 2026-11-26 in this machine's ~/.claude/projects transcripts (Claude Code rate_limit entries); `now` is the entry's timestamp; `at` is the entry's resetsAt: 8pm today in New York is tomorrow in UTC"
+    },
+    {
+      "text": "You've hit your session limit · resets 12:10am (America/New_York)",
+      "now": "2026-10-07T03:56:14.968Z",
+      "at": "2026-10-07T04:10:00Z",
+      "why": "#7986: measured 2026-11-26 in this machine's ~/.claude/projects transcripts (Claude Code rate_limit entries); `now` is the entry's timestamp; `at` is the entry's resetsAt: at 11:56pm in New York, 12:10am is New York's tomorrow, though the UTC date is already Oct 7"
+    },
+    {
+      "text": "resets 8:30pm (America/New_York)",
+      "now": "2026-11-22T01:35:00Z",
+      "at": null,
+      "why": "#7986: RESET_GRACE applies in a zone too: 8:30pm EST passed 5 minutes ago"
+    },
+    {
+      "text": "resets 9am (America/New_York)",
+      "now": "2026-10-31T14:00:00Z",
+      "at": "2026-11-01T14:00:00Z",
+      "why": "#7986: DST ends 2026-11-01 2am in New York, so tomorrow's 9am is EST (UTC-5), 25 hours after today's 9am EDT, not 24"
+    },
+    {
+      "text": "resets Nov 2, 8am (America/New_York)",
+      "now": "2026-10-30T12:00:00Z",
+      "at": "2026-11-02T13:00:00Z",
+      "why": "#7986: a date after the end of DST takes that date's offset (EST, UTC-5), not now's (EDT)"
+    },
+    {
+      "text": "resets 1:30am (America/New_York)",
+      "now": "2026-11-01T04:30:00Z",
+      "at": "2026-11-01T05:30:00Z",
+      "why": "#7986: 1:30am occurs twice on 2026-11-01 in New York; the rule takes the earlier (EDT), as Python's fold=0 does"
+    },
+    {
+      "text": "resets 2:30am (America/New_York)",
+      "now": "2026-03-08T06:00:00Z",
+      "at": "2026-03-08T07:30:00Z",
+      "why": "#7986: 2:30am does not occur on 2026-03-08 in New York (DST starts at 2am); the rule reads it with the offset before the gap (EST), so it is 3:30am EDT, as Python's fold=0 does"
+    },
+    {
+      "text": "resets 1pm (Asia/Kolkata)",
+      "now": "2026-10-17T22:16:05Z",
+      "at": "2026-10-18T07:30:00Z",
+      "why": "#8023: an IANA name that ICU answers as another ID (Asia/Calcutta) is still read, as Go and Python read it"
+    },
+    {
+      "text": "resets 1pm (asia/kolkata)",
+      "now": "2026-10-17T22:16:05Z",
+      "at": null,
+      "why": "#8023: an IANA name in the wrong case is not read, even where ICU answers another ID for it"
+    },
+    {
+      "text": "resets 1pm (america/new_york)",
+      "now": "2026-10-17T22:16:05Z",
+      "at": null,
+      "why": "#8023: an IANA name in the wrong case is not read, as Go and Python read names only as written"
+    },
+    {
+      "text": "resets 1pm (Mars/Olympus_Mons)",
+      "now": "2026-10-17T22:16:05Z",
+      "at": null,
+      "why": "#7986: a zone that no zone database knows: the default cooldown"
     }
   ]
 }

@@ -46,6 +46,49 @@ describe('GrantPanel', () => {
     expect(within(panel).queryByRole('button', { name: 'Approve grant…' })).not.toBeInTheDocument()
   })
 
+  it("says who besides the person its grant lets answer the run's questions (#7471)", async () => {
+    const grant = await grantOf('run-done')
+    renderPage(
+      <GrantPanel
+        runId="run-done"
+        grant={{ ...grant, spec: { ...grant.spec, answers: { who: ['sessions', 'token:70ce0000-0000-4000-8000-00000000000c'] } } }}
+        onChange={vi.fn()}
+      />,
+    )
+    expect(
+      screen.getByText(/Besides you, any of your assistant sessions and MCP token 70ce0000 may answer its questions/),
+    ).toBeInTheDocument()
+  })
+
+  it.each([
+    ['requested', { status: 'requested', in_force: false }, /^If you approve it, besides you, any of your assistant sessions may answer/],
+    ['in force', { status: 'approved', in_force: true }, /^Besides you, any of your assistant sessions may answer/],
+    ['expired', { status: 'approved', in_force: false }, /^Expired: any of your assistant sessions may no longer answer/],
+    [
+      'revoked',
+      { status: 'approved', in_force: false, revoked_at: '2026-11-27T00:00:00Z', revoked_by: 'browser' },
+      /^Revoked: any of your assistant sessions may no longer answer/,
+    ],
+  ] as const)('says who may answer only as a %s grant allows it (#8045)', async (_, state, text) => {
+    const grant = await grantOf('run-done')
+    renderPage(
+      <GrantPanel runId="run-done" grant={{ ...grant, ...state, spec: { ...grant.spec, answers: { who: ['sessions'] } } }} onChange={vi.fn()} />,
+    )
+    expect(screen.getByText(text)).toBeInTheDocument()
+  })
+
+  it('says nothing of answerers for a declined grant (#8045)', async () => {
+    const grant = await grantOf('run-done')
+    renderPage(
+      <GrantPanel
+        runId="run-done"
+        grant={{ ...grant, status: 'declined', in_force: false, spec: { ...grant.spec, answers: { who: ['sessions'] } } }}
+        onChange={vi.fn()}
+      />,
+    )
+    expect(screen.queryByText(/answer its questions/)).not.toBeInTheDocument()
+  })
+
   it('revokes only after a confirmation', async () => {
     const { user, onChange } = await render('run-done')
     await user.click(screen.getByRole('button', { name: 'Revoke grant' }))

@@ -48,6 +48,8 @@ function fresh() {
     refuseNextUpload: null as string | null,
     /** Each entity's properties, by key. */
     properties: new Map<string, EntityProperty[]>(),
+    /** Each entity's property changes, newest first. */
+    history: new Map<string, PropertyChange[]>(),
     /** Each PATCH's `set`, as the route received it. */
     /** Each entity's property changes, newest first. */
     history: new Map<string, PropertyChange[]>(),

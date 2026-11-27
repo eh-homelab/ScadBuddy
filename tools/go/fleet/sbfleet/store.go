@@ -30,7 +30,8 @@ const requestTimeout = 30 * time.Second
 // share their first 8 hex characters (core's 409 handle-taken).
 var ErrHandleTaken = errors.New("another session has this session's handle")
 
-// reasons map core's problem reasons to the errors fleetchat knows.
+// reasons map core's problem reasons to the errors fleetchat knows. Reason virtual-sender
+// is fleetchat.ErrVirtualSender too, as a VirtualSenderError with core's detail (problemOf).
 var reasons = map[string]error{
 	"unknown-agent":   fleetchat.ErrUnknownAgent,
 	"not-member":      fleetchat.ErrNotMember,
@@ -38,6 +39,7 @@ var reasons = map[string]error{
 	"handle-taken":    ErrHandleTaken,
 	"seq-ahead":       fleetchat.ErrBadSeq,
 	"text-too-long":   fleetchat.ErrTooLong,
+	"unknown-session": ErrUnknownSession,
 }
 
 type client struct {
@@ -156,6 +158,10 @@ func problemOf(res *http.Response) error {
 		Reason string `json:"reason"`
 	}
 	_ = json.NewDecoder(io.LimitReader(res.Body, 64<<10)).Decode(&p)
+	// A virtual sender's refusal is its reject message alone: fleet_send shows it as it is.
+	if p.Reason == "virtual-sender" {
+		return fleetchat.VirtualSenderError(p.Detail)
+	}
 	if known, ok := reasons[p.Reason]; ok {
 		return fmt.Errorf("%w: %s", known, p.Detail)
 	}

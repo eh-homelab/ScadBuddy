@@ -3,10 +3,12 @@ Task 9; phase 3, the edge).
 
 ffmpeg publishes a test stream to a third MediaMTX that stands in for the printer. The relay
 pulls it over plain RTSP (a test-only `Relay` ``source_for``), and each recorder's MediaMTX
-reads the relay and cuts 4 s fMP4 segments. The edge's MediaMTX reads the relay on demand
-and serves LL-HLS. The CRUD routes are a fake over the real
+reads the relay and cuts fMP4 segments of at least 4 s. The edge's MediaMTX reads the relay on
+demand and serves LL-HLS. The CRUD routes are a fake over the real
 `CameraStore` on the test Postgres; the bucket is moto. Every port is free and every process
-has its own, so the test runs anywhere. Every wait is bounded."""
+has its own, so the test runs anywhere: a MediaMTX that cannot bind its ports (another
+process took one after `free_port` probed it) starts again on new ones, and the hook servers
+bind a port the kernel picks. Every wait is bounded."""
 
 from __future__ import annotations
 
@@ -39,9 +41,7 @@ from scadbuddy.core.secrets import Kek
 from scadbuddy.crud.client import CrudClient
 from scadbuddy.printers.store import PrinterStore
 from tests.camera.conftest import Media, Spawn
-from tests.camera.test_follow import Token
-from tests.camera.test_store import make_printer
-from tests.camera.test_uploads import settings
+from tests.camera.support import Token, make_printer, settings
 from tests.conftest import PgPool
 from tests.support.store import moto_s3
 
@@ -56,6 +56,8 @@ EDGE_USER, EDGE_PASS = "edge-reader", "edge-read-pass"
 BEFORE, AFTER = 10, 10
 #: The longest hole allowed between one indexed segment's end and the next one's start.
 HOLE = timedelta(seconds=1)
+#: Starts of one MediaMTX before the test gives up on free ports.
+PORT_TRIES = 3
 
 
 @pytest.fixture
@@ -67,6 +69,10 @@ def free_port() -> int:
     with socket.socket() as probe:
         probe.bind(("127.0.0.1", 0))
         return int(probe.getsockname()[1])
+
+
+def bound_port(server: asyncio.Server) -> int:
+    return int(server.sockets[0].getsockname()[1])
 
 
 async def listening(port: int) -> bool:
@@ -151,24 +157,46 @@ async def until(what: str, check: Callable[[], Awaitable[bool]], seconds: float)
         raise AssertionError(f"waited {seconds} s for {what}") from None
 
 
+class _ExitedError(Exception):
+    pass
+
+
 async def start_mediamtx(
-    spawn: Spawn, media: Media, name: str, config: Path, env: dict[str, str]
-) -> tuple[subprocess.Popen[bytes], MediaMtx]:
+    spawn: Spawn,
+    logs: Path,
+    media: Media,
+    name: str,
+    config: Path,
+    ports: tuple[str, ...],
+    env: dict[str, str] | None = None,
+) -> tuple[subprocess.Popen[bytes], MediaMtx, dict[str, int]]:
     """Start MediaMTX with ``config``, the keys in ``env`` (``MTX_<KEY>``) overriding it,
-    and wait for its control API."""
-    proc = spawn(name, [str(media.mediamtx), str(config)], env)
-    api = f"http://{env['MTX_APIADDRESS']}"
-    mtx = MediaMtx(api)
+    and each key in ``ports`` (``MTX_APIADDRESS`` among them) set to a free port; wait for
+    its control API. A start that exits (a port was taken meanwhile) is tried again with
+    new ports, at most `PORT_TRIES` times. Returns the ports it bound."""
+    for attempt in range(PORT_TRIES):
+        chosen = {key: free_port() for key in ports}
+        full = {**(env or {}), **{key: f"127.0.0.1:{port}" for key, port in chosen.items()}}
+        proc = spawn(name, [str(media.mediamtx), str(config)], full)
+        mtx = MediaMtx(f"http://{full['MTX_APIADDRESS']}")
 
-    async def up() -> bool:
-        assert proc.poll() is None, f"{name} exited; see {name}.log"
-        with suppress(httpx.HTTPError):
-            await mtx.paths()
-            return True
-        return False
+        async def up(proc: subprocess.Popen[bytes] = proc, mtx: MediaMtx = mtx) -> bool:
+            if proc.poll() is not None:
+                raise _ExitedError
+            with suppress(httpx.HTTPError):
+                await mtx.paths()
+                return True
+            return False
 
-    await until(f"{name}'s control API", up, 20)
-    return proc, mtx
+        try:
+            await until(f"{name}'s control API", up, 20)
+        except _ExitedError:
+            await mtx.aclose()
+            log = logs / f"{name}.log"
+            log.replace(log.with_name(f"{name}.try{attempt}.log"))
+            continue
+        return proc, mtx, chosen
+    raise AssertionError(f"{name} exited {PORT_TRIES} times; see {name}.try*.log")
 
 
 async def publishing(
@@ -176,14 +204,16 @@ async def publishing(
 ) -> tuple[int, subprocess.Popen[bytes]]:
     """The printer: a MediaMTX that takes ffmpeg's test stream on path ``cam``. Its RTSP port
     and the publisher."""
-    printer_rtsp = free_port()
     printer_conf = tmp_path / "printer.yml"
     printer_conf.write_text(
-        "logLevel: info\napi: no\nmetrics: no\n"
-        f"rtspAddress: 127.0.0.1:{printer_rtsp}\nrtspTransports: [tcp]\n"
+        "logLevel: info\napi: yes\nmetrics: no\nrtspTransports: [tcp]\n"
         "rtmp: no\nhls: no\nwebrtc: no\nsrt: no\nmoq: no\npaths:\n  cam: {}\n"
     )
-    spawn("printer", [str(media.mediamtx), str(printer_conf)], {})
+    _, printer_mtx, printer_ports = await start_mediamtx(
+        spawn, tmp_path, media, "printer", printer_conf, ("MTX_APIADDRESS", "MTX_RTSPADDRESS")
+    )
+    await printer_mtx.aclose()
+    printer_rtsp = printer_ports["MTX_RTSPADDRESS"]
     await until("the printer's RTSP port", lambda: listening(printer_rtsp), 20)
     publisher = spawn(
         "publisher",
@@ -227,21 +257,19 @@ class RelayRig:
 
 @asynccontextmanager
 async def relaying(
-    spawn: Spawn, media: Media, crud: StoreCrud, printer_rtsp: int
+    tmp_path: Path, spawn: Spawn, media: Media, crud: StoreCrud, printer_rtsp: int
 ) -> AsyncIterator[RelayRig]:
     """The relay's MediaMTX with the read user, and its controller, which pulls the printer
     over plain RTSP (a test-only ``source_for``)."""
     async with AsyncExitStack() as stack:
-        relay_rtsp, relay_hook, relay_api = free_port(), free_port(), free_port()
-        _, relay_mtx = await start_mediamtx(
+        _, relay_mtx, relay_ports = await start_mediamtx(
             spawn,
+            tmp_path,
             media,
             "relay",
             DEPLOY / "mediamtx-relay.yml",
+            ("MTX_APIADDRESS", "MTX_METRICSADDRESS", "MTX_RTSPADDRESS"),
             {
-                "MTX_APIADDRESS": f"127.0.0.1:{relay_api}",
-                "MTX_METRICSADDRESS": f"127.0.0.1:{free_port()}",
-                "MTX_RTSPADDRESS": f"127.0.0.1:{relay_rtsp}",
                 "MTX_AUTHINTERNALUSERS_0_USER": READ_USER,
                 "MTX_AUTHINTERNALUSERS_0_PASS": READ_PASS,
             },
@@ -253,13 +281,18 @@ async def relaying(
             relay_client,
             relay_mtx,
             source_for=lambda source: f"rtsp://127.0.0.1:{printer_rtsp}/cam",
-            hook_url=f"http://127.0.0.1:{relay_hook}/hook",
         )
         stack.push_async_callback(relay.aclose)
-        relay_hooks = await relay_module.serve_hooks(relay, "127.0.0.1", relay_hook)
+        relay_hooks = await relay_module.serve_hooks(relay, "127.0.0.1", 0)
         stack.callback(relay_hooks.close)
+        # The port the kernel picked, before the first path names it.
+        relay._hook_url = f"http://127.0.0.1:{bound_port(relay_hooks)}/hook"
         await relay.reconcile_all()
-        yield RelayRig(relay_rtsp, f"http://127.0.0.1:{relay_api}", relay)
+        yield RelayRig(
+            relay_ports["MTX_RTSPADDRESS"],
+            f"http://127.0.0.1:{relay_ports['MTX_APIADDRESS']}",
+            relay,
+        )
 
 
 @dataclass
@@ -281,16 +314,13 @@ async def recording(
     relay_rtsp: int,
 ) -> AsyncIterator[RecorderRig]:
     async with AsyncExitStack() as stack:
-        api, hook = free_port(), free_port()
-        proc, mtx = await start_mediamtx(
+        proc, mtx, _ = await start_mediamtx(
             spawn,
+            tmp_path,
             media,
             name,
             DEPLOY / "mediamtx-recorder.yml",
-            {
-                "MTX_APIADDRESS": f"127.0.0.1:{api}",
-                "MTX_METRICSADDRESS": f"127.0.0.1:{free_port()}",
-            },
+            ("MTX_APIADDRESS", "MTX_METRICSADDRESS"),
         )
         stack.push_async_callback(mtx.aclose)
         config = settings(
@@ -316,11 +346,12 @@ async def recording(
             uploader,
             config,
             segments=segments,
-            hook_url=f"http://127.0.0.1:{hook}/segment",
         )
         stack.push_async_callback(recorder.aclose)
-        hooks = await recorder_module.serve_hooks(recorder, "127.0.0.1", hook)
+        hooks = await recorder_module.serve_hooks(recorder, "127.0.0.1", 0)
         stack.callback(hooks.close)
+        # The port the kernel picked, before the first path names it.
+        recorder._hook_url = f"http://127.0.0.1:{bound_port(hooks)}/segment"
         await recorder.reconcile_all()
         yield RecorderRig(name, proc, recorder, hooks)
 
@@ -365,7 +396,7 @@ async def test_two_recorders_no_gap_on_leader_kill(
     async with AsyncExitStack() as stack:
         s3 = stack.enter_context(moto_s3())
         relay_rtsp = (
-            await stack.enter_async_context(relaying(spawn, media, crud, printer_rtsp))
+            await stack.enter_async_context(relaying(tmp_path, spawn, media, crud, printer_rtsp))
         ).rtsp
 
         rigs = {
@@ -452,26 +483,31 @@ async def test_edge_serves_hls_on_demand_from_the_relay(
     printer_rtsp, publisher = await publishing(tmp_path, spawn, media)
 
     async with AsyncExitStack() as stack:
-        relay = await stack.enter_async_context(relaying(spawn, media, crud, printer_rtsp))
+        relay = await stack.enter_async_context(
+            relaying(tmp_path, spawn, media, crud, printer_rtsp)
+        )
         await until(
             "the relay's pull of the printer", lambda: path_ready(relay.api, printer_id), 30
         )
-        hls, whep = free_port(), free_port()
-        _, edge_mtx = await start_mediamtx(
+        _, edge_mtx, edge_ports = await start_mediamtx(
             spawn,
+            tmp_path,
             media,
             "edge",
             DEPLOY / "mediamtx-edge.yml",
+            (
+                "MTX_APIADDRESS",
+                "MTX_METRICSADDRESS",
+                "MTX_HLSADDRESS",
+                "MTX_WEBRTCADDRESS",
+                "MTX_WEBRTCLOCALUDPADDRESS",
+            ),
             {
-                "MTX_APIADDRESS": f"127.0.0.1:{free_port()}",
-                "MTX_METRICSADDRESS": f"127.0.0.1:{free_port()}",
-                "MTX_HLSADDRESS": f"127.0.0.1:{hls}",
-                "MTX_WEBRTCADDRESS": f"127.0.0.1:{whep}",
-                "MTX_WEBRTCLOCALUDPADDRESS": f"127.0.0.1:{free_port()}",
                 "MTX_AUTHINTERNALUSERS_0_USER": EDGE_USER,
                 "MTX_AUTHINTERNALUSERS_0_PASS": EDGE_PASS,
             },
         )
+        hls, whep = edge_ports["MTX_HLSADDRESS"], edge_ports["MTX_WEBRTCADDRESS"]
         stack.push_async_callback(edge_mtx.aclose)
         edge_client = crud.client("camera")
         stack.push_async_callback(edge_client.aclose)

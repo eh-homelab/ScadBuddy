@@ -135,6 +135,14 @@ Anti-goals (a failure even if it works)
   column `one`, as `ONLY` is a reserved word), with its time and the byte run it
   followed. `output_claims` holds the id claims (`output_id`, `slug`, `claimed_at`).
   `output_index` and `output_hold_slugs` stay until phase 3b drops them.
+- As built in phase 3b (#7257, `migrations/20261125T1737Z_outputs_drop_output_index.sql`):
+  the migration first refuses to run while the cut-over mark is missing (unless
+  `outputs` and `output_index` are both empty) or while a row has `bytes_at` NULL. Then it
+  fills `params_text` of the rows a phase 2 pod saved from their `output_index` rows, makes
+  it `NOT NULL DEFAULT ''`, and drops `output_index` and `output_hold_slugs`. `copied_at`,
+  `files_stamp`, `bytes_stamp`, `output_copy_runs` and `output_byte_runs` stayed, unwritten,
+  until `migrations/20261127T0259Z_outputs_drop_copy_state.sql` (#7887, plan D11) dropped
+  them, with `damaged` and `output_cutover`.
 
 ### 4.3 Blobs
 
@@ -179,7 +187,8 @@ The fallback cover of a model becomes a query: the oldest output of the slug wit
    sweep `housekeeping_copy_outputs` (`workflows/housekeeping.py` `OUTPUT_COPY_SWEEP`)
    on the sweeps' Schedule, under an advisory lock (`library/output_copy.py`,
    `main.py` `_copy_outputs_logged`). Until a run finishes, a missing row falls back to
-   the files. This phase removes the glob from the hot path.
+   the files. This phase removes the glob from the hot path. (Phase 3b removed the copy
+   and the fallback; see phase 3.)
 2. **Bytes** (#7256). Creates also put the 3MF, preview, thumbnail and `files/` as blobs. Move
    each path-based reader (downloads, preview, thumbnail, `files/`, `analyze_3mf`,
    `read_provenance`, `stamp`, `plates_of`, `analyzers/gather.py`,
@@ -218,7 +227,8 @@ The fallback cover of a model becomes a query: the oldest output of the slug wit
    refused it on `local` too (no content store, plan Ruling R1); since phase 3a, `local`
    keeps the outputs' blobs in a content store of their own under `data/output-blobs/`,
    with no caps, and the copy runs there (#7257); a store migration to `bambuddy` is refused while
-   any `output` blob exists. `GET /outputs/copy-status` answers its last run as `bytes`,
+   any `output` blob exists (since phase 3b, always). Phase 3b removed this copy and the
+   file reads; see phase 3. `GET /outputs/copy-status` answers its last run as `bytes`,
    with `pending`, the rows whose bytes the files still hold, and the rows' damage from
    every run (`damaged_rows`, `damaged_sample`). A missing file never drops a key the row
    names: it is `damaged`. An outputs folder that is missing or lists no slug folder
@@ -252,13 +262,28 @@ The fallback cover of a model becomes a query: the oldest output of the slug wit
    take a new id and no claim. As with a phase 2 pod's save, their holds are kept only
    while they are younger than the grace. A claim ends with the save's row, a failed
    save's release, or the reaper's prune past `ORPHAN_HOLD_GRACE`, which is so the claim's
-   lease: a save longer than that can lose its claim (phase 3b keeps a live save's claim). A
+   lease: a save longer than that can lose its claim (phase 3b keeps a live save's claim,
+   below). A
    phase 2 pod that saves after the mark takes no table claim; its holds are kept only
    within the grace. A phase 2 pod's row copy after the mark can leave a row with
    `bytes_at` NULL; the runbook in `docs/architecture/data.md` "The cut-over" checks
-   `pending` and names the recovery. Release 3b (not built yet) is to remove the rest,
-   and its migration is to refuse to run without the mark or while a row has `bytes_at`
-   NULL.
+   `pending` and names the recovery.
+
+   As built in release 3b: the row and the blobs are the only record, and no code reads
+   or writes `data/outputs/`. A save stages its files on the spool (`ContentStore.spool`,
+   the pod's disk, plan D8), uploads them, and commits the row as in phase 2; it writes no
+   folder and no `meta.json`. A reader reads the blob the row names; a lost blob is
+   `OutputBytesLostError`, logged at error level and answered 500, never a file read
+   (plan D9). The row copy, the byte copy, the file fallback, `OutputIndex` and its sync,
+   and the reapers' directory scans are gone; the housekeeping run with
+   `OUTPUTS_CUT_OVER_PATCH` schedules neither copy, and their activities stay as no-ops
+   for replay until a follow-up (plan D4). A save that names its id claims it in
+   `output_claims` only, and makes the claim young again while it runs
+   (`claim_refresh_seconds`), so the reaper's prune never takes a live save's claim. The
+   API does not start on the `bambuddy` store, even with no output, and a settings save
+   or a store migration to it is refused (§6.4). The migration refuses to run without the
+   mark or while a row has `bytes_at` NULL (§4.2). `GET /outputs/copy-status` still
+   answers the copies' last runs and `cut_over_at`.
 
 Each phase ships as one or more PRs, each releasable on its own.
 

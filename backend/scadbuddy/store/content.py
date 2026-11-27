@@ -137,6 +137,9 @@ class ContentStore:
         )
 
     def _require_room(self, size: int) -> None:
+        if not (self.max_count or self.max_total_bytes):
+            # No cap to check, so no aggregate over every row of the backend (#8110).
+            return
         usage = self.usage()
         if self.max_count and usage.count + 1 > self.max_count:
             raise StoreFullError(
