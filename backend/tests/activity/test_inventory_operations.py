@@ -13,7 +13,7 @@ import pytest
 from psycopg.types.json import Jsonb
 
 from scadbuddy.activity.component import ActivityComponent, _run
-from scadbuddy.activity.index import ActivityIndex
+from scadbuddy.activity.index import ActivityFilter, ActivityIndex
 from scadbuddy.activity.kinds import discover_kinds
 from scadbuddy.core.events import Event, InventoryOperationEvent
 from scadbuddy.inventory.activity import ACTIVITY_KINDS
@@ -162,6 +162,20 @@ async def test_a_missed_notice_is_repaired(pg_pool: PgPool) -> None:
         "succeeded",
         f"Receive a lot item:{ITEM}",
     )
+
+
+async def test_the_still_working_link_finds_its_row(pg_pool: PgPool) -> None:
+    """`StillWorking` links `/activity?q=<operation id>` (frontend `activityHref`): the
+    Activities filter `q` finds the row by its source id, which the title does not hold."""
+    index = ActivityIndex(pg_pool, events=None)
+    _operation(pg_pool, "browser:p1:linked")
+    _operation(pg_pool, "browser:p1:other")
+    await index.ingest_inventory_operation("browser:p1:linked")
+    await index.ingest_inventory_operation("browser:p1:other")
+
+    rows, _ = await index.list(ActivityFilter(q="browser:p1:linked"))
+
+    assert [row.id for row in rows] == ["inventory_operation:browser:p1:linked"]
 
 
 def test_every_activity_has_a_kind() -> None:

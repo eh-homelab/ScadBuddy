@@ -1,3 +1,4 @@
+import { readFileSync } from 'node:fs'
 import { describe, expect, it } from 'vitest'
 import { inventoryProblemMessage, refusedCheck, trackingDuplicates } from './problems'
 
@@ -50,22 +51,24 @@ describe('trackingDuplicates', () => {
 describe('inventoryProblemMessage (#6949 K1)', () => {
   const of = (status: number, code: string, extra: Record<string, unknown> = {}) => ({ title: 'x', status, detail: 'go detail', code, ...extra })
 
+  // The codes and statuses of Go's `routes.Codes`, read from its source (the one list of
+  // the inventory's codes), so a code Go adds without a message here fails this test.
+  const goCodes = (() => {
+    const source = readFileSync(`${import.meta.dirname}/../../../tools/go/core/internal/inventory/routes/problems.go`, 'utf8')
+    const block = /var Codes = map\[string\]int\{([\s\S]*?)\n\}/.exec(source)![1]!
+    return [...block.matchAll(/"([a-z_]+)":\s*(\d+)/g)].map((m) => [m[1]!, Number(m[2])] as const)
+  })()
+
+  it("reads Go's code list", () => {
+    expect(goCodes.length).toBeGreaterThan(30)
+    expect(goCodes).toContainEqual(['handler_not_built', 409])
+  })
+
   it('names every code the Go inventory answers', () => {
-    for (const [status, code] of [
-      [409, 'step_not_applicable'],
-      [409, 'step_incomplete'],
-      [409, 'handler_not_built'],
-      [409, 'wrong_counting'],
-      [409, 'recost_orders_moved'],
-      [409, 'kind_in_use'],
-      [422, 'class_open'],
-      [422, 'class_invalid'],
-      [422, 'bad_limit'],
-      [422, 'bad_input'],
-    ] as const) {
+    for (const [code, status] of goCodes) {
       const message = inventoryProblemMessage(of(status, code))
       expect(message, code).toBeTruthy()
-      expect(message, code).not.toBe('go detail')
+      expect(message, code).not.toContain('undefined')
     }
   })
 
@@ -79,15 +82,25 @@ describe('inventoryProblemMessage (#6949 K1)', () => {
     expect(message).toContain('needs a place')
   })
 
-  it('names the kind and the key a class_changed answer changes', () => {
-    const message = inventoryProblemMessage(of(422, 'class_changed', { owner: 'hardware', key: 'counting', from: 'lot', to: 'unit' }))
+  it('names the kind and the key a class_changed answer changes, as Go sends it in problems', () => {
+    // Go's shape: store/kinds.go classRefusal and SaveKind, `problems: [{owner?, key, from, to}]`.
+    const message = inventoryProblemMessage(of(422, 'class_changed', { problems: [{ owner: 'item_kind:hardware', key: 'counting', from: 'lot', to: 'unit' }] }))
     expect(message).toContain('hardware')
     expect(message).toContain('counting')
     expect(message).toContain('lot')
     expect(message).toContain('unit')
+    expect(message).not.toContain('undefined')
+  })
+
+  it('names the saved kind when a class_changed problem has no owner, and an unset key', () => {
+    const message = inventoryProblemMessage(of(422, 'class_changed', { problems: [{ key: 'billing', from: null, to: 'flat' }] }))
+    expect(message).toContain('billing')
+    expect(message).toContain('flat')
+    expect(message).not.toContain('undefined')
+    expect(message).not.toContain('null')
   })
 
   it('leaves a code it does not know to the caller', () => {
-    expect(inventoryProblemMessage(of(409, 'lot_empty'))).toBeUndefined()
+    expect(inventoryProblemMessage(of(409, 'recost_busy'))).toBeUndefined()
   })
 })

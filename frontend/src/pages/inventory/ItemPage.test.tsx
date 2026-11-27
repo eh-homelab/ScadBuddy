@@ -297,7 +297,7 @@ describe('ItemPage (#7067)', () => {
     expect(bodyOf('receiveUnits')).toEqual([])
     await user.type(serials, '{Enter}HS-0001')
     await user.click(within(form).getByRole('button', { name: 'Receive units' }))
-    await waitFor(() => expect(within(form).getByRole('alert')).toHaveTextContent('another unit of the item has that serial'))
+    await waitFor(() => expect(within(form).getByRole('alert')).toHaveTextContent('Another unit of this item has that serial.'))
     expect(bodyOf('receiveUnits')).toEqual([{ count: 2, serials: ['HS-0009', 'HS-0001'] }])
   })
 

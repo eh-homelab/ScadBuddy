@@ -40,7 +40,7 @@ parent's keys; its own subschema for a key wins (`inventory/kinds.py:1-5`).
 | `lot` | counted stock | lots and moves |
 | `unit` | one by one | units and moves |
 | `filament` | spools with a gram ledger | none yet; items and offers of this kind are refused until phase 3 (Ruling 9, `FilamentItemRefused`, `inventory/stock.py`) |
-| `none` | not counted | none; any stock call is 409 `step_not_applicable` (`item_not_counted` before #6949 K1) (Ruling 1, spec §6.4) |
+| `none` | not counted | none; a receive or a count is 409 `step_not_applicable`, and a use is 409 `handler_not_built` (a service's consume step is `consume.service`, which K1 does not build; phase 2 answered `item_not_counted` to all three) (Ruling 1, spec §6.4) |
 
 The migration seeds the built-in kinds (`20261124T0323Z_inventory_core.sql:189`): filament,
 printer, part (with nozzle, hotend, belt, build plate, AMS part and hardware under it),

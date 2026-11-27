@@ -494,10 +494,15 @@ function findItem(itemId: string): MockItem {
   return item
 }
 
-/** The item, refused unless its kind counts it in `tracking`. */
-function counted(itemId: string, tracking: 'lot' | 'unit'): MockItem {
+/**
+ * The item, refused unless its kind counts it in `tracking`. On an item that is not counted,
+ * a receive or a count is 409 `step_not_applicable`; a use (`take`) is 409 `handler_not_built`,
+ * because a service's consume step is `consume.service`, which K1 does not build (#6949 K1).
+ */
+function counted(itemId: string, tracking: 'lot' | 'unit', take = false): MockItem {
   const item = findItem(itemId)
   const has = trackingOf(item)
+  if (has === 'none' && take) throw new Refused(409, 'handler_not_built', "the item's consume step has a handler K1 does not build")
   if (has === 'none') throw new Refused(409, 'step_not_applicable', "the item's kind is not counted (tracking `none`): no lots, units or moves")
   if (has === 'filament') throw new Refused(409, 'filament_item_refused', 'filament items and their offers wait for the filament phase (#7068)')
   if (has !== tracking) throw new Refused(409, 'wrong_counting', 'a lot call on an item counted in units, or a unit call on one counted in lots')
@@ -1013,7 +1018,7 @@ export const handlers = [
   http.post(`${B}/items/:id/use`, async ({ request, params: p }) => {
     const input = await body<S['UseInput']>(request, 'use')
     return answer(request, () => {
-      const item = counted(String(p.id), 'lot')
+      const item = counted(String(p.id), 'lot', true)
       return { moves: takeStock(item.id, quantity(item, input.qty, 'qty'), { lot_id: input.lot_id, reason: input.reason }) }
     })
   }),

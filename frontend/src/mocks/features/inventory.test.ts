@@ -22,6 +22,14 @@ const NO_PLACE = 'ab7e0000-0000-4000-8000-000000000001'
 describe('inventory mock', () => {
   beforeEach(() => resetMockState())
 
+  it('refuses stock calls on a service as Go does: receive and count are step_not_applicable, use handler_not_built (#6949 K1)', async () => {
+    const service = seedItem({ name: 'Laser cutting', kind_id: 'service' })
+    const refused = (code: string) => ({ status: 409, type: `${INVENTORY_PROBLEM}${code}` })
+    expect(await refusal(inventoryApi.receiveLot(service.id, { qty: '1' }))).toEqual(refused('step_not_applicable'))
+    expect(await refusal(inventoryApi.count(service.id, { on_hand: '1', note: 'shelf' }))).toEqual(refused('step_not_applicable'))
+    expect(await refusal(inventoryApi.use(service.id, { qty: '1', reason: '' }))).toEqual(refused('handler_not_built'))
+  })
+
   it('answers offer decimals normalized, as `_Decimals` writes them (R-P2-40)', async () => {
     const offer = await inventoryApi.createOffer({ supplier_id: SUPPLIER.AMAZON, item_id: INVENTORY.HOOK, sku: 'B0HOOK500', pack_size: '500.000000' })
     expect(offer.pack_size).toBe('500')

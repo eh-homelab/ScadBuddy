@@ -98,7 +98,8 @@ class ActivityFilter:
     via_tool: str | None = None
     subject: str | None = None
     parent: str | None = None
-    #: A substring of the title, case-insensitive.
+    #: A substring of the title, case-insensitive, or a row's exact source id (#6949 K1:
+    #: an inventory operation's id, which `StillWorking` links).
     q: str | None = None
     since: datetime | None = None
     until: datetime | None = None
@@ -204,7 +205,7 @@ def _conditions(filters: ActivityFilter) -> tuple[list[sql.Composable], list[Any
             where.append(sql.SQL("{} = %s").format(sql.Identifier(column)))
             params.append(value)
     if filters.q is not None:
-        add("title ILIKE '%%' || %s || '%%'", _escape_like(filters.q))
+        add("(title ILIKE '%%' || %s || '%%' OR source_id = %s)", _escape_like(filters.q), filters.q)
     if filters.since is not None:
         add("created_at >= %s", filters.since)
     if filters.until is not None:
