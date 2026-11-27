@@ -939,7 +939,10 @@ only the sleeps move; a budget on the real clock fails on a slow runner (#6252).
   (`final_reading_g` or `final_grams`, booked as a `weighed` event just before the
   `archived` one by `add_event`'s rules), and the `archived` event's `data` keeps the
   closing, `ledger.closing`: `started_g` and `started_from`, `ledger_consumed_g`,
-  `final_filament_g`, `scale_consumed_g` and `drift_g`; `GET /spools/{id}/closing` is the
+  `final_filament_g`, `scale_consumed_g` and `drift_g`; a person's archive that leaves grams on the spool, unless the reason is `respooled`, books them as a
+  `non_print_waste` event just before the `archived` one (#7167, `archive_on`; the metrics
+  keep them apart from `wasted_g` as `non_print_waste_g`, and the Prometheus series is
+  `scadbuddy_filament_non_print_waste_grams`); `GET /spools/{id}/closing` is the
   archive dialog's preview with its notices against the setting
   `filament_weighing_finished_left_g`; a `SpoolDraft.continued_from` (a respooled spool,
   archived) links the new spool's `created` event and the source's `archived` event,
@@ -972,7 +975,14 @@ only the sleeps move; a budget on the real clock fails on a slow runner (#6252).
   `label_wrong`'s own `label_weight_g` as an `edited` event before the weighing, and keeps
   `resolution` and `shortfall_g` in its `data`, with `expected_g` but no `drift_g`; a
   `tared` weighing's `empty_source` is `tared`), `locations.py` (a spool moves only through `move()`; AMS trays are keyed by
-  printer, AMS and tray, never by name), `bambuddy_pull.py` (import and the scheduled pull,
+  printer, AMS and tray, never by name; `move_on` refuses a full dry box, #7167),
+  `dry_box.py` (#7167: what a dry box is, `BOX`, `occupant_on`, 409 `box_full` and 422
+  `box_has_many`; capacity is enforced for a box only) and `homes.py` (the home return:
+  `move_into` with `if_occupied` `refuse` or `replace`, which needs `expected_occupant_id`,
+  and `answers`; a replace archives the box's spool at 0 g and books its grams as a
+  `non_print_waste` event with `cause` `replaced`; capture's `_put_back` parks only a spool
+  that came from a live box and sets `home_asked_at`, and `GET /filament/spools?awaiting_home=true`
+  lists them), `bambuddy_pull.py` (import and the scheduled pull,
   the BB to SB side only: it writes nothing to Bambuddy (the push is `bb_sync_*.py` below, tags go through `rfid_push.py`); each `filament_sync` data type gates what the pull takes, through `Pulls.of(sync)` (#6265 Decision 3; `weights` since #6268), and BB's suppliers and locations are read only under `pulls(suppliers)` and `pulls(locations)`; it skips a BB spool whose tag an open binding of an SB spool linked elsewhere holds, warned once, and remembers it in `filament_bb_ignored` (the push clears its tag later, and the next pull would otherwise make a second SB spool; nothing un-ignores a row, so a person deletes it by hand, plan Decision 29); it never changes a held binding's `override` (`bind_on` with `override=None`); the Schedule's pull skips when none of the six `filament_sync` data types pulls, read per run (#6262 Task 13, widened by #6265 plan Decision 3, F1; `bb_pull_apply.pull_start`); after a pull it runs `reconcile_trays`, #6713. Since #6772 (plan Decisions 172-186) the CRUD service reads no Bambuddy for the pull: `bb_pull_models.py` is the wire (`PullStart`, the bodies, `BbPullApi`, and `Pulls` and `PullReport`, which `bambuddy_pull` re-exports), `bb_pull_run.py` the print worker's reads in the old order (`run_pull`, `read_and_pull`, `read_catalog`, `read_ha_sensors`, `reconcile_trays`), and `bb_pull_apply.py` the API's apply (`LocalBbPull`, `pull_start`, `execute_pull`); `workflows/filament_pull.py` is `FilamentBbPull` on the `bambuddy` queue (AUTO_UPGRADE; one activity `filament_bb_pull_read`, run once; replays `tests/fixtures/filament_pull_histories/`, so a change to its commands goes behind `workflow.patched`). The spool refresh's `filament_bambuddy_pull` activity (`spools/activities.py`; its commands in `SpoolRefresh` unchanged) and `POST /filament/bambuddy/import` start it and wait; the worker sends what it read to the CRUD area `filament-pull` (`…/print/filament/pull`, `…/pull/usage`, `…/pull/ha-states`, `…/pull/trays`, `…/pull/colours`; client `crud/print.py` `RemoteBbPull`), whose bodies the app's `BodySizeGate` caps at 8 MiB (`api/limits.py` `MAX_TEXT_BODY_BYTES`, 413 on the headers; Decision 182): the five routes carry their own `RouteLimit` (`api/crud_print.py` `PULL_ROUTE_LIMIT`), so the cap holds whatever the content type, header left out included (#6861) and name the Bambuddy instance read (409 `instance_changed` for another than the configured one) and the run's id, never an actor: the import route keeps the person under that id in `filament_pull_actors` (`remember_actor`), the routes read it there, else `bambuddy` (Decision 181); the route drops the row only once the read answered (a report or a problem); a row left behind is deleted by a later `remember_actor` once it is an hour old (`ACTOR_KEPT`, Decision 183). Tests: `tests/filament/pull_support.py` runs both halves in one process for the old pull tests, `test_bb_pull_run.py` the reads, `tests/crud/test_crud_filament_pull.py` the routes), `csv_import.py` (the spools CSV import, #6262 Task 15:
   rows the caller parsed, as text cells; a dry run reads only, so it adds no catalog row and
   takes no spool number; a write is one transaction, refused whole when a line is an error,

@@ -23,6 +23,7 @@ def _snapshot(**over: object) -> Snapshot:
         "low_stock": {},
         "reorder": {},
         "currency": "USD",
+        "non_print_waste": {},
     }
     body.update(over)
     return Snapshot.model_validate(body)
@@ -159,10 +160,10 @@ def test_a_failed_export_keeps_the_whole_previous_snapshot(
     old, new = _before_and_after()
     metrics_export.export(metrics, old)
     before = _all(metrics)
-    assert len(before) == 8
+    assert len(before) == len(FILAMENT_SERIES)
 
     # The last family built raises: nothing of the new snapshot may show.
-    monkeypatch.setattr(metrics_export, "GaugeMetricFamily", _fail_on_last(8))
+    monkeypatch.setattr(metrics_export, "GaugeMetricFamily", _fail_on_last(len(FILAMENT_SERIES)))
     with pytest.raises(RuntimeError):
         metrics_export.export(metrics, new)
     assert _all(metrics) == before

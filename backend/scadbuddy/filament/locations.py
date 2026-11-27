@@ -25,6 +25,12 @@ from scadbuddy.filament import ledger
 from scadbuddy.filament import models as m
 from scadbuddy.filament.bb_sync_models import BbLinked, forget_sync
 from scadbuddy.filament.catalog import CatalogRefError
+from scadbuddy.filament.dry_box import (
+    BoxFullError,
+    check_not_many,
+    keep_home_on,
+    occupant_on,
+)
 
 Conn = Connection[DictRow]
 
@@ -353,7 +359,8 @@ class LocationStore:
         """The fields ``patch`` sends (``archived`` included); ``None`` for no such place.
         A new parent that is the place or one of its descendants is `LocationCycleError`;
         the ancestors of the new parent are walked in the transaction that writes it, with
-        the tree lock and the place's row held."""
+        the tree lock and the place's row held. `BoxHasManyError` when the place ends as a
+        dry box (a dry-storage kind, capacity 1) that holds two spools or more (#7167)."""
         with self._pool.connection() as conn, conn.transaction():
             return self.update_on(conn, location_id, patch)
 
@@ -361,7 +368,8 @@ class LocationStore:
     def update_on(conn: Conn, location_id: UUID, patch: m.LocationPatch) -> m.Location | None:
         """`update` on ``conn``, in the caller's transaction (a printer's delete,
         `release_printer_child_places_on`). `LocationExistsError` or `CatalogRefError`
-        leaves that transaction aborted: the caller rolls it back."""
+        leaves that transaction aborted: the caller rolls it back. `BoxHasManyError` is
+        raised as in `update`."""
         sent = [n for n in type(patch).model_fields if n in patch.model_fields_set]
         columns = [n for n in sent if n != "archived"]
         sets = [f"{name} = %s" for name in columns]
@@ -385,6 +393,7 @@ class LocationStore:
                 f" RETURNING {_COLUMNS}",
                 [*values, location_id],
             ).fetchone()
+            check_not_many(conn, location_id)
             if patch.archived:
                 forget_sync(conn, "location", location_id)
         except errors.UniqueViolation:
@@ -680,9 +689,11 @@ class LocationStore:
         if before == location_id:
             return None
         if location_id is not None:
+            # Every target is locked FOR NO KEY UPDATE, the lock `occupant_on` takes too, so
+            # none is upgraded (two upgrades of one SHARE lock deadlock, #7167).
             target = conn.execute(
                 "SELECT printer_id, ams_id, tray_id FROM filament_locations"
-                " WHERE id = %s AND archived_at IS NULL FOR SHARE",
+                " WHERE id = %s AND archived_at IS NULL FOR NO KEY UPDATE",
                 (location_id,),
             ).fetchone()
             if target is None or (
@@ -691,11 +702,15 @@ class LocationStore:
                 and target["tray_id"] is None
             ):
                 raise MoveTargetError()
+            held = occupant_on(conn, location_id, but=spool_id)
+            if held is not None:
+                raise BoxFullError(held)
         conn.execute(
             "UPDATE filament_spools SET location_id = %s, tray_fingerprint = NULL,"
             " updated_at = now() WHERE id = %s",
             (location_id, spool_id),
         )
+        keep_home_on(conn, spool_id, location_id)
         return ledger.record(
             conn,
             spool_id,

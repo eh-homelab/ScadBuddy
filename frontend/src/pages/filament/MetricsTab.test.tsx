@@ -52,6 +52,43 @@ describe('the Metrics tab (#6269)', () => {
     expect(within(region('Days of stock')).getByRole('table', { name: 'Days of stock by type' })).toBeInTheDocument()
   })
 
+  it('shows non-print waste in a block of its own, apart from the print waste (#7167)', async () => {
+    server.use(
+      http.get('*/api/v1/filament/metrics', ({ request }) => {
+        const url = new URL(request.url)
+        return HttpResponse.json({
+          currency: 'USD',
+          dimension: 'material',
+          bucket: 'month',
+          since: url.searchParams.get('since'),
+          until: url.searchParams.get('until'),
+          stock: [],
+          consumption: [{ bucket: '2026-11-01', key: 'pla', label: 'PLA', used_g: 100, wasted_g: 10 }],
+          waste: [{ dimension: 'material', key: 'pla', label: 'PLA', used_g: 100, wasted_g: 10, rate: 0.1 }],
+          non_print_waste_g: 75.5,
+          non_print_waste: [
+            { dimension: 'material', key: 'pla', label: 'PLA', wasted_g: 75.5 },
+            { dimension: 'type', key: 't1', label: 'BL-PLA-WHITE', wasted_g: 50 },
+          ],
+        })
+      }),
+    )
+    render()
+    const waste = region('Waste')
+    const block = await within(waste).findByRole('group', { name: 'Non-print waste' })
+    expect(within(block).getByText(/^76 g thrown away/)).toBeInTheDocument()
+    expect(within(within(block).getByRole('list', { name: 'Non-print waste by material' })).getByText('PLA')).toBeInTheDocument()
+    expect(within(block).getByRole('list', { name: 'Non-print waste by type' })).toBeInTheDocument()
+    expect(within(waste).getByRole('list', { name: 'Waste by material' })).toBeInTheDocument()
+    expect(within(waste).getByText('10% of 100 g')).toBeInTheDocument()
+  })
+
+  it('shows no non-print waste block when there is none (#7167)', async () => {
+    render()
+    await within(region('Waste')).findByRole('list', { name: 'Waste by printer' })
+    expect(within(region('Waste')).queryByRole('group', { name: 'Non-print waste' })).not.toBeInTheDocument()
+  })
+
   it('shows the stats by material number, each type linked, the untyped spools last (#7152)', async () => {
     render()
     const table = await within(region('By material number')).findByRole('table', { name: 'Stats by material number' })
@@ -150,7 +187,7 @@ describe('the Metrics tab (#6269)', () => {
           { bucket: '2026-11-01', key: 'petg', label: 'PETG', used_g: 50, wasted_g: 0 },
           { bucket: '2026-11-01', key: 'pla', label: 'PLA', used_g: 100, wasted_g: 0 },
         ]
-        return HttpResponse.json({ currency: 'USD', dimension: 'material', bucket: 'month', since, until: url.searchParams.get('until'), stock: [], consumption, waste: [] })
+        return HttpResponse.json({ currency: 'USD', dimension: 'material', bucket: 'month', since, until: url.searchParams.get('until'), stock: [], consumption, waste: [], non_print_waste_g: 0, non_print_waste: [] })
       }),
     )
     const swatch = async (name: string) => {
@@ -186,6 +223,8 @@ describe('the Metrics tab (#6269)', () => {
           stock: [],
           consumption: [{ bucket: '2026-11-01', key: 'pla', label: 'PLA', used_g: 100, wasted_g: 0 }],
           waste: [],
+          non_print_waste_g: 0,
+          non_print_waste: [],
         })
       }),
     )

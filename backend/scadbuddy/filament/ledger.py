@@ -94,6 +94,8 @@ BB_SPOOL: Final = "bb_spool"
 #: The event that starts a spool's consumed counter again (#7149 R-7149-4): no grams. Its
 #: source is ``bb`` when the pull booked Bambuddy's reset, else ``person``.
 CONSUMED_RESET: Final = "consumed_reset"
+#: Grams written off the spool, not printed (#7167): an archive's leftovers, a box replace.
+NON_PRINT_WASTE: Final = "non_print_waste"
 #: The ``ref_kind``s of the events that carry BB's clock.
 BB_REFS: Final = frozenset({BB_SPOOL, "bb_scale", "bb_dried", BB_USAGE})
 
@@ -202,10 +204,20 @@ def _check_empty(conn: Conn, spool_id: UUID, event: m.SpoolEvent, now: Derived) 
     ``grams_left`` goes from above 0 (``grams_before``) to 0, or an ``archived`` event on a
     spool not already empty. Unknown grams that become 0 are no move (an import or the
     first reading of an old reel), nor is the pull's archived import of a spool Bambuddy
-    had archived (``data.bb_archived_at``). Later writes on an empty spool add nothing."""
+    had archived (``data.bb_archived_at``). Later writes on an empty spool add nothing.
+    A ``non_print_waste`` event adds nothing: its zero is the archive's own, so an
+    ``archived`` event with ``data.non_print_waste_g`` above 0 still counts as an archive
+    of a spool not already empty (#7167). A restored spool stays at 0 g, so its next
+    archive adds nothing more."""
+    if event.kind == "non_print_waste":
+        # #7167: the archive's own zero reading is no run-out; the `archived` event decides.
+        return
     before = event.grams_before
     was_empty = before is not None and before <= 0
     if event.kind == "archived":
+        # The waste event before it took the spool to 0 g; what it wrote off was there.
+        if (event.data.get("non_print_waste_g") or 0) > 0:
+            was_empty = False
         if was_empty or "bb_archived_at" in event.data:
             return
         add_for_empty_on(conn, spool_id, cause="archived", at=event.at)
@@ -382,6 +394,7 @@ def closing(
     final_filament_g: float | None,
     reason: m.ArchiveReason | None,
     grams_left: float | None = None,
+    waste: bool = False,
 ) -> dict[str, Any]:
     """An ``archived`` event's ``data`` (#7684, spec §5.4): the reason and the lifetime
     reconciliation. ``started_g`` is the first ``scale`` or ``person`` reading
@@ -392,11 +405,21 @@ def closing(
     final weighing's filament, else ``grams_left`` (the spool's at the archive).
     ``scale_consumed_g`` is ``started_g`` less the final weighing's filament and ``drift_g``
     is ``ledger_consumed_g - scale_consumed_g`` (negative: the scale found less filament
-    than the ledger expected), both null without a weighing or a start. Grams to 0.1 g."""
+    than the ledger expected), both null without a weighing or a start. Grams to 0.1 g.
+    With ``waste`` (an archive that books it, #7167) it also holds ``non_print_waste_g``:
+    the raw final filament when above 0 and the reason is not ``respooled`` (the filament
+    moved to another reel), else null."""
     from scadbuddy.filament.metrics import plates  # metrics imports this module
 
     ordered = sorted(events, key=lambda e: (e.at, e.seq))
-    first = next((e for e in ordered if e.source in _MANUAL and e.grams_after is not None), None)
+    first = next(
+        (
+            e
+            for e in ordered
+            if e.source in _MANUAL and e.grams_after is not None and e.kind != "non_print_waste"
+        ),
+        None,
+    )
     started: float | None
     started_from: str | None
     since: datetime | None
@@ -415,7 +438,7 @@ def closing(
     if started is not None and final_filament_g is not None:
         scale = started - final_filament_g
         drift = None if consumed is None else consumed - scale
-    return {
+    data: dict[str, Any] = {
         "reason": reason,
         "started_g": _tenth(started),
         "started_from": started_from,
@@ -424,6 +447,11 @@ def closing(
         "scale_consumed_g": _tenth(scale),
         "drift_g": _tenth(drift),
     }
+    if waste:
+        # The raw grams: the event's `grams_before` is raw too (no rounding either way).
+        booked = final is not None and final > 0 and reason != "respooled"
+        data["non_print_waste_g"] = final if booked else None
+    return data
 
 
 def _tenth(value: float | None) -> float | None:
@@ -457,6 +485,33 @@ def plate_events(
     ).fetchall():
         found.setdefault(row["spool_id"], []).append(m.SpoolEvent.model_validate(row))
     return found
+
+
+def waste_events(
+    conn: Conn, spool_ids: Sequence[UUID] | None = None
+) -> dict[UUID, list[m.SpoolEvent]]:
+    """The ``non_print_waste`` events of ``spool_ids`` (every spool with none), per
+    spool, oldest first (#7167): what the metrics sum as non-print waste, apart from the
+    plates' waste. The grams are the event's ``data.waste_g``."""
+    where = "kind = 'non_print_waste'"
+    args: list[Any] = []
+    if spool_ids is not None:
+        where += " AND spool_id = ANY(%s)"
+        args.append(list(spool_ids))
+    found: dict[UUID, list[m.SpoolEvent]] = {}
+    for row in conn.execute(
+        f"SELECT {_COLUMNS} FROM filament_spool_events WHERE {where} ORDER BY spool_id, at, seq",
+        args,
+    ).fetchall():
+        found.setdefault(row["spool_id"], []).append(m.SpoolEvent.model_validate(row))
+    return found
+
+
+def waste_grams(event: m.SpoolEvent) -> float:
+    """The grams a ``non_print_waste`` event books: its ``data.waste_g``, raw; 0 when
+    the key is missing or not a number."""
+    grams = event.data.get("waste_g")
+    return float(grams) if isinstance(grams, int | float) and not isinstance(grams, bool) else 0.0
 
 
 class BadCursorError(ValueError):

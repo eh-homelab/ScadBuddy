@@ -294,6 +294,9 @@ def spool_metrics(
         prints=len(found),
         grams_per_print=used / len(found) if found else None,
         wasted_g=sum(p.grams for p in found if p.outcome in ("failed", "cancelled")),
+        non_print_waste_g=sum(
+            ledger.waste_grams(e) for e in events if e.kind == ledger.NON_PRINT_WASTE
+        ),
         cost_used=None if cost_per_kg is None else _money(used, cost_per_kg),
         value_left=(
             None if cost_per_kg is None or grams_left is None else _money(grams_left, cost_per_kg)
