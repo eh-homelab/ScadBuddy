@@ -62,6 +62,8 @@ from scadbuddy.printers.store import (
     BambuddyLinkTakenError,
     KekMissingError,
     PrinterNotFoundError,
+    PrinterPlaceNameClashError,
+    PrinterPlacesReferencedError,
     SerialTakenError,
     SerialUnknownError,
     VirtualPrinterRowError,
@@ -119,6 +121,14 @@ async def _call[T](work: Callable[[], T]) -> T:
         raise ApiError(status.HTTP_503_SERVICE_UNAVAILABLE, KEK_MISSING) from None
     except SerialUnknownError:
         raise ApiError(status.HTTP_422_UNPROCESSABLE_CONTENT, SERIAL_UNKNOWN) from None
+    except PrinterPlacesReferencedError as error:
+        raise ApiError(
+            status.HTTP_409_CONFLICT,
+            str(error),
+            references=[{"kind": kind, "id": str(ref)} for kind, ref in error.references],
+        ) from None
+    except PrinterPlaceNameClashError as error:
+        raise ApiError(status.HTTP_409_CONFLICT, str(error), place_id=str(error.place_id)) from None
     except VirtualPrinterRowError as error:
         raise ApiError(
             status.HTTP_409_CONFLICT,
@@ -436,7 +446,11 @@ async def patch_printer(printers: PrintersDep, printer_id: str, body: PrinterPat
     summary="Forget a printer",
     description=(
         "409 while it links a Bambuddy printer: the next read of what the printers are "
-        "doing would make it again, under a new id. Unlink Bambuddy first."
+        "doing would make it again, under a new id. Unlink Bambuddy first. Its places go "
+        "with it: each spool in one moves to no place, and each place under one moves under "
+        "the printer root's parent. 409 when such a place would clash by name there "
+        "(`place_id`), or while a stock lot or unit points at one of its places "
+        "(`references`, each a `kind` and an `id`); the delete then changes nothing."
     ),
 )
 async def delete_printer(printers: PrintersDep, printer_id: str) -> Response:

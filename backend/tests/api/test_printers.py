@@ -442,6 +442,33 @@ def test_a_bambuddy_linked_printer_is_not_deleted(client: TestClient) -> None:
     assert client.delete(f"/api/v1/printers/{row['id']}").status_code == 204
 
 
+def test_a_delete_refused_by_a_reference_to_a_printers_place_is_409(client: TestClient) -> None:
+    """#8177: a stock lot in one of the printer's places refuses the delete with a 409
+    that names the lot, not a 500 from its foreign key."""
+    row = create(client)
+    with registry(client).store.pool.connection() as conn:
+        lot = conn.execute(
+            "WITH tray AS (INSERT INTO filament_locations (name, kind_id, printer_id, ams_id,"
+            " tray_id) VALUES ('H2C AMS-A slot 1',"
+            " (SELECT id FROM filament_location_kinds LIMIT 1), %s, 0, 0) RETURNING id),"
+            " item AS (INSERT INTO items (kind_id, name) VALUES ('part', 'Belt') RETURNING id)"
+            " INSERT INTO stock_lots (item_id, location_id, received_qty, on_hand,"
+            " unit_cost_minor, origin, created_by)"
+            " SELECT item.id, tray.id, 1, 1, 0, 'manual', '{}' FROM tray, item RETURNING id",
+            (row["id"],),
+        ).fetchone()
+        assert lot is not None
+
+    refused = client.delete(f"/api/v1/printers/{row['id']}")
+
+    assert refused.status_code == 409, refused.text
+    assert str(lot["id"]) in refused.json()["detail"]
+    assert refused.json()["references"] == [
+        {"kind": "stock_lots.location_id", "id": str(lot["id"])}
+    ]
+    assert client.get(f"/api/v1/printers/{row['id']}").status_code == 200
+
+
 async def test_a_watch_call_never_hangs_a_route(
     client: TestClient, monkeypatch: pytest.MonkeyPatch
 ) -> None:

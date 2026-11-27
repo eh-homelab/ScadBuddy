@@ -80,6 +80,35 @@ class PrinterNotFoundError(LookupError):
         self.printer_id = printer_id
 
 
+class PrinterPlacesReferencedError(Exception):
+    """Rows with no move path that writes an event point at one of the printer's places,
+    which go with its row (#8177). Each reference is ``(kind, id)``; the kind names the
+    table and its column, such as ``stock_lots.location_id``."""
+
+    def __init__(self, printer_id: str, references: list[tuple[str, uuid.UUID]]) -> None:
+        named = ", ".join(f"{kind} {ref}" for kind, ref in references)
+        super().__init__(
+            f"printer {printer_id} has places that other rows still point at: {named};"
+            " move them out first"
+        )
+        self.printer_id = printer_id
+        self.references = references
+
+
+class PrinterPlaceNameClashError(Exception):
+    """A place under one of the printer's places cannot move under the printer root's
+    parent: an unarchived place of that name is there already (#8177)."""
+
+    def __init__(self, printer_id: str, place_id: uuid.UUID, name: str) -> None:
+        super().__init__(
+            f"place {place_id} ({name!r}) is under printer {printer_id}'s places and cannot"
+            " move out: a place of that name is there already; rename one first"
+        )
+        self.printer_id = printer_id
+        self.place_id = place_id
+        self.name = name
+
+
 class SerialTakenError(Exception):
     """Another row already holds the serial."""
 
@@ -346,6 +375,33 @@ def _repoint_settings(conn: Connection[DictRow], merged: str, into: str, by: Act
         " updated_at = now() WHERE name = ANY(%(names)s) AND value ? %(merged)s",
         {"into": into, "merged": merged, "names": list(PRINTER_LISTED_SETTINGS)},
     )
+
+
+#: The columns that point at a place and have no move path that writes an event
+#: (#8177): a lot's or a unit's patch sets its place with no stock move, and nothing
+#: writes `location_ref_id` yet. A printer's delete is refused while one points at one of
+#: its places, rather than changed behind the inventory's back.
+_PLACE_REFERENCES = (
+    ("stock_lots", "location_id"),
+    ("stock_units", "location_id"),
+    ("stock_units", "location_ref_id"),
+)
+
+
+def _place_references(
+    conn: Connection[DictRow], printer_id: uuid.UUID
+) -> list[tuple[str, uuid.UUID]]:
+    """Each ``(table.column, id)`` of `_PLACE_REFERENCES` that points at one of the
+    printer's places, by kind then id."""
+    found: list[tuple[str, uuid.UUID]] = []
+    for table, column in _PLACE_REFERENCES:
+        rows = conn.execute(
+            f"SELECT r.id FROM {table} r JOIN filament_locations l ON l.id = r.{column}"
+            " WHERE l.printer_id = %s ORDER BY r.id",
+            (printer_id,),
+        ).fetchall()
+        found.extend((f"{table}.{column}", row["id"]) for row in rows)
+    return found
 
 
 def _forget_settings(conn: Connection[DictRow], printer_id: str) -> None:
@@ -1237,11 +1293,25 @@ class PrinterStore:
         key = printer_uuid(printer_id)
         if key is None:
             raise PrinterNotFoundError(printer_id)
-        from scadbuddy.filament.locations import release_printer_spools_on
+        from scadbuddy.filament.locations import (
+            ChildPlaceClashError,
+            lock_printer_places_on,
+            release_printer_child_places_on,
+            release_printer_spools_on,
+        )
 
-        with self.pool.connection() as conn:
-            # The printer's places go with its row; its spools leave them first (#7143).
+        with self.pool.connection() as conn, conn.transaction():
+            # The printer's places go with its row. Its spools leave them first (#7143),
+            # then the places under them (#8177); a row with no move path refuses it.
             release_printer_spools_on(conn, key, actor=PRINTER_DELETE_ACTOR)
+            lock_printer_places_on(conn, key)
+            refs = _place_references(conn, key)
+            if refs:
+                raise PrinterPlacesReferencedError(str(key), refs)
+            try:
+                release_printer_child_places_on(conn, key)
+            except ChildPlaceClashError as clash:
+                raise PrinterPlaceNameClashError(str(key), clash.place_id, clash.name) from None
             gone = conn.execute("DELETE FROM printers WHERE id = %s", (key,))
             if gone.rowcount == 0:
                 raise PrinterNotFoundError(printer_id)

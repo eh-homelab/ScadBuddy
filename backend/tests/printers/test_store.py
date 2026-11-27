@@ -34,6 +34,8 @@ from scadbuddy.printers.store import (
     KekMissingError,
     NoAccessCodeError,
     PrinterNotFoundError,
+    PrinterPlaceNameClashError,
+    PrinterPlacesReferencedError,
     PrinterReference,
     PrinterStore,
     SerialTakenError,
@@ -322,6 +324,185 @@ def test_a_delete_moves_the_spools_out_of_the_printers_places(printers: PrinterS
     assert [(m["actor"], m["data"]["reason"]) for m in moved] == [
         ("system:printer-delete", "printer_deleted")
     ]
+
+
+def _place(
+    conn: psycopg.Connection[Any],
+    name: str,
+    *,
+    parent: uuid.UUID | None = None,
+    printer: str | None = None,
+    root: bool = False,
+    tray: int | None = None,
+) -> uuid.UUID:
+    """A place row; a printer's tray place (unit 0) when ``tray`` is given."""
+    row = conn.execute(
+        "INSERT INTO filament_locations"
+        " (name, kind_id, parent_id, printer_id, printer_root, ams_id, tray_id)"
+        " VALUES (%s, (SELECT id FROM filament_location_kinds LIMIT 1), %s, %s, %s, %s, %s)"
+        " RETURNING id",
+        (name, parent, printer, root, None if tray is None else 0, tray),
+    ).fetchone()
+    assert row is not None
+    place: uuid.UUID = row["id"]
+    return place
+
+
+def _spool_in(conn: psycopg.Connection[Any], place: uuid.UUID) -> uuid.UUID:
+    row = conn.execute(
+        "INSERT INTO filament_spools (location_id, material_id)"
+        " VALUES (%s, (SELECT id FROM filament_materials LIMIT 1)) RETURNING id",
+        (place,),
+    ).fetchone()
+    assert row is not None
+    spool: uuid.UUID = row["id"]
+    return spool
+
+
+def _row(conn: psycopg.Connection[Any], table: str, row_id: uuid.UUID) -> Any:
+    found = conn.execute(f"SELECT * FROM {table} WHERE id = %s", (row_id,)).fetchone()
+    assert found is not None
+    return found
+
+
+def test_a_delete_moves_a_child_place_under_the_printer_roots_parent(
+    printers: PrinterStore,
+) -> None:
+    """#8177: a person's place under one of the printer's places would fail the delete on
+    `filament_locations.parent_id`. It moves under the printer root's own parent, through
+    the location store's write path, in the delete's transaction."""
+    row = printers.create(PrinterCreate(serial=SERIAL, name="A"))
+    with printers.pool.connection() as conn:
+        room = _place(conn, "Room")
+        root = _place(conn, "A", parent=room, printer=row.id, root=True)
+        tray = _place(conn, "A AMS-A slot 1", parent=root, printer=row.id, tray=0)
+        bin_ = _place(conn, "Bin", parent=tray)
+        shelf = _place(conn, "Shelf", parent=root)
+    printers.delete(row.id)
+    assert printers.get(row.id) is None
+    with printers.pool.connection() as conn:
+        assert _row(conn, "filament_locations", bin_)["parent_id"] == room
+        assert _row(conn, "filament_locations", shelf)["parent_id"] == room
+        gone = conn.execute(
+            "SELECT count(*) AS n FROM filament_locations WHERE id = ANY(%s)", ([root, tray],)
+        ).fetchone()
+    assert gone == {"n": 0}
+
+
+def test_a_child_place_goes_to_no_parent_when_the_printer_root_has_none(
+    printers: PrinterStore,
+) -> None:
+    """#8177: the printer root has no parent, so its child place goes to the top level."""
+    row = printers.create(PrinterCreate(serial=SERIAL, name="A"))
+    with printers.pool.connection() as conn:
+        root = _place(conn, "A", printer=row.id, root=True)
+        bin_ = _place(conn, "Bin", parent=root)
+    printers.delete(row.id)
+    with printers.pool.connection() as conn:
+        assert _row(conn, "filament_locations", bin_)["parent_id"] is None
+
+
+def test_a_delete_whose_child_place_would_clash_by_name_is_refused(
+    printers: PrinterStore,
+) -> None:
+    """#8177: the move would put two unarchived places of one name under one parent
+    (`filament_locations_name`). The delete is refused, naming the place, and writes
+    nothing: the spool stays in its tray and the printer stays."""
+    row = printers.create(PrinterCreate(serial=SERIAL, name="A"))
+    with printers.pool.connection() as conn:
+        _place(conn, "BIN")
+        root = _place(conn, "A", printer=row.id, root=True)
+        tray = _place(conn, "A AMS-A slot 1", parent=root, printer=row.id, tray=0)
+        bin_ = _place(conn, "Bin", parent=tray)
+        spool = _spool_in(conn, tray)
+    with pytest.raises(PrinterPlaceNameClashError) as refused:
+        printers.delete(row.id)
+    assert refused.value.place_id == bin_ and refused.value.name == "Bin"
+    assert str(bin_) in str(refused.value)
+    assert printers.get(row.id) is not None
+    with printers.pool.connection() as conn:
+        assert _row(conn, "filament_locations", bin_)["parent_id"] == tray
+        assert _row(conn, "filament_spools", spool)["location_id"] == tray
+        events = conn.execute(
+            "SELECT count(*) AS n FROM filament_spool_events WHERE spool_id = %s", (spool,)
+        ).fetchone()
+    assert events == {"n": 0}
+
+
+def _item(conn: psycopg.Connection[Any], kind: str) -> uuid.UUID:
+    row = conn.execute(
+        "INSERT INTO items (kind_id, name) VALUES (%s, %s) RETURNING id", (kind, kind)
+    ).fetchone()
+    assert row is not None
+    item: uuid.UUID = row["id"]
+    return item
+
+
+def _assert_refused_naming(
+    printers: PrinterStore, printer_id: str, tray: uuid.UUID, kind: str, ref: uuid.UUID
+) -> None:
+    """The delete is refused, naming ``kind`` and ``ref``, and writes nothing: a spool in
+    the tray stays there."""
+    with printers.pool.connection() as conn:
+        spool = _spool_in(conn, tray)
+    with pytest.raises(PrinterPlacesReferencedError) as refused:
+        printers.delete(printer_id)
+    assert refused.value.references == [(kind, ref)]
+    assert kind in str(refused.value) and str(ref) in str(refused.value)
+    assert printers.get(printer_id) is not None
+    with printers.pool.connection() as conn:
+        assert _row(conn, "filament_spools", spool)["location_id"] == tray
+
+
+def test_a_delete_is_refused_while_a_stock_lot_is_in_a_printers_place(
+    printers: PrinterStore,
+) -> None:
+    """#8177: `stock_lots.location_id` has no move path that writes an event (the lot's
+    patch sets it with none), so the delete is refused with the lot named."""
+    row = printers.create(PrinterCreate(serial=SERIAL, name="A"))
+    with printers.pool.connection() as conn:
+        tray = _place(conn, "A AMS-A slot 1", printer=row.id, tray=0)
+        lot = conn.execute(
+            "INSERT INTO stock_lots (item_id, location_id, received_qty, on_hand,"
+            " unit_cost_minor, origin, created_by) VALUES (%s, %s, 1, 1, 0, 'manual', '{}')"
+            " RETURNING id",
+            (_item(conn, "part"), tray),
+        ).fetchone()
+        assert lot is not None
+    _assert_refused_naming(printers, row.id, tray, "stock_lots.location_id", lot["id"])
+
+
+def test_a_delete_is_refused_while_a_stock_unit_is_in_a_printers_place(
+    printers: PrinterStore,
+) -> None:
+    """#8177: `stock_units.location_id`, as the lot's: no move path writes an event."""
+    row = printers.create(PrinterCreate(serial=SERIAL, name="A"))
+    with printers.pool.connection() as conn:
+        tray = _place(conn, "A AMS-A slot 1", printer=row.id, tray=0)
+        unit = conn.execute(
+            "INSERT INTO stock_units (item_id, location_id, cost_minor, origin, created_by)"
+            " VALUES (%s, %s, 0, 'manual', '{}') RETURNING id",
+            (_item(conn, "nozzle"), tray),
+        ).fetchone()
+        assert unit is not None
+    _assert_refused_naming(printers, row.id, tray, "stock_units.location_id", unit["id"])
+
+
+def test_a_delete_is_refused_while_a_stock_unit_is_one_of_the_printers_places(
+    printers: PrinterStore,
+) -> None:
+    """#8177: `stock_units.location_ref_id` (a unit that is a place) has no write path at
+    all yet, so the delete is refused with the unit named."""
+    row = printers.create(PrinterCreate(serial=SERIAL, name="A"))
+    with printers.pool.connection() as conn:
+        tray = _place(conn, "A AMS-A slot 1", printer=row.id, tray=0)
+        unit = conn.execute(
+            "INSERT INTO stock_units (item_id, location_ref_id, cost_minor, origin, created_by)"
+            " VALUES (%s, %s, 0, 'manual', '{}') RETURNING id",
+            (_item(conn, "nozzle"), tray),
+        ).fetchone()
+        assert unit is not None
+    _assert_refused_naming(printers, row.id, tray, "stock_units.location_ref_id", unit["id"])
 
 
 # ── #4186 review ─────────────────────────────────────────────────────────────────────
