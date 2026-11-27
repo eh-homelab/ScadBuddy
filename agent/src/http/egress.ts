@@ -62,7 +62,8 @@ export function isPrivateAddress(address: string): boolean {
 
 /**
  * Addresses inside the cluster, the LAN or the pod (#8178): the private ranges above,
- * CGNAT 100.64/10 (RFC 6598) and loopback (127/8, ::1). `http_request` reads such a host
+ * CGNAT 100.64/10 (RFC 6598), loopback (127/8, ::1) and "this network" 0/8 (RFC 1122),
+ * so the check does not depend on the kernel refusing it. `http_request` reads such a host
  * only when a person approved that host for the call.
  */
 const INTERNAL = new BlockList()
@@ -71,6 +72,7 @@ INTERNAL.addSubnet('172.16.0.0', 12, 'ipv4')
 INTERNAL.addSubnet('192.168.0.0', 16, 'ipv4')
 INTERNAL.addSubnet('100.64.0.0', 10, 'ipv4')
 INTERNAL.addSubnet('127.0.0.0', 8, 'ipv4')
+INTERNAL.addSubnet('0.0.0.0', 8, 'ipv4')
 INTERNAL.addSubnet('fc00::', 7, 'ipv6')
 INTERNAL.addAddress('::1', 'ipv6')
 
