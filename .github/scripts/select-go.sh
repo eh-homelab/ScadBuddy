@@ -7,7 +7,7 @@
 # plugin-seal-vectors.json (#8048), blob-upload-vectors.json (#7958) and the python-json,
 # activity-title, fetch-grant and assistant-cost vectors (#8046).
 set -euo pipefail
-if grep -qE '^(go\.work(\.sum)?$|vendor/|tools/go/|backend/scadbuddy/migrations(_agent)?/|backend/tests/fixtures/((event-stream|auth|plugin-seal|blob-upload|python-json|activity-title|fetch-grant|assistant-cost)-vectors|unknown-tray-vectors|unknown-trays-block)\.json$|scripts/generate-go-client\.(sh|jq)$|\.github/scripts/generate-go-client-jq\.test\.sh$|\.github/workflows/(ci|go-module-ci)\.yml$|\.github/scripts/select-go(\.test)?\.sh$|\.github/scripts/changed-paths\.sh$|agent/test/fixtures/rate-limit-reset-vectors\.json$)'; then
+if grep -qE '^(go\.work(\.sum)?$|vendor/|tools/go/|backend/scadbuddy/migrations(_agent)?/|backend/tests/fixtures/((event-stream|auth|plugin-seal|blob-upload|python-json|activity-title|fetch-grant|assistant-cost)-vectors|unknown-tray-vectors|unknown-trays-block)\.json$|docs/inventory-model/|scripts/generate-go-client\.(sh|jq)$|\.github/scripts/generate-go-client-jq\.test\.sh$|\.github/workflows/(ci|go-module-ci)\.yml$|\.github/scripts/select-go(\.test)?\.sh$|\.github/scripts/changed-paths\.sh$|agent/test/fixtures/rate-limit-reset-vectors\.json$)'; then
   echo true
 else
   echo false
