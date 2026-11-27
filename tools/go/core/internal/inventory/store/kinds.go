@@ -616,7 +616,8 @@ func classChange(oldCls model.Class, oldSpecial string, newCls model.Class, newS
 // Update changes the fields the patch names. kind_not_found; kind_in_use for a tracking,
 // class or special type change of a built-in kind, or a tracking change of a kind with
 // items; kind_cycle for a parent at or below the kind; kind_archived for an archived parent;
-// bad_property_schema; class_changed for a change that changes the class of a kind with
+// bad_property_schema, also when a kind below it would require a key that its merged
+// schema no longer defines (R-K1-33); class_changed for a change that changes the class of a kind with
 // items (its own or a descendant's) or that a descendant contradicts; steps_invalid when a
 // step of the kind, of a kind below it, or of an item of those that sets its own steps no
 // longer resolves (the problem names that kind or item). It
@@ -713,6 +714,9 @@ func (k *Kinds) Update(ctx context.Context, tx pgx.Tx, id string, p wire.KindPat
 		}
 	}
 	below := next.subtree(id)
+	if err := keepsRequired(next, id, below); err != nil {
+		return wire.ItemKind{}, err
+	}
 	has, err := kindsWithItems(ctx, tx, below)
 	if err != nil {
 		return wire.ItemKind{}, err
@@ -773,6 +777,31 @@ func (k *Kinds) Update(ctx context.Context, tx pgx.Tx, id string, p wire.KindPat
 		return wire.ItemKind{}, err
 	}
 	return k.Get(ctx, tx, id)
+}
+
+// keepsRequired is bad_property_schema for the first kind below id (in subtree order)
+// that requires a key of its own required list that its merged schema in next no longer
+// defines: an ancestor dropped the key, or a kind moved (R-K1-33). The kind id itself is
+// checked by checkSchema.
+func keepsRequired(next kindSet, id string, below []string) error {
+	for _, d := range below {
+		if d == id {
+			continue
+		}
+		var own struct {
+			Required []string `json:"required"`
+		}
+		if json.Unmarshal(next[d].Schema, &own) != nil {
+			continue
+		}
+		have := defined(next.chain(d))
+		for _, key := range own.Required {
+			if !have[key] {
+				return badSchema("kind '%s' would require '%s', which it no longer defines", d, key)
+			}
+		}
+	}
+	return nil
 }
 
 // checkItems re-resolves each item of the kinds that sets its own steps: a kind save that

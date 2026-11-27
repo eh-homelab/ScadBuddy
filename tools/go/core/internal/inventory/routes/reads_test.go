@@ -3,6 +3,7 @@ package routes
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -12,11 +13,15 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/eh-homelab/ScadBuddy/tools/go/core/internal/auth"
 	"github.com/eh-homelab/ScadBuddy/tools/go/core/internal/crud"
+	"github.com/eh-homelab/ScadBuddy/tools/go/core/internal/httpx"
+	"github.com/eh-homelab/ScadBuddy/tools/go/core/internal/inventory/handlers"
 	"github.com/eh-homelab/ScadBuddy/tools/go/core/internal/inventory/store"
+	"github.com/eh-homelab/ScadBuddy/tools/go/core/internal/inventory/wire"
 	"github.com/eh-homelab/ScadBuddy/tools/go/core/internal/testdb"
 )
 
@@ -220,3 +225,37 @@ func TestARefusalIsTheProblemDocumentWithItsMembers(t *testing.T) {
 		t.Fatalf("%s", w.Body)
 	}
 }
+
+// The two property codes of an item save keep the entities' type (R-K1-33), as the spool
+// routes answer them.
+func TestPropertyCodesKeepTheEntitiesType(t *testing.T) {
+	pool := testdb.New(t)
+	ctx := context.Background()
+	kinds, items := &store.Kinds{Cat: handlers.Builtin()}, &store.Items{Cat: handlers.Builtin()}
+	by := store.Actor(`{"kind":"browser","principal":null,"session":null,"run_id":null}`)
+	if err := store.Tx(ctx, pool, by, func(tx pgx.Tx) error {
+		_, err := kinds.Create(ctx, tx, wire.KindInput{ID: "strict", Name: "Strict", ParentID: ptrTo("hardware"),
+			AttributeSchema: json.RawMessage(`{"type": "object", "properties": {"mpn": {"type": "string"}}, "required": ["mpn"]}`)}, by)
+		return err
+	}); err != nil {
+		t.Fatal(err)
+	}
+	for code, props := range map[string]wire.PropertyPatch{
+		"missing_required_properties": nil,
+		"bad_property_value":          {"mpn": json.RawMessage(`5`)},
+	} {
+		err := store.Tx(ctx, pool, by, func(tx pgx.Tx) error {
+			_, err := items.Create(ctx, tx, wire.ItemInput{KindID: "strict", Name: "X", Properties: props}, by)
+			return err
+		})
+		var p *httpx.Problem
+		if !errors.As(problemOf(err), &p) {
+			t.Fatalf("%s: %v", code, err)
+		}
+		if p.Status != 422 || Codes[code] != 422 || p.Type != "https://scadbuddy.dev/problems/entities/"+code {
+			t.Errorf("%s: %d %s (Codes %d)", code, p.Status, p.Type, Codes[code])
+		}
+	}
+}
+
+func ptrTo[T any](v T) *T { return &v }

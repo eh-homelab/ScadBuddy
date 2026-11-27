@@ -12,7 +12,7 @@ from pathlib import Path
 import pytest
 
 from scadbuddy.crud import idempotency
-from scadbuddy.entities import registry
+from scadbuddy.entities import properties, registry
 from scadbuddy.orders.models import Actor
 
 PACKAGE = Path(registry.__file__).resolve().parents[1]
@@ -27,6 +27,8 @@ def _normal(text: str) -> str:
     ("path", "ours"),
     [
         ("entities/shared/ensure_entity.sql", registry.ENSURE_ENTITY_SQL),
+        ("entities/shared/entity_property_upsert.sql", properties.UPSERT_PROPERTY_SQL),
+        ("entities/shared/entity_property_delete.sql", properties.DELETE_PROPERTY_SQL),
         ("crud/shared/crud_requests_select.sql", idempotency.SELECT_SQL),
         ("crud/shared/crud_requests_insert.sql", idempotency.INSERT_SQL),
     ],

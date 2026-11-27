@@ -11,8 +11,9 @@ import (
 
 // Codes are the problem codes of the inventory's routes and activities, with their status,
 // as inventory/problems.py PROBLEMS writes them: type problem.Base plus the code, and the
-// code as a member. bad_property_schema and the entity reference codes keep the entities'
-// type. K1's new codes (R-K1-23): step_not_applicable, step_incomplete, handler_not_built,
+// code as a member. bad_property_schema, the entity reference codes and the two property
+// codes of an item create or save (R-K1-33), missing_required_properties (members missing
+// and invalid: [{key, reason}]) and bad_property_value, keep the entities' type. K1's new codes (R-K1-23): step_not_applicable, step_incomplete, handler_not_built,
 // wrong_counting and recost_orders_moved (409); steps_invalid, class_changed, class_open,
 // class_invalid and bad_input (422). A steps_invalid answer lists problems: [{owner?, step,
 // handler, reason, missing?}]; a class_changed answer names the key it changes (owner, key,
@@ -30,6 +31,7 @@ var Codes = map[string]int{
 	"kind_cycle": 422, "bad_quantity": 422, "bad_property_schema": 422, "bad_entity_ref": 422,
 	"unknown_entity_kind": 422, "steps_invalid": 422, "class_changed": 422, "class_open": 422,
 	"class_invalid": 422, "bad_input": 422, "bad_limit": 422,
+	"missing_required_properties": 422, "bad_property_value": 422,
 	// 500: an activity that Temporal closed without an answer (an operation's error only).
 	"inventory_activity_failed": 500,
 }

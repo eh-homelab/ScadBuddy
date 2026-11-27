@@ -475,9 +475,11 @@ func numbered(text string) string {
 
 func TestSharedStatementsMatch(t *testing.T) {
 	for path, ours := range map[string]string{
-		"entities/shared/ensure_entity.sql":    ensureEntitySQL,
-		"crud/shared/crud_requests_select.sql": requestSelectSQL,
-		"crud/shared/crud_requests_insert.sql": requestInsertSQL,
+		"entities/shared/ensure_entity.sql":          ensureEntitySQL,
+		"entities/shared/entity_property_upsert.sql": upsertPropertySQL,
+		"entities/shared/entity_property_delete.sql": deletePropertySQL,
+		"crud/shared/crud_requests_select.sql":       requestSelectSQL,
+		"crud/shared/crud_requests_insert.sql":       requestInsertSQL,
 	} {
 		if got := normalize(ours); got != shared(t, path) {
 			t.Errorf("%s:\n go:   %s\n file: %s", path, got, shared(t, path))

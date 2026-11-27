@@ -3,7 +3,9 @@ package store
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"reflect"
+	"regexp"
 	"slices"
 	"strings"
 	"sync"
@@ -382,9 +384,81 @@ func TestAnEmptyLotOfUnknownCostIsNotUnknown(t *testing.T) {
 
 // What K1 adds.
 
+var opaqueKindID = regexp.MustCompile(`^k[0-9a-f]{32}$`)
+
+func TestACodeFindsAKindByNameInAnyCase(t *testing.T) {
+	pool, s := testdb.New(t), itemStore()
+	if _, err := pool.Exec(context.Background(), `INSERT INTO item_kinds (id, name, parent_id, tracking, life_basis)
+		VALUES ('k0123456789abcdef0123456789abcdef', 'P1S', 'printer', 'unit', 'none')`); err != nil {
+		t.Fatal(err)
+	}
+	made := must(createItem(t, pool, s, wire.ItemInput{KindID: "nozzle", Name: "nozzle", CompatibleWith: []string{" p1s "}}))
+	if n := count(t, pool, `SELECT count(*) FROM item_kinds WHERE parent_id = 'printer' AND lower(name) = 'p1s'`); n != 1 {
+		t.Fatalf("%d kinds for p1s", n)
+	}
+	if !reflect.DeepEqual(made.CompatibleWith, []string{"P1S"}) {
+		t.Fatalf("made %v", made.CompatibleWith)
+	}
+	if n := count(t, pool, `SELECT count(*) FROM relations r JOIN entities o ON o.id = r.to_entity
+		WHERE r.type_id = 'compatible_with' AND o.kind = 'item_kind' AND o.ref = 'k0123456789abcdef0123456789abcdef'`); n != 1 {
+		t.Fatalf("%d relations to the existing kind", n)
+	}
+}
+
+func TestCompatibleFilterMatchesTheNameInAnyCase(t *testing.T) {
+	pool, s := testdb.New(t), itemStore()
+	made := must(createItem(t, pool, s, wire.ItemInput{KindID: "nozzle", Name: "nozzle", CompatibleWith: []string{"H2C"}}))
+	for _, code := range []string{"h2c", " H2c "} {
+		if got := itemIDs(listItems(t, pool, s, ItemFilter{Compatible: code})); !reflect.DeepEqual(got, []string{made.ID}) {
+			t.Fatalf("%q lists %v", code, got)
+		}
+	}
+	// A kind's id is never a code.
+	var id string
+	if err := pool.QueryRow(context.Background(), `SELECT id FROM item_kinds WHERE parent_id = 'printer' AND name = 'H2C'`).Scan(&id); err != nil {
+		t.Fatal(err)
+	}
+	if got := listItems(t, pool, s, ItemFilter{Compatible: id}); len(got) != 0 {
+		t.Fatalf("the id lists %v", itemIDs(got))
+	}
+}
+
+func TestTwoWritesOfOneNewCodeMakeOneKind(t *testing.T) {
+	pool, s := testdb.New(t), itemStore()
+	var wg sync.WaitGroup
+	errs := make([]error, 8)
+	for i := range errs {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			code := "X1C"
+			if i%2 == 1 {
+				code = " x1c"
+			}
+			_, errs[i] = createItem(t, pool, s, wire.ItemInput{KindID: "nozzle", Name: fmt.Sprintf("nozzle %d", i), CompatibleWith: []string{code}})
+		}()
+	}
+	wg.Wait()
+	for _, err := range errs {
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+	if n := count(t, pool, `SELECT count(*) FROM item_kinds WHERE parent_id = 'printer' AND lower(name) = 'x1c'`); n != 1 {
+		t.Fatalf("%d kinds for x1c", n)
+	}
+}
+
 func TestCompatibleWithBecomesRelations(t *testing.T) {
 	pool, s, k := testdb.New(t), itemStore(), kindStore()
 	made := must(createItem(t, pool, s, wire.ItemInput{KindID: "nozzle", Name: "0.4 nozzle", CompatibleWith: []string{"H2C"}}))
+	var h2c string
+	if err := pool.QueryRow(context.Background(), `SELECT id FROM item_kinds WHERE parent_id = 'printer' AND name = 'H2C'`).Scan(&h2c); err != nil {
+		t.Fatal(err)
+	}
+	if !opaqueKindID.MatchString(h2c) {
+		t.Fatalf("the model kind id %q is not opaque", h2c)
+	}
 	if !reflect.DeepEqual(made.CompatibleWith, []string{"H2C"}) {
 		t.Fatalf("made %v", made.CompatibleWith)
 	}
@@ -396,7 +470,7 @@ func TestCompatibleWithBecomesRelations(t *testing.T) {
 	}
 	if n := count(t, pool, `SELECT count(*) FROM relations r JOIN entities f ON f.id = r.from_entity
 		JOIN entities o ON o.id = r.to_entity WHERE r.type_id = 'compatible_with' AND r.ended_at IS NULL
-		AND f.kind = 'item' AND f.ref = $1 AND o.kind = 'item_kind' AND o.ref = 'printer_h2c'`, made.ID); n != 1 {
+		AND f.kind = 'item' AND f.ref = $1 AND o.kind = 'item_kind' AND o.ref = $2`, made.ID, h2c); n != 1 {
 		t.Fatalf("%d relations", n)
 	}
 
@@ -404,9 +478,13 @@ func TestCompatibleWithBecomesRelations(t *testing.T) {
 	if !reflect.DeepEqual(updated.CompatibleWith, []string{"H2C", "P1S"}) {
 		t.Fatalf("updated %v", updated.CompatibleWith)
 	}
-	p1s := getKind(t, pool, k, "printer_p1s")
-	if p1s.Name != "P1S" || p1s.ParentID == nil || *p1s.ParentID != "printer" || p1s.Tracking != "unit" || p1s.LifeBasis != "hours" {
-		t.Fatalf("printer_p1s %+v", p1s)
+	var p1sID string
+	if err := pool.QueryRow(context.Background(), `SELECT id FROM item_kinds WHERE parent_id = 'printer' AND name = 'P1S'`).Scan(&p1sID); err != nil {
+		t.Fatal(err)
+	}
+	p1s := getKind(t, pool, k, p1sID)
+	if !opaqueKindID.MatchString(p1s.ID) || p1s.Name != "P1S" || p1s.ParentID == nil || *p1s.ParentID != "printer" || p1s.Tracking != "unit" || p1s.LifeBasis != "hours" {
+		t.Fatalf("P1S kind %+v", p1s)
 	}
 	updated = must(updateItem(t, pool, s, made.ID, wire.InventoryItemPatch{CompatibleWith: &[]string{"P1S"}}))
 	if !reflect.DeepEqual(updated.CompatibleWith, []string{"P1S"}) {
@@ -448,45 +526,298 @@ func (r *recorder) take() []string {
 	return out
 }
 
-func TestAnItemNamesItsMissingProperties(t *testing.T) {
-	pool := testdb.New(t)
-	// A stand-in for filament_spool, whose items stay refused until K3: a special type that
-	// requires two properties.
+// tagged is a kind under hardware whose schema requires material, of a test special type
+// (a stand-in for filament_spool, whose items stay refused until K3) that requires
+// diameter_mm. Its stores resolve through rec.
+func tagged(t *testing.T, pool *pgxpool.Pool) (*Kinds, *Items, *recorder) {
+	t.Helper()
 	cat := handlers.Builtin()
 	cat.Special["tagged_part"] = handlers.SpecialType{
 		ID:                 "tagged_part",
 		Needs:              model.Class{Nature: "physical", Role: "consumable", Counting: "lot"},
-		RequiresProperties: []string{"rgba", "diameter_mm"},
+		RequiresProperties: []string{"diameter_mm"},
 	}
 	rec := &recorder{Catalog: cat}
 	k, s := &Kinds{Cat: rec}, &Items{Cat: rec}
-
 	must(createKind(t, pool, k, wire.KindInput{
 		ID: "tagged", Name: "Tagged", ParentID: ptr("hardware"), SpecialType: ptr("tagged_part"),
-		AttributeSchema: json.RawMessage(`{"type": "object", "properties": {"material": {"type": "string"}}, "required": ["material"]}`),
+		AttributeSchema: json.RawMessage(`{"type": "object", "properties": {"material": {"type": "string"},
+			"diameter_mm": {"type": "number"}, "weight_g": {"type": "number"}, "flag": {"type": "boolean"},
+			"tags": {"type": "array", "items": {"type": "string"}}}, "required": ["material"]}`),
 	}))
-	if got := rec.take(); !reflect.DeepEqual(got, []string{"ResolveKind"}) {
-		t.Fatalf("a kind save called %v", got)
+	return k, s, rec
+}
+
+// props is a property patch of Go values.
+func props(t *testing.T, values map[string]any) wire.PropertyPatch {
+	t.Helper()
+	out := wire.PropertyPatch{}
+	for k, v := range values {
+		b, err := json.Marshal(v)
+		if err != nil {
+			t.Fatal(err)
+		}
+		out[k] = b
 	}
-	made := must(createItem(t, pool, s, wire.ItemInput{KindID: "tagged", Name: "Tagged bolt"}))
+	return out
+}
+
+// incompleteness is a missing_required_properties refusal's two lists: the missing keys and
+// the invalid ones as key: reason.
+func incompleteness(t *testing.T, err error) (missing []string, invalid []string) {
+	t.Helper()
+	r := refusal(t, err, 422, "missing_required_properties")
+	if r.Type != "https://scadbuddy.dev/problems/entities/missing_required_properties" {
+		t.Fatalf("type %q", r.Type)
+	}
+	missing, _ = r.Fields["missing"].([]string)
+	list, _ := r.Fields["invalid"].([]Invalid)
+	if missing == nil || list == nil {
+		t.Fatalf("fields %#v", r.Fields)
+	}
+	invalid = []string{}
+	for _, i := range list {
+		invalid = append(invalid, i.Key+": "+i.Reason)
+	}
+	return missing, invalid
+}
+
+// storedProps is the item's stored properties, by key, as JSON text.
+func storedProps(t *testing.T, pool *pgxpool.Pool, itemID string) map[string]string {
+	t.Helper()
+	rows, err := pool.Query(context.Background(), `SELECT p.key, p.value::text FROM entity_properties p
+		JOIN entities e ON e.id = p.entity_id WHERE e.kind = 'item' AND e.ref = $1`, itemID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	out := map[string]string{}
+	for rows.Next() {
+		var k, v string
+		if err := rows.Scan(&k, &v); err != nil {
+			t.Fatal(err)
+		}
+		out[k] = v
+	}
+	return out
+}
+
+func TestAnItemWithoutARequiredPropertyIsRefused(t *testing.T) {
+	pool := testdb.New(t)
+	_, s, _ := tagged(t, pool)
+	_, err := createItem(t, pool, s, wire.ItemInput{KindID: "tagged", Name: "Tagged bolt"})
+	missing, invalid := incompleteness(t, err)
+	if !reflect.DeepEqual(missing, []string{"diameter_mm", "material"}) || len(invalid) != 0 {
+		t.Fatalf("missing %v, invalid %v", missing, invalid)
+	}
+	r := refusal(t, err, 422, "missing_required_properties")
+	if r.Detail != "missing required properties: diameter_mm, material" {
+		t.Fatalf("detail %q", r.Detail)
+	}
+	if n := count(t, pool, `SELECT count(*) FROM items WHERE name = 'Tagged bolt'`); n != 0 {
+		t.Fatal("a refused create left its item")
+	}
+	if n := count(t, pool, `SELECT count(*) FROM entities WHERE kind = 'item'`); n != 0 {
+		t.Fatal("a refused create left an entities row")
+	}
+}
+
+func TestAnItemCreatedWithItsPropertiesSaves(t *testing.T) {
+	pool := testdb.New(t)
+	_, s, rec := tagged(t, pool)
+	rec.take()
+	made := must(createItem(t, pool, s, wire.ItemInput{KindID: "tagged", Name: "Tagged bolt",
+		Properties: props(t, map[string]any{"material": "PLA", "diameter_mm": 1.75})}))
 	if got := rec.take(); !slices.Contains(got, "Resolve") || slices.Contains(got, "ResolveKind") {
 		t.Fatalf("an item save called %v", got)
 	}
-	want := []string{"diameter_mm", "material", "rgba"}
-	if !reflect.DeepEqual(made.MissingProperties, want) || made.SpecialType == nil || *made.SpecialType != "tagged_part" {
-		t.Fatalf("made: missing %v, special %v", made.MissingProperties, made.SpecialType)
+	if made.MissingProperties == nil || len(made.MissingProperties) != 0 || made.InvalidProperties == nil ||
+		len(made.InvalidProperties) != 0 || made.SpecialType == nil || *made.SpecialType != "tagged_part" {
+		t.Fatalf("missing %#v, invalid %#v, special %v", made.MissingProperties, made.InvalidProperties, made.SpecialType)
 	}
-	if n := count(t, pool, `SELECT count(*) FROM items WHERE id = $1`, made.ID); n != 1 {
-		t.Fatal("a missing property refused the save")
+	if n := count(t, pool, `SELECT count(*) FROM entity_properties p JOIN entities e ON e.id = p.entity_id
+		WHERE e.kind = 'item' AND e.ref = $1 AND p.source = 'manual' AND p.updated_by = $2::jsonb`, made.ID, browser); n != 2 {
+		t.Fatalf("%d manual rows by the actor, want 2", n)
 	}
+	if n := count(t, pool, `SELECT count(*) FROM events WHERE kind = 'entity_property.changed'
+		AND payload->>'ref' = $1 AND payload->'actor' = $2::jsonb`, made.ID, browser); n != 2 {
+		t.Fatalf("%d events by the actor, want 2", n)
+	}
+}
 
-	setProps(t, pool, made.ID, map[string]any{"material": "steel", "rgba": "FF0000FF"})
-	if got := getItem(t, pool, s, made.ID).MissingProperties; !reflect.DeepEqual(got, []string{"diameter_mm"}) {
-		t.Fatalf("after two: %v", got)
+func TestAFalseOrZeroIsAValue(t *testing.T) {
+	pool := testdb.New(t)
+	k, s, _ := tagged(t, pool)
+	must(updateKind(t, pool, k, "tagged", wire.KindPatch{AttributeSchema: json.RawMessage(`{"type": "object",
+		"properties": {"material": {"type": "string"}, "diameter_mm": {"type": "number"}, "flag": {"type": "boolean"},
+		"tags": {"type": "array", "items": {"type": "string"}}}, "required": ["material", "flag", "tags"]}`)}))
+	made := must(createItem(t, pool, s, wire.ItemInput{KindID: "tagged", Name: "Zero",
+		Properties: props(t, map[string]any{"material": "PLA", "diameter_mm": 0, "flag": false, "tags": []string{"a"}})}))
+	if len(made.MissingProperties) != 0 {
+		t.Fatalf("missing %v", made.MissingProperties)
 	}
-	setProps(t, pool, made.ID, map[string]any{"diameter_mm": 1.75})
-	if got := getItem(t, pool, s, made.ID).MissingProperties; got == nil || len(got) != 0 {
-		t.Fatalf("after all: %#v", got)
+	_, err := createItem(t, pool, s, wire.ItemInput{KindID: "tagged", Name: "Blank",
+		Properties: props(t, map[string]any{"material": "  ", "diameter_mm": 0, "flag": false, "tags": []string{}})})
+	if missing, _ := incompleteness(t, err); !reflect.DeepEqual(missing, []string{"material", "tags"}) {
+		t.Fatalf("missing %v", missing)
+	}
+}
+
+func TestASentValueThatDoesNotFitIsRefused(t *testing.T) {
+	pool := testdb.New(t)
+	_, s, _ := tagged(t, pool)
+	_, err := createItem(t, pool, s, wire.ItemInput{KindID: "tagged", Name: "Heavy",
+		Properties: props(t, map[string]any{"material": "PLA", "diameter_mm": 1.75, "weight_g": "heavy"})})
+	r := refusal(t, err, 422, "bad_property_value")
+	if r.Detail != "property 'weight_g': does not fit 'type'" ||
+		r.Type != "https://scadbuddy.dev/problems/entities/bad_property_value" {
+		t.Fatalf("%q %q", r.Detail, r.Type)
+	}
+	if n := count(t, pool, `SELECT count(*) FROM items WHERE name = 'Heavy'`); n != 0 {
+		t.Fatal("a refused create left its item")
+	}
+	if n := count(t, pool, `SELECT count(*) FROM entity_properties`); n != 0 {
+		t.Fatal("a refused create left a property")
+	}
+}
+
+func TestTooManyKeysIsRefused(t *testing.T) {
+	pool := testdb.New(t)
+	_, s, _ := tagged(t, pool)
+	values := map[string]any{"material": "PLA", "diameter_mm": 1.75}
+	for i := len(values); i < 201; i++ {
+		values[fmt.Sprintf("key_%03d", i)] = "x"
+	}
+	_, err := createItem(t, pool, s, wire.ItemInput{KindID: "tagged", Name: "Many", Properties: props(t, values)})
+	if r := refusal(t, err, 422, "bad_property_value"); r.Detail != "property '*': an entity has at most 200 keys" {
+		t.Fatalf("%q", r.Detail)
+	}
+}
+
+// plainItem is an item of a kind whose schema defines mpn, which the kind then requires: an
+// item made before its kind required mpn.
+func plainItem(t *testing.T, pool *pgxpool.Pool) (*Items, wire.Item) {
+	t.Helper()
+	k, s := kindStore(), itemStore()
+	must(createKind(t, pool, k, wire.KindInput{ID: "plain", Name: "Plain", ParentID: ptr("hardware"),
+		AttributeSchema: schema(map[string]any{"mpn": map[string]any{"type": "string"}})}))
+	made := must(createItem(t, pool, s, wire.ItemInput{KindID: "plain", Name: "Old"}))
+	must(updateKind(t, pool, k, "plain", wire.KindPatch{AttributeSchema: json.RawMessage(
+		`{"type": "object", "properties": {"mpn": {"type": "string"}}, "required": ["mpn"]}`)}))
+	if got := getItem(t, pool, s, made.ID); !reflect.DeepEqual(got.MissingProperties, []string{"mpn"}) {
+		t.Fatalf("missing %v", got.MissingProperties)
+	}
+	return s, made
+}
+
+func TestASaveIsCheckedAgainstTheStoredProperties(t *testing.T) {
+	pool := testdb.New(t)
+	s, made := plainItem(t, pool)
+	_, err := updateItem(t, pool, s, made.ID, wire.InventoryItemPatch{Name: ptr("New")})
+	if missing, _ := incompleteness(t, err); !reflect.DeepEqual(missing, []string{"mpn"}) {
+		t.Fatalf("missing %v", missing)
+	}
+	if got := getItem(t, pool, s, made.ID); got.Name != "Old" {
+		t.Fatalf("a refused save renamed the item to %q", got.Name)
+	}
+	saved := must(updateItem(t, pool, s, made.ID, wire.InventoryItemPatch{Name: ptr("New"),
+		Properties: props(t, map[string]any{"mpn": "A1"})}))
+	if saved.Name != "New" || len(saved.MissingProperties) != 0 {
+		t.Fatalf("%q %v", saved.Name, saved.MissingProperties)
+	}
+}
+
+func TestASaveThatChangesNothingIsStillChecked(t *testing.T) {
+	pool := testdb.New(t)
+	s, made := plainItem(t, pool)
+	_, err := updateItem(t, pool, s, made.ID, wire.InventoryItemPatch{Name: ptr(made.Name)})
+	refusal(t, err, 422, "missing_required_properties")
+}
+
+func TestAStoredValueThatNoLongerFitsIsInvalid(t *testing.T) {
+	pool := testdb.New(t)
+	k, s := kindStore(), itemStore()
+	must(createKind(t, pool, k, wire.KindInput{ID: "painted", Name: "Painted", ParentID: ptr("hardware"),
+		AttributeSchema: schema(map[string]any{"colour": map[string]any{"enum": []string{"red", "green"}}})}))
+	made := must(createItem(t, pool, s, wire.ItemInput{KindID: "painted", Name: "Red bolt",
+		Properties: props(t, map[string]any{"colour": "red"})}))
+	must(updateKind(t, pool, k, "painted", wire.KindPatch{AttributeSchema: schema(map[string]any{
+		"colour": map[string]any{"enum": []string{"green"}}})}))
+	if got := getItem(t, pool, s, made.ID); !reflect.DeepEqual(got.InvalidProperties, []string{"colour"}) ||
+		len(got.MissingProperties) != 0 {
+		t.Fatalf("invalid %v, missing %v", got.InvalidProperties, got.MissingProperties)
+	}
+	_, err := updateItem(t, pool, s, made.ID, wire.InventoryItemPatch{Note: ptr("n")})
+	missing, invalid := incompleteness(t, err)
+	if len(missing) != 0 || !reflect.DeepEqual(invalid, []string{"colour: does not fit 'enum'"}) {
+		t.Fatalf("missing %v, invalid %v", missing, invalid)
+	}
+	if r := refusal(t, err, 422, "missing_required_properties"); r.Detail != "properties that do not fit: colour" {
+		t.Fatalf("detail %q", r.Detail)
+	}
+}
+
+func TestARemoveOfARequiredKeyIsRefused(t *testing.T) {
+	pool := testdb.New(t)
+	_, s, _ := tagged(t, pool)
+	made := must(createItem(t, pool, s, wire.ItemInput{KindID: "tagged", Name: "Bolt",
+		Properties: props(t, map[string]any{"material": "PLA", "diameter_mm": 1.75})}))
+	_, err := updateItem(t, pool, s, made.ID, wire.InventoryItemPatch{Properties: wire.PropertyPatch{"material": json.RawMessage("null")}})
+	if missing, _ := incompleteness(t, err); !reflect.DeepEqual(missing, []string{"material"}) {
+		t.Fatalf("missing %v", missing)
+	}
+	if got := storedProps(t, pool, made.ID); got["material"] != `"PLA"` {
+		t.Fatalf("stored %v", got)
+	}
+}
+
+func TestAnEmptyPatchIsNotChecked(t *testing.T) {
+	pool := testdb.New(t)
+	s, made := plainItem(t, pool)
+	var before, after string
+	q := `SELECT updated_at::text FROM items WHERE id = $1::uuid`
+	if err := pool.QueryRow(context.Background(), q, made.ID).Scan(&before); err != nil {
+		t.Fatal(err)
+	}
+	got := must(updateItem(t, pool, s, made.ID, wire.InventoryItemPatch{}))
+	if got.Name != "Old" || !reflect.DeepEqual(got.MissingProperties, []string{"mpn"}) {
+		t.Fatalf("%+v", got)
+	}
+	if err := pool.QueryRow(context.Background(), q, made.ID).Scan(&after); err != nil {
+		t.Fatal(err)
+	}
+	if before != after {
+		t.Fatal("an empty patch wrote the item")
+	}
+}
+
+func TestArchiveAndRestoreAreNotChecked(t *testing.T) {
+	pool := testdb.New(t)
+	s, made := plainItem(t, pool)
+	if got := must(archiveItem(t, pool, s, made.ID)); got.ArchivedAt == nil {
+		t.Fatal("not archived")
+	}
+	if got := must(restoreItem(t, pool, s, made.ID)); got.ArchivedAt != nil {
+		t.Fatal("not restored")
+	}
+}
+
+func TestAnArchivedItemIsNeverMarked(t *testing.T) {
+	pool := testdb.New(t)
+	s, made := plainItem(t, pool)
+	setProps(t, pool, made.ID, map[string]any{"mpn": 5})
+	if got := getItem(t, pool, s, made.ID); len(got.MissingProperties) != 0 || !reflect.DeepEqual(got.InvalidProperties, []string{"mpn"}) {
+		t.Fatalf("missing %v, invalid %v", got.MissingProperties, got.InvalidProperties)
+	}
+	must(archiveItem(t, pool, s, made.ID))
+	got := getItem(t, pool, s, made.ID)
+	listed := listItems(t, pool, s, ItemFilter{Archived: true})
+	if len(listed) != 1 {
+		t.Fatalf("%d items", len(listed))
+	}
+	for _, it := range []wire.Item{got, listed[0]} {
+		if it.MissingProperties == nil || len(it.MissingProperties) != 0 || it.InvalidProperties == nil || len(it.InvalidProperties) != 0 {
+			t.Fatalf("missing %#v, invalid %#v", it.MissingProperties, it.InvalidProperties)
+		}
 	}
 }
 

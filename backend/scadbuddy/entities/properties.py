@@ -15,6 +15,7 @@ import re
 from collections.abc import Collection, Mapping
 from dataclasses import dataclass
 from datetime import datetime
+from pathlib import Path
 from typing import Any, Literal
 
 from jsonschema import Draft202012Validator
@@ -105,6 +106,11 @@ KEY_TYPES = frozenset({"string", "number", "integer", "boolean", "array"})
 ITEM_TYPES = frozenset({"string"})
 #: The only `$schema` a schema may name.
 DRAFT_2020_12 = "https://json-schema.org/draft/2020-12/schema"
+#: The statements `apply_on` runs to set and to remove a key. Go's ``scadbuddy-core`` runs
+#: the same texts for an item's properties (#7667 §5.1, #6949 K1), and each language
+#: compares its text with these files.
+UPSERT_PROPERTY_SQL = (Path(__file__).parent / "shared" / "entity_property_upsert.sql").read_text()
+DELETE_PROPERTY_SQL = (Path(__file__).parent / "shared" / "entity_property_delete.sql").read_text()
 
 PropertyValue = str | float | int | bool | list[str]
 
@@ -535,18 +541,9 @@ class EntityPropertyStore:
         actor = Jsonb(by.model_dump(mode="json"))
         for key, value in patch.set.items():
             if value is None:
-                conn.execute(
-                    "DELETE FROM entity_properties WHERE entity_id = %s AND key = %s",
-                    (entity_id, key),
-                )
+                conn.execute(DELETE_PROPERTY_SQL, (entity_id, key))
                 continue
-            conn.execute(
-                "INSERT INTO entity_properties (entity_id, key, value, source, updated_by)"
-                " VALUES (%s, %s, %s, 'manual', %s) ON CONFLICT (entity_id, key) DO UPDATE"
-                " SET value = EXCLUDED.value, source = 'manual',"
-                " updated_at = clock_timestamp(), updated_by = EXCLUDED.updated_by",
-                (entity_id, key, Jsonb(value), actor),
-            )
+            conn.execute(UPSERT_PROPERTY_SQL, (entity_id, key, Jsonb(value), actor))
         rows = conn.execute(_LIST, (entity_id,)).fetchall()
         if len(rows) > max(MAX_KEYS, len(before)):
             raise BadPropertyValue("*", f"an entity has at most {MAX_KEYS} keys")

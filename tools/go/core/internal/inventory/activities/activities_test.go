@@ -236,6 +236,95 @@ func TestABadInputIsA422AndNotARetry(t *testing.T) {
 	}
 }
 
+// strictKind is a kind under hardware whose schema requires material.
+func strictKind(f *fixture) {
+	f.t.Helper()
+	f.call("inventory.KindCreate", 201, nil, map[string]any{"id": "strict", "name": "Strict", "parent_id": "hardware",
+		"attribute_schema": map[string]any{"type": "object", "properties": map[string]any{"material": map[string]any{"type": "string"}},
+			"required": []string{"material"}}})
+}
+
+func TestItemCreateCarriesProperties(t *testing.T) {
+	f := newFixture(t)
+	strictKind(f)
+	key := newKey()
+	body := map[string]any{"kind_id": "strict", "name": "Bolt", "properties": map[string]any{"material": "steel"}}
+	var answers []store.Answer
+	for range 2 {
+		answer, err := f.tryKey("inventory.ItemCreate", key, nil, body)
+		if err != nil {
+			t.Fatal(err)
+		}
+		answers = append(answers, answer)
+	}
+	if answers[0].Status != 201 || !bytes.Equal(answers[0].Body, answers[1].Body) {
+		t.Fatalf("%d %s\n%s", answers[0].Status, answers[0].Body, answers[1].Body)
+	}
+	var made map[string]any
+	if err := json.Unmarshal(answers[0].Body, &made); err != nil {
+		t.Fatal(err)
+	}
+	if fmt.Sprint(made["missing_properties"], made["invalid_properties"]) != "[] []" {
+		t.Fatalf("%v", made)
+	}
+	for sql, want := range map[string]int{
+		`SELECT count(*) FROM items WHERE name = 'Bolt'`:                                                  1,
+		`SELECT count(*) FROM entity_properties p JOIN entities e ON e.id = p.entity_id WHERE e.ref = $1`: 1,
+		`SELECT count(*) FROM events WHERE kind = 'entity_property.changed' AND payload->>'ref' = $1`:     1,
+	} {
+		var n int
+		args := []any{id(made)}
+		if !strings.Contains(sql, "$1") {
+			args = nil
+		}
+		if err := f.pool.QueryRow(context.Background(), sql, args...).Scan(&n); err != nil || n != want {
+			t.Fatalf("%s: %d %v, want %d", sql, n, err, want)
+		}
+	}
+}
+
+func TestAMissingPropertyIsAnAnswerNotAFailure(t *testing.T) {
+	f := newFixture(t)
+	strictKind(f)
+	key := newKey()
+	body := map[string]any{"kind_id": "strict", "name": "Bolt"}
+	first, err := f.tryKey("inventory.ItemCreate", key, nil, body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var problem map[string]any
+	if err := json.Unmarshal(first.Body, &problem); err != nil {
+		t.Fatal(err)
+	}
+	if first.Status != 422 || problem["code"] != "missing_required_properties" ||
+		problem["type"] != "https://scadbuddy.dev/problems/entities/missing_required_properties" ||
+		fmt.Sprint(problem["missing"], problem["invalid"]) != "[material] []" {
+		t.Fatalf("%d %s", first.Status, first.Body)
+	}
+	f.keep("ItemCreateMissingProperties", first.Body)
+	rows := func() int {
+		var n int
+		if err := f.pool.QueryRow(context.Background(), `SELECT count(*) FROM crud_requests WHERE key = $1`, key).Scan(&n); err != nil {
+			t.Fatal(err)
+		}
+		return n
+	}
+	if n := rows(); n != 1 {
+		t.Fatalf("%d crud_requests rows", n)
+	}
+	// The kind no longer requires material, so a store that ran again would save the item.
+	f.call("inventory.KindUpdate", 200, p("kind_id", "strict"), map[string]any{"attribute_schema": map[string]any{"type": "object",
+		"properties": map[string]any{"material": map[string]any{"type": "string"}}}})
+	second, err := f.tryKey("inventory.ItemCreate", key, nil, body)
+	if err != nil || second.Status != 422 || !bytes.Equal(first.Body, second.Body) || rows() != 1 {
+		t.Fatalf("%d %s %v", second.Status, second.Body, err)
+	}
+	var n int
+	if err := f.pool.QueryRow(context.Background(), `SELECT count(*) FROM items WHERE name = 'Bolt'`).Scan(&n); err != nil || n != 0 {
+		t.Fatalf("%d items %v", n, err)
+	}
+}
+
 // Ports of phase 2's tests/api/test_inventory_stock.py.
 
 func TestALotRoundTripsThroughUseAdjustAndCount(t *testing.T) {
@@ -564,6 +653,7 @@ func TestTheAnswersMatchTheirGoldenFiles(t *testing.T) {
 		func(t *testing.T) *fixture { return golden(t, TestGiveBackAndRecostAnswerAsPhase2) },
 		func(t *testing.T) *fixture { return golden(t, TestAKindRoundTrips) },
 		func(t *testing.T) *fixture { return golden(t, TestAnItemRoundTrips) },
+		func(t *testing.T) *fixture { return golden(t, TestAMissingPropertyIsAnAnswerNotAFailure) },
 	} {
 		for k, v := range run(t).answers {
 			if _, ok := all[k]; !ok {
@@ -571,7 +661,7 @@ func TestTheAnswersMatchTheirGoldenFiles(t *testing.T) {
 			}
 		}
 	}
-	want := []string{"ItemKind", "KindList", "Item", "ItemList", "Lot", "LotList", "Unit", "UnitList", "MoveList", "KindSchema", "RecostResult"}
+	want := []string{"ItemKind", "KindList", "Item", "ItemList", "Lot", "LotList", "Unit", "UnitList", "MoveList", "KindSchema", "RecostResult", "ItemCreateMissingProperties"}
 	for _, n := range names {
 		want = append(want, strings.TrimPrefix(n, "inventory."))
 	}
