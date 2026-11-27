@@ -19,6 +19,7 @@ const spools = `${BASE}/spools`
 const types = `${BASE}/types`
 const suppliers = `${BASE}/suppliers`
 const invoices = `${BASE}/invoices`
+const presets = `${BASE}/presets`
 const shoppingList = `${BASE}/shopping-list`
 const catalog = `${BASE}/catalog`
 
@@ -43,6 +44,9 @@ export const filamentLinks = {
   types,
   newType: `${types}/new`,
   type: (id: string) => at(types, id),
+  /** #7204 — the Presets tab, and a preset's page (its id is a number). */
+  presets,
+  preset: (id: number | string) => at(presets, id),
   suppliers,
   supplier: (id: string) => at(suppliers, id),
   /** A supplier's product or price sheet row: both live on the supplier's page. */

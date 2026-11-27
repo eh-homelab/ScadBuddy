@@ -32,6 +32,8 @@ expect true  agent/test/fixtures/rate-limit-reset-vectors.json
 expect true  backend/tests/fixtures/plugin-seal-vectors.json
 expect true  backend/tests/fixtures/workspace-seal-vectors.json
 expect true  backend/tests/fixtures/auth-vectors.json
+expect true  backend/tests/fixtures/filament-preset-vectors.json
+expect true  test-fixtures/filament/preset-wire.json
 expect true  backend/tests/fixtures/unknown-tray-vectors.json
 expect true  backend/tests/fixtures/unknown-trays-block.json
 expect false backend/tests/fixtures/secret-vectors.json

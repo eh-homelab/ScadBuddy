@@ -42,6 +42,7 @@ import (
 	"github.com/eh-homelab/ScadBuddy/tools/go/core/internal/escalations"
 	"github.com/eh-homelab/ScadBuddy/tools/go/core/internal/events"
 	"github.com/eh-homelab/ScadBuddy/tools/go/core/internal/fetchgrants"
+	"github.com/eh-homelab/ScadBuddy/tools/go/core/internal/filamentpresets"
 	"github.com/eh-homelab/ScadBuddy/tools/go/core/internal/fleet"
 	"github.com/eh-homelab/ScadBuddy/tools/go/core/internal/forget"
 	"github.com/eh-homelab/ScadBuddy/tools/go/core/internal/front"
@@ -56,6 +57,7 @@ import (
 	"github.com/eh-homelab/ScadBuddy/tools/go/core/internal/publish"
 	"github.com/eh-homelab/ScadBuddy/tools/go/core/internal/questions"
 	"github.com/eh-homelab/ScadBuddy/tools/go/core/internal/realtime"
+	"github.com/eh-homelab/ScadBuddy/tools/go/core/internal/scan"
 	"github.com/eh-homelab/ScadBuddy/tools/go/core/internal/seal"
 	"github.com/eh-homelab/ScadBuddy/tools/go/core/internal/secrets"
 	"github.com/eh-homelab/ScadBuddy/tools/go/core/internal/sessions"
@@ -278,7 +280,7 @@ var areaPackages = []areaRoutes{
 type publicAreas func(pool *pgxpool.Pool, keys *seal.Keys) map[string][]auth.Public
 
 // publicPackages are the packages with public areas.
-var publicPackages = []publicAreas{unknowntrays.Public}
+var publicPackages = []publicAreas{scan.PublicAreas, unknowntrays.Public}
 
 // mirrorBlobs is the blob store as area package-mirrors calls it (packages.Blobs): a
 // publish to a key that names a blob is packages.ErrStale.
@@ -403,6 +405,8 @@ func newRouter(pool *pgxpool.Pool, next http.Handler, keys *seal.Keys, areas, au
 			more[name] = append(more[name], routes...)
 		}
 	}
+	// Naming filament-presets twice mounts it once: a pattern given twice panics.
+	presetsMounted := false
 	// Naming both `unknown-trays` and `unknown-trays:read` mounts the area once.
 	unknownTraysMounted := false
 	for name := range strings.SplitSeq(areas, ",") {
@@ -429,6 +433,23 @@ func newRouter(pool *pgxpool.Pool, next http.Handler, keys *seal.Keys, areas, au
 				return nil, fmt.Errorf("SCADBUDDY_CORE_AREAS names %q, which needs %s", name, seal.Variable)
 			}
 			router.AddShared(blobstore.Area, blobstore.Routes(pool, keys, lookupEnv, tel)...)
+		case filamentpresets.Area:
+			// Public routes that read documents from the blob store, whose S3 secret is
+			// sealed under the KEK. publicPackages pass no lookupEnv or tel, so the case is
+			// its own.
+			if keys == nil {
+				return nil, fmt.Errorf("SCADBUDDY_CORE_AREAS names %q, which needs %s", name, seal.Variable)
+			}
+			if presetsMounted {
+				break
+			}
+			presetsMounted = true
+			store := filamentpresets.Store(blobstore.New(pool, keys, lookupEnv, tel))
+			for _, p := range filamentpresets.Public(pool, store) {
+				// no-store is set outside the gate, so its own 401 and 403 carry it too.
+				public.Handle(p.Pattern, noStore(gate.Wrap(p.Route, p.Handler)))
+				served = true
+			}
 		case packages.MirrorArea:
 			// The blob store in process (#8137); its secret key is sealed under the KEK.
 			if keys == nil {
@@ -608,4 +629,12 @@ func (u *upstreamWait) dial(dial func(ctx context.Context, network, address stri
 // socket that is not there yet.
 func refused(err error) bool {
 	return errors.Is(err, syscall.ECONNREFUSED) || errors.Is(err, syscall.ENOENT)
+}
+
+// noStore sets Cache-Control: no-store before next answers, whatever it answers.
+func noStore(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Cache-Control", "no-store")
+		next.ServeHTTP(w, r)
+	})
 }
