@@ -31,6 +31,8 @@ import { FLOW_IMAGES_FULL, GRANT_REVOKED } from '../src/temporal/toolActivities.
 import { CALL_ID_META } from '../src/builtins/callId.js'
 import { connectInProcess, listTurnTools, TURN_TOOL_TIER_ACTIVITY, turnToolActivities, turnToolActivity, type TurnContext, type TurnServer, type ListedTools, type TurnToolsDeps, type TurnToolsResult } from '../src/temporal/turnTools.js'
 import { turnToolEnv } from './support/turnToolEnv.js'
+import { toolCallWorkflowId } from '../src/temporal/toolCall.js'
+import { durableRequestId } from '../src/gate/ids.js'
 
 // A turn's plugin and http tools as activities (#2320): listed per turn, tiered per call from
 // the input, gated by the recorded approval, and refused once their server is gone.
@@ -430,6 +432,24 @@ describe('turn tools in a durable session', () => {
       (err: unknown) => err as { type?: string },
     )
     expect(byPerson?.type).not.toBe('NotApproved')
+  })
+
+  it("refuses a ToolCall's private host read that a grant approved, as the turn path does (review of #8277)", async () => {
+    const saveRoot = await mkdtemp(path.join(os.tmpdir(), 'turn-http-'))
+    const deps: TurnToolsDeps = {
+      sessions: { ownerOf: async (id) => (id === SESSION ? (BROWSER as never) : undefined) },
+      servers: turnServers({ httpRequest: { saveRoot, bodies: noBodies() } }),
+      // Approved, but not by a person.
+      approvals: { approved: async () => true, byPerson: async () => false },
+    }
+    const toolUseId = 'toolu_grant'
+    const result = await env(`turn:${HTTP_SERVER}__${HTTP_TOOL}`, `tool-${toolUseId}`, toolCallWorkflowId(SESSION, toolUseId)).run(turnToolActivity(deps), {
+      tool: `${HTTP_SERVER}__${HTTP_TOOL}`,
+      input: { url: 'http://127.0.0.1:9/', allow_private_host: '127.0.0.1' },
+      requestId: durableRequestId(SESSION, 'run-1', toolUseId),
+    })
+    // A ToolCall's refusal is a result the model reads, not a thrown failure.
+    expect(result).toMatchObject({ ok: false, content: [{ type: 'text', text: expect.stringMatching(/a person's own approval/) }] })
   })
 
   it("takes http_request's switch and tier from ai_access (#2171): off hides it, an item set to outward parks a GET", async () => {

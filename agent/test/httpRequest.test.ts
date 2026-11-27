@@ -173,11 +173,11 @@ describe('a private or loopback host needs a person to approve it (#8178)', () =
   const refusing = (overrides: Partial<HttpRequestContext> = {}) => context({ allowPrivate: false, ...overrides })
   const loopback = async () => ['127.0.0.1']
 
-  it('knows the private, CGNAT and loopback ranges, also inside an IPv6 form', () => {
-    const inside = ['10.0.0.5', '172.16.0.9', '172.31.255.1', '192.168.1.20', '100.64.0.1', '100.127.255.254', '127.0.0.1', '127.8.9.10']
+  it('knows the private, CGNAT, loopback and 0/8 ranges, also inside an IPv6 form', () => {
+    const inside = ['10.0.0.5', '172.16.0.9', '172.31.255.1', '192.168.1.20', '100.64.0.1', '100.127.255.254', '127.0.0.1', '127.8.9.10', '0.0.0.0', '0.1.2.3', '::ffff:0.1.2.3']
     inside.push('::1', 'fd12:3456::1', 'fc00::1', '::ffff:10.0.0.5', '64:ff9b::c0a8:114', '[fd00::1]')
     for (const address of inside) expect(isInternalAddress(address), address).toBe(true)
-    for (const address of ['8.8.8.8', '172.32.0.1', '100.128.0.1', '192.169.0.1', '2001:db8::1', '2606:4700::1111']) {
+    for (const address of ['8.8.8.8', '1.0.0.1', '172.32.0.1', '100.128.0.1', '192.169.0.1', '2001:db8::1', '2606:4700::1111']) {
       expect(isInternalAddress(address), address).toBe(false)
     }
   })
