@@ -434,7 +434,7 @@ async function runAsActivity(
   if (flow === undefined) {
     // A session's call runs as `tool:<name>` in its ToolCall workflow; no session is read from this id (#7323).
     throw ApplicationFailure.nonRetryable(
-      `a bare ${tool.name} activity runs only for a flow run, and workflow ${workflowExecution?.workflowId ?? '(none)'} is none: ` +
+      `a bare ${tool.name} activity runs only for a flow run, and workflow ${workflowExecution?.workflowId ?? '(none)'} is not a flow run's: ` +
         `a session's call runs as ${toolCallActivity(tool.name)} in its ToolCall workflow`,
       UNKNOWN_SESSION,
     )
