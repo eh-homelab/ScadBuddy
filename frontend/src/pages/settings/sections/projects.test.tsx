@@ -50,7 +50,7 @@ describe('Projects & files, the blob store (#426)', () => {
         return HttpResponse.json({
           ...settings,
           ...rest,
-          ...(typeof key === 'string' ? { has_render_api_key: key !== '', render_key_fallback: key === '' } : {}),
+          ...(typeof key === 'string' ? { has_render_api_key: key !== '' } : {}),
         })
       }),
     )
@@ -58,7 +58,7 @@ describe('Projects & files, the blob store (#426)', () => {
   }
 
   it('seeds the Blob store choice and sends a change with Projects & files', async () => {
-    const bodies = serve({ ...stored, ...s3Saved, has_render_api_key: true, render_key_fallback: false })
+    const bodies = serve({ ...stored, ...s3Saved, has_render_api_key: true })
     const { user } = renderSettingsSection(<Projects />, { route })
     await loaded()
     const store = screen.getByLabelText('Blob store')
@@ -112,7 +112,6 @@ describe('Projects & files, the blob store (#426)', () => {
       ...s3Saved,
       store_backend: 's3',
       has_render_api_key: true,
-      render_key_fallback: false,
     })
     const { user } = renderSettingsSection(<Projects />, { route })
     await loaded()

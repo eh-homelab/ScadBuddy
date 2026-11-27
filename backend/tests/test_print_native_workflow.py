@@ -66,6 +66,7 @@ from scadbuddy.workflows.slicing_activities import _run_failed
 from tests.conftest import PgPool
 from tests.printers.conftest import KEK
 from tests.support.fake_lan import FakeLan, needs_fake_lan, running_fake_lan
+from tests.support.printers import MERGED_BY
 from tests.support.temporal import temporal_client
 from tests.test_print_workflow import PLAN, Fake, ended, start
 
@@ -769,7 +770,7 @@ async def test_the_rack_is_recorded_seen_once_per_report_read(
 ) -> None:
     """#4545: recorded at the report ``lan_print`` reads, not by the pick, so a plate
     that prints nothing from the rack records it too, once."""
-    PrinterStore(pg_pool, KEK).link_bambuddy(registry_native, 9)
+    PrinterStore(pg_pool, KEK).link_bambuddy(registry_native, 9, by=MERGED_BY)
     as_the_h2c(fake_lan)
     usage = Usage()
     _, run = await _run(client, pg_pool, registry_native, blobs=Blobs(), rack=usage)

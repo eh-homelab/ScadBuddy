@@ -25,8 +25,8 @@ unchanged, to the Python API: WebSockets, SSE and large bodies included. On prod
 | `settings`, `settings:read` | `GET`, `POST` `/settings` |
 | `credentials` †, `credentials:read` † | `GET` `/credentials`, `…/one`, `…/key`; `POST` `/credentials` and `…/save`, `…/delete`, `…/order`, `…/reset`, `…/name`, `…/events`, `…/reveal` |
 | `payload-keys` † | `POST /payload-keys/{subject}` |
-| `keys` † | `GET /keys/input-hash` (`POST /fetch-grants` stays in Python) |
-| `notify` †, `notify:read` † | `/push/vapid`, `/push/subscriptions` (and `…/remove`), `/push/sent`, `/push/poll-lease`, `/notify-channels` and every route under it (`GET /push/waiting` stays in Python) |
+| `keys` † | `GET /keys/input-hash` (`internal/secrets`) and `POST /fetch-grants` (`internal/fetchgrants`) |
+| `notify` †, `notify:read` † | `/push/vapid`, `/push/subscriptions` (and `…/remove`), `/push/sent`, `/push/poll-lease`, `/notify-channels` and every route under it, and `GET /push/waiting` |
 | `transcripts` †, `transcripts:read` † | `/sessions/{id}/entries` (and `…/last`, `…/landed`, `…/delete`), `…/transcript` (and `…/head`, `…/moved`), `…/cwd`, `…/subkeys`, `/transcripts` |
 | `access`, `access:read` | `/access/rows`, `/access/row`, `/access/write`, `/tool-listings/*`, `/leases/{key}` |
 | `plugin-sessions`, `plugin-sessions:read` | `/plugin-sessions/seen`, `…/ended`, `…/mark`, `…/dead`, `…/own` |
@@ -39,7 +39,8 @@ unchanged, to the Python API: WebSockets, SSE and large bodies included. On prod
 | `http-bodies` | those, and `POST /http-bodies` |
 | `background-tasks:read` | every `GET` under `/background-tasks` |
 | `background-tasks` | every route under `/background-tasks` |
-| `operations:read` | `GET /operations/{id}` and `…/by-key/{key}`. The insert and the end stay Python's: they write the activity row |
+| `operations:read` | `GET /operations/{id}` and `…/by-key/{key}` |
+| `operations` | those, and `POST /operations` and `…/{id}/finish`, each with its `activity` row and `activity.changed` event in its transaction (`internal/activity`) |
 | `workspace:read` | `GET /workspace/files`, `…/file`, `…/usage`, and `POST …/session-files` |
 | `workspace:sql` | those, and `POST /workspace/file-deletes`, `…/sweeps` and `…/reconciles`. The status, the bytes, a write, a copy and the move to blobs stay Python's: they need the blob store or the KEK |
 | `activity-kinds` | `POST /activity-kinds` |
@@ -48,7 +49,7 @@ unchanged, to the Python API: WebSockets, SSE and large bodies included. On prod
 | `pairings` | `/pairings` and every route under it |
 | `mcp-tokens` | `/mcp-tokens` and every route under it |
 | `plugins` | `POST` `/plugins/{name}/delete`, `/plugin-oauth/grants/{plugin}/mark`, `…/forget` only: the routes that need no KEK |
-| `remote-plugins` † | every route of `crud_agent_plugins.py`: `/plugins` (`GET`, `POST`), `GET /plugins/{name}`, `POST` `/plugins/open-enabled`, `…/{name}/update`, `…/tool-access`, `…/reveal`, `…/delete`; `POST` `/plugin-oauth/flows` and its `…/authorize`, `…/take`; `/plugin-oauth/grants` and its `…/{plugin}/open`, `…/refreshed` (only while the lease `plugin-oauth:<plugin>` holds), `…/mark`, `…/forget`; `/plugin-oauth/stored-secrets` |
+| `remote-plugins` † | replaces `plugins` (name one of the two): every route of `crud_agent_plugins.py`: `/plugins` (`GET`, `POST`), `GET /plugins/{name}`, `POST` `/plugins/open-enabled`, `…/{name}/update`, `…/tool-access`, `…/reveal`, `…/delete`; `POST` `/plugin-oauth/flows` and its `…/authorize`, `…/take`; `/plugin-oauth/grants` and its `…/{plugin}/open`, `…/refreshed` (only while the lease `plugin-oauth:<plugin>` holds), `…/mark`, `…/forget`; `/plugin-oauth/stored-secrets` |
 | `plugin-packages` | `/plugin-packages` and every route under it |
 | `hosted-plugins:read` | `GET /hosted-plugins/{name}`. A version's zip (the blob store) stays Python's |
 | `plugin-feeds` | `GET /plugin-feeds/{feed}`; `PUT`, `DELETE` `…/packages/{name}` |
@@ -65,7 +66,7 @@ unchanged, to the Python API: WebSockets, SSE and large bodies included. On prod
 | `migrations` | `POST /migrations/ledger` |
 | `auth-sessions` | `POST /auth-sessions/lookup` |
 | `forget:read` | `GET /flow-blobs/{subject}/{name}` |
-| `forget` | that, and `POST /payload-keys/{subject}/drop`, `/payload-key-sweeps`, `/flow-blobs/{subject}`; `POST /forgotten-subjects/{subject}` stays Python's (it opens transcripts under the KEK) |
+| `forget` | that, and `POST /payload-keys/{subject}/drop`, `/payload-key-sweeps`, `/flow-blobs/{subject}`, `/forgotten-subjects/{subject}` (a session's forks take their ranges first, opened and sealed under the KEK; with none, a fork that takes transcript entries is 409 `forks-take-ranges`) |
 | `workspace-blob-refs:read` | `GET /workspace-blob-refs` |
 | `workspace-blob-refs` | that, and `POST /workspace-blob-refs`, `…/release` |
 | `events` | `GET /events/head`, `GET /events` |
@@ -76,6 +77,7 @@ unchanged, to the Python API: WebSockets, SSE and large bodies included. On prod
 | `questions` | `/questions/*`: the `done` summaries read, dismissed and posted, and the attention count |
 | `escalations` | `/escalations/*`: a flow run's calls passed up, denied, moved, delivered, and a run's entries |
 | `audit` | `POST` `/audit/record`, `…/list`, `…/prune` |
+| `order-costs` | `POST /orders/{id}/assistant-cost`: the cost entry, its `order_events` row and, after the commit, `order.changed` and `order_item.changed`. It reads `pricing_usd_rate` and `orders_currency` from `settings`, else `SCADBUDDY_PRICING_USD_RATE` and `SCADBUDDY_ORDERS_CURRENCY` from core's own environment, else `1` and `USD`, so core needs the API's values of those two |
 | `filament-presets` † | Public, class `api`: `GET /api/v1/filament/presets` (`?source=`, `?type_id=`), `GET …/presets/{preset_id}` and `GET …/presets/{preset_id}/diff` (`?from_version=`, `?to_version=`). `POST …/presets/bambuddy-import` stays Python's. Go writes no preset row (#7204) |
 
 The `filament-presets` routes use `internal/auth` (see "Public routes"). They have their own
@@ -377,6 +379,18 @@ At a stop, the servers drain and the three signals flush within the 20 s shutdow
 - `POST /sessions`: a scope's size counts each number as it was sent; Python counted its own
   spelling of it (`1e3` as `1000.0`).
 - `POST /workspace-blob-refs` answers 204 with no `Content-Type`.
+- `POST /fetch-grants`: a host that is not ASCII, or one that starts `xn--`, is checked by
+  `golang.org/x/net/idna`'s registration profile, not Python's `idna` package. Both apply IDNA
+  2008; a rare label may be taken by one and refused by the other. A port that `int()` reads
+  with non-ASCII digits counts as one.
+- An operation's request, result and error, and a fork's copied events, are written as
+  Python's `json.loads` and `json.dumps` write them (`jsonv.Loads`), but `NaN` and `Infinity`
+  in the JSON text are refused.
+- An operation's activity title capitalises the kind as `str.capitalize` does for the simple
+  case mappings, the final sigma and a few full title mappings; a rare character outside them
+  may differ.
+- `POST /forgotten-subjects/{subject}`: an ancestor whose key went while its fork's range is
+  read is a 500, as in Python; a NaN in a copied event is a 500, where Python copied it.
 - `filament-presets`' diff compares two values by their JSON text, not by Python's `!=`. So
   `1` and `1.0` are a change in Go. So are two nested objects that differ only in key order,
   which Python's `!=` calls equal. Bambu Studio's values are strings and string lists, and

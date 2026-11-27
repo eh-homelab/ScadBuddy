@@ -30,8 +30,8 @@ a render job's own `piece` keys, never a meta key of the slicer's output mark
 (`SLICED_OUTPUT_META`, #6179), an output only while its job runs (`_open_jobs_only`),
 and a ref only at the object its bytes name, read and hashed by the API unless a row it
 verified (`store_blobs.verified_at`) names it (`_verified`, #6233).
-Its settings route never releases the full Bambuddy
-key (`withheld`; with no render key saved the worker gets none). Template `pipeline/`
+Its settings route releases no Bambuddy key, neither
+the render key nor the full one (`withheld`, #7882). Template `pipeline/`
 Python runs in the render worker's pod, and openscad and `openscad-lsp` run in the API's
 pod.
 
@@ -233,7 +233,7 @@ only the sleeps move; a budget on the real clock fails on a slow runner (#6252).
   every start (`auth/revoke.py` `RETIRED_ROLES`, PR #6906)); the render worker holds no database (#5298,
   `tests/test_render_worker_nodb.py`; the API revokes its old role `scadbuddy_render` at
   every start, `auth/revoke.py`): it reads the store settings and
-  writes its job rows, their events and activity rows, their blob refs, the piece geometry, the blob index, its uploads' `assets` rows (`library/assets.py` `RemoteAssetStore`, the files on its own volume) and its library leases, pin holds and install slots (`RemoteCheckoutLeases`, `RemoteInstallSlots`, under the API's `REMOVAL_LOCK`) only through the API's CRUD routes, `crud/render.py`, where the API also finds the Bambuddy store's folders for it. The legacy in-process queue, its file and Postgres stores
+  writes its job rows, their events and activity rows, their blob refs, the piece geometry, the blob index, its uploads' `assets` rows (`library/assets.py` `RemoteAssetStore`, the files on its own volume) and its library leases, pin holds and install slots (`RemoteCheckoutLeases`, `RemoteInstallSlots`, under the API's `REMOVAL_LOCK`) only through the API's CRUD routes, `crud/render.py`. The legacy in-process queue, its file and Postgres stores
   and its `.renders/<key>` cache are gone (#546): the Temporal path's cache is the blob
   store's piece (`piece.json`), and nothing writes or prunes `models/<slug>/.renders/`
   any more (it stays hidden and git-ignored for volumes that still hold one).
@@ -765,8 +765,8 @@ only the sleeps move; a budget on the real clock fails on a slow runner (#6252).
 - `backend/scadbuddy/printers/hot_path.py` — the native hot path (#3818 tier A, plan
   `docs/superpowers/plans/2026-10-18-hot-path-without-bambuddy.md`): a print that
   touches Bambuddy nowhere. `hot_path_native(settings, path)` decides per run from the
-  stored backends (`slicer_backend`, `library_backend` `native`, `store_backend` `s3`;
-  `NATIVE_STORES` still names `bambuddy`, on which the API no longer starts, #7257) and
+  stored backends (`slicer_backend`, `library_backend` `native`, `store_backend` `s3`,
+  `NATIVE_STORES`) and
   the printer row's resolved path; there is no stored switch of its own.
   One request may choose (#5352, print-flow spec §2 "As built: the request picks the
   path"): `PrintRunRequest.path` `bambuddy` is Bambuddy's queue whatever the row says
@@ -1336,8 +1336,10 @@ only the sleeps move; a budget on the real clock fails on a slow runner (#6252).
   a `JobResult` still names its files `blobs/<key>/<file>`, so read them through
   `cache.py` `result_file` or `core/paths.py` `result_path`, never `paths.root / name`;
   a small file read whole goes through `BlobStore.read_file`, `orders/attachments.py`
-  `read_blob`, which unpacks nothing on a miss), `bambuddy.py` (`BambuddyContentBackend`, Bambuddy's
-  library as the backend, `verify_bambuddy.py` its check), `locks.py`, `fonts.py`
+  `read_blob`, which unpacks nothing on a miss), `bambuddy.py` (the store settings' sources,
+  `StoreSettingsSource`, and `BambuddyContentBackend`, Bambuddy's library as the backend: retired
+  by #7257, the API refuses to start on it, and kept only as a store migration's source on the
+  API, its folders over SQL; `verify_bambuddy.py` its check), `locks.py`, `fonts.py`
   (`FontMirror`), `snapshots.py` (revision snapshots for workers) and `assets.py`
   (`RemoteAssets`, uploads reaching workers). `factory.py` builds the `StoreBundle` that
   wires them, reading `store_backend` (a stored setting) at start, through `backends.py`
@@ -1883,11 +1885,16 @@ only the sleeps move; a budget on the real clock fails on a slow runner (#6252).
   `stock_moves.entity_id` names stays in place, since that foreign key keeps it as the
   move's history, R-P2-4), `properties.py` (#7026,
   `entity_properties` and `entity_property_schemas`; the rules are in
-  `docs/features/spools-and-filament.md` "Properties"), `operations.py` (the
+  `docs/features/spools-and-filament.md` "Properties"; `history` and `schema_history` read the
+  tables the Go history subscriber fills, #6949), `actor.py` (`set_actor`: every writer that
+  removes a property or deletes an entity calls it first in its transaction, before any row
+  lock, since it takes the event log's lock; the triggers refuse a remove without it;
+  `SWEEP_ACTOR`), `operations.py` (the
   `entity_attachment_add` kind on the `library` queue), `activity.py`, `problems.py` and
   `component.py` (`ENTITIES`). Routes `api/entity_attachments.py` and `api/entity_links.py`
   under `/entities/{kind}:{ref}`, and `api/entity_properties.py`
-  (`/entities/{ref}/properties`, `/entity-kinds/{kind}/properties`, `…/property-schema`); the file and thumbnail GETs are scriptless
+  (`/entities/{ref}/properties`, `…/properties/history`, `/entity-kinds/{kind}/properties`,
+  `…/property-schema`, `…/property-schema/history`); the file and thumbnail GETs are scriptless
   (`auth/routes.py` `SCRIPTLESS_GETS`). The migration `20261122T0426Z_entities.sql` keeps
   `order_attachments` as a view, with a trigger that fills `entity_id`, for the previous
   build's replicas during the roll; `20261123T0651Z_drop_order_attachments_view.sql` drops them (#6960).

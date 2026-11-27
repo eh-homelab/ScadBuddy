@@ -185,6 +185,7 @@ from scadbuddy.printers.bambuddy_sync import (
 from scadbuddy.printers.component import PRINTERS
 from scadbuddy.printers.native import LanCommands
 from scadbuddy.printers.print_activities import LanActivities, LanDeps
+from scadbuddy.printers.store import BAMBUDDY_ACTOR
 from scadbuddy.printers.watch import WatchActivities
 from scadbuddy.rack.component import RACK_USAGE
 from scadbuddy.render.agent_migrations import migrate_agent
@@ -1179,7 +1180,7 @@ async def _sync_bambuddy_printers_logged(state: AppState) -> None:
 
     async def sweep(client: BambuddyClient) -> None:
         try:
-            result = await sync_printers(registry, client)
+            result = await sync_printers(registry, client, by=BAMBUDDY_ACTOR)
         except Exception:
             logger.exception("could not sync the printers from Bambuddy")
             raise

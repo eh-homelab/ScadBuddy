@@ -60,6 +60,7 @@ from scadbuddy.worker import PRINT_CRUD_AREAS
 from tests.conftest import UNUSED_TEMPORAL_ADDRESS
 from tests.crud.crud_support import FixedToken, threaded_print_crud
 from tests.printers.conftest import KEK
+from tests.support.printers import MERGED_BY
 
 SERIAL = "01P00A000000001"
 CODE = "87654321"
@@ -276,7 +277,7 @@ def test_the_reads_answer_as_the_sql_store(
     crud: CrudSyncClient, printers: PrinterStore, reports: PrinterReportStore
 ) -> None:
     lan = _lan_printer(printers)
-    linked = printers.ensure_bambuddy(4, serial=None, name="H2C", model="H2C")
+    linked = printers.ensure_bambuddy(4, serial=None, name="H2C", model="H2C", by=MERGED_BY)
     reports.put(lan, {"gcode_state": "IDLE"}, datetime.now(UTC))
     remote = RemotePrinterStore(crud)
     remote_reports = RemoteReports(crud)
@@ -299,7 +300,7 @@ def test_the_workers_merge_runs_on_the_api(store: SettingsStore, printers: Print
     default printer setting and its runs' activity facets move with it, all on the API
     (the worker's role holds none of those tables)."""
     rates = MachineRateStore(store.pool)
-    gone = printers.ensure_bambuddy(4, serial=None, name="H2C", model="H2C")
+    gone = printers.ensure_bambuddy(4, serial=None, name="H2C", model="H2C", by=MERGED_BY)
     inputs = MachineRateInputs(
         profile=CostProfile(watts="300", actuals_window=3, lan_hours_offset="0")
     )
@@ -319,7 +320,7 @@ def test_the_workers_merge_runs_on_the_api(store: SettingsStore, printers: Print
     with threaded_print_crud(store, printers=printers) as client:
         worker = RemotePrinterStore(client)
         row, written = worker.ensure_bambuddy_written(
-            4, serial=SERIAL, name="H2C", model="H2C", listed={4}
+            4, serial=SERIAL, name="H2C", model="H2C", listed={4}, by=MERGED_BY
         )
         assert row.id == mine.id and row.bambuddy_printer_id == 4 and written
         assert printers.get(gone.id) is None
@@ -335,7 +336,9 @@ def test_the_workers_merge_runs_on_the_api(store: SettingsStore, printers: Print
         assert facets is not None and facets["facets"]["printer"] == mine.id
         # Sent again, it finds the row and writes nothing (natural).
         before = _rows(store, "printers")
-        again, wrote = worker.ensure_bambuddy_written(4, serial=SERIAL, name="H2C", model="H2C")
+        again, wrote = worker.ensure_bambuddy_written(
+            4, serial=SERIAL, name="H2C", model="H2C", by=MERGED_BY
+        )
         assert again.id == mine.id and not wrote
         assert _rows(store, "printers") == before
 
@@ -489,7 +492,7 @@ def test_each_natural_write_sent_twice_leaves_what_one_left(
     assert seen is not None and seen[1] == now + timedelta(seconds=10)
     twice(
         lambda: RemotePrinterStore(crud).ensure_bambuddy_written(
-            9, serial=None, name="P1S", model="P1S"
+            9, serial=None, name="P1S", model="P1S", by=MERGED_BY
         )
     )
 

@@ -16,6 +16,7 @@ from scadbuddy.filament.spools import FilamentSpoolStore
 from scadbuddy.printers.models import PrinterCreate
 from scadbuddy.printers.store import PrinterStore
 from tests.conftest import PgPool
+from tests.support.printers import MERGED_BY
 
 pytestmark = pytest.mark.requires_postgres
 
@@ -25,7 +26,7 @@ SERIAL = "01P00A000006261"
 def _merge(printers: PrinterStore) -> tuple[UUID, UUID]:
     """A synthetic Bambuddy row and a row holding the serial; learning the serial merges
     the first into the second. Both ids, gone first."""
-    synthetic = printers.ensure_bambuddy(7, serial=None, name="H2C", model="H2C")
+    synthetic = printers.ensure_bambuddy(7, serial=None, name="H2C", model="H2C", by=MERGED_BY)
     mine = printers.create(PrinterCreate(serial=SERIAL, name="Mine"))
     return uuid.UUID(synthetic.id), uuid.UUID(mine.id)
 
@@ -46,7 +47,7 @@ def test_a_tray_both_printers_have_keeps_the_kept_place_and_takes_the_spools(
     spool = spools.create(SpoolCreate(material_id=_material(pg_pool)), actor="t")
     places.move(spool.id, clash_gone.id, actor="t")
 
-    printers.ensure_bambuddy(7, serial=SERIAL, name="H2C", model="H2C")
+    printers.ensure_bambuddy(7, serial=SERIAL, name="H2C", model="H2C", by=MERGED_BY)
 
     moved = spools.get(spool.id)
     assert moved is not None and moved.location_id == clash_kept.id
@@ -91,7 +92,7 @@ def test_a_k_value_both_printers_have_keeps_the_kept_one(
                     (who, printer, nozzle, k),
                 )
 
-    printers.ensure_bambuddy(7, serial=SERIAL, name="H2C", model="H2C")
+    printers.ensure_bambuddy(7, serial=SERIAL, name="H2C", model="H2C", by=MERGED_BY)
 
     with pg_pool.connection() as conn:
         for table in ("filament_spool_type_k_values", "filament_spool_k_values"):
