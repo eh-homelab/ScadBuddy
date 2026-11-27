@@ -79,8 +79,6 @@ type Approvals struct{ Pool *pgxpool.Pool }
 func (a *Approvals) Routes() []crud.Route {
 	return []crud.Route{
 		{Method: "GET", Path: "/approvals/row", Handle: a.row},
-		{Method: "GET", Path: "/approvals/session", Handle: a.session},
-		{Method: "POST", Path: "/approvals/visible-pending", Handle: a.visiblePending},
 		{Method: "POST", Path: "/approvals/prepared", Handle: a.prepared},
 		{Method: "POST", Path: "/approvals/list", Handle: a.list},
 		{Method: "POST", Path: "/approvals/due", Handle: a.due},
@@ -139,43 +137,6 @@ func (a *Approvals) row(r *http.Request, _ crud.Params) (any, error) {
 	return oneAnswer{found}, nil
 }
 
-type access struct {
-	OwnerKind   string  `json:"owner_kind"`
-	OwnerID     string  `json:"owner_id"`
-	OwnerLabel  string  `json:"owner_label"`
-	CreatorKind string  `json:"creator_kind"`
-	CreatorID   string  `json:"creator_id"`
-	OfferKind   *string `json:"offer_kind"`
-	OfferID     *string `json:"offer_id"`
-}
-
-func (a *Approvals) session(r *http.Request, _ crud.Params) (any, error) {
-	sid, err := crud.QueryText(r, "session_id", gate.NameMax)
-	if err != nil {
-		return nil, err
-	}
-	out := struct {
-		Session *access `json:"session"`
-	}{}
-	if !audit.IsUUID(sid) {
-		return out, nil
-	}
-	var s access
-	err = a.Pool.QueryRow(r.Context(), `SELECT owner_kind, owner_id, owner_label, creator_kind,
-		creator_id, CASE WHEN pending_owner_until > now() THEN pending_owner_kind END AS offer_kind,
-		CASE WHEN pending_owner_until > now() THEN pending_owner_id END AS offer_id
-		FROM ai_sessions WHERE id = $1::text::uuid`, sid).Scan(&s.OwnerKind, &s.OwnerID,
-		&s.OwnerLabel, &s.CreatorKind, &s.CreatorID, &s.OfferKind, &s.OfferID)
-	if errors.Is(err, pgx.ErrNoRows) {
-		return out, nil
-	}
-	if err != nil {
-		return nil, err
-	}
-	out.Session = &s
-	return out, nil
-}
-
 // who is a body of {kind, id}.
 func who(r *http.Request) (string, string, error) {
 	b, err := crud.ReadBody(r, "kind", "id")
@@ -184,24 +145,6 @@ func who(r *http.Request) (string, string, error) {
 	}
 	kind, id := b.Text("kind", 0, gate.NameMax), b.Text("id", 0, gate.NameMax)
 	return kind, id, b.Err()
-}
-
-func (a *Approvals) visiblePending(r *http.Request, _ crud.Params) (any, error) {
-	kind, id, err := who(r)
-	if err != nil {
-		return nil, err
-	}
-	found, err := rows(r.Context(), a.Pool, `SELECT `+columns+` FROM ai_approvals a
-		WHERE a.decision IS NULL AND (
-		 (a.session_id IS NULL AND a.requested_by_kind = $1 AND a.requested_by_id = $2)
-		 OR EXISTS (SELECT 1 FROM ai_sessions s WHERE s.id = a.session_id
-		 AND ((s.owner_kind = $1 AND s.owner_id = $2)
-		 OR (s.creator_kind = $1 AND s.creator_id = $2))))
-		ORDER BY a.created_at, a.id LIMIT $3`, kind, id, listMax)
-	if err != nil {
-		return nil, err
-	}
-	return rowsAnswer{found}, nil
 }
 
 func (a *Approvals) prepared(r *http.Request, _ crud.Params) (any, error) {
