@@ -256,9 +256,14 @@ credential at `POST /api/v1/auth/service-token` (a projected token of the Servic
 forwards: the `fleet.*` events of the event log, with `Last-Event-ID` replay) to tell
 subscribed inboxes of new messages. Its other settings are `FLEETCHAT_LISTEN`,
 `FLEETCHAT_CORE_URL`, `FLEETCHAT_MAX_TEXT`, `FLEETCHAT_PAGE_SIZE`,
-`FLEETCHAT_MAX_PAGE_SIZE` and `FLEETCHAT_SESSION_TIMEOUT`
-([`tools/go/fleet/README.md`](../../tools/go/fleet/README.md)). The server has no auth of
-its own: anything on the LAN may call it, directly or through ScadBuddy's `/mcp`
+`FLEETCHAT_MAX_PAGE_SIZE`, `FLEETCHAT_SESSION_TIMEOUT` and the "ScadBuddy Fleet" GitHub
+App's `FLEETCHAT_GITHUB_APP_ID`, `FLEETCHAT_GITHUB_INSTALLATION_ID`,
+`FLEETCHAT_GITHUB_APP_KEY_FILE` and `FLEETCHAT_GITHUB_WEBHOOK_SECRET_FILE`
+([`tools/go/fleet/README.md`](../../tools/go/fleet/README.md)). With the webhook secret file
+it also serves `/github/webhook` (`tools/go/fleet/ghwebhook`, #8014), which checks
+`X-Hub-Signature-256` before it reads anything; with the App key it holds the Actions secret
+writer (`tools/go/fleet/ghsecrets`, #8012), which no route calls yet. Apart from that
+signature check, the server has no auth of its own: anything on the LAN may call it, directly or through ScadBuddy's `/mcp`
 (the owner's decision of 2026-11-26), and a NetworkPolicy is to admit only ScadBuddy's pods and the LAN's
 Gateway. Neither the server nor that policy is deployed yet.
 
