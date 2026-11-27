@@ -149,8 +149,16 @@ func (s *Store) upload(r *http.Request, d Device) (any, error) {
 	if err != nil {
 		return nil, err
 	}
-	if _, err := s.Pool.Exec(ctx, `INSERT INTO blob_refs (key, holder_kind, holder_id) VALUES ($1, $2, $3)
-		ON CONFLICT DO NOTHING`, stored.Key, Holder, call.ID); err != nil {
+	// The hold is written while the call's row is locked open: a call that ended meanwhile
+	// gets no hold (409 call_closed), and its blob is the sweep's after its grace.
+	if err := pgx.BeginFunc(ctx, s.Pool, func(tx pgx.Tx) error {
+		if _, err := s.openCall(ctx, tx, call.ID, d); err != nil {
+			return err
+		}
+		_, err := tx.Exec(ctx, `INSERT INTO blob_refs (key, holder_kind, holder_id) VALUES ($1, $2, $3)
+			ON CONFLICT DO NOTHING`, stored.Key, Holder, call.ID)
+		return err
+	}); err != nil {
 		return nil, err
 	}
 	return map[string]any{"key": stored.Key, "media_type": mediaType}, nil
@@ -333,7 +341,7 @@ type Read struct {
 	Complete      bool      `json:"complete"`
 	MissingBlocks []int     `json:"missing_blocks"`
 
-	owner string
+	owner, caller, callerKind string
 }
 
 // ReadOf is a device read for a Go consumer (the tag and code decoders): no owner check.
@@ -344,9 +352,10 @@ func (s *Store) ReadOf(ctx context.Context, id string) (Read, error) {
 		return out, notFound("read")
 	}
 	err := s.Pool.QueryRow(ctx, `SELECT r.id::text, r.device_id::text, r.call_id::text, r.at, r.kind, r.uid, r.tech,
-		r.blob_key, r.media_type, r.complete, r.missing_blocks, d.owner FROM device_reads r
-		JOIN devices d ON d.id = r.device_id WHERE r.id = $1::uuid`, id).Scan(&out.ID, &out.DeviceID, &out.CallID,
-		&at, &out.Kind, &out.UID, &out.Tech, &out.BlobKey, &out.MediaType, &out.Complete, &out.MissingBlocks, &out.owner)
+		r.blob_key, r.media_type, r.complete, r.missing_blocks, d.owner, c.caller, c.caller_kind FROM device_reads r
+		JOIN devices d ON d.id = r.device_id JOIN device_calls c ON c.id = r.call_id
+		WHERE r.id = $1::uuid`, id).Scan(&out.ID, &out.DeviceID, &out.CallID, &at, &out.Kind, &out.UID, &out.Tech,
+		&out.BlobKey, &out.MediaType, &out.Complete, &out.MissingBlocks, &out.owner, &out.caller, &out.callerKind)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return out, notFound("read")
 	}
@@ -354,12 +363,18 @@ func (s *Store) ReadOf(ctx context.Context, id string) (Read, error) {
 	return out, err
 }
 
+// ownRead is the read when its call is visible to the viewer (visibleTo, as getCall): the
+// device's owner, the person who made the call, or the delegate that made it for that person.
 func (s *Store) ownRead(r *http.Request) (Read, error) {
+	kind, who, err := s.viewer(r)
+	if err != nil {
+		return Read{}, err
+	}
 	read, err := s.ReadOf(r.Context(), r.PathValue("id"))
 	if err != nil {
 		return read, err
 	}
-	if read.owner != principal(r.Context()) {
+	if !visibleTo(read.owner, read.caller, read.callerKind, kind, who) {
 		return Read{}, notFound("read")
 	}
 	return read, nil

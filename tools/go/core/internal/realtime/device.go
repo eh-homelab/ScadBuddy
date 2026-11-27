@@ -45,6 +45,10 @@ const (
 
 var callTopic = regexp.MustCompile(`^device:call:` + uuidText + `$`)
 
+// MaxCallTopics is the most call topics one subscribe frame may name: each is a read of
+// who may follow the call.
+const MaxCallTopics = 8
+
 // deviceBearer says whether the handshake carries a device token.
 func deviceBearer(r *http.Request) bool {
 	scheme, token, _ := strings.Cut(r.Header.Get("Authorization"), " ")
@@ -112,7 +116,7 @@ func (x *session) deviceLive(ctx context.Context) bool {
 }
 
 // topicAllowed says whether this socket may follow t: a device its own topic only; a person
-// the realtime topics, and a call's topic of a device it owns.
+// the realtime topics, and the topic of a call whose device it owns or that it made.
 func (x *session) topicAllowed(ctx context.Context, t bus.Value) bool {
 	if x.who.device != "" {
 		return t.Kind == 's' && t.Str == DeviceTopicPrefix+x.who.device

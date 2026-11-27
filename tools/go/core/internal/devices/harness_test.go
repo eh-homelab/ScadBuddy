@@ -55,9 +55,14 @@ func (c *clock) add(d time.Duration) {
 type memBlobs struct {
 	mu      sync.Mutex
 	objects map[string][]byte
+	// onPut runs after a Put stores its bytes, when a test sets it.
+	onPut func()
 }
 
 func (m *memBlobs) Put(_ context.Context, kind, _ string, body []byte) (blobstore.Committed, error) {
+	if m.onPut != nil {
+		defer m.onPut()
+	}
 	limit, ok := blobstore.Kinds[kind]
 	if !ok {
 		return blobstore.Committed{}, httpx.WithReason(422, "kind", "kind_not_allowed")
