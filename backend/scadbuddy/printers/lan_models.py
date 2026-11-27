@@ -60,9 +60,10 @@ class LanStarted(BaseModel):
     #: while it is the printer's print, read from the report.
     ended: Stage | None = None
     ended_message: str | None = None
-    #: When the report that showed its end was seen (#8321), set with ``ended``. An
+    #: When the report that showed its own ``FINISH`` or ``FAILED`` was seen (#8321). An
     #: order attempt reads its seconds by it (`orders/archives.py` `lan_facts`). ``None``
-    #: while ``ended`` is, and on a start from before it.
+    #: while ``ended`` is, for an ``unknown`` end (``IDLE``, or the printer moved on: no
+    #: report timed it), and on a start from before it.
     ended_at: datetime | None = None
     #: The plate's sliced grams per filament slot (#8321), from its upload
     #: (`LanUploaded.grams_by_slot`), for every slot whatever its tray holds. Empty on a

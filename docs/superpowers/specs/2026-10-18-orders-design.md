@@ -1242,7 +1242,8 @@ run instead (`OrderStore.lan_record`, `archives.lan_facts`), and an archive's on
 that record gives none; the archive gives its media. The start is the first start's
 `started_at` in `print_runs.result.lan`. Each start ends at the printer report that
 showed its plate end: the start's own `ended_at` (#8321, set when a later start waited
-for it), else that end as the filament ledger booked it (`filament/prints.py`
+for it and the report showed its own `FINISH` or `FAILED`; an `IDLE` or moved-on end has
+none), else that end as the filament ledger booked it (`filament/prints.py`
 `plate_ended`), and the last start with neither ends at `print_outcomes.settled_at`;
 the end is the last start's end. The seconds are the sum of each start's span; an earlier
 start with no timed end gives none. The grams are the starts' own sliced grams

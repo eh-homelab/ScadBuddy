@@ -168,8 +168,9 @@ def lan_facts(record: LanRecord) -> OwnFacts:
       take the plate.
     - Each start ends at the printer report that showed its plate end. The start records
       that time itself (``LanStarted.ended_at``, #8321) once a later start of the run
-      waited for it. A start with no such time ends where the ledger booked its end at a
-      report (`filament/prints.py` `plate_ended`, ``data.ended`` ``report``). The last
+      waited for it, for its own ``FINISH`` or ``FAILED`` only. A start with no such
+      time ends where the ledger booked its end at a report (`filament/prints.py`
+      `plate_ended`, ``data.ended`` ``report``). The last
       start with neither ends when the run's follow read the print settled
       (``print_outcomes.settled_at``). The end is the last start's end.
     - The seconds are the sum over the starts of the end less the start. An earlier start
