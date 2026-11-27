@@ -188,7 +188,9 @@ export function SpoolsTab() {
         },
         () => {},
       )
-      .finally(() => settle('properties'))
+      .finally(() => {
+        if (mine === latest.current) settle('properties')
+      })
     // #8372: the types' values too, read and kept the same way.
     readKindPropertyTexts('spool_type')
       .then(
@@ -197,7 +199,9 @@ export function SpoolsTab() {
         },
         () => {},
       )
-      .finally(() => settle('typeProperties'))
+      .finally(() => {
+        if (mine === latest.current) settle('typeProperties')
+      })
     try {
       const [spools, summary, types, tree] = await Promise.all([listSpools({ includeArchived: true }), getSummary(), listTypes(), listLocations()])
       if (mine !== latest.current) return
@@ -207,7 +211,8 @@ export function SpoolsTab() {
     } catch (cause) {
       if (mine === latest.current) setError(message(cause))
     }
-    settle('list')
+    // A load that a newer one replaced settles nothing: its answers were dropped.
+    if (mine === latest.current) settle('list')
     // The trays read Bambuddy too, so they come after the list and never hold it back;
     // without them, no spool is flagged (#6713).
     try {
@@ -273,7 +278,8 @@ export function SpoolsTab() {
   const groups = useMemo(() => groupSpools(shown, q.group, typeCodes), [shown, q.group, typeCodes])
   const chosen = shown.filter((spool) => selected.has(spool.id))
 
-  // #8372: a scan-made search (`from=scan`) waits for the list and both property reads. Then it
+  // #8372: a scan-made search (`from=scan`) waits for the list and both property reads. It does not
+  // wait for the SKU, tag or tray reads. Then it
   // decides once: one shown spool opens in the list's place in the history. Else `from` goes
   // out of the address, so the decision does not run again and a later edit of the search never opens a spool.
   const scanning = params.get('from') === 'scan'

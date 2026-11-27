@@ -2,6 +2,7 @@ import { render as rtlRender, screen, waitFor, within } from '@testing-library/r
 import userEvent from '@testing-library/user-event'
 import { MemoryRouter, Route, Routes, useLocation, useNavigate, useParams } from 'react-router'
 import { http, HttpResponse } from 'msw'
+import { Fragment, StrictMode } from 'react'
 import { describe, expect, it } from 'vitest'
 import { server } from '../../mocks/server'
 import { seedEntityProperties } from '../../mocks/features/entities'
@@ -147,9 +148,11 @@ function SpoolPageStub() {
   )
 }
 
-function renderScan(route = SCAN) {
+function renderScan(route = SCAN, strict = false) {
+  const Wrap = strict ? StrictMode : Fragment
   const user = userEvent.setup()
   rtlRender(
+    <Wrap>
     <MemoryRouter initialEntries={['/start', route]} initialIndex={1}>
       <Routes>
         <Route path="/start" element={<h1>Start</h1>} />
@@ -164,7 +167,8 @@ function renderScan(route = SCAN) {
         />
         <Route path="/filament/spools/:id" element={<SpoolPageStub />} />
       </Routes>
-    </MemoryRouter>,
+    </MemoryRouter>
+    </Wrap>,
   )
   return { user }
 }
@@ -213,6 +217,30 @@ describe('a scan-made spool search (#8372)', () => {
     expect(await screen.findByText(`Looking for “gtin:${GTIN}”…`)).toBeInTheDocument()
     expect(screen.queryByText(/No spool matches/)).not.toBeInTheDocument()
     expect(screen.queryByRole('heading', { name: /Spool page/ })).not.toBeInTheDocument()
+    expect(screen.getByTestId('search').textContent).toContain('from=scan')
+    release()
+    expect(await screen.findByRole('heading', { name: `Spool page ${spoolId(2)}` })).toBeInTheDocument()
+  })
+
+  it('does not decide on the answer of a load a newer one replaced', async () => {
+    seedEntityProperties(`spool_type:${T.ORANGE}`, { gtin: [GTIN] })
+    // StrictMode runs the mount effect twice, so two loads start. The first load's type read
+    // answers at once; the second's is held.
+    let reads = 0
+    let release = () => {}
+    const held = new Promise<void>((resolve) => (release = resolve))
+    server.use(
+      http.get('/api/v1/entity-kinds/spool_type/properties', async () => {
+        reads++
+        if (reads === 2) await held
+        return undefined
+      }),
+    )
+    renderScan(SCAN, true)
+    await waitFor(() => expect(reads).toBe(2))
+    // Let the list and the first load's answer settle.
+    await new Promise((resolve) => setTimeout(resolve, 100))
+    expect(screen.getByText(`Looking for “gtin:${GTIN}”…`)).toBeInTheDocument()
     expect(screen.getByTestId('search').textContent).toContain('from=scan')
     release()
     expect(await screen.findByRole('heading', { name: `Spool page ${spoolId(2)}` })).toBeInTheDocument()
