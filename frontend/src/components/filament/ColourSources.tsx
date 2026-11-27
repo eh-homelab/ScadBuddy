@@ -52,6 +52,13 @@ function ColourCodeLookup() {
   const [found, setFound] = useState<ColourCode | null>(null)
   const [error, setError] = useState<string | null>(null)
   const asked = useRef(0)
+  // An answer that comes after the panel unmounts is dropped, as a stale one is.
+  useEffect(
+    () => () => {
+      asked.current += 1
+    },
+    [],
+  )
 
   async function lookUp(event: FormEvent) {
     event.preventDefault()

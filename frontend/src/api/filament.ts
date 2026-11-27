@@ -489,13 +489,13 @@ export const listCatalog = <K extends CatalogKind>(kind: K, options: { includeAr
 export type ColourSync = Schemas['ColourSync']
 export type ColourSyncSource = ColourSync['source']
 
-/** Each source's newest run, with its progress while it runs. */
 export type ColourCode = Schemas['ColourCode']
 
 /** #6907: Bambu Studio's colour table by the `code` digits of a Bambu SKU; 404 for an unknown code, 503 with no table. */
 export const lookupBambuColourCode = (code: string) =>
   request<ColourCode>(`${BASE}/bambu-colour-codes?code=${encodeURIComponent(code)}`)
 
+/** Each source's newest run, with its progress while it runs. */
 export const listColourSyncs = () => request<ColourSync[]>(`${BASE}/colour-syncs`)
 
 /** Runs a sync as a command (followed past its 202); a failed read is a run with `state: 'failed'`, not an error. */
