@@ -10,6 +10,8 @@ import (
 	"strings"
 	"unicode/utf8"
 
+	"golang.org/x/net/idna"
+
 	"github.com/eh-homelab/ScadBuddy/tools/go/core/internal/httpx"
 )
 
@@ -184,10 +186,34 @@ func contains(items []string, s string) bool {
 	return false
 }
 
+// schemePattern is a URI scheme as a URI record holds it: lower case.
+var schemePattern = regexp.MustCompile(`^[a-z][a-z0-9+.-]*$`)
+
+// lookup turns a host into its ASCII (punycode) form, as the approval shows it.
+var lookup = idna.New(idna.MapForLookup(), idna.BidiRule(), idna.ValidateLabels(true))
+
+// absoluteURI says whether s is a URI an approval can show truly: scheme://host[:port] then
+// the rest, with a host, no userinfo (scadbuddy.example@evil.example names evil.example) and
+// no opaque part (https:evil.example), its authority spelt exactly as parsed and its host one
+// that turns into punycode. So the head an approval shows in full is the host it names.
 func absoluteURI(s string) bool {
+	if !utf8.ValidString(s) || strings.ContainsAny(s, " \t\r\n\\") {
+		return false
+	}
 	u, err := url.Parse(s)
-	return err == nil && u.Scheme != "" && (u.Host != "" || u.Opaque != "") && utf8.ValidString(s) &&
-		!strings.ContainsAny(s, " \t\r\n")
+	if err != nil || !schemePattern.MatchString(u.Scheme) || u.Opaque != "" || u.User != nil ||
+		u.Hostname() == "" || strings.ContainsAny(u.Host, "%@") {
+		return false
+	}
+	if !strings.HasPrefix(s, u.Scheme+"://"+u.Host) {
+		return false
+	}
+	rest := strings.TrimPrefix(s, u.Scheme+"://"+u.Host)
+	if rest != "" && !strings.ContainsRune("/?#", rune(rest[0])) {
+		return false
+	}
+	_, err = lookup.ToASCII(u.Hostname())
+	return err == nil
 }
 
 // summary is what a person approves for an nfc.write: the device, the record count, and every
@@ -239,15 +265,16 @@ func summary(method, deviceName string, args json.RawMessage) (string, error) {
 // shownURI is a URI with its scheme and host in full and the rest cut at pathShown runes,
 // quoted so a control character shows.
 func shownURI(s string) string {
+	// absoluteURI took s: scheme://host[:port] exactly, then the rest.
 	u, _ := url.Parse(s)
-	head := u.Scheme + ":"
-	if u.Host != "" {
-		head += "//" + u.Host
+	rest := strings.TrimPrefix(s, u.Scheme+"://"+u.Host)
+	host, _ := lookup.ToASCII(u.Hostname())
+	if strings.Contains(host, ":") {
+		host = "[" + host + "]"
 	}
-	rest := strings.TrimPrefix(s, head)
-	if !strings.HasPrefix(s, head) {
-		// A spelling url.Parse cleaned (an upper-case scheme): show it whole.
-		return strconv.Quote(s)
+	head := u.Scheme + "://" + host
+	if port := u.Port(); port != "" {
+		head += ":" + port
 	}
 	if utf8.RuneCountInString(rest) > pathShown {
 		rest = string([]rune(rest)[:pathShown]) + "…"

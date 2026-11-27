@@ -337,14 +337,13 @@ call's `device.*` events from the event log, oldest first (`{id, kind, at, data}
 `nfc.write` takes `{records: [...]}`, 1 to 16 NDEF records, and nothing else: core never asks a
 device to write raw blocks, sectors or keys, so it never writes a Bambu tag (the app refuses one
 too). The records are the app's wire records (`NdefWire.cs` `Build`), a strict subset (`ndef.go`):
-`text` (`text`, and `lang` and `encoding` if given), `url` and `absolute-url` (`text`, an absolute
-URI), `mime` (`mediaType` and exactly one of `text` and `hex`), an external type `<domain>:<type>`
+`text` (`text`, and `lang` and `encoding` if given), `url` and `absolute-url` (`text`: `scheme://host[:port]` then a path, query or fragment, with no userinfo and no opaque part, so the host an approval shows is the one it names), `mime` (`mediaType` and exactly one of `text` and `hex`), an external type `<domain>:<type>`
 (exactly one of `text` and `hex`) and `empty`. Any other type or key is a 422. Core sends the device
 the parsed form, and the approval's summary is built from that same form. An assistant's or a flow's `nfc.write` makes an `ai_approvals` row outside a session (tool
 `device_call`, tier `outward`, 10 minutes), which the UI lists with the other pending actions. Its
 `input_summary` shows all of what will be written: the record count, and every record's type and
-content. Only a URI's path, query and fragment are cut, at 80 characters, and never its scheme or
-host. A write whose summary would pass 2000 characters is refused (422
+content. A URI shows its scheme and host in full, the host in punycode; only its path, query and fragment are cut, at 80 characters.
+A write whose summary would pass 2000 characters is refused (422
 `write_too_large_to_approve`), never cut. It needs `SCADBUDDY_SECRET_KEY_FILE` for the input hash
 (the HMAC of the device, the method and the args; 503 `not_configured` without it). The caller
 confirms it once it is approved. The confirm hashes the call's stored args again (under the KEK

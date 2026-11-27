@@ -347,13 +347,19 @@ func TestWriteRecordsAreStrict(t *testing.T) {
 	d := h.pair(me)
 	sock := h.pods[0].device(d)
 	for name, records := range map[string]string{
-		"an extra key":       `[{"recordType":"text","text":"x","hex":"00"}]`,
-		"a hidden key":       `[{"recordType":"url","text":"https://a.example/","note":"not shown"}]`,
-		"an unknown type":    `[{"recordType":"smart-poster","records":[]}]`,
-		"a local type":       `[{"recordType":":t","hex":"00"}]`,
-		"no value":           `[{"recordType":"mime","mediaType":"text/plain"}]`,
-		"two values":         `[{"recordType":"mime","mediaType":"text/plain","text":"a","hex":"00"}]`,
-		"a relative URI":     `[{"recordType":"url","text":"/path"}]`,
+		"an extra key":    `[{"recordType":"text","text":"x","hex":"00"}]`,
+		"a hidden key":    `[{"recordType":"url","text":"https://a.example/","note":"not shown"}]`,
+		"an unknown type": `[{"recordType":"smart-poster","records":[]}]`,
+		"a local type":    `[{"recordType":":t","hex":"00"}]`,
+		"no value":        `[{"recordType":"mime","mediaType":"text/plain"}]`,
+		"two values":      `[{"recordType":"mime","mediaType":"text/plain","text":"a","hex":"00"}]`,
+		"a relative URI":  `[{"recordType":"url","text":"/path"}]`,
+		// Spoofs: what an approval shows first is not the host the URI names.
+		"an opaque URI":      `[{"recordType":"url","text":"https:evil.example/scadbuddy.example"}]`,
+		"userinfo":           `[{"recordType":"url","text":"https://scadbuddy.example@evil.example/"}]`,
+		"userinfo, absolute": `[{"recordType":"absolute-url","text":"https://scadbuddy.example:x@evil.example/"}]`,
+		"no host":            `[{"recordType":"url","text":"https:///path"}]`,
+		"a backslash":        `[{"recordType":"url","text":"https://scadbuddy.example\\@evil.example/"}]`,
 		"upper-case hex":     `[{"recordType":"example.com:t","hex":"AB"}]`,
 		"no records":         `[]`,
 		"an id, never shown": `[{"recordType":"text","text":"x","id":"y"}]`,
@@ -388,4 +394,19 @@ func TestWriteTooLargeToApproveRefused(t *testing.T) {
 	// A person's own write of it goes: they see it on their page.
 	expectStatus(t, h.do("POST", "/api/v1/devices/"+d.id+"/calls", me,
 		`{"method":"nfc.write","args":{"records":[{"recordType":"text","text":"`+text+`"}]}}`), 202)
+}
+
+// An approval shows a URI's scheme and host in full, the host in punycode, and cuts only
+// the rest.
+func TestAnApprovalShowsTheHostInPunycode(t *testing.T) {
+	args, err := checkArgs("nfc.write", []byte(`{"records":[{"recordType":"url","text":"https://bücher.example:8443/`+
+		strings.Repeat("p", 100)+`"}]}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	shown, err := summary("nfc.write", "Pixel", args)
+	if err != nil {
+		t.Fatal(err)
+	}
+	expect(t, shown, `nfc.write on "Pixel": 1 record; 1. url "https://xn--bcher-kva.example:8443/`+strings.Repeat("p", 79)+`…"`)
 }
