@@ -2,7 +2,6 @@
 # Prints true when any changed path on stdin is Go's (spec 2026-10-13 §7), or
 # is the `go` job's own wiring (ci.yml, this script, changed-paths.sh), as select-models.sh does.
 # claudecreds' test reads the agent's rate-limit-reset-vectors.json (#7986); core's read the
-# claudecreds' test reads the agent's rate-limit-reset-vectors.json (#7986); core's read the
 # backend's event-stream-vectors.json (#7768), auth-vectors.json (#8038),
 # plugin-seal-vectors.json (#8048) and the python-json, activity-title, fetch-grant and
 # assistant-cost vectors (#8046).
