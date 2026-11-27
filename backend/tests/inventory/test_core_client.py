@@ -18,7 +18,7 @@ from temporalio.common import ActivityIDConflictPolicy, ActivityIDReusePolicy
 from temporalio.contrib.pydantic import pydantic_data_converter
 
 from scadbuddy.core.problems import ApiError
-from scadbuddy.inventory.core_client import Done, operation_key
+from scadbuddy.inventory.core_client import Done, activity_id, operation_key
 from scadbuddy.inventory.models import UseInput
 from scadbuddy.operations.store import OperationAccepted
 from scadbuddy.orders.models import Actor
@@ -277,3 +277,18 @@ async def test_the_python_input_reads_in_go() -> None:
         "params": {"item_id": ITEM},
         "body": {"qty": "2.5", "lot_id": str(LOT), "reason": "fit a hotend"},
     }
+
+
+GO_ACTIVITY_IDS = (
+    Path(__file__).resolve().parents[3]
+    / "tools/go/core/internal/inventory/store/testdata/activity_ids.json"
+)
+
+
+def test_the_activity_id_is_gos() -> None:
+    """The ids Go's `store.ActivityID` asks Temporal for (its test reads the same file)."""
+    cases = json.loads(GO_ACTIVITY_IDS.read_text())["cases"]
+    assert cases
+    for case in cases:
+        name = case["kind"].removeprefix("inventory.")
+        assert activity_id(name, case["key"]) == case["id"], case

@@ -83,7 +83,7 @@ func Client(c Config, tracer trace.TracerProvider) (client.Client, error) {
 // Checker answers the operations read's question (store.Temporal) with a client.
 type Checker struct{ Client client.Client }
 
-// Closed tells the state of the activity id (a standalone one) or of the workflow
+// Closed tells the state of the activity id (a standalone one, store.ActivityID) or of the workflow
 // workflowID (one that runs it as a step). Failed, timed out, cancelled or terminated is
 // store.Failed, with the last failure's message; completed is store.Completed. An id
 // Temporal does not know is store.Failed too: no attempt of it will run.

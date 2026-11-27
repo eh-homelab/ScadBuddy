@@ -54,9 +54,10 @@ func OperationFrom(ctx context.Context) (string, bool) {
 }
 
 // StartOperation writes op as running, in a short transaction of its own, and sends the
-// notice. A running row of the id (an earlier attempt) takes this attempt; its last_error
-// stays. A finished row is never opened again: a replay or a reuse of its key changes
-// nothing and sends nothing.
+// notice. A running row of the id and kind (an earlier attempt) takes this attempt; its
+// last_error stays. A finished row is never opened again: a replay or a reuse of its key
+// changes nothing and sends nothing. A running row of another kind (its key reused on
+// another write, which runs as another activity) is left as it is, too.
 func StartOperation(ctx context.Context, pool *pgxpool.Pool, op Operation) error {
 	var actor any
 	if len(op.Actor) > 0 {
@@ -69,7 +70,7 @@ func StartOperation(ctx context.Context, pool *pgxpool.Pool, op Operation) error
 			ON CONFLICT (id) DO UPDATE SET kind = EXCLUDED.kind, subject = EXCLUDED.subject,
 				status = 'running', workflow_id = EXCLUDED.workflow_id, attempt = EXCLUDED.attempt,
 				actor = EXCLUDED.actor, updated_at = clock_timestamp()
-			WHERE inventory_operations.status = 'running'`,
+			WHERE inventory_operations.status = 'running' AND inventory_operations.kind = EXCLUDED.kind`,
 			op.ID, op.Kind, op.Subject, op.WorkflowID, op.Attempt, actor)
 		if err != nil || tag.RowsAffected() == 0 {
 			return err
@@ -137,6 +138,14 @@ const (
 	Completed = "completed"
 )
 
+// ActivityID is the Temporal id of a public write's standalone activity: its type
+// (inventory.<Name>, the operation's kind) and the operation id, the scoped
+// Idempotency-Key. Python's scadbuddy.inventory.core_client.activity_id starts the activity
+// under it; testdata/activity_ids.json holds the cases both sides test.
+func ActivityID(kind, operationID string) string {
+	return kind + ":" + operationID
+}
+
 // Closure is what Temporal tells of an activity: its state, the last failure's message (for
 // Failed) and the close time.
 type Closure struct {
@@ -144,8 +153,8 @@ type Closure struct {
 	At            time.Time
 }
 
-// Temporal tells the state of an activity that its row says is running: the activity id,
-// or the workflow that runs it when workflowID is not empty.
+// Temporal tells the state of an activity that its row says is running: the activity id
+// (ActivityID), or the workflow that runs it when workflowID is not empty.
 type Temporal interface {
 	Closed(ctx context.Context, id, workflowID string) (Closure, error)
 }
@@ -189,7 +198,13 @@ func ReadOperation(ctx context.Context, q Querier, id string, temporal Temporal)
 	if !stale || temporal == nil {
 		return op, true, nil
 	}
-	c, err := temporal.Closed(ctx, op.ID, deref(workflowID))
+	// A workflow's step is described by its workflow; a standalone activity by the id
+	// Python started it under.
+	asked := op.ID
+	if deref(workflowID) == "" {
+		asked = ActivityID(op.Kind, op.ID)
+	}
+	c, err := temporal.Closed(ctx, asked, deref(workflowID))
 	if err != nil {
 		slog.WarnContext(ctx, "could not ask Temporal about a running inventory activity",
 			"operation_id", op.ID, "error", err.Error())

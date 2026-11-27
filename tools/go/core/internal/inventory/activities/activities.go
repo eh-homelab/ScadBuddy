@@ -26,7 +26,8 @@ import (
 )
 
 // Input is every activity's input, as Python's InventoryCore.write sends it: the
-// idempotency key (the activity id too, but the code reads only Key), who the write is by
+// idempotency key (the operation id; a public write's activity id is store.ActivityID of
+// it, but the code reads only Key), who the write is by
 // (an Actor object, R-K1-5), the public route's path parameters, and its public body.
 type Input struct {
 	Key    string            `json:"key"`

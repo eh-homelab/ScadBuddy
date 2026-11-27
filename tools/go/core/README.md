@@ -115,6 +115,9 @@ registered by its name: `inventory.KindCreate`, `…KindUpdate`, `…KindArchive
 
 - The input is `{key, actor, params, body}`: the idempotency key, the Actor object, the public
   route's path parameters, and its public body. The code reads `key`, never the activity id.
+  A public write's activity id is `inventory.<Name>:<key>` (`store.ActivityID`, Python's
+  `core_client.activity_id`; both test `internal/inventory/store/testdata/activity_ids.json`),
+  so a key reused on another write runs as another activity, which the ledger refuses.
 - The answer is `{status, body}`: the public route's status and JSON, or its problem. A refusal is
   an answer, so Temporal does not retry it. Only an infrastructure error (the database out of
   reach) fails the activity, and Temporal retries it. A bad actor fails it, not retried.
