@@ -10,12 +10,12 @@ import { renderPage } from '../../test/utils'
 import { choose } from '../../test/select'
 import { SIGNAL_READ_MIN_MS } from '../../lib/useAsync'
 import { PrintersPanel } from './Printers'
-import { schemaProperty } from '../../test/spec'
+import { schemaKeyword } from '../../test/spec'
 
 /** `LanLink.access_code`'s `maxLength` in the spec `pnpm gen:api` (run before `pnpm test`)
  * exported: the backend's bound, read rather than restated (#4497 review). */
 function specAccessCodeMax(): number {
-  return schemaProperty('LanLink', 'access_code', 'maxLength', 'number')
+  return schemaKeyword('LanLink', 'access_code', 'maxLength', 'number')
 }
 
 const H2C = 'Printer 3DP-31B-598'
