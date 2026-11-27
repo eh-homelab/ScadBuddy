@@ -41,7 +41,8 @@ unchanged, to the Python API: WebSockets, SSE and large bodies included. On prod
 | `background-tasks` | every route under `/background-tasks` |
 | `operations:read` | `GET /operations/{id}` and `…/by-key/{key}`. The insert and the end stay Python's: they write the activity row |
 | `workspace:read` | `GET /workspace/files`, `…/file`, `…/usage`, and `POST …/session-files` |
-| `workspace:sql` | those, and `POST /workspace/file-deletes`, `…/sweeps` and `…/reconciles`. The status, the bytes, a write, a copy and the move to blobs stay Python's: they need the blob store or the KEK |
+| `workspace:sql` | those, and `POST /workspace/file-deletes`, `…/sweeps` and `…/reconciles` |
+| `workspace` † | every route of `crud_agent_workspace.py`: those, and `GET /workspace/status`, `…/file-bytes`, `POST …/file-writes`, `…/copies`, `…/blob-moves` (below). Not in this build's `SCADBUDDY_CORE_AREAS` yet: its blob store needs `internal/blobstore`'s read and write by key |
 | `activity-kinds` | `POST /activity-kinds` |
 | `browser-origins` | `GET` `/browser-origins`, `…/approved`; `POST` `…/approve`, `…/revoke` |
 | `bridge-tabs` | `/session-tabs`, `/tab-owners` and its `claim`, `refresh`, `release`, `release-all`; `PUT /tab-images/{name}`, `POST …/{name}/take` |
@@ -76,6 +77,27 @@ unchanged, to the Python API: WebSockets, SSE and large bodies included. On prod
 | `questions` | `/questions/*`: the `done` summaries read, dismissed and posted, and the attention count |
 | `escalations` | `/escalations/*`: a flow run's calls passed up, denied, moved, delivered, and a run's entries |
 | `audit` | `POST` `/audit/record`, `…/list`, `…/prune` |
+
+Area `workspace` † (`internal/workspace`, #8131) serves a file's bytes, sealed as Python seals
+them: on a backend with a blob store, a file is the blob `workspace-<sha256 of the sealed bytes>`,
+sealed under a file key of its own in segments of 1 MiB, segment i in the context
+`workspace-file:<sha256>:<i>:<more|end>`; the row keeps the file key wrapped in the context
+`workspace-file-key:<workspace>:<path>:<blob key>`, under the session's payload data key (made by
+the write while the session stands, no audit row) or, for a principal's file, under the KEK
+(`key_kek_id`; the previous KEK still opens one). On `store_backend` `local` the bytes stay in
+Postgres, one `ai_session_file_bytes` row per sha256. A write is one transaction: the session's
+row first when it logs events, the workspace's advisory lock, the conflict, quota and
+directory checks, the row, its blob's `blob_refs` hold (and the old blob's release) and its
+`workspace.file` events; on a blob store the checks also run before the upload, so a refused
+write stores nothing. A fork's copy wraps every file key again first, then writes the rows
+under the parent's lock while its blob rows are the ones wrapped (3 tries, then 409
+`conflict`). A read streams a segment at a time and reads the row again between segments: a
+file replaced meanwhile ends the stream short. The rotation's re-wrap stays Python's.
+`backend/tests/fixtures/workspace-seal-vectors.json`, which `tests/test_workspace_seal_vectors.py`
+writes from Python's own functions (`UPDATE_WORKSPACE_SEAL_VECTORS=1`), holds Go to Python's
+bytes: Go seals each file with the same IVs to the same bytes, opens Python's, and wraps each
+file key alike. Its blob store is `workspace.Store` (`Backend`, `Put`, `Get`), which
+`internal/blobstore` is to provide.
 
 Area `fleet` (`internal/fleet`) is caller `fleet`'s (scope `crud.fleet`), under
 `/api/v1/internal/crud/fleet`: `POST /agents/{session_id}/touch`, `GET /agents`, `PUT` and
@@ -331,6 +353,10 @@ At a stop, the servers drain and the three signals flush within the 20 s shutdow
 - `POST /sessions`: a scope's size counts each number as it was sent; Python counted its own
   spelling of it (`1e3` as `1000.0`).
 - `POST /workspace-blob-refs` answers 204 with no `Content-Type`.
+- `POST /workspace/file-writes`: a body over 32 MiB is refused (413) by core's body bound in its
+  words; Python's body gate refuses it in its own. A store failure's 503 names the store error's
+  class (`Class()`), else `Exception`, where Python names the exception's type. A meta that is no
+  JSON says `JSON decode error`, and an event that is no JSON names Go's parse error.
 - The event stream: a replayed typed event takes what pydantic's lax mode takes for its fields
   (an int as a whole float or a text of digits, a bool as `0`, `1` or a word), but not every
   other coercion pydantic makes; an event it does not take is a `resync`, as in Python. A lone

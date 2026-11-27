@@ -264,7 +264,7 @@ var publicPackages = []publicAreas{}
 // sealed are the areas that seal or open with the KEK: without one they refuse to start.
 var sealed = map[string]bool{
 	"credentials": true, "payload-keys": true, "keys": true, "notify": true, "transcripts": true,
-	"remote-plugins": true,
+	"remote-plugins": true, "workspace": true,
 }
 
 // streams are what the event stream's areas (changes, ws) share: the process's one hub and
