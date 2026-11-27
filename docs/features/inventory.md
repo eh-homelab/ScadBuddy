@@ -33,6 +33,14 @@ A kind has a parent, a unit of measure (`uom`), a service-life basis (`none`, `h
 properties of its items. It never restricts them (spec §6.3a). A child kind inherits its
 parent's keys; its own subschema for a key wins (`inventory/kinds.py:1-5`).
 
+Each kind has a `number` from the sequence `item_kinds_number_seq`
+(`20261126T0218Z_inventory_class.sql`, step 1a). Its code is `K-<number>`, which
+`GET /api/v1/codes/{code}` resolves (`codes/resolve.py` `PREFIXES`). A number is never
+reused. The kinds that existed before that migration keep their text ids and got numbers
+in `created_at`, then `id` order. A kind that ScadBuddy makes has the id `k<number>`. An id
+of `k` and digits must be `'k' || number` (`item_kinds_made_id_check`), so a person cannot
+choose one (`KindInput`, 422).
+
 `tracking` says how a kind's items are counted:
 
 | Tracking | Meaning | Stock |
@@ -247,7 +255,10 @@ The sidebar entry is **Inventory**. The routes are in `frontend/src/App.tsx:147-
 - `/inventory/units/:id` (`UnitPage`) and `/inventory/lots/:id` (`LotPage`): a lot's path
   opens its item's page at the lot's row, where its cost, "Re-cost past uses" and its
   result show.
-- `/orders/parts` redirects to `/inventory?kind=part` (`frontend/src/App.tsx:156`).
+- `/orders/parts` redirects to `/inventory?kind=hardware` (`PARTS_KIND`,
+  `frontend/src/App.tsx:158`). The parts are the lot items under `hardware` and `ams_part`
+  (`PART_KINDS`, `frontend/src/lib/inventoryLinks.ts`), which inventory K1 put under
+  `consumable`.
 
 The mock is `frontend/src/mocks/features/inventory.ts`.
 

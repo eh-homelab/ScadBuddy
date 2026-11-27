@@ -39,6 +39,7 @@ RouteClass = Literal[
     "crud.camera",
     "crud.camera-relay",
     "crud.fleet",
+    "crud.inventory",
     "crud.fleet-rotator",
     # The projects worker's flow host routes (#5298): `api` routes it may call too.
     "flow.host",
@@ -234,6 +235,7 @@ CRUD_CLASSES: dict[str, RouteClass] = {
     "camera": "crud.camera",
     "camera-relay": "crud.camera-relay",
     "fleet": "crud.fleet",
+    "inventory": "crud.inventory",
     "fleet-rotator": "crud.fleet-rotator",
 }
 CRUD_CALLERS = frozenset(CRUD_CLASSES)

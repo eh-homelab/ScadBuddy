@@ -645,7 +645,8 @@ matches `[a-z][a-z0-9_]{0,63}`. Limits: 200 keys per entity, 2000 characters per
     is never sent back. BB keeps no reset time, so that event is dated at the newest reading
     that still held the old baseline, or BB's `updated_at` when earlier (R-7149-9). No
     baseline column is kept.
-- Codes (#6955): each place has a number and the code `L-<n>`, each spool `S-<n>`. A code
+- Codes (#6955): each place has a number and the code `L-<n>`, each spool `S-<n>`, and each
+  item kind `K-<n>` (#6949; it opens the inventory list of the kind's items). A code
   opens at `/x/<code>` (`frontend/src/pages/CodePage.tsx`; route `GET /api/v1/codes/{code}`,
   `backend/scadbuddy/api/codes.py`). Any case works, with or without the dash. A number is
   never reused, and an archived thing still resolves.

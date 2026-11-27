@@ -97,6 +97,24 @@ def test_the_prune_drops_rows_past_the_retention_only(pool: PgPool) -> None:
     assert keys == ["new"]
 
 
+def test_prune_keeps_inventory_keys_seven_days(pool: PgPool) -> None:
+    with pool.connection() as conn:
+        for caller, key, age in (
+            ("inventory", "i2", "2 days"),
+            ("inventory", "i8", "8 days"),
+            ("print", "p2", "2 days"),
+        ):
+            conn.execute(
+                "INSERT INTO crud_requests"
+                " (caller, key, route, body_sha256, status, body, created_at)"
+                " VALUES (%s, %s, %s, %s, 200, '{}', now() - %s::interval)",
+                (caller, key, ROUTE, "h", age),
+            )
+        assert prune(conn) == 2
+        rows = conn.execute("SELECT caller, key FROM crud_requests").fetchall()
+    assert [(r["caller"], r["key"]) for r in rows] == [("inventory", "i2")]
+
+
 def test_the_auth_sweep_prunes_the_ledger(pool: PgPool) -> None:
     _write(pool, "old", {"n": 1})
     with pool.connection() as conn:

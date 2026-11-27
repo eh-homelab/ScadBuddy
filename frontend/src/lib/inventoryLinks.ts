@@ -18,6 +18,25 @@ export const inventoryAnchors = {
 
 const item = (id: string) => at(`${BASE}/items`, id)
 
+/** The kinds whose lot items, with the kinds below them, are an order's parts (R-P2-39; the
+ * `/parts` aliases read the same kinds, `inventory/part_alias.py` `_PARTS`). Inventory K1
+ * put both under `consumable`: `part` holds durable units now. */
+export const PART_KINDS = ['hardware', 'ams_part'] as const
+
+/** The kind the Parts views open. The list takes one kind, so they open `hardware`, the kind of
+ * every part the `/parts` aliases made; `ams_part` is next to it in the kind tree. */
+export const PARTS_KIND = PART_KINDS[0]
+
+/** Whether the kind is one of `PART_KINDS` or below one; `parentOf` gives a kind's parent. */
+export function isPartKind(kindId: string, parentOf: (id: string) => string | null | undefined): boolean {
+  const seen = new Set<string>()
+  for (let at: string | null | undefined = kindId; at && !seen.has(at); at = parentOf(at)) {
+    if ((PART_KINDS as readonly string[]).includes(at)) return true
+    seen.add(at)
+  }
+  return false
+}
+
 export const inventoryPaths = {
   list: BASE,
   /** The items of a kind and of its descendants (the list's `kind` filter). */

@@ -51,12 +51,13 @@ describe('InventoryPage (#7067)', () => {
   })
 
   it('filters by a kind and its children, and by a search, in the address', async () => {
+    seedItem({ kind_id: 'part', name: 'Spare fan' })
     const { user } = render()
     await table()
     const kinds = screen.getByRole('navigation', { name: 'Kinds' })
     await user.click(within(kinds).getByRole('link', { name: 'Part' }))
-    // Hardware and Nozzle are below Part; Service is not.
-    await waitFor(async () => expect(await names()).toEqual(['Hardened steel nozzle 0.4', 'Silver keychain hook']))
+    // Nozzle is below Part; Hardware is not (inventory K1 put it under Consumable).
+    await waitFor(async () => expect(await names()).toEqual(['Hardened steel nozzle 0.4', 'Spare fan']))
     expect(screen.getByTestId('where')).toHaveTextContent('/inventory?kind=part')
 
     await user.type(screen.getByRole('searchbox', { name: 'Search items' }), 'nozzle')
@@ -100,7 +101,7 @@ describe('InventoryPage (#7067)', () => {
 
   it('saves a model rule over the lot items (#5543, moved from the parts page)', async () => {
     const hook = seedItem({ kind_id: 'hardware', name: 'Silver hook' })
-    const { user } = render('/inventory?kind=part')
+    const { user } = render('/inventory?kind=hardware')
     await table()
     const rules = screen.getByRole('region', { name: 'Model rules' })
 
@@ -133,11 +134,17 @@ describe('InventoryPage (#7067)', () => {
     expect(within(rules).getByText(/Open coaster's rule first/)).toBeInTheDocument()
   })
 
-  it('shows the model rules only for the Part kind and the kinds below it (R-P2-39)', async () => {
+  it("shows the model rules only for the parts' kinds, Hardware and AMS part, and the kinds below them (R-P2-39, #6949)", async () => {
     const { user } = render('/inventory?kind=service')
     await table()
     expect(screen.queryByRole('region', { name: 'Model rules' })).toBeNull()
-    await user.click(within(screen.getByRole('navigation', { name: 'Kinds' })).getByRole('link', { name: 'Hardware' }))
+    const kinds = screen.getByRole('navigation', { name: 'Kinds' })
+    await user.click(within(kinds).getByRole('link', { name: 'Hardware' }))
+    expect(await screen.findByRole('region', { name: 'Model rules' })).toBeInTheDocument()
+    // Inventory K1: Part holds durable units now, not an order's parts.
+    await user.click(within(kinds).getByRole('link', { name: 'Part' }))
+    await waitFor(() => expect(screen.queryByRole('region', { name: 'Model rules' })).toBeNull())
+    await user.click(within(kinds).getByRole('link', { name: 'AMS part' }))
     expect(await screen.findByRole('region', { name: 'Model rules' })).toBeInTheDocument()
     await user.click(within(screen.getByRole('navigation', { name: 'Kinds' })).getByRole('link', { name: 'All items' }))
     await waitFor(() => expect(screen.queryByRole('region', { name: 'Model rules' })).toBeNull())

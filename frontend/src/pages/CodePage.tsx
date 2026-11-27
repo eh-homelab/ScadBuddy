@@ -5,19 +5,17 @@ import { resolveCode } from '../api/filament'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
 import { Skeleton } from '@/components/ui/skeleton'
+import { codeTarget } from '../lib/resolvedCode'
 import { useAsync } from '../lib/useAsync'
 
-/** #6955 — `/x/<code>`: the address a label's QR holds. It opens the place or spool the code names. */
+/** #6955 — `/x/<code>`: the address a label's QR holds. It opens the place, spool or item kind the code names. */
 export function CodePage() {
   const { code = '' } = useParams()
   const navigate = useNavigate()
   const [typed, setTyped] = useState('')
   const found = useAsync(() => resolveCode(code), [code])
 
-  if (found.data) {
-    const to = found.data.kind === 'location' ? `/filament/locations/${found.data.id}` : `/filament/spools/${found.data.id}`
-    return <Navigate to={to} replace />
-  }
+  if (found.data) return <Navigate to={codeTarget(found.data)} replace />
   if (found.loading) return <Skeleton role="status" aria-label="Looking up the code" className="m-4 h-8 w-48" />
 
   const unknown = found.error instanceof ApiError && found.error.status === 404

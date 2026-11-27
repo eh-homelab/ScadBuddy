@@ -40,7 +40,7 @@ def test_an_item_knows_its_kind_path_and_saleable(items: ItemStore) -> None:
 
     got = items.get(made.id)
     assert got is not None
-    assert got.kind_path == ["part", "hardware"]
+    assert got.kind_path == ["consumable", "hardware"]
     assert got.tracking == "lot"
     assert got.uom == "each"
     assert got.saleable is None
@@ -56,10 +56,10 @@ def test_an_item_knows_its_kind_path_and_saleable(items: ItemStore) -> None:
 def test_list_by_kind_takes_descendants_unless_told_not_to(items: ItemStore) -> None:
     made = items.create(ItemInput(kind_id="hardware", name="M3 nut"), BY)
 
-    assert [i.id for i in items.list(kind="part")] == [made.id]
-    assert items.list(kind="part", descendants=False) == []
+    assert [i.id for i in items.list(kind="consumable")] == [made.id]
+    assert items.list(kind="consumable", descendants=False) == []
     assert [i.id for i in items.list(kind="hardware", descendants=False)] == [made.id]
-    assert items.list(kind="consumable") == []
+    assert items.list(kind="part") == []
 
 
 def test_an_items_name_is_unique_in_its_kind_in_any_case(items: ItemStore) -> None:

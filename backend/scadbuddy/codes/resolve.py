@@ -14,9 +14,12 @@ from scadbuddy.codes.parse import Code, format_code
 Conn = Connection[DictRow]
 
 
+Kind = Literal["location", "spool", "item_kind"]
+
+
 class Lookup(NamedTuple):
     table: str
-    kind: Literal["location", "spool"]
+    kind: Kind
 
 
 #: One entry per prefix. A new prefix is a new entry; the SQL below is built from `table`
@@ -24,15 +27,18 @@ class Lookup(NamedTuple):
 PREFIXES: dict[str, Lookup] = {
     "L": Lookup("filament_locations", "location"),
     "S": Lookup("filament_spools", "spool"),
+    "K": Lookup("item_kinds", "item_kind"),
 }
 
 #: Spools have no name column.
-_NAME = {"filament_locations": "name", "filament_spools": "NULL"}
+_NAME = {"filament_locations": "name", "filament_spools": "NULL", "item_kinds": "name"}
 
 
 class Resolved(BaseModel):
-    kind: Literal["location", "spool"]
-    id: UUID
+    kind: Kind
+    #: A location's and a spool's id is a uuid; an item kind's is its text id (`printer`,
+    #: `k12`).
+    id: UUID | str
     code: str
     name: str | None
     archived: bool
