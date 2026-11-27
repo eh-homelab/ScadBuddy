@@ -164,7 +164,6 @@ type Tag struct {
 	// ProductionDateTime is ProductionDate as "2006-01-02T15:04:05", with no time
 	// zone because the guide names none. It is absent when ProductionDate is not
 	// exactly YYYY_MM_DD_hh_mm, zero-padded, with a real date and time.
-
 	ProductionDateTime *string `json:"production_datetime,omitempty"`
 
 	// ShortProductionDate is block 13 as text (the guide: "Short Production
