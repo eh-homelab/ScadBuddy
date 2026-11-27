@@ -37,9 +37,9 @@ func TestDelegateReadsItsOwnCall(t *testing.T) {
 // An approved approval that was used, revoked or expired before the confirm is named so.
 func TestConfirmNamesAnUnusableApproval(t *testing.T) {
 	for _, tc := range []struct{ name, change string }{
-		{"expired", `usable_until = now() - interval '1 second'`},
-		{"used", `consumed_at = now()`},
-		{"revoked", `revoked_at = now()`},
+		{"expired", `usable_until = $2::timestamptz - interval '1 second'`},
+		{"used", `consumed_at = $2::timestamptz`},
+		{"revoked", `revoked_at = $2::timestamptz`},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			h := newHarness(t, auth.Observe)
@@ -52,7 +52,7 @@ func TestConfirmNamesAnUnusableApproval(t *testing.T) {
 			call := got.body["call_id"].(string)
 			approve(h, call, "approved")
 			h.sql(`UPDATE ai_approvals a SET `+tc.change+` FROM device_calls c
-				WHERE c.id = $1::uuid AND a.id = c.approval_id`, call)
+				WHERE c.id = $1::uuid AND a.id = c.approval_id`, call, h.clock.now())
 			c := h.do("POST", "/api/v1/devices/calls/"+call+"/confirm", bot, "")
 			expectStatus(t, c, 409)
 			expect(t, c.body["reason"], any("approval_"+tc.name))
@@ -146,7 +146,7 @@ func TestExpireCancelsTheApproval(t *testing.T) {
 	expect(t, h.count(`SELECT count(*) FROM ai_approvals WHERE decision = 'cancelled'`), 1)
 }
 
-// One subscribe frame may name at most realtime.MaxCallTopics call topics.
+// One subscribe frame may name at most realtime.MaxCallTopics distinct call topics.
 func TestSubscribeCapsCallTopics(t *testing.T) {
 	h := newHarness(t, auth.Observe)
 	me := h.person("user:i#me")
@@ -162,6 +162,49 @@ func TestSubscribeCapsCallTopics(t *testing.T) {
 	expect(t, page.frame()["type"], any("error"))
 	page.send(`{"type":"subscribe","topics":[` + strings.Join(topics[:realtime.MaxCallTopics], ",") + `]}`)
 	expect(t, page.frame()["type"], any("subscribed"))
+	// The cap counts distinct topics: one call named more times than the cap is one topic.
+	page.send(`{"type":"subscribe","topics":[` + strings.Repeat(topics[0]+",", realtime.MaxCallTopics) + topics[0] + `]}`)
+	expect(t, page.frame()["type"], any("subscribed"))
+}
+
+// A frame that repeats one call topic reads who may follow it once, however many times it
+// names it. A frame holds at most realtime.MaxFrameChars characters, so as many copies as
+// fit (about 300) is the most one frame can send.
+func TestRepeatedCallTopicIsReadOnce(t *testing.T) {
+	h := newHarness(t, auth.Observe)
+	me := h.person("user:i#me")
+	d := h.pair(me)
+	sock := h.pods[0].device(d)
+	topic := `"device:call:` + h.start(me, d, `{"method":"nfc.read"}`) + `"`
+	frame := `{"type":"subscribe","topics":[` + topic
+	for len(frame)+len(topic)+3 < realtime.MaxFrameChars {
+		frame += "," + topic
+	}
+	frame += "]}"
+	page, res := h.pods[0].dial(map[string]string{"Cookie": me})
+	expect(t, res.StatusCode, 101)
+	before := h.visibleReads.Load()
+	page.send(frame)
+	expect(t, page.frame()["type"], any("subscribed"))
+	expect(t, h.visibleReads.Load()-before, int64(1))
+	// A device follows no call topic, and its refusal reads nothing.
+	before = h.visibleReads.Load()
+	sock.send(frame)
+	f := sock.frame()
+	for f["type"] == "event" { // the call's device.call_requested, sent before the frame
+		f = sock.frame()
+	}
+	expect(t, f["type"], any("error"))
+	expect(t, h.visibleReads.Load()-before, int64(0))
+	// Past the cap a distinct call topic is refused unread.
+	var topics []string
+	for range realtime.MaxCallTopics + 1 {
+		topics = append(topics, `"device:call:`+h.start(me, d, `{"method":"nfc.read"}`)+`"`)
+	}
+	before = h.visibleReads.Load()
+	page.send(`{"type":"subscribe","topics":[` + strings.Join(topics, ",") + `]}`)
+	expect(t, page.frame()["type"], any("error"))
+	expect(t, h.visibleReads.Load()-before, int64(realtime.MaxCallTopics))
 }
 
 // One rule says who may read a call and who may follow its events.

@@ -1886,7 +1886,7 @@ call (`agent/src/access/live.ts`), so `off` refuses a call in a turn under way.
 
 - **Reach** (#827, #8178): the internet and plain `http:` to any host. A `GET` or `HEAD`
   to a private or loopback address (RFC 1918, `fc00::/7`, CGNAT `100.64/10`, `127/8`,
-  `::1`, `localhost`) is refused unless the call names that host as
+  `::1`, `0/8`, `localhost`) is refused unless the call names that host as
   `allow_private_host`; that call then waits for a person to approve it in the UI.
   Link-local and cloud metadata addresses are always refused. If the pod must not reach
   something, an egress NetworkPolicy is the way to say so; see

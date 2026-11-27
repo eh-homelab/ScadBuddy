@@ -834,10 +834,23 @@ class SensorReading(BaseModel):
     value: float
 
 
+#: What a move does when its target is a dry box that holds another spool (#7167):
+#: ``refuse`` (409 ``box_full``) or ``replace`` (that spool is archived at 0 g first).
+IfOccupied = Literal["refuse", "replace"]
+
+
 class SpoolMove(_In):
     """Where a spool goes; ``null`` takes it out of every place."""
 
     location_id: UUID | None
+    #: What to do when the target is a dry box that holds a spool already (#7167).
+    if_occupied: IfOccupied = "refuse"
+    #: The unloaded spool whose home-return prompt this move answers (#7167): its
+    #: ``home_asked_at`` clears though another spool goes into its box.
+    answers: UUID | None = None
+    #: The box's spool the caller saw (#7167), required with ``replace``: a box that holds
+    #: another spool by then is `BoxFullError`, so no spool they did not name is archived.
+    expected_occupant_id: UUID | None = None
 
 
 # -- spool types ----------------------------------------------------------------------
@@ -1380,6 +1393,13 @@ class Spool(_Row):
     added_full: bool | None = None
     #: When its tag was written (Bambuddy's ``encode_time``, R-7149-3). Read only.
     tag_encoded_at: datetime | None = None
+    #: The last dry box the spool sat in (#7167). When the spool comes out of its tray and
+    #: it went in from this box, the person is asked which spool goes into the box. Null
+    #: when it has none; it clears when the box is deleted.
+    home_location_id: UUID | None = None
+    #: When capture asked which spool goes into the spool's home box (#7167); null once a
+    #: move, an archive or a load answers it.
+    home_asked_at: datetime | None = None
     #: The values the spool has after its overrides over its type's.
     effective: EffectiveValues = Field(default_factory=EffectiveValues)
     #: The names of the fields the spool overrides.
@@ -1657,6 +1677,7 @@ EventKind = Literal[
     "restored",
     "synced_from_bb",
     "consumed_reset",
+    "non_print_waste",
 ]
 EventSource = Literal["ams_remain", "scale", "print_estimate", "print_actual", "person", "bb"]
 
@@ -1893,6 +1914,10 @@ class Closing(BaseModel):
     final_filament_g: float | None = None
     scale_consumed_g: float | None = None
     drift_g: float | None = None
+    #: Grams left on the spool at the archive, written off as non-print waste
+    #: (`ledger.closing` with ``waste``); null when none is booked (0 g, ``respooled``, or
+    #: an archive that books no waste), #7167.
+    non_print_waste_g: float | None = None
 
 
 class ClosingNotice(BaseModel):

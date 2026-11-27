@@ -1,5 +1,5 @@
 import { ArchiveIcon, ArchiveRestoreIcon, ChevronLeftIcon, CopyIcon, PrinterIcon, Trash2Icon } from 'lucide-react'
-import { useEffect, useMemo, useState, type ReactNode } from 'react'
+import { useContext, useEffect, useMemo, useState, type ReactNode } from 'react'
 import { Link, useLocation, useParams, useSearchParams } from 'react-router'
 import { api, ApiError } from '../../api/client'
 import {
@@ -33,6 +33,9 @@ import {
   type SpoolTypeDetail,
 } from '../../api/filament'
 import { ArchiveSpoolDialog } from '../../components/filament/ArchiveSpoolDialog'
+import { HomeReturnDialog } from '../../components/filament/HomeReturnDialog'
+import { homeReturnTitle, spoolCode, useHomeReturns } from '../../lib/homeReturns'
+import { NeedsYouContext } from '../../lib/needsYou'
 import { ClosingSummary } from '../../components/filament/ClosingSummary'
 import { weighingCause } from '../../components/filament/driftCause'
 import { GramsBasis } from '../../components/filament/GramsBasis'
@@ -456,6 +459,11 @@ export function SpoolPage() {
   const spoolKey = madeId ?? id
   const [notice, setNotice] = useState<string | null>(null)
   const [saved, setSaved] = useState<SpoolDetail | null>(null)
+  /** #7167 — the home-return dialog, open from the page's banner. */
+  const [homeOpen, setHomeOpen] = useState(false)
+  const needsYou = useContext(NeedsYouContext)
+  // #7167 review M5: the banner shows for the spools Needs you lists (its home still a live dry box).
+  const { spools: awaiting, refresh: refreshAwaiting } = useHomeReturns()
   const [draft, setDraft] = useState<Draft>(BLANK)
   const [lists, setLists] = useState<Lists | null>(null)
   const [history, setHistory] = useState<SpoolHistory | null>(null)
@@ -880,6 +888,27 @@ export function SpoolPage() {
       <p role="status" className="mb-2 min-h-5 text-[13px] text-muted-foreground">
         {notice}
       </p>
+      {/* #7167 — the spool came out of its tray, and its home dry box waits to be told which spool goes in. */}
+      {!creating && saved && awaiting?.some((one) => one.id === saved.id) && (
+        <section aria-label="Dry box" className="mb-4 flex flex-wrap items-center gap-x-3 gap-y-2 rounded-r-lg border-l-[3px] border-needs bg-card px-3 py-2 text-[13px] ring-1 ring-foreground/10">
+          <p className="min-w-0 flex-1 font-medium text-needs">{homeReturnTitle(saved)}</p>
+          <Button type="button" size="sm" aria-haspopup="dialog" onClick={() => setHomeOpen(true)}>
+            Choose the spool…
+          </Button>
+          <HomeReturnDialog
+            spool={saved}
+            open={homeOpen}
+            onOpenChange={setHomeOpen}
+            onDone={(moved, box) => {
+              setHomeOpen(false)
+              setNotice(`Put ${spoolCode(moved)} in ${box}`)
+              needsYou?.refresh()
+              refreshAwaiting()
+              void reload(true).catch((cause: unknown) => setError(message(cause)))
+            }}
+          />
+        </section>
+      )}
       {creating && copyOf && continues && (
         <p className="mb-4 text-[13px] text-muted-foreground">
           Continues <Link to={filamentLinks.spool(copyOf)} className="underline">spool #{sourceNumber ?? '…'}</Link>: its filament, respooled.

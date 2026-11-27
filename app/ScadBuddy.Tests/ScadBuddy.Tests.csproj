@@ -1,6 +1,6 @@
 <Project Sdk="Microsoft.NET.Sdk">
 
-	<!-- The app's pure .NET parts, tested without Android (#7905): the scan links and their origins. -->
+	<!-- The app's pure .NET parts, tested without Android (#7905, #8244): the pairing link, and the device protocol (frames, events, results, the tag dump). -->
 	<PropertyGroup>
 		<TargetFramework>net10.0</TargetFramework>
 		<ImplicitUsings>enable</ImplicitUsings>
@@ -10,6 +10,7 @@
 
 	<ItemGroup>
 		<Compile Include="../ScadBuddy/DeepLink.Links.cs" Link="DeepLink.Links.cs" />
+		<Compile Include="../ScadBuddy/DeviceProtocol.cs" Link="DeviceProtocol.cs" />
 	</ItemGroup>
 
 	<ItemGroup>

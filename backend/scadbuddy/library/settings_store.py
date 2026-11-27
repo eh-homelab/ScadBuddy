@@ -276,6 +276,9 @@ RECOVER_BAMBUDDY_LIBRARY_SQL = (
 BAMBUDDY_NOT_READY = (
     "the Bambuddy store needs a Bambuddy URL and a library folder (its inbox) saved first"
 )
+BAMBUDDY_KEY_NOT_READY = (
+    "the Bambuddy store is read with the Bambuddy API key: save it first (Settings, Bambuddy)"
+)
 
 
 class S3Settings(BaseModel):

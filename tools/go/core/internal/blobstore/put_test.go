@@ -43,6 +43,9 @@ func TestAPutStoresTheBlobAsACommitDoes(t *testing.T) {
 	if h.s3.puts != 1 {
 		t.Errorf("%d PUTs", h.s3.puts)
 	}
+	if got := h.s3.lastPut; got.Get("Content-Type") != "image/jpeg" || got.Get("x-amz-acl") != "private" {
+		t.Errorf("PUT headers %v", got)
+	}
 	if got, ok := h.object("t/scan_image/" + sha); !ok || !bytes.Equal(got, body) {
 		t.Fatalf("content object %q", got)
 	}
@@ -70,6 +73,43 @@ func TestAPutIsRefusedAsAnUploadIs(t *testing.T) {
 	h.s3.objects["/"+h.bucket+"/t/scan_image/"+hex.EncodeToString(sum[:])] = []byte("not it")
 	if status, reason := reasonOf(errOf(h.blobs.Put(ctx, "scan_image", "image/png", body))); status != 409 || reason != "store_object_mismatch" {
 		t.Errorf("mismatch: %d %s", status, reason)
+	}
+}
+
+// A row whose object is not its bytes, and is not the content object, is passed over: the
+// bytes go to the content object and the row moves there, with no 409 (#8250).
+func TestAPutPassesOverARowNamedObjectOfOtherBytes(t *testing.T) {
+	h := newHarness(t)
+	ctx := context.Background()
+	body := []byte("the scan's photo")
+	sha := sum(body)
+	h.insertRow("scan_image-"+sha, sha, "s3", "old/scan_image/"+sha, len(body))
+	h.putObject("old/scan_image/"+sha, []byte("not it"))
+	if _, err := h.blobs.Put(ctx, "scan_image", "image/jpeg", body); err != nil {
+		t.Fatal(err)
+	}
+	object := ObjectKey("t", "scan_image", sha)
+	if got, ok := h.object(object); !ok || !bytes.Equal(got, body) {
+		t.Fatalf("content object %q", got)
+	}
+	if got := h.blobRow("scan_image-" + sha); got["backend_id"] != object {
+		t.Fatal(got)
+	}
+}
+
+// The caps refuse a Put that uploads (507 store_full); the same bytes stored again are not.
+func TestTheStoresCapsRefuseAPutOfNewBytes(t *testing.T) {
+	h := newHarness(t)
+	ctx := context.Background()
+	h.withEnv(map[string]string{"SCADBUDDY_STORE_MAX_COUNT": "1"})
+	if _, err := h.blobs.Put(ctx, "scan_image", "image/jpeg", []byte("one")); err != nil {
+		t.Fatal(err)
+	}
+	if status, reason := reasonOf(errOf(h.blobs.Put(ctx, "scan_image", "image/jpeg", []byte("two")))); status != http.StatusInsufficientStorage || reason != "store_full" {
+		t.Fatalf("new bytes: %d %s", status, reason)
+	}
+	if _, err := h.blobs.Put(ctx, "scan_image", "image/jpeg", []byte("one")); err != nil {
+		t.Fatal(err)
 	}
 }
 

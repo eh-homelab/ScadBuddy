@@ -132,7 +132,7 @@ func newHarness(t *testing.T) *harness {
 	key := make([]byte, 32)
 	blobs := &blobstore.Blobs{Pool: pool, Keys: &seal.Keys{Current: seal.NewKEK(key)},
 		LookupEnv: func(n string) (string, bool) { v, ok := env[n]; return v, ok },
-		HTTP:      store.Client(), Now: time.Now}
+		HTTP:      store.Client(), Stream: store.Client(), Now: time.Now}
 	py := &python{}
 	reads := &Reads{Pool: pool, Blobs: blobs, Upstream: py}
 	mux := http.NewServeMux()

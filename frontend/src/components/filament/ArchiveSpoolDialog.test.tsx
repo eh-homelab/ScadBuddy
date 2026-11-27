@@ -213,4 +213,23 @@ describe('ArchiveSpoolDialog (#7684)', () => {
     expect(await within(dialog).findByRole('alert')).toHaveTextContent('the reading is below the empty weight')
     expect(onArchived).not.toHaveBeenCalled()
   })
+
+  it('says the grams the archive books as non-print waste (#7167)', async () => {
+    const { dialog } = await show(10, 180)
+    await userEvent.click(within(dialog).getByRole('radio', { name: 'Damaged' }))
+    expect(await within(dialog).findByText('250 g will be booked as non-print waste.')).toBeInTheDocument()
+    await userEvent.type(within(dialog).getByLabelText('Scale reading, with the spool (g)'), '200')
+    expect(await within(dialog).findByText('20 g will be booked as non-print waste.')).toBeInTheDocument()
+    // Respooled: the filament moved to another reel, so nothing is wasted.
+    await userEvent.click(within(dialog).getByRole('radio', { name: 'Respooled' }))
+    await waitFor(() => expect(within(dialog).queryByText(/booked as non-print waste/)).toBeNull())
+    await within(dialog).findByText(/Filament at the end: 20 g\./)
+    // 0 g left books none.
+    await userEvent.click(within(dialog).getByRole('radio', { name: 'Finished' }))
+    const field = within(dialog).getByLabelText('Scale reading, with the spool (g)')
+    await userEvent.clear(field)
+    await userEvent.type(field, '180')
+    await within(dialog).findByText(/Filament at the end: 0 g\./)
+    expect(within(dialog).queryByText(/booked as non-print waste/)).toBeNull()
+  })
 })
