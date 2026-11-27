@@ -2213,7 +2213,7 @@ class TagReadIn(_FitsOneTag):
     tap: bool = True
 
 
-BackupReason = Literal["spool_write", "agent_write", "restore"]
+BackupReason = Literal["spool_write", "agent_write", "restore", "place_write"]
 
 
 class TagBackupIn(_FitsOneTag):
