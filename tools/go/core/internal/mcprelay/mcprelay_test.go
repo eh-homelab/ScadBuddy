@@ -7,9 +7,12 @@ import (
 	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"reflect"
 	"strings"
 	"testing"
@@ -20,6 +23,7 @@ import (
 
 	"github.com/eh-homelab/ScadBuddy/tools/go/core/internal/auth"
 	"github.com/eh-homelab/ScadBuddy/tools/go/core/internal/crud"
+	"github.com/eh-homelab/ScadBuddy/tools/go/core/internal/httpx"
 	"github.com/eh-homelab/ScadBuddy/tools/go/core/internal/testdb"
 )
 
@@ -319,5 +323,84 @@ func TestAMalformedIDOrBoundIsRefused(t *testing.T) {
 		if s := a.status(c.path, c.body); s != http.StatusUnprocessableEntity {
 			t.Errorf("%s %v: %d", c.path, c.body, s)
 		}
+	}
+}
+
+// TestTheAgentsRelayBodiesAreTaken reads each body the agent's CrudRelayRows sent as its route
+// does, for agent/test/mcpSessions.pg.test.ts. MCP_RELAY_BODIES names a JSON list of
+// {path, body}, the path under /crud/agent; MCP_RELAY_RESULTS gets one result per request:
+// {"ok": true}, with payload (the NOTIFY the route sends) for a send, or {"ok": false, "error"}.
+func TestTheAgentsRelayBodiesAreTaken(t *testing.T) {
+	in := os.Getenv("MCP_RELAY_BODIES")
+	if in == "" {
+		t.Skip("MCP_RELAY_BODIES names no file")
+	}
+	raw, err := os.ReadFile(in)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var requests []struct {
+		Path string          `json:"path"`
+		Body json.RawMessage `json:"body"`
+	}
+	if err := json.Unmarshal(raw, &requests); err != nil {
+		t.Fatal(err)
+	}
+	noPayload := func(_ any, err error) (*string, error) { return nil, err }
+	routes := map[string]func(*http.Request) (*string, error){
+		"/mcp-relay/sessions": func(r *http.Request) (*string, error) {
+			_, _, _, err := registerBody(r)
+			return nil, err
+		},
+		"/mcp-relay/sessions/touch": func(r *http.Request) (*string, error) { return noPayload(hashBody(r)) },
+		"/mcp-relay/sessions/owner": func(r *http.Request) (*string, error) { return noPayload(hashBody(r)) },
+		"/mcp-relay/sessions/remove": func(r *http.Request) (*string, error) {
+			_, _, err := removeBody(r)
+			return nil, err
+		},
+		"/mcp-relay/counts": func(r *http.Request) (*string, error) {
+			_, _, err := countsBody(r)
+			return nil, err
+		},
+		"/mcp-relay/sweep": func(r *http.Request) (*string, error) { return noPayload(sweepBody(r)) },
+		"/mcp-relay/send": func(r *http.Request) (*string, error) {
+			_, _, payload, err := sendBody(r)
+			return &payload, err
+		},
+		"/mcp-relay/rows/take":     func(r *http.Request) (*string, error) { return noPayload(rowBody(r)) },
+		"/mcp-relay/rows/withdraw": func(r *http.Request) (*string, error) { return noPayload(rowBody(r)) },
+	}
+	for _, route := range Areas(nil, nil)["mcp-relay"] {
+		if _, known := routes[route.Path]; !known {
+			t.Fatalf("%s's body is not read here", route.Path)
+		}
+	}
+	results := make([]obj, 0, len(requests))
+	for _, request := range requests {
+		parse, known := routes[request.Path]
+		if !known {
+			results = append(results, obj{"ok": false, "error": "no route " + request.Path})
+			continue
+		}
+		r := httptest.NewRequest(http.MethodPost, base+request.Path, strings.NewReader(string(request.Body)))
+		payload, err := parse(r)
+		var problem *httpx.Problem
+		switch {
+		case errors.As(err, &problem):
+			results = append(results, obj{"ok": false, "error": fmt.Sprintf("%s %v", problem.Detail, problem.Extensions)})
+		case err != nil:
+			results = append(results, obj{"ok": false, "error": err.Error()})
+		case payload != nil:
+			results = append(results, obj{"ok": true, "payload": *payload})
+		default:
+			results = append(results, obj{"ok": true})
+		}
+	}
+	out, err := json.Marshal(results)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(os.Getenv("MCP_RELAY_RESULTS"), out, 0o600); err != nil {
+		t.Fatal(err)
 	}
 }

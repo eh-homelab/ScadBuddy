@@ -201,7 +201,9 @@ and the module that serves it: Go's core (`tools/go/core`, a package per area un
 - `mcp-relay` (#5299 step 11, Go `internal/mcprelay`): `src/mcp/relayRows.ts` `CrudRelayRows`
   (the /mcp session directory and messages; a message's row and its `scadbuddy_mcp` NOTIFY
   commit in one transaction). `test/mcpSessions.pg.test.ts` runs the relay over fake routes
-  that answer with the agent's own SQL; the routes' own tests are Go's (`internal/mcprelay`).
+  that answer with the agent's own SQL, and runs every body it sent through the routes' own
+  readers with `go test` (`TestTheAgentsRelayBodiesAreTaken`; it skips without `go`); the
+  routes' own tests are Go's (`internal/mcprelay`).
 - `changes` (#5299 D4, `api/crud_agent_changes.py`, `agent_changes/hub.py`):
   `src/events/changeStream.ts` `ChangeStream`, the agent's one source of NOTIFYs, a server-sent
   event stream `GET …/agent/changes` carrying the six channels (`scadbuddy_events`, `_input`,

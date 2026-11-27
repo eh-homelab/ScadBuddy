@@ -1,3 +1,7 @@
+import { execFileSync } from 'node:child_process'
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
 import { setTimeout as sleep } from 'node:timers/promises'
 import { Client } from '@modelcontextprotocol/sdk/client/index.js'
 import { StreamableHTTPClientTransport } from '@modelcontextprotocol/sdk/client/streamableHttp.js'
@@ -83,12 +87,25 @@ const QUICK: Liveness = { beatMs: BEAT_MS, ackTimeoutMs: 1_000 }
  * check), as a fetch that answers each route with the agent's own SQL: the relay over
  * `CrudRelayRows` sends every call through the wire shape, ids and all in the body.
  */
+/** Every body `CrudRelayRows` sent, for the check against the API's own routes. */
+const sentToApi: { path: string; body: Record<string, unknown> }[] = []
+
+const hasGo = (): boolean => {
+  try {
+    execFileSync('go', ['version'], { stdio: 'ignore' })
+    return true
+  } catch {
+    return false
+  }
+}
+
 function crudRoutes(rows: RelayRows): typeof fetch {
   return async (input, init) => {
     // The API's JSON gate (api/limits.py MAX_TEXT_BODY_BYTES), refused before the route runs.
     if (Buffer.byteLength(String(init?.body ?? '')) > RELAY_SEND_MAX_BYTES) return new Response(null, { status: 413 })
     const path = new URL(String(input)).pathname.replace(/^.*\/crud\/agent\/mcp-relay/, '')
     const b = JSON.parse(String(init?.body ?? '{}')) as Record<string, unknown>
+    sentToApi.push({ path: `/mcp-relay${path}`, body: b })
     const s = (k: string) => b[k] as string
     const n = (k: string) => b[k] as number
     const answers: Record<string, () => Promise<unknown>> = {
@@ -479,6 +496,47 @@ describe.skipIf(!TEST_DATABASE_URL).each(['sql', 'crud'] as const)(`/mcp session
       const relayed = await call(n, 'relayed')
       expect(relayed.isError, `${n} models`).toBeFalsy()
       expect(relayed.content, `${n} models`).toEqual(direct.content)
+    }
+  })
+
+  // The fake routes above answer with the agent's own SQL, so this checks the wire itself: every
+  // body CrudRelayRows sent is one the API's routes take (Go's internal/mcprelay, its
+  // TestTheAgentsRelayBodiesAreTaken), and each NOTIFY the API would send is the header the agent sent.
+  it.skipIf(over === 'sql' || !hasGo())("sends only bodies the API's routes take, and they NOTIFY what was sent", { timeout: 300_000 }, async () => {
+    // Only this test's own calls: others write made-up hashes straight through the rows.
+    sentToApi.length = 0
+    const { token } = await tokens.mint({ name: 't', tier: 'read' })
+    let initialized = false
+    const client = await connect(token, () => (initialized ? b : a))
+    initialized = true
+    await client.listTools()
+    await (client.transport as StreamableHTTPClientTransport).terminateSession()
+    const sent = sentToApi.splice(0)
+    const paths = new Set(sent.map((s) => s.path))
+    for (const path of ['/mcp-relay/sessions', '/mcp-relay/counts', '/mcp-relay/send', '/mcp-relay/rows/take']) expect(paths).toContain(path)
+    const dir = mkdtempSync(join(tmpdir(), 'mcp-relay-bodies-'))
+    try {
+      const bodies = join(dir, 'bodies.json')
+      const results = join(dir, 'results.json')
+      writeFileSync(bodies, JSON.stringify(sent))
+      try {
+        execFileSync('go', ['test', './internal/mcprelay', '-run', '^TestTheAgentsRelayBodiesAreTaken$', '-count=1'], {
+          cwd: new URL('../../tools/go/core/', import.meta.url).pathname,
+          env: { ...process.env, MCP_RELAY_BODIES: bodies, MCP_RELAY_RESULTS: results },
+          stdio: ['ignore', 'pipe', 'pipe'],
+        })
+      } catch (err) {
+        const { stdout, stderr } = err as { stdout?: Buffer; stderr?: Buffer }
+        throw new Error(`go test failed:\n${String(stdout ?? '')}${String(stderr ?? '')}`, { cause: err })
+      }
+      const out = JSON.parse(readFileSync(results, 'utf8')) as { ok: boolean; error?: string; payload?: string }[]
+      expect(out).toHaveLength(sent.length)
+      out.forEach((result, i) => {
+        expect(result, `${sent[i]!.path}: ${result.error ?? ''}`).toMatchObject({ ok: true })
+        if (sent[i]!.path === '/mcp-relay/send') expect(JSON.parse(result.payload!)).toEqual(sent[i]!.body.header)
+      })
+    } finally {
+      rmSync(dir, { recursive: true, force: true })
     }
   })
 

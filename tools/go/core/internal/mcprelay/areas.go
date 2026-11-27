@@ -72,13 +72,21 @@ func (r *Relay) inTx(req *http.Request, fn func(pgx.Tx) error) error {
 
 // -- the directory --
 
-func (r *Relay) register(req *http.Request, _ crud.Params) (any, error) {
+// Each route reads its body in a function of its own, which TestTheAgentsRelayBodiesAreTaken
+// also runs over the bodies the agent's CrudRelayRows sends.
+
+func registerBody(req *http.Request) (hash, replica, caller string, err error) {
 	b, err := read(req, "hash", "replica", "caller_key")
 	if err != nil {
-		return nil, err
+		return "", "", "", err
 	}
-	hash, replica, caller := b.hash("hash"), b.uuid("replica"), b.text("caller_key", 1, callerKeyMax)
-	if err := b.err(); err != nil {
+	hash, replica, caller = b.hash("hash"), b.uuid("replica"), b.text("caller_key", 1, callerKeyMax)
+	return hash, replica, caller, b.err()
+}
+
+func (r *Relay) register(req *http.Request, _ crud.Params) (any, error) {
+	hash, replica, caller, err := registerBody(req)
+	if err != nil {
 		return nil, err
 	}
 	err = r.inTx(req, func(tx pgx.Tx) error {
@@ -94,13 +102,19 @@ func (r *Relay) register(req *http.Request, _ crud.Params) (any, error) {
 	return done{true}, nil
 }
 
-func (r *Relay) touch(req *http.Request, _ crud.Params) (any, error) {
+// hashBody is the body of touch and owner: the session's hash.
+func hashBody(req *http.Request) (string, error) {
 	b, err := read(req, "hash")
 	if err != nil {
-		return nil, err
+		return "", err
 	}
 	hash := b.hash("hash")
-	if err := b.err(); err != nil {
+	return hash, b.err()
+}
+
+func (r *Relay) touch(req *http.Request, _ crud.Params) (any, error) {
+	hash, err := hashBody(req)
+	if err != nil {
 		return nil, err
 	}
 	err = r.inTx(req, func(tx pgx.Tx) error {
@@ -114,14 +128,19 @@ func (r *Relay) touch(req *http.Request, _ crud.Params) (any, error) {
 	return done{true}, nil
 }
 
-func (r *Relay) remove(req *http.Request, _ crud.Params) (any, error) {
+func removeBody(req *http.Request) (hash string, replica *string, err error) {
 	b, err := read(req, "hash", "replica")
 	if err != nil {
-		return nil, err
+		return "", nil, err
 	}
-	hash := b.hash("hash")
-	replica := b.optionalUUID("replica")
-	if err := b.err(); err != nil {
+	hash = b.hash("hash")
+	replica = b.optionalUUID("replica")
+	return hash, replica, b.err()
+}
+
+func (r *Relay) remove(req *http.Request, _ crud.Params) (any, error) {
+	hash, replica, err := removeBody(req)
+	if err != nil {
 		return nil, err
 	}
 	var removed bool
@@ -146,12 +165,8 @@ func (r *Relay) remove(req *http.Request, _ crud.Params) (any, error) {
 }
 
 func (r *Relay) owner(req *http.Request, _ crud.Params) (any, error) {
-	b, err := read(req, "hash")
+	hash, err := hashBody(req)
 	if err != nil {
-		return nil, err
-	}
-	hash := b.hash("hash")
-	if err := b.err(); err != nil {
 		return nil, err
 	}
 	var replica *string
@@ -171,13 +186,18 @@ func (r *Relay) owner(req *http.Request, _ crud.Params) (any, error) {
 	}{replica}, nil
 }
 
-func (r *Relay) counts(req *http.Request, _ crud.Params) (any, error) {
+func countsBody(req *http.Request) (caller string, idle float64, err error) {
 	b, err := read(req, "caller_key", "idle_seconds")
 	if err != nil {
-		return nil, err
+		return "", 0, err
 	}
-	caller, idle := b.text("caller_key", 1, callerKeyMax), b.idleSeconds("idle_seconds")
-	if err := b.err(); err != nil {
+	caller, idle = b.text("caller_key", 1, callerKeyMax), b.idleSeconds("idle_seconds")
+	return caller, idle, b.err()
+}
+
+func (r *Relay) counts(req *http.Request, _ crud.Params) (any, error) {
+	caller, idle, err := countsBody(req)
+	if err != nil {
 		return nil, err
 	}
 	var out struct {
@@ -197,13 +217,18 @@ func (r *Relay) counts(req *http.Request, _ crud.Params) (any, error) {
 	return out, nil
 }
 
-func (r *Relay) sweep(req *http.Request, _ crud.Params) (any, error) {
+func sweepBody(req *http.Request) (float64, error) {
 	b, err := read(req, "idle_seconds")
 	if err != nil {
-		return nil, err
+		return 0, err
 	}
 	idle := b.idleSeconds("idle_seconds")
-	if err := b.err(); err != nil {
+	return idle, b.err()
+}
+
+func (r *Relay) sweep(req *http.Request, _ crud.Params) (any, error) {
+	idle, err := sweepBody(req)
+	if err != nil {
 		return nil, err
 	}
 	err = r.inTx(req, func(tx pgx.Tx) error {
@@ -326,24 +351,33 @@ func (b *body) readHeader(name string) header {
 	return out
 }
 
-func (r *Relay) send(req *http.Request, _ crud.Params) (any, error) {
+// sendBody is a send's header, its body, and the NOTIFY payload the header is sent as.
+func sendBody(req *http.Request) (h header, message json.RawMessage, payload string, err error) {
 	b, err := read(req, "header", "body")
 	if err != nil {
-		return nil, err
+		return header{}, nil, "", err
 	}
-	h := b.readHeader("header")
-	message := b.optionalObject("body")
+	h = b.readHeader("header")
+	message = b.optionalObject("body")
 	if err := b.err(); err != nil {
-		return nil, err
+		return header{}, nil, "", err
 	}
 	if (h.row == nil) != (message == nil) {
-		return nil, &httpx.Problem{Status: http.StatusUnprocessableEntity,
+		return header{}, nil, "", &httpx.Problem{Status: http.StatusUnprocessableEntity,
 			Detail: "a body is sent with the header that names its row, and only then"}
 	}
-	payload := h.payload()
+	payload = h.payload()
 	if len(payload) > notifyPayloadMax {
-		return nil, &httpx.Problem{Status: http.StatusUnprocessableEntity,
+		return header{}, nil, "", &httpx.Problem{Status: http.StatusUnprocessableEntity,
 			Detail: fmt.Sprintf("a relay header is at most %d bytes", notifyPayloadMax)}
+	}
+	return h, message, payload, nil
+}
+
+func (r *Relay) send(req *http.Request, _ crud.Params) (any, error) {
+	h, message, payload, err := sendBody(req)
+	if err != nil {
+		return nil, err
 	}
 	err = r.inTx(req, func(tx pgx.Tx) error {
 		if h.row != nil {
@@ -367,13 +401,19 @@ func (r *Relay) send(req *http.Request, _ crud.Params) (any, error) {
 	return done{true}, nil
 }
 
-func (r *Relay) take(req *http.Request, _ crud.Params) (any, error) {
+// rowBody is the body of take and withdraw: the relay row's id.
+func rowBody(req *http.Request) (string, error) {
 	b, err := read(req, "row")
 	if err != nil {
-		return nil, err
+		return "", err
 	}
 	row := b.uuid("row")
-	if err := b.err(); err != nil {
+	return row, b.err()
+}
+
+func (r *Relay) take(req *http.Request, _ crud.Params) (any, error) {
+	row, err := rowBody(req)
+	if err != nil {
 		return nil, err
 	}
 	var taken *string
@@ -399,12 +439,8 @@ func (r *Relay) take(req *http.Request, _ crud.Params) (any, error) {
 }
 
 func (r *Relay) withdraw(req *http.Request, _ crud.Params) (any, error) {
-	b, err := read(req, "row")
+	row, err := rowBody(req)
 	if err != nil {
-		return nil, err
-	}
-	row := b.uuid("row")
-	if err := b.err(); err != nil {
 		return nil, err
 	}
 	var gone bool
