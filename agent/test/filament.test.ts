@@ -2206,3 +2206,78 @@ describe('filament_spool_upsert quantity and copy_of', () => {
     )
   })
 })
+
+describe('filament preset read tools (#7204)', () => {
+  const wire = JSON.parse(readFileSync(`${import.meta.dirname}/../../test-fixtures/filament/preset-wire.json`, 'utf8')) as {
+    row: Record<string, unknown>
+    detail: Record<string, unknown>
+    diff: Record<string, unknown>
+  }
+  const PRESETS = `${BACKEND}/api/v1/filament/presets`
+  const NAMES = ['filament_preset_list', 'filament_preset_get', 'filament_preset_diff']
+
+  it.each(NAMES)('%s is read tier, never gated, with no OpenAPI route', (name) => {
+    expect(tool(name).risk).toBe('read')
+    expect(tool(name).gated).toBe(false)
+    expect(tool(name).routes).toEqual([])
+  })
+
+  it('lists presets with the filters it was given', async () => {
+    const TYPE = '5d0c8f1e-0000-4000-8000-000000007204'
+    server.use(
+      http.get(PRESETS, ({ request }) => {
+        const url = new URL(request.url)
+        expect(url.searchParams.get('source')).toBe('manual')
+        expect(url.searchParams.get('type_id')).toBe(TYPE)
+        return HttpResponse.json([wire.row])
+      }),
+    )
+    const listed = await runTool(tool('filament_preset_list'), { source: 'manual', type_id: TYPE }, ctx())
+    expect(firstText(listed)).toMatchObject([{ id: 7, ui_path: '/filament/presets/7', type_ui_path: expect.any(String) }])
+  })
+
+  it('reads a preset and diffs two versions', async () => {
+    server.use(
+      http.get(`${PRESETS}/7`, () => HttpResponse.json(wire.detail)),
+      http.get(`${PRESETS}/7/diff`, ({ request }) => {
+        const url = new URL(request.url)
+        expect(url.searchParams.get('from_version')).toBe('2')
+        expect(url.searchParams.get('to_version')).toBe('3')
+        return HttpResponse.json(wire.diff)
+      }),
+    )
+    const one = await runTool(tool('filament_preset_get'), { preset_id: 7 }, ctx())
+    expect(firstText(one)).toMatchObject({ id: 7, ui_path: '/filament/presets/7', document: wire.detail.document })
+    const diff = await runTool(tool('filament_preset_diff'), { preset_id: 7, from_version: 2, to_version: 3 }, ctx())
+    expect(firstText(diff)).toMatchObject({ preset_id: 7, changes: wire.diff.changes })
+  })
+
+  it('says the presets routes are off on a bare 404', async () => {
+    server.use(
+      http.get(PRESETS, () => HttpResponse.json({ detail: 'Not Found' }, { status: 404 })),
+      http.get(`${PRESETS}/8`, () =>
+        HttpResponse.json(
+          { type: 'about:blank', title: 'Not Found', status: 404, code: 'preset_not_found' },
+          { status: 404, headers: { 'content-type': 'application/problem+json' } },
+        ),
+      ),
+    )
+    const off = await runTool(tool('filament_preset_list'), {}, ctx())
+    expect(off.isError).toBe(true)
+    expect(JSON.stringify(off.content)).toContain('the presets routes are not on yet on this server (core area filament-presets)')
+    const missing = await runTool(tool('filament_preset_get'), { preset_id: 8 }, ctx())
+    expect(missing.isError).toBe(true)
+    expect(JSON.stringify(missing.content)).toContain('HTTP 404')
+    expect(JSON.stringify(missing.content)).not.toContain('not on yet')
+  })
+
+  it('the preset tools run in durable mode', () => {
+    const deps = { services: services(), sessions: { ownerOf: async () => undefined } }
+    const activities = toolActivities(ALL_TOOLS, deps)
+    const calls = toolCallActivities(ALL_TOOLS, deps)
+    for (const name of NAMES) {
+      expect(activities[name]).toBeTypeOf('function')
+      expect(calls[toolCallActivity(name)]).toBeTypeOf('function')
+    }
+  })
+})
