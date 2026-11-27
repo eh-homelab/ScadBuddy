@@ -117,6 +117,39 @@ socket frame, the typed kinds' fields, and the topic rules. The backend's
 `model_dump_json` does (`internal/bus/kinds.go` holds each kind's fields) and an opaque one as
 `json.dumps` does, both from the log's `jsonb`.
 
+The same area serves the session registry (`internal/fleet/registry.go`, #7985). Caller
+`fleet` reads `GET /sessions` (`?limit=`, as the inbox: the most recently seen session
+first, by its newest host, and `more`) and `GET /sessions/{session_id}` (404 reason
+`unknown-session`). One session id can run on several machines at once, so each session is
+its `session_id`, `handle`, `last_seen` (the newest host's) and `hosts`, one per machine,
+the most recently seen first: each host with its machine and its credential's `id`,
+`name`, `kind` and `last4` only, joined from `ai_credentials`, never a secret column. Caller `fleet-rotator` (scope `crud.fleet-rotator`),
+under `/api/v1/internal/crud/fleet-rotator`, writes `PUT /machines/{id}` (the id is 64
+lower-case hex: a SHA-256, never the raw machine id) and `PUT
+/machines/{machine_id}/sessions/{session_id}` (the session's row on that machine, keyed by
+both ids; the whole row: an optional field left out is cleared). A session `PUT` makes the
+session's fleet agent as `touch` does (409 `handle-taken`), needs its machine (404
+`unknown-machine`), links a new row to the newest row of the same machine, pid and
+`proc_start` (`previous_session_id`, the session before a `/clear`), and answers that one
+row only, never another machine's. Every field is checked: lengths,
+absolute paths, no control characters, a full `git_head`. `git_remote` is an `http(s)://`,
+`ssh://` or `git://` URL with no query and no fragment, or the scp-like `user@host:path`
+(user `[A-Za-z0-9._-]+`). Only an `ssh://` URL may name a user, with no password; anything
+else (a token in the user part, a local path, `file://`, `ext::`) is a 422.
+
+A `fleet-rotator` credential names its machine: the `<machine>` of the bootstrap proof file
+`fleet-rotator.<machine>` it was exchanged for (`service_credentials.machine`; `crud.ServiceOf`
+gives a handler the verified service). The machine's `id` is the service's own hash, so the
+first `PUT /machines/{id}` records the caller's proof name in `fleet_machines.proof_name`. A
+`PUT /machines/{id}` of a row another proof registered is a 403 (reason
+`machine-of-another-proof`), and so is a session `PUT` whose machine is registered to
+another proof. So two machines of different proofs each hold a row of the same session id,
+and neither changes the other's. A `fleet-rotator` credential with no machine writes
+nothing (403 `no-machine`). Core reads no bootstrap directory: a credential whose machine's file
+went is refused here once the API revokes its row, at the API's first resolve of it or its next
+start or auth sweep (at most 5 minutes; `docs/security/trust-boundaries.md`). `fleetd` sends a
+`fleet` PAT today, which these routes refuse until #8041.
+
 Area `blobs` † (`internal/blobstore`, #7958) is a shared area: any service credential whose scopes
 hold `crud.blobs` may call it, under `/api/v1/internal/crud/blobs`; no caller is granted that scope
 yet. Python has no such routes. `POST /uploads` with `{kind, size, sha256, media_type}` answers
@@ -148,6 +181,7 @@ stands for an upload: its URL lasts 15 minutes and its commit an hour more, and 
 commit of it is a 404. Refusals carry a `reason`: 422 `kind_not_allowed`, 413 `upload_too_large`,
 507 `store_full`, 404 `upload_not_found`, 410 `upload_expired`, 409 `upload_not_received`, 422
 `upload_mismatch`, 409 `store_object_mismatch`, 503 `store_unavailable` or `store_busy`.
+A Go handler in core reads a blob in-process with `Blobs.OpenKey(ctx, key)` (a `store_blobs` key, the form Python's `blob_key` and `blob_refs` hold) or `Blobs.Open(ctx, kind, sha256)`. It adds no route. The read looks up the row, sends a presigned GET to the row's S3 object, waits at most a minute for its headers, and streams the bytes with their `Ref` for as long as the caller's context allows. The stream checks size and SHA-256 and ends with `ErrBlobMismatch` on a wrong object. A missing row or object is `ErrBlobNotFound`. A store that is not S3, or a row on another backend, is `ErrNotConfigured`.
 `internal/blobclient` is its Go client: `New(baseURL, token, tel)`, `Upload(ctx, kind, mediaType, body)`; each call to core may take 2 minutes, longer than a busy commit takes to answer `store_busy`.
 Both sides trace their requests with `telemetry`'s `Transport`: each span records the method, the
 status and the peer (`s3` for the store), never a URL, so a presigned query is never recorded. A

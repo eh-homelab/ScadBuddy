@@ -81,6 +81,11 @@ same way, `vite.config.ts`).
   only the back office fetches the stored one (`lib/loadDisplayUnit.ts`). The customer's
   form is `components/ListingView.tsx`, which the back office's Storefront page mounts as
   its live preview (the back office may import from `src/storefront`, never the reverse).
+  Its colour parts are one block, `components/ColourParts.tsx` (#8127): from `colourParts.ts`
+  `GROUP_FROM` parts in two or more groups it shows the schema's groups, the first open, a
+  closed one as a strip of its colours, and an "All N parts" row; each part is a compact
+  `ColourPicker` row whose grid shows the colours the design uses first. The mock `l5`
+  (`DOLLHOUSE`) has 31 parts in five groups.
   `vite dev` and
   `vite preview` serve the page under `/store` (`storefrontPreview`); its mocks are
   `src/mocks/features/storefrontPublic.ts`, its e2e `e2e/storefront.spec.ts` (390 px wide).

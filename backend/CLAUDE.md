@@ -1228,7 +1228,17 @@ only the sleeps move; a budget on the real clock fails on a slow runner (#6252).
   CHECKs, which every new caller needs). Python serves only `api/crud_fleet.py`, `GET
   …/changes`, the stream of events whose kind starts with `fleet.` (an `OpaqueEvent`, its frame
   data the stored payload) with a budget of its own (`FLEET_STREAMS_MAX`); the `fleet` area's
-  routes are core's (Go). Test: `tests/api/test_crud_fleet_changes.py`.
+  routes are core's (Go). Test: `tests/api/test_crud_fleet_changes.py`. The session registry
+  (#7985): the `fleet-rotator` CRUD caller (scope `crud.fleet-rotator`, area `fleet`; no
+  ServiceAccount, its proof is one bootstrap secret per machine, `fleet-rotator.<machine>`,
+  `auth/exchange.py` `PER_MACHINE_CALLERS`) and `*_fleet_session_registry.sql`
+  (`fleet_machines`, `fleet_session_hosts`); its routes are core's. Its credential names the
+  machine whose file matched (`service_credentials.machine`); a machine whose file is gone is
+  refused at the exchange and, with its live credentials, at `resolve`, which revokes them
+  (`BootstrapVerifier.has_machine`); `main.py` `_rotate_service_credentials` (every start and
+  auth sweep) revokes the rest (`revoke_machines_without_proof`). A `fleet-rotator.*` file
+  whose suffix names no machine is skipped with a warning. `fleetd` sends a `fleet` PAT today,
+  which these routes refuse until #8041.
 - `backend/scadbuddy/filament/` labels and printer places (#6955, plan
   `docs/superpowers/plans/2026-11-22-printer-location-labels.md`). A location has a `number`
   (identity, never reused; its code is `L-<n>`; migration `20261122T0603Z_filament_location_numbers.sql`).
@@ -1698,9 +1708,9 @@ only the sleeps move; a budget on the real clock fails on a slow runner (#6252).
   output with no row and no young claim. A save with a new id takes no claim, so its holds
   are kept only while they are younger than the grace. The release's migration
   (`20261125T1737Z_outputs_drop_output_index.sql`) refuses to run without the cut-over
-  mark, and drops `output_index` and `output_hold_slugs`. Since #7887
-  nothing reads or writes the mark, the copies' run tables or the copy-only columns of
-  `outputs`, and `GET /outputs/copy-status` is gone; #7887's second step drops them. A
+  mark, and drops `output_index` and `output_hold_slugs`. The next one
+  (`20261127T0259Z_outputs_drop_copy_state.sql`, #7887) drops the mark, the copies' run
+  tables and the copy-only columns of `outputs`, and `GET /outputs/copy-status` is gone. A
   reader that needs a path
   opens `OutputStore.local_role` or `read_role` (`async with`: the blob as a temporary
   file under `ContentStore.spool`, #7316) and runs its sync reader in a thread; there

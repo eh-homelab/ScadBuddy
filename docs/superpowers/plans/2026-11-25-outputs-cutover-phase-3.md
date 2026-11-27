@@ -288,7 +288,7 @@ PR title `feat(outputs): cut over from NFS, phase 3b (#7257)`, body `Fixes #7257
 
 ### After release B deploys
 
-These steps are for release B's deploy only. #7887 (D11) later removed `GET /api/v1/outputs/copy-status`; its second step drops the cut-over mark and the copies' run tables.
+These steps are for release B's deploy only. #7887 (D11) later removed `GET /api/v1/outputs/copy-status`, the cut-over mark and the copies' run tables.
 
 1. Confirm every API pod runs release B's image. While the first new pod's migration refuses (D2), the pod restarts and the release A pods keep serving; read its log line, fix the cause on release A, and the roll continues by itself.
 2. Read `GET /api/v1/outputs/copy-status`: `cut_over_at` is set and `bytes.pending` is 0.

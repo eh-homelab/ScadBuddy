@@ -149,6 +149,7 @@ async def exchange_service_token(
             verified.proof,
             pod_name=verified.pod_name,
             pod_uid=verified.pod_uid,
+            machine=verified.machine,
         )
     except CallerSuspendedError:
         logger.warning("refused a service-token exchange: %s is suspended", verified.caller)

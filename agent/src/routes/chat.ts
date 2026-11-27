@@ -39,10 +39,6 @@ import { ready, type RouteModule } from './module.js'
 //                            session once its turn has started
 //   session.attach         → replay the session's event log from the start,
 //                            then follow it live (SessionManager.attach)
-//                          (The panel answers approvals and questions through
-//                          POST /api/v1/ai/pending-input/{id}, #815; the socket's
-//                          old `approval.decision` and `question.answer` are gone,
-//                          #7323, and are refused as malformed.)
 //   session.interrupt      → SessionManager.interrupt
 //   session.handoff        → SessionManager.handoff to the browser user (take over)
 //   tab.bind               → the tab this panel is in (#254): from then on each
@@ -57,7 +53,10 @@ import { ready, type RouteModule } from './module.js'
 // the SessionError code; the socket stays open. A send refused
 // because the budget is spent is preceded by a `session.budget` event (#790).
 // Raising a budget and forking are HTTP routes (routes/sessions.ts), not
-// socket messages.
+// socket messages. The panel answers approvals and questions through
+// POST /api/v1/ai/pending-input/{id} (#815); the socket's old
+// `approval.decision` and `question.answer` are gone (#7323) and are refused as
+// malformed.
 //
 // The upgrade passes guard.ts `uiRequestProblem` first: a browser always sends
 // `Origin` on a WebSocket handshake, and it must be the UI's (spec §8.4: "An
