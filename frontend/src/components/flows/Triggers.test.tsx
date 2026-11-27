@@ -3,12 +3,12 @@ import type { ReactNode } from 'react'
 import { describe, expect, it, vi } from 'vitest'
 import { bridge } from '../../agent/bridge'
 import { isUserOnly } from '../../agent/dom'
-import { api } from '../../api/client'
 import { useGlobalAgentTools } from '../../agent/global'
 import {
   changeFlowTrigger,
   flowTriggerRequests,
   reset as resetFlowTriggers,
+  standingGrant,
 } from '../../mocks/features/flowTriggers'
 import { choose } from '../../test/select'
 import { renderPage } from '../../test/utils'
@@ -59,12 +59,10 @@ describe('FlowTriggers', () => {
   })
 
   // #8221: a standing grant has no chain above it, so out of force means expired, and
-  // one whose expiry has passed still says Expired (#8188 changed grantStatus).
+  // one whose expiry has passed still says Expired (#8188 changed grantStatus, #8220 made
+  // `expired` the server's).
   it('says Expired for a standing grant whose expiry has passed', async () => {
-    const hourly = (await api.listFlowTriggers('swap')).find((t) => t.id === 'trig-hourly')!
-    changeFlowTrigger('trig-hourly', {
-      grant: { ...hourly.grant!, in_force: false, expires_at: '2026-01-01T00:00:00Z' },
-    })
+    changeFlowTrigger('trig-hourly', { grant: standingGrant('sg-1', { in_force: false, expired: true }) })
     render()
     expect(within(await row(/Every hour/)).getByTestId('standing-grant-status')).toHaveTextContent(/^Expired$/)
   })

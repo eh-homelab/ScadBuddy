@@ -93,6 +93,8 @@ class StandingGrantView(BaseModel):
     requested_at: datetime
     #: Approved, not revoked and not expired: each fire's run gets a grant from it.
     in_force: bool
+    #: Its own expiry has passed, by the server's clock (#8220).
+    expired: bool
 
 
 class TriggerView(Trigger):
@@ -269,10 +271,12 @@ async def _sync_saved(triggers: Triggers, trigger: Trigger) -> None:
 def _grant_view(grant: StandingGrant | None) -> StandingGrantView | None:
     if grant is None:
         return None
+    now = datetime.now(UTC)
     return StandingGrantView(
         **grant.model_dump(exclude={"trigger_id", "requested_at"}),
         requested_at=grant.requested_at or grant.created_at,
-        in_force=grant.in_force(datetime.now(UTC)),
+        in_force=grant.in_force(now),
+        expired=grant.expired(now),
     )
 
 

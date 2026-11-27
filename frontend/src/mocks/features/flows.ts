@@ -252,6 +252,7 @@ function grant(id: string, fields: Partial<FlowGrantView>): FlowGrantView {
     expires_at: null,
     created_at: at(0),
     in_force: true,
+    expired: false,
     uses: [],
     released: [],
     ...fields,

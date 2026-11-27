@@ -441,6 +441,10 @@ func (f *fakeS3) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		if f.afterGet != nil {
 			f.afterGet(r.URL.Path)
 		}
+	case http.MethodHead:
+		if _, ok := f.objects[r.URL.Path]; !ok {
+			w.WriteHeader(http.StatusNotFound)
+		}
 	case http.MethodDelete:
 		delete(f.objects, r.URL.Path)
 		w.WriteHeader(http.StatusNoContent)
@@ -487,6 +491,8 @@ type harness struct {
 	blobs  *Blobs
 	now    time.Time
 	bucket string
+	// env is the store's settings the harness started with.
+	env map[string]string
 }
 
 func newHarness(t *testing.T) *harness {
@@ -504,6 +510,7 @@ func newHarness(t *testing.T) *harness {
 		"SCADBUDDY_STORE_S3_ACCESS_KEY_ID":     "testing",
 		"SCADBUDDY_STORE_S3_SECRET_ACCESS_KEY": "testing",
 	}
+	h.env = env
 	h.blobs = &Blobs{Pool: pool, Keys: testKeys(t), LookupEnv: lookup(env),
 		HTTP: store.Client(), Stream: store.Client(), Now: func() time.Time { return h.now }}
 	router := &crud.Router{Resolver: resolver{}, Next: http.NotFoundHandler()}
