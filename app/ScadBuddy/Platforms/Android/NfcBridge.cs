@@ -370,6 +370,8 @@ public sealed class NfcBridge : Java.Lang.Object, NfcAdapter.IReaderCallback, We
 				{
 					at = sector;
 					if (sectors.ContainsKey(sector)) continue;
+					// The call's deadline is near: stop with what was read, which the dump keeps.
+					if (progress?.Stopped == true) throw new OperationCanceledException("the call stopped the read");
 					var key = sector < 16 ? keys.AsSpan(sector * 6, 6).ToArray() : null;
 					var read = key is null ? null : ReadSector(classic, sector, key);
 					if (read is null) refused.Add(sector); else sectors[sector] = read;
@@ -456,4 +458,7 @@ public interface ITagProgress
 	void Found(string uid, string tech, int blocks, int resumeFrom);
 	void Read(int read, int of);
 	void Lost(int read, string error);
+
+	/// <summary>Whether the call wants the read to stop before its next sector.</summary>
+	bool Stopped { get; }
 }

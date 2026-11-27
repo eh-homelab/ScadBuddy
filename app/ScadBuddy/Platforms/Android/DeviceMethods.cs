@@ -113,6 +113,9 @@ static class DeviceMethods
 					// No write without its backup: an upload that fails ends the call.
 					var (backup, _, _, _) = await SendDump(call, tag, before);
 					call.Event(DeviceProtocol.TagFound(uid, tech, 0, 0, backup));
+					// A write needs time for its read-back: it does not start when too little is left.
+					if (call.Request.Deadline - DateTimeOffset.UtcNow < WriteNeeds)
+						return DeviceProtocol.Failed("timeout: too little time was left to write the tag and read it back");
 					screen.Say("Backup kept. Writing.");
 					// A blank tag is formatted, and this Tag still lists no Ndef: only the next tap reads it back.
 					var formatted = !NfcBridge.HasNdef(tag);
@@ -204,6 +207,9 @@ static class DeviceMethods
 		return DeviceProtocol.PhotoResult(key, type);
 	}
 
+	// The time an nfc.write needs before the deadline: the margin DeviceLink keeps, then the write and a read-back tap.
+	static readonly TimeSpan WriteNeeds = TimeSpan.FromSeconds(20);
+
 	// One tap waits at a time; taps while a read runs are dropped.
 	static Channel<Tag> Taps() => Channel.CreateBounded<Tag>(new BoundedChannelOptions(1) { FullMode = BoundedChannelFullMode.DropWrite });
 
@@ -212,6 +218,8 @@ static class DeviceMethods
 	{
 		/// <summary>The last tag_lost's error, null while the read goes on or after it ended well.</summary>
 		public string? LostError { get; set; }
+
+		public bool Stopped => call.Token.IsCancellationRequested;
 
 		public void Found(string uid, string tech, int blocks, int resumeFrom)
 		{
