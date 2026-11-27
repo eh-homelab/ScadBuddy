@@ -103,7 +103,8 @@ type Blobs struct {
 	// sent (httpx.Outside); its spans carry the method, the status and the peer "s3", never
 	// the URL, whose query is the presigned signature.
 	HTTP *http.Client
-	// Stream sends a read's GET (OpenKey), whose body the caller reads: it has no total
+	// Stream sends a read's GET (OpenKey), whose body the caller reads, and a publish's PUT
+	// (PublishFile), whose body streams from a spooled file: it has no total
 	// timeout, since http.Client.Timeout also covers reading the body. fetch bounds the wait
 	// for the response headers (HeaderWait), and the caller's ctx and Close bound the rest.
 	Stream *http.Client
@@ -482,9 +483,19 @@ func do(ctx context.Context, client *http.Client, method, url string, body []byt
 	if body != nil {
 		reader = bytes.NewReader(body)
 	}
-	req, err := http.NewRequestWithContext(ctx, method, url, reader)
+	return doBody(ctx, client, method, url, reader, int64(len(body)), headers)
+}
+
+// doBody is do with a body of size bytes read as it goes (a spooled file), nil for none.
+func doBody(ctx context.Context, client *http.Client, method, url string, body io.Reader, size int64,
+	headers map[string]string) (*http.Response, error) {
+	req, err := http.NewRequestWithContext(ctx, method, url, body)
 	if err != nil {
 		return nil, unavailable("the S3 store's URL is not a URL")
+	}
+	if body != nil && req.ContentLength == 0 {
+		// A reader whose length net/http cannot tell (a file) is sent with its size, not chunked.
+		req.ContentLength = size
 	}
 	for name, value := range headers {
 		req.Header.Set(name, value)
