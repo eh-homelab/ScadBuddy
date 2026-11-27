@@ -50,7 +50,7 @@ public partial class MainPage : ContentPage
 	{
 		var accepted = Preferences.Get(OriginsKey, "").Split('\n', StringSplitOptions.RemoveEmptyEntries).ToHashSet(StringComparer.OrdinalIgnoreCase);
 		if (string.Equals(origin, OriginOf(url), StringComparison.OrdinalIgnoreCase) || accepted.Contains(origin)) return true;
-		var yes = await DisplayAlertAsync("Send scans to this server?", $"A link asks this app to send a tag read or a photo to {origin}. Accept only a ScadBuddy you run.", "Accept", "Cancel");
+		var yes = await DisplayAlertAsync("Send scans to this server?", $"A link asks this app to send a tag read or a photo to\n{origin}\n\nThis app's ScadBuddy is\n{OriginOf(url)}\n\nThey differ. Accept only a ScadBuddy you run. Changing the ScadBuddy address forgets every server accepted here.", "Accept", "Cancel");
 		if (!yes) return false;
 		accepted.Add(origin);
 		Preferences.Set(OriginsKey, string.Join('\n', accepted));
@@ -92,11 +92,7 @@ public partial class MainPage : ContentPage
 #endif
 	}
 
-	static string OriginOf(string address)
-	{
-		var uri = new Uri(address);
-		return uri.GetLeftPart(UriPartial.Authority);
-	}
+	static string OriginOf(string address) => DeepLink.OriginOf(new Uri(address));
 
 	void OnNavigating(object? sender, WebNavigatingEventArgs e)
 	{
@@ -121,6 +117,7 @@ public partial class MainPage : ContentPage
 			return;
 		}
 		Preferences.Set(UrlKey, parsed.ToString());
+		Preferences.Remove(OriginsKey);
 		await DisplayAlertAsync("Saved", "Close the app and open it again to use the new address.", "OK");
 	}
 

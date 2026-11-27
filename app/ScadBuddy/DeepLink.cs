@@ -37,7 +37,8 @@ public static class DeepLink
 		else pending = target;
 	}
 
-	public static string OriginOf(Uri address) => address.GetLeftPart(UriPartial.Authority);
+	/// <summary>The origin with its host in ASCII (punycode), so a look-alike host never reads as another.</summary>
+	public static string OriginOf(Uri address) => $"{address.Scheme}://{address.IdnHost}{(address.IsDefaultPort ? "" : $":{address.Port}")}";
 
 	/// <summary>The link the app was started with, once.</summary>
 	public static ScanJob? Take()
