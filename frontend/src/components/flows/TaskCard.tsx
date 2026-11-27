@@ -18,6 +18,7 @@ import { useAsync } from '../../lib/useAsync'
 import { useLatest } from '../../lib/useLatest'
 import { usePassed } from '../../lib/usePassed'
 import { AnsweredBy, INSET, PeopleOnly, StepLine, WAITING, type CardProps } from './pendingParts'
+import { weightExpected } from '../../lib/flowInputs'
 import { SchemaForm } from './SchemaForm'
 
 const STATE_TEXT: Record<Exclude<TaskQuestion['state'], 'open'>, string> = {
@@ -180,6 +181,8 @@ function AnswerForm({
         busy={busy}
         problems={problems}
         error={error}
+        taskId={task.id}
+        expect={weightExpected(task.context)}
         onSubmit={(answer) => void send(answer)}
       />
     </div>

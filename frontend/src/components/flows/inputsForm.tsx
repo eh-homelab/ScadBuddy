@@ -1,7 +1,13 @@
 import { useId, useState } from 'react'
 import type { AnswerProblem } from '../../api/types'
-import { defaultText, initialValues, itemLines, noErrors, toInputs, type InputField, type InputValues } from '../../lib/flowInputs'
-import { Checkbox } from '@/components/ui/checkbox'
+import { defaultText, expectedText, initialValues, itemLines, noErrors, toInputs, type InputField, type InputValues } from '../../lib/flowInputs'
+import { Button } from '@/components/ui/button'
+import { Switch } from '@/components/ui/switch'
+import { LibraryField } from './widgets/LibraryField'
+import { ScanField } from './widgets/ScanField'
+import { Segmented } from './widgets/Segmented'
+import { Stepper } from './widgets/Stepper'
+import { UploadField } from './widgets/UploadField'
 import { Input } from '@/components/ui/input'
 import { Label } from '@/components/ui/label'
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select'
@@ -18,7 +24,14 @@ interface InputsOptions {
   names?: boolean
   /** #5701 — called at each edit. */
   onChange?: () => void
+  /** #8062 — the task a photo or file is uploaded to; with none, such a field is plain text. */
+  taskId?: string
+  /** #8062 — the weight the task's context expects, shown beside a weight field. */
+  expect?: { weight_g: number; tolerance_g?: number }
 }
+
+/** A string enum of up to this many options is drawn as buttons, more as a select (spec §6.3). */
+const SEGMENTED_MAX = 5
 
 /**
  * Each problem by the field it is shown under, and the rest, which have no field. The server
@@ -46,7 +59,7 @@ function placed(fields: InputField[], sent: InputValues, problems: readonly Answ
  * the browser could not read (a date with no time), which are never sent as blank. `rest`
  * are the problems that are no field's.
  */
-export function useInputs(fields: InputField[], { answer = false, problems = [], values: starts, names = true, onChange }: InputsOptions = {}) {
+export function useInputs(fields: InputField[], { answer = false, problems = [], values: starts, names = true, onChange, taskId, expect }: InputsOptions = {}) {
   const [values, setValues] = useState<InputValues>(() =>
     initialValues(starts ? fields.map((field) => ({ ...field, default: starts[field.name] })) : fields),
   )
@@ -68,6 +81,8 @@ export function useInputs(fields: InputField[], { answer = false, problems = [],
       error={errors[field.name] ?? said[field.name]}
       answer={answer}
       names={names}
+      taskId={taskId}
+      expect={expect}
       onChange={(next) => {
         onChange?.()
         setValues((now) => ({ ...now, [field.name]: next }))
@@ -94,8 +109,12 @@ function Field({
   error,
   answer,
   names,
+  taskId,
+  expect,
   onChange,
 }: {
+  taskId?: string
+  expect?: InputsOptions['expect']
   field: InputField
   value: string | boolean
   error?: string
@@ -142,11 +161,34 @@ function Field({
     </p>
   )
 
+  if (field.type === 'boolean' && field.widget === 'confirm') {
+    return (
+      <div className="flex flex-col gap-1.5">
+        <Button
+          {...common}
+          type="button"
+          size="lg"
+          className="h-14 w-full text-base"
+          onClick={(event) => {
+            const form = event.currentTarget.form
+            onChange(true)
+            // Submits once the form holds the `true`.
+            setTimeout(() => form?.requestSubmit())
+          }}
+        >
+          {field.label}
+        </Button>
+        {hint}
+        {problem}
+      </div>
+    )
+  }
+
   if (field.type === 'boolean') {
     return (
       <div className="flex flex-col gap-1">
-        <div className="flex w-fit max-w-full items-center gap-2">
-          <Checkbox {...common} checked={value === true} onCheckedChange={(next) => onChange(next === true)} />
+        <div className="flex w-fit max-w-full items-center gap-3">
+          <Switch {...common} checked={value === true} onCheckedChange={(next) => onChange(next)} />
           <Label htmlFor={id} className="min-w-0">
             {label}
           </Label>
@@ -157,10 +199,70 @@ function Field({
     )
   }
 
+  const optional = field.default === undefined && !field.required
+  const plain = field.type === 'string' && !field.enum
+  const scanKinds = field.kind === 'location' || field.kind === 'spool' ? [field.kind] : undefined
+  if (field.widget === 'entity' && field.kind !== 'library_file' && !scanKinds) warnOnce(`${field.name}: unknown entity kind ${JSON.stringify(field.kind)}`)
+
+  // The library picker has a label of its own.
+  if (plain && field.widget === 'entity' && field.kind === 'library_file') {
+    return (
+      <div className="flex flex-col gap-1.5">
+        <LibraryField label={field.label} onPick={(file) => onChange(file ? String(file.id) : '')} />
+        {hint}
+        {problem}
+      </div>
+    )
+  }
+
   let control
-  if (field.enum) {
+  if (plain && (field.widget === 'scan' || scanKinds)) {
+    control = <ScanField common={common} id={id} expects={scanKinds ? { kinds: scanKinds } : field.expects} value={String(value)} onChange={onChange} />
+  } else if (plain && taskId && (field.widget === 'photo' || field.widget === 'file')) {
+    control = (
+      <UploadField
+        common={common}
+        id={id}
+        taskId={taskId}
+        accept={field.widget === 'photo' ? 'image/*' : undefined}
+        capture={field.widget === 'photo'}
+        onChange={onChange}
+      />
+    )
+  } else if (field.widget === 'weight' && (field.type === 'number' || field.type === 'integer')) {
+    control = (
+      <div className="flex flex-col gap-1.5">
+        <div className="flex items-center gap-2">
+          <Input
+            {...common}
+            data-field={field.name}
+            type="number"
+            inputMode="decimal"
+            step="any"
+            min={field.minimum}
+            className="h-11 w-36 text-base"
+            value={String(value)}
+            onChange={(event) => onChange(event.target.value)}
+          />
+          <span className="text-sm text-muted-foreground">g</span>
+        </div>
+        {expect && <p className="text-[13px] font-medium">{expectedText(expect)}</p>}
+      </div>
+    )
+  } else if (field.enum && field.type === 'string' && field.enum.length <= SEGMENTED_MAX) {
+    control = (
+      <Segmented
+        labelledBy={`${id}-label`}
+        options={field.enum.map(String)}
+        value={String(value)}
+        clearable={optional}
+        invalid={Boolean(error)}
+        describedBy={described || undefined}
+        onChange={onChange}
+      />
+    )
+  } else if (field.enum) {
     // With no default, nothing is chosen until the person chooses: never the first option shown chosen.
-    const optional = field.default === undefined && !field.required
     control = (
       <Select
         value={value === '' && optional ? NONE : String(value)}
@@ -182,6 +284,19 @@ function Field({
   } else if (field.type === 'array') {
     control = (
       <Textarea {...common} rows={3} className="font-mono" value={String(value)} onChange={(event) => onChange(event.target.value)} />
+    )
+  } else if (field.type !== 'string' && field.minimum !== undefined && field.maximum !== undefined) {
+    control = (
+      <Stepper
+        common={common}
+        id={id}
+        field={field.name}
+        value={String(value)}
+        min={field.minimum}
+        max={field.maximum}
+        integer={field.type === 'integer'}
+        onChange={onChange}
+      />
     )
   } else if (field.type === 'integer' || field.type === 'number') {
     control = (
@@ -210,10 +325,19 @@ function Field({
   }
   return (
     <div className="flex flex-col gap-1.5">
-      <Label htmlFor={id}>{label}</Label>
+      <Label id={`${id}-label`} htmlFor={field.enum && field.type === 'string' && field.enum.length <= SEGMENTED_MAX ? undefined : id}>
+        {label}
+      </Label>
       {control}
       {hint}
       {problem}
     </div>
   )
+}
+
+const warned = new Set<string>()
+function warnOnce(note: string) {
+  if (warned.has(note)) return
+  warned.add(note)
+  console.warn(`${note}; a text field is drawn.`)
 }

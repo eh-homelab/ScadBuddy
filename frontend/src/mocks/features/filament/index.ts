@@ -2960,6 +2960,7 @@ export const handlers = [
       printer_root: false,
       parent_id: null,
       identifier: null,
+      station: false,
       capacity: null,
       printer_id: null,
       ams_id: null,

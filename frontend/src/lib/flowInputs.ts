@@ -10,6 +10,8 @@
 export type InputScalar = 'string' | 'integer' | 'number' | 'boolean'
 export type InputType = InputScalar | 'array'
 export type InputFormat = 'email' | 'date' | 'date-time'
+/** #8062 — a task field's `x-sb-widget`. */
+export type InputWidget = 'scan' | 'photo' | 'file' | 'entity' | 'weight' | 'confirm'
 
 export interface InputField {
   name: string
@@ -25,16 +27,67 @@ export interface InputField {
   format?: InputFormat
   minimum?: number
   maximum?: number
+  /** #8062 — the field's `x-sb-widget`; an unknown one is left out and logged. */
+  widget?: InputWidget
+  /** #8062 — an `entity` field's kind. */
+  kind?: string
+  /** #8062 — a `scan` field's accepted code kinds and codes. */
+  expects?: { kinds?: string[]; codes?: string[] }
 }
 
 /** What the form holds: text per input, a checkbox's boolean. */
 export type InputValues = Record<string, string | boolean>
 
 const SCALARS = new Set(['string', 'integer', 'number', 'boolean'])
+const WIDGETS = new Set<unknown>(['scan', 'photo', 'file', 'entity', 'weight', 'confirm'] satisfies InputWidget[])
 const FORMATS = new Set<unknown>(['email', 'date', 'date-time'] satisfies InputFormat[])
 
 const isObject = (value: unknown): value is Record<string, unknown> =>
   typeof value === 'object' && value !== null && !Array.isArray(value)
+
+const warned = new Set<string>()
+
+/** A property's widget; an unknown name draws the plain field and is logged once. */
+function widgetOf(name: string, prop: Record<string, unknown>): InputWidget | undefined {
+  const widget = prop['x-sb-widget']
+  if (widget === undefined) return undefined
+  if (WIDGETS.has(widget)) return widget as InputWidget
+  const note = `${name}: unknown x-sb-widget ${JSON.stringify(widget)}`
+  if (!warned.has(note)) {
+    warned.add(note)
+    console.warn(`${note}; the plain field is drawn.`)
+  }
+  return undefined
+}
+
+const strings = (value: unknown): string[] | undefined =>
+  Array.isArray(value) && value.every((item) => typeof item === 'string') ? (value as string[]) : undefined
+
+function expectsOf(value: unknown): InputField['expects'] {
+  if (!isObject(value)) return undefined
+  const kinds = strings(value['kinds'])
+  const codes = strings(value['codes'])
+  return { ...(kinds ? { kinds } : {}), ...(codes ? { codes } : {}) }
+}
+
+/** The weight a task's context asks for: the first `expect` block, in grams. */
+export function weightExpected(context: unknown): { weight_g: number; tolerance_g?: number } | undefined {
+  if (!Array.isArray(context)) return undefined
+  for (const block of context) {
+    const target = isObject(block) ? block['expect'] : undefined
+    if (isObject(target) && typeof target['weight_g'] === 'number') {
+      return {
+        weight_g: target['weight_g'],
+        ...(typeof target['tolerance_g'] === 'number' ? { tolerance_g: target['tolerance_g'] } : {}),
+      }
+    }
+  }
+  return undefined
+}
+
+/** "Expect 640 g ± 96 g". */
+export const expectedText = ({ weight_g, tolerance_g }: { weight_g: number; tolerance_g?: number }) =>
+  `Expect ${weight_g} g${tolerance_g === undefined ? '' : ` ± ${tolerance_g} g`}`
 
 /** The schema's inputs, in its order; none for a flow without one. */
 export function inputFields(schema: unknown): InputField[] {
@@ -59,6 +112,9 @@ export function inputFields(schema: unknown): InputField[] {
         ...(type === 'string' && FORMATS.has(prop['format']) ? { format: prop['format'] as InputFormat } : {}),
         ...(typeof prop['minimum'] === 'number' ? { minimum: prop['minimum'] } : {}),
         ...(typeof prop['maximum'] === 'number' ? { maximum: prop['maximum'] } : {}),
+        ...(widgetOf(name, prop) ? { widget: widgetOf(name, prop) } : {}),
+        ...(typeof prop['kind'] === 'string' ? { kind: prop['kind'] } : {}),
+        ...(expectsOf(prop['expects']) ? { expects: expectsOf(prop['expects']) } : {}),
       },
     ]
   })

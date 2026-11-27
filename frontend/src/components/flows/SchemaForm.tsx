@@ -28,6 +28,8 @@ export function SchemaForm({
   problems,
   error,
   answer = false,
+  taskId,
+  expect,
   actions,
   onSubmit,
 }: {
@@ -38,6 +40,10 @@ export function SchemaForm({
   problems?: readonly AnswerProblem[]
   error?: string
   answer?: boolean
+  /** #8062 — the task a photo or file uploads to. */
+  taskId?: string
+  /** #8062 — the weight the task expects. */
+  expect?: { weight_g: number; tolerance_g?: number }
   /** Puts the submit button elsewhere, after the form: a dialog's footer. */
   actions?: (submit: ReactNode) => ReactNode
   onSubmit: (values: Record<string, unknown>) => void
@@ -45,7 +51,7 @@ export function SchemaForm({
   const id = useId()
   const form = useRef<HTMLFormElement>(null)
   const fields = inputFields(schema)
-  const { parse, rendered, errors, rest } = useInputs(fields, { answer, problems })
+  const { parse, rendered, errors, rest } = useInputs(fields, { answer, problems, taskId, expect })
   const undrawn = answer ? undrawnFields(schema) : []
 
   // An answer that does not fit moves to its first bad field, whoever found it.
