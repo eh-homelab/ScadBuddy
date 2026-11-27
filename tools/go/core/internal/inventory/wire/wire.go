@@ -96,12 +96,16 @@ type ItemKind struct {
 	Builtin         bool            `json:"builtin"`
 	ArchivedAt      *time.Time      `json:"archived_at"`
 	ItemCount       int             `json:"item_count"`
-	Nature          *string         `json:"nature"`
-	Role            *string         `json:"role"`
-	Counting        *string         `json:"counting"`
-	Billing         *string         `json:"billing"`
-	SpecialType     *string         `json:"special_type"`
-	Steps           model.Steps     `json:"steps"`
+	// Number is the kind's number from item_kinds_number_seq; Code is its short code K-<number>
+	// (#6955, the owner's decision of 2026-11-27).
+	Number      int64       `json:"number"`
+	Code        string      `json:"code"`
+	Nature      *string     `json:"nature"`
+	Role        *string     `json:"role"`
+	Counting    *string     `json:"counting"`
+	Billing     *string     `json:"billing"`
+	SpecialType *string     `json:"special_type"`
+	Steps       model.Steps `json:"steps"`
 	// IncompleteSteps are the steps whose handler lacks a required parameter (R-K1-8).
 	IncompleteSteps []string `json:"incomplete_steps"`
 }
@@ -110,7 +114,8 @@ type ItemKind struct {
 // a tracking sets the class keys its rule gives (§8) that the parents and the class keys
 // given here leave open; a life basis names the steps.life handler.
 type KindInput struct {
-	ID              string          `json:"id"`
+	// ID is optional: with none, the kind is k<number>.
+	ID              string          `json:"id,omitempty"`
 	Name            string          `json:"name"`
 	ParentID        *string         `json:"parent_id,omitempty"`
 	Tracking        *string         `json:"tracking,omitempty"`

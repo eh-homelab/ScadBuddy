@@ -109,7 +109,8 @@ async def _alias[T](
     response_model=list[InventoryPart],
     summary="The parts inventory",
     description=(
-        _ALIAS + "Every part (an unarchived item of a kind under `part`), by name: its pack (its "
+        _ALIAS + "Every part (an unarchived item of a lot-tracked kind under `hardware` or "
+        "`ams_part`), by name: its pack (its "
         "offer's; a part with no supplier has no offer and reads as a pack of 1 at 0), its "
         "unit cost (the weighted average of the lots on hand, a decimal string in minor "
         "units; a lot of unknown cost with no cost entered is left out; with none on hand "

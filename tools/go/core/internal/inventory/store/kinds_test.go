@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"reflect"
 	"slices"
 	"testing"
@@ -554,4 +555,45 @@ func TestAMoveThatDropsAGrandchildsKeyIsRefused(t *testing.T) {
 	if got := getKind(t, pool, k, "b"); got.ParentID == nil || *got.ParentID != "a" {
 		t.Fatalf("b moved to %v", got.ParentID)
 	}
+}
+
+// The owner's kind numbers (2026-11-27): every kind has a number and the code K-<number>; a
+// kind made without an id is k<number>.
+
+func TestAKindReadCarriesItsNumberAndCode(t *testing.T) {
+	pool, k := testdb.New(t), kindStore()
+	got := getKind(t, pool, k, "printer")
+	var n int64
+	if err := pool.QueryRow(context.Background(), `SELECT number FROM item_kinds WHERE id = 'printer'`).Scan(&n); err != nil {
+		t.Fatal(err)
+	}
+	if got.Number != n || got.Code != fmt.Sprintf("K-%d", n) {
+		t.Fatalf("printer reads number %d code %q, want %d", got.Number, got.Code, n)
+	}
+	for _, kind := range must(k.List(context.Background(), pool, true)) {
+		if kind.Number == 0 || kind.Code != fmt.Sprintf("K-%d", kind.Number) {
+			t.Fatalf("%s reads number %d code %q", kind.ID, kind.Number, kind.Code)
+		}
+	}
+}
+
+func TestAKindMadeWithNoIDIsKAndItsNumber(t *testing.T) {
+	pool, k := testdb.New(t), kindStore()
+	made := must(createKind(t, pool, k, wire.KindInput{Name: "Fastener", ParentID: ptr("part")}))
+	if made.ID != fmt.Sprintf("k%d", made.Number) || made.Code != fmt.Sprintf("K-%d", made.Number) {
+		t.Fatalf("made %q number %d code %q", made.ID, made.Number, made.Code)
+	}
+	next := must(createKind(t, pool, k, wire.KindInput{Name: "Washer", ParentID: ptr("part")}))
+	if next.Number <= made.Number || next.ID != fmt.Sprintf("k%d", next.Number) {
+		t.Fatalf("next %q number %d after %d", next.ID, next.Number, made.Number)
+	}
+}
+
+func TestATypedIDOfKAndDigitsIsRefused(t *testing.T) {
+	pool, k := testdb.New(t), kindStore()
+	for _, id := range []string{"k12", "k1", "k007"} {
+		_, err := createKind(t, pool, k, wire.KindInput{ID: id, Name: "X", ParentID: ptr("part")})
+		refusal(t, err, 422, "bad_input")
+	}
+	must(createKind(t, pool, k, wire.KindInput{ID: "kit", Name: "Kit", ParentID: ptr("part")}))
 }

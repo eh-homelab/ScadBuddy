@@ -84,29 +84,36 @@ function kind(id: string, name: string, parent_id: string | null, tracking: Trac
   return { id, name, parent_id, tracking, uom, attribute_schema: { type: 'object', properties: {} }, life_basis, saleable, builtin: true, archived_at: null }
 }
 
-/** `20261124T0323Z_inventory_core.sql`'s built-in kinds. */
+/** The built-in kinds as `20261126T0218Z_inventory_class.sql` (inventory K1) leaves them:
+ * the three roots, and `tracking` and `life_basis` derived from the class (R-K1-6). */
 function builtinKinds(): MockKind[] {
   const kinds = [
-    kind('filament', 'Filament', null, 'filament', 'g', 'none'),
-    kind('printer', 'Printer', null, 'unit', 'each', 'hours'),
-    kind('part', 'Part', null, 'lot', 'each', 'none'),
-    kind('nozzle', 'Nozzle', 'part', 'unit', 'each', 'hours'),
-    kind('hotend', 'Hotend', 'part', 'unit', 'each', 'hours'),
-    kind('belt', 'Belt', 'part', 'unit', 'each', 'hours'),
-    kind('build_plate', 'Build plate', 'part', 'unit', 'each', 'months'),
-    kind('ams_part', 'AMS part', 'part', 'lot', 'each', 'none'),
-    kind('hardware', 'Hardware', 'part', 'lot', 'each', 'none'),
     kind('consumable', 'Consumable', null, 'lot', 'each', 'none'),
+    kind('filament', 'Filament', 'consumable', 'filament', 'g', 'none'),
+    kind('general_consumable', 'General consumable', 'consumable', 'lot', 'each', 'none'),
     kind('desiccant', 'Desiccant', 'consumable', 'lot', 'g', 'none'),
     kind('packaging', 'Packaging', 'consumable', 'lot', 'each', 'none'),
     kind('lubricant', 'Lubricant', 'consumable', 'lot', 'ml', 'none'),
-    kind('equipment', 'Equipment', null, 'unit', 'each', 'months'),
+    kind('hardware', 'Hardware', 'consumable', 'lot', 'each', 'none'),
+    kind('ams_part', 'AMS part', 'consumable', 'lot', 'each', 'none'),
+    kind('printed_part', 'Printed part', 'consumable', 'lot', 'each', 'none', true),
+    kind('assembly', 'Assembly', 'consumable', 'lot', 'each', 'none', true),
+    kind('durable', 'Durable', null, 'unit', 'each', 'none'),
+    kind('printer', 'Printer', 'durable', 'unit', 'each', 'hours'),
+    kind('part', 'Part', 'durable', 'unit', 'each', 'none'),
+    kind('nozzle', 'Nozzle', 'part', 'unit', 'each', 'hours'),
+    kind('hotend', 'Hotend', 'part', 'unit', 'each', 'hours'),
+    kind('belt', 'Belt', 'part', 'unit', 'each', 'hours'),
+    kind('build_plate', 'Build plate', 'part', 'unit', 'each', 'none'),
+    kind('spool_part', 'Spool insert', 'durable', 'unit', 'each', 'none'),
+    kind('equipment', 'Equipment', 'durable', 'unit', 'each', 'months'),
     kind('dry_bin', 'Dry bin', 'equipment', 'unit', 'each', 'months'),
     kind('tool', 'Tool', 'equipment', 'unit', 'each', 'months'),
-    kind('printed_part', 'Printed part', null, 'lot', 'each', 'none', true),
-    kind('assembly', 'Assembly', null, 'lot', 'each', 'none', true),
     kind('service', 'Service', null, 'none', 'each', 'none'),
-    kind('spool_part', 'Spool part', null, 'unit', 'each', 'none'),
+    kind('warranty', 'Warranty', 'service', 'none', 'each', 'none'),
+    kind('service_plan', 'Service plan', 'service', 'none', 'each', 'none'),
+    kind('labour', 'Labour', 'service', 'none', 'each', 'none'),
+    kind('flat_service', 'Flat-rate service', 'service', 'none', 'each', 'none'),
   ]
   kinds.find((k) => k.id === 'spool_part')!.attribute_schema = {
     type: 'object',
@@ -227,7 +234,7 @@ function seed() {
   seedItem({ id: INVENTORY.NOZZLE, kind_id: 'nozzle', name: 'Hardened steel nozzle 0.4', manufacturer: 'Bambu Lab', compatible_with: ['H2C'] })
   newUnit(INVENTORY.NOZZLE, '1999', false, { id: INVENTORY.NOZZLE_UNIT, serial: 'HS-0001', received_at: SEEDED_AT })
   newUnit(INVENTORY.NOZZLE, '1999', false, { serial: 'HS-0002', received_at: SEEDED_AT })
-  seedItem({ id: INVENTORY.ENGRAVING, kind_id: 'service', name: 'Laser engraving' })
+  seedItem({ id: INVENTORY.ENGRAVING, kind_id: 'flat_service', name: 'Laser engraving' })
 }
 
 let seeded = false

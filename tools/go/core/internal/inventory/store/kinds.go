@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"regexp"
 	"slices"
 	"time"
 
@@ -289,7 +290,11 @@ func rewriteDerived(ctx context.Context, tx pgx.Tx, cat Catalog, set kindSet, id
 	return nil
 }
 
-const kindSQL = `SELECT k.id, k.tracking, k.life_basis,
+// madeKindID is the id of a kind that ScadBuddy makes: k and the kind's number
+// (item_kinds_made_id_check, the owner's decision of 2026-11-27).
+var madeKindID = regexp.MustCompile(`^k[0-9]+$`)
+
+const kindSQL = `SELECT k.id, k.number, k.tracking, k.life_basis,
 	(SELECT count(*) FROM items i WHERE i.kind_id = k.id AND i.archived_at IS NULL) FROM item_kinds k`
 
 func (k *Kinds) read(ctx context.Context, q Querier, where string, args ...any) ([]wire.ItemKind, error) {
@@ -305,16 +310,17 @@ func (k *Kinds) read(ctx context.Context, q Querier, where string, args ...any) 
 	for rows.Next() {
 		var id, tracking, basis string
 		var count int
-		if err := rows.Scan(&id, &tracking, &basis, &count); err != nil {
+		var number int64
+		if err := rows.Scan(&id, &number, &tracking, &basis, &count); err != nil {
 			rows.Close()
 			return nil, err
 		}
-		out = append(out, k.wire(set, id, tracking, basis, count))
+		out = append(out, k.wire(set, id, number, tracking, basis, count))
 	}
 	return out, rows.Err()
 }
 
-func (k *Kinds) wire(set kindSet, id, tracking, basis string, count int) wire.ItemKind {
+func (k *Kinds) wire(set kindSet, id string, number int64, tracking, basis string, count int) wire.ItemKind {
 	kind := set[id]
 	_, problems, err := k.Cat.ResolveKind(set.chain(id))
 	steps := kind.Steps
@@ -324,7 +330,7 @@ func (k *Kinds) wire(set kindSet, id, tracking, basis string, count int) wire.It
 	out := wire.ItemKind{
 		ID: id, Name: kind.Name, ParentID: opt(kind.ParentID), Tracking: tracking, UOM: kind.UOM,
 		AttributeSchema: kind.Schema, LifeBasis: basis, Saleable: kind.Saleable, Builtin: kind.Builtin,
-		ArchivedAt: kind.ArchivedAt, ItemCount: count, Nature: opt(kind.Class.Nature), Role: opt(kind.Class.Role),
+		ArchivedAt: kind.ArchivedAt, ItemCount: count, Number: number, Code: fmt.Sprintf("K-%d", number), Nature: opt(kind.Class.Nature), Role: opt(kind.Class.Role),
 		Counting: opt(kind.Class.Counting), Billing: opt(kind.Class.Billing), SpecialType: opt(kind.Special),
 		Steps: steps, IncompleteSteps: []string{},
 	}
@@ -525,6 +531,12 @@ func stepsJSON(steps model.Steps) ([]byte, error) {
 // class_changed for a class key it changes, steps_invalid for a step that does not resolve,
 // kind_exists for a taken id. It publishes one handler_config.changed per step it resolves.
 func (k *Kinds) Create(ctx context.Context, tx pgx.Tx, in wire.KindInput, by Actor) (wire.ItemKind, error) {
+	if madeKindID.MatchString(in.ID) {
+		// KindInput's _not_a_made_id refuses it before the start; the column CHECK would fail
+		// the write.
+		return wire.ItemKind{}, &Refused{Status: 422, Code: "bad_input",
+			Detail: "an id of k and digits is a made kind's id: k and its number"}
+	}
 	parent := ""
 	if in.ParentID != nil {
 		parent = *in.ParentID
@@ -577,12 +589,14 @@ func (k *Kinds) Create(ctx context.Context, tx pgx.Tx, in wire.KindInput, by Act
 	if err != nil {
 		return wire.ItemKind{}, err
 	}
-	_, err = tx.Exec(ctx, `INSERT INTO item_kinds (id, name, parent_id, tracking, uom, attribute_schema,
-		life_basis, saleable, nature, role, counting, billing, special_type, steps)
-		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)`,
+	// With no id, the kind is k<number> (item_kinds_made_id_check); with one, it keeps it.
+	err = tx.QueryRow(ctx, `INSERT INTO item_kinds (id, number, name, parent_id, tracking, uom,
+		attribute_schema, life_basis, saleable, nature, role, counting, billing, special_type, steps)
+		SELECT coalesce(nullif($1, ''), 'k' || n), n, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14
+		FROM nextval('item_kinds_number_seq') AS n RETURNING id`,
 		kind.ID, kind.Name, opt(parent), tracking, kind.UOM, kind.Schema, basis, kind.Saleable,
 		opt(kind.Class.Nature), opt(kind.Class.Role), opt(kind.Class.Counting), opt(kind.Class.Billing),
-		opt(kind.Special), steps)
+		opt(kind.Special), steps).Scan(&kind.ID)
 	if isUnique(err) {
 		return wire.ItemKind{}, &Refused{Status: 409, Code: "kind_exists", Detail: "an item kind has that id: " + kind.ID}
 	}

@@ -107,9 +107,9 @@ test('/prints/queue/260 is the queue item, not a print', async ({ page }) => {
   await expect(page).toHaveTitle(waiting('Bracket.gcode.3mf · ScadBuddy'))
 })
 
-test('/orders/parts opens the Inventory on the Part kind, not an order (#7067)', async ({ page }) => {
+test('/orders/parts opens the Inventory on the Hardware kind, not an order (#7067, #6949)', async ({ page }) => {
   await page.goto('/orders/parts')
-  await expect(page).toHaveURL(/\/inventory\?kind=part$/)
+  await expect(page).toHaveURL(/\/inventory\?kind=hardware$/)
   await expect(page).toHaveTitle(waiting('Inventory · ScadBuddy'))
 })
 

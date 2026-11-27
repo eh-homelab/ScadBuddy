@@ -7,7 +7,7 @@ import { IncompleteMark } from '../../components/entities/IncompleteMark'
 import { useMoney } from '../../components/filament/purchasing/useMoney'
 import { PartRules } from '../../components/orders/PartRules'
 import { DataTable, type Column } from '../../components/records/DataTable'
-import { inventoryPaths } from '../../lib/inventoryLinks'
+import { inventoryPaths, isPartKind } from '../../lib/inventoryLinks'
 import { useAsync } from '../../lib/useAsync'
 import { cn } from '@/lib/utils'
 import { Badge } from '@/components/ui/badge'
@@ -154,23 +154,13 @@ export function InventoryPage() {
               />
             )}
             {/* #5543 — moved from the parts page (#7067): the parts each unit of a model uses,
-                under the Part kind and the kinds below it only (R-P2-39). */}
-            {kind && underPart(kind, byId) && <PartRules />}
+                under the parts' kinds and the kinds below them only (R-P2-39, `PART_KINDS`). */}
+            {kind && isPartKind(kind, (id) => byId.get(id)?.parent_id) && <PartRules />}
           </div>
         </div>
       </div>
     </div>
   )
-}
-
-/** Whether the kind is `part` or below it (R-P2-39). */
-function underPart(kindId: string, byId: Map<string, ItemKind>): boolean {
-  const seen = new Set<string>()
-  for (let at: string | null | undefined = kindId; at && !seen.has(at); at = byId.get(at)?.parent_id) {
-    if (at === 'part') return true
-    seen.add(at)
-  }
-  return false
 }
 
 const treeLink = (active: boolean) => cn('block truncate rounded-md px-2 py-1 hover:bg-muted', active ? 'bg-muted font-medium text-foreground' : 'text-muted-foreground')

@@ -14,7 +14,7 @@ import (
 
 // modelKind is the id of the code's model kind: the kind under printer whose name is the
 // code in any case. The id is never built from the code. A missing kind is made with an
-// opaque id and the trimmed code as its name; it publishes its handler_config.changed
+// the id k<number>, from item_kinds_number_seq, and the trimmed code as its name; it publishes its handler_config.changed
 // events, as a kind save does. No unique index covers (parent_id, lower(name)), and this
 // layer adds no migration, so a transaction-scoped advisory lock on the lower-cased code
 // makes the find and the insert one step: a second write of a new code waits for the first
@@ -33,9 +33,9 @@ func modelKind(ctx context.Context, tx pgx.Tx, cat Catalog, code string, by Acto
 	if !errors.Is(err, pgx.ErrNoRows) {
 		return "", err
 	}
-	if err := tx.QueryRow(ctx, `INSERT INTO item_kinds (id, name, parent_id, tracking, life_basis)
-		VALUES ('k' || replace(gen_random_uuid()::text, '-', ''), left(btrim($1), 100), 'printer', 'unit', 'none')
-		RETURNING id`, code).Scan(&id); err != nil {
+	if err := tx.QueryRow(ctx, `INSERT INTO item_kinds (id, number, name, parent_id, tracking, life_basis)
+		SELECT 'k' || n, n, left(btrim($1), 100), 'printer', 'unit', 'none'
+		FROM nextval('item_kinds_number_seq') AS n RETURNING id`, code).Scan(&id); err != nil {
 		return "", err
 	}
 	set, err := loadKinds(ctx, tx)

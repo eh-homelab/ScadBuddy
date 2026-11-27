@@ -5,7 +5,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"reflect"
-	"regexp"
 	"slices"
 	"strings"
 	"sync"
@@ -384,8 +383,6 @@ func TestAnEmptyLotOfUnknownCostIsNotUnknown(t *testing.T) {
 
 // What K1 adds.
 
-var opaqueKindID = regexp.MustCompile(`^k[0-9a-f]{32}$`)
-
 func TestACodeFindsAKindByNameInAnyCase(t *testing.T) {
 	pool, s := testdb.New(t), itemStore()
 	if _, err := pool.Exec(context.Background(), `INSERT INTO item_kinds (id, name, parent_id, tracking, life_basis)
@@ -456,8 +453,8 @@ func TestCompatibleWithBecomesRelations(t *testing.T) {
 	if err := pool.QueryRow(context.Background(), `SELECT id FROM item_kinds WHERE parent_id = 'printer' AND name = 'H2C'`).Scan(&h2c); err != nil {
 		t.Fatal(err)
 	}
-	if !opaqueKindID.MatchString(h2c) {
-		t.Fatalf("the model kind id %q is not opaque", h2c)
+	if kind := getKind(t, pool, k, h2c); !madeKindID.MatchString(h2c) || h2c != fmt.Sprintf("k%d", kind.Number) {
+		t.Fatalf("the model kind id %q is not k and its number %d", h2c, kind.Number)
 	}
 	if !reflect.DeepEqual(made.CompatibleWith, []string{"H2C"}) {
 		t.Fatalf("made %v", made.CompatibleWith)
@@ -483,7 +480,7 @@ func TestCompatibleWithBecomesRelations(t *testing.T) {
 		t.Fatal(err)
 	}
 	p1s := getKind(t, pool, k, p1sID)
-	if !opaqueKindID.MatchString(p1s.ID) || p1s.Name != "P1S" || p1s.ParentID == nil || *p1s.ParentID != "printer" || p1s.Tracking != "unit" || p1s.LifeBasis != "hours" {
+	if p1s.ID != fmt.Sprintf("k%d", p1s.Number) || p1s.Name != "P1S" || p1s.ParentID == nil || *p1s.ParentID != "printer" || p1s.Tracking != "unit" || p1s.LifeBasis != "hours" {
 		t.Fatalf("P1S kind %+v", p1s)
 	}
 	updated = must(updateItem(t, pool, s, made.ID, wire.InventoryItemPatch{CompatibleWith: &[]string{"P1S"}}))
