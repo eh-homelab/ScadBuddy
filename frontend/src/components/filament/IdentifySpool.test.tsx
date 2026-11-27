@@ -1,7 +1,9 @@
 import { screen, waitFor, within } from '@testing-library/react'
 import { http, HttpResponse } from 'msw'
+import { StrictMode } from 'react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import { spoolId } from '../../mocks/features/filament/seed'
+import { seedEntityProperties } from '../../mocks/features/entities'
+import { spoolId, T } from '../../mocks/features/filament/seed'
 import { queueScanCodes } from '../../mocks/features/scan'
 import { resetMockState } from '../../mocks/handlers'
 import { server } from '../../mocks/server'
@@ -393,5 +395,72 @@ describe('IdentifySpool (#7167)', () => {
     } finally {
       camera.restore()
     }
+  })
+
+  describe('a code that names no ScadBuddy thing searches the spools (#8372)', () => {
+    const GTIN = '6975373321234'
+
+    /** Types the code in the QR code way, and waits for the switch to "Pick by hand" with the search in the box. */
+    async function scan(user: ReturnType<typeof show>['user']) {
+      await user.click(screen.getByRole('radio', { name: 'QR code' }))
+      await user.type(screen.getByLabelText('Spool code'), `${GTIN}{Enter}`)
+      expect(await screen.findByRole('searchbox', { name: 'Find a spool' })).toHaveValue(`gtin:${GTIN}`)
+      expect(screen.getByRole('radio', { name: 'Pick by hand' })).toHaveAttribute('aria-checked', 'true')
+      return screen.findByRole('radiogroup', { name: 'Spools' })
+    }
+
+    it('names the one spool whose type has the code at once', async () => {
+      seedEntityProperties(`spool_type:${T.ORANGE}`, { gtin: [GTIN] })
+      const { user, onIdentified } = show()
+      const list = await scan(user)
+      await waitFor(() => expect(identified(onIdentified)).toHaveLength(1))
+      expect(identified(onIdentified)[0]).toMatchObject({ id: spoolId(2) })
+      expect(within(list).getByRole('radio', { name: /S-2\b/ })).toHaveAttribute('aria-checked', 'true')
+    })
+
+    it('names the one spool once under StrictMode, which runs the effects twice', async () => {
+      seedEntityProperties(`spool_type:${T.ORANGE}`, { gtin: [GTIN] })
+      const onIdentified = vi.fn()
+      const { user } = renderPage(
+        <StrictMode>
+          <IdentifySpool onIdentified={onIdentified} />
+        </StrictMode>,
+      )
+      const list = await scan(user)
+      await waitFor(() => expect(within(list).getByRole('radio', { name: /S-2\b/ })).toHaveAttribute('aria-checked', 'true'))
+      expect(identified(onIdentified)).toEqual([expect.objectContaining({ id: spoolId(2) })])
+    })
+
+    it('shows several matches and names none, and an edit of the box later names none', async () => {
+      seedEntityProperties(`spool_type:${T.ORANGE}`, { gtin: [GTIN] })
+      seedEntityProperties(`spool_type:${T.PINK}`, { gtin: [GTIN] })
+      const { user, onIdentified } = show()
+      const list = await scan(user)
+      await waitFor(() => expect(within(list).getAllByRole('radio')).toHaveLength(2))
+      expect(within(list).getByRole('radio', { name: /S-2\b/ })).toBeInTheDocument()
+      expect(within(list).getByRole('radio', { name: /S-3\b/ })).toBeInTheDocument()
+      expect(identified(onIdentified)).toHaveLength(0)
+      await user.type(screen.getByRole('searchbox', { name: 'Find a spool' }), ' pink')
+      await waitFor(() => expect(within(list).getAllByRole('radio')).toHaveLength(1))
+      expect(within(list).getByRole('radio', { name: /S-3\b/ })).toHaveAttribute('aria-checked', 'false')
+      expect(identified(onIdentified)).toHaveLength(0)
+    })
+
+    it('shows an empty list with the code in the box when no spool has it', async () => {
+      const { user, onIdentified } = show()
+      const list = await scan(user)
+      expect(await screen.findByText('No spool matches. Check the code on its label.')).toBeInTheDocument()
+      expect(within(list).queryAllByRole('radio')).toHaveLength(0)
+      expect(screen.getByRole('searchbox', { name: 'Find a spool' })).toHaveValue(`gtin:${GTIN}`)
+      expect(identified(onIdentified)).toHaveLength(0)
+    })
+
+    it('keeps the sentence for a ScadBuddy code that is not found', async () => {
+      const { user } = show()
+      await user.click(screen.getByRole('radio', { name: 'QR code' }))
+      await user.type(screen.getByLabelText('Spool code'), 'S-999{Enter}')
+      expect(await screen.findByText('No spool has the code S-999.')).toBeInTheDocument()
+      expect(screen.queryByRole('searchbox', { name: 'Find a spool' })).toBeNull()
+    })
   })
 })

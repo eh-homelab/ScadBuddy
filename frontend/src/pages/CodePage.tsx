@@ -6,6 +6,7 @@ import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
 import { Skeleton } from '@/components/ui/skeleton'
 import { codeTarget } from '../lib/resolvedCode'
+import { isScadBuddyCode, scanSearchPath } from '../lib/scanSearch'
 import { useAsync } from '../lib/useAsync'
 
 /** #6955 — `/x/<code>`: the address a label's QR holds. It opens the place, spool or item kind the code names. */
@@ -19,6 +20,8 @@ export function CodePage() {
   if (found.loading) return <Skeleton role="status" aria-label="Looking up the code" className="m-4 h-8 w-48" />
 
   const unknown = found.error instanceof ApiError && found.error.status === 404
+  // #8372: a text that is not a ScadBuddy code, such as a barcode, searches the spools.
+  if (unknown && !isScadBuddyCode(code)) return <Navigate to={scanSearchPath(code)} replace />
   const go = (event: FormEvent) => {
     event.preventDefault()
     const next = typed.trim()

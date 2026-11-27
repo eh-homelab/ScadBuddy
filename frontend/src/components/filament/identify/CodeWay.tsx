@@ -25,12 +25,20 @@ export interface CodeCopy {
   noLabel: string
 }
 
+/** #8372: a text that names no thing, to search for in its place. */
+export interface CodeSearch {
+  search: string
+}
+
+const isSearch = (found: object): found is CodeSearch => 'search' in found && typeof found.search === 'string'
+
 /**
  * The code way of `IdentifySpool` and `IdentifyPlace`: a typed code, always; the camera where
  * `BarcodeDetector` exists and `camera` allows it (not in a frame), else a photo the server
  * reads (#8155), which a 404 hides. `fromText` resolves a typed or scanned text, `fromCode` the
  * code the photo's first code of `kind` names; each gives the thing, or the sentence why none.
- * `onIdentified` gets null as soon as nothing is named any more.
+ * `onIdentified` gets null as soon as nothing is named any more. When a lookup gives a
+ * search (#8372), the way shows nothing and gives the search to `onSearch`.
  */
 export function CodeWay<T extends object>({
   kind,
@@ -38,13 +46,15 @@ export function CodeWay<T extends object>({
   fromText,
   fromCode,
   onIdentified,
+  onSearch,
   camera: cameraAllowed,
 }: {
   kind: 'spool' | 'location'
   copy: CodeCopy
-  fromText: (text: string) => Promise<T | string>
-  fromCode: (code: string) => Promise<T | string>
+  fromText: (text: string) => Promise<T | string | CodeSearch>
+  fromCode: (code: string) => Promise<T | string | CodeSearch>
   onIdentified: (found: T | null) => void
+  onSearch?: (text: string) => void
   camera: boolean
 }) {
   const [text, setText] = useState('')
@@ -58,10 +68,13 @@ export function CodeWay<T extends object>({
   const ids = useId()
 
   /** The answer of a lookup: the thing, or the sentence why none, which also names none. */
-  function answer(found: T | string) {
+  function answer(found: T | string | CodeSearch) {
     if (typeof found === 'string') {
       setSaid(found)
       onIdentified(null)
+    } else if (isSearch(found)) {
+      onIdentified(null)
+      onSearch?.(found.search)
     } else onIdentified(found)
   }
 
