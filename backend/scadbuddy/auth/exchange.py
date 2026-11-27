@@ -466,7 +466,9 @@ class BootstrapVerifier:
     and its credential is bound to it (`service_credentials.py` ``issue``). A per-machine
     secret passes only while its file is still there (one stat per exchange), and every
     start and auth sweep revokes the credentials of a machine with no file
-    (``revoke_machines_without_proof``).
+    (``revoke_machines_without_proof``). Python's ``resolve`` refuses such a credential
+    at once too (``has_machine``), and revokes it. A file whose suffix names no machine is
+    skipped with a warning.
 
     ``hashes`` is keyed by file name; ``callers`` names each file's caller; ``directory``
     is where the per-machine files are looked for again."""
@@ -493,6 +495,13 @@ class BootstrapVerifier:
             if owner == caller and caller in PER_MACHINE_CALLERS and self._present(name)
         }
 
+    def has_machine(self, caller: str, machine: str) -> bool:
+        """Whether ``machine``'s proof file of ``caller`` was read at start and is still
+        there (one stat): a credential bound to a machine without it is refused when it is
+        resolved (`service_credentials.py` ``resolve``)."""
+        name = f"{caller}.{machine}"
+        return self.callers.get(name) == caller and self._present(name)
+
     @classmethod
     def from_dir(cls, directory: Path) -> BootstrapVerifier:
         if not directory.is_dir():
@@ -509,10 +518,14 @@ class BootstrapVerifier:
                     )
                 for path in sorted(directory.glob(f"{caller}.*")):
                     if not MACHINE_NAME.fullmatch(path.name[len(caller) + 1 :]):
-                        raise BootstrapConfigError(
-                            f"SCADBUDDY_SERVICE_BOOTSTRAP_DIR: {path.name!r} does not name a"
-                            " machine (lower-case letters, digits and '-', at most 63)"
+                        # An editor's or a backup's leftover (`fleet-rotator.devbox.bak`)
+                        # does not stop the start; its secret passes nothing.
+                        logger.warning(
+                            "SCADBUDDY_SERVICE_BOOTSTRAP_DIR: skipped %r, which does not name"
+                            " a machine (lower-case letters, digits and '-', at most 63)",
+                            path.name,
                         )
+                        continue
                     files[path.name] = caller
             elif (directory / caller).is_file():
                 files[caller] = caller

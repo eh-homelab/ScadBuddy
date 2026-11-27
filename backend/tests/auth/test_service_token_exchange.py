@@ -8,6 +8,7 @@ from __future__ import annotations
 import base64
 import hashlib
 import json
+import logging
 import os
 import secrets
 import threading
@@ -513,12 +514,31 @@ async def test_each_machine_has_its_own_fleet_rotator_secret(tmp_path: Path) -> 
     assert await verifier.verify(laptop) == on_laptop
 
 
-@pytest.mark.parametrize("name", ["fleet-rotator", "fleet-rotator.", "fleet-rotator.Dev Box"])
-def test_a_fleet_rotator_secret_names_its_machine(tmp_path: Path, name: str) -> None:
+def test_a_fleet_rotator_secret_names_its_machine(tmp_path: Path) -> None:
     directory = _bootstrap_dir(tmp_path)
-    (directory / name).write_text(secrets.token_urlsafe(32))
+    (directory / "fleet-rotator").write_text(secrets.token_urlsafe(32))
     with pytest.raises(BootstrapConfigError):
         BootstrapVerifier.from_dir(directory)
+
+
+@pytest.mark.parametrize(
+    "name", ["fleet-rotator.", "fleet-rotator.Dev Box", "fleet-rotator.devbox.bak"]
+)
+async def test_a_fleet_rotator_file_that_names_no_machine_is_skipped(
+    tmp_path: Path, name: str, caplog: pytest.LogCaptureFixture
+) -> None:
+    # An editor's or a backup's leftover does not stop the start: it is skipped, with a
+    # warning, and its secret passes nothing.
+    stray, devbox = secrets.token_urlsafe(32), secrets.token_urlsafe(32)
+    directory = _bootstrap_dir(tmp_path)
+    (directory / name).write_text(stray)
+    (directory / "fleet-rotator.devbox").write_text(devbox)
+    with caplog.at_level(logging.WARNING, logger="scadbuddy.auth.exchange"):
+        verifier = BootstrapVerifier.from_dir(directory)
+    assert any(name in record.getMessage() for record in caplog.records)
+    assert await verifier.verify(stray) is None
+    assert verifier.machines() == {"devbox"}
+    assert await verifier.verify(devbox) is not None
 
 
 def test_two_machines_with_one_secret_is_a_start_error(tmp_path: Path) -> None:

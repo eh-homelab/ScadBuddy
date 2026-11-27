@@ -260,6 +260,10 @@ class ServiceCredentialStore:
     def __init__(self, pool: Pool) -> None:
         self._pool = pool
         self._listeners: builtins.list[Callable[[ServiceCaller], None]] = []
+        #: Whether ``(caller, machine)``'s bootstrap proof file is still there
+        #: (`exchange.py` ``BootstrapVerifier.has_machine``); None: no bootstrap
+        #: directory, so no machine has one.
+        self.machine_present: Callable[[str, str], bool] | None = None
 
     def on_suspension_change(self, listener: Callable[[ServiceCaller], None]) -> None:
         """Calls ``listener`` with the caller after each :meth:`suspend` and :meth:`resume`
@@ -391,13 +395,25 @@ class ServiceCredentialStore:
         at = _now(now)
         with self._pool.connection() as conn:
             row = conn.execute(
-                "SELECT id, caller, scopes, last_used_at FROM service_credentials c"
+                "SELECT id, caller, scopes, machine, last_used_at FROM service_credentials c"
                 " WHERE secret_hash = %s AND revoked_at IS NULL AND expires_at > %s"
                 " AND NOT EXISTS (SELECT 1 FROM service_caller_suspensions s"
                 " WHERE s.caller = c.caller)",
                 (credential_hash, at),
             ).fetchone()
             if row is None:
+                return None
+            machine = row["machine"]
+            if machine is not None and (
+                self.machine_present is None or not self.machine_present(row["caller"], machine)
+            ):
+                # The machine was revoked (its proof file went): refused now, not at the
+                # next sweep, and revoked, so core's resolver refuses it too.
+                conn.execute(
+                    "UPDATE service_credentials SET revoked_at = %s"
+                    " WHERE id = %s AND revoked_at IS NULL",
+                    (at, row["id"]),
+                )
                 return None
             last = row["last_used_at"]
             if last is None or at - last >= TOUCH_INTERVAL:

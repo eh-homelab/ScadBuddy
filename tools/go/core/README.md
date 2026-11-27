@@ -144,7 +144,10 @@ first `PUT /machines/{id}` records the caller's proof name in `fleet_machines.pr
 `machine-of-another-proof`), and so is a session `PUT` whose machine is registered to
 another proof. So two machines of different proofs each hold a row of the same session id,
 and neither changes the other's. A `fleet-rotator` credential with no machine writes
-nothing (403 `no-machine`).
+nothing (403 `no-machine`). Core reads no bootstrap directory: a credential whose machine's file
+went is refused here once the API revokes its row, at the API's first resolve of it or its next
+start or auth sweep (at most 5 minutes; `docs/security/trust-boundaries.md`). `fleetd` sends a
+`fleet` PAT today, which these routes refuse until #8041.
 
 The `fleet` area also serves caller `fleet-rotator` (scope `crud.fleet-rotator`, #8026):
 `POST /api/v1/internal/crud/fleet-rotator/virtual-messages` `{sender, channel | agent, text}`

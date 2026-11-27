@@ -215,10 +215,13 @@ def test_a_fleet_rotator_credential_lives_only_while_its_machines_proof_does(
         rows = {row.id: row for row in credentials.list() if row.caller == "fleet-rotator"}
         assert sorted(row.machine for row in rows.values()) == ["m1", "m2"]
         assert credentials.resolve(t1) is not None
-        # m1 is revoked: its file goes. Its secret is refused at once, and the sweep (as
-        # every start does) revokes the credential it already holds.
+        # m1 is revoked: its file goes. Its secret is refused at once, and so is the
+        # credential it already holds, before any sweep (its row is revoked then, and the
+        # sweep, as every start does, revokes any other).
         (bootstrap / "fleet-rotator.m1").unlink()
         assert _exchange(client, m1, BOOTSTRAP).status_code == 401
+        assert credentials.resolve(t1) is None
+        assert credentials.resolve(t2) is not None
         _rotate_service_credentials(state)
         assert credentials.resolve(t1) is None
         assert credentials.resolve(t2) is not None
