@@ -45,7 +45,7 @@ func readBlobs(t *testing.T, objects map[string][]byte) (*Blobs, *S3, *readStore
 	now := time.Date(2026, 11, 26, 10, 0, 0, 0, time.UTC)
 	s3 := &S3{Endpoint: srv.URL, Region: "us-east-1", Bucket: "sb-test", Prefix: "t",
 		AccessKeyID: "testing", SecretAccessKey: "testing"}
-	return &Blobs{HTTP: srv.Client(), Now: func() time.Time { return now }}, s3, fake, now
+	return &Blobs{HTTP: srv.Client(), Stream: srv.Client(), Now: func() time.Time { return now }}, s3, fake, now
 }
 
 func refOf(body []byte) Ref {
@@ -125,7 +125,7 @@ func TestAReadOfAnS3FailureIsWrapped(t *testing.T) {
 		w.WriteHeader(http.StatusInternalServerError)
 	}))
 	defer srv.Close()
-	b := &Blobs{HTTP: srv.Client(), Now: time.Now}
+	b := &Blobs{HTTP: srv.Client(), Stream: srv.Client(), Now: time.Now}
 	s3 := &S3{Endpoint: srv.URL, Region: "r", Bucket: "b", Prefix: "t", AccessKeyID: "a", SecretAccessKey: "s"}
 	_, err := b.fetch(context.Background(), s3, ref)
 	if err == nil || errors.Is(err, ErrBlobNotFound) || errors.Is(err, ErrNotConfigured) {
@@ -137,7 +137,7 @@ func TestARowOnAnotherBackendIsNotConfigured(t *testing.T) {
 	b, s3, _, _ := readBlobs(t, nil)
 	ref := refOf([]byte("x"))
 	ref.Backend = "local"
-	if _, err := b.open(context.Background(), &Store{Backend: "s3", S3: s3}, ref); !errors.Is(err, ErrNotConfigured) {
+	if _, err := b.open(context.Background(), s3, ref); !errors.Is(err, ErrNotConfigured) {
 		t.Fatalf("err %v", err)
 	}
 }
@@ -182,10 +182,61 @@ func TestAReadOnAVolumeStoreIsNotConfigured(t *testing.T) {
 }
 
 func TestAStoreThatIsNotS3IsNotConfigured(t *testing.T) {
-	b, _, _, _ := readBlobs(t, nil)
 	for _, store := range []*Store{{Backend: "local"}, {Backend: "s3"}} {
-		if _, err := b.open(context.Background(), store, refOf([]byte("x"))); !errors.Is(err, ErrNotConfigured) {
+		if _, err := storeS3(store); !errors.Is(err, ErrNotConfigured) {
 			t.Fatalf("%+v: err %v", store, err)
 		}
+	}
+}
+
+// #8130 review: http.Client.Timeout also covers reading the body, so the read's client has none.
+func TestTheReadClientHasNoTotalTimeout(t *testing.T) {
+	b := New(nil, nil, nil, nil)
+	if b.Stream.Timeout != 0 || b.HTTP.Timeout != readTTL {
+		t.Fatalf("stream %s, http %s", b.Stream.Timeout, b.HTTP.Timeout)
+	}
+}
+
+// gatedStore sends the headers at once and the body only once release is closed.
+func gatedStore(t *testing.T, body []byte, release <-chan struct{}) *httptest.Server {
+	t.Helper()
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		w.(http.Flusher).Flush()
+		<-release
+		_, _ = w.Write(body)
+	}))
+	t.Cleanup(srv.Close)
+	return srv
+}
+
+func TestABodyMayTakeLongerThanTheHeaderWait(t *testing.T) {
+	body := []byte("hello blob")
+	release := make(chan struct{})
+	srv := gatedStore(t, body, release)
+	b := &Blobs{Stream: srv.Client(), Now: time.Now, HeaderWait: time.Second}
+	s3 := &S3{Endpoint: srv.URL, Region: "r", Bucket: "b", Prefix: "t", AccessKeyID: "a", SecretAccessKey: "s"}
+	rc, err := b.fetch(context.Background(), s3, refOf(body))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer rc.Close()
+	time.Sleep(1500 * time.Millisecond) // past the header wait: the body must still arrive
+	close(release)
+	if got, err := io.ReadAll(rc); err != nil || string(got) != string(body) {
+		t.Fatalf("read %q, %v", got, err)
+	}
+}
+
+func TestAStoreThatSendsNoHeadersInTheWaitIsUnavailable(t *testing.T) {
+	block := make(chan struct{})
+	srv := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) { <-block }))
+	t.Cleanup(srv.Close)
+	t.Cleanup(func() { close(block) }) // runs first, so srv.Close does not wait on the handler
+	b := &Blobs{Stream: srv.Client(), Now: time.Now, HeaderWait: 20 * time.Millisecond}
+	s3 := &S3{Endpoint: srv.URL, Region: "r", Bucket: "b", Prefix: "t", AccessKeyID: "a", SecretAccessKey: "s"}
+	_, err := b.fetch(context.Background(), s3, refOf([]byte("x")))
+	if err == nil || errors.Is(err, context.Canceled) || errors.Is(err, ErrBlobNotFound) {
+		t.Fatalf("err %v", err)
 	}
 }
