@@ -286,8 +286,12 @@ CRUD route).
 A prompt's scan fields that name `expects` also put `kind:<kind>` and `code:<CODE>` entries in
 the task's `expects` column (`scadbuddy/tasks/widgets.py` `expects_entries`), which
 `GET /tasks?code=` reads, and the task keeps its `assignee`. A change of what `prompt` or
-`wait_for_human` checks or opens is a Temporal patch (`HUMAN_PROMPT_PATCH`), because a
-refusal there schedules nothing and a replayed run must refuse as it did.
+`wait_for_human` checks or opens is a Temporal patch, because a refusal there schedules
+nothing and a replayed run must refuse as it did. `HUMAN_PROMPT_PATCH` gates the task of a
+`wait_for_human`, and `PROMPT_WIDGETS_PATCH` (a patch id per call) gates the widget keys
+and the checked context blocks of a `prompt`: a call from before replays with the rules it
+was checked by (`scadbuddy/tasks/models.py` `BEFORE_WIDGETS`). The CRUD route that opens the
+task is not replayed, so it checks by the new rules.
 See [features/flows.md](../features/flows.md#questions-to-a-person).
 
 ## Housekeeping

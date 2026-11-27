@@ -53,8 +53,8 @@ id per call), with the schema `HUMAN_ANSWER_SCHEMA` and the question as its titl
 question longer than a title (`TASK_TITLE_MAX`, 500 characters) is cut to fit, ending with
 "…", and the whole question is a `text` block of the task's context (at most 4000
 characters; a longer one raises `ValueError`; `_human_question`). `wait_for_human("")` raises
-`ValueError`, because a task title needs a character. An empty answer text is accepted: the
-schema has no `minLength`, where the text route refuses a blank answer. Its step is still
+`ValueError`, because a task title needs a character. An empty answer text is refused: the
+schema's `answer` has a `minLength` of 1, as the text route refuses a blank answer (#2379). Its step is still
 `wait_for_human`. A call from before replays with no task: it waits on
 `human_answer_open` (`human_answer` for an older one) and takes its answer at
 `POST /api/v1/workflow-runs/{run_id}/answer`, operation kind `flow_answer`. The run page shows
@@ -83,13 +83,14 @@ the answer is still the type's value:
 |---|---|---|
 | `scan` | string | a code, typed or scanned; the field looks it up and shows its name |
 | `photo`, `file` | string | an upload; the value is the id of an attachment of the task (entity kind `task`) |
-| `entity` | string | a pick of a row, with `kind`: `library_file`, `location` or `spool` |
+| `entity` | string | a pick of a row, with `kind`: `library_file` (the value is the file's id), `location` or `spool` (the value is its code, such as `S-9`) |
 | `weight` | number | a weight in grams |
 | `confirm` | boolean | a large yes or no |
 
 A `scan` field may also have `expects`, with `kinds` (`spool`, `location`) and `codes` (such
 as `S-3`). The route refuses an answer whose code is none of them, or names an archived row
 (`backend/scadbuddy/tasks/answer_check.py`). It never says which of the reasons it is. An
+`entity` field of kind `location` or `spool` is checked the same way, as a scan of that kind. An
 unknown `x-sb-widget` is logged and draws the plain control of the type. A widget on a type
 it does not fit, `kind` on a field that is not an `entity`, and `expects` on one that is not
 a `scan` are refused when the prompt opens (`widget_problems`). The inputs of a flow refuse
@@ -108,11 +109,16 @@ limit who may answer.
 
 **Stations.** A place may be a station for flow tasks (`filament_locations.station`; the
 switch "Station for flow tasks" on the place, and `GET /api/v1/filament/locations?station=true`
-lists them). `/station` lists the stations. `/station/<place>` shows that place's open
-tasks, oldest first, over `GET /api/v1/tasks?place=`, and it follows `tasks:<place>`, so a
-task that opens or is answered elsewhere appears or goes at once. A scan field at the top
-keeps the focus. A code scanned there goes to the one task that waits for it
-(`GET /api/v1/tasks?code=`); when more than one waits, the person chooses. The page is an
+lists them). A task's `place` names its station by the location's code, such as `L-7`. A
+place that parses as a location's code is stored in that form, so `l7` and `L-07` are `L-7`
+(`backend/scadbuddy/tasks/models.py` `folded_place`). A place that is no code is stored as
+it is, and no station shows it. `/station` lists the stations. `/station/<location id>`
+shows the open tasks at that location's code, oldest first, over
+`GET /api/v1/tasks?place=<code>`, and it follows `tasks:<code>`, so a task that opens or is
+answered elsewhere appears or goes at once. A scan field at the top keeps the focus. A code
+scanned there goes to the one task that waits for it (`GET /api/v1/tasks?code=`); when more
+than one waits, the person chooses. Only a scan field with `expects` makes its task wait for
+a code, so a station or `/x/<code>` offers only those fields. The page is an
 ordinary signed-in session, so each answer is the signed-in person's own.
 
 **Scan to answer.** `/x/<code>`, the address of a label's QR, shows the open task that
@@ -132,7 +138,8 @@ pipeline refuse `format`.
 
 **Sizes.** `backend/scadbuddy/tasks/models.py` `TaskOpen` checks them. The title has 1 to
 500 characters. The context has at most 16 KiB of JSON (`MAX_JSON_BYTES`), `ui` at most 200
-characters, and `place` 1 to 100 characters with no control character. The schema has the
+characters, and `place` 1 to 100 characters with no control character (a location's code
+is stored as `L-<n>`). The schema has the
 limits of an inputs schema. What Postgres cannot store is refused
 (`backend/scadbuddy/core/json_values.py` `unstorable`). An answer has at most 16 KiB of
 JSON (413).
