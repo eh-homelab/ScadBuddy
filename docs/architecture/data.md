@@ -36,6 +36,7 @@ same schema, created by a file in `backend/scadbuddy/migrations/` or
 | Printing | `print_runs`, `print_sends`, `print_links`, `output_bambuddy_uploads`, `output_bambuddy_slices`, `output_last_prints`, `print_preview_slices`, `print_slice_starts`, `print_batches`, `print_batch_items`, `print_attachments`, `print_outcomes`, `printers`, `printer_reports` (`20261018T1659Z_printers`), `rack_nozzle_*`, `library_folders`, `library_files` (`20261017T2250Z_print_library`), `native_slices`, `library_copies`, `print_imports`, `print_lan_imports`, `lan_print_archives` and more | the API; the print worker through `crud.print` routes (`scadbuddy/api/crud_print.py:316`) |
 | Spools and filament | `filament_*` (`20261114T1300Z`, `20261114T1301Z` and later), `filament_presets`, `filaments` (the overlay and native spool tables were dropped by `20261118T1235Z_drop_native_spool_tables`, and `held_local_presets` by `20261124T1308Z_drop_held_local_presets`, #7275) | the API; the print worker through CRUD |
 | Label sheets (#7216) | `label_sheets` (`20261125T1454Z_label_sheets`) | the API |
+| Code scans (#8155) | `code_scans` (`20261127T0424Z_code_scans`): each scan's photo (a `scan_image` blob, held in `blob_refs` as `code_scan`), its decoded codes, its source and its place | core (`tools/go/core/internal/scan`, area `scan`) |
 | Flows | `workflow_definitions`, `workflow_runs`, `workflow_run_decisions`, `workflow_flow_states`, `workflow_run_proposals`, `workflow_run_links`, `flow_grants`, `flow_grant_uses`, `flow_triggers`, `flow_trigger_grants`, `flow_trigger_fires`, `tasks` (`20261124T0449Z_tasks`, #7364) | the API; the projects worker through `crud.projects` (`scadbuddy/api/crud_projects.py:71-73`; the tasks: `scadbuddy/api/crud_tasks.py`); the agent's run-grant check reads `flow_grants` and `flow_grant_uses` through `crud.agent` area `gate` (`agent/src/gate/crudStore.ts:13`) |
 | Orders, payments, storefront | `customers*`, `orders`, `order_*` (`20261020T0446Z_orders` and later; `order_item_parts` and `model_part_rules` name `items` since `20261124T0918Z_parts_to_items`), `entity_attachments` (an order's files; `20261024T2050Z_order_attachments`, renamed by `20261122T0426Z_entities`), `parts_retired` and `part_stock_moves_retired` (the old `parts` and `part_stock_moves`, renamed by `20261124T0918Z_parts_to_items`; a follow-up drops them after a prod check, Ruling 6 of #7067), `payment_*`, `bank_*`, `printer_cost_profiles`, `storefront_*` (2026-11-07 to 2026-11-13 files) | the API; the storefront edge through `crud.storefront` (`scadbuddy/api/crud_storefront.py:208`); the intake worker through `crud.intake` (`scadbuddy/api/crud_intake.py:34`) |
 | Entities (files, links and properties on any row, #6950, #7026) | `entities`, `entity_links` (`20261122T0426Z_entities`), `entity_properties` (one row per entity and key) and `entity_property_schemas` (one row per kind, seeded for `spool_type` and `spool`; `20261123T0017Z_entity_properties`), `entity_attachments` (the old `order_attachments`, renamed there; an order's files are its rows with an `order_id`) | the API |
@@ -100,7 +101,7 @@ The stored setting `store_backend` (seeded from the environment, default `local`
 `ContentStore` (`scadbuddy/store/content.py`) maps a logical key to a `BlobRef` (sha256,
 kind, backend, backend id, size; `scadbuddy/store/content_models.py` `BlobRef`), indexed in
 `store_blobs`. The kinds are `piece`, `snapshot`, `asset`, `font`, `slice`, `library`,
-`workspace`, `media`, `output` and `tag_dump` (`content_models.py` `BlobKind`). A blob stays alive while a `blob_refs`
+`workspace`, `media`, `output`, `tag_dump` and `scan_image` (`content_models.py` `BlobKind`). A blob stays alive while a `blob_refs`
 row holds it (`scadbuddy/store/refs.py:22-30`); unreferenced blobs of the swept kinds are
 deleted after a grace period.
 
@@ -119,6 +120,7 @@ deleted after a grace period.
 | `customer-preview-<sha256>`, `customer-file-<sha256>`, `listing-media-<sha256>` | storefront uploads and listing media | `scadbuddy/orders/storefront/intake.py:74`, `scadbuddy/orders/storefront/order_page.py:163`, `scadbuddy/orders/storefront/listings.py:963` |
 | `workspace-<sha256>` | an agent workspace file | `scadbuddy/api/internal_workspace.py:43` |
 | `tag_dump-<sha256>` | a Bambu tag's raw dump (#7905), uploaded by a service through core's shared CRUD area `blobs` (#7958); swept unless its caller holds it | `tools/go/core/internal/blobstore` `IndexKey` |
+| `scan_image-<sha256>` | a code scan's photo (#8155), a JPEG, PNG or WebP that core takes from the page and stores with `Blobs.Put`; held by its `code_scans` row (`code_scan`, the scan's id) until the scan is deleted, then swept | `tools/go/core/internal/scan` |
 
 Processes without store credentials (the slicer) get short-lived transfer URLs instead:
 a presigned S3 GET, or the API's `/api/v1/internal/blobs/{key}` with an HMAC transfer
