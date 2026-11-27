@@ -107,8 +107,9 @@ class GrantSpec(BaseModel):
     #: Whether a call outside it goes to the starter session before the person (§4.4).
     ask_starter_session: bool = True
     rules: list[GrantRule] = Field(default_factory=list, max_length=MAX_RULES)
-    #: Who else may answer the run's questions (#7471). Known so that a worker reads a
-    #: grant that holds it; refused by `validate_spec` until grants may admit answers (B2).
+    #: Who else may answer the run's questions (#7471, spec 2026-11-25 §4.3): the values of
+    #: the setting `flow_answerers`. A child run's grant drops it (`inherited`), and a
+    #: trigger's standing grant may not hold it.
     #: Left out of a dump when empty: a worker from before #7471 refuses an unknown field.
     answers: GrantAnswers | None = Field(default=None, exclude_if=lambda v: v is None)
 
@@ -276,8 +277,6 @@ def validate_spec(spec: GrantSpec, *, tool_tiers: Mapping[str, str], now: dateti
     """Every problem with `spec` for a grant approved at `now`; empty when it may be.
     `tool_tiers` are the agent's tools as the run will enforce them (`raise_tiers`)."""
     problems = validate_rules(spec.rules, tool_tiers=tool_tiers)
-    if spec.answers is not None:
-        problems.append("answers is not taken yet: the setting flow_answerers says who answers")
     if spec.expires_at <= now:
         problems.append("expires_at is in the past")
     elif spec.expires_at - now > MAX_EXPIRY:

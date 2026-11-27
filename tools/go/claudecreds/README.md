@@ -2,7 +2,8 @@
 
 A Go library for facts about Claude Code logins and their limits. It is part of the
 fleet session registry and login rotator (#7981). The design is
-`docs/superpowers/specs/2026-11-26-fleet-session-registry-and-rotator-design.md` §6.5.
+`docs/superpowers/specs/2026-11-26-fleet-session-registry-and-rotator-design.md` §6.5
+and §6.6.
 The library has no binary and imports only the standard library. Transcript events are §6.4.
 
 ## The reset parser
@@ -63,6 +64,43 @@ The fixtures in `testdata/` are real transcript lines from one machine, redacted
 keep only the keys `ParseEntry` reads plus `type`, `message.content[0].text`,
 `timestamp`, `uuid`, `sessionId` and `cwd`, with fake ids and cwd `/home/user/repo`. The
 normal assistant and user lines have their text replaced.
+
+## The login and its locks
+
+`login.go` replaces the login in a config dir (`~/.claude` or `CLAUDE_CONFIG_DIR`) under
+Claude Code's own locks (#7989). The facts are design §3 and Claude Code 2.1.332's code
+(read 2026-11-26 with `strings` on its binary).
+
+- The login is `claudeAiOauth` in `<dir>/.credentials.json` (mode 0600).
+- `AcquireLoginLocks(ctx, dir)` takes three proper-lockfile locks, in Claude Code's own
+  order: `<dir>/.oauth_refresh.lock` and `<realpath(dir)>.lock` (stale 60 s), then
+  `<dir>/.storage-write.lock` (stale 15 s; Claude Code locks the path `.storage-write`, and
+  proper-lockfile adds `.lock`). Each lock is a directory made with mkdir. While it holds
+  them, it updates their mtimes every 5 s. It waits for a fresh lock, takes over only a
+  stale one, and gives back every lock when it fails (`LockTimeout`, 30 s, or the
+  context's deadline). `Release` removes only a lock this process still holds. The
+  convention is
+  [proper-lockfile's](https://github.com/moxystudio/node-proper-lockfile#design).
+- `ReadLogin(dir)` returns `claudeAiOauth` exactly as stored.
+- `WriteLogin(locks, dir, login)` replaces only `claudeAiOauth`. The other top-level keys
+  (such as `mcpOAuth`) keep their bytes and their order. It writes a 0600 temp file in the
+  dir, syncs it and renames it over the file. It refuses (`ErrLocksNotHeld`) without the
+  dir's locks, after their release, or after another process took one over.
+- `Rotate(ctx, dir, writeBack, next)` does design §6.6 in the order of #8016: take the
+  locks, read the live login, call `writeBack(old)`, write `next`, release. When
+  `writeBack` fails, the file is not changed. It returns after the release, with the
+  mtime of the file it wrote, so the caller then releases the old lease.
+- `LoginChanged(dir, last)` tells whether the file's mtime changed since `last`. A change
+  that the caller did not cause is a refresh by Claude Code, so the caller writes the
+  login back. The caller polls it.
+- `UpdateOAuthAccount(path, account)` sets `oauthAccount` in `~/.claude.json`, best
+  effort. That file has no lock to share. It changes only that key, writes a temp file and
+  renames it, reads the file again, and tries again at most 3 times. Then it returns
+  `ErrRaceLost`.
+- No error or log names a token or the file's contents; errors name the path and the
+  step.
+
+The tests use only `t.TempDir()`, never the real `~/.claude` or `~/.claude.json`.
 
 ## Commands
 

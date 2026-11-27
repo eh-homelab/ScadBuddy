@@ -155,9 +155,9 @@ export function CustomizePage() {
   // #269 — live: details, pins and the upstream badge follow changes made elsewhere.
   const modelState = useAsync(() => api.getModel(slug), [slug], [`model:${slug}`])
   const origin = modelState.data?.origin
-  // Resolved through /edit, not the history list: that route falls back to the 3MF's
-  // own provenance when the output record is gone. EditPage has usually resolved it
-  // already and passed it in state, so arriving that way costs no second request.
+  // Resolved through /edit, not the history list: that route reads the output's row and
+  // checks its model. EditPage has usually resolved it already and passed it in state,
+  // so arriving that way costs no second request.
   const handedOver = useLocation().state as EditNavigationState | null
   const preloaded = handedOver?.editTarget?.output_id === reopenId ? handedOver.editTarget : null
   const reopenState = useAsync(

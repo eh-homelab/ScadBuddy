@@ -1,13 +1,16 @@
 """Who may answer a flow's question at its two routes (#7471, spec 2026-11-25 §4, §8): a
 person always; an assistant session or an MCP token on the agent's credential only when
-the setting `flow_answerers` names it and the question is not for people only."""
+the setting `flow_answerers` or the run's approved grant names it, and the question is not
+for people only."""
 
 from __future__ import annotations
 
+import asyncio
 import base64
 from collections.abc import Iterator
 from pathlib import Path
 from typing import Any
+from unittest.mock import ANY
 
 import psycopg
 import pytest
@@ -18,7 +21,10 @@ from scadbuddy.api.deps import STATE_ATTR
 from scadbuddy.auth.models import principal_for
 from scadbuddy.auth.service_credentials import ServiceCredentialStore
 from scadbuddy.core.settings import Settings
+from scadbuddy.flows.models import Decision
+from scadbuddy.flows.store import FlowStore, GrantLapsedError
 from tests.api.test_auth_enforce import HEADER, _app, _configure, _sign_in
+from tests.api.test_flow_grants import grant
 from tests.api.test_flows import register, script, until
 from tests.auth.fake_oidc import CLIENT_ID, ISSUER, FakeIssuer
 from tests.flows.flows_support import parent_session
@@ -84,12 +90,16 @@ def answerers(client: TestClient, *rules: str) -> None:
     assert response.status_code == 200, response.text
 
 
-def waiting(client: TestClient, body: str, **start_headers: str) -> tuple[str, dict[str, Any]]:
-    """A run parked on its one question, and the question's entry."""
+def waiting(
+    client: TestClient, body: str, start: dict[str, Any] | None = None, **start_headers: str
+) -> tuple[str, dict[str, Any]]:
+    """A run parked on its one question, and the question's entry. `start` is the start's
+    body (a grant)."""
     definition = register(client, script(body, "return 'done'"))
     started = client.post(
         f"/api/v1/workflows/{definition['id']}/runs",
         headers={"Idempotency-Key": "w", **start_headers},
+        json=start or {},
     )
     assert started.status_code in (200, 201, 202), started.text
     run_id = started.json()["id"]
@@ -99,7 +109,7 @@ def waiting(client: TestClient, body: str, **start_headers: str) -> tuple[str, d
 
 
 def text_question(client: TestClient, **start_headers: str) -> tuple[str, dict[str, Any]]:
-    return waiting(client, "await wait_for_human('Swap?')", **start_headers)
+    return waiting(client, "await wait_for_human('Swap?')", None, **start_headers)
 
 
 def answer(
@@ -125,6 +135,16 @@ def refused(response: Any) -> None:
 
 def answered(response: Any) -> None:
     assert response.status_code in (200, 202), response.text
+
+
+def answers_grant(*who: str) -> dict[str, Any]:
+    """A run grant with no rules that lets `who` answer the run's questions (B2)."""
+    return {"grant": grant(answers={"who": list(who)})}
+
+
+def grant_id(client: TestClient, run_id: str) -> str:
+    shown = client.get(f"/api/v1/workflow-runs/{run_id}").json()["grant"]
+    return str(shown["id"])
 
 
 def decision(app: FastAPI, run_id: str) -> dict[str, Any] | None:
@@ -172,6 +192,7 @@ def test_sessions_admits_a_browser_users_session(
     if entry["task"] is not None:
         task = client.get(f"/api/v1/tasks/{entry['call_id']}").json()
         assert task["answered_by"] == f"session:{MINE}"
+        assert task["admitted_by"] == "setting"
 
 
 def test_each_rule_admits_its_answerer_and_no_other(
@@ -344,3 +365,138 @@ def test_in_enforce_the_policy_decides_on_the_agents_credential(
         answerers(client, "sessions")
         answered(answer(bare, run_id, entry, agent, "c"))
         assert decision(app, run_id) == {"responder": f"session:{MINE}", "admitted_by": "setting"}
+
+
+# -- the run grant (B2, spec §4.3) ----------------------------------------------------
+
+
+@QUESTIONS
+def test_an_approved_grant_admits_its_answerer_and_is_recorded(
+    app: FastAPI, client: TestClient, credential: str, body: str
+) -> None:
+    # A browser start approves its grant; the setting names nobody.
+    run_id, entry = waiting(client, body, answers_grant("sessions"))
+    answered(answer(client, run_id, entry, as_agent(credential)))
+    by = grant_id(client, run_id)
+    assert decision(app, run_id) == {"responder": f"session:{MINE}", "admitted_by": by}
+    done = until(client, run_id, lambda v: v["status"] == "succeeded")
+    assert done["answers"][0]["admitted_by"] == by
+    if entry["task"] is not None:
+        task = client.get(f"/api/v1/tasks/{entry['call_id']}").json()
+        assert (task["answered_by"], task["admitted_by"]) == (f"session:{MINE}", by)
+
+
+def test_a_grant_admits_only_whom_it_names(
+    app: FastAPI, client: TestClient, credential: str
+) -> None:
+    run_id, entry = text_question(client)
+    refused(answer(client, run_id, entry, as_agent(credential)))
+    run_id, entry = waiting(
+        client, "await wait_for_human('Swap?')", answers_grant(f"token:{TOKEN}")
+    )
+    refused(answer(client, run_id, entry, as_agent(credential)))
+    answered(answer(client, run_id, entry, as_token(credential), "b"))
+
+
+def test_the_setting_is_recorded_when_both_admit(
+    app: FastAPI, client: TestClient, credential: str
+) -> None:
+    answerers(client, "sessions")
+    run_id, entry = waiting(client, "await wait_for_human('Swap?')", answers_grant("sessions"))
+    answered(answer(client, run_id, entry, as_agent(credential)))
+    assert decision(app, run_id) == {"responder": f"session:{MINE}", "admitted_by": "setting"}
+
+
+def test_a_requested_or_revoked_grant_admits_nobody(
+    app: FastAPI, client: TestClient, credential: str
+) -> None:
+    # An agent's start only requests its grant, and an agent cannot approve it.
+    started = as_agent(credential, TOKENS, f"token:{TOKEN}")
+    run_id, entry = waiting(
+        client, "await wait_for_human('Swap?')", answers_grant("sessions"), **started
+    )
+    assert client.get(f"/api/v1/workflow-runs/{run_id}").json()["grant"]["status"] == "requested"
+    refused(answer(client, run_id, entry, as_agent(credential)))
+    approve = client.post(f"/api/v1/workflow-runs/{run_id}/grant/approve", headers=started)
+    assert approve.status_code == 403, approve.text
+    # Revoked by the person: nobody it named answers now.
+    run_id, entry = waiting(client, "await wait_for_human('Swap?')", answers_grant("sessions"))
+    assert client.post(f"/api/v1/workflow-runs/{run_id}/grant/revoke").status_code == 200
+    refused(answer(client, run_id, entry, as_agent(credential), "b"))
+    assert decision(app, run_id) is None
+
+
+@QUESTIONS
+def test_a_question_for_people_only_wins_over_the_grant(
+    app: FastAPI, client: TestClient, credential: str, body: str
+) -> None:
+    run_id, entry = waiting(
+        client, body.replace(")", ", people_only=True)"), answers_grant("sessions")
+    )
+    response = answer(client, run_id, entry, as_agent(credential))
+    refused(response)
+    assert response.json()["people_only"] is True
+
+
+def test_a_grant_revoked_after_the_route_records_nothing(
+    app: FastAPI, client: TestClient, credential: str
+) -> None:
+    """Between the route and the decision: the store's transaction checks the grant again."""
+    run_id, entry = waiting(client, "await wait_for_human('Swap?')", answers_grant("sessions"))
+    by = grant_id(client, run_id)
+    view = client.get(f"/api/v1/workflow-runs/{run_id}").json()
+    store = FlowStore(getattr(app.state, STATE_ATTR).settings_store.pool)
+
+    execution = view["run"]["workflow_run_id"]
+
+    def made(admitted_by: str) -> Decision:
+        return Decision(
+            request_id=f"flow:{run_id}:{execution}:{entry['call_id']}",
+            run_id=run_id,
+            workflow_run_id=execution,
+            call_id=entry["call_id"],
+            kind="answer",
+            outcome="answered",
+            response={"answer": "yes"},
+            responder=f"session:{MINE}",
+            admitted_by=admitted_by,
+        )
+
+    assert client.post(f"/api/v1/workflow-runs/{run_id}/grant/revoke").status_code == 200
+    with pytest.raises(GrantLapsedError):
+        asyncio.run(store.record_decision(made(by)))
+    assert decision(app, run_id) is None
+    # A grant that is not the run's lets nothing through either.
+    with pytest.raises(GrantLapsedError):
+        asyncio.run(store.record_decision(made("another-grant")))
+
+
+def test_a_take_over_checks_the_grant_and_a_put_back_does_not(
+    app: FastAPI, client: TestClient, credential: str
+) -> None:
+    """An agent's take-over of its own answer that never landed is a new answer: its grant
+    must still be in force. A put-back (`seen` None) restores an answer that landed."""
+    run_id, entry = waiting(client, "await wait_for_human('Swap?')", answers_grant("sessions"))
+    by = grant_id(client, run_id)
+    execution = client.get(f"/api/v1/workflow-runs/{run_id}").json()["run"]["workflow_run_id"]
+    store = FlowStore(getattr(app.state, STATE_ATTR).settings_store.pool)
+    held = Decision(
+        request_id=f"flow:{run_id}:{execution}:{entry['call_id']}",
+        run_id=run_id,
+        workflow_run_id=execution,
+        call_id=entry["call_id"],
+        kind="answer",
+        outcome="answered",
+        response={"answer": "no"},
+        responder=f"session:{MINE}",
+        admitted_by=by,
+    )
+    assert asyncio.run(store.record_decision(held))
+    assert client.post(f"/api/v1/workflow-runs/{run_id}/grant/revoke").status_code == 200
+    again = held.model_copy(update={"response": {"answer": "yes"}})
+    with pytest.raises(GrantLapsedError):
+        asyncio.run(store.take_over_decision(again, held=held, seen=[]))
+    assert asyncio.run(store.get_decision(held.request_id)) == held.model_copy(
+        update={"created_at": ANY}
+    )
+    assert asyncio.run(store.take_over_decision(again, held=held, seen=None))

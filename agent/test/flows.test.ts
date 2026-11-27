@@ -287,6 +287,25 @@ describe('run grants (#2481)', () => {
     expect(tool('start_flow_run').description).toMatch(/requested/)
   })
 
+  it("proposes who else may answer the run's questions, with the setting's values only (#7471)", async () => {
+    const bodies: unknown[] = []
+    server.use(
+      http.post(`${BACKEND}/api/v1/workflows/${DEFINITION}/runs`, async ({ request }) => {
+        bodies.push(await request.json())
+        return HttpResponse.json({ id: RUN, status: 'starting', repeated: false }, { status: 202 })
+      }),
+    )
+    const answers = { who: ['starter', 'token:70ce0000-0000-4000-8000-00000000000c'] }
+    const result = await runTool(tool('start_flow_run'), { definition_id: DEFINITION, grant: { ...GRANT, answers } }, ctx())
+    expect(result.isError).toBeFalsy()
+    expect(bodies).toEqual([{ grant: { ...GRANT, ask_starter_session: true, answers } }])
+    for (const who of [[], ['everyone']]) {
+      const refused = await runTool(tool('start_flow_run'), { definition_id: DEFINITION, grant: { ...GRANT, answers: { who } } }, ctx())
+      expect(refused.isError).toBe(true)
+    }
+    expect(bodies).toHaveLength(1)
+  })
+
   it('refuses an expiry with no offset and an empty value list before the round trip', async () => {
     let sent = 0
     server.use(

@@ -28,14 +28,21 @@ export function StepLine({ step, child = false }: { step: FlowQueueStep; child?:
 }
 
 /** #7471 — who answered a flow's question; the assistant links its session. */
-export function AnsweredBy({ by }: { by: string | null | undefined }) {
+export function AnsweredBy({ by, admittedBy }: { by: string | null | undefined; admittedBy?: string | null }) {
   const { text, sessionId } = answererLabel(by)
-  return sessionId ? (
+  const label = sessionId ? (
     <a href={sessionHref(sessionId)} className="underline underline-offset-2">
       {text}
     </a>
   ) : (
     <span>{text}</span>
+  )
+  // #7471: an assistant the run's grant let answer, not the setting.
+  if (!admittedBy || admittedBy === 'setting') return label
+  return (
+    <>
+      {label} <span>under the run&apos;s grant</span>
+    </>
   )
 }
 

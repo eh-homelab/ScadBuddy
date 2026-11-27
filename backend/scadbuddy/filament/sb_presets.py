@@ -344,9 +344,15 @@ class FilamentPresetStore:
     """``filament_presets`` and their documents. ``blobs`` is asked at each read, as the
     app's blob store is set after its components are built. Reads in a thread."""
 
-    def __init__(self, pool: ConnectionPool[Conn], blobs: Callable[[], BlobStore]) -> None:
+    def __init__(
+        self,
+        pool: ConnectionPool[Conn],
+        blobs: Callable[[], BlobStore],
+        instance: Callable[[], str | None] | None = None,
+    ) -> None:
         self._pool = pool
         self._blobs = blobs
+        self._instance = instance
 
     def get(self, preset_id: int) -> FilamentPreset | None:
         with self._pool.connection() as conn:
@@ -371,6 +377,12 @@ class FilamentPresetStore:
         return [FilamentPreset.model_validate(row) for row in rows]
 
     async def rows(self) -> list[OwnRow]:
+        """The native slicer's view of every preset. With ``instance`` (the configured
+        Bambuddy's instance id, read at each call), a row gives ``bb_preset_id`` only when
+        the preset is of that Bambuddy or of an unrecorded one (`by_bb_id_on`'s rule): an
+        id of another Bambuddy names another preset there (#7223). With no Bambuddy
+        configured, every row gives its id."""
+        instance = await asyncio.to_thread(self._instance) if self._instance else None
         return [
             OwnRow(
                 id=p.id,
@@ -379,7 +391,11 @@ class FilamentPresetStore:
                 filament_type=p.filament_type,
                 filament_colour=p.filament_colour,
                 compatible_printers=list(p.compatible_printers),
-                bb_preset_id=p.bb_preset_id,
+                bb_preset_id=(
+                    p.bb_preset_id
+                    if p.bb_instance is None or instance is None or p.bb_instance == instance
+                    else None
+                ),
             )
             for p in await asyncio.to_thread(self.all)
         ]
@@ -432,7 +448,9 @@ def _bound_bb_ids(conn: Conn) -> set[int]:
 def _fetched_key(conn: Conn, bb_preset_id: int) -> dict[str, Any] | None:
     """The type binding that a profile fetch of that type bound to ``bb_preset_id`` at
     the binding's own key, with the run, when the key has no ``3dfp`` preset yet: what
-    makes an adopted preset ``3dfp`` (Decision 6)."""
+    makes an adopted preset ``3dfp`` (Decision 6). A run's ``preset_id`` names the Bambuddy
+    of its time; a reset that deletes the links strips them (`bb_sync_results.reset_links`,
+    #7223), so a run's id is always the current Bambuddy's."""
     return conn.execute(
         "SELECT b.type_id, b.printer_model, b.nozzle_diameter, f.id AS run_id, f.tdfp_id"
         " FROM filament_spool_type_presets b"

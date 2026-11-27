@@ -123,6 +123,17 @@ describe('WorkflowRunPage', () => {
     },
   )
 
+  it("says when the run's grant, not the setting, let the assistant answer (#7471)", async () => {
+    const [run] = (await api.listFlowRuns()).filter((r) => r.id === 'run-ask')
+    setFlowRuns([
+      { ...run!, status: 'running', waiting_on: [], steps: run!.steps.map((s) => ({ ...s, status: 'succeeded' as const })) },
+    ])
+    setFlowAnswers('run-ask', [{ call_id: 'call-2', answered_by: 'session:s-9', admitted_by: 'grant-1' }])
+    render('run-ask')
+    const steps = await screen.findByRole('table', { name: 'Steps' })
+    expect(await within(steps).findByText("under the run's grant")).toBeInTheDocument()
+  })
+
   it('names no one for a question a Reset parked again, though its old answer is on record (#7471)', async () => {
     // run-ask's call-2 is running and waiting again: the answer is of an undone execution.
     setFlowAnswers('run-ask', [{ call_id: 'call-2', answered_by: 'session:s-9', admitted_by: 'setting' }])

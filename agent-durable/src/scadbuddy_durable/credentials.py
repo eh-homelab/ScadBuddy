@@ -16,8 +16,9 @@ import logging
 import re
 from dataclasses import dataclass, field
 from datetime import UTC, date, datetime, timedelta, tzinfo
+from functools import cache
 from typing import Any, Literal, cast, get_args
-from zoneinfo import ZoneInfo
+from zoneinfo import ZoneInfo, available_timezones
 
 import psycopg
 
@@ -177,10 +178,22 @@ RESET_HORIZON = timedelta(days=31)
 _MONTHS = ("jan", "feb", "mar", "apr", "may", "jun", "jul", "aug", "sep", "oct", "nov", "dec")
 
 
+@cache
+def _zone_names() -> frozenset[str]:
+    """Every zone name this machine's zone data holds, in its exact case. Kept for the
+    process's life: after a ``zoneinfo.reset_tzpath()`` it would no longer match what
+    ``ZoneInfo`` reads, and nothing calls that (#8082)."""
+    return frozenset(available_timezones())
+
+
 def _zone(name: str) -> tzinfo | None:
     """The zone the text names, or None when this machine's zone data does not know it."""
     if name.upper() == "UTC":
         return UTC
+    # On a case-insensitive filesystem (macOS) ZoneInfo opens "america/new_york"; Linux,
+    # Go and the agent refuse it, so a name counts only as written (#8023).
+    if name not in _zone_names():
+        return None
     try:
         return ZoneInfo(name)
     except KeyError, ValueError, OSError:
