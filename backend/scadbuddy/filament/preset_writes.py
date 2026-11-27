@@ -7,7 +7,10 @@ The Go routes ``POST /api/v1/filament/presets/{preset_id}/copy`` and ``PATCH
 built yet: they wait for ``internal/temporalx``, ruling N7). The API process serves them,
 because it is the only process with a database secret (#5295).
 
-Each activity reads the current document (`FilamentPresetStore.read`), applies the
+Each activity takes its input as a JSON object and checks it in its body, so a bad
+input is a typed refusal, never a decode failure that Temporal retries. A key sent
+again gets its stored reply before anything is read (`stored`). Otherwise the activity
+reads the current document (`FilamentPresetStore.read`), applies the
 change and writes the row's name into the document's ``name`` key (R6), and keeps the
 document as a blob (`keep_document`). Then, in one transaction, `idempotent_write` runs
 the write once per actor, key and preset (R12): it takes `lock_presets_on`, reads the
@@ -28,14 +31,21 @@ from collections.abc import Callable
 from typing import Annotated, Any, Final, Literal, Self
 
 from psycopg_pool import ConnectionPool
-from pydantic import BaseModel, Field, StringConstraints, field_validator, model_validator
+from pydantic import (
+    BaseModel,
+    Field,
+    StringConstraints,
+    ValidationError,
+    field_validator,
+    model_validator,
+)
 from pydantic_core import PydanticCustomError
 from temporalio import activity
 from temporalio.exceptions import ApplicationError
 
 from scadbuddy.core.credentials import is_credential
 from scadbuddy.core.problems import ApiError
-from scadbuddy.crud.idempotency import Replay, idempotent_write
+from scadbuddy.crud.idempotency import Replay, idempotent_write, stored
 from scadbuddy.filament.preset_mirror import mirror_pending, wants_mirror
 from scadbuddy.filament.sb_presets import (
     Conn,
@@ -52,6 +62,8 @@ from scadbuddy.store import BlobStore
 
 COPY_ACTIVITY: Final = "filament_preset_copy"
 EDIT_ACTIVITY: Final = "filament_preset_edit"
+#: The activities `preset_write_activities` defines, by name.
+PRESET_WRITE_ACTIVITIES: Final = (COPY_ACTIVITY, EDIT_ACTIVITY)
 #: The routes the idempotency ledger keys a reply under (the Go routes that start these).
 COPY_ROUTE: Final = "POST /filament/presets/{preset_id}/copy"
 EDIT_ROUTE: Final = "PATCH /filament/presets/{preset_id}"
@@ -70,6 +82,8 @@ DOCUMENT_MISSING: Final = "document_missing"
 KEY_REFUSED: Final = "key_refused"
 #: An idempotency key sent again with another body (`crud/idempotency.py` `KEY_PROBLEM`).
 KEY_REUSED: Final = "idempotency_key_reused"
+#: An input that is not a copy or an edit, for a reason other than a key.
+INVALID_INPUT: Final = "invalid_input"
 
 PresetName = Annotated[str, StringConstraints(strip_whitespace=True, min_length=1, max_length=200)]
 Mirror = Literal["sent", "failed", "pending", "off"]
@@ -128,6 +142,52 @@ def _refused(type_: str, message: str, *details: Any) -> ApplicationError:
     return ApplicationError(message, *details, type=type_, non_retryable=True)
 
 
+def _parsed[Input: (PresetCopyInput, PresetEditInput)](
+    model: type[Input], raw: dict[str, Any]
+) -> Input:
+    """``raw`` as ``model``: a refused key is ``key_refused`` (its key the detail), any
+    other fault ``invalid_input`` (each fault's ``loc`` and ``msg`` the detail)."""
+    try:
+        return model.model_validate(raw)
+    except ValidationError as error:
+        faults = error.errors(include_url=False)
+        for fault in faults:
+            if fault["type"] == KEY_REFUSED:
+                raise _refused(KEY_REFUSED, fault["msg"], fault["ctx"]["key"]) from None
+        listed = [{"loc": list(f["loc"]), "msg": f["msg"]} for f in faults]
+        raise _refused(INVALID_INPUT, str(error), listed) from None
+
+
+def _ledger_key(body: PresetCopyInput | PresetEditInput) -> tuple[str, dict[str, Any]]:
+    """The ledger key of ``body`` (actor, key and preset, R12) and the body it keys."""
+    key = f"{body.actor}\x1f{body.idempotency_key}\x1f{body.preset_id}"
+    return key, body.model_dump(mode="json", exclude={"actor", "idempotency_key"})
+
+
+def _replayed(
+    pool: ConnectionPool[Conn], route: str, body: PresetCopyInput | PresetEditInput
+) -> dict[str, Any] | None:
+    """The stored reply's body of ``body``'s key, read with no lock before any other work,
+    so a retry gets the first answer whatever changed since; None for a new key."""
+    key, asked = _ledger_key(body)
+    with pool.connection() as conn:
+        try:
+            replay = stored(conn, "filament", key, route, asked)
+        except ApiError as error:
+            raise _refused(KEY_REUSED, error.detail) from None
+    return None if replay is None else dict(replay.body)
+
+
+def _editable(preset_id: int, source: str, version: int, expected: int) -> None:
+    """Refuse an edit of a preset that is not ``manual``, or not at ``expected`` (R5)."""
+    if source != "manual":
+        raise _refused(NOT_MANUAL, f"filament preset {preset_id} is {source}: copy it first")
+    if version != expected:
+        raise _refused(
+            VERSION_MOVED, f"filament preset {preset_id} is at version {version} now", version
+        )
+
+
 async def _current(
     store: FilamentPresetStore, preset_id: int
 ) -> tuple[FilamentPreset, dict[str, Any]]:
@@ -160,8 +220,7 @@ def _write(
     run: Callable[[Conn], Replay],
 ) -> dict[str, Any]:
     """``run`` once per actor, key and preset (R12): its reply's body, or the stored one."""
-    key = f"{body.actor}\x1f{body.idempotency_key}\x1f{body.preset_id}"
-    asked = body.model_dump(mode="json", exclude={"actor", "idempotency_key"})
+    key, asked = _ledger_key(body)
     with pool.connection() as conn:
         try:
             reply = idempotent_write(conn, "filament", key, route, asked, lambda: run(conn))
@@ -212,6 +271,19 @@ async def copy_preset(
     (R4). It keeps the type, printer model and nozzle, and no 3DFP, Bambuddy or mirror
     column."""
     store = FilamentPresetStore(pool, lambda: blobs)
+    written = await asyncio.to_thread(_replayed, pool, COPY_ROUTE, body)
+    if written is None:
+        written = await _copied(pool, blobs, store, body)
+    mirror = await _mirrored(pool, store, settings, written["preset_id"])
+    return PresetWritten(**written, mirror=mirror)
+
+
+async def _copied(
+    pool: ConnectionPool[Conn],
+    blobs: BlobStore,
+    store: FilamentPresetStore,
+    body: PresetCopyInput,
+) -> dict[str, Any]:
     _, doc = await _current(store, body.preset_id)
     copied = {**doc, "name": body.name}
     key, sha256 = await keep_document(blobs, document_bytes(copied))
@@ -232,9 +304,7 @@ async def copy_preset(
         )
         return Replay(201, {"preset_id": made, "version": 1, "changed": True})
 
-    written = await asyncio.to_thread(_write, pool, COPY_ROUTE, body, run)
-    mirror = await _mirrored(pool, store, settings, written["preset_id"])
-    return PresetWritten(**written, mirror=mirror)
+    return await asyncio.to_thread(_write, pool, COPY_ROUTE, body, run)
 
 
 async def edit_preset(
@@ -247,23 +317,29 @@ async def edit_preset(
     the preset is no longer at ``expected_version``. A patch that changes nothing writes
     no version (``changed`` false)."""
     store = FilamentPresetStore(pool, lambda: blobs)
+    written = await asyncio.to_thread(_replayed, pool, EDIT_ROUTE, body)
+    if written is None:
+        written = await _edited(pool, blobs, store, body)
+    mirror = await _mirrored(pool, store, settings, body.preset_id)
+    return PresetWritten(**written, mirror=mirror)
+
+
+async def _edited(
+    pool: ConnectionPool[Conn],
+    blobs: BlobStore,
+    store: FilamentPresetStore,
+    body: PresetEditInput,
+) -> dict[str, Any]:
     current, doc = await _current(store, body.preset_id)
+    # Before the document is kept: an edit at a version it never read writes nothing.
+    _editable(body.preset_id, current.source, current.version, body.expected_version)
     name = body.name if body.name is not None else current.name
     edited = {k: v for k, v in doc.items() if k not in body.unset} | body.set | {"name": name}
     key, sha256 = await keep_document(blobs, document_bytes(edited))
 
     def run(conn: Conn) -> Replay:
         row = _locked_row(conn, body.preset_id)
-        if row["source"] != "manual":
-            raise _refused(
-                NOT_MANUAL, f"filament preset {body.preset_id} is {row['source']}: copy it first"
-            )
-        if row["version"] != body.expected_version:
-            raise _refused(
-                VERSION_MOVED,
-                f"filament preset {body.preset_id} is at version {row['version']} now",
-                row["version"],
-            )
+        _editable(body.preset_id, row["source"], row["version"], body.expected_version)
         version = version_on(
             conn,
             body.preset_id,
@@ -282,27 +358,28 @@ async def edit_preset(
             },
         )
 
-    written = await asyncio.to_thread(_write, pool, EDIT_ROUTE, body, run)
-    mirror = await _mirrored(pool, store, settings, body.preset_id)
-    return PresetWritten(**written, mirror=mirror)
+    return await asyncio.to_thread(_write, pool, EDIT_ROUTE, body, run)
 
 
 def preset_write_activities(
     pool: Callable[[], ConnectionPool[Conn]],
     blobs: Callable[[], BlobStore],
     settings: Callable[[], StoredSettings],
-) -> list[Callable[..., Any]]:
-    """``filament_preset_copy`` and ``filament_preset_edit`` for the ``library`` worker
-    (`main._run_library_worker`)."""
+) -> dict[str, Callable[..., Any]]:
+    """`PRESET_WRITE_ACTIVITIES` for the ``library`` worker (`main._library_activities`),
+    each defined under its key. Each takes its input as a JSON object (`_parsed`)."""
 
-    @activity.defn(name=COPY_ACTIVITY)
-    async def filament_preset_copy(body: PresetCopyInput) -> PresetWritten:
+    async def copy(raw: dict[str, Any]) -> PresetWritten:
+        body = _parsed(PresetCopyInput, raw)
         loaded = await asyncio.to_thread(settings)
         return await copy_preset(pool(), blobs(), loaded, body)
 
-    @activity.defn(name=EDIT_ACTIVITY)
-    async def filament_preset_edit(body: PresetEditInput) -> PresetWritten:
+    async def edit(raw: dict[str, Any]) -> PresetWritten:
+        body = _parsed(PresetEditInput, raw)
         loaded = await asyncio.to_thread(settings)
         return await edit_preset(pool(), blobs(), loaded, body)
 
-    return [filament_preset_copy, filament_preset_edit]
+    return {
+        name: activity.defn(name=name)(fn)
+        for name, fn in zip(PRESET_WRITE_ACTIVITIES, (copy, edit), strict=True)
+    }

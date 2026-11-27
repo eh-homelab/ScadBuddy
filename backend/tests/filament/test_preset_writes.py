@@ -6,25 +6,27 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
-from types import SimpleNamespace
-from typing import Any, cast
+from typing import Any
+from unittest.mock import MagicMock
 
 import httpx
 import pytest
 import respx
 from pydantic import ValidationError
-from temporalio import activity
 from temporalio.exceptions import ApplicationError
 
+from scadbuddy import main
 from scadbuddy.filament.preset_writes import (
     COPY_ACTIVITY,
     EDIT_ACTIVITY,
     MAX_EDIT_KEYS,
+    PRESET_WRITE_ACTIVITIES,
     PresetCopyInput,
     PresetEditInput,
     PresetWritten,
     copy_preset,
     edit_preset,
+    preset_write_activities,
 )
 from scadbuddy.filament.sb_presets import (
     FilamentPresetStore,
@@ -33,7 +35,6 @@ from scadbuddy.filament.sb_presets import (
     keep_document,
 )
 from scadbuddy.library.settings_store import StoredSettings
-from scadbuddy.main import _preset_write_activities
 from scadbuddy.store.local import LocalBlobStore
 from tests.conftest import PgPool
 from tests.filament.test_sb_presets import _type
@@ -321,9 +322,93 @@ async def test_a_failed_send_never_fails_the_edit(pg_pool: PgPool, tmp_path: Pat
     assert (done.version, done.changed, done.mirror) == (2, True, "failed")
 
 
-def test_the_library_worker_serves_the_preset_activities() -> None:
-    state = cast(Any, SimpleNamespace())
-    names = [
-        activity._Definition.must_from_callable(fn).name for fn in _preset_write_activities(state)
-    ]
-    assert names == [COPY_ACTIVITY, EDIT_ACTIVITY]
+def test_the_library_worker_serves_the_preset_activities(monkeypatch: pytest.MonkeyPatch) -> None:
+    made: list[dict[str, Any]] = []
+
+    def kept(*args: Any) -> dict[str, Any]:
+        made.append(preset_write_activities(*args))
+        return made[-1]
+
+    monkeypatch.setattr(main, "preset_write_activities", kept)
+
+    served = main._library_activities(MagicMock(), MagicMock(), MagicMock(), [])
+
+    assert list(made[0]) == list(PRESET_WRITE_ACTIVITIES) == [COPY_ACTIVITY, EDIT_ACTIVITY]
+    assert all(fn in served for fn in made[0].values())
+
+
+def _unused() -> Any:
+    raise AssertionError("a refused input reads nothing")
+
+
+_ACTIVITIES = preset_write_activities(_unused, _unused, _unused)
+_EDIT = {"preset_id": 1, "expected_version": 1, "actor": "ann", "idempotency_key": "k"}
+
+
+@pytest.mark.parametrize(
+    ("fields", "key"),
+    [
+        ({"set": {"printhost_apikey": "s"}}, "printhost_apikey"),
+        ({"set": {"a": "1"}, "unset": ["a"]}, "a"),
+    ],
+    ids=["credential", "both"],
+)
+async def test_an_edit_activity_refuses_a_refused_key_once(
+    fields: dict[str, Any], key: str
+) -> None:
+    error = await _refused(_ACTIVITIES[EDIT_ACTIVITY](_EDIT | fields))
+    assert error.type == "key_refused"
+    assert error.details == (key,)
+
+
+@pytest.mark.parametrize(
+    ("name", "raw", "loc"),
+    [
+        (
+            COPY_ACTIVITY,
+            {"preset_id": "x", "name": "A", "actor": "ann", "idempotency_key": "k"},
+            ["preset_id"],
+        ),
+        (EDIT_ACTIVITY, _EDIT | {"expected_version": 0, "name": "A"}, ["expected_version"]),
+    ],
+    ids=["copy", "edit"],
+)
+async def test_an_activity_refuses_a_bad_input_once(
+    name: str, raw: dict[str, Any], loc: list[str]
+) -> None:
+    error = await _refused(_ACTIVITIES[name](raw))
+    assert error.type == "invalid_input"
+    assert [e["loc"] for e in error.details[0]] == [loc]
+
+
+async def test_a_replay_gets_the_first_answer_after_the_document_is_lost(
+    pg_pool: PgPool, tmp_path: Path
+) -> None:
+    blobs = LocalBlobStore(tmp_path / "blobs")
+    made = await _make(pg_pool, blobs, {"name": "Gone", "a": "1"})
+    writes = Writes(pg_pool, blobs, OFF)
+    copied = await writes.copy(made, "Copy", "c1")
+    edited = await writes.edit(made, "e1", expected_version=1, set={"a": "2"})
+    with pg_pool.connection() as conn:
+        conn.execute(
+            "UPDATE filament_presets SET blob_key = 'attachment-' || repeat('0', 64) WHERE id = %s",
+            (made,),
+        )
+
+    assert await writes.copy(made, "Copy", "c1") == copied
+    assert await writes.edit(made, "e1", expected_version=1, set={"a": "2"}) == edited
+
+
+async def test_a_future_version_is_refused_before_a_document_is_kept(
+    pg_pool: PgPool, tmp_path: Path
+) -> None:
+    blobs = LocalBlobStore(tmp_path / "blobs")
+    made = await _make(pg_pool, blobs, {"name": "Guess", "a": "1"})
+    before = blobs.keys()
+
+    error = await _refused(
+        Writes(pg_pool, blobs, OFF).edit(made, expected_version=2, set={"a": "2"})
+    )
+
+    assert (error.type, error.details) == ("version_moved", (1,))
+    assert blobs.keys() == before

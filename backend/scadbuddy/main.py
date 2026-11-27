@@ -2370,7 +2370,40 @@ async def _run_library_worker(state: AppState, stop: asyncio.Event) -> None:
     current = asyncio.create_task(_make_library_current(client, build_id, queue, routed))
     ops = state.components.get(OPERATIONS)
     trigger_activities, stop_triggers = _flow_triggers(state, client, queue, stop)
-    activities = [
+    activities = _library_activities(state, client, ops, trigger_activities)
+    try:
+        while not stop.is_set():
+            worker = await _built_off_loop(
+                partial(
+                    library_worker,
+                    client,
+                    queue,
+                    activities,
+                    workflows=LIBRARY_WORKFLOWS,
+                    workflow_runner=sandboxed_runner(),
+                    graceful_shutdown_timeout=LIBRARY_GRACEFUL_SHUTDOWN,
+                    deployment_config=library_deployment(build_id),
+                )
+            )
+            if not await _serve_until([worker], stop, name="library"):
+                with suppress(TimeoutError):
+                    await asyncio.wait_for(stop.wait(), PRINT_WORKER_RECONNECT)
+    finally:
+        current.cancel()
+        schedules.cancel()
+        boot_nudge.cancel()
+        await stop_triggers()
+
+
+def _library_activities(
+    state: AppState,
+    client: Client,
+    ops: OperationCommands,
+    trigger_activities: list[Callable[..., Any]],
+) -> list[Callable[..., Any]]:
+    """The activities the ``library`` worker serves (`_run_library_worker`)."""
+    settings = state.settings
+    return [
         *_housekeeping_activities(state),
         *_preview_activities(state),
         # The retired spool-provider activities, for runs opened before
@@ -2430,28 +2463,6 @@ async def _run_library_worker(state: AppState, stop: asyncio.Event) -> None:
         # A listing's prepared colour combinations (#6237, #6299 review).
         *prepare_activities(state, lambda: state.components.get(ORDERS)),
     ]
-    try:
-        while not stop.is_set():
-            worker = await _built_off_loop(
-                partial(
-                    library_worker,
-                    client,
-                    queue,
-                    activities,
-                    workflows=LIBRARY_WORKFLOWS,
-                    workflow_runner=sandboxed_runner(),
-                    graceful_shutdown_timeout=LIBRARY_GRACEFUL_SHUTDOWN,
-                    deployment_config=library_deployment(build_id),
-                )
-            )
-            if not await _serve_until([worker], stop, name="library"):
-                with suppress(TimeoutError):
-                    await asyncio.wait_for(stop.wait(), PRINT_WORKER_RECONNECT)
-    finally:
-        current.cancel()
-        schedules.cancel()
-        boot_nudge.cancel()
-        await stop_triggers()
 
 
 def _unknown_tray_activities(state: AppState) -> list[Callable[..., Any]]:
@@ -2465,10 +2476,12 @@ def _unknown_tray_activities(state: AppState) -> list[Callable[..., Any]]:
 
 def _preset_write_activities(state: AppState) -> list[Callable[..., Any]]:
     """The copy and edit of a filament preset (#7204): the API alone holds the database secret."""
-    return preset_write_activities(
-        lambda: state.settings_store.pool,
-        lambda: state.store.blobs,
-        lambda: state.settings_store.load(),
+    return list(
+        preset_write_activities(
+            lambda: state.settings_store.pool,
+            lambda: state.store.blobs,
+            lambda: state.settings_store.load(),
+        ).values()
     )
 
 
