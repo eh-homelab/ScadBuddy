@@ -11,6 +11,7 @@ public partial class MainPage : ContentPage
 	const string DefaultUrl = "https://scadbuddy.internal.nullreference.io/scan";
 
 	string url = Preferences.Get(UrlKey, DefaultUrl);
+	bool addressChanged;
 
 	public MainPage()
 	{
@@ -55,7 +56,7 @@ public partial class MainPage : ContentPage
 	async Task<bool> Trusted(string origin)
 	{
 		var accepted = Preferences.Get(OriginsKey, "").Split('\n', StringSplitOptions.RemoveEmptyEntries).ToHashSet(StringComparer.OrdinalIgnoreCase);
-		if (string.Equals(origin, OriginOf(url), StringComparison.OrdinalIgnoreCase) || accepted.Contains(origin)) return true;
+		if ((!addressChanged && string.Equals(origin, OriginOf(url), StringComparison.OrdinalIgnoreCase)) || accepted.Contains(origin)) return true;
 		var yes = await DisplayAlertAsync("Send scans to this server?", $"A link asks this app to send a tag read or a photo to\n{origin}\n\nThis app's ScadBuddy is\n{OriginOf(url)}\n\nThey differ. Accept only a ScadBuddy you run. Changing the ScadBuddy address forgets every server accepted here.", "Accept", "Cancel");
 		if (!yes) return false;
 		accepted.Add(origin);
@@ -124,8 +125,9 @@ public partial class MainPage : ContentPage
 		}
 		Preferences.Set(UrlKey, parsed.ToString());
 		Preferences.Remove(OriginsKey);
-		// Trusted() compares with this field: the old origin stops being the app's own at once.
-		url = parsed.ToString();
+		// The loaded page, its bridge and its links keep the old address until the restart, but a
+		// scan link's result no longer counts the old origin as the app's own (Trusted).
+		addressChanged = true;
 		await DisplayAlertAsync("Saved", "Close the app and open it again to use the new address.", "OK");
 	}
 

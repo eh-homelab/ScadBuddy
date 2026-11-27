@@ -196,7 +196,8 @@ stored in the blob store", "implement 100% of the rfid tag guide"; decisions on 
 - The bridge is offered only to that origin. As built (`app/ScadBuddy/Resources/Raw/nfc-polyfill.js`),
   it installs Web NFC's `NDEFReader` (`scan()`, `write()`), backed by Android's NFC, so the page
   runs unchanged; `window.ScadBuddyNfc` is `{native, lastMifare, close}`:
-  - A tap answers `reading` as Chrome does. For a MIFARE Classic tag, the app derives the 16
+  - A tap answers `reading` as Chrome does, except that a 4-byte MIFARE Classic UID's
+    `serialNumber` is the AMS's 8-byte form (`…:00:00:01:00`); the server canonicalises both. For a MIFARE Classic tag, the app derives the 16
     keys, authenticates each sector with key A, and reads its blocks; a sector that refuses is
     left out, and key trailers are never sent. Those blocks go to `window.ScadBuddyNfc.lastMifare`
     and a `scadbuddy-mifare` window event as `{uid, blocks, refusedSectors, error?}`.

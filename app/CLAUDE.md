@@ -12,13 +12,19 @@ dotnet build -f net10.0-android -c Release -p:AndroidSdkDirectory=$ANDROID_HOME 
 adb install -r bin/Release/net10.0-android/com.ehhomelab.scadbuddy-Signed.apk
 ```
 
-CI's `android` job (`ci.yml`, lane `android` in `select-lanes.sh`) runs the same build on
-`ubuntu-latest` with JDK 17.
+CI's `android` job (`ci.yml`, lane `android` in `select-lanes.sh`) runs the tests and the same
+build on `ubuntu-latest` with JDK 17. The tests (`app/ScadBuddy.Tests`, xunit on `net10.0`, no
+Android) compile the app's pure files by link, today `DeepLink.Links.cs`:
+
+```bash
+cd app/ScadBuddy.Tests && dotnet test
+```
 
 ## Layout
 
 - `MainPage.xaml.cs`: loads the set ScadBuddy address and runs scan links.
-- `DeepLink.cs`: `scadbuddy://scan?kind=nfc|code&url=<one-time result URL>` (#8157).
+- `DeepLink.cs`: `scadbuddy://scan?kind=nfc|code&url=<one-time result URL>` (#8157); its pure
+  part (which links are accepted, `OriginOf`) is `DeepLink.Links.cs`, which uses no MAUI type.
 - `Platforms/Android/NfcBridge.cs`: reader mode, MIFARE reads (keys from the
   [RFID Tag Guide](https://github.com/Bambu-Research-Group/RFID-Tag-Guide)'s HKDF), NDEF
   reads and writes, and the bridge to `Resources/Raw/nfc-polyfill.js` (Web NFC's `NDEFReader`).

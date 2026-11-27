@@ -1,7 +1,8 @@
 // ScadBuddy app (#7905): Web NFC's NDEFReader, backed by Android's own NFC through the app's
 // native bridge, so the /scan page runs unchanged. Injected at document start, on the configured
 // ScadBuddy origin only (Platforms/Android/NfcBridge.cs). A MIFARE Classic tag (a Bambu spool's)
-// reads as Chrome reads it: its serial number and no records. The blocks the app could read go
+// reads with no records, and its serial number in the AMS's 8-byte form (the 4-byte UID and
+// `:00:00:01:00`, as the AMS reports it), where Chrome gives the 4 bytes; the server takes both. The blocks the app could read go
 // to window.ScadBuddyNfc.lastMifare and a `scadbuddy-mifare` window event, for the page to post.
 (() => {
   const port = window.ScadBuddyNfcNative

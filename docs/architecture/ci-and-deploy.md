@@ -126,7 +126,7 @@ Summary**, which needs every job except `lfs-fixtures` and `dispatch-review`
 | models | `models` (`:1797`) | `verify-models.sh` over the changed templates on the `base` stage | [`models/CLAUDE.md`](../../models/CLAUDE.md) |
 | go | `go-select` (`:1941`), `go` (`:1964`, calls `go-module-ci.yml`) | gofmt, vet, build, `test -race`, vendor drift, CLI images | [`tools/go/CLAUDE.md`](../../tools/go/CLAUDE.md) |
 | rust | `rust` (`:1976`), `slicer-image` (`:2053`) | the Rust workspace and the `slicer` target | [`workers/rust/CLAUDE.md`](../../workers/rust/CLAUDE.md) |
-| android | `android` (`:2244`) | the phone app's .NET MAUI Android build (`app/`), JDK 17; selected by `app/`, `ci.yml` and the selector only | [`app/CLAUDE.md`](../../app/CLAUDE.md) |
+| android | `android` (`:2244`) | the phone app's tests (`app/ScadBuddy.Tests`) and its .NET MAUI Android build (`app/`), JDK 17; selected by `app/`, `ci.yml` and the selector only | [`app/CLAUDE.md`](../../app/CLAUDE.md) |
 | profile-fetch | `profile-fetch-image` (`:2112`) | the profile-fetch site tests in the `test` stage | [`backend/CLAUDE.md`](../../backend/CLAUDE.md) |
 | image | `camera-image` (after `67d7ff6`, #7328) | builds the `camera-relay`, `camera-recorder` and `camera-edge` targets, checks MediaMTX, `curl`, `TZ`, the refusals and the relay's and the edge's read users | [`docs/features/printer-cameras.md`](../features/printer-cameras.md) |
 | freshness | `freshness` (`:2255`), `go-client` (`:2642`) | the generated API files ([data.md](data.md#generated-api-files)) and the Go client | root `CLAUDE.md` "Generated API files" |

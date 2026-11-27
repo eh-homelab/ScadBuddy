@@ -9,25 +9,12 @@ namespace ScadBuddy;
 /// upload is: the app needs no sign-in. Any page can make such a link, so the app sends a scan only
 /// to its own ScadBuddy, or to an origin the person accepted once (<c>MainPage.Trusted</c>).
 /// </summary>
-public static class DeepLink
+public static partial class DeepLink
 {
-	public const string Scheme = "scadbuddy";
-	public const string Host = "scan";
-
 	static ScanJob? pending;
 
 	/// <summary>Raised on the main thread with the result address of a link that came while the app was open.</summary>
 	public static event Action<ScanJob>? Opened;
-
-	/// <summary>The scan a link asks for, or null when it is not a ScadBuddy scan link.</summary>
-	public static ScanJob? TargetOf(Uri? link)
-	{
-		if (link is null || link.Scheme != Scheme || link.Host != Host) return null;
-		var query = System.Web.HttpUtility.ParseQueryString(link.Query);
-		var kind = query["kind"] ?? "nfc";
-		if (kind is not ("nfc" or "code")) return null;
-		return Uri.TryCreate(query["url"], UriKind.Absolute, out var target) && target.Scheme == "https" && target.UserInfo.Length == 0 ? new ScanJob(kind, target) : null;
-	}
 
 	public static void Raise(Uri? link)
 	{
@@ -37,9 +24,6 @@ public static class DeepLink
 		else pending = target;
 	}
 
-	/// <summary>The origin with its host in ASCII (punycode), so a look-alike host never reads as another.</summary>
-	public static string OriginOf(Uri address) => $"{address.Scheme}://{address.IdnHost}{(address.IsDefaultPort ? "" : $":{address.Port}")}";
-
 	/// <summary>The link the app was started with, once.</summary>
 	public static ScanJob? Take()
 	{
@@ -48,6 +32,3 @@ public static class DeepLink
 		return target;
 	}
 }
-
-/// <summary>A scan a link asked for: <c>nfc</c> or <c>code</c>, and where its result goes.</summary>
-public sealed record ScanJob(string Kind, Uri Result);

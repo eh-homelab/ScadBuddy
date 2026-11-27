@@ -2259,6 +2259,10 @@ jobs:
         with:
           distribution: microsoft
           java-version: '17'
+      # The app's pure .NET parts (the scan links and their origins), on net10.0 with no Android.
+      - name: Test
+        working-directory: app/ScadBuddy.Tests
+        run: dotnet test
       - name: Install the maui-android workload
         run: dotnet workload install maui-android
       - name: Build (Release)

@@ -292,7 +292,7 @@ The backend's migration files and its settings tables: `backend/CLAUDE.md`.
   (`rust`, `slicer-image`) and `image` (the app image job, `profile-fetch-image` and
   `camera-image`: any
   backend change, plus `frontend/` and the Go trees its live mount runs), and `android` (the
-  `android` job, the phone app's build: `app/`). A lane job skips on a change that
+  `android` job, the phone app's tests and build: `app/`). A lane job skips on a change that
   does not need it; `CI Summary` re-derives the lanes from its own checkout, so a skip
   where the lane was needed is a failure. A push, the schedule, a dispatch,
   `ci.yml` or the selector selects every lane; the Dockerfile and `.dockerignore` select every

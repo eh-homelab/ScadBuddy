@@ -51,7 +51,10 @@ public sealed class NfcBridge : Java.Lang.Object, NfcAdapter.IReaderCallback, We
 	}
 
 	Uri? job;
+	DateTime jobUntil;
 	bool sending;
+	// A scan link's one-time result URL lives about as long (the page's job expires too).
+	static readonly TimeSpan JobFor = TimeSpan.FromMinutes(5);
 	static readonly HttpClient Http = new() { Timeout = TimeSpan.FromSeconds(30) };
 
 	/// <summary>
@@ -60,7 +63,7 @@ public sealed class NfcBridge : Java.Lang.Object, NfcAdapter.IReaderCallback, We
 	/// </summary>
 	public void StartJob(Uri result)
 	{
-		lock (gate) job = result;
+		lock (gate) { job = result; jobUntil = DateTime.UtcNow + JobFor; }
 		Notify("Tap the tag on the back of the phone.");
 	}
 
@@ -180,7 +183,12 @@ public sealed class NfcBridge : Java.Lang.Object, NfcAdapter.IReaderCallback, We
 		PendingWrite? pending;
 		bool reading;
 		Uri? job;
-		lock (gate) { lastTag = tag; pending = write; reading = scanning; job = this.job; }
+		lock (gate)
+		{
+			// A scan link the person left takes no tap after JobFor: the page's own scan gets it.
+			if (this.job is not null && DateTime.UtcNow >= jobUntil) this.job = null;
+			lastTag = tag; pending = write; reading = scanning; job = this.job;
+		}
 		if (job is not null)
 		{
 			// One send per job at a time: a second tap while the one-time URL is in flight is dropped.
@@ -203,21 +211,27 @@ public sealed class NfcBridge : Java.Lang.Object, NfcAdapter.IReaderCallback, We
 			// MIFARE Classic tag, before NdefFormatable could format it.
 			if (tag.GetTechList()?.Contains("android.nfc.tech.MifareClassic") == true)
 				throw new BridgeError("NotAllowedError", "This is a MIFARE Classic tag, such as a Bambu spool's. ScadBuddy never writes one.");
-			using (var ndef = Ndef.Get(tag))
+			var ndef = Ndef.Get(tag);
+			if (ndef is not null)
 			{
-				if (ndef is not null)
+				try
 				{
 					ndef.Connect();
 					if (!ndef.IsWritable) throw new BridgeError("NotAllowedError", "This tag is read-only.");
 					ndef.WriteNdefMessage(pending.Message);
 				}
-				else
+				finally { Close(ndef); }
+			}
+			else
+			{
+				var formatable = NdefFormatable.Get(tag) ??
+					throw new BridgeError("NotSupportedError", "This tag cannot hold NDEF records.");
+				try
 				{
-					using var formatable = NdefFormatable.Get(tag) ??
-						throw new BridgeError("NotSupportedError", "This tag cannot hold NDEF records.");
 					formatable.Connect();
 					formatable.Format(pending.Message);
 				}
+				finally { Close(formatable); }
 			}
 			lock (gate) if (write == pending) write = null; else return;
 			Reply(pending.JsId, true);
@@ -260,9 +274,10 @@ public sealed class NfcBridge : Java.Lang.Object, NfcAdapter.IReaderCallback, We
 		if (isClassic && uid.Length == 4) serial += AmsUidSuffix;
 		var records = new JsonArray();
 		JsonObject? mifare = null;
+		Ndef? ndef = null;
 		try
 		{
-			using var ndef = Ndef.Get(tag);
+			ndef = Ndef.Get(tag);
 			if (ndef is not null)
 			{
 				ndef.Connect();
@@ -271,6 +286,9 @@ public sealed class NfcBridge : Java.Lang.Object, NfcAdapter.IReaderCallback, We
 			}
 		}
 		catch (Exception) { ndefFailed = true; }
+		// A Tag has one connected technology at a time: close Ndef before MifareClassic connects,
+		// and before a write or the next read connects again.
+		finally { Close(ndef); }
 		if (isClassic) mifare = ReadClassic(tag, uid, out resumed);
 		Android.Util.Log.Info("ScadBuddyNfc",
 			$"read {Convert.ToHexString(uid)} techs={string.Join(',', techs.Select(t => t.Split('.').Last()))} records={records.Count} " +
@@ -349,7 +367,6 @@ public sealed class NfcBridge : Java.Lang.Object, NfcAdapter.IReaderCallback, We
 		var refused = new JsonArray();
 		var at = -1;
 		string? failure = null;
-		using (classic)
 		{
 			try
 			{
@@ -368,6 +385,7 @@ public sealed class NfcBridge : Java.Lang.Object, NfcAdapter.IReaderCallback, We
 			{
 				failure = $"sector {at}: {error.GetType().Name}: {error.Message}";
 			}
+			finally { Close(classic); }
 		}
 		lock (PartialGate)
 			if (failure is null) Partials.Remove(hex); else Partials[hex] = (sectors, DateTime.UtcNow);
@@ -377,6 +395,17 @@ public sealed class NfcBridge : Java.Lang.Object, NfcAdapter.IReaderCallback, We
 		var result = new JsonObject { ["uid"] = hex, ["blocks"] = blocks, ["refusedSectors"] = refused };
 		if (failure is not null) result["error"] = failure;
 		return result;
+	}
+
+	/// <summary>
+	/// Closes a tag technology. Dispose releases only the managed peer, not the connection, and a
+	/// Tag refuses a second connect ("Close other technology first!") until close() runs.
+	/// </summary>
+	static void Close(Android.Nfc.Tech.ITagTechnology? tech)
+	{
+		if (tech is null) return;
+		try { tech.Close(); } catch (Java.IO.IOException) { }
+		(tech as IDisposable)?.Dispose();
 	}
 
 	static readonly object PartialGate = new();
