@@ -27,6 +27,14 @@
     {
       "key": "",
       "credential": false
+    },
+    {
+      "key": "PRİNTHOST_APİKEY",
+      "credential": false
+    },
+    {
+      "key": "Düse_Temperatur",
+      "credential": false
     }
   ],
   "documents": [
@@ -50,64 +58,64 @@
         "name": "nested",
         "a": {
           "b": {
-            "c": 1,
+            "c": "1",
             "api_token": "t",
             "keep": [
-              1,
-              2
+              "1",
+              "2"
             ]
           },
           "PrintHost_Password": "p"
         },
         "list": [
           {
-            "x": 1,
+            "x": "1",
             "secret_sauce": "s"
           },
           {
             "y": [
               {
-                "z": 2,
+                "z": "2",
                 "printhost_apikey": "k"
               }
             ]
           }
         ],
         "plain": [
-          1,
+          "1",
           "two",
-          null,
-          true
+          "null",
+          "true"
         ]
       },
       "out": {
         "name": "nested",
         "a": {
           "b": {
-            "c": 1,
+            "c": "1",
             "keep": [
-              1,
-              2
+              "1",
+              "2"
             ]
           }
         },
         "list": [
           {
-            "x": 1
+            "x": "1"
           },
           {
             "y": [
               {
-                "z": 2
+                "z": "2"
               }
             ]
           }
         ],
         "plain": [
-          1,
+          "1",
           "two",
-          null,
-          true
+          "null",
+          "true"
         ]
       }
     },
@@ -140,12 +148,12 @@
   "diffs": [
     {
       "old": {
-        "a": 1,
-        "b": 2
+        "a": "1",
+        "b": "2"
       },
       "new": {
-        "a": 1,
-        "b": 3
+        "a": "1",
+        "b": "3"
       },
       "changed": [
         "b"
@@ -153,11 +161,11 @@
     },
     {
       "old": {
-        "a": 1
+        "a": "1"
       },
       "new": {
-        "a": 1,
-        "b": 2
+        "a": "1",
+        "b": "2"
       },
       "changed": [
         "b"
@@ -165,11 +173,11 @@
     },
     {
       "old": {
-        "a": 1,
-        "b": 2
+        "a": "1",
+        "b": "2"
       },
       "new": {
-        "a": 1
+        "a": "1"
       },
       "changed": [
         "b"
@@ -194,21 +202,21 @@
     },
     {
       "old": {
-        "a": 1,
+        "a": "1",
         "printhost_apikey": "old"
       },
       "new": {
-        "a": 1
+        "a": "1"
       },
       "changed": []
     },
     {
       "old": {
-        "a": 1,
+        "a": "1",
         "printhost_apikey": "old"
       },
       "new": {
-        "a": 2,
+        "a": "2",
         "printhost_apikey": "new"
       },
       "changed": [

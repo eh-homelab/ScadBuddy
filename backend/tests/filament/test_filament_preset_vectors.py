@@ -26,27 +26,29 @@ KEYS = [
     "nozzle_temperature",
     "print_host",
     "",
+    "PR\u0130NTHOST_AP\u0130KEY",
+    "D\u00fcse_Temperatur",
 ]
 
 DOCUMENTS: list[dict[str, Any]] = [
     {"name": "PLA", "nozzle_temperature": ["220"], "printhost_apikey": "k"},
     {
         "name": "nested",
-        "a": {"b": {"c": 1, "api_token": "t", "keep": [1, 2]}, "PrintHost_Password": "p"},
-        "list": [{"x": 1, "secret_sauce": "s"}, {"y": [{"z": 2, "printhost_apikey": "k"}]}],
-        "plain": [1, "two", None, True],
+        "a": {"b": {"c": "1", "api_token": "t", "keep": ["1", "2"]}, "PrintHost_Password": "p"},
+        "list": [{"x": "1", "secret_sauce": "s"}, {"y": [{"z": "2", "printhost_apikey": "k"}]}],
+        "plain": ["1", "two", "null", "true"],
     },
     {"l1": {"l2": {"l3": {"printhost_password": "deep", "ok": "yes"}}}},
     {},
 ]
 
 DIFFS: list[tuple[dict[str, Any], dict[str, Any]]] = [
-    ({"a": 1, "b": 2}, {"a": 1, "b": 3}),
-    ({"a": 1}, {"a": 1, "b": 2}),
-    ({"a": 1, "b": 2}, {"a": 1}),
+    ({"a": "1", "b": "2"}, {"a": "1", "b": "3"}),
+    ({"a": "1"}, {"a": "1", "b": "2"}),
+    ({"a": "1", "b": "2"}, {"a": "1"}),
     ({"t": ["220", "230"]}, {"t": ["220", "240"]}),
-    ({"a": 1, "printhost_apikey": "old"}, {"a": 1}),
-    ({"a": 1, "printhost_apikey": "old"}, {"a": 2, "printhost_apikey": "new"}),
+    ({"a": "1", "printhost_apikey": "old"}, {"a": "1"}),
+    ({"a": "1", "printhost_apikey": "old"}, {"a": "2", "printhost_apikey": "new"}),
     ({}, {}),
 ]
 
