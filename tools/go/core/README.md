@@ -116,6 +116,43 @@ socket frame, the typed kinds' fields, and the topic rules. The backend's
 `model_dump_json` does (`internal/bus/kinds.go` holds each kind's fields) and an opaque one as
 `json.dumps` does, both from the log's `jsonb`.
 
+Area `blobs` † (`internal/blobstore`, #7958) is a shared area: any service credential whose scopes
+hold `crud.blobs` may call it, under `/api/v1/internal/crud/blobs`; no caller is granted that scope
+yet. Python has no such routes. `POST /uploads` with `{kind, size, sha256, media_type}` answers
+`{upload_id, url, headers, expires_at}`: the caller PUTs exactly the bytes to `url` with `headers`,
+then `POST /uploads/{upload_id}/commit` answers `{key, sha256, size}`, the blob indexed in
+`store_blobs` under its kind (again, the same answer). The kinds are an allowlist with a size each:
+`tag_dump`, 64 KiB. Only `store_backend` `s3` takes uploads: core reads the store's settings as
+Python resolves them (the `settings` row, else `SCADBUDDY_STORE_*`, set even when empty, else the
+default; the secret key opened with the KEK; path-style URLs, as botocore makes them for either
+`store_s3_path_style`) and presigns the PUT itself, with the length, the type, the SHA-256 checksum
+and the ACL `private` signed (Signature V4, pinned against botocore's answer in its tests). The PUT
+goes to the upload's own staging object, `<prefix>/staging/<32 random hex>` (the storefront's
+staging form, `store/s3.py` `staging_key`), never to the content key. The commit holds the
+object's stage lock shared (`blob-object:s3:<sha256>`, a session lock on a connection of its own
+outside the pool, at most 3 at once, a slot waited for at most 10 s; 6 tries of 5 s, then 503
+`store_busy`, as `StageHold`). It reads the content object: one that is there is never written, as
+`store/s3.py` `upload` does not, and one that is not the key's bytes is a 409
+`store_object_mismatch` (only a repair fixes it; Python's `_verified` answers 403 `ref_mismatch`), with nothing indexed (a row that named it stays as it was) and the staging
+object kept, so the commit goes through once the object is repaired. Otherwise it reads the staging
+object (at most the kind's limit), checks its size and SHA-256, and PUTs those verified bytes to the
+content key, so a later PUT to the staging key changes nothing indexed; a staging object gone (another
+commit of the upload took it) sends it back to the content object. Then it writes the row as
+Python's `BlobIndex.put` does, with `verified_at`, as `mark_verified_in` sets it (`backend/tests/fixtures/blob-upload-vectors.json`,
+which both sides' tests check), and deletes the staging object. One left behind (no commit, or a PUT
+sent again after it) goes with the storefront's backstop, `sweep_staged`, a day old; Python's
+unrecorded sweep takes content keys only. Any other backend is a 503 `not_configured`. The
+upload's id is a ticket MACed under the KEK (HKDF label `scadbuddy:blobs:upload:v1`), so no row
+stands for an upload: its URL lasts 15 minutes and its commit an hour more, and another caller's
+commit of it is a 404. Refusals carry a `reason`: 422 `kind_not_allowed`, 413 `upload_too_large`,
+507 `store_full`, 404 `upload_not_found`, 410 `upload_expired`, 409 `upload_not_received`, 422
+`upload_mismatch`, 409 `store_object_mismatch`, 503 `store_unavailable` or `store_busy`.
+`internal/blobclient` is its Go client: `New(baseURL, token, tel)`, `Upload(ctx, kind, mediaType, body)`; each call to core may take 2 minutes, longer than a busy commit takes to answer `store_busy`.
+Both sides trace their requests with `telemetry`'s `Transport`: each span records the method, the
+status and the peer (`s3` for the store), never a URL, so a presigned query is never recorded. A
+request to the store carries no trace context (`internal/httpx` `Outside`), as Python's S3 spans
+send none.
+
 The `fleet` area also serves caller `fleet-rotator` (scope `crud.fleet-rotator`, #8026):
 `POST /api/v1/internal/crud/fleet-rotator/virtual-messages` `{sender, channel | agent, text}`
 posts as a virtual sender (a row of `fleet_virtual_senders`, such as `rotator`): to a

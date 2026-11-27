@@ -33,7 +33,9 @@ most `SWEEP_PASS_BATCHES` batches of rows, and as many of waiting file sources, 
 next pass goes on from there (each cursor is the process's; a restart starts again from
 the oldest row). Each counts
 `scadbuddy_staged_files_repaired`; any count is
-a bug to look into.
+a bug to look into. Core's blob uploads (#7958) stage under the same form with no row: their
+commit deletes the object, so one this sweep deletes (`orphan_object`) is an upload never
+committed, or one whose staging object was PUT again after its commit.
 """
 
 from __future__ import annotations

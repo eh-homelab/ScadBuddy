@@ -1,0 +1,92 @@
+{
+  "_comment": "The S3 object key and the content index row of a blob core's blobs area commits (#7958): backend tests/store/test_blob_upload_vectors.py checks Python's ContentStore writes them, tools/go/core/internal/blobstore checks core does. before.backend_id null is the row's own object. row is what BlobIndex.put writes; committed is what core's commit changes after it: the verified_at that BlobIndex.mark_verified_in sets once the commit has read the object. staging_key is an upload's staging object for staging_nonce, in Python's storefront staging form (store/s3.py staging_key), which sweep_staged takes and sweep_unrecorded does not.",
+  "prefix": "scadbuddy",
+  "staging_nonce": "0123456789abcdef0123456789abcdef",
+  "staging_key": "scadbuddy/staging/0123456789abcdef0123456789abcdef",
+  "cases": [
+    {
+      "name": "a new blob",
+      "kind": "tag_dump",
+      "sha256": "886844768ede8039869ae8d43303cb312cf2b37fead872095a34406bd1531bdc",
+      "size": 23,
+      "object_key": "scadbuddy/tag_dump/886844768ede8039869ae8d43303cb312cf2b37fead872095a34406bd1531bdc",
+      "index_key": "tag_dump-886844768ede8039869ae8d43303cb312cf2b37fead872095a34406bd1531bdc",
+      "before": null,
+      "row": {
+        "key": "tag_dump-886844768ede8039869ae8d43303cb312cf2b37fead872095a34406bd1531bdc",
+        "sha256": "886844768ede8039869ae8d43303cb312cf2b37fead872095a34406bd1531bdc",
+        "kind": "tag_dump",
+        "backend": "s3",
+        "backend_id": "scadbuddy/tag_dump/886844768ede8039869ae8d43303cb312cf2b37fead872095a34406bd1531bdc",
+        "size": 23,
+        "slug": null,
+        "meta": {},
+        "verified": false
+      },
+      "committed": {
+        "verified": true
+      }
+    },
+    {
+      "name": "a row of the same object keeps its output mark and its verification",
+      "kind": "tag_dump",
+      "sha256": "0db6c06e8384b0928d9dca614c51b201fa867eb33e6d8ec74aef781646c99541",
+      "size": 23,
+      "object_key": "scadbuddy/tag_dump/0db6c06e8384b0928d9dca614c51b201fa867eb33e6d8ec74aef781646c99541",
+      "index_key": "tag_dump-0db6c06e8384b0928d9dca614c51b201fa867eb33e6d8ec74aef781646c99541",
+      "before": {
+        "backend_id": null,
+        "slug": "a-model",
+        "meta": {
+          "output": "sliced",
+          "note": "x"
+        },
+        "verified": true
+      },
+      "row": {
+        "key": "tag_dump-0db6c06e8384b0928d9dca614c51b201fa867eb33e6d8ec74aef781646c99541",
+        "sha256": "0db6c06e8384b0928d9dca614c51b201fa867eb33e6d8ec74aef781646c99541",
+        "kind": "tag_dump",
+        "backend": "s3",
+        "backend_id": "scadbuddy/tag_dump/0db6c06e8384b0928d9dca614c51b201fa867eb33e6d8ec74aef781646c99541",
+        "size": 23,
+        "slug": null,
+        "meta": {
+          "output": "sliced"
+        },
+        "verified": true
+      },
+      "committed": {
+        "verified": true
+      }
+    },
+    {
+      "name": "a row of another object loses its verification",
+      "kind": "tag_dump",
+      "sha256": "c1b82ed7f6514933d27209e76ce98f3c9b62ae773f08e2ee0887edf7fb2f172d",
+      "size": 25,
+      "object_key": "scadbuddy/tag_dump/c1b82ed7f6514933d27209e76ce98f3c9b62ae773f08e2ee0887edf7fb2f172d",
+      "index_key": "tag_dump-c1b82ed7f6514933d27209e76ce98f3c9b62ae773f08e2ee0887edf7fb2f172d",
+      "before": {
+        "backend_id": "old-prefix/tag_dump/same",
+        "slug": null,
+        "meta": {},
+        "verified": true
+      },
+      "row": {
+        "key": "tag_dump-c1b82ed7f6514933d27209e76ce98f3c9b62ae773f08e2ee0887edf7fb2f172d",
+        "sha256": "c1b82ed7f6514933d27209e76ce98f3c9b62ae773f08e2ee0887edf7fb2f172d",
+        "kind": "tag_dump",
+        "backend": "s3",
+        "backend_id": "scadbuddy/tag_dump/c1b82ed7f6514933d27209e76ce98f3c9b62ae773f08e2ee0887edf7fb2f172d",
+        "size": 25,
+        "slug": null,
+        "meta": {},
+        "verified": false
+      },
+      "committed": {
+        "verified": true
+      }
+    }
+  ]
+}

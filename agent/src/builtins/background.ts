@@ -18,7 +18,7 @@ import type { SlotRun } from '../sandbox/client.js'
 // jobs in its own process ("Session-only (not written to disk, dies when Claude
 // exits)"), which a turn ends; these last as long as the session, survive restarts, and
 // fire the prompt as the session's next message once it is idle. Their answers are
-// Claude Code's (measured on 2.1.296 in a classic turn), saying so where it differs.
+// Claude Code's (measured on 2.1.296 in a session turn), saying so where it differs.
 
 export type BackgroundContext = {
   tasks: BackgroundTasks

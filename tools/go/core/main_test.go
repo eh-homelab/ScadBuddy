@@ -45,7 +45,7 @@ func newAPI(t *testing.T, areas string) *api {
 		w.Header().Set("X-From", "python")
 		w.WriteHeader(http.StatusTeapot)
 	})
-	router, err := newRouter(pool, next, nil, areas, "", nil)
+	router, err := newRouter(pool, next, nil, areas, "", nil, nil, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -481,7 +481,7 @@ func TestWhatIsNotListedGoesToPython(t *testing.T) {
 			t.Errorf("%s %s has the CRUD header", c.method, c.path)
 		}
 	}
-	if _, err := newRouter(a.pool, nil, nil, "session-evnets", "", nil); err == nil {
+	if _, err := newRouter(a.pool, nil, nil, "session-evnets", "", nil, nil, nil); err == nil {
 		t.Error("an unknown area was taken")
 	}
 }
@@ -489,14 +489,14 @@ func TestWhatIsNotListedGoesToPython(t *testing.T) {
 func TestASealedAreaNeedsTheKEKAndTheOthersDoNot(t *testing.T) {
 	pool := testdb.New(t)
 	for _, area := range []string{"credentials", "credentials:read", "payload-keys", "keys", "notify",
-		"notify:read", "transcripts", "transcripts:read"} {
-		_, err := newRouter(pool, nil, nil, area, "", nil)
+		"notify:read", "transcripts", "transcripts:read", "blobs"} {
+		_, err := newRouter(pool, nil, nil, area, "", nil, nil, nil)
 		if err == nil || !strings.Contains(err.Error(), "SCADBUDDY_SECRET_KEY_FILE") {
 			t.Errorf("%s: %v", area, err)
 		}
 	}
 	every := "settings, access, plugin-sessions, mcp-relay, session-events, session-turns:read"
-	if _, err := newRouter(pool, nil, nil, every, "", nil); err != nil {
+	if _, err := newRouter(pool, nil, nil, every, "", nil, nil, nil); err != nil {
 		t.Fatal(err)
 	}
 	key := filepath.Join(t.TempDir(), "kek")
@@ -509,7 +509,7 @@ func TestASealedAreaNeedsTheKEKAndTheOthersDoNot(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := newRouter(pool, nil, keys, every+", credentials, payload-keys, keys, notify, transcripts", "", nil); err != nil {
+	if _, err := newRouter(pool, nil, keys, every+", credentials, payload-keys, keys, notify, transcripts, blobs", "", nil, nil, nil); err != nil {
 		t.Fatal(err)
 	}
 }
@@ -654,7 +654,7 @@ func TestTheCRUDPortMayNotBeTheMainAddress(t *testing.T) {
 		"SCADBUDDY_CORE_CRUD_LISTEN":   "127.0.0.1:0",
 		"SCADBUDDY_CORE_CRUD_UPSTREAM": "http://127.0.0.1:2",
 	}
-	err := run(context.Background(), func(k string) string { return env[k] }, nil)
+	err := run(context.Background(), func(k string) (string, bool) { v, ok := env[k]; return v, ok }, nil)
 	if err == nil || !strings.Contains(err.Error(), "needs its own") {
 		t.Fatalf("got %v", err)
 	}
@@ -692,7 +692,7 @@ func TestTheCRUDPortNeedsPythonsCRUDListener(t *testing.T) {
 		"SCADBUDDY_CORE_LISTEN":      "127.0.0.1:0",
 		"SCADBUDDY_CORE_CRUD_LISTEN": "127.0.0.1:1",
 	}
-	err := run(context.Background(), func(k string) string { return env[k] }, nil)
+	err := run(context.Background(), func(k string) (string, bool) { v, ok := env[k]; return v, ok }, nil)
 	if err == nil || !strings.Contains(err.Error(), "SCADBUDDY_CORE_CRUD_UPSTREAM") {
 		t.Fatalf("got %v", err)
 	}

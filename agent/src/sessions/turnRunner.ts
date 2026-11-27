@@ -54,7 +54,7 @@ import { createTurnSlot, NO_TURN, slotHooks, slotHttpContext, slotWebContext, ty
 import { nestedQueries } from '../builtins/nested.js'
 import { browserGuard } from '../browser/guard.js'
 import { loadAgentDefinitions } from '../harness/agentDefinitions.js'
-import { BUILTIN_SERVER, classicBuiltinNote, classicBuiltinServer } from '../builtins/server.js'
+import { BUILTIN_SERVER, sessionBuiltinNote, sessionBuiltinServer } from '../builtins/server.js'
 import { sandboxShellTools, sandboxStarter, SHELL_BUILTINS, type ShellContext } from '../builtins/sandboxShell.js'
 
 /** The longest a turn's assembly waits for its plugin and http tools' listing (temporal/turnTools.ts LIST_TIMEOUT_MS is each server's). */
@@ -740,7 +740,7 @@ export class TurnRunner {
           : {}),
         // ScadBuddy's fixed part (the untrusted-data notice and the tool notes), then the user's own
         // text from Settings → Assistant → Runtime (#5222), on the base the user chose.
-        systemPromptAppend: [systemAppend(), ...(served.length ? [classicBuiltinNote(servedTools, shellTier)] : []), turnSettings.system_prompt_append.trim()]
+        systemPromptAppend: [systemAppend(), ...(served.length ? [sessionBuiltinNote(servedTools, shellTier)] : []), turnSettings.system_prompt_append.trim()]
           .filter((part) => part !== '')
           .join('\n\n'),
         systemPromptBase: turnSettings.system_prompt_base,
@@ -778,7 +778,7 @@ export class TurnRunner {
                 ...(proxies ?? {}),
                 ...(served.length
                   ? {
-                      [BUILTIN_SERVER]: classicBuiltinServer(served, {
+                      [BUILTIN_SERVER]: sessionBuiltinServer(served, {
                         ...(shell ? { shell } : {}),
                         ...(this.deps.background
                           ? {
