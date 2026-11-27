@@ -466,12 +466,13 @@ export async function requestWithStatus<T>(path: string, init?: RequestInit): Pr
 /**
  * #6949 K1 — a write that may move stock: one `Idempotency-Key` per press, and a 202 is the
  * workflow that still runs (`WorkflowAccepted`), not the body. The page shows it and reads the
- * item again once its `parts_settling` clears.
+ * item again once its `parts_settling` clears. A `null` key sends no header: the write is keyed
+ * by its item on the server (`Lifecycle._parts_key`), which ignores the header.
  */
-export async function stockWrite<T>(path: string, init: RequestInit, key: string = crypto.randomUUID()): Promise<T | WorkflowAccepted> {
+export async function stockWrite<T>(path: string, init: RequestInit, key: string | null = crypto.randomUUID()): Promise<T | WorkflowAccepted> {
   // `new Headers` reads a Headers instance, a pair list and a record alike; a spread reads only a record.
   const headers = Object.fromEntries(new Headers(init.headers).entries())
-  const answer = await requestWithStatus<T | WorkflowAccepted>(path, { ...init, headers: { ...headers, 'Idempotency-Key': key } })
+  const answer = await requestWithStatus<T | WorkflowAccepted>(path, { ...init, headers: key === null ? headers : { ...headers, 'Idempotency-Key': key } })
   return answer.body
 }
 
@@ -2914,7 +2915,8 @@ export const api = {
   /** #4952 — undoes a fulfilment: the latest accepted attempt no longer counts as made,
    * and the item goes back to `approved` (or `failed`). */
   unfulfilOrderItem: (orderId: string, itemId: string) =>
-    stockWrite<OrderItem>(`/orders/${seg(orderId)}/items/${seg(itemId)}/unfulfil`, { method: 'POST' }),
+    // Keyed by the item on the server (`order_item:<id>:parts:<n>:return`): no Idempotency-Key.
+    stockWrite<OrderItem>(`/orders/${seg(orderId)}/items/${seg(itemId)}/unfulfil`, { method: 'POST' }, null),
   cancelOrderItem: (orderId: string, itemId: string) =>
     request<OrderItem>(`/orders/${seg(orderId)}/items/${seg(itemId)}/cancel`, { method: 'POST' }),
   /** #4955 — a copy of the item's design, quantity and title, with no quote (a custom item
@@ -3204,7 +3206,8 @@ export const api = {
       body: JSON.stringify(body),
     }),
   acceptFulfilment: (orderId: string, itemId: string, fulfilmentId: string) =>
-    stockWrite<Fulfilment>(`/orders/${seg(orderId)}/items/${seg(itemId)}/fulfilments/${seg(fulfilmentId)}/accept`, { method: 'POST' }),
+    // Keyed by the item on the server (`order_item:<id>:parts:<n>`): no Idempotency-Key.
+    stockWrite<Fulfilment>(`/orders/${seg(orderId)}/items/${seg(itemId)}/fulfilments/${seg(fulfilmentId)}/accept`, { method: 'POST' }, null),
   /** #4253 §8.2 — the attempt's Bambuddy archives and what each offers to copy. */
   attemptArchives: (orderId: string, itemId: string, fulfilmentId: string) =>
     request<AttemptArchives>(`/orders/${seg(orderId)}/items/${seg(itemId)}/fulfilments/${seg(fulfilmentId)}/archives`),
