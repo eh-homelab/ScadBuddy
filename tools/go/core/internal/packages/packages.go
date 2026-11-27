@@ -7,7 +7,8 @@
 // mirror (#7907, POST /plugin-packages/{name}/mirror) changes no pin: it only releases the
 // holds no row names.
 //
-// Still Python's: area package-mirrors and a hosted version's zip (the blob store).
+// Area package-mirrors and a hosted version's zip, which read or write the blob store, are
+// mirrors.go, over the Blobs that main.go wires.
 package packages
 
 import (
@@ -138,7 +139,7 @@ func (s *Packages) Feeds() []crud.Route {
 	)
 }
 
-// Hosted is area hosted-plugins' read of a plugin; a version's zip is still Python's.
+// Hosted is area hosted-plugins' read of a plugin; a version's zip is area package-mirrors'.
 func (s *Packages) Hosted() []crud.Route {
 	return []crud.Route{{Method: "GET", Path: "/hosted-plugins/{name}", Handle: s.hosted}}
 }
