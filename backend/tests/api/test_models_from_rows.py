@@ -536,8 +536,8 @@ def test_list_and_record_agree_on_upstream_state_with_no_row_version(world: Test
 
 def _statements(monkeypatch: pytest.MonkeyPatch) -> list[str]:
     """Every statement this thread sends from here on, as its text. The app's own
-    background tasks send statements on the test client's thread, and they are not
-    the listing's (#8139)."""
+    background tasks send statements on the TestClient's portal thread, not this one,
+    and they are not the listing's (#8139, #8164)."""
     sent: list[str] = []
     execute = psycopg.Cursor.execute
     executemany = psycopg.Cursor.executemany
