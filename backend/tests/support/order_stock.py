@@ -300,7 +300,9 @@ class InlineStarter:
         steps = self.steps()
         also: list[str] = []
         answer: dict[str, Any] = {}
-        for attempt in range(1, 4):
+        attempt = 0
+        while True:
+            attempt += 1
             orders = await steps.recost_orders({"lot_id": arg["lot_id"], "also": also})
             answer = self.go.run(
                 "inventory.Recost",
@@ -322,7 +324,11 @@ class InlineStarter:
                 )
             if answer["body"].get("code") != "recost_orders_moved":
                 break
-            also = sorted(set(also) | set(answer["body"].get("orders") or ()))
+            named = set(answer["body"].get("orders") or ())
+            also = sorted(set(also) | named)
+            # `RecostLot`: three rounds, then on while Go names an order not locked.
+            if attempt >= 3 and not named - set(orders):
+                break
         problem = {**answer["body"], "status": answer["status"]}
         raise ApplicationError(problem["detail"], problem, non_retryable=True)
 

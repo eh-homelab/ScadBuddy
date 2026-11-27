@@ -9,7 +9,8 @@ worker runs in the API process (its commit and record steps write Python-owned r
   `inventory.GiveBack`) of each part, in part order; then `orders_parts_record`.
 - `RecostLot`: `orders_recost_orders` (Go's read), Go's `inventory.Recost`, then
   `orders_recost_record`. Nothing is committed before Go answers. ``recost_orders_moved``
-  runs the first two again, at most `RECOST_ROUNDS` times.
+  runs the first two again: `RECOST_ROUNDS` times, and after that for as long as each
+  refusal names an order its round did not lock (`RECOST_UNTIL_NO_NEW`).
 - `MergePrinter`: Go's `inventory.Repoint` of the gone printer's stock, then
   `printers_merge_commit`, the caller's whole transaction; a stock row written meanwhile
   runs both again after a sleep (1 s doubling to 60 s), with `continue_as_new` after
@@ -55,8 +56,12 @@ AWAIT_HEARTBEAT = timedelta(seconds=30)
 #: The pause before each wait from the second on: 1 s, doubling to a minute.
 AWAIT_BACKOFF_FIRST = 1.0
 AWAIT_BACKOFF_MAX = 60.0
-#: How often a re-cost runs again after Go's ``recost_orders_moved``.
+#: How often a re-cost runs again after Go's ``recost_orders_moved``, whatever it names.
+#: Past it, a round runs again only while Go's refusal names an order the round did not lock.
 RECOST_ROUNDS = 3
+#: The patch that lets a re-cost go on past `RECOST_ROUNDS` (PR #8323): a run recorded before
+#: it failed after `RECOST_ROUNDS` refusals, and its history replays that way.
+RECOST_UNTIL_NO_NEW = "recost-until-no-new-orders"
 #: Rounds of a merge before it continues as new, which keeps its history small.
 MERGE_ROUNDS = 100
 MERGE_SLEEP_FIRST = 1.0
@@ -224,7 +229,9 @@ class RecostLot:
         workflow_id = workflow.info().workflow_id
         also: list[str] = []
         answer: dict[str, Any] = {}
-        for attempt in range(1, RECOST_ROUNDS + 1):
+        attempt = 0
+        while True:
+            attempt += 1
             orders = await _python(ORDERS_RECOST_ORDERS, {"lot_id": input["lot_id"], "also": also})
             # A new key per round: the same key would answer the first refusal again.
             answer = await _go(
@@ -247,7 +254,12 @@ class RecostLot:
             body = answer.get("body") or {}
             if body.get("code") != "recost_orders_moved":
                 break
-            also = sorted(set(also) | set(body.get("orders") or ()))
+            named = set(body.get("orders") or ())
+            also = sorted(set(also) | named)
+            if attempt >= RECOST_ROUNDS and (
+                not named - set(orders) or not workflow.patched(RECOST_UNTIL_NO_NEW)
+            ):
+                break
         raise _problem(answer)
 
 
@@ -313,12 +325,23 @@ class MergePrinter:
                 if refused is None:
                     raise
                 # The stock names the gone printer again; then the run fails (R-K1-32).
-                await _go(
+                back = await _go(
                     input,
                     "Repoint",
                     f"{key}:back",
                     body={"kind": "printer", "gone": kept, "kept": gone, "only": _union(moved)},
                 )
+                if int(back["status"]) >= 400:
+                    # Go never refuses it (`TestABackRepointNeverRefuses`). A refusal leaves
+                    # the stock on the kept printer: say so, and fail with step 2's refusal.
+                    workflow.logger.warning(
+                        "the back Repoint of merge %s -> %s was refused (%s): its stock"
+                        " stays on %s",
+                        gone,
+                        kept,
+                        back["status"],
+                        kept,
+                    )
                 raise refused from None
             if not step.get("again"):
                 return step

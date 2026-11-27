@@ -564,3 +564,83 @@ async def test_a_failed_take_is_recorded_and_frees_the_item(world: World) -> Non
     assert refused.detail["problem"]["code"] == "inventory_step_failed"
     assert "parts.used" not in shop.kinds(order)
     await _record(world, f"order_item:{item.id}:parts:1", "take_failed")
+
+
+async def _unfulfil_while_go_is_slow(world: World) -> tuple[Any, OrderItem]:
+    """A fulfilled item's unfulfil, past its commit, with Go's `GiveBack` held: it answers
+    202, and the item is `approved` again while its stock still settles."""
+    shop = world.shop
+    order, item, _ = _with_part(shop)
+    await _accept(world, order, item)
+    world.go.gates["GiveBack"] = asyncio.Event()
+    waiting = await _call(lambda: shop.lifecycle.unfulfil_item(order.id, item.id, BY))
+    assert isinstance(waiting, WorkflowAccepted)
+    await _until(lambda: shop.get_item(item).status == "approved")
+    assert shop.get_item(item).parts_settling is not None
+    return order, shop.get_item(item)
+
+
+async def test_an_accept_while_the_unfulfil_settles_is_the_next_cycle(world: World) -> None:
+    """Not a replay of cycle 1's completed `parts:1` run: the accept is `parts:2`, it waits
+    for the unfulfil, and then it takes the stock again."""
+    shop = world.shop
+    order, item = await _unfulfil_while_go_is_slow(world)
+
+    attempt, accepted = await _accept(world, order, item)
+
+    assert isinstance(accepted, WorkflowAccepted)
+    assert accepted.workflow_id == f"order_item:{item.id}:parts:2"
+    world.go.gates["GiveBack"].set()
+    await _until(lambda: shop.kinds(order).count("parts.used") == 2, 40.0)
+    assert shop.get_item(item).status == "fulfilled"
+    assert shop.rows.fulfilment(attempt.id).accepted_at is not None  # type: ignore[union-attr]
+
+
+async def test_a_fulfil_while_the_unfulfil_settles_is_not_lost(world: World) -> None:
+    """The fulfil waits for the unfulfil and then commits, rather than failing
+    `order_item_changed` with nobody told."""
+    shop = world.shop
+    order, item = await _unfulfil_while_go_is_slow(world)
+
+    answer = await _call(
+        lambda: shop.lifecycle.fulfil_items(
+            order.id, [FulfilLine(item_id=item.id, quantity=1)], BY, request_key="w2"
+        )
+    )
+
+    assert isinstance(answer, WorkflowAccepted)
+    world.go.gates["GiveBack"].set()
+    await _until(lambda: shop.kinds(order).count("parts.used") == 2, 40.0)
+    assert shop.get_item(item).status == "fulfilled"
+    result = await world.client.get_workflow_handle(answer.workflow_id).result()
+    assert len(result) == 1
+
+
+async def test_recost_goes_on_while_go_names_new_orders(world: World) -> None:
+    """Past `RECOST_ROUNDS`, a re-cost runs again as long as each refusal names an order
+    the round did not lock: a lot that many orders used re-costs in the end (PR #8323)."""
+    shop = world.shop
+    order, item, hook = _with_part(shop)
+    await _accept(world, order, item)
+    [lot] = shop.go.stock.lots(UUID(hook))
+    shop.go.stock.set_lot_cost(lot.id, Decimal(6), BY)
+    shop.go.answers["inventory.Recost"] = [
+        {
+            "status": 409,
+            "body": {
+                "code": "recost_orders_moved",
+                "status": 409,
+                "detail": "x",
+                "orders": [f"order-unseen-{n}"],
+            },
+        }
+        for n in range(4)
+    ]
+
+    result = await _call(lambda: shop.lifecycle.recost_lot(lot.id, BY, request_key="r3"))
+
+    assert not isinstance(result, WorkflowAccepted) and result.moves == 1
+    assert world.go.runs["Recost"] == 5
+    [last] = shop.go.named("inventory.Recost")[-1:]
+    assert set(last.arg["body"]["orders"]) >= {f"order-unseen-{n}" for n in range(4)}
+    assert shop.kinds(order).count("item.parts_recosted") == 1
