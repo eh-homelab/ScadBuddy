@@ -2,7 +2,7 @@ import { screen, waitFor, within } from '@testing-library/react'
 import { http, HttpResponse } from 'msw'
 import { Route, Routes } from 'react-router'
 import { beforeEach, describe, expect, it, onTestFinished, vi } from 'vitest'
-import { addSpoolEvent, archiveSpool, createTagBackup, getSpool, getType, listSpoolEvents, listSpools, patchSpool, setSpoolKValues, setSpoolPresets, spoolTagRecords, spoolTagWritten } from '../../api/filament'
+import { addSpoolEvent, archiveSpool, createTagBackup, getSpool, getType, listSpoolEvents, listSpools, patchSpool, setSpoolKValues, setSpoolPresets, spoolTagRecords, spoolTagWritten, upsertLocation } from '../../api/filament'
 import { SPOOL_ADVANCED_KEY } from '../../components/filament/SpoolSections'
 import { seedHomeReturn } from '../../mocks/features/filament'
 import { H2C, L, spoolId, T, TAG } from '../../mocks/features/filament/seed'
@@ -71,6 +71,24 @@ describe('the spool page', () => {
     await waitFor(() => expect(screen.queryByRole('region', { name: 'Dry box' })).toBeNull())
     expect(screen.getByText('Put S-11 in Dry box 2')).toBeInTheDocument()
     expect((await getSpool(spoolId(7))).archived_at).not.toBeNull()
+  })
+
+  it('shows no dry box banner once its home is no dry box, as Needs you does (#7167 review M5)', async () => {
+    const { box } = seedHomeReturn()
+    await upsertLocation({ capacity: 4 }, box)
+    const answered = new Promise<void>((resolve) => {
+      const done = ({ request }: { request: Request }) => {
+        if (new URL(request.url).searchParams.get('awaiting_home') !== 'true') return
+        server.events.removeListener('response:mocked', done)
+        resolve()
+      }
+      server.events.on('response:mocked', done)
+    })
+    open(11)
+    await heading(11)
+    await answered
+    await new Promise((resolve) => setTimeout(resolve, 0))
+    expect(screen.queryByRole('region', { name: 'Dry box' })).toBeNull()
   })
 
   it('shows no dry box banner for a spool that waits for nothing (#7167)', async () => {

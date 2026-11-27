@@ -3338,7 +3338,10 @@ def _no_sensor(sensor_id: UUID) -> ApiError:
         "the unloaded spool whose home-return prompt this move answers (`GET "
         "/filament/spools?awaiting_home=true`): its `home_asked_at` clears, and it keeps "
         "no place unless it is the spool moved. 404 when `answers` names no spool, 422 "
-        "with `code` `not_its_home` when that spool's home is not `location_id`."
+        "with `code` `not_its_home` when that spool's home is not `location_id`. "
+        "`expected_occupant_id` is the box's spool the caller saw: with `replace`, a box "
+        "that holds another spool is a 409 `box_full` naming it in `occupant_id`, and "
+        "nothing is archived or moved."
     ),
 )
 async def move_spool(
@@ -3352,6 +3355,7 @@ async def move_spool(
             body.location_id,
             if_occupied=body.if_occupied,
             answers=body.answers,
+            expected_occupant_id=body.expected_occupant_id,
             actor=actor(caller),
         )
     except LookupError as exc:

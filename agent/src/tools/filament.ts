@@ -2218,13 +2218,15 @@ const tools: Tool[] = [
       "when the user says the identified spool replaces the box's own spool, archives that spool at 0 g and books its " +
       'grams left as non-print waste, then moves; tell the user that first. `answers` is the unloaded spool whose ' +
       'home-return prompt this answers (filament_spool_list `awaiting_home: true`): its prompt clears, and it keeps no ' +
-      'place unless it is `spool_id`; a 422 `not_its_home` when its home is not `location_id`. Only what the user ' +
-      'says. Writes ScadBuddy only.',
+      'place unless it is `spool_id`; a 422 `not_its_home` when its home is not `location_id`. With a replace, send ' +
+      "`expected_occupant_id`, the box's spool you told the user about: a box that holds another spool by then is a " +
+      '409 `box_full` naming it, and nothing is archived. Only what the user says. Writes ScadBuddy only.',
     input: z.object({
       spool_id: z.string().uuid(),
       location_id: z.string().uuid().nullable(),
       if_occupied: z.enum(['refuse', 'replace']).optional(),
       answers: z.string().uuid().optional(),
+      expected_occupant_id: z.string().uuid().optional(),
     }),
     risk: 'write',
     source: SOURCE,
@@ -2235,7 +2237,7 @@ const tools: Tool[] = [
         : if_occupied === 'replace'
           ? `Move spool ${spool_id} to ${location_id}, archiving the spool there`
           : `Move spool ${spool_id} to ${location_id}`,
-    handler: async ({ spool_id, location_id, if_occupied, answers }, { backend }) =>
+    handler: async ({ spool_id, location_id, if_occupied, answers, expected_occupant_id }, { backend }) =>
       json(
         await ok(
           backend.POST('/api/v1/filament/spools/{spool_id}/move', {
@@ -2244,6 +2246,7 @@ const tools: Tool[] = [
               location_id,
               ...(if_occupied === undefined ? {} : { if_occupied }),
               ...(answers === undefined ? {} : { answers }),
+              ...(expected_occupant_id === undefined ? {} : { expected_occupant_id }),
             },
           }),
           `move spool ${spool_id}`,

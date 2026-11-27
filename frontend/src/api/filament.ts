@@ -383,10 +383,19 @@ export const acceptInsertWeight = (spoolId: string, readingG: number, newEmptyWe
  * `null` takes it out of every place. A full dry box is a 409 `box_full` naming `occupant_id`
  * unless `ifOccupied` is `replace` (#7167). `answers` is the unloaded spool whose home-return
  * prompt this move answers: its `home_asked_at` clears (404 for no such spool, 422
- * `not_its_home` when its home is not `locationId`).
+ * `not_its_home` when its home is not `locationId`). `expectedOccupantId` is the box's spool the
+ * person saw: a replace finds another there and is a 409 `box_full` naming it, archiving nothing.
  */
-export const moveSpool = (id: string, locationId: string | null, options: { ifOccupied?: 'refuse' | 'replace'; answers?: string } = {}) =>
-  request<Spool>(`${BASE}/spools/${seg(id)}/move`, json('POST', { location_id: locationId, if_occupied: options.ifOccupied, ...(options.answers ? { answers: options.answers } : {}) }))
+export const moveSpool = (id: string, locationId: string | null, options: { ifOccupied?: 'refuse' | 'replace'; answers?: string; expectedOccupantId?: string } = {}) =>
+  request<Spool>(
+    `${BASE}/spools/${seg(id)}/move`,
+    json('POST', {
+      location_id: locationId,
+      if_occupied: options.ifOccupied,
+      ...(options.answers ? { answers: options.answers } : {}),
+      ...(options.expectedOccupantId ? { expected_occupant_id: options.expectedOccupantId } : {}),
+    }),
+  )
 
 /** Books each loaded spool's AMS remaining percent (#6268); the answer counts what it did and what it skipped. */
 export const syncAmsWeights = () => request<AmsSyncResult>(`${BASE}/spools/sync-ams-weights`, { method: 'POST' })

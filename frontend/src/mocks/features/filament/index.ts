@@ -382,7 +382,7 @@ const FIELDS = {
   kValue: ['printer_id', 'extruder', 'nozzle_diameter', 'nozzle_type', 'k_value', 'name', 'cali_idx', 'setting_id'],
   typeCreate: ['code', 'material_id', 'subtype_id', 'brand_id', 'category_id', 'effect_id', 'insert_type_id', 'rgba', 'colour_name', 'extra_colours', 'diameter_mm', 'density_g_cm3', 'cost_per_kg', 'lead_time_days', 'safety_margin_days', 'label_weight_g', 'low_stock_pct', 'nozzle_temp_min', 'nozzle_temp_max', 'bed_temp_min', 'bed_temp_max', 'drying_temp_c', 'drying_hours', 'tdfp_id', 'note'],
   spoolCreate: ['type_id', 'brand_id', 'material_id', 'subtype_id', 'category_id', 'effect_id', 'colour_name', 'rgba', 'extra_colours', 'diameter_mm', 'density_g_cm3', 'nozzle_temp_min', 'nozzle_temp_max', 'bed_temp_min', 'bed_temp_max', 'drying_temp_c', 'drying_hours', 'label_weight_g', 'insert_type_id', 'low_stock_pct', 'cost_per_kg', 'weight_locked', 'note', 'grams_left', 'added_full'],
-  move: ['location_id', 'if_occupied', 'answers'],
+  move: ['location_id', 'if_occupied', 'answers', 'expected_occupant_id'],
   csvImport: ['rows', 'dry_run'],
   proposalPick: ['brand_id', 'material_id', 'subtype_id', 'rgba', 'label_weight_g', 'material_number', 'code', 'spool_ids'],
   archive: ['archived', 'reason', 'final_reading_g', 'final_grams'],
@@ -2962,7 +2962,7 @@ export const handlers = [
     const sent = await request.json()
     const extra = extraKeys(sent, FIELDS.move)
     if (extra) return extra
-    const { location_id, if_occupied, answers } = sent as S['SpoolMove']
+    const { location_id, if_occupied, answers, expected_occupant_id } = sent as S['SpoolMove']
     if (location_id && !state.locations.some((place) => place.id === location_id && !place.archived_at)) {
       return problem(422, REFUSED.moveTarget)
     }
@@ -2973,7 +2973,8 @@ export const handlers = [
       return problem(422, `the home of spool ${answers} is not this place`, { code: 'not_its_home' })
     }
     const held = location_id && isDryBox(location_id) ? state.spools.findIndex((one) => one.location_id === location_id && one.id !== params.id && one.archived_at === null) : -1
-    if (held >= 0 && if_occupied !== 'replace') {
+    // With `expected_occupant_id`, a replace of another spool than the caller saw is refused too.
+    if (held >= 0 && (if_occupied !== 'replace' || (expected_occupant_id != null && state.spools[held]!.id !== expected_occupant_id))) {
       // `dry_box.py` `BoxFullError`: a dry box holds one spool.
       const occupant = state.spools[held]!.id
       return problem(409, `the dry box already holds spool ${occupant}`, { code: 'box_full', occupant_id: occupant })

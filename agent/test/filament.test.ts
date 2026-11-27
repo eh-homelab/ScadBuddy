@@ -1362,6 +1362,21 @@ describe('filament location tools', () => {
     expect(text).toContain('non-print waste')
   })
 
+  it('sends expected_occupant_id, the box spool the user saw, only when given (#7167)', async () => {
+    const bodies: unknown[] = []
+    server.use(
+      http.post(`${SPOOLS}/${ROW}/move`, async ({ request }) => {
+        bodies.push(await request.json())
+        return HttpResponse.json({ id: ROW })
+      }),
+    )
+    const seen = '8d6f3c1e-0000-4000-8000-0000000061a7'
+    const replace = { spool_id: ROW, location_id: ROW, if_occupied: 'replace', expected_occupant_id: seen }
+    expect((await runTool(tool('filament_spool_move'), replace, ctx())).isError).toBeFalsy()
+    expect(bodies).toEqual([{ location_id: ROW, if_occupied: 'replace', expected_occupant_id: seen }])
+    expect(tool('filament_spool_move').description).toContain('expected_occupant_id')
+  })
+
   it('lists the spools awaiting their home box (#7167)', async () => {
     const seen: (string | null)[] = []
     server.use(

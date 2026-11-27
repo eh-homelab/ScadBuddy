@@ -112,7 +112,8 @@ function HomeReturnForm({
     setBusy(true)
     setError(null)
     try {
-      const moved = await moveSpool(chosen.id, box.id, { ifOccupied: replaces ? 'replace' : 'refuse', answers: spool.id })
+      // A replace names the box's spool the person saw: another one there by now is a 409, not archived.
+      const moved = await moveSpool(chosen.id, box.id, replaces && occupant ? { ifOccupied: 'replace', answers: spool.id, expectedOccupantId: occupant.id } : { ifOccupied: 'refuse', answers: spool.id })
       onDone(moved, box.name)
     } catch (cause) {
       if (problemCode(cause) === 'box_full') {
@@ -165,20 +166,23 @@ function HomeReturnForm({
             setError(null)
           }}
         />
-        {chosen && box && (
-          <div aria-live="polite" className={cn('flex flex-col gap-1 border-l-[3px] py-1 pl-3 text-[13px]', replaces ? 'border-warn' : 'border-primary')}>
-            <p className="flex items-center gap-2 font-medium">
-              <ArrowDownToLineIcon aria-hidden="true" className="size-4" />
-              {occupant?.id === chosen.id ? `${spoolCode(chosen)} stays in ${box.name}.` : `${spoolCode(chosen)} goes into ${box.name}.`}
-            </p>
-            {replaces && occupant && (
-              <p className="text-warn">
-                {occupant.code} comes out of {box.name} for good: it is archived at 0 g
-                {occupant.grams_left != null && occupant.grams_left > 0 ? `, and its ${grams(occupant.grams_left)} are booked as non-print waste.` : '.'}
+        {/* Mounted always, so a screen reader announces the outcome when it is filled in. */}
+        <div role="status" aria-label="What happens" aria-live="polite">
+          {chosen && box && (
+            <div className={cn('flex flex-col gap-1 border-l-[3px] py-1 pl-3 text-[13px]', replaces ? 'border-warn' : 'border-primary')}>
+              <p className="flex items-center gap-2 font-medium">
+                <ArrowDownToLineIcon aria-hidden="true" className="size-4" />
+                {occupant?.id === chosen.id ? `${spoolCode(chosen)} stays in ${box.name}.` : `${spoolCode(chosen)} goes into ${box.name}.`}
               </p>
-            )}
-          </div>
-        )}
+              {replaces && occupant && (
+                <p className="text-warn">
+                  {occupant.code} comes out of {box.name} for good: it is archived at 0 g
+                  {occupant.grams_left != null && occupant.grams_left > 0 ? `, and its ${grams(occupant.grams_left)} are booked as non-print waste.` : '.'}
+                </p>
+              )}
+            </div>
+          )}
+        </div>
         {error && (
           <p role="alert" className="text-[13px] text-warn">
             {error}

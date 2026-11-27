@@ -340,6 +340,16 @@ describe('the filament mocks', () => {
       expect((await getSpool(spoolId(1))).location_id).toBe(L.SHELF_A)
     })
 
+    it('refuses a replace of another occupant than expected_occupant_id, and archives nothing', async () => {
+      const { box } = seedHomeReturn()
+      await moveSpool(spoolId(7), L.SHELF_A)
+      await moveSpool(spoolId(9), box)
+      expect(await refusal(moveSpool(spoolId(1), box, { ifOccupied: 'replace', expectedOccupantId: spoolId(7) }))).toMatchObject({ status: 409, code: 'box_full', occupant_id: spoolId(9) })
+      expect((await getSpool(spoolId(9))).archived_at).toBeNull()
+      await moveSpool(spoolId(1), box, { ifOccupied: 'replace', expectedOccupantId: spoolId(9) })
+      expect((await getSpool(spoolId(9))).archived_at).not.toBeNull()
+    })
+
     it('answers the prompt with answers, and checks it', async () => {
       const { box } = seedHomeReturn()
       expect(await refusal(moveSpool(spoolId(7), box, { answers: NOBODY }))).toMatchObject({ status: 404 })

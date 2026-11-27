@@ -21,7 +21,7 @@ from psycopg import Connection
 from psycopg.rows import DictRow
 
 from scadbuddy.filament import models as m
-from scadbuddy.filament.dry_box import occupant_on
+from scadbuddy.filament.dry_box import BoxFullError, occupant_on
 from scadbuddy.filament.locations import LocationStore
 from scadbuddy.filament.spools import FilamentSpoolStore
 
@@ -66,6 +66,7 @@ def move_into(
     actor: str,
     spools: FilamentSpoolStore,
     answers: UUID | None = None,
+    expected_occupant_id: UUID | None = None,
 ) -> m.SpoolEvent | None:
     """Move ``spool_id``, the spool the person identified, to ``location_id`` on
     ``conn``, in the caller's transaction. ``refuse`` is `LocationStore.move_on` (a full
@@ -76,8 +77,10 @@ def move_into(
     the move goes into the box, which is empty then (the box's place lock keeps any
     other spool out). ``answers`` is the unloaded spool whose prompt this answers: its
     ``home_asked_at`` clears, and it keeps no place unless it is ``spool_id``.
-    `LookupError` for no such spool, `NotItsHomeError` when ``answers``'s home is not
-    ``location_id``."""
+    ``expected_occupant_id`` is the box's spool the person saw: with ``replace``, a box
+    that holds another spool once its lock is taken is `BoxFullError` naming that spool,
+    and nothing is archived. `LookupError` for no such spool, `NotItsHomeError` when
+    ``answers``'s home is not ``location_id``."""
     wanted = sorted({spool_id} if answers is None else {spool_id, answers})
     found = {
         row["id"]: row["home_location_id"]
@@ -95,6 +98,8 @@ def move_into(
     if if_occupied == "replace" and location_id is not None:
         held = occupant_on(conn, location_id, but=spool_id)
         if held is not None and _still_in(conn, held, location_id):
+            if expected_occupant_id is not None and held != expected_occupant_id:
+                raise BoxFullError(held)
             spools.archive_on(
                 conn,
                 held,
@@ -118,6 +123,7 @@ def move(
     if_occupied: m.IfOccupied,
     actor: str,
     answers: UUID | None = None,
+    expected_occupant_id: UUID | None = None,
 ) -> m.SpoolEvent | None:
     """`move_into` in a transaction of its own (`POST /filament/spools/{id}/move`)."""
     with spools.pool.connection() as conn, conn.transaction():
@@ -129,4 +135,5 @@ def move(
             actor=actor,
             spools=spools,
             answers=answers,
+            expected_occupant_id=expected_occupant_id,
         )

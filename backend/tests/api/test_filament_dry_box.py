@@ -191,3 +191,25 @@ def test_an_answer_that_names_no_spool_is_a_404_naming_it(client: TestClient) ->
     assert refused.status_code == 404, refused.text
     assert missing in refused.json()["detail"]
     assert client.get(f"{SPOOLS}/{spool['id']}").json()["location_id"] is None
+
+
+def test_a_replace_of_another_occupant_than_expected_is_a_409(client: TestClient) -> None:
+    """#7167 Task 6 review (M4): the caller saw `seen` in the box; `other` is there now."""
+    box, shelf = _box(client, "Box W"), _location(client, "Shelf W")
+    seen, other, new = _spool(client), _spool(client), _spool(client)
+    client.post(f"{SPOOLS}/{seen['id']}/move", json={"location_id": box["id"]})
+    client.post(f"{SPOOLS}/{seen['id']}/move", json={"location_id": shelf["id"]})
+    client.post(f"{SPOOLS}/{other['id']}/move", json={"location_id": box["id"]})
+    refused = client.post(
+        f"{SPOOLS}/{new['id']}/move",
+        json={
+            "location_id": box["id"],
+            "if_occupied": "replace",
+            "expected_occupant_id": seen["id"],
+        },
+    )
+    assert refused.status_code == 409, refused.text
+    assert refused.json()["code"] == "box_full"
+    assert refused.json()["occupant_id"] == other["id"]
+    assert client.get(f"{SPOOLS}/{other['id']}").json()["archived_at"] is None
+    assert client.get(f"{SPOOLS}/{new['id']}").json()["location_id"] is None

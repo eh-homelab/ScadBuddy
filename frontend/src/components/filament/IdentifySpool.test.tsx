@@ -17,6 +17,21 @@ function show() {
   return { ...view, onIdentified }
 }
 
+/** The spools named so far, without the clears (`null`) between them. */
+const identified = (fn: ReturnType<typeof vi.fn>) => fn.mock.calls.map((call) => call[0] as { id: string } | null).filter((one) => one !== null)
+
+/** The last thing the caller was told: a spool, or null for "none named now". */
+const last = (fn: ReturnType<typeof vi.fn>) => fn.mock.calls.at(-1)?.[0] as { id: string } | null | undefined
+
+/** jsdom draws nothing: a canvas that "draws" and makes a small JPEG, and a photo it can open. */
+function stubCanvas() {
+  vi.spyOn(HTMLCanvasElement.prototype, 'getContext').mockReturnValue({ drawImage: () => undefined } as unknown as CanvasRenderingContext2D)
+  vi.spyOn(HTMLCanvasElement.prototype, 'toBlob').mockImplementation(function (callback: BlobCallback) {
+    callback(new Blob([new Uint8Array([0xff, 0xd8, 0xff, 0xd9])], { type: 'image/jpeg' }))
+  })
+  vi.stubGlobal('createImageBitmap', async () => ({ width: 4000, height: 3000, close: () => undefined }))
+}
+
 /** The paths of every request, as they leave. */
 function paths() {
   const sent: string[] = []
@@ -46,7 +61,14 @@ function installCamera(rawValue: string) {
 }
 
 describe('IdentifySpool (#7167)', () => {
-  beforeEach(() => resetMockState())
+  beforeEach(() => {
+    resetMockState()
+    stubCanvas()
+  })
+  afterEach(() => {
+    vi.restoreAllMocks()
+    vi.unstubAllGlobals()
+  })
 
   it('offers the ways with none chosen, and no tag scan without Web NFC', () => {
     show()
@@ -69,8 +91,8 @@ describe('IdentifySpool (#7167)', () => {
       await screen.findByText("Hold the spool's tag to the phone.")
       await waitFor(() => expect(stub.scanning).toBe(true))
       stub.tap({ serialNumber: '04:a1:b2:c3:d4:e5:f6', records: [] })
-      await waitFor(() => expect(onIdentified).toHaveBeenCalledTimes(1))
-      expect(onIdentified.mock.calls[0]![0]).toMatchObject({ id: spoolId(3), number: 3 })
+      await waitFor(() => expect(identified(onIdentified)).toHaveLength(1))
+      expect(identified(onIdentified)[0]).toMatchObject({ id: spoolId(3), number: 3 })
     })
 
     it('makes a spool from a new tag, then identifies it', async () => {
@@ -81,14 +103,14 @@ describe('IdentifySpool (#7167)', () => {
         await waitFor(() => expect(stub.scanning).toBe(true))
         stub.tap({ serialNumber: '04:77:66:55:44:33:22', records: [{ recordType: 'mime', mediaType: 'application/json', data: OPENSPOOL_PLA }] })
         expect(await screen.findByText('This tag is not on a spool yet.')).toBeInTheDocument()
-        expect(onIdentified).not.toHaveBeenCalled()
+        expect(identified(onIdentified)).toHaveLength(0)
         await user.click(screen.getByRole('button', { name: 'Pick it by hand' }))
         expect(await screen.findByRole('searchbox', { name: 'Find a spool' })).toBeInTheDocument()
         await user.click(screen.getByRole('radio', { name: 'Scan tag' }))
         stub.tap({ serialNumber: '04:77:66:55:44:33:22', records: [{ recordType: 'mime', mediaType: 'application/json', data: OPENSPOOL_PLA }] })
         await user.click(await screen.findByRole('button', { name: 'Make a spool from this tag' }))
-        await waitFor(() => expect(onIdentified).toHaveBeenCalledTimes(1))
-        const made = onIdentified.mock.calls[0]![0] as { id: string }
+        await waitFor(() => expect(identified(onIdentified)).toHaveLength(1))
+        const made = identified(onIdentified)[0] as { id: string }
         expect(log.sent).toContain('POST /api/v1/filament/spools')
         expect(log.sent.lastIndexOf('POST /api/v1/filament/tags/reads')).toBeGreaterThan(log.sent.indexOf('POST /api/v1/filament/spools'))
         expect(made.id).not.toBe(spoolId(3))
@@ -111,8 +133,8 @@ describe('IdentifySpool (#7167)', () => {
     await user.clear(field)
     await user.type(field, 's7')
     await user.click(screen.getByRole('button', { name: 'Find' }))
-    await waitFor(() => expect(onIdentified).toHaveBeenCalledTimes(1))
-    expect(onIdentified.mock.calls[0]![0]).toMatchObject({ id: spoolId(7) })
+    await waitFor(() => expect(identified(onIdentified)).toHaveLength(1))
+    expect(identified(onIdentified)[0]).toMatchObject({ id: spoolId(7) })
   })
 
   it('reads a label with the camera where BarcodeDetector exists', async () => {
@@ -122,8 +144,8 @@ describe('IdentifySpool (#7167)', () => {
       await user.click(screen.getByRole('radio', { name: 'QR code' }))
       expect(screen.queryByRole('button', { name: 'Take a photo' })).toBeNull()
       await user.click(screen.getByRole('button', { name: 'Use camera' }))
-      await waitFor(() => expect(onIdentified).toHaveBeenCalledTimes(1))
-      expect(onIdentified.mock.calls[0]![0]).toMatchObject({ id: spoolId(9) })
+      await waitFor(() => expect(identified(onIdentified)).toHaveLength(1))
+      expect(identified(onIdentified)[0]).toMatchObject({ id: spoolId(9) })
       await waitFor(() => expect(camera.stop).toHaveBeenCalled())
     } finally {
       camera.restore()
@@ -139,8 +161,8 @@ describe('IdentifySpool (#7167)', () => {
       expect(screen.queryByRole('button', { name: 'Use camera' })).toBeNull()
       expect(screen.getByRole('button', { name: 'Take a photo' })).toBeInTheDocument()
       await user.upload(screen.getByLabelText('Photo of the label'), new File([new Uint8Array([0xff, 0xd8])], 'label.jpg', { type: 'image/jpeg' }))
-      await waitFor(() => expect(onIdentified).toHaveBeenCalledTimes(1))
-      expect(onIdentified.mock.calls[0]![0]).toMatchObject({ id: spoolId(5) })
+      await waitFor(() => expect(identified(onIdentified)).toHaveLength(1))
+      expect(identified(onIdentified)[0]).toMatchObject({ id: spoolId(5) })
       expect(log.sent.indexOf('POST /api/v1/scan/images')).toBeLessThan(log.sent.indexOf('POST /api/v1/scan/codes'))
     } finally {
       log.off()
@@ -155,7 +177,7 @@ describe('IdentifySpool (#7167)', () => {
     expect(await screen.findByText('This server reads no photos. Type the code from the label.')).toBeInTheDocument()
     expect(screen.queryByRole('button', { name: 'Take a photo' })).toBeNull()
     expect(screen.getByLabelText('Spool code')).toBeInTheDocument()
-    expect(onIdentified).not.toHaveBeenCalled()
+    expect(identified(onIdentified)).toHaveLength(0)
   })
 
   it('picks by hand from the unarchived spools, none selected until a click', async () => {
@@ -167,9 +189,109 @@ describe('IdentifySpool (#7167)', () => {
     expect(within(list).queryByRole('radio', { name: /S-19\b/ })).toBeNull()
     await user.type(screen.getByRole('searchbox', { name: 'Find a spool' }), 'teal')
     await waitFor(() => expect(within(list).getAllByRole('radio')).toHaveLength(1))
-    expect(onIdentified).not.toHaveBeenCalled()
+    expect(identified(onIdentified)).toHaveLength(0)
     await user.click(within(list).getByRole('radio', { name: /S-6\b/ }))
-    expect(onIdentified).toHaveBeenCalledTimes(1)
-    expect(onIdentified.mock.calls[0]![0]).toMatchObject({ id: spoolId(6) })
+    expect(identified(onIdentified)).toHaveLength(1)
+    expect(identified(onIdentified)[0]).toMatchObject({ id: spoolId(6) })
+  })
+
+  it('clears the named spool when the code changes, a lookup fails or the way changes (review I1)', async () => {
+    const { user, onIdentified } = show()
+    await user.click(screen.getByRole('radio', { name: 'QR code' }))
+    const field = screen.getByLabelText('Spool code')
+    await user.type(field, 'S-7{Enter}')
+    await waitFor(() => expect(last(onIdentified)).toMatchObject({ id: spoolId(7) }))
+    // Editing the code: the earlier spool is no longer named.
+    await user.type(field, '7')
+    expect(last(onIdentified)).toBeNull()
+    await user.type(field, '{Enter}')
+    expect(await screen.findByText('No spool has the code S-77.')).toBeInTheDocument()
+    expect(last(onIdentified)).toBeNull()
+    await user.clear(field)
+    await user.type(field, 'S-7{Enter}')
+    await waitFor(() => expect(last(onIdentified)).toMatchObject({ id: spoolId(7) }))
+    await user.click(screen.getByRole('radio', { name: 'Pick by hand' }))
+    expect(last(onIdentified)).toBeNull()
+  })
+
+  it('names nothing for a typed lookup that is still out, and says no photo is read (review M2)', async () => {
+    let release = () => {}
+    const held = new Promise<void>((resolve) => (release = resolve))
+    server.use(
+      http.get('/api/v1/codes/:code', async () => {
+        await held
+        return HttpResponse.json({ title: 'Not Found', status: 404, detail: 'no', code: 'code_unknown' }, { status: 404 })
+      }),
+    )
+    const { user } = show()
+    await user.click(screen.getByRole('radio', { name: 'QR code' }))
+    await user.type(screen.getByLabelText('Spool code'), 'S-5{Enter}')
+    expect(screen.queryByText('Reading the photo…')).toBeNull()
+    expect(screen.getByRole('button', { name: 'Take a photo' })).toBeInTheDocument()
+    release()
+    expect(await screen.findByText('No spool has the code S-5.')).toBeInTheDocument()
+  })
+
+  it('sends a photo drawn again as a JPEG, whatever its type (review M1)', async () => {
+    const types: (string | null)[] = []
+    const listen = ({ request }: { request: Request }) => {
+      if (new URL(request.url).pathname === '/api/v1/scan/images') types.push(request.headers.get('Content-Type'))
+    }
+    server.events.on('request:start', listen)
+    try {
+      queueScanCodes([{ format: 'qr_code', text: `scadbuddy:spool:${spoolId(5)}` }])
+      const { user, onIdentified } = show()
+      await user.click(screen.getByRole('radio', { name: 'QR code' }))
+      await user.upload(screen.getByLabelText('Photo of the label'), new File([new Uint8Array([0, 0, 0, 24])], 'IMG_0001.HEIC', { type: 'image/heic' }))
+      await waitFor(() => expect(identified(onIdentified)).toHaveLength(1))
+      expect(types).toEqual(['image/jpeg'])
+    } finally {
+      server.events.removeListener('request:start', listen)
+    }
+  })
+
+  describe('with Web NFC, the guards (review I2, M3)', () => {
+    let stub: NdefStub
+    beforeEach(() => {
+      stub = installNdefStub()
+    })
+    afterEach(() => stub.restore())
+
+    it('refuses a tag on an archived spool', async () => {
+      server.use(http.post('/api/v1/filament/tags/reads', () => HttpResponse.json({ next: 'open_spool', spool: { id: spoolId(19), number: 19, archived_at: '2026-11-01T00:00:00Z' }, tag: null, decoded: null, draft: null })))
+      const { user, onIdentified } = show()
+      await user.click(screen.getByRole('radio', { name: 'Scan tag' }))
+      await waitFor(() => expect(stub.scanning).toBe(true))
+      stub.tap({ serialNumber: '04:19:19:19:19:19:19', records: [] })
+      expect(await screen.findByText('S-19 is archived.')).toBeInTheDocument()
+      expect(identified(onIdentified)).toHaveLength(0)
+    })
+
+    it('keeps the spool a failed bind made, and binds it on the retry without a second one', async () => {
+      const log = paths()
+      let binds = 0
+      server.use(
+        http.post('/api/v1/filament/tags/reads', async ({ request }) => {
+          const body = (await request.clone().json()) as { bind_spool_id?: string }
+          if (body.bind_spool_id && (binds += 1) === 1) return HttpResponse.json({ title: 'Error', status: 500, detail: 'the bind failed here' }, { status: 500 })
+          return undefined
+        }),
+      )
+      try {
+        const { user, onIdentified } = show()
+        await user.click(screen.getByRole('radio', { name: 'Scan tag' }))
+        await waitFor(() => expect(stub.scanning).toBe(true))
+        stub.tap({ serialNumber: '04:77:66:55:44:33:23', records: [{ recordType: 'mime', mediaType: 'application/json', data: OPENSPOOL_PLA }] })
+        await user.click(await screen.findByRole('button', { name: 'Make a spool from this tag' }))
+        const retry = await screen.findByRole('button', { name: /^Bind to spool #\d+$/ })
+        expect(identified(onIdentified)).toHaveLength(0)
+        await user.click(retry)
+        await waitFor(() => expect(identified(onIdentified)).toHaveLength(1))
+        expect(log.sent.filter((line) => line === 'POST /api/v1/filament/spools')).toHaveLength(1)
+        expect(binds).toBe(2)
+      } finally {
+        log.off()
+      }
+    })
   })
 })

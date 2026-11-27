@@ -1,8 +1,9 @@
 import { screen, waitFor, within } from '@testing-library/react'
+import { http } from 'msw'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { getSpool, moveSpool } from '../../api/filament'
 import { seedHomeReturn } from '../../mocks/features/filament'
-import { spoolId } from '../../mocks/features/filament/seed'
+import { L, spoolId } from '../../mocks/features/filament/seed'
 import { resetMockState } from '../../mocks/handlers'
 import { server } from '../../mocks/server'
 import { NeedsYouHarness } from '../../test/needsYou'
@@ -12,14 +13,18 @@ import { HomeReturnDialog } from './HomeReturnDialog'
 
 const TITLE = 'S-11 came out of 3DP-31B-598 H2C AMS-A slot 1. Which spool goes into Dry box 2?'
 
-/** The bodies of every move request, read as they leave. */
+/**
+ * The bodies of every move request, kept by a handler before the mock answers (it falls
+ * through to it); `server.resetHandlers` takes it off after each test.
+ */
 function moves() {
   const bodies: unknown[] = []
-  server.events.on('request:start', ({ request }) => {
-    if (request.method === 'POST' && /\/filament\/spools\/[^/]+\/move$/.test(new URL(request.url).pathname)) {
-      void request.clone().json().then((body) => bodies.push({ spool: new URL(request.url).pathname.split('/').at(-2), body }), () => {})
-    }
-  })
+  server.use(
+    http.post('/api/v1/filament/spools/:id/move', async ({ params, request }) => {
+      bodies.push({ spool: params.id, body: await request.clone().json() })
+      return undefined
+    }),
+  )
   return bodies
 }
 
@@ -68,7 +73,7 @@ describe('HomeReturnDialog (#7167)', () => {
     expect(within(dialog).getByText('S-7 comes out of Dry box 2 for good: it is archived at 0 g, and its 300 g are booked as non-print waste.')).toBeInTheDocument()
     await user.click(within(dialog).getByRole('button', { name: 'Put in box' }))
     await waitFor(() => expect(onDone).toHaveBeenCalledTimes(1))
-    expect(sent).toEqual([{ spool: spoolId(11), body: { location_id: box, if_occupied: 'replace', answers: spoolId(11) } }])
+    expect(sent).toEqual([{ spool: spoolId(11), body: { location_id: box, if_occupied: 'replace', answers: spoolId(11), expected_occupant_id: spoolId(7) } }])
     const replaced = await getSpool(spoolId(7))
     expect(replaced.archived_at).not.toBeNull()
     expect((await getSpool(spoolId(11))).home_asked_at).toBeNull()
@@ -94,6 +99,49 @@ describe('HomeReturnDialog (#7167)', () => {
     expect(within(dialog).getByText('S-9 comes out of Dry box 2 for good: it is archived at 0 g, and its 1000 g are booked as non-print waste.')).toBeInTheDocument()
     expect(onDone).not.toHaveBeenCalled()
     expect((await getSpool(spoolId(9))).archived_at).toBeNull()
+  })
+
+  it('archives no spool it did not show: a new occupant is a 409, shown (review M4)', async () => {
+    const { user, dialog, box, onDone } = await show()
+    await pick(user, dialog, 'S-11')
+    // S-7 leaves and S-9 goes in before the click.
+    await moveSpool(spoolId(7), L.SHELF_A)
+    await moveSpool(spoolId(9), box)
+    await user.click(within(dialog).getByRole('button', { name: 'Put in box' }))
+    expect(await within(dialog).findByText('S-9 went into Dry box 2 meanwhile. Check which spool goes in, then try again.')).toBeInTheDocument()
+    expect(onDone).not.toHaveBeenCalled()
+    expect((await getSpool(spoolId(9))).archived_at).toBeNull()
+    expect((await getSpool(spoolId(11))).location_id).toBeNull()
+  })
+
+  it('names no spool once the person changes the code or the way (review I1)', async () => {
+    const sent = moves()
+    const { user, dialog } = await show()
+    const put = within(dialog).getByRole('button', { name: 'Put in box' })
+    await user.click(within(dialog).getByRole('radio', { name: 'QR code' }))
+    const field = within(dialog).getByLabelText('Spool code')
+    await user.type(field, 'S-7{Enter}')
+    await waitFor(() => expect(put).toBeEnabled())
+    await user.type(field, '7{Enter}')
+    expect(await within(dialog).findByText('No spool has the code S-77.')).toBeInTheDocument()
+    expect(put).toBeDisabled()
+    expect(within(dialog).getByRole('status', { name: 'What happens' }).textContent).toBe('')
+    await user.clear(field)
+    await user.type(field, 'S-7{Enter}')
+    await waitFor(() => expect(put).toBeEnabled())
+    await user.click(within(dialog).getByRole('radio', { name: 'Pick by hand' }))
+    expect(put).toBeDisabled()
+    await user.click(put)
+    expect(sent).toEqual([])
+  })
+
+  it('keeps its outcome live region mounted, and fills it when a spool is named (review M6)', async () => {
+    const { user, dialog } = await show()
+    const outcome = within(dialog).getByRole('status', { name: 'What happens' })
+    expect(outcome.textContent).toBe('')
+    await pick(user, dialog, 'S-7')
+    expect(within(dialog).getByRole('status', { name: 'What happens' })).toBe(outcome)
+    expect(outcome).toHaveTextContent('S-7 stays in Dry box 2.')
   })
 
   it('opens from its Needs-you row, and the row goes once the box is answered', async () => {

@@ -75,6 +75,7 @@ def _move(
     place: UUID | None,
     if_occupied: m.IfOccupied = "refuse",
     answers: UUID | None = None,
+    expected: UUID | None = None,
 ) -> m.SpoolEvent | None:
     return homes.move(
         FilamentSpoolStore(pool),
@@ -82,6 +83,7 @@ def _move(
         place,
         if_occupied=if_occupied,
         answers=answers,
+        expected_occupant_id=expected,
         actor="ann",
     )
 
@@ -235,3 +237,37 @@ def test_replace_after_the_occupant_moved_out_archives_nothing(pg_pool: PgPool) 
     assert kept["location_id"] == shelf
     assert _kinds(pg_pool, old, "non_print_waste") == []
     assert _row(pg_pool, new)["location_id"] == box
+
+
+def test_replace_refuses_an_occupant_the_person_did_not_see(pg_pool: PgPool) -> None:
+    """#7167 Task 6 review (M4): the dialog showed ``old`` in the box, and ``other`` took its
+    place before the click. ``replace`` with ``expected_occupant_id=old`` answers
+    `BoxFullError` naming ``other`` and writes nothing: ``other`` is not archived."""
+    box, shelf = _place(pg_pool, "Box N", "Dry box", 1), _place(pg_pool, "Shelf N", "Shelf", None)
+    old, other, new = _spool(pg_pool, 80), _spool(pg_pool, 90), _spool(pg_pool)
+    LocationStore(pg_pool).move(old, box, actor="ann")
+    LocationStore(pg_pool).move(old, shelf, actor="bob")
+    LocationStore(pg_pool).move(other, box, actor="bob")
+    with pytest.raises(BoxFullError) as full:
+        _move(pg_pool, new, box, "replace", expected=old)
+    assert full.value.occupant == other
+    assert _row(pg_pool, other)["archived_at"] is None
+    assert _row(pg_pool, other)["location_id"] == box
+    assert _kinds(pg_pool, other, "non_print_waste") == []
+    assert _row(pg_pool, new)["location_id"] is None
+
+
+def test_replace_of_the_expected_occupant_archives_it(pg_pool: PgPool) -> None:
+    box = _place(pg_pool, "Box O", "Dry box", 1)
+    old, new = _spool(pg_pool, 80), _spool(pg_pool)
+    LocationStore(pg_pool).move(old, box, actor="ann")
+    assert _move(pg_pool, new, box, "replace", expected=old) is not None
+    assert _row(pg_pool, old)["archived_at"] is not None
+    assert _row(pg_pool, new)["location_id"] == box
+
+
+def test_spool_move_takes_an_expected_occupant() -> None:
+    occupant = UUID(int=7)
+    body = m.SpoolMove.model_validate({"location_id": None, "expected_occupant_id": str(occupant)})
+    assert body.expected_occupant_id == occupant
+    assert m.SpoolMove(location_id=None).expected_occupant_id is None

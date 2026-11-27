@@ -34,7 +34,7 @@ import {
 } from '../../api/filament'
 import { ArchiveSpoolDialog } from '../../components/filament/ArchiveSpoolDialog'
 import { HomeReturnDialog } from '../../components/filament/HomeReturnDialog'
-import { homeReturnTitle, spoolCode } from '../../lib/homeReturns'
+import { homeReturnTitle, spoolCode, useHomeReturns } from '../../lib/homeReturns'
 import { NeedsYouContext } from '../../lib/needsYou'
 import { ClosingSummary } from '../../components/filament/ClosingSummary'
 import { weighingCause } from '../../components/filament/driftCause'
@@ -462,6 +462,8 @@ export function SpoolPage() {
   /** #7167 — the home-return dialog, open from the page's banner. */
   const [homeOpen, setHomeOpen] = useState(false)
   const needsYou = useContext(NeedsYouContext)
+  // #7167 review M5: the banner shows for the spools Needs you lists (its home still a live dry box).
+  const { spools: awaiting, refresh: refreshAwaiting } = useHomeReturns()
   const [draft, setDraft] = useState<Draft>(BLANK)
   const [lists, setLists] = useState<Lists | null>(null)
   const [history, setHistory] = useState<SpoolHistory | null>(null)
@@ -885,7 +887,7 @@ export function SpoolPage() {
         {notice}
       </p>
       {/* #7167 — the spool came out of its tray, and its home dry box waits to be told which spool goes in. */}
-      {!creating && saved?.home_asked_at && saved.home_location_id && !saved.archived_at && saved.location_id == null && (
+      {!creating && saved && awaiting?.some((one) => one.id === saved.id) && (
         <section aria-label="Dry box" className="mb-4 flex flex-wrap items-center gap-x-3 gap-y-2 rounded-r-lg border-l-[3px] border-needs bg-card px-3 py-2 text-[13px] ring-1 ring-foreground/10">
           <p className="min-w-0 flex-1 font-medium text-needs">{homeReturnTitle(saved)}</p>
           <Button type="button" size="sm" aria-haspopup="dialog" onClick={() => setHomeOpen(true)}>
@@ -899,6 +901,7 @@ export function SpoolPage() {
               setHomeOpen(false)
               setNotice(`Put ${spoolCode(moved)} in ${box}`)
               needsYou?.refresh()
+              refreshAwaiting()
               void reload(true).catch((cause: unknown) => setError(message(cause)))
             }}
           />
