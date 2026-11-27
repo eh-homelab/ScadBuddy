@@ -150,7 +150,7 @@ func run(ctx context.Context, env func(string) string, tel *telemetry.Telemetry)
 	}
 	// The event stream's one LISTEN connection, which both listeners' streams share.
 	hub := bus.NewHub(pool, tel.Meter())
-	stream := &streams{hub: hub, meter: tel.Meter(), env: env}
+	stream := &streams{hub: hub, env: env}
 	go func() {
 		// A stream never ends by itself: end them all first, so the servers can drain.
 		<-ctx.Done()
@@ -267,14 +267,14 @@ var publicPackages = []publicAreas{}
 // sealed are the areas that seal or open with the KEK: without one they refuse to start.
 var sealed = map[string]bool{
 	"credentials": true, "payload-keys": true, "keys": true, "notify": true, "transcripts": true,
+	"remote-plugins": true,
 }
 
-// streams are what the event stream's areas (changes, ws) share: the process's one hub, the
-// meter and the settings the socket reads.
+// streams are what the event stream's areas (changes, ws) share: the process's one hub and
+// the settings the socket reads.
 type streams struct {
-	hub   *bus.Hub
-	meter metric.MeterProvider
-	env   func(string) string
+	hub *bus.Hub
+	env func(string) string
 	// used says whether an area named uses the hub.
 	used bool
 }
@@ -339,6 +339,7 @@ func newRouter(pool *pgxpool.Pool, next http.Handler, keys *seal.Keys, areas, au
 			router.Add("agent", turn.Writes()...)
 		case "fleet":
 			router.Add(fleet.Caller, fleet.Routes(pool)...)
+			router.Add(fleet.VirtualCaller, fleet.VirtualRoutes(pool)...)
 		case "changes":
 			s := streamOf()
 			for caller, routes := range changes.Routes(s.hub) {
@@ -369,7 +370,7 @@ func newRouter(pool *pgxpool.Pool, next http.Handler, keys *seal.Keys, areas, au
 	}
 	if socket {
 		// The browser's socket is no CRUD route: it stands in front of the router.
-		return realtime.New(context.Background(), st.hub, pool, handler, st.env, st.meter)
+		return realtime.New(context.Background(), st.hub, pool, handler, st.env, gate)
 	}
 	return handler, nil
 }

@@ -329,6 +329,8 @@ const INSERT_WEIGHT_CHANGED = "The insert's empty weight changed since the check
 const message = (cause: unknown) => (cause instanceof ApiError ? cause.detail : cause instanceof Error ? cause.message : 'The server could not be reached. Try again.')
 
 const NONE = '__none__'
+/** The filament diameter a spool takes when none is set (the column default, `metrics.DEFAULT_DIAMETER_MM`). */
+const DEFAULT_DIAMETER_MM = 1.75
 
 /**
  * #7149: how the spool's tag came in, in a person's words, from Bambuddy's `data_origin`
@@ -754,6 +756,9 @@ export function SpoolPage() {
   const shown = (key: keyof Draft) => advanced || JSON.stringify(draft[key]) !== JSON.stringify(base[key])
   /** The presets and K values: Advanced, an unsaved row, or a first type that drops rows a person should see. */
   const showTables = shown('presets') || shown('k_values') || firstTypeChosen
+  /** A saved diameter other than the database default (1.75 mm) stays on screen with Advanced off. */
+  const savedDiameter = saved?.effective.diameter_mm
+  const oddDiameter = savedDiameter != null && Number(savedDiameter) !== DEFAULT_DIAMETER_MM
 
   const field = (key: 'colour_name' | 'diameter_mm' | 'density_g_cm3' | 'cost_per_kg' | 'label_weight_g' | 'low_stock_pct' | 'nozzle_temp_min' | 'nozzle_temp_max' | 'bed_temp_min' | 'bed_temp_max' | 'drying_temp_c' | 'drying_hours' | 'extra_colours', label: string, extra: { hint?: string; mode?: 'decimal' | 'numeric' } = {}) => (
     <OverrideField name={key} label={label} value={draft[key]} effective={eff(key)} overridden={own(key)} hasType={hasType} inputMode={extra.mode} hint={extra.hint} onChange={(next) => set(key, next)} onReset={() => void reset(key)} />
@@ -1046,7 +1051,7 @@ export function SpoolPage() {
             <div className="grid gap-3 sm:grid-cols-2">
               {field('label_weight_g', 'Label weight (g)', { mode: 'numeric', hint: 'The filament on a full spool.' })}
               {pick('insert_type_id', 'Spool', lists.insertTypes)}
-              {shown('diameter_mm') && field('diameter_mm', 'Diameter (mm)', { mode: 'decimal' })}
+              {(shown('diameter_mm') || oddDiameter) && field('diameter_mm', 'Diameter (mm)', { mode: 'decimal' })}
               {shown('density_g_cm3') && field('density_g_cm3', 'Density (g/cm³)', { mode: 'decimal' })}
               {shown('low_stock_pct') && field('low_stock_pct', 'Low stock at (%)', { mode: 'numeric', hint: 'Of the label weight.' })}
               {shown('added_full') && (
@@ -1098,6 +1103,7 @@ export function SpoolPage() {
                         : 'Never weighed.'}
                     </p>
                   )}
+                  {!advanced && saved && saved.last_weighed_g == null && saved.last_weighing?.data.reading_g == null && <p className="text-[13px] text-muted-foreground">To weigh this spool, turn on Advanced.</p>}
                   {saved && <GramsBasis basis={saved.basis} gramsLeft={leftNow} addedFull={saved.added_full ?? null} labelWeight={effective?.label_weight_g ?? null} />}
                 </div>
                 {(advanced || reading.trim() !== '') && (
@@ -1126,7 +1132,7 @@ export function SpoolPage() {
                 )}
               </div>
             )}
-            {shown('weight_locked') && (
+            {(shown('weight_locked') || saved?.weight_locked === true) && (
               <Label className="flex items-start gap-2 text-[13px] font-normal">
                 <Checkbox className="mt-0.5" checked={draft.weight_locked} onCheckedChange={(next) => set('weight_locked', next === true)} />
                 <span>
@@ -1157,14 +1163,14 @@ export function SpoolPage() {
               {field('bed_temp_min', 'Bed temperature, min (°C)', { mode: 'numeric' })}
               {field('bed_temp_max', 'Bed temperature, max (°C)', { mode: 'numeric' })}
             </div>
+            {typeError && (
+              <p role="alert" className="text-[13px] text-warn">
+                The type&apos;s presets and K values could not be loaded: {typeError}
+              </p>
+            )}
             {showTables && (
               <>
                 <div className="flex flex-col gap-2">
-                  {typeError && (
-                    <p role="alert" className="text-[13px] text-warn">
-                      The type&apos;s presets and K values could not be loaded: {typeError}
-                    </p>
-                  )}
                   <h3 className="text-[13px] font-medium">Slicer presets</h3>
                   <p className="text-[12px] text-muted-foreground">The Bambu Studio filament preset to slice with, for each printer model and nozzle. A row you do not set takes the type&apos;s.</p>
                   {firstTypeChosen ? (

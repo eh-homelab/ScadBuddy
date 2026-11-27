@@ -48,7 +48,8 @@ unchanged, to the Python API: WebSockets, SSE and large bodies included. On prod
 | `bridge-tabs` | `/session-tabs`, `/tab-owners` and its `claim`, `refresh`, `release`, `release-all`; `PUT /tab-images/{name}`, `POST …/{name}/take` |
 | `pairings` | `/pairings` and every route under it |
 | `mcp-tokens` | `/mcp-tokens` and every route under it |
-| `plugins` | `POST` `/plugins/{name}/delete`, `/plugin-oauth/grants/{plugin}/mark`, `…/forget` only. The rest seal or open with the KEK, and stay Python's |
+| `plugins` | `POST` `/plugins/{name}/delete`, `/plugin-oauth/grants/{plugin}/mark`, `…/forget` only: the routes that need no KEK |
+| `remote-plugins` † | every route of `crud_agent_plugins.py`: `/plugins` (`GET`, `POST`), `GET /plugins/{name}`, `POST` `/plugins/open-enabled`, `…/{name}/update`, `…/tool-access`, `…/reveal`, `…/delete`; `POST` `/plugin-oauth/flows` and its `…/authorize`, `…/take`; `/plugin-oauth/grants` and its `…/{plugin}/open`, `…/refreshed` (only while the lease `plugin-oauth:<plugin>` holds), `…/mark`, `…/forget`; `/plugin-oauth/stored-secrets` |
 | `plugin-packages` | `/plugin-packages` and every route under it |
 | `hosted-plugins:read` | `GET /hosted-plugins/{name}`. A version's zip (the blob store) stays Python's |
 | `plugin-feeds` | `GET /plugin-feeds/{feed}`; `PUT`, `DELETE` `…/packages/{name}` |
@@ -101,7 +102,7 @@ back after a drop, every subscriber gets a gap. Two areas read it; each is off u
 | Area | What |
 |---|---|
 | `changes` | `GET /api/v1/internal/crud/<caller>/changes` for the callers `agent`, `fleet`, `camera` and `camera-relay`, as `agent_changes/hub.py` serves them: the same frames (`change`, `ready`, `reconnected`, the keepalive every 15 s), the `Last-Event-ID` replay (at most 1000 events, else `resync`), the gap's replay, and the filters (`fleet.*` kinds only to `fleet`; `printer.changed` and `camera.reconnect` only to the camera callers; the other channels only to `agent`). At most 4 streams per credential and peer address (the TCP peer, never `X-Forwarded-For`, as uvicorn `--no-proxy-headers` gives it to Python) and 64 in all (429); `fleet` and the two camera callers have budgets of their own, 8 each |
-| `ws` | `WS /api/v1/ws`, the browser's realtime socket, as `api/realtime.py` serves it: the topic protocol (`subscribe`, `unsubscribe`, `check`; `subscribed` with `last`, `changed`, `event`, `resync`, `ping` every 25 s, `error`), the origin check, `SCADBUDDY_AUTH_MODE=enforce`'s refusal before the handshake, a revoked session's close (4401), and the socket cap. In `observe`, a socket that `enforce` would refuse is counted in `scadbuddy.auth.would_refuse` (by `class` and `reason`), as `auth/check.py` counts it. A handshake with a personal access token (`sbpat_`) goes to Python, which resolves those |
+| `ws` | `WS /api/v1/ws`, the browser's realtime socket, as `api/realtime.py` serves it: the topic protocol (`subscribe`, `unsubscribe`, `check`; `subscribed` with `last`, `changed`, `event`, `resync`, `ping` every 25 s, `error`), the origin check, `SCADBUDDY_AUTH_MODE=enforce`'s refusal before the handshake, a revoked session's close (4401), and the socket cap. The handshake goes through `internal/auth`'s gate as an `api` route (the caller from a session cookie, an `sbpat_` access token or an `sbsvc_` credential), so `observe` counts a socket that `enforce` would refuse in the gate's `scadbuddy.auth.would_refuse`, as `auth/check.py` counts it |
 
 `ws` reads `SCADBUDDY_PUBLIC_URL` (the setting `public_url`'s stored value comes first, read
 at each handshake), `SCADBUDDY_ALLOWED_ORIGINS` and `SCADBUDDY_REALTIME_SOCKETS` (default 256;
@@ -117,6 +118,14 @@ socket frame, the typed kinds' fields, and the topic rules. The backend's
 `model_dump_json` does (`internal/bus/kinds.go` holds each kind's fields) and an opaque one as
 `json.dumps` does, both from the log's `jsonb`.
 
+The `fleet` area also serves caller `fleet-rotator` (scope `crud.fleet-rotator`, #8026):
+`POST /api/v1/internal/crud/fleet-rotator/virtual-messages` `{sender, channel | agent, text}`
+posts as a virtual sender (a row of `fleet_virtual_senders`, such as `rotator`): to a
+channel's members, or as a DM to one agent by its handle. An unknown sender is a 404 (reason
+`unknown-sender`). A `POST /messages` DM to a virtual sender's name is a 422 (reason
+`virtual-sender`) whose detail is the sender's reject message. An inbox entry from a virtual
+sender has its name as `from`.
+
 Each of `browser-origins`, `bridge-tabs`, `pairings`, `mcp-tokens`, `plugin-packages` and
 `plugin-feeds` also has a `:read` form, its GETs only. Area `package-mirrors` (the blob store)
 is Python's.
@@ -127,6 +136,11 @@ An area Go answers in part leaves its other routes to Python: name it only where
 codec's subjects and payloads, and the canonical JSON of the input and response hashes; its tests
 open every vector in `backend/tests/fixtures/`. `internal/gate` is the gate's validator, pinned by
 `pending-input-vectors.json` and `response-hash-vectors.json`, and the `gate` area's routes.
+
+`internal/bambutag` decodes a Bambu Lab MIFARE Classic 1K filament tag and derives its sector
+keys from the UID, after the [RFID Tag Guide](https://github.com/Bambu-Research-Group/RFID-Tag-Guide/blob/a26cf83d7b296b71c558f8c332d464f4e5b9c314/BambuLabRfid.md)
+(#8058). It is pure: no I/O and no SQL, and it never writes a tag. Its `Tag` JSON is what a scan
+record stores; `testdata/*.json` pins it, and a change bumps `DecoderVersion`.
 
 A request that reaches Python carries one `X-Forwarded-For` value: its client, as the trusted
 proxies name it (`core/proxies.py`). So Python runs with `SCADBUDDY_TRUSTED_PROXIES=127.0.0.1`
@@ -229,7 +243,8 @@ A setting telemetry cannot use (such as a malformed endpoint URL) is logged once
   `scadbuddy.events.frames` (by `transport` and `frame`), `scadbuddy.events.resyncs` (by
   `transport` and `reason`: `place`, `gap` or `overflow`) and
   `scadbuddy.events.listener.reconnects`. `scadbuddy.auth.would_refuse` (by `class` and
-  `reason`) counts the sockets `observe` serves that `enforce` would refuse. Always cumulative.
+  `reason`) counts the requests and sockets `observe` serves that `enforce` would refuse
+  (the gate's one instrument). Always cumulative.
 - **Streams.** A change stream or a socket ends its server span when it starts
   (`telemetry.Streaming`), so no span stays open for the hours a stream lasts; its
   `http.server.request.duration` is the time to its start. A socket's span has status 101.
