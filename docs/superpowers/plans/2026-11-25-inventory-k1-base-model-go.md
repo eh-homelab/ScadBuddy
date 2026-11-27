@@ -505,7 +505,7 @@ K1 ports `check.py` up to the README table (R-K1-19). Its relation checks and it
   4. `items_on_roots`: items on `consumable` move to `general_consumable`; items on `service` to `flat_service`.
   5. `item_life`, `unit_life`: `items.life_hours` → `steps.life.params.hours` when the item's resolved life handler is `life.hours`; else `{handler: life.hours, params: {hours, source: own_run_hours}}` on a durable item; else dropped and named. The same for `life_months` and `life.months`. `stock_units.life_*` → `steps.life.params` only where the unit's resolved handler takes the key; else dropped and named. The columns stay, unwritten, until K2.
   6. `part_lots`: each lot of an item whose kind is now durable with `on_hand > 0` gets an `adjust` move of `-floor(on_hand)` and `floor(on_hand)` units at the lot's `unit_cost_minor` (`origin = 'opening'`, one `receive` move each). A fraction left is named in the detail. Expected: 0 rows on prod (§8, scadbuddy-09, 2026-11-24).
-  7. `model_codes`: each distinct trimmed `items.compatible_with` code becomes a kind under `printer`. Its id is opaque (`'k' || replace(gen_random_uuid()::text, '-', '')`) and holds no data; its name is the code as the oldest item spells it. Codes that are equal in lower case share one kind. A kind under `printer` whose name is already the code (in any case) is used as it is. An `entities` row `('item_kind', id)` for each such kind and `('item', id)` for each item, and one `compatible_with` relation per item and code. An item of kind `printer` with exactly one code takes that model kind; one with more stays and is named.
+  7. `model_codes`: each distinct trimmed `items.compatible_with` code becomes a kind under `printer`. It takes the next `item_kinds.number` and its id is `'k' || number` (R-K1-11); its name is the code as the oldest item spells it. Codes that are equal in lower case share one kind. A kind under `printer` whose name is already the code (in any case) is used as it is. An `entities` row `('item_kind', id)` for each such kind and `('item', id)` for each item, and one `compatible_with` relation per item and code. An item of kind `printer` with exactly one code takes that model kind; one with more stays and is named.
   8. `tracking_derived`: `tracking` and `life_basis` are rewritten from the class and `steps.life` by R-K1-6, so the SQL readers stay right.
 - `registry.py`: `item_kind` is an entity kind on `item_kinds` (text ids). `orphans` and the sweep skip an entity that a `relations` row names (as R-P2-4 does for moves).
 
@@ -514,7 +514,7 @@ K1 ports `check.py` up to the README table (R-K1-19). Its relation checks and it
   - `test_every_phase_2_combination_is_placed`: before the migration, one person kind for each `tracking` (4) × `life_basis` (3) × parent (`NULL`, `part`, `consumable`, `equipment`), one item on each, with `life_hours` 100 on every third; after it, every kind's chain resolves to a complete or open class with no conflict (a SQL check: no child sets a key its parent set to another value), every report row exists, and the report's moved and dropped details name the kinds the rules say.
   - `test_items_on_roots_move`: an item on `consumable` is on `general_consumable`; one on `service` is on `flat_service`.
   - `test_part_lots_become_units`: a `part` item with a lot of 2.5 at 300 → 2 units at 300, an `adjust` of −2, the lot's `on_hand` 0.5, and the detail names the 0.5.
-  - `test_model_codes_become_kinds`: items with `{"H2C"}`, `{"h2c", "X1C"}` → two kinds under `printer`, named `H2C` and `X1C`, with ids that match `k[0-9a-f]{32}`; three `compatible_with` relations; a `printer` item with `{"H2C"}` is now on the kind named `H2C`.
+  - `test_model_codes_become_kinds`: items with `{"H2C"}`, `{"h2c", "X1C"}` → two kinds under `printer`, named `H2C` and `X1C`, with ids that match `^k[0-9]+$` and equal `'k' || number`; three `compatible_with` relations; a `printer` item with `{"H2C"}` is now on the kind named `H2C`.
   - `test_item_life_moves_into_steps`: a `nozzle` item with `life_hours = 1500` has `steps = {"life": {"params": {"hours": 1500}}}`; a `tool` item (months) with `life_hours = 50` gets `{"life": {"handler": "life.hours", "params": {"hours": 50, "source": "own_run_hours"}}}`.
 - [ ] Write `TestSeededKindsMatchTheProof` (`seed_test.go`, `testdb.New`): every kind of `kinds.yaml` that is a root, has `seed: true` or has `was.tracking` is in `item_kinds` with the same parent, class, uom, name and steps; `special_type` equals `kinds.yaml`'s except `printer`, which is NULL until K6.
 - [ ] Write `test_an_entity_a_relation_names_survives_the_sweep` (`test_sweep.py`).
@@ -595,7 +595,7 @@ Phase 2's `tests/inventory/test_kinds.py` and `test_items.py` cases are rewritte
   - `TestAKindWithAWrongHandlerIsRefused`: `steps.count = {handler: count.lot}` on a durable kind → 422 `steps_invalid`, problem `{step: count, handler: count.lot, reason: not_applicable}`, no row.
   - `TestAParentChangeThatChangesAClassIsRefused`: a consumable kind with one item, `PATCH parent_id = durable` → 422 `class_changed` `{key: role, from: consumable, to: durable}`.
   - `TestTrackingIsDerived`: a kind made with `{nature: service, billing: flat}` reads `tracking = none`; a `KindInput` with only `tracking: unit` under `durable` saves as durable; `life_basis` reads `hours` for `life.hours`.
-  - `TestCompatibleWithBecomesRelations`: an item made with `compatible_with: ["H2C"]` reads it back; `List(compatible: "H2C")` finds it; a new code `P1S` makes a kind under `printer` named `P1S`, with an opaque id; `List(compatible: "p1s")` finds the item too.
+  - `TestCompatibleWithBecomesRelations`: an item made with `compatible_with: ["H2C"]` reads it back; `List(compatible: "H2C")` finds it; a new code `P1S` makes a kind under `printer` named `P1S`, with the id `'k' || number`; `List(compatible: "p1s")` finds the item too.
   - `TestAnItemNamesItsMissingProperties`: a kind whose schema requires `material`, and an item under `filament_spool`'s special type's `requires_properties` stand-in (a test catalog), made with no properties → saved, `missing_properties == ["material", …]`; the properties set → an empty list on the next read. `ResolveKind` is what the kind save calls and `Resolve` what the item save calls (a fake catalog records which). (Task 10b replaces it with `TestAnItemWithoutARequiredPropertyIsRefused`, R-K1-33.)
   - `TestAStepChangeIsAConfigEvent`: an item's `steps.life.params.hours` 1500 → 2000 → one `handler_config.changed`, `old` and `new` as the resolved params, `owner = item:<id>`; `history.Apply` → one `handler_config_history` row; `Apply` again → still one. A save that rolls back publishes nothing.
 - [ ] **Step 2: Run** `cd tools/go/core && go test ./internal/inventory/store/ -run 'Kind|Item|Compatible|Tracking|Config'` — Expected: FAIL.
@@ -1045,9 +1045,13 @@ retry to become consistent.
   `inventory_k1_report`.
 - **R-K1-10. Lots of a kind that became durable** become whole units with an `adjust` move;
   a fraction stays on the lot and is reported.
-- **R-K1-11. Model codes.** A model kind's name is the code; its id is opaque and is never
-  built from the code or the parent (owner on #7881, 2026-11-26). A model kind is found by
-  its name under `printer`, in any case. `item_kind` becomes an entity kind so a relation can
+- **R-K1-11. Model codes and kind numbers.** No id is built from data (owner on #7881,
+  2026-11-26). Every kind has a `number` from the sequence `item_kinds_number_seq`, and
+  `K-<number>` is its short code (#6955 `codes/resolve.py`, as `L-` and `S-`; owner
+  2026-11-27). A kind that ScadBuddy makes, and a kind created without an id, gets the id
+  `'k' || number`; a typed id of `k` and digits is refused. The seeded kinds keep their text
+  ids. A model kind's name is the code, and it is found by its name under `printer`, in any
+  case. `item_kind` becomes an entity kind so a relation can
   name a kind. An item write with a new code makes its model kind, by the same rule.
   `?compatible=` reads the relations and matches the kind's name.
 - **R-K1-12. The history is the event stream** (owner 2026-11-25; §4.8 at `156e0af78`).
