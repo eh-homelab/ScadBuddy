@@ -38,6 +38,7 @@ import (
 	"github.com/eh-homelab/ScadBuddy/tools/go/core/internal/edits"
 	"github.com/eh-homelab/ScadBuddy/tools/go/core/internal/escalations"
 	"github.com/eh-homelab/ScadBuddy/tools/go/core/internal/events"
+	"github.com/eh-homelab/ScadBuddy/tools/go/core/internal/filamentpresets"
 	"github.com/eh-homelab/ScadBuddy/tools/go/core/internal/fleet"
 	"github.com/eh-homelab/ScadBuddy/tools/go/core/internal/forget"
 	"github.com/eh-homelab/ScadBuddy/tools/go/core/internal/front"
@@ -323,6 +324,8 @@ func newRouter(pool *pgxpool.Pool, next http.Handler, keys *seal.Keys, areas, au
 			more[name] = routes
 		}
 	}
+	// Naming filament-presets twice mounts it once: a pattern given twice panics.
+	presetsMounted := false
 	for name := range strings.SplitSeq(areas, ",") {
 		switch name = strings.TrimSpace(name); name {
 		case "":
@@ -347,6 +350,22 @@ func newRouter(pool *pgxpool.Pool, next http.Handler, keys *seal.Keys, areas, au
 				return nil, fmt.Errorf("SCADBUDDY_CORE_AREAS names %q, which needs %s", name, seal.Variable)
 			}
 			router.AddShared(blobstore.Area, blobstore.Routes(pool, keys, lookupEnv, tel)...)
+		case filamentpresets.Area:
+			// Public routes that read documents from the blob store, whose S3 secret is
+			// sealed under the KEK. publicPackages pass no lookupEnv or tel, so the case is
+			// its own.
+			if keys == nil {
+				return nil, fmt.Errorf("SCADBUDDY_CORE_AREAS names %q, which needs %s", name, seal.Variable)
+			}
+			if presetsMounted {
+				break
+			}
+			presetsMounted = true
+			store := filamentpresets.Store(blobstore.New(pool, keys, lookupEnv, tel))
+			for _, p := range filamentpresets.Public(pool, store) {
+				public.Handle(p.Pattern, gate.Wrap(p.Route, p.Handler))
+				served = true
+			}
 		case "changes":
 			s := streamOf()
 			for caller, routes := range changes.Routes(s.hub) {

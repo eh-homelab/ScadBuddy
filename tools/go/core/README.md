@@ -76,6 +76,15 @@ unchanged, to the Python API: WebSockets, SSE and large bodies included. On prod
 | `questions` | `/questions/*`: the `done` summaries read, dismissed and posted, and the attention count |
 | `escalations` | `/escalations/*`: a flow run's calls passed up, denied, moved, delivered, and a run's entries |
 | `audit` | `POST` `/audit/record`, `…/list`, `…/prune` |
+| `filament-presets` † | Public, class `api`: `GET /api/v1/filament/presets` (`?source=`, `?type_id=`), `GET …/presets/{preset_id}` and `GET …/presets/{preset_id}/diff` (`?from_version=`, `?to_version=`). `POST …/presets/bambuddy-import` stays Python's. Go writes no preset row (#7204) |
+
+The `filament-presets` routes use `internal/auth` (see "Public routes"). They have their own
+`case` in `newRouter`, because they need the blob store. The area needs the KEK, and it needs
+an `s3` store to read documents. It reads each document with `Blobs.OpenKey` (#8129), and it
+reads the blob's size from its `store_blobs` row first, so a blob over the cap gets no GET.
+The document is the zip member `file`. Its credential keys are stripped, as
+`core/credentials.py` strips them. A document that is not read leaves the detail's
+`document` null and names why in `document_error`; the diff answers that code as a problem.
 
 Area `fleet` (`internal/fleet`) is caller `fleet`'s (scope `crud.fleet`), under
 `/api/v1/internal/crud/fleet`: `POST /agents/{session_id}/touch`, `GET /agents`, `PUT` and
@@ -240,13 +249,16 @@ other path still goes on to Python. An area may have CRUD routes, public routes 
 
 ```go
 func PublicAreas(pool *pgxpool.Pool, _ *seal.Keys) map[string][]auth.Public {
-	return map[string][]auth.Public{"filament-presets": {{
-		Pattern: "GET /api/v1/filament/presets",
-		Route:   auth.Route{Class: "api", Template: "/api/v1/filament/presets"},
+	return map[string][]auth.Public{"examples": {{
+		Pattern: "GET /api/v1/examples",
+		Route:   auth.Route{Class: "api", Template: "/api/v1/examples"},
 		Handler: http.HandlerFunc(list),
 	}}}
 }
 ```
+
+An area that needs more than the pool and the KEK has its own `case` in `newRouter` and
+mounts its routes on the same gate there. `filament-presets` does this: it reads the blob store.
 
 - `auth.ParseMode(value, set)` reads `SCADBUDDY_AUTH_MODE` as Python does: unset is `off`,
   and a value other than `off`, `observe` or `enforce` stops the start. Never `enforce` on
@@ -365,6 +377,15 @@ At a stop, the servers drain and the three signals flush within the 20 s shutdow
 - `POST /sessions`: a scope's size counts each number as it was sent; Python counted its own
   spelling of it (`1e3` as `1000.0`).
 - `POST /workspace-blob-refs` answers 204 with no `Content-Type`.
+- `filament-presets`' diff compares two values by their JSON text, not by Python's `!=`. So
+  `1` and `1.0` are a change in Go. Bambu Studio's values are strings and string lists, and
+  there the two agree.
+- `filament-presets` reads a document blob of at most 1 MiB, and an unzipped member `file`
+  of at most 1 MiB. A larger one is `document_too_large`. Python reads with no cap.
+- `filament-presets` gives `document_unreadable` for a document that is JSON but no object.
+  Python's `FilamentPresetStore.read` reads it as `{}`.
+- A `filament-presets` read of a lost blob changes no row. Python's read forgets the
+  `store_blobs` row.
 - The event stream: a replayed typed event takes what pydantic's lax mode takes for its fields
   (an int as a whole float or a text of digits, a bool as `0`, `1` or a word), but not every
   other coercion pydantic makes; an event it does not take is a `resync`, as in Python. A lone
