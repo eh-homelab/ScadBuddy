@@ -2,7 +2,8 @@ import { screen, waitFor, within } from '@testing-library/react'
 import { http, HttpResponse } from 'msw'
 import { useLocation } from 'react-router'
 import { describe, expect, it, vi } from 'vitest'
-import type { Spool } from '../../api/filament'
+import { listSpoolEvents, type Spool } from '../../api/filament'
+import { spoolId } from '../../mocks/features/filament/seed'
 import { server } from '../../mocks/server'
 import { problem } from '../../mocks/handlers'
 import { renderPage } from '../../test/utils'
@@ -41,6 +42,47 @@ describe('the bulk bar', () => {
     await waitFor(() => expect(onDone).toHaveBeenCalled())
     expect(bodies).toEqual([{ spool_ids: ['s1', 's2'] }])
     expect(onDone).toHaveBeenCalledWith('Restored 0 spools. #4 and #5 no longer exist.')
+  })
+
+  it("resets the used counter of the selection in one request, only after a confirm (#7149)", async () => {
+    const bodies: unknown[] = []
+    server.events.on('request:start', async ({ request }) => {
+      if (request.method === 'POST' && request.url.endsWith('/spools/reset-consumed')) bodies.push(await request.clone().json())
+    })
+    const gone = '00000000-0000-4000-8000-00000000dead'
+    const selected = [{ id: spoolId(2), number: 2 } as Spool, { id: gone, number: 9 } as Spool]
+    const onDone = vi.fn()
+    const { user } = renderPage(<BulkBar selected={selected} places={[]} types={[]} onDone={onDone} onClear={() => {}} />)
+    await user.click(screen.getByRole('button', { name: 'Reset used' }))
+    const dialog = await screen.findByRole('alertdialog', { name: 'Reset the used counter of 2 spools?' })
+    expect(bodies).toEqual([])
+    await user.click(within(dialog).getByRole('button', { name: 'Reset counters' }))
+    await waitFor(() => expect(onDone).toHaveBeenCalled())
+    expect(bodies).toEqual([{ spool_ids: [spoolId(2), gone] }])
+    expect(onDone).toHaveBeenCalledWith('Reset the used counter of 1 spool. #9 no longer exists.')
+    expect((await listSpoolEvents(spoolId(2))).at(-1)?.kind).toBe('consumed_reset')
+  })
+
+  it('keeps counting when the reset is not confirmed (#7149)', async () => {
+    const posts: string[] = []
+    server.events.on('request:start', ({ request }) => {
+      if (request.method === 'POST') posts.push(request.url)
+    })
+    const { user } = renderPage(<BulkBar selected={two} places={[]} types={[]} onDone={() => {}} onClear={() => {}} />)
+    await user.click(screen.getByRole('button', { name: 'Reset used' }))
+    const dialog = await screen.findByRole('alertdialog')
+    await user.click(within(dialog).getByRole('button', { name: 'Keep counting' }))
+    await waitFor(() => expect(screen.queryByRole('alertdialog')).toBeNull())
+    expect(posts).toEqual([])
+  })
+
+  it('reports a refused reset once (#7149)', async () => {
+    server.use(http.post('/api/v1/filament/spools/reset-consumed', () => problem(503, 'Unavailable', 'The database is busy.')))
+    const onDone = vi.fn()
+    const { user } = renderPage(<BulkBar selected={two} places={[]} types={[]} onDone={onDone} onClear={() => {}} />)
+    await user.click(screen.getByRole('button', { name: 'Reset used' }))
+    await user.click(within(await screen.findByRole('alertdialog')).getByRole('button', { name: 'Reset counters' }))
+    await waitFor(() => expect(onDone).toHaveBeenCalledWith('Reset no counter: The database is busy.'))
   })
 
   it('reports a refused bulk archive once, without doubling its full stop', async () => {

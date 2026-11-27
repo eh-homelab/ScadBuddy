@@ -2,7 +2,7 @@ import { ChevronDownIcon } from 'lucide-react'
 import { useState } from 'react'
 import { useNavigate } from 'react-router'
 import { ApiError } from '../../api/client'
-import { bulkArchiveSpools, bulkUpdateSpools, deleteSpool, getSpool, moveSpool, type Spool, type SpoolType } from '../../api/filament'
+import { bulkArchiveSpools, bulkUpdateSpools, deleteSpool, getSpool, moveSpool, resetSpoolsConsumed, type Spool, type SpoolType } from '../../api/filament'
 import {
   AlertDialog,
   AlertDialogAction,
@@ -45,7 +45,8 @@ const listed = (numbers: number[]) => {
 
 /**
  * #6262 — what to do with the selected spools: archive, restore, delete, move, set their
- * type or edit any field. Archive, Restore and Edit fields are one request each (#7151),
+ * type, edit any field or reset the used counter. Archive, Restore, Edit fields and Reset used
+ * (#7149, after a confirm) are one request each (#7151),
  * and the report says once what each did; the rest are one request per spool, in number
  * order, and the report names each spool that failed and why. Delete reads each spool
  * first and skips one that has printed (its `in_use`), naming it: the backend would
@@ -55,6 +56,7 @@ export function BulkBar({ selected, places, types, onDone, onClear }: Props) {
   const navigate = useNavigate()
   const [busy, setBusy] = useState(false)
   const [confirming, setConfirming] = useState(false)
+  const [confirmReset, setConfirmReset] = useState(false)
   const [editing, setEditing] = useState(false)
   const ordered = [...selected].sort((a, b) => a.number - b.number)
   const numberOf = new Map(ordered.map((spool) => [spool.id, spool.number]))
@@ -76,6 +78,21 @@ export function BulkBar({ selected, places, types, onDone, onClear }: Props) {
       onDone(notes.join(' '))
     } catch (cause) {
       onDone(`${verb} no spool: ${why(cause)}.`)
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  /** #7149 — one request; the grams left stay, and the used counter of each spool starts again. */
+  const resetAll = async () => {
+    setBusy(true)
+    try {
+      const done = await resetSpoolsConsumed(ordered.map((spool) => spool.id))
+      const notes = [`Reset the used counter of ${spools(done.reset)}.`]
+      if (done.not_found.length) notes.push(`${numbers(done.not_found)} no longer ${done.not_found.length === 1 ? 'exists' : 'exist'}.`)
+      onDone(notes.join(' '))
+    } catch (cause) {
+      onDone(`Reset no counter: ${why(cause)}.`)
     } finally {
       setBusy(false)
     }
@@ -152,6 +169,9 @@ export function BulkBar({ selected, places, types, onDone, onClear }: Props) {
       <Button size="sm" variant="outline" disabled={busy || !selected.length} onClick={() => setEditing(true)}>
         Edit fields
       </Button>
+      <Button size="sm" variant="outline" disabled={busy || !selected.length} onClick={() => setConfirmReset(true)}>
+        Reset used
+      </Button>
       <Button size="sm" variant="outline" disabled={busy || !selected.length} onClick={() => navigate(filamentLinks.labels(ordered.map((spool) => spool.id)))}>
         Labels
       </Button>
@@ -160,6 +180,21 @@ export function BulkBar({ selected, places, types, onDone, onClear }: Props) {
       </Button>
 
       <BulkEditDialog open={editing} ids={ordered.map((spool) => spool.id)} types={types} onClose={() => setEditing(false)} onDone={onDone} />
+
+      <AlertDialog open={confirmReset} onOpenChange={setConfirmReset}>
+        <AlertDialogContent>
+          <AlertDialogHeader>
+            <AlertDialogTitle>Reset the used counter of {spools(selected.length)}?</AlertDialogTitle>
+            <AlertDialogDescription>
+              Used starts again from 0 g on each spool. The grams left, the lifetime total and the cost stay. A spool linked to Bambuddy has its consumed counter reset there too when weights sync to it.
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <AlertDialogCancel>Keep counting</AlertDialogCancel>
+            <AlertDialogAction onClick={() => void resetAll()}>Reset counters</AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
 
       <AlertDialog open={confirming} onOpenChange={setConfirming}>
         <AlertDialogContent>

@@ -218,6 +218,12 @@ export const bulkUpdateSpools = (spoolIds: string[], patch: SpoolPatch) =>
   request<SpoolBulkUpdated>(`${BASE}/spools/bulk-update`, json('POST', { spool_ids: spoolIds, patch }))
 
 /** #7151 — archive (`true`) or restore several spools in one request; each spool's outcome is in the answer. */
+export type ConsumedResetDone = Schemas['ConsumedResetDone']
+
+/** #7149: a `consumed_reset` event on each spool named (1 to 500); the grams left stay. */
+export const resetSpoolsConsumed = (spoolIds: string[]) =>
+  request<ConsumedResetDone>(`${BASE}/spools/reset-consumed`, json('POST', { spool_ids: spoolIds }))
+
 export const bulkArchiveSpools = (spoolIds: string[], archived: boolean) =>
   request<SpoolsArchived>(`${BASE}/spools/${archived ? 'bulk-archive' : 'bulk-restore'}`, json('POST', { spool_ids: spoolIds }))
 

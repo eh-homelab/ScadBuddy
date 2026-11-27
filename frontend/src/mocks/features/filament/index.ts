@@ -2746,6 +2746,18 @@ export const handlers = [
     }
     return HttpResponse.json({ changed, unchanged: found.map((row) => row.id).filter((id) => !changed.includes(id)), not_found: [...new Set(ids)].filter((id) => !found.some((row) => row.id === id)) })
   }),
+  // #7149 — `POST /filament/spools/reset-consumed`: a `consumed_reset` event on each spool named; the grams left stay.
+  http.post(`${BASE}/spools/reset-consumed`, async ({ request }) => {
+    const raw = (await request.json()) as { spool_ids?: string[] }
+    const extra = extraKeys(raw, ['spool_ids'])
+    if (extra) return extra
+    const ids = raw.spool_ids ?? []
+    if (ids.length < 1 || ids.length > 500) return problem(422, 'spool_ids: List should have 1 to 500 items')
+    const found = new Set(state.spools.filter((row) => ids.includes(row.id)).map((row) => row.id))
+    const at = now()
+    found.forEach((id) => addEvent(id, 'consumed_reset', { at, source: 'person' }))
+    return HttpResponse.json({ reset: found.size, not_found: ids.filter((id) => !found.has(id)) } satisfies S['ConsumedResetDone'])
+  }),
   // #7151 — `POST /filament/spools/bulk-archive` and `bulk-restore`: each spool's outcome, reported once.
   ...([true, false] as const).map((archived) =>
     http.post(`${BASE}/spools/${archived ? 'bulk-archive' : 'bulk-restore'}`, async ({ request }) => {
