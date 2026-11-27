@@ -60,9 +60,6 @@ const (
 	dumpKind = "tag_dump"
 	// holderKind is the blob_refs holder of a dump: one row per read.
 	holderKind = "tag_read"
-	// appSource is a MIFARE read's source in filament_tag_reads: on this route, MIFARE blocks
-	// come only from the ScadBuddy app's native bridge.
-	appSource = "app"
 )
 
 // Putter stores a blob and answers its content index key (blobstore.Blobs.Put).
@@ -203,7 +200,8 @@ func (s *Reads) ndef(w http.ResponseWriter, r *http.Request, fields map[string]j
 		var uid, tagType *string
 		_ = json.Unmarshal(fields["uid"], &uid)
 		_ = json.Unmarshal(fields["tag_type"], &tagType)
-		row := historyRow{tagID: *tag.ID, source: "phone", actor: actorOf(auth.CallerOf(ctx)),
+		caller := auth.CallerOf(ctx)
+		row := historyRow{tagID: *tag.ID, source: sourceOf(caller, "phone"), actor: actorOf(caller),
 			tagType: tagType, records: fields["records"], scan: scan}
 		if uid != nil {
 			row.uid = CleanUID(*uid)
@@ -300,7 +298,8 @@ const dumpFormat = "scadbuddy.mifare_classic_1k.v1"
 
 func (s *Reads) mifare(w http.ResponseWriter, r *http.Request, fields map[string]json.RawMessage, rd read, scan scanFacts) {
 	ctx := r.Context()
-	saved, err := s.recordMifare(ctx, rd, scan, actorOf(auth.CallerOf(ctx)), appSource)
+	caller := auth.CallerOf(ctx)
+	saved, err := s.recordMifare(ctx, rd, scan, actorOf(caller), sourceOf(caller, "app"))
 	if err != nil {
 		writeError(w, r, err)
 		return
@@ -356,6 +355,16 @@ func actorOf(c auth.Caller) string {
 		return "service:" + c.Service.Caller
 	}
 	return "anonymous"
+}
+
+// sourceOf is a read's source in filament_tag_reads: a person's page is the phone (Web NFC)
+// or, for a read that carries MIFARE blocks, the ScadBuddy app's native bridge (page); an
+// access token or a service credential is an agent's or a script's read.
+func sourceOf(c auth.Caller, page string) string {
+	if c.Kind == auth.KindToken || c.Kind == auth.KindService {
+		return "agent"
+	}
+	return page
 }
 
 // mifareSuffix is spools/models.py MIFARE_UID_SUFFIX: the AMS's form of a 4-byte UID.

@@ -18,6 +18,7 @@ import (
 
 	"github.com/jackc/pgx/v5/pgxpool"
 
+	"github.com/eh-homelab/ScadBuddy/tools/go/core/internal/auth"
 	"github.com/eh-homelab/ScadBuddy/tools/go/core/internal/blobstore"
 	"github.com/eh-homelab/ScadBuddy/tools/go/core/internal/seal"
 	"github.com/eh-homelab/ScadBuddy/tools/go/core/internal/testdb"
@@ -333,6 +334,40 @@ func TestAReadOfANewSideOfAKnownTrayAddsItsUID(t *testing.T) {
 	}
 	if got := h.one("SELECT tag_uid FROM filament_tags"); got != uidA+"00000100" {
 		t.Errorf("the first UID changed: %v", got)
+	}
+}
+
+// Review of #8161: a UID a read adds is the read's, never the trigger's 'tag', whether the
+// tag is new or a tray's tag with no UID yet.
+func TestAUIDAReadAddsKeepsTheReadsSource(t *testing.T) {
+	h := newHarness(t)
+	h.exec("INSERT INTO filament_tags (kind, tray_uuid) VALUES ('bambu_mifare', $1)", tray)
+	if status, answer := h.post(mifareRead(uidB, block0B+" "+shared)); status != http.StatusOK {
+		t.Fatalf("%d %v", status, answer)
+	}
+	if got := h.one("SELECT string_agg(uid || ' ' || source, ',') FROM filament_tag_uids"); got != uidB+"00000100 app" {
+		t.Errorf("uids = %v", got)
+	}
+	if got := h.one("SELECT tag_uid FROM filament_tags WHERE tray_uuid = $1", tray); got != uidB+"00000100" {
+		t.Errorf("tag_uid = %v", got)
+	}
+}
+
+func TestANewTagsUIDKeepsTheReadsSource(t *testing.T) {
+	h := newHarness(t)
+	if status, answer := h.post(mifareRead(uidA, block0A+" "+shared)); status != http.StatusOK {
+		t.Fatalf("%d %v", status, answer)
+	}
+	if got := h.one("SELECT source FROM filament_tag_uids WHERE uid = $1", uidA+"00000100"); got != "app" {
+		t.Errorf("source = %v", got)
+	}
+}
+
+func TestATokenOrServiceReadIsAnAgents(t *testing.T) {
+	for kind, want := range map[auth.Kind]string{auth.KindPerson: "phone", auth.KindAnonymous: "phone", auth.KindToken: "agent", auth.KindService: "agent"} {
+		if got := sourceOf(auth.Caller{Kind: kind}, "phone"); got != want {
+			t.Errorf("%s: %s, want %s", kind, got, want)
+		}
 	}
 }
 

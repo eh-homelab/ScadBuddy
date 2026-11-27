@@ -84,9 +84,10 @@ func write(ctx context.Context, tx pgx.Tx, in recordIn) (recorded, error) {
 		if in.tray != "" {
 			tray = in.tray
 		}
-		// The trigger filament_tag_uids_keep_first adds the UID.
-		if err := tx.QueryRow(ctx, `INSERT INTO filament_tags (kind, tag_uid, tray_uuid)
- VALUES ('bambu_mifare', $1, $2) RETURNING id::text`, in.uid, tray).Scan(&tagID); err != nil {
+		// The UID is set below, after its filament_tag_uids row, so that row keeps this read's
+		// source and actor (the trigger filament_tag_uids_keep_first would add it as 'tag').
+		if err := tx.QueryRow(ctx, `INSERT INTO filament_tags (kind, tray_uuid)
+ VALUES ('bambu_mifare', $1) RETURNING id::text`, tray).Scan(&tagID); err != nil {
 			return recorded{}, err
 		}
 	case byTray == nil:
@@ -111,14 +112,16 @@ func write(ctx context.Context, tx pgx.Tx, in recordIn) (recorded, error) {
 				return recorded{}, err
 			}
 		}
-		if _, err := tx.Exec(ctx, `UPDATE filament_tags SET tag_uid = $2 WHERE id = $1 AND tag_uid IS NULL`,
-			tagID, in.uid); err != nil {
-			return recorded{}, err
-		}
-		if _, err := tx.Exec(ctx, `INSERT INTO filament_tag_uids (uid, tag_id, source, added_by)
+	}
+	// The UID's row first, with this read's source and actor; then the tag's own tag_uid,
+	// whose trigger then finds the row there.
+	if _, err := tx.Exec(ctx, `INSERT INTO filament_tag_uids (uid, tag_id, source, added_by)
  VALUES ($1, $2, $3, $4) ON CONFLICT (uid) DO NOTHING`, in.uid, tagID, in.source, in.actor); err != nil {
-			return recorded{}, err
-		}
+		return recorded{}, err
+	}
+	if _, err := tx.Exec(ctx, `UPDATE filament_tags SET tag_uid = $2 WHERE id = $1 AND tag_uid IS NULL`,
+		tagID, in.uid); err != nil {
+		return recorded{}, err
 	}
 	// A Bambu read names a Bambu tag; its raw dump only from a complete read.
 	if _, err := tx.Exec(ctx, `UPDATE filament_tags SET kind = 'bambu_mifare',

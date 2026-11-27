@@ -167,8 +167,17 @@ function Scanner() {
     let navigated = false
     const off = nfc.onReading((reading: Reading) => {
       // In the ScadBuddy app a Bambu tag's blocks come with the tap; the server decodes them (#8148).
+      // A server that does not decode them yet (core's area off) answers 503 mifare_needs_core:
+      // the tap is then posted again by its UID and records, as before.
       const mifare = takeMifare(reading.uid)
-      postTagRead(mifare ? { ...mifare, records: [] } : { uid: reading.uid || null, tag_type: null, records: reading.records }).then(
+      const plain = { uid: reading.uid || null, tag_type: null, records: reading.records }
+      const read = mifare
+        ? postTagRead({ ...mifare, records: [] }).catch((cause: unknown) => {
+            if (cause instanceof ApiError && cause.status === 503 && cause.problem.code === 'mifare_needs_core') return postTagRead(plain)
+            throw cause
+          })
+        : postTagRead(plain)
+      read.then(
         (result) => {
           if (!alive || navigated) return
           const key = (nextKey.current += 1)
