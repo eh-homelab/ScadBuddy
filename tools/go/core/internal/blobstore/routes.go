@@ -53,12 +53,17 @@ import (
 // route class crud.blobs.
 const Area = "blobs"
 
-// Kinds are the blob kinds a service may upload, each with the most bytes one blob of it
-// holds. A Bambu tag's raw dump (#7905) is about 1 KiB. A scan's photo (#8155) is a JPEG,
+// Kinds are the blob kinds core stores (Put), each with the most bytes one blob of it
+// holds. UploadKinds are the ones a service may also upload through a presigned URL
+// (POST /uploads), which reads no bytes: a scan's photo comes only through Put, which
+// reads its type from its bytes. A Bambu tag's raw dump (#7905) is about 1 KiB. A scan's photo (#8155) is a JPEG,
 // PNG or WebP still: a 12 MP phone JPEG is about 3 to 6 MiB and a phone's PNG screenshot
 // is under 10 MiB, so 12 MiB takes every photo a phone makes and still bounds what one
 // upload holds in memory (Put and a commit hold the whole blob).
 var Kinds = map[string]int64{"tag_dump": 64 << 10, "scan_image": 12 << 20}
+
+// UploadKinds are the kinds a presigned upload takes, with Kinds' limits.
+var UploadKinds = map[string]int64{"tag_dump": Kinds["tag_dump"]}
 
 const (
 	// urlTTL is how long an upload's URL may start (S3 checks the expiry when a request starts).
@@ -230,7 +235,7 @@ func (b *Blobs) begin(r *http.Request, _ crud.Params) (any, error) {
 	if err := body.Err(); err != nil {
 		return nil, err
 	}
-	limit, ok := Kinds[kind]
+	limit, ok := UploadKinds[kind]
 	if !ok {
 		return nil, refused(http.StatusUnprocessableEntity, "kind_not_allowed",
 			fmt.Sprintf("no service may upload a blob of kind %q", kind))
@@ -291,7 +296,7 @@ func (b *Blobs) commit(r *http.Request, p crud.Params) (any, error) {
 	if err != nil || t.Caller != crud.ServiceOf(r).Caller {
 		return nil, unknownUpload()
 	}
-	limit, ok := Kinds[t.Kind]
+	limit, ok := UploadKinds[t.Kind]
 	if !ok {
 		return nil, unknownUpload()
 	}

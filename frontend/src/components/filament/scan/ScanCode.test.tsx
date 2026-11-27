@@ -115,6 +115,22 @@ describe('ScanCode (#8155, a code scanned from a photo)', () => {
     log.off()
   })
 
+  it('stops a camera that opens after Stop, or after the page is gone', async () => {
+    let give: (value: MediaStream) => void = () => undefined
+    giveCamera(() => new Promise<MediaStream>((resolve) => (give = resolve)))
+    const { user, unmount } = open()
+    await user.click(screen.getByRole('button', { name: 'Start camera' }))
+    await user.click(screen.getByRole('button', { name: 'Stop camera' }))
+    give(stream)
+    await waitFor(() => expect(stopped).toBe(1))
+    expect(screen.queryByLabelText('Camera preview')).toBeNull()
+
+    await user.click(screen.getByRole('button', { name: 'Start camera' }))
+    unmount()
+    give(stream)
+    await waitFor(() => expect(stopped).toBe(2))
+  })
+
   it('says why the camera is refused', async () => {
     giveCamera(async () => {
       throw new DOMException('denied', 'NotAllowedError')

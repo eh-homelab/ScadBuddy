@@ -21,6 +21,9 @@ export function ScanCameraProvider({ children }: { children: ReactNode }) {
   const video = useRef<HTMLVideoElement | null>(null)
   // The camera stops while the page is hidden, and starts again when it is shown.
   const resume = useRef(false)
+  // Each start, stop and unmount bumps it: a camera that opens after it moved is not wanted.
+  const generation = useRef(0)
+  const opening = useRef(false)
 
   const attach = useCallback(() => {
     const element = video.current
@@ -30,6 +33,8 @@ export function ScanCameraProvider({ children }: { children: ReactNode }) {
   }, [])
 
   const stop = useCallback(() => {
+    generation.current += 1
+    opening.current = false
     stream.current?.getTracks().forEach((track) => track.stop())
     stream.current = null
     if (video.current) video.current.srcObject = null
@@ -37,30 +42,40 @@ export function ScanCameraProvider({ children }: { children: ReactNode }) {
   }, [])
 
   const start = useCallback(async () => {
-    if (stream.current) return
+    if (stream.current || opening.current) return
     if (!navigator.mediaDevices?.getUserMedia) {
       setState('unavailable')
       setReason('This browser gives the page no camera. Choose a photo instead.')
       return
     }
+    const mine = ++generation.current
+    opening.current = true
     setState('starting')
     setReason(null)
     try {
-      stream.current = await navigator.mediaDevices.getUserMedia({
+      const opened = await navigator.mediaDevices.getUserMedia({
         video: { facingMode: { ideal: 'environment' }, width: { ideal: 1920 }, height: { ideal: 1080 } },
         audio: false,
       })
+      if (mine !== generation.current) {
+        opened.getTracks().forEach((track) => track.stop())
+        return
+      }
+      stream.current = opened
       setState('on')
       attach()
     } catch (cause) {
+      if (mine !== generation.current) return
       setState('unavailable')
       setReason(cameraRefusal(cause))
+    } finally {
+      if (mine === generation.current) opening.current = false
     }
   }, [attach])
 
   useEffect(() => {
     const changed = () => {
-      if (document.hidden && stream.current) {
+      if (document.hidden && (stream.current || opening.current)) {
         resume.current = true
         stop()
       } else if (!document.hidden && resume.current) {
@@ -71,6 +86,7 @@ export function ScanCameraProvider({ children }: { children: ReactNode }) {
     document.addEventListener('visibilitychange', changed)
     return () => {
       document.removeEventListener('visibilitychange', changed)
+      generation.current += 1
       stream.current?.getTracks().forEach((track) => track.stop())
       stream.current = null
     }

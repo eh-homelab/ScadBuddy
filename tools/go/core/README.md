@@ -156,9 +156,11 @@ hold `crud.blobs` may call it, under `/api/v1/internal/crud/blobs`; no caller is
 yet. Python has no such routes. `POST /uploads` with `{kind, size, sha256, media_type}` answers
 `{upload_id, url, headers, expires_at}`: the caller PUTs exactly the bytes to `url` with `headers`,
 then `POST /uploads/{upload_id}/commit` answers `{key, sha256, size}`, the blob indexed in
-`store_blobs` under its kind (again, the same answer). The kinds are an allowlist with a size each:
-`tag_dump`, 64 KiB; `scan_image`, 12 MiB (a code scan's photo, #8155: a 12 MP phone JPEG is 3 to
-6 MiB and a phone's PNG screenshot under 10 MiB, and a commit holds the whole blob in memory). Only `store_backend` `s3` takes uploads: core reads the store's settings as
+`store_blobs` under its kind (again, the same answer). The kinds are an allowlist with a size each
+(`blobstore.UploadKinds`): only `tag_dump`, 64 KiB. Core's own `Put` also stores `scan_image`, 12 MiB
+(a code scan's photo, #8155: a 12 MP phone JPEG is 3 to 6 MiB and a phone's PNG screenshot under
+10 MiB, and `Put` holds the whole blob in memory), and a presigned upload refuses it
+(`kind_not_allowed`): `Put` reads a photo's type from its bytes, a presigned PUT reads none. Only `store_backend` `s3` takes uploads: core reads the store's settings as
 Python resolves them (the `settings` row, else `SCADBUDDY_STORE_*`, set even when empty, else the
 default; the secret key opened with the KEK; path-style URLs, as botocore makes them for either
 `store_s3_path_style`) and presigns the PUT itself, with the length, the type, the SHA-256 checksum
@@ -244,7 +246,7 @@ CORS rule and the app's CSP admit only the storefront), so core takes the photo'
 |---|---|---|
 | `POST /api/v1/scan/images` | the photo's bytes (JPEG, PNG or WebP; at most 12 MiB) | `{key, media_type, sha256, size}`: a `scan_image` blob, its type read from its bytes, never from a header. 415 `image_not_supported` for any other bytes; a HEIC, HEIF or AVIF photo is refused with its own words (no decoder in pure Go reads one: the page draws a chosen photo on a canvas and sends a JPEG) |
 | `POST /api/v1/scan/codes` | `{key, source?, location?}`: `source` `shutter` (the default), `nfc`, `file` or `app`; `location` `{lat, lon, accuracy_m?, at?}`, lat -90 to 90, lon -180 to 180, accuracy 0 to 1,000,000 m | a scan (below), recorded. 404 `image_not_found` for a key that is no `scan_image` blob |
-| `GET /api/v1/scan/scans?limit=&before=` | | `{scans}`, newest first, at most 100 (50 by default); `before` is a scan id |
+| `GET /api/v1/scan/scans?limit=&before=` | | `{scans}`, newest first, at most 100 (50 by default); `before` is a scan id. A person sees only their own scans (a scan holds its photo and GPS fix); a service sees all. The same holds for every route below: another person's scan is a 404 |
 | `GET /api/v1/scan/scans/{id}` | | a scan, or 404 `scan_not_found` |
 | `GET /api/v1/scan/scans/{id}/image` | | the photo's bytes with its media type, `nosniff` (scriptless, for an `<img>`) |
 | `POST /api/v1/scan/scans/{id}/decode` | | the scan, decoded again |

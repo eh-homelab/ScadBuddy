@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/binary"
 	"encoding/json"
+	"fmt"
 	"hash/crc32"
 	"image"
 	"image/color"
@@ -291,6 +292,7 @@ func (s *store) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 }
 
 type harness struct {
+	who   auth.Caller
 	t     *testing.T
 	pool  *pgxpool.Pool
 	scans *Scans
@@ -318,16 +320,18 @@ func newHarness(t *testing.T) *harness {
 		HTTP:      server.Client(), Stream: server.Client(), Now: time.Now}
 	scans := New(pool, blobs)
 	mux := http.NewServeMux()
-	person := auth.Caller{Kind: auth.KindPerson, Principal: "user:test#ada", SessionKind: "login"}
+	h := &harness{t: t, pool: pool, scans: scans, store: s3,
+		who: auth.Caller{Kind: auth.KindPerson, Principal: "user:test#ada", SessionKind: "login"}}
 	for _, p := range scans.Public() {
 		handler := p.Handler
 		mux.Handle(p.Pattern, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			handler.ServeHTTP(w, r.WithContext(auth.WithCaller(r.Context(), person)))
+			handler.ServeHTTP(w, r.WithContext(auth.WithCaller(r.Context(), h.who)))
 		}))
 	}
 	api := httptest.NewServer(mux)
 	t.Cleanup(api.Close)
-	return &harness{t: t, pool: pool, scans: scans, api: api.URL, store: s3}
+	h.api = api.URL
+	return h
 }
 
 func (h *harness) send(method, path, mediaType string, body []byte) (int, []byte, http.Header) {
@@ -555,5 +559,38 @@ func TestRefusedUploadsAndScans(t *testing.T) {
 	}
 	if status, _ := h.json("GET", "/api/v1/scan/scans/not-an-id", nil); status != 404 {
 		t.Errorf("bad id: %d", status)
+	}
+	// A missing lon is named as lon.
+	if _, out := h.json("POST", "/api/v1/scan/codes", map[string]any{"key": key, "location": map[string]any{"lat": 1}}); !strings.Contains(fmt.Sprint(out), "lon") {
+		t.Errorf("missing lon: %v", out)
+	}
+}
+
+func TestAPersonSeesOnlyTheirOwnScans(t *testing.T) {
+	h := newHarness(t)
+	key := h.upload(encodePNG(t, qr(t, "S-1", 200)))["key"].(string)
+	_, made := h.json("POST", "/api/v1/scan/codes", map[string]any{"key": key, "location": map[string]any{"lat": 1, "lon": 2}})
+	id := made["id"].(string)
+	h.who = auth.Caller{Kind: auth.KindPerson, Principal: "user:test#bob", SessionKind: "login"}
+	if _, out := h.json("GET", "/api/v1/scan/scans", nil); len(out["scans"].([]any)) != 0 {
+		t.Errorf("bob lists ada's scan: %v", out)
+	}
+	for _, path := range []string{"/api/v1/scan/scans/" + id, "/api/v1/scan/scans/" + id + "/image"} {
+		if status, _ := h.json("GET", path, nil); status != 404 {
+			t.Errorf("bob reads %s: %d", path, status)
+		}
+	}
+	for _, method := range []string{"POST", "DELETE"} {
+		path := "/api/v1/scan/scans/" + id
+		if method == "POST" {
+			path += "/decode"
+		}
+		if status, _ := h.json(method, path, nil); status != 404 {
+			t.Errorf("bob %s %s: %d", method, path, status)
+		}
+	}
+	h.who = auth.Caller{Kind: auth.KindService, Service: &auth.Service{Caller: "agent"}}
+	if _, out := h.json("GET", "/api/v1/scan/scans", nil); len(out["scans"].([]any)) != 1 {
+		t.Errorf("a service sees every scan: %v", out)
 	}
 }

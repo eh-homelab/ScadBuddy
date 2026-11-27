@@ -355,12 +355,25 @@ func (s *Scans) withResolved(ctx context.Context, sc Scan, codes []Code) (Scan, 
 	return sc, nil
 }
 
+// whose is the scans a caller may see: a person or a token sees only its own (a scan
+// carries the photo and its GPS fix); a service, or anyone while auth is off, sees all.
+// all is true for every scan, and me is the caller's actor otherwise.
+func whose(ctx context.Context) (all bool, me string) {
+	c := auth.CallerOf(ctx)
+	if c.Kind != auth.KindPerson && c.Kind != auth.KindToken {
+		return true, ""
+	}
+	return false, c.Principal
+}
+
 // one is the scan id, or the 404.
 func (s *Scans) one(ctx context.Context, id string) (Scan, error) {
 	if !crud.IsUUID(id) {
 		return Scan{}, notFound()
 	}
-	sc, codes, err := scanRow(s.Pool.QueryRow(ctx, "SELECT "+columns+" FROM code_scans WHERE id = $1", id))
+	everyone, me := whose(ctx)
+	sc, codes, err := scanRow(s.Pool.QueryRow(ctx, "SELECT "+columns+
+		" FROM code_scans WHERE id = $1 AND ($2 OR actor = $3)", id, everyone, me))
 	if errors.Is(err, pgx.ErrNoRows) {
 		return Scan{}, notFound()
 	}
@@ -389,8 +402,11 @@ func input(r *http.Request, body *crud.Body) Input {
 		lon := place.OptFloat("lon", -180, 180)
 		accuracy := place.OptFloat("accuracy_m", 0, 1_000_000)
 		at := place.Datetime("at", true)
-		if lat == nil || lon == nil {
+		if lat == nil {
 			place.Need("lat")
+		}
+		if lon == nil {
+			place.Need("lon")
 		}
 		place.Done()
 		if lat != nil && lon != nil {
@@ -440,16 +456,18 @@ func (s *Scans) list(r *http.Request) (any, error) {
 		limit = 50
 	}
 	before := r.URL.Query().Get("before")
+	everyone, me := whose(r.Context())
 	var rows pgx.Rows
 	if before != "" {
 		if !crud.IsUUID(before) {
 			return nil, notFound()
 		}
 		rows, err = s.Pool.Query(r.Context(), "SELECT "+columns+` FROM code_scans
-			WHERE (at, id) < (SELECT at, id FROM code_scans WHERE id = $1) ORDER BY at DESC, id DESC LIMIT $2`,
-			before, limit)
+			WHERE (at, id) < (SELECT at, id FROM code_scans WHERE id = $1) AND ($3 OR actor = $4)
+			ORDER BY at DESC, id DESC LIMIT $2`, before, limit, everyone, me)
 	} else {
-		rows, err = s.Pool.Query(r.Context(), "SELECT "+columns+" FROM code_scans ORDER BY at DESC, id DESC LIMIT $1", limit)
+		rows, err = s.Pool.Query(r.Context(), "SELECT "+columns+
+			" FROM code_scans WHERE ($2 OR actor = $3) ORDER BY at DESC, id DESC LIMIT $1", limit, everyone, me)
 	}
 	if err != nil {
 		return nil, err
@@ -539,9 +557,10 @@ func (s *Scans) remove(r *http.Request) (any, error) {
 	if !crud.IsUUID(id) {
 		return nil, notFound()
 	}
+	everyone, me := whose(ctx)
 	var gone bool
 	err := pgx.BeginFunc(ctx, s.Pool, func(tx pgx.Tx) error {
-		tag, err := tx.Exec(ctx, "DELETE FROM code_scans WHERE id = $1", id)
+		tag, err := tx.Exec(ctx, "DELETE FROM code_scans WHERE id = $1 AND ($2 OR actor = $3)", id, everyone, me)
 		if err != nil {
 			return err
 		}
