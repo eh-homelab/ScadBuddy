@@ -5,7 +5,6 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
-	"fmt"
 	"io"
 	"log/slog"
 	"net/http"
@@ -76,14 +75,15 @@ func (s *Service) Public() []auth.Public {
 }
 
 // errBadServer means the stored server URL breaks the rule of ParseServer.
-var errBadServer = errors.New("the stored label print server is not a valid URL")
+// It never carries the stored value: the value may hold a secret.
+var errBadServer = errors.New("the stored label server URL is not valid")
 
 // ParseServer checks a CUPS server's URL: http or https, a host, no user, no query, no
 // fragment, and a path of "/" or none. It is the rule of Python's label_printing.server_url.
 func ParseServer(raw string) (*url.URL, error) {
 	u, err := url.Parse(strings.TrimSpace(raw))
 	if err != nil {
-		return nil, fmt.Errorf("%w: %v", errBadServer, err)
+		return nil, errBadServer
 	}
 	bad := (u.Scheme != "http" && u.Scheme != "https") || u.Opaque != "" || u.Hostname() == "" ||
 		u.User != nil || u.RawQuery != "" || u.ForceQuery || u.Fragment != "" ||
@@ -114,7 +114,7 @@ func (s *Service) server(ctx context.Context) (*url.URL, error) {
 	}
 	var stored *string
 	if err := json.Unmarshal(value, &stored); err != nil {
-		return nil, fmt.Errorf("%w: %v", errBadServer, err)
+		return nil, errBadServer
 	}
 	if stored == nil {
 		return ParseServer(DefaultServer)

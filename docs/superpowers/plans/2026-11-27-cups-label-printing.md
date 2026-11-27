@@ -37,7 +37,7 @@ R1 to R10, "The routes"). Read it first.
   1 mm; list timeout 5 s, print timeout 30 s, both fields of the client.
 - Problem reasons, exact: `label_server_unreachable` (502), `label_queue_unknown` (422),
   `label_print_refused` (502, with `ipp_status`), `label_not_pdf` (415),
-  `label_option_invalid` (422); a body past the bound is 413.
+  `label_option_invalid` (422), `label_too_large` (413, a body past the bound).
 - IPP job attributes: `job-name` `ScadBuddy labels`, `requesting-user-name` `scadbuddy`,
   `document-format` `application/pdf`; PPD options as `nameWithoutLanguage` with the names
   `MediaType`, `Darkness`, `zePrintRate`, sent only when not the default.

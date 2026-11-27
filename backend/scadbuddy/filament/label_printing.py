@@ -17,7 +17,8 @@ PrintRate = Literal["Default", "1", "2", "3", "4", "5", "6", "7", "8", "9", "10"
 
 def server_url(value: str) -> str:
     """The CUPS server's URL, trimmed and with no trailing ``/``: http or https, a host, no
-    login, path, query or fragment. Anything else is a ``ValueError``."""
+    login, path, query or fragment (an empty ``?`` or ``#`` counts too).
+    Anything else is a ``ValueError``."""
     text = value.strip()
     try:
         parts = urlsplit(text)
@@ -30,8 +31,8 @@ def server_url(value: str) -> str:
         or not host
         or parts.username is not None
         or parts.password is not None
-        or parts.query
-        or parts.fragment
+        or "?" in text
+        or "#" in text
         or parts.path not in ("", "/")
     ):
         raise ValueError("a label print server is an http or https URL with a host only")

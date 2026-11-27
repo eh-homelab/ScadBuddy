@@ -40,6 +40,7 @@ type fakeCUPS struct {
 	requests     []fakeRequest
 	printStatus  uint16   // status of the next Print-Job reply
 	printMessage string   // its status-message
+	listStatus   uint16   // status of every CUPS-Get-Printers reply
 	replyID      *uint32  // when set, the request-id of every reply
 	jobState     int32    // job-state of the next accepted job; 0 is 5 (processing)
 	jobReasons   []string // its job-state-reasons; nil is job-printing
@@ -63,6 +64,12 @@ func (f *fakeCUPS) setPrintReply(status uint16, message string) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.printStatus, f.printMessage = status, message
+}
+
+func (f *fakeCUPS) setListStatus(status uint16) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.listStatus = status
 }
 
 func (f *fakeCUPS) setHang(v bool) {
@@ -104,6 +111,9 @@ func (f *fakeCUPS) serve(w http.ResponseWriter, r *http.Request) {
 	f.mu.Lock()
 	f.requests = append(f.requests, fakeRequest{Path: r.URL.EscapedPath(), ContentType: r.Header.Get("Content-Type"), Msg: msg})
 	status, message, hang, replyID := f.printStatus, f.printMessage, f.hang, f.replyID
+	if msg.Code == 0x4002 {
+		status = f.listStatus
+	}
 	hang = hang || (f.hangPrint && msg.Code == 0x0002)
 	state, reasons := f.jobState, f.jobReasons
 	f.mu.Unlock()
@@ -134,6 +144,7 @@ func (f *fakeCUPS) reply(w http.ResponseWriter, req Message, status uint16, mess
 	}
 	switch req.Code {
 	case 0x4002:
+		out.Code = status
 		for _, q := range f.queues {
 			out.Attrs = append(out.Attrs, groupStart(TagPrinter),
 				StrAttr(TagPrinter, "printer-name", TagName, q.Name),

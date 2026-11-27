@@ -162,7 +162,7 @@ server. The owner asked "Don't we use cups?" (2026-11-27). The ruling: print thr
   - CUPS answers any other status above 0x00FF to `Print-Job`: 502 `label_print_refused`, with
     CUPS's `status-message` in `detail` (cut to 300 characters) and the status code in
     `ipp_status`;
-  - a body past 8 MiB: 413. A body that does not start with `%PDF-`: 415 `label_not_pdf`. An
+  - a body past 8 MiB: 413 `label_too_large`. A body that does not start with `%PDF-`: 415 `label_not_pdf`. An
     option value outside R6's lists: 422 `label_option_invalid`.
 
   The print route answers 202 when CUPS has accepted the job, not when the label has printed.

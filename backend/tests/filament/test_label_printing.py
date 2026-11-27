@@ -29,6 +29,9 @@ def test_a_server_url_is_http_with_a_host(value: str) -> None:
         "http://cups/printers",
         "http://cups?x=1",
         "http://cups#f",
+        "http://cups?",
+        "http://cups#",
+        "http://cups/?",
         "javascript:alert(1)",
     ],
 )

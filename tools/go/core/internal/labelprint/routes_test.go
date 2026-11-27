@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
+	"log/slog"
 	"net"
 	"net/http"
 	"net/http/httptest"
@@ -320,4 +321,47 @@ func TestServerSetting(t *testing.T) {
 		t.Fatalf("a bad row: %v", err)
 	}
 	wantProblem(t, call(t, serveRoutes(t, s), "GET", "/api/v1/label-printing/queues", nil), 502, "label_server_unreachable")
+}
+
+func TestListRefusedIs502(t *testing.T) {
+	f := newFakeCUPS(t, twoQueues())
+	f.setListStatus(0x0507)
+	got := call(t, serveRoutes(t, fakeService(f)), "GET", "/api/v1/label-printing/queues", nil)
+	wantProblem(t, got, 502, "label_print_refused")
+	if got.body["ipp_status"] != 1287.0 {
+		t.Errorf("body %s", got.raw)
+	}
+}
+
+// captureLog sends the default logger's output to the buffer until the test ends.
+func captureLog(t *testing.T) *bytes.Buffer {
+	t.Helper()
+	var buf bytes.Buffer
+	old := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(&buf, nil)))
+	t.Cleanup(func() { slog.SetDefault(old) })
+	return &buf
+}
+
+func TestStoredValuesThatBreakTheRuleNeverReachTheLog(t *testing.T) {
+	pool := testdb.New(t)
+	ctx := context.Background()
+	s := &Service{Pool: pool, ListTimeout: time.Second}
+	for _, value := range []string{`"http://u:p@x y"`, `"http://us3r:s3cr3t@cups:99999"`, `7`} {
+		if _, err := pool.Exec(ctx, `INSERT INTO settings (name, value) VALUES ($1, $2::jsonb)
+			ON CONFLICT (name) DO UPDATE SET value = EXCLUDED.value`, ServerSetting, value); err != nil {
+			t.Fatal(err)
+		}
+		buf := captureLog(t)
+		got := call(t, serveRoutes(t, s), "GET", "/api/v1/label-printing/queues", nil)
+		wantProblem(t, got, 502, "label_server_unreachable")
+		for _, secret := range []string{"p@x", "s3cr3t", "us3r"} {
+			if strings.Contains(buf.String(), secret) || strings.Contains(got.raw, secret) {
+				t.Errorf("value %s leaks %q: log %s answer %s", value, secret, buf, got.raw)
+			}
+		}
+		if !strings.Contains(buf.String(), "the stored label server URL is not valid") {
+			t.Errorf("value %s: log %s", value, buf)
+		}
+	}
 }

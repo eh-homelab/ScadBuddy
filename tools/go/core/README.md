@@ -385,7 +385,7 @@ the caller's kind, never the document.
 | 422 `label_option_invalid` | an option value is not in the lists above |
 | 422 `label_queue_unknown` | the name is malformed or not in CUPS's list, or CUPS answers `client-error-not-found` |
 | 502 `label_server_unreachable` | no server (a bad stored value), or CUPS does not answer, times out, or answers bytes that are not IPP |
-| 502 `label_print_refused` | CUPS answers another error status; `detail` is its `status-message` (at most 300 characters) and `ipp_status` the status code |
+| 502 `label_print_refused` | CUPS answers another error status, to the queue list too; `detail` is its `status-message` (at most 300 characters) and `ipp_status` the status code |
 
 CUPS owns the size check, the order of the jobs and the retries.
 
