@@ -6,9 +6,11 @@
 # backend's event-stream-vectors.json (#7768), auth-vectors.json (#8038),
 # plugin-seal-vectors.json (#8048), blob-upload-vectors.json (#7958), pack-dir-vectors.json (#8137)
 # and the python-json, activity-title, fetch-grant and assistant-cost vectors (#8046), and
-# filament-preset-vectors.json and test-fixtures/filament/preset-wire.json (#7204).
+# filament-preset-vectors.json and test-fixtures/filament/preset-wire.json (#7204). Core's seal,
+# secrets and gate tests read secret-, payload-, subject-, approval-hash-, response-hash- and
+# pending-input-vectors.json (#7709, #7712), and tagreads reads test-fixtures/filament/tag-uid-vectors.json (#8226).
 set -euo pipefail
-if grep -qE '^(go\.work(\.sum)?$|vendor/|tools/go/|backend/scadbuddy/migrations(_agent)?/|backend/tests/fixtures/((event-stream|auth|plugin-seal|blob-upload|pack-dir|python-json|activity-title|fetch-grant|assistant-cost|filament-preset)-vectors|unknown-tray-vectors|unknown-trays-block)\.json$|docs/inventory-model/|scripts/generate-go-client\.(sh|jq)$|\.github/scripts/generate-go-client-jq\.test\.sh$|\.github/workflows/(ci|go-module-ci)\.yml$|\.github/scripts/select-go(\.test)?\.sh$|\.github/scripts/changed-paths\.sh$|agent/test/fixtures/rate-limit-reset-vectors\.json$|test-fixtures/filament/preset-wire\.json$)'; then
+if grep -qE '^(go\.work(\.sum)?$|vendor/|tools/go/|backend/scadbuddy/migrations(_agent)?/|backend/tests/fixtures/((event-stream|auth|plugin-seal|blob-upload|pack-dir|python-json|activity-title|fetch-grant|assistant-cost|filament-preset|secret|payload|subject|approval-hash|response-hash|pending-input)-vectors|unknown-tray-vectors|unknown-trays-block)\.json$|docs/inventory-model/|scripts/generate-go-client\.(sh|jq)$|\.github/scripts/generate-go-client-jq\.test\.sh$|\.github/workflows/(ci|go-module-ci)\.yml$|\.github/scripts/select-go(\.test)?\.sh$|\.github/scripts/changed-paths\.sh$|agent/test/fixtures/rate-limit-reset-vectors\.json$|test-fixtures/filament/(preset-wire|tag-uid-vectors)\.json$)'; then
   echo true
 else
   echo false
