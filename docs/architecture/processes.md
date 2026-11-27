@@ -93,6 +93,19 @@ flowchart LR
 - **Zone.** The CRUD service: the only process meant to hold SQL access
   ([`CLAUDE.md` "Database access"](../../CLAUDE.md#database-access-5295)).
 
+## scadbuddy-core (Go)
+
+- **Runs.** `tools/go/core` (#7667) serves the areas that `SCADBUDDY_CORE_AREAS` names, in
+  front of the Python API, which it forwards the rest to ([`tools/go/core/README.md`](../../tools/go/core/README.md)).
+- **Inventory worker (#6949 K1).** With the area `inventory`, core also runs a Temporal worker
+  on the task queue `inventory` (`SCADBUDDY_TEMPORAL_TASK_QUEUE_INVENTORY`;
+  `tools/go/core/internal/inventory/activities`, `internal/temporalx`). It serves the 19
+  standalone activities `inventory.<Name>`, each one write of a kind, item, lot, unit or move.
+  It needs `SCADBUDDY_TEMPORAL_ADDRESS`, and the Python API reads through core's CRUD port
+  (`SCADBUDDY_CORE_CRUD_URL`).
+- **History subscriber.** `internal/history` writes the property and parameter history from
+  the event stream (row `history` of `event_subscribers`).
+
 ## Render worker
 
 - **Runs.** `run_worker` (`scadbuddy/worker.py:1075`) on queue `render`: renders and

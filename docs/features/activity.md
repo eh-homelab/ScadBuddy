@@ -9,7 +9,11 @@ person, the assistant or a flow.
 ## How it works
 
 Features write `activity` rows through the API (workers through their CRUD routes); the
-agent registers its own activity kinds. The browser follows new rows over the realtime
+agent registers its own activity kinds. The inventory's writes are Temporal standalone
+activities in scadbuddy-core (#6949 K1). Core writes an `inventory_operations` row for each
+and sends `inventory_operation.changed`; the API turns it into an `activity` row with one
+kind per activity, `inventory.<Name>` (`backend/scadbuddy/inventory/activity.py`; for example
+`inventory.ReceiveLot`, `inventory.Take`), linked to the item, lot, unit or kind page. The browser follows new rows over the realtime
 socket.
 
 ## Code

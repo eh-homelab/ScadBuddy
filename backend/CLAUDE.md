@@ -2405,7 +2405,19 @@ only the sleeps move; a budget on the real clock fails on a slow runner (#6252).
   `POST /inventory/lots/{id}/recost` is `RecostLot` (`item.parts_recosted`); a printer merge whose
   gone row stock names is `MergePrinter` (Go's `Repoint`, then the merge). The app tests run them
   in line (`tests/support/order_stock.py`); the real ones are `tests/workflows/test_order_stock.py`
-  (`requires_temporal`) and replay `tests/fixtures/order_stock_histories/`. The
+  (`requires_temporal`) and replay `tests/fixtures/order_stock_histories/`.
+  To record the histories again (only after a change to the commands a workflow issues, which
+  goes behind `workflow.patched`; an old history is never re-recorded), dispatch `ci.yml` with
+  the input `record_histories`. Each backend shard sets `SCADBUDDY_RECORD_HISTORIES=1` and
+  uploads the artifact `order-stock-histories-<shard>`. Download the artifacts and commit their
+  files into `tests/fixtures/order_stock_histories/`; `tests/test_order_stock_replay.py` replays
+  them on every run. A closed stock workflow that holds its item is taken over by the next
+  change (the `takeover` history). The kind `inventory_operation.changed` is a typed,
+  NOTIFY-only event that scadbuddy-core sends (`tools/go/core/internal/bus/event.go`,
+  `agent_changes/hub.py`); `activity/` ingests it as the Activities tab rows. The test image
+  copies the Go vectors that the backend reads (the `COPY tools/go/core/internal/...` lines
+  in the `Dockerfile`, next to `bus/testdata/history`); a new cross-tree vector needs its
+  own line there. The
   unit-cost history takes `item_id` (`parts_unit_minor`, `parts_unknown`). Agent `part_list` (an order's
   parts), `order_item_parts_set`.
   The machine rate (#4625, order operations spec 2026-11-07 §6): per registry printer,

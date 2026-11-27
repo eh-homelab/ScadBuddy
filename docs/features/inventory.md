@@ -12,7 +12,10 @@ for phase 3, #7068). It covers:
 - a job's parts: an order item takes its parts from the lots when it is fulfilled, and job
   cost reads what they cost.
 
-This is phase 2 of the inventory and purchasing design (#7067, epic #6949). The design is
+This is phase 2 of the inventory and purchasing design (#7067, epic #6949). Phase K1 (#6949)
+moved its base model into Go: the kinds, items, lots, units and moves. The K1 design is
+[the kinds and handlers spec](../superpowers/specs/2026-11-25-inventory-kinds-and-handlers-design.md).
+Its plan rulings are cited as R-K1-n. The phase 2 design is
 [the inventory spec](../superpowers/specs/2026-11-21-inventory-and-purchasing-design.md)
 (§6.4 to §6.6 and §9). The plan is
 the phase 2 plan, `docs/superpowers/plans/2026-11-23-inventory-phase-2-item-core.md`
@@ -20,10 +23,60 @@ the phase 2 plan, `docs/superpowers/plans/2026-11-23-inventory-phase-2-item-core
 
 ## How it works
 
-All of it lives in the API process. No other process reads or writes these tables (root
-`CLAUDE.md`, "Database access"). The code is `backend/scadbuddy/inventory/`, registered as
-`InventoryComponent` (`backend/scadbuddy/inventory/component.py:25`). The routes are
-`backend/scadbuddy/api/inventory.py` and `inventory_stock.py`.
+Since K1, scadbuddy-core (Go) writes the kinds, items, lots, units and moves
+(`tools/go/core/internal/inventory`, area `inventory`). The Python API is a forwarder. It reads
+over core's CRUD routes (`SCADBUDDY_CORE_CRUD_URL`; unset, a read is 503
+`inventory_unavailable`) and writes by starting a Temporal standalone activity on the queue
+`inventory`. Python keeps the offers and price points (`OfferStore`, until K3) and the
+reads that job cost needs (`stock.py`). The routes are `backend/scadbuddy/api/inventory.py`
+and `inventory_stock.py`. The code is `backend/scadbuddy/inventory/`, registered as
+`InventoryComponent` (`backend/scadbuddy/inventory/component.py:25`).
+
+#### A write is an activity
+
+Each write is one activity of core's worker, named `inventory.<Name>` (19 names, listed in
+`tools/go/core/README.md`, "The inventory worker"). The activity id is
+`inventory.<Name>:<scoped key>` (Python `core_client.activity_id`, Go `store.ActivityID`; both
+run the vectors in `tools/go/core/internal/inventory/store/testdata/activity_ids.json`). The key
+is the request's `Idempotency-Key`. Go keeps it in `crud_requests` under the caller
+`inventory`, so an activity that runs twice writes once (R-K1-2). A route waits 15 s for the
+activity. If it is not done, the route answers 202 with `OperationAccepted`, and the
+frontend follows `GET /api/v1/inventory/operations/{id}` (R-K1-24; the agent tool is
+`inventory_operation_get`). A repeat with the same key is never an error. If Temporal
+cannot start the activity, the route answers 503 and nothing was written.
+
+Go writes one `inventory_operations` row for each activity in its own transaction. It then
+sends `inventory_operation.changed` on `scadbuddy_events`. This is a typed event kind with
+no log row (NOTIFY only; `tools/go/core/internal/bus/event.go`,
+`backend/scadbuddy/agent_changes/hub.py`). Python's `ActivityIndex.ingest_inventory_operation`
+turns it into an `activity` row (R-K1-22).
+
+### The class and the steps
+
+A kind answers a **class** with four keys (`tools/go/core/internal/inventory/model/class.go`,
+design §3): `nature` (`physical` or `service`), `role` (`consumable` or `durable`), `counting`
+(`lot` or `unit`) and `billing` (`term`, `hourly` or `flat`). A child kind may answer a key
+its parent left open. It may not change a key its parent set (`class_changed`). A durable
+thing is counted by unit (`class_invalid`). An item of a kind whose class is open is refused
+(`class_open`). A kind also names one optional special type (`filament_spool` in K1).
+
+A kind, an item and a unit can set `steps`: which handler runs each step (receive, count,
+consume, and so on). The registry resolves the steps from the class defaults down to the
+unit (`internal/inventory/handlers`, `handlers.yaml`). Go ported each default from phase 2
+(R-K1-1). A step whose handler K1 does not build is 409 `handler_not_built`; a step with a
+missing required parameter marks the kind or item incomplete (`incomplete_steps`), and
+calling it is 409 `step_incomplete` (R-K1-8). The parameter history starts in K1: Go
+publishes `handler_config.changed` and a subscriber writes `handler_config_history`
+(R-K1-13).
+
+The new problem codes replace phase 2's (R-K1-23): `item_not_counted` became
+`step_not_applicable`, `wrong_tracking` became `wrong_counting`, and a consume of a durable
+is `handler_not_built`. `unit_installed` and `filament_item_refused` stay.
+
+The public contract only grew (R-K1-6). Kinds and items gain the class keys, `special_type`,
+`steps` and `incomplete_steps`. `tracking`, `life_basis`, `life_hours`, `life_months` and
+`compatible_with` stay, and Go derives `tracking` and `life_basis` from the class. The model
+kinds are found by name under the parent `printer` (R-K1-11).
 
 ### Kinds and tracking
 
@@ -37,9 +90,10 @@ Each kind has a `number` from the sequence `item_kinds_number_seq`
 (`20261126T0218Z_inventory_class.sql`, step 1a). Its code is `K-<number>`, which
 `GET /api/v1/codes/{code}` resolves (`codes/resolve.py` `PREFIXES`). A number is never
 reused. The kinds that existed before that migration keep their text ids and got numbers
-in `created_at`, then `id` order. A kind that ScadBuddy makes has the id `k<number>`. An id
-of `k` and digits must be `'k' || number` (`item_kinds_made_id_check`), so a person cannot
-choose one (`KindInput`, 422).
+in `created_at`, then `id` order. A kind made without an id, and a model kind that Go makes
+for a new `compatible_with` code, get the id `k<number>`. The seeded kinds keep their text
+ids. An id of `k` and digits must be `'k' || number` (`item_kinds_made_id_check`), so a person
+cannot choose one (`KindInput`, 422; owner, 2026-11-27).
 
 `tracking` says how a kind's items are counted:
 
@@ -54,7 +108,7 @@ The migration seeds the built-in kinds (`20261124T0323Z_inventory_core.sql:189`)
 printer, part (with nozzle, hotend, belt, build plate, AMS part and hardware under it),
 consumable (with desiccant, packaging and lubricant), equipment (with dry bin and tool),
 printed part, assembly, service and spool part. A built-in kind cannot change its tracking.
-A kind with items cannot either (`KindInUse`, `inventory/kinds.py:41`). Kinds are rows, never
+A kind with items cannot either (409 `kind_in_use`, Go `store/kinds.go`). Kinds are rows, never
 a list in code (spec §4). A kind archives and restores; it never deletes.
 
 An item's property schema is its kind's `attribute_schema`. So `GET` and `PUT
@@ -203,6 +257,8 @@ R-K1-17). The agent tool `part_list` keeps only its `order_id` form. To list eve
 `inventory_lot_receive`. Kept: `GET /orders/{id}/parts`, `PUT /orders/{id}/items/{item}/parts`,
 the rule routes `GET`/`PUT /parts/rules/{slug}` and the tool `order_item_parts_set`.
 
+The parts kinds are `hardware` and `ams_part`. The agent tool `part_stock_add` is gone.
+
 Still to do: drop `parts_retired` and `part_stock_moves_retired` after a prod check (Ruling 6;
 the pack data of a part with no supplier stays only there, R-P2-25). The `part_id` reads in
 `PartStore` go with them.
@@ -210,6 +266,13 @@ the pack data of a part with no supplier stays only there, R-P2-25). The `part_i
 ### The migrations
 
 `20261124T0323Z_inventory_core.sql` makes the tables below and seeds the kinds.
+K1 adds `20261126T0218Z_inventory_class.sql` (the class columns, `item_kinds.number`,
+`relation_types`, `relations`, `handler_config_history`, `inventory_operations` and
+`inventory_k1_report`), `20261126T0253Z_inventory_service_caller.sql` and
+`20261127T0555Z_service_callers_inventory_and_rotator.sql` (the caller `inventory`),
+`20261126T0308Z_property_history_events.sql` (the history events; the subscriber is
+`tools/go/core/internal/history`) and `20261127T0521Z_order_items_parts_workflow.sql`
+(`order_items.parts_workflow_id`).
 `20261124T0918Z_parts_to_items.sql` moves the parts (see
 [data.md](../architecture/data.md)). It runs in one transaction under `LOCK TABLE ...
 IN EXCLUSIVE MODE` (R-P2-20): an old pod fails on its next fulfil after the rename. A part
@@ -264,9 +327,12 @@ The mock is `frontend/src/mocks/features/inventory.ts`.
 
 ## Code
 
-- Backend: `backend/scadbuddy/inventory/` (`models.py`, `kinds.py`, `items.py`, `offers.py`,
-  `stock.py`, `problems.py`, `component.py`); routes `api/inventory.py`,
-  `api/inventory_stock.py`, `api/parts.py`.
+- Backend: `backend/scadbuddy/inventory/` (`models.py`, `core_client.py`, `activity.py`,
+  `kinds.py`, `offers.py`, `stock.py`, `problems.py`, `component.py`); routes `api/inventory.py`,
+  `api/inventory_stock.py`, `api/inventory_operations.py`, `api/parts.py`. Order stock:
+  `backend/scadbuddy/workflows/order_stock.py`.
+- Go: `tools/go/core/internal/inventory/` (`model`, `handlers`, `store`, `flow`, `activities`,
+  `routes`, `modeldata`), `internal/temporalx`, `internal/history`.
 - Agent: `agent/src/tools/inventory.ts`, `inventoryLinks.ts`.
 - Frontend: `frontend/src/pages/inventory/`, `frontend/src/lib/inventoryLinks.ts`.
 
@@ -283,8 +349,28 @@ map `part_item_map` that the second migration adds. The full list, with the reti
 - Backend: `backend/tests/inventory/` (`test_kinds.py`, `test_items.py`, `test_offers.py`,
   `test_stock.py`, `test_schema.py`) and the parts and job cost tests under
   `backend/tests/`.
+- Backend, order stock: `backend/tests/workflows/test_order_stock.py` (needs Temporal) replays
+  the recorded histories in `backend/tests/fixtures/order_stock_histories/` (how to record
+  them: `backend/CLAUDE.md`). `backend/tests/test_no_python_stock_writes.py` keeps Python
+  from writing a stock table.
+- Go: `go test ./...` in `tools/go/core` (needs `SCADBUDDY_TEST_DATABASE_URL`). The proof
+  that the real model data resolves is `internal/inventory/modeldata`
+  ([`docs/inventory-model/`](../inventory-model/README.md)).
+- e2e: `frontend/e2e/inventory-core.spec.ts` with `E2E_INVENTORY_CORE=1` on the e2e stack's
+  `core` service (`e2e-stack/CLAUDE.md`); `hot-path-e2e.yml` runs it on dispatch.
 - Agent: `agent/test/inventory.test.ts`, `agent/test/inventoryLinks.test.ts`.
 - Frontend: `frontend/src/pages/inventory/*.test.tsx`, `frontend/src/mocks/features/inventory.test.ts`.
+
+## Orders and stock
+
+Three Python workflows on the queue `library` cross to Go (`backend/scadbuddy/workflows/order_stock.py`;
+R-K1-27 to R-K1-32): `FulfilOrderItem` (fulfil, accept and unfulfil: commit the order change,
+then Go's `Take` or `GiveBack`, then record `parts.used` or `parts.returned`), `RecostLot`
+(Go's `Recost`, then the cost events) and `MergePrinter` (Go's `Repoint`, then the merge). A
+route starts the workflow first and waits 15 s; then it answers 202 and the item shows "stock
+still settling". A refusal in a Python commit step fails the workflow, so the same id can start
+again (R-K1-32). A closed stock workflow that holds its item is taken over by the next change.
+There is no outbox, no sweep and no manual retry.
 
 ## Limits and known issues
 

@@ -33,6 +33,13 @@ CI sets `SCADBUDDY_TEST_POSTGRES_REQUIRED`). The Go toolchain is pinned in these
   writes are the only copy of a save, under the state directory, never the cache. `core/`
   is the API in Go (#7667): the areas it has, over Postgres, and a forward of the rest to
   Python (`internal/crud` the CRUD guard, `internal/<area>` the routes; README there).
+  Since #6949 K1 it also holds the inventory's base model: `internal/inventory` (`model`,
+  `handlers`, `store`, `flow`, `activities`, `routes`, `modeldata`: the kinds, items, lots,
+  units and moves, written by Temporal standalone activities, and the proof test of
+  `docs/inventory-model/`), `internal/temporalx` (core's Temporal client and worker settings)
+  and `internal/history` (the subscriber that writes the property and parameter history from
+  the event stream). The Temporal SDK (`go.temporal.io/sdk`, `go.temporal.io/api`) is vendored
+  in the root `vendor/` like every Go dependency, so `go work vendor` follows a bump.
   `fleetchat/` is the agent fleet chat library (MCP tools over a host's `Store` and `Bus`,
   imports nothing else from this repo; README there). `fleet/` is ScadBuddy's host of it,
   the image `ghcr.io/eh-homelab/scadbuddy-fleet`: `sbfleet` (a `Store` and the session registry's reads, `Registry`, over core's
