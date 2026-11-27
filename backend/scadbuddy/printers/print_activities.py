@@ -63,7 +63,11 @@ from scadbuddy.bambuddy.runs import PrintRunError
 from scadbuddy.core.heartbeat import heartbeating
 from scadbuddy.core.problems import ApiError
 from scadbuddy.filament.print_uses import PrintUses, slot_uses
-from scadbuddy.filament.unknown_tray_rows import UnknownSpoolReads, blocked_detail
+from scadbuddy.filament.unknown_tray_rows import (
+    UNKNOWN_SPOOL_LOADED,
+    UnknownSpoolReads,
+    blocked_detail,
+)
 from scadbuddy.library.settings_store import SettingsReader
 from scadbuddy.print_library.ids import is_native_id
 from scadbuddy.print_library.reads import LibraryReads, reads_for
@@ -136,11 +140,14 @@ MAX_SETTINGS_BYTES = 4 * 1024 * 1024
 Connect = Callable[[str, str, str, str], LanPrinter]
 
 
-def _failed(detail: str, *, status_code: int = status.HTTP_502_BAD_GATEWAY) -> ApplicationError:
+def _failed(
+    detail: str, *, status_code: int = status.HTTP_502_BAD_GATEWAY, code: str | None = None
+) -> ApplicationError:
     title = "Bad Gateway" if status_code == status.HTTP_502_BAD_GATEWAY else "Print refused"
+    extensions = {"code": code} if code else {}
     return ApplicationError(
         detail,
-        PrintRunError(status=status_code, title=title, detail=detail),
+        PrintRunError(status=status_code, title=title, detail=detail, extensions=extensions),
         type=FAILED,
         non_retryable=True,
     )
@@ -454,7 +461,9 @@ class LanActivities:
             return
         if refs:
             raise _failed(
-                blocked_detail(row.name, refs), status_code=status.HTTP_422_UNPROCESSABLE_CONTENT
+                blocked_detail(row.name, refs),
+                status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+                code=UNKNOWN_SPOOL_LOADED,
             )
 
     async def _save_uses(self, input: LanPrintInput, started_at: datetime) -> None:

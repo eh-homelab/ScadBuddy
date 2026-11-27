@@ -324,6 +324,7 @@ async def test_lan_print_refuses_before_the_command(pg_pool: PgPool) -> None:
     assert isinstance(outcome, ApplicationError)
     assert outcome.details[0].status == 422
     assert outcome.details[0].detail == DETAIL
+    assert outcome.details[0].extensions["code"] == UNKNOWN_SPOOL_LOADED
     assert lan.commands == []
 
 
