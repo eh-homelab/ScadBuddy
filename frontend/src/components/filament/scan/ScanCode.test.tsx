@@ -1,4 +1,5 @@
 import { screen, waitFor, within } from '@testing-library/react'
+import { useEffect } from 'react'
 import { useLocation } from 'react-router'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { L, spoolId } from '../../../mocks/features/filament/seed'
@@ -208,10 +209,12 @@ describe('ScanCode (#8155, a code scanned from a photo)', () => {
 
   it('gives another read the photo of the preview (an NFC read keeps its own)', async () => {
     giveCamera(async () => stream)
-    let take: (() => Promise<unknown>) | null = null
+    const take: { current: (() => Promise<unknown>) | null } = { current: null }
     function NfcRead() {
       const camera = useScanCamera()
-      take = () => camera!.capture('nfc')
+      useEffect(() => {
+        take.current = () => camera!.capture('nfc')
+      }, [camera])
       return null
     }
     const { user } = renderPage(
@@ -222,7 +225,7 @@ describe('ScanCode (#8155, a code scanned from a photo)', () => {
     )
     await user.click(screen.getByRole('button', { name: 'Start camera' }))
     await screen.findByLabelText('Camera preview')
-    const taken = (await take!()) as { key: string; mediaType: string; scan: { source: string } }
+    const taken = (await take.current!()) as { key: string; mediaType: string; scan: { source: string } }
     expect(taken.key).toMatch(/^scan_image-/)
     expect(taken.mediaType).toBe('image/jpeg')
     expect(taken.scan.source).toBe('nfc')
