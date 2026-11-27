@@ -124,6 +124,7 @@ from scadbuddy.filament.bb_sync_run import FilamentSyncActivities, settings_load
 from scadbuddy.filament.component import FILAMENT
 from scadbuddy.filament.inventory import PoolSbSpoolReads
 from scadbuddy.filament.preset_mirror import mirror_after_pull
+from scadbuddy.filament.preset_writes import preset_write_activities
 from scadbuddy.filament.print_uses import PoolPrintUses
 from scadbuddy.filament.sb_presets import PresetImport, import_from_bambuddy
 from scadbuddy.filament.sensor_notify import SensorNotifyActivities
@@ -2405,6 +2406,9 @@ async def _run_library_worker(state: AppState, stop: asyncio.Event) -> None:
         # The activity that links an unknown AMS tray to a spool (#7143, G5). The Go route that
         # starts it is not built yet.
         *_unknown_tray_activities(state),
+        # Copy and edit of ScadBuddy's own filament presets (#7204, N7). The Go routes that
+        # start them are not built yet.
+        *_preset_write_activities(state),
         *operation_activities(ops.store, state.settings_store, _kinds_on(ops, "library")),
         *trigger_activities,
         migrate_activity(lambda: state.settings_store.pool, state.settings),
@@ -2457,6 +2461,15 @@ def _unknown_tray_activities(state: AppState) -> list[Callable[..., Any]]:
             lambda: state.components.get(FILAMENT), lambda: state.settings_store.pool
         )
     ]
+
+
+def _preset_write_activities(state: AppState) -> list[Callable[..., Any]]:
+    """The copy and edit of a filament preset (#7204): the API alone holds the database secret."""
+    return preset_write_activities(
+        lambda: state.settings_store.pool,
+        lambda: state.store.blobs,
+        lambda: state.settings_store.load(),
+    )
 
 
 def _flow_triggers(
