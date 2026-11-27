@@ -3,7 +3,7 @@
 //
 // The API seals and opens their secrets with the KEK under the agent's own AADs
 // (agent_data/notify.py), so a row either side writes opens on the other. GET /push/waiting
-// stays in Python: it reads the flow grants (flow_triggers).
+// reads the flow grants waiting for a person (waiting.go).
 package notify
 
 import (
@@ -67,6 +67,7 @@ func Areas(pool *pgxpool.Pool, keys *seal.Keys) map[string][]crud.Route {
 	reads := []crud.Route{
 		{Method: "GET", Path: "/push/vapid", Handle: s.vapid},
 		{Method: "GET", Path: "/push/subscriptions", Handle: s.subscriptions},
+		{Method: "GET", Path: "/push/waiting", Handle: s.waiting},
 		{Method: "GET", Path: "/notify-channels", Handle: s.channels},
 		{Method: "GET", Path: "/notify-channels/{channel_id}", Handle: s.channel},
 	}

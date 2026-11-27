@@ -2,6 +2,10 @@ package main
 
 import (
 	"context"
+	"crypto/rand"
+	"crypto/rsa"
+	"crypto/x509"
+	"encoding/pem"
 	"errors"
 	"flag"
 	"io"
@@ -89,6 +93,9 @@ func TestConfig(t *testing.T) {
 		"page over max":           {[]string{"-core-url", "http://core", "-credential-file", "/t", "-page-size", "300"}, nil},
 		"negative timeout":        {[]string{"-core-url", "http://core", "-credential-file", "/t", "-session-timeout", "-1s"}, nil},
 		"bad flag":                {[]string{"-core-url", "http://core", "-credential-file", "/t", "-page-size", "x"}, nil},
+		"github key without ids":  {[]string{"-core-url", "http://core", "-credential-file", "/t", "-github-app-key-file", "/k"}, nil},
+		"github ids without key":  {[]string{"-core-url", "http://core", "-credential-file", "/t", "-github-app-id", "1", "-github-installation-id", "2"}, nil},
+		"github bad app id":       {[]string{"-core-url", "http://core", "-credential-file", "/t"}, map[string]string{"FLEETCHAT_GITHUB_APP_ID": "-3"}},
 	} {
 		t.Run(name, func(t *testing.T) {
 			if _, err := parseConfig(tc.args, env(tc.env)); err == nil {
@@ -96,6 +103,23 @@ func TestConfig(t *testing.T) {
 			}
 		})
 	}
+	t.Run("the github app", func(t *testing.T) {
+		c, err := parseConfig([]string{"-core-url", "http://core", "-credential-file", "/t", "-github-app-id", "5941183"}, env(map[string]string{
+			"FLEETCHAT_GITHUB_INSTALLATION_ID": "186236249", "FLEETCHAT_GITHUB_APP_KEY_FILE": "/k",
+			"FLEETCHAT_GITHUB_WEBHOOK_SECRET_FILE": "/w",
+		}))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if c.GitHubAppID != 5941183 || c.GitHubInstallationID != 186236249 || c.GitHubAppKeyFile != "/k" || c.GitHubWebhookSecretFile != "/w" {
+			t.Errorf("got %+v", c)
+		}
+		// The webhook alone needs no App key.
+		if _, err := parseConfig(nil, env(map[string]string{"FLEETCHAT_CORE_URL": "http://core", "FLEETCHAT_CREDENTIAL_FILE": "/t",
+			"FLEETCHAT_GITHUB_WEBHOOK_SECRET_FILE": "/w"})); err != nil {
+			t.Error(err)
+		}
+	})
 	t.Run("help needs no core URL", func(t *testing.T) {
 		if _, err := parseConfig([]string{"--help"}, env(nil)); !errors.Is(err, flag.ErrHelp) {
 			t.Errorf("err %v, want flag.ErrHelp", err)
@@ -161,7 +185,7 @@ func TestHealthz(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	svc := fleetchat.NewService(nil, idleBus{}, fleetchat.DefaultConfig())
-	srv := httptest.NewServer(newMux(ctx, svc))
+	srv := httptest.NewServer(newMux(ctx, svc, nil))
 	defer srv.Close()
 	res, err := http.Get(srv.URL + "/healthz")
 	if err != nil {
@@ -180,6 +204,82 @@ func TestHealthz(t *testing.T) {
 	res.Body.Close()
 	if res.StatusCode == http.StatusNotFound {
 		t.Errorf("/mcp is not served")
+	}
+}
+
+// TestGitHubWebhookRoute: /github/webhook is served only with a webhook secret file, and
+// then refuses an unsigned delivery.
+func TestGitHubWebhookRoute(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	svc := fleetchat.NewService(nil, idleBus{}, fleetchat.DefaultConfig())
+	post := func(h http.Handler) int {
+		srv := httptest.NewServer(h)
+		defer srv.Close()
+		res, err := http.Post(srv.URL+"/github/webhook", "application/json", strings.NewReader("{}"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		res.Body.Close()
+		return res.StatusCode
+	}
+	off, err := githubWebhook(config{}, nil)
+	if err != nil || off != nil {
+		t.Fatalf("no secret file: %v %v", off, err)
+	}
+	if code := post(newMux(ctx, svc, off)); code != http.StatusNotFound {
+		t.Errorf("no secret file: %d, want 404", code)
+	}
+	path := filepath.Join(t.TempDir(), "webhook")
+	const secret = "generated-webhook-secret-for-the-test"
+	if err := os.WriteFile(path, []byte(secret+"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	on, err := githubWebhook(config{GitHubWebhookSecretFile: path}, nil)
+	if err != nil || on == nil {
+		t.Fatalf("secret file: %v %v", on, err)
+	}
+	if code := post(newMux(ctx, svc, on)); code != http.StatusUnauthorized {
+		t.Errorf("unsigned delivery: %d, want 401", code)
+	}
+	if err := os.WriteFile(path, []byte(" \n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := githubWebhook(config{GitHubWebhookSecretFile: path}, nil); err == nil {
+		t.Error("an empty secret file: no error")
+	}
+}
+
+func TestGitHubWriter(t *testing.T) {
+	if w, err := githubWriter(config{}, nil); w != nil || err != nil {
+		t.Errorf("no key file: %v %v", w, err)
+	}
+	dir := t.TempDir()
+	key, err := rsa.GenerateKey(rand.Reader, 2048)
+	if err != nil {
+		t.Fatal(err)
+	}
+	good := filepath.Join(dir, "key.pem")
+	if err := os.WriteFile(good, pem.EncodeToMemory(&pem.Block{Type: "RSA PRIVATE KEY", Bytes: x509.MarshalPKCS1PrivateKey(key)}), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	c := config{GitHubAppID: 1, GitHubInstallationID: 2, GitHubAppKeyFile: good}
+	if w, err := githubWriter(c, nil); w == nil || err != nil {
+		t.Errorf("a key: %v %v", w, err)
+	}
+	const notAKey = "not-a-key-but-secret-text"
+	bad := filepath.Join(dir, "bad.pem")
+	if err := os.WriteFile(bad, []byte(notAKey), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	c.GitHubAppKeyFile = bad
+	_, err = githubWriter(c, nil)
+	if err == nil || strings.Contains(err.Error(), notAKey) {
+		t.Errorf("a bad key: %v", err)
+	}
+	c.GitHubAppKeyFile = filepath.Join(dir, "missing")
+	if _, err := githubWriter(c, nil); err == nil {
+		t.Error("a missing key: no error")
 	}
 }
 

@@ -1,11 +1,17 @@
-// Dollhouse kit -- a modular 1:6 ("playscale", 29-30 cm fashion doll)
-// dollhouse built from printed panels on one grid. Pick a piece from the
-// dropdown; every piece made with the same Grid settings joins every other.
+// Dollhouse kit -- a modular 1:6 ("playscale", 29-30 cm fashion doll) or
+// 1:12 (10-15 cm doll) dollhouse built from printed panels on one grid. Pick a
+// piece from the dropdown; every piece made with the same Grid settings joins
+// every other.
 //
-// Scale: 1 ft = 50.8 mm. A 30 cm doll is a 5'9" person, the default grid
-// module of 150 mm is 0.9 m, and a room is two wall courses of 210 mm
-// (420 mm = 2.5 m ceiling). Every piece fits a 300 x 300 x 300 mm envelope,
-// which is inside the Bambu H2C's two-nozzle volume (300 x 320 x 325 mm).
+// Scale: at 1:6, 1 ft = 50.8 mm. A 30 cm doll is a 5'9" person, the default
+// grid module of 150 mm is 0.9 m, and a room is two wall courses of 210 mm
+// (420 mm = 2.5 m ceiling). At 1:12, 1 ft = 25.4 mm: module 75, course 105
+// (a 210 mm room). Below a 180 mm course the trim, sills, flower box,
+// shutters, mouldings, door panels, knob, rug border, spindles and stair steps
+// scale by course_height / 210 (DS below), with printable minimums; the keys,
+// pegs, hinge pins and every joint keep their size. Every piece fits a
+// 300 x 300 x 300 mm envelope, which is inside the Bambu H2C's two-nozzle
+// volume (300 x 320 x 325 mm).
 //
 // How pieces join (see README for the diagram):
 //  * wall to wall in line, wall to corner post, course to course, floor tile
@@ -46,8 +52,8 @@ course = "upper"; // [lower:Lower course, upper:Upper course]
 
 /* [Grid] */
 
-// Grid module in mm; all pieces are multiples of it (150 = 0.9 m at 1:6). Use the same value for every piece of a house
-module_size = 150; // [100:5:150]
+// Grid module in mm; all pieces are multiples of it (150 = 0.9 m at 1:6, 75 at 1:12). Use the same value for every piece of a house
+module_size = 150; // [75:5:150]
 
 // Length of a wall, railing, floor tile or roof panel in modules (door walls are at least 1)
 width_units = 1; // [0.5:0.5:2]
@@ -55,8 +61,8 @@ width_units = 1; // [0.5:0.5:2]
 // Depth of a floor tile or roof panel in modules
 depth_units = 2; // [0.5:0.5:2]
 
-// Height of one wall course; a room is two courses (210 = 420 mm ceiling = 2.5 m at 1:6). Same value for every piece of a house
-course_height = 210; // [180:5:240]
+// Height of one wall course; a room is two courses (210 = 420 mm ceiling = 2.5 m at 1:6; 105 at 1:12). Same value for every piece of a house
+course_height = 210; // [105:5:240]
 
 // Wall thickness (also railings and the keys' pocket depth)
 wall_thickness = 6; // [4:0.5:10]
@@ -69,8 +75,8 @@ floor_thickness = 6; // [5:0.5:10]
 // Outside face of walls and corner posts
 exterior = "plain"; // [plain, siding, brick, stone, stucco]
 
-// Brick course height in mm; siding boards are 1.6x this and stone rows 2.2x
-texture_size = 12; // [8:1:20]
+// Brick course height in mm (12 at 1:6, 6 at 1:12); siding boards are 1.6x this and stone rows 2.2x
+texture_size = 12; // [5:1:20]
 
 /* [Interior] */
 
@@ -83,8 +89,8 @@ pattern_repeats = 6; // [2:1:12]
 // Wainscoting (panelled lower wall with a rail) on lower courses
 wainscoting = true;
 
-// Wainscoting height from the floor
-wainscot_height = 90; // [40:5:150]
+// Wainscoting height from the floor (90 at 1:6, 45 at 1:12)
+wainscot_height = 90; // [20:5:150]
 
 // Baseboard along the bottom of lower courses
 baseboard = true;
@@ -97,14 +103,14 @@ crown_moulding = true;
 // Window shape
 window_style = "square"; // [square, arched, round]
 
-// Window opening width (round: diameter); shrinks to fit the wall
-window_width = 70; // [40:5:180]
+// Window opening width (round: diameter; 70 at 1:6, 35 at 1:12); shrinks to fit the wall
+window_width = 70; // [20:5:180]
 
-// Window opening height (ignored for round)
-window_height = 120; // [40:5:200]
+// Window opening height (ignored for round; 120 at 1:6, 60 at 1:12)
+window_height = 120; // [20:5:200]
 
-// Window sill height above the bottom of the course
-window_sill = 40; // [20:5:120]
+// Window sill height above the bottom of the course (40 at 1:6, 20 at 1:12)
+window_sill = 40; // [10:5:120]
 
 // Panes across
 window_panes_x = 2; // [1:1:4]
@@ -129,11 +135,11 @@ trim = true;
 // Door shape: plain and arched hang one leaf (two halves), french hangs a glazed pair
 door_style = "plain"; // [plain, arched, french]
 
-// Clear door width
-door_width = 100; // [80:5:140]
+// Clear door width (100 at 1:6; at 1:12, 40 in a 1-unit door wall, 80 needs 1.5 units)
+door_width = 100; // [40:5:140]
 
-// Clear door height above the threshold (320 or more lets a 30 cm doll walk through)
-door_height = 330; // [320:5:400]
+// Clear door height above the threshold (320 or more lets a 30 cm doll walk through, 165 a 15 cm doll at 1:12)
+door_height = 330; // [160:5:400]
 
 // Raised panels per door leaf half (plain and arched doors)
 door_panels = 2; // [1:1:4]
@@ -160,14 +166,14 @@ roof_style = "shingles"; // [flat, shingles, tiles]
 
 /* [Stairs & railing] */
 
-// Stair width, both stringers included
-stair_width = 100; // [60:5:140]
+// Stair width, both stringers included (100 at 1:6, 50 at 1:12)
+stair_width = 100; // [40:5:140]
 
-// Tread depth (the rise follows from the storey height, about 35 mm)
-tread_depth = 24; // [20:1:32]
+// Tread depth (24 at 1:6, 12 at 1:12; the rise follows from the storey height, about 35 mm at 1:6 and 18 mm at 1:12)
+tread_depth = 24; // [10:1:32]
 
-// Railing height (150 = 0.9 m at 1:6)
-railing_height = 150; // [100:5:180]
+// Railing height (150 = 0.9 m at 1:6, 75 at 1:12)
+railing_height = 150; // [70:5:180]
 
 /* [Connectors] */
 
@@ -299,6 +305,11 @@ T = wall_thickness;
 FT = floor_thickness;
 C = clip_clearance;
 S = 0.6;                    // inlay skin: 3 layers at 0.2
+// Detail scale: 1 for a 1:6 course (180 mm and up), course / 210 below it
+// (0.5 at 1:12). It sizes trim and decoration only, never a joint, and
+// ds(v, lo) never goes below a printable lo.
+DS = CH >= 180 ? 1 : CH / 210;
+function ds(v, lo) = max(lo, v * DS);
 REL = 1.2;                  // exterior relief
 EPS = 0.01;
 
@@ -314,11 +325,13 @@ PD = 12;
 PL = PD + FT - 1.5;
 
 LIN = trim ? 1.6 : 0;       // frame lining inside openings
-FW = trim ? 7 : 0;          // architrave width
+FW = trim ? ds(7, 3) : 0;   // architrave width
 FR = 1.6;                   // architrave relief
-SILL_H = 6; SILL_R = 4; SILL_X = 6;
+SILL_H = ds(6, 3); SILL_R = ds(4, 2); SILL_X = ds(6, 3);
 MT = min(T, 3);             // glazing bar depth
-FBH = 22; FBD = 10;         // flower box height and depth
+MB = ds(2.4, 1.6);          // glazing bar width
+FBH = ds(22, 10); FBD = ds(10, 4);  // flower box height and depth
+FBMIN = ds(14, 7);          // a lower flower box is left off
 
 THR = 5;                    // door threshold height
 TAB = 8;                    // hinge block height
@@ -326,7 +339,7 @@ LT = T - 1;                 // door leaf thickness
 HP = max(1.2, min(2.4, LT - 2));   // hinge pin
 HH = HP + 2 * C;
 
-BB = 14; CR = 12; RAIL = 4; // baseboard, crown, wainscot rail heights
+BB = ds(14, 6); CR = ds(12, 5); RAIL = ds(4, 2); // baseboard, crown, wainscot rail heights
 
 function wl(u) = u * M - G;
 function du(u) = max(u, 1);
@@ -392,7 +405,7 @@ module win_open2d(u) {
 
 function dr_L(u) = wl(du(u));
 function dr_cx(u) = dr_L(u) / 2;
-function dr_w(u) = min(door_width, dr_L(u) - 2 * (KA + C + 5 + LIN + FW));
+function dr_w(u) = min(door_width, dr_L(u) - 2 * (KA + C + ds(5, 3) + LIN + FW));
 function dr_top() = THR + min(door_height, 2 * CH - 25 - THR);
 function dr_axes(u) =
     let (cx = dr_cx(u), w = dr_w(u))
@@ -475,7 +488,7 @@ module sill2d(k, u) {
 
 function box_top() = win_sill() - LIN - (has_sill() ? SILL_H : 0);
 function box_h() = min(FBH, box_top() - 1);
-function has_box() = flower_box && box_h() >= 14;
+function has_box() = flower_box && box_h() >= FBMIN;
 function box_x0(u) = wl(u) / 2 - win_w(u) / 2 - LIN - SILL_X + 3;
 function box_x1(u) = wl(u) / 2 + win_w(u) / 2 + LIN + SILL_X - 3;
 
@@ -485,7 +498,7 @@ module box2d(k, u) {
 }
 
 function sh_w(u) = min(win_w(u) / 2, (wl(u) - win_w(u)) / 2 - LIN - FW - 3);
-function has_shutters(u) = shutters && window_style != "round" && sh_w(u) >= 10;
+function has_shutters(u) = shutters && window_style != "round" && sh_w(u) >= ds(10, 5);
 
 module shutters2d(k, u) {
     if (k == "window" && has_shutters(u)) {
@@ -499,7 +512,7 @@ module shutters2d(k, u) {
 module louvres2d(k, u) {
     if (k == "window" && has_shutters(u)) {
         y0 = win_sill() - LIN; y1 = win_sill() + win_hs(u) + LIN;
-        for (y = [y0 + 5 : 5 : y1 - 6]) rect(-1, y, 1000, y + 2);
+        for (y = [y0 + ds(5, 2.5) : ds(5, 2.5) : y1 - ds(6, 3)]) rect(-1, y, 1000, y + ds(2, 1));
     }
 }
 
@@ -508,8 +521,8 @@ module muntins2d(u) {
     intersection() {
         win_open2d(u);
         union() {
-            for (i = [1 : window_panes_x - 1]) translate([x0 + i * w / window_panes_x - 1.2, y0 - 1]) square([2.4, h + 2]);
-            for (j = [1 : window_panes_y - 1]) translate([x0 - 1, y0 + j * h / window_panes_y - 1.2]) square([w + 2, 2.4]);
+            for (i = [1 : window_panes_x - 1]) translate([x0 + i * w / window_panes_x - MB / 2, y0 - 1]) square([MB, h + 2]);
+            for (j = [1 : window_panes_y - 1]) translate([x0 - 1, y0 + j * h / window_panes_y - MB / 2]) square([w + 2, MB]);
         }
     }
 }
@@ -660,11 +673,12 @@ module wall_holes(k, u) {
 
 module wall_part(col, k, u) { color(col) difference() { children(); wall_holes(k, u); } }
 
-function fl_n(u) = max(1, floor((box_x1(u) - box_x0(u) - 4) / 15));
+function fl_n(u) = max(1, floor((box_x1(u) - box_x0(u) - 4) / ds(15, 7)));
 function fl_x(u, i) = box_x0(u) + (i + 0.5) * (box_x1(u) - box_x0(u)) / fl_n(u);
-function fl_y() = box_top() - box_h() / 2 + 1;
+function fl_y() = box_top() - box_h() / 2 + DS;
+PET = ds(2.6, 1.2);         // blossom petal radius
 
-module petals2d() { for (a = [0 : 72 : 359]) rotate(a) translate([2.6, 0]) circle(r = 2.6, $fn = 16); }
+module petals2d() { for (a = [0 : 72 : 359]) rotate(a) translate([PET, 0]) circle(r = PET, $fn = 16); }
 
 module flowers2d(u, which) {
     for (i = [0 : fl_n(u) - 1]) if (i % 2 == which - 1) translate([fl_x(u, i), fl_y()]) petals2d();
@@ -673,14 +687,14 @@ module flowers2d(u, which) {
 // domed blossoms: straight-sided extrude that narrows, printed on the box face
 module flowers3d(u, which, z0) {
     for (i = [0 : fl_n(u) - 1]) if (i % 2 == which - 1)
-        translate([fl_x(u, i), fl_y(), z0]) linear_extrude(2.5, scale = 0.7) petals2d();
+        translate([fl_x(u, i), fl_y(), z0]) linear_extrude(ds(2.5, 1.2), scale = 0.7) petals2d();
 }
 
 module leaves2d(u) {
     n = fl_n(u); sp = (box_x1(u) - box_x0(u)) / n;
     difference() {
-        for (i = [0 : n]) translate([box_x0(u) + i * sp, fl_y() - 4])
-            for (s = [-1, 1]) rotate(s * 35) scale([1, 0.45]) circle(r = 4.5, $fn = 20);
+        for (i = [0 : n]) translate([box_x0(u) + i * sp, fl_y() - 4 * DS])
+            for (s = [-1, 1]) rotate(s * 35) scale([1, 0.45]) circle(r = ds(4.5, 3), $fn = 20);
         flowers2d(u, 1); flowers2d(u, 2);
     }
 }
@@ -773,7 +787,8 @@ module glazing2d(u, half, a) {
     y0 = leaf_y0(half); x0 = a - LT / 2; x1 = leaf_x1(u, a);
     h = (half == "lower" ? CH - TAB - GAP : dr_top()) - y0;
     intersection() {
-        offset(delta = -10) leaf2d(u, half, a);
+        // the margin keeps the glass clear of the knob
+        offset(delta = -ds(10, 6)) leaf2d(u, half, a);
         if (half == "lower") rect(-1, y0 + 0.45 * h, 1000, 1000);
     }
 }
@@ -782,22 +797,24 @@ module glazing_bars2d(u, half, a) {
     intersection() {
         glazing2d(u, half, a);
         union() {
-            translate([(x0 + x1) / 2 - 1.2, -1]) square([2.4, 1000]);
-            for (y = [0 : 45 : 2 * CH]) translate([-1, y - 1.2]) square([1000, 2.4]);
+            translate([(x0 + x1) / 2 - MB / 2, -1]) square([MB, 1000]);
+            for (y = [0 : 45 * DS : 2 * CH]) translate([-1, y - MB / 2]) square([1000, MB]);
         }
     }
 }
 module panels2d(u, half, a) {
     y0 = leaf_y0(half); x0 = a - LT / 2; x1 = leaf_x1(u, a);
     top = half == "lower" ? CH - TAB - GAP : dr_top();
-    ph_ = (top - y0 - 10) / door_panels;
+    m = ds(10, 5);
+    ph_ = (top - y0 - m) / door_panels;
     intersection() {
-        offset(delta = -10) leaf2d(u, half, a);
+        offset(delta = -m) leaf2d(u, half, a);
         for (i = [0 : door_panels - 1])
-            translate([x0 + 12, y0 + 10 + i * ph_]) offset(r = 2, $fn = 12) offset(delta = -2) square([x1 - x0 - 22, ph_ - 10]);
+            translate([x0 + ds(12, 6), y0 + m + i * ph_]) offset(r = 2, $fn = 12) offset(delta = -2) square([x1 - x0 - ds(22, 11), ph_ - m]);
     }
 }
-function knob_x(u, a) = leaf_x1(u, a) - 6;
+KNOB = ds(4, 2);            // knob radius
+function knob_x(u, a) = leaf_x1(u, a) - ds(6, 3.5);
 
 module leaf_holes(u, half, a) {
     if (half == "lower") translate([a, CH - TAB - GAP - 6, LT / 2]) teardrop_y(HH / 2, 6 + EPS);
@@ -824,7 +841,7 @@ module one_leaf(u, half, a) {
                 }
             }
             if (glazed) translate([0, 0, -1]) linear_extrude(LT + 2) glazing2d(u, half, a);
-            if (knob) translate([kx, ky, -1]) cylinder(r = 4, h = S + 1);
+            if (knob) translate([kx, ky, -1]) cylinder(r = KNOB, h = S + 1);
         }
         if (glazed) slab(0, LT) glazing_bars2d(u, half, a);
         if (!french) slab(LT, 1) panels2d(u, half, a);
@@ -833,8 +850,8 @@ module one_leaf(u, half, a) {
     }
     if (glazed) leaf_part(window_pane_color, u, half, a) slab(0, S) difference() { glazing2d(u, half, a); glazing_bars2d(u, half, a); }
     if (knob) leaf_part(door_knob_color, u, half, a) {
-        translate([kx, ky, 0]) cylinder(r = 4, h = S);
-        translate([kx, ky, LT]) linear_extrude(3.5, scale = 0.5) circle(r = 4, $fn = 24);
+        translate([kx, ky, 0]) cylinder(r = KNOB, h = S);
+        translate([kx, ky, LT]) linear_extrude(ds(3.5, 2), scale = 0.5) circle(r = KNOB, $fn = 24);
     }
 }
 
@@ -988,17 +1005,18 @@ module floor_accent2d(Lx, Ly) {
     }
 }
 
-function rug_m(Lx, Ly) = T + 12 + 0.12 * min(Lx, Ly);
-// The rug needs room for its 6 mm border plus a visible centre; on a tile too
+function rug_m(Lx, Ly) = T + ds(12, 6) + 0.12 * min(Lx, Ly);
+RUG_B = ds(6, 3);           // rug border
+// The rug needs room for its border plus a visible centre; on a tile too
 // small for that it is left off rather than drawn with a negative size.
-function rug_fits(Lx, Ly) = min(Lx, Ly) - 2 * rug_m(Lx, Ly) >= 20;
+function rug_fits(Lx, Ly) = min(Lx, Ly) - 2 * rug_m(Lx, Ly) >= ds(20, 10);
 module rug2d(Lx, Ly) {
     m = rug_m(Lx, Ly);
     if (!rug_fits(Lx, Ly)) {}
     else if (rug == "rectangle") rect(m, m, Lx - m, Ly - m);
     else if (rug == "oval") translate([Lx / 2, Ly / 2]) scale([(Lx - 2 * m) / 2, (Ly - 2 * m) / 2]) circle(r = 1, $fn = 96);
 }
-module rug_inner2d(Lx, Ly) { offset(delta = -6) rug2d(Lx, Ly); }
+module rug_inner2d(Lx, Ly) { offset(delta = -RUG_B) rug2d(Lx, Ly); }
 
 module floor_tile(u, v) {
     Lx = wl(u); Ly = wl(v);
@@ -1027,7 +1045,7 @@ module roof_panel(u, v) {
     s = M / tiles_per_module;
     tile_part(roof_color, Lx, Ly, false) {
         slab(0, FT - S) square([Lx, Ly]);
-        if (roof_style == "flat") slab(FT - S, S) offset(delta = -8) square([Lx, Ly]);
+        if (roof_style == "flat") slab(FT - S, S) offset(delta = -ds(8, 4)) square([Lx, Ly]);
         if (roof_style == "shingles") slab(FT, 0.8) intersection() { square([Lx, Ly]); difference() { shingles2d(Lx, Ly, false); shingles2d(Lx, Ly, true); } }
         if (roof_style == "tiles") intersection() {
             translate([0, 0, FT]) cube([Lx, Ly, 3]);
@@ -1036,7 +1054,7 @@ module roof_panel(u, v) {
         }
     }
     tile_part(roof_accent_color, Lx, Ly, false) {
-        if (roof_style == "flat") slab(FT - S, S) difference() { square([Lx, Ly]); offset(delta = -8) square([Lx, Ly]); }
+        if (roof_style == "flat") slab(FT - S, S) difference() { square([Lx, Ly]); offset(delta = -ds(8, 4)) square([Lx, Ly]); }
         else slab(FT - S, S) square([Lx, Ly]);
         if (roof_style == "shingles") slab(FT, 0.8) intersection() { square([Lx, Ly]); shingles2d(Lx, Ly, true); }
     }
@@ -1051,7 +1069,7 @@ ST = 6;                         // stringer thickness
 SB = 30;                        // stringer depth below the step line
 TT = 4; RT = 3;                 // tread and riser thickness
 SH = 2 * CH + FT;               // storey height
-SN = 2 * max(3, round(SH / 68));
+SN = 2 * max(3, round(SH / (68 * DS)));
 SR = SH / SN;
 STD = min(tread_depth, 290 / (SN / 2));
 SX = SN / 2 * STD;              // x of the joint between the halves
@@ -1106,7 +1124,7 @@ module stair_half(lower) {
 // ------------------------------------------------------------ railing
 // Flat, one wall thickness; pegs into the floor edge holes, keys at the ends.
 
-RP = 16; RB = PD + 4; RTOP = 12;
+RP = 16; RB = PD + 4; RTOP = ds(12, 6);
 
 module railing_holes(L) {
     for (x = [-G / 2, L + G / 2], y = [0.3, 0.7]) translate([x, y * railing_height, -EPS]) linear_extrude(KD + EPS) key2d(C);
@@ -1115,14 +1133,14 @@ module railing_holes(L) {
 
 module railing(u) {
     L = wl(u); H = railing_height;
-    n = max(1, round((L - 2 * RP) / 24)); sp = (L - 2 * RP) / n;
+    n = max(1, round((L - 2 * RP) / (24 * DS))); sp = (L - 2 * RP) / n;
     color(railing_color) difference() {
         slab(0, T) { rect(0, 0, RP, H); rect(L - RP, 0, L, H); rect(0, 0, L, RB); rect(0, H - RTOP, L, H); }
         railing_holes(L);
     }
     color(spindle_color) slab(0, T) for (i = [0 : n - 1]) translate([RP + (i + 0.5) * sp, 0]) {
-        rect(-3.5, RB, 3.5, H - RTOP);
-        translate([0, (RB + H - RTOP) / 2]) circle(d = 12, $fn = 32);
+        rect(-ds(3.5, 1.6), RB, ds(3.5, 1.6), H - RTOP);
+        translate([0, (RB + H - RTOP) / 2]) circle(d = ds(12, 5), $fn = 32);
     }
 }
 

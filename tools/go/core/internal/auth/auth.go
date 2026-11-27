@@ -1,5 +1,8 @@
-// Package auth resolves a service credential, as backend/scadbuddy/auth does
-// (service_auth.py, service_credentials.py `resolve`, gate.py).
+// Package auth resolves who a request is from, as backend/scadbuddy/auth does: a service
+// credential (service_credentials.py `resolve`), a person's session cookie (store.py) or
+// access token (personal_tokens.py), as gate.py picks one. check.go applies
+// SCADBUDDY_AUTH_MODE to a public route as check.py does. The shared vectors
+// (backend/tests/fixtures/auth-vectors.json) hold the two equal.
 package auth
 
 import (
@@ -10,6 +13,7 @@ import (
 	"regexp"
 	"slices"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/jackc/pgx/v5"
@@ -26,17 +30,40 @@ var tokenPattern = regexp.MustCompile(`^sbsvc_[0-9a-f]{16}\.[A-Za-z0-9_-]{43}$`)
 
 // Service is the caller a live service credential names.
 type Service struct {
+	// ID is the credential's id (models.py Service.credential_id).
+	ID     string
 	Caller string
 	Scopes []string
+	// Machine is the <machine> of the bootstrap proof file fleet-rotator.<machine> the
+	// credential was exchanged for; empty for every other credential.
+	Machine string
 }
 
 // Has says whether the credential's scopes hold class.
 func (s *Service) Has(class string) bool { return slices.Contains(s.Scopes, class) }
 
+type serviceKey struct{}
+
+// WithService is ctx with the service a route's guard let in.
+func WithService(ctx context.Context, s *Service) context.Context {
+	return context.WithValue(ctx, serviceKey{}, s)
+}
+
+// ServiceOf is the service the guard let in, nil when none did.
+func ServiceOf(ctx context.Context) *Service {
+	s, _ := ctx.Value(serviceKey{}).(*Service)
+	return s
+}
+
 // Resolver looks credentials up in Postgres. It keeps no cache: a revocation holds at once.
 type Resolver struct {
 	Pool *pgxpool.Pool
 	Now  func() time.Time
+
+	// mu guards the failed lookups' log (caller.go failed).
+	mu       sync.Mutex
+	loggedAt time.Time
+	unlogged int
 }
 
 // Resolve is the service the Authorization header names, or nil. A database that does not
@@ -68,10 +95,11 @@ func (r *Resolver) lookup(ctx context.Context, hash [32]byte, now time.Time) (*S
 		last *time.Time
 	)
 	err := r.Pool.QueryRow(ctx,
-		`SELECT id, caller, scopes, last_used_at FROM service_credentials c
+		`SELECT id, caller, scopes, coalesce(machine, ''), last_used_at FROM service_credentials c
 		 WHERE secret_hash = $1 AND revoked_at IS NULL AND expires_at > $2
 		   AND NOT EXISTS (SELECT 1 FROM service_caller_suspensions s WHERE s.caller = c.caller)`,
-		hash[:], now).Scan(&id, &s.Caller, &s.Scopes, &last)
+		hash[:], now).Scan(&id, &s.Caller, &s.Scopes, &s.Machine, &last)
+	s.ID = id
 	if errors.Is(err, pgx.ErrNoRows) {
 		return nil, nil
 	}

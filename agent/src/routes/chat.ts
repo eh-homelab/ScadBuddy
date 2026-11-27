@@ -3,13 +3,11 @@ import type { Hono, MiddlewareHandler } from 'hono'
 import { WebSocket } from 'ws'
 import type { UpgradeWebSocket, WSContext } from 'hono/ws'
 import { KeyNotReleasedError } from '../api/agentKeys.js'
-import { ApprovalError } from '../approvals/service.js'
-import { QuestionError } from '../gate/questions.js'
 import { contextFrom } from '../telemetry/trace.js'
 import type { TabHub } from '../bridge/hub.js'
 import type { OriginPolicy } from '../http/origins.js'
 import { type AttachmentRef, AttachmentError, type Attachments, type ResolvedAttachment } from '../attachments/store.js'
-import { type ClientMessage, isAnswerId, isSessionId, parseClientFrame, renderPageContext } from '../sessions/clientProtocol.js'
+import { type ClientMessage, parseClientFrame, renderPageContext } from '../sessions/clientProtocol.js'
 import { checkedImages } from '../sessions/images.js'
 import { type SessionManager, SessionError } from '../sessions/manager.js'
 import { event, type Owner, type ServerEvent } from '../sessions/protocol.js'
@@ -41,13 +39,6 @@ import { ready, type RouteModule } from './module.js'
 //                            session once its turn has started
 //   session.attach         → replay the session's event log from the start,
 //                            then follow it live (SessionManager.attach)
-//   question.answer        → QuestionService.answer (#940): the user's answer to
-//                            the agent's AskUserQuestion
-//   approval.decision      → ApprovalService.decision (#258): the same decision
-//                            as POST /api/v1/ai/approvals/:id/approve|deny
-//                          (The panel now answers both through POST
-//                          /api/v1/ai/pending-input/{id}, #815; these two stay
-//                          for a panel loaded before that.)
 //   session.interrupt      → SessionManager.interrupt
 //   session.handoff        → SessionManager.handoff to the browser user (take over)
 //   tab.bind               → the tab this panel is in (#254): from then on each
@@ -59,10 +50,13 @@ import { ready, type RouteModule } from './module.js'
 //                            pair with their tab automatically")
 //
 // A refused operation comes back as an `error` event naming the session and
-// the SessionError/ApprovalError code; the socket stays open. A send refused
+// the SessionError code; the socket stays open. A send refused
 // because the budget is spent is preceded by a `session.budget` event (#790).
 // Raising a budget and forking are HTTP routes (routes/sessions.ts), not
-// socket messages.
+// socket messages. The panel answers approvals and questions through
+// POST /api/v1/ai/pending-input/{id} (#815); the socket's old
+// `approval.decision` and `question.answer` are gone (#7323) and are refused as
+// malformed.
 //
 // The upgrade passes guard.ts `uiRequestProblem` first: a browser always sends
 // `Origin` on a WebSocket handshake, and it must be the UI's (spec §8.4: "An
@@ -129,8 +123,6 @@ export type ChatConnectionOptions = {
   snapshotMs?: number
   /** The browser bridge's tabs (#254); without them `tab.bind` pairs nothing. */
   tabs?: Pick<TabHub, 'pairSession' | 'sessionTab' | 'pairSessionIfStill'> | undefined
-  /** The client's address, for the audit rows of what it does here (a question's answer, #1075). */
-  clientIp?: string | undefined
   /** The panel's uploaded images (#1941), which a `user.message` names by id; without it such a message is refused. */
   attachments?: Attachments | undefined
   /**
@@ -170,38 +162,19 @@ export type ChatRouteDeps = {
 const NOT_CONFIGURED = 'AI features are not set up in this process'
 const NOT_READY = "AI unavailable: the API does not serve the agent's CRUD areas yet"
 
-/**
- * The session and question a malformed `question.answer` frame names, when it
- * names both readably (#940): the panel re-opens that card only, and no other
- * malformed frame touches a sent answer.
- */
-function refusedAnswer(raw: string): { sessionId: string; questionId: string } | Record<string, never> {
-  try {
-    const frame: unknown = JSON.parse(raw)
-    if (typeof frame !== 'object' || frame === null) return {}
-    const { type, sessionId, id } = frame as Record<string, unknown>
-    // The schema's own bounds, so an echoed id is one it would take.
-    return type === 'question.answer' && isSessionId(sessionId) && isAnswerId(id) ? { sessionId, questionId: id } : {}
-  } catch {
-    return {}
-  }
-}
-
 function errorEvent(
   err: unknown,
   sessionId: string | undefined,
   log: (m: string) => void,
-  questionId?: string,
   queuedId?: string,
 ): ServerEvent {
-  // A failed answer names its question (#940), so the panel re-opens that card only; a
-  // refused change to a queued message names it (#6386), so its buttons work again.
-  const where = { ...(sessionId ? { sessionId } : {}), ...(questionId ? { questionId } : {}), ...(queuedId ? { queuedId } : {}) }
-  if (err instanceof SessionError || err instanceof ApprovalError || err instanceof QuestionError) {
+  // A refused change to a queued message names it (#6386), so its buttons work again.
+  const where = { ...(sessionId ? { sessionId } : {}), ...(queuedId ? { queuedId } : {}) }
+  if (err instanceof SessionError) {
     return event({ type: 'error', ...where, code: err.code, message: err.message })
   }
-  // An answer or a decision is audited with its input's hash; a replica that has just started
-  // holds no key yet (api/agentKeys.ts). The panel may send it again.
+  // An action audited with its input's hash finds no key on a replica that has just started
+  // (api/agentKeys.ts). The panel may send it again.
   if (err instanceof KeyNotReleasedError) {
     return event({ type: 'error', ...where, code: 'unavailable', message: 'The assistant is still starting, so this was not done. Send it again.' })
   }
@@ -239,7 +212,6 @@ export class ChatConnection {
   private readonly tabs: Pick<TabHub, 'pairSession' | 'sessionTab' | 'pairSessionIfStill'> | undefined
   /** The tab this panel is in, once it said (`tab.bind`). */
   private tabId: string | undefined
-  private readonly clientIp: string | undefined
   private readonly attachments: Attachments | undefined
   private readonly signedIn: (() => Promise<boolean | undefined>) | undefined
   private readonly signedOut: () => void
@@ -253,7 +225,6 @@ export class ChatConnection {
     this.buffered = options.buffered ?? (() => 0)
     this.overflow = options.overflow ?? (() => {})
     this.tabs = options.tabs
-    this.clientIp = options.clientIp
     this.attachments = options.attachments
     this.signedIn = options.signedIn
     this.signedOut = options.signedOut ?? (() => {})
@@ -355,7 +326,7 @@ export class ChatConnection {
       // Answered through the queue, so it counts against the cap like any other frame.
       const { error, stale } = parsed
       // A tab loaded before #1941 sends images inline (#1959): it is told to reload, in the session it wrote to.
-      const where = stale ?? refusedAnswer(raw)
+      const where = stale ?? {}
       const message = stale ? error : `ignored a malformed message: ${error}`
       return this.enqueue(async () => {
         this.emit(event({ type: 'error', ...where, code: 'invalid', message }))
@@ -522,12 +493,6 @@ export class ChatConnection {
             this.log(`chat: pairing ${message.sessionId}: ${err instanceof Error ? err.message : String(err)}`),
           )
           return
-        case 'approval.decision':
-          await this.sessions.approvals.decision(this.principal, message, { clientIp: this.clientIp })
-          return
-        case 'question.answer':
-          await this.sessions.questions.answer(this.principal, message, { clientIp: this.clientIp })
-          return
         case 'session.interrupt':
           await this.sessions.interrupt(message.sessionId, this.principal)
           return
@@ -556,7 +521,6 @@ export class ChatConnection {
           err,
           sessionId,
           this.log,
-          message.type === 'question.answer' ? message.id : undefined,
           message.type === 'queue.remove' || message.type === 'queue.edit' ? message.id : undefined,
         ),
       )
@@ -652,7 +616,6 @@ export function registerChatRoute(app: Hono, deps: ChatRouteDeps): void {
     gate,
     upgrade((c) => {
       let connection: ChatConnection | undefined
-      const clientIp = deps.remoteAddress(c)
       // The signed-in person on the handshake (#4975 phase 5), else the browser user.
       const principal = browserUser(c)
       // The session that person acts under, re-checked while the socket is open (#5217):
@@ -673,7 +636,6 @@ export function registerChatRoute(app: Hono, deps: ChatRouteDeps): void {
           const raw = ws.raw as { bufferedAmount?: number } | undefined
           connection = new ChatConnection(sessions, (e) => ws.send(JSON.stringify(e)), {
             log,
-            clientIp,
             principal,
             ...(browserSessions && person
               ? {

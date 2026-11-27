@@ -405,7 +405,23 @@ The agent reads no KEK (#5299 step 12).
   credentials with the KEK (areas `credentials` and `payload-keys`,
   [`backend/scadbuddy/api/crud_agent_secrets.py`](../../backend/scadbuddy/api/crud_agent_secrets.py)),
   and the agent never opens one. A turn's credentials come from `POST …/crud/agent/credentials/reveal` (purpose
-  `turn`; `redact` for the scrubbing of tool output, `test` for a connection test), a
+  `turn`; `redact` for the scrubbing of tool output, `test` for a connection test; only the
+  rows whose `scope` is `agent` or `both`, filtered in the reveal's SQL, so a fleet row and every
+  `claude_login` stay closed to the agent and a fleet row's id reads as unknown, #7983; so
+  `redact` leaves fleet secrets out too, which is correct: the agent's process never holds a
+  fleet secret, so it has none to leak. The agent's caller cannot change a fleet row (a
+  `claude_login`, or scope `fleet`) in any way, each refusal the same 409 `credential-refused`:
+  a create or save of a `claude_login`, a save over a fleet row or into scope `fleet`
+  (`agent_data/credentials.py` `_refuse_fleet_rows`, core's `refuseFleetRows`), and a delete,
+  rename, reset or event on a fleet row (`_refuse_if_fleets`, core's `refuseIfFleets`: each
+  write's SQL matches the agent's rows only). Its reorder names the agent's rows only (an
+  order that names a fleet row is the 409), and every fleet row keeps its priority. With no
+  id, its read, save and delete take the first row the agent uses, never a fleet row, so the
+  deprecated single-credential routes act on that row. So a compromised agent pod can neither
+  plant a login that a fleet machine installs nor replace, delete, rename, reset, cool down or
+  disable a fleet login. Only the fleet's own caller (#7984, `agent=False` in the store) writes
+  fleet rows. Any other caller's save that widens a `fleet` row to `agent` or `both` must carry
+  the secret again, else it is a 422), a
   subject's payload data key from `POST …/crud/agent/payload-keys/{subject}`, never the
   KEK. Each answers the `agent` service credential only, writes its `ai_audit` row in the
   same transaction (principal `service:agent`, never the secret), and is `no-store`. A
@@ -848,7 +864,7 @@ A turn that loads an allowed pin also gets two more things:
   `outward`, and in a session it parks for a human. The session's own built-ins
   (`WebFetch`, `WebSearch` and the background ones, `access/nativeBuiltins.ts`
   `SESSION_BUILTINS`) are never among them: every session turn gets those from the agent's
-  `builtin` server (`builtins/server.ts` `classicBuiltinServer`, `mcp__builtin__<Name>`),
+  `builtin` server (`builtins/server.ts` `sessionBuiltinServer`, `mcp__builtin__<Name>`),
   whether or not a package names them, each at its `builtin:claude-code` item's access
   unless that item is `off` (#5870, [operating.md](operating.md) §9). `CronCreate`,
   `ScheduleWakeup` and `Workflow` run at `write` in every turn (they were `outward` while only

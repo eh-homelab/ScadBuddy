@@ -16,8 +16,9 @@ import logging
 import re
 from dataclasses import dataclass, field
 from datetime import UTC, date, datetime, timedelta, tzinfo
+from functools import cache
 from typing import Any, Literal, cast, get_args
-from zoneinfo import ZoneInfo
+from zoneinfo import ZoneInfo, available_timezones
 
 import psycopg
 
@@ -25,7 +26,7 @@ from scadbuddy_durable.secrets import SEAL_V1, Envelope, Kek, SealError, open_se
 
 log = logging.getLogger(__name__)
 
-CredentialKind = Literal["anthropic_api_key", "claude_oauth_token", "gateway"]
+CredentialKind = Literal["anthropic_api_key", "claude_login", "claude_oauth_token", "gateway"]
 
 LEGACY_FORMAT_MESSAGE = (
     "the stored credential was saved in an older format that did not bind its kind and"
@@ -47,7 +48,11 @@ class Credential:
     @property
     def label(self) -> str:
         """For logs: which credential, never its secret (credentials.ts `credentialLabel`)."""
-        what = {"gateway": f"gateway {self.base_url or ''}", "claude_oauth_token": "OAuth token"}
+        what = {
+            "gateway": f"gateway {self.base_url or ''}",
+            "claude_oauth_token": "OAuth token",
+            "claude_login": "Claude login",
+        }
         return f"credential {self.priority + 1} ({what.get(self.kind, 'API key')})"
 
 
@@ -99,11 +104,15 @@ async def usable_credentials(conn: psycopg.AsyncConnection[Any], kek: Kek) -> li
     Usable is the agent's rule: active, or cooling down with its cooldown passed;
     sealed under the mounted key; in the current format; and authenticating against
     its row. A row that fails any of those is skipped and logged by label.
+
+    Only the agent's rows (#7983): never a ``claude_login`` (a whole Claude Code login, the
+    fleet's), and never a row whose ``scope`` is ``fleet``.
     """
     cur = await conn.execute(
         "SELECT id, priority, kind, base_url, secret_sealed, dek_sealed, kek_id, epoch"
         " FROM ai_credentials"
-        " WHERE status = 'active' OR (status = 'cooling_down' AND cooldown_until <= now())"
+        " WHERE (status = 'active' OR (status = 'cooling_down' AND cooldown_until <= now()))"
+        " AND kind <> 'claude_login' AND scope IN ('agent', 'both')"
         " ORDER BY priority"
     )
     usable: list[Credential] = []
@@ -177,10 +186,22 @@ RESET_HORIZON = timedelta(days=31)
 _MONTHS = ("jan", "feb", "mar", "apr", "may", "jun", "jul", "aug", "sep", "oct", "nov", "dec")
 
 
+@cache
+def _zone_names() -> frozenset[str]:
+    """Every zone name this machine's zone data holds, in its exact case. Kept for the
+    process's life: after a ``zoneinfo.reset_tzpath()`` it would no longer match what
+    ``ZoneInfo`` reads, and nothing calls that (#8082)."""
+    return frozenset(available_timezones())
+
+
 def _zone(name: str) -> tzinfo | None:
     """The zone the text names, or None when this machine's zone data does not know it."""
     if name.upper() == "UTC":
         return UTC
+    # On a case-insensitive filesystem (macOS) ZoneInfo opens "america/new_york"; Linux,
+    # Go and the agent refuse it, so a name counts only as written (#8023).
+    if name not in _zone_names():
+        return None
     try:
         return ZoneInfo(name)
     except KeyError, ValueError, OSError:

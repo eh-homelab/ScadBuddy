@@ -482,7 +482,8 @@ func TestAnOperationIsReadByIDAndByKey(t *testing.T) {
 	expect(t, a.ok("GET", "/operations/none", "").raw, `{"operation":null}`)
 	expect(t, a.ok("GET", "/operations/by-key/"+strings.Repeat("cd", 32), "").raw, `{"operation":null}`)
 	expect(t, a.do("GET", base+"/operations/by-key/short", "").status, 422)
-	// The insert and the end write an activity row: still Python's.
+	// `operations:read` forwards the insert and the end; area `operations` serves them
+	// (internal/tasks/ops.go).
 	expect(t, a.do("POST", base+"/operations", "{}").status, http.StatusTeapot)
 }
 

@@ -46,8 +46,7 @@ Readiness: `src/api/crudAreas.ts` `CrudAreas` reads `GET …/crud/agent/areas` f
 not ready: `/mcp` and the data routes answer 503. It is not ready either until the API has
 released the input-hash key (`InputHashKey.isReleased`, `dataHealthOf`'s `keyReleased`), but only
 `/mcp`, health, the workers and the pending-input respond (an answer is audited with its hash,
-503 with `retry`; the chat socket's `question.answer` gets an `unavailable` error to send again,
-`routes/chat.ts` `errorEvent`) wait for the key, not the other data routes (`AgentData.areasReady`,
+503 with `retry`) wait for the key, not the other data routes (`AgentData.areasReady`,
 `routes/module.ts` `ready`), so Settings still answers on an API with no KEK: a tool
 call hashes its input for the audit log after it ran, so no Temporal worker polls before then
 (`AgentWorker`'s `before`), the worker's `/readyz` names the missing areas or the key, and `ai` says
@@ -425,10 +424,10 @@ opens every one and seals it again byte for byte).
     `scadbuddy-agent` with `agent-sessions` when the build has an id (#2726 Phase 11; the
     host queues stay unversioned, `agent/test/temporal.versioning.temporal.test.ts`):
     every `ALL_TOOLS` entry as an activity under its name (`toolActivities.ts`,
-    `runToolWithOutcome` with `gate: 'workflow'`, only for a `session-<id>` workflow (as the
-    session's owner with its turn's tiers), or a flow run's `flow-<id>` (`flowRuns.ts`, #1057: as the
-    run's starter, in no session; a gated call needs the backend's `workflow_run_decisions`
-    approval; no browser tools)), a turn's other tools (#2320, plan Step 9.3,
+    `runToolWithOutcome` with `gate: 'workflow'`, only for a flow run's `flow-<id>` (`flowRuns.ts`,
+    #1057: as the run's starter, in no session; a gated call needs the backend's
+    `workflow_run_decisions` approval; no browser tools); a session's call is `tool:<name>` in its
+    ToolCall workflow, and a bare one from any other workflow is refused `UnknownSession`, #7323), a turn's other tools (#2320, plan Step 9.3,
     `turnTools.ts`, built by `turnServers.ts`: remote plugins
     through the forwarder, packages' http MCP servers and `http_request`): `listTurnTools` lists them per turn as
     `<server>__<tool>`, `turn_tool_tier` tiers a call from its input before it may park,
@@ -554,7 +553,7 @@ opens every one and seals it again byte for byte).
     colliding tools are hidden. Unlisted plugin tools are `outward`.
     A session's browser options (#7027, `ai_sessions.browser`) go to every remote plugin
     route of its turns as `X-ScadBuddy-Browser` (`forwarder.ts` `BROWSER_HEADER`, their JSON;
-    none when the session has none): a classic turn's from `ClaimedSession.browser`, a durable
+    none when the session has none): a session turn's from `ClaimedSession.browser`, a durable
     turn's and its kept client's from the row its owner is read from (`RowSessionOwners`, into
     `TurnContext.browser`; a listing's from the session the turn holds), never a second read; a
     flow's never. Only the forwarder sets it; a client's own is dropped. The playwright-mcp

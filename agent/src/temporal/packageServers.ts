@@ -20,14 +20,14 @@ import type { TurnServer } from './turnTools.js'
 // A plugin package's local (stdio) MCP servers as turn servers (#2320), for a flow run's
 // `tool('<server>__<tool>', …)` (turnTools.ts): a session turn's Claude Code starts them itself
 // from the package it loads. They carry the names Claude Code gives them
-// (`plugin_<package>_<server>`), so their tiers are a classic turn's: each server's
+// (`plugin_<package>_<server>`), so their tiers are a session turn's: each server's
 // `package:<pkg>/mcp:<server>` rows in ai_access, a tool with none outward; a server switched off
 // there is not offered, nor any whose name another package server carries too (#4757). Only for a
 // package approved with `allow_refused`, started in the package's folder with only PATH, HOME and
 // its own declared `env`. A package's http servers are reached through the loopback forwarder
 // instead (plugins/packages/mcp.ts `forwardPackageServers`).
 //
-// And the sweep of package copies (#2395): a classic turn's under a pod's `plugins-local/`
+// And the sweep of package copies (#2395): a session turn's under a pod's `plugins-local/`
 // (plugins/packages/derived.ts), and those a durable session shared under the payload volume's
 // `plugins/` before the Python turn retired (plan 2026-10-13 Step 8.1), until they are gone.
 
@@ -124,7 +124,7 @@ async function connectStdio(config: McpConfig, root: string): Promise<Client> {
 
 /**
  * A package server known but switched off in Settings → Tools & plugins (#4757 final review
- * M2): not listed, never connected to, each call refused in a classic turn's words.
+ * M2): not listed, never connected to, each call refused in a session turn's words.
  */
 export function switchedOffServer(name: string): TurnServer {
   return {
@@ -140,7 +140,7 @@ export function switchedOffServer(name: string): TurnServer {
  * The local MCP servers of the packages approved with `allow_refused`, as turn servers;
  * their http servers come through the forwarder instead (turnServers.ts). A server
  * switched off in `access` (by `packageServerSource`) is not started: it is known, its
- * calls refused in a classic turn's words (`switchedOffServer`, #4757 final review M2).
+ * calls refused in a session turn's words (`switchedOffServer`, #4757 final review M2).
  * One missing from `access` is not started either, nor one whose name another package
  * server carries (`collidingServerNames`).
  * A tool's tier is its stored one, else outward; a tool set off is `offTools`.

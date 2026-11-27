@@ -1,7 +1,6 @@
-"""The outputs routes in the steady state (#7255): a copy run has finished, so the rows
-answer every read and a missing row is a missing output. `test_outputs.py` runs the same
-routes before any copy run. Release B retired the copy (#7257): each test records the
-finished run that release A left."""
+"""The outputs routes in the steady state (#7255): the rows answer every read and a
+missing row is a missing output. Release B retired the copy (#7257), and #7887 dropped
+its run tables."""
 
 from __future__ import annotations
 
@@ -15,7 +14,6 @@ from scadbuddy.api.deps import STATE_ATTR
 from scadbuddy.library.outputs import OutputStore
 from tests.api.conftest import wait_for_job
 from tests.support.operations import press
-from tests.support.row_outputs import record_copy_run
 
 pytestmark = pytest.mark.requires_postgres
 
@@ -41,13 +39,8 @@ def _save(client: TestClient, model: str, width: float, name: str | None = None)
 
 @pytest.fixture
 def first(client: TestClient, model: str, monkeypatch: pytest.MonkeyPatch) -> Iterator[str]:
-    """One output saved, then one finished copy run recorded; after it, nothing globs
-    the outputs for a record."""
+    """One output saved; after it, nothing globs the outputs for a record."""
     output_id = _save(client, model, 1, "first")
-    store = _store(client)
-    assert store.rows is not None
-    rows = store.rows
-    record_copy_run(rows, copied=1)
     real_glob = Path.glob
 
     def no_meta_glob(self: Path, pattern: str, **kwargs: object) -> Iterator[Path]:

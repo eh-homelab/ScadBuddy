@@ -1,8 +1,10 @@
-import { screen, waitFor, within } from '@testing-library/react'
+import { act, screen, waitFor, within } from '@testing-library/react'
+import { http, HttpResponse } from 'msw'
 import { Route, Routes } from 'react-router'
-import { beforeEach, describe, expect, it } from 'vitest'
+import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { getSpool, listCatalog, upsertCatalog } from '../../api/filament'
 import { SPOOL_ADVANCED_KEY } from '../../components/filament/SpoolSections'
+import { CHECK_WAIT_MS } from '../../components/filament/useInsertWeightCheck'
 import { IT, spoolId } from '../../mocks/features/filament/seed'
 import { server } from '../../mocks/server'
 import { rememberAdvanced } from '../../test/advanced'
@@ -38,7 +40,7 @@ function recorded(method: string, match: RegExp) {
   return seen
 }
 
-const OVERFILL = 'Makers overfill by about 10-30 g, so this estimate comes out slightly heavy. A later weighing of an empty spool replaces it.'
+const OVERFILL = "Makers overfill by about 10-30 g, so this estimate comes out slightly heavy. To correct it, edit the insert's empty weight in the catalog."
 
 describe('the weigh form offers an insert weight from a new spool (#7280)', () => {
   it('shows the offer with its numbers, unchecked over a catalog weight', async () => {
@@ -82,11 +84,19 @@ describe('the weigh form offers an insert weight from a new spool (#7280)', () =
     expect(within(panel).getByRole('checkbox', { name: /Save 200 g/ })).toBeChecked()
     await user.click(screen.getByRole('button', { name: 'Record weighing' }))
     await waitFor(() => expect(events.map((one) => one.body)).toEqual([{ kind: 'weighed', grams: 1000, source: 'scale', reading_g: 1200 }]))
-    expect(accepts.map((one) => one.body)).toEqual([{ reading_g: 1200 }])
+    expect(accepts.map((one) => one.body)).toEqual([{ reading_g: 1200, new_empty_weight_g: 200 }])
     expect((await getSpool(spoolId(9))).grams_left).toBe(1000)
     const insert = (await listCatalog('insert-types')).find((one) => one.id === IT.CARDBOARD)
     expect(insert).toMatchObject({ empty_weight_g: 200, empty_weight_basis: 'derived', derived_count: 1 })
     expect(await screen.findByText('Empty spool 200 g (Cardboard spool), from 1 new spool.')).toBeInTheDocument()
+  })
+
+  it('names a derived weight with no readings left (#7450)', async () => {
+    // A delete, or a spool's reading moved to another insert, leaves a derived weight with none.
+    await upsertCatalog('insert-types', { empty_weight_basis: 'derived' }, IT.CARDBOARD)
+    open(9)
+    await heading(9)
+    expect(await screen.findByText('Empty spool 180 g (Cardboard spool), from new-spool readings no longer counted.')).toBeInTheDocument()
   })
 
   it('accepts when a person checks the offer', async () => {
@@ -98,7 +108,7 @@ describe('the weigh form offers an insert weight from a new spool (#7280)', () =
     await user.click(await screen.findByRole('checkbox', { name: /Save 210 g/ }))
     await user.click(screen.getByRole('button', { name: 'Record weighing' }))
     await waitFor(() => expect(events.map((one) => one.body)).toEqual([{ kind: 'weighed', grams: 1000, source: 'scale', reading_g: 1210 }]))
-    expect(accepts.map((one) => one.body)).toEqual([{ reading_g: 1210 }])
+    expect(accepts.map((one) => one.body)).toEqual([{ reading_g: 1210, new_empty_weight_g: 210 }])
   })
 
   it('shows no offer for a used spool, and weighs as today', async () => {
@@ -128,6 +138,74 @@ describe('the weigh form offers an insert weight from a new spool (#7280)', () =
     await screen.findByRole('group', { name: 'Empty spool weight from this new spool' })
     expect(button).toBeEnabled()
     expect(events).toEqual([])
+  })
+
+  it('says that the offer replaces a weight a person set (#7450-3)', async () => {
+    await upsertCatalog('insert-types', { empty_weight_g: 185 }, IT.CARDBOARD)
+    const { user } = open(9)
+    await heading(9)
+    await user.type(screen.getByLabelText('Scale reading, with the spool (g)'), '1200')
+    const panel = await screen.findByRole('group', { name: 'Empty spool weight from this new spool' })
+    expect(within(panel).getByText('This replaces the 185 g a person set.')).toBeInTheDocument()
+  })
+
+  it('says why a spool weighed into a mean gets no later offer (#7451-3)', async () => {
+    server.use(
+      http.get('*/api/v1/filament/spools/:id/insert-weight-offer', () =>
+        HttpResponse.json({
+          offer: { insert_type_id: IT.CARDBOARD, insert_name: 'Cardboard spool', spool_id: spoolId(9), reading_g: 1200, label_weight_g: 1000, derived_g: 200, current_empty_weight_g: 190, current_basis: 'derived', placeholder: false, new_empty_weight_g: 195, sample_count: 2, checked_by_default: true },
+          reason: null,
+          insert_type_id: IT.CARDBOARD,
+          empty_weight_g: 190,
+          filament_g: 1010,
+        }),
+      ),
+    )
+    const { user } = open(9)
+    await heading(9)
+    await user.type(screen.getByLabelText('Scale reading, with the spool (g)'), '1200')
+    const panel = await screen.findByRole('group', { name: 'Empty spool weight from this new spool' })
+    expect(within(panel).getByText("The new weight is a mean, so this spool's grams left can end a few grams off its label weight. It then gets no new offer.")).toBeInTheDocument()
+  })
+
+  it('asks for a new check when the weight changed before the accept (#7450-2)', async () => {
+    await upsertCatalog('insert-types', { note: 'Placeholder weight, not measured.' }, IT.CARDBOARD)
+    const checks = recorded('GET', /\/insert-weight-offer$/)
+    const events = recorded('POST', /\/events$/)
+    const { user } = open(9)
+    await heading(9)
+    await user.type(screen.getByLabelText('Scale reading, with the spool (g)'), '1200')
+    await screen.findByRole('group', { name: 'Empty spool weight from this new spool' })
+    server.use(
+      http.post(
+        '*/api/v1/filament/spools/:id/insert-weight',
+        () => HttpResponse.json({ title: 'Conflict', status: 409, detail: 'the insert weight is now 190 g; check again', code: 'insert_weight_changed', new_empty_weight_g: 190 }, { status: 409 }),
+        { once: true },
+      ),
+    )
+    const before = checks.length
+    await user.click(screen.getByRole('button', { name: 'Record weighing' }))
+    expect(await screen.findByText("The insert's empty weight changed since the check. Check the new numbers, then record the weighing again.")).toBeInTheDocument()
+    await waitFor(() => expect(checks.length).toBeGreaterThan(before))
+    expect(events).toEqual([])
+  })
+
+  it('records the weighing when the check does not answer (#7452)', async () => {
+    // Fake timers that still let real time pass, so the page loads and the wait is skipped.
+    vi.useFakeTimers({ shouldAdvanceTime: true })
+    try {
+      server.use(http.get('*/api/v1/filament/spools/:id/insert-weight-offer', () => new Promise<never>(() => {})))
+      const { user } = open(9)
+      await heading(9)
+      await user.type(screen.getByLabelText('Scale reading, with the spool (g)'), '1200')
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(CHECK_WAIT_MS)
+      })
+      expect(await screen.findByText('The empty weight check did not answer. You can record the weighing without it.')).toBeInTheDocument()
+      expect(screen.getByRole('button', { name: 'Record weighing' })).toBeEnabled()
+    } finally {
+      vi.useRealTimers()
+    }
   })
 })
 
