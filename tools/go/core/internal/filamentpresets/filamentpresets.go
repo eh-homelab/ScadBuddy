@@ -34,7 +34,7 @@ func Public(pool *pgxpool.Pool, blobs Blobs) []auth.Public {
 		return auth.Public{
 			Pattern: "GET " + path,
 			Route:   auth.Route{Class: "api", Template: path},
-			// Every answer of the area, a problem too, is no-store.
+			// Every answer of the handler, a problem too, is no-store. The gate's own refusals get it in main.go.
 			Handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 				w.Header().Set("Cache-Control", "no-store")
 				handler(w, r)

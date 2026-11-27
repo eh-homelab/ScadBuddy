@@ -107,6 +107,24 @@ describe('the preset page', () => {
     expect(await within(compare).findByText('The blob store did not answer. Try again.')).toBeInTheDocument()
   })
 
+  it('asks again when the same pair is picked after a failure', async () => {
+    let calls = 0
+    server.use(
+      http.get('/api/v1/filament/presets/3/diff', () => {
+        calls += 1
+        return calls === 1 ? problem(503, 'store_unavailable', 'down') : HttpResponse.json({ preset_id: 3, from_version: 1, to_version: 2, changes: [] })
+      }),
+    )
+    const { user } = show(3)
+    const compare = await screen.findByRole('region', { name: 'Compare versions' })
+    expect(await within(compare).findByText('The blob store did not answer. Try again.')).toBeInTheDocument()
+    expect(calls).toBe(1)
+    await user.selectOptions(within(compare).getByLabelText('From'), '2')
+    await user.selectOptions(within(compare).getByLabelText('From'), '1')
+    await waitFor(() => expect(calls).toBe(2))
+    expect(await within(compare).findByText('No key changed.')).toBeInTheDocument()
+  })
+
   it('says presets are not on when the area is off', async () => {
     presetsOff()
     show(3)
@@ -136,7 +154,7 @@ describe('the preset page', () => {
     const { user } = show(3)
     const list = await screen.findByRole('list', { name: 'Versions' })
     await waitFor(() => expect(within(list).getAllByText('No key changed.').length).toBeGreaterThan(0))
-    // 10 versions shown: 9 diffs inside the page, and the Compare pair is one of them.
+    // 10 versions shown: 10 diffs, and the Compare pair (11:12) is one of them.
     expect(list.children).toHaveLength(10)
     expect(asked.length).toBeLessThanOrEqual(10)
     expect(asked).not.toContain('1:2')
@@ -158,7 +176,7 @@ describe('the preset page', () => {
     )
     show(3)
     const compare = await screen.findByRole('region', { name: 'Compare versions' })
-    await within(compare).findByRole('table', { name: 'Changed keys, v1 to v2' }).catch(() => within(compare).findByText('No key changed.'))
+    await within(compare).findByText('No key changed.')
     expect(asked.filter((pair) => pair === '1:2')).toHaveLength(1)
   })
 

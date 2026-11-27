@@ -381,7 +381,8 @@ func newRouter(pool *pgxpool.Pool, next http.Handler, keys *seal.Keys, areas, au
 			presetsMounted = true
 			store := filamentpresets.Store(blobstore.New(pool, keys, lookupEnv, tel))
 			for _, p := range filamentpresets.Public(pool, store) {
-				public.Handle(p.Pattern, gate.Wrap(p.Route, p.Handler))
+				// no-store is set outside the gate, so its own 401 and 403 carry it too.
+				public.Handle(p.Pattern, noStore(gate.Wrap(p.Route, p.Handler)))
 				served = true
 			}
 		case "changes":
@@ -539,4 +540,12 @@ func (u *upstreamWait) dial(dial func(ctx context.Context, network, address stri
 // socket that is not there yet.
 func refused(err error) bool {
 	return errors.Is(err, syscall.ECONNREFUSED) || errors.Is(err, syscall.ENOENT)
+}
+
+// noStore sets Cache-Control: no-store before next answers, whatever it answers.
+func noStore(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Cache-Control", "no-store")
+		next.ServeHTTP(w, r)
+	})
 }

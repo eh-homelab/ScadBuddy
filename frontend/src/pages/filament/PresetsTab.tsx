@@ -8,6 +8,7 @@ import { FilamentSearchBox } from '../../components/filament/FilamentSearchBox'
 import { filamentLinks } from '../../lib/filamentLinks'
 import { Button } from '@/components/ui/button'
 import { cn } from '@/lib/utils'
+import { count } from './plural'
 
 const SOURCES: { id: PresetSource; label: string }[] = [
   { id: '3dfp', label: '3DFP' },
@@ -160,13 +161,13 @@ export function PresetsTab() {
                   <MirrorState row={row} />
                 </td>
                 <td className="px-2 py-1.5 text-right tabular-nums">{row.bb_preset_id ?? <span className="text-muted-foreground">None</span>}</td>
-                <td className="px-2 py-1.5 text-right tabular-nums">{`${row.used_by_types} types, ${row.used_by_spools} spools`}</td>
+                <td className="px-2 py-1.5 text-right tabular-nums">{`${count(row.used_by_types, 'type')}, ${count(row.used_by_spools, 'spool')}`}</td>
               </tr>
             ))}
             {shown.length === 0 && (
               <tr className="border-t">
                 <td colSpan={8} className="px-2 py-3 text-muted-foreground">
-                  {rows.length === 0 ? 'No presets yet. Fetch a profile on a type, or pull from Bambuddy.' : needle ? `No preset matches “${search}”.` : 'No preset has this source.'}
+                  {rows.length === 0 ? (typeId ? 'No preset has this type.' : 'No presets yet. Fetch a profile on a type, or pull from Bambuddy.') : needle ? `No preset matches “${search}”.` : 'No preset has this source.'}
                 </td>
               </tr>
             )}

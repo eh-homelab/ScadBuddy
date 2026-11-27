@@ -2296,7 +2296,7 @@ const tools: Tool[] = [
       'Writes nothing.',
     input: z.object({
       source: z.enum(['3dfp', 'bambuddy', 'manual']).optional(),
-      type_id: z.string().uuid().optional(),
+      type_id: z.string().uuid().transform((s) => s.toLowerCase()).optional(),
     }),
     risk: 'read',
     source: SOURCE,

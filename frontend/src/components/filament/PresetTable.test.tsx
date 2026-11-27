@@ -76,6 +76,19 @@ describe('PresetTable', () => {
     expect(screen.getAllByRole('link')).toHaveLength(1)
   })
 
+  it('leaves a ref no binding can hold as text', () => {
+    const rows: PresetInput[] = [
+      { printer_model: 'H2C', nozzle_diameter: '0.4', slicer_filament: 'sb-0', slicer_filament_name: null },
+      { printer_model: 'H2C', nozzle_diameter: '0.6', slicer_filament: 'sb-007', slicer_filament_name: null },
+    ]
+    render(
+      <MemoryRouter>
+        <PresetTable rows={rows} onChange={() => {}} />
+      </MemoryRouter>,
+    )
+    expect(screen.queryAllByRole('link')).toHaveLength(0)
+  })
+
   describe('inherited', () => {
     const FROM_TYPE: EffectivePreset = { printer_model: 'H2C', nozzle_diameter: '0.4', slicer_filament: 'GFA00', slicer_filament_name: 'Bambu PLA Basic @BBL H2C', overridden: false, migrated: false }
 

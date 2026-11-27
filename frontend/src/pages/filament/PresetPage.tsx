@@ -7,6 +7,7 @@ import { FilamentSearchBox } from '../../components/filament/FilamentSearchBox'
 import { filamentLinks } from '../../lib/filamentLinks'
 import { Button } from '@/components/ui/button'
 import { cn } from '@/lib/utils'
+import { count } from './plural'
 
 const SOURCE_LABEL: Record<PresetSource, string> = { '3dfp': '3DFP', bambuddy: 'Bambuddy', manual: 'Manual' }
 const MIRROR_LABEL: Record<PresetMirror, string> = { sent: 'Sent to Bambuddy', pending: 'Not sent to Bambuddy yet', failed: 'Send to Bambuddy failed', bambuddy_owned: 'Owned by Bambuddy' }
@@ -35,8 +36,6 @@ const diffMessage = (cause: unknown) => {
   if (code && DIFF_ERROR[code]) return DIFF_ERROR[code]
   return cause instanceof ApiError ? cause.detail : 'The versions could not be compared. Try again.'
 }
-
-const count = (n: number, noun: string) => `${n} ${noun}${n === 1 ? '' : 's'}`
 
 const date = (iso: string) => new Date(iso).toLocaleString(undefined, { dateStyle: 'medium', timeStyle: 'short' })
 
@@ -98,7 +97,10 @@ function useDiffCache(id: number) {
       asked.current.add(key)
       diffPreset(id, from, to).then(
         (diff) => setResults((was) => new Map(was).set(key, { diff })),
-        (cause: unknown) => setResults((was) => new Map(was).set(key, { error: diffMessage(cause) })),
+        (cause: unknown) => {
+          asked.current.delete(key)
+          setResults((was) => new Map(was).set(key, { error: diffMessage(cause) }))
+        },
       )
     },
     [id],
@@ -113,9 +115,9 @@ const PAGE = 10
 
 /** The keys each version changed from the one before it. A version that cannot be diffed shows why, and the rest still show. */
 function Versions({ preset, diffs }: { preset: PresetDetail; diffs: Diffs }) {
-  const [count, setCount] = useState(PAGE)
+  const [limit, setLimit] = useState(PAGE)
   const versions = useMemo(() => [...preset.versions].sort((a, b) => b.version - a.version), [preset.versions])
-  const shown = useMemo(() => versions.slice(0, count), [versions, count])
+  const shown = useMemo(() => versions.slice(0, limit), [versions, limit])
   const { ask } = diffs
   useEffect(() => {
     shown.forEach((one, at) => {
@@ -162,9 +164,9 @@ function Versions({ preset, diffs }: { preset: PresetDetail; diffs: Diffs }) {
           )
         })}
       </ol>
-      {versions.length > count && (
+      {versions.length > limit && (
         <div>
-          <Button type="button" variant="outline" size="sm" onClick={() => setCount(count + PAGE)}>
+          <Button type="button" variant="outline" size="sm" onClick={() => setLimit(limit + PAGE)}>
             Show more
           </Button>
         </div>

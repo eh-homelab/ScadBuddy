@@ -112,6 +112,11 @@ func keepPreset(t *testing.T, pool *pgxpool.Pool, store *presetStore, doc string
 }
 
 func send(t *testing.T, handler http.Handler, method, path string) (int, string) {
+	status, body, _ := sendCache(t, handler, method, path)
+	return status, body
+}
+
+func sendCache(t *testing.T, handler http.Handler, method, path string) (int, string, string) {
 	t.Helper()
 	server := httptest.NewServer(handler)
 	defer server.Close()
@@ -123,7 +128,7 @@ func send(t *testing.T, handler http.Handler, method, path string) (int, string)
 	}
 	defer res.Body.Close()
 	body, _ := io.ReadAll(res.Body)
-	return res.StatusCode, string(body)
+	return res.StatusCode, string(body), res.Header.Get("Cache-Control")
 }
 
 var teapot = http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusTeapot) })
@@ -135,9 +140,9 @@ func TestPublicRoutesUseTheGate(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if status, body := send(t, enforce, http.MethodGet, "/api/v1/filament/presets"); status != http.StatusUnauthorized ||
-		!strings.Contains(body, "signed-out") {
-		t.Errorf("enforce, signed out: %d %s", status, body)
+	if status, body, cache := sendCache(t, enforce, http.MethodGet, "/api/v1/filament/presets"); status != http.StatusUnauthorized ||
+		!strings.Contains(body, "signed-out") || cache != "no-store" {
+		t.Errorf("enforce, signed out: %d %s, Cache-Control %q", status, body, cache)
 	}
 	rec := recordTelemetry(t)
 	observe, err := newRouter(pool, teapot, keys, filamentpresets.Area, "observe", rec.tel.Meters, nil, nil)

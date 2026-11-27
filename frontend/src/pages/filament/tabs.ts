@@ -1,7 +1,7 @@
 import { filamentLinks } from '../../lib/filamentLinks'
 
 /**
- * #6262 — the Filament section's tabs, in spec §10's order
+ * #6262 — the Filament section's tabs, in spec §10's order, with Presets (#7204) after Types
  * (`docs/superpowers/specs/2026-11-14-filament-management-design.md`). The section shows
  * only the available ones. Suppliers, Invoices and Shopping list are #6266's; Metrics is
  * #6269's.

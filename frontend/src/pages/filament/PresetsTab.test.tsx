@@ -52,6 +52,18 @@ describe('the Presets tab', () => {
     expect(screen.queryByRole('button', { name: /^Clear the type filter/ })).not.toBeInTheDocument()
   })
 
+  it('says no preset has the type when the type filter matches nothing', async () => {
+    renderPage(<PresetsTab />, { route: '/?type_id=00000000-0000-4000-8000-000000000000' })
+    expect(await screen.findByText('No preset has this type.')).toBeInTheDocument()
+    expect(screen.queryByText(/^No presets yet/)).not.toBeInTheDocument()
+  })
+
+  it('uses the singular for a count of one', async () => {
+    renderPage(<PresetsTab />)
+    await presets()
+    expect(await screen.findByText('1 type, 2 spools')).toBeInTheDocument()
+  })
+
   it('names a type by the start of its id when the types cannot be loaded', async () => {
     server.use(http.get('/api/v1/filament/types', () => HttpResponse.json({ detail: 'down' }, { status: 500 })))
     renderPage(<PresetsTab />)

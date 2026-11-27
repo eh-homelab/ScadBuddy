@@ -9,7 +9,7 @@ import { filamentLinks } from '../../lib/filamentLinks'
 import { keyOf } from './presetRows'
 
 /** A ScadBuddy preset's ref, `sb-<id>`; any other value is a Bambuddy id. */
-const SB_REF = /^sb-(\d+)$/
+const SB_REF = /^sb-([1-9]\d{0,17})$/
 
 /** The link to a ScadBuddy preset's page (#7204), or null for a Bambuddy id. */
 function PresetLink({ value }: { value: string }) {

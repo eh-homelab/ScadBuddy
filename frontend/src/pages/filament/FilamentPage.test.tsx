@@ -18,7 +18,7 @@ function render(route: string) {
 }
 
 describe('the Filament section', () => {
-  it('lists every tab of spec §10 in order, all of them built (#6269 built Metrics)', () => {
+  it("lists every tab in order (spec §10's, and Presets (#7204) after Types), all of them built (#6269 built Metrics)", () => {
     expect(FILAMENT_TABS.map((tab) => tab.id)).toEqual([
       'spools',
       'types',

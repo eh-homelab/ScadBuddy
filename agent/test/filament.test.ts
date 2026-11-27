@@ -2273,6 +2273,19 @@ describe('filament preset read tools (#7204)', () => {
     expect(firstText(listed)).toMatchObject([{ id: 7, ui_path: '/filament/presets/7', type_ui_path: expect.any(String) }])
   })
 
+  it('lower-cases the type id before it is sent', async () => {
+    const TYPE = '5d0c8f1e-0000-4000-8000-00000000ABCD'
+    let sent: string | null = null
+    server.use(
+      http.get(PRESETS, ({ request }) => {
+        sent = new URL(request.url).searchParams.get('type_id')
+        return HttpResponse.json([wire.row])
+      }),
+    )
+    await runTool(tool('filament_preset_list'), { type_id: TYPE }, ctx())
+    expect(sent).toBe(TYPE.toLowerCase())
+  })
+
   it('reads a preset and diffs two versions', async () => {
     server.use(
       http.get(`${PRESETS}/7`, () => HttpResponse.json(wire.detail)),
