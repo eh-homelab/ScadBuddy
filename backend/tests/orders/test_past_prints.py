@@ -10,6 +10,7 @@ from decimal import Decimal
 from pathlib import Path
 
 import pytest
+from psycopg.types.json import Jsonb
 
 from scadbuddy.core.problems import ApiError
 from scadbuddy.orders.costs import _unit
@@ -144,6 +145,50 @@ def test_an_archives_run_lists_every_plate_and_its_archive(rows: OrderStore, poo
     send(pool, subject, None, 54, 1, 84)
     assert rows.archive_run_plates(84) == []
     assert rows.archive_run_plates(99) == []
+
+
+def lan_run(pool: PgPool, run_id: str, *plates: int, archived: dict[int, int]) -> None:
+    """A LAN run (#8283): one start per plate in ``result.lan``, and for each plate in
+    ``archived`` the archive that start became, as `print_history._run_by_file` records it."""
+    starts = [
+        {
+            "subtask_name": f"scadbuddy-{run_id[:8]}-p{p}",
+            "started_at": f"2026-11-26T1{p}:00:00Z",
+            "plate_id": p,
+        }
+        for p in plates
+    ]
+    with pool.connection() as conn:
+        conn.execute(
+            "INSERT INTO print_runs (id, output_id, idempotency_key, status, result)"
+            " VALUES (%s, %s, %s, 'succeeded', %s)",
+            (run_id, OUTPUT, f"k-{run_id}", Jsonb({"lan": starts})),
+        )
+        for p, archive_id in archived.items():
+            conn.execute(
+                "INSERT INTO lan_print_archives (archive_id, run_id, subtask_name, plate_id)"
+                " VALUES (%s, %s, %s, %s)",
+                (archive_id, run_id, f"scadbuddy-{run_id[:8]}-p{p}", p),
+            )
+
+
+def test_a_lan_runs_archive_lists_every_plate_of_its_run(rows: OrderStore, pool: PgPool) -> None:
+    """#8283: a LAN run sends no queue item, so its plates are its LAN starts, each with
+    the archive its start became; another LAN run of the same file adds none."""
+    lan_run(pool, "7cb24b655d0740999b530c96fb9f8f7a", 1, 2, archived={1: 360})
+    lan_run(pool, "8dc35c766e1851aaa641d07a0a9g08b", 1, archived={1: 370})
+    assert rows.archive_run_plates(360) == [(1, 360), (2, None)]
+    assert rows.archive_run_plates(370) == [(1, 370)]
+
+
+def test_a_lan_archive_whose_run_was_pruned_lists_the_recorded_starts(
+    rows: OrderStore, pool: PgPool
+) -> None:
+    """#8283: `lan_print_archives` outlives the run's row (it has no foreign key)."""
+    lan_run(pool, "9ed46d877f2962bbb752e18b1b1h19c", 1, 2, archived={1: 380, 2: 381})
+    with pool.connection() as conn:
+        conn.execute("DELETE FROM print_runs WHERE id = %s", ("9ed46d877f2962bbb752e18b1b1h19c",))
+    assert rows.archive_run_plates(381) == [(1, 380), (2, 381)]
 
 
 def test_a_run_s_link_found_after_an_import_owns_the_archive(

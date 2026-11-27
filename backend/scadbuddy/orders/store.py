@@ -2230,7 +2230,12 @@ class OrderStore:
         """Every plate of the print run that made ``archive_id`` (#4777): each queue item
         the run sent for the archive's owner, as ``(plate_id, archive_id)``, the archive
         None for a plate Bambuddy has reported none for, by plate. Empty when the archive
-        is no run's (a print ScadBuddy never sent, or a send recorded before runs were)."""
+        is no run's (a print ScadBuddy never sent, or a send recorded before runs were).
+
+        A LAN run sends no queue item (#8283): its plates are its LAN starts
+        (``print_runs.result -> 'lan'``), each with the archive ``lan_print_archives``
+        records for that start. When the run's row was pruned, the starts recorded there
+        are what is left."""
         with self._read(conn) as c:
             rows = c.execute(
                 "WITH owner AS (SELECT subject, queue_item_id FROM print_links"
@@ -2247,6 +2252,25 @@ class OrderStore:
                 " ORDER BY s.plate_id NULLS LAST, s.queue_item_id",
                 {"a": archive_id},
             ).fetchall()
+            if not rows:
+                rows = c.execute(
+                    "WITH run AS (SELECT run_id FROM lan_print_archives WHERE archive_id = %(a)s)"
+                    " SELECT (e->>'plate_id')::int AS plate_id, (SELECT min(l.archive_id)"
+                    "  FROM lan_print_archives l WHERE l.run_id = r.run_id"
+                    "  AND l.subtask_name = e->>'subtask_name') AS archive_id"
+                    " FROM run r JOIN print_runs p ON p.id = r.run_id,"
+                    " jsonb_array_elements(CASE WHEN jsonb_typeof(p.result->'lan') = 'array'"
+                    "  THEN p.result->'lan' END) AS e"
+                    " ORDER BY (e->>'plate_id')::int NULLS LAST, e->>'started_at'",
+                    {"a": archive_id},
+                ).fetchall()
+            if not rows:
+                rows = c.execute(
+                    "SELECT l.plate_id, l.archive_id FROM lan_print_archives l"
+                    " JOIN lan_print_archives a ON a.run_id = l.run_id AND a.archive_id = %(a)s"
+                    " ORDER BY l.plate_id NULLS LAST, l.archive_id",
+                    {"a": archive_id},
+                ).fetchall()
         return [(row["plate_id"], row["archive_id"]) for row in rows]
 
     def archive_copy(self, archive_id: int) -> int | None:
