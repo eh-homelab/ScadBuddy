@@ -131,26 +131,9 @@ call PUT "/printers/${printer_id}/lan" "{\"host\": \"printer\", \"access_code\":
 
 if [ "$mode" = recorder ]; then
   log "one spool refresh from the recorder: Bambuddy's spools pulled"
-  # The recorder's spools the pull is meant to link: a spool with no tag, and the first
-  # spool of each tag. A later spool with a tag an earlier one holds is Bambuddy's own
-  # duplicate of it and stays unlinked (`filament_bb_ignored`, `bambuddy_pull.py`
-  # `_linked_holder`, #6264). The recording scrubbed six tags to one placeholder, so
-  # five of them are such duplicates. Spool RECORDER_TAGGED_SPOOL_ID (2) has its own tag
-  # (`bambuddy-recorder/recorder.py`).
-  expected="$(RECORDER_TAGGED_SPOOL_ID="${RECORDER_TAGGED_SPOOL_ID:-2}" python3 -c '
-import json, os, sys
-seen, ids = set(), []
-for s in json.load(open(sys.argv[1])):
-    key = None
-    if s["id"] == int(os.environ["RECORDER_TAGGED_SPOOL_ID"]):
-        key = ("printer-tag",)
-    elif s["tag_uid"] or s["tray_uuid"]:
-        key = (s["tag_uid"], s["tray_uuid"])
-    if key is None or key not in seen:
-        ids.append(s["id"])
-        seen.add(key)
-print(*ids)' "$here/bambuddy-recorder/answers/inventory-spools.json")"
-  want="$(wc -w <<<"$expected" | tr -d ' ')"
+  # Every spool the recorder lists, linked to the SB spool the pull made of it.
+  want="$(python3 -c 'import json, sys; print(len(json.load(open(sys.argv[1]))))' \
+    "$here/bambuddy-recorder/answers/inventory-spools.json")"
   "${compose[@]}" exec -T temporal temporal schedule trigger \
     --schedule-id "$spool_schedule" --address 127.0.0.1:7233 --namespace default >/dev/null
   pulled=""
@@ -160,10 +143,7 @@ print(*ids)' "$here/bambuddy-recorder/answers/inventory-spools.json")"
     sleep 1
   done
   if [ "${pulled:-0}" -lt "$want" ]; then
-    echo "seed($mode): the pull linked ${pulled:-0} of the ${want} recorder spools it should link (recorder ids ${expected}):" >&2
-    linked_ids="$(psql_value "SELECT string_agg(bb_spool_id::text, ' ') FROM filament_bb_links" || true)"
-    missing="$(python3 -c 'import sys; print(*sorted(set(sys.argv[1].split()) - set(sys.argv[2].split()), key=int))' "$expected" "$linked_ids")"
-    echo "seed($mode): recorder ids not linked: ${missing:-none}" >&2
+    echo "seed($mode): the pull linked ${pulled:-0} of the recorder's ${want} spools:" >&2
     psql_value "SELECT bb_spool_id, linked_at FROM filament_bb_links" >&2 || true
     exit 1
   fi
