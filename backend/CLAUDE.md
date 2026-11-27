@@ -1698,7 +1698,10 @@ only the sleeps move; a budget on the real clock fails on a slow runner (#6252).
   output with no row and no young claim. A save with a new id takes no claim, so its holds
   are kept only while they are younger than the grace. The release's migration
   (`20261125T1737Z_outputs_drop_output_index.sql`) refuses to run without the cut-over
-  mark, and drops `output_index` and `output_hold_slugs`. A reader that needs a path
+  mark, and drops `output_index` and `output_hold_slugs`. Since #7887
+  nothing reads or writes the mark, the copies' run tables or the copy-only columns of
+  `outputs`, and `GET /outputs/copy-status` is gone; #7887's second step drops them. A
+  reader that needs a path
   opens `OutputStore.local_role` or `read_role` (`async with`: the blob as a temporary
   file under `ContentStore.spool`, #7316) and runs its sync reader in a thread; there
   is no blocking helper for sync callers. What a reader derives of the model is kept in `output_derived`, and

@@ -10,7 +10,7 @@ from pathlib import Path
 from fastapi.testclient import TestClient
 
 from scadbuddy.api.deps import STATE_ATTR
-from scadbuddy.library.output_rows import Role, output_blob_key
+from scadbuddy.library.output_rows import OUTPUT_HOLDER, Role, output_blob_key, plate_cover_prefix
 from scadbuddy.library.outputs import MODEL_NAME, OutputStore
 
 
@@ -30,7 +30,23 @@ async def rewrite_stored_model(
         path.write_bytes(data)
         write(path)
         await blobs.put_file(output_blob_key(output_id, "model"), path, slug=slug)
-    outputs.rows.drop_derived(output_id)
+    drop_derived(outputs, output_id)
+
+
+def drop_derived(outputs: OutputStore, output_id: str) -> None:
+    """Delete what readers derived of the output and release its plate cover's hold, in
+    one transaction, for when the model key took other bytes. It locks the row first, so
+    a derive write that read the old bytes either commits before this deletes, or finds
+    the new sha256 and writes nothing (`output_rows._lock_for_derive`). Only tests move a
+    saved output's model key (#7887)."""
+    with outputs.rows._pool.connection() as conn, conn.transaction():
+        conn.execute("SELECT 1 FROM outputs WHERE output_id = %s FOR UPDATE", (output_id,))
+        conn.execute("DELETE FROM output_derived WHERE output_id = %s", (output_id,))
+        conn.execute(
+            "DELETE FROM blob_refs WHERE holder_kind = %s AND holder_id = %s"
+            " AND starts_with(key, %s)",
+            (OUTPUT_HOLDER, output_id, plate_cover_prefix(output_id)),
+        )
 
 
 def _outputs(client: TestClient) -> OutputStore:
