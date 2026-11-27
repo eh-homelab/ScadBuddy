@@ -4,8 +4,8 @@
 There is no stored switch of its own: the stored backends are the user's control. One
 request may ask for a path over this choice (`PrintRunRequest.path`, #5352, `run_route`'s
 ``asked``). Otherwise a run is native when the slicer and the library are ScadBuddy's
-own, the store is one a native run can read its copy from (``s3``, or ``bambuddy``, whose
-calls are the store's and outside the print path), and the printer row's resolved path
+own, the store is one a native run can read its copy from (``s3``; the API no longer
+starts on ``bambuddy``, #7257), and the printer row's resolved path
 (`print_run.run_path`, plan 2026-10-16 Task 8) is the LAN. Decided per run, from the
 settings as they are then: never once at a process's start."""
 
@@ -16,7 +16,7 @@ from typing import Literal
 from scadbuddy.library.settings_store import StoredSettings
 
 #: The stores a native run reads its copy from (D2).
-NATIVE_STORES = ("s3", "bambuddy")
+NATIVE_STORES = ("s3",)
 
 
 def native_backends(settings: StoredSettings) -> bool:

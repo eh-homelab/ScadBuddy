@@ -5,6 +5,7 @@ as the backstop."""
 
 from __future__ import annotations
 
+from scadbuddy.entities.actor import SWEEP_ACTOR, set_actor
 from scadbuddy.entities.attachments import ORDER_KINDS, EntityAttachmentStore
 from scadbuddy.entities.registry import EntityStore
 
@@ -18,11 +19,13 @@ def sweep_orphan_entities(
     a released claim) go too, but only once they hold no file: their files are the order
     code's, which removes or moves them before the owner's row goes. An orphan that a
     stock move or a relationship names stays: their foreign keys keep it (R-P2-4, #7067;
-    inventory K1)."""
+    inventory K1). Each key an orphan loses is a history remove by `SWEEP_ACTOR` (#6949)."""
     removed = 0
     with entities.pool.connection() as conn:
         for entity_id, ref in entities.orphans(conn, limit, guarded=ORDER_KINDS):
             with conn.transaction():
+                # The event log's lock before the entity's (`entities/actor.py`).
+                set_actor(conn, SWEEP_ACTOR)
                 # The owner is checked again under the entity's lock: a row made under
                 # the same id since `orphans` read keeps its files and links.
                 conn.execute("SELECT 1 FROM entities WHERE id = %s FOR UPDATE", (entity_id,))

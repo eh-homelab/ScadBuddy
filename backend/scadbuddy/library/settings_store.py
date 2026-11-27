@@ -152,8 +152,10 @@ S3_FIELDS = (
     "store_s3_secret_access_key",
     "store_s3_path_style",
 )
-#: The fields a render worker reads (spec §9): the store and the key it uses. The full
-#: key only when no render key is stored, as the fallback.
+#: The store's fields (spec §9), read through the `render_settings` view: by the API,
+#: and by a render worker through the API's CRUD route, which answers no Bambuddy key
+#: (`api/crud_render.py` `withheld`, #7882). The full key only when no render key is
+#: stored: the API's read of the Bambuddy store, a store migration's source.
 RENDER_FIELDS = (
     "store_backend",
     "bambuddy_url",
@@ -793,14 +795,11 @@ class StoredSettings(BambuddyIds):
             return DEFAULT_ASSET_FETCH_DOMAINS
         return tuple(self.asset_fetch_domains)
 
-    def render_bambuddy_key(self) -> tuple[str | None, bool]:
-        """The key the API's own render store uses, and whether it is the full key by
-        fallback. With no key at all there is nothing to fall back to: ``(None, False)``,
-        as the view's ``render_key_fallback``. A standalone render worker never gets the
-        full key: the CRUD route withholds it (`api/crud_render.py` `withheld`, #5298)."""
-        if self.bambuddy_render_api_key:
-            return self.bambuddy_render_api_key, False
-        return self.bambuddy_api_key, self.bambuddy_api_key is not None
+    def render_bambuddy_key(self) -> str | None:
+        """The key the API reads the Bambuddy store with, as a store migration's source:
+        the render key, else the full key. A render worker never gets either: the CRUD
+        route withholds them (`api/crud_render.py` `withheld`, #7882)."""
+        return self.bambuddy_render_api_key or self.bambuddy_api_key
 
     def s3_settings(self) -> S3Settings | None:
         """The S3 store's connection, or ``None`` until it has all it needs."""
@@ -1498,12 +1497,12 @@ class SettingsStore:
     def _check_store_ready(
         self, conn: Connection[DictRow], changes: dict[str, Any], reset: list[str]
     ) -> None:
-        """The merged result, not the patch: clearing the URL or the inbox while on the
-        Bambuddy store would leave a store the next start refuses (`build_store`). A
-        reset name is part of it: its row goes, and the value is the deployment's.
+        """The merged result, not the patch: clearing an S3 key while on the S3 store
+        would leave a store the next start refuses (`build_store`). A reset name is part
+        of it: its row goes, and the value is the deployment's.
 
         Read under `STORE_READINESS_LOCK`, in the write's own transaction: two saves each
-        safe alone (one clears the URL, one switches to Bambuddy) serialize, and the
+        safe alone (one clears an S3 key, one switches to S3) serialize, and the
         second sees the first. A row lock would not do: a value that follows the
         environment has no row to lock. The storefront mail's user and TLS mode are
         checked the same way (`MAIL_LOGIN_TLS`)."""
@@ -1954,11 +1953,9 @@ class RenderStoreSettings(BaseModel):
 
     store_backend: StoreBackend = "local"
     bambuddy_url: str | None = None
+    #: The render key, else the full key: the API's own read only. The CRUD route's
+    #: answer to a render worker holds none (`api/crud_render.py` `withheld`, #7882).
     api_key: str | None = Field(default=None, repr=False)
-    #: True when no render key is stored but the full key is: the API's own read then
-    #: holds the full key in `api_key`; the CRUD route's answer to a render worker holds
-    #: none (`api/crud_render.py` `withheld`).
-    key_is_fallback: bool = False
     library_folder_id: int | None = None
     s3: S3Settings | None = None
     #: The per-job colour slots in effect: the Settings page's, else the environment's;
@@ -1972,8 +1969,7 @@ def load_render_store_settings(
     """Read only `RENDER_FIELDS`: a worker holds no settings store (spec §9). Through
     the `render_settings` view, all of the settings a render worker gets (#601), from
     the API's CRUD route (#5298). The full key is in it only while no render key is
-    stored, and the route withholds it from the worker then (`api/crud_render.py`
-    `withheld`)."""
+    stored; the route withholds both from the worker (`api/crud_render.py` `withheld`)."""
     kek = settings_kek(defaults.secret_key_file)
     with pool.connection() as conn:
         rows = conn.execute(
@@ -1986,12 +1982,10 @@ def load_render_store_settings(
     # A JSON null is a field cleared in Settings: it beats the environment's seed.
     values.update(_opened(kek, {row["name"]: row["value"] for row in rows}))
     stored = StoredSettings.model_validate(values)
-    key, fallback = stored.render_bambuddy_key()
     return RenderStoreSettings(
         store_backend=stored.store_backend,
         bambuddy_url=stored.bambuddy_url,
-        api_key=key,
-        key_is_fallback=fallback,
+        api_key=stored.render_bambuddy_key(),
         library_folder_id=stored.library_folder_id,
         s3=stored.s3_settings(),
         solid_concurrency=_solid_concurrency(values, defaults),

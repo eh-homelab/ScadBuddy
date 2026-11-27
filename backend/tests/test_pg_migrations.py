@@ -130,7 +130,10 @@ def test_positional_ledger_applies_what_it_had_not_run(pg_conninfo: str) -> None
     _positional_ledger(pg_conninfo, [1, 2])
     with psycopg.connect(pg_conninfo) as conn:
         assert migrate(conn) == [m.id for m in MIGRATIONS[2:]]
-        assert conn.execute("SELECT count(*) FROM events").fetchone() == (0,)
+        # The only events are the property history's back-fill of the kinds' schemas (#6949).
+        assert conn.execute(
+            "SELECT count(*) FROM events WHERE kind <> 'entity_property_schema.changed'"
+        ).fetchone() == (0,)
 
 
 @pytest.mark.requires_postgres
@@ -2308,3 +2311,47 @@ def test_a_moved_kind_keeps_its_old_chains_schema(pg_conninfo: str) -> None:
             "hardware": ["mpn"],
             "ams_part": ["mpn"],
         }
+
+
+@pytest.mark.requires_postgres
+def test_property_history_backfills_existing_rows(pg_conninfo: str) -> None:
+    """#6949 (design §4.8): each property that exists before the history is one `set` event
+    at its own `updated_at`, past the history subscriber's starting cursor."""
+    history = _index("property_history_events")
+    with psycopg.connect(pg_conninfo) as conn:
+        migrate(conn, MIGRATIONS[:history])
+        before = conn.execute(
+            "INSERT INTO events (event_id, kind, at, payload) VALUES ('e0', 'job.progress',"
+            ' now(), \'{"id": "e0", "at": "2026-11-25T00:00:00Z", "kind": "job.progress"}\')'
+            " RETURNING seq"
+        ).fetchone()
+        assert before is not None
+        entity = conn.execute(
+            "INSERT INTO entities (kind, ref) VALUES ('item', 'i1') RETURNING id"
+        ).fetchone()
+        assert entity is not None
+        conn.execute(
+            "INSERT INTO entity_properties (entity_id, key, value, updated_at, updated_by)"
+            " VALUES (%s, 'b', '2', '2026-11-01T00:00:00Z', '{\"kind\": \"browser\"}'),"
+            " (%s, 'a', '\"x\"', '2026-11-02T00:00:00Z', '{\"kind\": \"browser\"}')",
+            (entity[0], entity[0]),
+        )
+        assert migrate(conn)[0] == MIGRATIONS[history].id
+        rows = conn.execute(
+            "SELECT e.seq, e.payload, p.updated_at FROM events e JOIN entity_properties p"
+            " ON p.entity_id = (e.payload->>'entity_id')::uuid AND p.key = e.payload->>'key'"
+            " WHERE e.kind = 'entity_property.changed' ORDER BY e.seq"
+        ).fetchall()
+        cursor = conn.execute("SELECT seq FROM event_subscribers WHERE name = 'history'").fetchone()
+        changed_at = [
+            conn.execute("SELECT %s::timestamptz", (p["changed_at"],)).fetchone()
+            for _, p, _ in rows
+        ]
+    assert [(p["key"], p["op"], p["old"], p["new"], p["ref"]) for _, p, _ in rows] == [
+        ("a", "set", None, "x", "i1"),
+        ("b", "set", None, 2, "i1"),
+    ]
+    assert [p["actor"] for _, p, _ in rows] == [{"kind": "browser"}] * 2
+    assert changed_at == [(updated_at,) for _, _, updated_at in rows]
+    assert cursor == before
+    assert all(seq > before[0] for seq, _, _ in rows)

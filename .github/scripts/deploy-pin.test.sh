@@ -641,6 +641,33 @@ if CAMERA_EDGE_DIGEST="" run "$(deployment scadbuddy "$IMAGE:$old" "$agent")"; t
 else
   fail "camera edge, no image: step failed: $(grep '::error' "$work/log")"
 fi
+# #8191: the edge's new image runs the same inputs as its pin (the resolve
+# step's edge_same names that pin, and its digest output is empty): both pins
+# and the comment stay, with a notice and no warning, the final check passes
+# that one pin, and the recorder still moves.
+if CAMERA_EDGE_DIGEST="" CAMERA_EDGE_SAME="$CAMERA_EDGE_IMAGE:$cam_old" run "$(deployment scadbuddy "$IMAGE:$old" "$agent")"; then
+  n=$(grep -cF "image: $CAMERA_EDGE_IMAGE:$cam_old" "$work/repo/$MANIFEST_CAMERA_EDGE" || true)
+  [ "$n" -eq 2 ] || fail "camera edge, same inputs: $n old pins kept, expected 2"
+  grep -qF "the build of the API's sha-1111111." "$work/repo/$MANIFEST_CAMERA_EDGE" \
+    || fail "camera edge, same inputs: comment moved without the pins"
+  grep -q '^camera_edge=same$' "$work/out" || fail "camera edge, same inputs: output is not same"
+  grep -q '::notice.*runs the same inputs as.*keeping the camera-edge pins' "$work/log" \
+    || fail "camera edge, same inputs: no notice: $(cat "$work/log")"
+  grep -q '::warning.*camera-edge' "$work/log" && fail "camera edge, same inputs: warned"
+  grep -q "$MANIFEST_CAMERA_EDGE" "$work/out" && fail "camera edge, same inputs: kept file listed as changed"
+  grep -q '^camera_recorder=pinned$' "$work/out" || fail "camera edge, same inputs: recorder output is not pinned"
+else
+  fail "camera edge, same inputs: step failed: $(grep '::error' "$work/log")"
+fi
+# The final check passes only the pin the resolve step compared: a file whose
+# pin is another one fails, so a kept pin is always the one that was checked.
+if CAMERA_EDGE_DIGEST="" CAMERA_EDGE_SAME="$CAMERA_EDGE_IMAGE:sha-5555555@sha256:$(printf '5a%.0s' {1..32})" \
+  run "$(deployment scadbuddy "$IMAGE:$old" "$agent")"; then
+  fail "camera edge, same inputs for another pin: step passed, expected the final check to fail"
+else
+  grep -q "$CAMERA_EDGE_IMAGE:$cam_old" "$work/log" \
+    || fail "camera edge, same inputs for another pin: wrong error: $(grep '::error' "$work/log")"
+fi
 # The two containers must run one image: one line alone, or two that differ, fail.
 cam_edge_line="ghcr.io/eh-homelab/temporal-server:1.32.1"
 if run "$(deployment scadbuddy "$IMAGE:$old" "$agent")"; then

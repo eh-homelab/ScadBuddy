@@ -6,7 +6,11 @@ import psycopg
 from fastapi.testclient import TestClient
 
 from scadbuddy.api.deps import STATE_ATTR
+from scadbuddy.orders.models import Actor
 from scadbuddy.printers.component import PRINTERS, Printers
+
+#: Who a test's printer merge is by (#6949: a merge names its actor).
+MERGED_BY = Actor(kind="browser")
 
 
 def bambuddy_printer(conninfo: str, bambuddy_id: int) -> str:
@@ -29,6 +33,6 @@ def linked_printer(client: TestClient, bambuddy_id: int) -> str:
     print run makes it (`PrinterStore.ensure_bambuddy`): its id."""
     registry: Printers = getattr(client.app.state, STATE_ATTR).components.get(PRINTERS)  # type: ignore[attr-defined]
     row = registry.store.ensure_bambuddy(
-        bambuddy_id, serial=None, name=f"Printer {bambuddy_id}", model=None
+        bambuddy_id, serial=None, name=f"Printer {bambuddy_id}", model=None, by=MERGED_BY
     )
     return row.id

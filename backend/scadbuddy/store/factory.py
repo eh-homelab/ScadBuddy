@@ -19,7 +19,7 @@ from scadbuddy.store import BlobStore
 from scadbuddy.store.assets import RemoteAssets
 from scadbuddy.store.backends import RECOVER_LOCAL_SQL as RECOVER_LOCAL_SQL
 from scadbuddy.store.backends import RemoteBackend, build_backend
-from scadbuddy.store.bambuddy import KeepsFolders, StoreSettingsSource
+from scadbuddy.store.bambuddy import StoreSettingsSource
 from scadbuddy.store.cache import CachedBlobStore
 from scadbuddy.store.content import ContentStore, StoreUsage
 from scadbuddy.store.download_cache import DownloadCache
@@ -77,7 +77,6 @@ def build_store(
     metrics: Metrics | None,
     downloads_dir: Path | None = None,
     downloads_private: bool = False,
-    folders: KeepsFolders | None = None,
     drop_asset_copy: Callable[[str], bool] | None = None,
 ) -> StoreBundle:
     """``downloads_dir`` is where this process keeps whole Bambuddy downloads (#2788),
@@ -90,8 +89,7 @@ def build_store(
     PUTs, slice bodies, thumbnail and archive copies, a library upload's body) go under
     it, and no caller passes it.
     ``index`` is the blob index: the API's `BlobIndex` on ``pool``, the render worker's
-    `crud/render.py` `RemoteBlobIndex` (#5298). ``folders`` keeps a Bambuddy store's
-    folders: SQL on ``pool`` unless given (the render worker's `RemoteStoreFolders`).
+    `crud/render.py` `RemoteBlobIndex` (#5298).
     ``drop_asset_copy`` drops an upload's unreadable copy: the render worker's
     `RemoteAssetRows.drop_copy`, None on the API (`RemoteAssets`). ``pool`` is None on the
     render worker, which holds no database. The piece cache of a remote store is under
@@ -112,7 +110,7 @@ def build_store(
     )
     if backend == "local":
         return StoreBundle("local", local, None, None, None, None, source, downloads=downloads)
-    remote = build_backend(backend, current, source, pool, index, folders)
+    remote = build_backend(backend, current, source, pool, index)
     content = ContentStore(
         remote,
         index,
@@ -175,10 +173,6 @@ class StoreHealth(BaseModel):
     backend: StoreBackend
     #: The backend stored in Settings; differs from `backend` until a restart.
     configured_backend: StoreBackend
-    #: This process's store holds the full Bambuddy key because no render key is saved
-    #: (spec §9): a render inside the API process runs template code that can print. A
-    #: standalone render worker never gets the full key (`api/crud_render.py` `withheld`).
-    render_key_fallback: bool
     #: The render worker Deployment may run more than one replica (spec §3.1).
     multi_worker: bool
     #: False while the stored settings cannot be re-read: the fields above are then
@@ -196,7 +190,6 @@ async def store_health(bundle: StoreBundle, *, wait: bool = True) -> StoreHealth
     return StoreHealth(
         backend=bundle.backend,
         configured_backend=current.store_backend,
-        render_key_fallback=current.key_is_fallback and bool(current.api_key),
         multi_worker=bundle.backend != "local",
         settings_current=bundle.source.fresh,
     )

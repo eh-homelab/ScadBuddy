@@ -256,6 +256,15 @@ def test_an_unready_bambuddy_backend_is_refused(
     assert RECOVER_LOCAL_SQL in str(refused.value)
 
 
+def test_a_render_worker_with_no_pool_refuses_a_ready_bambuddy_store(
+    tmp_path: Path, pool: Pool
+) -> None:
+    """A render worker builds with no pool: a ready Bambuddy store is refused (#7882)."""
+    _, bundle = _build(tmp_path, pool, "local", RenderStoreSettings())
+    with pytest.raises(StoreNotReadyError, match="no longer starts on"):
+        build_backend("bambuddy", READY, bundle.source, None)
+
+
 def test_an_env_seeded_bambuddy_backend_without_a_url_or_inbox_is_refused(
     tmp_path: Path, pool: Pool
 ) -> None:
