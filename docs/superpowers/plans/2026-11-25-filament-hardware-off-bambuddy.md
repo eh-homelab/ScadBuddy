@@ -12,7 +12,7 @@
 
 ## Global Constraints
 
-- Bambuddy is a sync target only (owner, 2026-11-23). No new or kept code in this plan acts on a printer, an AMS, a scale or a tag reader through Bambuddy. When this plan is done, no filament route or agent tool writes to hardware through Bambuddy, except the tray-question answer's Bambuddy assignment (P56, moved by #7641).
+- ScadBuddy does not act on hardware through Bambuddy (owner, 2026-11-23); it integrates with Bambuddy and does not build on it (owner, 2026-11-27). No new or kept code in this plan acts on a printer, an AMS, a scale or a tag reader through Bambuddy. When this plan is done, no filament route or agent tool writes to hardware through Bambuddy, except the tray-question answer's Bambuddy assignment (P56, moved by #7641).
 - Tests touch live printers and Bambuddy with GET only, and in this plan not at all: Bambuddy is respx (with `assert_all_called=False` and no route for any Bambuddy path, so any call fails the test), the printer is the fake printer or an injected `LanDeps.connect`.
 - The live H2C check of the payloads (R-7276-5) is a manual step (Task 14), run only after the owner says OK. Never automate it, never run it from CI, never run it without that OK.
 - Every payload builder cites a public source link in its docstring (R-7276-2): Bambuddy's `bambu_mqtt.py` at the pinned commit `d3be761f3bd0b6bac78045dc53599331d64c3672` (tag v1.3.1), OpenBambuAPI `mqtt.md`, or ha-bambulab. Link form: `https://github.com/maziggy/bambuddy/blob/d3be761f3bd0b6bac78045dc53599331d64c3672/backend/app/services/bambu_mqtt.py#L<a>-L<b>`.

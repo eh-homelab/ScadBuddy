@@ -21,7 +21,7 @@ from contextlib import AsyncExitStack, asynccontextmanager, contextmanager, supp
 from datetime import UTC, datetime, timedelta
 from functools import partial
 from types import FrameType
-from typing import Any, Final
+from typing import Any
 
 from fastapi import APIRouter, Depends, FastAPI
 from fastapi.routing import iter_route_contexts
@@ -111,7 +111,7 @@ from scadbuddy.core.paths import BUILTIN_DIR, MODEL_META_NAME
 from scadbuddy.core.pg_events import PgNotifyEventBus
 from scadbuddy.core.problems import ApiError, install_problem_handlers
 from scadbuddy.core.settings import Settings
-from scadbuddy.core.tracing import configure_tracing
+from scadbuddy.core.tracing import EXCLUDED_URLS, configure_tracing
 from scadbuddy.crud import idempotency
 from scadbuddy.crud import listener as crud_listener
 from scadbuddy.entities.component import ENTITIES
@@ -299,13 +299,6 @@ from scadbuddy.workflows.staged_file import VersionedStagedFile
 from scadbuddy.workflows.store_migration import VersionedStoreMigration
 
 API_PREFIX = "/api/v1"
-
-#: Never traced (spec §6): set in code so no deployment can drop it.
-#: Regexes searched against the full ``scheme://host/path`` URL, so each is anchored on
-#: both ends: an unanchored ``/metrics`` would also drop ``/api/v1/models/metrics-x``.
-EXCLUDED_URLS: Final = ",".join(
-    f"^[a-z]+://[^/]+{path}$" for path in ("/healthz", "/metrics", "/telemetry/v1/traces")
-)
 
 #: How long a batch print nobody touches is kept (#2718 review): long past any print
 #: it started, which Bambuddy's queue and the print runs keep on their own.
