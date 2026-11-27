@@ -1,6 +1,7 @@
 package devices
 
 import (
+	"encoding/json"
 	"strings"
 	"testing"
 	"time"
@@ -213,7 +214,7 @@ func TestCallRefusals(t *testing.T) {
 	expectStatus(t, h.do("POST", "/api/v1/devices/"+d.id+"/calls", "", `{"method":"nfc.read","timeout_s":121}`), 422)
 	// A write takes NDEF records only: never raw blocks or keys.
 	expectStatus(t, h.do("POST", "/api/v1/devices/"+d.id+"/calls", "",
-		`{"method":"nfc.write","args":{"records":[{"type":"text","text":"x"}],"blocks":[{"index":4}]}}`), 422)
+		`{"method":"nfc.write","args":{"records":[{"recordType":"text","text":"x"}],"blocks":[{"index":4}]}}`), 422)
 	expectStatus(t, h.do("POST", "/api/v1/devices/"+d.id+"/calls", "", `{"method":"nfc.write","args":{}}`), 422)
 	h.clock.add(2 * time.Minute)
 	got = h.do("POST", "/api/v1/devices/"+d.id+"/calls", "", `{"method":"nfc.read"}`)
@@ -240,7 +241,7 @@ func TestWriteFromAssistantNeedsApproval(t *testing.T) {
 	d := h.pair(me)
 	sock := h.pods[0].device(d)
 	bot := h.assistant("user:i#me")
-	write := `{"method":"nfc.write","args":{"records":[{"type":"text","text":"PLA #12"}]}}`
+	write := `{"method":"nfc.write","args":{"records":[{"recordType":"text","text":"PLA #12"}]}}`
 	got := h.do("POST", "/api/v1/devices/"+d.id+"/calls", bot, write)
 	expectStatus(t, got, 202)
 	call, pending := got.body["call_id"].(string), got.body["pending_action_id"].(string)
@@ -275,7 +276,7 @@ func TestWriteFromPersonGoesAtOnce(t *testing.T) {
 	me := h.person("user:i#me")
 	d := h.pair(me)
 	sock := h.pods[0].device(d)
-	got := h.do("POST", "/api/v1/devices/"+d.id+"/calls", me, `{"method":"nfc.write","args":{"records":[{"type":"text","text":"x"}]}}`)
+	got := h.do("POST", "/api/v1/devices/"+d.id+"/calls", me, `{"method":"nfc.write","args":{"records":[{"recordType":"text","text":"x"}]}}`)
 	expectStatus(t, got, 202)
 	if _, ok := got.body["pending_action_id"]; ok {
 		t.Fatalf("a person's own click needs no approval: %v", got.body)
@@ -317,7 +318,8 @@ func TestConfirmRefusesChangedRecords(t *testing.T) {
 	bot := h.assistant("user:i#me")
 	long := strings.Repeat("x", 200)
 	got := h.do("POST", "/api/v1/devices/"+d.id+"/calls", bot,
-		`{"method":"nfc.write","args":{"records":[{"type":"text","text":"PLA #12"},{"type":"uri","uri":"https://`+long+`"}]}}`)
+		`{"method":"nfc.write","args":{"records":[{"recordType":"text","text":"PLA #12","lang":"en"},
+		{"recordType":"url","text":"https://spools.example/`+long+`"}]}}`)
 	expectStatus(t, got, 202)
 	call := got.body["call_id"].(string)
 	var summary string
@@ -325,15 +327,65 @@ func TestConfirmRefusesChangedRecords(t *testing.T) {
 		got.body["pending_action_id"]).Scan(&summary); err != nil {
 		t.Fatal(err)
 	}
-	if !strings.HasPrefix(summary, `nfc.write on Pixel: text "PLA #12"; uri "https://xxx`) || !strings.HasSuffix(summary, `…"`) ||
-		len([]rune(summary)) > summaryMax {
-		t.Fatalf("summary %q", summary)
-	}
+	// The count and every type always; a URI's scheme and host in full, its path cut.
+	expect(t, summary, `nfc.write on "Pixel": 2 records; 1. text "PLA #12" lang en; 2. url "https://spools.example/`+
+		strings.Repeat("x", 79)+`…"`)
 	approve(h, call, "approved")
-	h.sql(`UPDATE device_calls SET args = '{"records":[{"type":"text","text":"something else"}]}' WHERE id = $1::uuid`, call)
+	h.sql(`UPDATE device_calls SET args = '{"records":[{"recordType":"text","text":"something else"}]}' WHERE id = $1::uuid`, call)
 	c := h.do("POST", "/api/v1/devices/calls/"+call+"/confirm", bot, "")
 	expectStatus(t, c, 409)
 	expect(t, c.body["reason"], any("approval_mismatch"))
 	expect(t, outcome(h.view(me, call)), any("denied"))
 	expect(t, h.count(`SELECT count(*) FROM ai_approvals WHERE consumed_at IS NOT NULL`), 0)
+}
+
+// A write's records are parsed strictly: only the types the app writes, each with the one
+// value it uses and no other key. The device is sent the parsed form.
+func TestWriteRecordsAreStrict(t *testing.T) {
+	h := newHarness(t, auth.Observe)
+	me := h.person("user:i#me")
+	d := h.pair(me)
+	sock := h.pods[0].device(d)
+	for name, records := range map[string]string{
+		"an extra key":       `[{"recordType":"text","text":"x","hex":"00"}]`,
+		"a hidden key":       `[{"recordType":"url","text":"https://a.example/","note":"not shown"}]`,
+		"an unknown type":    `[{"recordType":"smart-poster","records":[]}]`,
+		"a local type":       `[{"recordType":":t","hex":"00"}]`,
+		"no value":           `[{"recordType":"mime","mediaType":"text/plain"}]`,
+		"two values":         `[{"recordType":"mime","mediaType":"text/plain","text":"a","hex":"00"}]`,
+		"a relative URI":     `[{"recordType":"url","text":"/path"}]`,
+		"upper-case hex":     `[{"recordType":"example.com:t","hex":"AB"}]`,
+		"no records":         `[]`,
+		"an id, never shown": `[{"recordType":"text","text":"x","id":"y"}]`,
+	} {
+		got := h.do("POST", "/api/v1/devices/"+d.id+"/calls", me, `{"method":"nfc.write","args":{"records":`+records+`}}`)
+		if got.status != 422 {
+			t.Errorf("%s: %d %s", name, got.status, got.raw)
+		}
+	}
+	expect(t, h.count(`SELECT count(*) FROM device_calls`), 0)
+	got := h.do("POST", "/api/v1/devices/"+d.id+"/calls", me, `{"method":"nfc.write","args":{"records":[
+		{"text":"PLA","recordType":"text"},{"recordType":"example.com:spool","hex":"0a0b"},{"recordType":"empty"}]}}`)
+	expectStatus(t, got, 202)
+	args := requestedOn(t, sock, got.body["call_id"].(string))["args"].(map[string]any)
+	sent, _ := json.Marshal(args)
+	expect(t, string(sent), `{"records":[{"recordType":"text","text":"PLA"},{"hex":"0a0b","recordType":"example.com:spool"},{"recordType":"empty"}]}`)
+}
+
+// An approval shows all of what is written: a write too large to show is refused, not cut.
+func TestWriteTooLargeToApproveRefused(t *testing.T) {
+	h := newHarness(t, auth.Observe)
+	me := h.person("user:i#me")
+	d := h.pair(me)
+	bot := h.assistant("user:i#me")
+	text := strings.Repeat("y", summaryMax)
+	got := h.do("POST", "/api/v1/devices/"+d.id+"/calls", bot,
+		`{"method":"nfc.write","args":{"records":[{"recordType":"text","text":"`+text+`"}]}}`)
+	expectStatus(t, got, 422)
+	expect(t, got.body["reason"], any("write_too_large_to_approve"))
+	expect(t, h.count(`SELECT count(*) FROM ai_approvals`), 0)
+	expect(t, h.count(`SELECT count(*) FROM device_calls`), 0)
+	// A person's own write of it goes: they see it on their page.
+	expectStatus(t, h.do("POST", "/api/v1/devices/"+d.id+"/calls", me,
+		`{"method":"nfc.write","args":{"records":[{"recordType":"text","text":"`+text+`"}]}}`), 202)
 }

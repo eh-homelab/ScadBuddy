@@ -7,8 +7,6 @@ import (
 	"net/http"
 	"slices"
 	"sort"
-	"strconv"
-	"strings"
 	"time"
 
 	"github.com/jackc/pgx/v5"
@@ -196,7 +194,12 @@ func (s *Store) call(r *http.Request) (any, error) {
 		return nil, httpx.WithReason(http.StatusServiceUnavailable,
 			"An approval needs "+seal.Variable+", which this core does not have.", "not_configured")
 	}
+	shown := ""
 	if approve {
+		// What the person approves is all of what will be written, or the call is refused.
+		if shown, err = summary(method, name, args); err != nil {
+			return nil, err
+		}
 		// The approval waits for a person; the call's deadline starts again at the confirm.
 		deadline = now.Add(ApprovalTTL)
 	}
@@ -204,7 +207,7 @@ func (s *Store) call(r *http.Request) (any, error) {
 	var pendingID *string
 	err = pgx.BeginFunc(ctx, s.Pool, func(tx pgx.Tx) error {
 		if approve {
-			p, err := s.approval(ctx, tx, kind, who, name, id, method, args, now)
+			p, err := s.approval(ctx, tx, kind, who, shown, id, method, args, now)
 			if err != nil {
 				return err
 			}
@@ -228,42 +231,6 @@ func (s *Store) call(r *http.Request) (any, error) {
 		return s.wait(ctx, callID)
 	}
 	return &crud.Reply{Status: http.StatusAccepted, Value: map[string]any{"call_id": callID}}, nil
-}
-
-// checkArgs refuses args a method does not take. nfc.write takes NDEF records only, never
-// raw blocks, sectors or keys: core never asks a device to write a MIFARE sector, so it can
-// never write a Bambu tag. The device refuses a Bambu tag too.
-func checkArgs(method string, args json.RawMessage) (json.RawMessage, error) {
-	if len(args) > argsMax {
-		return nil, httpx.WithReason(http.StatusRequestEntityTooLarge, "The call's args are too large.", "args_too_large")
-	}
-	var fields map[string]json.RawMessage
-	if err := json.Unmarshal(args, &fields); err != nil {
-		return nil, httpx.Invalid(httpx.Issue{Loc: []string{"body", "args"}, Msg: "Input should be a valid dictionary"})
-	}
-	allowed := map[string][]string{"nfc.write": {"records"}}[method]
-	var issues []httpx.Issue
-	keys := make([]string, 0, len(fields))
-	for k := range fields {
-		keys = append(keys, k)
-	}
-	sort.Strings(keys)
-	for _, k := range keys {
-		if !slices.Contains(allowed, k) {
-			issues = append(issues, httpx.Issue{Loc: []string{"body", "args", k}, Msg: "Extra inputs are not permitted"})
-		}
-	}
-	if method == "nfc.write" {
-		var records []map[string]json.RawMessage
-		if json.Unmarshal(fields["records"], &records) != nil || len(records) < 1 || len(records) > 16 {
-			issues = append(issues, httpx.Issue{Loc: []string{"body", "args", "records"},
-				Msg: "a list of 1 to 16 NDEF records"})
-		}
-	}
-	if len(issues) > 0 {
-		return nil, httpx.Invalid(issues...)
-	}
-	return args, nil
 }
 
 func requested(call, device, method string, args json.RawMessage, deadline time.Time) []httpx.Field {
@@ -513,7 +480,7 @@ func end(ctx context.Context, tx pgx.Tx, id, outcome string, result any, now tim
 // ai_approvals row outside a session, as the MCP prepare step makes one. The UI shows it with
 // the other pending actions; a person approves or denies it there; the caller then confirms
 // the call (POST …/calls/{id}/confirm), which uses the approval once.
-func (s *Store) approval(ctx context.Context, tx pgx.Tx, kind, who, deviceName, device, method string,
+func (s *Store) approval(ctx context.Context, tx pgx.Tx, kind, who, shown, device, method string,
 	args json.RawMessage, now time.Time) (string, error) {
 	inputHash, err := inputHash(s.Keys.Current, device, method, args)
 	if err != nil {
@@ -524,7 +491,7 @@ func (s *Store) approval(ctx context.Context, tx pgx.Tx, kind, who, deviceName, 
 		input_hash, tier, requested_by_kind, requested_by_id, requested_by_label, created_at, expires_at)
 		VALUES (gen_random_uuid(), NULL, NULL, 'device_call:' || gen_random_uuid()::text, $1, $2, $3, 'outward',
 		$4, $5, $6, $7, $8) RETURNING id::text`,
-		toolName, summary(method, deviceName, args), inputHash, kind, who, kind+" for "+who, now,
+		toolName, shown, inputHash, kind, who, kind+" for "+who, now,
 		now.Add(ApprovalTTL)).Scan(&id)
 	return id, err
 }
@@ -537,47 +504,6 @@ func inputHash(kek *seal.KEK, device, method string, args json.RawMessage) (stri
 		return "", err
 	}
 	return seal.InputHash(seal.InputHashKey(kek), toolName, string(raw))
-}
-
-const (
-	// summaryValueMax and summaryMax bound what an approval shows of the records to write.
-	summaryValueMax = 80
-	summaryMax      = 1000
-)
-
-// summary is what the person approves: the method, the device, and each record's type and
-// its text or URI, each value cut to summaryValueMax runes and the whole to summaryMax.
-func summary(method, deviceName string, args json.RawMessage) string {
-	var parsed struct {
-		Records []map[string]any `json:"records"`
-	}
-	_ = json.Unmarshal(args, &parsed)
-	parts := []string{}
-	for _, r := range parsed.Records {
-		kind, _ := r["type"].(string)
-		value := ""
-		for _, k := range []string{"text", "uri", "url", "value"} {
-			if v, ok := r[k].(string); ok {
-				value = v
-				break
-			}
-		}
-		parts = append(parts, cut(kind, 20)+" "+strconv.Quote(cut(value, summaryValueMax)))
-	}
-	out := method + " on " + deviceName
-	if len(parts) > 0 {
-		out += ": " + strings.Join(parts, "; ")
-	}
-	return cut(out, summaryMax)
-}
-
-// cut is s at most n runes, with an ellipsis when it was cut.
-func cut(s string, n int) string {
-	runes := []rune(s)
-	if len(runes) <= n {
-		return s
-	}
-	return string(runes[:n-1]) + "…"
 }
 
 // confirm sends an approved call: the caller that made it uses its approval once. A denied
