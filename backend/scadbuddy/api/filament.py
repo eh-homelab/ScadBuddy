@@ -386,6 +386,14 @@ def _refused(exc: ValueError) -> ApiError:
         return ApiError(status.HTTP_422_UNPROCESSABLE_CONTENT, str(exc), code="box_has_many")
     if isinstance(exc, homes.NotItsHomeError):
         return ApiError(status.HTTP_422_UNPROCESSABLE_CONTENT, str(exc), code="not_its_home")
+    if isinstance(exc, homes.SpoolMovedError):
+        return ApiError(
+            status.HTTP_409_CONFLICT,
+            str(exc),
+            code=MOVE_STALE,
+            location_id=None if exc.location_id is None else str(exc.location_id),
+            archived=exc.archived,
+        )
     if isinstance(exc, homes.ExpectedOccupantRequiredError):
         return ApiError(
             status.HTTP_422_UNPROCESSABLE_CONTENT, str(exc), code="expected_occupant_required"
@@ -3340,6 +3348,8 @@ def _no_sensor(sensor_id: UUID) -> ApiError:
 
 #: The move route's 409 when Postgres aborted it in a deadlock (#7167, rulings P17, P20).
 MOVE_CONFLICT = "move_conflict"
+#: The move route's 409 when the spool is not where the caller read it (#7168).
+MOVE_STALE = "move_stale"
 
 
 @router.post(
@@ -3366,7 +3376,11 @@ MOVE_CONFLICT = "move_conflict"
         "`expected_occupant_id` is the box's spool the caller saw, and `replace` must send "
         "it: a replace without it is a 422 with `code` `expected_occupant_required`, and a "
         "box that holds another spool is a 409 `box_full` naming it in `occupant_id`; "
-        "either way nothing is archived or moved. A move that meets a concurrent change "
+        "either way nothing is archived or moved. `expected_location_id` is the place where "
+        "the caller read the spool (`null`: in no place), checked only when the body sends "
+        "it: a spool that is in another place or is archived by then is a 409 with `code` "
+        "`move_stale`, `location_id` (where it is now, or null) and `archived`, and nothing "
+        "is archived or moved (#7168). A move that meets a concurrent change "
         "to the same spools (a tag bind) is a 409 with `code` `move_conflict`: nothing is "
         "written, and the caller may try again."
     ),
@@ -3383,6 +3397,8 @@ async def move_spool(
             if_occupied=body.if_occupied,
             answers=body.answers,
             expected_occupant_id=body.expected_occupant_id,
+            expected_location_id=body.expected_location_id,
+            check_location="expected_location_id" in body.model_fields_set,
             actor=actor(caller),
         )
     except LookupError as exc:
@@ -3392,6 +3408,7 @@ async def move_spool(
         BoxFullError,
         homes.NotItsHomeError,
         homes.ExpectedOccupantRequiredError,
+        homes.SpoolMovedError,
     ) as exc:
         raise _refused(exc) from None
     except pg_errors.DeadlockDetected:
