@@ -1,4 +1,4 @@
-import { CalendarClockIcon, Columns3Icon, DownloadIcon, ListFilterIcon, RefreshCwIcon, LayoutGridIcon, PlusIcon, Rows3Icon, UploadIcon, XIcon } from 'lucide-react'
+import { ArrowLeftRightIcon, CalendarClockIcon, Columns3Icon, DownloadIcon, ListFilterIcon, RefreshCwIcon, LayoutGridIcon, PlusIcon, Rows3Icon, UploadIcon, XIcon } from 'lucide-react'
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { Link, useSearchParams } from 'react-router'
 import { ApiError } from '../../api/client'
@@ -451,6 +451,11 @@ export function SpoolsTab() {
           <Button size="sm" asChild>
             <Link to={filamentLinks.newSpool}>
               <PlusIcon /> New spool
+            </Link>
+          </Button>
+          <Button size="sm" variant="outline" asChild>
+            <Link to={filamentLinks.swap}>
+              <ArrowLeftRightIcon /> Swap spools
             </Link>
           </Button>
           <Button size="sm" variant="outline" disabled={syncing} onClick={() => void syncWeights()}>

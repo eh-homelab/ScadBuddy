@@ -4,6 +4,7 @@ non-print waste; the server never picks the spool."""
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from datetime import UTC, datetime
 from typing import Any
 from uuid import UUID
@@ -78,6 +79,9 @@ def _move(
     if_occupied: m.IfOccupied = "refuse",
     answers: UUID | None = None,
     expected: UUID | None = None,
+    *,
+    expected_location_id: UUID | None = None,
+    check_location: bool = False,
 ) -> m.SpoolEvent | None:
     return homes.move(
         FilamentSpoolStore(pool),
@@ -86,6 +90,8 @@ def _move(
         if_occupied=if_occupied,
         answers=answers,
         expected_occupant_id=expected,
+        expected_location_id=expected_location_id,
+        check_location=check_location,
         actor="ann",
     )
 
@@ -314,3 +320,187 @@ def test_replace_without_an_expected_occupant_is_refused(pg_pool: PgPool) -> Non
         _move(pg_pool, new, box, "replace")
     assert _row(pg_pool, old)["archived_at"] is None
     assert _row(pg_pool, new)["location_id"] is None
+
+
+# -- the stale refusal (#7168): the move carries where the caller read the spool -------
+
+
+def _shelf(pool: PgPool, name: str) -> UUID:
+    return _place(pool, name, "Shelf", None)
+
+
+def test_a_move_whose_spool_left_its_place_is_stale(pg_pool: PgPool) -> None:
+    shelf_a, shelf_b = _shelf(pg_pool, "Shelf A1"), _shelf(pg_pool, "Shelf B1")
+    box = _place(pg_pool, "Box S1", "Dry box", 1)
+    spool = _spool(pg_pool)
+    LocationStore(pg_pool).move(spool, shelf_a, actor="ann")
+    LocationStore(pg_pool).move(spool, shelf_b, actor="bob")
+    with pytest.raises(homes.SpoolMovedError) as err:
+        _move(pg_pool, spool, box, expected_location_id=shelf_a, check_location=True)
+    assert err.value.location_id == shelf_b and err.value.archived is False
+    assert _row(pg_pool, spool)["location_id"] == shelf_b
+
+
+def test_a_spool_read_in_no_place_is_checked_too(pg_pool: PgPool) -> None:
+    shelf_b = _shelf(pg_pool, "Shelf B2")
+    box = _place(pg_pool, "Box S2", "Dry box", 1)
+    spool = _spool(pg_pool)
+    LocationStore(pg_pool).move(spool, shelf_b, actor="bob")
+    with pytest.raises(homes.SpoolMovedError) as err:
+        _move(pg_pool, spool, box, expected_location_id=None, check_location=True)
+    assert err.value.location_id == shelf_b and err.value.archived is False
+    assert _row(pg_pool, spool)["location_id"] == shelf_b
+
+
+def test_an_archived_spool_is_stale_though_its_place_is_the_same(pg_pool: PgPool) -> None:
+    shelf_a = _shelf(pg_pool, "Shelf A3")
+    box = _place(pg_pool, "Box S3", "Dry box", 1)
+    spool = _spool(pg_pool)
+    LocationStore(pg_pool).move(spool, shelf_a, actor="ann")
+    with pg_pool.connection() as conn:
+        conn.execute("UPDATE filament_spools SET archived_at = now() WHERE id = %s", (spool,))
+    with pytest.raises(homes.SpoolMovedError) as err:
+        _move(pg_pool, spool, box, expected_location_id=shelf_a, check_location=True)
+    assert err.value.location_id == shelf_a and err.value.archived is True
+    assert _row(pg_pool, spool)["location_id"] == shelf_a
+
+
+def test_a_stale_replace_archives_nothing(pg_pool: PgPool) -> None:
+    shelf_a, shelf_b = _shelf(pg_pool, "Shelf A4"), _shelf(pg_pool, "Shelf B4")
+    box = _place(pg_pool, "Box S4", "Dry box", 1)
+    occupant, mover = _spool(pg_pool, 80), _spool(pg_pool)
+    LocationStore(pg_pool).move(occupant, box, actor="ann")
+    LocationStore(pg_pool).move(mover, shelf_a, actor="ann")
+    LocationStore(pg_pool).move(mover, shelf_b, actor="bob")
+    with pytest.raises(homes.SpoolMovedError):
+        _move(
+            pg_pool,
+            mover,
+            box,
+            "replace",
+            expected=occupant,
+            expected_location_id=shelf_a,
+            check_location=True,
+        )
+    kept = _row(pg_pool, occupant)
+    assert kept["archived_at"] is None and kept["location_id"] == box
+    assert _kinds(pg_pool, occupant, "non_print_waste") == []
+    assert _row(pg_pool, mover)["location_id"] == shelf_b
+
+
+def test_no_expected_location_is_todays_move(pg_pool: PgPool) -> None:
+    shelf_a, shelf_b = _shelf(pg_pool, "Shelf A5"), _shelf(pg_pool, "Shelf B5")
+    box = _place(pg_pool, "Box S5", "Dry box", 1)
+    spool = _spool(pg_pool)
+    LocationStore(pg_pool).move(spool, shelf_b, actor="bob")
+    assert _move(pg_pool, spool, box, expected_location_id=shelf_a) is not None
+    assert _row(pg_pool, spool)["location_id"] == box
+
+
+def test_a_matching_expected_location_moves(pg_pool: PgPool) -> None:
+    shelf_a = _shelf(pg_pool, "Shelf A6")
+    box = _place(pg_pool, "Box S6", "Dry box", 1)
+    spool = _spool(pg_pool)
+    LocationStore(pg_pool).move(spool, shelf_a, actor="ann")
+    assert _move(pg_pool, spool, box, expected_location_id=shelf_a, check_location=True)
+    assert _row(pg_pool, spool)["location_id"] == box
+
+
+def test_spool_move_takes_an_expected_location() -> None:
+    place = UUID(int=9)
+    body = m.SpoolMove.model_validate({"location_id": None, "expected_location_id": str(place)})
+    assert body.expected_location_id == place
+    assert "expected_location_id" in body.model_fields_set
+    bare = m.SpoolMove(location_id=None)
+    assert bare.expected_location_id is None
+    assert "expected_location_id" not in bare.model_fields_set
+
+
+def _wizard(
+    pool: PgPool,
+    spool: UUID,
+    place: UUID,
+    expected: UUID | None,
+    if_occupied: m.IfOccupied = "refuse",
+    occupant: UUID | None = None,
+) -> Callable[[Any], object]:
+    """A wizard's move on the caller's connection, in its open transaction. The settings
+    are read here, before any connection is taken."""
+    spools = FilamentSpoolStore(pool)
+    defaults = spools.defaults()
+
+    def run(conn: Any) -> object:
+        return homes.move_into(
+            conn,
+            spool,
+            place,
+            if_occupied=if_occupied,
+            actor="ann",
+            spools=spools,
+            defaults=defaults,
+            expected_occupant_id=occupant,
+            expected_location_id=expected,
+            check_location=True,
+        )
+
+    return run
+
+
+def _in_own_transaction(pool: PgPool, step: Callable[[Any], object]) -> Callable[[], str]:
+    """``step`` in a transaction of its own, its outcome as a word: ``moved``,
+    ``stale:<place>:<archived>`` or ``full:<occupant>``."""
+
+    def run() -> str:
+        try:
+            with pool.connection() as conn, conn.transaction():
+                step(conn)
+        except homes.SpoolMovedError as exc:
+            return f"stale:{exc.location_id}:{exc.archived}"
+        except BoxFullError as exc:
+            return f"full:{exc.occupant}"
+        return "moved"
+
+    return run
+
+
+def test_two_wizards_on_one_spool_the_second_is_stale(pg_pool: PgPool) -> None:
+    """D13: both read S in A. Wizard 1 moves S to B and has not committed; wizard 2's move
+    of S to C waits on S's row and, once wizard 1 commits, reads S in B."""
+    a, b, c = _shelf(pg_pool, "Shelf A7"), _shelf(pg_pool, "Shelf B7"), _shelf(pg_pool, "C7")
+    spool = _spool(pg_pool)
+    LocationStore(pg_pool).move(spool, a, actor="ann")
+    first = _wizard(pg_pool, spool, b, a)
+    second = _in_own_transaction(pg_pool, _wizard(pg_pool, spool, c, a))
+    assert waits_for(pg_pool, first, second) == f"stale:{b}:False"
+    assert _row(pg_pool, spool)["location_id"] == b
+
+
+def test_two_wizards_on_one_box_the_second_meets_box_full(pg_pool: PgPool) -> None:
+    """D13: box X is empty. Wizard 1 moves S1 in and has not committed; wizard 2's move of
+    S2 waits on X's place lock and then finds S1 there."""
+    box = _place(pg_pool, "Box X8", "Dry box", 1)
+    a1, a2 = _shelf(pg_pool, "Shelf A8"), _shelf(pg_pool, "Shelf B8")
+    s1, s2 = _spool(pg_pool), _spool(pg_pool)
+    LocationStore(pg_pool).move(s1, a1, actor="ann")
+    LocationStore(pg_pool).move(s2, a2, actor="ann")
+    first = _wizard(pg_pool, s1, box, a1)
+    second = _in_own_transaction(pg_pool, _wizard(pg_pool, s2, box, a2))
+    assert waits_for(pg_pool, first, second) == f"full:{s1}"
+    assert _row(pg_pool, s1)["location_id"] == box
+    assert _row(pg_pool, s2)["location_id"] == a2
+
+
+def test_a_replace_and_a_move_of_the_occupant_race(pg_pool: PgPool) -> None:
+    """D13: box X holds O. Wizard 1 replaces it with S and has not committed (O is
+    archived); wizard 2's move of O, read in X, waits on O's row and is stale, archived."""
+    box = _place(pg_pool, "Box X9", "Dry box", 1)
+    a, shelf = _shelf(pg_pool, "Shelf A9"), _shelf(pg_pool, "Shelf B9")
+    occupant, spool = _spool(pg_pool, 80), _spool(pg_pool)
+    LocationStore(pg_pool).move(occupant, box, actor="ann")
+    LocationStore(pg_pool).move(spool, a, actor="ann")
+    first = _wizard(pg_pool, spool, box, a, "replace", occupant)
+    second = _in_own_transaction(pg_pool, _wizard(pg_pool, occupant, shelf, box))
+    # An archive keeps the spool's place, so the stale report names the box.
+    assert waits_for(pg_pool, first, second) == f"stale:{box}:True"
+    assert _row(pg_pool, occupant)["archived_at"] is not None
+    assert _row(pg_pool, spool)["location_id"] == box

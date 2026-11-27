@@ -77,7 +77,7 @@ from scadbuddy.core.problems import ApiError
 from scadbuddy.filament.models import EffectivePreset
 from scadbuddy.filament.presets import preset_for
 from scadbuddy.library.outputs import STOREFRONT, storefront_output_id
-from scadbuddy.library.settings_store import StoredSettings
+from scadbuddy.library.settings_store import Setting, StoredSettings
 from scadbuddy.orders.currency import minor_exponent
 from scadbuddy.orders.estimate import StoreEstimate
 from scadbuddy.orders.lifecycle import QUOTE_TIMEOUT
@@ -88,6 +88,7 @@ from scadbuddy.orders.models import (
     QuoteLine,
     Reference,
 )
+from scadbuddy.orders.pricebook import policy_of
 from scadbuddy.orders.pricing import Plate, PlateFilament
 from scadbuddy.orders.quote import (
     FOLLOW_EVERY,
@@ -161,6 +162,9 @@ RATE_TTL: Final = 60.0
 #: review), as `RATE_TTL`, but short: a shop's edit should move the price soon. Not
 #: `Final`: an api test sets it to 0 to read an edit at once.
 TEMPLATE_TTL = 5.0
+
+#: How many storefront slices run at once, read from the settings cache (#8240).
+STOREFRONT_SLICES_CONCURRENT: Final[Setting[int]] = Setting("storefront_slices_concurrent")
 #: The advisory lock every claim takes, so the capacity is counted once at a time.
 _CLAIM_LOCK: Final = "storefront_slice_prices"
 
@@ -1197,23 +1201,33 @@ async def planned_variant(
     if filaments is None:
         return None
     orders = _orders(state)
-    settings = await asyncio.to_thread(state.settings_store.load)
+    # One read of the settings gives the profile and the policy (#8240).
+    snapshot = await asyncio.to_thread(state.settings_store.snapshot)
+    settings = snapshot.stored
     profile = settings.storefront_slice_profile
     if profile is None:
         return None
-    currency, policy, _ = await asyncio.to_thread(orders.price_book.policy)
+    currency, policy, _ = policy_of(snapshot.runtime)
+    wanted = {profile.materials.get(f.material.casefold()) for f in filaments}
+
+    async def no_template() -> TemplateSettings | None:
+        return None
+
+    # The reads below need only the settings, so they run side by side (#8240): one at a
+    # time they took about 4 s of a 10 s estimate while the database was slow.
     # The live rate, as a back-office quote prices it: the key holds it and the run
     # prices with it, so a rate change is a new key (#6153).
-    rate = await live_rate(orders.machine_rates, profile.printer)
-    opening = await live_opening(state, settings, profile.printer)
+    rate, opening, type_presets, template_settings = await asyncio.gather(
+        live_rate(orders.machine_rates, profile.printer),
+        live_opening(state, settings, profile.printer),
+        read_type_presets(state, [t for t in wanted if t is not None]),
+        no_template()
+        if reference is None
+        else live_template_settings(state.catalogue, reference.slug),
+    )
     if opening is None:
         logger.info("a storefront variant has no slice price: no printer %s", profile.printer)
         return None
-    wanted = {profile.materials.get(f.material.casefold()) for f in filaments}
-    type_presets = await read_type_presets(state, [t for t in wanted if t is not None])
-    template_settings = (
-        None if reference is None else await live_template_settings(state.catalogue, reference.slug)
-    )
     return plan_variant(
         settings=settings,
         reference=reference,
@@ -1351,7 +1365,8 @@ async def planned_estimate(
             )
         return answer_of(row)
     await _settle_ended(state, prices)
-    limit = (await asyncio.to_thread(state.settings_store.snapshot)).runtime
+    # One setting, from the settings cache when it is warm: no fifth read (#8240).
+    concurrent = await asyncio.to_thread(state.settings_store.get, STOREFRONT_SLICES_CONCURRENT)
     refund = None
     if charge is not None and (row is None or not _stands(row, datetime.now(UTC))):
         refund = await charge(planned.key)
@@ -1359,7 +1374,7 @@ async def planned_estimate(
         prices.claim,
         planned.key,
         planned.variant.model_sha256,
-        limit=limit.storefront_slices_concurrent,
+        limit=concurrent,
     )
     if not claim.claimed and refund is not None:
         await refund()

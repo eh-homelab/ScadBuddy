@@ -6,6 +6,7 @@ import { seedHomeReturn } from '../../mocks/features/filament'
 import { L, spoolId } from '../../mocks/features/filament/seed'
 import { resetMockState } from '../../mocks/handlers'
 import { server } from '../../mocks/server'
+import { installNdefStub } from '../../test/ndefStub'
 import { NeedsYouHarness } from '../../test/needsYou'
 import { renderPage } from '../../test/utils'
 import { NeedsYouList } from '../activity/NeedsYou'
@@ -163,6 +164,38 @@ describe('HomeReturnDialog (#7167)', () => {
     await user.click(within(dialog).getByRole('button', { name: 'Put in box' }))
     await waitFor(() => expect(screen.queryByRole('dialog')).toBeNull())
     await waitFor(() => expect(screen.queryAllByTestId('needs-you-item').filter((one) => one.dataset.kind === 'home-return')).toHaveLength(0))
+  })
+
+  it('in a frame, offers no tag way and no camera, and asks once (review 3)', async () => {
+    // A frame (`isEmbedded`: `window.top` is another window), with Web NFC and BarcodeDetector there.
+    const top = window.top
+    let asked = 0
+    Object.defineProperty(window, 'top', {
+      get: () => {
+        asked += 1
+        return {}
+      },
+      configurable: true,
+    })
+    const nfc = installNdefStub()
+    ;(window as unknown as { BarcodeDetector: unknown }).BarcodeDetector = class {
+      detect() {
+        return Promise.resolve([])
+      }
+    }
+    try {
+      const { user, dialog } = await show()
+      expect(within(dialog).queryByRole('radio', { name: 'Scan tag' })).toBeNull()
+      await user.click(within(dialog).getByRole('radio', { name: 'QR code' }))
+      await user.type(within(dialog).getByLabelText('Spool code'), 'S-7')
+      expect(within(dialog).queryByRole('button', { name: 'Use camera' })).toBeNull()
+      // The dialog asks once for its life, not on each render.
+      expect(asked).toBe(1)
+    } finally {
+      Object.defineProperty(window, 'top', { value: top, configurable: true })
+      nfc.restore()
+      delete (window as unknown as { BarcodeDetector?: unknown }).BarcodeDetector
+    }
   })
 
   it('keeps the focus inside, and Escape closes it with nothing sent', async () => {

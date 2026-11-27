@@ -92,6 +92,7 @@ export const HAND_LAID: Partial<Record<SectionId, readonly FieldName[]>> = {
   // #6868 — and whether an empty spool adds its type to the shopping list (stored only).
   // #6905 — and how long the sync's pass history is kept (stored only), beside that history.
   // #7156 — and whether ScadBuddy holds Bambuddy's auto-add of unknown RFID spools off (stored only).
+  // #7170 — and the CUPS server the Labels page prints to (stored only, a person's session saves it).
   filament: [
     'filament_sync',
     'profile_fetch_nozzles',
@@ -99,6 +100,7 @@ export const HAND_LAID: Partial<Record<SectionId, readonly FieldName[]>> = {
     'filament_shopping_auto_add_empty',
     'filament_sync_pass_ttl_days',
     'filament_auto_add_unknown_rfid',
+    'filament_label_server_url',
   ],
 }
 

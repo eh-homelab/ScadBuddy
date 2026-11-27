@@ -188,14 +188,14 @@ def record_lan_start_in(conn: Connection[DictRow], link: LanArchiveLink) -> bool
     #8281). One start per archive and one archive per start: the first record is kept.
     A start that another archive became already gets no second archive (#8306): a failed
     LAN print printed again from the printer's own storage makes a second archive of the
-    same file, and an order attempt then adds the grams and seconds of both prints. True
-    when the archive's record is this start, written now or before."""
+    same file, and an order attempt then adds the grams and seconds of both prints. The
+    table's unique index on the start (#8312) holds this for two records at the same
+    moment too, so a conflict on either key writes nothing. True when the archive's
+    record is this start, written now or before."""
     conn.execute(
         "INSERT INTO lan_print_archives (archive_id, run_id, subtask_name, plate_id)"
-        " SELECT %(archive)s::bigint, %(run)s::text, %(start)s::text, %(plate)s::integer"
-        " WHERE NOT EXISTS (SELECT 1 FROM lan_print_archives"
-        "  WHERE run_id = %(run)s AND subtask_name = %(start)s AND archive_id <> %(archive)s)"
-        " ON CONFLICT (archive_id) DO NOTHING",
+        " VALUES (%(archive)s, %(run)s, %(start)s, %(plate)s)"
+        " ON CONFLICT DO NOTHING",
         {
             "archive": link.archive_id,
             "run": link.run_id,

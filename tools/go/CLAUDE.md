@@ -32,7 +32,8 @@ CI sets `SCADBUDDY_TEST_POSTGRES_REQUIRED`). The Go toolchain is pinned in these
   unsent queue, `internal/telemetry` its spans and metrics; README there). Its unsent
   writes are the only copy of a save, under the state directory, never the cache. `core/`
   is the API in Go (#7667): the areas it has, over Postgres, and a forward of the rest to
-  Python (`internal/crud` the CRUD guard, `internal/<area>` the routes; README there).
+  Python (`internal/crud` the CRUD guard, `internal/<area>` the routes, such as
+  `internal/labelprint`, the IPP client that sends label PDFs to CUPS, #7170; README there).
   Since #6949 K1 it also holds the inventory's base model: `internal/inventory` (`model`,
   `handlers`, `store`, `flow`, `activities`, `routes`, `modeldata`: the kinds, items, lots,
   units and moves, written by Temporal standalone activities, and the proof test of

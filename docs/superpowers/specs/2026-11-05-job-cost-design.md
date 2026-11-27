@@ -69,8 +69,8 @@ Every attempt in `order_item_fulfilments` for the item, whatever its `purpose`
 
 - **Filament.** Today `costs.py` prices an attempt's `actual_grams` at its accepted
   quote's price per gram. That stays the first source. Two gaps are closed:
-  - **No actual grams** (no Bambuddy archive: a native hot-path print, an archive not yet
-    linked, an attempt recorded by hand). The attempt's grams are then taken from the
+  - **No actual grams** (no Bambuddy archive: a native hot-path print whose own record
+    gives no grams (#8282), an archive not yet linked, an attempt recorded by hand). The attempt's grams are then taken from the
     quote it printed from: the item's quote whose own `sliced_sha256` equals the
     attempt's (a quote's `sliced_sha256` is its first plate's file, and the attempt
     records that same value), whose plates give grams per unit, times the attempt's

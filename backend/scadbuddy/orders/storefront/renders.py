@@ -691,11 +691,18 @@ async def render_estimate(state: AppState, visitor_id: str, job_id: str) -> Stor
     listing's now (`shows_design`, #6370 review): the price is never of a design the
     visitor does not see. A render of several outputs has one price over all of them
     (#5701, spec 2026-11-17 §7.4), since the order renders and prints each one."""
-    owned, job = await owned_job(state, visitor_id, job_id)
+    owned = await owned_render(state, visitor_id, job_id)
+    orders = _orders(state)
+    # The job and the listing side by side (#8240): neither read needs the other.
+    try:
+        job, listing = await asyncio.gather(
+            asyncio.to_thread(state.render.store.read, job_id),
+            asyncio.to_thread(orders.listings.get, owned.listing_id),
+        )
+    except JobNotFoundError:
+        raise not_found() from None
     if job.state != "done" or job.result is None:
         raise _unavailable("The price is ready once the render is done.")
-    orders = _orders(state)
-    listing = await asyncio.to_thread(orders.listings.get, owned.listing_id)
     if listing is None or listing.template_snapshot is None:
         return NO_PRICE
     return await estimate_of(

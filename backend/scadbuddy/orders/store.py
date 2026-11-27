@@ -25,12 +25,14 @@ from psycopg import Connection, errors, sql
 from psycopg.rows import DictRow
 from psycopg.types.json import Jsonb
 from psycopg_pool import ConnectionPool
+from pydantic import TypeAdapter
 
 from scadbuddy.bambuddy.print_links import LanArchiveLink, record_lan_start_in
 from scadbuddy.bambuddy.runs import PrintRun, lan_started_in
 from scadbuddy.bambuddy.subject import PrintSubject
 from scadbuddy.entities.refs import EntityRef
 from scadbuddy.entities.registry import EntityStore
+from scadbuddy.filament.prints import RunUse, run_uses
 from scadbuddy.inventory.stock import PartsMoved, parts_moved, parts_moves
 from scadbuddy.orders.models import (
     IMPORT_STUCK,
@@ -89,6 +91,7 @@ from scadbuddy.orders.models import (
     TimeEntryInput,
 )
 from scadbuddy.orders.numbers import next_number
+from scadbuddy.printers.lan_models import LanStarted
 
 Conn = Connection[DictRow]
 Pool = ConnectionPool[Conn]
@@ -144,6 +147,22 @@ class RowNotOwnedError(LookupError):
         self.table = table
         self.row_id = row_id
         self.customer_id = customer_id
+
+
+#: A run's ``result.lan``, as `OrderStore.lan_record` reads it.
+_LAN_STARTS = TypeAdapter(list[LanStarted])
+
+
+@dataclass(frozen=True)
+class LanRecord:
+    """What ScadBuddy itself recorded of a LAN run (#8282, `OrderStore.lan_record`)."""
+
+    #: Each plate the printer took, in the order the run started them.
+    starts: list[LanStarted]
+    #: When the run's follow read its print settled; ``None`` until then.
+    settled_at: datetime | None
+    #: What the starts booked in the filament ledger, one per start and slot.
+    uses: list[RunUse]
 
 
 class ArchiveCopyExistsError(ValueError):
@@ -2233,6 +2252,9 @@ class OrderStore:
             if run is None:
                 return None
             if run["last_start"] is None:
+                # No unnamed start has a time, so there is no window to read in. Every
+                # writer of `result.lan` sets `started_at` (`LanStarted.started_at` is
+                # required), so this holds only for a row written by hand (#8316).
                 return str(run["output_id"]), []
             subject = PrintSubject.from_run_subject(run["output_id"]).key
             rows = c.execute(
@@ -2245,6 +2267,24 @@ class OrderStore:
                 (subject, run["created_at"], run["last_start"] + within, limit),
             ).fetchall()
         return str(run["output_id"]), [int(row["archive_id"]) for row in rows]
+
+    def lan_record(self, run_id: str) -> LanRecord | None:
+        """ScadBuddy's own record of a LAN run (#8282): the starts its result lists
+        (``print_runs.result.lan``), when its follow read the print settled
+        (``print_outcomes.settled_at``), and what its starts booked in the filament ledger
+        (`filament/prints.py` `run_uses`). None for a run with no LAN start (Bambuddy's
+        queue), or whose row is pruned."""
+        with self._read(None) as c:
+            row = c.execute(
+                "SELECT r.result -> 'lan' AS lan, o.settled_at FROM print_runs r"
+                " LEFT JOIN print_outcomes o ON o.run_id = r.id WHERE r.id = %s",
+                (run_id,),
+            ).fetchone()
+            if row is None or not isinstance(row["lan"], list) or not row["lan"]:
+                return None
+            starts = _LAN_STARTS.validate_python(row["lan"])
+            uses = run_uses(c, run_id)
+        return LanRecord(starts=starts, settled_at=row["settled_at"], uses=uses)
 
     def lan_runs(self, run_subject: str, subtask_names: list[str]) -> list[PrintRun]:
         """The subject's runs with a LAN start under one of ``subtask_names``, as
@@ -2290,7 +2330,13 @@ class OrderStore:
         """Every plate of the print run that made ``archive_id`` (#4777): each queue item
         the run sent for the archive's owner, as ``(plate_id, archive_id)``, the archive
         None for a plate Bambuddy has reported none for, by plate. Empty when the archive
-        is no run's (a print ScadBuddy never sent, or a send recorded before runs were)."""
+        is no run's (a print ScadBuddy never sent, or a send recorded before runs were).
+
+        A LAN run sends no queue item (#8283): its plates are its LAN starts
+        (``print_runs.result -> 'lan'``), each with the archive ``lan_print_archives``
+        records for that start, then, unless the run has stopped (``lan_stopped``), each
+        plate still in ``lan_waiting``, with None. When the run's row was pruned, the
+        starts recorded there are what is left."""
         with self._read(conn) as c:
             rows = c.execute(
                 "WITH owner AS (SELECT subject, queue_item_id FROM print_links"
@@ -2307,7 +2353,61 @@ class OrderStore:
                 " ORDER BY s.plate_id NULLS LAST, s.queue_item_id",
                 {"a": archive_id},
             ).fetchall()
+            lan = not rows and not self._owned_by_import(c, archive_id)
+            if lan:
+                rows = c.execute(
+                    "WITH run AS (SELECT run_id FROM lan_print_archives WHERE archive_id = %(a)s),"
+                    " runs AS (SELECT r.run_id, p.result FROM run r"
+                    "  JOIN print_runs p ON p.id = r.run_id),"
+                    # A plate only as `print_links._LAN_JOBS` reads one (#8078, #8083): a
+                    # start's bad `plate_id` (2.0, 10**12, 0) is no plate, never an error.
+                    " starts AS (SELECT r.run_id, e->>'subtask_name' AS subtask,"
+                    "  (e->>'started_at')::timestamptz AS started_at,"
+                    "  CASE WHEN jsonb_typeof(e->'plate_id') = 'number'"
+                    "   AND e->>'plate_id' ~ '^[1-9][0-9]{0,8}$'"
+                    "   THEN (e->>'plate_id')::int END AS plate"
+                    "  FROM runs r,"
+                    "  jsonb_array_elements(CASE WHEN jsonb_typeof(r.result->'lan') = 'array'"
+                    "   THEN r.result->'lan' END) AS e),"
+                    # The plates still to start (#4541, `lan_waiting`), as the queue path's
+                    # sends list a plate not yet archived; none once the run stopped.
+                    " waiting AS (SELECT CASE WHEN jsonb_typeof(w) = 'number'"
+                    "   AND w::text ~ '^[1-9][0-9]{0,8}$' THEN w::text::int END AS plate, n"
+                    "  FROM runs r, jsonb_array_elements("
+                    "   CASE WHEN jsonb_typeof(r.result->'lan_waiting') = 'array'"
+                    "   AND jsonb_typeof(r.result->'lan_stopped') IS DISTINCT FROM 'object'"
+                    "   THEN r.result->'lan_waiting' END) WITH ORDINALITY AS x(w, n))"
+                    # A start from before #4541 has no plate: the recorded archive's, if any.
+                    " SELECT plate_id, archive_id FROM ("
+                    "  SELECT COALESCE(s.plate, a.plate_id) AS plate_id, a.archive_id,"
+                    "   0 AS later, s.started_at, 0::bigint AS n"
+                    "  FROM starts s LEFT JOIN LATERAL (SELECT min(l.archive_id) AS archive_id,"
+                    "   min(l.plate_id) AS plate_id FROM lan_print_archives l"
+                    "   WHERE l.run_id = s.run_id AND l.subtask_name = s.subtask) a ON true"
+                    "  UNION ALL SELECT plate, NULL, 1, NULL, n FROM waiting) AS plates"
+                    " ORDER BY plate_id NULLS LAST, later, started_at, n",
+                    {"a": archive_id},
+                ).fetchall()
+            if lan and not rows:
+                rows = c.execute(
+                    "SELECT l.plate_id, l.archive_id FROM lan_print_archives l"
+                    " JOIN lan_print_archives a ON a.run_id = l.run_id AND a.archive_id = %(a)s"
+                    " ORDER BY l.plate_id NULLS LAST, l.archive_id",
+                    {"a": archive_id},
+                ).fetchall()
         return [(row["plate_id"], row["archive_id"]) for row in rows]
+
+    @staticmethod
+    def _owned_by_import(c: Conn, archive_id: int) -> bool:
+        """Whether an `import` link owns ``archive_id`` (#4698, #6394), in the order
+        ``archive_origin`` reads owners: ScadBuddy did not print it, so no run's."""
+        row = c.execute(
+            "SELECT matched_by FROM print_links WHERE archive_id = %s"
+            " ORDER BY (matched_by = 'import'), (subject LIKE 'library:%%'), first_seen,"
+            " subject, queue_item_id LIMIT 1",
+            (archive_id,),
+        ).fetchone()
+        return row is not None and row["matched_by"] == "import"
 
     def archive_copy(self, archive_id: int) -> int | None:
         """The native library file archive ``archive_id`` was copied to (#4777), if any."""

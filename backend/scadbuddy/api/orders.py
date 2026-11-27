@@ -3237,7 +3237,9 @@ async def get_attempt_archives(
     """The archives the attempt's print run made in Bambuddy (one per plate, §8.2), with
     what each offers to copy: its ``finish_`` photos and whether it has a timelapse.
     Reading them copies what they say onto the attempt once its print settled
-    (``archive_ids``, the printer's times, ``actual_seconds``, ``actual_grams``), and,
+    (``archive_ids``, the printer's times, ``actual_seconds``, ``actual_grams``; a LAN
+    attempt takes those four facts from ScadBuddy's own record of the run, and an
+    archive's only where that record has none, #8282), and,
     when an archive offers a medium the attempt does not have yet, starts one step of the
     attempt's media import (#7233); the read never waits on the download. Each archive's
     ``finished_attachment_id`` and ``timelapse_attachment_id`` are what is attached now

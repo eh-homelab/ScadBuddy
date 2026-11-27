@@ -214,12 +214,14 @@ class Ctx:
         # every `Blob`/`Part` passed, one transfer each: with those in the budget, the
         # subprocess's own kill (at ``seconds``) still fires before Temporal's.
         moves = 1 + _references([call.args, call.kwargs])
-        return await workflow.execute_activity(
-            "run_template_activity",
-            call,
-            start_to_close_timeout=timedelta(seconds=seconds + 30) + moves * TRANSFER,
-            heartbeat_timeout=HEARTBEAT,
-            retry_policy=RETRY,
+        return await self._host.step(
+            workflow.execute_activity(
+                "run_template_activity",
+                call,
+                start_to_close_timeout=timedelta(seconds=seconds + 30) + moves * TRANSFER,
+                heartbeat_timeout=HEARTBEAT,
+                retry_policy=RETRY,
+            )
         )
 
 

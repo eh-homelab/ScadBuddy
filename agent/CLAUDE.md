@@ -450,7 +450,8 @@ opens every one and seals it again byte for byte).
     replays. Temporal tests (`test/*temporal*.test.ts`)
     skip unless `SCADBUDDY_TEST_TEMPORAL_DEV_SERVER` names a Temporal CLI (or
     `temporal` is on `PATH`); the `agent` CI job installs the Dockerfile's pinned one.
-    The `@temporalio/*` packages are pinned exactly, all one version.
+    The `@temporalio/*` packages take a `^` range on the newest release and lock to one
+    version; Dependabot's `temporal` group moves them together.
   - The tool-call gate (#1056 phase 5b, spec 2026-10-01 §6.6, plan
     `docs/superpowers/plans/2026-10-08-durable-phase-5b-tool-call-gate.md`) is
     `src/gate/`: request ids (`ids.ts`: `approval:`, `question:`, `durable:<session>:<run>:<tool_use_id>`),
