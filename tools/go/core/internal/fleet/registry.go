@@ -2,7 +2,8 @@ package fleet
 
 // The session registry (spec 2026-11-26-fleet-session-registry-and-rotator-design §6.3,
 // #7985): the machines that run Claude Code sessions, and where each session runs. Caller
-// `fleet-rotator` (the machine service) writes it; caller `fleet` (the chat server) reads it.
+// `fleet-rotator` (the machine service) writes it, with a `fleet` access token (#8041) or a
+// machine's bootstrap proof (#8003); caller `fleet` (the chat server) reads it.
 // A read gives a credential's id, name, kind and last 4 characters, never its secret.
 
 import (
@@ -18,6 +19,7 @@ import (
 	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
 
+	"github.com/eh-homelab/ScadBuddy/tools/go/core/internal/auth"
 	"github.com/eh-homelab/ScadBuddy/tools/go/core/internal/crud"
 	"github.com/eh-homelab/ScadBuddy/tools/go/core/internal/httpx"
 	"github.com/eh-homelab/ScadBuddy/tools/go/core/internal/wire"
@@ -94,19 +96,27 @@ func remoteProblem(remote string) string {
 	return ""
 }
 
-// proofName is the machine of the caller's bootstrap proof (fleet-rotator.<machine>), or a
-// 403 when its credential names none.
-func proofName(r *http.Request) (string, error) {
-	if s := crud.ServiceOf(r); s != nil && s.Machine != "" {
-		return s.Machine, nil
+// owner is who may write a machine's rows: a fleet access token's id (#8041), or the
+// machine of a credential's bootstrap proof (fleet-rotator.<machine>, #8003). Exactly one is
+// set; a credential that names no machine is a 403.
+type owner struct{ proof, token *string }
+
+func ownerOf(r *http.Request) (owner, error) {
+	if c := auth.CallerOf(r.Context()); c.Kind == auth.KindToken && c.TokenID != "" {
+		return owner{token: &c.TokenID}, nil
 	}
-	return "", httpx.WithReason(http.StatusForbidden,
-		"this credential names no machine: exchange the machine's own bootstrap proof", "no-machine")
+	if s := crud.ServiceOf(r); s != nil && s.Machine != "" {
+		return owner{proof: &s.Machine}, nil
+	}
+	return owner{}, httpx.WithReason(http.StatusForbidden,
+		"this credential names no machine: use the machine's fleet access token", "no-machine")
 }
+
+func same(a, b *string) bool { return (a == nil) == (b == nil) && (a == nil || *a == *b) }
 
 func anotherProof() error {
 	return httpx.WithReason(http.StatusForbidden,
-		"another machine's proof registered that machine", "machine-of-another-proof")
+		"another machine's token or proof registered that machine", "machine-of-another-proof")
 }
 
 // RegistryReads are caller fleet's registry routes, under /api/v1/internal/crud/fleet.
@@ -149,10 +159,10 @@ func (m *machine) targets() []any {
 		&m.CreatedAt, &m.UpdatedAt}
 }
 
-// putMachine registers the machine under the caller's proof name, or refreshes its facts
-// and last_seen. A machine another proof registered is a 403.
+// putMachine registers the machine under the caller's token or proof name, or refreshes its
+// facts and last_seen. A machine another token or proof registered is a 403.
 func (f *Fleet) putMachine(r *http.Request, p crud.Params) (any, error) {
-	proof, err := proofName(r)
+	own, err := ownerOf(r)
 	if err != nil {
 		return nil, err
 	}
@@ -173,13 +183,14 @@ func (f *Fleet) putMachine(r *http.Request, p crud.Params) (any, error) {
 	}
 	var m machine
 	err = f.Pool.QueryRow(r.Context(), `INSERT INTO fleet_machines AS m
-			(id, hostname, os, os_user, service_version, proof_name) VALUES ($1, $2, $3, $4, $5, $6)
+			(id, hostname, os, os_user, service_version, proof_name, token_id)
+			VALUES ($1, $2, $3, $4, $5, $6, $7)
 		ON CONFLICT (id) DO UPDATE SET hostname = $2, os = $3, os_user = $4, service_version = $5,
 			last_seen = now(), updated_at = now()
-		WHERE m.proof_name = $6
-		RETURNING `+machineColumns, id, hostname, os, user, version, proof).Scan(m.targets()...)
+		WHERE m.proof_name IS NOT DISTINCT FROM $6 AND m.token_id IS NOT DISTINCT FROM $7
+		RETURNING `+machineColumns, id, hostname, os, user, version, own.proof, own.token).Scan(m.targets()...)
 	if errors.Is(err, pgx.ErrNoRows) {
-		// The row exists and another proof registered it: ON CONFLICT updated nothing.
+		// The row exists and another token or proof registered it: ON CONFLICT updated nothing.
 		return nil, anotherProof()
 	}
 	if err != nil {
@@ -190,11 +201,12 @@ func (f *Fleet) putMachine(r *http.Request, p crud.Params) (any, error) {
 
 // putSession writes the session's row on the machine whole: an optional field left out is
 // cleared. One session id can run on several machines at once, so each machine has a row of
-// its own, and a caller writes only the rows of machines registered to its proof (403). It
+// its own, and a caller writes only the rows of machines registered to its token or proof
+// (403). It
 // makes the session's fleet agent as touch does, when there is none. A new row is linked to
 // the newest row of the same machine, pid and proc_start (the session before a /clear).
 func (f *Fleet) putSession(r *http.Request, p crud.Params) (any, error) {
-	proof, err := proofName(r)
+	own, err := ownerOf(r)
 	if err != nil {
 		return nil, err
 	}
@@ -241,9 +253,9 @@ func (f *Fleet) putSession(r *http.Request, p crud.Params) (any, error) {
 	}
 	ctx := r.Context()
 	err = pgx.BeginFunc(ctx, f.Pool, func(tx pgx.Tx) error {
-		var owner string
-		err := tx.QueryRow(ctx, `SELECT proof_name FROM fleet_machines WHERE id = $1 FOR KEY SHARE`,
-			machineID).Scan(&owner)
+		var row owner
+		err := tx.QueryRow(ctx, `SELECT proof_name, token_id FROM fleet_machines WHERE id = $1 FOR KEY SHARE`,
+			machineID).Scan(&row.proof, &row.token)
 		if errors.Is(err, pgx.ErrNoRows) {
 			return httpx.WithReason(http.StatusNotFound,
 				"no fleet machine has that id: register it first", "unknown-machine")
@@ -251,7 +263,7 @@ func (f *Fleet) putSession(r *http.Request, p crud.Params) (any, error) {
 		if err != nil {
 			return err
 		}
-		if owner != proof {
+		if !same(row.proof, own.proof) || !same(row.token, own.token) {
 			return anotherProof()
 		}
 		_, err = tx.Exec(ctx, `INSERT INTO fleet_agents (session_id, handle) VALUES ($1, $2)

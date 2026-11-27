@@ -176,7 +176,8 @@ Where the accounts live:
   and sent as `Authorization: Bearer`, as `bambuddy-fs` does (owner, 2026-11-26; #8041). One
   token is one machine: the machine row records the token's id, and a person revokes a machine
   by revoking its token in Settings. A `fleet` token can call only these routes. #8003's
-  per-machine bootstrap proofs (`fleet-rotator.<machine>`) are retired for machines by #8041.
+  per-machine bootstrap proofs (`fleet-rotator.<machine>`) still work beside the tokens; #8367
+  retires them for machines.
 - Proof in the cluster: the `github` mode (#8012) keeps a `fleet-rotator` service credential from
   a Kubernetes ServiceAccount proof, renewed like the other callers'
   (`tools/go/fleet/sbfleet` `NewExchange`).
@@ -204,8 +205,8 @@ Where the accounts live:
 
 - Tables (each with `created_at`, and `updated_at` where the row changes, #7968):
   - `fleet_machines`: id (the hash of `/etc/machine-id` and the user, never the raw id)
-    **(call)**, the id of the `fleet` token that registered it (§6.2; #8041 replaces #8003's
-    `proof_name` with it), hostname, OS, user, service version, first and last seen.
+    **(call)**, the id of the `fleet` token that registered it (§6.2; #8041 adds `token_id`
+    beside #8003's `proof_name`, and each row names one of them; #8367 drops `proof_name`), hostname, OS, user, service version, first and last seen.
   - `fleet_session_hosts`: `session_id` (a fleet agent), machine, pid, `procStart`, cwd, config
     dir, transcript path, git remote, branch, worktree root and HEAD, Claude Code version,
     kind, entrypoint, name, status, the credential in use (id), the account uuid, the last rate

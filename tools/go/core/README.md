@@ -200,8 +200,23 @@ credential that names a machine passes only while `fleet-rotator.<machine>` is a
 there (one stat per resolve, as `exchange.py` `BootstrapVerifier.has_machine`). When the file is
 gone, `internal/auth` refuses the credential and revokes its row at once. With the variable
 unset, core refuses every such credential, so the core container needs the API's bootstrap
-secret directory mounted and the variable set. `fleetd` sends a
-`fleet` PAT today, which these routes refuse until #8041.
+secret directory mounted and the variable set.
+
+Every `fleet-rotator` route (the two `PUT`s and `POST /virtual-messages`) also takes a person's
+access token of scope `fleet` (#8041), which `fleetd` sends: `crud.Router.AddForToken` mounts
+them, and `auth.Resolver.Token`, the shared `sbpat_` lookup, reads it. A handler finds the token
+with `auth.CallerOf`; `crud.ServiceOf` is nil then. One token is one machine: the first `PUT
+/machines/{id}` records the token's id in `fleet_machines.token_id`, and every write to that
+machine from another token, or from a bootstrap proof, is 403 `machine-of-another-proof` (the
+same for a proof's machine and a token). Each row names exactly one owner, its `proof_name` or
+its `token_id`. A revoked, expired or unknown `sbpat_` token on these routes is 401
+`no_credential`, so a person revokes a machine by revoking its token in Settings, with no restart.
+A `read` or `write` token there is 403 `out_of_scope`. A `fleet` token is 403 `out_of_scope` on
+every other route, in every `SCADBUDDY_AUTH_MODE`: every other CRUD route, and every public route
+behind `internal/auth`'s gate (`auth.WouldRefuse`, `Gate.Wrap`), as Python's `auth/check.py`
+`auth_check` refuses it on every route Python serves (#8179). A `read` or `write` token on
+another caller's CRUD route stays 401, as Python's guard answers it. The bootstrap proofs keep
+working until #8367 retires them for machines.
 
 Area `blobs` † (`internal/blobstore`, #7958) is a shared area: any service credential whose scopes
 hold `crud.blobs` may call it, under `/api/v1/internal/crud/blobs`; no caller is granted that scope

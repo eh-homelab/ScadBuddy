@@ -67,7 +67,7 @@ fleetd version
 | Flag | Meaning |
 |---|---|
 | `--api` | ScadBuddy's API root, like `https://host/api/v1`. Default `$FLEETD_API`, else the deployed ScadBuddy. It must be https. Plain http is allowed only to localhost (`localhost`, `127.0.0.1`, `::1`). |
-| `--token-file` | A file that holds a personal access token of scope `fleet` (#8041). fleetd sends it as `Authorization: Bearer`. It reads the file again for each request, so you can replace the token with no restart. Default `$FLEETD_TOKEN_FILE`. `run` needs it. |
+| `--token-file` | A file that holds a personal access token of scope `fleet` (#8041). fleetd sends it as `Authorization: Bearer`. It reads the file again for each request, so you can replace the token with no restart. Default `$FLEETD_TOKEN_FILE`. `run` needs it. Use one token per machine: core records the token that registered a machine first and refuses another token's writes to it (403 `machine-of-another-proof`). A revoked token gets 401; a `read` or `write` token gets 403 `out_of_scope` (core's README, "fleet-rotator"). |
 | `--config-dir` | A Claude Code config dir to watch. Give it again for each other dir. Default `$CLAUDE_CONFIG_DIR`, else `~/.claude`. |
 | `--interval` | How often `run` scans. Default `10s`. |
 | `--refresh` | How often `run` sends every row again, changed or not, so the registry's `last_seen` stays fresh. Default `5m`. |

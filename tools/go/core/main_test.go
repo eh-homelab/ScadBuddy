@@ -43,6 +43,12 @@ type api struct {
 
 func newAPI(t *testing.T, areas string) *api {
 	t.Helper()
+	return newAPIInMode(t, areas, "")
+}
+
+// newAPIInMode is newAPI with SCADBUDDY_AUTH_MODE set to mode ("" is unset).
+func newAPIInMode(t *testing.T, areas, mode string) *api {
+	t.Helper()
 	pool := testdb.New(t)
 	next := http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("X-From", "python")
@@ -55,7 +61,7 @@ func newAPI(t *testing.T, areas string) *api {
 		}
 		return "", false
 	}
-	router, err := newRouter(pool, next, nil, areas, "", callerPackages, nil, lookupEnv, nil)
+	router, err := newRouter(pool, next, nil, areas, mode, callerPackages, nil, lookupEnv, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
