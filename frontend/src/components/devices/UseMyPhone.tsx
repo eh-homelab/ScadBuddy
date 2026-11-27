@@ -18,7 +18,13 @@ const OFFERED: { method: DeviceMethod; label: string; icon: typeof NfcIcon }[] =
   { method: 'code.scan', label: 'Scan a code', icon: ScanQrCodeIcon },
 ]
 
-type Decoded = { kind: 'tag'; result: TagReadResult } | { kind: 'codes'; codes: ScannedCode[] } | { kind: 'failed'; message: string }
+type Decoded = { kind: 'tag'; result: TagReadResult } | { kind: 'codes'; codes: ScannedCode[]; error: string | null } | { kind: 'failed'; message: string }
+
+/** Why the code decoder read nothing, by its `error` (#8155). */
+const SCAN_ERROR: Record<string, string> = {
+  image_unreadable: 'ScadBuddy could not open the photo as an image. Try again.',
+  image_too_large: 'The photo is too large to decode. Try again.',
+}
 
 interface Run {
   key: number
@@ -49,6 +55,8 @@ export function UseMyPhone() {
 
   const usable = devices.data.filter((one) => one.online && OFFERED.some(({ method }) => one.capabilities.includes(method)))
   const device = usable.find((one) => one.id === chosen) ?? usable[0]
+  /** Paired phones that could read here once their app is open. */
+  const offline = devices.data.filter((one) => !one.online && OFFERED.some(({ method }) => one.capabilities.includes(method)))
   const busy = calling || decoding
 
   function begin(method: DeviceMethod) {
@@ -65,7 +73,12 @@ export function UseMyPhone() {
     if (end.outcome !== 'done' || !readId) return
     setDecoding(true)
     try {
-      setDecoded(method === 'nfc.read' ? { kind: 'tag', result: await tagReadFromDevice(readId) } : { kind: 'codes', codes: (await codeScanFromDevice(readId)).codes })
+      if (method === 'nfc.read') {
+        setDecoded({ kind: 'tag', result: await tagReadFromDevice(readId) })
+      } else {
+        const scan = await codeScanFromDevice(readId)
+        setDecoded({ kind: 'codes', codes: scan.codes, error: scan.error })
+      }
     } catch (cause) {
       setDecoded({ kind: 'failed', message: `The phone read it, but ScadBuddy could not decode the read: ${cause instanceof Error ? cause.message : String(cause)}` })
     } finally {
@@ -80,7 +93,11 @@ export function UseMyPhone() {
           Use my phone
         </h2>
         <p className="text-muted-foreground">
-          {device ? 'Read a tag or a code with the ScadBuddy app on a paired phone.' : 'Pair a phone with the ScadBuddy app, then read tags and codes with it from here.'}
+          {device
+            ? 'Read a tag or a code with the ScadBuddy app on a paired phone.'
+            : offline.length > 0
+              ? `${offline.map((one) => one.name).join(', ')} ${offline.length === 1 ? 'is' : 'are'} offline. Open the ScadBuddy app on the phone to use it here, or pair another phone.`
+              : 'Pair a phone with the ScadBuddy app, then read tags and codes with it from here.'}
         </p>
       </div>
       {!device ? (
@@ -130,7 +147,10 @@ function DecodedRead({ decoded }: { decoded: Decoded }) {
     )
   }
   if (decoded.kind === 'codes') {
-    if (decoded.codes.length === 0) return <p role="status">The photo has no code that ScadBuddy can read. Try again.</p>
+    if (decoded.codes.length === 0) {
+      const reason = decoded.error ? (SCAN_ERROR[decoded.error] ?? `ScadBuddy could not decode the photo (${decoded.error}). Try again.`) : null
+      return <p role="status">{reason ?? 'The photo has no code that ScadBuddy can read. Try again.'}</p>
+    }
     return (
       <ul aria-label="Codes read" className="flex flex-col gap-1">
         {decoded.codes.map((code, at) => (

@@ -125,8 +125,8 @@ export function DeviceCall({
     setEvents((current) => (current.some((one) => one.id === signal.id) ? current : [...current, { id: signal.id, kind: signal.kind, data: signal.data }]))
     if (!ENDING_KINDS.has(signal.kind)) return
     if (signal.kind === 'device.call_done') {
-      const { call: _call, device: _device, ...result } = signal.data
-      finish({ outcome: 'done', result: result as CallResult })
+      // The result comes from the call's own read, not from the event's fields.
+      read()
     } else {
       finish({ outcome: (str(signal.data.outcome) as CallOutcome | undefined) ?? 'error', result: null, error: str(signal.data.error) })
     }

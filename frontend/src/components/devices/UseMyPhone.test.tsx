@@ -52,7 +52,16 @@ it('offers the pairing code when no phone is online', async () => {
   setDevices([OLD_PHONE])
   renderPage(<UseMyPhone />)
   expect(await screen.findByRole('button', { name: 'Add a device' })).toBeInTheDocument()
+  expect(screen.getByText(`${OLD_PHONE.name} is offline. Open the ScadBuddy app on the phone to use it here, or pair another phone.`)).toBeInTheDocument()
   expect(screen.queryByRole('button', { name: 'Read a tag' })).not.toBeInTheDocument()
+})
+
+it('says why the code decoder read nothing', async () => {
+  setStepMs(10)
+  server.use(http.post('*/api/v1/scan/codes', () => HttpResponse.json({ id: 's2', error: 'image_too_large', codes: [] })))
+  const { user } = renderPage(<UseMyPhone />)
+  await user.click(await screen.findByRole('button', { name: 'Scan a code' }))
+  expect(await screen.findByText('The photo is too large to decode. Try again.')).toBeInTheDocument()
 })
 
 it('lets the person choose between two online phones', async () => {
