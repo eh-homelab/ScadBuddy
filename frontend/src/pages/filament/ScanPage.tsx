@@ -9,6 +9,8 @@ import { KnownTag } from '../../components/filament/scan/KnownTag'
 import { NfcJobBanner } from '../../components/filament/scan/NfcJobBanner'
 import { DecodedFields, NewTag } from '../../components/filament/scan/NewTag'
 import type { HeldPhotos } from '../../components/filament/scan/PhotoButtons'
+import { ScanCameraProvider } from '../../components/filament/scan/ScanCameraProvider'
+import { ScanCode } from '../../components/filament/scan/ScanCode'
 import { filamentLinks } from '../../lib/filamentLinks'
 import { codeLabel, codeTarget } from '../../lib/resolvedCode'
 import { takeMifare } from '../../lib/nativeMifare'
@@ -81,7 +83,10 @@ export function ScanPage() {
         <h1 className="text-lg font-semibold tracking-tight">Scan</h1>
         <p className="text-muted-foreground">Hold a tag or a label to the phone: a spool's tag, a place's tag, or a label with a code such as L-12 or S-142.</p>
       </div>
-      {support === 'ok' ? <Scanner /> : <Unsupported embedded={support === 'embedded'} />}
+      <ScanCameraProvider>
+        <ScanCode />
+        {support === 'ok' ? <Scanner /> : <Unsupported embedded={support === 'embedded'} />}
+      </ScanCameraProvider>
     </div>
   )
 }

@@ -1,6 +1,7 @@
 package blobstore
 
 import (
+	"bytes"
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
@@ -11,53 +12,65 @@ import (
 	"github.com/eh-homelab/ScadBuddy/tools/go/core/internal/httpx"
 )
 
-func TestAPutIndexesTheBlobAsACommitDoes(t *testing.T) {
+func reasonOf(err error) (int, string) {
+	var p *httpx.Problem
+	if !errors.As(err, &p) {
+		return 0, ""
+	}
+	for _, f := range p.Extensions {
+		if f.Key == "reason" {
+			reason, _ := f.Value.(string)
+			return p.Status, reason
+		}
+	}
+	return p.Status, ""
+}
+
+// A Put indexes the blob as a commit does, with no staging object, and writes an object
+// that is there already never again.
+func TestAPutStoresTheBlobAsACommitDoes(t *testing.T) {
 	h := newHarness(t)
-	body := []byte(`{"uid":"9CC69CE3"}`)
-	sum := sha256.Sum256(body)
-	digest := hex.EncodeToString(sum[:])
 	ctx := context.Background()
-	key, err := h.blobs.Put(ctx, "tag_dump", "application/json", body)
-	if err != nil {
-		t.Fatal(err)
+	body := []byte("a scan's photo")
+	sum := sha256.Sum256(body)
+	sha := hex.EncodeToString(sum[:])
+	for range 2 {
+		got, err := h.blobs.Put(ctx, "scan_image", "image/jpeg", body)
+		if err != nil || got != (Committed{Key: "scan_image-" + sha, SHA256: sha, Size: int64(len(body))}) {
+			t.Fatal(got, err)
+		}
 	}
-	if key != IndexKey("tag_dump", digest) {
-		t.Fatalf("key = %s", key)
+	if h.s3.puts != 1 {
+		t.Errorf("%d PUTs", h.s3.puts)
 	}
-	if got, ok := h.object(ObjectKey("t", "tag_dump", digest)); !ok || string(got) != string(body) {
-		t.Fatalf("object = %q, %v", got, ok)
+	if got, ok := h.object("t/scan_image/" + sha); !ok || !bytes.Equal(got, body) {
+		t.Fatalf("content object %q", got)
 	}
-	if verifiedAt(t, h, key).IsZero() {
-		t.Error("the row is not verified")
+	if staged := h.stagingKeys(); len(staged) != 0 {
+		t.Errorf("staged %v", staged)
 	}
-	// The same bytes again write no second object.
-	puts := h.s3.puts
-	if again, err := h.blobs.Put(ctx, "tag_dump", "application/json", body); err != nil || again != key {
-		t.Fatalf("again = %s, %v", again, err)
-	}
-	if h.s3.puts != puts {
-		t.Error("a content object there already was written again")
-	}
-	if len(h.stagingKeys()) != 0 {
-		t.Error("a put left a staging object")
+	r := row(t, h.pool, "scan_image-"+sha)
+	if r["kind"] != "scan_image" || r["backend_id"] != "t/scan_image/"+sha || r["verified"] != true {
+		t.Fatal(r)
 	}
 }
 
-func TestAPutRefusesAnUnknownKindAndTooManyBytes(t *testing.T) {
+func TestAPutIsRefusedAsAnUploadIs(t *testing.T) {
 	h := newHarness(t)
 	ctx := context.Background()
-	for _, c := range []struct {
-		kind   string
-		size   int
-		reason string
-	}{{"render", 1, "kind_not_allowed"}, {"tag_dump", 64<<10 + 1, "upload_too_large"}} {
-		_, err := h.blobs.Put(ctx, c.kind, "application/json", make([]byte, c.size))
-		var p *httpx.Problem
-		if !errors.As(err, &p) || p.Status == http.StatusOK {
-			t.Fatalf("%s: %v", c.kind, err)
-		}
-		if len(p.Extensions) != 1 || p.Extensions[0].Value != c.reason {
-			t.Errorf("%s: %v, want reason %s", c.kind, p.Extensions, c.reason)
-		}
+	if status, reason := reasonOf(errOf(h.blobs.Put(ctx, "piece", "image/jpeg", []byte("x")))); status != 422 || reason != "kind_not_allowed" {
+		t.Errorf("kind: %d %s", status, reason)
+	}
+	big := make([]byte, Kinds["tag_dump"]+1)
+	if status, reason := reasonOf(errOf(h.blobs.Put(ctx, "tag_dump", "application/octet-stream", big))); status != http.StatusRequestEntityTooLarge || reason != "upload_too_large" {
+		t.Errorf("size: %d %s", status, reason)
+	}
+	body := []byte("the photo")
+	sum := sha256.Sum256(body)
+	h.s3.objects["/"+h.bucket+"/t/scan_image/"+hex.EncodeToString(sum[:])] = []byte("not it")
+	if status, reason := reasonOf(errOf(h.blobs.Put(ctx, "scan_image", "image/png", body))); status != 409 || reason != "store_object_mismatch" {
+		t.Errorf("mismatch: %d %s", status, reason)
 	}
 }
+
+func errOf(_ Committed, err error) error { return err }

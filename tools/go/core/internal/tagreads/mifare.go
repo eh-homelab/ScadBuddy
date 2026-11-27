@@ -63,10 +63,11 @@ func (s *Reads) recordMifare(ctx context.Context, rd read, scan scanFacts, actor
 		d.Blocks = append(d.Blocks, dumpBlock{Index: b.Block, DataHex: b.Hex})
 	}
 	body, _ := httpx.Marshal(d)
-	key, err := s.Blobs.Put(ctx, dumpKind, mediaType, body)
+	put, err := s.Blobs.Put(ctx, dumpKind, mediaType, body)
 	if err != nil {
 		return Recorded{}, err
 	}
+	key := put.Key
 	stored := tag
 	stored.Blocks, stored.Signature.Blocks = []bambutag.RawBlock{}, []bambutag.RawBlock{}
 	decoded, _ := json.Marshal(stored)

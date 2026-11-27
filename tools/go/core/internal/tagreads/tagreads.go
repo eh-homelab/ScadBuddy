@@ -39,6 +39,7 @@ import (
 
 	"github.com/eh-homelab/ScadBuddy/tools/go/core/internal/auth"
 	"github.com/eh-homelab/ScadBuddy/tools/go/core/internal/bambutag"
+	"github.com/eh-homelab/ScadBuddy/tools/go/core/internal/blobstore"
 	"github.com/eh-homelab/ScadBuddy/tools/go/core/internal/httpx"
 )
 
@@ -62,9 +63,9 @@ const (
 	holderKind = "tag_read"
 )
 
-// Putter stores a blob and answers its content index key (blobstore.Blobs.Put).
+// Putter stores a blob; its Key is the content index key (blobstore.Blobs.Put).
 type Putter interface {
-	Put(ctx context.Context, kind, mediaType string, body []byte) (string, error)
+	Put(ctx context.Context, kind, mediaType string, body []byte) (blobstore.Committed, error)
 }
 
 // Reads serves the area.

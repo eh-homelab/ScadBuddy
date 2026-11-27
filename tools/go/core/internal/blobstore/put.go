@@ -6,74 +6,58 @@ import (
 	"encoding/hex"
 	"fmt"
 	"net/http"
-
-	"github.com/jackc/pgx/v5"
 )
 
-// Put stores body as a blob of kind for a route of this process (#8148: a tag read's raw
-// dump), as a commit does with the bytes already in hand: no staging object and no URL. It
-// takes the same kinds and limits, the store's caps, the object's stage lock, and never
-// overwrites a content object (a wrong one is a 409 store_object_mismatch). It answers the
-// content index's key. A blob of a swept kind is collected unless the caller holds it in
-// blob_refs within the sweep's grace.
-func (b *Blobs) Put(ctx context.Context, kind, mediaType string, body []byte) (string, error) {
+// Put stores body as a blob of kind, for a Go handler in core that took the bytes itself
+// (#8155: a person's page cannot PUT to the bucket, whose CORS rule and the app's CSP
+// admit only the storefront). It is a commit without the staging object: the kind's limit
+// and the store's caps are checked, the object's stage lock is held shared, a content
+// object that is there already is never written (one that is not body is a 409
+// store_object_mismatch), and the row is written as a commit writes it. Its refusals are
+// the area's (*httpx.Problem with a reason).
+func (b *Blobs) Put(ctx context.Context, kind, mediaType string, body []byte) (Committed, error) {
 	limit, ok := Kinds[kind]
 	if !ok {
-		return "", refused(http.StatusUnprocessableEntity, "kind_not_allowed",
-			fmt.Sprintf("no blob of kind %q is stored here", kind))
-	}
-	if !mediaTypePattern.MatchString(mediaType) {
-		return "", fmt.Errorf("blobstore: %q is not a media type", mediaType)
+		return Committed{}, refused(http.StatusUnprocessableEntity, "kind_not_allowed",
+			fmt.Sprintf("no blob of kind %q may be stored", kind))
 	}
 	size := int64(len(body))
 	if size > limit {
-		return "", refused(http.StatusRequestEntityTooLarge, "upload_too_large",
+		return Committed{}, refused(http.StatusRequestEntityTooLarge, "upload_too_large",
 			fmt.Sprintf("a %s blob is at most %d bytes, not %d", kind, limit, size))
 	}
 	store, err := b.s3Store(ctx)
 	if err != nil {
-		return "", err
+		return Committed{}, err
 	}
 	if err := b.room(ctx, store, size); err != nil {
-		return "", err
+		return Committed{}, err
 	}
 	digest := sha256.Sum256(body)
 	t := ticket{Kind: kind, SHA256: hex.EncodeToString(digest[:]), Size: size, MediaType: mediaType}
 	objectKey := ObjectKey(store.S3.Prefix, kind, t.SHA256)
+	key := IndexKey(kind, t.SHA256)
 	release, err := b.hold(ctx, t.SHA256)
 	if err != nil {
-		return "", err
+		return Committed{}, err
 	}
 	defer release()
 	there, found, err := b.read(ctx, store.S3, objectKey, limit)
-	if err != nil {
-		return "", err
-	}
-	if found {
+	switch {
+	case err != nil:
+		return Committed{}, err
+	case found:
 		if err := stored(ctx, there, t); err != nil {
-			return "", err
+			return Committed{}, err
 		}
-	} else {
-		url, headers, err := b.presignPut(store.S3, objectKey, t, readTTL)
-		if err != nil {
-			return "", notConfigured(err.Error())
-		}
-		res, err := b.send(ctx, http.MethodPut, url, body, headers)
-		if err != nil {
-			return "", err
-		}
-		res.Body.Close()
-		if res.StatusCode != http.StatusOK {
-			return "", unavailable(fmt.Sprintf("the S3 store answered %d to the blob's PUT", res.StatusCode))
+	default:
+		if err := b.write(ctx, store.S3, objectKey, t, body); err != nil {
+			return Committed{}, err
 		}
 	}
-	key := IndexKey(kind, t.SHA256)
 	ref := Ref{SHA256: t.SHA256, Kind: kind, Backend: backendS3, BackendID: objectKey, Size: size}
-	if err := pgx.BeginFunc(ctx, b.Pool, func(tx pgx.Tx) error {
-		_, err := index(ctx, tx, key, ref)
-		return err
-	}); err != nil {
-		return "", err
+	if err := b.record(ctx, key, ref); err != nil {
+		return Committed{}, err
 	}
-	return key, nil
+	return Committed{Key: key, SHA256: t.SHA256, Size: size}, nil
 }
