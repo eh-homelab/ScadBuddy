@@ -76,6 +76,20 @@ describe('task widgets (#8062)', () => {
     expect(onSubmit).toHaveBeenCalledWith({ place: 'L-7' })
   })
 
+  it('looks a typed code up when the field is left, with no Enter', async () => {
+    const { user, onSubmit } = draw({ place: { 'x-sb-widget': 'scan', type: 'string', title: 'Shelf' } })
+    server.use(
+      http.get('/api/v1/codes/:code', () =>
+        HttpResponse.json({ kind: 'location', id: 'l7', code: 'L-7', name: 'Shelf seven', archived: false }),
+      ),
+    )
+    await user.type(screen.getByLabelText(/Shelf/), 'L-7')
+    await user.tab()
+    expect(await screen.findByText('Shelf seven')).toBeInTheDocument()
+    await user.click(press())
+    expect(onSubmit).toHaveBeenCalledWith({ place: 'L-7' })
+  })
+
   it('says what a code of the wrong kind should have been', async () => {
     const { user, onSubmit } = draw({ spool: { 'x-sb-widget': 'scan', type: 'string', title: 'Spool', expects: { kinds: ['spool'] } } }, { required: ['spool'] })
     server.use(

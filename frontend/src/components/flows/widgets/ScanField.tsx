@@ -97,7 +97,7 @@ export function ScanField({
           void look(text)
         }}
         onBlur={() => {
-          if (looked === null && value.trim()) void look(text)
+          if (looked === null && text.trim()) void look(text)
         }}
       />
       {looked?.kind === 'busy' && (
