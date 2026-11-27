@@ -3,7 +3,7 @@ import { api, ApiError } from '../../api/client'
 import type { FlowGrantRule, FlowGrantSpec, FlowGrantView } from '../../api/types'
 import { USER_ONLY } from '../../agent/dom'
 import { actorText, answerersText } from '../../lib/flows'
-import { grantStatus, isUnbounded, unboundedText } from '../../lib/grants'
+import { grantExpired, grantStatus, isUnbounded, unboundedText } from '../../lib/grants'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card'
@@ -39,13 +39,15 @@ function usage(rule: FlowGrantRule, used: FlowGrantView['used'][string] | undefi
 }
 
 /** Who else may answer the run's questions, as the grant's status allows it now: only a
- * grant in force admits an answerer (#8045). A declined grant never admitted one. */
+ * grant in force admits an answerer (#8045). A declined grant never admitted one. An approved
+ * grant out of force before its expiry lost force with a grant above it (#8188). */
 function answersText(grant: FlowGrantView, who: string): string | null {
   const rest = 'answer its questions, except those it asks of people only.'
   if (grant.revoked_at) return `Revoked: ${who} may no longer answer its questions.`
   if (grant.status === 'requested') return `If you approve it, besides you, ${who} may ${rest}`
   if (grant.status === 'declined') return null
-  return grant.in_force ? `Besides you, ${who} may ${rest}` : `Expired: ${who} may no longer answer its questions.`
+  if (grant.in_force) return `Besides you, ${who} may ${rest}`
+  return `${grantExpired(grant) ? 'Expired' : 'No longer in force'}: ${who} may no longer answer its questions.`
 }
 
 interface Props {
