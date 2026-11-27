@@ -163,7 +163,8 @@ same way, `vite.config.ts`).
   `/storefront/listings/new?sell=…`); `?listing=<id>` redirects to a saved one's editor. The smart defaults are `listingDraft.ts` `defaultsFor` (free text and
   every colour offered, from the priced filaments of the design's material, the rest locked;
   a support setting is never offered, `isSupport`; an offered colour whose template default
-  no colour on offer has starts at one that is, `fittedDefault`, #6144), pinned by
+  no colour on offer has starts at the closest one on offer, `fittedDefault`, #6144, #8126, by
+  `storefront/closestColour.ts`, whose agent twin is `agent/src/tools/closestColour.ts`), pinned by
   `test-fixtures/storefront/sell-draft-vectors.json`, which the agent's copy
   (`agent/src/tools/storefrontDraft.ts`) is tested against too (its case with `file` is a new
   file listing's body, #6710: `fileTitle`, `fileColours` over `declaredSlots`, `platePictures`; its

@@ -1,6 +1,7 @@
 """The closest colour (#6258): the colour a part moves to when the material it prints in
-does not offer its colour. The page has a twin of this function; the shared vectors in
-``test-fixtures/storefront/closest-colour.json`` pin both. Change them together.
+does not offer its colour. The page (``frontend/src/storefront/closestColour.ts``) and the
+agent (``agent/src/tools/closestColour.ts``) have twins of this function; the shared vectors
+in ``test-fixtures/storefront/closest-colour.json`` pin all three. Change them together.
 
 The rule, in order:
 

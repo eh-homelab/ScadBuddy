@@ -440,6 +440,22 @@ describe('colourProblems (#6144)', () => {
   })
 })
 
+describe('the colour an offered parameter starts at (#6144, #8126)', () => {
+  it('starts a template colour default that no filament has at the closest filament, not the first', () => {
+    const made = (id: string, colour: string, colour_name: string): Filament => ({ ...(owl.filaments[0] as Filament), id, colour, colour_name, alpha: 255, material: 'PLA', density_g_cm3: '1.24' })
+    const schema = {
+      ...owl.schema,
+      parameters: [
+        { name: 'roof', type: 'color', initial: '#7E57C2', caption: 'Roof', group: 'Colours' },
+        { name: 'walls', type: 'color', initial: '#F8BBD0', caption: 'Walls', group: 'Colours' },
+      ],
+    } as Schema
+    const { params } = defaultsFor(schema, [made('white', '#FFFFFF', 'Jade White'), made('purple', '#694ED4', 'Purple'), made('pink', '#FC97B0', 'Pink')])
+    expect(params['roof']).toEqual({ kind: 'choice', choices: [], default: '#694ED4' })
+    expect(params['walls']).toEqual({ kind: 'choice', choices: [], default: '#FC97B0' })
+  })
+})
+
 describe('isSupportMaterial (#6710, #7189 and #7195 reviews)', () => {
   it('reads a support material as the backend and the page do: the shared vectors', () => {
     // `test-fixtures/storefront/support-materials.json`, which the backend's

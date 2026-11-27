@@ -1,4 +1,5 @@
 import type { components } from '../api/schema.js'
+import { closestColour } from './closestColour.js'
 
 // #6131 (design 2026-11-13 §4) — the smart defaults of a storefront listing, the agent's
 // copy of the Storefront page's (`frontend/src/components/storefront/listingDraft.ts`
@@ -152,8 +153,10 @@ export function defaultsFor(schema: Schema, filaments: readonly Filament[], valu
     .filter((filament) => !offered.includes(filament))
   const colours = [...offered, ...new Set(support)].map((filament) => filament.id)
   // #6144: an offered colour whose template default no colour on offer has starts at the value
-  // given, else the first colour on offer, so publish takes it (the page's `fittedDefault`).
+  // given, else the colour on offer closest to it (#8126, `closestColour.ts`, each colour's
+  // swatch the first listing filament with it), so publish takes it (the page's `fittedDefault`).
   const chosen = withColourChoices({ params, fixed, colours }, schema, filaments).params
+  const listed = filaments.filter((filament) => colours.includes(filament.id))
   for (const param of shown) {
     const bound = chosen[param.name]
     const own = params[param.name]
@@ -161,10 +164,20 @@ export function defaultsFor(schema: Schema, filaments: readonly Filament[], valu
     const pickable = bound.choices
     if (pickable.some((colour) => sameColour(colour, param.initial))) continue
     const value = valueOf(param)
-    const start = pickable.find((colour) => sameColour(colour, value)) !== undefined ? value : pickable[0]
+    const start = pickable.find((colour) => sameColour(colour, value)) !== undefined ? value : closestOnOffer(value, pickable, listed)
     if (start !== undefined) params[param.name] = { ...own, default: start }
   }
   return { params, fixed, colours }
+}
+
+/** The colour of `pickable` closest to `value` by the shop's rule, each a swatch of the first of `filaments` with it. */
+function closestOnOffer(value: Value | undefined, pickable: readonly Value[], filaments: readonly Filament[]): Value | undefined {
+  const swatches = pickable.map((colour) => {
+    const filament = filamentOf(colour, filaments)
+    return { hex: String(colour), name: filament?.colour_name, alpha: filament?.alpha }
+  })
+  const index = closestColour({ hex: typeof value === 'string' ? value : '', name: null }, swatches)
+  return index === null ? undefined : pickable[index]
 }
 
 /**
