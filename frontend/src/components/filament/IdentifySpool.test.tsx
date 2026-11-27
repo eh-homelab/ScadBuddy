@@ -1,4 +1,4 @@
-import { screen, waitFor, within } from '@testing-library/react'
+import { act, screen, waitFor, within } from '@testing-library/react'
 import { http, HttpResponse } from 'msw'
 import { StrictMode } from 'react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
@@ -453,6 +453,62 @@ describe('IdentifySpool (#7167)', () => {
       expect(within(list).queryAllByRole('radio')).toHaveLength(0)
       expect(screen.getByRole('searchbox', { name: 'Find a spool' })).toHaveValue(`gtin:${GTIN}`)
       expect(identified(onIdentified)).toHaveLength(0)
+    })
+
+    it('searches the code a photo reads when it names no ScadBuddy thing', async () => {
+      queueScanCodes([{ format: 'ean_13', text: GTIN }])
+      const { user, onIdentified } = show()
+      await user.click(screen.getByRole('radio', { name: 'QR code' }))
+      await user.upload(screen.getByLabelText('Photo of the label'), new File([new Uint8Array([0xff, 0xd8])], 'label.jpg', { type: 'image/jpeg' }))
+      expect(await screen.findByRole('searchbox', { name: 'Find a spool' })).toHaveValue(`gtin:${GTIN}`)
+      expect(screen.getByRole('radio', { name: 'Pick by hand' })).toHaveAttribute('aria-checked', 'true')
+      expect(identified(onIdentified)).toHaveLength(0)
+    })
+
+    it('names no spool when the box is edited before the property reads settle', async () => {
+      seedEntityProperties(`spool_type:${T.ORANGE}`, { gtin: [GTIN] })
+      let release!: () => void
+      const held = new Promise<void>((resolve) => (release = resolve))
+      server.use(
+        http.get('/api/v1/entity-kinds/spool_type/properties', async () => {
+          await held
+          return undefined
+        }),
+      )
+      let handled!: () => void
+      const answered = new Promise<void>((resolve) => (handled = resolve))
+      const listen = ({ request }: { request: Request }) => {
+        if (new URL(request.url).pathname === '/api/v1/entity-kinds/spool_type/properties') handled()
+      }
+      server.events.on('response:mocked', listen)
+      try {
+        const { user, onIdentified } = show()
+        await scan(user)
+        expect(screen.getByText(`Looking for “gtin:${GTIN}”…`)).toBeInTheDocument()
+        // A space keeps the one match, so only the edit can stop the pick.
+        await user.type(screen.getByRole('searchbox', { name: 'Find a spool' }), ' ')
+        release()
+        await answered
+        await act(async () => {})
+        const list = screen.getByRole('radiogroup', { name: 'Spools' })
+        expect(await within(list).findByRole('radio', { name: /S-2\b/ })).toHaveAttribute('aria-checked', 'false')
+        expect(within(list).getAllByRole('radio')).toHaveLength(1)
+        expect(identified(onIdentified)).toHaveLength(0)
+      } finally {
+        server.events.removeListener('response:mocked', listen)
+      }
+    })
+
+    it('finds a spool by its code and a property of its type in one search', async () => {
+      seedEntityProperties(`spool_type:${T.ORANGE}`, { gtin: [GTIN] })
+      seedEntityProperties(`spool_type:${T.PINK}`, { gtin: [GTIN] })
+      const { user } = show()
+      await user.click(screen.getByRole('radio', { name: 'Pick by hand' }))
+      const list = await screen.findByRole('radiogroup', { name: 'Spools' })
+      await waitFor(() => expect(within(list).getAllByRole('radio').length).toBeGreaterThan(1))
+      await user.type(screen.getByRole('searchbox', { name: 'Find a spool' }), `S-2 gtin:${GTIN}`)
+      await waitFor(() => expect(within(list).getAllByRole('radio')).toHaveLength(1))
+      expect(within(list).getByRole('radio', { name: /S-2\b/ })).toBeInTheDocument()
     })
 
     it('keeps the sentence for a ScadBuddy code that is not found', async () => {

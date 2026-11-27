@@ -2,6 +2,7 @@ import { screen, waitFor, within } from '@testing-library/react'
 import { http, HttpResponse } from 'msw'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { L } from '../../mocks/features/filament/seed'
+import { queueScanCodes } from '../../mocks/features/scan'
 import { resetMockState } from '../../mocks/handlers'
 import { server } from '../../mocks/server'
 import { installNdefStub, type NdefStub } from '../../test/ndefStub'
@@ -49,6 +50,26 @@ describe('IdentifyPlace (#7168)', () => {
   })
   afterEach(() => {
     vi.restoreAllMocks()
+  })
+
+  it('keeps the no-label sentence for a photo whose only code names no ScadBuddy thing (#8372)', async () => {
+    // jsdom draws nothing: a canvas that "draws" and makes a small JPEG, and a photo it can open.
+    vi.spyOn(HTMLCanvasElement.prototype, 'getContext').mockReturnValue({ drawImage: () => undefined } as unknown as CanvasRenderingContext2D)
+    vi.spyOn(HTMLCanvasElement.prototype, 'toBlob').mockImplementation(function (callback: BlobCallback) {
+      callback(new Blob([new Uint8Array([0xff, 0xd8, 0xff, 0xd9])], { type: 'image/jpeg' }))
+    })
+    vi.stubGlobal('createImageBitmap', async () => ({ width: 4000, height: 3000, close: () => undefined }))
+    try {
+      queueScanCodes([{ format: 'ean_13', text: '6975373321234' }])
+      const { user, onIdentified } = show('no_api')
+      await user.click(screen.getByRole('radio', { name: 'QR code' }))
+      await user.upload(screen.getByLabelText('Photo of the label'), new File([new Uint8Array([0xff, 0xd8])], 'label.jpg', { type: 'image/jpeg' }))
+      expect(await screen.findByText('No place label was found in the photo. Take it again, or type the code.')).toBeInTheDocument()
+      expect(screen.getByLabelText('Place code')).toBeInTheDocument()
+      expect(identified(onIdentified)).toHaveLength(0)
+    } finally {
+      vi.unstubAllGlobals()
+    }
   })
 
   it('offers the ways with none chosen', () => {

@@ -284,8 +284,8 @@ function searchText(spool: Spool): string {
 }
 
 /**
- * Every unarchived spool, found by its code, colour, material, brand or place, or by the filament
- * search over its and its type's property values (#8372); none picked until a click. `fromScan`
+ * Every unarchived spool. Each word of the box matches its code, colour, material, brand or place,
+ * or the filament search over its and its type's property values (#8372); none picked until a click. `fromScan`
  * (a scanned code's search in `initialSearch`): once the spools and both property reads have
  * settled, one shown spool is named. That decision is made once, and never after an edit of the box.
  */
@@ -324,12 +324,12 @@ function HandWay({ onIdentified, initialSearch = '', fromScan = false }: { onIde
 
   const found = useMemo(() => {
     const words = search.trim().toLowerCase().split(/\s+/).filter(Boolean)
-    const tokens = parseSearch(search)
-    return (spools ?? []).filter(
-      (spool) =>
-        words.every((word) => searchText(spool).includes(word)) ||
-        matchesSearch(spoolSearchDoc(spool, { properties: properties?.get(spool.id), typeProperties: spool.type_id ? typeProperties?.get(spool.type_id) : undefined }), tokens),
-    )
+    return (spools ?? []).filter((spool) => {
+      const text = searchText(spool)
+      const doc = spoolSearchDoc(spool, { properties: properties?.get(spool.id), typeProperties: spool.type_id ? typeProperties?.get(spool.type_id) : undefined })
+      // Each word matches by one rule or the other, so `S-2 gtin:…` finds S-2.
+      return words.every((word) => text.includes(word) || matchesSearch(doc, parseSearch(word)))
+    })
   }, [spools, search, properties, typeProperties])
 
   const settled = (spools !== null || error !== null) && properties !== null && typeProperties !== null

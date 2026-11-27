@@ -2,6 +2,7 @@ import { CameraIcon, ImageUpIcon } from 'lucide-react'
 import { useId, useRef, useState, type ReactNode } from 'react'
 import { ApiError } from '../../../api/client'
 import { decodeScan, storeScanImage } from '../../../api/scan'
+import { scanSearchQuery } from '../../../lib/scanSearch'
 import { detectorClass, jpegOf } from './camera'
 import { CameraReader } from './CameraReader'
 import { reasonOf } from './reason'
@@ -38,7 +39,8 @@ const isSearch = (found: object): found is CodeSearch => 'search' in found && ty
  * reads (#8155), which a 404 hides. `fromText` resolves a typed or scanned text, `fromCode` the
  * code the photo's first code of `kind` names; each gives the thing, or the sentence why none.
  * `onIdentified` gets null as soon as nothing is named any more. When a lookup gives a
- * search (#8372), the way shows nothing and gives the search to `onSearch`.
+ * search (#8372), the way shows nothing and gives the search to `onSearch`. With `onSearch`, a
+ * photo with no code of `kind` but a code that names no thing searches that code.
  */
 export function CodeWay<T extends object>({
   kind,
@@ -91,15 +93,16 @@ export function CodeWay<T extends object>({
     setPhotoBusy(true)
     setSaid(null)
     onIdentified(null)
+    /** #8372: the search for a code the photo read that names no thing. */
+    let search: string | null = null
     try {
       const stored = await storeScanImage(await jpegOf(file))
       const scan = await decodeScan({ key: stored.key, source: 'shutter', location: null })
       const first = scan.codes.find((code) => code.resolved?.kind === kind)
-      if (!first?.resolved) {
-        answer(scan.error ? 'The photo could not be read. Take it again, closer to the label.' : copy.noLabel)
-        return
-      }
-      answer(await fromCode(first.resolved.code))
+      const unknown = onSearch ? scan.codes.find((code) => !code.resolved) : undefined
+      if (first?.resolved) answer(await fromCode(first.resolved.code))
+      else if (unknown) search = scanSearchQuery(unknown.text)
+      else answer(scan.error ? 'The photo could not be read. Take it again, closer to the label.' : copy.noLabel)
     } catch (cause) {
       // The core area is off: no photo route on this server.
       if (cause instanceof ApiError && cause.status === 404) {
@@ -109,6 +112,8 @@ export function CodeWay<T extends object>({
     } finally {
       setPhotoBusy(false)
     }
+    // After the busy flag: the search can remove this way from the page.
+    if (search !== null) answer({ search })
   }
 
   return (
