@@ -886,6 +886,47 @@ func TestTagReadFromDeviceRead(t *testing.T) {
 	if status, answer := h.post(map[string]any{"read_id": readA, "records": []any{}}); status != http.StatusOK {
 		t.Errorf("read_id and records []: %d %v", status, answer)
 	}
+	// A second post with a photo keeps no photo: the first row stands.
+	photo := "scan_image-" + strings.Repeat("ab", 32)
+	h.exec(`INSERT INTO store_blobs (sha256, kind, backend, backend_id, size, meta, key)
+ VALUES ($1, 'scan_image', 's3', 't/scan_image/x', 10, '{}'::jsonb, $2)`, strings.Repeat("ab", 32), photo)
+	if status, answer := h.post(map[string]any{"read_id": readA, "image": map[string]any{"key": photo, "media_type": "image/jpeg"}}); status != http.StatusOK || answer["tag_read_id"] != first {
+		t.Errorf("again with a photo: %d %v", status, answer)
+	}
+	if got := h.one("SELECT count(*) FROM blob_refs WHERE key = $1", photo); got != int64(0) {
+		t.Errorf("%v holds of the repeat's photo", got)
+	}
+	if got := h.one("SELECT count(*) FROM filament_tag_reads WHERE image_key IS NOT NULL"); got != int64(0) {
+		t.Errorf("%v rows with a photo", got)
+	}
+	// A photo read is no tag read.
+	photoRead := h.one(`WITH c AS (INSERT INTO device_calls (device_id, caller, caller_kind, method, timeout_s, deadline, outcome, ended_at)
+ SELECT device_id, $2, 'person', 'code.scan', 60, now(), 'done', now() FROM device_reads WHERE id = $1::uuid RETURNING id, device_id)
+ INSERT INTO device_reads (device_id, call_id, kind, blob_key, media_type)
+ SELECT device_id, id, 'photo', $3, 'image/jpeg' FROM c RETURNING id::text`, readA, ada.Principal, photo)
+	if status, answer := h.post(map[string]any{"read_id": photoRead}); status != http.StatusUnprocessableEntity {
+		t.Errorf("a photo read: %d %v", status, answer)
+	}
+}
+
+func TestANullReadIDIsAnInlineRead(t *testing.T) {
+	h := newHarness(t)
+	body := mifareRead(uidA, block0A+" "+shared)
+	body["read_id"] = nil
+	if status, answer := h.post(body); status != http.StatusOK || answer["bambu"] == nil {
+		t.Fatalf("%d %v", status, answer)
+	}
+	if _, ok := h.py.bodies[0]["read_id"]; ok {
+		t.Errorf("forwarded %v", h.py.bodies[0])
+	}
+	tag := h.one("INSERT INTO filament_tags (kind, tag_uid) VALUES ('ntag_openspool', '53F64B94420001') RETURNING id::text")
+	h.py.answer = `{"tag":{"id":"` + tag.(string) + `"},"spool":null,"decoded":null,"draft":null,"next":"bind_or_create"}`
+	if status, answer := h.post(map[string]any{"uid": "53F64B94420001", "records": []any{}, "read_id": nil}); status != http.StatusOK {
+		t.Errorf("NDEF: %d %v", status, answer)
+	}
+	if _, ok := h.py.bodies[1]["read_id"]; ok {
+		t.Errorf("forwarded %v", h.py.bodies[1])
+	}
 }
 
 func TestADeviceReadThatIsNoClassic1KIsAUIDOnlyRead(t *testing.T) {

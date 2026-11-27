@@ -311,7 +311,7 @@ A read's source is the caller's: an access token or a service credential is `age
 `image` (a committed `scan_image` blob) and `location` are checked and stored on the row.
 `Reads.RecordMifare(ctx, body, actor, source)` is the same write for a Go caller (#8157). With
 the area off, Python answers a MIFARE read 503 `mifare_needs_core`.
-A body with `read_id` (#8244) names a paired device's read in place of `uid`, `tag_type`,
+A body with a `read_id` that is not null (#8244) names a paired device's read in place of `uid`, `tag_type`,
 `records` and `mifare_blocks` (with any of them it is a 422 `device_read_invalid`). Core loads the
 read (`devices.Store.OwnRead`: a read of a device the caller does not own is a 404
 `read_not_found`, with `code`, as a read that is not there), reads its `tag_dump` blob, and takes the dump's
@@ -350,7 +350,7 @@ CORS rule and the app's CSP admit only the storefront), so core takes the photo'
 | Route | Body | Answer |
 |---|---|---|
 | `POST /api/v1/scan/images` | the photo's bytes (JPEG, PNG or WebP; at most 12 MiB) | `{key, media_type, sha256, size}`: a `scan_image` blob, its type read from its bytes, never from a header. 415 `image_not_supported` for any other bytes; a HEIC, HEIF or AVIF photo is refused with its own words (no decoder in pure Go reads one: the page draws a chosen photo on a canvas and sends a JPEG) |
-| `POST /api/v1/scan/codes` | `{key, source?, location?}`, or `{read_id, source?, location?}` (#8244: a paired device's photo read in place of `key`; its `source` defaults to `app`): `source` `shutter` (the default), `nfc`, `file` or `app`; `location` `{lat, lon, accuracy_m?, at?}`, lat -90 to 90, lon -180 to 180, accuracy 0 to 1,000,000 m | a scan (below), recorded. 404 `image_not_found` for a key that is no `scan_image` blob; 404 `read_not_found` for a read of a device the caller does not own, as for one that is not there; 422 `read_not_a_photo` for a tag read. Each post is a new scan, of a `read_id` as of a `key` |
+| `POST /api/v1/scan/codes` | `{key, source?, location?}`, or `{read_id, source?, location?}` (#8244: a paired device's photo read in place of `key`, a null `read_id` as none; its `source` defaults to `app`): `source` `shutter` (the default), `nfc`, `file` or `app`; `location` `{lat, lon, accuracy_m?, at?}`, lat -90 to 90, lon -180 to 180, accuracy 0 to 1,000,000 m | a scan (below), recorded. 404 `image_not_found` for a key that is no `scan_image` blob; 404 `read_not_found` for a read of a device the caller does not own, as for one that is not there; 422 `read_not_a_photo` for a tag read. Each post is a new scan, of a `read_id` as of a `key` |
 | `GET /api/v1/scan/scans?limit=&before=` | | `{scans}`, newest first, at most 100 (50 by default); `before` is a scan id. A person sees only their own scans (a scan holds its photo and GPS fix); a service sees all; any other caller (anonymous, as under auth `off` or `observe`) sees only the scans made with no actor. The same holds for every route below: another person's scan is a 404 |
 | `GET /api/v1/scan/scans/{id}` | | a scan, or 404 `scan_not_found` |
 | `GET /api/v1/scan/scans/{id}/image` | | the photo's bytes with its media type, `nosniff` (scriptless, for an `<img>`) |

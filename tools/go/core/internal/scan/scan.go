@@ -460,7 +460,7 @@ func (s *Scans) codes(r *http.Request) (any, error) {
 	}
 	var key, readID string
 	source := "shutter"
-	if body.Present("read_id") {
+	if !body.Null("read_id") {
 		source = "app"
 		readID = body.Text("read_id", 1, 64)
 		if body.Present("key") {

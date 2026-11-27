@@ -120,7 +120,12 @@ func (s *Reads) serve(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var deviceRead string
-	if _, ok := fields["read_id"]; ok {
+	if v, ok := fields["read_id"]; ok && isNull(v) {
+		// A null read_id is the model's default: an inline read, and Python gets the body as
+		// it was, without it.
+		delete(fields, "read_id")
+		raw, _ = json.Marshal(fields)
+	} else if ok {
 		id, perr := s.fromDevice(r.Context(), fields)
 		if perr != nil {
 			httpx.WriteProblem(w, r, perr)

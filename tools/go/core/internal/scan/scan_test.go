@@ -658,6 +658,24 @@ func TestCodeScanFromDeviceRead(t *testing.T) {
 	if status, _ := h.json("POST", "/api/v1/scan/codes", map[string]any{"read_id": read, "key": "scan_image-x"}); status != 422 {
 		t.Errorf("read_id and key: %d", status)
 	}
+	// A null read_id is a scan by key; a tag read is no photo.
+	key := sc["image"].(map[string]any)["key"]
+	if status, out := h.json("POST", "/api/v1/scan/codes", map[string]any{"read_id": nil, "key": key}); status != 200 || out["source"] != "shutter" {
+		t.Errorf("null read_id: %d %v", status, out)
+	}
+	var tagRead string
+	if err := h.pool.QueryRow(context.Background(), `WITH c AS (
+		INSERT INTO device_calls (device_id, caller, caller_kind, method, timeout_s, deadline, outcome, ended_at)
+		SELECT device_id, $2, 'person', 'nfc.read', 60, now(), 'done', now() FROM device_reads WHERE id = $1::uuid
+		RETURNING id, device_id)
+	INSERT INTO device_reads (device_id, call_id, kind, uid, blob_key, media_type)
+		SELECT device_id, id, 'nfc', '9CC69CE3', 'tag_dump-x', 'application/json' FROM c RETURNING id::text`,
+		read, h.who.Principal).Scan(&tagRead); err != nil {
+		t.Fatal(err)
+	}
+	if status, out := h.json("POST", "/api/v1/scan/codes", map[string]any{"read_id": tagRead}); status != 422 || out["reason"] != "read_not_a_photo" {
+		t.Errorf("a tag read: %d %v", status, out)
+	}
 }
 
 func TestCodeScanFromAnotherPersonsDeviceReadIsNotFound(t *testing.T) {
