@@ -1784,13 +1784,21 @@ async def _push_now(filament: Filament, store: SettingsStore) -> None:
     summary="Take a tag off its spool",
     description=(
         "Closes the tag's open binding, with a `tag_unbound` ledger event on its spool, "
-        "and answers the closed binding. 404 when the tag is on no spool."
+        "and answers the closed binding. `reason` is the binding's reason: `unbound` (the "
+        "default), or `cleared` when the phone wrote the tag empty first (#8362). 404 when "
+        "the tag is on no spool."
     ),
 )
 async def unbind_tag(
-    filament: FilamentDep, store: SettingsStoreDep, caller: CallerDep, tag_id: UUID
+    filament: FilamentDep,
+    store: SettingsStoreDep,
+    caller: CallerDep,
+    tag_id: UUID,
+    reason: m.UnbindReason = "unbound",
 ) -> m.TagBinding:
-    closed = await asyncio.to_thread(filament.spools.unbind_tag, tag_id, actor=actor(caller))
+    closed = await asyncio.to_thread(
+        filament.spools.unbind_tag, tag_id, actor=actor(caller), reason=reason
+    )
     if closed is None:
         raise ApiError(status.HTTP_404_NOT_FOUND, f"tag {tag_id} is on no spool")
     await _push_now(filament, store)
@@ -2270,7 +2278,8 @@ async def read_tag(
     description=(
         "Keeps what a tag holds (its `uid` and NDEF `records`) just before a write, and makes "
         "the tag when ScadBuddy has not seen it. `reason` is `spool_write`, `agent_write` (with "
-        "the NFC job's `job_id`; no other reason takes one) or `restore`. The answer is the "
+        "the NFC job's `job_id`; no other reason takes one), `restore`, `place_write` or "
+        "`clear` (the phone writes the tag empty, #8362). The answer is the "
         "`backup_id` the write names. 422 `no_uid` for a UID that cleans to nothing. 409 "
         "`job_not_armed` for an `agent_write` whose job is not an armed `write` job."
     ),
