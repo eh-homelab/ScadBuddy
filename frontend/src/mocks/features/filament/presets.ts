@@ -95,6 +95,10 @@ function seeded(): Seeded[] {
         { version: version(2, 'edit', SHA(42)), document: { name: 'My PETG, lost', nozzle_temperature: ['245'] } },
       ],
     },
+    {
+      row: row(5, '3dfp', { name: 'Zed PETG HF @H2C 0.4', filament_type: 'PETG', type_id: T.ORANGE, filament_colour: '#FF6A13' }),
+      versions: [{ version: version(1, 'profile_fetch', SHA(5)), document: { name: 'Zed PETG HF @H2C 0.4', nozzle_temperature: ['250'] } }],
+    },
   ]
 }
 

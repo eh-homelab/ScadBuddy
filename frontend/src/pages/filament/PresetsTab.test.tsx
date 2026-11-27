@@ -1,7 +1,11 @@
 import { screen, within } from '@testing-library/react'
 import { describe, expect, it } from 'vitest'
+import { listTypes } from '../../api/filament'
 import { listPresets } from '../../api/filamentPresets'
 import { presetsOff } from '../../mocks/features/filament/presets'
+import { T } from '../../mocks/features/filament/seed'
+import { server } from '../../mocks/server'
+import { http, HttpResponse } from 'msw'
 import { renderPage } from '../../test/utils'
 import { PresetsTab } from './PresetsTab'
 
@@ -20,6 +24,7 @@ describe('the Presets tab', () => {
     expect(within(row).getByText('Manual')).toBeInTheDocument()
     expect(within(row).getByText(`v${failed.version}`)).toBeInTheDocument()
     expect(within(row).getByText('Failed')).toHaveAttribute('title', failed.mirror_error)
+    expect(within(row).getByText(failed.mirror_error!)).toBeVisible()
     const sent = rowOf(rows, all.find((one) => one.mirror === 'sent')!.id)
     expect(within(sent).getByText('3DFP')).toBeInTheDocument()
     expect(within(sent).getByText('Sent')).toBeInTheDocument()
@@ -32,6 +37,27 @@ describe('the Presets tab', () => {
     const rows = presetRows(await presets())
     expect(rows).toHaveLength(1)
     expect(within(rows[0]!).getByText('Bambuddy')).toBeInTheDocument()
+  })
+
+  it('filters by type from the URL', async () => {
+    const { user } = renderPage(<PresetsTab />, { route: `/?type_id=${T.ORANGE}` })
+    const types = await listTypes({ includeArchived: true })
+    const code = types.find((type) => type.id === T.ORANGE)!.code
+    const chip = await screen.findByRole('button', { name: `Type: ${code}` })
+    const rows = presetRows(await presets())
+    expect(rows).toHaveLength(1)
+    expect(within(rows[0]!).getByRole('link', { name: code })).toHaveAttribute('href', `/filament/types/${T.ORANGE}`)
+    await user.click(chip)
+    expect(presetRows(await presets()).length).toBeGreaterThan(1)
+    expect(screen.queryByRole('button', { name: /^Type:/ })).not.toBeInTheDocument()
+  })
+
+  it('names a type by the start of its id when the types cannot be loaded', async () => {
+    server.use(http.get('/api/v1/filament/types', () => HttpResponse.json({ detail: 'down' }, { status: 500 })))
+    renderPage(<PresetsTab />)
+    const row = presetRows(await presets()).find((one) => one.dataset.preset === '1')!
+    const link = within(row).getByRole('link', { name: `Type ${T.JADE}` })
+    expect(link).toHaveTextContent(T.JADE.slice(0, 8))
   })
 
   it("opens a preset's page from its name", async () => {

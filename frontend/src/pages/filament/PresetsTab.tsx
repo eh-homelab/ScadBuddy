@@ -1,3 +1,4 @@
+import { XIcon } from 'lucide-react'
 import { useEffect, useState } from 'react'
 import { Link, useSearchParams } from 'react-router'
 import { ApiError } from '../../api/client'
@@ -27,15 +28,21 @@ const MIRROR_HINT: Record<PresetMirror, string> = {
 
 const message = (cause: unknown) => (cause instanceof ApiError ? cause.detail : 'The presets could not be loaded. Try again.')
 
+/** The first 8 characters of an id: the name of a type whose code is not loaded. */
+const shortId = (id: string) => id.slice(0, 8)
+
 const searchDoc = (row: PresetRow) => [row.name, row.ref, row.printer_model, row.filament_type, row.nozzle_diameter].filter(Boolean).join(' ').toLowerCase()
 
-/** The mirror state of a preset. A failed one carries the error in its title. */
+/** The mirror state of a preset. Its error is shown under it, and kept in the title. */
 function MirrorState({ row }: { row: PresetRow }) {
   const title = row.mirror === 'failed' && row.mirror_error ? row.mirror_error : row.mirror_error ? `${MIRROR_HINT[row.mirror]} ${row.mirror_error}` : MIRROR_HINT[row.mirror]
   return (
-    <span title={title} className={cn(row.mirror === 'failed' && 'font-medium text-warn', (row.mirror === 'pending' || row.mirror === 'bambuddy_owned') && 'text-muted-foreground')}>
-      {MIRROR_LABEL[row.mirror]}
-    </span>
+    <>
+      <span title={title} className={cn(row.mirror === 'failed' && 'font-medium text-warn', (row.mirror === 'pending' || row.mirror === 'bambuddy_owned') && 'text-muted-foreground')}>
+        {MIRROR_LABEL[row.mirror]}
+      </span>
+      {row.mirror_error && <p className="mt-0.5 max-w-64 text-[12px] whitespace-normal text-muted-foreground">{row.mirror_error}</p>}
+    </>
   )
 }
 
@@ -44,6 +51,7 @@ export function PresetsTab() {
   const [params, setParams] = useSearchParams()
   const source = SOURCES.find((one) => one.id === params.get('source'))?.id ?? null
   const search = params.get('q') ?? ''
+  const typeId = params.get('type_id')
   const [rows, setRows] = useState<PresetRow[] | null>(null)
   const [served, setServed] = useState(true)
   const [error, setError] = useState<string | null>(null)
@@ -51,7 +59,7 @@ export function PresetsTab() {
 
   useEffect(() => {
     let live = true
-    listPresets().then(
+    listPresets({ typeId: typeId ?? undefined }).then(
       (list) => {
         if (!live) return
         setRows(list.rows)
@@ -72,7 +80,7 @@ export function PresetsTab() {
     return () => {
       live = false
     }
-  }, [])
+  }, [typeId])
 
   const setParam = (key: string, value: string | null) => {
     const next = new URLSearchParams(params)
@@ -107,6 +115,12 @@ export function PresetsTab() {
             </Button>
           ))}
         </div>
+        {typeId && (
+          <Button type="button" variant="outline" size="sm" onClick={() => setParam('type_id', null)}>
+            {`Type: ${typeCodes.get(typeId) ?? shortId(typeId)}`}
+            <XIcon />
+          </Button>
+        )}
       </div>
       <div className="relative overflow-x-auto rounded-md border">
         <table aria-label="Presets" className="w-full text-left text-[13px]">
@@ -133,8 +147,8 @@ export function PresetsTab() {
                 <td className="px-2 py-1.5">{SOURCE_LABEL[row.source]}</td>
                 <td className="px-2 py-1.5">
                   {row.type_id ? (
-                    <Link to={filamentLinks.type(row.type_id)} className="underline-offset-4 hover:underline">
-                      {typeCodes.get(row.type_id) ?? 'Type'}
+                    <Link to={filamentLinks.type(row.type_id)} aria-label={typeCodes.get(row.type_id) ?? `Type ${row.type_id}`} className="underline-offset-4 hover:underline">
+                      {typeCodes.get(row.type_id) ?? shortId(row.type_id)}
                     </Link>
                   ) : (
                     <span className="text-muted-foreground" aria-label="No type">—</span>
