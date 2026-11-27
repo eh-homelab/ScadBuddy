@@ -2439,8 +2439,8 @@ def _library_activities(
         # The activity that links an unknown AMS tray to a spool (#7143, G5). The Go route that
         # starts it is not built yet.
         *_unknown_tray_activities(state),
-        # Copy and edit of ScadBuddy's own filament presets (#7204, N7). The Go routes that
-        # start them are not built yet.
+        # Copy, edit and send again of ScadBuddy's own filament presets (#7204, N7). The Go
+        # routes that start them are not built yet.
         *_preset_write_activities(state),
         *operation_activities(ops.store, state.settings_store, _kinds_on(ops, "library")),
         *trigger_activities,
@@ -2475,7 +2475,8 @@ def _unknown_tray_activities(state: AppState) -> list[Callable[..., Any]]:
 
 
 def _preset_write_activities(state: AppState) -> list[Callable[..., Any]]:
-    """The copy and edit of a filament preset (#7204): the API alone holds the database secret."""
+    """The copy, edit and send again of a filament preset (#7204): the API alone holds the
+    database secret."""
     return list(
         preset_write_activities(
             lambda: state.settings_store.pool,

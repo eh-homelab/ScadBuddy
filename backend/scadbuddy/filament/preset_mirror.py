@@ -38,6 +38,11 @@ the lost create, nothing above the floor holds it: the preset is created again a
 ``mirror_error`` names the untracked copy of its name the lost create left (#7343). One
 preset's failure, a Bambuddy id another ScadBuddy preset holds included, is its own
 ``mirror_error`` and never stops the presets after it.
+
+A person sends one preset again with the Go route ``POST
+/api/v1/filament/presets/{preset_id}/mirror`` (#7204), which runs `mirror_again` as the
+``library`` activity ``filament_preset_mirror_again`` (`preset_writes.py`), bounded by
+`RESEND_TIMEOUT` (R11).
 """
 
 from __future__ import annotations
@@ -46,11 +51,13 @@ import asyncio
 import logging
 from collections.abc import Callable, Collection
 from dataclasses import dataclass
-from typing import Any
+from datetime import datetime
+from typing import Any, Final, Literal
 
 from fastapi import status
 from psycopg.errors import UniqueViolation
 from psycopg_pool import ConnectionPool
+from temporalio.exceptions import ApplicationError
 
 from scadbuddy.bambuddy.client import BambuddyClient, client_for
 from scadbuddy.bambuddy.models import LocalPreset
@@ -71,6 +78,18 @@ logger = logging.getLogger(__name__)
 MAX_ERROR = 500
 #: The session try-lock one mirror run holds.
 LOCK = "scadbuddy:filament:preset_mirror"
+#: The bound on one preset's send again (R11); past it the outcome is ``pending``.
+RESEND_TIMEOUT: Final = 60.0
+
+PRESET_NOT_FOUND: Final = "preset_not_found"
+NOT_MIRRORED: Final = "not_mirrored"
+MIRROR_OFF: Final = "mirror_off"
+NOT_CONFIGURED: Final = "not_configured"
+INSTANCE_CHANGED: Final = "instance_changed"
+
+#: What came of a send again: Bambuddy took it, it failed again (its new
+#: ``mirror_error``), another mirror held `LOCK`, nothing was pending, or the bound passed.
+MirrorAgain = Literal["sent", "failed", "busy", "in_sync", "pending"]
 
 
 def wants_mirror(settings: StoredSettings) -> bool:
@@ -390,3 +409,71 @@ async def mirror_after_pull(
     Bambuddy's presets into ScadBuddy (#7244)."""
     loaded = await asyncio.to_thread(settings)
     return await mirror_pending(pool, FilamentPresetStore(pool, lambda: blobs), loaded)
+
+
+def _refused(type_: str, message: str) -> ApplicationError:
+    return ApplicationError(message, type=type_, non_retryable=True)
+
+
+def _source_of(pool: ConnectionPool[Conn], preset_id: int) -> str | None:
+    with pool.connection() as conn:
+        row = conn.execute(
+            "SELECT source FROM filament_presets WHERE id = %s", (preset_id,)
+        ).fetchone()
+    return None if row is None else str(row["source"])
+
+
+def _db_now(pool: ConnectionPool[Conn]) -> datetime:
+    """The database's clock, which ``mirror_error_at`` is set from."""
+    with pool.connection() as conn:
+        row = conn.execute("SELECT clock_timestamp() AS at").fetchone()
+    assert row is not None
+    at: datetime = row["at"]
+    return at
+
+
+def _failed_since(pool: ConnectionPool[Conn], preset_id: int, start: datetime) -> bool:
+    with pool.connection() as conn:
+        row = conn.execute(
+            "SELECT mirror_error_at >= %s AS failed FROM filament_presets WHERE id = %s",
+            (start, preset_id),
+        ).fetchone()
+    return row is not None and bool(row["failed"])
+
+
+async def mirror_again(
+    pool: ConnectionPool[Conn],
+    store: FilamentPresetStore,
+    settings: StoredSettings,
+    preset_id: int,
+    timeout: float = RESEND_TIMEOUT,
+) -> MirrorAgain:
+    """Send preset ``preset_id`` to Bambuddy now (`mirror_with`), bounded by ``timeout``.
+    A refusal is a non-retryable `ApplicationError` of type `PRESET_NOT_FOUND`,
+    `NOT_MIRRORED` (a ``bambuddy`` preset is Bambuddy's), `MIRROR_OFF`, `NOT_CONFIGURED`
+    or `INSTANCE_CHANGED` (the links wait for a reset, #6773), and calls no Bambuddy."""
+    source = await asyncio.to_thread(_source_of, pool, preset_id)
+    if source is None:
+        raise _refused(PRESET_NOT_FOUND, f"no filament preset {preset_id}")
+    if source == "bambuddy":
+        raise _refused(NOT_MIRRORED, f"filament preset {preset_id} is Bambuddy's own")
+    instance = instance_of(settings)
+    if not wants_mirror(settings) or instance is None:
+        if not settings.filament_preset_mirror:
+            raise _refused(MIRROR_OFF, "the filament preset mirror is off")
+        raise _refused(NOT_CONFIGURED, "no Bambuddy is configured")
+    if await asyncio.to_thread(_links_elsewhere, pool, instance):
+        raise _refused(INSTANCE_CHANGED, "the Bambuddy URL changed: reset the links before a send")
+    if not await asyncio.to_thread(_pending, pool, [preset_id], instance):
+        return "in_sync"
+    start = await asyncio.to_thread(_db_now, pool)
+    try:
+        async with client_for(settings) as client:
+            sent = await asyncio.wait_for(
+                mirror_with(client, pool, store, instance, [preset_id]), timeout
+            )
+    except TimeoutError:
+        return "pending"
+    if sent == 1:
+        return "sent"
+    return "failed" if await asyncio.to_thread(_failed_since, pool, preset_id, start) else "busy"

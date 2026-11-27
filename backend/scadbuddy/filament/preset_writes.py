@@ -1,11 +1,14 @@
-"""#7204 Phase B: copy and edit a ScadBuddy filament preset, as Temporal activities on
-the ``library`` queue (plan `docs/superpowers/plans/2026-11-26-filament-presets-view.md`,
-rulings R2 to R7, R11 and R12).
+"""#7204 Phase B: copy, edit and send again a ScadBuddy filament preset, as Temporal
+activities on the ``library`` queue (plan
+`docs/superpowers/plans/2026-11-26-filament-presets-view.md`, rulings R2 to R7, R11 and
+R12).
 
-The Go routes ``POST /api/v1/filament/presets/{preset_id}/copy`` and ``PATCH
-/api/v1/filament/presets/{preset_id}`` check the body and start these activities (not
-built yet: they wait for ``internal/temporalx``, ruling N7). The API process serves them,
-because it is the only process with a database secret (#5295).
+The Go routes ``POST /api/v1/filament/presets/{preset_id}/copy``, ``PATCH
+/api/v1/filament/presets/{preset_id}`` and ``POST
+/api/v1/filament/presets/{preset_id}/mirror`` check the body and start these activities
+(not built yet: they wait for ``internal/temporalx``, ruling N7). The API process serves
+them, because it is the only process with a database secret (#5295). The send again is
+`preset_mirror.mirror_again`; it writes no row of its own and needs no key (R12).
 
 Each activity takes its input as a JSON object and checks it in its body, so a bad
 input is a typed refusal, never a decode failure that Temporal retries. A key sent
@@ -46,7 +49,13 @@ from temporalio.exceptions import ApplicationError
 from scadbuddy.core.credentials import is_credential
 from scadbuddy.core.problems import ApiError
 from scadbuddy.crud.idempotency import Replay, idempotent_write, stored
-from scadbuddy.filament.preset_mirror import mirror_pending, wants_mirror
+from scadbuddy.filament.preset_mirror import (
+    PRESET_NOT_FOUND,
+    MirrorAgain,
+    mirror_again,
+    mirror_pending,
+    wants_mirror,
+)
 from scadbuddy.filament.sb_presets import (
     Conn,
     FilamentPreset,
@@ -62,8 +71,9 @@ from scadbuddy.store import BlobStore
 
 COPY_ACTIVITY: Final = "filament_preset_copy"
 EDIT_ACTIVITY: Final = "filament_preset_edit"
+MIRROR_AGAIN_ACTIVITY: Final = "filament_preset_mirror_again"
 #: The activities `preset_write_activities` defines, by name.
-PRESET_WRITE_ACTIVITIES: Final = (COPY_ACTIVITY, EDIT_ACTIVITY)
+PRESET_WRITE_ACTIVITIES: Final = (COPY_ACTIVITY, EDIT_ACTIVITY, MIRROR_AGAIN_ACTIVITY)
 #: The routes the idempotency ledger keys a reply under (the Go routes that start these).
 COPY_ROUTE: Final = "POST /filament/presets/{preset_id}/copy"
 EDIT_ROUTE: Final = "PATCH /filament/presets/{preset_id}"
@@ -75,7 +85,6 @@ MAX_EDIT_KEYS: Final = 500
 #: The shape of a key an edit may set or unset (R7).
 KEY: Final = re.compile(r"^[A-Za-z0-9_.-]{1,128}$")
 
-PRESET_NOT_FOUND: Final = "preset_not_found"
 NOT_MANUAL: Final = "not_manual"
 VERSION_MOVED: Final = "version_moved"
 DOCUMENT_MISSING: Final = "document_missing"
@@ -94,6 +103,12 @@ class PresetCopyInput(BaseModel):
     name: PresetName
     actor: str
     idempotency_key: str
+
+
+class PresetMirrorInput(BaseModel):
+    """A send again of one preset (`mirror_again`). It needs no idempotency key (R12)."""
+
+    preset_id: int
 
 
 class PresetEditInput(BaseModel):
@@ -148,7 +163,7 @@ def _refused(type_: str, message: str, *details: Any) -> ApplicationError:
     return ApplicationError(message, *details, type=type_, non_retryable=True)
 
 
-def _parsed[Input: (PresetCopyInput, PresetEditInput)](
+def _parsed[Input: (PresetCopyInput, PresetEditInput, PresetMirrorInput)](
     model: type[Input], raw: dict[str, Any]
 ) -> Input:
     """``raw`` as ``model``: a refused key is ``key_refused`` (its key the detail), any
@@ -388,7 +403,14 @@ def preset_write_activities(
         loaded = await asyncio.to_thread(settings)
         return await edit_preset(pool(), blobs(), loaded, body)
 
+    async def mirror(raw: dict[str, Any]) -> MirrorAgain:
+        body = _parsed(PresetMirrorInput, raw)
+        loaded = await asyncio.to_thread(settings)
+        rows = pool()
+        store = FilamentPresetStore(rows, blobs)
+        return await mirror_again(rows, store, loaded, body.preset_id)
+
     return {
         name: activity.defn(name=name)(fn)
-        for name, fn in zip(PRESET_WRITE_ACTIVITIES, (copy, edit), strict=True)
+        for name, fn in zip(PRESET_WRITE_ACTIVITIES, (copy, edit, mirror), strict=True)
     }

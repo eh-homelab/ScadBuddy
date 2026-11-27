@@ -20,6 +20,7 @@ from scadbuddy.filament.preset_writes import (
     COPY_ACTIVITY,
     EDIT_ACTIVITY,
     MAX_EDIT_KEYS,
+    MIRROR_AGAIN_ACTIVITY,
     PRESET_WRITE_ACTIVITIES,
     PresetCopyInput,
     PresetEditInput,
@@ -333,7 +334,8 @@ def test_the_library_worker_serves_the_preset_activities(monkeypatch: pytest.Mon
 
     served = main._library_activities(MagicMock(), MagicMock(), MagicMock(), [])
 
-    assert list(made[0]) == list(PRESET_WRITE_ACTIVITIES) == [COPY_ACTIVITY, EDIT_ACTIVITY]
+    assert list(made[0]) == list(PRESET_WRITE_ACTIVITIES)
+    assert list(PRESET_WRITE_ACTIVITIES) == [COPY_ACTIVITY, EDIT_ACTIVITY, MIRROR_AGAIN_ACTIVITY]
     assert all(fn in served for fn in made[0].values())
 
 
@@ -373,8 +375,9 @@ async def test_an_edit_activity_refuses_a_refused_key_once(
             ["preset_id"],
         ),
         (EDIT_ACTIVITY, _EDIT | {"expected_version": 0, "name": "A"}, ["expected_version"]),
+        (MIRROR_AGAIN_ACTIVITY, {"preset_id": "x"}, ["preset_id"]),
     ],
-    ids=["copy", "edit"],
+    ids=["copy", "edit", "mirror again"],
 )
 async def test_an_activity_refuses_a_bad_input_once(
     name: str, raw: dict[str, Any], loc: list[str]
@@ -438,3 +441,13 @@ async def test_a_future_version_is_refused_before_a_document_is_kept(
 
     assert (error.type, error.details) == ("version_moved", (1,))
     assert blobs.keys() == before
+
+
+async def test_the_send_again_activity_sends_the_preset(pg_pool: PgPool, tmp_path: Path) -> None:
+    blobs = LocalBlobStore(tmp_path / "blobs")
+    made = await _make(pg_pool, blobs, {"name": "Again"})
+    activities = preset_write_activities(lambda: pg_pool, lambda: blobs, lambda: OFF)
+
+    error = await _refused(activities[MIRROR_AGAIN_ACTIVITY]({"preset_id": made}))
+
+    assert error.type == "not_configured"
