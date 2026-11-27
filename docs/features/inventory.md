@@ -30,7 +30,7 @@ over core's CRUD routes (`SCADBUDDY_CORE_CRUD_URL`; unset, a read is 503
 `inventory`. Python keeps the offers and price points (`OfferStore`, until K3) and the
 reads that job cost needs (`stock.py`). The routes are `backend/scadbuddy/api/inventory.py`
 and `inventory_stock.py`. The code is `backend/scadbuddy/inventory/`, registered as
-`InventoryComponent` (`backend/scadbuddy/inventory/component.py:25`).
+`InventoryComponent` (`backend/scadbuddy/inventory/component.py:26`).
 
 #### A write is an activity
 
@@ -115,7 +115,7 @@ a list in code (spec §4). A kind archives and restores; it never deletes.
 
 An item's property schema is its kind's `attribute_schema`. So `GET` and `PUT
 /entity-kinds/item/property-schema` answer 409 `schema_owned_by_item_kind` (R-P2-5, R-P2-6;
-`backend/scadbuddy/entities/problems.py:123`).
+`backend/scadbuddy/entities/problems.py:124`).
 
 ### Items and properties
 
@@ -307,7 +307,7 @@ including `inventory_lot_recost` (Ruling 8). None reaches Bambuddy.
 
 ## The UI
 
-The sidebar entry is **Inventory**. The routes are in `frontend/src/App.tsx:147-151` and
+The sidebar entry is **Inventory**. The routes are in `frontend/src/App.tsx:149-151` and
 [frontend.md](../architecture/frontend.md); the code is `frontend/src/pages/inventory/`.
 
 - `/inventory` (`InventoryPage`): a kind tree on the left, the items on the right, with
