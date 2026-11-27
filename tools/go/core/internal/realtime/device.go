@@ -45,8 +45,8 @@ const (
 
 var callTopic = regexp.MustCompile(`^device:call:` + uuidText + `$`)
 
-// MaxCallTopics is the most call topics one subscribe frame may name: each is a read of
-// who may follow the call.
+// MaxCallTopics is the most distinct call topics one subscribe frame may name. Each distinct
+// topic is one read of who may follow the call, once per frame however often it is named.
 const MaxCallTopics = 8
 
 // deviceBearer says whether the handshake carries a device token.

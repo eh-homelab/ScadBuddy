@@ -479,7 +479,7 @@ The realtime socket (area `ws`) takes a device token too, checked before the gat
 `device:<its id>`; any other topic is an `unknown topics` error. Its socket closes with 4401 on
 `device.revoked` for it, and when its token is no longer live, read at each keepalive (25 s) and at
 each resync. The handshake moves the expiry, as every device request does; the keepalive and resync reads do not. A person's socket may follow
-`device:call:<id>` of a call whose device it owns, or that it made, at most 8 call topics in one subscribe frame. A device event's frame is
+`device:call:<id>` of a call whose device it owns, or that it made, at most 8 distinct call topics in one subscribe frame (a topic named more than once is read once). A device event's frame is
 `{"type": "event", "id", "kind", "topics", "data"}` with the event's own fields as `data` (all but
 `id`, `at`, `kind`, `topics` and `retention_seconds`): the device needs a call's method and args.
 Python's socket follows no `device:` topic, so a device needs core's `ws` area.

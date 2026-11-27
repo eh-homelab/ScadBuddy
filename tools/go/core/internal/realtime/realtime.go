@@ -537,16 +537,24 @@ func (x *session) frame(ctx context.Context, m message) error {
 		return x.sendError("expected subscribe or unsubscribe")
 	}
 	var bad []bus.Value
-	calls := 0
+	// allowed is each distinct call topic's answer in this frame: a topic named many times is
+	// read once. MaxFrameChars bounds how many items a frame holds.
+	allowed := map[string]bool{}
 	for _, t := range requested.Items {
 		// A device follows its own topic only, and a person a device call's only when it
-		// owns the device or made the call (device.go). Each call topic is one read of the database, so one
-		// frame may name at most MaxCallTopics of them.
+		// owns the device or made the call (device.go). Each call topic is one read of the
+		// database, so one frame may name at most MaxCallTopics distinct ones.
 		if kind == "subscribe" && t.Kind == 's' && callTopic.MatchString(t.Str) {
-			if calls++; calls > MaxCallTopics {
-				bad = append(bad, t)
-				continue
+			ok, seen := allowed[t.Str]
+			if !seen && len(allowed) < MaxCallTopics {
+				// Past the cap a topic is refused unread, and the map stays at the cap.
+				ok = x.topicAllowed(ctx, t)
+				allowed[t.Str] = ok
 			}
+			if !ok {
+				bad = append(bad, t)
+			}
+			continue
 		}
 		if !x.topicShaped(t) || kind == "subscribe" && !x.topicAllowed(ctx, t) {
 			bad = append(bad, t)

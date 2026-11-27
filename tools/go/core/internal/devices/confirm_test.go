@@ -146,7 +146,7 @@ func TestExpireCancelsTheApproval(t *testing.T) {
 	expect(t, h.count(`SELECT count(*) FROM ai_approvals WHERE decision = 'cancelled'`), 1)
 }
 
-// One subscribe frame may name at most realtime.MaxCallTopics call topics.
+// One subscribe frame may name at most realtime.MaxCallTopics distinct call topics.
 func TestSubscribeCapsCallTopics(t *testing.T) {
 	h := newHarness(t, auth.Observe)
 	me := h.person("user:i#me")
@@ -162,6 +162,40 @@ func TestSubscribeCapsCallTopics(t *testing.T) {
 	expect(t, page.frame()["type"], any("error"))
 	page.send(`{"type":"subscribe","topics":[` + strings.Join(topics[:realtime.MaxCallTopics], ",") + `]}`)
 	expect(t, page.frame()["type"], any("subscribed"))
+	// The cap counts distinct topics: one call named more times than the cap is one topic.
+	page.send(`{"type":"subscribe","topics":[` + strings.Repeat(topics[0]+",", realtime.MaxCallTopics) + topics[0] + `]}`)
+	expect(t, page.frame()["type"], any("subscribed"))
+}
+
+// A frame that repeats one call topic reads who may follow it once, however many times it
+// names it. A frame holds at most realtime.MaxFrameChars characters, so as many copies as
+// fit (about 300) is the most one frame can send.
+func TestRepeatedCallTopicIsReadOnce(t *testing.T) {
+	h := newHarness(t, auth.Observe)
+	me := h.person("user:i#me")
+	d := h.pair(me)
+	_ = h.pods[0].device(d)
+	topic := `"device:call:` + h.start(me, d, `{"method":"nfc.read"}`) + `"`
+	frame := `{"type":"subscribe","topics":[` + topic
+	for len(frame)+len(topic)+3 < realtime.MaxFrameChars {
+		frame += "," + topic
+	}
+	frame += "]}"
+	page, res := h.pods[0].dial(map[string]string{"Cookie": me})
+	expect(t, res.StatusCode, 101)
+	before := h.visibleReads.Load()
+	page.send(frame)
+	expect(t, page.frame()["type"], any("subscribed"))
+	expect(t, h.visibleReads.Load()-before, int64(1))
+	// Past the cap a distinct call topic is refused unread.
+	var topics []string
+	for range realtime.MaxCallTopics + 1 {
+		topics = append(topics, `"device:call:`+h.start(me, d, `{"method":"nfc.read"}`)+`"`)
+	}
+	before = h.visibleReads.Load()
+	page.send(`{"type":"subscribe","topics":[` + strings.Join(topics, ",") + `]}`)
+	expect(t, page.frame()["type"], any("error"))
+	expect(t, h.visibleReads.Load()-before, int64(realtime.MaxCallTopics))
 }
 
 // One rule says who may read a call and who may follow its events.
