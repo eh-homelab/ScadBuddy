@@ -568,7 +568,9 @@ The migration places every phase 2 row by these rules, and reports each count:
   (scadbuddy-09, 2026-11-24), so this is expected to touch no rows.
 - **`items.compatible_with`** (printer model codes): each distinct code becomes a kind
   under `printer` named by the code (`H2C`), and each item gets a `compatible_with`
-  relationship to it. A printer item takes its model kind. The list filter
+  relationship to it. The code is the kind's name only. A new model kind takes the next
+  kind number, and its id is `k` and that number (`k28`; the owner's decision of
+  2026-11-27). A printer item takes its model kind. The list filter
   `?compatible=<model code>` keeps working: it reads the relationship to the kind of that
   name.
 - **Spool types and spools**: items and units (plan #7666 R-P3-30, kept). The filament

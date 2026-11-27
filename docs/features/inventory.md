@@ -33,6 +33,14 @@ A kind has a parent, a unit of measure (`uom`), a service-life basis (`none`, `h
 properties of its items. It never restricts them (spec §6.3a). A child kind inherits its
 parent's keys; its own subschema for a key wins (`inventory/kinds.py:1-5`).
 
+Each kind has a `number` from the sequence `item_kinds_number_seq`
+(`20261126T0218Z_inventory_class.sql`, step 1a). Its code is `K-<number>`, which
+`GET /api/v1/codes/{code}` resolves (`codes/resolve.py` `PREFIXES`). A number is never
+reused. The kinds that existed before that migration keep their text ids and got numbers
+in `created_at`, then `id` order. A kind that ScadBuddy makes has the id `k<number>`. An id
+of `k` and digits must be `'k' || number` (`item_kinds_made_id_check`), so a person cannot
+choose one (`KindInput`, 422).
+
 `tracking` says how a kind's items are counted:
 
 | Tracking | Meaning | Stock |

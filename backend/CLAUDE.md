@@ -1289,9 +1289,10 @@ only the sleeps move; a budget on the real clock fails on a slow runner (#6252).
   R-7216-14); the PDF route has none
   (`agent/src/tools/coverage.ts` `NOT_A_TOOL`, R-7157-10).
 - `backend/scadbuddy/codes/` — typed label codes (#6955). `parse.py` `parse_code` and `format_code`
-  (`L-12`, `S-142`; any case, dash optional, at most 10 digits, number 1 to 2^31-1), `resolve.py` `PREFIXES`
-  (`L` is `filament_locations`, `S` is `filament_spools`) and `resolve` (`{kind, id, code, name,
-  archived}`; an archived row still resolves). Route `GET /api/v1/codes/{code}` (`api/codes.py`,
+  (`L-12`, `S-142`, `K-3`; any case, dash optional, at most 10 digits, number 1 to 2^31-1), `resolve.py` `PREFIXES`
+  (`L` is `filament_locations`, `S` is `filament_spools`, `K` is `item_kinds`, kind `item_kind`,
+  #6949) and `resolve` (`{kind, id, code, name, archived}`; an archived row still resolves; an
+  item kind's `id` is its text id). Route `GET /api/v1/codes/{code}` (`api/codes.py`,
   404 `code_unknown`). A new prefix is one entry in `PREFIXES`.
 - `backend/scadbuddy/store/` — the blob store. Phase 1: the directory-shaped `BlobStore`
   Protocol and `LocalBlobStore` (`local.py`, a piece in `data/blobs/<piece_key>/`),

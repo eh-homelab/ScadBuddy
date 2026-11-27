@@ -269,6 +269,38 @@ ON CONFLICT (id) DO UPDATE SET
     steps = EXCLUDED.steps,
     builtin = true;
 
+-- 1a. kind_numbers (#6955, the owner's decision of 2026-11-27): each kind gets a number, the
+-- figure in its code `K-<n>`. A number is never reused: an archived kind keeps its number.
+-- The kinds that exist now, the seeded kinds too, keep their text ids and are numbered by
+-- `created_at`, then `id`. A kind that ScadBuddy makes takes the next number and the id
+-- `'k' || number` (step 7). A kind whose id is `k` and digits must have that number, so that
+-- id never meets a kind that has it already. A person's kind made before with such an id
+-- stops the migration.
+DO $$
+DECLARE
+    taken text;
+BEGIN
+    SELECT id INTO taken FROM item_kinds WHERE id ~ '^k[0-9]+$' ORDER BY id LIMIT 1;
+    IF FOUND THEN
+        RAISE EXCEPTION 'inventory K1: the kind % has an id of k and digits, which a kind '
+            'that ScadBuddy makes takes from its number', taken;
+    END IF;
+END
+$$;
+
+CREATE SEQUENCE item_kinds_number_seq AS bigint;
+ALTER TABLE item_kinds ADD COLUMN number bigint;
+ALTER SEQUENCE item_kinds_number_seq OWNED BY item_kinds.number;
+UPDATE item_kinds k SET number = n.number
+FROM (SELECT id, row_number() OVER (ORDER BY created_at, id) AS number FROM item_kinds) n
+WHERE k.id = n.id;
+SELECT setval('item_kinds_number_seq', coalesce(max(number), 0) + 1, false) FROM item_kinds;
+ALTER TABLE item_kinds
+    ALTER COLUMN number SET DEFAULT nextval('item_kinds_number_seq'),
+    ALTER COLUMN number SET NOT NULL,
+    ADD CONSTRAINT item_kinds_number_key UNIQUE (number),
+    ADD CONSTRAINT item_kinds_made_id_check CHECK (id !~ '^k[0-9]+$' OR id = 'k' || number);
+
 -- 2. person_kinds (§8, R-K1-9): each kind a person made gets the class of its `tracking`
 -- (`lot`: consumable, lot; `unit`: durable; `none`: service, flat; `filament`: under
 -- `filament`), and sets only the keys its parent leaves open. A kind whose class
@@ -518,8 +550,8 @@ FROM inventory_k1_lots;
 -- `items.compatible_with` becomes a kind under `printer`, named as the oldest item spells
 -- it; codes that differ only in case are one code. The code is data: it is the kind's name
 -- only, never part of its id. A kind under `printer` whose name is the code in any case is
--- the code's kind and is kept as it is; a new kind gets an opaque id (`k` and a random
--- uuid's hex). Each item gets one `compatible_with` relationship per code kind. A
+-- the code's kind and is kept as it is. A new kind takes the next kind number, in the order
+-- of the oldest item that names its code, and the id `'k' || number`. Each item gets one `compatible_with` relationship per code kind. A
 -- `printer` item with one code kind takes it; one with more stays and is named.
 CREATE TEMP TABLE inventory_k1_all_codes ON COMMIT DROP AS
 SELECT i.id AS item_id, i.kind_id AS item_kind, left(btrim(c.code), 100) AS code,
@@ -529,11 +561,10 @@ FROM items i
 CROSS JOIN LATERAL unnest(i.compatible_with) WITH ORDINALITY AS c (code, n)
 WHERE btrim(c.code) <> '';
 
-CREATE TEMP TABLE inventory_k1_model_kinds ON COMMIT DROP AS
-SELECT g.code_key, coalesce(e.id, 'k' || replace(gen_random_uuid()::text, '-', '')) AS kind,
-    coalesce(e.name, g.name) AS name, e.id IS NOT NULL AS existed
+CREATE TEMP TABLE inventory_k1_model_found ON COMMIT DROP AS
+SELECT g.code_key, g.first, e.id, coalesce(e.name, g.name) AS name
 FROM (
-    SELECT code_key, (array_agg(code ORDER BY age))[1] AS name
+    SELECT code_key, (array_agg(code ORDER BY age))[1] AS name, min(age) AS first
     FROM inventory_k1_all_codes GROUP BY code_key
 ) g
 LEFT JOIN LATERAL (
@@ -542,12 +573,33 @@ LEFT JOIN LATERAL (
     ORDER BY k.id LIMIT 1
 ) e ON true;
 
+CREATE TEMP TABLE inventory_k1_model_kinds (
+    code_key text, kind text, number bigint, name text, existed boolean
+) ON COMMIT DROP;
+INSERT INTO inventory_k1_model_kinds
+SELECT code_key, id, NULL, name, true FROM inventory_k1_model_found WHERE id IS NOT NULL;
+-- One row at a time in `first` order, so the numbers follow the oldest items.
+DO $$
+DECLARE
+    code record;
+    n bigint;
+BEGIN
+    FOR code IN SELECT code_key, name FROM inventory_k1_model_found WHERE id IS NULL
+        ORDER BY first
+    LOOP
+        n := nextval('item_kinds_number_seq');
+        INSERT INTO inventory_k1_model_kinds VALUES (code.code_key, 'k' || n, n, code.name, false);
+    END LOOP;
+END
+$$;
+
 CREATE TEMP TABLE inventory_k1_codes ON COMMIT DROP AS
 SELECT a.item_id, a.item_kind, a.code, m.kind, a.age
 FROM inventory_k1_all_codes a JOIN inventory_k1_model_kinds m USING (code_key);
 
-INSERT INTO item_kinds (id, name, parent_id, tracking, life_basis)
-SELECT kind, name, 'printer', 'unit', 'none' FROM inventory_k1_model_kinds WHERE NOT existed;
+INSERT INTO item_kinds (id, number, name, parent_id, tracking, life_basis)
+SELECT kind, number, name, 'printer', 'unit', 'none' FROM inventory_k1_model_kinds
+WHERE NOT existed;
 
 INSERT INTO entities (kind, ref)
 SELECT 'item_kind', kind FROM inventory_k1_model_kinds
