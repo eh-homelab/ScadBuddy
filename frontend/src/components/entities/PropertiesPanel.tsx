@@ -176,8 +176,6 @@ function PatchFeedback({ patch, locked }: { patch: ReturnType<typeof usePatch>; 
  * lot number. Each row shows the key, its value (a list as chips) and what the kind's schema
  * says of the key. A key is edited in place; renaming one is one PATCH that removes the old
  * key and sets the new. The server decides what a key and a value may be (`bad_property_value`).
- */
-/**
  * `hideKeys` (R-K1-33): keys a form on the page holds as its own fields, which the panel does
  * not list, so it lists only the other keys. They stay known to the add form.
  */

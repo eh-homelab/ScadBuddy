@@ -2,7 +2,7 @@ import { HttpResponse, http } from 'msw'
 import { addDecimals, cmpDecimals, divDecimal, mulDecimals, roundDecimal, subDecimals } from '../../lib/decimal'
 import type { components } from '../../api/schema'
 import { mockSettings } from '../handlers'
-import { marksOf, rowPropertiesRefusal, saveRowProperties, schemaProblem } from './entities'
+import { itemKeysInUse, marksOf, rowPropertiesRefusal, saveRowProperties, schemaProblem } from './entities'
 import { locationExists } from './filament'
 import { supplierById } from './filamentPurchasing'
 import { SUPPLIER } from './filamentPurchasingSeed'
@@ -308,13 +308,15 @@ export function itemSchemaOf(itemId: string): Record<string, unknown> | undefine
   return required.length ? { ...kindSchema(item.kind_id), required } : kindSchema(item.kind_id)
 }
 
+/** The ids of the items of the kinds, archived ones too. */
+const itemsOfKinds = (kinds: Set<string>) => inventoryMock.items.filter((i) => kinds.has(i.kind_id)).map((i) => i.id)
+
 /** The items of the item's kind and of its descendants, for `keys_in_use`. */
 export function itemsTypedLike(itemId: string): string[] {
   ready()
   const item = inventoryMock.items.find((i) => i.id === itemId)
   if (!item) return []
-  const kinds = subtree(item.kind_id)
-  return inventoryMock.items.filter((i) => kinds.has(i.kind_id)).map((i) => i.id)
+  return itemsOfKinds(subtree(item.kind_id))
 }
 
 const trackingOf = (item: MockItem): Tracking => kindOf(item.kind_id)?.tracking ?? 'none'
@@ -466,7 +468,6 @@ class Refused extends Error {
   }
 }
 
-/** FastAPI's own 422 for a body field (no inventory code), as `fieldProblem` answers it. */
 /** A refusal another mock already wrote as a response (`rowPropertiesRefusal`). */
 class Answered extends Error {
   readonly response: Response
@@ -476,6 +477,7 @@ class Answered extends Error {
   }
 }
 
+/** FastAPI's own 422 for a body field (no inventory code), as `fieldProblem` answers it. */
 class FieldRefused extends Error {
   readonly field: string
   constructor(field: string, msg: string) {
@@ -784,7 +786,10 @@ function kindProblem(body: { parent_id?: string | null; attribute_schema?: Recor
     if (own && kindPath(body.parent_id).some((k) => k.id === own)) throw new Refused(422, 'kind_cycle', 'the parent is the kind or below it')
   }
   if (body.attribute_schema != null) {
-    const reason = schemaProblem(body.attribute_schema, 'item')
+    // Go's checkSchema: a required key may be one a parent defines (the parent's merged keys).
+    const parent = body.parent_id !== undefined ? body.parent_id : own ? (kindOf(own)?.parent_id ?? null) : null
+    const inherited = parent ? Object.keys((kindSchema(parent).properties ?? {}) as Record<string, unknown>) : []
+    const reason = schemaProblem(body.attribute_schema, 'item', inherited)
     if (reason) throw new Refused(422, 'bad_property_schema', reason)
   }
 }
@@ -884,7 +889,7 @@ export const handlers = [
     answer(request, () => {
       const k = kindOf(String(p.id))
       if (!k) throw new Refused(404, 'kind_not_found', `no item kind '${String(p.id)}'`)
-      return { kind_id: k.id, schema: kindSchema(k.id), own_schema: k.attribute_schema, keys_in_use: [], item_required: itemRequired(k.id) }
+      return { kind_id: k.id, schema: kindSchema(k.id), own_schema: k.attribute_schema, keys_in_use: itemKeysInUse(itemsOfKinds(subtree(k.id))), item_required: itemRequired(k.id) }
     }),
   ),
 
@@ -940,8 +945,10 @@ export const handlers = [
     const input = await body<S['InventoryItemPatch']>(request, 'patchItem')
     return answer(request, () => {
       const item = findItem(String(p.id))
-      // R-K1-33: a patch that sends a field is checked; an empty one is not.
-      const refusal = rowPropertiesRefusal(request, `item:${item.id}`, input.properties, Object.keys(input).length > 0)
+      // R-K1-33: a patch that sends a field is checked; an empty one is not. `properties: null`
+      // alone counts as empty, as `_item_body` drops it before Go sees the patch.
+      const sent = Object.entries(input).filter(([key, value]) => !(key === 'properties' && value === null))
+      const refusal = rowPropertiesRefusal(request, `item:${item.id}`, input.properties, sent.length > 0)
       if (refusal) throw new Answered(refusal)
       saveRowProperties(`item:${item.id}`, input.properties)
       if (input.name != null) item.name = input.name

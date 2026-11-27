@@ -142,6 +142,7 @@ export function ItemPage() {
           item={current}
           kind={kind}
           schema={schema.data ?? null}
+          schemaError={schema.error}
           onDone={() => {
             setEditing(false)
             changed()
@@ -225,7 +226,7 @@ export function ItemPage() {
 const SALEABLE = { kind: 'As its kind', yes: 'For sale', no: 'Not for sale' } as const
 type Saleable = keyof typeof SALEABLE
 
-function DetailsForm({ item, kind, schema, onDone, onCancel }: { item: Item; kind: ItemKind | undefined; schema: Record<string, unknown> | null; onDone: () => void; onCancel: () => void }) {
+function DetailsForm({ item, kind, schema, schemaError, onDone, onCancel }: { item: Item; kind: ItemKind | undefined; schema: Record<string, unknown> | null; schemaError?: Error; onDone: () => void; onCancel: () => void }) {
   const id = useId()
   const [name, setName] = useState(item.name)
   const [manufacturer, setManufacturer] = useState(item.manufacturer)
@@ -335,6 +336,11 @@ function DetailsForm({ item, kind, schema, onDone, onCancel }: { item: Item; kin
       {valuesError && (
         <p role="alert" className="text-warn">
           {valuesError}
+        </p>
+      )}
+      {schemaError && (
+        <p role="alert" className="text-warn">
+          The kind&apos;s properties could not be loaded: {schemaError.message}
         </p>
       )}
       {schema && <DefinedFields schema={schema} values={defined} onChange={setDefined} errors={fieldErrors} />}

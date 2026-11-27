@@ -1,7 +1,7 @@
 import { ChevronLeftIcon, PlusIcon } from 'lucide-react'
 import { useId, useState, type FormEvent } from 'react'
 import { Link } from 'react-router'
-import { REQUIRED_KINDS, entityApi, hasValue } from '../../components/entities/api'
+import { REQUIRED_KINDS } from '../../components/entities/api'
 import { requiredOf } from '../../components/entities/definedProperties'
 import { PropertyKeyTable } from '../../components/entities/PropertyKeyTable'
 import { namedTwice, rowsOf, schemaOf, type KeyRow } from '../../components/entities/propertyKeys'
@@ -304,14 +304,15 @@ function AddKindForm({ kinds, onDone, onCancel }: { kinds: ItemKind[]; onDone: (
 }
 
 /**
- * R-K1-33 — each key's count of the unarchived items of the kind and the kinds below it that
- * have no value for it: the items a newly required key leaves incomplete.
+ * R-K1-33 — for each key, about how many items of the kind and of the kinds below it have no
+ * row for it: their count less the key's `keys_in_use` count. Two reads, not one per item. It
+ * is an estimate: `keys_in_use` counts archived items and blank values too (Go's
+ * `Kinds.Schema` counts every row), so the items are counted with the archived ones.
  */
 async function lacking(kindId: string, keys: string[]): Promise<Map<string, number>> {
-  const items = await inventoryApi.items({ kind: kindId })
-  const values = await Promise.all(items.map((item) => entityApi.properties(`item:${item.id}`)))
-  const has = (at: number, key: string) => values[at]!.some((p) => p.key === key && hasValue(p.value))
-  return new Map(keys.map((key) => [key, items.filter((_, at) => !has(at, key)).length]))
+  const [items, schema] = await Promise.all([inventoryApi.items({ kind: kindId, archived: true }), inventoryApi.kindSchema(kindId)])
+  const inUse = new Map(schema.keys_in_use.map((k) => [k.key, k.count]))
+  return new Map(keys.map((key) => [key, Math.max(0, items.length - (inUse.get(key) ?? 0))]))
 }
 
 function EditKindForm({ kind, kinds, onDone, onCancel }: { kind: ItemKind; kinds: ItemKind[]; onDone: () => void; onCancel: () => void }) {
@@ -383,7 +384,7 @@ function EditKindForm({ kind, kinds, onDone, onCancel }: { kind: ItemKind; kinds
           <ul aria-label="Items that lack a newly required key" className="text-xs text-muted-foreground">
             {newlyRequired.map((key) => {
               const n = counts.data?.get(key)
-              return <li key={key}>{n === undefined ? `Counting the items that lack ${key}…` : `${n} ${n === 1 ? 'item lacks' : 'items lack'} ${key}`}</li>
+              return <li key={key}>{n === undefined ? `Counting the items that lack ${key}…` : `About ${n} ${n === 1 ? 'item lacks' : 'items lack'} ${key}`}</li>
             })}
             <li>An item without a required key reads incomplete, and its next save asks for it.</li>
           </ul>

@@ -4,6 +4,7 @@ import { inventoryApi } from '../../pages/inventory/api'
 import { resetMockState } from '../handlers'
 import { INVENTORY, seedItem, seedLot, seedOffer, takeStock } from './inventory'
 import { SUPPLIER } from './filamentPurchasingSeed'
+import { seedEntityProperties } from './entities'
 
 const refusal = async (promise: Promise<unknown>) => {
   const error = await promise.then(
@@ -52,6 +53,35 @@ describe('inventory mock', () => {
     expect((await inventoryApi.item(old.id)).missing_properties).toEqual(['material'])
     await inventoryApi.archiveItem(old.id)
     expect((await inventoryApi.item(old.id)).missing_properties).toEqual([])
+  })
+
+  it('treats a patch of only `properties: null` as empty, as the forwarder drops it (R-K1-33)', async () => {
+    await inventoryApi.createKind({ id: 'strict', name: 'Strict', parent_id: 'hardware', attribute_schema: { type: 'object', properties: { material: { type: 'string' } }, required: ['material'] } })
+    const old = seedItem({ name: 'Old bolt', kind_id: 'strict' })
+    expect((await inventoryApi.patchItem(old.id, { properties: null })).missing_properties).toEqual(['material'])
+  })
+
+  it('takes a required key a parent kind defines, as Go does (R-K1-33)', async () => {
+    await inventoryApi.createKind({ id: 'base', name: 'Base', parent_id: 'hardware', attribute_schema: { type: 'object', properties: { material: { type: 'string' } } } })
+    await inventoryApi.createKind({ id: 'strict', name: 'Strict', parent_id: 'base', attribute_schema: { type: 'object', required: ['material'] } })
+    expect((await inventoryApi.kindSchema('strict')).item_required).toEqual(['material'])
+    await inventoryApi.patchKind('strict', { attribute_schema: { type: 'object', required: ['material'] } })
+    const unknown = await inventoryApi.createKind({ id: 'loose', name: 'Loose', parent_id: 'base', attribute_schema: { type: 'object', required: ['colour'] } }).catch((e: unknown) => e as ApiError)
+    expect((unknown as ApiError).problem.code).toBe('bad_property_schema')
+  })
+
+  it('counts each key the items of a kind and of its descendants hold, archived ones too, in keys_in_use', async () => {
+    await inventoryApi.createKind({ id: 'base', name: 'Base', parent_id: 'hardware' })
+    await inventoryApi.createKind({ id: 'leaf', name: 'Leaf', parent_id: 'base' })
+    const one = seedItem({ name: 'A', kind_id: 'base' })
+    const two = seedItem({ name: 'B', kind_id: 'leaf', archived_at: '2026-11-01T00:00:00Z' })
+    seedEntityProperties(`item:${one.id}`, { material: 'steel', grade: '8.8' })
+    seedEntityProperties(`item:${two.id}`, { material: '' })
+    expect((await inventoryApi.kindSchema('base')).keys_in_use).toEqual([
+      { key: 'grade', count: 1 },
+      { key: 'material', count: 2 },
+    ])
+    expect((await inventoryApi.kindSchema('leaf')).keys_in_use).toEqual([{ key: 'material', count: 1 }])
   })
 
   it('names a printer special type\'s model_code among the keys an item must have', async () => {

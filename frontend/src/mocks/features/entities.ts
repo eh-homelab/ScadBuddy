@@ -229,7 +229,12 @@ function schemaOf(entity: string): Record<string, unknown> | undefined {
 function keysTypedLike(entity: string) {
   const { kind, ref } = entityParts(entity)
   if (kind !== ITEM) return keysInUse(kind)
-  const items = new Set(itemsTypedLike(ref).map((id) => `${ITEM}:${id}`))
+  return itemKeysInUse(itemsTypedLike(ref))
+}
+
+/** Each key the items `itemIds` have, with how many (Go counts every row, a blank value too). */
+export function itemKeysInUse(itemIds: readonly string[]) {
+  const items = new Set(itemIds.map((id) => `${ITEM}:${id}`))
   const counts = new Map<string, number>()
   for (const [other, list] of entityMock.properties) {
     if (!items.has(other)) continue
@@ -331,7 +336,7 @@ function keyProblem(sub: unknown, where: string, item: boolean): string | null {
   return null
 }
 
-export function schemaProblem(schema: Record<string, unknown> | undefined, kind?: string): string | null {
+export function schemaProblem(schema: Record<string, unknown> | undefined, kind?: string, inherited: readonly string[] = []): string | null {
   if (!schema || typeof schema !== 'object') return 'a schema is a JSON object'
   for (const k of Object.keys(schema)) {
     if (k === 'required' && kind !== undefined && REQUIRED_KINDS.has(kind)) continue
@@ -342,7 +347,7 @@ export function schemaProblem(schema: Record<string, unknown> | undefined, kind?
     const required = schema.required
     if (!Array.isArray(required) || required.some((k) => typeof k !== 'string') || new Set(required).size !== required.length) return '"required" is a list of distinct keys'
     const defined = (schema.properties ?? {}) as Record<string, unknown>
-    const undefinedKey = required.find((k) => !(k in defined))
+    const undefinedKey = required.find((k) => !(k in defined) && !inherited.includes(k))
     if (undefinedKey !== undefined) return `"required" names '${undefinedKey}', which "properties" does not define`
   }
   if (schema.type !== 'object') return 'a schema\'s "type" is "object"'

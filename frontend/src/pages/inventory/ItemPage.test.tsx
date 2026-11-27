@@ -361,6 +361,16 @@ describe('ItemPage (#7067)', () => {
       expect(await screen.findByText('Missing required: material')).toBeInTheDocument()
     })
 
+    it("says when the kind's properties could not be loaded", async () => {
+      const made = await strictItem()
+      server.use(http.get('/api/v1/inventory/kinds/strict/schema', () => HttpResponse.json({ detail: 'down' }, { status: 503 })))
+      const { user } = render(made.id)
+      await screen.findByRole('heading', { level: 1, name: 'Bolt' })
+      await user.click(screen.getByRole('button', { name: 'Edit details' }))
+      const form = screen.getByRole('form', { name: 'Item details' })
+      expect(await within(form).findByText(/The kind's properties could not be loaded/)).toBeInTheDocument()
+    })
+
     it("edits the kind's keys with the item and sends both in one request", async () => {
       const made = await strictItem({ material: 'steel', finish: 'zinc' })
       const { user } = render(made.id)

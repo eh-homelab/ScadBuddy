@@ -110,18 +110,30 @@ describe('KindsPage (#7067)', () => {
     expect(within(form).getByLabelText('Description of key 1')).toHaveValue('A reusable shell, or an addon such as an AMS adaptor')
   })
 
-  it('marks a key required and says how many items lack it before the save (R-K1-33)', async () => {
+  it('marks a key required and says about how many items lack it before the save, from keys_in_use (R-K1-33)', async () => {
     const one = seedItem({ kind_id: 'spool_part', name: 'Shell A' })
     seedItem({ kind_id: 'spool_part', name: 'Shell B' })
+    const gone = seedItem({ kind_id: 'spool_part', name: 'Shell C', archived_at: '2026-11-01T00:00:00Z' })
     seedEntityProperties(`item:${one.id}`, { role: 'shell' })
-    const { user } = renderPage(<KindsPage />)
-    const tree = await kindList()
-    await user.click(within(tree).getByRole('button', { name: 'Edit Spool part' }))
-    const form = screen.getByRole('form', { name: 'Edit Spool part' })
-    await user.click(within(form).getByRole('checkbox', { name: 'Key 2 is required' }))
-    expect(await within(form).findByText('1 item lacks role')).toBeInTheDocument()
-    await user.click(within(form).getByRole('button', { name: 'Save kind' }))
-    await waitFor(() => expect(bodyOf('patchKind')).toHaveLength(1))
-    expect((bodyOf('patchKind')[0] as { attribute_schema: { required?: string[] } }).attribute_schema.required).toEqual(['role'])
+    seedEntityProperties(`item:${gone.id}`, { role: 'shell' })
+    const reads: string[] = []
+    const onStart = ({ request }: { request: Request }) => void reads.push(new URL(request.url).pathname)
+    server.events.on('request:start', onStart)
+    try {
+      const { user } = renderPage(<KindsPage />)
+      const tree = await kindList()
+      await user.click(within(tree).getByRole('button', { name: 'Edit Spool part' }))
+      const form = screen.getByRole('form', { name: 'Edit Spool part' })
+      await user.click(within(form).getByRole('checkbox', { name: 'Key 2 is required' }))
+      // Three items, archived one too, and keys_in_use counts two rows of `role`.
+      expect(await within(form).findByText('About 1 item lacks role')).toBeInTheDocument()
+      expect(reads.filter((path) => path.includes('/entities/'))).toEqual([])
+      expect(reads).toContain('/api/v1/inventory/kinds/spool_part/schema')
+      await user.click(within(form).getByRole('button', { name: 'Save kind' }))
+      await waitFor(() => expect(bodyOf('patchKind')).toHaveLength(1))
+      expect((bodyOf('patchKind')[0] as { attribute_schema: { required?: string[] } }).attribute_schema.required).toEqual(['role'])
+    } finally {
+      server.events.removeListener('request:start', onStart)
+    }
   })
 })
