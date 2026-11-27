@@ -3,6 +3,13 @@ import { http, HttpResponse } from 'msw'
 import { setupServer } from 'msw/node'
 import { afterAll, afterEach, beforeAll, describe, expect, it } from 'vitest'
 import { z } from 'zod'
+import type {
+  FilamentPresetDetail,
+  FilamentPresetDiff,
+  FilamentPresetKeyChange,
+  FilamentPresetRow,
+  FilamentPresetVersion,
+} from '../src/api/filamentPresets.js'
 import { tiersUpTo } from '../src/auth/principal.js'
 import { TOUCHES_NOTHING } from '../src/sessions/touched.js'
 import { toolActivities, toolCallActivities } from '../src/temporal/toolActivities.js'
@@ -2220,6 +2227,36 @@ describe('filament preset read tools (#7204)', () => {
     expect(tool(name).risk).toBe('read')
     expect(tool(name).gated).toBe(false)
     expect(tool(name).routes).toEqual([])
+  })
+
+  it('keeps the hand-written wire types to the keys Go writes (N8)', () => {
+    const keys = <T,>(all: Record<keyof T, true>) => Object.keys(all).sort()
+    const row = keys<FilamentPresetRow>({
+      id: true, ref: true, name: true, source: true, version: true, type_id: true, printer_model: true,
+      nozzle_diameter: true, filament_type: true, filament_colour: true, compatible_printers: true, sha256: true,
+      bb_preset_id: true, bb_instance: true, mirror: true, mirror_error: true, mirror_error_at: true,
+      used_by_types: true, used_by_spools: true, created_at: true, updated_at: true,
+    })
+    const detail = keys<FilamentPresetDetail>({
+      id: true, ref: true, name: true, source: true, version: true, type_id: true, printer_model: true,
+      nozzle_diameter: true, filament_type: true, filament_colour: true, compatible_printers: true, sha256: true,
+      bb_preset_id: true, bb_instance: true, mirror: true, mirror_error: true, mirror_error_at: true,
+      used_by_types: true, used_by_spools: true, created_at: true, updated_at: true,
+      versions: true, document: true, document_error: true,
+    })
+    const version = keys<FilamentPresetVersion>({
+      version: true, sha256: true, made_by: true, made_at: true, fetch_run_id: true, bb_updated_at: true,
+    })
+    const diff = keys<FilamentPresetDiff>({ preset_id: true, from_version: true, to_version: true, changes: true })
+    const change = keys<FilamentPresetKeyChange>({ key: true, before: true, after: true })
+    const sorted = (o: object) => Object.keys(o).sort()
+    const versions = wire.detail.versions as object[]
+    const changes = wire.diff.changes as object[]
+    expect(sorted(wire.row)).toEqual(row)
+    expect(sorted(wire.detail)).toEqual(detail)
+    expect(sorted(versions[0]!)).toEqual(version)
+    expect(sorted(wire.diff)).toEqual(diff)
+    expect(sorted(changes[0]!)).toEqual(change)
   })
 
   it('lists presets with the filters it was given', async () => {

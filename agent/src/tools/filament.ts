@@ -41,7 +41,7 @@ async function presetOk<T>(pending: Promise<{ data?: T; error?: unknown; respons
   if (result.response.status === 404 && typeof code !== 'string') {
     throw new ToolError('the presets routes are not on yet on this server (core area filament-presets)')
   }
-  return ok(Promise.resolve(result as never), what) as Promise<T>
+  return ok(Promise.resolve(result), what)
 }
 
 type SpoolCreate = components['schemas']['SpoolCreate-Input']

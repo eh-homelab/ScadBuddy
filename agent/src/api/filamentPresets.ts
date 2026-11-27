@@ -35,7 +35,7 @@ export interface FilamentPresetRow {
 export interface FilamentPresetVersion {
   version: number
   sha256: string
-  made_by: string
+  made_by: string | null
   made_at: string
   fetch_run_id: string | null
   bb_updated_at: string | null
