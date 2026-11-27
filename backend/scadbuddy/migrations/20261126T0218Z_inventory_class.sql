@@ -516,27 +516,35 @@ FROM inventory_k1_lots;
 
 -- 7. model_codes (§8, R-K1-11): each distinct trimmed printer model code in
 -- `items.compatible_with` becomes a kind under `printer`, named as the oldest item spells
--- it; codes that give one id share it. Each item gets one `compatible_with` relationship
--- per code kind. A `printer` item with one code kind takes it; one with more stays and is
--- named. A kind that already has the id is kept as it is and named. A code with no letter
--- or digit gives no kind and is named.
+-- it; codes that differ only in case are one code. The code is data: it is the kind's name
+-- only, never part of its id. A kind under `printer` whose name is the code in any case is
+-- the code's kind and is kept as it is; a new kind gets an opaque id (`k` and a random
+-- uuid's hex). Each item gets one `compatible_with` relationship per code kind. A
+-- `printer` item with one code kind takes it; one with more stays and is named.
 CREATE TEMP TABLE inventory_k1_all_codes ON COMMIT DROP AS
-SELECT i.id AS item_id, i.kind_id AS item_kind, btrim(c.code) AS code,
-    'printer_' || left(regexp_replace(lower(btrim(c.code)), '[^a-z0-9]+', '_', 'g'), 32) AS kind,
-    lower(btrim(c.code)) ~ '[a-z0-9]' AS usable,
+SELECT i.id AS item_id, i.kind_id AS item_kind, left(btrim(c.code), 100) AS code,
+    lower(left(btrim(c.code), 100)) AS code_key,
     row_number() OVER (ORDER BY i.created_at, i.id, c.n) AS age
 FROM items i
 CROSS JOIN LATERAL unnest(i.compatible_with) WITH ORDINALITY AS c (code, n)
 WHERE btrim(c.code) <> '';
 
-CREATE TEMP TABLE inventory_k1_codes ON COMMIT DROP AS
-SELECT item_id, item_kind, code, kind, age FROM inventory_k1_all_codes WHERE usable;
-
 CREATE TEMP TABLE inventory_k1_model_kinds ON COMMIT DROP AS
-SELECT c.kind, left((array_agg(c.code ORDER BY c.age))[1], 100) AS name,
-    EXISTS (SELECT 1 FROM item_kinds k WHERE k.id = c.kind) AS existed
-FROM inventory_k1_codes c
-GROUP BY c.kind;
+SELECT g.code_key, coalesce(e.id, 'k' || replace(gen_random_uuid()::text, '-', '')) AS kind,
+    coalesce(e.name, g.name) AS name, e.id IS NOT NULL AS existed
+FROM (
+    SELECT code_key, (array_agg(code ORDER BY age))[1] AS name
+    FROM inventory_k1_all_codes GROUP BY code_key
+) g
+LEFT JOIN LATERAL (
+    SELECT k.id, k.name FROM item_kinds k
+    WHERE k.parent_id = 'printer' AND lower(k.name) = g.code_key
+    ORDER BY k.id LIMIT 1
+) e ON true;
+
+CREATE TEMP TABLE inventory_k1_codes ON COMMIT DROP AS
+SELECT a.item_id, a.item_kind, a.code, m.kind, a.age
+FROM inventory_k1_all_codes a JOIN inventory_k1_model_kinds m USING (code_key);
 
 INSERT INTO item_kinds (id, name, parent_id, tracking, life_basis)
 SELECT kind, name, 'printer', 'unit', 'none' FROM inventory_k1_model_kinds WHERE NOT existed;
@@ -594,9 +602,6 @@ SELECT 'model_codes', (SELECT count(*) FROM inventory_k1_model_kinds),
         UNION ALL
         SELECT jsonb_build_object('stays', item_id, 'kinds', to_jsonb(kinds))
         FROM inventory_k1_printers WHERE cardinality(kinds) > 1
-        UNION ALL
-        SELECT jsonb_build_object('skipped', code, 'item', item_id)
-        FROM inventory_k1_all_codes WHERE NOT usable
     ) x), '[]');
 
 -- 7a. kind_schemas (§8: every row keeps its meaning): a kind whose parent changed keeps

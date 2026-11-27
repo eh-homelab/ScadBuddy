@@ -4,6 +4,7 @@ positional ledger from before #491."""
 
 from __future__ import annotations
 
+import re
 import threading
 from decimal import Decimal
 from pathlib import Path
@@ -1858,6 +1859,9 @@ def test_inventory_class_places_the_builtin_kinds(pg_conninfo: str) -> None:
         )
 
 
+#: A model kind's id: opaque, a letter and a random uuid's hex (R-K1-11).
+MODEL_KIND_ID = r"k[0-9a-f]{32}"
+
 _TRACKINGS = ("lot", "unit", "filament", "none")
 _BASES = ("none", "hours", "months")
 _PARENTS = (None, "part", "consumable", "equipment")
@@ -1987,28 +1991,40 @@ def test_model_codes_stop_on_a_name_the_model_kind_has(pg_conninfo: str) -> None
         _before_inventory_class(conn)
         conn.execute(
             "INSERT INTO item_kinds (id, name, parent_id, tracking, life_basis)"
-            " VALUES ('printer_h2c', 'H2C', 'printer', 'unit', 'none')"
+            " VALUES ('my_model', 'h2c', 'printer', 'unit', 'none')"
         )
-        _item(conn, "printer_h2c", "Mine")
+        _item(conn, "my_model", "Mine")
         _item(conn, "printer", "MINE", compatible=["H2C"])
-        with pytest.raises(psycopg.errors.RaiseException, match=r"inventory K1: .*printer_h2c"):
+        with pytest.raises(psycopg.errors.RaiseException, match=r"inventory K1: .*my_model"):
             migrate(conn)
 
 
 @pytest.mark.requires_postgres
-def test_a_model_code_with_no_letter_or_digit_is_named_not_made(pg_conninfo: str) -> None:
-    """R-K1-11: a code with no letter or digit gives no kind and is named in the report."""
+def test_a_model_kind_is_found_by_its_name_under_printer(pg_conninfo: str) -> None:
+    """R-K1-11: a kind under `printer` whose name is the code in any case is the code's
+    model kind, whatever its id; no kind is made for it."""
     with psycopg.connect(pg_conninfo) as conn:
         _before_inventory_class(conn)
-        item = _item(conn, "nozzle", "Odd", compatible=["--", "H2C"])
+        conn.execute(
+            "INSERT INTO item_kinds (id, name, parent_id, tracking, life_basis)"
+            " VALUES ('my_model', 'h2c', 'printer', 'unit', 'none')"
+        )
+        item = _item(conn, "nozzle", "Odd", compatible=[" H2C ", "--"])
         migrate(conn)
-        assert conn.execute(
-            "SELECT id FROM item_kinds WHERE parent_id = 'printer' ORDER BY id"
-        ).fetchall() == [("printer_h2c",)]
-        assert conn.execute(
-            "SELECT d FROM inventory_k1_report, jsonb_array_elements(detail) AS d"
-            " WHERE rule = 'model_codes' AND d ? 'skipped'"
-        ).fetchall() == [({"skipped": "--", "item": item},)]
+        kinds: dict[str, str] = dict(
+            conn.execute("SELECT name, id FROM item_kinds WHERE parent_id = 'printer'").fetchall()
+        )
+        assert kinds["h2c"] == "my_model"
+        assert set(kinds) == {"h2c", "--"}
+        assert re.fullmatch(MODEL_KIND_ID, kinds["--"])
+        assert set(
+            conn.execute(
+                "SELECT t.ref FROM relations r JOIN entities f ON f.id = r.from_entity"
+                " JOIN entities t ON t.id = r.to_entity"
+                " WHERE r.type_id = 'compatible_with' AND f.ref = %s",
+                (item,),
+            ).fetchall()
+        ) == {("my_model",), (kinds["--"],)}
 
 
 @pytest.mark.requires_postgres
@@ -2061,27 +2077,24 @@ def test_model_codes_become_kinds(pg_conninfo: str) -> None:
         printer = _item(conn, "printer", "Mine", compatible=["H2C"], minute=3)
         both = _item(conn, "printer", "Spare", compatible=["H2C", "X1C"], minute=4)
         migrate(conn)
-        assert conn.execute(
-            "SELECT id, name, parent_id FROM item_kinds WHERE id LIKE 'printer\\_%' ORDER BY id"
-        ).fetchall() == [
-            ("printer_h2c", "H2C", "printer"),
-            ("printer_x1c", "X1C", "printer"),
-        ]
+        kinds: dict[str, str] = dict(
+            conn.execute("SELECT name, id FROM item_kinds WHERE parent_id = 'printer'").fetchall()
+        )
+        assert set(kinds) == {"H2C", "X1C"}
+        # The id is opaque: it holds no part of the code or of the parent's key.
+        assert all(re.fullmatch(MODEL_KIND_ID, k) for k in kinds.values())
+        h2c, x1c = kinds["H2C"], kinds["X1C"]
         rels = conn.execute(
             "SELECT f.ref, t.ref FROM relations r JOIN entities f ON f.id = r.from_entity"
             " JOIN entities t ON t.id = r.to_entity"
             " WHERE r.type_id = 'compatible_with' AND f.kind = 'item' AND t.kind = 'item_kind'"
         ).fetchall()
-        assert {r for r in rels if r[0] in (one, two)} == {
-            (one, "printer_h2c"),
-            (two, "printer_h2c"),
-            (two, "printer_x1c"),
-        }
+        assert {r for r in rels if r[0] in (one, two)} == {(one, h2c), (two, h2c), (two, x1c)}
         assert dict(
             conn.execute(
                 "SELECT id::text, kind_id FROM items WHERE id = ANY(%s::uuid[])", ([printer, both],)
             ).fetchall()
-        ) == {printer: "printer_h2c", both: "printer"}
+        ) == {printer: h2c, both: "printer"}
         assert conn.execute(
             "SELECT d ->> 'stays' FROM inventory_k1_report, jsonb_array_elements(detail) AS d"
             " WHERE rule = 'model_codes' AND d ? 'stays'"
