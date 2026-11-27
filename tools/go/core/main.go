@@ -42,6 +42,7 @@ import (
 	"github.com/eh-homelab/ScadBuddy/tools/go/core/internal/escalations"
 	"github.com/eh-homelab/ScadBuddy/tools/go/core/internal/events"
 	"github.com/eh-homelab/ScadBuddy/tools/go/core/internal/fetchgrants"
+	"github.com/eh-homelab/ScadBuddy/tools/go/core/internal/filamentpresets"
 	"github.com/eh-homelab/ScadBuddy/tools/go/core/internal/fleet"
 	"github.com/eh-homelab/ScadBuddy/tools/go/core/internal/forget"
 	"github.com/eh-homelab/ScadBuddy/tools/go/core/internal/front"
@@ -369,6 +370,8 @@ func newRouter(pool *pgxpool.Pool, next http.Handler, keys *seal.Keys, areas, au
 			more[name] = append(more[name], routes...)
 		}
 	}
+	// Naming filament-presets twice mounts it once: a pattern given twice panics.
+	presetsMounted := false
 	// Naming both `unknown-trays` and `unknown-trays:read` mounts the area once.
 	unknownTraysMounted := false
 	for name := range strings.SplitSeq(areas, ",") {
@@ -403,6 +406,23 @@ func newRouter(pool *pgxpool.Pool, next http.Handler, keys *seal.Keys, areas, au
 			reads := &tagreads.Reads{Pool: pool, Blobs: blobstore.New(pool, keys, lookupEnv, tel), Upstream: next}
 			for _, p := range reads.Public()[tagreads.Area] {
 				public.Handle(p.Pattern, gate.Wrap(p.Route, p.Handler))
+				served = true
+			}
+		case filamentpresets.Area:
+			// Public routes that read documents from the blob store, whose S3 secret is
+			// sealed under the KEK. publicPackages pass no lookupEnv or tel, so the case is
+			// its own.
+			if keys == nil {
+				return nil, fmt.Errorf("SCADBUDDY_CORE_AREAS names %q, which needs %s", name, seal.Variable)
+			}
+			if presetsMounted {
+				break
+			}
+			presetsMounted = true
+			store := filamentpresets.Store(blobstore.New(pool, keys, lookupEnv, tel))
+			for _, p := range filamentpresets.Public(pool, store) {
+				// no-store is set outside the gate, so its own 401 and 403 carry it too.
+				public.Handle(p.Pattern, noStore(gate.Wrap(p.Route, p.Handler)))
 				served = true
 			}
 		case packages.MirrorArea:
@@ -576,4 +596,12 @@ func (u *upstreamWait) dial(dial func(ctx context.Context, network, address stri
 // socket that is not there yet.
 func refused(err error) bool {
 	return errors.Is(err, syscall.ECONNREFUSED) || errors.Is(err, syscall.ENOENT)
+}
+
+// noStore sets Cache-Control: no-store before next answers, whatever it answers.
+func noStore(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Cache-Control", "no-store")
+		next.ServeHTTP(w, r)
+	})
 }

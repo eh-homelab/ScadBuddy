@@ -21,6 +21,8 @@ export const filamentPaths = {
   invoiceLine: (invoiceId: string, lineId: string) => anchored(at(`${BASE}/invoices`, invoiceId), `line-${lineId}`),
   /** #6955 — a place's own page (its path, children and spools), the target of `/x/L-<n>`. */
   location: (id: string) => at(`${BASE}/locations`, id),
+  /** #7204 — a preset's page; its id is a number. */
+  preset: (id: string | number) => at(`${BASE}/presets`, String(id)),
   /** A catalog row's catalog (the Catalog tab opens on materials). */
   catalog: (kind: string) => (kind === 'materials' ? `${BASE}/catalog` : query(`${BASE}/catalog`, { kind })),
   shoppingList: `${BASE}/shopping-list`,
@@ -38,6 +40,7 @@ export type LinkKind =
   | 'invoice'
   | 'invoice_line'
   | 'location'
+  | 'preset'
   | 'shopping_item'
   | 'price_sheet_row'
   | 'line_candidates'
@@ -51,6 +54,7 @@ const str = (value: unknown): value is string => typeof value === 'string' && va
 function ownPath(kind: LinkKind, row: Row): string | null {
   if (kind.startsWith('catalog:')) return filamentPaths.catalog(kind.slice('catalog:'.length))
   if (kind === 'shopping_item') return filamentPaths.shoppingList
+  if (kind === 'preset') return typeof row.id === 'number' ? filamentPaths.preset(row.id) : null
   if (!str(row.id)) return null
   switch (kind) {
     case 'location':

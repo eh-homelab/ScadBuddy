@@ -299,8 +299,17 @@ same way, `vite.config.ts`).
   model's Prints tab does when the model has such a print (`PrintsPage.tsx`
   `LanPrintsNote`).
 - `frontend/src/pages/filament/` and `components/filament/` — the Filament section (#6262, spec
-  2026-11-14 §10). `/filament` opens Spools; the tabs are Spools, Types, Tags, Suppliers, Invoices, Locations,
-  Catalog, Metrics, Shopping list and Ledger.
+  2026-11-14 §10). `/filament` opens Spools; the tabs are Spools, Types, Presets, Tags, Suppliers, Invoices, Locations,
+  Catalog, Metrics, Shopping list and Ledger (`pages/filament/tabs.ts`).
+  Presets (#7204, read-only, Go core's area `filament-presets`): the Presets tab
+  (`pages/filament/PresetsTab.tsx`) lists each preset with its source, version and mirror
+  state, and filters by source and by type. A preset's page `/filament/presets/:id`
+  (`PresetPage.tsx`) shows its versions, newest first, 10 at a time with "Show more", the
+  diff between two versions and the document. Links come from `lib/filamentLinks.ts`. The
+  mock is `mocks/features/filament/presets.ts`. A 404 with no `code` means Python answered
+  because core does not serve the area yet. The tab then shows "Presets are not on yet on
+  this server." in place of the table, and the page shows it in place of the versions and the
+  document (`PresetsTab.tsx`, `PresetPage.tsx`).
   Codes and labels (#6955): `/x/:code` (`pages/CodePage.tsx`) asks `GET /api/v1/codes/{code}` and opens
   the spool or place; `filament/locations/:id` (`pages/filament/LocationPage.tsx`) is a place's page, with its files and links (entity `location:<id>`, #6950). The
   Locations tab's name opens that page, its count badge opens the spools filter, and "Print printer
