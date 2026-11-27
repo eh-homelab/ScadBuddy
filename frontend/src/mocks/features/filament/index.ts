@@ -2755,8 +2755,18 @@ export const handlers = [
       if (ids.length < 1 || ids.length > 500) return problem(422, 'spool_ids: List should have 1 to 500 items')
       const found = state.spools.filter((row) => ids.includes(row.id)).sort((a, b) => a.id.localeCompare(b.id))
       // #7167: a restore into a dry box another spool holds is 409 `box_full`, and none is changed.
-      const taken = archived ? null : found.map(boxTaken).find((one) => one != null)
-      if (taken) return taken
+      // The backend restores in id order, so a spool restored earlier in the same call is an occupant too.
+      if (!archived) {
+        const claimed = new Map<string, string>()
+        for (const row of found) {
+          const taken = boxTaken(row)
+          if (taken) return taken
+          if (row.archived_at === null || !row.location_id || !isDryBox(row.location_id)) continue
+          const earlier = claimed.get(row.location_id)
+          if (earlier) return boxFull(earlier)
+          claimed.set(row.location_id, row.id)
+        }
+      }
       const changed: string[] = []
       const unchanged: string[] = []
       for (const row of found) {

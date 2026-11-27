@@ -423,6 +423,14 @@ describe('the filament mocks', () => {
       expect((await getSpool(spoolId(7))).archived_at).not.toBeNull()
     })
 
+    it('a bulk restore of two archived spools in one box restores neither: the first is the second one’s occupant', async () => {
+      await boxTakenAfterArchive()
+      await bulkArchiveSpools([spoolId(1)], true)
+      expect(await refusal(bulkArchiveSpools([spoolId(7), spoolId(1)], false))).toMatchObject({ status: 409, code: 'box_full', occupant_id: spoolId(1) })
+      expect((await getSpool(spoolId(1))).archived_at).not.toBeNull()
+      expect((await getSpool(spoolId(7))).archived_at).not.toBeNull()
+    })
+
     it('refuses to make a kind dry storage while one of its capacity-1 places holds several spools (box_has_many)', async () => {
       await upsertLocation({ capacity: 1 }, L.SHELF_A)
       expect(await refusal(upsertCatalog('location-kinds', { dry_storage: true }, LK.SHELF))).toMatchObject({ status: 422, code: 'box_has_many' })
