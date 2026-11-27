@@ -298,6 +298,7 @@ no such routes. The tables are `devices`, `device_pairings`, `device_tokens`, `d
 |---|---|---|
 | `SCADBUDDY_DEVICE_IDLE` | `1h` | How long a device token lives unused. Each device request moves its expiry to now + this |
 | `SCADBUDDY_DEVICE_HARD_CAP` | `720h` | How long a pairing lasts at most, from the claim. A bad value of either stops the start |
+| `SCADBUDDY_DEVICE_DELEGATES` | `agent,projects` | The service callers that may call a device for a person they name in `on_behalf_of`. A credential whose scopes hold `devices.call` may too. Set but empty: no caller by its name. Any other service is a 403 `no_delegation` |
 
 Person routes are class `api` and follow `SCADBUDDY_AUTH_MODE`. With auth off, or a signed-out
 request served in `observe`, the person is `anonymous`. Device routes are class `public` to the
@@ -311,9 +312,9 @@ refuses a missing, bad, revoked or expired one with 401 `device_unauthorized`.
 | `GET /api/v1/devices` | person | | `{devices: [{id, name, model, app_version, capabilities, created_at, last_seen_at, online, expires_at, hard_cap_at}]}`: the caller's own, not revoked, newest first. `online` is a request in the last 75 s |
 | `DELETE /api/v1/devices/{id}` | person | | 204. The device and its tokens are revoked, its open calls end `offline`, and `device.revoked` closes its socket on every pod |
 | `POST /api/v1/devices/heartbeat` | device | none | 204. The app sends it every 30 s while it is in front |
-| `POST /api/v1/devices/{id}/calls[?wait=true]` | person, assistant, flow | `{method, args?, timeout_s?, on_behalf_of?}` | 202 `{call_id}`, or for an assistant's or a flow's `nfc.write` 202 `{call_id, pending_action_id}`. 403 `not_your_device`, 409 `offline` (with `"error": "offline"`), 422 `method_not_announced`. `timeout_s` is 60 by default, at most 120. With `wait=true`: 200 with the view (below) when the call ends `done` or `error`, else 504 whose `reason` is the outcome |
+| `POST /api/v1/devices/{id}/calls[?wait=true]` | person, assistant, flow | `{method, args?, timeout_s?, on_behalf_of?}` | 202 `{call_id}`, or for an assistant's or a flow's `nfc.write` 202 `{call_id, pending_action_id}`. 403 `not_your_device` or `no_delegation`, 409 `offline` (with `"error": "offline"`), 422 `method_not_announced`. `timeout_s` is 60 by default, at most 120. With `wait=true`: 200 with the view (below) when the call ends `done` or `error`, else 504 whose `reason` is the outcome |
 | `GET /api/v1/devices/calls/{id}` | the device's owner, or the caller | | `{call, events, result}` (below) |
-| `POST /api/v1/devices/calls/{id}/confirm` | the caller that made it | `{on_behalf_of}` for a service | 202 `{call_id}`: the approved call is sent. 409 `approval_pending`, `approval_denied` (the call ends `denied`) or `no_approval` |
+| `POST /api/v1/devices/calls/{id}/confirm` | the caller that made it | `{on_behalf_of}` for a service | 202 `{call_id}`: the approved call is sent. 409 `approval_pending`, `approval_denied` or `approval_mismatch` (both end the call `denied`), or `no_approval` |
 | `POST /api/v1/devices/calls/{id}/events` | the call's device, while the call is open | `{events: [{kind, data?}]}`, at most 20; `kind` `tag_found`, `tag_progress` or `tag_lost`; `data` at most 1 KiB and never `call`, `device`, `id`, `at`, `kind`, `topics` or `retention_seconds` | 204. 409 `call_closed` |
 | `POST /api/v1/devices/uploads?call=&kind=` | the call's device, while the call is open | the raw bytes | `{key, media_type}`: `tag_dump` for an `nfc.*` call, `scan_image` for the others (422 `kind_mismatch`), stored with `Blobs.Put` and held in `blob_refs` as (`device_call`, the call's id). A photo's type is read from its bytes (JPEG, PNG or WebP, else 415 `not_an_image`). A dump is JSON `{uid, tech, blocks: [{index, data_hex}], records}` with no sector trailer (422 `key_trailer`) |
 | `POST /api/v1/devices/calls/{id}/result` | the call's device, while the call is open | `{outcome: "error", error?}`, or `{outcome: "done", result: {read: {blob_key, uid?, tech?, complete?, missing_blocks?}}}` | 204 for an error. For done, `{read_id, uid?, complete?}`, a `device_reads` row. A blob this call's device did not upload, or of a kind not the method's, is 422 `foreign_blob`: no row, and the call ends `error` |
@@ -322,8 +323,11 @@ refuses a missing, bad, revoked or expired one with 401 `device_unauthorized`.
 
 A call is `{id, device_id, method, args, caller_kind, outcome, created_at, deadline, sent_at,
 ended_at, pending_action_id}`. `caller_kind` is `person` (a session cookie, or no one with auth
-off), `assistant` (a person's access token, or the agent's service credential, which names the
-person in `on_behalf_of`) or `flow` (the projects worker's credential, likewise). By default only
+off), `assistant` (a person's access token, or a delegate service's credential, which names the
+person in `on_behalf_of`) or `flow` (the projects worker's credential, likewise). Only a delegate
+(`SCADBUDDY_DEVICE_DELEGATES`, or scope `devices.call`) may name a person; core has no proof yet
+that the person asked (the agent's CRUD calls carry no turn principal), so the grant is the
+check. By default only
 the device's owner, and the owner's assistant and flows, may call it. `outcome` is null while the
 call is open, then `done`, `error`, `offline` (the device had gone at the deadline), `timeout` (it
 was online at the deadline) or `denied` (its approval never came, or was refused). Core ends a call
@@ -333,9 +337,13 @@ call's `device.*` events from the event log, oldest first (`{id, kind, at, data}
 `nfc.write` takes `{records: [...]}`, 1 to 16 NDEF records, and nothing else: core never asks a
 device to write raw blocks, sectors or keys, so it never writes a Bambu tag (the app refuses one
 too). An assistant's or a flow's `nfc.write` makes an `ai_approvals` row outside a session (tool
-`device_call`, tier `outward`, 10 minutes), which the UI lists with the other pending actions; it
-needs `SCADBUDDY_SECRET_KEY_FILE` for the input hash (503 `not_configured` without it). The caller
-confirms it once it is approved, and the confirm uses the approval once. A person's own call is
+`device_call`, tier `outward`, 10 minutes), which the UI lists with the other pending actions. Its
+`input_summary` shows what will be written: each record's type and its text or URI, each value cut
+to 80 characters and the whole to 1000. It needs `SCADBUDDY_SECRET_KEY_FILE` for the input hash
+(the HMAC of the device, the method and the args; 503 `not_configured` without it). The caller
+confirms it once it is approved. The confirm hashes the call's stored args again (under the KEK
+or the one before it) and refuses a mismatch (409 `approval_mismatch`, the call ends `denied`),
+then uses the approval once. A person's own call is
 sent at once: their click is the approval.
 
 A call and its events go over the bus, as opaque events (Python has no model for them), each kept

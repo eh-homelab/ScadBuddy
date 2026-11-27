@@ -283,3 +283,57 @@ func TestWriteFromPersonGoesAtOnce(t *testing.T) {
 	requestedOn(t, sock, got.body["call_id"].(string))
 	expect(t, h.count(`SELECT count(*) FROM ai_approvals`), 0)
 }
+
+// Only a service that holds the delegation grant may name a person in on_behalf_of: the
+// agent and the projects worker by default, or a credential with scope devices.call.
+func TestDelegationNeedsTheGrant(t *testing.T) {
+	h := newHarness(t, auth.Observe)
+	me := h.person("user:i#me")
+	d := h.pair(me)
+	body := `{"method":"nfc.read","on_behalf_of":"user:i#me"}`
+	got := h.do("POST", "/api/v1/devices/"+d.id+"/calls", h.service("render", "api"), body)
+	expectStatus(t, got, 403)
+	expect(t, got.body["reason"], any("no_delegation"))
+	expect(t, h.count(`SELECT count(*) FROM device_calls`), 0)
+	expectStatus(t, h.do("POST", "/api/v1/devices/"+d.id+"/calls", h.service("agent", "api"), body), 202)
+	expect(t, h.count(`SELECT count(*) FROM device_calls WHERE caller_kind = 'assistant' AND caller = 'user:i#me'`), 1)
+	expectStatus(t, h.do("POST", "/api/v1/devices/"+d.id+"/calls", h.service("projects", "flow.host"), body), 202)
+	expect(t, h.count(`SELECT count(*) FROM device_calls WHERE caller_kind = 'flow'`), 1)
+	expectStatus(t, h.do("POST", "/api/v1/devices/"+d.id+"/calls", h.service("render", "api", DelegateScope), body), 202)
+	// A delegate still acts only for the device's owner.
+	expectStatus(t, h.do("POST", "/api/v1/devices/"+d.id+"/calls", h.service("agent", "api"),
+		`{"method":"nfc.read","on_behalf_of":"user:i#you"}`), 403)
+	// The grant is a setting: with SCADBUDDY_DEVICE_DELEGATES empty, the agent holds none.
+	h.store.Delegates = delegates(func(string) (string, bool) { return "", true })
+	expectStatus(t, h.do("POST", "/api/v1/devices/"+d.id+"/calls", h.service("agent", "api"), body), 403)
+}
+
+// The pending action shows what will be written, and the confirm refuses a call whose
+// records changed after the approval.
+func TestConfirmRefusesChangedRecords(t *testing.T) {
+	h := newHarness(t, auth.Observe)
+	me := h.person("user:i#me")
+	d := h.pair(me)
+	bot := h.assistant("user:i#me")
+	long := strings.Repeat("x", 200)
+	got := h.do("POST", "/api/v1/devices/"+d.id+"/calls", bot,
+		`{"method":"nfc.write","args":{"records":[{"type":"text","text":"PLA #12"},{"type":"uri","uri":"https://`+long+`"}]}}`)
+	expectStatus(t, got, 202)
+	call := got.body["call_id"].(string)
+	var summary string
+	if err := h.pool.QueryRow(t.Context(), `SELECT input_summary FROM ai_approvals WHERE id = $1::uuid`,
+		got.body["pending_action_id"]).Scan(&summary); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.HasPrefix(summary, `nfc.write on Pixel: text "PLA #12"; uri "https://xxx`) || !strings.HasSuffix(summary, `…"`) ||
+		len([]rune(summary)) > summaryMax {
+		t.Fatalf("summary %q", summary)
+	}
+	approve(h, call, "approved")
+	h.sql(`UPDATE device_calls SET args = '{"records":[{"type":"text","text":"something else"}]}' WHERE id = $1::uuid`, call)
+	c := h.do("POST", "/api/v1/devices/calls/"+call+"/confirm", bot, "")
+	expectStatus(t, c, 409)
+	expect(t, c.body["reason"], any("approval_mismatch"))
+	expect(t, outcome(h.view(me, call)), any("denied"))
+	expect(t, h.count(`SELECT count(*) FROM ai_approvals WHERE consumed_at IS NOT NULL`), 0)
+}

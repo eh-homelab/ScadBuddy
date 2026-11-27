@@ -85,16 +85,44 @@ type Store struct {
 	Poll time.Duration
 	// After schedules a call's deadline check; time.AfterFunc by default.
 	After func(d time.Duration, f func())
+	// Delegates are the service callers that may call a device for a person they name
+	// (SCADBUDDY_DEVICE_DELEGATES). A credential whose scopes hold DelegateScope may too.
+	Delegates []string
 }
+
+// DelegateScope is the service scope that grants calling a device on a person's behalf.
+const DelegateScope = "devices.call"
+
+// DefaultDelegates are the callers that hold the grant when SCADBUDDY_DEVICE_DELEGATES is
+// not set: the agent (the assistant) and the projects worker (flows).
+var DefaultDelegates = []string{"agent", "projects"}
 
 // New is the area over pool, with its settings read from lookupEnv (CheckEnv has refused a
 // bad one at the start).
 func New(pool *pgxpool.Pool, keys *seal.Keys, blobs Blobs, lookupEnv func(string) (string, bool)) *Store {
-	s := &Store{Pool: pool, Keys: keys, Blobs: blobs, Now: time.Now, Idle: DefaultIdle, HardCap: DefaultHardCap}
+	s := &Store{Pool: pool, Keys: keys, Blobs: blobs, Now: time.Now, Idle: DefaultIdle, HardCap: DefaultHardCap,
+		Delegates: DefaultDelegates}
 	if lookupEnv != nil {
 		s.Idle, s.HardCap, _ = settings(lookupEnv)
+		s.Delegates = delegates(lookupEnv)
 	}
 	return s
+}
+
+// delegates is SCADBUDDY_DEVICE_DELEGATES, comma-separated; set but empty, no caller holds
+// the grant by its name.
+func delegates(lookupEnv func(string) (string, bool)) []string {
+	raw, ok := lookupEnv("SCADBUDDY_DEVICE_DELEGATES")
+	if !ok {
+		return DefaultDelegates
+	}
+	out := []string{}
+	for item := range strings.SplitSeq(raw, ",") {
+		if item = strings.TrimSpace(item); item != "" {
+			out = append(out, item)
+		}
+	}
+	return out
 }
 
 // CheckEnv refuses a setting the area cannot use, so a bad value stops the start.

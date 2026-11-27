@@ -110,7 +110,7 @@ func newHarness(t *testing.T, mode auth.Mode) *harness {
 	h := &harness{t: t, pool: pool, clock: &clock{at: time.Now().UTC().Truncate(time.Second)},
 		blobs: &memBlobs{objects: map[string][]byte{}}}
 	h.store = &Store{Pool: pool, Keys: testKeys(t), Blobs: h.blobs, Now: h.clock.now, Idle: DefaultIdle,
-		HardCap: DefaultHardCap, Poll: 20 * time.Millisecond,
+		HardCap: DefaultHardCap, Poll: 20 * time.Millisecond, Delegates: DefaultDelegates,
 		After: func(_ time.Duration, f func()) { h.mu.Lock(); h.timers = append(h.timers, f); h.mu.Unlock() }}
 	h.addPod(mode)
 	return h
@@ -208,6 +208,19 @@ func (h *harness) assistant(principal string) string {
 	token := "sbpat_" + hex.EncodeToString(id) + "." + base64.RawURLEncoding.EncodeToString(b)
 	h.sql(`INSERT INTO personal_access_tokens (id, principal, name, scope, token_hash, expires_at)
 		VALUES ($1, $2, 'n', 'write', sha256($3::bytea), now() + interval '1 day')`, hex.EncodeToString(id), principal, []byte(token))
+	return token
+}
+
+// service is a service credential of caller with scopes.
+func (h *harness) service(caller string, scopes ...string) string {
+	h.t.Helper()
+	id, secret := make([]byte, 8), make([]byte, 32)
+	_, _ = rand.Read(id)
+	_, _ = rand.Read(secret)
+	token := "sbsvc_" + hex.EncodeToString(id) + "." + base64.RawURLEncoding.EncodeToString(secret)
+	h.sql(`INSERT INTO service_credentials (id, caller, scopes, secret_hash, expires_at, proof)
+		VALUES ($1, $2, $3, sha256($4::bytea), now() + interval '15 minutes', 'inprocess')`,
+		hex.EncodeToString(id), caller, scopes, []byte(token))
 	return token
 }
 

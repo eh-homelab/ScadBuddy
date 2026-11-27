@@ -7,6 +7,8 @@ import (
 	"net/http"
 	"slices"
 	"sort"
+	"strconv"
+	"strings"
 	"time"
 
 	"github.com/jackc/pgx/v5"
@@ -94,26 +96,32 @@ func (s *Store) loadCall(ctx context.Context, q interface {
 // callerOf is who a person route acts for, and as what: a person (a session cookie, or no
 // one with auth off), the assistant (a person's access token, or the agent's service
 // credential), or a flow (the projects worker's credential). A service names the person it
-// acts for in on_behalf_of.
-func callerOf(r *http.Request, b *crud.Body) (kind, who string) {
+// acts for in on_behalf_of, and only a service that holds the delegation grant may: its
+// credential's scope DelegateScope, or its caller named in SCADBUDDY_DEVICE_DELEGATES
+// (agent and projects by default). Any other service is a 403.
+func (s *Store) callerOf(r *http.Request, b *crud.Body) (kind, who string, err error) {
 	c := auth.CallerOf(r.Context())
 	switch c.Kind {
 	case auth.KindService:
+		if !c.Service.Has(DelegateScope) && !slices.Contains(s.Delegates, c.Service.Caller) {
+			return "", "", httpx.WithReason(http.StatusForbidden,
+				"This service may not call a device for a person.", "no_delegation")
+		}
 		kind = "assistant"
 		if c.Service.Caller == "projects" {
 			kind = "flow"
 		}
 		if b == nil {
-			return kind, ""
+			return "", "", httpx.Invalid(httpx.Issue{Loc: []string{"body", "on_behalf_of"}, Msg: "Field required"})
 		}
-		return kind, b.Text("on_behalf_of", 1, 200)
+		return kind, b.Text("on_behalf_of", 1, 200), nil
 	case auth.KindToken:
-		return "assistant", c.Principal
+		return "assistant", c.Principal, nil
 	}
 	if b != nil && b.Present("on_behalf_of") {
 		b.Fail([]string{"on_behalf_of"}, "only a service acts on another's behalf")
 	}
-	return "person", principal(r.Context())
+	return "person", principal(r.Context()), nil
 }
 
 func offline() error {
@@ -139,7 +147,10 @@ func (s *Store) call(r *http.Request) (any, error) {
 	if err != nil {
 		return nil, err
 	}
-	kind, who := callerOf(r, b)
+	kind, who, err := s.callerOf(r, b)
+	if err != nil {
+		return nil, err
+	}
 	method := b.Choice("method", Methods...)
 	args := json.RawMessage(`{}`)
 	if b.Present("args") {
@@ -504,11 +515,7 @@ func end(ctx context.Context, tx pgx.Tx, id, outcome string, result any, now tim
 // the call (POST …/calls/{id}/confirm), which uses the approval once.
 func (s *Store) approval(ctx context.Context, tx pgx.Tx, kind, who, deviceName, device, method string,
 	args json.RawMessage, now time.Time) (string, error) {
-	input, err := approvalInput(device, method, args)
-	if err != nil {
-		return "", err
-	}
-	inputHash, err := seal.InputHash(seal.InputHashKey(s.Keys.Current), toolName, input)
+	inputHash, err := inputHash(s.Keys.Current, device, method, args)
 	if err != nil {
 		return "", err
 	}
@@ -517,13 +524,60 @@ func (s *Store) approval(ctx context.Context, tx pgx.Tx, kind, who, deviceName, 
 		input_hash, tier, requested_by_kind, requested_by_id, requested_by_label, created_at, expires_at)
 		VALUES (gen_random_uuid(), NULL, NULL, 'device_call:' || gen_random_uuid()::text, $1, $2, $3, 'outward',
 		$4, $5, $6, $7, $8) RETURNING id::text`,
-		toolName, method+" on "+deviceName, inputHash, kind, who, kind+" for "+who, now, now.Add(ApprovalTTL)).Scan(&id)
+		toolName, summary(method, deviceName, args), inputHash, kind, who, kind+" for "+who, now,
+		now.Add(ApprovalTTL)).Scan(&id)
 	return id, err
 }
 
-func approvalInput(device, method string, args json.RawMessage) (string, error) {
+// inputHash is the approval's HMAC of the call's device, method and args (seal.InputHash:
+// canonical JSON, so the args read back from jsonb hash the same).
+func inputHash(kek *seal.KEK, device, method string, args json.RawMessage) (string, error) {
 	raw, err := json.Marshal(map[string]any{"device_id": device, "method": method, "args": args})
-	return string(raw), err
+	if err != nil {
+		return "", err
+	}
+	return seal.InputHash(seal.InputHashKey(kek), toolName, string(raw))
+}
+
+const (
+	// summaryValueMax and summaryMax bound what an approval shows of the records to write.
+	summaryValueMax = 80
+	summaryMax      = 1000
+)
+
+// summary is what the person approves: the method, the device, and each record's type and
+// its text or URI, each value cut to summaryValueMax runes and the whole to summaryMax.
+func summary(method, deviceName string, args json.RawMessage) string {
+	var parsed struct {
+		Records []map[string]any `json:"records"`
+	}
+	_ = json.Unmarshal(args, &parsed)
+	parts := []string{}
+	for _, r := range parsed.Records {
+		kind, _ := r["type"].(string)
+		value := ""
+		for _, k := range []string{"text", "uri", "url", "value"} {
+			if v, ok := r[k].(string); ok {
+				value = v
+				break
+			}
+		}
+		parts = append(parts, cut(kind, 20)+" "+strconv.Quote(cut(value, summaryValueMax)))
+	}
+	out := method + " on " + deviceName
+	if len(parts) > 0 {
+		out += ": " + strings.Join(parts, "; ")
+	}
+	return cut(out, summaryMax)
+}
+
+// cut is s at most n runes, with an ellipsis when it was cut.
+func cut(s string, n int) string {
+	runes := []rune(s)
+	if len(runes) <= n {
+		return s
+	}
+	return string(runes[:n-1]) + "…"
 }
 
 // confirm sends an approved call: the caller that made it uses its approval once. A denied
@@ -541,7 +595,10 @@ func (s *Store) confirm(r *http.Request) (any, error) {
 			return nil, err
 		}
 	}
-	kind, who := callerOf(r, b)
+	kind, who, err := s.callerOf(r, b)
+	if err != nil {
+		return nil, err
+	}
 	if b != nil {
 		if err := b.Err(); err != nil {
 			return nil, err
@@ -552,7 +609,7 @@ func (s *Store) confirm(r *http.Request) (any, error) {
 	var decision *string
 	usable := false
 	sent := false
-	err := pgx.BeginFunc(ctx, s.Pool, func(tx pgx.Tx) error {
+	err = pgx.BeginFunc(ctx, s.Pool, func(tx pgx.Tx) error {
 		var err error
 		c, err = s.loadCall(ctx, tx, id, " FOR UPDATE OF c")
 		if err != nil {
@@ -564,14 +621,21 @@ func (s *Store) confirm(r *http.Request) (any, error) {
 		if c.PendingActionID == nil || c.SentAt != nil || c.Outcome != nil {
 			return httpx.WithReason(http.StatusConflict, "That call waits for no approval.", "no_approval")
 		}
+		var approved string
 		err = tx.QueryRow(ctx, `SELECT decision, coalesce(decision = 'approved' AND consumed_at IS NULL
-			AND revoked_at IS NULL AND usable_until > $2, false) FROM ai_approvals WHERE id = $1::uuid`, *c.PendingActionID, now).Scan(&decision, &usable)
+			AND revoked_at IS NULL AND usable_until > $2, false), input_hash FROM ai_approvals WHERE id = $1::uuid`,
+			*c.PendingActionID, now).Scan(&decision, &usable, &approved)
 		if errors.Is(err, pgx.ErrNoRows) {
 			decision = ptr("cancelled")
 			err = nil
 		}
 		if err != nil || decision == nil {
 			return err
+		}
+		// What is sent must be what was approved: the call's args hash again to the
+		// approval's input hash, under the KEK or the one before it.
+		if usable && !s.sameInput(approved, c) {
+			decision, usable = ptr("mismatched"), false
 		}
 		if !usable {
 			return end(ctx, tx, id, "denied", map[string]any{"error": "approval_" + *decision}, now)
@@ -591,7 +655,11 @@ func (s *Store) confirm(r *http.Request) (any, error) {
 		return nil, httpx.WithReason(http.StatusConflict, "No person has approved the call yet.", "approval_pending")
 	case !sent:
 		s.publishFailed(ctx, id, c.DeviceID, "denied", "the approval was "+*decision)
-		return nil, httpx.WithReason(http.StatusConflict, "The call was not approved: "+*decision+".", "approval_denied")
+		reason := "approval_denied"
+		if *decision == "mismatched" {
+			reason = "approval_mismatch"
+		}
+		return nil, httpx.WithReason(http.StatusConflict, "The call was not approved: "+*decision+".", reason)
 	}
 	online, err := s.Online(ctx, c.DeviceID)
 	if err != nil {
@@ -613,6 +681,19 @@ func (s *Store) confirm(r *http.Request) (any, error) {
 	}
 	s.schedule(id, deadline)
 	return &crud.Reply{Status: http.StatusAccepted, Value: map[string]any{"call_id": id}}, nil
+}
+
+// sameInput says whether the call's device, method and args hash to approved.
+func (s *Store) sameInput(approved string, c *Call) bool {
+	for _, kek := range []*seal.KEK{s.Keys.Current, s.Keys.Previous} {
+		if kek == nil {
+			continue
+		}
+		if got, err := inputHash(kek, c.DeviceID, c.Method, c.Args); err == nil && got == approved {
+			return true
+		}
+	}
+	return false
 }
 
 func ptr[T any](v T) *T { return &v }
