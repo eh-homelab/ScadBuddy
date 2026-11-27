@@ -25,9 +25,19 @@ export function CameraReader({ Detector, formats = QR_FORMATS, onRead, onStop, o
     let detector: BarcodeDetectorLike | null = null
     async function tick() {
       if (!alive || !video.current) return
-      try {
-        detector ??= new Detector({ formats: await readableFormats(Detector, wanted) })
+      if (!detector) {
+        try {
+          detector = new Detector({ formats: await readableFormats(Detector, wanted) })
+        } catch {
+          if (!alive) return
+          alive = false
+          stop()
+          done.current.onFail('This browser cannot read codes from the camera. Type the code from the label.')
+          return
+        }
         if (!alive || !video.current) return
+      }
+      try {
         const found = await detector.detect(video.current)
         const raw = found.find((one) => one.rawValue)?.rawValue
         if (raw && alive) {
@@ -37,7 +47,7 @@ export function CameraReader({ Detector, formats = QR_FORMATS, onRead, onStop, o
           return
         }
       } catch {
-        // A frame not ready yet, or a detector that did not start: try the next frame.
+        // A frame not ready yet: try the next frame.
       }
       if (alive) timer = setTimeout(() => void tick(), 300)
     }

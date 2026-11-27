@@ -45,9 +45,9 @@ function paths() {
 /**
  * A stand-in for the Shape Detection API's BarcodeDetector, and a camera that gives a stream.
  * `supported` is what `getSupportedFormats` answers (no such method when it is missing), and
- * `formats` keeps the formats each detector was made with.
+ * `formats` keeps the formats each detector was made with, and `breaks` makes the constructor throw.
  */
-function installCamera(rawValue: string, { format = 'qr_code', supported }: { format?: string; supported?: string[] } = {}) {
+function installCamera(rawValue: string, { format = 'qr_code', supported, breaks = false }: { format?: string; supported?: string[]; breaks?: boolean } = {}) {
   const stop = vi.fn()
   const stream = { getTracks: () => [{ stop }] }
   const before = navigator.mediaDevices
@@ -55,6 +55,7 @@ function installCamera(rawValue: string, { format = 'qr_code', supported }: { fo
   Object.defineProperty(navigator, 'mediaDevices', { value: { getUserMedia: vi.fn(() => Promise.resolve(stream)) }, configurable: true })
   const Detector = class {
     constructor(options?: { formats: string[] }) {
+      if (breaks) throw new Error('no detector')
       formats.push(options?.formats ?? [])
     }
     detect() {
@@ -177,6 +178,20 @@ describe('IdentifySpool (#7167)', () => {
       await waitFor(() => expect(identified(onIdentified)).toHaveLength(1))
       expect(identified(onIdentified)[0]).toMatchObject({ id: spoolId(2) })
       expect(camera.formats).toEqual([['qr_code', 'ean_13']])
+      expect(camera.stop).toHaveBeenCalled()
+    } finally {
+      camera.restore()
+    }
+  })
+
+  it('says so, once, when the camera detector cannot be made (#8372)', async () => {
+    const camera = installCamera('x', { breaks: true })
+    try {
+      const { user } = show()
+      await user.click(screen.getByRole('radio', { name: 'QR code' }))
+      await user.click(screen.getByRole('button', { name: 'Use camera' }))
+      expect(await screen.findByText(/This browser cannot read codes from the camera/)).toBeInTheDocument()
+      expect(screen.queryByLabelText('Camera preview')).toBeNull()
       expect(camera.stop).toHaveBeenCalled()
     } finally {
       camera.restore()
