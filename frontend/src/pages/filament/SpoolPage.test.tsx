@@ -1,4 +1,4 @@
-import { screen, waitFor, within } from '@testing-library/react'
+import { act, screen, waitFor, within } from '@testing-library/react'
 import { http, HttpResponse } from 'msw'
 import { Route, Routes } from 'react-router'
 import { beforeEach, describe, expect, it, onTestFinished, vi } from 'vitest'
@@ -87,7 +87,8 @@ describe('the spool page', () => {
     open(11)
     await heading(11)
     await answered
-    await new Promise((resolve) => setTimeout(resolve, 0))
+    // Flush the updates the answer starts, with no timer: a slow runner cannot pass early.
+    await act(async () => {})
     expect(screen.queryByRole('region', { name: 'Dry box' })).toBeNull()
   })
 
