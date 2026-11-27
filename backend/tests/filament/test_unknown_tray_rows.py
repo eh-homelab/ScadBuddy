@@ -20,6 +20,7 @@ from scadbuddy.printers.store import PrinterStore
 from scadbuddy.spools.models import SeenTray
 from tests.conftest import PgPool
 from tests.printers.conftest import KEK
+from tests.support.printers import MERGED_BY
 
 pytestmark = pytest.mark.requires_postgres
 
@@ -87,12 +88,14 @@ def test_deleting_the_printer_deletes_its_rows(pg_pool: PgPool) -> None:
 
 def test_merging_a_printer_drops_its_rows(pg_pool: PgPool) -> None:
     printers = PrinterStore(pg_pool, KEK)
-    synthetic = UUID(printers.ensure_bambuddy(4, serial=None, name="H2C", model="H2C").id)
+    synthetic = UUID(
+        printers.ensure_bambuddy(4, serial=None, name="H2C", model="H2C", by=MERGED_BY).id
+    )
     mine = _printer(pg_pool, name="Mine")
     with pg_pool.connection() as conn:
         note_on(conn, synthetic, _seen(1), T0)
         note_on(conn, mine, _seen(2), T0)
-    printers.ensure_bambuddy(4, serial=SERIAL, name="H2C", model="H2C")
+    printers.ensure_bambuddy(4, serial=SERIAL, name="H2C", model="H2C", by=MERGED_BY)
     with pg_pool.connection() as conn:
         assert [(r.printer_id, r.tray_id) for r in rows_on(conn)] == [(mine, 2)]
 

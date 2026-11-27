@@ -190,7 +190,7 @@ def _drop_override_slots(conn: Connection[DictRow], merged: str, into: str, by: 
 PRINTER_DELETE_ACTOR = "system:printer-delete"
 
 
-def _drop_unknown_trays(conn: Connection[DictRow], merged: str, into: str) -> None:
+def _drop_unknown_trays(conn: Connection[DictRow], merged: str, into: str, by: Actor) -> None:
     """#7143: the merged printer's unknown-tray rows are dropped, not moved. The kept
     printer's next report records what it shows."""
     conn.execute("DELETE FROM filament_unknown_trays WHERE printer_id = %s", (merged,))
