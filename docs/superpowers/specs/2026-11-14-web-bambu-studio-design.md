@@ -8,8 +8,9 @@ Epic: #6272. Plan: `docs/superpowers/plans/2026-11-14-web-bambu-studio.md`.
 ## 0. Sources and how they were read
 
 - Bambu Studio rules are cited at tag
-  [`v02.08.02.61`](https://github.com/bambulab/BambuStudio/tree/v02.08.02.61). That is
-  the version ScadBuddy's native slicer pins (`Dockerfile` `ARG BAMBU_STUDIO_VERSION=02.08.02.61`).
+  [`v02.08.02.61`](https://github.com/bambulab/BambuStudio/tree/v02.08.02.61). That was
+  the version ScadBuddy's native slicer pinned when this was written (`Dockerfile`
+  `ARG BAMBU_STUDIO_VERSION`); the pin moves by the weekly bump PR now (#8325).
   The files were fetched with `gh api repos/bambulab/BambuStudio/contents/<path>?ref=v02.08.02.61`
   on 2026-11-14. Each rule below links the file and the lines. Bambuddy's own slicer can
   run another version; a rule that moves between versions is re-read when the pin moves.

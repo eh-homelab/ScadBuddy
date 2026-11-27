@@ -1,0 +1,102 @@
+---
+name: Bambu Studio Bump
+
+# Opens ONE pull request when a newer stable Bambu Studio release exists (#8325).
+# The Dockerfile pins the Ubuntu 24.04 AppImage by version, asset name, REST API
+# asset id and sha256. Dependabot cannot watch a release asset, so this workflow
+# brings each new release in as a single, reviewable change.
+#
+# The PR moves the four ARGs together (`.github/scripts/bambu-studio-bump.sh`); the
+# sha256 is the `digest` GitHub lists for the asset, or a download's hash when there
+# is none. Its own CI is the re-measurement: a Dockerfile change selects every lane,
+# so the slicer image is built and runs `scadbuddy-slicer --check-cli` against the
+# new BAMBU_STUDIO_VERSION, and the image job runs the profile tests on the new
+# tree. It is never auto-merged: a human reads the result and the release notes,
+# re-measures what the code says of the slicer, and merges.
+#
+# The PR is opened with the eh-homelab-org-runners App token, not GITHUB_TOKEN:
+# a push or PR made with GITHUB_TOKEN starts no workflow, so the PR would sit
+# with no CI at all.
+
+on:
+  schedule:
+    # Mondays, beside the OpenSCAD bump and before Dependabot's 04:00 run.
+    - cron: "37 3 * * 1"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}
+  cancel-in-progress: false
+
+jobs:
+  bump:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Generate app token
+        id: app-token
+        uses: actions/create-github-app-token@v3
+        with:
+          client-id: ${{ secrets.RUNNER_APP_ID }}
+          private-key: ${{ secrets.RUNNER_APP_PRIVATE_KEY }}
+
+      - uses: actions/checkout@v7
+        with:
+          token: ${{ steps.app-token.outputs.token }}
+
+      - name: Look for a newer release
+        id: bump
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: .github/scripts/bambu-studio-bump.sh . | tee -a "$GITHUB_OUTPUT"
+
+      - name: Open the pull request
+        if: ${{ steps.bump.outputs.bump == 'true' }}
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+          VERSION: ${{ steps.bump.outputs.version }}
+          ASSET: ${{ steps.bump.outputs.asset }}
+          ASSET_ID: ${{ steps.bump.outputs.asset_id }}
+          SHA256: ${{ steps.bump.outputs.sha256 }}
+          SHA256_FROM: ${{ steps.bump.outputs.sha256_from }}
+        run: |
+          set -euo pipefail
+          branch="chore/bambu-studio-$VERSION"
+          # One PR per release: a rerun, or next week's run while this one is
+          # still open, finds the branch and leaves it alone.
+          if git ls-remote --exit-code --heads origin "$branch" >/dev/null; then
+            echo "$branch already exists; nothing to do."
+            exit 0
+          fi
+          git switch -c "$branch"
+          git -c user.name="scadbuddy-bambu-studio-bump" \
+              -c user.email="scadbuddy-bambu-studio-bump@users.noreply.github.com" \
+              commit -am "fix(slicer): bump Bambu Studio to $VERSION"
+          git push origin "$branch"
+          body="$RUNNER_TEMP/body.md"
+          cat > "$body" <<EOF
+          Bambu Studio v$VERSION is the newest stable release. This moves the slicer's pin to it, changing the four ARGs together:
+
+          \`\`\`
+          ARG BAMBU_STUDIO_VERSION=$VERSION
+          ARG BAMBU_STUDIO_ASSET=$ASSET
+          ARG BAMBU_STUDIO_ASSET_ID=$ASSET_ID
+          ARG BAMBU_STUDIO_SHA256_AMD64=$SHA256
+          \`\`\`
+
+          The sha256 comes from the asset's \`$SHA256_FROM\`. Release notes: https://github.com/bambulab/BambuStudio/releases/tag/v$VERSION
+
+          Opened by \`.github/workflows/bambu-studio-bump.yml\` (#8325). This PR is **not** auto-merged. Before merging:
+
+          - [ ] The \`slicer-image\` job passes: \`scadbuddy-slicer --check-cli\` finds this version in \`--help\`.
+          - [ ] The image job passes, including the \`requires_slicer_profiles\` tests on the new profile tree.
+          - [ ] Run \`Hot path e2e\` on this branch (\`gh workflow run hot-path-e2e.yml --ref $branch\`): it slices and prints with the new CLI.
+          - [ ] Read the release notes for CLI, preset, 3MF and H2C profile changes. Check spec §3's five \`project_settings\` options and the mixed-nozzle-size refusal in \`backend/scadbuddy/bambuddy/resolver.py\`.
+          - [ ] Re-measure what \`backend/scadbuddy/slicing/profiles.py\` says of the tree (\`_PER_FILAMENT\`, the include counts) and fix anything that moved here.
+          EOF
+          gh pr create --base main --head "$branch" \
+            --title "fix(slicer): bump Bambu Studio to $VERSION" \
+            --body-file "$body"

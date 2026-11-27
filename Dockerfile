@@ -26,10 +26,10 @@ ARG BOSL2_COMMIT=f47030c41d88d0676bca73be1c6b7ba58564f9dd
 # value. See `slicer-dist` for how to bump it. BAMBU_STUDIO_ASSET_ID is the same
 # asset's id in the REST API, the fallback when the release URL fails (#5706); a bump
 # changes it too.
-ARG BAMBU_STUDIO_VERSION=02.08.02.61
-ARG BAMBU_STUDIO_ASSET=BambuStudio_ubuntu24.04-v02.08.02.61-20260820225108.AppImage
-ARG BAMBU_STUDIO_ASSET_ID=523226841
-ARG BAMBU_STUDIO_SHA256_AMD64=d501b103fac5424513ec0e8d6bc145fb30719de2c7d94d7320d723740c81a7fd
+ARG BAMBU_STUDIO_VERSION=02.09.02.62
+ARG BAMBU_STUDIO_ASSET=BambuStudio_ubu24-v02.09.02.62-20261124164959.AppImage
+ARG BAMBU_STUDIO_ASSET_ID=787358056
+ARG BAMBU_STUDIO_SHA256_AMD64=01a9d25179df6495ecb3d402628232b31a10cff1f8991f052988383adf680eea
 
 # ── uv ────────────────────────────────────────────────────────────────────────
 # A FROM line, not `COPY --from=ghcr.io/astral-sh/uv:...`, so Dependabot's
@@ -537,9 +537,13 @@ RUN cargo build --release --locked -p scadbuddy-slicer
 # asset's name, its REST API asset id (BAMBU_STUDIO_ASSET_ID, from
 # `gh api repos/bambulab/BambuStudio/releases/tags/v<version>`, the fallback's URL,
 # #5706) and the sha256 (the global ARGs at the top) together, and re-measure
-# what backend/scadbuddy/slicing/profiles.py says of the profiles. The sha256 was
-# measured with `curl -sL <asset URL> | sha256sum` on 2026-10-17 and equals the digest GitHub
-# lists for the asset (`gh api repos/bambulab/BambuStudio/releases/tags/v02.08.02.61`).
+# what backend/scadbuddy/slicing/profiles.py says of the profiles. The weekly
+# `.github/workflows/bambu-studio-bump.yml` (`.github/scripts/bambu-studio-bump.sh`)
+# opens that PR when a newer stable release exists (#8325), taking the sha256 from the
+# `digest` GitHub lists for the asset, or from a download when there is none. For
+# v02.09.02.62 the digest equals `curl -sL <asset URL> | sha256sum` (measured
+# 2026-11-27). The AppImage was named `BambuStudio_ubuntu24.04-…` up to v02.08.02.61
+# and `BambuStudio_ubu24-…` from v02.09.01.70.
 # Upstream publishes no arm64 AppImage, so this stage always takes the amd64 one,
 # whatever TARGETARCH is: the profiles are JSON and serve every app image, and only
 # `slicer`, which runs the CLI, refuses another architecture.
@@ -620,7 +624,9 @@ RUN [ "$TARGETARCH" = amd64 ] \
 # with libEGL.so* removed the CLI exits 127. Dropped: libglu1-mesa (nothing
 # names libGLU) and libosmesa6 (the binary only dlopens libOSMesa, and the same
 # slice with libOSMesa.so* removed still wrote plate_1.png, the copied one). Measured 2026-10-17
-# on this base. tini reaps what a killed slice leaves behind, as in `runtime`.
+# on this base. For v02.09.02.62 the ldd check is still empty with these six, and
+# `--help` runs headless (measured 2026-11-27 on this base, no slice run, #8325).
+# tini reaps what a killed slice leaves behind, as in `runtime`.
 # hadolint ignore=DL3008
 RUN apt-get update \
     && apt-get install -y --no-install-recommends \

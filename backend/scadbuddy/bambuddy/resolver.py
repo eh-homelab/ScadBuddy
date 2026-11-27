@@ -253,6 +253,10 @@ def _resolve_choices(choices: PrintChoices, catalogue: Catalogue) -> _ChoiceResu
     sizes = {nozzle.size for nozzle in choices.nozzles}
     size = choices.nozzles[0].size
     if len(sizes) > 1:
+        # Bambu Studio v02.09.02.62 slices mixed nozzle sizes on the H3C and H2D only; the
+        # H2C is to follow (release notes,
+        # https://github.com/bambulab/BambuStudio/releases/tag/v02.09.02.62). Keep this
+        # refusal until a release names the H2C (#8325).
         errors.append(
             FilamentWarning(
                 kind="mixed-sizes",

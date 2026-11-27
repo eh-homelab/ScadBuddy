@@ -155,6 +155,7 @@ Outside `ci.yml`:
 | Workflow | Trigger | Does |
 |---|---|---|
 | `openscad-bump.yml` | weekly | opens a PR moving the OpenSCAD nightly (never auto-merged) |
+| `bambu-studio-bump.yml` | weekly | opens a PR moving the pinned Bambu Studio release to the newest stable one (never auto-merged, #8325) |
 | `postgres-pin.yml`, `rust-toolchain-pin.yml`, `harness-pin.yml` | weekly | check pinned digests and SHAs against upstream |
 | `link-check.yml` | weekly, dispatch | lychee over `docs/`, `README.md`, every `CLAUDE.md` and `SKILL.md` |
 | `ghcr-cleanup.yml` | monthly | prunes untagged versions of the `scadbuddy` package only (`ghcr-cleanup.yml:63`) |
