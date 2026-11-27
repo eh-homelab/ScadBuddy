@@ -217,6 +217,7 @@ async def prompt(
     ui: str | None = None,
     timeout_s: int | None = None,
     people_only: bool = False,
+    assignee: str | None = None,
 ) -> dict[str, Any]:
     """Ask a person the question `title` and wait for a typed answer, with no limit unless
     `timeout_s` (at least 10 seconds) sets one. `schema` declares the answer's fields as a
@@ -226,10 +227,12 @@ async def prompt(
     a list of JSON objects kept with the question, `place` the name of the place that shows
     it, and `ui` the name of its screen. `title`, `context` and `ui` are limited in size,
     and a refusal names the limit. Raises ValueError for a schema, title, context, place,
-    ui or timeout_s it does not take, and for an answer that fits the schema and not the
+    ui, assignee or timeout_s it does not take, and for an answer that fits the schema and not the
     field's type (a huge number). Raises TimeoutError if nobody answers in time. With
     `people_only`, only a person may answer; otherwise the setting `flow_answerers` or
-    the run's grant may also let an assistant answer."""
+    the run's grant may also let an assistant answer. `assignee` names who the task is for:
+    the task card shows it and `GET /tasks?assignee=me` lists it. It does not limit who
+    may answer."""
     people_only = _people_only(people_only)
     timeout_s = _wait_s(timeout_s)
     owner: StepOwner = workflow.instance()
@@ -243,6 +246,7 @@ async def prompt(
         context=[] if context is None else context,
         place=place,
         ui=ui,
+        assignee=assignee,
         expires_at=expires,
     )
     await _open_task(task)
