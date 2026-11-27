@@ -493,7 +493,7 @@ func (r *rate) take() bool {
 
 // read reads the client's messages. limit is the socket's frame rate, which its pings and
 // pongs take from too.
-func (x *session) read(_ context.Context, limit *rate) string {
+func (x *session) read(ctx context.Context, limit *rate) string {
 	for {
 		m, err := x.c.read()
 		if errors.Is(err, errRate) {
@@ -505,13 +505,13 @@ func (x *session) read(_ context.Context, limit *rate) string {
 		if !limit.take() {
 			return "rate"
 		}
-		if err := x.frame(m); err != nil {
+		if err := x.frame(ctx, m); err != nil {
 			return ""
 		}
 	}
 }
 
-func (x *session) frame(m message) error {
+func (x *session) frame(ctx context.Context, m message) error {
 	if m.binary {
 		return x.sendError("expected a text frame")
 	}
@@ -537,10 +537,18 @@ func (x *session) frame(m message) error {
 		return x.sendError("expected subscribe or unsubscribe")
 	}
 	var bad []bus.Value
+	calls := 0
 	for _, t := range requested.Items {
 		// A device follows its own topic only, and a person a device call's only when it
-		// owns the device (device.go).
-		if !x.topicShaped(t) || kind == "subscribe" && !x.topicAllowed(context.Background(), t) {
+		// owns the device (device.go). Each call topic is one read of the database, so one
+		// frame may name at most MaxCallTopics of them.
+		if kind == "subscribe" && t.Kind == 's' && callTopic.MatchString(t.Str) {
+			if calls++; calls > MaxCallTopics {
+				bad = append(bad, t)
+				continue
+			}
+		}
+		if !x.topicShaped(t) || kind == "subscribe" && !x.topicAllowed(ctx, t) {
 			bad = append(bad, t)
 		}
 	}

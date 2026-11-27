@@ -373,8 +373,8 @@ refuses a missing, bad, revoked or expired one with 401 `device_unauthorized`.
 | `POST /api/v1/devices/calls/{id}/events` | the call's device, while the call is open | `{events: [{kind, data?}]}`, at most 20; `kind` `tag_found`, `tag_progress` or `tag_lost`; `data` at most 1 KiB and never `call`, `device`, `id`, `at`, `kind`, `topics` or `retention_seconds` | 204. 409 `call_closed` |
 | `POST /api/v1/devices/uploads?call=&kind=` | the call's device, while the call is open | the raw bytes | `{key, media_type}`: `tag_dump` for an `nfc.*` call, `scan_image` for the others (422 `kind_mismatch`), stored with `Blobs.Put` and held in `blob_refs` as (`device_call`, the call's id). Nothing releases the hold yet (#8251). A photo's type is read from its bytes (JPEG, PNG or WebP, else 415 `not_an_image`). A dump is JSON `{uid, tech, blocks: [{index, data_hex}], records}` with no sector trailer (422 `key_trailer`) |
 | `POST /api/v1/devices/calls/{id}/result` | the call's device, while the call is open | `{outcome: "error", error?}`, or `{outcome: "done", result: {read: {blob_key, uid?, tech?, complete?, missing_blocks?}}}` | 204 for an error. For done, `{read_id, uid?, complete?}`, a `device_reads` row. A blob this call's device did not upload, or of a kind not the method's, is 422 `foreign_blob`: no row, and the call ends `error` |
-| `GET /api/v1/devices/reads/{id}` | the device's owner | | `{id, device_id, call_id, at, kind, uid, tech, blob_key, media_type, complete, missing_blocks}` |
-| `GET /api/v1/devices/reads/{id}/blob` | the device's owner | | the bytes, with their media type and `nosniff` (scriptless) |
+| `GET /api/v1/devices/reads/{id}` | as the read's call: the device's owner, or the caller | a delegate service names the person in `?on_behalf_of=` | `{id, device_id, call_id, at, kind, uid, tech, blob_key, media_type, complete, missing_blocks}` |
+| `GET /api/v1/devices/reads/{id}/blob` | as the read above | `?on_behalf_of=` for a delegate | the bytes, with their media type and `nosniff` (scriptless) |
 
 A call is `{id, device_id, method, args, caller_kind, outcome, created_at, deadline, sent_at,
 ended_at, pending_action_id}`. `caller_kind` is `person` (a session cookie, or no one with auth
@@ -419,7 +419,7 @@ The realtime socket (area `ws`) takes a device token too, checked before the gat
 `device:<its id>`; any other topic is an `unknown topics` error. Its socket closes with 4401 on
 `device.revoked` for it, and when its token is no longer live, read at each keepalive (25 s) and at
 each resync. The handshake moves the expiry, as every device request does; the keepalive and resync reads do not. A person's socket may follow
-`device:call:<id>` of a call whose device it owns, or that it made. A device event's frame is
+`device:call:<id>` of a call whose device it owns, or that it made, at most 8 call topics in one subscribe frame. A device event's frame is
 `{"type": "event", "id", "kind", "topics", "data"}` with the event's own fields as `data` (all but
 `id`, `at`, `kind`, `topics` and `retention_seconds`): the device needs a call's method and args.
 Python's socket follows no `device:` topic, so a device needs core's `ws` area.

@@ -3,12 +3,14 @@ package devices
 import (
 	"errors"
 	"fmt"
+	"strings"
 	"testing"
 	"time"
 
 	"github.com/jackc/pgx/v5"
 
 	"github.com/eh-homelab/ScadBuddy/tools/go/core/internal/auth"
+	"github.com/eh-homelab/ScadBuddy/tools/go/core/internal/realtime"
 )
 
 // A delegate service reads the call it made for a person, naming that person as it did in
@@ -142,6 +144,24 @@ func TestExpireCancelsTheApproval(t *testing.T) {
 	h.clock.add(ApprovalTTL + time.Second)
 	expect(t, outcome(h.view(me, call)), any("denied"))
 	expect(t, h.count(`SELECT count(*) FROM ai_approvals WHERE decision = 'cancelled'`), 1)
+}
+
+// One subscribe frame may name at most realtime.MaxCallTopics call topics.
+func TestSubscribeCapsCallTopics(t *testing.T) {
+	h := newHarness(t, auth.Observe)
+	me := h.person("user:i#me")
+	d := h.pair(me)
+	_ = h.pods[0].device(d)
+	var topics []string
+	for range realtime.MaxCallTopics + 1 {
+		topics = append(topics, `"device:call:`+h.start(me, d, `{"method":"nfc.read"}`)+`"`)
+	}
+	page, res := h.pods[0].dial(map[string]string{"Cookie": me})
+	expect(t, res.StatusCode, 101)
+	page.send(`{"type":"subscribe","topics":[` + strings.Join(topics, ",") + `]}`)
+	expect(t, page.frame()["type"], any("error"))
+	page.send(`{"type":"subscribe","topics":[` + strings.Join(topics[:realtime.MaxCallTopics], ",") + `]}`)
+	expect(t, page.frame()["type"], any("subscribed"))
 }
 
 // One rule says who may read a call and who may follow its events.

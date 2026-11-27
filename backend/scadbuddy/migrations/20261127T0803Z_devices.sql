@@ -84,5 +84,8 @@ CREATE TABLE device_reads (
 CREATE UNIQUE INDEX device_reads_call ON device_reads (call_id);
 
 -- A call's events, replayed from the event log by the call's id
--- (GET /api/v1/devices/calls/{id}).
+-- (GET /api/v1/devices/calls/{id}). The build locks writes to events while it runs (no
+-- CONCURRENTLY: a migration runs in a transaction), as events_own_retention's did. The
+-- log keeps only its retention's rows, so that is a moment; a log far larger needs this
+-- index built CONCURRENTLY by hand first.
 CREATE INDEX events_device_call ON events ((payload ->> 'call'), seq) WHERE kind LIKE 'device.%';

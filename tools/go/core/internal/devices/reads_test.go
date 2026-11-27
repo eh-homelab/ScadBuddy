@@ -81,6 +81,40 @@ func TestNfcReadRecorded(t *testing.T) {
 	}
 }
 
+// A delegate reads the read its own call made, naming the person as in the call; another
+// person, or a delegate naming the wrong person, gets a 404.
+func TestDelegateReadsItsOwnRead(t *testing.T) {
+	h := newHarness(t, auth.Enforce)
+	me := h.person("user:i#me")
+	d := h.pair(me)
+	agent := h.service("agent", "api")
+	got := h.do("POST", "/api/v1/devices/"+d.id+"/calls", agent, `{"method":"nfc.read","on_behalf_of":"user:i#me"}`)
+	expectStatus(t, got, 202)
+	call := got.body["call_id"].(string)
+	key := h.upload(d, call, "tag_dump", fixtureDump(t))
+	done := h.post(d, call, "result", `{"outcome":"done","result":{"read":{"blob_key":"`+key+`","uid":"dc999be3",
+		"tech":"mifare_classic","complete":true}}}`)
+	expectStatus(t, done, 200)
+	read := "/api/v1/devices/reads/" + done.body["read_id"].(string)
+	expectStatus(t, h.do("GET", read+"?on_behalf_of=user:i%23me", agent, ""), 200)
+	expectStatus(t, h.do("GET", read+"/blob?on_behalf_of=user:i%23me", agent, ""), 200)
+	expectStatus(t, h.do("GET", read+"?on_behalf_of=user:i%23you", agent, ""), 404)
+	expectStatus(t, h.do("GET", read, h.person("user:i#you"), ""), 404)
+	expectStatus(t, h.do("GET", read, me, ""), 200)
+}
+
+// An upload for a call that ended gets no hold.
+func TestUploadAfterTheCallEndsHoldsNothing(t *testing.T) {
+	h := newHarness(t, auth.Observe)
+	me := h.person("user:i#me")
+	d := h.pair(me)
+	call := h.start(me, d, `{"method":"nfc.read"}`)
+	h.sql(`UPDATE device_calls SET outcome = 'timeout', ended_at = now() WHERE id = $1::uuid`, call)
+	got := h.do("POST", "/api/v1/devices/uploads?call="+call+"&kind=tag_dump", d.token, fixtureDump(t))
+	expectStatus(t, got, 409)
+	expect(t, h.count(`SELECT count(*) FROM blob_refs WHERE holder_kind = 'device_call'`), 0)
+}
+
 // Review focus 5: a result that names a blob the device did not upload for this call, or of
 // a kind its method does not make, is refused: no device_reads row, and the call ends error.
 func TestResultRefusesForeignBlob(t *testing.T) {
