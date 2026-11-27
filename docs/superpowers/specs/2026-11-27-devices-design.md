@@ -48,7 +48,7 @@ So the phone stops being a page that has to be in the right state. It becomes ha
 
 ## Approaches
 
-1. **A device hub in Go core** (picked; the owner answered the next question on that basis, 2026-11-27). Core gets a `devices` area with pairing, a socket per online device, and a call route. One process owns pairing, tokens and calls. It is new code, but it sits where new backend work goes.
+1. **A device hub in Go core** (picked; the owner answered the next question on that basis, 2026-11-27). Core gets a `devices` area with pairing, tokens, calls and reads. The transport is what ScadBuddy has: the bus and the realtime socket for calls and events, the blob store for bytes, and pending actions for approvals. One process owns pairing, tokens and calls. It is new code, but it sits where new backend work goes.
 2. **Extend the agent's browser bridge.** It reuses the socket, the pairing and the tool catalogue. Rejected: it lives in the TypeScript agent sidecar, and it works only while the assistant is available.
 3. **MQTT.** The standard for hardware. Rejected for now: it needs a new broker in the path, broker auth per device, and a second transport beside HTTP.
 
@@ -65,21 +65,20 @@ So the phone stops being a page that has to be in the right state. It becomes ha
 
 ### Tokens (G2)
 
-- Idle expiry: 1 hour (the owner's default). Each authenticated frame or call moves `expires_at` to now + 1 hour.
+- Idle expiry: 1 hour (the owner's default). Each authenticated device request moves `expires_at` to now + 1 hour.
 - Hard cap: 30 days from pairing. This is the assistant's call; the owner may change it. When it is reached, the person pairs again.
 - Both values are settings with these defaults.
-- A token is at least 256 random bits. Only its hash is stored. It is sent as a bearer header on the socket and on uploads.
-- Revoke: the Devices page ends a pairing at once. Its socket is closed, and its token is refused from then on.
+- A token is at least 256 random bits. Only its hash is stored. It is sent as a bearer header on every device route and on the realtime socket.
+- Revoke: the Devices page ends a pairing at once. The bus event `device.revoked` closes its realtime socket, and its token is refused from then on.
 
 ### The link between a device and core
 
-- While the app is in front, it holds a WebSocket to core: `GET /api/v1/devices/socket`, with the bearer token. Its frames:
-  - `hello`: capabilities and version;
-  - `heartbeat`: every 30 s, which also moves the expiry forward;
-  - `result`: the answer to a call.
-- Core sends `call` frames: an id, a method and its arguments. The device sends `event` frames for that call as it works, and one `result` frame at the end. A call has a deadline (the caller's timeout, at most 2 minutes for `nfc.read`).
-- When the app goes to the back, it closes the socket. The device then shows as offline, and its token keeps ageing toward the idle expiry.
-- Bytes never go in a frame. The device uploads them through the blob API with its token, then puts the blob's key in its `result`.
+The device uses what ScadBuddy already has. It gets no socket of its own.
+
+- **Calls in:** while the app is in front, it holds ScadBuddy's realtime socket (`internal/realtime`, #7768) with its device token, subscribed to its own topic `device:<device id>`. A call is the bus event `device.call_requested` on that topic. Every pod's realtime socket gets every bus event, so a call reaches the device whichever pod took the request, with nothing added. The realtime socket accepts a device token for that one topic only, and closes on `device.revoked`, as it closes on `auth.session_revoked` today.
+- **Events and the result out:** plain HTTP with the device token: `POST /api/v1/devices/calls/{id}/events` (one or a few events) and `POST /api/v1/devices/calls/{id}/result`. Core publishes each event on the bus (below) and ends the call.
+- **Online:** `POST /api/v1/devices/heartbeat` every 30 s moves `last_seen_at` and the token's expiry. A device is online while `last_seen_at` is under 75 s old. When the app goes to the back, it stops the heartbeat and closes its realtime socket.
+- Bytes never go in an event or a result. The device uploads them with its token, and puts the blob's key in its result.
 
 ### Capabilities (G3)
 
@@ -94,17 +93,19 @@ The RFID reader is listed as a sensor with a writer, as the owner put it.
 
 ### Events and results (G6, G7)
 
-Every call has an ordered event log, `device_call_events` (call, seq, at, kind, data). The device sends each event as it happens. Core stores it and publishes it on the change stream, so a page or the assistant sees the call move. For example, `nfc.read` on a Bambu tag:
+A device's events are events on ScadBuddy's own event stream, the bus (`internal/bus` `Publish`, core/pg_events.py). That stream already has an ordered log, retention, replay and a NOTIFY, and pages follow it by topic over the realtime socket (#7768). No second event table and no second channel are made. Each event the device sends is published with kind `device.<kind>` and the topics `device:<device id>` and `device:call:<call id>`. A page or the assistant follows `device:call:<id>` and sees the call move. For example, `nfc.read` on a Bambu tag:
 
-| seq | kind | data |
+| # | kind | fields |
 |---|---|---|
-| 1 | `tag.found` | `{uid: "9CC69CE3", tech: "mifare_classic", blocks: 48}` |
-| 2 | `tag.progress` | `{read: 8, of: 48}` |
-| 3 | `tag.lost` | `{read: 8, error: "sector 2: transceive failed"}` |
-| 4 | `tag.found` | `{uid: "9CC69CE3", resume_from: 8}` |
-| 5 | `tag.progress` | `{read: 16, of: 48}` |
+| 1 | `device.tag_found` | `{call, uid: "9CC69CE3", tech: "mifare_classic", blocks: 48}` |
+| 2 | `device.tag_progress` | `{call, read: 8, of: 48}` |
+| 3 | `device.tag_lost` | `{call, read: 8, error: "sector 2: transceive failed"}` |
+| 4 | `device.tag_found` | `{call, uid: "9CC69CE3", resume_from: 8}` |
+| 5 | `device.tag_progress` | `{call, read: 16, of: 48}` |
 | … | | |
-| n | `done` | `{read_id}` |
+| n | `device.call_done` | `{call, read_id}` |
+
+The calls themselves go the same way. A call is published as `device.call_requested` with the topic `device:<device id>`. The device's realtime socket, on whichever pod, delivers it.
 
 The result is generic and knows nothing of filament:
 
@@ -117,7 +118,7 @@ The result is generic and knows nothing of filament:
 
 ### Calls (G4)
 
-- `POST /api/v1/devices/{id}/calls {method, args, timeout_s}` answers `202 {call_id}` at once, or `409 offline` when the device has no socket. `GET /api/v1/devices/calls/{id}` gives the call, its events and its result. The change stream carries each new event. A caller that only wants the end can add `wait=true`, which holds the request until the result or the deadline (`504`). Core keeps a row per call: who called, the method, the outcome and the times.
+- `POST /api/v1/devices/{id}/calls {method, args, timeout_s}` answers `202 {call_id}` at once, or `409 offline` when the device is not online. `GET /api/v1/devices/calls/{id}` gives the call and its result; its events are replayed from the event log by the topic `device:call:<id>`. The realtime socket carries each new event. A caller that only wants the end can add `wait=true`, which holds the request until the result or the deadline (`504`). Core keeps a row per call: who called, the method, the outcome and the times.
 - The caller is a person (a page), a flow, or the assistant. An assistant tool `device_call` uses the same route.
 - An outward method (`nfc.write`) called by the assistant or a flow needs an approval, as outward tools do: a pending action confirmed in the UI. A person who calls it from a page with their own click has approved it by that click.
 - Grants are settings. By default, the device's owner and the owner's flows and assistant sessions may call every read method.
@@ -125,7 +126,7 @@ The result is generic and knows nothing of filament:
 ### Auth mode
 
 Prod runs in auth mode `observe`, and it never runs `enforce` (owner, 2026-11-17).
-- **Device-token routes:** the socket, the device's uploads, and a call made with a device token. These routes check the device token in every mode, as service-credential routes do (#5297 part 1). They refuse a missing, bad, revoked or expired token. Without this check, a stolen token outlives its idle hour.
+- **Device-token routes:** the pairing claim, the heartbeat, a call's events and result, the device's uploads, and the realtime socket's device-token path. These routes check the device token in every mode, as service-credential routes do (#5297 part 1). They refuse a missing, bad, revoked or expired token. Without this check, a stolen token outlives its idle hour.
 - **Person routes:** creating a pairing, listing devices, revoking a device, and calling a device. These follow the global mode, as every other person route does. With auth off (on the LAN host), the person is the anonymous principal, as for `nfc-jobs`.
 
 ### The Devices view (G5)
@@ -145,14 +146,13 @@ Core owns three new tables:
 - `devices`: id, owner, name, model, app version, capabilities, created, last seen, revoked.
 - `device_tokens`: device, token hash, created, expires, hard cap, revoked.
 - `device_calls`: id, device, caller, method, arguments (bounded), outcome, result pointer, created, ended.
-- `device_call_events`: call, seq, at, kind, data (bounded jsonb).
 - `device_reads`: id, device, call, at, kind (`nfc`, `photo`), UID, tech, blob key, media type, complete, missing blocks.
 
 One migration creates them.
 
 ### Away from home (G8)
 
-- The SSO host (Pomerium) sends anything without a Pomerium login to sign-in. So the device-token routes are narrow public routes on that host: the pairing claim, the socket and the device upload, each an Exact route. The device-token check protects them. The owner accepted this pattern for `/mcp` and the plugin feeds on 2026-11-25. This needs a clusters PR, with a server-side dry run of the changed Ingress before merge.
+- The SSO host (Pomerium) sends anything without a Pomerium login to sign-in. So the device-token routes are narrow public routes on that host: the pairing claim, the heartbeat, the call events and result, the device upload, and the realtime socket, each an Exact or narrow prefix route. The device-token check protects them. The owner accepted this pattern for `/mcp` and the plugin feeds on 2026-11-25. This needs a clusters PR, with a server-side dry run of the changed Ingress before merge.
 - The person routes stay behind SSO.
 - The pairing link names the host the person is on (the page's `window.location`). A phone paired on the SSO host works away from home.
 
@@ -165,12 +165,12 @@ One migration creates them.
 - A device belongs to the person who paired it, and its calls act as that person.
 - Device-token routes check the token in every auth mode, and person routes follow the global mode.
 - A person's own click approves an outward call made from a page. The assistant and flows need a pending action.
-- The device reads table is `device_reads`, and its event kinds are `tag.found`, `tag.progress`, `tag.lost` and `done` (plus `error`).
-- Calls between replicas: core's LISTEN/NOTIFY bus carries a call to the pod that holds the device's socket.
+- The device reads table is `device_reads`. The event kinds on the bus are `device.tag_found`, `device.tag_progress`, `device.tag_lost`, `device.call_requested`, `device.call_done` and `device.call_failed`.
+- No device socket of its own: the realtime socket carries calls in, and HTTP carries events and results out.
 - Device uploads: a device route of its own, with kind `scan_image` for photos.
 
 ## Left to the builder
 
-- The exact frame fields, and how a page waits for a call (polling the call row, or the change stream).
+- The exact event fields, and how a page waits for a call (the realtime socket, or `wait=true`).
 - How the app shows an incoming call: a toast, or a full-screen "Tap the tag" view.
-- The PR order. A sensible one: pairing, tokens and the Devices list first; then the socket and the call events; then `nfc.read` and `code.scan`; then `nfc.write`.
+- The PR order. A sensible one: pairing, tokens and the Devices list first; then the calls, their events and the realtime socket's device path; then `nfc.read` and `code.scan`; then `nfc.write`.
