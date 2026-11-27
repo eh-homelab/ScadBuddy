@@ -220,8 +220,10 @@ async def test_a_500_from_the_accept_route_does_not_pass(
     worker does not take for a state that passes (`render_accept`). The route's answer
     ends the budget: the error names the last try's failure, and a retry that a loaded
     runner stalls past `ACCEPT_TIMEOUT` would be a read timeout, `transport` (#7525).
-    One try reaches the route, counted, not timed: a loaded runner made the one round trip
-    take 3.5 s (#7885)."""
+    The route is reached (counted, not timed): a loaded runner made one round trip take
+    3.5 s (#7885). A loaded runner can also stall the first try past `ACCEPT_TIMEOUT`
+    before the route runs, and the budget then ends with that timeout (#8075). The route's
+    answer is what this test checks, so it accepts again until the client has seen it."""
     tries: list[int] = []
 
     def broken(*_: object, **__: object) -> Job:
@@ -230,10 +232,18 @@ async def test_a_500_from_the_accept_route_does_not_pass(
         raise RuntimeError("relation render_jobs has no column x")
 
     monkeypatch.setattr(projection, "accept", broken)
-    with pytest.raises(CrudUnavailableError) as failed:
-        await _accept(jobs, _job())
-    assert len(tries) == 1
-    assert failed.value.failure == "unavailable" and not failed.value.passes
+    accepts = 0
+    while accepts < 5:
+        accepts += 1
+        with pytest.raises(CrudUnavailableError) as failed:
+            await _accept(jobs, _job())
+        if failed.value.failure != "transport":
+            break
+    # A try an earlier accept gave up on can still reach the route later, so only that
+    # the route ran is counted; its answer ending the budget is the failure's name.
+    assert tries, (accepts, failed.value.failure)
+    assert failed.value.failure == "unavailable", (accepts, len(tries), failed.value.failure)
+    assert not failed.value.passes
 
 
 async def test_claims_steps_and_reads_reach_the_row(
