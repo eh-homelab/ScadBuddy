@@ -146,9 +146,12 @@ first `PUT /machines/{id}` records the caller's proof name in `fleet_machines.pr
 `machine-of-another-proof`), and so is a session `PUT` whose machine is registered to
 another proof. So two machines of different proofs each hold a row of the same session id,
 and neither changes the other's. A `fleet-rotator` credential with no machine writes
-nothing (403 `no-machine`). Core reads no bootstrap directory: a credential whose machine's file
-went is refused here once the API revokes its row, at the API's first resolve of it or its next
-start or auth sweep (at most 5 minutes; `docs/security/trust-boundaries.md`). `fleetd` sends a
+nothing (403 `no-machine`). Core reads Python's `SCADBUDDY_SERVICE_BOOTSTRAP_DIR` (#8172): a
+credential that names a machine passes only while `fleet-rotator.<machine>` is a regular file
+there (one stat per resolve, as `exchange.py` `BootstrapVerifier.has_machine`). When the file is
+gone, `internal/auth` refuses the credential and revokes its row at once. With the variable
+unset, core refuses every such credential, so the core container needs the API's bootstrap
+secret directory mounted and the variable set. `fleetd` sends a
 `fleet` PAT today, which these routes refuse until #8041.
 
 Area `blobs` † (`internal/blobstore`, #7958) is a shared area: any service credential whose scopes

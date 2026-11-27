@@ -10,6 +10,8 @@ import (
 	"crypto/sha256"
 	"errors"
 	"log/slog"
+	"os"
+	"path/filepath"
 	"regexp"
 	"slices"
 	"strings"
@@ -27,6 +29,13 @@ const touchInterval = time.Minute
 const timeout = 5 * time.Second
 
 var tokenPattern = regexp.MustCompile(`^sbsvc_[0-9a-f]{16}\.[A-Za-z0-9_-]{43}$`)
+
+// perMachineCallers have one bootstrap secret per machine, each in <caller>.<machine>
+// (exchange.py PER_MACHINE_CALLERS).
+var perMachineCallers = []string{"fleet-rotator"}
+
+// machinePattern is a machine's name in such a file (exchange.py MACHINE_NAME).
+var machinePattern = regexp.MustCompile(`^[a-z0-9][a-z0-9-]{0,62}$`)
 
 // Service is the caller a live service credential names.
 type Service struct {
@@ -59,6 +68,10 @@ func ServiceOf(ctx context.Context) *Service {
 type Resolver struct {
 	Pool *pgxpool.Pool
 	Now  func() time.Time
+	// BootstrapDir is SCADBUDDY_SERVICE_BOOTSTRAP_DIR, where a per-machine caller's proof
+	// files are (exchange.py BootstrapVerifier). A credential that names a machine passes
+	// only while its file is there; with no directory, none passes.
+	BootstrapDir string
 
 	// mu guards the failed lookups' log (caller.go failed).
 	mu       sync.Mutex
@@ -106,6 +119,16 @@ func (r *Resolver) lookup(ctx context.Context, hash [32]byte, now time.Time) (*S
 	if err != nil {
 		return nil, err
 	}
+	if s.Machine != "" && !r.hasProof(s.Caller, s.Machine) {
+		// The machine was revoked (its proof file went): refused now and revoked, as
+		// service_credentials.py resolve does.
+		if _, err := r.Pool.Exec(ctx,
+			`UPDATE service_credentials SET revoked_at = $1 WHERE id = $2 AND revoked_at IS NULL`,
+			now, id); err != nil {
+			return nil, err
+		}
+		return nil, nil
+	}
 	if last == nil || now.Sub(*last) >= touchInterval {
 		if _, err := r.Pool.Exec(ctx,
 			`UPDATE service_credentials SET last_used_at = $1 WHERE id = $2`, now, id); err != nil {
@@ -113,4 +136,26 @@ func (r *Resolver) lookup(ctx context.Context, hash [32]byte, now time.Time) (*S
 		}
 	}
 	return &s, nil
+}
+
+// proofName is the bootstrap proof file of caller's machine, <caller>.<machine>; false when
+// caller has no secret per machine or machine is no machine's name (exchange.py
+// MACHINE_NAME), so the name never leaves the bootstrap directory.
+func proofName(caller, machine string) (string, bool) {
+	if !slices.Contains(perMachineCallers, caller) || !machinePattern.MatchString(machine) {
+		return "", false
+	}
+	return caller + "." + machine, true
+}
+
+// hasProof says whether the proof file of caller's machine is a regular file in the
+// bootstrap directory now (one stat), as exchange.py BootstrapVerifier.has_machine does.
+// With no bootstrap directory, no machine has its proof.
+func (r *Resolver) hasProof(caller, machine string) bool {
+	name, ok := proofName(caller, machine)
+	if !ok || r.BootstrapDir == "" {
+		return false
+	}
+	info, err := os.Stat(filepath.Join(r.BootstrapDir, name))
+	return err == nil && info.Mode().IsRegular()
 }

@@ -1235,7 +1235,8 @@ only the sleeps move; a budget on the real clock fails on a slow runner (#6252).
   (`fleet_machines`, `fleet_session_hosts`); its routes are core's. Its credential names the
   machine whose file matched (`service_credentials.machine`); a machine whose file is gone is
   refused at the exchange and, with its live credentials, at `resolve`, which revokes them
-  (`BootstrapVerifier.has_machine`); `main.py` `_rotate_service_credentials` (every start and
+  (`BootstrapVerifier.has_machine`), and core's resolver does the same over the same
+  `SCADBUDDY_SERVICE_BOOTSTRAP_DIR` (#8172; unset, core refuses them all); `main.py` `_rotate_service_credentials` (every start and
   auth sweep) revokes the rest (`revoke_machines_without_proof`). A `fleet-rotator.*` file
   whose suffix names no machine is skipped with a warning. `fleetd` sends a `fleet` PAT today,
   which these routes refuse until #8041.
