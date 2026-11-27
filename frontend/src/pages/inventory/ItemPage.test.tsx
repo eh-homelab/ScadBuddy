@@ -4,6 +4,8 @@ import { Route, Routes } from 'react-router'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { resetMockState } from '../../mocks/handlers'
 import { failNextRecost, INVENTORY, inventoryMock, seedItem, seedLot, takeStock } from '../../mocks/features/inventory'
+import { seedEntityProperties } from '../../mocks/features/entities'
+import { inventoryApi } from './api'
 import { server } from '../../mocks/server'
 import { L } from '../../mocks/features/filament/seed'
 import { ITEM_APPROVED, ORDER_ACCEPTED } from '../../mocks/features/orders/state'
@@ -342,5 +344,44 @@ describe('ItemPage (#7067)', () => {
     await user.click(screen.getByRole('button', { name: 'Restore' }))
     await waitFor(() => expect(screen.queryByText('Archived')).toBeNull())
     expect(screen.getByRole('button', { name: 'Archive' })).toBeInTheDocument()
+  })
+
+  describe('required properties (R-K1-33)', () => {
+    async function strictItem(values: Record<string, string> = {}) {
+      await inventoryApi.createKind({ id: 'strict', name: 'Strict', parent_id: 'hardware', attribute_schema: { type: 'object', properties: { material: { type: 'string' }, finish: { type: 'string' } }, required: ['material'] } })
+      const made = seedItem({ kind_id: 'strict', name: 'Bolt' })
+      if (Object.keys(values).length) seedEntityProperties(`item:${made.id}`, values)
+      return made
+    }
+
+    it('marks an item that lacks a required property', async () => {
+      const made = await strictItem()
+      render(made.id)
+      await screen.findByRole('heading', { level: 1, name: 'Bolt' })
+      expect(await screen.findByText('Missing required: material')).toBeInTheDocument()
+    })
+
+    it("edits the kind's keys with the item and sends both in one request", async () => {
+      const made = await strictItem({ material: 'steel', finish: 'zinc' })
+      const { user } = render(made.id)
+      await screen.findByRole('heading', { level: 1, name: 'Bolt' })
+      await user.click(screen.getByRole('button', { name: 'Edit details' }))
+      const form = screen.getByRole('form', { name: 'Item details' })
+      const material = await within(form).findByRole('textbox', { name: 'material' })
+      await waitFor(() => expect(material).toHaveValue('steel'))
+      // The panel lists only the keys the form does not hold.
+      expect(within(screen.getByRole('region', { name: 'Properties' })).queryByText('zinc')).toBeNull()
+
+      await user.clear(material)
+      await user.click(within(form).getByRole('button', { name: 'Save details' }))
+      expect(await within(form).findByRole('alert')).toHaveTextContent('Fill the required properties: material')
+      expect(material).toHaveAttribute('aria-invalid', 'true')
+
+      await user.type(material, 'brass')
+      await user.click(within(form).getByRole('button', { name: 'Save details' }))
+      await waitFor(() => expect(screen.queryByRole('form', { name: 'Item details' })).toBeNull())
+      expect(bodyOf('patchItem').at(-1)).toMatchObject({ name: 'Bolt', properties: { material: 'brass' } })
+      expect(bodyOf('patchItem').filter((b) => 'properties' in (b as object))).toHaveLength(2)
+    })
   })
 })

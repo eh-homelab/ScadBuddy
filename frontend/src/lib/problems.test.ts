@@ -100,6 +100,17 @@ describe('inventoryProblemMessage (#6949 K1)', () => {
     expect(message).not.toContain('null')
   })
 
+  it('names each missing and ill-fitting key of a missing_required_properties answer (R-K1-33)', () => {
+    const message = inventoryProblemMessage(of(422, 'missing_required_properties', { missing: ['material', 'model_code'], invalid: [{ key: 'thread', reason: "does not fit 'type'" }] }))
+    expect(message).toContain('material, model_code')
+    expect(message).toContain("thread (does not fit 'type')")
+    expect(message).not.toContain('undefined')
+  })
+
+  it('names the key and why of a bad_property_value answer', () => {
+    expect(inventoryProblemMessage(of(422, 'bad_property_value', { detail: "property 'material': does not fit 'type'" }))).toContain("property 'material': does not fit 'type'")
+  })
+
   it('leaves a code it does not know to the caller', () => {
     expect(inventoryProblemMessage(of(409, 'recost_busy'))).toBeUndefined()
   })

@@ -1,8 +1,12 @@
 import { ArchiveIcon, ArchiveRestoreIcon, ChevronLeftIcon } from 'lucide-react'
-import { useId, useMemo, useState, type FormEvent } from 'react'
+import { useEffect, useId, useMemo, useState, type FormEvent } from 'react'
 import { Link, useParams } from 'react-router'
 import { ApiError } from '../../api/client'
+import { entityApi } from '../../components/entities/api'
 import { AttachmentsPanel } from '../../components/entities/AttachmentsPanel'
+import { DefinedFields } from '../../components/entities/DefinedFields'
+import { definedKeys, fieldErrorsOf, propertiesPatch, sentValues, type FieldErrors, type Values } from '../../components/entities/definedProperties'
+import { IncompleteMark } from '../../components/entities/IncompleteMark'
 import { LinksPanel } from '../../components/entities/LinksPanel'
 import { PropertiesPanel } from '../../components/entities/PropertiesPanel'
 import { useMoney } from '../../components/filament/purchasing/useMoney'
@@ -17,6 +21,7 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@
 import { inventoryApi, type Item, type ItemKind } from './api'
 import { dec, lifeText, qtyText, valueText } from './format'
 import { ItemOffers } from './ItemOffers'
+import { useItemSchema } from './itemProperties'
 import { LotStock, MovesTable, UnitStock } from './ItemStock'
 import { StillWorking } from './StillWorking'
 import { activityHref, failed, usePress } from './usePress'
@@ -45,6 +50,8 @@ export function ItemPage() {
   const hashId = useHashTarget(!!item.data && !!offers.data)
   const moved = useMemo(() => new Set((moves.data ?? []).filter((m) => m.lot_id && m.kind !== 'receive').map((m) => m.lot_id!)), [moves.data])
   const [editing, setEditing] = useState(false)
+  // R-K1-33: the kind's keys are the edit form's fields while it is open.
+  const schema = useItemSchema(editing ? item.data?.kind_id : null)
   const [error, setError] = useState<string | null>(null)
   const archiving = usePress()
   const current = item.data
@@ -107,6 +114,7 @@ export function ItemPage() {
             {current.effective_saleable && <Badge variant="secondary">For sale</Badge>}
             {current.low && <Badge variant="destructive">Low</Badge>}
             {current.archived_at && <Badge variant="outline">Archived</Badge>}
+            <IncompleteMark row={current} />
           </div>
           {current.manufacturer && <p className="text-[13px] text-muted-foreground">{current.manufacturer}</p>}
         </div>
@@ -133,6 +141,7 @@ export function ItemPage() {
         <DetailsForm
           item={current}
           kind={kind}
+          schema={schema.data ?? null}
           onDone={() => {
             setEditing(false)
             changed()
@@ -201,7 +210,7 @@ export function ItemPage() {
         )}
         <section aria-label="Files, links and properties" className="flex flex-col gap-2">
           <h2 className="text-sm font-semibold tracking-tight">Files, links and properties</h2>
-          <PropertiesPanel entity={`item:${current.id}`} />
+          <PropertiesPanel key={version} entity={`item:${current.id}`} hideKeys={editing && schema.data ? definedKeys(schema.data) : undefined} />
           <div className="grid gap-6 lg:grid-cols-2">
             <AttachmentsPanel entity={`item:${current.id}`} />
             <LinksPanel entity={`item:${current.id}`} />
@@ -216,7 +225,7 @@ export function ItemPage() {
 const SALEABLE = { kind: 'As its kind', yes: 'For sale', no: 'Not for sale' } as const
 type Saleable = keyof typeof SALEABLE
 
-function DetailsForm({ item, kind, onDone, onCancel }: { item: Item; kind: ItemKind | undefined; onDone: () => void; onCancel: () => void }) {
+function DetailsForm({ item, kind, schema, onDone, onCancel }: { item: Item; kind: ItemKind | undefined; schema: Record<string, unknown> | null; onDone: () => void; onCancel: () => void }) {
   const id = useId()
   const [name, setName] = useState(item.name)
   const [manufacturer, setManufacturer] = useState(item.manufacturer)
@@ -227,6 +236,27 @@ function DetailsForm({ item, kind, onDone, onCancel }: { item: Item; kind: ItemK
   const [lifeMonths, setLifeMonths] = useState(item.life_months === null ? '' : String(item.life_months))
   const { busy, running, press } = usePress()
   const [error, setError] = useState<string | null>(null)
+  // R-K1-33: the item's values of its kind's keys, saved with the item in one request.
+  const [defined, setDefined] = useState<Values>({})
+  const [before, setBefore] = useState<Values>({})
+  const [fieldErrors, setFieldErrors] = useState<FieldErrors | undefined>()
+  const [valuesError, setValuesError] = useState<string | null>(null)
+  useEffect(() => {
+    let live = true
+    entityApi.properties(`item:${item.id}`).then(
+      (own) => {
+        if (!live) return
+        const values = Object.fromEntries(own.map((p) => [p.key, p.value]))
+        // A key typed before the read answered keeps what was typed.
+        setDefined((typed) => ({ ...values, ...typed }))
+        setBefore(values)
+      },
+      (cause: unknown) => live && setValuesError(`The item's properties could not be loaded: ${failed(cause, 'try again')}`),
+    )
+    return () => {
+      live = false
+    }
+  }, [item.id])
 
   async function submit(event: FormEvent) {
     event.preventDefault()
@@ -247,9 +277,14 @@ function DetailsForm({ item, kind, onDone, onCancel }: { item: Item; kind: ItemK
         life_hours: hours || null,
         life_months: months ? Number(months) : null,
       }
-      await press((o) => inventoryApi.patchItem(item.id, body, o), body)
+      const properties = propertiesPatch(schema ?? {}, before, defined)
+      const sent = Object.keys(properties).length ? { ...body, properties } : body
+      setFieldErrors(undefined)
+      await press((o) => inventoryApi.patchItem(item.id, sent, o), sent)
+      setBefore(sentValues(defined))
       onDone()
     } catch (cause) {
+      setFieldErrors(fieldErrorsOf(cause) ?? undefined)
       setError(failed(cause, 'The item could not be saved. Try again.'))
     }
   }
@@ -297,6 +332,12 @@ function DetailsForm({ item, kind, onDone, onCancel }: { item: Item; kind: ItemK
         <Label htmlFor={`${id}-note`}>Note</Label>
         <textarea id={`${id}-note`} rows={2} value={note} onChange={(e) => setNote(e.target.value)} className="w-full max-w-xl rounded-md border bg-transparent px-2 py-1" />
       </div>
+      {valuesError && (
+        <p role="alert" className="text-warn">
+          {valuesError}
+        </p>
+      )}
+      {schema && <DefinedFields schema={schema} values={defined} onChange={setDefined} errors={fieldErrors} />}
       <div className="flex flex-wrap gap-2">
         <Button type="submit" size="sm" disabled={busy}>
           Save details

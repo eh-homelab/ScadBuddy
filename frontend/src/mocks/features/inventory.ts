@@ -2,7 +2,7 @@ import { HttpResponse, http } from 'msw'
 import { addDecimals, cmpDecimals, divDecimal, mulDecimals, roundDecimal, subDecimals } from '../../lib/decimal'
 import type { components } from '../../api/schema'
 import { mockSettings } from '../handlers'
-import { schemaProblem } from './entities'
+import { marksOf, rowPropertiesRefusal, saveRowProperties, schemaProblem } from './entities'
 import { locationExists } from './filament'
 import { supplierById } from './filamentPurchasing'
 import { SUPPLIER } from './filamentPurchasingSeed'
@@ -276,19 +276,36 @@ function subtree(kindId: string): Set<string> {
   return found
 }
 
-/** `kinds.item_schema`: each ancestor's `properties`, the kind's own last. */
+/** `kinds.item_schema`: each ancestor's `properties`, the kind's own last, and each `required` key, ancestor first and once (R-K1-33). */
 export function kindSchema(kindId: string): Record<string, unknown> {
   ready()
   const properties: Record<string, unknown> = {}
-  for (const k of kindPath(kindId)) Object.assign(properties, (k.attribute_schema.properties ?? {}) as Record<string, unknown>)
-  return { type: 'object', properties }
+  const required: string[] = []
+  for (const k of kindPath(kindId)) {
+    Object.assign(properties, (k.attribute_schema.properties ?? {}) as Record<string, unknown>)
+    for (const key of (k.attribute_schema.required ?? []) as string[]) if (!required.includes(key)) required.push(key)
+  }
+  return required.length ? { type: 'object', properties, required } : { type: 'object', properties }
 }
 
-/** An item's property schema (`schema_for`), or undefined for no such item. */
+/** Go's special types' `requires_properties` (`handlers/catalog.go`), by special type. */
+const SPECIAL_REQUIRES: Record<string, string[]> = { filament_spool: ['rgba', 'diameter_mm'], printer: ['model_code'] }
+
+/** The keys an item of the kind must have (Go's `item_required`): the schema's, then its special type's. */
+export function itemRequired(kindId: string): string[] {
+  const required = [...((kindSchema(kindId).required ?? []) as string[])]
+  const special = [...kindPath(kindId)].reverse().find((k) => k.special_type)?.special_type
+  for (const key of SPECIAL_REQUIRES[special ?? ''] ?? []) if (!required.includes(key)) required.push(key)
+  return required
+}
+
+/** An item's property schema (`schema_for`), or undefined for no such item. Its `required` is the item's, special type's included, so the marks and the save check match Go. */
 export function itemSchemaOf(itemId: string): Record<string, unknown> | undefined {
   ready()
   const item = inventoryMock.items.find((i) => i.id === itemId)
-  return item ? kindSchema(item.kind_id) : undefined
+  if (!item) return undefined
+  const required = itemRequired(item.kind_id)
+  return required.length ? { ...kindSchema(item.kind_id), required } : kindSchema(item.kind_id)
 }
 
 /** The items of the item's kind and of its descendants, for `keys_in_use`. */
@@ -349,6 +366,7 @@ function answerItem(item: MockItem): S['Item'] {
     cost_unknown: unknown,
     low: tracking !== 'none' && above(item.low_stock) && !above(onHand, item.low_stock),
     offer_count: inventoryMock.offers.filter((o) => o.item_id === item.id && !o.archived_at).length,
+    ...marksOf(`item:${item.id}`, item.archived_at !== null),
   }
 }
 
@@ -449,6 +467,15 @@ class Refused extends Error {
 }
 
 /** FastAPI's own 422 for a body field (no inventory code), as `fieldProblem` answers it. */
+/** A refusal another mock already wrote as a response (`rowPropertiesRefusal`). */
+class Answered extends Error {
+  readonly response: Response
+  constructor(response: Response) {
+    super('answered')
+    this.response = response
+  }
+}
+
 class FieldRefused extends Error {
   readonly field: string
   constructor(field: string, msg: string) {
@@ -459,6 +486,7 @@ class FieldRefused extends Error {
 
 function refused(request: Request, error: unknown) {
   if (error instanceof FieldRefused) return fieldProblem(request, error.field, error.message)
+  if (error instanceof Answered) return error.response
   if (!(error instanceof Refused)) throw error
   return problem(request, error.status, error.message, error.base + error.code, { code: error.code })
 }
@@ -756,7 +784,7 @@ function kindProblem(body: { parent_id?: string | null; attribute_schema?: Recor
     if (own && kindPath(body.parent_id).some((k) => k.id === own)) throw new Refused(422, 'kind_cycle', 'the parent is the kind or below it')
   }
   if (body.attribute_schema != null) {
-    const reason = schemaProblem(body.attribute_schema)
+    const reason = schemaProblem(body.attribute_schema, 'item')
     if (reason) throw new Refused(422, 'bad_property_schema', reason)
   }
 }
@@ -811,6 +839,7 @@ export const handlers = [
           saleable: input.saleable ?? false,
           builtin: false,
           archived_at: null,
+          special_type: input.special_type ?? null,
         }
         inventoryMock.kinds.push(made)
         return answerKind(made)
@@ -855,7 +884,7 @@ export const handlers = [
     answer(request, () => {
       const k = kindOf(String(p.id))
       if (!k) throw new Refused(404, 'kind_not_found', `no item kind '${String(p.id)}'`)
-      return { kind_id: k.id, schema: kindSchema(k.id), own_schema: k.attribute_schema, keys_in_use: [] }
+      return { kind_id: k.id, schema: kindSchema(k.id), own_schema: k.attribute_schema, keys_in_use: [], item_required: itemRequired(k.id) }
     }),
   ),
 
@@ -886,7 +915,7 @@ export const handlers = [
         if (inventoryMock.items.some((i) => i.kind_id === k.id && !i.archived_at && i.name.toLowerCase() === input.name.trim().toLowerCase())) {
           throw new Refused(409, 'item_exists', 'an unarchived item of the kind has that name in any case, or that import ref')
         }
-        return seedItem({
+        const made = seedItem({
           kind_id: k.id,
           name: input.name,
           manufacturer: input.manufacturer ?? '',
@@ -894,6 +923,14 @@ export const handlers = [
           saleable: input.saleable ?? null,
           note: input.note ?? '',
         })
+        // R-K1-33: the item and its properties in one write, or nothing.
+        const refusal = rowPropertiesRefusal(request, `item:${made.id}`, input.properties, true)
+        if (refusal) {
+          inventoryMock.items = inventoryMock.items.filter((i) => i.id !== made.id)
+          throw new Answered(refusal)
+        }
+        saveRowProperties(`item:${made.id}`, input.properties)
+        return answerItem(findItem(made.id))
       },
       201,
     )
@@ -903,6 +940,10 @@ export const handlers = [
     const input = await body<S['InventoryItemPatch']>(request, 'patchItem')
     return answer(request, () => {
       const item = findItem(String(p.id))
+      // R-K1-33: a patch that sends a field is checked; an empty one is not.
+      const refusal = rowPropertiesRefusal(request, `item:${item.id}`, input.properties, Object.keys(input).length > 0)
+      if (refusal) throw new Answered(refusal)
+      saveRowProperties(`item:${item.id}`, input.properties)
       if (input.name != null) item.name = input.name
       if (input.manufacturer != null) item.manufacturer = input.manufacturer
       if (input.note != null) item.note = input.note

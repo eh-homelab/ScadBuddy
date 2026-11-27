@@ -2,7 +2,8 @@ import { screen, waitFor, within } from '@testing-library/react'
 import { HttpResponse, http } from 'msw'
 import { beforeEach, describe, expect, it } from 'vitest'
 import { resetMockState } from '../../mocks/handlers'
-import { inventoryMock } from '../../mocks/features/inventory'
+import { inventoryMock, seedItem } from '../../mocks/features/inventory'
+import { seedEntityProperties } from '../../mocks/features/entities'
 import { server } from '../../mocks/server'
 import { renderPage } from '../../test/utils'
 import { choose } from '../../test/select'
@@ -107,5 +108,20 @@ describe('KindsPage (#7067)', () => {
     expect(within(form).getByLabelText('Key 1')).toHaveValue('role')
     expect(within(form).getByRole('combobox', { name: 'Type of key 1' })).toHaveTextContent('Text')
     expect(within(form).getByLabelText('Description of key 1')).toHaveValue('A reusable shell, or an addon such as an AMS adaptor')
+  })
+
+  it('marks a key required and says how many items lack it before the save (R-K1-33)', async () => {
+    const one = seedItem({ kind_id: 'spool_part', name: 'Shell A' })
+    seedItem({ kind_id: 'spool_part', name: 'Shell B' })
+    seedEntityProperties(`item:${one.id}`, { role: 'shell' })
+    const { user } = renderPage(<KindsPage />)
+    const tree = await kindList()
+    await user.click(within(tree).getByRole('button', { name: 'Edit Spool part' }))
+    const form = screen.getByRole('form', { name: 'Edit Spool part' })
+    await user.click(within(form).getByRole('checkbox', { name: 'Key 2 is required' }))
+    expect(await within(form).findByText('1 item lacks role')).toBeInTheDocument()
+    await user.click(within(form).getByRole('button', { name: 'Save kind' }))
+    await waitFor(() => expect(bodyOf('patchKind')).toHaveLength(1))
+    expect((bodyOf('patchKind')[0] as { attribute_schema: { required?: string[] } }).attribute_schema.required).toEqual(['role'])
   })
 })

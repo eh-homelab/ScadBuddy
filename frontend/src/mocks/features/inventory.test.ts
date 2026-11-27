@@ -30,6 +30,38 @@ describe('inventory mock', () => {
     expect(await refusal(inventoryApi.use(service.id, { qty: '1', reason: '' }))).toEqual(refused('handler_not_built'))
   })
 
+  it('refuses an item without its required properties as Go does, and marks a read (R-K1-33)', async () => {
+    await inventoryApi.createKind({ id: 'strict', name: 'Strict', parent_id: 'hardware', attribute_schema: { type: 'object', properties: { material: { type: 'string' } }, required: ['material'] } })
+    const schema = await inventoryApi.kindSchema('strict')
+    expect(schema.item_required).toEqual(['material'])
+    const missing = await inventoryApi.createItem({ kind_id: 'strict', name: 'Bolt' }).catch((e: unknown) => e as ApiError)
+    expect(missing).toBeInstanceOf(ApiError)
+    expect((missing as ApiError).problem).toMatchObject({ code: 'missing_required_properties', missing: ['material'], invalid: [] })
+    const bad = await inventoryApi.createItem({ kind_id: 'strict', name: 'Bolt', properties: { material: 7 } }).catch((e: unknown) => e as ApiError)
+    expect((bad as ApiError).problem.code).toBe('bad_property_value')
+    expect((await inventoryApi.items({ kind: 'strict' })).length).toBe(0)
+
+    const made = await inventoryApi.createItem({ kind_id: 'strict', name: 'Bolt', properties: { material: 'steel' } })
+    expect(made.missing_properties).toEqual([])
+    // An empty patch is not checked; a patch that empties the key is refused.
+    await inventoryApi.patchItem(made.id, {})
+    const emptied = await inventoryApi.patchItem(made.id, { properties: { material: null } }).catch((e: unknown) => e as ApiError)
+    expect((emptied as ApiError).problem.code).toBe('missing_required_properties')
+
+    const old = seedItem({ name: 'Old bolt', kind_id: 'strict' })
+    expect((await inventoryApi.item(old.id)).missing_properties).toEqual(['material'])
+    await inventoryApi.archiveItem(old.id)
+    expect((await inventoryApi.item(old.id)).missing_properties).toEqual([])
+  })
+
+  it('names a printer special type\'s model_code among the keys an item must have', async () => {
+    await inventoryApi.createKind({ id: 'fdm', name: 'FDM printer', parent_id: 'printer', special_type: 'printer' })
+    expect((await inventoryApi.kindSchema('fdm')).item_required).toEqual(['model_code'])
+    const refused = await inventoryApi.createItem({ kind_id: 'fdm', name: 'H2C' }).catch((e: unknown) => e as ApiError)
+    expect((refused as ApiError).problem).toMatchObject({ code: 'missing_required_properties', missing: ['model_code'] })
+    expect((await inventoryApi.createItem({ kind_id: 'fdm', name: 'H2C', properties: { model_code: 'O1C' } })).missing_properties).toEqual([])
+  })
+
   it('answers offer decimals normalized, as `_Decimals` writes them (R-P2-40)', async () => {
     const offer = await inventoryApi.createOffer({ supplier_id: SUPPLIER.AMAZON, item_id: INVENTORY.HOOK, sku: 'B0HOOK500', pack_size: '500.000000' })
     expect(offer.pack_size).toBe('500')

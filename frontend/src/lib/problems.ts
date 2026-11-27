@@ -80,12 +80,13 @@ const INVENTORY_MESSAGES: Record<string, string> = {
   class_invalid: 'Those kind settings do not go together.',
   bad_limit: 'Ask for 1 to 5000 rows.',
   bad_input: 'Some of the values are not correct. Check them and try again.',
+  bad_property_value: 'A property value does not fit its key.',
   // 500
   inventory_activity_failed: 'The change stopped before it finished. Check the item before you try again.',
 }
 
 /** The codes whose detail names the field or the reason, added to the message. */
-const WITH_DETAIL = new Set(['bad_quantity', 'bad_property_schema', 'bad_input', 'class_invalid'])
+const WITH_DETAIL = new Set(['bad_quantity', 'bad_property_schema', 'bad_input', 'class_invalid', 'bad_property_value'])
 
 const name = (ref: unknown) => String(ref).replace(/^item_kind:/, '')
 const value = (v: unknown) => (v == null ? 'not set' : String(v))
@@ -97,6 +98,13 @@ export function inventoryProblemMessage(problem: Problem): string | undefined {
   if (code === 'steps_invalid') {
     const lines = listed.map((p) => `${String(p.step)}${p.owner ? ` (in ${name(p.owner)})` : ''}: ${String(p.reason)}.`)
     return ['A step cannot run as set up.', ...lines].join(' ')
+  }
+  if (code === 'missing_required_properties') {
+    // R-K1-33: `missing` (keys) and `invalid` ({key, reason}); nothing was written.
+    const missing = Array.isArray(problem.missing) ? (problem.missing as unknown[]).map(String) : []
+    const invalid = Array.isArray(problem.invalid) ? (problem.invalid as Record<string, unknown>[]).map((p) => `${String(p.key)} (${String(p.reason)})`) : []
+    const parts = [missing.length ? `Fill the required properties: ${missing.join(', ')}.` : '', invalid.length ? `Fix the values that do not fit: ${invalid.join(', ')}.` : '']
+    return ['Nothing was saved.', ...parts.filter(Boolean)].join(' ')
   }
   if (code === 'class_changed') {
     // Go sends what changes in `problems: [{owner?, key, from, to}]`; no owner is the kind saved.

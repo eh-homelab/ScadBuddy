@@ -116,7 +116,7 @@ describe('inventory tools', () => {
     for (const t of ALL_TOOLS.filter((x) => x.name.startsWith('inventory_'))) expect(t.description, t.name).toContain('ui_path')
   })
 
-  it('adds an item, then sets its properties in one PATCH, and answers both with its page', async () => {
+  it('adds an item with its properties in the same request, and answers it with its page (R-K1-33)', async () => {
     const calls: string[] = []
     server.use(
       http.post(`${INV}/items`, async ({ request }) => {
@@ -125,49 +125,60 @@ describe('inventory tools', () => {
       }),
       http.patch(props, async ({ request }) => {
         calls.push(`PATCH props ${JSON.stringify(await request.json())}`)
-        return HttpResponse.json({ properties: [{ key: 'thread', value: 'M3', source: 'manual' }] })
+        return HttpResponse.json({ properties: [] })
       }),
     )
     const answer = firstText(
       await runTool(tool('inventory_item_upsert'), { fields: { kind_id: 'hardware', name: 'M3 nut' }, properties: { thread: 'M3' } }, ctx()),
     )
-    expect(calls).toEqual(['POST item {"kind_id":"hardware","name":"M3 nut"}', 'PATCH props {"set":{"thread":"M3"}}'])
-    expect(answer).toMatchObject({
-      id: ITEM,
-      ui_path: `/inventory/items/${ITEM}`,
-      kind_ui_path: '/inventory?kind=hardware',
-      properties: [{ key: 'thread', value: 'M3' }],
-    })
+    expect(calls).toEqual(['POST item {"kind_id":"hardware","name":"M3 nut","properties":{"thread":"M3"}}'])
+    expect(answer).toMatchObject({ id: ITEM, ui_path: `/inventory/items/${ITEM}`, kind_ui_path: '/inventory?kind=hardware' })
   })
 
-  it('reports a saved item and the backend reason when its properties are refused', async () => {
+  it('edits fields and properties in one PATCH', async () => {
+    const calls: string[] = []
     server.use(
-      http.post(`${INV}/items`, () => HttpResponse.json(item(), { status: 201 })),
-      http.patch(props, () =>
+      http.patch(`${INV}/items/${ITEM}`, async ({ request }) => {
+        calls.push(`PATCH item ${JSON.stringify(await request.json())}`)
+        return HttpResponse.json(item())
+      }),
+    )
+    await runTool(tool('inventory_item_upsert'), { item_id: ITEM, fields: { name: 'M3 nut' }, properties: { thread: null } }, ctx())
+    expect(calls).toEqual(['PATCH item {"name":"M3 nut","properties":{"thread":null}}'])
+  })
+
+  it('names each missing and ill-fitting key when a required property is missing, and says nothing was written', async () => {
+    server.use(
+      http.post(`${INV}/items`, () =>
         HttpResponse.json(
-          { type: 'https://scadbuddy.dev/problems/entities/bad_property_value', title: 'Bad value', status: 422, detail: 'thread: not a number' },
+          {
+            type: 'https://scadbuddy.dev/problems/entities/missing_required_properties',
+            title: 'Unprocessable Content',
+            status: 422,
+            detail: 'missing required properties: material',
+            code: 'missing_required_properties',
+            missing: ['material'],
+            invalid: [{ key: 'thread', reason: "does not fit 'type'" }],
+          },
           { status: 422 },
         ),
       ),
     )
     const err = await tool('inventory_item_upsert')
-      .execute({ fields: { kind_id: 'hardware', name: 'M3 nut' }, properties: { thread: 'M3' } }, ctx())
+      .execute({ fields: { kind_id: 'strict', name: 'M3 nut' }, properties: { thread: 3 } }, ctx())
       .catch((e: unknown) => e)
     expect(err).toBeInstanceOf(ToolError)
-    expect((err as ToolError).message).toContain(`inventory item ${ITEM} was saved; its properties were not`)
-    expect((err as ToolError).message).toContain('entity_property_set')
-    expect((err as ToolError).status).toBe(422)
-    expect((err as ToolError).problem).toBe('bad_property_value')
-    expect((err as ToolError).untrusted).toBe('Bad value: thread: not a number')
+    expect((err as ToolError).message).toContain('missing: material')
+    expect((err as ToolError).message).toContain('values that do not fit: thread')
+    expect((err as ToolError).message).toContain('Nothing was written')
+    expect((err as ToolError).problem).toBe('missing_required_properties')
+  })
 
-    const run = await runTool(tool('inventory_item_upsert'), { fields: { kind_id: 'hardware', name: 'M3 nut' }, properties: { thread: 'M3' } }, ctx())
-    expect(run.isError).toBe(true)
-    const shown = (run.content[0] as { text: string }).text
-    const envelope = shown.indexOf('"untrusted_data"')
-    expect(shown.slice(0, envelope)).toContain(`inventory item ${ITEM} was saved`)
-    expect(envelope).toBeGreaterThan(0)
-    expect(shown.slice(envelope)).toContain('thread: not a number')
-    expect(shown.slice(0, envelope)).not.toContain('thread: not a number')
+  it('says in its description that a missing required key writes nothing', () => {
+    const text = tool('inventory_item_upsert').description
+    expect(text).toMatch(/missing_required_properties/)
+    expect(text).toMatch(/writes nothing/)
+    expect(text).not.toMatch(/set on the item after it is saved/)
   })
 
   it('says nothing was saved when a properties-only edit is refused', async () => {
@@ -440,7 +451,7 @@ describe('inventory tools', () => {
     expect((used as { note: string }).note).toContain('still running, operation req:op-1')
     expect(uses).toBe(1)
     expect(made).toMatchObject({ still_running: true, operation_id: 'req:op-2' })
-    expect((made as { note: string }).note).toContain('The properties were not set')
+    expect((made as { note: string }).note).not.toContain('The properties were not set')
     expect(patches).toBe(0)
   })
 

@@ -267,15 +267,18 @@ export const inventoryTools = [
       '`null` clears `life_hours`, `life_months` or `saleable`. The kind never changes. 409 `item_exists` when an ' +
       'unarchived item of the kind has the name, in any case; 409 `filament_item_refused` for a `filament` kind. Its ' +
       "attributes (a part number, a thread size) are its `properties`, typed by its kind's merged schema " +
-      "(inventory_kind_list with `kind_id`): they are set on the item after it is saved, and the answer carries them; if " +
-      'they are refused, the error says the item was saved and they were not. An edit with only `properties` leaves ' +
-      `the item itself untouched. ${PROPERTY_RULES} Stock changes through the lot, unit and move tools. Only what the ` +
+      "(inventory_kind_list with `kind_id`). They go in the same request as the item, so the item and its properties " +
+      'are written together or not at all. The item must have a value for each key its kind requires (the kind ' +
+      "schema's `item_required`, such as a printer's `model_code`): a create or an edit that leaves one missing or " +
+      'ill-fitting writes nothing (422 `missing_required_properties` names each missing and each ill-fitting key; 422 ' +
+      '`bad_property_value` names a sent value that does not fit). An edit with only `properties` leaves the item ' +
+      `itself untouched. ${PROPERTY_RULES} Stock changes through the lot, unit and move tools. Only what the ` +
       'user says. Writes ScadBuddy only.' +
       INVENTORY_UI_PATH_NOTE,
     input: z.object({
       item_id: itemId.optional().describe("An item's id; omit to add"),
       fields: itemFields.default({}),
-      properties: propertySet.optional().describe("The item's properties to set after the item is saved; `null` removes a key"),
+      properties: propertySet.optional().describe("The item's properties, written with the item; `null` removes a key"),
     }),
     risk: 'write',
     source: SOURCE,
@@ -292,7 +295,10 @@ export const inventoryTools = [
       if (item_id === undefined) {
         const { kind_id, name } = fields
         if (kind_id === undefined || name === undefined) throw new ToolError('a new item needs `kind_id` and `name` in `fields`')
-        row = await wrote(backend.POST('/api/v1/inventory/items', { body: { ...changes(fields), kind_id, name } }), 'add an inventory item')
+        row = await wrote(
+          backend.POST('/api/v1/inventory/items', { body: { ...changes(fields), kind_id, name, ...(properties === undefined ? {} : { properties }) } }),
+          'add an inventory item',
+        )
       } else {
         if (fields.kind_id !== undefined) throw new ToolError("an item's kind does not change: leave `kind_id` out of an edit")
         const path = { params: { path: { item_id } } }
@@ -303,15 +309,14 @@ export const inventoryTools = [
           row = await ok(backend.GET('/api/v1/inventory/items/{item_id}', path), `read inventory item ${item_id}`)
           return answer({ ...row, properties: set }, 'item')
         }
-        row = await wrote(backend.PATCH('/api/v1/inventory/items/{item_id}', { ...path, body: changes(fields) }), `edit inventory item ${item_id}`)
+        row = await wrote(
+          backend.PATCH('/api/v1/inventory/items/{item_id}', { ...path, body: { ...changes(fields), ...(properties === undefined ? {} : { properties }) } }),
+          `edit inventory item ${item_id}`,
+        )
       }
-      if (isRunning(row)) {
-        // The item's id may not be known yet: its properties wait for it.
-        return answer(properties === undefined ? row : { ...row, note: `${row.note} The properties were not set; set them once it is done.` })
-      }
-      if (properties === undefined) return answer(row, 'item')
-      const set = await setPropertiesAfter(backend, `item:${row.id}`, properties, `inventory item ${row.id}`)
-      return answer({ ...row, properties: set }, 'item')
+      // A 202: the item and its properties are written together, once it is done.
+      if (isRunning(row)) return answer(row)
+      return answer(row, 'item')
     },
   }),
   defineTool({
