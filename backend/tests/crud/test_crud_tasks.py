@@ -227,6 +227,24 @@ async def test_open_twice_answers_the_same_row(
     assert events.changes() == [(T1, "open")]
 
 
+async def test_open_carries_the_assignee_and_the_scan_expects(
+    remote: RemoteTasks, store: TaskStore
+) -> None:
+    scan = {
+        "type": "object",
+        "properties": {
+            "box": {"type": "string", "x-sb-widget": "scan", "expects": {"kinds": ["location"]}}
+        },
+    }
+    task = _task(T1).model_copy(update={"schema_": scan, "assignee": "user:alice"})
+    opened = await remote.open(task)
+    assert opened.assignee == "user:alice"
+    assert store.get(T1) == opened
+    with store._pool.connection() as conn:
+        row = conn.execute("SELECT expects FROM tasks WHERE id = %s", (T1,)).fetchone()
+    assert row == {"expects": ["kind:location"]}
+
+
 async def test_open_on_an_unknown_run_is_a_typed_404(
     remote: RemoteTasks, http: httpx.AsyncClient
 ) -> None:

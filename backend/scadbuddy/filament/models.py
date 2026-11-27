@@ -503,10 +503,12 @@ class LocationCreate(_In):
     ams_id: Idx | None = None
     tray_id: Idx | None = None
     note: Note | None = None
+    #: A station for flow tasks (#8062).
+    station: bool = False
 
 
 class LocationPatch(_Patch):
-    not_null = frozenset({"name", "sort_order", "kind_id"})
+    not_null = frozenset({"name", "sort_order", "kind_id", "station"})
     name: Name | None = None
     sort_order: SortOrder | None = None
     kind_id: UUID | None = None
@@ -517,6 +519,7 @@ class LocationPatch(_Patch):
     ams_id: Idx | None = None
     tray_id: Idx | None = None
     note: Note | None = None
+    station: bool | None = None
     archived: bool | None = None
 
 
@@ -531,6 +534,7 @@ class Location(_Catalog):
     ams_id: int | None
     tray_id: int | None
     note: str | None
+    station: bool
 
 
 class LocationNode(Location):

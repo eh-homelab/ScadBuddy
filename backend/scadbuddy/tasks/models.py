@@ -53,6 +53,10 @@ class _TaskFields(BaseModel):
     )
     ui: str | None = None
     expires_at: datetime | None = None
+    #: Who it is for, a principal string. It filters a list; it refuses no one's answer.
+    assignee: str | None = Field(
+        default=None, min_length=1, max_length=MAX_BY_CHARS, pattern=r"^[^\x00-\x1f\x7f]+$"
+    )
 
 
 class TaskOpen(_TaskFields):
@@ -60,7 +64,7 @@ class TaskOpen(_TaskFields):
     row still reads when the rules tighten later. Its context and its schema nest at most
     `MAX_DEPTH` deep, counted without recursion."""
 
-    @field_validator("title", "context", "place", "ui")
+    @field_validator("title", "context", "place", "ui", "assignee")
     @classmethod
     def _can_be_stored(cls, value: Any) -> Any:
         for bad in unstorable(value):
