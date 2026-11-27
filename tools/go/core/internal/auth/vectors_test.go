@@ -474,22 +474,24 @@ func TestNothingSecretIsLogged(t *testing.T) {
 
 // SessionID is the hex SHA-256 of the session cookie Caller reads (Python's
 // session.id_hash.hex()): Starlette's parse, a quoted value unquoted, the last of two kept.
-func TestSessionIDIsTheCookieCallerReads(t *testing.T) {
-	token := strings.Repeat("a", 43)
-	sum := sha256.Sum256([]byte(token))
-	want := hex.EncodeToString(sum[:])
-	for _, cookie := range []string{
-		SessionCookie + "=" + token,
-		SessionCookie + `="` + token + `"`,
-		SessionCookie + "=x; other=1; " + SessionCookie + "= " + token + " ",
-	} {
-		if got := SessionID(http.Header{"Cookie": {cookie}}); got != want {
-			t.Errorf("%q: %q, want %q", cookie, got, want)
+// A person's caller names its session by the cookie the gate read, however it was written.
+func TestAPersonsCallerNamesItsSession(t *testing.T) {
+	v := loadVectors(t)
+	pool := testdb.New(t)
+	seed(t, pool, v)
+	r := &Resolver{Pool: pool}
+	for _, c := range v.Callers {
+		got := r.Caller(context.Background(), header(c.Headers))
+		if got.Kind != KindPerson {
+			if got.SessionID != "" {
+				t.Errorf("%s: a %s caller names session %q", c.Name, got.Kind, got.SessionID)
+			}
+			continue
 		}
-	}
-	for _, h := range []http.Header{{}, {"Cookie": {"other=1"}}, {"Cookie": {SessionCookie + "="}}} {
-		if got := SessionID(h); got != "" {
-			t.Errorf("%v: %q, want none", h, got)
+		token := parseCookies(header(c.Headers).Get("Cookie"))[SessionCookie]
+		sum := sha256.Sum256([]byte(token))
+		if want := hex.EncodeToString(sum[:]); got.SessionID != want {
+			t.Errorf("%s: session %q, want %q", c.Name, got.SessionID, want)
 		}
 	}
 }

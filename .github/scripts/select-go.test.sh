@@ -31,6 +31,11 @@ expect true  backend/tests/fixtures/plugin-seal-vectors.json
 expect true  backend/tests/fixtures/auth-vectors.json
 expect false backend/tests/fixtures/secret-vectors.json
 expect false agent/test/fixtures/secret-vectors.json
+expect true  backend/tests/fixtures/python-json-vectors.json
+expect true  backend/tests/fixtures/activity-title-vectors.json
+expect true  backend/tests/fixtures/fetch-grant-vectors.json
+expect true  backend/tests/fixtures/assistant-cost-vectors.json
+expect false backend/tests/fixtures/assistant-cost-vectors.jsonx
 expect false agent/src/harness/credentialErrors.ts
 expect false Dockerfile
 expect false backend/scadbuddy/api/library_print.py
