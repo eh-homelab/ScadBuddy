@@ -1102,8 +1102,8 @@ export function SpoolPage() {
                     />
                   ) : (
                     <p className="text-[13px] text-muted-foreground">
-                      {/* #8196: the same boolean as the hint below. */}
-                      {weighed && measured
+                      {/* #8196: `measured`, which `weighed` (the hint below) is read from. */}
+                      {measured
                         ? `Measured ${grams(measured.g)} on ${new Date(measured.at).toLocaleDateString(undefined, { dateStyle: 'medium' })}.`
                         : 'Never weighed.'}
                     </p>
