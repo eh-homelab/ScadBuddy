@@ -13,9 +13,12 @@ import httpx
 import pytest
 import respx
 from pydantic import ValidationError
+from temporalio import activity
+from temporalio.converter import default as default_converter
 from temporalio.exceptions import ApplicationError
 
 from scadbuddy import main
+from scadbuddy.filament.preset_mirror import LOCK
 from scadbuddy.filament.preset_writes import (
     COPY_ACTIVITY,
     EDIT_ACTIVITY,
@@ -25,10 +28,12 @@ from scadbuddy.filament.preset_writes import (
     PresetCopyInput,
     PresetEditInput,
     PresetWritten,
+    _edited,
     copy_preset,
     edit_preset,
     preset_write_activities,
 )
+from scadbuddy.filament.rfid_push import acquire_lock
 from scadbuddy.filament.sb_presets import (
     FilamentPresetStore,
     create_on,
@@ -459,3 +464,60 @@ async def test_the_send_again_activity_sends_the_preset(pg_pool: PgPool, tmp_pat
     error = await _refused(activities[MIRROR_AGAIN_ACTIVITY]({"preset_id": made}))
 
     assert error.type == "not_configured"
+
+
+@respx.mock
+async def test_an_edit_with_an_old_error_while_another_mirror_runs_is_pending(
+    pg_pool: PgPool, tmp_path: Path
+) -> None:
+    """An error from before the edit's send is no failure of it: the lock is held, so the
+    send never ran and the edit is pending."""
+    blobs = LocalBlobStore(tmp_path / "blobs")
+    made = await _make(pg_pool, blobs, {"name": "Waits", "a": "1"})
+    with pg_pool.connection() as conn:
+        conn.execute(
+            "UPDATE filament_presets SET mirror_error = 'Bambuddy: down',"
+            " mirror_error_at = now() - interval '1 day' WHERE id = %s",
+            (made,),
+        )
+    conninfo = pg_pool.conninfo
+    held = await acquire_lock(conninfo() if callable(conninfo) else str(conninfo), LOCK)
+    assert held is not None
+    try:
+        done = await Writes(pg_pool, blobs, ON).edit(made, expected_version=1, set={"a": "2"})
+    finally:
+        held.close()
+
+    assert (done.version, done.changed, done.mirror) == (2, True, "pending")
+
+
+async def test_an_edit_whose_first_run_commits_meanwhile_gets_its_reply(
+    pg_pool: PgPool, tmp_path: Path
+) -> None:
+    """The retry read no stored reply, then the first run committed before its version
+    check: the check sees the first run's version, and the retry answers the first reply."""
+    blobs = LocalBlobStore(tmp_path / "blobs")
+    made = await _make(pg_pool, blobs, {"name": "Twice", "a": "1"})
+    body = PresetEditInput(
+        preset_id=made, expected_version=1, set={"a": "2"}, actor="ann", idempotency_key="e1"
+    )
+    first = await edit_preset(pg_pool, blobs, OFF, body)
+
+    again = await _edited(pg_pool, blobs, FilamentPresetStore(pg_pool, lambda: blobs), body)
+
+    assert again == {"preset_id": made, "version": first.version, "changed": True}
+    assert _row(pg_pool, made)["version"] == 2
+
+
+@pytest.mark.parametrize("name", PRESET_WRITE_ACTIVITIES)
+async def test_an_activity_refuses_a_payload_that_is_no_object(name: str) -> None:
+    """Decoded by Temporal's converter with the activity's own type hints, so a list
+    reaches the body and is refused once, never a decode failure that Temporal retries."""
+    fn = _ACTIVITIES[name]
+    defn = activity._Definition.must_from_callable(fn)
+    converter = default_converter().payload_converter
+    (raw,) = converter.from_payloads(converter.to_payloads([[1, 2]]), defn.arg_types)
+
+    error = await _refused(fn(raw))
+
+    assert error.type == "invalid_input"

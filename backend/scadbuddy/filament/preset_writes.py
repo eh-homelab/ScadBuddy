@@ -52,6 +52,8 @@ from scadbuddy.crud.idempotency import Replay, idempotent_write, stored
 from scadbuddy.filament.preset_mirror import (
     PRESET_NOT_FOUND,
     MirrorAgain,
+    db_now,
+    failed_since,
     mirror_again,
     mirror_pending,
     wants_mirror,
@@ -172,12 +174,15 @@ def _refused(type_: str, message: str, *details: Any) -> ApplicationError:
 
 
 def _parsed[Input: (PresetCopyInput, PresetEditInput, PresetMirrorInput)](
-    model: type[Input], raw: dict[str, Any]
+    model: type[Input], raw: Any
 ) -> Input:
-    """``raw`` as ``model``: a refused key is ``key_refused`` (its key the detail), any
-    other fault ``invalid_input`` (each fault's ``loc`` and ``msg`` the detail). The
-    failure holds no input value: it goes to Temporal's history, the logs and the Go
-    problem."""
+    """``raw`` as ``model``: a value that is not a JSON object is ``invalid_input``, a
+    refused key is ``key_refused`` (its key the detail), any other fault ``invalid_input``
+    (each fault's ``loc`` and ``msg`` the detail). The failure holds no input value: it
+    goes to Temporal's history, the logs and the Go problem."""
+    if not isinstance(raw, dict):
+        msg = "the input is not a JSON object"
+        raise _refused(INVALID_INPUT, msg, [{"loc": [], "msg": msg}])
     try:
         return model.model_validate(raw)
     except ValidationError as error:
@@ -268,9 +273,13 @@ async def _mirrored(
     settings: StoredSettings,
     preset_id: int,
 ) -> Mirror:
-    """The preset sent to Bambuddy after the commit, and what came of it (R9, R11)."""
+    """The preset sent to Bambuddy after the commit, and what came of it (R9, R11). It is
+    ``failed`` only for an error set at or after the send's start (`failed_since`, as
+    `mirror_again` reads it), else ``pending``: another mirror held `LOCK`, or the links
+    wait for a reset, and the send never ran."""
     if not wants_mirror(settings):
         return "off"
+    start = await asyncio.to_thread(db_now, pool)
     try:
         await asyncio.wait_for(
             mirror_pending(pool, store, settings, [preset_id]), WRITE_MIRROR_TIMEOUT
@@ -281,14 +290,14 @@ async def _mirrored(
     def state() -> Mirror:
         with pool.connection() as conn:
             row = conn.execute(
-                "SELECT sha256, mirrored_sha256, mirror_error FROM filament_presets WHERE id = %s",
+                "SELECT sha256, mirrored_sha256 FROM filament_presets WHERE id = %s",
                 (preset_id,),
             ).fetchone()
         if row is None:
             return "pending"
         if row["mirrored_sha256"] == row["sha256"]:
             return "sent"
-        return "failed" if row["mirror_error"] is not None else "pending"
+        return "failed" if failed_since(pool, preset_id, start) else "pending"
 
     return await asyncio.to_thread(state)
 
@@ -362,6 +371,26 @@ async def _edited(
     store: FilamentPresetStore,
     body: PresetEditInput,
 ) -> dict[str, Any]:
+    """The edit's reply. A ``version_moved`` refusal reads the stored reply once more: a
+    retry after a lost reply may find the version its own first run wrote, and then
+    answers that run's reply."""
+    try:
+        return await _edit_once(pool, blobs, store, body)
+    except ApplicationError as error:
+        if error.type != VERSION_MOVED:
+            raise
+        replay = await asyncio.to_thread(_replayed, pool, EDIT_ROUTE, body)
+        if replay is None:
+            raise
+        return replay
+
+
+async def _edit_once(
+    pool: ConnectionPool[Conn],
+    blobs: BlobStore,
+    store: FilamentPresetStore,
+    body: PresetEditInput,
+) -> dict[str, Any]:
     current, doc = await _current(store, body.preset_id)
     # Before the document is kept: an edit at a version it never read writes nothing.
     _editable(body.preset_id, current.source, current.version, body.expected_version)
@@ -399,19 +428,22 @@ def preset_write_activities(
     settings: Callable[[], StoredSettings],
 ) -> dict[str, Callable[..., Any]]:
     """`PRESET_WRITE_ACTIVITIES` for the ``library`` worker (`main._library_activities`),
-    each defined under its key. Each takes its input as a JSON object (`_parsed`)."""
+    each defined under its key. Each takes its input as a JSON object, checked in its
+    body (`_parsed`): its parameter is ``Any``, so Temporal's converter hands any value to
+    the body, and a value that is not an object is ``invalid_input``, never a decode failure
+    that Temporal retries."""
 
-    async def copy(raw: dict[str, Any]) -> PresetWritten:
+    async def copy(raw: Any) -> PresetWritten:
         body = _parsed(PresetCopyInput, raw)
         loaded = await asyncio.to_thread(settings)
         return await copy_preset(pool(), blobs(), loaded, body)
 
-    async def edit(raw: dict[str, Any]) -> PresetWritten:
+    async def edit(raw: Any) -> PresetWritten:
         body = _parsed(PresetEditInput, raw)
         loaded = await asyncio.to_thread(settings)
         return await edit_preset(pool(), blobs(), loaded, body)
 
-    async def mirror(raw: dict[str, Any]) -> MirrorAgain:
+    async def mirror(raw: Any) -> MirrorAgain:
         body = _parsed(PresetMirrorInput, raw)
         loaded = await asyncio.to_thread(settings)
         rows = pool()

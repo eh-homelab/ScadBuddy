@@ -39,9 +39,10 @@ the lost create, nothing above the floor holds it: the preset is created again a
 preset's failure, a Bambuddy id another ScadBuddy preset holds included, is its own
 ``mirror_error`` and never stops the presets after it.
 
-A person sends one preset again with the Go route ``POST
-/api/v1/filament/presets/{preset_id}/mirror`` (#7204), which runs `mirror_again` as the
-``library`` activity ``filament_preset_mirror_again`` (`preset_writes.py`), bounded by
+A person will send one preset again with the Go route ``POST
+/api/v1/filament/presets/{preset_id}/mirror`` (#7204). That route is not built yet: it
+waits for ``internal/temporalx`` (ruling N7). It runs `mirror_again` as the ``library``
+activity ``filament_preset_mirror_again`` (`preset_writes.py`), bounded by
 `RESEND_TIMEOUT` (R11).
 """
 
@@ -423,7 +424,7 @@ def _source_of(pool: ConnectionPool[Conn], preset_id: int) -> str | None:
     return None if row is None else str(row["source"])
 
 
-def _db_now(pool: ConnectionPool[Conn]) -> datetime:
+def db_now(pool: ConnectionPool[Conn]) -> datetime:
     """The database's clock, which ``mirror_error_at`` is set from."""
     with pool.connection() as conn:
         row = conn.execute("SELECT clock_timestamp() AS at").fetchone()
@@ -432,7 +433,9 @@ def _db_now(pool: ConnectionPool[Conn]) -> datetime:
     return at
 
 
-def _failed_since(pool: ConnectionPool[Conn], preset_id: int, start: datetime) -> bool:
+def failed_since(pool: ConnectionPool[Conn], preset_id: int, start: datetime) -> bool:
+    """Whether the preset's ``mirror_error`` was set at or after ``start`` (`db_now` before
+    the send): an older error is no failure of this send, which may never have run."""
     with pool.connection() as conn:
         row = conn.execute(
             "SELECT mirror_error_at >= %s AS failed FROM filament_presets WHERE id = %s",
@@ -466,7 +469,7 @@ async def mirror_again(
         raise _refused(INSTANCE_CHANGED, "the Bambuddy URL changed: reset the links before a send")
     if not await asyncio.to_thread(_pending, pool, [preset_id], instance):
         return "in_sync"
-    start = await asyncio.to_thread(_db_now, pool)
+    start = await asyncio.to_thread(db_now, pool)
     try:
         async with client_for(settings) as client:
             sent = await asyncio.wait_for(
@@ -476,4 +479,4 @@ async def mirror_again(
         return "pending"
     if sent == 1:
         return "sent"
-    return "failed" if await asyncio.to_thread(_failed_since, pool, preset_id, start) else "busy"
+    return "failed" if await asyncio.to_thread(failed_since, pool, preset_id, start) else "busy"
