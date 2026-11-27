@@ -305,7 +305,7 @@ describe('the filament mocks', () => {
     it('a replace move archives the box spool and books its grams with cause replaced', async () => {
       const { box } = seedHomeReturn()
       expect((await getSpool(spoolId(7))).location_id).toBe(box)
-      await moveSpool(spoolId(1), box, { ifOccupied: 'replace' })
+      await moveSpool(spoolId(1), box, { ifOccupied: 'replace', expectedOccupantId: spoolId(7) })
       expect((await getSpool(spoolId(7))).archived_at).not.toBeNull()
       expect((await events(spoolId(7)))[0]?.data).toMatchObject({ waste_g: 300, cause: 'replaced' })
       expect((await getSpool(spoolId(1))).location_id).toBe(box)
@@ -314,9 +314,17 @@ describe('the filament mocks', () => {
 
     it('a replace into a place that is no dry box is the plain move', async () => {
       expect((await getSpool(spoolId(2))).location_id).toBe(L.DRY_BOX)
-      await moveSpool(spoolId(1), L.DRY_BOX, { ifOccupied: 'replace' })
+      await moveSpool(spoolId(1), L.DRY_BOX, { ifOccupied: 'replace', expectedOccupantId: spoolId(2) })
       expect((await getSpool(spoolId(2))).archived_at).toBeNull()
       expect(await waste()).toBe(0)
+    })
+
+    it('refuses a replace that names no expected occupant (expected_occupant_required)', async () => {
+      const { box } = seedHomeReturn()
+      // The type requires the field; the test sends the body an older client could still send.
+      expect(await refusal(moveSpool(spoolId(1), box, { ifOccupied: 'replace' } as unknown as Parameters<typeof moveSpool>[2]))).toMatchObject({ status: 422, code: 'expected_occupant_required' })
+      expect((await getSpool(spoolId(7))).archived_at).toBeNull()
+      expect((await getSpool(spoolId(1))).location_id).toBe(L.SHELF_A)
     })
 
     it('the closing preview carries the waste the archive would book', async () => {

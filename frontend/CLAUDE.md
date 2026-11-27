@@ -287,7 +287,7 @@ same way, `vite.config.ts`).
   "Use camera" where `window.BarcodeDetector` exists, else "Take a photo" through `api/scan.ts`, which
   a 404 hides; Pick by hand): nothing is preselected, the unloaded spool included. The box's spool or
   an empty box moves with `if_occupied: 'refuse'`, any other spool with `replace` and
-  `expected_occupant_id` (the box's spool it showed), each with `answers`; a 409 `box_full` reads
+  `expected_occupant_id` (the box's spool it showed; a replace without it is a 422 `expected_occupant_required`), each with `answers`; a 409 `box_full` reads
   the box again. `IdentifySpool` calls `onIdentified(null)` whenever no spool is named any more (a
   new way, an edited code, a failed lookup or read), and a tag's new spool is made through
   `scan/useSpoolFromTag.ts`, which the scan page's `NewTag` shares (required properties; a failed

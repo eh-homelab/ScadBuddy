@@ -2218,16 +2218,22 @@ const tools: Tool[] = [
       "when the user says the identified spool replaces the box's own spool, archives that spool at 0 g and books its " +
       'grams left as non-print waste, then moves; tell the user that first. `answers` is the unloaded spool whose ' +
       'home-return prompt this answers (filament_spool_list `awaiting_home: true`): its prompt clears, and it keeps no ' +
-      'place unless it is `spool_id`; a 422 `not_its_home` when its home is not `location_id`. With a replace, send ' +
-      "`expected_occupant_id`, the box's spool you told the user about: a box that holds another spool by then is a " +
-      '409 `box_full` naming it, and nothing is archived. Only what the user says. Writes ScadBuddy only.',
-    input: z.object({
-      spool_id: z.string().uuid(),
-      location_id: z.string().uuid().nullable(),
-      if_occupied: z.enum(['refuse', 'replace']).optional(),
-      answers: z.string().uuid().optional(),
-      expected_occupant_id: z.string().uuid().optional(),
-    }),
+      'place unless it is `spool_id`; a 422 `not_its_home` when its home is not `location_id`. A replace must send ' +
+      "`expected_occupant_id`: the occupant you read from the box (filament_location_get's `spools`, or the 409's " +
+      '`occupant_id`) and told the user about, never a guess. A box that holds another spool by then is a 409 ' +
+      '`box_full` naming it, and nothing is archived. Only what the user says. Writes ScadBuddy only.',
+    input: z
+      .object({
+        spool_id: z.string().uuid(),
+        location_id: z.string().uuid().nullable(),
+        if_occupied: z.enum(['refuse', 'replace']).optional(),
+        answers: z.string().uuid().optional(),
+        expected_occupant_id: z.string().uuid().optional(),
+      })
+      .refine((o) => o.if_occupied !== 'replace' || o.expected_occupant_id !== undefined, {
+        message: "a replace must name the box's spool it expects in expected_occupant_id",
+        path: ['expected_occupant_id'],
+      }),
     risk: 'write',
     source: SOURCE,
     routes: ['POST /api/v1/filament/spools/{spool_id}/move'],

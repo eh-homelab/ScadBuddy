@@ -22,6 +22,8 @@ from tests.filament.lock_support import waits_for
 pytestmark = pytest.mark.requires_postgres
 
 ASKED = datetime(2026, 11, 16, 12, 0, tzinfo=UTC)
+#: A spool the caller expected in a box that is empty now (a replace names one).
+GONE = UUID(int=0x7167)
 
 
 def _place(pool: PgPool, name: str, kind: str, capacity: int | None) -> UUID:
@@ -92,7 +94,7 @@ def test_replace_archives_the_occupant_and_books_waste(pg_pool: PgPool) -> None:
     box = _place(pg_pool, "Box A", "Dry box", 1)
     old, new = _spool(pg_pool, 80), _spool(pg_pool)
     LocationStore(pg_pool).move(old, box, actor="ann")
-    moved = _move(pg_pool, new, box, "replace")
+    moved = _move(pg_pool, new, box, "replace", expected=old)
     assert moved is not None and moved.data["to"] == str(box)
     gone = _row(pg_pool, old)
     assert gone["archived_at"] is not None and gone["grams_left"] == 0
@@ -105,7 +107,7 @@ def test_replace_archives_the_occupant_and_books_waste(pg_pool: PgPool) -> None:
 def test_replace_with_empty_box_is_a_plain_move(pg_pool: PgPool) -> None:
     box = _place(pg_pool, "Box B", "Dry box", 1)
     spool = _spool(pg_pool)
-    assert _move(pg_pool, spool, box, "replace") is not None
+    assert _move(pg_pool, spool, box, "replace", expected=GONE) is not None
     assert _row(pg_pool, spool)["location_id"] == box
     assert [e.kind for e in FilamentSpoolStore(pg_pool).events(spool)].count("archived") == 0
     assert _kinds(pg_pool, spool, "non_print_waste") == []
@@ -115,7 +117,7 @@ def test_replace_on_a_shelf_archives_nothing(pg_pool: PgPool) -> None:
     shelf = _place(pg_pool, "Shelf", "Shelf", None)
     first, second = _spool(pg_pool), _spool(pg_pool)
     LocationStore(pg_pool).move(first, shelf, actor="ann")
-    _move(pg_pool, second, shelf, "replace")
+    _move(pg_pool, second, shelf, "replace", expected=first)
     assert _row(pg_pool, first)["archived_at"] is None
     assert _row(pg_pool, second)["location_id"] == shelf
 
@@ -125,7 +127,7 @@ def test_identified_spool_is_the_occupant_is_a_noop(pg_pool: PgPool) -> None:
     spool = _spool(pg_pool)
     LocationStore(pg_pool).move(spool, box, actor="ann")
     before = len(FilamentSpoolStore(pg_pool).events(spool))
-    assert _move(pg_pool, spool, box, "replace") is None
+    assert _move(pg_pool, spool, box, "replace", expected=spool) is None
     assert _row(pg_pool, spool)["archived_at"] is None
     assert _row(pg_pool, spool)["location_id"] == box
     assert len(FilamentSpoolStore(pg_pool).events(spool)) == before
@@ -153,7 +155,7 @@ def test_replace_is_atomic(pg_pool: PgPool, monkeypatch: pytest.MonkeyPatch) -> 
 
     monkeypatch.setattr(LocationStore, "move_on", staticmethod(broken))
     with pytest.raises(RuntimeError):
-        _move(pg_pool, new, box, "replace")
+        _move(pg_pool, new, box, "replace", expected=old)
     kept = _row(pg_pool, old)
     assert kept["archived_at"] is None and kept["grams_left"] == 80
     assert kept["location_id"] == box
@@ -231,7 +233,7 @@ def test_replace_after_the_occupant_moved_out_archives_nothing(pg_pool: PgPool) 
     def move_out(conn: Any) -> None:
         LocationStore.move_on(conn, old, shelf, actor="bob")
 
-    waits_for(pg_pool, move_out, lambda: _move(pg_pool, new, box, "replace"))
+    waits_for(pg_pool, move_out, lambda: _move(pg_pool, new, box, "replace", expected=old))
     kept = _row(pg_pool, old)
     assert kept["archived_at"] is None and kept["grams_left"] == 80
     assert kept["location_id"] == shelf
@@ -271,3 +273,14 @@ def test_spool_move_takes_an_expected_occupant() -> None:
     body = m.SpoolMove.model_validate({"location_id": None, "expected_occupant_id": str(occupant)})
     assert body.expected_occupant_id == occupant
     assert m.SpoolMove(location_id=None).expected_occupant_id is None
+
+
+def test_replace_without_an_expected_occupant_is_refused(pg_pool: PgPool) -> None:
+    """#7167 fix round 2: ScadBuddy never archives a spool the caller did not name."""
+    box = _place(pg_pool, "Box P", "Dry box", 1)
+    old, new = _spool(pg_pool, 80), _spool(pg_pool)
+    LocationStore(pg_pool).move(old, box, actor="ann")
+    with pytest.raises(homes.ExpectedOccupantRequiredError):
+        _move(pg_pool, new, box, "replace")
+    assert _row(pg_pool, old)["archived_at"] is None
+    assert _row(pg_pool, new)["location_id"] is None

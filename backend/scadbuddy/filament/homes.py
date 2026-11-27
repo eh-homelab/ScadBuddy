@@ -36,6 +36,14 @@ class NotItsHomeError(ValueError):
         self.spool_id = spool_id
 
 
+class ExpectedOccupantRequiredError(ValueError):
+    """A ``replace`` that names no ``expected_occupant_id``: ScadBuddy never archives a
+    spool the caller did not name (#7167)."""
+
+    def __init__(self) -> None:
+        super().__init__("a replace must name the box's spool it expects in expected_occupant_id")
+
+
 def _still_in(conn: Conn, spool_id: UUID, location_id: UUID) -> bool:
     """Lock the box's own spool as `FilamentSpoolStore.archive_on` takes it (its open
     tags, then its row), and say whether it is still unarchived in ``location_id``.
@@ -77,10 +85,13 @@ def move_into(
     the move goes into the box, which is empty then (the box's place lock keeps any
     other spool out). ``answers`` is the unloaded spool whose prompt this answers: its
     ``home_asked_at`` clears, and it keeps no place unless it is ``spool_id``.
-    ``expected_occupant_id`` is the box's spool the person saw: with ``replace``, a box
-    that holds another spool once its lock is taken is `BoxFullError` naming that spool,
-    and nothing is archived. `LookupError` for no such spool, `NotItsHomeError` when
+    ``expected_occupant_id`` is the box's spool the person saw, which ``replace`` must
+    name (`ExpectedOccupantRequiredError`, before anything is read or locked): a box that
+    holds another spool once its lock is taken is `BoxFullError` naming that spool, and
+    nothing is archived. `LookupError` for no such spool, `NotItsHomeError` when
     ``answers``'s home is not ``location_id``."""
+    if if_occupied == "replace" and expected_occupant_id is None:
+        raise ExpectedOccupantRequiredError()
     wanted = sorted({spool_id} if answers is None else {spool_id, answers})
     found = {
         row["id"]: row["home_location_id"]
@@ -98,7 +109,7 @@ def move_into(
     if if_occupied == "replace" and location_id is not None:
         held = occupant_on(conn, location_id, but=spool_id)
         if held is not None and _still_in(conn, held, location_id):
-            if expected_occupant_id is not None and held != expected_occupant_id:
+            if held != expected_occupant_id:
                 raise BoxFullError(held)
             spools.archive_on(
                 conn,

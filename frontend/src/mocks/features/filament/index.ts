@@ -2963,6 +2963,10 @@ export const handlers = [
     const extra = extraKeys(sent, FIELDS.move)
     if (extra) return extra
     const { location_id, if_occupied, answers, expected_occupant_id } = sent as S['SpoolMove']
+    // `homes.py` `ExpectedOccupantRequiredError`: a replace names the box's spool it expects.
+    if (if_occupied === 'replace' && expected_occupant_id == null) {
+      return problem(422, "a replace must name the box's spool it expects in expected_occupant_id", { code: 'expected_occupant_required' })
+    }
     if (location_id && !state.locations.some((place) => place.id === location_id && !place.archived_at)) {
       return problem(422, REFUSED.moveTarget)
     }
@@ -2973,8 +2977,8 @@ export const handlers = [
       return problem(422, `the home of spool ${answers} is not this place`, { code: 'not_its_home' })
     }
     const held = location_id && isDryBox(location_id) ? state.spools.findIndex((one) => one.location_id === location_id && one.id !== params.id && one.archived_at === null) : -1
-    // With `expected_occupant_id`, a replace of another spool than the caller saw is refused too.
-    if (held >= 0 && (if_occupied !== 'replace' || (expected_occupant_id != null && state.spools[held]!.id !== expected_occupant_id))) {
+    // A replace of another spool than the one the caller expects is refused too.
+    if (held >= 0 && (if_occupied !== 'replace' || state.spools[held]!.id !== expected_occupant_id)) {
       // `dry_box.py` `BoxFullError`: a dry box holds one spool.
       const occupant = state.spools[held]!.id
       return problem(409, `the dry box already holds spool ${occupant}`, { code: 'box_full', occupant_id: occupant })

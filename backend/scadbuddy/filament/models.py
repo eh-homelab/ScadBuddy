@@ -848,8 +848,8 @@ class SpoolMove(_In):
     #: The unloaded spool whose home-return prompt this move answers (#7167): its
     #: ``home_asked_at`` clears though another spool goes into its box.
     answers: UUID | None = None
-    #: With ``replace``, the box's spool the person saw (#7167): a box that holds another
-    #: spool by then is `BoxFullError`, so no spool they did not see is archived.
+    #: The box's spool the caller saw (#7167), required with ``replace``: a box that holds
+    #: another spool by then is `BoxFullError`, so no spool they did not name is archived.
     expected_occupant_id: UUID | None = None
 
 

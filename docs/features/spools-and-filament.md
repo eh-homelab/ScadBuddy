@@ -353,6 +353,9 @@ the shelf with no prompt, and its home stays the same.
 (the unloaded spool) puts it in. With `if_occupied: replace`, the box's own spool is archived
 at 0 g first and its grams are booked as non-print waste (`cause` `replaced`), in one
 transaction. A box's spool that left the box before the replace locked it is not archived.
+A replace names the box's spool the caller saw in `expected_occupant_id`: without it the move is
+a 422 `expected_occupant_required`, and a box that holds another spool by then is a 409
+`box_full` naming it, so no spool the caller did not name is archived.
 Any move, an archive or a reload clears `home_asked_at`. A spool whose box was archived goes to
 no place, and one whose box is no box now goes back to it, as before. The code is in
 `backend/scadbuddy/filament/homes.py` and `capture.py` (`_put_back`).

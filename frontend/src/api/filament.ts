@@ -386,7 +386,10 @@ export const acceptInsertWeight = (spoolId: string, readingG: number, newEmptyWe
  * `not_its_home` when its home is not `locationId`). `expectedOccupantId` is the box's spool the
  * person saw: a replace finds another there and is a 409 `box_full` naming it, archiving nothing.
  */
-export const moveSpool = (id: string, locationId: string | null, options: { ifOccupied?: 'refuse' | 'replace'; answers?: string; expectedOccupantId?: string } = {}) =>
+/** A replace names the box's spool it expects; without it the server answers 422 `expected_occupant_required` (#7167). */
+type MoveOptions = { answers?: string } & ({ ifOccupied?: 'refuse'; expectedOccupantId?: string } | { ifOccupied: 'replace'; expectedOccupantId: string })
+
+export const moveSpool = (id: string, locationId: string | null, options: MoveOptions = {}) =>
   request<Spool>(
     `${BASE}/spools/${seg(id)}/move`,
     json('POST', {

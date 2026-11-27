@@ -386,6 +386,10 @@ def _refused(exc: ValueError) -> ApiError:
         return ApiError(status.HTTP_422_UNPROCESSABLE_CONTENT, str(exc), code="box_has_many")
     if isinstance(exc, homes.NotItsHomeError):
         return ApiError(status.HTTP_422_UNPROCESSABLE_CONTENT, str(exc), code="not_its_home")
+    if isinstance(exc, homes.ExpectedOccupantRequiredError):
+        return ApiError(
+            status.HTTP_422_UNPROCESSABLE_CONTENT, str(exc), code="expected_occupant_required"
+        )
     code = (
         status.HTTP_409_CONFLICT
         if isinstance(
@@ -3339,9 +3343,10 @@ def _no_sensor(sensor_id: UUID) -> ApiError:
         "/filament/spools?awaiting_home=true`): its `home_asked_at` clears, and it keeps "
         "no place unless it is the spool moved. 404 when `answers` names no spool, 422 "
         "with `code` `not_its_home` when that spool's home is not `location_id`. "
-        "`expected_occupant_id` is the box's spool the caller saw: with `replace`, a box "
-        "that holds another spool is a 409 `box_full` naming it in `occupant_id`, and "
-        "nothing is archived or moved."
+        "`expected_occupant_id` is the box's spool the caller saw, and `replace` must send "
+        "it: a replace without it is a 422 with `code` `expected_occupant_required`, and a "
+        "box that holds another spool is a 409 `box_full` naming it in `occupant_id`; "
+        "either way nothing is archived or moved."
     ),
 )
 async def move_spool(
@@ -3360,7 +3365,12 @@ async def move_spool(
         )
     except LookupError as exc:
         raise ApiError(status.HTTP_404_NOT_FOUND, str(exc)) from None
-    except (MoveTargetError, BoxFullError, homes.NotItsHomeError) as exc:
+    except (
+        MoveTargetError,
+        BoxFullError,
+        homes.NotItsHomeError,
+        homes.ExpectedOccupantRequiredError,
+    ) as exc:
         raise _refused(exc) from None
     moved = await asyncio.to_thread(filament.spools.get, spool_id)
     if moved is None:

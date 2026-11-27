@@ -141,7 +141,12 @@ def test_a_replace_puts_the_identified_spool_in_and_archives_the_old(
     client.post(f"{SPOOLS}/{held['id']}/move", json={"location_id": box["id"]})
     moved = client.post(
         f"{SPOOLS}/{named['id']}/move",
-        json={"location_id": box["id"], "if_occupied": "replace", "answers": unloaded["id"]},
+        json={
+            "location_id": box["id"],
+            "if_occupied": "replace",
+            "answers": unloaded["id"],
+            "expected_occupant_id": held["id"],
+        },
     )
     assert moved.status_code == 200, moved.text
     assert moved.json()["location_id"] == box["id"]
@@ -212,4 +217,18 @@ def test_a_replace_of_another_occupant_than_expected_is_a_409(client: TestClient
     assert refused.json()["code"] == "box_full"
     assert refused.json()["occupant_id"] == other["id"]
     assert client.get(f"{SPOOLS}/{other['id']}").json()["archived_at"] is None
+    assert client.get(f"{SPOOLS}/{new['id']}").json()["location_id"] is None
+
+
+def test_a_replace_that_names_no_occupant_is_a_422(client: TestClient) -> None:
+    """#7167 fix round 2: a replace names the box's spool it expects, or nothing happens."""
+    box = _box(client, "Box X")
+    held, new = _spool(client), _spool(client)
+    client.post(f"{SPOOLS}/{held['id']}/move", json={"location_id": box["id"]})
+    refused = client.post(
+        f"{SPOOLS}/{new['id']}/move", json={"location_id": box["id"], "if_occupied": "replace"}
+    )
+    assert refused.status_code == 422, refused.text
+    assert refused.json()["code"] == "expected_occupant_required"
+    assert client.get(f"{SPOOLS}/{held['id']}").json()["archived_at"] is None
     assert client.get(f"{SPOOLS}/{new['id']}").json()["location_id"] is None
