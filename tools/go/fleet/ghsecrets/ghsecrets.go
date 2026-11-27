@@ -29,6 +29,7 @@ import (
 	"strconv"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"golang.org/x/crypto/nacl/box"
 )
@@ -291,8 +292,11 @@ func (w *Writer) installationToken(ctx context.Context, t Target, level string) 
 		body["repositories"] = []string{t.Repo}
 	}
 	var answer struct {
-		Token       string            `json:"token"`
-		Permissions map[string]string `json:"permissions"`
+		Token        string            `json:"token"`
+		Permissions  map[string]string `json:"permissions"`
+		Repositories []struct {
+			Name string `json:"name"`
+		} `json:"repositories"`
 	}
 	path := "/app/installations/" + strconv.FormatInt(w.cfg.InstallationID, 10) + "/access_tokens"
 	if err := w.do(ctx, jwt, http.MethodPost, path, body, &answer, http.StatusCreated); err != nil {
@@ -301,11 +305,21 @@ func (w *Writer) installationToken(ctx context.Context, t Target, level string) 
 	if answer.Token == "" {
 		return "", errors.New("ghsecrets: GitHub's token answer has no token")
 	}
-	// Refuse a token that holds more than was asked (GitHub can add metadata).
-	for p := range answer.Permissions {
-		if p != "metadata" && ((t.org() && p != "organization_secrets") || (!t.org() && p != "secrets")) {
-			return "", fmt.Errorf("ghsecrets: GitHub's token holds the permission %q, which was not asked for", p)
+	// Refuse a token that holds more than was asked (GitHub can add metadata at read).
+	asked := "secrets"
+	if t.org() {
+		asked = "organization_secrets"
+	}
+	for p, l := range answer.Permissions {
+		switch {
+		case p == "metadata" && l == "read":
+		case p == asked && l == level:
+		default:
+			return "", fmt.Errorf("ghsecrets: GitHub's token holds the permission %q at %q, which was not asked for", p, l)
 		}
+	}
+	if !t.org() && (len(answer.Repositories) != 1 || !strings.EqualFold(answer.Repositories[0].Name, t.Repo)) {
+		return "", fmt.Errorf("ghsecrets: GitHub's token names %d repositories, not only the one asked for", len(answer.Repositories))
 	}
 	return answer.Token, nil
 }
@@ -381,7 +395,12 @@ func (w *Writer) do(ctx context.Context, bearer, method, path string, in, out an
 	_ = json.Unmarshal(data, &problem)
 	msg := problem.Message
 	if len(msg) > 200 {
-		msg = msg[:200]
+		// Cut at a rune's start, so no UTF-8 rune is split.
+		i := 200
+		for i > 0 && !utf8.RuneStart(msg[i]) {
+			i--
+		}
+		msg = msg[:i]
 	}
 	err = fmt.Errorf("ghsecrets: %s %s: GitHub answered %d %q", method, path, resp.StatusCode, msg)
 	if resp.StatusCode == http.StatusNotFound {

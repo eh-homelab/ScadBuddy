@@ -20,6 +20,7 @@ import (
 	"sync"
 	"testing"
 	"time"
+	"unicode/utf8"
 
 	"golang.org/x/crypto/nacl/box"
 )
@@ -62,6 +63,9 @@ type fakeGitHub struct {
 	puts        map[string]map[string]any
 	paths       []string
 	grantExtra  bool
+	grantLevel  string   // when set, the level every asked permission is granted at
+	grantRepos  []string // when set, the repositories a repository token names
+	message     string   // when set, the message of a refused secret write
 	updatedAt   string
 	missingName string
 }
@@ -155,12 +159,29 @@ func (f *fakeGitHub) serve(w http.ResponseWriter, r *http.Request) {
 		perms := map[string]any{"metadata": "read"}
 		for k, v := range ask["permissions"].(map[string]any) {
 			perms[k] = v
+			if f.grantLevel != "" {
+				perms[k] = f.grantLevel
+			}
 		}
 		if f.grantExtra {
 			perms["contents"] = "write"
 		}
+		answer := map[string]any{"token": ghToken, "expires_at": "2026-11-26T11:00:00Z", "permissions": perms}
+		if asked, ok := ask["repositories"].([]any); ok {
+			repos := []map[string]any{}
+			for _, n := range asked {
+				repos = append(repos, map[string]any{"id": 1, "name": n})
+			}
+			if f.grantRepos != nil {
+				repos = repos[:0]
+				for i, n := range f.grantRepos {
+					repos = append(repos, map[string]any{"id": i + 1, "name": n})
+				}
+			}
+			answer["repositories"] = repos
+		}
 		w.WriteHeader(201)
-		_ = json.NewEncoder(w).Encode(map[string]any{"token": ghToken, "expires_at": "2026-11-26T11:00:00Z", "permissions": perms})
+		_ = json.NewEncoder(w).Encode(answer)
 		return
 	}
 	if bearer != ghToken {
@@ -170,6 +191,9 @@ func (f *fakeGitHub) serve(w http.ResponseWriter, r *http.Request) {
 	switch {
 	case r.Method == http.MethodGet && strings.HasSuffix(r.URL.Path, "/actions/secrets/public-key"):
 		_ = json.NewEncoder(w).Encode(map[string]string{"key_id": "kid-1", "key": base64.StdEncoding.EncodeToString(f.boxPub[:])})
+	case r.Method == http.MethodPut && f.message != "":
+		w.WriteHeader(422)
+		_ = json.NewEncoder(w).Encode(map[string]string{"message": f.message})
 	case r.Method == http.MethodPut:
 		var body map[string]any
 		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
@@ -387,6 +411,51 @@ func TestRefusesATokenWithMoreThanAsked(t *testing.T) {
 		}
 	}
 	noSecrets(t, "the error", err.Error())
+}
+
+func TestRefusesATokenAtAHigherLevel(t *testing.T) {
+	f, srv := newFake(t)
+	f.grantLevel = "write"
+	_, err := newWriter(t, srv, f, &bytes.Buffer{}).UpdatedAt(context.Background(), Target{Owner: "o", Repo: "r", Name: "N"})
+	if err == nil || !strings.Contains(err.Error(), `"secrets" at "write"`) {
+		t.Fatalf("got %v", err)
+	}
+	for _, p := range f.paths {
+		if strings.Contains(p, "/actions/secrets") {
+			t.Errorf("used the token: %s", p)
+		}
+	}
+}
+
+func TestRefusesATokenForMoreRepositories(t *testing.T) {
+	for _, repos := range [][]string{{"r", "other"}, {"other"}, {}} {
+		f, srv := newFake(t)
+		f.grantRepos = repos
+		err := newWriter(t, srv, f, &bytes.Buffer{}).Set(context.Background(), Target{Owner: "o", Repo: "r", Name: "N"}, []byte(value))
+		if err == nil || !strings.Contains(err.Error(), "repositories") {
+			t.Fatalf("%v: got %v", repos, err)
+		}
+		for _, p := range f.paths {
+			if strings.Contains(p, "/actions/secrets") {
+				t.Errorf("%v: used the token: %s", repos, p)
+			}
+		}
+	}
+}
+
+func TestLongMessageIsCutAtARune(t *testing.T) {
+	f, srv := newFake(t)
+	f.message = strings.Repeat("a", 199) + strings.Repeat("é", 10)
+	err := newWriter(t, srv, f, &bytes.Buffer{}).Set(context.Background(), Target{Owner: "o", Repo: "r", Name: "N"}, []byte(value))
+	if err == nil {
+		t.Fatal("no error")
+	}
+	if !strings.Contains(err.Error(), `422 "`+strings.Repeat("a", 199)+`"`) {
+		t.Fatalf("got %v", err)
+	}
+	if !utf8.ValidString(err.Error()) {
+		t.Fatalf("not valid UTF-8: %q", err.Error())
+	}
 }
 
 func TestBadTargets(t *testing.T) {

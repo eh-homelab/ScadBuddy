@@ -3,9 +3,8 @@
 ScadBuddy's agent fleet chat server: `fleetchat`'s MCP server (`tools/go/fleetchat`)
 over ScadBuddy's own store and bus. The design is
 `docs/superpowers/specs/2026-11-25-agent-fleet-messaging-design.md` §5 and §6.5-6.6.
-It also holds the "ScadBuddy Fleet" GitHub App's parts (#8012, #8014; spec
-`docs/superpowers/specs/2026-11-26-fleet-session-registry-and-rotator-design.md` §6.9):
-the Actions secret writer (`ghsecrets`) and the webhook receiver (`ghwebhook`).
+It also holds the "ScadBuddy Fleet" GitHub App's parts (#8012, #8014; no spec section
+describes them yet): the Actions secret writer (`ghsecrets`) and the webhook receiver (`ghwebhook`).
 
 The image is `ghcr.io/eh-homelab/scadbuddy-fleet`, published by
 `.github/workflows/build-go-image.yml`. It runs as uid 10003 and listens on 8080.
@@ -129,7 +128,9 @@ secret come with #8011's rotation targets.
      ([create an installation access token](https://docs.github.com/en/rest/apps/apps#create-an-installation-access-token-for-an-app)).
      An organisation permission gives no repository's contents, so that token names no
      repository. A token whose answer holds a permission that was not asked for (other
-     than `metadata`, which GitHub can add) is refused and not used.
+     than `metadata` at `read`, which GitHub can add), or the asked one at another level,
+     is refused and not used; so is a repository target's token whose `repositories` is
+     not that one repository.
   3. `GET …/actions/secrets/public-key`, a sealed box with that key
      (`golang.org/x/crypto/nacl/box` `SealAnonymous`), then
      `PUT …/actions/secrets/{name}` with `encrypted_value` and `key_id`, and for an
@@ -144,7 +145,7 @@ The writer never caches, logs or returns a token or the JWT. It never logs the k
 value or the sealed value either. It follows no redirect. Each request to GitHub is a CLIENT span (`Config.WrapTransport`,
 telemetry's `Transport`), but the writer strips `traceparent`, `tracestate` and `baggage`
 after that wrap, so no trace context reaches GitHub. An error names the method, the
-path, the status and GitHub's `message`, never a header or a body that was sent. Each
+path, the status and GitHub's `message` (cut to 200 bytes at a rune's start), never a header or a body that was sent. Each
 write logs one line, "github secret set", with the owner, repository, name and key id.
 
 ## Package `ghwebhook`
@@ -240,8 +241,8 @@ build that published a fleet image, and keeps it otherwise. Before a deploy, the
 - A route on ScadBuddy's LAN-only hostname, `https://scadbuddy.internal.nullreference.io/fleet/mcp`
   rewritten to the server's `/mcp`, so anything on the LAN can call it (the owner's decision of 2026-11-26).
   The hostname's DNS record is DNS-only, so `/mcp` is never on the internet.
-- A NetworkPolicy that admits, on 8080, ScadBuddy's pods and that Gateway's proxy pods (the
-  server has no auth of its own), and lets the pod reach only DNS and core (and
+- A NetworkPolicy that admits, on 8080, ScadBuddy's pods and that Gateway's proxy pods (apart
+  from the webhook's signature check, the server has no auth of its own), and lets the pod reach only DNS and core (and
   api.github.com once the secret writer is on). The SSO host's Pomerium proxy reaches it
   for `/github/webhook` only (eh-homelab/clusters#4432).
 - For the GitHub App: the webhook secret from 1Password `homelab - prod` /

@@ -263,9 +263,11 @@ App's `FLEETCHAT_GITHUB_APP_ID`, `FLEETCHAT_GITHUB_INSTALLATION_ID`,
 it also serves `/github/webhook` (`tools/go/fleet/ghwebhook`, #8014), which checks
 `X-Hub-Signature-256` before it reads anything; with the App key it holds the Actions secret
 writer (`tools/go/fleet/ghsecrets`, #8012), which no route calls yet. Apart from that
-signature check, the server has no auth of its own: anything on the LAN may call it, directly or through ScadBuddy's `/mcp`
-(the owner's decision of 2026-11-26), and a NetworkPolicy is to admit only ScadBuddy's pods and the LAN's
-Gateway. Neither the server nor that policy is deployed yet.
+signature check, the server has no auth of its own. The internet reaches only `/github/webhook`,
+through the SSO host's public Exact route (eh-homelab/clusters#4432), which that signature check
+guards. Every other path is open to the LAN and the cluster only: anything on the LAN may call it,
+directly or through ScadBuddy's `/mcp` (the owner's decision of 2026-11-26). A NetworkPolicy is to
+admit ScadBuddy's pods, the LAN's Gateway and, for `/github/webhook`, the SSO host's Pomerium proxy. Neither the server nor that policy is deployed yet.
 
 ## bambuddy-fs
 

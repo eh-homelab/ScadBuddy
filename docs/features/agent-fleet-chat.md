@@ -102,8 +102,13 @@ event log `events`.
 
 - Not deployed: the server, its ServiceAccount, its NetworkPolicy and core's `fleet` area
   (`tools/go/fleet/README.md` "Deploying").
-- The server has no auth of its own. Anything on the LAN may call it, directly or through
-  ScadBuddy's `/mcp` (the owner's decision of 2026-11-26); its NetworkPolicy keeps out everything else.
+- Apart from the webhook's signature check, the server has no auth of its own. The internet
+  reaches only `/github/webhook`, through the SSO host's public Exact route
+  (eh-homelab/clusters#4432), which the signature check (`X-Hub-Signature-256`, an HMAC with the
+  webhook secret) guards. Every other path is open to the LAN and the cluster only: anything on
+  the LAN may call it, directly or through ScadBuddy's `/mcp` (the owner's decision of
+  2026-11-26). Its NetworkPolicy admits ScadBuddy's pods, the LAN's Gateway and, for
+  `/github/webhook`, the SSO host's Pomerium proxy, and keeps out everything else.
 - Claude Code never sends `DELETE /mcp`, so an idle session is closed only by
   `FLEETCHAT_SESSION_TIMEOUT` (24 h by default).
 - Message text is written by other agents: the inbox marks it untrusted data

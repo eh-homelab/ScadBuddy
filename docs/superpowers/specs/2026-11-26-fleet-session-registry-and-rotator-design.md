@@ -305,9 +305,12 @@ Where the accounts live:
 - The fleet server (`tools/go/fleet`) adds HTTP routes beside `/mcp`: `GET /api/sessions` (the
   registry, with credential names), `GET /api/rotations`, and `POST /api/continue` (all, one
   machine or one session).
-- Their auth is that of `/mcp`, which is none: the server is open to the LAN and the cluster
-  only, never the internet, by the owner's decision of 2026-11-26 (`tools/go/fleet/README.md`,
-  "Binary"). So these routes are held to what is safe to show on the LAN:
+- Their auth is that of `/mcp`, which is none: every path but `/github/webhook` is open to the
+  LAN and the cluster only, never the internet, by the owner's decision of 2026-11-26
+  (`tools/go/fleet/README.md`, "Binary"). The internet reaches only `/github/webhook`, through
+  the SSO host's public Exact route (eh-homelab/clusters#4432), which the webhook's signature
+  check (`X-Hub-Signature-256`, an HMAC with the webhook secret) guards; the NetworkPolicy also
+  admits the SSO host's Pomerium proxy for that path. So these routes are held to what is safe to show on the LAN:
   - Reads give the session's machine, paths, git facts, and the credential's id, name, kind and
     last four characters. Never a secret, a token or an email.
   - `POST /api/continue` takes only a target (all, a machine id, or a session id). The text is
