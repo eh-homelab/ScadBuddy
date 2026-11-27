@@ -329,6 +329,8 @@ class InlineStarter:
             # `RecostLot`: three rounds, then on while Go names an order not locked.
             if attempt >= 3 and not named - set(orders):
                 break
+            if attempt >= 50:  # `RECOST_MAX_ROUNDS`
+                break
         problem = {**answer["body"], "status": answer["status"]}
         raise ApplicationError(problem["detail"], problem, non_retryable=True)
 

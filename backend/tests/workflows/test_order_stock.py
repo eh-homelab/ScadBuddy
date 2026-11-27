@@ -24,7 +24,7 @@ from uuid import UUID
 
 import pytest
 from temporalio import activity
-from temporalio.client import Client
+from temporalio.client import Client, WorkflowFailureError
 from temporalio.exceptions import ApplicationError
 from temporalio.worker import Worker
 
@@ -38,7 +38,12 @@ from scadbuddy.printers.merge_activities import merge_activities
 from scadbuddy.printers.models import PrinterCreate
 from scadbuddy.printers.store import BambuddyLinkTakenError, MergeRunningError, PrinterStore
 from scadbuddy.store.refs import BlobRefs
-from scadbuddy.workflows.order_stock import FulfilOrderItem, MergePrinter, RecostLot
+from scadbuddy.workflows.order_stock import (
+    RECOST_MAX_ROUNDS,
+    FulfilOrderItem,
+    MergePrinter,
+    RecostLot,
+)
 from tests.conftest import PgPool
 from tests.orders.test_lifecycle import BY, Shop
 from tests.orders.test_parts_lifecycle import _item
@@ -646,3 +651,42 @@ async def test_recost_goes_on_while_go_names_new_orders(world: World) -> None:
     assert shop.kinds(order).count("item.parts_recosted") == 1
     # The `recost-until-no-new-orders` patch's scene, for `test_order_stock_replay.py`.
     await _record(world, f"lot:{lot.id}:recost:r3", "recost_rounds")
+
+
+async def test_recost_stops_at_its_round_cap(world: World) -> None:
+    """A lot whose orders keep moving: the re-cost fails with Go's last
+    ``recost_orders_moved`` after `RECOST_MAX_ROUNDS`, and nothing is recorded."""
+    shop = world.shop
+    order, item, hook = _with_part(shop)
+    await _accept(world, order, item)
+    [lot] = shop.go.stock.lots(UUID(hook))
+    shop.go.stock.set_lot_cost(lot.id, Decimal(6), BY)
+    shop.go.answers["inventory.Recost"] = [
+        {
+            "status": 409,
+            "body": {
+                "code": "recost_orders_moved",
+                "status": 409,
+                "detail": "x",
+                "orders": [f"order-moving-{n}"],
+            },
+        }
+        for n in range(RECOST_MAX_ROUNDS + 5)
+    ]
+
+    try:
+        answer = await _call(lambda: shop.lifecycle.recost_lot(lot.id, BY, request_key="r4"))
+    except WorkflowRefused as refused:
+        problem = refused.problem
+    else:
+        assert isinstance(answer, WorkflowAccepted)
+        with pytest.raises(WorkflowFailureError) as failed:
+            await world.client.get_workflow_handle(answer.workflow_id).result()
+        cause = failed.value.cause
+        assert isinstance(cause, ApplicationError)
+        problem = cause.details[0]
+
+    assert problem["code"] == "recost_orders_moved"
+    assert f"after {RECOST_MAX_ROUNDS} rounds" in problem["detail"]
+    assert world.go.runs["Recost"] == RECOST_MAX_ROUNDS
+    assert shop.kinds(order).count("item.parts_recosted") == 0

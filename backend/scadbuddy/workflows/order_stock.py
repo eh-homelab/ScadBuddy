@@ -10,7 +10,8 @@ worker runs in the API process (its commit and record steps write Python-owned r
 - `RecostLot`: `orders_recost_orders` (Go's read), Go's `inventory.Recost`, then
   `orders_recost_record`. Nothing is committed before Go answers. ``recost_orders_moved``
   runs the first two again: `RECOST_ROUNDS` times, and after that for as long as each
-  refusal names an order its round did not lock (`RECOST_UNTIL_NO_NEW`).
+  refusal names an order its round did not lock (`RECOST_UNTIL_NO_NEW`), at most
+  `RECOST_MAX_ROUNDS` rounds in all.
 - `MergePrinter`: Go's `inventory.Repoint` of the gone printer's stock, then
   `printers_merge_commit`, the caller's whole transaction; a stock row written meanwhile
   runs both again after a sleep (1 s doubling to 60 s), with `continue_as_new` after
@@ -62,6 +63,9 @@ RECOST_ROUNDS = 3
 #: The patch that lets a re-cost go on past `RECOST_ROUNDS` (PR #8323): a run recorded before
 #: it failed after `RECOST_ROUNDS` refusals, and its history replays that way.
 RECOST_UNTIL_NO_NEW = "recost-until-no-new-orders"
+#: The most rounds a re-cost runs under that patch: a lot whose orders keep moving fails with
+#: Go's last ``recost_orders_moved``, which says so, rather than growing one history for good.
+RECOST_MAX_ROUNDS = 50
 #: Rounds of a merge before it continues as new, which keeps its history small.
 MERGE_ROUNDS = 100
 MERGE_SLEEP_FIRST = 1.0
@@ -259,6 +263,14 @@ class RecostLot:
             if attempt >= RECOST_ROUNDS and (
                 not named - set(orders) or not workflow.patched(RECOST_UNTIL_NO_NEW)
             ):
+                break
+            if attempt >= RECOST_MAX_ROUNDS:
+                # Only under the patch: without it the check above ended the loop at round 3.
+                detail = (
+                    f"the lot's moves still named new orders after {attempt} rounds;"
+                    " re-cost it again once its orders settle"
+                )
+                answer = {**answer, "body": {**body, "detail": detail}}
                 break
         raise _problem(answer)
 
