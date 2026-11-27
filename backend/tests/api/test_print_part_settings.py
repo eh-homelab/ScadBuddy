@@ -17,7 +17,6 @@ from scadbuddy.bambuddy.send import PART_SETTINGS_AS_IS, PART_SETTINGS_UNWRITABL
 from scadbuddy.core.paths import DataPaths
 from scadbuddy.orders.quote import SliceQuoteRequest
 from scadbuddy.render.bambu3mf import MODEL_SETTINGS_NAME, layout_of
-from tests.api.conftest import files_only
 from tests.api.test_filament_profiles import preset_values
 from tests.api.test_print_filaments import prepared, queue_route, slice_routes
 from tests.api.test_print_library import (
@@ -32,6 +31,7 @@ from tests.api.test_print_run_choices import body, run_print, run_routes
 from tests.api.test_print_supports import routes
 from tests.api.test_send import _uploaded_3mf, configure, upload_route
 from tests.bambuddy.test_part_settings import author_two_colours, without_project_settings
+from tests.support.saved_outputs import rewrite_model
 
 pytestmark = [pytest.mark.requires_postgres, pytest.mark.usefixtures("recorded_sb_spools")]
 
@@ -184,13 +184,15 @@ def test_an_output_that_prints_as_it_is_refuses_part_settings(
     """#5571 review: an output whose 3MF nothing can be written into (``as_is``: here
     without its ``project_settings.config``) is refused before anything is uploaded,
     never printed under a key that names settings its copy lacks."""
-    files_only(client)
     output_id = prepared(client, model)
     upload = upload_route()
     routes()
     preset_values({})
-    [model_3mf] = paths.outputs.glob(f"*/{output_id}/model.3mf")
-    model_3mf.write_bytes(without_project_settings(model_3mf.read_bytes()))
+    rewrite_model(
+        client,
+        output_id,
+        lambda model_3mf: model_3mf.write_bytes(without_project_settings(model_3mf.read_bytes())),
+    )
     request = {**body(), "part_settings": {"1": {"top_shell_layers": 8}}}
 
     check = client.post(f"/api/v1/print/outputs/{output_id}/check", json=request)

@@ -14,18 +14,26 @@ type V1PrintLibraryItemPlatesItemThumbnailRequestBuilder struct {
 	i2ae4187f7daee263371cb1c977df639813ab50ffa529013b7437480d1ec0158f.BaseRequestBuilder
 }
 
+// V1PrintLibraryItemPlatesItemThumbnailRequestBuilderGetQueryParameters one plate's image. A queue item's picture asks with “cover_if_missing“: a plate with no image then shows the file's thumbnail, never nothing.
+type V1PrintLibraryItemPlatesItemThumbnailRequestBuilderGetQueryParameters struct {
+	// The file's thumbnail when the plate has no image (#7939)
+	Cover_if_missing *bool "uriparametername:\"cover_if_missing\""
+}
+
 // V1PrintLibraryItemPlatesItemThumbnailRequestBuilderGetRequestConfiguration configuration for the request such as headers, query parameters, and middleware options.
 type V1PrintLibraryItemPlatesItemThumbnailRequestBuilderGetRequestConfiguration struct {
 	// Request headers
 	Headers *i2ae4187f7daee263371cb1c977df639813ab50ffa529013b7437480d1ec0158f.RequestHeaders
 	// Request options
 	Options []i2ae4187f7daee263371cb1c977df639813ab50ffa529013b7437480d1ec0158f.RequestOption
+	// Request query parameters
+	QueryParameters *V1PrintLibraryItemPlatesItemThumbnailRequestBuilderGetQueryParameters
 }
 
 // NewV1PrintLibraryItemPlatesItemThumbnailRequestBuilderInternal instantiates a new V1PrintLibraryItemPlatesItemThumbnailRequestBuilder and sets the default values.
 func NewV1PrintLibraryItemPlatesItemThumbnailRequestBuilderInternal(pathParameters map[string]string, requestAdapter i2ae4187f7daee263371cb1c977df639813ab50ffa529013b7437480d1ec0158f.RequestAdapter) *V1PrintLibraryItemPlatesItemThumbnailRequestBuilder {
 	m := &V1PrintLibraryItemPlatesItemThumbnailRequestBuilder{
-		BaseRequestBuilder: *i2ae4187f7daee263371cb1c977df639813ab50ffa529013b7437480d1ec0158f.NewBaseRequestBuilder(requestAdapter, "{+baseurl}/api/v1/print/library/{file_id}/plates/{index}/thumbnail", pathParameters),
+		BaseRequestBuilder: *i2ae4187f7daee263371cb1c977df639813ab50ffa529013b7437480d1ec0158f.NewBaseRequestBuilder(requestAdapter, "{+baseurl}/api/v1/print/library/{file_id}/plates/{index}/thumbnail{?cover_if_missing*}", pathParameters),
 	}
 	return m
 }
@@ -37,7 +45,7 @@ func NewV1PrintLibraryItemPlatesItemThumbnailRequestBuilder(rawUrl string, reque
 	return NewV1PrintLibraryItemPlatesItemThumbnailRequestBuilderInternal(urlParams, requestAdapter)
 }
 
-// Get one plate's image of a library file
+// Get one plate's image. A queue item's picture asks with “cover_if_missing“: a plate with no image then shows the file's thumbnail, never nothing.
 // returns a []byte when successful
 // returns a HTTPValidationError error when the service returns a 422 status code
 func (m *V1PrintLibraryItemPlatesItemThumbnailRequestBuilder) Get(ctx context.Context, requestConfiguration *V1PrintLibraryItemPlatesItemThumbnailRequestBuilderGetRequestConfiguration) ([]byte, error) {
@@ -58,11 +66,14 @@ func (m *V1PrintLibraryItemPlatesItemThumbnailRequestBuilder) Get(ctx context.Co
 	return res.([]byte), nil
 }
 
-// ToGetRequestInformation one plate's image of a library file
+// ToGetRequestInformation one plate's image. A queue item's picture asks with “cover_if_missing“: a plate with no image then shows the file's thumbnail, never nothing.
 // returns a *RequestInformation when successful
 func (m *V1PrintLibraryItemPlatesItemThumbnailRequestBuilder) ToGetRequestInformation(ctx context.Context, requestConfiguration *V1PrintLibraryItemPlatesItemThumbnailRequestBuilderGetRequestConfiguration) (*i2ae4187f7daee263371cb1c977df639813ab50ffa529013b7437480d1ec0158f.RequestInformation, error) {
 	requestInfo := i2ae4187f7daee263371cb1c977df639813ab50ffa529013b7437480d1ec0158f.NewRequestInformationWithMethodAndUrlTemplateAndPathParameters(i2ae4187f7daee263371cb1c977df639813ab50ffa529013b7437480d1ec0158f.GET, m.BaseRequestBuilder.UrlTemplate, m.BaseRequestBuilder.PathParameters)
 	if requestConfiguration != nil {
+		if requestConfiguration.QueryParameters != nil {
+			requestInfo.AddQueryParameters(*(requestConfiguration.QueryParameters))
+		}
 		requestInfo.Headers.AddAll(requestConfiguration.Headers)
 		requestInfo.AddRequestOptions(requestConfiguration.Options)
 	}

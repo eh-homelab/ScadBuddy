@@ -4,6 +4,7 @@ import type { components } from '../../../api/schema'
 import type { FilamentInventorySpool, FilamentInventoryView, FilamentSpool } from '../../../api/types'
 import { divDecimal, mulDecimal } from '../../../lib/decimal'
 import { parseRgba } from '../../../lib/rgba'
+import { cleanTagUid } from '../../../lib/tagUid'
 // Also a cycle (`handlers.ts` loads every feature): only inside functions.
 import { mockSettings } from '../../handlers'
 // A module cycle (`orders/priceBook.ts` imports `inventoryRows` from here): use it only inside functions.
@@ -167,6 +168,18 @@ function insertBasis(body: Record<string, unknown>): InsertBasis {
   return body.empty_weight_basis === 'placeholder' ? 'placeholder' : 'person'
 }
 
+/** `insert_weights.forget_spool_on` (#7450-1): a derived weight is the mean of the rows left; with none left it stays. */
+function forgetInsertReading(spoolId: string) {
+  const gone = insertReadings.get(spoolId)
+  if (!gone) return
+  insertReadings.delete(spoolId)
+  const inserts = state.catalogs['insert-types']
+  const at = inserts.findIndex((one) => one.id === gone.insert_type_id)
+  const left = [...insertReadings.values()].filter((one) => one.insert_type_id === gone.insert_type_id).map((one) => one.derived_g)
+  if (at < 0 || inserts[at]!.empty_weight_basis !== 'derived' || left.length === 0) return
+  inserts[at] = { ...inserts[at]!, empty_weight_g: Math.floor(left.reduce((sum, one) => sum + one, 0) / left.length + 0.5), updated_at: now() }
+}
+
 /** `insert_weights.check_on` (#7280 R-7280-1, D1, D2) over the mock's spools and ledger. */
 function insertWeightCheck(row: SpoolRow, reading: number): S['InsertWeightCheck'] {
   const effective = view(row).effective ?? {}
@@ -196,7 +209,8 @@ function insertWeightCheck(row: SpoolRow, reading: number): S['InsertWeightCheck
       return read != null && read < label - 0.5
     })
   if (used) return answer('used')
-  if (row.grams_left == null || Math.abs(row.grams_left - label) >= 0.5) return answer('not_full')
+  // #7449-1, #7449-3: no grams left and no use is full; the 0.5 g edge is full too.
+  if (row.grams_left != null && Math.abs(row.grams_left - label) > 0.5) return answer('not_full')
   if (reading < label - 0.5) {
     // #7683 `insert_weights.below_label`: the shortfall, the readings of it, the default.
     const filament = reading - insert.empty_weight_g
@@ -208,13 +222,15 @@ function insertWeightCheck(row: SpoolRow, reading: number): S['InsertWeightCheck
     const shortfall = label - reading
     return { ...answer('below_label'), shortfall_g: shortfall, resolutions, default: shortfall > 0.1 * label && resolutions.length > 1 ? 'short' : 'tared' }
   }
+  // #7449-4: an archived insert takes no new weight, but keeps the resolutions above.
+  if (insert.archived_at) return answer('no_insert')
   const derived = reading - label
   if (derived <= 0) return answer('not_above_label')
   if (derived > label) return answer('derived_too_heavy')
   const others = [...insertReadings.entries()].filter(([spool, one]) => spool !== row.id && one.insert_type_id === insert.id).map(([, one]) => one.derived_g)
   const all = [...others, derived]
   const mean = Math.floor(all.reduce((sum, one) => sum + one, 0) / all.length + 0.5)
-  if (mean < 1) return answer('not_above_label')
+  if (mean < 1) return answer('mean_below_1g')
   const placeholder = isPlaceholder(insert.empty_weight_basis, insert.note)
   return answer(null, {
     insert_type_id: insert.id,
@@ -2037,8 +2053,8 @@ export function setOrigin(spoolId: string, origin: string, tagEncodedAt?: string
   if (tagEncodedAt !== undefined) row.tag_encoded_at = tagEncodedAt
 }
 
-/** `clean_tag_uid`: hex digits only, the last 16, upper case; none when empty or all zeros. */
-export const cleanTagUid = (uid: string | null | undefined) => keyOf(hexOf(uid).slice(-16))
+/** `clean_tag_uid`, from the browser's one copy (`lib/tagUid.ts`, #8042), for `tags.ts`. */
+export { cleanTagUid }
 
 /**
  * #7273 `seen_on` for a phone's or an agent's read: the tag with this cleaned UID, made when none
@@ -2623,6 +2639,7 @@ export const handlers = [
     state.events = state.events.filter((event) => event.spool_id !== row.id)
     state.bindings = state.bindings.filter((one) => one.spool_id !== row.id)
     state.bbLinks.delete(row.id)
+    forgetInsertReading(row.id)
     return new HttpResponse(null, { status: 204 })
   }),
   http.post(`${BASE}/spools/:id/archive`, async ({ params, request }) => {
@@ -2672,7 +2689,7 @@ export const handlers = [
     const body = (await request.json()) as S['TagBind']
     const extra = extraKeys(body, FIELDS.tag)
     if (extra) return extra
-    const uid = keyOf(hexOf(body.tag_uid).slice(-16))
+    const uid = cleanTagUid(body.tag_uid)
     const tray = keyOf(hexOf(body.tray_uuid).slice(0, 32))
     if (uid === null && tray === null) return problem(422, REFUSED.tagUnnamed)
     const row = findSpool(String(params.id))
@@ -2782,12 +2799,16 @@ export const handlers = [
     const row = findSpool(String(params.id))
     if (!row) return problem(404, `no spool ${String(params.id)}`)
     const raw = await request.json()
-    const extra = extraKeys(raw, ['reading_g'])
+    const extra = extraKeys(raw, ['reading_g', 'new_empty_weight_g'])
     if (extra) return extra
     const reading = readingParam((raw as { reading_g?: unknown }).reading_g)
     if (reading == null) return problem(422, 'body.reading_g: Input should be greater than 0')
     const { offer, reason } = insertWeightCheck(row, reading)
     if (!offer) return problem(409, `no insert weight offer for spool ${row.id}: ${reason}`, { code: 'no_insert_weight_offer', reason })
+    const expected = (raw as { new_empty_weight_g?: number | null }).new_empty_weight_g
+    if (expected != null && expected !== offer.new_empty_weight_g) {
+      return problem(409, `the insert weight of spool ${row.id} is now ${offer.new_empty_weight_g} g; check again`, { code: 'insert_weight_changed', new_empty_weight_g: offer.new_empty_weight_g })
+    }
     insertReadings.set(row.id, { insert_type_id: offer.insert_type_id, reading_g: reading, label_weight_g: offer.label_weight_g, derived_g: offer.derived_g })
     const inserts = state.catalogs['insert-types']
     const at = inserts.findIndex((one) => one.id === offer.insert_type_id)

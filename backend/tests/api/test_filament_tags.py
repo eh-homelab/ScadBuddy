@@ -33,7 +33,9 @@ def _spool(client: TestClient) -> dict[str, object]:
 def test_a_phone_read_answers_the_tag_and_next(client: TestClient) -> None:
     got = client.post(READS, json={"uid": "04:a2:b3:c4", "records": []})
     assert got.status_code == 200, got.text
-    assert got.json()["next"] == "bind_or_create" and got.json()["tag"]["tag_uid"] == "04A2B3C4"
+    # A 4-byte UID is stored in the AMS's form, `<uid>00000100` (#8042).
+    assert got.json()["next"] == "bind_or_create"
+    assert got.json()["tag"]["tag_uid"] == "04A2B3C400000100"
 
 
 def test_a_read_of_a_place_label_answers_open_code_and_the_place(client: TestClient) -> None:
@@ -42,7 +44,8 @@ def test_a_read_of_a_place_label_answers_open_code_and_the_place(client: TestCli
     record = {"record_type": "url", "data_hex": href.encode().hex()}
     got = client.post(READS, json={"uid": "04:a2:b3:c4", "records": [record]})
     assert got.status_code == 200, got.text
-    assert got.json()["next"] == "open_code" and got.json()["tag"]["tag_uid"] == "04A2B3C4"
+    assert got.json()["next"] == "open_code"
+    assert got.json()["tag"]["tag_uid"] == "04A2B3C400000100"
     assert got.json()["resolved"] == {
         "kind": "location",
         "id": place["id"],

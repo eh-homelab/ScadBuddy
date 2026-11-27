@@ -66,11 +66,6 @@ export const ClientMessageSchema = z.discriminatedUnion('type', [
     images: AttachmentRefsSchema.optional(),
     /** The new session's browser options (#7027); used only when the message starts a session (no `sessionId`). */
     browser: SessionBrowserInput.optional(),
-    /**
-     * Taken, logged and ignored (#7323): every session is an AgentSession. Kept so a tab of
-     * an earlier release that still sends it, with any value, is not refused.
-     */
-    mode: z.unknown().optional(),
   }),
   z.object({ v, type: z.literal('approval.decision'), sessionId, id: answerId, approve: z.boolean() }),
   // #940: the user's answer to an AskUserQuestion (gate/questions.ts).

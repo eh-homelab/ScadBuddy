@@ -23,6 +23,7 @@ from scadbuddy.core.config import StoreBackend
 from scadbuddy.core.settings import Settings
 from scadbuddy.library.settings_store import (
     BAMBUDDY_NOT_READY,
+    OUTPUTS_NEED_A_BLOB_STORE,
     S3_NOT_READY,
     S3_PREFIX_NOT_READY,
     RenderStoreSettings,
@@ -170,21 +171,16 @@ async def _source_serves(index: BlobIndex, source: ContentBackend, target: Conte
 
 
 class OutputsNotForBambuddyError(StoreNotReadyError):
-    """Ruling R5 (#7256): saved outputs' bytes never go into Bambuddy's library, so a
-    migration to the `bambuddy` backend is refused while the index holds an output."""
-
-
-OUTPUTS_NOT_FOR_BAMBUDDY = (
-    "the store holds saved outputs' bytes (blobs of kind output), and outputs do not go"
-    " into Bambuddy's library: migrate to s3 instead"
-)
+    """Ruling R5 (#7256): saved outputs' bytes never go into Bambuddy's library. Since
+    #7257 the API does not start on the `bambuddy` store at all, so a migration to it is
+    always refused."""
 
 
 async def refuse_outputs_to_bambuddy(index: BlobIndex, target: str) -> None:
-    """`OutputsNotForBambuddyError` when ``target`` is `bambuddy` and the index holds a
-    blob of kind ``output``."""
-    if target == "bambuddy" and await asyncio.to_thread(index.holds_kind, "output"):
-        raise OutputsNotForBambuddyError(OUTPUTS_NOT_FOR_BAMBUDDY)
+    """`OutputsNotForBambuddyError` when ``target`` is `bambuddy` (#7257). ``index`` is
+    no longer read: the refusal holds whether or not it holds an output yet."""
+    if target == "bambuddy":
+        raise OutputsNotForBambuddyError(OUTPUTS_NEED_A_BLOB_STORE)
 
 
 def _error(error: BaseException) -> str:
@@ -259,7 +255,7 @@ async def check_backends(
     settings as they are now: a run that could not build one would end before it
     copied, and `GET /store/migrate` would show nothing wrong. The target first, the
     one a migration's settings are most likely still missing for. Before either:
-    `OutputsNotForBambuddyError` for a `bambuddy` target while the index holds outputs."""
+    `OutputsNotForBambuddyError` for a `bambuddy` target (#7257)."""
     await refuse_outputs_to_bambuddy(BlobIndex(pool), target)
     for name in (target, source):
         if name == "s3" and current.s3 is None:

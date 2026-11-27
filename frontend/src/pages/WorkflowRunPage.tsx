@@ -298,7 +298,7 @@ function Steps({ steps, answers }: { steps: FlowStep[]; answers: FlowAnswerBy[] 
   // #7471: the latest answer of each question (a Reset may answer it again). A Reset to
   // before an answer parks its question again, so an answer on record is in effect only on
   // a step an answer could have ended: not one still running, cancelled or timed out.
-  const by = new Map(answers.map((a) => [a.call_id, a.answered_by] as const))
+  const by = new Map(answers.map((a) => [a.call_id, a] as const))
   return (
     <Card size="sm" className="px-3">
       <table aria-label="Steps" className="w-full text-left text-[12.5px]">
@@ -320,7 +320,7 @@ function Steps({ steps, answers }: { steps: FlowStep[]; answers: FlowAnswerBy[] 
                 {step.error ? `${step.status} (${step.error})` : step.status}
                 {answerable(step) && by.has(step.call_id) && (
                   <span className="block text-muted-foreground">
-                    <AnsweredBy by={by.get(step.call_id)} />
+                    <AnsweredBy by={by.get(step.call_id)?.answered_by} admittedBy={by.get(step.call_id)?.admitted_by} />
                   </span>
                 )}
               </td>

@@ -106,18 +106,21 @@ func (s sizes) record(start time.Time, sent, read int64, attrs []attribute.KeyVa
 
 type serverKey struct{}
 
-// server is a request's server span and route, which SetRoute names.
+// server is a request's server span and route, which SetRoute names, and how it ends.
 type server struct {
 	span   trace.Span
 	method string
 	route  atomic.Pointer[string]
+	rec    *recorder
+	end    func(status int, abort bool)
 }
 
 // Server wraps next so each request is a SERVER span, a child of the traceparent it
 // carries, and is measured (http.server.request.duration and the body sizes). The span is
 // named by its method until SetRoute names its route, as the API's FastAPI spans are
-// ("GET /api/v1/models"). A path in skip (/healthz) is neither traced nor measured. With
-// traces and metrics off it is next itself.
+// ("GET /api/v1/models"). A path in skip (/healthz) is neither traced nor measured. A
+// long-lived stream calls Streaming once it starts, so its span ends then. With traces and
+// metrics off it is next itself.
 func (t *Telemetry) Server(next http.Handler, skip ...string) http.Handler {
 	tp, mp, on := t.providers()
 	if !on {
@@ -140,49 +143,65 @@ func (t *Telemetry) Server(next http.Handler, skip ...string) http.Handler {
 		ctx, span := tracer.Start(ctx, m, trace.WithSpanKind(trace.SpanKindServer), trace.WithAttributes(
 			methodKey.String(m), requestMethod.String(m), schemeKey.String(sch), urlScheme.String(sch),
 		))
-		s := &server{span: span, method: m}
-		ctx = context.WithValue(ctx, serverKey{}, s)
 		rec := &recorder{ResponseWriter: w}
+		s := &server{span: span, method: m, rec: rec}
+		ctx = context.WithValue(ctx, serverKey{}, s)
 		var sent atomic.Int64
 		r = r.WithContext(ctx)
 		if r.Body != nil && r.Body != http.NoBody {
 			r.Body = &counted{ReadCloser: r.Body, n: &sent}
 		}
+		var once sync.Once
+		// end ends the span and records the metrics, once: at the handler's return, or at
+		// Streaming. A status of 0 is a panic.
+		s.end = func(status int, abort bool) {
+			once.Do(func() {
+				attrs := []attribute.KeyValue{requestMethod.String(m), urlScheme.String(sch)}
+				if route := s.route.Load(); route != nil {
+					attrs = append(attrs, routeKey.String(*route))
+				}
+				switch {
+				case status == 0 && !abort:
+					span.SetStatus(codes.Error, "panic")
+					span.SetAttributes(errorTypeKey.String("panic"))
+					attrs = append(attrs, errorTypeKey.String("panic"))
+				case status != 0:
+					span.SetAttributes(statusKey.Int(status), responseStatus.Int(status))
+					attrs = append(attrs, responseStatus.Int(status))
+					if status >= 500 {
+						span.SetStatus(codes.Error, "")
+						span.SetAttributes(errorTypeKey.String(strconv.Itoa(status)))
+						attrs = append(attrs, errorTypeKey.String(strconv.Itoa(status)))
+					}
+				}
+				span.End()
+				measure.record(start, max(r.ContentLength, sent.Load()), rec.written.Load(), attrs)
+			})
+		}
 		defer func() {
-			status := rec.status
-			attrs := []attribute.KeyValue{requestMethod.String(m), urlScheme.String(sch)}
-			if route := s.route.Load(); route != nil {
-				attrs = append(attrs, routeKey.String(*route))
-			}
 			if p := recover(); p != nil {
 				// net/http answers a panic by closing the connection; the client sees no status.
 				// http.ErrAbortHandler is a deliberate abort: ReverseProxy panics with it when
 				// the client leaves mid-stream (an SSE or progress answer). That is a client
-				// cancel, not an error.
-				if p != http.ErrAbortHandler {
-					span.SetStatus(codes.Error, "panic")
-					span.SetAttributes(errorTypeKey.String("panic"))
-					attrs = append(attrs, errorTypeKey.String("panic"))
-				}
-				span.End()
-				measure.record(start, max(r.ContentLength, sent.Load()), rec.written, attrs)
+				// cancel, not an error, wrapped or not.
+				err, ok := p.(error)
+				s.end(0, ok && errors.Is(err, http.ErrAbortHandler))
 				panic(p)
 			}
-			if status == 0 {
-				status = http.StatusOK
-			}
-			span.SetAttributes(statusKey.Int(status), responseStatus.Int(status))
-			attrs = append(attrs, responseStatus.Int(status))
-			if status >= 500 {
-				span.SetStatus(codes.Error, "")
-				span.SetAttributes(errorTypeKey.String(strconv.Itoa(status)))
-				attrs = append(attrs, errorTypeKey.String(strconv.Itoa(status)))
-			}
-			span.End()
-			measure.record(start, max(r.ContentLength, sent.Load()), rec.written, attrs)
+			s.end(rec.answered(), false)
 		}()
 		next.ServeHTTP(rec, r)
 	})
+}
+
+// Streaming ends the request's server span now, with the status already written (200 when
+// none is), and records the request's metrics. Then a stream that stays open for hours
+// (server-sent events, a WebSocket) holds no span open, and its duration is the time to its
+// start. It does nothing outside a measured request, and nothing after the first time.
+func Streaming(ctx context.Context) {
+	if s, ok := ctx.Value(serverKey{}).(*server); ok && s.end != nil {
+		s.end(s.rec.answered(), false)
+	}
 }
 
 // SetRoute names the request's server span by its route template, which the span and the
@@ -219,7 +238,15 @@ func RecordProblem(ctx context.Context, status int, kind, reason string) {
 type recorder struct {
 	http.ResponseWriter
 	status  int
-	written int64
+	written atomic.Int64
+}
+
+// answered is the status the handler answered with: 200 when it wrote none.
+func (r *recorder) answered() int {
+	if r.status == 0 {
+		return http.StatusOK
+	}
+	return r.status
 }
 
 func (r *recorder) WriteHeader(code int) {
@@ -234,7 +261,7 @@ func (r *recorder) Write(b []byte) (int, error) {
 		r.status = http.StatusOK
 	}
 	n, err := r.ResponseWriter.Write(b)
-	r.written += int64(n)
+	r.written.Add(int64(n))
 	return n, err
 }
 
