@@ -505,7 +505,7 @@ func newHarness(t *testing.T) *harness {
 		"SCADBUDDY_STORE_S3_SECRET_ACCESS_KEY": "testing",
 	}
 	h.blobs = &Blobs{Pool: pool, Keys: testKeys(t), LookupEnv: lookup(env),
-		HTTP: store.Client(), Now: func() time.Time { return h.now }}
+		HTTP: store.Client(), Stream: store.Client(), Now: func() time.Time { return h.now }}
 	router := &crud.Router{Resolver: resolver{}, Next: http.NotFoundHandler()}
 	router.AddShared(Area, h.blobs.Routes()...)
 	api := httptest.NewServer(router)
