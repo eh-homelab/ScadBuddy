@@ -2389,19 +2389,25 @@ def test_both_inventory_and_fleet_rotator_are_callers(
     pg_conninfo: str, first: tuple[Migration, ...]
 ) -> None:
     """#6949: the `inventory` caller and main's `fleet-rotator` both pass both caller
-    CHECKs, whichever order their migrations ran in."""
+    CHECKs, whichever order their migrations ran in. A `fleet-rotator` credential and
+    suspension written before the late files run (prod ran main's fleet files first) keep
+    them from failing."""
+
+    def add(conn: psycopg.Connection, n: int, caller: str) -> None:
+        conn.execute(
+            "INSERT INTO service_credentials (id, caller, scopes, secret_hash,"
+            " secret_sealed, dek_sealed, kek_id, expires_at)"
+            " VALUES (%s, %s, '{}', %s, '', '', 'k', now() + interval '1 day')",
+            (f"{n:016x}", caller, bytes([n]) * 32),
+        )
+        conn.execute(
+            "INSERT INTO service_caller_suspensions (caller, suspended_at, suspended_by)"
+            " VALUES (%s, now(), 'test')",
+            (caller,),
+        )
+
     with psycopg.connect(pg_conninfo) as conn:
         migrate(conn, first)
+        add(conn, 1, "fleet-rotator")
         migrate(conn)
-        for n, caller in enumerate(("inventory", "fleet-rotator")):
-            conn.execute(
-                "INSERT INTO service_credentials (id, caller, scopes, secret_hash,"
-                " secret_sealed, dek_sealed, kek_id, expires_at)"
-                " VALUES (%s, %s, '{}', %s, '', '', 'k', now() + interval '1 day')",
-                (f"{n:016x}", caller, bytes([n]) * 32),
-            )
-            conn.execute(
-                "INSERT INTO service_caller_suspensions (caller, suspended_at, suspended_by)"
-                " VALUES (%s, now(), 'test')",
-                (caller,),
-            )
+        add(conn, 0, "inventory")
