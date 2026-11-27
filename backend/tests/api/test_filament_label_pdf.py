@@ -23,9 +23,7 @@ from scadbuddy.filament.label_output import ALL_FIELDS, DEFAULT_FIELDS, LabelFie
 from scadbuddy.filament.label_pdf import Label, Layout
 from scadbuddy.filament.label_templates import LabelTemplate
 from tests.api.test_filament import _type
-from tests.api.test_inventory import _item, _kind
 from tests.api.test_settings_runtime import _state
-from tests.support.operations import press
 
 pytestmark = pytest.mark.requires_postgres
 
@@ -255,8 +253,34 @@ def test_an_unknown_id_is_a_404_that_names_it(client: TestClient) -> None:
 BASE = {"filament_label_base_url": "https://sb.example.com"}
 
 
+def _kind(client: TestClient) -> dict[str, str]:
+    """An item kind made with SQL: the inventory routes are not this file's subject."""
+    kind_id, name = f"k{uuid4().hex[:12]}", f"Fasteners {uuid4().hex[:6]}"
+    with _state(client).refs.pool.connection() as conn:
+        conn.execute(
+            "INSERT INTO item_kinds (id, name, parent_id, tracking, created_at)"
+            " VALUES (%s, %s, 'part', 'unit', %s)",
+            (kind_id, name, datetime(2026, 1, 1, tzinfo=UTC)),
+        )
+    return {"id": kind_id, "name": name}
+
+
+def _item(client: TestClient, kind_id: str = "part", archived: bool = False) -> dict[str, str]:
+    """An item made with SQL, archived when asked."""
+    name = f"Grease {uuid4().hex[:6]}"
+    stamp = datetime(2026, 1, 1, tzinfo=UTC)
+    with _state(client).refs.pool.connection() as conn:
+        row = conn.execute(
+            "INSERT INTO items (kind_id, name, created_at, archived_at)"
+            " VALUES (%s, %s, %s, %s) RETURNING id",
+            (kind_id, name, stamp, stamp if archived else None),
+        ).fetchone()
+    assert row is not None
+    return {"id": str(row["id"]), "name": name}
+
+
 def _number(client: TestClient, table: str, row_id: object) -> int:
-    """An item's or a kind's number: their read models do not carry it (#8323 adds it)."""
+    """An item's or a kind's number, read from its row."""
     with _state(client).refs.pool.connection() as conn:
         row = conn.execute(f"SELECT number FROM {table} WHERE id = %s", (row_id,)).fetchone()
     assert row is not None
@@ -287,7 +311,7 @@ def test_a_type_label_needs_the_label_address(client: TestClient) -> None:
 def test_an_item_and_a_kind_get_code_labels(
     client: TestClient, drawn: list[tuple[list[Label], LabelTemplate, Layout]]
 ) -> None:
-    kind = _kind(client, name=f"Fasteners {uuid4().hex[:6]}")
+    kind = _kind(client)
     item = _item(client, kind["id"])
     assert client.put(SETTINGS, json=BASE).status_code == 200
     answer = client.post(PDF, json={"item_ids": [item["id"]], "kind_ids": [kind["id"]]})
@@ -307,9 +331,7 @@ def test_an_item_and_a_kind_get_code_labels(
 def test_an_archived_item_still_gets_its_label(
     client: TestClient, drawn: list[tuple[list[Label], LabelTemplate, Layout]]
 ) -> None:
-    item = _item(client)
-    archived = client.post(f"/api/v1/inventory/items/{item['id']}/archive", headers=press())
-    assert archived.status_code == 200, archived.text
+    item = _item(client, archived=True)
     assert client.put(SETTINGS, json=BASE).status_code == 200
     answer = client.post(PDF, json={"item_ids": [item["id"]]})
     assert answer.status_code == 200, answer.text
@@ -330,7 +352,7 @@ def test_the_labels_keep_the_subject_order(
     client: TestClient, drawn: list[tuple[list[Label], LabelTemplate, Layout]]
 ) -> None:
     spool, place, made = _spool(client), _place(client, "Shelf 4"), _type(client)
-    kind = _kind(client, name=f"Fasteners {uuid4().hex[:6]}")
+    kind = _kind(client)
     item = _item(client, kind["id"])
     assert client.put(SETTINGS, json=BASE).status_code == 200
     body = {

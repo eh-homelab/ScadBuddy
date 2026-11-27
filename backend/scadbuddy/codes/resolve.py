@@ -33,7 +33,7 @@ PREFIXES: dict[str, Lookup] = {
 }
 
 #: The SQL for each table's name. Spools have no name; a type's name is its code and colour.
-#: Public because the label sheet reads it too.
+#: Public because the labels file (`filament/labels.py`) reads it too.
 NAME_SQL: dict[str, str] = {
     "filament_locations": "name",
     "filament_spools": "NULL",
