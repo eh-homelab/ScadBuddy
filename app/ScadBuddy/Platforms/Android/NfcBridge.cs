@@ -38,9 +38,9 @@ public sealed class NfcBridge : Java.Lang.Object, NfcAdapter.IReaderCallback, We
 
 	sealed record PendingWrite(long JsId, long WriteId, NdefMessage Message);
 
-	public static void Attach(AWebView webView, string origin)
+	public static void Attach(AWebView webView, IEnumerable<string> origins)
 	{
-		var rules = new List<string> { origin };
+		var rules = origins.ToList();
 		if (!WebViewFeature.IsFeatureSupported(WebViewFeature.WebMessageListener) ||
 			!WebViewFeature.IsFeatureSupported(WebViewFeature.DocumentStartScript))
 			throw new InvalidOperationException("This phone's Android System WebView is too old for ScadBuddy's NFC. Update it from the Play Store.");
@@ -48,6 +48,51 @@ public sealed class NfcBridge : Java.Lang.Object, NfcAdapter.IReaderCallback, We
 		using var stream = FileSystem.OpenAppPackageFileAsync("nfc-polyfill.js").GetAwaiter().GetResult();
 		using var text = new StreamReader(stream);
 		WebViewCompat.AddDocumentStartJavaScript(webView, text.ReadToEnd(), rules);
+	}
+
+	Uri? job;
+	static readonly HttpClient Http = new() { Timeout = TimeSpan.FromSeconds(30) };
+
+	/// <summary>
+	/// A scan link's job (<see cref="DeepLink"/>): the next tag read goes to <paramref name="result"/>,
+	/// not to the page. A partial MIFARE read waits for the next tap, which resumes it.
+	/// </summary>
+	public void StartJob(Uri result)
+	{
+		lock (gate) job = result;
+		Notify("Tap the tag on the back of the phone.");
+	}
+
+	async Task SendJob(Uri result, JsonObject reading)
+	{
+		var mifare = reading["mifare"] as JsonObject;
+		if (mifare?["error"] is not null) return;
+		var body = new JsonObject
+		{
+			["uid"] = reading["serialNumber"]?.GetValue<string>(),
+			["tag_type"] = mifare is null ? null : "mifare_classic",
+			["records"] = reading["records"]!.DeepClone(),
+		};
+		if (mifare is not null)
+			body["mifare_blocks"] = new JsonArray(mifare["blocks"]!.AsArray().Select(b => (JsonNode)new JsonObject { ["index"] = b!["index"]!.GetValue<int>(), ["data_hex"] = b["dataHex"]!.GetValue<string>() }).ToArray());
+		try
+		{
+			using var content = new StringContent(body.ToJsonString(), Encoding.UTF8, "application/json");
+			using var answer = await Http.PostAsync(result, content);
+			if (!answer.IsSuccessStatusCode)
+			{
+				Notify($"Not sent: ScadBuddy answered {(int)answer.StatusCode}. Start the scan again from the page.");
+				lock (gate) if (job == result) job = null;
+				return;
+			}
+			lock (gate) if (job == result) job = null;
+			Notify("Sent. Back to the page.");
+			MainThread.BeginInvokeOnMainThread(() => activity?.MoveTaskToBack(true));
+		}
+		catch (Exception error)
+		{
+			Notify($"Not sent: {error.Message}. Tap the tag again.");
+		}
 	}
 
 	public void Resume(Activity resumed)
@@ -115,6 +160,11 @@ public sealed class NfcBridge : Java.Lang.Object, NfcAdapter.IReaderCallback, We
 					lock (gate) if (write?.WriteId == writeId) write = null;
 					Reply(id, true);
 					break;
+				case "close":
+					lock (gate) scanning = false;
+					Reply(id, true);
+					MainThread.BeginInvokeOnMainThread(() => activity?.MoveTaskToBack(true));
+					break;
 				default:
 					throw new BridgeError("NotSupportedError", $"Unknown operation {op}.");
 			}
@@ -128,7 +178,9 @@ public sealed class NfcBridge : Java.Lang.Object, NfcAdapter.IReaderCallback, We
 		if (tag is null) return;
 		PendingWrite? pending;
 		bool reading;
-		lock (gate) { lastTag = tag; pending = write; reading = scanning; }
+		Uri? job;
+		lock (gate) { lastTag = tag; pending = write; reading = scanning; job = this.job; }
+		if (job is not null) { _ = SendJob(job, Read(tag)); return; }
 		if (pending is not null) { TryWrite(tag, fromTap: true); return; }
 		if (reading) Emit(Read(tag));
 	}
@@ -216,7 +268,6 @@ public sealed class NfcBridge : Java.Lang.Object, NfcAdapter.IReaderCallback, We
 		if (mifare is not null)
 		{
 			var count = mifare["blocks"]!.AsArray().Count;
-			Android.Util.Log.Info("ScadBuddyNfc", "blocks " + string.Join(' ', mifare["blocks"]!.AsArray().Select(b => $"{b!["index"]}:{b["dataHex"]}")));
 			// Sectors 0-4 (blocks 1-18) hold every field that names the filament; the rest is
 			// the signature, so a read that has them already identifies the spool.
 			var identified = Enumerable.Range(0, 5).All(s => mifare["blocks"]!.AsArray().Any(b => b!["index"]!.GetValue<int>() == s * 4));
@@ -335,6 +386,8 @@ public sealed class NfcBridge : Java.Lang.Object, NfcAdapter.IReaderCallback, We
 		}
 		return read;
 	}
+
+	public static void Notify(string text) => Toast(text);
 
 	static void Toast(string text) =>
 		MainThread.BeginInvokeOnMainThread(() =>

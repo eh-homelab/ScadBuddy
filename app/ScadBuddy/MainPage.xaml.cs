@@ -20,9 +20,12 @@ public partial class MainPage : ContentPage
 		{
 			if (Web.Handler is null) return;
 #if ANDROID
+			var platform = (Android.Webkit.WebView)Web.Handler.PlatformView!;
+			platform.Settings.SetGeolocationEnabled(true);
+			platform.SetWebChromeClient(new ScanChromeClient((Microsoft.Maui.Handlers.IWebViewHandler)Web.Handler, new HashSet<string>([OriginOf(url)], StringComparer.OrdinalIgnoreCase)));
 			try
 			{
-				NfcBridge.Attach((Android.Webkit.WebView)Web.Handler.PlatformView!, OriginOf(url));
+				NfcBridge.Attach(platform, [OriginOf(url)]);
 			}
 			catch (Exception error)
 			{
@@ -30,7 +33,63 @@ public partial class MainPage : ContentPage
 			}
 #endif
 			Web.Source = url;
+			if (DeepLink.Take() is { } first) Dispatcher.Dispatch(() => Scan(first));
 		};
+		Loaded += (_, _) => DeepLink.Opened += Scan;
+		Unloaded += (_, _) => DeepLink.Opened -= Scan;
+	}
+
+	const string OriginsKey = "scadbuddy.scanOrigins";
+
+	/// <summary>
+	/// Whether a scan link may send a read or a photo to <paramref name="origin"/>. Any page can
+	/// make a scan link, so only the app's own ScadBuddy, or one the person accepted here once, gets
+	/// the tag's bytes or the camera's photo.
+	/// </summary>
+	async Task<bool> Trusted(string origin)
+	{
+		var accepted = Preferences.Get(OriginsKey, "").Split('\n', StringSplitOptions.RemoveEmptyEntries).ToHashSet(StringComparer.OrdinalIgnoreCase);
+		if (string.Equals(origin, OriginOf(url), StringComparison.OrdinalIgnoreCase) || accepted.Contains(origin)) return true;
+		var yes = await DisplayAlertAsync("Send scans to this server?", $"A link asks this app to send a tag read or a photo to {origin}. Accept only a ScadBuddy you run.", "Accept", "Cancel");
+		if (!yes) return false;
+		accepted.Add(origin);
+		Preferences.Set(OriginsKey, string.Join('\n', accepted));
+		return true;
+	}
+
+	static readonly HttpClient Http = new() { Timeout = TimeSpan.FromSeconds(30) };
+
+	/// <summary>Does the scan a link asked for, posts it to the link's result address, and goes back to the browser.</summary>
+	async void Scan(ScanJob job)
+	{
+#if ANDROID
+		if (!await Trusted(DeepLink.OriginOf(job.Result))) return;
+		if (job.Kind == "nfc")
+		{
+			NfcBridge.Instance.StartJob(job.Result);
+			return;
+		}
+		try
+		{
+			var photo = await MediaPicker.Default.CapturePhotoAsync(new MediaPickerOptions { Title = "Photo of the code" });
+			if (photo is null) return;
+			await using var stream = await photo.OpenReadAsync();
+			using var body = new StreamContent(stream);
+			body.Headers.ContentType = new System.Net.Http.Headers.MediaTypeHeaderValue(photo.ContentType ?? "image/jpeg");
+			using var answer = await Http.PostAsync(job.Result, body);
+			if (!answer.IsSuccessStatusCode)
+			{
+				await DisplayAlertAsync("Not sent", $"ScadBuddy answered {(int)answer.StatusCode}. Start the scan again from the page.", "OK");
+				return;
+			}
+			NfcBridge.Notify("Sent. Back to the page.");
+			Platform.CurrentActivity?.MoveTaskToBack(true);
+		}
+		catch (Exception error)
+		{
+			await DisplayAlertAsync("Not sent", error.Message, "OK");
+		}
+#endif
 	}
 
 	static string OriginOf(string address)
