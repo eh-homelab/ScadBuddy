@@ -58,7 +58,7 @@ func Areas(pool *pgxpool.Pool, keys *seal.Keys) map[string][]crud.Route {
 			post("/credentials/reveal", s.reveal),
 		),
 		"payload-keys": {post("/payload-keys/{subject}", s.payloadKey)},
-		// POST /fetch-grants stays in Python: it reads a URL as library/url_import.py does.
+		// POST /fetch-grants is internal/fetchgrants's, in this same area.
 		"keys": {{Method: "GET", Path: "/keys/input-hash", Handle: s.inputHashKey}},
 	}
 }

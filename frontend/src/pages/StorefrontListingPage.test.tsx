@@ -103,6 +103,25 @@ describe('StorefrontListingPage (#5282, #6157)', () => {
     expect(saved?.media_ids).toEqual(['thumbnail'])
   })
 
+  it('starts a part whose template colour no filament has at the closest filament in the customer view, not the first (#8126)', async () => {
+    const book = await api.priceBook()
+    const base = book.filaments[0]!
+    const made = (id: string, colour: string, colour_name: string) => ({ ...base, id, material: 'PLA', colour, colour_name, alpha: 255, density_g_cm3: '1.24' })
+    server.use(
+      http.get('/api/v1/orders/price-book', () =>
+        HttpResponse.json({ ...book, filaments: [made('f-white', '#FFFFFF', 'Jade White'), made('f-purple', '#694ED4', 'Purple'), made('f-pink', '#FC97B0', 'Pink')] }),
+      ),
+      // The plate starts at the dollhouse roof's purple, which no filament has.
+      http.get('/api/v1/models/:slug/versions/:commit/schema', () =>
+        HttpResponse.json({ ...keychainSchema, parameters: (keychainSchema.parameters ?? []).map((p) => (p.name === 'body_color' ? { ...p, initial: '#7E57C2' } : p)) }),
+      ),
+    )
+    renderStorefront()
+    const preview = await screen.findByTestId('listing-preview')
+    await waitFor(() => expect(within(preview).getByRole('button', { name: /^Plate / })).toHaveAccessibleName(/Purple/))
+    expect(within(preview).getByRole('button', { name: /^Plate / })).not.toHaveAccessibleName(/Jade White/)
+  })
+
   it('opens from the list, keeps its own address, and goes back to the same page of the list', async () => {
     for (const title of ['First', 'Second']) await seed(title)
     const { user } = renderStorefront('/storefront?q=sec')
@@ -416,8 +435,8 @@ describe('StorefrontListingPage (#5282, #6157)', () => {
     const [saved] = await stored()
     expect(saved?.colours).toEqual([FILAMENT_PLA, FILAMENT_PETG])
     // Stored as the backend stores it: an unset label is null. No filament has the template's
-    // colour, so the colour starts at the first on offer (#6144).
-    expect(saved?.params['body_color']).toEqual({ kind: 'choice', choices: ['#F9D72C', '#1E1E1E'], label: null, default: '#F9D72C' })
+    // colour, so the colour starts at the closest on offer: the plate's blue is nearer the black (#6144, #8126).
+    expect(saved?.params['body_color']).toEqual({ kind: 'choice', choices: ['#F9D72C', '#1E1E1E'], label: null, default: '#1E1E1E' })
     expect(saved?.fixed['text_color']).toBe('#E8532F')
   })
 
@@ -958,7 +977,7 @@ describe('StorefrontListingPage (#5282, #6157)', () => {
       await waitFor(() => expect(screen.getByRole('combobox', { name: 'Version' })).toHaveTextContent(versionIds.edited.slice(0, 7)))
       // Both colours are offered; the plate's yellow is a PLA, so the PLA filaments are on offer.
       // No filament on offer has either template default, so each starts at one that is (#6144):
-      // the plate at the yellow the render used, the text at the first on offer.
+      // the plate at the yellow the render used, the text at the closest on offer (the only one here, #8126).
       await user.click(within(screen.getByRole('group', { name: 'Colours on offer' })).getByRole('button', { name: /^Show all/ }))
       expect(screen.getByRole('checkbox', { name: 'PLA Sunflower Yellow' })).toBeChecked()
       expect(screen.getByRole('checkbox', { name: 'PETG Black' })).not.toBeChecked()

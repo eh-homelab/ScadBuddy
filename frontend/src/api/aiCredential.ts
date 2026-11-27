@@ -6,8 +6,18 @@
  * `agent/src/harness/testConnection.ts` (`ConnectionTest`).
  */
 
-/** agent `credentials.ts` `CREDENTIAL_KINDS`. */
+/** agent `credentials.ts` `AGENT_CREDENTIAL_KINDS`: the kinds the assistant runs, and the kinds Settings saves. */
 export type AiCredentialKind = 'anthropic_api_key' | 'claude_oauth_token' | 'gateway'
+
+/**
+ * agent `credentials.ts` `CREDENTIAL_KINDS`: every kind the list can show. The pool is shared
+ * with the fleet's login rotator (#7983), so it also holds `claude_login` rows, which the
+ * assistant never runs or saves.
+ */
+export type AiStoredCredentialKind = AiCredentialKind | 'claude_login'
+
+/** agent `credentials.ts` `CREDENTIAL_SCOPES`: who may use a credential (#7983). */
+export type AiCredentialScope = 'agent' | 'fleet' | 'both'
 
 /**
  * `cooling_down` until `cooldown_until` (rate limited), then `active` again on its own;
@@ -23,7 +33,7 @@ export interface AiCredentialEntry {
   id: string
   /** 0 is tried first. */
   priority: number
-  kind: AiCredentialKind
+  kind: AiStoredCredentialKind
   /** The person's label for it (#3710), or null. Plain text: show it as text, never as markup. */
   name: string | null
   base_url: string | null
@@ -38,12 +48,19 @@ export interface AiCredentialEntry {
   last_error: string | null
   last_error_at: string | null
   last_used_at: string | null
+  /** Who may use it (#7983): the assistant, the fleet's machines, or both. */
+  scope: AiCredentialScope
+  /** Whether the assistant uses it: false for a `claude_login` or a `fleet` row. */
+  agent_uses: boolean
+  /** A `claude_login`'s account (#7983), in clear: null on every other kind. */
+  email: string | null
+  subscription_type: string | null
 }
 
 export interface AiCredentialList {
   /** In priority order. */
   credentials: AiCredentialEntry[]
-  /** Whether any credential can be used now. */
+  /** Whether any credential the assistant uses can be used now. */
   usable_now: boolean
   /** When none can: the soonest a rate-limited one is usable again; null if every one needs a reset. */
   recovers_at: string | null

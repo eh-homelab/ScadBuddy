@@ -38,6 +38,10 @@ function entry(over: Partial<AiCredentialEntry> & Pick<AiCredentialEntry, 'id' |
     last_error: null,
     last_error_at: null,
     last_used_at: null,
+    scope: 'agent',
+    agent_uses: true,
+    email: null,
+    subscription_type: null,
     ...over,
   }
 }
@@ -102,9 +106,11 @@ function expire(): void {
 
 function listView(): AiCredentialList {
   expire()
-  const usable = state.credentials.filter((c) => c.usable && c.status === 'active')
+  // Agent `listView`: only the credentials the assistant uses count (#7983).
+  const own = state.credentials.filter((c) => c.agent_uses)
+  const usable = own.filter((c) => c.usable && c.status === 'active')
   // Agent `soonestRecovery`: only a credential the mounted key opens recovers.
-  const cooling = state.credentials
+  const cooling = own
     .filter((c) => c.usable && c.status === 'cooling_down' && c.cooldown_until)
     .map((c) => c.cooldown_until!)
     .sort()
@@ -119,6 +125,10 @@ function listView(): AiCredentialList {
 
 const detail = (message: string, status: number, init?: ResponseInit) =>
   HttpResponse.json({ detail: message }, { ...init, status })
+
+/** The API's refusal of a fleet row to the agent's caller (#7983): Settings never changes one. */
+const FLEET_ROW_MESSAGE =
+  "the fleet's credentials are not changed here: the assistant may not save, delete, rename, reset, reorder or record an event on a claude_login or a credential whose scope is fleet"
 
 /** The body's kind, base URL and secret checked as `planPut` does, or the refusal. */
 function checked(body: AiCredentialSave): { baseUrl: string | null; secret?: string } | Response {
@@ -182,12 +192,17 @@ export const handlers = [
   }),
 
   http.put(`${base}/order`, async ({ request }) => {
+    // The agent's rows only (#7983): a fleet row is refused, and keeps its place in the list.
     const { ids } = (await request.json()) as { ids: string[] }
-    const known = state.credentials.map((c) => c.id)
+    if (ids.some((id) => find(id)?.agent_uses === false)) return detail(FLEET_ROW_MESSAGE, 409)
+    const known = state.credentials.filter((c) => c.agent_uses).map((c) => c.id)
     if (ids.length !== known.length || new Set(ids).size !== ids.length || !ids.every((id) => known.includes(id))) {
-      return detail('ids must name every credential exactly once; the list changed, read it again', 409)
+      return detail("the order must name every credential this caller may order exactly once (the assistant's caller: every credential the assistant uses, no fleet row); the list changed since it was read, so reload it", 409)
     }
-    state.credentials = ids.map((id, priority) => ({ ...find(id)!, priority }))
+    const next = [...ids]
+    state.credentials = state.credentials
+      .map((c) => (c.agent_uses ? find(next.shift()!)! : c))
+      .map((c, priority) => ({ ...c, priority }))
     return HttpResponse.json(listView())
   }),
 
@@ -226,6 +241,7 @@ export const handlers = [
 
   http.delete(`${base}/entries/:id`, ({ params }) => {
     if (!find(params.id)) return detail(`no credential ${String(params.id)}`, 404)
+    if (!find(params.id)!.agent_uses) return detail(FLEET_ROW_MESSAGE, 409)
     state.credentials = state.credentials.filter((c) => c.id !== params.id).map((c, priority) => ({ ...c, priority }))
     return HttpResponse.json(listView())
   }),
@@ -233,6 +249,7 @@ export const handlers = [
   http.put(`${base}/entries/:id/name`, async ({ params, request }) => {
     const current = find(params.id)
     if (!current) return detail(`no credential ${String(params.id)}`, 404)
+    if (!current.agent_uses) return detail(FLEET_ROW_MESSAGE, 409)
     // Strict, as agent `RenameBody` (a zod strictObject): `name` only, a string or null (#5772).
     const body: unknown = await request.json()
     if (typeof body !== 'object' || body === null || Array.isArray(body)) return detail('body: Expected object', 400)
@@ -250,6 +267,7 @@ export const handlers = [
   http.post(`${base}/entries/:id/reset`, ({ params }) => {
     const current = find(params.id)
     if (!current) return detail(`no credential ${String(params.id)}`, 404)
+    if (!current.agent_uses) return detail(FLEET_ROW_MESSAGE, 409)
     const reset: AiCredentialEntry = {
       ...current,
       status: 'active',

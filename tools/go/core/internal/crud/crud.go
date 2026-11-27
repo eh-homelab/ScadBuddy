@@ -74,11 +74,6 @@ type mounted struct {
 	template string
 }
 
-// ServiceOf is the service a guarded request's credential names.
-func ServiceOf(r *http.Request) *auth.Service {
-	return auth.ServiceOf(r.Context())
-}
-
 // rest is a trailing {name...} segment.
 var rest = regexp.MustCompile(`\{([A-Za-z_][A-Za-z0-9_]*)\.\.\.\}`)
 
@@ -129,6 +124,11 @@ func (rt *Router) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		httpx.WriteProblem(w, r, problemOf(r, err))
 	}
+}
+
+// ServiceOf is the verified service of a guarded request, nil outside a route's handler.
+func ServiceOf(r *http.Request) *auth.Service {
+	return auth.ServiceOf(r.Context())
 }
 
 func (rt *Router) answer(route *mounted, r *http.Request, params Params) (any, error) {

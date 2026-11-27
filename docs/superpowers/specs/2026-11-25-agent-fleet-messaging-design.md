@@ -174,7 +174,10 @@ v1.8.0, the latest stable release on 2026-11-25); the workspace builds with go1.
 imports `fleetchat` and writes its own host. The server has no auth of its own; a
 NetworkPolicy lets in only ScadBuddy's pods, as for the Playwright MCP server. Changed on
 2026-11-26: anything on the LAN may call it, directly or through ScadBuddy's `/mcp`
-**(owner)**, so the policy also admits the LAN's Gateway.
+**(owner)**, so the policy also admits the LAN's Gateway. Changed by #8014: the internet reaches
+`/github/webhook` only, through the SSO host's public Exact route (eh-homelab/clusters#4432), which
+the webhook's signature check (`X-Hub-Signature-256`) guards; the policy also admits the SSO host's
+Pomerium proxy for that path.
 
 ## 7. Non-goals
 

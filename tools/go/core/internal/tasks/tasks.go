@@ -1,8 +1,8 @@
 // Package tasks is the agent's background tasks and the reads of its command record:
 // backend/scadbuddy/api/crud_agent_tasks.py over agent_data/background.py and
-// agent_data/operations.py, statement for statement (area background-tasks, and
-// operations:read). An operation's insert and end stay Python's: they write its activity
-// row in the same transaction.
+// agent_data/operations.py, statement for statement (areas background-tasks and
+// operations). An operation's insert and end write its activity row in the same transaction
+// (internal/activity).
 package tasks
 
 import (
@@ -49,13 +49,15 @@ const taskColumns = `id, session_id::text AS session_id, kind, description, spec
 // Tasks is the areas' routes.
 type Tasks struct{ Pool *pgxpool.Pool }
 
-// Areas are the routes of areas background-tasks, background-tasks:read and operations:read.
+// Areas are the routes of areas background-tasks, background-tasks:read, operations and
+// operations:read.
 func Areas(pool *pgxpool.Pool, _ *seal.Keys) map[string][]crud.Route {
 	t := &Tasks{Pool: pool}
 	return map[string][]crud.Route{
 		"background-tasks:read": t.Reads(),
 		"background-tasks":      append(t.Reads(), t.Writes()...),
 		"operations:read":       t.OperationReads(),
+		"operations":            append(t.OperationReads(), t.OperationWrites()...),
 	}
 }
 
