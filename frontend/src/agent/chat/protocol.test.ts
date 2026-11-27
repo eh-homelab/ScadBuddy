@@ -102,7 +102,7 @@ describe('parseServerEvent', () => {
 
 describe('client messages', () => {
   it('stamps the protocol version', () => {
-    const message = clientMessage({ type: 'approval.decision', sessionId: 's1', id: 'a1', approve: true })
+    const message = clientMessage({ type: 'session.interrupt', sessionId: 's1' })
     expect(message.v).toBe(PROTOCOL_VERSION)
     expect(parseClientMessage(message).ok).toBe(true)
   })

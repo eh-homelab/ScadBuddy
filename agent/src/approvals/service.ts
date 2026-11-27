@@ -4,7 +4,7 @@ import type { RiskTier } from '../harness/permissions.js'
 import { isUuid } from '../harness/stateDirs.js'
 import { redact } from '../secrets.js'
 import type { EventLog } from '../sessions/eventLog.js'
-import { type ApprovalDecisionMessage, event, type Owner, PROTOCOL_VERSION, sameOwner } from '../sessions/protocol.js'
+import { event, type Owner, sameOwner } from '../sessions/protocol.js'
 import { scrubForLog } from '../sessions/sdkEvents.js'
 import type { AuditSurface } from '../audit/log.js'
 import { type Span, SpanKind } from '@opentelemetry/api'
@@ -520,8 +520,8 @@ export class ApprovalService {
   }
 
   /**
-   * The decision API: the panel's `approval.decision` (through `decision()`),
-   * the HTTP routes (routes/approvals.ts), and #251's `sessions.approve/deny`.
+   * The decision API: the pending-input respond route, the HTTP routes
+   * (routes/approvals.ts), and #251's `sessions.approve/deny`.
    */
   async decide(principal: Owner, id: string, approve: boolean, options: DecideOptions = {}): Promise<ApprovalRecord> {
     const approval = await this.row(id)
@@ -553,18 +553,6 @@ export class ApprovalService {
       )
     }
     return settled
-  }
-
-  /** The panel's `approval.decision` client message; the seam #266's socket calls. */
-  async decision(
-    principal: Owner,
-    message: ApprovalDecisionMessage,
-    where: Pick<DecideOptions, 'clientIp' | 'surface'> = {},
-  ): Promise<ApprovalRecord> {
-    if (message.v !== PROTOCOL_VERSION || message.type !== 'approval.decision') {
-      throw new ApprovalError('invalid', 'not an approval.decision message')
-    }
-    return this.decide(principal, message.id, message.approve, { sessionId: message.sessionId, ...where })
   }
 
   private async expire(id: string): Promise<ApprovalRecord | undefined> {

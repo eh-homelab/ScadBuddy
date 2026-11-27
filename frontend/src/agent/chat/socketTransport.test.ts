@@ -103,19 +103,17 @@ describe('createSocketTransport', () => {
     expect(t.send(attach)).toBe('sent')
   })
 
-  it('never lets a backlog crowd out an approval or an interrupt; they go first on reconnect', () => {
+  it('never lets a backlog crowd out an interrupt; it goes first on reconnect', () => {
     const t = createSocketTransport({ WebSocketImpl: Impl })
     t.connect({ onFrame: () => {} })
     for (let i = 0; i < MAX_QUEUED; i++) t.send(attach)
     expect(t.send(attach)).toBe('refused')
-    const decision = clientMessage({ type: 'approval.decision', sessionId: 's1', id: 'a1', approve: true })
     const stop = clientMessage({ type: 'session.interrupt', sessionId: 's1' })
-    expect(t.send(decision)).toBe('queued')
     expect(t.send(stop)).toBe('queued')
     const ws = FakeSocket.instances[0]!
     ws.open()
-    expect(ws.sent.slice(0, 2)).toEqual([JSON.stringify(decision), JSON.stringify(stop)])
-    expect(ws.sent).toHaveLength(MAX_QUEUED + 2)
+    expect(ws.sent[0]).toEqual(JSON.stringify(stop))
+    expect(ws.sent).toHaveLength(MAX_QUEUED + 1)
   })
 
   it('lets the re-attach go out before anything queued, so a replay is not doubled', () => {
@@ -132,13 +130,13 @@ describe('createSocketTransport', () => {
     FakeSocket.instances[0]!.open()
     FakeSocket.instances[0]!.drop()
     const message = clientMessage({ type: 'user.message', sessionId: 's9', text: 'hi', context: { route: '/' } })
-    const decision = clientMessage({ type: 'approval.decision', sessionId: 's9', id: 'a1', approve: false })
+    const stop = clientMessage({ type: 'session.interrupt', sessionId: 's9' })
     t.send(message)
-    t.send(decision)
+    t.send(stop)
     vi.advanceTimersByTime(10)
     const ws = FakeSocket.instances[1]!
     ws.open()
-    expect(ws.sent).toEqual([JSON.stringify(reattach), JSON.stringify(decision), JSON.stringify(message)])
+    expect(ws.sent).toEqual([JSON.stringify(reattach), JSON.stringify(stop), JSON.stringify(message)])
   })
 
   it('asks the status after repeated failed handshakes, and says refused only when the agent says so', async () => {
@@ -175,8 +173,8 @@ describe('createSocketTransport', () => {
     t.connect({ onFrame: () => {}, onClose })
     FakeSocket.instances[0]!.open()
     FakeSocket.instances[0]!.drop(1001)
-    const decision = clientMessage({ type: 'approval.decision', sessionId: 's1', id: 'a1', approve: true })
-    expect(t.send(decision)).toBe('queued')
+    const stop = clientMessage({ type: 'session.interrupt', sessionId: 's1' })
+    expect(t.send(stop)).toBe('queued')
     expect(t.send(attach)).toBe('queued')
     for (let i = 0; i < REFUSED_AFTER * 2; i++) {
       vi.advanceTimersByTime(10)
@@ -186,11 +184,11 @@ describe('createSocketTransport', () => {
     expect(onRefused).toHaveBeenCalledTimes(2)
     expect(onClose).not.toHaveBeenCalledWith(REFUSED_MESSAGE)
     expect(onClose).toHaveBeenLastCalledWith('Lost the connection to the assistant; reconnecting…')
-    // The agent is back: the queues survived the outage, the decision first.
+    // The agent is back: the queues survived the outage, the interrupt first.
     vi.advanceTimersByTime(10)
     const ws = FakeSocket.instances.at(-1)!
     ws.open()
-    expect(ws.sent).toEqual([JSON.stringify(decision), JSON.stringify(attach)])
+    expect(ws.sent).toEqual([JSON.stringify(stop), JSON.stringify(attach)])
     t.close()
   })
 

@@ -2,7 +2,7 @@ import { screen, waitFor, within } from '@testing-library/react'
 import { http, HttpResponse } from 'msw'
 import { Route, Routes } from 'react-router'
 import { beforeEach, describe, expect, it, onTestFinished, vi } from 'vitest'
-import { addSpoolEvent, createTagBackup, getSpool, getType, listSpoolEvents, listSpools, patchSpool, setSpoolKValues, setSpoolPresets, spoolTagRecords, spoolTagWritten } from '../../api/filament'
+import { addSpoolEvent, archiveSpool, createTagBackup, getSpool, getType, listSpoolEvents, listSpools, patchSpool, setSpoolKValues, setSpoolPresets, spoolTagRecords, spoolTagWritten } from '../../api/filament'
 import { SPOOL_ADVANCED_KEY } from '../../components/filament/SpoolSections'
 import { H2C, L, spoolId, T, TAG } from '../../mocks/features/filament/seed'
 import { INVOICE, LINE, SUPPLIER } from '../../mocks/features/filamentPurchasingSeed'
@@ -12,6 +12,7 @@ import { server } from '../../mocks/server'
 import { entityMock, seedEntityProperties } from '../../mocks/features/entities'
 import { rememberAdvanced } from '../../test/advanced'
 import { choose } from '../../test/select'
+import { schemaProperty } from '../../test/spec'
 import { renderPage } from '../../test/utils'
 import { SpoolPage } from './SpoolPage'
 import { SpoolsTab } from './SpoolsTab'
@@ -867,7 +868,11 @@ describe("the spool page's Advanced toggle", () => {
     expect(screen.getByRole('checkbox', { name: /Lock the weight/ })).toBeChecked()
   })
 
-  it('shows a saved diameter other than 1.75 mm with Advanced off, and hides the default (#7642)', async () => {
+  it('shows a saved diameter other than the default with Advanced off, and hides the default (#7642)', async () => {
+    // #8107: the backend's default, read from the spec, so a change there fails here.
+    const fallback = schemaProperty('SpoolTypeCreate-Input', 'diameter_mm').default
+    if (typeof fallback !== 'string') throw new Error(`SpoolTypeCreate-Input.diameter_mm.default is ${JSON.stringify(fallback)}, not a string`)
+    await patchSpool(spoolId(2), { diameter_mm: fallback })
     const { unmount } = open(2)
     await heading(2)
     expect(screen.queryByLabelText('Diameter (mm)')).toBeNull()
@@ -895,6 +900,14 @@ describe("the spool page's Advanced toggle", () => {
     open(2)
     await heading(2)
     expect(screen.getByText(/^Measured /)).toBeInTheDocument()
+    expect(screen.queryByText('To weigh this spool, turn on Advanced.')).toBeNull()
+  })
+
+  it('does not tell where to weigh an archived spool (#8107)', async () => {
+    await archiveSpool(spoolId(3))
+    open(3)
+    await heading(3)
+    expect(screen.getByText('Never weighed.')).toBeInTheDocument()
     expect(screen.queryByText('To weigh this spool, turn on Advanced.')).toBeNull()
   })
 

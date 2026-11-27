@@ -830,8 +830,8 @@ tool the user has set to `read` or `write` runs without one. Where it is enforce
   by allowing the call with `answers` added to its input, and Claude Code passes them to
   the model as the tool result (measured on SDK 0.3.283 and 0.3.287,
   `agent/test/questions.sdk.test.ts`). Only a session the browser user owns is offered
-  the tool, and only the browser user answers, over the chat socket's
-  `question.answer`; no tool result and no other principal can. The session waits in
+  the tool, and only the browser user answers, through
+  `POST /api/v1/ai/pending-input/{request_id}` (the `question:` kind; #815, #7323); no tool result and no other principal can. The session waits in
   `waiting_input`. Questions live in `ai_questions`, so any replica can take the
   answer, but unlike an approval a question never outlives its turn: interrupt,
   handoff, a shutdown and every other end of the turn cancel it, and the model is told

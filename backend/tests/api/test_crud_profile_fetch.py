@@ -985,8 +985,7 @@ def test_a_waiting_import_holds_no_pool_connection(
         with lock:
             return len(held)
 
-    def until(done: Callable[[], bool]) -> bool:
-        deadline = time.monotonic() + 30
+    def until(done: Callable[[], bool], deadline: float) -> bool:
         while not done():
             if time.monotonic() > deadline:
                 return False
@@ -1002,7 +1001,9 @@ def test_a_waiting_import_holds_no_pool_connection(
     second.start()
     # The window opens at the waiter's first poll: on a loaded runner its request can take
     # longer than the window to reach the lease at all (#8010).
-    assert until(lambda: polls() > seen), "the waiting import never polled"
+    # 20 s, well inside the holder's own 30 s wait on Bambuddy (`_slow_k_tables`), so the
+    # window below opens while the waiter still waits (#8104).
+    assert until(lambda: polls() > seen, time.monotonic() + 20), "the waiting import never polled"
 
     def longest(since: float) -> float:
         """The longest part of the time since ``since`` that one checkout covered."""
@@ -1016,8 +1017,11 @@ def test_a_waiting_import_holds_no_pool_connection(
     polls_before, start = polls(), time.monotonic()
     time.sleep(wait)
     covered = longest(start)
-    # It keeps polling; how many polls fit in the window depends on the runner's load.
-    kept_polling = until(lambda: polls() - polls_before >= 3)
+    # It keeps polling, every LEASE_POLL_SECONDS (0.1 s), about 65 polls in the 6.5 s from
+    # the window's start to 5 s past it. How many fit depends on the runner's load, so ten
+    # are due by then: a waiter slower than one poll each 0.65 s fails, and a loaded
+    # runner has room (#8104, #8118).
+    kept_polling = until(lambda: polls() - polls_before >= 10, start + wait + 5)
     polls_after = polls()
     release.set()
     first.join(timeout=60)

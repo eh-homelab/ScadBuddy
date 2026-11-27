@@ -163,7 +163,7 @@ type Tag struct {
 	ProductionDate *string `json:"production_date,omitempty"`
 	// ProductionDateTime is ProductionDate as "2006-01-02T15:04:05", with no time
 	// zone because the guide names none. It is absent when ProductionDate is not
-	// a valid date.
+	// exactly YYYY_MM_DD_hh_mm, zero-padded, with a real date and time.
 	ProductionDateTime *string `json:"production_datetime,omitempty"`
 
 	// ShortProductionDate is block 13 as text (the guide: "Short Production
@@ -394,14 +394,11 @@ func text(b []byte) string {
 }
 
 func productionTime(s string) *string {
-	var y, mo, d, h, mi int
-	var rest string
-	n, _ := fmt.Sscanf(s, "%d_%d_%d_%d_%d%s", &y, &mo, &d, &h, &mi, &rest)
-	if n != 5 {
-		return nil
-	}
-	at := time.Date(y, time.Month(mo), d, h, mi, 0, 0, time.UTC)
-	if at.Year() != y || int(at.Month()) != mo || at.Day() != d || at.Hour() != h || at.Minute() != mi {
+	// time.Parse refuses a sign, extra text and a day the calendar lacks, but its 15 takes a
+	// one-digit hour, so the value must also format back to the same text.
+	const layout = "2006_01_02_15_04"
+	at, err := time.Parse(layout, s)
+	if err != nil || at.Format(layout) != s {
 		return nil
 	}
 	return ptr(at.Format("2006-01-02T15:04:05"))

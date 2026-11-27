@@ -168,6 +168,30 @@ async def test_put_refuses_past_the_byte_cap_except_a_re_put(tmp_path: Path, poo
     await store.put("asset", b"abc", name="1 again", scope=SCOPE)
 
 
+async def test_a_put_with_no_cap_reads_no_usage(
+    tmp_path: Path, pool: Pool, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#8110: with neither cap set, a put checks nothing, so it runs no aggregate over the
+    backend's rows; with either cap, it reads the usage to check it."""
+    cases: list[tuple[dict[str, int], bool]] = [
+        ({}, False),
+        ({"max_count": 10}, True),
+        ({"max_total_bytes": 10**6}, True),
+    ]
+    for case, (caps, reads) in enumerate(cases):
+        store = local_content(tmp_path / f"remote-{case}", pool, **caps)
+        calls: list[str] = []
+        counted = store.index.usage
+
+        def usage(backend: str, counted: Any = counted, calls: list[str] = calls) -> Any:
+            calls.append(backend)
+            return counted(backend)
+
+        monkeypatch.setattr(store.index, "usage", usage)
+        await store.put("asset", f"{caps}".encode(), name=f"n{caps}", scope=SCOPE)
+        assert bool(calls) == reads, caps
+
+
 async def test_altered_or_missing_bytes_are_reported_not_returned(content: ContentStore) -> None:
     store = content
     ref = await store.put("piece", b"real", name="p.zip", scope=SCOPE, key=K)

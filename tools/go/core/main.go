@@ -31,6 +31,7 @@ import (
 	"github.com/eh-homelab/ScadBuddy/tools/go/core/internal/audit"
 	"github.com/eh-homelab/ScadBuddy/tools/go/core/internal/auth"
 	"github.com/eh-homelab/ScadBuddy/tools/go/core/internal/blobs"
+	"github.com/eh-homelab/ScadBuddy/tools/go/core/internal/blobstore"
 	"github.com/eh-homelab/ScadBuddy/tools/go/core/internal/bus"
 	"github.com/eh-homelab/ScadBuddy/tools/go/core/internal/changes"
 	"github.com/eh-homelab/ScadBuddy/tools/go/core/internal/crud"
@@ -98,7 +99,7 @@ func main() {
 	tel.SetDefaultLogger(slog.NewJSONHandler(os.Stderr, nil), serviceName, nil)
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
-	if err := run(ctx, os.Getenv, tel); err != nil {
+	if err := run(ctx, os.LookupEnv, tel); err != nil {
 		slog.Error("scadbuddy-core stopped", "error", err.Error())
 		flush, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		tel.Shutdown(flush)
@@ -107,8 +108,14 @@ func main() {
 	}
 }
 
-// run serves until ctx ends. tel is the process's telemetry, nil for none; serve flushes it.
-func run(ctx context.Context, env func(string) string, tel *telemetry.Telemetry) error {
+// run serves until ctx ends, over the process's environment, os.LookupEnv's shape: the
+// blobs area tells a variable set to "" from one not set, as Python's settings do. tel is
+// the process's telemetry, nil for none; serve flushes it.
+func run(ctx context.Context, lookupEnv func(string) (string, bool), tel *telemetry.Telemetry) error {
+	env := func(name string) string {
+		v, _ := lookupEnv(name)
+		return v
+	}
 	trusted, err := front.ParseNetworks(env("SCADBUDDY_CORE_TRUSTED_PROXIES"))
 	if err != nil {
 		return fmt.Errorf("SCADBUDDY_CORE_TRUSTED_PROXIES: %w", err)
@@ -154,7 +161,7 @@ func run(ctx context.Context, env func(string) string, tel *telemetry.Telemetry)
 		<-ctx.Done()
 		hub.Close()
 	}()
-	router, err := newRouter(pool, upstream, keys, env("SCADBUDDY_CORE_AREAS"), env("SCADBUDDY_AUTH_MODE"), tel.Meter(), stream)
+	router, err := newRouter(pool, upstream, keys, env("SCADBUDDY_CORE_AREAS"), env("SCADBUDDY_AUTH_MODE"), tel.Meter(), lookupEnv, tel, stream)
 	if err != nil {
 		return err
 	}
@@ -174,7 +181,7 @@ func run(ctx context.Context, env func(string) string, tel *telemetry.Telemetry)
 		if err != nil {
 			return fmt.Errorf("SCADBUDDY_CORE_CRUD_UPSTREAM: %w", err)
 		}
-		crudRouter, err := newRouter(pool, crudUpstream, keys, env("SCADBUDDY_CORE_AREAS"), env("SCADBUDDY_AUTH_MODE"), tel.Meter(), stream)
+		crudRouter, err := newRouter(pool, crudUpstream, keys, env("SCADBUDDY_CORE_AREAS"), env("SCADBUDDY_AUTH_MODE"), tel.Meter(), lookupEnv, tel, stream)
 		if err != nil {
 			return err
 		}
@@ -275,9 +282,12 @@ type streams struct {
 // newRouter answers the named areas: <area> for all its routes here, <area>:read for its GETs.
 // A named area's public routes stand in front of the CRUD router, behind the gate in
 // SCADBUDDY_AUTH_MODE's mode; meter, when not nil, counts what enforce would refuse.
+// lookupEnv is the process's environment, which the blobs area reads the store's settings from,
+// and tel the process's telemetry (nil for none), which traces its store requests.
 // stream is the process's event stream; without one, an area that needs it gets a hub of
 // its own.
-func newRouter(pool *pgxpool.Pool, next http.Handler, keys *seal.Keys, areas, authMode string, meter metric.MeterProvider, stream ...*streams) (http.Handler, error) {
+func newRouter(pool *pgxpool.Pool, next http.Handler, keys *seal.Keys, areas, authMode string, meter metric.MeterProvider,
+	lookupEnv func(string) (string, bool), tel *telemetry.Telemetry, stream ...*streams) (http.Handler, error) {
 	mode, err := auth.ParseMode(authMode, authMode != "")
 	if err != nil {
 		return nil, fmt.Errorf("SCADBUDDY_AUTH_MODE: %w", err)
@@ -332,6 +342,12 @@ func newRouter(pool *pgxpool.Pool, next http.Handler, keys *seal.Keys, areas, au
 		case "fleet":
 			router.Add(fleet.Caller, fleet.Routes(pool)...)
 			router.Add(fleet.VirtualCaller, fleet.VirtualRoutes(pool)...)
+		case blobstore.Area:
+			// A shared area (#7958): any caller whose scopes hold crud.blobs.
+			if keys == nil {
+				return nil, fmt.Errorf("SCADBUDDY_CORE_AREAS names %q, which needs %s", name, seal.Variable)
+			}
+			router.AddShared(blobstore.Area, blobstore.Routes(pool, keys, lookupEnv, tel)...)
 		case "changes":
 			s := streamOf()
 			for caller, routes := range changes.Routes(s.hub) {

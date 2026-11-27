@@ -163,12 +163,12 @@ export type SessionTurnResult = {
   parked?: string[]
   error?: string
   /**
-   * The turn's closing events as a classic turn builds them (turnCore.ts `tallyTurn`), scrubbed:
+   * The turn's closing events as a session turn builds them (turnCore.ts `tallyTurn`), scrubbed:
    * what `session.finish_turn` writes, worded with the row's spend and budget (`wordTail`).
    */
   tail?: ServerEvent[]
   /**
-   * The `error` event's code a classic turn would write for this end (turnCore.ts `tallyTurn`):
+   * The `error` event's code a session turn would write for this end (turnCore.ts `tallyTurn`):
    * `api_error`, a result subtype such as `error_max_turns`, or `turn_failed`. With `done` the
    * session stays idle and the error is still said (classic's `error_max_turns`).
    */
