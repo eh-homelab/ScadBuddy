@@ -12,8 +12,10 @@ import { advanceChecks, modelsOrderOf } from './storefrontModels'
 
 /**
  * #5282 (spec 2026-11-02 §5.1-§5.4; backend `storefront/routes.py`): the public page's edge,
- * `/api/store/v1`. Two listings: a keychain that offers a name, a size and a colour, and a
- * tag whose one colour choice lost every filament (all archived), so it cannot be ordered.
+ * `/api/store/v1`. Its listings: a keychain that offers a name, a size and a colour, a tag
+ * whose one colour choice lost every filament (all archived), so it cannot be ordered, a
+ * charm in two materials, a library file, and a dollhouse kit with 31 colour parts in
+ * five groups (#8127).
  * A render is pending once, then done, with an estimate of $12.40. A write without an
  * `Idempotency-Key` is refused, as the edge refuses it (428); a value the listing does not
  * offer is refused as the CRUD side refuses it (422).
@@ -135,7 +137,108 @@ export const FILE: Listing = {
   previews: [`${base}/listings/${FILE_ID}/preview/1.glb`, `${base}/listings/${FILE_ID}/preview/2.glb`],
 }
 
-const LISTINGS = [KEYCHAIN, TAG, CHARM, FILE]
+export const DOLLHOUSE_ID = 'l5'
+
+/** #8127: a shop's PLA colours, as many as a real shop offers a design with many parts. */
+const SHOP_PLA = [
+  ['#FFFFFF', 'Jade White'],
+  ['#000000', 'Black'],
+  ['#8E9089', 'Gray'],
+  ['#C12E1F', 'Red'],
+  ['#F4A925', 'Sunflower Yellow'],
+  ['#0A2989', 'Blue'],
+  ['#00AE42', 'Bambu Green'],
+  ['#9D432C', 'Brown'],
+  ['#F5547C', 'Pink'],
+  ['#F7E6DE', 'Beige'],
+  ['#5E43B7', 'Purple'],
+  ['#FF6A13', 'Orange'],
+  ['#A3D8E1', 'Ice Blue'],
+  ['#C8C8C8', 'Silver'],
+  ['#4D3324', 'Dark Brown'],
+  ['#AE96D4', 'Lilac Purple'],
+  ['#E4BD68', 'Gold'],
+  ['#164B35', 'Dark Green'],
+  ['#E8DBB7', 'Ivory White'],
+  ['#2850E0', 'Cobalt Blue'],
+  ['#D02727', 'Scarlet Red'],
+  ['#BB3D43', 'Maroon Red'],
+  ['#56B7E6', 'Cyan'],
+  ['#9B9EA0', 'Ash Gray'],
+  ['#E1E3E8', 'Light Gray'],
+  ['#68724D', 'Olive'],
+  ['#C98E62', 'Caramel'],
+  ['#F9C1BD', 'Sakura Pink'],
+].map(([colour, colour_name], n) => ({
+  id: `f-shop-${n}`,
+  colour: colour!,
+  colour_name: colour_name!,
+  material: 'PLA',
+  alpha: 255,
+  extra_colours: [],
+  effect: null,
+  subtype: 'Basic',
+  brand: 'Bambu Lab',
+}))
+
+/**
+ * #8127: a design with many colour parts in five groups, as the dollhouse kit offers them
+ * (31 parts on the live shop, `builtin:dollhouse-kit`). The parts come in the order the
+ * public listing sent them on 2026-11-26.
+ */
+const DOLLHOUSE_PARTS: [string, string, string][] = [
+  ['rug_color', 'Rug', 'Floors colours'],
+  ['clip_color', 'Keys, pegs and hinge pins', 'Roof, stairs & railing colours'],
+  ['door_color', 'Door leaf', 'Windows & doors colours'],
+  ['leaf_color', 'Leaves', 'Windows & doors colours'],
+  ['roof_color', 'Roof', 'Roof, stairs & railing colours'],
+  ['trim_color', 'Window sills and door thresholds', 'Walls outside colours'],
+  ['wall_color', 'Wall body, and the outside face when the exterior is plain', 'Walls outside colours'],
+  ['crown_color', 'Crown moulding', 'Walls inside colours'],
+  ['floor_color', 'Floor', 'Floors colours'],
+  ['flower_color', 'Flowers', 'Windows & doors colours'],
+  ['mortar_color', 'Mortar between bricks and stones', 'Walls outside colours'],
+  ['railing_color', 'Railing posts and rails', 'Roof, stairs & railing colours'],
+  ['shutter_color', 'Shutters', 'Windows & doors colours'],
+  ['spindle_color', 'Railing spindles', 'Roof, stairs & railing colours'],
+  ['exterior_color', 'Siding, brick, stone or stucco', 'Walls outside colours'],
+  ['flower_color_2', 'Flowers, second colour', 'Windows & doors colours'],
+  ['wainscot_color', 'Wainscoting', 'Walls inside colours'],
+  ['baseboard_color', 'Baseboard and wainscot rail', 'Walls inside colours'],
+  ['door_knob_color', 'Door knob', 'Windows & doors colours'],
+  ['wallpaper_color', 'Wallpaper pattern, first colour', 'Walls inside colours'],
+  ['door_frame_color', 'Door frame and hinge blocks', 'Windows & doors colours'],
+  ['flower_box_color', 'Flower box', 'Windows & doors colours'],
+  ['rug_border_color', 'Rug border', 'Floors colours'],
+  ['roof_accent_color', 'Roof accent: odd shingles, tile valleys, flat-roof border', 'Roof, stairs & railing colours'],
+  ['stair_riser_color', 'Stair risers and stringers', 'Roof, stairs & railing colours'],
+  ['stair_tread_color', 'Stair treads', 'Roof, stairs & railing colours'],
+  ['wall_inside_color', 'Inside face background', 'Walls inside colours'],
+  ['wallpaper_color_2', 'Wallpaper pattern, second colour', 'Walls inside colours'],
+  ['window_pane_color', 'Window glass', 'Windows & doors colours'],
+  ['floor_accent_color', 'Plank seams, herringbone, grout, checkerboard', 'Floors colours'],
+  ['window_frame_color', 'Window frame, sill-side architrave and glazing bars', 'Windows & doors colours'],
+]
+
+export const DOLLHOUSE: Listing = {
+  id: DOLLHOUSE_ID,
+  source: 'template',
+  title: 'Dollhouse kit',
+  description: 'A dollhouse room kit: floors, walls, a roof, stairs, windows and doors, in the colours you choose.',
+  params: Object.fromEntries(
+    DOLLHOUSE_PARTS.map(([name, label, group]) => [
+      name,
+      { kind: 'choice', label, group, colour: true, choices: SHOP_PLA.map((f) => f.colour), default: '#FFFFFF' },
+    ]),
+  ),
+  colours: SHOP_PLA,
+  media: [],
+  materials: ['PLA'],
+  updated_at: '2026-11-07T12:00:00Z',
+  available: true,
+}
+
+const LISTINGS = [KEYCHAIN, TAG, CHARM, FILE, DOLLHOUSE]
 
 /**
  * The listings the public page shows: the fixed ones, then each file listing the back

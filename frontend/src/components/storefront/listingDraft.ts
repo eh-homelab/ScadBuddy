@@ -1,5 +1,6 @@
 import type { CustomizerSchema, Filament, ListingBound, MediaView, OutputPlate, Param, ParamValue, RevisionSchema, SlotNeed, StorefrontListing, StorefrontListingInput } from '../../api/types'
 import type { Listing as PublicListing, PublicParam } from '../../storefront/api/client'
+import { closestColour } from '../../storefront/closestColour'
 import { customerFilaments, shownLabel, valueProblem } from '../../storefront/params'
 
 /**
@@ -337,11 +338,13 @@ export function defaultsFor(
     .filter((filament) => !offered.includes(filament))
   const colours = [...offered, ...new Set(support)].map((filament) => filament.id)
   // #6144: an offered colour whose template default no colour on offer has starts at the
-  // value the person was looking at, else the first colour on offer, so publish takes it.
+  // value the person was looking at, else the colour on offer closest to it (#8126), so
+  // publish takes it.
   const pickable = pickableColours({ ...emptyDraft(), params, fixed, colours }, schema, filaments)
+  const listed = filaments.filter((filament) => colours.includes(filament.id))
   for (const param of shown) {
     const bound = params[param.name]
-    if (bound && param.type === 'color') params[param.name] = fittedDefault(param, bound, pickable, valueOf(param))
+    if (bound && param.type === 'color') params[param.name] = fittedDefault(param, bound, pickable, valueOf(param), listed)
   }
   return { params, fixed, colours }
 }
@@ -473,9 +476,21 @@ export function defaultFits(param: Param, bound: ListingBound, value: ParamValue
   return bound.choices.some((choice) => choice === value)
 }
 
-/** The value `bound` allows nearest `value`: a number put in the range and on the step, text cut to the length, else the first choice or colour. */
-function nearestAllowed(param: Param, bound: ListingBound, value: ParamValue | null | undefined, colours: readonly string[]): ParamValue | undefined {
-  if (param.type === 'color') return colours[0]
+/**
+ * The value `bound` allows nearest `value`: the colour on offer closest to it (#8126, the
+ * shop's rule `storefront/closestColour.ts`, each colour's swatch the first of `filaments`
+ * with it), a number put in the range and on the step, text cut to the length, else the
+ * first choice.
+ */
+function nearestAllowed(param: Param, bound: ListingBound, value: ParamValue | null | undefined, colours: readonly string[], filaments: readonly Filament[]): ParamValue | undefined {
+  if (param.type === 'color') {
+    const swatches = colours.map((colour) => {
+      const filament = filamentOf(colour, filaments)
+      return { hex: colour, name: filament?.colour_name, alpha: filament?.alpha }
+    })
+    const index = closestColour({ hex: typeof value === 'string' ? value : '', name: null }, swatches)
+    return index === null ? undefined : colours[index]
+  }
   if (bound.kind === 'number') {
     const start = typeof value === 'number' && Number.isFinite(value) ? value : bound.min
     const step = bound.step ?? param.step
@@ -493,13 +508,14 @@ function nearestAllowed(param: Param, bound: ListingBound, value: ParamValue | n
  * listing default that fits stays; else none, when the template's fits; else `current` (the
  * value the person was looking at, or the locked one) when it fits; else the value the
  * bound allows nearest it. A bound that allows nothing keeps no default. `colours` are the
- * colours a customer can pick, for a colour parameter.
+ * colours a customer can pick, for a colour parameter, and `filaments` the listing's, whose
+ * names and alphas the closest colour compares.
  */
-export function fittedDefault(param: Param, bound: ListingBound, colours: readonly string[], current?: ParamValue | null): ListingBound {
+export function fittedDefault(param: Param, bound: ListingBound, colours: readonly string[], current?: ParamValue | null, filaments: readonly Filament[] = []): ListingBound {
   const { default: own, ...rest } = bound
   if (defaultFits(param, bound, own, colours)) return bound
   if (defaultFits(param, bound, param.initial, colours)) return rest as ListingBound
-  const start = defaultFits(param, bound, current, colours) ? current : nearestAllowed(param, bound, current ?? own ?? param.initial, colours)
+  const start = defaultFits(param, bound, current, colours) ? current : nearestAllowed(param, bound, current ?? own ?? param.initial, colours, filaments)
   return start === undefined || !defaultFits(param, bound, start, colours) ? (rest as ListingBound) : ({ ...rest, default: start } as ListingBound)
 }
 

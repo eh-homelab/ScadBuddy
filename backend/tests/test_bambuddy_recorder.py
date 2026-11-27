@@ -71,6 +71,10 @@ def test_the_inventory_reads_are_answered(recorder: str) -> None:
     assert tagged[0]["tray_uuid"] == module.TAGGED_TRAY_UUID
     assert tagged[0]["tag_uid"] == module.TAGGED_TAG_UID
 
+    # #8146: no two spools share a tag, as in a real Bambuddy, so the pull links every one.
+    tags = [s["tag_uid"] for s in spools if s.get("tag_uid")]
+    assert len(tags) == len(set(tags)), tags
+
     status, assignments = _call(f"{recorder}/api/v1/inventory/assignments/")
     assert status == 200
     assert assignments == json.loads((RECORDINGS / "inventory-assignments.json").read_text())

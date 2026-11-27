@@ -13,6 +13,7 @@ import (
 	"net/url"
 	"os"
 	"os/signal"
+	"path"
 	"strings"
 	"sync/atomic"
 	"syscall"
@@ -28,6 +29,7 @@ import (
 	"github.com/eh-homelab/ScadBuddy/tools/go/core/internal/agentreads"
 	"github.com/eh-homelab/ScadBuddy/tools/go/core/internal/agentstart"
 	"github.com/eh-homelab/ScadBuddy/tools/go/core/internal/approvals"
+	"github.com/eh-homelab/ScadBuddy/tools/go/core/internal/assistantcost"
 	"github.com/eh-homelab/ScadBuddy/tools/go/core/internal/audit"
 	"github.com/eh-homelab/ScadBuddy/tools/go/core/internal/auth"
 	"github.com/eh-homelab/ScadBuddy/tools/go/core/internal/blobs"
@@ -38,6 +40,7 @@ import (
 	"github.com/eh-homelab/ScadBuddy/tools/go/core/internal/edits"
 	"github.com/eh-homelab/ScadBuddy/tools/go/core/internal/escalations"
 	"github.com/eh-homelab/ScadBuddy/tools/go/core/internal/events"
+	"github.com/eh-homelab/ScadBuddy/tools/go/core/internal/fetchgrants"
 	"github.com/eh-homelab/ScadBuddy/tools/go/core/internal/fleet"
 	"github.com/eh-homelab/ScadBuddy/tools/go/core/internal/forget"
 	"github.com/eh-homelab/ScadBuddy/tools/go/core/internal/front"
@@ -114,6 +117,16 @@ func run(ctx context.Context, lookupEnv func(string) (string, bool), tel *teleme
 	env := func(name string) string {
 		v, _ := lookupEnv(name)
 		return v
+	}
+	// Set but empty stops the start, as in Python; newRouter reads empty as unset.
+	if _, set := lookupEnv("SCADBUDDY_AUTH_MODE"); set {
+		if _, err := auth.ParseMode(env("SCADBUDDY_AUTH_MODE"), true); err != nil {
+			return fmt.Errorf("SCADBUDDY_AUTH_MODE: %w", err)
+		}
+	}
+	// A value Python refuses at its start stops core's too, not each request later.
+	if err := assistantcost.CheckEnv(lookupEnv); err != nil {
+		return err
 	}
 	trusted, err := front.ParseNetworks(env("SCADBUDDY_CORE_TRUSTED_PROXIES"))
 	if err != nil {
@@ -251,6 +264,7 @@ var areaPackages = []areaRoutes{
 	ordercosts.Areas, packages.Areas, pending.Areas, plugins.Areas, publish.Areas,
 	questions.Areas, secrets.Areas, sessions.Areas, stores.Areas, sweeps.Areas, tasks.Areas,
 	transcripts.Areas, workspace.Areas,
+	assistantcost.Areas, fetchgrants.Areas,
 }
 
 // publicAreas is a package's public routes by area name, over the pool, with the KEKs.
@@ -320,7 +334,8 @@ func newRouter(pool *pgxpool.Pool, next http.Handler, keys *seal.Keys, areas, au
 	more := map[string][]crud.Route{}
 	for _, p := range areaPackages {
 		for name, routes := range p(pool, keys) {
-			more[name] = routes
+			// Two packages may serve one area (keys: secrets and fetchgrants).
+			more[name] = append(more[name], routes...)
 		}
 	}
 	for name := range strings.SplitSeq(areas, ",") {
@@ -338,6 +353,8 @@ func newRouter(pool *pgxpool.Pool, next http.Handler, keys *seal.Keys, areas, au
 			router.Add("agent", turn.Writes()...)
 		case "fleet":
 			router.Add(fleet.Caller, fleet.Routes(pool)...)
+			router.Add(fleet.Caller, fleet.RegistryReads(pool)...)
+			router.Add(fleet.RotatorCaller, fleet.RegistryWrites(pool)...)
 			router.Add(fleet.VirtualCaller, fleet.VirtualRoutes(pool)...)
 		case blobstore.Area:
 			// A shared area (#7958): any caller whose scopes hold crud.blobs.
@@ -371,14 +388,43 @@ func newRouter(pool *pgxpool.Pool, next http.Handler, keys *seal.Keys, areas, au
 	}
 	var handler http.Handler = router
 	if served {
-		public.Handle("/", router)
-		handler = public
+		handler = &publicFront{mux: public, next: router}
 	}
 	if socket {
 		// The browser's socket is no CRUD route: it stands in front of the router.
 		return realtime.New(context.Background(), st.hub, pool, handler, st.env, gate)
 	}
 	return handler, nil
+}
+
+// publicFront serves a request from the public routes only where its path is canonical and
+// one of them matches it, method included; every other request, a path the mux would answer
+// with its own redirect among them, goes on to next unchanged.
+type publicFront struct {
+	mux  *http.ServeMux
+	next http.Handler
+}
+
+func (f *publicFront) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	if p := r.URL.Path; p == canonical(p) {
+		if _, pattern := f.mux.Handler(r); pattern != "" {
+			f.mux.ServeHTTP(w, r)
+			return
+		}
+	}
+	f.next.ServeHTTP(w, r)
+}
+
+// canonical is p as net/http's mux cleans it: path.Clean, keeping a trailing slash.
+func canonical(p string) string {
+	if p == "" || p[0] != '/' {
+		return "/" + p
+	}
+	c := path.Clean(p)
+	if strings.HasSuffix(p, "/") && c != "/" {
+		c += "/"
+	}
+	return c
 }
 
 // newUpstream forwards to the Python API at an http:// URL or a unix:///path socket. The

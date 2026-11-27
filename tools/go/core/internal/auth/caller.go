@@ -56,13 +56,16 @@ const (
 )
 
 // Caller is who a request is from, as auth/gate.py AuthGate resolves it. It holds no
-// credential: never a token, a cookie value or a hash.
+// credential: never a token or a cookie value.
 type Caller struct {
 	Kind Kind
 	// Principal is the person, for KindPerson and KindToken: "user:<issuer>#<subject>".
 	Principal string
 	// SessionKind is a person's session kind: "login", "delegated" or "break_glass".
 	SessionKind string
+	// SessionID is a person's session row: the hex SHA-256 of its cookie (Python's
+	// id_hash.hex()), what an auth.session_revoked names. It is an id, never logged.
+	SessionID string
 	// TokenID is an access token's id, TokenScope its scope: "read" or "write".
 	TokenID, TokenScope string
 	// Service is the credential's caller and scopes, for KindService.
@@ -120,18 +123,6 @@ func (r *Resolver) Caller(ctx context.Context, h http.Header) Caller {
 	return *c
 }
 
-// SessionID is the hex SHA-256 of the session cookie Caller reads from h (Python's
-// session.id_hash.hex()), "" when h carries none. A KindPerson caller's session is this one:
-// what an auth.session_revoked names. It is an id, never logged.
-func SessionID(h http.Header) string {
-	token := parseCookies(h.Get("Cookie"))[SessionCookie]
-	if token == "" {
-		return ""
-	}
-	sum := sha256.Sum256([]byte(token))
-	return hex.EncodeToString(sum[:])
-}
-
 func (r *Resolver) now() time.Time {
 	if r.Now != nil {
 		return r.Now().UTC()
@@ -180,7 +171,7 @@ func (r *Resolver) session(ctx context.Context, token string) (*Caller, error) {
 	defer cancel()
 	now := r.now()
 	const live = `revoked_at IS NULL AND idle_expires_at > $2 AND absolute_expires_at > $2`
-	c := Caller{Kind: KindPerson}
+	c := Caller{Kind: KindPerson, SessionID: hex.EncodeToString(hash[:])}
 	var seen time.Time
 	err := r.Pool.QueryRow(ctx, `SELECT principal, kind, last_seen_at FROM auth_sessions
 		WHERE id_hash = $1 AND `+live, hash[:], now).Scan(&c.Principal, &c.SessionKind, &seen)

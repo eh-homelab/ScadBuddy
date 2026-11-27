@@ -399,8 +399,13 @@ func TestTheAgentsOwnRowsOpenHere(t *testing.T) {
 	for _, c := range v.Credentials {
 		s, _ := base64.StdEncoding.DecodeString(c.Secret)
 		d, _ := base64.StdEncoding.DecodeString(c.DEK)
-		a.sql(`INSERT INTO ai_credentials (id, priority, kind, base_url, secret_sealed, dek_sealed, kek_id, last4)
-			VALUES ($1, $2, $3, $4, $5, $6, $7, '')`, c.ID, c.Priority, c.Kind, c.BaseURL, s, d, c.KEKID)
+		// A claude_login is the fleet's (#7983): its scope is fleet, and the agent's reveal skips it.
+		scope := "agent"
+		if c.Kind == claudeLogin {
+			scope = "fleet"
+		}
+		a.sql(`INSERT INTO ai_credentials (id, priority, kind, base_url, secret_sealed, dek_sealed, kek_id, last4, scope)
+			VALUES ($1, $2, $3, $4, $5, $6, $7, '', $8)`, c.ID, c.Priority, c.Kind, c.BaseURL, s, d, c.KEKID, scope)
 	}
 	rows := a.post("/credentials/reveal", obj{"all": true, "purpose": "turn"}).body["credentials"].([]any)
 	byID := map[string]any{}
@@ -408,7 +413,13 @@ func TestTheAgentsOwnRowsOpenHere(t *testing.T) {
 		byID[r.(obj)["stored"].(obj)["id"].(string)] = r.(obj)["credential"]
 	}
 	for _, c := range v.Credentials {
-		got := byID[c.ID]
+		got, listed := byID[c.ID]
+		if c.Kind == claudeLogin {
+			if listed {
+				t.Errorf("%s: the agent's reveal listed a fleet row", c.Name)
+			}
+			continue
+		}
 		if c.Opens != (got != nil) || (got != nil && got.(obj)["secret"] != c.Plaintext) {
 			t.Errorf("%s: %v", c.Name, got)
 		}
@@ -650,7 +661,7 @@ func TestTheInputHashKeyIsTheAgentsOwn(t *testing.T) {
 	if !strings.Contains(answer.header.Get("Cache-Control"), "no-store") {
 		t.Fatal(answer.header)
 	}
-	// A fetch grant is still Python's.
+	// A fetch grant is internal/fetchgrants's, not this package's.
 	expect(t, a.post("/fetch-grants", obj{"host": "a.example", "url": "https://a.example/x"}).status, 404)
 }
 

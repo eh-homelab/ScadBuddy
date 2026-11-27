@@ -10,7 +10,8 @@ Task 6b), and the stack's seed runs it once before resetting the list:
 - ``GET /api/v1/inventory/spools`` from ``answers/inventory-spools.json``, with spool
   ``RECORDER_TAGGED_SPOOL_ID`` (2) given the fake printer's tagged tray's ``tray_uuid``
   and ``tag_uid`` (``e2e-stack/fake-printer/report.json``, AMS 0 tray 0), so its pulled
-  SB spool holds that tray by its tag;
+  SB spool holds that tray by its tag, and each other tagged spool given a tag of its own
+  (the recording's scrub wrote one tag on all of them, #8146);
 - ``GET /api/v1/inventory/assignments`` from ``answers/inventory-assignments.json``
   (``read_assignments``, which places a linked SB spool no report shows);
 - ``GET /api/v1/inventory/catalog`` from ``answers/inventory-catalog.json`` (#6262: the pull
@@ -45,6 +46,17 @@ ANSWERS = Path(__file__).with_name("answers")
 #: The fake printer's tagged tray (``e2e-stack/fake-printer/report.json``).
 TAGGED_TRAY_UUID = "5CADB0DDF1A7E5000000000000000001"
 TAGGED_TAG_UID = "FA4E0DE1C0FFEE01"
+#: The tag the recording's scrub wrote on every tagged spool. A real Bambuddy never gives two
+#: spools one tag, and the pull leaves a spool alone whose tag a linked spool holds
+#: (``filament/bambuddy_pull.py`` ``_linked_holder``, #6264), so each spool gets its own.
+SCRUBBED_TAG_UID = "TAGUID0000000000"
+
+
+def scrubbed_tag_uid(spool_id: int) -> str:
+    """The tag of scrubbed spool ``spool_id``: 16 hex digits, one per spool (#8146)."""
+    return f"5CADB0DD{spool_id:08X}"
+
+
 #: The status every unanswered request gets.
 FORBIDDEN_STATUS = 599
 
@@ -54,6 +66,8 @@ def _answers(tagged_spool_id: int) -> dict[str, Any]:
     for spool in spools:
         if spool["id"] == tagged_spool_id:
             spool.update(tray_uuid=TAGGED_TRAY_UUID, tag_uid=TAGGED_TAG_UID)
+        elif spool.get("tag_uid") == SCRUBBED_TAG_UID:
+            spool["tag_uid"] = scrubbed_tag_uid(spool["id"])
     assignments = json.loads((ANSWERS / "inventory-assignments.json").read_text())
     return {
         "/api/v1/inventory/spools": spools,

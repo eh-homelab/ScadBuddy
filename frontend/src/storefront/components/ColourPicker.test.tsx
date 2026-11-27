@@ -98,6 +98,27 @@ describe('ColourPicker (#6152, #6258)', () => {
     expect(dot('Rainbow · Multicolor').style.backgroundImage).toContain('conic-gradient')
   })
 
+  it('shows the colours in use first, and moves down from them into the rest by column (#8127)', async () => {
+    const many = Array.from({ length: 10 }, (_, n) => f(`m${n}`, `#${String(n).padStart(2, '0')}0000`, `Shade ${n}`))
+    const { user } = show({ filaments: many, shown: '#030000', used: ['#030000', '#050000'] })
+    await user.click(screen.getByRole('button', { name: /Letters/ }))
+    const radios = screen.getAllByRole('radio')
+    expect(radios.slice(0, 2).map((radio) => radio.getAttribute('aria-label'))).toEqual(['Shade 3', 'Shade 5'])
+    expect(screen.getByText('In this design')).toBeInTheDocument()
+    expect(document.activeElement).toBe(radios[0])
+    // Down from the second of the first section goes to the second of the next one.
+    await user.keyboard('{ArrowRight}{ArrowDown}')
+    expect(document.activeElement).toBe(radios[3])
+    await user.keyboard('{ArrowUp}')
+    expect(document.activeElement).toBe(radios[1])
+  })
+
+  it('shows one plain grid when no colour is in use (#8127)', async () => {
+    const { user } = show({ shown: undefined })
+    await user.click(screen.getByRole('button', { name: /Letters/ }))
+    expect(screen.queryByText('In this design')).toBeNull()
+  })
+
   it('goes back to the shop’s choice', async () => {
     const { user, onChange } = show({ picked: true, shown: '#0A2E8C' })
     await user.click(screen.getByRole('button', { name: /Letters/ }))

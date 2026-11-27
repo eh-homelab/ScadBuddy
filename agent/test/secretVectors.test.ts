@@ -2,7 +2,7 @@ import { createCipheriv, createHash } from 'node:crypto'
 import { readFileSync, writeFileSync } from 'node:fs'
 import { describe, expect, it } from 'vitest'
 import { credentialAad, LEGACY_FORMAT_MESSAGE, type CredentialKind } from '../src/credentials.js'
-import { openCredential } from './support/memoryCredentials.js'
+import { openSealed } from './support/memoryCredentials.js'
 import { kekFromBase64, openSecret, sealSecret, type RandomSource } from '../src/secrets.js'
 
 // The one source of truth for the sealed format (spec 2026-10-01 §6.2, "Test
@@ -26,12 +26,28 @@ function counter(seed: number): RandomSource {
 const KEK_B64 = Buffer.alloc(32, 0x5a).toString('base64')
 const kek = kekFromBase64(KEK_B64)
 
+const CREDENTIAL_LOGIN_OBJECT = {
+  accessToken: 'sk-ant-oat01-vector-4444444444444444',
+  refreshToken: 'sk-ant-ort01-vector-4444444444444444',
+  expiresAt: 1795000000000,
+  refreshTokenExpiresAt: null,
+  accountUuid: 'c0ffee00-0000-4000-8000-0000000000aa',
+  organizationUuid: 'c0ffee00-0000-4000-8000-0000000000bb',
+  rateLimitTier: 'default_claude_max_20x',
+  scopes: ['user:inference', 'user:profile'],
+  subscriptionType: 'max',
+  subscriptionTypeSource: 'account',
+}
+const CLAUDE_LOGIN = JSON.stringify(CREDENTIAL_LOGIN_OBJECT)
+
 const CREDENTIALS: { name: string; id: string; priority: number; kind: CredentialKind; base_url: string | null; plaintext: string }[] = [
   { name: 'api key, migrated row id', id: 'default', priority: 0, kind: 'anthropic_api_key', base_url: null, plaintext: 'sk-ant-api03-vector-0000000000000000' },
   { name: 'oauth token', id: 'c0ffee00-0000-4000-8000-000000000001', priority: 1, kind: 'claude_oauth_token', base_url: null, plaintext: 'sk-ant-oat01-vector-1111111111111111' },
   { name: 'gateway with a path', id: 'c0ffee00-0000-4000-8000-000000000002', priority: 2, kind: 'gateway', base_url: 'https://gw.example.com/anthropic/v1', plaintext: 'gw-token-vector-2222222222222222' },
   // Review Focus 1: JSON.stringify leaves non-ASCII as is; the port must too.
   { name: 'gateway, non-ASCII host', id: 'c0ffee00-0000-4000-8000-000000000003', priority: 3, kind: 'gateway', base_url: 'https://passerelle.exemple.fr/é/v1', plaintext: 'gw-token-vector-3333333333333333' },
+  // #7983: a whole claudeAiOauth object, as Claude Code writes it to .credentials.json.
+  { name: 'claude login', id: 'c0ffee00-0000-4000-8000-000000000004', priority: 4, kind: 'claude_login', base_url: null, plaintext: CLAUDE_LOGIN },
 ]
 
 /** A version-1 envelope as #354 wrote it (AAD = the bare context). Frozen: seal never writes v1. */
@@ -87,8 +103,8 @@ describe('secret vectors', () => {
         id: v.id, kind: v.kind, base_url: v.base_url,
         envelope: { secretSealed: Buffer.from(v.secret_sealed_b64, 'base64'), dekSealed: Buffer.from(v.dek_sealed_b64, 'base64'), kekId: v.kek_id },
       }
-      if (v.opens) expect(openCredential(kek, row).secret).toBe(v.plaintext)
-      else expect(() => openCredential(kek, row)).toThrow(LEGACY_FORMAT_MESSAGE)
+      if (v.opens) expect(openSealed(kek, row)).toBe(v.plaintext)
+      else expect(() => openSealed(kek, row)).toThrow(LEGACY_FORMAT_MESSAGE)
     }
     for (const v of built.secrets) {
       const env = { secretSealed: Buffer.from(v.secret_sealed_b64, 'base64'), dekSealed: Buffer.from(v.dek_sealed_b64, 'base64'), kekId: v.kek_id }

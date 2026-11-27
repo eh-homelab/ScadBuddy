@@ -1,6 +1,6 @@
 """The outputs routes in the steady state (#7255): the rows answer every read and a
-missing row is a missing output. Release B retired the copy (#7257), and #7887 removed
-what read its run tables."""
+missing row is a missing output. Release B retired the copy (#7257), and #7887 dropped
+its run tables."""
 
 from __future__ import annotations
 
