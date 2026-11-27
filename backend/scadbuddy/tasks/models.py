@@ -18,6 +18,7 @@ from pydantic import (
 from scadbuddy.core.events import TASK_PLACE_CHAR, TASK_PLACE_MAX
 from scadbuddy.core.json_values import unstorable
 from scadbuddy.tasks.schema import prompt_schema_problems
+from scadbuddy.tasks.widgets import context_problems
 
 TaskState = Literal["open", "answered", "cancelled", "expired"]
 
@@ -71,6 +72,8 @@ class TaskOpen(_TaskFields):
     def _context_is_small(cls, value: list[dict[str, Any]]) -> list[dict[str, Any]]:
         if not json_fits(value):
             raise ValueError(f"the context is more than {MAX_JSON_BYTES} bytes of JSON")
+        if problems := context_problems(value):
+            raise ValueError("; ".join(problems))
         return value
 
     @field_validator("ui")

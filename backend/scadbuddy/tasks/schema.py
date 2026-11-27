@@ -17,5 +17,10 @@ def prompt_schema_problems(
     for bad in unstorable(schema):
         return [f"the schema {bad.message}"]
     return schema_problems(
-        schema, stored=stored, formats=True, defaults=defaults, retry_timeouts=retry_timeouts
+        schema,
+        stored=stored,
+        formats=True,
+        widgets=True,
+        defaults=defaults,
+        retry_timeouts=retry_timeouts,
     )
