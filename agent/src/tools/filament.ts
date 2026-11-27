@@ -102,6 +102,7 @@ const EVENT_KINDS = [
   'restored',
   'synced_from_bb',
   'consumed_reset',
+  'non_print_waste',
 ] as const
 
 /** A calendar day, as the metrics routes' `date` query takes it. */
