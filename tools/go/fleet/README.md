@@ -47,7 +47,10 @@ telemetry's `Transport`); `(*Exchange).WrapTransport` does the same for the exch
   `handle-taken` (409, two session ids that share their first 8 hex characters) to
   `sbfleet.ErrHandleTaken`, `seq-ahead` (422, a rewind past the cursor) to
   `fleetchat.ErrBadSeq`, and `text-too-long` (422, a text over core's 16 MiB, detail
-  `text is longer than 16777216 bytes`) to `fleetchat.ErrTooLong`. Any other answer is an error that names the status. A 403
+  `text is longer than 16777216 bytes`) to `fleetchat.ErrTooLong`. `virtual-sender` (422,
+  a DM to a virtual sender's name such as `rotator`) is `fleetchat.ErrVirtualSender`, as a
+  `fleetchat.VirtualSenderError` whose text is core's detail, the sender's reject message
+  alone, so `fleet_send` shows that text. Any other answer is an error that names the status. A 403
   with no `not-member` reason (the CRUD guard's refusal) is not `ErrNotMember`. Every
   request has a 30 s timeout.
 - `NewBus(coreURL, token)`: a `fleetchat.Bus`. `Publish` does nothing: core publishes

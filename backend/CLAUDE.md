@@ -488,7 +488,10 @@ only the sleeps move; a budget on the real clock fails on a slow runner (#6252).
   sessions), `api/crud_agent_plugins.py` (area `plugins`: the remote plugins and their
   OAuth sign-ins, sealed and opened with the KEK under the agent's AAD,
   `agent_data/plugins.py`, which also re-wraps them in the rotation; a token refresh is
-  stored only while the lease `plugin-oauth:<plugin>` holds) and `api/crud_agent_packages.py`
+  stored only while the lease `plugin-oauth:<plugin>` holds; Go's copy is
+  `tools/go/core/internal/plugins`, area `remote-plugins`, held to Python's AADs by
+  `tests/fixtures/plugin-seal-vectors.json`, which `tests/test_plugin_seal_vectors.py`
+  writes with `UPDATE_PLUGIN_SEAL_VECTORS=1`, #8048) and `api/crud_agent_packages.py`
   (area `plugin-packages`: each write with `agent_data/packages.py` `prune_stale_rows`, the
   agent's `pruneStaleRows`; area `package-mirrors`, #6935: an archive or npm pin's file kept
   as the blob `plugin-mirror-<sha256>` by `agent_data/package_mirrors.py`, a bytes pin

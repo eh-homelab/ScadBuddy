@@ -12,7 +12,6 @@ package realtime
 
 import (
 	"context"
-	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -30,9 +29,6 @@ import (
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
-	"go.opentelemetry.io/otel/attribute"
-	"go.opentelemetry.io/otel/metric"
-	"go.opentelemetry.io/otel/metric/noop"
 	"go.opentelemetry.io/otel/trace"
 
 	"github.com/eh-homelab/ScadBuddy/tools/go/core/internal/auth"
@@ -62,49 +58,34 @@ const (
 	SignedOut = 4401
 	// DefaultSockets is core/config.py DEFAULT_REALTIME_SOCKETS.
 	DefaultSockets = 256
-	// SessionCookie is auth/gate.py SESSION_COOKIE.
-	SessionCookie = "__Host-scadbuddy_session"
-	via           = "ws"
+	via            = "ws"
 )
 
 // Socket serves the realtime socket and gives every other request to Next.
 type Socket struct {
-	Hub      *bus.Hub
-	Pool     *pgxpool.Pool
-	Next     http.Handler
-	Services *auth.Resolver
-	// AuthMode is SCADBUDDY_AUTH_MODE: "off", "observe" or "enforce".
-	AuthMode string
+	Hub  *bus.Hub
+	Pool *pgxpool.Pool
+	Next http.Handler
+	// Gate resolves the handshake's caller and applies SCADBUDDY_AUTH_MODE to it, as to the
+	// public routes: the socket is an "api" route (auth/routes.py).
+	Gate *auth.Gate
 	// AllowedOrigins is SCADBUDDY_ALLOWED_ORIGINS, PublicURL SCADBUDDY_PUBLIC_URL (the
 	// setting's value when it has no row).
 	AllowedOrigins []string
 	PublicURL      string
 	// slots are the sockets that may be open at once (SCADBUDDY_REALTIME_SOCKETS).
 	slots chan struct{}
-	// wouldRefuse counts, in observe, the sockets enforce would refuse (auth/observe.py).
-	wouldRefuse metric.Int64Counter
-	loggedMu    sync.Mutex
-	logged      map[string]time.Time
+	// gated is open behind Gate.
+	gated http.Handler
 }
 
 // New is the socket over hub and pool, with its settings read from env and the settings
-// table, once: realtime_sockets takes a restart in Python too. meter, when not nil, gets
-// the observe mode's count.
+// table, once: realtime_sockets takes a restart in Python too. gate is the process's gate:
+// its mode, and its count of what enforce would refuse.
 func New(ctx context.Context, hub *bus.Hub, pool *pgxpool.Pool, next http.Handler, env func(string) string,
-	meter metric.MeterProvider) (*Socket, error) {
-	s := &Socket{Hub: hub, Pool: pool, Next: next, Services: &auth.Resolver{Pool: pool},
-		AuthMode: strings.TrimSpace(env("SCADBUDDY_AUTH_MODE")), PublicURL: env("SCADBUDDY_PUBLIC_URL"),
-		logged: map[string]time.Time{}}
-	if meter == nil {
-		meter = noop.NewMeterProvider()
-	}
-	// The error is only for an invalid name, fixed here; a failed counter is a no-op.
-	s.wouldRefuse, _ = meter.Meter("github.com/eh-homelab/ScadBuddy/tools/go/core/internal/realtime").Int64Counter(
-		"scadbuddy.auth.would_refuse",
-		metric.WithDescription("Requests that SCADBUDDY_AUTH_MODE=enforce would refuse, served in observe."))
-	if s.AuthMode == "" {
-		s.AuthMode = "off"
-	}
+	gate *auth.Gate) (*Socket, error) {
+	s := &Socket{Hub: hub, Pool: pool, Next: next, Gate: gate, PublicURL: env("SCADBUDDY_PUBLIC_URL")}
+	s.gated = gate.Wrap(auth.Route{Class: "api", Template: Path}, http.HandlerFunc(s.open))
 	for item := range strings.SplitSeq(env("SCADBUDDY_ALLOWED_ORIGINS"), ",") {
 		if item = strings.TrimSpace(item); item != "" {
 			s.AllowedOrigins = append(s.AllowedOrigins, item)
@@ -145,20 +126,18 @@ func (s *Socket) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		s.Next.ServeHTTP(w, r)
 		return
 	}
-	scheme, bearer, _ := strings.Cut(r.Header.Get("Authorization"), " ")
-	if strings.EqualFold(scheme, "bearer") && strings.HasPrefix(bearer, "sbpat_") {
-		// A person's access token: Python resolves those (auth/personal_tokens.py).
-		s.Next.ServeHTTP(w, r)
-		return
-	}
 	telemetry.SetRoute(r.Context(), Path)
-	who := s.caller(r, scheme, bearer)
-	if reason := who.refusal(); reason != "" && s.AuthMode != "off" {
-		if s.AuthMode == "enforce" {
-			refuse(w) // before it is accepted, as auth/check.py closes it (1008)
-			return
-		}
-		s.noteRefusal(r.Context(), reason)
+	// In enforce the gate refuses a handshake before it is accepted (403 with no body), as
+	// auth/check.py closes it (1008); in observe it counts it and serves it.
+	s.gated.ServeHTTP(w, r)
+}
+
+// open serves a handshake the gate let through.
+func (s *Socket) open(w http.ResponseWriter, r *http.Request) {
+	var who caller
+	if c := auth.CallerOf(r.Context()); c.Kind == auth.KindPerson {
+		// Only a session's socket closes on its revocation (realtime.py _serve).
+		who = caller{session: auth.SessionID(r.Header), principal: c.Principal}
 	}
 	if !s.originAllowed(r) {
 		refuse(w)
@@ -180,91 +159,10 @@ func (s *Socket) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	s.serve(context.WithoutCancel(r.Context()), c, who)
 }
 
-// caller is who opened the socket, as auth/gate.py resolves it.
+// caller is a session's socket, as realtime.py _serve keeps it: session is the hex SHA-256
+// of the session's token, principal its person. Any other caller's is empty.
 type caller struct {
-	service *auth.Service
-	// session is the hex SHA-256 of a live session's token, principal its person.
 	session, principal string
-}
-
-// refusal is auth/routes.py would_refuse for the socket, an "api" route: why enforce would
-// refuse it, or "".
-func (c caller) refusal() string {
-	switch {
-	case c.service != nil && !c.service.Has("api"):
-		return "out_of_scope"
-	case c.service == nil && c.session == "":
-		return "signed_out"
-	}
-	return ""
-}
-
-// logEvery is auth/observe.py LOG_INTERVAL: each reason is logged once a minute at most.
-const logEvery = time.Minute
-
-// noteRefusal is auth/observe.py WouldRefuse.note: counted as
-// scadbuddy_auth_would_refuse_total{class, reason}, and logged.
-func (s *Socket) noteRefusal(ctx context.Context, reason string) {
-	s.wouldRefuse.Add(ctx, 1, metric.WithAttributes(attribute.String("class", "api"), attribute.String("reason", reason)))
-	now := time.Now()
-	s.loggedMu.Lock()
-	last, seen := s.logged[reason]
-	if seen && now.Sub(last) < logEvery {
-		s.loggedMu.Unlock()
-		return
-	}
-	s.logged[reason] = now
-	s.loggedMu.Unlock()
-	slog.WarnContext(ctx, "enforce would refuse an api request ("+reason+"); served, as SCADBUDDY_AUTH_MODE=observe",
-		"route", Path)
-}
-
-var tokenPattern = regexp.MustCompile(`^[A-Za-z0-9_-]{43}$`)
-
-func (s *Socket) caller(r *http.Request, scheme, bearer string) caller {
-	if strings.EqualFold(scheme, "bearer") && strings.HasPrefix(bearer, "sbsvc_") {
-		// A cookie beside a service credential is not looked at.
-		return caller{service: s.Services.Resolve(r.Context(), r.Header.Get("Authorization"))}
-	}
-	cookie, err := r.Cookie(SessionCookie)
-	if err != nil || !tokenPattern.MatchString(cookie.Value) {
-		return caller{}
-	}
-	sum := sha256.Sum256([]byte(cookie.Value))
-	principal, err := s.session(r.Context(), sum[:], time.Now().UTC())
-	if err != nil {
-		slog.WarnContext(r.Context(), "session lookup failed; serving the socket as anonymous", "error", err.Error())
-		return caller{}
-	}
-	if principal == "" {
-		return caller{}
-	}
-	return caller{session: hex.EncodeToString(sum[:]), principal: principal}
-}
-
-// session is auth/store.py SessionStore.resolve: the live session's principal, "" for none.
-// Its idle deadline slides when it was last seen a minute ago or more.
-func (s *Socket) session(ctx context.Context, idHash []byte, now time.Time) (string, error) {
-	ctx, cancel := context.WithTimeout(ctx, 5*time.Second)
-	defer cancel()
-	const live = `revoked_at IS NULL AND idle_expires_at > $2 AND absolute_expires_at > $2`
-	var principal string
-	var seen time.Time
-	err := s.Pool.QueryRow(ctx, `SELECT principal, last_seen_at FROM auth_sessions WHERE id_hash = $1 AND `+live,
-		idHash, now).Scan(&principal, &seen)
-	if errors.Is(err, pgx.ErrNoRows) {
-		return "", nil
-	}
-	if err != nil || now.Sub(seen) < time.Minute {
-		return principal, err
-	}
-	err = s.Pool.QueryRow(ctx, `UPDATE auth_sessions SET last_seen_at = $2,
-		idle_expires_at = LEAST($2 + interval '14 days', absolute_expires_at)
-		WHERE id_hash = $1 AND `+live+` RETURNING principal`, idHash, now).Scan(&principal)
-	if errors.Is(err, pgx.ErrNoRows) {
-		return "", nil
-	}
-	return principal, err
 }
 
 // originAllowed is core/origins.py origin_allowed with the public URL and the allowed
@@ -455,7 +353,7 @@ func (x *session) ping(ctx context.Context) string {
 // topic; a resync when the subscription dropped events or the listener lost some.
 func (x *session) pump(ctx context.Context) string {
 	dropped := 0
-	revocable := x.s.AuthMode != "off" && x.who.session != ""
+	revocable := x.s.Gate.Mode != auth.Off && x.who.session != ""
 	for {
 		it, _ := x.sub.Next(ctx, 0)
 		if it.End {

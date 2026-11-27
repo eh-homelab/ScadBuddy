@@ -45,7 +45,8 @@ CI sets `SCADBUDDY_TEST_POSTGRES_REQUIRED`). The Go toolchain is pinned in these
   account uuid), `internal/registry` (the client of core's `…/crud/fleet-rotator/machines`
   routes, a `fleet` PAT from `--token-file`, https only), `internal/report` (changed rows
   only, all every 5 minutes) and `internal/watch` (inotify); README there.
-  `claudecreds/` is a library for Claude Code logins (#7981): `ResetFromText`, the reset a
+  `claudecreds/` is a library for Claude Code logins (#7981): `ParseEntry` and `Tail`, the
+  rate-limit and credential events in transcripts (#7988), and `ResetFromText`, the reset a
   usage-limit text names, in UTC or an IANA zone, held to the agent's
   `rate-limit-reset-vectors.json` with the TypeScript and Python ports (#7986), and
   `Rotate`, which replaces a config dir's login under Claude Code's own locks (#7989;

@@ -125,6 +125,8 @@ var zoneDirs = []string{"/usr/share/zoneinfo", "/usr/share/lib/zoneinfo", "/usr/
 // filesystem.
 func writtenAsFiled(name string) bool {
 	dirs := zoneDirs
+	// time.LoadLocation reads $ZONEINFO once per process; this reads it on each call, so
+	// the test can point it at a stand-in. Nothing here changes it after start (#8082).
 	if env := os.Getenv("ZONEINFO"); env != "" {
 		// A zip file there is read by exact name; os.ReadDir fails on it and skips it.
 		dirs = append([]string{env}, dirs...)
