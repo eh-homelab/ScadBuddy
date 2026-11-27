@@ -43,13 +43,13 @@ describe('the Presets tab', () => {
     const { user } = renderPage(<PresetsTab />, { route: `/?type_id=${T.ORANGE}` })
     const types = await listTypes({ includeArchived: true })
     const code = types.find((type) => type.id === T.ORANGE)!.code
-    const chip = await screen.findByRole('button', { name: `Type: ${code}` })
+    const chip = await screen.findByRole('button', { name: `Clear the type filter (Type: ${code})` })
     const rows = presetRows(await presets())
     expect(rows).toHaveLength(1)
     expect(within(rows[0]!).getByRole('link', { name: code })).toHaveAttribute('href', `/filament/types/${T.ORANGE}`)
     await user.click(chip)
     expect(presetRows(await presets()).length).toBeGreaterThan(1)
-    expect(screen.queryByRole('button', { name: /^Type:/ })).not.toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: /^Clear the type filter/ })).not.toBeInTheDocument()
   })
 
   it('names a type by the start of its id when the types cannot be loaded', async () => {

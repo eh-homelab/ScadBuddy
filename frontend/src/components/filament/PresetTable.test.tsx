@@ -1,5 +1,6 @@
 import { render, screen, within } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
+import { MemoryRouter } from 'react-router'
 import { useState } from 'react'
 import { describe, expect, it, vi } from 'vitest'
 import type { EffectivePreset, PresetInput } from '../../api/filament'
@@ -59,6 +60,20 @@ describe('PresetTable', () => {
 
   it('refuses two rows for one printer model and nozzle', () => {
     expect(presetRowsError([ROW, { ...ROW, slicer_filament: 'GFA01' }])).toMatch(/H2C 0\.4/)
+  })
+
+  it('links a ScadBuddy preset ref to its page and leaves a Bambuddy id as text', () => {
+    const rows: PresetInput[] = [
+      { printer_model: 'H2C', nozzle_diameter: '0.4', slicer_filament: 'sb-7', slicer_filament_name: null },
+      { printer_model: 'H2C', nozzle_diameter: '0.6', slicer_filament: 'GFA00', slicer_filament_name: null },
+    ]
+    render(
+      <MemoryRouter>
+        <PresetTable rows={rows} onChange={() => {}} />
+      </MemoryRouter>,
+    )
+    expect(screen.getByRole('link', { name: 'Open preset sb-7' })).toHaveAttribute('href', '/filament/presets/7')
+    expect(screen.getAllByRole('link')).toHaveLength(1)
   })
 
   describe('inherited', () => {

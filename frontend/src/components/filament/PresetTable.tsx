@@ -1,10 +1,26 @@
-import { PlusIcon, Undo2Icon, XIcon } from 'lucide-react'
+import { ExternalLinkIcon, PlusIcon, Undo2Icon, XIcon } from 'lucide-react'
 import { useId } from 'react'
+import { Link } from 'react-router'
 import type { EffectivePreset, PresetInput } from '../../api/filament'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
 import { cn } from '@/lib/utils'
+import { filamentLinks } from '../../lib/filamentLinks'
 import { keyOf } from './presetRows'
+
+/** A ScadBuddy preset's ref, `sb-<id>`; any other value is a Bambuddy id. */
+const SB_REF = /^sb-(\d+)$/
+
+/** The link to a ScadBuddy preset's page (#7204), or null for a Bambuddy id. */
+function PresetLink({ value }: { value: string }) {
+  const id = SB_REF.exec(value.trim())?.[1]
+  if (!id) return null
+  return (
+    <Link to={filamentLinks.preset(id)} aria-label={`Open preset ${value.trim()}`} title="Open the preset" className="inline-flex text-muted-foreground hover:text-foreground">
+      <ExternalLinkIcon className="size-3.5" />
+    </Link>
+  )
+}
 
 /** What a nozzle field may hold on the way to a diameter: digits and one point. */
 const TYPING = /^\d*\.?\d*$/
@@ -79,7 +95,10 @@ export function PresetTable({ rows, onChange, models = [], inherited, typeKeys }
                     )}
                   </td>
                   <td className="px-2 py-1">
-                    <Input aria-label="Slicer filament" className="h-7 w-28 font-mono" value={row.slicer_filament} onChange={(e) => set(at, { slicer_filament: e.target.value })} />
+                    <div className="flex items-center gap-1.5">
+                      <Input aria-label="Slicer filament" className="h-7 w-28 font-mono" value={row.slicer_filament} onChange={(e) => set(at, { slicer_filament: e.target.value })} />
+                      <PresetLink value={row.slicer_filament} />
+                    </div>
                   </td>
                   <td className="px-2 py-1">
                     <Input
@@ -107,7 +126,12 @@ export function PresetTable({ rows, onChange, models = [], inherited, typeKeys }
               <tr key={keyOf(row)} aria-label={`${row.printer_model} ${row.nozzle_diameter} from type`} className={cn('border-t opacity-60')}>
                 <td className="px-2 py-1.5">{row.printer_model}</td>
                 <td className="px-2 py-1.5 tabular-nums">{row.nozzle_diameter}</td>
-                <td className="px-2 py-1.5 font-mono">{row.slicer_filament}</td>
+                <td className="px-2 py-1.5 font-mono">
+                  <span className="inline-flex items-center gap-1.5">
+                    {row.slicer_filament}
+                    <PresetLink value={row.slicer_filament} />
+                  </span>
+                </td>
                 <td className="px-2 py-1.5">
                   {row.slicer_filament_name} <span className="ml-1 text-[12px] text-muted-foreground">From type</span>
                 </td>

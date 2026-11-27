@@ -116,7 +116,7 @@ export function PresetsTab() {
           ))}
         </div>
         {typeId && (
-          <Button type="button" variant="outline" size="sm" onClick={() => setParam('type_id', null)}>
+          <Button type="button" variant="outline" size="sm" aria-label={`Clear the type filter (Type: ${typeCodes.get(typeId) ?? shortId(typeId)})`} onClick={() => setParam('type_id', null)}>
             {`Type: ${typeCodes.get(typeId) ?? shortId(typeId)}`}
             <XIcon />
           </Button>
