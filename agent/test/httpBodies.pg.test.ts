@@ -112,6 +112,8 @@ describe.skipIf(skip !== undefined)(`saved http bodies${skip ? ` (skipped: ${ski
       secrets: () => [],
       actor: { kind: 'browser' as const, id: 'user', label: 'User' },
       limits: { inlineMaxBytes: 1000 },
+      // The test server listens on loopback (#8178).
+      allowPrivate: true,
     }
     const result = await runHttpRequest(withDefaults({ url }), context)
     const saved = (JSON.parse((result.content[0] as { text: string }).text) as { saved: { id: string } }).saved.id

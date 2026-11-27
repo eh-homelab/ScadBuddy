@@ -4,7 +4,9 @@
 // names it (fetch_asset's `allow_host`), so that call is always parked for a person. A
 // call that reads the printer's storage (#4698: get_print_sources with `printer`,
 // import_print from a `printer` source, #6916: create_model_from_mesh from a print's
-// `printer` source) reaches the printer, so it is parked too.
+// `printer` source) reaches the printer, so it is parked too. An http_request that names
+// `allow_private_host` (#8178) asks to read a private or loopback host, and the approval of
+// that call is what lets it through, so it is parked too, whatever its method.
 //
 // Read by every gate: the harness seam (harness/permissions.ts `decide`) and the
 // registry's effective tier (registry.ts `effectiveTool`), which /mcp, confirm_action,
@@ -32,6 +34,9 @@ export function pinnedOutwardReason(toolName: string, input: unknown): string | 
   const name = bareName(toolName)
   if (name === 'fetch_asset' && field(input, 'allow_host') !== undefined) {
     return `${toolName} asks to fetch from a host off the asset allowlist, which needs a human approval in the ScadBuddy UI.`
+  }
+  if (name === 'http_request' && field(input, 'allow_private_host') !== undefined) {
+    return `${toolName} asks to reach a private or loopback host (allow_private_host), which needs a human approval in the ScadBuddy UI.`
   }
   if (name === 'get_print_sources' && ![undefined, false].includes(field(input, 'printer') as undefined | false)) {
     return `${toolName} asks to read the printer's storage, which reaches the printer and needs a human approval in the ScadBuddy UI.`

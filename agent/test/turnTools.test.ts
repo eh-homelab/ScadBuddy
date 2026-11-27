@@ -398,6 +398,12 @@ describe('turn tools in a durable session', () => {
       env(TURN_TOOL_TIER_ACTIVITY).run(activities[TURN_TOOL_TIER_ACTIVITY]!, { tool: `${HTTP_SERVER}__${HTTP_TOOL}`, input })
     expect(await tier({ url: 'http://example.test/', method: 'POST' })).toEqual({ tier: 'outward', declared: 'outward' })
     expect(await tier({ url: 'http://example.test/' })).toEqual({ tier: 'read', declared: 'read' })
+    // A GET to a private host a person must approve (#8178): outward in a flow and a durable turn too.
+    expect(await tier({ url: 'http://nas.example/', allow_private_host: 'nas.example' })).toEqual({ tier: 'outward', declared: 'outward' })
+    const unapproved = await failure(
+      env(`turn:${HTTP_SERVER}__${HTTP_TOOL}`).run(turnToolActivity(deps), { url: 'http://nas.example/', allow_private_host: 'nas.example' }),
+    )
+    expect(unapproved.type).toBe('NotApproved')
     const refused = await failure(
       env(`turn:${HTTP_SERVER}__${HTTP_TOOL}`).run(turnToolActivity(deps), { url: 'http://example.test/', method: 'POST' }),
     )
