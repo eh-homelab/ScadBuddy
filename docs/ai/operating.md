@@ -500,8 +500,8 @@ If the previous file cannot be loaded, the API's log says so and nothing is re-w
 ## 4. Setting up the Claude credential
 
 There can be several credentials, one row each in `ai_credentials`, in priority order
-(#1093). Each is of one of three kinds (`CREDENTIAL_KINDS`,
-[`agent/src/credentials.ts`](../../agent/src/credentials.ts); spec D2):
+(#1093). Each credential the assistant runs is of one of three kinds
+(`AGENT_CREDENTIAL_KINDS`, [`agent/src/credentials.ts`](../../agent/src/credentials.ts); spec D2):
 
 - `anthropic_api_key`: a Console key (`sk-ant-api03-…`), passed to Claude Code as
   `ANTHROPIC_API_KEY`.
@@ -511,6 +511,18 @@ There can be several credentials, one row each in `ai_credentials`, in priority 
   read Anthropic's terms for subscription credentials before using it.
 - `gateway`: a `base_url` plus a token, passed as `ANTHROPIC_BASE_URL` and
   `ANTHROPIC_AUTH_TOKEN`.
+
+The pool also holds the fleet's rows (#7983): kind `claude_login` (a whole Claude Code
+`claudeAiOauth` login, which only the fleet's login rotator uses) and any row whose `scope`
+is `fleet`. The assistant never uses or tests those rows; Settings lists them with their
+scope. A row's `scope` is `agent` by default; a `claude_login` is always `fleet`. The API's
+reveal answers the assistant only the rows whose scope is `agent` or `both`. The API also
+refuses the assistant's caller (409) every change to a `claude_login` or a `fleet` row: a
+save that creates or changes one or makes a row `fleet`, and a delete, rename, reset or
+health event on one. A reorder names the assistant's rows only, and the fleet's rows keep
+their priorities. So the assistant cannot plant a login that a fleet machine installs, nor
+delete, disable or replace a fleet login. Settings shows the fleet's rows read-only ("Managed
+by the fleet"); the fleet manages them (#7984).
 
 The mapping is in `credentialEnv()` in [`agent/src/harness/run.ts`](../../agent/src/harness/run.ts).
 Its sources are the [LLM gateway docs](https://code.claude.com/docs/en/llm-gateway-connect)
@@ -585,7 +597,8 @@ cooldown ends, since the status is worked out at read time. The `curl` below is 
 fallback when there is no UI.
 
 The routes without `/entries` are the single-credential routes from #1000. They act on
-the first credential by priority, for scripts written against them. They are
+the first credential the assistant uses (never a fleet row, #7983), for scripts written
+against them. They are
 **deprecated** (#2768): the UI no longer uses them, and every answer carries
 `Deprecation: @1791936000` (RFC 9745: deprecated at 2026-10-14T00:00:00Z) and a `Link`
 header naming `/api/v1/ai/credentials/entries` as the
@@ -596,10 +609,10 @@ in anything new.
 |---|---|---|
 | `GET /api/v1/ai/credentials` | Read guard (#989) | Returns `configured`, `kind`, `base_url`, `last4`, `updated_at`, `usable`, `can_save` and `cannot_save_reason` (`view()`). It never returns the secret. `last4` is empty for a secret shorter than 12 characters (`last4()`, `secrets.ts`). |
 | `PUT /api/v1/ai/credentials` | Yes | Body `{ kind, base_url?, secret? }`, strict (`PutBody`). A `gateway` needs `base_url`, and `anthropic_api_key` and `claude_oauth_token` must not have one. `base_url` must be http(s), with no userinfo, query or fragment. It is normalised without a trailing slash (`normaliseBaseUrl()`). A gateway host is checked against the egress rules first (§5 of [security.md](security.md#egress-check-on-gateway-urls)). The secret must not contain whitespace. **Omitting `secret` keeps the stored one only if `kind` and `base_url` are unchanged**; otherwise the route answers `409` (`planPut()`). |
-| `DELETE /api/v1/ai/credentials` | Yes | Deletes the first credential and answers with the one that moved up into its place (`configured: false` when none is left). |
-| `GET /api/v1/ai/credentials/entries` | Read guard (#989) | Every credential in priority order, as `{ credentials, usable_now, recovers_at, can_save, cannot_save_reason }`. Each entry has `id`, `priority`, `kind`, `name`, `base_url`, `last4`, `updated_at`, `usable`, `status` (`active`, `cooling_down` or `disabled`), `cooldown_until`, `last_error`, `last_error_at` and `last_used_at` (`entryView()`). |
+| `DELETE /api/v1/ai/credentials` | Yes | Deletes the first credential the assistant uses and answers with the one that moved up into its place (`configured: false` when none is left). |
+| `GET /api/v1/ai/credentials/entries` | Read guard (#989) | Every credential in priority order, as `{ credentials, usable_now, recovers_at, can_save, cannot_save_reason }`. Each entry has `id`, `priority`, `kind`, `name`, `base_url`, `last4`, `updated_at`, `usable`, `status` (`active`, `cooling_down` or `disabled`), `cooldown_until`, `last_error`, `last_error_at`, `last_used_at`, `scope` (`agent`, `fleet` or `both`), `agent_uses` (whether the assistant uses it, `agentUses()`), and `email` and `subscription_type` (a `claude_login`'s account, else `null`) (`entryView()`). |
 | `POST /api/v1/ai/credentials/entries` | Yes | Body `{ kind, base_url?, secret, name? }`; adds a credential last in priority and answers `201` with its entry. `name` is optional, as for the rename route below. At most 100 are stored (`MAX_CREDENTIALS`); past that it answers `409`. |
-| `PUT /api/v1/ai/credentials/order` | Yes | Body `{ ids }`, every credential's id exactly once, first to last; otherwise `409`. Answers with the list. |
+| `PUT /api/v1/ai/credentials/order` | Yes | Body `{ ids }`, the id of every credential the assistant uses exactly once, first to last, and no fleet row; otherwise `409`. Fleet rows keep their priorities. Answers with the list. |
 | `PUT /api/v1/ai/credentials/entries/{id}` | Yes | Same body and rules as `PUT /api/v1/ai/credentials`, for one credential. A new secret makes it `active` again. |
 | `DELETE /api/v1/ai/credentials/entries/{id}` | Yes | Deletes one credential and answers with the list. |
 | `PUT /api/v1/ai/credentials/entries/{id}/name` | Yes | Body `{ name }`, strict (#3710). Sets the credential's name, or clears it with `null` or a blank string, and answers with its entry. The secret, status and `epoch` do not change. The name is trimmed. It is refused with `400` past 60 characters (`CREDENTIAL_NAME_MAX`) or with a control, format or line separator character (`normaliseCredentialName()`). It is a display label only: it need not be unique, it is not in the AAD, and it is not written to logs, audit rows or prompts (the audit row names the route, not the body). |
