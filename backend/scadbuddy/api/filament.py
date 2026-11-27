@@ -2217,7 +2217,12 @@ async def get_tag(filament: FilamentDep, tag_id: UUID) -> m.TagDetail:
         "`tags_both_bound` or `tag_has_backups` when the tags cannot be folded, 422 "
         "`mifare_unreadable`, and 503 `mifare_needs_core` when that area does not run. Core "
         "also keeps each read's `image` (a `scan_image` blob, 422 `image_not_found`) and "
-        "`location` in the scan history, `tag_read_id`."
+        "`location` in the scan history, `tag_read_id`. "
+        "A `read_id` names a paired device's tag read in place of `uid`, `tag_type`, "
+        "`records` and `mifare_blocks` (#8244): core loads it and decodes it as an inline "
+        "read; 404 `read_not_found` for a read of a device the caller does not own, 422 "
+        "`device_read_invalid` for a photo read or for inline fields beside it, and 503 "
+        "`device_read_needs_core` when that area does not run."
     ),
 )
 async def read_tag(
@@ -2229,6 +2234,13 @@ async def read_tag(
 ) -> m.TagReadResult:
     # Only a bind changes what the sync pushes (`NOT_NUDGED`).
     setattr(request.state, SKIP_NUDGE, body.bind_spool_id is None)
+    if body.read_id is not None:
+        # Core's area filament-tag-reads loads a device read before it reaches Python.
+        raise ApiError(
+            status.HTTP_503_SERVICE_UNAVAILABLE,
+            "a device read is loaded by core's area filament-tag-reads, which does not run",
+            code="device_read_needs_core",
+        )
     if body.mifare_blocks is not None:
         # Core's area filament-tag-reads answers a MIFARE read before it reaches Python.
         raise ApiError(
