@@ -21,6 +21,7 @@ from temporalio.testing import ActivityEnvironment
 from temporalio.worker import Worker
 
 from scadbuddy.core.problems import ApiError
+from scadbuddy.flows.answerers import ANSWER_NOT_ALLOWED
 from scadbuddy.flows.models import Decision, Run
 from scadbuddy.flows.operations import (
     ALREADY_RESOLVED,
@@ -34,6 +35,7 @@ from scadbuddy.flows.operations import (
     request_id,
     seal_answer,
 )
+from scadbuddy.flows.store import GrantLapsedError
 from scadbuddy.operations.kinds import OperationKind
 from scadbuddy.operations.store import OperationStore
 from scadbuddy.tasks.models import TaskOpen
@@ -98,6 +100,23 @@ async def test_a_sealed_answer_is_opened_and_reaches_the_run(flows: Flows) -> No
     assert (await flows.finished(run.id)).result == "result: 'ok'"
     decision = await flows.store.get_decision(request_id(run, call_id))
     assert decision is not None and decision.response == {"answer": "ok"}
+
+
+async def test_an_answer_whose_grant_lapsed_since_the_route_is_not_allowed(
+    flows: Flows, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """`land` turns the store's `GrantLapsedError` into the 403 `flow-answer-not-allowed`."""
+    run, call_id = await parked(flows)
+
+    async def lapsed(decision: Decision, **kwargs: Any) -> bool:
+        raise GrantLapsedError(decision.request_id)
+
+    monkeypatch.setattr(flows.store, "record_decision", lapsed)
+    request = {"run_id": run.id, "call_id": call_id, "answer": "ok"}
+    with pytest.raises(ApiError) as err:
+        await operate(flows, kinds(flows)[FLOW_ANSWER], request)
+    assert (err.value.status, err.value.type) == (403, ANSWER_NOT_ALLOWED)
+    assert await flows.store.get_decision(request_id(run, call_id)) is None
 
 
 async def test_a_second_answer_is_refused_by_the_check(flows: Flows) -> None:
