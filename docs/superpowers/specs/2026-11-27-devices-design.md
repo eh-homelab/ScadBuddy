@@ -61,7 +61,7 @@ So the phone stops being a page that has to be in the right state. It becomes ha
 3. On yes, the app POSTs to the URL with its name, its model, the app version and its capabilities. Core spends the code and answers with the device id and a device token. The app stores the token in Android's encrypted storage (`SecureStorage`).
 4. The device belongs to the person who made the request. Its calls are made by that person (the actor), and the device's id is recorded beside the actor.
 
-`DeepLink.cs` takes `scadbuddy://pair?url=…` in place of the per-scan `scadbuddy://scan?…` link of #8157. Per-scan result URLs are dropped. No server ever made a scan link, because #8157 was never built. So the pairing PR replaces the scan link at once, and no flow breaks.
+The app came in with #8160 (merged). `DeepLink.cs` takes `scadbuddy://pair?url=…` in place of the per-scan `scadbuddy://scan?…` link of #8157. Per-scan result URLs are dropped. No server ever made a scan link, because #8157 was never built. So the pairing PR replaces the scan link at once, and no flow breaks.
 
 ### Tokens (G2)
 
@@ -118,7 +118,7 @@ The result is generic and knows nothing of filament:
 
 ### Calls (G4)
 
-- `POST /api/v1/devices/{id}/calls {method, args, timeout_s}` answers `202 {call_id}` at once, or `409 offline` when the device is not online. `GET /api/v1/devices/calls/{id}` gives the call and its result; its events are replayed from the event log by the topic `device:call:<id>`. The realtime socket carries each new event. A caller that only wants the end can add `wait=true`, which holds the request until the result or the deadline (`504`). Core keeps a row per call: who called, the method, the outcome and the times.
+- `POST /api/v1/devices/{id}/calls {method, args, timeout_s}` answers `202 {call_id}` at once, or `409 offline` when the device is not online. `GET /api/v1/devices/calls/{id}` gives the call, its events and its result. Its events are read from the event log by the topic `device:call:<id>`. The realtime socket carries each new event. A caller that only wants the end can add `wait=true`, which holds the request until the result or the deadline (`504`). Core keeps a row per call: who called, the method, the outcome and the times.
 - The caller is a person (a page), a flow, or the assistant. An assistant tool `device_call` uses the same route.
 - An outward method (`nfc.write`) called by the assistant or a flow needs an approval, as outward tools do: a pending action confirmed in the UI. A person who calls it from a page with their own click has approved it by that click.
 - Grants are settings. By default, the device's owner and the owner's flows and assistant sessions may call every read method.
@@ -142,8 +142,9 @@ The Scan page and other pages that can use a device offer "Use my phone" when an
 
 ### Data
 
-Core owns three new tables:
+Core owns five new tables:
 - `devices`: id, owner, name, model, app version, capabilities, created, last seen, revoked.
+- `device_pairings`: code hash, owner, created, expires, spent, device.
 - `device_tokens`: device, token hash, created, expires, hard cap, revoked.
 - `device_calls`: id, device, caller, method, arguments (bounded), outcome, result pointer, created, ended.
 - `device_reads`: id, device, call, at, kind (`nfc`, `photo`), UID, tech, blob key, media type, complete, missing blocks.
@@ -165,7 +166,7 @@ One migration creates them.
 - A device belongs to the person who paired it, and its calls act as that person.
 - Device-token routes check the token in every auth mode, and person routes follow the global mode.
 - A person's own click approves an outward call made from a page. The assistant and flows need a pending action.
-- The device reads table is `device_reads`. The event kinds on the bus are `device.tag_found`, `device.tag_progress`, `device.tag_lost`, `device.call_requested`, `device.call_done` and `device.call_failed`.
+- The device reads table is `device_reads`. The event kinds on the bus are `device.tag_found`, `device.tag_progress`, `device.tag_lost`, `device.call_requested`, `device.call_done`, `device.call_failed` and `device.revoked`.
 - No device socket of its own: the realtime socket carries calls in, and HTTP carries events and results out.
 - Device uploads: a device route of its own, with kind `scan_image` for photos.
 
