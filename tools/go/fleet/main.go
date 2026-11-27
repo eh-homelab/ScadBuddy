@@ -294,7 +294,7 @@ func githubWebhook(c config, meter metric.MeterProvider) (http.Handler, error) {
 
 // githubWriter is the GitHub secret writer, or nil when no App key file is set. No route
 // uses it yet: #8011's rotation targets will.
-func githubWriter(c config, transport http.RoundTripper) (*ghsecrets.Writer, error) {
+func githubWriter(c config, wrap func(http.RoundTripper) http.RoundTripper) (*ghsecrets.Writer, error) {
 	if c.GitHubAppKeyFile == "" {
 		return nil, nil
 	}
@@ -306,7 +306,7 @@ func githubWriter(c config, transport http.RoundTripper) (*ghsecrets.Writer, err
 	if err != nil {
 		return nil, err
 	}
-	return ghsecrets.New(ghsecrets.Config{AppID: c.GitHubAppID, InstallationID: c.GitHubInstallationID, PrivateKey: key, Transport: transport})
+	return ghsecrets.New(ghsecrets.Config{AppID: c.GitHubAppID, InstallationID: c.GitHubInstallationID, PrivateKey: key, WrapTransport: wrap})
 }
 
 // newMux serves /mcp and /healthz, and /github/webhook when webhook is not nil.
@@ -337,7 +337,11 @@ func run(ctx context.Context, c config, tel *telemetry.Telemetry) error {
 	if err != nil {
 		return err
 	}
-	writer, err := githubWriter(c, tel.Transport(http.DefaultTransport, "api.github.com"))
+	// A CLIENT span for each request to GitHub; the writer strips the trace context the
+	// span's transport adds, so GitHub gets no traceparent.
+	writer, err := githubWriter(c, func(base http.RoundTripper) http.RoundTripper {
+		return tel.Transport(base, "api.github.com")
+	})
 	if err != nil {
 		return err
 	}

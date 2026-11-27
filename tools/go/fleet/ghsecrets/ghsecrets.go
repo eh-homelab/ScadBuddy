@@ -60,6 +60,10 @@ type Config struct {
 	BaseURL string
 	// Transport is http.DefaultTransport when nil.
 	Transport http.RoundTripper
+	// WrapTransport, when set, wraps the transport (such as telemetry's, for a CLIENT
+	// span). The writer strips trace context from every request after the wrap, so no
+	// traceparent, tracestate or baggage reaches GitHub.
+	WrapTransport func(http.RoundTripper) http.RoundTripper
 	// Logger is slog.Default() when nil.
 	Logger *slog.Logger
 	// Now is time.Now when nil.
@@ -140,6 +144,10 @@ func New(cfg Config) (*Writer, error) {
 	if cfg.Transport == nil {
 		cfg.Transport = http.DefaultTransport
 	}
+	var transport http.RoundTripper = noTraceContext{cfg.Transport}
+	if cfg.WrapTransport != nil {
+		transport = cfg.WrapTransport(transport)
+	}
 	if cfg.Now == nil {
 		cfg.Now = time.Now
 	}
@@ -150,10 +158,22 @@ func New(cfg Config) (*Writer, error) {
 	return &Writer{
 		cfg: cfg,
 		// No redirects: a token must never follow one to another host.
-		http: &http.Client{Timeout: requestTimeout, Transport: cfg.Transport,
+		http: &http.Client{Timeout: requestTimeout, Transport: transport,
 			CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }},
 		log: log,
 	}, nil
+}
+
+// noTraceContext sends each request with no trace context: GitHub is not ours, so it gets
+// no traceparent, tracestate or baggage (the W3C headers telemetry's propagator writes).
+type noTraceContext struct{ base http.RoundTripper }
+
+func (n noTraceContext) RoundTrip(r *http.Request) (*http.Response, error) {
+	r = r.Clone(r.Context())
+	for _, h := range []string{"Traceparent", "Tracestate", "Baggage"} {
+		r.Header.Del(h)
+	}
+	return n.base.RoundTrip(r)
 }
 
 // ParsePrivateKey reads the App's private key: PEM, PKCS #1 (what GitHub gives) or

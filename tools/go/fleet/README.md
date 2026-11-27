@@ -141,7 +141,9 @@ secret come with #8011's rotation targets.
   its last write to find an overwrite. A missing secret is `ErrNotFound`.
 
 The writer never caches, logs or returns a token or the JWT. It never logs the key, the
-value or the sealed value either. It follows no redirect. An error names the method, the
+value or the sealed value either. It follows no redirect. Each request to GitHub is a CLIENT span (`Config.WrapTransport`,
+telemetry's `Transport`), but the writer strips `traceparent`, `tracestate` and `baggage`
+after that wrap, so no trace context reaches GitHub. An error names the method, the
 path, the status and GitHub's `message`, never a header or a body that was sent. Each
 write logs one line, "github secret set", with the owner, repository, name and key id.
 

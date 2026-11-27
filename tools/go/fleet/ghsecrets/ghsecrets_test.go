@@ -130,6 +130,12 @@ func (f *fakeGitHub) serve(w http.ResponseWriter, r *http.Request) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.paths = append(f.paths, r.Method+" "+r.URL.Path)
+	for _, h := range []string{"Traceparent", "Tracestate", "Baggage"} {
+		if v := r.Header.Get(h); v != "" {
+			f.fail(w, 400, "%s %s: carries %s %q", r.Method, r.URL.Path, h, v)
+			return
+		}
+	}
 	if r.Header.Get("X-GitHub-Api-Version") != apiVersion || r.Header.Get("Accept") != "application/vnd.github+json" {
 		f.fail(w, 400, "%s %s: headers %v", r.Method, r.URL.Path, r.Header)
 		return
@@ -308,6 +314,40 @@ func TestEveryCallMintsItsOwnToken(t *testing.T) {
 	}
 	if got := asJSON(f.tokenAsks[2]); got != `{"permissions":{"secrets":"read"},"repositories":["r"]}` {
 		t.Errorf("read token ask %s", got)
+	}
+}
+
+// injecting adds trace context to every request, as telemetry's Transport does.
+type injecting struct{ base http.RoundTripper }
+
+func (i injecting) RoundTrip(r *http.Request) (*http.Response, error) {
+	r = r.Clone(r.Context())
+	r.Header.Set("traceparent", "00-0af7651916cd43dd8448eb211c80319c-b7ad6b7169203331-01")
+	r.Header.Set("tracestate", "vendor=value")
+	r.Header.Set("baggage", "user=someone")
+	return i.base.RoundTrip(r)
+}
+
+// TestNoTraceContextToGitHub: a wrap that injects trace context (telemetry's CLIENT span)
+// still sends GitHub no traceparent, tracestate or baggage.
+func TestNoTraceContextToGitHub(t *testing.T) {
+	f, srv := newFake(t)
+	var logs bytes.Buffer
+	wrapped := 0
+	w, err := New(Config{AppID: appID, InstallationID: installationID, PrivateKey: testKey(t), BaseURL: srv.URL,
+		Logger: slog.New(slog.NewTextHandler(&logs, nil)), Now: func() time.Time { return f.now },
+		WrapTransport: func(base http.RoundTripper) http.RoundTripper { wrapped++; return injecting{base} }})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := w.Set(context.Background(), Target{Owner: "o", Repo: "r", Name: "N"}, []byte(value)); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := w.UpdatedAt(context.Background(), Target{Owner: "o", Name: "N"}); err != nil {
+		t.Fatal(err)
+	}
+	if wrapped != 1 {
+		t.Errorf("wrapped %d times, want 1", wrapped)
 	}
 }
 
