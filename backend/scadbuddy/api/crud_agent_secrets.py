@@ -18,7 +18,7 @@ Area ``credentials``, ``ai_credentials``, sealed and opened here with the KEK:
 - ``GET …/credentials/key``: whether this API holds a KEK, and its id (the agent tells a
   credential sealed under another key by it);
 - ``GET …/credentials`` and ``GET …/credentials/one``: every credential, or one (the
-  first by priority without ``id``), with no secret;
+  first the agent uses without ``id``, never a fleet row), with no secret;
 - ``POST …/credentials`` (create), ``…/save``, ``…/delete``, ``…/order``, ``…/reset``,
   ``…/name`` and ``…/events`` (what a query learned): the agent's store's writes;
 - ``POST …/credentials/reveal``: the plaintext of one credential, or of every one the KEK
@@ -205,7 +205,8 @@ async def write_settings(body: SettingsWrite, state: StateDep) -> SettingsWritte
 
 # --- credentials ------------------------------------------------------------------------
 
-CredentialKind = Literal["anthropic_api_key", "claude_oauth_token", "gateway"]
+CredentialKind = Literal["anthropic_api_key", "claude_login", "claude_oauth_token", "gateway"]
+CredentialScope = Literal["agent", "fleet", "both"]
 
 
 class KeyStatus(BaseModel):
@@ -234,6 +235,16 @@ class StoredCredential(BaseModel):
     epoch: int
     kek_id: str
     legacy_format: bool
+    #: #7983: who may use it, a claude_login's account (in clear) and its machine lease.
+    scope: CredentialScope
+    account_uuid: str | None
+    organization_uuid: str | None
+    subscription_type: str | None
+    rate_limit_tier: str | None
+    email: str | None
+    leased_to: str | None
+    leased_at: str | None
+    lease_epoch: int
 
 
 class CredentialList(BaseModel):
@@ -254,17 +265,26 @@ class CredentialFields(BaseModel):
     secret: str | None = Field(default=None, min_length=1, max_length=4096)
     #: As the agent normalised it (`normaliseCredentialName`); read by a create only.
     name: str | None = Field(default=None, max_length=1024)
+    #: Who may use it (#7983); omitted keeps the stored scope.
+    scope: CredentialScope | None = None
+    #: A claude_login's email (#7983); omitted keeps the stored one, "" clears it.
+    email: str | None = Field(default=None, max_length=1024)
 
     def update(self) -> store.Update:
         return store.Update(
-            kind=self.kind, base_url=self.base_url, secret=self.secret, name=self.name
+            kind=self.kind,
+            base_url=self.base_url,
+            secret=self.secret,
+            name=self.name,
+            scope=self.scope,
+            email=self.email,
         )
 
 
 class CredentialSave(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    #: The credential to save over; the first by priority when omitted.
+    #: The credential to save over; the first the agent uses when omitted.
     id: CREDENTIAL_ID | None = None
     update: CredentialFields
 
@@ -324,7 +344,7 @@ class Recorded(BaseModel):
 class RevealAsk(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    #: One credential (the first by priority when omitted), unless ``all``.
+    #: One credential (the first the agent uses when omitted), unless ``all``.
     id: CREDENTIAL_ID | None = None
     #: Every credential, each opened where the KEK opens it.
     all: bool = False
@@ -463,6 +483,8 @@ def _reveal(conn: Any, body: RevealAsk, kek: Kek) -> Revealed | SealError:
                 out.append(RevealedRow(stored=_stored(row), credential=opened))
             count = sum(1 for r in out if r.credential is not None)
             # Redaction reads every credential at tool-call rate: one row a window says it did.
+            # It gets the agent's own rows only. That is correct: the agent's process never
+            # holds a fleet secret, so it has none to redact.
             if body.purpose != "redact" or not audit.recorded_lately(
                 conn, "credential", (action,), REDACT_AUDIT_WINDOW
             ):
