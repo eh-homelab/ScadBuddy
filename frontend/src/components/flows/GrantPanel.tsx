@@ -38,6 +38,16 @@ function usage(rule: FlowGrantRule, used: FlowGrantView['used'][string] | undefi
   return out
 }
 
+/** Who else may answer the run's questions, as the grant's status allows it now: only a
+ * grant in force admits an answerer (#8045). A declined grant never admitted one. */
+function answersText(grant: FlowGrantView, who: string): string | null {
+  const rest = 'answer its questions, except those it asks of people only.'
+  if (grant.revoked_at) return `Revoked: ${who} may no longer ${rest}`
+  if (grant.status === 'requested') return `If you approve it, besides you, ${who} may ${rest}`
+  if (grant.status === 'declined') return null
+  return grant.in_force ? `Besides you, ${who} may ${rest}` : `Expired: ${who} may no longer ${rest}`
+}
+
 interface Props {
   runId: string
   grant: FlowGrantView
@@ -59,6 +69,7 @@ export function GrantPanel({ runId, grant, onChange }: Props) {
   const [revoking, setRevoking] = useState(false)
   const rules = grant.spec.rules ?? []
   const live = grant.status === 'approved' && !grant.revoked_at
+  const answers = grant.spec.answers ? answersText(grant, answerersText(grant.spec.answers.who)) : null
 
   async function act(send: () => Promise<unknown>): Promise<boolean> {
     setBusy(true)
@@ -113,12 +124,7 @@ export function GrantPanel({ runId, grant, onChange }: Props) {
             ? 'Calls outside it ask the starting session first.'
             : 'Calls outside it come to you.'}
         </p>
-        {grant.spec.answers && (
-          <p className="text-[12.5px] text-muted-foreground">
-            Besides you, {answerersText(grant.spec.answers.who)} may answer its questions, except those it asks
-            of people only.
-          </p>
-        )}
+        {answers && <p className="text-[12.5px] text-muted-foreground">{answers}</p>}
         {rules.length === 0 ? (
           <p className="text-[12.5px] text-muted-foreground">No rules: every outward call asks.</p>
         ) : (
