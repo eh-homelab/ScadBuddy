@@ -50,6 +50,7 @@ import {
   type NeedsYouSource,
   type NeedsYou,
 } from '../lib/needsYou'
+import { useTagMadeToasts, useUnknownSpools } from '../lib/unknownSpools'
 import { useAttentionNotifications } from '../agent/attentionNotifications'
 import { useWebPush } from '../agent/webPush'
 import { useAiAvailability } from '../agent/chat/availability'
@@ -215,24 +216,34 @@ export function AppShell({ embedded = isEmbedded(), assistantTransport, tabLink 
   // "Needs you" lists it in full, and each new one is toasted and (hidden) notified.
   const [pairings, setPairings] = useState<readonly PairingEntry[]>(NO_PAIRINGS)
   const { grants, refresh: refreshGrants } = useGrantRequests()
+  const { data: unknown, refresh: refreshUnknown } = useUnknownSpools()
+  useTagMadeToasts(unknown?.made_from_tags ?? null)
   const waitingEntries = attention.counts?.waiting ?? NO_WAITING
   // Built from whichever reads have answered, so a failing one hides none of the others; null
   // until one has (unknown is not "nothing waits"). The toasts skip what waited at a source's
   // first answer: a reload must not announce it again.
   const agentKnown = !shown || attention.counts !== null
   const grantsKnown = grants !== null
+  const filamentKnown = unknown !== null
   const needsSources = useMemo(
-    () => new Set<NeedsYouSource>(['pairings', ...(agentKnown ? (['agent'] as const) : []), ...(grantsKnown ? (['grants'] as const) : [])]),
-    [agentKnown, grantsKnown],
+    () =>
+      new Set<NeedsYouSource>([
+        'pairings',
+        ...(agentKnown ? (['agent'] as const) : []),
+        ...(grantsKnown ? (['grants'] as const) : []),
+        ...(filamentKnown ? (['filament'] as const) : []),
+      ]),
+    [agentKnown, grantsKnown, filamentKnown],
   )
   const needsItems = useMemo(
-    () => (agentKnown || grantsKnown ? needsYouItems(waitingEntries, grants, pairings) : null),
-    [agentKnown, grantsKnown, waitingEntries, grants, pairings],
+    () => (agentKnown || grantsKnown || filamentKnown ? needsYouItems(waitingEntries, grants, pairings, unknown?.trays) : null),
+    [agentKnown, grantsKnown, filamentKnown, waitingEntries, grants, pairings, unknown],
   )
   const refreshNeeds = useCallback(() => {
     refreshAttention()
     refreshGrants()
-  }, [refreshAttention, refreshGrants])
+    refreshUnknown()
+  }, [refreshAttention, refreshGrants, refreshUnknown])
   useNeedsYouToasts(needsItems, needsSources)
   const mainElement = useRef<HTMLElement>(null)
   useAttentionTitle(needsItems === null ? attention.waiting : needsItems.length, !embedded, usePageTitle(mainElement))
@@ -278,6 +289,10 @@ export function AppShell({ embedded = isEmbedded(), assistantTransport, tabLink 
     () => (grantsKnown ? needsYouNotices(needsYouItems(NO_WAITING, grants, NO_PAIRINGS)) : null),
     [grantsKnown, grants],
   )
+  const filamentNotices = useMemo(
+    () => (filamentKnown ? needsYouNotices(needsYouItems(NO_WAITING, null, NO_PAIRINGS, unknown?.trays)) : null),
+    [filamentKnown, unknown],
+  )
   const pairingNotices = useMemo(() => needsYouNotices(needsYouItems(NO_WAITING, null, pairings)), [pairings])
   const navigate = useNavigate()
   const openNotice = useCallback(
@@ -292,6 +307,7 @@ export function AppShell({ embedded = isEmbedded(), assistantTransport, tabLink 
   useAttentionNotifications(agentNotices, !embedded, openNotice)
   useAttentionNotifications(grantNotices, !embedded, openNotice)
   useAttentionNotifications(pairingNotices, !embedded, openNotice)
+  useAttentionNotifications(filamentNotices, !embedded, openNotice)
   // #815 — and with every tab closed, through Web Push; its click opens the session here.
   useWebPush(shown && !embedded, openNotice)
   const opener = useMemo<AssistantOpener | null>(

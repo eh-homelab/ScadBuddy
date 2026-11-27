@@ -17,6 +17,7 @@ import { Spinner } from '../ui/spinner'
 // only when a person opens one.
 const GrantPanel = lazy(async () => ({ default: (await import('../flows/GrantPanel')).GrantPanel }))
 const TriggerList = lazy(async () => ({ default: (await import('../flows/Triggers')).TriggerList }))
+const UnknownSpoolDialog = lazy(async () => ({ default: (await import('../filament/UnknownSpoolDialog')).UnknownSpoolDialog }))
 
 /**
  * #6399 — what waits on the person, of every kind (`lib/needsYou.ts`), each with its kind, where
@@ -37,6 +38,8 @@ function kindLabel(item: NeedsYouItem): string {
       return 'Standing grant request'
     case 'pairing':
       return 'Pairing request'
+    case 'unknown_spool':
+      return 'Unknown spool'
     case 'agent': {
       const { entry } = item
       if (entry.run) return entry.kind === 'approval' ? 'Flow run approval' : 'Flow run question'
@@ -56,6 +59,8 @@ function sourceText(item: NeedsYouItem): string {
       return `A trigger of ${item.trigger.name}${item.trigger.grant ? `, asked by ${actorText(item.trigger.grant.requested_by)}` : ''}`
     case 'pairing':
       return `${item.pairing.label}, from outside ScadBuddy`
+    case 'unknown_spool':
+      return `${item.tray.printer_name} ${item.tray.slot}`
     case 'agent': {
       const { entry } = item
       if (entry.run) return `Flow run ${entry.run.name}${entry.tool ? `, ${entry.tool}` : ''}`
@@ -74,6 +79,8 @@ function askText(item: NeedsYouItem): string {
       return 'Outward calls inside the grant would run without asking you.'
     case 'trigger-grant':
       return 'Each run it starts would make the calls inside the grant without asking you, until it expires.'
+    case 'unknown_spool':
+      return `Prints to ${item.tray.printer_name} wait until you link the spool in ${item.tray.slot}.`
     case 'pairing':
       return 'It could see this tab and change it as you can. Type the code it gave you in the pairing prompt on this page.'
   }
@@ -108,6 +115,7 @@ export function NeedsYouRow({
   const ctx = useContext(NeedsYouContext)
   const [state, setState] = useState<RowState>({ kind: 'idle' })
   const [reviewing, setReviewing] = useState(open)
+  const [linking, setLinking] = useState(false)
   // The bell's "Review" on this page changes `REVIEW_PARAM` under a row already shown.
   useEffect(() => {
     if (open) setReviewing(true)
@@ -234,6 +242,13 @@ export function NeedsYouRow({
         </>
       )
     }
+    if (item.kind === 'unknown_spool') {
+      return (
+        <Button size="sm" aria-haspopup="dialog" onClick={() => setLinking(true)}>
+          Tell ScadBuddy which spool…
+        </Button>
+      )
+    }
     return null
   })()
 
@@ -271,6 +286,20 @@ export function NeedsYouRow({
         <p role="alert" className="text-xs text-warn">
           {state.error}
         </p>
+      )}
+      {linking && item.kind === 'unknown_spool' && (
+        <Suspense fallback={null}>
+          <UnknownSpoolDialog
+            tray={item.tray}
+            open
+            onOpenChange={setLinking}
+            onResolved={(resolved) => {
+              setLinking(false)
+              setState({ kind: 'done', text: `Linked ${resolved.code} to ${item.tray.slot}.` })
+              refresh()
+            }}
+          />
+        </Suspense>
       )}
       {reviewing && (
         <Suspense fallback={<Spinner />}>
