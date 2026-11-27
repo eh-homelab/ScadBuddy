@@ -60,6 +60,7 @@ from scadbuddy.bambuddy.attachments import Attachment, AttachmentStore
 from scadbuddy.bambuddy.client import BambuddyClient, client_for
 from scadbuddy.bambuddy.component import ArchiveCacheDep
 from scadbuddy.bambuddy.costs import archive_cost, run_cost
+from scadbuddy.bambuddy.lan_files import lan_subtask, start_by_file
 from scadbuddy.bambuddy.linking import link_library_prints, scan_library_by_hash
 from scadbuddy.bambuddy.models import (
     ArchiveDetail,
@@ -71,7 +72,6 @@ from scadbuddy.bambuddy.models import (
 )
 from scadbuddy.bambuddy.part_settings import PartSettingsMap, parts_set_only
 from scadbuddy.bambuddy.print_links import (
-    LanArchiveLink,
     LinkedPrint,
     PrintImport,
     PrintLinkStore,
@@ -597,13 +597,6 @@ async def _named_run(
     return run if run is not None and run.output_id == subject else None
 
 
-#: The file name a LAN start uploads (`workflows/printing.py` `_start_lan`):
-#: ``scadbuddy-<run id[:8]>-p<plate>``, then ``-c<copy>`` past the first copy (together
-#: the start's ``subtask_name``), then ``-<attempt>`` past the first attempt, then
-#: ``.3mf``. A stem never ends in ``-<digits>``, so the attempt is read without doubt.
-_LAN_FILE = re.compile(r"(?P<subtask>scadbuddy-(?P<run>[0-9a-f]{8})-p\d+(?:-c\d+)?)(?:-\d+)?\.3mf")
-
-
 async def _run_by_file(
     links: PrintLinkStore,
     runs: PrintRunStore,
@@ -611,39 +604,23 @@ async def _run_by_file(
     archive: ArchiveDetail | None,
 ) -> PrintRun | None:
     """The run whose LAN start ``link``'s archive became (#5661), from the archive's file
-    name: Bambuddy archives a print it did not queue under the name of the file the
-    printer printed (``services/archive.py`` ``archive_print``,
-    ``filename=original_filename or source_file.name``, maziggy/bambuddy@2ce0d93). That
-    name is the one the run uploaded, and it names the start. The link is recorded only
-    when exactly one start of one run of the link's own subject has that name, whatever
-    the run's status: never a guess. The recorded link is kept when the archive is
-    deleted later, and `_named_run` follows it."""
+    name (`lan_files.start_by_file`: exactly one start of one run of the link's own
+    subject has that name, whatever the run's status: never a guess). The recorded link
+    is kept when the archive is deleted later, and `_named_run` follows it."""
     subject = PrintSubject.parse(link.subject).run_subject
-    if archive is None or archive.filename is None:
+    if archive is None:
         return None
-    named = _LAN_FILE.fullmatch(archive.filename)
-    if named is None:
+    subtask = lan_subtask(archive.filename)
+    if subtask is None:
         return None
-    subtask = named["subtask"]
-    found = [
-        (run, start)
-        for run in await runs.lan_started(subject, [subtask])
-        if run.id.startswith(named["run"]) and run.result is not None
-        for start in run.result.lan
-        if start.subtask_name == subtask
-    ]
-    if len(found) != 1:
+    found = start_by_file(
+        link.archive_id, archive.filename, await runs.lan_started(subject, [subtask])
+    )
+    if found is None:
         return None
-    run, start = found[0]
+    run, recorded = found
     try:
-        await links.record_lan_start(
-            LanArchiveLink(
-                archive_id=link.archive_id,
-                run_id=run.id,
-                subtask_name=subtask,
-                plate_id=start.plate_id,
-            )
-        )
+        await links.record_lan_start(recorded)
     except psycopg.Error:
         # The run is found exactly; only the record is lost, and the next read tries again.
         logger.warning(
