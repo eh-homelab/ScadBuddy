@@ -162,6 +162,9 @@ func TestSubscribeCapsCallTopics(t *testing.T) {
 	expect(t, page.frame()["type"], any("error"))
 	page.send(`{"type":"subscribe","topics":[` + strings.Join(topics[:realtime.MaxCallTopics], ",") + `]}`)
 	expect(t, page.frame()["type"], any("subscribed"))
+	// The cap counts distinct topics: one call named more times than the cap is one topic.
+	page.send(`{"type":"subscribe","topics":[` + strings.Repeat(topics[0]+",", realtime.MaxCallTopics) + topics[0] + `]}`)
+	expect(t, page.frame()["type"], any("subscribed"))
 }
 
 // One rule says who may read a call and who may follow its events.
