@@ -5,6 +5,7 @@ import {
   getRfidStatus,
   getSyncStatus,
   importBambuddyPresets,
+  importBambuddySpools,
   listSyncPasses,
   reconcileRfid,
   resetSyncLinks,
@@ -14,6 +15,7 @@ import {
   type LinksResetDone,
   type LinksResetPreview,
   type PresetImport,
+  type PullReport,
   type RfidReconcileReport,
   type RfidStatus,
   type SyncError,
@@ -249,6 +251,80 @@ function PresetsImportRow() {
           <Button type="button" size="sm" variant="outline" disabled={pending} onClick={() => void importNow()}>
             {pending && <Spinner />}
             Import presets from Bambuddy now
+          </Button>
+        </div>
+        <p role="status" aria-live="polite" className="text-muted-foreground empty:hidden">
+          {note}
+        </p>
+        {problem && (
+          <p role="alert" className="text-warn">
+            {problem}
+          </p>
+        )}
+      </div>
+    </FieldRow>
+  )
+}
+
+/** What the spool import found, in plain words (#6261). */
+function spoolImportLine(done: PullReport): string {
+  const unread = done.invalid + (done.failed_bb_ids?.length ?? 0)
+  const parts = [
+    done.created > 0 && plural(done.created, 'new spool', 'new spools'),
+    done.linked > 0 && `${plural(done.linked, 'spool', 'spools')} linked`,
+    done.updated > 0 && `${plural(done.updated, 'spool', 'spools')} updated`,
+  ].filter(Boolean)
+  const lines = [
+    parts.length > 0 ? `Imported: ${parts.join(', ')}.` : null,
+    done.needs_type > 0 && `${plural(done.needs_type, 'spool needs', 'spools need')} a type: choose one in Filament.`,
+    unread > 0 && `${plural(unread, 'Bambuddy spool', 'Bambuddy spools')} could not be read.`,
+    done.rfid_duplicates > 0 && `${plural(done.rfid_duplicates, 'RFID duplicate', 'RFID duplicates')} skipped.`,
+  ].filter(Boolean)
+  if (lines.length === 0) return 'Nothing to import: ScadBuddy has every Bambuddy spool, and none changed since the last pull.'
+  if (parts.length === 0) lines.unshift('Nothing imported.')
+  return lines.join(' ')
+}
+
+/** What the spool import says when the server refuses it: the presets import's words, plus its own 503. */
+function spoolImportProblem(cause: unknown): ReactNode {
+  if (!(cause instanceof ApiError)) return "Bambuddy's spools could not be imported. Try again."
+  if (cause.status === 503) return 'The import did not finish in time and may still be running. Check the spools before you import again.'
+  return importProblem(cause)
+}
+
+/**
+ * #6261 — a one-time pull of Bambuddy's spools into ScadBuddy's own, whatever the spools direction
+ * says (the refresh Schedule does the same). It never writes to Bambuddy and saves nothing of the form.
+ */
+function SpoolsImportRow() {
+  const [pending, setPending] = useState(false)
+  const [note, setNote] = useState<string | null>(null)
+  const [problem, setProblem] = useState<ReactNode>(null)
+
+  async function importNow() {
+    setPending(true)
+    setNote(null)
+    setProblem(null)
+    try {
+      setNote(spoolImportLine(await importBambuddySpools()))
+    } catch (cause) {
+      setProblem(spoolImportProblem(cause))
+    } finally {
+      setPending(false)
+    }
+  }
+
+  return (
+    <FieldRow
+      id="filament-spools-import"
+      label="Bambuddy's spools"
+      help="Pulls Bambuddy's spools, archived ones too, into ScadBuddy's own once, whatever the spools direction says. A spool already linked takes what Bambuddy changed since the last pull; any other becomes a new spool. It can take a few minutes. Nothing is sent to Bambuddy."
+    >
+      <div id="filament-spools-import" className="flex flex-col gap-2 text-sm">
+        <div>
+          <Button type="button" size="sm" variant="outline" disabled={pending} onClick={() => void importNow()}>
+            {pending && <Spinner />}
+            Import spools from Bambuddy now
           </Button>
         </div>
         <p role="status" aria-live="polite" className="text-muted-foreground empty:hidden">
@@ -1088,6 +1164,7 @@ export function Component() {
       <RuntimeRows form={form} section="filament" />
       <LabelServerRow form={form} />
       <SyncRows form={form} />
+      <SpoolsImportRow />
       <PresetsImportRow />
       <SyncStatusRow status={syncStatus} mirror={form.settings.filament_preset_mirror} />
       <SyncPassesRow lastPassAt={syncStatus.data?.last_pass_at} form={form} />

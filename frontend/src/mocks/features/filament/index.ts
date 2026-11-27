@@ -3308,42 +3308,6 @@ export const handlers = [
     return done instanceof Response ? done : HttpResponse.json(done)
   }),
 
-  // -- the pull: the mock has no Bambuddy spools to pull, so it changes nothing --
-  http.post(`${BASE}/bambuddy/import`, () =>
-    HttpResponse.json({
-      created: 0,
-      archived_created: 0,
-      linked: 0,
-      updated: 0,
-      needs_type: 0,
-      archived: 0,
-      invalid: 0,
-      catalog_failed: false,
-      catalog_skipped: 0,
-      names_skipped: 0,
-      created_ids: [],
-      linked_ids: [],
-      updated_ids: [],
-      needs_type_ids: [],
-      archived_ids: [],
-      failed_bb_ids: [],
-      invalid_bb_ids: [],
-      usage_booked: 0,
-      usage_unlinked: 0,
-      rfid_duplicates: 0,
-      rfid_duplicate_bb_ids: [],
-      archived_deferred: 0,
-      archived_deferred_bb_ids: [],
-      claimed: 0,
-      suppliers: 0,
-      locations: 0,
-      moved: 0,
-      conflicts: 0,
-      colours: 0,
-      colours_kept: 0,
-      colours_failed: false,
-    } satisfies S['PullReport']),
-  ),
 ]
 
 /**

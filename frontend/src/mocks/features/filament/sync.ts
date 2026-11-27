@@ -30,6 +30,10 @@ type S = components['schemas']
  * #7244 — `POST /api/v1/filament/presets/bambuddy-import`: 409 with no Bambuddy, 409
  * `instance_changed` while the links are another Bambuddy's; else the first import adopts two
  * presets and updates one, and every later one finds nothing new, as a second import does.
+ *
+ * #6261 — `POST /api/v1/filament/bambuddy/import`: the same two 409s; else the first import makes
+ * two spools, links one, updates one, leaves one needing a type and cannot read one Bambuddy row,
+ * and every later one finds nothing new. It changes no spool in the mock's inventory.
  */
 
 const BASE = '/api/v1/filament/sync'
@@ -68,6 +72,7 @@ let onlyPresets = false
 
 /** #7244 — whether the presets import ran: the next one finds nothing new. */
 let presetsImported = false
+let spoolsImported = false
 /** #7244 — Bambuddy ids that bindings still name after an import (`unresolved`). */
 let unresolvedPresets = 0
 
@@ -131,6 +136,7 @@ export function reset() {
   unreadable = false
   onlyColours = false
   presetsImported = false
+  spoolsImported = false
   unresolvedPresets = 0
   onlyPresets = false
   passes = seedPasses()
@@ -255,6 +261,39 @@ function status(): S['SyncStatus'] {
   }
 }
 
+/** What `POST /filament/bambuddy/import` answers: the first import finds spools, a later one nothing. */
+function pullReport(first: boolean): S['PullReport'] {
+  const none = { created: 0, archived_created: 0, linked: 0, updated: 0, needs_type: 0, archived: 0, invalid: 0 }
+  return {
+    ...none,
+    ...(first ? { created: 2, linked: 1, updated: 1, needs_type: 1, invalid: 1 } : {}),
+    catalog_failed: false,
+    catalog_skipped: 0,
+    names_skipped: 0,
+    created_ids: first ? [spoolId(40), spoolId(41)] : [],
+    linked_ids: first ? [spoolId(3)] : [],
+    updated_ids: first ? [spoolId(4)] : [],
+    needs_type_ids: first ? [spoolId(41)] : [],
+    archived_ids: [],
+    failed_bb_ids: [],
+    invalid_bb_ids: first ? [77] : [],
+    usage_booked: 0,
+    usage_unlinked: 0,
+    rfid_duplicates: 0,
+    rfid_duplicate_bb_ids: [],
+    archived_deferred: 0,
+    archived_deferred_bb_ids: [],
+    claimed: 0,
+    suppliers: 0,
+    locations: 0,
+    moved: 0,
+    conflicts: 0,
+    colours: 0,
+    colours_kept: 0,
+    colours_failed: false,
+  }
+}
+
 const conflict = (detail: string, code: string) => problem(409, 'Conflict', detail, { code })
 
 export const handlers = [
@@ -267,6 +306,14 @@ export const handlers = [
       : { adopted: 2, updated: 1, unresolved: unresolvedPresets }
     presetsImported = true
     return HttpResponse.json(done)
+  }),
+  http.post('/api/v1/filament/bambuddy/import', () => {
+    if (!configured()) return conflict('no Bambuddy URL is configured; set one in Settings', 'no_bambuddy')
+    if (linksInstance() !== null && linksInstance() !== configured())
+      return conflict('the Bambuddy links belong to another Bambuddy; reset them first', 'instance_changed')
+    const first = !spoolsImported
+    spoolsImported = true
+    return HttpResponse.json(pullReport(first))
   }),
   http.get(`${BASE}/status`, () => {
     if (running !== null) {
