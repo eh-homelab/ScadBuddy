@@ -52,8 +52,8 @@ DUE_TIMEOUT = timedelta(minutes=5)
 #: A refresh's least bound, and its bound in a run given none (one the Schedule
 #: started before the bound was passed). It heartbeats while it waits.
 REFRESH_TIMEOUT = timedelta(hours=1)
-#: Beside the two renders a refresh may wait on, the snapshot's transfer on the
-#: Bambuddy store.
+#: Beside the two renders a refresh may wait on, the snapshot's transfer on a remote
+#: store.
 TRANSFER_ALLOWANCE = timedelta(minutes=15)
 #: The whole continue-as-new chain: a run that can never finish ends, and the
 #: Schedule's overlap SKIP stops holding later ticks back. A longer backlog resumes at

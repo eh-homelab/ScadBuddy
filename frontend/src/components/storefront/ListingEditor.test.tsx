@@ -213,9 +213,10 @@ describe('ListingEditor (#5282, #6131)', () => {
     expect(last(seen).params['hole_side']).toEqual({ kind: 'choice', choices: ['right', 'top'], default: 'right' })
   })
 
-  it('starts a colour at a colour on offer when none has the template’s (#6144)', () => {
+  it('starts a colour at the closest colour on offer when none has the template’s (#6144, #8126)', () => {
     renderPage(<Harness seen={[]} filaments={[RED, BLUE]} />)
-    expect(within(screen.getByRole('group', { name: 'Text' })).getByLabelText('Default of Text')).toHaveTextContent('PLA Ocean')
+    // The text's coral (#E8532F) is nearer the red than the blue.
+    expect(within(screen.getByRole('group', { name: 'Text' })).getByLabelText('Default of Text')).toHaveTextContent('PLA Red')
   })
 
   it('says why a typeface is never the customer’s', async () => {

@@ -164,10 +164,29 @@ describe('defaultsFor (#6131): the smart defaults', () => {
 describe('the value an offered parameter starts at (#6144)', () => {
   const param = (name: string) => keychainSchema.parameters!.find((p) => p.name === name)!
 
-  it('starts a colour whose template default no colour on offer has at the first colour on offer', () => {
+  it('starts a colour whose template default no colour on offer has at the closest colour on offer (#8126)', () => {
     const { params } = defaultsFor(keychainSchema, [YELLOW, BLUE])
     expect(params['body_color']).toEqual({ kind: 'choice', choices: [] })
-    expect(params['text_color']).toEqual({ kind: 'choice', choices: [], default: '#1b6ca8' })
+    // The text's coral is nearer the yellow than the blue, which is first on offer.
+    expect(params['text_color']).toEqual({ kind: 'choice', choices: [], default: '#FFC20E' })
+  })
+
+  it('starts a template colour default that no filament has at the closest filament, not the first (#8126)', () => {
+    const white = filament('white', '#FFFFFF', 'Jade White')
+    const purple = filament('purple', '#694ED4', 'Purple')
+    const pink = filament('pink', '#FC97B0', 'Pink')
+    const schema: CustomizerSchema = {
+      ...keychainSchema,
+      parameters: [
+        { name: 'roof', type: 'color', initial: '#7E57C2', caption: 'Roof', group: 'Colours' },
+        { name: 'walls', type: 'color', initial: '#F8BBD0', caption: 'Walls', group: 'Colours' },
+      ] as CustomizerSchema['parameters'],
+    }
+    const { params } = defaultsFor(schema, [white, purple, pink])
+    expect(params['roof']).toEqual({ kind: 'choice', choices: [], default: '#694ED4' })
+    expect(params['walls']).toEqual({ kind: 'choice', choices: [], default: '#FC97B0' })
+    const roof = schema.parameters![0]!
+    expect(fittedDefault(roof, { kind: 'choice', choices: [] }, ['#FFFFFF', '#694ED4', '#FC97B0'], undefined, [white, purple, pink]).default).toBe('#694ED4')
   })
 
   it('starts it at the colour the person was looking at, when one on offer has it', () => {

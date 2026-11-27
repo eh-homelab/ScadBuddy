@@ -21,7 +21,7 @@ async function seeded() {
   )
 }
 
-/** The render key's warning (#426) is a status too, so find the one that says `text`. */
+/** A status that says `text`. */
 function findStatus(text: string) {
   return screen.findByText(
     (_, element) => element?.getAttribute('role') === 'status' && (element.textContent ?? '').includes(text),
@@ -258,30 +258,24 @@ describe('Connection render key (#426)', () => {
         return HttpResponse.json({
           ...settings,
           ...rest,
-          ...(typeof key === 'string' ? { has_render_api_key: key !== '', render_key_fallback: key === '' } : {}),
+          ...(typeof key === 'string' ? { has_render_api_key: key !== '' } : {}),
         })
       }),
     )
     return bodies
   }
 
-  it('warns while no render key is saved', async () => {
-    serve({ ...stored, has_render_api_key: false, render_key_fallback: true })
+  it('asks for a render key while none is saved', async () => {
+    serve({ ...stored, has_render_api_key: false })
     renderSettingsSection(<Connection />)
     await seeded()
-    const warning = screen.getByTestId('render-key-fallback')
-    expect(warning).toHaveAttribute('role', 'status')
-    expect(warning).toHaveTextContent(
-      /^No render key is saved\. Render workers get no Bambuddy key, so their renders on the Bambuddy store fail; a worker inside the API process uses the full key, and template code can print\. Create a key with only Manage Library in Bambuddy and paste it above as the render key\.$/,
-    )
     expect(screen.getByLabelText('Render worker API key')).toHaveAttribute('placeholder', 'Paste the key')
   })
 
-  it('drops the warning once a render key is stored, and never shows the key', async () => {
-    serve({ ...stored, has_render_api_key: true, render_key_fallback: false })
+  it('never shows a stored render key', async () => {
+    serve({ ...stored, has_render_api_key: true })
     renderSettingsSection(<Connection />)
     await seeded()
-    expect(screen.queryByTestId('render-key-fallback')).toBeNull()
     const key = screen.getByLabelText('Render worker API key')
     expect(key).toHaveValue('')
     expect(key).toHaveAttribute('type', 'password')
@@ -289,19 +283,24 @@ describe('Connection render key (#426)', () => {
   })
 
   it('sends a typed render key with Connection and leaves the stored API key alone', async () => {
-    const bodies = serve({ ...stored, has_render_api_key: false, render_key_fallback: true })
+    const bodies = serve({ ...stored, has_render_api_key: false })
     const { user } = renderSettingsSection(<Connection />)
     await seeded()
     await enter(user, screen.getByLabelText('Render worker API key'), 'narrow')
     await user.click(within(region('Connection')).getByRole('button', { name: 'Save Connection' }))
     await waitFor(() => expect(bodies).toHaveLength(1))
     expect(bodies[0]).toEqual({ bambuddy_render_api_key: 'narrow' })
-    await waitFor(() => expect(screen.queryByTestId('render-key-fallback')).toBeNull())
+    await waitFor(() =>
+      expect(screen.getByLabelText('Render worker API key')).toHaveAttribute(
+        'placeholder',
+        expect.stringContaining('A key is stored'),
+      ),
+    )
     expect(screen.getByLabelText('Render worker API key')).toHaveValue('')
   })
 
   it('removes a stored render key when Connection is saved', async () => {
-    const bodies = serve({ ...stored, has_render_api_key: true, render_key_fallback: false })
+    const bodies = serve({ ...stored, has_render_api_key: true })
     const { user } = renderSettingsSection(<Connection />)
     await seeded()
     const row = screen.getByLabelText('Render worker API key').closest('div') as HTMLElement

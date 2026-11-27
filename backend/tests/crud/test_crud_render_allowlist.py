@@ -239,24 +239,19 @@ def _settings(*, render_key: bool) -> RenderStoreSettings:
         bambuddy_url="http://bambuddy.test",
         library_folder_id=1,
         api_key="render" if render_key else "full",
-        key_is_fallback=not render_key,
     )
 
 
-def test_the_full_key_is_withheld_and_a_render_key_released() -> None:
-    fallback = crud_render.withheld(_settings(render_key=False))
-    assert (fallback.api_key, fallback.key_is_fallback) == (None, True)
-    assert crud_render.released(fallback) == []
-    narrow = _settings(render_key=True)
-    assert crud_render.withheld(narrow) is narrow
-    assert crud_render.released(narrow) == ["bambuddy_render_api_key"]
+def test_no_bambuddy_key_is_released() -> None:
+    """#7882: a render worker renders on the S3 store only, so it gets neither key."""
+    for render_key in (False, True):
+        answered = crud_render.withheld(_settings(render_key=render_key))
+        assert answered.api_key is None
+        assert crud_render.released(answered) == []
 
 
-def test_a_worker_without_the_full_key_names_the_render_key_setting() -> None:
-    with pytest.raises(ApiError) as refused:
-        render_target(crud_render.withheld(_settings(render_key=False)))
-    assert "bambuddy_render_api_key" in refused.value.detail
-    # The API's own read keeps the full key, and its own target works.
+def test_the_apis_own_read_keeps_its_key() -> None:
+    """The API's own target, a store migration's source, keeps the key it read."""
     assert render_target(_settings(render_key=False)).config.api_key == "full"
     assert render_target(_settings(render_key=True)).config.api_key == "render"
 

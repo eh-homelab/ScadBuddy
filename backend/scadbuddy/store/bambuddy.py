@@ -1,4 +1,11 @@
-"""The Bambuddy backend of the blob store (spec 2026-09-27 §6.3).
+"""The Bambuddy backend of the blob store (spec 2026-09-27 §6.3), and the store settings'
+sources (`StoreSettingsSource`) every store reads.
+
+Since #7257 nothing runs on this backend: the API refuses to start on it, and Settings and
+a store migration refuse to choose it (`outputs-need-a-blob-store`). It stays only as the
+source of a store migration (`store/migrate.py`): an install that recovered from that
+refusal onto the local store can still copy its blobs to S3. Its folders are found over
+SQL on the API alone; the render worker's routes for them are gone (#7882).
 
 Layout (#316, #317): the Settings `library_folder_id` folder is ScadBuddy's inbox and
 the only place it deletes from. Under it, one folder per template named by its title,
@@ -10,9 +17,8 @@ deleted. No dot-named folders: Bambuddy shows them.
 Every folder ScadBuddy makes or adopts is recorded in `store_folders`, under the
 Bambuddy instance (its base URL) and inbox it was found on, and a delete is refused
 unless the file sits in one recorded as `work` there (#683). `FolderFinder` finds,
-records and forgets them over SQL: the API's, and the render worker's through the API's
-CRUD routes (`crud/render.py` `RemoteStoreFolders`, #5298), both `KeepsFolders`. What
-each file is lives in `store_blobs`, so a fetch is by file id, never a folder scan.
+records and forgets them over SQL. What each file is lives in `store_blobs`, so a fetch is
+by file id, never a folder scan.
 
 Known limits (#682): a folder is adopted by `(parent, name)`, so two templates whose
 titles clean to the same name share one folder pair, and a template titled "Shared"
@@ -32,7 +38,7 @@ from contextlib import AbstractAsyncContextManager, aclosing, asynccontextmanage
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any, Literal, Protocol
+from typing import Any, Literal
 from urllib.parse import urlsplit
 
 import httpx
@@ -113,10 +119,10 @@ def folder_name(title: str) -> str:
 
 
 class StoreSettingsSource:
-    """The render key and the inbox, re-read at most every ``ttl`` seconds, so a key
-    rotated in Settings reaches every worker without a restart (spec §9, §10). A subclass
-    says where they are read from (`_read`): the API's database here, the API's CRUD route
-    on a render worker (`crud/render.py`, #5298)."""
+    """The store settings, re-read at most every ``ttl`` seconds, so a key rotated in
+    Settings reaches every process without a restart (spec §9, §10). A subclass says where
+    they are read from (`_read`): the API's database here, the API's CRUD route on a render
+    worker (`crud/render.py`, #5298), which answers no Bambuddy key (#7882)."""
 
     def __init__(
         self,
@@ -187,17 +193,11 @@ class StoreSettingsSource:
 
 
 def render_target(current: RenderStoreSettings) -> BambuddyTarget:
-    """The Bambuddy and inbox the store's settings name, with the render key."""
+    """The Bambuddy and inbox the store's settings name, with the render key (else the
+    full key): the API's own read, the only one that carries a Bambuddy key (#7882)."""
     if not current.bambuddy_url or current.library_folder_id is None:
         raise not_configured(
             "the Bambuddy store needs a Bambuddy URL and a library folder in Settings"
-        )
-    if current.key_is_fallback and current.api_key is None:
-        # The API's CRUD route withholds the full key from a render worker
-        # (`api/crud_render.py` `withheld`); only the API's own read carries it.
-        raise not_configured(
-            "the render worker gets no Bambuddy key while no render key is saved: save"
-            " bambuddy_render_api_key (Settings, Bambuddy render key)"
         )
     return BambuddyTarget(
         config=BambuddyConfig(base_url=current.bambuddy_url.rstrip("/"), api_key=current.api_key),
@@ -224,9 +224,7 @@ class RenderSettingsSource(StoreSettingsSource):
         return await asyncio.to_thread(load_render_store_settings, self._pool, self._defaults)
 
 
-#: How long a find waits for another finder's folder lock before it fails. The same in
-#: the API and in an older worker that still finds over SQL, so the two exclude each
-#: other during a roll (#5298).
+#: How long a find waits for another finder's folder lock before it fails.
 FOLDER_LOCK_SECONDS = 30
 FOLDER_LOCK_TIMEOUT = f"{FOLDER_LOCK_SECONDS}s"
 
@@ -246,27 +244,17 @@ class BambuddyContentBackend:
     def __init__(
         self,
         target: Callable[[], Awaitable[BambuddyTarget]],
-        pool: Pool | None,
+        pool: Pool,
         *,
         http: httpx.AsyncClient | None = None,
         index: IndexesBlobs | None = None,
-        folders: KeepsFolders | None = None,
     ) -> None:
-        """``index`` says whether a row names an uploaded file (`sweep_unrecorded`);
-        ``folders`` finds, records and forgets the store's folders. Each is SQL on
-        ``pool`` unless given (the render worker's are its CRUD routes', #5298); with no
-        ``pool`` (the render worker, which holds no database) both must be given."""
-        if index is None:
-            if pool is None:
-                raise ValueError("a Bambuddy store with no pool needs its index")
-            index = BlobIndex(pool)
-        if folders is None:
-            if pool is None:
-                raise ValueError("a Bambuddy store with no pool needs its folders")
-            folders = FolderFinder(pool)
+        """``index`` says whether a row names an uploaded file (`sweep_unrecorded`): SQL
+        on ``pool`` unless given. The store's folders are SQL on ``pool`` (`FolderFinder`):
+        only the API, which holds the database, builds this backend (#7882)."""
         self._target = target
-        self._index: IndexesBlobs = index
-        self._kept: KeepsFolders = folders
+        self._index: IndexesBlobs = index if index is not None else BlobIndex(pool)
+        self._kept = FolderFinder(pool)
         self._http = http or httpx.AsyncClient()
         self._owns_http = http is None
         self._folders: dict[tuple[str, int, str, str], int] = {}
@@ -443,29 +431,14 @@ class BambuddyContentBackend:
         return await self._kept.work_folders(inbox)
 
 
-class KeepsFolders(Protocol):
-    """Finds, records and forgets the store's folders on one Bambuddy inbox: SQL
-    (`FolderFinder`), or the render worker's CRUD routes (`crud/render.py`
-    `RemoteStoreFolders`, #5298), where the API finds them with its own client and target.
-
-    `find` answers the folder of ``slug`` in ``role``, made under ``inbox`` (named
-    ``title``, cleaned by `folder_name`) or under the template's folder (`Work/`) when
-    none is recorded, and records it. `forget` drops the template's rows, `work_folders`
-    lists the `Work/` folders recorded under ``inbox``."""
-
-    async def find(
-        self, client: BambuddyClient, inbox: Inbox, slug: str, role: FolderRole, title: str
-    ) -> int: ...
-
-    async def forget(self, inbox: Inbox, slug: str) -> None: ...
-
-    async def work_folders(self, inbox: Inbox) -> set[int]: ...
-
-
 class FolderFinder:
-    """`KeepsFolders` over SQL on ``pool``: the API's. A find takes the folder's
-    advisory lock (`folder_lock_key`) across its Bambuddy calls, so two finders never
-    both make a folder."""
+    """Finds, records and forgets the store's folders on one Bambuddy inbox, over SQL on
+    ``pool``: the API's. `find` answers the folder of ``slug`` in ``role``, made under
+    ``inbox`` (named ``title``, cleaned by `folder_name`) or under the template's folder
+    (`Work/`) when none is recorded, and records it; `forget` drops the template's rows;
+    `work_folders` lists the `Work/` folders recorded under ``inbox``. A find takes the
+    folder's advisory lock (`folder_lock_key`) across its Bambuddy calls, so two finders
+    never both make a folder."""
 
     def __init__(self, pool: Pool) -> None:
         self._pool = pool

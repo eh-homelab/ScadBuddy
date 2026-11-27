@@ -13,7 +13,7 @@ from scadbuddy.core.metrics import CONTENT_TYPE_LATEST
 from scadbuddy.filament import metrics_export
 from scadbuddy.filament.component import FILAMENT
 from scadbuddy.store.cache import CachedBlobStore
-from scadbuddy.store.factory import store_health, store_usage
+from scadbuddy.store.factory import store_usage
 
 logger = logging.getLogger(__name__)
 
@@ -52,8 +52,6 @@ async def refresh_store_metrics(state: AppState) -> None:
         state.metrics.store_bytes.labels(kind).set(size)
     state.metrics.store_max_blobs.set(usage.max_count)
     state.metrics.store_max_bytes.set(usage.max_total_bytes)
-    health = await store_health(state.store)
-    state.metrics.store_render_key_fallback.set(1 if health.render_key_fallback else 0)
     if isinstance(state.store.blobs, CachedBlobStore):
         cached = await asyncio.to_thread(
             state.store.blobs.cached_bytes, max_age=CACHE_BYTES_MAX_AGE

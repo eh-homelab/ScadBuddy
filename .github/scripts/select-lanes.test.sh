@@ -54,6 +54,8 @@ expect "false false false false false" README.md
 # The design spec is the exception: agent/test/evalScoring.test.ts reads its §6.2, so a
 # change to it is not docs-only and the agent job runs (#7792).
 expect "false false false false false" docs/superpowers/specs/2026-09-22-scadbuddy-design.md
+# So is the inventory model README: the Go proof tests compare its matrix (#6949).
+expect "false false false false false" docs/inventory-model/README.md
 expect "false false false false true" docs/superpowers/specs/2026-09-27-template-pipelines-design.md
 expect "false false false false false" .github/workflows/build-image.yml
 expect "false false false false false" backendx/foo.py
