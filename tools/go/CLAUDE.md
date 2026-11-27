@@ -35,7 +35,7 @@ CI sets `SCADBUDDY_TEST_POSTGRES_REQUIRED`). The Go toolchain is pinned in these
   Python (`internal/crud` the CRUD guard, `internal/<area>` the routes; README there).
   `fleetchat/` is the agent fleet chat library (MCP tools over a host's `Store` and `Bus`,
   imports nothing else from this repo; README there). `fleet/` is ScadBuddy's host of it,
-  the image `ghcr.io/eh-homelab/scadbuddy-fleet`: `sbfleet` (a `Store` over core's
+  the image `ghcr.io/eh-homelab/scadbuddy-fleet`: `sbfleet` (a `Store` and the session registry's reads, `Registry`, over core's
   `…/crud/fleet/` routes and a `Bus` over the API's fleet change stream, with the `fleet`
   credential; it imports nothing from `core/`) and the server binary (`/mcp`, `/healthz`,
   `FLEETCHAT_*` settings; README there).

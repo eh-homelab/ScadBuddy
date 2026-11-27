@@ -74,6 +74,15 @@ name, its description and its reject message. It starts with `rotator`, the logi
   settings.
 - `tools/go/core/internal/fleet/fleet.go`: the routes; `tools/go/core/internal/bus/`: the
   event publish.
+- `tools/go/core/internal/fleet/registry.go`: the session registry (#7985, spec
+  `2026-11-26-fleet-session-registry-and-rotator-design` §6.3). Caller `fleet` reads
+  `GET …/fleet/sessions` and `…/fleet/sessions/{session_id}` (`sbfleet` `Registry`); caller
+  `fleet-rotator`, the machine service, writes `PUT …/fleet-rotator/machines/{id}` and
+  `…/fleet-rotator/machines/{machine_id}/sessions/{session_id}`. Each caller is refused on
+  the other's routes. A `fleet-rotator` credential writes only the machines its proof file
+  registered (`fleet_machines.proof_name`) and their rows of sessions. One session id can
+  run on several machines at once: each machine writes its own row, and a read gives the
+  session once with a `hosts` array, one entry per machine.
 - `backend/scadbuddy/api/crud_fleet.py`: the change stream. The caller `fleet`:
   `backend/scadbuddy/auth/` (`exchange.py`, `service_credentials.py`, `routes.py`).
 - `backend/scadbuddy/core/events.py`, `pg_events.py`: unknown kinds pass the bus as
@@ -90,9 +99,20 @@ and `fleet_deliveries` (one row per recipient). Every row has a timestamp
 `created_at`. The `fleet.message` events are rows of the
 event log `events`.
 
+`backend/scadbuddy/migrations/20261126T1615Z_fleet_session_registry.sql`: `fleet_machines`
+(the SHA-256 of `/etc/machine-id` and the user, never the raw id; host, OS, user, service
+version) and `fleet_session_hosts` (one row per session id and machine, keyed by both: pid
+and `proc_start`, paths, git facts, Claude Code facts, the credential's id, the account, the
+last rate limit, and `previous_session_id`, the row of the same process on the same machine
+before a `/clear`). It also adds
+`fleet-rotator` to the two caller CHECKs, `fleet_machines.proof_name` (the proof file's
+`<machine>` that registered the row) and `service_credentials.machine` (the machine a
+`fleet-rotator` credential was exchanged for).
+
 ## Tests
 
 - `tools/go/core/fleet_test.go`: the routes, against Postgres.
+- `tools/go/core/fleet_registry_test.go`: the registry's routes, their checks and callers.
 - `tools/go/fleet/sbfleet/*_test.go`, `tools/go/fleet/main_test.go`: the store, the bus,
   the exchange and the binary, against fakes.
 - `tools/go/fleetchat/*_test.go`: the service and the MCP server.

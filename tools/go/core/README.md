@@ -116,6 +116,39 @@ socket frame, the typed kinds' fields, and the topic rules. The backend's
 `model_dump_json` does (`internal/bus/kinds.go` holds each kind's fields) and an opaque one as
 `json.dumps` does, both from the log's `jsonb`.
 
+The same area serves the session registry (`internal/fleet/registry.go`, #7985). Caller
+`fleet` reads `GET /sessions` (`?limit=`, as the inbox: the most recently seen session
+first, by its newest host, and `more`) and `GET /sessions/{session_id}` (404 reason
+`unknown-session`). One session id can run on several machines at once, so each session is
+its `session_id`, `handle`, `last_seen` (the newest host's) and `hosts`, one per machine,
+the most recently seen first: each host with its machine and its credential's `id`,
+`name`, `kind` and `last4` only, joined from `ai_credentials`, never a secret column. Caller `fleet-rotator` (scope `crud.fleet-rotator`),
+under `/api/v1/internal/crud/fleet-rotator`, writes `PUT /machines/{id}` (the id is 64
+lower-case hex: a SHA-256, never the raw machine id) and `PUT
+/machines/{machine_id}/sessions/{session_id}` (the session's row on that machine, keyed by
+both ids; the whole row: an optional field left out is cleared). A session `PUT` makes the
+session's fleet agent as `touch` does (409 `handle-taken`), needs its machine (404
+`unknown-machine`), links a new row to the newest row of the same machine, pid and
+`proc_start` (`previous_session_id`, the session before a `/clear`), and answers that one
+row only, never another machine's. Every field is checked: lengths,
+absolute paths, no control characters, a full `git_head`. `git_remote` is an `http(s)://`,
+`ssh://` or `git://` URL with no query and no fragment, or the scp-like `user@host:path`
+(user `[A-Za-z0-9._-]+`). Only an `ssh://` URL may name a user, with no password; anything
+else (a token in the user part, a local path, `file://`, `ext::`) is a 422.
+
+A `fleet-rotator` credential names its machine: the `<machine>` of the bootstrap proof file
+`fleet-rotator.<machine>` it was exchanged for (`service_credentials.machine`; `crud.ServiceOf`
+gives a handler the verified service). The machine's `id` is the service's own hash, so the
+first `PUT /machines/{id}` records the caller's proof name in `fleet_machines.proof_name`. A
+`PUT /machines/{id}` of a row another proof registered is a 403 (reason
+`machine-of-another-proof`), and so is a session `PUT` whose machine is registered to
+another proof. So two machines of different proofs each hold a row of the same session id,
+and neither changes the other's. A `fleet-rotator` credential with no machine writes
+nothing (403 `no-machine`). Core reads no bootstrap directory: a credential whose machine's file
+went is refused here once the API revokes its row, at the API's first resolve of it or its next
+start or auth sweep (at most 5 minutes; `docs/security/trust-boundaries.md`). `fleetd` sends a
+`fleet` PAT today, which these routes refuse until #8041.
+
 Area `blobs` † (`internal/blobstore`, #7958) is a shared area: any service credential whose scopes
 hold `crud.blobs` may call it, under `/api/v1/internal/crud/blobs`; no caller is granted that scope
 yet. Python has no such routes. `POST /uploads` with `{kind, size, sha256, media_type}` answers

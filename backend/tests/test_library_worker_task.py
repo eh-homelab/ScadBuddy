@@ -581,6 +581,8 @@ async def test_the_prune_sweeps_heartbeat_while_they_run(
             delete_spent_delegations=lambda: time.sleep(0.1),
             tokens=SimpleNamespace(delete_expired=lambda: time.sleep(0.1)),
             kek=None,  # no service credentials to rotate without the KEK
+            # #7985: no bootstrap proof directory, so no machine's credentials to revoke.
+            verifiers={},
             # #5700: the payment pages whose close failed, a provider call per page.
             # #4959: the pending captures, a provider read or two per request.
             service=SimpleNamespace(retry_closes=slow_closes, settle_captures=slow_closes),
