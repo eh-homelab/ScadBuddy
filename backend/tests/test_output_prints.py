@@ -68,7 +68,6 @@ def saved(store: OutputStore, output_id: str, **fields: object) -> OutputMeta:
             arranged_from=None,
             backfill=None,
             has_plate_cover=False,
-            copied_at=meta.created_at,
         )
     )
     return meta

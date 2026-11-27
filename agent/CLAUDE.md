@@ -46,8 +46,7 @@ Readiness: `src/api/crudAreas.ts` `CrudAreas` reads `GET …/crud/agent/areas` f
 not ready: `/mcp` and the data routes answer 503. It is not ready either until the API has
 released the input-hash key (`InputHashKey.isReleased`, `dataHealthOf`'s `keyReleased`), but only
 `/mcp`, health, the workers and the pending-input respond (an answer is audited with its hash,
-503 with `retry`; the chat socket's `question.answer` gets an `unavailable` error to send again,
-`routes/chat.ts` `errorEvent`) wait for the key, not the other data routes (`AgentData.areasReady`,
+503 with `retry`) wait for the key, not the other data routes (`AgentData.areasReady`,
 `routes/module.ts` `ready`), so Settings still answers on an API with no KEK: a tool
 call hashes its input for the audit log after it ran, so no Temporal worker polls before then
 (`AgentWorker`'s `before`), the worker's `/readyz` names the missing areas or the key, and `ai` says
@@ -554,7 +553,7 @@ opens every one and seals it again byte for byte).
     colliding tools are hidden. Unlisted plugin tools are `outward`.
     A session's browser options (#7027, `ai_sessions.browser`) go to every remote plugin
     route of its turns as `X-ScadBuddy-Browser` (`forwarder.ts` `BROWSER_HEADER`, their JSON;
-    none when the session has none): a classic turn's from `ClaimedSession.browser`, a durable
+    none when the session has none): a session turn's from `ClaimedSession.browser`, a durable
     turn's and its kept client's from the row its owner is read from (`RowSessionOwners`, into
     `TurnContext.browser`; a listing's from the session the turn holds), never a second read; a
     flow's never. Only the forwarder sets it; a client's own is dropped. The playwright-mcp

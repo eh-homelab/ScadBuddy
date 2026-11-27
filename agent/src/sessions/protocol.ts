@@ -259,13 +259,12 @@ export type ServerEvent = V &
         sha256?: string
       }
     /**
-     * `questionId`: the error refused the panel's answer to that question (#940), so its card is answerable again.
      * `queuedId`: the error refused the panel's remove or edit of that queued message (#6386), which stays queued.
      * `shown`: `message` with the credential named by its name (#3710, credentials.ts `credentialDisplayLabel`),
      * which the panel shows in its place. Only the panel reads it: logs, a flow's failure and the turn's
      * outcome read `message`.
      */
-    | { type: 'error'; sessionId?: string; code?: string; message: string; questionId?: string; queuedId?: string; shown?: string }
+    | { type: 'error'; sessionId?: string; code?: string; message: string; queuedId?: string; shown?: string }
     /**
      * #3710: a model request failed on one Claude credential, and the turn continues on the
      * next (harness/fallback.ts `onFallback`). Both are named for the person, with their names
@@ -381,12 +380,5 @@ export function ownerSeenBy(viewer: Pick<Owner, 'kind' | 'id'>, owner: Owner): S
   return { kind: owner.kind, label: publicLabel(owner) }
 }
 
-/**
- * The panel's `approval.decision` client message (frontend protocol.ts
- * `ClientMessageSchema`), the one client message the agent consumes today
- * (#258; the socket that carries it is #266's).
- */
-export type ApprovalDecisionMessage = V & { type: 'approval.decision'; sessionId: string; id: string; approve: boolean }
-
-/** The panel's `question.answer` (#940): one answer per question, in the order asked. */
+/** An answer to a summary (#940), from the pending-input respond route: one answer per question, in the order asked. */
 export type QuestionAnswerMessage = V & { type: 'question.answer'; sessionId: string; id: string; answers: string[] }

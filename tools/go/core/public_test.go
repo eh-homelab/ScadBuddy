@@ -30,7 +30,7 @@ func TestAPublicAreaIsServedBehindTheGate(t *testing.T) {
 	})
 	next := http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusTeapot) })
 	get := func(mode, path string) (int, string) {
-		router, err := newRouter(pool, next, nil, "test-public", mode, nil)
+		router, err := newRouter(pool, next, nil, "test-public", mode, nil, nil, nil)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -55,7 +55,7 @@ func TestAPublicAreaIsServedBehindTheGate(t *testing.T) {
 	if status, _ := get("", "/api/v1/elsewhere"); status != http.StatusTeapot {
 		t.Errorf("another path: %d, not Python's", status)
 	}
-	if _, err := newRouter(pool, next, nil, "test-public", "enforced", nil); err == nil {
+	if _, err := newRouter(pool, next, nil, "test-public", "enforced", nil, nil, nil); err == nil {
 		t.Error("an unknown SCADBUDDY_AUTH_MODE was taken")
 	}
 }

@@ -80,7 +80,7 @@ export const LISTING_KEPT_MS = 30_000
 
 /** One MCP server a turn offers beside ScadBuddy's own tools. */
 export type TurnServer = {
-  /** Its name, as the classic turn's `mcpServers` key. */
+  /** Its name, as the session turn's `mcpServers` key. */
   name: string
   /** A client on it, for one listing or one call; the caller closes it. */
   connect(): Promise<Client>
@@ -92,7 +92,7 @@ export type TurnServer = {
    */
   declaredTierOf?(harnessName: string, input: unknown): RiskTier
   /**
-   * Judges a call by its input before its tier, as a classic turn's input guard does
+   * Judges a call by its input before its tier, as a session turn's input guard does
    * (harness/permissions.ts; the headless browser's lists, #982): `deny` refuses it,
    * `outward` or `allow` move its tier (`tierAfter`).
    */
@@ -143,7 +143,7 @@ export type TurnServer = {
   listingKey?: string
   /**
    * A remote plugin whose MCP session a durable session keeps from one call, and one
-   * turn, to the next (#2581, sessionClients.ts), as a classic turn's Claude Code keeps
+   * turn, to the next (#2581, sessionClients.ts), as a session turn's Claude Code keeps
    * it for the turn: a stateful plugin (Playwright MCP) keeps its page. `fingerprint`
    * says what the session depends on (URL, header, address, tool settings): a change
    * starts a new one. `connect` opens a client that outlives the turn's servers (its own
@@ -166,7 +166,7 @@ export type TurnServers = {
   /**
    * The turn's secrets (every credential's, each plugin's header and forwarder URL):
    * redacted from every result, error, audit detail and problem before it leaves the
-   * agent, as a classic turn scrubs its event log (sessions/sdkEvents.ts `scrubForLog`).
+   * agent, as a session turn scrubs its event log (sessions/sdkEvents.ts `scrubForLog`).
    */
   secrets: readonly string[]
   release(): void | Promise<void>
@@ -189,7 +189,7 @@ export type TurnToolsDeps = {
   sessions: SessionOwners
   /** A flow run's starter and its calls' approvals; without it a flow's call is refused. */
   flows?: FlowRuns | undefined
-  /** The turn's servers, built as a classic turn builds them, for one listing or one call. */
+  /** The turn's servers, built as a session turn builds them, for one listing or one call. */
   servers(context: TurnContext): Promise<TurnServers>
   approvals?: ApprovalRecords | undefined
   audit?: Pick<AuditLog, 'record' | 'hash' | 'summarise'> | undefined
@@ -267,7 +267,7 @@ async function withClient<T>(server: TurnServer, use: (client: Client) => Promis
 
 /**
  * The server's tools as {original name, harness name}, as Claude Code would list them.
- * Tools whose harness names collide are left out, as a classic turn hides them
+ * Tools whose harness names collide are left out, as a session turn hides them
  * (plugins/forwarder.ts), so a name never stands for two tools.
  */
 export type ListedTools = { tool: Awaited<ReturnType<Client['listTools']>>['tools'][number]; name: string }[]
@@ -796,7 +796,7 @@ async function runTurnTool(
       // the payload; their names and the text go through the same scrub.
       const content = (result.content ?? []) as { type: string; text?: string; data?: unknown; mimeType?: unknown }[]
       // A page the lists do not let the model read is withheld, its images with it, so
-      // none is kept (#982). It reads what a classic turn's hook reads (`screenedText`).
+      // none is kept (#982). It reads what a session turn's hook reads (`screenedText`).
       const withheld = server.screen ? await screened(server, harnessName, input, screenedText(content)) : undefined
       if (withheld !== undefined) {
         await record(tier, result.isError ? 'error' : 'ok')

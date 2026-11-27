@@ -1,7 +1,9 @@
 // Package crud guards and answers the routes under /api/v1/internal/crud/<caller>/, as
 // backend/scadbuddy/crud/guard.py does: the caller's own live service credential in every
 // auth mode, the CRUD headers on every answer of a matched route, and a database that is out
-// of reach as a 503 a client can tell from a route's own 500.
+// of reach as a 503 a client can tell from a route's own 500. A shared area's routes, under
+// /api/v1/internal/crud/<area>/ (AddShared, #7958), take any caller whose scopes hold
+// crud.<area>.
 package crud
 
 import (
@@ -65,6 +67,7 @@ type Router struct {
 type mounted struct {
 	Route
 	caller   string
+	shared   bool
 	segments []string
 	// template is the route as Starlette writes it ({name...} is {name:path}): its spans'
 	// and metrics' http.route, as the Python route's.
@@ -79,7 +82,17 @@ func (rt *Router) Add(caller string, routes ...Route) {
 	for _, r := range routes {
 		segments := strings.Split(strings.TrimPrefix(Prefix, "/")+caller+r.Path, "/")
 		template := rest.ReplaceAllString(Prefix+caller+r.Path, "{$1:path}")
-		rt.routes = append(rt.routes, mounted{r, caller, segments, template})
+		rt.routes = append(rt.routes, mounted{r, caller, false, segments, template})
+	}
+}
+
+// AddShared serves a shared area's routes, under /api/v1/internal/crud/<area>: any caller
+// whose credential's scopes hold crud.<area> may call them. An area's name is never a caller's.
+func (rt *Router) AddShared(area string, routes ...Route) {
+	for _, r := range routes {
+		segments := strings.Split(strings.TrimPrefix(Prefix, "/")+area+r.Path, "/")
+		template := rest.ReplaceAllString(Prefix+area+r.Path, "{$1:path}")
+		rt.routes = append(rt.routes, mounted{r, area, true, segments, template})
 	}
 }
 
@@ -119,7 +132,7 @@ func ServiceOf(r *http.Request) *auth.Service {
 }
 
 func (rt *Router) answer(route *mounted, r *http.Request, params Params) (any, error) {
-	service, p := rt.refusal(route.caller, r)
+	service, p := rt.refusal(route, r)
 	if p != nil {
 		return nil, p
 	}
@@ -174,7 +187,8 @@ next:
 	return nil, nil
 }
 
-func (rt *Router) refusal(caller string, r *http.Request) (*auth.Service, *httpx.Problem) {
+func (rt *Router) refusal(route *mounted, r *http.Request) (*auth.Service, *httpx.Problem) {
+	caller := route.caller
 	service := rt.Resolver.Resolve(r.Context(), r.Header.Get("Authorization"))
 	if service == nil {
 		detail := "This route needs a service credential."
@@ -188,7 +202,7 @@ func (rt *Router) refusal(caller string, r *http.Request) (*auth.Service, *httpx
 	}
 	var p *httpx.Problem
 	switch {
-	case service.Caller != caller:
+	case !route.shared && service.Caller != caller:
 		p = httpx.WithReason(http.StatusForbidden,
 			"These routes belong to another service.", "wrong_caller")
 	case !service.Has("crud." + caller):

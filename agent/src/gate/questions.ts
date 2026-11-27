@@ -236,7 +236,7 @@ export class QuestionService {
   }
 
   /**
-   * The panel's `question.answer` to a summary: its dismissal, from the user in the panel. `where`
+   * The user's answer to a summary, from the pending-input respond route: its dismissal. `where`
    * is for the audit log: the answerer's address and the surface ('http', the panel, when omitted).
    */
   async answer(principal: Owner, message: QuestionAnswerMessage, where: { clientIp?: string | undefined; surface?: AuditSurface } = {}): Promise<void> {
