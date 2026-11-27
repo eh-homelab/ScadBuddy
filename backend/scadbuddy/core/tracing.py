@@ -37,6 +37,12 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 TRACER_NAME: Final = "scadbuddy"
+#: Never traced (spec §6): set in code so no deployment can drop it.
+#: Regexes searched against the full ``scheme://host/path`` URL, so each is anchored on
+#: both ends: an unanchored ``/metrics`` would also drop ``/api/v1/models/metrics-x``.
+EXCLUDED_URLS: Final = ",".join(
+    f"^[a-z]+://[^/]+{path}$" for path in ("/healthz", "/metrics", "/telemetry/v1/traces")
+)
 _PROPAGATOR: Final = TraceContextTextMapPropagator()
 
 # opentelemetry.util.types.AttributeValue is a chained assignment, which mypy rejects as a type.
@@ -171,12 +177,19 @@ def _instrument_libraries() -> None:
 
 
 def configure_tracing(
-    service_name: str, *, version: str, revision: str, inprocess_worker: bool = False
+    service_name: str,
+    *,
+    version: str,
+    revision: str,
+    inprocess_worker: bool = False,
+    instrument_database: bool = True,
 ) -> None:
     """Once per process, before anything that traces is built. A provider already set
     (an earlier `create_app` in the same process, or one `adopt_provider` took) is kept.
     One that neither made (``opentelemetry-instrument``, an auto-configurator) exports
-    without ScadBuddy's scrub (spec §6), so the process refuses to start (#1193)."""
+    without ScadBuddy's scrub (spec §6), so the process refuses to start (#1193).
+    ``instrument_database`` False is for a process that holds no database, such as the
+    storefront edge (#8239): it then instruments no Postgres driver."""
     propagate.set_global_textmap(_PROPAGATOR)
     if tracing_disabled():
         return
@@ -196,7 +209,8 @@ def configure_tracing(
                 inprocess_worker=inprocess_worker,
             )
         )
-    _instrument_libraries()
+    if instrument_database:
+        _instrument_libraries()
 
 
 def failure_class(error: BaseException) -> str:
