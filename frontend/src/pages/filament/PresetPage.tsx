@@ -106,7 +106,19 @@ function useDiffCache(id: number) {
     },
     [id],
   )
-  return { results, ask }
+  /** Ask again for a pair that failed: its message goes, "Loading changes…" shows, and one new request goes out. */
+  const retry = useCallback(
+    (from: number, to: number) => {
+      setResults((was) => {
+        const next = new Map(was)
+        next.delete(`${from}:${to}`)
+        return next
+      })
+      ask(from, to)
+    },
+    [ask],
+  )
+  return { results, ask, retry }
 }
 
 type Diffs = ReturnType<typeof useDiffCache>
@@ -148,7 +160,12 @@ function Versions({ preset, diffs }: { preset: PresetDetail; diffs: Diffs }) {
                 ) : !result ? (
                   <p className="text-[13px] text-muted-foreground">Loading changes…</p>
                 ) : 'error' in result ? (
-                  <p className="text-[13px] text-warn">{result.error}</p>
+                  <div className="flex flex-wrap items-center gap-2">
+                    <p className="text-[13px] text-warn">{result.error}</p>
+                    <Button type="button" variant="outline" size="sm" onClick={() => diffs.retry(before.version, one.version)}>
+                      Try again
+                    </Button>
+                  </div>
                 ) : result.diff.changes.length === 0 ? (
                   <p className="text-[13px] text-muted-foreground">No key changed.</p>
                 ) : (
@@ -225,7 +242,12 @@ function Compare({ preset, diffs }: { preset: PresetDetail; diffs: Diffs }) {
           ) : !result ? (
             <p className="text-[13px] text-muted-foreground">Loading changes…</p>
           ) : 'error' in result ? (
-            <p role="alert" className="text-[13px] text-warn">{result.error}</p>
+            <div className="flex flex-wrap items-center gap-2">
+              <p role="alert" className="text-[13px] text-warn">{result.error}</p>
+              <Button type="button" variant="outline" size="sm" onClick={() => diffs.retry(from, to)}>
+                Try again
+              </Button>
+            </div>
           ) : (
             <ChangesTable label={`Changed keys, v${from} to v${to}`} changes={result.diff.changes} />
           )}
