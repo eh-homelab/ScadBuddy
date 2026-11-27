@@ -145,9 +145,6 @@ func TestTheAgentsCallerNeverWritesAFleetRow(t *testing.T) {
 		r := a.post("/credentials/save", obj{"id": save.id, "update": save.update})
 		expect(t, []any{save.update, r.status, r.body["reason"]}, []any{save.update, 409, credentialRefused})
 	}
-	// With no id, a save goes to the first row by priority: the fleet's login here.
-	r := a.post("/credentials/save", obj{"update": obj{"kind": "anthropic_api_key", "secret": "k"}})
-	expect(t, r.status, 409)
 	listed := map[any]obj{}
 	for _, c := range a.get("/credentials").body["credentials"].([]any) {
 		listed[c.(obj)["id"]] = c.(obj)
@@ -304,4 +301,109 @@ func TestWideningAFleetRowToTheAgentNeedsItsSecretAgain(t *testing.T) {
 	// A narrowing needs no secret and keeps the epoch.
 	narrowed := a.fleet(update{kind: "anthropic_api_key", scope: text("fleet")}, id)
 	expect(t, []any{narrowed["scope"], narrowed["epoch"]}, []any{"fleet", 1})
+}
+
+// state is every row's priority, name, status, epoch and last error, by id.
+func (a *api) state() map[any][]any {
+	a.t.Helper()
+	out := map[any][]any{}
+	for _, c := range a.get("/credentials").body["credentials"].([]any) {
+		r := c.(obj)
+		out[r["id"]] = []any{r["priority"], r["name"], r["status"], r["epoch"], r["last_error"]}
+	}
+	return out
+}
+
+// A compromised agent pod may not delete, rename, reset, cool down, disable or reorder a fleet
+// login (#7983): each is the save's 409, and the row is as it was.
+func TestTheAgentsCallerChangesNoFleetRow(t *testing.T) {
+	a := newAPI(t, keysOf(kek))
+	loginRow := a.fleet(update{kind: claudeLogin, secret: text(login)}, "")
+	own := a.post("/credentials", obj{"kind": "anthropic_api_key", "secret": apiKey}).body["credential"].(obj)
+	fleet := a.fleet(update{kind: "anthropic_api_key", secret: text(apiKey + "f"), scope: text("fleet")}, "")
+	both := a.post("/credentials", obj{"kind": "anthropic_api_key", "secret": apiKey + "b", "scope": "both"}).body["credential"].(obj)
+	before := a.state()
+	for _, row := range []obj{loginRow, fleet} {
+		for _, c := range []struct {
+			path string
+			body obj
+		}{
+			{"/credentials/delete", obj{"id": row["id"]}},
+			{"/credentials/reset", obj{"id": row["id"]}},
+			{"/credentials/name", obj{"id": row["id"], "name": "Mine"}},
+			{"/credentials/events", obj{"id": row["id"], "epoch": 0, "event": obj{"kind": "used"}}},
+			{"/credentials/events", obj{"id": row["id"], "epoch": 0, "event": obj{"kind": "disabled", "reason": "401"}}},
+			{"/credentials/events", obj{"id": row["id"], "epoch": 0,
+				"event": obj{"kind": "cooling_down", "until": "2099-01-01T00:00:00Z", "reason": "429"}}},
+		} {
+			r := a.post(c.path, c.body)
+			expect(t, []any{c.path, r.status, r.body["reason"], r.body["detail"]},
+				[]any{c.path, 409, credentialRefused, fleetRowMessage})
+		}
+	}
+	// An order that names a fleet row, or every row, is refused; the agent's rows alone move.
+	for _, ids := range [][]any{
+		{both["id"], own["id"], loginRow["id"], fleet["id"]},
+		{loginRow["id"], both["id"], own["id"]},
+	} {
+		r := a.post("/credentials/order", obj{"ids": ids})
+		expect(t, []any{r.status, r.body["detail"]}, []any{409, fleetRowMessage})
+	}
+	expect(t, a.state(), before)
+	order := a.post("/credentials/order", obj{"ids": []any{both["id"], own["id"]}})
+	expect(t, order.status, 200)
+	var got []any
+	for _, c := range order.body["credentials"].([]any) {
+		got = append(got, c.(obj)["id"])
+	}
+	expect(t, got, []any{loginRow["id"], both["id"], fleet["id"], own["id"]})
+	// With no id, a read, a save and a delete go to the first row the agent uses, never the
+	// fleet's login before it.
+	expect(t, a.get("/credentials/one").body["credential"].(obj)["id"], both["id"])
+	saved := a.post("/credentials/save", obj{"update": obj{"kind": "anthropic_api_key", "secret": "k"}})
+	expect(t, []any{saved.status, saved.body["credential"].(obj)["id"]}, []any{200, both["id"]})
+	expect(t, a.post("/credentials/delete", obj{}).body, obj{"deleted": true})
+	left := a.state()
+	expect(t, len(left), 3)
+	// The rest close up; the fleet's rows are otherwise as they were.
+	expect(t, left[loginRow["id"]], before[loginRow["id"]])
+	expect(t, left[fleet["id"]], append([]any{1}, before[fleet["id"]][1:]...))
+}
+
+// agent false (the fleet's own caller, #7984) still deletes, renames, resets, records and reorders
+// a fleet row.
+func TestTheFleetsCallerStillChangesItsRows(t *testing.T) {
+	a := newAPI(t, keysOf(kek))
+	loginRow := a.fleet(update{kind: claudeLogin, secret: text(login)}, "")
+	fleet := a.fleet(update{kind: "anthropic_api_key", secret: text(apiKey + "f"), scope: text("fleet")}, "")
+	own := a.post("/credentials", obj{"kind": "anthropic_api_key", "secret": apiKey}).body["credential"].(obj)
+	s := &Store{Pool: a.pool, Keys: keysOf(kek)}
+	ctx := context.Background()
+	loginID, fleetID, ownID := loginRow["id"].(string), fleet["id"].(string), own["id"].(string)
+	if r, err := s.renameRow(ctx, loginID, text("Ops"), false); err != nil || r == nil {
+		t.Fatal(r, err)
+	}
+	found, err := s.recordEvent(ctx, loginID, 0, "disabled", text("401"), nil, nil, false)
+	if err != nil || found == nil || found.After != "disabled" {
+		t.Fatal(found, err)
+	}
+	reset, err := s.resetRow(ctx, loginID, false)
+	if err != nil || reset == nil {
+		t.Fatal(reset, err)
+	}
+	expect(t, []any{reset.Status, reset.Epoch}, []any{"active", 1})
+	ordered, err := s.orderRows(ctx, []string{ownID, fleetID, loginID}, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	expect(t, []any{ordered[0].ID, ordered[1].ID, ordered[2].ID}, []any{ownID, fleetID, loginID})
+	if gone, err := s.deleteRow(ctx, &fleetID, false); err != nil || !gone {
+		t.Fatal(gone, err)
+	}
+	if gone, err := s.deleteRow(ctx, nil, false); err != nil || !gone {
+		t.Fatal(gone, err)
+	}
+	listed := a.get("/credentials").body["credentials"].([]any)
+	expect(t, len(listed), 1)
+	expect(t, []any{listed[0].(obj)["id"], listed[0].(obj)["name"]}, []any{loginID, "Ops"})
 }

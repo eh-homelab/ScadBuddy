@@ -85,6 +85,27 @@ function stored(row: Omit<Row, 'secret_sealed' | 'dek_sealed'>): StoredCredentia
 
 type Db = Sql | TransactionSql
 
+/** The API's refusal of a fleet row to the agent's caller (backend `FLEET_ROW_MESSAGE`, #7983). */
+export const FLEET_ROW_MESSAGE =
+  "the fleet's credentials are not changed here: the assistant may not save, delete," +
+  ' rename, reset, reorder or record an event on a claude_login or a credential whose' +
+  ' scope is fleet'
+
+/** Whether a row is the fleet's: a `claude_login`, or scope `fleet`. */
+const fleets = (row: Pick<StoredCredential, 'kind' | 'scope'>): boolean => row.kind === 'claude_login' || row.scope === 'fleet'
+
+/** A claude_login's account, by column, from its `claudeAiOauth` object (backend `login_account`). */
+function accountOf(update: CredentialUpdate): Record<'account_uuid' | 'organization_uuid' | 'subscription_type' | 'rate_limit_tier', string | null> {
+  const found = update.kind === 'claude_login' && update.secret ? (JSON.parse(update.secret) as Record<string, unknown>) : {}
+  const text = (v: unknown) => (typeof v === 'string' ? v : null)
+  return {
+    account_uuid: text(found.accountUuid),
+    organization_uuid: text(found.organizationUuid),
+    subscription_type: text(found.subscriptionType),
+    rate_limit_tier: text(found.rateLimitTier),
+  }
+}
+
 /** The table's own lock, against other structural writers (create, reorder, delete); readers are not blocked. */
 async function lockForWrite(tx: TransactionSql): Promise<void> {
   await tx`LOCK TABLE ai_credentials IN SHARE ROW EXCLUSIVE MODE`
@@ -108,7 +129,8 @@ function tryOpen(kek: Kek, row: Pick<Row, 'id' | 'kind' | 'base_url' | 'secret_s
 /**
  * `ai_credentials` over SQL on the test database, sealed under `kek` (the API's key): what the
  * API's `credentials` routes run (backend api/crud_agent_secrets.py), as the agent once ran them
- * itself. `kek` undefined is an API with no key.
+ * itself. `kek` undefined is an API with no key. It refuses the agent's caller every change to a
+ * fleet row, as the API does (#7983); `seedFleet` writes one as the fleet's own caller.
  */
 export class SqlCredentials implements CredentialRepo {
   private readonly sql: Sql
@@ -122,8 +144,11 @@ export class SqlCredentials implements CredentialRepo {
     return Promise.resolve(this.kek ? { ok: true, kek: this.kek } : { ok: false, reason: 'SCADBUDDY_SECRET_KEY_FILE is not set' })
   }
 
-  /** Rows as of the database's clock: an expired cooldown reads as `active`. */
-  private async rows(db: Db, id?: string): Promise<StoredCredential[]> {
+  /**
+   * Rows as of the database's clock: an expired cooldown reads as `active`. With no `id`, the
+   * agent's caller's `get` reads the first row the agent uses (`own`), as the API answers it.
+   */
+  private async rows(db: Db, id?: string, own = false): Promise<StoredCredential[]> {
     const rows = await db<Omit<Row, 'secret_sealed' | 'dek_sealed'>[]>`
       SELECT id, priority, kind, name, base_url, last4, updated_at, kek_id,
              get_byte(secret_sealed, 0) AS seal_version,
@@ -132,7 +157,7 @@ export class SqlCredentials implements CredentialRepo {
              last_error, last_error_at, last_used_at, epoch, scope, account_uuid, organization_uuid,
              subscription_type, rate_limit_tier, email, leased_to, leased_at, lease_epoch
       FROM ai_credentials
-      ${id === undefined ? db`` : db`WHERE id = ${id}`}
+      ${id === undefined ? (own ? db`WHERE scope IN ('agent', 'both') AND kind <> 'claude_login'` : db``) : db`WHERE id = ${id}`}
       ORDER BY priority`
     return rows.map(stored)
   }
@@ -142,7 +167,24 @@ export class SqlCredentials implements CredentialRepo {
   }
 
   async get(id?: string): Promise<StoredCredential | undefined> {
-    return (await this.rows(this.sql, id))[0]
+    return (await this.rows(this.sql, id, true))[0]
+  }
+
+  /** After a write that matched no row the agent uses: the API's 409 when the row is the fleet's. */
+  private async refuseIfFleets(db: Db, id: string): Promise<void> {
+    const [row] = await this.rows(db, id)
+    if (row && fleets(row)) throw new CredentialError(FLEET_ROW_MESSAGE, 409)
+  }
+
+  /**
+   * A row written by the fleet's own caller (`agent=False` on the API, #7984), which the agent's
+   * caller may not write: a `claude_login` with its account and email in clear, or a fleet row.
+   */
+  async seedFleet(update: CredentialUpdate): Promise<StoredCredential> {
+    return await this.sql.begin(async (tx) => {
+      await lockForWrite(tx)
+      return await this.insert(tx, update, this.kek, false)
+    })
   }
 
   async reveal(id?: string): Promise<Credential | undefined> {
@@ -182,10 +224,13 @@ export class SqlCredentials implements CredentialRepo {
     const kek = this.kek
     return await this.sql.begin(async (tx) => {
       await lockForWrite(tx)
-      const [current] = await this.rows(tx, id)
+      const [current] = await this.rows(tx, id, true)
       if (!current) {
         if (id !== undefined) throw new CredentialError(`no credential ${id}`, 404)
-        return await this.insert(tx, update, kek)
+        return await this.insert(tx, update, kek, true)
+      }
+      if (update.kind === 'claude_login' || update.scope === 'fleet' || fleets(current)) {
+        throw new CredentialError(FLEET_ROW_MESSAGE, 409)
       }
       const plan = planPut(update, current, kek, current.id)
       const scope = scopeOf(update, current)
@@ -215,23 +260,30 @@ export class SqlCredentials implements CredentialRepo {
     if (update.secret === undefined) throw new CredentialError('secret is required for a new credential', 400)
     return await this.sql.begin(async (tx) => {
       await lockForWrite(tx)
-      return await this.insert(tx, update, kek)
+      return await this.insert(tx, update, kek, true)
     })
   }
 
-  private async insert(tx: TransactionSql, update: CredentialUpdate, kek: Kek | undefined): Promise<StoredCredential> {
+  /** `agent`: the agent's caller inserts, so a claude_login or a fleet row is refused (409). */
+  private async insert(tx: TransactionSql, update: CredentialUpdate, kek: Kek | undefined, agent: boolean): Promise<StoredCredential> {
     // Under the table lock (lockForWrite), so racing creates cannot pass the cap together.
     const [count] = await tx<{ n: number }[]>`SELECT count(*)::int AS n FROM ai_credentials`
     if ((count?.n ?? 0) >= MAX_CREDENTIALS) throw new CredentialError(TOO_MANY_MESSAGE, 409)
+    if (agent && (update.kind === 'claude_login' || update.scope === 'fleet')) throw new CredentialError(FLEET_ROW_MESSAGE, 409)
     const id = randomUUID()
     const name = normaliseCredentialName(update.name)
     const plan = planPut(update, undefined, kek, id)
     if ('keep' in plan) throw new Error('planPut kept a credential that does not exist')
     const { kind, baseUrl, envelope, last4: tail } = plan.write
+    const account = accountOf(update)
+    const email = kind === 'claude_login' ? (update.email ?? null) : null
     await tx`
-      INSERT INTO ai_credentials (id, priority, kind, name, base_url, secret_sealed, dek_sealed, kek_id, last4, scope)
+      INSERT INTO ai_credentials (id, priority, kind, name, base_url, secret_sealed, dek_sealed, kek_id, last4, scope,
+                                  account_uuid, organization_uuid, subscription_type, rate_limit_tier, email)
       VALUES (${id}, (SELECT COALESCE(MAX(priority) + 1, 0) FROM ai_credentials), ${kind}, ${name}, ${baseUrl},
-              ${envelope.secretSealed}, ${envelope.dekSealed}, ${envelope.kekId}, ${tail}, ${scopeOf(update, undefined)})`
+              ${envelope.secretSealed}, ${envelope.dekSealed}, ${envelope.kekId}, ${tail}, ${scopeOf(update, undefined)},
+              ${account.account_uuid}, ${account.organization_uuid}, ${account.subscription_type}, ${account.rate_limit_tier},
+              ${email})`
     await tx`SELECT pg_notify('scadbuddy_warm_evict', '*')`
     return await this.one(tx, id)
   }
@@ -245,10 +297,14 @@ export class SqlCredentials implements CredentialRepo {
   async delete(id?: string): Promise<boolean> {
     return await this.sql.begin(async (tx) => {
       await lockForWrite(tx)
-      const deleted = await tx`
-        DELETE FROM ai_credentials
-        WHERE id = ${id === undefined ? tx`(SELECT id FROM ai_credentials ORDER BY priority LIMIT 1)` : id}`
-      if (deleted.count === 0) return false
+      // The agent's rows only; with no id, the first row the agent uses.
+      const target = id ?? (await this.rows(tx, undefined, true))[0]?.id
+      if (target === undefined) return false
+      const deleted = await tx`DELETE FROM ai_credentials WHERE id = ${target} AND scope IN ('agent', 'both') AND kind <> 'claude_login'`
+      if (deleted.count === 0) {
+        await this.refuseIfFleets(tx, target)
+        return false
+      }
       await tx`
         UPDATE ai_credentials c SET priority = n.rn - 1
         FROM (SELECT id, row_number() OVER (ORDER BY priority) AS rn FROM ai_credentials) n
@@ -261,14 +317,19 @@ export class SqlCredentials implements CredentialRepo {
   async reorder(ids: readonly string[]): Promise<StoredCredential[]> {
     return await this.sql.begin(async (tx) => {
       await lockForWrite(tx)
-      const current = await tx<{ id: string }[]>`SELECT id FROM ai_credentials`
+      // The agent's rows only: they take the priorities they hold between them, in this order,
+      // and every fleet row keeps its own; an order naming a fleet row is refused.
+      const current = await this.rows(tx)
       const wanted = new Set(ids)
-      if (wanted.size !== ids.length || wanted.size !== current.length || current.some((r) => !wanted.has(r.id))) {
+      if (current.some((r) => fleets(r) && wanted.has(r.id))) throw new CredentialError(FLEET_ROW_MESSAGE, 409)
+      const moved = current.filter((r) => !fleets(r))
+      if (wanted.size !== ids.length || wanted.size !== moved.length || moved.some((r) => !wanted.has(r.id))) {
         throw new CredentialError(STALE_ORDER_MESSAGE, 409)
       }
+      const slots = moved.map((r) => r.priority).sort((a, b) => a - b)
       await tx`
-        UPDATE ai_credentials c SET priority = v.ord - 1
-        FROM unnest(${tx.array([...ids])}::text[]) WITH ORDINALITY AS v(id, ord)
+        UPDATE ai_credentials c SET priority = v.priority
+        FROM unnest(${tx.array([...ids])}::text[], ${tx.array(slots)}::int[]) AS v(id, priority)
         WHERE c.id = v.id`
       await tx`SELECT pg_notify('scadbuddy_warm_evict', '*')`
       return await this.rows(tx)
@@ -279,16 +340,23 @@ export class SqlCredentials implements CredentialRepo {
     const updated = await this.sql`
       UPDATE ai_credentials SET status = 'active', cooldown_until = NULL, last_error = NULL, last_error_at = NULL,
         epoch = epoch + 1
-      WHERE id = ${id}`
-    if (updated.count === 0) return undefined
+      WHERE id = ${id} AND scope IN ('agent', 'both') AND kind <> 'claude_login'`
+    if (updated.count === 0) {
+      await this.refuseIfFleets(this.sql, id)
+      return undefined
+    }
     await this.sql`SELECT pg_notify('scadbuddy_warm_evict', '*')`
     return await this.get(id)
   }
 
   async rename(id: string, name: string | null): Promise<StoredCredential | undefined> {
     // No warm eviction: a Claude Code process never sees the name.
-    const updated = await this.sql`UPDATE ai_credentials SET name = ${normaliseCredentialName(name)} WHERE id = ${id}`
-    if (updated.count === 0) return undefined
+    const updated = await this.sql`
+      UPDATE ai_credentials SET name = ${normaliseCredentialName(name)} WHERE id = ${id} AND scope IN ('agent', 'both') AND kind <> 'claude_login'`
+    if (updated.count === 0) {
+      await this.refuseIfFleets(this.sql, id)
+      return undefined
+    }
     return await this.get(id)
   }
 
@@ -299,7 +367,7 @@ export class SqlCredentials implements CredentialRepo {
     const before = sql`
       SELECT id, status AS raw,
              CASE WHEN status = 'cooling_down' AND cooldown_until <= now() THEN 'active' ELSE status END AS status
-      FROM ai_credentials WHERE id = ${id} AND epoch = ${epoch} FOR UPDATE`
+      FROM ai_credentials WHERE id = ${id} AND epoch = ${epoch} AND scope IN ('agent', 'both') AND kind <> 'claude_login' FOR UPDATE`
     let rows: { before: CredentialStatus; raw: CredentialStatus; after: CredentialStatus }[]
     switch (event.kind) {
       case 'used':
@@ -342,7 +410,10 @@ export class SqlCredentials implements CredentialRepo {
         break
     }
     const [row] = rows
-    if (!row) return undefined
+    if (!row) {
+      await this.refuseIfFleets(sql, id)
+      return undefined
+    }
     return { before: row.before, after: row.after, recovered: row.raw === 'cooling_down' && row.after === 'active' }
   }
 

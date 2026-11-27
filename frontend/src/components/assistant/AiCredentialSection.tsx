@@ -43,8 +43,8 @@ const KIND_LABEL: Record<AiStoredCredentialKind, string> = {
 
 /**
  * The kind the assistant saves this credential as, or null for one it does not use (#7983: a
- * `claude_login`, or scope `fleet`): such a row is never tested or given a new key here, and the
- * API refuses a save over it.
+ * `claude_login`, or scope `fleet`): such a row is read-only here (no test, new key, rename,
+ * reset, move or delete), as the API refuses the assistant's caller every change to it.
  */
 function ownKind(entry: AiCredentialEntry): AiCredentialKind | null {
   return entry.agent_uses && entry.kind !== 'claude_login' ? entry.kind : null
@@ -170,6 +170,19 @@ function clock(iso: string, now = new Date()): string {
  * ••••abcd)", or with its name (#3710) "credential 2 “Work” (Anthropic API key ••••abcd)". The
  * position keeps two of one kind apart, even with no last four (a short secret) or one name.
  */
+/** The assistant's own credentials' ids, in order: what a reorder names (#7983). */
+function ownIds(list: readonly AiCredentialEntry[]): string[] {
+  return list.filter((c) => c.agent_uses).map((c) => c.id)
+}
+
+function isFirstOwn(entry: AiCredentialEntry, list: readonly AiCredentialEntry[]): boolean {
+  return ownIds(list)[0] === entry.id
+}
+
+function isLastOwn(entry: AiCredentialEntry, list: readonly AiCredentialEntry[]): boolean {
+  return ownIds(list).at(-1) === entry.id
+}
+
 function nameOf(entry: AiCredentialEntry, list: readonly AiCredentialEntry[]): string {
   const at = list.findIndex((c) => c.id === entry.id)
   const what = `${KIND_LABEL[entry.kind]}${entry.last4 ? ` ••••${entry.last4}` : ''}`
@@ -414,10 +427,15 @@ export function AiCredentialSection() {
     void recheckAiAvailability({ force: true })
   }
 
+  /**
+   * Swaps the assistant's credential with the next of its own up or down (#7983): the order sent
+   * names the assistant's rows only, and the fleet's keep their places.
+   */
   function move(index: number, by: -1 | 1) {
-    const ids = credentials.map((entry) => entry.id)
-    const [moved] = ids.splice(index, 1)
-    ids.splice(index + by, 0, moved!)
+    const ids = ownIds(credentials)
+    const at = ids.indexOf(credentials[index]!.id)
+    const [moved] = ids.splice(at, 1)
+    ids.splice(at + by, 0, moved!)
     void act(
       { id: moved!, action: by < 0 ? 'up' : 'down' },
       () => api.reorderAiCredentials(ids),
@@ -557,24 +575,29 @@ export function AiCredentialSection() {
                       : 'The agent cannot decrypt this key: no key-encryption key is mounted. Mount it, then replace the key if it still cannot be decrypted.'}
                   </p>
                 )}
+                {!entry.agent_uses ? (
+                  <p className="text-xs text-muted-foreground" data-testid="ai-credential-fleet-note">
+                    Managed by the fleet. It cannot be changed here.
+                  </p>
+                ) : (
                 <div className="flex flex-wrap items-center gap-1.5">
-                  <Tip wrap={index === 0 || busy !== null} content="Try it earlier">
+                  <Tip wrap={isFirstOwn(entry, credentials) || busy !== null} content="Try it earlier">
                     <Button
                       size="icon-sm"
                       variant="ghost"
                       onClick={() => move(index, -1)}
-                      disabled={index === 0 || busy !== null}
+                      disabled={isFirstOwn(entry, credentials) || busy !== null}
                       aria-label={`Move ${nameOf(entry, credentials)} up`}
                     >
                       {isBusy(entry.id, 'up') ? <Spinner /> : <ArrowUpIcon />}
                     </Button>
                   </Tip>
-                  <Tip wrap={index === credentials.length - 1 || busy !== null} content="Try it later">
+                  <Tip wrap={isLastOwn(entry, credentials) || busy !== null} content="Try it later">
                     <Button
                       size="icon-sm"
                       variant="ghost"
                       onClick={() => move(index, 1)}
-                      disabled={index === credentials.length - 1 || busy !== null}
+                      disabled={isLastOwn(entry, credentials) || busy !== null}
                       aria-label={`Move ${nameOf(entry, credentials)} down`}
                     >
                       {isBusy(entry.id, 'down') ? <Spinner /> : <ArrowDownIcon />}
@@ -661,6 +684,7 @@ export function AiCredentialSection() {
                     Delete
                   </Button>
                 </div>
+                )}
                 {ownKind(entry) && (
                 <CollapsibleContent asChild>
                   <form

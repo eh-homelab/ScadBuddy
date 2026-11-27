@@ -409,11 +409,18 @@ The agent reads no KEK (#5299 step 12).
   rows whose `scope` is `agent` or `both`, filtered in the reveal's SQL, so a fleet row and every
   `claude_login` stay closed to the agent and a fleet row's id reads as unknown, #7983; so
   `redact` leaves fleet secrets out too, which is correct: the agent's process never holds a
-  fleet secret, so it has none to leak. The agent's caller writes the agent's rows only: a
-  create or save of a `claude_login`, a save over a `fleet` row, or a scope of `fleet` is a
-  409 (`agent_data/credentials.py` `_refuse_fleet_rows`, core's `refuseFleetRows`), so the
-  agent can neither plant a login that a fleet machine installs nor replace a fleet row's
-  secret. Any other caller's save that widens a `fleet` row to `agent` or `both` must carry
+  fleet secret, so it has none to leak. The agent's caller cannot change a fleet row (a
+  `claude_login`, or scope `fleet`) in any way, each refusal the same 409 `credential-refused`:
+  a create or save of a `claude_login`, a save over a fleet row or into scope `fleet`
+  (`agent_data/credentials.py` `_refuse_fleet_rows`, core's `refuseFleetRows`), and a delete,
+  rename, reset or event on a fleet row (`_refuse_if_fleets`, core's `refuseIfFleets`: each
+  write's SQL matches the agent's rows only). Its reorder names the agent's rows only (an
+  order that names a fleet row is the 409), and every fleet row keeps its priority. With no
+  id, its read, save and delete take the first row the agent uses, never a fleet row, so the
+  deprecated single-credential routes act on that row. So a compromised agent pod can neither
+  plant a login that a fleet machine installs nor replace, delete, rename, reset, cool down or
+  disable a fleet login. Only the fleet's own caller (#7984, `agent=False` in the store) writes
+  fleet rows. Any other caller's save that widens a `fleet` row to `agent` or `both` must carry
   the secret again, else it is a 422), a
   subject's payload data key from `POST …/crud/agent/payload-keys/{subject}`, never the
   KEK. Each answers the `agent` service credential only, writes its `ai_audit` row in the

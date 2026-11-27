@@ -116,7 +116,7 @@ describe('AiCredentialSection (#1000, #1093)', () => {
     expect(screen.getByTestId('ai-credentials-none-usable')).toHaveTextContent('each one needs a reset or a new key')
   })
 
-  it('lists the fleet’s credentials with their scope and account, never tested or replaced here (#7983)', async () => {
+  it('lists the fleet’s credentials read-only, with their scope and account (#7983)', async () => {
     setCredentials([
       credentialEntry({
         id: 'l1',
@@ -141,13 +141,36 @@ describe('AiCredentialSection (#1000, #1093)', () => {
       expect(within(row).getByTestId('ai-credential-scope')).toHaveTextContent('Fleet only')
       expect(within(row).queryByRole('button', { name: /^Test / })).toBeNull()
       expect(within(row).queryByRole('button', { name: /^Replace the key/ })).toBeNull()
-      expect(within(row).getByRole('button', { name: /^Delete / })).toBeInTheDocument()
+      // The API refuses Settings every change to a fleet row: it is the fleet's to manage.
+      for (const name of [/^Delete /, /^Rename /, /^Reset /, /^Move /]) {
+        expect(within(row).queryByRole('button', { name })).toBeNull()
+      }
+      expect(within(row).getByTestId('ai-credential-fleet-note')).toHaveTextContent('Managed by the fleet')
     }
     expect(within(both!).getByTestId('ai-credential-scope')).toHaveTextContent('Shared with the fleet')
     expect(within(both!).getByRole('button', { name: /^Test / })).toBeInTheDocument()
     expect(within(both!).getByRole('button', { name: /^Replace the key/ })).toBeInTheDocument()
+    expect(within(both!).getByRole('button', { name: /^Delete / })).toBeInTheDocument()
+    expect(within(both!).getByRole('button', { name: /^Reset / })).toBeInTheDocument()
+    expect(within(both!).queryByTestId('ai-credential-fleet-note')).toBeNull()
     // The fleet's rows do not count: the assistant's only one is refused.
     expect(screen.getByTestId('ai-credentials-none-usable')).toHaveTextContent('each one needs a reset or a new key')
+  })
+
+  it('moves the assistant’s credentials past the fleet’s, which keep their places (#7983)', async () => {
+    const orders = bodiesOf('PUT', `${base}/order`)
+    setCredentials([
+      credentialEntry({ id: 'a1', last4: 'AAAA' }),
+      credentialEntry({ id: 'f1', last4: 'FFFF', scope: 'fleet', agent_uses: false }),
+      credentialEntry({ id: 'b1', last4: 'BBBB', scope: 'both' }),
+    ])
+    const { user } = renderPage(<AiCredentialSection />)
+    const down = await screen.findByRole('button', { name: /^Move credential 1 .*AAAA\) down$/ })
+    expect(screen.getByRole('button', { name: /^Move credential 3 .*BBBB\) down$/ })).toBeDisabled()
+    await user.click(down)
+    await waitFor(() => expect(rows()[0]).toHaveTextContent('BBBB'))
+    expect(orders).toEqual([{ ids: ['b1', 'a1'] }])
+    expect(rows().map((r) => r.textContent?.match(/([A-Z])\1{3}/)?.[0])).toEqual(['BBBB', 'FFFF', 'AAAA'])
   })
 
   it('names the first rate-limited one by its name when it has one (#3710)', async () => {

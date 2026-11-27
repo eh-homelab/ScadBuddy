@@ -38,9 +38,12 @@ const (
 		" base URL; save it again"
 	wideningMessage = "to share a fleet credential with the agent, enter its secret again"
 	// fleetRowMessage refuses the agent's caller a fleet row (#7983): a fleet machine installs a
-	// claude_login, so the agent must never plant one or replace a fleet row's secret.
-	fleetRowMessage = "the fleet's credentials are not written here: the assistant may not save a" +
-		" claude_login or a credential whose scope is fleet"
+	// claude_login, so the agent's caller never creates, saves, deletes, renames, resets or
+	// records an event on a claude_login or a row whose scope is fleet, never names one in a
+	// reorder (which leaves their priorities alone), and never saves a row into scope fleet.
+	fleetRowMessage = "the fleet's credentials are not changed here: the assistant may not save, delete," +
+		" rename, reset, reorder or record an event on a claude_login or a credential whose" +
+		" scope is fleet"
 )
 
 var kinds = []string{"anthropic_api_key", "claude_login", "claude_oauth_token", "gateway"}
@@ -194,12 +197,19 @@ const agentsOwn = "scope IN ('agent', 'both') AND kind <> 'claude_login'"
 // rows are the credentials as of the database's clock: an expired cooldown reads as active.
 // With sealed, the sealed bytes too, of the agent's own rows only.
 func rows(ctx context.Context, q querier, id *string, sealed bool) ([]row, error) {
+	return rowsOf(ctx, q, id, sealed, false)
+}
+
+// rowsOf is rows; with own, the agent's own rows only.
+func rowsOf(ctx context.Context, q querier, id *string, sealed, own bool) ([]row, error) {
 	cols, where, args := columns, []string{}, []any{}
 	if sealed {
 		cols += ", secret_sealed, dek_sealed"
-		where = append(where, agentsOwn)
 	} else {
 		cols += ", NULL::bytea, NULL::bytea"
+	}
+	if sealed || own {
+		where = append(where, agentsOwn)
 	}
 	if id != nil {
 		where, args = append(where, "id = $1"), []any{*id}
@@ -216,11 +226,42 @@ func rows(ctx context.Context, q querier, id *string, sealed bool) ([]row, error
 }
 
 func first(ctx context.Context, q querier, id *string) (*row, error) {
-	found, err := rows(ctx, q, id, false)
+	return firstOf(ctx, q, id, false)
+}
+
+// firstOf is one credential; the first by priority when id is nil, and with agent (the agent's
+// caller) the first one the agent uses: never a fleet row (#7983).
+func firstOf(ctx context.Context, q querier, id *string, agent bool) (*row, error) {
+	found, err := rowsOf(ctx, q, id, false, agent && id == nil)
 	if err != nil || len(found) == 0 {
 		return nil, err
 	}
 	return &found[0], nil
+}
+
+// fleets is whether the row is the fleet's (#7983): a claude_login, or scope fleet. Every other
+// row is one that agentsOwn matches.
+func (r *row) fleets() bool { return r.Kind == claudeLogin || r.Scope == "fleet" }
+
+// refuseIfFleets runs after a write of the agent's caller that matched no row of agentsOwn: a 409
+// when the row is the fleet's, so the caller tells a fleet row from a row that is gone.
+func refuseIfFleets(ctx context.Context, q querier, id string) error {
+	found, err := first(ctx, q, &id)
+	if err != nil {
+		return err
+	}
+	if found != nil && found.fleets() {
+		return refused(409, fleetRowMessage)
+	}
+	return nil
+}
+
+// ownOnly is the agentsOwn condition a write of the agent's caller adds to its WHERE.
+func ownOnly(agent bool) string {
+	if agent {
+		return " AND " + agentsOwn
+	}
+	return ""
 }
 
 // iso is Python's datetime.isoformat, in UTC.
@@ -360,7 +401,7 @@ func (s *Store) get(r *http.Request, _ crud.Params) (any, error) {
 		}
 		id = &v
 	}
-	found, err := first(r.Context(), s.Pool, id)
+	found, err := firstOf(r.Context(), s.Pool, id, true)
 	if err != nil {
 		return nil, err
 	}
@@ -504,9 +545,10 @@ func loginAccount(secret string) (account, string, error) {
 	return a, last4(access), nil
 }
 
-// refuseFleetRows is the agent's caller's rule (#7983): it writes the agent's rows only, never a
-// claude_login and never a row whose scope is or becomes fleet. A 409, which the agent's store
-// passes on.
+// refuseFleetRows is a create or save of the agent's caller (#7983): never a claude_login, never a
+// row whose scope is or becomes fleet. A 409, which the agent's store passes on. Its delete,
+// rename, reset and events refuse a fleet row with the same 409 (refuseIfFleets), and so does a
+// reorder that names one.
 func refuseFleetRows(u update, current *row) error {
 	if u.kind == claudeLogin || (u.scope != nil && *u.scope == "fleet") {
 		return refused(409, fleetRowMessage)
@@ -518,7 +560,7 @@ func refuseFleetRows(u update, current *row) error {
 }
 
 // plan is credentials.ts planPut: its envelope nil to keep the stored secret (only when
-// neither kind nor base_url changes). agent: the agent's caller writes, so a fleet row is refused.
+// neither kind nor base_url changes). agent: the agent's caller saves, so a fleet row is refused.
 func (s *Store) plan(u update, current *row, id string, agent bool) (*plan, error) {
 	if agent {
 		if err := refuseFleetRows(u, current); err != nil {
@@ -691,14 +733,14 @@ func (s *Store) save(r *http.Request, _ crud.Params) (any, error) {
 
 // saveRow is a save over a credential (the first by priority when id is nil; one is created when
 // there is none), in its own transaction. agent as for createRow: the agent's caller never saves
-// over a claude_login or a fleet row.
+// over a claude_login or a fleet row, and its save with no id goes to the first row the agent uses.
 func (s *Store) saveRow(ctx context.Context, id *string, u update, agent bool) (*row, error) {
 	var out *row
 	err := pgx.BeginFunc(ctx, s.Pool, func(tx pgx.Tx) error {
 		if err := lock(ctx, tx); err != nil {
 			return err
 		}
-		current, err := first(ctx, tx, id)
+		current, err := firstOf(ctx, tx, id, agent)
 		if err != nil {
 			return err
 		}
@@ -760,23 +802,41 @@ func (s *Store) delete(r *http.Request, _ crud.Params) (any, error) {
 	if err := f.err(); err != nil {
 		return nil, err
 	}
+	deleted, err := s.deleteRow(r.Context(), id, true)
+	if err != nil {
+		return nil, err
+	}
+	return struct {
+		Deleted bool `json:"deleted"`
+	}{deleted}, nil
+}
+
+// deleteRow deletes a credential (the first by priority when id is nil); the rest close up.
+// agent: the agent's caller deletes the agent's rows only, a fleet row is a 409, and with no id it
+// deletes the first row the agent uses.
+func (s *Store) deleteRow(ctx context.Context, id *string, agent bool) (bool, error) {
 	deleted := false
-	err = pgx.BeginFunc(r.Context(), s.Pool, func(tx pgx.Tx) error {
-		ctx := r.Context()
+	err := pgx.BeginFunc(ctx, s.Pool, func(tx pgx.Tx) error {
 		if err := lock(ctx, tx); err != nil {
 			return err
 		}
 		target := id
 		if target == nil {
-			current, err := first(ctx, tx, nil)
+			current, err := firstOf(ctx, tx, nil, agent)
 			if err != nil || current == nil {
 				return err
 			}
 			target = &current.ID
 		}
-		tag, err := tx.Exec(ctx, `DELETE FROM ai_credentials WHERE id = $1`, *target)
-		if err != nil || tag.RowsAffected() == 0 {
+		tag, err := tx.Exec(ctx, `DELETE FROM ai_credentials WHERE id = $1`+ownOnly(agent), *target)
+		if err != nil {
 			return err
+		}
+		if tag.RowsAffected() == 0 {
+			if agent {
+				return refuseIfFleets(ctx, tx, *target)
+			}
+			return nil
 		}
 		if _, err := tx.Exec(ctx, `UPDATE ai_credentials c SET priority = n.rn - 1 FROM (SELECT id,
 			row_number() OVER (ORDER BY priority) AS rn FROM ai_credentials) n
@@ -786,12 +846,7 @@ func (s *Store) delete(r *http.Request, _ crud.Params) (any, error) {
 		deleted = true
 		return evict(ctx, tx)
 	})
-	if err != nil {
-		return nil, err
-	}
-	return struct {
-		Deleted bool `json:"deleted"`
-	}{deleted}, nil
+	return deleted, err
 }
 
 func (s *Store) order(r *http.Request, _ crud.Params) (any, error) {
@@ -817,9 +872,19 @@ func (s *Store) order(r *http.Request, _ crud.Params) (any, error) {
 	if err := f.err(); err != nil {
 		return nil, err
 	}
+	out, err := s.orderRows(r.Context(), ids, true)
+	if err != nil {
+		return nil, err
+	}
+	return listOf(out), nil
+}
+
+// orderRows puts the credentials in this order; ids must name every one exactly once. With agent,
+// the agent's rows only: ids names every row the agent uses and no fleet row (a 409), those rows
+// take the priorities they hold between them in that order, and every fleet row keeps its own.
+func (s *Store) orderRows(ctx context.Context, ids []string, agent bool) ([]row, error) {
 	var out []row
-	err = pgx.BeginFunc(r.Context(), s.Pool, func(tx pgx.Tx) error {
-		ctx := r.Context()
+	err := pgx.BeginFunc(ctx, s.Pool, func(tx pgx.Tx) error {
 		if err := lock(ctx, tx); err != nil {
 			return err
 		}
@@ -827,18 +892,25 @@ func (s *Store) order(r *http.Request, _ crud.Params) (any, error) {
 		if err != nil {
 			return err
 		}
-		have := make([]string, 0, len(current))
+		have, slots := make([]string, 0, len(current)), make([]int, 0, len(current))
 		for _, c := range current {
-			have = append(have, c.ID)
+			if agent && c.fleets() {
+				if slices.Contains(ids, c.ID) {
+					return refused(409, fleetRowMessage)
+				}
+				continue
+			}
+			have, slots = append(have, c.ID), append(slots, c.Priority)
 		}
 		wanted := slices.Clone(ids)
 		slices.Sort(wanted)
 		slices.Sort(have)
+		slices.Sort(slots)
 		if len(slices.Compact(slices.Clone(wanted))) != len(ids) || !slices.Equal(wanted, have) {
 			return refused(409, staleOrderMessage)
 		}
-		if _, err := tx.Exec(ctx, `UPDATE ai_credentials c SET priority = v.ord - 1 FROM unnest($1::text[])
-			WITH ORDINALITY AS v(id, ord) WHERE c.id = v.id`, ids); err != nil {
+		if _, err := tx.Exec(ctx, `UPDATE ai_credentials c SET priority = v.priority
+			FROM unnest($1::text[], $2::int[]) AS v(id, priority) WHERE c.id = v.id`, ids, slots); err != nil {
 			return err
 		}
 		if err := evict(ctx, tx); err != nil {
@@ -847,10 +919,7 @@ func (s *Store) order(r *http.Request, _ crud.Params) (any, error) {
 		out, err = rows(ctx, tx, nil, false)
 		return err
 	})
-	if err != nil {
-		return nil, err
-	}
-	return listOf(out), nil
+	return out, err
 }
 
 func (s *Store) reset(r *http.Request, _ crud.Params) (any, error) {
@@ -862,24 +931,36 @@ func (s *Store) reset(r *http.Request, _ crud.Params) (any, error) {
 	if err := f.err(); err != nil {
 		return nil, err
 	}
-	var out *row
-	err = pgx.BeginFunc(r.Context(), s.Pool, func(tx pgx.Tx) error {
-		ctx := r.Context()
-		tag, err := tx.Exec(ctx, `UPDATE ai_credentials SET status = 'active', cooldown_until = NULL,
-			last_error = NULL, last_error_at = NULL, epoch = epoch + 1 WHERE id = $1`, *id)
-		if err != nil || tag.RowsAffected() == 0 {
-			return err
-		}
-		if err := evict(ctx, tx); err != nil {
-			return err
-		}
-		out, err = first(ctx, tx, id)
-		return err
-	})
+	out, err := s.resetRow(r.Context(), *id, true)
 	if err != nil {
 		return nil, err
 	}
 	return one(out), nil
+}
+
+// resetRow makes a credential active again, ending a cooldown or a disable. agent: the agent's rows
+// only, a fleet row is a 409.
+func (s *Store) resetRow(ctx context.Context, id string, agent bool) (*row, error) {
+	var out *row
+	err := pgx.BeginFunc(ctx, s.Pool, func(tx pgx.Tx) error {
+		tag, err := tx.Exec(ctx, `UPDATE ai_credentials SET status = 'active', cooldown_until = NULL,
+			last_error = NULL, last_error_at = NULL, epoch = epoch + 1 WHERE id = $1`+ownOnly(agent), id)
+		if err != nil {
+			return err
+		}
+		if tag.RowsAffected() == 0 {
+			if agent {
+				return refuseIfFleets(ctx, tx, id)
+			}
+			return nil
+		}
+		if err := evict(ctx, tx); err != nil {
+			return err
+		}
+		out, err = first(ctx, tx, &id)
+		return err
+	})
+	return out, err
 }
 
 func (s *Store) rename(r *http.Request, _ crud.Params) (any, error) {
@@ -892,29 +973,44 @@ func (s *Store) rename(r *http.Request, _ crud.Params) (any, error) {
 	if err := f.err(); err != nil {
 		return nil, err
 	}
-	var out *row
-	err = pgx.BeginFunc(r.Context(), s.Pool, func(tx pgx.Tx) error {
-		ctx := r.Context()
-		checked, err := checkName(name)
-		if err != nil {
-			return err
-		}
-		tag, err := tx.Exec(ctx, `UPDATE ai_credentials SET name = $1 WHERE id = $2`, checked, *id)
-		if err != nil || tag.RowsAffected() == 0 {
-			return err
-		}
-		out, err = first(ctx, tx, id)
-		return err
-	})
+	out, err := s.renameRow(r.Context(), *id, name, true)
 	if err != nil {
 		return nil, err
 	}
 	return one(out), nil
 }
 
-const before = `SELECT id, status AS raw, CASE WHEN status = 'cooling_down' AND cooldown_until <= now()
+// renameRow sets or clears the name, and nothing else. No warm eviction: a Claude Code process
+// never sees the name. agent: the agent's rows only, a fleet row is a 409.
+func (s *Store) renameRow(ctx context.Context, id string, name *string, agent bool) (*row, error) {
+	var out *row
+	err := pgx.BeginFunc(ctx, s.Pool, func(tx pgx.Tx) error {
+		checked, err := checkName(name)
+		if err != nil {
+			return err
+		}
+		tag, err := tx.Exec(ctx, `UPDATE ai_credentials SET name = $1 WHERE id = $2`+ownOnly(agent), checked, id)
+		if err != nil {
+			return err
+		}
+		if tag.RowsAffected() == 0 {
+			if agent {
+				return refuseIfFleets(ctx, tx, id)
+			}
+			return nil
+		}
+		out, err = first(ctx, tx, &id)
+		return err
+	})
+	return out, err
+}
+
+// before locks the row an event is recorded on; with agent, a row of the agent's only.
+func before(agent bool) string {
+	return `SELECT id, status AS raw, CASE WHEN status = 'cooling_down' AND cooldown_until <= now()
 	THEN 'active' ELSE status END AS status FROM ai_credentials
-	WHERE id = @id AND epoch = @epoch FOR UPDATE`
+	WHERE id = @id AND epoch = @epoch` + ownOnly(agent) + ` FOR UPDATE`
+}
 
 var record = map[string]string{
 	"used": `UPDATE ai_credentials c SET last_used_at = now(),
@@ -979,20 +1075,7 @@ func (s *Store) events(r *http.Request, _ crud.Params) (any, error) {
 	if kind == "cooling_down" && until == nil {
 		return nil, httpx.WithReason(422, "a cooling_down event needs until", credentialRefused)
 	}
-	sql := "WITH b AS (" + before + ") " + record[kind] +
-		" FROM b WHERE c.id = b.id RETURNING b.status AS before, b.raw AS raw, c.status AS after"
-	var found *struct{ before, raw, after string }
-	err = pgx.BeginFunc(r.Context(), s.Pool, func(tx pgx.Tx) error {
-		var b, raw, after string
-		err := tx.QueryRow(r.Context(), sql, pgx.NamedArgs{
-			"id": *id, "epoch": epoch, "reason": reason, "until": until, "replacing": replacing,
-		}).Scan(&b, &raw, &after)
-		if errors.Is(err, pgx.ErrNoRows) {
-			return nil
-		}
-		found = &struct{ before, raw, after string }{b, raw, after}
-		return err
-	})
+	found, err := s.recordEvent(r.Context(), *id, epoch, kind, reason, until, replacing, true)
 	if err != nil {
 		return nil, err
 	}
@@ -1005,10 +1088,39 @@ func (s *Store) events(r *http.Request, _ crud.Params) (any, error) {
 		Transition *transition `json:"transition"`
 	}{}
 	if found != nil {
-		out.Transition = &transition{found.before, found.after,
-			found.raw == "cooling_down" && found.after == "active"}
+		out.Transition = &transition{found.Before, found.After,
+			found.Raw == "cooling_down" && found.After == "active"}
 	}
 	return out, nil
+}
+
+// recorded is an event's transition: the status before (as read) and its raw value, and after.
+type recorded struct{ Before, Raw, After string }
+
+// recordEvent records what a query learned; nil when the row is gone or its epoch moved on. before
+// locks the row, so the transition answered is the one written even when several pods report at
+// once. agent: the agent's rows only, a fleet row is a 409, so the agent's caller never cools down
+// or disables a fleet login.
+func (s *Store) recordEvent(ctx context.Context, id string, epoch int64, kind string, reason *string,
+	until, replacing *time.Time, agent bool) (*recorded, error) {
+	sql := "WITH b AS (" + before(agent) + ") " + record[kind] +
+		" FROM b WHERE c.id = b.id RETURNING b.status AS before, b.raw AS raw, c.status AS after"
+	var found *recorded
+	err := pgx.BeginFunc(ctx, s.Pool, func(tx pgx.Tx) error {
+		var r recorded
+		err := tx.QueryRow(ctx, sql, pgx.NamedArgs{
+			"id": id, "epoch": epoch, "reason": reason, "until": until, "replacing": replacing,
+		}).Scan(&r.Before, &r.Raw, &r.After)
+		if errors.Is(err, pgx.ErrNoRows) {
+			if agent {
+				return refuseIfFleets(ctx, tx, id)
+			}
+			return nil
+		}
+		found = &r
+		return err
+	})
+	return found, err
 }
 
 // opened is the agent's Credential: the secret in plaintext.

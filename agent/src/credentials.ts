@@ -133,7 +133,7 @@ function wireIds(ids: RevealIds): { session_id?: string; turn_id?: string } {
 export type CredentialRepo = {
   /** Every credential, in priority order. */
   list(): Promise<StoredCredential[]>
-  /** One credential; the first by priority when `id` is omitted (the single-credential routes). */
+  /** One credential; the first the agent uses when `id` is omitted (the single-credential routes). */
   get(id?: string): Promise<StoredCredential | undefined>
   /** The credential decrypted by the API, which audits the reveal (`purpose`). */
   reveal(id?: string, purpose?: RevealPurpose, ids?: RevealIds): Promise<Credential | undefined>
@@ -146,18 +146,22 @@ export type CredentialRepo = {
   /** Who opens the secrets: the API's key. */
   opener(): Promise<OpenerStatus>
   /**
-   * Saves `update` over a credential (the first by priority when `id` is
+   * Saves `update` over a credential (the first the agent uses when `id` is
    * omitted; one is created when there is none). A new secret makes it
-   * `active` again. Throws CredentialError 404 for an unknown `id`.
+   * `active` again. Throws CredentialError 404 for an unknown `id`, and 409 for a
+   * `claude_login` or a fleet row (#7983): the API changes the agent's rows only.
    */
   put(update: CredentialUpdate, id?: string): Promise<StoredCredential>
   /** A new credential, last in priority. `secret` is required; refused (409) past MAX_CREDENTIALS. */
   create(update: CredentialUpdate): Promise<StoredCredential>
-  /** Deletes a credential (the first by priority when `id` is omitted); the rest close up. */
+  /** Deletes a credential (the first the agent uses when `id` is omitted); the rest close up. 409 for a fleet row. */
   delete(id?: string): Promise<boolean>
-  /** Puts the credentials in this order; `ids` must name every one exactly once (else CredentialError 409). */
+  /**
+   * Puts the agent's credentials in this order; `ids` must name every row the agent uses exactly
+   * once and no fleet row (else CredentialError 409). The fleet's rows keep their priorities.
+   */
   reorder(ids: readonly string[]): Promise<StoredCredential[]>
-  /** Makes a credential `active` again, ending a cooldown or a disable. */
+  /** Makes a credential `active` again, ending a cooldown or a disable. 409 for a fleet row. */
   reset(id: string): Promise<StoredCredential | undefined>
   /**
    * Sets or clears a credential's name (#3710), and nothing else: the secret, its health and

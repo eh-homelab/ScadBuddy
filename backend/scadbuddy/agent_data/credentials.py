@@ -56,11 +56,14 @@ EMAIL_MESSAGE = (
     "email must be one address, at most 320 characters, with no space or control character"
 )
 WIDENING_MESSAGE = "to share a fleet credential with the agent, enter its secret again"
-#: The agent's caller writes the agent's rows only (#7983): a fleet machine installs a
-#: claude_login, so the agent must never plant one or replace a fleet row's secret.
+#: The agent's caller changes the agent's rows only (#7983): a fleet machine installs a
+#: claude_login, so the agent's caller never creates, saves, deletes, renames, resets or
+#: records an event on a claude_login or a row whose scope is fleet, never names one in a
+#: reorder (which leaves their priorities alone), and never saves a row into scope fleet.
 FLEET_ROW_MESSAGE = (
-    "the fleet's credentials are not written here: the assistant may not save a"
-    " claude_login or a credential whose scope is fleet"
+    "the fleet's credentials are not changed here: the assistant may not save, delete,"
+    " rename, reset, reorder or record an event on a claude_login or a credential whose"
+    " scope is fleet"
 )
 LOGIN_MESSAGE = "a claude_login secret must be a claudeAiOauth JSON object"
 LOGIN_NEEDS = (
@@ -190,12 +193,13 @@ AGENTS_OWN = "scope IN ('agent', 'both') AND kind <> 'claude_login'"
 
 
 def _rows(
-    conn: Connection[Any], row_id: str | None = None, *, sealed: bool = False
+    conn: Connection[Any], row_id: str | None = None, *, sealed: bool = False, own: bool = False
 ) -> list[dict[str, Any]]:
     """Rows as of the database's clock: an expired cooldown reads as ``active``. With
-    ``sealed``, the sealed bytes too, of the agent's own rows only."""
+    ``sealed``, the sealed bytes too, of the agent's own rows only; with ``own``, the agent's
+    own rows only."""
     columns = _COLUMNS + (", secret_sealed, dek_sealed" if sealed else "")
-    clauses = ([AGENTS_OWN] if sealed else []) + ([] if row_id is None else ["id = %s"])
+    clauses = ([AGENTS_OWN] if sealed or own else []) + ([] if row_id is None else ["id = %s"])
     where = f" WHERE {' AND '.join(clauses)}" if clauses else ""
     cur = conn.execute(
         f"SELECT {columns} FROM ai_credentials{where} ORDER BY priority",
@@ -205,9 +209,24 @@ def _rows(
     return [_dict(r, names) for r in cur.fetchall()]
 
 
-def _first_id(conn: Connection[Any]) -> str | None:
-    rows = _rows(conn)
+def _first_id(conn: Connection[Any], *, agent: bool) -> str | None:
+    """The first row by priority; with ``agent``, the first row the agent uses."""
+    rows = _rows(conn, own=agent)
     return rows[0]["id"] if rows else None
+
+
+def _fleets(row: dict[str, Any]) -> bool:
+    """Whether the row is the fleet's (#7983): a claude_login, or scope fleet. Every other row
+    is one that ``AGENTS_OWN`` matches."""
+    return bool(row["kind"] == CLAUDE_LOGIN or row["scope"] == "fleet")
+
+
+def _refuse_if_fleets(conn: Connection[Any], row_id: str) -> None:
+    """After a write of the agent's caller that matched no row of ``AGENTS_OWN``: a 409 when
+    the row is the fleet's, so the caller tells a fleet row from a row that is gone."""
+    found = _rows(conn, row_id)
+    if found and _fleets(found[0]):
+        raise CredentialRefusedError(FLEET_ROW_MESSAGE, 409)
 
 
 def stored(row: dict[str, Any]) -> dict[str, Any]:
@@ -367,8 +386,10 @@ _NO_ACCOUNT: dict[str, str | None] = dict.fromkeys(ACCOUNT_FIELDS)
 
 
 def _refuse_fleet_rows(update: Update, current: dict[str, Any] | None) -> None:
-    """The agent's caller writes the agent's rows only (#7983): never a claude_login, never
-    a row whose scope is or becomes fleet. A 409, which the agent's store passes on."""
+    """A create or save of the agent's caller (#7983): never a claude_login, never a row whose
+    scope is or becomes fleet. A 409, which the agent's store passes on. Its delete, rename,
+    reset and events refuse a fleet row with the same 409 (``_refuse_if_fleets``), and so
+    does a reorder that names one."""
     if update.kind == CLAUDE_LOGIN or update.scope == "fleet":
         raise CredentialRefusedError(FLEET_ROW_MESSAGE, 409)
     if current is not None and (current["kind"] == CLAUDE_LOGIN or current["scope"] == "fleet"):
@@ -380,7 +401,7 @@ def _plan(
 ) -> _Plan:
     """credentials.ts ``planPut``: the base URL, the new envelope (None to keep the stored
     secret, only when neither ``kind`` nor ``base_url`` changes), the scope, the email and a
-    claude_login's account. ``agent``: the agent's caller writes, so a fleet row is refused."""
+    claude_login's account. ``agent``: the agent's caller saves, so a fleet row is refused."""
     if agent:
         _refuse_fleet_rows(update, current)
     base_url: str | None = None
@@ -438,9 +459,10 @@ def list_all(conn: Connection[Any]) -> list[dict[str, Any]]:
     return _rows(conn)
 
 
-def get(conn: Connection[Any], row_id: str | None) -> dict[str, Any] | None:
-    """One credential; the first by priority when ``row_id`` is None."""
-    rows = _rows(conn, row_id)
+def get(conn: Connection[Any], row_id: str | None, *, agent: bool = True) -> dict[str, Any] | None:
+    """One credential; the first by priority when ``row_id`` is None, and with ``agent`` (the
+    agent's caller, the default) the first one the agent uses: never a fleet row (#7983)."""
+    rows = _rows(conn, row_id, own=agent and row_id is None)
     return rows[0] if rows else None
 
 
@@ -504,10 +526,11 @@ def put(
 ) -> dict[str, Any]:
     """A save over a credential, the first by priority when ``row_id`` is None (one is
     created when there is none). A new secret makes it ``active`` again. ``agent`` as for
-    ``create``: the agent's caller never saves over a claude_login or a fleet row."""
+    ``create``: the agent's caller never saves over a claude_login or a fleet row, and its
+    save with no ``row_id`` goes to the first row the agent uses."""
     with conn.transaction():
         _lock(conn)
-        current = get(conn, row_id)
+        current = get(conn, row_id, agent=agent)
         if current is None:
             if row_id is not None:
                 raise CredentialRefusedError(f"no credential {row_id}", 404)
@@ -557,16 +580,20 @@ def put(
         return _one(conn, current["id"])
 
 
-def delete(conn: Connection[Any], row_id: str | None) -> bool:
+def delete(conn: Connection[Any], row_id: str | None, *, agent: bool = True) -> bool:
     """Deletes a credential (the first by priority when ``row_id`` is None); the rest
-    close up."""
+    close up. ``agent`` (the default): the agent's caller deletes the agent's rows only, a
+    fleet row is a 409, and with no ``row_id`` it deletes the first row the agent uses."""
     with conn.transaction():
         _lock(conn)
-        target = row_id if row_id is not None else _first_id(conn)
+        target = row_id if row_id is not None else _first_id(conn, agent=agent)
         if target is None:
             return False
-        deleted = conn.execute("DELETE FROM ai_credentials WHERE id = %s", (target,))
+        own = f" AND {AGENTS_OWN}" if agent else ""
+        deleted = conn.execute(f"DELETE FROM ai_credentials WHERE id = %s{own}", (target,))
         if deleted.rowcount == 0:
+            if agent:
+                _refuse_if_fleets(conn, target)
             return False
         conn.execute(
             "UPDATE ai_credentials c SET priority = n.rn - 1 FROM (SELECT id,"
@@ -577,45 +604,62 @@ def delete(conn: Connection[Any], row_id: str | None) -> bool:
         return True
 
 
-def reorder(conn: Connection[Any], ids: list[str]) -> list[dict[str, Any]]:
-    """Puts the credentials in this order; ``ids`` must name every one exactly once."""
+def reorder(conn: Connection[Any], ids: list[str], *, agent: bool = True) -> list[dict[str, Any]]:
+    """Puts the credentials in this order; ``ids`` must name every one exactly once. With
+    ``agent`` (the default), the agent's rows only: ``ids`` names every row the agent uses and
+    no fleet row (a 409), those rows take the priorities they hold between them in that
+    order, and every fleet row keeps its own."""
     with conn.transaction():
         _lock(conn)
-        current = {r["id"] for r in _rows(conn)}
-        wanted = set(ids)
-        if len(wanted) != len(ids) or wanted != current:
+        rows = _rows(conn)
+        named = set(ids)
+        if agent and any(_fleets(r) for r in rows if r["id"] in named):
+            raise CredentialRefusedError(FLEET_ROW_MESSAGE, 409)
+        moved = [r for r in rows if not (agent and _fleets(r))]
+        if len(named) != len(ids) or named != {r["id"] for r in moved}:
             raise CredentialRefusedError(STALE_ORDER_MESSAGE, 409)
+        slots = sorted(r["priority"] for r in moved)
         conn.execute(
-            "UPDATE ai_credentials c SET priority = v.ord - 1 FROM unnest(%s::text[])"
-            " WITH ORDINALITY AS v(id, ord) WHERE c.id = v.id",
-            (ids,),
+            "UPDATE ai_credentials c SET priority = v.priority FROM unnest(%s::text[],"
+            " %s::int[]) AS v(id, priority) WHERE c.id = v.id",
+            (ids, slots),
         )
         _evict(conn)
         return _rows(conn)
 
 
-def reset(conn: Connection[Any], row_id: str) -> dict[str, Any] | None:
-    """Makes a credential ``active`` again, ending a cooldown or a disable."""
+def reset(conn: Connection[Any], row_id: str, *, agent: bool = True) -> dict[str, Any] | None:
+    """Makes a credential ``active`` again, ending a cooldown or a disable. ``agent`` (the
+    default): the agent's rows only, a fleet row is a 409."""
+    own = f" AND {AGENTS_OWN}" if agent else ""
     with conn.transaction():
         updated = conn.execute(
             "UPDATE ai_credentials SET status = 'active', cooldown_until = NULL,"
-            " last_error = NULL, last_error_at = NULL, epoch = epoch + 1 WHERE id = %s",
+            f" last_error = NULL, last_error_at = NULL, epoch = epoch + 1 WHERE id = %s{own}",
             (row_id,),
         )
         if updated.rowcount == 0:
+            if agent:
+                _refuse_if_fleets(conn, row_id)
             return None
         _evict(conn)
         return get(conn, row_id)
 
 
-def rename(conn: Connection[Any], row_id: str, name: str | None) -> dict[str, Any] | None:
+def rename(
+    conn: Connection[Any], row_id: str, name: str | None, *, agent: bool = True
+) -> dict[str, Any] | None:
     """Sets or clears the name, and nothing else. No warm eviction: a Claude Code process
-    never sees the name."""
+    never sees the name. ``agent`` (the default): the agent's rows only, a fleet row is a
+    409."""
+    own = f" AND {AGENTS_OWN}" if agent else ""
     with conn.transaction():
         updated = conn.execute(
-            "UPDATE ai_credentials SET name = %s WHERE id = %s", (check_name(name), row_id)
+            f"UPDATE ai_credentials SET name = %s WHERE id = %s{own}", (check_name(name), row_id)
         )
         if updated.rowcount == 0:
+            if agent:
+                _refuse_if_fleets(conn, row_id)
             return None
         return get(conn, row_id)
 
@@ -633,7 +677,7 @@ class Event:
 _BEFORE = (
     "SELECT id, status AS raw, CASE WHEN status = 'cooling_down' AND cooldown_until <= now()"
     " THEN 'active' ELSE status END AS status FROM ai_credentials"
-    " WHERE id = %(id)s AND epoch = %(epoch)s FOR UPDATE"
+    " WHERE id = %(id)s AND epoch = %(epoch)s{own} FOR UPDATE"
 )
 _RECORD = {
     "used": (
@@ -660,13 +704,15 @@ _RECORD = {
 
 
 def record_event(
-    conn: Connection[Any], row_id: str, epoch: int, event: Event
+    conn: Connection[Any], row_id: str, epoch: int, event: Event, *, agent: bool = True
 ) -> dict[str, Any] | None:
     """Records what a query learned; None when the row is gone or its epoch moved on.
     ``before`` locks the row, so the transition answered is the one written even when
-    several pods report at once."""
+    several pods report at once. ``agent`` (the default): the agent's rows only, a fleet row
+    is a 409, so the agent's caller never cools down or disables a fleet login."""
+    before = _BEFORE.format(own=f" AND {AGENTS_OWN}" if agent else "")
     sql = (
-        f"WITH b AS ({_BEFORE}) {_RECORD[event.kind]} FROM b WHERE c.id = b.id"
+        f"WITH b AS ({before}) {_RECORD[event.kind]} FROM b WHERE c.id = b.id"
         " RETURNING b.status AS before, b.raw AS raw, c.status AS after"
     )
     params = {
@@ -680,6 +726,8 @@ def record_event(
         cur = conn.execute(sql, params)
         names = [d.name for d in cur.description or []]
         row = cur.fetchone()
+        if row is None and agent:
+            _refuse_if_fleets(conn, row_id)
     if row is None:
         return None
     found = _dict(row, names)

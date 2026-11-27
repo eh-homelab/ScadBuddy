@@ -146,4 +146,23 @@ describe('the credential routes and the fleet’s rows (#7983)', () => {
     expect(ok.status).toBe(200)
     expect(tested.map((c) => c.secret)).toEqual([BOTH_KEY])
   })
+
+  it('act on the first row the agent uses on the deprecated single-credential routes', async () => {
+    const { app, repo, login, fleet, agent, both, tested } = await setup()
+    const read = await app.request('/api/v1/ai/credentials', { headers: UI })
+    expect(((await read.json()) as { last4: string }).last4).toBe('aaaa')
+    const test = await app.request('/api/v1/ai/credentials/test', { method: 'POST', headers: UI })
+    expect(test.status).toBe(200)
+    expect(tested.map((c) => c.secret)).toEqual([KEY])
+    const put = await app.request('/api/v1/ai/credentials', {
+      method: 'PUT',
+      headers: { ...UI, 'content-type': 'application/json' },
+      body: JSON.stringify({ kind: 'anthropic_api_key', secret: 'sk-ant-api03-scope-new-nnnn' }),
+    })
+    expect(put.status).toBe(200)
+    const gone = await app.request('/api/v1/ai/credentials', { method: 'DELETE', headers: UI })
+    expect(((await gone.json()) as { last4: string }).last4).toBe('bbbb')
+    expect((await repo.list()).map((c) => c.id)).toEqual([login.id, fleet.id, both.id])
+    expect(agent.id).not.toBe(both.id)
+  })
 })

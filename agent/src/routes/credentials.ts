@@ -34,9 +34,9 @@ import { ready, type RouteModule } from './module.js'
 //     DEPRECATED (#2768): the single-credential routes #255 began with. Settings
 //     no longer calls them (it uses the routes below); they are kept for scripts
 //     written against them and answer with a `Deprecation` header (RFC 9745)
-//     naming `/entries` as the successor. They act on the FIRST credential by
-//     priority: PUT saves over it (creating one when there is none), DELETE
-//     removes it (so the next one moves up), test tests it.
+//     naming `/entries` as the successor. They act on the FIRST credential the
+//     agent uses (#7983: never a fleet row): PUT saves over it (creating one when
+//     there is none), DELETE removes it (so the next one moves up), test tests it.
 //
 //   /api/v1/ai/credentials/entries[/:id[/test|/reset|/name]], /api/v1/ai/credentials/order
 //     Every credential (#1093): list, create, save, delete, test, reset, rename
@@ -44,7 +44,8 @@ import { ready, type RouteModule } from './module.js'
 //
 // The pool is shared with the fleet's login rotator (#7983): the list shows each row's scope,
 // and a row the agent does not use (`agentUses`: a `claude_login`, or scope `fleet`) is never
-// tested here and never counts as usable now. Saves take the agent's own kinds only.
+// tested here and never counts as usable now. The API refuses this caller every change to such
+// a row (save, delete, rename, reset, reorder, events: a 409), so Settings shows it read-only.
 
 export type CredentialRouteDeps = {
   /** Undefined when this process was not given it (tests). */
@@ -263,7 +264,7 @@ export function registerCredentialRoutes(app: Hono, deps: CredentialRouteDeps): 
     ...(body.name === undefined ? {} : { name: body.name }),
   })
 
-  // --- The single-credential routes (#255): the first credential by priority.
+  // --- The single-credential routes (#255): the first credential the agent uses.
 
   // Deprecated (#2768): every answer from the single-credential routes says so, a guard's
   // 403 included (so registered before the guards), and names the routes that replace

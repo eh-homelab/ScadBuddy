@@ -18,7 +18,7 @@ Area ``credentials``, ``ai_credentials``, sealed and opened here with the KEK:
 - ``GET …/credentials/key``: whether this API holds a KEK, and its id (the agent tells a
   credential sealed under another key by it);
 - ``GET …/credentials`` and ``GET …/credentials/one``: every credential, or one (the
-  first by priority without ``id``), with no secret;
+  first the agent uses without ``id``, never a fleet row), with no secret;
 - ``POST …/credentials`` (create), ``…/save``, ``…/delete``, ``…/order``, ``…/reset``,
   ``…/name`` and ``…/events`` (what a query learned): the agent's store's writes;
 - ``POST …/credentials/reveal``: the plaintext of one credential, or of every one the KEK
@@ -284,7 +284,7 @@ class CredentialFields(BaseModel):
 class CredentialSave(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    #: The credential to save over; the first by priority when omitted.
+    #: The credential to save over; the first the agent uses when omitted.
     id: CREDENTIAL_ID | None = None
     update: CredentialFields
 
@@ -344,7 +344,7 @@ class Recorded(BaseModel):
 class RevealAsk(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    #: One credential (the first by priority when omitted), unless ``all``.
+    #: One credential (the first the agent uses when omitted), unless ``all``.
     id: CREDENTIAL_ID | None = None
     #: Every credential, each opened where the KEK opens it.
     all: bool = False

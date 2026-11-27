@@ -201,8 +201,9 @@ export class MemoryCredentials implements CredentialRepo {
     if (this.failing) throw new Error('connection refused')
   }
 
+  /** A row by id; with none, the first the agent uses, as the API answers the agent (#7983). */
   private find(id: string | undefined): MemoryRow | undefined {
-    return id === undefined ? this.rows[0] : this.rows.find((r) => r.id === id)
+    return id === undefined ? this.agentsOwn[0] : this.rows.find((r) => r.id === id)
   }
 
   async list(): Promise<StoredCredential[]> {
