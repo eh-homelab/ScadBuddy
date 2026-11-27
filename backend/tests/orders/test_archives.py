@@ -500,17 +500,21 @@ async def test_an_archive_named_by_hand_is_not_a_later_runs(shop: Shop, pool: Pg
     assert shop.rows.fulfilments(item.id)[0].archive_ids == [81]
 
 
-def lan_link(pool: PgPool, run_id: str, archive_id: int, plate: int = 1) -> None:
+def lan_link(
+    pool: PgPool, run_id: str, archive_id: int, plate: int = 1, *, hash_link: bool = True
+) -> None:
     """A LAN start's archive (#8124): the link Bambuddy's hash gave, with no queue item and
     no send, and the start the archive became, as `print_history._run_by_file` records it
-    from the job name the archive's file carries."""
+    from the job name the archive's file carries. Without ``hash_link``, only the start's
+    record (#8287)."""
     subject = f"output:{SUBJECT}"
     with pool.connection() as conn:
-        conn.execute(
-            "INSERT INTO print_links (subject, archive_id, matched_by)"
-            " VALUES (%s, %s, 'content_hash')",
-            (subject, archive_id),
-        )
+        if hash_link:
+            conn.execute(
+                "INSERT INTO print_links (subject, archive_id, matched_by)"
+                " VALUES (%s, %s, 'content_hash')",
+                (subject, archive_id),
+            )
         conn.execute(
             "INSERT INTO lan_print_archives (archive_id, run_id, subtask_name, plate_id)"
             " VALUES (%s, %s, %s, %s)",
@@ -518,12 +522,14 @@ def lan_link(pool: PgPool, run_id: str, archive_id: int, plate: int = 1) -> None
         )
 
 
-def lan_printed(shop: Shop, pool: PgPool, archive_id: int) -> tuple[Order, OrderItem, Fulfilment]:
+def lan_printed(
+    shop: Shop, pool: PgPool, archive_id: int, *, hash_link: bool = True
+) -> tuple[Order, OrderItem, Fulfilment]:
     """An attempt whose LAN print settled, its archive recorded as the run's start."""
     order, item = shop.accepted()
     run_id = run_row(pool)
     started(shop, order, item, run_id)
-    lan_link(pool, run_id, archive_id)
+    lan_link(pool, run_id, archive_id, hash_link=hash_link)
     settle(pool, run_id, "finished")
     attempt = shop.lifecycle.follow_print(run_id)
     assert attempt is not None and attempt.finished_at is not None
@@ -711,6 +717,31 @@ async def test_an_archive_whose_file_names_no_single_start_is_not_linked(
     assert [recorded_start(pool, a) for a in (367, 368, 369)] == [None, None, None]
     assert shop.rows.run_archives(run_id) == []
     assert shop.rows.fulfilments(item.id)[0].archive_ids == []
+
+
+async def test_a_lan_archive_needs_no_hash_link(shop: Shop, pool: PgPool) -> None:
+    """#8287: the LAN path reads only the start's record, so an archive Bambuddy's hash
+    never linked is still the run's."""
+    order, item, attempt = lan_printed(shop, pool, 364, hash_link=False)
+    assert attempt.print_run_id is not None
+    assert shop.rows.run_archives(attempt.print_run_id) == [364]
+    seam = Archives(facts(364, grams=5.0))
+    read = await attempt_archives(
+        shop.lifecycle, seam, order.id, item.id, attempt.id, Starts(), limit=LIMIT
+    )
+    assert [a.archive_id for a in read.archives] == [364]
+
+
+def test_an_archive_on_both_paths_is_listed_once(shop: Shop, pool: PgPool) -> None:
+    """#8287: an archive a run's send links and its start's record names too is one archive."""
+    _, _, _, run_id = printed(shop, pool)
+    with pool.connection() as conn:
+        conn.execute(
+            "INSERT INTO lan_print_archives (archive_id, run_id, subtask_name, plate_id)"
+            " VALUES (%s, %s, %s, %s)",
+            (81, run_id, f"scadbuddy-{run_id[:8]}-p1", 1),
+        )
+    assert shop.rows.run_archives(run_id) == [81, 82]
 
 
 def test_a_hand_attempt_cannot_name_another_attempts_archive(shop: Shop, pool: PgPool) -> None:
