@@ -1126,6 +1126,46 @@ only the sleeps move; a budget on the real clock fails on a slow runner (#6252).
   row lock, so two starts cannot both claim it). An empty PATCH `{}` returns the invoice unchanged.
   The agent's session blobs accept `application/pdf` (6 MiB, migration
   `20261118T0811Z_session_blobs_pdf.sql`) and store it (`crud_agent_blobs.py` stores and checks the bytes only; the attachment header is set by the agent's sessions route).
+- Unknown spools (#7143, spec `docs/superpowers/specs/2026-11-23-unknown-spool-flow-design.md`):
+  a tray that a printer reports as loaded and that no spool holds is a row of
+  `filament_unknown_trays` (migration `20261126T1936Z_filament_unknown_trays.sql`). Python keeps
+  `filament/unknown_tray_rows.py` (`note_on`, `clear_on`, `rows_on`, the wire types of the print
+  block, `PoolUnknownTrays`) and `filament/unknown_resolve.py`. `note_on` moves `seen_at` only when
+  a reported field changes (D1): it is a version of the tray, not a heartbeat. Capture's step
+  `unknown_trays` (`capture.note_unknown`) runs after `reconcile` in the report write's savepoint
+  and in the backstop (`reconcile_all`, `BACKSTOP_ACTOR`). A tray with an RFID key gets a spool at
+  once (`_spool_from_tag`: the type `SpoolTypeStore.match_tray` finds, else a spool with a material
+  and a colour only; its `created` event has `data.by` `rfid_capture`, `RFID_MADE`). An untagged
+  tray gets a row and its place. The external holder gets no row (D2). Every `clear_on` and every
+  make takes `try_tray_lock` first: a busy lock leaves the tray to the next report (D11). A tray
+  that is empty, or that a spool holds, loses its row. A tray whose unit the report does not show
+  keeps its row until that unit returns; a printer's merge or delete drops it. Resolve is the
+  Temporal activity `filament_resolve_unknown_tray` (`unknown_resolve.py`, G5) on the `library`
+  queue, which the API process serves (`main._unknown_tray_activities`; the API alone holds the
+  database secret). In one transaction it takes the tray's advisory lock, the row `FOR UPDATE`,
+  then `FilamentInventory.link_on`'s own locks (G9: the lock order stays in Python), links the
+  spool, books the first weight and deletes the row. Only a spool with no event beyond `created`,
+  `edited`, `moved`, `tag_bound` and `tag_unbound` takes the typed net weight as its label weight
+  (D4); the `weighed` event is booked either way. Each failure is a non-retryable
+  `ApplicationError` whose `type` is `tray_changed`, `code_unknown`, `spool_archived`,
+  `no_ams_kind`, `spool_missing` or `tag_clash`. It publishes no event. The Go routes (list,
+  dismiss, and the print worker's block read) are `tools/go/core/internal/unknowntrays`
+  (`tools/go/core/README.md`). The Go resolve route is not built yet: it waits on a Temporal client
+  in Go (`internal/temporalx`). Until it exists, the dialog's and the tool's resolve get a 404 and
+  cannot resolve a tray. The existing link paths still clear the row (`link_on`: the print
+  dialog's tray question, the place page's "New spool from this tray", the agent's
+  `link_tray_spool`). The block (D9): `print_run.refuse_unknown_spools`, called by `prepare_run`
+  (and so by the check, whose `PrintCheck.unknown_trays` lists the trays) refuses a run with 422
+  `unknown_spool_loaded`; on Bambuddy's path it drops a tray whose slot the lazy `read_inventory`
+  gives an SB spool. `printers/print_activities.py` `_refuse_unknown` does the same for `lan_print`.
+  The print worker reads the block from the CRUD route `…/print/filament/printers/{id}/unknown-trays`
+  (`crud/print.py` `RemoteUnknownTrays`, a 2 s budget on a missing route); the API's own runs read
+  Postgres (`PoolUnknownTrays`). `prepare_run` goes on when the route is missing
+  (`CrudUnavailableError`, G3); `lan_print` goes on when the read fails for any reason. So the
+  worker-side block works only once `SCADBUDDY_CORE_AREAS` names `unknown-trays`. A print started
+  in Bambuddy or on the printer is not blocked. Tests: `tests/filament/` (capture, rows, resolve),
+  `tests/printers/test_unknown_spool_block.py` and `tests/crud/test_crud_unknown_trays.py`
+  (the block).
 - `backend/scadbuddy/profile_fetch/` — the 3DFP profile-fetch worker and its browser service
   (#6625, #6780, plan `docs/superpowers/plans/2026-11-18-profile-fetch-worker.md`): `python -m
   scadbuddy.profile_fetch` (`worker.py`) polls the queue `profile-fetch`, serves `/healthz` and

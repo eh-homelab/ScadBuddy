@@ -63,6 +63,7 @@ import (
 	"github.com/eh-homelab/ScadBuddy/tools/go/core/internal/tasks"
 	"github.com/eh-homelab/ScadBuddy/tools/go/core/internal/transcripts"
 	"github.com/eh-homelab/ScadBuddy/tools/go/core/internal/turns"
+	"github.com/eh-homelab/ScadBuddy/tools/go/core/internal/unknowntrays"
 	"github.com/eh-homelab/ScadBuddy/tools/go/core/internal/workspace"
 )
 
@@ -276,7 +277,7 @@ var areaPackages = []areaRoutes{
 type publicAreas func(pool *pgxpool.Pool, keys *seal.Keys) map[string][]auth.Public
 
 // publicPackages are the packages with public areas.
-var publicPackages = []publicAreas{}
+var publicPackages = []publicAreas{unknowntrays.Public}
 
 // sealed are the areas that seal or open with the KEK: without one they refuse to start.
 var sealed = map[string]bool{
@@ -338,6 +339,13 @@ func newRouter(pool *pgxpool.Pool, next http.Handler, keys *seal.Keys, areas, au
 			publics[name] = append(publics[name], routes...)
 		}
 	}
+	// mountPublic serves a named area's public routes behind the gate.
+	mountPublic := func(name string) {
+		for _, p := range publics[name] {
+			public.Handle(p.Pattern, gate.Wrap(p.Route, p.Handler))
+			served = true
+		}
+	}
 	log, turn := &events.Log{Pool: pool}, &turns.Turns{Pool: pool}
 	more := map[string][]crud.Route{}
 	for _, p := range areaPackages {
@@ -346,6 +354,8 @@ func newRouter(pool *pgxpool.Pool, next http.Handler, keys *seal.Keys, areas, au
 			more[name] = append(more[name], routes...)
 		}
 	}
+	// Naming both `unknown-trays` and `unknown-trays:read` mounts the area once.
+	unknownTraysMounted := false
 	for name := range strings.SplitSeq(areas, ",") {
 		switch name = strings.TrimSpace(name); name {
 		case "":
@@ -378,20 +388,29 @@ func newRouter(pool *pgxpool.Pool, next http.Handler, keys *seal.Keys, areas, au
 		case "ws":
 			streamOf()
 			socket = true
+		case unknowntrays.Area, unknowntrays.Read:
+			// Its CRUD route is the print worker's, not the agent's (areaPackages mounts on
+			// the agent), so it has a case of its own.
+			// The full area holds every route of the read-only one.
+			if name == unknowntrays.Read && strings.Contains(","+strings.ReplaceAll(areas, " ", "")+",", ","+unknowntrays.Area+",") {
+				break
+			}
+			if !unknownTraysMounted {
+				unknownTraysMounted = true
+				router.Add(unknowntrays.Caller, unknowntrays.BlockRoutes(pool)...)
+			}
+			mountPublic(name)
 		default:
 			if keys == nil && sealed[strings.TrimSuffix(name, ":read")] {
 				return nil, fmt.Errorf("SCADBUDDY_CORE_AREAS names %q, which needs %s", name, seal.Variable)
 			}
 			routes, ok := more[name]
-			outside, open := publics[name]
+			_, open := publics[name]
 			if !ok && !open {
 				return nil, fmt.Errorf("SCADBUDDY_CORE_AREAS names %q, which this build does not have", name)
 			}
 			router.Add("agent", routes...)
-			for _, p := range outside {
-				public.Handle(p.Pattern, gate.Wrap(p.Route, p.Handler))
-				served = true
-			}
+			mountPublic(name)
 		}
 	}
 	var handler http.Handler = router

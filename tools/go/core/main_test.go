@@ -495,6 +495,15 @@ func TestWhatIsNotListedGoesToPython(t *testing.T) {
 	}
 }
 
+func TestNamingTheFullAndTheReadOnlyUnknownTraysAreaMountsItOnce(t *testing.T) {
+	pool := testdb.New(t)
+	for _, areas := range []string{"unknown-trays, unknown-trays:read", "unknown-trays:read, unknown-trays"} {
+		if _, err := newRouter(pool, nil, nil, areas, "", nil, nil, nil); err != nil {
+			t.Errorf("%s: %v", areas, err)
+		}
+	}
+}
+
 func TestASealedAreaNeedsTheKEKAndTheOthersDoNot(t *testing.T) {
 	pool := testdb.New(t)
 	for _, area := range []string{"credentials", "credentials:read", "payload-keys", "keys", "notify",
