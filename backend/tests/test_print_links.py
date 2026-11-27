@@ -367,13 +367,15 @@ async def test_a_reprint_names_the_plate_its_archive_was_linked_with(
     assert (job.archive_id, job.plate) == (18, 2)
 
 
+@pytest.mark.parametrize("recorded", [None, 0])
 async def test_a_lan_start_with_no_plate_names_its_archives(
-    links: PrintLinkStore, jobs: JobProjection
+    links: PrintLinkStore, jobs: JobProjection, recorded: int | None
 ) -> None:
     """#8079: a LAN start that recorded no plate (a start from before #4541) names the
-    plate its archive link recorded."""
+    plate its archive link recorded. #8112: so does one that recorded plate 0, which is
+    no plate (plates start at 1)."""
     printer = "00000000-0000-4000-8000-000000008079"
-    _lan_runs(jobs, printer, {"r8079": None})
+    _lan_runs(jobs, printer, {"r8079": recorded})
     await links.record_lan_start(
         LanArchiveLink(archive_id=42, run_id="r8079", subtask_name="scadbuddy-r8079-p1", plate_id=2)
     )
