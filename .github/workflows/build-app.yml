@@ -17,9 +17,9 @@ name: Build App
 # number, so each published APK is newer than the last. It is signed with the
 # runner's debug key until a release key exists (#8376).
 #
-# THE PACKAGE MUST BE PUBLIC, as the other images' are. Package visibility is a
-# one-time GitHub UI step after the first push (Packages -> scadbuddy-app ->
-# Package settings -> Change visibility).
+# THE PACKAGE MUST BE PUBLIC, as the other images' are. It was public from its
+# first push (2026-11-27: an anonymous ghcr.io token read its tags and layer).
+# Visibility is a GitHub UI step (Packages -> scadbuddy-app -> Package settings).
 #
 # Nothing here runs on a pull request: a PR has no GHCR write token, and ci.yml's
 # `android` job builds the app on every PR that touches app/.
