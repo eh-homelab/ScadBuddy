@@ -228,7 +228,7 @@ public sealed class DeviceLink
 				// The call's context is made here, under the lock, so an end that comes at once
 				// (core's call_done, a new pairing) always reaches it.
 				var cancel = new CancellationTokenSource();
-				running = started = new RunningCall(call, cancel) { Context = new DeviceCall(this, p, call, cancel.Token) };
+				running = started = new RunningCall(call, cancel, new DeviceCall(this, p, call, cancel.Token));
 			}
 		}
 		if (started is null)
@@ -247,7 +247,7 @@ public sealed class DeviceLink
 		var until = call.Deadline - Margin - DateTimeOffset.UtcNow;
 		// CancelAfter takes at most int.MaxValue ms (about 24 days); core's deadlines are at most 2 minutes.
 		run.Cancel.CancelAfter(until <= TimeSpan.Zero ? TimeSpan.Zero : until > MaxCall ? MaxCall : until);
-		var context = run.Context!;
+		var context = run.Context;
 		JsonObject result;
 		try { result = await DeviceMethods.Run(context); }
 		catch (Exception error) when (error is CallFailed or UploadFailed) { result = DeviceProtocol.Failed(error.Message); }
@@ -308,18 +308,14 @@ public sealed class DeviceLink
 		NfcBridge.Notify(why ?? "This phone's pairing with ScadBuddy ended. Pair it again from ScadBuddy's Devices page.");
 	}
 
-	sealed class RunningCall(CallRequest call, CancellationTokenSource cancel)
+	sealed class RunningCall(CallRequest call, CancellationTokenSource cancel, DeviceCall context)
 	{
 		public CallRequest Call { get; } = call;
 		public CancellationTokenSource Cancel { get; } = cancel;
-		public DeviceCall? Context { get; init; }
+		public DeviceCall Context { get; } = context;
 
 		/// <summary>Core ended the call, or a new pairing replaced its own: stop it, uploads too.</summary>
-		public void End()
-		{
-			if (Context is { } context) context.End();
-			else Cancel.Cancel();
-		}
+		public void End() => Context.End();
 	}
 }
 

@@ -239,6 +239,11 @@ public static class DeviceProtocol
 		: ended ? "ended: the call ended before the write; nothing was written"
 		: "timeout: the call's deadline came before the write; nothing was written";
 
+	/// <summary>The error of an nfc.write stopped while its read-back went up: the tag holds the new records.</summary>
+	public static string WrittenNotSent(bool byPerson, bool ended) =>
+		"written_not_sent: the tag was written, but its read-back was not sent: " +
+		(byPerson ? "the person stopped the call on the phone" : ended ? "the call ended" : "the call's deadline came");
+
 	/// <summary>A failed call's result. The error starts with its code, as <c>no_tag: …</c>.</summary>
 	public static JsonObject Failed(string error) => new() { ["outcome"] = "error", ["error"] = Cut(error, ErrorMax) };
 

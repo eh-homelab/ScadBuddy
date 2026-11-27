@@ -157,8 +157,15 @@ static class DeviceMethods
 				if ((after["records"] as JsonArray ?? new JsonArray()).ToJsonString() != wanted)
 					return DeviceProtocol.Failed("read_back_mismatch: the tag holds other records than were written");
 				screen.Say("Written. Sending the read-back.");
-				var (key, readUid, readTech, missing) = await SendDump(call, tag, after);
-				return DeviceProtocol.NfcResult(key, readUid, readTech, missing);
+				try
+				{
+					var (key, readUid, readTech, missing) = await SendDump(call, tag, after);
+					return DeviceProtocol.NfcResult(key, readUid, readTech, missing);
+				}
+				catch (OperationCanceledException) when (call.Token.IsCancellationRequested)
+				{
+					return DeviceProtocol.Failed(DeviceProtocol.WrittenNotSent(call.CancelledByPerson, call.Ended));
+				}
 			}
 		}
 		finally { NfcBridge.Instance.EndCall(onTap); }
