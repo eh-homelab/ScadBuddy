@@ -355,7 +355,28 @@ SELECT 'kind_life', count(*),
         FILTER (WHERE role IS DISTINCT FROM 'durable'), '[]')
 FROM inventory_k1_kind_life;
 
--- 4. items_on_roots (§8): a root leaves its class open, so no item may sit on it.
+-- 4. items_on_roots (§8): a root leaves its class open, so no item may sit on it. An
+-- item whose name an item of the leaf has stops the migration (a kind's item names are
+-- unique, `items_kind_name`).
+DO $$
+DECLARE
+    clash record;
+BEGIN
+    SELECT i.id, i.name, t.id AS other, l.leaf INTO clash
+    FROM items i
+    CROSS JOIN LATERAL (SELECT CASE i.kind_id
+        WHEN 'consumable' THEN 'general_consumable' ELSE 'flat_service' END AS leaf) l
+    JOIN items t ON t.kind_id = l.leaf AND lower(t.name) = lower(i.name)
+        AND t.archived_at IS NULL
+    WHERE i.kind_id IN ('consumable', 'service') AND i.archived_at IS NULL
+    ORDER BY i.id LIMIT 1;
+    IF FOUND THEN
+        RAISE EXCEPTION 'inventory K1: the item % "%" moves to the kind %, where the item % '
+            'has its name; rename one first', clash.id, clash.name, clash.leaf, clash.other;
+    END IF;
+END
+$$;
+
 WITH moved AS (
     UPDATE items SET kind_id = CASE kind_id
         WHEN 'consumable' THEN 'general_consumable' ELSE 'flat_service' END
@@ -497,14 +518,19 @@ FROM inventory_k1_lots;
 -- `items.compatible_with` becomes a kind under `printer`, named as the oldest item spells
 -- it; codes that give one id share it. Each item gets one `compatible_with` relationship
 -- per code kind. A `printer` item with one code kind takes it; one with more stays and is
--- named. A kind that already has the id is kept as it is and named.
-CREATE TEMP TABLE inventory_k1_codes ON COMMIT DROP AS
+-- named. A kind that already has the id is kept as it is and named. A code with no letter
+-- or digit gives no kind and is named.
+CREATE TEMP TABLE inventory_k1_all_codes ON COMMIT DROP AS
 SELECT i.id AS item_id, i.kind_id AS item_kind, btrim(c.code) AS code,
     'printer_' || left(regexp_replace(lower(btrim(c.code)), '[^a-z0-9]+', '_', 'g'), 32) AS kind,
+    lower(btrim(c.code)) ~ '[a-z0-9]' AS usable,
     row_number() OVER (ORDER BY i.created_at, i.id, c.n) AS age
 FROM items i
 CROSS JOIN LATERAL unnest(i.compatible_with) WITH ORDINALITY AS c (code, n)
 WHERE btrim(c.code) <> '';
+
+CREATE TEMP TABLE inventory_k1_codes ON COMMIT DROP AS
+SELECT item_id, item_kind, code, kind, age FROM inventory_k1_all_codes WHERE usable;
 
 CREATE TEMP TABLE inventory_k1_model_kinds ON COMMIT DROP AS
 SELECT c.kind, left((array_agg(c.code ORDER BY c.age))[1], 100) AS name,
@@ -534,6 +560,27 @@ FROM inventory_k1_codes
 WHERE item_kind = 'printer'
 GROUP BY item_id;
 
+-- A printer item whose name an item of its model kind has stops the migration
+-- (`items_kind_name`).
+DO $$
+DECLARE
+    clash record;
+BEGIN
+    SELECT i.id, i.name, t.id AS other, p.kinds[1] AS kind INTO clash
+    FROM inventory_k1_printers p
+    JOIN items i ON i.id = p.item_id
+    JOIN item_kinds k ON k.id = p.kinds[1]
+    JOIN items t ON t.kind_id = p.kinds[1] AND lower(t.name) = lower(i.name)
+        AND t.archived_at IS NULL
+    WHERE cardinality(p.kinds) = 1 AND k.parent_id = 'printer' AND i.archived_at IS NULL
+    ORDER BY i.id LIMIT 1;
+    IF FOUND THEN
+        RAISE EXCEPTION 'inventory K1: the printer % "%" moves to the kind %, where the item % '
+            'has its name; rename one first', clash.id, clash.name, clash.kind, clash.other;
+    END IF;
+END
+$$;
+
 UPDATE items i SET kind_id = p.kinds[1]
 FROM inventory_k1_printers p
 JOIN item_kinds k ON k.id = p.kinds[1]
@@ -547,6 +594,9 @@ SELECT 'model_codes', (SELECT count(*) FROM inventory_k1_model_kinds),
         UNION ALL
         SELECT jsonb_build_object('stays', item_id, 'kinds', to_jsonb(kinds))
         FROM inventory_k1_printers WHERE cardinality(kinds) > 1
+        UNION ALL
+        SELECT jsonb_build_object('skipped', code, 'item', item_id)
+        FROM inventory_k1_all_codes WHERE NOT usable
     ) x), '[]');
 
 -- 7a. kind_schemas (§8: every row keeps its meaning): a kind whose parent changed keeps

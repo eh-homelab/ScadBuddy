@@ -1962,6 +1962,53 @@ def test_items_on_roots_move(pg_conninfo: str) -> None:
 
 
 @pytest.mark.requires_postgres
+def test_items_on_roots_stop_on_a_name_the_leaf_has(pg_conninfo: str) -> None:
+    """§8: an item that moves to a leaf where an item has its name stops the migration with
+    a K1 message that names both, not a bare unique violation."""
+    with psycopg.connect(pg_conninfo) as conn:
+        _before_inventory_class(conn)
+        conn.execute(
+            "INSERT INTO item_kinds (id, name, tracking) VALUES ('general_consumable', 'Mine', 'lot')"
+        )
+        _item(conn, "general_consumable", "Tape")
+        _item(conn, "consumable", "tape")
+        with pytest.raises(psycopg.errors.RaiseException, match="inventory K1: .*general_consumable"):
+            migrate(conn)
+
+
+@pytest.mark.requires_postgres
+def test_model_codes_stop_on_a_name_the_model_kind_has(pg_conninfo: str) -> None:
+    """R-K1-11: a printer item that moves to its model kind where an item has its name
+    stops the migration with a K1 message, not a bare unique violation."""
+    with psycopg.connect(pg_conninfo) as conn:
+        _before_inventory_class(conn)
+        conn.execute(
+            "INSERT INTO item_kinds (id, name, parent_id, tracking, life_basis)"
+            " VALUES ('printer_h2c', 'H2C', 'printer', 'unit', 'none')"
+        )
+        _item(conn, "printer_h2c", "Mine")
+        _item(conn, "printer", "MINE", compatible=["H2C"])
+        with pytest.raises(psycopg.errors.RaiseException, match="inventory K1: .*printer_h2c"):
+            migrate(conn)
+
+
+@pytest.mark.requires_postgres
+def test_a_model_code_with_no_letter_or_digit_is_named_not_made(pg_conninfo: str) -> None:
+    """R-K1-11: a code with no letter or digit gives no kind and is named in the report."""
+    with psycopg.connect(pg_conninfo) as conn:
+        _before_inventory_class(conn)
+        item = _item(conn, "nozzle", "Odd", compatible=["--", "H2C"])
+        migrate(conn)
+        assert conn.execute(
+            "SELECT id FROM item_kinds WHERE parent_id = 'printer' ORDER BY id"
+        ).fetchall() == [("printer_h2c",)]
+        assert conn.execute(
+            "SELECT d FROM inventory_k1_report, jsonb_array_elements(detail) AS d"
+            " WHERE rule = 'model_codes' AND d ? 'skipped'"
+        ).fetchall() == [({"skipped": "--", "item": item},)]
+
+
+@pytest.mark.requires_postgres
 def test_part_lots_become_units(pg_conninfo: str) -> None:
     """R-K1-10: `part` becomes durable, so its lots become whole units at the lot's cost,
     with an `adjust` move; the fraction stays on the lot and is named."""
