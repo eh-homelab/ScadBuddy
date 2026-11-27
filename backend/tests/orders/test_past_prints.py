@@ -147,9 +147,18 @@ def test_an_archives_run_lists_every_plate_and_its_archive(rows: OrderStore, poo
     assert rows.archive_run_plates(99) == []
 
 
-def lan_run(pool: PgPool, run_id: str, *plates: int, archived: dict[int, int]) -> None:
+def lan_run(
+    pool: PgPool,
+    run_id: str,
+    *plates: int,
+    archived: dict[int, int],
+    waiting: list[int] | None = None,
+    stopped: bool = False,
+) -> None:
     """A LAN run (#8283): one start per plate in ``result.lan``, and for each plate in
-    ``archived`` the archive that start became, as `print_history._run_by_file` records it."""
+    ``archived`` the archive that start became, as `print_history._run_by_file` records it.
+    ``waiting`` are the plates still to start (``result.lan_waiting``); ``stopped`` sets
+    ``result.lan_stopped``."""
     starts = [
         {
             "subtask_name": f"scadbuddy-{run_id[:8]}-p{p}",
@@ -162,7 +171,20 @@ def lan_run(pool: PgPool, run_id: str, *plates: int, archived: dict[int, int]) -
         conn.execute(
             "INSERT INTO print_runs (id, output_id, idempotency_key, status, result)"
             " VALUES (%s, %s, %s, 'succeeded', %s)",
-            (run_id, OUTPUT, f"k-{run_id}", Jsonb({"lan": starts})),
+            (
+                run_id,
+                OUTPUT,
+                f"k-{run_id}",
+                Jsonb(
+                    {
+                        "lan": starts,
+                        "lan_waiting": waiting or [],
+                        "lan_stopped": {"stage": "cancelled", "message": "stopped"}
+                        if stopped
+                        else None,
+                    }
+                ),
+            ),
         )
         for p, archive_id in archived.items():
             conn.execute(
@@ -179,6 +201,32 @@ def test_a_lan_runs_archive_lists_every_plate_of_its_run(rows: OrderStore, pool:
     lan_run(pool, "8dc35c766e1851aaa641d07a0a9g08b", 1, archived={1: 370})
     assert rows.archive_run_plates(360) == [(1, 360), (2, None)]
     assert rows.archive_run_plates(370) == [(1, 370)]
+
+
+def test_a_lan_run_still_printing_lists_the_plates_it_has_yet_to_start(
+    rows: OrderStore, pool: PgPool
+) -> None:
+    """Review of #8295: a LAN run starts its plates one at a time (#4541), so a plate
+    still in ``lan_waiting`` is one of its plates, not yet archived, as the queue path's
+    send of a plate not yet printed is. A stopped run's waiting plates never print."""
+    lan_run(pool, "b1068fa99b4184ddd974040d3d3j3be", 1, archived={1: 500}, waiting=[2, 3])
+    assert rows.archive_run_plates(500) == [(1, 500), (2, None), (3, None)]
+    lan_run(
+        pool, "c2179ab00c5295eee085151e4e4k4cf", 1, archived={1: 510}, waiting=[2], stopped=True
+    )
+    assert rows.archive_run_plates(510) == [(1, 510)]
+
+
+def test_an_imported_archive_is_no_lan_runs(rows: OrderStore, pool: PgPool) -> None:
+    """Review of #8295: an archive an `import` link owns (#4698, #6394) is not a run's,
+    whatever `lan_print_archives` says, as `archive_origin` reads it."""
+    lan_run(pool, "d328abc11d6306fff196262f5f5l5dg", 1, 2, archived={1: 520})
+    with pool.connection() as conn:
+        conn.execute(
+            "INSERT INTO print_links (subject, archive_id, matched_by)"
+            " VALUES ('model:imported', 520, 'import')"
+        )
+    assert rows.archive_run_plates(520) == []
 
 
 def test_a_lan_start_with_a_bad_plate_is_no_plate_not_an_error(
