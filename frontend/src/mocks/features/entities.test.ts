@@ -82,3 +82,23 @@ describe('entity properties mock (#7026)', () => {
     expect(await refusal({ b: ['😀'.repeat(501)] })).toMatch(/500/)
   })
 })
+
+describe('entity property history mock (#6949)', () => {
+  beforeEach(() => resetMockState())
+
+  it('records each PATCH, newest first, and filters by key and limit', async () => {
+    await entityApi.setProperties(TYPE, { td: 1.8 })
+    await entityApi.setProperties(TYPE, { td: 2, mpn: 'x' })
+    await entityApi.setProperties(TYPE, { td: null })
+    const all = await entityApi.propertyHistory(TYPE)
+    expect(all.map((c) => [c.key, c.op, c.old, c.new])).toEqual([
+      ['td', 'remove', 2, null],
+      ['mpn', 'set', null, 'x'],
+      ['td', 'set', 1.8, 2],
+      ['td', 'set', null, 1.8],
+    ])
+    expect((await entityApi.propertyHistory(TYPE, 'mpn')).length).toBe(1)
+    const limited = await fetch(`/api/v1/entities/${encodeURIComponent(TYPE)}/properties/history?limit=2`)
+    expect(((await limited.json()) as { changes: unknown[] }).changes).toHaveLength(2)
+  })
+})

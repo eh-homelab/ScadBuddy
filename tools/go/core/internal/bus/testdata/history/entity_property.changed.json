@@ -1,0 +1,17 @@
+{
+  "at": "2026-11-26T03:16:24.729591+00:00",
+  "id": "2ef7de80f4bc47d08473733ec06b0d31",
+  "op": "set",
+  "key": "colour_name",
+  "new": "Gold",
+  "old": null,
+  "ref": "00000000-0000-0000-0000-000000000004",
+  "kind": "entity_property.changed",
+  "actor": {
+    "kind": "browser"
+  },
+  "source": "manual",
+  "entity_id": "00000000-0000-0000-0000-000000000003",
+  "entity_kind": "item",
+  "retention_seconds": 0
+}

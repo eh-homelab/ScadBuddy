@@ -12,6 +12,7 @@ from fastapi.testclient import TestClient
 from scadbuddy.api.deps import STATE_ATTR, AppState
 from scadbuddy.printers.component import PRINTERS, Printers
 from tests.api.conftest import read_stored
+from tests.support.printers import MERGED_BY
 
 
 def _rows(client: TestClient) -> tuple[str, str]:
@@ -20,7 +21,7 @@ def _rows(client: TestClient) -> tuple[str, str]:
     assert lan.status_code == 201, lan.text
     linked = client.post("/api/v1/printers", json={"serial": "0938AB000000032", "name": "Both"})
     registry: Printers = getattr(client.app.state, STATE_ATTR).components.get(PRINTERS)  # type: ignore[attr-defined]
-    registry.store.link_bambuddy(linked.json()["id"], 4)
+    registry.store.link_bambuddy(linked.json()["id"], 4, by=MERGED_BY)
     return lan.json()["id"], linked.json()["id"]
 
 
@@ -166,7 +167,7 @@ def test_an_entry_keeps_its_key_once_its_printer_is_linked(client: TestClient) -
     )
     assert saved.status_code == 200, saved.text
     registry: Printers = getattr(client.app.state, STATE_ATTR).components.get(PRINTERS)  # type: ignore[attr-defined]
-    registry.store.link_bambuddy(lan, 5)
+    registry.store.link_bambuddy(lan, 5, by=MERGED_BY)
 
     assert client.get("/api/v1/settings/remembered").json()["printer_rack_algorithms"] == {
         lan: "newest_first"

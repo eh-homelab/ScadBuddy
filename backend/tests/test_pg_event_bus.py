@@ -834,3 +834,74 @@ async def test_a_listener_runs_before_its_event_becomes_the_cursor(make_bus: Bus
     releases[0]()
     releases[0]()  # releasing twice counts once
     assert bus.settling == 0
+
+
+#: The history kinds' payloads as Go publishes them (tools/go/core/internal/bus in_test.go
+#: writes them; #6949, design §4.8).
+HISTORY_GOLDEN = Path(__file__).parents[2] / "tools/go/core/internal/bus/testdata/history"
+HISTORY_KINDS = (
+    "entity_property.changed",
+    "entity_property_schema.changed",
+    "handler_config.changed",
+    "handler_value.changed",
+)
+
+
+def _history_payloads() -> list[dict[str, object]]:
+    return [
+        json.loads((HISTORY_GOLDEN / f"{kind}.json").read_text(encoding="utf-8"))
+        for kind in HISTORY_KINDS
+    ]
+
+
+def _log_payload(conninfo: str, payload: dict[str, object], age: float) -> int:
+    with psycopg.connect(conninfo, autocommit=True) as conn:
+        row = conn.execute(
+            "INSERT INTO events (event_id, kind, at, logged_at, payload)"
+            " VALUES (%s, %s, now(), now() - make_interval(secs => %s), %s::jsonb)"
+            " RETURNING seq",
+            (payload["id"], payload["kind"], age, json.dumps(payload)),
+        ).fetchone()
+    assert row is not None
+    return int(row[0])
+
+
+@pytest.mark.requires_postgres
+async def test_history_events_decode_as_opaque(make_bus: BusFactory, pg_conninfo: str) -> None:
+    bus = await make_bus()
+    payloads = _history_payloads()
+    for payload in payloads:
+        event = decode_event(json.dumps(payload))
+        assert isinstance(event, OpaqueEvent)
+        assert event.kind == payload["kind"]
+        assert event.retention_seconds == 0
+    with psycopg.connect(pg_conninfo) as conn:
+        mark = conn.execute("SELECT coalesce(max(seq), 0) FROM events").fetchone()
+    assert mark is not None
+    seqs = [_log_payload(pg_conninfo, payload, 0) for payload in payloads]
+    page = await bus.replay(mark[0])
+    replayed = [(logged.seq, logged.event) for logged in page.events]
+    assert [seq for seq, _ in replayed] == seqs
+    assert all(isinstance(event, OpaqueEvent) for _, event in replayed)
+    assert [event.kind for _, event in replayed] == list(HISTORY_KINDS)
+
+
+@pytest.mark.requires_postgres
+async def test_history_events_survive_every_prune(make_bus: BusFactory, pg_conninfo: str) -> None:
+    retention = EventLogRetention(
+        seconds=1, rows=1, kinds={"entity_property": 1, "handler_config": 1}
+    )
+    bus = await make_bus(retention=retention)
+    for payload in _history_payloads():
+        _log_payload(pg_conninfo, payload, 30 * DAY)
+    _log_rows(
+        pg_conninfo,
+        [("entity_property.other", 30 * DAY, None), ("job.progress", 30 * DAY, None)],
+    )
+    await bus.prune_log()
+    with psycopg.connect(pg_conninfo) as conn:
+        kept = [row[0] for row in conn.execute("SELECT kind FROM events ORDER BY seq")]
+    assert "entity_property.other" not in kept
+    assert "job.progress" not in kept
+    for kind in HISTORY_KINDS:
+        assert kind in kept
