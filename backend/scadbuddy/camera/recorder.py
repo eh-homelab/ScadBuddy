@@ -832,7 +832,8 @@ class Recorder:
         # A stale answer names an end this recorder's own index calls left (`own_ends`);
         # any other end is another recorder's: the handover (D14).
         mine = {before, feed.own_end, feed.indexing, *feed.own_ends}
-        # An unsure end can only be this recorder's own commit, so it wins over the rest.
+        # An unsure end is one of this recorder's commits whose answer was lost. Another
+        # recorder's commit matches it only by chance, so a match counts as this recorder's.
         if answer.indexed_until in feed.unsure_ends:
             self._confirm(feed, answer.indexed_until)
         elif answer.indexed_until not in mine:
@@ -877,7 +878,11 @@ class Recorder:
         now = self._clock()
         cached = self._ready_cache
         if cached is None or now - cached[0] >= (self._tick_seconds or TICK_SECONDS) / 2:
-            cached = (now, asyncio.ensure_future(self._read_ready()))
+            read = asyncio.ensure_future(self._read_ready())
+            # Every stall check that awaits it may be cancelled before it fails: read its
+            # outcome here, so asyncio never logs it as unretrieved (#8187).
+            read.add_done_callback(lambda done: done.cancelled() or done.exception())
+            cached = (now, read)
             self._ready_cache = cached
         try:
             return await asyncio.shield(cached[1])
@@ -1111,6 +1116,9 @@ class Recorder:
             feed.uploader = None
             await _cancel(feed.renewer)
             feed.renewer = None
+        if self._ready_cache is not None:
+            await _cancel(self._ready_cache[1])
+            self._ready_cache = None
         await self._feed.aclose()
 
 
