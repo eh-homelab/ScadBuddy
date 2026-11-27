@@ -210,6 +210,17 @@ public class DeviceProtocolTests
 		Assert.Equal(code, DeviceProtocol.CodeOf(DeviceProtocol.WriteTimedOut(last)));
 
 	[Theory]
+	[InlineData(true, true, "cancelled")]
+	[InlineData(false, true, "ended")]
+	[InlineData(false, false, "timeout")]
+	public void AWriteStoppedBeforeItWroteSaysWhyAndThatNothingWasWritten(bool byPerson, bool ended, string code)
+	{
+		var error = DeviceProtocol.WriteStopped(byPerson, ended);
+		Assert.Equal(code, DeviceProtocol.CodeOf(error));
+		Assert.Contains("nothing was written", error);
+	}
+
+	[Theory]
 	[InlineData("no_tag: no tag was tapped", "no_tag")]
 	[InlineData("bambu_tag: this is a MIFARE Classic tag", "bambu_tag")]
 	[InlineData("sector 2: IOException: 9CC69CE3", "error")]

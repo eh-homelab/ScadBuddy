@@ -227,6 +227,12 @@ public static class DeviceProtocol
 		_ => "no_tag: no tag was tapped before the deadline",
 	};
 
+	/// <summary>The error of an nfc.write stopped after its backup and before it wrote: nothing was written.</summary>
+	public static string WriteStopped(bool byPerson, bool ended) =>
+		byPerson ? "cancelled: the person stopped the write on the phone; nothing was written"
+		: ended ? "ended: the call ended before the write; nothing was written"
+		: "timeout: the call's deadline came before the write; nothing was written";
+
 	/// <summary>A failed call's result. The error starts with its code, as <c>no_tag: …</c>.</summary>
 	public static JsonObject Failed(string error) => new() { ["outcome"] = "error", ["error"] = Cut(error, ErrorMax) };
 

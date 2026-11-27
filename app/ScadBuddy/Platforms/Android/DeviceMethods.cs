@@ -119,6 +119,8 @@ static class DeviceMethods
 					screen.Say("Backup kept. Writing.");
 					// A blank tag is formatted, and this Tag still lists no Ndef: only the next tap reads it back.
 					var formatted = !NfcBridge.HasNdef(tag);
+					// The backup took time: a call ended meanwhile writes nothing.
+					if (call.Token.IsCancellationRequested) return DeviceProtocol.Failed(DeviceProtocol.WriteStopped(call.CancelledByPerson, call.Ended));
 					try { await Task.Run(() => NfcBridge.WriteNdef(tag, message)); }
 					catch (NfcBridge.BridgeError error) { return DeviceProtocol.Failed($"refused: {error.Message}"); }
 					catch (Exception error)

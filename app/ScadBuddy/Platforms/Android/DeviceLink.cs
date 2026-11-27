@@ -25,6 +25,7 @@ public sealed class DeviceLink
 	static readonly TimeSpan Margin = TimeSpan.FromSeconds(5);
 	const int FrameMax = 64 << 10;
 	static readonly TimeSpan StableFor = TimeSpan.FromMinutes(1);
+	static readonly TimeSpan MaxCall = TimeSpan.FromMinutes(10);
 	// RFC 6455 close code realtime.SignedOut: the pairing ended (revoked, or its token expired).
 	const int SignedOut = 4401;
 
@@ -69,7 +70,7 @@ public sealed class DeviceLink
 		var paired = DeviceProtocol.PairingOf(text, claim) ?? throw new InvalidOperationException("ScadBuddy's answer was not a pairing.");
 		Close();
 		// A call of the old pairing stops, so the new one's calls are not busy.
-		lock (gate) running?.Cancel.Cancel();
+		lock (gate) running?.End();
 		// The phone keeps one pairing: a new one replaces the old, which expires after its idle hour.
 		await SecureStorage.Default.SetAsync(StoreKey, DeviceProtocol.Stored(paired));
 		lock (gate) { pairing = paired; loaded = true; }
@@ -204,7 +205,7 @@ public sealed class DeviceLink
 					Dispatch(p, call);
 					break;
 				case CallEnded ended:
-					lock (gate) if (running?.Call.Call == ended.Call) running.Cancel.Cancel();
+					lock (gate) if (running?.Call.Call == ended.Call) running.End();
 					break;
 			}
 		}
@@ -238,8 +239,10 @@ public sealed class DeviceLink
 		using var span = Telemetry.Source.StartActivity("device.call");
 		span?.SetTag("device.method", call.Method);
 		var until = call.Deadline - Margin - DateTimeOffset.UtcNow;
-		run.Cancel.CancelAfter(until > TimeSpan.Zero ? until : TimeSpan.Zero);
+		// Core's deadlines are at most 2 minutes; a far one is held to MaxCall, which CancelAfter takes.
+		run.Cancel.CancelAfter(until <= TimeSpan.Zero ? TimeSpan.Zero : until > MaxCall ? MaxCall : until);
 		var context = new DeviceCall(this, p, call, run.Cancel.Token);
+		lock (gate) run.Context = context;
 		JsonObject result;
 		try { result = await DeviceMethods.Run(context); }
 		catch (Exception error) when (error is CallFailed or UploadFailed) { result = DeviceProtocol.Failed(error.Message); }
@@ -295,7 +298,19 @@ public sealed class DeviceLink
 		NfcBridge.Notify(why ?? "This phone's pairing with ScadBuddy ended. Pair it again from ScadBuddy's Devices page.");
 	}
 
-	sealed record RunningCall(CallRequest Call, CancellationTokenSource Cancel);
+	sealed class RunningCall(CallRequest call, CancellationTokenSource cancel)
+	{
+		public CallRequest Call { get; } = call;
+		public CancellationTokenSource Cancel { get; } = cancel;
+		public DeviceCall? Context { get; set; }
+
+		/// <summary>Core ended the call, or a new pairing replaced its own: stop it, uploads too.</summary>
+		public void End()
+		{
+			if (Context is { } context) context.End();
+			else Cancel.Cancel();
+		}
+	}
 }
 
 /// <summary>
@@ -310,6 +325,7 @@ public sealed class DeviceCall
 	readonly Task pump;
 	readonly CancellationTokenSource cancel;
 	static readonly HttpClient Uploads = new() { Timeout = Timeout.InfiniteTimeSpan };
+	readonly CancellationTokenSource ended = new();
 
 	internal DeviceCall(DeviceLink link, Pairing pairing, CallRequest call, CancellationToken token)
 	{
@@ -330,7 +346,7 @@ public sealed class DeviceCall
 	public void CancelByPerson()
 	{
 		CancelledByPerson = true;
-		try { cancel.Cancel(); } catch (ObjectDisposedException) { }
+		End();
 	}
 
 	/// <summary>Queues an event; they are posted in order, a few at a time.</summary>
@@ -351,8 +367,8 @@ public sealed class DeviceCall
 					request.Content = new StringContent(body.ToJsonString(), Encoding.UTF8, "application/json");
 					using var answer = await DeviceLink.Client.SendAsync(request);
 					// 409: core ended the call (its deadline, or a revoke): stop the method.
-					if (answer.StatusCode == HttpStatusCode.Conflict) cancel.Cancel();
-					if (answer.StatusCode == HttpStatusCode.Unauthorized) { cancel.Cancel(); link.Ended(pairing, null); }
+					if (answer.StatusCode == HttpStatusCode.Conflict) End();
+					if (answer.StatusCode == HttpStatusCode.Unauthorized) { End(); link.Ended(pairing, null); }
 				}
 				catch (Exception)
 				{
@@ -368,7 +384,25 @@ public sealed class DeviceCall
 		events.Writer.TryComplete();
 		await pump;
 		cancel.Dispose();
+		ended.Dispose();
 	}
+
+	/// <summary>
+	/// Ends the call before its deadline: the person cancelled it, core ended it, or its pairing
+	/// went. Unlike the deadline's margin, this stops an upload in flight too.
+	/// </summary>
+	internal void End()
+	{
+		try
+		{
+			ended.Cancel();
+			cancel.Cancel();
+		}
+		catch (ObjectDisposedException) { }
+	}
+
+	/// <summary>Whether the call was ended before its deadline (<see cref="End"/>).</summary>
+	public bool Ended => ended.IsCancellationRequested;
 
 	/// <summary>Uploads what the call read as one blob of <paramref name="kind"/>, and answers its key.</summary>
 	public async Task<string> Upload(string kind, byte[] body, string mediaType)
@@ -379,7 +413,8 @@ public sealed class DeviceCall
 		// A photo on a slow link takes longer than the shared client's 30 s, and core takes the
 		// upload only until the call's deadline.
 		var left = Request.Deadline - DateTimeOffset.UtcNow;
-		using var until = new CancellationTokenSource(left > TimeSpan.FromSeconds(1) ? left : TimeSpan.FromSeconds(1));
+		using var until = CancellationTokenSource.CreateLinkedTokenSource(ended.Token);
+		until.CancelAfter(left > TimeSpan.FromSeconds(1) ? left : TimeSpan.FromSeconds(1));
 		using var answer = await Uploads.SendAsync(request, until.Token);
 		if (answer.StatusCode == HttpStatusCode.Unauthorized) link.Ended(pairing, null);
 		if (!answer.IsSuccessStatusCode) throw new UploadFailed((int)answer.StatusCode);
