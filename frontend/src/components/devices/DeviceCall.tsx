@@ -27,6 +27,8 @@ export interface CallEnd {
 export const POLL_MS = 2_000
 /** How long after the call's deadline the page reads it once more, in case its end was missed. */
 const DEADLINE_SLACK_MS = 5_000
+/** Past the deadline, how often the call is read until core ends it. */
+export const LATE_POLL_MS = 10_000
 /** The longest delay `setTimeout` keeps; a longer one fires at once. */
 const MAX_TIMER_MS = 2 ** 31 - 1
 
@@ -36,7 +38,9 @@ type Phase = { kind: 'starting' } | { kind: 'open'; callId: string; deadline?: s
  * #7905 — one call to a paired device (plan Task 9). It starts the call on mount and shows its
  * events as the realtime socket gives them (topic `device:call:<id>`). Each `'resync'` reads the
  * call (`GET /devices/calls/{id}`), whose events come in log order, so an event sent before the
- * subscription was live still shows. While the socket is down it reads every `POLL_MS`. When the
+ * subscription was live still shows. While the socket is down it reads every `POLL_MS`, and past
+ * the deadline every `LATE_POLL_MS` until core ends the call. A signal that comes while a read is
+ * out reads once more after it, so the read that shows the end is never dropped. When the
  * call ends, `onEnd` gets the outcome and the result (its `read_id`). Mount it again, with a new
  * `key`, to call again.
  */
@@ -87,20 +91,30 @@ export function DeviceCall({
 
   const callId = phase.kind === 'open' ? phase.callId : undefined
   const reading = useRef(false)
+  const again = useRef(false)
   const read = useCallback(() => {
-    if (!callId || ended.current || reading.current) return
-    reading.current = true
-    getCall(callId)
-      .then((view: CallView) => {
-        setEvents((current) => merged(current, view.events ?? []))
-        setPhase((now) => (now.kind === 'open' && now.callId === callId && !now.deadline ? { ...now, deadline: view.call.deadline } : now))
-        if (view.call.outcome) finish({ outcome: view.call.outcome, result: view.result })
-      })
-      // A failed read leaves the call open: the next signal, poll or the deadline reads again.
-      .catch(() => {})
-      .finally(() => {
-        reading.current = false
-      })
+    if (!callId || ended.current) return
+    if (reading.current) {
+      again.current = true
+      return
+    }
+    const run = () => {
+      reading.current = true
+      again.current = false
+      getCall(callId)
+        .then((view: CallView) => {
+          setEvents((current) => merged(current, view.events ?? []))
+          setPhase((now) => (now.kind === 'open' && now.callId === callId && !now.deadline ? { ...now, deadline: view.call.deadline } : now))
+          if (view.call.outcome) finish({ outcome: view.call.outcome, result: view.result })
+        })
+        // A failed read leaves the call open: the next signal, poll or the deadline reads again.
+        .catch(() => {})
+        .finally(() => {
+          reading.current = false
+          if (again.current && !ended.current) run()
+        })
+    }
+    run()
   }, [callId, finish])
 
   useSubscription(callId ? callTopic(callId) : undefined, (signal) => {
@@ -129,8 +143,15 @@ export function DeviceCall({
   useEffect(() => {
     if (!callId) return
     const at = deadline ? new Date(deadline).getTime() : Date.now() + timeoutS * 1000
-    const timer = setTimeout(read, Math.min(Math.max(0, at - Date.now()) + DEADLINE_SLACK_MS, MAX_TIMER_MS))
-    return () => clearTimeout(timer)
+    let late: ReturnType<typeof setInterval> | undefined
+    const timer = setTimeout(() => {
+      read()
+      late = setInterval(read, LATE_POLL_MS)
+    }, Math.min(Math.max(0, at - Date.now()) + DEADLINE_SLACK_MS, MAX_TIMER_MS))
+    return () => {
+      clearTimeout(timer)
+      clearInterval(late)
+    }
   }, [callId, deadline, timeoutS, read])
 
   const progress = method === 'nfc.read' ? progressOf(events) : undefined

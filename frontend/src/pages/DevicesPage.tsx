@@ -40,7 +40,8 @@ export function DevicesPage() {
     try {
       await revokeDevice(confirming.id)
       setConfirming(null)
-      devices.reload()
+      // In the background: the list stays on screen, with no skeleton.
+      devices.refresh()
     } catch (cause) {
       setRevokeError(cause instanceof ApiError && cause.status === 404 ? 'This device is no longer paired.' : `Could not revoke the device: ${cause instanceof Error ? cause.message : String(cause)}`)
     } finally {

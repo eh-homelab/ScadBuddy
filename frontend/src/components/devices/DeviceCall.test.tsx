@@ -1,12 +1,12 @@
 import { render, screen, waitFor, within } from '@testing-library/react'
 import { http, HttpResponse } from 'msw'
-import { afterEach, expect, it, vi } from 'vitest'
+import { afterEach, expect, it, onTestFinished, vi } from 'vitest'
 import type { CallView } from '../../api/devices'
 import { OLD_PHONE, PHONE, setStepMs } from '../../mocks/features/devices'
 import { emitRealtime } from '../../mocks/realtime'
 import { server } from '../../mocks/server'
 import { resetRealtime } from '../../lib/realtime'
-import { DeviceCall } from './DeviceCall'
+import { DeviceCall, LATE_POLL_MS } from './DeviceCall'
 
 // The real realtime client over msw's socket, as the mocked app runs it.
 afterEach(() => resetRealtime())
@@ -69,6 +69,44 @@ it('puts the events the read replays first, then the live ones after them', asyn
   emitRealtime('device.call_failed', ['device:call:c1'], { call: 'c1', outcome: 'timeout' })
   await screen.findByText('The device did not finish in time. Try again.')
   expect(screen.getByText('Stopped.')).toBeInTheDocument()
+})
+
+it('keeps reading a call past its deadline until core ends it', async () => {
+  vi.useFakeTimers({ shouldAdvanceTime: true })
+  onTestFinished(() => {
+    vi.useRealTimers()
+  })
+  let outcome: CallView['call']['outcome'] = null
+  server.use(
+    http.post('*/api/v1/devices/:id/calls', () => HttpResponse.json({ call_id: 'c2' }, { status: 202 })),
+    http.get('*/api/v1/devices/calls/c2', () =>
+      HttpResponse.json({
+        call: {
+          id: 'c2',
+          device_id: PHONE.id,
+          method: 'code.scan',
+          args: {},
+          caller_kind: 'person',
+          outcome,
+          created_at: '2026-11-27T10:00:00Z',
+          deadline: new Date(Date.now() - 1_000).toISOString(),
+          sent_at: '2026-11-27T10:00:00Z',
+          ended_at: null,
+          pending_action_id: null,
+        },
+        events: [],
+        result: null,
+      }),
+    ),
+  )
+  render(<DeviceCall deviceId={PHONE.id} method="code.scan" />)
+  await screen.findByText('Point the phone’s camera at the code and take the photo.')
+  await vi.advanceTimersByTimeAsync(LATE_POLL_MS)
+  expect(screen.queryByText('Stopped.')).not.toBeInTheDocument()
+  outcome = 'timeout'
+  await vi.advanceTimersByTimeAsync(LATE_POLL_MS)
+  await screen.findByText('Stopped.')
+  expect(screen.getByRole('alert')).toHaveTextContent('The device did not finish in time. Try again.')
 })
 
 it('says the device is offline when the call is refused with 409', async () => {

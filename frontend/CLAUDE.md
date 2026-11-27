@@ -282,7 +282,7 @@ same way, `vite.config.ts`).
   and `components/devices/`: `AddDevice` (`POST /devices/pairings`; the code as `scadbuddy://pair?url=<encoded>`,
   a QR code and a tap link, moved onto `window.location`'s host by `onThisHost`; `USER_ONLY`, as the code is a
   credential), `DeviceCall` (starts one call, follows `device:call:<id>` with `useSubscription`, reads
-  `GET /devices/calls/{id}` on each `'resync'` for the events in log order, polls while the socket is down,
+  `GET /devices/calls/{id}` on each `'resync'` for the events in log order, polls while the socket is down and past the deadline,
   and gives the parent the result's `read_id`) and `UseMyPhone`, the Scan page's one mount: `nfc.read` or
   `code.scan` on an online phone, then the read to `POST /filament/tags/reads {read_id}` or
   `POST /scan/codes {read_id}`; the pairing button when no phone is online; nothing on a 404. Mocks

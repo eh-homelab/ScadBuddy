@@ -2,7 +2,7 @@ import QRCode from 'qrcode'
 import { SmartphoneIcon } from 'lucide-react'
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { USER_ONLY } from '../../agent/dom'
-import { createPairing, onThisHost, pairLink, type Device, type Pairing } from '../../api/devices'
+import { createPairing, listDevices, onThisHost, pairLink, type Device, type Pairing } from '../../api/devices'
 import { Spinner } from '../ui/spinner'
 import { Button } from '@/components/ui/button'
 
@@ -11,8 +11,10 @@ const timeOf = (iso: string) => new Date(iso).toLocaleTimeString([], { hour: '2-
 /**
  * #7905 — "Add a device" (plan Task 9): posts `POST /devices/pairings` and shows its code as
  * `scadbuddy://pair?url=<encoded>`, as a QR code to scan with the phone and as a link to tap on
- * the phone itself. The code works once and for 10 minutes. `devices` is the list the parent
- * reads again; a device in it that was not there when the code was made is the one that paired.
+ * the phone itself. The code works once and for 10 minutes. The devices are read just before the
+ * code is made; a device in `devices` (the list the parent reads again) that was not in that read
+ * is the one that paired. `onPairing` says whether a code is on screen, and says `false` when the
+ * block goes away with a code still shown, so the parent never keeps its fast poll.
  *
  * The link holds a one-time pairing code, a credential: the button and the link are
  * `USER_ONLY`, so the browser agent can neither make a code nor read one.
@@ -33,10 +35,13 @@ export function AddDevice({ devices, onPairing }: { devices: readonly Device[] |
     setError(null)
     setPaired(null)
     try {
+      // Read now: the parent's list can be up to a poll old, and a device paired since then
+      // would count as the new one and close the code at once.
+      const before = (await listDevices()).devices
       const made: Pairing = await createPairing()
       const link = pairLink(onThisHost(made.code_url))
       const svg = await QRCode.toString(link, { type: 'svg', errorCorrectionLevel: 'M', margin: 0 })
-      known.current = new Set((devices ?? []).map((one) => one.id))
+      known.current = new Set(before.map((one) => one.id))
       setPairing({ link, expiresAt: made.expires_at, svg })
       latestOnPairing.current?.(true)
     } catch (cause) {
@@ -71,11 +76,19 @@ export function AddDevice({ devices, onPairing }: { devices: readonly Device[] |
     return () => clearTimeout(timer)
   }, [pairing, close])
 
+  // Unmounted with a code on screen (the Scan page drops this block once a phone is online):
+  // the parent's fast poll must stop too.
+  const open = pairing !== null
+  useEffect(() => {
+    if (!open) return
+    return () => latestOnPairing.current?.(false)
+  }, [open])
+
   if (!pairing) {
     return (
       <div className="flex flex-col gap-2">
         <div>
-          <Button type="button" onClick={() => void start()} disabled={busy || devices === undefined} aria-busy={busy} {...USER_ONLY}>
+          <Button type="button" onClick={() => void start()} disabled={busy} aria-busy={busy} {...USER_ONLY}>
             {busy ? <Spinner /> : <SmartphoneIcon aria-hidden="true" />} Add a device
           </Button>
         </div>
