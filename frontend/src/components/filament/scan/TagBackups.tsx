@@ -12,6 +12,7 @@ const REASONS: Record<TagBackup['reason'], string> = {
   spool_write: 'before a spool write',
   agent_write: 'before an agent write',
   restore: 'before a restore',
+  place_write: 'before a place write',
 }
 
 /** The route's default page: a full page means there are more. */

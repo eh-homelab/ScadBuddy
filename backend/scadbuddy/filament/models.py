@@ -851,6 +851,10 @@ class SpoolMove(_In):
     #: The box's spool the caller saw (#7167), required with ``replace``: a box that holds
     #: another spool by then is `BoxFullError`, so no spool they did not name is archived.
     expected_occupant_id: UUID | None = None
+    #: The place where the caller read the spool (#7168), ``null`` for no place. It is
+    #: checked only when the body sends the key: a spool that is in another place, or is
+    #: archived, by then is a 409 ``move_stale``, and nothing is archived or moved.
+    expected_location_id: UUID | None = None
 
 
 # -- spool types ----------------------------------------------------------------------
@@ -2209,7 +2213,7 @@ class TagReadIn(_FitsOneTag):
     tap: bool = True
 
 
-BackupReason = Literal["spool_write", "agent_write", "restore"]
+BackupReason = Literal["spool_write", "agent_write", "restore", "place_write"]
 
 
 class TagBackupIn(_FitsOneTag):

@@ -472,6 +472,54 @@ page's error), or, when none comes within 10 minutes of the backup, `failed` wit
 `no_read_back` (the tag may hold the new records, and its backup can restore it). The agent
 waits for either.
 
+### The swap wizard (#7168)
+
+`/filament/swap` ("Swap spools" on the Spools tab's toolbar; `pages/filament/SwapPage.tsx`) is a
+phone page that moves spools by hand, one after the other (spec
+`docs/superpowers/specs/2026-11-27-swap-wizard-design.md`; plan
+`docs/superpowers/plans/2026-11-27-swap-wizard.md`). It asks two questions in turn: "Which
+spool?" and "Where does it go?". The person answers each one with a tag tap, a QR code (the
+camera, or a photo the server reads) or a pick by hand (`IdentifySpool`, `IdentifyPlace`).
+No step has a default answer. When both are named, "Move" sends one
+`POST /filament/spools/{id}/move`. A log under the steps lists each move of this visit.
+
+- **The stale rule.** Each move sends `expected_location_id`: the place the spool was in when the
+  person named it, or `null` for no place. When the spool is somewhere else by then, or archived,
+  the server refuses the move with 409 `move_stale` (`location_id`, `archived`) and moves
+  nothing. The page reads the spool again and shows what changed ("S-12 is now in Shelf 2"). It
+  never sends the move again by itself: the person confirms it. When no spool waits, an archived
+  spool goes back to "Which spool?". When a spool waits, the page says "S-n was archived." and
+  shows the waiting spool's move; that move goes out only when the person confirms it. A 409
+  `move_conflict`, or a move that got no answer, offers "Try again", which sends the same move.
+  When a `move_stale` spool is already in the move's target (the first move went through, but
+  its answer was lost), the move is done: the log lists it, the page says so ("S-12 is already in
+  Shelf 2.") and goes on with the chain. After "Archive S-n", "Try again" keeps the archive, so
+  the log says "S-n archived". "Choose another place" names a place for the spool whose move did
+  not go through: after a failed "Take S-n out first", that is the waiting spool, which then goes
+  to the place named instead of to no place. Each new step moves the focus to its heading; the
+  short "Moving…" step does not.
+- **A full dry box.** A move into a dry box sends `if_occupied: refuse`. A 409 `box_full` shows
+  the box's spool and its choices: "Archive S-n" (a `replace` with `expected_occupant_id`, as
+  #7167 does it), "Move S-n first", or "Choose another place". The page offers "Move S-n first"
+  only for the current spool's move, not for a waiting spool's move. "Move S-n first" makes the box's
+  spool the next one to place, and the first spool waits (`lib/swapChain.ts`). After each move
+  that succeeds, the newest waiting spool's move goes out by itself, with the place it was read
+  in. When the box's spool is itself waiting (a cycle), the page offers "Take S-n out first": it
+  moves that spool to no place, then the other moves follow. Each step is its own request, so a
+  failure in the middle leaves every spool in a real place or in none; the page shows the moves
+  that still wait, and "Clear" drops them.
+- **Tags.** Where Web NFC works, "Write tag" writes a spool's tag (the spool write of the Scan
+  mode) or a place's tag (one NDEF `url` record, the place label's URL `<label base>/x/L-<n>`,
+  `WritePlaceTag`). Each write backs the tag up first and reads it back. The page never makes a
+  tag read-only, so a tag stays reusable. In a browser a Bambu tag gives its UID only (Web NFC
+  reads NDEF only, https://w3c.github.io/web-nfc/), so it names a spool only for a side the AMS
+  saw. In the ScadBuddy app the read also carries the tag's blocks, so either side names it.
+- **The frame rule.** Web NFC and the camera run only on ScadBuddy's own origin, at the top
+  level. Inside Bambuddy's frame the page offers "Open the swap page in its own tab"
+  (`openExternal`, a new tab) and keeps only the typed code, the photo and the pick by hand.
+  Without Web NFC (iOS, a desktop browser) it says "Tags need Chrome on Android or the
+  ScadBuddy app." and keeps the QR code and the pick by hand.
+
 ### Properties (#7026)
 
 Design: [inventory spec §6.3a](../superpowers/specs/2026-11-21-inventory-and-purchasing-design.md), D17.
@@ -697,6 +745,25 @@ matches `[a-z][a-z0-9_]{0,63}`. Limits: 200 keys per entity, 2000 characters per
   `png_too_large`: choose PDF, a lower dpi or fewer labels. The labels page has the choice
   beside the template: PDF or PNG, and for PNG the dpi (203, 300 or 600). It saves each change
   in `filament_label_output`, and "Download" names the file by the type of the answer.
+- Labels print to a CUPS queue (#7170, design
+  `docs/superpowers/specs/2026-11-27-cups-label-printing-design.md` R7 and R9). The labels page
+  has a "Label printer" row beside "Print" and "Download". It reads the queues of the CUPS
+  server in Settings, Filament, "Label print server" (`filament_label_server_url`; the
+  cluster's `http://cups.cups.svc:8631` by default; only a person changes it) through core's
+  `GET /api/v1/label-printing/queues`. It offers a queue only when CUPS gives the queue's size
+  and that size is the PDF's page within 1 mm each way, in the same orientation. The page is
+  the label for a roll with a one-label template, else the sheet's page (Letter or A4), so a
+  sheet never goes to a 2 x 1 in queue. It picks the last queue used
+  (`filament_label_queue`) when that queue fits, else the only queue that fits, else none. Each
+  queue in the picker shows its state, and the picked queue shows its state and its CUPS message, such as "1.02 in labels are loaded; …". A
+  Zebra ZPL queue also gets the print mode, the darkness and the speed
+  (`filament_label_job_options`; "Printer default" sends nothing). "Print to label printer"
+  asks for the labels' PDF, then sends it with
+  `POST /api/v1/label-printing/queues/{queue}/jobs`, and says "Sent to" with the queue's `info` (its name when `info` is empty) and the job's id
+  when CUPS accepts the job. A queue that is gone (`label_queue_unknown`) reads the list again.
+  When the server does not answer, the row says so, and "Print" and "Download" still work
+  (`frontend/src/pages/filament/LabelQueuePrint.tsx`, `frontend/src/api/labelPrinting.ts`;
+  mocks `frontend/src/mocks/features/labelPrinting.ts`).
 - The fields a spool label prints (#7216, R-7216-9 and R-7216-10): the body's `fields`, else
   the setting `filament_label_output`'s, from `number`, `material` (with its subtype),
   `colour` (its name), `hex` (the effective colour as `#RRGGBB`), `brand`, `location` (its

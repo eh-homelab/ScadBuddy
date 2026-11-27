@@ -36,6 +36,8 @@ export const filamentLinks = {
   newSpool: `${spools}/new`,
   /** #7273 — the hand-held Scan mode: the phone page that reads and writes tags through Web NFC. Top-level, as it opens any thing a tag names. */
   scan: '/scan',
+  /** #7168 — the swap wizard: name a spool, then its new place, and the page moves it. */
+  swap: `${BASE}/swap`,
   /** #7150 — a new spool filled from an existing one. */
   copySpool: (id: string) => query(`${spools}/new`, { copy: id }),
   /** #7684 — a respooled spool continued as a new one, with its final filament as the new spool's grams. */
