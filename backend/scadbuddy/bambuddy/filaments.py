@@ -676,6 +676,9 @@ def suggest(
     :func:`_fallback`), whatever its material or colour: an empty slot holds Print until
     someone picks, and the dialog says why the choice differs from the file. A slot is
     left empty only when no free spool is loaded in this printer and none taken is close.
+    The fallback runs only after every slot has had its match (#8264): run in slot order,
+    an earlier slot with no match took the spool a later slot matched, and both printed
+    in that one colour.
     """
     scored = [
         (score, index, option)
@@ -686,7 +689,7 @@ def suggest(
     declared = {family(slot.material) for slot in slots if slot.material}
     families = declared or _anchor_family(scored, printer_id)
     taken: set[int] = set()
-    chosen: list[SlotChoice] = []
+    picked: dict[int, int] = {}
     for slot in slots:
         best: tuple[float, int] | None = None
         shared: tuple[float, int] | None = None
@@ -707,13 +710,20 @@ def suggest(
                 shared = (score, option.spool_id)
         if best is not None:
             taken.add(best[1])
-            chosen.append(SlotChoice(slot_id=slot.slot_id, spool_id=best[1]))
+            picked[slot.slot_id] = best[1]
         elif shared is not None:
-            chosen.append(SlotChoice(slot_id=slot.slot_id, spool_id=shared[1]))
-        elif (fallback := _fallback(slot, spools, families, taken, printer_id)) is not None:
+            picked[slot.slot_id] = shared[1]
+    for slot in slots:
+        if slot.slot_id in picked:
+            continue
+        if (fallback := _fallback(slot, spools, families, taken, printer_id)) is not None:
             taken.add(fallback)
-            chosen.append(SlotChoice(slot_id=slot.slot_id, spool_id=fallback))
-    return chosen
+            picked[slot.slot_id] = fallback
+    return [
+        SlotChoice(slot_id=slot.slot_id, spool_id=picked[slot.slot_id])
+        for slot in slots
+        if slot.slot_id in picked
+    ]
 
 
 def _fallback(
