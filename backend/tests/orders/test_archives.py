@@ -605,6 +605,7 @@ async def test_a_lan_archive_needs_no_hash_link(shop: Shop, pool: PgPool) -> Non
         shop.lifecycle, seam, order.id, item.id, attempt.id, Starts(), limit=LIMIT
     )
     assert [a.archive_id for a in read.archives] == [364]
+    assert shop.rows.fulfilments(item.id)[0].archive_ids == [364]
 
 
 def test_an_archive_on_both_paths_is_listed_once(shop: Shop, pool: PgPool) -> None:
