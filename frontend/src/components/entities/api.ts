@@ -1,7 +1,6 @@
 import { API_BASE, request, uploadForm } from '../../api/client'
 import type { components } from '../../api/schema'
-import { propertyTexts } from '../../lib/filamentSearch'
-import type { PropertyText } from '../../lib/filamentSearch'
+import { propertyTexts, type PropertyText } from '../../lib/filamentSearch'
 
 /**
  * #6950 — the files and links of any entity (`kind:ref`, such as `spool:<id>`):

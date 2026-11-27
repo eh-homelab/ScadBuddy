@@ -5,6 +5,7 @@ import { THUMBNAILED } from '../../components/entities/attachmentMedia'
 import { parts, sha256, sniff } from './orders/attachments'
 import { itemSchemaOf, itemsTypedLike } from './inventory'
 import { BROWSER, newId, now, problem, state as orders } from './orders/state'
+import { AT, T } from './filament/seed'
 
 /**
  * #6950 — any entity's files and links (`backend/scadbuddy/api/entity_attachments.py`,
@@ -46,8 +47,10 @@ function fresh() {
     uploads: [] as { entity: string; filename: string; role: string; caption: string }[],
     /** The next upload's 413 detail, once. */
     refuseNextUpload: null as string | null,
-    /** Each entity's properties, by key. */
-    properties: new Map<string, EntityProperty[]>(),
+    /** Each entity's properties, by key. #8372: one type's barcode, so a scan of it finds spool #3. */
+    properties: new Map<string, EntityProperty[]>([
+      [`spool_type:${T.PINK}`, [{ key: 'gtin', value: ['6975337030016'], source: 'manual', updated_at: AT, updated_by: BROWSER }]],
+    ]),
     /** Each entity's property changes, newest first. */
     history: new Map<string, PropertyChange[]>(),
     /** Each PATCH's `set`, as the route received it. */

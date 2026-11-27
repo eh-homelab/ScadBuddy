@@ -1,6 +1,6 @@
 import { ArrowLeftRightIcon, CalendarClockIcon, Columns3Icon, DownloadIcon, ListFilterIcon, RefreshCwIcon, LayoutGridIcon, PlusIcon, Rows3Icon, UploadIcon, XIcon } from 'lucide-react'
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
-import { Link, useSearchParams } from 'react-router'
+import { Link, useNavigate, useSearchParams } from 'react-router'
 import { ApiError } from '../../api/client'
 import { getInventory, getSummary, listLocations, listSpools, listTags, listTypes, syncAmsWeights, type InventorySummary, type LocationNode, type Spool, type SpoolType } from '../../api/filament'
 import { BulkBar, type Place } from '../../components/filament/BulkBar'
@@ -50,8 +50,7 @@ import {
 } from '@/components/ui/dropdown-menu'
 import { downloadBlob } from '../../lib/embed'
 import { readKindPropertyTexts } from '../../components/entities/api'
-import { loadTypeSkus, spoolSearchDoc, tagsBySpool, traysBySpool } from '../../lib/filamentSearch'
-import type { PropertyText } from '../../lib/filamentSearch'
+import { loadTypeSkus, spoolSearchDoc, tagsBySpool, traysBySpool, type PropertyText } from '../../lib/filamentSearch'
 import { toast } from '../../lib/toast'
 import { syncText } from './syncText'
 import { cn } from '@/lib/utils'
@@ -165,6 +164,15 @@ export function SpoolsTab() {
   /** #7151: each spool's open tag keys, so the search finds a spool by its tag. */
   const [tagKeys, setTagKeys] = useState<ReadonlyMap<string, string[]>>(new Map())
   const [propertyTexts, setPropertyTexts] = useState<ReadonlyMap<string, PropertyText[]>>(new Map())
+  /** #8372: each spool type's property values, so a spool is found by its type's barcode. */
+  const [typePropertyTexts, setTypePropertyTexts] = useState<ReadonlyMap<string, PropertyText[]>>(new Map())
+  /** #8372: which reads have settled (a failure settles), so a scan-made search decides once all have. */
+  const [settled, setSettled] = useState({ list: false, properties: false, typeProperties: false })
+  const settle = useCallback(
+    (read: keyof typeof settled) => setSettled((current) => (current[read] ? current : { ...current, [read]: true })),
+    [],
+  )
+  const navigate = useNavigate()
 
   /** Each load takes a number; only the newest one's answer is used. */
   const latest = useRef(0)
@@ -173,12 +181,23 @@ export function SpoolsTab() {
     // #7026: each spool's property values, searched as text, read on every load so an edit
     // shows; beside the list, never holding it back. A failed read keeps the map it has
     // (empty when the first read fails): the search still runs on everything else.
-    readKindPropertyTexts('spool').then(
-      (found) => {
-        if (mine === latest.current) setPropertyTexts(found)
-      },
-      () => {},
-    )
+    readKindPropertyTexts('spool')
+      .then(
+        (found) => {
+          if (mine === latest.current) setPropertyTexts(found)
+        },
+        () => {},
+      )
+      .finally(() => settle('properties'))
+    // #8372: the types' values too, read and kept the same way.
+    readKindPropertyTexts('spool_type')
+      .then(
+        (found) => {
+          if (mine === latest.current) setTypePropertyTexts(found)
+        },
+        () => {},
+      )
+      .finally(() => settle('typeProperties'))
     try {
       const [spools, summary, types, tree] = await Promise.all([listSpools({ includeArchived: true }), getSummary(), listTypes(), listLocations()])
       if (mine !== latest.current) return
@@ -188,6 +207,7 @@ export function SpoolsTab() {
     } catch (cause) {
       if (mine === latest.current) setError(message(cause))
     }
+    settle('list')
     // The trays read Bambuddy too, so they come after the list and never hold it back;
     // without them, no spool is flagged (#6713).
     try {
@@ -202,7 +222,7 @@ export function SpoolsTab() {
         setTrayNames(new Map())
       }
     }
-  }, [])
+  }, [settle])
 
   useEffect(() => {
     let live = true
@@ -246,11 +266,34 @@ export function SpoolsTab() {
         tray: trayNames.get(spool.id),
         tags: tagKeys.get(spool.id),
         properties: propertyTexts.get(spool.id),
+        typeProperties: spool.type_id ? typePropertyTexts.get(spool.type_id) : undefined,
       })
     return sortSpools(filterSpools(data.spools, q, data.trays, searchDoc), q.sort)
-  }, [data, q, typeCodes, skus, trayNames, tagKeys, propertyTexts])
+  }, [data, q, typeCodes, skus, trayNames, tagKeys, propertyTexts, typePropertyTexts])
   const groups = useMemo(() => groupSpools(shown, q.group, typeCodes), [shown, q.group, typeCodes])
   const chosen = shown.filter((spool) => selected.has(spool.id))
+
+  // #8372: a scan-made search (`from=scan`) waits for the list and both property reads. Then it
+  // decides once: one shown spool opens in the list's place in the history. Else `from` goes
+  // out of the address, so the decision does not run again and a later edit of the search never opens a spool.
+  const scanning = params.get('from') === 'scan'
+  const scanReady = settled.list && settled.properties && settled.typeProperties
+  useEffect(() => {
+    if (!scanning || !scanReady) return
+    if (shown.length === 1) {
+      void navigate(filamentLinks.spool(shown[0]!.id), { replace: true })
+      return
+    }
+    setParams(
+      (current) => {
+        const next = new URLSearchParams(current)
+        next.delete('from')
+        return next
+      },
+      { replace: true },
+    )
+  }, [scanning, scanReady, shown, navigate, setParams])
+  const lookingUp = scanning && !scanReady
 
   const select = (ids: string[], on: boolean) =>
     setSelected((current) => {
@@ -528,7 +571,12 @@ export function SpoolsTab() {
         </p>
       )}
 
-      {data && !shown.length && (
+      {lookingUp && (
+        <p role="status" className="rounded-md border px-3 py-6 text-center text-[13px] text-muted-foreground">
+          {q.q ? `Looking for “${q.q}”…` : 'Looking for the scanned code…'}
+        </p>
+      )}
+      {data && !shown.length && !lookingUp && (
         <p className="rounded-md border px-3 py-6 text-center text-[13px] text-muted-foreground">
           {!data.spools.length ? 'No spools yet. Add a spool, or import a CSV.' : q.q ? `No spool matches “${q.q}” with these filters.` : 'No spool matches these filters.'}
         </p>

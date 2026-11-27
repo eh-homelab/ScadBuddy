@@ -10,8 +10,7 @@ import { filamentLinks } from '../../lib/filamentLinks'
 import { spoolColour, spoolName } from '../../lib/filamentColour'
 import { readPickerFilters, writePickerFilters, type PickerFilters } from '../../lib/filamentPickerFilters'
 import { loadKindPropertyTexts } from '../entities/api'
-import type { PropertyText } from '../../lib/filamentSearch'
-import { loadTypeSkus, matchesSearch, namesNumber, parseSearch, spoolSearchDoc, traysBySpool, typeSearchDoc } from '../../lib/filamentSearch'
+import { loadTypeSkus, matchesSearch, namesNumber, parseSearch, spoolSearchDoc, traysBySpool, typeSearchDoc, type PropertyText } from '../../lib/filamentSearch'
 import { ClearSwatch, Swatch } from '../print/Swatch'
 import { Button } from '@/components/ui/button'
 import { Checkbox } from '@/components/ui/checkbox'
@@ -154,6 +153,7 @@ function QuickFindList({ onDone }: { onDone: () => void }) {
         skus: spool.type_id ? data.skus.get(spool.type_id) : undefined,
         tray: data.trays.get(spool.id),
         properties: data.spoolProperties.get(spool.id),
+        typeProperties: spool.type_id ? data.typeProperties.get(spool.type_id) : undefined,
       })
       return matchesSearch(doc, tokens)
     })
