@@ -235,6 +235,46 @@ func (e *Event) Topics() []string {
 	return nil
 }
 
+// OwnTopics is an opaque event's own topics field (the envelope's topics), nil for a typed
+// event or one with none. Python's socket sends no opaque event; core's sends one only of a
+// namespace it opts in (realtime, device.*).
+func (e *Event) OwnTopics() []string {
+	if !e.Opaque {
+		return nil
+	}
+	var out []string
+	if topics := e.raw.Get("topics"); topics != nil && topics.Kind == 'a' {
+		for _, t := range topics.Items {
+			if t.Kind == 's' {
+				out = append(out, t.Str)
+			}
+		}
+	}
+	return out
+}
+
+// OpaqueFrame is an opaque event's socket frame, as Frame writes a typed one: its kind and
+// id, and as data every field but id, at, kind, topics and retention_seconds, in the order
+// it was logged.
+func (e *Event) OpaqueFrame(topics []string) string {
+	data := Value{Kind: 'o', Keys: []string{}, Vals: []Value{}}
+	for i, k := range e.raw.Keys {
+		switch k {
+		case "id", "at", "kind", "topics", "retention_seconds":
+			continue
+		}
+		data.Keys, data.Vals = append(data.Keys, k), append(data.Vals, e.raw.Vals[i])
+	}
+	names := Value{Kind: 'a', Items: []Value{}}
+	for _, t := range topics {
+		names.Items = append(names.Items, Value{Kind: 's', Str: t})
+	}
+	frame := Value{Kind: 'o',
+		Keys: []string{"type", "id", "kind", "topics", "data"},
+		Vals: []Value{{Kind: 's', Str: "event"}, {Kind: 's', Str: e.ID}, {Kind: 's', Str: e.Kind}, names, data}}
+	return Dumps(frame, false, true)
+}
+
 // Frame is api/realtime.py event_frame, as the socket sends it (json.dumps, compact, no
 // ensure_ascii): the kind and ids, and the fields but id, at, kind and cart; an order's
 // deleted only when true.
