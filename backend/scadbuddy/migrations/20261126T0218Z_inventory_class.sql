@@ -82,6 +82,9 @@ CREATE TABLE relations (
 CREATE UNIQUE INDEX relations_open ON relations (type_id, from_entity, to_entity)
     WHERE ended_at IS NULL;
 CREATE INDEX relations_to ON relations (to_entity) WHERE ended_at IS NULL;
+-- The entities sweep and `registry.py` `orphans` look up any relationship from an entity,
+-- ended or not, and so does the foreign key check when an entity row goes.
+CREATE INDEX relations_from ON relations (from_entity);
 
 -- §4.7 The parameter history: one row per `handler_config.changed` event, keyed by its
 -- `seq`. Only the history subscriber writes it (R-K1-13). `owner` is `item_kind:<id>`,

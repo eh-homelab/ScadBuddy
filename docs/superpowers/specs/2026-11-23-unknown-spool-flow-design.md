@@ -196,3 +196,37 @@ For each tray with a holder, or not loaded: delete its row if one exists.
 - How the type match for an unknown RFID tag reuses the existing pull or invoice code.
 - The polling cadence of the Needs-you source.
 - Test split between capture, the store, the routes, the print checks and the dialog.
+
+## As built (#7143)
+
+Read from the code at commit bdb40d8bb of the branch `feat/7143-unknown-spool`. Where this
+section and the text above differ, this section is what the code does.
+
+- **Table.** `filament_unknown_trays` (`20261126T1936Z_filament_unknown_trays.sql`). `seen_at`
+  moves only when a reported field changes (D1). No row for the external holder (D2).
+  `remain_pct` is stored and null in practice (D3).
+- **Capture.** `capture.note_unknown` runs in the report write's savepoint and in the backstop. An
+  RFID tray gets a spool (`match_tray`, else a spool with material and colour only; `created` event
+  `data.by` `rfid_capture`). An untagged tray gets a row and its place. A busy tray lock leaves the
+  tray to the next report (D11).
+- **Routes.** Go, area `unknown-trays` (`tools/go/core/internal/unknowntrays`): the list, with up to 10
+  ranked candidates and `made_from_tags` (D5, 24 hours), and dismiss. The rank key: spools with no
+  place, then the reported material, then the nearest colour, then the number.
+- **Resolve.** The write is Python's Temporal activity `filament_resolve_unknown_tray`
+  (`backend/scadbuddy/filament/unknown_resolve.py`) on the `library` queue, served by the API process
+  (G5). It answers `{id, number, code, location_id}`, publishes no event (G8), and keeps the lock
+  order in Python (G9). The label weight changes only for a first weight (D4). There is no Go spool
+  writer. **The Go resolve route is not built yet.** It waits for a Temporal client in Go
+  (`internal/temporalx`). Until then, the dialog's and the tool's resolve get a 404 and cannot resolve a
+  tray. The existing link paths still clear the row (`link_on`: the print dialog's tray question,
+  the place page's "New spool from this tray", the agent's `link_tray_spool`). The rest of the
+  flow works.
+- **Block.** `prepare_run` (and so the check, `PrintCheck.unknown_trays`) and `lan_print` refuse a
+  run with 422 `unknown_spool_loaded`. The print worker reads a CRUD route of caller `print`
+  (area `unknown-trays`). A missing route lets the run go on (G3), so the worker-side block works only
+  once `SCADBUDDY_CORE_AREAS` names the area.
+- **Owner.** A "Needs you" source (read every 15 s), one dialog, four entry points (Needs you,
+  Filament → Locations, a place's page, the print dialog) and the tools `filament_unknown_trays` and
+  `filament_unknown_tray_resolve`.
+- **Limits.** A print started in Bambuddy or on the printer is not blocked. A row whose unit the
+  report no longer shows stays until that unit returns; deleting or merging the printer drops it.

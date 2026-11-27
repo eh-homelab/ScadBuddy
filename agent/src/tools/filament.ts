@@ -1,6 +1,7 @@
 import { createHash } from 'node:crypto'
 import { z } from 'zod'
 import type { components } from '../api/schema.js'
+import { unknownTrayClient } from '../api/unknownTrays.js'
 import { ok } from './call.js'
 import { command } from './command.js'
 import { catalogRowRef, PROPERTY_RULES, propertyChanges, propertySet, savedProperties, setPropertiesAfter } from './entities.js'
@@ -2010,6 +2011,61 @@ const tools: Tool[] = [
   }),
 
   defineTool({
+    name: 'filament_unknown_trays',
+    label: 'List unknown trays',
+    description:
+      'The loaded trays that no spool is linked to (#7143). A row is one tray: its `id`, printer, `slot`, place, ' +
+      '`material`, `colour_rgba`, `remain_pct` and `seen_at`. `candidates` are the spools that may be in it, ranked ' +
+      'by ScadBuddy: spools with no place first, then the same material, then the nearest colour. ' +
+      '`made_from_tags` lists the spools that capture made from RFID tags in the last 24 hours. ScadBuddy refuses a ' +
+      'print to a printer that has a row here (422 `unknown_spool_loaded`). To fix a row, ask the user which spool is ' +
+      "in the tray, then call filament_unknown_tray_resolve with this row's `seen_at` as it is.",
+    input: z.object({}),
+    risk: 'read',
+    source: SOURCE,
+    routes: [],
+    handler: async (_input, { backend }) =>
+      json(await ok(unknownTrayClient(backend).GET('/api/v1/filament/unknown-trays'), 'list the unknown trays')),
+  }),
+
+  defineTool({
+    name: 'filament_unknown_tray_resolve',
+    label: 'Link a spool to an unknown tray',
+    description:
+      'Link a spool to an unknown tray (#7143). Give `tray_id` (filament_unknown_trays `id`), exactly one of ' +
+      "`spool_id` and `code` (a label code such as `S-12`), `net_weight_g` (the spool's weight without its core, " +
+      "more than 0) and `seen_at` (the row's `seen_at`, as listed, never changed). It answers `{id, number, code, " +
+      'location_id}`. 409 `tray_changed`: the tray changed after the list; read the list again. 404 `code_unknown`: ' +
+      'no spool has that code. 409 `spool_archived`. 409 `no_ams_kind`. 404 `spool_missing`: the spool was archived ' +
+      'or deleted while it linked. 409 `tag_clash`: the tag on the tray is on another spool. Use only what the user says: never pick a ' +
+      'candidate yourself. Writes ScadBuddy only.',
+    input: z.object({
+      tray_id: z.string().uuid(),
+      spool_id: z.string().uuid().optional(),
+      code: z.string().min(1).optional(),
+      net_weight_g: z.number().positive(),
+      seen_at: z.string().min(1),
+    }),
+    risk: 'write',
+    source: SOURCE,
+    routes: [],
+    summarize: ({ tray_id, spool_id, code }) => `Link spool ${code ?? spool_id} to unknown tray ${tray_id}`,
+    handler: async ({ tray_id, spool_id, code, net_weight_g, seen_at }, { backend }) => {
+      if ((spool_id === undefined) === (code === undefined)) throw new ToolError('give exactly one of spool_id and code')
+      const body = spool_id !== undefined ? { spool_id, net_weight_g, seen_at } : { code: code as string, net_weight_g, seen_at }
+      return json(
+        await ok(
+          unknownTrayClient(backend).POST('/api/v1/filament/unknown-trays/{tray_id}/resolve', {
+            params: { path: { tray_id } },
+            body,
+          }),
+          `link a spool to unknown tray ${tray_id}`,
+        ),
+      )
+    },
+  }),
+
+  defineTool({
     name: 'filament_label_templates',
     label: 'List label templates',
     description:
@@ -2426,6 +2482,7 @@ export const filamentTools: Tool[] = linkingTools(tools, {
   filament_spool_upsert: 'spool',
   filament_spool_archive: 'spool',
   filament_spool_move: 'spool',
+  filament_unknown_tray_resolve: 'spool',
   filament_location_list: 'location',
   filament_location_get: 'location',
   filament_location_upsert: 'location',
