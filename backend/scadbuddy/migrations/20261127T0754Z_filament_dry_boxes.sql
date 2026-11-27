@@ -12,7 +12,7 @@ ALTER TABLE filament_spool_events
     ));
 
 -- Backfill: a spool whose newest `moved` event went to a live dry box (a dry-storage place
--- of capacity 1) lives there.
+-- of capacity 1, no printer's place) lives there.
 UPDATE filament_spools s SET home_location_id = last_move.target
 FROM (
     SELECT DISTINCT ON (e.spool_id) e.spool_id, (e.data ->> 'to')::uuid AS target
@@ -22,4 +22,5 @@ FROM (
 ) last_move
 JOIN filament_locations l ON l.id = last_move.target
 JOIN filament_location_kinds k ON k.id = l.kind_id
-WHERE s.id = last_move.spool_id AND k.dry_storage AND l.capacity = 1 AND l.archived_at IS NULL;
+WHERE s.id = last_move.spool_id AND k.dry_storage AND l.capacity = 1 AND l.archived_at IS NULL
+  AND l.printer_id IS NULL;

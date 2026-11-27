@@ -345,6 +345,7 @@ _CATALOG_REFUSED = (
     TypeTempError,
     MissingRequiredProperties,
     BadPropertyValue,
+    BoxHasManyError,
 )
 
 
@@ -483,7 +484,10 @@ async def create_catalog_row(
         "`properties` (a key-to-value map) are written with the row in one transaction. 422 "
         "`missing_required_properties` (with `missing` and `invalid` keys) when the row's "
         "required properties are not all filled after the save (a patch that sends only "
-        "`sort_order` or `archived` is not checked); nothing is written (#7703)."
+        "`sort_order` or `archived` is not checked); nothing is written (#7703). A location "
+        "kind that becomes dry storage (`dry_storage: true`) while a place of it with "
+        "capacity 1 holds two spools or more is a 422 with `code` `box_has_many`; nothing "
+        "changes (#7167)."
     ),
 )
 async def patch_catalog_row(
@@ -1212,6 +1216,7 @@ _SPOOL_REFUSED = (
     PresetUnknownError,
     MissingRequiredProperties,
     BadPropertyValue,
+    BoxFullError,
 )
 
 
@@ -1365,7 +1370,6 @@ async def bulk_create_spools(
         SpoolTrayPlaceError,
         SpoolCopySourceError,
         MoveTargetError,
-        BoxFullError,
         CatalogRefError,
     ) as exc:
         raise _refused(exc) from None
@@ -1379,7 +1383,8 @@ async def bulk_create_spools(
     description=(
         "The body `POST /filament/spools/bulk` takes, less its `quantity`, filled from the "
         "spool (#7150): its type, its own overrides, its note, its own presets and K values, "
-        "and its place unless that is a printer's tray or archived. It leaves out what stays "
+        "and its place unless that is a printer's tray, a dry box or archived. It leaves out "
+        "what stays "
         "the first spool's own: its number, tags, tray, ledger (so no `grams_left`), "
         "weight lock and `added_full`. `copy_of` is the spool's id, for the bulk create. An "
         "archived spool can be copied. Writes nothing; 404 for no such spool."
@@ -1550,7 +1555,9 @@ async def get_spool(filament: FilamentDep, spool_id: UUID) -> m.SpoolDetail:
         "its type's value again. One `edited` ledger event records each change as `[before, "
         "after]`. `archived` takes the spool off the lists or puts it back. 404 for no such "
         "spool, 422 for a bad field, a patch that leaves neither `type_id` nor "
-        "`material_id`, or an effective minimum temperature above its maximum."
+        "`material_id`, or an effective minimum temperature above its maximum. A restore "
+        "(`archived: false`) of a spool whose place is a dry box that another spool holds "
+        "is a 409 with `code` `box_full` and `occupant_id`; nothing is written (#7167)."
     ),
 )
 async def patch_spool(
@@ -1648,7 +1655,9 @@ async def closing_preview(
         "`scale_consumed_g` and `drift_g` (`GET …/closing` previews them). A reading on a "
         "spool with no empty weight known is a 422 with `code` `no_empty_weight`, one under "
         "it `reading_below_empty`; nothing is archived then. A restore with a reason or a "
-        "reading is a 422. A spool already archived takes nothing. 404 for no such spool."
+        "reading is a 422. A spool already archived takes nothing. 404 for no such spool. "
+        "A restore of a spool whose place is a dry box that another spool holds is a 409 "
+        "with `code` `box_full` and `occupant_id`; nothing is written (#7167)."
     ),
 )
 async def archive_spool(
@@ -1672,6 +1681,8 @@ async def archive_spool(
         raise ApiError(
             status.HTTP_422_UNPROCESSABLE_CONTENT, str(exc), code="reading_below_empty"
         ) from None
+    except BoxFullError as exc:
+        raise _refused(exc) from None
     if changed is None:
         raise _no_spool(spool_id)
     return changed
@@ -2077,7 +2088,9 @@ _BULK_ARCHIVE_DESCRIPTION = (
     "each spool of `spool_ids` (1 to 500), in one transaction (#7151). Each spool it "
     "changes gets its own `{event}` ledger event{extra}. The answer lists, in id order, "
     "the spools it changed (`changed`), those already so (`unchanged`) and the ids that "
-    "name no spool (`not_found`); none of them is refused."
+    "name no spool (`not_found`); none of them is refused. A restore of a spool whose "
+    "place is a dry box that another spool holds is a 409 with `code` `box_full` and "
+    "`occupant_id`, and then none is changed (#7167)."
 )
 
 
@@ -2109,9 +2122,12 @@ async def bulk_archive_spools(
 async def bulk_restore_spools(
     filament: FilamentDep, caller: CallerDep, body: m.SpoolIds
 ) -> m.SpoolsArchived:
-    return await asyncio.to_thread(
-        filament.spools.bulk_archive, body.spool_ids, False, actor=actor(caller)
-    )
+    try:
+        return await asyncio.to_thread(
+            filament.spools.bulk_archive, body.spool_ids, False, actor=actor(caller)
+        )
+    except BoxFullError as exc:
+        raise _refused(exc) from None
 
 
 @router.get(

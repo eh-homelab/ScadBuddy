@@ -36,6 +36,7 @@ from scadbuddy.filament import dry_hours, ledger, metrics
 from scadbuddy.filament import models as m
 from scadbuddy.filament import presets as p
 from scadbuddy.filament.catalog import CatalogRefError
+from scadbuddy.filament.dry_box import BoxFullError, is_dry_box, occupant_on
 from scadbuddy.filament.empty_weight import EmptyWeight, effective_on
 from scadbuddy.filament.insert_weights import check_on, forget_spool_on
 from scadbuddy.filament.invoice_money import price_per_kg, unit_cost
@@ -1049,11 +1050,11 @@ class FilamentSpoolStore:
     def copy(self, spool_id: UUID) -> m.SpoolDraft | None:
         """A new spool's draft from ``spool_id`` (#7150, R-7150-3): its type, its own
         overrides and note, its own presets and K values, and its place unless that is a
-        printer's tray or archived. Not its number, tags, tray place, ledger (so no
-        ``grams_left``), weight lock or ``added_full``, a fact of the source's own history
-        (R-7150-10). ``copy_of`` names the source, so a bulk create marks the rows that
-        match its ``migrated`` ones (R-7150-11, R-7150-13). ``None`` for no such spool.
-        Writes nothing."""
+        printer's tray, a dry box (the source holds it) or archived. Not its number, tags,
+        tray place, ledger (so no ``grams_left``), weight lock or ``added_full``, a fact of
+        the source's own history (R-7150-10). ``copy_of`` names the source, so a bulk create
+        marks the rows that match its ``migrated`` ones (R-7150-11, R-7150-13).
+        ``None`` for no such spool. Writes nothing."""
         left_out = {"grams_left", "weight_locked", "added_full", "properties"}
         fields = [f for f in m.SpoolCreate.model_fields if f not in left_out]
         with self._pool.connection() as conn:
@@ -1071,6 +1072,8 @@ class FilamentSpoolStore:
                     (row["location_id"],),
                 ).fetchone()
                 place = None if kept is None else kept["id"]
+                if place is not None and is_dry_box(conn, place):
+                    place = None  # the source holds its box; a copy would find it full
             presets = conn.execute(
                 "SELECT printer_model, nozzle_diameter, slicer_filament, slicer_filament_name"
                 " FROM filament_spool_presets WHERE spool_id = %s"
@@ -2064,9 +2067,20 @@ class FilamentSpoolStore:
         data: dict[str, Any] | None = None,
     ) -> None:
         """Archive or restore the locked row ``current``. ``data`` is the ``archived``
-        event's closing (`ledger.closing`, #7684); a restore carries none."""
+        event's closing (`ledger.closing`, #7684); a restore carries none. A restore into
+        a dry box another spool holds is `BoxFullError`, and nothing is written (#7167)."""
         if (current["archived_at"] is not None) == archived:
             return
+        if not archived:
+            # #7167: an archived spool keeps its place; it may not take a box another
+            # spool holds now. The spool is locked, then the place, as `move_on` does.
+            place = conn.execute(
+                "SELECT location_id FROM filament_spools WHERE id = %s", (current["id"],)
+            ).fetchone()
+            if place is not None and place["location_id"] is not None:
+                held = occupant_on(conn, place["location_id"], but=current["id"])
+                if held is not None:
+                    raise BoxFullError(held)
         if archived:
             closed = conn.execute(
                 "UPDATE filament_tag_bindings SET unbound_at = now(), reason = 'archived'"

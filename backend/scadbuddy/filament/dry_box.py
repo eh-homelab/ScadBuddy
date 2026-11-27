@@ -17,8 +17,10 @@ from psycopg.rows import DictRow
 Conn = Connection[DictRow]
 
 #: A live dry box, as a place ``l`` joined to its kind ``k``: the one meaning that the
-#: migration's backfill (`20261127T0754Z_filament_dry_boxes.sql`) uses too.
-BOX = "k.dry_storage AND l.capacity = 1 AND l.archived_at IS NULL"
+#: migration's backfill (`20261127T0754Z_filament_dry_boxes.sql`) uses too. A place with a
+#: printer (a tray, an AMS unit, the external holder, a printer's root) is never a box,
+#: whatever its kind and capacity; a kind's archive state does not change it.
+BOX = "k.dry_storage AND l.capacity = 1 AND l.archived_at IS NULL AND l.printer_id IS NULL"
 
 
 class BoxFullError(ValueError):
@@ -50,11 +52,12 @@ def is_dry_box(conn: Conn, location_id: UUID) -> bool:
 
 def occupant_on(conn: Conn, location_id: UUID, *, but: UUID | None = None) -> UUID | None:
     """The unarchived spool in the dry box ``location_id`` (not ``but``); none for an
-    empty box and for a place that is no box. Locks the box's row ``FOR UPDATE`` first,
+    empty box and for a place that is no box. Locks the box's row ``FOR NO KEY UPDATE``
+    first (the lock `LocationStore.move_on` takes on every target, so none is upgraded),
     then reads, in the caller's transaction."""
     box = conn.execute(
         "SELECT l.id FROM filament_locations l JOIN filament_location_kinds k"
-        f" ON k.id = l.kind_id WHERE l.id = %s AND {BOX} FOR UPDATE OF l",
+        f" ON k.id = l.kind_id WHERE l.id = %s AND {BOX} FOR NO KEY UPDATE OF l",
         (location_id,),
     ).fetchone()
     if box is None:
@@ -88,6 +91,27 @@ def check_not_many(conn: Conn, location_id: UUID) -> None:
         "SELECT 1 FROM filament_spools WHERE location_id = %s AND archived_at IS NULL"
         " OFFSET 1 LIMIT 1",
         (location_id,),
+    ).fetchone()
+    if many is not None:
+        raise BoxHasManyError()
+
+
+def check_kind_flip(conn: Conn, kind_id: UUID) -> None:
+    """`BoxHasManyError` when ``kind_id`` is now dry storage and one of its places of
+    capacity 1 (no printer's, not archived) holds two unarchived spools or more. Call it in
+    the transaction that wrote the kind's flag: the places are locked before the spools
+    are read, so a move that waits on its lock then sees the box."""
+    places = conn.execute(
+        "SELECT id FROM filament_locations WHERE kind_id = %s AND capacity = 1"
+        " AND archived_at IS NULL AND printer_id IS NULL ORDER BY id FOR NO KEY UPDATE",
+        (kind_id,),
+    ).fetchall()
+    if not places:
+        return
+    many = conn.execute(
+        "SELECT 1 FROM filament_spools WHERE location_id = ANY(%s) AND archived_at IS NULL"
+        " GROUP BY location_id HAVING count(*) > 1 LIMIT 1",
+        ([row["id"] for row in places],),
     ).fetchone()
     if many is not None:
         raise BoxHasManyError()

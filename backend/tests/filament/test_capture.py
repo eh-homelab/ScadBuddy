@@ -145,6 +145,33 @@ def test_a_swap_unloads_the_old_spool_and_loads_the_new(pg_pool: PgPool) -> None
     assert _row(pg_pool, b)["location_id"] == _tray_place(pg_pool, pid)
 
 
+def test_an_unload_to_a_box_another_spool_took_leaves_the_spool_no_place(
+    pg_pool: PgPool,
+) -> None:
+    """#7167: the spool came from a dry box, which holds another spool by the unload; the
+    refused move writes nothing, and the spool gets no place."""
+    a, b = _spool(pg_pool, tray_uuid=U1), _spool(pg_pool)
+    pid, _ = _printer(pg_pool)
+    kind = next(
+        r.id
+        for r in CatalogStore(pg_pool).list("location-kinds")
+        if isinstance(r, LocationKind) and r.name == "Dry box"
+    )
+    box = LocationStore(pg_pool).create(LocationCreate(name="Box X", kind_id=kind, capacity=1)).id
+    LocationStore(pg_pool).move(a, box, actor="t")
+    _reconcile(pg_pool, pid, _report(_tray(1, U1)))
+    LocationStore(pg_pool).move(b, box, actor="t")
+    result = _reconcile(pg_pool, pid, _report({"id": "1"}), T0 + timedelta(minutes=1))
+    assert result.unloaded == 1
+    assert _row(pg_pool, a)["location_id"] is None
+    assert _row(pg_pool, b)["location_id"] == box
+    moves = [e.data["to"] for e in _events(pg_pool, a, "moved")]
+    # Placed in the box, then in the tray, then none: the refused move to the box wrote nothing.
+    assert sorted(moves, key=str) == sorted(
+        [str(box), str(_tray_place(pg_pool, pid)), None], key=str
+    )
+
+
 def test_a_tagged_spool_moved_to_a_lower_tray_stays_loaded(pg_pool: PgPool) -> None:
     spool = _spool(pg_pool, tray_uuid=U1)
     pid, _ = _printer(pg_pool)

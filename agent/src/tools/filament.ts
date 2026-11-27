@@ -181,7 +181,9 @@ const tools: Tool[] = [
       'row frees its name and a 409 means another unarchived row has it. ' +
       '`properties` (#7026) are saved with the row in the same request and the answer carries them; a refused ' +
       'value or a required key left empty (#7703) writes nothing. An edit with only `properties` leaves the row ' +
-      'itself untouched and is not checked for completeness. ' +
+      'itself untouched and is not checked for completeness. A location kind that becomes dry storage ' +
+      '(`dry_storage: true`) while a place of it with capacity 1 holds two spools is a 422 `box_has_many` and ' +
+      'changes nothing. ' +
       `${PROPERTY_RULES} Only what the user says. Writes ScadBuddy only.`,
     input: z.object({
       kind,
@@ -904,12 +906,14 @@ const tools: Tool[] = [
       'ledger event. To record a weighing use filament_spool_add_event; to archive use filament_spool_archive. ' +
       'When adding, `quantity` (1 to 100) makes that many identical spools in one request, each with its own number, ' +
       "and `copy_of` (a spool's `id`) starts from that spool: its type, own overrides, note, own presets and K " +
-      'values and its place unless that is a tray, never its number, tag, tray, weight, weight lock or `added_full`; `fields` ' +
+      'values and its place unless that is a tray or a dry box, never its number, tag, tray, weight, weight lock or `added_full`; `fields` ' +
       'then change the copy. `continued_from` (#7684, with `copy_of` the same archived, respooled spool and `grams_left` its final filament) links the two: the new ' +
       "spool's `created` event keeps `continued_from` and the source's `archived` event `continued_as`; 422 `continued_from_not_archived` otherwise, " +
       '`continued_from_taken` for a source a spool already continues (#7909). ' +
       'Either answers the list of spools made, and a resend of the same call makes none twice; ' +
       'a resend of a copy reads the source again, and when the source changed in between it makes a new set from it. ' +
+      'A place that is a dry box (capacity 1) holding another spool is a 409 `box_full` naming it (`occupant_id`), and so is ' +
+      'a restore (`archived: false`) into a box another spool holds; nothing is written. ' +
       '422 when an effective minimum temperature is above its maximum or the spool would have neither type nor ' +
       'material. `properties` (#7026) are saved with the spool, or with each spool made, in the same request and the ' +
       'answer carries them; a refused value or a required key left empty (#7703) writes nothing. A copy does not ' +
@@ -1085,6 +1089,8 @@ const tools: Tool[] = [
       '`data` keeps the closing: `reason`, `started_g`, `started_from`, `ledger_consumed_g`, `final_filament_g`, ' +
       '`scale_consumed_g` and `drift_g` (negative: the scale found less than the ledger expected). 422 ' +
       '`no_empty_weight` or `reading_below_empty` archives nothing; a restore takes no reason or reading. ' +
+      'A restore of a spool whose place is a dry box that another spool holds is a 409 `box_full` naming that spool ' +
+      '(`occupant_id`) and restores nothing; tell the user. ' +
       'Only what the user says. Writes ScadBuddy; with tag sync on (filament_sync.tags), ' +
       "the archived spool's tag is then cleared in Bambuddy.",
     input: z.object({
@@ -2157,7 +2163,9 @@ const tools: Tool[] = [
       'Add a place (no `location_id`), or edit one: only the `fields` given change, and `null` clears a nullable ' +
       'one. A place needs a `name` and a `kind_id` (filament_catalog_list kind `location-kinds`); `parent_id` puts ' +
       'it under another place. `archived: true` takes a place off the tree and frees its name, `false` puts it back. ' +
-      '409 when the name is taken under that parent, or the parent would make the place its own ancestor. Only what ' +
+      '409 when the name is taken under that parent, or the parent would make the place its own ancestor. A change ' +
+      'that makes the place a dry box (capacity 1 and a dry-storage kind) while it holds two spools is a 422 ' +
+      '`box_has_many`. Only what ' +
       'the user says. Writes ScadBuddy only.',
     input: z.object({
       location_id: z.string().uuid().optional().describe("A place's `id` from filament_location_list; omit to add"),

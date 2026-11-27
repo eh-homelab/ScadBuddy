@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import threading
+from pathlib import Path
 from uuid import UUID
 
 import pytest
@@ -16,18 +17,27 @@ from scadbuddy.filament.locations import LocationStore
 from scadbuddy.filament.models import (
     LocationCreate,
     LocationKind,
+    LocationKindCreate,
+    LocationKindPatch,
     LocationPatch,
     Material,
     SpoolBulkCreate,
     SpoolCreate,
+    SpoolPatch,
 )
 from scadbuddy.filament.spools import FilamentSpoolStore
 from tests.conftest import PgPool
 from tests.filament.test_bambuddy_pull import NOW, bb
 from tests.filament.test_bambuddy_pull_refs import ROWS, _bb_time
+from tests.filament.test_bb_sync_plan import _place as _printer_place
+from tests.filament.test_bb_sync_plan import _printer
 from tests.filament.test_csv_import import _filament
 
 pytestmark = pytest.mark.requires_postgres
+
+_MIGRATION = (
+    Path(__file__).parents[2] / "scadbuddy/migrations/20261127T0754Z_filament_dry_boxes.sql"
+)
 
 
 def _place(pool: PgPool, name: str, kind: str, capacity: int | None) -> UUID:
@@ -244,3 +254,166 @@ def test_a_printer_delete_style_move_to_none_still_works(pg_pool: PgPool) -> Non
     with pg_pool.connection() as conn, conn.transaction():
         LocationStore.move_on(conn, spool, None, actor="system")
     assert _row(pg_pool, spool)["location_id"] is None
+
+
+# -- fix round 1 ------------------------------------------------------------------------
+
+
+def _kind(pool: PgPool, name: str, *, dry: bool) -> UUID:
+    made = CatalogStore(pool).create(
+        "location-kinds", LocationKindCreate(name=name, dry_storage=dry)
+    )
+    assert isinstance(made, LocationKind)
+    return made.id
+
+
+def _dry_flag(pool: PgPool, kind: UUID) -> bool:
+    found = next(
+        r
+        for r in CatalogStore(pool).list("location-kinds")
+        if isinstance(r, LocationKind) and r.id == kind
+    )
+    return found.dry_storage
+
+
+def test_a_kind_flip_to_dry_storage_is_refused_for_a_place_with_two_spools(
+    pg_pool: PgPool,
+) -> None:
+    kind = _kind(pg_pool, "Cabinet", dry=False)
+    cabinet = LocationStore(pg_pool).create(LocationCreate(name="Cab", kind_id=kind, capacity=1)).id
+    a, b = _spool(pg_pool), _spool(pg_pool)
+    store = LocationStore(pg_pool)
+    # A cabinet that is no box can hold two.
+    with pg_pool.connection() as conn:
+        conn.execute(
+            "UPDATE filament_spools SET location_id = %s WHERE id = ANY(%s)", (cabinet, [a, b])
+        )
+    flip = LocationKindPatch(dry_storage=True)
+    with pytest.raises(BoxHasManyError):
+        CatalogStore(pg_pool).update("location-kinds", kind, flip)
+    assert _dry_flag(pg_pool, kind) is False
+    store.move(b, None, actor="ann")
+    CatalogStore(pg_pool).update("location-kinds", kind, flip)
+    assert _dry_flag(pg_pool, kind) is True
+    with pg_pool.connection() as conn:
+        assert is_dry_box(conn, cabinet)
+
+
+def test_a_copy_of_a_boxed_spool_does_not_keep_the_box(pg_pool: PgPool) -> None:
+    box, boxed, shelved = _box(pg_pool), _spool(pg_pool), _spool(pg_pool)
+    shelf = _place(pg_pool, "Shelf A", "Shelf", None)
+    store = LocationStore(pg_pool)
+    store.move(boxed, box, actor="ann")
+    store.move(shelved, shelf, actor="ann")
+    spools = FilamentSpoolStore(pg_pool)
+    draft = spools.copy(boxed)
+    assert draft is not None and draft.location_id is None
+    other = spools.copy(shelved)
+    assert other is not None and other.location_id == shelf
+
+
+def _boxed_pair(pool: PgPool) -> tuple[UUID, UUID, UUID]:
+    """An archived spool that keeps its box, and a live spool that now holds it."""
+    box, old, new = _box(pool), _spool(pool), _spool(pool)
+    store = LocationStore(pool)
+    store.move(old, box, actor="ann")
+    FilamentSpoolStore(pool).archive(old, True, actor="ann", reason="other")
+    store.move(new, box, actor="ann")
+    return box, old, new
+
+
+def test_a_restore_into_a_box_another_spool_holds_is_refused(pg_pool: PgPool) -> None:
+    box, old, new = _boxed_pair(pg_pool)
+    spools = FilamentSpoolStore(pg_pool)
+    with pytest.raises(BoxFullError) as full:
+        spools.archive(old, False, actor="ann")
+    assert full.value.occupant == new
+    with pytest.raises(BoxFullError):
+        spools.update(old, SpoolPatch(archived=False), actor="ann")
+    with pytest.raises(BoxFullError):
+        spools.bulk_archive([old], False, actor="ann")
+    kept = spools.get(old)
+    assert kept is not None and kept.archived_at is not None and kept.location_id == box
+
+
+def test_a_restore_into_an_empty_box_keeps_the_box(pg_pool: PgPool) -> None:
+    box, old = _box(pg_pool), _spool(pg_pool)
+    LocationStore(pg_pool).move(old, box, actor="ann")
+    spools = FilamentSpoolStore(pg_pool)
+    spools.archive(old, True, actor="ann", reason="other")
+    back = spools.archive(old, False, actor="ann")
+    assert back is not None and back.archived_at is None and back.location_id == box
+
+
+def test_the_bambuddy_pull_restores_a_spool_to_no_place_when_its_box_is_taken(
+    pg_pool: PgPool,
+) -> None:
+    f = _filament(pg_pool)
+    (made,) = pull(f, [bb(updated_at=_bb_time(-3))], now=NOW).created_ids
+    box = _box(pg_pool)
+    f.locations.move(made, box, actor="ann")
+    pull(f, [bb(archived_at=_bb_time(-2), updated_at=_bb_time(-2))], now=NOW)
+    archived = f.spools.get(made)
+    assert archived is not None and archived.archived_at is not None
+    taker = _spool(pg_pool)
+    f.locations.move(taker, box, actor="ann")
+    pull(f, [bb(updated_at=_bb_time(1))], now=NOW)
+    restored = f.spools.get(made)
+    assert restored is not None
+    assert restored.archived_at is None
+    assert restored.location_id is None
+    held = f.spools.get(taker)
+    assert held is not None and held.location_id == box
+
+
+def test_a_tray_place_is_no_box_whatever_its_kind_and_capacity(pg_pool: PgPool) -> None:
+    f = _filament(pg_pool)
+    tray = _printer_place(pg_pool, f, "Tray 1", printer=_printer(pg_pool), ams=0, tray=1)
+    kinds = CatalogStore(pg_pool).list("location-kinds")
+    dry = next(r.id for r in kinds if isinstance(r, LocationKind) and r.name == "Dry box")
+    with pg_pool.connection() as conn:
+        conn.execute(
+            "UPDATE filament_locations SET kind_id = %s, capacity = 1 WHERE id = %s", (dry, tray)
+        )
+        assert not is_dry_box(conn, tray)
+    a, b = _spool(pg_pool), _spool(pg_pool)
+    LocationStore(pg_pool).move(a, tray, actor="ann")
+    LocationStore(pg_pool).move(b, tray, actor="ann")
+
+
+def test_the_migration_backfill_skips_a_printer_place(pg_pool: PgPool) -> None:
+    f = _filament(pg_pool)
+    tray = _printer_place(pg_pool, f, "Tray 1", printer=_printer(pg_pool), ams=0, tray=1)
+    box, on_tray, on_box = _box(pg_pool), _spool(pg_pool), _spool(pg_pool)
+    kinds = CatalogStore(pg_pool).list("location-kinds")
+    dry = next(r.id for r in kinds if isinstance(r, LocationKind) and r.name == "Dry box")
+    store = LocationStore(pg_pool)
+    store.move(on_tray, tray, actor="ann")
+    store.move(on_box, box, actor="ann")
+    with pg_pool.connection() as conn:
+        conn.execute(
+            "UPDATE filament_locations SET kind_id = %s, capacity = 1 WHERE id = %s", (dry, tray)
+        )
+        conn.execute("UPDATE filament_spools SET home_location_id = NULL")
+        sql = _MIGRATION.read_text()
+        conn.execute(sql[sql.index("UPDATE filament_spools s SET home_location_id") :])
+    assert _row(pg_pool, on_tray)["home_location_id"] is None
+    assert _row(pg_pool, on_box)["home_location_id"] == box
+
+
+def test_the_bambuddy_pull_keeps_a_shelved_spool_where_it_was_when_the_box_is_full(
+    pg_pool: PgPool,
+) -> None:
+    f = _filament(pg_pool)
+    garage = _place(pg_pool, "Garage", "Dry box", 1)
+    f.locations.move(_spool(pg_pool), garage, actor="ann")
+    (made,) = pull(f, [bb(updated_at=_bb_time(-3))], now=NOW).created_ids
+    shelf = _place(pg_pool, "Shelf Z", "Shelf", None)
+    f.locations.move(made, shelf, actor="ann")
+    places = [BbLocation.model_validate({"id": 5, "name": "Garage"})]
+    report = pull(
+        f, [bb(location_id=5, updated_at=_bb_time(1))], now=NOW, pulls=ROWS, locations=places
+    )
+    spool = f.spools.get(made)
+    assert spool is not None and spool.location_id == shelf
+    assert report.moved == 0

@@ -42,6 +42,7 @@ from scadbuddy.entities.required import (
 )
 from scadbuddy.filament import models as m
 from scadbuddy.filament.bb_sync_models import forget_sync
+from scadbuddy.filament.dry_box import check_kind_flip
 from scadbuddy.orders.models import Actor
 
 Conn = Connection[DictRow]
@@ -507,8 +508,9 @@ class CatalogStore:
         route, #7703 spec 6.3b) a save that leaves the row incomplete is
         `MissingRequiredProperties`, unless it sends only ``sort_order`` or ``archived``.
         `TypeTempError` when a material's or subtype's temperature range would be
-        backwards; `CatalogKeyClashError` when the new name (or a subtype's new material)
-        meets a key another row holds."""
+        backwards; `BoxHasManyError` when a location kind becomes dry storage while a
+        place of it with capacity 1 holds two spools (#7167); `CatalogKeyClashError` when
+        the new name (or a subtype's new material) meets a key another row holds."""
         spec = _spec(kind)
         sent = [n for n in type(patch).model_fields if n in patch.model_fields_set]
         columns = [n for n in sent if n != "archived"]
@@ -550,6 +552,12 @@ class CatalogStore:
                     ).fetchone()
                     if row is not None and archived and kind == "insert-types":
                         forget_sync(conn, "insert_type", row_id)
+                    if (
+                        row is not None
+                        and kind == "location-kinds"
+                        and (getattr(patch, "dry_storage", None))
+                    ):
+                        check_kind_flip(conn, row_id)
                     fields = set(sent) | ({"properties"} if properties is not None else set())
                     check = checked and checks_save(fields)
                     if row is not None and (properties or check):

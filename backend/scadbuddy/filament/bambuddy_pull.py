@@ -154,7 +154,7 @@ from scadbuddy.filament.bb_sync_models import (
 from scadbuddy.filament.catalog import KIND_OF_TABLE, lookup_key, resolve_or_add
 from scadbuddy.filament.colour import canonical_colours, canonical_rgba
 from scadbuddy.filament.component import Filament
-from scadbuddy.filament.dry_box import BoxFullError
+from scadbuddy.filament.dry_box import BoxFullError, occupant_on
 from scadbuddy.filament.locations import LocationStore
 from scadbuddy.filament.presets import drop_migrated, effective_k_values, own_k_values, own_presets
 from scadbuddy.filament.sb_presets import by_bb_id_on, links_elsewhere_on
@@ -1935,6 +1935,8 @@ def _archive_state(conn: Conn, run: _Run, spool_id: UUID, bb: BbSpool, *, archiv
     at = max(times) if times else run.now
     if _sb_newer(conn, spool_id, "archived_at", at):
         return False
+    if not bb_archived:
+        _free_taken_box(conn, run, spool_id, at)
     run.store.spools.update_on(
         conn,
         spool_id,
@@ -1943,6 +1945,30 @@ def _archive_state(conn: Conn, run: _Run, spool_id: UUID, bb: BbSpool, *, archiv
         at=_bb_event_at(conn, spool_id, at),
     )
     return True
+
+
+def _free_taken_box(conn: Conn, run: _Run, spool_id: UUID, at: datetime) -> None:
+    """A restore (#7167): an archived spool keeps its place, and when that is a dry box
+    another spool holds now, the restore would be `BoxFullError`. The pull never fails
+    over it: the spool is moved to no place first, and the pull logs it. The spool is
+    locked, then its place, as `LocationStore.move_on` does."""
+    row = conn.execute(
+        "SELECT location_id FROM filament_spools WHERE id = %s FOR UPDATE", (spool_id,)
+    ).fetchone()
+    if row is None or row["location_id"] is None:
+        return
+    held = occupant_on(conn, row["location_id"], but=spool_id)
+    if held is None:
+        return
+    logger.warning(
+        "BB restored spool %s, whose dry box %s holds %s: restored with no place",
+        spool_id,
+        row["location_id"],
+        held,
+    )
+    LocationStore.move_on(
+        conn, spool_id, None, actor=run.actor, at=_bb_event_at(conn, spool_id, at)
+    )
 
 
 def _bb_event_at(conn: Conn, spool_id: UUID, bb_at: datetime) -> datetime:
@@ -2001,9 +2027,9 @@ def _follow_location(
             conn, spool_id, target, actor=run.actor, at=_bb_event_at(conn, spool_id, at)
         )
     except BoxFullError as full:
-        # #7167: the pull never fails over a full dry box; the spool stays where it is.
+        # #7167: the pull never fails over a full dry box; the spool is left where it was.
         logger.warning(
-            "BB placed spool %s in dry box %s, which holds %s: left unplaced",
+            "BB placed spool %s in dry box %s, which holds %s: left where it was",
             spool_id,
             target,
             full.occupant,

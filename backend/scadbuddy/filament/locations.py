@@ -28,7 +28,6 @@ from scadbuddy.filament.catalog import CatalogRefError
 from scadbuddy.filament.dry_box import (
     BoxFullError,
     check_not_many,
-    is_dry_box,
     keep_home_on,
     occupant_on,
 )
@@ -599,12 +598,11 @@ class LocationStore:
         if before == location_id:
             return None
         if location_id is not None:
-            # A dry box is locked FOR UPDATE from the start: a SHARE lock raised to UPDATE
-            # by `occupant_on` could deadlock two moves into one box (#7167).
-            lock = "FOR UPDATE" if is_dry_box(conn, location_id) else "FOR SHARE"
+            # Every target is locked FOR NO KEY UPDATE, the lock `occupant_on` takes too, so
+            # none is upgraded (two upgrades of one SHARE lock deadlock, #7167).
             target = conn.execute(
                 "SELECT printer_id, ams_id, tray_id FROM filament_locations"
-                f" WHERE id = %s AND archived_at IS NULL {lock}",
+                " WHERE id = %s AND archived_at IS NULL FOR NO KEY UPDATE",
                 (location_id,),
             ).fetchone()
             if target is None or (
