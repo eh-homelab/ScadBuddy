@@ -169,7 +169,9 @@ Where the accounts live:
 ### 6.2 The `fleet-rotator` caller
 
 - A new service caller `fleet-rotator`, separate from `fleet` **(call)**. The `fleet` caller
-  runs the unauthenticated chat server and must never reveal a secret.
+  runs the unauthenticated chat server and must never reveal a secret. The `fleet` PAT scope
+  below is a third principal: a person's token for one machine, which these routes accept and
+  the chat server never does.
 - Proof on a machine: a personal access token of the scope `fleet`, read from `--token-file`
   and sent as `Authorization: Bearer`, as `bambuddy-fs` does (owner, 2026-11-26; #8041). One
   token is one machine: the machine row records the token's id, and a person revokes a machine
@@ -202,7 +204,8 @@ Where the accounts live:
 
 - Tables (each with `created_at`, and `updated_at` where the row changes, #7968):
   - `fleet_machines`: id (the hash of `/etc/machine-id` and the user, never the raw id)
-    **(call)**, hostname, OS, user, service version, first and last seen.
+    **(call)**, the id of the `fleet` token that registered it (§6.2; #8041 replaces #8003's
+    `proof_name` with it), hostname, OS, user, service version, first and last seen.
   - `fleet_session_hosts`: `session_id` (a fleet agent), machine, pid, `procStart`, cwd, config
     dir, transcript path, git remote, branch, worktree root and HEAD, Claude Code version,
     kind, entrypoint, name, status, the credential in use (id), the account uuid, the last rate
@@ -259,9 +262,9 @@ Where the accounts live:
      stale time of `.storage-write.lock`. If that write fails, release the locks, release the
      new lease (`DELETE /leases/{new}`) and stop: the file is not changed, the old lease is
      kept, and the new row is free for other machines. If that release fails too (the API is
-     down), the service keeps the lease's id and releases it first on its next attempt. `POST
-     /leases` also gives a machine back the lease it already holds and never installed, before it
-     leases another row, so a machine holds at most one such lease.
+     down), the service writes the new lease's id to a 0600 file beside its state, per config
+     dir, and on its next attempt for that dir releases that lease before it asks for another.
+     This state is the service's own; the API keeps no "installed" mark.
   4. Still inside the locks, write the new `claudeAiOauth` to a 0600 temp file in the dir and
      rename it over `.credentials.json`.
   5. Release the locks. Only then release the old lease (`DELETE /leases/{credential}`), so no
@@ -329,7 +332,7 @@ Where the accounts live:
 ## 8. What is left to the builder
 
 - Names of tables, routes and the kind, where they read better.
-- The proper-lockfile details (lock dir, mtime refresh), matched to what Claude Code does.
+- Any proper-lockfile detail not named in §3 and §6.6, matched to what Claude Code does.
 - How the service learns a transcript's credential when the session started before the service.
   The account uuid in `.credentials.json` at the time is enough.
 
