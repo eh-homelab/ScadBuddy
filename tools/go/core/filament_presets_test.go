@@ -133,7 +133,7 @@ func sendCache(t *testing.T, handler http.Handler, method, path string) (int, st
 
 var teapot = http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusTeapot) })
 
-func TestPublicRoutesUseTheGate(t *testing.T) {
+func TestThePresetsRoutesUseTheGate(t *testing.T) {
 	pool := testdb.New(t)
 	keys := presetKeys(t)
 	enforce, err := newRouter(pool, teapot, keys, filamentpresets.Area, "enforce", nil, nil, nil)
@@ -179,7 +179,7 @@ func TestTheDetailReadsItsDocumentFromTheStore(t *testing.T) {
 	}
 }
 
-func TestAnUnswitchedAreaForwardsToNext(t *testing.T) {
+func TestAnUnswitchedPresetsAreaForwardsToNext(t *testing.T) {
 	pool := testdb.New(t)
 	router, err := newRouter(pool, teapot, presetKeys(t), "", "", nil, nil, nil)
 	if err != nil {

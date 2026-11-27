@@ -8,7 +8,7 @@
 # activity-title, fetch-grant and assistant-cost vectors (#8046), and
 # filament-preset-vectors.json and test-fixtures/filament/preset-wire.json (#7204).
 set -euo pipefail
-if grep -qE '^(go\.work(\.sum)?$|vendor/|tools/go/|backend/scadbuddy/migrations(_agent)?/|backend/tests/fixtures/(event-stream|auth|plugin-seal|blob-upload|python-json|activity-title|fetch-grant|assistant-cost|filament-preset)-vectors\.json$|docs/inventory-model/|scripts/generate-go-client\.(sh|jq)$|\.github/scripts/generate-go-client-jq\.test\.sh$|\.github/workflows/(ci|go-module-ci)\.yml$|\.github/scripts/select-go(\.test)?\.sh$|\.github/scripts/changed-paths\.sh$|agent/test/fixtures/rate-limit-reset-vectors\.json$|test-fixtures/filament/preset-wire\.json$)'; then
+if grep -qE '^(go\.work(\.sum)?$|vendor/|tools/go/|backend/scadbuddy/migrations(_agent)?/|backend/tests/fixtures/((event-stream|auth|plugin-seal|blob-upload|python-json|activity-title|fetch-grant|assistant-cost|filament-preset)-vectors|unknown-tray-vectors|unknown-trays-block)\.json$|docs/inventory-model/|scripts/generate-go-client\.(sh|jq)$|\.github/scripts/generate-go-client-jq\.test\.sh$|\.github/workflows/(ci|go-module-ci)\.yml$|\.github/scripts/select-go(\.test)?\.sh$|\.github/scripts/changed-paths\.sh$|agent/test/fixtures/rate-limit-reset-vectors\.json$|test-fixtures/filament/preset-wire\.json$)'; then
   echo true
 else
   echo false

@@ -377,10 +377,6 @@ def _insert(
     return replaced
 
 
-#: What a retired copy activity logs: it does nothing, the outputs are cut over (plan D4).
-CUT_OVER_NOTHING_TO_COPY = "the outputs are cut over (#7257); nothing to copy"
-
-
 class OutputRows:
     def __init__(self, pool: ConnectionPool[Connection[DictRow]]) -> None:
         self._pool = pool

@@ -67,6 +67,7 @@ import { features } from './features'
 import { trashFiledMockLibraryFiles } from './features/library'
 import { attachmentsOf } from './features/printAttachments'
 import { printersState } from './features/printers'
+import { unknownTrayRefs } from './features/filament/unknownTrays'
 import { mockRackCheck, mockRackPicks } from './features/rack'
 import { mockTowerCheck } from './towerCheck'
 import { mcpOidcHandlers, resetMcpOidcMock } from './mcpOidc'
@@ -3644,8 +3645,13 @@ export const handlers = [
     // #5627 — the process's own part settings, which "Settings for this colour" opens on,
     // only for a check that asks for them.
     const asked = new URL(request.url).searchParams.get('process_values') === 'true'
+    const rack = mockRackCheck(body.rack_position ?? null)
+    // #7143 — the block: a loaded tray no spool is linked to refuses the run.
+    const unknownTrays = unknownTrayRefs()
     return HttpResponse.json({
-      ...mockRackCheck(body.rack_position ?? null),
+      ...rack,
+      errors: [...(rack.errors ?? []), ...unknownTrays.map((tray) => `Printer has an unknown spool in ${tray.slot}: link it on the Filament page first.`)],
+      ...(unknownTrays.length > 0 ? { unknown_trays: unknownTrays } : {}),
       process_part_settings: asked ? MOCK_PROCESS_PARTS : null,
       // #6758 — the prime tower judged before the slice.
       prime_tower: mockTowerCheck(body),

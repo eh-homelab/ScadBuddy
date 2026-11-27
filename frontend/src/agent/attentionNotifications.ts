@@ -47,6 +47,9 @@ export function noticeTitle(reason: string): string {
       return 'A flow asks for a grant'
     case 'pairing':
       return 'An agent asks to use ScadBuddy'
+    // #7143 — a loaded tray no spool is linked to.
+    case 'unknown_spool':
+      return 'An unknown spool is loaded'
     default:
       return 'The assistant needs you'
   }

@@ -3,6 +3,7 @@ import type { ReactNode } from 'react'
 import { describe, expect, it, vi } from 'vitest'
 import { bridge } from '../../agent/bridge'
 import { isUserOnly } from '../../agent/dom'
+import { api } from '../../api/client'
 import { useGlobalAgentTools } from '../../agent/global'
 import {
   changeFlowTrigger,
@@ -55,6 +56,17 @@ describe('FlowTriggers', () => {
     const render_ = await row(/When a render finishes \(coaster\)/)
     expect(within(render_).getByTestId('standing-grant-status')).toHaveTextContent('Requested by an assistant')
     expect(within(render_).getByText(/outward calls wait for you/)).toBeInTheDocument()
+  })
+
+  // #8221: a standing grant has no chain above it, so out of force means expired, and
+  // one whose expiry has passed still says Expired (#8188 changed grantStatus).
+  it('says Expired for a standing grant whose expiry has passed', async () => {
+    const hourly = (await api.listFlowTriggers('swap')).find((t) => t.id === 'trig-hourly')!
+    changeFlowTrigger('trig-hourly', {
+      grant: { ...hourly.grant!, in_force: false, expires_at: '2026-01-01T00:00:00Z' },
+    })
+    render()
+    expect(within(await row(/Every hour/)).getByTestId('standing-grant-status')).toHaveTextContent(/^Expired$/)
   })
 
   // #4673: a trigger of an older built-in version the upgrade did not move says so.

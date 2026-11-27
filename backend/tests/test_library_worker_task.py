@@ -26,8 +26,6 @@ from scadbuddy.workflows.housekeeping import (
     GIT_SWEEP,
     LIBRARY_SWEEP,
     LOST_SLICES_SWEEP,
-    OUTPUT_BYTES_SWEEP,
-    OUTPUT_COPY_SWEEP,
     PREVIEWS_SWEEP,
     PRINTER_WATCHES_SWEEP,
     PRUNE_SWEEPS,
@@ -282,13 +280,8 @@ async def _a_client(settings: object) -> AsyncIterator[object]:
     yield object()
 
 
-#: #7257: the copies are retired; their activities do nothing, so they cannot fail
-#: (`tests/test_output_cut_over.py` `test_copy_sweeps_do_nothing`).
-RETIRED_SWEEPS = (OUTPUT_COPY_SWEEP, OUTPUT_BYTES_SWEEP)
-
-
 @pytest.mark.parametrize("staging_error", [OSError("read-only"), ValueError("a bad name")])
-@pytest.mark.parametrize("sweep", [sweep for sweep in SWEEPS if sweep not in RETIRED_SWEEPS])
+@pytest.mark.parametrize("sweep", SWEEPS)
 async def test_a_failing_sweep_fails_its_activity(
     sweep: str,
     staging_error: Exception,
