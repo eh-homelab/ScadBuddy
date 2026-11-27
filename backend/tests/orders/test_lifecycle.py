@@ -49,6 +49,7 @@ from scadbuddy.payments import store as payments_store
 from scadbuddy.payments.models import PaymentRequestStatus, PaymentRequestView
 from scadbuddy.store.refs import BlobRefs
 from tests.conftest import PgPool
+from tests.support.order_stock import run_in_line
 
 pytestmark = pytest.mark.requires_postgres
 
@@ -79,6 +80,8 @@ class Shop:
         self.events: list[Event] = []
         self.bus.add_listener(self.events.append)
         self.lifecycle = Lifecycle(rows, self.bus, refs)
+        #: Go's stock, and the stock workflows run in line (#6949 K1 Task 16).
+        self.go = run_in_line(self.lifecycle, rows._pool)
         self.customer = rows.insert_customer(
             display_name="Ada",
             company=None,
@@ -114,7 +117,9 @@ class Shop:
         attempt = self.lifecycle.record_fulfilment(
             order.id, item.id, FulfilmentInput(quantity=item.quantity, outcome="succeeded"), BY
         )
-        return self.lifecycle.accept_fulfilment(order.id, item.id, attempt.id, BY)
+        accepted = self.lifecycle.accept_fulfilment(order.id, item.id, attempt.id, BY)
+        assert isinstance(accepted, Fulfilment)  # the inline workflow never answers 202
+        return accepted
 
     def shipped(self, order: Order, *items: OrderItem) -> Shipment:
         return self.lifecycle.add_shipment(
@@ -147,6 +152,7 @@ class RulesShop(Shop):
         super().__init__(rows, refs)
         self.now = rules
         self.lifecycle = Lifecycle(rows, self.bus, refs, rules=lambda: self.now)
+        self.go = run_in_line(self.lifecycle, rows._pool)
 
 
 def connect(rows: OrderStore, provider: str = "fake", *, default: bool = False) -> None:
@@ -212,8 +218,8 @@ def test_the_happy_path_to_closed(shop: Shop) -> None:
     )
     assert attempt.attempt == 1
     assert shop.get(order).status == "in_production"
-    attempt = shop.lifecycle.accept_fulfilment(order.id, item.id, attempt.id, BY)
-    assert attempt.accepted_at is not None
+    accepted = shop.lifecycle.accept_fulfilment(order.id, item.id, attempt.id, BY)
+    assert isinstance(accepted, Fulfilment) and accepted.accepted_at is not None
     assert shop.get_item(item).status == "fulfilled"
     assert shop.get(order).status == "ready"
 
@@ -602,19 +608,24 @@ def test_an_unfulfil_tells_the_bus_once_committed(shop: Shop) -> None:
     attempt = shop.fulfilled(order, item)
     assert shop.get(order).status == "ready"
     seen = len(shop.events)
-    item = shop.lifecycle.unfulfil_item(order.id, item.id, BY)
-    assert item.status == "approved"
+    back = shop.lifecycle.unfulfil_item(order.id, item.id, BY)
+    assert isinstance(back, OrderItem) and back.status == "approved"
+    item = back
     told = shop.events[seen:]
-    assert [type(e) for e in told] == [OrderChanged, OrderItemChanged]
+    # The commit's, then the stock record's `order_item.changed` (#6949 K1 Task 16).
+    assert [type(e) for e in told] == [OrderChanged, OrderItemChanged, OrderItemChanged]
     assert isinstance(told[0], OrderChanged) and told[0].status == "in_production"
     assert isinstance(told[1], OrderItemChanged)
     assert (told[1].item_id, told[1].status, told[1].attempt) == (item.id, "approved", 1)
-    assert shop.kinds(order)[-2:] == ["item.unfulfilled", "order.status"]
+    assert isinstance(told[2], OrderItemChanged)
+    assert (told[2].item_id, told[2].attempt) == (item.id, None)
+    # Every unfulfil records one `parts.returned`, with no parts here (C9).
+    assert shop.kinds(order)[-3:] == ["item.unfulfilled", "order.status", "parts.returned"]
     # A refusal writes and tells nothing.
     with pytest.raises(LifecycleError) as refused:
         shop.lifecycle.unfulfil_item(order.id, item.id, BY)
     assert refused.value.slug == "item_not_fulfilled"
-    assert len(shop.events) == seen + 2
+    assert len(shop.events) == seen + 3
     assert shop.rows.fulfilment(attempt.id) is not None
 
 

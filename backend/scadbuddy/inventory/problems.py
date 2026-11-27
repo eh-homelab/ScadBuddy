@@ -2,8 +2,8 @@
 its ``code``. Since K1 (#6949) the kind, item and stock routes pass scadbuddy-core's
 problems through unchanged (`core_client.py`), with its codes (R-K1-23; the full list is
 Go's `routes/problems.go` `Codes`). `refused` maps the errors of the stores Python still
-runs (offers, and the orders' stock calls until Task 16) to the same codes; a code shared
-with the entity routes (`bad_property_schema`, and the entity reference codes) keeps the
+runs (offers, and the stock reads Python keeps, `inventory/stock.py`) to the same codes; a
+code shared with the entity routes (`bad_property_schema`, and the entity reference codes) keeps the
 entities' type, so one code has one type."""
 
 from __future__ import annotations
@@ -69,7 +69,7 @@ _CODES: tuple[tuple[type[Exception], int, str, str], ...] = (
         "offer_exists",
         "the item already has an unarchived offer with that SKU at the supplier",
     ),
-    # Go's codes (R-K1-23), for the stock calls Python still makes until Task 16.
+    # Go's codes (R-K1-23), for the stock reads Python keeps (`estimate_unit_cost`).
     (
         WrongTracking,
         _409,

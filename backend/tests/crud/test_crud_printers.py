@@ -120,17 +120,19 @@ def test_every_report_method_is_remote() -> None:
 
 def test_the_worker_store_overrides_every_method_that_merges_rows() -> None:
     """A row merge moves another service's rows (#4625): each PrinterStore method that
-    merges is the API's, so the worker's store overrides it."""
+    merges is the API's, so the worker's store overrides it. Since #6949 K1 Task 16 a
+    merge goes through `_link` and `_ensure_tx` (the merge whose stock moves first, through
+    `MergePrinter`), and `merge_commit` is its workflow's step."""
     merging = {
         name
         for name, method in inspect.getmembers(PrinterStore, inspect.isfunction)
         if not name.startswith("_")
-        and (
-            "self._merge(" in inspect.getsource(method)
-            or "self._ensure_locked(" in inspect.getsource(method)
+        and any(
+            call in inspect.getsource(method)
+            for call in ("self._merge(", "self._ensure_locked(", "self._link(", "self._ensure_tx(")
         )
     }
-    assert merging >= {"ensure_bambuddy_written", "link_bambuddy"}
+    assert merging >= {"ensure_bambuddy_written", "link_bambuddy", "merge_commit"}
     assert merging <= set(vars(RemotePrinterStore))
 
 

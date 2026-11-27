@@ -110,9 +110,12 @@ def _ref_as_id(kind: EntityKind) -> str:
 
 def repoint_entity(conn: Conn, kind: str, gone: str, kept: str, by: Actor) -> None:
     """Make `kind:kept` own what `kind:gone` owned: its files, links and properties (a key
-    both have keeps `kept`'s value), and the stock moves that name it. For a merge that
-    deletes `gone`'s row and keeps `kept`'s (the printers' `PRINTER_REFERENCES`), in its
-    transaction; without it the sweep would take them as an orphan's. ``by`` is the
+    both have keeps `kept`'s value). For a merge that deletes `gone`'s row and keeps
+    `kept`'s (the printers' `PRINTER_REFERENCES`, its one caller), in its transaction;
+    without it the sweep would take them as an orphan's. The stock moves that name `gone`
+    are Go's to move (#6949 K1 Task 16): `MergePrinter` runs `inventory.Repoint` first, and
+    the merge checks that none is left (`printers/store.py` `_no_stock_names`), as a stock
+    move's foreign key would refuse the delete below (R-P2-4). ``by`` is the
     history's actor of each key moved or removed (`set_actor`, which takes the event
     log's lock before the rows below)."""
     set_actor(conn, by)
@@ -138,10 +141,6 @@ def repoint_entity(conn: Conn, kind: str, gone: str, kept: str, by: Actor) -> No
     )
     conn.execute(
         "UPDATE entity_links SET entity_id = %s WHERE entity_id = %s", (ids[kept], ids[gone])
-    )
-    # A stock move's foreign key would refuse the delete below (R-P2-4, #7067).
-    conn.execute(
-        "UPDATE stock_moves SET entity_id = %s WHERE entity_id = %s", (ids[kept], ids[gone])
     )
     conn.execute(
         "INSERT INTO entity_properties (entity_id, key, value, source, updated_at, updated_by)"

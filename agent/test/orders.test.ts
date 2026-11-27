@@ -989,6 +989,26 @@ describe('order tools (#4249)', () => {
     expect(z.object(fulfil.shape).safeParse({ order_id: ORDER, items: [] }).success).toBe(false)
   })
 
+  // #6949 K1 Task 16: a stock change still running after the route's wait answers 202.
+  it('says a 202 stock change is accepted and finishes by itself', async () => {
+    const running = (id: string) => HttpResponse.json({ workflow_id: id, kind: 'FulfilOrderItem', started_at: '2026-11-27T00:00:00Z', repeated: false }, { status: 202 })
+    server.use(
+      http.post(`${BACKEND}/api/v1/orders/${ORDER}/fulfil`, () => running(`order:${ORDER}:fulfil:k`)),
+      http.post(`${BACKEND}/api/v1/orders/${ORDER}/items/${ITEM}/unfulfil`, () => running(`order_item:${ITEM}:parts:1:return`)),
+      http.post(`${BACKEND}/api/v1/orders/${ORDER}/items/${ITEM}/fulfilments/f1/accept`, () => running(`order_item:${ITEM}:parts:1`)),
+    )
+    const fulfil = await tool('order_fulfil').execute({ order_id: ORDER, items: [{ item_id: ITEM, quantity: 1 }] }, ctx())
+    expect(JSON.stringify(firstText(fulfil))).toContain(`accepted; it finishes by itself (workflow order:${ORDER}:fulfil:k)`)
+    const unfulfil = await tool('order_item_unfulfil').execute({ order_id: ORDER, item_id: ITEM }, ctx())
+    expect(JSON.stringify(firstText(unfulfil))).toContain(`accepted; it finishes by itself (workflow order_item:${ITEM}:parts:1:return)`)
+    const accept = await tool('order_item_fulfil').execute({ order_id: ORDER, item_id: ITEM, fulfilment_id: 'f1', accept: true }, ctx())
+    expect(JSON.stringify(firstText(accept))).toContain(`accepted; it finishes by itself (workflow order_item:${ITEM}:parts:1)`)
+
+    server.use(http.put(`${BACKEND}/api/v1/printers/${CUSTOMER}/bambuddy`, () => running(`entity_merge:printer:p2:${CUSTOMER}`)))
+    const link = await tool('link_printer_bambuddy').execute({ printer: CUSTOMER, bambuddy_printer_id: 4 }, ctx())
+    expect(JSON.stringify(firstText(link))).toContain(`accepted; it finishes by itself (workflow entity_merge:printer:p2:${CUSTOMER})`)
+  })
+
   it('passes the setting refusal on (#4953)', async () => {
     server.use(
       http.post(`${BACKEND}/api/v1/orders/${ORDER}/items/${ITEM}/unfulfil`, () =>

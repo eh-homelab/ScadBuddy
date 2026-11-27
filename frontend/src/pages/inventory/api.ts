@@ -9,7 +9,7 @@
  * followed at `GET /inventory/operations/{id}` to its result or its problem. `onAccepted`
  * hears that 202; a press while the write runs passes the same `key`, so it attaches.
  */
-import { ApiError, command, request } from '../../api/client'
+import { ApiError, command, request, stockWrite } from '../../api/client'
 import type { components } from '../../api/schema'
 import type { OperationAccepted } from '../../api/types'
 
@@ -119,7 +119,8 @@ export const inventoryApi = {
   receiveLot: (itemId: string, body: ReceiveLot, o?: WriteOptions) => write<Lot>(`${BASE}/items/${seg(itemId)}/lots`, json('POST', body), o),
   /** A cost set here moves no past move until the lot is re-costed. */
   patchLot: (id: string, body: LotPatch, o?: WriteOptions) => write<Lot>(`${BASE}/lots/${seg(id)}`, json('PATCH', body), o),
-  recostLot: (id: string) => request<RecostResult>(`${BASE}/lots/${seg(id)}/recost`, { method: 'POST' }),
+  /** A 202 is the `RecostLot` workflow still running (#6949 K1 Task 16). */
+  recostLot: (id: string, key?: string) => stockWrite<RecostResult>(`${BASE}/lots/${seg(id)}/recost`, { method: 'POST' }, key),
   use: (itemId: string, body: UseInput, o?: WriteOptions) => write<{ moves: Move[] }>(`${BASE}/items/${seg(itemId)}/use`, json('POST', body), o).then((b) => b.moves),
   count: (itemId: string, body: CountInput, o?: WriteOptions) => write<{ moves: Move[] }>(`${BASE}/items/${seg(itemId)}/count`, json('POST', body), o).then((b) => b.moves),
 

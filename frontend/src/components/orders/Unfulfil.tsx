@@ -39,6 +39,8 @@ export function UnfulfilDialog({
     setBusy(true)
     setError(null)
     try {
+      // A 202 (#6949 K1 Task 16) counts as done: the parts go back by themselves, and the
+      // table says the stock still settles until they have.
       await api.unfulfilOrderItem(orderId, item.id)
       onOpenChange(false)
       onChanged()

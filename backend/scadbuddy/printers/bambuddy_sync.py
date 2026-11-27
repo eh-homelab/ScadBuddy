@@ -52,6 +52,8 @@ from scadbuddy.printers.store import (
     BambuddyLinkTakenError,
     KekMissingError,
     LanLinkChangedError,
+    MergeChangedError,
+    MergeRunningError,
     NoAccessCodeError,
     PrinterNotFoundError,
     PrinterStore,
@@ -63,7 +65,11 @@ from scadbuddy.printers.store import (
 
 logger = logging.getLogger(__name__)
 
-SyncAction = Literal["created", "linked", "already_linked", "skipped", "conflict", "missing"]
+#: ``merging``: the link merges a row stock still names, and its workflow still runs
+#: (#6949 K1 Task 16, ``workflow_id``); it ends by itself.
+SyncAction = Literal[
+    "created", "linked", "already_linked", "skipped", "conflict", "missing", "merging"
+]
 #: What happened to the row's LAN link: ``linked`` (filled from Bambuddy), ``relinked``
 #: (moved to Bambuddy's new address), ``kept`` (an existing link, untouched), ``failed``
 #: (a probe failed; the next sync tries again), ``withheld`` (Bambuddy gave no code),
@@ -129,6 +135,8 @@ class SyncEntry(BaseModel):
     #: pass (#4797): ``forwards_to`` is NULL, which is not "any <model>". ``action`` keeps
     #: what happened to the VP's own row; ``reason`` names the target.
     target_missing: bool = False
+    #: The merge's workflow, while ``action`` is ``merging``.
+    workflow_id: str | None = None
 
 
 class PrinterSyncResult(BaseModel):
@@ -399,8 +407,13 @@ async def _sync_printer(
                     model=printer.model,
                     by=by,
                 )
-    except (SerialTakenError, BambuddyLinkTakenError, VirtualPrinterRowError):
+    except (SerialTakenError, BambuddyLinkTakenError, VirtualPrinterRowError, MergeChangedError):
         entry.action, entry.reason = "conflict", RACE
+        return entry
+    except MergeRunningError as running:
+        # #6949 K1 Task 16: the merge moves the gone printer's stock first; it ends by
+        # itself and publishes `printer.changed`.
+        entry.action, entry.workflow_id = "merging", running.accepted.workflow_id
         return entry
     except PrinterNotFoundError:
         entry.action, entry.reason = "conflict", RACE

@@ -285,6 +285,8 @@ export type FlowStandingGrant = Schemas['StandingGrantView']
 export type FlowRunTrigger = Schemas['RunTrigger']
 /** A route's 202: the operation to follow, `repeated` when an earlier press started it. */
 export type OperationAccepted = Schemas['OperationAccepted']
+/** #6949 K1 — a stock change still running after the route's wait (its 202): it ends by itself. */
+export type WorkflowAccepted = Schemas['WorkflowAccepted']
 
 /** spec 2026-09-27 — the spool-first print dialog's own choices. */
 export type ChoicesView = Schemas['ChoicesView']

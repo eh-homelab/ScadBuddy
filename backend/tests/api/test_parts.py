@@ -18,6 +18,7 @@ from tests.api.test_orders_unfulfil import accepted_order, unfulfil
 from tests.api.test_settings_runtime import _state
 from tests.api.test_versions import SLUG
 from tests.support.inventory_rows import insert_item
+from tests.support.order_stock import app_go
 
 pytestmark = pytest.mark.requires_git
 
@@ -27,7 +28,7 @@ def _inventory(client: TestClient) -> InventoryComponent:
 
 
 def _on_hand(client: TestClient, item_id: str) -> Decimal:
-    return sum((lot.on_hand for lot in _inventory(client).stock.lots(UUID(item_id))), Decimal(0))
+    return sum((lot.on_hand for lot in app_go(client).stock.lots(UUID(item_id))), Decimal(0))
 
 
 def make_part(client: TestClient, qty: int = 0) -> dict[str, Any]:
@@ -35,7 +36,7 @@ def make_part(client: TestClient, qty: int = 0) -> dict[str, Any]:
     `qty` units received at 5.99 each."""
     item_id = insert_item(_state(client).refs.pool, "hardware", name="Silver hook")
     if qty:
-        _inventory(client).stock.receive_lot(
+        app_go(client).stock.receive_lot(
             item_id,
             ReceiveLot(qty=Decimal(qty), unit_cost_minor=Decimal("5.99")),
             Actor(kind="browser"),

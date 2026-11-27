@@ -1836,11 +1836,11 @@ only the sleeps move; a budget on the real clock fails on a slow runner (#6252).
   tab's `inventory.<Name>` kinds), `kinds.py` (`merged_schema`, `item_schema` and
   `keys_in_use` of the `item_kinds` tree; Go writes the kinds and items now),
   `offers.py` (`OfferStore`: `supplier_offers` and
-  `offer_price_points`), `stock.py` (`StockStore`: lots, units and moves; `_fifo`, `take`,
-  `give_back`, `count_item`, `recost_lot`; `parts_moved`, the one reader of job cost's parts figure;
-  the lock order of R-P2-32: `lock_items` takes, per item in `item_id` order, the item `FOR SHARE`,
-  then `_open_lock` (the advisory lock every lot insert takes first), then the lots `FOR UPDATE` in
-  FIFO order), `problems.py` (the 4xx problems, `refused`) and `component.py` (`InventoryComponent`).
+  `offer_price_points`), `stock.py` (reads only since #6949 K1 Task 16: `estimate_unit_cost`, and
+  `parts_moved`, the one reader of job cost's parts figure; Go writes every stock row, and
+  `tests/test_no_python_stock_writes.py` keeps it so; phase 2's writes live on as the tests' stand-in
+  for Go, `tests/support/python_stock.py`), `problems.py` (the 4xx problems, `refused`) and
+  `component.py` (`InventoryComponent`).
   Only filament reaches Bambuddy: nothing here calls it, and `bb_sync_plan._suppliers()` keeps a
   supplier made for offers out of it (D16, R-P2-8 to R-P2-10). Tests: `backend/tests/inventory/`.
 - `backend/scadbuddy/entities/` — files, links and key-value properties on any row
@@ -1851,7 +1851,8 @@ only the sleeps move; a budget on the real clock fails on a slow runner (#6252).
   `item`, `lot` and `unit` among them since #7067, and one kind per filament catalog, such
   as `insert_type`; `EntityStore`: an `entities` row made by
   `ensure` only for an owner row that exists, and `orphans`, the rows whose owner is gone
-  and that no stock move names; `repoint_entity` also moves a merged entity's stock moves),
+  and that no stock move names; `repoint_entity` moves no stock move since #6949 K1 Task 16:
+  a printer merge moves them first through `MergePrinter`, Go's `inventory.Repoint`),
   `attachments.py` (`EntityAttachmentStore` over
   `entity_attachments`, the old `order_attachments`: an order's files are its rows with an
   `order_id`, written only through the order routes, `ORDER_KINDS`; a print archive's files
@@ -2361,13 +2362,21 @@ only the sleeps move; a budget on the real clock fails on a slow runner (#6252).
   (`GET /orders/{id}/parts`, `PUT /orders/{id}/items/{item}/parts`, the rule routes). The
   `/parts` part-row alias routes (`/parts`, `/parts/{id}`, its `stock`, `adjust` and `moves`) are gone
   (#6949, K1 5/7): the inventory routes do their work, and the part bodies went with them.
-  `Lifecycle.add_item` copies the model's rule; `accept_fulfilment` or `fulfil_items` making an
-  item `fulfilled` takes its parts from the lots (`StockStore.take`, the part items locked
-  first in `item_id` order by `lock_items`: each item, the lock every lot insert takes, then
-  its lots, so no receive or count adds a lot under it; `parts.used`), and `unfulfil_item` gives each use back to its lot
-  at its cost (`parts.returned`); no cost entry is written: job cost reads the moves as
+  `Lifecycle.add_item` copies the model's rule. The stock workflows (#6949 K1 Task 16,
+  `workflows/order_stock.py` on the `library` queue, steps `orders/stock_activities.py`, starts
+  `orders/stock_start.py`): `accept_fulfilment` or `fulfil_items` making an item `fulfilled`,
+  and `unfulfil_item`, are `FulfilOrderItem` (ids `order_item:<id>:parts:<n>`, `…:return`, and
+  `order:<id>:fulfil:<Idempotency-Key>` for the bulk route): the route's checks with no lock, then
+  the start; its first step commits the order change and sets `order_items.parts_workflow_id`
+  (`OrderItem.parts_settling`), then Go's `Take` (or `GiveBack`) of each part, then the record
+  (`parts.used`, `parts.returned`, `parts.stock_refused`). A route answers 202 `WorkflowAccepted`
+  after 15 s; it ends by itself. A refusal in the first step fails the run, writes nothing and
+  answers as before (R-K1-32). No cost entry is written: job cost reads the moves as
   `parts_minor` (`costs.py`). A fulfilled item's parts are fixed (`item_parts_used`).
-  `POST /inventory/lots/{id}/recost` runs `Lifecycle.recost_lot` (`item.parts_recosted`). The
+  `POST /inventory/lots/{id}/recost` is `RecostLot` (`item.parts_recosted`); a printer merge whose
+  gone row stock names is `MergePrinter` (Go's `Repoint`, then the merge). The app tests run them
+  in line (`tests/support/order_stock.py`); the real ones are `tests/workflows/test_order_stock.py`
+  (`requires_temporal`) and replay `tests/fixtures/order_stock_histories/`. The
   unit-cost history takes `item_id` (`parts_unit_minor`, `parts_unknown`). Agent `part_list` (an order's
   parts), `order_item_parts_set`.
   The machine rate (#4625, order operations spec 2026-11-07 §6): per registry printer,

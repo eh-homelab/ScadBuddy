@@ -13,8 +13,9 @@ a required parameter is 409 `step_incomplete`.
 A lot item's stock is in lots, each at its own cost; a use takes FIFO by received time
 unless a lot is named (D2), and a use past the stock on hand goes on the newest lot,
 flagged `needs_review`. A move's cost is a snapshot (D14). "Re-cost past uses"
-(`POST /inventory/lots/{lot_id}/recost`) still runs through the orders' lifecycle, as it
-locks the orders and writes their events, until Task 16 moves it.
+(`POST /inventory/lots/{lot_id}/recost`) is the `RecostLot` workflow (Task 16,
+`workflows/order_stock.py`): it reads the orders the lot's moves name, runs Go's `Recost`,
+then writes the orders' events.
 
 No ``from __future__ import annotations``: FastAPI reads the dependency annotations at
 runtime (``api/components.py``).
@@ -36,6 +37,7 @@ from scadbuddy.api.inventory import (
     write_codes,
 )
 from scadbuddy.inventory.component import InventoryDep
+from scadbuddy.inventory.core_client import operation_key, passed_through
 from scadbuddy.inventory.models import (
     AdjustInput,
     CountInput,
@@ -52,8 +54,7 @@ from scadbuddy.inventory.models import (
 )
 from scadbuddy.orders.actor import current_actor
 from scadbuddy.orders.component import OrdersDep
-from scadbuddy.orders.lifecycle import LifecycleError
-from scadbuddy.orders.problems import refused as order_refused
+from scadbuddy.orders.stock_start import WorkflowAccepted, WorkflowRefused, accepted_response
 
 router = APIRouter(tags=["inventory"])
 
@@ -219,20 +220,28 @@ async def adjust_lot(
         "flag changed as job cost reads them (`parts_minor`: the known-cost moves; unknown "
         "while a use not given back is of unknown cost), before and after. Each such "
         "order gets one `item.parts_recosted` event with its items' before and after. "
-        "409 `recost_busy` (orders problem) when new order moves kept reaching the lot; "
-        "try again."
+        "It runs as a workflow (#6949 K1): 202 with it when it takes longer than 15 s; the "
+        "same `Idempotency-Key` again attaches to it. 409 `recost_orders_moved` when new "
+        "order moves kept reaching the lot; nothing was written, try again."
     ),
-    responses=codes(
+    responses=write_codes(
         (404, "`lot_not_found`"),
-        (409, _ITEM_CODES + " or `recost_busy`"),
+        (409, _ITEM_CODES + " or `recost_orders_moved`"),
         (422, "`bad_quantity` (a move's amount at the cost)"),
     ),
 )
-async def recost_lot(lot_id: UUID, orders: OrdersDep) -> RecostResult:
+async def recost_lot(
+    lot_id: UUID, orders: OrdersDep, idempotency_key: IdempotencyKey = None
+) -> RecostResult | JSONResponse:
+    by = current_actor()
+    key = operation_key(by, idempotency_key)
     try:
-        return await run(orders.lifecycle.recost_lot, lot_id, current_actor())
-    except LifecycleError as error:
-        raise order_refused(error) from None
+        answer = await run(lambda: orders.lifecycle.recost_lot(lot_id, by, request_key=key))
+    except WorkflowRefused as refused:
+        raise passed_through(int(refused.problem.get("status") or 409), refused.problem) from None
+    if isinstance(answer, WorkflowAccepted):
+        return accepted_response(answer)
+    return answer
 
 
 @router.post(

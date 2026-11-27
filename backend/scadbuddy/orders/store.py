@@ -69,6 +69,7 @@ from scadbuddy.orders.models import (
     OrderProject,
     OrderStatus,
     Outcome,
+    PartsSettling,
     Payment,
     PurchaseCostKind,
     PurchaseSource,
@@ -197,7 +198,7 @@ _ITEM = (
     " slug, commit, inputs, libraries, template_name, render_key, colours, output_id,"
     " delivered_attachment_id, current_revision_id, approval, created_at, updated_at,"
     " revised_after_acceptance, library_file_id, library_filename, library_source,"
-    " origin_archive_ids, library_sha256, library_copy_key"
+    " origin_archive_ids, library_sha256, library_copy_key, parts_workflow_id"
 )
 _REVISION = (
     "id, item_id, number, slug, commit, inputs, libraries, template_name, render_key, colours,"
@@ -346,6 +347,9 @@ def _item_of(row: DictRow) -> OrderItem:
         approval=row["approval"],
         revised_after_acceptance=row["revised_after_acceptance"],
         origin_archive_ids=row["origin_archive_ids"],
+        parts_settling=None
+        if row["parts_workflow_id"] is None
+        else PartsSettling(workflow_id=row["parts_workflow_id"]),
         created_at=row["created_at"],
         updated_at=row["updated_at"],
     )
@@ -3523,6 +3527,56 @@ class OrderStore:
         ).fetchone()
         assert row is not None
         return OrderEvent.model_validate(row)
+
+    # -- the stock workflows' marks (#6949 K1 Task 16) -----------------------------------
+
+    def parts_returned(self, conn: Conn, order_id: str, item_id: str) -> int:
+        """How many `parts.returned` events the item has: each unfulfil writes one."""
+        row = conn.execute(
+            "SELECT count(*) AS n FROM order_events WHERE order_id = %s"
+            " AND kind = 'parts.returned' AND detail ->> 'item_id' = %s",
+            (order_id, item_id),
+        ).fetchone()
+        assert row is not None
+        return int(row["n"])
+
+    def workflow_commit(
+        self, conn: Conn, order_id: str, workflow_id: str
+    ) -> tuple[list[dict[str, Any]], list[str]] | None:
+        """What the stock workflow's first step committed, from its audit rows (the ones
+        whose detail names the ``workflow`` and carries its ``stock`` calls): the calls,
+        and the attempts it accepted, in the rows' order. None before it committed."""
+        rows = conn.execute(
+            "SELECT kind, detail FROM order_events WHERE order_id = %s"
+            " AND detail ->> 'workflow' = %s AND detail ? 'stock' ORDER BY id",
+            (order_id, workflow_id),
+        ).fetchall()
+        if not rows:
+            return None
+        calls = [call for row in rows for call in row["detail"]["stock"]]
+        attempts = [
+            row["detail"]["fulfilment_id"] for row in rows if row["kind"] == "fulfilment.accepted"
+        ]
+        return sorted(calls, key=lambda c: (c["item_id"], c["order_item_id"])), attempts
+
+    def set_parts_workflow(
+        self, conn: Conn, item_ids: Sequence[str], workflow_id: str | None
+    ) -> None:
+        """The items' open stock workflow (`order_items.parts_workflow_id`); None clears it."""
+        conn.execute(
+            "UPDATE order_items SET parts_workflow_id = %s WHERE id = ANY(%s)",
+            (workflow_id, list(item_ids)),
+        )
+
+    def workflow_wrote(self, conn: Conn, order_ids: Sequence[str], workflow_id: str) -> bool:
+        """Whether an event of one of the orders names the workflow (a re-cost's record)."""
+        row = conn.execute(
+            "SELECT EXISTS (SELECT 1 FROM order_events WHERE order_id = ANY(%s)"
+            " AND detail ->> 'workflow' = %s) AS wrote",
+            (list(order_ids), workflow_id),
+        ).fetchone()
+        assert row is not None
+        return bool(row["wrote"])
 
     def events(self, order_id: str, *, conn: Conn | None = None) -> list[OrderEvent]:
         with self._read(conn) as c:

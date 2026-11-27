@@ -1,7 +1,7 @@
 import { createHash } from 'node:crypto'
 import { z } from 'zod'
 import type { components } from '../api/schema.js'
-import { ok } from './call.js'
+import { ok, settling } from './call.js'
 import { command } from './command.js'
 import {
   nozzles,
@@ -2164,9 +2164,11 @@ export const orderTools: Tool[] = [
         )
       }
       if (accept) {
-        result = await ok(
-          backend.POST('/api/v1/orders/{order_id}/items/{item_id}/fulfilments/{fulfilment_id}/accept', { params: { path } }),
-          `accept attempt ${fulfilment_id}`,
+        result = settling(
+          await ok(
+            backend.POST('/api/v1/orders/{order_id}/items/{item_id}/fulfilments/{fulfilment_id}/accept', { params: { path } }),
+            `accept attempt ${fulfilment_id}`,
+          ),
         )
       }
       if (result === undefined) throw new ToolError('give an attempt to edit, or accept: true')
@@ -2350,9 +2352,11 @@ export const orderTools: Tool[] = [
     summarize: ({ order_id, item_id }) => `Undo the fulfilment of item ${item_id} of order ${order_id}`,
     handler: async ({ order_id, item_id }, { backend }) =>
       json(
-        await ok(
-          backend.POST('/api/v1/orders/{order_id}/items/{item_id}/unfulfil', { params: { path: { order_id, item_id } } }),
-          `unfulfil item ${item_id}`,
+        settling(
+          await ok(
+            backend.POST('/api/v1/orders/{order_id}/items/{item_id}/unfulfil', { params: { path: { order_id, item_id } } }),
+            `unfulfil item ${item_id}`,
+          ),
         ),
       ),
   }),
@@ -2407,9 +2411,11 @@ export const orderTools: Tool[] = [
     summarize: ({ order_id, items }) => `Fulfil ${items.length} item${items.length === 1 ? '' : 's'} of order ${order_id}`,
     handler: async ({ order_id, items }, { backend }) =>
       json(
-        await ok(
-          backend.POST('/api/v1/orders/{order_id}/fulfil', { params: { path: { order_id } }, body: { items } }),
-          `fulfil ${items.length} items of order ${order_id}`,
+        settling(
+          await ok(
+            backend.POST('/api/v1/orders/{order_id}/fulfil', { params: { path: { order_id } }, body: { items } }),
+            `fulfil ${items.length} items of order ${order_id}`,
+          ),
         ),
       ),
   }),

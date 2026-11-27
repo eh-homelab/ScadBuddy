@@ -24,6 +24,7 @@ from tests.api.test_settings_runtime import _state
 from tests.api.test_versions import SLUG
 from tests.support.inventory_core import Go, install_go
 from tests.support.operations import press
+from tests.support.order_stock import app_go
 
 pytestmark = pytest.mark.requires_postgres
 
@@ -46,8 +47,8 @@ def _inventory(client: TestClient) -> InventoryComponent:
 
 
 def _receive(client: TestClient, item_id: str, **body: Any) -> dict[str, Any]:
-    """A lot as Python's stock store still writes it for the orders (until Task 16)."""
-    lot = _inventory(client).stock.receive_lot(
+    """A lot as phase 2's stock writes made it (Go's stand-in, `tests/support/order_stock.py`)."""
+    lot = app_go(client).stock.receive_lot(
         UUID(item_id), ReceiveLot.model_validate({"qty": "10", **body}), Actor(kind="browser")
     )
     return {"id": str(lot.id)}
@@ -225,7 +226,7 @@ def test_an_orders_parts_take_from_lots_and_recost_writes_the_order(
         assert unknown.json()["type"].endswith("/part_not_found")
 
     fulfil(client, order_id, item_id, 1)
-    stock = _inventory(client).stock
+    stock = app_go(client).stock
     [use] = stock.moves(item_id=UUID(hook["id"]), limit=1)
     assert (use.kind, use.qty, use.order_item_id) == ("use", Decimal(-2), item_id)
     # The quote's parts: a FIFO take of 2 from what is left, at 5 each.

@@ -1,7 +1,7 @@
 import { useState, type FormEvent } from 'react'
 import { USER_ONLY } from '../../agent/dom'
-import { api, ApiError } from '../../api/client'
-import type { DiscoveredPrinter, PrinterRow, PrinterSyncEntry, PrinterSyncResult, PrintPath } from '../../api/types'
+import { api, ApiError, isWorkflowAccepted } from '../../api/client'
+import type { DiscoveredPrinter, PrinterRow, PrinterSyncEntry, PrinterSyncResult, PrintPath, WorkflowAccepted } from '../../api/types'
 import { PRINTER_TOPICS as TOPICS, registryNews, syncSummary } from '../../lib/printerRegistry'
 import { useAsync } from '../../lib/useAsync'
 import { Badge } from '@/components/ui/badge'
@@ -12,6 +12,7 @@ import { Spinner } from '../ui/spinner'
 import { VirtualPrintersPanel } from './VirtualPrinters'
 import { PrinterAmsSlots } from './PrinterAmsSlots'
 import { PrinterKProfiles } from './PrinterKProfiles'
+import { StillWorking } from '../../pages/inventory/StillWorking'
 
 /**
  * Settings → Printers (#3823, plan 2026-10-16, Task 10): the printer registry, one row per
@@ -110,13 +111,17 @@ function PrinterItem({
 }) {
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState<string | null>(null)
+  // #6949 K1 Task 16 — a link whose merge moves stock answers 202: its `MergePrinter` runs on,
+  // and `printer.changed` brings the row again when it ends.
+  const [merging, setMerging] = useState<{ id: string; row: PrinterRow } | null>(null)
 
-  async function act(work: () => Promise<PrinterRow | void>, fallback: string) {
+  async function act(work: () => Promise<PrinterRow | WorkflowAccepted | void>, fallback: string) {
     setBusy(true)
     setError(null)
     try {
       const next = await work()
-      if (next) onChanged(next)
+      if (isWorkflowAccepted(next)) setMerging({ id: next.workflow_id, row })
+      else if (next) onChanged(next)
       else onGone()
     } catch (cause) {
       setError(problem(cause, fallback))
@@ -194,6 +199,7 @@ function PrinterItem({
             )}
           </div>
 
+          {merging && merging.row === row && <StillWorking id={merging.id} />}
           {free.length > 0 && (
             <div className="space-y-1">
               <p className="text-xs font-medium">Link a Bambuddy printer</p>
@@ -324,6 +330,7 @@ const OUTCOMES: Record<PrinterSyncEntry['action'], string> = {
   skipped: 'skipped',
   conflict: 'conflict',
   missing: 'no longer in Bambuddy',
+  merging: 'merging (stock moves to the kept printer; it finishes by itself)',
 }
 
 /**

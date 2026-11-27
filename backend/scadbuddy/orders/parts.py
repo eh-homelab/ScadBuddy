@@ -4,12 +4,12 @@ uses beside its filament, and the rule a model gives its items.
 Since #7067 (Task 7) a part is an inventory item (`items`, a kind with tracking `lot`), and
 its stock is in lots (`inventory/stock.py`). An order item's parts are
 `order_item_parts.item_id`; a model's rule names items as `item_id` (a rule or a body that
-still says `part_id` is read the same, for one release). The lifecycle takes an item's
-parts from the lots when it is fulfilled (`StockStore.take`, FIFO, a cost snapshot on each
-move) and gives them back when it is unfulfilled (`StockStore.give_back`, at each use's
-own cost); it writes no cost entry (the plan's Pre-flight 5). It locks the order first,
-then the items in `item_id` order, so two writers never wait on each other in opposite
-orders.
+still says `part_id` is read the same, for one release). An item's parts leave the lots
+when it is fulfilled (Go's `inventory.Take`, FIFO, a cost snapshot on each move) and come
+back when it is unfulfilled (Go's `inventory.GiveBack`, at each use's own cost), through
+the lifecycle's stock workflow (`workflows/order_stock.py` `FulfilOrderItem`, #6949 K1 Task
+16), one take per part in `item_id` order; it writes no cost entry (the plan's Pre-flight
+5).
 
 The `/parts` alias routes over the inventory are gone (#6949, K1 5/7). Every text a body
 takes refuses a NUL byte, which Postgres `text` refuses (R-P2-16).

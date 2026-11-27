@@ -98,6 +98,15 @@ the moves derive, a unit cost, a cost currency and an origin. `on_hand` may go b
 (`in_stock`, `in_service`, `retired`, `scrapped`, `sold`), a cost and a service life.
 Install, value over life and printers as units are phase 4 (#7069); the columns exist.
 
+Since #6949 K1 (Task 16) Python writes no stock row. scadbuddy-core (Go) writes every lot,
+unit and move, and the orders reach it through Temporal workflows
+(`backend/scadbuddy/workflows/order_stock.py`: `FulfilOrderItem` calls `inventory.Take` and
+`inventory.GiveBack`, `RecostLot` calls `inventory.Recost`, `MergePrinter` calls
+`inventory.Repoint`). `backend/tests/test_no_python_stock_writes.py` keeps it so. The rules
+below are phase 2's, which Go ported; the Python names in them (`StockStore`, `take`,
+`lock_items`, `inventory/stock.py` lines) are phase 2's code, kept now only as the tests'
+stand-in for Go (`backend/tests/support/python_stock.py`).
+
 A **move** (`stock_moves`) is the only thing that changes stock. Its `qty` is signed. Its
 kinds are `receive`, `use`, `return`, `adjust`, `produce`, `transfer`, `sell`, `retire` and
 `scrap`; phase 2 writes the first four and the unit ones. A move holds a lot or a unit, never

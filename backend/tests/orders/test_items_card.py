@@ -114,6 +114,7 @@ def test_several_items_are_fulfilled_at_once(shop: Shop) -> None:
         [FulfilLine(item_id=first, quantity=2), FulfilLine(item_id=second, quantity=1)],
         BY,
     )
+    assert isinstance(attempts, list)
     assert [(a.quantity, a.outcome, a.accepted_at is not None) for a in attempts] == [
         (2, "succeeded", True),
         (1, "succeeded", True),

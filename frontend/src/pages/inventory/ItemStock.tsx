@@ -1,5 +1,6 @@
 import { useEffect, useId, useRef, useState, type FormEvent, type ReactNode } from 'react'
 import { Link } from 'react-router'
+import { isWorkflowAccepted } from '../../api/client'
 import type { OperationAccepted } from '../../api/types'
 import type { ShopMoney } from '../../components/filament/purchasing/useMoney'
 import { DataTable, type Column } from '../../components/records/DataTable'
@@ -118,14 +119,19 @@ export function LotStock({ item, offers, money, moved, version, onChanged }: { i
   const [costed, setCosted] = useState<string | null>(null)
   const [recost, setRecost] = useState<RecostResult | null>(null)
   const [recosting, setRecosting] = useState<string | null>(null)
+  const [recostRunning, setRecostRunning] = useState<string | null>(null)
   const priced = offers ? pricedOffer(offers, money.currency) : undefined
 
   async function recostLot(lotId: string) {
     if (recosting) return
     setRecosting(lotId)
+    setRecostRunning(null)
     setError(null)
     try {
-      setRecost(await inventoryApi.recostLot(lotId))
+      const answer = await inventoryApi.recostLot(lotId)
+      // A 202: the `RecostLot` workflow runs on and ends by itself (#6949 K1 Task 16).
+      if (isWorkflowAccepted(answer)) setRecostRunning(answer.workflow_id)
+      else setRecost(answer)
       onChanged()
     } catch (cause) {
       setError(failed(cause, 'The past uses could not be re-costed. Try again.'))
@@ -229,6 +235,7 @@ export function LotStock({ item, offers, money, moved, version, onChanged }: { i
       {open === 'count' && <CountForm item={item} onDone={done} />}
       {costed && !recost && <p className="text-[13px] text-muted-foreground">Past uses keep the cost they were taken at. "Re-cost past uses" gives them this lot's cost now, and changes the parts cost of the orders that used them.</p>}
       {recost && <RecostSummary result={recost} money={money} />}
+      {recostRunning && <StillWorking id={recostRunning} />}
       <PlacesError error={places.error} />
       {(error ?? lots.error) && (
         <p role="alert" className="text-[13px] text-warn">

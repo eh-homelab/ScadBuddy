@@ -1,7 +1,8 @@
 """`INVENTORY`: the inventory's client of scadbuddy-core (#6949 K1: the kinds, the items and
-the stock), and the offers and stock stores Python still runs (#7067) over the shared rows
-pool (`rows/component.py`), opened on first use as the entities' stores are. Only the API
-process builds it (#5295)."""
+the stock), and the offers store Python still runs (#7067) over the shared rows pool
+(`rows/component.py`), opened on first use as the entities' stores are. Python writes no
+stock (Task 16): the orders' stock moves are Go's activities in `workflows/order_stock.py`.
+Only the API process builds it (#5295)."""
 
 from __future__ import annotations
 
@@ -17,10 +18,8 @@ from scadbuddy.api.components import component_dep
 from scadbuddy.auth.component import AUTH
 from scadbuddy.auth.service_credentials import InProcessProvider, ServiceAuth
 from scadbuddy.core.components import Component, Components, Core, Key
-from scadbuddy.entities.registry import EntityStore
 from scadbuddy.inventory.core_client import InventoryCore
 from scadbuddy.inventory.offers import OfferStore
-from scadbuddy.inventory.stock import StockStore
 from scadbuddy.rows.component import ROWS
 
 
@@ -35,9 +34,7 @@ class InventoryComponent:
         #: Go's kinds, items and stock: reads over its CRUD routes, writes as its
         #: activities (`core_client.py`).
         self.core = core
-        entities = EntityStore(pool)
         self._offers = OfferStore(pool, shop_currency)
-        self._stock = StockStore(pool, entities, shop_currency)
 
     def opened(self) -> ConnectionPool[Connection[DictRow]]:
         """The shared pool, opened on first use (an open pool ignores it)."""
@@ -48,12 +45,6 @@ class InventoryComponent:
     def offers(self) -> OfferStore:
         self.opened()
         return self._offers
-
-    @property
-    def stock(self) -> StockStore:
-        """Python's stock writes for the orders, until they move to Go (Task 16)."""
-        self.opened()
-        return self._stock
 
 
 INVENTORY: Key[InventoryComponent] = Key("inventory")

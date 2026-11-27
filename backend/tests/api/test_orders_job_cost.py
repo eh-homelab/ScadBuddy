@@ -12,7 +12,6 @@ import pytest
 from fastapi.testclient import TestClient
 
 from scadbuddy.api import orders as orders_api
-from scadbuddy.inventory.component import INVENTORY
 from scadbuddy.inventory.models import ReceiveLot
 from scadbuddy.orders.models import Actor
 from tests.api.test_customers import create as create_customer
@@ -26,6 +25,7 @@ from tests.api.test_printers import create as create_printer
 from tests.api.test_settings_runtime import _state
 from tests.api.test_versions import SLUG
 from tests.support.inventory_rows import insert_item
+from tests.support.order_stock import app_go
 
 pytestmark = pytest.mark.requires_git
 
@@ -359,10 +359,10 @@ def test_each_attempt_says_which_machine_rate_priced_it(
 
 def test_the_costs_carry_the_parts_taken_from_stock(client: TestClient) -> None:
     """#7067 Task 8: `parts_minor` is the item's `use` moves, in its cost and the order's."""
-    # Go makes items and lots since K1 (#6949); the orders' takes are still Python's.
+    # Go makes items and lots since K1 (#6949); here phase 2's writes stand for Go's.
     state = _state(client)
     hook = {"id": str(insert_item(state.refs.pool, "hardware", name="Job cost hook"))}
-    state.components.get(INVENTORY).stock.receive_lot(
+    app_go(client).stock.receive_lot(
         UUID(hook["id"]),
         ReceiveLot(qty=Decimal(10), unit_cost_minor=Decimal("12.5")),
         Actor(kind="browser"),

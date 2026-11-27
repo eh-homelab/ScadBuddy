@@ -176,6 +176,7 @@ import type {
   FlowVersion,
   Operation,
   OperationAccepted,
+  WorkflowAccepted,
   PrintRunRequest,
   PrintRunResult,
   PrintOptionsState,
@@ -440,8 +441,8 @@ export async function request<T>(path: string, init?: RequestInit): Promise<T> {
   return (await requestWithStatus<T>(path, init)).body
 }
 
-/** `request`, keeping the status: a 202 from an operation's route is not its body. */
-async function requestWithStatus<T>(path: string, init?: RequestInit): Promise<{ status: number; body: T }> {
+/** `request`, keeping the status: a 202 from an operation's or a stock workflow's route is not its body. */
+export async function requestWithStatus<T>(path: string, init?: RequestInit): Promise<{ status: number; body: T }> {
   const response = await send(`${API_BASE}${path}`, {
     ...init,
     headers: {
@@ -460,6 +461,21 @@ async function requestWithStatus<T>(path: string, init?: RequestInit): Promise<{
     return { status: 204, body: undefined as T }
   }
   return { status: response.status, body: (await response.json()) as T }
+}
+
+/**
+ * #6949 K1 — a write that may move stock: one `Idempotency-Key` per press, and a 202 is the
+ * workflow that still runs (`WorkflowAccepted`), not the body. The page shows it and reads the
+ * item again once its `parts_settling` clears.
+ */
+export async function stockWrite<T>(path: string, init: RequestInit, key: string = crypto.randomUUID()): Promise<T | WorkflowAccepted> {
+  const answer = await requestWithStatus<T | WorkflowAccepted>(path, { ...init, headers: { ...init.headers, 'Idempotency-Key': key } })
+  return answer.body
+}
+
+/** Whether a stock write's answer is the 202 of a workflow that still runs. */
+export function isWorkflowAccepted(answer: unknown): answer is WorkflowAccepted {
+  return typeof answer === 'object' && answer !== null && 'workflow_id' in answer && 'kind' in answer && 'started_at' in answer
 }
 
 /** A call whose answer is not JSON (a hosted plugin's draft file, #6937), as the `Response`; a non-2xx answer throws `ApiError`. */
@@ -2619,8 +2635,9 @@ export const api = {
   /** #4439, #4747: import and link Bambuddy's printers and virtual printers; idempotent. */
   syncPrintersFromBambuddy: (dryRun = false) =>
     request<PrinterSyncResult>(`/printers/sync-bambuddy?dry_run=${dryRun}`, { method: 'POST' }),
+  /** A link that merges a printer stock names answers 202 while its `MergePrinter` runs (#6949 K1). */
   linkPrinterBambuddy: (id: string, bambuddyPrinterId: number) =>
-    request<PrinterRow>(`/printers/${seg(id)}/bambuddy`, {
+    stockWrite<PrinterRow>(`/printers/${seg(id)}/bambuddy`, {
       method: 'PUT',
       body: JSON.stringify({ bambuddy_printer_id: bambuddyPrinterId }),
     }),
@@ -2871,7 +2888,7 @@ export const api = {
   /** #4952 — undoes a fulfilment: the latest accepted attempt no longer counts as made,
    * and the item goes back to `approved` (or `failed`). */
   unfulfilOrderItem: (orderId: string, itemId: string) =>
-    request<OrderItem>(`/orders/${seg(orderId)}/items/${seg(itemId)}/unfulfil`, { method: 'POST' }),
+    stockWrite<OrderItem>(`/orders/${seg(orderId)}/items/${seg(itemId)}/unfulfil`, { method: 'POST' }),
   cancelOrderItem: (orderId: string, itemId: string) =>
     request<OrderItem>(`/orders/${seg(orderId)}/items/${seg(itemId)}/cancel`, { method: 'POST' }),
   /** #4955 — a copy of the item's design, quantity and title, with no quote (a custom item
@@ -2880,8 +2897,8 @@ export const api = {
     request<OrderItem>(`/orders/${seg(orderId)}/items/${seg(itemId)}/duplicate`, { method: 'POST', body: JSON.stringify(body) }),
   /** #4955 — several items made by hand at once: an accepted attempt of each line's quantity,
    * all or none (`POST /orders/{id}/fulfil`). */
-  fulfilOrderItems: (orderId: string, items: FulfilLine[]) =>
-    request<Fulfilment[]>(`/orders/${seg(orderId)}/fulfil`, { method: 'POST', body: JSON.stringify({ items }) }),
+  fulfilOrderItems: (orderId: string, items: FulfilLine[], key?: string) =>
+    stockWrite<Fulfilment[]>(`/orders/${seg(orderId)}/fulfil`, { method: 'POST', body: JSON.stringify({ items }) }, key),
   // -- an order's files (#4251, spec 2026-10-18 §6.2) ---------------------------------------
   /** Any file, on the order or (with `itemId`) on one of its items; an upload as a command. */
   addOrderAttachment: (
@@ -3161,7 +3178,7 @@ export const api = {
       body: JSON.stringify(body),
     }),
   acceptFulfilment: (orderId: string, itemId: string, fulfilmentId: string) =>
-    request<Fulfilment>(`/orders/${seg(orderId)}/items/${seg(itemId)}/fulfilments/${seg(fulfilmentId)}/accept`, { method: 'POST' }),
+    stockWrite<Fulfilment>(`/orders/${seg(orderId)}/items/${seg(itemId)}/fulfilments/${seg(fulfilmentId)}/accept`, { method: 'POST' }),
   /** #4253 §8.2 — the attempt's Bambuddy archives and what each offers to copy. */
   attemptArchives: (orderId: string, itemId: string, fulfilmentId: string) =>
     request<AttemptArchives>(`/orders/${seg(orderId)}/items/${seg(itemId)}/fulfilments/${seg(fulfilmentId)}/archives`),

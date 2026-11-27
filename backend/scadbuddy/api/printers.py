@@ -40,6 +40,7 @@ from scadbuddy.bambuddy.virtual_printers import (
 from scadbuddy.core.problems import ApiError
 from scadbuddy.operations.component import OperationsDep
 from scadbuddy.orders.actor import current_actor
+from scadbuddy.orders.stock_start import WorkflowAccepted, accepted_response
 from scadbuddy.printers.address import UnsafeAddressError
 from scadbuddy.printers.ams_slots import SlotCommandSent, SlotConfigured
 from scadbuddy.printers.bambuddy_sync import (
@@ -61,6 +62,8 @@ from scadbuddy.printers.native import command_response
 from scadbuddy.printers.store import (
     BambuddyLinkTakenError,
     KekMissingError,
+    MergeChangedError,
+    MergeRunningError,
     PrinterNotFoundError,
     SerialTakenError,
     SerialUnknownError,
@@ -125,6 +128,8 @@ async def _call[T](work: Callable[[], T]) -> T:
             f"printer {error.printer_id} is a Bambuddy virtual printer; it links no"
             " Bambuddy printer",
         ) from None
+    except MergeChangedError as error:
+        raise ApiError(status.HTTP_409_CONFLICT, f"{error}; try again") from None
 
 
 async def _bambuddy_printers(store: SettingsStoreDep) -> list[Printer]:
@@ -463,12 +468,20 @@ async def delete_printer(printers: PrintersDep, printer_id: str) -> Response:
         "422 when Bambuddy reports a serial other than this row's. A row with no LAN link "
         "then gets one from Bambuddy's address and access code, through the LAN link's "
         "probe (#4747), when Bambuddy gives the code; a failure is the row's "
-        "`lan_sync_error`, never the link's."
+        "`lan_sync_error`, never the link's. A link that merges a row stock still names "
+        "moves that stock first (#6949 K1): 202 with its workflow when it takes longer than "
+        "15 s; it finishes by itself, and `printer.changed` brings the row."
     ),
+    responses={
+        202: {
+            "model": WorkflowAccepted,
+            "description": "The merge's workflow still runs; it finishes by itself.",
+        }
+    },
 )
 async def link_bambuddy(
     printers: PrintersDep, store: SettingsStoreDep, printer_id: str, body: BambuddyLink
-) -> PrinterRow:
+) -> PrinterRow | JSONResponse:
     row = await _call(lambda: printers.store.require(printer_id))
     async with client_for(await asyncio.to_thread(store.load)) as client:
         found = {printer.id: printer for printer in await client.printers()}
@@ -483,9 +496,12 @@ async def link_bambuddy(
                 f"Bambuddy printer {printer.id} reports another serial than this printer's",
             )
         by = current_actor()
-        linked = await _call(
-            lambda: printers.store.link_bambuddy(printer_id, body.bambuddy_printer_id, by)
-        )
+        try:
+            linked = await _call(
+                lambda: printers.store.link_bambuddy(printer_id, body.bambuddy_printer_id, by)
+            )
+        except MergeRunningError as running:
+            return accepted_response(running.accepted)
         printers.changed(printer_id)
         try:
             return await fill_lan_after_link(printers, client, linked, printer)
