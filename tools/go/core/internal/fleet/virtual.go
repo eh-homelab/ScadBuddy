@@ -61,8 +61,8 @@ func (f *Fleet) sendVirtual(r *http.Request, _ crud.Params) (any, error) {
 	if err != nil {
 		return nil, err
 	}
-	sender := b.Match("sender", 1, 40, channelPattern)
-	channel := b.OptText("channel", 1, 40, channelPattern)
+	sender := b.Match("sender", 1, 40, namePattern)
+	channel := b.OptText("channel", 1, channelMax, channelPattern)
 	agent := b.OptText("agent", 8, 8, handlePattern)
 	text := b.Text("text", 1, math.MaxInt)
 	if err := b.Err(); err != nil {

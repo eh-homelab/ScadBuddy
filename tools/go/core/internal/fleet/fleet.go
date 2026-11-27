@@ -45,10 +45,40 @@ const (
 	kind            = "fleet.message"
 )
 
-var (
-	channelPattern = regexp.MustCompile(`^[a-z0-9-]{1,40}$`)
-	handlePattern  = regexp.MustCompile(`^[0-9a-f]{8}$`)
+// channelMax is a channel name's most bytes.
+const channelMax = 256
+
+// A channel's name, at most channelMax bytes, is a GitHub reference (refRule: owner/repo#number
+// or owner/repo/runs/id) or a name under Kubernetes' rules (dnsRule: a DNS-1123 subdomain, save
+// that the whole may be channelMax bytes). A channel made before #8149 may keep a name valid
+// only under legacyRule (a leading or trailing "-"); no new channel gets one. fleetchat's
+// service.go and the fleet_channels CHECK hold the same rules, all held to
+// tools/go/fleetchat/testdata/channel-vectors.json.
+const (
+	refRule    = `[a-z0-9][a-z0-9-]{0,38}/[a-z0-9._-]{1,100}(?:#[1-9][0-9]{0,9}|/runs/[1-9][0-9]{0,19})`
+	dnsRule    = `[a-z0-9](?:[-a-z0-9]{0,61}[a-z0-9])?(?:\.[a-z0-9](?:[-a-z0-9]{0,61}[a-z0-9])?)*`
+	legacyRule = `[a-z0-9-]{1,40}`
 )
+
+var (
+	// newChannelPattern is a name a new channel may have.
+	newChannelPattern = regexp.MustCompile(`^(?:` + refRule + `|` + dnsRule + `)$`)
+	// channelPattern is any channel's name, an old-style one included.
+	channelPattern = regexp.MustCompile(`^(?:` + refRule + `|` + dnsRule + `|` + legacyRule + `)$`)
+	// namePattern is a virtual sender's name or a DM's agent name.
+	namePattern   = regexp.MustCompile(`^` + legacyRule + `$`)
+	handlePattern = regexp.MustCompile(`^[0-9a-f]{8}$`)
+)
+
+// isChannel says whether name is any channel's name.
+func isChannel(name string) bool {
+	return len(name) <= channelMax && channelPattern.MatchString(name)
+}
+
+// isNewChannel says whether a new channel may have name.
+func isNewChannel(name string) bool {
+	return len(name) <= channelMax && newChannelPattern.MatchString(name)
+}
 
 // Fleet serves the routes over the API's database.
 type Fleet struct {
@@ -63,6 +93,10 @@ func Routes(pool *pgxpool.Pool) []crud.Route {
 		{Method: "GET", Path: "/agents", Handle: f.agents},
 		{Method: "PUT", Path: "/channels/{name}/members/{session_id}", Handle: f.join},
 		{Method: "DELETE", Path: "/channels/{name}/members/{session_id}", Handle: f.leave},
+		// The same, with the channel in the query: a name with "/" or "#" must be escaped in a
+		// path, and the router leaves an escaped path to Python.
+		{Method: "PUT", Path: "/members/{session_id}", Handle: f.join},
+		{Method: "DELETE", Path: "/members/{session_id}", Handle: f.leave},
 		{Method: "GET", Path: "/agents/{session_id}/channels", Handle: f.channels},
 		{Method: "POST", Path: "/messages", Handle: f.send, MaxBody: messageBodyMax},
 		{Method: "GET", Path: "/agents/{session_id}/inbox", Handle: f.inbox},
@@ -95,13 +129,24 @@ func notMember(channel string) error {
 		fmt.Sprintf(`the agent is not a member of channel "%s"`, channel), "not-member")
 }
 
-func channelOf(p crud.Params) (string, error) {
-	if name := p["name"]; channelPattern.MatchString(name) {
+// channelOf is a join's or leave's channel: the path's name, or else the query's channel.
+func channelOf(r *http.Request, p crud.Params) (string, error) {
+	loc := []string{"path", "name"}
+	name, inPath := p["name"]
+	if !inPath {
+		loc = []string{"query", "channel"}
+		values := r.URL.Query()["channel"]
+		if len(values) == 0 {
+			return "", httpx.Invalid(httpx.Issue{Loc: loc, Msg: "Field required"})
+		}
+		name = values[len(values)-1]
+	}
+	if isChannel(name) {
 		return name, nil
 	}
 	return "", httpx.Invalid(httpx.Issue{
-		Loc: []string{"path", "name"},
-		Msg: fmt.Sprintf("String should match pattern '%s'", channelPattern),
+		Loc: loc,
+		Msg: fmt.Sprintf("String should match pattern '%s' and have at most %d characters", channelPattern, channelMax),
 	})
 }
 
@@ -166,7 +211,7 @@ func (f *Fleet) agents(r *http.Request, _ crud.Params) (any, error) {
 
 // membership is the channel and the agent of a join or leave, the agent's row checked.
 func membership(r *http.Request, tx pgx.Tx, p crud.Params) (string, string, error) {
-	channel, err := channelOf(p)
+	channel, err := channelOf(r, p)
 	if err != nil {
 		return "", "", err
 	}
@@ -186,6 +231,17 @@ func (f *Fleet) join(r *http.Request, p crud.Params) (any, error) {
 		var err error
 		if channel, session, err = membership(r, tx, p); err != nil {
 			return err
+		}
+		if !isNewChannel(channel) {
+			// An old-style name: only a channel made before #8149 keeps one.
+			if err := channelExists(r.Context(), tx, channel); err != nil {
+				if !errors.As(err, new(*httpx.Problem)) {
+					return err
+				}
+				return httpx.WithReason(http.StatusUnprocessableEntity, fmt.Sprintf(
+					`"%s" starts or ends with "-", which only a channel made before #8149 may`, channel),
+					"legacy-channel-name")
+			}
 		}
 		if _, err := tx.Exec(r.Context(),
 			`INSERT INTO fleet_channels (name) VALUES ($1) ON CONFLICT DO NOTHING`, channel); err != nil {
@@ -280,9 +336,9 @@ func (f *Fleet) send(r *http.Request, _ crud.Params) (any, error) {
 		return nil, err
 	}
 	from := b.UUID("from")
-	channel := b.OptText("channel", 1, 40, channelPattern)
+	channel := b.OptText("channel", 1, channelMax, channelPattern)
 	// An agent is a handle, or a name: a DM to a virtual sender's name is refused below.
-	agent := b.OptText("agent", 1, 40, channelPattern)
+	agent := b.OptText("agent", 1, 40, namePattern)
 	// The length is checked below, in bytes, with a detail that names the limit.
 	text := b.Text("text", 1, math.MaxInt)
 	if err := b.Err(); err != nil {

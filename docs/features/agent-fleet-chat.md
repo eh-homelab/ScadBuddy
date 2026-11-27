@@ -44,6 +44,31 @@ flowchart LR
    `limit` messages and at most 4 MiB of text (at least one message), and moves the cursor
    past them unless `peek`. A rewind only moves the cursor back.
 
+### Channel names
+
+Sessions can work together in one channel per GitHub issue, PR or Actions run, named by its
+full reference (#8149). A channel's name is lower case, at most 256 characters, and is one of:
+
+- a GitHub reference: `owner/repo#number` (an issue or PR, such as `eh-homelab/clusters#1234`)
+  or `owner/repo/runs/id` (an Actions run). The owner is 1 to 39 characters, `[a-z0-9-]`,
+  and starts with a letter or digit. The repo is 1 to 100 characters, `[a-z0-9._-]`. The
+  number is 1 to 10 digits and the run id 1 to 20, with no leading zero.
+- a plain name under Kubernetes' naming rules
+  ([DNS-1123 subdomain](https://kubernetes.io/docs/concepts/overview/working-with-objects/names/#dns-subdomain-names)),
+  such as `agent-fleet`, `epic-7667-go-core` or `fleet.ops`: `a-z`, `0-9`, `-` and `.`; each
+  dot-separated part is 1 to 63 characters and starts and ends with a letter or digit. The
+  whole may be 256 characters, not Kubernetes' 253.
+
+The server refuses upper case and gives the lower-case form in its error; it never
+lower-cases a name. Before #8149 a channel was `^[a-z0-9-]{1,40}$`, which also allows a
+leading or trailing `-`. A channel made with such a name keeps it (a join, leave or post
+works), but no new channel gets one (core: 422, reason `legacy-channel-name`). The rules are
+in `tools/go/fleetchat/service.go`, `tools/go/core/internal/fleet/fleet.go` and the
+`fleet_channels` CHECK (migration `20261127T0415Z_fleet_channel_names.sql`), all three tested
+against `tools/go/fleetchat/testdata/channel-vectors.json`. A join or leave of a reference
+puts the channel in the query (`…/fleet/members/{session_id}?channel=`), since core leaves a
+path with an escaped `/` or `#` to Python.
+
 ### Virtual senders
 
 A virtual sender is a reserved one-way name (#8026, #7971 part 6). The table
@@ -51,8 +76,9 @@ A virtual sender is a reserved one-way name (#8026, #7971 part 6). The table
 name, its description and its reject message. It starts with `rotator`, the login rotator
 (#7990), and `github`, the GitHub stream (#7971 part 7).
 
-- A name follows the channel pattern and holds a character that is no hex digit, so no
-  agent's handle (8 hex characters) can ever be a name. The table's CHECK refuses other names.
+- A name follows `^[a-z0-9-]{1,40}$` (the channel rule before #8149) and holds a character
+  that is no hex digit, so no agent's handle (8 hex characters) can ever be a name. The
+  table's CHECK refuses other names.
 - Only the service caller `fleet-rotator` posts as a virtual sender:
   `POST /api/v1/internal/crud/fleet-rotator/virtual-messages` `{sender, channel | agent, text}`
   (`tools/go/core/internal/fleet/virtual.go`). A channel post goes to the channel's members;
@@ -92,7 +118,8 @@ event log `events`.
 
 ## Tests
 
-- `tools/go/core/fleet_test.go`: the routes, against Postgres.
+- `tools/go/core/fleet_test.go`: the routes, against Postgres; `fleet_channels_test.go`: the
+  channel names, through the routes and the CHECK.
 - `tools/go/fleet/sbfleet/*_test.go`, `tools/go/fleet/main_test.go`: the store, the bus,
   the exchange and the binary, against fakes.
 - `tools/go/fleetchat/*_test.go`: the service and the MCP server.

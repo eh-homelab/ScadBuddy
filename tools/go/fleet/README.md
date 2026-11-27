@@ -34,7 +34,7 @@ telemetry's `Transport`); `(*Exchange).WrapTransport` does the same for the exch
   |---|---|
   | `Touch` | `POST /agents/{session_id}/touch` |
   | `Agents` | `GET /agents` (`{"agents"}`) |
-  | `Join` / `Leave` | `PUT` / `DELETE /channels/{name}/members/{session_id}` |
+  | `Join` / `Leave` | `PUT` / `DELETE /channels/{name}/members/{session_id}` for a plain name; `PUT` / `DELETE /members/{session_id}?channel=` for a GitHub reference, whose `/` and `#` core cannot take escaped in a path (#8149) |
   | `Channels` | `GET /agents/{session_id}/channels` (`{"channels"}`) |
   | `Send` | `POST /messages` `{"from", "channel" or "agent", "text"}` (`{"seq", "recipients"}`) |
   | `Inbox` | `GET /agents/{session_id}/inbox?limit=&peek=` (`{"messages", "more"}`; a page holds at most 4 MiB of text, and at least one message) |

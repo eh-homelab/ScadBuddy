@@ -5,6 +5,8 @@ import (
 	"fmt"
 	"log/slog"
 	"regexp"
+	"slices"
+	"strings"
 	"time"
 )
 
@@ -30,14 +32,44 @@ func DefaultConfig() Config {
 var (
 	sessionRE = regexp.MustCompile(`^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$`)
 	handleRE  = regexp.MustCompile(`^[0-9a-f]{8}$`)
-	channelRE = regexp.MustCompile(`^[a-z0-9-]{1,40}$`)
+	nameRE    = regexp.MustCompile(LegacyChannelPattern)
+	refRE     = regexp.MustCompile(RefChannelPattern)
+	dnsRE     = regexp.MustCompile(NameChannelPattern)
 	hexRE     = regexp.MustCompile(`^[0-9a-f]*$`)
 )
 
-// isName says whether agent is a name, such as a virtual sender's: a channel's pattern with
+// A channel's name, at most MaxChannel bytes, is one of (#8149):
+//   - a GitHub reference, RefChannelPattern: owner/repo#number (an issue or PR) or
+//     owner/repo/runs/id (an Actions run);
+//   - a plain name under Kubernetes' rules, NameChannelPattern: a DNS-1123 subdomain (lower-case
+//     alphanumerics, "-" and "."; each dot-separated label 1 to 63 characters, starting and
+//     ending with an alphanumeric), save that the whole may be MaxChannel bytes, not 253.
+//
+// Before #8149 a channel was LegacyChannelPattern, which allows a leading or trailing "-". Such
+// a name stays usable for a channel that already exists (join, leave, send), but no new
+// channel gets one. core's internal/fleet and the fleet_channels CHECK hold the same rules;
+// testdata/channel-vectors.json keeps the copies alike.
+const (
+	RefChannelPattern    = `^[a-z0-9][a-z0-9-]{0,38}/[a-z0-9._-]{1,100}(?:#[1-9][0-9]{0,9}|/runs/[1-9][0-9]{0,19})$`
+	NameChannelPattern   = `^[a-z0-9](?:[-a-z0-9]{0,61}[a-z0-9])?(?:\.[a-z0-9](?:[-a-z0-9]{0,61}[a-z0-9])?)*$`
+	LegacyChannelPattern = `^[a-z0-9-]{1,40}$`
+	MaxChannel           = 256
+)
+
+// ValidChannel says whether channel is a name a new channel may have.
+func ValidChannel(channel string) bool {
+	return len(channel) <= MaxChannel && (refRE.MatchString(channel) || dnsRE.MatchString(channel))
+}
+
+// legacyOnly says whether channel is valid only under the rule before #8149.
+func legacyOnly(channel string) bool {
+	return !ValidChannel(channel) && nameRE.MatchString(channel)
+}
+
+// isName says whether agent is a name, such as a virtual sender's: LegacyChannelPattern with
 // a character that is no hex digit, so no name can ever be a handle.
 func isName(agent string) bool {
-	return channelRE.MatchString(agent) && !hexRE.MatchString(agent)
+	return nameRE.MatchString(agent) && !hexRE.MatchString(agent)
 }
 
 // Handle returns the agent's handle, the first 8 hex characters of its
@@ -86,11 +118,16 @@ func (s *Service) touch(ctx context.Context, sessionID string) error {
 	return s.store.Touch(ctx, sessionID, h)
 }
 
+// checkChannel refuses a name no channel can have: neither valid nor legacyOnly. A name that
+// is valid in lower case is refused too, never lower-cased: the error says so.
 func checkChannel(channel string) error {
-	if !channelRE.MatchString(channel) {
-		return fmt.Errorf("%w: %q", ErrBadChannel, channel)
+	if ValidChannel(channel) || legacyOnly(channel) {
+		return nil
 	}
-	return nil
+	if lower := strings.ToLower(channel); lower != channel && (ValidChannel(lower) || legacyOnly(lower)) {
+		return fmt.Errorf("%w: %q has upper case; write it as %q", ErrBadChannel, channel, lower)
+	}
+	return fmt.Errorf("%w: %q", ErrBadChannel, channel)
 }
 
 func (s *Service) Join(ctx context.Context, sessionID, channel string) error {
@@ -102,6 +139,16 @@ func (s *Service) Join(ctx context.Context, sessionID, channel string) error {
 	}
 	if err := s.touch(ctx, sessionID); err != nil {
 		return err
+	}
+	if legacyOnly(channel) {
+		// Only an existing channel keeps an old-style name; a join never makes one.
+		chans, err := s.store.Channels(ctx, sessionID)
+		if err != nil {
+			return err
+		}
+		if !slices.ContainsFunc(chans, func(c ChannelInfo) bool { return c.Name == channel }) {
+			return fmt.Errorf("%w: %q starts or ends with \"-\", which only a channel made before #8149 may", ErrBadChannel, channel)
+		}
 	}
 	return s.store.Join(ctx, sessionID, channel)
 }

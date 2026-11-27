@@ -39,6 +39,8 @@ var reasons = map[string]error{
 	"handle-taken":    ErrHandleTaken,
 	"seq-ahead":       fleetchat.ErrBadSeq,
 	"text-too-long":   fleetchat.ErrTooLong,
+	// A join that would make a channel with a name valid only before #8149.
+	"legacy-channel-name": fleetchat.ErrBadChannel,
 }
 
 type client struct {
@@ -181,7 +183,12 @@ func NewStore(baseURL string, token func() (string, error), opts ...Option) flee
 
 func agentPath(sessionID string) string { return "/agents/" + url.PathEscape(sessionID) }
 
+// memberPath is a join's or leave's route. A plain name goes in the path; a reference such as
+// owner/repo#123 goes in the query, since core leaves a path with an escape in it to Python.
 func memberPath(sessionID, channel string) string {
+	if strings.ContainsAny(channel, "/#") {
+		return "/members/" + url.PathEscape(sessionID) + "?" + url.Values{"channel": {channel}}.Encode()
+	}
 	return "/channels/" + url.PathEscape(channel) + "/members/" + url.PathEscape(sessionID)
 }
 
