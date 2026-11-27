@@ -186,6 +186,10 @@ func TestARevokedSessionIsFoundAtAResync(t *testing.T) {
 		now() + interval '1 day', now() + interval '2 days')`, []byte(token))
 	sock, res := s.dial(map[string]string{"Cookie": "__Host-scadbuddy_session=" + token})
 	expect(t, res.StatusCode, 101)
+	// The socket joins the hub after it sends 101; its "subscribed" says it has joined, so the
+	// gap below reaches it.
+	sock.send(1, `{"type":"subscribe","topics":["models"]}`)
+	expect(t, sock.text(), `{"type":"subscribed","topics":["models"]}`)
 	s.hub.Gap()
 	expect(t, sock.text(), `{"type":"resync"}`)
 	s.sql(`UPDATE auth_sessions SET revoked_at = now() WHERE id_hash = sha256($1::bytea)`, []byte(token))
