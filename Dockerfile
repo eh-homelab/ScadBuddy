@@ -1323,6 +1323,14 @@ COPY workers/playwright-mcp/browser-vectors.json /app/workers/playwright-mcp/bro
 # The history kinds' payloads as Go publishes them (#6949): test_pg_event_bus.py
 # `HISTORY_GOLDEN` reads them from the repo layout.
 COPY tools/go/core/internal/bus/testdata/history /app/tools/go/core/internal/bus/testdata/history
+# The inventory vectors Go writes and the backend tests read from the repo layout (#6949
+# K1): Go's activity answers and the Python input it reads (tests/inventory,
+# tests/api/test_inventory*.py), the store's activity ids, actors, property values and
+# special requires (test_core_client.py, test_shared_sql.py, test_property_vectors.py,
+# test_kinds_required.py), and the operation notice (test_go_answers.py).
+COPY tools/go/core/internal/inventory/activities/testdata /app/tools/go/core/internal/inventory/activities/testdata
+COPY tools/go/core/internal/inventory/store/testdata /app/tools/go/core/internal/inventory/store/testdata
+COPY tools/go/core/internal/publish/testdata /app/tools/go/core/internal/publish/testdata
 
 # The fakes the tests load from the repo layout (fake_lan.py's PRINTER_PY,
 # test_bambuddy_recorder.py's RECORDER_PY), beside the backend. Last, so a change to a
