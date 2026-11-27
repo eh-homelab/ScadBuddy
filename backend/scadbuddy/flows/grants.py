@@ -175,6 +175,13 @@ class Outside(BaseModel):
 Verdict = Inside | Outside
 
 
+def own_expiry_passed(expires_at: datetime | None, spec: GrantSpec, now: datetime) -> bool:
+    """A grant's own expiry has passed: the approved one, else the one it asks for (#8220).
+    `in_force` also needs the rest of its chain, so out of force is not expired. Run and
+    standing grants both use it (#8248)."""
+    return (expires_at or spec.expires_at) <= now
+
+
 class Grant(BaseModel):
     """A run's grant (`flow_grants`)."""
 
@@ -204,9 +211,7 @@ class Grant(BaseModel):
         )
 
     def expired(self, now: datetime) -> bool:
-        """Its own expiry has passed: the approved one, else the one it asks for (#8220).
-        `in_force` also needs the rest of its chain, so out of force is not expired."""
-        return (self.expires_at or self.spec.expires_at) <= now
+        return own_expiry_passed(self.expires_at, self.spec, now)
 
 
 class GrantUse(BaseModel):
