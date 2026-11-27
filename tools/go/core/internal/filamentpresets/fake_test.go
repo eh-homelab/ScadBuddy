@@ -18,8 +18,8 @@ type blob struct {
 	body []byte
 	// size, when set, is the row's size in place of len(body).
 	size int64
-	// openErr is OpenKey's error; readErr the stream's at its end.
-	openErr, readErr error
+	// sizeErr is Size's error; openErr OpenKey's; readErr the stream's at its end.
+	sizeErr, openErr, readErr error
 }
 
 // fakeBlobs is the store in memory. It records each key OpenKey was asked for: the GETs.
@@ -56,6 +56,9 @@ func (f *fakeBlobs) Size(_ context.Context, key string) (int64, error) {
 	b, ok := f.blobs[key]
 	if !ok {
 		return 0, blobstore.ErrBlobNotFound
+	}
+	if b.sizeErr != nil {
+		return 0, b.sizeErr
 	}
 	return f.sizeOf(b), nil
 }

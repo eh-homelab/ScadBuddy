@@ -34,7 +34,11 @@ func Public(pool *pgxpool.Pool, blobs Blobs) []auth.Public {
 		return auth.Public{
 			Pattern: "GET " + path,
 			Route:   auth.Route{Class: "api", Template: path},
-			Handler: handler,
+			// Every answer of the area, a problem too, is no-store.
+			Handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				w.Header().Set("Cache-Control", "no-store")
+				handler(w, r)
+			}),
 		}
 	}
 	return []auth.Public{
@@ -81,7 +85,6 @@ func failed(w http.ResponseWriter, r *http.Request, err error) {
 }
 
 func answer(w http.ResponseWriter, r *http.Request, v any) {
-	w.Header().Set("Cache-Control", "no-store")
 	if err := httpx.WriteJSON(w, v); err != nil {
 		failed(w, r, err)
 	}

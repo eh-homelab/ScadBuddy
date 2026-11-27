@@ -56,14 +56,20 @@ func (s store) Size(ctx context.Context, key string) (int64, error) {
 //   - document_unreadable: the wrong bytes (blobstore.ErrBlobMismatch), a bad zip, or JSON
 //     that does not parse or is no object;
 //   - store_not_configured: blobstore.ErrNotConfigured;
-//   - store_unavailable: any other error.
+//   - store_unavailable: any other error of the store.
+//
+// A failed read of the row's size (the database, not the store) is no code: it answers
+// an empty code and the error, which the handler answers as a server failure.
 //
 // A missing row or object changes no row: Python's read forgets the row, and this one
 // writes nothing (plan ruling N3).
 func readDocument(ctx context.Context, blobs Blobs, key string) (jsonv.Object, string, error) {
 	size, err := blobs.Size(ctx, key)
+	if errors.Is(err, blobstore.ErrBlobNotFound) {
+		return nil, documentMissing, err
+	}
 	if err != nil {
-		return nil, codeOf(err), err
+		return nil, "", err
 	}
 	if size > DocumentLimit {
 		return nil, documentTooLarge, nil

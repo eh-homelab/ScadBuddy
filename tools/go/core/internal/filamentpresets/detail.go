@@ -89,6 +89,10 @@ func serveDetail(w http.ResponseWriter, r *http.Request, pool *pgxpool.Pool, blo
 	}
 	detail := Detail{Row: *row, Versions: versions}
 	doc, code, err := readDocument(r.Context(), blobs, row.blobKey)
+	if code == "" && err != nil {
+		failed(w, r, err)
+		return
+	}
 	if code != "" {
 		logRead(r, code, err)
 		detail.DocumentError = &code

@@ -147,6 +147,10 @@ func serveDiff(w http.ResponseWriter, r *http.Request, pool *pgxpool.Pool, blobs
 			continue
 		}
 		doc, code, err := readDocument(ctx, blobs, keys[v])
+		if code == "" && err != nil {
+			failed(w, r, err)
+			return
+		}
 		if code != "" {
 			logRead(r, code, err)
 			writeCode(w, r, code)

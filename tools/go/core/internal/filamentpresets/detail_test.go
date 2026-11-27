@@ -55,6 +55,30 @@ func TestReadDocumentMapsEachError(t *testing.T) {
 	}
 }
 
+// A failed read of the row's size is the database's failure, not the store's: no code, and
+// the handler answers it as a server failure.
+func TestReadDocumentGivesAFailedSizeReadAsAnError(t *testing.T) {
+	f := newFake()
+	cause := errors.New("conn closed")
+	f.put("k", blob{body: packed(t, map[string]string{"file": `{}`}), sizeErr: cause})
+	doc, code, err := readDocument(context.Background(), f, "k")
+	if code != "" || doc != nil || !errors.Is(err, cause) || len(f.opened) != 0 {
+		t.Fatalf("%q %v %v GETs %v", code, doc, err, f.opened)
+	}
+}
+
+func TestADetailWhoseSizeReadFailsIsAServerFailure(t *testing.T) {
+	e := newEnv(t)
+	doc := `{"name":"PLA"}`
+	id := e.preset("manual", "PLA", doc)
+	key, _ := keyOf(doc)
+	e.blobs.put(key, blob{sizeErr: errors.New("conn closed")})
+	status, cache, body := e.get(fmt.Sprintf("%s/%d", listPath, id))
+	if status != http.StatusInternalServerError || cache != "no-store" || field(body, "code") != nil {
+		t.Fatalf("%d %q %s", status, cache, jsonv.Dumps(body))
+	}
+}
+
 func TestReadDocumentOverTheCapSendsNoGet(t *testing.T) {
 	f := newFake()
 	f.put("k", blob{body: packed(t, map[string]string{"file": `{}`}), size: DocumentLimit + 1})
@@ -121,8 +145,8 @@ func TestDetailOfALostBlobHasNoDocument(t *testing.T) {
 func TestAnUnknownPresetIsNotFound(t *testing.T) {
 	e := newEnv(t)
 	for _, id := range []string{"9", "0", "-1", "bambuddy-import", "99999999999999999999", "+1", "01"} {
-		status, _, body := e.get(listPath + "/" + id)
-		if status != http.StatusNotFound || field(body, "code") != "preset_not_found" {
+		status, cache, body := e.get(listPath + "/" + id)
+		if status != http.StatusNotFound || cache != "no-store" || field(body, "code") != "preset_not_found" {
 			t.Errorf("%s: %d %s", id, status, jsonv.Dumps(body))
 		}
 	}

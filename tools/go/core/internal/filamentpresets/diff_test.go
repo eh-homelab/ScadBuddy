@@ -53,8 +53,8 @@ func TestDiffRefusesAnUnknownVersionAndALostBlob(t *testing.T) {
 	}
 	key, _ := keyOf(first)
 	e.blobs.drop(key)
-	status, _, body = e.get(fmt.Sprintf("%s/%d/diff", listPath, id))
-	if status != http.StatusConflict || field(body, "code") != "document_missing" {
+	status, cache, body := e.get(fmt.Sprintf("%s/%d/diff", listPath, id))
+	if status != http.StatusConflict || cache != "no-store" || field(body, "code") != "document_missing" {
 		t.Errorf("lost v1: %d %s", status, jsonv.Dumps(body))
 	}
 	status, _, body = e.get(listPath + "/9999/diff")

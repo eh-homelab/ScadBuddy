@@ -378,7 +378,8 @@ At a stop, the servers drain and the three signals flush within the 20 s shutdow
   spelling of it (`1e3` as `1000.0`).
 - `POST /workspace-blob-refs` answers 204 with no `Content-Type`.
 - `filament-presets`' diff compares two values by their JSON text, not by Python's `!=`. So
-  `1` and `1.0` are a change in Go. Bambu Studio's values are strings and string lists, and
+  `1` and `1.0` are a change in Go. So are two nested objects that differ only in key order,
+  which Python's `!=` calls equal. Bambu Studio's values are strings and string lists, and
   there the two agree.
 - `filament-presets` reads a document blob of at most 1 MiB, and an unzipped member `file`
   of at most 1 MiB. A larger one is `document_too_large`. Python reads with no cap.
