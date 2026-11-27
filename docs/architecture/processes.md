@@ -81,6 +81,12 @@ flowchart LR
   the CRUD listener (`scadbuddy/main.py:2163-2339`). Routers under `api/` are mounted
   automatically under `/api/v1` (`scadbuddy/main.py:279-297`); the built frontend is
   mounted last at `/` (`scadbuddy/main.py:2532`).
+- **Go core serves some paths instead.** Core (`tools/go/core`) answers the paths of the areas
+  that `SCADBUDDY_CORE_AREAS` names (`tools/go/core/main.go`). The area `filament-presets`
+  (`tools/go/core/internal/filamentpresets`, #7204) serves the public, read-only
+  `GET /api/v1/filament/presets` routes. It reads the preset rows and each document's blob
+  from the store, and it needs the KEK and an `s3` store (`tools/go/core/README.md`). With
+  the area off, the paths go on to this API, which has no handler for them.
 - **Also runs untrusted code today:** openscad renders for the editor's checks and
   `openscad-lsp`, the latter under a no-network seccomp filter (`scadbuddy/editor/nonet.py:3-6`);
   #5296 moves them out.
