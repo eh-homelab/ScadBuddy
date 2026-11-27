@@ -5,14 +5,15 @@ answer, and never says which of the reasons it is that a code is refused."""
 from __future__ import annotations
 
 from typing import Any
+from uuid import UUID
 
 from psycopg import Connection
 from psycopg.rows import DictRow
 
-from scadbuddy.codes.parse import format_code, parse_code
+from scadbuddy.codes.parse import Code, format_code, parse_code
 from scadbuddy.codes.resolve import PREFIXES, resolve
 from scadbuddy.tasks.models import AnswerProblem
-from scadbuddy.tasks.widgets import scan_fields
+from scadbuddy.tasks.widgets import Expects, scan_fields
 
 _FILE_WIDGETS = ("photo", "file")
 
@@ -28,6 +29,22 @@ def _file_fields(schema: dict[str, Any]) -> list[str]:
     ]
 
 
+def _uuid(value: str) -> str | None:
+    """``value`` as the text an attachment's id is stored as, or None if it is no UUID."""
+    try:
+        return str(UUID(value))
+    except ValueError:
+        return None
+
+
+def _accepts(expects: Expects, kind: str, code: Code) -> bool:
+    if format_code(code.prefix, code.number) in expects["codes"]:
+        return True
+    if kind in expects["kinds"]:
+        return True
+    return not expects["kinds"] and not expects["codes"]
+
+
 def scan_and_file_problems(
     conn: Connection[DictRow], task_id: str, schema: dict[str, Any], answer: dict[str, Any]
 ) -> list[AnswerProblem]:
@@ -41,13 +58,7 @@ def scan_and_file_problems(
             continue
         code = parse_code(value)
         lookup = PREFIXES.get(code.prefix) if code else None
-        allowed = code is not None and lookup is not None
-        if code is not None and lookup is not None and (expects["kinds"] or expects["codes"]):
-            allowed = (
-                lookup.kind in expects["kinds"]
-                or format_code(code.prefix, code.number) in expects["codes"]
-            )
-        if not allowed or code is None:
+        if code is None or lookup is None or not _accepts(expects, lookup.kind, code):
             problems.append(AnswerProblem(field=name, message="is not a code this question takes"))
             continue
         found = resolve(conn, code)
@@ -57,10 +68,15 @@ def scan_and_file_problems(
         value = answer.get(name)
         if not isinstance(value, str):
             continue
-        held = conn.execute(
-            "SELECT 1 FROM entity_attachments WHERE subject = %s AND id::text = %s",
-            (f"task:{task_id}", value),
-        ).fetchone()
+        attachment = _uuid(value)
+        held = (
+            None
+            if attachment is None
+            else conn.execute(
+                "SELECT 1 FROM entity_attachments WHERE subject = %s AND id = %s",
+                (f"task:{task_id}", attachment),
+            ).fetchone()
+        )
         if held is None:
             problems.append(AnswerProblem(field=name, message="is not a file of this task"))
     return problems
