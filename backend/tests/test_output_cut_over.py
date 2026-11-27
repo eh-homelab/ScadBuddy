@@ -1,34 +1,25 @@
 """The cut-over (#7257). Release B retired the copies of the files to rows and to blobs
-(plan Task B2): the housekeeping activities `OUTPUT_COPY_SWEEP` and `OUTPUT_BYTES_SWEEP`
-stay registered for one release and do nothing. Release B writes no folder: the rows
-and the blobs are the only record."""
+(plan Task B2; #7886 removed their housekeeping activities). Release B writes no folder:
+the rows and the blobs are the only record."""
 
 from __future__ import annotations
 
 import asyncio
-import logging
 from collections.abc import AsyncGenerator, Iterator
 from pathlib import Path
-from types import SimpleNamespace
-from typing import Any
 
 import pytest
-from temporalio.testing import ActivityEnvironment
 
-from scadbuddy import main
 from scadbuddy.library.output_bytes import OutputBytes
 from scadbuddy.library.output_rows import OutputRows, output_blob_key
 from scadbuddy.library.outputs import OutputMeta, OutputStore
 from scadbuddy.render.projection import JobProjection
 from scadbuddy.store.content import ContentStore
 from scadbuddy.store.index import Pool
-from scadbuddy.workflows.housekeeping import OUTPUT_BYTES_SWEEP, OUTPUT_COPY_SWEEP, SWEEPS
 from tests.support.arrange import finished_job
 from tests.support.store import local_content, store_pool
 
 pytestmark = pytest.mark.requires_postgres
-
-NOTHING_TO_COPY = "the outputs are cut over (#7257); nothing to copy"
 
 
 @pytest.fixture
@@ -75,40 +66,6 @@ def _folder(store: OutputStore, meta: OutputMeta) -> Path:
 def _rows(store: OutputStore) -> OutputRows:
     assert store.rows is not None
     return store.rows
-
-
-def _outputs(pool: Pool) -> list[tuple[str, Any, Any]]:
-    """Each row's id, ``meta`` and ``bytes_at``: what a copy would write."""
-    with pool.connection() as conn:
-        found = conn.execute(
-            "SELECT output_id, meta, bytes_at FROM outputs ORDER BY output_id"
-        ).fetchall()
-    return [(str(r["output_id"]), r["meta"], r["bytes_at"]) for r in found]
-
-
-async def test_copy_sweeps_do_nothing(
-    saved: tuple[OutputStore, list[OutputMeta]],
-    content: ContentStore,
-    projection: JobProjection,
-    pool: Pool,
-    caplog: pytest.LogCaptureFixture,
-) -> None:
-    """Plan Task B2: both copy activities return, log that the outputs are cut over, and
-    touch no row, though no output has a folder. (#7887 dropped the run tables.)"""
-    store, metas = saved
-    before = _outputs(pool)
-    assert not _folder(store, metas[0]).exists()
-    state = SimpleNamespace(
-        outputs=store,
-        projection=SimpleNamespace(conninfo=projection.conninfo),
-        store=SimpleNamespace(content=content),
-    )
-    sweeps = dict(zip(SWEEPS, main._housekeeping_activities(state), strict=True))  # type: ignore[arg-type]
-    with caplog.at_level(logging.INFO, logger="scadbuddy.main"):
-        await ActivityEnvironment().run(sweeps[OUTPUT_COPY_SWEEP])
-        await ActivityEnvironment().run(sweeps[OUTPUT_BYTES_SWEEP])
-    assert _outputs(pool) == before
-    assert [r.getMessage() for r in caplog.records].count(NOTHING_TO_COPY) == 2
 
 
 THUMBNAIL_PNG = b"\x89PNG\r\n\x1a\nthumbnail after the mark"

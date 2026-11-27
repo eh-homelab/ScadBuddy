@@ -2,7 +2,7 @@ import { z } from 'zod'
 import { ok } from './call.js'
 import { PROPERTY_RULES, propertyChanges, propertySet, setPropertiesAfter } from './entities.js'
 import { INVENTORY_UI_PATH_NOTE, type InventoryKind, withInventoryPaths } from './inventoryLinks.js'
-import { defineTool, json, ToolError } from './registry.js'
+import { defineTool, idempotencyKey, json, ToolError } from './registry.js'
 
 // The inventory (#7067, spec 2026-11-21-inventory-and-purchasing-design.md §6.4–6.6): item
 // kinds, items, supplier offers and their pack prices, and the stock of each item in lots or
@@ -60,6 +60,14 @@ async function wrote<T>(pending: Promise<FetchResult<T>>, what: string): Promise
     note: `${what}: still running, operation ${id}. It may finish later; do not call it again. Read the row later to see the result.`,
   }
 }
+
+/**
+ * The request options that give one write of a tool call its `Idempotency-Key`: the call's
+ * key (`idempotencyKey`) and the write's `step`. A retried call sends the same keys, so the
+ * API answers with the first write's result and does not write again; two writes of one
+ * call never share a key.
+ */
+const keyed = (callKey: string | undefined, step: string) => ({ headers: { 'Idempotency-Key': `${idempotencyKey({ callKey })}:${step}` } })
 
 const isRunning = (row: unknown): row is StillRunning => typeof row === 'object' && row !== null && (row as StillRunning).still_running === true
 
@@ -163,7 +171,7 @@ export const inventoryTools = [
     ],
     summarize: ({ kind_id, create, archived }) =>
       `${create ? 'Add' : 'Edit'} inventory kind ${kind_id ?? '(numbered)'}${archived === true ? ' and archive it' : archived === false ? ' and restore it' : ''}`,
-    handler: async ({ kind_id: given, create, fields, archived }, { backend }) => {
+    handler: async ({ kind_id: given, create, fields, archived }, { backend, callKey }) => {
       if (!create && given === undefined) throw new ToolError('an edit needs `kind_id`; only a new kind may leave it out')
       let kind_id = given ?? ''
       let row: unknown
@@ -172,18 +180,18 @@ export const inventoryTools = [
         if (name === undefined || tracking === undefined) throw new ToolError('a new kind needs `name` and `tracking`')
         if (archived === false) throw new ToolError('a new kind is not archived: leave out `archived: false`')
         const body = { ...changes(fields), name, tracking, ...(given === undefined ? {} : { id: given }) }
-        row = await wrote(backend.POST('/api/v1/inventory/kinds', { body }), `add kind ${given ?? name}`)
+        row = await wrote(backend.POST('/api/v1/inventory/kinds', { body, ...keyed(callKey, 'add') }), `add kind ${given ?? name}`)
         // A numbered kind's id is in the answer.
         if (given === undefined && row && typeof row === 'object' && 'id' in row && typeof row.id === 'string') kind_id = row.id
       } else if (!empty(fields)) {
-        row = await wrote(backend.PATCH('/api/v1/inventory/kinds/{kind_id}', { params: { path: { kind_id } }, body: changes(fields) }), `edit kind ${kind_id}`)
+        row = await wrote(backend.PATCH('/api/v1/inventory/kinds/{kind_id}', { params: { path: { kind_id } }, body: changes(fields), ...keyed(callKey, 'edit') }), `edit kind ${kind_id}`)
       } else if (archived === undefined) {
         throw new ToolError('nothing to change: give `fields`, `archived` or `create`')
       }
       if (isRunning(row)) return answer(row)
       const path = { params: { path: { kind_id } } }
-      if (archived === true) row = await wrote(backend.POST('/api/v1/inventory/kinds/{kind_id}/archive', path), `archive kind ${kind_id}`)
-      if (archived === false) row = await wrote(backend.POST('/api/v1/inventory/kinds/{kind_id}/restore', path), `restore kind ${kind_id}`)
+      if (archived === true) row = await wrote(backend.POST('/api/v1/inventory/kinds/{kind_id}/archive', { ...path, ...keyed(callKey, 'archive') }), `archive kind ${kind_id}`)
+      if (archived === false) row = await wrote(backend.POST('/api/v1/inventory/kinds/{kind_id}/restore', { ...path, ...keyed(callKey, 'restore') }), `restore kind ${kind_id}`)
       return answer(row, 'kind')
     },
   }),
@@ -318,13 +326,16 @@ export const inventoryTools = [
     ],
     summarize: ({ item_id, fields, properties }) =>
       (item_id ? `Edit inventory item ${item_id}` : `Add inventory item ${fields.name ?? ''}`.trim()) + propertyChanges(properties),
-    handler: async ({ item_id, fields, properties }, { backend }) => {
+    handler: async ({ item_id, fields, properties }, { backend, callKey }) => {
       let row
       if (item_id === undefined) {
         const { kind_id, name } = fields
         if (kind_id === undefined || name === undefined) throw new ToolError('a new item needs `kind_id` and `name` in `fields`')
         row = await wrote(
-          backend.POST('/api/v1/inventory/items', { body: { ...changes(fields), kind_id, name, ...(properties === undefined ? {} : { properties }) } }),
+          backend.POST('/api/v1/inventory/items', {
+            body: { ...changes(fields), kind_id, name, ...(properties === undefined ? {} : { properties }) },
+            ...keyed(callKey, 'add'),
+          }),
           'add an inventory item',
         )
       } else {
@@ -338,7 +349,11 @@ export const inventoryTools = [
           return answer({ ...row, properties: set }, 'item')
         }
         row = await wrote(
-          backend.PATCH('/api/v1/inventory/items/{item_id}', { ...path, body: { ...changes(fields), ...(properties === undefined ? {} : { properties }) } }),
+          backend.PATCH('/api/v1/inventory/items/{item_id}', {
+            ...path,
+            body: { ...changes(fields), ...(properties === undefined ? {} : { properties }) },
+            ...keyed(callKey, 'edit'),
+          }),
           `edit inventory item ${item_id}`,
         )
       }
@@ -360,11 +375,11 @@ export const inventoryTools = [
     source: SOURCE,
     routes: ['POST /api/v1/inventory/items/{item_id}/archive', 'POST /api/v1/inventory/items/{item_id}/restore'],
     summarize: ({ item_id, restore }) => `${restore ? 'Restore' : 'Archive'} inventory item ${item_id}`,
-    handler: async ({ item_id, restore }, { backend }) => {
+    handler: async ({ item_id, restore }, { backend, callKey }) => {
       const path = { params: { path: { item_id } } }
       const row = restore
-        ? await wrote(backend.POST('/api/v1/inventory/items/{item_id}/restore', path), `restore inventory item ${item_id}`)
-        : await wrote(backend.POST('/api/v1/inventory/items/{item_id}/archive', path), `archive inventory item ${item_id}`)
+        ? await wrote(backend.POST('/api/v1/inventory/items/{item_id}/restore', { ...path, ...keyed(callKey, 'restore') }), `restore inventory item ${item_id}`)
+        : await wrote(backend.POST('/api/v1/inventory/items/{item_id}/archive', { ...path, ...keyed(callKey, 'archive') }), `archive inventory item ${item_id}`)
       return answer(row, 'item')
     },
   }),
@@ -497,8 +512,8 @@ export const inventoryTools = [
     source: SOURCE,
     routes: ['POST /api/v1/inventory/items/{item_id}/lots'],
     summarize: ({ item_id, qty }) => `Receive ${qty} of inventory item ${item_id}`,
-    handler: async ({ item_id, ...body }, { backend }) =>
-      answer(await wrote(backend.POST('/api/v1/inventory/items/{item_id}/lots', { params: { path: { item_id } }, body }), `receive a lot of item ${item_id}`), 'lot'),
+    handler: async ({ item_id, ...body }, { backend, callKey }) =>
+      answer(await wrote(backend.POST('/api/v1/inventory/items/{item_id}/lots', { params: { path: { item_id } }, body, ...keyed(callKey, 'receive') }), `receive a lot of item ${item_id}`), 'lot'),
   }),
   defineTool({
     name: 'inventory_lot_update',
@@ -519,9 +534,9 @@ export const inventoryTools = [
     source: SOURCE,
     routes: ['PATCH /api/v1/inventory/lots/{lot_id}'],
     summarize: ({ lot_id, unit_cost_minor }) => `Edit lot ${lot_id}${unit_cost_minor !== undefined ? `: unit cost ${unit_cost_minor}` : ''}`,
-    handler: async ({ lot_id, ...fields }, { backend }) => {
+    handler: async ({ lot_id, ...fields }, { backend, callKey }) => {
       if (empty(fields)) throw new ToolError('nothing to change: give `unit_cost_minor`, `location_id` or `note`')
-      return answer(await wrote(backend.PATCH('/api/v1/inventory/lots/{lot_id}', { params: { path: { lot_id } }, body: changes(fields) }), `edit lot ${lot_id}`), 'lot')
+      return answer(await wrote(backend.PATCH('/api/v1/inventory/lots/{lot_id}', { params: { path: { lot_id } }, body: changes(fields), ...keyed(callKey, 'edit') }), `edit lot ${lot_id}`), 'lot')
     },
   }),
   defineTool({
@@ -562,8 +577,8 @@ export const inventoryTools = [
     source: SOURCE,
     routes: ['POST /api/v1/inventory/items/{item_id}/units'],
     summarize: ({ item_id, count }) => `Receive ${count} unit(s) of inventory item ${item_id}`,
-    handler: async ({ item_id, ...body }, { backend }) =>
-      answer(await wrote(backend.POST('/api/v1/inventory/items/{item_id}/units', { params: { path: { item_id } }, body }), `receive units of item ${item_id}`)),
+    handler: async ({ item_id, ...body }, { backend, callKey }) =>
+      answer(await wrote(backend.POST('/api/v1/inventory/items/{item_id}/units', { params: { path: { item_id } }, body, ...keyed(callKey, 'receive') }), `receive units of item ${item_id}`)),
   }),
   defineTool({
     name: 'inventory_unit_update',
@@ -583,9 +598,9 @@ export const inventoryTools = [
     source: SOURCE,
     routes: ['PATCH /api/v1/inventory/units/{unit_id}'],
     summarize: ({ unit_id }) => `Edit unit ${unit_id}`,
-    handler: async ({ unit_id, ...fields }, { backend }) => {
+    handler: async ({ unit_id, ...fields }, { backend, callKey }) => {
       if (empty(fields)) throw new ToolError('nothing to change: give `name`, `serial` or `location_id`')
-      return answer(await wrote(backend.PATCH('/api/v1/inventory/units/{unit_id}', { params: { path: { unit_id } }, body: changes(fields) }), `edit unit ${unit_id}`), 'unit')
+      return answer(await wrote(backend.PATCH('/api/v1/inventory/units/{unit_id}', { params: { path: { unit_id } }, body: changes(fields), ...keyed(callKey, 'edit') }), `edit unit ${unit_id}`), 'unit')
     },
   }),
   defineTool({
@@ -608,8 +623,8 @@ export const inventoryTools = [
     source: SOURCE,
     routes: ['POST /api/v1/inventory/units/{unit_id}/status'],
     summarize: ({ unit_id, status }) => `Set unit ${unit_id} to ${status}`,
-    handler: async ({ unit_id, ...body }, { backend }) =>
-      answer(await wrote(backend.POST('/api/v1/inventory/units/{unit_id}/status', { params: { path: { unit_id } }, body }), `change the status of unit ${unit_id}`), 'unit'),
+    handler: async ({ unit_id, ...body }, { backend, callKey }) =>
+      answer(await wrote(backend.POST('/api/v1/inventory/units/{unit_id}/status', { params: { path: { unit_id } }, body, ...keyed(callKey, 'status') }), `change the status of unit ${unit_id}`), 'unit'),
   }),
   defineTool({
     name: 'inventory_move_list',
@@ -654,8 +669,8 @@ export const inventoryTools = [
     source: SOURCE,
     routes: ['POST /api/v1/inventory/items/{item_id}/use'],
     summarize: ({ item_id, qty }) => `Use ${qty} of inventory item ${item_id}`,
-    handler: async ({ item_id, ...body }, { backend }) =>
-      answer(await wrote(backend.POST('/api/v1/inventory/items/{item_id}/use', { params: { path: { item_id } }, body }), `use some of item ${item_id}`)),
+    handler: async ({ item_id, ...body }, { backend, callKey }) =>
+      answer(await wrote(backend.POST('/api/v1/inventory/items/{item_id}/use', { params: { path: { item_id } }, body, ...keyed(callKey, 'use') }), `use some of item ${item_id}`)),
   }),
   defineTool({
     name: 'inventory_move_count',
@@ -677,12 +692,12 @@ export const inventoryTools = [
     source: SOURCE,
     routes: ['POST /api/v1/inventory/items/{item_id}/count', 'POST /api/v1/inventory/lots/{lot_id}/adjust'],
     summarize: ({ item_id, lot_id, on_hand }) => `Count ${on_hand} on hand of ${lot_id ? `lot ${lot_id}` : `inventory item ${item_id}`}`,
-    handler: async ({ item_id, lot_id, on_hand, note }, { backend }) => {
+    handler: async ({ item_id, lot_id, on_hand, note }, { backend, callKey }) => {
       const body = { on_hand, note }
       if (oneOf({ item_id, lot_id }) === 'lot_id') {
-        return answer(await wrote(backend.POST('/api/v1/inventory/lots/{lot_id}/adjust', { params: { path: { lot_id: lot_id! } }, body }), `count lot ${lot_id}`), 'lot')
+        return answer(await wrote(backend.POST('/api/v1/inventory/lots/{lot_id}/adjust', { params: { path: { lot_id: lot_id! } }, body, ...keyed(callKey, 'count') }), `count lot ${lot_id}`), 'lot')
       }
-      return answer(await wrote(backend.POST('/api/v1/inventory/items/{item_id}/count', { params: { path: { item_id: item_id! } }, body }), `count item ${item_id}`))
+      return answer(await wrote(backend.POST('/api/v1/inventory/items/{item_id}/count', { params: { path: { item_id: item_id! } }, body, ...keyed(callKey, 'count') }), `count item ${item_id}`))
     },
   }),
 ]

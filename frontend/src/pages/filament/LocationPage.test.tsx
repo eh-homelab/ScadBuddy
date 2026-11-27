@@ -5,6 +5,8 @@ import { describe, expect, it } from 'vitest'
 import { getLocation, listSpools, moveSpool } from '../../api/filament'
 import { H2C, L, spoolId } from '../../mocks/features/filament/seed'
 import { server } from '../../mocks/server'
+import { seedUnknownTray } from '../../mocks/features/filament/unknownTrays'
+import { NeedsYouHarness } from '../../test/needsYou'
 import { renderPage } from '../../test/utils'
 import { LocationPage } from './LocationPage'
 
@@ -125,5 +127,42 @@ describe('the location page', () => {
     expect(root.className).toMatch(/\bmax-w-/)
     expect(root.className).not.toMatch(/(^|\s)(min-)?w-\[?[1-9]/)
     expect(screen.getByRole('heading', { level: 1 }).className).toMatch(/break-words|truncate/)
+  })
+})
+
+describe('the location page · unknown spool (#7143)', () => {
+  const slot2 = async () => {
+    const real = await getLocation(L.AMS_A1)
+    server.use(http.get('*/api/v1/filament/locations/:id', () => HttpResponse.json({ ...real, tray_id: 1, spools: [] })))
+  }
+
+  it('says an unknown spool is loaded in this slot and links one', async () => {
+    seedUnknownTray()
+    await slot2()
+    const { user } = renderPage(
+      <NeedsYouHarness>
+        <LocationPage />
+      </NeedsYouHarness>,
+      { route: `/filament/locations/${L.AMS_A1}`, path: '/filament/locations/:id' },
+    )
+    expect(await screen.findByText('An unknown spool is loaded here. Prints to this printer wait until you link it.')).toBeInTheDocument()
+    await user.click(screen.getByRole('button', { name: 'Tell ScadBuddy which spool…' }))
+    const dialog = await screen.findByRole('dialog', { name: 'Unknown spool in 3DP-31B-598 AMS-A slot 2' })
+    await user.click(within(dialog).getByRole('radio', { name: /S-9\b/ }))
+    await user.type(within(dialog).getByLabelText('Net weight (g)'), '980')
+    await user.click(within(dialog).getByRole('button', { name: 'Link spool' }))
+    await waitFor(() => expect(screen.queryByText(/An unknown spool is loaded here/)).toBeNull())
+  })
+
+  it('says nothing for a place with no unknown tray', async () => {
+    seedUnknownTray()
+    renderPage(
+      <NeedsYouHarness>
+        <LocationPage />
+      </NeedsYouHarness>,
+      { route: `/filament/locations/${L.AMS_A1}`, path: '/filament/locations/:id' },
+    )
+    expect(await screen.findByRole('heading', { level: 1, name: 'H2C AMS-A slot 1' })).toBeInTheDocument()
+    expect(screen.queryByText(/An unknown spool is loaded here/)).toBeNull()
   })
 })

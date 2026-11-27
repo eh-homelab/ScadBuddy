@@ -1531,6 +1531,32 @@ async def test_concurrent_renewals_share_one_ready_paths_read(
     await rig.recorder.aclose()
 
 
+async def test_close_cancels_a_ready_paths_read_in_flight(tmp_path: Path, api: FakeCamera) -> None:
+    """A stall check cancelled while its shared read runs leaves that read behind: ``aclose``
+    cancels it, so it can neither outlive the recorder nor fail unread (#8187)."""
+    rig = Rig(tmp_path, api)
+    await rig.recorder.reconcile_all()
+    await rig.recorder.tick(P1)
+    started = asyncio.Event()
+
+    async def ready() -> dict[str, bool]:
+        started.set()
+        await asyncio.sleep(3600)
+        return {}
+
+    rig.recorder._mtx.ready = ready  # type: ignore[method-assign]
+    rig.clock.now += 5  # past the read the tick cached
+    check = asyncio.ensure_future(rig.recorder._ready_paths())
+    await asyncio.wait_for(started.wait(), 5)
+    check.cancel()
+    await asyncio.gather(check, return_exceptions=True)
+    assert rig.recorder._ready_cache is not None
+    read = rig.recorder._ready_cache[1]
+    assert not read.done()
+    await rig.recorder.aclose()
+    assert read.cancelled()
+
+
 async def test_a_stall_release_is_counted(tmp_path: Path, api: FakeCamera) -> None:
     """Each stall release adds one to ``scadbuddy_camera_stall_releases_total``, so two
     recorders that both cannot index and hand the lease back and forth show it (#7998)."""

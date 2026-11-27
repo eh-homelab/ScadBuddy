@@ -254,20 +254,10 @@ AUTO_IMPORT_PATCH = "housekeeping-auto-import-prints"
 #: the Prints page for at most `PRUNE_INTERVAL` too.
 RUN_HOLDS_SWEEP = "housekeeping_reap_print_run_holds"
 RUN_HOLDS_PATCH = "housekeeping-reap-print-run-holds"
-#: #7255: was the copy of the saved outputs' files to their `outputs` rows. Retired by
-#: #7257 (`OUTPUTS_CUT_OVER_PATCH`): its activity does nothing. After the output holds'
-#: reaper, behind its own patch; on the sweeps' Schedule only.
-OUTPUT_COPY_SWEEP = "housekeeping_copy_outputs"
-OUTPUT_COPY_PATCH = "housekeeping-copy-outputs"
-#: #7256: was the copy of the saved outputs' bytes to the blob store. Retired by #7257
-#: (`OUTPUTS_CUT_OVER_PATCH`): its activity does nothing. After the row copy, behind its
-#: own patch; on the sweeps' Schedule only.
-OUTPUT_BYTES_SWEEP = "housekeeping_copy_output_bytes"
-OUTPUT_BYTES_PATCH = "housekeeping-copy-output-bytes"
-#: #7257 (plan D4): the copies are retired. A run with this patch schedules neither
-#: `OUTPUT_COPY_SWEEP` nor `OUTPUT_BYTES_SWEEP`. Both names stay in `SWEEPS`, and their
-#: activities stay registered as no-ops, so a recorded run that scheduled them replays
-#: its commands. A follow-up removes them with ``workflow.deprecate_patch``.
+#: #7257 (plan D4): the outputs' copies are retired. The row copy (#7255) and the byte
+#: copy (#7256) were sweeps after the output holds' reaper; this patch stopped them, and
+#: #7886 removed them, their activities and their own patches. Kept for
+#: ``workflow.deprecate_patch``, so a run recorded with it still replays.
 OUTPUTS_CUT_OVER_PATCH = "housekeeping-outputs-cut-over"
 #: #7234 (spec 2026-11-05 §4.6): one step of ``AttemptMedia`` for each order attempt of
 #: the last 14 days that still lacks its finish photo or timelapse and was not read for
@@ -295,8 +285,6 @@ SWEEPS = (
     "housekeeping_sweep_claims",
     BACKFILL_SWEEP,
     REAP_SWEEP,
-    OUTPUT_COPY_SWEEP,
-    OUTPUT_BYTES_SWEEP,
     FLOWS_SWEEP,
     PREVIEWS_SWEEP,
     LOST_SLICES_SWEEP,
@@ -467,11 +455,6 @@ AUTO_IMPORT_TIMEOUT = timedelta(minutes=15)
 #: bounded by its `SEQUENCE_CHECK_TIMEOUT`, 10 s, and the pass by half of this), then one
 #: delete.
 RUN_HOLDS_TIMEOUT = timedelta(minutes=2)
-#: The retired row copy's (#7257): kept for the runs recorded before
-#: `OUTPUTS_CUT_OVER_PATCH`, which still schedule it.
-OUTPUT_COPY_TIMEOUT = timedelta(minutes=15)
-#: The retired byte copy's (#7257), kept as `OUTPUT_COPY_TIMEOUT` is.
-OUTPUT_BYTES_TIMEOUT = timedelta(minutes=30)
 #: One read of the attempts, then one Temporal start per attempt; the downloads run in
 #: each attempt's own ``AttemptMedia`` step, not here.
 ATTEMPT_MEDIA_TIMEOUT = timedelta(minutes=5)
@@ -538,10 +521,6 @@ def sweep_timeout(sweep: str) -> timedelta:
         return AUTO_IMPORT_TIMEOUT
     if sweep == RUN_HOLDS_SWEEP:
         return RUN_HOLDS_TIMEOUT
-    if sweep == OUTPUT_COPY_SWEEP:
-        return OUTPUT_COPY_TIMEOUT
-    if sweep == OUTPUT_BYTES_SWEEP:
-        return OUTPUT_BYTES_TIMEOUT
     if sweep == ATTEMPT_MEDIA_SWEEP:
         return ATTEMPT_MEDIA_TIMEOUT
     if sweep == TEMPLATE_COPY_SWEEP:
@@ -567,6 +546,10 @@ class Housekeeping:
             # Added after runs that may still replay; one recorded before it skips it.
             if sweep == REAP_SWEEP and not workflow.patched(REAP_PATCH):
                 continue
+            # #7886: where the retired copies were, after the reaper. A run recorded with
+            # this patch has its marker here; the copies, and their own patches, are gone.
+            if sweep == FLOWS_SWEEP:
+                workflow.deprecate_patch(OUTPUTS_CUT_OVER_PATCH)
             if sweep == FLOWS_SWEEP and not workflow.patched(FLOWS_PATCH):
                 continue
             if sweep == PREVIEWS_SWEEP and not workflow.patched(PREVIEWS_PATCH):
@@ -616,14 +599,6 @@ class Housekeeping:
             if sweep == AUTO_IMPORT_SWEEP and not workflow.patched(AUTO_IMPORT_PATCH):
                 continue
             if sweep == RUN_HOLDS_SWEEP and not workflow.patched(RUN_HOLDS_PATCH):
-                continue
-            if sweep in (OUTPUT_COPY_SWEEP, OUTPUT_BYTES_SWEEP) and workflow.patched(
-                OUTPUTS_CUT_OVER_PATCH
-            ):
-                continue
-            if sweep == OUTPUT_COPY_SWEEP and not workflow.patched(OUTPUT_COPY_PATCH):
-                continue
-            if sweep == OUTPUT_BYTES_SWEEP and not workflow.patched(OUTPUT_BYTES_PATCH):
                 continue
             if sweep == ATTEMPT_MEDIA_SWEEP and not workflow.patched(ATTEMPT_MEDIA_PATCH):
                 continue

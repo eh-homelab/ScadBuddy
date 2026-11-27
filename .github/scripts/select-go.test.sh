@@ -15,6 +15,7 @@ expect true  backend/scadbuddy/entities/shared/ensure_entity.sql
 expect false backend/scadbuddy/crud/idempotency.py
 expect true  docs/inventory-model/kinds.yaml
 expect true  backend/tests/fixtures/blob-upload-vectors.json
+expect true  backend/tests/fixtures/pack-dir-vectors.json
 expect false backend/tests/fixturesx/a.json
 expect true  backend/tests/fixtures/event-stream-vectors.json
 expect true  go.work
@@ -33,6 +34,8 @@ expect true  .github/scripts/changed-paths.sh
 expect true  agent/test/fixtures/rate-limit-reset-vectors.json
 expect true  backend/tests/fixtures/plugin-seal-vectors.json
 expect true  backend/tests/fixtures/auth-vectors.json
+expect true  backend/tests/fixtures/unknown-tray-vectors.json
+expect true  backend/tests/fixtures/unknown-trays-block.json
 expect false backend/tests/fixtures/secret-vectors.json
 expect false agent/test/fixtures/secret-vectors.json
 expect true  backend/tests/fixtures/python-json-vectors.json

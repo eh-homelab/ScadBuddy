@@ -7,6 +7,7 @@ import threading
 import xml.etree.ElementTree as ET
 import zipfile
 from collections.abc import Callable
+from concurrent.futures import ThreadPoolExecutor
 from contextlib import ExitStack
 from dataclasses import replace
 from datetime import UTC, datetime
@@ -192,6 +193,56 @@ async def test_a_thumbnail_that_raises_costs_the_cover_not_the_job() -> None:
 
     assert rendered is None
     assert warnings == [THUMBNAIL_FAILED_WARNING]
+
+
+async def test_a_multi_plate_output_draws_its_covers_side_by_side_in_plate_order() -> None:
+    """#8238: a 17-plate kit spent minutes drawing one cover after another while the
+    pool's second thread idled. Each plate waits at a barrier only both reach together,
+    so the covers come back only when two are drawn at once."""
+    plates = [[ColourPart(1, f"Plate {n}", "#FF6AC1", trimesh.creation.box())] for n in range(2)]
+    both = threading.Barrier(2, timeout=10)
+
+    def drawn(parts: list[ColourPart]) -> str:
+        both.wait()
+        return parts[0].name
+
+    with (
+        ThreadPoolExecutor(max_workers=2) as pool,
+        mock.patch.object(jobs, "render_plate_thumbnails", drawn),
+    ):
+        rendered, warnings = await jobs.plates_thumbnails(plates, config=CONFIG, executor=pool)
+
+    assert rendered == ["Plate 0", "Plate 1"]  # type: ignore[comparison-overlap]
+    assert warnings == []
+
+
+async def test_a_plate_that_fails_leaves_the_queued_plates_undrawn() -> None:
+    """All or none (#8238): once one cover fails the 3MF gets none, so a plate still
+    waiting for the pool is never drawn."""
+    plates = [[ColourPart(1, f"Plate {n}", "#FF6AC1", trimesh.creation.box())] for n in range(3)]
+    drawn: list[str] = []
+    # Plate 1 may already be on the one thread when plate 0's failure is seen; it holds
+    # there until the test has its answer, so plate 2 is still queued at the cancel.
+    released = threading.Event()
+
+    def broken(parts: list[ColourPart]) -> object:
+        drawn.append(parts[0].name)
+        if parts[0].name != "Plate 0":
+            assert released.wait(timeout=30), "the test never released the thread"
+        raise ValueError("degenerate face")
+
+    with (
+        ThreadPoolExecutor(max_workers=1) as pool,
+        mock.patch.object(jobs, "render_plate_thumbnails", broken),
+    ):
+        try:
+            rendered, warnings = await jobs.plates_thumbnails(plates, config=CONFIG, executor=pool)
+        finally:
+            released.set()
+
+    assert rendered is None
+    assert warnings == [THUMBNAIL_FAILED_WARNING]
+    assert "Plate 2" not in drawn
 
 
 def _colour_schema(*colours: tuple[str, str]) -> CustomizerSchema:

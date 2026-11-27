@@ -397,6 +397,13 @@ opens every one and seals it again byte for byte).
   per tool, projected in-process for the harness and over `/mcp` (`src/mcp/http.ts`,
   auth in `src/auth/`); every `/api/v1` operation needs a tool or a
   `src/tools/coverage.ts` entry, or `test/coverage.test.ts` fails.
+  - Unknown spools (#7143): `filament_unknown_trays` (read: the loaded trays no spool holds, with
+    ranked candidates and `made_from_tags`) and `filament_unknown_tray_resolve` (write, linked as a
+    `spool`; it takes `seen_at` as listed and the user's own choice, never a candidate the agent picks)
+    are in `src/tools/filament.ts`. They call the Go routes through `src/api/unknownTrays.ts`, whose
+    types are written by hand, because `pnpm gen:api` exports Python's OpenAPI only. There is no
+    dismiss tool (D10). The Go resolve route is not built yet, so the resolve tool gets a 404 until
+    it is. Tests: `test/filament.test.ts`.
   - Data: the agent has no database ("Database access" above); the API owns the `ai_*`
     tables and applies their migrations (#5299 D6). The tests make their schemas with
     `test/support/migrations.ts` (`test/support/postgres.ts` `migrateSchema`), and
