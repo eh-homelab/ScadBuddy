@@ -294,4 +294,78 @@ describe('IdentifySpool (#7167)', () => {
       }
     })
   })
+
+  describe('with Web NFC, a Bambu tag (#7168)', () => {
+    let stub: NdefStub
+    let bodies: Record<string, unknown>[]
+    const listen = async ({ request }: { request: Request }) => {
+      if (new URL(request.url).pathname === '/api/v1/filament/tags/reads') bodies.push((await request.clone().json()) as Record<string, unknown>)
+    }
+    beforeEach(() => {
+      stub = installNdefStub()
+      bodies = []
+      server.events.on('request:start', listen)
+    })
+    afterEach(() => {
+      server.events.removeListener('request:start', listen)
+      delete window.ScadBuddyNfc
+      stub.restore()
+    })
+
+    it("posts the app's MIFARE blocks for the tapped tag", async () => {
+      window.ScadBuddyNfc = { native: true, lastMifare: { uid: '1A2B3C4D', blocks: [{ index: 1, dataHex: '4131372d503100004746413137000000' }] } }
+      const { user } = show()
+      await user.click(screen.getByRole('radio', { name: 'Scan tag' }))
+      await waitFor(() => expect(stub.scanning).toBe(true))
+      stub.tap({ serialNumber: '1a:2b:3c:4d', records: [] })
+      await waitFor(() => expect(bodies).toHaveLength(1))
+      expect(bodies[0]).toEqual({ uid: '1A2B3C4D', tag_type: 'mifare_classic', mifare_blocks: [{ index: 1, data_hex: '4131372d503100004746413137000000' }], records: [] })
+    })
+
+    it('posts no blocks without the app, and says what to do for an unknown side', async () => {
+      const { user, onIdentified } = show()
+      await user.click(screen.getByRole('radio', { name: 'Scan tag' }))
+      await waitFor(() => expect(stub.scanning).toBe(true))
+      stub.tap({ serialNumber: '1a:2b:3c:4d', records: [] })
+      expect(await screen.findByText('This side of the Bambu tag is on no spool yet. Tap the other side, use the QR code, or pick the spool by hand.')).toBeInTheDocument()
+      expect(bodies).toHaveLength(1)
+      expect(bodies[0]).not.toHaveProperty('mifare_blocks')
+      expect(screen.queryByText('This tag is not on a spool yet.')).toBeNull()
+      expect(identified(onIdentified)).toHaveLength(0)
+    })
+
+    it('posts the read again without blocks when the server cannot decode them', async () => {
+      window.ScadBuddyNfc = { native: true, lastMifare: { uid: '04A1B2C3D4E5F6', blocks: [{ index: 1, dataHex: '4131372d503100004746413137000000' }] } }
+      server.use(
+        http.post('/api/v1/filament/tags/reads', async ({ request }) => {
+          const body = (await request.clone().json()) as { mifare_blocks?: unknown }
+          if (body.mifare_blocks) return HttpResponse.json({ title: 'Service Unavailable', status: 503, detail: 'core is off', code: 'mifare_needs_core' }, { status: 503 })
+          return undefined
+        }),
+      )
+      const { user, onIdentified } = show()
+      await user.click(screen.getByRole('radio', { name: 'Scan tag' }))
+      await waitFor(() => expect(stub.scanning).toBe(true))
+      stub.tap({ serialNumber: '04:a1:b2:c3:d4:e5:f6', records: [] })
+      await waitFor(() => expect(identified(onIdentified)).toHaveLength(1))
+      expect(identified(onIdentified)[0]).toMatchObject({ id: spoolId(3) })
+      expect(bodies).toHaveLength(2)
+      expect(bodies[1]).not.toHaveProperty('mifare_blocks')
+    })
+  })
+
+  it('offers no tag way and no camera in a frame', async () => {
+    const camera = installCamera(`scadbuddy:spool:${spoolId(9)}`)
+    try {
+      const onIdentified = vi.fn()
+      const { user } = renderPage(<IdentifySpool onIdentified={onIdentified} nfc="embedded" />)
+      expect(screen.queryByRole('radio', { name: 'Scan tag' })).toBeNull()
+      await user.click(screen.getByRole('radio', { name: 'QR code' }))
+      expect(screen.getByLabelText('Spool code')).toBeInTheDocument()
+      expect(screen.queryByRole('button', { name: 'Use camera' })).toBeNull()
+      expect(screen.getByRole('button', { name: 'Take a photo' })).toBeInTheDocument()
+    } finally {
+      camera.restore()
+    }
+  })
 })

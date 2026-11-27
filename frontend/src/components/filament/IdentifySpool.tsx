@@ -1,13 +1,14 @@
-import { CameraIcon, CameraOffIcon, ImageUpIcon, ListIcon, NfcIcon, QrCodeIcon } from 'lucide-react'
+import { CameraIcon, ImageUpIcon, ListIcon, NfcIcon, QrCodeIcon } from 'lucide-react'
 import { useEffect, useId, useMemo, useRef, useState, type ReactNode } from 'react'
 import { ApiError } from '../../api/client'
 import { getSpool, listSpools, postTagRead, resolveCode, type NdefRecord, type Spool, type TagReadResult } from '../../api/filament'
 import { decodeScan, storeScanImage } from '../../api/scan'
 import { spoolCode } from '../../lib/homeReturns'
 import { codeFromScan } from '../../lib/unknownSpools'
+import { takeMifare } from '../../lib/nativeMifare'
 import { NfcSession, nfcSupport } from '../../lib/webNfc'
 import { DefinedFields } from '../entities/DefinedFields'
-import { FILE_STILL_MAX, stillOf } from './scan/scanCamera'
+import { CameraReader, detectorClass, jpegOf } from './identify/CameraReader'
 import { useSpoolFromTag } from './scan/useSpoolFromTag'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
@@ -23,6 +24,7 @@ import { RgbaSwatch } from './RgbaSwatch'
  * `onIdentified` gets each spool the person names, and null as soon as none is named any more
  * (the way changes, the code is edited, a lookup, a photo or a tag read names no spool), so the
  * caller never acts on a spool the person has since replaced. An archived spool is never named.
+ * `nfc` is the page's `nfcSupport()`: in a frame (`embedded`) there is no tag way and no camera.
  */
 
 type Way = 'tag' | 'code' | 'hand'
@@ -64,8 +66,7 @@ async function spoolFromText(text: string): Promise<Spool | string> {
   }
 }
 
-export function IdentifySpool({ onIdentified }: { onIdentified: OnIdentified }) {
-  const [support] = useState(nfcSupport)
+export function IdentifySpool({ onIdentified, nfc: support = nfcSupport() }: { onIdentified: OnIdentified; nfc?: ReturnType<typeof nfcSupport> }) {
   const [way, setWay] = useState<Way | ''>('')
   const change = (next: Way | '') => {
     setWay(next)
@@ -95,7 +96,7 @@ export function IdentifySpool({ onIdentified }: { onIdentified: OnIdentified }) 
         </ToggleGroupItem>
       </ToggleGroup>
       {way === 'tag' && <TagWay onIdentified={onIdentified} onPickByHand={() => change('hand')} />}
-      {way === 'code' && <CodeWay onIdentified={onIdentified} />}
+      {way === 'code' && <CodeWay onIdentified={onIdentified} camera={support !== 'embedded'} />}
       {way === 'hand' && <HandWay onIdentified={onIdentified} />}
     </div>
   )
@@ -103,6 +104,29 @@ export function IdentifySpool({ onIdentified }: { onIdentified: OnIdentified }) 
 
 function Note({ children }: { children: ReactNode }) {
   return <p className="text-[13px] text-muted-foreground">{children}</p>
+}
+
+/** A Bambu tag's 4-byte UID with no NDEF records: a browser reads no more of it (Web NFC is NDEF only). */
+const bambuSide = (uid: string, records: NdefRecord[]) => records.length === 0 && uid.replace(/[^0-9a-f]/gi, '').length === 8
+
+/**
+ * One tap's read. In the ScadBuddy app a Bambu tag's MIFARE blocks come with the tap, and core
+ * finds the spool by its tray UUID, so either side names it (#8148). A server that does not
+ * decode them (503 `mifare_needs_core`, 422 `mifare_unreadable` or `mifare_invalid`, refused
+ * before anything is recorded) gets the plain read, as the scan page does it. `blocks` says
+ * whether the answer came from the blocks.
+ */
+async function postTap(uid: string, records: NdefRecord[]): Promise<{ result: TagReadResult; blocks: boolean }> {
+  const plain = { uid: uid || null, tag_type: null, records }
+  const mifare = takeMifare(uid)
+  if (!mifare) return { result: await postTagRead(plain), blocks: false }
+  try {
+    return { result: await postTagRead({ ...mifare, records: [] }), blocks: true }
+  } catch (cause) {
+    const undecoded = cause instanceof ApiError && ((cause.status === 422 && (cause.problem.code === 'mifare_unreadable' || cause.problem.code === 'mifare_invalid')) || (cause.status === 503 && cause.problem.code === 'mifare_needs_core'))
+    if (!undecoded) throw cause
+    return { result: await postTagRead(plain), blocks: false }
+  }
 }
 
 /** Web NFC: one scan while the way is open; each tap posts the read to `POST /filament/tags/reads`. */
@@ -119,8 +143,8 @@ function TagWay({ onIdentified, onPickByHand }: { onIdentified: OnIdentified; on
     const session = new NfcSession()
     let alive = true
     const off = session.onReading((reading) => {
-      postTagRead({ uid: reading.uid || null, tag_type: null, records: reading.records }).then(
-        async (result) => {
+      postTap(reading.uid, reading.records).then(
+        async ({ result, blocks }) => {
           if (!alive) return
           setError(null)
           setUnknown(null)
@@ -134,6 +158,9 @@ function TagWay({ onIdentified, onPickByHand }: { onIdentified: OnIdentified; on
                 : null
           if (!alive) return
           if (found !== null) return typeof found === 'string' ? setError(found) : identify.current(found)
+          // A Bambu tag's other side, read without the app: no spool holds this UID, and making one would duplicate it.
+          if (result.next === 'bind_or_create' && !blocks && bambuSide(reading.uid, reading.records))
+            return setError('This side of the Bambu tag is on no spool yet. Tap the other side, use the QR code, or pick the spool by hand.')
           if (result.next === 'bind_or_create') return setUnknown({ key: (reads.current += 1), uid: reading.uid, records: reading.records, result })
           setError('This tag has no serial number. Pick the spool by hand.')
         },
@@ -221,23 +248,18 @@ function UnknownTag({ uid, records, result, onMade, onPickByHand }: { uid: strin
   )
 }
 
-/** The Shape Detection API's detector, where the browser has one (Chrome on Android). */
-interface BarcodeDetectorLike {
-  detect(source: HTMLVideoElement): Promise<{ rawValue: string }[]>
-}
-type BarcodeDetectorClass = new (options?: { formats: string[] }) => BarcodeDetectorLike
-
-const detectorClass = (): BarcodeDetectorClass | null => (window as unknown as { BarcodeDetector?: BarcodeDetectorClass }).BarcodeDetector ?? null
-
-/** A typed code, always; the camera where `BarcodeDetector` exists, else a photo the server reads (#8155). */
-function CodeWay({ onIdentified }: { onIdentified: OnIdentified }) {
+/**
+ * A typed code, always; the camera where `BarcodeDetector` exists, else a photo the server reads
+ * (#8155). With `camera` false (in a frame) the photo stands in for the camera.
+ */
+function CodeWay({ onIdentified, camera: cameraAllowed }: { onIdentified: OnIdentified; camera: boolean }) {
   const [text, setText] = useState('')
   const [said, setSaid] = useState<string | null>(null)
   const [looking, setLooking] = useState(false)
   const [photoBusy, setPhotoBusy] = useState(false)
   const [camera, setCamera] = useState(false)
   const [photosOff, setPhotosOff] = useState(false)
-  const [Detector] = useState(detectorClass)
+  const [Detector] = useState(() => (cameraAllowed ? detectorClass() : null))
   const photo = useRef<HTMLInputElement>(null)
   const ids = useId()
 
@@ -256,21 +278,6 @@ function CodeWay({ onIdentified }: { onIdentified: OnIdentified }) {
     const found = await spoolFromText(raw)
     setLooking(false)
     answer(found)
-  }
-
-  /** The photo drawn again as a JPEG of a known size (core takes JPEG, PNG or WebP; a phone may give HEIC). */
-  async function jpegOf(file: File): Promise<Blob> {
-    let bitmap: ImageBitmap
-    try {
-      bitmap = await createImageBitmap(file)
-    } catch {
-      throw new Error('This browser cannot open that photo. Type the code from the label.')
-    }
-    try {
-      return await stillOf(bitmap, bitmap.width, bitmap.height, FILE_STILL_MAX)
-    } finally {
-      bitmap.close()
-    }
   }
 
   async function readPhoto(file: File) {
@@ -375,75 +382,6 @@ function CodeWay({ onIdentified }: { onIdentified: OnIdentified }) {
           {said}
         </p>
       )}
-    </div>
-  )
-}
-
-/** The rear camera, read in the browser by `BarcodeDetector` until it finds a code; the camera stops then. */
-function CameraReader({ Detector, onRead, onStop, onFail }: { Detector: BarcodeDetectorClass; onRead: (raw: string) => void; onStop: () => void; onFail: (reason: string) => void }) {
-  const video = useRef<HTMLVideoElement>(null)
-  const done = useRef({ onRead, onFail })
-  useEffect(() => {
-    done.current = { onRead, onFail }
-  }, [onRead, onFail])
-
-  useEffect(() => {
-    let alive = true
-    let stream: MediaStream | null = null
-    let timer: ReturnType<typeof setTimeout> | undefined
-    const stop = () => stream?.getTracks().forEach((track) => track.stop())
-    const detector = new Detector({ formats: ['qr_code'] })
-    async function tick() {
-      if (!alive || !video.current) return
-      try {
-        const found = await detector.detect(video.current)
-        const raw = found.find((one) => one.rawValue)?.rawValue
-        if (raw && alive) {
-          alive = false
-          stop()
-          done.current.onRead(raw)
-          return
-        }
-      } catch {
-        // A frame not ready yet: try the next one.
-      }
-      if (alive) timer = setTimeout(() => void tick(), 300)
-    }
-    navigator.mediaDevices
-      .getUserMedia({ video: { facingMode: 'environment' } })
-      .then((got) => {
-        stream = got
-        if (!alive) return stop()
-        const element = video.current
-        if (element) {
-          element.srcObject = got
-          try {
-            void Promise.resolve(element.play()).catch(() => {})
-          } catch {
-            // The preview may stay still; the detector reads the frames anyway.
-          }
-        }
-        void tick()
-      })
-      .catch((cause: unknown) => {
-        if (alive) done.current.onFail(cause instanceof DOMException && cause.name === 'NotAllowedError' ? 'The camera is not allowed for this page. Type the code from the label, or allow the camera in the browser’s site settings.' : 'The camera did not start. Type the code from the label.')
-      })
-    return () => {
-      alive = false
-      clearTimeout(timer)
-      stop()
-    }
-  }, [Detector])
-
-  return (
-    <div className="flex flex-col gap-2">
-      <div className="relative aspect-[4/3] max-h-56 overflow-hidden rounded-lg bg-black">
-        <video ref={video} muted playsInline aria-label="Camera preview" className="size-full object-cover" />
-        <div aria-hidden="true" className="pointer-events-none absolute inset-[18%] rounded-md border-2 border-white/80" />
-      </div>
-      <Button type="button" variant="ghost" size="sm" className="self-start" onClick={onStop}>
-        <CameraOffIcon /> Stop camera
-      </Button>
     </div>
   )
 }
