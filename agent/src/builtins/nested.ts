@@ -9,8 +9,8 @@ import type { NestedQueries, WebSearchInput } from './web.js'
 
 // The model work WebFetch and WebSearch need in a durable turn (#2393), as one-shot Claude
 // Code queries: a durable turn's on the usable credentials, tried in order as a turn tries
-// them (`credentials`, runWithFallback, #3200); a classic turn's WebFetch on the turn's own
-// (`credential`). Claude Code makes these calls itself in a classic turn, on the same
+// them (`credentials`, runWithFallback, #3200); a session turn's WebFetch on the turn's own
+// (`credential`). Claude Code makes these calls itself in a session turn, on the same
 // credential, and counts them in the turn's cost; here each query's cost is added to the
 // session's (`spent`), which its budget reads, and none may spend more than the budget
 // has left (`remaining`, #3200).

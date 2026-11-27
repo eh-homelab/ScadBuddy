@@ -16,8 +16,8 @@ import type { BuiltinResult } from './result.js'
 // credential (the caller's `ask`, a one-shot Claude Code query with no tools). Claude
 // Code upgrades http to https; here http stays, as http_request reaches http hosts by the
 // owner's decision (#827). Claude Code's own fetches inside Claude Code, without the egress
-// check (measured: a call to 127.0.0.1:9 there tried to connect), so a classic turn is given
-// this one too, in its place (#2684, builtins/server.ts `classicBuiltinServer`).
+// check (measured: a call to 127.0.0.1:9 there tried to connect), so a session turn is given
+// this one too, in its place (#2684, builtins/server.ts `sessionBuiltinServer`).
 //
 // WebSearch is a model call with the API's web search tool, which Claude Code makes
 // itself; the caller's `search` runs Claude Code's own WebSearch in a one-shot query and

@@ -232,7 +232,7 @@ export type TurnHostDeps = {
   cutCallWaitMs?: number
   /** Runs a released turn's approved call once (toolActivities.ts `decidedCalls`); absent, the model is told it was not run. */
   runCall?: (call: DecidedCall) => Promise<DecidedRun>
-  /** Where a `done` summary is posted, as a classic turn posts it (#815 §4); absent, it reads NO_PARKS. */
+  /** Where a `done` summary is posted, as a session turn posts it (#815 §4); absent, it reads NO_PARKS. */
   questions?: Pick<QuestionService, 'gate' | 'attentionLimit'>
   /**
    * The session's working directory as a copy of its workspace (workspace/directory.ts, plan
@@ -535,7 +535,7 @@ export class TurnHost {
     // `turn_attempt` (run id and cycle) is its own. A change to how attempts are minted must keep that.
     this.#deps.core.warm.refence(id, holdsOrLast)
     const events = this.#deps.core.events
-    // The turn's spans are children of the sender's trace, as a classic turn's are (turnCore.ts).
+    // The turn's spans are children of the sender's trace, as a session turn's are (turnCore.ts).
     const sender = contextFrom(input.message?.traceparent, otelContext.active())
     const core: CoreTurn = otelContext.with(sender, () => new CoreTurn(this.#deps.core, {
       session,
@@ -573,7 +573,7 @@ export class TurnHost {
         if (cutBy() === 'shutdown') this.#deps.core.warm.seal(entry)
         // Its transcript appends only while this placement holds the turn, or is the session's
         // last placement and no turn runs: what Claude Code writes as it exits between turns
-        // (`last-prompt`, `cost-state`, warm.ts DRAIN_MS) lands as a classic process's does,
+        // (`last-prompt`, `cost-state`, warm.ts DRAIN_MS) lands as a session's process's does,
         // and never once another turn has the session.
         this.#deps.core.warm.fence(entry, holdsOrLast)
         if (fenced()) void this.#deps.core.warm.cut(entry, 'the placement was cut off')
@@ -714,7 +714,7 @@ export class TurnHost {
         throw unreachable(id, attempt, new Error(run.failure ?? 'the backend could not be reached'))
       }
       // A process the turn let go (it failed, or was recycled) lands its last appends before the
-      // turn ends, as a classic turn's does: the next turn's claim would fence them out, and its
+      // turn ends, as a session turn's does: the next turn's claim would fence them out, and its
       // spawn would then start the session anew over Claude Code's own file of it.
       await this.#deps.core.warm.landed(id)
       return this.#result(tally, run.secrets)
@@ -938,7 +938,7 @@ export class TurnHost {
     return {
       approvalGate,
       approvalFor: (toolUseId) => Promise.resolve(parkedAs.get(toolUseId)),
-      // A browser call's wait for its tab, as a classic turn's (sessions/manager.ts): only where the user is asked.
+      // A browser call's wait for its tab, as a session turn's (sessions/manager.ts): only where the user is asked.
       ...(asks
         ? {
             questionGate,
