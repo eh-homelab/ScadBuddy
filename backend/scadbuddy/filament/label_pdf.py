@@ -99,14 +99,18 @@ class SpoolLabel:
 
 
 @dataclass(frozen=True)
-class PlaceLabel:
+class CodeLabel:
+    """A code label (#7169): a place's (`L-<n>`), a spool type's (`T-<n>`), an item's
+    (`I-<n>`) or an item kind's (`K-<n>`) code and name, with its QR code. A spool has a
+    `SpoolLabel`."""
+
     code: str
     name: str
-    #: What the QR code holds: `<base>/x/L-<n>`.
+    #: What the QR code holds: `<base>/x/<code>`.
     qr: str
 
 
-Label = SpoolLabel | PlaceLabel
+Label = SpoolLabel | CodeLabel
 
 
 @dataclass(frozen=True)
@@ -225,7 +229,7 @@ def _draw_label(
 ) -> None:
     """One label with its bottom left at (``x``, ``y``) mm. A spool label with no `qr`
     field has no QR code, and its text column starts at the quiet zone (R-7216-10)."""
-    if isinstance(label, PlaceLabel) or "qr" in fields:
+    if isinstance(label, CodeLabel) or "qr" in fields:
         _draw_qr(canvas, label.qr, x + QUIET_MM, y + (height - QR_MM) / 2)
         text_x = x + 2 * QUIET_MM + QR_MM
         column = width - 2 * QUIET_MM - QR_MM - PAD_MM
@@ -306,7 +310,7 @@ def _spool_lines(label: SpoolLabel, column: float, fields: Sequence[LabelField])
     return lines
 
 
-def _place_lines(label: PlaceLabel, column: float) -> list[_Line]:
+def _place_lines(label: CodeLabel, column: float) -> list[_Line]:
     lines = [_big_line(label.code, CODE_MM, column)]
     for at, text in enumerate(_wrap(label.name, BOLD, PLACE_NAME_MM, column, 2)):
         lines.append(_Line(text, BOLD, PLACE_NAME_MM, gap_mm=GAP_MM if at == 0 else 0.0))

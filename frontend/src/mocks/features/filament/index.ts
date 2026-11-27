@@ -1298,6 +1298,7 @@ export function createType(raw: unknown): S['SpoolType'] | Response {
     ...body,
     drying_hours: body.drying_hours ?? null,
     id: newId(),
+    number: Math.max(0, ...state.types.map((t) => t.number)) + 1,
     filament_id: null,
     archived_at: null,
     created_at: now(),
@@ -3154,8 +3155,9 @@ export const handlers = [
     const body = (await request.json()) as S['LabelsRequest']
     const spools = body.spool_ids ?? []
     const places = body.location_ids ?? []
-    const count = spools.length + places.length
-    if (count < 1 || count > 100) return problem(422, 'name 1 to 100 spools and places')
+    const codes = (body.type_ids?.length ?? 0) + (body.item_ids?.length ?? 0) + (body.kind_ids?.length ?? 0)
+    const count = spools.length + places.length + codes
+    if (count < 1 || count > 100) return problem(422, 'name 1 to 100 spools, places, types, items and kinds')
     const noSpool = spools.find((id) => !findSpool(id))
     if (noSpool) return problem(404, `no spool ${noSpool}`)
     const noPlace = places.find((id) => !state.locations.some((one) => one.id === id))
@@ -3165,8 +3167,8 @@ export const handlers = [
     const chosen = body.template ?? settings.filament_label_template
     if (chosen?.template === 'saved' && !savedSheets.some((one) => one.id === chosen.sheet_id))
       return problem(409, 'The saved sheet was deleted. Choose another template.', { code: 'label_sheet_gone' })
-    if (places.length > 0 && !settings.filament_label_base_url && !settings.public_url?.startsWith('https://'))
-      return problem(409, 'A place label needs an address: set the label address in Settings, or the public URL.', { code: 'no_label_base' })
+    if (places.length + codes > 0 && !settings.filament_label_base_url && !settings.public_url?.startsWith('https://'))
+      return problem(409, 'A code label needs an address: set the label address in Settings, or the public URL.', { code: 'no_label_base' })
     // #7216 — a PNG answer is one byte of the type the real route gives: one page is one PNG, more pages are a ZIP
     // (R-7216-6). The real route reads the stored settings when the request names no format or template.
     if ((body.format ?? settings.filament_label_output?.format) === 'png') {

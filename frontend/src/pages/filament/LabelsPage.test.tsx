@@ -250,13 +250,13 @@ describe('the label template (#7157)', () => {
     serveTemplate({ template: 'roll_50x25', width_mm: null, height_mm: null })
     server.use(
       http.post('*/api/v1/filament/labels', () =>
-        HttpResponse.json({ type: 'about:blank', title: 'Conflict', status: 409, detail: 'A place label needs an address: set the label address in Settings, or the public URL.', code: 'no_label_base' }, { status: 409 }),
+        HttpResponse.json({ type: 'about:blank', title: 'Conflict', status: 409, detail: 'A code label needs an address: set the label address in Settings, or the public URL.', code: 'no_label_base' }, { status: 409 }),
       ),
     )
     const { user } = renderPage(<LabelsPage />, { route: `/filament/labels?locations=${L.AMS_A1}` })
     await waitFor(() => expect(screen.getByRole('button', { name: 'Download' })).toBeEnabled())
     await user.click(screen.getByRole('button', { name: 'Download' }))
-    expect(await screen.findByRole('alert')).toHaveTextContent('A place label needs an address')
+    expect(await screen.findByRole('alert')).toHaveTextContent('A code label needs an address')
   })
 
   it('keeps the Download button disabled while the places load', async () => {
