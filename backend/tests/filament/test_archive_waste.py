@@ -146,7 +146,9 @@ def test_waste_zero_does_not_add_a_shopping_row(pg_pool: PgPool) -> None:
     ShoppingStore(pg_pool).clear(purchased_only=False)
     again = _spool(pg_pool, 50)
     FilamentSpoolStore(pg_pool).archive(again, True, actor="ann", reason="other", final_grams=0)
-    assert len(_items(pg_pool)) == 1
+    [row] = _items(pg_pool)
+    # The one row is the weighing's own run-out; the waste event added none.
+    assert row.empty_spool_id == again and row.note is not None and "ran out" in row.note
 
 
 def test_the_waste_event_alone_adds_nothing(pg_pool: PgPool) -> None:
@@ -162,3 +164,72 @@ def test_the_waste_event_alone_adds_nothing(pg_pool: PgPool) -> None:
             data={"waste_g": 120, "cause": "archive"},
         )
     assert _items(pg_pool) == []
+
+
+def test_re_archive_after_restore_keeps_one_waste_event_and_one_shopping_row(
+    pg_pool: PgPool,
+) -> None:
+    spool = _spool(pg_pool, 120)
+    store = FilamentSpoolStore(pg_pool)
+    store.archive(spool, True, actor="ann", reason="damaged")
+    store.archive(spool, False, actor="ann")
+    got = store.archive(spool, True, actor="ann", reason="damaged")
+    assert got is not None and got.grams_left == 0
+    assert len(_waste(pg_pool, spool)) == 1
+    [item] = _items(pg_pool)
+    assert item.empty_spool_id == spool
+
+
+def test_a_tiny_raw_remainder_is_waste_with_the_raw_number(pg_pool: PgPool) -> None:
+    spool = _spool(pg_pool, 120)
+    got = FilamentSpoolStore(pg_pool).archive(
+        spool, True, actor="ann", reason="damaged", final_grams=0.04
+    )
+    assert got is not None and got.grams_left == 0
+    [event] = _waste(pg_pool, spool)
+    assert event.data["waste_g"] == 0.04 and event.grams_before == 0.04
+
+
+def test_the_archived_spool_with_no_reading_stays_null(pg_pool: PgPool) -> None:
+    spool = _spool(pg_pool, None)
+    store = FilamentSpoolStore(pg_pool)
+    store.archive(spool, True, actor="ann", reason="damaged")
+    got = store.get(spool)
+    assert got is not None and got.grams_left is None
+
+
+def test_archive_on_in_a_callers_transaction_keeps_its_cause(pg_pool: PgPool) -> None:
+    spool = _spool(pg_pool, 80)
+    store = FilamentSpoolStore(pg_pool)
+    with pg_pool.connection() as conn, conn.transaction():
+        got = store.archive_on(
+            conn,
+            spool,
+            reason="other",
+            final_reading_g=None,
+            final_grams=None,
+            actor="ann",
+            cause="replaced",
+        )
+    assert got is not None and got.grams_left == 0
+    [event] = _waste(pg_pool, spool)
+    assert event.data["cause"] == "replaced" and event.data["waste_g"] == 80
+
+
+def test_archive_on_rolled_back_writes_no_event(pg_pool: PgPool) -> None:
+    spool = _spool(pg_pool, 80)
+    store = FilamentSpoolStore(pg_pool)
+    with pytest.raises(RuntimeError), pg_pool.connection() as conn, conn.transaction():
+        store.archive_on(
+            conn,
+            spool,
+            reason="other",
+            final_reading_g=None,
+            final_grams=None,
+            actor="ann",
+            cause="replaced",
+        )
+        raise RuntimeError
+    assert _kinds(pg_pool, spool) == ["created"]
+    got = store.get(spool)
+    assert got is not None and got.grams_left == 80 and got.archived_at is None

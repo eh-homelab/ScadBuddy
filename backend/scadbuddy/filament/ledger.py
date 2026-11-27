@@ -202,7 +202,11 @@ def _check_empty(conn: Conn, spool_id: UUID, event: m.SpoolEvent, now: Derived) 
     ``grams_left`` goes from above 0 (``grams_before``) to 0, or an ``archived`` event on a
     spool not already empty. Unknown grams that become 0 are no move (an import or the
     first reading of an old reel), nor is the pull's archived import of a spool Bambuddy
-    had archived (``data.bb_archived_at``). Later writes on an empty spool add nothing."""
+    had archived (``data.bb_archived_at``). Later writes on an empty spool add nothing.
+    A ``non_print_waste`` event adds nothing: its zero is the archive's own, so an
+    ``archived`` event with ``data.non_print_waste_g`` above 0 still counts as an archive
+    of a spool not already empty (#7167). A restored spool stays at 0 g, so its next
+    archive adds nothing more."""
     if event.kind == "non_print_waste":
         # #7167: the archive's own zero reading is no run-out; the `archived` event decides.
         return
@@ -401,7 +405,7 @@ def closing(
     is ``ledger_consumed_g - scale_consumed_g`` (negative: the scale found less filament
     than the ledger expected), both null without a weighing or a start. Grams to 0.1 g.
     With ``waste`` (an archive that books it, #7167) it also holds ``non_print_waste_g``:
-    the final filament when above 0 and the reason is not ``respooled`` (the filament
+    the raw final filament when above 0 and the reason is not ``respooled`` (the filament
     moved to another reel), else null."""
     from scadbuddy.filament.metrics import plates  # metrics imports this module
 
@@ -442,9 +446,9 @@ def closing(
         "drift_g": _tenth(drift),
     }
     if waste:
-        left = _tenth(final)
-        booked = left is not None and left > 0 and reason != "respooled"
-        data["non_print_waste_g"] = left if booked else None
+        # The raw grams: the event's `grams_before` is raw too (no rounding either way).
+        booked = final is not None and final > 0 and reason != "respooled"
+        data["non_print_waste_g"] = final if booked else None
     return data
 
 

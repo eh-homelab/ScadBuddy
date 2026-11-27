@@ -325,7 +325,10 @@ Grams left at the end are waste (#7167). A person's archive books them as one
 `archived` event. The waste is what is left after that weighing, so no gram is counted
 twice. The spool then has 0 g left, and `non_print_waste_g` in the closing says how many
 grams were written off. A `respooled` archive books none: the filament moves to the new
-reel. The bulk archive and the Bambuddy pull's archive book none. The event is not a
+reel. The bulk archive, the Bambuddy pull's archive and an archive by a plain edit (PATCH) book
+none. A restore leaves the spool at 0 g, so a second archive books no second waste and adds
+no second shopping item. An `archived` event that carries waste counts as the archive of a
+spool that was not empty, so the archive adds its one shopping item. The event is not a
 plate, and it adds no shopping item of its own. The code is in
 `backend/scadbuddy/filament/spools.py` (`archive_on`).
 
