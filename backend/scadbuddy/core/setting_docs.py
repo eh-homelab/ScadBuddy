@@ -508,6 +508,26 @@ SETTING_DOCS: Final[Mapping[str, SettingDoc]] = MappingProxyType(
             " their code, name and QR code. The Labels page saves the last format, dpi and"
             " fields.",
         ),
+        "filament_label_printer_host": SettingDoc(
+            "Label printer host",
+            "The LAN name or IP address of the Zebra label printer. Only a person's session"
+            ' changes it. When it is not set, the Labels page hides "Print to Zebra".',
+        ),
+        "filament_label_printer_port": SettingDoc(
+            "Label printer port",
+            "The port of the label printer for raw ZPL. The default is 9100. Only a person's"
+            " session changes it.",
+        ),
+        "filament_label_printer_media": SettingDoc(
+            "Label print mode",
+            "Direct thermal, or thermal transfer with a ribbon for labels that see heat. The"
+            " Labels page saves the last choice.",
+        ),
+        "filament_label_printer_darkness": SettingDoc(
+            "Label darkness",
+            "From 0 to 30. This is the printer's ~SD value. 10 is the GK420t's own default. The"
+            " Labels page saves the last choice.",
+        ),
         "filament_shopping_auto_add_empty": SettingDoc(
             "Add empty spools to the shopping list",
             "On, a spool whose filament reaches 0 g, or that is archived, adds its type to the"

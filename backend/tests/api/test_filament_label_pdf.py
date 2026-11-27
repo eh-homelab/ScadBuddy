@@ -390,3 +390,16 @@ def test_the_stored_fields_are_used(client: TestClient) -> None:
 def test_a_request_with_no_fields_is_a_422(client: TestClient) -> None:
     answer = client.post(PDF, json={"spool_ids": [str(uuid4())], "fields": []})
     assert answer.status_code == 422, answer.text
+
+
+def test_the_2x1_template_is_one_png_of_406_by_203(client: TestClient) -> None:
+    spool = _spool(client)
+    body = {
+        "spool_ids": [spool["id"]],
+        "template": {"template": "roll_2x1in"},
+        "format": "png",
+        "dpi": 203,
+    }
+    answer = client.post(PDF, json=body)
+    assert answer.status_code == 200, answer.text
+    assert Image.open(io.BytesIO(answer.content)).size == (406, 203)

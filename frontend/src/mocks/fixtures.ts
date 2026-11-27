@@ -1269,6 +1269,11 @@ export const settings: Settings = {
   filament_label_template: { template: 'roll_50x25', width_mm: null, height_mm: null, sheet_id: null },
   // #7216 — the labels output; stored only, a PDF at 300 dpi with the default fields by default.
   filament_label_output: { format: 'pdf', dpi: 300, fields: ['number', 'material', 'colour', 'brand', 'qr'] },
+  // #7170 — the label printer; stored only, no printer, port 9100, direct thermal, darkness 10.
+  filament_label_printer_host: null,
+  filament_label_printer_port: 9100,
+  filament_label_printer_media: 'direct',
+  filament_label_printer_darkness: 10,
   activity_ttl_seconds: null,
   activity_repair_window_seconds: null,
   has_google_fonts_api_key: false,
