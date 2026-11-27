@@ -537,6 +537,8 @@ async def test_the_component_registers_it_only_when_switched_on_with_flows(
         lifecycle=None,
         integrations=None,
         mail=_IdleMail(),
+        # #6949 K1 Task 16: `_run` binds the stock workflows' starter to its loop.
+        stock_starter=_IdleMail(),
     )
     async with component._run(cast(component.OrdersComponent, orders)):
         await asyncio.sleep(0)
@@ -578,6 +580,8 @@ async def test_a_slow_registration_never_holds_up_the_start(
         lifecycle=None,
         integrations=None,
         mail=_IdleMail(),
+        # #6949 K1 Task 16: `_run` binds the stock workflows' starter to its loop.
+        stock_starter=_IdleMail(),
     )
     async with asyncio.timeout(5):
         async with component._run(cast(component.OrdersComponent, orders)):

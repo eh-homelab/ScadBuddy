@@ -9,6 +9,7 @@ Temporal are `tests/workflows/test_order_stock.py`'s (CI)."""
 from __future__ import annotations
 
 import asyncio
+import threading
 from collections.abc import Callable, Mapping
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
@@ -70,6 +71,7 @@ class GoStock:
         self.calls: list[GoCall] = []
         self.answers: dict[str, list[Any]] = {}
         self._ledger: dict[str, dict[str, Any]] = {}
+        self._writing = threading.Lock()
 
     def named(self, name: str) -> list[GoCall]:
         return [c for c in self.calls if c.name == name]
@@ -83,11 +85,14 @@ class GoStock:
                 raise answer
             return dict(answer)
         key = arg["key"]
-        if key in self._ledger:
-            return self._ledger[key]
-        made: dict[str, Any] = getattr(self, "_" + name.removeprefix("inventory."))(arg)
-        self._ledger[key] = made
-        return made
+        # One write per key, as Go's `crud_requests` row makes it: two runs of one key at
+        # once (a terminated run's activity still running beside its new run's) wait here.
+        with self._writing:
+            if key in self._ledger:
+                return self._ledger[key]
+            made: dict[str, Any] = getattr(self, "_" + name.removeprefix("inventory."))(arg)
+            self._ledger[key] = made
+            return made
 
     def _Take(self, arg: dict[str, Any]) -> dict[str, Any]:  # noqa: N802
         by = Actor.model_validate(arg["actor"])

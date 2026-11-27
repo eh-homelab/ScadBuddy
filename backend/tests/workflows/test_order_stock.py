@@ -385,7 +385,9 @@ async def test_recost_retries_when_another_order_moved(world: World) -> None:
 def _unit(pool: PgPool, printer_id: str) -> UUID:
     with pool.connection() as conn:
         item = conn.execute(
-            "INSERT INTO items (kind_id, name) VALUES ('printer', 'H2C') RETURNING id"
+            # A name of its own: `items_kind_name` holds one H2C (a test adds two units).
+            "INSERT INTO items (kind_id, name) VALUES ('printer', 'H2C ' || gen_random_uuid())"
+            " RETURNING id"
         ).fetchone()
         assert item is not None
         unit = conn.execute(
