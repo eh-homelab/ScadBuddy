@@ -288,7 +288,7 @@ same way, `vite.config.ts`).
   2026-11-14 §10). `/filament` opens Spools; the tabs are Spools, Types, Tags, Suppliers, Invoices, Locations,
   Catalog, Metrics, Shopping list and Ledger.
   Codes and labels (#6955): `/x/:code` (`pages/CodePage.tsx`) asks `GET /api/v1/codes/{code}` and opens
-  the spool or place; `filament/locations/:id` (`pages/filament/LocationPage.tsx`) is a place's page, with its files and links (entity `location:<id>`, #6950). The
+  the spool, place or item kind (`codeTarget`, `inventoryPaths.kind`); `filament/locations/:id` (`pages/filament/LocationPage.tsx`) is a place's page, with its files and links (entity `location:<id>`, #6950). The
   Locations tab's name opens that page, its count badge opens the spools filter, and "Print printer
   labels" opens the labels page with `?printers=`. The labels page also takes `?locations=<id>,<id>`
   (`LocationLabel`; a place that cannot be read is named and the rest are drawn;
