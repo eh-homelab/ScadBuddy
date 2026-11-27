@@ -1,5 +1,6 @@
 import { Suspense, lazy, useCallback, useState, type ReactNode } from 'react'
 import type { UnknownSpoolTray } from '../../api/unknownTrays'
+import { toast } from '../../lib/toast'
 import type { NeedsYouItem } from '../../lib/needsYou'
 
 // The shell is on every page: the dialog loads only when a person opens one.
@@ -11,11 +12,15 @@ const UnknownSpoolDialog = lazy(async () => ({ default: (await import('./Unknown
  * was when the person opened it. `gone` says that the list no longer has that tray (another client
  * linked it, or the slot was emptied).
  */
-export function useUnknownSpoolDialog(items: readonly NeedsYouItem[] | null, refresh: () => void): { open: (tray: UnknownSpoolTray) => void; dialog: ReactNode } {
-  const [tray, setTray] = useState<UnknownSpoolTray | null>(null)
+export function useUnknownSpoolDialog(items: readonly NeedsYouItem[] | null, refresh: () => void): {
+  open: (tray: UnknownSpoolTray, onResolved?: () => void) => void
+  dialog: ReactNode
+} {
+  const [opened, setOpened] = useState<{ tray: UnknownSpoolTray; after: (() => void) | undefined } | null>(null)
+  const tray = opened?.tray ?? null
   const gone = tray !== null && items !== null && !items.some((item) => item.key === `unknown_spool:${tray.id}`)
   const close = useCallback((open: boolean) => {
-    if (!open) setTray(null)
+    if (!open) setOpened(null)
   }, [])
   const dialog = tray && (
     <Suspense fallback={null}>
@@ -24,12 +29,15 @@ export function useUnknownSpoolDialog(items: readonly NeedsYouItem[] | null, ref
         gone={gone}
         open
         onOpenChange={close}
-        onResolved={() => {
-          setTray(null)
+        onResolved={(resolved) => {
+          setOpened(null)
           refresh()
+          toast({ title: `Linked S-${resolved.number} to ${tray.slot}` })
+          opened?.after?.()
         }}
       />
     </Suspense>
   )
-  return { open: setTray, dialog }
+  const open = useCallback((next: UnknownSpoolTray, after?: () => void) => setOpened({ tray: next, after }), [])
+  return { open, dialog }
 }

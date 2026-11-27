@@ -78,6 +78,28 @@ export function useUnknownSpools(): { data: UnknownSpoolTrays | null; refresh: (
   return { data, refresh }
 }
 
+/** The unknown trays, read once on mount and again on `reload`; a failed read leaves the last answer (an empty list at first). */
+export function useUnknownTrayList(): { trays: UnknownSpoolTray[]; reload: () => void } {
+  const [trays, setTrays] = useState<UnknownSpoolTray[]>([])
+  const live = useRef(true)
+  const reload = useCallback(() => {
+    listUnknownTrays().then(
+      (answer) => {
+        if (live.current) setTrays(answer.trays)
+      },
+      () => {},
+    )
+  }, [])
+  useEffect(() => {
+    live.current = true
+    reload()
+    return () => {
+      live.current = false
+    }
+  }, [reload])
+  return { trays, reload }
+}
+
 /** How long a "made from its tag" toast stays. */
 export const TAG_MADE_TOAST_MS = 15_000
 

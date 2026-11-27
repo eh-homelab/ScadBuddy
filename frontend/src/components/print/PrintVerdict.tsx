@@ -1,6 +1,7 @@
 import { CircleAlertIcon, TriangleAlertIcon } from 'lucide-react'
 import { ApiError } from '../../api/client'
 import type { PrintCheck } from '../../api/types'
+import { UnknownSpoolButton } from '../filament/UnknownSpoolButton'
 import { Button } from '@/components/ui/button'
 import { cn } from '@/lib/utils'
 
@@ -57,6 +58,11 @@ export function PrintVerdict({ verdict, error, onRetry }: Props) {
         >
           <TriangleAlertIcon aria-hidden="true" />
           <span>{warning.message}</span>
+        </li>
+      ))}
+      {(verdict?.unknown_trays ?? []).map((tray) => (
+        <li key={tray.id}>
+          <UnknownSpoolButton trayId={tray.id} label={`Link the spool in ${tray.slot}`} onResolved={onRetry} />
         </li>
       ))}
     </ul>
