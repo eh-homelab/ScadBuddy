@@ -470,4 +470,4 @@ def test_a_new_types_default_diameter_is_the_one_metrics_reads_by() -> None:
     """#8196: the request model cannot import `metrics` (it imports the models), so the
     two defaults are separate literals. A change to one alone fails here."""
     default = SpoolTypeCreate.model_fields["diameter_mm"].default
-    assert default == Decimal(str(metrics.DEFAULT_DIAMETER_MM))
+    assert float(default) == metrics.DEFAULT_DIAMETER_MM
