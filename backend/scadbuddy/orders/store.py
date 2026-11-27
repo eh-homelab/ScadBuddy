@@ -2234,8 +2234,9 @@ class OrderStore:
 
         A LAN run sends no queue item (#8283): its plates are its LAN starts
         (``print_runs.result -> 'lan'``), each with the archive ``lan_print_archives``
-        records for that start. When the run's row was pruned, the starts recorded there
-        are what is left."""
+        records for that start, then, unless the run has stopped (``lan_stopped``), each
+        plate still in ``lan_waiting``, with None. When the run's row was pruned, the
+        starts recorded there are what is left."""
         with self._read(conn) as c:
             rows = c.execute(
                 "WITH owner AS (SELECT subject, queue_item_id FROM print_links"
@@ -2252,7 +2253,8 @@ class OrderStore:
                 " ORDER BY s.plate_id NULLS LAST, s.queue_item_id",
                 {"a": archive_id},
             ).fetchall()
-            if not rows and not self._owned_by_import(c, archive_id):
+            lan = not rows and not self._owned_by_import(c, archive_id)
+            if lan:
                 rows = c.execute(
                     "WITH run AS (SELECT run_id FROM lan_print_archives WHERE archive_id = %(a)s),"
                     " runs AS (SELECT r.run_id, p.result FROM run r"
@@ -2286,7 +2288,7 @@ class OrderStore:
                     " ORDER BY plate_id NULLS LAST, later, started_at, n",
                     {"a": archive_id},
                 ).fetchall()
-            if not rows and not self._owned_by_import(c, archive_id):
+            if lan and not rows:
                 rows = c.execute(
                     "SELECT l.plate_id, l.archive_id FROM lan_print_archives l"
                     " JOIN lan_print_archives a ON a.run_id = l.run_id AND a.archive_id = %(a)s"
