@@ -1,8 +1,11 @@
-import { CameraIcon, CameraOffIcon, ExternalLinkIcon, ImageUpIcon, RotateCwIcon, Trash2Icon } from 'lucide-react'
+import { CameraIcon, CameraOffIcon, ExternalLinkIcon, ImageUpIcon, RotateCwIcon, SearchIcon, Trash2Icon } from 'lucide-react'
 import { useId, useRef, useState } from 'react'
+import { Link } from 'react-router'
 import { ApiError } from '../../../api/client'
 import { type CodeScan, type ScannedCode, decodeScanAgain, deleteScan, scanImageUrl } from '../../../api/scan'
 import { codeLabel } from '../../../lib/resolvedCode'
+import { isScadBuddyCode, scanSearchPath } from '../../../lib/scanSearch'
+import { codeFromScan } from '../../../lib/unknownSpools'
 import { CodeCard } from './CodeCard'
 import { formatName, useScanCamera } from './scanCamera'
 import { Button } from '@/components/ui/button'
@@ -226,6 +229,8 @@ function ScanDetail({ scan, onChange, onGone }: { scan: CodeScan; onChange: (sca
 function ScannedCodeView({ code }: { code: ScannedCode }) {
   if (code.resolved) return <CodeCard resolved={code.resolved} />
   const link = httpsLink(code.text)
+  // A text with the shape of a ScadBuddy code names no spool here; a search would find nothing (#8372).
+  const searchable = !isScadBuddyCode(code.text) && codeFromScan(code.text) === null
   return (
     <div className="flex flex-col gap-1 rounded-lg bg-muted/60 p-3">
       <span className="text-muted-foreground">{formatName(code.format)}</span>
@@ -234,6 +239,11 @@ function ScannedCodeView({ code }: { code: ScannedCode }) {
         <a href={link} target="_blank" rel="noopener noreferrer" className="inline-flex items-center gap-1 self-start text-primary underline-offset-2 hover:underline">
           <ExternalLinkIcon className="size-4" /> Open this address
         </a>
+      )}
+      {searchable && (
+        <Link to={scanSearchPath(code.text)} className="inline-flex items-center gap-1 self-start break-all text-primary underline-offset-2 hover:underline">
+          <SearchIcon className="size-4 shrink-0" /> Search spools for {code.text}
+        </Link>
       )}
     </div>
   )

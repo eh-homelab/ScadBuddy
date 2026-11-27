@@ -1,18 +1,26 @@
 import { screen, waitFor, within } from '@testing-library/react'
+import { useLocation } from 'react-router'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { L, spoolId } from '../../../mocks/features/filament/seed'
 import { queueScanCodes } from '../../../mocks/features/scan'
 import { server } from '../../../mocks/server'
 import { filamentLinks } from '../../../lib/filamentLinks'
+import { scanSearchPath } from '../../../lib/scanSearch'
 import { renderPage } from '../../../test/utils'
 import { ScanCameraProvider } from './ScanCameraProvider'
 import { ScanCode } from './ScanCode'
 import { useScanCamera } from './scanCamera'
 
+function Here() {
+  const location = useLocation()
+  return <output aria-label="Current address">{location.pathname + location.search}</output>
+}
+
 const open = () =>
   renderPage(
     <ScanCameraProvider>
       <ScanCode />
+      <Here />
     </ScanCameraProvider>,
   )
 
@@ -113,6 +121,40 @@ describe('ScanCode (#8155, a code scanned from a photo)', () => {
     await waitFor(() => expect(log.requests[0]).toEqual({ line: 'POST /api/v1/scan/images', body: 'image/jpeg' }))
     await waitFor(() => expect(log.requests[1]?.body).toMatchObject({ source: 'file', location: null }))
     log.off()
+  })
+
+  it('links an unknown code to the spool search, and goes there only on a tap (#8372)', async () => {
+    queueScanCodes([
+      { format: 'ean_13', text: '6975373321234' },
+      { format: 'qr_code', text: 'https://example.com/datasheet' },
+      { format: 'qr_code', text: 'https://scadbuddy.example/x/L-4' },
+    ])
+    const { user } = open()
+    await user.click(screen.getByRole('button', { name: 'Start camera' }))
+    await user.upload(screen.getByLabelText('Photo of a code'), new File(['bytes'], 'a.jpg', { type: 'image/jpeg' }))
+    const codes = await screen.findByRole('list', { name: 'Codes in this photo' })
+    const ean = within(codes).getByRole('link', { name: 'Search spools for 6975373321234' })
+    expect(ean).toHaveAttribute('href', scanSearchPath('6975373321234'))
+    expect(within(codes).getByRole('link', { name: 'Search spools for https://example.com/datasheet' })).toHaveAttribute('href', scanSearchPath('https://example.com/datasheet'))
+    expect(within(codes).getByRole('link', { name: 'Open this address' })).toBeInTheDocument()
+    // The resolved place has no search link.
+    expect(within(codes).getAllByRole('link', { name: /^Search spools for/ })).toHaveLength(2)
+    expect(screen.getByLabelText('Current address')).toHaveTextContent('/')
+    await user.click(screen.getByRole('button', { name: 'Read again' }))
+    await within(await screen.findByRole('list', { name: 'Codes in this photo' })).findByRole('link', { name: 'Search spools for 6975373321234' })
+    expect(screen.getByLabelText('Current address')).toHaveTextContent(/^\/$/)
+    await user.click(ean)
+    expect(screen.getByLabelText('Current address')).toHaveTextContent(scanSearchPath('6975373321234'))
+  })
+
+  it('gives an unknown ScadBuddy code no search link (#8372)', async () => {
+    queueScanCodes([{ format: 'qr_code', text: 'S-999' }])
+    const { user } = open()
+    await user.click(screen.getByRole('button', { name: 'Start camera' }))
+    await user.upload(screen.getByLabelText('Photo of a code'), new File(['bytes'], 'a.jpg', { type: 'image/jpeg' }))
+    const codes = await screen.findByRole('list', { name: 'Codes in this photo' })
+    expect(within(codes).getByText('S-999')).toBeInTheDocument()
+    expect(within(codes).queryByRole('link', { name: /^Search spools for/ })).toBeNull()
   })
 
   it('stops a camera that opens after Stop, or after the page is gone', async () => {
