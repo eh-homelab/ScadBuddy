@@ -410,3 +410,24 @@ func TestDecodeOddValues(t *testing.T) {
 		t.Error(err)
 	}
 }
+
+func TestProductionTimeTakesOnlyDigits(t *testing.T) {
+	for in, want := range map[string]string{
+		"2026_05_08_23_15":  "2026-05-08T23:15:00",
+		"+2026_05_08_23_15": "<absent>",
+		"2026_+5_08_23_15":  "<absent>",
+		"2026_5_08_23_15":   "<absent>",
+		"2026_05_08_3_15":   "<absent>",
+		"2026_05_08_23_15x": "<absent>",
+		"2026_02_30_23_15":  "<absent>",
+		"2026_05_08_24_00":  "<absent>",
+	} {
+		got := "<absent>"
+		if p := productionTime(in); p != nil {
+			got = *p
+		}
+		if got != want {
+			t.Errorf("productionTime(%q) = %q, want %q", in, got, want)
+		}
+	}
+}

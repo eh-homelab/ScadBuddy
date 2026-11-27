@@ -85,7 +85,6 @@ class Library:
                 arranged_from=None,
                 backfill=None,
                 has_plate_cover=False,
-                copied_at=datetime.now(UTC),
             )
         )
 

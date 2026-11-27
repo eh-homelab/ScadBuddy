@@ -110,9 +110,8 @@ An open flow run (`workflow_runs` `running` or `waiting`) does not stop the swit
 holds a commit of a template in its own state keeps the old id: end it first, or accept that
 its call is refused.
 
-Note these, for the checks at the end: `GET /api/v1/outputs/copy-status`,
-`GET /api/v1/settings/git-remote`, one approved order item with a saved output, and one
-published listing with its prices.
+Note these, for the checks at the end: `GET /api/v1/settings/git-remote`, one approved
+order item with a saved output, and one published listing with its prices.
 
 ## 3. All API replicas at 0
 
@@ -267,7 +266,6 @@ and the next start continues the copy (each batch keeps its rows); raise the sta
 | Check | Expected |
 |---|---|
 | `GET /api/v1/model-records/copy-status` | `finished_at` is set and after the start; `incomplete` is false; `added` is the number of templates; `unreadable` is empty |
-| `GET /api/v1/outputs/copy-status` | The same as in step 2: `cut_over_at` is set. No copy runs since release B of #7257, so nothing in it moves |
 | The model list and one mesh model | Each template is there. The mesh model opens, and it renders |
 | The approved item | Its saved output is still its output. Its quote stands: the item page asks for no new one |
 | The listing | The page shows it with the prices that it had |

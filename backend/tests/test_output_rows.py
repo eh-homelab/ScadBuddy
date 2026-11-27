@@ -7,7 +7,7 @@ import dataclasses
 import hashlib
 import threading
 import time
-from collections.abc import Callable, Iterator
+from collections.abc import Iterator
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
@@ -28,12 +28,6 @@ from scadbuddy.library.output_rows import (
 from scadbuddy.library.outputs import STOREFRONT, OutputMeta, OutputSource
 from scadbuddy.render.glb import BoundingBox
 from scadbuddy.render.projection import JobProjection
-from tests.support.row_outputs import (
-    mark_cut_over,
-    name_blobs,
-    record_byte_run,
-    record_copy_run,
-)
 
 pytestmark = pytest.mark.requires_postgres
 
@@ -56,21 +50,12 @@ def test_outputs_tables_exist(projection: JobProjection) -> None:
             "INSERT INTO outputs (output_id, slug, meta, created_at)"
             " VALUES ('o1', 'cube', '{\"id\": \"o1\"}', now())"
         )
-        run = conn.execute("INSERT INTO output_copy_runs DEFAULT VALUES RETURNING id").fetchone()
         row = conn.execute("SELECT * FROM outputs WHERE output_id = 'o1'").fetchone()
-        assert run is not None and row is not None
+        assert row is not None
         assert row["slug"] == "cube"
         assert row["params"] == {}
         assert row["inputs"] is None
         assert row["has_plate_cover"] is False
-        assert row["copied_at"] is not None
-        copy_run = conn.execute(
-            "SELECT * FROM output_copy_runs WHERE id = %s", (run["id"],)
-        ).fetchone()
-        assert copy_run is not None
-        assert copy_run["finished_at"] is None
-        assert copy_run["not_copied"] == []
-        assert copy_run["copied"] == 0
 
 
 def test_output_bytes_tables_exist(projection: JobProjection) -> None:
@@ -92,9 +77,7 @@ def test_output_bytes_tables_exist(projection: JobProjection) -> None:
         row = conn.execute("SELECT * FROM outputs WHERE output_id = 'o1'").fetchone()
         assert row is not None
         assert row["model_blob"] == "output-o1-model"
-        assert row["bytes_at"] is None and row["damaged"] == []
-        run = conn.execute("INSERT INTO output_byte_runs DEFAULT VALUES RETURNING *").fetchone()
-        assert run is not None and run["failed"] == [] and run["finished_at"] is None
+        assert row["bytes_at"] is None
         with pytest.raises(psycopg.errors.CheckViolation), conn.transaction():
             conn.execute(
                 "INSERT INTO output_derived (output_id, kind, plate, version, data)"
@@ -139,7 +122,6 @@ def make_row(
         arranged_from=None,
         backfill=None,
         has_plate_cover=has_plate_cover,
-        copied_at=NOW,
     )
 
 
@@ -200,36 +182,6 @@ def test_update_meta_changes_name(rows: OutputRows) -> None:
     assert got.meta.name == "New"
 
 
-def _clock(rows: OutputRows) -> datetime:
-    """The database's clock, as the retired copy's mark was."""
-    with rows._pool.connection() as conn:
-        found = conn.execute("SELECT clock_timestamp() AS now").fetchone()
-    assert found is not None
-    now: datetime = found["now"]
-    return now
-
-
-def _stamp(rows: OutputRows, output_id: str) -> None:
-    """Mark the row as the retired copy wrote it (#7255): with a stamp of the files it read."""
-    with rows._pool.connection() as conn:
-        conn.execute("UPDATE outputs SET files_stamp = 'stamp' WHERE output_id = %s", (output_id,))
-
-
-def test_every_live_writer_moves_copied_at(rows: OutputRows) -> None:
-    """A row a live writer touched moves ``copied_at`` (kept by plan D11)."""
-    rows.insert(make_row("o1"))
-    writes: list[Callable[[], object]] = [
-        lambda: rows.update_meta("o1", make_row("o1", name="New").meta),
-        lambda: rows.set_backfill("o1", {"job_id": "j"}),
-        lambda: rows.attach_backfill("o1", {"plate_key": "p"}, []),
-    ]
-    for write in writes:
-        mark = _clock(rows)
-        write()
-        got = rows.get("o1")
-        assert got is not None and got.copied_at > mark
-
-
 def test_set_backfill_and_pending_backfills(rows: OutputRows) -> None:
     rows.insert(make_row("o1"))
     rows.insert(make_row("o2"))
@@ -258,17 +210,15 @@ def test_oldest_with_plate_cover_picks_oldest_flagged(rows: OutputRows) -> None:
     assert rows.oldest_with_plate_cover("ball") is None
 
 
-def test_a_save_under_another_slug_does_not_replace_the_copys_row(rows: OutputRows) -> None:
-    """Ids can repeat across models (`orders/quote.py` makes them with uuid5): a save
-    replaces the copy's row of its own folder only, never one of another model."""
-    rows.insert(make_row("o1", "cube"))
-    _stamp(rows, "o1")
-    with pytest.raises(psycopg.errors.UniqueViolation):
-        rows.insert(make_row("o1", "ball"))
-    assert rows.slug_of("o1") == "cube"
-    rows.insert(make_row("o1", "cube", name="saved"))
+def test_a_second_save_of_an_id_raises(rows: OutputRows) -> None:
+    """Ids can repeat across models (`orders/quote.py` makes them with uuid5): a second
+    save of an id, under any model, never replaces the first one's row (#7887)."""
+    rows.insert(make_row("o1", "cube", name="first"))
+    for slug in ("ball", "cube"):
+        with pytest.raises(psycopg.errors.UniqueViolation):
+            rows.insert(make_row("o1", slug, name="second"))
     got = rows.get("o1")
-    assert got is not None and got.meta.name == "saved" and got.files_stamp is None
+    assert got is not None and got.slug == "cube" and got.meta.name == "first"
 
 
 def test_attach_backfill_keeps_a_record_and_clears_the_backfill(rows: OutputRows) -> None:
@@ -285,23 +235,6 @@ def test_attach_backfill_keeps_a_record_and_clears_the_backfill(rows: OutputRows
     assert got is not None
     assert got.record == {"plate_key": "first"}
     assert got.manifest == [{"part": "q"}]
-
-
-def test_last_run_names_a_finished_run(rows: OutputRows) -> None:
-    assert rows.last_run() is None
-    record_copy_run(
-        rows,
-        copied=2,
-        refreshed=1,
-        dropped=0,
-        not_copied=["x"],
-        damaged=[{"id": "y", "why": "bad"}],
-    )
-    last = rows.last_run()
-    assert last is not None
-    assert last["copied"] == 2
-    assert last["not_copied"] == ["x"]
-    assert last["finished_at"] is not None
 
 
 # Phase 2 (#7256, spec §4.2, §4.3): the row's blob keys, files, derived data and holds.
@@ -365,13 +298,9 @@ def test_insert_with_blobs_writes_columns_files_and_holds(
 
 
 def test_insert_failure_writes_no_hold(rows: OutputRows, projection: JobProjection) -> None:
-    """A save that fails after it dropped the copy's row undoes the drop: the copy's row
-    and its holds stay, and the save writes no file row and no hold."""
-    rows.insert(make_row("o1"))
-    _stamp(rows, "o1")
-    copied = _blobs("o1", "a.stl")
-    assert name_blobs(rows, "o1", copied)
-    # Two `files/` entries of one name: `_write_files` fails on the key, after the drop.
+    """A save that fails after its row's insert writes nothing: no row, no file row and
+    no hold."""
+    # Two `files/` entries of one name: `_write_files` fails on the key, after the insert.
     clash = dataclasses.replace(
         _blobs("o1", "b.stl"),
         files=(
@@ -381,10 +310,9 @@ def test_insert_failure_writes_no_hold(rows: OutputRows, projection: JobProjecti
     )
     with pytest.raises(psycopg.errors.UniqueViolation):
         rows.insert(dataclasses.replace(make_row("o1"), blobs=clash))
-    got = rows.get("o1")
-    assert got is not None and got.files_stamp == "stamp"
-    assert _holds(projection, "o1") == set(copied.keys())
-    assert [f.name for f in rows.files("o1")] == ["a.stl"]
+    assert rows.get("o1") is None
+    assert _holds(projection, "o1") == set()
+    assert rows.files("o1") == []
 
 
 def test_files_are_sorted_by_name(rows: OutputRows) -> None:
@@ -436,46 +364,8 @@ def test_delete_slug_releases_every_byte_hold(rows: OutputRows, projection: JobP
     assert _holds(projection, "c") == set(_blobs("c").keys())
 
 
-def test_byte_run_round_trip(rows: OutputRows) -> None:
-    """`GET /outputs/copy-status` reads the last byte run release A recorded."""
-    assert rows.last_byte_run() is None
-    first = record_byte_run(
-        rows,
-        finished_at=None,
-        incomplete=True,
-        refused="store full",
-        copied=1,
-        verified=2,
-        skipped=3,
-        needed_bytes=400,
-        needed_count=5,
-        failed=[{"id": "x", "error": "boom"}],
-        damaged=[{"id": "y", "role": "model", "error": "missing"}],
-    )
-    last = rows.last_byte_run()
-    assert last is not None and last["id"] == first
-    assert last["finished_at"] is None and last["incomplete"] is True
-    assert last["refused"] == "store full"
-    assert (last["copied"], last["verified"], last["skipped"]) == (1, 2, 3)
-    assert (last["needed_bytes"], last["needed_count"]) == (400, 5)
-    assert last["failed"] == [{"id": "x", "error": "boom"}]
-    assert last["damaged"] == [{"id": "y", "role": "model", "error": "missing"}]
-    second = record_byte_run(rows)
-    last = rows.last_byte_run()
-    assert last is not None and last["id"] == second and last["finished_at"] is not None
-
-
-def test_pending_bytes_counts_rows_without_bytes_at(rows: OutputRows) -> None:
-    rows.insert(make_row("files"))
-    rows.insert(dataclasses.replace(make_row("saved"), blobs=_blobs("saved")))
-    rows.insert(make_row("copied"))
-    assert rows.pending_bytes() == 2
-    name_blobs(rows, "copied", _blobs("copied"))
-    assert rows.pending_bytes() == 1
-
-
-# Phase 3 release A (#7257, spec §4.2, §4.5): the list's columns on `outputs`, the
-# cut-over mark and the id claims.
+# Phase 3 release A (#7257, spec §4.2, §4.5): the list's columns on `outputs` and the
+# id claims.
 
 
 def _column(projection: JobProjection, output_id: str, column: str) -> object:
@@ -510,13 +400,6 @@ def test_insert_writes_params_text_and_drops_claim(rows: OutputRows) -> None:
     # The save's transaction took the claim: once the row goes, the id is free again.
     rows.delete("o1")
     assert rows.claim("o1", "cube") is True
-
-
-def test_cut_over_at_reads_the_mark(rows: OutputRows) -> None:
-    """Release A wrote the mark (#7257); release B only reads it, for copy-status."""
-    assert rows.cut_over_at() is None
-    mark_cut_over(rows)
-    assert rows.cut_over_at() is not None
 
 
 def _listed(

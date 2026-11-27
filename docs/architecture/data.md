@@ -31,7 +31,7 @@ same schema, created by a file in `backend/scadbuddy/migrations/` or
 | Domain | Tables (creating migration) | Written by |
 |---|---|---|
 | Render and blobs | `render_jobs` (`20260927T2243Z_render_jobs`), `blob_refs` (`20260928T0900Z_render_jobs_projection`), `store_blobs`, `store_folders` (`20260928T1800Z_blob_store`), `assets` (`20260928T1631Z_assets`), `piece_geometry` (`20261013T0719Z_piece_geometry`), `model_previews`, `template_media`, `saved_presets`, `analyzer_decisions`, `library_leases`, `library_pin_holds`, `library_install_slots`, `transfer_puts` | the API; the render worker through `crud.render` routes (`scadbuddy/api/crud_render.py:89`) |
-| Core | `events` (`20260928T0630Z_events`), `settings`, `model_print_choices`, `printer_bed_types` (`20260928T0840Z_settings`), `operations`, `activity` (`20261010T0533Z_activity`), `crud_requests`, `models_repo_head`, `templates`, `template_copy_runs` (`20261124T1824Z_templates`, #7317), `flows_repo_head`, `git_remote_pushes`, `outputs`, `output_copy_runs` (`20261124T0053Z_outputs_records`, #7255; `output_index` and `output_hold_slugs` were dropped by `20261125T1737Z_outputs_drop_output_index`, #7257), `output_files`, `output_derived`, `output_byte_runs` (`20261124T0245Z_output_bytes`, #7256), `output_cutover`, `output_claims` (`20261125T0758Z_outputs_cut_over`, #7257; see [Saved outputs](#saved-outputs)) | the API |
+| Core | `events` (`20260928T0630Z_events`), `settings`, `model_print_choices`, `printer_bed_types` (`20260928T0840Z_settings`), `operations`, `activity` (`20261010T0533Z_activity`), `crud_requests`, `models_repo_head`, `templates`, `template_copy_runs` (`20261124T1824Z_templates`, #7317), `flows_repo_head`, `git_remote_pushes`, `outputs`, `output_copy_runs` (`20261124T0053Z_outputs_records`, #7255; `output_index` and `output_hold_slugs` were dropped by `20261125T1737Z_outputs_drop_output_index`, #7257), `output_files`, `output_derived`, `output_byte_runs` (`20261124T0245Z_output_bytes`, #7256), `output_cutover`, `output_claims` (`20261125T0758Z_outputs_cut_over`, #7257; `output_copy_runs`, `output_byte_runs` and `output_cutover` are unused since #7887, whose second step drops them; see [Saved outputs](#saved-outputs)) | the API |
 | Auth | `auth_sessions`, `auth_login_config`, `auth_break_glass_codes`, `service_credentials`, `personal_access_tokens`, `auth_delegation_codes`, `service_caller_suspensions` (2026-11-02 to 2026-11-06 files) | the API |
 | Printing | `print_runs`, `print_sends`, `print_links`, `output_bambuddy_uploads`, `output_bambuddy_slices`, `output_last_prints`, `print_preview_slices`, `print_slice_starts`, `print_batches`, `print_batch_items`, `print_attachments`, `print_outcomes`, `printers`, `printer_reports` (`20261018T1659Z_printers`), `rack_nozzle_*`, `library_folders`, `library_files` (`20261017T2250Z_print_library`), `native_slices`, `library_copies`, `print_imports`, `print_lan_imports`, `lan_print_archives` and more | the API; the print worker through `crud.print` routes (`scadbuddy/api/crud_print.py:316`) |
 | Spools and filament | `filament_*` (`20261114T1300Z`, `20261114T1301Z` and later), `filament_presets`, `filaments` (the overlay and native spool tables were dropped by `20261118T1235Z_drop_native_spool_tables`, and `held_local_presets` by `20261124T1308Z_drop_held_local_presets`, #7275) | the API; the print worker through CRUD |
@@ -405,24 +405,19 @@ from `outputs` too.
 Two copies filled the rows and the blobs from the folders, until release B of #7257
 removed them (`library/output_copy.py`, `library/output_byte_copy.py`; plan D4). The row
 copy (#7255) ran at each API start and in the housekeeping sweep
-`housekeeping_copy_outputs`; each run is a row of `output_copy_runs`. The byte copy (#7256)
-ran after it, and in the sweep `housekeeping_copy_output_bytes`; each run is a row of
-`output_byte_runs`. A housekeeping run with `OUTPUTS_CUT_OVER_PATCH` schedules neither.
+`housekeeping_copy_outputs`; each run was a row of `output_copy_runs`. The byte copy
+(#7256) ran after it, and in the sweep `housekeeping_copy_output_bytes`; each run was a row
+of `output_byte_runs`. A housekeeping run with `OUTPUTS_CUT_OVER_PATCH` schedules neither.
 Both activities stay registered as no-ops that log `CUT_OVER_NOTHING_TO_COPY`, so a run
 recorded before that patch replays (`scadbuddy/workflows/housekeeping.py`). A follow-up
-removes them with `workflow.deprecate_patch`, and drops the ledgers and the copy columns
-(`copied_at`, `files_stamp`, `bytes_stamp`; plan D11).
+(#7886) removes them with `workflow.deprecate_patch`.
 
-`GET /api/v1/outputs/copy-status` still answers the last run of each copy, and no later run
-comes. Its body is the last row copy run (404 before any). `bytes` is the last byte run
-(`null` before any), with `pending`, the count of rows whose `bytes_at` is NULL now (0
-after the cut-over), and the rows' damage from every run: `damaged_rows`, the count of rows
-whose `damaged` is not empty, and `damaged_sample`, the first 50 of them by output id as
-`{output_id, damaged}`. `cut_over_at` is the time of the cut-over mark. When
-`damaged_rows` is more than the sample, list the rest with
-`SELECT output_id, damaged FROM outputs WHERE damaged <> '[]' ORDER BY output_id`. A
-person checks each output that they name: the folder on the share is the only other copy
-of what the copy found damaged.
+#7887 (plan D11) removed `GET /api/v1/outputs/copy-status`, which answered the copies'
+last runs and the cut-over mark's time. No code reads or writes the tables
+`output_copy_runs`, `output_byte_runs` and `output_cutover` or the copy-only columns of
+`outputs` (`copied_at`, `files_stamp`, `bytes_stamp`, `damaged`) now; #7887's second step
+drops them. A save inserts a new row only: a row that already holds the id is a
+`UniqueViolation`.
 
 #### The cut-over
 
@@ -434,7 +429,8 @@ fails when the folder is missing. So release A (3a) still wrote every folder, an
 release B (3b) stopped the folder writes and removed the file fallback, the copies, the
 directory scans and `output_index`.
 
-Release A wrote the mark, the one row of `output_cutover` (its key column is `one`), in one
+Release A wrote the mark, the one row of `output_cutover` (its key column is `one`; unused
+since #7887), in one
 transaction, when both copies were done: it got both copies' advisory locks, the last row
 copy run and the last byte run had a `finished_at` (the byte run with no `refused` and an
 empty `failed`), and no `outputs` row had `bytes_at` NULL. Once the mark existed, both
@@ -470,6 +466,9 @@ Three gaps stay open while both builds run, so avoid model deletes during the ro
   housekeeping runs back. It can then replay runs that release B recorded behind
   `OUTPUTS_CUT_OVER_PATCH`, a patch its build does not have, until a release B pod starts
   and is current again.
+
+The steps below were for release B's deploy. They read `GET /api/v1/outputs/copy-status`,
+which #7887 removed after it.
 
 After release B's roll ends:
 

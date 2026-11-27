@@ -34,7 +34,6 @@ from scadbuddy.store.content import ContentStore, sweep_content
 from scadbuddy.store.index import Pool
 from scadbuddy.store.refs import BlobRefs
 from tests.support.arrange import finished_job
-from tests.support.row_outputs import mark_cut_over
 from tests.support.store import local_content, store_pool
 
 pytestmark = pytest.mark.requires_postgres
@@ -282,15 +281,10 @@ async def test_reaper_still_releases_holds_of_output_with_no_row(
     assert _holds(pool, meta.id) == set()
 
 
-def _mark(pool: Pool, rows: OutputRows) -> None:
-    """The cut-over mark (#7257), over a row copy run and a byte run that finished."""
-    mark_cut_over(rows)
-
-
 async def test_reaper_after_cut_over_reads_rows_only(
     tmp_path: Path, projection: JobProjection, content: ContentStore, pool: Pool
 ) -> None:
-    """#7257 plan A5: after the mark the reaper scans no folder and reads no
+    """#7257 plan A5: since the cut-over the reaper scans no folder and reads no
     ``output_hold_slugs`` (release B's migration dropped it). Past the grace, a
     deleted output's holds go; a live output's holds and a claimed id's holds stay."""
     store, job, files = await _with_files(tmp_path, projection, content)
@@ -301,7 +295,6 @@ async def test_reaper_after_cut_over_reads_rows_only(
     refs = BlobRefs(pool)
     live_holds = _holds(pool, live.id)
     assert live_holds
-    _mark(pool, rows)
     await asyncio.to_thread(store.delete, gone.id)
     # A hold taken after the delete's release (a byte copy's or a thumbnail's).
     refs.add("piece-late", OUTPUT_HOLDER, gone.id)
@@ -329,7 +322,6 @@ async def test_reaper_after_cut_over_keeps_young_holds_and_drops_stale_claims(
     rows = store.rows
     assert rows is not None
     await store.save(job, name="live")
-    _mark(pool, rows)
     refs = BlobRefs(pool)
     unclaimed = "d" * 32
     refs.add("piece-phase-2", OUTPUT_HOLDER, unclaimed)

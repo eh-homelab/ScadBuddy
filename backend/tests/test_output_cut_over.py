@@ -24,7 +24,6 @@ from scadbuddy.store.content import ContentStore
 from scadbuddy.store.index import Pool
 from scadbuddy.workflows.housekeeping import OUTPUT_BYTES_SWEEP, OUTPUT_COPY_SWEEP, SWEEPS
 from tests.support.arrange import finished_job
-from tests.support.row_outputs import mark_cut_over
 from tests.support.store import local_content, store_pool
 
 pytestmark = pytest.mark.requires_postgres
@@ -78,30 +77,13 @@ def _rows(store: OutputStore) -> OutputRows:
     return store.rows
 
 
-def _mark(rows: OutputRows) -> None:
-    """Write the cut-over mark as release A wrote it: a finished row copy run, then a
-    finished byte run with no refusal and no failure."""
-    mark_cut_over(rows)
-
-
-def _runs(pool: Pool) -> tuple[int, int]:
-    """How many row copy runs and byte copy runs exist."""
-    with pool.connection() as conn:
-        found = conn.execute(
-            "SELECT (SELECT count(*) FROM output_copy_runs) AS rows,"
-            " (SELECT count(*) FROM output_byte_runs) AS bytes"
-        ).fetchone()
-    assert found is not None
-    return int(found["rows"]), int(found["bytes"])
-
-
 def _outputs(pool: Pool) -> list[tuple[str, Any, Any]]:
-    """Each row's id, ``copied_at`` and ``bytes_at``: what a copy would write."""
+    """Each row's id, ``meta`` and ``bytes_at``: what a copy would write."""
     with pool.connection() as conn:
         found = conn.execute(
-            "SELECT output_id, copied_at, bytes_at FROM outputs ORDER BY output_id"
+            "SELECT output_id, meta, bytes_at FROM outputs ORDER BY output_id"
         ).fetchall()
-    return [(str(r["output_id"]), r["copied_at"], r["bytes_at"]) for r in found]
+    return [(str(r["output_id"]), r["meta"], r["bytes_at"]) for r in found]
 
 
 async def test_copy_sweeps_do_nothing(
@@ -112,9 +94,9 @@ async def test_copy_sweeps_do_nothing(
     caplog: pytest.LogCaptureFixture,
 ) -> None:
     """Plan Task B2: both copy activities return, log that the outputs are cut over, and
-    touch no table: no run is added, and no row changes, though no output has a folder."""
+    touch no row, though no output has a folder. (The run tables are unused since #7887.)"""
     store, metas = saved
-    before = (_runs(pool), _outputs(pool))
+    before = _outputs(pool)
     assert not _folder(store, metas[0]).exists()
     state = SimpleNamespace(
         outputs=store,
@@ -125,7 +107,7 @@ async def test_copy_sweeps_do_nothing(
     with caplog.at_level(logging.INFO, logger="scadbuddy.main"):
         await ActivityEnvironment().run(sweeps[OUTPUT_COPY_SWEEP])
         await ActivityEnvironment().run(sweeps[OUTPUT_BYTES_SWEEP])
-    assert (_runs(pool), _outputs(pool)) == before
+    assert _outputs(pool) == before
     assert [r.getMessage() for r in caplog.records].count(NOTHING_TO_COPY) == 2
 
 
@@ -135,10 +117,9 @@ THUMBNAIL_PNG = b"\x89PNG\r\n\x1a\nthumbnail after the mark"
 async def _without_folder(
     saved: tuple[OutputStore, list[OutputMeta]],
 ) -> tuple[OutputStore, OutputMeta, Path]:
-    """Review Focus 2: the mark is written, the store puts blobs, and the first output has
-    no folder: a release B pod saves none (#7257, task B4)."""
+    """Review Focus 2: the store puts blobs, and the first output has no folder: a release
+    B pod saves none (#7257, task B4)."""
     store, metas = saved
-    _mark(_rows(store))
     directory = _folder(store, metas[0])
     assert not directory.exists()
     return store, metas[0], directory
