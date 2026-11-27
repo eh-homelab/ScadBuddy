@@ -28,6 +28,9 @@ type recordIn struct {
 	// decoded is the decoder's JSON without the raw blocks, which the dump holds.
 	decoded []byte
 	scan    scanFacts
+	// noTap is a read the page sent with tap false (a lookup of a tag it read before): the
+	// tag is written, but no history row and no hold of its dump or its photo.
+	noTap bool
 }
 
 type recorded struct {
@@ -146,6 +149,9 @@ func write(ctx context.Context, tx pgx.Tx, in recordIn) (recorded, error) {
  raw_blob = CASE WHEN $2 THEN $3 ELSE raw_blob END WHERE id = $1`, tagID, in.complete, in.dumpKey, in.bambu); err != nil {
 		return recorded{}, err
 	}
+	if in.noTap {
+		return recorded{tagID: tagID}, nil
+	}
 	readID, err := insertRead(ctx, tx, historyRow{
 		tagID: tagID, source: in.source, actor: in.actor, uid: in.uid, tray: in.tray,
 		tagType: in.tagType, dumpKey: in.dumpKey, decoded: in.decoded, scan: in.scan,
@@ -243,7 +249,9 @@ func lock(ctx context.Context, tx pgx.Tx, sql string, arg string) (*tagRow, erro
 // fold moves a UID-only tag into the tag of its spool's tray ("Same spool as…", spec G3), as
 // 20261126T1817Z_filament_tag_uid_canonical.sql merges a tag's two UID forms: its UIDs,
 // bindings, reads, the ledger's copies of its id, its Bambuddy queue row and its newer
-// last-seen fields move, then the row goes. A tag with backups is refused (backups are never
+// last-seen fields move, and its note only when the tray's tag has none; then the row goes.
+// The folded tag's kind is dropped: the tray's tag keeps its own (a tray UUID makes it a
+// Bambu tag). A tag with backups is refused (backups are never
 // changed), and so is a pair where both tags hold an open binding.
 func fold(ctx context.Context, tx pgx.Tx, from, into string) error {
 	var backups, bothBound bool

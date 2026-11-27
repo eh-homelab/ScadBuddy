@@ -12,7 +12,8 @@ import (
 
 // Recorded is what RecordMifare wrote.
 type Recorded struct {
-	// TagID is the tag the read names now; ReadID its filament_tag_reads row.
+	// TagID is the tag the read names now; ReadID its filament_tag_reads row, "" for a read
+	// with tap false.
 	TagID, ReadID string
 	// DumpKey is the raw dump's content index key (kind tag_dump).
 	DumpKey string
@@ -48,11 +49,11 @@ func (s *Reads) RecordMifare(ctx context.Context, body []byte, actor, source str
 	if p != nil {
 		return Recorded{}, p
 	}
-	return s.recordMifare(ctx, rd, scanFacts{image: img, location: at}, actor, source)
+	return s.recordMifare(ctx, rd, scanFacts{image: img, location: at}, actor, source, false)
 }
 
 // recordMifare decodes rd, stores its dump and writes the tag and the history row.
-func (s *Reads) recordMifare(ctx context.Context, rd read, scan scanFacts, actor, source string) (Recorded, error) {
+func (s *Reads) recordMifare(ctx context.Context, rd read, scan scanFacts, actor, source string, noTap bool) (Recorded, error) {
 	tag, err := bambutag.Decode(rd.uid, rd.blocks)
 	if err != nil {
 		return Recorded{}, problem(http.StatusUnprocessableEntity, "mifare_unreadable", err.Error())
@@ -76,7 +77,7 @@ func (s *Reads) recordMifare(ctx context.Context, rd read, scan scanFacts, actor
 	saved, err := record(ctx, s.Pool, recordIn{
 		uid: CleanUID(tag.UID), tray: tray, tagType: rd.tagType, actor: actor, source: source,
 		dumpKey: key, complete: tag.Complete, decoded: decoded, scan: scan,
-		bambu: tray != "" || tag.FilamentType != nil,
+		bambu: tray != "" || tag.FilamentType != nil, noTap: noTap,
 	})
 	if err != nil {
 		return Recorded{}, err

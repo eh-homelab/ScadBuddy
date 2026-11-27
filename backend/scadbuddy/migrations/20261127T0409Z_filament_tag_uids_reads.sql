@@ -6,7 +6,8 @@
 -- read. A trigger keeps that first UID in this table: a write of `tag_uid` that names a UID
 -- another tag holds here is a unique violation, as the unique index on `tag_uid` was. Every
 -- lookup by UID goes through this table (`filament/tags.py` `_find`, `holder_by_keys`,
--- `filament/spools.py` `_tag`, and core's `internal/tagreads`).
+-- `filament/spools.py` `_tag`, `filament/inventory.py`, `filament/bambuddy_pull.py`,
+-- `filament/capture.py` `_spool_from_tag`, and core's `internal/tagreads`).
 --
 -- `filament_tag_reads`: the scan history, one row per read, never changed but by a tag
 -- merge (which moves `tag_id`) and never deleted. A MIFARE read's raw dump is a blob of

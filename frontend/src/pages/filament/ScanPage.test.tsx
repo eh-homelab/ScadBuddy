@@ -152,6 +152,31 @@ describe('the scan page (#7273)', () => {
     }
   })
 
+  it("shows another refusal of the app's blocks and does not post again (#8148)", async () => {
+    const log = sent()
+    server.use(
+      http.post('/api/v1/filament/tags/reads', () =>
+        HttpResponse.json(
+          { type: 'about:blank', title: 'Refused', status: 422, detail: 'no such spool', code: 'spool_unknown' },
+          { status: 422, headers: { 'Content-Type': 'application/problem+json' } },
+        ),
+      ),
+    )
+    window.ScadBuddyNfc = { native: true, lastMifare: { uid: '04A1B2C3D4E5F6', blocks: [{ index: 1, dataHex: '4131372d503100004746413137000000' }] } }
+    try {
+      const { user } = open()
+      await user.click(screen.getByRole('button', { name: 'Scan' }))
+      await screen.findByRole('button', { name: 'Scanning — hold a tag to the phone' })
+      stub.tap({ serialNumber: '04:a1:b2:c3:d4:e5:f6', records: [] })
+      expect(await screen.findByText(/could not look up the tag/)).toBeInTheDocument()
+      const reads = log.requests.filter((one) => one.line === 'POST /api/v1/filament/tags/reads')
+      expect(reads).toHaveLength(1)
+    } finally {
+      log.off()
+      delete window.ScadBuddyNfc
+    }
+  })
+
   it("creates a spool from a new tag's draft and binds it", async () => {
     const log = sent()
     try {

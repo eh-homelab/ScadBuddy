@@ -501,6 +501,69 @@ func TestALookupThatIsNoTapIsNotInTheHistory(t *testing.T) {
 	}
 }
 
+// Review of #8161: tap false on a MIFARE read writes the tag but no history row and no hold.
+func TestAMifareLookupThatIsNoTapIsNotInTheHistory(t *testing.T) {
+	h := newHarness(t)
+	body := mifareRead(uidA, block0A+" "+shared)
+	body["tap"] = false
+	status, answer := h.post(body)
+	if status != http.StatusOK || answer["tag_read_id"] != nil || answer["bambu"] == nil {
+		t.Fatalf("%d %v", status, answer)
+	}
+	if got := h.one("SELECT tray_uuid FROM filament_tags WHERE id = $1::uuid", h.tagOf(uidA+"00000100")); got != tray {
+		t.Errorf("tray_uuid = %v", got)
+	}
+	if got := h.one("SELECT count(*) FROM filament_tag_reads"); got != int64(0) {
+		t.Errorf("rows = %v", got)
+	}
+	if got := h.one("SELECT count(*) FROM blob_refs WHERE holder_kind = 'tag_read'"); got != int64(0) {
+		t.Errorf("holds = %v", got)
+	}
+}
+
+// Review of #8161: the fold keeps the tray tag's note over the folded tag's, and takes the
+// folded tag's note only when the tray's tag has none.
+func TestTheFoldKeepsTheTrayTagsNote(t *testing.T) {
+	for _, c := range []struct {
+		name string
+		kept any
+		want string
+	}{{"both", "tray note", "tray note"}, {"folded only", nil, "side note"}} {
+		t.Run(c.name, func(t *testing.T) {
+			h := newHarness(t)
+			h.exec("INSERT INTO filament_tags (kind, tag_uid, tray_uuid, note) VALUES ('bambu_mifare', $1, $2, $3)", uidA+"00000100", tray, c.kept)
+			h.exec("INSERT INTO filament_tags (kind, tag_uid, note) VALUES ('other', $1, 'side note')", uidB+"00000100")
+			if status, answer := h.post(mifareRead(uidB, block0B+" "+shared)); status != http.StatusOK {
+				t.Fatalf("%d %v", status, answer)
+			}
+			if got := h.one("SELECT count(*) FROM filament_tags"); got != int64(1) {
+				t.Fatalf("%v tag rows", got)
+			}
+			if got := h.one("SELECT note || ' ' || kind FROM filament_tags"); got != c.want+" bambu_mifare" {
+				t.Errorf("note and kind = %v", got)
+			}
+		})
+	}
+}
+
+// Review of #8161: a body over bodyMax goes to Python whole, which answers its own refusal.
+func TestAnOversizeBodyGoesToPythonWhole(t *testing.T) {
+	h := newHarness(t)
+	h.py.status, h.py.answer = http.StatusRequestEntityTooLarge, `{"code":"too_large"}`
+	body := mifareRead(uidA, block0A+" "+shared)
+	body["pad"] = strings.Repeat("x", bodyMax)
+	status, answer := h.post(body)
+	if status != http.StatusRequestEntityTooLarge || answer["code"] != "too_large" {
+		t.Fatalf("%d %v", status, answer)
+	}
+	if len(h.py.bodies) != 1 || h.py.bodies[0]["pad"] != body["pad"] || h.py.bodies[0]["mifare_blocks"] == nil {
+		t.Errorf("python did not get the whole body")
+	}
+	if got := h.one("SELECT count(*) FROM filament_tags"); got != int64(0) {
+		t.Errorf("an oversize read wrote %v tags", got)
+	}
+}
+
 func TestAScanKeepsItsPhoto(t *testing.T) {
 	h := newHarness(t)
 	photo := "scan_image-" + strings.Repeat("ab", 32)

@@ -196,9 +196,7 @@ func (s *Reads) ndef(w http.ResponseWriter, r *http.Request, fields map[string]j
 	}
 	// A bind_spool_id is the page binding a tag it read a moment ago (the New tag card), and
 	// tap false a page's lookup of a tag it read before: no tap, so no history row.
-	var tap *bool
-	_ = json.Unmarshal(fields["tap"], &tap)
-	if err := json.Unmarshal(answer["tag"], &tag); err == nil && tag.ID != nil && isNull(fields["bind_spool_id"]) && (tap == nil || *tap) {
+	if err := json.Unmarshal(answer["tag"], &tag); err == nil && tag.ID != nil && isNull(fields["bind_spool_id"]) && tapped(fields) {
 		var uid, tagType *string
 		_ = json.Unmarshal(fields["uid"], &uid)
 		_ = json.Unmarshal(fields["tag_type"], &tagType)
@@ -301,7 +299,7 @@ const dumpFormat = "scadbuddy.mifare_classic_1k.v1"
 func (s *Reads) mifare(w http.ResponseWriter, r *http.Request, fields map[string]json.RawMessage, rd read, scan scanFacts) {
 	ctx := r.Context()
 	caller := auth.CallerOf(ctx)
-	saved, err := s.recordMifare(ctx, rd, scan, actorOf(caller), sourceOf(caller, "app"))
+	saved, err := s.recordMifare(ctx, rd, scan, actorOf(caller), sourceOf(caller, "app"), !tapped(fields))
 	if err != nil {
 		writeError(w, r, err)
 		return
@@ -321,7 +319,9 @@ func (s *Reads) mifare(w http.ResponseWriter, r *http.Request, fields map[string
 		return
 	}
 	answer["bambu"], _ = json.Marshal(tag)
-	answer["tag_read_id"], _ = json.Marshal(saved.ReadID)
+	if saved.ReadID != "" {
+		answer["tag_read_id"], _ = json.Marshal(saved.ReadID)
+	}
 	answer["dump_key"], _ = json.Marshal(key)
 	if isNull(answer["spool"]) && isNull(answer["draft"]) {
 		if draft, err := draftOf(ctx, s.Pool, tag); err != nil {
@@ -331,6 +331,14 @@ func (s *Reads) mifare(w http.ResponseWriter, r *http.Request, fields map[string
 		}
 	}
 	_ = httpx.WriteJSON(w, answer)
+}
+
+// tapped is false only for a body with tap false: a page's lookup of a tag it read before
+// (after a move, a restore's confirm), which writes no history row.
+func tapped(fields map[string]json.RawMessage) bool {
+	var tap *bool
+	_ = json.Unmarshal(fields["tap"], &tap)
+	return tap == nil || *tap
 }
 
 func isNull(v json.RawMessage) bool { return len(v) == 0 || string(v) == "null" }
