@@ -167,6 +167,9 @@ class Relay:
         #: a silence must last before `check_silence` restarts the pull.
         self._heard: dict[str, tuple[int, float]] = {}
         self._silent_after: dict[str, float] = {}
+        #: The paths a failed silent restart deleted and did not put back: each
+        #: `check_silence` reconciles them until that succeeds.
+        self._lost: set[str] = set()
 
     def wanted(self) -> set[str]:
         """The paths the relay has put in MediaMTX and not removed: each one must be in
@@ -209,9 +212,11 @@ class Relay:
         # Until MediaMTX calls the ready hook (``runOnAvailable``), the pull is being tried.
         self._want(name, "retrying")
 
-    async def _remove(self, name: str, present: bool) -> None:
+    async def _remove(self, name: str, present: bool, report: FeedState = "stopped") -> None:
         """Delete the path when MediaMTX has it, and report ``stopped``: also when a
-        delete went through earlier but its report did not."""
+        delete went through earlier but its report did not. A restart that puts the path
+        back at once reports ``retrying`` instead (``report``): the printer is still
+        recorded."""
         if present:
             try:
                 await self._mtx.delete_path(name)
@@ -220,7 +225,10 @@ class Relay:
             self._confs.pop(name, None)
             if self._held is not None:
                 self._held.discard(name)
-        if present or self._feed.desired(name) not in (None, "stopped"):
+        if report != "stopped":
+            if present:
+                self._want(name, report)
+        elif present or self._feed.desired(name) not in (None, "stopped"):
             self._want(name, "stopped")
 
     def _want(self, printer_id: str, state: FeedState) -> None:
@@ -301,13 +309,14 @@ class Relay:
         async with self._lock:
             await self._reconcile_locked(printer_id)
 
-    async def restart(self, printer_id: str) -> None:
+    async def restart(self, printer_id: str, *, report: FeedState = "stopped") -> None:
         """Drop one printer's MediaMTX path, then bring it up again, so MediaMTX dials the
-        printer afresh (``camera.reconnect``). One hold of the lock, as `reconcile`."""
+        printer afresh (``camera.reconnect``). One hold of the lock, as `reconcile`.
+        ``report`` is the state reported between the two (`_remove`)."""
         async with self._lock:
             existing = await self._existing()
             self._held = set(existing)
-            await self._remove(printer_id, printer_id in existing)
+            await self._remove(printer_id, printer_id in existing, report)
             await self._reconcile_locked(printer_id)
 
     async def _reconcile_locked(self, printer_id: str) -> None:
@@ -343,8 +352,22 @@ class Relay:
 
         The read runs outside the lock: a `reconcile_all` that replaces a path between the
         read and the restart makes the relay restart a fresh pull once, which costs a few
-        seconds. A restart whose CRUD read fails leaves the path deleted until the next
-        `reconcile_all`, as a failed `camera.reconnect` does."""
+        seconds. A restart that fails after its delete (the CRUD read or the put) leaves the
+        path out of MediaMTX: the name goes in `_lost`, and each later call reconciles it
+        until that succeeds. The change follower knows nothing of these restarts, so it
+        would not resync."""
+        for name in sorted(self._lost):
+            try:
+                await self.reconcile(name)
+            except Exception as error:
+                logger.warning(
+                    "camera relay: %s is still not back after a failed restart (%s: %s)",
+                    name,
+                    type(error).__name__,
+                    error,
+                )
+            else:
+                self._lost.discard(name)
         try:
             received = await self._mtx.received()
         except httpx.HTTPError as error:
@@ -374,9 +397,10 @@ class Relay:
             self._silent_after[name] = min(wait * 2, SILENT_MAX)
             del self._heard[name]
             try:
-                await self.restart(name)
+                await self.restart(name, report="retrying")
             except Exception as error:
-                # The next silent wait tries again; the other printers still restart.
+                # The other printers still restart; the next call puts this one back.
+                self._lost.add(name)
                 logger.warning(
                     "camera relay: restart of %s failed (%s: %s)", name, type(error).__name__, error
                 )
