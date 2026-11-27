@@ -16,8 +16,9 @@ The shelf is every unarchived spool that no printer's latest report resolves as 
 An untagged tray's placed spool must also agree with what the tray reports (#6713,
 `tray_agreement`). The scheduled pull reconciles it (`reconcile_trays`): where it does not
 and Bambuddy assigns the tray a linked, unarchived spool that does, that spool moves in and
-the placed one moves to no place. Where neither agrees, nothing moves, and the tray view
-carries a ``mismatch`` (`view`).
+the placed one moves to no place. Where no spool holds the tray (D9, #7143), the assigned
+spool that agrees moves in and the tray's unknown row goes. Where neither agrees, nothing
+moves, and the tray view carries a ``mismatch`` (`view`).
 """
 
 from __future__ import annotations
@@ -52,6 +53,7 @@ from scadbuddy.filament.models import (
 )
 from scadbuddy.filament.presets import PoolSpoolPresets, effective_presets
 from scadbuddy.filament.spools import FilamentDefaults, FilamentSpoolStore
+from scadbuddy.filament.unknown_tray_rows import clear_on
 from scadbuddy.printers.models import PrinterRow
 from scadbuddy.printers.reports import PrinterReportStore, report_status
 from scadbuddy.printers.status import is_fresh
@@ -131,12 +133,12 @@ def tray_agreement(
 @dataclass(frozen=True)
 class TrayMove:
     """One tray `FilamentInventory.reconcile_trays` set right: the spool it moved to no
-    place, and the spool it put in the tray."""
+    place (``None`` when D9 found none placed there), and the spool it put in the tray."""
 
     printer_id: UUID
     ams_id: int
     tray_id: int
-    removed: UUID
+    removed: UUID | None
     placed: UUID
 
 
@@ -208,6 +210,10 @@ class TrayNotFilledError(ValueError):
 
     def __init__(self) -> None:
         super().__init__("the printer's last report does not show that tray filled")
+
+
+class SpoolNotFoundError(LookupError):
+    """`link_on` found no live spool: it was archived or deleted since the caller read it."""
 
 
 class TrayTagClashError(ValueError):
@@ -467,7 +473,10 @@ class FilamentInventory:
         unarchived SB spool that agrees (`_verdict`, #6713): the placed spool moves to no
         place and the assigned one into the tray, each with a ``moved`` event by
         `RECONCILE_ACTOR` whose ``data.reason`` says why. An assigned spool that another
-        reported tray holds stays where it is. Nothing else moves. The moves made."""
+        reported tray holds stays where it is. D9 (#7143): an untagged tray no spool holds
+        gets the assigned spool when it agrees (``data.reason`` ``assigned_to_empty_tray``),
+        and the tray's unknown-tray row is deleted in the same transaction. Nothing else
+        moves. The moves made."""
         printers = {row.id: row for row in PrinterStore(self._pool, None).list()}
         assigned = _assigned_trays(bb_assignments, printers)
         if not assigned:
@@ -493,6 +502,29 @@ class FilamentInventory:
             sb_id = None if bb_id is None else links.get(bb_id)
             candidate = None if sb_id is None or sb_id in held else spools.get(sb_id)
             holder = None if holder_id is None else spools.get(holder_id)
+            if holder is None:
+                # D9 (#7143): a tray no spool holds, where Bambuddy assigns one that agrees.
+                if (
+                    holder_id is None
+                    and candidate is not None
+                    and _untagged(tray)
+                    and tray_agreement(candidate, tray, materials)
+                ):
+                    evicted = self._place_assigned(
+                        printers[str(printer_id)].name, printer_id, tray, candidate
+                    )
+                    if evicted is not None:
+                        moved.append(
+                            TrayMove(
+                                printer_id,
+                                tray.ams_id,
+                                tray.tray_id,
+                                evicted[0] if evicted else None,
+                                candidate.id,
+                            )
+                        )
+                        held.add(candidate.id)
+                continue
             if _verdict(tray, holder, found_by, candidate, materials) != "move":
                 continue
             assert holder is not None and candidate is not None
@@ -698,7 +730,8 @@ class FilamentInventory:
         (`FilamentSpoolStore.tag_on`; #6261: every writer of bindings takes the tag
         first); the spools by id; then the place, ``FOR SHARE`` in
         `LocationStore.move_on`, after its spool, as `LocationStore.move` does. The
-        place's row is never locked ``FOR UPDATE`` here, which would invert that order."""
+        place's row is never locked ``FOR UPDATE`` here, which would invert that order. The
+        tray's unknown row (#7143) is deleted last (`clear_on`), under the same locks."""
         place = self.tray_place(printer_id, ams_id, tray_id, seen)
         defaults = self._spools.defaults()
         with self._pool.connection() as conn, conn.transaction():
@@ -772,7 +805,8 @@ class FilamentInventory:
         actor: str,
     ) -> None:
         """`link` on ``conn``, in the caller's transaction, at the tray's place
-        ``place_id`` (`tray_place`)."""
+        ``place_id`` (`tray_place`). It also deletes the tray's unknown-tray row
+        (#7143, `clear_on`): the tray now has a spool."""
         _tray_lock(conn, printer_id, ams_id, tray_id)
         self._no_tag_clash(conn, seen, spool_id)
         uid, tray = clean_tag_uid(seen.tag_uid), clean_tray_uuid(seen.tray_uuid)
@@ -786,13 +820,14 @@ class FilamentInventory:
         ).fetchall()
         spool = next((row for row in rows if row["id"] == spool_id), None)
         if spool is None or spool["archived_at"] is not None:
-            raise LookupError(f"no spool {spool_id}")
+            raise SpoolNotFoundError(f"no spool {spool_id}")
         for row in rows:
             if row["id"] != spool_id:
                 LocationStore.move_on(conn, row["id"], None, actor=actor)
         self.place_on(conn, spool_id, place_id, seen, actor=actor)
         if uid is not None or tray is not None:
             FilamentSpoolStore.bind_on(conn, spool_id, uid, tray, kind, None, actor)
+        clear_on(conn, printer_id, ams_id, tray_id)
 
     def unlink(self, printer_id: UUID, ams_id: int, tray_id: int, *, actor: str) -> None:
         """Move every spool in the tray's place to no place, each with a ``moved``
@@ -848,6 +883,48 @@ class FilamentInventory:
             },
         )
         return True
+
+    def _place_assigned(
+        self, name: str, printer_id: UUID, tray: SeenTray, assigned: m.Spool
+    ) -> list[UUID] | None:
+        """`reconcile_trays`'s move for a tray no spool holds (D9, #7143): ``assigned`` into
+        the tray, and the tray's unknown-tray row deleted, in one transaction. Locks as
+        `link_on` does: the tray's advisory lock, then the spools by id. A spool placed
+        at the tray that `holder_on` does not see (its fingerprint is stale) moves to no
+        place first; the ids of those spools are returned. ``None``, with nothing
+        written, when a spool holds the tray by now or ``assigned`` is archived since the
+        read: the next pass looks again."""
+        place = self._locations.ensure_ams(
+            printer_id,
+            tray.ams_id,
+            tray.tray_id,
+            label=place_label(name, tray.ams_id, tray.tray_id),
+        )
+        with self._pool.connection() as conn, conn.transaction():
+            _tray_lock(conn, printer_id, tray.ams_id, tray.tray_id)
+            rows = conn.execute(
+                "SELECT id, archived_at FROM filament_spools"
+                " WHERE id = %s OR location_id = %s ORDER BY id FOR UPDATE",
+                (assigned.id, place.id),
+            ).fetchall()
+            mine = next((row for row in rows if row["id"] == assigned.id), None)
+            if mine is None or mine["archived_at"] is not None:
+                return None
+            if self.holder_on(conn, printer_id, tray) != (None, None):
+                return None
+            evicted = [row["id"] for row in rows if row["id"] != assigned.id]
+            for spool_id in evicted:
+                LocationStore.move_on(conn, spool_id, None, actor=RECONCILE_ACTOR)
+            self.place_on(
+                conn,
+                assigned.id,
+                place.id,
+                tray,
+                actor=RECONCILE_ACTOR,
+                reason="assigned_to_empty_tray",
+            )
+            clear_on(conn, printer_id, tray.ams_id, tray.tray_id)
+        return evicted
 
     def _others(self, printer_id: UUID) -> list[tuple[UUID, list[SeenTray]]]:
         """Every other registry printer's trays, as its latest stored report shows them."""
@@ -913,6 +990,17 @@ def _tray_lock(conn: Conn, printer_id: UUID, ams_id: int, tray_id: int) -> None:
         "SELECT pg_advisory_xact_lock(hashtext(%s))",
         (f"filament_tray:{printer_id}:{ams_id}:{tray_id}",),
     )
+
+
+def try_tray_lock(conn: Conn, printer_id: UUID, ams_id: int, tray_id: int) -> bool:
+    """`_tray_lock`'s lock, taken only when it is free. False when a link or an unlink
+    holds it (#7143): the caller leaves the tray to the next report."""
+    row = conn.execute(
+        "SELECT pg_try_advisory_xact_lock(hashtext(%s)) AS got",
+        (f"filament_tray:{printer_id}:{ams_id}:{tray_id}",),
+    ).fetchone()
+    assert row is not None
+    return bool(row["got"])
 
 
 async def route_trays(

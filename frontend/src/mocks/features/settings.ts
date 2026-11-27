@@ -388,8 +388,6 @@ function putSettings(body: Record<string, unknown>) {
       'a plain connection (storefront_mail_tls none) is for a relay with no login: clear the user, or use starttls or implicit',
     )
   }
-  // #426 — without their own key, render workers are handed the full one.
-  next.render_key_fallback = Boolean(next.has_api_key) && !next.has_render_api_key
   next.sources = sources
   next.restart_required = Object.entries(fixtures.settingsApplies)
     .filter(([name, applies]) => applies === 'restart' && next[name] !== (state.running as Record<string, unknown>)[name])

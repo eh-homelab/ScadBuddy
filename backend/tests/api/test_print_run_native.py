@@ -34,6 +34,7 @@ from scadbuddy.bambuddy.options import (
 )
 from scadbuddy.core.problems import ApiError
 from scadbuddy.core.settings import Settings
+from scadbuddy.filament.unknown_tray_rows import PoolUnknownTrays, UnknownSpoolRef
 from scadbuddy.library.settings_store import S3Settings
 from scadbuddy.printers.component import PRINTERS, Printers
 from scadbuddy.printers.models import LanLink, PrinterCreate, PrinterPatch
@@ -59,8 +60,10 @@ from tests.api.test_print_preview_native import kek_file as kek_file  # the fixt
 from tests.api.test_print_run_choices import allow_reprints, body, follow_run, run_routes
 from tests.api.test_send import API, upload_route
 from tests.bambuddy.conftest import recording
+from tests.printers.conftest import unkeyed
 from tests.support.fake_slicer import FakeSlicer, fake_slicer_worker
 from tests.support.operations import press
+from tests.support.printers import MERGED_BY
 from tests.support.sb_rows import seed_app_sb_spools
 
 pytestmark = [
@@ -664,8 +667,10 @@ def test_a_native_run_applies_the_accepted_fixes_it_names(
 # ── #5352: a check that asks for Bambuddy's queue on a printer the LAN reaches ──────
 
 #: A fresh LAN report of an H2C (`tests/printers/fixtures`).
-LAN_REPORT = json.loads(
-    (Path(__file__).parents[1] / "printers" / "fixtures" / "lan-report-h2c.json").read_text()
+LAN_REPORT = unkeyed(
+    json.loads(
+        (Path(__file__).parents[1] / "printers" / "fixtures" / "lan-report-h2c.json").read_text()
+    )
 )
 
 
@@ -673,7 +678,9 @@ def _lan_routed(client: TestClient) -> str:
     """Bambuddy printer 1's registry row, linked over the LAN, set to print natively,
     with a fresh report: on the hot path's backends a run on it goes over the LAN."""
     printers: Printers = _state(client).components.get(PRINTERS)
-    row = printers.store.ensure_bambuddy(1, serial="0938AB000000001", name="Garage", model="H2C")
+    row = printers.store.ensure_bambuddy(
+        1, serial="0938AB000000001", name="Garage", model="H2C", by=MERGED_BY
+    )
     printers.store.link_lan(
         row.id, LanLink(host="10.0.0.9", access_code="12345678"), cert_sha256="cd" * 32
     )
@@ -682,12 +689,27 @@ def _lan_routed(client: TestClient) -> str:
     return row.id
 
 
+@pytest.fixture
+def no_unknown_trays(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The check's unknown-tray read answers no trays (#7143). `LAN_REPORT` has filled,
+    untagged trays that no SB spool holds, so the report's capture records them as unknown
+    and the check would refuse before Bambuddy's status read. These tests are about the
+    path a check takes; the block has its own tests
+    (`tests/printers/test_unknown_spool_block.py`)."""
+
+    async def no_trays(self: PoolUnknownTrays, printer_id: str) -> list[UnknownSpoolRef]:
+        return []
+
+    monkeypatch.setattr(PoolUnknownTrays, "blocking", no_trays)
+
+
 def _status_reads() -> int:
     """How many times Bambuddy's status of printer 1 was read: only the Bambuddy check
     reads it (the native check reads the LAN report)."""
     return sum(1 for call in respx.calls if call.request.url.path == "/api/v1/printers/1/status")
 
 
+@pytest.mark.usefixtures("no_unknown_trays")
 def test_an_outputs_check_asked_through_bambuddy_is_bambuddys_check(
     model: str,
     settings: Settings,
@@ -712,6 +734,7 @@ def test_an_outputs_check_asked_through_bambuddy_is_bambuddys_check(
         assert _status_reads() > before
 
 
+@pytest.mark.usefixtures("no_unknown_trays")
 def test_a_library_files_check_asked_through_bambuddy_is_bambuddys_check(
     model: str,
     settings: Settings,

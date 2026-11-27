@@ -318,7 +318,7 @@ class RenderService:
         reuse_finished: bool = False,
     ) -> tuple[Job, bool]:
         if self.snapshots is not None:
-            # The bambuddy store (spec §6.1): workers read the source from the store,
+            # A remote store (spec §6.1): workers read the source from the store,
             # so every job names a revision whose snapshot exists before it starts.
             model_version = await self.snapshots.pin(slug, model_version)
             if model_version is None:
@@ -749,8 +749,8 @@ class RenderService:
         on it, with time left) and bounds itself instead: its memo'd `preview_timeout`
         is ``timeout`` plus the margin. The timeout counts from the start, so it
         includes the snapshot's `pin` (#1430) and any wait for a free worker; a pin
-        that spends all of it raises `TimeoutError` before any run starts. On the
-        bambuddy store the worker renders the snapshot of the slug's last commit, which
+        that spends all of it raises `TimeoutError` before any run starts. On a remote
+        store the worker renders the snapshot of the slug's last commit, which
         it may first have to bring in: the caller then waits `PREVIEW_TRANSFER` longer.
         There the run's id names the
         revision too, so a join never spans two commits: a newer commit's call starts its
@@ -762,7 +762,7 @@ class RenderService:
         started = loop.time()
         wait = timeout
         if self.snapshots is not None:
-            # The bambuddy store: the worker has no volume, so it renders the snapshot
+            # A remote store: the worker has no volume, so it renders the snapshot
             # of the last commit (as `submit`), and may first bring it and its fonts in.
             revision = await self.snapshots.pin(slug, None, background=True)
             if revision is None:
@@ -803,7 +803,7 @@ class RenderService:
         """``inputs`` brought up to the template's `INPUTS_VERSION` by its `migrate`, run
         on a worker (§8.2, §9). The template's refusal is an `InputsError` with its
         message; a request too large to carry is a 413, the service unreachable a 503,
-        and a migration that ran out of time a 504. On the bambuddy store the worker has
+        and a migration that ran out of time a 504. On a remote store the worker has
         no volume, so every revision is pinned as a snapshot first, as for a render
         (`pin` takes None as the last commit)."""
         # Measured before the pin, so an oversized request uploads no snapshot: with a

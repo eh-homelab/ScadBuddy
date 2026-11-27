@@ -54,9 +54,6 @@ from scadbuddy.workflows.housekeeping import (
     NATIVE_COPIES_TIMEOUT,
     NATIVE_SLICES_SWEEP,
     NATIVE_SLICES_TIMEOUT,
-    OUTPUT_BYTES_SWEEP,
-    OUTPUT_COPY_SWEEP,
-    OUTPUT_COPY_TIMEOUT,
     PAYMENT_CAPTURES_SWEEP,
     PAYMENT_CAPTURES_TIMEOUT,
     PAYMENT_CLOSES_SWEEP,
@@ -72,7 +69,6 @@ from scadbuddy.workflows.housekeeping import (
     PRUNE_TIMEOUT,
     QUOTE_HOLDS_SWEEP,
     QUOTE_HOLDS_TIMEOUT,
-    REAP_SWEEP,
     RUN_HOLDS_SWEEP,
     RUN_HOLDS_TIMEOUT,
     STOREFRONT_DRAFTS_SWEEP,
@@ -99,11 +95,6 @@ from scadbuddy.workflows.housekeeping import (
 from tests.support.temporal import NO_TICK, temporal_client, terminate_open_workflows
 
 pytestmark = pytest.mark.requires_temporal
-
-
-#: What a run schedules today: every sweep but the copies of the outputs, which
-#: `OUTPUTS_CUT_OVER_PATCH` retired (#7257).
-RUN_SWEEPS = [sweep for sweep in SWEEPS if sweep not in (OUTPUT_COPY_SWEEP, OUTPUT_BYTES_SWEEP)]
 
 
 class FakeSweeps:
@@ -140,7 +131,7 @@ async def test_housekeeping_runs_every_sweep_in_order(client: Client) -> None:
         await client.execute_workflow(
             Housekeeping.run, id=f"housekeeping-{uuid.uuid4().hex}", task_queue=queue
         )
-    assert fake.ran == RUN_SWEEPS
+    assert fake.ran == list(SWEEPS)
 
 
 async def test_a_failing_sweep_does_not_stop_the_rest(client: Client) -> None:
@@ -150,7 +141,7 @@ async def test_a_failing_sweep_does_not_stop_the_rest(client: Client) -> None:
         failed = await client.execute_workflow(
             Housekeeping.run, id=f"housekeeping-{uuid.uuid4().hex}", task_queue=queue
         )
-    assert fake.ran == RUN_SWEEPS
+    assert fake.ran == list(SWEEPS)
     assert failed == [SWEEPS[1]]
 
 
@@ -194,7 +185,7 @@ async def test_the_prune_is_short_and_every_sweep_heartbeats(client: Client) -> 
         WARM_LISTINGS_SWEEP: WARM_LISTINGS_TIMEOUT,
         TEMPLATE_COPY_SWEEP: TEMPLATE_COPY_TIMEOUT,
     }
-    for sweep in RUN_SWEEPS:
+    for sweep in SWEEPS:
         assert fake.timeouts[sweep] == (expected.get(sweep, SWEEP_TIMEOUT), HEARTBEAT_TIMEOUT)
 
 
@@ -239,15 +230,6 @@ def test_the_run_holds_reaper_is_on_both_schedules() -> None:
     with the sweeps off, behind its own patch."""
     assert SWEEPS[-3] == PRUNE_SWEEPS[-3] == RUN_HOLDS_SWEEP
     assert sweep_timeout(RUN_HOLDS_SWEEP) == RUN_HOLDS_TIMEOUT
-
-
-def test_the_output_copy_follows_the_output_holds_reaper_on_the_sweeps_schedule() -> None:
-    """#7255: the copy of the saved outputs' files to rows runs in each sweep run, behind
-    its own patch, so the writes of pods on an older build reach the rows by the next
-    sweep. Sweeps off (`asset_sweep_interval` 0) turns it off, as every sweep."""
-    assert SWEEPS[SWEEPS.index(REAP_SWEEP) + 1] == OUTPUT_COPY_SWEEP
-    assert OUTPUT_COPY_SWEEP not in PRUNE_SWEEPS
-    assert sweep_timeout(OUTPUT_COPY_SWEEP) == OUTPUT_COPY_TIMEOUT
 
 
 def test_the_attempt_media_sweep_is_on_both_schedules() -> None:

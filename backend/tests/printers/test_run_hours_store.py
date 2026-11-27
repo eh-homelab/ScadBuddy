@@ -16,6 +16,7 @@ from scadbuddy.printers.reports import PrinterReportStore
 from scadbuddy.printers.run_hours import RunHours
 from scadbuddy.printers.store import PrinterStore
 from tests.conftest import PgPool
+from tests.support.printers import MERGED_BY
 
 pytestmark = pytest.mark.requires_postgres
 
@@ -225,7 +226,7 @@ def test_an_unlink_keeps_the_total_and_clears_the_state_and_a_relink_counts_on(
 
 
 def _two_rows(printers: PrinterStore) -> tuple[str, str]:
-    synthetic = printers.ensure_bambuddy(4, serial=None, name="H2C", model="H2C")
+    synthetic = printers.ensure_bambuddy(4, serial=None, name="H2C", model="H2C", by=MERGED_BY)
     mine = printers.create(PrinterCreate(serial=SERIAL, name="Mine"))
     return synthetic.id, mine.id
 
@@ -245,7 +246,7 @@ def test_a_merge_moves_the_gone_printers_counter_when_the_kept_has_none(
     gone, kept = _two_rows(printers)
     _put_counter(pg_pool, gone, 3600)
 
-    printers.ensure_bambuddy(4, serial=SERIAL, name="H2C", model="H2C")
+    printers.ensure_bambuddy(4, serial=SERIAL, name="H2C", model="H2C", by=MERGED_BY)
 
     assert printers.get(gone) is None
     counter = _counter(pg_pool, kept)
@@ -257,7 +258,7 @@ def test_a_merge_keeps_the_kept_printers_counter(printers: PrinterStore, pg_pool
     _put_counter(pg_pool, gone, 3600)
     _put_counter(pg_pool, kept, 60)
 
-    printers.ensure_bambuddy(4, serial=SERIAL, name="H2C", model="H2C")
+    printers.ensure_bambuddy(4, serial=SERIAL, name="H2C", model="H2C", by=MERGED_BY)
 
     counter = _counter(pg_pool, kept)
     assert counter is not None and counter.run_seconds == 60
@@ -277,7 +278,7 @@ def test_after_a_merge_a_report_before_the_moved_counter_changes_nothing(
         conn.execute("DELETE FROM printer_run_hours WHERE printer = %s", (kept,))
     _put_counter(pg_pool, gone, 3600)  # counted to T0
 
-    printers_with_kek.ensure_bambuddy(4, serial=SERIAL, name="H2C", model="H2C")
+    printers_with_kek.ensure_bambuddy(4, serial=SERIAL, name="H2C", model="H2C", by=MERGED_BY)
     reports.advance(kept, _running(), _at(-50))
     before = _counter(pg_pool, kept)
     reports.advance(kept, _running(), _at(10))

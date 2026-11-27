@@ -394,6 +394,8 @@ export class ApprovalService {
   async listVisiblePending(principal: Owner): Promise<ApprovalRecord[]> {
     await this.expireDue()
     const everything = principal.kind === 'browser' || (await this.hasGrant(principal))
+    // Both routes leave session rows out (`session_id IS NULL` in Go's /approvals/list and
+    // /approvals/prepared), so no filter is needed here.
     const rows = everything ? await this.deps.routes.pending() : await this.deps.routes.prepared(principal)
     return rows.map(record)
   }

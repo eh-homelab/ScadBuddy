@@ -26,7 +26,12 @@ from pydantic import JsonValue
 from scadbuddy.core.settings import Settings
 from scadbuddy.core.tracing import traced_transaction
 from scadbuddy.entities.refs import EntityRef
-from scadbuddy.entities.required import checks_save, mark_incomplete, save_properties_on
+from scadbuddy.entities.required import (
+    checks_save,
+    hold_for_properties,
+    mark_incomplete,
+    save_properties_on,
+)
 from scadbuddy.filament import dry_hours, ledger, metrics
 from scadbuddy.filament import models as m
 from scadbuddy.filament import presets as p
@@ -295,6 +300,11 @@ _SETTING_DEFAULTS = FilamentDefaults(
 
 def _setting_defaults() -> FilamentDefaults:
     return _SETTING_DEFAULTS
+
+
+def _hold(conn: Conn, properties: dict[str, JsonValue] | None, by: Actor | None) -> None:
+    """`hold_for_properties` for `_properties`' write, first in the transaction."""
+    hold_for_properties(conn, properties, by or Actor(kind="browser"))
 
 
 def _properties(
@@ -897,6 +907,7 @@ class FilamentSpoolStore:
         defaults = self._defaults()
         try:
             with self._pool.connection() as conn, conn.transaction():
+                _hold(conn, body.properties, by)
                 bare = body.model_copy(update={"properties": None})
                 spool_id = self.create_on(conn, bare, actor=actor)
                 _properties(conn, spool_id, body.properties, by, checked)
@@ -971,6 +982,8 @@ class FilamentSpoolStore:
         copy and the save, an unchanged copied row stops being ``migrated``. That is
         intended. Each spool gets the draft's ``properties``, by ``by``; with ``checked``
         (#7703) an incomplete spool is `MissingRequiredProperties`."""
+        # The log before any row this locks; the caller has locked none a merge takes.
+        _hold(conn, body.spool.properties, by)
         carried: set[_PresetValues] = set()
         continued: UUID | None = None
         if body.continued_from is not None:
@@ -1102,6 +1115,8 @@ class FilamentSpoolStore:
         defaults = self._defaults()
         try:
             with self._pool.connection() as conn, conn.transaction():
+                # The log before the spool row `update_on` locks (#6949).
+                _hold(conn, patch.properties, by)
                 if not self.update_on(conn, spool_id, patch, actor=actor):
                     return None
                 _properties(

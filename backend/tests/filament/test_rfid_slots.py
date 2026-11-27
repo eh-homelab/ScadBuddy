@@ -74,6 +74,7 @@ from scadbuddy.spools.activities import filament_rfid_activity
 from scadbuddy.workflows.lan_command import LanCommandAnswer, LanCommandKind
 from scadbuddy.workflows.print_models import LAN_ROUTE_WAIT_S
 from tests.conftest import PgPool
+from tests.printers.conftest import unkeyed
 from tests.slicing.conftest import PROFILES
 
 pytestmark = pytest.mark.requires_postgres
@@ -193,7 +194,9 @@ def _filament(pool: PgPool) -> Filament:
 def _report(*more: dict[str, Any], **tray: object) -> dict[str, Any]:
     """The idle H2C report with one tray in AMS 0, tray 1; ``tray`` overrides its keys, and
     ``more`` are further trays of AMS 0."""
-    data: dict[str, Any] = json.loads((FIXTURES / "lan-report-h2c-idle.json").read_text())["print"]
+    data: dict[str, Any] = unkeyed(
+        json.loads((FIXTURES / "lan-report-h2c-idle.json").read_text())["print"]
+    )
     shown = {
         "id": "1",
         "tray_color": "FF0000FF",
@@ -228,7 +231,6 @@ class World:
                 " decode('00', 'hex'), decode('00', 'hex'), 'k1')",
                 (self.printer, f"SN{self.printer.hex[:8]}", "ab" * 32),
             )
-        self.report(_report())
         material = next(
             r.id
             for r in CatalogStore(pool).list("materials")
@@ -247,6 +249,9 @@ class World:
         self.preset("0.4", "GFL99")
         self.spool = self.filament.spools.create(SpoolCreate(type_id=self.type_id), actor="ann").id
         self.bind(override=True)
+        # The first report comes after the bind: capture makes a spool for a tray with an
+        # RFID key that no spool holds (#7143).
+        self.report(_report())
 
     def report(self, data: dict[str, Any]) -> None:
         self.reports.put(str(self.printer), data, datetime.now(UTC))

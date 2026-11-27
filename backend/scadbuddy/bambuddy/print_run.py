@@ -179,7 +179,14 @@ from scadbuddy.bambuddy.trays import (
 )
 from scadbuddy.bambuddy.uploads import BambuddyUploadStore
 from scadbuddy.core.problems import ApiError
+from scadbuddy.crud.client import CrudUnavailableError
 from scadbuddy.filament.models import EffectivePreset, HeldTrays, Spool, TrayView
+from scadbuddy.filament.unknown_tray_rows import (
+    UNKNOWN_SPOOL_LOADED,
+    UnknownSpoolReads,
+    UnknownSpoolRef,
+    blocked_detail,
+)
 from scadbuddy.library.catalogue import PrintSequence
 from scadbuddy.library.outputs import OutputMeta, OutputStore
 from scadbuddy.library.settings_store import StoredSettings
@@ -895,6 +902,54 @@ class RunRefusalError(ApiError):
         super().__init__(status.HTTP_422_UNPROCESSABLE_CONTENT, detail, type_=type_, **extensions)
 
 
+class UnknownSpoolLoadedError(RunRefusalError):
+    """A printer holds a tray that reports a spool no SB spool holds (#7143). The run
+    refuses before it uploads anything. ``refs`` name the trays, for the dialog."""
+
+    def __init__(self, printer_name: str, refs: Sequence[UnknownSpoolRef]) -> None:
+        super().__init__(blocked_detail(printer_name, refs), code=UNKNOWN_SPOOL_LOADED)
+        self.refs = list(refs)
+
+
+async def refuse_unknown_spools(
+    reads: UnknownSpoolReads | None,
+    row: PrinterRow | None,
+    *,
+    inventory: Callable[[], Awaitable[Inventory]] | None = None,
+) -> None:
+    """Refuse the run when ``row`` holds an unknown tray (#7143).
+
+    With no ``reads`` or no ``row`` it does nothing. A ``reads`` whose CRUD route is
+    missing (`CrudUnavailableError`: the API is older than the worker) counts as no block.
+    It is logged and the run goes on (G3). A refused credential still fails the run.
+
+    On Bambuddy's path ``inventory`` reads the SB spools and where each is loaded. A tray
+    that read gives an SB spool is not unknown, so its ref is dropped (D9). The read is
+    lazy: a printer with no unknown tray costs no Bambuddy read. The native path has no
+    such read and passes ``None``."""
+    if reads is None or row is None:
+        return
+    try:
+        refs = await reads.blocking(row.id)
+    except CrudUnavailableError as error:
+        logger.warning(
+            "the unknown trays could not be read; the run goes on",
+            extra={"area": "unknown-trays", "error": type(error).__name__},
+        )
+        return
+    if refs and inventory is not None:
+        # On Bambuddy's path the check has read the inventory for its plan already, so this is a
+        # second read when a tray is unknown (small, and only then).
+        held = {
+            tray_label(spool.loaded.ams_id, spool.loaded.tray_id)
+            for spool in await inventory()
+            if spool.loaded is not None and spool.loaded.printer_id == row.id
+        }
+        refs = [ref for ref in refs if ref.slot not in held]
+    if refs:
+        raise UnknownSpoolLoadedError(row.name, refs)
+
+
 #: Why a request's ``part_settings`` (#5571) are refused for a sliced file: it prints
 #: as it was sliced, so nothing is laid out to carry them.
 PART_SETTINGS_SLICED = (
@@ -991,6 +1046,9 @@ class PrintCheck(BaseModel):
     it would carry back as advisories."""
 
     errors: list[str] = Field(default_factory=list)
+    #: The trays that refuse the run as unknown spools (#7143): the ids the dialog links
+    #: from, set with the matching error.
+    unknown_trays: list[UnknownSpoolRef] = Field(default_factory=list)
     warnings: list[FilamentWarning] = Field(default_factory=list)
     #: The rack side's preview (#836); ``None`` with no readable rack.
     rack: RackPickView | None = None
@@ -1462,6 +1520,15 @@ async def check_tower(
     )
 
 
+def _refused_check(error: RunRefusalError) -> PrintCheck:
+    """The check that says the run's refusal as an error, with the unknown trays when
+    that is the refusal (#7143)."""
+    return PrintCheck(
+        errors=[error.detail],
+        unknown_trays=error.refs if isinstance(error, UnknownSpoolLoadedError) else [],
+    )
+
+
 async def check_print(
     client: BambuddyClient | None,
     source: PrintSource,
@@ -1478,6 +1545,7 @@ async def check_print(
     sb_presets: SpoolPresetSource | None = None,
     sb_reads: SbSpoolReads | None = None,
     listing: Awaitable[list[Printer]] | None = None,
+    unknown_trays: UnknownSpoolReads | None = None,
 ) -> PrintCheck:
     """What the run would refuse for ``request``, with nothing uploaded, sliced or queued.
 
@@ -1541,7 +1609,7 @@ async def check_print(
                 asked=request.path,
             )
         except RunRefusalError as error:
-            return PrintCheck(errors=[error.detail])
+            return _refused_check(error)
     refusal = asked_path_refusal(request, route is not None and route.native)
     if refusal is not None:
         return PrintCheck(errors=[refusal])
@@ -1556,6 +1624,7 @@ async def check_print(
             process_values=process_values,
             sb_trays=sb_trays,
             sb_presets=sb_presets,
+            unknown_trays=unknown_trays,
         )
     client = bambuddy_client(client)
     # A plan from before #6262 Task 7 names Bambuddy spools: read as SB numbers (F14).
@@ -1622,11 +1691,13 @@ async def check_print(
             catalogue=catalogue,
             naming=naming,
             listing=listing,
+            unknown_trays=unknown_trays,
+            sb_reads=sb_reads,
         )
     except BaseException as error:
         await _drop(laying_out, reading, naming, *early_tasks)
         if isinstance(error, RunRefusalError):
-            return PrintCheck(errors=[error.detail])
+            return _refused_check(error)
         if isinstance(error, MemoryError):
             # As the layout's read below (#4576 review): a read of the file that runs out
             # of memory is the check's refusal, never a 500. Logged, as the allocation
@@ -1873,6 +1944,7 @@ async def _native_check(
     process_values: bool = False,
     sb_trays: FilamentInventory | None = None,
     sb_presets: SpoolPresetSource | None = None,
+    unknown_trays: UnknownSpoolReads | None = None,
 ) -> PrintCheck:
     """:func:`check_print` on a native run: its refusals and advisories, judged on the
     report's status, the trays with the SB spool in each and the image's presets, with
@@ -1896,9 +1968,10 @@ async def _native_check(
             native=source.native,
             catalogue=presets,
             route=route,
+            unknown_trays=unknown_trays,
         )
     except RunRefusalError as error:
-        return PrintCheck(errors=[error.detail])
+        return _refused_check(error)
     if source.is_sliced:
         return PrintCheck(warnings=prepared.warnings + not_resliced(request.prime_tower))
     laid_out = await source.states_nozzles(None)
@@ -2497,6 +2570,7 @@ async def check_for_output(
     sb_trays: FilamentInventory | None = None,
     sb_presets: SpoolPresetSource | None = None,
     sb_reads: SbSpoolReads | None = None,
+    unknown_trays: UnknownSpoolReads | None = None,
 ) -> PrintCheck:
     """:func:`check_print` for an output ScadBuddy rendered, with its template's
     ``print_settings`` as the run reads them, so a template that prints by object is
@@ -2526,6 +2600,7 @@ async def check_for_output(
         sb_trays=sb_trays,
         sb_presets=sb_presets,
         sb_reads=sb_reads,
+        unknown_trays=unknown_trays,
     )
 
 
@@ -2547,6 +2622,7 @@ async def check_for_library(
     sb_trays: FilamentInventory | None = None,
     sb_presets: SpoolPresetSource | None = None,
     sb_reads: SbSpoolReads | None = None,
+    unknown_trays: UnknownSpoolReads | None = None,
 ) -> PrintCheck:
     """:func:`check_print` for a file already in the library; with ``filaments``, its
     slots read from the file itself (#2550): from their cache, else from the download
@@ -2587,6 +2663,7 @@ async def check_for_library(
             sb_presets=sb_presets,
             sb_reads=sb_reads,
             listing=listing,
+            unknown_trays=unknown_trays,
         )
     finally:
         # Read by `prepare_run`, else not wanted: dropped, never left running.
@@ -3013,6 +3090,8 @@ async def prepare_run(
     route: RunRoute | None = None,
     naming: Awaitable[tuple[PrinterRow | None, int | None]] | None = None,
     listing: Awaitable[list[Printer]] | None = None,
+    unknown_trays: UnknownSpoolReads | None = None,
+    sb_reads: SbSpoolReads | None = None,
 ) -> PreparedRun:
     """Every refusal the request alone decides, before anything is uploaded (#470).
 
@@ -3050,6 +3129,10 @@ async def prepare_run(
     `_named_printer` for ``request``, when it reads that already (`check_print`), and
     ``listing`` Bambuddy's printer list, when the caller started that read already
     (`check_for_library`).
+
+    ``unknown_trays`` refuses a printer that holds a tray no SB spool holds (#7143,
+    :func:`refuse_unknown_spools`), sliced file or not; ``sb_reads`` lets the Bambuddy
+    path drop the trays an SB spool holds (D9).
     """
     if native is not None:
         if request.project_id is not None:
@@ -3146,6 +3229,13 @@ async def prepare_run(
             path, report_status = await _registry_path(
                 row, printers, reports, say_fallback=refuse_manual_pick
             )
+    await refuse_unknown_spools(
+        unknown_trays,
+        row,
+        inventory=None
+        if route is not None and route.native
+        else lambda: read_inventory(bambuddy_client(client), sb_reads),
+    )
     if source.is_sliced:
         # Nothing is sliced, so no preset need resolve (#2671): any active printer the
         # file was sliced for prints it (`any_model` above).
@@ -3389,12 +3479,16 @@ async def _ensure_row(
     there is none (`PrinterStore.ensure_bambuddy`)."""
     if printers is None or row is not None:
         return row
+    # Imported here, as the store's type above: `printers.store` reads Postgres.
+    from scadbuddy.printers.store import BAMBUDDY_ACTOR
+
     return await asyncio.to_thread(
         printers.ensure_bambuddy,
         printer.id,
         serial=printer.serial_number,
         name=printer.name,
         model=printer.model,
+        by=BAMBUDDY_ACTOR,
     )
 
 

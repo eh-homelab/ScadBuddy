@@ -14,6 +14,7 @@ from psycopg import Connection
 from psycopg.rows import DictRow
 from pydantic import JsonValue
 
+from scadbuddy.entities.actor import set_actor
 from scadbuddy.entities.properties import (
     ITEM,
     Completeness,
@@ -43,6 +44,16 @@ _PROPERTIES = EntityPropertyStore(None, EntityStore(None))
 EXEMPT_FIELDS = frozenset({"archived", "sort_order"})
 
 
+def hold_for_properties(conn: Conn, properties: Mapping[str, JsonValue] | None, by: Actor) -> None:
+    """When ``properties`` will be written, `set_actor` now: the event log's lock, then
+    ``by`` as the history's actor (#6949). A create or save calls it first in its
+    transaction, before it locks its own row, so it never holds that row while
+    `save_properties_on` waits for the log (a printer merge holds the log and then locks
+    spool, location and type rows)."""
+    if properties:
+        set_actor(conn, by)
+
+
 def save_properties_on(
     conn: Conn,
     ref: EntityRef,
@@ -52,7 +63,8 @@ def save_properties_on(
     check: bool,
 ) -> None:
     """A create's or save's ``properties`` on the row it just wrote, in its transaction,
-    as ``manual`` (spec 6.3b); then, with ``check``, `check_row`."""
+    as ``manual`` (spec 6.3b); then, with ``check``, `check_row`. The caller calls
+    `hold_for_properties` before it locks that row."""
     if properties:
         _PROPERTIES.apply_on(conn, ref, PropertyPatch(set=dict(properties)), by)
     if check:
