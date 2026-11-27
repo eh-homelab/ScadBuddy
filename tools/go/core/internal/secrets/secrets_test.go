@@ -650,7 +650,7 @@ func TestTheInputHashKeyIsTheAgentsOwn(t *testing.T) {
 	if !strings.Contains(answer.header.Get("Cache-Control"), "no-store") {
 		t.Fatal(answer.header)
 	}
-	// A fetch grant is still Python's.
+	// A fetch grant is internal/fetchgrants's, not this package's.
 	expect(t, a.post("/fetch-grants", obj{"host": "a.example", "url": "https://a.example/x"}).status, 404)
 }
 

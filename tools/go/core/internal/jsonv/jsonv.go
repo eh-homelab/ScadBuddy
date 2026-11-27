@@ -10,6 +10,7 @@ import (
 	"errors"
 	"fmt"
 	"strconv"
+	"strings"
 	"time"
 	"unicode/utf8"
 
@@ -399,12 +400,16 @@ func write(b *bytes.Buffer, v any, ascii, spaced bool) {
 
 // Float is Python's repr of a float, as json.dumps writes one.
 func Float(f float64) string {
-	s := strconv.FormatFloat(f, 'g', -1, 64)
-	if exp := bytes.IndexByte([]byte(s), 'e'); exp >= 0 {
-		// Python writes 1e+16 and 1e-05; Go writes 1e+16 and 1e-05 too.
+	// Python's repr is positional for decimal exponents -4 to 15 and
+	// scientific outside them (1e+16, 1e-05); Go's 'g' switches at 1e+21
+	// for shortest output, so the exponent is read from 'e' first.
+	s := strconv.FormatFloat(f, 'e', -1, 64)
+	at := strings.IndexByte(s, 'e')
+	if exp, _ := strconv.Atoi(s[at+1:]); exp < -4 || exp >= 16 {
 		return s
 	}
-	if !bytes.ContainsAny([]byte(s), ".") {
+	s = strconv.FormatFloat(f, 'f', -1, 64)
+	if !strings.Contains(s, ".") {
 		s += ".0"
 	}
 	return s
