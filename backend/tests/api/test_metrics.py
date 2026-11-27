@@ -174,6 +174,7 @@ class _Snapshots:
             days_of_stock={},
             low_stock={},
             reorder={},
+            non_print_waste={},
             currency="USD",
         )
 

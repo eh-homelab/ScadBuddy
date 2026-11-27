@@ -336,6 +336,43 @@ func TestAStalePublishLeavesAnObjectAStagerHolds(t *testing.T) {
 	}
 }
 
+// A content object that is not the publish's bytes is refused (409 store_object_mismatch)
+// and left as it is, with nothing indexed, whether a row names it or not (#8250).
+func TestAPublishRefusesAContentObjectOfOtherBytes(t *testing.T) {
+	h := newHarness(t)
+	mine := []byte("the mirror's bytes")
+	spool := must(os.CreateTemp(t.TempDir(), "p"))
+	if _, err := packFile(spool, "file", bytes.NewReader(mine)); err != nil {
+		t.Fatal(err)
+	}
+	sha, size, err := digest(spool)
+	if err != nil {
+		t.Fatal(err)
+	}
+	object := ObjectKey("t", "piece", sha)
+	h.putObject(object, []byte("not it"))
+	if status, reason := reasonOf(h.publish("plugin-mirror-m", mine)); status != http.StatusConflict || reason != "store_object_mismatch" {
+		t.Fatalf("unnamed: %d %s", status, reason)
+	}
+	if got := h.blobRow("plugin-mirror-m"); got != nil {
+		t.Fatal("a mismatched object was indexed", got)
+	}
+	if got, _ := h.object(object); string(got) != "not it" {
+		t.Fatalf("the object was rewritten: %q", got)
+	}
+	// A row that names the altered object is not trusted either.
+	h.insertRow("plugin-mirror-n", sha, "s3", object, int(size))
+	if status, reason := reasonOf(h.publish("plugin-mirror-o", mine)); status != http.StatusConflict || reason != "store_object_mismatch" {
+		t.Fatalf("named: %d %s", status, reason)
+	}
+	if got := h.blobRow("plugin-mirror-o"); got != nil {
+		t.Fatal("a mismatched object was indexed", got)
+	}
+	if h.s3.puts != 0 {
+		t.Fatalf("%d PUTs", h.s3.puts)
+	}
+}
+
 func TestTheStoresCapsRefuseAPublishThatUploads(t *testing.T) {
 	h := newHarness(t)
 	env := map[string]string{"SCADBUDDY_STORE_MAX_COUNT": "1"}

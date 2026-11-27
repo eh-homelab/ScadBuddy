@@ -12,8 +12,8 @@ public partial class MainPage : ContentPage
 
 	// The loaded page's address: its bridge, camera and links keep it until the app restarts.
 	string url = Preferences.Get(UrlKey, DefaultUrl);
-	// The set ScadBuddy's origin, which a scan link's result may go to without asking: the new
-	// address as soon as the person sets it, before the restart loads it.
+	// The set ScadBuddy's origin, which the pairing question names when a link's server differs:
+	// the new address as soon as the person sets it, before the restart loads it.
 	string ownOrigin = DeepLink.OriginOf(new Uri(Preferences.Get(UrlKey, DefaultUrl)));
 
 	public MainPage()
@@ -37,67 +37,36 @@ public partial class MainPage : ContentPage
 			}
 #endif
 			Web.Source = url;
-			if (DeepLink.Take() is { } first) Dispatcher.Dispatch(() => Scan(first));
+			if (DeepLink.Take() is { } first) Dispatcher.Dispatch(() => Pair(first));
 		};
 		// A cold start's link was raised after the handler took it (MAUI builds the page inside
 		// base.OnCreate, before MainActivity raises it), so take it again once subscribed.
 		Loaded += (_, _) =>
 		{
-			DeepLink.Opened += Scan;
-			if (DeepLink.Take() is { } late) Scan(late);
+			DeepLink.Opened += Pair;
+			if (DeepLink.Take() is { } late) Pair(late);
 		};
-		Unloaded += (_, _) => DeepLink.Opened -= Scan;
+		Unloaded += (_, _) => DeepLink.Opened -= Pair;
 	}
-
-	const string OriginsKey = "scadbuddy.scanOrigins";
 
 	/// <summary>
-	/// Whether a scan link may send a read or a photo to <paramref name="origin"/>. Any page can
-	/// make a scan link, so only the app's own ScadBuddy, or one the person accepted here once, gets
-	/// the tag's bytes or the camera's photo.
+	/// Pairs the phone with the server a pairing link names. Any page can make such a link, so the
+	/// app always asks first, and names the claim's origin in punycode, and the app's own set
+	/// address too when the two differ.
 	/// </summary>
-	async Task<bool> Trusted(string origin)
-	{
-		var accepted = Preferences.Get(OriginsKey, "").Split('\n', StringSplitOptions.RemoveEmptyEntries).ToHashSet(StringComparer.OrdinalIgnoreCase);
-		if (string.Equals(origin, ownOrigin, StringComparison.OrdinalIgnoreCase) || accepted.Contains(origin)) return true;
-		var yes = await DisplayAlertAsync("Send scans to this server?", $"A link asks this app to send a tag read or a photo to\n{origin}\n\nThis app's ScadBuddy is\n{ownOrigin}\n\nThey differ. Accept only a ScadBuddy you run. Changing the ScadBuddy address forgets every server accepted here.", "Accept", "Cancel");
-		if (!yes) return false;
-		accepted.Add(origin);
-		Preferences.Set(OriginsKey, string.Join('\n', accepted));
-		return true;
-	}
-
-	static readonly HttpClient Http = new() { Timeout = TimeSpan.FromSeconds(30) };
-
-	/// <summary>Does the scan a link asked for, posts it to the link's result address, and goes back to the browser.</summary>
-	async void Scan(ScanJob job)
+	async void Pair(Uri claim)
 	{
 #if ANDROID
-		if (!await Trusted(DeepLink.OriginOf(job.Result))) return;
-		if (job.Kind == "nfc")
-		{
-			NfcBridge.Instance.StartJob(job.Result);
-			return;
-		}
+		var origin = DeepLink.OriginOf(claim);
+		if (!await DisplayAlertAsync("Pair this phone?", DeepLink.PairQuestion(claim, ownOrigin), "Pair", "Cancel")) return;
 		try
 		{
-			var photo = await MediaPicker.Default.CapturePhotoAsync(new MediaPickerOptions { Title = "Photo of the code" });
-			if (photo is null) return;
-			await using var stream = await photo.OpenReadAsync();
-			using var body = new StreamContent(stream);
-			body.Headers.ContentType = new System.Net.Http.Headers.MediaTypeHeaderValue(photo.ContentType ?? "image/jpeg");
-			using var answer = await Http.PostAsync(job.Result, body);
-			if (!answer.IsSuccessStatusCode)
-			{
-				await DisplayAlertAsync("Not sent", $"ScadBuddy answered {(int)answer.StatusCode}. Start the scan again from the page.", "OK");
-				return;
-			}
-			NfcBridge.Notify("Sent. Back to the page.");
-			Platform.CurrentActivity?.MoveTaskToBack(true);
+			await DeviceLink.Instance.Pair(claim);
+			await DisplayAlertAsync("Paired", $"This phone is a device of\n{origin}\n\nKeep the app open while ScadBuddy uses its NFC or camera.", "OK");
 		}
 		catch (Exception error)
 		{
-			await DisplayAlertAsync("Not sent", error.Message, "OK");
+			await DisplayAlertAsync("Not paired", error.Message, "OK");
 		}
 #endif
 	}
@@ -107,6 +76,13 @@ public partial class MainPage : ContentPage
 	void OnNavigating(object? sender, WebNavigatingEventArgs e)
 	{
 		if (!Uri.TryCreate(e.Url, UriKind.Absolute, out var target)) return;
+		if (target.Scheme == DeepLink.Scheme)
+		{
+			// A pairing link the page shows as a tap link: the app asks, as for one from the browser.
+			e.Cancel = true;
+			DeepLink.Raise(target);
+			return;
+		}
 		if (target.Scheme is not ("http" or "https")) return;
 		// Both sides in punycode, so an international ScadBuddy host keeps its own links in the app.
 		if (string.Equals(DeepLink.OriginOf(target), OriginOf(url), StringComparison.OrdinalIgnoreCase)) return;
@@ -128,9 +104,8 @@ public partial class MainPage : ContentPage
 			return;
 		}
 		Preferences.Set(UrlKey, parsed.ToString());
-		Preferences.Remove(OriginsKey);
-		// The loaded page keeps the old address until the restart; a scan link's result counts the
-		// new one as the app's own at once, and the old one no longer (Trusted).
+		// The loaded page keeps the old address until the restart; the pairing question names the
+		// new one as the app's own at once.
 		ownOrigin = DeepLink.OriginOf(parsed);
 		await DisplayAlertAsync("Saved", "Close the app and open it again to use the new address.", "OK");
 	}

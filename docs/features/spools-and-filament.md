@@ -345,6 +345,56 @@ label), the ledger used 508 g, the scale says 520 g were used; 12 g less than th
 expected." or "…the ledger used 508 g; not weighed at the end."), and the timeline shows
 the reason on the archive.
 
+Grams left at the end are waste (#7167). A person's archive books them as one
+`non_print_waste` event, the zero reading, after the final weighing and before the
+`archived` event. The waste is what is left after that weighing, so no gram is counted
+twice. The spool then has 0 g left, and `non_print_waste_g` in the closing says how many
+grams were written off. A `respooled` archive books none: the filament moves to the new
+reel. The bulk archive, the Bambuddy pull's archive and an archive by a plain edit (PATCH) book
+none. A restore leaves the spool at 0 g, so a second archive books no second waste and adds
+no second shopping item. An `archived` event that carries waste counts as the archive of a
+spool that was not empty, so the archive adds its one shopping item. The event is not a
+plate, and it adds no shopping item of its own. The code is in
+`backend/scadbuddy/filament/spools.py` (`archive_on`).
+
+The metrics keep this waste apart from the print waste (#7167). `wasted_g` stays the grams of
+the failed and cancelled plates. Each `non_print_waste` event adds its `data.waste_g`, raw, to
+one other figure: `non_print_waste_g` on a spool's metrics, and on the inventory metrics a
+total with rows by material and type (no printer: the waste has none) by the event's UTC day
+in the range. No gram is in both figures, and no rate counts it. The Prometheus export has its
+own series, `scadbuddy_filament_non_print_waste_grams`, by material. The reader is
+`ledger.waste_events` in `backend/scadbuddy/filament/ledger.py`. The sums are in
+`metrics.py` (`spool_metrics`), `metrics_store.py` (`inventory`, `snapshot`) and
+`metrics_export.py`. The Metrics tab shows a "Non-print waste" block under "Waste" only when
+the range has some (`frontend/src/pages/filament/MetricsTab.tsx`).
+
+A dry box is a place of a dry-storage kind (`dry_storage` on the kind), with capacity 1, not
+archived, and with no printer (#7167, `backend/scadbuddy/filament/dry_box.py` `BOX`). Capacity
+was only a number before; for a dry box it is now enforced. A box holds one spool. A move into
+a box that holds another spool is a 409 `box_full` naming it (`occupant_id`), and so are a
+bulk create and a bulk restore. A change that makes a place a box while it holds two spools or
+more (its kind, its capacity or its kind's `dry_storage` flag) is a 422 `box_has_many`. A
+place of another kind, or with another capacity, keeps capacity as a number only. A box is a
+place, so its label is the place label, `L-<n>`; the row of every place on the Locations tab
+has a "Print label" link to it (`frontend/src/components/filament/LocationTree.tsx`).
+
+A spool's home is the last dry box it sat in (#7167). When a spool that went into its tray
+from a place that is a live dry box now comes out of the tray, capture puts it in no place,
+makes that box its home and sets `home_asked_at`: ScadBuddy never assumes which spool goes into
+the box, the unloaded spool included. A spool that went into the tray from a shelf goes back to
+the shelf with no prompt, and its home stays the same.
+`GET /filament/spools?awaiting_home=true` lists the asked spools. The person names the spool
+(a tag scan, a code or a pick by hand), and `POST /filament/spools/{id}/move` with `answers`
+(the unloaded spool) puts it in. With `if_occupied: replace`, the box's own spool is archived
+at 0 g first and its grams are booked as non-print waste (`cause` `replaced`), in one
+transaction. A box's spool that left the box before the replace locked it is not archived.
+A replace names the box's spool the caller saw in `expected_occupant_id`: without it the move is
+a 422 `expected_occupant_required`, and a box that holds another spool by then is a 409
+`box_full` naming it, so no spool the caller did not name is archived.
+Any move, an archive or a reload clears `home_asked_at`. A spool whose box was archived goes to
+no place, and one whose box is no box now goes back to it, as before. The code is in
+`backend/scadbuddy/filament/homes.py` and `capture.py` (`_put_back`).
+
 Respooled offers "Archive and continue as a new spool": the copy flow opens with the final
 filament as the new spool's grams and "Added full: No", and the save sends `continued_from`
 with `copy_of`. The source must be archived (422 `continued_from_not_archived`) and not

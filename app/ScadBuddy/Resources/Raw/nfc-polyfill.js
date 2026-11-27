@@ -139,7 +139,6 @@
   }
 
   window.NDEFReader = NDEFReader
-  // `close()` sends the app to the back, so the page that opened it (a link
-  // scadbuddy://scan?kind=…&url=…) comes back after a scan job's result is posted.
+  // `close()` sends the app to the back, so the page that opened it comes back.
   window.ScadBuddyNfc = { native: true, lastMifare: null, close: () => call('close') }
 })()

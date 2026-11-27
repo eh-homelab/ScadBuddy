@@ -26,6 +26,9 @@ from psycopg.rows import DictRow
 from psycopg.types.json import Jsonb
 from psycopg_pool import ConnectionPool
 
+from scadbuddy.bambuddy.print_links import LanArchiveLink, record_lan_start_in
+from scadbuddy.bambuddy.runs import PrintRun, lan_started_in
+from scadbuddy.bambuddy.subject import PrintSubject
 from scadbuddy.entities.refs import EntityRef
 from scadbuddy.entities.registry import EntityStore
 from scadbuddy.inventory.stock import PartsMoved, parts_moved, parts_moves
@@ -2160,36 +2163,91 @@ class OrderStore:
 
     def archive_claimed(self, conn: Conn, archive_id: int) -> bool:
         """Whether an attempt already has Bambuddy archive ``archive_id``: one that named
-        it, or one whose print run made it (:meth:`run_archives`'s link). Asked under a
-        transaction-scoped lock on the archive, so two records naming it at once cannot
-        both see it free."""
+        it, or one whose print run made it (:meth:`run_archives`'s two links: a queue
+        item's send, or a LAN start's record). Asked under a transaction-scoped lock on the
+        archive, so two records naming it at once cannot both see it free."""
         conn.execute("SELECT pg_advisory_xact_lock(hashtext('order_archive'), %s)", (archive_id,))
         row = conn.execute(
             "SELECT EXISTS (SELECT 1 FROM order_item_fulfilments WHERE %(a)s = ANY(archive_ids))"
             " OR EXISTS (SELECT 1 FROM print_links l JOIN print_sends s"
             " ON s.subject = l.subject AND s.queue_item_id = l.queue_item_id"
             " JOIN order_item_fulfilments f ON f.print_run_id = s.run_id"
-            " WHERE l.archive_id = %(a)s) AS claimed",
+            " WHERE l.archive_id = %(a)s)"
+            " OR EXISTS (SELECT 1 FROM lan_print_archives a"
+            " JOIN order_item_fulfilments f ON f.print_run_id = a.run_id"
+            " WHERE a.archive_id = %(a)s) AS claimed",
             {"a": archive_id},
         ).fetchone()
         return bool(row and row["claimed"])
 
     def run_archives(self, run_id: str, *, conn: Conn | None = None) -> list[int]:
-        """The Bambuddy archives a print run's queue items made (§8.2): ``print_sends``
-        by the run, then ``print_links`` by queue item, oldest first. One an attempt not
-        of this run names is that attempt's (#5273: named by hand before Bambuddy linked
-        it), and left out."""
+        """The Bambuddy archives a print run made (§8.2), oldest first. A queue item's
+        archive is found by ``print_sends`` of the run, then ``print_links`` by queue item.
+        A LAN start has no queue item (#8124), so its archive is found by the start's
+        record, ``lan_print_archives`` by run: the API writes that row only when exactly
+        one start of the run has the job name the archive's file carries
+        (`print_history._run_by_file`), so two prints of one file never mix. One an
+        attempt not of this run names is that attempt's (#5273: named by hand before
+        Bambuddy linked it), and left out."""
         with self._read(conn) as c:
             rows = c.execute(
-                "SELECT l.archive_id, min(l.first_seen) AS seen FROM print_sends s"
-                " JOIN print_links l ON l.subject = s.subject AND l.queue_item_id = s.queue_item_id"
-                " WHERE s.run_id = %(run)s AND NOT EXISTS (SELECT 1 FROM order_item_fulfilments f"
-                "  WHERE l.archive_id = ANY(f.archive_ids)"
+                "WITH found AS (SELECT l.archive_id, l.first_seen FROM print_sends s"
+                "  JOIN print_links l"
+                "  ON l.subject = s.subject AND l.queue_item_id = s.queue_item_id"
+                "  WHERE s.run_id = %(run)s"
+                " UNION ALL SELECT a.archive_id, a.first_seen FROM lan_print_archives a"
+                "  WHERE a.run_id = %(run)s)"
+                " SELECT x.archive_id, min(x.first_seen) AS seen FROM found x"
+                " WHERE NOT EXISTS (SELECT 1 FROM order_item_fulfilments f"
+                "  WHERE x.archive_id = ANY(f.archive_ids)"
                 "  AND f.print_run_id IS DISTINCT FROM %(run)s)"
-                " GROUP BY l.archive_id ORDER BY seen, l.archive_id",
+                " GROUP BY x.archive_id ORDER BY seen, x.archive_id",
                 {"run": run_id},
             ).fetchall()
         return [int(row["archive_id"]) for row in rows]
+
+    def lan_candidates(self, run_id: str, limit: int) -> tuple[str, list[int]] | None:
+        """For a run with a LAN start that no archive names yet (#8281): the run's subject
+        (``print_runs.output_id``), and the archives that a link by content hash gives that
+        subject and that name no start yet, at most ``limit``, oldest link first. Such a
+        link names no queue item, as Bambuddy's hash found it (`linking.link_lan_starts`,
+        `linking.link_archive`). Only the links made since the run was made are taken: the
+        run's archive is made when its print starts, and linked after that. These are
+        candidates only; :meth:`lan_runs` and the file name decide. None for a run with
+        no such start."""
+        with self._read(None) as c:
+            run = c.execute(
+                "SELECT r.output_id, r.created_at FROM print_runs r WHERE r.id = %s"
+                " AND EXISTS (SELECT 1 FROM jsonb_array_elements("
+                "  CASE WHEN jsonb_typeof(r.result->'lan') = 'array' THEN r.result->'lan' END) e"
+                "  WHERE NOT EXISTS (SELECT 1 FROM lan_print_archives a"
+                "   WHERE a.run_id = r.id AND a.subtask_name = e->>'subtask_name'))",
+                (run_id,),
+            ).fetchone()
+            if run is None:
+                return None
+            subject = PrintSubject.from_run_subject(run["output_id"]).key
+            rows = c.execute(
+                "SELECT l.archive_id FROM print_links l WHERE l.subject = %s"
+                " AND l.matched_by = 'content_hash' AND l.queue_item_id IS NULL"
+                " AND l.first_seen >= %s AND NOT EXISTS (SELECT 1 FROM lan_print_archives a"
+                "  WHERE a.archive_id = l.archive_id)"
+                " ORDER BY l.first_seen, l.archive_id LIMIT %s",
+                (subject, run["created_at"], limit),
+            ).fetchall()
+        return str(run["output_id"]), [int(row["archive_id"]) for row in rows]
+
+    def lan_runs(self, run_subject: str, subtask_names: list[str]) -> list[PrintRun]:
+        """The subject's runs with a LAN start under one of ``subtask_names``, as
+        `PrintRunStore.lan_started` reads them (#8281)."""
+        with self._read(None) as c:
+            return lan_started_in(c, run_subject, subtask_names)
+
+    def record_lan_start(self, link: LanArchiveLink) -> None:
+        """Record the LAN start an archive became, as `PrintLinkStore.record_lan_start`
+        does (#8281). The first record is kept."""
+        with self._write(None) as c:
+            record_lan_start_in(c, link)
 
     def archive_origin(self, archive_id: int, *, conn: Conn | None = None) -> ArchiveOrigin | None:
         """What printed Bambuddy archive ``archive_id`` (#4777): the output or library file

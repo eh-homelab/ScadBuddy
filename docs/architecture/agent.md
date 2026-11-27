@@ -102,7 +102,7 @@ printers, spools, orders (68), flows, sessions, browser and more. They are serve
 `scadbuddy` (`tools/projections.ts:90-114`). Each tool calls the backend API; the agent
 never calls Bambuddy or a printer itself (`tools/makerworld.ts:6-8`). Turns also get:
 
-- `scadbuddy_http` (`http_request`, `harness/httpRequest.ts:79-81`) and
+- `scadbuddy_http` (`http_request`, `harness/httpRequest.ts:87-89`) and
   `scadbuddy_questions` (`ask_user`, `harness/questions.ts:34-37`);
 - the `builtin` server: WebFetch, WebSearch, Cron, Monitor, Workflow and, with the
   sandbox, `Bash` and `PowerShell` (`builtins/server.ts:36`, `builtins/sandboxShell.ts:88`);

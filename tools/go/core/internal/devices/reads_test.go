@@ -98,6 +98,8 @@ func TestDelegateReadsItsOwnRead(t *testing.T) {
 	read := "/api/v1/devices/reads/" + done.body["read_id"].(string)
 	expectStatus(t, h.do("GET", read+"?on_behalf_of=user:i%23me", agent, ""), 200)
 	expectStatus(t, h.do("GET", read+"/blob?on_behalf_of=user:i%23me", agent, ""), 200)
+	// A service that holds no delegation grant is refused before the lookup, as on calls.
+	expectStatus(t, h.do("GET", read+"?on_behalf_of=user:i%23me", h.service("render", "api"), ""), 403)
 	expectStatus(t, h.do("GET", read+"?on_behalf_of=user:i%23you", agent, ""), 404)
 	expectStatus(t, h.do("GET", read, h.person("user:i#you"), ""), 404)
 	expectStatus(t, h.do("GET", read, me, ""), 200)
@@ -182,7 +184,7 @@ func TestDumpRefusesTrailer(t *testing.T) {
 	expect(t, len(h.blobs.objects), 0)
 }
 
-func TestReadsOnlyOwner(t *testing.T) {
+func TestReadsOnlyWhoMaySeeTheCall(t *testing.T) {
 	h := newHarness(t, auth.Observe)
 	me, you := h.person("user:i#me"), h.person("user:i#you")
 	d := h.pair(me)

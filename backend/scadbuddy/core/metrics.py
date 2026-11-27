@@ -732,6 +732,12 @@ FILAMENT_SERIES: tuple[tuple[str, str, tuple[str, ...]], ...] = (
         ("material", "outcome"),
     ),
     (
+        "scadbuddy_filament_non_print_waste_grams",
+        "Grams thrown away off the printer (archives, box replacements), by material;"
+        " never in scadbuddy_filament_used_grams; read with delta().",
+        ("material",),
+    ),
+    (
         "scadbuddy_filament_burn_grams_per_day",
         "Grams a day used over the burn window, by material.",
         ("material",),

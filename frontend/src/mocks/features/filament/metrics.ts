@@ -5,7 +5,7 @@ import { addDecimals, cmpDecimals, divDecimal, fromScaled, mulDecimal, toScaled 
 // Cycles (`handlers.ts` loads every feature; the purchasing mock imports the Filament one): only inside functions.
 import { mockSettings } from '../../handlers'
 import { purchasingMetrics } from '../filamentPurchasing'
-import { burnOf, emptyOn, MAX_FORECAST_DAYS, metricsInput, type MockPlate } from './index'
+import { burnOf, emptyOn, MAX_FORECAST_DAYS, metricsInput, nonPrintWaste, type MockPlate } from './index'
 
 type S = components['schemas']
 type Dimension = S['InventoryMetrics']['dimension']
@@ -31,6 +31,8 @@ const METRICS_MAX_DAYS = 1096
 const DIMENSIONS: readonly Dimension[] = ['material', 'brand', 'type', 'supplier', 'location']
 const BUCKETS: readonly Bucket[] = ['week', 'month']
 const WASTE: readonly WasteDimension[] = ['material', 'type', 'printer']
+/** The non-print waste has no printer (`metrics_store.py` `_NON_PRINT`). */
+const NON_PRINT: readonly WasteDimension[] = ['material', 'type']
 const NONE_LABEL: Record<Dimension | 'printer', string> = {
   material: 'No material',
   brand: 'No brand',
@@ -192,12 +194,32 @@ export function inventory(dimension: Dimension, bucket: Bucket, since: string, u
       }
     }
   }
+  const dumped = new Map<string, { dimension: WasteDimension; key: string | null; label: string; wasted: number }>()
+  let dumpedTotal = 0
+  for (const spool of input.spools) {
+    for (const event of input.waste.get(spool.id) ?? []) {
+      const at = event.at.slice(0, 10)
+      if (at < since || at > until) continue
+      const grams = nonPrintWaste(event)
+      dumpedTotal += grams
+      for (const name of NON_PRINT) {
+        const [key, label] = keyOf(input, spool, name as Dimension)
+        const found = dumped.get(`${name}|${key}`) ?? { dimension: name, key, label, wasted: 0 }
+        found.wasted += grams
+        dumped.set(`${name}|${key}`, found)
+      }
+    }
+  }
   return {
     currency,
     dimension,
     bucket,
     since,
     until,
+    non_print_waste_g: dumpedTotal,
+    non_print_waste: [...dumped.values()]
+      .map((row) => ({ dimension: row.dimension, key: row.key, label: row.label, wasted_g: row.wasted }))
+      .sort((a, b) => NON_PRINT.indexOf(a.dimension) - NON_PRINT.indexOf(b.dimension) || b.wasted_g - a.wasted_g || cmp(upper(a.label), upper(b.label))),
     stock: [...stock.entries()]
       .map(([key, row]) => ({ key, label: row.label, spools: row.spools, grams_left: row.grams, value: row.milli == null ? null : divDecimal(row.milli, '1000', 2) }))
       .sort((a, b) => b.grams_left - a.grams_left || cmp(upper(a.label), upper(b.label))),

@@ -46,6 +46,8 @@ _NONE_LABEL = {
     "material_number": "No material number",
 }
 _WASTE: tuple[mm.WasteDimension, ...] = ("material", "type", "printer")
+#: The non-print waste has no printer (#7167).
+_NON_PRINT: tuple[mm.WasteDimension, ...] = ("material", "type")
 
 
 def _default(name: str) -> Any:
@@ -80,6 +82,8 @@ class _Read:
     suppliers: dict[UUID, tuple[UUID, str]]
     types: dict[UUID, Row]
     printers: dict[UUID, str]
+    #: A spool's ``non_print_waste`` events (#7167), apart from its plates.
+    waste: dict[UUID, list[m.SpoolEvent]]
 
     def stocked(self) -> list[m.Spool]:
         return [s for s in self.spools if s.archived_at is None]
@@ -241,6 +245,17 @@ class MetricsStore:
                     row = waste.setdefault((name, key), [label, 0.0, 0.0])
                     row[1] += plate.grams
                     row[2] += lost
+        dumped: dict[tuple[mm.WasteDimension, str | None], list[Any]] = {}
+        lost_total = 0.0
+        for spool in read.spools:
+            for event in read.waste.get(spool.id, []):
+                if not since <= event.at.astimezone(UTC).date() <= until:
+                    continue
+                grams = ledger.waste_grams(event)
+                lost_total += grams
+                for name in _NON_PRINT:
+                    key, label = _key(read, spool, name)
+                    dumped.setdefault((name, key), [label, 0.0])[1] += grams
         return mm.InventoryMetrics(
             currency=settings.currency,
             dimension=dimension,
@@ -274,6 +289,14 @@ class MetricsStore:
                     for (d, k), r in waste.items()
                 ),
                 key=lambda r: (_WASTE.index(r.dimension), -r.wasted_g, r.label.upper()),
+            ),
+            non_print_waste_g=lost_total,
+            non_print_waste=sorted(
+                (
+                    mm.NonPrintWasteRow(dimension=d, key=k, label=r[0], wasted_g=r[1])
+                    for (d, k), r in dumped.items()
+                ),
+                key=lambda r: (_NON_PRINT.index(r.dimension), -r.wasted_g, r.label.upper()),
             ),
         )
 
@@ -411,6 +434,10 @@ class MetricsStore:
             by_material[spool.names.material].append(spool)
             for plate in read.plates.get(spool.id, []):
                 used[(spool.names.material, plate.outcome)] += plate.grams
+        npw: dict[str | None, float] = defaultdict(float)
+        for spool in read.spools:
+            for event in read.waste.get(spool.id, []):
+                npw[spool.names.material] += ledger.waste_grams(event)
         in_stock = {s.names.material for s in stocked}
         burn: dict[str | None, float] = {}
         days: dict[str | None, float] = {}
@@ -451,6 +478,7 @@ class MetricsStore:
             low_stock=low,
             reorder=reorder,
             currency=settings.currency,
+            non_print_waste=dict(npw),
         )
 
     def _read(self) -> _Read:
@@ -468,6 +496,7 @@ class MetricsStore:
                 " LEFT JOIN filament_suppliers sup ON sup.id = i.supplier_id"
             ).fetchall()
             events = ledger.plate_events(conn)
+            wastes = ledger.waste_events(conn)
             types = conn.execute(
                 "SELECT t.id, t.code, upper(t.code) AS code_key, t.lead_time_days,"
                 " t.safety_margin_days, t.archived_at, mat.name AS material"
@@ -486,6 +515,7 @@ class MetricsStore:
             },
             types={r["id"]: r for r in types},
             printers={r["id"]: r["name"] for r in printers},
+            waste=wastes,
         )
 
 

@@ -31,6 +31,7 @@ from scadbuddy.filament import models as m
 from scadbuddy.filament.bambuddy_pull import _catalog_id
 from scadbuddy.filament.catalog import CATALOGS, KIND_OF_TABLE, find_by_key, lookup_key
 from scadbuddy.filament.component import Filament
+from scadbuddy.filament.dry_box import BoxFullError
 from scadbuddy.filament.locations import LocationStore, MoveTargetError
 from scadbuddy.filament.spools import FilamentSpoolStore, SpoolTypelessError
 from scadbuddy.filament.types import TypeTempError
@@ -344,6 +345,11 @@ def _plan(
         except (MoveTargetError, LookupError):
             raise _RowError(
                 f"location: {_name(conn, 'filament_locations', location)!r} cannot be moved to"
+            ) from None
+        except BoxFullError as full:
+            raise _RowError(
+                f"location: {_name(conn, 'filament_locations', location)!r} is a dry box"
+                f" that holds spool {full.occupant}"
             ) from None
     made = conn.execute("SELECT number FROM filament_spools WHERE id = %s", (spool_id,)).fetchone()
     assert made is not None

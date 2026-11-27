@@ -184,6 +184,30 @@ def test_a_place_label_opens_the_label_address(
     ]
 
 
+def test_a_dry_box_gets_a_place_label(
+    client: TestClient, drawn: list[tuple[list[Label], LabelTemplate, Layout]]
+) -> None:
+    """Pin (#7167): a dry box is a place, so its label is the place label, `L-<number>`.
+    No change in `labels.py` was needed."""
+    kind = next(
+        r["id"]
+        for r in client.get(f"{URL}/catalog/location-kinds").json()
+        if r["name"] == "Dry box"
+    )
+    made = client.post(f"{URL}/locations", json={"name": "Box 7", "kind_id": kind, "capacity": 1})
+    assert made.status_code == 201, made.text
+    box = made.json()
+    assert (
+        client.put(SETTINGS, json={"filament_label_base_url": "https://sb.example.com"}).status_code
+        == 200
+    )
+    assert client.post(PDF, json={"location_ids": [box["id"]]}).status_code == 200
+    code = f"L-{box['number']}"
+    assert drawn[-1][0] == [
+        label_pdf.PlaceLabel(code=code, name="Box 7", qr=f"https://sb.example.com/x/{code}")
+    ]
+
+
 def test_the_labels_keep_the_request_order(
     client: TestClient, drawn: list[tuple[list[Label], LabelTemplate, Layout]]
 ) -> None:

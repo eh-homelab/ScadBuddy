@@ -489,7 +489,8 @@ found by content hash whose file name has that form looks for the start among th
 runs of the link's own subject whose result holds it, whatever the run's status (#5733;
 today only a run that succeeded holds a result). When exactly one start of one run has that
 name, the read records it (`lan_print_archives`: archive, run, start, plate) and lists
-that run's settings. Later reads follow the record (`print_history._named_run`), also once
+that run's settings (the rule is `bambuddy/lan_files.py` `start_by_file`; an order
+attempt's archive read records the start by the same rule, #8281). Later reads follow the record (`print_history._named_run`), also once
 Bambuddy has deleted the archive, and list none once the run is pruned or the archive
 belongs to another subject. A send or a recorded start is read while the archive is
 fetched; only the file name waits for the archive (#5733). Any other case (no such name, no such start, two runs that share the name)

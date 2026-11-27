@@ -125,6 +125,8 @@ class FakeMtx:
         self.fail = False
         #: The runtime ``ready`` flag per path; false when absent.
         self.ready: dict[str, bool] = {}
+        #: The runtime ``bytesReceived`` per path; 0 when absent.
+        self.received: dict[str, int] = {}
 
     def handle(self, request: httpx.Request) -> httpx.Response:
         path = request.url.path
@@ -132,7 +134,13 @@ class FakeMtx:
         if path == "/v3/paths/list":
             # The runtime list's fields, measured on MediaMTX v1.21.4.
             runtime = [
-                {"name": n, "confName": n, "ready": self.ready.get(n, False), "online": True}
+                {
+                    "name": n,
+                    "confName": n,
+                    "ready": self.ready.get(n, False),
+                    "online": True,
+                    "bytesReceived": self.received.get(n, 0),
+                }
                 for n in self.paths
             ]
             return httpx.Response(200, json={"pageCount": 1, "items": runtime})

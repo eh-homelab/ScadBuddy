@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import type { SpoolEvent } from '../../api/filament'
-import { actorText, changeLines, eventNames, fromTypeText } from './eventText'
+import { actorText, changeLines, eventNames, fromTypeText, KIND_TEXT } from './eventText'
 
 const event = (values: Partial<SpoolEvent>): SpoolEvent => ({
   id: 'e1',
@@ -76,5 +76,11 @@ describe('changeLines', () => {
   it('says an edit a type wrote is from its type', () => {
     expect(fromTypeText(event({ data: { changes: { nozzle_temp_max: [230, 240] }, type_id: 't-black' } }), names)).toBe('from its type BL-PLA-BASIC-BLACK')
     expect(fromTypeText(event({ data: { changes: {} } }), names)).toBeNull()
+  })
+})
+
+describe('KIND_TEXT', () => {
+  it('names the non-print waste event (#7167)', () => {
+    expect(KIND_TEXT.non_print_waste).toBe('Non-print waste')
   })
 })

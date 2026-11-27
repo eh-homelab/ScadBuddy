@@ -50,6 +50,9 @@ export function noticeTitle(reason: string): string {
     // #7143 — a loaded tray no spool is linked to.
     case 'unknown_spool':
       return 'An unknown spool is loaded'
+    // #7167 — a spool came out of its tray, and its home dry box waits for the next spool.
+    case 'home_return':
+      return 'A dry box waits for a spool'
     default:
       return 'The assistant needs you'
   }

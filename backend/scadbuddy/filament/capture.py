@@ -7,9 +7,11 @@ location with ``printer_id`` set). The spool the tray holds is the tray's: its t
 read through `tags.seen_on` as a phone's reading is (#7273), which marks the tag seen by
 the AMS; else the placed spool whose fingerprint still matches
 (`FilamentInventory.holder_on`). Any other
-spool in the place is ``unloaded`` and moves back to the place it came from; the holder
-is ``loaded`` and moves in. Every event is timed at the report (``seen_at``), never the
-clock, so a resent report books nothing twice and a late one never reorders the ledger.
+spool in the place is ``unloaded`` and moves back to the place it came from, unless that
+place is a live dry box: then it goes to no place and is asked which spool goes into that
+box (#7167, `_put_back`); the holder is ``loaded`` and moves in. Every event is timed at
+the report (``seen_at``), never the clock, so a resent report books nothing twice and a
+late one never reorders the ledger.
 
 A report that does not show an AMS unit says nothing of its trays, so they are left alone
 (a delta report, a printer mid-reconnect). A tray the report shows loading or
@@ -45,6 +47,7 @@ from scadbuddy.bambuddy.trays import EXTERNAL, loading_trays, place_label, seen_
 from scadbuddy.filament import ledger, prints, tags
 from scadbuddy.filament import models as m
 from scadbuddy.filament.catalog import resolve_or_add
+from scadbuddy.filament.dry_box import is_dry_box
 from scadbuddy.filament.inventory import (
     _ADDED_SORT,
     FilamentInventory,
@@ -235,6 +238,30 @@ def _moved_from(conn: Conn, spool_id: UUID, place: UUID) -> UUID | None:
     return None if row is None else row["id"]
 
 
+def _put_back(conn: Conn, spool: UUID, place: UUID, *, actor: str, at: datetime) -> None:
+    """Where ``spool``, unloaded from the tray ``place``, goes: back where it came from
+    (`_moved_from`), unless that is a live dry box now (#7167). Then the spool goes to no
+    place, that box becomes its home, and it is asked which spool goes into the box
+    (``home_asked_at`` is ``at``, `filament/homes.py`): the system never assumes it is this
+    one, even into an empty box, and a place that became a box while the spool was out is
+    asked about too. A spool taken from a shelf goes back to the shelf with no prompt, and
+    its home stays the box it had. The place is locked (after the spools capture holds,
+    as `LocationStore.move_on` locks it) before it is read, so a kind flip that waited on
+    it is seen (`dry_box.occupant_on`)."""
+    back = _moved_from(conn, spool, place)
+    if back is not None:
+        conn.execute("SELECT 1 FROM filament_locations WHERE id = %s FOR NO KEY UPDATE", (back,))
+        if is_dry_box(conn, back):
+            LocationStore.move_on(conn, spool, None, actor=actor, at=at)
+            conn.execute(
+                "UPDATE filament_spools SET home_location_id = %s, home_asked_at = %s"
+                " WHERE id = %s",
+                (back, at, spool),
+            )
+            return
+    LocationStore.move_on(conn, spool, back, actor=actor, at=at)
+
+
 def _reading_due(conn: Conn, spool_id: UUID, key: tuple[UUID, int, int], remain: int) -> bool:
     """The spool's newest ``ams_reading`` has another percent or another tray."""
     last = conn.execute(
@@ -405,9 +432,7 @@ def reconcile(
                     at=seen_at,
                     data={"by": found_by},
                 )
-                LocationStore.move_on(
-                    conn, spool, _moved_from(conn, spool, place), actor=actor, at=seen_at
-                )
+                _put_back(conn, spool, place, actor=actor, at=seen_at)
                 result += CaptureResult(unloaded=1)
             if holder is not None and seen is not None:
                 result += _book_load(
