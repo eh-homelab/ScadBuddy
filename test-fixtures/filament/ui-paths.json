@@ -4,6 +4,7 @@
   { "kind": "supplier", "key": "s-1", "path": "/filament/suppliers/s-1" },
   { "kind": "invoice", "key": "inv 7/2", "path": "/filament/invoices/inv%207%2F2" },
   { "kind": "location", "key": "loc 1/a&b", "path": "/filament/locations/loc%201%2Fa%26b" },
+  { "kind": "preset", "key": "12", "path": "/filament/presets/12" },
   { "kind": "catalog", "key": "materials", "path": "/filament/catalog" },
   { "kind": "catalog", "key": "insert-types", "path": "/filament/catalog?kind=insert-types" }
 ]
