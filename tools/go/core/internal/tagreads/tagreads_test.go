@@ -323,6 +323,33 @@ func TestOnlyACompleteReadWritesRawBlob(t *testing.T) {
 	}
 }
 
+// Review of #8161: a complete read with tap false holds no dump, so it names none in raw_blob;
+// the dump a tap named stays held.
+func TestANoTapReadNamesNoUnheldDump(t *testing.T) {
+	h := newHarness(t)
+	body := mifareRead(uidA, complete())
+	body["tap"] = false
+	if status, answer := h.post(body); status != http.StatusOK {
+		t.Fatalf("%d %v", status, answer)
+	}
+	tag := h.tagOf(uidA + "00000100")
+	if got := h.one("SELECT raw_blob FROM filament_tags WHERE id = $1::uuid", tag); got != nil {
+		t.Errorf("raw_blob = %v from a read that holds no dump", got)
+	}
+	status, answer := h.post(mifareRead(uidA, complete()))
+	if status != http.StatusOK {
+		t.Fatalf("%d %v", status, answer)
+	}
+	body["tap"] = false
+	if status, answer := h.post(body); status != http.StatusOK {
+		t.Fatalf("%d %v", status, answer)
+	}
+	if got := h.one(`SELECT count(*) FROM filament_tags t JOIN blob_refs r ON r.key = t.raw_blob
+ AND r.holder_kind = 'tag_read' WHERE t.id = $1::uuid`, tag); got != int64(1) {
+		t.Errorf("raw_blob's dump has %v holds, want 1", got)
+	}
+}
+
 func TestAReadOfANewSideOfAKnownTrayAddsItsUID(t *testing.T) {
 	h := newHarness(t)
 	h.exec("INSERT INTO filament_tags (kind, tag_uid, tray_uuid) VALUES ('bambu_mifare', $1, $2)", uidA+"00000100", tray)

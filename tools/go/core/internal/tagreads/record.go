@@ -144,9 +144,10 @@ func write(ctx context.Context, tx pgx.Tx, in recordIn) (recorded, error) {
 		tagID, in.uid); err != nil {
 		return recorded{}, err
 	}
-	// A read with Bambu fields names a Bambu tag; its raw dump only from a complete read.
+	// A read with Bambu fields names a Bambu tag; its raw dump only from a complete read that
+	// is a tap, since only the history row holds the dump (a tap false read holds nothing).
 	if _, err := tx.Exec(ctx, `UPDATE filament_tags SET kind = CASE WHEN $4 THEN 'bambu_mifare' ELSE kind END,
- raw_blob = CASE WHEN $2 THEN $3 ELSE raw_blob END WHERE id = $1`, tagID, in.complete, in.dumpKey, in.bambu); err != nil {
+ raw_blob = CASE WHEN $2 THEN $3 ELSE raw_blob END WHERE id = $1`, tagID, in.complete && !in.noTap, in.dumpKey, in.bambu); err != nil {
 		return recorded{}, err
 	}
 	if in.noTap {
