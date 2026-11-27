@@ -19,6 +19,7 @@ import (
 	"fmt"
 	"hash/crc32"
 	"io"
+	"log/slog"
 	"net/http"
 	"os"
 	"strconv"
@@ -210,21 +211,28 @@ func (b *Blobs) put(ctx context.Context, store *Store, kind, mediaType string, b
 // bytes and kind a row names and the store holds is reused; otherwise the caps are checked
 // (room, which runs no aggregate with no cap set) and the bytes PUT, unless the content
 // object is there already (store/s3.py `upload`). Unlike Python, which trusts an object it
-// finds, every object stage would use is read and hashed first: one that is not sha256's
-// bytes is a 409 store_object_mismatch, left as it is and never indexed (held), for every
-// caller (#8250).
+// finds, every object stage would use is checked first (held). A row-named object that is
+// not sha256's bytes is logged and passed over, so the content object can still serve or be
+// written; only a content object of other bytes is a 409 store_object_mismatch, left as it
+// is and never indexed, for every caller (#8250).
 func (b *Blobs) stage(ctx context.Context, store *Store, kind, mediaType, sha string, size int64, body *os.File) (Ref, error) {
 	var existing Ref
 	err := b.Pool.QueryRow(ctx, `SELECT sha256, kind, backend, backend_id, size FROM store_blobs
  WHERE sha256 = $1 AND kind = $2 AND backend = $3 LIMIT 1`, sha, kind, backendS3).
 		Scan(&existing.SHA256, &existing.Kind, &existing.Backend, &existing.BackendID, &existing.Size)
+	objectKey := ObjectKey(store.S3.Prefix, kind, sha)
 	switch {
 	case err == nil:
 		there, err := b.held(ctx, store.S3, kind, existing.BackendID, sha, size)
-		if err != nil {
+		switch {
+		case errors.Is(err, ErrBlobMismatch) && existing.BackendID != objectKey:
+			slog.WarnContext(ctx, "a row names an object that is not its bytes; storing the content object instead",
+				"kind", kind, "sha256", sha, "object", existing.BackendID)
+		case errors.Is(err, ErrBlobMismatch):
+			return Ref{}, mismatched(ctx, kind, sha)
+		case err != nil:
 			return Ref{}, err
-		}
-		if there {
+		case there:
 			return existing, nil
 		}
 	case !errors.Is(err, pgx.ErrNoRows):
@@ -233,12 +241,23 @@ func (b *Blobs) stage(ctx context.Context, store *Store, kind, mediaType, sha st
 	if err := b.room(ctx, store, size); err != nil {
 		return Ref{}, err
 	}
+	there, err := b.held(ctx, store.S3, kind, objectKey, sha, size)
+	switch {
+	case errors.Is(err, ErrBlobMismatch):
+		return Ref{}, mismatched(ctx, kind, sha)
+	case err != nil:
+		return Ref{}, err
+	case there:
+		return Ref{SHA256: sha, Kind: kind, Backend: backendS3, BackendID: objectKey, Size: size}, nil
+	}
+	return b.upload(ctx, store, kind, mediaType, sha, size, body)
+}
+
+// upload PUTs body as kind's content object of sha256 and size, typed mediaType and private
+// when mediaType is set, as a commit PUTs it.
+func (b *Blobs) upload(ctx context.Context, store *Store, kind, mediaType, sha string, size int64, body *os.File) (Ref, error) {
 	objectKey := ObjectKey(store.S3.Prefix, kind, sha)
 	ref := Ref{SHA256: sha, Kind: kind, Backend: backendS3, BackendID: objectKey, Size: size}
-	there, err := b.held(ctx, store.S3, kind, objectKey, sha, size)
-	if err != nil || there {
-		return ref, err
-	}
 	sum, _ := hex.DecodeString(sha)
 	headers := map[string]string{"x-amz-checksum-sha256": base64.StdEncoding.EncodeToString(sum)}
 	if mediaType != "" {
@@ -268,10 +287,13 @@ func (b *Blobs) stage(ctx context.Context, store *Store, kind, mediaType, sha st
 }
 
 // held is whether the store holds objectKey as kind's blob of sha256 and size, read whole
-// and hashed as it streams (fetch): false when there is no object, and a 409
-// store_object_mismatch (mismatched) when the object is other bytes.
+// and hashed as it streams (fetch): false when there is no object, and ErrBlobMismatch when
+// the object is other bytes. An object whose GET declares another size is a mismatch with no
+// byte read, and the read has a deadline (reuseWait), so a stalled body frees its stage slot.
 func (b *Blobs) held(ctx context.Context, s3 *S3, kind, objectKey, sha string, size int64) (bool, error) {
-	rc, err := b.fetch(ctx, s3, Ref{SHA256: sha, Kind: kind, Backend: backendS3, BackendID: objectKey, Size: size})
+	reading, cancel := context.WithTimeout(ctx, reuseWait(size))
+	defer cancel()
+	rc, err := b.fetch(reading, s3, Ref{SHA256: sha, Kind: kind, Backend: backendS3, BackendID: objectKey, Size: size})
 	switch {
 	case errors.Is(err, ErrBlobNotFound):
 		return false, nil
@@ -281,14 +303,24 @@ func (b *Blobs) held(ctx context.Context, s3 *S3, kind, objectKey, sha string, s
 		return false, storeFailed(ctx, err)
 	}
 	defer rc.Close()
+	if v, ok := rc.(*verified); ok && v.declared >= 0 && v.declared != size {
+		return false, fmt.Errorf("%w: %s is %d bytes, not %d", ErrBlobMismatch, objectKey, v.declared, size)
+	}
 	_, err = io.Copy(io.Discard, rc)
 	switch {
 	case errors.Is(err, ErrBlobMismatch):
-		return false, mismatched(ctx, kind, sha)
+		return false, err
 	case err != nil:
 		return false, storeFailed(ctx, err)
 	}
 	return true, nil
+}
+
+// reuseWait bounds held's read of an object of size bytes: a minute plus a second per MiB.
+// A floor of 1 MiB/s is far below what the store serves, so only a stalled body reaches it,
+// and it scales, because kind piece has no size limit that a fixed cap could be set from.
+func reuseWait(size int64) time.Duration {
+	return time.Minute + time.Duration(size>>20)*time.Second
 }
 
 // storeFailed is err as a 503 store_unavailable, unless it is a refusal already or the
