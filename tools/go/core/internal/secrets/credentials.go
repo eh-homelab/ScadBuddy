@@ -32,8 +32,9 @@ const (
 	redactAuditWindow = "10 minutes"
 
 	tooManyMessage    = "at most 100 Claude credentials can be stored; delete one first"
-	staleOrderMessage = "the order must name every stored credential exactly once; the list changed since it" +
-		" was read, so reload it"
+	staleOrderMessage = "the order must name every credential this caller may order exactly once (the" +
+		" assistant's caller: every credential the assistant uses, no fleet row); the list" +
+		" changed since it was read, so reload it"
 	legacyFormatMessage = "the stored credential was saved in an older format that did not bind its kind and" +
 		" base URL; save it again"
 	wideningMessage = "to share a fleet credential with the agent, enter its secret again"
@@ -879,7 +880,8 @@ func (s *Store) order(r *http.Request, _ crud.Params) (any, error) {
 	return listOf(out), nil
 }
 
-// orderRows puts the credentials in this order; ids must name every one exactly once. With agent,
+// orderRows puts the credentials in this order; ids must name every row this caller may order
+// exactly once. With agent,
 // the agent's rows only: ids names every row the agent uses and no fleet row (a 409), those rows
 // take the priorities they hold between them in that order, and every fleet row keeps its own.
 func (s *Store) orderRows(ctx context.Context, ids []string, agent bool) ([]row, error) {

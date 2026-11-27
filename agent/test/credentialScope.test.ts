@@ -147,6 +147,25 @@ describe('the credential routes and the fleet’s rows (#7983)', () => {
     expect(tested.map((c) => c.secret)).toEqual([BOTH_KEY])
   })
 
+  it('answer 404, and open nothing, for a row that went to the fleet between the check and the reveal', async () => {
+    // The route's fleet check (`get`) and its `reveal` are two API calls; the reveal's own
+    // filter is the boundary, so a row moved to `fleet` between them reads as unknown.
+    const { app, repo, agent, tested } = await setup()
+    const get = repo.get.bind(repo)
+    let moved = false
+    repo.get = async (id?: string) => {
+      const before = await get(id)
+      if (!moved && id === agent.id) {
+        moved = true
+        await repo.put({ kind: 'anthropic_api_key', scope: 'fleet' }, agent.id)
+      }
+      return before
+    }
+    const res = await app.request(`/api/v1/ai/credentials/entries/${agent.id}/test`, { method: 'POST', headers: UI })
+    expect(res.status).toBe(404)
+    expect(tested).toEqual([])
+  })
+
   it('act on the first row the agent uses on the deprecated single-credential routes', async () => {
     const { app, repo, login, fleet, agent, both, tested } = await setup()
     const read = await app.request('/api/v1/ai/credentials', { headers: UI })

@@ -339,9 +339,12 @@ export function describeUnusable(
   )
 }
 
-/** The order `reorder` refuses: not every credential exactly once. */
+/**
+ * The order `reorder` refuses: not every row this caller may order exactly once
+ * (the assistant's caller: every credential the assistant uses, no fleet row).
+ */
 export const STALE_ORDER_MESSAGE =
-  'the order must name every stored credential exactly once; the list changed since it was read, so reload it'
+  "the order must name every credential this caller may order exactly once (the assistant's caller: every credential the assistant uses, no fleet row); the list changed since it was read, so reload it"
 
 /**
  * Non-secret AI settings in `ai_settings`. Every write is recorded in the

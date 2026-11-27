@@ -197,7 +197,7 @@ export const handlers = [
     if (ids.some((id) => find(id)?.agent_uses === false)) return detail(FLEET_ROW_MESSAGE, 409)
     const known = state.credentials.filter((c) => c.agent_uses).map((c) => c.id)
     if (ids.length !== known.length || new Set(ids).size !== ids.length || !ids.every((id) => known.includes(id))) {
-      return detail('ids must name every credential exactly once; the list changed, read it again', 409)
+      return detail("the order must name every credential this caller may order exactly once (the assistant's caller: every credential the assistant uses, no fleet row); the list changed since it was read, so reload it", 409)
     }
     const next = [...ids]
     state.credentials = state.credentials

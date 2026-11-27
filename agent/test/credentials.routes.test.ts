@@ -180,7 +180,7 @@ describe('/api/v1/ai/credentials/entries (#1093)', () => {
     expect((await call<CredentialView>('DELETE', '', undefined, UI)).body).toMatchObject({ configured: false })
   })
 
-  it('refuses an order that does not name every credential exactly once', async () => {
+  it('refuses an order that does not name every credential the assistant uses exactly once', async () => {
     const { call, create } = setup()
     const a = await create({ kind: 'anthropic_api_key', secret: KEY_A })
     const b = await create({ kind: 'anthropic_api_key', secret: KEY_B })

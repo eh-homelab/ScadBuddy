@@ -83,8 +83,9 @@ MAX_CREDENTIALS = 100
 NAME_MAX = 60
 TOO_MANY_MESSAGE = f"at most {MAX_CREDENTIALS} Claude credentials can be stored; delete one first"
 STALE_ORDER_MESSAGE = (
-    "the order must name every stored credential exactly once; the list changed since it"
-    " was read, so reload it"
+    "the order must name every credential this caller may order exactly once (the"
+    " assistant's caller: every credential the assistant uses, no fleet row); the list"
+    " changed since it was read, so reload it"
 )
 LEGACY_FORMAT_MESSAGE = (
     "the stored credential was saved in an older format that did not bind its kind and"
@@ -605,7 +606,8 @@ def delete(conn: Connection[Any], row_id: str | None, *, agent: bool = True) -> 
 
 
 def reorder(conn: Connection[Any], ids: list[str], *, agent: bool = True) -> list[dict[str, Any]]:
-    """Puts the credentials in this order; ``ids`` must name every one exactly once. With
+    """Puts the credentials in this order; ``ids`` must name every row this caller may order
+    exactly once. With
     ``agent`` (the default), the agent's rows only: ``ids`` names every row the agent uses and
     no fleet row (a 409), those rows take the priorities they hold between them in that
     order, and every fleet row keeps its own."""
