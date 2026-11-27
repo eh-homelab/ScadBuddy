@@ -1341,6 +1341,41 @@ describe('filament location tools', () => {
     expect(bodies).toEqual([{ location_id: ROW }, { location_id: null }])
   })
 
+  it('sends if_occupied and answers only when given, for the spool the user identified (#7167)', async () => {
+    const bodies: unknown[] = []
+    server.use(
+      http.post(`${SPOOLS}/${ROW}/move`, async ({ request }) => {
+        bodies.push(await request.json())
+        return HttpResponse.json({ id: ROW })
+      }),
+    )
+    const unloaded = '8d6f3c1e-0000-4000-8000-0000000061a2'
+    const answer = { spool_id: ROW, location_id: ROW, if_occupied: 'replace', answers: unloaded }
+    expect((await runTool(tool('filament_spool_move'), answer, ctx())).isError).toBeFalsy()
+    expect(bodies).toEqual([{ location_id: ROW, if_occupied: 'replace', answers: unloaded }])
+    const bad = { spool_id: ROW, location_id: ROW, if_occupied: 'assume_new' }
+    expect((await runTool(tool('filament_spool_move'), bad, ctx())).isError).toBe(true)
+    expect(bodies).toHaveLength(1)
+    const text = tool('filament_spool_move').description
+    expect(text).toContain('identified')
+    expect(text).toContain('never a guess')
+    expect(text).toContain('non-print waste')
+  })
+
+  it('lists the spools awaiting their home box (#7167)', async () => {
+    const seen: (string | null)[] = []
+    server.use(
+      http.get(SPOOLS, ({ request }) => {
+        seen.push(new URL(request.url).searchParams.get('awaiting_home'))
+        return HttpResponse.json([])
+      }),
+    )
+    await runTool(tool('filament_spool_list'), { awaiting_home: true }, ctx())
+    await runTool(tool('filament_spool_list'), {}, ctx())
+    expect(seen).toEqual(['true', null])
+    expect(tool('filament_spool_list').description).toContain('awaiting_home')
+  })
+
   it("imports Bambuddy's spools and says what it did", async () => {
     expect(tool('filament_bambuddy_import').risk).toBe('write')
     expect(tool('filament_bambuddy_import').gated).toBe(false)

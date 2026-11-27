@@ -68,6 +68,7 @@ from scadbuddy.entities.problems import bad_property_value, missing_required
 from scadbuddy.entities.properties import BadPropertyValue, MissingRequiredProperties
 from scadbuddy.filament import (
     capture,
+    homes,
     label_fonts,
     label_pdf,
     label_png,
@@ -383,6 +384,8 @@ def _refused(exc: ValueError) -> ApiError:
         )
     if isinstance(exc, BoxHasManyError):
         return ApiError(status.HTTP_422_UNPROCESSABLE_CONTENT, str(exc), code="box_has_many")
+    if isinstance(exc, homes.NotItsHomeError):
+        return ApiError(status.HTTP_422_UNPROCESSABLE_CONTENT, str(exc), code="not_its_home")
     code = (
         status.HTTP_409_CONFLICT
         if isinstance(
@@ -1245,14 +1248,24 @@ def _no_spool(spool_id: UUID) -> ApiError:
         "fields it `overridden`, the `names` behind its ids and `low_stock` (the grams left "
         "are under its low-stock percentage of its label weight, else 20 %; false when "
         "either weight is unknown). `needs_type=true` keeps only spools with no type yet, "
-        "`false` only typed ones. Archived spools only with `include_archived`."
+        "`false` only typed ones. Archived spools only with `include_archived`. "
+        "`awaiting_home=true` keeps only the spools asked which spool goes into their home "
+        "dry box (#7167: `home_asked_at` set when a spool whose home is a live dry box came "
+        "out of its tray, no place since, and the home still a live dry box); answer one "
+        "with `POST /filament/spools/{id}/move` and `answers`. `false` keeps the others."
     ),
 )
 async def list_spools(
-    filament: FilamentDep, include_archived: bool = False, needs_type: bool | None = None
+    filament: FilamentDep,
+    include_archived: bool = False,
+    needs_type: bool | None = None,
+    awaiting_home: bool | None = None,
 ) -> list[m.Spool]:
     return await asyncio.to_thread(
-        filament.spools.list, include_archived=include_archived, needs_type=needs_type
+        filament.spools.list,
+        include_archived=include_archived,
+        needs_type=needs_type,
+        awaiting_home=awaiting_home,
     )
 
 
@@ -3308,7 +3321,17 @@ def _no_sensor(sensor_id: UUID) -> ApiError:
         "404 for no such spool, 422 for a place that does not exist, is archived or is an "
         "AMS unit's place. A dry box (a dry-storage place of capacity 1) holds one spool: "
         "a place that holds another one is a 409 with `code` `box_full` and `occupant_id`, "
-        "and nothing is written (#7167). A move into a dry box makes it the spool's home."
+        "and nothing is written (#7167). A move into a dry box makes it the spool's home. "
+        "The spool moved is always the one the person identified (a tag scan, a code or a "
+        "pick by hand); the server never picks it. `if_occupied: replace` first archives "
+        "the box's own spool at 0 g (reason `other`) and books its grams left as "
+        "non-print waste (`cause` `replaced`), in the same transaction; on an empty box, a "
+        "place that is no box, or the box's own spool it is the plain move. `if_occupied` "
+        "is `refuse` (the default) or `replace`; any other value is a 422. `answers` names "
+        "the unloaded spool whose home-return prompt this move answers (`GET "
+        "/filament/spools?awaiting_home=true`): its `home_asked_at` clears, and it keeps "
+        "no place unless it is the spool moved. 404 when `answers` names no spool, 422 "
+        "with `code` `not_its_home` when that spool's home is not `location_id`."
     ),
 )
 async def move_spool(
@@ -3316,11 +3339,17 @@ async def move_spool(
 ) -> m.Spool:
     try:
         await asyncio.to_thread(
-            filament.locations.move, spool_id, body.location_id, actor=actor(caller)
+            homes.move,
+            filament.spools,
+            spool_id,
+            body.location_id,
+            if_occupied=body.if_occupied,
+            answers=body.answers,
+            actor=actor(caller),
         )
-    except LookupError:
-        raise _no_spool(spool_id) from None
-    except (MoveTargetError, BoxFullError) as exc:
+    except LookupError as exc:
+        raise ApiError(status.HTTP_404_NOT_FOUND, str(exc)) from None
+    except (MoveTargetError, BoxFullError, homes.NotItsHomeError) as exc:
         raise _refused(exc) from None
     moved = await asyncio.to_thread(filament.spools.get, spool_id)
     if moved is None:

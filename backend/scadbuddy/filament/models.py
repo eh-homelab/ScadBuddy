@@ -834,12 +834,20 @@ class SensorReading(BaseModel):
     value: float
 
 
+#: What a move does when its target is a dry box that holds another spool (#7167):
+#: ``refuse`` (409 ``box_full``) or ``replace`` (that spool is archived at 0 g first).
+IfOccupied = Literal["refuse", "replace"]
+
+
 class SpoolMove(_In):
     """Where a spool goes; ``null`` takes it out of every place."""
 
     location_id: UUID | None
     #: What to do when the target is a dry box that holds a spool already (#7167).
-    if_occupied: Literal["refuse", "replace"] = "refuse"
+    if_occupied: IfOccupied = "refuse"
+    #: The unloaded spool whose home-return prompt this move answers (#7167): its
+    #: ``home_asked_at`` clears though another spool goes into its box.
+    answers: UUID | None = None
 
 
 # -- spool types ----------------------------------------------------------------------

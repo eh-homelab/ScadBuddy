@@ -9,7 +9,7 @@ import pytest
 from fastapi.testclient import TestClient
 from httpx import Response
 
-from tests.api.test_filament import LOCATIONS, SPOOLS, _kind_id, _location, _spool
+from tests.api.test_filament import LOCATIONS, SPOOLS, _kind_id, _location, _spool, _state
 
 pytestmark = pytest.mark.requires_postgres
 
@@ -106,3 +106,76 @@ def test_a_kind_flip_over_a_place_with_two_spools_is_a_422(client: TestClient) -
         if r["id"] == kind["id"]
     )
     assert kept["dry_storage"] is False
+
+
+def _asked(client: TestClient, spool: dict[str, object]) -> None:
+    """The spool came out of a tray and is asked about its home (as capture parks it)."""
+    with _state(client).settings_store.pool.connection() as conn:
+        conn.execute(
+            "UPDATE filament_spools SET location_id = NULL, home_asked_at = now() WHERE id = %s",
+            (spool["id"],),
+        )
+
+
+def test_awaiting_home_lists_only_the_asked_spools(client: TestClient) -> None:
+    box = _box(client, "Box W")
+    asked, plain = _spool(client), _spool(client)
+    client.post(f"{SPOOLS}/{asked['id']}/move", json={"location_id": box["id"]})
+    _asked(client, asked)
+    listed = client.get(SPOOLS, params={"awaiting_home": "true"})
+    assert listed.status_code == 200, listed.text
+    assert [s["id"] for s in listed.json()] == [asked["id"]]
+    assert listed.json()[0]["home_asked_at"] is not None
+    rest = [s["id"] for s in client.get(SPOOLS, params={"awaiting_home": "false"}).json()]
+    assert plain["id"] in rest and asked["id"] not in rest
+
+
+def test_a_replace_puts_the_identified_spool_in_and_archives_the_old(
+    client: TestClient,
+) -> None:
+    """The unloaded spool is asked; the person names another spool and replaces the box's."""
+    box = _box(client, "Box V")
+    unloaded, held, named = _spool(client), _spool(client, grams_left=80), _spool(client)
+    client.post(f"{SPOOLS}/{unloaded['id']}/move", json={"location_id": box["id"]})
+    _asked(client, unloaded)
+    client.post(f"{SPOOLS}/{held['id']}/move", json={"location_id": box["id"]})
+    moved = client.post(
+        f"{SPOOLS}/{named['id']}/move",
+        json={"location_id": box["id"], "if_occupied": "replace", "answers": unloaded["id"]},
+    )
+    assert moved.status_code == 200, moved.text
+    assert moved.json()["location_id"] == box["id"]
+    gone = client.get(f"{SPOOLS}/{held['id']}").json()
+    assert gone["archived_at"] is not None and gone["grams_left"] == 0
+    events = client.get(f"{SPOOLS}/{held['id']}/events").json()
+    waste = [e for e in events if e["kind"] == "non_print_waste"]
+    assert [(e["data"]["cause"], e["data"]["waste_g"]) for e in waste] == [("replaced", 80)]
+    answered = client.get(f"{SPOOLS}/{unloaded['id']}").json()
+    assert answered["home_asked_at"] is None and answered["location_id"] is None
+    assert answered["archived_at"] is None
+    assert client.get(SPOOLS, params={"awaiting_home": "true"}).json() == []
+
+
+def test_an_answer_for_another_home_is_a_422(client: TestClient) -> None:
+    box, elsewhere = _box(client, "Box U"), _box(client, "Box T")
+    asked, other = _spool(client), _spool(client)
+    client.post(f"{SPOOLS}/{asked['id']}/move", json={"location_id": box["id"]})
+    _asked(client, asked)
+    refused = client.post(
+        f"{SPOOLS}/{other['id']}/move",
+        json={"location_id": elsewhere["id"], "answers": asked["id"]},
+    )
+    assert refused.status_code == 422, refused.text
+    assert refused.json()["code"] == "not_its_home"
+    assert client.get(f"{SPOOLS}/{other['id']}").json()["location_id"] is None
+
+
+@pytest.mark.parametrize("value", ["assume_new", "keep", "", "REPLACE"])
+def test_an_unknown_if_occupied_is_a_422(client: TestClient, value: str) -> None:
+    box = _box(client, "Box S")
+    spool = _spool(client)
+    refused = client.post(
+        f"{SPOOLS}/{spool['id']}/move", json={"location_id": box["id"], "if_occupied": value}
+    )
+    assert refused.status_code == 422, refused.text
+    assert client.get(f"{SPOOLS}/{spool['id']}").json()["location_id"] is None

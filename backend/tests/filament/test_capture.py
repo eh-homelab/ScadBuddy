@@ -17,7 +17,13 @@ from scadbuddy.filament import capture, prints
 from scadbuddy.filament.catalog import CatalogStore
 from scadbuddy.filament.inventory import FilamentInventory, _Keys
 from scadbuddy.filament.locations import LocationStore
-from scadbuddy.filament.models import LocationCreate, LocationKind, Material, SpoolCreate
+from scadbuddy.filament.models import (
+    LocationCreate,
+    LocationKind,
+    LocationPatch,
+    Material,
+    SpoolCreate,
+)
 from scadbuddy.filament.spools import FilamentSpoolStore
 from scadbuddy.printers.models import LanLink, PrinterCreate
 from scadbuddy.printers.reports import PrinterReportStore
@@ -145,31 +151,128 @@ def test_a_swap_unloads_the_old_spool_and_loads_the_new(pg_pool: PgPool) -> None
     assert _row(pg_pool, b)["location_id"] == _tray_place(pg_pool, pid)
 
 
-def test_an_unload_to_a_box_another_spool_took_leaves_the_spool_no_place(
-    pg_pool: PgPool,
-) -> None:
-    """#7167: the spool came from a dry box, which holds another spool by the unload; the
-    refused move writes nothing, and the spool gets no place."""
-    a, b = _spool(pg_pool, tray_uuid=U1), _spool(pg_pool)
-    pid, _ = _printer(pg_pool)
+def _box(pool: PgPool, name: str = "Box X") -> UUID:
     kind = next(
         r.id
-        for r in CatalogStore(pg_pool).list("location-kinds")
+        for r in CatalogStore(pool).list("location-kinds")
         if isinstance(r, LocationKind) and r.name == "Dry box"
     )
-    box = LocationStore(pg_pool).create(LocationCreate(name="Box X", kind_id=kind, capacity=1)).id
+    return LocationStore(pool).create(LocationCreate(name=name, kind_id=kind, capacity=1)).id
+
+
+def _asked(pool: PgPool, spool: UUID) -> datetime | None:
+    with pool.connection() as conn:
+        row = conn.execute(
+            "SELECT home_asked_at FROM filament_spools WHERE id = %s", (spool,)
+        ).fetchone()
+    assert row is not None
+    asked: datetime | None = row["home_asked_at"]
+    return asked
+
+
+def test_an_unload_to_a_box_another_spool_took_parks_the_spool_and_asks(
+    pg_pool: PgPool,
+) -> None:
+    """#7167: the spool's home box holds another spool by the unload. The spool gets no
+    place and is asked which spool goes into the box; nothing tried the full box."""
+    a, b = _spool(pg_pool, tray_uuid=U1), _spool(pg_pool)
+    pid, _ = _printer(pg_pool)
+    box = _box(pg_pool)
     LocationStore(pg_pool).move(a, box, actor="t")
     _reconcile(pg_pool, pid, _report(_tray(1, U1)))
     LocationStore(pg_pool).move(b, box, actor="t")
-    result = _reconcile(pg_pool, pid, _report({"id": "1"}), T0 + timedelta(minutes=1))
+    seen = T0 + timedelta(minutes=1)
+    result = _reconcile(pg_pool, pid, _report({"id": "1"}), seen)
     assert result.unloaded == 1
     assert _row(pg_pool, a)["location_id"] is None
+    assert _asked(pg_pool, a) == seen
     assert _row(pg_pool, b)["location_id"] == box
     moves = [e.data["to"] for e in _events(pg_pool, a, "moved")]
-    # Placed in the box, then in the tray, then none: the refused move to the box wrote nothing.
     assert sorted(moves, key=str) == sorted(
         [str(box), str(_tray_place(pg_pool, pid)), None], key=str
     )
+
+
+def test_unload_of_a_spool_with_a_live_home_parks_it_and_asks(pg_pool: PgPool) -> None:
+    """#7167: the system never assumes the unloaded spool goes back into its empty box."""
+    spool = _spool(pg_pool, tray_uuid=U1)
+    pid, _ = _printer(pg_pool)
+    box = _box(pg_pool)
+    LocationStore(pg_pool).move(spool, box, actor="t")
+    _reconcile(pg_pool, pid, _report(_tray(1, U1)))
+    seen = T0 + timedelta(minutes=1)
+    result = _reconcile(pg_pool, pid, _report({"id": "1"}), seen)
+    assert result.unloaded == 1
+    assert _row(pg_pool, spool)["location_id"] is None
+    assert _asked(pg_pool, spool) == seen
+    (gone,) = _events(pg_pool, spool, "unloaded")
+    assert gone.at == seen and (gone.ams_id, gone.tray_id) == (0, 1)
+    assert [s.id for s in FilamentSpoolStore(pg_pool).list(awaiting_home=True)] == [spool]
+
+
+def test_unload_without_a_home_goes_back_as_today(pg_pool: PgPool) -> None:
+    spool = _spool(pg_pool, tray_uuid=U1)
+    pid, _ = _printer(pg_pool)
+    shelf = _shelf(pg_pool)
+    LocationStore(pg_pool).move(spool, shelf, actor="t")
+    _reconcile(pg_pool, pid, _report(_tray(1, U1)))
+    _reconcile(pg_pool, pid, _report({"id": "1"}), T0 + timedelta(minutes=1))
+    assert _row(pg_pool, spool)["location_id"] == shelf
+    assert _asked(pg_pool, spool) is None
+
+
+def test_unload_with_an_archived_home_goes_back_as_today(pg_pool: PgPool) -> None:
+    """#7167 Review Focus 5: a home box that was archived, or is no box now, asks nothing."""
+    spool, other = _spool(pg_pool, tray_uuid=U1), _spool(pg_pool, tray_uuid=U2)
+    pid, _ = _printer(pg_pool)
+    shelf = _shelf(pg_pool)
+    gone, flat = _box(pg_pool, "Box G"), _box(pg_pool, "Box F")
+    for one, box in ((spool, gone), (other, flat)):
+        LocationStore(pg_pool).move(one, box, actor="t")
+        LocationStore(pg_pool).move(one, shelf, actor="t")
+    _reconcile(pg_pool, pid, _report(_tray(1, U1), _tray(2, U2)))
+    LocationStore(pg_pool).update(gone, LocationPatch(archived=True))
+    LocationStore(pg_pool).update(flat, LocationPatch(capacity=2))
+    _reconcile(pg_pool, pid, _report({"id": "1"}, {"id": "2"}), T0 + timedelta(minutes=1))
+    for one in (spool, other):
+        assert _row(pg_pool, one)["location_id"] == shelf
+        assert _asked(pg_pool, one) is None
+
+
+def test_resent_report_asks_once(pg_pool: PgPool) -> None:
+    spool = _spool(pg_pool, tray_uuid=U1)
+    pid, _ = _printer(pg_pool)
+    LocationStore(pg_pool).move(spool, _box(pg_pool), actor="t")
+    _reconcile(pg_pool, pid, _report(_tray(1, U1)))
+    seen = T0 + timedelta(minutes=1)
+    _reconcile(pg_pool, pid, _report({"id": "1"}), seen)
+    again = _reconcile(pg_pool, pid, _report({"id": "1"}), seen + timedelta(minutes=1))
+    assert again.unloaded == 0
+    assert _asked(pg_pool, spool) == seen
+    assert len(_events(pg_pool, spool, "unloaded")) == 1
+
+
+def test_asked_flag_clears_on_move_archive_and_reload(pg_pool: PgPool) -> None:
+    moved, archived, reloaded = (
+        _spool(pg_pool, tray_uuid=U1),
+        _spool(pg_pool, tray_uuid=U2),
+        _spool(pg_pool, tray_uuid=U3),
+    )
+    pid, _ = _printer(pg_pool)
+    shelf = _shelf(pg_pool)
+    for n, one in enumerate((moved, archived, reloaded)):
+        LocationStore(pg_pool).move(one, _box(pg_pool, f"Box {n}"), actor="t")
+    _reconcile(pg_pool, pid, _report(_tray(1, U1), _tray(2, U2), _tray(3, U3)))
+    seen = T0 + timedelta(minutes=1)
+    _reconcile(pg_pool, pid, _report({"id": "1"}, {"id": "2"}, {"id": "3"}), seen)
+    assert all(_asked(pg_pool, one) == seen for one in (moved, archived, reloaded))
+    LocationStore(pg_pool).move(moved, shelf, actor="t")
+    FilamentSpoolStore(pg_pool).archive(archived, True, actor="t", reason="other")
+    _reconcile(
+        pg_pool, pid, _report({"id": "1"}, {"id": "2"}, _tray(3, U3)), seen + timedelta(minutes=1)
+    )
+    assert _row(pg_pool, reloaded)["location_id"] == _tray_place(pg_pool, pid, tray_id=3)
+    assert [_asked(pg_pool, one) for one in (moved, archived, reloaded)] == [None, None, None]
 
 
 def test_a_tagged_spool_moved_to_a_lower_tray_stays_loaded(pg_pool: PgPool) -> None:

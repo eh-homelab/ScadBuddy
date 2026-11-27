@@ -814,12 +814,15 @@ const tools: Tool[] = [
       "override, else its type's), the fields it `overridden`, the `names` behind its ids, `low_stock`, and " +
       '`grams_left` from its ledger. ' +
       '`needs_type: true` lists only spools with no type yet, `false` only typed ones. Archived spools only ' +
-      'with `include_archived`. `q` keeps the spools whose number, brand, material, subtype, colour name, hex, ' +
+      'with `include_archived`. `awaiting_home: true` lists only the spools that came out of a tray and are asked ' +
+      'which spool goes into their home dry box (`home_location_id`, asked at `home_asked_at`); ask the user to ' +
+      'identify the spool, then answer with filament_spool_move `answers`. `q` keeps the spools whose number, brand, material, subtype, colour name, hex, ' +
       "place, tray, type code, type's supplier SKU, one of the spool's property values (a lot) or open tag's UID or " +
       'tray UUID (from 4 hex digits; `:` and `-` are left out, so `04:A1:B2` finds tag `04A1B2…`) match it.',
     input: z.object({
       include_archived: z.boolean().default(false),
       needs_type: z.boolean().optional(),
+      awaiting_home: z.boolean().optional(),
       q: searchQuery,
     }),
     risk: 'read',
@@ -831,9 +834,9 @@ const tools: Tool[] = [
       'GET /api/v1/filament/tags',
       ...SEARCH_ROUTES,
     ],
-    handler: async ({ include_archived, needs_type, q }, { backend }) => {
+    handler: async ({ include_archived, needs_type, awaiting_home, q }, { backend }) => {
       const spools = await ok(
-        backend.GET('/api/v1/filament/spools', { params: { query: { include_archived, needs_type } } }),
+        backend.GET('/api/v1/filament/spools', { params: { query: { include_archived, needs_type, awaiting_home } } }),
         'list the spools',
       )
       const tokens = parseSearch(q)
@@ -2207,19 +2210,38 @@ const tools: Tool[] = [
       "The spool's ledger records the move as `{from, to}`. A spool already there is left as it is. 422 for a place " +
       'that does not exist or is archived. A dry box (a dry-storage place of capacity 1) holds one spool: a box that ' +
       'holds another one is a 409 `box_full` naming that spool (`occupant_id`); tell the user, and do not move that ' +
-      'spool unasked. Only what the user says. Writes ScadBuddy only.',
-    input: z.object({ spool_id: z.string().uuid(), location_id: z.string().uuid().nullable() }),
+      'spool unasked. `spool_id` must be the spool the user identified (a tag scan, a spool code such as `S-12`, or a ' +
+      'spool they named), never a guess: not even the spool that came out of the tray. `if_occupied: "replace"`, only ' +
+      "when the user says the identified spool replaces the box's own spool, archives that spool at 0 g and books its " +
+      'grams left as non-print waste, then moves; tell the user that first. `answers` is the unloaded spool whose ' +
+      'home-return prompt this answers (filament_spool_list `awaiting_home: true`): its prompt clears, and it keeps no ' +
+      'place unless it is `spool_id`; a 422 `not_its_home` when its home is not `location_id`. Only what the user ' +
+      'says. Writes ScadBuddy only.',
+    input: z.object({
+      spool_id: z.string().uuid(),
+      location_id: z.string().uuid().nullable(),
+      if_occupied: z.enum(['refuse', 'replace']).optional(),
+      answers: z.string().uuid().optional(),
+    }),
     risk: 'write',
     source: SOURCE,
     routes: ['POST /api/v1/filament/spools/{spool_id}/move'],
-    summarize: ({ spool_id, location_id }) =>
-      location_id ? `Move spool ${spool_id} to ${location_id}` : `Take spool ${spool_id} out of its place`,
-    handler: async ({ spool_id, location_id }, { backend }) =>
+    summarize: ({ spool_id, location_id, if_occupied }) =>
+      !location_id
+        ? `Take spool ${spool_id} out of its place`
+        : if_occupied === 'replace'
+          ? `Move spool ${spool_id} to ${location_id}, archiving the spool there`
+          : `Move spool ${spool_id} to ${location_id}`,
+    handler: async ({ spool_id, location_id, if_occupied, answers }, { backend }) =>
       json(
         await ok(
           backend.POST('/api/v1/filament/spools/{spool_id}/move', {
             params: { path: { spool_id } },
-            body: { location_id },
+            body: {
+              location_id,
+              ...(if_occupied === undefined ? {} : { if_occupied }),
+              ...(answers === undefined ? {} : { answers }),
+            },
           }),
           `move spool ${spool_id}`,
         ),

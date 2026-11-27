@@ -36,7 +36,7 @@ from scadbuddy.filament import dry_hours, ledger, metrics
 from scadbuddy.filament import models as m
 from scadbuddy.filament import presets as p
 from scadbuddy.filament.catalog import CatalogRefError
-from scadbuddy.filament.dry_box import BoxFullError, is_dry_box, occupant_on
+from scadbuddy.filament.dry_box import BOX, BoxFullError, is_dry_box, occupant_on
 from scadbuddy.filament.empty_weight import EmptyWeight, effective_on
 from scadbuddy.filament.insert_weights import check_on, forget_spool_on
 from scadbuddy.filament.invoice_money import price_per_kg, unit_cost
@@ -104,6 +104,13 @@ _SPOOL_FIELDS = tuple(
     }
 )
 _SPOOL_COLUMNS = ", ".join(_SPOOL_FIELDS)
+#: A spool of ``filament_spools`` asked which spool goes into its home box, and still
+#: waiting (#7167): asked, in no place, and its home still a live dry box.
+_AWAITING_HOME = (
+    "(home_asked_at IS NOT NULL AND location_id IS NULL AND EXISTS (SELECT 1"
+    " FROM filament_locations l JOIN filament_location_kinds k ON k.id = l.kind_id"
+    f" WHERE l.id = filament_spools.home_location_id AND {BOX}))"
+)
 _TYPE_COLUMNS = ", ".join(f for f in m.SpoolType.model_fields if f not in m.COMPLETENESS)
 _TAG_COLUMNS = ", ".join(m.Tag.model_fields)
 _BINDING_COLUMNS = ", ".join(m.TagBinding.model_fields)
@@ -646,20 +653,31 @@ class FilamentSpoolStore:
         conninfo = self._pool.conninfo
         return conninfo() if callable(conninfo) else conninfo
 
-    def list(self, *, include_archived: bool = False, needs_type: bool | None = None) -> _Spools:
+    def list(
+        self,
+        *,
+        include_archived: bool = False,
+        needs_type: bool | None = None,
+        awaiting_home: bool | None = None,
+    ) -> _Spools:
         """By number. ``needs_type`` keeps only the spools with no type (``True``) or only
-        those with one (``False``)."""
-        return self._list(self._defaults(), include_archived, needs_type)
+        those with one (``False``). ``awaiting_home`` keeps only the spools asked which
+        spool goes into their home box (#7167: ``home_asked_at`` set, no place, and a home
+        that is still a live dry box), or only the others (``False``)."""
+        return self._list(self._defaults(), include_archived, needs_type, awaiting_home)
 
     def _list(
         self,
         defaults: FilamentDefaults,
         include_archived: bool = False,
         needs_type: bool | None = None,
+        awaiting_home: bool | None = None,
     ) -> _Spools:
         where = [] if include_archived else ["archived_at IS NULL"]
         if needs_type is not None:
             where.append("type_id IS NULL" if needs_type else "type_id IS NOT NULL")
+        if awaiting_home is not None:
+            where.append(("" if awaiting_home else "NOT ") + _AWAITING_HOME)
         clause = f" WHERE {' AND '.join(where)}" if where else ""
         with self._pool.connection() as conn:
             rows = conn.execute(
@@ -2140,10 +2158,12 @@ class FilamentSpoolStore:
                     data={"tag_id": closed["tag_id"], "reason": "archived"},
                 )
                 enqueue_tag(conn, closed["tag_id"])
+        # An archived spool is asked nothing about its home (#7167).
         conn.execute(
             "UPDATE filament_spools SET archived_at = CASE WHEN %s THEN now() END,"
+            " home_asked_at = CASE WHEN %s THEN NULL ELSE home_asked_at END,"
             " updated_at = now() WHERE id = %s",
-            (archived, current["id"]),
+            (archived, archived, current["id"]),
         )
         if archived:
             # #6265 R-T3-5: an archived spool's sync error leaves the status. Its create
