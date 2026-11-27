@@ -2399,7 +2399,8 @@ async def _run_library_worker(state: AppState, stop: asyncio.Event) -> None:
             LanCommands(lambda: client, settings.temporal_task_queue_bambuddy),
             lambda: state.components.get(SLICING).profiles,
         ),
-        # An unknown AMS tray linked to a spool by the Go route (#7143, G5).
+        # The activity that links an unknown AMS tray to a spool (#7143, G5). The Go route that
+        # starts it is not built yet.
         *_unknown_tray_activities(state),
         *operation_activities(ops.store, state.settings_store, _kinds_on(ops, "library")),
         *trigger_activities,

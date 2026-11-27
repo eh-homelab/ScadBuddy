@@ -1,9 +1,10 @@
 """#7143 (G5): resolve an unknown tray, as a Temporal activity on the ``library`` queue.
 
-The Go route ``POST /api/v1/filament/unknown-trays/{id}/resolve`` checks the body and runs
-this activity. It links a spool to the tray, books the spool's first weight and deletes the
-tray's row, in one transaction. The API process serves it: it is the only process with a
-database secret (#5295). It publishes no event (G8).
+The Go route ``POST /api/v1/filament/unknown-trays/{id}/resolve`` will check the body and
+start this activity (not built yet: it waits for ``internal/temporalx``). The activity links
+a spool to the tray, books the spool's first weight and deletes the tray's row, in one
+transaction. The API process serves it: it is the only process with a database secret
+(#5295). It publishes no event (G8).
 
 Locks, in this order (G9): the tray's advisory lock, the row ``FOR UPDATE``, then
 `FilamentInventory.link_on`'s own (the tag, the spools by id, the place ``FOR SHARE``).
@@ -32,7 +33,7 @@ from scadbuddy.filament import ledger
 from scadbuddy.filament import models as m
 from scadbuddy.filament.component import Filament
 from scadbuddy.filament.inventory import (
-    TrayNotFilledError,
+    SpoolNotFoundError,
     TrayTagClashError,
     _tray_lock,
 )
@@ -174,7 +175,7 @@ def resolve_unknown_tray(
             raise _refused(NO_AMS_KIND, str(error)) from None
         except (TrayTagClashError, TagKeysClashError) as error:
             raise _refused(TAG_CLASH, str(error)) from None
-        except (TrayNotFilledError, LookupError) as error:
+        except SpoolNotFoundError as error:
             raise _refused(SPOOL_MISSING, str(error)) from None
         spool = FilamentSpoolStore.read(conn, spool_id, defaults=filament.spools.defaults())
         assert spool is not None

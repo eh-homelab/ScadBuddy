@@ -1,8 +1,9 @@
 """#7143: the rows of ``filament_unknown_trays``, and the wire types of the print block.
 
 A row exists while a printer reports a tray as loaded and no spool holds it. Capture
-writes it (`note_on`). Linking a spool clears it (`clear_on`). Only the API process
-reads these tables (#5295): the print worker gets the block from a CRUD route.
+writes it (`note_on`). Linking a spool clears it (`clear_on`). The API process and
+`tools/go/core` (the #7667 exception) read these tables; the print worker gets the block from
+a CRUD route.
 """
 
 from __future__ import annotations

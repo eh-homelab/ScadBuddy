@@ -1,4 +1,4 @@
-import { Suspense, lazy, useCallback, useState, type ReactNode } from 'react'
+import { Suspense, lazy, useCallback, useEffect, useState, type ReactNode } from 'react'
 import type { UnknownSpoolTray } from '../../api/unknownTrays'
 import { toast } from '../../lib/toast'
 import type { NeedsYouItem } from '../../lib/needsYou'
@@ -10,7 +10,8 @@ const UnknownSpoolDialog = lazy(async () => ({ default: (await import('./Unknown
  * #7143 — the one resolve dialog of "Needs you", owned by the shell (and the test harness), not by a
  * row: a row goes away when its tray does, and the open dialog must stay. It holds the tray as it
  * was when the person opened it. `gone` says that the list no longer has that tray (another client
- * linked it, or the slot was emptied).
+ * linked it, or the slot was emptied): only after the shell's items have held the tray once since it
+ * opened, because the shell's last poll may be older than the row. Opening asks for a fresh poll.
  */
 export function useUnknownSpoolDialog(items: readonly NeedsYouItem[] | null, refresh: () => void): {
   open: (tray: UnknownSpoolTray, onResolved?: () => void) => void
@@ -18,7 +19,12 @@ export function useUnknownSpoolDialog(items: readonly NeedsYouItem[] | null, ref
 } {
   const [opened, setOpened] = useState<{ tray: UnknownSpoolTray; after: (() => void) | undefined } | null>(null)
   const tray = opened?.tray ?? null
-  const gone = tray !== null && items !== null && !items.some((item) => item.key === `unknown_spool:${tray.id}`)
+  const listed = tray !== null && items !== null && items.some((item) => item.key === `unknown_spool:${tray.id}`)
+  const [heldFor, setHeldFor] = useState<string | null>(null)
+  useEffect(() => {
+    if (tray && listed) setHeldFor(tray.id)
+  }, [tray, listed])
+  const gone = tray !== null && items !== null && heldFor === tray.id && !listed
   const close = useCallback((open: boolean) => {
     if (!open) setOpened(null)
   }, [])
@@ -38,6 +44,13 @@ export function useUnknownSpoolDialog(items: readonly NeedsYouItem[] | null, ref
       />
     </Suspense>
   )
-  const open = useCallback((next: UnknownSpoolTray, after?: () => void) => setOpened({ tray: next, after }), [])
+  const open = useCallback(
+    (next: UnknownSpoolTray, after?: () => void) => {
+      setHeldFor(null)
+      setOpened({ tray: next, after })
+      refresh()
+    },
+    [refresh],
+  )
   return { open, dialog }
 }

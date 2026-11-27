@@ -113,16 +113,18 @@ describe('UnknownSpoolDialog (#7143)', () => {
     expect(onResolved).not.toHaveBeenCalled()
   })
 
-  it('says when the server is not ready to link, and when it has no such route', async () => {
-    server.use(http.post(RESOLVE, () => problem(503, 'resolve_pending', 'not served yet')))
+  it('says what the server answered, and where to link when it has no such route', async () => {
+    server.use(http.post(RESOLVE, () => problem(503, null, 'Temporal is not ready.')))
     const { dialog } = await show()
     await userEvent.type(within(dialog).getByLabelText('Spool code'), 'S-1')
     await userEvent.type(within(dialog).getByLabelText('Net weight (g)'), '500')
     await userEvent.click(within(dialog).getByRole('button', { name: 'Link spool' }))
-    expect(await within(dialog).findByRole('alert')).toHaveTextContent('ScadBuddy could not finish linking the spool. Try again in a moment.')
+    expect(await within(dialog).findByRole('alert')).toHaveTextContent('Temporal is not ready.')
     server.use(http.post(RESOLVE, () => problem(404, null, 'Not Found')))
     await userEvent.click(within(dialog).getByRole('button', { name: 'Link spool' }))
-    await waitFor(() => expect(within(dialog).getByRole('alert')).toHaveTextContent('This server cannot link spools yet.'))
+    await waitFor(() => expect(within(dialog).getByRole('alert')).toHaveTextContent('Filament, then Locations'))
+    expect(within(dialog).getByRole('alert')).toHaveTextContent('New spool from this tray')
+    expect(within(dialog).getByRole('link', { name: 'Open Locations' })).toHaveAttribute('href', '/filament/locations')
   })
 
   it('needs a weight', async () => {

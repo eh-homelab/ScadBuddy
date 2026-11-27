@@ -16,8 +16,9 @@ The shelf is every unarchived spool that no printer's latest report resolves as 
 An untagged tray's placed spool must also agree with what the tray reports (#6713,
 `tray_agreement`). The scheduled pull reconciles it (`reconcile_trays`): where it does not
 and Bambuddy assigns the tray a linked, unarchived spool that does, that spool moves in and
-the placed one moves to no place. Where neither agrees, nothing moves, and the tray view
-carries a ``mismatch`` (`view`).
+the placed one moves to no place. Where no spool holds the tray (D9, #7143), the assigned
+spool that agrees moves in and the tray's unknown row goes. Where neither agrees, nothing
+moves, and the tray view carries a ``mismatch`` (`view`).
 """
 
 from __future__ import annotations
@@ -209,6 +210,10 @@ class TrayNotFilledError(ValueError):
 
     def __init__(self) -> None:
         super().__init__("the printer's last report does not show that tray filled")
+
+
+class SpoolNotFoundError(LookupError):
+    """`link_on` found no live spool: it was archived or deleted since the caller read it."""
 
 
 class TrayTagClashError(ValueError):
@@ -725,7 +730,8 @@ class FilamentInventory:
         (`FilamentSpoolStore.tag_on`; #6261: every writer of bindings takes the tag
         first); the spools by id; then the place, ``FOR SHARE`` in
         `LocationStore.move_on`, after its spool, as `LocationStore.move` does. The
-        place's row is never locked ``FOR UPDATE`` here, which would invert that order."""
+        place's row is never locked ``FOR UPDATE`` here, which would invert that order. The
+        tray's unknown row (#7143) is deleted last (`clear_on`), under the same locks."""
         place = self.tray_place(printer_id, ams_id, tray_id, seen)
         defaults = self._spools.defaults()
         with self._pool.connection() as conn, conn.transaction():
@@ -814,7 +820,7 @@ class FilamentInventory:
         ).fetchall()
         spool = next((row for row in rows if row["id"] == spool_id), None)
         if spool is None or spool["archived_at"] is not None:
-            raise LookupError(f"no spool {spool_id}")
+            raise SpoolNotFoundError(f"no spool {spool_id}")
         for row in rows:
             if row["id"] != spool_id:
                 LocationStore.move_on(conn, row["id"], None, actor=actor)

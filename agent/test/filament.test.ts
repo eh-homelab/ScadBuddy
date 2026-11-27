@@ -1169,10 +1169,19 @@ describe('filament location tools', () => {
 
   it('refuses both or neither of spool_id and code', async () => {
     const base = { tray_id: ROW, net_weight_g: 980, seen_at: 'x' }
+    let posted = false
+    server.use(
+      http.post(`${BACKEND}/api/v1/filament/unknown-trays/${ROW}/resolve`, () => {
+        posted = true
+        return HttpResponse.json({})
+      }),
+    )
     for (const extra of [{}, { spool_id: ROW, code: 'S-12' }]) {
       const result = await runTool(tool('filament_unknown_tray_resolve'), { ...base, ...extra }, ctx())
       expect(result.isError).toBe(true)
+      expect(JSON.stringify(result.content)).toContain('give exactly one of spool_id and code')
     }
+    expect(posted).toBe(false)
   })
 
   it('lists the tree, adds a place and edits another', async () => {

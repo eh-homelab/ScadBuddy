@@ -91,7 +91,13 @@ def test_reconcile_places_an_assigned_spool_into_an_unknown_tray(pg_pool: PgPool
         (printer, HT_A, 0, None, grey)
     ]
     assert _cells(pg_pool, printer) == []
-    assert _get(pg_pool, grey).location_id is not None
+    place = _get(pg_pool, grey).location_id
+    assert place is not None
+    with pg_pool.connection() as conn:
+        cell = conn.execute(
+            "SELECT ams_id, tray_id FROM filament_locations WHERE id = %s", (place,)
+        ).fetchone()
+    assert cell is not None and (cell["ams_id"], cell["tray_id"]) == (HT_A, 0)
     ((actor, data),) = _moves(pg_pool, grey)
     assert actor == RECONCILE_ACTOR
     assert data["reason"] == "assigned_to_empty_tray"
@@ -119,6 +125,9 @@ def test_reconcile_evicts_a_spool_placed_with_a_stale_fingerprint(pg_pool: PgPoo
     grey = _spool(pg_pool, "PETG", GREY)
     _link_bb(pg_pool, grey, 121)
     inventory = FilamentInventory(pg_pool)
+    # The tray reports grey PETG. A later report would move the old spool off (capture's
+    # reconcile), so the stale link is made after it: the old spool's fingerprint is stale.
+    _report(pg_pool, printer, _tray("PETG", GREY))
     inventory.link(
         printer,
         HT_A,
@@ -127,8 +136,6 @@ def test_reconcile_evicts_a_spool_placed_with_a_stale_fingerprint(pg_pool: PgPoo
         SeenTray(ams_id=HT_A, tray_id=0, material="PLA", rgba=PINK),
         actor="ann",
     )
-    # The tray now reports grey PETG, so the old spool's fingerprint is stale.
-    _report(pg_pool, printer, _tray("PETG", GREY))
     seen = SeenTray(ams_id=HT_A, tray_id=0, material="PETG", rgba=GREY)
     with pg_pool.connection() as conn:
         note_on(conn, printer, seen, T0)

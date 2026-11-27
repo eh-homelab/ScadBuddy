@@ -61,6 +61,11 @@ export interface UnknownSpoolTrays {
   made_from_tags: TagMadeSpool[]
 }
 
+/** The list as `listUnknownTrays` gives it: `served` is false when the server has no unknown-spool area (a 404). */
+export interface UnknownSpoolList extends UnknownSpoolTrays {
+  served: boolean
+}
+
 /** The resolve body: one spool by id or by its code, the net weight, and the tray's `seen_at` as listed. */
 export type UnknownSpoolResolve =
   | { spool_id: string; net_weight_g: number; seen_at: string }
@@ -76,22 +81,28 @@ export interface UnknownTrayResolved {
 
 const PATH = '/filament/unknown-trays'
 
-/** The `code` a failed call's problem carries (`tray_changed`, `code_unknown`, `resolve_pending`, `tray_gone` …), or null. */
+/** The `code` a failed call's problem carries (`tray_changed`, `code_unknown`, `tray_gone` …), or null. */
 export function problemCode(cause: unknown): string | null {
   if (!(cause instanceof ApiError)) return null
   const code = (cause.problem as unknown as { code?: unknown }).code
   return typeof code === 'string' ? code : null
 }
 
-/** A 404 is an empty answer: Go has not been switched on for the area (plan G4). */
-export async function listUnknownTrays(): Promise<UnknownSpoolTrays> {
+/**
+ * A 404 is an empty list with `served: false`: Go has not been switched on for the area (plan G4).
+ * A caller that must say "no unknown trays" tells that apart from an empty list the server gave.
+ */
+export async function listUnknownTrays(): Promise<UnknownSpoolList> {
   try {
-    return await request<UnknownSpoolTrays>(PATH)
+    return { ...(await request<UnknownSpoolTrays>(PATH)), served: true }
   } catch (cause) {
-    if (cause instanceof ApiError && cause.status === 404) return { trays: [], made_from_tags: [] }
+    if (cause instanceof ApiError && cause.status === 404) return { trays: [], made_from_tags: [], served: false }
     throw cause
   }
 }
+
+/** A 404 with no problem `code`: the server has no such route (the unknown-spool area is not switched on). */
+export const routeMissing = (cause: unknown): boolean => cause instanceof ApiError && cause.status === 404 && problemCode(cause) === null
 
 export const resolveUnknownTray = (id: string, body: UnknownSpoolResolve): Promise<UnknownTrayResolved> =>
   request<UnknownTrayResolved>(`${PATH}/${encodeURIComponent(id)}/resolve`, { method: 'POST', body: JSON.stringify(body) })

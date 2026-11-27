@@ -124,20 +124,12 @@ def test_a_unit_the_report_omits_keeps_its_rows(pg_pool: PgPool) -> None:
     assert (0, 2) in rows
 
 
-def _with_bits(report: dict[str, Any]) -> dict[str, Any]:
-    """``report`` with presence bits, a change `trays_changed` sees (`tray_projection`)."""
-    report["ams"]["tray_exist_bits"] = "ffff"
-    return report
-
-
 def test_a_tray_that_flips_known_and_back_gets_a_new_row(pg_pool: PgPool) -> None:
     pid, _ = _printer(pg_pool)
     _advance(pg_pool, pid, _report(_tray(1)))
     (first,) = _rows(pg_pool, pid)
     _link(pg_pool, pid, _spool(pg_pool))
-    # `link` leaves the row to the next report (Task 3's `link_on` clears it); the bits
-    # make that report a tray change, so capture runs and finds the holder.
-    _advance(pg_pool, pid, _with_bits(_report(_tray(1))), T0 + timedelta(minutes=1))
+    # `link` deletes the row itself.
     assert _rows(pg_pool, pid) == []
     FilamentInventory(pg_pool).unlink(UUID(pid), 0, 1, actor="t")
     t2 = T0 + timedelta(minutes=2)

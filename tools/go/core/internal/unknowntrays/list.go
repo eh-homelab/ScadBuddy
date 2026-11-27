@@ -179,6 +179,7 @@ func readMade(ctx context.Context, tx pgx.Tx) ([]TagMade, error) {
 		JOIN filament_spools s ON s.id = e.spool_id
 		LEFT JOIN printers p ON p.id = e.printer_id
 		WHERE e.kind = 'created' AND e.data->>'by' = 'rfid_capture'
+		  AND s.archived_at IS NULL
 		  AND e.at > now() - $1::interval
 		ORDER BY e.at DESC, e.seq DESC
 		LIMIT $2`, madeWindow, madeLimit)

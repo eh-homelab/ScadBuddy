@@ -321,6 +321,8 @@ func newRouter(pool *pgxpool.Pool, next http.Handler, keys *seal.Keys, areas, au
 			more[name] = routes
 		}
 	}
+	// Naming both `unknown-trays` and `unknown-trays:read` mounts the area once.
+	unknownTraysMounted := false
 	for name := range strings.SplitSeq(areas, ",") {
 		switch name = strings.TrimSpace(name); name {
 		case "":
@@ -348,7 +350,14 @@ func newRouter(pool *pgxpool.Pool, next http.Handler, keys *seal.Keys, areas, au
 		case unknowntrays.Area, unknowntrays.Read:
 			// Its CRUD route is the print worker's, not the agent's (areaPackages mounts on
 			// the agent), so it has a case of its own.
-			router.Add(unknowntrays.Caller, unknowntrays.BlockRoutes(pool)...)
+			// The full area holds every route of the read-only one.
+			if name == unknowntrays.Read && strings.Contains(","+strings.ReplaceAll(areas, " ", "")+",", ","+unknowntrays.Area+",") {
+				break
+			}
+			if !unknownTraysMounted {
+				unknownTraysMounted = true
+				router.Add(unknowntrays.Caller, unknowntrays.BlockRoutes(pool)...)
+			}
 			mountPublic(name)
 		default:
 			if keys == nil && sealed[strings.TrimSuffix(name, ":read")] {

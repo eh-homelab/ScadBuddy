@@ -257,7 +257,7 @@ same way, `vite.config.ts`).
   `also_when_storefront_mails`. Mocks `src/mocks/features/orders/messages.ts`.
 
 - Unknown spools (#7143): `api/unknownTrays.ts` (the list, resolve and dismiss calls; a 404 on the
-  list is read as "no unknown trays", as the area may be off), `lib/unknownSpools.ts` (`useUnknownSpools`,
+  list is an empty list with `served: false`, as the area may be off; `UnknownSpoolButton` then says to link from the slot's page, `UnknownSpoolAreaOff`, and the Needs-you source and callouts stay quiet), `lib/unknownSpools.ts` (`useUnknownSpools`,
   read at once, every `ATTENTION_POLL_MS` (15 s), and when the tab shows again; `useUnknownTrayList`;
   `useTagMadeToasts`, one toast for each new spool in `made_from_tags`; `codeFromScan`, `prefillNetWeight`)
   and `components/filament/UnknownSpoolDialog.tsx` (pick a ranked candidate or type or scan a spool
@@ -268,7 +268,8 @@ same way, `vite.config.ts`).
   Filament → Locations (`LocationsTab.tsx`), a place's page (`LocationPage.tsx`) and the print dialog's
   verdict (`components/print/PrintVerdict.tsx`, from `PrintCheck.unknown_trays`). Mocks
   `src/mocks/features/filament/unknownTrays.ts`. Until the Go resolve route exists, the dialog's
-  "Link spool" gets a 404 and shows that the server has no such route.
+  "Link spool" gets a 404 and names the same path (Filament → Locations → the place). The print
+  verdict e2e is `e2e/unknown-spool.spec.ts` (the mock tray: `unknownTrays.ts` `UNKNOWN_TRAY_SEED_KEY`).
 - The print watcher (#4699 phase 2): Settings → Printing's "Print watcher"
   (`pages/settings/sections/print-watcher.tsx`; the list fields' form values are
   comma-joined, `values.ts` `sourcesValue`, `printerIdsValue`, `registryIdsValue`), and the Prints page's

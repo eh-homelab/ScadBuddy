@@ -2036,7 +2036,7 @@ const tools: Tool[] = [
       "`spool_id` and `code` (a label code such as `S-12`), `net_weight_g` (the spool's weight without its core, " +
       "more than 0) and `seen_at` (the row's `seen_at`, as listed, never changed). It answers `{id, number, code, " +
       'location_id}`. 409 `tray_changed`: the tray changed after the list; read the list again. 404 `code_unknown`: ' +
-      'no spool has that code. 409 `spool_archived`. 409 `no_ams_kind`. Use only what the user says: never pick a ' +
+      'no spool has that code. 409 `spool_archived`. 409 `no_ams_kind`. 404 `spool_missing`: the spool was archived or deleted while it linked. 409 `tag_clash`: the tray's tag is on another spool. Use only what the user says: never pick a ' +
       'candidate yourself. Writes ScadBuddy only.',
     input: z.object({
       tray_id: z.string().uuid(),
@@ -2050,7 +2050,7 @@ const tools: Tool[] = [
     routes: [],
     summarize: ({ tray_id, spool_id, code }) => `Link spool ${code ?? spool_id} to unknown tray ${tray_id}`,
     handler: async ({ tray_id, spool_id, code, net_weight_g, seen_at }, { backend }) => {
-      if ((spool_id === undefined) === (code === undefined)) throw new ToolError('give spool_id or code, not both')
+      if ((spool_id === undefined) === (code === undefined)) throw new ToolError('give exactly one of spool_id and code')
       const body = spool_id !== undefined ? { spool_id, net_weight_g, seen_at } : { code: code as string, net_weight_g, seen_at }
       return json(
         await ok(

@@ -40,7 +40,7 @@ class StubClient:
 
 def test_the_print_worker_waits_for_the_unknown_trays_area() -> None:
     assert "unknown-trays" in PRINT_CRUD_AREAS
-    assert CRUD_AREAS["print"][-1] == "unknown-trays"
+    assert "unknown-trays" in CRUD_AREAS["print"]
 
 
 async def test_remote_blocking_parses_the_golden_block() -> None:

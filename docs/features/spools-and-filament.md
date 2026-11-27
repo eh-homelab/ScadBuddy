@@ -226,7 +226,9 @@ A tray that a printer reports as loaded, with no spool in it, is an unknown spoo
   spool with no reading, use or load yet takes the net weight as its label weight (D4). The lock
   order stays in Python (G9). **The Go route that starts the activity is not built yet.** It waits
   for a Temporal client in Go (`tools/go/core/internal/temporalx`). Until then, the dialog's and
-  the tool's resolve get a 404, and no unknown tray can be resolved.
+  the tool's resolve get a 404 and cannot resolve a tray. The existing link paths still clear the
+  row: the print dialog's tray question, the place page's "New spool from this tray" and the
+  agent's `link_tray_spool`.
 - **The block.** A print to a printer that has a row is refused with 422 `unknown_spool_loaded`.
   `prepare_run` and the print check do it (`PrintCheck.unknown_trays` names the trays), and so does
   `lan_print`. On Bambuddy's path, a tray that the inventory read gives an SB spool is not counted
@@ -696,6 +698,11 @@ matches `[a-z][a-z0-9_]{0,63}`. Limits: 200 keys per entity, 2000 characters per
 
 ## Limits and known issues
 
+- Before core serves the area `unknown-trays`, the print block already holds (the API reads the rows
+  itself), but the list and resolve routes answer 404. The print dialog's button then says to link
+  the spool from the slot's page (Filament → Locations → the place: "New spool from this tray" or the
+  tray question). The Needs-you list and the Locations and place callouts stay empty, because they
+  cannot know the trays.
 - The filament epic is [#6260](https://github.com/eh-homelab/ScadBuddy/issues/6260).
 - K-profiles and slot commands need a printer linked over ScadBuddy's LAN link: a printer
   linked only through Bambuddy is refused 409 `not_lan_linked`

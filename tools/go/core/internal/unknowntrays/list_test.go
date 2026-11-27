@@ -6,6 +6,7 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/jackc/pgx/v5/pgxpool"
 
@@ -105,6 +106,8 @@ func TestListHasTheSpoolsMadeFromTags(t *testing.T) {
 	recent := newSpool(t, pool, "PLA", "#FF0000FF")
 	old := newSpool(t, pool, "PLA", "#00FF00FF")
 	other := newSpool(t, pool, "PLA", "#0000FFFF")
+	archived := newSpool(t, pool, "PLA", "#FFFF00FF")
+	exec(t, pool, `UPDATE filament_spools SET archived_at = now() WHERE id = $1`, archived)
 	event := func(spool, by, age string) {
 		exec(t, pool, `INSERT INTO filament_spool_events (spool_id, at, kind, printer_id, ams_id, tray_id, data)
 			VALUES ($1, now() - $2::interval, 'created', $3, 0, 1, jsonb_build_object('by', $4::text))`,
@@ -113,6 +116,7 @@ func TestListHasTheSpoolsMadeFromTags(t *testing.T) {
 	event(recent, "rfid_capture", "1 hour")
 	event(old, "rfid_capture", "25 hours")
 	event(other, "person", "1 hour")
+	event(archived, "rfid_capture", "1 hour")
 	got, err := List(context.Background(), pool)
 	if err != nil {
 		t.Fatal(err)
@@ -149,5 +153,18 @@ func TestDismissDeletesThenNotFound(t *testing.T) {
 	}
 	if n := text(t, pool, `SELECT count(*)::text FROM filament_unknown_trays WHERE id = $1`, keep); n != "1" {
 		t.Errorf("another row went too: %s", n)
+	}
+}
+
+func TestADatabaseOutOfReachIs503(t *testing.T) {
+	pool := testdb.New(t)
+	ctx, cancel := context.WithDeadline(context.Background(), time.Now().Add(-time.Second))
+	defer cancel()
+	routes := Public(pool, nil)[Area]
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/filament/unknown-trays", nil).WithContext(ctx)
+	rec := httptest.NewRecorder()
+	routes[0].Handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusServiceUnavailable {
+		t.Fatalf("%d %q", rec.Code, rec.Body)
 	}
 }

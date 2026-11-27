@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { ATTENTION_POLL_MS } from '../agent/attention'
-import { listUnknownTrays, type TagMadeSpool, type UnknownSpoolTray, type UnknownSpoolTrays } from '../api/unknownTrays'
+import { listUnknownTrays, type TagMadeSpool, type UnknownSpoolList, type UnknownSpoolTray } from '../api/unknownTrays'
 import { filamentLinks } from './filamentLinks'
 import { toast } from './toast'
 
@@ -32,8 +32,8 @@ export const unknownSpoolTitle = (tray: UnknownSpoolTray): string => `Unknown sp
  * view. A failed read keeps the last answer. A 404 (the area is not switched on) is an empty
  * answer, which `listUnknownTrays` gives.
  */
-export function useUnknownSpools(): { data: UnknownSpoolTrays | null; refresh: () => void } {
-  const [data, setData] = useState<UnknownSpoolTrays | null>(null)
+export function useUnknownSpools(): { data: UnknownSpoolList | null; refresh: () => void } {
+  const [data, setData] = useState<UnknownSpoolList | null>(null)
   const inflight = useRef(false)
   const again = useRef(false)
   const live = useRef(true)

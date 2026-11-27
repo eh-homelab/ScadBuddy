@@ -70,6 +70,6 @@ func Public(pool *pgxpool.Pool, _ *seal.Keys) map[string][]auth.Public {
 	return map[string][]auth.Public{Read: {list}, Area: {list, dismiss}}
 }
 
-func failed(w http.ResponseWriter, r *http.Request, _ error) {
-	httpx.WriteProblem(w, r, &httpx.Problem{Status: http.StatusInternalServerError, Detail: "InternalError"})
+func failed(w http.ResponseWriter, r *http.Request, err error) {
+	httpx.WriteProblem(w, r, crud.ProblemOf(r, err))
 }

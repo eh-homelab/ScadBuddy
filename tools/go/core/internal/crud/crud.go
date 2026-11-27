@@ -199,6 +199,10 @@ func (rt *Router) refusal(caller string, r *http.Request) (*auth.Service, *httpx
 	return nil, p
 }
 
+// ProblemOf is the answer to a handler's error, for a public route that shares the CRUD
+// routes' mapping and logging: a database out of reach is a 503, anything else a logged 500.
+func ProblemOf(r *http.Request, err error) *httpx.Problem { return problemOf(r, err) }
+
 // problemOf is the answer to a handler's error.
 func problemOf(r *http.Request, err error) *httpx.Problem {
 	var p *httpx.Problem

@@ -54,12 +54,12 @@ def _spool(pool: PgPool, label: int | None = 1000) -> tuple[UUID, int]:
     return made.id, made.number
 
 
-def _tray(pool: PgPool, printer: UUID, tray_id: int = 1, **keys: Any) -> UUID:
+def _tray(pool: PgPool, printer: UUID, tray_id: int = 1, *, at: datetime = T0, **keys: Any) -> UUID:
     seen = SeenTray(
         ams_id=0, tray_id=tray_id, material="PLA", colour="#FF0000FF", rgba="#FF0000FF", **keys
     )
     with pool.connection() as conn:
-        return note_on(conn, printer, seen, T0).id
+        return note_on(conn, printer, seen, at).id
 
 
 def _body(row: UUID, **fields: Any) -> ResolveInput:
@@ -140,6 +140,21 @@ def test_a_used_spool_keeps_its_label_weight(pg_pool: PgPool) -> None:
     assert _label(pg_pool, spool) == 1000
     weighed = [e["grams_after"] for e in _events(pg_pool, spool) if e["kind"] == "weighed"]
     assert weighed == [900, 700]
+
+
+def test_a_seen_at_with_microseconds_round_trips(pg_pool: PgPool) -> None:
+    printer = _printer(pg_pool)
+    spool, _ = _spool(pg_pool)
+    seen_at = T0.replace(microsecond=123456)
+    row = _tray(pg_pool, printer, at=seen_at)
+
+    out = resolve_unknown_tray(
+        _filament(pg_pool), pg_pool, _body(row, spool_id=spool, seen_at=seen_at)
+    )
+
+    assert out.id == spool
+    with pg_pool.connection() as conn:
+        assert rows_on(conn, printer) == []
 
 
 def test_a_stale_seen_at_is_tray_changed(pg_pool: PgPool) -> None:

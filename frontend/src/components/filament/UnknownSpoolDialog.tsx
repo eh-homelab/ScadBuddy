@@ -1,7 +1,7 @@
 import { useContext, useId, useState } from 'react'
 import { Link } from 'react-router'
 import { ApiError } from '../../api/client'
-import { dismissUnknownTray, problemCode, resolveUnknownTray, type UnknownSpoolCandidate, type UnknownSpoolTray, type UnknownTrayResolved } from '../../api/unknownTrays'
+import { dismissUnknownTray, problemCode, resolveUnknownTray, routeMissing, type UnknownSpoolCandidate, type UnknownSpoolTray, type UnknownTrayResolved } from '../../api/unknownTrays'
 import { filamentLinks } from '../../lib/filamentLinks'
 import { NeedsYouContext } from '../../lib/needsYou'
 import { codeFromScan, prefillNetWeight, unknownSpoolTitle } from '../../lib/unknownSpools'
@@ -11,6 +11,7 @@ import { Input } from '@/components/ui/input'
 import { Label } from '@/components/ui/label'
 import { RadioGroup, RadioGroupItem } from '@/components/ui/radio-group'
 import { RgbaSwatch } from './RgbaSwatch'
+import { UnknownSpoolAreaOff } from './UnknownSpoolAreaOff'
 
 const DECIMAL = /^\d+(\.\d+)?$/
 
@@ -18,9 +19,6 @@ function failureText(cause: unknown, code: string): string {
   const kind = problemCode(cause)
   if (kind === 'tray_changed') return 'This tray changed since the dialog opened. Close it and open it again.'
   if (kind === 'code_unknown') return `No spool has the code ${code}.`
-  if (kind === 'resolve_pending') return 'ScadBuddy could not finish linking the spool. Try again in a moment.'
-  // A 404 with no code: the server has no such route (the unknown-spool area is not switched on).
-  if (cause instanceof ApiError && cause.status === 404 && kind === null) return 'This server cannot link spools yet.'
   if (cause instanceof ApiError) return cause.detail
   return 'The server could not be reached. Try again.'
 }
@@ -82,6 +80,7 @@ function UnknownSpoolForm({
   const [picked, setPicked] = useState<string | null>(null)
   const [weight, setWeight] = useState('')
   const [error, setError] = useState<string | null>(null)
+  const [off, setOff] = useState(false)
   const ids = useId()
 
   const typed = code.trim()
@@ -110,13 +109,15 @@ function UnknownSpoolForm({
     if (!ready) return
     setBusy(true)
     setError(null)
+    setOff(false)
     // `seen_at` is the string the list gave, never a `Date` (a round trip loses the microseconds).
     const common = { net_weight_g: Number(trimmedWeight), seen_at: tray.seen_at }
     try {
       const resolved = await resolveUnknownTray(tray.id, typed !== '' ? { code: typed, ...common } : { spool_id: picked!, ...common })
       onResolved(resolved)
     } catch (cause) {
-      setError(failureText(cause, typed))
+      setOff(routeMissing(cause))
+      setError(routeMissing(cause) ? null : failureText(cause, typed))
       if (problemCode(cause) === 'tray_changed') ctx?.refresh()
     } finally {
       setBusy(false)
@@ -221,6 +222,11 @@ function UnknownSpoolForm({
         {gone && (
           <p role="status" className="text-[13px] text-warn">
             This tray is not waiting any more. Someone linked a spool to it, or the slot was emptied. Close this dialog.
+          </p>
+        )}
+        {off && (
+          <p className="text-[13px]">
+            <UnknownSpoolAreaOff placeId={tray.place_id} role="alert" />
           </p>
         )}
         {error && (

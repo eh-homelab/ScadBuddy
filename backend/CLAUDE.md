@@ -1154,7 +1154,9 @@ only the sleeps move; a budget on the real clock fails on a slow runner (#6252).
   dismiss, and the print worker's block read) are `tools/go/core/internal/unknowntrays`
   (`tools/go/core/README.md`). The Go resolve route is not built yet: it waits on a Temporal client
   in Go (`internal/temporalx`). Until it exists, the dialog's and the tool's resolve get a 404 and
-  nothing links a spool. The block (D9): `print_run.refuse_unknown_spools`, called by `prepare_run`
+  cannot resolve a tray. The existing link paths still clear the row (`link_on`: the print
+  dialog's tray question, the place page's "New spool from this tray", the agent's
+  `link_tray_spool`). The block (D9): `print_run.refuse_unknown_spools`, called by `prepare_run`
   (and so by the check, whose `PrintCheck.unknown_trays` lists the trays) refuses a run with 422
   `unknown_spool_loaded`; on Bambuddy's path it drops a tray whose slot the lazy `read_inventory`
   gives an SB spool. `printers/print_activities.py` `_refuse_unknown` does the same for `lan_print`.
@@ -1164,7 +1166,8 @@ only the sleeps move; a budget on the real clock fails on a slow runner (#6252).
   (`CrudUnavailableError`, G3); `lan_print` goes on when the read fails for any reason. So the
   worker-side block works only once `SCADBUDDY_CORE_AREAS` names `unknown-trays`. A print started
   in Bambuddy or on the printer is not blocked. Tests: `tests/filament/` (capture, rows, resolve),
-  `tests/bambuddy/` (the block).
+  `tests/printers/test_unknown_spool_block.py` and `tests/crud/test_crud_unknown_trays.py`
+  (the block).
 - `backend/scadbuddy/profile_fetch/` — the 3DFP profile-fetch worker and its browser service
   (#6625, #6780, plan `docs/superpowers/plans/2026-11-18-profile-fetch-worker.md`): `python -m
   scadbuddy.profile_fetch` (`worker.py`) polls the queue `profile-fetch`, serves `/healthz` and

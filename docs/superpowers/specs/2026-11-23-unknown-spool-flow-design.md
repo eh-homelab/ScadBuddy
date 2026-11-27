@@ -217,8 +217,10 @@ section and the text above differ, this section is what the code does.
   (G5). It answers `{id, number, code, location_id}`, publishes no event (G8), and keeps the lock
   order in Python (G9). The label weight changes only for a first weight (D4). There is no Go spool
   writer. **The Go resolve route is not built yet.** It waits for a Temporal client in Go
-  (`internal/temporalx`). Until then, the dialog's and the tool's resolve get a 404, and no unknown
-  tray can be resolved. The rest of the flow works.
+  (`internal/temporalx`). Until then, the dialog's and the tool's resolve get a 404 and cannot resolve a
+  tray. The existing link paths still clear the row (`link_on`: the print dialog's tray question,
+  the place page's "New spool from this tray", the agent's `link_tray_spool`). The rest of the
+  flow works.
 - **Block.** `prepare_run` (and so the check, `PrintCheck.unknown_trays`) and `lan_print` refuse a
   run with 422 `unknown_spool_loaded`. The print worker reads a CRUD route of caller `print`
   (area `unknown-trays`). A missing route lets the run go on (G3), so the worker-side block works only

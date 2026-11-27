@@ -26,6 +26,17 @@ describe('PrintVerdict · unknown spool (#7143)', () => {
     expect(await screen.findByRole('dialog', { name: 'Unknown spool in 3DP-31B-598 AMS-A slot 2' })).toBeInTheDocument()
   })
 
+  it('offers the link when the block is the only thing the check found', async () => {
+    const tray = seedUnknownTray()
+    const verdict = { errors: [], warnings: [], unknown_trays: [{ id: tray.id, slot: 'AMS-A slot 2' }] } as unknown as PrintCheck
+    renderPage(
+      <NeedsYouHarness>
+        <PrintVerdict verdict={verdict} onRetry={vi.fn()} />
+      </NeedsYouHarness>,
+    )
+    expect(await screen.findByRole('button', { name: 'Link the spool in AMS-A slot 2' })).toBeInTheDocument()
+  })
+
   it('checks again once the spool is linked', async () => {
     const tray = seedUnknownTray()
     const onRetry = vi.fn()

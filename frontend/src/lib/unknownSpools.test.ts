@@ -68,7 +68,11 @@ describe('unknown spools (#7143)', () => {
 
   it('reads a 404 from the list route as an empty answer', async () => {
     server.use(http.get('/api/v1/filament/unknown-trays', () => HttpResponse.json({ title: 'Not Found', status: 404, detail: 'not found' }, { status: 404 })))
-    expect(await listUnknownTrays()).toEqual({ trays: [], made_from_tags: [] })
+    expect(await listUnknownTrays()).toEqual({ trays: [], made_from_tags: [], served: false })
+  })
+
+  it('tells an empty list the server gave from an area that is off', async () => {
+    expect((await listUnknownTrays()).served).toBe(true)
   })
 
   it('reads the trays at once, and keeps the last answer when a read fails', async () => {
@@ -76,8 +80,18 @@ describe('unknown spools (#7143)', () => {
     const { result } = renderHook(() => useUnknownSpools())
     await waitFor(() => expect(result.current.data?.trays).toHaveLength(1))
     server.use(http.get('/api/v1/filament/unknown-trays', () => HttpResponse.json({ detail: 'down' }, { status: 500 })))
+    const failed = new Promise<void>((resolve) => {
+      const done = ({ response }: { response: Response }) => {
+        if (response.status !== 500) return
+        server.events.removeListener('response:mocked', done)
+        resolve()
+      }
+      server.events.on('response:mocked', done)
+    })
     await act(async () => result.current.refresh())
-    await new Promise((resolve) => setTimeout(resolve, 50))
+    await failed
+    // Let the hook handle the answer before the check.
+    await act(async () => {})
     expect(result.current.data?.trays).toHaveLength(1)
   })
 

@@ -268,7 +268,7 @@ Core's area `unknown-trays` (`tools/go/core/internal/unknowntrays`; core serves 
 `SCADBUDDY_CORE_AREAS` names it) has these routes. `GET /api/v1/filament/unknown-trays` lists the
 trays that a printer reports as loaded and no spool holds, with ranked candidates, and
 `POST …/{id}/dismiss` deletes a row. Both are public routes behind the person-auth gate
-(`internal/auth`). The third is the print worker's block read, `GET
+(`internal/auth`). The print worker's block read is `GET
 …/crud/print/filament/printers/{printer_id}/unknown-trays`, a CRUD route of caller `print`. Go
 writes no spool. The resolve write is Python's Temporal activity `filament_resolve_unknown_tray`
 (`backend/scadbuddy/filament/unknown_resolve.py`) on the `library` queue, which the API process

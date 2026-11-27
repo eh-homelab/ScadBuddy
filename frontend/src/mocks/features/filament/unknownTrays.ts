@@ -44,6 +44,20 @@ function seededTray(): UnknownSpoolTray {
  */
 let trays: UnknownSpoolTray[] = []
 
+/**
+ * A Playwright test puts the tray before the page loads: `"1"` under this `sessionStorage` key,
+ * read once at load (as `pendingInput.ts` does).
+ */
+export const UNKNOWN_TRAY_SEED_KEY = 'scadbuddy.mock.unknown-tray'
+try {
+  if (typeof sessionStorage !== 'undefined' && sessionStorage.getItem(UNKNOWN_TRAY_SEED_KEY) === '1') trays = [seededTray()]
+} catch {
+  // Nothing seeded.
+}
+
+/** The trays the print block names, as the print check's `unknown_trays` gives them. */
+export const unknownTrayRefs = (): { id: string; slot: string }[] => trays.map(({ id, slot }) => ({ id, slot }))
+
 export function reset() {
   trays = []
 }
