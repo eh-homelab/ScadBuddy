@@ -55,6 +55,7 @@ describe('inventory tools', () => {
         ],
       ],
       inventory_item_list: ['read', ['GET /api/v1/inventory/items']],
+      inventory_operation_get: ['read', ['GET /api/v1/inventory/operations/{operation_id}']],
       inventory_item_get: [
         'read',
         [
@@ -113,7 +114,8 @@ describe('inventory tools', () => {
     expect(tool('inventory_item_list').description).toContain('until inventory_lot_recost')
     expect(tool('inventory_lot_recost').description).toMatch(/past order/)
     expect(tool('inventory_unit_status').description).toContain('`kind:ref`')
-    for (const t of ALL_TOOLS.filter((x) => x.name.startsWith('inventory_'))) expect(t.description, t.name).toContain('ui_path')
+    // An operation's answer is a status record, with no item or lot page of its own.
+    for (const t of ALL_TOOLS.filter((x) => x.name.startsWith('inventory_') && x.name !== 'inventory_operation_get')) expect(t.description, t.name).toContain('ui_path')
   })
 
   it('adds an item with its properties in the same request, and answers it with its page (R-K1-33)', async () => {
@@ -248,6 +250,20 @@ describe('inventory tools', () => {
     })
     expect(answer).not.toHaveProperty('units')
     expect((answer as { moves: Record<string, unknown>[] }).moves[0]).not.toHaveProperty('ui_path')
+  })
+
+  it('reads a write that answered 202 by its operation id, in each of its three states', async () => {
+    const OP = 'req:7c1a0000-0000-4000-8000-000000000001'
+    const answers = [
+      { id: OP, status: 'running' },
+      { id: OP, status: 'succeeded', result: { id: ITEM, name: 'M3 nut' } },
+      { id: OP, status: 'failed', error: { status: 409, title: 'item_exists' } },
+    ]
+    server.use(http.get(`${INV}/operations/${encodeURIComponent(OP)}`, () => HttpResponse.json(answers.shift())))
+    const read = async () => firstText(await runTool(tool('inventory_operation_get'), { operation_id: OP }, ctx()))
+    expect(await read()).toMatchObject({ status: 'running' })
+    expect(await read()).toMatchObject({ status: 'succeeded', result: { id: ITEM } })
+    expect(await read()).toMatchObject({ status: 'failed', error: { title: 'item_exists' } })
   })
 
   it("reads a unit item's units, and nothing of stock for a kind that is not counted", async () => {

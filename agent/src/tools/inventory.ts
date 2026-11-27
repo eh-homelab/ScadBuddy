@@ -267,6 +267,27 @@ export const inventoryTools = [
     },
   }),
   defineTool({
+    name: 'inventory_operation_get',
+    label: 'Read an inventory write that is still working',
+    description:
+      'Reads an inventory write that answered 202 "still working", by the `id` that answer gave. It says `running`, ' +
+      '`succeeded` with the route\'s answer as `result`, or `failed` with the problem as `error`. Call it instead of ' +
+      'repeating the write.',
+    input: z.object({
+      operation_id: z.string().min(1).max(100).describe('The operation id the 202 answer gave'),
+    }),
+    risk: 'read',
+    source: SOURCE,
+    routes: ['GET /api/v1/inventory/operations/{operation_id}'],
+    handler: async ({ operation_id }, { backend }) =>
+      json(
+        await ok(
+          backend.GET('/api/v1/inventory/operations/{operation_id}', { params: { path: { operation_id } } }),
+          `read inventory operation ${operation_id}`,
+        ),
+      ),
+  }),
+  defineTool({
     name: 'inventory_item_upsert',
     label: 'Add or edit an inventory item',
     description:

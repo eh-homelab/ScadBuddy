@@ -133,6 +133,10 @@ export const NOT_A_TOOL: readonly { operation: Operation; reason: string }[] = [
     reason: "The shop edits listings on the Storefront page (#5282, spec 2026-11-02 §5.3); the assistant drafts and publishes through storefront_listing_draft and storefront_listing_publish (#6131).",
   },
   {
+    operation: 'GET /api/v1/inventory/kinds/{kind_id}/schema/history',
+    reason: "A kind's schema history is an audit view for people, on the kind's page (#6949, K1); the assistant reads the current schema with inventory_kind_list.",
+  },
+  {
     operation: 'GET /api/v1/parts/rules/{slug}',
     reason: "The model rules in Inventory, under the Hardware and AMS part kinds (#5543, #7067, job cost spec §11): a new item takes its rule, and order_item_parts_set changes an item's parts.",
   },
