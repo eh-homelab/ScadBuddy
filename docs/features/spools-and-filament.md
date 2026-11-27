@@ -332,15 +332,18 @@ spool that was not empty, so the archive adds its one shopping item. The event i
 plate, and it adds no shopping item of its own. The code is in
 `backend/scadbuddy/filament/spools.py` (`archive_on`).
 
-A spool's home is the last dry box it sat in (#7167). When a spool whose home is still a live
-dry box comes out of its tray, capture puts it in no place and sets `home_asked_at`: ScadBuddy
-never assumes which spool goes into the box, the unloaded spool included.
+A spool's home is the last dry box it sat in (#7167). When a spool that went into its tray
+from a place that is a live dry box now comes out of the tray, capture puts it in no place,
+makes that box its home and sets `home_asked_at`: ScadBuddy never assumes which spool goes into
+the box, the unloaded spool included. A spool that went into the tray from a shelf goes back to
+the shelf with no prompt, and its home stays the same.
 `GET /filament/spools?awaiting_home=true` lists the asked spools. The person names the spool
 (a tag scan, a code or a pick by hand), and `POST /filament/spools/{id}/move` with `answers`
 (the unloaded spool) puts it in. With `if_occupied: replace`, the box's own spool is archived
 at 0 g first and its grams are booked as non-print waste (`cause` `replaced`), in one
-transaction. Any move, an archive or a reload clears `home_asked_at`. A spool whose home was
-archived or is no box now goes back where it came from, as before. The code is in
+transaction. A box's spool that left the box before the replace locked it is not archived.
+Any move, an archive or a reload clears `home_asked_at`. A spool whose box was archived goes to
+no place, and one whose box is no box now goes back to it, as before. The code is in
 `backend/scadbuddy/filament/homes.py` and `capture.py` (`_put_back`).
 
 Respooled offers "Archive and continue as a new spool": the copy flow opens with the final

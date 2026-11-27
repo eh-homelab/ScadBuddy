@@ -179,3 +179,15 @@ def test_an_unknown_if_occupied_is_a_422(client: TestClient, value: str) -> None
     )
     assert refused.status_code == 422, refused.text
     assert client.get(f"{SPOOLS}/{spool['id']}").json()["location_id"] is None
+
+
+def test_an_answer_that_names_no_spool_is_a_404_naming_it(client: TestClient) -> None:
+    box = _box(client, "Box Q")
+    spool = _spool(client)
+    missing = "00000000-0000-4000-8000-00000000717a"
+    refused = client.post(
+        f"{SPOOLS}/{spool['id']}/move", json={"location_id": box["id"], "answers": missing}
+    )
+    assert refused.status_code == 404, refused.text
+    assert missing in refused.json()["detail"]
+    assert client.get(f"{SPOOLS}/{spool['id']}").json()["location_id"] is None

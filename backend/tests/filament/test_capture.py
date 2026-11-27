@@ -20,6 +20,8 @@ from scadbuddy.filament.locations import LocationStore
 from scadbuddy.filament.models import (
     LocationCreate,
     LocationKind,
+    LocationKindCreate,
+    LocationKindPatch,
     LocationPatch,
     Material,
     SpoolCreate,
@@ -237,6 +239,52 @@ def test_unload_with_an_archived_home_goes_back_as_today(pg_pool: PgPool) -> Non
     for one in (spool, other):
         assert _row(pg_pool, one)["location_id"] == shelf
         assert _asked(pg_pool, one) is None
+
+
+def _home(pool: PgPool, spool: UUID) -> UUID | None:
+    with pool.connection() as conn:
+        row = conn.execute(
+            "SELECT home_location_id FROM filament_spools WHERE id = %s", (spool,)
+        ).fetchone()
+    assert row is not None
+    home: UUID | None = row["home_location_id"]
+    return home
+
+
+def test_unload_of_a_spool_taken_from_a_shelf_goes_back_to_the_shelf(pg_pool: PgPool) -> None:
+    """#7167 ruling: home box H, then a shelf, then the AMS. The person took it from the
+    shelf, so it goes back there with no prompt, and its home stays H."""
+    spool = _spool(pg_pool, tray_uuid=U1)
+    pid, _ = _printer(pg_pool)
+    box, shelf = _box(pg_pool), _shelf(pg_pool)
+    LocationStore(pg_pool).move(spool, box, actor="t")
+    LocationStore(pg_pool).move(spool, shelf, actor="t")
+    _reconcile(pg_pool, pid, _report(_tray(1, U1)))
+    _reconcile(pg_pool, pid, _report({"id": "1"}), T0 + timedelta(minutes=1))
+    assert _row(pg_pool, spool)["location_id"] == shelf
+    assert _asked(pg_pool, spool) is None
+    assert _home(pg_pool, spool) == box
+
+
+def test_unload_to_a_place_that_became_a_box_parks_and_asks(pg_pool: PgPool) -> None:
+    """#7167 review Minor 1: the place the spool came from became an empty dry box while
+    it was out (a kind flip). The spool is never put in it; it is asked about that box."""
+    spool = _spool(pg_pool, tray_uuid=U1)
+    pid, _ = _printer(pg_pool)
+    catalog = CatalogStore(pg_pool)
+    made = catalog.create("location-kinds", LocationKindCreate(name="Cabinet"))
+    assert isinstance(made, LocationKind)
+    cabinet = (
+        LocationStore(pg_pool).create(LocationCreate(name="Cab", kind_id=made.id, capacity=1)).id
+    )
+    LocationStore(pg_pool).move(spool, cabinet, actor="t")
+    _reconcile(pg_pool, pid, _report(_tray(1, U1)))
+    catalog.update("location-kinds", made.id, LocationKindPatch(dry_storage=True))
+    seen = T0 + timedelta(minutes=1)
+    _reconcile(pg_pool, pid, _report({"id": "1"}), seen)
+    assert _row(pg_pool, spool)["location_id"] is None
+    assert _asked(pg_pool, spool) == seen
+    assert _home(pg_pool, spool) == cabinet
 
 
 def test_resent_report_asks_once(pg_pool: PgPool) -> None:

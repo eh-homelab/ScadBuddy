@@ -1250,8 +1250,9 @@ def _no_spool(spool_id: UUID) -> ApiError:
         "either weight is unknown). `needs_type=true` keeps only spools with no type yet, "
         "`false` only typed ones. Archived spools only with `include_archived`. "
         "`awaiting_home=true` keeps only the spools asked which spool goes into their home "
-        "dry box (#7167: `home_asked_at` set when a spool whose home is a live dry box came "
-        "out of its tray, no place since, and the home still a live dry box); answer one "
+        "dry box (#7167: `home_asked_at` set when a spool that went into its tray from a "
+        "live dry box came out of it, no place since, and the home still a live dry box); "
+        "answer one "
         "with `POST /filament/spools/{id}/move` and `answers`. `false` keeps the others."
     ),
 )

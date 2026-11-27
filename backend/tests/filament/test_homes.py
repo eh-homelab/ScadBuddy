@@ -17,6 +17,7 @@ from scadbuddy.filament.dry_box import BoxFullError
 from scadbuddy.filament.locations import LocationStore
 from scadbuddy.filament.spools import FilamentSpoolStore
 from tests.conftest import PgPool
+from tests.filament.lock_support import waits_for
 
 pytestmark = pytest.mark.requires_postgres
 
@@ -215,3 +216,22 @@ def test_awaiting_home_lists_only_asked_spools_with_a_live_box(pg_pool: PgPool) 
     assert [s.id for s in store.list(awaiting_home=True)] == [asked]
     rest = {s.id for s in store.list(awaiting_home=False)}
     assert asked not in rest and {plain, orphan} <= rest
+
+
+def test_replace_after_the_occupant_moved_out_archives_nothing(pg_pool: PgPool) -> None:
+    """#7167 review (Important): one transaction moves the box's spool to a shelf and has
+    not committed; the replace reads it in the box, waits on its row, and runs after the
+    commit. The spool left, so the replace is a plain move into the empty box."""
+    box, shelf = _place(pg_pool, "Box M", "Dry box", 1), _place(pg_pool, "Shelf M", "Shelf", None)
+    old, new = _spool(pg_pool, 80), _spool(pg_pool)
+    LocationStore(pg_pool).move(old, box, actor="ann")
+
+    def move_out(conn: Any) -> None:
+        LocationStore.move_on(conn, old, shelf, actor="bob")
+
+    waits_for(pg_pool, move_out, lambda: _move(pg_pool, new, box, "replace"))
+    kept = _row(pg_pool, old)
+    assert kept["archived_at"] is None and kept["grams_left"] == 80
+    assert kept["location_id"] == shelf
+    assert _kinds(pg_pool, old, "non_print_waste") == []
+    assert _row(pg_pool, new)["location_id"] == box
