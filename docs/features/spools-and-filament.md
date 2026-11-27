@@ -646,6 +646,25 @@ matches `[a-z][a-z0-9_]{0,63}`. Limits: 200 keys per entity, 2000 characters per
   `png_too_large`: choose PDF, a lower dpi or fewer labels. The labels page has the choice
   beside the template: PDF or PNG, and for PNG the dpi (203, 300 or 600). It saves each change
   in `filament_label_output`, and "Download" names the file by the type of the answer.
+- Labels print to a CUPS queue (#7170, design
+  `docs/superpowers/specs/2026-11-27-cups-label-printing-design.md` R7 and R9). The labels page
+  has a "Label printer" row beside "Print" and "Download". It reads the queues of the CUPS
+  server in Settings, Filament, "Label print server" (`filament_label_server_url`; the
+  cluster's `http://cups.cups.svc:8631` by default; only a person changes it) through core's
+  `GET /api/v1/label-printing/queues`. It offers a queue only when CUPS gives the queue's size
+  and that size is the PDF's page within 1 mm each way, in the same orientation. The page is
+  the label for a roll with a one-label template, else the sheet's page (Letter or A4), so a
+  sheet never goes to a 2 x 1 in queue. It picks the last queue used
+  (`filament_label_queue`) when that queue fits, else the only queue that fits, else none. It
+  shows the queue's state and its CUPS message, such as "1.02 in labels are loaded; …". A
+  Zebra ZPL queue also gets the print mode, the darkness and the speed
+  (`filament_label_job_options`; "Printer default" sends nothing). "Print to label printer"
+  asks for the labels' PDF, then sends it with
+  `POST /api/v1/label-printing/queues/{queue}/jobs`, and says "Sent to" with the queue's name and the job's id
+  when CUPS accepts the job. A queue that is gone (`label_queue_unknown`) reads the list again.
+  When the server does not answer, the row says so, and "Print" and "Download" still work
+  (`frontend/src/pages/filament/LabelQueuePrint.tsx`, `frontend/src/api/labelPrinting.ts`;
+  mocks `frontend/src/mocks/features/labelPrinting.ts`).
 - The fields a spool label prints (#7216, R-7216-9 and R-7216-10): the body's `fields`, else
   the setting `filament_label_output`'s, from `number`, `material` (with its subtype),
   `colour` (its name), `hex` (the effective colour as `#RRGGBB`), `brand`, `location` (its

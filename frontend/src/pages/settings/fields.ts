@@ -220,6 +220,12 @@ export const RUNTIME_FIELDS: readonly FieldSpec[] = [
     section: 'filament',
     kind: 'url',
   },
+  // #7170 — the CUPS server the Labels page prints to. Only a person's session changes it.
+  {
+    name: 'filament_label_server_url',
+    section: 'filament',
+    kind: 'url',
+  },
   {
     name: 'filament_burn_window_days',
     section: 'filament',

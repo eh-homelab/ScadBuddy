@@ -698,7 +698,7 @@ describe('the labels page', () => {
     expect(screen.queryAllByTestId('label')).toHaveLength(0)
     expect(screen.queryAllByTestId('print-label')).toHaveLength(0)
     expect(screen.queryByText(/Labels open/)).toBeNull()
-    expect(screen.getByRole('button', { name: /Print/ })).toBeDisabled()
+    expect(screen.getByRole('button', { name: 'Print' })).toBeDisabled()
   })
 
   it('names the printers with no report', async () => {
@@ -747,7 +747,7 @@ describe('the labels page', () => {
     expect(await screen.findByText('Print at most 100 labels at a time')).toBeInTheDocument()
     expect(screen.queryAllByTestId('label')).toHaveLength(0)
     expect(screen.queryByText('No printers.')).toBeNull()
-    expect(screen.getByRole('button', { name: /Print/ })).toBeDisabled()
+    expect(screen.getByRole('button', { name: 'Print' })).toBeDisabled()
   })
 
   it('goes back to the Locations tab from a place label', () => {

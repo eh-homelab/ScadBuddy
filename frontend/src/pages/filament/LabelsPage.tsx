@@ -31,6 +31,8 @@ import { Select, SelectContent, SelectGroup, SelectItem, SelectLabel, SelectSepa
 import { downloadBlob } from '../../lib/embed'
 import { useSettingSaver } from '../../lib/useSettingSaver'
 import { filamentLinks } from '../../lib/filamentLinks'
+import { pageSizeOf } from '../../api/labelPrinting'
+import { LabelQueuePrint } from './LabelQueuePrint'
 
 type Layout = 'roll' | 'sheet'
 const LAYOUT_KEY = 'scadbuddy.labels.layout'
@@ -577,6 +579,17 @@ export function LabelsPage() {
   // A place label's PDF needs an address from Settings; a spool label needs none.
   const pdfNeedsBase = placeLabels.length > 0 && readyPlaces !== null && !readyPlaces.hasBase
 
+  /** The labels file's request: what "Download" sends, and, as a PDF, what "Print to label printer" sends (#7170). */
+  const fileBody = {
+    spool_ids: labels.map(({ spool }) => spool.id),
+    location_ids: placeLabels.map((one) => one.id),
+    template: cleanChoice(choice),
+    layout,
+    format: output.format,
+    dpi: output.dpi,
+    fields: [...fields],
+  }
+
   /**
    * #7157, #7216 — the server's file of the labels drawn, at the template and output shown; saved through
    * `downloadBlob`, which works inside Bambuddy's frame. The name follows the type of the answer.
@@ -584,18 +597,9 @@ export function LabelsPage() {
   const download = () => {
     setPdfProblem(null)
     setPdfBusy(true)
-    const body = {
-      spool_ids: labels.map(({ spool }) => spool.id),
-      location_ids: placeLabels.map((one) => one.id),
-      template: cleanChoice(choice),
-      layout,
-      format: output.format,
-      dpi: output.dpi,
-      fields: [...fields],
-    }
     let file: Blob | null = null
     downloadBlob(
-      async () => (file = await labelsFile(body)),
+      async () => (file = await labelsFile(fileBody)),
       () => (file ? fileName(file) : 'labels.pdf'),
     )
       .catch((cause: unknown) => setPdfProblem(cause instanceof Error ? cause.message : 'The labels file could not be made. Try again.'))
@@ -687,6 +691,7 @@ export function LabelsPage() {
           <Button type="button" size="sm" disabled={count === 0 || printing} onClick={() => void print()}>
             <PrinterIcon /> Print
           </Button>
+          <LabelQueuePrint body={fileBody} page={pageSizeOf(cleanChoice(choice), layout, templates)} disabled={count === 0 || pdfNeedsBase} />
           {pdfNeedsBase && (
             <p id="labels-pdf-needs-base" className="basis-full text-right text-[13px] text-muted-foreground">
               A download of place labels needs a label address. Set one in Settings, or an https public URL.
