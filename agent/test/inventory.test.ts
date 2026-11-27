@@ -369,6 +369,31 @@ describe('inventory tools', () => {
     ).rejects.toThrow('archived')
   })
 
+  it("sends each write of a call its own Idempotency-Key, and a retried call's the same (#6949 K1)", async () => {
+    const keys: string[] = []
+    const kind = (request: Request) => {
+      keys.push(`${new URL(request.url).pathname} ${request.headers.get('Idempotency-Key')}`)
+      return HttpResponse.json({ id: 'bearing' })
+    }
+    server.use(
+      http.patch(`${INV}/kinds/bearing`, ({ request }) => kind(request)),
+      http.post(`${INV}/kinds/bearing/archive`, ({ request }) => kind(request)),
+      http.post(`${INV}/items/${ITEM}/use`, ({ request }) => kind(request)),
+    )
+    const call = { ...ctx(), callKey: 'session-1:tool-1' }
+    const edit = { kind_id: 'bearing', fields: { parent_id: null }, archived: true }
+    await runTool(tool('inventory_kind_upsert'), edit, call)
+    await runTool(tool('inventory_kind_upsert'), edit, call)
+    await runTool(tool('inventory_move_use'), { item_id: ITEM, qty: '1' }, { ...ctx(), callKey: 'session-1:tool-2' })
+    const [patch, archive, again, archiveAgain, use] = keys
+    expect(patch).toMatch(/^\/api\/v1\/inventory\/kinds\/bearing [0-9a-f]{64}:edit$/)
+    expect(archive).toMatch(/^\/api\/v1\/inventory\/kinds\/bearing\/archive [0-9a-f]{64}:archive$/)
+    expect(patch!.split(' ')[1]!.split(':')[0]).toBe(archive!.split(' ')[1]!.split(':')[0])
+    expect([again, archiveAgain]).toEqual([patch, archive])
+    expect(use).toMatch(/ [0-9a-f]{64}:use$/)
+    expect(use!.split(' ')[1]!.split(':')[0]).not.toBe(patch!.split(' ')[1]!.split(':')[0])
+  })
+
   it('archives and restores an item', async () => {
     const calls: string[] = []
     server.use(
