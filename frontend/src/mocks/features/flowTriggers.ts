@@ -25,7 +25,8 @@ function grantSpec(): FlowGrantSpec {
   }
 }
 
-function standing(id: string, fields: Partial<FlowStandingGrant>): FlowStandingGrant {
+/** A standing grant as the mock serves one: approved and in force unless `fields` say not. */
+export function standingGrant(id: string, fields: Partial<FlowStandingGrant>): FlowStandingGrant {
   const spec = fields.spec ?? grantSpec()
   return {
     id,
@@ -58,7 +59,7 @@ function defaults(): FlowTrigger[] {
       paused: false,
       created_by: { kind: 'browser' },
       created_at: at(0),
-      grant: standing('sg-1', {}),
+      grant: standingGrant('sg-1', {}),
       next_fires: [at(120), at(180)],
       fires: [
         {
@@ -93,7 +94,7 @@ function defaults(): FlowTrigger[] {
       paused: false,
       created_by: { kind: 'agent', principal: 'p1', session: 's1' },
       created_at: at(0),
-      grant: standing('sg-2', {
+      grant: standingGrant('sg-2', {
         status: 'requested',
         requested_by: { kind: 'agent', principal: 'p1' },
         approved_by: null,
@@ -207,7 +208,7 @@ export const handlers = [
       // Refused as the backend's body validation would, so a request that drops its spec
       // fails here rather than taking the default one.
       if (!sent['spec']) return HttpResponse.json({ detail: 'spec is required' }, { status: 422 })
-      const grant = standing(`sg-${id}`, { spec: sent['spec'] as FlowGrantSpec })
+      const grant = standingGrant(`sg-${id}`, { spec: sent['spec'] as FlowGrantSpec })
       return HttpResponse.json(update(id, (t) => ({ ...t, grant })).grant)
     }
     return HttpResponse.json({ detail: 'unknown action' }, { status: 404 })
