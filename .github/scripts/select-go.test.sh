@@ -36,7 +36,14 @@ expect true  backend/tests/fixtures/filament-preset-vectors.json
 expect true  test-fixtures/filament/preset-wire.json
 expect true  backend/tests/fixtures/unknown-tray-vectors.json
 expect true  backend/tests/fixtures/unknown-trays-block.json
-expect false backend/tests/fixtures/secret-vectors.json
+expect true  backend/tests/fixtures/secret-vectors.json
+expect true  backend/tests/fixtures/payload-vectors.json
+expect true  backend/tests/fixtures/subject-vectors.json
+expect true  backend/tests/fixtures/approval-hash-vectors.json
+expect true  backend/tests/fixtures/response-hash-vectors.json
+expect true  backend/tests/fixtures/pending-input-vectors.json
+expect true  test-fixtures/filament/tag-uid-vectors.json
+expect false test-fixtures/filament/tag-uid-vectors.jsonx
 expect false agent/test/fixtures/secret-vectors.json
 expect true  backend/tests/fixtures/python-json-vectors.json
 expect true  backend/tests/fixtures/activity-title-vectors.json
