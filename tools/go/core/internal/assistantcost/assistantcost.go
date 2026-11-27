@@ -187,6 +187,22 @@ func setting(ctx context.Context, stored map[string]string, name, fallback strin
 	return fallback, nil
 }
 
+// CheckEnv refuses, as Python's settings do at its start, a SCADBUDDY_PRICING_USD_RATE or
+// SCADBUDDY_ORDERS_CURRENCY that the API would not take.
+func CheckEnv(lookup func(string) (string, bool)) error {
+	for name, check := range map[string]func(string) (string, bool){
+		"pricing_usd_rate": checkRate, "orders_currency": checkCurrency,
+	} {
+		variable := "SCADBUDDY_" + strings.ToUpper(name)
+		if v, ok := lookup(variable); ok {
+			if _, ok := check(v); !ok {
+				return fmt.Errorf("%s is not a value the API takes", variable)
+			}
+		}
+	}
+	return nil
+}
+
 // checkRate is settings.py decimal_string with positive: finite, above 0, below 10**9.
 func checkRate(value string) (string, bool) {
 	text := strings.TrimFunc(value, pySpace)

@@ -100,7 +100,7 @@ func main() {
 	tel.SetDefaultLogger(slog.NewJSONHandler(os.Stderr, nil), serviceName, nil)
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
-	if err := run(ctx, os.Getenv, tel); err != nil {
+	if err := run(ctx, os.LookupEnv, tel); err != nil {
 		slog.Error("scadbuddy-core stopped", "error", err.Error())
 		flush, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		tel.Shutdown(flush)
@@ -110,7 +110,18 @@ func main() {
 }
 
 // run serves until ctx ends. tel is the process's telemetry, nil for none; serve flushes it.
-func run(ctx context.Context, env func(string) string, tel *telemetry.Telemetry) error {
+func run(ctx context.Context, lookup func(string) (string, bool), tel *telemetry.Telemetry) error {
+	env := func(name string) string { v, _ := lookup(name); return v }
+	// Set but empty stops the start, as in Python; newRouter reads empty as unset.
+	if _, set := lookup("SCADBUDDY_AUTH_MODE"); set {
+		if _, err := auth.ParseMode(env("SCADBUDDY_AUTH_MODE"), true); err != nil {
+			return fmt.Errorf("SCADBUDDY_AUTH_MODE: %w", err)
+		}
+	}
+	// A value Python refuses at its start stops core's too, not each request later.
+	if err := assistantcost.CheckEnv(lookup); err != nil {
+		return err
+	}
 	trusted, err := front.ParseNetworks(env("SCADBUDDY_CORE_TRUSTED_PROXIES"))
 	if err != nil {
 		return fmt.Errorf("SCADBUDDY_CORE_TRUSTED_PROXIES: %w", err)
@@ -156,12 +167,6 @@ func run(ctx context.Context, env func(string) string, tel *telemetry.Telemetry)
 		<-ctx.Done()
 		hub.Close()
 	}()
-	// Set but empty stops the start, as in Python; newRouter reads empty as unset.
-	if _, set := os.LookupEnv("SCADBUDDY_AUTH_MODE"); set {
-		if _, err := auth.ParseMode(env("SCADBUDDY_AUTH_MODE"), true); err != nil {
-			return fmt.Errorf("SCADBUDDY_AUTH_MODE: %w", err)
-		}
-	}
 	router, err := newRouter(pool, upstream, keys, env("SCADBUDDY_CORE_AREAS"), env("SCADBUDDY_AUTH_MODE"), tel.Meter(), stream)
 	if err != nil {
 		return err

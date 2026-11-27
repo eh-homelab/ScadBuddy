@@ -38,7 +38,7 @@ func (s *Store) waiting(r *http.Request, _ crud.Params) (any, error) {
 	runs, err := s.Pool.Query(ctx, `SELECT g.id::text, g.created_at FROM flow_grants g
 		WHERE g.status = 'requested' AND g.revoked_at IS NULL
 		AND EXISTS (SELECT 1 FROM workflow_runs r WHERE r.id = g.run_id AND NOT (r.status = ANY($1)))
-		AND ($2::timestamptz IS NULL OR g.created_at > $2)
+		AND g.created_at > $2
 		ORDER BY g.created_at DESC, g.id DESC LIMIT $3`, terminal, newerThan, grantRequestsMax)
 	if err != nil {
 		return nil, err

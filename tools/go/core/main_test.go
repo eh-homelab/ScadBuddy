@@ -654,7 +654,7 @@ func TestTheCRUDPortMayNotBeTheMainAddress(t *testing.T) {
 		"SCADBUDDY_CORE_CRUD_LISTEN":   "127.0.0.1:0",
 		"SCADBUDDY_CORE_CRUD_UPSTREAM": "http://127.0.0.1:2",
 	}
-	err := run(context.Background(), func(k string) string { return env[k] }, nil)
+	err := run(context.Background(), func(k string) (string, bool) { v, ok := env[k]; return v, ok }, nil)
 	if err == nil || !strings.Contains(err.Error(), "needs its own") {
 		t.Fatalf("got %v", err)
 	}
@@ -692,8 +692,21 @@ func TestTheCRUDPortNeedsPythonsCRUDListener(t *testing.T) {
 		"SCADBUDDY_CORE_LISTEN":      "127.0.0.1:0",
 		"SCADBUDDY_CORE_CRUD_LISTEN": "127.0.0.1:1",
 	}
-	err := run(context.Background(), func(k string) string { return env[k] }, nil)
+	err := run(context.Background(), func(k string) (string, bool) { v, ok := env[k]; return v, ok }, nil)
 	if err == nil || !strings.Contains(err.Error(), "SCADBUDDY_CORE_CRUD_UPSTREAM") {
 		t.Fatalf("got %v", err)
+	}
+}
+
+// A setting Python refuses at its start stops core's start too.
+func TestABadSettingStopsTheStart(t *testing.T) {
+	for name, value := range map[string]string{
+		"SCADBUDDY_AUTH_MODE": "", "SCADBUDDY_PRICING_USD_RATE": "-1", "SCADBUDDY_ORDERS_CURRENCY": "XAU",
+	} {
+		env := map[string]string{name: value}
+		err := run(context.Background(), func(k string) (string, bool) { v, ok := env[k]; return v, ok }, nil)
+		if err == nil || !strings.Contains(err.Error(), name) {
+			t.Errorf("%s=%q: %v", name, value, err)
+		}
 	}
 }
