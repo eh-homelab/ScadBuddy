@@ -577,6 +577,7 @@ export function SpoolsTab() {
         </p>
       )}
 
+      {/* While a scan's search settles, no rows: a partial match must not show (#8372). */}
       {lookingUp && (
         <p role="status" className="rounded-md border px-3 py-6 text-center text-[13px] text-muted-foreground">
           {q.q ? `Looking for “${q.q}”…` : 'Looking for the scanned code…'}
@@ -587,7 +588,7 @@ export function SpoolsTab() {
           {!data.spools.length ? 'No spools yet. Add a spool, or import a CSV.' : q.q ? `No spool matches “${q.q}” with these filters.` : 'No spool matches these filters.'}
         </p>
       )}
-      {data && shown.length > 0 && q.view === 'table' && (
+      {data && !lookingUp && shown.length > 0 && q.view === 'table' && (
         <SpoolsTable
           groups={groups}
           columns={q.columns.includes('number') ? q.columns : ['number', ...q.columns]}
@@ -599,8 +600,8 @@ export function SpoolsTab() {
           checks={checks}
         />
       )}
-      {data && shown.length > 0 && q.view === 'cards' && <SpoolCards groups={groups} selected={selected} onSelect={select} checks={checks} />}
-      {data && q.view === 'forecast' && <SpoolForecast spools={shown} />}
+      {data && !lookingUp && shown.length > 0 && q.view === 'cards' && <SpoolCards groups={groups} selected={selected} onSelect={select} checks={checks} />}
+      {data && !lookingUp && q.view === 'forecast' && <SpoolForecast spools={shown} />}
 
       <SpoolImport
         open={importing}

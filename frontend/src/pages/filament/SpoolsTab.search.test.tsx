@@ -222,6 +222,38 @@ describe('a scan-made spool search (#8372)', () => {
     expect(await screen.findByRole('heading', { name: `Spool page ${spoolId(2)}` })).toBeInTheDocument()
   })
 
+  it('shows no rows while it looks, though a partial read already matches one', async () => {
+    seedEntityProperties(`spool:${spoolId(3)}`, { gtin: [GTIN] })
+    seedEntityProperties(`spool_type:${T.ORANGE}`, { gtin: [GTIN] })
+    let release = () => {}
+    const held = new Promise<void>((resolve) => (release = resolve))
+    // The spool list and the spools' own properties answer; only the type properties are held.
+    const answered = new Set<string>()
+    const onAnswer = ({ request }: { request: Request }) => {
+      const { pathname } = new URL(request.url)
+      if (request.method === 'GET' && (pathname === '/api/v1/filament/spools' || pathname === '/api/v1/entity-kinds/spool/properties')) answered.add(pathname)
+    }
+    server.events.on('response:mocked', onAnswer)
+    server.use(
+      http.get('/api/v1/entity-kinds/spool_type/properties', async () => {
+        await held
+        return undefined
+      }),
+    )
+    try {
+      renderScan()
+      await waitFor(() => expect(answered.size).toBe(2))
+      await act(async () => {})
+      expect(await screen.findByText(`Looking for “gtin:${GTIN}”…`)).toBeInTheDocument()
+      expect(screen.queryByRole('table', { name: 'Spools' })).toBeNull()
+      release()
+      await waitFor(async () => expect(numbers(await table())).toEqual(['2', '3']))
+      expect(screen.queryByText(`Looking for “gtin:${GTIN}”…`)).toBeNull()
+    } finally {
+      server.events.removeListener('response:mocked', onAnswer)
+    }
+  })
+
   it('does not decide on the answer of a load a newer one replaced', async () => {
     seedEntityProperties(`spool_type:${T.ORANGE}`, { gtin: [GTIN] })
     // StrictMode runs the mount effect twice, so two loads start. The first load's type read

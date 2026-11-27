@@ -5,11 +5,12 @@ import { getSpool, listSpools, postTagRead, resolveCode, type NdefRecord, type S
 import { spoolCode } from '../../lib/homeReturns'
 import { codeFromScan } from '../../lib/unknownSpools'
 import { matchesSearch, parseSearch, spoolSearchDoc, type PropertyText } from '../../lib/filamentSearch'
-import { isScadBuddyCode, scanSearchQuery } from '../../lib/scanSearch'
+import { scanSearchQuery, searchesSpools } from '../../lib/scanSearch'
 import { takeMifare } from '../../lib/nativeMifare'
 import { nfcSupport, type Reading } from '../../lib/webNfc'
 import { loadKindPropertyTexts } from '../entities/api'
 import { DefinedFields } from '../entities/DefinedFields'
+import { SPOOL_FORMATS } from './identify/camera'
 import { CodeWay, Said, type CodeCopy, type CodeSearch } from './identify/CodeWay'
 import { reasonOf } from './identify/reason'
 import { useTagReads } from './identify/useTagReads'
@@ -29,6 +30,7 @@ import { RgbaSwatch } from './RgbaSwatch'
  * (the way changes, the code is edited, a lookup, a photo or a tag read names no spool), so the
  * caller never acts on a spool the person has since replaced. An archived spool is never named.
  * `nfc` is the page's `nfcSupport()`: in a frame (`embedded`) there is no tag way and no camera.
+ * A code that names no thing (a maker's barcode) becomes a "Pick by hand" search (#8372).
  */
 
 type Way = 'tag' | 'code' | 'hand'
@@ -71,7 +73,7 @@ async function spoolFromText(text: string, search = false): Promise<Spool | stri
     return usable(await getSpool(resolved.id))
   } catch (cause) {
     const unknown = cause instanceof ApiError && cause.status === 404
-    if (unknown && search && !codeFromScan(text) && !isScadBuddyCode(text)) return { search: scanSearchQuery(text) }
+    if (unknown && search && searchesSpools(text)) return { search: scanSearchQuery(text) }
     return unknown ? `No spool has the code ${code}.` : reasonOf(cause, 'ScadBuddy could not look up the code. Try again.')
   }
 }
@@ -127,6 +129,7 @@ export function IdentifySpool({ onIdentified, nfc }: { onIdentified: OnIdentifie
             setScanned(search)
           }}
           camera={support !== 'embedded'}
+          formats={SPOOL_FORMATS}
         />
       )}
       {way === 'hand' && <HandWay onIdentified={onIdentified} initialSearch={scanned ?? ''} fromScan={scanned !== null} />}

@@ -139,7 +139,7 @@ describe('ScanCode (#8155, a code scanned from a photo)', () => {
     expect(within(codes).getByRole('link', { name: 'Open this address' })).toBeInTheDocument()
     // The resolved place has no search link.
     expect(within(codes).getAllByRole('link', { name: /^Search spools for/ })).toHaveLength(2)
-    expect(screen.getByLabelText('Current address')).toHaveTextContent('/')
+    expect(screen.getByLabelText('Current address')).toHaveTextContent(/^\/$/)
     await user.click(screen.getByRole('button', { name: 'Read again' }))
     await within(await screen.findByRole('list', { name: 'Codes in this photo' })).findByRole('link', { name: 'Search spools for 6975373321234' })
     expect(screen.getByLabelText('Current address')).toHaveTextContent(/^\/$/)
@@ -147,13 +147,20 @@ describe('ScanCode (#8155, a code scanned from a photo)', () => {
     expect(screen.getByLabelText('Current address')).toHaveTextContent(scanSearchPath('6975373321234'))
   })
 
-  it('gives an unknown ScadBuddy code no search link (#8372)', async () => {
-    queueScanCodes([{ format: 'qr_code', text: 'S-999' }])
+  it('gives an unknown ScadBuddy code, label URL or label text no search link (#8372)', async () => {
+    const gone = 'scadbuddy:spool:0b6c1f2e-1d2a-4c3b-9e8f-7a6b5c4d3e2f'
+    queueScanCodes([
+      { format: 'qr_code', text: 'S-999' },
+      { format: 'qr_code', text: 'https://scadbuddy.example/x/L-99' },
+      { format: 'qr_code', text: gone },
+    ])
     const { user } = open()
     await user.click(screen.getByRole('button', { name: 'Start camera' }))
     await user.upload(screen.getByLabelText('Photo of a code'), new File(['bytes'], 'a.jpg', { type: 'image/jpeg' }))
     const codes = await screen.findByRole('list', { name: 'Codes in this photo' })
     expect(within(codes).getByText('S-999')).toBeInTheDocument()
+    expect(within(codes).getByText('https://scadbuddy.example/x/L-99')).toBeInTheDocument()
+    expect(within(codes).getByText(gone)).toBeInTheDocument()
     expect(within(codes).queryByRole('link', { name: /^Search spools for/ })).toBeNull()
   })
 

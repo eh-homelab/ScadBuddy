@@ -4,8 +4,7 @@ import { Link } from 'react-router'
 import { ApiError } from '../../../api/client'
 import { type CodeScan, type ScannedCode, decodeScanAgain, deleteScan, scanImageUrl } from '../../../api/scan'
 import { codeLabel } from '../../../lib/resolvedCode'
-import { isScadBuddyCode, scanSearchPath } from '../../../lib/scanSearch'
-import { codeFromScan } from '../../../lib/unknownSpools'
+import { scanSearchPath, searchesSpools } from '../../../lib/scanSearch'
 import { CodeCard } from './CodeCard'
 import { formatName, useScanCamera } from './scanCamera'
 import { Button } from '@/components/ui/button'
@@ -230,7 +229,7 @@ function ScannedCodeView({ code }: { code: ScannedCode }) {
   if (code.resolved) return <CodeCard resolved={code.resolved} />
   const link = httpsLink(code.text)
   // A text with the shape of a ScadBuddy code names no spool here; a search would find nothing (#8372).
-  const searchable = !isScadBuddyCode(code.text) && codeFromScan(code.text) === null
+  const searchable = searchesSpools(code.text)
   return (
     <div className="flex flex-col gap-1 rounded-lg bg-muted/60 p-3">
       <span className="text-muted-foreground">{formatName(code.format)}</span>

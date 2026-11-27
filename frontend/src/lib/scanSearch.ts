@@ -18,3 +18,16 @@ export function scanSearchPath(text: string): string {
 export function isScadBuddyCode(text: string): boolean {
   return /^[a-z]-?\d+$/i.test(text.trim())
 }
+
+/**
+ * #8372 D11: whether a text that names no thing becomes a spool search. A text whose last path
+ * segment has the ScadBuddy code shape (`L-99`, or a label URL such as `…/x/S-5`) keeps its
+ * "not found" answer, and so does a ScadBuddy QR text (`scadbuddy:…`). Any other text, such as
+ * a maker's barcode, becomes a search.
+ */
+export function searchesSpools(text: string): boolean {
+  const trimmed = text.trim()
+  if (/^scadbuddy:/i.test(trimmed)) return false
+  const last = trimmed.split(/[?#]/)[0]!.split('/').filter(Boolean).pop() ?? ''
+  return !isScadBuddyCode(last)
+}

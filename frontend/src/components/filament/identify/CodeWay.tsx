@@ -1,10 +1,9 @@
 import { CameraIcon, ImageUpIcon } from 'lucide-react'
-import { useId, useRef, useState, type ReactNode } from 'react'
+import { useEffect, useId, useRef, useState, type ReactNode } from 'react'
 import { ApiError } from '../../../api/client'
 import { decodeScan, storeScanImage } from '../../../api/scan'
-import { isScadBuddyCode, scanSearchQuery } from '../../../lib/scanSearch'
-import { codeFromScan } from '../../../lib/unknownSpools'
-import { detectorClass, jpegOf } from './camera'
+import { scanSearchQuery, searchesSpools } from '../../../lib/scanSearch'
+import { detectorClass, jpegOf, QR_FORMATS } from './camera'
 import { CameraReader } from './CameraReader'
 import { reasonOf } from './reason'
 import { Button } from '@/components/ui/button'
@@ -41,7 +40,9 @@ const isSearch = (found: object): found is CodeSearch => 'search' in found && ty
  * code the photo's first code of `kind` names; each gives the thing, or the sentence why none.
  * `onIdentified` gets null as soon as nothing is named any more. When a lookup gives a
  * search (#8372), the way shows nothing and gives the search to `onSearch`. With `onSearch`, a
- * photo with no code of `kind` but a code that names no thing searches that code.
+ * photo with no code of `kind` but a code that names no thing searches that code. `formats` are
+ * the code formats the camera reads (a QR code by default). A lookup that answers after the way
+ * has left the page is dropped: it names nothing and starts no search.
  */
 export function CodeWay<T extends object>({
   kind,
@@ -51,6 +52,7 @@ export function CodeWay<T extends object>({
   onIdentified,
   onSearch,
   camera: cameraAllowed,
+  formats = QR_FORMATS,
 }: {
   kind: 'spool' | 'location'
   copy: CodeCopy
@@ -59,6 +61,7 @@ export function CodeWay<T extends object>({
   onIdentified: (found: T | null) => void
   onSearch?: (text: string) => void
   camera: boolean
+  formats?: readonly string[]
 }) {
   const [text, setText] = useState('')
   const [said, setSaid] = useState<string | null>(null)
@@ -69,9 +72,18 @@ export function CodeWay<T extends object>({
   const [Detector] = useState(() => (cameraAllowed ? detectorClass() : null))
   const photo = useRef<HTMLInputElement>(null)
   const ids = useId()
+  /** Whether the way is still on the page: a late answer must not name a thing or move the person. */
+  const mounted = useRef(true)
+  useEffect(() => {
+    mounted.current = true
+    return () => {
+      mounted.current = false
+    }
+  }, [])
 
   /** The answer of a lookup: the thing, or the sentence why none, which also names none. */
   function answer(found: T | string | CodeSearch) {
+    if (!mounted.current) return
     if (typeof found === 'string') {
       setSaid(found)
       onIdentified(null)
@@ -86,6 +98,7 @@ export function CodeWay<T extends object>({
     setSaid(null)
     onIdentified(null)
     const found = await fromText(raw)
+    if (!mounted.current) return
     setLooking(false)
     answer(found)
   }
@@ -100,7 +113,7 @@ export function CodeWay<T extends object>({
       const stored = await storeScanImage(await jpegOf(file))
       const scan = await decodeScan({ key: stored.key, source: 'shutter', location: null })
       const first = scan.codes.find((code) => code.resolved?.kind === kind)
-      const unknown = onSearch ? scan.codes.find((code) => !code.resolved && !isScadBuddyCode(code.text) && codeFromScan(code.text) === null) : undefined
+      const unknown = onSearch ? scan.codes.find((code) => !code.resolved && searchesSpools(code.text)) : undefined
       if (first?.resolved) answer(await fromCode(first.resolved.code))
       else if (unknown) search = scanSearchQuery(unknown.text)
       else answer(scan.error ? 'The photo could not be read. Take it again, closer to the label.' : copy.noLabel)
@@ -111,7 +124,7 @@ export function CodeWay<T extends object>({
         answer('This server reads no photos. Type the code from the label.')
       } else answer(cause instanceof ApiError ? `The photo did not go through: ${cause.detail}.` : reasonOf(cause, 'The photo did not go through. Try again.'))
     } finally {
-      setPhotoBusy(false)
+      if (mounted.current) setPhotoBusy(false)
     }
     // After the busy flag: the search can remove this way from the page.
     if (search !== null) answer({ search })
@@ -182,6 +195,7 @@ export function CodeWay<T extends object>({
       {camera && Detector && (
         <CameraReader
           Detector={Detector}
+          formats={formats}
           onRead={(raw) => {
             setCamera(false)
             void look(raw)

@@ -27,14 +27,23 @@ function installCamera(rawValue: string) {
   const stop = vi.fn()
   const stream = { getTracks: () => [{ stop }] }
   const before = navigator.mediaDevices
+  /** The formats each detector was made with. */
+  const formats: string[][] = []
   Object.defineProperty(navigator, 'mediaDevices', { value: { getUserMedia: vi.fn(() => Promise.resolve(stream)) }, configurable: true })
   ;(window as unknown as { BarcodeDetector: unknown }).BarcodeDetector = class {
+    static getSupportedFormats() {
+      return Promise.resolve(['qr_code', 'ean_13', 'ean_8', 'upc_a', 'upc_e'])
+    }
+    constructor(options?: { formats: string[] }) {
+      formats.push(options?.formats ?? [])
+    }
     detect() {
       return Promise.resolve([{ rawValue, format: 'qr_code' }])
     }
   }
   return {
     stop,
+    formats,
     restore() {
       delete (window as unknown as { BarcodeDetector?: unknown }).BarcodeDetector
       Object.defineProperty(navigator, 'mediaDevices', { value: before, configurable: true })
@@ -136,6 +145,8 @@ describe('IdentifyPlace (#7168)', () => {
       await user.click(screen.getByRole('button', { name: 'Use camera' }))
       await waitFor(() => expect(identified(onIdentified)).toHaveLength(1))
       expect(identified(onIdentified)[0]).toMatchObject({ id: L.AMS_A1, code: 'L-4' })
+      // A place's label is a QR code only, though the detector reads barcodes too (#8372).
+      expect(camera.formats).toEqual([['qr_code']])
       await waitFor(() => expect(camera.stop).toHaveBeenCalled())
     } finally {
       camera.restore()
