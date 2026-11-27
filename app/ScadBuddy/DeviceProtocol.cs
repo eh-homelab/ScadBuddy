@@ -22,8 +22,9 @@ public static class DeviceProtocol
 	/// <summary>Core takes an error of at most this many characters.</summary>
 	public const int ErrorMax = 200;
 
-	/// <summary>The realtime socket's path on the device's origin.</summary>
-	public const string SocketPath = "/api/v1/ws";
+	/// <summary>The realtime socket's device path on the device's origin. Only a device token
+	/// opens it; the person's path, /api/v1/ws, refuses one.</summary>
+	public const string SocketPath = "/api/v1/devices/ws";
 
 	/// <summary>The blob kinds: a tag read and a photo.</summary>
 	public const string TagDump = "tag_dump";

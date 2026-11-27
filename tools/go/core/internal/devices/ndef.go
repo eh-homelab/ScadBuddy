@@ -71,6 +71,12 @@ func allowedKeys(t string) (required, optional []string, ok bool) {
 	return nil, nil, false
 }
 
+// argsTooLarge is the 422 of args whose call would not fit in its device.call_requested
+// event, or the table's CHECK.
+func argsTooLarge() error {
+	return httpx.WithReason(http.StatusUnprocessableEntity, "The call's args are too large.", "args_too_large")
+}
+
 func argsIssue(msg string, at ...string) error {
 	return httpx.Invalid(httpx.Issue{Loc: append([]string{"body", "args"}, at...), Msg: msg})
 }
@@ -81,7 +87,7 @@ func argsIssue(msg string, at ...string) error {
 // other methods take {}.
 func checkArgs(method string, args json.RawMessage) (json.RawMessage, error) {
 	if len(args) > argsMax {
-		return nil, httpx.WithReason(http.StatusRequestEntityTooLarge, "The call's args are too large.", "args_too_large")
+		return nil, argsTooLarge()
 	}
 	var fields map[string]json.RawMessage
 	if err := json.Unmarshal(args, &fields); err != nil || fields == nil {

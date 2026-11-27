@@ -54,7 +54,7 @@ public class DeviceProtocolTests
 	[Fact]
 	public void TheSocketIsOnTheDevicesOrigin()
 	{
-		Assert.Equal("wss://sb.example:8443/api/v1/ws", DeviceProtocol.SocketOf("https://sb.example:8443").ToString());
+		Assert.Equal("wss://sb.example:8443/api/v1/devices/ws", DeviceProtocol.SocketOf("https://sb.example:8443").ToString());
 		Assert.Equal($$"""{"type":"subscribe","topics":["device:{{Device}}"]}""", DeviceProtocol.Subscribe(Device));
 	}
 

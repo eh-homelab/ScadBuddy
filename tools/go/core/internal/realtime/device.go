@@ -13,10 +13,13 @@ import (
 	"github.com/eh-homelab/ScadBuddy/tools/go/telemetry"
 )
 
-// The device path (#8244): a paired device holds this socket with its device token
-// (Authorization: Bearer sbdev_…) to hear its calls. The token is checked in every auth
-// mode, before the gate, so a revoked or expired one is refused even where the host runs
-// observe. A device follows only its own topic, device:<id>. Its socket closes with
+// The device path (#8244): a paired device holds the socket at DevicePath with its device
+// token (Authorization: Bearer sbdev_…) to hear its calls. Only devices use that path, and
+// only it may be public away from home: Path stays behind the SSO host's login. On
+// DevicePath the token is checked in every auth mode, never by the gate, so a handshake with
+// no token, with a person's credential, or with a revoked or expired token is refused even
+// where the host runs observe or off. Path refuses a device token. A device follows only its
+// own topic, device:<id>. Its socket closes with
 // SignedOut on device.revoked for it, and when its token is no longer live (read at each
 // keepalive and at each resync).
 //
@@ -35,6 +38,9 @@ type DeviceTokens interface {
 	// CallVisible says whether principal may follow the call's events.
 	CallVisible(ctx context.Context, call, principal string) bool
 }
+
+// DevicePath is the socket's route for a paired device.
+const DevicePath = "/api/v1/devices/ws"
 
 const (
 	devicePrefix = "sbdev_"
@@ -55,21 +61,30 @@ func deviceBearer(r *http.Request) bool {
 	return strings.EqualFold(scheme, "bearer") && strings.HasPrefix(strings.TrimSpace(token), devicePrefix)
 }
 
-// openDevice serves a device's handshake: its token first, in every mode.
+// openDevice serves a handshake on DevicePath: a live device token first, in every mode.
 func (s *Socket) openDevice(w http.ResponseWriter, r *http.Request) {
-	telemetry.SetRoute(r.Context(), Path)
+	telemetry.SetRoute(r.Context(), DevicePath)
 	if s.Devices == nil {
 		refuse(w)
+		return
+	}
+	if !deviceBearer(r) {
+		unauthorized(w)
 		return
 	}
 	authorization := r.Header.Get("Authorization")
 	id, err := s.Devices.DeviceOf(r.Context(), authorization)
 	if err != nil {
-		w.Header().Set("Content-Length", "0")
-		w.WriteHeader(http.StatusUnauthorized)
+		unauthorized(w)
 		return
 	}
 	s.accepted(w, r, caller{device: id, authorization: authorization})
+}
+
+// unauthorized refuses a handshake with 401 and no body.
+func unauthorized(w http.ResponseWriter) {
+	w.Header().Set("Content-Length", "0")
+	w.WriteHeader(http.StatusUnauthorized)
 }
 
 // deviceEvent says whether e is a devices area event: opaque, of namespace device.

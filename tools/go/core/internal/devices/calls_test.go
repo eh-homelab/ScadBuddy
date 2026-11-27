@@ -396,6 +396,68 @@ func TestWriteTooLargeToApproveRefused(t *testing.T) {
 		`{"method":"nfc.write","args":{"records":[{"recordType":"text","text":"`+text+`"}]}}`), 202)
 }
 
+// A call goes to its device in one device.call_requested event, which bus.Publish would drop
+// past bus.PayloadMax. So args that would not fit in it are refused with 422 before a call
+// is made, never accepted with a 202 the device then never hears.
+func TestCallArgsMustFitTheEvent(t *testing.T) {
+	h := newHarness(t, auth.Observe)
+	me := h.person("user:i#me")
+	d := h.pair(me)
+	sock := h.pods[0].device(d)
+	write := func(text string) answer {
+		return h.do("POST", "/api/v1/devices/"+d.id+"/calls", me,
+			`{"method":"nfc.write","args":{"records":[{"recordType":"text","text":"`+text+`"}]}}`)
+	}
+	for name, text := range map[string]string{
+		"args near the body's limit": strings.Repeat("x", 3900),
+		// The parsed form is what is sent, and it escapes < as <: 700 bytes posted are
+		// 4200 sent.
+		"args that grow when parsed": strings.Repeat("<", 700),
+	} {
+		got := write(text)
+		expectStatus(t, got, 422)
+		if got.body["reason"] != "args_too_large" {
+			t.Errorf("%s: %s", name, got.raw)
+		}
+	}
+	expect(t, h.count(`SELECT count(*) FROM device_calls`), 0)
+	expect(t, h.count(`SELECT count(*) FROM events WHERE kind = 'device.call_requested'`), 0)
+	// The largest that fits reaches the device whole.
+	got := write(strings.Repeat("x", 3000))
+	expectStatus(t, got, 202)
+	sent := requestedOn(t, sock, got.body["call_id"].(string))["args"].(map[string]any)
+	expect(t, sent["records"].([]any)[0].(map[string]any)["text"], any(strings.Repeat("x", 3000)))
+}
+
+// A posted event's data is at most 1 KiB, which keeps the whole event under bus.PayloadMax:
+// the largest data a device may post is logged whole, never dropped by bus.Publish.
+func TestEventDataCapFitsTheEvent(t *testing.T) {
+	h := newHarness(t, auth.Observe)
+	me := h.person("user:i#me")
+	d := h.pair(me)
+	call := h.start(me, d, `{"method":"nfc.read"}`)
+	data := func(n int) string {
+		// {"a":"…","b":"…"} with n bytes in all: two keys, and text that is not ASCII.
+		head := `{"a":"` + strings.Repeat(" ", 100) + `","b":"`
+		return head + strings.Repeat("y", n-len(head)-2) + `"}`
+	}
+	expect(t, len(data(eventDataMax)), eventDataMax)
+	expectStatus(t, h.post(d, call, "events", `{"events":[{"kind":"tag_found","data":`+data(eventDataMax+1)+`}]}`), 422)
+	expectStatus(t, h.post(d, call, "events", `{"events":[{"kind":"tag_found","data":`+data(eventDataMax)+`},
+		{"kind":"tag_progress","data":`+data(eventDataMax)+`}]}`), 204)
+	v := h.view(me, call)
+	expect(t, strings.Join(kinds(v), ","), "device.call_requested,device.tag_found,device.tag_progress")
+	var want map[string]any
+	if err := json.Unmarshal([]byte(data(eventDataMax)), &want); err != nil {
+		t.Fatal(err)
+	}
+	for _, e := range v.body["events"].([]any)[1:] {
+		got := e.(map[string]any)["data"].(map[string]any)
+		expect(t, got["a"], want["a"])
+		expect(t, got["b"], want["b"])
+	}
+}
+
 // An approval shows a URI's scheme and host in full, the host in punycode, and cuts only
 // the rest.
 func TestAnApprovalShowsTheHostInPunycode(t *testing.T) {

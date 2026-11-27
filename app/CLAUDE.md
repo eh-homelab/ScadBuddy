@@ -38,7 +38,7 @@ cd app/ScadBuddy.Tests && dotnet test
   result, the tag dump, and the `nfc.write` record check. It uses no MAUI or Android type.
   Core's side is `tools/go/core/internal/devices` and `internal/realtime` (`device.go`).
 - `Platforms/Android/DeviceLink.cs`: the phone as a paired device. The token is in
-  `SecureStorage`. While the app is in front, it holds the realtime socket (`/api/v1/ws`,
+  `SecureStorage`. While the app is in front, it holds the realtime socket's device path (`/api/v1/devices/ws`,
   `Authorization: Bearer sbdev_…`, subscribed to `device:<id>`), and posts
   `/api/v1/devices/heartbeat` every 30 s. It runs one `device.call_requested` at a time, and
   posts its events, uploads and result. A 401, or close code 4401, ends the pairing.
