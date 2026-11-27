@@ -10,6 +10,7 @@ import { filamentLinks } from '../../lib/filamentLinks'
 import { spoolColour, spoolName } from '../../lib/filamentColour'
 import { readPickerFilters, writePickerFilters, type PickerFilters } from '../../lib/filamentPickerFilters'
 import { loadKindPropertyTexts } from '../entities/api'
+import type { PropertyText } from '../../lib/filamentSearch'
 import { loadTypeSkus, matchesSearch, namesNumber, parseSearch, spoolSearchDoc, traysBySpool, typeSearchDoc } from '../../lib/filamentSearch'
 import { ClearSwatch, Swatch } from '../print/Swatch'
 import { Button } from '@/components/ui/button'
@@ -28,8 +29,8 @@ interface Loaded {
   trays: Map<string, string>
   skus: Map<string, string[]>
   /** #7026: each spool's and type's property values as text, by id. */
-  spoolProperties: Map<string, string[]>
-  typeProperties: Map<string, string[]>
+  spoolProperties: Map<string, PropertyText[]>
+  typeProperties: Map<string, PropertyText[]>
 }
 
 type State = { kind: 'loading' } | { kind: 'failed'; message: string } | { kind: 'open'; data: Loaded }

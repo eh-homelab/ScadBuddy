@@ -51,6 +51,7 @@ import {
 import { downloadBlob } from '../../lib/embed'
 import { readKindPropertyTexts } from '../../components/entities/api'
 import { loadTypeSkus, spoolSearchDoc, tagsBySpool, traysBySpool } from '../../lib/filamentSearch'
+import type { PropertyText } from '../../lib/filamentSearch'
 import { toast } from '../../lib/toast'
 import { syncText } from './syncText'
 import { cn } from '@/lib/utils'
@@ -163,7 +164,7 @@ export function SpoolsTab() {
   const [skus, setSkus] = useState<ReadonlyMap<string, string[]>>(new Map())
   /** #7151: each spool's open tag keys, so the search finds a spool by its tag. */
   const [tagKeys, setTagKeys] = useState<ReadonlyMap<string, string[]>>(new Map())
-  const [propertyTexts, setPropertyTexts] = useState<ReadonlyMap<string, string[]>>(new Map())
+  const [propertyTexts, setPropertyTexts] = useState<ReadonlyMap<string, PropertyText[]>>(new Map())
 
   /** Each load takes a number; only the newest one's answer is used. */
   const latest = useRef(0)

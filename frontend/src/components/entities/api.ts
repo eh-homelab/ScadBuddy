@@ -1,6 +1,7 @@
 import { API_BASE, request, uploadForm } from '../../api/client'
 import type { components } from '../../api/schema'
 import { propertyTexts } from '../../lib/filamentSearch'
+import type { PropertyText } from '../../lib/filamentSearch'
 
 /**
  * #6950 — the files and links of any entity (`kind:ref`, such as `spool:<id>`):
@@ -104,13 +105,13 @@ export const entityApi = {
 }
 
 /** #7026 — every entity of `kind`'s property values as search text (`propertyTexts`), by ref. A failed read throws. */
-export async function readKindPropertyTexts(kind: string): Promise<Map<string, string[]>> {
+export async function readKindPropertyTexts(kind: string): Promise<Map<string, PropertyText[]>> {
   const found = await entityApi.kindProperties(kind)
   return new Map(Object.entries(found).map(([ref, values]) => [ref, propertyTexts(values)]))
 }
 
 /** `readKindPropertyTexts`, but a failed read gives an empty map: the filament search still runs on everything else. */
-export async function loadKindPropertyTexts(kind: string): Promise<Map<string, string[]>> {
+export async function loadKindPropertyTexts(kind: string): Promise<Map<string, PropertyText[]>> {
   try {
     return await readKindPropertyTexts(kind)
   } catch {
