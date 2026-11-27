@@ -211,6 +211,7 @@ class Grant(BaseModel):
         )
 
     def expired(self, now: datetime) -> bool:
+        """Its own expiry has passed (`own_expiry_passed`): out of force is not expired."""
         return own_expiry_passed(self.expires_at, self.spec, now)
 
 
