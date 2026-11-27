@@ -127,6 +127,7 @@ from scadbuddy.core.tracing import span, traced_thread
 from scadbuddy.dialog_reads.component import DialogReadsDep
 from scadbuddy.dialog_reads.reads import dialog_client, maybe_dialog_client
 from scadbuddy.filament.component import FilamentDep
+from scadbuddy.filament.unknown_tray_rows import PoolUnknownTrays
 from scadbuddy.library.library_file_moves import (
     LibraryCopyResult,
     LibraryMoveResult,
@@ -1771,4 +1772,5 @@ async def post_library_check(
             sb_trays=filament.inventory,
             sb_presets=filament.presets,
             sb_reads=filament.reads,
+            unknown_trays=PoolUnknownTrays(filament.spools.pool),
         )

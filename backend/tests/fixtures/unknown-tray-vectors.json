@@ -1,0 +1,240 @@
+{
+  "colour_distance": [
+    {
+      "distance": null,
+      "left": null,
+      "right": null
+    },
+    {
+      "distance": null,
+      "left": null,
+      "right": "#FF0000"
+    },
+    {
+      "distance": null,
+      "left": "#FF0000",
+      "right": null
+    },
+    {
+      "distance": null,
+      "left": "",
+      "right": "#FF0000"
+    },
+    {
+      "distance": 0.0,
+      "left": "#FF0000",
+      "right": "#FF0000"
+    },
+    {
+      "distance": 0.0,
+      "left": "#FF0000FF",
+      "right": "#FF000000"
+    },
+    {
+      "distance": 0.0,
+      "left": "#ff0000",
+      "right": "#FF0000FF"
+    },
+    {
+      "distance": 0.0,
+      "left": "FF0000",
+      "right": "#FF0000"
+    },
+    {
+      "distance": 3.190539397541466,
+      "left": "#FF0000",
+      "right": "#F00000"
+    },
+    {
+      "distance": 4.8711033761591,
+      "left": "#FF0000",
+      "right": "#E81010"
+    },
+    {
+      "distance": 10.090004060516982,
+      "left": "#FF0000",
+      "right": "#D32F2F"
+    },
+    {
+      "distance": 86.6082374535373,
+      "left": "#FF0000",
+      "right": "#00FF00"
+    },
+    {
+      "distance": 52.88136803127368,
+      "left": "#FF0000",
+      "right": "#0000FF"
+    },
+    {
+      "distance": 100.00000386666865,
+      "left": "#000000",
+      "right": "#FFFFFF"
+    },
+    {
+      "distance": 100.00000386666865,
+      "left": "#FFFFFF",
+      "right": "#000000"
+    },
+    {
+      "distance": 0.0,
+      "left": "#000000",
+      "right": "#000000"
+    },
+    {
+      "distance": 0.0,
+      "left": "#FFFFFF",
+      "right": "#FFFFFFFF"
+    },
+    {
+      "distance": 0.9036686355205605,
+      "left": "#A7AEB2",
+      "right": "#A9AFB4"
+    },
+    {
+      "distance": 24.657021954624856,
+      "left": "#A7AEB2FF",
+      "right": "#F772A4FF"
+    },
+    {
+      "distance": 0.3805524962418016,
+      "left": "#808080",
+      "right": "#7F7F7F"
+    },
+    {
+      "distance": 0.3101613937222134,
+      "left": "#123456",
+      "right": "#123457"
+    },
+    {
+      "distance": null,
+      "left": "not a colour",
+      "right": "#FF0000"
+    },
+    {
+      "distance": null,
+      "left": "#FFF",
+      "right": "#FFFFFF"
+    },
+    {
+      "distance": 11.583696831713983,
+      "left": "#FFFF00",
+      "right": "#FFD700"
+    }
+  ],
+  "labels": [
+    {
+      "ams_id": 0,
+      "place_label_for_printer_H2C": "H2C AMS-A slot 1",
+      "tray_id": 0,
+      "tray_label": "AMS-A slot 1"
+    },
+    {
+      "ams_id": 0,
+      "place_label_for_printer_H2C": "H2C AMS-A slot 2",
+      "tray_id": 1,
+      "tray_label": "AMS-A slot 2"
+    },
+    {
+      "ams_id": 0,
+      "place_label_for_printer_H2C": "H2C AMS-A slot 3",
+      "tray_id": 2,
+      "tray_label": "AMS-A slot 3"
+    },
+    {
+      "ams_id": 0,
+      "place_label_for_printer_H2C": "H2C AMS-A slot 4",
+      "tray_id": 3,
+      "tray_label": "AMS-A slot 4"
+    },
+    {
+      "ams_id": 1,
+      "place_label_for_printer_H2C": "H2C AMS-B slot 1",
+      "tray_id": 0,
+      "tray_label": "AMS-B slot 1"
+    },
+    {
+      "ams_id": 1,
+      "place_label_for_printer_H2C": "H2C AMS-B slot 2",
+      "tray_id": 1,
+      "tray_label": "AMS-B slot 2"
+    },
+    {
+      "ams_id": 1,
+      "place_label_for_printer_H2C": "H2C AMS-B slot 3",
+      "tray_id": 2,
+      "tray_label": "AMS-B slot 3"
+    },
+    {
+      "ams_id": 1,
+      "place_label_for_printer_H2C": "H2C AMS-B slot 4",
+      "tray_id": 3,
+      "tray_label": "AMS-B slot 4"
+    },
+    {
+      "ams_id": 2,
+      "place_label_for_printer_H2C": "H2C AMS-C slot 1",
+      "tray_id": 0,
+      "tray_label": "AMS-C slot 1"
+    },
+    {
+      "ams_id": 2,
+      "place_label_for_printer_H2C": "H2C AMS-C slot 2",
+      "tray_id": 1,
+      "tray_label": "AMS-C slot 2"
+    },
+    {
+      "ams_id": 2,
+      "place_label_for_printer_H2C": "H2C AMS-C slot 3",
+      "tray_id": 2,
+      "tray_label": "AMS-C slot 3"
+    },
+    {
+      "ams_id": 2,
+      "place_label_for_printer_H2C": "H2C AMS-C slot 4",
+      "tray_id": 3,
+      "tray_label": "AMS-C slot 4"
+    },
+    {
+      "ams_id": 3,
+      "place_label_for_printer_H2C": "H2C AMS-D slot 1",
+      "tray_id": 0,
+      "tray_label": "AMS-D slot 1"
+    },
+    {
+      "ams_id": 3,
+      "place_label_for_printer_H2C": "H2C AMS-D slot 2",
+      "tray_id": 1,
+      "tray_label": "AMS-D slot 2"
+    },
+    {
+      "ams_id": 3,
+      "place_label_for_printer_H2C": "H2C AMS-D slot 3",
+      "tray_id": 2,
+      "tray_label": "AMS-D slot 3"
+    },
+    {
+      "ams_id": 3,
+      "place_label_for_printer_H2C": "H2C AMS-D slot 4",
+      "tray_id": 3,
+      "tray_label": "AMS-D slot 4"
+    },
+    {
+      "ams_id": 128,
+      "place_label_for_printer_H2C": "H2C HT-A",
+      "tray_id": 0,
+      "tray_label": "HT-A"
+    },
+    {
+      "ams_id": 129,
+      "place_label_for_printer_H2C": "H2C HT-B",
+      "tray_id": 0,
+      "tray_label": "HT-B"
+    },
+    {
+      "ams_id": 255,
+      "place_label_for_printer_H2C": "H2C External slot 1",
+      "tray_id": 0,
+      "tray_label": "External slot 1"
+    }
+  ]
+}

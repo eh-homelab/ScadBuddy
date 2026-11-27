@@ -16,7 +16,7 @@ from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from scadbuddy.core.settings import check_approval_timeout
-from scadbuddy.flows.grants import GrantSpec, GrantStatus, RuleUse
+from scadbuddy.flows.grants import GrantSpec, GrantStatus, RuleUse, own_expiry_passed
 from scadbuddy.orders.models import ItemStatus, OrderStatus
 
 EventKind = Literal[
@@ -294,6 +294,9 @@ class StandingGrant(BaseModel):
             and self.expires_at is not None
             and now < self.expires_at
         )
+
+    def expired(self, now: datetime) -> bool:
+        return own_expiry_passed(self.expires_at, self.spec, now)
 
 
 class Fire(BaseModel):

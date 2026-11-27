@@ -44,8 +44,17 @@ from scadbuddy.bambuddy.models import PrinterStatus
 from scadbuddy.bambuddy.trays import EXTERNAL, loading_trays, place_label, seen_trays
 from scadbuddy.filament import ledger, prints, tags
 from scadbuddy.filament import models as m
-from scadbuddy.filament.inventory import FilamentInventory, FoundBy
-from scadbuddy.filament.locations import LocationStore
+from scadbuddy.filament.catalog import resolve_or_add
+from scadbuddy.filament.inventory import (
+    _ADDED_SORT,
+    FilamentInventory,
+    FoundBy,
+    try_tray_lock,
+)
+from scadbuddy.filament.locations import LocationStore, NoAmsKindError
+from scadbuddy.filament.spools import FilamentSpoolStore
+from scadbuddy.filament.types import SpoolTypeStore
+from scadbuddy.filament.unknown_tray_rows import clear_on, note_on, rows_on
 from scadbuddy.printers.lan_models import LanReport
 from scadbuddy.printers.models import PrinterRow
 from scadbuddy.printers.status import RUNNING, is_fresh, status_from_report
@@ -58,6 +67,9 @@ logger = logging.getLogger(__name__)
 #: Who a watch-booked event names, and a backstop's.
 WATCH_ACTOR: Final = "system:printer-watch"
 BACKSTOP_ACTOR: Final = "system:capture-backstop"
+#: The ``data.by`` of the ``created`` event of a spool capture makes from an unknown RFID
+#: tray (#7143).
+RFID_MADE: Final = "rfid_capture"
 
 
 @dataclass(frozen=True)
@@ -73,6 +85,20 @@ class CaptureResult:
             self.loaded + other.loaded,
             self.unloaded + other.unloaded,
             self.readings + other.readings,
+        )
+
+
+@dataclass(frozen=True)
+class UnknownTrayResult:
+    """What one `note_unknown` did: spools made, rows noted, rows cleared."""
+
+    made: int = 0
+    noted: int = 0
+    cleared: int = 0
+
+    def __add__(self, other: UnknownTrayResult) -> UnknownTrayResult:
+        return UnknownTrayResult(
+            self.made + other.made, self.noted + other.noted, self.cleared + other.cleared
         )
 
 
@@ -273,6 +299,66 @@ def _holder(conn: Conn, printer: UUID, seen: SeenTray) -> tuple[UUID | None, Fou
     return (None, None) if linked is None else (linked, "link")
 
 
+def _book_reading(
+    conn: Conn,
+    printer: UUID,
+    spool: UUID,
+    seen: SeenTray,
+    *,
+    actor: str,
+    at: datetime,
+    printing: bool,
+    job: str | None,
+) -> None:
+    ledger.record(
+        conn,
+        spool,
+        "ams_reading",
+        source="ams_remain",
+        printer=printer,
+        ams_id=seen.ams_id,
+        tray_id=seen.tray_id,
+        actor=actor,
+        at=at,
+        data={"remain_pct": seen.remain, "printing": printing, "job": job},
+    )
+
+
+def _book_load(
+    conn: Conn,
+    printer: UUID,
+    name: str,
+    seen: SeenTray,
+    holder: UUID,
+    found_by: FoundBy | None,
+    *,
+    actor: str,
+    at: datetime,
+    printing: bool,
+    job: str | None,
+) -> CaptureResult:
+    """Book ``holder`` as loaded in the tray ``seen`` shows: the tray's place, the
+    ``loaded`` event, the move, and an ``ams_reading`` when the tray sent a ``remain``."""
+    label = place_label(name, seen.ams_id, seen.tray_id)
+    target = LocationStore.ensure_ams_on(conn, printer, seen.ams_id, seen.tray_id, label=label)
+    ledger.record(
+        conn,
+        holder,
+        "loaded",
+        printer=printer,
+        ams_id=seen.ams_id,
+        tray_id=seen.tray_id,
+        actor=actor,
+        at=at,
+        data={"by": found_by},
+    )
+    FilamentInventory.place_on(conn, holder, target.id, seen, actor=actor, at=at)
+    if seen.remain is None:
+        return CaptureResult(loaded=1)
+    _book_reading(conn, printer, holder, seen, actor=actor, at=at, printing=printing, job=job)
+    return CaptureResult(loaded=1, readings=1)
+
+
 def reconcile(
     conn: Conn, printer_id: str, report: Mapping[str, Any], seen_at: datetime, *, actor: str
 ) -> CaptureResult:
@@ -324,42 +410,204 @@ def reconcile(
                 )
                 result += CaptureResult(unloaded=1)
             if holder is not None and seen is not None:
-                label = place_label(row.name, ams_id, tray_id)
-                target = LocationStore.ensure_ams_on(conn, printer, ams_id, tray_id, label=label)
-                ledger.record(
+                result += _book_load(
                     conn,
+                    printer,
+                    row.name,
+                    seen,
                     holder,
-                    "loaded",
-                    printer=printer,
-                    ams_id=ams_id,
-                    tray_id=tray_id,
+                    found_by,
                     actor=actor,
                     at=seen_at,
-                    data={"by": found_by},
+                    printing=printing,
+                    job=job,
                 )
-                FilamentInventory.place_on(conn, holder, target.id, seen, actor=actor, at=seen_at)
                 loaded = True
                 loaded_now.add(holder)
-                result += CaptureResult(loaded=1)
         if (
             holder is not None
             and seen is not None
             and seen.remain is not None
-            and (loaded or _reading_due(conn, holder, (printer, ams_id, tray_id), seen.remain))
+            and not loaded
+            and _reading_due(conn, holder, (printer, ams_id, tray_id), seen.remain)
         ):
-            ledger.record(
-                conn,
-                holder,
-                "ams_reading",
-                source="ams_remain",
-                printer=printer,
-                ams_id=ams_id,
-                tray_id=tray_id,
-                actor=actor,
-                at=seen_at,
-                data={"remain_pct": seen.remain, "printing": printing, "job": job},
+            _book_reading(
+                conn, printer, holder, seen, actor=actor, at=seen_at, printing=printing, job=job
             )
             result += CaptureResult(readings=1)
+    return result
+
+
+class _TrayBusyError(Exception):
+    """A link or an unlink holds the tray's lock."""
+
+
+def _spool_from_tag(
+    conn: Conn,
+    printer: UUID,
+    name: str,
+    seen: SeenTray,
+    *,
+    actor: str,
+    at: datetime,
+    printing: bool,
+    job: str | None,
+) -> UUID:
+    """Make a spool for a tray with an RFID key that no spool holds (#7143), place it in
+    the tray and clear the tray's row. The caller runs this in a savepoint. `_TrayBusyError`
+    when the tray's lock or its tag's row lock is not free. When a spool holds the tray by
+    now, that spool is returned and nothing is made."""
+    if not try_tray_lock(conn, printer, seen.ams_id, seen.tray_id):
+        raise _TrayBusyError()
+    uid, tray = clean_tag_uid(seen.tag_uid), clean_tray_uuid(seen.tray_uuid)
+    kind: m.TagKind = "bambu_mifare" if tray is not None else "other"
+    # A bind locks the tag before its spools (#6261), but the caller holds spools already,
+    # so a locked tag is skipped, not waited on (as `tags.seen_on` skips it). The tag is
+    # locked before the holder is read, so a bind that commits first is seen.
+    keyed = "SELECT id FROM filament_tags WHERE tag_uid = %s OR tray_uuid = %s"
+    exists = conn.execute(keyed, (uid, tray)).fetchall()
+    free = conn.execute(keyed + " FOR UPDATE SKIP LOCKED", (uid, tray)).fetchall()
+    if len(free) < len(exists):
+        raise _TrayBusyError()
+    holder, _ = FilamentInventory.holder_on(conn, printer, seen)
+    if holder is not None:
+        clear_on(conn, printer, seen.ams_id, seen.tray_id)
+        return holder
+    FilamentSpoolStore.tag_on(conn, uid, tray, kind)
+    found = SpoolTypeStore.match_tray(conn, seen.material or "", seen.rgba, seen.tray_info_idx)
+    if found is not None:
+        made = conn.execute(
+            "INSERT INTO filament_spools (type_id) VALUES (%s) RETURNING id", (found.id,)
+        ).fetchone()
+    else:
+        material = resolve_or_add(
+            conn, "materials", (seen.material or "").strip(), sort_order=_ADDED_SORT
+        )
+        made = conn.execute(
+            "INSERT INTO filament_spools (material_id, rgba) VALUES (%s, %s) RETURNING id",
+            (material, seen.rgba),
+        ).fetchone()
+    assert made is not None
+    spool: UUID = made["id"]
+    ledger.record(
+        conn,
+        spool,
+        "created",
+        printer=printer,
+        ams_id=seen.ams_id,
+        tray_id=seen.tray_id,
+        actor=actor,
+        at=at,
+        data={"by": RFID_MADE},
+    )
+    created = FilamentSpoolStore.read(conn, spool, check=True)
+    assert created is not None
+    FilamentSpoolStore.bind_on(conn, spool, uid, tray, kind, None, actor)
+    _book_load(
+        conn, printer, name, seen, spool, "tag", actor=actor, at=at, printing=printing, job=job
+    )
+    clear_on(conn, printer, seen.ams_id, seen.tray_id)
+    logger.info(
+        "made a spool from an unknown RFID tag",
+        extra={
+            "printer_id": str(printer),
+            "ams_id": seen.ams_id,
+            "tray_id": seen.tray_id,
+            "number": created.number,
+        },
+    )
+    return spool
+
+
+def _unknown_reading(seen: SeenTray) -> SeenTray:
+    """``seen`` for a row: a ``remain`` outside 0 to 100 is no percent, so it is dropped."""
+    if seen.remain is not None and not 0 <= seen.remain <= 100:
+        return seen.model_copy(update={"remain": None})
+    return seen
+
+
+def note_unknown(
+    conn: Conn, printer_id: str, report: Mapping[str, Any], seen_at: datetime, *, actor: str
+) -> UnknownTrayResult:
+    """Record the trays the report shows loaded that no spool holds (#7143), on ``conn``'s
+    transaction. A tray with an RFID key gets a spool at once (`_spool_from_tag`). An
+    untagged tray gets a row in ``filament_unknown_trays`` (`note_on`) and a place; the
+    owner is asked about it. A tray that is empty, or that a spool holds, loses its row.
+    A tray the report shows loading is left alone, and so is one whose lock is busy: the
+    next report looks again. The external holders get no row. Trays of a unit the report
+    does not show are left alone, as `reconcile` leaves them."""
+    row = PrinterStore.read_on(conn, printer_id)
+    if row is None:
+        return UnknownTrayResult()
+    printer = UUID(printer_id)
+    status = _status(row, report, seen_at)
+    filled = {(t.ams_id, t.tray_id): t for t in seen_trays(status)}
+    loading = loading_trays(status)
+    places, _, _ = _holders(conn, printer_id)
+    units = {unit.id for unit in status.ams}
+    keys = set(_walk(status, report, places))
+    keys |= {(r.ams_id, r.tray_id) for r in rows_on(conn, printer) if r.ams_id in units}
+    state = report.get("gcode_state")
+    printing = isinstance(state, str) and state in RUNNING
+    job = report.get("subtask_name") if printing else None
+    result = UnknownTrayResult()
+    for key in sorted(keys):
+        if key in loading:
+            continue
+        ams_id, tray_id = key
+        seen = filled.get(key)
+        if seen is None:
+            # A busy tray lock means a link or a resolve is settling the tray (D11).
+            if try_tray_lock(conn, printer, ams_id, tray_id):
+                result += UnknownTrayResult(cleared=int(clear_on(conn, printer, ams_id, tray_id)))
+            continue
+        holder, _ = FilamentInventory.holder_on(conn, printer, seen)
+        if holder is not None:
+            if try_tray_lock(conn, printer, ams_id, tray_id):
+                result += UnknownTrayResult(cleared=int(clear_on(conn, printer, ams_id, tray_id)))
+            continue
+        if seen.tray_uuid is not None or seen.tag_uid is not None:
+            try:
+                with conn.transaction():
+                    _spool_from_tag(
+                        conn,
+                        printer,
+                        row.name,
+                        seen,
+                        actor=actor,
+                        at=seen_at,
+                        printing=printing,
+                        job=job,
+                    )
+                result += UnknownTrayResult(made=1)
+                continue
+            except _TrayBusyError:
+                continue
+            except Exception as error:
+                logger.warning(
+                    prints.FILAMENT_CAPTURE_FAILED,
+                    extra={
+                        "printer_id": printer_id,
+                        "what": "rfid_spool",
+                        "error": type(error).__name__,
+                    },
+                )
+        if ams_id == EXTERNAL:
+            continue
+        if not try_tray_lock(conn, printer, ams_id, tray_id):
+            continue
+        holder, _ = FilamentInventory.holder_on(conn, printer, seen)
+        if holder is not None:
+            result += UnknownTrayResult(cleared=int(clear_on(conn, printer, ams_id, tray_id)))
+            continue
+        try:
+            with conn.transaction():
+                label = place_label(row.name, ams_id, tray_id)
+                LocationStore.ensure_ams_on(conn, printer, ams_id, tray_id, label=label)
+        except NoAmsKindError:
+            pass
+        note_on(conn, printer, _unknown_reading(seen), seen_at)
+        result += UnknownTrayResult(noted=1)
     return result
 
 
@@ -384,6 +632,18 @@ def reconcile_all(
                 report = dict(row["report"])
                 lock(conn, touched(conn, printer_id, report, None, row["seen_at"]))
                 total += reconcile(conn, printer_id, report, row["seen_at"], actor=BACKSTOP_ACTOR)
+                try:
+                    with conn.transaction():
+                        note_unknown(conn, printer_id, report, row["seen_at"], actor=BACKSTOP_ACTOR)
+                except Exception as error:
+                    logger.warning(
+                        prints.FILAMENT_CAPTURE_FAILED,
+                        extra={
+                            "printer_id": printer_id,
+                            "what": "backstop_unknown",
+                            "error": type(error).__name__,
+                        },
+                    )
         except Exception as error:
             logger.warning(
                 prints.FILAMENT_CAPTURE_FAILED,

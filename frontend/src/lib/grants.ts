@@ -82,10 +82,17 @@ export function grantProblems(
   return problems
 }
 
-/** The grant's state as one word: revoked and expired are what an approved grant became. */
-export function grantStatus(grant: Pick<FlowGrantView, 'revoked_at' | 'status' | 'in_force'>): string {
+type GrantState = Pick<FlowGrantView, 'revoked_at' | 'status' | 'in_force' | 'expired'>
+
+/** The grant's state in a few words: revoked, expired and no longer in force (a grant above
+ * it ended) are what an approved grant became. */
+export function grantStatus(grant: GrantState): string {
   if (grant.revoked_at) return 'Revoked'
   if (grant.status === 'requested') return 'Requested'
   if (grant.status === 'declined') return 'Declined'
-  return grant.in_force ? 'In force' : 'Expired'
+  if (grant.in_force) return 'In force'
+  // `expired` is the grant's own expiry, by the server's clock (#8220); `in_force` also
+  // covers its chain (the parent and standing grants), so a grant can be out of force
+  // before it expires (#8188).
+  return grant.expired ? 'Expired' : 'No longer in force'
 }
