@@ -180,7 +180,9 @@ _MONTHS = ("jan", "feb", "mar", "apr", "may", "jun", "jul", "aug", "sep", "oct",
 
 @cache
 def _zone_names() -> frozenset[str]:
-    """Every zone name this machine's zone data holds, in its exact case."""
+    """Every zone name this machine's zone data holds, in its exact case. Kept for the
+    process's life: after a ``zoneinfo.reset_tzpath()`` it would no longer match what
+    ``ZoneInfo`` reads, and nothing calls that (#8082)."""
     return frozenset(available_timezones())
 
 

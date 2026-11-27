@@ -15,8 +15,10 @@ no binary and no storage of its own: **the host supplies the `Store` and the
   message's `seq` and the recipients' session ids), `Inbox` (a page above the
   agent's cursor; moves the cursor unless `peek`) and `Rewind`. It returns
   `ErrUnknownAgent`, `ErrUnknownChannel` (a post to or a leave of a channel nobody
-  has joined; `fleet_join` creates channels) and `ErrNotMember`; every argument it
-  gets is validated.
+  has joined; `fleet_join` creates channels), `ErrNotMember`, and for a DM to a
+  virtual sender (a reserved one-way name, such as `rotator`) a
+  `VirtualSenderError(reject)`: `errors.Is` finds `ErrVirtualSender`, and its text is
+  the sender's reject message alone. Every argument it gets is validated.
 - `Bus`: `Publish(sessionIDs)` after a send, and `Subscribe(ctx, func(Event))`,
   which runs until `ctx` ends. An `Event` names the recipients, or says `Resync`
   (events may have been lost) so that every watched inbox is notified.
@@ -41,7 +43,10 @@ no binary and no storage of its own: **the host supplies the `Store` and the
   as activity, so a timeout also ends a session that only holds a GET stream.
 
 An agent is its Claude Code `session_id`, a canonical lower-case UUID; its
-handle is the first 8 hex characters. A channel is `^[a-z0-9-]{1,40}$`.
+handle is the first 8 hex characters. A channel is `^[a-z0-9-]{1,40}$`. A DM's
+`agent` is a handle, or a name: the channel pattern with a character that is no hex
+digit, so no name is ever a handle. The service passes a name to the store, which
+refuses a virtual sender's with its reject message.
 
 ## Tools
 
@@ -51,7 +56,7 @@ Every tool has a required `session_id`. Validation errors are tool errors
 | Tool | What it does |
 |---|---|
 | `fleet_join` / `fleet_leave` | Join (and create) or leave a channel |
-| `fleet_send` | A DM (`agent`, a handle) or a channel post (`channel`), exactly one. Returns `seq` |
+| `fleet_send` | A DM (`agent`, a handle) or a channel post (`channel`), exactly one. Returns `seq`. A DM to a virtual sender is a tool error with its reject message |
 | `fleet_inbox` | Messages after the cursor, paged (`limit`; a host may also bound a page's bytes, as ScadBuddy's core does at 4 MiB of text); moves the cursor unless `peek` |
 | `fleet_rewind` | Sets the cursor back to a `seq` (0 up to the cursor; a host's store refuses one past it with `ErrBadSeq`) |
 | `fleet_channels` | Channels, members, this agent's unread count |

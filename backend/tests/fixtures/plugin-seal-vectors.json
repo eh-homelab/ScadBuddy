@@ -1,0 +1,136 @@
+{
+  "kek_b64": "WlpaWlpaWlpaWlpaWlpaWlpaWlpaWlpaWlpaWlpaWlo=",
+  "kek_id": "60bf07c488aad18f",
+  "plugins": [
+    {
+      "name": "docs",
+      "url": "https://mcp.example/mcp/",
+      "auth_header": "X-Key",
+      "secret": "sk-1",
+      "aad": "ai_plugins:{\"name\":\"docs\",\"url\":\"https://mcp.example/mcp/\",\"auth_header\":\"X-Key\"}",
+      "plaintext": "sk-1",
+      "secret_sealed_b64": "AmBhYmNkZWZnaGlqa3j6upAjs8HkaY1Vz+fUxKXfQyQ0",
+      "dek_sealed_b64": "Amxtbm9wcXJzdHV2dxnFlwGCql+O0ixeEJi+pSM5HO1/l6Wzi5JRPtG53CR5PyBFzIPRf9HQO92l3+Cb4g==",
+      "kek_id": "60bf07c488aad18f"
+    },
+    {
+      "name": "odd-one",
+      "url": "https://mcp.example/a\"b\\c\n\t\u0001\u001f é 🔑   </script> & <",
+      "auth_header": "Authorization",
+      "secret": "a\"b\\c\n\t\u0001\u001f é 🔑   </script> & <",
+      "aad": "ai_plugins:{\"name\":\"odd-one\",\"url\":\"https://mcp.example/a\\\"b\\\\c\\n\\t\\u0001\\u001f é 🔑   </script> & <\",\"auth_header\":\"Authorization\"}",
+      "plaintext": "a\"b\\c\n\t\u0001\u001f é 🔑   </script> & <",
+      "secret_sealed_b64": "AqChoqOkpaanqKmqq8HzyN9m51JZJHmRpglj4p1hLRJsP6qaMWFPxR+k8RUSPArkMYeovgKzw/RScKLv/OhYEg==",
+      "dek_sealed_b64": "Aqytrq+wsbKztLW2txPALmidfQzBOiZSIlACSngslEa8riZmZvta+VzANOEYKPlH+MnfkC/bdVVAmCNYzA==",
+      "kek_id": "60bf07c488aad18f"
+    }
+  ],
+  "grants": [
+    {
+      "plugin": "docs",
+      "plugin_url": "https://mcp.example/mcp/",
+      "resource": "https://mcp.example/mcp/",
+      "issuer": "https://auth.example",
+      "token_endpoint": "https://auth.example/token",
+      "client_id": "client-1",
+      "secret": {
+        "access_token": "at-1"
+      },
+      "aad": "ai_plugin_oauth:{\"plugin\":\"docs\",\"plugin_url\":\"https://mcp.example/mcp/\",\"resource\":\"https://mcp.example/mcp/\",\"issuer\":\"https://auth.example\",\"token_endpoint\":\"https://auth.example/token\",\"client_id\":\"client-1\"}",
+      "plaintext": "{\"access_token\":\"at-1\"}",
+      "secret_sealed_b64": "AuDh4uPk5ebn6Onq60leJt+At7yG6W7kLeG3XirVV/9QK89UFRd2feenkG1cMJXaqZ/UWw==",
+      "dek_sealed_b64": "Auzt7u/w8fLz9PX298m4GIV4RwInosaSuYUoAYHlx77EIMOEtqTtVWsUKn6qBH7HShfiO4aSloL6Jrmqog==",
+      "kek_id": "60bf07c488aad18f"
+    },
+    {
+      "plugin": "odd-one",
+      "plugin_url": "https://x/a\"b\\c\n\t\u0001\u001f é 🔑   </script> & <",
+      "resource": "a\"b\\c\n\t\u0001\u001f é 🔑   </script> & <",
+      "issuer": "é",
+      "token_endpoint": "https://t/",
+      "client_id": "a\"b\\c\n\t\u0001\u001f é 🔑   </script> & <",
+      "secret": {
+        "access_token": "a\"b\\c\n\t\u0001\u001f é 🔑   </script> & <",
+        "refresh_token": "rt-1",
+        "client_secret": "cs-a\"b\\c\n\t\u0001\u001f é 🔑   </script> & <"
+      },
+      "aad": "ai_plugin_oauth:{\"plugin\":\"odd-one\",\"plugin_url\":\"https://x/a\\\"b\\\\c\\n\\t\\u0001\\u001f é 🔑   </script> & <\",\"resource\":\"a\\\"b\\\\c\\n\\t\\u0001\\u001f é 🔑   </script> & <\",\"issuer\":\"é\",\"token_endpoint\":\"https://t/\",\"client_id\":\"a\\\"b\\\\c\\n\\t\\u0001\\u001f é 🔑   </script> & <\"}",
+      "plaintext": "{\"access_token\":\"a\\\"b\\\\c\\n\\t\\u0001\\u001f é 🔑   </script> & <\",\"refresh_token\":\"rt-1\",\"client_secret\":\"cs-a\\\"b\\\\c\\n\\t\\u0001\\u001f é 🔑   </script> & <\"}",
+      "secret_sealed_b64": "AiAhIiMkJSYnKCkqK7cbbfIqMSKErdGNZJcGPEWpGMcTD/1pfUUILaWkdtbD8iiwvuXcP40wmDBmFf9uOUW/uXG+FQS8ND7HsqiWi1nCyGwmugACEq0QFm04jCr7+BrvJ7TlgPD5D5pP5ClWCrD5ET6VifIz/m3uCHlw97lsIHElrSfslr2+niXAheByLLPtHs2982MMhlt6xbeyGWCRTa4KiCNyzK9S9ZquPERXYgsJ/Ou5+Fl4yRGq9fHx+4g=",
+      "dek_sealed_b64": "AiwtLi8wMTIzNDU2N4nQ1nVzZy3zp0pckypxs69mdZ0BKUM5gwTMoHY8irjmCYNCQl3e8blqnyyzZhQCag==",
+      "kek_id": "60bf07c488aad18f"
+    },
+    {
+      "plugin": "docs",
+      "plugin_url": "u",
+      "resource": "r",
+      "issuer": "i",
+      "token_endpoint": "t",
+      "client_id": "c",
+      "secret": {
+        "access_token": "at",
+        "client_secret": "cs"
+      },
+      "aad": "ai_plugin_oauth:{\"plugin\":\"docs\",\"plugin_url\":\"u\",\"resource\":\"r\",\"issuer\":\"i\",\"token_endpoint\":\"t\",\"client_id\":\"c\"}",
+      "plaintext": "{\"access_token\":\"at\",\"client_secret\":\"cs\"}",
+      "secret_sealed_b64": "AmBhYmNkZWZnaGlqaxpE+iimpMTgBKLGpLZzs1TXCmhmZPHj1Vb1Fl1g6H4xLU2aMzsc8mJnH6XM9LFimFKKmTxB6bz6ioQ=",
+      "dek_sealed_b64": "Amxtbm9wcXJzdHV2d21Iks88sCk//tXHkODHxuQ5HO1/l6Wzi5JRPtG53CR5PyBFzIPRf9HQO92l3+Cb4g==",
+      "kek_id": "60bf07c488aad18f"
+    }
+  ],
+  "flows": [
+    {
+      "state_hash": "abababababababababababababababababababababababababababababababab",
+      "plugin": "docs",
+      "plugin_url": "https://mcp.example/mcp/",
+      "meta": {
+        "issuer": "https://auth.example",
+        "authorization_endpoint": "https://auth.example/authorize",
+        "token_endpoint": "https://auth.example/token",
+        "iss_supported": true,
+        "resource": "https://mcp.example/mcp/",
+        "scope": null,
+        "client_id": "client-1",
+        "auth_method": "none",
+        "registration": "dynamic",
+        "redirect_uri": "https://scadbuddy.example/api/v1/ai/plugin-oauth/callback"
+      },
+      "secret": {
+        "state": "st",
+        "verifier": "ve"
+      },
+      "aad": "ai_plugin_oauth_flows:{\"state_hash\":\"abababababababababababababababababababababababababababababababab\",\"plugin\":\"docs\",\"plugin_url\":\"https://mcp.example/mcp/\",\"issuer\":\"https://auth.example\",\"token_endpoint\":\"https://auth.example/token\",\"client_id\":\"client-1\",\"redirect_uri\":\"https://scadbuddy.example/api/v1/ai/plugin-oauth/callback\"}",
+      "plaintext": "{\"state\":\"st\",\"verifier\":\"ve\"}",
+      "secret_sealed_b64": "AqChoqOkpaanqKmqq6RYqFC4CT8NiTosgF9t5VR7LQNEPdT2EkRNdcKmLajwyFhv10bt8A/6gvBeIqs=",
+      "dek_sealed_b64": "Aqytrq+wsbKztLW2t+tNCuzDpZcyqCAQfo7OstQslEa8riZmZvta+VzANOEYKPlH+MnfkC/bdVVAmCNYzA==",
+      "kek_id": "60bf07c488aad18f"
+    },
+    {
+      "state_hash": "cdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcd",
+      "plugin": "odd-one",
+      "plugin_url": "a\"b\\c\n\t\u0001\u001f é 🔑   </script> & <",
+      "meta": {
+        "issuer": "https://auth.example",
+        "authorization_endpoint": "https://auth.example/authorize",
+        "token_endpoint": "https://auth.example/token",
+        "iss_supported": true,
+        "resource": "https://mcp.example/mcp/",
+        "scope": null,
+        "client_id": "a\"b\\c\n\t\u0001\u001f é 🔑   </script> & <",
+        "auth_method": "none",
+        "registration": "dynamic",
+        "redirect_uri": "é"
+      },
+      "secret": {
+        "state": "a\"b\\c\n\t\u0001\u001f é 🔑   </script> & <",
+        "verifier": "v",
+        "client_secret": "a\"b\\c\n\t\u0001\u001f é 🔑   </script> & <"
+      },
+      "aad": "ai_plugin_oauth_flows:{\"state_hash\":\"cdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcd\",\"plugin\":\"odd-one\",\"plugin_url\":\"a\\\"b\\\\c\\n\\t\\u0001\\u001f é 🔑   </script> & <\",\"issuer\":\"https://auth.example\",\"token_endpoint\":\"https://auth.example/token\",\"client_id\":\"a\\\"b\\\\c\\n\\t\\u0001\\u001f é 🔑   </script> & <\",\"redirect_uri\":\"é\"}",
+      "plaintext": "{\"state\":\"a\\\"b\\\\c\\n\\t\\u0001\\u001f é 🔑   </script> & <\",\"verifier\":\"v\",\"client_secret\":\"a\\\"b\\\\c\\n\\t\\u0001\\u001f é 🔑   </script> & <\"}",
+      "secret_sealed_b64": "AuDh4uPk5ebn6Onq63jPhhqftj4eve29TNyGc+HVV+1HKd5CRHIgc9DgnBM6cajA2NqqU20369jjGfMNtZ1oyS5lxWjb432nqBKYcPsXIpPoij7sh2GuFoJ9Wv5CeUwahgcDomg0REo7rQyaJuix61yeHPJ5BpvLrG0dMEjBq+Iv9txBKcxsaq0mKmEBx2blc2ggQUW6a0VDKnsbWCHPE4US86sn/8cyEc1UVlw=",
+      "dek_sealed_b64": "Auzt7u/w8fLz9PX293qsavLsDY4BWGCM9E7zLJjlx77EIMOEtqTtVWsUKn6qBH7HShfiO4aSloL6Jrmqog==",
+      "kek_id": "60bf07c488aad18f"
+    }
+  ]
+}
