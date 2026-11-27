@@ -35,8 +35,9 @@ parent's keys; its own subschema for a key wins (`inventory/kinds.py:1-5`).
 
 Each kind has a `number` from the sequence `item_kinds_number_seq`
 (`20261126T0218Z_inventory_class.sql`, step 1a). Its code is `K-<number>`, which
-`GET /api/v1/codes/{code}` resolves (`codes/resolve.py` `PREFIXES`). A number is never
-reused. An item has its own code, `I-<number>` (#7169), which the same route resolves. The kinds that existed before that migration keep their text ids and got numbers
+`GET /api/v1/codes/{code}` resolves (`codes/resolve.py` `PREFIXES`). An item has its own
+code, `I-<number>` (#7169), which the same route resolves. A kind's number is never
+reused. The kinds that existed before that migration keep their text ids and got numbers
 in `created_at`, then `id` order. A kind that ScadBuddy makes has the id `k<number>`. An id
 of `k` and digits must be `'k' || number` (`item_kinds_made_id_check`), so a person cannot
 choose one (`KindInput`, 422).

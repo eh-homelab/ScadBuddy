@@ -1378,7 +1378,8 @@ only the sleeps move; a budget on the real clock fails on a slow runner (#6252).
   (`L` is `filament_locations`, `S` is `filament_spools`, `K` is `item_kinds`, kind `item_kind`, `T` is `filament_spool_types`, kind `spool_type`, `I` is `items`, kind `item`, #7169;
   `NAME_SQL` is each table's name; the item kind is #6949) and `resolve` (`{kind, id, code, name, archived}`; an archived row still resolves; an
   item kind's `id` is its text id). Route `GET /api/v1/codes/{code}` (`api/codes.py`,
-  404 `code_unknown`). A new prefix is one entry in `PREFIXES`.
+  404 `code_unknown`). A new prefix is an entry in `codes/resolve.py` `PREFIXES` and in Go
+  `tools/go/core/internal/scan/resolve.go` `prefixes`.
 - `backend/scadbuddy/store/` — the blob store. Phase 1: the directory-shaped `BlobStore`
   Protocol and `LocalBlobStore` (`local.py`, a piece in `data/blobs/<piece_key>/`),
   `BlobRefs` (`refs.py`, the `blob_refs` table that keeps a blob alive) and `sweep_blobs`
