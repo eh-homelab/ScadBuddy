@@ -104,6 +104,51 @@ def test_a_kind_create_starts_kind_create(client: TestClient, go: Go) -> None:
     assert start.options["summary"] == "KindCreate item_kind:bolt"
 
 
+def test_a_kind_reads_its_number_and_code(client: TestClient, go: Go) -> None:
+    """Every kind has a number and the code K-<number> (#6955, the owner's decision of
+    2026-11-27); the read keeps both."""
+    go.reads["/kinds"] = (200, answer("KindList"))
+
+    listed = client.get(f"{API}/kinds").json()["kinds"]
+
+    assert listed
+    assert all(kind["code"] == f"K-{kind['number']}" for kind in listed)
+    assert [k["number"] for k in listed] == [k["number"] for k in answer("KindList")["kinds"]]
+
+
+def test_a_kind_create_with_no_id_sends_none(client: TestClient, go: Go) -> None:
+    """With no id, Go numbers the kind: k<number>."""
+    go.temporal.answers.append(done(201, answer("KindCreate")))
+    body = {"name": "Bolt", "parent_id": "fastener"}
+
+    made = client.post(f"{API}/kinds", json=body, headers=press())
+
+    assert made.status_code == 201, made.text
+    assert go.start.arg["body"] == body
+    assert go.start.options["summary"] == "KindCreate item_kind"
+
+
+@pytest.mark.parametrize("kind_id", ["k1", "k12", "k007"])
+def test_a_typed_id_of_k_and_digits_is_refused(client: TestClient, go: Go, kind_id: str) -> None:
+    """`k<number>` is a made kind's id (item_kinds_made_id_check): 422 before any start."""
+    refused = client.post(f"{API}/kinds", json={"id": kind_id, "name": "X"}, headers=press())
+
+    assert refused.status_code == 422, refused.text
+    assert "made kind" in refused.text
+    assert go.temporal.starts == []
+
+
+def test_gos_made_id_refusal_passes_through(client: TestClient, go: Go) -> None:
+    """Go's own 422 `bad_input` for a made id (the golden `KindCreateMadeID`) is the
+    answer, as Go wrote it."""
+    go.temporal.answers.append(done(422, answer("KindCreateMadeID")))
+
+    refused = client.post(f"{API}/kinds", json={"id": "kit", "name": "X"}, headers=press())
+
+    _code(refused, 422, "bad_input")
+    assert refused.json()["detail"] == answer("KindCreateMadeID")["detail"]
+
+
 def test_a_kind_patch_sends_its_nulls(client: TestClient, go: Go) -> None:
     """A patch's null opens a class key or makes the kind a root; an absent field is
     left out (Task 10). `steps` replaces the kind's own."""
@@ -634,3 +679,21 @@ def test_the_entity_property_schema_serves_other_kinds_and_refuses_a_missing_ent
         "bad_entity_ref",
         ENTITY_PROBLEMS,
     )
+
+
+def test_the_property_route_keeps_a_special_types_required_key(client: TestClient) -> None:
+    """`PATCH /entities/{ref}/properties` refuses to empty a printer item's `model_code`,
+    and its description says so."""
+    pg_pool = _state(client).refs.pool
+    fdm = insert_kind(pg_pool, parent_id="printer", tracking="none", special_type="printer")
+    item = str(insert_item(pg_pool, fdm, name="H2C"))
+    url = f"/api/v1/entities/item:{item}/properties"
+    assert client.patch(url, json={"set": {"model_code": "O1C"}}).status_code == 200
+
+    emptied = client.patch(url, json={"set": {"model_code": None}})
+
+    assert emptied.status_code == 422, emptied.text
+    assert emptied.json()["missing"] == ["model_code"]
+    spec = client.get("/openapi.json").json()
+    refused = spec["paths"]["/api/v1/entities/{ref}/properties"]["patch"]["responses"]["422"]
+    assert "`model_code`" in refused["description"]

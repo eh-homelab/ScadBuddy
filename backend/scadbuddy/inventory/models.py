@@ -93,6 +93,10 @@ class ItemKind(BaseModel):
     archived_at: datetime | None
     #: Its unarchived items, not its descendants'.
     item_count: int
+    #: The kind's number from `item_kinds_number_seq`, and its short code `K-<number>`
+    #: (#6955, the owner's decision of 2026-11-27).
+    number: int
+    code: str
     #: The class keys the kind answers itself (C22); null leaves the key to its children.
     nature: Nature | None = None
     role: Role | None = None
@@ -114,9 +118,13 @@ class KindInput(BaseModel):
 
     model_config = ConfigDict(extra="forbid")
 
-    id: str = Field(
+    id: str | None = Field(
+        default=None,
         pattern=KIND_ID,
-        description="Not `k` and digits only: that id is a made kind's, `k` and its number.",
+        description=(
+            "Optional: with none, the kind is `k` and its number. Not `k` and digits only: "
+            "that id is a made kind's, `k` and its number."
+        ),
     )
     name: Text = Field(min_length=1, max_length=100)
     parent_id: str | None = Field(default=None, pattern=KIND_ID)
@@ -134,9 +142,9 @@ class KindInput(BaseModel):
 
     @field_validator("id")
     @classmethod
-    def _not_a_made_id(cls, value: str) -> str:
+    def _not_a_made_id(cls, value: str | None) -> str | None:
         # `item_kinds_made_id_check` (migration `20261126T0218Z_inventory_class.sql`).
-        if MADE_KIND_ID.fullmatch(value):
+        if value is not None and MADE_KIND_ID.fullmatch(value):
             raise ValueError("an id of k and digits is a made kind's id: k and its number")
         return value
 

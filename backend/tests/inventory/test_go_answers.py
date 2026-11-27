@@ -10,7 +10,7 @@ from pathlib import Path
 from typing import Any
 
 import pytest
-from pydantic import BaseModel
+from pydantic import BaseModel, ValidationError
 
 from scadbuddy.api.inventory import ItemList, KindList, KindSchema
 from scadbuddy.api.inventory_stock import LotList, MoveList, UnitList
@@ -18,7 +18,16 @@ from scadbuddy.core.events import InventoryOperationEvent, decode_event
 from scadbuddy.core.problems import ApiError
 from scadbuddy.entities.problems import bad_property_value, missing_required
 from scadbuddy.entities.properties import MissingRequiredProperties
-from scadbuddy.inventory.models import Item, ItemKind, Lot, Moved, RecostResult, Unit
+from scadbuddy.inventory.models import (
+    Item,
+    ItemKind,
+    KindInput,
+    Lot,
+    Moved,
+    RecostResult,
+    Unit,
+)
+from scadbuddy.inventory.problems import PROBLEMS as INVENTORY_PROBLEMS
 
 ROOT = Path(__file__).resolve().parents[3]
 ANSWERS = ROOT / "tools/go/core/internal/inventory/activities/testdata/answers"
@@ -61,9 +70,21 @@ MODELS: dict[str, type[BaseModel]] = {
 
 #: Each recorded refusal, as Python's own builder of that problem writes it (R-K1-33): Go's
 #: port answers what `apply_on` and `check_row` answer.
+def _made_id_refusal() -> str:
+    """KindInput's own message for a typed id of k and digits, which Go's 422 repeats."""
+    try:
+        KindInput(id="k12", name="X")
+    except ValidationError as refused:
+        return str(refused.errors()[0]["ctx"]["error"])
+    raise AssertionError("KindInput took k12")
+
+
 PROBLEMS: dict[str, ApiError] = {
     "ItemCreateMissingProperties": missing_required(MissingRequiredProperties(("material",))),
     "ItemCreateBadPropertyValue": bad_property_value("material", "does not fit 'type'"),
+    "KindCreateMadeID": ApiError(
+        422, _made_id_refusal(), type_=INVENTORY_PROBLEMS + "bad_input", code="bad_input"
+    ),
 }
 
 

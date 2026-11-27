@@ -213,7 +213,9 @@ async def get_entity_property_schema(
         422: {
             "description": _CODES
             + ", `bad_property_value`, or `missing_required_properties` for a patch that"
-            " removes or empties a required key that has a value"
+            " removes or empties a required key that has a value. An item's required keys"
+            " are its item kind's and its special type's: a printer item's `model_code`, a"
+            " filament spool item's `rgba` and `diameter_mm` (R-K1-33)"
         },
     },
 )

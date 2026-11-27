@@ -58,7 +58,9 @@ def kind_item_schema(conn: Conn, kind_id: str) -> dict[str, Any]:
     """What an item of the kind is checked against (R-K1-33), as Go's `itemSchema`: the
     merged schema, its `required` followed by the special type's `requires_properties`,
     each key once. A chain sets at most one special type; with two, Go resolves none and
-    adds no key, and so does this."""
+    adds no key, and so does this. It does not repeat Go's other `chain.Class()` checks (a
+    class conflict also makes Go add no key); a kind save refuses such a chain, so none is
+    stored."""
     schema = merged_schema(conn, kind_id)
     rows = conn.execute(
         "WITH RECURSIVE up (id, parent_id, special_type, depth) AS ("

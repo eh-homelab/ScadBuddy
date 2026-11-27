@@ -159,10 +159,12 @@ async def list_kinds(inventory: InventoryDep, archived: bool = False) -> KindLis
     status_code=status.HTTP_201_CREATED,
     summary="Add an item kind",
     description=(
-        "The id is `^[a-z][a-z0-9_]{0,39}$`. The class keys narrow the parent's and never "
-        "change one it answered; `steps` names the kind's own handlers. `tracking` and "
-        "`life_basis` are still taken for one release: a tracking sets the class keys its "
-        "rule gives, and a life basis names the `life` step's handler. The "
+        "The id is `^[a-z][a-z0-9_]{0,39}$` and optional: with none, the kind is `k` and "
+        "its number (`k12`, code `K-12`). A typed id of `k` and digits is 422. The class "
+        "keys narrow the parent's and never change one it answered; `steps` names the "
+        "kind's own handlers. `tracking` and `life_basis` are still taken for one release: "
+        "a tracking sets the class keys its rule gives, and a life basis names the `life` "
+        "step's handler. The "
         "`attribute_schema` documents and types the properties of the kind's items and "
         "never refuses a key: the subset that `PUT /entity-kinds/{kind}/property-schema` "
         "takes, else 422 `bad_property_schema` and no kind is made. A child kind inherits "
@@ -186,7 +188,7 @@ async def create_kind(
         "KindCreate",
         ItemKind,
         key=idempotency_key,
-        subject=f"item_kind:{body.id}",
+        subject=f"item_kind:{body.id}" if body.id else "item_kind",
         body=body,
     )
 
