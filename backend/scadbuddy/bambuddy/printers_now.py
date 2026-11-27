@@ -253,8 +253,9 @@ def with_scadbuddy_jobs(
         if job is None:
             return printer
         update: dict[str, Any] = {"scadbuddy": job}
-        # #3742: ScadBuddy's own picture of its job, over Bambuddy's cover.
-        if (picture := scadbuddy_picture(job)) is not None:
+        # #3742: ScadBuddy's own picture of its job, over Bambuddy's cover; the
+        # running plate's image for plate 2 or later (#8031).
+        if (picture := scadbuddy_picture(job, job.plate)) is not None:
             update["picture"] = picture
         return printer.model_copy(update=update)
 

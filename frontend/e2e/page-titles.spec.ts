@@ -35,7 +35,7 @@ const PAGES = [
   '/orders',
   // The profit report (#5329): its tab is "Profit by model · ScadBuddy".
   '/orders/profit',
-  // The old parts inventory (#5543) opens the Inventory on the Part kind (#7067).
+  // The old parts inventory (#5543) opens the Inventory on the Hardware kind (`PARTS_KIND`, #6949).
   '/orders/parts',
   '/orders/0e5a3c1e-1111-4222-8333-944455556661',
   '/customers',

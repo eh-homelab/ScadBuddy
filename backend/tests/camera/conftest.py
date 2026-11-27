@@ -73,6 +73,16 @@ def _fetch_mediamtx() -> Path | str:
     return binary
 
 
+def _version(binary: Path) -> str | None:
+    try:
+        done = subprocess.run(
+            [str(binary), "--version"], capture_output=True, text=True, timeout=10, check=False
+        )
+    except (OSError, subprocess.SubprocessError):
+        return None
+    return done.stdout.strip() or None
+
+
 @dataclass(frozen=True)
 class Media:
     mediamtx: Path
@@ -81,11 +91,14 @@ class Media:
 
 @pytest.fixture(scope="session")
 def media() -> Media:
-    """MediaMTX (on PATH, else the pinned release) and ffmpeg (on PATH); skips naming what
-    is missing."""
+    """MediaMTX (on PATH at `MEDIAMTX_VERSION`, else the pinned release) and ffmpeg (on
+    PATH); skips naming what is missing."""
     ffmpeg = shutil.which("ffmpeg")
     found = shutil.which("mediamtx")
-    mediamtx: Path | str = Path(found) if found else _fetch_mediamtx()
+    # A MediaMTX on PATH counts only at the pinned version (it prints ``v1.21.4``); any
+    # other runs the pinned release instead.
+    on_path = Path(found) if found and _version(Path(found)) == MEDIAMTX_VERSION else None
+    mediamtx: Path | str = on_path or _fetch_mediamtx()
     missing = [] if ffmpeg else ["ffmpeg is not on PATH"]
     if isinstance(mediamtx, str):
         missing.append(mediamtx)

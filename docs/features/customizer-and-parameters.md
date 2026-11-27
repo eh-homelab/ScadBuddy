@@ -43,4 +43,4 @@ be a Google Fonts family, which is installed on demand.
 ## Limits and known issues
 
 - A missing font family falls back silently to DejaVu (root `CLAUDE.md`); fonts named only
-  inside a library checkout are not mirrored to render workers on the bambuddy store.
+  inside a library checkout are not mirrored to render workers on a remote store.

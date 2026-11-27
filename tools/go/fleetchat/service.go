@@ -31,7 +31,14 @@ var (
 	sessionRE = regexp.MustCompile(`^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$`)
 	handleRE  = regexp.MustCompile(`^[0-9a-f]{8}$`)
 	channelRE = regexp.MustCompile(`^[a-z0-9-]{1,40}$`)
+	hexRE     = regexp.MustCompile(`^[0-9a-f]*$`)
 )
+
+// isName says whether agent is a name, such as a virtual sender's: a channel's pattern with
+// a character that is no hex digit, so no name can ever be a handle.
+func isName(agent string) bool {
+	return channelRE.MatchString(agent) && !hexRE.MatchString(agent)
+}
 
 // Handle returns the agent's handle, the first 8 hex characters of its
 // session id, which must be a canonical lower-case UUID.
@@ -121,7 +128,7 @@ func (s *Service) Send(ctx context.Context, sessionID string, t Target, text str
 	switch {
 	case (t.Channel == "") == (t.Agent == ""):
 		return 0, ErrBadTarget
-	case t.Agent != "" && !handleRE.MatchString(t.Agent):
+	case t.Agent != "" && !handleRE.MatchString(t.Agent) && !isName(t.Agent):
 		return 0, ErrBadTarget
 	case t.Channel != "":
 		if err := checkChannel(t.Channel); err != nil {

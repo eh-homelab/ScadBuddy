@@ -1,6 +1,7 @@
 import { http, HttpResponse } from 'msw'
 import { setupServer } from 'msw/node'
 import { afterAll, afterEach, beforeAll, expect, it } from 'vitest'
+import { z } from 'zod'
 import { tiersUpTo } from '../src/auth/principal.js'
 import { ALL_TOOLS } from '../src/tools/index.js'
 import { type Tool, type ToolContext } from '../src/tools/registry.js'
@@ -67,6 +68,25 @@ it('store_migrate_status GETs the pair and returns the progress', async () => {
   expect(asked?.searchParams.get('source')).toBe('bambuddy')
   expect(asked?.searchParams.get('target')).toBe('s3')
   expect(body(result)).toEqual(status)
+})
+
+it('store_migrate_status still reads a migration recorded to bambuddy before #7257', async () => {
+  let asked: URL | undefined
+  const status = { source: 's3', target: 'bambuddy', remaining: 0, copied: 4, failed: [], failed_count: 0, running: false }
+  server.use(
+    http.get(`${BACKEND}/api/v1/store/migrate`, ({ request }) => {
+      asked = new URL(request.url)
+      return HttpResponse.json(status)
+    }),
+  )
+  const result = await tool('store_migrate_status').execute({ source: 's3', target: 'bambuddy' }, ctx())
+  expect(asked?.searchParams.get('target')).toBe('bambuddy')
+  expect(body(result)).toEqual(status)
+})
+
+it('store_migrate takes only s3 as its target', () => {
+  expect(z.object(tool('store_migrate').shape).safeParse({ source: 's3', target: 'bambuddy' }).success).toBe(false)
+  expect(z.object(tool('store_migrate_status').shape).safeParse({ source: 's3', target: 'bambuddy' }).success).toBe(true)
 })
 
 it('store_migrate surfaces a 422 for an invalid pair', async () => {

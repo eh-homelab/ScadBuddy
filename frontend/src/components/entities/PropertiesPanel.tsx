@@ -564,7 +564,7 @@ function PropertyRow({
   )
 }
 
-/** The text of a change's value: a list joined, a yes or no for a boolean, `removed` for none. */
+/** The text of a change's value: a list joined, a yes or no for a boolean, an empty string for none. */
 function changeText(value: PropertyChange['new']): string {
   if (value === null) return ''
   if (Array.isArray(value)) return value.join(', ')
@@ -572,10 +572,35 @@ function changeText(value: PropertyChange['new']): string {
   return String(value)
 }
 
-/** #6949 — one key's changes, newest first; read again when the key's value changes. */
+/**
+ * The waits before each new read while the newest change is not the key's value. The
+ * history subscriber writes a change up to its poll (2 s) after the commit.
+ */
+const HISTORY_RETRY_MS = [250, 500, 1000, 2000]
+
+/**
+ * #6949 — one key's changes, newest first. It reads again when the key's value changes,
+ * and then until the newest change sets that value, at most `HISTORY_RETRY_MS.length` times.
+ */
 function PropertyHistory({ entity, property }: { entity: string; property: EntityProperty }) {
   const { key } = property
-  const history = useAsync(() => entityApi.propertyHistory(entity, key), [entity, key, JSON.stringify(property.value)])
+  const valueText = JSON.stringify(property.value)
+  const history = useAsync(() => entityApi.propertyHistory(entity, key), [entity, key, valueText])
+  const { data, refresh } = history
+  const newest = data?.[0]
+  const recorded = newest !== undefined && newest.op === 'set' && JSON.stringify(newest.new) === valueText
+  // The reads made for this value; a new value starts again from none.
+  const [retries, setRetries] = useState({ valueText, count: 0 })
+  const count = retries.valueText === valueText ? retries.count : 0
+  const recording = data !== undefined && !recorded && count < HISTORY_RETRY_MS.length
+  useEffect(() => {
+    if (!recording) return
+    const timer = setTimeout(() => {
+      setRetries({ valueText, count: count + 1 })
+      refresh()
+    }, HISTORY_RETRY_MS[count])
+    return () => clearTimeout(timer)
+  }, [recording, data, count, valueText, refresh])
   if (history.error) {
     return (
       <p role="alert" className="text-xs text-warn">
@@ -584,8 +609,11 @@ function PropertyHistory({ entity, property }: { entity: string; property: Entit
     )
   }
   if (!history.data) return <p className="text-xs text-muted-foreground">Loading the history…</p>
-  if (history.data.length === 0) return <p className="text-xs text-muted-foreground">No changes recorded.</p>
+  const pending = recording && <p className="text-xs text-muted-foreground">Recording the newest change…</p>
+  if (history.data.length === 0) return pending || <p className="text-xs text-muted-foreground">No changes recorded.</p>
   return (
+    <>
+    {pending}
     <ul aria-label={`History of ${key}`} className="flex flex-col gap-1 text-xs">
       {history.data.map((change, at) => (
         <li key={at} className="flex flex-wrap gap-x-3">
@@ -599,6 +627,7 @@ function PropertyHistory({ entity, property }: { entity: string; property: Entit
         </li>
       ))}
     </ul>
+    </>
   )
 }
 

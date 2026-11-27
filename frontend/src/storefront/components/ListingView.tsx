@@ -1,7 +1,9 @@
 import { useMemo, type ElementType } from 'react'
 import type { Listing, ParamValue } from '../api/client'
 import { colourPlan } from '../colours'
+import { colourParts } from '../colourParts'
 import { listingUnavailable } from '../params'
+import { ColourParts } from './ColourParts'
 import { ParamField } from './ParamField'
 
 export type ParamValues = Record<string, ParamValue>
@@ -33,6 +35,9 @@ export interface ListingViewProps {
  * material at once (`colours.ts` `colourPlan`, the page's copy of the shop's rule). A part
  * whose default that material offers keeps it. A colour the visitor set never moves.
  *
+ * #8127: the colour parts are one block (`ColourParts`), where the first of them is: in
+ * their groups when the list is long, each row compact.
+ *
  * Everything the shop typed (title, description, captions, labels) renders as React text,
  * never as HTML (spec §5.8).
  */
@@ -40,6 +45,13 @@ export function ListingView({ listing, values, settled, onChange, headingLevel =
   const Heading: ElementType = headingLevel === 1 ? 'h1' : 'h2'
   const params = Object.entries(listing.params)
   const plan = useMemo(() => colourPlan(listing, values), [listing, values])
+  const parts = useMemo(() => colourParts(listing), [listing])
+  const shown = useMemo(
+    () => Object.fromEntries(parts.map(({ name }) => [name, settled?.[name] ?? plan.shown[name]])),
+    [parts, settled, plan],
+  )
+  // #8127: the colour parts are one block, where the first of them is.
+  const firstColour = parts[0]?.name
   return (
     <article className="flex min-w-0 flex-col gap-5">
       <header className="flex flex-col gap-2">
@@ -71,17 +83,13 @@ export function ListingView({ listing, values, settled, onChange, headingLevel =
       )}
       {params.length > 0 ? (
         <form className="grid gap-[18px]" aria-label="Customize" onSubmit={(event) => event.preventDefault()}>
-          {params.map(([name, param]) => (
-            <ParamField
-              key={name}
-              param={param}
-              value={values[name]}
-              shown={settled?.[name] ?? plan.shown[name]}
-              filaments={listing.colours}
-              materials={listing.materials}
-              onChange={(next) => onChange(name, next)}
-            />
-          ))}
+          {params.map(([name, param]) =>
+            name === firstColour ? (
+              <ColourParts key={name} listing={listing} parts={parts} values={values} shown={shown} onChange={onChange} />
+            ) : param.kind === 'choice' && param.colour ? null : (
+              <ParamField key={name} param={param} value={values[name]} onChange={(next) => onChange(name, next)} />
+            ),
+          )}
         </form>
       ) : (
         <p className="m-0 text-sm text-muted-foreground">This design is made as shown.</p>

@@ -3,8 +3,7 @@
 // workspace-blob-refs, store/refs.py), the backend's event log's head and gap (area events),
 // and the agent's reads of the flow tables (area flows, flows/agent_reads.py).
 //
-// POST …/orders/{id}/assistant-cost (area order-costs) stays Python's: it runs the orders
-// lifecycle, which Go does not have.
+// POST …/orders/{id}/assistant-cost (area order-costs) is internal/assistantcost's.
 package agentreads
 
 import (

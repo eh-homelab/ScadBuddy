@@ -9,7 +9,7 @@ from __future__ import annotations
 import dataclasses
 import json
 import shutil
-import time
+import threading
 from collections.abc import Iterator
 from pathlib import Path
 from typing import Any
@@ -31,7 +31,6 @@ from scadbuddy.library.catalogue import (
     ModelRecord,
 )
 from scadbuddy.library.history import ModelHistory
-from scadbuddy.library.output_copy import copy_outputs
 from scadbuddy.library.template_refresh import TemplateRefresh
 from scadbuddy.library.template_rows import TemplateRows
 from tests.api.conftest import PNG_BYTES, set_plate_image, wait_for_job
@@ -98,18 +97,9 @@ def _output(client: TestClient, slug: str) -> str:
 
 
 def _copy(client: TestClient) -> None:
-    """The outputs copied first (so the output covers read rows), then the templates:
-    the copy that repairs the hand edits a test made (#7317 phase 3: the app's start
-    already copied once, so the catalogue reads rows before it too)."""
-    state = _state(client)
-    outputs = state.outputs.rows
-    assert outputs is not None
-    if not outputs.copied():
-        copy_outputs(state.outputs, outputs, state.projection.conninfo)
-    deadline = time.monotonic() + 30
-    while not outputs.copied():
-        assert time.monotonic() < deadline, "no finished outputs copy"
-        time.sleep(0.1)
+    """The templates' copy that repairs the hand edits a test made (#7317 phase 3: the
+    app's start already copied once, so the catalogue reads rows before it too). The
+    outputs need no copy: their rows are their only record (#7257)."""
     sync_template_rows(client)
 
 
@@ -545,17 +535,22 @@ def test_list_and_record_agree_on_upstream_state_with_no_row_version(world: Test
 
 
 def _statements(monkeypatch: pytest.MonkeyPatch) -> list[str]:
-    """Every statement sent from here on, as its text."""
+    """Every statement this thread sends from here on, as its text. The app's own
+    background tasks send statements on the test client's thread, and they are not
+    the listing's (#8139)."""
     sent: list[str] = []
     execute = psycopg.Cursor.execute
     executemany = psycopg.Cursor.executemany
+    caller = threading.get_ident()
 
     def counted(self: psycopg.Cursor[Any], query: Any, *args: Any, **kwargs: Any) -> Any:
-        sent.append(str(query))
+        if threading.get_ident() == caller:
+            sent.append(str(query))
         return execute(self, query, *args, **kwargs)
 
     def counted_many(self: psycopg.Cursor[Any], query: Any, *args: Any, **kwargs: Any) -> Any:
-        sent.append(str(query))
+        if threading.get_ident() == caller:
+            sent.append(str(query))
         return executemany(self, query, *args, **kwargs)
 
     monkeypatch.setattr(psycopg.Cursor, "execute", counted)

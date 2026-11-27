@@ -4,7 +4,6 @@ commit's schema, libraries and colours copied from the output it came from."""
 
 from __future__ import annotations
 
-import json
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -15,7 +14,8 @@ from scadbuddy.core.paths import DataPaths
 from scadbuddy.core.settings import Settings
 from scadbuddy.library.catalogue import Catalogue, ModelMeta
 from scadbuddy.library.history import ModelHistory
-from scadbuddy.library.outputs import ARRANGED_NAME, INPUTS_NAME, META_NAME, OutputStore
+from scadbuddy.library.output_rows import OutputRow
+from scadbuddy.library.outputs import OutputMeta
 from scadbuddy.orders.models import ColourSlot
 from scadbuddy.orders.reference import (
     ReferenceError,
@@ -26,7 +26,9 @@ from scadbuddy.orders.reference import (
 from scadbuddy.render.job_models import render_key
 from scadbuddy.render.schema import ParamValue
 from scadbuddy.render.solids import WRAPPER_PREFIX
+from tests.conftest import PgPool
 from tests.support.media import MemoryMediaStore
+from tests.support.row_outputs import output_store, update_row
 
 pytestmark = [pytest.mark.requires_git, pytest.mark.requires_postgres]
 
@@ -36,7 +38,7 @@ SOURCE = 'width = 10;\nlabel = "hi";\n'
 class Library:
     """The catalogue, history and outputs a resolution reads, over one data dir."""
 
-    def __init__(self, paths: DataPaths, settings: Settings) -> None:
+    def __init__(self, paths: DataPaths, settings: Settings, pool: PgPool) -> None:
         self.paths = paths
         self.config = settings.to_config()
         self.history = ModelHistory(paths.models, wrapper_prefix=WRAPPER_PREFIX)
@@ -44,7 +46,7 @@ class Library:
         self.catalogue = Catalogue(
             paths, self.history, media_store=MemoryMediaStore(), wrapper_prefix=WRAPPER_PREFIX
         )
-        self.outputs = OutputStore(paths)
+        self.outputs = output_store(paths.root, pool, paths=paths)
 
     def create(self, slug: str, name: str = "Demo") -> str:
         record = self.catalogue.create(slug, SOURCE, ModelMeta(name=name))
@@ -52,8 +54,6 @@ class Library:
         return record.version
 
     def write_output(self, slug: str, output_id: str, commit: str | None, **meta: object) -> None:
-        directory = self.paths.output_dir(slug, output_id)
-        directory.mkdir(parents=True)
         record = {
             "id": output_id,
             "slug": slug,
@@ -72,9 +72,20 @@ class Library:
             ],
             **meta,
         }
-        (directory / META_NAME).write_text(json.dumps(record), encoding="utf-8")
-        (directory / INPUTS_NAME).write_text(
-            json.dumps({"params": {"width": 12}, "v": 1}), encoding="utf-8"
+        self.outputs.rows.insert(
+            OutputRow(
+                output_id=output_id,
+                slug=slug,
+                meta=OutputMeta.model_validate(record),
+                params={"width": 12},
+                inputs={"params": {"width": 12}, "v": 1},
+                record=None,
+                manifest=None,
+                bom=None,
+                arranged_from=None,
+                backfill=None,
+                has_plate_cover=False,
+            )
         )
 
     async def resolve(self, **kwargs: object) -> object:
@@ -90,8 +101,8 @@ class Library:
 
 
 @pytest.fixture
-def library(paths: DataPaths, settings: Settings) -> Library:
-    return Library(paths, settings)
+def library(paths: DataPaths, settings: Settings, pg_pool: PgPool) -> Library:
+    return Library(paths, settings, pg_pool)
 
 
 async def test_a_reference_is_checked_and_normalised(library: Library) -> None:
@@ -209,9 +220,7 @@ async def test_an_arranged_output_pins_the_templates_commit(
     commit = library.create("demo")
     hashed = "sha256:" + "c" * 64
     library.write_output("demo", "arr1", hashed)
-    (paths.output_dir("demo", "arr1") / ARRANGED_NAME).write_text(
-        json.dumps(["library:3410"]), encoding="utf-8"
-    )
+    update_row(library.outputs, "arr1", arranged_from=["library:3410"])
     resolved = await library.resolve(slug=None, commit=None, inputs=None, output_id="arr1")
     reference = resolved.reference  # type: ignore[attr-defined]
     assert (reference.slug, reference.commit) == ("demo", commit)
@@ -276,9 +285,7 @@ async def test_an_outputs_unreadable_inputs_are_named_as_its_own(
     """#4484: the fault is the output's stored inputs, not a mismatch with the caller's."""
     commit = library.create("demo")
     library.write_output("demo", "out4", commit)
-    (paths.output_dir("demo", "out4") / INPUTS_NAME).write_text(
-        json.dumps({"params": 3}), encoding="utf-8"
-    )
+    update_row(library.outputs, "out4", inputs={"params": 3})
     for given in (None, {"params": {"width": 12}, "v": 1}):
         with pytest.raises(ReferenceError) as refused:
             await library.resolve(slug=None, commit=None, inputs=given, output_id="out4")

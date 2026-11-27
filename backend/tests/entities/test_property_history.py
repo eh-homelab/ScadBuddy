@@ -310,6 +310,34 @@ def test_history_lists_a_keys_changes_newest_first(
     assert [c.op for c in store.history(ref, "colour_name", 1)] == ["remove"]
 
 
+def test_history_follows_an_entity_a_merge_renamed(
+    pg_pool: PgPool, history_rows: HistoryRows
+) -> None:
+    """A merge into a printer with no entity row renames the entity (`repoint_entity`), and
+    its history rows keep the old ref: the kept printer's history still lists them."""
+    store = _store(pg_pool)
+    with pg_pool.connection() as conn:
+        entity_id = _entity(conn, "printer", "b", {"nozzle_note": "hardened"})
+        base = {"entity_id": entity_id, "kind": "printer", "ref": "b", "source": "manual"}
+        history_rows(
+            conn,
+            {**base, "event_seq": 10, "key": "nozzle_note", "op": "set", "new": "hardened"},
+            {
+                **base,
+                "event_seq": 11,
+                "entity_id": str(uuid.uuid4()),
+                "ref": "c",
+                "key": "other",
+                "op": "set",
+                "new": 1,
+            },
+        )
+        with conn.transaction():
+            repoint_entity(conn, "printer", "b", "a", AGENT)
+    changes = store.history(EntityRef("printer", "a"), None, 100)
+    assert [(c.key, c.op, c.new) for c in changes] == [("nozzle_note", "set", "hardened")]
+
+
 def test_schema_history_lists_an_owners_changes_newest_first(
     pg_pool: PgPool, history_rows: HistoryRows
 ) -> None:

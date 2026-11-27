@@ -111,7 +111,7 @@ export function TaskCard({ entry, task: listed, step, respond }: CardProps & { t
         {/* #7471: an agent's answer names it; a person's is the person's own. */}
         {task.state === 'answered' && /^(session|token):/.test(read.data?.answered_by ?? '') && (
           <p className="text-[12.5px] text-muted-foreground">
-            <AnsweredBy by={read.data?.answered_by} />
+            <AnsweredBy by={read.data?.answered_by} admittedBy={read.data?.admitted_by} />
           </p>
         )}
       </CardContent>

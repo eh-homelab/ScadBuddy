@@ -27,14 +27,16 @@ test.describe('sell on storefront', () => {
     // #6290 — a locked setting shows its value in place, in the one list.
     await expect(page.getByRole('region', { name: 'Settings' }).getByLabel('Value of Text size')).toHaveValue('14')
 
-    // #6144 — no filament on offer has either template colour, so each starts at one that is,
-    // and the person may choose another.
+    // #6144 — no filament on offer has either template colour, so each starts at the closest one that is
+    // (#8126: the plate's blue and the text's coral are both nearer the black than the yellow), and the
+    // person may choose another.
     await expect(page.getByTestId('colour-problems')).toHaveCount(0)
     const settings = page.getByRole('region', { name: 'Settings' })
-    await expect(settings.getByRole('combobox', { name: 'Default of Plate' })).toContainText('PLA Sunflower Yellow')
-    await settings.getByRole('combobox', { name: 'Default of Text' }).click()
-    await page.getByRole('option', { name: 'PETG Black' }).click()
+    await expect(settings.getByRole('combobox', { name: 'Default of Plate' })).toContainText('PETG Black')
     await expect(settings.getByRole('combobox', { name: 'Default of Text' })).toContainText('PETG Black')
+    await settings.getByRole('combobox', { name: 'Default of Text' }).click()
+    await page.getByRole('option', { name: 'PLA Sunflower Yellow' }).click()
+    await expect(settings.getByRole('combobox', { name: 'Default of Text' })).toContainText('PLA Sunflower Yellow')
 
     // #6258 — the materials allowed start as the shop's default; the listing chooses its own.
     const allowed = page.getByRole('group', { name: 'Materials allowed' })

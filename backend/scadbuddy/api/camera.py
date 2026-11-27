@@ -10,11 +10,16 @@ The live view (spec §6.7) reaches the browser only on ScadBuddy's origin, under
 MediaMTX (`deploy/camera/mediamtx-edge.yml`) with the edge read user's password. No header of
 the browser's reaches the edge, and no cookie of the edge's reaches the browser. MediaMTX
 v1.21.4 carries an HLS session in the query key ``session`` when the client sends no cookie
-(measured 2026-11-25, `backend/tests/api/test_camera_live.py`), so that key passes."""
+(measured 2026-11-25, `backend/tests/api/test_camera_live.py`), so that key passes. It also
+binds the session to the client's IP (`internal/servers/hls/server.go`
+`findNonCDNSession`), and each request of one browser can reach another API pod, so the
+proxy names the viewer in ``X-Forwarded-For``, which the edge believes from the pod network
+(`hlsTrustedProxies`)."""
 
 from __future__ import annotations
 
 import asyncio
+import ipaddress
 import logging
 import re
 from collections.abc import AsyncIterator
@@ -33,6 +38,7 @@ from scadbuddy.camera.models import CameraFeed
 from scadbuddy.camera.store import CameraStore
 from scadbuddy.core.events import CameraReconnectEvent, emit
 from scadbuddy.core.problems import PROBLEM_MEDIA_TYPE, ApiError
+from scadbuddy.core.proxies import client_address, plain_address
 from scadbuddy.printers.component import PRINTERS
 from scadbuddy.printers.store import PrinterNotFoundError, printer_uuid
 
@@ -188,6 +194,24 @@ async def _recorded(state: StateDep, printer_id: str) -> str:
     if not await asyncio.to_thread(store.recorded, str(key)):
         raise _not_found(f"printer {printer_id} is not recorded")
     return str(key)
+
+
+def _viewer(state: StateDep, request: Request) -> dict[str, str]:
+    """The viewer's address for the edge, as `core/proxies.py` decides it; none when it is
+    not an IP address. MediaMTX v1.21.4 answers 401 "session not found" when an HLS session
+    comes back from another address (measured 2026-11-26 on prod: a session made through one
+    API pod failed through another)."""
+    peer = request.client.host if request.client else None
+    address = client_address(
+        peer, request.headers.get("x-forwarded-for"), state.settings.trusted_proxy_networks
+    )
+    if address is None:
+        return {}
+    try:
+        ipaddress.ip_address(plain_address(address))
+    except ValueError:
+        return {}
+    return {"X-Forwarded-For": plain_address(address)}
 
 
 def _client(base: str, auth: httpx.BasicAuth, timeout: httpx.Timeout) -> httpx.AsyncClient:
@@ -376,7 +400,7 @@ async def live_camera_hls(
     try:
         http = await stack.enter_async_context(_client(base, auth, HLS_TIMEOUT))
         response = await stack.enter_async_context(
-            http.stream("GET", f"/{printer}/{name}", params=params)
+            http.stream("GET", f"/{printer}/{name}", params=params, headers=_viewer(state, request))
         )
         await _check_refused(printer, response)
     except httpx.HTTPError as error:

@@ -4,9 +4,11 @@ toolchain go1.26.9
 
 use (
 	./tools/go/bambuddy-fs
+	./tools/go/claudecreds
 	./tools/go/core
 	./tools/go/fleet
 	./tools/go/fleetchat
+	./tools/go/fleetd
 	./tools/go/scadbuddy-client
 	./tools/go/telemetry
 )

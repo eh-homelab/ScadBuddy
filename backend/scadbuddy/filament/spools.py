@@ -37,7 +37,7 @@ from scadbuddy.filament import models as m
 from scadbuddy.filament import presets as p
 from scadbuddy.filament.catalog import CatalogRefError
 from scadbuddy.filament.empty_weight import EmptyWeight, effective_on
-from scadbuddy.filament.insert_weights import check_on
+from scadbuddy.filament.insert_weights import check_on, forget_spool_on
 from scadbuddy.filament.invoice_money import price_per_kg, unit_cost
 from scadbuddy.filament.locations import LocationStore
 from scadbuddy.filament.rfid_push import enqueue_tag, link_origin
@@ -1474,6 +1474,10 @@ class FilamentSpoolStore:
                 "DELETE FROM filament_bb_push_errors WHERE kind = 'spool' AND sb_id = %s",
                 (spool_id,),
             )
+            # Its insert-weight row goes with it, and a derived weight is the mean again.
+            # Lock order: this spool's row (above), then its insert's row, as `accept_on`
+            # locks them, so a delete and another spool's accept on the insert never deadlock.
+            forget_spool_on(conn, spool_id)
             conn.execute("DELETE FROM filament_spools WHERE id = %s", (spool_id,))
         return True
 

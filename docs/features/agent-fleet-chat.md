@@ -44,6 +44,27 @@ flowchart LR
    `limit` messages and at most 4 MiB of text (at least one message), and moves the cursor
    past them unless `peek`. A rewind only moves the cursor back.
 
+### Virtual senders
+
+A virtual sender is a reserved one-way name (#8026, #7971 part 6). The table
+`fleet_virtual_senders` (migration `20261126T1743Z_fleet_virtual_senders.sql`) holds each
+name, its description and its reject message. It starts with `rotator`, the login rotator
+(#7990), and `github`, the GitHub stream (#7971 part 7).
+
+- A name follows the channel pattern and holds a character that is no hex digit, so no
+  agent's handle (8 hex characters) can ever be a name. The table's CHECK refuses other names.
+- Only the service caller `fleet-rotator` posts as a virtual sender:
+  `POST /api/v1/internal/crud/fleet-rotator/virtual-messages` `{sender, channel | agent, text}`
+  (`tools/go/core/internal/fleet/virtual.go`). A channel post goes to the channel's members;
+  an `agent` (a handle) gets a DM. The sender is in no channel and gets no delivery. An unknown
+  sender is a 404 (reason `unknown-sender`). The `fleet` caller, which serves the
+  unauthenticated `/mcp`, gets 403 there, so no tool call can post as a virtual sender.
+- A `fleet_send` DM to a virtual sender's name is refused: core answers 422, reason
+  `virtual-sender`, with the reject message as the detail, and the tool error is that text
+  (`fleetchat.ErrVirtualSender`).
+- An inbox entry from a virtual sender has its name as `from`.
+- Tests: `tools/go/core/fleet_virtual_test.go`, against Postgres.
+
 ## Code
 
 - `tools/go/fleetchat/`: the interfaces (`Store`, `Bus`), the service and the MCP server, a
@@ -53,6 +74,15 @@ flowchart LR
   settings.
 - `tools/go/core/internal/fleet/fleet.go`: the routes; `tools/go/core/internal/bus/`: the
   event publish.
+- `tools/go/core/internal/fleet/registry.go`: the session registry (#7985, spec
+  `2026-11-26-fleet-session-registry-and-rotator-design` §6.3). Caller `fleet` reads
+  `GET …/fleet/sessions` and `…/fleet/sessions/{session_id}` (`sbfleet` `Registry`); caller
+  `fleet-rotator`, the machine service, writes `PUT …/fleet-rotator/machines/{id}` and
+  `…/fleet-rotator/machines/{machine_id}/sessions/{session_id}`. Each caller is refused on
+  the other's routes. A `fleet-rotator` credential writes only the machines its proof file
+  registered (`fleet_machines.proof_name`) and their rows of sessions. One session id can
+  run on several machines at once: each machine writes its own row, and a read gives the
+  session once with a `hosts` array, one entry per machine.
 - `backend/scadbuddy/api/crud_fleet.py`: the change stream. The caller `fleet`:
   `backend/scadbuddy/auth/` (`exchange.py`, `service_credentials.py`, `routes.py`).
 - `backend/scadbuddy/core/events.py`, `pg_events.py`: unknown kinds pass the bus as
@@ -62,12 +92,27 @@ flowchart LR
 
 `backend/scadbuddy/migrations/20261125T1954Z_fleet.sql`: `fleet_agents` (handle, cursor,
 last seen), `fleet_channels`, `fleet_members`, `fleet_messages` (DM or channel post, text)
-and `fleet_deliveries` (one row per recipient). The `fleet.message` events are rows of the
+and `fleet_deliveries` (one row per recipient). Every row has a timestamp
+(`20261126T1533Z_fleet_row_timestamps.sql`, #7968): `fleet_agents` `created_at` and
+`updated_at` (core sets it when the cursor moves), `fleet_channels` `created_at`,
+`fleet_members` `joined_at`, `fleet_messages` `sent_at` and `fleet_deliveries`
+`created_at`. The `fleet.message` events are rows of the
 event log `events`.
+
+`backend/scadbuddy/migrations/20261126T1615Z_fleet_session_registry.sql`: `fleet_machines`
+(the SHA-256 of `/etc/machine-id` and the user, never the raw id; host, OS, user, service
+version) and `fleet_session_hosts` (one row per session id and machine, keyed by both: pid
+and `proc_start`, paths, git facts, Claude Code facts, the credential's id, the account, the
+last rate limit, and `previous_session_id`, the row of the same process on the same machine
+before a `/clear`). It also adds
+`fleet-rotator` to the two caller CHECKs, `fleet_machines.proof_name` (the proof file's
+`<machine>` that registered the row) and `service_credentials.machine` (the machine a
+`fleet-rotator` credential was exchanged for).
 
 ## Tests
 
 - `tools/go/core/fleet_test.go`: the routes, against Postgres.
+- `tools/go/core/fleet_registry_test.go`: the registry's routes, their checks and callers.
 - `tools/go/fleet/sbfleet/*_test.go`, `tools/go/fleet/main_test.go`: the store, the bus,
   the exchange and the binary, against fakes.
 - `tools/go/fleetchat/*_test.go`: the service and the MCP server.
@@ -77,8 +122,13 @@ event log `events`.
 
 - Not deployed: the server, its ServiceAccount, its NetworkPolicy and core's `fleet` area
   (`tools/go/fleet/README.md` "Deploying").
-- The server has no auth of its own. Anything on the LAN may call it, directly or through
-  ScadBuddy's `/mcp` (the owner's decision of 2026-11-26); its NetworkPolicy keeps out everything else.
+- Apart from the webhook's signature check, the server has no auth of its own. The internet
+  reaches only `/github/webhook`, through the SSO host's public Exact route
+  (eh-homelab/clusters#4432), which the signature check (`X-Hub-Signature-256`, an HMAC with the
+  webhook secret) guards. Every other path is open to the LAN and the cluster only: anything on
+  the LAN may call it, directly or through ScadBuddy's `/mcp` (the owner's decision of
+  2026-11-26). Its NetworkPolicy admits ScadBuddy's pods, the LAN's Gateway and, for
+  `/github/webhook`, the SSO host's Pomerium proxy, and keeps out everything else.
 - Claude Code never sends `DELETE /mcp`, so an idle session is closed only by
   `FLEETCHAT_SESSION_TIMEOUT` (24 h by default).
 - Message text is written by other agents: the inbox marks it untrusted data

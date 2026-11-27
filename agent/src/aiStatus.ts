@@ -1,5 +1,5 @@
 import type { AppDeps } from './app.js'
-import { type OpenerStatus, opensWith, soonestRecovery } from './credentials.js'
+import { agentUses, type OpenerStatus, opensWith, soonestRecovery } from './credentials.js'
 
 /** Upper bound on each step of the status that asks the API (the credential list, its key). */
 export const DEFAULT_HEALTH_TIMEOUT_MS = 2000
@@ -70,6 +70,8 @@ export async function aiStatus(
     return { ai: UNANSWERED, credential: 'unknown' }
   }
   if (list === TIMED_OUT) return { ai: 'unavailable (the API timed out)', credential: 'unknown' }
+  // #7983: the fleet's rows are not the agent's credentials.
+  list = list.filter(agentUses)
   const credential = list.length ? 'configured' : 'not configured'
   // The key that opens them is the API's (#5299 D5).
   let opener: OpenerStatus | typeof TIMED_OUT

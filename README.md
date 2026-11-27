@@ -244,10 +244,12 @@ on shutdown.
   you would Bambuddy's slicer sidecar, or switch sign-in on and set the mode to
   `enforce` ("Signing in" below) before it is reachable by anyone you do not trust.
 - **State** lives in `/data` (`SCADBUDDY_DATA_DIR`): models (a git repository),
-  outputs, downloaded fonts and caches. Back up the volume. A saved output's record is
-  in the database and its bytes are in the blob store (on the `bambuddy` store they stay
-  files); on the `local` store they are in `/data/output-blobs/` (#7257). The folders under `/data/outputs/` stay as a fallback
-  until the cut-over's second release. Settings and saved presets are in the
+  downloaded fonts and caches. Back up the volume. A saved output's record is in the
+  database and its bytes are in the blob store; on the `local` store they are in
+  `/data/output-blobs/` (#7257). No code reads or writes `/data/outputs/` since the
+  cut-over's second release (#7257): it is an unread backup, and deleting it is the
+  owner's step. That release does not start on the `bambuddy` store, even with no
+  outputs ("Recovering an unready blob store" below). Settings and saved presets are in the
   database, not in `/data`: back that up too. The Bambuddy API key is stored there as plain text
   (it used to be a 0600 file on the volume), so it is in every database backup;
   supply it with `SCADBUDDY_BAMBUDDY_API_KEY` from a secret if that matters. The
@@ -338,13 +340,13 @@ on shutdown.
     0 turns it off. It is the interval of the Temporal Schedule
     `scadbuddy-housekeeping-library`, on the API's own `library` queue
     (`SCADBUDDY_TEMPORAL_TASK_QUEUE_LIBRARY`); 0 deletes the Schedule. Every start
-    also triggers the Schedule once, a full sweep: on the Bambuddy blob store it
+    also triggers the Schedule once, a full sweep: on a remote store it
     converges the uploads with the store (reconcile and backfill), so expect that
-    Bambuddy traffic right after a deploy. A run still open from before the start
+    store traffic right after a deploy. A run still open from before the start
     goes first, and that sweep follows it. A Schedule paused in the Temporal UI stays
     paused across restarts, and a start does not trigger it: while it is paused nothing
     sweeps the uploads or reconciles them with the store, and a start only backfills
-    them to the Bambuddy store. Settled render jobs are pruned every 300 s by a second
+    them to the store. Settled render jobs are pruned every 300 s by a second
     Schedule, `scadbuddy-prune-library`, which 0 leaves alone; it also sweeps request
     claims, the activity record and the files of print runs' lost slice starts. The
     print dialog's background slices are removed from Bambuddy's library (6 hours after
@@ -474,12 +476,7 @@ on shutdown.
     (`orders/store.py`), a storefront publish's lock (at most 2 at once,
     `orders/storefront/listings.py`, in the gauges as `scadbuddy-storefront-publish`), a library copy's target locks (`print_library/copy_store.py`),
     the Bambuddy catalogue refresh and upload claims, the store's folder lock, the
-    output backfill's claim, the service credential rotation and the flow keys. The copy
-    of the saved outputs to rows (#7255) and the copy of their bytes to the blob store
-    (#7256, after it) each hold their advisory lock for the whole run on a connection of
-    its own (`scadbuddy-output-copy`, up to 15 minutes; `scadbuddy-output-byte-copy`, up
-    to its 30-minute timeout in the sweep, with no bound at a start), not on a pool's;
-    each of their statements takes a connection of the main pool. So
+    output backfill's claim, the service credential rotation and the flow keys. So
     leave headroom above the pools' sum. Every pool keeps only what it uses (the main
     pool one more) and closes a connection left idle for a minute, one a minute
     (psycopg_pool's `max_idle`). The `LISTEN` connection and `scadbuddy-preview-follows`
@@ -835,10 +832,13 @@ and "Not this order" hides it for good, after an unlink and a new link too. If t
 later changes or removes a deposit already recorded, the order page warns until the shop
 records the difference as a `bank_transfer` payment with the transaction id as reference
 (payments are never edited). A cancelled order takes no payment and shows no such warning.
-With `SCADBUDDY_PUBLIC_URL` set, Link registers
-`https://<public host>/api/v1/payments/bank/webhook` for the account's webhooks
-([webhooks](https://plaid.com/docs/api/webhooks/)); an account linked before the public URL
-was set gets none until it is linked again. Each webhook is checked by its
+With `SCADBUDDY_STOREFRONT_PUBLIC_URL` (else `SCADBUDDY_PUBLIC_URL`) set, Link registers
+`https://<that host>/api/v1/payments/bank/webhook` for the account's webhooks
+([webhooks](https://plaid.com/docs/api/webhooks/)). The storefront's host comes first because
+Plaid must reach it from the internet, and the back office may be LAN-only; the deployment
+then routes that one path to the API (eh-homelab/clusters `httproute-storefront.yaml`). An
+account linked before that URL was set, or while it named another host, keeps the old one
+until it is linked again. Each webhook is checked by its
 `Plaid-Verification` JWT
 ([webhook verification](https://plaid.com/docs/api/webhooks/webhook-verification/)).
 `SYNC_UPDATES_AVAILABLE` reads the new deposits at once. When the bank needs the shop to
@@ -879,7 +879,7 @@ database (render, print, projects and the agent, #5299 step 12):
 | Proof | On the caller | On the API |
 |---|---|---|
 | Kubernetes | `SCADBUDDY_SERVICE_TOKEN_FILE`: a projected ServiceAccount token, audience `scadbuddy`, from a projected volume (not `subPath`) | `SCADBUDDY_SERVICE_ACCOUNT_NAMESPACE` (e.g. `bambuddy`); the API asks the apiserver with a TokenReview, with its own token, and reads the cluster's issuer discovery and JWKS. The API needs two roles: `system:auth-delegator` (TokenReview) and `system:service-account-issuer-discovery` (the discovery and the JWKS). A default ClusterRoleBinding [gives the second to every ServiceAccount](https://kubernetes.io/docs/tasks/configure-pod-container/configure-service-account/#service-account-issuer-discovery) (`system:serviceaccounts`); an explicit binding to the API's ServiceAccount (eh-homelab/clusters#3246) keeps the JWKS read from depending on that default |
-| Bootstrap (compose, a laptop) | `SCADBUDDY_SERVICE_BOOTSTRAP_FILE`: its random secret, at least 32 characters | `SCADBUDDY_SERVICE_BOOTSTRAP_DIR`: one file per caller, named `render`, `print`, `projects` or `agent`; only the hashes are kept |
+| Bootstrap (compose, a laptop) | `SCADBUDDY_SERVICE_BOOTSTRAP_FILE`: its random secret, at least 32 characters | `SCADBUDDY_SERVICE_BOOTSTRAP_DIR`: one file per caller, named after it (`render`, `print`, `projects`, `agent` …); the fleet's machine service has one per machine, `fleet-rotator.<machine>`, so one machine can be revoked alone; only the hashes are kept |
 
 The API takes a proof only when its own variable is set. The ServiceAccounts it maps are
 `scadbuddy-render` (caller `render`), `scadbuddy-print`, `scadbuddy-projects`,
@@ -1108,19 +1108,14 @@ hook (`temporal-promote-workers.yaml`) would also try to make the old revision c
 and fail that sync: take `scadbuddy-library` out of its list for such a rollback. Rolling back to any build
 from #4090 on needs nothing: its pods make their own build current.
 
-**Saved outputs during a roll-out (#7255).** An API pod of a build before #7255 saves
-an output in the files only. Once a copy run has finished, the newer pods look outputs
-up in the `outputs` rows only, so such an output is a 404 on them until the next copy
-writes its row: the next housekeeping sweep (every `asset_sweep_interval`), or the next
-API start. A rollback to such a build makes the same window. To end it sooner, restart
-one API pod once the roll-out is done: its start runs the copy. Then check
-`GET /api/v1/outputs/copy-status` ([Saved outputs](docs/architecture/data.md#saved-outputs)).
-Both copies stop at the cut-over mark (#7257), which `copy-status` names as
-`cut_over_at`; after the roll-out of its first release, check that `cut_over_at` is set
-and `bytes.pending` is 0 ([The cut-over](docs/architecture/data.md#the-cut-over)).
-Check too that the last row copy run (`copy-status`'s `started_at`) started after the last
-pod of a build before phase 2 (#7256) went: a start writes the mark before it runs the row
-copy, so a write such a pod made in the files only after that run is never copied.
+**Saved outputs during a roll-out (#7257).** Since the cut-over's second release, an
+output's row and blobs are its only record, and no copy runs. Its migration refuses to
+run until the first release wrote the cut-over mark and every row's bytes are blobs: a
+refused pod restarts, and the pods of the first release go on serving. Upgrade from the
+first release only, once `GET /api/v1/outputs/copy-status` named `cut_over_at` and
+`bytes.pending` was 0 ([The cut-over](docs/architecture/data.md#the-cut-over)). #7887
+removed that route after the second release, and its second step drops the mark's table
+after the second release's migration has read it.
 
 ### Render worker (#424)
 
@@ -1130,7 +1125,7 @@ Renders run on a separate worker. It is the
 Probe that port: the image's `HEALTHCHECK` is the API's 8080.
 
 - **A remote store (#5298 plan D11).** The worker holds no database, so it runs only on
-  the `bambuddy` or `s3` store. On `local` it refuses to start, and its log says why: the
+  the `s3` store (the API refuses the `bambuddy` store since #7257). On `local` it refuses to start, and its log says why: the
   local store runs only in-process (`SCADBUDDY_TEMPORAL_WORKER_INPROCESS`), on the API's
   own volume and git. The worker's `/data` is its own (an `emptyDir` is enough). It
   renders from the template snapshots that the API stores, writes each piece to the
@@ -1154,13 +1149,9 @@ Probe that port: the image's `HEALTHCHECK` is the API's 8080.
   API's: the worker runs openscad under them, and the API derives the workflows'
   timeouts from the same values.
 - **No database (#5298).** The worker opens no database connection. It reads the
-  store's settings (backend, Bambuddy URL, library folder, render key, S3 keys) from the
-  API's CRUD route `/api/v1/internal/crud/render/settings`, which never answers the full
-  Bambuddy key: while no render key is saved in Settings (the fallback `/healthz` reports
-  as `render_key_fallback`), it answers no Bambuddy key at all and logs that it withheld
-  it, and a worker on the Bambuddy store fails its renders with an error that names
-  `bambuddy_render_api_key`. Save a render key before you run a standalone render worker
-  on the Bambuddy store. The API writes a job's row, its events and its activity row for it,
+  store's settings (backend, S3 keys) from the API's CRUD route
+  `/api/v1/internal/crud/render/settings`, which answers no Bambuddy key, neither the
+  render key nor the full one (#7882): the worker runs on the `s3` store only. The API writes a job's row, its events and its activity row for it,
   through the routes under `/api/v1/internal/crud/render/jobs`, holds a done job's blobs
   and records a piece's geometry for it, through `/api/v1/internal/crud/render/blob-refs`
   and `…/render/geometry`, reads and writes the blob index for it, through
@@ -1170,11 +1161,8 @@ Probe that port: the image's `HEALTHCHECK` is the API's 8080.
   API's: the API drops or forgets a copy the worker cannot read, through
   `…/render/assets/{id}/drop-copy` and `…/render/blob-index/{key}/forget-copy`, and
   forgets a library piece only when its own read, bounded to a minute and made at most
-  once a piece in ten minutes, finds the object gone or altered and the row still names it),
-  and finds a template's Bambuddy folder for it, through
-  `…/render/store-folders`: the API calls Bambuddy itself, on the URL, library folder and
-  render key in Settings, under the folder's lock, and refuses a worker whose URL or
-  library folder is not that one yet (it tries again). The API reads, marks used and
+  once a piece in ten minutes, finds the object gone or altered and the row still names it).
+  The API reads, marks used and
   records, for the worker, the uploads it fetched, through `…/render/assets`; their files stay on the
   worker's volume, and the API writes a fetched upload's row from its own copy's metadata
   in the store. It takes, renews and releases the worker's library leases, pin holds
@@ -1190,7 +1178,7 @@ Probe that port: the image's `HEALTHCHECK` is the API's 8080.
   22); with no such role, it does nothing.
 - **The worker never migrates.** It waits at start, logging what it waits for,
   until the API serves its CRUD areas (`settings`, `jobs`, `refs`, `blob-index`,
-  `store-folders`, `assets`, `libraries`) and answers its first read of the store
+  `assets`, `libraries`) and answers its first read of the store
   settings; it serves `/healthz` only after that. In a rollout where the worker comes up
   first, it starts once the API has.
 - **Versioning:** workflows are pinned to the build that started them. At start
@@ -1297,8 +1285,8 @@ clusters. It serves `/healthz` (`{"ok": true, "build_id": …, "task_queue": …
   (`/api/v1/internal/workspace-blobs/…`, #4789) are the agent's credential's
   (`internal.workspace`) in the same way: `POST /uploads` is a write path, minting a token
   for one internal PUT of up to 128 MiB with no workflow or row behind it. An output's last print is recorded in
-  Postgres (`output_last_prints`); an older `meta.json`'s last print still reads for an
-  output not printed since.
+  Postgres (`output_last_prints`); the last print that an older `meta.json` held (now in
+  the output's row) still reads for an output not printed since.
 - **Environment:** `SCADBUDDY_TEMPORAL_ADDRESS`,
   `SCADBUDDY_TEMPORAL_NAMESPACE`, `SCADBUDDY_TEMPORAL_TASK_QUEUE_BAMBUDDY`,
   `SCADBUDDY_TEMPORAL_SEARCH_ATTRIBUTES`, `SCADBUDDY_API_INTERNAL_URL`, and
@@ -1618,26 +1606,13 @@ workers restart.
 - **`local`** (the default): this server's volume. Renders then run only in-process
   (`SCADBUDDY_TEMPORAL_WORKER_INPROCESS`): a render worker Deployment holds no database
   and refuses to start on `local` (#5298 plan D11; "Render worker (#424)" above).
-- **`bambuddy`**: Bambuddy's library. Files go to `<Inbox folder>/<Template>/Work/`,
-  and ScadBuddy deletes only inside a `Work/` folder of the inbox folder Settings
-  names. Changing that folder leaves the previous one's `Work/` files for you to delete.
-  Any file in a ScadBuddy `Work/` folder that ScadBuddy did not upload, such as one
-  dropped there by hand, is deleted once it is older than `SCADBUDDY_JOB_TTL`
-  (a day while it is 0, which keeps renders forever): keep
-  your own files elsewhere.
-  The same goes for the Bambuddy URL: folders are recorded per instance, so pointing
-  ScadBuddy at another Bambuddy makes new folders there and never deletes by the old
-  instance's folder ids (#683). Respelling the same URL (host case, a default port, a
-  trailing slash) is the same instance; another host, scheme, port or path is not.
-  To switch:
-  1. Set Bambuddy's URL (Settings → *Connection*) and the **Inbox folder, for sends
-     without a project** (Settings → *Projects & files*), which is the store's inbox.
-  2. In Bambuddy, create a key with *Manage Library* only, and paste it into Settings as
-     **Render worker API key**.
-  3. Choose **Bambuddy library** under **Blob store**, and restart the API and the
-     workers.
-
-  The workers then need no shared volume:
+- **`bambuddy`**: Bambuddy's library, retired (#7257, #7882). The API refuses to start
+  on it, and Settings and a store migration refuse to choose it. It stays only as a store
+  migration's source, read on the API with the **Render worker API key** (else the full
+  key), so an install that recovered onto `local` can still copy its blobs to `s3`
+  ("Switching a store that already holds blobs" below; "Recovering an unready blob
+  store").
+- **Render workers on `s3`** need no shared volume:
   - Give each one an `emptyDir` at `/data`. It holds the worker's piece cache (`blobs/`)
     and the snapshots, fonts, uploads and library checkouts it fetched.
   - Previews (the catalogue's default renders) render on the workers too, from the
@@ -1711,27 +1686,22 @@ workers restart.
 
   **Sweeps.** The API runs the store's sweep on its own `SCADBUDDY_ASSET_SWEEP_INTERVAL`.
   A piece or snapshot that no job references is deleted from the
-  store (on `bambuddy`, from Bambuddy's library) once nothing has used it for
+  store once nothing has used it for
   `SCADBUDDY_ASSET_SWEEP_GRACE` (a week by default). The API's own upload sweep uses the
   same grace.
 
   `/healthz` on the API and on each worker (port 9090) carries a `store` object:
   - `multi_worker: true` says more than one replica is safe;
-  - `backend` differs from `configured_backend` until the restart;
-  - `render_key_fallback: true` (on the API) means no render key is stored but the full
-    Bambuddy key is. The API withholds the full key from standalone render workers, so
-    their renders on the `bambuddy` store fail with an error that names
-    `bambuddy_render_api_key`; a render worker inside the API process
-    (`SCADBUDDY_TEMPORAL_WORKER_INPROCESS`) uses the full key, and its template code can
-    print. The Settings page shows the same warning.
+  - `backend` differs from `configured_backend` until the restart.
 
-  If a `bambuddy` or `s3` store cannot start (no URL or folder; no endpoint, bucket or
-  keys), see "Recovering an unready blob store" below.
+  The API refuses to start on the `bambuddy` store since #7257. If it is stored, or an
+  `s3` store cannot start (no endpoint, bucket or keys), see "Recovering an unready blob
+  store" below.
 
-- **`s3`**: an S3-compatible object store, the second multi-worker backend (design:
+- **`s3`**: an S3-compatible object store, the multi-worker backend (design:
   `docs/superpowers/specs/2026-10-16-own-store-slicer-rust-workers-design.md` §4). The
-  workers need no shared volume, exactly as for `bambuddy` above (an `emptyDir` at
-  `/data`, the same cache and sweep settings). Settings → **Blob store** takes seven
+  workers need no shared volume ("Render workers on `s3`" above: an `emptyDir` at
+  `/data`, the cache and sweep settings). Settings → **Blob store** takes seven
   values, each seeded by the `SCADBUDDY_<FIELD>` variable of the same name and applied
   at restart:
 
@@ -1798,16 +1768,16 @@ workers restart.
 | Variable | Default | What it does |
 |---|---|---|
 | `SCADBUDDY_STORE_BACKEND` | `local` | Seeds the stored **Blob store** setting. A value saved in Settings wins. |
-| `SCADBUDDY_LIBRARY_BACKEND` | `bambuddy` | Seeds the stored **Print library** setting (`bambuddy` or `native`; applies on restart). A value saved in Settings wins. `native` keeps print files in ScadBuddy's own library, in the blob store, and needs `store_backend` `s3` or `bambuddy`: a start with `native` on the `local` store is refused, and so is a save in Settings (422, `NATIVE_LIBRARY_NOT_READY`). |
+| `SCADBUDDY_LIBRARY_BACKEND` | `bambuddy` | Seeds the stored **Print library** setting (`bambuddy` or `native`; applies on restart). A value saved in Settings wins. `native` keeps print files in ScadBuddy's own library, in the blob store, and needs `store_backend` `s3`: a start with `native` on the `local` store is refused, and so is a save in Settings (422, `NATIVE_LIBRARY_NOT_READY`). The `bambuddy` store is refused since #7257 (below). |
 | `SCADBUDDY_BAMBUDDY_RENDER_API_KEY` | none | Seeds the stored **Render worker API key**. It is stored like `SCADBUDDY_BAMBUDDY_API_KEY` and never returned by the API. |
 | `SCADBUDDY_STORE_MAX_TOTAL_BYTES` | 50 GiB | Past this, a new blob is refused (a re-put of one already stored never is). `0` is no limit. |
 | `SCADBUDDY_STORE_MAX_COUNT` | 200000 | The same, counted in blobs. |
-| `SCADBUDDY_WORKER_CACHE_MAX_BYTES` | 10 GiB | Each process's local piece cache on the `bambuddy` or `s3` store. It is trimmed to this after each fetch or publish (#689), and again every `SCADBUDDY_ASSET_SWEEP_INTERVAL` (on a worker, every 300 s when that is `0`). |
+| `SCADBUDDY_WORKER_CACHE_MAX_BYTES` | 10 GiB | Each process's local piece cache on the `s3` store. It is trimmed to this after each fetch or publish (#689), and again every `SCADBUDDY_ASSET_SWEEP_INTERVAL` (on a worker, every 300 s when that is `0`). |
 | `SCADBUDDY_DOWNLOAD_CACHE_DIR` | API: `<data>/cache/downloads`; worker: none | Whole files downloaded from Bambuddy, named by their SHA-256 (#2788). A blob this process stored or fetched, and a library 3MF Bambuddy states a hash for, is read from here rather than downloaded again. An entry is renamed in only after its bytes match its name, and every read uses a private copy whose digest was checked (or, with `SCADBUDDY_DOWNLOAD_CACHE_PRIVATE`, the entry itself, checked first), so a bad entry is a miss. **Never give a render worker write access to the API's directory**: workers run template code, which could then fill the volume. A worker with none downloads as before. |
 | `SCADBUDDY_DOWNLOAD_CACHE_MAX_BYTES` | 4 GiB | Its cap, least recently used first, trimmed on each write. An entry used within the activity timeout is kept even past it, so a read under way keeps its file. `0` keeps nothing. |
 | `SCADBUDDY_DOWNLOAD_CACHE_PRIVATE` | `false` | API only, and only with `SCADBUDDY_DOWNLOAD_CACHE_DIR` set (#7316). `true` says that directory is this container's alone (an `emptyDir` mounted in no other container): a hit is then checked and read in place, with no private copy. Never on a shared directory, and never on a render worker, which runs template code in its container. Each replica then keeps its own cache. |
 | `SCADBUDDY_SPOOL_DIR` | `<data>/cache` | #7316. Where this process spools whole files while it works on them. `blob-spool/` holds the store's request-body spool: a cached download's private copy while it is read, the slicer worker's sliced 3MF (`PUT /api/v1/internal/blobs/…`), the print worker's per-print library copy (`PUT /api/v1/internal/library/files`), a background slice's 3MF while it is read, a Bambuddy library file downloaded for a slice, a sliced 3MF on its way to the library, a native library file copied for its thumbnail, a library upload's body (`POST /api/v1/print/library/files`, put in the blob store before its run starts, #7373) and the run's copy of it on its way to Bambuddy or read for its plates, and an order item's copy of a past print's archive. `library-spool/` holds every read of a Bambuddy library file (the file route, previews, choices, analyses, Arrange, and library prints from the dialog, a batch or an order). All are this process's own: unnamed files, except the archive copy and a library upload's body, named files removed when their upload or request ends. So a node-local `emptyDir` is right. The API reads it, and so does a render worker where it is set there (`build_store`). It is set once on the download cache, so with `SCADBUDDY_DOWNLOAD_CACHE_MAX_BYTES=0` a library read spools under `<data>/cache` instead. With the `local` store, a library upload's body streams to `<data>/cache` instead and is claimed there as a file. Every other browser upload's body (media, attachments, a mesh) still streams to `<data>/cache`, since its claim is linked there for a run that may be another replica's. |
-| `SCADBUDDY_BLOB_CACHE_DIR` | `<data>/blobs` | #7318. Where this process keeps its piece cache on the `bambuddy` or `s3` store: each rendered piece (and each kept file it serves by path, such as an order's attachment) it fetched or published, unpacked under `<key>/`, capped by `SCADBUDDY_WORKER_CACHE_MAX_BYTES`. The store is the record, and each process fetches what it lacks, so a node-local `emptyDir` is right: on the shared `/data` NFS volume every hit read a marker file over NFS and every miss unpacked a piece onto it. A job's files keep their stored names (`blobs/<key>/<file>`), wherever the cache is. A small file read whole (a filament preset document, a hosted plugin's zip) is read from the store in memory on a miss, with nothing unpacked. Each replica keeps its own cache, so each fetches a piece once. On the `local` store `<data>/blobs` is the store itself, so the setting is ignored there. After a move the old `<data>/blobs` is read by nothing; remove it by hand once every replica runs with the setting. The API reads it, and so does a render worker where it is set there (`build_store`). |
+| `SCADBUDDY_BLOB_CACHE_DIR` | `<data>/blobs` | #7318. Where this process keeps its piece cache on the `s3` store: each rendered piece (and each kept file it serves by path, such as an order's attachment) it fetched or published, unpacked under `<key>/`, capped by `SCADBUDDY_WORKER_CACHE_MAX_BYTES`. The store is the record, and each process fetches what it lacks, so a node-local `emptyDir` is right: on the shared `/data` NFS volume every hit read a marker file over NFS and every miss unpacked a piece onto it. A job's files keep their stored names (`blobs/<key>/<file>`), wherever the cache is. A small file read whole (a filament preset document, a hosted plugin's zip) is read from the store in memory on a miss, with nothing unpacked. Each replica keeps its own cache, so each fetches a piece once. On the `local` store `<data>/blobs` is the store itself, so the setting is ignored there. After a move the old `<data>/blobs` is read by nothing; remove it by hand once every replica runs with the setting. The API reads it, and so does a render worker where it is set there (`build_store`). |
 
 On a node-local `emptyDir`, the download cache's free-space reserve (1 GiB) is read from the node's disk, not from the volume's `sizeLimit`, and the kubelet evicts a pod whose `emptyDir` passes its `sizeLimit` ([Kubernetes: emptyDir](https://kubernetes.io/docs/concepts/storage/volumes/#emptydir)). So size the `emptyDir` for the download cache and for every body spooled at the same time. The cache: its cap, with room for its overshoot: entries read within the activity timeout are kept past the cap, each fill under way holds up to a quarter of the cap, and each spooled copy as much again. Twice `SCADBUDDY_DOWNLOAD_CACHE_MAX_BYTES` covers that (8 GiB for the default 4 GiB). The request bodies add their own sizes, one for each under way: up to 128 MiB for a sliced 3MF, a slicer PUT or a background slice read (`bambuddy/preview.py` `MAX_SLICED_BYTES`); up to 272 MiB for a per-print library copy (`bambuddy/print_source.py` `MAX_DOWNLOAD_BYTES`, 256 MiB, plus `api/internal_library.py` `LAYOUT_HEADROOM`, 16 MiB); up to 256 MiB for a library upload's body, and as much again for its run's copy (`MAX_DOWNLOAD_BYTES`); up to 1 GiB for an order's archive copy (`orders/past_prints.py` `MAX_COPY_BYTES`). A library read of a Bambuddy library file that is not kept spools the whole file, whatever its size, and a thumbnail copy spools a whole native library file: each adds its largest file. A slice of a Bambuddy library file spools up to 272 MiB (`workflows/slicing_activities.py` `MAX_INPUT_BYTES`, #7499). So start from twice the cache's cap plus 2 GiB (10 GiB for the default 4 GiB), and add more for a large library or for many prints and slices at once.
 
@@ -1819,19 +1789,22 @@ each. **GET `/api/v1/store/usage`** and **Blob store usage** in Settings →
 
 **Metrics:**
 - `scadbuddy_store_*`: `operations_total{op,outcome}`, `blobs`, `bytes{kind}`,
-  `max_blobs`, `max_bytes` and `render_key_fallback`;
+  `max_blobs` and `max_bytes`;
 - `scadbuddy_worker_cache_*`: `total{result}` (hit or miss) and `bytes`, per process.
 
 ### Recovering an unready blob store
 
-With `store_backend` set to `bambuddy`, the API and the render worker refuse to start
-without a Bambuddy URL and a library folder (the store's inbox), so the Settings page
-is out of reach. The same holds for `s3` without its endpoint, bucket and both keys, and
-the recovery below is the same. Settings no longer saves that state, but a stored `bambuddy` beats
+With `store_backend` set to `bambuddy`, the API refuses to start (#7257): saved outputs
+live only in the blob store, and the `bambuddy` store holds none (spec 6.4). It refuses
+whether or not the install holds an output. Settings refuses to save that store (422,
+reason `outputs-need-a-blob-store`), and a store migration to it is refused, but a
+stored `bambuddy`, or `SCADBUDDY_STORE_BACKEND=bambuddy` with nothing stored, still
+reaches a start. The same recovery holds for `s3` without its endpoint, bucket and both
+keys, which Settings does not save either, and a stored value beats
 `SCADBUDDY_STORE_BACKEND`. To start on the local store, run this in ScadBuddy's
 database, in the schema `SCADBUDDY_DATABASE_URL` uses (the `settings` table is
-unqualified: on a custom schema, `SET search_path` to it first), then set the URL and
-folder (or the S3 values) in Settings and choose that store again:
+unqualified: on a custom schema, `SET search_path` to it first), then set the S3 values
+in Settings and choose that store again:
 
 ```sql
 UPDATE settings SET value = '"local"' WHERE name = 'store_backend';
@@ -1853,9 +1826,9 @@ set `SCADBUDDY_STORE_BACKEND=local` instead.
 when the API restarts; no worker needs a restart, since `library_backend` is not among
 the settings render workers read (`RENDER_FIELDS`) and the print worker reads a native
 file through the API, which answers for the library it serves. It needs a content
-store, so choose `store_backend` `s3` or `bambuddy` first; with `s3`, nothing at start
-needs Bambuddy, while `bambuddy` still needs its inbox folder at start
+store, so choose `store_backend` `s3` first; with `s3`, nothing at start needs Bambuddy
 (spec 2026-10-16 §4.5, `docs/superpowers/specs/2026-10-16-own-store-slicer-rust-workers-design.md`).
+The `bambuddy` store is refused since #7257 ("Recovering an unready blob store").
 
 **A flip moves no files.** Switching to `native` starts an empty library, and Bambuddy's
 files stay in Bambuddy; switching back shows Bambuddy's again. Copy anything you want
@@ -2172,8 +2145,8 @@ the backend on `http://127.0.0.1:8080` (§4.3).
   and the agent's questions are answered through
   `POST /api/v1/ai/pending-input/{request_id}` (the panel's one respond route, #815),
   which works while the panel's socket is down;
-  `/api/v1/ai/approvals` and the socket's `approval.decision` / `question.answer`
-  still work. A chat
+  `/api/v1/ai/approvals` still works; the socket's old `approval.decision` /
+  `question.answer` are refused as malformed (#7323). A chat
   session's model gets the ScadBuddy tools in-process (`mcp__scadbuddy__*`, at
   their tiers), plus enabled plugins. Every agent response carries
   `X-ScadBuddy-Service: agent`.
@@ -2292,8 +2265,8 @@ What the API side needs for `slicer_backend` `native` (spec §5.2–§5.4, #3822
   saying which is missing. The slicer pod must reach that URL, and so must the print
   worker, whose LAN print reads its sliced file there by a URL the API mints
   (`…/print/transfer-urls`; without either, that read fails with a 503 `not_configured`).
-- `store_backend` `s3` or `bambuddy`: `local` has no content store for the slices'
-  blobs, and a native slice there fails with a 503.
+- `store_backend` `s3`: `local` has no content store for the slices' blobs, and a native
+  slice there fails with a 503 (the `bambuddy` store is refused since #7257).
 - The print worker's `SCADBUDDY_TEMPORAL_TASK_QUEUE_LIBRARY` and
   `SCADBUDDY_TEMPORAL_TASK_QUEUE_SLICER` matching the API's: the dialog's slice is
   started from the print worker onto those queues, and the API's `library` worker runs
@@ -2325,16 +2298,14 @@ trays all ScadBuddy's own, over the LAN) takes four switches, in this order. Eac
 checked per run from the settings as they are then (`printers/hot_path.py`
 `hot_path_native`), so there is no fifth switch and no restart beyond the ones noted:
 
-1. **`store_backend` `s3` or `bambuddy`** (the blob store, restart; "Blob store and
+1. **`store_backend` `s3`** (the blob store, restart; "Blob store and
    render workers" above), with the KEK mounted (`SCADBUDDY_SECRET_KEY_FILE`) on the API,
    which seals the printer's access code and opens it for the print worker (#5298) and
    signs a LAN print's blob reads (#5298 Task 32). The print worker holds no KEK; while
    the API has none, it takes Bambuddy's path for an `auto` printer and refuses a
-   `native` one (#5298 Task 33). Both count as native
-   (`printers/hot_path.py` `NATIVE_STORES`). On `bambuddy` the blobs, the native library's
-   copy among them, live in Bambuddy's library: those reads are the store's calls, outside
-   the print path, but a print still needs Bambuddy up. Only `s3` takes Bambuddy out of
-   the print entirely, so the real-stack check below runs on it.
+   `native` one (#5298 Task 33). Only `s3` counts as native
+   (`printers/hot_path.py` `NATIVE_STORES`): the API no longer starts on `bambuddy`
+   (#7257). The real-stack check below runs on it.
 2. **`library_backend` `native`** (Settings → *Projects & files*, restart; "Choosing
    ScadBuddy's own print library" above). A native run files its laid-out copy in the
    native library; a project is a Bambuddy path's, so a native run refuses a
@@ -2754,10 +2725,11 @@ holds the manifests. Phase 1 added two Deployments, the relay and the recorders.
   `deploy/camera/`. The recorder image sets `TZ=UTC`. MediaMTX names segment files in local
   time, and the recorder refuses any other `TZ` (`RecorderSettings.check_environment`).
   `build-image.yml` job `camera` publishes all three (amd64); `ci.yml` job `camera-image` builds and
-  checks all three. `deploy.reusable.yml` does not pin them yet. When a pin comes, it must move the
-  relay's image only when the relay's code or MediaMTX changes, not with each ScadBuddy release
-  (spec §6.1): each relay restart is a gap of about 10 to 30 s in every printer's recording
-  (the spec's estimate, §6.9).
+  checks all three. `deploy.reusable.yml` pins the recorder and the edge in eh-homelab/clusters
+  `applications/scadbuddy-camera/` to each build's `sha-<7>@sha256:<digest>` (#7997), both
+  containers of each. It never moves the relay. The relay's pin moves by hand, in a reviewed
+  clusters PR, only when the relay's code or MediaMTX changes (spec §6.1): each relay restart
+  is a gap of about 10 to 30 s in every printer's recording (the spec's estimate, §6.9).
 - **Two containers per pod.** Each pod runs its image twice: MediaMTX
   (`args: [mediamtx, /etc/mediamtx/mediamtx.yml]`) and the controller (the default command,
   `python -m scadbuddy.camera.relay`, `.recorder` or `.edge`). The controller
@@ -2869,9 +2841,10 @@ holds the manifests. Phase 1 added two Deployments, the relay and the recorders.
   the same numbers: `curl -fsS -o /dev/null http://127.0.0.1:9997/v3/paths/list`.
   Each controller also answers `/readyz` on 9090: 503 until the change follower runs, a full
   reconcile has put the API's paths in MediaMTX, and `/healthz` would answer 200. The
-  recorder adds one rule: every recorded printer has delivered a segment since the process
-  started, or has delivered none for 120 s (`STALL_SECONDS`; a printer that is off sends no
-  video to any recorder, and must not stop a rollout). The relay does not wait for its pulls:
+  recorder adds one rule: every printer it recorded at its first full reconcile has delivered
+  a segment since the process started, or has delivered none for 120 s (`STALL_SECONDS`; a
+  printer that is off sends no video to any recorder, and must not stop a rollout). A printer
+  added later does not count. The relay does not wait for its pulls:
   a printer that is off must not take the relay out of its Service. Use it as the
   controller's readiness probe with the same numbers (`periodSeconds: 10`,
   `timeoutSeconds: 4`, `failureThreshold: 3`). On the recorder Deployment, set

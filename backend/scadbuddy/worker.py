@@ -91,7 +91,6 @@ from scadbuddy.crud.render import (
     RemoteInstallSlots,
     RemoteJobProjection,
     RemoteRenderSettingsSource,
-    RemoteStoreFolders,
 )
 from scadbuddy.crud.tasks import RemoteTasks
 from scadbuddy.filament.bb_pull_run import FilamentPullActivities
@@ -228,7 +227,7 @@ LOCAL_STORE_REFUSED = (
     "store_backend is local, and the render worker holds no database (#5298): the local"
     " backend runs only in-process, in the API (SCADBUDDY_TEMPORAL_WORKER_INPROCESS), whose"
     " volume and git it shares (plan D11). A render worker Deployment needs a remote store:"
-    " choose bambuddy or s3 in Settings, or run the renders in-process."
+    " choose s3 in Settings, or run the renders in-process."
 )
 
 
@@ -241,7 +240,6 @@ def build_worker_deps(
     refs: RemoteBlobRefs,
     geometry: RemoteGeometryIndex,
     index: RemoteBlobIndex,
-    folders: RemoteStoreFolders,
     assets: RemoteAssetRows,
     leases: RemoteCheckoutLeases,
     slots: RemoteInstallSlots,
@@ -249,9 +247,9 @@ def build_worker_deps(
 ) -> tuple[WorkerDeps, StoreBundle]:
     """``current`` is ``source``'s first read, which the store is built from: a remote
     one (`LocalStoreRefusedError`). ``jobs`` writes the job rows, ``refs`` the job's blob
-    refs, ``geometry`` the piece geometry, ``index`` the blob index, ``folders`` the
-    Bambuddy store's folders, ``assets`` the uploads' rows, ``leases`` the library leases
-    and pin holds, ``slots`` the install slots, each through the API's CRUD routes
+    refs, ``geometry`` the piece geometry, ``index`` the blob index, ``assets`` the
+    uploads' rows, ``leases`` the library leases and pin holds, ``slots`` the install
+    slots, each through the API's CRUD routes
     (#5298): the worker holds no database. Its caller closes their clients."""
     backend = current.store_backend
     if backend == "local":
@@ -284,7 +282,6 @@ def build_worker_deps(
         paths=paths,
         pool=None,
         index=index,
-        folders=folders,
         # The worker writes no upload's index key: the API drops a bad copy (#5298).
         drop_asset_copy=assets.drop_copy,
         source=source,
@@ -850,12 +847,10 @@ class _DataUsage:
 
 async def _refresh_store_metrics(metrics: Metrics, store: StoreBundle, data: _DataUsage) -> None:
     """The store gauges this process owns: its whole data directory, which is an
-    emptyDir evicted past its sizeLimit (#1785), first, since it needs no database; then
-    its piece cache and the key it holds. The store's usage is the API's to export (one
-    database, one set of numbers)."""
+    emptyDir evicted past its sizeLimit (#1785), and its piece cache. Neither needs the
+    database. The store's usage is the API's to export (one database, one set of
+    numbers)."""
     metrics.render_data_bytes.set(await data.read())
-    health = await store_health(store)
-    metrics.store_render_key_fallback.set(1 if health.render_key_fallback else 0)
     if isinstance(store.blobs, CachedBlobStore):
         cached = await asyncio.to_thread(store.blobs.cached_bytes)
         if cached is not None:
@@ -1051,7 +1046,7 @@ def _start_housekeeping(deps: WorkerDeps, sweep_interval: float) -> asyncio.Task
     """Housekeep the worker's piece cache on a timer: every SCADBUDDY_ASSET_SWEEP_INTERVAL
     when that is on, else every `WORKER_CACHE_EVICT_INTERVAL`. Turning the upload sweep
     off never stops eviction. A render worker's blobs are always a `CachedBlobStore` (it
-    runs only on `bambuddy` or `s3`, #5298 plan D11); other blobs get None."""
+    runs only on a remote store, #5298 plan D11); other blobs get None."""
     if not isinstance(deps.blobs, CachedBlobStore):
         return None
     interval = sweep_interval if sweep_interval > 0 else WORKER_CACHE_EVICT_INTERVAL
@@ -1060,9 +1055,7 @@ def _start_housekeeping(deps: WorkerDeps, sweep_interval: float) -> asyncio.Task
 
 
 #: The CRUD areas the render worker calls (`api/crud_areas.py` `CRUD_AREAS`).
-RENDER_CRUD_AREAS = frozenset(
-    {"settings", "jobs", "refs", "blob-index", "store-folders", "assets", "libraries"}
-)
+RENDER_CRUD_AREAS = frozenset({"settings", "jobs", "refs", "blob-index", "assets", "libraries"})
 
 
 def render_crud(settings: Settings, metrics: Metrics | None = None) -> CrudClient:
@@ -1089,7 +1082,7 @@ async def run_worker(
     crud: CrudClient | None = None,
 ) -> None:
     """``python -m scadbuddy.worker``: the render worker. No database and no KEK
-    (#5298): its store settings, job rows, refs, geometry, blob index, store folders,
+    (#5298): its store settings, job rows, refs, geometry, blob index,
     uploads and library leases go through the API's CRUD routes, with a credential it
     exchanges its proof for, and it runs only on a remote store (plan D11). ``crud``, the
     client of those routes, defaults to `render_crud`'s; the worker closes it when it
@@ -1119,11 +1112,6 @@ async def run_worker(
             logger.info("stopped before the API answered this worker's store settings")
             return
         current = reading.result()
-        if current.store_backend == "bambuddy" and current.key_is_fallback:
-            logger.error(
-                "the API withholds the full Bambuddy key and no bambuddy_render_api_key is"
-                " saved: renders on the Bambuddy store fail until one is"
-            )
         # Called from the activities' threads (`asyncio.to_thread`), so blocking; one
         # client for the seven, closed with ``jobs``.
         remote = crud.blocking()
@@ -1139,8 +1127,6 @@ async def run_worker(
                 refs=RemoteBlobRefs(remote),
                 geometry=RemoteGeometryIndex(remote),
                 index=RemoteBlobIndex(remote),
-                # On the loop, as the store calls it: the async client.
-                folders=RemoteStoreFolders(crud, source=source),
                 assets=RemoteAssetRows(remote),
                 leases=RemoteCheckoutLeases(remote),
                 slots=RemoteInstallSlots(remote),

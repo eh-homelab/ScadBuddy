@@ -79,11 +79,11 @@ job and print progress. The owner chose no data loss; the operator can set per-k
 
 A new migration in `backend/scadbuddy/migrations/` (API ledger):
 
-- `fleet_agents (session_id uuid pk, handle text unique, label text, cursor bigint default 0, last_seen timestamptz)`
+- `fleet_agents (session_id uuid pk, handle text unique, label text, cursor bigint default 0, last_seen timestamptz, created_at timestamptz, updated_at timestamptz)` (`created_at` and `updated_at` from #7968; core sets `updated_at` with the cursor)
 - `fleet_channels (name text pk, created_at timestamptz)`
 - `fleet_members (channel, session_id, joined_at, pk (channel, session_id))`
 - `fleet_messages (seq bigint identity pk, from_session uuid, channel text null, to_session uuid null, text text, sent_at timestamptz, check exactly one target)`
-- `fleet_deliveries (session_id, seq, pk (session_id, seq))`
+- `fleet_deliveries (session_id, seq, created_at, pk (session_id, seq))` (`created_at` from #7968)
 
 ### 4.2 Routes in core (Go)
 
@@ -174,7 +174,10 @@ v1.8.0, the latest stable release on 2026-11-25); the workspace builds with go1.
 imports `fleetchat` and writes its own host. The server has no auth of its own; a
 NetworkPolicy lets in only ScadBuddy's pods, as for the Playwright MCP server. Changed on
 2026-11-26: anything on the LAN may call it, directly or through ScadBuddy's `/mcp`
-**(owner)**, so the policy also admits the LAN's Gateway.
+**(owner)**, so the policy also admits the LAN's Gateway. Changed by #8014: the internet reaches
+`/github/webhook` only, through the SSO host's public Exact route (eh-homelab/clusters#4432), which
+the webhook's signature check (`X-Hub-Signature-256`) guards; the policy also admits the SSO host's
+Pomerium proxy for that path.
 
 ## 7. Non-goals
 

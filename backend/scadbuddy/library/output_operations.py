@@ -13,8 +13,8 @@ from __future__ import annotations
 
 import asyncio
 import logging
-import shutil
 import uuid
+from contextlib import AsyncExitStack
 from typing import TYPE_CHECKING, Any
 
 import psycopg
@@ -35,7 +35,6 @@ from scadbuddy.library.libraries import CheckoutFetcher
 from scadbuddy.library.operations import answered_as_routes
 from scadbuddy.library.outputs import (
     BACK_OFFICE,
-    MODEL_NAME,
     hold_parts,
     release_parts,
     require_output,
@@ -160,13 +159,13 @@ def output_kinds(state: AppState, components: Components) -> list[OperationKind]
         result = chosen.result if chosen is not None else job.result
         assert result is not None  # `_done` refuses a job without one
         blobs = state.store.blobs
-        # The copy reads the job's files, which on the bambuddy backend come through the
-        # cache. Not in the check: a fetch from Bambuddy may take longer than its budget.
-        # #2755: the fetch (a download from Bambuddy when this process has not got the
-        # piece) and the write are the save's two long steps; each is its own span.
+        # The copy reads the job's files, which on a remote store come through the
+        # cache. Not in the check: a fetch may take longer than its budget.
+        # #2755: the fetch (a download when this process has not got the piece) and the
+        # write are the save's two long steps; each is its own span.
         with span("output.fetch_result", attributes={"scadbuddy.job_id": job.id}):
             await materialize_result(blobs, result)
-        # A piece the store no longer has (aged out, or the Bambuddy store unreachable)
+        # A piece the store no longer has (aged out, or the store unreachable)
         # is not fetched, and the copy would fail with a server path in its message.
         files = (result.model_3mf, result.preview_glb)
         root = state.outputs.paths.root
@@ -175,7 +174,7 @@ def output_kinds(state: AppState, components: Components) -> list[OperationKind]
         files_dir = None
         if chosen is not None and chosen.files_key is not None:
             if not await blobs.fetch(chosen.files_key):
-                # Before the save, so a refused save leaves nothing under outputs/.
+                # Before the save, so a refused save leaves no row and no blob.
                 raise ApiError(
                     status.HTTP_409_CONFLICT,
                     "the job's extra files are no longer in the store; render again",
@@ -207,11 +206,14 @@ def output_kinds(state: AppState, components: Components) -> list[OperationKind]
         # An arranged output has no template inputs to reopen; it records its sources (§7).
         arranged = job.kind == "arrange"
         sources = ArrangeInputs.model_validate(job.inputs).sources if arranged else []
+        # The staged files stay until the filing below has read the 3MF.
+        stack = AsyncExitStack()
         try:
-            await asyncio.to_thread(hold_parts, state.refs, output_id, manifest, job.slug)
+            await asyncio.to_thread(hold_parts, state.refs, output_id, manifest)
             with span("output.write", attributes={"scadbuddy.job_id": job.id}):
-                # #7256: the folder, then its bytes in the blob store, then the row.
-                meta = await state.outputs.save(
+                # #7256, #7257: staged on the spool, then the bytes in the blob store, then
+                # the row.
+                saving = state.outputs.saving(
                     job,
                     name=request["name"],
                     public_url=public_url,
@@ -221,61 +223,62 @@ def output_kinds(state: AppState, components: Components) -> list[OperationKind]
                     blobs_root=blobs.root,
                     arranged_from=sources,
                     output_id=output_id,
+                    claimed=claimed,
                     print_settings=print_settings,
                     # #6371: only the storefront slice run names one; `POST /outputs`'s
                     # body cannot, so its outputs are the back office's.
                     source=request.get("source", BACK_OFFICE),
                 )
+                saved = await stack.enter_async_context(saving)
         except Exception as error:
-            # Not on cancellation: the prepare or commit thread cannot be stopped and may
-            # still finish the output, and an output written without its holds loses its
-            # Parts at the next sweep. A cancel during the puts stops the save at once and
-            # leaves a folder with no meta.json, which the hold reaper removes with its
-            # holds (#1007).
+            # Not on cancellation: the commit thread cannot be stopped and may still finish
+            # the output, and an output written without its holds loses its Parts at the
+            # next sweep. A cancel during the puts stops the save at once; the output has
+            # no row, so the hold reaper releases its holds (#1007).
             try:
                 await asyncio.to_thread(release_parts, state.refs, output_id)
             except psycopg.Error:
                 logger.exception("could not release a failed save's Parts", extra={"id": output_id})
             if claimed:
-                # The row claim and the directory this save claimed, so a later attempt
-                # can claim the id again (#7257). A release that fails leaves the claim
-                # to the hold reaper's prune.
-                rows = state.outputs.rows
-                if rows is not None:
-                    try:
-                        await asyncio.to_thread(rows.release_claim, output_id)
-                    except psycopg.Error:
-                        logger.exception(
-                            "could not release a failed save's claim", extra={"id": output_id}
-                        )
-                directory = state.outputs.paths.output_dir(job.slug, output_id)
-                await asyncio.to_thread(shutil.rmtree, directory, ignore_errors=True)
+                # The claim, so a later attempt can claim the id again (#7257). A release
+                # that fails leaves the claim to the hold reaper's prune.
+                try:
+                    await asyncio.to_thread(state.outputs.rows.release_claim, output_id)
+                except psycopg.Error:
+                    logger.exception(
+                        "could not release a failed save's claim", extra={"id": output_id}
+                    )
             if isinstance(error, OSError):
                 # Evicted or swept after the check above, or unreadable: the same answer,
                 # not the copy's path. Only after the release, so this path leaks no holds.
                 raise _gone(job) from None
             if isinstance(error, StoreFullError):
-                # Ruling R2, as a render's snapshot put (`api/jobs.py`): the save's folder
-                # is gone (`OutputStore.save`), and its Parts are released above.
+                # Ruling R2, as a render's snapshot put (`api/jobs.py`): the save's staged
+                # files are gone (`OutputStore.saving`), and its Parts are released above.
                 raise ApiError(
                     status.HTTP_507_INSUFFICIENT_STORAGE,
                     f"the blob store has no room for this output: {error}",
                 ) from None
             raise
-        emit(state.events, OutputEvent(kind="output.created", output_id=meta.id, slug=meta.slug))
-        # Ruling 8: the save is the output; filing is logged and retried by nothing.
-        try:
-            native = await components.get(PRINT_LIBRARY).serving_native()
-            if native is not None:
-                title = await asyncio.to_thread(
-                    template_title, state.paths.model_source(meta.slug).parent, meta.slug
+        async with stack:
+            meta = saved.meta
+            emit(
+                state.events, OutputEvent(kind="output.created", output_id=meta.id, slug=meta.slug)
+            )
+            # Ruling 8: the save is the output; filing is logged and retried by nothing.
+            try:
+                native = await components.get(PRINT_LIBRARY).serving_native()
+                if native is not None:
+                    title = await asyncio.to_thread(
+                        template_title, state.paths.model_source(meta.slug).parent, meta.slug
+                    )
+                    # The 3MF the save staged and put: the same bytes as its blob, so the
+                    # blob is not downloaded again (#7256, #7257).
+                    await file_output(native, meta, saved.model_3mf, title)
+            except Exception:
+                logger.exception(
+                    "could not file a saved output in the library", extra={"id": meta.id}
                 )
-                # The 3MF the save just wrote and put: from its folder, the same bytes as
-                # its blob, so the blob is not downloaded again (#7256).
-                model_3mf = state.outputs.paths.output_dir(meta.slug, meta.id) / MODEL_NAME
-                await file_output(native, meta, model_3mf, title)
-        except Exception:
-            logger.exception("could not file a saved output in the library", extra={"id": meta.id})
         # A new output has no uploads yet: no read to make.
         # In a thread: the detail reads the blob index and the row.
         detail = await asyncio.to_thread(outputs_api.detail, state.outputs, meta, [])

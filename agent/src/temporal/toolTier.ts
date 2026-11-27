@@ -37,7 +37,7 @@ export function toolTierActivity(
 /**
  * `builtin_tier` (#4757): a durable session asks, before an engine-parked built-in's call
  * (Bash, PowerShell), its access across `packages`, the listing's packages that name it, as
- * a classic turn's seam reads it per call (access/live.ts): resolver.ts `builtin`, the
+ * a session turn's seam reads it per call (access/live.ts): resolver.ts `builtin`, the
  * strictest of each package's `builtin:<tool>`, an unset one `outward`. The caller names
  * the packages, so both runtimes ask about the same set. Without a resolver, `outward`.
  * The caller never passes an empty `packages` for a package's built-in (workflow.py

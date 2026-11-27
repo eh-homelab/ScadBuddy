@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import json
 import time
 from collections.abc import Iterator
 from datetime import UTC, datetime, timedelta
@@ -30,6 +29,7 @@ from scadbuddy.store.refs import BlobRefs
 from scadbuddy.workflows.commands import CommandStillAcceptingError
 from tests.api.conftest import wait_for_job
 from tests.support.operations import press
+from tests.support.row_outputs import update_row
 from tests.support.store import store_pool
 
 Pool = ConnectionPool[Connection[DictRow]]
@@ -59,8 +59,7 @@ def held(pool: Pool, output_id: str) -> set[str]:
 
 def legacy_output(client: TestClient, app: FastAPI, slug: str = "pasted") -> str:
     """A saved output of a pasted template, made to look like one saved before phase 5:
-    no manifest.json, no Parts held and no row (#7255: an output saved before the rows
-    has none until the copy runs, so its files answer)."""
+    its row names no manifest, and no Parts are held."""
     if client.get(f"/api/v1/models/{slug}").status_code == 404:
         created = client.post(
             "/api/v1/models", json={"name": slug, "source": "cube(10);\n"}, headers=press()
@@ -75,9 +74,7 @@ def legacy_output(client: TestClient, app: FastAPI, slug: str = "pasted") -> str
     assert saved.status_code == 201, saved.text
     output_id: str = saved.json()["id"]
     state = _state(app)
-    (state.outputs.directory(output_id) / "manifest.json").unlink()
-    assert state.outputs.rows is not None
-    state.outputs.rows.delete(output_id)
+    update_row(state.outputs, output_id, manifest=None)
     release_parts(state.refs, output_id)
     return output_id
 
@@ -98,8 +95,8 @@ def attached(client: TestClient, output_id: str, timeout: float = 30) -> dict[st
 
 
 def _rewrite_meta(store: OutputStore, output_id: str, **update: object) -> None:
-    path = store.directory(output_id) / "meta.json"
-    path.write_text(json.dumps({**json.loads(path.read_text()), **update}), encoding="utf-8")
+    meta = store.get(output_id).model_dump(mode="json")
+    update_row(store, output_id, meta={**meta, **update})
 
 
 def test_a_backfill_rerenders_the_output_and_gives_it_a_manifest(
@@ -160,7 +157,7 @@ def test_an_output_whose_revision_cannot_be_rendered_again_is_a_422(
 def test_an_arranged_output_is_a_422(client: TestClient, app: FastAPI, pool: Pool) -> None:
     output_id = legacy_output(client, app)
     store = _state(app).outputs
-    (store.directory(output_id) / "arranged_from.json").write_text('["x"]', encoding="utf-8")
+    update_row(store, output_id, arranged_from=["x"])
     refused = client.post(f"/api/v1/outputs/{output_id}/backfill")
     assert refused.status_code == 422, refused.text
     assert "arranged" in refused.json()["detail"]

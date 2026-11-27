@@ -49,10 +49,6 @@ const QUESTIONS: UserQuestion[] = [
 const answerBody = (answers: string[], questions: UserQuestion[] = QUESTIONS) =>
   ({ kind: 'answer', answers: Object.fromEntries(questions.map((q, i) => [q.question, answers[i]!])) }) as const
 
-/** A question frame as an older panel sends it on the chat socket. */
-const socketAnswer = (sessionId: string, id: string, answers: unknown) =>
-  ({ v: PROTOCOL_VERSION, type: 'question.answer', sessionId, id, answers }) as const
-
 const result = (run: HarnessRun) =>
   ({ type: 'result', subtype: 'success', is_error: false, num_turns: 1, total_cost_usd: 0.01, session_id: run.sessionId ?? run.resume }) as unknown as SDKMessage
 
@@ -508,19 +504,18 @@ describe.skipIf(!TEST_DATABASE_URL || AGENT_SESSIONS_SKIP !== '')(
       expect((await m.get(session.id, browser)).status).toBe('idle')
     })
 
-    it('the chat socket names the question on a malformed answer, and nothing on another malformed frame', async () => {
+    // #7323: the socket's old answer frame is gone; one still sent is refused as malformed and names nothing.
+    it('the chat socket refuses the old question.answer frame as malformed, naming no question', async () => {
       const m = manager({ sql: db.sql, paths: await tempPaths(), run: asking })
       const out: ServerEvent[] = []
       const chat = new ChatConnection(m, (e) => out.push(e), { snapshotMs: 60_000 })
       try {
-        await chat.receive(JSON.stringify(socketAnswer('s1', 'q1', 'Red')))
-        await chat.receive(JSON.stringify({ v: PROTOCOL_VERSION, type: 'session.send', sessionId: 's1', id: 'q1' }))
-        await expect.poll(() => out.filter((e) => e.type === 'error').length).toBe(2)
-        const [first, second] = out.filter((e) => e.type === 'error')
-        expect(first).toMatchObject({ code: 'invalid', sessionId: 's1', questionId: 'q1' })
-        expect(second).toMatchObject({ code: 'invalid' })
-        expect(second).not.toHaveProperty('questionId')
-        expect(second).not.toHaveProperty('sessionId')
+        await chat.receive(JSON.stringify({ v: PROTOCOL_VERSION, type: 'question.answer', sessionId: 's1', id: 'q1', answers: ['Red'] }))
+        await expect.poll(() => out.filter((e) => e.type === 'error').length).toBe(1)
+        const [refused] = out.filter((e) => e.type === 'error')
+        expect(refused).toMatchObject({ code: 'invalid' })
+        expect(refused).not.toHaveProperty('questionId')
+        expect(refused).not.toHaveProperty('sessionId')
       } finally {
         chat.close()
       }

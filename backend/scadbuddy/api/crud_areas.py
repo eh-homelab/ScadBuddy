@@ -182,7 +182,7 @@ from scadbuddy.crud.guard import CrudCaller, crud_router
 #: ``/{id}/answered``: the typed questions a flow asks (#7364, `api/crud_tasks.py`).
 CRUD_AREAS: dict[CrudCaller, list[str]] = {
     "projects": ["flows", "operations", "payload-keys", "tasks"],
-    "render": ["settings", "jobs", "refs", "blob-index", "store-folders", "assets", "libraries"],
+    "render": ["settings", "jobs", "refs", "blob-index", "assets", "libraries"],
     "print": [
         "settings",
         "runs",
@@ -278,6 +278,7 @@ CRUD_AREAS: dict[CrudCaller, list[str]] = {
     # #6949 K1: scadbuddy-core answers the area `inventory`, the inventory's reads; its
     # writes are Temporal activities, not routes (tools/go/core/README.md).
     "inventory": ["inventory"],
+    "fleet-rotator": ["fleet"],
 }
 
 

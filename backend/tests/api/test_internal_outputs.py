@@ -13,8 +13,9 @@ from fastapi.testclient import TestClient
 
 from scadbuddy.api.deps import STATE_ATTR, AppState
 from scadbuddy.bambuddy.output_reader import LocalOutputs, OutputReader, RemoteOutputs
-from scadbuddy.library.outputs import MODEL_NAME, OutputNotFoundError
+from scadbuddy.library.outputs import OutputNotFoundError
 from tests.api.test_send import make_output
+from tests.support.saved_outputs import stored_bytes
 
 UNKNOWN = "f" * 32
 
@@ -49,8 +50,7 @@ def test_the_routes_answer_the_record_the_stored_3mf_and_the_naming(
     meta = client.get(f"/api/v1/internal/outputs/{output_id}")
     assert meta.status_code == 200 and meta.json()["id"] == output_id
     stored = client.get(f"/api/v1/internal/outputs/{output_id}/model.3mf")
-    path = state(client).outputs.directory(output_id) / MODEL_NAME
-    assert stored.status_code == 200 and stored.content == path.read_bytes()
+    assert stored.status_code == 200 and stored.content == stored_bytes(client, output_id)
     naming = client.get(f"/api/v1/internal/outputs/{output_id}/naming").json()
     assert naming["stem"] and naming["invalid_meta"] is None
 
@@ -69,13 +69,13 @@ def test_the_routes_are_not_in_the_schema(client: TestClient) -> None:
 @pytest.mark.parametrize("reader", [local, remote])
 def test_both_readers_read_the_same_output(client: TestClient, model: str, reader: Any) -> None:
     output_id = make_output(client, model)
-    path = state(client).outputs.directory(output_id) / MODEL_NAME
+    data = stored_bytes(client, output_id)
     outputs: OutputReader = reader(client)
 
     async def read() -> None:
         meta = await outputs.get(output_id)
         assert meta == state(client).outputs.get(output_id)
-        assert await outputs.model_3mf(output_id) == path.read_bytes()
+        assert await outputs.model_3mf(output_id) == data
         assert (await outputs.naming(meta)) == (await local(client).naming(meta))
         with pytest.raises(OutputNotFoundError):
             await outputs.get(UNKNOWN)

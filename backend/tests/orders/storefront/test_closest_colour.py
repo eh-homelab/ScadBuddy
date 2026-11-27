@@ -1,5 +1,5 @@
-"""The closest colour (#6258): the shared vectors, which the page's twin reads too, and
-CIEDE2000 against Sharma, Wu and Dalal's published test pairs."""
+"""The closest colour (#6258): the shared vectors, which the page's and the agent's twins
+read too, and CIEDE2000 against Sharma, Wu and Dalal's published test pairs."""
 
 from __future__ import annotations
 

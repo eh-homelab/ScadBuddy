@@ -2,32 +2,21 @@
 
 from __future__ import annotations
 
-import json
 import threading
 import uuid
 from datetime import UTC, datetime, timedelta
-from pathlib import Path
 from typing import Any
 
 import pytest
 
 from scadbuddy.camera.models import FeedReport, SegmentIn
-from scadbuddy.camera.store import CameraStore, NotLeaderError
+from scadbuddy.camera.store import CameraStore, NotLeaderError, ObjectKeyError
 from scadbuddy.core.secrets import Kek
-from scadbuddy.printers.models import LanLink, PrinterCreate
-from scadbuddy.printers.reports import PrinterReportStore
 from scadbuddy.printers.store import PrinterStore
+from tests.camera.support import CERT, CODE, NOW, make_printer
 from tests.conftest import PgPool
 
 pytestmark = pytest.mark.requires_postgres
-
-REPORT: dict[str, Any] = json.loads(
-    (Path(__file__).parent / "fixtures" / "h2c-report.json").read_text()
-)
-SERIAL = "01P00A000000001"
-CODE = "12345678"
-CERT = "ab" * 32
-NOW = datetime(2026, 11, 23, 12, 0, 0, tzinfo=UTC)
 
 
 @pytest.fixture
@@ -40,27 +29,11 @@ def camera(pg_pool: PgPool, printers: PrinterStore) -> CameraStore:
     return CameraStore(pg_pool, printers)
 
 
-def make_printer(
-    printers: PrinterStore,
-    pool: PgPool,
-    *,
-    serial: str = SERIAL,
-    code: bool = True,
-    report: dict[str, Any] | None = REPORT,
-) -> str:
-    row = printers.create(PrinterCreate(serial=serial, name="H2C", model="H2C"))
-    if code:
-        printers.link_lan(row.id, LanLink(host="10.0.0.9", access_code=CODE), cert_sha256=CERT)
-    if report is not None:
-        PrinterReportStore(pool).put(row.id, report, NOW)
-    return row.id
-
-
-def seg(start: datetime, ms: int = 4000, key: str | None = None) -> SegmentIn:
+def seg(pid: str, start: datetime, ms: int = 4000, key: str | None = None) -> SegmentIn:
     return SegmentIn(
         started_at=start,
         duration_ms=ms,
-        object_key=key or f"camera/{start.isoformat()}.mp4",
+        object_key=f"rec/camera/{pid}/{key or start.isoformat()}.mp4",
         bytes=1000,
         init_bytes=100,
         init_sha256="0" * 64,
@@ -100,6 +73,23 @@ def test_sources_skip_unqualified(
     for pid in (no_code, plain, no_report, off):
         assert camera.sources(pid) == []
         assert camera.sources_with_codes(pid) == []
+
+
+def test_sources_skip_a_virtual_printer(
+    camera: CameraStore, printers: PrinterStore, pg_pool: PgPool
+) -> None:
+    """A Bambuddy virtual printer has a LAN link and the report of the printer it forwards
+    to, so an RTSP URL, but no camera (#7996, seen on prod 2026-11-26)."""
+    physical = make_printer(printers, pg_pool)
+    virtual = make_printer(printers, pg_pool, serial="01P00A000000003")
+    with pg_pool.connection() as conn:
+        conn.execute(
+            "UPDATE printers SET kind = 'bambuddy_virtual', bambuddy_vp_id = 1 WHERE id = %s",
+            (uuid.UUID(virtual),),
+        )
+    assert [s.printer_id for s in camera.sources()] == [physical]
+    assert camera.sources(virtual) == []
+    assert camera.recorded(virtual) is False
 
 
 def test_acquire_is_exclusive(camera: CameraStore, printers: PrinterStore, pg_pool: PgPool) -> None:
@@ -164,15 +154,15 @@ def test_index_refuses_non_leader(
     pid = make_printer(printers, pg_pool)
     now = datetime.now(UTC)
     with pytest.raises(NotLeaderError):
-        camera.index(pid, "a", [seg(now)], now)
+        camera.index(pid, "a", [seg(pid, now)], now)
     camera.lease(pid, "a", "acquire", now)
     with pytest.raises(NotLeaderError):
-        camera.index(pid, "b", [seg(now)], now)
+        camera.index(pid, "b", [seg(pid, now)], now)
     camera.lease(pid, "c", "acquire", now - timedelta(minutes=5))
     camera.lease(pid, "a", "release", now)
     camera.lease(pid, "a", "acquire", now - timedelta(minutes=5))
     with pytest.raises(NotLeaderError):
-        camera.index(pid, "a", [seg(now)], now)
+        camera.index(pid, "a", [seg(pid, now)], now)
 
 
 def test_index_is_idempotent_by_key(
@@ -181,9 +171,9 @@ def test_index_is_idempotent_by_key(
     pid = make_printer(printers, pg_pool)
     now = datetime.now(UTC)
     camera.lease(pid, "a", "acquire", now)
-    batch = [seg(NOW), seg(NOW + timedelta(seconds=4))]
+    batch = [seg(pid, NOW), seg(pid, NOW + timedelta(seconds=4))]
     assert camera.index(pid, "a", batch, now) == 2
-    assert camera.index(pid, "a", [*batch, seg(NOW + timedelta(seconds=8))], now) == 1
+    assert camera.index(pid, "a", [*batch, seg(pid, NOW + timedelta(seconds=8))], now) == 1
     assert camera.index(pid, "a", [], now) == 0
     with pg_pool.connection() as conn:
         row = conn.execute("SELECT count(*) AS n FROM camera_segments").fetchone()
@@ -196,7 +186,7 @@ def test_indexed_until_is_last_end(
     pid = make_printer(printers, pg_pool)
     now = datetime.now(UTC)
     assert camera.lease(pid, "a", "acquire", now).indexed_until is None
-    camera.index(pid, "a", [seg(NOW), seg(NOW + timedelta(seconds=4), 3500)], now)
+    camera.index(pid, "a", [seg(pid, NOW), seg(pid, NOW + timedelta(seconds=4), 3500)], now)
     answer = camera.lease(pid, "a", "renew", now)
     assert answer.indexed_until == NOW + timedelta(seconds=7.5)
     assert camera.lease(pid, "b", "acquire", now).indexed_until == NOW + timedelta(seconds=7.5)
@@ -270,9 +260,9 @@ def test_index_uses_the_callers_clock(
     pid = make_printer(printers, pg_pool)
     t = datetime(2030, 1, 1, tzinfo=UTC)
     assert camera.lease(pid, "a", "acquire", t).held
-    assert camera.index(pid, "a", [seg(t)], t + timedelta(seconds=19)) == 1
+    assert camera.index(pid, "a", [seg(pid, t)], t + timedelta(seconds=19)) == 1
     with pytest.raises(NotLeaderError):
-        camera.index(pid, "a", [seg(t, key="late")], t + timedelta(seconds=21))
+        camera.index(pid, "a", [seg(pid, t, key="late")], t + timedelta(seconds=21))
 
 
 def test_sources_use_the_linked_host(
@@ -291,3 +281,30 @@ def test_sources_skip_a_bad_port(
     report = {"ipcam": {"rtsp_url": f"rtsps://10.0.0.9:{port}/streaming/live/1"}}
     pid = make_printer(printers, pg_pool, report=report)
     assert camera.sources(pid) == []
+
+
+@pytest.mark.parametrize(
+    "key",
+    [
+        "rec/camera/{other}/a.mp4",
+        "camera/{pid}.mp4",
+        "rec/camera/{pid}/../{other}/a.mp4",
+        "rec/camera/{pid}//a.mp4",
+        "rec/camera/{pid}/a.json",
+        "rec/{pid}/a.mp4",
+    ],
+)
+def test_index_refuses_a_key_outside_the_printers_folder(
+    camera: CameraStore, printers: PrinterStore, pg_pool: PgPool, key: str
+) -> None:
+    pid = make_printer(printers, pg_pool)
+    other = str(uuid.uuid4())
+    now = datetime.now(UTC)
+    camera.lease(pid, "a", "acquire", now)
+    bad = seg(pid, NOW).model_copy(update={"object_key": key.format(pid=pid, other=other)})
+    with pytest.raises(ObjectKeyError):
+        camera.index(pid, "a", [seg(pid, NOW + timedelta(seconds=4)), bad], now)
+    with pg_pool.connection() as conn:
+        row = conn.execute("SELECT count(*) AS n FROM camera_segments").fetchone()
+    assert row is not None and row["n"] == 0
+    assert camera.index(pid, "a", [seg(pid, NOW)], now) == 1

@@ -1201,17 +1201,28 @@ async def get_library_plate_thumbnail(
     request: Request,
     store: SettingsStoreDep,
     library: PrintLibraryDep,
+    cover_if_missing: Annotated[
+        bool,
+        Query(description="The file's thumbnail when the plate has no image (#7939)"),
+    ] = False,
 ) -> Response:
-    native = await library.serving_native()
-    if native is not None:
-        return await _native_thumbnail(native, file_id, index)
-    return await _proxy(
-        store,
-        request,
-        f"/library/files/{file_id}/plate-thumbnail/{index}",
-        operation="library.plate_thumbnail",
-        what="show the plate image",
-    )
+    """One plate's image. A queue item's picture asks with ``cover_if_missing``: a plate
+    with no image then shows the file's thumbnail, never nothing."""
+    try:
+        native = await library.serving_native()
+        if native is not None:
+            return await _native_thumbnail(native, file_id, index)
+        return await _proxy(
+            store,
+            request,
+            f"/library/files/{file_id}/plate-thumbnail/{index}",
+            operation="library.plate_thumbnail",
+            what="show the plate image",
+        )
+    except ApiError as error:
+        if not cover_if_missing or error.status != status.HTTP_404_NOT_FOUND:
+            raise
+    return await get_library_thumbnail(file_id, request, store, library)
 
 
 async def native_library_source(

@@ -15,8 +15,7 @@ from scadbuddy.camera.edge import BASE, Edge, ViewersCollector
 from scadbuddy.camera.follow import ChangeFollower
 from scadbuddy.camera.settings import EdgeSettings
 from scadbuddy.crud.client import CrudClient
-from tests.camera.test_follow import Token, frame, sse, until
-from tests.camera.test_relay import FakeMtx
+from tests.camera.support import FakeMtx, Token, frame, sse, until
 
 CRUD = {"X-ScadBuddy-Crud": "1"}
 READ_PASS = "relay-read-secret"

@@ -187,7 +187,7 @@ type channelArgs struct {
 type sendArgs struct {
 	SessionID string `json:"session_id" jsonschema:"Your Claude Code session id (a lower-case UUID). Your handle is its first 8 characters."`
 	Channel   string `json:"channel,omitempty" jsonschema:"Post to this channel (you must be a member). Give channel or agent, not both."`
-	Agent     string `json:"agent,omitempty" jsonschema:"Send a direct message to the agent with this 8-character handle. Give channel or agent, not both."`
+	Agent     string `json:"agent,omitempty" jsonschema:"Send a direct message to the agent with this 8-character handle. Give channel or agent, not both. A virtual sender's name (such as rotator) takes no messages."`
 	Text      string `json:"text" jsonschema:"The message text."`
 }
 
