@@ -61,6 +61,7 @@ from scadbuddy.workflows.print_activities import PrintActivities, PrintDeps
 from scadbuddy.workflows.print_models import AcceptAnswer, CheckInput, SourceSpec
 from tests.bambuddy.conftest import recording
 from tests.conftest import PgPool
+from tests.printers.conftest import unkeyed
 from tests.support.printers import MERGED_BY
 from tests.test_print_workflow import run_input
 
@@ -76,7 +77,9 @@ HOT_PATH: dict[str, Any] = {
     "library_backend": "native",
     "store_backend": "s3",
 }
-REPORT = json.loads((Path(__file__).parent / "fixtures" / "lan-report-h2c.json").read_text())
+REPORT = unkeyed(
+    json.loads((Path(__file__).parent / "fixtures" / "lan-report-h2c.json").read_text())
+)
 
 
 class OnePlate:

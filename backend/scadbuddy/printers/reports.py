@@ -284,6 +284,14 @@ def _capture(
                 ),
             )
         )
+        steps.append(
+            (
+                "unknown_trays",
+                lambda: capture.note_unknown(
+                    conn, printer_id, report, seen_at, actor=capture.WATCH_ACTOR
+                ),
+            )
+        )
     for what, step in steps:
         try:
             with conn.transaction():

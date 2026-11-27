@@ -3,9 +3,11 @@ import { api } from '../api/client'
 import type { FlowGrantRequests, FlowRunGrantRequest, FlowTrigger } from '../api/types'
 import { ATTENTION_POLL_MS, type AttentionNotice, type WaitingEntry } from '../agent/attention'
 import type { PairingEntry } from '../agent/linkProtocol'
+import type { UnknownSpoolTray } from '../api/unknownTrays'
 import { noticeTitle } from '../agent/attentionNotifications'
 import { getRealtime } from './realtime'
 import { dismissToast, toast } from './toast'
+import { unknownSpoolTitle } from './unknownSpools'
 
 /**
  * #6399 — every request that waits on the person, of every kind, in one list: what the bell's
@@ -16,7 +18,8 @@ import { dismissToast, toast } from './toast'
  *   run's calls at hop `person`;
  * - the flow grants a person has to decide (`GET /api/v1/flow-grant-requests`): a run's
  *   requested grant, and a trigger's requested standing grant;
- * - the browser pairing requests this tab's link heard (an MCP client asks to drive a tab).
+ * - the browser pairing requests this tab's link heard (an MCP client asks to drive a tab);
+ * - the loaded trays no spool is linked to (#7143, `GET /api/v1/filament/unknown-trays`).
  *
  * Who sees what is the routes' own rule: the agent lists to the browser user what it lists, and
  * the grant requests are read as any flow read is. Only a person decides each one.
@@ -26,6 +29,7 @@ export type NeedsYouItem =
   | { kind: 'run-grant'; key: string; since?: string; request: FlowRunGrantRequest }
   | { kind: 'trigger-grant'; key: string; since?: string; trigger: FlowTrigger }
   | { kind: 'pairing'; key: string; since?: string; pairing: PairingEntry }
+  | { kind: 'unknown_spool'; key: string; since: string; tray: UnknownSpoolTray }
 
 /** The Activity page's section, which the bell's "See all" and a notification open. */
 export const NEEDS_YOU_ID = 'needs-you'
@@ -42,6 +46,7 @@ export function needsYouItems(
   waiting: readonly WaitingEntry[],
   grants: FlowGrantRequests | null,
   pairings: readonly PairingEntry[],
+  unknown: readonly UnknownSpoolTray[] = [],
 ): NeedsYouItem[] {
   const items: NeedsYouItem[] = [
     ...waiting.map((entry, i): NeedsYouItem => ({
@@ -64,6 +69,7 @@ export function needsYouItems(
       }),
     ),
     ...pairings.map((pairing): NeedsYouItem => ({ kind: 'pairing', key: `pairing:${pairing.id}`, pairing })),
+    ...unknown.map((tray): NeedsYouItem => ({ kind: 'unknown_spool', key: `unknown_spool:${tray.id}`, since: tray.first_seen_at, tray })),
   ]
   const at = (item: NeedsYouItem) => (item.since ? Date.parse(item.since) : Number.POSITIVE_INFINITY)
   return items.sort((a, b) => at(a) - at(b))
@@ -84,6 +90,8 @@ export function needsYouNotices(items: readonly NeedsYouItem[]): AttentionNotice
       out.push({ id: item.key, sessionId: null, reason: 'grant', message: `Trigger of ${item.trigger.name} asks for a standing grant`, href: NEEDS_YOU_PATH })
     } else if (item.kind === 'pairing') {
       out.push({ id: item.key, sessionId: null, reason: 'pairing', message: `${item.pairing.label} asks to use a ScadBuddy tab`, href: NEEDS_YOU_PATH })
+    } else if (item.kind === 'unknown_spool') {
+      out.push({ id: item.key, sessionId: null, reason: 'unknown_spool', message: unknownSpoolTitle(item.tray), href: NEEDS_YOU_PATH })
     }
   }
   return out
@@ -104,6 +112,8 @@ export interface NeedsYou {
   refresh: () => void
   /** Opens the assistant panel, on the session when one is named; null while the assistant is not there. */
   openSession: ((sessionId: string | null) => void) | null
+  /** Opens the dialog that asks which spool is in an unknown tray (`useUnknownSpoolDialog`); absent where there is none. */
+  answerSpool?: (tray: UnknownSpoolTray, onResolved?: () => void) => void
 }
 
 export const NeedsYouContext = createContext<NeedsYou | null>(null)
@@ -112,6 +122,7 @@ export const NeedsYouContext = createContext<NeedsYou | null>(null)
 function toastTitle(item: NeedsYouItem): string {
   if (item.kind === 'run-grant' || item.kind === 'trigger-grant') return noticeTitle('grant')
   if (item.kind === 'pairing') return noticeTitle('pairing')
+  if (item.kind === 'unknown_spool') return noticeTitle('unknown_spool')
   const { entry } = item
   return noticeTitle(entry.kind === 'approval' ? 'approval' : (entry.reason ?? 'question'))
 }
@@ -124,6 +135,8 @@ function toastDetail(item: NeedsYouItem): string {
       return `A trigger of ${item.trigger.name}`
     case 'pairing':
       return item.pairing.label
+    case 'unknown_spool':
+      return `${item.tray.printer_name} ${item.tray.slot}`
     case 'agent':
       return item.entry.run ? `Flow run ${item.entry.run.name}` : item.entry.tool
   }
@@ -133,10 +146,10 @@ function toastDetail(item: NeedsYouItem): string {
 export const NEEDS_YOU_TOAST_MS = 30_000
 
 /** Where an item is read from; each answers on its own, so the list is built from those that have. */
-export type NeedsYouSource = 'agent' | 'grants' | 'pairings'
+export type NeedsYouSource = 'agent' | 'grants' | 'pairings' | 'filament'
 
 export const sourceOf = (item: NeedsYouItem): NeedsYouSource =>
-  item.kind === 'agent' ? 'agent' : item.kind === 'pairing' ? 'pairings' : 'grants'
+  item.kind === 'agent' ? 'agent' : item.kind === 'pairing' ? 'pairings' : item.kind === 'unknown_spool' ? 'filament' : 'grants'
 
 /**
  * #6399 — a toast for each request that starts to wait while this page is open, of every kind
