@@ -2118,6 +2118,7 @@ export function placeSpoolAtTray(spool: string, printer: string, ams: number, tr
       capacity: null,
       note: null,
       sort_order: 10 + tray,
+      station: false,
       name: `${unit?.name ?? `AMS ${ams}`} slot ${tray + 1}`,
       kind_id: LK.AMS,
       printer_id: printer,
