@@ -7,6 +7,7 @@ from typing import Any
 import pytest
 from pydantic import ValidationError
 
+from scadbuddy.flow_triggers.models import StandingGrant
 from scadbuddy.flows.grants import (
     MAX_EXPIRY,
     CallFacts,
@@ -268,17 +269,21 @@ def test_a_child_runs_grant_has_no_answers() -> None:
     assert inherited(_plain(answers=ANSWERS), None).answers is None
 
 
-def test_expired_reads_the_grants_own_expiry_by_the_clock_it_is_given() -> None:
+@pytest.mark.parametrize("kind", ["run", "standing"])
+def test_expired_reads_the_grants_own_expiry_by_the_clock_it_is_given(kind: str) -> None:
     """#8220: the view says expired from the server's clock. An approved grant reads its
-    own `expires_at`; a requested one, the expiry it asks for."""
-    approved = Grant(
-        id="g",
-        run_id="r",
-        status="approved",
-        spec=spec({"fn": "queue_print"}),
-        requested_by={"kind": "browser"},
-        expires_at=NOW + timedelta(hours=1),
-        created_at=NOW,
+    own `expires_at`; a requested one, the expiry it asks for. Run and standing grants
+    alike (#8248)."""
+    fields: dict[str, Any] = {
+        "id": "g",
+        "status": "approved",
+        "spec": spec({"fn": "queue_print"}),
+        "requested_by": {"kind": "browser"},
+        "expires_at": NOW + timedelta(hours=1),
+        "created_at": NOW,
+    }
+    approved: Grant | StandingGrant = (
+        Grant(run_id="r", **fields) if kind == "run" else StandingGrant(trigger_id="t", **fields)
     )
     assert not approved.expired(NOW)
     assert approved.expired(NOW + timedelta(hours=1))
