@@ -1,4 +1,4 @@
-# Own the store, the slicer and the printers: cut Bambuddy out of the hot path
+# Own the store, the slicer and the printers: the hot path does not depend on Bambuddy
 
 Status: proposed, 2026-10-16. Supersedes nothing yet; it narrows what the
 2026-09-27 template-pipelines spec §6 says about the `bambuddy` store backend being
