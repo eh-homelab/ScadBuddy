@@ -5,6 +5,7 @@ import { archiveSpool, getSpool, moveSpool, upsertLocation } from '../../api/fil
 import { L, LK, spoolId } from '../../mocks/features/filament/seed'
 import { resetMockState } from '../../mocks/handlers'
 import { server } from '../../mocks/server'
+import { installNdefStub } from '../../test/ndefStub'
 import { renderPage } from '../../test/utils'
 import { SwapPage } from './SwapPage'
 
@@ -316,6 +317,12 @@ describe('SwapPage (#7168)', () => {
     const reader = vi.fn()
     const getUserMedia = vi.fn()
     ;(window as unknown as { NDEFReader: unknown }).NDEFReader = reader
+    // A camera and a BarcodeDetector, so the page offers "Use camera" outside a frame (IdentifySpool.test.tsx `installCamera`).
+    ;(window as unknown as { BarcodeDetector: unknown }).BarcodeDetector = class {
+      detect() {
+        return Promise.resolve([])
+      }
+    }
     const media = navigator.mediaDevices
     Object.defineProperty(navigator, 'mediaDevices', { value: { getUserMedia }, configurable: true })
     const open = vi.spyOn(window, 'open').mockReturnValue(null)
@@ -329,13 +336,116 @@ describe('SwapPage (#7168)', () => {
       expect(screen.queryByRole('button', { name: 'Use camera' })).toBeNull()
       await pickSpool(user, 'S-3')
       await screen.findByRole('heading', { name: 'Where does it go?' })
-      expect(screen.queryByRole('button', { name: 'Write tag' })).toBeNull()
+      const placeWays = screen.getByRole('radiogroup', { name: 'How do you name the place?' })
+      expect(within(placeWays).queryByRole('radio', { name: 'Scan tag' })).toBeNull()
+      await user.click(within(placeWays).getByRole('radio', { name: 'QR code' }))
+      expect(screen.queryByRole('button', { name: 'Use camera' })).toBeNull()
+      expect(screen.queryByRole('button', { name: /^Write tag/ })).toBeNull()
       expect(reader).not.toHaveBeenCalled()
       expect(getUserMedia).not.toHaveBeenCalled()
     } finally {
       Object.defineProperty(window, 'top', { value: top, configurable: true })
       Object.defineProperty(navigator, 'mediaDevices', { value: media, configurable: true })
       delete (window as unknown as { NDEFReader?: unknown }).NDEFReader
+      delete (window as unknown as { BarcodeDetector?: unknown }).BarcodeDetector
+    }
+  })
+
+  it('after a failed take-out, "Choose another place" names a place for the taken-out spool', async () => {
+    const { a, b } = await seedBoxes()
+    const { user } = renderPage(<SwapPage />)
+    const out = await toCycle(user)
+    server.use(http.post('/api/v1/filament/spools/:id/move', () => HttpResponse.error(), { once: true }))
+    await user.click(out)
+    await screen.findByRole('alert')
+    const sent = moves()
+    await user.click(screen.getByRole('button', { name: 'Choose another place' }))
+    expect(await screen.findByRole('heading', { name: 'Where does it go?' })).toBeInTheDocument()
+    expect(screen.getByText(/in Dry box A/)).toBeInTheDocument()
+    await pickPlace(user, 'Shelf A')
+    await user.click(await screen.findByRole('button', { name: 'Move' }))
+    await waitFor(() => expect(within(logOf()).getByText('S-6 → Dry box B')).toBeInTheDocument())
+    expect(within(logOf()).getByText('S-6 → Shelf A')).toBeInTheDocument()
+    expect(within(logOf()).getByText('S-9 → Dry box A')).toBeInTheDocument()
+    expect(sent).toEqual([
+      { spool: spoolId(6), body: { location_id: L.SHELF_A, if_occupied: 'refuse', expected_location_id: a } },
+      { spool: spoolId(9), body: { location_id: a, if_occupied: 'refuse', expected_location_id: b } },
+      { spool: spoolId(6), body: { location_id: b, if_occupied: 'refuse', expected_location_id: L.SHELF_A } },
+    ])
+  })
+
+  it('a retry that finds the spool already in its target counts the move as done', async () => {
+    server.use(http.post('/api/v1/filament/spools/:id/move', () => HttpResponse.error(), { once: true }))
+    const { user } = renderPage(<SwapPage />)
+    await pickSpool(user, 'S-3')
+    await pickPlace(user, 'Dry box 1')
+    await user.click(await screen.findByRole('button', { name: 'Move' }))
+    await screen.findByRole('alert')
+    // The first move went through; only its answer was lost.
+    await moveSpool(spoolId(3), L.DRY_BOX)
+    const sent = moves()
+    await user.click(screen.getByRole('button', { name: 'Try again' }))
+    expect(await screen.findByText('S-3 is already in Dry box 1.')).toBeInTheDocument()
+    expect(within(logOf()).getByText('S-3 → Dry box 1')).toBeInTheDocument()
+    expect(screen.getByRole('heading', { name: 'Which spool?' })).toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: 'Move S-3 to Dry box 1' })).toBeNull()
+    expect(sent).toHaveLength(1)
+  })
+
+  it('a retry for a taken-out spool that is already out goes on with the chain', async () => {
+    const { a, b } = await seedBoxes()
+    const { user } = renderPage(<SwapPage />)
+    const out = await toCycle(user)
+    server.use(http.post('/api/v1/filament/spools/:id/move', () => HttpResponse.error(), { once: true }))
+    await user.click(out)
+    await screen.findByRole('alert')
+    await moveSpool(spoolId(6), null)
+    const sent = moves()
+    await user.click(screen.getByRole('button', { name: 'Try again' }))
+    await waitFor(() => expect(within(logOf()).getByText('S-6 → Dry box B')).toBeInTheDocument())
+    expect(within(logOf()).getByText('S-6 → no place')).toBeInTheDocument()
+    expect(sent.slice(1)).toEqual([
+      { spool: spoolId(9), body: { location_id: a, if_occupied: 'refuse', expected_location_id: b } },
+      { spool: spoolId(6), body: { location_id: b, if_occupied: 'refuse', expected_location_id: null } },
+    ])
+  })
+
+  it('does not move the focus to the heading while the move is sending', async () => {
+    let answer: () => void = () => undefined
+    const held = new Promise<void>((resolve) => (answer = resolve))
+    server.use(
+      http.post(
+        '/api/v1/filament/spools/:id/move',
+        async () => {
+          await held
+          return undefined
+        },
+        { once: true },
+      ),
+    )
+    const { user } = renderPage(<SwapPage />)
+    await pickSpool(user, 'S-3')
+    await pickPlace(user, 'Dry box 1')
+    await user.click(await screen.findByRole('button', { name: 'Move' }))
+    const sending = await screen.findByRole('heading', { name: 'Moving…' })
+    expect(document.activeElement).not.toBe(sending)
+    answer()
+    const next = await screen.findByRole('heading', { name: 'Which spool?' })
+    await waitFor(() => expect(document.activeElement).toBe(next))
+  })
+
+  it('names each "Write tag" button by what it writes', async () => {
+    const stub = installNdefStub()
+    try {
+      const { user } = renderPage(<SwapPage />)
+      await pickSpool(user, 'S-3')
+      const spoolWrite = await screen.findByRole('button', { name: 'Write tag for S-3' })
+      expect(spoolWrite).toHaveTextContent('Write tag')
+      await pickPlace(user, 'Dry box 1')
+      const placeWrite = await screen.findByRole('button', { name: 'Write tag for Dry box 1' })
+      expect(placeWrite).toHaveTextContent('Write tag')
+    } finally {
+      stub.restore()
     }
   })
 

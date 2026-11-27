@@ -181,7 +181,7 @@ function TagWay({ onIdentified, onPickByHand }: { onIdentified: OnIdentified; on
       </p>
       {unseenSide && (
         <div className="flex flex-wrap items-center gap-x-2 gap-y-1">
-          <Said>This tag's side has not been seen in an AMS, so ScadBuddy cannot tell which spool it is.</Said>
+          <Said>This side of the Bambu tag is on no spool yet. Tap the other side, use the QR code, or pick the spool by hand.</Said>
           <Button type="button" size="sm" variant="link" className="h-auto px-0" onClick={onPickByHand}>
             Pick it by hand
           </Button>

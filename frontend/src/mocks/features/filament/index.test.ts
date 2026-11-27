@@ -358,6 +358,12 @@ describe('the filament mocks', () => {
       expect((await moveSpool(spoolId(1), L.SHELF_A, { expectedLocationId: null })).location_id).toBe(L.SHELF_A)
     })
 
+    it('checks the stale spool before the target, as homes.move_into does under the row lock', async () => {
+      await moveSpool(spoolId(1), L.WORKSHOP)
+      const cause = await moveSpool(spoolId(1), 'no-such-place', { expectedLocationId: L.SHELF_A }).catch((e: unknown) => e)
+      expect(staleOf(cause)).toEqual({ locationId: L.WORKSHOP, archived: false })
+    })
+
     it('refuses a move of an archived spool as stale', async () => {
       await archiveSpool(spoolId(1))
       const cause = await moveSpool(spoolId(1), L.WORKSHOP, { expectedLocationId: L.SHELF_A }).catch((e: unknown) => e)

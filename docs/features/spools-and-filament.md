@@ -491,8 +491,13 @@ No step has a default answer. When both are named, "Move" sends one
   spool goes back to "Which spool?". When a spool waits, the page says "S-n was archived." and
   shows the waiting spool's move; that move goes out only when the person confirms it. A 409
   `move_conflict`, or a move that got no answer, offers "Try again", which sends the same move.
-  After "Archive S-n", "Try again" keeps the archive, so the log says "S-n archived". Each new
-  step moves the focus to its heading.
+  When a `move_stale` spool is already in the move's target (the first move went through, but
+  its answer was lost), the move is done: the log lists it, the page says so ("S-12 is already in
+  Shelf 2.") and goes on with the chain. After "Archive S-n", "Try again" keeps the archive, so
+  the log says "S-n archived". "Choose another place" names a place for the spool whose move did
+  not go through: after a failed "Take S-n out first", that is the waiting spool, which then goes
+  to the place named instead of to no place. Each new step moves the focus to its heading; the
+  short "Moving…" step does not.
 - **A full dry box.** A move into a dry box sends `if_occupied: refuse`. A 409 `box_full` shows
   the box's spool and three choices: "Archive S-n" (a `replace` with `expected_occupant_id`, as
   #7167 does it), "Move S-n first", or "Choose another place". "Move S-n first" makes the box's

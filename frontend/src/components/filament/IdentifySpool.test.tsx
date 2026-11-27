@@ -350,7 +350,7 @@ describe('IdentifySpool (#7167)', () => {
       await user.click(screen.getByRole('radio', { name: 'Scan tag' }))
       await waitFor(() => expect(stub.scanning).toBe(true))
       stub.tap({ serialNumber: '1a:2b:3c:4d', records: [] })
-      expect(await screen.findByText("This tag's side has not been seen in an AMS, so ScadBuddy cannot tell which spool it is.")).toBeInTheDocument()
+      expect(await screen.findByText("This side of the Bambu tag is on no spool yet. Tap the other side, use the QR code, or pick the spool by hand.")).toBeInTheDocument()
       expect(bodies).toHaveLength(1)
       expect(bodies[0]).not.toHaveProperty('mifare_blocks')
       expect(screen.queryByText('This tag is not on a spool yet.')).toBeNull()

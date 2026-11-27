@@ -3010,15 +3010,15 @@ export const handlers = [
     if (if_occupied === 'replace' && expected_occupant_id == null) {
       return problem(422, "a replace must name the box's spool it expects in expected_occupant_id", { code: 'expected_occupant_required' })
     }
-    if (location_id && !state.locations.some((place) => place.id === location_id && !place.archived_at)) {
-      return problem(422, REFUSED.moveTarget)
-    }
-    // #7168 `homes.py` `move_into`: a key that is present (null too) is checked before `answers`, the box and the move.
+    // #7168 `homes.py` `move_into`: a key that is present (null too) is checked first under the spool's row lock: before the target, `answers`, the box and the move.
     if ('expected_location_id' in (sent as object)) {
       const mover = state.spools[at]!
       if ((mover.location_id ?? null) !== (expected_location_id ?? null) || mover.archived_at !== null) {
         return problem(409, `spool ${mover.id} is not where it was read`, { code: 'move_stale', location_id: mover.location_id ?? null, archived: mover.archived_at !== null })
       }
+    }
+    if (location_id && !state.locations.some((place) => place.id === location_id && !place.archived_at)) {
+      return problem(422, REFUSED.moveTarget)
     }
     // #7167 `homes.py` `move_into`: `answers` names the unloaded spool whose prompt this answers.
     const answered = answers ? state.spools.findIndex((one) => one.id === answers) : -1

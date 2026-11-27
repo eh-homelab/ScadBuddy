@@ -10,7 +10,7 @@ import { WritePlaceTag } from '../../components/filament/WritePlaceTag'
 import { WriteTag } from '../../components/filament/scan/WriteTag'
 import { openExternal } from '../../lib/embed'
 import { spoolCode } from '../../lib/homeReturns'
-import { afterMove, isWaiting, moveFirst, nameTarget, reread, takeOutFirst, type Chain, type Next, type Waiting } from '../../lib/swapChain'
+import { afterMove, isWaiting, moveFirst, nameTarget, reread, takeOutFirst, type Chain, type Held, type Next, type Waiting } from '../../lib/swapChain'
 import { NfcSession, nfcSupport } from '../../lib/webNfc'
 import { Button } from '@/components/ui/button'
 import { cn } from '@/lib/utils'
@@ -21,7 +21,8 @@ type Support = ReturnType<typeof nfcSupport>
 /** Where the page is: the step the person answers, or the answer of the last move. */
 type Phase =
   | { kind: 'spool' }
-  | { kind: 'place' }
+  /** `forId`: a waiting spool whose place the person names now, after its take-out did not go through. */
+  | { kind: 'place'; forId?: string }
   | { kind: 'sending' }
   | { kind: 'stale'; next: Move; said: string }
   | { kind: 'full'; next: Move; occupant: Spool; cycle: boolean }
@@ -35,8 +36,10 @@ const reasonOf = (cause: unknown) => (cause instanceof ApiError ? cause.detail :
 const unanswered = (cause: unknown) => !(cause instanceof ApiError) || cause.status === 0
 const colourOf = (spool: Spool) => spool.effective?.colour_name ?? spool.colour_name ?? spool.names?.material ?? 'No colour yet'
 
+/** The entry of `id` in the chain, current or waiting. */
+const entryOf = (chain: Chain, id: string): Held | null => (chain.current?.spool.id === id ? chain.current : (chain.waiting.find((one) => one.spool.id === id) ?? null))
 /** The spool of `id` in the chain, current or waiting. */
-const heldOf = (chain: Chain, id: string): Spool | null => (chain.current?.spool.id === id ? chain.current.spool : (chain.waiting.find((one) => one.spool.id === id)?.spool ?? null))
+const heldOf = (chain: Chain, id: string): Spool | null => entryOf(chain, id)?.spool ?? null
 
 /** The chain without an archived spool: when it was current, the newest waiting spool is current. */
 function without(chain: Chain, id: string): Chain {
@@ -80,11 +83,18 @@ export function SwapPage() {
   useEffect(() => () => session?.stop(), [session])
 
   // A new step moves focus to its heading, so a screen reader reads the step; the first view keeps the page's focus.
+  // "Sending" is only for a moment: the focus stays, and moves to the step that comes after it, the same kind too.
   const heading = useRef<HTMLHeadingElement>(null)
   const shown = useRef(phase.kind)
+  const sent = useRef(false)
   useLayoutEffect(() => {
-    if (shown.current === phase.kind) return
+    if (phase.kind === 'sending') {
+      sent.current = true
+      return
+    }
+    if (shown.current === phase.kind && !sent.current) return
     shown.current = phase.kind
+    sent.current = false
     heading.current?.focus()
   }, [phase.kind])
 
@@ -95,16 +105,20 @@ export function SwapPage() {
   const placeName = (id: string | null, fallback?: string | null) => (id === null ? 'no place' : (names.get(id) ?? fallback ?? 'a place'))
   const note = (text: string) => setLog((rows) => [{ key: (logKey.current += 1), text }, ...rows])
 
-  function toStep(next: Next) {
+  /** The next step; `said` is the notice shown with it. */
+  function toStep(next: Next, said?: string) {
     setPlace(null)
     setWriting(null)
-    if (next.kind === 'move') void send(next)
-    else setPhase({ kind: next.kind === 'done' ? 'spool' : 'place' })
+    if (next.kind === 'move') void send(next, undefined, said)
+    else {
+      if (said) setNotice(said)
+      setPhase({ kind: next.kind === 'done' ? 'spool' : 'place' })
+    }
   }
 
-  async function send(next: Move, archives?: string) {
+  async function send(next: Move, archives?: string, said?: string) {
     setPhase({ kind: 'sending' })
-    setNotice(null)
+    setNotice(said ?? null)
     const code = spoolCode(heldOf(chainRef.current, next.spoolId) ?? { number: 0 })
     try {
       const moved = await moveSpool(
@@ -131,6 +145,16 @@ export function SwapPage() {
     if (stale) {
       try {
         const spool = await getSpool(next.spoolId)
+        // The spool is in the target already (a move whose answer was lost went through): the move is done.
+        if (!stale.archived && !spool.archived_at && (spool.location_id ?? null) === next.target) {
+          const there = next.target === null ? 'no place' : (spool.names?.location ?? placeName(next.target))
+          note(`${code} → ${there}`)
+          if (archives) note(`${archives} archived`)
+          const after = afterMove(chainRef.current, spool)
+          setChain(after.chain)
+          toStep(after.next, `${code} is already in ${there}.`)
+          return
+        }
         if (stale.archived || spool.archived_at) {
           const left = without(chainRef.current, next.spoolId)
           setChain(left)
@@ -189,14 +213,18 @@ export function SwapPage() {
   }
 
   function moveTo(target: LocationDetail) {
+    const waits = phase.kind === 'place' && phase.forId ? chainRef.current.waiting.find((one) => one.spool.id === phase.forId) : undefined
+    // A waiting spool goes to the place named instead of to no place; its own target and the chain stay.
+    if (waits) return void send({ kind: 'move', spoolId: waits.spool.id, target: target.id, expectedLocationId: waits.readIn, ifOccupied: 'refuse' })
     const { chain: named, next } = nameTarget(chainRef.current, target.id)
     setChain(named)
     if (next.kind === 'move') void send(next)
   }
 
-  function chooseAnother() {
+  /** "Choose another place" names a place for the spool whose move did not go through, current or waiting. */
+  function chooseAnother(spoolId: string) {
     setPlace(null)
-    setPhase({ kind: 'place' })
+    setPhase(isWaiting(chainRef.current, spoolId) ? { kind: 'place', forId: spoolId } : { kind: 'place' })
   }
 
   function clear() {
@@ -208,6 +236,8 @@ export function SwapPage() {
   }
 
   const current = chain.current
+  // The spool the place step names a place for.
+  const subject = phase.kind === 'place' && phase.forId ? (entryOf(chain, phase.forId) ?? current) : current
   const busy = phase.kind === 'sending'
   // The text that says why the step is shown, read with its heading.
   const described = phase.kind === 'stale' || phase.kind === 'full' || phase.kind === 'conflict' || phase.kind === 'failed'
@@ -230,7 +260,7 @@ export function SwapPage() {
       {nfc === 'no_api' && <p className="text-sm text-muted-foreground">Tags need Chrome on Android or the ScadBuddy app.</p>}
 
       <section aria-labelledby="swap-step" className="flex flex-col gap-4 rounded-xl border bg-card p-4 shadow-xs">
-        <Ticket spool={current?.spool ?? null} readIn={current ? placeName(current.readIn, current.spool.names?.location) : null} place={phase.kind === 'place' ? (place?.name ?? null) : null} />
+        <Ticket spool={subject?.spool ?? null} readIn={subject ? placeName(subject.readIn, subject.spool.names?.location) : null} place={phase.kind === 'place' ? (place?.name ?? null) : null} />
         <h2 id="swap-step" ref={heading} tabIndex={-1} aria-describedby={described ? 'swap-said' : undefined} className="text-xl font-semibold tracking-tight text-balance outline-none">
           {HEADINGS[phase.kind]}
         </h2>
@@ -242,11 +272,11 @@ export function SwapPage() {
 
         {phase.kind === 'spool' && <IdentifySpool nfc={nfc} onIdentified={spoolNamed} />}
 
-        {phase.kind === 'place' && current && (
+        {phase.kind === 'place' && subject && (
           <>
             <div className="flex flex-wrap gap-2">
               {session && (
-                <Button type="button" variant="outline" className="h-11" disabled={writing !== null} onClick={() => setWriting('spool')}>
+                <Button type="button" variant="outline" className="h-11" aria-label={`Write tag for ${spoolCode(subject.spool)}`} disabled={writing !== null} onClick={() => setWriting('spool')}>
                   <NfcIcon /> Write tag
                 </Button>
               )}
@@ -256,7 +286,7 @@ export function SwapPage() {
                 </Button>
               )}
             </div>
-            {session && writing === 'spool' && <WriteTag session={session} spool={current.spool} onClose={() => setWriting(null)} />}
+            {session && writing === 'spool' && <WriteTag session={session} spool={subject.spool} onClose={() => setWriting(null)} />}
             {writing === null && !place && <IdentifyPlace nfc={nfc} onIdentified={placeNamed} />}
             {place && (
               <div className="flex flex-col gap-3">
@@ -269,7 +299,7 @@ export function SwapPage() {
                   </Button>
                 </div>
                 {session && writing === null && (
-                  <Button type="button" variant="outline" className="h-11" onClick={() => setWriting('place')}>
+                  <Button type="button" variant="outline" className="h-11" aria-label={`Write tag for ${place.name}`} onClick={() => setWriting('place')}>
                     <NfcIcon /> Write tag
                   </Button>
                 )}
@@ -292,14 +322,14 @@ export function SwapPage() {
               <Button type="button" className="h-12 text-base" onClick={() => void send(phase.next)}>
                 Move {spoolCode(heldOf(chain, phase.next.spoolId) ?? { number: 0 })} to {placeName(phase.next.target)}
               </Button>
-              <Button type="button" variant="outline" className="h-11" onClick={chooseAnother}>
+              <Button type="button" variant="outline" className="h-11" onClick={() => chooseAnother(phase.next.spoolId)}>
                 Choose another place
               </Button>
             </Actions>
           </div>
         )}
 
-        {phase.kind === 'full' && <FullBox phase={phase} box={placeName(phase.next.target)} chain={chain} send={(next, archives) => void send(next, archives)} setChain={setChain} onMoveFirst={() => toStep({ kind: 'name_target' })} onAnother={chooseAnother} />}
+        {phase.kind === 'full' && <FullBox phase={phase} box={placeName(phase.next.target)} chain={chain} send={(next, archives) => void send(next, archives)} setChain={setChain} onMoveFirst={() => toStep({ kind: 'name_target' })} onAnother={() => chooseAnother(phase.next.spoolId)} />}
 
         {phase.kind === 'conflict' && (
           <div className="flex flex-col gap-3">
@@ -308,7 +338,7 @@ export function SwapPage() {
               <Button type="button" className="h-12 text-base" onClick={() => void send(phase.next, phase.archives)}>
                 Try again
               </Button>
-              <Button type="button" variant="outline" className="h-11" onClick={chooseAnother}>
+              <Button type="button" variant="outline" className="h-11" onClick={() => chooseAnother(phase.next.spoolId)}>
                 Choose another place
               </Button>
             </Actions>
@@ -326,7 +356,7 @@ export function SwapPage() {
                   Try again
                 </Button>
               )}
-              <Button type="button" variant="outline" className="h-11" onClick={chooseAnother}>
+              <Button type="button" variant="outline" className="h-11" onClick={() => chooseAnother(phase.next.spoolId)}>
                 Choose another place
               </Button>
             </Actions>
@@ -433,6 +463,8 @@ function FullBox({
   onAnother: () => void
 }) {
   const { next, occupant, cycle } = phase
+  // Only the current spool can wait for the box: a waiting spool's move offers no "Move first".
+  const first = next.spoolId === chain.current?.spool.id
   const code = spoolCode(occupant)
   const rgba = occupant.effective?.rgba ?? occupant.rgba
   return (
@@ -460,16 +492,18 @@ function FullBox({
           </>
         ) : (
           <>
-            <Button
-              type="button"
-              className="h-12 text-base"
-              onClick={() => {
-                setChain(moveFirst(chain, next.target!, occupant))
-                onMoveFirst()
-              }}
-            >
-              Move {code} first
-            </Button>
+            {first && (
+              <Button
+                type="button"
+                className="h-12 text-base"
+                onClick={() => {
+                  setChain(moveFirst(chain, next.target!, occupant))
+                  onMoveFirst()
+                }}
+              >
+                Move {code} first
+              </Button>
+            )}
             <Button type="button" variant="destructive" className="h-11" onClick={() => send({ ...next, ifOccupied: 'replace', expectedOccupantId: occupant.id }, code)}>
               Archive {code}
             </Button>
