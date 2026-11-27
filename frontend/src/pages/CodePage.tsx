@@ -30,7 +30,7 @@ export function CodePage() {
     [code],
   )
 
-  const [done, setDone] = useState(false)
+  const [done, setDone] = useState<'sent' | 'elsewhere' | null>(null)
 
   const to = found.data ? (found.data.kind === 'location' ? `/filament/locations/${found.data.id}` : `/filament/spools/${found.data.id}`) : null
   const tasks = waiting.data ?? []
@@ -43,7 +43,7 @@ export function CodePage() {
     if (done) {
       return (
         <div className="mx-auto flex w-full max-w-md flex-col gap-4 p-4">
-          <h1 role="status" className="text-lg font-semibold">Answered.</h1>
+          <h1 role="status" className="text-lg font-semibold">{done === 'elsewhere' ? 'This task was answered elsewhere.' : 'Answered.'}</h1>
           {open('')}
         </div>
       )
@@ -60,7 +60,7 @@ export function CodePage() {
                 respond={async (send) => {
                   await send()
                 }}
-                onClosed={() => setDone(true)}
+                onClosed={(by) => setDone(by)}
                 onSettled={() => undefined}
                 offer={scan ? { field: scan.name, code: found.data?.code ?? code, n: 1 } : undefined}
               />

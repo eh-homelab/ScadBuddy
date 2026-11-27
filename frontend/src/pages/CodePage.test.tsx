@@ -2,7 +2,7 @@ import { screen, waitFor } from '@testing-library/react'
 import { Route, Routes, useLocation } from 'react-router'
 import { describe, expect, it, vi } from 'vitest'
 import { api } from '../api/client'
-import { addTask } from '../mocks/features/tasks'
+import { addTask, setTask } from '../mocks/features/tasks'
 import { L, spoolId } from '../mocks/features/filament/seed'
 import { renderPage } from '../test/utils'
 import { CodePage } from './CodePage'
@@ -97,5 +97,16 @@ describe('the code page', () => {
     expect(await screen.findByText('Answered.')).toBeInTheDocument()
     expect(screen.getByRole('link', { name: 'Open L-3' })).toHaveAttribute('href', `/filament/locations/${L.DRY_BOX}`)
     expect(screen.queryByTestId('where')).toBeNull()
+  })
+
+  it('says so when the task was answered elsewhere', async () => {
+    addTask({ id: 'scan-1', title: 'Check the box', schema: scanSchema })
+    const { user } = render('/x/L-3')
+    await waitFor(() => expect(screen.getByRole('textbox', { name: /Spool/ })).toHaveValue('L-3'))
+    await waitFor(() => expect(screen.getAllByRole('status')[0]).toBeInTheDocument())
+    setTask('scan-1', { state: 'answered' })
+    await user.click(screen.getByRole('button', { name: 'Answer' }))
+    expect(await screen.findByText('This task was answered elsewhere.')).toBeInTheDocument()
+    expect(screen.getByRole('link', { name: 'Open L-3' })).toBeInTheDocument()
   })
 })
