@@ -82,7 +82,7 @@ unchanged, to the Python API: WebSockets, SSE and large bodies included. On prod
 Area `fleet` (`internal/fleet`) is caller `fleet`'s (scope `crud.fleet`), under
 `/api/v1/internal/crud/fleet`: `POST /agents/{session_id}/touch`, `GET /agents`, `PUT` and
 `DELETE /channels/{name}/members/{session_id}` (`{name}` is a plain name, or `~` and the
-unpadded base64url of a GitHub reference, whose `/` and `#` would need escapes, and the router
+unpadded base64url of any name; a GitHub reference must take that form, because its `/` and `#` would need escapes, and the router
 leaves a path with an escape in it to Python; a bad `~` segment is a 422), `GET
 /agents/{session_id}/channels`, `POST /messages`, `GET /agents/{session_id}/inbox`, `PUT /agents/{session_id}/cursor`. A send publishes
 `fleet.message` after its commit. An inbox page holds up to `limit` messages (50 by

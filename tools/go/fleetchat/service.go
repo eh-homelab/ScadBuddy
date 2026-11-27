@@ -141,7 +141,9 @@ func (s *Service) Join(ctx context.Context, sessionID, channel string) error {
 		return err
 	}
 	if legacyOnly(channel) {
-		// Only an existing channel keeps an old-style name; a join never makes one.
+		// Only an existing channel keeps an old-style name; a join never makes one. A
+		// ScadBuddy store refuses it too (core's channelExists); this check is for stores
+		// that do not, and it lists the channels only for such a name.
 		chans, err := s.store.Channels(ctx, sessionID)
 		if err != nil {
 			return err
