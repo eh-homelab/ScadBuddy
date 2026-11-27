@@ -734,8 +734,8 @@ matches `[a-z][a-z0-9_]{0,63}`. Limits: 200 keys per entity, 2000 characters per
   `filament_label_template`. A sheet template prints on its own grid. "Download" asks
   `POST /api/v1/filament/labels` (`backend/scadbuddy/filament/label_pdf.py`, ReportLab) for
   the same labels at the same template and saves it through `downloadBlob`, so it works
-  inside Bambuddy's frame. A code label's PDF (a place, type, item or kind label) needs the label address or an https
-  public URL (409 `no_label_base` otherwise). The browser print stays.
+  inside Bambuddy's frame. A code label's PDF (a place, type, item or kind label) needs the
+  label address or an https public URL (409 `no_label_base` otherwise). The browser print stays.
   The agent reads codes with `filament_code_resolve`, `filament_location_get` and
   `filament_printer_labels`, and the label sizes with `filament_label_templates`. It saves
   and deletes saved sheets with `filament_label_sheet_upsert` and
