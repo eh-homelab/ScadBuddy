@@ -700,7 +700,7 @@ Write each note in ASD-STE100 style. Cite each measured fact with where it was m
 - [ ] **Step 1: Write the notes.** They say:
   - The table and when a row exists. D1: `seen_at` moves only when the reported fields change.
   - Capture's `unknown_trays` step: RFID auto-create (`match_tray`, else a typeless spool, `data.by = "rfid_capture"`), the try-lock, D2 (no external rows), and the backstop.
-  - The routes (Go, area `unknown-trays`, #8038's gate), their codes and the ranking key. D4 (first weight only). D5 (`made_from_tags`). G5 to G10: the Go resolve is a second writer held equal to Python's `link` by the vectors; it answers `{id, number, code, location_id}`; it publishes no event; the lock order.
+  - The routes (Go, area `unknown-trays`, #8038's gate), their codes and the ranking key. D4 (first weight only). D5 (`made_from_tags`). G5 to G10: the Go resolve route writes no spool and has no vectors (it runs the Python activity `filament_resolve_unknown_tray` on queue `library`); it answers `{id, number, code, location_id}`; it publishes no event; the lock order.
   - The block: `prepare_run`, the check's `unknown_trays`, the Go CRUD route `unknown-trays` on caller `print`, and the `lan_print` check. Both fail open on a missing route (G3). Say that the worker-side block works only once `SCADBUDDY_CORE_AREAS` names the area.
   - The Needs-you source (15 s), the dialog, its four entry points, and the agent's two tools.
   - Limits: D2 and D3; prints started in Bambuddy or on the printer are not blocked; a row whose unit the report no longer shows stays until that unit returns (deleting or merging the printer drops it).

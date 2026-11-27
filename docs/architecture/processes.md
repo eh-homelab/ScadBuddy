@@ -265,7 +265,7 @@ Gateway. Neither the server nor that policy is deployed yet.
 ### Unknown spools in core (#7143)
 
 Core's area `unknown-trays` (`tools/go/core/internal/unknowntrays`; core serves it when
-`SCADBUDDY_CORE_AREAS` names it) has three routes. `GET /api/v1/filament/unknown-trays` lists the
+`SCADBUDDY_CORE_AREAS` names it) has these routes. `GET /api/v1/filament/unknown-trays` lists the
 trays that a printer reports as loaded and no spool holds, with ranked candidates, and
 `POST …/{id}/dismiss` deletes a row. Both are public routes behind the person-auth gate
 (`internal/auth`). The third is the print worker's block read, `GET

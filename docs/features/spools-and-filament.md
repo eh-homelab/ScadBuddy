@@ -201,7 +201,9 @@ A tray that a printer reports as loaded, with no spool in it, is an unknown spoo
 - **The row.** Capture writes a row in `filament_unknown_trays` for an untagged AMS tray that
   no spool holds. `seen_at` moves only when a reported field changes (D1): it is the version of
   the tray, not a heartbeat. The owner's resolve sends `seen_at` back, and a changed tray is
-  refused as `tray_changed`. A tray that is empty, or that a spool holds, loses its row. The
+  refused as `tray_changed`. A tray that is empty, or that a spool holds, loses its row when its tray lock is free. A busy
+  lock (D11) means a link or a resolve is settling the tray, so capture keeps the row and looks
+  again on the next report. The
   external holder never gets a row (D2). `remain_pct` is stored, but it is null in practice for
   an untagged tray (D3).
 - **A tray with an RFID key** gets a spool at once, with no question. Capture takes the spool type
@@ -492,6 +494,12 @@ matches `[a-z][a-z0-9_]{0,63}`. Limits: 200 keys per entity, 2000 characters per
   - `profile_fetch.py`, `sb_presets.py` (ScadBuddy's presets) and
     `backend/scadbuddy/slicing/own_presets.py` (their refs, as the native slicer reads them);
   - a printer's K-profiles: `backend/scadbuddy/printers/kprofiles.py` (the bodies and the LAN steps) and `backend/scadbuddy/api/printer_kprofiles.py` (over ScadBuddy's own LAN link, #7276); `BambuddyClient` has no printer K-profile write, slot command, slot preset or AMS label call any more (removed in #7276; it keeps the K-table read `k_profiles` that `profile_fetch.py` uses, until #7604, `put_spool_k_profiles` for the sync's spool K values, and `assign_spool` for the tray question, until #7641).
+- Unknown spools (#7143):
+  - `tools/go/core/internal/unknowntrays` (list, rank, dismiss, and the print worker's block read);
+  - `backend/scadbuddy/filament/unknown_tray_rows.py` (the rows and the block text) and `unknown_resolve.py` (the resolve activity);
+  - the capture step `note_unknown` in `backend/scadbuddy/filament/capture.py`, called from `backend/scadbuddy/printers/reports.py`, and the block in `backend/scadbuddy/bambuddy/print_run.py` and `backend/scadbuddy/printers/print_activities.py`;
+  - the UI: `frontend/src/components/filament/UnknownSpoolDialog.tsx`, `useUnknownSpoolDialog.tsx` and `UnknownSpoolButton.tsx`, with `frontend/src/lib/unknownSpools.ts` and `frontend/src/api/unknownTrays.ts`;
+  - the agent tools `filament_unknown_trays` and `filament_unknown_tray_resolve` in `agent/src/tools/filament.ts`.
 - Workflows:
   - `backend/scadbuddy/workflows/spool_refresh.py:104`;
   - `filament_sync.py:68`, `filament_pull.py:43`, `sensor_notify.py:58`.
@@ -510,8 +518,9 @@ matches `[a-z][a-z0-9_]{0,63}`. Limits: 200 keys per entity, 2000 characters per
 - `filament_unknown_trays` (#7143, `20261126T1936Z_filament_unknown_trays.sql`): one row for each
   `(printer_id, ams_id, tray_id)` while the tray is loaded and no spool holds it. It has the
   reported tag keys, material, colour and remain percent, `first_seen_at` and `seen_at`. The row
-  goes with its printer (`ON DELETE CASCADE`). Only the API reads it (#5295): the print worker
-  gets the block from a CRUD route.
+  goes with its printer (`ON DELETE CASCADE`). The API and `tools/go/core` read it (the
+  one #5295 exception, #7667): core lists the rows and deletes one on dismiss, and serves the
+  print worker's block read. The print worker gets the block from a CRUD route.
 - The old spool overlay and native spool tables were dropped
   (`backend/scadbuddy/migrations/20261118T1235Z_drop_native_spool_tables.sql`).
 - Settings: `spool_overlay_refresh_seconds` (the refresh Schedule), `filament_sync`,

@@ -92,7 +92,7 @@ the messages returned. A text over 16 MiB is a 422 whose detail names the limit 
 `text-too-long`). A cursor `PUT` only moves it back: a `seq` past the cursor is a 422
 (reason `seq-ahead`). Its `GET /changes` is area `changes` (below).
 
-### The event stream (#7768)
+## The event stream (#7768)
 
 `internal/bus` publishes on the event bus and reads it. One `LISTEN` connection per process,
 outside the request pool, hears `scadbuddy_events` and the agent's five channels
