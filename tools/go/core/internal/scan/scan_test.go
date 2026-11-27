@@ -473,6 +473,24 @@ func TestAScanStoresThePhotoDecodesItAndResolvesEachCode(t *testing.T) {
 	}
 }
 
+func TestAKindsCodeResolvesAsPythonsDoes(t *testing.T) {
+	h := newHarness(t)
+	var number int
+	var name string
+	if err := h.pool.QueryRow(context.Background(), "SELECT number, name FROM item_kinds WHERE id = 'printer'").
+		Scan(&number, &name); err != nil {
+		t.Fatal(err)
+	}
+	r, err := resolve(context.Background(), h.pool, "k"+jsonInt(number))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if r == nil || r.Kind != "item_kind" || r.ID != "printer" || r.Code != "K-"+jsonInt(number) ||
+		r.Name == nil || *r.Name != name || r.Archived {
+		t.Errorf("resolved %+v", r)
+	}
+}
+
 func TestAScanThatReadsNothingIsKeptWithItsPhoto(t *testing.T) {
 	h := newHarness(t)
 	for _, c := range []struct {

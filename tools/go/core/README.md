@@ -125,14 +125,19 @@ The document is the zip member `file`. Its credential keys are stripped, as
 
 Area `fleet` (`internal/fleet`) is caller `fleet`'s (scope `crud.fleet`), under
 `/api/v1/internal/crud/fleet`: `POST /agents/{session_id}/touch`, `GET /agents`, `PUT` and
-`DELETE /channels/{name}/members/{session_id}`, `GET /agents/{session_id}/channels`, `POST
-/messages`, `GET /agents/{session_id}/inbox`, `PUT /agents/{session_id}/cursor`. A send publishes
+`DELETE /channels/{name}/members/{session_id}` (`{name}` is a plain name, or `~` and the
+unpadded base64url of any name; a GitHub reference must take that form, because its `/` and `#` would need escapes, and the router
+leaves a path with an escape in it to Python; a bad `~` segment is a 422), `GET
+/agents/{session_id}/channels`, `POST /messages`, `GET /agents/{session_id}/inbox`, `PUT /agents/{session_id}/cursor`. A send publishes
 `fleet.message` after its commit. An inbox page holds up to `limit` messages (50 by
 default, at most 200) and at most 4 MiB of message text: it stops before the message that
 would pass 4 MiB, always holds at least one, and then says `more`; the cursor moves only past
 the messages returned. A text over 16 MiB is a 422 whose detail names the limit (reason
 `text-too-long`). A cursor `PUT` only moves it back: a `seq` past the cursor is a 422
-(reason `seq-ahead`). Its `GET /changes` is area `changes` (below).
+(reason `seq-ahead`). A channel's name follows fleetchat's rule (#8149,
+`tools/go/fleetchat/README.md`), as does the `fleet_channels` CHECK; a join that would make a channel with a name valid
+only under the rule before it is a 422 (reason `legacy-channel-name`). Its `GET /changes` is
+area `changes` (below).
 
 ## The event stream (#7768)
 

@@ -605,8 +605,10 @@ async def _run_by_file(
 ) -> PrintRun | None:
     """The run whose LAN start ``link``'s archive became (#5661), from the archive's file
     name (`lan_files.start_by_file`: exactly one start of one run of the link's own
-    subject has that name, whatever the run's status: never a guess). The recorded link
-    is kept when the archive is deleted later, and `_named_run` follows it."""
+    subject has that name, whatever the run's status: never a guess). None when another
+    archive became that start already (#8306: a reprint of the file from the printer's
+    own storage): the start keeps its first archive. The recorded link is kept when the
+    archive is deleted later, and `_named_run` follows it."""
     subject = PrintSubject.parse(link.subject).run_subject
     if archive is None:
         return None
@@ -620,7 +622,8 @@ async def _run_by_file(
         return None
     run, recorded = found
     try:
-        await links.record_lan_start(recorded)
+        if not await links.record_lan_start(recorded):
+            return None
     except psycopg.Error:
         # The run is found exactly; only the record is lost, and the next read tries again.
         logger.warning(
