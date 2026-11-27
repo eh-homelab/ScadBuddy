@@ -45,6 +45,10 @@ const (
 
 var callTopic = regexp.MustCompile(`^device:call:` + uuidText + `$`)
 
+// MaxCallTopics is the most call topics one subscribe frame may name: each is a read of
+// who may follow the call.
+const MaxCallTopics = 8
+
 // deviceBearer says whether the handshake carries a device token.
 func deviceBearer(r *http.Request) bool {
 	scheme, token, _ := strings.Cut(r.Header.Get("Authorization"), " ")

@@ -398,14 +398,9 @@ func (s *Store) getCall(r *http.Request) (any, error) {
 	if !crud.IsUUID(id) {
 		return nil, notFound("call")
 	}
-	c := auth.CallerOf(r.Context())
-	kind, who := "", principal(r.Context())
-	if c.Kind == auth.KindService {
-		var err error
-		if kind, err = s.delegate(c); err != nil {
-			return nil, err
-		}
-		who = r.URL.Query().Get("on_behalf_of")
+	kind, who, err := s.viewer(r)
+	if err != nil {
+		return nil, err
 	}
 	// Visibility first, so a caller that gets a 404 writes nothing (view may expire the call).
 	call, err := s.loadCall(r.Context(), s.Pool, id, "")
@@ -416,6 +411,19 @@ func (s *Store) getCall(r *http.Request) (any, error) {
 		return nil, notFound("call")
 	}
 	return s.view(r.Context(), id)
+}
+
+// viewer is who reads a call or a read, for visibleTo: a person (kind ""), or a delegate
+// service as its caller kind for the person it names in ?on_behalf_of=.
+func (s *Store) viewer(r *http.Request) (kind, who string, err error) {
+	c := auth.CallerOf(r.Context())
+	if c.Kind != auth.KindService {
+		return "", principal(r.Context()), nil
+	}
+	if kind, err = s.delegate(c); err != nil {
+		return "", "", err
+	}
+	return kind, r.URL.Query().Get("on_behalf_of"), nil
 }
 
 // visibleTo is the one rule of who may read a call or follow its events: a person (kind "")
@@ -566,7 +574,9 @@ func end(ctx context.Context, tx pgx.Tx, id, outcome string, result any, now tim
 // approval makes the pending action an assistant's or a flow's nfc.write waits for: an
 // ai_approvals row outside a session, as the MCP prepare step makes one. The UI shows it with
 // the other pending actions; a person approves or denies it there; the caller then confirms
-// the call (POST …/calls/{id}/confirm), which uses the approval once.
+// the call (POST …/calls/{id}/confirm), which uses the approval once. The table's trigger
+// ai_approvals_changed NOTIFYs scadbuddy_pending at commit, whoever writes the row, so the
+// badge and the list read it again at once.
 func (s *Store) approval(ctx context.Context, tx pgx.Tx, kind, who, shown, device, method string,
 	args json.RawMessage, now time.Time) (string, error) {
 	inputHash, err := inputHash(s.Keys.Current, device, method, args)
