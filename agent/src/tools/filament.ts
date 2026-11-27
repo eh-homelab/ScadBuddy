@@ -1421,7 +1421,10 @@ const tools: Tool[] = [
     label: 'Read stock, consumption and waste',
     description:
       "The unarchived spools' stock (spools, grams left, value) by `dimension`, the grams used and wasted " +
-      'per `bucket` and dimension, and the waste by material, type and printer. `since` and `until` are ' +
+      '(`wasted_g`: failed and cancelled plates) per `bucket` and dimension, and the waste by material, type and ' +
+      'printer. Filament thrown away off the printer (an archive, a box replacement) is apart: `non_print_waste_g` ' +
+      'is its total and `non_print_waste` its rows by material and type. It is in no `used_g` or `wasted_g`. ' +
+      '`since` and `until` are ' +
       'dates (`YYYY-MM-DD`), both included; default the 180 days before today. 422 when `since` is after ' +
       '`until` or the range is over 1096 days.',
     input: z.object({

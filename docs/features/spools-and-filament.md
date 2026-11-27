@@ -332,6 +332,17 @@ spool that was not empty, so the archive adds its one shopping item. The event i
 plate, and it adds no shopping item of its own. The code is in
 `backend/scadbuddy/filament/spools.py` (`archive_on`).
 
+The metrics keep this waste apart from the print waste (#7167). `wasted_g` stays the grams of
+the failed and cancelled plates. Each `non_print_waste` event adds its `data.waste_g`, raw, to
+one other figure: `non_print_waste_g` on a spool's metrics, and on the inventory metrics a
+total with rows by material and type (no printer: the waste has none) by the event's UTC day
+in the range. No gram is in both figures, and no rate counts it. The Prometheus export has its
+own series, `scadbuddy_filament_non_print_waste_grams`, by material. The reader is
+`ledger.waste_events` in `backend/scadbuddy/filament/ledger.py`. The sums are in
+`metrics.py` (`spool_metrics`), `metrics_store.py` (`inventory`, `snapshot`) and
+`metrics_export.py`. The Metrics tab shows a "Non-print waste" block under "Waste" only when
+the range has some (`frontend/src/pages/filament/MetricsTab.tsx`).
+
 A spool's home is the last dry box it sat in (#7167). When a spool that went into its tray
 from a place that is a live dry box now comes out of the tray, capture puts it in no place,
 makes that box its home and sets `home_asked_at`: ScadBuddy never assumes which spool goes into

@@ -1381,6 +1381,12 @@ export interface MockPlate {
  * `not_applied` one a failed 0 g plate). An open `print_started` estimate and a `print`
  * ref are no plate. The one plate rule of the mock: the history and `consumed_g` use it.
  */
+/** `ledger.waste_grams`: a `non_print_waste` event's `data.waste_g`, raw; 0 when it is not a number. */
+export function nonPrintWaste(event: S['SpoolEvent']): number {
+  const grams = event.data?.waste_g
+  return typeof grams === 'number' ? grams : 0
+}
+
 function platesOf(events: readonly S['SpoolEvent'][]): MockPlate[] {
   const bbJobs = new Set(events.filter((event) => event.ref_kind === 'bb_usage' && event.kind === 'print_ended').map(jobOf))
   const lengthOf = (event: S['SpoolEvent']) => (typeof event.data?.length_m === 'number' ? event.data.length_m : null)
@@ -1538,6 +1544,7 @@ function spoolHistory(row: SpoolRow): S['SpoolHistory'] {
       prints: plates.length,
       grams_per_print: plates.length > 0 ? used / plates.length : null,
       wasted_g: wasted,
+      non_print_waste_g: events.filter((event) => event.kind === 'non_print_waste').reduce((sum, event) => sum + nonPrintWaste(event), 0),
       cost_used: perKg != null ? costOf(perKg, used) : null,
       value_left: perKg != null && left != null ? costOf(perKg, left) : null,
       burn_g_per_day: burn,
@@ -1586,6 +1593,8 @@ export function metricsInput() {
   return {
     spools,
     plates: new Map(spools.map((spool) => [spool.id, platesOf(state.events.filter((event) => event.spool_id === spool.id))])),
+    /** #7167: a spool's `non_print_waste` events, apart from its plates. */
+    waste: new Map(spools.map((spool) => [spool.id, state.events.filter((event) => event.spool_id === spool.id && event.kind === 'non_print_waste')])),
     suppliers,
     types: state.types.map((type) => ({ ...type, material: nameOf('materials', type.material_id) })),
     printers: new Map([[H2C.printer_id, H2C.printer_name]]),

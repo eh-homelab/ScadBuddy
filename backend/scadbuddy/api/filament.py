@@ -2635,7 +2635,9 @@ def _range(since: date | None, until: date | None, default_days: int) -> tuple[d
         "attempt printed the plate, and `archive_id`, the Bambuddy print archive it "
         "matched. `series` is the grams left after each event, oldest first, the readings "
         "the grams anchored on marked `anchor` (at most 500 points). `metrics` is the "
-        "spool's use, waste, cost used and value left (in `currency`, the shop's), burn "
+        "spool's use, waste (`wasted_g`: failed and cancelled plates; `non_print_waste_g`: "
+        "the grams of its `non_print_waste` events, apart), cost used and value left (in "
+        "`currency`, the shop's), burn "
         "rate over the last `window_days` and empty day, days since opened and last use, "
         "hours outside dry storage and AMS error; `type_ams_error` is the AMS error over "
         "every spool of its type. 404 for no such spool."
@@ -2676,9 +2678,13 @@ async def get_forecast(filament: FilamentDep) -> mm.Forecast:
         "default `material`); the grams used and wasted (failed and cancelled plates) "
         "per `bucket` (`week` from Monday or `month`; default `month`) and dimension, from "
         "`since` to `until`, both included (default the 180 days before today); and the "
-        "waste by material, type and printer with its rate. Archived spools' plates "
-        "count. A key is the id, `null` when none is set. 422 when `since` is after "
-        "`until` or the range is longer than three years."
+        "waste by material, type and printer with its rate. The waste (`wasted_g`) is the "
+        "failed and cancelled plates only. The grams thrown away off the printer (an "
+        "archive's leftovers, a box replacement) are apart: `non_print_waste_g` is their "
+        "total and `non_print_waste` their rows by material and type (no printer), by the "
+        "day of each `non_print_waste` event, and they are in no `used_g`, `wasted_g` or "
+        "rate. Archived spools' plates and waste count. A key is the id, `null` when none "
+        "is set. 422 when `since` is after `until` or the range is longer than three years."
     ),
 )
 async def get_metrics(

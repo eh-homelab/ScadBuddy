@@ -94,6 +94,7 @@ BB_SPOOL: Final = "bb_spool"
 #: The event that starts a spool's consumed counter again (#7149 R-7149-4): no grams. Its
 #: source is ``bb`` when the pull booked Bambuddy's reset, else ``person``.
 CONSUMED_RESET: Final = "consumed_reset"
+NON_PRINT_WASTE: Final = "non_print_waste"
 #: The ``ref_kind``s of the events that carry BB's clock.
 BB_REFS: Final = frozenset({BB_SPOOL, "bb_scale", "bb_dried", BB_USAGE})
 
@@ -483,6 +484,33 @@ def plate_events(
     ).fetchall():
         found.setdefault(row["spool_id"], []).append(m.SpoolEvent.model_validate(row))
     return found
+
+
+def waste_events(
+    conn: Conn, spool_ids: Sequence[UUID] | None = None
+) -> dict[UUID, list[m.SpoolEvent]]:
+    """The ``non_print_waste`` events of ``spool_ids`` (every spool with none), per
+    spool, oldest first (#7167): what the metrics sum as non-print waste, apart from the
+    plates' waste. The grams are the event's ``data.waste_g``."""
+    where = "kind = 'non_print_waste'"
+    args: list[Any] = []
+    if spool_ids is not None:
+        where += " AND spool_id = ANY(%s)"
+        args.append(list(spool_ids))
+    found: dict[UUID, list[m.SpoolEvent]] = {}
+    for row in conn.execute(
+        f"SELECT {_COLUMNS} FROM filament_spool_events WHERE {where} ORDER BY spool_id, at, seq",
+        args,
+    ).fetchall():
+        found.setdefault(row["spool_id"], []).append(m.SpoolEvent.model_validate(row))
+    return found
+
+
+def waste_grams(event: m.SpoolEvent) -> float:
+    """The grams a ``non_print_waste`` event books: its ``data.waste_g``, raw; 0 when
+    the key is missing or not a number."""
+    grams = event.data.get("waste_g")
+    return float(grams) if isinstance(grams, int | float) and not isinstance(grams, bool) else 0.0
 
 
 class BadCursorError(ValueError):
