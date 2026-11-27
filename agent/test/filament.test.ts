@@ -1138,6 +1138,52 @@ describe('filament location tools', () => {
     expect(tool(name).gated).toBe(false)
   })
 
+  it.each([
+    ['filament_unknown_trays', 'read'],
+    ['filament_unknown_tray_resolve', 'write'],
+  ])('%s is %s tier, never gated', (name, risk) => {
+    expect(tool(name).risk).toBe(risk)
+    expect(tool(name).gated).toBe(false)
+  })
+
+  it('lists unknown trays and resolves one by code (#7143)', async () => {
+    const SEEN = '2026-11-26T10:00:00.123456Z'
+    const bodies: unknown[] = []
+    server.use(
+      http.get(`${BACKEND}/api/v1/filament/unknown-trays`, () =>
+        HttpResponse.json({ trays: [{ id: ROW, seen_at: SEEN, candidates: [{ spool_id: ROW }] }], made_from_tags: [] }),
+      ),
+      http.post(`${BACKEND}/api/v1/filament/unknown-trays/${ROW}/resolve`, async ({ request }) => {
+        bodies.push(await request.json())
+        return HttpResponse.json({ id: ROW, number: 12, code: 'S-12', location_id: null })
+      }),
+    )
+    const listed = (await runTool(tool('filament_unknown_trays'), {}, ctx())) as Parameters<typeof firstText>[0]
+    const trays = (firstText(listed) as { trays: { candidates: { spool_ui_path: string }[] }[] }).trays
+    expect(trays[0]?.candidates[0]?.spool_ui_path).toBe(`/filament/spools/${ROW}`)
+    const input = { tray_id: ROW, code: 'S-12', net_weight_g: 980, seen_at: SEEN }
+    const resolved = await runTool(tool('filament_unknown_tray_resolve'), input, ctx())
+    expect(bodies).toEqual([{ code: 'S-12', net_weight_g: 980, seen_at: SEEN }])
+    expect((firstText(resolved) as { ui_path: string }).ui_path).toBe(`/filament/spools/${ROW}`)
+  })
+
+  it('refuses both or neither of spool_id and code', async () => {
+    const base = { tray_id: ROW, net_weight_g: 980, seen_at: 'x' }
+    let posted = false
+    server.use(
+      http.post(`${BACKEND}/api/v1/filament/unknown-trays/${ROW}/resolve`, () => {
+        posted = true
+        return HttpResponse.json({})
+      }),
+    )
+    for (const extra of [{}, { spool_id: ROW, code: 'S-12' }]) {
+      const result = await runTool(tool('filament_unknown_tray_resolve'), { ...base, ...extra }, ctx())
+      expect(result.isError).toBe(true)
+      expect(JSON.stringify(result.content)).toContain('give exactly one of spool_id and code')
+    }
+    expect(posted).toBe(false)
+  })
+
   it('lists the tree, adds a place and edits another', async () => {
     const calls: unknown[] = []
     server.use(

@@ -51,7 +51,8 @@ unchanged, to the Python API: WebSockets, SSE and large bodies included. On prod
 | `plugins` | `POST` `/plugins/{name}/delete`, `/plugin-oauth/grants/{plugin}/mark`, `…/forget` only: the routes that need no KEK |
 | `remote-plugins` † | replaces `plugins` (name one of the two): every route of `crud_agent_plugins.py`: `/plugins` (`GET`, `POST`), `GET /plugins/{name}`, `POST` `/plugins/open-enabled`, `…/{name}/update`, `…/tool-access`, `…/reveal`, `…/delete`; `POST` `/plugin-oauth/flows` and its `…/authorize`, `…/take`; `/plugin-oauth/grants` and its `…/{plugin}/open`, `…/refreshed` (only while the lease `plugin-oauth:<plugin>` holds), `…/mark`, `…/forget`; `/plugin-oauth/stored-secrets` |
 | `plugin-packages` | `/plugin-packages` and every route under it |
-| `hosted-plugins:read` | `GET /hosted-plugins/{name}`. A version's zip (the blob store) stays Python's |
+| `hosted-plugins:read` | `GET /hosted-plugins/{name}`. A version's zip is area `package-mirrors` |
+| `package-mirrors` † | `POST /package-mirrors/{name}`, `GET /package-mirrors/{name}/{sha256}`, `GET /hosted-plugins/{name}/versions/{version}.zip`: the routes that need the blob store (below) |
 | `plugin-feeds` | `GET /plugin-feeds/{feed}`; `PUT`, `DELETE` `…/packages/{name}` |
 | `sessions:read` | `GET /session-starts`, `GET /sessions/{id}`, `POST /sessions/list` |
 | `sessions` | those, and `POST /sessions`, `…/{id}/agent`, `…/offer`, `…/offer/cancel`, `…/owner`, `…/budget`, `…/discard` |
@@ -78,6 +79,10 @@ unchanged, to the Python API: WebSockets, SSE and large bodies included. On prod
 | `escalations` | `/escalations/*`: a flow run's calls passed up, denied, moved, delivered, and a run's entries |
 | `audit` | `POST` `/audit/record`, `…/list`, `…/prune` |
 | `order-costs` | `POST /orders/{id}/assistant-cost`: the cost entry, its `order_events` row and, after the commit, `order.changed` and `order_item.changed`. It reads `pricing_usd_rate` and `orders_currency` from `settings`, else `SCADBUDDY_PRICING_USD_RATE` and `SCADBUDDY_ORDERS_CURRENCY` from core's own environment, else `1` and `USD`, so core needs the API's values of those two |
+| `unknown-trays:read` | `GET /api/v1/filament/unknown-trays` (public, caller `api`), and the print worker's `GET …/crud/print/filament/printers/{printer_id}/unknown-trays` (caller `print`) |
+| `unknown-trays` | those, and `POST /api/v1/filament/unknown-trays/{id}/dismiss` (public). Go writes no spool here (#7143). The resolve route (`POST …/{id}/resolve`, which would start Python's activity `filament_resolve_unknown_tray` on queue `library`) is not built yet: it waits for `internal/temporalx`, so a resolve gets a 404 |
+
+The `unknown-trays` public routes use `internal/auth` (see "Public routes"). Their CRUD route is caller `print`'s, so it has its own `case` in `newRouter` (areaPackages mounts on caller `agent`).
 
 Area `fleet` (`internal/fleet`) is caller `fleet`'s (scope `crud.fleet`), under
 `/api/v1/internal/crud/fleet`: `POST /agents/{session_id}/touch`, `GET /agents`, `PUT` and
@@ -90,7 +95,7 @@ the messages returned. A text over 16 MiB is a 422 whose detail names the limit 
 `text-too-long`). A cursor `PUT` only moves it back: a `seq` past the cursor is a 422
 (reason `seq-ahead`). Its `GET /changes` is area `changes` (below).
 
-### The event stream (#7768)
+## The event stream (#7768)
 
 `internal/bus` publishes on the event bus and reads it. One `LISTEN` connection per process,
 outside the request pool, hears `scadbuddy_events` and the agent's five channels
@@ -146,9 +151,12 @@ first `PUT /machines/{id}` records the caller's proof name in `fleet_machines.pr
 `machine-of-another-proof`), and so is a session `PUT` whose machine is registered to
 another proof. So two machines of different proofs each hold a row of the same session id,
 and neither changes the other's. A `fleet-rotator` credential with no machine writes
-nothing (403 `no-machine`). Core reads no bootstrap directory: a credential whose machine's file
-went is refused here once the API revokes its row, at the API's first resolve of it or its next
-start or auth sweep (at most 5 minutes; `docs/security/trust-boundaries.md`). `fleetd` sends a
+nothing (403 `no-machine`). Core reads Python's `SCADBUDDY_SERVICE_BOOTSTRAP_DIR` (#8172): a
+credential that names a machine passes only while `fleet-rotator.<machine>` is a regular file
+there (one stat per resolve, as `exchange.py` `BootstrapVerifier.has_machine`). When the file is
+gone, `internal/auth` refuses the credential and revokes its row at once. With the variable
+unset, core refuses every such credential, so the core container needs the API's bootstrap
+secret directory mounted and the variable set. `fleetd` sends a
 `fleet` PAT today, which these routes refuse until #8041.
 
 Area `blobs` † (`internal/blobstore`, #7958) is a shared area: any service credential whose scopes
@@ -183,6 +191,7 @@ commit of it is a 404. Refusals carry a `reason`: 422 `kind_not_allowed`, 413 `u
 507 `store_full`, 404 `upload_not_found`, 410 `upload_expired`, 409 `upload_not_received`, 422
 `upload_mismatch`, 409 `store_object_mismatch`, 503 `store_unavailable` or `store_busy`.
 A Go handler in core reads a blob in-process with `Blobs.OpenKey(ctx, key)` (a `store_blobs` key, the form Python's `blob_key` and `blob_refs` hold) or `Blobs.Open(ctx, kind, sha256)`. It adds no route. The read looks up the row, sends a presigned GET to the row's S3 object, waits at most a minute for its headers, and streams the bytes with their `Ref` for as long as the caller's context allows. The stream checks size and SHA-256 and ends with `ErrBlobMismatch` on a wrong object. A missing row or object is `ErrBlobNotFound`. A store that is not S3, or a row on another backend, is `ErrNotConfigured`.
+`Blobs.Claim`, `Blobs.PublishFile` and `Blobs.ReadFile` (#8137) are the rest of the store in process, for area `package-mirrors` (above). A publish goes through `put`: the bytes spooled and hashed, the object's stage lock held shared as a commit holds it, the object reused or stored with the caps checked (`stage`), the row written by the caller's `indexer`, and the object removed again when that writes no row and no other row names it (`removeUnnamed`). It adds no route; the upload routes and their kinds are as above.
 `internal/blobclient` is its Go client: `New(baseURL, token, tel)`, `Upload(ctx, kind, mediaType, body)`; each call to core may take 2 minutes, longer than a busy commit takes to answer `store_busy`.
 Both sides trace their requests with `telemetry`'s `Transport`: each span records the method, the
 status and the peer (`s3` for the store), never a URL, so a presigned query is never recorded. A
@@ -198,8 +207,23 @@ channel's members, or as a DM to one agent by its handle. An unknown sender is a
 sender has its name as `from`.
 
 Each of `browser-origins`, `bridge-tabs`, `pairings`, `mcp-tokens`, `plugin-packages` and
-`plugin-feeds` also has a `:read` form, its GETs only. Area `package-mirrors` (the blob store)
-is Python's.
+`plugin-feeds` also has a `:read` form, its GETs only. Area `package-mirrors`
+(`internal/packages` `MirrorAreas`, #8137) reads and publishes in process through
+`internal/blobstore`'s `Claim`, `PublishFile` and `ReadFile`, which are store/cache.py
+`CachedBlobStore`'s `claim`, `publish_fresh` (with `expected=None`) and `read_file` on the S3
+store only (any other `store_backend` is 503 `not_configured`); it needs `SCADBUDDY_SECRET_KEY_FILE`,
+as area `blobs` does. A published mirror is a `piece` blob, a zip of one entry with Python's
+`pack_dir` header, directory, date and mode (`backend/tests/fixtures/pack-dir-vectors.json`);
+its deflate stream is Go's `compress/flate`, not zlib's, so Go and Python pack the same file to
+different bytes, and each reads the other's. As `api/crud_agent_packages.py` and `agent_data/package_mirrors.py` do, a mirror's `POST` spools
+the body to a temporary file and hashes it as it streams, refused 413 past 24 MiB (on a declared
+`Content-Length` before the body is read, or as it streams without one), keeps it as the blob
+`plugin-mirror-<sha256>` (claimed when the store holds it, else published), then holds it in
+`blob_refs` for `<name>/<sha256>` and releases every hold no row names past its day, in one
+transaction. A mirror's `GET` serves the bytes only while the package's row names the sha256 in
+`bytes_sha256`, `pending_bytes_sha256`, `mirror_sha256` or `pending_mirror_sha256` (404
+`mirror-not-found`). A hosted version's zip is the blob `attachment-<zip_sha256>`, checked
+against its sha256 (500 `blob-missing`), with its sha256 and content hash in the headers.
 
 An area Go answers in part leaves its other routes to Python: name it only where Python still runs.
 
@@ -379,6 +403,11 @@ At a stop, the servers drain and the three signals flush within the 20 s shutdow
   may differ.
 - `POST /forgotten-subjects/{subject}`: an ancestor whose key went while its fork's range is
   read is a 500, as in Python; a NaN in a copied event is a 500, where Python copied it.
+- `package-mirrors`: a mirror past its limit is refused with the CRUD headers (Python's body gate
+  answered without them). A mirror's `GET` is the whole body with no `ETag`, `Last-Modified` or
+  range answers (Python's `FileResponse`). A version in a zip's path is decimal digits only
+  (pydantic's lax mode also took a sign or spaces), and a last segment that does not end `.zip` is
+  a 404 from Go.
 - The event stream: a replayed typed event takes what pydantic's lax mode takes for its fields
   (an int as a whole float or a text of digits, a bool as `0`, `1` or a word), but not every
   other coercion pydantic makes; an event it does not take is a `resync`, as in Python. A lone

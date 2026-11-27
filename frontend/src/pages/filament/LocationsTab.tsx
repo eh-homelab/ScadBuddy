@@ -16,6 +16,8 @@ import {
 } from '../../api/filament'
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select'
 import { LocationTree } from '../../components/filament/LocationTree'
+import { UnknownSpoolButton } from '../../components/filament/UnknownSpoolButton'
+import { unknownSpoolTitle, useUnknownTrayList } from '../../lib/unknownSpools'
 import { Button } from '@/components/ui/button'
 import { Checkbox } from '@/components/ui/checkbox'
 import { Input } from '@/components/ui/input'
@@ -78,6 +80,7 @@ export function LocationsTab() {
   const [saving, setSaving] = useState(false)
   const [sensors, setSensors] = useState<Sensor[]>([])
   const [sensorsError, setSensorsError] = useState(false)
+  const { trays: unknown, reload: reloadUnknown } = useUnknownTrayList()
 
   /** Each load takes a number; only the newest one's answer is used. */
   const latest = useRef(0)
@@ -317,6 +320,16 @@ export function LocationsTab() {
             Retry
           </Button>
         </div>
+      )}
+      {unknown.length > 0 && (
+        <ul aria-label="Unknown spools" className="flex flex-col gap-2 rounded-lg border border-primary/50 bg-primary/10 px-3 py-2 text-[13px]">
+          {unknown.map((tray) => (
+            <li key={tray.id} className="flex flex-wrap items-center gap-x-3 gap-y-1">
+              <span className="min-w-0 break-words">{unknownSpoolTitle(tray)}</span>
+              <UnknownSpoolButton trayId={tray.id} onResolved={reloadUnknown} />
+            </li>
+          ))}
+        </ul>
       )}
       {data && <LocationTree nodes={data.nodes} kinds={kinds} spoolsAt={spoolsAt} sensorsAt={sensorsAt} onSensorsChanged={() => void loadSensors()} onEdit={open} onArchive={(node, value) => void archive(node, value)} />}
     </div>

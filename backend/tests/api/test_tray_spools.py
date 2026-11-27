@@ -17,6 +17,7 @@ from scadbuddy.api.deps import STATE_ATTR, AppState
 from scadbuddy.bambuddy.filaments import FilamentOptions, gather_plate_options
 from scadbuddy.bambuddy.models import FilamentRequirements
 from scadbuddy.bambuddy.trays import seen_trays
+from scadbuddy.filament import capture
 from scadbuddy.filament.component import FILAMENT, Filament
 from scadbuddy.filament.models import Material, SpoolCreate
 from scadbuddy.printers.component import PRINTERS, Printers
@@ -77,6 +78,18 @@ def _report(white: str = "FFFFFFFF") -> dict[str, Any]:
             ]
         },
     }
+
+
+@pytest.fixture(autouse=True)
+def no_unknown_tray_capture(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A stored report makes no spool from a tag and notes no unknown tray (#7143).
+
+    These tests are about a person's link of a tray, with tray 0's tag still free. Since
+    #7143 the report's capture would make tray 0's spool from its tag at once. Capture's
+    unknown trays have their own tests (`tests/filament/test_capture_unknown.py`)."""
+    monkeypatch.setattr(
+        capture, "note_unknown", lambda *_args, **_kwargs: capture.UnknownTrayResult()
+    )
 
 
 @pytest.fixture
