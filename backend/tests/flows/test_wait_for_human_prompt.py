@@ -17,7 +17,7 @@ postgres = pytest.mark.requires_postgres
 
 ANSWER = {
     "type": "object",
-    "properties": {"answer": {"type": "string", "title": "Answer"}},
+    "properties": {"answer": {"type": "string", "title": "Answer", "minLength": 1}},
     "required": ["answer"],
 }
 

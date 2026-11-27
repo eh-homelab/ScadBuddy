@@ -192,8 +192,8 @@ def _table_problem(value: Any) -> str | None:
 
 
 def context_problems(context: list[dict[str, Any]]) -> list[str]:
-    """What is wrong with the blocks of a task's context. An item that is not one of the
-    six blocks (one key of `_BLOCKS`) is stored as it is, so A1 flows keep working."""
+    """What is wrong with the blocks of a task's context. An item that is not a block
+    (one key of `_BLOCKS`) is stored as it is, so A1 flows keep working."""
     problems: list[str] = []
     for index, item in enumerate(context):
         if len(item) != 1:

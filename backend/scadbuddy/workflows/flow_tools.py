@@ -28,6 +28,7 @@ with workflow.unsafe.imports_passed_through():
 
     from scadbuddy.flows.inputs import InputsError, filled, inputs_model
     from scadbuddy.tasks.models import (
+        BEFORE_WIDGETS,
         TASK_TITLE_MAX,
         UNCHECKED_DEFAULTS,
         TaskOpen,
@@ -86,12 +87,17 @@ WAIT_OPEN_PATCH = "flow-open-wait-7364"
 #: `wait_for_human` opens a task with one text field, as `prompt()` does (#8062). One id
 #: per call, as `WAIT_OPEN_PATCH`: a run from before asks its next question as a task.
 HUMAN_PROMPT_PATCH = "flow-human-prompt-8062"
-#: The task of a `wait_for_human` under `HUMAN_PROMPT_PATCH`.
+#: The task of a `wait_for_human` under `HUMAN_PROMPT_PATCH`. A blank answer is refused,
+#: as the text answer's route refuses one (#2379).
 HUMAN_ANSWER_SCHEMA: dict[str, Any] = {
     "type": "object",
-    "properties": {"answer": {"type": "string", "title": "Answer"}},
+    "properties": {"answer": {"type": "string", "title": "Answer", "minLength": 1}},
     "required": ["answer"],
 }
+#: `prompt()` takes the widget keys of a property (`x-sb-widget`, `expects`, `kind`) and
+#: checks its context's blocks (#8062). One id per call, as `HUMAN_PROMPT_PATCH`: a call
+#: from before replays with the rules it was checked by (`tasks/models.BEFORE_WIDGETS`).
+PROMPT_WIDGETS_PATCH = "flow-prompt-widgets-8062"
 #: One try of a prompt's task write, past the CRUD client's own budget
 #: (`crud/client.UNAVAILABLE_BUDGET`). Tried again without limit: the task and the run
 #: must agree.
@@ -171,6 +177,8 @@ async def wait_for_human(
             HUMAN_ANSWER_SCHEMA,
             timeout_s,
             people_only,
+            # The task path is new with #8062: it has the rules of #8062 from its first call.
+            widgets=True,
             context=context,
         )
         return HumanAnswer(answer=asked["answer"])
@@ -212,15 +220,17 @@ async def task_answer(  # type: ignore[empty-body]
     ...
 
 
-def _prompt_task(call_id: str, run_id: str, **fields: Any) -> dict[str, Any]:
+def _prompt_task(call_id: str, run_id: str, *, widgets: bool, **fields: Any) -> dict[str, Any]:
     """The prompt's task as the open activity takes it. ValueError names what is wrong.
+    Without ``widgets``, it checks by the rules from before #8062 (`PROMPT_WIDGETS_PATCH`).
 
     A refusal here schedules nothing, so a run replays only if its calls are refused and
     taken as they were. A change of what this takes needs a patch, in either direction: a
     rule added, a rule loosened, or a dependency bump that moves one."""
     try:
         task = TaskOpen.model_validate(
-            {"id": call_id, "run_id": run_id, **fields}, context=UNCHECKED_DEFAULTS
+            {"id": call_id, "run_id": run_id, **fields},
+            context=UNCHECKED_DEFAULTS if widgets else BEFORE_WIDGETS,
         )
         return task.model_dump(mode="json", by_alias=True)
     except ValidationError as err:
@@ -263,8 +273,9 @@ async def prompt(
     flow's inputs.json does, and a string may also have a `format` of `email`, `date` or
     `date-time`. Returns the answer as a dict by field name. A field left out is its
     default; with no default, a boolean is False and any other field is None. `context` is
-    a list of JSON objects kept with the question, `place` the name of the place that shows
-    it, and `ui` the name of its screen. `title`, `context` and `ui` are limited in size,
+    a list of JSON objects kept with the question, `place` the code of the station that
+    shows it (a location's code, such as `L-7`; `l7` is stored as `L-7`), and `ui` the name
+    of its screen. `title`, `context` and `ui` are limited in size,
     and a refusal names the limit. Raises ValueError for a schema, title, context, place,
     ui, assignee or timeout_s it does not take, and for an answer that fits the schema and not the
     field's type (a huge number). Raises TimeoutError if nobody answers in time. With
@@ -285,6 +296,9 @@ async def prompt(
     timeout_s = _wait_s(timeout_s)
     owner: StepOwner = workflow.instance()
     call_id = str(workflow.uuid4())
+    # Before the task is checked: a call refused by the rules of #8062 has the marker too,
+    # so its replay is refused by the same rules. A call from before has none.
+    widgets = workflow.patched(f"{PROMPT_WIDGETS_PATCH}:{call_id}")
     answer = await _task_wait(
         owner,
         call_id,
@@ -293,6 +307,7 @@ async def prompt(
         schema,
         timeout_s,
         people_only,
+        widgets=widgets,
         context=[] if context is None else context,
         place=place,
         ui=ui,
@@ -313,13 +328,22 @@ async def _task_wait(
     schema: dict[str, Any],
     timeout_s: int | None,
     people_only: bool,
+    *,
+    widgets: bool,
     **fields: Any,
 ) -> dict[str, Any]:
     """Open the task `call_id` and wait for its answer, in the step `fn`. Returns the
-    answer as its answerer sent it. `fields` are the task's other fields."""
+    answer as its answerer sent it. `widgets` as `_prompt_task`; `fields` are the task's
+    other fields."""
     expires = None if timeout_s is None else workflow.now() + timedelta(seconds=timeout_s)
     task = _prompt_task(
-        call_id, owner.run_id, title=title, schema=schema, expires_at=expires, **fields
+        call_id,
+        owner.run_id,
+        widgets=widgets,
+        title=title,
+        schema=schema,
+        expires_at=expires,
+        **fields,
     )
     await _open_task(task)
     try:

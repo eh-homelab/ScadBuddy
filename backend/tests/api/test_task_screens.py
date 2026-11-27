@@ -18,7 +18,12 @@ from tests.api.test_tasks import Harness, Rows, harness, parked, post, rows
 
 __all__ = ["harness", "rows", "settings"]
 
-pytestmark = [pytest.mark.requires_postgres, pytest.mark.requires_temporal]
+# `parked` opens no task of its own: the tests add the task they need.
+pytestmark = [
+    pytest.mark.requires_postgres,
+    pytest.mark.requires_temporal,
+    pytest.mark.usefixtures("waits_before_8062"),
+]
 
 LOCATIONS = "/api/v1/filament/locations"
 INVALID = "https://scadbuddy.dev/problems/tasks/invalid-answer"
@@ -158,3 +163,54 @@ def test_task_entity_kind(client: TestClient, rows: Rows) -> None:
     assert stored.status_code == 200, stored.text
     gone = upload(client, f"task:{uuid.uuid4()}", png(), "a.png")
     assert gone.status_code == 404, gone.text
+
+
+def entity_schema(kind: str) -> dict[str, Any]:
+    return {
+        "type": "object",
+        "required": ["where"],
+        "properties": {"where": {"type": "string", "x-sb-widget": "entity", "kind": kind}},
+    }
+
+
+def test_entity_answer_of_a_location_is_checked_as_a_scan(
+    client: TestClient, rows: Rows, harness: Harness
+) -> None:
+    run_id, call_id = parked(client)
+    add(rows, run_id, entity_schema("location"), task_id=call_id)
+    place = location(client, "Bench")
+    code = f"L-{place['number']}"
+
+    for key, bad in (("k1", "S-1"), ("k2", "L-99999"), ("k3", "anything")):
+        refused = post(client, call_id, {"where": bad}, key)
+        assert refused.status_code == 422, refused.text
+        assert refused.json()["problems"][0]["field"] == "where"
+    client.patch(f"{LOCATIONS}/{place['id']}", json={"archived": True})
+    assert post(client, call_id, {"where": code}, "k4").status_code == 422
+    assert harness.sends == []
+
+    client.patch(f"{LOCATIONS}/{place['id']}", json={"archived": False})
+    assert post(client, call_id, {"where": code}, "k5").status_code == 200
+
+
+def test_an_entity_field_is_offered_no_scan(client: TestClient, rows: Rows) -> None:
+    run_id, _ = parked(client)
+    add(rows, run_id, entity_schema("spool"))
+    assert expects_entries(entity_schema("spool")) == []
+    assert listed(client, "code=S-1") == []
+
+
+def test_a_library_file_entity_answer_is_not_a_code(
+    client: TestClient, rows: Rows, harness: Harness
+) -> None:
+    run_id, call_id = parked(client)
+    add(rows, run_id, entity_schema("library_file"), task_id=call_id)
+    assert post(client, call_id, {"where": str(uuid.uuid4())}).status_code == 200
+
+
+def test_list_by_place_folds_a_location_code(client: TestClient, rows: Rows) -> None:
+    run_id, _ = parked(client)
+    task_id = add(rows, run_id, box_schema())
+    rows.conn.execute("UPDATE tasks SET place = 'L-7' WHERE id = %s", (task_id,))
+    assert listed(client, "place=l07") == [task_id]
+    assert listed(client, "place=L-7") == [task_id]

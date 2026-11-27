@@ -43,7 +43,7 @@ JANE = {"email": "jane@example.com"}
 FULL = {**JANE, "also_sms": True, "note": None}
 WAITED: dict[str, Any] = {
     "type": "object",
-    "properties": {"answer": {"type": "string", "title": "Answer"}},
+    "properties": {"answer": {"type": "string", "title": "Answer", "minLength": 1}},
     "required": ["answer"],
 }
 ASK = f"a = await prompt('Where to?', {EMAIL!r}, context=[{{'text': 'hi'}}], place='bench')"
@@ -169,6 +169,9 @@ def test_a_wait_for_human_is_a_task_answered_through_its_route(
         headers={"Idempotency-Key": "t"},
     )
     assert text.status_code == 409 and text.json()["task_id"] == call_id
+    # A blank answer is refused, as the text route refuses one (#2379).
+    blank = answer(client, call_id, {"answer": ""}, "blank")
+    assert blank.status_code == 422, blank.text
     given = answer(client, call_id, {"answer": "yes"})
     assert given.status_code == 200, given.text
     done = finished(client, run_id)

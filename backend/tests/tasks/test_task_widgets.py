@@ -7,7 +7,7 @@ import pytest
 from pydantic import ValidationError
 
 from scadbuddy.core.input_schema import schema_problems
-from scadbuddy.tasks.models import TaskOpen
+from scadbuddy.tasks.models import BEFORE_WIDGETS, UNCHECKED_DEFAULTS, TaskOpen
 from scadbuddy.tasks.schema import prompt_schema_problems
 from scadbuddy.tasks.widgets import WIDGETS, context_problems, expects_entries, scan_fields
 
@@ -144,3 +144,43 @@ def test_task_open_checks_the_context() -> None:
     with pytest.raises(ValidationError) as err:
         _open([{"text": 3}])
     assert "context[0] text" in str(err.value)
+
+
+def _opened(rules: dict[str, Any], **fields: Any) -> TaskOpen:
+    return TaskOpen.model_validate(
+        {"id": "t", "run_id": "r", "title": "q", **fields}, context=rules
+    )
+
+
+def test_before_widgets_refuses_a_widget_schema() -> None:
+    schema = _asks({"type": "string", "x-sb-widget": "scan", "expects": {"kinds": ["spool"]}})
+    assert _opened(UNCHECKED_DEFAULTS, schema=schema).schema_ == schema
+    with pytest.raises(ValidationError, match="'x-sb-widget' is not supported"):
+        _opened(BEFORE_WIDGETS, schema=schema)
+
+
+def test_before_widgets_keeps_a_context_item_as_it_is() -> None:
+    context = [{"checklist": "not a list"}, {"entity": "SB-1042"}]
+    with pytest.raises(ValidationError, match="context"):
+        _opened(UNCHECKED_DEFAULTS, schema=_asks({"type": "string"}), context=context)
+    assert (
+        _opened(BEFORE_WIDGETS, schema=_asks({"type": "string"}), context=context).context
+        == context
+    )
+
+
+@pytest.mark.parametrize(
+    ("place", "stored"),
+    [
+        ("L-7", "L-7"),
+        ("l7", "L-7"),
+        ("L-07", "L-7"),
+        (" l-7 ", "L-7"),
+        ("S-3", "S-3"),
+        ("Bench", "Bench"),
+    ],
+)
+def test_a_place_that_is_a_location_code_is_stored_canonical(place: str, stored: str) -> None:
+    assert (
+        _opened(UNCHECKED_DEFAULTS, schema=_asks({"type": "string"}), place=place).place == stored
+    )

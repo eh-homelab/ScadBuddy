@@ -51,6 +51,7 @@ from scadbuddy.tasks.models import (
     Task,
     TaskQuestion,
     TaskState,
+    folded_place,
     json_fits,
 )
 from scadbuddy.tasks.validate import validate_answer
@@ -137,7 +138,7 @@ def list_tasks(
     return TaskList(
         tasks=tasks.store.list(
             state=state,
-            place=place,
+            place=None if place is None else folded_place(place),
             code=parsed,
             assignee=browser_principal()[:MAX_BY_CHARS] if assignee == "me" else None,
             limit=limit,

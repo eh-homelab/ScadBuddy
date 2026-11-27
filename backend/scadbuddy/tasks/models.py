@@ -15,10 +15,15 @@ from pydantic import (
     field_validator,
 )
 
+from scadbuddy.codes.parse import format_code, parse_code
+from scadbuddy.codes.resolve import PREFIXES
 from scadbuddy.core.events import TASK_PLACE_CHAR, TASK_PLACE_MAX
 from scadbuddy.core.json_values import unstorable
 from scadbuddy.tasks.schema import prompt_schema_problems
 from scadbuddy.tasks.widgets import context_problems
+
+#: The prefix of a location's code.
+LOCATION_PREFIX = next(prefix for prefix, one in PREFIXES.items() if one.kind == "location")
 
 TaskState = Literal["open", "answered", "cancelled", "expired"]
 
@@ -29,6 +34,23 @@ MAX_BY_CHARS = 200
 #: A `TaskOpen`'s validation context that leaves its schema's defaults unchecked: that
 #: check runs patterns against a clock, which a workflow must not do.
 UNCHECKED_DEFAULTS = {"defaults": False}
+#: As `UNCHECKED_DEFAULTS`, with the rules from before #8062: no widget keys in the
+#: schema, and the context's blocks are not checked. A workflow replays an older
+#: `prompt` call with these (`flow_tools.PROMPT_WIDGETS_PATCH`).
+BEFORE_WIDGETS = {"defaults": False, "widgets": False}
+
+
+def folded_place(place: str) -> str:
+    """A place that is a location's code (`l7`, `L-07`) as `L-7`, and any other as it is:
+    a station lists its tasks by its own code (#8062)."""
+    code = parse_code(place)
+    if code is not None and code.prefix == LOCATION_PREFIX:
+        return format_code(code.prefix, code.number)
+    return place
+
+
+def _widgets(info: ValidationInfo) -> bool:
+    return bool((info.context or {}).get("widgets", True))
 
 
 def json_fits(value: Any) -> bool:
@@ -77,12 +99,19 @@ class TaskOpen(_TaskFields):
 
     @field_validator("context")
     @classmethod
-    def _context_is_small(cls, value: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    def _context_is_small(
+        cls, value: list[dict[str, Any]], info: ValidationInfo
+    ) -> list[dict[str, Any]]:
         if not json_fits(value):
             raise ValueError(f"the context is more than {MAX_JSON_BYTES} bytes of JSON")
-        if problems := context_problems(value):
+        if _widgets(info) and (problems := context_problems(value)):
             raise ValueError("; ".join(problems))
         return value
+
+    @field_validator("place")
+    @classmethod
+    def _place_is_a_code(cls, value: str | None) -> str | None:
+        return None if value is None else folded_place(value)
 
     @field_validator("ui")
     @classmethod
@@ -95,12 +124,15 @@ class TaskOpen(_TaskFields):
     @classmethod
     def _schema_fits_the_subset(cls, value: dict[str, Any], info: ValidationInfo) -> dict[str, Any]:
         defaults = (info.context or {}).get("defaults", True)
+        widgets = _widgets(info)
         # A default's pattern that ran out of time (its own `PATTERN_TIMEOUT_S` or the shared
         # `PATTERNS_BUDGET_S`) raises `PatternsTimedOutError`, which pydantic passes on as it
         # is, not as a refusal: the caller tries again (#7437, #7688).
         # It drops the other fields' errors pydantic collected; the workflow refuses those
         # before the task reaches the activity (`_prompt_task`).
-        problems = prompt_schema_problems(value, defaults=defaults, retry_timeouts=True)
+        problems = prompt_schema_problems(
+            value, defaults=defaults, widgets=widgets, retry_timeouts=True
+        )
         if problems:
             raise ValueError("; ".join(problems))
         return value

@@ -16,6 +16,25 @@ from scadbuddy.tasks.models import AnswerProblem
 from scadbuddy.tasks.widgets import Expects, scan_fields
 
 _FILE_WIDGETS = ("photo", "file")
+#: The entity fields whose answer is a code: their control is a scan field (#8062 R5).
+_CODED_KINDS = tuple(lookup.kind for lookup in PREFIXES.values())
+
+
+def _coded_fields(schema: dict[str, Any]) -> dict[str, Expects]:
+    """The scan fields, and each `entity` field of a kind a code names, which expects that
+    kind. An entity field is not in `widgets.expects_entries`: a station offers it no scan."""
+    found = scan_fields(schema)
+    properties = schema.get("properties")
+    if not isinstance(properties, dict):
+        return found
+    for name, prop in properties.items():
+        if (
+            isinstance(prop, dict)
+            and prop.get("x-sb-widget") == "entity"
+            and prop.get("kind") in _CODED_KINDS
+        ):
+            found[name] = {"kinds": (prop["kind"],), "codes": ()}
+    return found
 
 
 def _file_fields(schema: dict[str, Any]) -> list[str]:
@@ -48,11 +67,12 @@ def _accepts(expects: Expects, kind: str, code: Code) -> bool:
 def scan_and_file_problems(
     conn: Connection[DictRow], task_id: str, schema: dict[str, Any], answer: dict[str, Any]
 ) -> list[AnswerProblem]:
-    """The scan fields whose code is not one the question takes (it parses, is of a kind
-    or is a code the field expects, and names a row that is not archived), and the photo
-    and file fields that are not an attachment of this task."""
+    """The scan fields, and the entity fields of a location or a spool, whose code is not
+    one the question takes (it parses, is of a kind or is a code the field expects, and
+    names a row that is not archived), and the photo and file fields that are not an
+    attachment of this task."""
     problems: list[AnswerProblem] = []
-    for name, expects in scan_fields(schema).items():
+    for name, expects in _coded_fields(schema).items():
         value = answer.get(name)
         if not isinstance(value, str):
             continue
