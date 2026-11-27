@@ -132,6 +132,7 @@ from scadbuddy.filament.csv_import import (
     import_on,
     import_rows,
 )
+from scadbuddy.filament.dry_box import BoxFullError, BoxHasManyError
 from scadbuddy.filament.insert_weights import InsertWeightChangedError, NoInsertWeightOfferError
 from scadbuddy.filament.label_output import LabelOutput
 from scadbuddy.filament.label_sheets import (
@@ -375,6 +376,12 @@ def _refused(exc: ValueError) -> ApiError:
             f"{exc.noun}_name": exc.holder_name,
         }
         return ApiError(status.HTTP_409_CONFLICT, str(exc), **holder)
+    if isinstance(exc, BoxFullError):
+        return ApiError(
+            status.HTTP_409_CONFLICT, str(exc), code="box_full", occupant_id=str(exc.occupant)
+        )
+    if isinstance(exc, BoxHasManyError):
+        return ApiError(status.HTTP_422_UNPROCESSABLE_CONTENT, str(exc), code="box_has_many")
     code = (
         status.HTTP_409_CONFLICT
         if isinstance(
@@ -1298,7 +1305,9 @@ BULK_ROUTE = "POST /filament/spools/bulk"
         "effective minimum temperature above its maximum, two preset or K rows of one key, "
         "a place that does not exist, is archived, is an AMS unit's or is a printer's tray "
         "(a tray takes one spool, through its own link), or a `copy_of` or `continued_from` "
-        "that names no spool. `continued_from` (#7684) is the archived spool whose filament "
+        "that names no spool. A dry box (a dry-storage place of capacity 1) holds one spool: "
+        "a place that holds one already is a 409 with `code` `box_full` and `occupant_id` "
+        "(#7167). `continued_from` (#7684) is the archived spool whose filament "
         "the new one continues (respooled): the new spool's `created` event keeps it, the "
         "source's newest `archived` event gets `continued_as`, `quantity` must be 1, and a "
         "source not archived is a 422 with `code` `continued_from_not_archived`, a source "
@@ -1356,6 +1365,7 @@ async def bulk_create_spools(
         SpoolTrayPlaceError,
         SpoolCopySourceError,
         MoveTargetError,
+        BoxFullError,
         CatalogRefError,
     ) as exc:
         raise _refused(exc) from None
@@ -2790,7 +2800,7 @@ async def get_spool_summary(
 
 # -- locations ------------------------------------------------------------------------
 
-_LOCATION_REFUSED = (CatalogRefError, LocationExistsError, LocationCycleError)
+_LOCATION_REFUSED = (CatalogRefError, LocationExistsError, LocationCycleError, BoxHasManyError)
 
 
 @router.get(
@@ -3114,7 +3124,9 @@ async def render_labels(
         "Only the fields sent change; `null` clears a nullable one. `archived: true` takes "
         "the place off the tree and frees its name, `false` puts it back. 404 for no such "
         "place, 409 for a name, tray or AMS unit taken, or a `parent_id` that would make "
-        "the place its own ancestor; 422 for a bad field."
+        "the place its own ancestor; 422 for a bad field, or `code` `box_has_many` for a "
+        "place that would be a dry box (a dry-storage kind, capacity 1) while it holds two "
+        "spools or more (#7167)."
     ),
 )
 async def patch_location(
@@ -3269,7 +3281,9 @@ def _no_sensor(sensor_id: UUID) -> ApiError:
         "Put the spool in a place (`location_id: null`: in none) and write a `moved` ledger "
         "event, `{from, to}`. A spool already there is answered as it is, with no event. "
         "404 for no such spool, 422 for a place that does not exist, is archived or is an "
-        "AMS unit's place."
+        "AMS unit's place. A dry box (a dry-storage place of capacity 1) holds one spool: "
+        "a place that holds another one is a 409 with `code` `box_full` and `occupant_id`, "
+        "and nothing is written (#7167). A move into a dry box makes it the spool's home."
     ),
 )
 async def move_spool(
@@ -3281,7 +3295,7 @@ async def move_spool(
         )
     except LookupError:
         raise _no_spool(spool_id) from None
-    except MoveTargetError as exc:
+    except (MoveTargetError, BoxFullError) as exc:
         raise _refused(exc) from None
     moved = await asyncio.to_thread(filament.spools.get, spool_id)
     if moved is None:

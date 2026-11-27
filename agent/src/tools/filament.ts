@@ -2192,7 +2192,9 @@ const tools: Tool[] = [
     description:
       'Put a spool in a place (`location_id` from filament_location_list); `null` takes it out of every place. ' +
       "The spool's ledger records the move as `{from, to}`. A spool already there is left as it is. 422 for a place " +
-      'that does not exist or is archived. Only what the user says. Writes ScadBuddy only.',
+      'that does not exist or is archived. A dry box (a dry-storage place of capacity 1) holds one spool: a box that ' +
+      'holds another one is a 409 `box_full` naming that spool (`occupant_id`); tell the user, and do not move that ' +
+      'spool unasked. Only what the user says. Writes ScadBuddy only.',
     input: z.object({ spool_id: z.string().uuid(), location_id: z.string().uuid().nullable() }),
     risk: 'write',
     source: SOURCE,

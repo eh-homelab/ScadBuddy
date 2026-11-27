@@ -154,6 +154,7 @@ from scadbuddy.filament.bb_sync_models import (
 from scadbuddy.filament.catalog import KIND_OF_TABLE, lookup_key, resolve_or_add
 from scadbuddy.filament.colour import canonical_colours, canonical_rgba
 from scadbuddy.filament.component import Filament
+from scadbuddy.filament.dry_box import BoxFullError
 from scadbuddy.filament.locations import LocationStore
 from scadbuddy.filament.presets import drop_migrated, effective_k_values, own_k_values, own_presets
 from scadbuddy.filament.sb_presets import by_bb_id_on, links_elsewhere_on
@@ -1995,9 +1996,19 @@ def _follow_location(
     at = as_utc(bb.updated_at) or run.now
     if _sb_newer(conn, spool_id, "location_id", at):
         return False
-    LocationStore.move_on(
-        conn, spool_id, target, actor=run.actor, at=_bb_event_at(conn, spool_id, at)
-    )
+    try:
+        LocationStore.move_on(
+            conn, spool_id, target, actor=run.actor, at=_bb_event_at(conn, spool_id, at)
+        )
+    except BoxFullError as full:
+        # #7167: the pull never fails over a full dry box; the spool stays where it is.
+        logger.warning(
+            "BB placed spool %s in dry box %s, which holds %s: left unplaced",
+            spool_id,
+            target,
+            full.occupant,
+        )
+        return False
     taken.add("location_id")
     run.moved += 1
     return True

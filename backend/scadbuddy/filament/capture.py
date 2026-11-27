@@ -45,6 +45,7 @@ from scadbuddy.bambuddy.trays import EXTERNAL, loading_trays, place_label, seen_
 from scadbuddy.filament import ledger, prints, tags
 from scadbuddy.filament import models as m
 from scadbuddy.filament.catalog import resolve_or_add
+from scadbuddy.filament.dry_box import BoxFullError
 from scadbuddy.filament.inventory import (
     _ADDED_SORT,
     FilamentInventory,
@@ -405,9 +406,18 @@ def reconcile(
                     at=seen_at,
                     data={"by": found_by},
                 )
-                LocationStore.move_on(
-                    conn, spool, _moved_from(conn, spool, place), actor=actor, at=seen_at
-                )
+                back = _moved_from(conn, spool, place)
+                try:
+                    LocationStore.move_on(conn, spool, back, actor=actor, at=seen_at)
+                except BoxFullError as full:
+                    # #7167: the dry box it came from holds another spool now.
+                    logger.warning(
+                        "spool %s left its tray but its box %s holds %s: no place",
+                        spool,
+                        back,
+                        full.occupant,
+                    )
+                    LocationStore.move_on(conn, spool, None, actor=actor, at=seen_at)
                 result += CaptureResult(unloaded=1)
             if holder is not None and seen is not None:
                 result += _book_load(
