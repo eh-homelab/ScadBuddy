@@ -218,6 +218,14 @@ func TestStoreErrors(t *testing.T) {
 			t.Fatalf("err %v, want ErrTooLong naming core's limit", err)
 		}
 	})
+	t.Run("virtual sender", func(t *testing.T) {
+		reject := `"rotator" is the login rotator, a virtual sender.`
+		s, _ := newStore(t, 422, `{"detail":"\"rotator\" is the login rotator, a virtual sender.","reason":"virtual-sender"}`)
+		_, _, err := s.Send(ctx, sid, fleetchat.Target{Agent: "rotator"}, "x")
+		if !errors.Is(err, fleetchat.ErrVirtualSender) || err.Error() != reject {
+			t.Fatalf("err %v, want ErrVirtualSender whose text is the reject message", err)
+		}
+	})
 	t.Run("seq ahead", func(t *testing.T) {
 		s, _ := newStore(t, 422, problem(422, "seq-ahead"))
 		if err := s.Rewind(ctx, sid, 99); !errors.Is(err, fleetchat.ErrBadSeq) {
