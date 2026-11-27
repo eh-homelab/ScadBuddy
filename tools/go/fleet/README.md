@@ -3,6 +3,8 @@
 ScadBuddy's agent fleet chat server: `fleetchat`'s MCP server (`tools/go/fleetchat`)
 over ScadBuddy's own store and bus. The design is
 `docs/superpowers/specs/2026-11-25-agent-fleet-messaging-design.md` §5 and §6.5-6.6.
+It also holds the "ScadBuddy Fleet" GitHub App's parts (#8012, #8014; no spec section
+describes them yet): the Actions secret writer (`ghsecrets`) and the webhook receiver (`ghwebhook`).
 
 The image is `ghcr.io/eh-homelab/scadbuddy-fleet`, published by
 `.github/workflows/build-go-image.yml`. It runs as uid 10003 and listens on 8080.
@@ -125,15 +127,85 @@ with 401 calls `f` with the refused credential and is sent once more with the ne
   sets no back-off. It never logs the proof
   or the credential.
 
+## Package `ghsecrets`
+
+`ghsecrets` writes GitHub Actions secrets as a GitHub App. It imports nothing else from
+this repository, so fleetd can use it later. No route calls it yet: the routes that set a
+secret come with #8011's rotation targets.
+
+- `New(Config{AppID, InstallationID, PrivateKey, …})` and `ParsePrivateKey` (PEM,
+  PKCS #1 as GitHub gives it, or PKCS #8).
+- `Target{Owner, Repo, Name, Visibility, SelectedRepositoryIDs}`: a repository secret
+  when `Repo` is set, else an organisation secret. `Visibility` (`all`, `private`, the
+  default, or `selected` with `SelectedRepositoryIDs`) is for an organisation secret only.
+  A name must match GitHub's rule (letters, digits and `_`, not a digit first, not
+  `GITHUB_` first).
+- `Set(ctx, target, value)`:
+  1. It signs the App's JWT: RS256 over `iat` (now minus 60 s), `exp` (now plus 9
+     minutes; GitHub refuses more than 10) and `iss` (the App id)
+     ([GitHub's JWT page](https://docs.github.com/en/apps/creating-github-apps/authenticating-with-a-github-app/generating-a-json-web-token-jwt-for-a-github-app)).
+  2. It mints an installation token for this one write:
+     `POST /app/installations/{id}/access_tokens` with `permissions`
+     `{"secrets":"write"}` and `repositories` `[repo]` for a repository target, or
+     `{"organization_secrets":"write"}` for an organisation target
+     ([create an installation access token](https://docs.github.com/en/rest/apps/apps#create-an-installation-access-token-for-an-app)).
+     An organisation permission gives no repository's contents, so that token names no
+     repository. A token whose answer holds a permission that was not asked for (other
+     than `metadata` at `read`, which GitHub can add), or the asked one at another level,
+     is refused and not used; so is a repository target's token whose `repositories` is
+     not that one repository.
+  3. `GET …/actions/secrets/public-key`, a sealed box with that key
+     (`golang.org/x/crypto/nacl/box` `SealAnonymous`), then
+     `PUT …/actions/secrets/{name}` with `encrypted_value` and `key_id`, and for an
+     organisation secret `visibility` (and `selected_repository_ids`)
+     ([repository secrets](https://docs.github.com/en/rest/actions/secrets#create-or-update-a-repository-secret),
+     [organisation secrets](https://docs.github.com/en/rest/actions/secrets#create-or-update-an-organization-secret)).
+- `UpdatedAt(ctx, target)`: the secret's `updated_at`, with a token minted the same way at
+  `read`. GitHub sends no webhook when a secret changes, so a scheduler compares this with
+  its last write to find an overwrite. A missing secret is `ErrNotFound`.
+
+The writer never caches, logs or returns a token or the JWT. It never logs the key, the
+value or the sealed value either. It follows no redirect. Each request to GitHub is a CLIENT span (`Config.WrapTransport`,
+telemetry's `Transport`), but the writer strips `traceparent`, `tracestate` and `baggage`
+after that wrap, so no trace context reaches GitHub. An error names the method, the
+path, the status and GitHub's `message` (cut to 200 bytes at a rune's start), never a header or a body that was sent. Each
+write logs one line, "github secret set", with the owner, repository, name and key id.
+
+## Package `ghwebhook`
+
+`ghwebhook.New(secret, Options)` is the receiver of the App's webhook deliveries, served
+at `/github/webhook`. Pomerium sends the public
+`https://scadbuddy.sso.nullreference.io/fleet/github/webhook` to it and rewrites the path
+(eh-homelab/clusters#4432). That route is public, so the handler is its only guard:
+
+| Delivery | Answer |
+|---|---|
+| A method other than `POST` (Pomerium cannot limit the method on a public route) | 405, `Allow: POST` |
+| No `X-Hub-Signature-256: sha256=<64 hex>` | 401; the body is not read |
+| A body over 1 MiB | 413 |
+| A signature that is not the HMAC-SHA256 of the raw body with the secret (compared in constant time, [GitHub's page](https://docs.github.com/en/webhooks/using-webhooks/validating-webhook-deliveries)) | 401; the body is not parsed |
+| `X-GitHub-Event` `installation` or `installation_repositories` | 204, after one log line and one count |
+| Any other event | 204; the body is not parsed |
+| One of the two events with a body that is not JSON | 400 |
+
+The log line, "github app installation event", holds the event, the action, the delivery
+id, the installation id and, for `installation`, the account id and the count of
+repositories; for `installation_repositories`, the repository selection and the counts
+and ids of the repositories added and removed. It holds no name, login or secret. The
+counter `fleet.github.webhook.installation_events` has the attributes `event` and
+`action`. Marking a `github_secret` target broken when the App loses its repository or
+organisation is #8011's work, with its targets table.
+
 ## Binary
 
 `main.go` serves `/mcp` (fleetchat's streamable HTTP handler, server name
 `scadbuddy-fleet`, its version from the build info or `dev`) and `GET /healthz`
-(`ok`). On SIGTERM it takes no new request and lets the open ones finish for 5 s,
-then ends those still open (the MCP GET streams) and stops within 10 s. The server has
-no auth of its own. Anything on the LAN may call it, directly or through ScadBuddy's `/mcp`
-(the owner's decision of 2026-11-26): its NetworkPolicy admits ScadBuddy's pods and the LAN's Gateway, never
-the internet.
+(`ok`), and `/github/webhook` (`ghwebhook`) when a webhook secret file is set. On SIGTERM it takes no new request and lets the open ones finish for 5 s,
+then ends those still open (the MCP GET streams) and stops within 10 s. Apart from the
+webhook's signature check, the server has no auth of its own. Anything on the LAN may call it, directly or through ScadBuddy's `/mcp`
+(the owner's decision of 2026-11-26): its NetworkPolicy admits ScadBuddy's pods and the LAN's Gateway. The
+internet reaches only `/github/webhook`, through the SSO host's one public Exact route
+(eh-homelab/clusters#4432).
 
 | Flag | Environment | Default |
 |---|---|---|
@@ -146,8 +218,17 @@ the internet.
 | `-page-size` | `FLEETCHAT_PAGE_SIZE` | `50` |
 | `-max-page-size` | `FLEETCHAT_MAX_PAGE_SIZE` | `200` |
 | `-session-timeout` | `FLEETCHAT_SESSION_TIMEOUT` | `24h`: a Go duration; `0` never closes a session |
+| `-github-app-id` | `FLEETCHAT_GITHUB_APP_ID` | none: the App's id (5941183 for "ScadBuddy Fleet") |
+| `-github-installation-id` | `FLEETCHAT_GITHUB_INSTALLATION_ID` | none: the installation's id (186236249 on eh-homelab) |
+| `-github-app-key-file` | `FLEETCHAT_GITHUB_APP_KEY_FILE` | none: the App's private key (PEM). Unset, the secret writer is off |
+| `-github-webhook-secret-file` | `FLEETCHAT_GITHUB_WEBHOOK_SECRET_FILE` | none: the webhook secret. Unset, `/github/webhook` is not served |
 
-Exactly one of the three credential settings is required. An exchanged credential is
+Exactly one of the three credential settings is required. The App key file, the App id and
+the installation id go together, or none is given; the webhook secret file needs none of
+them. Both files are read once, at start, with the space around them trimmed; an empty or
+unreadable file, or a key that is not RSA PEM, stops the start. The start logs one
+"github app" line that says which parts are on, with the two ids, never a file's
+content. An exchanged credential is
 renewed in the process (`NewExchange`); a fixed one lasts 15 minutes unless something
 rewrites the file. A flag wins over its variable, which wins over the default. A bad
 value, from either, stops the start. `--help` and `-version` need no core URL.
@@ -182,9 +263,15 @@ build that published a fleet image, and keeps it otherwise. Before a deploy, the
   fixed credential is not renewed.
 - A route on ScadBuddy's LAN-only hostname, `https://scadbuddy.internal.nullreference.io/fleet/mcp`
   rewritten to the server's `/mcp`, so anything on the LAN can call it (the owner's decision of 2026-11-26).
-  The hostname's DNS record is DNS-only, so the server is never on the internet.
-- A NetworkPolicy that admits, on 8080, ScadBuddy's pods and that Gateway's proxy pods (the
-  server has no auth of its own), and lets the pod reach only DNS and core.
+  The hostname's DNS record is DNS-only, so `/mcp` is never on the internet.
+- A NetworkPolicy that admits, on 8080, ScadBuddy's pods and that Gateway's proxy pods (apart
+  from the webhook's signature check, the server has no auth of its own), and lets the pod reach only DNS and core (and
+  api.github.com once the secret writer is on). The SSO host's Pomerium proxy reaches it
+  for `/github/webhook` only (eh-homelab/clusters#4432).
+- For the GitHub App: the webhook secret from 1Password `homelab - prod` /
+  `scadbuddy-fleet-github-webhook` as `FLEETCHAT_GITHUB_WEBHOOK_SECRET_FILE`, and, for the
+  writer, the key from `scadbuddy-fleet-github-app` as `FLEETCHAT_GITHUB_APP_KEY_FILE`
+  with its `app-id` and `installation-id` (#8014).
 - `FLEETCHAT_SESSION_TIMEOUT`: keep the 24 h default, or set a shorter one; never `0`
   while Claude Code is a client.
 
