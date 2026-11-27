@@ -645,6 +645,27 @@ func mustJSON(t *testing.T, v any) json.RawMessage {
 	return raw
 }
 
+// TestAKindWithNoIDIsNumbered: the owner's kind numbers (2026-11-27). A kind made with no
+// id is k<number> with the code K-<number>; a typed id of k and digits is 422 bad_input, as
+// KindInput refuses it.
+func TestAKindWithNoIDIsNumbered(t *testing.T) {
+	f := newFixture(t)
+	made := f.call("inventory.KindCreate", 201, nil, map[string]any{"name": "Fastener", "parent_id": "consumable", "counting": "lot"})
+	n, _ := made["number"].(float64)
+	if n < 1 || made["id"] != fmt.Sprintf("k%d", int64(n)) || made["code"] != fmt.Sprintf("K-%d", int64(n)) {
+		t.Fatalf("made %v", made)
+	}
+	answer, err := f.try("inventory.KindCreate", nil, map[string]any{"id": "k12", "name": "X", "parent_id": "consumable"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var problem map[string]any
+	if err := json.Unmarshal(answer.Body, &problem); err != nil || answer.Status != 422 || problem["code"] != "bad_input" {
+		t.Fatalf("%d %s", answer.Status, answer.Body)
+	}
+	f.keep("KindCreateMadeID", answer.Body)
+}
+
 func TestTheAnswersMatchTheirGoldenFiles(t *testing.T) {
 	all := map[string]json.RawMessage{}
 	for _, run := range []func(*testing.T) *fixture{
@@ -654,6 +675,7 @@ func TestTheAnswersMatchTheirGoldenFiles(t *testing.T) {
 		func(t *testing.T) *fixture { return golden(t, TestAKindRoundTrips) },
 		func(t *testing.T) *fixture { return golden(t, TestAnItemRoundTrips) },
 		func(t *testing.T) *fixture { return golden(t, TestAMissingPropertyIsAnAnswerNotAFailure) },
+		func(t *testing.T) *fixture { return golden(t, TestAKindWithNoIDIsNumbered) },
 	} {
 		for k, v := range run(t).answers {
 			if _, ok := all[k]; !ok {
@@ -661,7 +683,7 @@ func TestTheAnswersMatchTheirGoldenFiles(t *testing.T) {
 			}
 		}
 	}
-	want := []string{"ItemKind", "KindList", "Item", "ItemList", "Lot", "LotList", "Unit", "UnitList", "MoveList", "KindSchema", "RecostResult", "ItemCreateMissingProperties"}
+	want := []string{"ItemKind", "KindList", "Item", "ItemList", "Lot", "LotList", "Unit", "UnitList", "MoveList", "KindSchema", "RecostResult", "ItemCreateMissingProperties", "KindCreateMadeID"}
 	for _, n := range names {
 		want = append(want, strings.TrimPrefix(n, "inventory."))
 	}

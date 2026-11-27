@@ -253,6 +253,10 @@ At a stop, the servers drain and the three signals flush within the 20 s shutdow
   name.
 - Inventory: the shop's currency is the `orders_currency` row when it holds a code, else
   `SCADBUDDY_ORDERS_CURRENCY`, else `USD`. A row that holds JSON `null` reads as no row.
+- Inventory: every kind read carries `number` (from `item_kinds_number_seq`) and `code`,
+  `K-<number>` (#6955, the owner's decision of 2026-11-27). A kind create with no `id`, and a
+  model kind that a `compatible_with` code makes, get the id `k<number>`. A typed id of `k`
+  and digits is 422 `bad_input`, as `KindInput` refuses it.
 - Inventory: `GET /items/{id}/estimate` is new (Python's `estimate_unit_cost` had no route): it
   answers `{unit_cost_minor, cost_unknown}`, or the refusal a take of `qty` would give.
 - Inventory: an item create or save that is not complete is 422 `missing_required_properties`
