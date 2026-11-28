@@ -44,14 +44,14 @@ type Store interface {
 	// Touch records that the agent was seen now, creating it on first use.
 	Touch(ctx context.Context, sessionID, handle string) error
 	Agents(ctx context.Context) ([]AgentInfo, error)
-	// Join adds the agent to the channel, creating the channel.
+	// Join adds the agent to the channel, creating the channel. A name valid only
+	// before #8149 is never created: when no channel has it, Join returns
+	// ErrBadChannel and changes nothing.
 	Join(ctx context.Context, sessionID, channel string) error
 	// Leave returns ErrUnknownChannel when no channel has the name, and
 	// ErrNotMember when the agent is not in it.
 	Leave(ctx context.Context, sessionID, channel string) error
 	Channels(ctx context.Context, sessionID string) ([]ChannelInfo, error)
-	// ChannelExists says whether a channel has the name.
-	ChannelExists(ctx context.Context, channel string) (bool, error)
 	// Send stores the message and delivers it: to the agent of a DM, or to
 	// the channel's members at send time (sender included). It returns the
 	// message's seq and the recipients' session ids. It returns

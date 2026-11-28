@@ -3,6 +3,7 @@ package fleetchat
 import (
 	"context"
 	"errors"
+	"fmt"
 	"slices"
 	"sort"
 	"sync"
@@ -19,9 +20,7 @@ type fakeStore struct {
 	cursor    map[string]int64
 	lastLimit int
 	touches   int
-	// existsAsked counts ChannelExists calls.
-	existsAsked int
-	virtual     map[string]string // virtual sender name -> reject message
+	virtual   map[string]string // virtual sender name -> reject message
 }
 
 const rotatorReject = `"rotator" is the login rotator, a virtual sender: it reads no messages.`
@@ -59,6 +58,10 @@ func (f *fakeStore) Join(_ context.Context, sessionID, channel string) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	if f.members[channel] == nil {
+		if legacyOnly(channel) {
+			// As core's join: an old-style name is kept, never made.
+			return fmt.Errorf("%w: %q starts or ends with \"-\", which only a channel made before #8149 may", ErrBadChannel, channel)
+		}
 		f.members[channel] = map[string]struct{}{}
 	}
 	f.members[channel][sessionID] = struct{}{}
@@ -97,14 +100,6 @@ func (f *fakeStore) Channels(_ context.Context, sessionID string) ([]ChannelInfo
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].Name < out[j].Name })
 	return out, nil
-}
-
-func (f *fakeStore) ChannelExists(_ context.Context, channel string) (bool, error) {
-	f.mu.Lock()
-	defer f.mu.Unlock()
-	f.existsAsked++
-	_, ok := f.members[channel]
-	return ok, nil
 }
 
 func (f *fakeStore) Send(_ context.Context, sessionID string, t Target, text string) (int64, []string, error) {

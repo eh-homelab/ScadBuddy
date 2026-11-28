@@ -225,9 +225,8 @@ the messages returned. A text over 16 MiB is a 422 whose detail names the limit 
 `tools/go/fleetchat/README.md`), as does the `fleet_channels` CHECK; a join that would make a channel with a name valid
 only under the rule before it is a 422 (reason `legacy-channel-name`). A bad `{name}` is a 422
 whose message names the reference and DNS rules, word for word fleetchat's `ErrBadChannel`.
-`GET /channels/{name}` (same segment) answers 200 `{name}` when a channel has the name and 404
-`unknown-channel` when none has: fleetchat's `Store.ChannelExists`, which a join of an
-old-style name asks. A `POST /messages` whose `agent` is all hex digits but no handle is a 422
+The join checks an old-style name in its own transaction, so fleetchat's `Service.Join` lists
+no channels: sbfleet maps the 422 `legacy-channel-name` to `fleetchat.ErrBadChannel`. A `POST /messages` whose `agent` is all hex digits but no handle is a 422
 (the handle's check), not a 404. Its `GET /changes` is
 area `changes` (below).
 
@@ -285,9 +284,10 @@ gives a handler the verified service). The machine's `id` is the service's own h
 first `PUT /machines/{id}` records the caller's proof name in `fleet_machines.proof_name`. A
 `PUT /machines/{id}` of a row another proof registered is a 403 (reason
 `machine-of-another-proof`), and so is a session `PUT` whose machine is registered to
-another proof. A new proof takes the row only when the old proof is dead: no
-`fleet-rotator.<old name>` file and no live (unrevoked, unexpired) credential of that name,
-which is a machine provisioned again under a new proof name (#8003). So two machines of different proofs each hold a row of the same session id,
+another proof. This holds when the old proof is dead too (no file, no live credential):
+nothing links two proofs, so taking a dead proof's row would let any machine's proof take
+it. A machine provisioned again under a new proof name (#8003) needs an admin to delete its
+old `fleet_machines` row first, or it keeps its old proof file name. So two machines of different proofs each hold a row of the same session id,
 and neither changes the other's. A `fleet-rotator` credential with no machine writes
 nothing (403 `no-machine`). Core reads Python's `SCADBUDDY_SERVICE_BOOTSTRAP_DIR` (#8172): a
 credential that names a machine passes only while `fleet-rotator.<machine>` is a regular file

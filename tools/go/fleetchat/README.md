@@ -11,8 +11,7 @@ no binary and no storage of its own: **the host supplies the `Store` and the
 
 ## Interfaces
 
-- `Store`: `Touch`, `Agents`, `Join`, `Leave`, `Channels`, `ChannelExists` (whether a
-  channel has a name; a join of a name valid only before #8149 asks it), `Send` (returns the
+- `Store`: `Touch`, `Agents`, `Join`, `Leave`, `Channels`, `Send` (returns the
   message's `seq` and the recipients' session ids), `Inbox` (a page above the
   agent's cursor; moves the cursor unless `peek`) and `Rewind`. It returns
   `ErrUnknownAgent`, `ErrUnknownChannel` (a post to or a leave of a channel nobody

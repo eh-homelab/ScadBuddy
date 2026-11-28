@@ -47,15 +47,6 @@ func memberRoute(v channelVectors, session, channel string) string {
 	return "/channels/" + segment + "/members/" + session
 }
 
-// channelRoute is a channel's own route, as memberRoute names it.
-func channelRoute(v channelVectors, channel string) string {
-	segment, ok := v.Segments[channel]
-	if !ok {
-		segment = channel
-	}
-	return "/channels/" + segment
-}
-
 func TestANewChannelTakesEveryValidName(t *testing.T) {
 	a := newFleet(t)
 	ann := a.agent()
@@ -114,12 +105,9 @@ func TestAnOldStyleNameIsKeptOnlyByAChannelMadeBefore(t *testing.T) {
 	for _, ch := range v.Legacy {
 		refused := a.fleet("PUT", memberRoute(v, ann, ch), "", 422)
 		expect(t, refused.body["reason"], "legacy-channel-name")
-		// fleetchat's Store.ChannelExists: 404 until the channel is there, then 200.
-		expect(t, a.fleet("GET", channelRoute(v, ch), "", 404).body["reason"], "unknown-channel")
 		if _, err := a.pool.Exec(context.Background(), `INSERT INTO fleet_channels (name) VALUES ($1)`, ch); err != nil {
 			t.Fatalf("a channel made before #8149, %q: %v", ch, err)
 		}
-		expect(t, a.fleet("GET", channelRoute(v, ch), "", 200).body["name"], ch)
 		a.fleet("PUT", memberRoute(v, ann, ch), "", 200)
 		if got := a.send(ann, ch, "hi"); got.status != 200 {
 			t.Errorf("a post to %q: %d %s", ch, got.status, got.raw)

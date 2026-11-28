@@ -129,10 +129,11 @@ name, its description and its reject message. It starts with `rotator`, the logi
   the other's routes. Each machine row has one owner: the `fleet` access token that registered
   it (`fleet_machines.token_id`, #8041), or the proof file of a `fleet-rotator` credential
   (`fleet_machines.proof_name`). Each writes only its own machines and their rows of sessions.
-  A row moves to a new owner of its kind only when its owner is dead: a token's to a new token
-  of the same person (403 `machine-token-live` while the old one lives), a proof's to a new
-  proof once the old proof name has no file and no live credential (a machine provisioned
-  again under a new name). One session id can
+  A token's row moves to a new token of the same person only when the old token is dead (403
+  `machine-token-live` while it lives). A proof's row never moves to another proof, even a
+  dead one (403 `machine-of-another-proof`): nothing links two proofs. A machine provisioned
+  again under a new proof name needs an admin to delete its old `fleet_machines` row, or it
+  keeps its old proof file name. One session id can
   run on several machines at once: each machine writes its own row, and a read gives the
   session once with a `hosts` array, one entry per machine.
 - `backend/scadbuddy/api/crud_fleet.py`: the change stream. The caller `fleet`:

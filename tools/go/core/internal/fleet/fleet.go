@@ -102,7 +102,6 @@ func Routes(pool *pgxpool.Pool) []crud.Route {
 	return []crud.Route{
 		{Method: "POST", Path: "/agents/{session_id}/touch", Handle: f.touch},
 		{Method: "GET", Path: "/agents", Handle: f.agents},
-		{Method: "GET", Path: "/channels/{name}", Handle: f.channel},
 		{Method: "PUT", Path: "/channels/{name}/members/{session_id}", Handle: f.join},
 		{Method: "DELETE", Path: "/channels/{name}/members/{session_id}", Handle: f.leave},
 		{Method: "GET", Path: "/agents/{session_id}/channels", Handle: f.channels},
@@ -274,24 +273,6 @@ func (f *Fleet) join(r *http.Request, p crud.Params) (any, error) {
 		return nil, err
 	}
 	return map[string]string{"joined": channel}, nil
-}
-
-// channel says whether a channel has the name (fleetchat's Store.ChannelExists): 200 with
-// its name, or 404 unknown-channel.
-func (f *Fleet) channel(r *http.Request, p crud.Params) (any, error) {
-	name, err := channelOf(p)
-	if err != nil {
-		return nil, err
-	}
-	var one int
-	err = f.Pool.QueryRow(r.Context(), `SELECT 1 FROM fleet_channels WHERE name = $1`, name).Scan(&one)
-	if errors.Is(err, pgx.ErrNoRows) {
-		return nil, unknownChannel(name)
-	}
-	if err != nil {
-		return nil, err
-	}
-	return map[string]string{"name": name}, nil
 }
 
 // leave takes the agent out of the channel; the channel stays.

@@ -123,25 +123,6 @@ func TestStoreAgents(t *testing.T) {
 	}
 }
 
-func TestStoreChannelExists(t *testing.T) {
-	ctx := context.Background()
-	s, f := newStore(t, 200, `{"name":"-ops"}`)
-	if ok, err := s.ChannelExists(ctx, "-ops"); err != nil || !ok {
-		t.Fatalf("an existing channel: %v, %v", ok, err)
-	}
-	if r := f.last(t); r.Method != "GET" || r.Path != base+"/channels/-ops" {
-		t.Errorf("request %+v", r)
-	}
-	s, _ = newStore(t, 404, `{"status":404,"detail":"no channel is named \"-ops\"","reason":"unknown-channel"}`)
-	if ok, err := s.ChannelExists(ctx, "-ops"); err != nil || ok {
-		t.Errorf("no channel: %v, %v; want false, nil", ok, err)
-	}
-	s, _ = newStore(t, 500, `{}`)
-	if _, err := s.ChannelExists(ctx, "-ops"); err == nil {
-		t.Error("a 500 is no error")
-	}
-}
-
 func TestStoreChannels(t *testing.T) {
 	s, f := newStore(t, 200, `{"channels":[{"name":"ops","members":["0a1b2c3d"],"unread":3}]}`)
 	got, err := s.Channels(context.Background(), sid)

@@ -220,15 +220,6 @@ func (s *store) Channels(ctx context.Context, sessionID string) ([]fleetchat.Cha
 	return out.Channels, err
 }
 
-// ChannelExists asks core's GET /channels/{name}: 200 is a channel, 404 unknown-channel none.
-func (s *store) ChannelExists(ctx context.Context, channel string) (bool, error) {
-	err := s.c.do(ctx, http.MethodGet, "/channels/"+url.PathEscape(fleetchat.ChannelSegment(channel)), nil, nil)
-	if errors.Is(err, fleetchat.ErrUnknownChannel) {
-		return false, nil
-	}
-	return err == nil, err
-}
-
 func (s *store) Send(ctx context.Context, sessionID string, t fleetchat.Target, text string) (int64, []string, error) {
 	body := map[string]string{"from": sessionID, "text": text}
 	if t.Channel != "" {
