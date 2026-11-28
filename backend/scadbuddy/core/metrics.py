@@ -280,6 +280,15 @@ class Metrics:
             ["subscriber"],
             registry=r,
         )
+        # #8074: a lag that grows is a slow subscriber or a stopped one; this tells them
+        # apart, and names the event (`event_subscribers.stopped_seq`).
+        self.event_subscriber_stopped_seq = Gauge(
+            "scadbuddy_event_subscriber_stopped_seq",
+            "The seq of the event the subscriber's cursor cannot pass (a payload that does"
+            " not fit its table); 0 when it is stopped at none.",
+            ["subscriber"],
+            registry=r,
+        )
         self.render_rejected = Counter(
             "scadbuddy_render_jobs_rejected",
             "Render requests refused (503) because SCADBUDDY_RENDER_QUEUE_MAX were waiting."
