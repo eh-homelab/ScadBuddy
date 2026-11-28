@@ -178,7 +178,11 @@ async def _go_answer(input: dict[str, Any], call: dict[str, Any], unfulfil: bool
     """Go's Take (or GiveBack) of one part. A step that failed rather than answered (past its
     day's schedule-to-close, or a non-retryable error) is an answer too, 503
     `inventory_step_failed`, so the record still writes `parts.stock_refused` and clears
-    the item's `parts_workflow_id` (fix round 1). A cancel of the run is not caught."""
+    the item's `parts_workflow_id` (fix round 1). A cancel of the run is not caught.
+
+    This 503 does not prove that Go wrote nothing (#8256). An attempt can commit in Go and
+    lose its answer, and then the step can end at its schedule-to-close. The stock move is
+    then made, but the record says the take was refused."""
     try:
         if unfulfil:
             return await _go(

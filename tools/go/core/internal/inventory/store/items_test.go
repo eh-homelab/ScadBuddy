@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"reflect"
 	"slices"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -99,6 +100,29 @@ func TestAnUncountedItemHasNoStockAndIsNeverLow(t *testing.T) {
 	made := must(createItem(t, pool, itemStore(), wire.ItemInput{KindID: "flat_service", Name: "Laser cutting", LowStock: dec("5")}))
 	if made.Tracking != "none" || made.OnHand != "0" || made.StockValueMinor != "0" || made.Low {
 		t.Fatalf("%+v", made)
+	}
+}
+
+// The owner's item numbers (#7169): every item has a number and the code I-<number>, on every
+// read and every write's answer.
+
+func TestAnItemReadCarriesItsCode(t *testing.T) {
+	pool, s := testdb.New(t), itemStore()
+	first := must(createItem(t, pool, s, wire.ItemInput{KindID: "hardware", Name: "M3 nut"}))
+	second := must(createItem(t, pool, s, wire.ItemInput{KindID: "hardware", Name: "M3 bolt"}))
+	if first.Number <= 0 || second.Number <= first.Number {
+		t.Fatalf("numbers %d then %d", first.Number, second.Number)
+	}
+	renamed := must(updateItem(t, pool, s, first.ID, wire.InventoryItemPatch{Name: ptr("M3 nyloc")}))
+	reads := []wire.Item{first, second, renamed, getItem(t, pool, s, first.ID)}
+	reads = append(reads, must(s.List(context.Background(), pool, ItemFilter{}))...)
+	for _, it := range reads {
+		if it.Code != "I-"+strconv.FormatInt(it.Number, 10) {
+			t.Fatalf("%s reads number %d code %q", it.Name, it.Number, it.Code)
+		}
+	}
+	if renamed.Number != first.Number {
+		t.Fatalf("a patch changed the number from %d to %d", first.Number, renamed.Number)
 	}
 }
 
@@ -728,6 +752,31 @@ func TestASaveThatChangesNothingIsStillChecked(t *testing.T) {
 	s, made := plainItem(t, pool)
 	_, err := updateItem(t, pool, s, made.ID, wire.InventoryItemPatch{Name: ptr(made.Name)})
 	refusal(t, err, 422, "missing_required_properties")
+}
+
+// TestASaveThatChangesNothingOnACompleteItemAnswersTheItem: a save that writes the item's
+// own name and values back is checked, passes, and answers the item as it is (#8095).
+func TestASaveThatChangesNothingOnACompleteItemAnswersTheItem(t *testing.T) {
+	pool := testdb.New(t)
+	_, s, _ := tagged(t, pool)
+	made := must(createItem(t, pool, s, wire.ItemInput{KindID: "tagged", Name: "Bolt",
+		Properties: props(t, map[string]any{"material": "PLA", "diameter_mm": 1.75})}))
+	const events = `SELECT count(*) FROM events
+		WHERE kind = 'entity_property.changed' AND payload->>'entity_kind' = 'item' AND payload->>'ref' = $1`
+	before := count(t, pool, events, made.ID)
+	saved := must(updateItem(t, pool, s, made.ID, wire.InventoryItemPatch{Name: ptr(made.Name),
+		Properties: props(t, map[string]any{"material": "PLA", "diameter_mm": 1.75})}))
+	if saved.ID != made.ID || saved.Name != made.Name || len(saved.MissingProperties) != 0 ||
+		len(saved.InvalidProperties) != 0 {
+		t.Fatalf("saved %+v, made %+v", saved, made)
+	}
+	if got := storedProps(t, pool, made.ID); got["material"] != `"PLA"` || got["diameter_mm"] != "1.75" {
+		t.Fatalf("stored %v", got)
+	}
+	// The property history stays as it was (#8455): an unchanged value writes no event.
+	if after := count(t, pool, events, made.ID); before == 0 || after != before {
+		t.Fatalf("property events %d before the save, %d after", before, after)
+	}
 }
 
 func TestAStoredValueThatNoLongerFitsIsInvalid(t *testing.T) {

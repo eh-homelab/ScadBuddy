@@ -162,7 +162,7 @@ def lan_ended(
     if progress.settled:
         detail = progress.copies_detail
         message = detail[0].message if detail else progress.error_message
-        timed = seen_at if progress.stage != "unknown" else None
+        timed = seen_at if progress.stage in ("done", "failed") else None
         return started.model_copy(
             update={"ended": progress.stage, "ended_message": message, "ended_at": timed}
         )

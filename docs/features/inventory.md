@@ -51,6 +51,12 @@ no log row (NOTIFY only; `tools/go/core/internal/bus/event.go`,
 `backend/scadbuddy/agent_changes/hub.py`). Python's `ActivityIndex.ingest_inventory_operation`
 turns it into an `activity` row (R-K1-22).
 
+A finished row (`succeeded` or `failed`) stays 8 days after its end. Then the next start of
+an activity deletes it (`tools/go/core/internal/inventory/store/operations.go`
+`pruneOperations`, #8438). A `running` row is never deleted. The 8 days are longer than the
+7 days that `crud_requests` keeps an `inventory` key, so a replay of the key and a read of
+its operation still find the row. The `activity` row stays after its source row is gone.
+
 ### The class and the steps
 
 A kind answers a **class** with four keys (`tools/go/core/internal/inventory/model/class.go`,
@@ -319,6 +325,9 @@ The sidebar entry is **Inventory**. The routes are in `frontend/src/App.tsx:149-
 - `/inventory/items/:id` (`ItemPage`): the item's details, its Offers (`ItemOffers`, with
   "Add price"), its Stock (`ItemStock`: receive, use, count, units and their status, the
   moves table), and the Files, links and properties panel.
+- An item's page shows its code, `I-<number>`, and has a "Print label" link. Each row of the
+  kind tree has one too. Both open the label page with the item or kind chosen (#7169), as a
+  saved spool type's page does for its type.
 - `/inventory/units/:id` (`UnitPage`) and `/inventory/lots/:id` (`LotPage`): a lot's path
   opens its item's page at the lot's row, where its cost, "Re-cost past uses" and its
   result show.

@@ -1,0 +1,2 @@
+/** The next number of a numbered row set: one more than the highest now there, as a database sequence hands out. Give it every row set the sequence numbers: types and items share `item_numbers_seq` (`inventory.ts` `nextItemNumber`); a kind, a place and a spool each have one of their own. */
+export const nextNumber = (rows: readonly { number: number }[]): number => Math.max(0, ...rows.map((row) => row.number)) + 1

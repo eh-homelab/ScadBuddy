@@ -15,7 +15,7 @@ import { ScanCode } from '../../components/filament/scan/ScanCode'
 import { filamentLinks } from '../../lib/filamentLinks'
 import { codeLabel, codeTarget } from '../../lib/resolvedCode'
 import { takeMifare } from '../../lib/nativeMifare'
-import { NfcSession, nfcSupport, type Reading, type TagInfo, type WireRecord } from '../../lib/webNfc'
+import { chipFields, NfcSession, nfcSupport, type Reading, type TagInfo, type WireRecord } from '../../lib/webNfc'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
 import { Switch } from '@/components/ui/switch'
@@ -182,7 +182,7 @@ function Scanner() {
       // still finds the tag by its UID and records, as before. Any other refusal is the answer:
       // core may have recorded the read, so a second post would record the tap twice.
       const mifare = takeMifare(reading.uid)
-      const plain = { uid: reading.uid || null, tag_type: null, records: reading.records }
+      const plain = { uid: reading.uid || null, tag_type: null, records: reading.records, ...chipFields(reading.tag) }
       const read = mifare
         ? postTagRead({ ...mifare, records: [] }).catch((cause: unknown) => {
             if (cause instanceof ApiError && ((cause.status === 422 && (cause.problem.code === 'mifare_unreadable' || cause.problem.code === 'mifare_invalid')) || (cause.status === 503 && cause.problem.code === 'mifare_needs_core'))) return postTagRead(plain)

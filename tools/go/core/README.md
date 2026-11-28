@@ -306,7 +306,11 @@ registered by its name: `inventory.KindCreate`, `…KindUpdate`, `…KindArchive
   ends the row (`succeeded`, or `failed` with the problem) in its own transaction, so the end
   commits with the stock write or not at all. An attempt that fails keeps the row `running` with
   `last_error`. A record write that fails is logged and counted
-  (`scadbuddy_inventory_record_failures`); it never fails the activity.
+  (`scadbuddy_inventory_record_failures`); it never fails the activity. Each start first deletes
+  the finished rows (`succeeded` or `failed`) that ended more than 8 days ago
+  (`store.pruneOperations`, as `insertOperation` prunes `ai_operations`). A `running` row stays.
+  The 8 days are longer than the 7 days that `crud_requests` keeps an `inventory` key, so a replay
+  of the key and a read of its operation still find the row while the ledger keeps the answer.
 - `GET /operations/one` reads a `running` row older than 60 s with Temporal (the activity's
   Describe, or the workflow's): one that Temporal closed without a result answers `failed` with
   the problem `inventory_activity_failed`. One that completed answers from its answer in

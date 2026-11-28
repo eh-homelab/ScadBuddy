@@ -49,7 +49,9 @@ LedgerCaller = CrudCaller | Literal["filament"]
 #: How long a reply is kept for a retry (D5).
 RETENTION: Final = timedelta(hours=24)
 #: A caller whose replies are kept longer than ``RETENTION`` (R-K1-2): an inventory
-#: write's reply stays 7 days.
+#: write's reply stays 7 days. Go's operations prune keeps a row a day longer
+#: (`store/operations.go` `requestRetention`); both tests read
+#: `store/testdata/retention.json`, so change the three together.
 RETENTION_BY_CALLER: Final = {"inventory": timedelta(days=7)}
 #: The advisory lock class of a ``(caller, key)`` ("SCRQ").
 LOCK_CLASS: Final = 0x5343_5251
@@ -186,7 +188,13 @@ def prune(conn: Connection[DictRow], older_than: timedelta = RETENTION) -> int:
     else ``older_than``; how many there were."""
     cursor = conn.execute(
         "DELETE FROM crud_requests WHERE created_at < now() - COALESCE("
-        "(SELECT (r.value #>> '{}')::interval FROM jsonb_each(%s) r WHERE r.key = caller), %s)",
-        (Jsonb({c: str(d) for c, d in RETENTION_BY_CALLER.items()}), older_than),
+        "(SELECT make_interval(secs => r.value::float8) FROM jsonb_each(%s) r"
+        " WHERE r.key = caller), %s)",
+        # Seconds as a JSON number: no text of a timedelta reaches the interval parser
+        # (#8308, #8451).
+        (
+            Jsonb({c: d.total_seconds() for c, d in RETENTION_BY_CALLER.items()}),
+            older_than,
+        ),
     )
     return cursor.rowcount

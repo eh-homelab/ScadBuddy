@@ -16,7 +16,8 @@ import { H2C, L, LK, seed, spoolId, type Catalogs, type Seed, type SpoolRow } fr
 import { jobOf } from '../../../components/filament/eventText'
 import { CATALOGS } from '../../../components/filament/catalogs'
 import { checksSave, marksOf, rowPropertiesRefusal, saveRowProperties } from '../entities'
-import { kindByNumber } from '../inventory'
+import { itemByNumber, kindByNumber, nextItemNumber } from '../inventory'
+import { nextNumber } from '../../nextNumber'
 
 type S = components['schemas']
 
@@ -158,6 +159,9 @@ const MOCK_COLOUR_CODES: components['schemas']['ColourCode'][] = [
 export function locationExists(id: string): boolean {
   return state.locations.some((place) => place.id === id)
 }
+
+/** #7169 — the spool types, archived ones too, for the inventory mock's `nextItemNumber`. */
+export const mockTypes = (): readonly { number: number }[] => state.types
 
 export function reset() {
   state = seed()
@@ -567,7 +571,7 @@ export function seedHomeReturn({ empty = false }: { empty?: boolean } = {}): { b
   if (!state.locations.some((one) => one.id === HOME_BOX)) {
     state.locations.push({
       id: HOME_BOX,
-      number: Math.max(0, ...state.locations.map((place) => place.number)) + 1,
+      number: nextNumber(state.locations),
       name: 'Dry box 2',
       kind_id: LK.DRY_BOX,
       parent_id: L.WORKSHOP,
@@ -1250,7 +1254,7 @@ function under(parent: string, id: string): boolean {
 function newSpool(body: Record<string, unknown>): SpoolRow {
   const blank: SpoolRow = {
     id: newId(),
-    number: Math.max(0, ...state.spools.map((row) => row.number)) + 1,
+    number: nextNumber(state.spools),
     type_id: null,
     brand_id: null,
     material_id: null,
@@ -1324,7 +1328,7 @@ export function createType(raw: unknown): S['SpoolType'] | Response {
     ...body,
     drying_hours: body.drying_hours ?? null,
     id: newId(),
-    number: Math.max(0, ...state.types.map((t) => t.number)) + 1,
+    number: nextItemNumber(),
     filament_id: null,
     archived_at: null,
     created_at: now(),
@@ -2106,6 +2110,14 @@ export function resolveCodeText(text: string): S['Resolved'] | null {
     const kind = kindByNumber(parsed.number)
     return kind ? { kind: 'item_kind', id: kind.id, code: `K-${kind.number}`, name: kind.name, archived: !!kind.archived_at } : null
   }
+  if (parsed.prefix === 'T') {
+    const type = state.types.find((one) => one.number === parsed.number)
+    return type ? { kind: 'spool_type', id: type.id, code: `T-${type.number}`, name: [type.code, type.colour_name].filter(Boolean).join(' '), archived: !!type.archived_at } : null
+  }
+  if (parsed.prefix === 'I') {
+    const item = itemByNumber(parsed.number)
+    return item ? { kind: 'item', id: item.id, code: `I-${item.number}`, name: item.name, archived: !!item.archived_at } : null
+  }
   return null
 }
 
@@ -2206,15 +2218,27 @@ export { cleanTagUid }
  * holds it, marked seen by `source`. A read in a known format gives the tag that format's kind
  * (R13), but a Bambu tag's.
  */
-export function seenTag(uid: string, kind: S['Tag']['kind'] | null, source: 'phone' | 'agent' = 'phone'): S['Tag'] {
+export function seenTag(uid: string, kind: S['Tag']['kind'] | null, source: 'phone' | 'agent' = 'phone', chip: ChipRead = {}): S['Tag'] {
   let tag = state.tags.find((one) => one.tag_uid === uid)
   if (!tag) {
     tag = { id: newId(), kind: kind ?? 'other', tag_uid: uid, tray_uuid: null, raw_blob: null, note: null, created_at: now() }
     state.tags.push(tag)
   } else if (kind && tag.kind !== 'bambu_mifare') tag.kind = kind
   Object.assign(tag, { last_seen_at: now(), last_seen_source: source })
+  // #8366 `_mark`: each chip value the read told is kept; one it left out stays as it was.
+  if (chip.chip != null || chip.max_ndef_bytes != null || chip.writable != null) {
+    Object.assign(tag, {
+      chip: chip.chip ?? tag.chip ?? null,
+      max_ndef_bytes: chip.max_ndef_bytes ?? tag.max_ndef_bytes ?? null,
+      writable: chip.writable ?? tag.writable ?? null,
+      chip_read_at: now(),
+    })
+  }
   return tag
 }
+
+/** What the ScadBuddy app read of a tag's chip beside its records (#8366). */
+export type ChipRead = Pick<S['TagReadIn'], 'chip' | 'max_ndef_bytes' | 'writable'>
 
 /** A tag as the tag list shows it: with its open binding and its spool's number. */
 export function tagRowOf(tag: S['Tag']): S['TagRow'] {
@@ -2256,7 +2280,7 @@ export function placeSpoolAtTray(spool: string, printer: string, ams: number, tr
   if (!place) {
     const unit = state.locations.find((one) => one.printer_id === printer && one.ams_id === ams && one.tray_id == null && !one.archived_at)
     place = {
-      number: Math.max(0, ...state.locations.map((one) => one.number)) + 1,
+      number: nextNumber(state.locations),
       printer_root: false,
       parent_id: unit?.id ?? null,
       identifier: null,
@@ -2719,7 +2743,7 @@ export const handlers = [
       const fields = normalised(body.spool)
       const made: SpoolRow[] = []
       for (let n = 0; n < quantity; n += 1) {
-        const row = { ...newSpool(fields), number: Math.max(0, ...state.spools.map((one) => one.number), ...made.map((one) => one.number)) + 1, location_id: place?.id ?? null }
+        const row = { ...newSpool(fields), number: nextNumber([...state.spools, ...made]), location_id: place?.id ?? null }
         const refused = spoolRefusal(row)
         if (refused) return refused
         // #7167 `move_on`: each spool's move into a dry box asks for its occupant, the one before it included.
@@ -3294,7 +3318,7 @@ export const handlers = [
     if (placeTaken(body)) return problem(409, REFUSED.locationExists)
     if (badRef(body, LOCATION_REFS)) return problem(422, REFUSED.catalogRef)
     const made: S['Location'] = {
-      number: Math.max(0, ...state.locations.map((place) => place.number)) + 1,
+      number: nextNumber(state.locations),
       printer_root: false,
       parent_id: null,
       identifier: null,
@@ -3411,42 +3435,6 @@ export const handlers = [
     return done instanceof Response ? done : HttpResponse.json(done)
   }),
 
-  // -- the pull: the mock has no Bambuddy spools to pull, so it changes nothing --
-  http.post(`${BASE}/bambuddy/import`, () =>
-    HttpResponse.json({
-      created: 0,
-      archived_created: 0,
-      linked: 0,
-      updated: 0,
-      needs_type: 0,
-      archived: 0,
-      invalid: 0,
-      catalog_failed: false,
-      catalog_skipped: 0,
-      names_skipped: 0,
-      created_ids: [],
-      linked_ids: [],
-      updated_ids: [],
-      needs_type_ids: [],
-      archived_ids: [],
-      failed_bb_ids: [],
-      invalid_bb_ids: [],
-      usage_booked: 0,
-      usage_unlinked: 0,
-      rfid_duplicates: 0,
-      rfid_duplicate_bb_ids: [],
-      archived_deferred: 0,
-      archived_deferred_bb_ids: [],
-      claimed: 0,
-      suppliers: 0,
-      locations: 0,
-      moved: 0,
-      conflicts: 0,
-      colours: 0,
-      colours_kept: 0,
-      colours_failed: false,
-    } satisfies S['PullReport']),
-  ),
 ]
 
 /**

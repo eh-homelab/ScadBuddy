@@ -101,6 +101,8 @@ REQUEST_DEADLINE: float = 60.0
 #: client sees the answer, not a reset: this, plus the time the announced body takes at
 #: the rate `REQUEST_DEADLINE` allows a whole body (`linger`, #8363). The client sends
 #: the whole body before it reads the answer, so a close before the body is in resets it.
+#: A body past `MAX_MODEL_FILE_BYTES` (413) is never read whole and gets `LINGER` alone
+#: (#8398): that client may be reset, by design.
 LINGER: Final = 0.5
 _CHUNK: Final = 1 << 20
 _TOKEN: Final = re.compile(r"[!#$%&'*+\-.^_`|~0-9A-Za-z]+")
@@ -530,10 +532,11 @@ async def _receive(reader: asyncio.StreamReader, box_fd: int, length: int, deadl
 def linger(unread: int | None) -> float:
     """How long `_send` reads and drops ``unread`` bytes (None: unknown) after an early
     refusal (#8363): `LINGER`, plus the body at the rate of `MAX_MODEL_FILE_BYTES` in
-    `REQUEST_DEADLINE`. 64 MiB is about 15 s more; the read stops once the body is in."""
-    if unread is None:
+    `REQUEST_DEADLINE`. 64 MiB is about 15 s more; the read stops once the body is in. A
+    body past the cap (413) is never read whole, so it keeps `LINGER` (#8398)."""
+    if unread is None or unread > MAX_MODEL_FILE_BYTES:
         return LINGER
-    return LINGER + REQUEST_DEADLINE * min(unread, MAX_MODEL_FILE_BYTES) / MAX_MODEL_FILE_BYTES
+    return LINGER + REQUEST_DEADLINE * unread / MAX_MODEL_FILE_BYTES
 
 
 async def _send(

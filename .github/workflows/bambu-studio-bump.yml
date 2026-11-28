@@ -59,6 +59,7 @@ jobs:
         run: .github/scripts/bambu-studio-bump.sh . | tee -a "$GITHUB_OUTPUT"
 
       - name: Open the pull request
+        id: open
         if: ${{ steps.bump.outputs.bump == 'true' }}
         env:
           GH_TOKEN: ${{ steps.app-token.outputs.token }}
@@ -77,7 +78,9 @@ jobs:
             echo "$branch already exists; nothing to do."
             exit 0
           fi
-          if [ -n "$(gh pr list --state all --head "$branch" --json number --jq '.[].number')" ]; then
+          # Same-repo PRs only: a fork's PR can carry the same branch name.
+          if [ -n "$(gh pr list --state all --head "$branch" --json number,isCrossRepository \
+              --jq '.[] | select(.isCrossRepository == false) | .number')" ]; then
             echo "a PR for $branch exists; nothing to do."
             exit 0
           fi
@@ -107,6 +110,36 @@ jobs:
           - [ ] Read the release notes for CLI, preset, 3MF and H2C profile changes. Check spec §3's five \`project_settings\` options and the mixed-nozzle-size refusal in \`backend/scadbuddy/bambuddy/resolver.py\`.
           - [ ] Re-measure what \`backend/scadbuddy/slicing/profiles.py\` says of the tree (\`_PER_FILAMENT\`, the include counts) and fix anything that moved here.
           EOF
-          gh pr create --base main --head "$branch" \
+          url="$(gh pr create --base main --head "$branch" \
             --title "chore(slicer): bump Bambu Studio to $VERSION" \
-            --body-file "$body"
+            --body-file "$body")"
+          echo "url=$url" >> "$GITHUB_OUTPUT"
+
+      # Only the newest release's PR stays in review: an older bump PR still open is
+      # closed, with a link to this release's PR, and its branch deleted. A step of
+      # its own, so a rerun after a failed close does it even though the PR exists.
+      - name: Close older bump pull requests
+        if: ${{ steps.bump.outputs.bump == 'true' }}
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+          VERSION: ${{ steps.bump.outputs.version }}
+          OPENED_URL: ${{ steps.open.outputs.url }}
+        run: |
+          set -euo pipefail
+          branch="chore/bambu-studio-$VERSION"
+          # The PR the step above opened; on a rerun that found it already open, the
+          # same-repo PR of this branch (a fork's PR can carry the same name).
+          url="$OPENED_URL"
+          if [ -z "$url" ]; then
+            url="$(gh pr list --state open --head "$branch" --json url,isCrossRepository \
+              --jq '[.[] | select(.isCrossRepository == false)][0].url // ""')"
+          fi
+          if [ -z "$url" ]; then
+            echo "no open PR for $branch; nothing to supersede."
+            exit 0
+          fi
+          gh pr list --state open --limit 1000 --json number,headRefName,isCrossRepository \
+            --jq ".[] | select(.isCrossRepository == false) | select(.headRefName | test(\"^chore/bambu-studio-[0-9]{2}\\\\.[0-9]{2}\\\\.[0-9]{2}\\\\.[0-9]{2}$\")) | select(.headRefName != \"$branch\") | .number" |
+            while read -r old; do
+              gh pr close "$old" --delete-branch --comment "Superseded by $url."
+            done

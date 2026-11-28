@@ -550,6 +550,16 @@ def test_two_machines_with_one_secret_is_a_start_error(tmp_path: Path) -> None:
         BootstrapVerifier.from_dir(directory)
 
 
+@pytest.mark.parametrize("name", ["inventory", "inventory.devbox", "inventory.bak"])
+def test_an_inventory_bootstrap_secret_is_a_start_error(tmp_path: Path, name: str) -> None:
+    """#8308: the API mints the inventory caller in process. No bootstrap file can mint
+    its credential over the exchange."""
+    directory = _bootstrap_dir(tmp_path, render=secrets.token_urlsafe(32))
+    (directory / name).write_text(secrets.token_urlsafe(32))
+    with pytest.raises(BootstrapConfigError, match=f"remove '{name}'"):
+        BootstrapVerifier.from_dir(directory)
+
+
 def test_a_missing_bootstrap_dir_is_a_start_error(tmp_path: Path) -> None:
     with pytest.raises(BootstrapConfigError):
         BootstrapVerifier.from_dir(tmp_path / "nope")

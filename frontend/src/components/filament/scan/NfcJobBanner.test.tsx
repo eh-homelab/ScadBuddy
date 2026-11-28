@@ -127,6 +127,15 @@ describe('NfcJobBanner (#7273)', () => {
     await waitFor(() => expect(onAnnounce).toHaveBeenLastCalledWith('Agent job done: the tag was read.'))
   })
 
+  it("posts the chip the ScadBuddy app read with a read job's result (#8366)", async () => {
+    const job = seedNfcJob({ kind: 'read' })
+    const { user } = render()
+    await user.click(await armButton())
+    expect(await screen.findByText('Hold a tag to the phone')).toBeInTheDocument()
+    stub.tap({ serialNumber: UID, records: [], tag: { chip: 'NTAG215', user_bytes: 504, max_ndef_bytes: 496, writable: true } })
+    await waitFor(() => expect(log.bodyOf(`POST ${JOBS}/${job.id}/result`)).toEqual({ uid: UID, records: [], chip: 'NTAG215', max_ndef_bytes: 496, writable: true }))
+  })
+
   it('arms a write job, backs up with the job id, writes the records and posts the read-back', async () => {
     const job = seedNfcJob({ kind: 'write', records: RECORDS })
     const { user, onAnnounce } = render()
@@ -251,6 +260,19 @@ describe('NfcJobBanner (#7273)', () => {
     seedNfcJob({ kind: 'write', records: [{ record_type: 'smart-poster', data_hex: 'd3010078' }] })
     render()
     expect(await screen.findByText(/This job cannot be written from this page: .*\. Cancel or decline it to tell the agent\./)).toBeInTheDocument()
+  })
+
+  it('says the write has begun elsewhere when the cancel answers 409 write_begun, and keeps the job', async () => {
+    seedNfcJob({ kind: 'read' })
+    server.use(
+      http.post(`${JOBS}/:id/cancel`, () =>
+        HttpResponse.json({ type: 'about:blank', title: 'Conflict', status: 409, detail: 'the write has begun: the job ends only with its result', code: 'write_begun' }, { status: 409 }),
+      ),
+    )
+    const { user, onAnnounce } = render()
+    await user.click(await screen.findByRole('button', { name: 'Cancel job' }))
+    await waitFor(() => expect(onAnnounce).toHaveBeenLastCalledWith('Another page has begun writing this job. It ends with that write’s result.'))
+    expect(screen.getByRole('heading', { name: 'Agent wants to read a tag' })).toBeInTheDocument()
   })
 
   it('says why when ScadBuddy refuses the cancel, and keeps the job', async () => {

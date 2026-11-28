@@ -1744,6 +1744,14 @@ class Tag(BaseModel):
     created_at: datetime
     last_seen_at: datetime | None = None
     last_seen_source: str | None = None
+    #: What the ScadBuddy app last read of the tag (#8366): the NTAG chip from GET_VERSION
+    #: (`NTAG213`, `NTAG215`, `NTAG216`), the largest NDEF message it takes (Android's
+    #: `Ndef.getMaxSize()`), whether it takes a write, and when. None when no read told them
+    #: (a Web NFC read, an older app): an NFC `read` job on the app (agent `nfc_probe`) tells.
+    chip: str | None = None
+    max_ndef_bytes: int | None = None
+    writable: bool | None = None
+    chip_read_at: datetime | None = None
 
 
 class TagBindingCreate(_In):
@@ -2182,6 +2190,12 @@ def _check_fits(records: Sequence[NdefRecord]) -> None:
         raise ValueError(f"the records hold more than {MAX_RECORD_BYTES} bytes")
 
 
+#: A tag's chip as the ScadBuddy app reads it (#8366): NTAG GET_VERSION's chip name.
+Chip = Annotated[str, Field(min_length=1, max_length=32, pattern=r"^[A-Za-z0-9 ._-]+$")]
+#: Android's `Ndef.getMaxSize()`: the largest NDEF message the tag takes, in bytes.
+MaxNdefBytes = Annotated[int, Field(ge=0, le=65535)]
+
+
 class _FitsOneTag(_In):
     """A body whose NDEF ``records`` must fit one tag."""
 
@@ -2240,6 +2254,12 @@ class TagReadIn(_FitsOneTag):
     #: False for a page's lookup of a tag it read before (the old tag after a move, a
     #: restore's read back): core then writes no `filament_tag_reads` row for it (#8148).
     tap: bool = True
+    #: What the ScadBuddy app read of the tag beside its records (#8366): its NTAG chip, the
+    #: largest NDEF message it takes and whether it takes a write. Each is kept on the tag
+    #: when sent; one left out keeps the tag's last known value.
+    chip: Chip | None = None
+    max_ndef_bytes: MaxNdefBytes | None = None
+    writable: bool | None = None
 
 
 BackupReason = Literal["spool_write", "agent_write", "restore", "place_write", "clear"]
@@ -2388,6 +2408,11 @@ class NfcJobResultIn(_In):
     )
     backup_id: UUID | None = None
     error: Annotated[str, Field(max_length=500)] | None = None
+    #: What the ScadBuddy app read of the tag (#8366), as `TagReadIn` takes them; a `read`
+    #: job's result carries them as sent.
+    chip: Chip | None = None
+    max_ndef_bytes: MaxNdefBytes | None = None
+    writable: bool | None = None
 
     @field_validator("error")
     @classmethod

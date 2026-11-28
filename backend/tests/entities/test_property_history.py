@@ -310,6 +310,76 @@ def test_history_lists_a_keys_changes_newest_first(
     assert [c.op for c in store.history(ref, "colour_name", 1)] == ["remove"]
 
 
+def test_a_source_only_change_is_published(pg_pool: PgPool) -> None:
+    """#8190: a save that keeps the value but changes who owns it (a provider's value
+    saved as `manual`) is an event, so the history's source is not left stale."""
+    with pg_pool.connection() as conn:
+        entity_id = _entity(conn, "printer", str(uuid.uuid4()), {"nozzle_note": "hardened"})
+        mark = _newest(conn)
+        with conn.transaction():
+            set_actor(conn, AGENT)
+            conn.execute(
+                "UPDATE entity_properties SET source = 'bambuddy'"
+                " WHERE entity_id = %s AND key = 'nozzle_note'",
+                (entity_id,),
+            )
+        with conn.transaction():
+            set_actor(conn, AGENT)
+            conn.execute(
+                "UPDATE entity_properties SET updated_at = clock_timestamp()"
+                " WHERE entity_id = %s AND key = 'nozzle_note'",
+                (entity_id,),
+            )
+        events = _events(conn, mark)
+    assert [(e["op"], e["old"], e["new"], e["source"]) for e in events] == [
+        ("set", "hardened", "hardened", "bambuddy")
+    ]
+
+
+def test_history_lists_a_row_both_reads_find_once(
+    pg_pool: PgPool, history_rows: HistoryRows
+) -> None:
+    """#8190: the read is one query on the ref and one on the current entity. A row of
+    the current entity under its own ref is found by both and listed once."""
+    store = _store(pg_pool)
+    ref = EntityRef("printer", str(uuid.uuid4()))
+    with pg_pool.connection() as conn:
+        entity_id = _entity(conn, ref.kind, ref.ref, {})
+        base = {"entity_id": entity_id, "kind": ref.kind, "ref": ref.ref, "source": "manual"}
+        history_rows(
+            conn,
+            {**base, "event_seq": 10, "key": "nozzle_note", "op": "set", "new": "hardened"},
+            {**base, "event_seq": 11, "key": "other", "op": "set", "new": 1},
+        )
+    assert [(c.key, c.new) for c in store.history(ref, None, 100)] == [
+        ("other", 1),
+        ("nozzle_note", "hardened"),
+    ]
+    assert [c.key for c in store.history(ref, None, 1)] == ["other"]
+    assert [c.key for c in store.history(ref, "nozzle_note", 100)] == ["nozzle_note"]
+
+
+def test_history_lists_a_value_an_older_rule_allowed(
+    pg_pool: PgPool, history_rows: HistoryRows
+) -> None:
+    """#8116: a stored value today's rule refuses (an object, a list of numbers) is
+    still listed, not a 500. Each change carries its event's seq."""
+    store = _store(pg_pool)
+    ref = EntityRef("spool", str(uuid.uuid4()))
+    base = {"entity_id": str(uuid.uuid4()), "kind": ref.kind, "ref": ref.ref, "source": "manual"}
+    with pg_pool.connection() as conn:
+        history_rows(
+            conn,
+            {**base, "event_seq": 20, "key": "dims", "op": "set", "new": {"w": 1}},
+            {**base, "event_seq": 21, "key": "dims", "op": "set", "old": {"w": 1}, "new": [1, 2]},
+        )
+    changes = store.history(ref, None, 100)
+    assert [(c.event_seq, c.old, c.new) for c in changes] == [
+        (21, {"w": 1}, [1, 2]),
+        (20, None, {"w": 1}),
+    ]
+
+
 def test_history_follows_an_entity_a_merge_renamed(
     pg_pool: PgPool, history_rows: HistoryRows
 ) -> None:

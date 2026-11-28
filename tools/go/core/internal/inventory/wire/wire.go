@@ -159,9 +159,12 @@ type PropertyPatch map[string]json.RawMessage
 // relations (R-K1-6, R-K1-11). MissingProperties are the keys the special type and the
 // kinds' schemas require that the item has no value for; InvalidProperties are the keys
 // its kinds' schemas define whose stored value does not fit. Both are sorted, read on
-// every read and never stored, and empty for an archived item (R-K1-33).
+// every read and never stored, and empty for an archived item (R-K1-33). Number is the
+// item's number from item_numbers_seq; Code is its short code I-<number> (#7169).
 type Item struct {
 	ID                string      `json:"id"`
+	Number            int64       `json:"number"`
+	Code              string      `json:"code"`
 	KindID            string      `json:"kind_id"`
 	KindPath          []string    `json:"kind_path"`
 	Tracking          string      `json:"tracking"`

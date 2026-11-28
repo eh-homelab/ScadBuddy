@@ -31,6 +31,16 @@ describe('the tag mocks (#7273)', () => {
     expect(tag.last_seen_source).toBe('agent')
   })
 
+  it("keeps a read's chip on the tag, and tag-records warn when the tag is too small (#8366)", async () => {
+    const read = await postTagRead({ uid: '04:0d:0d:0d', tag_type: null, records: [], chip: 'NTAG213', max_ndef_bytes: 40, writable: true })
+    expect(read.tag).toMatchObject({ chip: 'NTAG213', max_ndef_bytes: 40, writable: true })
+    const again = await postTagRead({ uid: '04:0d:0d:0d', tag_type: null, records: [] })
+    expect(again.tag).toMatchObject({ chip: 'NTAG213', max_ndef_bytes: 40 })
+    const { backup_id } = await createTagBackup({ uid: '04:0d:0d:0d', records: [], reason: 'spool_write' })
+    const out = await spoolTagRecords(spoolId(3), { uid: '04:0d:0d:0d', records: [], backup_id })
+    expect((out.warnings ?? []).some((one) => one.includes('this NTAG213 holds 40'))).toBe(true)
+  })
+
   // The hand-held Scan mode (#6955): `tag_codes.resolve_records` over the seed's places and spools.
   const hex = (text: string) => Array.from(new TextEncoder().encode(text), (byte) => byte.toString(16).padStart(2, '0')).join('')
   const url = (href: string) => ({ record_type: 'url', data_hex: hex(href) })

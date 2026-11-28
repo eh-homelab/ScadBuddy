@@ -567,11 +567,16 @@ function PropertyRow({
   )
 }
 
-/** The text of a change's value: a list joined, a yes or no for a boolean, an empty string for none. */
+/**
+ * The text of a change's value: a list of strings joined, a yes or no for a boolean, an
+ * empty string for none. A value an older rule allowed (an object, a list with other
+ * items) is its JSON, so `[1, "a"]` never reads as `["1", "a"]` does (#8116).
+ */
 function changeText(value: PropertyChange['new']): string {
-  if (value === null) return ''
-  if (Array.isArray(value)) return value.join(', ')
+  if (value === null || value === undefined) return ''
   if (typeof value === 'boolean') return value ? 'Yes' : 'No'
+  if (Array.isArray(value) && value.every((item) => typeof item === 'string')) return value.join(', ')
+  if (typeof value === 'object') return JSON.stringify(value)
   return String(value)
 }
 
@@ -618,8 +623,8 @@ function PropertyHistory({ entity, property }: { entity: string; property: Entit
     <>
     {pending}
     <ul aria-label={`History of ${key}`} className="flex flex-col gap-1 text-xs">
-      {history.data.map((change, at) => (
-        <li key={at} className="flex flex-wrap gap-x-3">
+      {history.data.map((change) => (
+        <li key={change.event_seq} className="flex flex-wrap gap-x-3">
           <time dateTime={change.at} className="text-muted-foreground tabular-nums">
             {new Date(change.at).toLocaleString()}
           </time>

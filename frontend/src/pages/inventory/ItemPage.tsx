@@ -1,4 +1,4 @@
-import { ArchiveIcon, ArchiveRestoreIcon, ChevronLeftIcon } from 'lucide-react'
+import { ArchiveIcon, ArchiveRestoreIcon, ChevronLeftIcon, PrinterIcon } from 'lucide-react'
 import { useEffect, useId, useMemo, useState, type FormEvent } from 'react'
 import { Link, useParams } from 'react-router'
 import { ApiError } from '../../api/client'
@@ -10,6 +10,7 @@ import { IncompleteMark } from '../../components/entities/IncompleteMark'
 import { LinksPanel } from '../../components/entities/LinksPanel'
 import { PropertiesPanel } from '../../components/entities/PropertiesPanel'
 import { useMoney } from '../../components/filament/purchasing/useMoney'
+import { filamentLinks } from '../../lib/filamentLinks'
 import { inventoryPaths } from '../../lib/inventoryLinks'
 import { useAsync } from '../../lib/useAsync'
 import { useHashTarget } from '../../lib/useHashTarget'
@@ -116,6 +117,9 @@ export function ItemPage() {
         <div className="min-w-0 flex-1">
           <div className="flex flex-wrap items-center gap-2">
             <h1 className="min-w-0 break-words text-lg font-semibold tracking-tight">{current.name}</h1>
+            <span className="font-mono text-[12px] text-muted-foreground" title="The item's code">
+              {current.code}
+            </span>
             {current.effective_saleable && <Badge variant="secondary">For sale</Badge>}
             {current.low && <Badge variant="destructive">Low</Badge>}
             {current.archived_at && <Badge variant="outline">Archived</Badge>}
@@ -125,6 +129,12 @@ export function ItemPage() {
         </div>
         <Button size="sm" variant="outline" aria-expanded={editing} onClick={() => setEditing((open) => !open)}>
           Edit details
+        </Button>
+        <Button asChild size="sm" variant="outline">
+          <Link to={filamentLinks.itemLabel(current.id)}>
+            <PrinterIcon />
+            Print label
+          </Link>
         </Button>
         <Button size="sm" variant="outline" onClick={() => void archive(!current.archived_at)}>
           {current.archived_at ? <ArchiveRestoreIcon /> : <ArchiveIcon />}

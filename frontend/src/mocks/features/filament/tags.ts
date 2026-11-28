@@ -2,9 +2,9 @@ import { HttpResponse, http } from 'msw'
 import type { components } from '../../../api/schema'
 import { parseRgba } from '../../../lib/rgba'
 // `same_records`'s rule is the page's own `sameRecords`.
-import { recordsSha256, sameRecords } from '../../../lib/webNfc'
+import { ndefMessageBytes, recordsSha256, sameRecords } from '../../../lib/webNfc'
 import { newId } from '../../newId'
-import { bindOn, cleanTagUid, findByKey, holderOf, parseCode, resolveCodeText, resolvedSpool, seenTag, setOrigin, spoolRowOf, spoolViewOf, tagOf, tagRowOf } from './index'
+import { bindOn, cleanTagUid, findByKey, holderOf, parseCode, resolveCodeText, resolvedSpool, seenTag, setOrigin, spoolRowOf, spoolViewOf, tagOf, tagRowOf, type ChipRead } from './index'
 
 type S = components['schemas']
 
@@ -286,7 +286,7 @@ function resolveRecords(records: readonly S['NdefRecord'][]): S['Resolved'] | nu
 }
 
 /** `read_on`: a reading's answer. A read with a UID finds or makes its tag, marked seen by `source`; with `bindSpoolId` it binds it there. */
-function readOn(uid: string | null, records: readonly S['NdefRecord'][], source: 'phone' | 'agent', bindSpoolId?: string | null): S['TagReadResult'] | Response {
+function readOn(uid: string | null, records: readonly S['NdefRecord'][], source: 'phone' | 'agent', bindSpoolId?: string | null, chip: ChipRead = {}): S['TagReadResult'] | Response {
   const decoded = decodeOpenSpool(records)
   if (bindSpoolId && uid === null) return problem(422, 'a tag with no UID cannot be bound', 'no_uid')
   if (uid === null) {
@@ -294,7 +294,7 @@ function readOn(uid: string | null, records: readonly S['NdefRecord'][], source:
     return { tag: null, spool: null, decoded, draft: decoded ? draftOf(decoded) : null, resolved, next: resolved ? 'open_code' : 'none' }
   }
   const kind = decoded ? 'ntag_openspool' : null
-  const tag = seenTag(uid, kind, source)
+  const tag = seenTag(uid, kind, source, chip)
   if (bindSpoolId) {
     const bound = bindOn(bindSpoolId, uid, null, kind ?? tag.kind, false)
     if (bound instanceof Response) return bound
@@ -353,9 +353,10 @@ export const handlers = [
     const uid = cleanTagUid(body.uid ?? null)
     const records = body.records ?? []
     if (job.kind === 'read') {
-      const found = readOn(uid, records, 'agent')
+      const chip = { chip: body.chip ?? null, max_ndef_bytes: body.max_ndef_bytes ?? null, writable: body.writable ?? null }
+      const found = readOn(uid, records, 'agent', null, chip)
       if (found instanceof Response) return found
-      return HttpResponse.json(Object.assign(job, { state: 'done', result: { ...found, uid, records } }))
+      return HttpResponse.json(Object.assign(job, { state: 'done', result: { ...found, uid, records, ...chip } }))
     }
     const backup = backups.find((one) => one.id === body.backup_id)
     if (!backup || uid === null || backup.reason !== 'agent_write' || backup.job_id !== job.id || backup.uid !== uid) return conflict('backup_mismatch', 'the backup does not cover this write')
@@ -385,7 +386,14 @@ export const handlers = [
     if (!spool) return problem(404, `no spool ${String(params.id)}`)
     const backup = covering(body, 'spool_write')
     if (backup instanceof Response) return backup
-    return HttpResponse.json(openSpoolRecords(spool))
+    const out = openSpoolRecords(spool)
+    // #8366: a message larger than the tag's last known capacity gets a warning.
+    const tag = tagOf(backup.tag_id)
+    const needs = ndefMessageBytes(out.records)
+    if (tag?.max_ndef_bytes != null && needs > tag.max_ndef_bytes) {
+      out.warnings = [...(out.warnings ?? []), `The records need ${needs} bytes, and ${tag.chip ? `this ${tag.chip}` : 'this tag'} holds ${tag.max_ndef_bytes}: the write would fail. Use a tag that holds more.`]
+    }
+    return HttpResponse.json(out)
   }),
   http.post(`${BASE}/spools/:id/tag-written`, async ({ params, request }) => {
     const body = (await request.json()) as S['TagWrittenIn']
@@ -423,7 +431,7 @@ export const handlers = [
   }),
   http.post(`${BASE}/tags/reads`, async ({ request }) => {
     const body = (await request.json()) as S['TagReadIn']
-    const found = readOn(cleanTagUid(body.uid), body.records ?? [], 'phone', body.bind_spool_id)
+    const found = readOn(cleanTagUid(body.uid), body.records ?? [], 'phone', body.bind_spool_id, body)
     return found instanceof Response ? found : HttpResponse.json(found)
   }),
 ]

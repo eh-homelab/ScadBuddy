@@ -36,9 +36,9 @@ def refresh_asset_metrics(state: AppState) -> None:
 
 
 #: Each subscriber's lag in one read: the newest seq less its cursor, and the age of the
-#: oldest event past it (both read the primary key).
+#: oldest event past it (both read the primary key), and the event it stopped at (#8074).
 _SUBSCRIBER_LAG = (
-    "SELECT s.name,"
+    "SELECT s.name, coalesce(s.stopped_seq, 0) AS stopped_seq,"
     " greatest(coalesce((SELECT max(seq) FROM events), 0) - s.seq, 0) AS lag_events,"
     " coalesce(extract(epoch FROM clock_timestamp() - (SELECT e.logged_at FROM events e"
     " WHERE e.seq > s.seq ORDER BY e.seq LIMIT 1)), 0)::float8 AS lag_seconds"
@@ -58,6 +58,7 @@ def refresh_subscriber_metrics(state: AppState) -> None:
     for row in rows:
         state.metrics.event_subscriber_lag_events.labels(row["name"]).set(row["lag_events"])
         state.metrics.event_subscriber_lag_seconds.labels(row["name"]).set(row["lag_seconds"])
+        state.metrics.event_subscriber_stopped_seq.labels(row["name"]).set(row["stopped_seq"])
 
 
 #: Seconds a local store walk answers the scraper for.

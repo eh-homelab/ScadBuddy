@@ -287,7 +287,15 @@ export const getNfcJob = (id: string) => request<NfcJob>(`${BASE}/nfc-jobs/${seg
  */
 export const claimNfcJob = (id: string, body: NfcJobClaimIn = {}) => request<NfcJob>(`${BASE}/nfc-jobs/${seg(id)}/claim`, json('POST', body))
 
-/** Ends a pending job as cancelled, without arming it; the agent's tool sees `cancelled`. */
+/** Queues a job for the phone page; the Tags tab's "Read chip" queues a `read` (#8366). */
+export const createNfcJob = (body: Schemas['NfcJobIn']) => request<NfcJob>(`${BASE}/nfc-jobs`, json('POST', body))
+
+/**
+ * Ends a job as cancelled without arming it; the agent's tool sees `cancelled`. The route also
+ * cancels an `armed` job whose write has not begun, so a page that armed it since the last poll
+ * stops; 409 `write_begun` once a write's backup is kept. A job that had already ended is answered
+ * unchanged.
+ */
 export const cancelNfcJob = (id: string) => request<NfcJob>(`${BASE}/nfc-jobs/${seg(id)}/cancel`, { method: 'POST' })
 
 /** Ends an armed job with what the tag gave, or with an `error`. */
@@ -321,6 +329,11 @@ export const getSyncStatus = () => request<SyncStatus>(`${BASE}/sync/status`)
 export const runSync = () => request<Schemas['SyncRun']>(`${BASE}/sync/run`, { method: 'POST' })
 
 export type PresetImport = Schemas['PresetImport']
+
+export type PullReport = Schemas['PullReport']
+
+/** #6261: a one-time pull of Bambuddy's spools into ScadBuddy's own; it waits for the print worker (up to 4.5 min). */
+export const importBambuddySpools = () => request<PullReport>(`${BASE}/bambuddy/import`, { method: 'POST' })
 
 /** #7244 — bring Bambuddy's filament presets into ScadBuddy's own once, whatever the presets direction says. */
 export const importBambuddyPresets = () => request<PresetImport>(`${BASE}/presets/bambuddy-import`, { method: 'POST' })

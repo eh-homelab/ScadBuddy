@@ -54,8 +54,13 @@ func New(pool *pgxpool.Pool, shop string) *Activities {
 
 // write runs do in one store.Write of the caller inventory: name is the route, the key the
 // input's, and the ledger's input the params and the body (the actor is in the key). A
-// bad actor is the caller's fault: the activity fails, not retried, and writes nothing.
+// bad actor, or a key with a NUL, is the caller's fault: the activity fails, not retried,
+// and writes nothing. The key goes into the ledger's text column and its lock before do
+// runs, so a NUL there cannot be an answer as one in the body is (hasNUL).
 func (a *Activities) write(ctx context.Context, name string, in Input, do func(tx pgx.Tx, by store.Actor) (int, any, error)) (store.Answer, error) {
+	if strings.ContainsRune(in.Key, 0) {
+		return store.Answer{}, temporal.NewNonRetryableApplicationError("the key holds a NUL character", "bad_key", nil)
+	}
 	by, err := store.ReadActor(in.Actor)
 	if err != nil {
 		return store.Answer{}, temporal.NewNonRetryableApplicationError(err.Error(), "bad_actor", err)
@@ -79,7 +84,8 @@ func (a *Activities) write(ctx context.Context, name string, in Input, do func(t
 		})
 }
 
-// hasNUL says whether a path parameter or a string of the body (a key too) holds a NUL.
+// hasNUL says whether a path parameter or a string of the body (an object's key too) holds
+// a NUL. The idempotency key is checked before the write (write).
 func hasNUL(in Input) bool {
 	for k, v := range in.Params {
 		if strings.ContainsRune(k+v, 0) {

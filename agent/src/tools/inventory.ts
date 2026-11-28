@@ -610,7 +610,8 @@ export const inventoryTools = [
       "A unit's status: `in_stock`, `in_service`, `retired`, `scrapped` or `sold`. Leaving `in_stock` writes a move of " +
       "-1 at the unit's cost (`in_service` a `use`, `sold` a `sell`, `retired` a `retire`, `scrapped` a `scrap`); coming " +
       'back writes a `return` of +1; a change between two statuses out of stock moves no stock. `entity`, in the ' +
-      '`kind:ref` form (`printer:<id>`), names what it went into or to. A unit fitted in another is 409 ' +
+      '`kind:ref` form (`printer:<id>`), names what it went into or to. `entity` and `note` go on the move, so a ' +
+      'change that writes none refuses them (422 `bad_input`). A unit fitted in another is 409 ' +
       '`unit_installed`. Writes ScadBuddy only.' +
       INVENTORY_UI_PATH_NOTE,
     input: z.object({

@@ -42,6 +42,19 @@ export interface TagInfo {
   writable?: boolean | null
 }
 
+/**
+ * #8366 — what a read posts of the tag's chip (`POST /tags/reads`, an NFC job's result), so the
+ * server keeps it on the tag: only the values the app told, none for a Web NFC read.
+ */
+export function chipFields(info?: TagInfo): { chip?: string; max_ndef_bytes?: number; writable?: boolean } {
+  if (!info) return {}
+  return {
+    ...(info.chip ? { chip: info.chip } : {}),
+    ...(info.max_ndef_bytes != null ? { max_ndef_bytes: info.max_ndef_bytes } : {}),
+    ...(info.writable != null ? { writable: info.writable } : {}),
+  }
+}
+
 export interface NDEFRecordInit {
   recordType: string
   mediaType?: string

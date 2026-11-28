@@ -724,7 +724,8 @@
     "diameter_mm",
     "material"
    ],
-   "invalid": []
+   "invalid": [],
+   "keywords": []
   },
   {
    "schema": {
@@ -763,6 +764,9 @@
    ],
    "invalid": [
     "diameter_mm"
+   ],
+   "keywords": [
+    "exclusiveMinimum"
    ]
   },
   {
@@ -801,6 +805,10 @@
    "invalid": [
     "diameter_mm",
     "material"
+   ],
+   "keywords": [
+    "type",
+    "type"
    ]
   },
   {
@@ -839,6 +847,9 @@
    ],
    "invalid": [
     "colour"
+   ],
+   "keywords": [
+    "enum"
    ]
   },
   {
@@ -875,7 +886,8 @@
    "missing": [
     "tags"
    ],
-   "invalid": []
+   "invalid": [],
+   "keywords": []
   },
   {
    "schema": {
@@ -911,7 +923,8 @@
     }
    },
    "missing": [],
-   "invalid": []
+   "invalid": [],
+   "keywords": []
   },
   {
    "schema": {
@@ -947,7 +960,8 @@
     ]
    },
    "missing": [],
-   "invalid": []
+   "invalid": [],
+   "keywords": []
   }
  ]
 }

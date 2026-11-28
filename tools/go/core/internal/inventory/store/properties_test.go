@@ -31,9 +31,10 @@ type propertyVectors struct {
 			Properties map[string]json.RawMessage `json:"properties"`
 			Required   []string                   `json:"required"`
 		} `json:"schema"`
-		Values  map[string]any `json:"values"`
-		Missing []string       `json:"missing"`
-		Invalid []string       `json:"invalid"`
+		Values   map[string]any `json:"values"`
+		Missing  []string       `json:"missing"`
+		Invalid  []string       `json:"invalid"`
+		Keywords []string       `json:"keywords"` // each invalid key's best_match keyword (#8095)
 	} `json:"completeness"`
 }
 
@@ -78,10 +79,10 @@ func TestPropertyValuesMatchPython(t *testing.T) {
 	for _, c := range v.Completeness {
 		missing, invalid := completeness(c.Schema.Properties, c.Schema.Required, c.Values)
 		keys := []string{}
-		for _, i := range invalid {
+		for n, i := range invalid {
 			keys = append(keys, i.Key)
-			if i.Reason == "" {
-				t.Errorf("completeness(%v): %s has no reason", c.Values, i.Key)
+			if n >= len(c.Keywords) || i.Reason != "does not fit '"+c.Keywords[n]+"'" {
+				t.Errorf("completeness(%v): %s's reason is %q; want the keyword of %v", c.Values, i.Key, i.Reason, c.Keywords)
 			}
 		}
 		if !reflect.DeepEqual(missing, c.Missing) || !reflect.DeepEqual(keys, c.Invalid) {

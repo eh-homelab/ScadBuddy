@@ -1,4 +1,4 @@
-import { ArchiveIcon, ArchiveRestoreIcon, ChevronLeftIcon, ExternalLinkIcon, ShoppingCartIcon, SlidersHorizontalIcon } from 'lucide-react'
+import { ArchiveIcon, ArchiveRestoreIcon, ChevronLeftIcon, ExternalLinkIcon, PrinterIcon, ShoppingCartIcon, SlidersHorizontalIcon } from 'lucide-react'
 import { useEffect, useMemo, useState, type ReactNode } from 'react'
 import { Link, useLocation, useParams } from 'react-router'
 import { AttachmentsPanel } from '../../components/entities/AttachmentsPanel'
@@ -6,7 +6,7 @@ import { LinksPanel } from '../../components/entities/LinksPanel'
 import { PropertiesPanel } from '../../components/entities/PropertiesPanel'
 import { entityApi, type PropertyValue } from '../../components/entities/api'
 import { DefinedFields } from '../../components/entities/DefinedFields'
-import { fieldErrorsOf, propertiesPatch, refusalText, sentValues, type FieldErrors } from '../../components/entities/definedProperties'
+import { definedKeys, fieldErrorsOf, propertiesPatch, refusalText, sentValues, type FieldErrors } from '../../components/entities/definedProperties'
 import { useAsync } from '../../lib/useAsync'
 import { api, ApiError } from '../../api/client'
 import {
@@ -541,15 +541,17 @@ export function TypePage() {
     set('tdfp_id', String(tdfpId))
     setNotice(`The 3DFP id is now ${tdfpId}. Save the type to keep it.`)
   }
-  const tdfpCreated = (tdfpId: number, typeTookIt: boolean) => {
-    if (!typeTookIt) return
-    getType(madeId ?? id).then(
-      (fresh) => {
-        setSaved(fresh)
-        setDraft((was) => ({ ...was, tdfp_id: String(tdfpId) }))
-      },
-      (cause) => setError(message(cause)),
-    )
+  /** A 3DFP create for this saved type ended: the type is read again, and the field shows the id it holds. */
+  const tdfpCreated = async (tdfpId: number, typeTookIt: boolean): Promise<number | null> => {
+    try {
+      const fresh = await getType(madeId ?? id)
+      setSaved(fresh)
+      setDraft((was) => ({ ...was, tdfp_id: str(fresh.tdfp_id ?? (typeTookIt ? tdfpId : null)) }))
+      return fresh.tdfp_id ?? null
+    } catch (cause) {
+      setError(message(cause))
+      return null
+    }
   }
   const subtypes = lists.subtypes.filter((one) => !one.material_id || one.material_id === draft.material_id)
   const models = [...new Set(lists.printers.map((p) => p.model).filter((m): m is string => !!m))]
@@ -574,6 +576,14 @@ export function TypePage() {
           <Button type="button" variant="outline" size="sm" disabled={busy} onClick={() => void archive(!saved.archived_at)}>
             {saved.archived_at ? <ArchiveRestoreIcon /> : <ArchiveIcon />}
             {saved.archived_at ? 'Restore' : 'Archive'}
+          </Button>
+        )}
+        {!creating && saved && (
+          <Button asChild variant="outline" size="sm">
+            <Link to={filamentLinks.typeLabel(saved.id)}>
+              <PrinterIcon />
+              Print label
+            </Link>
           </Button>
         )}
         {!creating && (
@@ -746,7 +756,7 @@ export function TypePage() {
             <AttachmentsPanel entity={`spool_type:${madeId ?? id}`} />
             <div className="flex flex-col gap-6">
               <LinksPanel entity={`spool_type:${madeId ?? id}`} />
-              <PropertiesPanel entity={`spool_type:${madeId ?? id}`} />
+              <PropertiesPanel entity={`spool_type:${madeId ?? id}`} hideKeys={definedKeys(schema)} />
             </div>
           </div>
         </section>

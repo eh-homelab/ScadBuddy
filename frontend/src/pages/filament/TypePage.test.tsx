@@ -6,8 +6,9 @@ import { getType, listTypes, startProfileFetch, upsertType } from '../../api/fil
 import { listShopping, patchSupplier } from '../../api/filamentPurchasing'
 import { SUPPLIER } from '../../mocks/features/filamentPurchasingSeed'
 import { server } from '../../mocks/server'
-import { entityMock } from '../../mocks/features/entities'
+import { entityMock, seedEntityProperties } from '../../mocks/features/entities'
 import { T } from '../../mocks/features/filament/seed'
+import { filamentLinks } from '../../lib/filamentLinks'
 import { choose } from '../../test/select'
 import { renderPage } from '../../test/utils'
 import { TypePage } from './TypePage'
@@ -35,6 +36,17 @@ describe('the type page', () => {
     expect(within(screen.getByRole('table', { name: 'K values' })).getByDisplayValue('0.020')).toBeInTheDocument()
     const spools = screen.getByRole('table', { name: 'Spools of this type' })
     expect(await within(spools).findByRole('link', { name: '#1' })).toBeInTheDocument()
+  })
+
+  it('links to its label', async () => {
+    render(`/filament/types/${T.JADE}`)
+    expect(await screen.findByRole('link', { name: 'Print label' })).toHaveAttribute('href', filamentLinks.typeLabel(T.JADE))
+  })
+
+  it('has no label link on the new type page', async () => {
+    render('/filament/types/new')
+    await code()
+    expect(screen.queryByRole('link', { name: 'Print label' })).toBeNull()
   })
 
   it('saves a new 0.6 preset with one PUT of the presets, and the old row stays', async () => {
@@ -520,6 +532,16 @@ describe('the 3DFP id and fetch (#6625)', () => {
   })
 
   describe('defined and required properties (#7703)', () => {
+    // #8227 (spec §6.3b): the panel lists only the keys the form does not show.
+    it('lists in the Properties panel only the keys the form does not show (#8227)', async () => {
+      seedEntityProperties(`spool_type:${T.JADE}`, { mpn: 'A00-W1', shelf_note: 'top' })
+      render(`/filament/types/${T.JADE}`)
+      const panel = await screen.findByRole('region', { name: 'Properties' })
+      expect(await within(panel).findByText('shelf_note')).toBeVisible()
+      expect(within(panel).queryByText('mpn')).not.toBeInTheDocument()
+      expect(await screen.findByLabelText('mpn')).toHaveValue('A00-W1')
+    })
+
     it('saves the row and its defined properties with one request', async () => {
       const patches: Record<string, unknown>[] = []
       server.events.on('request:start', ({ request }) => {
@@ -713,6 +735,96 @@ describe('finding and adding the 3DFP filament (#7025)', () => {
     const { user, form } = await openAdd()
     await user.click(within(form).getByRole('button', { name: 'Add to 3DFP' }))
     expect(await within(finder()).findByRole('alert')).toHaveTextContent(text)
+  })
+
+  it('refuses a nominal weight that is not a number, and sends nothing', async () => {
+    const sent = tdfpRequests()
+    const { user, form } = await openAdd()
+    await user.clear(within(form).getByLabelText('Nominal weight (g)'))
+    await user.type(within(form).getByLabelText('Nominal weight (g)'), '1kg')
+    await user.click(within(form).getByRole('button', { name: 'Add to 3DFP' }))
+    expect(await within(finder()).findByRole('alert')).toHaveTextContent('Enter the nominal weight in grams, as a whole number.')
+    expect(sent.filter((one) => one.path === '/api/v1/filament/tdfp/filaments')).toEqual([])
+  })
+
+  it('opens again with no matches, notice or error from the last time', async () => {
+    const { user } = render(`/filament/types/${T.JADE}`)
+    await code()
+    await user.click(screen.getByRole('button', { name: 'Find on 3DFP' }))
+    await user.click(within(finder()).getByRole('button', { name: 'Search 3DFP' }))
+    await within(finder()).findByRole('listitem', { name: /3DFP 4411/ })
+    await user.click(within(finder()).getByRole('button', { name: 'Close' }))
+    await user.click(screen.getByRole('button', { name: 'Find on 3DFP' }))
+    expect(within(finder()).queryByRole('list', { name: '3DFP matches' })).not.toBeInTheDocument()
+  })
+
+  it('reads the type again when it holds an id by the time the add answers, and keeps that id', async () => {
+    server.use(
+      http.post('/api/v1/filament/tdfp/filaments', async () => {
+        // Another edit gave the type an id while the add ran (R-7025-14).
+        await upsertType({ tdfp_id: 9999 }, T.JADE)
+        return HttpResponse.json({ create: { status: 'created', tdfp_id: 38600, duplicate_text: '' }, type_id: T.JADE, type_tdfp_id_set: false })
+      }),
+    )
+    const { user, form } = await openAdd()
+    await user.clear(within(form).getByLabelText('Hexes'))
+    await user.type(within(form).getByLabelText('Hexes'), '#8A8D8F')
+    await user.click(within(form).getByRole('button', { name: 'Add to 3DFP' }))
+    expect(await screen.findByText('Added to 3DFP as 38600. The type already holds 3DFP id 9999, so it keeps it.')).toBeInTheDocument()
+    await waitFor(() => expect(screen.getByLabelText('3DFP id')).toHaveValue('9999'))
+  })
+
+  it('sends a second press after a 504 with the same Idempotency-Key', async () => {
+    const keys: (string | null)[] = []
+    server.use(
+      http.post('/api/v1/filament/tdfp/filaments', ({ request }) => {
+        keys.push(request.headers.get('Idempotency-Key'))
+        if (keys.length === 1) return HttpResponse.json({ type: 'about:blank', title: 'Gateway Timeout', status: 504, detail: 'no outcome in time' }, { status: 504 })
+        return HttpResponse.json({ create: { status: 'created', tdfp_id: 38600, duplicate_text: '' }, type_id: T.JADE, type_tdfp_id_set: true })
+      }),
+    )
+    const { user, form } = await openAdd()
+    await user.clear(within(form).getByLabelText('Hexes'))
+    await user.type(within(form).getByLabelText('Hexes'), '#8A8D8F')
+    await user.click(within(form).getByRole('button', { name: 'Add to 3DFP' }))
+    await within(finder()).findByRole('alert')
+    await user.click(within(form).getByRole('button', { name: 'Add to 3DFP' }))
+    await screen.findByText(/Added to 3DFP as 38600/)
+    expect(keys).toHaveLength(2)
+    expect(keys[1]).toBe(keys[0])
+  })
+
+  it('fills the new id when the re-read type still has none', async () => {
+    server.use(
+      http.post('/api/v1/filament/tdfp/filaments', () =>
+        HttpResponse.json({ create: { status: 'created', tdfp_id: 38600, duplicate_text: '' }, type_id: T.JADE, type_tdfp_id_set: false }),
+      ),
+    )
+    const { user, form } = await openAdd()
+    await user.clear(within(form).getByLabelText('Hexes'))
+    await user.type(within(form).getByLabelText('Hexes'), '#8A8D8F')
+    await user.click(within(form).getByRole('button', { name: 'Add to 3DFP' }))
+    expect(await screen.findByText('Added to 3DFP as 38600. Save the type to keep the id.')).toBeInTheDocument()
+    await waitFor(() => expect(screen.getByLabelText('3DFP id')).toHaveValue('38600'))
+  })
+
+  it('keeps the panel open while an add waits for its answer', async () => {
+    let answer: () => void = () => {}
+    const answered = new Promise<void>((resolve) => (answer = resolve))
+    server.use(
+      http.post('/api/v1/filament/tdfp/filaments', async () => {
+        await answered
+        return HttpResponse.json({ create: { status: 'created', tdfp_id: 38600, duplicate_text: '' }, type_id: T.JADE, type_tdfp_id_set: true })
+      }),
+    )
+    const { user, form } = await openAdd()
+    await user.clear(within(form).getByLabelText('Hexes'))
+    await user.type(within(form).getByLabelText('Hexes'), '#8A8D8F')
+    await user.click(within(form).getByRole('button', { name: 'Add to 3DFP' }))
+    await waitFor(() => expect(within(finder()).getByRole('button', { name: 'Close' })).toBeDisabled())
+    answer()
+    await screen.findByText(/Added to 3DFP as 38600/)
+    expect(within(finder()).getByRole('button', { name: 'Close' })).toBeEnabled()
   })
 
   it('says why a search failed', async () => {
