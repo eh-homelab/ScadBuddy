@@ -29,6 +29,14 @@ Android) compile the app's pure files by link, today `DeepLink.Links.cs` and `De
 cd app/ScadBuddy.Tests && dotnet test
 ```
 
+## Wireless adb
+
+From WSL, run adb's server on port 5039: `~/android-sdk/platform-tools/adb -P 5039 nodaemon server`
+(5037 hangs: under mirrored networking, Windows holds it). A phone with Advanced Protection takes
+an APK only over wireless debugging: pair once with `adb -P 5039 pair <ip:port> <code>` (the code
+from "Pair device with pairing code"), then the phone shows in `adb -P 5039 devices` through mDNS.
+The app logs each read under the logcat tag `ScadBuddyNfc`.
+
 ## The published APK
 
 `build-app.yml` (#8376) runs on every push to main that changes `app/` (not only a

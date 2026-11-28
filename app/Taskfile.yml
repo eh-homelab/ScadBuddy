@@ -34,8 +34,9 @@ tasks:
       - git fetch origin main
       - |
         if [ -e "{{.BUILD_DIR}}/.git" ]; then
-          git -C "{{.BUILD_DIR}}" checkout --quiet --detach origin/main
+          git -C "{{.BUILD_DIR}}" checkout --quiet --force --detach origin/main
         else
+          git worktree prune
           git worktree add --detach "{{.BUILD_DIR}}" origin/main
         fi
       - git -C "{{.BUILD_DIR}}" log --oneline -1
@@ -50,7 +51,7 @@ tasks:
       - sh: test -f "{{.APK}}"
         msg: 'No APK at {{.APK}}: run `task build` first.'
       - sh: '"{{.ADB}}" -P {{.ADB_PORT}} get-state'
-        msg: 'No phone on adb port {{.ADB_PORT}} (see app/CLAUDE.md and the adb server notes).'
+        msg: 'No phone on adb port {{.ADB_PORT}} (see app/CLAUDE.md "Wireless adb").'
     cmds:
       - |
         if [ "{{.REINSTALL}}" = "1" ]; then
