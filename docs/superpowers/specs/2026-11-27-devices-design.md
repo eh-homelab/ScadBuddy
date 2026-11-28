@@ -44,7 +44,7 @@ So the phone stops being a page that has to be in the right state. It becomes ha
 - New backend work is Go in `tools/go/core` (#7667). Only core and the API hold SQL.
 - Migrations: one new file per change in `backend/scadbuddy/migrations/`.
 - Fleet and the agent's browser bridge are prior art, not dependencies. The device hub must work while the assistant is unavailable.
-- A Bambu tag is never written. `nfc.write` refuses a Bambu MIFARE tag on the device and on the server.
+- A Bambu tag is never written. On the server, `nfc.write` takes NDEF records only, with no raw block, sector or key, so core never asks for a MIFARE sector write; it does not check a tag's UID. The device refuses a Bambu MIFARE tag it meets.
 
 ## Approaches
 
@@ -118,7 +118,7 @@ The result is generic and knows nothing of filament:
 
 ### Calls (G4)
 
-- `POST /api/v1/devices/{id}/calls {method, args, timeout_s}` answers `202 {call_id}` at once, or `409 offline` when the device is not online. `GET /api/v1/devices/calls/{id}` gives the call, its events and its result. Its events are read from the event log by the topic `device:call:<id>`. The realtime socket carries each new event. A caller that only wants the end can add `wait=true`, which holds the request until the result or the deadline (`504`). Core keeps a row per call: who called, the method, the outcome and the times.
+- `POST /api/v1/devices/{id}/calls {method, args, timeout_s}` answers `202 {call_id}` at once, or `409 offline` when the device is not online. `GET /api/v1/devices/calls/{id}` gives the call, its events and its result, to the device's owner, the call's caller, or a delegate service for the person it made the call for; anyone else gets `404`, and an error frame on the call's topic. Its events are read from the event log by the topic `device:call:<id>`. The realtime socket carries each new event. A caller that only wants the end can add `wait=true`, which holds the request until the result or the deadline (`504`). Core keeps a row per call: who called, the method, the outcome and the times. A call whose args are over 4 KiB, or whose `device.call_requested` event would not fit the bus (`PayloadMax`), is refused with `413 args_too_large`, and no row is written. An event's data is at most 1024 bytes.
 - The caller is a person (a page), a flow, or the assistant. An assistant tool `device_call` uses the same route.
 - An outward method (`nfc.write`) called by the assistant or a flow needs an approval, as outward tools do: a pending action confirmed in the UI. A person who calls it from a page with their own click has approved it by that click.
 - Grants are settings. By default, the device's owner and the owner's flows and assistant sessions may call every read method.
