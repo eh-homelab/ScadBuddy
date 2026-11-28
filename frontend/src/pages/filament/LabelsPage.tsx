@@ -2,11 +2,14 @@ import { ChevronLeftIcon, FileDownIcon, PencilIcon, PlusIcon, PrinterIcon, Trash
 import { type FocusEvent, type ReactNode, useEffect, useMemo, useRef, useState } from 'react'
 import { createPortal } from 'react-dom'
 import { Link, useSearchParams } from 'react-router'
+import { inventoryApi } from '../inventory/api'
+import { inventoryPaths } from '../../lib/inventoryLinks'
 import { api, ApiError } from '../../api/client'
 import {
   fileName,
   deleteLabelSheet,
   getLocation,
+  getType,
   getSpool,
   labelsFile,
   type LabelOutput,
@@ -17,7 +20,7 @@ import {
   type SavedLabelSheet,
   type SpoolDetail,
 } from '../../api/filament'
-import { Label, LocationLabel } from '../../components/filament/Label'
+import { Label, CodeLabel } from '../../components/filament/Label'
 import { LabelOutputPicker } from '../../components/filament/LabelOutputPicker'
 import { LabelFieldsPicker } from '../../components/filament/LabelFieldsPicker'
 import { LabelSheetEditor } from '../../components/filament/LabelSheetEditor'
@@ -154,8 +157,12 @@ interface Loaded {
   failed: string[]
 }
 
+/** What a code label names: #6955 a place, #7169 a spool type, an item or an item kind. */
+type CodeSubject = 'location' | 'spool_type' | 'item' | 'item_kind'
+
 interface PlaceLabel {
   id: string
+  subject: CodeSubject
   code: string
   name: string
   svg: string
@@ -172,7 +179,7 @@ interface LoadedPlaces {
   error: string | null
   /** More than `MAX_LABELS` labels: none is drawn. */
   tooMany: boolean
-  /** The `?locations=` ids that could not be read; the others are drawn. */
+  /** The `?locations=`, `?types=`, `?items=` and `?kinds=` ids that could not be read; the others are drawn. */
   failed: string[]
   tooLong: string[]
   /** The printers with no report that lists their AMS units (`no_report`): their empty slots have no label yet. */
@@ -208,7 +215,18 @@ export function LabelsPage() {
   // Both print at most `MAX_LABELS` labels, as spools do (#7081).
   const printersParam = params.get('printers')
   const locationsParam = params.get('locations')?.trim() || null
-  const placesKey = printersParam ? `printers:${printersParam}` : locationsParam ? `locations:${locationsParam}` : ''
+  // #7169 — `?types=`, `?items=` and `?kinds=`: spool type, item and kind labels, drawn after the places.
+  const typesParam = params.get('types')?.trim() || null
+  const itemsParam = params.get('items')?.trim() || null
+  const kindsParam = params.get('kinds')?.trim() || null
+  const placesKey = [
+    printersParam ? `printers:${printersParam}` : locationsParam ? `locations:${locationsParam}` : '',
+    typesParam ? `types:${typesParam}` : '',
+    itemsParam ? `items:${itemsParam}` : '',
+    kindsParam ? `kinds:${kindsParam}` : '',
+  ]
+    .filter(Boolean)
+    .join('|')
   const [places, setPlaces] = useState<LoadedPlaces | null>(null)
   // #7157 — the label template: the setting `filament_label_template`, saved at each change.
   const [templates, setTemplates] = useState<LabelTemplates | null>(null)
@@ -468,7 +486,7 @@ export function LabelsPage() {
     if (!placesKey) return
     let live = true
     const empty = { labels: [], error: null, tooMany: false, failed: [], tooLong: [], noReport: [], hasBase: false }
-    const draw = async (base: string | null, rows: { id: string; code: string; name: string }[], more: { noReport?: string[]; failed?: string[] } = {}) => {
+    const draw = async (base: string | null, rows: { id: string; subject: CodeSubject; code: string; name: string }[], more: { noReport?: string[]; failed?: string[] } = {}) => {
       const origin = labelBase(base)
       // The cap stops drawing only: in `?printers=` mode the labels request has already made
       // the printers' places by now (`POST /filament/printer-labels` makes them, #6955).
@@ -485,49 +503,62 @@ export function LabelsPage() {
     const fail = (error: string) => () => {
       if (live) setPlaces({ ...empty, key: placesKey, base: labelBase(null), error })
     }
-    if (printersParam) {
-      const wanted = printersParam === 'all' ? null : splitIds(printersParam)
-      // Each printer has a label of its own, so more printers than the cap are refused before any place is made.
-      if (wanted && wanted.length > MAX_LABELS) {
-        setPlaces({ ...empty, key: placesKey, base: labelBase(null), tooMany: true })
-        return
-      }
-      printerLabels(wanted)
-        .then((answer) =>
-          draw(
-            answer.base_url,
-            answer.labels.map((row) => ({ id: row.location_id, code: row.code, name: row.name })),
-            { noReport: answer.no_report },
-          ),
-        )
-        .catch(fail('The printer labels could not be read'))
-    } else if (locationsParam) {
-      const wanted = splitIds(locationsParam)
-      if (wanted.length > MAX_LABELS) {
-        setPlaces({ ...empty, key: placesKey, base: labelBase(null), tooMany: true })
-        return
-      }
-      // A failed settings read is an error, never "unset": the page's own origin may be the wrong host for a label.
-      const base = settingsBase().catch((cause: unknown) => {
-        throw new SettingsReadError(cause)
-      })
-      Promise.all([readEach(wanted, getLocation, () => live), base])
-        .then(([read, origin]) => {
-          const found = read.filter((r): r is Exclude<typeof r, string> => typeof r !== 'string')
-          return draw(
-            origin,
-            found.map((place) => ({ id: place.id, code: place.code, name: place.name })),
-            { failed: read.filter((r): r is string => typeof r === 'string') },
-          )
-        })
-        .catch((cause: unknown) =>
-          fail(cause instanceof SettingsReadError ? 'The label address in Settings could not be read, so no label is drawn. Try again.' : 'The place labels could not be drawn')(),
-        )
+    const wantedPlaces = locationsParam ? splitIds(locationsParam) : []
+    const wantedTypes = typesParam ? splitIds(typesParam) : []
+    const wantedItems = itemsParam ? splitIds(itemsParam) : []
+    const wantedKinds = kindsParam ? splitIds(kindsParam) : []
+    const wantedPrinters = printersParam && printersParam !== 'all' ? splitIds(printersParam) : null
+    // Each printer has a label of its own, so more printers than the cap are refused before any place is made.
+    if ((wantedPrinters && wantedPrinters.length > MAX_LABELS) || (!printersParam && wantedPlaces.length + wantedTypes.length + wantedItems.length + wantedKinds.length > MAX_LABELS)) {
+      setPlaces({ ...empty, key: placesKey, base: labelBase(null), tooMany: true })
+      return
     }
+    const found = <T,>(read: (T | string)[]) => read.filter((r): r is T => typeof r !== 'string')
+    const lost = (read: unknown[]) => read.filter((r): r is string => typeof r === 'string')
+    const printed = printersParam ? printerLabels(wantedPrinters) : null
+    // A failed settings read is an error, never "unset": the page's own origin may be the wrong host for a label.
+    const base = printersParam
+      ? null
+      : settingsBase().catch((cause: unknown) => {
+          throw new SettingsReadError(cause)
+        })
+    // The kinds come as one list.
+    const kinds = wantedKinds.length > 0 ? inventoryApi.kinds(true) : null
+    Promise.all([
+      printed ?? Promise.resolve(null),
+      base,
+      readEach(printersParam ? [] : wantedPlaces, getLocation, () => live),
+      readEach(wantedTypes, getType, () => live),
+      readEach(wantedItems, inventoryApi.item, () => live),
+      kinds ?? Promise.resolve([]),
+    ]).then(([answer, origin, placeRead, typeRead, itemRead, kindList]) => {
+      const rows: { id: string; subject: CodeSubject; code: string; name: string }[] = [
+        ...(answer ? answer.labels.map((row) => ({ id: row.location_id, subject: 'location' as const, code: row.code, name: row.name })) : []),
+        ...found<Awaited<ReturnType<typeof getLocation>>>(placeRead).map((place) => ({ id: place.id, subject: 'location' as const, code: place.code, name: place.name })),
+        ...found<Awaited<ReturnType<typeof getType>>>(typeRead).map((type) => ({
+          id: type.id,
+          subject: 'spool_type' as const,
+          code: `T-${type.number}`,
+          name: [type.code, type.colour_name].filter(Boolean).join(' '),
+        })),
+        ...found<Awaited<ReturnType<typeof inventoryApi.item>>>(itemRead).map((item) => ({ id: item.id, subject: 'item' as const, code: item.code, name: item.name })),
+        ...wantedKinds.flatMap((id) => kindList.filter((kind) => kind.id === id).map((kind) => ({ id: kind.id, subject: 'item_kind' as const, code: kind.code, name: kind.name }))),
+      ]
+      const failed = [...lost(placeRead), ...lost(typeRead), ...lost(itemRead), ...wantedKinds.filter((id) => !kindList.some((kind) => kind.id === id))]
+      return draw(answer ? answer.base_url : (origin ?? null), rows, { noReport: answer?.no_report, failed })
+    }).catch((cause: unknown) =>
+      fail(
+        cause instanceof SettingsReadError
+          ? 'The label address in Settings could not be read, so no label is drawn. Try again.'
+          : printersParam
+            ? 'The printer labels could not be read'
+            : 'The labels could not be drawn',
+      )(),
+    )
     return () => {
       live = false
     }
-  }, [placesKey, printersParam, locationsParam])
+  }, [placesKey, printersParam, locationsParam, typesParam, itemsParam, kindsParam])
 
   useEffect(() => {
     const wanted = key.split(',').filter(Boolean)
@@ -561,6 +592,16 @@ export function LabelsPage() {
   }
 
   const placeMode = placesKey !== ''
+  // The page's first subject names it: places, then spool types, items and kinds (#7169).
+  const mode = printersParam || locationsParam
+    ? { heading: 'Printer labels', back: filamentLinks.locations, backName: 'Locations' }
+    : typesParam
+      ? { heading: 'Spool type labels', back: filamentLinks.types, backName: 'Types' }
+      : itemsParam
+        ? { heading: 'Item labels', back: inventoryPaths.list, backName: 'Inventory' }
+        : kindsParam
+          ? { heading: 'Kind labels', back: inventoryPaths.kinds, backName: 'Kinds' }
+          : { heading: 'Spool labels', back: filamentLinks.spools, backName: 'Spools' }
   const ready = !placeMode && !tooMany && loaded?.key === key ? loaded : null
   const labels = ready?.labels ?? []
   const readyPlaces = placeMode && places?.key === placesKey ? places : null
@@ -571,16 +612,21 @@ export function LabelsPage() {
   /** The print copy's labels, in order: a sheet template lays them out a page at a time. */
   const printed: { key: string; node: ReactNode }[] = [
     ...labels.map(({ spool, svg }) => ({ key: spool.id, node: <Label spool={spool} svg={svg} size={size} fields={fields} testId="print-label" /> })),
-    ...placeLabels.map((one) => ({ key: one.id, node: <LocationLabel code={one.code} name={one.name} svg={one.svg} size={size} testId="print-label" /> })),
+    ...placeLabels.map((one) => ({ key: one.id, node: <CodeLabel code={one.code} name={one.name} svg={one.svg} size={size} testId="print-label" /> })),
   ]
 
   // A place label's PDF needs an address from Settings; a spool label needs none.
   const pdfNeedsBase = placeLabels.length > 0 && readyPlaces !== null && !readyPlaces.hasBase
 
+  const idsOf = (subject: CodeSubject) => placeLabels.filter((one) => one.subject === subject).map((one) => one.id)
+
   /** The labels file's request: what "Download" sends, and, as a PDF, what "Print to label printer" sends (#7170). */
   const fileBody = {
     spool_ids: labels.map(({ spool }) => spool.id),
-    location_ids: placeLabels.map((one) => one.id),
+    location_ids: idsOf('location'),
+    type_ids: idsOf('spool_type'),
+    item_ids: idsOf('item'),
+    kind_ids: idsOf('item_kind'),
     template: cleanChoice(choice),
     layout,
     format: output.format,
@@ -608,19 +654,21 @@ export function LabelsPage() {
     <div className="h-full overflow-y-auto">
       <style>{printCss(layout, size)}</style>
       <div className="mx-auto max-w-4xl px-4 py-6">
-        <Link to={placeMode ? filamentLinks.locations : filamentLinks.spools} className="mb-3 inline-flex items-center gap-1 text-[13px] text-muted-foreground hover:text-foreground">
-          <ChevronLeftIcon className="size-3.5" /> {placeMode ? 'Locations' : 'Spools'}
+        <Link to={mode.back} className="mb-3 inline-flex items-center gap-1 text-[13px] text-muted-foreground hover:text-foreground">
+          <ChevronLeftIcon className="size-3.5" /> {mode.backName}
         </Link>
         <header className="mb-5 flex flex-wrap items-center gap-3">
           <div className="min-w-0 flex-1">
-            <h1 className="text-lg font-semibold tracking-tight">{placeMode ? 'Printer labels' : 'Spool labels'}</h1>
+            <h1 className="text-lg font-semibold tracking-tight">{mode.heading}</h1>
             <p className="text-[13px] text-muted-foreground">
               {placeMode
                 ? readyPlaces
                   ? readyPlaces.tooMany
                     ? ''
                     : placeLabels.length === 0 && readyPlaces.error === null && readyPlaces.tooLong.length === 0 && readyPlaces.failed.length === 0
-                      ? 'No printers.'
+                      ? printersParam
+                        ? 'No printers.'
+                        : 'No labels.'
                       : `${placeLabels.length} ready, ${size.widthMm} x ${size.heightMm} mm each.`
                   : 'Loading labels…'
                 : tooMany ? '' : ids.length === 0 ? 'No spools chosen.' : `${labels.length} of ${ids.length} ready, ${size.widthMm} x ${size.heightMm} mm each.`}
@@ -697,7 +745,7 @@ export function LabelsPage() {
           />
           {pdfNeedsBase && (
             <p id="labels-pdf-needs-base" className="basis-full text-right text-[13px] text-muted-foreground">
-              A download of place labels needs a label address. Set one in Settings, or an https public URL.
+              A download of code labels needs a label address. Set one in Settings, or an https public URL.
             </p>
           )}
         </header>
@@ -767,7 +815,7 @@ export function LabelsPage() {
           </p>
         )}
         {placeMode ? (
-          <p className="mb-5 text-[13px] text-muted-foreground">A place label prints its code, its name and its QR code.</p>
+          <p className="mb-5 text-[13px] text-muted-foreground">A code label prints its code, its name and its QR code.</p>
         ) : (
           <LabelFieldsPicker value={fields} onTick={pickField} />
         )}
@@ -819,7 +867,7 @@ export function LabelsPage() {
           ))}
           {placeLabels.map((one) => (
             <div key={one.id} className="outline outline-1 outline-dashed outline-border">
-              <LocationLabel code={one.code} name={one.name} svg={one.svg} size={size} />
+              <CodeLabel code={one.code} name={one.name} svg={one.svg} size={size} />
             </div>
           ))}
         </div>

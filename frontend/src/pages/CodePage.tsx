@@ -29,7 +29,7 @@ export function CodePage() {
       <h1 className="text-lg font-semibold">{unknown ? `No such code: ${code}` : `Could not look up ${code}`}</h1>
       {found.error && !unknown && <p role="alert" className="text-sm text-destructive">{found.error.message}</p>}
       <form onSubmit={go} className="flex gap-2">
-        <Input aria-label="Code" placeholder="L-12 or S-142" value={typed} onChange={(event) => setTyped(event.target.value)} autoCapitalize="characters" autoComplete="off" />
+        <Input aria-label="Code" placeholder="L-12, T-4 or I-9" value={typed} onChange={(event) => setTyped(event.target.value)} autoCapitalize="characters" autoComplete="off" />
         <Button type="submit">Open</Button>
       </form>
     </div>

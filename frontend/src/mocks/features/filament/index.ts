@@ -16,7 +16,8 @@ import { H2C, L, LK, seed, spoolId, type Catalogs, type Seed, type SpoolRow } fr
 import { jobOf } from '../../../components/filament/eventText'
 import { CATALOGS } from '../../../components/filament/catalogs'
 import { checksSave, marksOf, rowPropertiesRefusal, saveRowProperties } from '../entities'
-import { kindByNumber } from '../inventory'
+import { itemByNumber, kindByNumber } from '../inventory'
+import { nextNumber } from '../../nextNumber'
 
 type S = components['schemas']
 
@@ -550,7 +551,7 @@ export function seedHomeReturn({ empty = false }: { empty?: boolean } = {}): { b
   if (!state.locations.some((one) => one.id === HOME_BOX)) {
     state.locations.push({
       id: HOME_BOX,
-      number: Math.max(0, ...state.locations.map((place) => place.number)) + 1,
+      number: nextNumber(state.locations),
       name: 'Dry box 2',
       kind_id: LK.DRY_BOX,
       parent_id: L.WORKSHOP,
@@ -1232,7 +1233,7 @@ function under(parent: string, id: string): boolean {
 function newSpool(body: Record<string, unknown>): SpoolRow {
   const blank: SpoolRow = {
     id: newId(),
-    number: Math.max(0, ...state.spools.map((row) => row.number)) + 1,
+    number: nextNumber(state.spools),
     type_id: null,
     brand_id: null,
     material_id: null,
@@ -1306,7 +1307,7 @@ export function createType(raw: unknown): S['SpoolType'] | Response {
     ...body,
     drying_hours: body.drying_hours ?? null,
     id: newId(),
-    number: Math.max(0, ...state.types.map((t) => t.number)) + 1,
+    number: nextNumber(state.types),
     filament_id: null,
     archived_at: null,
     created_at: now(),
@@ -2087,6 +2088,14 @@ export function resolveCodeText(text: string): S['Resolved'] | null {
     // An item kind resolves by its text id (#6949, the owner's kind numbers of 2026-11-27).
     const kind = kindByNumber(parsed.number)
     return kind ? { kind: 'item_kind', id: kind.id, code: `K-${kind.number}`, name: kind.name, archived: !!kind.archived_at } : null
+  }
+  if (parsed.prefix === 'T') {
+    const type = state.types.find((one) => one.number === parsed.number)
+    return type ? { kind: 'spool_type', id: type.id, code: `T-${type.number}`, name: type.colour_name ?? type.code, archived: !!type.archived_at } : null
+  }
+  if (parsed.prefix === 'I') {
+    const item = itemByNumber(parsed.number)
+    return item ? { kind: 'item', id: item.id, code: `I-${item.number}`, name: item.name, archived: !!item.archived_at } : null
   }
   return null
 }
@@ -3225,7 +3234,7 @@ export const handlers = [
     if (placeTaken(body)) return problem(409, REFUSED.locationExists)
     if (badRef(body, LOCATION_REFS)) return problem(422, REFUSED.catalogRef)
     const made: S['Location'] = {
-      number: Math.max(0, ...state.locations.map((place) => place.number)) + 1,
+      number: nextNumber(state.locations),
       printer_root: false,
       parent_id: null,
       identifier: null,

@@ -8,6 +8,7 @@ import { supplierById } from './filamentPurchasing'
 import { SUPPLIER } from './filamentPurchasingSeed'
 import { INVENTORY } from './inventorySeed'
 import { BROWSER, fieldProblem, now, problem, PROBLEMS as ORDER_PROBLEMS, state as orders } from './orders/state'
+import { nextNumber } from '../nextNumber'
 
 /**
  * #7067 — the inventory (`backend/scadbuddy/api/inventory.py`, `inventory_stock.py`): item
@@ -193,7 +194,7 @@ export function seedItem(fields: Partial<MockItem> & { name: string; kind_id: st
   ready()
   const item: MockItem = {
     id: id(),
-    number: Math.max(0, ...inventoryMock.items.map((i) => i.number)) + 1,
+    number: nextNumber(inventoryMock.items),
     manufacturer: '',
     compatible_with: [],
     low_stock: '0',
@@ -392,6 +393,12 @@ export function inventoryItem(itemId: string): S['Item'] | undefined {
   ready()
   const item = inventoryMock.items.find((i) => i.id === itemId)
   return item ? answerItem(item) : undefined
+}
+
+/** The item an I-<number> code names, or undefined. */
+export const itemByNumber = (number: number): MockItem | undefined => {
+  ready()
+  return inventoryMock.items.find((i) => i.number === number)
 }
 
 /** The kind a K-<number> code names (`codes/resolve.py`), or undefined. */
@@ -858,7 +865,7 @@ export const handlers = [
         if (input.id != null && kindOf(input.id)) throw new Refused(409, 'kind_exists', `an item kind has that id: ${input.id}`)
         kindProblem(input, null)
         // The next number of `item_kinds_number_seq`; with no id, the kind is k<number>.
-        const number = Math.max(0, ...inventoryMock.kinds.map((k) => k.number)) + 1
+        const number = nextNumber(inventoryMock.kinds)
         const made: MockKind = {
           id: input.id ?? `k${number}`,
           number,
