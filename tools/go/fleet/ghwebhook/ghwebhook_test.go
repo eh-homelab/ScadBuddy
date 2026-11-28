@@ -177,6 +177,30 @@ func TestOtherEvents(t *testing.T) {
 	}
 }
 
+// A signed delivery with no X-GitHub-Event logs one debug line; other events log none.
+func TestNoEventHeaderLogsDebug(t *testing.T) {
+	logs := &bytes.Buffer{}
+	h, err := New([]byte(secret), Options{Logger: slog.New(slog.NewTextHandler(logs, &slog.HandlerOptions{Level: slog.LevelDebug}))})
+	if err != nil {
+		t.Fatal(err)
+	}
+	r := rig{h: h, logs: logs}
+	body := "{}"
+	if w := r.send(http.MethodPost, "ping", sign(body), strings.NewReader(body)); w.Code != http.StatusNoContent {
+		t.Fatalf("ping: %d", w.Code)
+	}
+	if logs.Len() != 0 {
+		t.Fatalf("ping logged %q", logs.String())
+	}
+	if w := r.send(http.MethodPost, "", sign(body), strings.NewReader(body)); w.Code != http.StatusNoContent {
+		t.Fatalf("no event: %d", w.Code)
+	}
+	out := logs.String()
+	if strings.Count(out, "\n") != 1 || !strings.Contains(out, "level=DEBUG") || !strings.Contains(out, "delivery=d-1") {
+		t.Fatalf("logs = %q", out)
+	}
+}
+
 func TestBodyCap(t *testing.T) {
 	r := newRig(t)
 	body := strings.Repeat("a", MaxBody+1)

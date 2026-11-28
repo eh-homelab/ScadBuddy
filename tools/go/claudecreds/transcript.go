@@ -16,7 +16,8 @@ const (
 	KindRateLimit Kind = "rate_limit"
 	// KindPermanent: the login itself is refused (revoked, no permission, no credit).
 	KindPermanent Kind = "permanent"
-	// KindTransient: the endpoint or the network failed; the login is fine.
+	// KindTransient: the endpoint or the network failed; the login is fine. Callers drop
+	// these events: design §6.4 ignores server_error and the like.
 	KindTransient Kind = "transient"
 )
 
@@ -36,7 +37,8 @@ const (
 const TextLimit = 500
 
 // Event is a credential event that one transcript entry records. It keeps only these
-// fields of the entry.
+// fields of the entry. Callers act on KindRateLimit and KindPermanent and drop
+// KindTransient (design §6.4).
 type Event struct {
 	Kind Kind
 	// Category is the entry's raw `error` value, such as rate_limit or billing_error.

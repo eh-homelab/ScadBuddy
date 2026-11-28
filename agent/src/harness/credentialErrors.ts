@@ -182,8 +182,12 @@ const DAY_MS = 24 * 60 * 60_000
 /** A formatter for the zone, or undefined when the zone is not a known IANA name as written. */
 function zoneFormat(zone: string): Intl.DateTimeFormat | undefined {
   if (zone.toUpperCase() === 'UTC') zone = 'UTC'
+  // ICU reads a name in any case, turns an alias into another ID ("us/eastern" is
+  // America/New_York) and knows IDs tzdata has not (SystemV/AST4); Go and Python read
+  // only tzdata's names, as written. So the name must be exactly one of tzdata's.
+  if (zone !== 'UTC' && !IANA_ZONE_NAMES.has(zone)) return undefined
   try {
-    const fmt = new Intl.DateTimeFormat('en-US', {
+    return new Intl.DateTimeFormat('en-US', {
       timeZone: zone,
       hourCycle: 'h23',
       year: 'numeric',
@@ -193,9 +197,6 @@ function zoneFormat(zone: string): Intl.DateTimeFormat | undefined {
       minute: 'numeric',
       second: 'numeric',
     })
-    // ICU reads a name in any case and may answer another ID for it; Go and Python
-    // read it only as written. So the name must be ICU's own ID or a known exact spelling.
-    return fmt.resolvedOptions().timeZone === zone || IANA_ZONE_NAMES.has(zone) ? fmt : undefined
   } catch {
     return undefined
   }

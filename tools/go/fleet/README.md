@@ -14,7 +14,8 @@ The image is `ghcr.io/eh-homelab/scadbuddy-fleet`, published by
 The server exports traces, metrics and logs over OTLP/HTTP with the shared
 `tools/go/telemetry` (service name `scadbuddy-fleet`), set by the standard `OTEL_*`
 variables; with no endpoint every signal is off. Each request it serves is a SERVER span
-(not `/healthz`), each request to core (the store, the bus stream and the credential
+(not `/healthz`); a request to `/github/webhook` comes from outside, so its `traceparent`,
+`tracestate` and `baggage` are dropped first and its span starts a new trace. Each request to core (the store, the bus stream and the credential
 exchange) a CLIENT span whose traceparent core continues, and the Go runtime and process
 are measured. Its JSON log lines stay on stderr; with logs on, each also goes over OTLP
 without its path, error or credential fields. The `log` package's lines (net/http's) stay
@@ -153,7 +154,8 @@ secret come with #8011's rotation targets.
      repository. A token whose answer holds a permission that was not asked for (other
      than `metadata` at `read`, which GitHub can add), or the asked one at another level,
      is refused and not used; so is a repository target's token whose `repositories` is
-     not that one repository.
+     not that one repository, and an organisation target's token whose answer names any
+     repository.
   3. `GET …/actions/secrets/public-key`, a sealed box with that key
      (`golang.org/x/crypto/nacl/box` `SealAnonymous`), then
      `PUT …/actions/secrets/{name}` with `encrypted_value` and `key_id`, and for an
@@ -186,6 +188,7 @@ at `/github/webhook`. Pomerium sends the public
 | A signature that is not the HMAC-SHA256 of the raw body with the secret (compared in constant time, [GitHub's page](https://docs.github.com/en/webhooks/using-webhooks/validating-webhook-deliveries)) | 401; the body is not parsed |
 | `X-GitHub-Event` `installation` or `installation_repositories` | 204, after one log line and one count |
 | Any other event | 204; the body is not parsed |
+| No `X-GitHub-Event` | 204; the body is not parsed; one debug log line with the delivery id |
 | One of the two events with a body that is not JSON | 400 |
 
 The log line, "github app installation event", holds the event, the action, the delivery

@@ -260,14 +260,22 @@ Where the accounts live:
   2. Take Claude Code's locks: `.oauth_refresh.lock`, the legacy `<dir>.lock` and
      `.storage-write.lock`, with the proper-lockfile convention, and refresh their mtimes every
      5 s while they are held. While they are held, no session can
-     refresh or write the login (§3).
+     refresh or write the login (§3). The 5 s refresh keeps the locks from looking stale
+     (`.storage-write.lock`'s stale time is 15 s), so Claude Code does not take them over
+     however long the steps below take.
   3. Inside the locks, read the current `claudeAiOauth` back. It holds the live refresh token.
      Write it to the old row (`PUT /leases/{credential}`), with a 10 s timeout, below the 15 s
-     stale time of `.storage-write.lock`. If that write fails, release the locks, release the
+     stale time of `.storage-write.lock`. The timeout is a bound on how long the sessions
+     wait: while the locks are held, no session can refresh its token, so a slow API must not
+     hold them without end. The refresh above covers a stall of this process; the timeout
+     covers a slow API. If that write fails, release the locks, release the
      new lease (`DELETE /leases/{new}`) and stop: the file is not changed, the old lease is
      kept, and the new row is free for other machines. If that release fails too (the API is
      down), the service writes the new lease's id to a 0600 file beside its state, per config
-     dir, and on its next attempt for that dir releases that lease before it asks for another.
+     dir, and tries that release again on each 10 s scan, at its start, and on its next
+     attempt for that dir, before it asks for another lease. It removes the file once the
+     release succeeds (or the API answers that the lease is gone), so a lease is not held
+     until the next rate limit.
      This state is the service's own; the API keeps no "installed" mark.
   4. Still inside the locks, write the new `claudeAiOauth` to a 0600 temp file in the dir and
      rename it over `.credentials.json`.

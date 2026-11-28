@@ -3,6 +3,7 @@ package claudecreds
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -124,6 +125,10 @@ func AcquireLoginLocks(ctx context.Context, dir string) (*Locks, error) {
 func acquireLock(ctx context.Context, spec lockSpec) (*heldLock, error) {
 	wait := lockRetryMin
 	for {
+		// The stale-lock path loops without a wait, so look at the context each time.
+		if err := ctx.Err(); err != nil {
+			return nil, fmt.Errorf("claudecreds: %s: wait for lock: %w", spec.path, err)
+		}
 		err := os.Mkdir(spec.path, 0o700)
 		if err == nil {
 			mtime, err := touch(spec.path)
@@ -388,12 +393,13 @@ func WriteLogin(locks *Locks, dir string, login json.RawMessage) error {
 		}
 	}
 	ms = setMember(ms, "claudeAiOauth", login)
-	return writeAtomic(path, encodeObject(ms), 0o600)
+	return writeAtomic(path, encodeObject(ms), 0o600, nil)
 }
 
 // writeAtomic writes data to a temp file beside path (beside the file a symlink names),
-// syncs it, and renames it over the file.
-func writeAtomic(path string, data []byte, perm fs.FileMode) error {
+// syncs it, and renames it over the file. With owner set, the temp file takes owner's
+// user and group where the process may set them (best effort).
+func writeAtomic(path string, data []byte, perm fs.FileMode, owner fs.FileInfo) error {
 	if real, err := filepath.EvalSymlinks(path); err == nil {
 		path = real
 	}
@@ -407,6 +413,9 @@ func writeAtomic(path string, data []byte, perm fs.FileMode) error {
 		_ = tmp.Close()
 		_ = os.Remove(name)
 		return fmt.Errorf("claudecreds: %s: %s: %w", path, step, err)
+	}
+	if owner != nil {
+		keepOwner(tmp, owner)
 	}
 	if err := tmp.Chmod(perm); err != nil {
 		return fail("set temp file mode", err)
@@ -435,50 +444,86 @@ func writeAtomic(path string, data []byte, perm fs.FileMode) error {
 // (#8016): take the locks; read the live login; call writeBack with it; write next;
 // release the locks. If writeBack fails, the file is not changed. Rotate returns only
 // after the release, so the caller can then release the old lease. It returns the
-// mtime of the file it wrote, read under the locks, for LoginChanged.
-func Rotate(ctx context.Context, dir string, writeBack func(old json.RawMessage) error, next json.RawMessage) (time.Time, error) {
+// stamp of the file it wrote, read under the locks, for LoginChanged.
+//
+// A config dir that has never logged in has no old login to write back, so Rotate
+// changes nothing there: it returns an error that matches fs.ErrNotExist when
+// .credentials.json is missing, and ErrNoLogin when the file has no claudeAiOauth. The
+// caller handles both; it does not rotate a dir without a login.
+func Rotate(ctx context.Context, dir string, writeBack func(old json.RawMessage) error, next json.RawMessage) (LoginStamp, error) {
 	path := filepath.Join(dir, credentialsFile)
 	if !isObject(next) {
-		return time.Time{}, fmt.Errorf("claudecreds: %s: rotate: the new login is %w", path, errNotObject)
+		return LoginStamp{}, fmt.Errorf("claudecreds: %s: rotate: the new login is %w", path, errNotObject)
 	}
 	locks, err := AcquireLoginLocks(ctx, dir)
 	if err != nil {
-		return time.Time{}, err
+		return LoginStamp{}, err
 	}
 	defer locks.Release()
 	old, err := ReadLogin(dir)
 	if err != nil {
-		return time.Time{}, err
+		return LoginStamp{}, err
 	}
 	if err := writeBack(old); err != nil {
-		return time.Time{}, fmt.Errorf("claudecreds: %s: write back the old login: %w", path, err)
+		return LoginStamp{}, fmt.Errorf("claudecreds: %s: write back the old login: %w", path, err)
 	}
 	if err := WriteLogin(locks, dir, next); err != nil {
-		return time.Time{}, err
+		return LoginStamp{}, err
 	}
-	st, err := os.Stat(path)
+	stamp, err := readStamp(path)
 	if err != nil {
-		return time.Time{}, fmt.Errorf("claudecreds: %s: stat login: %w", path, err)
+		return LoginStamp{}, err
 	}
 	locks.Release()
-	return st.ModTime(), nil
+	return stamp, nil
 }
 
-// LoginChanged tells whether .credentials.json's mtime differs from last, and returns
-// the mtime now. A change the caller did not cause is a refresh by Claude Code, so the
-// caller writes the login back. Poll it; a zero last always reads as a change.
-func LoginChanged(dir string, last time.Time) (bool, time.Time, error) {
-	path := filepath.Join(dir, credentialsFile)
+// LoginStamp is what LoginChanged compares: .credentials.json's mtime and size, and a
+// SHA-256 of its claudeAiOauth bytes (all zero when the file has none). It holds no
+// token.
+type LoginStamp struct {
+	ModTime time.Time
+	Size    int64
+	Login   [sha256.Size]byte
+}
+
+// readStamp reads path's LoginStamp.
+func readStamp(path string) (LoginStamp, error) {
 	st, err := os.Stat(path)
 	if err != nil {
-		return false, time.Time{}, fmt.Errorf("claudecreds: %s: stat login: %w", path, err)
+		return LoginStamp{}, fmt.Errorf("claudecreds: %s: stat login: %w", path, err)
 	}
-	return !st.ModTime().Equal(last), st.ModTime(), nil
+	s := LoginStamp{ModTime: st.ModTime(), Size: st.Size()}
+	login, err := ReadLogin(filepath.Dir(path))
+	switch {
+	case errors.Is(err, ErrNoLogin):
+	case err != nil:
+		return LoginStamp{}, err
+	default:
+		s.Login = sha256.Sum256(login)
+	}
+	return s, nil
+}
+
+// LoginChanged tells whether .credentials.json's mtime, size or claudeAiOauth differs
+// from last, and returns the stamp now. The bytes are compared too because a file
+// system's mtime can be coarse: a refresh within one tick keeps the mtime. A change
+// the caller did not cause is a refresh by Claude Code, so the caller writes the login
+// back. Poll it; a zero last always reads as a change.
+func LoginChanged(dir string, last LoginStamp) (bool, LoginStamp, error) {
+	now, err := readStamp(filepath.Join(dir, credentialsFile))
+	if err != nil {
+		return false, LoginStamp{}, err
+	}
+	same := now.ModTime.Equal(last.ModTime) && now.Size == last.Size && now.Login == last.Login
+	return last.ModTime.IsZero() || !same, now, nil
 }
 
 // UpdateOAuthAccount sets oauthAccount in ~/.claude.json (homeJSONPath), best effort.
 // That file has no lock to share, and Claude Code rewrites it often (design §6.6). It
-// changes only oauthAccount, keeps the other keys and the file's mode, and writes
+// changes only oauthAccount, keeps the other keys and the file's mode, keeps its user
+// and group where the process may set them (a non-root process keeps at least a group
+// it is in), and writes
 // through a temp file and a rename. It then reads the file again and tries again, at
 // most 3 times, while oauthAccount is not the new one; then it returns ErrRaceLost.
 func UpdateOAuthAccount(homeJSONPath string, account map[string]any) error {
@@ -499,7 +544,7 @@ func UpdateOAuthAccount(homeJSONPath string, account map[string]any) error {
 			return err
 		}
 		ms = setMember(ms, "oauthAccount", val)
-		if err := writeAtomic(homeJSONPath, encodeObject(ms), st.Mode().Perm()); err != nil {
+		if err := writeAtomic(homeJSONPath, encodeObject(ms), st.Mode().Perm(), st); err != nil {
 			return err
 		}
 		if afterOAuthWrite != nil {

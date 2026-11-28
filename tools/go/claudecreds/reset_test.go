@@ -93,3 +93,17 @@ func TestAZoneNameInAnotherCaseIsRefused(t *testing.T) {
 		t.Error("a lower-case zone name was read")
 	}
 }
+
+// Go only: this machine's own zone files, not a stand-in. A name in the wrong case is
+// refused, so the answer is the same on a case-insensitive filesystem (#8000 review).
+func TestZoneNameInWrongCaseGivesNone(t *testing.T) {
+	now := time.Date(2026, 10, 17, 22, 16, 5, 0, time.UTC)
+	for _, text := range []string{"resets 1pm (america/new_york)", "resets 1pm (us/eastern)"} {
+		if got, ok := ResetFromText(text, now); ok {
+			t.Errorf("%q gave %s, want none", text, got)
+		}
+	}
+	if _, ok := ResetFromText("resets 1pm (America/New_York)", now); !ok {
+		t.Error("the exact name was not read")
+	}
+}

@@ -207,6 +207,26 @@ func TestHealthz(t *testing.T) {
 	}
 }
 
+// TestGitHubWebhookStartsARootSpan: a delivery's trace headers come from outside, so the
+// server span that tel.Server starts for /github/webhook reads none of them. Other paths
+// keep theirs.
+func TestGitHubWebhookStartsARootSpan(t *testing.T) {
+	var got http.Header
+	h := untrustedTrace(http.HandlerFunc(func(_ http.ResponseWriter, r *http.Request) { got = r.Header.Clone() }), "/github/webhook")
+	for path, kept := range map[string]bool{"/github/webhook": false, "/mcp": true} {
+		r := httptest.NewRequest(http.MethodPost, path, nil)
+		r.Header.Set("Traceparent", "00-0af7651916cd43dd8448eb211c80319c-b7ad6b7169203331-01")
+		r.Header.Set("Tracestate", "a=b")
+		r.Header.Set("Baggage", "k=v")
+		h.ServeHTTP(httptest.NewRecorder(), r)
+		for _, k := range []string{"Traceparent", "Tracestate", "Baggage"} {
+			if (got.Get(k) != "") != kept {
+				t.Errorf("%s: %s = %q, kept %v", path, k, got.Get(k), kept)
+			}
+		}
+	}
+}
+
 // TestGitHubWebhookRoute: /github/webhook is served only with a webhook secret file, and
 // then refuses an unsigned delivery.
 func TestGitHubWebhookRoute(t *testing.T) {

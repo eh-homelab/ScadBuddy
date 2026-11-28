@@ -236,6 +236,18 @@
       "why": "#8023: an IANA name in the wrong case is not read, as Go and Python read names only as written"
     },
     {
+      "text": "resets 1pm (us/eastern)",
+      "now": "2026-10-17T22:16:05Z",
+      "at": null,
+      "why": "#8000 review: an alias in the wrong case is not read, though ICU answers it as another ID (America/New_York)"
+    },
+    {
+      "text": "resets 1pm (SystemV/AST4)",
+      "now": "2026-10-17T22:16:05Z",
+      "at": null,
+      "why": "#8000 review: a name that ICU knows as its own ID but tzdata has no Zone or Link for is not read, as Go and Python know only tzdata's names (ICU in Node 24 answers SystemV/AST4; zoneinfo.ZoneInfo refuses it)"
+    },
+    {
       "text": "resets 1pm (Mars/Olympus_Mons)",
       "now": "2026-10-17T22:16:05Z",
       "at": null,
