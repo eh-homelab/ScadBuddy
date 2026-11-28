@@ -36,6 +36,8 @@ export function ServiceCredentials() {
   const [withEnded, setWithEnded] = useState<ReadonlySet<string>>(new Set())
   /** Revoked here: still shown, so the click's result stays in view. */
   const [revokedHere, setRevokedHere] = useState<ReadonlySet<string>>(new Set())
+  /** Listed while folded: a live row, or one revoked in this view. */
+  const kept = (row: ServiceCredentialView) => row.live || revokedHere.has(row.id)
   const shown = rows ?? listed.data ?? []
 
   async function run(key: string, action: () => Promise<ServiceCredentialView[]>) {
@@ -69,7 +71,6 @@ export function ServiceCredentials() {
       {CALLERS.map((section) => {
         const { caller, label } = section
         const own = shown.filter((row) => row.caller === caller)
-        const kept = (row: ServiceCredentialView) => row.live || revokedHere.has(row.id)
         const ended = own.filter((row) => !kept(row)).length
         const showEnded = withEnded.has(caller)
         const listedRows = showEnded ? own : own.filter(kept)

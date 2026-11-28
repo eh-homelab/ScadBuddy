@@ -88,6 +88,7 @@ describe('SourceCard', () => {
     expect(screen.getByRole('region', { name: 'Source Nested demo' })).toBeVisible()
     await user.click(fold)
     expect(screen.getByRole('combobox', { name: accessName('tool_2'), hidden: true })).not.toBeVisible()
+    expect(screen.getByRole('region', { name: 'Source Nested demo', hidden: true })).not.toBeVisible()
   })
 
   it('folds to its summary, and opens to its rows', async () => {
