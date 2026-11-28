@@ -135,18 +135,45 @@ func FinishOperation(ctx context.Context, tx pgx.Tx, id string, a Answer) error 
 // NoteError records that an attempt failed with an infrastructure error: the row stays
 // running, Temporal retries the activity, and the row keeps the error and the attempt.
 func NoteError(ctx context.Context, pool *pgxpool.Pool, id string, attempt int, cause error) error {
-	text := []rune(cause.Error())
-	if len(text) > lastErrorMax {
-		text = text[:lastErrorMax]
-	}
 	return pgx.BeginFunc(ctx, pool, func(tx pgx.Tx) error {
 		tag, err := tx.Exec(ctx, `UPDATE inventory_operations SET last_error = $2, attempt = $3,
-			updated_at = clock_timestamp() WHERE id = $1 AND status = 'running'`, id, string(text), attempt)
+			updated_at = clock_timestamp() WHERE id = $1 AND status = 'running'`, id, lastError(cause), attempt)
 		if err != nil || tag.RowsAffected() == 0 {
 			return err
 		}
 		return notifyOperation(ctx, tx, id)
 	})
+}
+
+// FailOperation ends the operation id as failed: its attempt failed with an error that
+// Temporal does not retry, so no later attempt ends the row (#8256). The row keeps the
+// error and the attempt, and its problem is the one ReadOperation answers for an activity
+// that Temporal closed without a result: 500 inventory_activity_failed.
+func FailOperation(ctx context.Context, pool *pgxpool.Pool, id string, attempt int, cause error) error {
+	text := lastError(cause)
+	failed := &problem.Refused{Status: 500, Code: "inventory_activity_failed", Detail: text}
+	body, err := httpx.Marshal(failed.Body())
+	if err != nil {
+		return err
+	}
+	return pgx.BeginFunc(ctx, pool, func(tx pgx.Tx) error {
+		tag, err := tx.Exec(ctx, `UPDATE inventory_operations SET status = 'failed', problem = $2::jsonb,
+			last_error = $3, attempt = $4, finished_at = clock_timestamp(), updated_at = clock_timestamp()
+			WHERE id = $1 AND status = 'running'`, id, string(body), text, attempt)
+		if err != nil || tag.RowsAffected() == 0 {
+			return err
+		}
+		return notifyOperation(ctx, tx, id)
+	})
+}
+
+// lastError is cause's text, at most lastErrorMax characters.
+func lastError(cause error) string {
+	text := []rune(cause.Error())
+	if len(text) > lastErrorMax {
+		text = text[:lastErrorMax]
+	}
+	return string(text)
 }
 
 func notifyOperation(ctx context.Context, tx pgx.Tx, id string) error {
