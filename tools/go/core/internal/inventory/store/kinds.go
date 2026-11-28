@@ -115,15 +115,24 @@ func stepsRefusal(problems []handlers.Problem) error {
 
 // ownedRefusal is stepsRefusal with each problem naming owner.
 func ownedRefusal(owner string, problems []handlers.Problem) error {
-	blocking := handlers.Blocking(problems)
-	if len(blocking) == 0 {
-		return nil
-	}
-	out := make([]StepProblem, 0, len(blocking))
-	for _, p := range blocking {
+	return stepsInvalid(ownedProblems(owner, problems))
+}
+
+// ownedProblems is the problems that refuse a save (handlers.Blocking), each naming owner.
+func ownedProblems(owner string, problems []handlers.Problem) []StepProblem {
+	var out []StepProblem
+	for _, p := range handlers.Blocking(problems) {
 		out = append(out, StepProblem{Owner: owner, Step: string(p.Step), Handler: p.Handler, Reason: p.Reason, Missing: p.Missing})
 	}
-	return &Refused{Status: 422, Code: "steps_invalid", Detail: "a step does not resolve to a handler it can use", Problems: out}
+	return out
+}
+
+// stepsInvalid is the 422 steps_invalid that names every problem, or nil for none.
+func stepsInvalid(problems []StepProblem) error {
+	if len(problems) == 0 {
+		return nil
+	}
+	return &Refused{Status: 422, Code: "steps_invalid", Detail: "a step does not resolve to a handler it can use", Problems: problems}
 }
 
 // incomplete is the steps whose handler lacks a required parameter, in step order.
@@ -784,6 +793,8 @@ func (k *Kinds) Update(ctx context.Context, tx pgx.Tx, id string, p wire.KindPat
 	if err != nil {
 		return wire.ItemKind{}, err
 	}
+	// Every kind and item below whose steps no longer resolve, all in one refusal (#8256).
+	var broken []StepProblem
 	for _, d := range below {
 		cls, special, err := next.chain(d).Class()
 		if err != nil {
@@ -810,11 +821,13 @@ func (k *Kinds) Update(ctx context.Context, tx pgx.Tx, id string, p wire.KindPat
 		if err != nil {
 			return wire.ItemKind{}, classRefusal(err)
 		}
-		if err := ownedRefusal("item_kind:"+d, problems); err != nil {
-			return wire.ItemKind{}, err
-		}
+		broken = append(broken, ownedProblems("item_kind:"+d, problems)...)
 	}
-	if err := k.checkItems(ctx, tx, next, below); err != nil {
+	items, err := k.checkItems(ctx, tx, next, below)
+	if err != nil {
+		return wire.ItemKind{}, err
+	}
+	if err := stepsInvalid(append(broken, items...)); err != nil {
 		return wire.ItemKind{}, err
 	}
 	_, _, res, err := k.resolve(next.chain(id))
@@ -867,13 +880,14 @@ func keepsRequired(next kindSet, id string, below []string) error {
 	return nil
 }
 
-// checkItems re-resolves each item of the kinds that sets its own steps: a kind save that
-// leaves one with a blocking problem is steps_invalid, naming the item (design §4.2).
-func (k *Kinds) checkItems(ctx context.Context, tx pgx.Tx, set kindSet, kinds []string) error {
+// checkItems re-resolves each item of the kinds that sets its own steps, and gives the
+// blocking problems of each, naming the item: a kind save that leaves one is steps_invalid
+// (design §4.2).
+func (k *Kinds) checkItems(ctx context.Context, tx pgx.Tx, set kindSet, kinds []string) ([]StepProblem, error) {
 	rows, err := tx.Query(ctx, `SELECT id::text, kind_id, steps FROM items
 		WHERE kind_id = ANY($1) AND steps <> '{}' ORDER BY id`, kinds)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	type item struct {
 		id, kind string
@@ -885,27 +899,26 @@ func (k *Kinds) checkItems(ctx context.Context, tx pgx.Tx, set kindSet, kinds []
 		var raw []byte
 		if err := rows.Scan(&it.id, &it.kind, &raw); err != nil {
 			rows.Close()
-			return err
+			return nil, err
 		}
 		if err := json.Unmarshal(raw, &it.steps); err != nil {
 			rows.Close()
-			return err
+			return nil, err
 		}
 		items = append(items, it)
 	}
 	if err := rows.Err(); err != nil {
-		return err
+		return nil, err
 	}
+	var out []StepProblem
 	for _, it := range items {
 		_, problems, err := k.Cat.Resolve(set.chain(it.kind), it.steps, nil)
 		if err != nil {
-			return classRefusal(err)
+			return nil, classRefusal(err)
 		}
-		if err := ownedRefusal("item:"+it.id, problems); err != nil {
-			return err
-		}
+		out = append(out, ownedProblems("item:"+it.id, problems)...)
 	}
-	return nil
+	return out, nil
 }
 
 func deref(s *string) string {
