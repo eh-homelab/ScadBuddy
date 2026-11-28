@@ -313,14 +313,22 @@ func (c *counting) count(l slog.Level) int {
 	return c.levels[l]
 }
 
-// TestRunBeforeTheMigrationsWarnsOnce: a subscriber with no row yet (the API has not
-// migrated) is one warning, not an error every Poll (#8116).
-func TestRunBeforeTheMigrationsWarnsOnce(t *testing.T) {
-	pool := testdb.New(t)
+// countLogs makes the default logger count each level until the test ends, and gives
+// the counts. The Run tests set up their logging this one way.
+func countLogs(t *testing.T) *counting {
+	t.Helper()
 	logs := &counting{levels: map[slog.Level]int{}}
 	previous := slog.Default()
 	slog.SetDefault(slog.New(logs))
 	t.Cleanup(func() { slog.SetDefault(previous) })
+	return logs
+}
+
+// TestRunBeforeTheMigrationsWarnsOnce: a subscriber with no row yet (the API has not
+// migrated) is one warning, not an error every Poll (#8116).
+func TestRunBeforeTheMigrationsWarnsOnce(t *testing.T) {
+	pool := testdb.New(t)
+	logs := countLogs(t)
 	run, stop := context.WithTimeout(ctx, 300*time.Millisecond)
 	defer stop()
 	Run(run, pool, Options{Name: "nobody", Poll: 10 * time.Millisecond})
@@ -334,10 +342,7 @@ func TestRunBeforeTheMigrationsWarnsOnce(t *testing.T) {
 // gives its warnings and errors.
 func lateRun(t *testing.T, pool *pgxpool.Pool) (until func(string, func() bool), logs *counting, finish func() (int, int)) {
 	t.Helper()
-	logs = &counting{levels: map[slog.Level]int{}}
-	previous := slog.Default()
-	slog.SetDefault(slog.New(logs))
-	t.Cleanup(func() { slog.SetDefault(previous) })
+	logs = countLogs(t)
 	run, stop := context.WithTimeout(ctx, 20*time.Second)
 	done := make(chan struct{})
 	go func() {
