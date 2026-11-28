@@ -54,6 +54,11 @@ describe('the scan page without Web NFC (#7273)', () => {
     expect(screen.queryByRole('button', { name: 'Scan' })).toBeNull()
   })
 
+  it('scrolls itself, as the shell clips its main', () => {
+    open()
+    expect(screen.getByTestId('scan-page')).toHaveClass('h-full', 'overflow-y-auto')
+  })
+
   it('has no back link and names what it reads', () => {
     open()
     expect(screen.queryByRole('link', { name: 'Spools' })).not.toBeInTheDocument()
