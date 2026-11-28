@@ -120,19 +120,37 @@ function sizeOf(choice: LabelTemplateChoice, templates: LabelTemplates | null): 
   return found ? { widthMm: found.width_mm, heightMm: found.height_mm, sheet: found.sheet ?? null, gone: false } : { ...DEFAULT_SIZE, gone: false }
 }
 
-/** How many spools or places the page reads at the same time. */
-const READ_AT_ONCE = 6
+/** How many spools, places, types or items the page reads at the same time, all subjects together. */
+export const READ_AT_ONCE = 6
 
 /** The ids of a comma-separated parameter, trimmed, each once, in order. */
 function splitIds(raw: string): string[] {
   return [...new Set(raw.split(',').map((id) => id.trim()).filter(Boolean))]
 }
 
+/** A pool of `READ_AT_ONCE` reads: `run` waits for a free place, and a read that ends gives its place to the next. */
+function readPool(): <T>(read: () => Promise<T>) => Promise<T> {
+  let open = 0
+  const waiting: (() => void)[] = []
+  return async (read) => {
+    if (open < READ_AT_ONCE) open += 1
+    else await new Promise<void>((place) => waiting.push(place))
+    try {
+      return await read()
+    } finally {
+      const next = waiting.shift()
+      if (next) next()
+      else open -= 1
+    }
+  }
+}
+
 /**
  * `read` of each id, at most `READ_AT_ONCE` in flight (up to 100 ids must not open 100
  * requests together), in the order of `ids`; an id whose read failed stays as its id.
+ * Calls that share a `pool` share its limit.
  */
-async function readEach<T>(ids: string[], read: (id: string) => Promise<T>, live: () => boolean): Promise<(T | string)[]> {
+async function readEach<T>(ids: string[], read: (id: string) => Promise<T>, live: () => boolean, pool = readPool()): Promise<(T | string)[]> {
   const results: (T | string)[] = new Array(ids.length)
   let next = 0
   const worker = async () => {
@@ -140,7 +158,8 @@ async function readEach<T>(ids: string[], read: (id: string) => Promise<T>, live
       const at = next++
       const id = ids[at]!
       try {
-        results[at] = await read(id)
+        // A read that waited for its place starts only while the page still wants it.
+        results[at] = await pool(() => (live() ? read(id) : Promise.reject(new Error('the page left'))))
       } catch {
         results[at] = id
       }
@@ -524,12 +543,14 @@ export function LabelsPage() {
         })
     // The kinds come as one list; a failed read leaves each asked kind unread, as a failed type or item read does.
     const kinds = wantedKinds.length > 0 ? inventoryApi.kinds(true).catch(() => []) : null
+    // One pool for the three reads, so up to 100 ids open at most READ_AT_ONCE requests in all.
+    const pool = readPool()
     Promise.all([
       printed ?? Promise.resolve(null),
       base,
-      readEach(printersParam ? [] : wantedPlaces, getLocation, () => live),
-      readEach(wantedTypes, getType, () => live),
-      readEach(wantedItems, inventoryApi.item, () => live),
+      readEach(printersParam ? [] : wantedPlaces, getLocation, () => live, pool),
+      readEach(wantedTypes, getType, () => live, pool),
+      readEach(wantedItems, inventoryApi.item, () => live, pool),
       kinds ?? Promise.resolve([]),
     ]).then(([answer, origin, placeRead, typeRead, itemRead, kindList]) => {
       const rows: { id: string; subject: CodeSubject; code: string; name: string }[] = [

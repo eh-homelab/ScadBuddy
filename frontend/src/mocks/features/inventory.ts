@@ -3,7 +3,7 @@ import { addDecimals, cmpDecimals, divDecimal, mulDecimals, roundDecimal, subDec
 import type { components } from '../../api/schema'
 import { mockSettings } from '../handlers'
 import { itemKeysInUse, marksOf, rowPropertiesRefusal, saveRowProperties, schemaProblem } from './entities'
-import { locationExists } from './filament'
+import { locationExists, mockTypes } from './filament'
 import { supplierById } from './filamentPurchasing'
 import { SUPPLIER } from './filamentPurchasingSeed'
 import { INVENTORY } from './inventorySeed'
@@ -29,7 +29,7 @@ const KIND_ID = /^[a-z][a-z0-9_]{0,39}$/
 type MockKind = Omit<S['ItemKind'], 'item_count' | 'code'>
 type MockItem = {
   id: string
-  /** The next number of `item_numbers_seq`; the code is I-<number>. */
+  /** From `item_numbers_seq`, which numbers spool types too (`nextItemNumber`); the code is I-<number>. */
   number: number
   kind_id: string
   name: string
@@ -194,7 +194,7 @@ export function seedItem(fields: Partial<MockItem> & { name: string; kind_id: st
   ready()
   const item: MockItem = {
     id: id(),
-    number: nextNumber(inventoryMock.items),
+    number: nextItemNumber(),
     manufacturer: '',
     compatible_with: [],
     low_stock: '0',
@@ -393,6 +393,15 @@ export function inventoryItem(itemId: string): S['Item'] | undefined {
   ready()
   const item = inventoryMock.items.find((i) => i.id === itemId)
   return item ? answerItem(item) : undefined
+}
+
+/**
+ * The next number of `item_numbers_seq`: one sequence numbers spool types and items, so a
+ * T-<n> and an I-<n> never share n. The seeded items come after the seeded types.
+ */
+export function nextItemNumber(): number {
+  ready()
+  return nextNumber([...mockTypes(), ...inventoryMock.items])
 }
 
 /** The item an I-<number> code names, or undefined. */

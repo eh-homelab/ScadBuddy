@@ -12,7 +12,7 @@ import { server } from '../../mocks/server'
 import { choose } from '../../test/select'
 import { renderPage } from '../../test/utils'
 import { printTiming } from '../../components/filament/labelSheet'
-import { LabelsPage } from './LabelsPage'
+import { LabelsPage, READ_AT_ONCE } from './LabelsPage'
 
 // Loads the file the way the real one does; saving it is lib/embed's own test.
 const saved: Blob[] = []
@@ -367,12 +367,14 @@ describe('spool type, item and kind labels (#7169)', () => {
     expect(bodies[1]).toMatchObject({ kind_ids: ['hardware'], item_ids: [], type_ids: [] })
   })
 
-  it('numbers a new type and a new item one past the highest, and the mock label shows it', async () => {
-    const seeded = (await listTypes({ includeArchived: true })).map((type) => type.number)
+  it('numbers a new type and a new item one past the highest of both, and the mock label shows it', async () => {
+    const types = (await listTypes({ includeArchived: true })).map((type) => type.number)
+    const items = (await inventoryApi.items({ archived: true })).map((item) => item.number)
     const made = await upsertType({ code: 'NEW-PLA-RED', material_id: M.PLA, brand_id: B.BAMBU, rgba: '#ff0000ff', label_weight_g: 1000 } as SpoolTypeCreate)
-    expect(made.number).toBe(Math.max(...seeded) + 1)
+    expect(made.number).toBe(Math.max(...types, ...items) + 1)
     const first = await inventoryApi.createItem({ kind_id: 'hardware', name: 'M3 nut' })
     const second = await inventoryApi.createItem({ kind_id: 'hardware', name: 'M3 bolt' })
+    expect(first.number).toBe(made.number + 1)
     expect(second.number).toBe(first.number + 1)
     renderPage(<LabelsPage />, { route: `/filament/labels?types=${made.id}` })
     await waitFor(() => expect(screen.getAllByTestId('label')).toHaveLength(1))
@@ -432,6 +434,35 @@ describe('spool type, item and kind labels (#7169)', () => {
     await user.click(screen.getByRole('button', { name: 'Download' }))
     await waitFor(() => expect(bodies).toHaveLength(1))
     expect(bodies[0]).toMatchObject({ type_ids: ['a'], item_ids: ['x'], kind_ids: [], location_ids: [] })
+  })
+
+  it('keeps at most READ_AT_ONCE reads open across places, types and items together', async () => {
+    const held: (() => void)[] = []
+    let open = 0
+    let most = 0
+    const hold = async (body: Record<string, unknown>) => {
+      open += 1
+      most = Math.max(most, open)
+      await new Promise<void>((release) => held.push(release))
+      open -= 1
+      return HttpResponse.json(body)
+    }
+    server.use(
+      http.get('*/api/v1/filament/locations/:id', ({ params }) => hold({ id: String(params.id), number: 1, code: `L-${String(params.id)}`, name: 'Shelf' })),
+      http.get('*/api/v1/filament/types/:id', ({ params }) => hold({ id: String(params.id), number: 4, code: '10101', colour_name: 'Charcoal' })),
+      http.get('*/api/v1/inventory/items/:id', ({ params }) => hold({ id: String(params.id), number: 9, code: 'I-9', name: 'M3 nut' })),
+    )
+    const ids = (prefix: string) => Array.from({ length: 10 }, (_, at) => `${prefix}${at}`).join(',')
+    renderPage(<LabelsPage />, { route: `/filament/labels?locations=${ids('l')}&types=${ids('t')}&items=${ids('i')}` })
+    let answered = 0
+    while (answered < 30) {
+      await waitFor(() => expect(held.length).toBeGreaterThan(0))
+      const now = held.splice(0)
+      answered += now.length
+      now.forEach((release) => release())
+    }
+    await waitFor(() => expect(screen.getAllByTestId('label')).toHaveLength(30))
+    expect(most).toBe(READ_AT_ONCE)
   })
 
   it('says a type label needs the label address, as the place labels do', async () => {

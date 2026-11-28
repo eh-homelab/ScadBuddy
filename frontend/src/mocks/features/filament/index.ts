@@ -16,7 +16,7 @@ import { H2C, L, LK, seed, spoolId, type Catalogs, type Seed, type SpoolRow } fr
 import { jobOf } from '../../../components/filament/eventText'
 import { CATALOGS } from '../../../components/filament/catalogs'
 import { checksSave, marksOf, rowPropertiesRefusal, saveRowProperties } from '../entities'
-import { itemByNumber, kindByNumber } from '../inventory'
+import { itemByNumber, kindByNumber, nextItemNumber } from '../inventory'
 import { nextNumber } from '../../nextNumber'
 
 type S = components['schemas']
@@ -144,6 +144,9 @@ const MOCK_COLOUR_CODES: components['schemas']['ColourCode'][] = [
 export function locationExists(id: string): boolean {
   return state.locations.some((place) => place.id === id)
 }
+
+/** #7169 — the spool types, archived ones too, for the inventory mock's `nextItemNumber`. */
+export const mockTypes = (): readonly { number: number }[] => state.types
 
 export function reset() {
   state = seed()
@@ -1307,7 +1310,7 @@ export function createType(raw: unknown): S['SpoolType'] | Response {
     ...body,
     drying_hours: body.drying_hours ?? null,
     id: newId(),
-    number: nextNumber(state.types),
+    number: nextItemNumber(),
     filament_id: null,
     archived_at: null,
     created_at: now(),
