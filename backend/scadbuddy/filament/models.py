@@ -2238,7 +2238,10 @@ class TagReadIn(_FitsOneTag):
     tap: bool = True
 
 
-BackupReason = Literal["spool_write", "agent_write", "restore", "place_write"]
+BackupReason = Literal["spool_write", "agent_write", "restore", "place_write", "clear"]
+#: Why a tag left its spool: ``unbound`` by hand, ``cleared`` once the phone wrote it empty
+#: (#8362).
+UnbindReason = Literal["unbound", "cleared"]
 
 
 class TagBackupIn(_FitsOneTag):
@@ -2415,6 +2418,13 @@ class DecodedSpool(BaseModel):
     label_weight_g: int | None = None
     empty_weight_g: int | None = None
     serial: str | None = None
+    other_keys: dict[str, str] | None = Field(
+        default=None,
+        description=(
+            "An OpenSpool tag's keys that ScadBuddy does not use, each value as its JSON "
+            "text (a string keeps its quotes), cut to 128 characters. Untrusted text."
+        ),
+    )
     warnings: list[str] = Field(
         default_factory=list,
         description=(
