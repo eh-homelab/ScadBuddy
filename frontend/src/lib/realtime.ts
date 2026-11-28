@@ -85,7 +85,10 @@ const CALL_TOPIC = 'device:call:'
 /**
  * The subscribe frames that resubscribe `topics` after a reconnect: the call topics in frames
  * of at most `MAX_CALL_TOPICS`, the rest in a frame of their own, so a refused call topic never
- * takes the other topics with it.
+ * takes the other topics with it. A refused frame still drops the other call topics in it; those
+ * calls fall back to their deadline read. One frame per call topic would avoid that, but core
+ * closes a socket that sends more than `RateBurst` (40) frames at once, and a socket may follow
+ * 64 topics.
  */
 export function subscribeFrames(topics: string[]): string[][] {
   const calls = topics.filter((topic) => topic.startsWith(CALL_TOPIC))
