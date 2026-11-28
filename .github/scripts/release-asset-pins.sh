@@ -113,7 +113,10 @@ check_temporal_download "$(arg TEMPORAL_CLI_VERSION)" "$(arg TEMPORAL_CLI_SHA256
 # jobs, go-module-ci.yml) copy the Dockerfile's version and sha256, which the check above
 # fetches; this keeps a partial bump from passing (#8513). It fetches nothing, so it runs
 # with --resolve too. It prints how many copies it found ("copies: <name> <n>"), which the
-# test checks for this repo, so a renamed key is not passed as no copies (#8536).
+# test checks for this repo, so a renamed key is not passed as no copies (#8536). The test
+# expects three copies of each ("three copies of $name in the repo" in
+# release-asset-pins.test.sh): a job that starts or stops installing the CLI changes that
+# number too (#8555).
 copies() {
   local name="$1" want="$2" file line value found=0
   for file in "$root"/.github/workflows/*.yml "$root"/.github/workflows/*.yaml; do
