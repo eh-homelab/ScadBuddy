@@ -92,6 +92,8 @@ export function BulkBar({ selected, places, types, onDone, onClear }: Props) {
    */
   const resetAll = async () => {
     setBusy(true)
+    // `resetBatches` reports through `onDone` before `busy` ends: the tab reloads after the report,
+    // and a bar it unmounts drops the later state update harmlessly.
     try {
       await resetBatches()
     } finally {

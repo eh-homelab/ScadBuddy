@@ -784,6 +784,39 @@ describe('finding and adding the 3DFP filament (#7025)', () => {
     expect(keys[1]).toBe(keys[0])
   })
 
+  it('fills the new id when the re-read type still has none', async () => {
+    server.use(
+      http.post('/api/v1/filament/tdfp/filaments', () =>
+        HttpResponse.json({ create: { status: 'created', tdfp_id: 38600, duplicate_text: '' }, type_id: T.JADE, type_tdfp_id_set: false }),
+      ),
+    )
+    const { user, form } = await openAdd()
+    await user.clear(within(form).getByLabelText('Hexes'))
+    await user.type(within(form).getByLabelText('Hexes'), '#8A8D8F')
+    await user.click(within(form).getByRole('button', { name: 'Add to 3DFP' }))
+    expect(await screen.findByText('Added to 3DFP as 38600. Save the type to keep the id.')).toBeInTheDocument()
+    await waitFor(() => expect(screen.getByLabelText('3DFP id')).toHaveValue('38600'))
+  })
+
+  it('keeps the panel open while an add waits for its answer', async () => {
+    let answer: () => void = () => {}
+    const answered = new Promise<void>((resolve) => (answer = resolve))
+    server.use(
+      http.post('/api/v1/filament/tdfp/filaments', async () => {
+        await answered
+        return HttpResponse.json({ create: { status: 'created', tdfp_id: 38600, duplicate_text: '' }, type_id: T.JADE, type_tdfp_id_set: true })
+      }),
+    )
+    const { user, form } = await openAdd()
+    await user.clear(within(form).getByLabelText('Hexes'))
+    await user.type(within(form).getByLabelText('Hexes'), '#8A8D8F')
+    await user.click(within(form).getByRole('button', { name: 'Add to 3DFP' }))
+    await waitFor(() => expect(within(finder()).getByRole('button', { name: 'Close' })).toBeDisabled())
+    answer()
+    await screen.findByText(/Added to 3DFP as 38600/)
+    expect(within(finder()).getByRole('button', { name: 'Close' })).toBeEnabled()
+  })
+
   it('says why a search failed', async () => {
     server.use(
       http.post('/api/v1/filament/tdfp/search', () =>

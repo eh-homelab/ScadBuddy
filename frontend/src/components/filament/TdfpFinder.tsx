@@ -212,7 +212,11 @@ export function TdfpFinder({ defaults, linkTypeId, hasSavedId, onUse, onCreated 
       } else if (body.type_id) {
         // The type took an id another way while the add ran (R-7025-14): it keeps that one.
         const held = await onCreated(id, false)
-        setDone(held == null ? `Added to 3DFP as ${id}.` : `Added to 3DFP as ${id}. The type already holds 3DFP id ${held}, so it keeps it.`)
+        if (held == null) {
+          // The type has no id after all: the new one goes in the field, for the person to save.
+          setDone(`Added to 3DFP as ${id}. Save the type to keep the id.`)
+          onUse(id)
+        } else setDone(`Added to 3DFP as ${id}. The type already holds 3DFP id ${held}, so it keeps it.`)
       } else {
         setDone(`Added to 3DFP as ${id}. Save the type to keep the id.`)
         onUse(id)
@@ -245,7 +249,8 @@ export function TdfpFinder({ defaults, linkTypeId, hasSavedId, onUse, onCreated 
           <Button type="submit" size="sm" disabled={searching || !ask.brand.trim()}>
             {searching ? <Spinner /> : <SearchIcon />} Search 3DFP
           </Button>
-          <Button type="button" size="sm" variant="ghost" onClick={() => setOpen(false)}>
+          {/* An add waits for its answer in this panel: closing it would reset what the answer lands in. */}
+          <Button type="button" size="sm" variant="ghost" disabled={sending} onClick={() => setOpen(false)}>
             Close
           </Button>
         </div>

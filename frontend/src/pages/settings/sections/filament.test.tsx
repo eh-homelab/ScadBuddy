@@ -1119,7 +1119,7 @@ describe("Import Bambuddy's spools (#6261)", () => {
   it('says how a Bambuddy spool is linked or made', async () => {
     renderSettingsSection(<Filament />, { route: '/settings/printing' })
     await seeded()
-    expect(within(region('Filament')).getByText(/a Bambuddy spool whose tag a ScadBuddy spool holds is linked to it; any other becomes a new spool, except Bambuddy's copy of a tag a linked spool holds, which is skipped/)).toBeInTheDocument()
+    expect(within(region('Filament')).getByText(/a Bambuddy spool whose tag a ScadBuddy spool holds is linked to it; any other becomes a new spool, except Bambuddy's copy of a tag a linked spool holds, which is skipped now and in later pulls/)).toBeInTheDocument()
   })
 
   it('links to Connection when no Bambuddy is set up', async () => {
@@ -1145,6 +1145,21 @@ describe("Import Bambuddy's spools (#6261)", () => {
     expect(await within(filament).findByRole('alert')).toHaveTextContent('The Bambuddy links belong to another Bambuddy. Reset them under Sync status, then try again.')
   })
 
+  it('shows the detail of a 503 that is not an unfinished import', async () => {
+    server.use(
+      http.post('*/api/v1/filament/bambuddy/import', () =>
+        HttpResponse.json({ type: 'about:blank', title: 'Service Unavailable', status: 503, detail: 'the blob store is not reachable' }, { status: 503 }),
+      ),
+    )
+    const { user } = renderSettingsSection(<Filament />, { route: '/settings/printing' })
+    await seeded()
+    const filament = region('Filament')
+    await user.click(within(filament).getByRole('button', { name: IMPORT }))
+    const alert = await within(filament).findByRole('alert')
+    expect(alert).toHaveTextContent('the blob store is not reachable')
+    expect(alert).not.toHaveTextContent('may still be running')
+  })
+
   it('says to import again when the Bambuddy URL changed during the import', async () => {
     server.use(
       http.post('*/api/v1/filament/bambuddy/import', () =>
@@ -1166,7 +1181,7 @@ describe("Import Bambuddy's spools (#6261)", () => {
   it('says to check the spools before importing again when the worker did not finish in time', async () => {
     server.use(
       http.post('*/api/v1/filament/bambuddy/import', () =>
-        HttpResponse.json({ type: 'about:blank', title: 'Service Unavailable', status: 503, detail: 'the print worker did not finish the import in time' }, { status: 503 }),
+        HttpResponse.json({ type: 'about:blank', title: 'Service Unavailable', status: 503, detail: 'the print worker did not finish the import in time', code: 'import_unfinished' }, { status: 503 }),
       ),
     )
     const { user } = renderSettingsSection(<Filament />, { route: '/settings/printing' })

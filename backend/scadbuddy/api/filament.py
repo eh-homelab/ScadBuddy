@@ -3458,6 +3458,8 @@ IMPORT_UNFINISHED = (
     "the print worker did not finish the import in time; it may still be running, so check"
     " the spools before importing again"
 )
+#: Its ``code``, so a client tells it apart from any other 503.
+IMPORT_UNFINISHED_CODE = "import_unfinished"
 
 
 @router.post(
@@ -3487,8 +3489,9 @@ IMPORT_UNFINISHED = (
         "spool (Bambuddy's archive time, what is left, its usage rows), counted in `created` "
         "and in `archived_created`; Bambuddy archiving a linked spool changes nothing. "
         "The print worker reads Bambuddy and ScadBuddy pulls what it read, so the import "
-        "waits for it (at most 4.5 minutes); 503 when the worker did not finish it in time "
-        "(it may still be running: check the spools before importing again); 502 when "
+        "waits for it (at most 4.5 minutes); 503 `import_unfinished` when the worker did not "
+        "finish it in time (it may still be running: check the spools before importing "
+        "again); 502 when "
         "ScadBuddy refused what the worker read (importing again gets the same answer); 409 "
         "with `code` `url_changed` when the Bambuddy URL changed during the import. "
         "The ledger events name the caller. Answers the counts and ids made, linked, changed, "
@@ -3537,10 +3540,14 @@ async def import_bambuddy(
         # sending bodies, so the person stays kept for them; a later `remember_actor` drops the
         # row once it is `ACTOR_KEPT` old.
         logger.warning("the Bambuddy import did not finish", extra={"error": type(error).__name__})
-        raise ApiError(status.HTTP_503_SERVICE_UNAVAILABLE, IMPORT_UNFINISHED) from error
+        raise ApiError(
+            status.HTTP_503_SERVICE_UNAVAILABLE, IMPORT_UNFINISHED, code=IMPORT_UNFINISHED_CODE
+        ) from error
     if outcome.outcome == "failed" and outcome.error is None:
         # The read raised or timed out (Temporal's timeout does not stop it): kept as above.
-        raise ApiError(status.HTTP_503_SERVICE_UNAVAILABLE, IMPORT_UNFINISHED)
+        raise ApiError(
+            status.HTTP_503_SERVICE_UNAVAILABLE, IMPORT_UNFINISHED, code=IMPORT_UNFINISHED_CODE
+        )
     # The read answered, so no body of this run is still to come (Decision 183).
     try:
         await asyncio.to_thread(forget_actor, filament, start.pull_id)
@@ -3552,7 +3559,9 @@ async def import_bambuddy(
     if outcome.error is not None:
         raise outcome.error.error()
     if outcome.report is None:
-        raise ApiError(status.HTTP_503_SERVICE_UNAVAILABLE, IMPORT_UNFINISHED)
+        raise ApiError(
+            status.HTTP_503_SERVICE_UNAVAILABLE, IMPORT_UNFINISHED, code=IMPORT_UNFINISHED_CODE
+        )
     return outcome.report
 
 
