@@ -364,6 +364,7 @@ function Actions({ preset, onPreset, reload }: { preset: PresetDetail; onPreset:
           </Button>
         )}
         {!manual && <span className="text-[13px] text-muted-foreground">Only a manual preset can be edited. Make a copy first.</span>}
+        {manual && preset.document === null && <span className="text-[13px] text-muted-foreground">The document is not in the store, so this preset cannot be edited.</span>}
       </div>
       {notice && (
         <p role={notice.tone === 'warn' ? 'alert' : 'status'} className={cn('text-[13px]', notice.tone === 'warn' ? 'text-warn' : 'text-muted-foreground')}>

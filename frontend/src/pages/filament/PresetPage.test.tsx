@@ -1,7 +1,7 @@
 import { screen, waitFor, within } from '@testing-library/react'
 import { http, HttpResponse } from 'msw'
 import { describe, expect, it } from 'vitest'
-import { LOST_PRESET, presetsOff, writesOff } from '../../mocks/features/filament/presets'
+import { LOST_PRESET, mirrorShows, presetsOff, writesOff } from '../../mocks/features/filament/presets'
 import { server } from '../../mocks/server'
 import { choose } from '../../test/select'
 import { renderPage } from '../../test/utils'
@@ -9,8 +9,8 @@ import { PresetPage } from './PresetPage'
 
 const show = (id: number) => renderPage(<PresetPage />, { route: `/filament/presets/${id}`, path: '/filament/presets/:id' })
 
-const problem = (status: number, code: string, detail: string) =>
-  HttpResponse.json({ type: 'about:blank', title: detail, status, detail, code }, { status, headers: { 'Content-Type': 'application/problem+json' } })
+const problem = (status: number, code: string, detail: string, extra: Record<string, unknown> = {}) =>
+  HttpResponse.json({ type: 'about:blank', title: detail, status, detail, code, ...extra }, { status, headers: { 'Content-Type': 'application/problem+json' } })
 
 const detail = (over: Record<string, unknown>) => ({
   id: 3,
@@ -360,17 +360,82 @@ describe('the preset page', () => {
     })
 
     it('sends a new key when the form is opened again', async () => {
-      const seen = patchBody(() => problem(409, 'key_refused', 'the key bad cannot be set or unset'))
+      const seen = patchBody(() => problem(422, 'key_refused', 'the key bad cannot be set or unset', { key: 'bad' }))
       const { user } = show(3)
       for (let round = 0; round < 2; round += 1) {
         const form = await openEdit(user)
         await user.type(within(form).getByRole('textbox', { name: 'New key' }), 'bad')
         await user.type(within(form).getByRole('textbox', { name: 'New value' }), 'v')
         await user.click(within(form).getByRole('button', { name: 'Save edit' }))
-        expect(await within(form).findByText('the key bad cannot be set or unset')).toBeInTheDocument()
+        expect(await within(form).findByText('The key bad is not allowed in this edit. Change it or take it out.')).toBeInTheDocument()
         await user.click(within(form).getByRole('button', { name: 'Cancel' }))
       }
       expect(seen[0]!.key).not.toBe(seen[1]!.key)
+    })
+
+    it('says in its own words that the server did not accept the edit', async () => {
+      patchBody(() => problem(422, 'invalid_input', 'an edit needs a name, a key to set or a key to unset'))
+      const { user } = show(3)
+      const form = await openEdit(user)
+      await user.type(within(form).getByRole('textbox', { name: 'New key' }), 'k')
+      await user.type(within(form).getByRole('textbox', { name: 'New value' }), 'v')
+      await user.click(within(form).getByRole('button', { name: 'Save edit' }))
+      expect(await within(form).findByText('The change is not valid: an edit needs a name, a key to set or a key to unset.')).toBeInTheDocument()
+    })
+
+    it('says why Edit is off when the preset has no document', async () => {
+      server.use(http.get('/api/v1/filament/presets/3', () => HttpResponse.json(detail({ version: 2, document: null, document_error: 'document_missing', versions: versionsOf([2, 1]) }))))
+      show(3)
+      expect(await screen.findByRole('button', { name: 'Edit' })).toBeDisabled()
+      expect(screen.getByText('The document is not in the store, so this preset cannot be edited.')).toBeInTheDocument()
+    })
+
+    it('refuses an empty list item in the form, and sends nothing', async () => {
+      const seen = patchBody(() => HttpResponse.json({ changed: true, preset: detail({ id: 3, version: 3 }) }))
+      const { user } = show(3)
+      const form = await openEdit(user)
+      const temp = within(form).getByRole('textbox', { name: 'Value of nozzle_temperature' })
+      await user.clear(temp)
+      await user.type(temp, '225{Enter}{Enter}230')
+      expect(within(form).getByText('nozzle_temperature: a list item is empty. Fill it in or delete the line.')).toBeInTheDocument()
+      expect(within(form).getByRole('button', { name: 'Save edit' })).toBeDisabled()
+      await user.clear(temp)
+      await user.type(temp, '225{Enter}230')
+      expect(within(form).queryByText(/a list item is empty/)).not.toBeInTheDocument()
+      await user.click(within(form).getByRole('button', { name: 'Save edit' }))
+      await waitFor(() => expect(seen).toHaveLength(1))
+      expect(seen[0]!.body).toEqual({ expected_version: 2, set: { nozzle_temperature: ['225', '230'] } })
+    })
+
+    it('refuses an empty line in a new list value too', async () => {
+      const { user } = show(3)
+      const form = await openEdit(user)
+      await user.type(within(form).getByRole('textbox', { name: 'New key' }), 'k')
+      await user.type(within(form).getByRole('textbox', { name: 'New value' }), 'a{Enter}')
+      expect(within(form).getByText('k: a list item is empty. Fill it in or delete the line.')).toBeInTheDocument()
+      expect(within(form).getByRole('button', { name: 'Save edit' })).toBeDisabled()
+    })
+
+    it.each([
+      ['mirror_off', 'The send to Bambuddy is off in Settings.'],
+      ['not_configured', 'Bambuddy is not set up in Settings.'],
+      ['instance_changed', 'Bambuddy changed. Reset the Bambuddy links in Settings first.'],
+    ] as const)('says %s in its own words on a send again', async (code, text) => {
+      mirrorShows(code)
+      const { user } = show(3)
+      await user.click(await screen.findByRole('button', { name: 'Send again' }))
+      expect(await screen.findByText(text)).toBeInTheDocument()
+    })
+
+    it.each([
+      ['busy', 'A send is running now. Wait a moment, then send again.'],
+      ['pending', 'The send is queued. Bambuddy has not got this version yet.'],
+      ['failed', 'The send failed. See the reason with the preset.'],
+    ] as const)('says the outcome %s of a send again', async (outcome, text) => {
+      mirrorShows(outcome)
+      const { user } = show(3)
+      await user.click(await screen.findByRole('button', { name: 'Send again' }))
+      expect(await screen.findByText(text)).toBeInTheDocument()
     })
   })
 })

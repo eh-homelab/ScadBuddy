@@ -17,8 +17,10 @@ const toText = (value: string | string[]) => (Array.isArray(value) ? value.join(
 /** Text back to a value: a list stays a list, and a new text with more than one line becomes one. */
 function fromText(was: unknown, text: string): string | string[] {
   if (!Array.isArray(was) && !text.includes('\n')) return text
-  return text.split('\n').map((line) => line.replace(/\r$/, '')).filter((line) => line !== '')
+  return text.split('\n').map((line) => line.replace(/\r$/, ''))
 }
+
+const hasEmptyItem = (value: string | string[]) => Array.isArray(value) && value.some((item) => item === '')
 
 /** One key for each opened form. A retry after a 503 sends it again, so the server runs the write once. */
 const useFormKey = () => useState(() => crypto.randomUUID())[0]
@@ -119,6 +121,7 @@ export function EditForm({
   }, [values, removed, added, name, document, preset.name, preset.version])
 
   const nothing = body.name === undefined && !body.set && !body.unset
+  const emptyItems = Object.entries(body.set ?? {}).filter(([, value]) => hasEmptyItem(value)).map(([field]) => field)
   const needle = filter.trim().toLowerCase()
   const shown = needle ? entries.filter(([field]) => field.toLowerCase().includes(needle)) : entries
 
@@ -215,9 +218,14 @@ export function EditForm({
           </Button>
         </div>
       </div>
+      {emptyItems.map((field) => (
+        <p key={field} role="alert" className="text-[13px] text-warn">
+          {field}: a list item is empty. Fill it in or delete the line.
+        </p>
+      ))}
       {failure && <Failure failure={failure} />}
       <div className="flex items-center gap-2">
-        <Button type="submit" size="sm" disabled={busy || nothing || name.trim() === ''}>
+        <Button type="submit" size="sm" disabled={busy || nothing || name.trim() === '' || emptyItems.length > 0}>
           Save edit
         </Button>
         <Button type="button" variant="outline" size="sm" onClick={onClose}>

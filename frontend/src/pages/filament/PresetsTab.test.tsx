@@ -2,7 +2,7 @@ import { screen, within } from '@testing-library/react'
 import { describe, expect, it } from 'vitest'
 import { listTypes } from '../../api/filament'
 import { listPresets } from '../../api/filamentPresets'
-import { presetsOff, writesOff } from '../../mocks/features/filament/presets'
+import { mirrorShows, presetsOff, writesOff } from '../../mocks/features/filament/presets'
 import { T } from '../../mocks/features/filament/seed'
 import { server } from '../../mocks/server'
 import { http, HttpResponse } from 'msw'
@@ -157,5 +157,14 @@ describe('the Presets tab', () => {
     await user.click(within(rowOf(presetRows(await presets()), failed.id)).getByRole('button', { name: 'Send again' }))
     expect(await screen.findByText('Writes are not on yet on this server.')).toBeInTheDocument()
     expect(screen.queryByRole('button', { name: 'Send again' })).not.toBeInTheDocument()
+  })
+
+  it('says a failed send again in active words', async () => {
+    mirrorShows('failed')
+    const { user } = renderPage(<PresetsTab />)
+    const { rows: all } = await listPresets()
+    const failed = all.find((row) => row.mirror === 'failed')!
+    await user.click(within(rowOf(presetRows(await presets()), failed.id)).getByRole('button', { name: 'Send again' }))
+    expect(await screen.findByText('My PLA, slower: The send failed. See the reason with the preset.')).toBeInTheDocument()
   })
 })

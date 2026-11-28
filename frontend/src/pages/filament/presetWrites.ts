@@ -29,13 +29,23 @@ const TEXT: Record<string, string> = {
 
 const IDEMPOTENCY_REQUIRED = 'https://scadbuddy.dev/problems/crud/idempotency-key-required'
 
+/** Texts that name what the server refused: the key of `key_refused`, the detail of `invalid_input`. */
+function refusal(code: string | null, key: string | null, detail: string): string | null {
+  if (code === 'key_refused' && key !== null) return `The key ${key} is not allowed in this edit. Change it or take it out.`
+  if (code === 'invalid_input' && detail) return `The change is not valid: ${detail}.`
+  return null
+}
+
 export function writeFailure(cause: unknown): WriteFailure {
   const code = problemCode(cause)
   const own = code ? TEXT[code] : undefined
+  const extra = cause instanceof ApiError ? (cause.problem as unknown as { key?: unknown }) : {}
+  const refusedKey = typeof extra.key === 'string' ? extra.key : null
+  const detail = cause instanceof ApiError ? cause.detail.replace(/\.$/, '') : ''
   const required = cause instanceof ApiError && cause.problem.type === IDEMPOTENCY_REQUIRED
   const fallback = cause instanceof ApiError ? cause.detail : 'The write failed. Try again.'
   return {
-    text: own ?? (required ? 'The server needs a key for this write. Reload the page and try again.' : fallback),
+    text: refusal(code, refusedKey, detail) ?? own ?? (required ? 'The server needs a key for this write. Reload the page and try again.' : fallback),
     off: code === 'writes_not_configured',
     pending: code === 'preset_write_pending',
     moved: code === 'version_moved',
@@ -44,7 +54,7 @@ export function writeFailure(cause: unknown): WriteFailure {
 
 export const OUTCOME_TEXT: Record<MirrorOutcome, string> = {
   sent: 'Sent to Bambuddy.',
-  failed: 'The send failed. The reason is shown with the preset.',
+  failed: 'The send failed. See the reason with the preset.',
   busy: 'A send is running now. Wait a moment, then send again.',
   in_sync: 'Bambuddy already has this version.',
   pending: 'The send is queued. Bambuddy has not got this version yet.',
