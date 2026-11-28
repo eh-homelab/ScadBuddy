@@ -144,14 +144,15 @@ func (n *noSubscriber) Error() string {
 
 // Run applies until ctx ends: at once while a batch comes back full, else after Poll. An
 // error is logged, and Apply runs again after Poll. Before the API's migrations have made
-// the event log, it logs that once, at warn, until an Apply succeeds (#8116). Every
-// replica runs it; the cursor's row lock lets one apply at a time.
+// the event log, it logs that once, at warn, until an Apply ends any other way: a success
+// or another error (#8116, #8463). Every replica runs it; the cursor's row lock lets one
+// apply at a time.
 func Run(ctx context.Context, pool *pgxpool.Pool, o Options) {
 	o = o.withDefaults()
 	waiting := false
 	for {
 		applied, err := Apply(ctx, pool, o)
-		if err == nil {
+		if err == nil || !unmigrated(err) {
 			waiting = false
 		}
 		if err != nil && ctx.Err() == nil && unmigrated(err) {
