@@ -600,22 +600,20 @@ class EntityPropertyStore:
         its poll (2 s) after a commit. Kept after the entity goes. The rows of `ref`'s
         current entity count too: a merge into an owner with no entity row renames the
         entity (`repoint_entity`), and its older rows keep the old ref."""
+        # One read per index, each newest first and capped, then merged (#8190): an OR of
+        # the two can keep the planner off both. UNION drops a row both reads find.
         where = " AND key = %s" if key is not None else ""
-        args: tuple[Any, ...] = (
-            ref.kind,
-            ref.ref,
-            ref.kind,
-            ref.ref,
-            *(() if key is None else (key,)),
-            limit,
-        )
+        keyed: tuple[Any, ...] = () if key is None else (key,)
+        cols = "event_seq, key, op, old, new, source, at, actor"
         with self.pool.connection() as conn:
             rows = conn.execute(
-                "SELECT key, op, old, new, source, at, actor FROM entity_property_history"
-                " WHERE (kind = %s AND ref = %s OR entity_id ="
-                " (SELECT id FROM entities WHERE kind = %s AND ref = %s))"
-                f"{where} ORDER BY event_seq DESC LIMIT %s",
-                args,
+                f"(SELECT {cols} FROM entity_property_history"
+                f" WHERE kind = %s AND ref = %s{where} ORDER BY event_seq DESC LIMIT %s)"
+                f" UNION (SELECT {cols} FROM entity_property_history"
+                " WHERE entity_id = (SELECT id FROM entities WHERE kind = %s AND ref = %s)"
+                f"{where} ORDER BY event_seq DESC LIMIT %s)"
+                " ORDER BY event_seq DESC LIMIT %s",
+                (ref.kind, ref.ref, *keyed, limit, ref.kind, ref.ref, *keyed, limit, limit),
             ).fetchall()
         return [PropertyChange.model_validate(dict(r)) for r in rows]
 
