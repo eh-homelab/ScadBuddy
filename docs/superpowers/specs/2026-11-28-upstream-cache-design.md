@@ -65,7 +65,7 @@ The storages:
 |---|---|---|---|
 | `nfs-git` | `/data/upstream-cache/git/<host>/<owner>/<repo>.git`, a bare mirror on the API's NFS share | every fetched commit of a repository | the mirror's worker in the API pod |
 | `blob` | the content store (S3 on prod) | one archive per key: `cache-git-<commit>`, `cache-http-<sha256>` | the tier's fill activity, through the blob API (#7958) |
-| `local` | a pod's own emptyDir, `<state>/upstream-cache/<source>/<id>/` | the unpacked files of one key | that pod's `cache-local.<hostname>` worker |
+| `local` | a pod's own disk, `<root>/<source>/<id>/`; `<root>` is configurable, by default `<state>/upstream-cache/` on the pod's emptyDir (§8) | the unpacked files of one key | that pod's `cache-local.<hostname>` worker |
 
 The sources:
 
@@ -162,9 +162,11 @@ stream can replace that later without a change to the engine.
 5. Agent plugin commit pins move their fetch to `CacheFill{blob}`.
 6. Agent plugin archive and npm pins, and Google Fonts, move to the `http` source.
 
-## 8. Open questions
+## 8. Answered questions (owner, 2026-11-28)
 
-- Sweep policy for `nfs-git`: a bare mirror only grows. Keep it whole, or repack and prune
-  commits that no pin names?
-- Whether the API's `local` tier can be the NFS share (one copy for three replicas) or must
-  be each pod's own disk. D4 holds either way; the trade is disk against a fill per pod.
+- **The `nfs-git` mirror is never pruned.** It keeps every commit it fetched, so an old pin
+  never goes back to upstream. Git's own `gc` may still pack it; nothing deletes a commit.
+- **The `local` store is each pod's own disk, at a configurable path.** The default is
+  `<state>/upstream-cache/`, on the pod's emptyDir, and a setting of the store's worker can move
+  it (to the NFS share, for one). D4 holds on any path: the workflow id includes the location,
+  so one writer per path.
