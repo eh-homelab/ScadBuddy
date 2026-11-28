@@ -316,12 +316,13 @@ function spoolImportLine(done: PullReport): string {
 
 /**
  * What the spool import says when the server refuses it: the presets import's words, plus its own
- * 503 and its 409 `url_changed` (the not-configured problem type, but a Bambuddy is set up).
+ * 503 `import_unfinished` and its 409 `url_changed` (the not-configured problem type, but a Bambuddy is set up).
  */
 function spoolImportProblem(cause: unknown): ReactNode {
   if (!(cause instanceof ApiError)) return "Bambuddy's spools could not be imported. Try again."
   if (cause.status === 409 && cause.problem.code === 'url_changed') return 'The Bambuddy URL changed during the import. Import again.'
-  if (cause.status === 503) return 'The import did not finish in time and may still be running. Check the spools before you import again.'
+  if (cause.status === 503 && cause.problem.code === 'import_unfinished')
+    return 'The import did not finish in time and may still be running. Check the spools before you import again.'
   return importProblem(cause)
 }
 
@@ -351,7 +352,7 @@ function SpoolsImportRow() {
     <FieldRow
       id="filament-spools-import"
       label="Bambuddy's spools"
-      help="Pulls Bambuddy's spools, archived ones too, into ScadBuddy's own once, whatever the spools direction says. A spool already linked takes what Bambuddy changed since the last pull; a Bambuddy spool whose tag a ScadBuddy spool holds is linked to it; any other becomes a new spool, except Bambuddy's copy of a tag a linked spool holds, which is skipped. It can take a few minutes. Nothing is sent to Bambuddy."
+      help="Pulls Bambuddy's spools, archived ones too, into ScadBuddy's own once, whatever the spools direction says. A spool already linked takes what Bambuddy changed since the last pull; a Bambuddy spool whose tag a ScadBuddy spool holds is linked to it; any other becomes a new spool, except Bambuddy's copy of a tag a linked spool holds, which is skipped now and in later pulls. It can take a few minutes. Nothing is sent to Bambuddy."
     >
       <div id="filament-spools-import" className="flex flex-col gap-2 text-sm">
         <div>
