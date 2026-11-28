@@ -389,6 +389,58 @@ func TestACreateThatWaitsOnAnArchiveOfItsParentIsRefused(t *testing.T) {
 
 // A restore of a kind waits on an uncommitted archive of its parent, then is refused, as a
 // create is (#8503).
+// An update of a kind waits on the tree lock before its row, so a restore of a child that
+// holds the lock and the child's row can still take the parent: Restore's own order, in
+// its steps (#8503, #8519). Before, the update held the parent FOR UPDATE and its
+// rewriteDerived then wrote the child's row, and the two could deadlock.
+func TestAnUpdateWaitsForARestoreOfItsChild(t *testing.T) {
+	pool, k := testdb.New(t), kindStore()
+	must(createKind(t, pool, k, wire.KindInput{ID: "widget", Name: "Widget", Tracking: ptr("lot")}))
+	must(createKind(t, pool, k, wire.KindInput{ID: "gizmo", Name: "Gizmo", ParentID: ptr("widget")}))
+	must(archiveKind(t, pool, k, "gizmo"))
+	ctx := context.Background()
+
+	// Restore's first steps: the tree lock, then the child's row.
+	restore, err := pool.Begin(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = restore.Rollback(ctx) }()
+	if err := lockTree(ctx, restore); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := restore.Exec(ctx, `SELECT id FROM item_kinds WHERE id = 'gizmo' FOR UPDATE`); err != nil {
+		t.Fatal(err)
+	}
+
+	updated := make(chan error, 1)
+	go func() {
+		_, err := updateKind(t, pool, k, "widget", wire.KindPatch{Name: ptr("Widgets")})
+		updated <- err
+	}()
+	select {
+	case err := <-updated:
+		t.Fatalf("the update did not wait for the tree lock: %v", err)
+	case <-time.After(200 * time.Millisecond):
+	}
+
+	// Restore's next step, the parent FOR SHARE: the update holds no row of it yet.
+	wait, cancel := context.WithTimeout(ctx, 5*time.Second)
+	defer cancel()
+	if _, err := restore.Exec(wait, `SELECT id FROM item_kinds WHERE id = 'widget' FOR SHARE`); err != nil {
+		t.Fatalf("the restore could not take the parent: %v", err)
+	}
+	if err := restore.Commit(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if err := <-updated; err != nil {
+		t.Fatal(err)
+	}
+	if got := getKind(t, pool, k, "widget").Name; got != "Widgets" {
+		t.Fatalf("name %s", got)
+	}
+}
+
 func TestARestoreThatWaitsOnAnArchiveOfItsParentIsRefused(t *testing.T) {
 	pool, k := testdb.New(t), kindStore()
 	must(createKind(t, pool, k, wire.KindInput{ID: "widget", Name: "Widget", Tracking: ptr("lot")}))
