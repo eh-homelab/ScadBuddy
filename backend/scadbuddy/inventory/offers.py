@@ -23,7 +23,6 @@ from psycopg import Connection
 from psycopg.rows import DictRow
 from pydantic import BaseModel
 
-from scadbuddy.crud.idempotency import Replay, idempotent_write
 from scadbuddy.inventory.models import (
     Offer,
     OfferInput,
@@ -131,6 +130,10 @@ class OfferStore:
         """``write`` in one transaction. With a ``key``, once per key: the reply stored
         under it, else ``write``'s, stored in the same transaction (`idempotent_write`).
         ``asked`` is the request as JSON, ``route`` the route it came on."""
+        # Here, not at the top: `inventory.problems` imports this module, and
+        # `crud.idempotency` reaches `api.deps` and back to it (a cycle at import).
+        from scadbuddy.crud.idempotency import Replay, idempotent_write
+
         with self.pool.connection() as conn:
             if key is None:
                 with conn.transaction():
