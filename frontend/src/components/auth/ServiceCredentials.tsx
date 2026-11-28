@@ -32,6 +32,10 @@ export function ServiceCredentials() {
   const [rows, setRows] = useState<ServiceCredentialView[] | null>(null)
   const [error, setError] = useState<string | null>(null)
   const [busy, setBusy] = useState<string | null>(null)
+  /** The callers whose expired and revoked credentials are shown: thousands pile up. */
+  const [withEnded, setWithEnded] = useState<ReadonlySet<string>>(new Set())
+  /** Revoked here: still shown, so the click's result stays in view. */
+  const [revokedHere, setRevokedHere] = useState<ReadonlySet<string>>(new Set())
   const shown = rows ?? listed.data ?? []
 
   async function run(key: string, action: () => Promise<ServiceCredentialView[]>) {
@@ -65,6 +69,10 @@ export function ServiceCredentials() {
       {CALLERS.map((section) => {
         const { caller, label } = section
         const own = shown.filter((row) => row.caller === caller)
+        const kept = (row: ServiceCredentialView) => row.live || revokedHere.has(row.id)
+        const ended = own.filter((row) => !kept(row)).length
+        const showEnded = withEnded.has(caller)
+        const listedRows = showEnded ? own : own.filter(kept)
         return (
           <section key={caller} aria-label={label} className="space-y-2">
             <div className="flex items-center justify-between gap-2">
@@ -83,7 +91,10 @@ export function ServiceCredentials() {
             </div>
             <ul className="divide-y rounded-md border" aria-label={`${label} credentials`}>
               {own.length === 0 && <li className="px-3 py-2 text-sm text-muted-foreground">None issued.</li>}
-              {own.map((row) => (
+              {own.length > 0 && listedRows.length === 0 && (
+                <li className="px-3 py-2 text-sm text-muted-foreground">None live.</li>
+              )}
+              {listedRows.map((row) => (
                 <li key={row.id} className="flex flex-wrap items-center justify-between gap-2 px-3 py-2 text-sm">
                   <div>
                     <p className="sb-num">
@@ -101,7 +112,13 @@ export function ServiceCredentials() {
                       variant="outline"
                       size="sm"
                       disabled={busy !== null}
-                      onClick={() => void run(row.id, () => api.revokeServiceCredential(row.id))}
+                      onClick={() =>
+                        void run(row.id, async () => {
+                          const next = await api.revokeServiceCredential(row.id)
+                          setRevokedHere((current) => new Set([...current, row.id]))
+                          return next
+                        })
+                      }
                       {...USER_ONLY}
                     >
                       Revoke
@@ -110,6 +127,23 @@ export function ServiceCredentials() {
                 </li>
               ))}
             </ul>
+            {ended > 0 && (
+              <Button
+                variant="ghost"
+                size="sm"
+                aria-expanded={showEnded}
+                onClick={() =>
+                  setWithEnded((current) => {
+                    const next = new Set(current)
+                    if (showEnded) next.delete(caller)
+                    else next.add(caller)
+                    return next
+                  })
+                }
+              >
+                {showEnded ? `Hide ${ended} expired or revoked` : `Show ${ended} expired or revoked`}
+              </Button>
+            )}
           </section>
         )
       })}

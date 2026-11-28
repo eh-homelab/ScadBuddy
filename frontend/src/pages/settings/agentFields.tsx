@@ -112,7 +112,7 @@ export function SettingsAgentProvider({ sections, children }: { sections: readon
     if (!area || current() === area) return
     navigate(`/settings/${area}`)
     // The router commits the move later; the answer should see the page as the user does.
-    // Moving re-renders every area, which a loaded machine takes longer than a field edit.
+    // Moving re-renders every mounted area, which a loaded machine takes longer than a field edit.
     await committed(() => current() === area, `the ${area} settings to open`, AREA_MOVE_TIMEOUT_MS)
   }
 
@@ -160,7 +160,7 @@ export function SettingsAgentProvider({ sections, children }: { sections: readon
         const binding = bindings.fields.get(field)
         if (!binding) throw new AgentToolError('unavailable', `No settings section here holds ${field}.`)
         refuseUnlisted(field, next, binding.current)
-        // Every area is mounted, so the binding is live in a hidden one: the edit is made
+        // A field's area mounts with Settings (SettingsShell), so the binding is live in a hidden one: the edit is made
         // first, and a slow move to its area never loses it.
         binding.current.set(next)
         // A folded section's field is hidden: unfold it first, so the edit is seen (#3414).

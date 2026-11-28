@@ -1,4 +1,4 @@
-import { useContext, useEffect, useMemo, useRef, type ReactNode } from 'react'
+import { useContext, useEffect, useMemo, useRef, useState, type ReactNode } from 'react'
 import { Link, useLocation, useNavigate } from 'react-router'
 import { useAiAvailability } from '../../agent/chat/availability'
 import { McpAuthBanner } from '../../components/McpAuthBanner'
@@ -18,7 +18,7 @@ import { Button } from '@/components/ui/button'
 import { Card, CardContent } from '@/components/ui/card'
 import { SidebarMenuSub, SidebarMenuSubButton, SidebarMenuSubItem } from '@/components/ui/sidebar'
 import { Skeleton } from '@/components/ui/skeleton'
-import { SettingsAgentProvider } from './agentFields'
+import { AGENT_FIELD_HOME, SettingsAgentProvider } from './agentFields'
 import { BambuddyResourcesProvider } from './bambuddyResources'
 import { SettingsCacheProvider, useSettingsCache } from './cache'
 import { SettingsCollapseProvider } from './collapse'
@@ -80,10 +80,16 @@ function SectionSlot({ section, children }: { section: SettingsSection; children
   )
 }
 
+/** The sections that hold a field the agent's settings tools set: their areas are always mounted. */
+const AGENT_SECTIONS: ReadonlySet<string> = new Set(Object.values(AGENT_FIELD_HOME).map((home) => home.section))
+
 /**
  * #2171 — Settings by area: `/settings/<area>`, each area's sections under one sub-nav.
- * Every area is rendered at once and the others hidden, so a draft and the agent's field
- * bindings survive a switch; the leave guard asks only when Settings itself is left.
+ * An area mounts when it is first opened and then stays mounted, hidden while another shows,
+ * so a draft survives a switch. The areas that hold the agent's fields mount at once, so
+ * `set_field` finds a live binding. The others wait: Tools & plugins and System are thousands
+ * of rows, which made every Settings page slow to open. The leave guard asks only when
+ * Settings itself is left.
  */
 export function SettingsShell({ sections = SECTION_REGISTRY }: { sections?: readonly SettingsSection[] }) {
   const { pathname, hash } = useLocation()
@@ -113,6 +119,16 @@ export function SettingsShell({ sections = SECTION_REGISTRY }: { sections?: read
   const holds = useLeaveHolds()
   const leaveHeld = anyDirty || holds.length > 0
   const titleOf = (id: string) => sections.find((section) => section.id === id)?.title ?? id
+
+  // Grown during render, so the area the address names mounts in the same pass it shows.
+  const [visited, setVisited] = useState<ReadonlySet<string>>(() => new Set([target.area]))
+  if (!visited.has(target.area)) setVisited(new Set([...visited, target.area]))
+  // Read from `sections` on each render, so a section list that gains an agent field mounts its area.
+  const opened = useMemo(
+    () =>
+      new Set([...visited, ...sections.filter((section) => AGENT_SECTIONS.has(section.id)).map((section) => section.area)]),
+    [visited, sections],
+  )
 
   const shown = useMemo(
     () =>
@@ -274,6 +290,7 @@ export function SettingsShell({ sections = SECTION_REGISTRY }: { sections?: read
 
           <div className="mt-5">
             {AREAS.map((area) => {
+              if (!opened.has(area.id)) return null
               const areaSections = sections.filter((section) => section.area === area.id)
               const nothingToShow =
                 area.servedByAgent &&

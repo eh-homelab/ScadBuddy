@@ -46,6 +46,9 @@ export function SourceCard({
   /** Its own problem (not one it carries from the source above) leaves its own row on. */
   const ownProblem = source.problem !== null && source.problem !== parentProblem
   const [open, setOpen] = useState(false)
+  /** Unfolded at least once: its rows and nested sources mount then, and stay. */
+  const [unfolded, setUnfolded] = useState(false)
+  if (open && !unfolded) setUnfolded(true)
   const [filter, setFilter] = useState('')
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState<string | null>(null)
@@ -121,13 +124,16 @@ export function SourceCard({
               className="h-7 max-w-xs text-xs"
             />
           )}
-          <div className="divide-y divide-border">
-            {rows.map((item) => (
-              <ItemRow key={item.id} source={source.id} item={item} onSaved={onChange} claims={source.kind !== 'builtin'} />
-            ))}
-          </div>
+          {/* A source can hold hundreds of tools: their rows wait for the first unfold. */}
+          {unfolded && (
+            <div className="divide-y divide-border">
+              {rows.map((item) => (
+                <ItemRow key={item.id} source={source.id} item={item} onSaved={onChange} claims={source.kind !== 'builtin'} />
+              ))}
+            </div>
+          )}
           {children}
-          {source.children.map((child) => (
+          {unfolded && source.children.map((child) => (
             <SourceCard
               key={child.id}
               source={child}

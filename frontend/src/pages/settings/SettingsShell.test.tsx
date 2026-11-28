@@ -11,7 +11,7 @@ import type { SettingsSection } from './registry'
 import { SettingsProviders, SettingsShell } from './SettingsShell'
 import { enter, renderSettingsShell } from './testing'
 
-// #2171 — Settings by area: one address per area, every area mounted at once so drafts
+// #2171 — Settings by area: one address per area, each area mounted once opened so drafts
 // survive a switch, and the leave guard asking only when the page itself is left.
 
 const availability = vi.hoisted((): AiAvailability => ({ available: true, state: 'configured' }))
@@ -23,7 +23,8 @@ function Where() {
   return <span data-testid="where">{`${pathname}${hash}`}</span>
 }
 
-const where = () => screen.getByTestId('where').textContent
+/** Each mounted fake section has a `Where`; an area mounts only once opened. */
+const where = () => screen.getAllByTestId('where')[0]?.textContent
 
 function Alpha() {
   const [value, setValue] = useState('')
@@ -48,6 +49,7 @@ function Beta() {
     <Section id="beta" title="Beta">
       <label htmlFor="beta-input">Beta</label>
       <input id="beta-input" value={value} onChange={(event) => setValue(event.target.value)} />
+      <Where />
     </Section>
   )
 }
@@ -56,6 +58,7 @@ function Packages() {
   return (
     <Section id="packages" title="Packages">
       <p>Plugin packages</p>
+      <Where />
     </Section>
   )
 }
@@ -134,6 +137,30 @@ describe('SettingsShell (#2171)', () => {
     Object.assign(availability, { available: true, state: 'configured' })
     localStorage.clear()
     vi.restoreAllMocks()
+  })
+
+  it('mounts an area when it is first opened, and keeps it mounted after', async () => {
+    const user = userEvent.setup()
+    renderSettingsShell(fakes, { route: '/settings/general' })
+    await screen.findByLabelText('Alpha')
+    // Not mounted, hidden or not: Tools & plugins and System are thousands of rows.
+    expect(screen.queryByText('Plugin packages')).toBeNull()
+    expect(screen.queryByRole('textbox', { name: 'Beta', hidden: true })).toBeNull()
+    await user.click(within(areas()).getByRole('link', { name: 'Tools & plugins' }))
+    expect(await screen.findByText('Plugin packages')).toBeVisible()
+    await user.click(within(areas()).getByRole('link', { name: 'General' }))
+    await waitFor(() => expect(where()).toBe('/settings/general'))
+    expect(screen.getByText('Plugin packages')).not.toBeVisible()
+  })
+
+  it("mounts the agent's field areas at once, so set_field finds them", async () => {
+    const withConnection: readonly SettingsSection[] = [
+      ...fakes,
+      { id: 'projects', area: 'library', title: 'Projects', order: 20, Component: Model },
+    ]
+    renderSettingsShell(withConnection, { route: '/settings/general' })
+    await screen.findByLabelText('Alpha')
+    expect(screen.getByText('The model')).not.toBeVisible()
   })
 
   it('redirects /settings to /settings/general', async () => {

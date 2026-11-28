@@ -61,12 +61,22 @@ function nameOf(element: Element): string {
   return element.getAttribute('aria-label') ?? ''
 }
 
-// #2171 — every area is rendered at once, so ids and landmark names must stay unique
+/** Opens each area in turn: an area mounts once opened and stays, so all are mounted after. */
+async function openEveryArea() {
+  const user = userEvent.setup()
+  const areas = screen.getByRole('navigation', { name: 'Settings areas' })
+  for (const link of within(areas).getAllByRole('link')) await user.click(link)
+  await user.click(within(areas).getByRole('link', { name: 'General' }))
+}
+
+// #2171 — every opened area stays mounted, so ids and landmark names must stay unique
 // across all of Settings, not only within one area.
-describe('SettingsPage, every area at once (#2171)', () => {
+// Every area mounted is all of Settings: it renders slowly under jsdom.
+describe('SettingsPage, every area opened (#2171)', { timeout: 60_000 }, () => {
   it('gives every section an id, heading and body no other element on the page has', async () => {
     renderPage(<SettingsPage />, { route: '/settings/general' })
     await seeded()
+    await openEveryArea()
     await waitFor(() => {
       for (const { id } of SECTION_REGISTRY) {
         expect(document.querySelectorAll(`[id="${id}"]`), id).toHaveLength(1)
@@ -79,6 +89,7 @@ describe('SettingsPage, every area at once (#2171)', () => {
   it('nests every heading inside a section below the section’s own h3', async () => {
     renderPage(<SettingsPage />, { route: '/settings/general' })
     await seeded()
+    await openEveryArea()
     // Once the agent's sections have loaded too: their cards bring headings of their own.
     await waitFor(() => expect(screen.queryByTestId('ai-audit-heading')).not.toBeNull())
     await waitFor(() => expect(document.getElementById('ai-credential-heading')).not.toBeNull())
@@ -95,6 +106,7 @@ describe('SettingsPage, every area at once (#2171)', () => {
   it('names no two regions alike', async () => {
     renderPage(<SettingsPage />, { route: '/settings/general' })
     await seeded()
+    await openEveryArea()
     // Each section's own heading, once the agent's sections have loaded too.
     await waitFor(() =>
       expect(document.querySelectorAll('section[aria-labelledby]').length).toBeGreaterThanOrEqual(
@@ -180,9 +192,11 @@ describe('SettingsPage, live (#269)', () => {
       ),
     )
     resetAiAvailability()
-    const hidden = renderPage(<SettingsPage />, { route: '/settings/tools' })
+    const user = userEvent.setup()
+    const hidden = renderPage(<SettingsPage />, { route: '/settings/assistant' })
     await seeded()
     await waitFor(() => expect(screen.getByTestId('ai-status')).toHaveAttribute('data-state', 'not_configured'))
+    await user.click(within(screen.getByRole('navigation', { name: 'Settings areas' })).getByRole('link', { name: 'Tools & plugins' }))
     expect(screen.queryByRole('region', { name: 'Packages' })).not.toBeInTheDocument()
     expect(screen.queryByRole('heading', { name: 'Plugin packages' })).not.toBeInTheDocument()
     expect(screen.queryByRole('heading', { name: 'Plugins' })).not.toBeInTheDocument()
