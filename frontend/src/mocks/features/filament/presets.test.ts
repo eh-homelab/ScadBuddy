@@ -127,6 +127,34 @@ describe('the preset mocks (#7204)', () => {
       }
     })
 
+    describe('the checks of begin in writes.go', () => {
+      const send = (path: string, method: string, headers: Record<string, string>, body = '{"name":"x"}') =>
+        fetch(`/api/v1/filament/presets${path}`, { method, body, headers: { 'Content-Type': 'application/json', ...headers } })
+
+      it.each(['0', '01', '-1', 'abc', '1.5', '99999999999999999999'])('answer 404 preset_not_found for the path id %s, before the key and the writes check', async (id) => {
+        writesOff()
+        for (const [path, method] of [[`/${id}/copy`, 'POST'], [`/${id}`, 'PATCH'], [`/${id}/mirror`, 'POST']] as const) {
+          const response = await send(path, method, {})
+          expect(response.status).toBe(404)
+          expect((await response.json()).code).toBe('preset_not_found')
+        }
+      })
+
+      it('answer 422 invalid_input for an Idempotency-Key that is empty or longer than 200 characters', async () => {
+        for (const key of ['', 'k'.repeat(201)]) {
+          const response = await send('/3/copy', 'POST', { 'Idempotency-Key': key })
+          expect(response.status).toBe(422)
+          expect((await response.json()).code).toBe('invalid_input')
+        }
+        expect((await send('/3/copy', 'POST', { 'Idempotency-Key': 'k'.repeat(200) })).status).toBe(201)
+      })
+
+      it('refuse a credential key whose name has the dotted capital I (U+0130), as Go does', async () => {
+        const cause = await failure(editPreset(3, { expected_version: 2, set: { 'PR\u0130NTHOST_AP\u0130KEY': 'x' } }, 'k'))
+        expect(cause).toMatchObject({ status: 422, problem: { code: 'key_refused' } })
+      })
+    })
+
     describe('the body checks of R7 come before not_manual and the lookup', () => {
       const refused = (body: Partial<PresetEdit>, id = 1) => failure(editPreset(id, { expected_version: 1, ...body } as PresetEdit, 'k'))
 

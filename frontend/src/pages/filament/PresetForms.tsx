@@ -14,8 +14,9 @@ const editable = (value: unknown): value is string | string[] => typeof value ==
 
 const toText = (value: string | string[]) => (Array.isArray(value) ? value.join('\n') : value)
 
-/** Text back to a value: a list stays a list, and a new text with more than one line becomes one. */
+/** Text back to a value: a list stays a list, and a new text with more than one line becomes one. No text at all is the empty list, a valid value. */
 function fromText(was: unknown, text: string): string | string[] {
+  if (Array.isArray(was) && text === '') return []
   if (!Array.isArray(was) && !text.includes('\n')) return text
   return text.split('\n').map((line) => line.replace(/\r$/, ''))
 }

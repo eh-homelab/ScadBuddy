@@ -407,6 +407,17 @@ describe('the preset page', () => {
       expect(seen[0]!.body).toEqual({ expected_version: 2, set: { nozzle_temperature: ['225', '230'] } })
     })
 
+    it('sends an empty list when the whole list text is cleared', async () => {
+      const seen = patchBody(() => HttpResponse.json({ changed: true, preset: detail({ id: 3, version: 3 }) }))
+      const { user } = show(3)
+      const form = await openEdit(user)
+      await user.clear(within(form).getByRole('textbox', { name: 'Value of nozzle_temperature' }))
+      expect(within(form).queryByText(/a list item is empty/)).not.toBeInTheDocument()
+      await user.click(within(form).getByRole('button', { name: 'Save edit' }))
+      await waitFor(() => expect(seen).toHaveLength(1))
+      expect(seen[0]!.body).toEqual({ expected_version: 2, set: { nozzle_temperature: [] } })
+    })
+
     it('refuses an empty line in a new list value too', async () => {
       const { user } = show(3)
       const form = await openEdit(user)

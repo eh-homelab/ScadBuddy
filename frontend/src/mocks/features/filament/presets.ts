@@ -188,8 +188,9 @@ const KEY_PATTERN = /^[A-Za-z0-9_.-]{1,128}$/
 const MAX_EDIT_KEYS = 500
 const CREDENTIAL_KEYS = new Set(['printhost_apikey', 'printhost_password', 'printhost_user'])
 const CREDENTIAL_PARTS = ['apikey', 'password', 'secret', 'token']
+/** `IsCredential` of Go: U+0130 is spelled as Python lowers it (an "i" and a combining dot above) before the lowercase. */
 const isCredential = (key: string) => {
-  const lowered = key.toLowerCase()
+  const lowered = key.replaceAll('\u0130', 'i\u0307').toLowerCase()
   return CREDENTIAL_KEYS.has(lowered) || CREDENTIAL_PARTS.some((part) => lowered.includes(part))
 }
 const shown = (key: string) => (Array.from(key).length <= 64 ? key : `${Array.from(key).slice(0, 64).join('')}…`)
@@ -197,13 +198,23 @@ const shown = (key: string) => (Array.from(key).length <= 64 ? key : `${Array.fr
 const keyRefused = (key: string, detail = `the key ${shown(key)} cannot be set or unset`) => problem(422, 'key_refused', detail, { key: shown(key) })
 const invalid = (detail: string) => problem(422, 'invalid_input', detail)
 
-/** What every write checks first, as `begin` in Go does: the area, the writes and (keyed) the key. */
-function begin(request: Request, keyed: boolean): Response | { key: string } {
+/** `presetID` of Go: a positive integer in its plain spelling that fits an int64. */
+const presetIdOf = (raw: string | readonly string[] | undefined) =>
+  typeof raw === 'string' && /^[1-9][0-9]*$/.test(raw) && BigInt(raw) <= 9223372036854775807n
+
+const MAX_KEY_CHARS = 200
+
+/** What every write checks first, in the order of `begin` in Go: the area, the path id, the writes and (keyed) the key. */
+function begin(request: Request, id: string | readonly string[] | undefined, keyed: boolean): Response | { key: string } {
   if (off) return bare404()
+  if (!presetIdOf(id)) return problem(404, 'preset_not_found', 'no such preset')
   if (noWrites) return problem(503, 'writes_not_configured', 'Preset writes are not set up on this server.')
   const key = request.headers.get('Idempotency-Key')
-  if (keyed && !key) return keyRequired()
-  return { key: key ?? '' }
+  if (!keyed) return { key: key ?? '' }
+  if (key === null) return keyRequired()
+  const chars = Array.from(key).length
+  if (chars < 1 || chars > MAX_KEY_CHARS) return invalid(`the Idempotency-Key is 1 to ${MAX_KEY_CHARS} characters`)
+  return { key }
 }
 
 /** The write that started and did not finish: it is checked after the body and before the activity. */
@@ -276,7 +287,7 @@ function once<T>(op: string, id: number, key: string, body: unknown, make: () =>
 
 export const handlers = [
   http.post(`${BASE}/:id/copy`, async ({ request, params }) => {
-    const began = begin(request, true)
+    const began = begin(request, params.id, true)
     if (began instanceof Response) return began
     const body = (await request.json()) as { name?: string }
     const refusal = nameRefusal(body.name, true)
@@ -300,7 +311,7 @@ export const handlers = [
     return HttpResponse.json(detailOf(made), { status: 201 })
   }),
   http.patch(`${BASE}/:id`, async ({ request, params }) => {
-    const began = begin(request, true)
+    const began = begin(request, params.id, true)
     if (began instanceof Response) return began
     const body = (await request.json()) as PresetEdit
     const refusal = editRefusal(body)
@@ -318,7 +329,7 @@ export const handlers = [
     return HttpResponse.json({ changed: result.changed, preset: detailOf(one) })
   }),
   http.post(`${BASE}/:id/mirror`, ({ request, params }) => {
-    const began = begin(request, false)
+    const began = begin(request, params.id, false)
     if (began instanceof Response) return began
     const late = pendingAnswer()
     if (late) return late
