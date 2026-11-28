@@ -128,12 +128,15 @@ class EntityProperty(BaseModel):
 
 class PropertyChange(BaseModel):
     """One set or remove of a key, as the history subscriber recorded it (#6949). A remove's
-    ``new`` and ``source`` are null; a first set's ``old`` is."""
+    ``new`` and ``source`` are null; a first set's ``old`` is. ``old`` and ``new`` are any
+    JSON: a value an older rule allowed stays readable after the rule changes (#8116).
+    ``event_seq`` is the event's place in the log, unique per change."""
 
+    event_seq: int
     key: str
     op: Literal["set", "remove"]
-    old: PropertyValue | None
-    new: PropertyValue | None
+    old: JsonValue
+    new: JsonValue
     source: str | None
     at: datetime
     actor: Actor
