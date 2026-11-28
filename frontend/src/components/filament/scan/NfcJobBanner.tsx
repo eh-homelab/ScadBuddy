@@ -388,7 +388,10 @@ export function NfcJobBanner({ session, onAnnounce }: { session: NfcSession; onA
       drop(target.id)
       reload()
     } catch (cause) {
-      text = `ScadBuddy could not cancel the job: ${detailOf(cause)}.`
+      text =
+        codeOf(cause) === 'write_begun'
+          ? 'Another page has begun writing this job. It ends with that write’s result.'
+          : `ScadBuddy could not cancel the job: ${detailOf(cause)}.`
     } finally {
       setCancelling((now) => (now === target.id ? null : now))
     }

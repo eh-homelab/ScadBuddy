@@ -89,7 +89,14 @@ function ColourCodeLookup() {
           inputMode="numeric"
           className="h-8 w-56"
           value={code}
-          onChange={(event) => setCode(event.target.value)}
+          onChange={(event) => {
+            // An answer for the old code would be misread once the field changes.
+            asked.current += 1
+            setCode(event.target.value)
+            setFound(null)
+            setError(null)
+            setBusy(false)
+          }}
         />
         <Button type="submit" size="sm" variant="ghost" disabled={busy || !code.trim()}>
           {busy ? <Spinner /> : <SearchIcon />} Look up

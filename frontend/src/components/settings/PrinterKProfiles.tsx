@@ -335,6 +335,9 @@ function KProfileForm({
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState<string | null>(null)
 
+  /** The name or K differs from the profile being edited: what Save writes, and what Delete note would drop. */
+  const profileEdited = was !== undefined && (name.trim() !== was.name || Number(k.trim()) !== Number(was.k_value))
+
   async function submit(event: FormEvent) {
     event.preventDefault()
     setBusy(true)
@@ -356,7 +359,7 @@ function KProfileForm({
     const noteChanged = text !== (note?.note ?? '')
     // A profile write runs once and on a single-nozzle printer is a delete and an add, so an
     // edit that changes only the note sends only the note.
-    const profileChanged = !was || name.trim() !== was.name || Number(k.trim()) !== Number(was.k_value)
+    const profileChanged = !was || profileEdited
     let result: KProfileWriteResult | undefined
     try {
       if (profileChanged) {
@@ -416,8 +419,6 @@ function KProfileForm({
     }
     onDone(said(result, `${saved}.`))
   }
-
-  const profileEdited = was !== undefined && (name.trim() !== was.name || Number(k.trim()) !== Number(was.k_value))
 
   async function deleteNote() {
     if (!note || !was) return
