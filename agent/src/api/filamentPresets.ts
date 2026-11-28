@@ -60,7 +60,24 @@ export interface FilamentPresetDiff {
   changes: FilamentPresetKeyChange[]
 }
 
-type Problem = { code?: string; detail?: string; title?: string }
+export interface FilamentPresetEdited {
+  changed: boolean
+  preset: FilamentPresetDetail | null
+}
+
+export interface FilamentPresetMirrorOutcome {
+  outcome: string
+  preset: FilamentPresetRow
+}
+
+export interface FilamentPresetEdit {
+  expected_version: number
+  name?: string
+  set?: Record<string, string | string[]>
+  unset?: string[]
+}
+
+type Problem = { code?: string; detail?: string; title?: string; current_version?: number }
 type Failure = { default: { headers: Record<string, unknown>; content: { 'application/problem+json': Problem } } }
 
 export interface FilamentPresetPaths {
@@ -76,6 +93,25 @@ export interface FilamentPresetPaths {
       parameters: { query?: never; header?: never; path: { preset_id: number }; cookie?: never }
       requestBody?: never
       responses: { 200: { headers: Record<string, unknown>; content: { 'application/json': FilamentPresetDetail } } } & Failure
+    }
+    patch: {
+      parameters: { query?: never; header: { 'Idempotency-Key': string }; path: { preset_id: number }; cookie?: never }
+      requestBody: { content: { 'application/json': FilamentPresetEdit } }
+      responses: { 200: { headers: Record<string, unknown>; content: { 'application/json': FilamentPresetEdited } } } & Failure
+    }
+  }
+  '/api/v1/filament/presets/{preset_id}/copy': {
+    post: {
+      parameters: { query?: never; header: { 'Idempotency-Key': string }; path: { preset_id: number }; cookie?: never }
+      requestBody: { content: { 'application/json': { name: string } } }
+      responses: { 201: { headers: Record<string, unknown>; content: { 'application/json': FilamentPresetDetail } } } & Failure
+    }
+  }
+  '/api/v1/filament/presets/{preset_id}/mirror': {
+    post: {
+      parameters: { query?: never; header?: never; path: { preset_id: number }; cookie?: never }
+      requestBody?: never
+      responses: { 200: { headers: Record<string, unknown>; content: { 'application/json': FilamentPresetMirrorOutcome } } } & Failure
     }
   }
   '/api/v1/filament/presets/{preset_id}/diff': {

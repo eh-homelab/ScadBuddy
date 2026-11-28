@@ -82,10 +82,15 @@ flowchart LR
   mounted last at `/` (`scadbuddy/main.py:2532`).
 - **Go core serves some paths instead.** Core (`tools/go/core`) answers the paths of the areas
   that `SCADBUDDY_CORE_AREAS` names (`tools/go/core/main.go`). The area `filament-presets`
-  (`tools/go/core/internal/filamentpresets`, #7204) serves the public, read-only
-  `GET /api/v1/filament/presets` routes. It reads the preset rows and each document's blob
-  from the store, and it needs the KEK and an `s3` store (`tools/go/core/README.md`). With
-  the area off, the paths go on to this API, which has no handler for them.
+  (`tools/go/core/internal/filamentpresets`, #7204) serves the public
+  `/api/v1/filament/presets` routes. Its reads take the preset rows and each document's blob
+  from the store, and need the KEK and an `s3` store (`tools/go/core/README.md`). Its three
+  writes (copy, edit, send again) write no row in Go. Each starts core's workflow
+  `FilamentPresetWrite` on core's own worker. The workflow runs one Python activity on the
+  `library` queue, which this API serves, so the API alone writes the rows. The writes need
+  `SCADBUDDY_TEMPORAL_ADDRESS` on the core container. Without it, core starts, the reads serve,
+  and each write answers 503 `writes_not_configured`. With the area off, the paths go on to
+  this API, which has no handler for them.
 - **Also runs untrusted code today:** openscad renders for the editor's checks and
   `openscad-lsp`, the latter under a no-network seccomp filter (`scadbuddy/editor/nonet.py:3-6`);
   #5296 moves them out.
@@ -109,6 +114,14 @@ flowchart LR
   standalone activities `inventory.<Name>`, each one write of a kind, item, lot, unit or move.
   It needs `SCADBUDDY_TEMPORAL_ADDRESS`, and the Python API reads through core's CRUD port
   (`SCADBUDDY_CORE_CRUD_URL`).
+- **Preset write worker (#7204).** With the area `filament-presets` and
+  `SCADBUDDY_TEMPORAL_ADDRESS` set, core also runs an unversioned Temporal worker on the task
+  queue `filament-presets` (`SCADBUDDY_TEMPORAL_TASK_QUEUE_FILAMENT_PRESETS`;
+  `tools/go/core/internal/filamentpresets/temporal.go`). It runs the workflow
+  `FilamentPresetWrite`, whose one step is a Python activity on `library`:
+  `filament_preset_copy`, `filament_preset_edit` or `filament_preset_mirror_again`. Without
+  the address no worker starts, the reads serve, and each write answers 503
+  `writes_not_configured` (plan ruling P22).
 - **History subscriber.** `internal/history` writes the property and parameter history from
   the event stream (row `history` of `event_subscribers`). A payload it cannot store stops
   its cursor; the row's `stopped_seq` names that event, and the API's scrape exports it as

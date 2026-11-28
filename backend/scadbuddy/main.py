@@ -2445,7 +2445,8 @@ def _library_activities(
         # starts it is not built yet.
         *_unknown_tray_activities(state),
         # Copy, edit and send again of ScadBuddy's own filament presets (#7204, N7). The Go
-        # routes that start them are not built yet.
+        # routes in tools/go/core/internal/filamentpresets start them, through core's
+        # workflow FilamentPresetWrite.
         *_preset_write_activities(state),
         *operation_activities(ops.store, state.settings_store, _kinds_on(ops, "library")),
         *trigger_activities,

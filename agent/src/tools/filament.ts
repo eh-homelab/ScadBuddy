@@ -45,9 +45,28 @@ const CHIP_FIELDS =
  */
 async function presetOk<T>(pending: Promise<{ data?: T; error?: unknown; response: Response }>, what: string): Promise<T> {
   const result = await pending
-  const code = (result.error as { code?: unknown } | undefined)?.code
-  if (result.response.status === 404 && typeof code !== 'string') {
+  const status = result.response.status
+  const problem = result.error as { code?: unknown; current_version?: unknown; key?: unknown; detail?: unknown } | undefined
+  const code = problem?.code
+  if (status === 404 && typeof code !== 'string') {
     throw new ToolError('the presets routes are not on yet on this server (core area filament-presets)')
+  }
+  if (!result.response.ok && typeof code === 'string') {
+    // As entities.ts does: the code is the ToolError's `problem` and is in the summary. The detail is the backend's text, so it is untrusted.
+    const extra =
+      code === 'version_moved'
+        ? ` The preset has a newer version than \`expected_version\`; nothing was written.${
+            typeof problem?.current_version === 'number' ? ` Its current version is ${problem.current_version}.` : ''
+          } Read it again, then repeat the edit.`
+        : code === 'key_refused' && typeof problem?.key === 'string'
+          ? ` The key is ${JSON.stringify(problem.key)}.`
+          : ''
+    throw new ToolError(
+      `${what} failed (HTTP ${status}, ${code}).${extra}`,
+      status,
+      typeof problem?.detail === 'string' ? problem.detail : undefined,
+      code,
+    )
   }
   return ok(Promise.resolve(result), what)
 }
@@ -2412,7 +2431,7 @@ const tools: Tool[] = [
       'spools use it. `source` says where the preset came from: `3dfp` (fetched from 3dfilamentprofiles.com), ' +
       '`bambuddy` (taken from Bambuddy) or `manual` (made in ScadBuddy). Only a `manual` preset can be edited. ' +
       '`mirror` is the state of its copy in Bambuddy: `sent`, `pending`, `failed` or `bambuddy_owned`. ' +
-      '`source` and `type_id` limit the list. The order is by name. The tools to copy, edit and send again come later. ' +
+      '`source` and `type_id` limit the list. The order is by name. The tools filament_preset_copy, filament_preset_update and filament_preset_mirror write them. ' +
       'Writes nothing.',
     input: z.object({
       source: z.enum(['3dfp', 'bambuddy', 'manual']).optional(),
@@ -2436,8 +2455,8 @@ const tools: Tool[] = [
     description:
       'One filament preset (#7204), as filament_preset_list shows it, with its `versions` and its `document`: the ' +
       'slicer settings of the current version, as text values. Credentials are never in it. `document` is null when ' +
-      'it cannot be read, and `document_error` says why. Only a `manual` preset can be edited. The tools to copy, ' +
-      'edit and send again come later. 404 `preset_not_found`. Writes nothing.',
+      'it cannot be read, and `document_error` says why. Only a `manual` preset can be edited. The tools filament_preset_copy, ' +
+      'filament_preset_update and filament_preset_mirror write them. 404 `preset_not_found`. Writes nothing.',
     input: z.object({ preset_id: z.number().int().positive() }),
     risk: 'read',
     source: SOURCE,
@@ -2473,6 +2492,102 @@ const tools: Tool[] = [
             params: { path: { preset_id }, query: { from_version, to_version } },
           }),
           `diff filament preset ${preset_id}`,
+        ),
+      ),
+  }),
+
+  defineTool({
+    name: 'filament_preset_copy',
+    label: 'Copy a filament preset',
+    description:
+      'Copy a filament preset (#7204) as a new `manual` preset named `name` (1 to 200 characters). It is a ' +
+      'new preset at version 1 and answers it as filament_preset_get does. While the setting ' +
+      '`filament_preset_mirror` is on, it also writes the copy to Bambuddy through the mirror; the `mirror` field ' +
+      'says how that went, and filament_preset_mirror sends it again. A repeat of the same call gets the first ' +
+      'answer. Problems, each with a `code`: 422 `invalid_input` (the name or the call is not valid), 422 ' +
+      '`idempotency_key_reused`, 404 `preset_not_found`, 409 `document_missing` (the store lost the preset ' +
+      'document), 503 `writes_not_configured`, and 503 `preset_write_pending` (the write may still run: read the ' +
+      'presets before you repeat it). Any other failure is 500. Writes ScadBuddy, and Bambuddy through the mirror. Approved first.',
+    input: z.object({ preset_id: z.number().int().positive(), name: z.string().min(1).max(200) }),
+    risk: 'outward',
+    source: SOURCE,
+    routes: [],
+    summarize: ({ preset_id, name }) => `Copy filament preset ${preset_id} as "${name}"`,
+    handler: async ({ preset_id, name }, ctx) =>
+      json(
+        await presetOk(
+          filamentPresetClient(ctx.backend).POST('/api/v1/filament/presets/{preset_id}/copy', {
+            params: { path: { preset_id }, header: { 'Idempotency-Key': idempotencyKey(ctx) } },
+            body: { name },
+          }),
+          `copy filament preset ${preset_id}`,
+        ),
+      ),
+  }),
+
+  defineTool({
+    name: 'filament_preset_update',
+    label: 'Edit a filament preset',
+    description:
+      'Edit a filament preset (#7204) and make a new version of it. Only a `manual` preset can be updated; copy ' +
+      'any other one first with filament_preset_copy. `expected_version` is the `version` you read; a newer one ' +
+      'is refused 409 `version_moved` with `current_version`, and nothing is written. `name` renames it (1 to ' +
+      '200 characters). `set` gives settings by key; a value is a string or a list of strings. `unset` lists the ' +
+      'keys to remove. A key matches `^[A-Za-z0-9_.-]{1,128}$`. `set` and `unset` hold at most 500 keys together. ' +
+      'An edit needs a `name`, a `set` or an `unset`. `name` and credential keys are refused as keys. The ' +
+      'answer is `changed` (false when the edit changes nothing, so no version is made) and the `preset`. While ' +
+      'the setting `filament_preset_mirror` is on, it also writes the new version to Bambuddy through the mirror; ' +
+      'filament_preset_mirror sends it again. Problems, each with a `code`: 409 `not_manual` (the preset is not ' +
+      'manual: copy it first), 409 `version_moved`, 422 `key_refused` (with the `key`), 422 `invalid_input`, 422 ' +
+      '`idempotency_key_reused`, 404 `preset_not_found`, 409 `document_missing`, 503 `writes_not_configured`, and ' +
+      '503 `preset_write_pending` (the write may still run: read the preset before you repeat it). Any other ' +
+      'failure is 500. Writes ScadBuddy, and Bambuddy through the mirror. Approved first.',
+    input: z.object({
+      preset_id: z.number().int().positive(),
+      expected_version: z.number().int().positive(),
+      name: z.string().min(1).max(200).optional(),
+      set: z.record(z.string(), z.union([z.string(), z.array(z.string())])).optional(),
+      unset: z.array(z.string()).optional(),
+    }),
+    risk: 'outward',
+    source: SOURCE,
+    routes: [],
+    summarize: ({ preset_id, expected_version }) => `Edit filament preset ${preset_id} (from version ${expected_version})`,
+    handler: async ({ preset_id, ...body }, ctx) =>
+      json(
+        await presetOk(
+          filamentPresetClient(ctx.backend).PATCH('/api/v1/filament/presets/{preset_id}', {
+            params: { path: { preset_id }, header: { 'Idempotency-Key': idempotencyKey(ctx) } },
+            body,
+          }),
+          `edit filament preset ${preset_id}`,
+        ),
+      ),
+  }),
+
+  defineTool({
+    name: 'filament_preset_mirror',
+    label: 'Send a filament preset to Bambuddy again',
+    description:
+      'Send a filament preset (#7204) to Bambuddy again, when its `mirror` is `pending` or `failed`. The answer ' +
+      'is `outcome` and the `preset` row. `outcome` is `sent` (Bambuddy took it), `failed` (the send ran and ' +
+      "failed; the preset's `mirror_error` says why), `busy` (another send of this preset runs: read the preset " +
+      'again later), `in_sync` (nothing to send: Bambuddy has it already) or `pending` (the send did not finish ' +
+      'in time and may still run). This is the one write of the three that does not change the preset. Problems, ' +
+      'each with a `code`: 409 `mirror_off` (the setting `filament_preset_mirror` is off), 409 `not_configured` ' +
+      '(no Bambuddy is set), 409 `instance_changed` (the Bambuddy URL changed: reset the links first), 409 ' +
+      '`not_mirrored` (a `bambuddy` preset is Bambuddy\'s own), 404 `preset_not_found`, 503 ' +
+      '`writes_not_configured`, and 503 `preset_write_pending`. Any other failure is 500. Writes Bambuddy through the mirror. Approved first.',
+    input: z.object({ preset_id: z.number().int().positive() }),
+    risk: 'outward',
+    source: SOURCE,
+    routes: [],
+    summarize: ({ preset_id }) => `Send filament preset ${preset_id} to Bambuddy again`,
+    handler: async ({ preset_id }, { backend }) =>
+      json(
+        await presetOk(
+          filamentPresetClient(backend).POST('/api/v1/filament/presets/{preset_id}/mirror', { params: { path: { preset_id } } }),
+          `send filament preset ${preset_id} again`,
         ),
       ),
   }),

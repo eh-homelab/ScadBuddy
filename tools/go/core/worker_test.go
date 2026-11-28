@@ -67,7 +67,7 @@ func TestAWorkerThatCouldNotStartIsBuiltAgain(t *testing.T) {
 		built = append(built, w)
 		return w
 	}
-	stop := startWorker(context.Background(), health, build)
+	stop := startWorker(context.Background(), "test", health, build)
 	time.Sleep(50 * time.Millisecond)
 	mu.Lock()
 	if len(built) != 0 {
@@ -111,7 +111,7 @@ func TestAFailedStartBuildsANewWorker(t *testing.T) {
 	done := make(chan struct{})
 	var stop func(context.Context)
 	go func() {
-		stop = startWorker(context.Background(), func(context.Context) error { return nil }, build)
+		stop = startWorker(context.Background(), "test", func(context.Context) error { return nil }, build)
 		close(done)
 	}()
 	<-done
@@ -140,7 +140,7 @@ func TestTheWorkersStopEndsAtTheDrainDeadline(t *testing.T) {
 	setWorkerRetry(t, time.Millisecond)
 	w := &slowWorker{fakeWorker: fakeWorker{ok: true}, release: make(chan struct{})}
 	defer close(w.release)
-	stop := startWorker(context.Background(), func(context.Context) error { return nil }, func() worker.Worker { return w })
+	stop := startWorker(context.Background(), "test", func(context.Context) error { return nil }, func() worker.Worker { return w })
 	for w.starts.Load() == 0 {
 		time.Sleep(time.Millisecond)
 	}

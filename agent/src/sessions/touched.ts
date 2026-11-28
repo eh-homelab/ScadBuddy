@@ -794,6 +794,10 @@ export const TOUCHES_NOTHING: ReadonlySet<string> = new Set([
   // #7025: a 3DFP create adds a filament on 3dfilamentprofiles.com and sets a type's
   // `tdfp_id`; neither is a recorded kind.
   'filament_tdfp_create',
+  // #7204: a filament preset is no recorded resource kind.
+  'filament_preset_copy',
+  'filament_preset_update',
+  'filament_preset_mirror',
   'filament_spool_upsert',
   'filament_spool_set_presets',
   'filament_spool_set_k_values',

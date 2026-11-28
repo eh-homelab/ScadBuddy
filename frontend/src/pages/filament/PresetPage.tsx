@@ -1,14 +1,16 @@
 import { ChevronLeftIcon } from 'lucide-react'
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
-import { Link, useParams } from 'react-router'
+import { Link, useNavigate, useParams } from 'react-router'
 import { ApiError } from '../../api/client'
-import { diffPreset, getPreset, problemCode, routeMissing, type PresetDetail, type PresetDiff, type PresetKeyChange, type PresetMirror, type PresetSource } from '../../api/filamentPresets'
+import { diffPreset, getPreset, mirrorPreset, problemCode, routeMissing, type PresetDetail, type PresetDiff, type PresetKeyChange, type PresetMirror, type PresetSource } from '../../api/filamentPresets'
 import { FilamentSearchBox } from '../../components/filament/FilamentSearchBox'
 import { filamentLinks } from '../../lib/filamentLinks'
 import { Button } from '@/components/ui/button'
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select'
 import { cn } from '@/lib/utils'
+import { CopyForm, EditForm } from './PresetForms'
 import { count } from './plural'
+import { canSendAgain, OUTCOME_TEXT, WRITES_OFF_TEXT, writeFailure } from './presetWrites'
 
 const SOURCE_LABEL: Record<PresetSource, string> = { '3dfp': '3DFP', bambuddy: 'Bambuddy', manual: 'Manual' }
 const MIRROR_LABEL: Record<PresetMirror, string> = { sent: 'Sent to Bambuddy', pending: 'Not sent to Bambuddy yet', failed: 'Send to Bambuddy failed', bambuddy_owned: 'Owned by Bambuddy' }
@@ -311,7 +313,96 @@ function Shell({ children }: { children: React.ReactNode }) {
 
 type Load = { state: 'loading' } | { state: 'off' } | { state: 'missing' } | { state: 'error'; message: string } | { state: 'ready'; preset: PresetDetail }
 
-function Loaded({ preset }: { preset: PresetDetail }) {
+type Notice = { text: string; tone: 'ok' | 'warn' }
+
+/** Copy, edit and send again. Each says what happened in the notice below the buttons. */
+function Actions({ preset, onPreset, reload }: { preset: PresetDetail; onPreset: (next: PresetDetail) => void; reload: () => void }) {
+  const navigate = useNavigate()
+  const [panel, setPanel] = useState<'copy' | 'edit' | null>(null)
+  const [notice, setNotice] = useState<Notice | null>(null)
+  const [off, setOff] = useState(false)
+  const [sending, setSending] = useState(false)
+
+  const writesOff = () => {
+    setOff(true)
+    setPanel(null)
+    setNotice({ text: WRITES_OFF_TEXT, tone: 'warn' })
+  }
+
+  const sendAgain = async () => {
+    setSending(true)
+    setNotice(null)
+    try {
+      const result = await mirrorPreset(preset.id)
+      if (result.preset.version !== preset.version) reload()
+      else onPreset({ ...preset, ...result.preset })
+      setNotice({ text: OUTCOME_TEXT[result.outcome], tone: result.outcome === 'failed' ? 'warn' : 'ok' })
+    } catch (cause) {
+      const failure = writeFailure(cause)
+      if (failure.off) writesOff()
+      else setNotice({ text: failure.text, tone: 'warn' })
+    } finally {
+      setSending(false)
+    }
+  }
+
+  const manual = preset.source === 'manual'
+  return (
+    <div className="flex flex-col gap-2">
+      <div className="flex flex-wrap items-center gap-2">
+        <Button type="button" variant="outline" size="sm" disabled={off} aria-expanded={panel === 'copy'} onClick={() => setPanel(panel === 'copy' ? null : 'copy')}>
+          Make a copy
+        </Button>
+        {manual && (
+          <Button type="button" variant="outline" size="sm" disabled={off || preset.document === null} aria-expanded={panel === 'edit'} onClick={() => setPanel(panel === 'edit' ? null : 'edit')}>
+            Edit
+          </Button>
+        )}
+        {canSendAgain(preset) && (
+          <Button type="button" variant="outline" size="sm" disabled={off || sending} onClick={sendAgain}>
+            Send again
+          </Button>
+        )}
+        {!manual && <span className="text-[13px] text-muted-foreground">Only a manual preset can be edited. Make a copy first.</span>}
+        {manual && preset.document === null && <span className="text-[13px] text-muted-foreground">The document is not in the store, so this preset cannot be edited.</span>}
+      </div>
+      {notice && (
+        <p role={notice.tone === 'warn' ? 'alert' : 'status'} className={cn('text-[13px]', notice.tone === 'warn' ? 'text-warn' : 'text-muted-foreground')}>
+          {notice.text}
+        </p>
+      )}
+      {panel === 'copy' && (
+        <CopyForm
+          key="copy"
+          preset={preset}
+          onClose={() => setPanel(null)}
+          onOff={writesOff}
+          onMade={(copy) => navigate(filamentLinks.preset(copy.id))}
+        />
+      )}
+      {panel === 'edit' && (
+        <EditForm
+          key="edit"
+          preset={preset}
+          onClose={() => setPanel(null)}
+          onOff={writesOff}
+          onMoved={(failure) => {
+            setPanel(null)
+            setNotice({ text: failure.text, tone: 'warn' })
+            reload()
+          }}
+          onSaved={(edited) => {
+            setPanel(null)
+            onPreset(edited.preset)
+            setNotice({ text: edited.changed ? `Saved as v${edited.preset.version}. ${MIRROR_LABEL[edited.preset.mirror]}.` : 'Nothing changed. No new version was made.', tone: 'ok' })
+          }}
+        />
+      )}
+    </div>
+  )
+}
+
+function Loaded({ preset, onPreset, reload }: { preset: PresetDetail; onPreset: (next: PresetDetail) => void; reload: () => void }) {
   const diffs = useDiffCache(preset.id)
   const where = [preset.printer_model, preset.nozzle_diameter && `${preset.nozzle_diameter} mm`, preset.filament_type].filter(Boolean).join(', ')
   return (
@@ -333,19 +424,26 @@ function Loaded({ preset }: { preset: PresetDetail }) {
         </p>
         {preset.mirror_error && <p className="text-[13px] text-muted-foreground">{preset.mirror_error}</p>}
       </header>
+      <div className="mb-6">
+        <Actions preset={preset} onPreset={onPreset} reload={reload} />
+      </div>
       <div className="flex flex-col gap-6">
-        <Versions preset={preset} diffs={diffs} />
-        <Compare preset={preset} diffs={diffs} />
-        <Document preset={preset} />
+        <Versions key={`versions-${preset.version}`} preset={preset} diffs={diffs} />
+        <Compare key={`compare-${preset.version}`} preset={preset} diffs={diffs} />
+        <Document key={`document-${preset.version}`} preset={preset} />
       </div>
     </Shell>
   )
 }
 
-/** #7204 — one filament preset, read only: its versions with the keys each changed, a compare of any two, and the current document. */
+/** #7204 — one filament preset: its versions with the keys each changed, a compare of any two, the current document, and copy, edit and send again. */
 export function PresetPage() {
   const { id } = useParams()
   const [load, setLoad] = useState<{ id: string | undefined; value: Load }>({ id, value: { state: 'loading' } })
+
+  // Bumped to read the preset again (another edit came first, or a send moved its version).
+  const [reads, setReads] = useState(0)
+  const reload = useCallback(() => setReads((n) => n + 1), [])
 
   useEffect(() => {
     const number = Number(id)
@@ -366,7 +464,7 @@ export function PresetPage() {
     return () => {
       live = false
     }
-  }, [id])
+  }, [id, reads])
 
   const value: Load = load.id === id ? load.value : { state: 'loading' }
   if (value.state === 'loading')
@@ -396,5 +494,5 @@ export function PresetPage() {
       </Shell>
     )
 
-  return <Loaded key={value.preset.id} preset={value.preset} />
+  return <Loaded key={value.preset.id} preset={value.preset} onPreset={(preset) => setLoad({ id, value: { state: 'ready', preset } })} reload={reload} />
 }

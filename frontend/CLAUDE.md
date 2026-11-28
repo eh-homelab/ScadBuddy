@@ -334,12 +334,12 @@ same way, `vite.config.ts`).
 - `frontend/src/pages/filament/` and `components/filament/` — the Filament section (#6262, spec
   2026-11-14 §10). `/filament` opens Spools; the tabs are Spools, Types, Presets, Tags, Suppliers, Invoices, Locations,
   Catalog, Metrics, Shopping list and Ledger (`pages/filament/tabs.ts`).
-  Presets (#7204, read-only, Go core's area `filament-presets`): the Presets tab
+  Presets (#7204, Go core's area `filament-presets`): the Presets tab
   (`pages/filament/PresetsTab.tsx`) lists each preset with its source, version and mirror
   state, and filters by source and by type. A preset's page `/filament/presets/:id`
   (`PresetPage.tsx`) shows its versions, newest first, 10 at a time with "Show more", the
   diff between two versions and the document. Links come from `lib/filamentLinks.ts`. The
-  mock is `mocks/features/filament/presets.ts`. A 404 with no `code` means Python answered
+  mock is `mocks/features/filament/presets.ts`. A copy, an edit of a manual preset and "Send again" (shown for a `failed` or `pending` mirror, on the tab and the page) are `PresetForms.tsx` and `presetWrites.ts`: one `Idempotency-Key` for each opened form (1 to 200 characters; a copy and an edit need it, a send again does not), sent again after a 503 `preset_write_pending`; clearing a whole list text sends `[]`, and only an empty item inside a non-empty list is refused in the form; a 409 `version_moved` reads the preset again; a 503 `writes_not_configured` says writes are not on yet (`writesOff()` in the mock: core has no `SCADBUDDY_TEMPORAL_ADDRESS`). The mock checks as Go's `writes.go` does: the path id, then the writes, then the key (428 with none, 422 `invalid_input` for a length outside 1 to 200), then the body, and its `isCredential` is Go's rule, U+0130 included. A 404 with no `code` means Python answered
   because core does not serve the area yet. The tab then shows "Presets are not on yet on
   this server." in place of the table, and the page shows it in place of the versions and the
   document (`PresetsTab.tsx`, `PresetPage.tsx`).
