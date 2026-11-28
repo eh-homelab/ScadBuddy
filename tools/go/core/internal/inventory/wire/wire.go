@@ -207,7 +207,7 @@ type ItemInput struct {
 	LifeHours      *Decimal      `json:"life_hours,omitempty"`
 	LifeMonths     *int64        `json:"life_months,omitempty"`
 	Saleable       *bool         `json:"saleable,omitempty"`
-	Source         *string       `json:"source,omitempty"`
+	Source         Opt[string]   `json:"source,omitzero"`
 	SourceRef      *string       `json:"source_ref,omitempty"`
 	Note           string        `json:"note,omitempty"`
 	Steps          model.Steps   `json:"steps,omitempty"`

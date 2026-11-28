@@ -3,6 +3,7 @@ package handlers
 import (
 	"errors"
 	"reflect"
+	"strings"
 	"testing"
 
 	"github.com/eh-homelab/ScadBuddy/tools/go/core/internal/inventory/model"
@@ -186,8 +187,10 @@ func TestRegistryNamesAHandlerNotBuilt(t *testing.T) {
 func TestImplementRefusesAnUnknownHandler(t *testing.T) {
 	r := &Registry{Catalog: Builtin()}
 	defer func() {
-		if recover() == nil {
-			t.Fatal("Implement took a handler the catalog does not have")
+		// The panic must be Implement's own, naming the id, not another one (#8494).
+		got, _ := recover().(string)
+		if !strings.Contains(got, `"life.hourz"`) || !strings.Contains(got, "no such handler") {
+			t.Fatalf("Implement took a handler the catalog does not have, or panicked otherwise: %q", got)
 		}
 	}()
 	r.Implement("life.hourz", "impl")

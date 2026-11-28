@@ -176,14 +176,17 @@ func TestAFilamentItemIsRefused(t *testing.T) {
 	refusal(t, err, 409, "filament_item_refused")
 }
 
-// No source is manual, and an empty one is 422, as models.py ItemInput answers (#8256).
+// No source is manual, and an empty or a null one is 422, as models.py ItemInput answers
+// (#8256, #8493).
 func TestAnItemWithNoSourceIsManualAndAnEmptyOneIsRefused(t *testing.T) {
 	pool, s := testdb.New(t), itemStore()
 	made := must(createItem(t, pool, s, wire.ItemInput{KindID: "hardware", Name: "M3 nut"}))
 	if made.Source != "manual" {
 		t.Fatalf("source %q, want manual", made.Source)
 	}
-	_, err := createItem(t, pool, s, wire.ItemInput{KindID: "hardware", Name: "M2 nut", Source: ptr("")})
+	_, err := createItem(t, pool, s, wire.ItemInput{KindID: "hardware", Name: "M2 nut", Source: wire.Some("")})
+	refusal(t, err, 422, "bad_input")
+	_, err = createItem(t, pool, s, wire.ItemInput{KindID: "hardware", Name: "M2 nut", Source: wire.Null[string]()})
 	refusal(t, err, 422, "bad_input")
 }
 
@@ -199,7 +202,7 @@ func TestAnItemOfAnUnknownOrArchivedKindIsRefused(t *testing.T) {
 
 func TestAnImportedItemsEditsAreRemembered(t *testing.T) {
 	pool, s := testdb.New(t), itemStore()
-	made := must(createItem(t, pool, s, wire.ItemInput{KindID: "nozzle", Name: "0.4 hardened", Source: ptr("bambu_store"), SourceRef: ptr("SKU-1")}))
+	made := must(createItem(t, pool, s, wire.ItemInput{KindID: "nozzle", Name: "0.4 hardened", Source: wire.Some("bambu_store"), SourceRef: ptr("SKU-1")}))
 
 	updated := must(updateItem(t, pool, s, made.ID, wire.InventoryItemPatch{Name: ptr("0.4 mm hardened"), Note: ptr("")}))
 	if updated.Name != "0.4 mm hardened" || !reflect.DeepEqual(updated.EditedFields, []string{"name"}) {
