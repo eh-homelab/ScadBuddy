@@ -172,3 +172,66 @@ func TestRouteMissingBacksOff(t *testing.T) {
 		t.Fatalf("%+v", got)
 	}
 }
+
+func TestARefusedRowWaitsUntilItChanges(t *testing.T) {
+	refused := &registry.ProblemError{Status: 422, Detail: "String should have at most 40 characters"}
+	reg := &fakeRegistry{sessionErr: []error{refused}}
+	c := &clock{time.Unix(1_800_000_000, 0)}
+	r := newReporter(reg, c)
+	var logged []string
+	r.logRefused = func(session string, reason error) {
+		if !errors.Is(reason, refused) {
+			t.Errorf("logged %v, want the 422", reason)
+		}
+		logged = append(logged, session)
+	}
+	id := rows("busy")[0].SessionID
+
+	if err := r.Report(context.Background(), rows("busy")); !errors.Is(err, refused) {
+		t.Fatalf("the refusal was not reported: %v", err)
+	}
+	reg.take()
+	// The same row, at each scan and past the refresh: never sent again, logged once.
+	for _, step := range []time.Duration{10 * time.Second, 10 * time.Second, 6 * time.Minute} {
+		c.t = c.t.Add(step)
+		if err := r.Report(context.Background(), rows("busy")); err != nil {
+			t.Fatal(err)
+		}
+		for _, got := range reg.take() {
+			if got.kind == "session" {
+				t.Fatalf("the refused row was sent again after %v", step)
+			}
+		}
+	}
+	if len(logged) != 1 || logged[0] != id {
+		t.Fatalf("logged %v, want %s once", logged, id)
+	}
+	// The row changes: it is sent, and once sent it is no longer held back.
+	c.t = c.t.Add(10 * time.Second)
+	if err := r.Report(context.Background(), rows("idle")); err != nil {
+		t.Fatal(err)
+	}
+	if got := reg.take(); len(got) != 1 || got[0].status != "idle" {
+		t.Fatalf("the changed row: %+v", got)
+	}
+	if len(r.refused) != 0 {
+		t.Fatalf("still held back: %+v", r.refused)
+	}
+}
+
+func TestARefusedSessionThatGoesIsForgotten(t *testing.T) {
+	reg := &fakeRegistry{sessionErr: []error{&registry.ProblemError{Status: 422}}}
+	c := &clock{time.Unix(1_800_000_000, 0)}
+	r := newReporter(reg, c)
+	r.logRefused = func(string, error) {}
+	_ = r.Report(context.Background(), rows("busy"))
+	_ = r.Report(context.Background(), nil)
+	if len(r.refused) != 0 {
+		t.Fatalf("a gone session is still held back: %+v", r.refused)
+	}
+	reg.take()
+	_ = r.Report(context.Background(), rows("busy"))
+	if got := reg.take(); len(got) != 1 || got[0].kind != "session" {
+		t.Fatalf("the session that came back: %+v", got)
+	}
+}

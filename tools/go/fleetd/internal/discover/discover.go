@@ -55,8 +55,11 @@ type Options struct {
 	GitTimeout time.Duration
 }
 
-// The limits and forms core's registry accepts (tools/go/core/internal/fleet/registry.go).
-// A value that would fail them is left out, so one odd field never loses the whole row.
+// The limits and forms core's registry accepts (tools/go/core/internal/fleet/registry.go,
+// putMachine and putSession). A value that would fail them is left out, so one odd field
+// never loses the whole row. ../../testdata/registry-vectors.json holds values core takes
+// and values it refuses; core's registry tests and this package's tests both read it, so the
+// cleaners below and core's checks cannot drift apart.
 var (
 	uuidPattern    = regexp.MustCompile(`^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$`)
 	controlPattern = regexp.MustCompile(`[\x00-\x1f\x7f\x{80}-\x{9f}]`)
@@ -93,6 +96,23 @@ func match(re *regexp.Regexp, s string) string {
 	}
 	return ""
 }
+
+// The cleaners: each is a field's value as fleetd sends it, or "" when core would refuse it.
+// A required field that cleans to "" loses the row (a session) or gets a stand-in (a
+// machine's).
+
+func sessionID(s string) string      { return strings.ToLower(match(uuidPattern, s)) }
+func validPID(pid int) bool          { return pid >= 1 && pid <= pidMax }
+func cleanProcStart(s string) string { return match(procPattern, s) }
+func cleanBranch(s string) string    { return plain(s, 255) }
+func cleanHead(s string) string      { return match(headPattern, s) }
+func cleanVersion(s string) string   { return match(versionPattern, s) }
+func cleanLabel(s string) string     { return plain(s, 40) } // kind, entrypoint and status
+func cleanName(s string) string      { return plain(s, 200) }
+func cleanAccount(s string) string   { return strings.ToLower(match(uuidPattern, s)) }
+func cleanHostname(s string) string  { return plain(s, 253) }
+func cleanOS(s string) string        { return plain(s, 100) }
+func cleanOSUser(s string) string    { return plain(s, 64) }
 
 // MachineID is the hex SHA-256 of the machine id in path (/etc/machine-id) and the OS user,
 // joined by ':' (a user name never holds one). The raw id never leaves this function.
@@ -200,7 +220,7 @@ func AccountUUID(configDir string) string {
 	if json.Unmarshal(b, &f) != nil {
 		return ""
 	}
-	return match(uuidPattern, f.ClaudeAiOauth.AccountUUID)
+	return cleanAccount(f.ClaudeAiOauth.AccountUUID)
 }
 
 // Git is a cwd's git facts; empty outside a repo.
@@ -240,8 +260,8 @@ func GitFacts(ctx context.Context, dir string, timeout time.Duration) Git {
 		g.Remote = CleanRemote(first)
 	}
 	g.Root = absolute(g.Root)
-	g.Head = match(headPattern, g.Head)
-	g.Branch = plain(g.Branch, 255)
+	g.Head = cleanHead(g.Head)
+	g.Branch = cleanBranch(g.Branch)
 	return g
 }
 
@@ -332,15 +352,16 @@ func Scan(ctx context.Context, o Options) []Row {
 			if json.Unmarshal(b, &s) != nil {
 				continue
 			}
-			start := match(procPattern, string(s.ProcStart))
+			start := cleanProcStart(string(s.ProcStart))
 			cwd := absolute(s.Cwd)
-			if !uuidPattern.MatchString(s.SessionID) || s.PID < 1 || s.PID > pidMax || start == "" ||
+			id := sessionID(s.SessionID)
+			if id == "" || !validPID(s.PID) || start == "" ||
 				cwd == "" || absolute(dir) == "" || !Live(o.ProcRoot, s.PID, start) {
 				continue
 			}
 			g := GitFacts(ctx, cwd, o.GitTimeout)
 			rows = append(rows, Row{
-				SessionID:      strings.ToLower(s.SessionID),
+				SessionID:      id,
 				PID:            s.PID,
 				ProcStart:      start,
 				Cwd:            cwd,
@@ -350,11 +371,11 @@ func Scan(ctx context.Context, o Options) []Row {
 				GitBranch:      g.Branch,
 				WorktreeRoot:   g.Root,
 				GitHead:        g.Head,
-				CCVersion:      match(versionPattern, s.Version),
-				Kind:           plain(s.Kind, 40),
-				Entrypoint:     plain(s.Entrypoint, 40),
-				Name:           plain(s.Name, 200),
-				Status:         plain(s.Status, 40),
+				CCVersion:      cleanVersion(s.Version),
+				Kind:           cleanLabel(s.Kind),
+				Entrypoint:     cleanLabel(s.Entrypoint),
+				Name:           cleanName(s.Name),
+				Status:         cleanLabel(s.Status),
 				AccountUUID:    account,
 			})
 		}

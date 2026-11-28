@@ -92,6 +92,8 @@ Core's answers:
   older core pod answers so during a rollout. fleetd stops that scan, logs it once, and
   tries again at the next scan.
 - **404 `unknown-machine`**: fleetd registers the machine again, then sends the row again.
+- **422 on a session's row**: core refuses the row as it is. fleetd logs it once and does
+  not send that row again until the row changes (or the session goes and comes back).
 - **Any other failure**: fleetd logs it and sends the row again at the next scan.
 
 `fleetd scan` prints the same machine and rows as JSON and exits. It sends nothing and
@@ -133,7 +135,9 @@ needs no token.
   as `git@`), which core requires and which holds no password. A remote in another form,
   or with a password in the scp-like form, is not sent.
 - A value that core would refuse (a control character, too long) is left out of the row,
-  so one odd field does not lose the whole row.
+  so one odd field does not lose the whole row. `testdata/registry-vectors.json` holds
+  values core takes and values it refuses; core's registry tests and fleetd's discover tests
+  both read it, so the two sets of limits cannot drift apart.
 
 ## Telemetry
 

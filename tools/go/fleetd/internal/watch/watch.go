@@ -87,6 +87,11 @@ func (w *Watcher) read() {
 				if d, ok := w.byWD[int(ev.Wd)]; ok {
 					delete(w.byWD, int(ev.Wd))
 					delete(w.watched, d)
+					if ev.Mask&unix.IN_MOVE_SELF != 0 {
+						// A dir moved away still exists, and so does its watch: drop it,
+						// or its changes would still be signalled.
+						_, _ = unix.InotifyRmWatch(w.fd, uint32(ev.Wd))
+					}
 				}
 				w.mu.Unlock()
 			}

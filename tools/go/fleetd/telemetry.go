@@ -61,9 +61,7 @@ func startTelemetry(cfg telemetryConfig, stderr io.Writer) (*tel, func(time.Dura
 		slog.Warn("fleetd: telemetry is off", "err", err)
 		t = &shared.Telemetry{}
 	}
-	if t.Logs != nil {
-		slog.SetDefault(slog.New(t.LogHandler(text, serviceName, func(a slog.Attr) bool { return loggedKeys[a.Key] })))
-	}
+	setLogger(t, text)
 	var tp trace.TracerProvider = tracenoop.NewTracerProvider()
 	if p := t.Tracer(); p != nil {
 		tp = p
@@ -83,6 +81,13 @@ func startTelemetry(cfg telemetryConfig, stderr io.Writer) (*tel, func(time.Dura
 		defer cancel()
 		t.Shutdown(ctx)
 	}
+}
+
+// setLogger makes slog's default text, plus, with logs on, the OTLP copy with loggedKeys
+// only. The log package's lines (net/http's ErrorLog) go to text alone: SetDefaultLogger
+// keeps them off OTLP, which slog.SetDefault alone would not.
+func setLogger(t *shared.Telemetry, text slog.Handler) {
+	t.SetDefaultLogger(text, serviceName, func(a slog.Attr) bool { return loggedKeys[a.Key] })
 }
 
 // transport wraps a transport in a CLIENT span per request (method, status, the API's host;

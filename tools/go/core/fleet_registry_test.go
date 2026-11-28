@@ -5,6 +5,8 @@ import (
 	"crypto/sha256"
 	"encoding/base64"
 	"encoding/hex"
+	"encoding/json"
+	"fmt"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -542,6 +544,119 @@ func TestTheRemoteIsAPlainGitURL(t *testing.T) {
 		got := g.do("PUT", rotatorBase+onMachine+uuid(), sessionBody("git_remote", c.remote), bearer(g.rotatorToken))
 		if got.status != want {
 			t.Errorf("%q: %d %s, want %d", c.remote, got.status, got.raw, want)
+		}
+	}
+}
+
+// The registry's limits, held to fleetd's vectors (#8590): fleetd's discover tests read the
+// same file, so the machine service never sends a value core refuses.
+
+type registryVectorGroup struct {
+	Fields  []string
+	OK, Bad []json.RawMessage
+}
+
+type registryVectors struct {
+	SessionID struct{ OK, Bad []json.RawMessage } `json:"session_id"`
+	Machine   []registryVectorGroup
+	Session   []registryVectorGroup
+}
+
+// registryVectorValue is a vector's value: a string, a number, or {prefix, repeat, n, suffix}.
+func registryVectorValue(t *testing.T, raw json.RawMessage) any {
+	t.Helper()
+	var s string
+	if json.Unmarshal(raw, &s) == nil {
+		return s
+	}
+	var n int
+	if json.Unmarshal(raw, &n) == nil {
+		return n
+	}
+	var r struct {
+		Prefix, Repeat, Suffix string
+		N                      int
+	}
+	if err := json.Unmarshal(raw, &r); err != nil || r.Repeat == "" {
+		t.Fatalf("bad vector %s", raw)
+	}
+	return r.Prefix + strings.Repeat(r.Repeat, r.N) + r.Suffix
+}
+
+func readRegistryVectors(t *testing.T) registryVectors {
+	t.Helper()
+	raw, err := os.ReadFile("../fleetd/testdata/registry-vectors.json")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var v registryVectors
+	if err := json.Unmarshal(raw, &v); err != nil {
+		t.Fatal(err)
+	}
+	if len(v.SessionID.OK) == 0 || len(v.SessionID.Bad) == 0 || len(v.Machine) == 0 || len(v.Session) == 0 {
+		t.Fatal("registry-vectors.json lacks a list")
+	}
+	return v
+}
+
+func TestTheRegistryHoldsToFleetdsVectors(t *testing.T) {
+	g := newRegistry(t)
+	g.write("/machines/"+machineID, machineBody(), 200)
+	v := readRegistryVectors(t)
+	short := func(x any) string {
+		s := fmt.Sprint(x)
+		if r := []rune(s); len(r) > 40 {
+			return string(r[:40]) + "…"
+		}
+		return s
+	}
+
+	for _, raw := range v.SessionID.OK {
+		id := registryVectorValue(t, raw).(string)
+		if got := g.do("PUT", rotatorBase+onMachine+id, sessionBody(), bearer(g.rotatorToken)); got.status != 200 {
+			t.Errorf("session id %q: %d %s", id, got.status, got.raw)
+		}
+	}
+	for _, raw := range v.SessionID.Bad {
+		id := registryVectorValue(t, raw).(string)
+		if got := g.do("PUT", rotatorBase+onMachine+id, sessionBody(), bearer(g.rotatorToken)); got.status != 422 {
+			t.Errorf("session id %q: %d %s, want 422", id, got.status, got.raw)
+		}
+	}
+
+	machine := func(field string, value any) string {
+		m := map[string]any{"hostname": "devbox", "os": "linux", "os_user": "elan", "service_version": "0.1.0"}
+		m[field] = value
+		b, err := json.Marshal(m)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return string(b)
+	}
+	for _, grp := range v.Machine {
+		for _, field := range grp.Fields {
+			for want, list := range map[int][]json.RawMessage{200: grp.OK, 422: grp.Bad} {
+				for _, raw := range list {
+					value := registryVectorValue(t, raw)
+					got := g.do("PUT", rotatorBase+"/machines/"+machineID, machine(field, value), bearer(g.rotatorToken))
+					if got.status != want {
+						t.Errorf("machine %s %q: %d %s, want %d", field, short(value), got.status, got.raw, want)
+					}
+				}
+			}
+		}
+	}
+	for _, grp := range v.Session {
+		for _, field := range grp.Fields {
+			for want, list := range map[int][]json.RawMessage{200: grp.OK, 422: grp.Bad} {
+				for _, raw := range list {
+					value := registryVectorValue(t, raw)
+					got := g.do("PUT", rotatorBase+onMachine+uuid(), sessionBody(field, value), bearer(g.rotatorToken))
+					if got.status != want {
+						t.Errorf("session %s %q: %d %s, want %d", field, short(value), got.status, got.raw, want)
+					}
+				}
+			}
 		}
 	}
 }
