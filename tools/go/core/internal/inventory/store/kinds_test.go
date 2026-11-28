@@ -427,7 +427,7 @@ func TestAnUpdateWaitsForARestoreOfItsChild(t *testing.T) {
 	wait, cancel := context.WithTimeout(ctx, 5*time.Second)
 	defer cancel()
 	if _, err := restore.Exec(wait, `SELECT id FROM item_kinds WHERE id = 'widget' FOR SHARE`); err != nil {
-		t.Fatalf("the restore could not take the parent: %v", err)
+		t.Fatalf("the restore could not take the parent: the update took the parent's row before the tree lock: %v", err)
 	}
 	if err := restore.Commit(ctx); err != nil {
 		t.Fatal(err)
