@@ -102,6 +102,22 @@ if RELEASE_ASSET_CURL="$work/nocurl" "$script" --resolve "$work/missing" >"$work
   fail "--resolve should fail on a missing pin"
 fi
 
+# A workflow's copy of the Temporal CLI pin must equal the Dockerfile's (#8513).
+make_root "$work/copy" 10 "$(sha 10)"
+cat >"$work/copy/.github/workflows/go.yml" <<COPY
+        env:
+          TEMPORAL_CLI_VERSION: 1.9.1
+          TEMPORAL_CLI_SHA256: $(printf 'temporal' | sha256sum | cut -d ' ' -f 1)
+COPY
+RELEASE_ASSET_CURL="$work/nocurl" "$script" --resolve "$work/copy" >"$work/out" ||
+  fail "matching copies should pass: $(cat "$work/out")"
+sed -i 's/TEMPORAL_CLI_VERSION: 1.9.1/TEMPORAL_CLI_VERSION: "1.9.0"/' "$work/copy/.github/workflows/go.yml"
+if RELEASE_ASSET_CURL="$work/nocurl" "$script" --resolve "$work/copy" >"$work/out"; then
+  fail "a copy left behind by a bump should fail"
+fi
+grep -q "file=.github/workflows/go.yml,line=2::TEMPORAL_CLI_VERSION is 1.9.0 here, not the Dockerfile's 1.9.1" "$work/out" ||
+  fail "names the stale copy: $(cat "$work/out")"
+
 # The repo's own Dockerfile and ci.yml: every pin is found.
 RELEASE_ASSET_CURL="$work/nocurl" "$script" --resolve "$here/../.." >"$work/out" ||
   fail "the repo's pins should resolve: $(cat "$work/out")"
