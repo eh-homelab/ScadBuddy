@@ -184,6 +184,14 @@ updates:
       # so the exporter and the tracing bridge move with it.
       opentelemetry:
         patterns: ["opentelemetry*", "tracing-opentelemetry"]
+    ignore:
+      # temporalio-sdk 1.3.0 (the newest) requires opentelemetry 0.32; a 0.33
+      # tree mixes two OTel versions and sb-temporal does not compile (#8339).
+      # Remove when a temporalio-sdk release moves to 0.33 (#8581).
+      - dependency-name: "opentelemetry*"
+        versions: [">= 0.33.a"]
+      - dependency-name: "tracing-opentelemetry"
+        versions: [">= 0.34.a"]
 
   # The frontend and the AI agent service (#261), one entry for both. A group
   # in a multi-directory entry is one PR across every directory it touches,
