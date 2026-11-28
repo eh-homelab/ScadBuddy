@@ -478,6 +478,22 @@ export type ProfileFetchStarted = Schemas['ProfileFetchStarted']
 export type ProfileFetchStatus = Schemas['ProfileFetchStatus']
 export type MissingKey = Schemas['MissingKey']
 
+export type TdfpSearchAsk = Schemas['SearchAsk']
+export type TdfpCandidate = Schemas['Candidate']
+export type TdfpSearchAnswer = Schemas['SearchAnswer']
+export type TdfpCreateRequest = Schemas['TdfpCreateRequest']
+export type TdfpCreated = Schemas['TdfpCreated']
+
+/** #7025: searches 3dfilamentprofiles.com on the profile-fetch worker; it reads only and stores nothing. */
+export const searchTdfp = (ask: TdfpSearchAsk) => request<TdfpSearchAnswer>(`${BASE}/tdfp/search`, json('POST', ask))
+
+/**
+ * #7025: adds a filament to 3dfilamentprofiles.com, once per `key` (the same key and body answer the
+ * first outcome). `status` `duplicate` saved nothing; `type_id`, when sent, takes the new id.
+ */
+export const createTdfpFilament = (body: TdfpCreateRequest, key: string) =>
+  request<TdfpCreated>(`${BASE}/tdfp/filaments`, { ...json('POST', body), headers: { 'Idempotency-Key': key } })
+
 /**
  * Starts a fetch of the type's presets from 3dfilamentprofiles.com (its saved `tdfp_id`),
  * or joins the one that runs (`joined`). 422 `no_tdfp_id` or `no_printer_models`; 503 when
