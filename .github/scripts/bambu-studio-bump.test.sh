@@ -60,6 +60,15 @@ run() {
   BAMBU_STUDIO_RELEASES_URL="file://$work/releases.json" "$bump" "$work/repo"
 }
 
+# `refused <why> <stderr pattern>`: the run exits non-zero for the reason named.
+refused() {
+  if run >/dev/null 2>"$work/err"; then
+    fail "$1: exited zero"
+  elif ! grep -q -- "$2" "$work/err"; then
+    fail "$1: failed for another reason: $(cat "$work/err")"
+  fi
+}
+
 new_asset="BambuStudio_ubu24-v02.09.02.62-20261124164959.AppImage"
 listing_new() {
   listing \
@@ -122,31 +131,32 @@ grep -qx "version=02.09.02.62" <<<"$out" || fail "by version: got: $out"
 # 5. Failures change nothing and exit non-zero.
 setup
 cp "$work/repo/Dockerfile" "$work/before"
-listing "$(release v02.09.02.62 false false "$(asset Bambu_Studio_mac-v02.09.02.62-1.dmg 1 "sha256:$new_sha")")"
-if run >/dev/null 2>&1; then fail "no AppImage: exited zero"; fi
+pin="$(release v02.08.02.61 false false)"
+listing "$(release v02.09.02.62 false false "$(asset Bambu_Studio_mac-v02.09.02.62-1.dmg 1 "sha256:$new_sha")")" "$pin"
+refused "no AppImage" "has 0 Ubuntu 24.04 AppImage assets"
 listing "$(release v02.09.02.62 false false \
   "$(asset BambuStudio_ubu24-v02.09.02.62-1.AppImage 1 "sha256:$new_sha")" \
-  "$(asset BambuStudio_ubuntu24.04-v02.09.02.62-2.AppImage 2 "sha256:$new_sha")")"
-if run >/dev/null 2>&1; then fail "two AppImages: exited zero"; fi
+  "$(asset BambuStudio_ubuntu24.04-v02.09.02.62-2.AppImage 2 "sha256:$new_sha")")" "$pin"
+refused "two AppImages" "has 2 Ubuntu 24.04 AppImage assets"
 listing "$(release v02.08.02.61 true false)"
-if run >/dev/null 2>&1; then fail "no stable release: exited zero"; fi
+refused "no stable release" "no stable vNN.NN.NN.NN release"
 rm -f "$work/asset.bin"
 listing_new ""
-if run >/dev/null 2>&1; then fail "no digest, no download: exited zero"; fi
+refused "no digest, no download" "curl:"
 listing "$(release v02.09.02.62 false false "$(asset "$new_asset" 787358056 "sha256:$new_sha")")"
-if run >/dev/null 2>&1; then fail "pin not in the listing: exited zero"; fi
+refused "pin not in the listing" "the pinned release, is not in the listing"
 rm -f "$work/releases.json"
-if run >/dev/null 2>&1; then fail "no listing: exited zero"; fi
+refused "no listing" "curl:"
 cmp -s "$work/before" "$work/repo/Dockerfile" || fail "a failure changed the Dockerfile"
 
 # 6. A Dockerfile without the pin is refused, not rewritten.
 setup
 sed -i 's|^ARG BAMBU_STUDIO_VERSION=.*|ARG BAMBU_STUDIO_VERSION=latest|' "$work/repo/Dockerfile"
 listing_new "sha256:$new_sha"
-if run >/dev/null 2>&1; then fail "unpinned: exited zero"; fi
+refused "unpinned" "no 'ARG BAMBU_STUDIO_VERSION="
 setup
 sed -i '/^ARG BAMBU_STUDIO_ASSET_ID=/d' "$work/repo/Dockerfile"
-if run >/dev/null 2>&1; then fail "no asset id ARG: exited zero"; fi
+refused "no asset id ARG" "no 'ARG BAMBU_STUDIO_ASSET_ID="
 
 if [ "$failures" -gt 0 ]; then
   echo "$failures failure(s)" >&2
