@@ -3,12 +3,13 @@ import { useEffect, useState } from 'react'
 import { Link, useSearchParams } from 'react-router'
 import { ApiError } from '../../api/client'
 import { listTypes } from '../../api/filament'
-import { listPresets, type PresetMirror, type PresetRow, type PresetSource } from '../../api/filamentPresets'
+import { listPresets, mirrorPreset, type PresetMirror, type PresetRow, type PresetSource } from '../../api/filamentPresets'
 import { FilamentSearchBox } from '../../components/filament/FilamentSearchBox'
 import { filamentLinks } from '../../lib/filamentLinks'
 import { Button } from '@/components/ui/button'
 import { cn } from '@/lib/utils'
 import { count } from './plural'
+import { canSendAgain, OUTCOME_TEXT, WRITES_OFF_TEXT, writeFailure } from './presetWrites'
 
 const SOURCES: { id: PresetSource; label: string }[] = [
   { id: '3dfp', label: '3DFP' },
@@ -57,6 +58,9 @@ export function PresetsTab() {
   const [served, setServed] = useState(true)
   const [error, setError] = useState<string | null>(null)
   const [typeCodes, setTypeCodes] = useState<Map<string, string>>(new Map())
+  const [sending, setSending] = useState<number | null>(null)
+  const [writesOff, setWritesOff] = useState(false)
+  const [notice, setNotice] = useState<{ text: string; warn: boolean } | null>(null)
 
   useEffect(() => {
     let live = true
@@ -91,6 +95,22 @@ export function PresetsTab() {
     if (value) next.set(key, value)
     else next.delete(key)
     setParams(next, { replace: true })
+  }
+
+  const sendAgain = async (row: PresetRow) => {
+    setSending(row.id)
+    setNotice(null)
+    try {
+      const result = await mirrorPreset(row.id)
+      setRows((was) => was && was.map((one) => (one.id === row.id ? result.preset : one)))
+      setNotice({ text: `${row.name}: ${OUTCOME_TEXT[result.outcome]}`, warn: result.outcome === 'failed' })
+    } catch (cause) {
+      const failure = writeFailure(cause)
+      if (failure.off) setWritesOff(true)
+      setNotice({ text: failure.off ? WRITES_OFF_TEXT : `${row.name}: ${failure.text}`, warn: true })
+    } finally {
+      setSending(null)
+    }
   }
 
   const typeChip = typeId && (
@@ -132,6 +152,11 @@ export function PresetsTab() {
         </div>
         {typeChip}
       </div>
+      {notice && (
+        <p role={notice.warn ? 'alert' : 'status'} className={cn('text-[13px]', notice.warn ? 'text-warn' : 'text-muted-foreground')}>
+          {notice.text}
+        </p>
+      )}
       <div className="relative overflow-x-auto rounded-md border">
         <table aria-label="Presets" className="w-full text-left text-[13px]">
           <thead className="bg-muted/50 text-muted-foreground">
@@ -168,6 +193,11 @@ export function PresetsTab() {
                 <td className="px-2 py-1.5 text-right tabular-nums">{`v${row.version}`}</td>
                 <td className="px-2 py-1.5">
                   <MirrorState row={row} />
+                  {canSendAgain(row) && !writesOff && (
+                    <Button type="button" variant="outline" size="sm" className="mt-1" disabled={sending !== null} onClick={() => sendAgain(row)}>
+                      Send again
+                    </Button>
+                  )}
                 </td>
                 <td className="px-2 py-1.5 text-right tabular-nums">{row.bb_preset_id ?? <span className="text-muted-foreground">None</span>}</td>
                 <td className="px-2 py-1.5 text-right tabular-nums">{`${count(row.used_by_types, 'type')}, ${count(row.used_by_spools, 'spool')}`}</td>

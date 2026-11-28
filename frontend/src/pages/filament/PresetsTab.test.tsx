@@ -2,7 +2,7 @@ import { screen, within } from '@testing-library/react'
 import { describe, expect, it } from 'vitest'
 import { listTypes } from '../../api/filament'
 import { listPresets } from '../../api/filamentPresets'
-import { presetsOff } from '../../mocks/features/filament/presets'
+import { presetsOff, writesOff } from '../../mocks/features/filament/presets'
 import { T } from '../../mocks/features/filament/seed'
 import { server } from '../../mocks/server'
 import { http, HttpResponse } from 'msw'
@@ -123,5 +123,39 @@ describe('the Presets tab', () => {
     expect(await screen.findByText('Presets are not on yet on this server.')).toBeInTheDocument()
     expect(screen.queryByRole('table')).not.toBeInTheDocument()
     expect(screen.queryByRole('button', { name: 'Manual' })).not.toBeInTheDocument()
+  })
+
+  it('sends a failed preset again and shows the new state', async () => {
+    const { user } = renderPage(<PresetsTab />)
+    const { rows: all } = await listPresets()
+    const failed = all.find((row) => row.mirror === 'failed')!
+    const rows = presetRows(await presets())
+    await user.click(within(rowOf(rows, failed.id)).getByRole('button', { name: 'Send again' }))
+    expect(await screen.findByText('My PLA, slower: Sent to Bambuddy.')).toBeInTheDocument()
+    const row = rowOf(presetRows(await presets()), failed.id)
+    expect(within(row).getByText('Sent')).toBeInTheDocument()
+    expect(within(row).queryByText(failed.mirror_error!)).not.toBeInTheDocument()
+    expect(within(row).queryByRole('button', { name: 'Send again' })).not.toBeInTheDocument()
+  })
+
+  it('offers Send again only for a failed or pending send', async () => {
+    renderPage(<PresetsTab />)
+    const { rows: all } = await listPresets()
+    const rows = presetRows(await presets())
+    for (const row of all) {
+      const button = within(rowOf(rows, row.id)).queryByRole('button', { name: 'Send again' })
+      if (row.mirror === 'failed' || row.mirror === 'pending') expect(button).toBeInTheDocument()
+      else expect(button).not.toBeInTheDocument()
+    }
+  })
+
+  it('says writes are not on yet and offers no retry when the server has no writes', async () => {
+    writesOff()
+    const { user } = renderPage(<PresetsTab />)
+    const { rows: all } = await listPresets()
+    const failed = all.find((row) => row.mirror === 'failed')!
+    await user.click(within(rowOf(presetRows(await presets()), failed.id)).getByRole('button', { name: 'Send again' }))
+    expect(await screen.findByText('Writes are not on yet on this server.')).toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: 'Send again' })).not.toBeInTheDocument()
   })
 })

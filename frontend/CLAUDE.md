@@ -334,12 +334,12 @@ same way, `vite.config.ts`).
 - `frontend/src/pages/filament/` and `components/filament/` — the Filament section (#6262, spec
   2026-11-14 §10). `/filament` opens Spools; the tabs are Spools, Types, Presets, Tags, Suppliers, Invoices, Locations,
   Catalog, Metrics, Shopping list and Ledger (`pages/filament/tabs.ts`).
-  Presets (#7204, read-only, Go core's area `filament-presets`): the Presets tab
+  Presets (#7204, Go core's area `filament-presets`): the Presets tab
   (`pages/filament/PresetsTab.tsx`) lists each preset with its source, version and mirror
   state, and filters by source and by type. A preset's page `/filament/presets/:id`
   (`PresetPage.tsx`) shows its versions, newest first, 10 at a time with "Show more", the
   diff between two versions and the document. Links come from `lib/filamentLinks.ts`. The
-  mock is `mocks/features/filament/presets.ts`. A 404 with no `code` means Python answered
+  mock is `mocks/features/filament/presets.ts`. A copy, an edit of a manual preset and "Send again" (shown for a `failed` or `pending` mirror, on the tab and the page) are `PresetForms.tsx` and `presetWrites.ts`: one `Idempotency-Key` for each opened form, sent again after a 503 `preset_write_pending`; a 409 `version_moved` reads the preset again; a 503 `writes_not_configured` says writes are not on yet (`writesOff()` in the mock). A 404 with no `code` means Python answered
   because core does not serve the area yet. The tab then shows "Presets are not on yet on
   this server." in place of the table, and the page shows it in place of the versions and the
   document (`PresetsTab.tsx`, `PresetPage.tsx`).

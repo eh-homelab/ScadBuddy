@@ -1,5 +1,5 @@
 import { HttpResponse, http } from 'msw'
-import type { PresetDetail, PresetDiff, PresetKeyChange, PresetRow, PresetSource, PresetVersion } from '../../../api/filamentPresets'
+import type { PresetDetail, PresetDiff, PresetEdit, PresetKeyChange, PresetRow, PresetSource, PresetVersion } from '../../../api/filamentPresets'
 import { T } from './seed'
 
 /**
@@ -7,8 +7,10 @@ import { T } from './seed'
  * diff of two of its versions. Seeded with a `3dfp` preset (sent), a `bambuddy` one, a `manual`
  * one with two versions whose mirror failed, and a `manual` one whose first version has no
  * document (`LOST_PRESET`). `presetsOff()` is the server before the area is switched on: a bare
- * 404, with no `code`, on every path (plan N5). Key sets are tested against
- * `test-fixtures/filament/preset-wire.json`.
+ * 404, with no `code`, on every path (plan N5). The writes (copy, edit, send again) answer as
+ * `writes.go` does: 428 with no `Idempotency-Key`, 409 `version_moved` and `not_manual`, and 503
+ * `writes_not_configured` after `writesOff()`. One key with one body answers the first result again.
+ * Key sets are tested against `test-fixtures/filament/preset-wire.json`.
  */
 
 const BASE = '/api/v1/filament/presets'
@@ -104,19 +106,35 @@ function seeded(): Seeded[] {
 
 let presets = seeded()
 let off = false
+let noWrites = false
+let answered = new Map<string, unknown>()
 
 /** The server before the presets area is switched on: a bare 404 with no `code` on every preset path. */
 export function presetsOff(on = true) {
   off = on
 }
 
+/** The server with the area on but no writes (no Temporal): 503 `writes_not_configured` on each write. */
+export function writesOff(on = true) {
+  noWrites = on
+}
+
 export function reset() {
   presets = seeded()
   off = false
+  noWrites = false
+  answered = new Map()
 }
 
-const problem = (status: number, code: string, detail: string) =>
-  HttpResponse.json({ type: 'about:blank', title: detail, status, detail, code }, { status, headers: { 'Content-Type': 'application/problem+json' } })
+const problem = (status: number, code: string, detail: string, extra: Record<string, unknown> = {}) =>
+  HttpResponse.json({ type: 'about:blank', title: detail, status, detail, code, ...extra }, { status, headers: { 'Content-Type': 'application/problem+json' } })
+
+const KEY_REQUIRED = 'https://scadbuddy.dev/problems/crud/idempotency-key-required'
+const keyRequired = () =>
+  HttpResponse.json(
+    { type: KEY_REQUIRED, title: 'Precondition Required', status: 428, detail: 'This write needs an Idempotency-Key header. Nothing was done.' },
+    { status: 428, headers: { 'Content-Type': 'application/problem+json' } },
+  )
 
 const bare404 = () => new HttpResponse(null, { status: 404 })
 
@@ -144,7 +162,91 @@ function diffOf(one: Seeded, from: number, to: number): PresetDiff | Response {
   return { preset_id: one.row.id, from_version: from, to_version: to, changes }
 }
 
+const NOW = '2026-11-27T09:00:00.000000Z'
+
+/** The checks every keyed write makes first: the area, the writes, the preset and the key. */
+function begin(request: Request, rawId: string | readonly string[] | undefined, keyed: boolean): Response | { one: Seeded; key: string } {
+  if (off) return bare404()
+  if (noWrites) return problem(503, 'writes_not_configured', 'Preset writes are not set up on this server.')
+  const one = find(rawId)
+  if (!one) return problem(404, 'preset_not_found', 'no such preset')
+  const key = request.headers.get('Idempotency-Key')
+  if (keyed && !key) return keyRequired()
+  return { one, key: key ?? '' }
+}
+
+function addVersion(one: Seeded, document: Doc, madeBy: string) {
+  const version = one.row.version + 1
+  const sha = SHA(one.row.id * 100 + version)
+  one.versions.push({ version: { version, sha256: sha, made_by: madeBy, made_at: NOW, fetch_run_id: null, bb_updated_at: null }, document })
+  one.row = { ...one.row, version, sha256: sha, updated_at: NOW, mirror: 'sent', mirror_error: null, mirror_error_at: null }
+}
+
+function applyEdit(one: Seeded, body: PresetEdit): { changed: boolean } {
+  const current = one.versions.find((v) => v.version.version === one.row.version)
+  const document: Doc = { ...(current?.document ?? {}) }
+  if (body.name !== undefined) document.name = body.name.trim()
+  for (const [key, value] of Object.entries(body.set ?? {})) document[key] = value
+  for (const key of body.unset ?? []) delete document[key]
+  const name = body.name?.trim() ?? one.row.name
+  if (JSON.stringify(document) === JSON.stringify(current?.document ?? {}) && name === one.row.name) return { changed: false }
+  addVersion(one, document, 'edit')
+  one.row = { ...one.row, name }
+  return { changed: true }
+}
+
+/** Once for each key and body: a second send of both answers the first result. */
+function once<T>(op: string, id: number, key: string, body: unknown, make: () => T): T {
+  const at = `${op}:${id}:${key}:${JSON.stringify(body)}`
+  if (!answered.has(at)) answered.set(at, make())
+  return answered.get(at) as T
+}
+
 export const handlers = [
+  http.post(`${BASE}/:id/copy`, async ({ request, params }) => {
+    const began = begin(request, params.id, true)
+    if (began instanceof Response) return began
+    const body = (await request.json()) as { name?: string }
+    const name = body.name?.trim() ?? ''
+    if (!name) return problem(422, 'invalid_input', 'name: the field is required')
+    const { one, key } = began
+    const made = once('copy', one.row.id, key, body, () => {
+      const id = Math.max(...presets.map((p) => p.row.id)) + 1
+      const current = one.versions.find((v) => v.version.version === one.row.version)
+      const document: Doc = { ...(current?.document ?? {}), name }
+      const copy: Seeded = {
+        row: { ...one.row, id, ref: `sb-${id}`, name, source: 'manual', version: 1, sha256: SHA(id), bb_preset_id: null, bb_instance: null, mirror: 'sent', mirror_error: null, mirror_error_at: null, used_by_types: 0, used_by_spools: 0, created_at: NOW, updated_at: NOW },
+        versions: [{ version: { version: 1, sha256: SHA(id), made_by: 'copy', made_at: NOW, fetch_run_id: null, bb_updated_at: null }, document }],
+      }
+      presets.push(copy)
+      return copy
+    })
+    return HttpResponse.json(detailOf(made), { status: 201 })
+  }),
+  http.patch(`${BASE}/:id`, async ({ request, params }) => {
+    const began = begin(request, params.id, true)
+    if (began instanceof Response) return began
+    const body = (await request.json()) as PresetEdit
+    const { one, key } = began
+    if (one.row.source !== 'manual') return problem(409, 'not_manual', 'only a manual preset can be edited')
+    if (!Number.isInteger(body.expected_version) || body.expected_version < 1) return problem(422, 'invalid_input', 'expected_version: the field is required, as an integer')
+    if (body.name === undefined && !body.set && !body.unset) return problem(422, 'invalid_input', 'an edit needs a name, a key to set or a key to unset')
+    const result = once('edit', one.row.id, key, body, () => {
+      if (body.expected_version !== one.row.version) return { moved: one.row.version }
+      return applyEdit(one, body)
+    })
+    if ('moved' in result) return problem(409, 'version_moved', 'another edit came first', { current_version: result.moved })
+    return HttpResponse.json({ changed: result.changed, preset: detailOf(one) })
+  }),
+  http.post(`${BASE}/:id/mirror`, ({ request, params }) => {
+    const began = begin(request, params.id, false)
+    if (began instanceof Response) return began
+    const { one } = began
+    if (one.row.source === 'bambuddy') return problem(409, 'not_mirrored', 'Bambuddy owns this preset')
+    if (one.row.mirror === 'sent') return HttpResponse.json({ outcome: 'in_sync', preset: one.row })
+    one.row = { ...one.row, mirror: 'sent', mirror_error: null, mirror_error_at: null }
+    return HttpResponse.json({ outcome: 'sent', preset: one.row })
+  }),
   http.get(BASE, ({ request }) => {
     if (off) return bare404()
     const url = new URL(request.url)
