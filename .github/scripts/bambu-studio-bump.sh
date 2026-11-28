@@ -14,7 +14,8 @@
 # Prints `bump=true|false`, and for a bump `version=`, `asset=`, `asset_id=`,
 # `sha256=` and `sha256_from=` (`digest` or `download`), as lines a workflow can
 # append to $GITHUB_OUTPUT. Exits non-zero, having changed nothing, when the
-# release list cannot be read or the new release has no usable asset.
+# release list cannot be read or does not reach the pinned release, or the new
+# release has no usable asset.
 #
 # GH_TOKEN, when set, is sent with the API call.
 # Test seam (bambu-studio-bump.test.sh):
@@ -59,9 +60,11 @@ if [ -z "$version" ]; then
   exit 1
 fi
 
-# A listing that no longer reaches the pinned release may hide a newer one too.
+# A listing that no longer reaches the pinned release may hide a newer one too, so
+# the run fails rather than compare against part of the history.
 if ! jq -e --arg tag "v$current" 'any(.[]; .tag_name == $tag)' "$work/releases.json" >/dev/null; then
   echo "bambu-studio-bump: v$current, the pinned release, is not in the listing" >&2
+  exit 1
 fi
 
 # Equal or older is no bump.
