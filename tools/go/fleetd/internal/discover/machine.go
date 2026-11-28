@@ -50,10 +50,10 @@ func ReadMachine(o MachineOptions) (Machine, error) {
 	if host == "" {
 		host, _ = os.Hostname()
 	}
-	if host = plain(host, 253); host == "" {
+	if host = cleanHostname(host); host == "" {
 		host = "unknown"
 	}
-	version := match(versionPattern, o.Version)
+	version := cleanVersion(o.Version)
 	if version == "" {
 		version = "dev"
 	}
@@ -64,7 +64,12 @@ func ReadMachine(o MachineOptions) (Machine, error) {
 	if r := []rune(osName); len(r) > 100 {
 		osName = string(r[:100])
 	}
-	return Machine{ID: id, Hostname: host, OS: plain(osName, 100), OSUser: plain(name, 64), ServiceVersion: version}, nil
+	osUser := cleanOSUser(name)
+	if osUser == "" {
+		// core requires one: a name it would refuse must not lose the machine.
+		osUser = "unknown"
+	}
+	return Machine{ID: id, Hostname: host, OS: cleanOS(osName), OSUser: osUser, ServiceVersion: version}, nil
 }
 
 // prettyName is os-release's PRETTY_NAME, or "".

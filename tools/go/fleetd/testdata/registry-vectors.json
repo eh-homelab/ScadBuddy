@@ -1,0 +1,122 @@
+{
+  "about": "The session registry's field limits (#8590). core's registry tests (tools/go/core/fleet_registry_test.go) check that core answers 200 to every ok value and 422 to every bad one. fleetd's discover tests check that fleetd sends every ok value unchanged and never sends a bad one as it is. A value is a string, a number, or {prefix, repeat, n, suffix}: prefix, then repeat n times, then suffix. An ok value core takes but fleetd changes (such as ssh://git@host/r, whose user fleetd drops) belongs in neither list.",
+  "session_id": {
+    "ok": ["aaaaaaaa-1111-4111-8111-111111111111"],
+    "bad": ["AAAAAAAA-1111-4111-8111-111111111111", "not-a-uuid", "aaaaaaaa11114111811111111111111111"]
+  },
+  "machine": [
+    {
+      "fields": ["hostname"],
+      "ok": ["devbox", {"repeat": "h", "n": 253}, {"repeat": "é", "n": 253}],
+      "bad": ["", "dev\nbox", "a\u0085b", {"repeat": "h", "n": 254}]
+    },
+    {
+      "fields": ["os"],
+      "ok": ["linux/amd64 Ubuntu 24.04.3 LTS", {"repeat": "o", "n": 100}],
+      "bad": ["", "linux\t", {"repeat": "o", "n": 101}]
+    },
+    {
+      "fields": ["os_user"],
+      "ok": ["elan", {"repeat": "u", "n": 64}],
+      "bad": ["", "el\u0000an", {"repeat": "u", "n": 65}]
+    },
+    {
+      "fields": ["service_version"],
+      "ok": ["0.1.0", "v1.2.3+dirty_x-y", {"repeat": "1", "n": 64}],
+      "bad": ["", "1 0", "1/2", {"repeat": "1", "n": 65}]
+    }
+  ],
+  "session": [
+    {
+      "fields": ["pid"],
+      "ok": [1, 4194304],
+      "bad": [0, -1, 4194305]
+    },
+    {
+      "fields": ["proc_start"],
+      "ok": ["97360477", "0", {"repeat": "9", "n": 20}],
+      "bad": ["", "12a", "-1", {"repeat": "9", "n": 21}]
+    },
+    {
+      "fields": ["cwd", "config_dir", "transcript_path", "worktree_root"],
+      "ok": ["/home/elan/repos/x", "/", "/home/elan/a b", {"prefix": "/", "repeat": "p", "n": 4095}],
+      "bad": ["repos/x", "~/.claude", "./x", "/home/\u0000x", "/a\u009fb", {"prefix": "/", "repeat": "p", "n": 4096}]
+    },
+    {
+      "fields": ["git_remote"],
+      "ok": [
+        "https://github.com/o/r",
+        "https://github.com/o/r.git",
+        "http://git.lan:3000/o/r.git",
+        "ssh://github.com:22/o/r",
+        "git://github.com/o/r.git",
+        "git@github.com:o/r.git",
+        "deploy.bot-1@git.lan:team/r.git"
+      ],
+      "bad": [
+        "https://token@github.com/o/r",
+        "https://u:p@github.com/o/r",
+        "https://u:@github.com/o/r",
+        "https://@github.com/o/r",
+        "ssh://git:pw@github.com/o/r",
+        "ssh://g%20it@github.com/o/r",
+        "git://u@github.com/o/r",
+        "https://github.com/o/r?x=1",
+        "https://github.com/o/r?",
+        "https://github.com/o/r#main",
+        "https://github.com/o/r#",
+        "ssh://git@github.com/o/r?x=1",
+        "git@github.com:o/r.git#frag",
+        "git@github.com:o/r.git?x",
+        "u:p@github.com:o/r.git",
+        "t@k@github.com:o/r.git",
+        "git@-oProxyCommand=x:o/r",
+        "git@github.com:",
+        "git@github.com:-u/r",
+        "github.com:o/r.git",
+        "/home/elan/repos/r",
+        "../r",
+        "file:///home/elan/repos/r",
+        "ext::sh -c touch% /tmp/pwned",
+        "fd::17",
+        "https:///o/r",
+        "https://-x/o/r",
+        "ftp://github.com/o/r",
+        "git+ssh://git@github.com/o/r",
+        "HTTPS://token@github.com/o/r",
+        "https://github.com\\@evil/o/r",
+        {"prefix": "https://github.com/", "repeat": "r", "n": 2030}
+      ]
+    },
+    {
+      "fields": ["git_branch"],
+      "ok": ["feat/registry", {"repeat": "b", "n": 255}],
+      "bad": ["a\nb", {"repeat": "b", "n": 256}]
+    },
+    {
+      "fields": ["git_head"],
+      "ok": [{"repeat": "ab", "n": 20}, {"repeat": "ab", "n": 32}],
+      "bad": ["abc123", {"repeat": "AB", "n": 20}, {"repeat": "a", "n": 41}, {"repeat": "ab", "n": 33}]
+    },
+    {
+      "fields": ["cc_version"],
+      "ok": ["2.1.332", {"repeat": "1", "n": 64}],
+      "bad": ["2.1 beta", "2.1/3", {"repeat": "1", "n": 65}]
+    },
+    {
+      "fields": ["kind", "entrypoint", "status"],
+      "ok": ["interactive", {"repeat": "k", "n": 40}],
+      "bad": ["busy\t", "a\u007fb", {"repeat": "k", "n": 41}]
+    },
+    {
+      "fields": ["name"],
+      "ok": ["registry work", {"repeat": "n", "n": 200}, {"repeat": "é", "n": 200}],
+      "bad": ["a\u001bb", {"repeat": "n", "n": 201}, {"repeat": "é", "n": 201}]
+    },
+    {
+      "fields": ["account_uuid"],
+      "ok": ["11111111-2222-4333-8444-555555555555"],
+      "bad": ["11111111-2222-4333-8444-55555555555A", "not-a-uuid"]
+    }
+  ]
+}
