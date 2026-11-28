@@ -6,7 +6,8 @@ R12).
 The Go routes ``POST /api/v1/filament/presets/{preset_id}/copy``, ``PATCH
 /api/v1/filament/presets/{preset_id}`` and ``POST
 /api/v1/filament/presets/{preset_id}/mirror`` check the body and start these activities
-(not built yet: they wait for ``internal/temporalx``, ruling N7). The API process serves
+(``tools/go/core/internal/filamentpresets``, each through core's workflow
+``FilamentPresetWrite``). The API process serves
 them, because it is the only process with a database secret (#5295). The send again is
 `preset_mirror.mirror_again`; it writes no row of its own and needs no key (R12).
 

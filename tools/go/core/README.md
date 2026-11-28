@@ -18,6 +18,8 @@ unchanged, to the Python API: WebSockets, SSE and large bodies included. On prod
 | `SCADBUDDY_TEMPORAL_ADDRESS` | required with area `inventory` | Temporal's frontend (`host:port`, no TLS, as the Python client). Without it, a start that names `inventory` stops. With only `inventory:read`, it is optional: the operation read then asks Temporal about a stale row |
 | `SCADBUDDY_TEMPORAL_NAMESPACE` | `scadbuddy` | As `core/config.py` `DEFAULT_TEMPORAL_NAMESPACE` |
 | `SCADBUDDY_TEMPORAL_TASK_QUEUE_INVENTORY` | `inventory` | The task queue the inventory worker polls |
+| `SCADBUDDY_TEMPORAL_TASK_QUEUE_FILAMENT_PRESETS` | `filament-presets` | The task queue of the preset writes' workflow, which core's own worker polls when the area `filament-presets` is named and `SCADBUDDY_TEMPORAL_ADDRESS` is set |
+| `SCADBUDDY_TEMPORAL_TASK_QUEUE_LIBRARY` | `library` | Python's own variable (`core/settings.py` `temporal_task_queue_library`): the queue the preset writes' activities run on |
 | `SCADBUDDY_ORDERS_CURRENCY` | `USD` | The shop's currency when the setting `orders_currency` has no row (a lot's cost is in it) |
 
 | Area | Routes under `/api/v1/internal/crud/agent` |
@@ -86,7 +88,7 @@ unchanged, to the Python API: WebSockets, SSE and large bodies included. On prod
 | `order-costs` | `POST /orders/{id}/assistant-cost`: the cost entry, its `order_events` row and, after the commit, `order.changed` and `order_item.changed`. It reads `pricing_usd_rate` and `orders_currency` from `settings`, else `SCADBUDDY_PRICING_USD_RATE` and `SCADBUDDY_ORDERS_CURRENCY` from core's own environment, else `1` and `USD`, so core needs the API's values of those two |
 | `unknown-trays:read` | `GET /api/v1/filament/unknown-trays` (public, caller `api`), and the print worker's `GET …/crud/print/filament/printers/{printer_id}/unknown-trays` (caller `print`) |
 | `unknown-trays` | those, and `POST /api/v1/filament/unknown-trays/{id}/dismiss` (public). Go writes no spool here (#7143). The resolve route (`POST …/{id}/resolve`, which would start Python's activity `filament_resolve_unknown_tray` on queue `library`) is not built yet: it waits for `internal/temporalx`, so a resolve gets a 404 |
-| `filament-presets` † | Public, class `api`: `GET /api/v1/filament/presets` (`?source=`, `?type_id=`), `GET …/presets/{preset_id}` and `GET …/presets/{preset_id}/diff` (`?from_version=`, `?to_version=`). `POST …/presets/bambuddy-import` stays Python's. Go writes no preset row (#7204) |
+| `filament-presets` † | Public, class `api`: `GET /api/v1/filament/presets` (`?source=`, `?type_id=`), `GET …/presets/{preset_id}` and `GET …/presets/{preset_id}/diff` (`?from_version=`, `?to_version=`); the writes `POST …/presets/{preset_id}/copy`, `PATCH …/presets/{preset_id}` and `POST …/presets/{preset_id}/mirror`, each a Python activity on queue `library` ("The preset writes"). `POST …/presets/bambuddy-import` stays Python's. Go writes no preset row (#7204) |
 
 The `unknown-trays` public routes use `internal/auth` (see "Public routes"). Their CRUD route is caller `print`'s, so it has its own `case` in `newRouter` (areaPackages mounts on caller `agent`).
 
@@ -122,6 +124,47 @@ reads the blob's size from its `store_blobs` row first, so a blob over the cap g
 The document is the zip member `file`. Its credential keys are stripped, as
 `core/credentials.py` strips them. A document that is not read leaves the detail's
 `document` null and names why in `document_error`; the diff answers that code as a problem.
+
+### The preset writes
+
+The three writes of `filament-presets` (plan
+`docs/superpowers/plans/2026-11-26-filament-presets-view.md`, rulings R7, R11, R12, P21 and
+P22) run Python's activities `filament_preset_copy`, `filament_preset_edit` and
+`filament_preset_mirror_again` (`filament/preset_writes.py`) on the queue `library`, which the
+API process serves. Go writes no row.
+
+- Each write is one run of core's workflow `FilamentPresetWrite`
+  (`internal/filamentpresets/temporal.go`), on the queue
+  `SCADBUDDY_TEMPORAL_TASK_QUEUE_FILAMENT_PRESETS`. Core's own worker runs it. Its one step is
+  the activity, with one JSON object as its argument, a start-to-close of its bound plus 30 s
+  (30 s for copy and edit, 60 s for a send again) and one attempt. The route waits for the
+  result 10 s more, then answers 503 `preset_write_pending`.
+- The run's id is `filament-preset-copy-` or `filament-preset-edit-` and the SHA-256 of the
+  actor, the key and the preset id, joined by `\x1f`; a send again's is
+  `filament-preset-mirror-<preset_id>`. The start uses the conflict policy `USE_EXISTING`, so
+  a send while a run of the id is open joins it. Its reuse policy is `ALLOW_DUPLICATE`: a send
+  after the run closed starts a new run, and the activity answers the reply that the
+  idempotency ledger keeps (`crud/idempotency.py` `idempotent_write`), or refuses the key with
+  another body (`idempotency_key_reused`).
+- Copy and edit need an `Idempotency-Key` (1 to 200 characters): without one the answer is
+  428 with the type `https://scadbuddy.dev/problems/crud/idempotency-key-required`, and
+  nothing starts. Go checks the body before the start as the activity's models do (R7): a
+  refused key is 422 `key_refused` with the extension `key`, any other fault 422
+  `invalid_input`. The activity checks it again.
+- An activity failure's `type` is the problem's `code`, with its status (409 for
+  `not_manual`, `version_moved`, `document_missing`, `mirror_off`, `not_configured`,
+  `instance_changed` and `not_mirrored`; 404 `preset_not_found`; 422 `key_refused`,
+  `invalid_input` and `idempotency_key_reused`). `version_moved` carries `current_version`.
+  A timeout, or a start that Temporal refuses, is 503 `preset_write_pending`. Any other type
+  is a 500 with no message.
+- Copy answers 201 and the new preset's detail; edit answers `{changed, preset}`; a send again
+  answers `{outcome, preset}`, `preset` the row. Each is read after the activity's answer.
+- Without `SCADBUDDY_TEMPORAL_ADDRESS` core still starts with the area, the reads serve, no
+  worker runs, and each write answers 503 `writes_not_configured`.
+- The `library` worker is versioned (deployment `scadbuddy-library`). Core's workflow is not,
+  so its activity task carries no version, and Temporal gives it to the queue's current
+  version: the API build that made itself current at its start
+  (`main._make_library_current`).
 
 Area `fleet` (`internal/fleet`) is caller `fleet`'s (scope `crud.fleet`), under
 `/api/v1/internal/crud/fleet`: `POST /agents/{session_id}/touch`, `GET /agents`, `PUT` and

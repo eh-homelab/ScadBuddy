@@ -27,13 +27,20 @@ const (
 	DefaultNamespace = "scadbuddy"
 	// DefaultInventoryQueue is the inventory activities' task queue (design §6.1a).
 	DefaultInventoryQueue = "inventory"
+	// DefaultFilamentPresetsQueue is the task queue of core's FilamentPresetWrite workflow
+	// (#7204, plan ruling P21).
+	DefaultFilamentPresetsQueue = "filament-presets"
+	// DefaultLibraryQueue is core/settings.py temporal_task_queue_library: the Python queue
+	// the preset write activities run on.
+	DefaultLibraryQueue = "library"
 )
 
 // Config is where core's Temporal is: SCADBUDDY_TEMPORAL_ADDRESS (host:port, no TLS, as the
-// Python client uses none), SCADBUDDY_TEMPORAL_NAMESPACE and
-// SCADBUDDY_TEMPORAL_TASK_QUEUE_INVENTORY.
+// Python client uses none), SCADBUDDY_TEMPORAL_NAMESPACE,
+// SCADBUDDY_TEMPORAL_TASK_QUEUE_INVENTORY, SCADBUDDY_TEMPORAL_TASK_QUEUE_FILAMENT_PRESETS and
+// SCADBUDDY_TEMPORAL_TASK_QUEUE_LIBRARY (Python's own variable for the library queue).
 type Config struct {
-	Address, Namespace, InventoryQueue string
+	Address, Namespace, InventoryQueue, FilamentPresetsQueue, LibraryQueue string
 }
 
 // FromEnv reads the Config. An empty address is an error naming its variable: the start
@@ -43,6 +50,9 @@ func FromEnv(env func(string) string) (Config, error) {
 		Address:        env("SCADBUDDY_TEMPORAL_ADDRESS"),
 		Namespace:      env("SCADBUDDY_TEMPORAL_NAMESPACE"),
 		InventoryQueue: env("SCADBUDDY_TEMPORAL_TASK_QUEUE_INVENTORY"),
+
+		FilamentPresetsQueue: env("SCADBUDDY_TEMPORAL_TASK_QUEUE_FILAMENT_PRESETS"),
+		LibraryQueue:         env("SCADBUDDY_TEMPORAL_TASK_QUEUE_LIBRARY"),
 	}
 	if c.Address == "" {
 		return Config{}, errors.New("SCADBUDDY_TEMPORAL_ADDRESS is required when SCADBUDDY_CORE_AREAS names inventory")
@@ -52,6 +62,12 @@ func FromEnv(env func(string) string) (Config, error) {
 	}
 	if c.InventoryQueue == "" {
 		c.InventoryQueue = DefaultInventoryQueue
+	}
+	if c.FilamentPresetsQueue == "" {
+		c.FilamentPresetsQueue = DefaultFilamentPresetsQueue
+	}
+	if c.LibraryQueue == "" {
+		c.LibraryQueue = DefaultLibraryQueue
 	}
 	return c, nil
 }
