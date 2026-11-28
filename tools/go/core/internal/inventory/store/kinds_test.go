@@ -8,6 +8,7 @@ import (
 	"reflect"
 	"slices"
 	"testing"
+	"time"
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -326,6 +327,83 @@ func TestAnArchivedParentIsRefused(t *testing.T) {
 	fastener(t, pool, k, nil)
 	_, err = updateKind(t, pool, k, "fastener", wire.KindPatch{ParentID: wire.Some("widget")})
 	refusal(t, err, 409, "kind_archived")
+}
+
+// A kind is archived only below its live children, and restored only under a live parent
+// (#7464), so no live kind sits under an archived one.
+func TestAKindWithALiveChildIsNotArchived(t *testing.T) {
+	pool, k := testdb.New(t), kindStore()
+	must(createKind(t, pool, k, wire.KindInput{ID: "widget", Name: "Widget", Tracking: ptr("lot")}))
+	must(createKind(t, pool, k, wire.KindInput{ID: "gizmo", Name: "Gizmo", ParentID: ptr("widget"), Tracking: ptr("lot")}))
+
+	_, err := archiveKind(t, pool, k, "widget")
+	refusal(t, err, 409, "kind_in_use")
+	must(archiveKind(t, pool, k, "gizmo"))
+	must(archiveKind(t, pool, k, "widget"))
+
+	_, err = restoreKind(t, pool, k, "gizmo")
+	refusal(t, err, 409, "kind_archived")
+	must(restoreKind(t, pool, k, "widget"))
+	if got := must(restoreKind(t, pool, k, "gizmo")); got.ArchivedAt != nil {
+		t.Fatal("the child is still archived")
+	}
+}
+
+// An archive of a parent and a create under it race (#7464): the archive holds the
+// parent's row, the create waits on it FOR SHARE, and once the archive commits the create
+// is kind_archived. No live kind ends up under an archived one.
+func TestACreateThatWaitsOnAnArchiveOfItsParentIsRefused(t *testing.T) {
+	pool, k := testdb.New(t), kindStore()
+	must(createKind(t, pool, k, wire.KindInput{ID: "widget", Name: "Widget", Tracking: ptr("lot")}))
+	ctx := context.Background()
+	archived := make(chan struct{})
+	release := make(chan struct{})
+	done := make(chan error, 1)
+	go func() {
+		done <- Tx(ctx, pool, Actor(browser), func(tx pgx.Tx) error {
+			if _, err := k.Archive(ctx, tx, "widget"); err != nil {
+				return err
+			}
+			close(archived)
+			<-release
+			return nil
+		})
+	}()
+	<-archived
+	created := make(chan error, 1)
+	go func() {
+		_, err := createKind(t, pool, k, wire.KindInput{ID: "gizmo", Name: "Gizmo", ParentID: ptr("widget"), Tracking: ptr("lot")})
+		created <- err
+	}()
+	select {
+	case err := <-created:
+		t.Fatalf("the create did not wait for the archive: %v", err)
+	case <-time.After(200 * time.Millisecond):
+	}
+	close(release)
+	if err := <-done; err != nil {
+		t.Fatal(err)
+	}
+	refusal(t, <-created, 409, "kind_archived")
+}
+
+// A kind's unit changes only while it has no items, archived ones too (#7536): a lot
+// counted in grams is not a count of whole units.
+func TestAKindWithItemsKeepsItsUnit(t *testing.T) {
+	pool, k, items := testdb.New(t), kindStore(), itemStore()
+	fastener(t, pool, k, nil)
+	made := must(createItem(t, pool, items, wire.ItemInput{KindID: "fastener", Name: "M3 bolt"}))
+	must(archiveItem(t, pool, items, made.ID))
+
+	_, err := updateKind(t, pool, k, "fastener", wire.KindPatch{UOM: ptr("g")})
+	refusal(t, err, 409, "kind_in_use")
+	must(updateKind(t, pool, k, "fastener", wire.KindPatch{UOM: ptr("each")}))
+	must(updateKind(t, pool, k, "fastener", wire.KindPatch{UOM: ptr("each"), Name: ptr("Fasteners")}))
+
+	must(createKind(t, pool, k, wire.KindInput{ID: "cable", Name: "Cable", ParentID: ptr("part")}))
+	if got := must(updateKind(t, pool, k, "cable", wire.KindPatch{UOM: ptr("m")})); got.UOM != "m" {
+		t.Fatalf("uom %s", got.UOM)
+	}
 }
 
 // The class and steps a kind save checks (§3, §4.2, R-K1-6, R-K1-8).

@@ -129,8 +129,11 @@ The migration seeds the built-in kinds (`20261124T0323Z_inventory_core.sql:189`)
 printer, part (with nozzle, hotend, belt, build plate, AMS part and hardware under it),
 consumable (with desiccant, packaging and lubricant), equipment (with dry bin and tool),
 printed part, assembly, service and spool part. A built-in kind cannot change its tracking, its class or its special type, and neither can a
-kind with items (409 `kind_in_use`, Go `store/kinds.go`). Kinds are rows, never
-a list in code (spec §4). A kind archives and restores; it never deletes.
+kind with items (409 `kind_in_use`, Go `store/kinds.go`). A kind with items keeps its
+`uom` too (#7536). Kinds are rows, never a list in code (spec §4). A kind archives and
+restores; it never deletes. It archives only once its items and child kinds are archived
+(409 `kind_in_use`), and it restores only under a live parent (409 `kind_archived`), so no
+live kind sits under an archived one (#7464).
 
 An item's property schema is its kind's `attribute_schema`. So `GET` and `PUT
 /entity-kinds/item/property-schema` answer 409 `schema_owned_by_item_kind` (R-P2-5, R-P2-6;

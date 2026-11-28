@@ -58,8 +58,8 @@ const INVENTORY_MESSAGES: Record<string, string> = {
   operation_not_found: 'ScadBuddy has no record of that operation.',
   // 409
   kind_exists: 'An item kind already has that id. Choose another id.',
-  kind_in_use: 'The kind has items, or it is built in, so it cannot change like that.',
-  kind_archived: 'The item kind is archived. Restore it first.',
+  kind_in_use: 'The kind has items or live child kinds, or it is built in, so it cannot change like that.',
+  kind_archived: 'The item kind, or the parent it goes under, is archived. Restore that first.',
   item_exists: 'An item of this kind already has that name. Choose another name.',
   lot_empty: 'That lot has no stock on hand. Take from another lot.',
   unit_installed: 'The unit is fitted in another unit. Take it out first.',

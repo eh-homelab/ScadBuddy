@@ -84,7 +84,7 @@ func kindArchived(kind string) error {
 }
 
 func kindInUse(why string) error {
-	return &Refused{Status: 409, Code: "kind_in_use", Detail: "the kind's items or built-in status forbid it: " + why}
+	return &Refused{Status: 409, Code: "kind_in_use", Detail: "the kind's items, child kinds or built-in status forbid it: " + why}
 }
 
 func opt(s string) *string {
@@ -422,11 +422,19 @@ func (k *Kinds) Schema(ctx context.Context, q Querier, id string) (KindSchema, e
 	return out, rows.Err()
 }
 
+// lockTree is the kind tree's lock, held until the commit. Every tree change (a create,
+// a move, a restore) takes it before any kind's row, so they never wait on each other in
+// a cycle. Taking it again in one transaction is a no-op.
+func lockTree(ctx context.Context, tx pgx.Tx) error {
+	_, err := tx.Exec(ctx, `SELECT pg_advisory_xact_lock(hashtext('item_kinds_tree'))`)
+	return err
+}
+
 // lockParent is phase 2's _lock_parent: one tree change at a time, so two moves cannot each
 // pass the cycle check and make a cycle together; then the parent, held until the commit so
 // it cannot be archived meanwhile.
 func lockParent(ctx context.Context, tx pgx.Tx, parent string) error {
-	if _, err := tx.Exec(ctx, `SELECT pg_advisory_xact_lock(hashtext('item_kinds_tree'))`); err != nil {
+	if err := lockTree(ctx, tx); err != nil {
 		return err
 	}
 	var archived *time.Time
@@ -655,8 +663,8 @@ func classChange(oldCls model.Class, oldSpecial string, newCls model.Class, newS
 }
 
 // Update changes the fields the patch names. kind_not_found; kind_in_use for a tracking,
-// class or special type change of a built-in kind, or a tracking change of a kind with
-// items; kind_cycle for a parent at or below the kind; kind_archived for an archived parent;
+// class or special type change of a built-in kind, or a tracking or uom change of a kind
+// with items; kind_cycle for a parent at or below the kind; kind_archived for an archived parent;
 // bad_property_schema, also when a kind below it would require a key that its merged
 // schema no longer defines (R-K1-33); class_changed for a change that changes the class of a kind with
 // items (its own or a descendant's) or that a descendant contradicts; steps_invalid when a
@@ -665,6 +673,13 @@ func classChange(oldCls model.Class, oldSpecial string, newCls model.Class, newS
 // publishes one handler_config.changed per step whose handler or parameters changed, and
 // rewrites the tracking and life_basis of the kind and its descendants.
 func (k *Kinds) Update(ctx context.Context, tx pgx.Tx, id string, p wire.KindPatch, by Actor) (wire.ItemKind, error) {
+	// A move is a tree change: the tree lock before the kind's row, as Restore and Create
+	// take them, so a move and a restore cannot deadlock (lockParent takes it again).
+	if p.ParentID.Set {
+		if err := lockTree(ctx, tx); err != nil {
+			return wire.ItemKind{}, err
+		}
+	}
 	var tracking, basis string
 	var builtin bool
 	err := tx.QueryRow(ctx, `SELECT tracking, life_basis, builtin FROM item_kinds WHERE id = $1 FOR UPDATE`, id).
@@ -684,7 +699,14 @@ func (k *Kinds) Update(ctx context.Context, tx pgx.Tx, id string, p wire.KindPat
 	if p.Name != nil {
 		kind.Name = *p.Name
 	}
-	if p.UOM != nil {
+	if p.UOM != nil && *p.UOM != old.UOM {
+		has, err := kindsWithItems(ctx, tx, []string{id})
+		if err != nil {
+			return wire.ItemKind{}, err
+		}
+		if has[id] {
+			return wire.ItemKind{}, kindInUse(id + " has items; its unit stays")
+		}
 		kind.UOM = *p.UOM
 	}
 	if p.Saleable != nil {
@@ -773,7 +795,7 @@ func (k *Kinds) Update(ctx context.Context, tx pgx.Tx, id string, p wire.KindPat
 			owned := *change
 			owned.Owner = "item_kind:" + d
 			return wire.ItemKind{}, &Refused{Status: 409, Code: "kind_in_use",
-				Detail:   "the kind's items or built-in status forbid it: item_kind:" + d + " is built in; its class stays",
+				Detail:   "the kind's items, child kinds or built-in status forbid it: item_kind:" + d + " is built in; its class stays",
 				Problems: []ClassProblem{owned}}
 		}
 		if change != nil && has[d] {
@@ -893,7 +915,9 @@ func deref(s *string) string {
 	return *s
 }
 
-// Archive archives the kind: kind_in_use while it has unarchived items.
+// Archive archives the kind: kind_in_use while it has unarchived items or unarchived child
+// kinds. The row lock waits for a create, move or restore under the kind, which holds the
+// kind FOR SHARE until it commits (lockParent).
 func (k *Kinds) Archive(ctx context.Context, tx pgx.Tx, id string) (wire.ItemKind, error) {
 	err := tx.QueryRow(ctx, `SELECT id FROM item_kinds WHERE id = $1 FOR UPDATE`, id).Scan(new(string))
 	if errors.Is(err, pgx.ErrNoRows) {
@@ -902,13 +926,17 @@ func (k *Kinds) Archive(ctx context.Context, tx pgx.Tx, id string) (wire.ItemKin
 	if err != nil {
 		return wire.ItemKind{}, err
 	}
-	var live bool
-	if err := tx.QueryRow(ctx, `SELECT EXISTS (SELECT 1 FROM items WHERE kind_id = $1 AND archived_at IS NULL)`, id).
-		Scan(&live); err != nil {
+	var live, children bool
+	if err := tx.QueryRow(ctx, `SELECT EXISTS (SELECT 1 FROM items WHERE kind_id = $1 AND archived_at IS NULL),
+		EXISTS (SELECT 1 FROM item_kinds WHERE parent_id = $1 AND archived_at IS NULL)`, id).
+		Scan(&live, &children); err != nil {
 		return wire.ItemKind{}, err
 	}
 	if live {
 		return wire.ItemKind{}, kindInUse(id + " has items; archive them first")
+	}
+	if children {
+		return wire.ItemKind{}, kindInUse(id + " has child kinds; archive them first")
 	}
 	if _, err := tx.Exec(ctx, `UPDATE item_kinds SET archived_at = coalesce(archived_at, now()), updated_at = now()
 		WHERE id = $1`, id); err != nil {
@@ -917,14 +945,28 @@ func (k *Kinds) Archive(ctx context.Context, tx pgx.Tx, id string) (wire.ItemKin
 	return k.Get(ctx, tx, id)
 }
 
-// Restore unarchives the kind.
+// Restore unarchives the kind: kind_archived while its parent is archived, as a create or
+// a move under that parent is.
 func (k *Kinds) Restore(ctx context.Context, tx pgx.Tx, id string) (wire.ItemKind, error) {
-	tag, err := tx.Exec(ctx, `UPDATE item_kinds SET archived_at = NULL, updated_at = now() WHERE id = $1`, id)
+	// The tree lock before the kind's row, as a create or a move takes them (lockTree).
+	if err := lockTree(ctx, tx); err != nil {
+		return wire.ItemKind{}, err
+	}
+	var parent *string
+	err := tx.QueryRow(ctx, `SELECT parent_id FROM item_kinds WHERE id = $1 FOR UPDATE`, id).Scan(&parent)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return wire.ItemKind{}, notFound(id)
+	}
 	if err != nil {
 		return wire.ItemKind{}, err
 	}
-	if tag.RowsAffected() == 0 {
-		return wire.ItemKind{}, notFound(id)
+	if parent != nil {
+		if err := lockParent(ctx, tx, *parent); err != nil {
+			return wire.ItemKind{}, err
+		}
+	}
+	if _, err := tx.Exec(ctx, `UPDATE item_kinds SET archived_at = NULL, updated_at = now() WHERE id = $1`, id); err != nil {
+		return wire.ItemKind{}, err
 	}
 	return k.Get(ctx, tx, id)
 }
