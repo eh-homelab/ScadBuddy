@@ -28,6 +28,16 @@ const (
 	staleAfter = 60 * time.Second
 	// lastErrorMax is the most characters of an attempt's error that the row keeps.
 	lastErrorMax = 2000
+	// requestRetention is how long crud_requests keeps the caller inventory's answers
+	// (crud/idempotency.py RETENTION_BY_CALLER).
+	requestRetention = 7 * 24 * time.Hour
+	// operationRetention is how long a finished row stays. It is longer than
+	// requestRetention: while the ledger keeps a key, a replay of the key and a read of
+	// its operation still find the row. The API prunes crud_requests on a schedule, so a
+	// key can stay a little past requestRetention. The extra day covers that.
+	operationRetention = requestRetention + 24*time.Hour
+	// pruneBatch is the most finished rows that one start deletes.
+	pruneBatch = 1000
 )
 
 // Operation is one attempt of an activity: its id (the idempotency key), its name, what it
@@ -57,13 +67,18 @@ func OperationFrom(ctx context.Context) (string, bool) {
 // notice. A running row of the id and kind (an earlier attempt) takes this attempt; its
 // last_error stays. A finished row is never opened again: a replay or a reuse of its key
 // changes nothing and sends nothing. A running row of another kind (its key reused on
-// another write, which runs as another activity) is left as it is, too.
+// another write, which runs as another activity) is left as it is, too. Before it writes,
+// the start prunes the finished rows past the retention (pruneOperations), as the agent's
+// insertOperation prunes ai_operations.
 func StartOperation(ctx context.Context, pool *pgxpool.Pool, op Operation) error {
 	var actor any
 	if len(op.Actor) > 0 {
 		actor = string(op.Actor)
 	}
 	return pgx.BeginFunc(ctx, pool, func(tx pgx.Tx) error {
+		if err := pruneOperations(ctx, tx, op.ID); err != nil {
+			return err
+		}
 		tag, err := tx.Exec(ctx, `INSERT INTO inventory_operations
 			(id, kind, subject, status, workflow_id, attempt, actor)
 			VALUES ($1, $2, $3, 'running', NULLIF($4, ''), $5, $6::jsonb)
@@ -77,6 +92,24 @@ func StartOperation(ctx context.Context, pool *pgxpool.Pool, op Operation) error
 		}
 		return notifyOperation(ctx, tx, op.ID)
 	})
+}
+
+// pruneOperations deletes at most pruneBatch rows that finished (succeeded or failed) more
+// than operationRetention ago. It never deletes a running row. It never deletes the row of
+// keep, the id that the start writes, so an old finished row of that id stays finished. No
+// write changes a finished row, so its updated_at is its end, and the index
+// inventory_operations_status finds the rows. The delete skips a row that another start
+// deletes at the same time, and does not wait for it.
+func pruneOperations(ctx context.Context, tx pgx.Tx, keep string) error {
+	_, err := tx.Exec(ctx, `DELETE FROM inventory_operations WHERE id IN (
+		SELECT id FROM inventory_operations
+		WHERE status IN ('succeeded', 'failed')
+			AND updated_at < now() - make_interval(secs => $1)
+			AND finished_at < now() - make_interval(secs => $1)
+			AND id <> $2
+		LIMIT $3 FOR UPDATE SKIP LOCKED)`,
+		operationRetention.Seconds(), keep, pruneBatch)
+	return err
 }
 
 // FinishOperation ends the operation id with the answer a, in tx, the write's own
