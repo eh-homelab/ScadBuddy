@@ -456,8 +456,11 @@ same way, `vite.config.ts`).
   New tag card. The switch "Open what I scan at once" (localStorage `scadbuddy.scan.openAtOnce`,
   `"1"` when on, read in try/catch) navigates to the thing on each `open_spool` or `open_code`
   read and starts the scan by itself when the page opens, falling back to the Scan button with
-  the reason when the browser refuses. A spool's "Write tag" and a backup's restore go through
-  `lib/tagWrite.ts` `writeWithBackup` (backup, write, read back), and an agent's NFC job shows
+  the reason when the browser refuses. A spool's "Write tag", a backup's restore and "Clear tag" (#8362,
+  `tagWrite.ts` `clearTag`: backup `clear`, one empty record, read back, then the unbind with
+  `reason=cleared`; never a Bambu tag, only the tag on screen) go through
+  `lib/tagWrite.ts` `writeWithBackup` (backup, write, read back; in the ScadBuddy app a record
+  larger than the reading's `tag.max_ndef_bytes` stops before the write), and an agent's NFC job shows
   in `NfcJobBanner` (`components/filament/scan/`); tests stub Web NFC with `src/test/ndefStub.ts`.
   "Scan code" (#8155, `components/filament/scan/ScanCode.tsx`) shows the rear camera's live
   preview, or a chosen photo where the browser gives no camera (inside Bambuddy's frame too).
