@@ -78,7 +78,12 @@ func serveDetail(w http.ResponseWriter, r *http.Request, pool *pgxpool.Pool, blo
 		writeCode(w, r, presetNotFound)
 		return
 	}
-	row, versions, err := read(r.Context(), pool, id)
+	answerDetail(w, r, pool, blobs, id, http.StatusOK)
+}
+
+// answerDetail answers preset id's Detail with status, or its problem.
+func answerDetail(w http.ResponseWriter, r *http.Request, pool *pgxpool.Pool, blobs Blobs, id int64, status int) {
+	detail, err := detailOf(r, pool, blobs, id)
 	if errors.Is(err, errNoPreset) {
 		writeCode(w, r, presetNotFound)
 		return
@@ -87,11 +92,20 @@ func serveDetail(w http.ResponseWriter, r *http.Request, pool *pgxpool.Pool, blo
 		failed(w, r, err)
 		return
 	}
+	answerStatus(w, r, status, detail)
+}
+
+// detailOf is preset id's Detail, or errNoPreset. A document that was not read is a
+// DocumentError, not an error.
+func detailOf(r *http.Request, pool *pgxpool.Pool, blobs Blobs, id int64) (*Detail, error) {
+	row, versions, err := read(r.Context(), pool, id)
+	if err != nil {
+		return nil, err
+	}
 	detail := Detail{Row: *row, Versions: versions}
 	doc, code, err := readDocument(r.Context(), blobs, row.blobKey)
 	if code == "" && err != nil {
-		failed(w, r, err)
-		return
+		return nil, err
 	}
 	if code != "" {
 		logRead(r, code, err)
@@ -99,5 +113,5 @@ func serveDetail(w http.ResponseWriter, r *http.Request, pool *pgxpool.Pool, blo
 	} else {
 		detail.Document = StripCredentials(doc)
 	}
-	answer(w, r, detail)
+	return &detail, nil
 }

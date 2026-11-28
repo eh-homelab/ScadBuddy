@@ -22,6 +22,10 @@ import (
 
 	"github.com/jackc/pgx/v5/pgxpool"
 	"go.opentelemetry.io/otel/metric"
+	"go.temporal.io/sdk/client"
+	"go.temporal.io/sdk/interceptor"
+	"go.temporal.io/sdk/worker"
+	"go.temporal.io/sdk/workflow"
 
 	"github.com/eh-homelab/ScadBuddy/tools/go/telemetry"
 	"github.com/eh-homelab/ScadBuddy/tools/go/telemetry/pgxtrace"
@@ -49,7 +53,10 @@ import (
 	"github.com/eh-homelab/ScadBuddy/tools/go/core/internal/front"
 	"github.com/eh-homelab/ScadBuddy/tools/go/core/internal/gate"
 	"github.com/eh-homelab/ScadBuddy/tools/go/core/internal/history"
+	"github.com/eh-homelab/ScadBuddy/tools/go/core/internal/inventory"
+	"github.com/eh-homelab/ScadBuddy/tools/go/core/internal/inventory/activities"
 	"github.com/eh-homelab/ScadBuddy/tools/go/core/internal/labelprint"
+	"github.com/eh-homelab/ScadBuddy/tools/go/core/internal/libraryrun"
 	"github.com/eh-homelab/ScadBuddy/tools/go/core/internal/mcprelay"
 	"github.com/eh-homelab/ScadBuddy/tools/go/core/internal/notify"
 	"github.com/eh-homelab/ScadBuddy/tools/go/core/internal/ordercosts"
@@ -67,6 +74,7 @@ import (
 	"github.com/eh-homelab/ScadBuddy/tools/go/core/internal/sweeps"
 	"github.com/eh-homelab/ScadBuddy/tools/go/core/internal/tagreads"
 	"github.com/eh-homelab/ScadBuddy/tools/go/core/internal/tasks"
+	"github.com/eh-homelab/ScadBuddy/tools/go/core/internal/temporalx"
 	"github.com/eh-homelab/ScadBuddy/tools/go/core/internal/transcripts"
 	"github.com/eh-homelab/ScadBuddy/tools/go/core/internal/turns"
 	"github.com/eh-homelab/ScadBuddy/tools/go/core/internal/unknowntrays"
@@ -86,7 +94,7 @@ var (
 	// dialWait is how long a forward waits for the Python API to listen: at a pod's start,
 	// core is up some 25 s before Python is.
 	dialWait = 30 * time.Second
-	// untraced are the paths the API never traces either (main.py EXCLUDED_URLS).
+	// untraced are the paths the API never traces either (core/tracing.py EXCLUDED_URLS).
 	untraced = []string{"/healthz", "/metrics", "/telemetry/v1/traces"}
 )
 
@@ -147,6 +155,23 @@ func run(ctx context.Context, lookupEnv func(string) (string, bool), tel *teleme
 	if err != nil {
 		return err
 	}
+	// The inventory's writes are activities on Temporal (#6949 K1): the area inventory runs
+	// the worker, so it needs Temporal's address; inventory:read alone asks Temporal about a
+	// stale operation when the address is given. The filament presets' writes and an unknown
+	// tray's resolve run on Temporal too (#7204, #8489), but their areas do not need the
+	// address: without it the reads serve and each write answers 503 writes_not_configured
+	// (plan ruling P22).
+	areas := env("SCADBUDDY_CORE_AREAS")
+	libraryAreas := namesArea(areas, filamentpresets.Area) || namesArea(areas, unknowntrays.Area)
+	var temporal *temporalx.Config
+	if namesArea(areas, "inventory") ||
+		(namesArea(areas, "inventory:read") || libraryAreas) && env("SCADBUDDY_TEMPORAL_ADDRESS") != "" {
+		c, err := temporalx.FromEnv(env)
+		if err != nil {
+			return err
+		}
+		temporal = &c
+	}
 	dsn := env("SCADBUDDY_DATABASE_URL")
 	if dsn == "" {
 		return errors.New("SCADBUDDY_DATABASE_URL is required")
@@ -176,15 +201,32 @@ func run(ctx context.Context, lookupEnv func(string) (string, bool), tel *teleme
 	if err != nil {
 		return err
 	}
+	callers := callerPackages
+	var temporalClient client.Client
+	if temporal != nil {
+		if temporalClient, err = temporalx.Client(*temporal, tel.Tracer()); err != nil {
+			return err
+		}
+		defer temporalClient.Close()
+		callers = map[string]areaRoutes{inventory.Caller: inventory.AreasWith(temporalx.Checker{Client: temporalClient})}
+	}
+	libraryRuns := libraryAreas && temporal != nil
+	var options []routerOption
+	if libraryRuns {
+		options = append(options, withLibraryRuns(libraryrun.TemporalStarter{
+			Client: temporalClient, Queue: temporal.FilamentPresetsQueue, LibraryQueue: temporal.LibraryQueue,
+		}))
+	}
 	// The event stream's one LISTEN connection, which both listeners' streams share.
 	hub := bus.NewHub(pool, tel.Meter())
 	stream := &streams{hub: hub, env: env}
+	options = append(options, withStreams(stream))
 	go func() {
 		// A stream never ends by itself: end them all first, so the servers can drain.
 		<-ctx.Done()
 		hub.Close()
 	}()
-	router, err := newRouter(pool, upstream, keys, env("SCADBUDDY_CORE_AREAS"), env("SCADBUDDY_AUTH_MODE"), tel.Meter(), lookupEnv, tel, stream)
+	router, err := newRouter(pool, upstream, keys, areas, env("SCADBUDDY_AUTH_MODE"), callers, tel.Meter(), lookupEnv, tel, options...)
 	if err != nil {
 		return err
 	}
@@ -204,7 +246,7 @@ func run(ctx context.Context, lookupEnv func(string) (string, bool), tel *teleme
 		if err != nil {
 			return fmt.Errorf("SCADBUDDY_CORE_CRUD_UPSTREAM: %w", err)
 		}
-		crudRouter, err := newRouter(pool, crudUpstream, keys, env("SCADBUDDY_CORE_AREAS"), env("SCADBUDDY_AUTH_MODE"), tel.Meter(), lookupEnv, tel, stream)
+		crudRouter, err := newRouter(pool, crudUpstream, keys, areas, env("SCADBUDDY_AUTH_MODE"), callers, tel.Meter(), lookupEnv, tel, options...)
 		if err != nil {
 			return err
 		}
@@ -212,7 +254,121 @@ func run(ctx context.Context, lookupEnv func(string) (string, bool), tel *teleme
 	}
 	// The history subscriber (#6949): every replica runs it, and one at a time applies.
 	go history.Run(ctx, pool, history.Options{})
-	return serve(ctx, servers, tel.Shutdown)
+	health := func(ctx context.Context) error {
+		_, err := temporalClient.CheckHealth(ctx, &client.CheckHealthRequest{})
+		return err
+	}
+	stopWorkers := []func(context.Context){}
+	if namesArea(areas, "inventory") {
+		acts := activities.New(pool, or(env("SCADBUDDY_ORDERS_CURRENCY"), "USD"))
+		record := activities.Record(pool, tel.Meter())
+		stopWorkers = append(stopWorkers, startWorker(ctx, "inventory", health, func() worker.Worker {
+			w := worker.New(temporalClient, temporal.InventoryQueue, worker.Options{
+				Interceptors: []interceptor.WorkerInterceptor{record},
+			})
+			activities.Register(w, acts)
+			return w
+		}))
+	}
+	if libraryRuns {
+		// The workflow of each preset write and each unknown tray's resolve (plan ruling P21,
+		// #8489 U2). Its one activity runs on the Python library queue, which the API process
+		// serves.
+		stopWorkers = append(stopWorkers, startWorker(ctx, "library-run", health, func() worker.Worker {
+			w := worker.New(temporalClient, temporal.FilamentPresetsQueue, worker.Options{})
+			w.RegisterWorkflowWithOptions(libraryrun.Workflow, workflow.RegisterOptions{Name: libraryrun.WorkflowName})
+			return w
+		}))
+	}
+	return serve(ctx, servers, func(drain context.Context) {
+		for _, stop := range stopWorkers {
+			stop(drain)
+		}
+		tel.Shutdown(drain)
+	})
+}
+
+// namesArea says whether the comma-separated areas name area.
+func namesArea(areas, area string) bool {
+	for name := range strings.SplitSeq(areas, ",") {
+		if strings.TrimSpace(name) == area {
+			return true
+		}
+	}
+	return false
+}
+
+// workerRetry is how long the worker waits before it asks Temporal again.
+var workerRetry = 5 * time.Second
+
+// startWorker starts the named Temporal worker beside the HTTP servers. A Temporal out of reach
+// does not stop core, which is the API pod's front. Until health (Temporal's CheckHealth)
+// answers, the worker waits workerRetry and asks again. Then it builds a worker and starts it.
+// The SDK keeps a worker's first Start result (sync.OnceValue), so a worker whose Start
+// failed is never started again: it is stopped, so it lets go of what Start took, and the
+// next try builds a new one. A worker that starts after ctx ends is stopped at once. The
+// function it gives stops the started worker, and waits for it at most until drain ends. A
+// worker that started before stop is called is always stopped, even when drain has already
+// ended (#8256).
+func startWorker(ctx context.Context, name string, health func(context.Context) error, build func() worker.Worker) (stop func(drain context.Context)) {
+	started := make(chan worker.Worker, 1)
+	go func() {
+		for {
+			ask, cancel := context.WithTimeout(ctx, 10*time.Second)
+			err := health(ask)
+			cancel()
+			if err == nil {
+				w := build()
+				if err = w.Start(); err == nil {
+					if ctx.Err() != nil {
+						w.Stop()
+						started <- nil
+						return
+					}
+					slog.Info("the " + name + " worker polls Temporal")
+					started <- w
+					return
+				}
+				w.Stop()
+			}
+			if ctx.Err() == nil {
+				slog.Warn("the "+name+" worker could not start", "error", err.Error())
+			}
+			select {
+			case <-ctx.Done():
+				started <- nil
+				return
+			case <-time.After(workerRetry):
+			}
+		}
+	}()
+	return func(drain context.Context) {
+		// A worker already started is taken first: with drain already ended, a select on both
+		// could pick drain and leave the worker running.
+		var w worker.Worker
+		select {
+		case w = <-started:
+		default:
+			select {
+			case w = <-started:
+			case <-drain.Done():
+				return
+			}
+		}
+		if w == nil {
+			return
+		}
+		stopped := make(chan struct{})
+		go func() {
+			w.Stop()
+			close(stopped)
+		}()
+		select {
+		case <-stopped:
+		case <-drain.Done():
+			slog.Warn("the " + name + " worker did not stop before the drain ended")
+		}
+	}
 }
 
 func or(value, fallback string) string {
@@ -280,13 +436,19 @@ var areaPackages = []areaRoutes{
 	assistantcost.Areas, fetchgrants.Areas,
 }
 
+// callerPackages are the packages whose areas are mounted for a caller of their own (the
+// key), not for the agent.
+var callerPackages = map[string]areaRoutes{inventory.Caller: inventory.Areas}
+
 // publicAreas is a package's public routes by area name, over the pool, with the KEKs.
 // newRouter serves each behind the one person-auth gate (internal/auth); an area may have
 // CRUD routes, public routes or both.
 type publicAreas func(pool *pgxpool.Pool, keys *seal.Keys) map[string][]auth.Public
 
 // publicPackages are the packages with public areas.
-var publicPackages = []publicAreas{scan.PublicAreas, unknowntrays.Public, devices.Routes}
+// Area unknown-trays is not among them: its resolve needs the router's Temporal, so newRouter
+// adds its routes itself.
+var publicPackages = []publicAreas{scan.PublicAreas, devices.Routes}
 
 // mirrorBlobs is the blob store as area package-mirrors calls it (packages.Blobs): a
 // publish to a key that names a blob is packages.ErrStale.
@@ -351,6 +513,22 @@ type streams struct {
 	used bool
 }
 
+// routerOptions are newRouter's optional parts: the event stream's areas' hub, and the
+// Temporal that the filament presets' writes and an unknown tray's resolve start on (none:
+// they answer 503).
+type routerOptions struct {
+	stream      *streams
+	libraryRuns libraryrun.Starter
+}
+
+type routerOption func(*routerOptions)
+
+func withStreams(s *streams) routerOption { return func(o *routerOptions) { o.stream = s } }
+
+func withLibraryRuns(s libraryrun.Starter) routerOption {
+	return func(o *routerOptions) { o.libraryRuns = s }
+}
+
 // newRouter answers the named areas: <area> for all its routes here, <area>:read for its GETs.
 // A named area's public routes stand in front of the CRUD router, behind the gate in
 // SCADBUDDY_AUTH_MODE's mode; meter, when not nil, counts what enforce would refuse.
@@ -358,8 +536,12 @@ type streams struct {
 // and tel the process's telemetry (nil for none), which traces its store requests.
 // stream is the process's event stream; without one, an area that needs it gets a hub of
 // its own.
-func newRouter(pool *pgxpool.Pool, next http.Handler, keys *seal.Keys, areas, authMode string, meter metric.MeterProvider,
-	lookupEnv func(string) (string, bool), tel *telemetry.Telemetry, stream ...*streams) (http.Handler, error) {
+// The areas of areaPackages are the agent's; those of callers are their caller's. An area
+// name that two callers' packages give stops the start; the agent's packages may share one
+// (keys: secrets and fetchgrants).
+func newRouter(pool *pgxpool.Pool, next http.Handler, keys *seal.Keys, areas, authMode string,
+	callers map[string]areaRoutes, meter metric.MeterProvider,
+	lookupEnv func(string) (string, bool), tel *telemetry.Telemetry, options ...routerOption) (http.Handler, error) {
 	mode, err := auth.ParseMode(authMode, authMode != "")
 	if err != nil {
 		return nil, fmt.Errorf("SCADBUDDY_AUTH_MODE: %w", err)
@@ -370,10 +552,11 @@ func newRouter(pool *pgxpool.Pool, next http.Handler, keys *seal.Keys, areas, au
 		// proof file is there.
 		resolver.BootstrapDir, _ = lookupEnv("SCADBUDDY_SERVICE_BOOTSTRAP_DIR")
 	}
-	var st *streams
-	if len(stream) > 0 {
-		st = stream[0]
+	var opts routerOptions
+	for _, option := range options {
+		option(&opts)
 	}
+	st := opts.stream
 	streamOf := func() *streams {
 		if st == nil {
 			st = &streams{hub: bus.NewHub(pool, nil), env: os.Getenv}
@@ -384,6 +567,7 @@ func newRouter(pool *pgxpool.Pool, next http.Handler, keys *seal.Keys, areas, au
 	socket := false
 	router := &crud.Router{
 		Resolver: resolver,
+		Tokens:   resolver,
 		Enforce:  mode == auth.Enforce,
 		Next:     next,
 	}
@@ -396,6 +580,9 @@ func newRouter(pool *pgxpool.Pool, next http.Handler, keys *seal.Keys, areas, au
 			publics[name] = append(publics[name], routes...)
 		}
 	}
+	for name, routes := range unknowntrays.Public(pool, keys, opts.libraryRuns) {
+		publics[name] = append(publics[name], routes...)
+	}
 	// mountPublic serves a named area's public routes behind the gate.
 	mountPublic := func(name string) {
 		for _, p := range publics[name] {
@@ -405,10 +592,24 @@ func newRouter(pool *pgxpool.Pool, next http.Handler, keys *seal.Keys, areas, au
 	}
 	log, turn := &events.Log{Pool: pool}, &turns.Turns{Pool: pool}
 	more := map[string][]crud.Route{}
-	for _, p := range areaPackages {
+	callerOf := map[string]string{}
+	add := func(caller string, p areaRoutes) error {
 		for name, routes := range p(pool, keys) {
-			// Two packages may serve one area (keys: secrets and fetchgrants).
-			more[name] = append(more[name], routes...)
+			if prev, twice := callerOf[name]; twice && prev != caller {
+				return fmt.Errorf("two packages give the area %q", name)
+			}
+			more[name], callerOf[name] = append(more[name], routes...), caller
+		}
+		return nil
+	}
+	for _, p := range areaPackages {
+		if err := add("agent", p); err != nil {
+			return nil, err
+		}
+	}
+	for caller, p := range callers {
+		if err := add(caller, p); err != nil {
+			return nil, err
 		}
 	}
 	// Naming filament-presets twice mounts it once: a pattern given twice panics.
@@ -434,7 +635,10 @@ func newRouter(pool *pgxpool.Pool, next http.Handler, keys *seal.Keys, areas, au
 		case "fleet":
 			router.Add(fleet.Caller, fleet.Routes(pool)...)
 			router.Add(fleet.Caller, fleet.RegistryReads(pool)...)
-			router.Add(fleet.RotatorCaller, fleet.RegistryWrites(pool)...)
+			// fleetd's registry writes take its `fleet` access token too (#8041). Virtual
+			// senders stay service-only: a machine's token never posts as `rotator` or
+			// `github`.
+			router.AddForToken(fleet.RotatorCaller, auth.FleetScope, fleet.RegistryWrites(pool)...)
 			router.Add(fleet.VirtualCaller, fleet.VirtualRoutes(pool)...)
 		case blobstore.Area:
 			// A shared area (#7958): any caller whose scopes hold crud.blobs.
@@ -465,7 +669,7 @@ func newRouter(pool *pgxpool.Pool, next http.Handler, keys *seal.Keys, areas, au
 			}
 			presetsMounted = true
 			store := filamentpresets.Store(blobstore.New(pool, keys, lookupEnv, tel))
-			for _, p := range filamentpresets.Public(pool, store) {
+			for _, p := range filamentpresets.Public(pool, store, opts.libraryRuns) {
 				// no-store is set outside the gate, so its own 401 and 403 carry it too.
 				public.Handle(p.Pattern, noStore(gate.Wrap(p.Route, p.Handler)))
 				served = true
@@ -518,7 +722,11 @@ func newRouter(pool *pgxpool.Pool, next http.Handler, keys *seal.Keys, areas, au
 				unknownTraysMounted = true
 				router.Add(unknowntrays.Caller, unknowntrays.BlockRoutes(pool)...)
 			}
-			mountPublic(name)
+			for _, p := range publics[name] {
+				// no-store is set outside the gate, so its own 401 and 403 carry it too.
+				public.Handle(p.Pattern, noStore(gate.Wrap(p.Route, p.Handler)))
+				served = true
+			}
 		default:
 			if keys == nil && sealed[strings.TrimSuffix(name, ":read")] {
 				return nil, fmt.Errorf("SCADBUDDY_CORE_AREAS names %q, which needs %s", name, seal.Variable)
@@ -528,7 +736,7 @@ func newRouter(pool *pgxpool.Pool, next http.Handler, keys *seal.Keys, areas, au
 			if !ok && !open {
 				return nil, fmt.Errorf("SCADBUDDY_CORE_AREAS names %q, which this build does not have", name)
 			}
-			router.Add("agent", routes...)
+			router.Add(callerOf[name], routes...)
 			mountPublic(name)
 		}
 	}

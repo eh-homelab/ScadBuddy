@@ -124,6 +124,7 @@ from scadbuddy.filament.bb_sync_run import FilamentSyncActivities, settings_load
 from scadbuddy.filament.component import FILAMENT
 from scadbuddy.filament.inventory import PoolSbSpoolReads
 from scadbuddy.filament.preset_mirror import mirror_after_pull
+from scadbuddy.filament.preset_writes import preset_write_activities
 from scadbuddy.filament.print_uses import PoolPrintUses
 from scadbuddy.filament.sb_presets import PresetImport, import_from_bambuddy
 from scadbuddy.filament.sensor_notify import SensorNotifyActivities
@@ -137,6 +138,7 @@ from scadbuddy.flows.component import FLOWS
 from scadbuddy.flows.sweep import sweep_flow_runs, sweep_orphan_grants
 from scadbuddy.git_remote.component import GIT_REMOTE
 from scadbuddy.git_remote.push import PushError
+from scadbuddy.inventory.component import INVENTORY
 from scadbuddy.library.assets import referenced_asset_ids, stopped
 from scadbuddy.library.backfill import attach_backfills, attach_job_backfills, follow_backfills
 from scadbuddy.library.history import GitError
@@ -164,6 +166,7 @@ from scadbuddy.operations.store import OperationStore
 from scadbuddy.orders.archives import mirror_attempt, sweep_media
 from scadbuddy.orders.component import ORDERS
 from scadbuddy.orders.lifecycle import reap_quote_holds as reap_orphan_quote_holds
+from scadbuddy.orders.stock_activities import OrderStockSteps, order_stock_activities
 from scadbuddy.orders.storefront.prepare import prepare_activities, warm_unpriced
 from scadbuddy.orders.storefront.staged_files import staged_file_activities, sweep_staged
 from scadbuddy.orders.storefront.visitors import VisitorStore
@@ -184,6 +187,7 @@ from scadbuddy.printers.bambuddy_sync import (
     sync_printers,
 )
 from scadbuddy.printers.component import PRINTERS
+from scadbuddy.printers.merge_activities import merge_activities
 from scadbuddy.printers.native import LanCommands
 from scadbuddy.printers.print_activities import LanActivities, LanDeps
 from scadbuddy.printers.store import BAMBUDDY_ACTOR
@@ -281,6 +285,11 @@ from scadbuddy.workflows.housekeeping import (
 from scadbuddy.workflows.library_copy import VersionedLibraryCopy
 from scadbuddy.workflows.operation import VersionedOperationWorkflow
 from scadbuddy.workflows.operation_activities import operation_activities
+from scadbuddy.workflows.order_stock import (
+    VersionedFulfilOrderItem,
+    VersionedMergePrinter,
+    VersionedRecostLot,
+)
 from scadbuddy.workflows.prepare_listing import VersionedPrepareListing
 from scadbuddy.workflows.previews import (
     DUE_ACTIVITY,
@@ -1555,7 +1564,15 @@ def _rotate_service_credentials(state: AppState) -> None:
     minted = auth.credentials.rotate_due(kek)
     if minted:
         logger.info("issued service credentials", extra={"credentials": len(minted)})
-    auth.credentials.delete_expired()
+    try:
+        retention = state.settings_store.load().service_credential_retention_days
+    except Exception:
+        # The stored retention is unknown and may keep more than the default: delete none.
+        logger.warning(
+            "could not load the service credentials' retention; deleting none", exc_info=True
+        )
+        return
+    auth.credentials.delete_ended(retention)
 
 
 def _migrate_agent_at_start(state: AppState) -> None:
@@ -2238,6 +2255,10 @@ LIBRARY_WORKFLOWS: tuple[type, ...] = (
     VersionedStagedFile,
     VersionedPrepareListing,
     VersionedAttemptMedia,
+    # #6949 K1 Task 16: the orders' stock writes and the printer merge's stock repoint.
+    VersionedFulfilOrderItem,
+    VersionedRecostLot,
+    VersionedMergePrinter,
 )
 
 
@@ -2362,7 +2383,40 @@ async def _run_library_worker(state: AppState, stop: asyncio.Event) -> None:
     current = asyncio.create_task(_make_library_current(client, build_id, queue, routed))
     ops = state.components.get(OPERATIONS)
     trigger_activities, stop_triggers = _flow_triggers(state, client, queue, stop)
-    activities = [
+    activities = _library_activities(state, client, ops, trigger_activities)
+    try:
+        while not stop.is_set():
+            worker = await _built_off_loop(
+                partial(
+                    library_worker,
+                    client,
+                    queue,
+                    activities,
+                    workflows=LIBRARY_WORKFLOWS,
+                    workflow_runner=sandboxed_runner(),
+                    graceful_shutdown_timeout=LIBRARY_GRACEFUL_SHUTDOWN,
+                    deployment_config=library_deployment(build_id),
+                )
+            )
+            if not await _serve_until([worker], stop, name="library"):
+                with suppress(TimeoutError):
+                    await asyncio.wait_for(stop.wait(), PRINT_WORKER_RECONNECT)
+    finally:
+        current.cancel()
+        schedules.cancel()
+        boot_nudge.cancel()
+        await stop_triggers()
+
+
+def _library_activities(
+    state: AppState,
+    client: Client,
+    ops: OperationCommands,
+    trigger_activities: list[Callable[..., Any]],
+) -> list[Callable[..., Any]]:
+    """The activities the ``library`` worker serves (`_run_library_worker`)."""
+    settings = state.settings
+    return [
         *_housekeeping_activities(state),
         *_preview_activities(state),
         # The retired spool-provider activities, for runs opened before
@@ -2395,9 +2449,13 @@ async def _run_library_worker(state: AppState, stop: asyncio.Event) -> None:
             LanCommands(lambda: client, settings.temporal_task_queue_bambuddy),
             lambda: state.components.get(SLICING).profiles,
         ),
-        # The activity that links an unknown AMS tray to a spool (#7143, G5). The Go route that
-        # starts it is not built yet.
+        # The activity that links an unknown AMS tray to a spool (#7143, G5). The Go route in
+        # tools/go/core/internal/unknowntrays starts it, through core's workflow LibraryRun.
         *_unknown_tray_activities(state),
+        # Copy, edit and send again of ScadBuddy's own filament presets (#7204, N7). The Go
+        # routes in tools/go/core/internal/filamentpresets start them, through core's
+        # workflow LibraryRun.
+        *_preset_write_activities(state),
         *operation_activities(ops.store, state.settings_store, _kinds_on(ops, "library")),
         *trigger_activities,
         migrate_activity(lambda: state.settings_store.pool, state.settings),
@@ -2418,29 +2476,17 @@ async def _run_library_worker(state: AppState, stop: asyncio.Event) -> None:
         _attempt_media_activity(state),
         # A listing's prepared colour combinations (#6237, #6299 review).
         *prepare_activities(state, lambda: state.components.get(ORDERS)),
+        # The orders' stock workflows' Python steps, and the printer merge's (#6949 K1
+        # Task 16): they write Python-owned rows, so only the API runs them.
+        *order_stock_activities(
+            lambda: OrderStockSteps(
+                lambda: state.components.get(ORDERS).lifecycle,
+                lambda: state.components.get(INVENTORY).core,
+            ),
+            lambda: client,
+        ),
+        *merge_activities(lambda: state.components.get(PRINTERS).store),
     ]
-    try:
-        while not stop.is_set():
-            worker = await _built_off_loop(
-                partial(
-                    library_worker,
-                    client,
-                    queue,
-                    activities,
-                    workflows=LIBRARY_WORKFLOWS,
-                    workflow_runner=sandboxed_runner(),
-                    graceful_shutdown_timeout=LIBRARY_GRACEFUL_SHUTDOWN,
-                    deployment_config=library_deployment(build_id),
-                )
-            )
-            if not await _serve_until([worker], stop, name="library"):
-                with suppress(TimeoutError):
-                    await asyncio.wait_for(stop.wait(), PRINT_WORKER_RECONNECT)
-    finally:
-        current.cancel()
-        schedules.cancel()
-        boot_nudge.cancel()
-        await stop_triggers()
 
 
 def _unknown_tray_activities(state: AppState) -> list[Callable[..., Any]]:
@@ -2450,6 +2496,18 @@ def _unknown_tray_activities(state: AppState) -> list[Callable[..., Any]]:
             lambda: state.components.get(FILAMENT), lambda: state.settings_store.pool
         )
     ]
+
+
+def _preset_write_activities(state: AppState) -> list[Callable[..., Any]]:
+    """The copy, edit and send again of a filament preset (#7204): the API alone holds the
+    database secret."""
+    return list(
+        preset_write_activities(
+            lambda: state.settings_store.pool,
+            lambda: state.store.blobs,
+            lambda: state.settings_store.load(),
+        ).values()
+    )
 
 
 def _flow_triggers(

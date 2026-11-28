@@ -13,6 +13,7 @@ import {
   matchesSearch,
   orElse,
   parseSearch,
+  type PropertyText,
   SEARCH_ROUTES,
   spoolSearchDoc,
   spoolTags,
@@ -32,15 +33,72 @@ import { defineTool, idempotencyKey, json, ToolError, type Tool } from './regist
 
 const SOURCE = "ScadBuddy's own filament inventory"
 
+/** #8366: what a tag answer says of its chip, and the probe that tells it when it is unknown. */
+const CHIP_FIELDS =
+  'Each tag has `chip` (NTAG213, NTAG215 or NTAG216), `max_ndef_bytes` (the largest NDEF message it takes), ' +
+  '`writable` and `chip_read_at`, as the ScadBuddy app last read them; all null when no app read told them (a ' +
+  "Chrome Web NFC read, an older app, a Bambu tag). To learn them, call nfc_probe: the user's phone reads the tag."
+
 /**
  * #7204: the preset routes are Go's. Until core serves the area `filament-presets`, the path goes on to
  * Python, which answers a 404 with no `code`; a real answer of Go's has one (`preset_not_found`).
  */
 async function presetOk<T>(pending: Promise<{ data?: T; error?: unknown; response: Response }>, what: string): Promise<T> {
   const result = await pending
-  const code = (result.error as { code?: unknown } | undefined)?.code
-  if (result.response.status === 404 && typeof code !== 'string') {
+  const status = result.response.status
+  const problem = result.error as { code?: unknown; current_version?: unknown; key?: unknown; detail?: unknown } | undefined
+  const code = problem?.code
+  if (status === 404 && typeof code !== 'string') {
     throw new ToolError('the presets routes are not on yet on this server (core area filament-presets)')
+  }
+  if (!result.response.ok && typeof code === 'string') {
+    // As entities.ts does: the code is the ToolError's `problem` and is in the summary. The detail is the backend's text, so it is untrusted.
+    const extra =
+      code === 'version_moved'
+        ? ` The preset has a newer version than \`expected_version\`; nothing was written.${
+            typeof problem?.current_version === 'number' ? ` Its current version is ${problem.current_version}.` : ''
+          } Read it again, then repeat the edit.`
+        : code === 'key_refused' && typeof problem?.key === 'string'
+          ? ` The key is ${JSON.stringify(problem.key)}.`
+          : ''
+    throw new ToolError(
+      `${what} failed (HTTP ${status}, ${code}).${extra}`,
+      status,
+      typeof problem?.detail === 'string' ? problem.detail : undefined,
+      code,
+    )
+  }
+  return ok(Promise.resolve(result), what)
+}
+
+/** The Go resolve route's problem codes (`tools/go/core/internal/unknowntrays/resolve.go`), #8489. */
+const RESOLVE_CODES = new Set([
+  'tray_changed',
+  'code_unknown',
+  'spool_archived',
+  'no_ams_kind',
+  'spool_missing',
+  'tag_clash',
+  'invalid_input',
+  'resolve_pending',
+  'writes_not_configured',
+])
+
+/**
+ * #8489: the resolve's answer, or a ToolError whose summary names the route's code, so the model can
+ * tell `tray_changed` from `tag_clash`. Only a code of `RESOLVE_CODES` is named; the detail stays untrusted.
+ */
+async function resolveOk<T>(pending: Promise<{ data?: T; error?: unknown; response: Response }>, what: string): Promise<T> {
+  const result = await pending
+  const status = result.response.status
+  const problem = result.error as { code?: unknown; detail?: unknown } | undefined
+  const code = typeof problem?.code === 'string' && RESOLVE_CODES.has(problem.code) ? problem.code : undefined
+  if (status === 404 && typeof problem?.code !== 'string') {
+    throw new ToolError(`${what} failed (HTTP 404): this server does not serve the unknown-spool area yet (core area unknown-trays)`, status)
+  }
+  if (!result.response.ok && code !== undefined) {
+    const extra = code === 'resolve_pending' ? ' It may still finish: read filament_unknown_trays before you send it again.' : ''
+    throw new ToolError(`${what} failed (HTTP ${status}, ${code}).${extra}`, status, typeof problem?.detail === 'string' ? problem.detail : undefined, code)
   }
   return ok(Promise.resolve(result), what)
 }
@@ -150,6 +208,9 @@ const csvRows = z
   .min(1)
   .max(5000)
   .describe('One object per CSV row, column name to cell text')
+
+/** #8228: the catalog names a type add takes instead of their ids. */
+const NAME_FIELDS = ['brand_name', 'material_name', 'subtype_name'] as const
 
 const tools: Tool[] = [
   defineTool({
@@ -345,7 +406,9 @@ const tools: Tool[] = [
       'The spool types, by code. A type is a product: what a maker sells under one code (brand, material, ' +
       'subtype, colour `#RRGGBBAA`, label weight, print values a spool inherits, `cost_per_kg`, `filament_id` of ' +
       'its price book row). Archived types only with `include_archived`. `q` keeps the types whose code, brand, ' +
-      'material, subtype, colour name, hex, supplier SKU or a property value (a GTIN, an MPN) match it.',
+      'material, subtype, colour name, hex, supplier SKU or a property value (a GTIN, an MPN) match it. ' +
+      'A `key:value` token (such as `gtin:06975337041234`) also matches a property of that key whose whole value equals it; ' +
+      'two values of 8 to 14 digits are equal when they are equal padded to 14 digits.',
     input: z.object({ include_archived: z.boolean().default(false), q: searchQuery }),
     risk: 'read',
     source: SOURCE,
@@ -360,7 +423,7 @@ const tools: Tool[] = [
       const [names, skus, properties] = await Promise.all([
         catalogNames(backend),
         orElse(typeSkus(backend), new Map<string, string[]>()),
-        orElse(kindPropertyTexts(backend, 'spool_type'), new Map<string, string[]>()),
+        orElse(kindPropertyTexts(backend, 'spool_type'), new Map<string, PropertyText[]>()),
       ])
       return json(
         types.filter((type) => matchesSearch(typeSearchDoc(type, names, skus.get(type.id), { properties: properties.get(type.id) }), tokens)),
@@ -390,8 +453,12 @@ const tools: Tool[] = [
     label: 'Add or edit a spool type',
     description:
       'Add a spool type (no `type_id`), or edit one: only the `fields` given change, and `null` clears a ' +
-      'nullable one. A new type needs `code`, `material_id`, `rgba` (`#RRGGBB` or `#RRGGBBAA`) and ' +
-      '`label_weight_g`; ids come from filament_catalog_list. With a `cost_per_kg` it also keeps the price ' +
+      'nullable one. A new type needs `code`, `material_id` (or `material_name`), `rgba` (`#RRGGBB` or `#RRGGBBAA`) and ' +
+      '`label_weight_g`; ids come from filament_catalog_list. On an add only, `brand_name`, `material_name` and ' +
+      '`subtype_name` (#8228) are the other way to give `brand_id`, `material_id` and `subtype_id` (one or the other, ' +
+      'not both): the catalog row of that name or alias, else a new row added unchecked with the type (a subtype of ' +
+      "the type's material), which a refused type does not add. An effect is never added. " +
+      'With a `cost_per_kg` it also keeps the price ' +
       'book row of its material, subtype, brand, colour and alpha in step; a new row takes its stops and effect. ' +
       '`lead_time_days` and `safety_margin_days` (days, `null` clears) set the type\'s own reorder timing. ' +
       '`archived: true` takes a type off the lists and frees its code. `tdfp_id` (a positive integer below 2^31, `null` ' +
@@ -428,6 +495,14 @@ const tools: Tool[] = [
             .nullable()
             .optional()
             .describe('The drying time in hours a drying of its spools defaults to, a decimal such as `8`; null clears it'),
+          brand_name: z.string().min(1).max(128).optional().describe('Add only: the brand by name instead of `brand_id`; a missing one is added'),
+          material_name: z.string().min(1).max(128).optional().describe('Add only: the material by name instead of `material_id`; a missing one is added'),
+          subtype_name: z
+            .string()
+            .min(1)
+            .max(128)
+            .optional()
+            .describe("Add only: the subtype by name instead of `subtype_id`, under the type's material; a missing one is added"),
         })
         .catchall(z.unknown())
         .default({})
@@ -451,6 +526,8 @@ const tools: Tool[] = [
       if (type_id === undefined) {
         if (archived !== undefined) throw new ToolError('archived needs a type_id')
         row = await ok(backend.POST('/api/v1/filament/types', { body: { ...fields, properties } as never }), 'add a spool type')
+      } else if (NAME_FIELDS.some((name) => (fields as Record<string, unknown>)[name] !== undefined)) {
+        throw new ToolError(`${NAME_FIELDS.join(', ')} are for an add only; edit a type with ids`)
       } else if (properties !== undefined && archived === undefined && Object.keys(fields).length === 0) {
         // Properties only: no row PATCH, which would move the type's `updated_at` and so its sync time.
         const set = await setPropertiesAfter(backend, `spool_type:${type_id}`, properties)
@@ -831,8 +908,10 @@ const tools: Tool[] = [
       'with `include_archived`. `awaiting_home: true` lists only the spools that came out of a tray and are asked ' +
       'which spool goes into their home dry box (`home_location_id`, asked at `home_asked_at`); ask the user to ' +
       'identify the spool, then answer with filament_spool_move `answers`. `q` keeps the spools whose number, brand, material, subtype, colour name, hex, ' +
-      "place, tray, type code, type's supplier SKU, one of the spool's property values (a lot) or open tag's UID or " +
-      'tray UUID (from 4 hex digits; `:` and `-` are left out, so `04:A1:B2` finds tag `04A1B2…`) match it.',
+      "place, tray, type code, type's supplier SKU, one of the spool's or its type's property values (a lot, a GTIN) or open tag's UID or " +
+      'tray UUID (from 4 hex digits; `:` and `-` are left out, so `04:A1:B2` finds tag `04A1B2…`) match it. ' +
+      'A `key:value` token (such as `gtin:06975337041234`) also matches a property of that key whose whole value equals it; ' +
+      'two values of 8 to 14 digits are equal when they are equal padded to 14 digits.',
     input: z.object({
       include_archived: z.boolean().default(false),
       needs_type: z.boolean().optional(),
@@ -856,7 +935,7 @@ const tools: Tool[] = [
       const tokens = parseSearch(q)
       if (!tokens.length) return json(spools)
       // The type codes, SKUs, trays, tags and properties only add to the search: one that cannot be read leaves its field out.
-      const [types, skus, trays, tags, properties] = await Promise.all([
+      const [types, skus, trays, tags, properties, typeProperties] = await Promise.all([
         orElse(
           ok(backend.GET('/api/v1/filament/types', { params: { query: { include_archived: true } } }), 'list the spool types'),
           [],
@@ -864,7 +943,8 @@ const tools: Tool[] = [
         orElse(typeSkus(backend), new Map<string, string[]>()),
         orElse(spoolTrays(backend), new Map<string, string>()),
         orElse(spoolTags(backend), new Map<string, string[]>()),
-        orElse(kindPropertyTexts(backend, 'spool'), new Map<string, string[]>()),
+        orElse(kindPropertyTexts(backend, 'spool'), new Map<string, PropertyText[]>()),
+        orElse(kindPropertyTexts(backend, 'spool_type'), new Map<string, PropertyText[]>()),
       ])
       const codes = new Map(types.map((type) => [type.id, type.code]))
       return json(
@@ -876,6 +956,7 @@ const tools: Tool[] = [
               tray: trays.get(spool.id),
               tags: tags.get(spool.id),
               properties: properties.get(spool.id),
+              typeProperties: spool.type_id ? typeProperties.get(spool.type_id) : undefined,
             }),
             tokens,
           ),
@@ -1287,7 +1368,8 @@ const tools: Tool[] = [
     label: 'List spool tags',
     description:
       "ScadBuddy's spool tags (RFID or NFC), oldest first, each with its open `binding` and the `spool_number` " +
-      'it is on. A tag on no spool only with `include_unbound`.',
+      'it is on. A tag on no spool only with `include_unbound`. ' +
+      CHIP_FIELDS,
     input: z.object({ include_unbound: z.boolean().default(false) }),
     risk: 'read',
     source: SOURCE,
@@ -1304,7 +1386,7 @@ const tools: Tool[] = [
   defineTool({
     name: 'filament_tag_get',
     label: 'Read a spool tag',
-    description: 'One tag with its open binding and every binding it has had, newest first. 404 for none.',
+    description: 'One tag with its open binding and every binding it has had, newest first. 404 for none. ' + CHIP_FIELDS,
     input: z.object({ tag_id: z.string().uuid().describe("A tag's `id` from filament_tag_list") }),
     risk: 'read',
     source: SOURCE,
@@ -1323,7 +1405,7 @@ const tools: Tool[] = [
     label: 'List a spool tag’s backups',
     description:
       'List what a tag held before each write, newest first: its UID, its NDEF records (record type, media type, ' +
-      'data as hex), why it was written (`spool_write`, `agent_write`, `restore`, `place_write`: a place’s tag, written by the swap page), who wrote it and when. ' +
+      'data as hex), why it was written (`spool_write`, `agent_write`, `restore`, `place_write`: a place’s tag, written by the swap page, `clear`: the phone wrote the tag empty), who wrote it and when. ' +
       'A page holds up to `limit` backups (default 50, at most 200); pass the last `id` as `before` for the next page. Reads ScadBuddy only.',
     input: z.object({
       tag_id: z.string().uuid().describe("A tag's `id` from filament_tag_list"),
@@ -2066,16 +2148,20 @@ const tools: Tool[] = [
     description:
       'Link a spool to an unknown tray (#7143). Give `tray_id` (filament_unknown_trays `id`), exactly one of ' +
       "`spool_id` and `code` (a label code such as `S-12`), `net_weight_g` (the spool's weight without its core, " +
-      "more than 0) and `seen_at` (the row's `seen_at`, as listed, never changed). It answers `{id, number, code, " +
-      'location_id}`. 409 `tray_changed`: the tray changed after the list; read the list again. 404 `code_unknown`: ' +
-      'no spool has that code. 409 `spool_archived`. 409 `no_ams_kind`. 404 `spool_missing`: the spool was archived ' +
-      'or deleted while it linked. 409 `tag_clash`: the tag on the tray is on another spool. Use only what the user says: never pick a ' +
-      'candidate yourself. Writes ScadBuddy only.',
+      "more than 0 and at most 100000) and `seen_at` (the row's `seen_at`, as listed, never changed). It answers " +
+      '`{id, number, code, location_id}`. 409 `tray_changed`: the tray changed after the list; read the list again. ' +
+      '404 `code_unknown`: no spool has that code. 409 `spool_archived`. 409 `no_ams_kind`: no location kind is ' +
+      'marked AMS. 404 `spool_missing`: the spool was archived or deleted while it linked. 409 `tag_clash`: the tag ' +
+      'on the tray is on another spool. 422 `invalid_input`: the body is not valid. 503 `resolve_pending`: the link ' +
+      'did not answer in time and may still finish; read the list before you send it again. 503 ' +
+      '`writes_not_configured`: this server has no Temporal for the link. A 404 with no `code`: the server does not ' +
+      'serve the unknown-spool area yet. Use only what the user says: never pick a candidate yourself. Writes ' +
+      'ScadBuddy only.',
     input: z.object({
       tray_id: z.string().uuid(),
       spool_id: z.string().uuid().optional(),
       code: z.string().min(1).optional(),
-      net_weight_g: z.number().positive(),
+      net_weight_g: z.number().positive().max(100000),
       seen_at: z.string().min(1),
     }),
     risk: 'write',
@@ -2086,7 +2172,7 @@ const tools: Tool[] = [
       if ((spool_id === undefined) === (code === undefined)) throw new ToolError('give exactly one of spool_id and code')
       const body = spool_id !== undefined ? { spool_id, net_weight_g, seen_at } : { code: code as string, net_weight_g, seen_at }
       return json(
-        await ok(
+        await resolveOk(
           unknownTrayClient(backend).POST('/api/v1/filament/unknown-trays/{tray_id}/resolve', {
             params: { path: { tray_id } },
             body,
@@ -2355,7 +2441,7 @@ const tools: Tool[] = [
       '`usage_unlinked` (Bambuddy usage rows booked, and the rows of an unlinked spool later than the last ' +
       "read an earlier pull booked whole; a failed body's rows are counted again). " +
       '409 when no Bambuddy is configured, or when the Bambuddy URL changed during the import (import again). ' +
-      '503 when the print worker did not finish in time: it may still be running, so check the spools before ' +
+      '503 `import_unfinished` when the print worker did not finish in time: it may still be running, so check the spools before ' +
       'importing again. 502 when ScadBuddy refused what the worker read (importing again gets the same answer). ' +
       "ScadBuddy's print worker reads Bambuddy; this writes ScadBuddy only.",
     input: z.object({}),
@@ -2398,7 +2484,7 @@ const tools: Tool[] = [
       'spools use it. `source` says where the preset came from: `3dfp` (fetched from 3dfilamentprofiles.com), ' +
       '`bambuddy` (taken from Bambuddy) or `manual` (made in ScadBuddy). Only a `manual` preset can be edited. ' +
       '`mirror` is the state of its copy in Bambuddy: `sent`, `pending`, `failed` or `bambuddy_owned`. ' +
-      '`source` and `type_id` limit the list. The order is by name. The tools to copy, edit and send again come later. ' +
+      '`source` and `type_id` limit the list. The order is by name. The tools filament_preset_copy, filament_preset_update and filament_preset_mirror write them. ' +
       'Writes nothing.',
     input: z.object({
       source: z.enum(['3dfp', 'bambuddy', 'manual']).optional(),
@@ -2422,8 +2508,8 @@ const tools: Tool[] = [
     description:
       'One filament preset (#7204), as filament_preset_list shows it, with its `versions` and its `document`: the ' +
       'slicer settings of the current version, as text values. Credentials are never in it. `document` is null when ' +
-      'it cannot be read, and `document_error` says why. Only a `manual` preset can be edited. The tools to copy, ' +
-      'edit and send again come later. 404 `preset_not_found`. Writes nothing.',
+      'it cannot be read, and `document_error` says why. Only a `manual` preset can be edited. The tools filament_preset_copy, ' +
+      'filament_preset_update and filament_preset_mirror write them. 404 `preset_not_found`. Writes nothing.',
     input: z.object({ preset_id: z.number().int().positive() }),
     risk: 'read',
     source: SOURCE,
@@ -2459,6 +2545,102 @@ const tools: Tool[] = [
             params: { path: { preset_id }, query: { from_version, to_version } },
           }),
           `diff filament preset ${preset_id}`,
+        ),
+      ),
+  }),
+
+  defineTool({
+    name: 'filament_preset_copy',
+    label: 'Copy a filament preset',
+    description:
+      'Copy a filament preset (#7204) as a new `manual` preset named `name` (1 to 200 characters). It is a ' +
+      'new preset at version 1 and answers it as filament_preset_get does. While the setting ' +
+      '`filament_preset_mirror` is on, it also writes the copy to Bambuddy through the mirror; the `mirror` field ' +
+      'says how that went, and filament_preset_mirror sends it again. A repeat of the same call gets the first ' +
+      'answer. Problems, each with a `code`: 422 `invalid_input` (the name or the call is not valid), 422 ' +
+      '`idempotency_key_reused`, 404 `preset_not_found`, 409 `document_missing` (the store lost the preset ' +
+      'document), 503 `writes_not_configured`, and 503 `preset_write_pending` (the write may still run: read the ' +
+      'presets before you repeat it). Any other failure is 500. Writes ScadBuddy, and Bambuddy through the mirror. Approved first.',
+    input: z.object({ preset_id: z.number().int().positive(), name: z.string().min(1).max(200) }),
+    risk: 'outward',
+    source: SOURCE,
+    routes: [],
+    summarize: ({ preset_id, name }) => `Copy filament preset ${preset_id} as "${name}"`,
+    handler: async ({ preset_id, name }, ctx) =>
+      json(
+        await presetOk(
+          filamentPresetClient(ctx.backend).POST('/api/v1/filament/presets/{preset_id}/copy', {
+            params: { path: { preset_id }, header: { 'Idempotency-Key': idempotencyKey(ctx) } },
+            body: { name },
+          }),
+          `copy filament preset ${preset_id}`,
+        ),
+      ),
+  }),
+
+  defineTool({
+    name: 'filament_preset_update',
+    label: 'Edit a filament preset',
+    description:
+      'Edit a filament preset (#7204) and make a new version of it. Only a `manual` preset can be updated; copy ' +
+      'any other one first with filament_preset_copy. `expected_version` is the `version` you read; a newer one ' +
+      'is refused 409 `version_moved` with `current_version`, and nothing is written. `name` renames it (1 to ' +
+      '200 characters). `set` gives settings by key; a value is a string or a list of strings. `unset` lists the ' +
+      'keys to remove. A key matches `^[A-Za-z0-9_.-]{1,128}$`. `set` and `unset` hold at most 500 keys together. ' +
+      'An edit needs a `name`, a `set` or an `unset`. `name` and credential keys are refused as keys. The ' +
+      'answer is `changed` (false when the edit changes nothing, so no version is made) and the `preset`. While ' +
+      'the setting `filament_preset_mirror` is on, it also writes the new version to Bambuddy through the mirror; ' +
+      'filament_preset_mirror sends it again. Problems, each with a `code`: 409 `not_manual` (the preset is not ' +
+      'manual: copy it first), 409 `version_moved`, 422 `key_refused` (with the `key`), 422 `invalid_input`, 422 ' +
+      '`idempotency_key_reused`, 404 `preset_not_found`, 409 `document_missing`, 503 `writes_not_configured`, and ' +
+      '503 `preset_write_pending` (the write may still run: read the preset before you repeat it). Any other ' +
+      'failure is 500. Writes ScadBuddy, and Bambuddy through the mirror. Approved first.',
+    input: z.object({
+      preset_id: z.number().int().positive(),
+      expected_version: z.number().int().positive(),
+      name: z.string().min(1).max(200).optional(),
+      set: z.record(z.string(), z.union([z.string(), z.array(z.string())])).optional(),
+      unset: z.array(z.string()).optional(),
+    }),
+    risk: 'outward',
+    source: SOURCE,
+    routes: [],
+    summarize: ({ preset_id, expected_version }) => `Edit filament preset ${preset_id} (from version ${expected_version})`,
+    handler: async ({ preset_id, ...body }, ctx) =>
+      json(
+        await presetOk(
+          filamentPresetClient(ctx.backend).PATCH('/api/v1/filament/presets/{preset_id}', {
+            params: { path: { preset_id }, header: { 'Idempotency-Key': idempotencyKey(ctx) } },
+            body,
+          }),
+          `edit filament preset ${preset_id}`,
+        ),
+      ),
+  }),
+
+  defineTool({
+    name: 'filament_preset_mirror',
+    label: 'Send a filament preset to Bambuddy again',
+    description:
+      'Send a filament preset (#7204) to Bambuddy again, when its `mirror` is `pending` or `failed`. The answer ' +
+      'is `outcome` and the `preset` row. `outcome` is `sent` (Bambuddy took it), `failed` (the send ran and ' +
+      "failed; the preset's `mirror_error` says why), `busy` (another send of this preset runs: read the preset " +
+      'again later), `in_sync` (nothing to send: Bambuddy has it already) or `pending` (the send did not finish ' +
+      'in time and may still run). This is the one write of the three that does not change the preset. Problems, ' +
+      'each with a `code`: 409 `mirror_off` (the setting `filament_preset_mirror` is off), 409 `not_configured` ' +
+      '(no Bambuddy is set), 409 `instance_changed` (the Bambuddy URL changed: reset the links first), 409 ' +
+      '`not_mirrored` (a `bambuddy` preset is Bambuddy\'s own), 404 `preset_not_found`, 503 ' +
+      '`writes_not_configured`, and 503 `preset_write_pending`. Any other failure is 500. Writes Bambuddy through the mirror. Approved first.',
+    input: z.object({ preset_id: z.number().int().positive() }),
+    risk: 'outward',
+    source: SOURCE,
+    routes: [],
+    summarize: ({ preset_id }) => `Send filament preset ${preset_id} to Bambuddy again`,
+    handler: async ({ preset_id }, { backend }) =>
+      json(
+        await presetOk(
+          filamentPresetClient(backend).POST('/api/v1/filament/presets/{preset_id}/mirror', { params: { path: { preset_id } } }),
+          `send filament preset ${preset_id} again`,
         ),
       ),
   }),

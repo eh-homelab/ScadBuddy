@@ -1,0 +1,29 @@
+{
+  "archived_at": "2026-11-26T12:00:00Z",
+  "attribute_schema": {
+    "properties": {
+      "thread": {
+        "type": "string"
+      }
+    },
+    "type": "object"
+  },
+  "billing": null,
+  "builtin": false,
+  "code": "K-28",
+  "counting": null,
+  "id": "bolt",
+  "incomplete_steps": [],
+  "item_count": 0,
+  "life_basis": "none",
+  "name": "Bolts",
+  "nature": null,
+  "number": 28,
+  "parent_id": "fastener",
+  "role": null,
+  "saleable": false,
+  "special_type": null,
+  "steps": {},
+  "tracking": "lot",
+  "uom": "each"
+}

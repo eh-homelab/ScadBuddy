@@ -10,6 +10,9 @@ expect true  tools/go/bambuddy-fs/main.go
 expect true  backend/scadbuddy/migrations/20261102T0645Z_service_credentials.sql
 expect true  backend/scadbuddy/migrations_agent/20260928T0107Z_sessions.sql
 expect false backend/scadbuddy/migrationsx/a.sql
+expect true  backend/scadbuddy/crud/shared/crud_requests_insert.sql
+expect true  backend/scadbuddy/entities/shared/ensure_entity.sql
+expect false backend/scadbuddy/crud/idempotency.py
 expect true  docs/inventory-model/kinds.yaml
 expect true  backend/tests/fixtures/blob-upload-vectors.json
 expect true  backend/tests/fixtures/pack-dir-vectors.json

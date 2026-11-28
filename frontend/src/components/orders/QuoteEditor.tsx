@@ -225,6 +225,8 @@ export function QuoteEditor({
   // made again keeps them; with none, on the model's remembered ones.
   const lastSlice = quotes.filter((q) => q.source === 'slice').sort(byCreated).at(-1)
   const running = slice?.run && !slice.run.error ? slice.run : undefined
+  // #8481 — past acceptance the render is Print…'s (`PrintItem` `renderFirst`), not Slice…'s.
+  const again = editable ? 'Slice…' : 'Print…'
   // #4673 PR 4 — the print setups, by revision; headed only when there is a revision to name.
   const groups = setupGroups(quotes, item?.revisions ?? [], item?.current_revision_id)
   const grouped = groups.some((group) => group.revision !== null)
@@ -349,12 +351,12 @@ export function QuoteEditor({
         <p role="status" className="flex flex-wrap items-center gap-2 text-[13px] text-muted-foreground" data-testid="quote-running">
           <Spinner />
           {running.landed && running.detached ? (
-            <span>The render finished, but the order could not be read again: its output shows here once it is. Stop waiting to press Slice… again.</span>
+            <span>The render finished, but the order could not be read again: its output shows here once it is. Stop waiting to press {again} again.</span>
           ) : running.landed ? (
             <span>The render finished. Reading the order again for its output; the print dialog opens then.</span>
           ) : running.detached && running.stage === 'rendering' ? (
             <span>
-              No answer from the render started at <When at={running.startedAt} /> ({elapsed(running.startedAt, now)} ago): it may still be rendering, and its output shows here when it lands. If it never started, stop waiting and press Slice… again.
+              No answer from the render started at <When at={running.startedAt} /> ({elapsed(running.startedAt, now)} ago): it may still be rendering, and its output shows here when it lands. If it never started, stop waiting and press {again} again.
             </span>
           ) : running.detached ? (
             <span>

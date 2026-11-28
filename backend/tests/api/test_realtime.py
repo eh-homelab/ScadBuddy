@@ -435,6 +435,11 @@ def test_a_task_change_reaches_its_topics() -> None:
     topics = ["tasks", f"task:{TASK_ID}", "tasks:packing bench"]
     assert realtime.topics_of(event) == topics
     assert all(realtime.valid_topic(topic) for topic in topics)
+    # A place kept as it was given before #8062 reaches its station's folded topic too.
+    raw = TaskChanged(task_id=TASK_ID, run_id=FLOW_RUN_ID, state="open", place="l7")
+    assert realtime.topics_of(raw) == ["tasks", f"task:{TASK_ID}", "tasks:l7", "tasks:L-7"]
+    folded = TaskChanged(task_id=TASK_ID, run_id=FLOW_RUN_ID, state="open", place="L-7")
+    assert realtime.topics_of(folded) == ["tasks", f"task:{TASK_ID}", "tasks:L-7"]
     unplaced = TaskChanged(task_id=TASK_ID, run_id=FLOW_RUN_ID, state="answered")
     assert realtime.topics_of(unplaced) == ["tasks", f"task:{TASK_ID}"]
 

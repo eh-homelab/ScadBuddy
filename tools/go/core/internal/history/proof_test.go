@@ -6,13 +6,13 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
-	"runtime"
 	"slices"
 	"strings"
 	"testing"
 
 	"go.yaml.in/yaml/v3"
 
+	"github.com/eh-homelab/ScadBuddy/tools/go/core/internal/inventory/modeldata"
 	"github.com/eh-homelab/ScadBuddy/tools/go/core/internal/testdb"
 )
 
@@ -47,8 +47,11 @@ var actors = map[string]string{
 
 func readProof(t *testing.T) proof {
 	t.Helper()
-	_, file, _, _ := runtime.Caller(0)
-	raw, err := os.ReadFile(filepath.Join(filepath.Dir(file), "../../../../../docs/inventory-model/examples.yaml"))
+	dir, err := modeldata.Dir()
+	if err != nil {
+		t.Fatal(err)
+	}
+	raw, err := os.ReadFile(filepath.Join(dir, "examples.yaml"))
 	if err != nil {
 		t.Fatal(err)
 	}

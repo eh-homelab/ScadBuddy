@@ -58,6 +58,8 @@ func init() {
 		"order_item.changed")
 	kinds([]Field{str("order_id")}, "order.bank_deposits")
 	kinds([]Field{str("operation_id")}, "ai_operation.changed")
+	// #6949 K1: Go's own record of an inventory activity, sent as NOTIFY only.
+	kinds([]Field{str("operation_id")}, "inventory_operation.changed")
 	kinds([]Field{str("principal"), optStr("session_id")}, "auth.session_revoked")
 	kinds([]Field{str("slug"), str("name")}, "library.changed")
 	kinds([]Field{str("name"), strs("commits")}, "library.removed")

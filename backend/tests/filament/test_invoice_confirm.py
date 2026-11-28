@@ -194,6 +194,19 @@ def test_a_missing_catalog_row_in_a_proposed_type_is_a_line_error(shop: Shop) ->
     assert shop.status(invoice.id) == "draft"
 
 
+def test_a_catalog_name_that_keeps_clashing_is_a_line_error(
+    shop: Shop, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Every lookup misses and the insert of the name clashes with the row that has it."""
+    monkeypatch.setattr("scadbuddy.filament.catalog.find_by_key", lambda *_, **__: None)
+    invoice = shop.one(
+        None, proposed_type=shop.type_body("PLA-NEW", material_id=None, material_name="PLA")
+    )
+    with pytest.raises(InvoiceLineError, match="line 1"):
+        shop.invoices.confirm(invoice.id, actor="ann")
+    assert shop.status(invoice.id) == "draft"
+
+
 def test_a_line_with_no_type_is_a_line_error(shop: Shop) -> None:
     invoice = shop.one(None)
     with pytest.raises(InvoiceLineError, match="line 1"):

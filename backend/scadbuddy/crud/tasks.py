@@ -45,11 +45,16 @@ class RemoteTasks:
     def __init__(self, crud: CrudClient) -> None:
         self._client = crud
 
-    async def open(self, task: TaskOpen, *, workflow_run_id: str | None = None) -> Task:
+    async def open(
+        self, task: TaskOpen, *, widgets: bool = False, workflow_run_id: str | None = None
+    ) -> Task:
         """`TaskStore.open`: the same id again returns the stored row. Raises
         `RunNotFoundError` for an unknown run and `RunEndedError` for one that ended, or
         whose execution ``workflow_run_id`` a Reset replaced."""
-        body = task.model_dump(mode="json", by_alias=True) | {"workflow_run_id": workflow_run_id}
+        body = task.model_dump(mode="json", by_alias=True) | {
+            "widgets": widgets,
+            "workflow_run_id": workflow_run_id,
+        }
         try:
             response = await self._client.request("POST", BASE, json=body)
         except CrudRefusedError as error:

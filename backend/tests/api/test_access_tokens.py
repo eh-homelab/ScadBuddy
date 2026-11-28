@@ -105,6 +105,42 @@ def test_a_revoked_token_is_nobody(client: TestClient, app: FastAPI) -> None:
     assert _count(app, "api", "signed_out") == 1
 
 
+def test_a_fleet_token_is_minted_and_listed(client: TestClient, app: FastAPI) -> None:
+    # #8041: fleetd's token, beside read and write.
+    _sign_in(client, app)
+    created = _mint(client, scope="fleet")
+    assert created["token"].startswith("sbpat_")
+    assert created["access_token"]["scope"] == "fleet"
+    listed = client.get("/api/v1/auth/access-tokens").json()
+    assert [row["scope"] for row in listed] == ["fleet"]
+    response = client.post("/api/v1/auth/access-tokens", json={"name": "x", "scope": "admin"})
+    assert response.status_code == 422
+
+
+@pytest.mark.parametrize("mode", ["off", "observe", "enforce"])
+def test_a_fleet_token_reaches_nothing_here(
+    client: TestClient, app: FastAPI, settings: Settings, mode: str
+) -> None:
+    # #8041, #8179: Python serves none of the rotator's routes (core does), so a fleet token
+    # is refused on every route here, in every mode: an api read, a person route, a CRUD
+    # route. A write token still reads.
+    _sign_in(client, app)
+    fleet = _mint(client, scope="fleet")["token"]
+    write = _mint(client, scope="write")["token"]
+    client.cookies.clear()
+    settings.auth_mode = mode  # type: ignore[assignment]
+    for path in (
+        "/api/v1/models",
+        "/api/v1/auth/access-tokens",
+        "/api/v1/internal/crud/fleet/changes",
+    ):
+        response = client.get(path, headers={"Authorization": f"Bearer {fleet}"})
+        assert response.status_code == 403, (path, response.text)
+        assert response.json()["reason"] == "out_of_scope"
+    response = client.get("/api/v1/models", headers={"Authorization": f"Bearer {write}"})
+    assert response.status_code == 200, response.text
+
+
 def test_minting_needs_a_signed_in_person(client: TestClient) -> None:
     assert client.post("/api/v1/auth/access-tokens", json={"name": "fs"}).status_code == 401
 

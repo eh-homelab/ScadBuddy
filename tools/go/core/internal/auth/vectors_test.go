@@ -260,7 +260,7 @@ func TestModeVectors(t *testing.T) {
 			_ = httpx.WriteJSON(w, map[string]bool{"ok": true})
 		})
 		for _, class := range []string{"public", "api", "person", "flow.host", "internal.outputs",
-			"crud.agent", "crud.render", "transfer", "exchange"} {
+			"crud.agent", "crud.render", "crud.fleet-rotator", "transfer", "exchange"} {
 			mux.Handle("/v/"+class, gate.Wrap(Route{Class: class, Template: "/v/" + class}, ok))
 			mux.Handle("GET /v/"+class+"/img",
 				gate.Wrap(Route{Class: class, Template: "/v/" + class + "/img", Scriptless: true}, ok))

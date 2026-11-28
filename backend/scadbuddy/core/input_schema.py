@@ -48,6 +48,8 @@ import jsonschema
 import regex
 from pydantic import BaseModel
 
+from scadbuddy.tasks.widgets import WIDGET_KEYS, widget_problems
+
 MAX_SCHEMA_BYTES = 16_384
 MAX_INPUTS = 50
 MAX_PATTERN = 256
@@ -146,6 +148,7 @@ def schema_problems(
     objects: bool = False,
     reserved: Collection[str] = (),
     formats: bool = False,
+    widgets: bool = False,
     defaults: bool = True,
     retry_timeouts: bool = False,
 ) -> list[str]:
@@ -158,6 +161,8 @@ def schema_problems(
     schema is refused cannot be answered (`tasks/validate.py`).
     ``objects``: a top-level input may be an object of scalar inputs (#5701).
     ``formats``: a string may have a ``format`` of `FORMATS` (a prompt's, #7364).
+    ``widgets``: a property may have an ``x-sb-widget``, with its ``expects`` and ``kind``
+    (a prompt's task screen, `tasks/widgets.py`); a flow's inputs may not.
     ``defaults``: false skips the check of each ``default``, which runs its pattern within
     the budget below; the structure is still checked.
     ``retry_timeouts``: raise `PatternsTimedOutError` when the only problem is a default whose
@@ -172,6 +177,7 @@ def schema_problems(
         objects=objects,
         reserved=reserved,
         formats=formats,
+        widgets=widgets,
         defaults=defaults,
         retry_timeouts=retry_timeouts,
     )
@@ -184,6 +190,7 @@ def _schema_problems(
     objects: bool,
     reserved: Collection[str],
     formats: bool,
+    widgets: bool,
     defaults: bool,
     retry_timeouts: bool,
 ) -> list[str]:
@@ -209,6 +216,7 @@ def _schema_problems(
             objects=objects,
             reserved=reserved,
             formats=formats,
+            widgets=widgets,
             defaults=defaults,
             retry_timeouts=retry_timeouts,
         )
@@ -224,6 +232,7 @@ def _properties_problems(
     objects: bool,
     reserved: Collection[str],
     formats: bool,
+    widgets: bool,
     defaults: bool,
     retry_timeouts: bool,
 ) -> list[str]:
@@ -249,6 +258,7 @@ def _properties_problems(
                     prop,
                     stored=stored,
                     formats=formats,
+                    widgets=widgets,
                     defaults=defaults,
                     retry_timeouts=retry_timeouts,
                 )
@@ -258,6 +268,7 @@ def _properties_problems(
                     prop,
                     stored=stored,
                     formats=formats,
+                    widgets=widgets,
                     defaults=defaults,
                     retry_timeouts=retry_timeouts,
                 )
@@ -295,6 +306,7 @@ def _object_problems(
     *,
     stored: bool,
     formats: bool,
+    widgets: bool,
     defaults: bool,
     retry_timeouts: bool,
 ) -> list[str]:
@@ -320,6 +332,7 @@ def _object_problems(
                 spec,
                 stored=stored,
                 formats=formats,
+                widgets=widgets,
                 defaults=defaults,
                 retry_timeouts=retry_timeouts,
             )
@@ -346,6 +359,7 @@ def _property_problems(
     *,
     stored: bool = False,
     formats: bool = False,
+    widgets: bool = False,
     defaults: bool = True,
     retry_timeouts: bool = False,
 ) -> list[str]:
@@ -360,9 +374,13 @@ def _property_problems(
         return ["type must be one of " + ", ".join(_OWN)]
     extra = {"format"} if formats and kind == "string" else set()
     allowed = _DESCRIBED | {"default"} | _OWN[kind] | extra
+    if widgets:
+        allowed |= WIDGET_KEYS
     problems = [f"{key!r} is not supported for {kind}" for key in prop if key not in allowed]
     if extra:
         problems += _format_problems(prop, "")
+    if widgets:
+        problems += widget_problems(prop, kind)
     if kind == "array":
         items = prop.get("items")
         if not isinstance(items, dict) or items.get("type") not in tuple(SCALARS):

@@ -149,6 +149,7 @@ import type {
   FlowDecided,
   FlowProposal,
   Task,
+  TaskQuestion,
   FlowRunQueue,
   FlowCommitMessage,
   FlowDefinition,
@@ -176,6 +177,7 @@ import type {
   FlowVersion,
   Operation,
   OperationAccepted,
+  WorkflowAccepted,
   PrintRunRequest,
   PrintRunResult,
   PrintOptionsState,
@@ -440,8 +442,8 @@ export async function request<T>(path: string, init?: RequestInit): Promise<T> {
   return (await requestWithStatus<T>(path, init)).body
 }
 
-/** `request`, keeping the status: a 202 from an operation's route is not its body. */
-async function requestWithStatus<T>(path: string, init?: RequestInit): Promise<{ status: number; body: T }> {
+/** `request`, keeping the status: a 202 from an operation's or a stock workflow's route is not its body. */
+export async function requestWithStatus<T>(path: string, init?: RequestInit): Promise<{ status: number; body: T }> {
   const response = await send(`${API_BASE}${path}`, {
     ...init,
     headers: {
@@ -460,6 +462,44 @@ async function requestWithStatus<T>(path: string, init?: RequestInit): Promise<{
     return { status: 204, body: undefined as T }
   }
   return { status: response.status, body: (await response.json()) as T }
+}
+
+/**
+ * #6949 K1 — a write that may move stock: one `Idempotency-Key` per press, and a 202 is the
+ * workflow that still runs (`WorkflowAccepted`), not the body. The page shows it and reads the
+ * item again once its `parts_settling` clears. A `null` key sends no header: the write is keyed
+ * by its item on the server (`Lifecycle._parts_key`), which ignores the header.
+ */
+export async function stockWrite<T>(path: string, init: RequestInit, key: string | null = crypto.randomUUID()): Promise<T | WorkflowAccepted> {
+  // `new Headers` reads a Headers instance, a pair list and a record alike; a spread reads only a record.
+  const headers = Object.fromEntries(new Headers(init.headers).entries())
+  const answer = await requestWithStatus<T | WorkflowAccepted>(path, { ...init, headers: key === null ? headers : { ...headers, 'Idempotency-Key': key } })
+  return answer.body
+}
+
+/** The pause between two sends of a stock write that answered 202 (a test shortens it). */
+export const stockFollow = { intervalMs: 2000 }
+
+/**
+ * Follows a stock write's 202 to its end: `send` (the same write, with the same
+ * `Idempotency-Key`) goes again until it answers with its body. Each send attaches to the
+ * workflow and waits on the server, and a send after the run ended reads its result, so the
+ * last answer is the write's own. `onAccepted` hears the first 202, for `StillWorking`.
+ */
+export async function settled<T>(send: () => Promise<T | WorkflowAccepted>, onAccepted?: (accepted: WorkflowAccepted) => void, signal?: AbortSignal): Promise<T> {
+  let answer = await send()
+  if (isWorkflowAccepted(answer)) onAccepted?.(answer)
+  while (isWorkflowAccepted(answer)) {
+    await new Promise((resolve) => setTimeout(resolve, stockFollow.intervalMs))
+    signal?.throwIfAborted()
+    answer = await send()
+  }
+  return answer
+}
+
+/** Whether a stock write's answer is the 202 of a workflow that still runs. */
+export function isWorkflowAccepted(answer: unknown): answer is WorkflowAccepted {
+  return typeof answer === 'object' && answer !== null && 'workflow_id' in answer && 'kind' in answer && 'started_at' in answer
 }
 
 /** A call whose answer is not JSON (a hosted plugin's draft file, #6937), as the `Response`; a non-2xx answer throws `ApiError`. */
@@ -1227,6 +1267,14 @@ export const api = {
       method: 'POST',
       body: JSON.stringify({ call_id: callId, answer }),
     }),
+
+  /** #8062 — the open tasks at a place, for a code, or for the signed-in person; oldest first. */
+  listTasks: (filter: { place?: string; code?: string; assignee?: 'me'; limit?: number }) => {
+    const params = new URLSearchParams()
+    for (const [name, value] of Object.entries(filter)) if (value) params.set(name, String(value))
+    const text = params.toString()
+    return request<{ tasks: TaskQuestion[] }>(`/tasks${text ? `?${text}` : ''}`).then((body) => body.tasks)
+  },
 
   /** #7364 — a flow prompt's task, its answer too. */
   getTask: (id: string) => request<Task>(`/tasks/${seg(id)}`),
@@ -2590,6 +2638,8 @@ export const api = {
       method: 'PUT',
       body: JSON.stringify({ setting_id: key, note }),
     }),
+  deleteKProfileNote: (id: string, key: string) =>
+    printerCommand<KProfileWriteResult>(id, `/printers/${seg(id)}/kprofiles/notes/${seg(key)}`, { method: 'DELETE' }),
   /** #7153, #7276: a printer's AMS slots and labels, from its latest LAN report. */
   printerAms: (id: string) => request<AmsView>(`/printers/${seg(id)}/ams`),
   /**
@@ -2619,11 +2669,16 @@ export const api = {
   /** #4439, #4747: import and link Bambuddy's printers and virtual printers; idempotent. */
   syncPrintersFromBambuddy: (dryRun = false) =>
     request<PrinterSyncResult>(`/printers/sync-bambuddy?dry_run=${dryRun}`, { method: 'POST' }),
-  linkPrinterBambuddy: (id: string, bambuddyPrinterId: number) =>
-    request<PrinterRow>(`/printers/${seg(id)}/bambuddy`, {
-      method: 'PUT',
-      body: JSON.stringify({ bambuddy_printer_id: bambuddyPrinterId }),
-    }),
+  /** A link that merges a printer stock names answers 202 while its `MergePrinter` runs (#6949 K1). */
+  linkPrinterBambuddy: (id: string, bambuddyPrinterId: number, key?: string) =>
+    stockWrite<PrinterRow>(
+      `/printers/${seg(id)}/bambuddy`,
+      {
+        method: 'PUT',
+        body: JSON.stringify({ bambuddy_printer_id: bambuddyPrinterId }),
+      },
+      key,
+    ),
   unlinkPrinterBambuddy: (id: string) => request<PrinterRow>(`/printers/${seg(id)}/bambuddy`, { method: 'DELETE' }),
   linkPrinterLan: (id: string, body: LanLink) =>
     request<PrinterRow>(`/printers/${seg(id)}/lan`, { method: 'PUT', body: JSON.stringify(body) }),
@@ -2871,7 +2926,8 @@ export const api = {
   /** #4952 — undoes a fulfilment: the latest accepted attempt no longer counts as made,
    * and the item goes back to `approved` (or `failed`). */
   unfulfilOrderItem: (orderId: string, itemId: string) =>
-    request<OrderItem>(`/orders/${seg(orderId)}/items/${seg(itemId)}/unfulfil`, { method: 'POST' }),
+    // Keyed by the item on the server (`order_item:<id>:parts:<n>:return`): no Idempotency-Key.
+    stockWrite<OrderItem>(`/orders/${seg(orderId)}/items/${seg(itemId)}/unfulfil`, { method: 'POST' }, null),
   cancelOrderItem: (orderId: string, itemId: string) =>
     request<OrderItem>(`/orders/${seg(orderId)}/items/${seg(itemId)}/cancel`, { method: 'POST' }),
   /** #4955 — a copy of the item's design, quantity and title, with no quote (a custom item
@@ -2880,8 +2936,8 @@ export const api = {
     request<OrderItem>(`/orders/${seg(orderId)}/items/${seg(itemId)}/duplicate`, { method: 'POST', body: JSON.stringify(body) }),
   /** #4955 — several items made by hand at once: an accepted attempt of each line's quantity,
    * all or none (`POST /orders/{id}/fulfil`). */
-  fulfilOrderItems: (orderId: string, items: FulfilLine[]) =>
-    request<Fulfilment[]>(`/orders/${seg(orderId)}/fulfil`, { method: 'POST', body: JSON.stringify({ items }) }),
+  fulfilOrderItems: (orderId: string, items: FulfilLine[], key?: string) =>
+    stockWrite<Fulfilment[]>(`/orders/${seg(orderId)}/fulfil`, { method: 'POST', body: JSON.stringify({ items }) }, key),
   // -- an order's files (#4251, spec 2026-10-18 §6.2) ---------------------------------------
   /** Any file, on the order or (with `itemId`) on one of its items; an upload as a command. */
   addOrderAttachment: (
@@ -3161,7 +3217,8 @@ export const api = {
       body: JSON.stringify(body),
     }),
   acceptFulfilment: (orderId: string, itemId: string, fulfilmentId: string) =>
-    request<Fulfilment>(`/orders/${seg(orderId)}/items/${seg(itemId)}/fulfilments/${seg(fulfilmentId)}/accept`, { method: 'POST' }),
+    // Keyed by the item on the server (`order_item:<id>:parts:<n>`): no Idempotency-Key.
+    stockWrite<Fulfilment>(`/orders/${seg(orderId)}/items/${seg(itemId)}/fulfilments/${seg(fulfilmentId)}/accept`, { method: 'POST' }, null),
   /** #4253 §8.2 — the attempt's Bambuddy archives and what each offers to copy. */
   attemptArchives: (orderId: string, itemId: string, fulfilmentId: string) =>
     request<AttemptArchives>(`/orders/${seg(orderId)}/items/${seg(itemId)}/fulfilments/${seg(fulfilmentId)}/archives`),

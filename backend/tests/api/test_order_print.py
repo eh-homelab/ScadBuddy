@@ -59,7 +59,7 @@ from tests.api.test_print_run_native import (
 )
 from tests.api.test_send import API, configure, make_output, upload_route
 from tests.api.test_settings_runtime import _state
-from tests.api.test_versions import SLUG, upload
+from tests.api.test_versions import SECOND, SLUG, put_source, upload
 from tests.orders.test_lifecycle import BY
 from tests.support.fake_slicer import fake_slicer_worker
 from tests.support.operations import press
@@ -1092,3 +1092,63 @@ def test_a_manual_quote_prints_with_the_requests_choices_and_needs_some(
     assert "choices" in refusal["detail"] and "filament_plan" not in refusal["detail"]
     attempt = printed(item, key="print-manual")
     assert attempt["sliced_sha256"] is None
+
+
+def test_an_accepted_item_with_no_output_renders_at_its_commit_and_prints(
+    bambuddy: TestClient,
+) -> None:
+    """#8481: an accepted item with a design and no output (a storefront item) is
+    rendered by ``POST .../render`` at its reference's commit, not the model's newer one,
+    keeps its accepted quote, and then prints from that output."""
+    slice_routes()
+    queue_route()
+    upload(bambuddy)
+    first = bambuddy.get(f"/api/v1/models/{SLUG}").json()["version"]
+    customer = create_customer(bambuddy)
+    order = create_order(bambuddy, customer["id"])
+    item = add_item(
+        bambuddy,
+        order["id"],
+        slug=SLUG,
+        commit=first,
+        inputs={"params": {"width": 12}},
+        quantity=1,
+    )
+    quote_and_accept(bambuddy, order["id"], item["id"])
+    assert bambuddy.post(f"/api/v1/orders/{order['id']}/accept").status_code == 200
+    path = f"/api/v1/orders/{order['id']}/items/{item['id']}"
+    # On hold, the render that changes what prints is refused, as the print is.
+    assert bambuddy.post(f"/api/v1/orders/{order['id']}/hold").status_code == 200
+    problem(bambuddy.post(f"{path}/render", headers=press()), "order_on_hold")
+    assert bambuddy.post(f"/api/v1/orders/{order['id']}/release").status_code == 200
+    # The model moves on after the order pinned its commit.
+    assert put_source(bambuddy, SECOND).status_code == 200
+    assert bambuddy.get(f"/api/v1/models/{SLUG}").json()["version"] != first
+
+    def current() -> dict[str, Any]:
+        detail = bambuddy.get(f"/api/v1/orders/{order['id']}").json()
+        found: dict[str, Any] = next(i for i in detail["items"] if i["id"] == item["id"])
+        return found
+
+    quotes = [(q["id"], q["accepted"]) for q in current()["quotes"]]
+    # With no output, the print wants one first.
+    problem(bambuddy.post(f"{path}/print", json=body(), headers=press()), "requote_needed")
+
+    started = bambuddy.post(f"{path}/render", headers=press())
+    assert started.status_code == 202, started.text
+    op = follow_operation(bambuddy, started.json(), timeout=120, poll=0.2)
+    assert op["status"] == "succeeded", op
+    rendered = current()
+    assert rendered["output_id"] is not None
+    output = bambuddy.get(f"/api/v1/outputs/{rendered['output_id']}").json()
+    assert output["model_version"] == first
+    # The customer's accepted price stays locked.
+    assert [(q["id"], q["accepted"]) for q in rendered["quotes"]] == quotes
+    assert rendered["status"] == "approved"
+
+    attempt = answered(bambuddy, bambuddy.post(f"{path}/print", json=body(), headers=press()))
+    assert attempt["print_run_id"]
+    run = follow_run(bambuddy, attempt["print_run_id"])
+    assert run["subject"] == f"output:{rendered['output_id']}"
+    # The item follows the print: queued, or printing already once the run is read.
+    assert current()["status"] in ("queued", "printing")

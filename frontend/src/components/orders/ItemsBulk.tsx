@@ -16,6 +16,7 @@ import { Input } from '@/components/ui/input'
 import { Spinner } from '@/components/ui/spinner'
 import { isKit, itemActions, type ItemActionKey } from './itemActions'
 import { ItemPrintDialog } from './PrintItem'
+import { orderItemSource } from '../../lib/printSource'
 import { parseQuantity, QUANTITY_HINT } from './quantity'
 import { refusalItems, refusalText } from './refusal'
 
@@ -66,7 +67,8 @@ export function ItemsBulk({
   const rules = { shipments, unfulfilAllowed }
   const fulfil = allowed(order, selected, rules, ['fulfil']).filter((item) => FULFILLABLE.has(item.status))
   // A kit prints output by output from its own details (#5701), never in the item's dialog.
-  const print = allowed(order, selected, rules, ['print']).filter((item) => !isKit(item))
+  // #8481: an item with no output yet renders first from its own Print… (`PrintItem`), not here.
+  const print = allowed(order, selected, rules, ['print']).filter((item) => !isKit(item) && orderItemSource(item) !== null)
   const remove = allowed(order, selected, rules, ['delete', 'cancel'])
   const tooMany = fulfil.length > MAX_BULK_FULFIL
   const [fulfilling, setFulfilling] = useState(false)
@@ -146,6 +148,11 @@ function FulfilDialog({
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const titles = new Map(items.map((item) => [item.id, item.title]))
+  // #6949 K1 Task 16: one Idempotency-Key while the dialog is open, so a press sent again after a
+  // lost answer attaches to the same `FulfilOrderItem` run. A 202 closes the dialog: the run goes
+  // on by itself. It may not have committed yet (it waits while an item's unfulfil still settles),
+  // so the items can still read approved until it does.
+  const [key] = useState(() => crypto.randomUUID())
 
   async function submit() {
     const lines = items.map((item) => ({ item_id: item.id, quantity: parseQuantity(typed[item.id] ?? String(remaining(item))) }))
@@ -154,7 +161,7 @@ function FulfilDialog({
     onWriting(true)
     setError(null)
     try {
-      await api.fulfilOrderItems(orderId, lines.map((line) => ({ item_id: line.item_id, quantity: line.quantity! })))
+      await api.fulfilOrderItems(orderId, lines.map((line) => ({ item_id: line.item_id, quantity: line.quantity! })), key)
       onDone()
     } catch (err) {
       const named = refusalItems(err).map((id) => titles.get(id) ?? id)

@@ -77,6 +77,11 @@ The Spools tab's bulk bar acts on the selected spools (#7151, plan
 - **Archive and Restore.** One request each, `POST /filament/spools/bulk-archive` and
   `/bulk-restore`. The answer lists the spools changed, those already so and the ids that
   name no spool, and the bar reports it once.
+- **Reset used.** After a confirm, `POST /filament/spools/reset-consumed` puts a
+  `consumed_reset` event on each selected spool (#7149), in requests of at most 500 ids. The
+  grams left stay; the report says how many counters were reset and names each spool that no
+  longer exists. When a request is refused, the earlier ones stand, the rest are not sent, and
+  the report says which spools were not reset.
 
 An AMS tray's place page that holds a spool has "Take the spool out of this tray"
 (`DELETE /printers/{id}/trays/{ams}/{tray}/spool`): the spool moves to no place.
@@ -146,11 +151,11 @@ twice; when a newer version was written since, it is created again and its `mirr
 names the copy the lost create left (#7343); one preset's failure, a Bambuddy id another ScadBuddy preset holds included, is its
 own `mirror_error` and never stops the rest.
 
-The Presets view (#7204, plan `docs/superpowers/plans/2026-11-26-filament-presets-view.md`) is
-read-only. Go core serves it, not Python: area `filament-presets` in
+The Presets view (#7204, plan `docs/superpowers/plans/2026-11-26-filament-presets-view.md`)
+reads and writes ScadBuddy's own presets. Go core serves it, not Python: area `filament-presets` in
 `tools/go/core/internal/filamentpresets`, with `GET /api/v1/filament/presets` (`?source=`,
-`?type_id=`), `GET …/presets/{preset_id}` and `GET …/presets/{preset_id}/diff`
-(`tools/go/core/README.md`). The area is on only when `SCADBUDDY_CORE_AREAS` names it
+`?type_id=`), `GET …/presets/{preset_id}` and `GET …/presets/{preset_id}/diff`, and the writes
+described below (`tools/go/core/README.md`). The area is on only when `SCADBUDDY_CORE_AREAS` names it
 (`tools/go/core/main.go`). Until then the paths go on to Python, which has a handler for none
 of them and answers a 404 with no `code`. The Presets tab and the preset page tell that apart
 from a Go 404, which has a `code`, and show "Presets are not on yet on this server"
@@ -165,11 +170,60 @@ the same rule through shared vectors
 (`backend/tests/fixtures/filament-preset-vectors.json`,
 `backend/tests/filament/test_filament_preset_vectors.py`, `test-fixtures/filament/preset-wire.json`).
 Every answer is `no-store`, and a document over 1 MiB is not read
-(`tools/go/core/internal/filamentpresets/document.go`). Only a `manual` preset can be edited,
-when the edit routes come: a `3dfp` preset would get a new version from the next fetch, and a
-`bambuddy` preset from the next Bambuddy refresh, so each of them is copied first (plan R3). The
-page and the three read tools `filament_preset_list`, `filament_preset_get` and
+(`tools/go/core/internal/filamentpresets/document.go`). Only a `manual` preset can be edited: a `3dfp` preset would get a new version from the next
+fetch, and a `bambuddy` preset from the next Bambuddy refresh, so each of them is copied first
+(plan R3). The three read tools `filament_preset_list`, `filament_preset_get` and
 `filament_preset_diff` change nothing (`agent/src/tools/filament.ts`).
+
+The Presets view has three writes (plan R2, R7, R11, R12, P21 to P25):
+
+- `POST /api/v1/filament/presets/{preset_id}/copy` (body `{name}`) makes a new `manual` preset
+  at version 1 from the preset's current document, whatever its source. It answers 201 and the
+  new preset's detail.
+- `PATCH /api/v1/filament/presets/{preset_id}` (body `{expected_version, name?, set?, unset?}`)
+  makes the next version of a `manual` preset. It answers 200 and `{changed, preset}`. An edit
+  that changes nothing writes no version (`changed` is false). `expected_version` is a JSON
+  integer above 0.
+- `POST /api/v1/filament/presets/{preset_id}/mirror` sends one preset to Bambuddy again. It
+  answers 200 and `{outcome, preset}`. `outcome` is `sent`, `failed`, `busy`, `in_sync` or
+  `pending`.
+
+Go checks the body and then starts core's workflow `LibraryRun`. Its one step is a
+Python activity on the `library` queue (`filament_preset_copy`, `filament_preset_edit` or
+`filament_preset_mirror_again`, `backend/scadbuddy/filament/preset_writes.py`), which the API
+process serves, because only the API writes the rows. Go writes no row. After the commit, the
+activity sends the preset to Bambuddy while the stored setting `filament_preset_mirror` is on
+(`backend/scadbuddy/filament/preset_mirror.py` `mirror_pending`, `mirror_again`). A mirror
+failure never fails the write. A copy or an edit bounds its mirror at 30 s and a send again
+bounds it at 60 s; a mirror that is not done in time is the outcome `pending`. The activity
+has one attempt. Its start-to-close is its bound plus 30 s. The route waits for that time plus
+10 s, then answers 503 `preset_write_pending`, and the client sends a copy or an edit again with
+the same key. The run closes when the route stops waiting, so a write that no worker started by
+then does not start more than a moment later (the timeout counts from the moment Temporal
+records the start).
+
+A copy and an edit need an `Idempotency-Key` of 1 to 200 characters. Without one the answer is
+428 with the type `https://scadbuddy.dev/problems/crud/idempotency-key-required`, and nothing
+starts. Two sends of one key and one body at the same time join one run. The activity keeps
+its reply in the idempotency ledger under the actor, the key and the preset, so a repeat gets
+the first reply, for as long as the ledger keeps it (24 hours). The same key with another body
+is 422 `idempotency_key_reused`. A send again needs no key.
+
+The codes (each is the problem's `code`): 404 `preset_not_found`; 409 `not_manual`,
+`version_moved` (with `current_version`), `document_missing`, `mirror_off`, `not_configured`,
+`instance_changed` and `not_mirrored`; 422 `key_refused` (with the `key`; the key is `name`, a
+print-host credential key, a key that does not match `[A-Za-z0-9_.-]{1,128}`, or a key that is both set
+and unset), `invalid_input` and `idempotency_key_reused`; 503 `preset_write_pending` and
+`writes_not_configured`. An edit sets and unsets at most 500 keys, and a `set` value is a
+string or a list of strings (an empty list is allowed). A name is 1 to 200 characters.
+
+The writes need `SCADBUDDY_TEMPORAL_ADDRESS` on the core container. Without it, core starts
+with the area, the reads serve, no worker starts, and each write answers 503
+`writes_not_configured`. The area name in `SCADBUDDY_CORE_AREAS` and the address are two
+separate settings in the cluster config (eh-homelab/clusters): naming the area does not give
+core an address. The page and the three write tools `filament_preset_copy`,
+`filament_preset_update` and `filament_preset_mirror` (`outward`, so a person approves each)
+are in `frontend/src/pages/filament/` and `agent/src/tools/filament.ts`.
 
 A fetch writes ScadBuddy only: each file is the type's `3dfp` preset of its key, a changed
 one a new version with its changed keys in the run's notes, and the type's own nozzle range
@@ -245,15 +299,22 @@ A tray that a printer reports as loaded, with no spool in it, is an unknown spoo
   colour (a spool with no colour last), then the spool number; archived spools are left out.
   `POST …/{id}/dismiss` deletes a row (204, or 404 `tray_gone`). A dismiss is only for a slot
   that is no longer there: a spool that is still loaded comes back on the next report.
+  `POST …/{id}/resolve` takes `{spool_id or code, net_weight_g, seen_at}` and answers 200
+  `{id, number, code, location_id}` (below).
 - **Resolve** links a spool to the tray, books the typed net weight as a `weighed` reading and
   deletes the row, in one transaction. It is a Temporal activity, `filament_resolve_unknown_tray`,
   on the `library` queue (G5), so the Python write that links a spool stays the only one. Only a
   spool with no reading, use or load yet takes the net weight as its label weight (D4). The lock
-  order stays in Python (G9). **The Go route that starts the activity is not built yet.** It waits
-  for a Temporal client in Go (`tools/go/core/internal/temporalx`). Until then, the dialog's and
-  the tool's resolve get a 404 and cannot resolve a tray. The existing link paths still clear the
-  row: the print dialog's tray question, the place page's "New spool from this tray" and the
-  agent's `link_tray_spool`.
+  order stays in Python (G9). The Go route checks the body first: exactly one of `spool_id` and
+  `code`, `net_weight_g` above 0 and at most 100000, `seen_at` an RFC 3339 time with a zone, and no
+  other field, else 422 `invalid_input`. Then it starts the activity as a run of core's workflow
+  `LibraryRun` (#8489), one attempt with a 30 s timeout. A refusal keeps its code: 409
+  `tray_changed`, `spool_archived`, `no_ams_kind` and `tag_clash`, 404 `code_unknown` and
+  `spool_missing`. An answer that does not come in time is 503 `resolve_pending`: the link can
+  still finish, so the dialog and the tool read the list again. Without
+  `SCADBUDDY_TEMPORAL_ADDRESS` on core, a resolve is 503 `writes_not_configured`, and the dialog
+  points to the slot's page. The other link paths also clear the row: the print dialog's tray
+  question, the place page's "New spool from this tray" and the agent's `link_tray_spool`.
 - **The block.** A print to a printer that has a row is refused with 422 `unknown_spool_loaded`.
   `prepare_run` and the print check do it (`PrintCheck.unknown_trays` names the trays), and so does
   `lan_print`. On Bambuddy's path, a tray that the inventory read gives an SB spool is not counted
@@ -454,7 +515,16 @@ a `url` record whose path ends `/x/<code>` (a printed label) or a `text` record 
 or `S-142`, or a `scadbuddy:spool:<id>` text (`next` `open_code`, with `resolved` in the
 `GET /codes/{code}` shape; `backend/scadbuddy/filament/tag_codes.py`); else it offers to bind
 the tag or make a spool from what the tag says (OpenSpool or OpenTag3D). A code that names no
-row is a new tag. A phone reads a Bambu tag's UID as 4 bytes (`7E7482BB`), and the AMS reports
+row is a new tag. An OpenSpool write holds the published keys of
+[openspool.io/rfid.html](https://openspool.io/rfid.html) and every extended key of
+[SnapmakerU1-Extended-Firmware `docs/design/openspool.md` @ 8cb0b4e1](https://github.com/paxx12-snapmaker-u1/SnapmakerU1-Extended-Firmware/blob/8cb0b4e1b1d8f235ca067c0e8a5cabc0197aa11f/docs/design/openspool.md)
+the spool has a value for (`subtype`, `bed_min_temp`, `bed_max_temp`, `alpha`,
+`additional_color_hexes`, `weight`, `diameter`; #8364). A read fills the draft from all of
+them, and the "On the tag" card also lists any other key the tag holds, as text, under
+"Other keys on the tag". With every key, Spool #114's JSON is 215 bytes (measured
+2026-11-27 with `tag_formats.encode`), more than an NTAG213's 144 bytes of user memory
+([NXP NTAG213/215/216 data sheet](https://www.nxp.com/docs/en/data-sheet/NTAG213_215_216.pdf)),
+so use an NTAG215 or NTAG216, as the OpenSpool README asks. A phone reads a Bambu tag's UID as 4 bytes (`7E7482BB`), and the AMS reports
 the same tag as `7E7482BB00000100`, so ScadBuddy stores every 4-byte UID in the AMS's form
 (`spools/models.py` `clean_tag_uid`, #8042; all 38 Bambu tags on prod end `00000100`, read
 2026-11-26), and a phone's scan of a Bambu spool opens it. A 4-byte tag that is not a Bambu
@@ -547,7 +617,11 @@ matches `[a-z][a-z0-9_]{0,63}`. Limits: 200 keys per entity, 2000 characters per
   `invalid`. An empty or blank string and an empty list are no value; `false` and `0` are.
   Not checked: a save that sends only `archived` or `sort_order`, bulk-update, events,
   syncs, imports, invoice confirm, a catalog row added on the way to another, and
-  `PUT /filament/types/{id}/cost-per-kg`, which sets only the cost. Reads carry
+  `PUT /filament/types/{id}/cost-per-kg`, which sets only the cost. A type create may name
+  its brand, material and subtype (`brand_name`, `material_name`, `subtype_name`) in place
+  of their ids; a name the catalog lacks is added, unchecked, in the type's transaction, so
+  a refused type adds no row (#8228). The price book's "Make a type" sends the names
+  (`frontend/src/components/filament/makeType.ts`). Reads carry
   `missing_properties` and `invalid_properties` (keys only); an archived row is never
   marked. `PATCH /entities/{ref}/properties` refuses removing or emptying a required key
   that has a value (`backend/scadbuddy/entities/required.py`). Items and item kinds follow
@@ -587,6 +661,9 @@ matches `[a-z][a-z0-9_]{0,63}`. Limits: 200 keys per entity, 2000 characters per
   `frontend/src/components/entities/api.ts`). The agent's search matches them too
   (`agent/src/tools/filament.ts` loads them, `agent/src/tools/filamentSearch.ts` matches); both use the shared vectors
   `test-fixtures/filament/search-vectors.json`.
+  A `key:value` token (#8372, such as `gtin:06975337041234`) also matches a property with that
+  key whose whole value, or one list item, equals the value; 8 to 14 digits compare as GTIN-14,
+  and a spool also matches by its type's property values.
 - Agent: `entity_property_list`, `entity_property_set`, `entity_property_schema_get` and
   `entity_property_schema_set` (`agent/src/tools/entities.ts`), and a `properties` field on
   `filament_type_upsert` and `filament_spool_upsert` (`agent/src/tools/filament.ts`). An
@@ -699,7 +776,9 @@ matches `[a-z][a-z0-9_]{0,63}`. Limits: 200 keys per entity, 2000 characters per
   inventory list of the kind's items). A code
   opens at `/x/<code>` (`frontend/src/pages/CodePage.tsx`; route `GET /api/v1/codes/{code}`,
   `backend/scadbuddy/api/codes.py`). Any case works, with or without the dash. A number is
-  never reused, and an archived thing still resolves.
+  never reused, and an archived thing still resolves. A `/x/<text>` that names nothing and has
+  no code shape (a maker's barcode), and the scan page's "Search spools for" link, go to the
+  Spools tab's search with `from=scan`, which opens the spool when only one matches (#8372).
 - Printer places: a printer has its own place (`filament_locations.printer_root`, kind
   "Printer"). Its AMS units and external holder hang under it
   (`LocationStore.ensure_printer_on`, `backend/scadbuddy/filament/locations.py`). A printer
@@ -719,7 +798,9 @@ matches `[a-z][a-z0-9_]{0,63}`. Limits: 200 keys per entity, 2000 characters per
   a concurrent write answers 409 `printer_delete_conflict`, and the person tries again.
 - Labels: a place's QR is `<base>/x/L-<n>`. The labels page (`/filament/labels`) prints places
   with `?locations=` and printers with `?printers=` (one printer's from its place page, every
-  printer's from the Locations tab). The printer labels first make the place of each AMS unit,
+  printer's from the Locations tab). It prints spool types with `?types=`, items with `?items=`
+  and kinds with `?kinds=` (#7169). A saved spool type's page has a "Print label" link that opens
+  it with that type chosen. The printer labels first make the place of each AMS unit,
   slot and external holder the printer's latest report lists; a printer with no such report is
   named on the page. Spool labels keep `scadbuddy:spool:<id>`. A place links to its own page,
   `/filament/locations/<id>`. `POST /api/v1/filament/labels` also takes `type_ids`, `item_ids`
@@ -878,7 +959,7 @@ matches `[a-z][a-z0-9_]{0,63}`. Limits: 200 keys per entity, 2000 characters per
   that report is not caught by ScadBuddy's guard (`backend/scadbuddy/printers/ams_slots.py`
   `guard`), whose refusals are its own 409 codes (`printer_busy`, `ams_busy`, `no_slot`,
   `printer_offline` and the rest above).
-- Unknown spools (#7143): the Go resolve route is not built yet (above). A print started in
+- Unknown spools (#7143): a print started in
   Bambuddy, or on the printer itself, is not blocked: only ScadBuddy's own prints check. A tray
   of the external holder (D2) gets no row, so it never blocks a print. A row whose unit the
   report no longer shows stays until that unit returns; deleting or merging the printer drops it.

@@ -91,6 +91,17 @@ The owner's policy of epic #7667 (spec `docs/superpowers/specs/2026-11-25-go-ser
 - **R6** Ruling: `resolve_pending` is not a code. `spool_missing` and `tag_clash` (the activity's error types) join the code list and the agent tool's description; their HTTP statuses are fixed when the Go resolve route is built — cost if wrong: the text changes again then.
 - **R7** Ruling: three small review notes stay as they are: `UnknownSpoolButton`'s `placeId` has no caller yet (the verdict's tray refs carry no place); a dialog opened from a stale list for a tray that is gone ends in `tray_changed`, which the dialog handles; the code statuses of R6 — cost if wrong: a later review asks for `placeId` to go.
 
+## Rulings made while building the Go resolve route (#8489, 2026-11-28)
+
+- **U1** Ruling: the generic part of #8427's preset-write workflow (the workflow that runs one named activity on a named queue with start-to-close, schedule-to-start and execution timeouts and one attempt, its `Starter`, `TemporalStarter`, `failureOf` and `actor`) moves to `tools/go/core/internal/libraryrun`, which `filamentpresets` and `unknowntrays` both use; the workflow is renamed `LibraryRun` — reuse, not a copy — cost if wrong: a `FilamentPresetWrite` run open at the deploy (a run lasts less than 100 s) fails once, as a write that did not answer.
+- **U2** Ruling: core runs the one `LibraryRun` worker when `SCADBUDDY_TEMPORAL_ADDRESS` is set and `SCADBUDDY_CORE_AREAS` names `filament-presets` or `unknown-trays`; its queue keeps the variable `SCADBUDDY_TEMPORAL_TASK_QUEUE_FILAMENT_PRESETS` and the default `filament-presets`. Without the address a resolve answers 503 `writes_not_configured`, as the preset writes do (P22) — no prod env names the queue, so a rename would cost docs only — cost if wrong: a queue name that reads as the presets' only.
+- **U3** Ruling: the route is `POST /api/v1/filament/unknown-trays/{id}/resolve`, an `auth.Public` in the package's map (write class). Go checks the body first (exactly one of `spool_id` and `code`, `net_weight_g` above 0 and at most 100000, `seen_at` RFC 3339 with a zone, no other field; else 422 `invalid_input`; a path id that is no UUID is 409 `tray_changed`). The activity gets `{tray_id, spool_id|null, code|null, net_weight_g, seen_at, actor}`, 30 s start-to-close, one attempt; the route waits 10 s more, then 503 `resolve_pending`. The failure map is Task 3B's, `tag_clash` with the activity's message; any other type is a 500. R6's open statuses are now fixed: `spool_missing` 404, `tag_clash` 409 — Task 3B's contract — cost if wrong: a status changes in Go, the dialog and the tool.
+- **U4** Ruling: the run id is `unknown-tray-resolve-` and the SHA-256 of the actor, the tray id and the activity's input, with `USE_EXISTING` and `ALLOW_DUPLICATE`, so two equal sends join one run and another body runs apart; the activity's `seen_at` check and tray lock refuse the second with `tray_changed` — no idempotency ledger is needed, since a resolve deletes the row it needs — cost if wrong: a repeat after the run closed gets `tray_changed` in place of the first answer; the dialog then reads the list again.
+- **U5** Ruling: the Python activity's typed input `ResolveInput` stays as it is; Go builds the input from the values it parsed, so no other field reaches the decode — cost if wrong: a Python change later to accept a looser input.
+- **U6** Ruling: the dialog, the mocks and the agent tool follow the route: each code has its own text, `writes_not_configured` reads like the area being off, and `resolve_pending` and `tray_changed` read the list again — cost if wrong: text changes only.
+- **U7** Ruling: the docs (the feature page, the architecture pages, core's README and the #7143 design) say the resolve route is built and how it runs — cost if wrong: doc edits only.
+- **U8** Ruling: a non-UUID path id on resolve is 409 `tray_changed` (the activity's answer for a missing row; Go refuses it before the start, else the decode fails untyped as a 500); dismiss keeps 404 `tray_gone` (D10). Both lower-case the path id before the UUID check — cost if wrong: a client handles two "read the list again" codes.
+
 ## Review Focus
 
 1. **A stale row blocks a printer after the tray was settled another way.** This covers the old tray link (`PUT /printers/{id}/trays/{ams}/{tray}/spool`), the print dialog's tray question (`api/printing.py` `post_tray_spool`, which calls `link`), and a capture that read "no holder" while a resolve was committing. Expected: no row once the tray has a holder. `link_on` deletes the row in its transaction. Capture writes a row only under `pg_try_advisory_xact_lock` on the tray's key, and it checks the holder again after it takes the lock. Tests in Task 2 and Task 3 (Python `link_on`).
@@ -419,7 +430,7 @@ async def test_the_library_worker_serves_the_activity(): ...       # the API's a
 
 - [ ] **Step 2: Implement the activity** (ruff, mypy; CI runs the tests).
 - [ ] **Step 3: Commit** — `feat(filament): resolve an unknown tray as a library activity (#7143)`
-- [ ] **Step 4: Write the failing Go tests** (`resolve_test.go`, with a fake starter in place of `temporalx`):
+- [x] **Step 4: Write the failing Go tests** (`resolve_test.go`, with a fake starter in place of `temporalx`):
 
 ```go
 func TestResolveBodyNeedsExactlyOneOfSpoolAndCode(t *testing.T)  // both, neither, net 0 -> 422; nothing started
@@ -429,8 +440,8 @@ func TestResolveTimeoutIs503(t *testing.T)
 func TestResolveAnswersTheSpoolsIdentity(t *testing.T)          // {id, number, code, location_id}
 ```
 
-- [ ] **Step 5: Implement the route** (gofmt, vet, build; CI runs the tests).
-- [ ] **Step 6: Commit** — `feat(core): resolve an unknown tray through a library activity (#7143)`
+- [x] **Step 5: Implement the route** (gofmt, vet, build; CI runs the tests).
+- [x] **Step 6: Commit** — `feat(core): resolve an unknown tray through a library activity (#7143)` (#8489, as built: rulings U1 to U4)
 
 ---
 

@@ -103,3 +103,37 @@ export function diffPreset(id: number, from?: number, to?: number): Promise<Pres
   const text = params.toString()
   return request<PresetDiff>(`${PATH}/${id}/diff${text ? `?${text}` : ''}`)
 }
+
+/** The body of an edit: `set` takes a text or a list of texts for each key, `unset` the keys to remove. */
+export interface PresetEdit {
+  expected_version: number
+  name?: string
+  set?: Record<string, string | string[]>
+  unset?: string[]
+}
+
+export interface PresetEdited {
+  changed: boolean
+  preset: PresetDetail
+}
+
+export type MirrorOutcome = 'sent' | 'failed' | 'busy' | 'in_sync' | 'pending'
+
+export interface MirrorAgainResult {
+  outcome: MirrorOutcome
+  preset: PresetRow
+}
+
+/**
+ * The writes. A copy and an edit need an `Idempotency-Key`: one for each opened form, sent again
+ * unchanged after a 503 `preset_write_pending`. A copy answers 201 with the new preset.
+ */
+export const copyPreset = (id: number, name: string, key: string): Promise<PresetDetail> =>
+  request<PresetDetail>(`${PATH}/${id}/copy`, { method: 'POST', body: JSON.stringify({ name }), headers: { 'Idempotency-Key': key } })
+
+/** An edit of a manual preset: a new version when something changed (`changed`), else the same one. */
+export const editPreset = (id: number, body: PresetEdit, key: string): Promise<PresetEdited> =>
+  request<PresetEdited>(`${PATH}/${id}`, { method: 'PATCH', body: JSON.stringify(body), headers: { 'Idempotency-Key': key } })
+
+/** "Send again" needs no key: the server joins a send that is open. */
+export const mirrorPreset = (id: number): Promise<MirrorAgainResult> => request<MirrorAgainResult>(`${PATH}/${id}/mirror`, { method: 'POST' })

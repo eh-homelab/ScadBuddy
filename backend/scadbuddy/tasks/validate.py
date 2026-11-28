@@ -16,7 +16,7 @@ from scadbuddy.core.input_schema import (
     without_patterns,
 )
 from scadbuddy.core.json_values import unstorable
-from scadbuddy.tasks.models import AnswerProblem
+from scadbuddy.tasks.models import HUMAN_ANSWER_SCHEMA, AnswerProblem
 from scadbuddy.tasks.schema import prompt_schema_problems
 
 __all__ = ["prompt_schema_problems", "validate_answer"]
@@ -118,4 +118,9 @@ def validate_answer(schema: dict[str, Any], answer: Any) -> list[AnswerProblem]:
     # Its defaults were checked when the task opened; a slow pattern must not fail a good answer.
     if prompt_schema_problems(schema, stored=True, defaults=False):
         return [AnswerProblem(field="", message="this question's form is broken")]
-    return _problems(schema, _failures(schema, answer))
+    problems = _problems(schema, _failures(schema, answer))
+    if not problems and schema == HUMAN_ANSWER_SCHEMA and not answer["answer"].strip():
+        # A blank answer to a `wait_for_human` is a click on an empty box (#2379). The schema's
+        # equality decides it, not the call: a `prompt()` with this schema gets the same rule.
+        return [AnswerProblem(field="answer", message="an answer is required")]
+    return problems

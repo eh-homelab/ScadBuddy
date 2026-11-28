@@ -118,12 +118,17 @@ export const flowTools: Tool[] = [
     label: 'Register a flow',
     description:
       'Register a flow: a Python script that runs durably, for as long as it needs, over the host functions ' +
-      '`sleep(seconds)`, `wait_for_human(question, timeout_s=None, people_only=False)` (returns {answer}), ' +
-      '`prompt(title, schema, context=None, place=None, ui=None, timeout_s=None, people_only=False)` (a question with typed fields: ' +
+      '`sleep(seconds)`, `wait_for_human(question, timeout_s=None, people_only=False)` (returns {answer}; a long question is cut in the title and shown whole in the task; an empty question, or one over 4000 characters, raises ValueError), ' +
+      '`prompt(title, schema, context=None, place=None, ui=None, timeout_s=None, people_only=False, assignee=None)` (a question with typed fields: ' +
       "`schema` declares them as `inputs_schema` does, and a string may have a `format` of email, date or date-time; " +
       'returns the answer as a dict by field: a field left out is its default, and with no default a boolean is False ' +
       'and any other None; raises ValueError for a schema, title, context, place, ui or timeout_s it does not take, where ' +
       "title, context and ui are limited in size and the refusal names the limit, and for an answer that does not fit its field's type), " +
+      "a property may add `x-sb-widget` to draw a control: `scan` (a code; `expects` {kinds, codes} limits it, as in {kinds: ['spool']} or {codes: ['S-3']}), " +
+      "`photo` or `file` (an attachment id), `entity` (with `kind` of library_file, location or spool), `weight` (grams) or `confirm` (a boolean); " +
+      "a `context` item of one key may be a block: entity ('<kind>:<ref>'), text, image ({entity, attachment_id}), table ({columns, rows}), " +
+      'checklist (a list of texts) or expect ({weight_g, tolerance_g}); `place` is the code of the station that shows the task, ' +
+      "a location's code such as L-7 (l7 is stored as L-7); `assignee` names who the task is for and limits no one; " +
       'both with no limit unless `timeout_s` (at least 10 s; then a TimeoutError) sets one, and answered by a person; ' +
       "with people_only False the user's setting flow_answerers or the run's grant may also let an assistant answer, " +
       '`render(slug, params)` (returns {job_id, status, error}; status done, failed or cancelled), ' +
@@ -587,8 +592,10 @@ export const flowTools: Tool[] = [
     name: 'answer_flow_question',
     label: "Answer a flow's question",
     description:
-      "Answer a flow run's question (#7471): a `wait_for_human` with a text, a `prompt` with an object of its " +
-      "task's fields (get_flow_run's `pending` names the call and its `task`). Allowed only when the user's " +
+      "Answer a flow run's question (#7471): one with a `task` (a `prompt`, or a `wait_for_human` since #8062, " +
+      "whose one field is `answer`) with an object of the task's fields, an older `wait_for_human` with no " +
+      "`task` with a text (get_flow_run's `pending` names the call and its `task`). A text for a question with " +
+      "a task is sent as its `answer` field. Allowed only when the user's " +
       "setting flow_answerers, or the run's approved grant (`answers`), names this session (or its MCP token) and " +
       'the question is not `people_only`; else a ' +
       '403 says why. The first answer wins: a later one is told that it was answered already. Not for flow runs.',
@@ -597,13 +604,16 @@ export const flowTools: Tool[] = [
       call_id: z.string().uuid().describe("The question's call id, from get_flow_run's `pending`"),
       answer: z
         .union([z.string().min(1).max(10_000), z.record(z.string(), z.unknown())])
-        .describe("A text for wait_for_human; for prompt, an object of the task's fields"),
+        .describe("An object of the task's fields; a text for a wait_for_human with no task"),
     }),
     risk: 'outward',
     routes: ['POST /api/v1/workflow-runs/{run_id}/answer', 'GET /api/v1/tasks/{task_id}', 'POST /api/v1/tasks/{task_id}/answer'],
     summarize: ({ run_id, call_id }) => `Answer question ${call_id} of flow run ${run_id}`,
     handler: async ({ run_id, call_id, answer }, ctx) => {
-      if (typeof answer === 'string') {
+      // A prompt's task, or a wait_for_human's since #8062: its id is the call's.
+      const found = await ctx.backend.GET('/api/v1/tasks/{task_id}', { params: { path: { task_id: call_id } } })
+      if (typeof answer === 'string' && found.response.status === 404) {
+        // A wait_for_human from before #8062: it has no task, and takes a text.
         return json(
           await command(ctx, `answer flow run ${run_id}`, (headers) =>
             ctx.backend.POST('/api/v1/workflow-runs/{run_id}/answer', {
@@ -614,17 +624,15 @@ export const flowTools: Tool[] = [
           ),
         )
       }
-      // A prompt's task: its id is the call's. Only one of this run's.
-      const task = await ok(
-        ctx.backend.GET('/api/v1/tasks/{task_id}', { params: { path: { task_id: call_id } } }),
-        `get task ${call_id}`,
-      )
+      // Only one of this run's.
+      const task = await ok(Promise.resolve(found), `get task ${call_id}`)
       if (task.run_id !== run_id) throw new ToolError(`task ${call_id} is not a question of flow run ${run_id}`)
       return json(
         await command(ctx, `answer task ${call_id}`, (headers) =>
           ctx.backend.POST('/api/v1/tasks/{task_id}/answer', {
             params: { path: { task_id: call_id } },
-            body: { answer },
+            // A text is the answer of a wait_for_human's one field, as an agent sent it before #8062.
+            body: { answer: typeof answer === 'string' ? { answer } : answer },
             headers,
           }),
         ),

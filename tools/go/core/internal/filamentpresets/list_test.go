@@ -17,18 +17,28 @@ import (
 
 func TestMain(m *testing.M) { testdb.Main(m) }
 
-// env is the area's routes over a test database and a store in memory.
+// env is the area's routes over a test database, a store in memory and a fake Temporal.
 type env struct {
-	t     *testing.T
-	pool  *pgxpool.Pool
-	blobs *fakeBlobs
-	mux   *http.ServeMux
+	t       *testing.T
+	pool    *pgxpool.Pool
+	blobs   *fakeBlobs
+	starter *fakeStarter
+	mux     *http.ServeMux
 }
 
 func newEnv(t *testing.T) *env {
 	t.Helper()
+	starter := &fakeStarter{}
+	e := newEnvWith(t, starter)
+	e.starter = starter
+	return e
+}
+
+// newEnvWith is the env with starter as its Temporal; nil is a core without one.
+func newEnvWith(t *testing.T, starter Starter) *env {
+	t.Helper()
 	e := &env{t: t, pool: testdb.New(t), blobs: newFake(), mux: http.NewServeMux()}
-	for _, p := range Public(e.pool, e.blobs) {
+	for _, p := range Public(e.pool, e.blobs, starter) {
 		e.mux.Handle(p.Pattern, p.Handler)
 	}
 	return e

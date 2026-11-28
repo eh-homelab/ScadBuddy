@@ -16,14 +16,22 @@ import re
 from typing import Any, Literal
 
 from fastapi import status
-from pydantic import BaseModel, field_validator
+from fastapi.exceptions import RequestValidationError
+from pydantic import BaseModel, ValidationError, field_validator
 
 from scadbuddy.api.crud_agent_events import UUID_PATTERN
 from scadbuddy.core.json_values import unstorable
 from scadbuddy.core.problems import ApiError
 from scadbuddy.crud.guard import crud_router
 from scadbuddy.tasks.component import TasksDep
-from scadbuddy.tasks.models import MAX_BY_CHARS, MAX_JSON_BYTES, Task, TaskOpen, json_fits
+from scadbuddy.tasks.models import (
+    MAX_BY_CHARS,
+    MAX_JSON_BYTES,
+    Task,
+    TaskFields,
+    TaskOpen,
+    json_fits,
+)
 from scadbuddy.tasks.store import (
     RunBehindError,
     RunEndedError,
@@ -43,7 +51,13 @@ _UUID = re.compile(UUID_PATTERN)
 router = crud_router("projects")
 
 
-class OpenWrite(TaskOpen):
+class OpenWrite(TaskFields):
+    """A `TaskOpen`, which the route checks by the rules ``widgets`` names."""
+
+    #: The rules of #8062: a schema's widget keys and the context's blocks. A worker from
+    #: before #8062 sends no such key, and a prompt from before it (`PROMPT_WIDGETS_PATCH`)
+    #: sends false: both are checked by the rules they were asked under.
+    widgets: bool = False
     #: The run's execution that opens it.
     workflow_run_id: str | None = None
 
@@ -117,8 +131,16 @@ def open_task(body: OpenWrite, tasks: TasksDep) -> Task:
     state."""
     _uuid("task id", body.id)
     _uuid("run id", body.run_id)
+    fields = body.model_dump(by_alias=True, exclude={"widgets", "workflow_run_id"})
     try:
-        return tasks.store.open(body, workflow_run_id=body.workflow_run_id)
+        task = TaskOpen.model_validate(fields, context={"widgets": body.widgets})
+    except ValidationError as error:
+        # The shape a refused body has (`crud/guard.py`).
+        raise RequestValidationError(
+            [{**one, "loc": ("body", *one["loc"])} for one in error.errors(include_input=False)]
+        ) from None
+    try:
+        return tasks.store.open(task, workflow_run_id=body.workflow_run_id)
     except RunNotFoundError:
         raise ApiError(status.HTTP_404_NOT_FOUND, "No such run.", reason=RUN_NOT_FOUND) from None
     except RunEndedError:

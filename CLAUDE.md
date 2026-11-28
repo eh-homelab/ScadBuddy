@@ -236,7 +236,9 @@ The backend's migration files and its settings tables: `backend/CLAUDE.md`.
   binary reports the version the SDK declares (`agent/src/check-cli-version.ts`), so
   no second pin moves with a bump (#1540). A bump still changes the harness under
   every query: the `*.e2e`/`*.sdk` tests run the real binary, and a "measured on"
-  note is re-dated only when what backs it was re-checked.
+  note is re-dated only when what backs it was re-checked. A new field on a transcript
+  entry fails `agent/test/durableImport.sdk.test.ts`'s field check; its comment says how
+  to read and fix that (#8064).
 - The `agent` jobs in `ci.yml` and `build-image.yml` use the buildx `type=gha` cache
   with `scope=agent`, so they do not overwrite the backend image's cache index.
 - Every `docker/setup-buildx-action` step sets `driver-opts:
@@ -308,6 +310,11 @@ The backend's migration files and its settings tables: `backend/CLAUDE.md`.
   (markdownlint-cli2 0.20.0 over those files outside `vendor/`, config
   `.markdownlint-cli2.jsonc`, style rules off) runs on every change. A docs-only push to `main` starts neither `ci.yml`
   nor `build-image.yml` (their push `paths` exclude those files), so it builds and deploys nothing.
+- `ci.yml`'s `workflow_dispatch` input `record_histories` (#6949 K1 Task 16) runs the
+  backend shards with `SCADBUDDY_RECORD_HISTORIES=1` and uploads
+  `backend/tests/fixtures/order_stock_histories/` as one artifact per shard
+  (`order-stock-histories-<n>`): the stock workflows' replay histories, which no laptop
+  without Temporal can record. Commit the files; never re-record one.
 - `build-go-image.yml` publishes each `tools/go/*` CLI (every one with a `main.go`
   must have a Dockerfile) as `ghcr.io/eh-homelab/scadbuddy-<module>` on a push to main
   touching Go (a `CLAUDE.md` or `AGENTS.md` outside `vendor/` aside), a `v*` tag or a dispatch, for amd64 only: `sha-<7>` always,

@@ -14,6 +14,10 @@ dotnet build -f net10.0-android -c Release -p:AndroidSdkDirectory=$ANDROID_HOME 
 adb install -r bin/Release/net10.0-android/com.ehhomelab.scadbuddy-Signed.apk
 ```
 
+`app/Taskfile.yml` ([go-task](https://taskfile.dev) v3) does both in one step: `cd app && task
+phone` builds the latest origin/main in a worktree of its own (`~/.cache/scadbuddy-app-build`) and
+installs it over adb on port 5039. `REINSTALL=1` uninstalls first (needed over a CI build's key).
+
 CI's `android` job (`ci.yml`, lane `android` in `select-lanes.sh`) runs the tests and the same
 build on `ubuntu-latest` with JDK 17. It pins the .NET SDK (`10.0.301`, in `app/global.json` too: the runner image also has a .NET 11
 SDK, which `dotnet` would otherwise pick, and whose manifests conflict with this workload set) and the workload set
@@ -25,14 +29,23 @@ Android) compile the app's pure files by link, today `DeepLink.Links.cs` and `De
 cd app/ScadBuddy.Tests && dotnet test
 ```
 
+## Wireless adb
+
+From WSL, run adb's server on port 5039: `~/android-sdk/platform-tools/adb -P 5039 nodaemon server`
+(5037 hangs: under mirrored networking, Windows holds it). A phone with Advanced Protection takes
+an APK only over wireless debugging: pair once with `adb -P 5039 pair <ip:port> <code>` (the code
+from "Pair device with pairing code"), then the phone shows in `adb -P 5039 devices` through mDNS.
+The app logs each read under the logcat tag `ScadBuddyNfc`.
+
 ## The published APK
 
 `build-app.yml` (#8376) runs on every push to main that changes `app/` (not only a
 `CLAUDE.md`), and on a dispatch. It runs the tests and the `android` job's build with the same
 pins, with version code `github.run_number` and version name `1.0.<run number>`. Then it
 pushes `app/Dockerfile`, a `FROM scratch` image with only `/scadbuddy.apk` and
-`/scadbuddy.apk.sha256`, to `ghcr.io/eh-homelab/scadbuddy-app`, tagged `sha-<7>` and
-`latest`. It publishes no GitHub release. To install the latest:
+`/scadbuddy.apk.sha256`, to `ghcr.io/eh-homelab/scadbuddy-app`, tagged `sha-<7>`, and
+`latest` only for a main build: a dispatch of another branch publishes `sha-<7>` alone.
+It publishes no GitHub release. To install the latest:
 
 ```bash
 crane export ghcr.io/eh-homelab/scadbuddy-app:latest - | tar -x scadbuddy.apk scadbuddy.apk.sha256
@@ -70,6 +83,11 @@ That stays until a release key signs every build (the #8376 follow-up).
   reads and writes, and the bridge to `Resources/Raw/nfc-polyfill.js` (Web NFC's `NDEFReader`).
   A running device call takes every tap (`StartCall`), and a read tells it its progress
   (`ITagProgress`).
+  A page write reads the tag back on the write's own connection (Android dispatches a tag only
+  when it finds it, and a new connection just after the write failed on prod, #8362); with no
+  read-back the page asks for a second tap. A failed NDEF read is a `readingerror`, never a
+  reading with no records. Each NDEF reading carries `tag`: the NTAG chip from GET_VERSION, its
+  user memory, `Ndef.getMaxSize()` and `isWritable()`.
 - `Platforms/Android/ScanChromeClient.cs`: the camera and the location, for the set origin only.
 - `Telemetry.cs`: OTLP/HTTP traces, metrics and logs (`scadbuddy-app`).
 

@@ -27,6 +27,7 @@ async def test_a_run_records_its_steps_and_completes(flows: Flows) -> None:
     assert run.workflow_id == f"flow-{run_id}"
 
 
+@pytest.mark.usefixtures("waits_before_8062")
 async def test_wait_for_human_parks_until_answered(flows: Flows) -> None:
     run_id = await flows.start(
         script("a = await wait_for_human('Swap to pink?', 600)", "return a['answer']")

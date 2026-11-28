@@ -39,17 +39,29 @@ sequenceDiagram
 
 A script asks with a host function (`backend/scadbuddy/workflows/flow_tools.py`):
 
-| | `wait_for_human(question, timeout_s=None, people_only=False)` | `prompt(title, schema, context=None, place=None, ui=None, timeout_s=None, people_only=False)` |
+| | `wait_for_human(question, timeout_s=None, people_only=False)` | `prompt(title, schema, context=None, place=None, ui=None, timeout_s=None, people_only=False, assignee=None)` |
 |---|---|---|
-| The question | a text | a title and a form |
+| The question | a text, the task's title | a title and a form |
 | The answer | `{answer}`, a text | a dict by field name |
-| Row in `tasks` | none | one, opened before the call waits |
-| Answer route | `POST /api/v1/workflow-runs/{run_id}/answer` | `POST /api/v1/tasks/{task_id}/answer` |
-| Operation kind | `flow_answer`; an agent's: `flow_agent_answer` | `task_answer`; an agent's: `flow_agent_answer` |
-| Harness callback | `human_answer_open` (`human_answer` in a replay of an older call) | `task_answer` |
+| Row in `tasks` | one, with the one text field `answer` | one, opened before the call waits |
+| Answer route | `POST /api/v1/tasks/{task_id}/answer` | `POST /api/v1/tasks/{task_id}/answer` |
+| Operation kind | `task_answer`; an agent's: `flow_agent_answer` | `task_answer`; an agent's: `flow_agent_answer` |
+| Harness callback | `task_answer` | `task_answer` |
 
-The text route refuses a prompt's call with 409 `flow-answer-is-a-task`
-(`backend/scadbuddy/api/flows.py` `ANSWER_IS_A_TASK`).
+Since #8062 a `wait_for_human` opens a task as a prompt does (`HUMAN_PROMPT_PATCH`, a patch
+id per call), with the schema `HUMAN_ANSWER_SCHEMA` and the question as its title. A
+question longer than a title (`TASK_TITLE_MAX`, 500 characters) is cut to fit, ending with
+"…", and the whole question is a `text` block of the task's context (at most 4000
+characters; a longer one raises `ValueError`; `_human_question`). `wait_for_human("")` raises
+`ValueError`, because a task title needs a character. An answer with no character but spaces is
+refused, as the text route refuses a blank answer (#2379): the schema's `answer` has a
+`minLength` of 1, and `validate_answer` (`backend/scadbuddy/tasks/validate.py`) refuses
+an answer of only spaces. Its step is still
+`wait_for_human`. A call from before replays with no task: it waits on
+`human_answer_open` (`human_answer` for an older one) and takes its answer at
+`POST /api/v1/workflow-runs/{run_id}/answer`, operation kind `flow_answer`. The run page shows
+it with `CallCard`. The text route refuses a call with a task with 409
+`flow-answer-is-a-task` (`backend/scadbuddy/api/flows.py` `ANSWER_IS_A_TASK`).
 
 **No default limit.** Both wait with no limit unless `timeout_s` sets one (`_wait_s`). The
 floor is 10 seconds (`MIN_WAIT_S`): less raises `ValueError`, and a literal that is too
@@ -65,6 +77,58 @@ replays with the old callback, its default of an hour and its range of 10 to 864
 (`WAIT_OPEN_PATCH`, a patch id per call). The next call of the same run has no default
 limit.
 
+**Widgets.** A property of a prompt's schema may name a screen control with `x-sb-widget`
+(`backend/scadbuddy/tasks/widgets.py` `WIDGETS`). The control draws the field's own type, so
+the answer is still the type's value:
+
+| `x-sb-widget` | Type | The control |
+|---|---|---|
+| `scan` | string | a code, typed or scanned; the field looks it up and shows its name |
+| `photo`, `file` | string | an upload; the value is the id of an attachment of the task (entity kind `task`) |
+| `entity` | string | a pick of a row, with `kind`: `library_file` (the value is the file's id), `location` or `spool` (the value is its code, such as `S-9`) |
+| `weight` | number | a weight in grams |
+| `confirm` | boolean | a large yes or no |
+
+A `scan` field may also have `expects`, with `kinds` (`spool`, `location`) and `codes` (such
+as `S-3`). The route refuses an answer whose code is none of them, or names an archived row
+(`backend/scadbuddy/tasks/answer_check.py`). It never says which of the reasons it is. An
+`entity` field of kind `location` or `spool` is checked the same way, as a scan of that kind;
+one of kind `library_file` must name a library file that is not in the trash. An
+unknown `x-sb-widget` is logged and draws the plain control of the type. A widget on a type
+it does not fit, `kind` on a field that is not an `entity`, and `expects` on one that is not
+a `scan` are refused when the prompt opens (`widget_problems`). The inputs of a flow refuse
+all three keys.
+
+**Context blocks.** An item of `context` with one key that names a block is checked and
+drawn as that block (`context_problems`, `frontend/src/components/flows/ContextBlocks.tsx`):
+`entity` (`<kind>:<ref>`, a link), `text` (Markdown), `image` (`{entity, attachment_id}`),
+`table` (`{columns, rows}`), `checklist` (a list of texts, ticked on the screen and not
+kept) and `expect` (`{weight_g, tolerance_g}`, which a `weight` field checks the weighing
+against). Any other item is stored and drawn as before.
+
+**Assignee.** `prompt(..., assignee=...)` names who the task is for. The task card shows it,
+and `GET /api/v1/tasks?assignee=me` lists the tasks of the signed-in person. It does not
+limit who may answer.
+
+**Stations.** A place may be a station for flow tasks (`filament_locations.station`; the
+switch "Station for flow tasks" on the place, and `GET /api/v1/filament/locations?station=true`
+lists them). A task's `place` names its station by the location's code, such as `L-7`. A
+place that parses as a location's code is stored in that form, so `l7` and `L-07` are `L-7`
+(`backend/scadbuddy/tasks/models.py` `folded_place`). A place that is no code is stored as
+it is, and no station shows it. `/station` lists the stations. `/station/<location id>`
+shows the open tasks at that location's code, oldest first, over
+`GET /api/v1/tasks?place=<code>`, and it follows `tasks:<code>`, so a task that opens or is
+answered elsewhere appears or goes at once. A scan field at the top keeps the focus. A code
+scanned there goes to the one task that waits for it (`GET /api/v1/tasks?code=`); when more
+than one waits, the person chooses. Only a scan field with `expects` makes its task wait for
+a code, so a station or `/x/<code>` offers only those fields. The page is an
+ordinary signed-in session, so each answer is the signed-in person's own.
+
+**Scan to answer.** `/x/<code>`, the address of a label's QR, shows the open task that
+waits for the code before it opens the place or spool, with the code in the task's scan
+field. `tasks.expects` holds the entries (`kind:<kind>`, `code:<CODE>`) that the list by
+code reads.
+
 **The schema.** A prompt's `schema` is the subset of a flow's `inputs.json`
 (`backend/scadbuddy/core/input_schema.py` `schema_problems`,
 `backend/scadbuddy/tasks/schema.py` `prompt_schema_problems`). A string, or an array's string
@@ -77,7 +141,8 @@ pipeline refuse `format`.
 
 **Sizes.** `backend/scadbuddy/tasks/models.py` `TaskOpen` checks them. The title has 1 to
 500 characters. The context has at most 16 KiB of JSON (`MAX_JSON_BYTES`), `ui` at most 200
-characters, and `place` 1 to 100 characters with no control character. The schema has the
+characters, and `place` 1 to 100 characters with no control character (a location's code
+is stored as `L-<n>`). The schema has the
 limits of an inputs schema. What Postgres cannot store is refused
 (`backend/scadbuddy/core/json_values.py` `unstorable`). An answer has at most 16 KiB of
 JSON (413).
@@ -172,13 +237,14 @@ another answer on the row and leaves an expired task as it is.
   refusals: a task that is refused (422), a run that has ended and a run that is gone.
 - **Forget.** Forgetting a run deletes its tasks (`ON DELETE CASCADE`).
 
-**Reads.** `GET /api/v1/tasks` lists tasks by `state` and `place`, without their answers or
+**Reads.** `GET /api/v1/tasks` lists tasks by `state`, `place`, `code` and `assignee`, without their answers or
 who gave them (`TaskQuestion`). `GET /api/v1/tasks/{task_id}` reads one with both
 (`backend/scadbuddy/api/tasks.py`). A run's page gets
 the question, without its answer, in its pending entry (`PendingEntry.task`). A task that
 opens or moves to another state publishes `task.changed` on the realtime topics `tasks`,
-`task:<id>` and, with a place, `tasks:<place>` (`backend/scadbuddy/api/realtime.py`
-`topics_of`). No page lists tasks by place, and nothing reads `ui`.
+`task:<id>` and, with a place, `tasks:<place>`, plus `tasks:L-7` for a place kept as `l7` before
+#8062 (`backend/scadbuddy/api/realtime.py` `topics_of`; Go core's `/api/v1/ws` in
+`tools/go/core/internal/bus/event.go`, checked by the shared event-stream vectors). The station page lists tasks by place. Nothing reads `ui`.
 
 ## Decisions on an outward call
 
@@ -220,8 +286,10 @@ change: the call does what the new decision says.
 - UI: `frontend/src/pages/WorkflowsPage.tsx`, `FlowPage.tsx`, `WorkflowRunPage.tsx`,
   `frontend/src/components/flows/FlowEditor.tsx:106`. A question:
   `frontend/src/components/flows/PendingCard.tsx`, `TaskCard.tsx` (a prompt's card),
-  `SchemaForm.tsx` (the form, which Start run also uses), `inputsForm.tsx` and
-  `frontend/src/lib/flowInputs.ts`.
+  `SchemaForm.tsx` (the form, which Start run also uses), `TaskPanel.tsx` (the context and
+  the form, shared by the card, the station and the code page), `ContextBlocks.tsx`,
+  `widgets/` (the controls), `inputsForm.tsx` and `frontend/src/lib/flowInputs.ts`.
+  Stations: `frontend/src/pages/StationPage.tsx`, `CodePage.tsx`.
 - Routes: `backend/scadbuddy/api/flows.py` (`register_flow`, `start_flow_run`),
   `backend/scadbuddy/api/flow_triggers.py:65`, `backend/scadbuddy/api/flow_script.py:18`,
   `backend/scadbuddy/api/tasks.py`. The projects worker's task routes:
@@ -230,8 +298,8 @@ change: the call does what the new decision says.
 - Runs: `backend/scadbuddy/flows/launch.py:54`, `backend/scadbuddy/workflows/project.py:126`,
   `flow_tools.py` (`FLOW_TOOLS`, `SCRIPT_TOOLS`), `flow_activities.py`, `flow_routes.py:192`,
   `flow_grants.py`.
-- Tasks: `backend/scadbuddy/tasks/` (`models.py`, `schema.py`, `validate.py`, `store.py`,
-  `component.py`).
+- Tasks: `backend/scadbuddy/tasks/` (`models.py`, `schema.py`, `widgets.py`, `answer_check.py`,
+  `validate.py`, `store.py`, `component.py`).
 - What a flow's author reads of the host functions: the description of the agent's
   `register_flow` tool (`agent/src/tools/flows.ts`).
 - Definitions in git under `data/flows` (`backend/scadbuddy/flows/repository.py`).
@@ -259,11 +327,10 @@ change: the call does what the new decision says.
   `backend/tests/flows/test_project_replay.py` replays.
 - Frontend: `frontend/src/components/flows/PendingCard.test.tsx`, `SchemaForm.test.tsx`,
   `frontend/src/lib/flowInputs.test.ts`.
-- e2e: `frontend/e2e/workflows.spec.ts`.
+- e2e: `frontend/e2e/workflows.spec.ts`, `frontend/e2e/flow-station.spec.ts`.
 
 ## Limits and known issues
 
 - Some rare Resets can leave a task row behind its run: one made by hand in Temporal, and one
   through ScadBuddy whose commit was lost and which was then tried again
   ([#7413](https://github.com/eh-homelab/ScadBuddy/issues/7413)).
-- `wait_for_human` opens no task yet.

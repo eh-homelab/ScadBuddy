@@ -3,7 +3,6 @@ import { Route, Routes } from 'react-router'
 import { describe, expect, it } from 'vitest'
 import { flowRequests } from '../../mocks/features/flows'
 import { renderPage } from '../../test/utils'
-import { choose } from '../../test/select'
 import { StartRun } from './StartRun'
 
 // #2483 — Start run: a flow with an inputs schema asks for them in a form drawn from it
@@ -33,15 +32,15 @@ describe('StartRun (#2483)', () => {
     await user.click(screen.getByRole('button', { name: 'Start run' }))
     const dialog = await screen.findByRole('dialog', { name: 'Start coasters' })
     expect(within(dialog).getByRole('spinbutton', { name: /Copies/ })).toHaveValue(2)
-    expect(within(dialog).getByRole('combobox', { name: /Colour/ })).toHaveTextContent('red')
+    expect(within(dialog).getByRole('radio', { name: 'red' })).toBeChecked()
     expect(within(dialog).getByText('The template to render')).toBeInTheDocument()
     await user.click(within(dialog).getByRole('button', { name: 'Start run' }))
     expect(within(dialog).getByText('Required')).toBeInTheDocument()
     expect(starts()).toEqual([])
 
     await user.type(within(dialog).getByRole('textbox', { name: /Template/ }), 'coaster')
-    await choose(user, within(dialog).getByRole('combobox', { name: /Colour/ }), 'blue')
-    await user.click(within(dialog).getByRole('checkbox', { name: /Dry run/ }))
+    await user.click(within(dialog).getByRole('radio', { name: 'blue' }))
+    await user.click(within(dialog).getByRole('switch', { name: /Dry run/ }))
     await user.click(within(dialog).getByRole('button', { name: 'Start run' }))
     expect(await screen.findByText('Run page')).toBeInTheDocument()
     expect(starts().map((r) => r.body)).toEqual([
@@ -63,13 +62,11 @@ describe('StartRun (#2483)', () => {
     )
     await user.click(screen.getByRole('button', { name: 'Start run' }))
     const dialog = await screen.findByRole('dialog', { name: 'Start swap' })
-    const colour = within(dialog).getByRole('combobox', { name: /Colour/ })
-    // The placeholder, which is no option at all.
-    expect(colour).toHaveTextContent('Choose…')
-    expect(colour).toHaveAttribute('data-placeholder')
+    // Nothing is chosen until the person chooses.
+    expect(within(dialog).getAllByRole('radio').map((radio) => radio.getAttribute('aria-checked'))).toEqual(['false', 'false'])
     await user.click(within(dialog).getByRole('button', { name: 'Start run' }))
     expect(within(dialog).getByText('Required')).toBeInTheDocument()
-    await choose(user, colour, 'red')
+    await user.click(within(dialog).getByRole('radio', { name: 'red' }))
     await user.click(within(dialog).getByRole('button', { name: 'Start run' }))
     await waitFor(() => expect(starts().map((r) => r.body)).toEqual([{ inputs: { colour: 'red' } }]))
   })

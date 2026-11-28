@@ -1,7 +1,9 @@
-import { screen, waitFor, within } from '@testing-library/react'
+import { act, screen, waitFor, within } from '@testing-library/react'
 import { http, HttpResponse } from 'msw'
+import { StrictMode } from 'react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import { spoolId } from '../../mocks/features/filament/seed'
+import { seedEntityProperties } from '../../mocks/features/entities'
+import { spoolId, T } from '../../mocks/features/filament/seed'
 import { queueScanCodes } from '../../mocks/features/scan'
 import { resetMockState } from '../../mocks/handlers'
 import { server } from '../../mocks/server'
@@ -40,19 +42,31 @@ function paths() {
   return { sent, off: () => server.events.removeListener('request:start', listen) }
 }
 
-/** A stand-in for the Shape Detection API's BarcodeDetector, and a camera that gives a stream. */
-function installCamera(rawValue: string) {
+/**
+ * A stand-in for the Shape Detection API's BarcodeDetector, and a camera that gives a stream.
+ * `supported` is what `getSupportedFormats` answers (no such method when it is missing), and
+ * `formats` keeps the formats each detector was made with, and `breaks` makes the constructor throw.
+ */
+function installCamera(rawValue: string, { format = 'qr_code', supported, breaks = false }: { format?: string; supported?: string[]; breaks?: boolean } = {}) {
   const stop = vi.fn()
   const stream = { getTracks: () => [{ stop }] }
   const before = navigator.mediaDevices
+  const formats: string[][] = []
   Object.defineProperty(navigator, 'mediaDevices', { value: { getUserMedia: vi.fn(() => Promise.resolve(stream)) }, configurable: true })
-  ;(window as unknown as { BarcodeDetector: unknown }).BarcodeDetector = class {
+  const Detector = class {
+    constructor(options?: { formats: string[] }) {
+      if (breaks) throw new Error('no detector')
+      formats.push(options?.formats ?? [])
+    }
     detect() {
-      return Promise.resolve([{ rawValue, format: 'qr_code' }])
+      return Promise.resolve([{ rawValue, format }])
     }
   }
+  if (supported) Object.assign(Detector, { getSupportedFormats: () => Promise.resolve(supported) })
+  ;(window as unknown as { BarcodeDetector: unknown }).BarcodeDetector = Detector
   return {
     stop,
+    formats,
     restore() {
       delete (window as unknown as { BarcodeDetector?: unknown }).BarcodeDetector
       Object.defineProperty(navigator, 'mediaDevices', { value: before, configurable: true })
@@ -146,7 +160,39 @@ describe('IdentifySpool (#7167)', () => {
       await user.click(screen.getByRole('button', { name: 'Use camera' }))
       await waitFor(() => expect(identified(onIdentified)).toHaveLength(1))
       expect(identified(onIdentified)[0]).toMatchObject({ id: spoolId(9) })
+      expect(camera.formats).toEqual([['qr_code', 'ean_13', 'ean_8', 'upc_a', 'upc_e']])
       await waitFor(() => expect(camera.stop).toHaveBeenCalled())
+    } finally {
+      camera.restore()
+    }
+  })
+
+  it("reads a maker's EAN with the camera, in the formats the detector says it reads (#8372)", async () => {
+    seedEntityProperties(`spool_type:${T.ORANGE}`, { gtin: ['6975373321234'] })
+    const camera = installCamera('6975373321234', { format: 'ean_13', supported: ['qr_code', 'ean_13', 'code_128'] })
+    try {
+      const { user, onIdentified } = show()
+      await user.click(screen.getByRole('radio', { name: 'QR code' }))
+      await user.click(screen.getByRole('button', { name: 'Use camera' }))
+      expect(await screen.findByRole('searchbox', { name: 'Find a spool' })).toHaveValue('gtin:6975373321234')
+      await waitFor(() => expect(identified(onIdentified)).toHaveLength(1))
+      expect(identified(onIdentified)[0]).toMatchObject({ id: spoolId(2) })
+      expect(camera.formats).toEqual([['qr_code', 'ean_13']])
+      expect(camera.stop).toHaveBeenCalled()
+    } finally {
+      camera.restore()
+    }
+  })
+
+  it('says so, once, when the camera detector cannot be made (#8372)', async () => {
+    const camera = installCamera('x', { breaks: true })
+    try {
+      const { user } = show()
+      await user.click(screen.getByRole('radio', { name: 'QR code' }))
+      await user.click(screen.getByRole('button', { name: 'Use camera' }))
+      expect(await screen.findByText(/This browser cannot read codes from the camera/)).toBeInTheDocument()
+      expect(screen.queryByLabelText('Camera preview')).toBeNull()
+      expect(camera.stop).toHaveBeenCalled()
     } finally {
       camera.restore()
     }
@@ -380,6 +426,83 @@ describe('IdentifySpool (#7167)', () => {
     })
   })
 
+  describe('with Web NFC, a photo read that answers after the way changed (#8372)', () => {
+    let stub: NdefStub
+    let release!: () => void
+    let reached!: Promise<void>
+    let answered!: Promise<void>
+    const off: (() => void)[] = []
+    beforeEach(() => {
+      stub = installNdefStub()
+      const held = new Promise<void>((resolve) => (release = resolve))
+      let reach!: () => void
+      reached = new Promise<void>((resolve) => (reach = resolve))
+      server.use(
+        http.post('/api/v1/scan/codes', async () => {
+          reach()
+          await held
+          return undefined
+        }),
+      )
+      let answer!: () => void
+      answered = new Promise<void>((resolve) => (answer = resolve))
+      const listen = ({ request }: { request: Request }) => {
+        if (new URL(request.url).pathname === '/api/v1/scan/codes') answer()
+      }
+      server.events.on('response:mocked', listen)
+      off.push(() => server.events.removeListener('response:mocked', listen))
+    })
+    afterEach(() => {
+      off.splice(0).forEach((stop) => stop())
+      stub.restore()
+    })
+
+    /** Uploads a photo in the QR code way, and waits until its read is held at the server. */
+    async function holdPhoto(user: ReturnType<typeof show>['user']) {
+      await user.click(screen.getByRole('radio', { name: 'QR code' }))
+      await user.upload(screen.getByLabelText('Photo of the label'), new File([new Uint8Array([0xff, 0xd8])], 'label.jpg', { type: 'image/jpeg' }))
+      await reached
+    }
+
+    it('starts no search and moves no way for a late barcode', async () => {
+      queueScanCodes([{ format: 'ean_13', text: '6975373321234' }])
+      const { user, onIdentified } = show()
+      await holdPhoto(user)
+      await user.click(screen.getByRole('radio', { name: 'Scan tag' }))
+      const calls = onIdentified.mock.calls.length
+      release()
+      await answered
+      await act(async () => {})
+      expect(screen.getByRole('radio', { name: 'Scan tag' })).toHaveAttribute('aria-checked', 'true')
+      expect(screen.queryByRole('searchbox', { name: 'Find a spool' })).toBeNull()
+      expect(onIdentified.mock.calls.length).toBe(calls)
+    })
+
+    it("keeps the spool a tag named when the photo's lookup answers late", async () => {
+      queueScanCodes([{ format: 'qr_code', text: `scadbuddy:spool:${spoolId(5)}` }])
+      let fetched!: () => void
+      const spoolRead = new Promise<void>((resolve) => (fetched = resolve))
+      const listen = ({ request }: { request: Request }) => {
+        if (new URL(request.url).pathname === `/api/v1/filament/spools/${spoolId(5)}`) fetched()
+      }
+      server.events.on('response:mocked', listen)
+      off.push(() => server.events.removeListener('response:mocked', listen))
+      const { user, onIdentified } = show()
+      await holdPhoto(user)
+      await user.click(screen.getByRole('radio', { name: 'Scan tag' }))
+      await waitFor(() => expect(stub.scanning).toBe(true))
+      stub.tap({ serialNumber: '04:a1:b2:c3:d4:e5:f6', records: [] })
+      await waitFor(() => expect(last(onIdentified)).toMatchObject({ id: spoolId(3) }))
+      const calls = onIdentified.mock.calls.length
+      release()
+      await answered
+      await spoolRead
+      await act(async () => {})
+      expect(onIdentified.mock.calls.length).toBe(calls)
+      expect(last(onIdentified)).toMatchObject({ id: spoolId(3) })
+    })
+  })
+
   it('offers no tag way and no camera in a frame', async () => {
     const camera = installCamera(`scadbuddy:spool:${spoolId(9)}`)
     try {
@@ -393,5 +516,156 @@ describe('IdentifySpool (#7167)', () => {
     } finally {
       camera.restore()
     }
+  })
+
+  describe('a code that names no ScadBuddy thing searches the spools (#8372)', () => {
+    const GTIN = '6975373321234'
+
+    /** Types the code in the QR code way, and waits for the switch to "Pick by hand" with the search in the box. */
+    async function scan(user: ReturnType<typeof show>['user']) {
+      await user.click(screen.getByRole('radio', { name: 'QR code' }))
+      await user.type(screen.getByLabelText('Spool code'), `${GTIN}{Enter}`)
+      expect(await screen.findByRole('searchbox', { name: 'Find a spool' })).toHaveValue(`gtin:${GTIN}`)
+      expect(screen.getByRole('radio', { name: 'Pick by hand' })).toHaveAttribute('aria-checked', 'true')
+      return screen.findByRole('radiogroup', { name: 'Spools' })
+    }
+
+    it('names the one spool whose type has the code at once', async () => {
+      seedEntityProperties(`spool_type:${T.ORANGE}`, { gtin: [GTIN] })
+      const { user, onIdentified } = show()
+      const list = await scan(user)
+      await waitFor(() => expect(identified(onIdentified)).toHaveLength(1))
+      expect(identified(onIdentified)[0]).toMatchObject({ id: spoolId(2) })
+      expect(within(list).getByRole('radio', { name: /S-2\b/ })).toHaveAttribute('aria-checked', 'true')
+    })
+
+    it('names the one spool once under StrictMode, which runs the effects twice', async () => {
+      seedEntityProperties(`spool_type:${T.ORANGE}`, { gtin: [GTIN] })
+      const onIdentified = vi.fn()
+      const { user } = renderPage(
+        <StrictMode>
+          <IdentifySpool onIdentified={onIdentified} />
+        </StrictMode>,
+      )
+      const list = await scan(user)
+      await waitFor(() => expect(within(list).getByRole('radio', { name: /S-2\b/ })).toHaveAttribute('aria-checked', 'true'))
+      expect(identified(onIdentified)).toEqual([expect.objectContaining({ id: spoolId(2) })])
+    })
+
+    it('shows several matches and names none, and an edit of the box later names none', async () => {
+      seedEntityProperties(`spool_type:${T.ORANGE}`, { gtin: [GTIN] })
+      seedEntityProperties(`spool_type:${T.PINK}`, { gtin: [GTIN] })
+      const { user, onIdentified } = show()
+      const list = await scan(user)
+      await waitFor(() => expect(within(list).getAllByRole('radio')).toHaveLength(2))
+      expect(within(list).getByRole('radio', { name: /S-2\b/ })).toBeInTheDocument()
+      expect(within(list).getByRole('radio', { name: /S-3\b/ })).toBeInTheDocument()
+      expect(identified(onIdentified)).toHaveLength(0)
+      await user.type(screen.getByRole('searchbox', { name: 'Find a spool' }), ' pink')
+      await waitFor(() => expect(within(list).getAllByRole('radio')).toHaveLength(1))
+      expect(within(list).getByRole('radio', { name: /S-3\b/ })).toHaveAttribute('aria-checked', 'false')
+      expect(identified(onIdentified)).toHaveLength(0)
+    })
+
+    it('shows an empty list with the code in the box when no spool has it', async () => {
+      const { user, onIdentified } = show()
+      const list = await scan(user)
+      expect(await screen.findByText('No spool matches. Check the code on its label.')).toBeInTheDocument()
+      expect(within(list).queryAllByRole('radio')).toHaveLength(0)
+      expect(screen.getByRole('searchbox', { name: 'Find a spool' })).toHaveValue(`gtin:${GTIN}`)
+      expect(identified(onIdentified)).toHaveLength(0)
+    })
+
+    it('searches the code a photo reads when it names no ScadBuddy thing', async () => {
+      queueScanCodes([{ format: 'ean_13', text: GTIN }])
+      const { user, onIdentified } = show()
+      await user.click(screen.getByRole('radio', { name: 'QR code' }))
+      await user.upload(screen.getByLabelText('Photo of the label'), new File([new Uint8Array([0xff, 0xd8])], 'label.jpg', { type: 'image/jpeg' }))
+      expect(await screen.findByRole('searchbox', { name: 'Find a spool' })).toHaveValue(`gtin:${GTIN}`)
+      expect(screen.getByRole('radio', { name: 'Pick by hand' })).toHaveAttribute('aria-checked', 'true')
+      expect(identified(onIdentified)).toHaveLength(0)
+    })
+
+    it('keeps the sentence for a photo of an unknown ScadBuddy code (D11)', async () => {
+      queueScanCodes([{ format: 'qr_code', text: 'S-999' }])
+      const { user, onIdentified } = show()
+      await user.click(screen.getByRole('radio', { name: 'QR code' }))
+      await user.upload(screen.getByLabelText('Photo of the label'), new File([new Uint8Array([0xff, 0xd8])], 'label.jpg', { type: 'image/jpeg' }))
+      expect(await screen.findByText('No spool label was found in the photo. Take it again, or type the code.')).toBeInTheDocument()
+      expect(screen.queryByRole('searchbox', { name: 'Find a spool' })).toBeNull()
+      expect(screen.getByRole('radio', { name: 'QR code' })).toHaveAttribute('aria-checked', 'true')
+      expect(identified(onIdentified)).toHaveLength(0)
+    })
+
+    it('names no spool when the box is edited before the property reads settle', async () => {
+      seedEntityProperties(`spool_type:${T.ORANGE}`, { gtin: [GTIN] })
+      let release!: () => void
+      const held = new Promise<void>((resolve) => (release = resolve))
+      server.use(
+        http.get('/api/v1/entity-kinds/spool_type/properties', async () => {
+          await held
+          return undefined
+        }),
+      )
+      let handled!: () => void
+      const answered = new Promise<void>((resolve) => (handled = resolve))
+      const listen = ({ request }: { request: Request }) => {
+        if (new URL(request.url).pathname === '/api/v1/entity-kinds/spool_type/properties') handled()
+      }
+      server.events.on('response:mocked', listen)
+      try {
+        const { user, onIdentified } = show()
+        await scan(user)
+        expect(screen.getByText(`Looking for “gtin:${GTIN}”…`)).toBeInTheDocument()
+        // A space keeps the one match, so only the edit can stop the pick.
+        await user.type(screen.getByRole('searchbox', { name: 'Find a spool' }), ' ')
+        release()
+        await answered
+        await act(async () => {})
+        const list = screen.getByRole('radiogroup', { name: 'Spools' })
+        expect(await within(list).findByRole('radio', { name: /S-2\b/ })).toHaveAttribute('aria-checked', 'false')
+        expect(within(list).getAllByRole('radio')).toHaveLength(1)
+        expect(identified(onIdentified)).toHaveLength(0)
+      } finally {
+        server.events.removeListener('response:mocked', listen)
+      }
+    })
+
+    it('finds a spool by its code and a property of its type in one search', async () => {
+      seedEntityProperties(`spool_type:${T.ORANGE}`, { gtin: [GTIN] })
+      seedEntityProperties(`spool_type:${T.PINK}`, { gtin: [GTIN] })
+      const { user } = show()
+      await user.click(screen.getByRole('radio', { name: 'Pick by hand' }))
+      const list = await screen.findByRole('radiogroup', { name: 'Spools' })
+      await waitFor(() => expect(within(list).getAllByRole('radio').length).toBeGreaterThan(1))
+      await user.type(screen.getByRole('searchbox', { name: 'Find a spool' }), `S-2 gtin:${GTIN}`)
+      await waitFor(() => expect(within(list).getAllByRole('radio')).toHaveLength(1))
+      expect(within(list).getByRole('radio', { name: /S-2\b/ })).toBeInTheDocument()
+    })
+
+    it('keeps the sentence for a label URL whose code is not found (D11)', async () => {
+      const { user } = show()
+      await user.click(screen.getByRole('radio', { name: 'QR code' }))
+      await user.type(screen.getByLabelText('Spool code'), 'https://h/x/L-99{Enter}')
+      expect(await screen.findByText('No spool has the code L-99.')).toBeInTheDocument()
+      expect(screen.queryByRole('searchbox', { name: 'Find a spool' })).toBeNull()
+    })
+
+    it('keeps the sentence for a photo of a spool label whose spool is gone (D11)', async () => {
+      queueScanCodes([{ format: 'qr_code', text: 'scadbuddy:spool:0b6c1f2e-1d2a-4c3b-9e8f-7a6b5c4d3e2f' }])
+      const { user } = show()
+      await user.click(screen.getByRole('radio', { name: 'QR code' }))
+      await user.upload(screen.getByLabelText('Photo of the label'), new File([new Uint8Array([0xff, 0xd8])], 'label.jpg', { type: 'image/jpeg' }))
+      expect(await screen.findByText('No spool label was found in the photo. Take it again, or type the code.')).toBeInTheDocument()
+      expect(screen.queryByRole('searchbox', { name: 'Find a spool' })).toBeNull()
+    })
+
+    it('keeps the sentence for a ScadBuddy code that is not found', async () => {
+      const { user } = show()
+      await user.click(screen.getByRole('radio', { name: 'QR code' }))
+      await user.type(screen.getByLabelText('Spool code'), 'S-999{Enter}')
+      expect(await screen.findByText('No spool has the code S-999.')).toBeInTheDocument()
+      expect(screen.queryByRole('searchbox', { name: 'Find a spool' })).toBeNull()
+    })
   })
 })

@@ -27,6 +27,7 @@ const LocationPage = lazyRetry(async () => ({ default: (await import('./pages/fi
 const LabelsPage = lazyRetry(async () => ({ default: (await import('./pages/filament/LabelsPage')).LabelsPage }))
 const SwapPage = lazyRetry(async () => ({ default: (await import('./pages/filament/SwapPage')).SwapPage }))
 const ScanPage = lazyRetry(async () => ({ default: (await import('./pages/filament/ScanPage')).ScanPage }))
+const DevicesPage = lazyRetry(async () => ({ default: (await import('./pages/DevicesPage')).DevicesPage }))
 const SupplierPage = lazyRetry(async () => ({ default: (await import('./pages/filament/SupplierPage')).SupplierPage }))
 const InvoicePage = lazyRetry(async () => ({ default: (await import('./pages/filament/InvoicePage')).InvoicePage }))
 const FilamentPage = lazyRetry(async () => ({ default: (await import('./pages/filament/FilamentPage')).FilamentPage }))
@@ -51,6 +52,7 @@ const SettingsPage = lazyRetry(async () => ({ default: (await import('./pages/Se
 const StorefrontPage = lazyRetry(async () => ({ default: (await import('./pages/StorefrontPage')).StorefrontPage }))
 const StorefrontListingPage = lazyRetry(async () => ({ default: (await import('./pages/StorefrontListingPage')).StorefrontListingPage }))
 const VersionsPage = lazyRetry(async () => ({ default: (await import('./pages/VersionsPage')).VersionsPage }))
+const StationPage = lazyRetry(async () => ({ default: (await import('./pages/StationPage')).StationPage }))
 const WorkflowRunPage = lazyRetry(async () => ({ default: (await import('./pages/WorkflowRunPage')).WorkflowRunPage }))
 const WorkflowsPage = lazyRetry(async () => ({ default: (await import('./pages/WorkflowsPage')).WorkflowsPage }))
 // #3653 — the component gallery, in the mocked build only: a production bundle has neither
@@ -123,6 +125,7 @@ export function App() {
         <Route path="m/:slug/prints" element={<TemplatePrintsPage />} />
         <Route path="prints" element={<PrintsPage />} />
         <Route path="scan" element={<ScanPage />} />
+        <Route path="devices" element={<DevicesPage />} />
         <Route path="edit/:outputId" element={<EditPage />} />
         <Route path="prints/:archiveId" element={<PrintDetailPage />} />
         <Route path="prints/queue/:itemId" element={<QueueItemPage />} />
@@ -167,6 +170,8 @@ export function App() {
         <Route path="customers/:id" element={<CustomerPage />} />
         <Route path="storefront" element={<StorefrontPage />} />
         <Route path="storefront/listings/:id" element={<StorefrontListingPage />} />
+        <Route path="station" element={<StationPage />} />
+        <Route path="station/:place" element={<StationPage />} />
         <Route path="workflows" element={<WorkflowsPage />} />
         <Route path="workflows/flows" element={<WorkflowsPage tab="flows" />} />
         <Route path="workflows/flows/:id" element={<FlowPage />} />

@@ -582,3 +582,70 @@ def test_a_tdfp_id_set_again_holds_and_another_does_not_replace_it(pg_pool: PgPo
     kept = store.get(made.id)
     assert kept is not None and kept.tdfp_id == 40001
     assert not store.set_tdfp_id(UUID(int=1), 40001)
+
+
+def _rows(pool: PgPool, kind: str) -> dict[str, dict[str, Any]]:
+    listed = CatalogStore(pool).list(kind, include_archived=True)
+    return {row["name"]: row for row in (r.model_dump() for r in listed)}
+
+
+def _names(pool: PgPool, kind: str) -> list[str]:
+    return [r.model_dump()["name"] for r in CatalogStore(pool).list(kind, include_archived=True)]
+
+
+@pg
+def test_a_type_create_adds_and_links_a_named_brand_material_and_subtype(pg_pool: PgPool) -> None:
+    store = SpoolTypeStore(pg_pool)
+    body = _body(pg_pool, material_id=None, material_name="Nylon X", brand_name="Acme")
+    made = store.create(body.model_copy(update={"subtype_name": "Glossy X"}))
+    material = _rows(pg_pool, "materials")["Nylon X"]
+    subtype = _rows(pg_pool, "subtypes")["Glossy X"]
+    assert made.material_id == material["id"]
+    assert made.brand_id == _rows(pg_pool, "brands")["Acme"]["id"]
+    assert made.subtype_id == subtype["id"]
+    assert subtype["material_id"] == material["id"]
+
+
+@pg
+def test_a_type_create_resolves_an_existing_name_to_its_row(pg_pool: PgPool) -> None:
+    store = SpoolTypeStore(pg_pool)
+    first = store.create(_body(pg_pool, brand_name="Acme"))
+    again = store.create(_body(pg_pool, code="PLA-BLK", brand_name="acme"))
+    assert again.brand_id == first.brand_id
+    assert store.create(_body(pg_pool, code="PLA-RED", material_id=None, material_name="pla"))
+    assert _names(pg_pool, "brands").count("Acme") == 1
+    assert [n for n in _names(pg_pool, "materials") if n.upper() == "PLA"] == ["PLA"]
+
+
+@pg
+def test_a_refused_type_create_adds_no_named_row(pg_pool: PgPool) -> None:
+    store = SpoolTypeStore(pg_pool)
+    store.create(_body(pg_pool))
+    with pytest.raises(CatalogExistsError):
+        store.create(_body(pg_pool, brand_name="Acme", subtype_name="Glossy X"))
+    assert "Acme" not in _names(pg_pool, "brands")
+    assert "Glossy X" not in _names(pg_pool, "subtypes")
+
+
+@pg
+def test_a_type_create_resolves_a_name_to_an_archived_row(pg_pool: PgPool) -> None:
+    store = SpoolTypeStore(pg_pool)
+    brands = CatalogStore(pg_pool)
+    first = store.create(_body(pg_pool, brand_name="Acme"))
+    assert first.brand_id is not None
+    brands.archive("brands", first.brand_id, True)
+    again = store.create(_body(pg_pool, code="PLA-BLK", brand_name="Acme"))
+    assert again.brand_id == first.brand_id
+    assert _names(pg_pool, "brands").count("Acme") == 1
+
+
+def test_a_type_create_takes_an_id_or_a_name_not_both() -> None:
+    base = {"code": "X", "rgba": "#FFFFFF", "label_weight_g": 1000}
+    one = UUID(int=1)
+    with pytest.raises(ValidationError, match="material_id or material_name"):
+        SpoolTypeCreate.model_validate(base)
+    for noun in ("brand", "material", "subtype"):
+        body = base | {"material_id": one, f"{noun}_id": one, f"{noun}_name": "A"}
+        with pytest.raises(ValidationError, match=f"{noun}_id or {noun}_name, not both"):
+            SpoolTypeCreate.model_validate(body)
+    assert SpoolTypeCreate.model_validate(base | {"material_name": "PLA"}).material_id is None

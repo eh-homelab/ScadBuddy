@@ -2,6 +2,7 @@
 
 import hashlib
 import json
+import re
 import shutil
 from collections.abc import AsyncIterator
 from pathlib import Path
@@ -399,7 +400,8 @@ def test_the_images_h2c_machine_flattens() -> None:
     assert isinstance(start, str) and start.startswith(";===== machine: H2C")
     assert "T[initial_no_support_filament_id]" in start
     assert "T[next_filament_id]" in h2c["change_filament_gcode"]
-    assert profiles.version == "02.08.02.61"
+    # VERSION is the image's BAMBU_STUDIO_VERSION, which the weekly bump moves (#8325).
+    assert re.fullmatch(r"\d{2}\.\d{2}\.\d{2}\.\d{2}", profiles.version), profiles.version
 
 
 def test_per_filament_lists_are_cut_to_the_filament_count(profiles: Profiles) -> None:

@@ -1,0 +1,4 @@
+{
+  "comment": "How long crud_requests keeps the caller inventory's answers, in seconds: Python's crud/idempotency.py RETENTION_BY_CALLER[\"inventory\"] and Go's store/operations.go requestRetention. Both tests read this file (#8448).",
+  "inventory_request_retention_seconds": 604800
+}

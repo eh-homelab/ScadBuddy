@@ -247,6 +247,8 @@ class SettingsView(BaseModel):
     activity_ttl_seconds: float | None = None
     #: How far back the activity sweep repairs, in seconds; ``None``: 1 day.
     activity_repair_window_seconds: float | None = None
+    #: #8539: days an ended service credential is kept; ``None``: the defaults, ``0``: all.
+    service_credential_retention_days: int | None = None
     #: The principals whose activity the assistant follows; ``None``: ``["browser"]``.
     activity_follow: list[str] | None = None
     last_project_id: int | None = None
@@ -552,6 +554,7 @@ def _view(snapshot: SettingsSnapshot, state: AppState) -> SettingsView:
         print_run_retention_seconds=stored.print_run_retention_seconds,
         operation_retention_seconds=stored.operation_retention_seconds,
         activity_ttl_seconds=stored.activity_ttl_seconds,
+        service_credential_retention_days=stored.service_credential_retention_days,
         activity_repair_window_seconds=stored.activity_repair_window_seconds,
         activity_follow=stored.activity_follow,
         last_project_id=stored.last_project_id,

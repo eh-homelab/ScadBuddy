@@ -53,7 +53,12 @@ from tests.flows.harness_probe import (
 )
 from tests.flows.test_flow_reset import point_after, reset
 
-pytestmark = [pytest.mark.requires_temporal, pytest.mark.requires_postgres]
+#: Their `wait_for_human` takes a text: the path of a call from before #8062.
+pytestmark = [
+    pytest.mark.requires_temporal,
+    pytest.mark.requires_postgres,
+    pytest.mark.usefixtures("waits_before_8062"),
+]
 
 
 def kinds(flows: Flows, tasks: Any = None) -> dict[str, OperationKind]:

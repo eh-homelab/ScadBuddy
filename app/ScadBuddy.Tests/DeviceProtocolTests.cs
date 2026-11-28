@@ -169,12 +169,19 @@ public class DeviceProtocolTests
 	}
 
 	[Fact]
-	public void ADumpKeepsTheNdefRecords()
+	public void ADumpKeepsTheNdefRecordsInTheApisShape()
 	{
-		var records = new JsonArray(Obj("""{"recordType":"url","dataHex":"68747470"}"""));
+		var records = new JsonArray(
+			Obj("""{"id":null,"mediaType":null,"encoding":null,"lang":null,"recordType":"url","dataHex":"68747470"}"""),
+			Obj("""{"id":null,"mediaType":null,"encoding":null,"lang":null,"recordType":"empty","dataHex":null}"""),
+			Obj("""{"id":"a","mediaType":"application/json","encoding":null,"lang":null,"recordType":"mime","dataHex":"7b7d"}"""));
 		var dump = Obj(DeviceProtocol.Dump("04A1B2C3D4E5F6", "ndef", [], records));
 		Assert.Empty(dump["blocks"]!.AsArray());
-		Assert.Equal("""[{"recordType":"url","dataHex":"68747470"}]""", dump["records"]!.ToJsonString());
+		Assert.Equal(
+			"""[{"record_type":"url","media_type":null,"id":null,"encoding":null,"lang":null,"data_hex":"68747470"},"""
+			+ """{"record_type":"empty","media_type":null,"id":null,"encoding":null,"lang":null,"data_hex":""},"""
+			+ """{"record_type":"mime","media_type":"application/json","id":"a","encoding":null,"lang":null,"data_hex":"7b7d"}]""",
+			dump["records"]!.ToJsonString());
 	}
 
 	[Fact]

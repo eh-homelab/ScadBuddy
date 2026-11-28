@@ -3,7 +3,9 @@
 # The native hot path against a real stack (#3818 tier A, plan 2026-10-18 Task 13):
 # ScadBuddy with its own store, library and slicer, a fake LAN printer and a Bambuddy
 # that fails every call (e2e-stack/compose.yaml), driven by
-# frontend/e2e/real-hot-path.spec.ts.
+# frontend/e2e/real-hot-path.spec.ts. On the first mode's stack it also runs
+# frontend/e2e/inventory-core.spec.ts (#6949 K1): the inventory's writes go from the
+# API through Temporal to scadbuddy-core's worker, and its reads to core's CRUD port.
 #
 #   run.sh [--mode recorder|unset|both] [--keep] [--no-build]
 #   run.sh --auth [--keep] [--no-build]
@@ -18,7 +20,8 @@
 #
 # It builds three images from the Dockerfile (unless --no-build): `runtime` as
 # SB_HOTPATH_APP_IMAGE, `slicer` as SB_HOTPATH_SLICER_IMAGE and `test` as
-# SB_HOTPATH_TOOLS_IMAGE (the Temporal dev server and moto), plus the two fakes. Tags of
+# SB_HOTPATH_TOOLS_IMAGE (the Temporal dev server and moto), plus scadbuddy-core from
+# tools/go/core/Dockerfile as SB_HOTPATH_CORE_IMAGE and the two fakes. Tags of
 # its own by default, so a shared machine's other builds keep theirs. BUILDX_* or
 # DOCKER_BUILDKIT settings in the environment apply to the builds; the CI workflow
 # builds with its own cache instead and passes --no-build.
@@ -79,6 +82,7 @@ repo="$(cd "$here/.." && pwd)"
 export SB_HOTPATH_APP_IMAGE="${SB_HOTPATH_APP_IMAGE:-scadbuddy:hot-path-app}"
 export SB_HOTPATH_SLICER_IMAGE="${SB_HOTPATH_SLICER_IMAGE:-scadbuddy-slicer:hot-path}"
 export SB_HOTPATH_TOOLS_IMAGE="${SB_HOTPATH_TOOLS_IMAGE:-scadbuddy:hot-path-test}"
+export SB_HOTPATH_CORE_IMAGE="${SB_HOTPATH_CORE_IMAGE:-scadbuddy-core:hot-path}"
 # The recorder's host port: 18000 unless the host already uses it (seed.sh, compose.yaml).
 export SB_HOTPATH_RECORDER_PORT="${SB_HOTPATH_RECORDER_PORT:-18000}"
 compose=(docker compose -p sb-hotpath -f "$here/compose.yaml")
@@ -102,7 +106,7 @@ finish() {
   # else that failed on it (a build, `up`, the seed) shows them here.
   if [ "$status" -ne 0 ] && [ "$up" = 1 ] && [ "${logs_saved:-0}" = 0 ]; then
     "${compose[@]}" ps -a || true
-    "${compose[@]}" logs --tail 300 app slicer printer bambuddy >"$state/stack.log" 2>&1 || true
+    "${compose[@]}" logs --tail 300 app core slicer printer bambuddy >"$state/stack.log" 2>&1 || true
     echo "--- the stack's last logs ($state/stack.log)"
     tail -n 400 "$state/stack.log" || true
   fi
@@ -120,6 +124,7 @@ if [ "$build" = 1 ]; then
   docker build --target runtime -t "$SB_HOTPATH_APP_IMAGE" "$repo"
   docker build --target slicer -t "$SB_HOTPATH_SLICER_IMAGE" "$repo"
   docker build --target test -t "$SB_HOTPATH_TOOLS_IMAGE" "$repo"
+  docker build -f "$repo/tools/go/core/Dockerfile" -t "$SB_HOTPATH_CORE_IMAGE" "$repo"
 fi
 "${compose[@]}" build printer bambuddy
 # The pulled images (Postgres), by `docker pull`: compose's own pull of a tag@digest
@@ -158,12 +163,46 @@ for index in "${!modes[@]}"; do
     failed=1
     # Beside the Playwright results, which the workflow uploads.
     mkdir -p "$repo/frontend/test-results/hot-path-${current}"
-    "${compose[@]}" logs app slicer printer bambuddy \
+    "${compose[@]}" logs app core slicer printer bambuddy \
       >"$repo/frontend/test-results/hot-path-${current}/stack.log" 2>&1 || true
     logs_saved=1
     echo "--- recorded by the recorder:"
     curl --silent "http://127.0.0.1:${SB_HOTPATH_RECORDER_PORT}/__recorded" || true
     echo
+  fi
+  # The inventory through scadbuddy-core, once: on the first mode's stack, after the hot
+  # path. bambuddy_url does not change what it does. A failure here does not stop the
+  # next mode; the run fails at the end.
+  # A run that skipped the spec, or ran no test of it, fails too: its JSON report must count
+  # at least one passed test, and none skipped or failed.
+  if [ "$index" = 0 ]; then
+    inventory_report="$repo/frontend/test-results/inventory-core.json"
+    rm -f "$inventory_report"
+    reporters=list,json
+    if [ -n "${CI:-}" ]; then
+      reporters=github,list,json
+    fi
+    if (
+      cd "$repo/frontend"
+      E2E_BASE_URL=http://127.0.0.1:18080 E2E_INVENTORY_CORE=1 \
+        PLAYWRIGHT_JSON_OUTPUT_NAME="$inventory_report" \
+        pnpm exec playwright test e2e/inventory-core.spec.ts --output test-results/inventory-core \
+        --reporter="$reporters"
+    ) && node -e '
+      const s = require(process.argv[1]).stats;
+      if (s.expected + s.flaky < 1 || s.skipped > 0 || s.unexpected > 0) {
+        console.error("inventory-core.spec.ts did not run: " + JSON.stringify(s));
+        process.exit(1);
+      }' "$inventory_report"; then
+      results+=("inventory-core (${current}): passed")
+    else
+      results+=("inventory-core (${current}): FAILED")
+      failed=1
+      mkdir -p "$repo/frontend/test-results/inventory-core"
+      "${compose[@]}" logs app core temporal \
+        >"$repo/frontend/test-results/inventory-core/stack.log" 2>&1 || true
+      logs_saved=1
+    fi
   fi
   if [ "$index" -lt $((${#modes[@]} - 1)) ]; then
     down

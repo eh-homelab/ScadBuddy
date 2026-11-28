@@ -1,8 +1,8 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { ApiError } from '../../../api/client'
-import { claimNfcJob, getNfcJob, listPendingNfcJobs, postNfcJobResult, type NfcJob } from '../../../api/filament'
+import { cancelNfcJob, claimNfcJob, getNfcJob, listPendingNfcJobs, postNfcJobResult, type NfcJob } from '../../../api/filament'
 import { headlineOf, writeWithBackup, type WriteOutcome, type WriteStep } from '../../../lib/tagWrite'
-import { decodeText, notWritable, posterRecords, recordsSha256, visibleText, type NfcSession, type PosterRecord, type WireRecord } from '../../../lib/webNfc'
+import { chipFields, decodeText, notWritable, posterRecords, recordsSha256, visibleText, type NfcSession, type PosterRecord, type WireRecord } from '../../../lib/webNfc'
 import { Button } from '@/components/ui/button'
 import { cn } from '@/lib/utils'
 
@@ -20,6 +20,13 @@ const PHASE_TEXT: Record<Phase, string> = {
   tap_again: 'Lift the tag and tap it again to check it.',
 }
 
+/** What Cancel job says for the state the cancel answered: a job that had ended another way is not "cancelled". */
+const CANCEL_TEXT: Partial<Record<NfcJob['state'], string>> = {
+  cancelled: 'Cancelled. The agent was told.',
+  done: 'The job had already ended: the agent has its result.',
+  failed: 'The job had already ended: the agent was told it failed.',
+  expired: 'The job had already expired. Nothing was cancelled.',
+}
 const CHANGED = 'The job changed. Nothing was written.'
 const STOPPED_WAITING = 'The agent stopped waiting.'
 /** The reason a run is stopped with at 0:00. */
@@ -144,7 +151,8 @@ const clip = (text: string, limit: number) => Array.from(text).slice(0, limit).j
  * #7273 G4 — an agent's NFC job on the scan page. It asks for pending jobs every 2 s while the
  * page is on screen and shows the oldest: what it wants, every record it would write, and the
  * time left. "Arm" claims the job and runs it on the next tap (a write backs the tag up first,
- * `writeWithBackup`); "Decline" claims it and ends it with an error. While a job runs, it holds
+ * `writeWithBackup`); "Decline" claims it and ends it with an error; "Cancel job" ends it as
+ * cancelled without claiming it, so it works on a job Arm refuses too. While a job runs, it holds
  * the session's claim, so the page's own read handler gets no taps.
  */
 export function NfcJobBanner({ session, onAnnounce }: { session: NfcSession; onAnnounce?: (text: string) => void }) {
@@ -154,6 +162,8 @@ export function NfcJobBanner({ session, onAnnounce }: { session: NfcSession; onA
   const [notice, setNotice] = useState<string | null>(null)
   const [hash, setHash] = useState<{ key: string; value: string } | null>(null)
   const [now, setNow] = useState(() => Date.now())
+  /** The job whose cancel waits for its answer: only that job's buttons are held. */
+  const [cancelling, setCancelling] = useState<string | null>(null)
   /** The running job's id and the controller that stops its run. */
   const stop = useRef<{ id: string; controller: AbortController } | null>(null)
   const announce = useRef(onAnnounce)
@@ -196,6 +206,11 @@ export function NfcJobBanner({ session, onAnnounce }: { session: NfcSession; onA
   const expired = job !== null && left <= 0 && !begun
 
   const shownId = job?.id ?? null
+  /** The job on screen, for an answer that comes after the banner moved on. */
+  const shown = useRef<string | null>(null)
+  useEffect(() => {
+    shown.current = shownId
+  })
   useEffect(() => {
     if (!shownId) return
     setNow(Date.now())
@@ -293,7 +308,7 @@ export function NfcJobBanner({ session, onAnnounce }: { session: NfcSession; onA
           return
         }
         try {
-          await postNfcJobResult(target.id, { uid: reading.uid || null, records: reading.records })
+          await postNfcJobResult(target.id, { uid: reading.uid || null, records: reading.records, ...chipFields(reading.tag) })
           end(target.id, 'Agent job done: the tag was read.')
         } catch (cause) {
           if (codeOf(cause) === 'job_not_armed') end(target.id, STOPPED_WAITING)
@@ -322,7 +337,7 @@ export function NfcJobBanner({ session, onAnnounce }: { session: NfcSession; onA
       signal,
     })
     if (outcome.status === 'checked') {
-      end(target.id, `Agent job done: ${headlineOf(outcome, false)}`)
+      end(target.id, `Agent job done: ${headlineOf(outcome, 'write')}`)
       return
     }
     if (signal.reason === NO_READ_BACK) {
@@ -347,7 +362,7 @@ export function NfcJobBanner({ session, onAnnounce }: { session: NfcSession; onA
       )
       if (!posted) await fail(target.id, 'the tag does not hold what was sent')
     } else await fail(target.id, errorOf(outcome))
-    end(target.id, headlineOf(outcome, false))
+    end(target.id, headlineOf(outcome, 'write'))
   }
 
   async function decline(target: NfcJob, sha: string | null) {
@@ -358,10 +373,37 @@ export function NfcJobBanner({ session, onAnnounce }: { session: NfcSession; onA
     end(target.id, 'Declined. The agent was told.')
   }
 
+  /**
+   * R23 from the page: ends a pending job as cancelled; it is never armed, so nothing is read or
+   * written. The route answers a job that had already ended unchanged, so the words follow its state.
+   */
+  async function cancel(target: NfcJob) {
+    setNotice(null)
+    setCancelling(target.id)
+    let text: string
+    try {
+      const ended = await cancelNfcJob(target.id)
+      text = CANCEL_TEXT[ended.state] ?? 'Cancelled. The agent was told.'
+      // A cancel never runs a job, so it resets no run: another job may be running by now.
+      drop(target.id)
+      reload()
+    } catch (cause) {
+      text =
+        codeOf(cause) === 'write_begun'
+          ? 'Another page has begun writing this job. It ends with that write’s result.'
+          : `ScadBuddy could not cancel the job: ${detailOf(cause)}.`
+    } finally {
+      setCancelling((now) => (now === target.id ? null : now))
+    }
+    // Once the poll moved on to another job, the outcome is announced, not shown on that job.
+    if (shown.current === target.id || shown.current === null) say(text)
+    else announce.current?.(text)
+  }
+
   if (!job && !notice) return null
   const sha = recordsKey !== null && hash?.key === recordsKey ? hash.value : null
   const ready = job !== null && !expired && !run && (job.kind === 'read' || sha !== null)
-  // A record Web NFC would refuse is named as the job is shown: it can be declined, never armed.
+  // A record Web NFC would refuse is named as the job is shown: it can be cancelled or declined, never armed.
   const refused = job?.kind === 'write' ? notWritable(job.records ?? []) : null
   const count = job?.records?.length ?? 0
 
@@ -422,16 +464,19 @@ export function NfcJobBanner({ session, onAnnounce }: { session: NfcSession; onA
               })}
             </ul>
           )}
-          {refused && !run && <p className="font-medium text-warn">This job cannot be written from this page: {refused}. Decline it to tell the agent.</p>}
+          {refused && !run && <p className="font-medium text-warn">This job cannot be written from this page: {refused}. Cancel or decline it to tell the agent.</p>}
           {run ? (
             <p className="text-base font-medium">{PHASE_TEXT[run.phase]}</p>
           ) : (
             <div className="grid grid-cols-2 gap-3">
-              <Button type="button" className="h-11" disabled={!ready || refused !== null} onClick={() => void arm(job, sha)}>
+              <Button type="button" className="h-11" disabled={!ready || refused !== null || cancelling === job.id} onClick={() => void arm(job, sha)}>
                 Arm
               </Button>
-              <Button type="button" variant="outline" className="h-11" disabled={!ready} onClick={() => void decline(job, sha)}>
+              <Button type="button" variant="outline" className="h-11" disabled={!ready || cancelling === job.id} onClick={() => void decline(job, sha)}>
                 Decline
+              </Button>
+              <Button type="button" variant="ghost" className="col-span-2" disabled={expired || cancelling === job.id} onClick={() => void cancel(job)}>
+                Cancel job
               </Button>
             </div>
           )}

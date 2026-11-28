@@ -228,6 +228,9 @@ function putSettings(body: Record<string, unknown>) {
     // #6905 — `SettingsPatch`'s bounds: 1 to 3650 days.
     if (name === 'filament_sync_pass_ttl_days' && typeof value === 'number' && (value < 1 || value > 3650))
       return refused(name, value < 1 ? 'Input should be greater than or equal to 1' : 'Input should be less than or equal to 3650')
+    // #8539 — `SettingsPatch`'s bounds: 0 to 3650 days.
+    if (name === 'service_credential_retention_days' && typeof value === 'number' && (value < 0 || value > 3650))
+      return refused(name, value < 0 ? 'Input should be greater than or equal to 0' : 'Input should be less than or equal to 3650')
     // #7170 — `label_printing.server_url`: http or https, a host, no login, path, query or fragment.
     if (name === 'filament_label_server_url' && typeof value === 'string') {
       const text = value.trim()

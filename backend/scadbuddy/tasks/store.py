@@ -12,15 +12,30 @@ from psycopg.types.json import Jsonb
 from psycopg_pool import ConnectionPool
 
 from scadbuddy.bambuddy.runs import TransactionalEvents
+from scadbuddy.codes.parse import Code, format_code
+from scadbuddy.codes.resolve import PREFIXES
 from scadbuddy.core.events import TaskChanged
 from scadbuddy.flows.models import TERMINAL
-from scadbuddy.tasks.models import Task, TaskOpen, TaskQuestion, TaskState
+from scadbuddy.tasks.answer_check import scan_and_file_problems
+from scadbuddy.tasks.models import AnswerProblem, Task, TaskOpen, TaskQuestion, TaskState
+from scadbuddy.tasks.widgets import expects_entries
 
 _QUESTION = (
-    "id, run_id, title, schema, context, place, ui, expires_at, state, created_at, updated_at"
+    "id, run_id, title, schema, context, place, ui, expires_at, assignee, state, created_at,"
+    " updated_at"
 )
 _COLUMNS = f"{_QUESTION}, answer, answered_by"
 _MOVED = "id, run_id, state, place"
+
+
+def _code_entries(code: Code | None) -> list[str] | None:
+    """What a task's ``expects`` holds for a scan of ``code``: its kind (a prefix no kind
+    has gives none) and the code itself."""
+    if code is None:
+        return None
+    lookup = PREFIXES.get(code.prefix)
+    kind = [f"kind:{lookup.kind}"] if lookup else []
+    return [*kind, f"code:{format_code(code.prefix, code.number)}"]
 
 
 class TaskNotOpenError(Exception):
@@ -81,8 +96,10 @@ class TaskStore:
                         raise RunEndedError(task.run_id)
                     return Task.model_validate(held)
                 row = conn.execute(
-                    "INSERT INTO tasks (id, run_id, title, schema, context, place, ui, expires_at)"
-                    " VALUES (%s, %s, %s, %s, %s, %s, %s, %s) ON CONFLICT (id) DO NOTHING"
+                    "INSERT INTO tasks (id, run_id, title, schema, context, place, ui, expires_at,"
+                    " assignee, expects)"
+                    " VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)"
+                    " ON CONFLICT (id) DO NOTHING"
                     f" RETURNING {_COLUMNS}",
                     (
                         task.id,
@@ -93,6 +110,8 @@ class TaskStore:
                         task.place,
                         task.ui,
                         task.expires_at,
+                        task.assignee,
+                        expects_entries(task.schema_),
                     ),
                 ).fetchone()
                 if row is None:
@@ -120,17 +139,39 @@ class TaskStore:
             ).fetchall()
         return {row["id"]: TaskQuestion.model_validate(row) for row in rows}
 
+    def answer_problems(
+        self, task_id: str, schema: dict[str, Any], answer: dict[str, Any]
+    ) -> list[AnswerProblem]:
+        """What the answer's scan and photo fields name wrongly (`answer_check.py`)."""
+        with self._pool.connection() as conn:
+            return scan_and_file_problems(conn, task_id, schema, answer)
+
     def list(
-        self, *, state: TaskState | None = "open", place: str | None = None, limit: int = 100
+        self,
+        *,
+        state: TaskState | None = "open",
+        places: tuple[str, ...] | None = None,
+        code: Code | None = None,
+        assignee: str | None = None,
+        limit: int = 100,
     ) -> list[TaskQuestion]:
-        """Tasks without their answers, oldest first."""
+        """Tasks without their answers, oldest first. ``places``: the tasks at any of them.
+        ``code`` is a parsed code: only open tasks that expect its kind or the code itself."""
         with self._pool.connection() as conn:
             rows = conn.execute(
                 f"SELECT {_QUESTION} FROM tasks"
                 " WHERE (%(state)s::text IS NULL OR state = %(state)s)"
-                " AND (%(place)s::text IS NULL OR place = %(place)s)"
+                " AND (%(places)s::text[] IS NULL OR place = ANY(%(places)s))"
+                " AND (%(assignee)s::text IS NULL OR assignee = %(assignee)s)"
+                " AND (%(code)s::text[] IS NULL OR (state = 'open' AND expects && %(code)s))"
                 " ORDER BY created_at, id LIMIT %(limit)s",
-                {"state": state, "place": place, "limit": limit},
+                {
+                    "state": state,
+                    "places": None if places is None else list(places),
+                    "assignee": assignee,
+                    "code": _code_entries(code),
+                    "limit": limit,
+                },
             ).fetchall()
         return [TaskQuestion.model_validate(row) for row in rows]
 

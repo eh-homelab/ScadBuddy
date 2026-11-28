@@ -11,7 +11,7 @@ import { filamentLinks } from '../../lib/filamentLinks'
 import { useMoney } from '../../components/filament/purchasing/useMoney'
 import { FilamentsEditor } from '../../components/orders/FilamentsEditor'
 import { readKindPropertyTexts } from '../../components/entities/api'
-import { addSku, matchesSearch, parseSearch, typeSearchDoc } from '../../lib/filamentSearch'
+import { addSku, matchesSearch, parseSearch, typeSearchDoc, type PropertyText } from '../../lib/filamentSearch'
 import { Button } from '@/components/ui/button'
 import { IncompleteMark } from '../../components/entities/IncompleteMark'
 import { isIncomplete } from '../../components/entities/definedProperties'
@@ -76,7 +76,7 @@ export function TypesTab() {
   const [newest, setNewest] = useState<Map<string, PricePoint>>(new Map())
   const [pricesFailed, setPricesFailed] = useState(false)
   const [skus, setSkus] = useState<Map<string, string[]>>(new Map())
-  const [propertyTexts, setPropertyTexts] = useState<Map<string, string[]>>(new Map())
+  const [propertyTexts, setPropertyTexts] = useState<Map<string, PropertyText[]>>(new Map())
   const [notice, setNotice] = useState<string | null>(null)
   // Types whose add is in flight: a second click meanwhile would make a second pending item.
   const [adding, setAdding] = useState<ReadonlySet<string>>(new Set())

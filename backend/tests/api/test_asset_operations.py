@@ -170,3 +170,27 @@ def test_an_asset_fetch_names_the_host_of_a_url_pasted_with_whitespace(
         rows = conn.execute("SELECT * FROM operations WHERE kind = 'asset_fetch'").fetchall()
     assert rows[0]["subject"] == "openmoji.org"
     assert rows[0]["request"]["shown"] == url
+
+
+def test_an_asset_upload_that_committed_then_failed_stores_one_asset(
+    client: TestClient, app: FastAPI, monkeypatch: pytest.MonkeyPatch, model: str
+) -> None:
+    """#8471: the run is tried again after any failure but a refusal, and every attempt
+    writes the same asset (its id is its bytes' sha256)."""
+    store = _state(app).assets
+    put = store.put
+    calls = 0
+
+    def committed_then_lost(*args: Any, **kwargs: Any) -> Any:
+        nonlocal calls
+        calls += 1
+        meta = put(*args, **kwargs)
+        if calls == 1:
+            raise OSError("the volume went away after the commit")
+        return meta
+
+    monkeypatch.setattr(store, "put", committed_then_lost)
+    added = _upload(client, _svg(1))
+    assert added.status_code == 201, added.text
+    assert calls == 2
+    assert client.get("/api/v1/assets/usage").json()["count"] == 1

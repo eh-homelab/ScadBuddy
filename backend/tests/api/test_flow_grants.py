@@ -457,6 +457,7 @@ def test_the_grant_requests_list_the_newest_and_count_the_rest(
     assert listed["runs_total"] == 2
 
 
+@pytest.mark.usefixtures("waits_before_8062")
 def test_the_grant_requests_leave_out_a_run_that_ended(client: TestClient) -> None:
     """A run that ended asks for nothing more, so its undecided grant is not listed."""
     asked = started(client, "e1", {"grant": grant({"fn": "queue_print"})}, **AGENT)

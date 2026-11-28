@@ -210,16 +210,17 @@ section and the text above differ, this section is what the code does.
   `data.by` `rfid_capture`). An untagged tray gets a row and its place. A busy tray lock leaves the
   tray to the next report (D11).
 - **Routes.** Go, area `unknown-trays` (`tools/go/core/internal/unknowntrays`): the list, with up to 10
-  ranked candidates and `made_from_tags` (D5, 24 hours), and dismiss. The rank key: spools with no
+  ranked candidates and `made_from_tags` (D5, 24 hours), dismiss and resolve. The rank key: spools with no
   place, then the reported material, then the nearest colour, then the number.
 - **Resolve.** The write is Python's Temporal activity `filament_resolve_unknown_tray`
   (`backend/scadbuddy/filament/unknown_resolve.py`) on the `library` queue, served by the API process
   (G5). It answers `{id, number, code, location_id}`, publishes no event (G8), and keeps the lock
   order in Python (G9). The label weight changes only for a first weight (D4). There is no Go spool
-  writer. **The Go resolve route is not built yet.** It waits for a Temporal client in Go
-  (`internal/temporalx`). Until then, the dialog's and the tool's resolve get a 404 and cannot resolve a
-  tray. The existing link paths still clear the row (`link_on`: the print dialog's tray question,
-  the place page's "New spool from this tray", the agent's `link_tray_spool`). The rest of the
+  writer. The Go resolve route (#8489) checks the body, then runs the activity as a run of core's
+  workflow `LibraryRun`: 30 s, one attempt. A refusal keeps its code. An answer that comes too late
+  is 503 `resolve_pending`. Without `SCADBUDDY_TEMPORAL_ADDRESS` on core, the route is 503
+  `writes_not_configured`. The existing link paths still clear the row (`link_on`: the print
+  dialog's tray question, the place page's "New spool from this tray", the agent's `link_tray_spool`). The rest of the
   flow works.
 - **Block.** `prepare_run` (and so the check, `PrintCheck.unknown_trays`) and `lan_print` refuse a
   run with 422 `unknown_spool_loaded`. The print worker reads a CRUD route of caller `print`

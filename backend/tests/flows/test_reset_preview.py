@@ -274,6 +274,7 @@ def test_the_reset_points_leave_out_those_before_the_runs_floor() -> None:
 
 @pytest.mark.requires_temporal
 @pytest.mark.requires_postgres
+@pytest.mark.usefixtures("waits_before_8062")
 async def test_two_prints(outward: Outward) -> None:
     """Runs the fixture's script live; records it with `SCADBUDDY_RECORD_HISTORIES=1`."""
     run_id = await outward.run(

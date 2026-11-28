@@ -15,10 +15,20 @@ import { UnknownSpoolAreaOff } from './UnknownSpoolAreaOff'
 
 const DECIMAL = /^\d+(\.\d+)?$/
 
+/** The resolve's answers that mean "this server cannot link here": the area is off (a 404 with no code), or core has no Temporal. */
+const cannotLinkHere = (cause: unknown): boolean => routeMissing(cause) || problemCode(cause) === 'writes_not_configured'
+
 function failureText(cause: unknown, code: string): string {
   const kind = problemCode(cause)
   if (kind === 'tray_changed') return 'This tray changed since the dialog opened. Close it and open it again.'
   if (kind === 'code_unknown') return `No spool has the code ${code}.`
+  if (kind === 'spool_archived') return 'That spool is archived. Choose a spool that is in use.'
+  if (kind === 'spool_missing') return 'That spool does not exist now. Choose another spool.'
+  if (kind === 'no_ams_kind') return 'No location kind is marked AMS, so the tray has no place. Mark one in Filament, Catalog, Location kinds, then try again.'
+  if (kind === 'tag_clash') return `The tag in this tray is on another spool. ${cause instanceof ApiError ? cause.detail : ''}`.trim()
+  if (kind === 'resolve_pending') return 'The link did not finish in time, and it can still finish. Wait a moment, then close this dialog and look at the list again.'
+  if (kind === 'invalid_input') return `The server refused the request: ${cause instanceof ApiError ? cause.detail : 'it is not valid'}.`
+  if (cause instanceof ApiError && cause.status >= 500) return 'The server could not link the spool. Try again.'
   if (cause instanceof ApiError) return cause.detail
   return 'The server could not be reached. Try again.'
 }
@@ -116,9 +126,9 @@ function UnknownSpoolForm({
       const resolved = await resolveUnknownTray(tray.id, typed !== '' ? { code: typed, ...common } : { spool_id: picked!, ...common })
       onResolved(resolved)
     } catch (cause) {
-      setOff(routeMissing(cause))
-      setError(routeMissing(cause) ? null : failureText(cause, typed))
-      if (problemCode(cause) === 'tray_changed') ctx?.refresh()
+      setOff(cannotLinkHere(cause))
+      setError(cannotLinkHere(cause) ? null : failureText(cause, typed))
+      if (problemCode(cause) === 'tray_changed' || problemCode(cause) === 'resolve_pending') ctx?.refresh()
     } finally {
       setBusy(false)
     }

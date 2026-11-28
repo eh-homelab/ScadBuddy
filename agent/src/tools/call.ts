@@ -64,6 +64,20 @@ function missingRequired(what: string, status: number, error: unknown): ToolErro
 }
 
 /** The response body, or a ToolError naming `what` failed, the status and the backend's reason. */
+/**
+ * #6949 K1 Task 16 — a change that moves stock (a fulfil, an accept, an unfulfil, a re-cost or a
+ * printer link that merges) answers 202 `WorkflowAccepted` when its workflow still runs after the
+ * route's wait. The tool says so, with the id; the workflow finishes by itself, and the next read
+ * shows the result. Any other answer passes through unchanged.
+ */
+export function settling<T>(answer: T): T | { accepted: string; workflow_id: string } {
+  if (typeof answer === 'object' && answer !== null && 'workflow_id' in answer && 'started_at' in answer && 'kind' in answer) {
+    const id = String((answer as { workflow_id: unknown }).workflow_id)
+    return { accepted: `accepted; it finishes by itself (workflow ${id})`, workflow_id: id }
+  }
+  return answer
+}
+
 export async function ok<T>(pending: Promise<FetchResult<T>>, what: string): Promise<T> {
   const { data, error, response } = await pending
   if (!response.ok) {

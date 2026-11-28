@@ -14,7 +14,12 @@ from tests.api.test_flows import register, script, settings, start, until
 
 __all__ = ["settings"]
 
-pytestmark = [pytest.mark.requires_postgres, pytest.mark.requires_temporal]
+#: Their `wait_for_human` takes a text: the path of a call from before #8062.
+pytestmark = [
+    pytest.mark.requires_postgres,
+    pytest.mark.requires_temporal,
+    pytest.mark.usefixtures("waits_before_8062"),
+]
 
 
 def preview(client: TestClient, run_id: str, event_id: int) -> dict[str, Any]:

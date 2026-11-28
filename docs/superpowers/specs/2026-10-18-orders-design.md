@@ -6,7 +6,7 @@ Status: accepted, merged in #4176 (2026-10-19). Epic #4248. Design only; no code
 amendment), the template-pipelines spec (`2026-09-27-template-pipelines-design.md`,
 template-owned UIs in §4) and the own-store spec
 (`2026-10-16-own-store-slicer-rust-workers-design.md`, epic #3818). Related epics:
-#3818 (Bambuddy out of the hot path), #2486 (flows people can see, steer and trust),
+#3818 (the hot path does not depend on Bambuddy), #2486 (flows people can see, steer and trust),
 #2182 (print as easily as a page).
 
 Every fact about the code below was read from the tree at `d4df45d` on 2026-10-18; file
@@ -1241,19 +1241,25 @@ rule. A LAN attempt (#8282) takes each of these facts from ScadBuddy's own recor
 run instead (`OrderStore.lan_record`, `archives.lan_facts`), and an archive's only where
 that record gives none; the archive gives its media. The start is the first start's
 `started_at` in `print_runs.result.lan`. Each start ends at the printer report that
-showed its plate end, as the filament ledger booked it (`filament/prints.py`
-`plate_ended`), and the last start with no such end ends at `print_outcomes.settled_at`;
+showed its plate end: the start's own `ended_at` (#8321, set when a later start waited
+for it and the report showed its own `FINISH` or `FAILED`; an `IDLE` or moved-on end has
+none), else that end as the filament ledger booked it (`filament/prints.py`
+`plate_ended`), and the last start with neither ends at `print_outcomes.settled_at`;
 the end is the last start's end. The seconds are the sum of each start's span; an earlier
-start with no timed end gives none. The grams are the ledger's `print_ended` grams of the
-run's uses (`prints.run_uses`): each start books its sliced grams per slot whose tray
-holds an SB spool, so there are none when a start booked no use, a use is still open, or
-a plate did not finish (its end drops the estimate). A LAN attempt writes these with no
+start with no timed end gives none. The grams are the starts' own sliced grams
+(`grams_by_slot`, #8321, every slot) when every plate printed to the end (each earlier
+start ended `done` and the outcome is `finished`). Else they are the ledger's
+`print_ended` grams of the run's uses (`prints.run_uses`): each start books its sliced
+grams per slot whose tray holds an SB spool, so there are none when a start booked no
+use, a use is still open, or a plate did not finish (its end drops the estimate). A LAN attempt writes these with no
 Bambuddy and no archive too. It does not copy the
 outcome: the attempt's is the print path's (`print_outcomes`), read from the same print.
 The times are copied once, told by `archive_copied` (#5273), so one a person corrected
 stands even when the archives give no seconds or grams. An attempt that named archives before that column was
 added is taken as copied (#5276): nothing tells one copied from an archive with neither
-from one never read.
+from one never read. A copy of an attempt copied once that would change nothing writes
+nothing and takes no order lock (#8330). A `result.lan` that does not parse gives no
+record (logged), so the archives give every fact.
 The copy runs on each `print.outcome` heard (`listen_for_prints`' `on_outcome`) and on
 each `GET …/fulfilments/{f}/archives`, which also lists each archive's `finish_` photos
 and whether it has a timelapse, so a link Bambuddy made late is still copied. `POST
