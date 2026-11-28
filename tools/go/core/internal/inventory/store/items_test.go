@@ -754,6 +754,24 @@ func TestASaveThatChangesNothingIsStillChecked(t *testing.T) {
 	refusal(t, err, 422, "missing_required_properties")
 }
 
+// TestASaveThatChangesNothingOnACompleteItemAnswersTheItem: a save that writes the item's
+// own name and values back is checked, passes, and answers the item as it is (#8095).
+func TestASaveThatChangesNothingOnACompleteItemAnswersTheItem(t *testing.T) {
+	pool := testdb.New(t)
+	_, s, _ := tagged(t, pool)
+	made := must(createItem(t, pool, s, wire.ItemInput{KindID: "tagged", Name: "Bolt",
+		Properties: props(t, map[string]any{"material": "PLA", "diameter_mm": 1.75})}))
+	saved := must(updateItem(t, pool, s, made.ID, wire.InventoryItemPatch{Name: ptr(made.Name),
+		Properties: props(t, map[string]any{"material": "PLA", "diameter_mm": 1.75})}))
+	if saved.ID != made.ID || saved.Name != made.Name || len(saved.MissingProperties) != 0 ||
+		len(saved.InvalidProperties) != 0 {
+		t.Fatalf("saved %+v, made %+v", saved, made)
+	}
+	if got := storedProps(t, pool, made.ID); got["material"] != `"PLA"` || got["diameter_mm"] != "1.75" {
+		t.Fatalf("stored %v", got)
+	}
+}
+
 func TestAStoredValueThatNoLongerFitsIsInvalid(t *testing.T) {
 	pool := testdb.New(t)
 	k, s := kindStore(), itemStore()

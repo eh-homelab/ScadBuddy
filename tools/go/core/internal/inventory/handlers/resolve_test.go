@@ -206,6 +206,23 @@ func TestResolveKindChecksWhatItNames(t *testing.T) {
 	}
 }
 
+// TestResolveKindDropsTheParamsOfAStepWithNoHandler: a kind of an open class has no default
+// column, so a step it gives only params has no handler. The params are dropped, not
+// checked: a narrower kind or the item picks the handler, and they are checked then (#8095).
+func TestResolveKindDropsTheParamsOfAStepWithNoHandler(t *testing.T) {
+	ch := model.Chain{
+		{ID: "consumable", Class: model.Class{Nature: "physical", Role: "consumable"}},
+		{ID: "odd", ParentID: "consumable", Steps: model.Steps{"life": {Params: map[string]any{"hourz": 5}}}},
+	}
+	res, problems, err := Builtin().ResolveKind(ch)
+	if err != nil || len(problems) != 0 {
+		t.Fatalf("err %v, problems %+v", err, problems)
+	}
+	if got, ok := res.Steps["life"]; ok {
+		t.Fatalf("life = %+v, want no step", got)
+	}
+}
+
 func TestResolveKindChecksTheSpecialTypesSetKeys(t *testing.T) {
 	open := model.Chain{{ID: "k", Class: model.Class{Nature: "physical", Role: "consumable"}, Special: "filament_spool"}}
 	if _, problems, err := Builtin().ResolveKind(open); err != nil || len(problems) != 0 {
