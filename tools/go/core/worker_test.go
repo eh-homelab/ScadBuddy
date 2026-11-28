@@ -139,9 +139,10 @@ func TestAStopAfterTheDrainStillStopsAStartedWorker(t *testing.T) {
 	t.Cleanup(func() { slog.SetDefault(before) })
 	slog.SetDefault(slog.New(logs))
 	w := &fakeWorker{ok: true}
-	stop := startWorker(context.Background(), "test", func(context.Context) error { return nil }, func() worker.Worker { return w })
+	// A name no other test uses, so a line of another test's late goroutine cannot answer the wait.
+	stop := startWorker(context.Background(), "drain-test", func(context.Context) error { return nil }, func() worker.Worker { return w })
 	// The worker logs that it polls once it has handed the worker on.
-	for deadline := time.Now().Add(5 * time.Second); !logs.has("the test worker polls Temporal"); {
+	for deadline := time.Now().Add(5 * time.Second); !logs.has("the drain-test worker polls Temporal"); {
 		if time.Now().After(deadline) {
 			t.Fatal("the worker was not handed on")
 		}
