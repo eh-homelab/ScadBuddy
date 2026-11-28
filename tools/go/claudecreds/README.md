@@ -57,8 +57,12 @@ without the text `"isApiErrorMessage":true` returns false before any JSON parse.
 which returns the events of the complete lines written since the last call, in order,
 and keeps a partial last line. The first `Poll` starts at the file's end (or at 0 when
 the file does not exist yet). Tail holds the file open by inode: after a rename it reads
-the rest of the old file, then the new file from 0. After a truncate it reads from 0.
-`Close()` closes the file.
+the rest of the old file, then the new file from 0. While no file has the path, it keeps
+the old file open and reads what is still appended to it. After a truncate it reads from
+0, and also after a truncate and a rewrite past the old offset between two calls, which
+it sees in the file's first 4 KiB. A partial line longer than `MaxLineBytes` (4 MiB) is
+dropped up to its newline, with one log line. `Close()` closes the file. Callers drop
+`transient` events (design §6.4).
 
 The fixtures in `testdata/` are real transcript lines from one machine, redacted: they
 keep only the keys `ParseEntry` reads plus `type`, `message.content[0].text`,
@@ -89,12 +93,17 @@ Claude Code's own locks (#7989). The facts are design §3 and Claude Code 2.1.33
 - `Rotate(ctx, dir, writeBack, next)` does design §6.6 in the order of #8016: take the
   locks, read the live login, call `writeBack(old)`, write `next`, release. When
   `writeBack` fails, the file is not changed. It returns after the release, with the
-  mtime of the file it wrote, so the caller then releases the old lease.
-- `LoginChanged(dir, last)` tells whether the file's mtime changed since `last`. A change
-  that the caller did not cause is a refresh by Claude Code, so the caller writes the
-  login back. The caller polls it.
+  `LoginStamp` of the file it wrote, so the caller then releases the old lease. A dir
+  that has never logged in is not changed: Rotate returns an error that matches
+  `fs.ErrNotExist` (no file) or `ErrNoLogin` (no `claudeAiOauth`), and the caller handles
+  it.
+- `LoginChanged(dir, last)` tells whether the file's mtime, size or `claudeAiOauth` bytes
+  (as a SHA-256 in the `LoginStamp`) changed since `last`. A change that the caller did
+  not cause is a refresh by Claude Code, so the caller writes the login back. The caller
+  polls it.
 - `UpdateOAuthAccount(path, account)` sets `oauthAccount` in `~/.claude.json`, best
-  effort. That file has no lock to share. It changes only that key, writes a temp file and
+  effort. That file has no lock to share. It changes only that key, writes a temp file
+  with the old mode and, where the process may set them, the old user and group, and
   renames it, reads the file again, and tries again at most 3 times. Then it returns
   `ErrRaceLost`.
 - No error or log names a token or the file's contents; errors name the path and the

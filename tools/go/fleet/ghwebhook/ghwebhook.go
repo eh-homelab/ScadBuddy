@@ -97,6 +97,11 @@ func (h *handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	event := r.Header.Get("X-GitHub-Event")
+	if event == "" {
+		// GitHub always names the event, so a signed delivery without one is odd.
+		h.log.DebugContext(r.Context(), "github delivery with a valid signature and no X-GitHub-Event",
+			"delivery", r.Header.Get("X-GitHub-Delivery"))
+	}
 	if event != "installation" && event != "installation_repositories" {
 		w.WriteHeader(http.StatusNoContent)
 		return

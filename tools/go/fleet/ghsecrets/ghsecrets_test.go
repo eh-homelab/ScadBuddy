@@ -179,6 +179,12 @@ func (f *fakeGitHub) serve(w http.ResponseWriter, r *http.Request) {
 				}
 			}
 			answer["repositories"] = repos
+		} else if f.grantRepos != nil {
+			repos := []map[string]any{}
+			for i, n := range f.grantRepos {
+				repos = append(repos, map[string]any{"id": i + 1, "name": n})
+			}
+			answer["repositories"] = repos
 		}
 		w.WriteHeader(201)
 		_ = json.NewEncoder(w).Encode(answer)
@@ -439,6 +445,22 @@ func TestRefusesATokenForMoreRepositories(t *testing.T) {
 			if strings.Contains(p, "/actions/secrets") {
 				t.Errorf("%v: used the token: %s", repos, p)
 			}
+		}
+	}
+}
+
+// An organisation secret's token is asked for no repository, so a token answer that
+// names any is refused before the token is used (#8125 review).
+func TestRefusesAnOrgTokenThatNamesRepositories(t *testing.T) {
+	f, srv := newFake(t)
+	f.grantRepos = []string{"r"}
+	err := newWriter(t, srv, f, &bytes.Buffer{}).Set(context.Background(), Target{Owner: "o", Name: "N"}, []byte(value))
+	if err == nil || !strings.Contains(err.Error(), "repositories") {
+		t.Fatalf("got %v", err)
+	}
+	for _, p := range f.paths {
+		if strings.Contains(p, "/actions/secrets") {
+			t.Errorf("used the token: %s", p)
 		}
 	}
 }

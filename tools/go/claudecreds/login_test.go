@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"syscall"
 	"testing"
 	"time"
 )
@@ -494,25 +495,55 @@ func TestUpdateOAuthAccountRaceLost(t *testing.T) {
 func TestLoginChanged(t *testing.T) {
 	fastLocks(t)
 	dir := configDir(t, credsFixture)
-	changed, mtime, err := LoginChanged(dir, time.Time{})
+	changed, stamp, err := LoginChanged(dir, LoginStamp{})
 	if err != nil || !changed {
 		t.Fatalf("first look: changed=%v err=%v", changed, err)
 	}
-	changed, again, err := LoginChanged(dir, mtime)
-	if err != nil || changed || !again.Equal(mtime) {
+	changed, again, err := LoginChanged(dir, stamp)
+	if err != nil || changed || again != stamp {
 		t.Fatalf("no change: changed=%v err=%v", changed, err)
 	}
 	// Claude Code refreshes the login.
-	later := mtime.Add(2 * time.Second)
+	later := stamp.ModTime.Add(2 * time.Second)
 	if err := os.WriteFile(filepath.Join(dir, credentialsFile), []byte(`{"claudeAiOauth":{}}`), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	if err := os.Chtimes(filepath.Join(dir, credentialsFile), later, later); err != nil {
 		t.Fatal(err)
 	}
-	changed, now, err := LoginChanged(dir, mtime)
-	if err != nil || !changed || !now.Equal(later) {
+	changed, now, err := LoginChanged(dir, stamp)
+	if err != nil || !changed || !now.ModTime.Equal(later) {
 		t.Fatalf("refresh: changed=%v now=%v err=%v", changed, now, err)
+	}
+	// A refresh that keeps the mtime and the size (a coarse clock) is still a change.
+	if err := os.WriteFile(filepath.Join(dir, credentialsFile), []byte(`{"claudeAiOauth":{"a":2}}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chtimes(filepath.Join(dir, credentialsFile), later, later); err != nil {
+		t.Fatal(err)
+	}
+	_, base, err := LoginChanged(dir, LoginStamp{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, credentialsFile), []byte(`{"claudeAiOauth":{"a":3}}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chtimes(filepath.Join(dir, credentialsFile), later, later); err != nil {
+		t.Fatal(err)
+	}
+	if changed, _, err := LoginChanged(dir, base); err != nil || !changed {
+		t.Fatalf("same mtime and size, new login: changed=%v err=%v", changed, err)
+	}
+	// Another key changes and the size with it: a change too.
+	if err := os.WriteFile(filepath.Join(dir, credentialsFile), []byte(`{"claudeAiOauth":{"a":2},"mcpOAuth":{}}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chtimes(filepath.Join(dir, credentialsFile), later, later); err != nil {
+		t.Fatal(err)
+	}
+	if changed, _, err := LoginChanged(dir, base); err != nil || !changed {
+		t.Fatalf("same mtime, new size: changed=%v err=%v", changed, err)
 	}
 	// A rotation's own write is not a refresh: Rotate returns the mtime it left.
 	written, err := Rotate(context.Background(), dir, func(json.RawMessage) error { return nil }, json.RawMessage(`{"accessToken":"n"}`))
@@ -522,7 +553,82 @@ func TestLoginChanged(t *testing.T) {
 	if changed, _, err := LoginChanged(dir, written); err != nil || changed {
 		t.Fatalf("own write: changed=%v err=%v", changed, err)
 	}
-	if _, _, err := LoginChanged(configDir(t, ""), time.Time{}); !errors.Is(err, fs.ErrNotExist) {
+	if _, _, err := LoginChanged(configDir(t, ""), LoginStamp{}); !errors.Is(err, fs.ErrNotExist) {
 		t.Fatalf("no file gave %v", err)
+	}
+}
+
+func TestRotateNeverLoggedIn(t *testing.T) {
+	fastLocks(t)
+	for name, creds := range map[string]string{
+		"no file":          "",
+		"no claudeAiOauth": `{"mcpOAuth":{}}`,
+	} {
+		t.Run(name, func(t *testing.T) {
+			dir := configDir(t, creds)
+			called := false
+			_, err := Rotate(context.Background(), dir, func(json.RawMessage) error { called = true; return nil }, json.RawMessage(`{"accessToken":"new-a"}`))
+			if creds == "" && !errors.Is(err, fs.ErrNotExist) {
+				t.Fatalf("err = %v, want fs.ErrNotExist", err)
+			}
+			if creds != "" && !errors.Is(err, ErrNoLogin) {
+				t.Fatalf("err = %v, want ErrNoLogin", err)
+			}
+			if called {
+				t.Fatal("writeBack ran with no old login")
+			}
+			b, _ := os.ReadFile(filepath.Join(dir, credentialsFile))
+			if string(b) != creds {
+				t.Fatalf("the file changed: %s", b)
+			}
+			for _, p := range lockPaths(dir) {
+				if exists(t, p) {
+					t.Fatalf("%s was not released", p)
+				}
+			}
+		})
+	}
+}
+
+func TestAcquireLoginLocksCancelledContext(t *testing.T) {
+	fastLocks(t)
+	dir := configDir(t, credsFixture)
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	if _, err := AcquireLoginLocks(ctx, dir); !errors.Is(err, context.Canceled) {
+		t.Fatalf("err = %v, want context.Canceled", err)
+	}
+	for _, p := range lockPaths(dir) {
+		if exists(t, p) {
+			t.Fatalf("%s was taken with a cancelled context", p)
+		}
+	}
+}
+
+func TestUpdateOAuthAccountKeepsGroup(t *testing.T) {
+	p := homeFile(t, homeFixture)
+	groups, err := os.Getgroups()
+	if err != nil {
+		t.Fatal(err)
+	}
+	gid := -1
+	for _, g := range groups {
+		if g != os.Getgid() {
+			gid = g
+			break
+		}
+	}
+	if gid < 0 {
+		t.Skip("the user is in no second group")
+	}
+	if err := os.Chown(p, -1, gid); err != nil {
+		t.Skipf("chown: %v", err)
+	}
+	if err := UpdateOAuthAccount(p, map[string]any{"accountUuid": "b2"}); err != nil {
+		t.Fatal(err)
+	}
+	st, _ := os.Stat(p)
+	if got := int(st.Sys().(*syscall.Stat_t).Gid); got != gid {
+		t.Fatalf("gid = %d, want the old %d", got, gid)
 	}
 }

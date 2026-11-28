@@ -321,6 +321,11 @@ func (w *Writer) installationToken(ctx context.Context, t Target, level string) 
 	if !t.org() && (len(answer.Repositories) != 1 || !strings.EqualFold(answer.Repositories[0].Name, t.Repo)) {
 		return "", fmt.Errorf("ghsecrets: GitHub's token names %d repositories, not only the one asked for", len(answer.Repositories))
 	}
+	// An organisation token was asked for no repository; one scoped to repositories is
+	// not the token asked for.
+	if t.org() && len(answer.Repositories) > 0 {
+		return "", fmt.Errorf("ghsecrets: GitHub's organisation token names %d repositories, but none was asked for", len(answer.Repositories))
+	}
 	return answer.Token, nil
 }
 

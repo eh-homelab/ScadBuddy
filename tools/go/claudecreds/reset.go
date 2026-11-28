@@ -101,13 +101,17 @@ func ResetFromText(text string, now time.Time) (time.Time, bool) {
 }
 
 // location loads the zone the text names. "UTC" is read in any case; an IANA name only
-// as written, as Python's zoneinfo reads it.
+// as written, as Python's zoneinfo reads it. The case is checked before
+// time.LoadLocation, which on a case-insensitive filesystem opens a name in any case.
 func location(name string) (*time.Location, bool) {
 	if strings.EqualFold(name, "UTC") {
 		return time.UTC, true
 	}
+	if !writtenAsFiled(name) {
+		return nil, false
+	}
 	loc, err := time.LoadLocation(name)
-	if err != nil || !writtenAsFiled(name) {
+	if err != nil {
 		return nil, false
 	}
 	return loc, true

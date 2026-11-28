@@ -1,6 +1,7 @@
 package claudecreds
 
 import (
+	"bytes"
 	"os"
 	"path/filepath"
 	"testing"
@@ -121,4 +122,79 @@ func TestTailRename(t *testing.T) {
 		t.Fatal(err)
 	}
 	wantCats(t, poll(t, tl), "billing_error", "server_error")
+}
+
+func TestTailKeepsOldFileUntilNewOne(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "s.jsonl")
+	appendFile(t, path, line(fixture(t, "user.jsonl")))
+	tl := newTail(t, path)
+	wantCats(t, poll(t, tl))
+	old := filepath.Join(dir, "old.jsonl")
+	if err := os.Rename(path, old); err != nil {
+		t.Fatal(err)
+	}
+	wantCats(t, poll(t, tl))
+	// The writer still has the old file open and appends to it.
+	appendFile(t, old, line(fixture(t, "billing_error.jsonl")))
+	wantCats(t, poll(t, tl), "billing_error")
+	appendFile(t, path, line(fixture(t, "server_error.jsonl")))
+	wantCats(t, poll(t, tl), "server_error")
+}
+
+func TestTailReadsOldFileAfterRename(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "s.jsonl")
+	appendFile(t, path, line(fixture(t, "user.jsonl")))
+	tl := newTail(t, path)
+	wantCats(t, poll(t, tl))
+	// After Poll's first read, a line lands in the old file, the file is renamed, and a
+	// new file takes the path.
+	done := false
+	tl.afterRead = func() {
+		if done {
+			return
+		}
+		done = true
+		appendFile(t, path, line(fixture(t, "billing_error.jsonl")))
+		if err := os.Rename(path, filepath.Join(dir, "old.jsonl")); err != nil {
+			t.Fatal(err)
+		}
+		appendFile(t, path, line(fixture(t, "server_error.jsonl")))
+	}
+	wantCats(t, poll(t, tl), "billing_error", "server_error")
+}
+
+func TestTailTruncateAndRegrow(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "s.jsonl")
+	appendFile(t, path, line(fixture(t, "assistant.jsonl")))
+	tl := newTail(t, path)
+	wantCats(t, poll(t, tl))
+	// Between two Polls, the file is cut and written past the old offset.
+	if err := os.Truncate(path, 0); err != nil {
+		t.Fatal(err)
+	}
+	se, rate := fixture(t, "server_error.jsonl"), fixture(t, "rate_limit_plain_429.jsonl")
+	appendFile(t, path, line(se), line(rate), line(se))
+	wantCats(t, poll(t, tl), "server_error", "rate_limit", "server_error")
+}
+
+func TestTailDropsOverlongLine(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "s.jsonl")
+	appendFile(t, path)
+	tl := newTail(t, path)
+	wantCats(t, poll(t, tl))
+	long := bytes.Repeat([]byte("x"), MaxLineBytes+1)
+	appendFile(t, path, long)
+	wantCats(t, poll(t, tl))
+	if len(tl.partial) != 0 {
+		t.Fatalf("partial keeps %d bytes", len(tl.partial))
+	}
+	// The rest of the long line, an event in it, and then a line of its own.
+	appendFile(t, path, long, line(fixture(t, "billing_error.jsonl")))
+	appendFile(t, path, line(fixture(t, "server_error.jsonl")))
+	wantCats(t, poll(t, tl), "server_error")
+	if len(tl.partial) != 0 {
+		t.Fatalf("partial keeps %d bytes", len(tl.partial))
+	}
 }

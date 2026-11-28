@@ -293,8 +293,10 @@ subscribed inboxes of new messages. Its other settings are `FLEETCHAT_LISTEN`,
 App's `FLEETCHAT_GITHUB_APP_ID`, `FLEETCHAT_GITHUB_INSTALLATION_ID`,
 `FLEETCHAT_GITHUB_APP_KEY_FILE` and `FLEETCHAT_GITHUB_WEBHOOK_SECRET_FILE`
 ([`tools/go/fleet/README.md`](../../tools/go/fleet/README.md)). With the webhook secret file
-it also serves `/github/webhook` (`tools/go/fleet/ghwebhook`, #8014), which checks
-`X-Hub-Signature-256` before it reads anything; with the App key it holds the Actions secret
+it also serves `/github/webhook` (`tools/go/fleet/ghwebhook`, #8014). Before it reads the
+body, it checks only that `X-Hub-Signature-256` is there and has the shape `sha256=<64 hex>`;
+it checks the HMAC after it has read the body (at most 1 MiB). It reads no trace context from
+a delivery, so each one starts a new trace. With the App key it holds the Actions secret
 writer (`tools/go/fleet/ghsecrets`, #8012), which no route calls yet. Apart from that
 signature check, the server has no auth of its own. The internet reaches only `/github/webhook`,
 through the SSO host's public Exact route (eh-homelab/clusters#4432), which that signature check

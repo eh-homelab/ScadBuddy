@@ -352,7 +352,28 @@ func run(ctx context.Context, c config, tel *telemetry.Telemetry) error {
 		return err
 	}
 	slog.Info("fleet listens", "address", listener.Addr().String(), "version", buildVersion())
-	return serve(ctx, listener, tel.Server(newMux(ctx, svc, webhook), "/healthz"), shutdownGrace, shutdownTimeout)
+	handler := untrustedTrace(tel.Server(newMux(ctx, svc, webhook), "/healthz"), "/github/webhook")
+	return serve(ctx, listener, handler, shutdownGrace, shutdownTimeout)
+}
+
+// traceHeaders are the trace context and baggage headers a request can carry.
+var traceHeaders = []string{"Traceparent", "Tracestate", "Baggage"}
+
+// untrustedTrace drops the trace headers of a request to one of paths before next reads
+// them, so its server span starts a new trace. A GitHub delivery comes from outside:
+// its traceparent must not join or steer one of ours.
+func untrustedTrace(next http.Handler, paths ...string) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		for _, p := range paths {
+			if r.URL.Path == p {
+				for _, k := range traceHeaders {
+					r.Header.Del(k)
+				}
+				break
+			}
+		}
+		next.ServeHTTP(w, r)
+	})
 }
 
 // serve serves handler on listener until ctx ends. Then it stops taking requests and lets
