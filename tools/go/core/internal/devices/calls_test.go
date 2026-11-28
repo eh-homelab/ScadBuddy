@@ -410,3 +410,31 @@ func TestAnApprovalShowsTheHostInPunycode(t *testing.T) {
 	}
 	expect(t, shown, `nfc.write on "Pixel": 1 record; 1. url "https://xn--bcher-kva.example:8443/`+strings.Repeat("p", 79)+`…"`)
 }
+
+// Args under the table's 4 KiB whose device.call_requested event is over the bus's
+// PayloadMax are refused: bus.Publish would drop the event, and the call would be lost.
+func TestCallArgsTooLargeForTheBus(t *testing.T) {
+	h := newHarness(t, auth.Observe)
+	me := h.person("user:i#me")
+	d := h.pair(me)
+	args := `{"records":[{"recordType":"text","text":"` + strings.Repeat("z", 3990) + `"}]}`
+	if len(args) >= argsMax {
+		t.Fatalf("the args are %d bytes, want under %d", len(args), argsMax)
+	}
+	got := h.do("POST", "/api/v1/devices/"+d.id+"/calls", me, `{"method":"nfc.write","args":`+args+`}`)
+	expectStatus(t, got, 413)
+	expect(t, got.body["reason"], any("args_too_large"))
+	expect(t, h.count(`SELECT count(*) FROM device_calls`), 0)
+}
+
+// An event's data is at most eventDataMax bytes, so a posted event always fits the bus. A
+// request with one larger event logs none of its events.
+func TestEventDataTooLarge(t *testing.T) {
+	h := newHarness(t, auth.Off)
+	d := h.pair("")
+	call := h.start("", d, `{"method":"nfc.read"}`)
+	big := `{"uid":"` + strings.Repeat("A", eventDataMax) + `"}`
+	expectStatus(t, h.post(d, call, "events", `{"events":[{"kind":"tag_progress","data":{"read":1,"of":2}},
+		{"kind":"tag_found","data":`+big+`}]}`), 422)
+	expect(t, h.count(`SELECT count(*) FROM events WHERE kind LIKE 'device.%' AND kind <> 'device.call_requested'`), 0)
+}
