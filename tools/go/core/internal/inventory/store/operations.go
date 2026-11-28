@@ -64,8 +64,10 @@ func OperationFrom(ctx context.Context) (string, bool) {
 }
 
 // StartOperation writes op as running, in a short transaction of its own, and sends the
-// notice. A running row of the id and kind (an earlier attempt) takes this attempt; its
-// last_error stays. A finished row is never opened again: a replay or a reuse of its key
+// notice. A running row of the id and kind takes this attempt only when the row's attempt is
+// an earlier one; its last_error stays. A start of the same or an earlier attempt (another
+// activity that reuses the key while the first runs) leaves the row to the first, with its
+// workflow_id (#8567). A finished row is never opened again: a replay or a reuse of its key
 // changes nothing and sends nothing. A running row of another kind (its key reused on
 // another write, which runs as another activity) is left as it is, too. Before it writes,
 // the start prunes the finished rows past the retention (pruneOperations), as the agent's
@@ -85,7 +87,8 @@ func StartOperation(ctx context.Context, pool *pgxpool.Pool, op Operation) error
 			ON CONFLICT (id) DO UPDATE SET kind = EXCLUDED.kind, subject = EXCLUDED.subject,
 				status = 'running', workflow_id = EXCLUDED.workflow_id, attempt = EXCLUDED.attempt,
 				actor = EXCLUDED.actor, updated_at = clock_timestamp()
-			WHERE inventory_operations.status = 'running' AND inventory_operations.kind = EXCLUDED.kind`,
+			WHERE inventory_operations.status = 'running' AND inventory_operations.kind = EXCLUDED.kind
+				AND inventory_operations.attempt < EXCLUDED.attempt`,
 			op.ID, op.Kind, op.Subject, op.WorkflowID, op.Attempt, actor)
 		if err != nil || tag.RowsAffected() == 0 {
 			return err
@@ -133,11 +136,14 @@ func FinishOperation(ctx context.Context, tx pgx.Tx, id string, a Answer) error 
 }
 
 // NoteError records that an attempt failed with an infrastructure error: the row stays
-// running, Temporal retries the activity, and the row keeps the error and the attempt.
+// running, Temporal retries the activity, and the row keeps the error and the attempt. An
+// attempt older than the row's (one that timed out and failed while a later one runs)
+// changes nothing (#8567).
 func NoteError(ctx context.Context, pool *pgxpool.Pool, id string, attempt int, cause error) error {
 	return pgx.BeginFunc(ctx, pool, func(tx pgx.Tx) error {
 		tag, err := tx.Exec(ctx, `UPDATE inventory_operations SET last_error = $2, attempt = $3,
-			updated_at = clock_timestamp() WHERE id = $1 AND status = 'running'`, id, lastError(cause), attempt)
+			updated_at = clock_timestamp() WHERE id = $1 AND status = 'running' AND attempt <= $3`,
+			id, lastError(cause), attempt)
 		if err != nil || tag.RowsAffected() == 0 {
 			return err
 		}

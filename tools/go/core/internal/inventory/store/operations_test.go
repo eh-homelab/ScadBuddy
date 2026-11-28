@@ -336,3 +336,51 @@ func TestAStartKeepsTheOldFinishedRowOfItsOwnKey(t *testing.T) {
 		t.Fatalf("the replayed key's row changed: %d", n)
 	}
 }
+
+func TestAStaleAttemptLeavesTheRowToTheLaterOne(t *testing.T) {
+	pool := setup(t)
+	ctx := context.Background()
+	op := Operation{ID: "k-stale", Kind: "inventory.Test", Attempt: 1, Actor: Actor(browser)}
+	if err := StartOperation(ctx, pool, op); err != nil {
+		t.Fatal(err)
+	}
+	op.Attempt = 2
+	if err := StartOperation(ctx, pool, op); err != nil {
+		t.Fatal(err)
+	}
+	// Attempt 1 timed out and fails while attempt 2 runs.
+	if err := NoteError(ctx, pool, op.ID, 1, errors.New("late")); err != nil {
+		t.Fatal(err)
+	}
+	var attempt int
+	var lastError *string
+	if err := pool.QueryRow(ctx, `SELECT attempt, last_error FROM inventory_operations WHERE id = $1`, op.ID).
+		Scan(&attempt, &lastError); err != nil {
+		t.Fatal(err)
+	}
+	if attempt != 2 || lastError != nil {
+		t.Fatal(attempt, lastError)
+	}
+}
+
+func TestAReusedKeyLeavesTheRowToTheFirstRun(t *testing.T) {
+	pool := setup(t)
+	ctx := context.Background()
+	first := Operation{ID: "k-reused", Kind: "inventory.Test", Attempt: 1, WorkflowID: "wf-first", Actor: Actor(browser)}
+	if err := StartOperation(ctx, pool, first); err != nil {
+		t.Fatal(err)
+	}
+	second := first
+	second.WorkflowID = "wf-second"
+	if err := StartOperation(ctx, pool, second); err != nil {
+		t.Fatal(err)
+	}
+	var workflowID string
+	if err := pool.QueryRow(ctx, `SELECT workflow_id FROM inventory_operations WHERE id = $1`, first.ID).
+		Scan(&workflowID); err != nil {
+		t.Fatal(err)
+	}
+	if workflowID != "wf-first" {
+		t.Fatalf("workflow_id %q, want wf-first", workflowID)
+	}
+}
