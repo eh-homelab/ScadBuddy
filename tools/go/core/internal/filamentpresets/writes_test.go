@@ -405,20 +405,3 @@ func TestTheWriteAnswersHaveTheWireKeys(t *testing.T) {
 	sameKeys(t, "mirror_again_outcome", outcome, want)
 	sameKeys(t, "mirror_again_outcome.preset", field(outcome, "preset"), field(want, "preset"))
 }
-
-func TestActorIsPythons(t *testing.T) {
-	for _, c := range []struct {
-		caller auth.Caller
-		want   string
-	}{
-		{person, "user:test#ann"},
-		{auth.Caller{Kind: auth.KindToken, Principal: "user:test#bob", TokenScope: "write"}, "user:test#bob"},
-		{auth.Caller{Kind: auth.KindService, Service: &auth.Service{Caller: "agent"}}, "service:agent"},
-		{auth.Caller{Kind: auth.KindAnonymous}, "anonymous"},
-		{auth.Caller{}, "anonymous"},
-	} {
-		if got := actor(c.caller); got != c.want {
-			t.Errorf("%+v: %q", c.caller, got)
-		}
-	}
-}

@@ -56,6 +56,7 @@ import (
 	"github.com/eh-homelab/ScadBuddy/tools/go/core/internal/inventory"
 	"github.com/eh-homelab/ScadBuddy/tools/go/core/internal/inventory/activities"
 	"github.com/eh-homelab/ScadBuddy/tools/go/core/internal/labelprint"
+	"github.com/eh-homelab/ScadBuddy/tools/go/core/internal/libraryrun"
 	"github.com/eh-homelab/ScadBuddy/tools/go/core/internal/mcprelay"
 	"github.com/eh-homelab/ScadBuddy/tools/go/core/internal/notify"
 	"github.com/eh-homelab/ScadBuddy/tools/go/core/internal/ordercosts"
@@ -156,13 +157,15 @@ func run(ctx context.Context, lookupEnv func(string) (string, bool), tel *teleme
 	}
 	// The inventory's writes are activities on Temporal (#6949 K1): the area inventory runs
 	// the worker, so it needs Temporal's address; inventory:read alone asks Temporal about a
-	// stale operation when the address is given. The filament presets' writes run on Temporal
-	// too (#7204), but the area does not need the address: without it the reads serve and
-	// each write answers 503 writes_not_configured (plan ruling P22).
+	// stale operation when the address is given. The filament presets' writes and an unknown
+	// tray's resolve run on Temporal too (#7204, #8489), but their areas do not need the
+	// address: without it the reads serve and each write answers 503 writes_not_configured
+	// (plan ruling P22).
 	areas := env("SCADBUDDY_CORE_AREAS")
+	libraryAreas := namesArea(areas, filamentpresets.Area) || namesArea(areas, unknowntrays.Area)
 	var temporal *temporalx.Config
 	if namesArea(areas, "inventory") ||
-		(namesArea(areas, "inventory:read") || namesArea(areas, filamentpresets.Area)) && env("SCADBUDDY_TEMPORAL_ADDRESS") != "" {
+		(namesArea(areas, "inventory:read") || libraryAreas) && env("SCADBUDDY_TEMPORAL_ADDRESS") != "" {
 		c, err := temporalx.FromEnv(env)
 		if err != nil {
 			return err
@@ -207,10 +210,10 @@ func run(ctx context.Context, lookupEnv func(string) (string, bool), tel *teleme
 		defer temporalClient.Close()
 		callers = map[string]areaRoutes{inventory.Caller: inventory.AreasWith(temporalx.Checker{Client: temporalClient})}
 	}
-	presetWrites := namesArea(areas, filamentpresets.Area) && temporal != nil
+	libraryRuns := libraryAreas && temporal != nil
 	var options []routerOption
-	if presetWrites {
-		options = append(options, withPresetWrites(filamentpresets.TemporalStarter{
+	if libraryRuns {
+		options = append(options, withLibraryRuns(libraryrun.TemporalStarter{
 			Client: temporalClient, Queue: temporal.FilamentPresetsQueue, LibraryQueue: temporal.LibraryQueue,
 		}))
 	}
@@ -267,12 +270,13 @@ func run(ctx context.Context, lookupEnv func(string) (string, bool), tel *teleme
 			return w
 		}))
 	}
-	if presetWrites {
-		// The workflow of each preset write (plan ruling P21). Its one activity runs on
-		// the Python library queue, which the API process serves.
-		stopWorkers = append(stopWorkers, startWorker(ctx, "filament-presets", health, func() worker.Worker {
+	if libraryRuns {
+		// The workflow of each preset write and each unknown tray's resolve (plan ruling P21,
+		// #8489 U2). Its one activity runs on the Python library queue, which the API process
+		// serves.
+		stopWorkers = append(stopWorkers, startWorker(ctx, "library-run", health, func() worker.Worker {
 			w := worker.New(temporalClient, temporal.FilamentPresetsQueue, worker.Options{})
-			w.RegisterWorkflowWithOptions(filamentpresets.WriteWorkflow, workflow.RegisterOptions{Name: filamentpresets.WorkflowName})
+			w.RegisterWorkflowWithOptions(libraryrun.Workflow, workflow.RegisterOptions{Name: libraryrun.WorkflowName})
 			return w
 		}))
 	}
@@ -427,7 +431,9 @@ var callerPackages = map[string]areaRoutes{inventory.Caller: inventory.Areas}
 type publicAreas func(pool *pgxpool.Pool, keys *seal.Keys) map[string][]auth.Public
 
 // publicPackages are the packages with public areas.
-var publicPackages = []publicAreas{scan.PublicAreas, unknowntrays.Public, devices.Routes}
+// Area unknown-trays is not among them: its resolve needs the router's Temporal, so newRouter
+// adds its routes itself.
+var publicPackages = []publicAreas{scan.PublicAreas, devices.Routes}
 
 // mirrorBlobs is the blob store as area package-mirrors calls it (packages.Blobs): a
 // publish to a key that names a blob is packages.ErrStale.
@@ -493,18 +499,19 @@ type streams struct {
 }
 
 // routerOptions are newRouter's optional parts: the event stream's areas' hub, and the
-// Temporal that the filament presets' writes start on (none: they answer 503).
+// Temporal that the filament presets' writes and an unknown tray's resolve start on (none:
+// they answer 503).
 type routerOptions struct {
-	stream       *streams
-	presetWrites filamentpresets.Starter
+	stream      *streams
+	libraryRuns libraryrun.Starter
 }
 
 type routerOption func(*routerOptions)
 
 func withStreams(s *streams) routerOption { return func(o *routerOptions) { o.stream = s } }
 
-func withPresetWrites(s filamentpresets.Starter) routerOption {
-	return func(o *routerOptions) { o.presetWrites = s }
+func withLibraryRuns(s libraryrun.Starter) routerOption {
+	return func(o *routerOptions) { o.libraryRuns = s }
 }
 
 // newRouter answers the named areas: <area> for all its routes here, <area>:read for its GETs.
@@ -557,6 +564,9 @@ func newRouter(pool *pgxpool.Pool, next http.Handler, keys *seal.Keys, areas, au
 		for name, routes := range p(pool, keys) {
 			publics[name] = append(publics[name], routes...)
 		}
+	}
+	for name, routes := range unknowntrays.Public(pool, keys, opts.libraryRuns) {
+		publics[name] = append(publics[name], routes...)
 	}
 	// mountPublic serves a named area's public routes behind the gate.
 	mountPublic := func(name string) {
@@ -644,7 +654,7 @@ func newRouter(pool *pgxpool.Pool, next http.Handler, keys *seal.Keys, areas, au
 			}
 			presetsMounted = true
 			store := filamentpresets.Store(blobstore.New(pool, keys, lookupEnv, tel))
-			for _, p := range filamentpresets.Public(pool, store, opts.presetWrites) {
+			for _, p := range filamentpresets.Public(pool, store, opts.libraryRuns) {
 				// no-store is set outside the gate, so its own 401 and 403 carry it too.
 				public.Handle(p.Pattern, noStore(gate.Wrap(p.Route, p.Handler)))
 				served = true

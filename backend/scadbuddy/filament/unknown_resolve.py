@@ -1,7 +1,8 @@
 """#7143 (G5): resolve an unknown tray, as a Temporal activity on the ``library`` queue.
 
-The Go route ``POST /api/v1/filament/unknown-trays/{id}/resolve`` will check the body and
-start this activity (not built yet: it waits for ``internal/temporalx``). The activity links
+The Go route ``POST /api/v1/filament/unknown-trays/{id}/resolve`` checks the body and
+starts this activity through core's workflow ``LibraryRun``, one attempt with a 30 s
+timeout (``tools/go/core/internal/unknowntrays/resolve.go``, #8489). The activity links
 a spool to the tray, books the spool's first weight and deletes the tray's row, in one
 transaction. The API process serves it: it is the only process with a database secret
 (#5295). It publishes no event (G8).

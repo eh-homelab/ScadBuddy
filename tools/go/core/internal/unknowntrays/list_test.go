@@ -128,7 +128,7 @@ func TestListHasTheSpoolsMadeFromTags(t *testing.T) {
 }
 
 func dismiss(pool *pgxpool.Pool, id string) *httptest.ResponseRecorder {
-	routes := Public(pool, nil)[Area]
+	routes := Public(pool, nil, nil)[Area]
 	req := httptest.NewRequest(http.MethodPost, "/api/v1/filament/unknown-trays/"+id+"/dismiss", nil)
 	req.SetPathValue("id", id)
 	rec := httptest.NewRecorder()
@@ -160,7 +160,7 @@ func TestADatabaseOutOfReachIs503(t *testing.T) {
 	pool := testdb.New(t)
 	ctx, cancel := context.WithDeadline(context.Background(), time.Now().Add(-time.Second))
 	defer cancel()
-	routes := Public(pool, nil)[Area]
+	routes := Public(pool, nil, nil)[Area]
 	req := httptest.NewRequest(http.MethodGet, "/api/v1/filament/unknown-trays", nil).WithContext(ctx)
 	rec := httptest.NewRecorder()
 	routes[0].Handler.ServeHTTP(rec, req)

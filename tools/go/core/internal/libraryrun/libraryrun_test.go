@@ -1,4 +1,4 @@
-package filamentpresets
+package libraryrun
 
 import (
 	"context"
@@ -21,7 +21,7 @@ import (
 func writeEnv(t *testing.T, fn any) (*testsuite.TestWorkflowEnvironment, *[]string) {
 	t.Helper()
 	env := (&testsuite.WorkflowTestSuite{}).NewTestWorkflowEnvironment()
-	env.RegisterWorkflowWithOptions(WriteWorkflow, workflow.RegisterOptions{Name: WorkflowName})
+	env.RegisterWorkflowWithOptions(Workflow, workflow.RegisterOptions{Name: WorkflowName})
 	env.RegisterActivityWithOptions(fn, activity.RegisterOptions{Name: "filament_preset_copy"})
 	queues := &[]string{}
 	env.SetOnActivityStartedListener(func(info *activity.Info, _ context.Context, _ converter.EncodedValues) {
@@ -36,7 +36,7 @@ func TestTheWorkflowRunsTheActivityOnLibraryAndGivesItsResult(t *testing.T) {
 		got = in
 		return json.RawMessage(`{"preset_id":8,"version":1,"changed":true,"mirror":"off"}`), nil
 	})
-	env.ExecuteWorkflow(WorkflowName, WriteRun{Activity: "filament_preset_copy", Queue: "library",
+	env.ExecuteWorkflow(WorkflowName, Run{Activity: "filament_preset_copy", Queue: "library",
 		Input: json.RawMessage(`{"preset_id":7,"name":"Mine"}`), StartToCloseS: 60})
 	if err := env.GetWorkflowError(); err != nil {
 		t.Fatal(err)
@@ -59,7 +59,7 @@ func TestTheWorkflowTriesTheActivityOnceAndKeepsItsType(t *testing.T) {
 		tries++
 		return nil, temporal.NewApplicationError("at version 4", "version_moved", 4)
 	})
-	env.ExecuteWorkflow(WorkflowName, WriteRun{Activity: "filament_preset_copy", Queue: "library",
+	env.ExecuteWorkflow(WorkflowName, Run{Activity: "filament_preset_copy", Queue: "library",
 		Input: json.RawMessage(`{}`), StartToCloseS: 60})
 	err := env.GetWorkflowError()
 	failure := failureOf(err)
@@ -75,7 +75,7 @@ func TestTheWorkflowTriesTheActivityOnceAndKeepsItsType(t *testing.T) {
 		tries++
 		return nil, errors.New("a bug")
 	})
-	env.ExecuteWorkflow(WorkflowName, WriteRun{Activity: "filament_preset_copy", Queue: "library",
+	env.ExecuteWorkflow(WorkflowName, Run{Activity: "filament_preset_copy", Queue: "library",
 		Input: json.RawMessage(`{}`), StartToCloseS: 60})
 	if env.GetWorkflowError() == nil || tries != 1 {
 		t.Errorf("%d tries", tries)
@@ -88,10 +88,10 @@ func TestATimedOutActivityIsATimeout(t *testing.T) {
 		return nil, ctx.Err()
 	})
 	env.SetTestTimeout(time.Minute)
-	env.ExecuteWorkflow(WorkflowName, WriteRun{Activity: "filament_preset_copy", Queue: "library",
+	env.ExecuteWorkflow(WorkflowName, Run{Activity: "filament_preset_copy", Queue: "library",
 		Input: json.RawMessage(`{}`), StartToCloseS: 1})
 	failure := failureOf(env.GetWorkflowError())
-	if failure == nil || failure.Type != timeoutFailure {
+	if failure == nil || failure.Type != TimeoutFailure {
 		t.Fatalf("%+v", failure)
 	}
 }
@@ -161,7 +161,7 @@ func TestRunStartsOrJoinsTheRunAndClosesItWhenTheRouteStopsWaiting(t *testing.T)
 	if c.name != WorkflowName || len(c.args) != 1 {
 		t.Fatalf("%v %v", c.name, c.args)
 	}
-	in := c.args[0].(WriteRun)
+	in := c.args[0].(Run)
 	if in.Activity != "filament_preset_copy" || in.Queue != "library" || string(in.Input) != `{"preset_id":7}` ||
 		in.StartToCloseS != 60 || in.ScheduleToStartS != 70 {
 		t.Errorf("%+v", in)
@@ -174,7 +174,7 @@ func TestRunGivesTheActivityFailureOfAClosedRun(t *testing.T) {
 	env, _ := writeEnv(t, func(context.Context, json.RawMessage) (json.RawMessage, error) {
 		return nil, temporal.NewApplicationError("at version 4", "version_moved", 4)
 	})
-	env.ExecuteWorkflow(WorkflowName, WriteRun{Activity: "filament_preset_copy", Queue: "library",
+	env.ExecuteWorkflow(WorkflowName, Run{Activity: "filament_preset_copy", Queue: "library",
 		Input: json.RawMessage(`{}`), StartToCloseS: 60})
 	closed := env.GetWorkflowError()
 	var execution *temporal.WorkflowExecutionError

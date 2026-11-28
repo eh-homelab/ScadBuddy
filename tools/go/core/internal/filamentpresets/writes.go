@@ -22,32 +22,20 @@ import (
 	"github.com/eh-homelab/ScadBuddy/tools/go/core/internal/auth"
 	"github.com/eh-homelab/ScadBuddy/tools/go/core/internal/httpx"
 	"github.com/eh-homelab/ScadBuddy/tools/go/core/internal/jsonv"
+	"github.com/eh-homelab/ScadBuddy/tools/go/core/internal/libraryrun"
 )
 
-// Write is one write to start: its run's id, the activity by name, the activity's one JSON
-// object argument, and its start-to-close timeout.
-type Write struct {
-	WorkflowID string
-	Activity   string
-	Input      jsonv.Object
-	Timeout    time.Duration
-}
+// Write, Starter and Failure are libraryrun's: each write is one run of core's workflow
+// LibraryRun, whose one step is the write's Python activity on the library queue.
+type (
+	Write   = libraryrun.Write
+	Starter = libraryrun.Starter
+	Failure = libraryrun.Failure
+)
 
-// Starter runs a Write: it starts the write's run, or joins the open run with its id, and
-// waits for the activity's result until ctx ends. An activity failure is a *Failure; any
-// other error (a start Temporal refused, the wait's end) means the write may still run.
-type Starter interface {
-	Run(ctx context.Context, w Write) (json.RawMessage, error)
-}
-
-// Failure is an activity's failure: its type (one of the problem codes), its message and
-// its first detail.
-type Failure struct {
-	Type, Message string
-	Detail        json.RawMessage
-}
-
-func (f *Failure) Error() string { return f.Type + ": " + f.Message }
+// timeoutFailure is a Failure's Type when Temporal timed the activity out: the write may
+// have run, so the same key is sent again.
+const timeoutFailure = libraryrun.TimeoutFailure
 
 // The activities (filament/preset_writes.py PRESET_WRITE_ACTIVITIES) and their bounds on the
 // mirror (R11): WRITE_MIRROR_TIMEOUT and preset_mirror.py RESEND_TIMEOUT.
@@ -61,7 +49,7 @@ const (
 	// An activity's start-to-close is its bound plus activityMargin, and the route waits for
 	// it that plus waitMargin (R11).
 	activityMargin = 30 * time.Second
-	waitMargin     = 10 * time.Second
+	waitMargin     = libraryrun.WaitMargin
 )
 
 // R7's limits, as preset_writes.py has them, and the idempotency key's length
@@ -124,7 +112,7 @@ func (x *writer) copy(w http.ResponseWriter, r *http.Request) {
 		refuse(w, r, bad)
 		return
 	}
-	caller := actor(auth.CallerOf(r.Context()))
+	caller := libraryrun.Actor(auth.CallerOf(r.Context()))
 	input := jsonv.Object{{Key: "preset_id", Value: id}, {Key: "name", Value: name}, {Key: "actor", Value: caller}, {Key: "idempotency_key", Value: key}}
 	result, ok := x.run(w, r, Write{WorkflowID: keyedID("copy", caller, key, id, input), Activity: copyActivity, Input: input}, writeMirrorBound, "")
 	if !ok {
@@ -150,7 +138,7 @@ func (x *writer) edit(w http.ResponseWriter, r *http.Request) {
 		refuse(w, r, bad)
 		return
 	}
-	caller := actor(auth.CallerOf(r.Context()))
+	caller := libraryrun.Actor(auth.CallerOf(r.Context()))
 	input := append(jsonv.Object{{Key: "preset_id", Value: id}}, fields...)
 	input = append(input, jsonv.Member{Key: "actor", Value: caller}, jsonv.Member{Key: "idempotency_key", Value: key})
 	result, ok := x.run(w, r, Write{WorkflowID: keyedID("edit", caller, key, id, input), Activity: editActivity, Input: input}, writeMirrorBound, "")

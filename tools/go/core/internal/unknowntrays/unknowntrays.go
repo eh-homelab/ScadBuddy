@@ -1,7 +1,8 @@
 // Package unknowntrays is the unknown-spool flow's Go routes (#7143, area unknown-trays):
 // the list of trays a printer reports that no spool holds, with ranked candidates, the
-// dismiss route, and the print worker's CRUD read of the block. Go writes no spool here:
-// the resolve write is Python's, run as an activity (task 3B).
+// resolve and dismiss routes, and the print worker's CRUD read of the block. Go writes no
+// spool here: the resolve write is Python's, the activity filament_resolve_unknown_tray on
+// the library queue, which Go runs through internal/libraryrun (resolve.go, #8489).
 package unknowntrays
 
 import (
@@ -12,6 +13,7 @@ import (
 	"github.com/eh-homelab/ScadBuddy/tools/go/core/internal/auth"
 	"github.com/eh-homelab/ScadBuddy/tools/go/core/internal/crud"
 	"github.com/eh-homelab/ScadBuddy/tools/go/core/internal/httpx"
+	"github.com/eh-homelab/ScadBuddy/tools/go/core/internal/libraryrun"
 	"github.com/eh-homelab/ScadBuddy/tools/go/core/internal/seal"
 )
 
@@ -22,11 +24,13 @@ const (
 
 	listPath    = "/api/v1/filament/unknown-trays"
 	dismissPath = listPath + "/{id}/dismiss"
+	resolvePath = listPath + "/{id}/resolve"
 )
 
 // Public are the area's public routes by area name. newRouter serves them behind the one
-// person-auth gate (internal/auth).
-func Public(pool *pgxpool.Pool, _ *seal.Keys) map[string][]auth.Public {
+// person-auth gate (internal/auth). The resolve starts its activity through starter; with a
+// nil starter (a core with no Temporal) it answers 503 writes_not_configured.
+func Public(pool *pgxpool.Pool, _ *seal.Keys, starter libraryrun.Starter) map[string][]auth.Public {
 	list := auth.Public{
 		Pattern: "GET " + listPath,
 		Route:   auth.Route{Class: "api", Template: listPath},
@@ -67,7 +71,12 @@ func Public(pool *pgxpool.Pool, _ *seal.Keys) map[string][]auth.Public {
 			w.WriteHeader(http.StatusNoContent)
 		}),
 	}
-	return map[string][]auth.Public{Read: {list}, Area: {list, dismiss}}
+	resolve := auth.Public{
+		Pattern: "POST " + resolvePath,
+		Route:   auth.Route{Class: "api", Template: resolvePath},
+		Handler: http.HandlerFunc((&resolver{starter: starter}).resolve),
+	}
+	return map[string][]auth.Public{Read: {list}, Area: {list, dismiss, resolve}}
 }
 
 func failed(w http.ResponseWriter, r *http.Request, err error) {

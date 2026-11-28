@@ -20,6 +20,8 @@ const (
 	blockGolden = "../../../backend/tests/fixtures/unknown-trays-block.json"
 	blockPath   = "/api/v1/internal/crud/print/filament/printers/" + trayPrinter + "/unknown-trays"
 	listPath    = "/api/v1/filament/unknown-trays"
+	resolvePath = listPath + "/5d0c8f1e-0000-4000-8000-000000007143/resolve"
+	resolveBody = `{"code":"S-12","net_weight_g":980,"seen_at":"2026-11-26T09:30:00.123456Z"}`
 )
 
 func seedTrays(a *api) {
@@ -67,8 +69,9 @@ func TestTheReadAreaServesTheBlockAndTheListOnly(t *testing.T) {
 	seedTrays(a)
 	expect(t, a.do("GET", blockPath, "", asCaller(a.credential("print", "crud.print"))).status, 200)
 	expect(t, a.do("GET", listPath, "", func(r *http.Request) { r.Header.Set(auth.RequestHeader, "1") }).status, 200)
-	// The dismiss route is not in the read area: it goes on to Python.
+	// The dismiss and resolve routes are not in the read area: they go on to Python.
 	expect(t, a.do("POST", listPath+"/5d0c8f1e-0000-4000-8000-000000007143/dismiss", "").status, http.StatusTeapot)
+	expect(t, a.do("POST", resolvePath, resolveBody).status, http.StatusTeapot)
 	expect(t, a.count(`SELECT count(*) FROM filament_unknown_trays`), 2)
 }
 
@@ -78,6 +81,7 @@ func TestAnUnswitchedAreaForwardsToNext(t *testing.T) {
 	for _, c := range []struct{ method, path string }{
 		{"GET", listPath},
 		{"POST", listPath + "/5d0c8f1e-0000-4000-8000-000000007143/dismiss"},
+		{"POST", resolvePath},
 		{"GET", blockPath},
 	} {
 		got := a.do(c.method, c.path, "", func(r *http.Request) { r.Header.Set(auth.RequestHeader, "1") })
@@ -136,5 +140,60 @@ func TestPublicRoutesUseTheGate(t *testing.T) {
 	var n int
 	if err := pool.QueryRow(t.Context(), `SELECT count(*) FROM filament_unknown_trays`).Scan(&n); err != nil || n != 2 {
 		t.Errorf("the refused dismiss deleted a row: %d %v", n, err)
+	}
+}
+
+// Prod's core has no Temporal address (#8489 U2): the area serves its reads, and a resolve
+// answers 503 writes_not_configured.
+func TestTheResolveWithoutTemporalIs503(t *testing.T) {
+	a := newAPI(t, "unknown-trays")
+	seedTrays(a)
+	got := a.do("POST", resolvePath, resolveBody, func(r *http.Request) { r.Header.Set(auth.RequestHeader, "1") })
+	expect(t, got.status, http.StatusServiceUnavailable)
+	expect(t, got.body["code"], "writes_not_configured")
+	expect(t, a.count(`SELECT count(*) FROM filament_unknown_trays`), 2)
+}
+
+func TestAReadTokenCannotResolve(t *testing.T) {
+	pool := testdb.New(t)
+	token := "sbpat_0123456789abcdef." + strings.Repeat("A", 43)
+	sum := sha256.Sum256([]byte(token))
+	if _, err := pool.Exec(t.Context(), `INSERT INTO personal_access_tokens (id, principal, name, scope, token_hash, expires_at)
+		VALUES ('t1', 'user:test#me', 'read', 'read', $1, now() + interval '1 day')`, sum[:]); err != nil {
+		t.Fatal(err)
+	}
+	post := func(handler http.Handler) (int, string) {
+		server := httptest.NewServer(handler)
+		defer server.Close()
+		req, _ := http.NewRequest(http.MethodPost, server.URL+resolvePath, strings.NewReader(resolveBody))
+		req.Header.Set("Authorization", "Bearer "+token)
+		res, err := http.DefaultClient.Do(req)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer res.Body.Close()
+		var b bytes.Buffer
+		_, _ = b.ReadFrom(res.Body)
+		return res.StatusCode, b.String()
+	}
+	starter := &countingStarter{}
+	enforce, err := newRouter(pool, teapot, nil, "unknown-trays", "enforce", callerPackages, nil, nil, nil, withLibraryRuns(starter))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if status, body := post(enforce); status != http.StatusForbidden || !strings.Contains(body, "out_of_scope") || starter.count() != 0 {
+		t.Errorf("enforce: %d %s, %d runs", status, body, starter.count())
+	}
+	rec := recordTelemetry(t)
+	observe, err := newRouter(pool, teapot, nil, "unknown-trays", "observe", callerPackages, rec.tel.Meters, nil, nil, withLibraryRuns(starter))
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Observe serves it: the counting starter runs nothing and answers an error, a pending resolve.
+	if status, body := post(observe); status != http.StatusServiceUnavailable || !strings.Contains(body, "resolve_pending") || starter.count() != 1 {
+		t.Errorf("observe: %d %s, %d runs", status, body, starter.count())
+	}
+	if _, ok := rec.metrics(t)[auth.WouldRefuseMetric]; !ok {
+		t.Error("observe counted nothing")
 	}
 }
