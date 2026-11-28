@@ -121,10 +121,14 @@ export function SettingsShell({ sections = SECTION_REGISTRY }: { sections?: read
   const titleOf = (id: string) => sections.find((section) => section.id === id)?.title ?? id
 
   // Grown during render, so the area the address names mounts in the same pass it shows.
-  const [opened, setOpened] = useState<ReadonlySet<string>>(
-    () => new Set([target.area, ...sections.filter((section) => AGENT_SECTIONS.has(section.id)).map((section) => section.area)]),
+  const [visited, setVisited] = useState<ReadonlySet<string>>(() => new Set([target.area]))
+  if (!visited.has(target.area)) setVisited(new Set([...visited, target.area]))
+  // Read from `sections` on each render, so a section list that gains an agent field mounts its area.
+  const opened = useMemo(
+    () =>
+      new Set([...visited, ...sections.filter((section) => AGENT_SECTIONS.has(section.id)).map((section) => section.area)]),
+    [visited, sections],
   )
-  if (!opened.has(target.area)) setOpened(new Set([...opened, target.area]))
 
   const shown = useMemo(
     () =>

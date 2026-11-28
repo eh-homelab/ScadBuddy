@@ -77,6 +77,19 @@ function Polled() {
 const card = (title: string) => screen.getByRole('region', { name: `Source ${title}` })
 
 describe('SourceCard', () => {
+  it('mounts the rows and nested sources only once it is first unfolded, then keeps them', async () => {
+    const nested = source({ id: 'package:demo', kind: 'package', title: 'Nested demo' }, 2)
+    const { user } = renderPage(<Harness start={source({ children: [nested] }, 3)} />)
+    const fold = screen.getByRole('button', { name: 'ScadBuddy tools' })
+    expect(screen.queryByRole('combobox', { name: accessName('tool_2'), hidden: true })).toBeNull()
+    expect(screen.queryByRole('region', { name: 'Source Nested demo', hidden: true })).toBeNull()
+    await user.click(fold)
+    expect(screen.getByRole('combobox', { name: accessName('tool_2') })).toBeVisible()
+    expect(screen.getByRole('region', { name: 'Source Nested demo' })).toBeVisible()
+    await user.click(fold)
+    expect(screen.getByRole('combobox', { name: accessName('tool_2'), hidden: true })).not.toBeVisible()
+  })
+
   it('folds to its summary, and opens to its rows', async () => {
     const { user } = renderPage(<Harness start={source()} />)
     expect(within(card('ScadBuddy tools')).getByText('10 tools, 1 changed')).toBeInTheDocument()

@@ -196,7 +196,8 @@ describe('RemotePluginsPanel', () => {
     const fold = within(card).getByRole('button', { name: 'hindsight' })
     expect(fold).toHaveAttribute('aria-expanded', 'false')
     expect(within(card).getByText('5 tools, 1 changed')).toBeInTheDocument()
-    expect(within(card).getByRole('combobox', { name: accessName('retain'), hidden: true })).not.toBeVisible()
+    // Not mounted until the first unfold: a source can hold hundreds of rows.
+    expect(within(card).queryByRole('combobox', { name: accessName('retain'), hidden: true })).toBeNull()
     await user.click(fold)
     expect(within(card).getByRole('combobox', { name: accessName('retain') })).toBeVisible()
     await user.click(fold)
