@@ -2415,6 +2415,13 @@ class DecodedSpool(BaseModel):
     label_weight_g: int | None = None
     empty_weight_g: int | None = None
     serial: str | None = None
+    other_keys: dict[str, str] | None = Field(
+        default=None,
+        description=(
+            "An OpenSpool tag's keys that ScadBuddy does not use, each value as its JSON "
+            "text (a string keeps its quotes), cut to 128 characters. Untrusted text."
+        ),
+    )
     warnings: list[str] = Field(
         default_factory=list,
         description=(
