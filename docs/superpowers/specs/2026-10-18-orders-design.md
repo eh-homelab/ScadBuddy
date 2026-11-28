@@ -6,7 +6,7 @@ Status: accepted, merged in #4176 (2026-10-19). Epic #4248. Design only; no code
 amendment), the template-pipelines spec (`2026-09-27-template-pipelines-design.md`,
 template-owned UIs in §4) and the own-store spec
 (`2026-10-16-own-store-slicer-rust-workers-design.md`, epic #3818). Related epics:
-#3818 (Bambuddy out of the hot path), #2486 (flows people can see, steer and trust),
+#3818 (the hot path does not depend on Bambuddy), #2486 (flows people can see, steer and trust),
 #2182 (print as easily as a page).
 
 Every fact about the code below was read from the tree at `d4df45d` on 2026-10-18; file
