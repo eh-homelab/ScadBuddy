@@ -643,7 +643,12 @@ async def test_a_crud_request_carries_the_trace_and_no_baggage() -> None:
         with trace.get_tracer(__name__).start_as_current_span("caller") as span:
             await client.request("GET", PATH)
         sent = script.requests[0].headers
-        assert sent["traceparent"].split("-")[1] == format(span.get_span_context().trace_id, "032x")
+        # The caller span is the parent: its trace id and its span id (#8421).
+        caller = span.get_span_context()
+        assert sent["traceparent"].split("-")[1:3] == [
+            format(caller.trace_id, "032x"),
+            format(caller.span_id, "016x"),
+        ]
         assert "baggage" not in sent
     finally:
         context.detach(token)
