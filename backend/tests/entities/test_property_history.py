@@ -378,6 +378,12 @@ def test_history_lists_a_value_an_older_rule_allowed(
         (21, {"w": 1}, [1, 2]),
         (20, None, {"w": 1}),
     ]
+    # The keyed read (the other branch of the UNION) lists them alike.
+    keyed = store.history(ref, "dims", 100)
+    assert [(c.event_seq, c.old, c.new) for c in keyed] == [
+        (21, {"w": 1}, [1, 2]),
+        (20, None, {"w": 1}),
+    ]
 
 
 def test_history_follows_an_entity_a_merge_renamed(
