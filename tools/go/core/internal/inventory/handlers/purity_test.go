@@ -38,9 +38,9 @@ func TestTheBaseFlowNamesNoKind(t *testing.T) {
 	}
 
 	_, here, _, _ := runtime.Caller(0)
-	dir := filepath.Dir(here)
+	pkg := filepath.Dir(here)
 	var files []string
-	for _, pattern := range []string{filepath.Join(dir, "*.go"), filepath.Join(dir, "..", "flow", "*.go")} {
+	for _, pattern := range []string{filepath.Join(pkg, "*.go"), filepath.Join(pkg, "..", "flow", "*.go")} {
 		found, err := filepath.Glob(pattern)
 		if err != nil {
 			t.Fatal(err)
