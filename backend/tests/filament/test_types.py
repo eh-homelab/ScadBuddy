@@ -627,6 +627,18 @@ def test_a_refused_type_create_adds_no_named_row(pg_pool: PgPool) -> None:
     assert "Glossy X" not in _names(pg_pool, "subtypes")
 
 
+@pg
+def test_a_type_create_resolves_a_name_to_an_archived_row(pg_pool: PgPool) -> None:
+    store = SpoolTypeStore(pg_pool)
+    brands = CatalogStore(pg_pool)
+    first = store.create(_body(pg_pool, brand_name="Acme"))
+    assert first.brand_id is not None
+    brands.archive("brands", first.brand_id, True)
+    again = store.create(_body(pg_pool, code="PLA-BLK", brand_name="Acme"))
+    assert again.brand_id == first.brand_id
+    assert _names(pg_pool, "brands").count("Acme") == 1
+
+
 def test_a_type_create_takes_an_id_or_a_name_not_both() -> None:
     base = {"code": "X", "rgba": "#FFFFFF", "label_weight_g": 1000}
     one = UUID(int=1)

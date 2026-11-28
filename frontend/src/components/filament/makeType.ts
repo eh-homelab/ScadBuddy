@@ -47,7 +47,7 @@ export function typeCodeOf(row: Pick<Filament, 'brand' | 'material' | 'subtype' 
  * already has. The server links the new type to that row (`filament_id`), since the type
  * has the row's identity. The material, brand and subtype go as names: the server finds
  * each row by key and alias, else adds it, unchecked, in the type's own transaction, so a
- * refused type adds no row (#8228, spec §6.3b).
+ * refused type adds no row (#8228, spec 2026-11-21-inventory-and-purchasing-design.md §6.3b).
  */
 export async function makeTypeFromBook(row: Filament, properties?: Record<string, PropertyValue>): Promise<SpoolType> {
   // The book's `dual-color` is the catalog's `Dual Color` by key; an effect is never added.

@@ -282,7 +282,9 @@ class SpoolTypeStore:
         `CatalogExistsError`. It writes no ``properties`` and checks
         nothing (#7703): `create` does. A ``brand_name``, ``material_name`` or
         ``subtype_name`` is its row, else a new one added on ``conn``, unchecked (spec
-        §6.3b, #8228), so a refused type takes it back with it."""
+        2026-11-21-inventory-and-purchasing-design.md §6.3b, #8228), so a refused type
+        takes it back with it. A name may resolve to an archived row (`find_by_key`
+        includes archived rows), as the Bambuddy pull and the CSV import do."""
         if body.properties is not None:
             raise ValueError("create_on writes no properties")
         data = body.model_dump(exclude={"properties", *_NAMES})

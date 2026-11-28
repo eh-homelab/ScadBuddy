@@ -266,8 +266,9 @@ class InvoiceStore:
             return None
         spools = self._spools.list(include_archived=True)
         found: _Candidates = []
-        for line in invoice.lines:
-            key = self._line_key(line)
+        with self._pool.connection() as conn:
+            keys = [self._line_key(conn, line) for line in invoice.lines]
+        for line, key in zip(invoice.lines, keys, strict=True):
             matching = [
                 (
                     s.cost_per_kg is not None or s.invoice_line_id is not None,
@@ -295,7 +296,7 @@ class InvoiceStore:
             )
         return found
 
-    def _line_key(self, line: pm.InvoiceLine) -> tuple[UUID, str] | None:
+    def _line_key(self, conn: Conn, line: pm.InvoiceLine) -> tuple[UUID, str] | None:
         if line.type_id is not None:
             kind = self._types.get(line.type_id)
             return None if kind is None else (kind.material_id, kind.rgba)
@@ -305,8 +306,7 @@ class InvoiceStore:
         material = proposed.material_id
         if material is None and proposed.material_name is not None:
             # A proposed type that names its material (#8228): that material, if it exists.
-            with self._pool.connection() as conn:
-                material = find_by_key(conn, "materials", proposed.material_name)
+            material = find_by_key(conn, "materials", proposed.material_name)
         return None if material is None else (material, proposed.rgba)
 
     def _detail(self, conn: Conn, invoice_id: UUID) -> pm.InvoiceDetail | None:

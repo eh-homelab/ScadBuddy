@@ -697,7 +697,7 @@ async def list_types(filament: FilamentDep, include_archived: bool = False) -> l
         "with neither `material_id` nor `material_name` it is 422. Each name is the catalog "
         "row of that name or alias, else a new row of that name (a subtype of the type's "
         "material), added unchecked in the type's transaction (docs/superpowers/specs/"
-        "2026-11-14-filament-management-design.md §6.3b): a refused type "
+        "2026-11-21-inventory-and-purchasing-design.md §6.3b): a refused type "
         "adds no row (#8228). An effect is never added. With a "
         "`cost_per_kg` it also writes the price book row of its material, subtype, brand, "
         "colour and alpha (`filament_id`), which takes its stops and effect when it is new "

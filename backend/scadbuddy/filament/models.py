@@ -881,7 +881,8 @@ class SpoolTypeCreate(_In):
     """A new type. ``brand_name``, ``material_name`` and ``subtype_name`` are the other way
     to give ``brand_id``, ``material_id`` and ``subtype_id`` (one or the other, not both): the
     row of that name, else a new one, added unchecked in the type's transaction (spec
-    §6.3b, #8228). A ``subtype_name`` is a subtype of the type's material."""
+    2026-11-21-inventory-and-purchasing-design.md §6.3b, #8228). A ``subtype_name`` is a
+    subtype of the type's material."""
 
     code: Name
     brand_id: UUID | None = None

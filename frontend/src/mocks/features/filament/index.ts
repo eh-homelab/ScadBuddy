@@ -1301,7 +1301,7 @@ const TYPE_NAMES = { brand: 'brands', material: 'materials', subtype: 'subtypes'
 const TYPE_CREATE_FIELDS = [...FIELDS.typeCreate, ...Object.keys(TYPE_NAMES).map((noun) => `${noun}_name`)]
 
 /**
- * `types.py` `create_on` (#8228, spec §6.3b): each `*_name` as its `*_id`, the row of that
+ * `types.py` `create_on` (#8228, spec 2026-11-21-inventory-and-purchasing-design.md §6.3b): each `*_name` as its `*_id`, the row of that
  * key or alias (a subtype the material's own, else one for every material), else a new row
  * (sort 1000), added unchecked. `undo` takes the new rows back, as a refused type's rollback does.
  */
