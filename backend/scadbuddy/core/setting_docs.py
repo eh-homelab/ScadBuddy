@@ -394,6 +394,12 @@ SETTING_DOCS: Final[Mapping[str, SettingDoc]] = MappingProxyType(
             "How far back the activity sweep looks for rows it missed. 600 to 604800. Empty"
             " is the default, one day.",
         ),
+        "service_credential_retention_days": SettingDoc(
+            "Keep ended service credentials for (days)",
+            "How long Service credentials keeps a credential after it expired or was revoked."
+            " 1 to 3650 days, or 0 to keep every one. Empty is the default: a day for the"
+            " 15-minute credentials the services exchange, 30 days for the agent's.",
+        ),
         "temporal_ui_url": SettingDoc(
             "Temporal UI URL",
             "The Temporal web UI, where render workflows can be inspected. Empty shows no link.",

@@ -542,6 +542,17 @@ class ServiceCredentialStore:
             )
         return cur.rowcount
 
+    def delete_ended(self, retention_days: int | None, *, now: datetime | None = None) -> int:
+        """The auth sweep's (#8539): ended credentials past the stored retention.
+        ``None`` keeps the defaults of :meth:`delete_expired`, ``0`` keeps every one, and
+        a number of days applies to both kinds."""
+        if retention_days == 0:
+            return 0
+        if retention_days is None:
+            return self.delete_expired(now=now)
+        kept = timedelta(days=retention_days)
+        return self.delete_expired(older_than=kept, exchanged_older_than=kept, now=now)
+
 
 #: How often a caller reads its view again (§7.2: at start and every hour).
 REREAD_SECONDS = 3600.0

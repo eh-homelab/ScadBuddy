@@ -509,6 +509,11 @@ class StoredSettings(BambuddyIds):
     #: How far back the activity sweep looks for rows its sources wrote and it missed.
     #: ``None``: 1 day.
     activity_repair_window_seconds: float | None = None
+    #: #8539: how many days an expired or revoked service credential's row is kept.
+    #: ``None``: the defaults, a day for an exchanged one and 30 days for a sealed one
+    #: (`auth/service_credentials.py` `EXCHANGE_RETENTION`, `LIFETIME`); ``0`` keeps
+    #: every one. Stored only: the auth sweep reads it.
+    service_credential_retention_days: int | None = None
     #: The principals whose activity the assistant follows. ``None``: ``["browser"]``.
     activity_follow: list[str] | None = None
     #: The domains `POST /models/{slug}/assets/fetch` may fetch from (#844), each with
@@ -857,6 +862,9 @@ class SettingsPatch(BaseModel):
     )
     activity_ttl_seconds: float | None = Field(default=None, ge=86400, le=RETENTION_MAX_SECONDS)
     activity_repair_window_seconds: float | None = Field(default=None, ge=600, le=7 * 86400)
+    #: #8539: days an ended service credential's row is kept, 0 (every one) to ten years;
+    #: ``null`` puts back the defaults (a day exchanged, 30 days sealed).
+    service_credential_retention_days: int | None = Field(default=None, ge=0, le=3650)
     activity_follow: list[Annotated[str, StringConstraints(max_length=256)]] | None = Field(
         default=None, max_length=50
     )
