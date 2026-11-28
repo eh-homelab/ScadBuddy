@@ -152,7 +152,7 @@ func Run(ctx context.Context, pool *pgxpool.Pool, o Options) {
 	waiting := false
 	for {
 		applied, err := Apply(ctx, pool, o)
-		if err == nil || !unmigrated(err) {
+		if !unmigrated(err) {
 			waiting = false
 		}
 		if err != nil && ctx.Err() == nil && unmigrated(err) {
