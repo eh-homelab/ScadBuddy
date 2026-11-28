@@ -99,7 +99,8 @@ describe('a DurableSession conversation under the TypeScript CLI (plan Step 7.1)
     // by 2.1.327), and to a user entry (`rowSource` by 2.1.331), which a resume does not need.
     // After an SDK bump fails here: vitest's "Expected" is the second argument, the new
     // CLI's keys. A key only the new CLI writes goes into its entry type's list below, with
-    // its version above; the "resumes" test shows the old entries still resume. A key only
+    // its version above (for `attachment` or `last-prompt`, first take the type out of the
+    // loop, as #8064 did for `user`); the "resumes" test shows the old entries still resume. A key only
     // the fixture has is not that case: check that a resume does not need it first.
     // (`rowSource` labels where a user entry came from: `local`, `harness`, `recorded` or
     // `hook`, read with `grep -ao` from the bundled 2.1.331 binary; no agent code reads it.)
