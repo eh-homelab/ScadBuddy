@@ -260,6 +260,51 @@ func TestABadPayloadStopsTheCursor(t *testing.T) {
 	}
 }
 
+// A subscriber stuck at an event it cannot store logs it once, not at every Poll (#8256).
+func TestRunLogsAStuckEventOnce(t *testing.T) {
+	pool := testdb.New(t)
+	id := entity(t, pool, "item", "i1")
+	set(t, pool, id, "a", `1`, person)
+	if _, err := pool.Exec(ctx, `INSERT INTO events (event_id, kind, at, payload)
+		SELECT 'bad', kind, at, payload - 'key' || '{"id": "bad"}' FROM events WHERE seq = $1`,
+		newest(t, pool)); err != nil {
+		t.Fatal(err)
+	}
+	logs := countLogs(t)
+	run, stop := context.WithTimeout(ctx, 20*time.Second)
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		Run(run, pool, Options{Poll: 10 * time.Millisecond})
+	}()
+	t.Cleanup(func() {
+		stop()
+		<-done
+	})
+	errorsAre := func(want int) {
+		t.Helper()
+		for logs.count(slog.LevelError) < want && run.Err() == nil {
+			time.Sleep(10 * time.Millisecond)
+		}
+		// Many Polls more at the same event log nothing more.
+		time.Sleep(200 * time.Millisecond)
+		if e := logs.count(slog.LevelError); e != want {
+			t.Fatalf("%d errors, want %d", e, want)
+		}
+	}
+	errorsAre(1)
+
+	// Once the subscriber passes it and stops at another bad event, that one is logged too.
+	if _, err := pool.Exec(ctx, `UPDATE events SET payload = payload || '{"key": "c"}' WHERE event_id = 'bad'`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := pool.Exec(ctx, `INSERT INTO events (event_id, kind, at, payload)
+		SELECT 'bad2', kind, at, payload - 'key' || '{"id": "bad2"}' FROM events WHERE event_id = 'bad'`); err != nil {
+		t.Fatal(err)
+	}
+	errorsAre(2)
+}
+
 func stoppedAt(t *testing.T, pool *pgxpool.Pool) *int64 {
 	t.Helper()
 	return scalar[*int64](t, pool, `SELECT stopped_seq FROM event_subscribers WHERE name = 'history'`)
