@@ -83,7 +83,10 @@ export function ScanPage() {
   const [support] = useState(nfcSupport)
   // The scan toggle sits in the title row, which stays at the top, so it never covers the reads.
   const [toggleSlot, setToggleSlot] = useState<HTMLElement | null>(null)
+  // The shell's <main> clips overflow, so the page scrolls itself, as every page does; the sticky
+  // title row sticks to the top of this pane.
   return (
+    <div data-testid="scan-page" className="h-full overflow-y-auto">
     <div className="mx-auto flex min-h-full w-full max-w-md min-w-0 flex-col gap-5 px-4 pt-4 pb-[max(1rem,env(safe-area-inset-bottom))] text-[13px]">
       {/* A child of the page column itself, so it stays at the top for the whole page. */}
       <div className="sticky top-0 z-10 -mx-4 -mb-4 flex min-h-11 items-center justify-between gap-3 bg-background/95 px-4 py-1.5 backdrop-blur supports-[backdrop-filter]:bg-background/80">
@@ -98,6 +101,7 @@ export function ScanPage() {
         <ScanCode />
         {support === 'ok' ? <Scanner toggleSlot={toggleSlot} /> : <Unsupported embedded={support === 'embedded'} />}
       </ScanCameraProvider>
+    </div>
     </div>
   )
 }
