@@ -305,8 +305,11 @@ var workerRetry = 5 * time.Second
 // does not stop core, which is the API pod's front. Until health (Temporal's CheckHealth)
 // answers, the worker waits workerRetry and asks again. Then it builds a worker and starts it.
 // The SDK keeps a worker's first Start result (sync.OnceValue), so a worker whose Start
-// failed is never started again: the next try builds a new one. The function it gives stops
-// the started worker, and waits for it at most until drain ends.
+// failed is never started again: it is stopped, so it lets go of what Start took, and the
+// next try builds a new one. A worker that starts after ctx ends is stopped at once. The
+// function it gives stops the started worker, and waits for it at most until drain ends. A
+// worker that started before stop is called is always stopped, even when drain has already
+// ended (#8256).
 func startWorker(ctx context.Context, name string, health func(context.Context) error, build func() worker.Worker) (stop func(drain context.Context)) {
 	started := make(chan worker.Worker, 1)
 	go func() {
@@ -317,10 +320,16 @@ func startWorker(ctx context.Context, name string, health func(context.Context) 
 			if err == nil {
 				w := build()
 				if err = w.Start(); err == nil {
+					if ctx.Err() != nil {
+						w.Stop()
+						started <- nil
+						return
+					}
 					slog.Info("the " + name + " worker polls Temporal")
 					started <- w
 					return
 				}
+				w.Stop()
 			}
 			if ctx.Err() == nil {
 				slog.Warn("the "+name+" worker could not start", "error", err.Error())
@@ -334,11 +343,17 @@ func startWorker(ctx context.Context, name string, health func(context.Context) 
 		}
 	}()
 	return func(drain context.Context) {
+		// A worker already started is taken first: with drain already ended, a select on both
+		// could pick drain and leave the worker running.
 		var w worker.Worker
 		select {
 		case w = <-started:
-		case <-drain.Done():
-			return
+		default:
+			select {
+			case w = <-started:
+			case <-drain.Done():
+				return
+			}
 		}
 		if w == nil {
 			return

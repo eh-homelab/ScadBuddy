@@ -127,6 +127,43 @@ func TestAFailedStartBuildsANewWorker(t *testing.T) {
 	if first.starts.Load() != 1 {
 		t.Fatalf("the failed worker was started %d times", first.starts.Load())
 	}
+	if first.stopped.Load() != 1 {
+		t.Fatalf("the failed worker was stopped %d times, want 1", first.stopped.Load())
+	}
+}
+
+func TestAStopAfterTheDrainStillStopsAStartedWorker(t *testing.T) {
+	setWorkerRetry(t, time.Millisecond)
+	w := &fakeWorker{ok: true}
+	stop := startWorker(context.Background(), "test", func(context.Context) error { return nil }, func() worker.Worker { return w })
+	for w.starts.Load() == 0 {
+		time.Sleep(time.Millisecond)
+	}
+	// The worker is in the channel once Start has returned; give the send its moment.
+	time.Sleep(20 * time.Millisecond)
+	drain, cancel := context.WithCancel(context.Background())
+	cancel()
+	stop(drain)
+	for deadline := time.Now().Add(5 * time.Second); w.stopped.Load() == 0; {
+		if time.Now().After(deadline) {
+			t.Fatal("a worker that had started was not stopped")
+		}
+		time.Sleep(time.Millisecond)
+	}
+}
+
+func TestAWorkerThatStartsAfterCtxEndsIsStopped(t *testing.T) {
+	setWorkerRetry(t, time.Millisecond)
+	ctx, cancel := context.WithCancel(context.Background())
+	w := &fakeWorker{ok: true}
+	stop := startWorker(ctx, "test", func(context.Context) error { return nil }, func() worker.Worker {
+		cancel()
+		return w
+	})
+	stop(context.Background())
+	if w.starts.Load() != 1 || w.stopped.Load() != 1 {
+		t.Fatalf("starts %d, stopped %d, want 1 and 1", w.starts.Load(), w.stopped.Load())
+	}
 }
 
 // slowWorker's Stop blocks until released, as the SDK's waits for running activities.
