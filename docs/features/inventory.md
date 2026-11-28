@@ -59,9 +59,10 @@ sends `inventory_operation.changed` on `scadbuddy_events`. This is a typed event
 no log row (NOTIFY only; `tools/go/core/internal/bus/event.go`,
 `backend/scadbuddy/agent_changes/hub.py`). Python's `ActivityIndex.ingest_inventory_operation`
 turns it into an `activity` row (R-K1-22). An attempt that fails with an error stays
-`running` while Temporal retries it. An error that Temporal does not retry (a bad actor) ends
-the row `failed` with `inventory_activity_failed`, since no attempt follows to end it
-(`tools/go/core/internal/inventory/activities/record.go`, #8256).
+`running` while Temporal retries it. An error that Temporal does not retry (a bad actor, a
+type the retry policy names as non-retryable, or any error on the policy's last attempt)
+ends the row `failed` with `inventory_activity_failed`, since no attempt follows to end it
+(`tools/go/core/internal/inventory/activities/record.go` `final`, #8256, #8497).
 
 A finished row (`succeeded` or `failed`) stays 8 days after its end. Then the next start of
 an activity deletes it (`tools/go/core/internal/inventory/store/operations.go`

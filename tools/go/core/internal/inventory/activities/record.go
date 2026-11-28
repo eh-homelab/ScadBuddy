@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"log/slog"
+	"slices"
 
 	"github.com/jackc/pgx/v5/pgxpool"
 	"go.opentelemetry.io/otel/metric"
@@ -19,9 +20,8 @@ import (
 // attempt it writes the row as running (store.StartOperation) and puts the operation in the
 // context, so store.Write ends the row in the write's own transaction; when the attempt
 // fails with an error, it notes the error (store.NoteError), and the row stays running
-// while Temporal retries. An error that Temporal does not retry (a non-retryable
-// ApplicationError) ends the row failed (store.FailOperation), since no attempt follows to
-// end it (#8256). A record write that fails is logged and counted in
+// while Temporal retries. An error that Temporal does not retry ends the row failed
+// (store.FailOperation), since no attempt follows to end it (#8256, #8497; final). A record write that fails is logged and counted in
 // scadbuddy_inventory_record_failures (meters, when not nil); it never fails the activity.
 func Record(pool *pgxpool.Pool, meters metric.MeterProvider) interceptor.WorkerInterceptor {
 	r := &record{pool: pool}
@@ -74,7 +74,7 @@ func (r *recordInbound) ExecuteActivity(ctx context.Context, in *interceptor.Exe
 	out, err := r.Next.ExecuteActivity(store.WithOperation(ctx, op.ID), in)
 	if err != nil {
 		end, msg := store.NoteError, "could not record an inventory activity's error"
-		if app := (*temporal.ApplicationError)(nil); errors.As(err, &app) && app.NonRetryable() {
+		if final(err, info.Attempt, info.RetryPolicy) {
 			end, msg = store.FailOperation, "could not record an inventory activity's failure"
 		}
 		if note := end(context.WithoutCancel(ctx), r.pool, op.ID, op.Attempt, err); note != nil {
@@ -82,6 +82,24 @@ func (r *recordInbound) ExecuteActivity(ctx context.Context, in *interceptor.Exe
 		}
 	}
 	return out, err
+}
+
+// final says whether Temporal gives err no next attempt: a non-retryable ApplicationError,
+// an ApplicationError whose type the policy names in NonRetryableErrorTypes, or any error
+// on the policy's last attempt (MaximumAttempts). A schedule-to-close timeout that ends the
+// retries is not known here; a stale read asks Temporal about it (store.ReadOperation).
+func final(err error, attempt int32, policy *temporal.RetryPolicy) bool {
+	var app *temporal.ApplicationError
+	if errors.As(err, &app) && app.NonRetryable() {
+		return true
+	}
+	if policy == nil {
+		return false
+	}
+	if policy.MaximumAttempts > 0 && attempt >= policy.MaximumAttempts {
+		return true
+	}
+	return app != nil && slices.Contains(policy.NonRetryableErrorTypes, app.Type())
 }
 
 func (r *record) failed(ctx context.Context, msg, id string, err error) {

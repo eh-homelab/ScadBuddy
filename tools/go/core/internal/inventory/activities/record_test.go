@@ -227,6 +227,37 @@ func TestANonRetryableFailureEndsTheRecord(t *testing.T) {
 	}
 }
 
+// final knows every error that gets no next attempt: a non-retryable ApplicationError, a
+// type the policy does not retry, and any error on the policy's last attempt (#8497). It is
+// tested alone: the SDK's test environment hands an activity no retry policy
+// (internal_workflow_testsuite.go builds its PollActivityTaskQueueResponse with none), so
+// activity.Info.RetryPolicy is nil there; a server sends the policy with the task.
+func TestFinalKnowsWhenNoAttemptFollows(t *testing.T) {
+	plain := errors.New("the database is out of reach")
+	typed := temporal.NewApplicationError("no", "never_again")
+	two := &temporal.RetryPolicy{MaximumAttempts: 2}
+	never := &temporal.RetryPolicy{MaximumAttempts: 3, NonRetryableErrorTypes: []string{"never_again"}}
+	for name, c := range map[string]struct {
+		err     error
+		attempt int32
+		policy  *temporal.RetryPolicy
+		want    bool
+	}{
+		"non-retryable":                    {temporal.NewNonRetryableApplicationError("no", "bad_actor", nil), 1, nil, true},
+		"the last attempt":                 {plain, 2, two, true},
+		"before the last attempt":          {plain, 1, two, false},
+		"no policy":                        {plain, 5, nil, false},
+		"unlimited attempts":               {plain, 5, &temporal.RetryPolicy{}, false},
+		"a type the policy does not retry": {typed, 1, never, true},
+		"another type":                     {temporal.NewApplicationError("no", "other"), 1, never, false},
+		"a plain error and a type list":    {plain, 1, never, false},
+	} {
+		if got := final(c.err, c.attempt, c.policy); got != c.want {
+			t.Errorf("%s: final %v, want %v", name, got, c.want)
+		}
+	}
+}
+
 func TestAFailedRecordNeverFailsTheActivity(t *testing.T) {
 	f, _ := recorded(t)
 	// A key past the record's id bound: the record cannot start, the activity still runs.
