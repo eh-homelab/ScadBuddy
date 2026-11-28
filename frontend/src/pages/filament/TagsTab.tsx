@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { useSearchParams } from 'react-router'
 import { ApiError } from '../../api/client'
-import { getTag, listSpools, listTags, type TagDetail, type TagRow } from '../../api/filament'
+import { cancelNfcJob, createNfcJob, getNfcJob, getTag, listSpools, listTags, type TagDetail, type TagRow } from '../../api/filament'
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select'
 import { TD, TH, when } from '../../components/filament/formClasses'
 import { KINDS } from '../../components/filament/tagKinds'
@@ -18,6 +18,113 @@ const kindName = (kind: string) => KINDS.find((one) => one.id === kind)?.name ??
 const message = (cause: unknown) => (cause instanceof ApiError ? cause.detail : 'The tags could not be loaded. Try again.')
 
 const SHOWN = ['all', 'bound', 'unbound'] as const
+
+/** How often a waiting "Read chip" reads its job again. */
+export const PROBE_POLL_MS = 2000
+
+const ENDED = new Set(['done', 'failed', 'expired', 'cancelled'])
+
+/** What an NFC read job's result says of the chip (`finish_job`, #8366). */
+type ProbeResult = { uid?: string | null; chip?: string | null; max_ndef_bytes?: number | null; writable?: boolean | null; tag?: { id?: string } | null; error?: string }
+
+function probeText(tag: TagRow, state: string, result: ProbeResult | null | undefined): string | null {
+  if (state === 'expired') return 'No phone took the read in time. Nothing was read.'
+  if (state === 'cancelled') return 'Stopped. Nothing was read.'
+  if (state === 'failed') return `The read failed: ${result?.error ?? 'try again'}.`
+  if (result?.tag?.id && result.tag.id !== tag.id) return `A different tag was read (${result.uid ?? 'no UID'}). Hold this tag and try again.`
+  if (result?.chip == null && result?.max_ndef_bytes == null && result?.writable == null) return 'The phone read no chip. Use Scan in the ScadBuddy app on Android, which reads it.'
+  return null
+}
+
+/**
+ * #8366 — a tag's chip and capacity as the ScadBuddy app last read them, and, when no app read
+ * told them, "Read chip": an NFC read job (`POST /nfc-jobs`) that the phone's Scan page runs, as
+ * an agent's `nfc_probe` does. It only reads the tag. A Bambu tag (MIFARE Classic) has no NTAG chip.
+ */
+function ChipCell({ tag, onRead }: { tag: TagRow; onRead: () => unknown }) {
+  const [job, setJob] = useState<string | null>(null)
+  const [note, setNote] = useState<string | null>(null)
+  const jobRef = useRef<string | null>(null)
+
+  useEffect(() => {
+    if (!job) return
+    let alive = true
+    const timer = window.setInterval(() => {
+      void getNfcJob(job).then(
+        (found) => {
+          if (!alive || !ENDED.has(found.state)) return
+          setJob(null)
+          jobRef.current = null
+          setNote(probeText(tag, found.state, found.result as ProbeResult | null))
+          onRead()
+        },
+        () => {},
+      )
+    }, PROBE_POLL_MS)
+    return () => {
+      alive = false
+      window.clearInterval(timer)
+    }
+  }, [job, tag, onRead])
+
+  // A read still waiting when the tab goes is cancelled, so no phone runs it later.
+  useEffect(
+    () => () => {
+      if (jobRef.current) void cancelNfcJob(jobRef.current).catch(() => null)
+    },
+    [],
+  )
+
+  async function start() {
+    setNote(null)
+    try {
+      const made = await createNfcJob({ kind: 'read', ttl_s: 600 })
+      jobRef.current = made.id
+      setJob(made.id)
+    } catch (cause) {
+      setNote(message(cause))
+    }
+  }
+
+  async function stop() {
+    const id = jobRef.current
+    jobRef.current = null
+    setJob(null)
+    setNote('Stopped. Nothing was read.')
+    if (id) await cancelNfcJob(id).catch(() => null)
+  }
+
+  if (tag.kind === 'bambu_mifare') return <span className="text-muted-foreground">MIFARE Classic</span>
+  const parts = [tag.chip, tag.max_ndef_bytes != null ? `${tag.max_ndef_bytes} bytes` : null].filter(Boolean)
+  const known = parts.length > 0 || tag.writable != null
+  return (
+    <div className="flex flex-col items-start gap-1">
+      {known ? (
+        <span aria-label={`Chip of ${keyOf(tag)}`} className="tabular-nums">
+          {parts.join(' · ')}
+          {tag.writable === false && <span className="text-warn">{parts.length > 0 ? ', read-only' : 'Read-only'}</span>}
+        </span>
+      ) : job ? (
+        <span role="status" className="text-muted-foreground">
+          Open Scan on the phone, tap Arm, then hold this tag.
+        </span>
+      ) : (
+        <span className="text-muted-foreground">Not read yet</span>
+      )}
+      {!known &&
+        (job ? (
+          <Button type="button" size="xs" variant="ghost" onClick={() => void stop()}>
+            Stop
+          </Button>
+        ) : (
+          <Button type="button" size="xs" variant="outline" aria-label={`Read the chip of ${keyOf(tag)}`} onClick={() => void start()}>
+            Read chip
+          </Button>
+        ))}
+      {note && <span className="text-warn">{note}</span>}
+    </div>
+  )
+}
 
 /** A tag's key as a person finds it printed: the UID, else the tray UUID. */
 const keyOf = (tag: Pick<TagRow, 'tag_uid' | 'tray_uuid'>) => tag.tag_uid ?? tag.tray_uuid ?? ''
@@ -144,6 +251,7 @@ export function TagsTab() {
               <tr>
                 <th scope="col" className={TH}>Tag</th>
                 <th scope="col" className={TH}>Kind</th>
+                <th scope="col" className={TH}>Chip</th>
                 <th scope="col" className={TH}>Spool</th>
                 <th scope="col" className={TH}>Bound since</th>
                 <th scope="col" className={TH}>Taken over</th>
@@ -157,6 +265,9 @@ export function TagsTab() {
                 <tr key={tag.id} data-tag={tag.id} className="border-t">
                   <td className={`${TD} font-mono text-[12px]`}>{keyOf(tag)}</td>
                   <td className={TD}>{kindName(tag.kind)}</td>
+                  <td className={TD}>
+                    <ChipCell tag={tag} onRead={load} />
+                  </td>
                   <td className={TD}>
                     {tag.binding ? spoolLink(tag.binding.spool_id, tag.spool_number) : <span className="text-muted-foreground">Not on a spool</span>}
                   </td>
@@ -173,7 +284,7 @@ export function TagsTab() {
               ))}
               {rows.length === 0 && (
                 <tr className="border-t">
-                  <td colSpan={6} className="px-2 py-3 text-muted-foreground">
+                  <td colSpan={7} className="px-2 py-3 text-muted-foreground">
                     No tags match. A spool&apos;s page binds a tag to it.
                   </td>
                 </tr>

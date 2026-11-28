@@ -100,9 +100,17 @@ class EntityAttachmentStore:
         by: Actor,
     ) -> EntityAttachment:
         """The entity made on first use, the row and its hold on ``blob_key``, in one
-        transaction. `EntityNotFound` when the owner's row is not there."""
+        transaction. `EntityNotFound` when the owner's row is not there. An
+        ``attachment_id`` already there is that row as it is, so a retried run that made
+        the same id writes nothing a second time (#8471)."""
         with conn.transaction():
             entity_id = self.entities.ensure(conn, ref)
+            kept = conn.execute(
+                f"SELECT {_COLUMNS} FROM entity_attachments WHERE id = %s AND subject = %s",
+                (attachment_id, str(ref)),
+            ).fetchone()
+            if kept is not None:
+                return _of(kept)[0]
             conn.execute(
                 "INSERT INTO blob_refs (key, holder_kind, holder_id) VALUES (%s, %s, %s)"
                 " ON CONFLICT DO NOTHING",

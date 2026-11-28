@@ -1,5 +1,5 @@
 import { z } from 'zod'
-import { ok } from './call.js'
+import { ok, settling } from './call.js'
 import { command } from './command.js'
 import { defineTool, json, type Tool } from './registry.js'
 import { page, PAGED, pageInput } from './pagination.js'
@@ -372,7 +372,9 @@ export const printerTools: Tool[] = [
     label: 'Link a printer to Bambuddy',
     description:
       'Links a registry printer to the Bambuddy printer it is (`bambuddy_printer_id`, as discover_printers lists ' +
-      'them). Refused when the serials differ, or another row already links that Bambuddy printer.',
+      'them). Refused when the serials differ, or another row already links that Bambuddy printer. When the link ' +
+      'merges a printer that stock names, the stock moves first: a merge still running after 15 s answers ' +
+      '"accepted; it finishes by itself (workflow <id>)", and list_printers shows the result once it ends.',
     input: z.object({ printer, bambuddy_printer_id: z.number().int().positive() }),
     risk: 'write',
     source: SOURCE,
@@ -380,7 +382,7 @@ export const printerTools: Tool[] = [
     routes: ['PUT /api/v1/printers/{printer_id}/bambuddy'],
     handler: async ({ printer: id, bambuddy_printer_id }, { backend }) =>
       json(
-        shown(
+        ((answer) => ('workflow_id' in answer ? settling(answer) : shown(answer)))(
           await ok(
             backend.PUT('/api/v1/printers/{printer_id}/bambuddy', {
               params: { path: { printer_id: id } },

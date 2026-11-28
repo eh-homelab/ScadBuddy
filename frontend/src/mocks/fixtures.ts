@@ -1275,6 +1275,7 @@ export const settings: Settings = {
   filament_label_job_options: { media_type: 'Saved', darkness: -1, print_rate: 'Default' },
   activity_ttl_seconds: null,
   activity_repair_window_seconds: null,
+  service_credential_retention_days: null,
   has_google_fonts_api_key: false,
   has_store_s3_secret_access_key: false,
   has_git_remote_token: false,

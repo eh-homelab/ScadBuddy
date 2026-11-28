@@ -116,8 +116,9 @@ name, its description and its reject message. It starts with `rotator`, the logi
   `GET …/fleet/sessions` and `…/fleet/sessions/{session_id}` (`sbfleet` `Registry`); caller
   `fleet-rotator`, the machine service, writes `PUT …/fleet-rotator/machines/{id}` and
   `…/fleet-rotator/machines/{machine_id}/sessions/{session_id}`. Each caller is refused on
-  the other's routes. A `fleet-rotator` credential writes only the machines its proof file
-  registered (`fleet_machines.proof_name`) and their rows of sessions. One session id can
+  the other's routes. Each machine row has one owner: the `fleet` access token that registered
+  it (`fleet_machines.token_id`, #8041), or the proof file of a `fleet-rotator` credential
+  (`fleet_machines.proof_name`). Each writes only its own machines and their rows of sessions. One session id can
   run on several machines at once: each machine writes its own row, and a read gives the
   session once with a `hosts` array, one entry per machine.
 - `backend/scadbuddy/api/crud_fleet.py`: the change stream. The caller `fleet`:
@@ -143,7 +144,8 @@ and `proc_start`, paths, git facts, Claude Code facts, the credential's id, the 
 last rate limit, and `previous_session_id`, the row of the same process on the same machine
 before a `/clear`). It also adds
 `fleet-rotator` to the two caller CHECKs, `fleet_machines.proof_name` (the proof file's
-`<machine>` that registered the row) and `service_credentials.machine` (the machine a
+`<machine>` that registered the row; #8041 adds `fleet_machines.token_id`, the `fleet` access
+token that registered it, and each row names exactly one of the two) and `service_credentials.machine` (the machine a
 `fleet-rotator` credential was exchanged for).
 
 ## Tests

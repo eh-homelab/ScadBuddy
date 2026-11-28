@@ -4,6 +4,10 @@ import { Route, Routes } from 'react-router'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { resetMockState } from '../../mocks/handlers'
 import { failNextRecost, INVENTORY, inventoryMock, seedItem, seedLot, takeStock } from '../../mocks/features/inventory'
+import { seedEntityProperties } from '../../mocks/features/entities'
+import { filamentLinks } from '../../lib/filamentLinks'
+import { inventoryApi } from './api'
+import { stockFollow } from '../../api/client'
 import { server } from '../../mocks/server'
 import { L } from '../../mocks/features/filament/seed'
 import { ITEM_APPROVED, ORDER_ACCEPTED } from '../../mocks/features/orders/state'
@@ -40,6 +44,22 @@ describe('ItemPage (#7067)', () => {
     expect(within(offers).getByRole('link', { name: 'Amazon' })).toHaveAttribute('href', expect.stringMatching(/^\/filament\/suppliers\//))
     expect(offers).toHaveTextContent('$5.99')
     expect(document.getElementById(`offer-${INVENTORY.HOOK_OFFER}`)).not.toBeNull()
+  })
+
+  it("shows the item kind's code by its name (the owner, 2026-11-27)", async () => {
+    render(INVENTORY.HOOK)
+    await screen.findByRole('heading', { level: 1, name: 'Silver keychain hook' })
+    const hardware = inventoryMock.kinds.find((k) => k.id === 'hardware')!
+    const path = screen.getByRole('navigation', { name: 'Kind' })
+    expect(await within(path).findByText(`K-${hardware.number}`)).toBeInTheDocument()
+  })
+
+  it("shows the item's code by its name, and links its label", async () => {
+    render(INVENTORY.HOOK)
+    const heading = await screen.findByRole('heading', { level: 1, name: 'Silver keychain hook' })
+    const item = inventoryMock.items.find((i) => i.id === INVENTORY.HOOK)!
+    expect(within(heading.parentElement as HTMLElement).getByText(`I-${item.number}`)).toBeInTheDocument()
+    expect(screen.getByRole('link', { name: 'Print label' })).toHaveAttribute('href', filamentLinks.itemLabel(INVENTORY.HOOK))
   })
 
   it('lists the lots and receives one at the newest offer price for the quantity (Ruling 4)', async () => {
@@ -265,6 +285,37 @@ describe('ItemPage (#7067)', () => {
     expect(calls).toBe(1)
   })
 
+  // #6949 K1 Task 16, fix round 1: a re-cost still running answers 202; the page follows it
+  // with the same key until the answer comes, then says what it changed.
+  it('follows a re-cost that answers 202 to its end', async () => {
+    stockFollow.intervalMs = 1
+    const ring = seedItem({ kind_id: 'hardware', name: 'Split ring' })
+    const lot = seedLot(ring.id, 10, 25)
+    takeStock(ring.id, 4, { order_id: ORDER_ACCEPTED, order_item_id: ITEM_APPROVED })
+    const keys: (string | null)[] = []
+    let release = () => {}
+    const held = new Promise<void>((resolve) => (release = resolve))
+    server.use(
+      http.post('/api/v1/inventory/lots/:id/recost', async ({ request }) => {
+        keys.push(request.headers.get('Idempotency-Key'))
+        if (keys.length === 1) return HttpResponse.json({ workflow_id: `lot:${lot.id}:recost:k`, kind: 'RecostLot', started_at: '2026-11-27T00:00:00Z', repeated: false }, { status: 202 })
+        await held
+        return undefined
+      }),
+    )
+    const { user } = render(ring.id)
+    const row = await screen.findByTestId(`lot-row-${lot.id}`)
+    await user.click(within(row).getByRole('button', { name: 'Re-cost past uses' }))
+
+    const working = await screen.findByText(/Still working/)
+    expect(working.closest('[data-operation]')).toHaveAttribute('data-operation', `lot:${lot.id}:recost:k`)
+    release()
+
+    await waitFor(() => expect(screen.queryByText(/Still working/)).toBeNull())
+    expect(keys.length).toBe(2)
+    expect(keys[1]).toBe(keys[0])
+  })
+
   it('offers no re-cost on a lot nothing has taken from', async () => {
     render(INVENTORY.HOOK)
     const row = await screen.findByTestId(`lot-row-${INVENTORY.HOOK_LOT}`)
@@ -297,7 +348,7 @@ describe('ItemPage (#7067)', () => {
     expect(bodyOf('receiveUnits')).toEqual([])
     await user.type(serials, '{Enter}HS-0001')
     await user.click(within(form).getByRole('button', { name: 'Receive units' }))
-    await waitFor(() => expect(within(form).getByRole('alert')).toHaveTextContent('another unit of the item has that serial'))
+    await waitFor(() => expect(within(form).getByRole('alert')).toHaveTextContent('Another unit of this item has that serial.'))
     expect(bodyOf('receiveUnits')).toEqual([{ count: 2, serials: ['HS-0009', 'HS-0001'] }])
   })
 
@@ -342,5 +393,54 @@ describe('ItemPage (#7067)', () => {
     await user.click(screen.getByRole('button', { name: 'Restore' }))
     await waitFor(() => expect(screen.queryByText('Archived')).toBeNull())
     expect(screen.getByRole('button', { name: 'Archive' })).toBeInTheDocument()
+  })
+
+  describe('required properties (R-K1-33)', () => {
+    async function strictItem(values: Record<string, string> = {}) {
+      await inventoryApi.createKind({ id: 'strict', name: 'Strict', parent_id: 'hardware', attribute_schema: { type: 'object', properties: { material: { type: 'string' }, finish: { type: 'string' } }, required: ['material'] } })
+      const made = seedItem({ kind_id: 'strict', name: 'Bolt' })
+      if (Object.keys(values).length) seedEntityProperties(`item:${made.id}`, values)
+      return made
+    }
+
+    it('marks an item that lacks a required property', async () => {
+      const made = await strictItem()
+      render(made.id)
+      await screen.findByRole('heading', { level: 1, name: 'Bolt' })
+      expect(await screen.findByText('Missing required: material')).toBeInTheDocument()
+    })
+
+    it("says when the kind's properties could not be loaded", async () => {
+      const made = await strictItem()
+      server.use(http.get('/api/v1/inventory/kinds/strict/schema', () => HttpResponse.json({ detail: 'down' }, { status: 503 })))
+      const { user } = render(made.id)
+      await screen.findByRole('heading', { level: 1, name: 'Bolt' })
+      await user.click(screen.getByRole('button', { name: 'Edit details' }))
+      const form = screen.getByRole('form', { name: 'Item details' })
+      expect(await within(form).findByText(/The kind's properties could not be loaded/)).toBeInTheDocument()
+    })
+
+    it("edits the kind's keys with the item and sends both in one request", async () => {
+      const made = await strictItem({ material: 'steel', finish: 'zinc' })
+      const { user } = render(made.id)
+      await screen.findByRole('heading', { level: 1, name: 'Bolt' })
+      await user.click(screen.getByRole('button', { name: 'Edit details' }))
+      const form = screen.getByRole('form', { name: 'Item details' })
+      const material = await within(form).findByRole('textbox', { name: 'material' })
+      await waitFor(() => expect(material).toHaveValue('steel'))
+      // The panel lists only the keys the form does not hold.
+      expect(within(screen.getByRole('region', { name: 'Properties' })).queryByText('zinc')).toBeNull()
+
+      await user.clear(material)
+      await user.click(within(form).getByRole('button', { name: 'Save details' }))
+      expect(await within(form).findByRole('alert')).toHaveTextContent('Fill the required properties: material')
+      expect(material).toHaveAttribute('aria-invalid', 'true')
+
+      await user.type(material, 'brass')
+      await user.click(within(form).getByRole('button', { name: 'Save details' }))
+      await waitFor(() => expect(screen.queryByRole('form', { name: 'Item details' })).toBeNull())
+      expect(bodyOf('patchItem').at(-1)).toMatchObject({ name: 'Bolt', properties: { material: 'brass' } })
+      expect(bodyOf('patchItem').filter((b) => 'properties' in (b as object))).toHaveLength(2)
+    })
   })
 })

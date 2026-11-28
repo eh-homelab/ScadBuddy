@@ -10,6 +10,8 @@ import { ITEM_APPROVED, ITEM_DRAFT, ORDER_ACCEPTED, ORDER_DRAFT, PROBLEMS, seedC
 import { OrderPage } from '../../pages/OrderPage'
 import { renderPage } from '../../test/utils'
 import { LOCKED_TEXT, REVISED_TEXT } from './itemActions'
+import { SETTLING_TEXT } from './OrderItemsTable'
+import { settleStock, slowStockOnce } from '../../mocks/features/orders/orders'
 import { QUANTITY_HINT } from './quantity'
 import type { OrderItemDetail } from '../../api/types'
 import { ORDERS_MEMORY_KEY, resetOrdersMemory } from '../../lib/orderViews'
@@ -893,7 +895,8 @@ describe('OrderItemsTable · duplicate and bulk actions (#4955)', () => {
     await user.clear(quantity)
     await user.type(quantity, '1')
     await user.click(within(dialog).getByRole('button', { name: 'Fulfil' }))
-    await waitFor(() => expect(fulfilled).toHaveBeenCalledWith(ORDER_ACCEPTED, [{ item_id: ITEM_APPROVED, quantity: 1 }]))
+    // With one Idempotency-Key per open dialog (#6949 K1 Task 16).
+    await waitFor(() => expect(fulfilled).toHaveBeenCalledWith(ORDER_ACCEPTED, [{ item_id: ITEM_APPROVED, quantity: 1 }], expect.any(String)))
     await waitFor(() => expect(screen.queryByRole('dialog', { name: 'Fulfil items' })).toBeNull())
     // One of two made: the item stays open, and the selection clears.
     expect(state.items.find((i) => i.id === ITEM_APPROVED)!.status).toBe('approved')
@@ -1115,5 +1118,31 @@ describe('OrderItemsTable · groups (#6334)', () => {
     await screen.findByRole('heading', { name: 'ORD-2026-2' })
     expect(screen.queryByTestId('row-group-cancelled')).toBeNull()
     expect(within(row(ITEM_APPROVED)).getByText('not counted')).toBeInTheDocument()
+  })
+})
+
+// #6949 K1 Task 16: a fulfil whose stock workflow runs past the route's wait answers 202. The
+// item is fulfilled at once; its row says the stock still settles until `order_item.changed`
+// brings it with `parts_settling` empty. Nothing is for a person to press.
+describe('OrderItemsTable · stock settling', () => {
+  beforeEach(() => resetMockState())
+
+  it('a slow fulfil shows stock still settling until parts.used', async () => {
+    const order = await api.createOrder({ customer_id: state.orders[0]!.customer_id! })
+    const item = await api.addOrderItem(order.id, { kind: 'custom', title: 'Design work', quantity: 1, unit_price_minor: 1000 })
+    await api.acceptOrder(order.id)
+    slowStockOnce()
+    const { user } = render(order.id)
+    await user.click(await screen.findByRole('button', { name: 'Design work' }))
+    await user.click(within(await screen.findByRole('dialog')).getByRole('button', { name: 'Mark done' }))
+
+    await waitFor(() => expect(within(row(item.id)).getByText(SETTLING_TEXT, { exact: false })).toBeInTheDocument())
+    expect(state.items.find((i) => i.id === item.id)?.status).toBe('fulfilled')
+    expect(within(row(item.id)).queryByRole('button', { name: /settle/i })).toBeNull()
+
+    act(() => settleStock())
+
+    await waitFor(() => expect(within(row(item.id)).queryByText(SETTLING_TEXT, { exact: false })).toBeNull())
+    expect(state.items.find((i) => i.id === item.id)?.parts_settling).toBeNull()
   })
 })

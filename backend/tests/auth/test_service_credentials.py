@@ -199,3 +199,21 @@ def test_the_api_mints_an_inventory_credential_in_process(store: ServiceCredenti
     assert token is not None
     service = store.resolve(token)
     assert service == Service("inventory", frozenset({"crud.inventory"}))
+
+
+def test_ended_credentials_are_kept_as_the_retention_says(store: ServiceCredentialStore) -> None:
+    """#8539: ``None`` keeps the defaults (a day for an exchanged one), ``0`` keeps every
+    one, and a number of days applies to both kinds."""
+    now = datetime.now(UTC)
+    store.issue("render", "k8s", pod_name="p", pod_uid="u", rate_limited=False, now=now)
+    store.rotate_due(KEK, now=now)
+    # The exchanged one ended 15 minutes after it was made; the sealed one lives 30 days.
+    two_days = now + timedelta(days=2)
+    assert store.delete_ended(0, now=two_days + LIFETIME) == 0
+    assert {c.caller for c in store.list()} == {"render", "agent"}
+    assert store.delete_ended(3, now=two_days) == 0
+    assert store.delete_ended(None, now=two_days) == 1
+    assert {c.caller for c in store.list()} == {"agent"}
+    assert store.delete_ended(3, now=now + LIFETIME + timedelta(days=2)) == 0
+    assert store.delete_ended(3, now=now + LIFETIME + timedelta(days=4)) == 1
+    assert store.list() == []

@@ -332,8 +332,7 @@ export const EXTRACTORS: Readonly<Record<string, Extractor>> = {
   order_item_source_decline: () => [],
   order_item_source_check_again: () => [],
   order_item_source_retry_import: () => [],
-  // Parts (#5543): a part's stock line and the order's audit line record them.
-  part_stock_add: () => [],
+  // Parts (#5543): the order's audit line records them.
   order_item_parts_set: () => [],
   // The inventory (#7067): kinds, items, offers, lots and units are records of their own, on
   // the Inventory pages; every stock change is a move in the item's own stock line, and a
@@ -795,6 +794,10 @@ export const TOUCHES_NOTHING: ReadonlySet<string> = new Set([
   // #7025: a 3DFP create adds a filament on 3dfilamentprofiles.com and sets a type's
   // `tdfp_id`; neither is a recorded kind.
   'filament_tdfp_create',
+  // #7204: a filament preset is no recorded resource kind.
+  'filament_preset_copy',
+  'filament_preset_update',
+  'filament_preset_mirror',
   'filament_spool_upsert',
   'filament_spool_set_presets',
   'filament_spool_set_k_values',
@@ -833,6 +836,7 @@ export const TOUCHES_NOTHING: ReadonlySet<string> = new Set([
   'filament_sync_reset_links',
   // #7273: a tag and an NFC job are no recorded resource kind.
   'nfc_read',
+  'nfc_probe',
   'nfc_write',
   // Purchasing (#6266: suppliers, products, price points, invoices, the shopping list) is
   // no recorded resource kind either; an invoice's spools are in each spool's ledger.

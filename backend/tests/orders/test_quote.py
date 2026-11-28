@@ -60,6 +60,7 @@ from scadbuddy.render.schema import CustomizerSchema, Parameter
 from scadbuddy.store.local import LocalBlobStore
 from scadbuddy.store.refs import BlobRefs
 from tests.conftest import PgPool
+from tests.support.order_stock import run_in_line
 from tests.support.sliced3mf import sliced_3mf
 
 pytestmark = pytest.mark.requires_postgres
@@ -89,6 +90,7 @@ class Shop:
         self.rows = rows
         self.refs = refs
         self.lifecycle = Lifecycle(rows, InProcessEventBus(), refs)
+        self.go = run_in_line(self.lifecycle, rows._pool)
         customer = rows.insert_customer(
             display_name="Ada",
             company=None,

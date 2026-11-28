@@ -82,10 +82,15 @@ flowchart LR
   mounted last at `/` (`scadbuddy/main.py:2532`).
 - **Go core serves some paths instead.** Core (`tools/go/core`) answers the paths of the areas
   that `SCADBUDDY_CORE_AREAS` names (`tools/go/core/main.go`). The area `filament-presets`
-  (`tools/go/core/internal/filamentpresets`, #7204) serves the public, read-only
-  `GET /api/v1/filament/presets` routes. It reads the preset rows and each document's blob
-  from the store, and it needs the KEK and an `s3` store (`tools/go/core/README.md`). With
-  the area off, the paths go on to this API, which has no handler for them.
+  (`tools/go/core/internal/filamentpresets`, #7204) serves the public
+  `/api/v1/filament/presets` routes. Its reads take the preset rows and each document's blob
+  from the store, and need the KEK and an `s3` store (`tools/go/core/README.md`). Its three
+  writes (copy, edit, send again) write no row in Go. Each starts core's workflow
+  `LibraryRun` on core's own worker. The workflow runs one Python activity on the
+  `library` queue, which this API serves, so the API alone writes the rows. The writes need
+  `SCADBUDDY_TEMPORAL_ADDRESS` on the core container. Without it, core starts, the reads serve,
+  and each write answers 503 `writes_not_configured`. With the area off, the paths go on to
+  this API, which has no handler for them.
 - **Also runs untrusted code today:** openscad renders for the editor's checks and
   `openscad-lsp`, the latter under a no-network seccomp filter (`scadbuddy/editor/nonet.py:3-6`);
   #5296 moves them out.
@@ -98,6 +103,29 @@ flowchart LR
   the optional git remote.
 - **Zone.** The CRUD service: the only process meant to hold SQL access
   ([`CLAUDE.md` "Database access"](../../CLAUDE.md#database-access-5295)).
+
+## scadbuddy-core (Go)
+
+- **Runs.** `tools/go/core` (#7667) serves the areas that `SCADBUDDY_CORE_AREAS` names, in
+  front of the Python API, which it forwards the rest to ([`tools/go/core/README.md`](../../tools/go/core/README.md)).
+- **Inventory worker (#6949 K1).** With the area `inventory`, core also runs a Temporal worker
+  on the task queue `inventory` (`SCADBUDDY_TEMPORAL_TASK_QUEUE_INVENTORY`;
+  `tools/go/core/internal/inventory/activities`, `internal/temporalx`). It serves the 19
+  standalone activities `inventory.<Name>`, each one write of a kind, item, lot, unit or move.
+  It needs `SCADBUDDY_TEMPORAL_ADDRESS`, and the Python API reads through core's CRUD port
+  (`SCADBUDDY_CORE_CRUD_URL`).
+- **Library-run worker (#7204, #8489).** With `SCADBUDDY_TEMPORAL_ADDRESS` set and the area
+  `filament-presets` or `unknown-trays` named, core also runs one unversioned Temporal worker
+  on the task queue `filament-presets` (`SCADBUDDY_TEMPORAL_TASK_QUEUE_FILAMENT_PRESETS`;
+  `tools/go/core/internal/libraryrun`). It runs the workflow `LibraryRun`, whose one step is a
+  Python activity on `library`: `filament_preset_copy`, `filament_preset_edit`,
+  `filament_preset_mirror_again` or `filament_resolve_unknown_tray`. Without the address no
+  worker starts, the reads serve, and each write answers 503 `writes_not_configured` (plan
+  ruling P22).
+- **History subscriber.** `internal/history` writes the property and parameter history from
+  the event stream (row `history` of `event_subscribers`). A payload it cannot store stops
+  its cursor; the row's `stopped_seq` names that event, and the API's scrape exports it as
+  `scadbuddy_event_subscriber_stopped_seq` (#8074).
 
 ## Render worker
 
@@ -278,15 +306,16 @@ admit ScadBuddy's pods, the LAN's Gateway and, for `/github/webhook`, the SSO ho
 
 Core's area `unknown-trays` (`tools/go/core/internal/unknowntrays`; core serves it when
 `SCADBUDDY_CORE_AREAS` names it) has these routes. `GET /api/v1/filament/unknown-trays` lists the
-trays that a printer reports as loaded and no spool holds, with ranked candidates, and
-`POST …/{id}/dismiss` deletes a row. Both are public routes behind the person-auth gate
+trays that a printer reports as loaded and no spool holds, with ranked candidates,
+`POST …/{id}/resolve` links a spool to one, and `POST …/{id}/dismiss` deletes a row. All three
+are public routes behind the person-auth gate
 (`internal/auth`). The print worker's block read is `GET
 …/crud/print/filament/printers/{printer_id}/unknown-trays`, a CRUD route of caller `print`. Go
 writes no spool. The resolve write is Python's Temporal activity `filament_resolve_unknown_tray`
 (`backend/scadbuddy/filament/unknown_resolve.py`) on the `library` queue, which the API process
-serves, because the API alone holds the database secret (#5295). The Go resolve route that starts
-the activity is not built yet: it waits for a Temporal client in core (`internal/temporalx`). Until
-it exists, a resolve gets a 404. The feature is in
+serves, because the API alone holds the database secret (#5295). The Go resolve route starts it
+as a run of `LibraryRun` and waits 40 s (#8489); without `SCADBUDDY_TEMPORAL_ADDRESS` it answers
+503 `writes_not_configured`. The feature is in
 [spools-and-filament](../features/spools-and-filament.md#unknown-spools-7143).
 
 ## bambuddy-fs

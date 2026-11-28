@@ -128,7 +128,7 @@ def _items(
     conn: Conn, refs: list[str], values: dict[str, dict[str, Any]]
 ) -> dict[str, Completeness]:
     # Imported here: the inventory imports the entities package.
-    from scadbuddy.inventory.kinds import merged_schema
+    from scadbuddy.inventory.kinds import kind_item_schema
 
     ids = [UUID(ref) for ref in refs if _is_uuid(ref)]
     kind_of = {
@@ -143,7 +143,7 @@ def _items(
             found[ref] = Completeness()
             continue
         if kind_id not in schemas:
-            schemas[kind_id] = merged_schema(conn, kind_id)
+            schemas[kind_id] = kind_item_schema(conn, kind_id)
         found[ref] = completeness(schemas[kind_id], values[ref])
     return found
 

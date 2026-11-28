@@ -38,6 +38,7 @@ interface Draft {
   identifier: string
   capacity: string
   note: string
+  station: boolean
 }
 
 const TOP = '__top'
@@ -67,6 +68,7 @@ const draftOf = (node: LocationNode | undefined, kindId: string): Draft => ({
   identifier: node?.identifier ?? '',
   capacity: node?.capacity == null ? '' : String(node.capacity),
   note: node?.note ?? '',
+  station: node?.station ?? false,
 })
 
 /** #6262 — the Locations tab: the tree of places spools are kept in, and the form that adds or changes one. */
@@ -167,6 +169,7 @@ export function LocationsTab() {
       identifier: draft.identifier.trim() || null,
       capacity,
       note: draft.note.trim() || null,
+      station: draft.station,
     }
     setSaving(true)
     setFormError(null)
@@ -174,15 +177,17 @@ export function LocationsTab() {
       if (was) {
         // Only what changed: a patch that names a field the place keeps still counts as an edit.
         const changed: LocationPatch = {}
-        for (const key of Object.keys(values) as (keyof typeof values)[]) {
+        for (const key of Object.keys(values).filter((name) => name !== 'station') as Exclude<keyof typeof values, 'station'>[]) {
           if (values[key] !== (was[key] ?? null)) Object.assign(changed, { [key]: values[key] })
         }
+        if (values.station !== (was.station ?? false)) changed.station = values.station
         if (Object.keys(changed).length > 0) await upsertLocation(changed, was.id)
       } else {
         const body: LocationCreate = { name: values.name, kind_id: values.kind_id, sort_order: 0 }
         for (const key of ['parent_id', 'identifier', 'capacity', 'note'] as const) {
           if (values[key] !== null) Object.assign(body, { [key]: values[key] })
         }
+        if (values.station) body.station = true
         await upsertLocation(body)
       }
       setDraft(null)
@@ -314,6 +319,19 @@ export function LocationsTab() {
             Note
             <Input value={draft.note} onChange={(event) => setDraft({ ...draft, note: event.target.value })} />
           </label>
+          <div className="flex items-center gap-2 sm:col-span-2">
+            <Switch
+              id="place-station"
+              checked={draft.station}
+              onCheckedChange={(next) => setDraft({ ...draft, station: next })}
+            />
+            <label htmlFor="place-station">Station for flow tasks</label>
+            {draft.id && draft.station && (
+              <Link to={`/station/${draft.id}`} className="text-muted-foreground underline">
+                Open the station
+              </Link>
+            )}
+          </div>
           {formError && (
             <p role="alert" className="text-warn sm:col-span-2">
               {formError}

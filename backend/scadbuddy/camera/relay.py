@@ -340,9 +340,16 @@ class Relay:
             item = response.json()
         except ValueError:
             raise SourceError(f"the API sent an unreadable source for {printer_id}") from None
-        parsed = _parse(item)
         existing = await self._existing()
         self._held = set(existing)
+        try:
+            parsed = _parse(item)
+        except SourceRefusedError:
+            # With no path in MediaMTX (a silent restart deleted it), the feed reports
+            # `stopped`, as for a host off the LAN. A path MediaMTX still has is left.
+            if printer_id not in existing:
+                await self._remove(printer_id, False)
+            raise
         try:
             parsed = await _dialable(parsed)
         except SourceError:

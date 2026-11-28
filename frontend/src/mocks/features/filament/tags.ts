@@ -2,9 +2,9 @@ import { HttpResponse, http } from 'msw'
 import type { components } from '../../../api/schema'
 import { parseRgba } from '../../../lib/rgba'
 // `same_records`'s rule is the page's own `sameRecords`.
-import { recordsSha256, sameRecords } from '../../../lib/webNfc'
+import { ndefMessageBytes, recordsSha256, sameRecords } from '../../../lib/webNfc'
 import { newId } from '../../newId'
-import { bindOn, cleanTagUid, findByKey, holderOf, parseCode, resolveCodeText, resolvedSpool, seenTag, setOrigin, spoolRowOf, spoolViewOf, tagOf, tagRowOf } from './index'
+import { bindOn, cleanTagUid, findByKey, holderOf, parseCode, resolveCodeText, resolvedSpool, seenTag, setOrigin, spoolRowOf, spoolViewOf, tagOf, tagRowOf, type ChipRead } from './index'
 
 type S = components['schemas']
 
@@ -40,8 +40,19 @@ const OPENSPOOL_MEDIA = 'application/json'
 const text = (value: unknown) => (typeof value === 'string' && value.trim() ? value.trim() : null)
 
 function temp(value: unknown): number | null {
-  const number = typeof value === 'string' && /^\d{1,4}$/.test(value.trim()) ? Number(value) : null
+  const raw = typeof value === 'number' ? String(value) : value
+  const number = typeof raw === 'string' && /^\d{1,7}$/.test(raw.trim()) ? Number(raw) : null
   return number && number > 0 ? number : null
+}
+
+/** `_OPENSPOOL_KEYS`: the keys the decode reads into fields; any other is in `other_keys`. */
+const OPENSPOOL_KEYS = new Set(['protocol', 'version', 'type', 'color_hex', 'brand', 'min_temp', 'max_temp', 'subtype', 'bed_min_temp', 'bed_max_temp', 'alpha', 'additional_color_hexes', 'weight', 'diameter'])
+
+/** `_json_text`, as `JSON.stringify` writes it with Python's `", "` and `": "` separators. */
+function jsonText(value: unknown): string {
+  if (Array.isArray(value)) return `[${value.map(jsonText).join(', ')}]`
+  if (value && typeof value === 'object') return `{${Object.entries(value).map(([k, v]) => `${JSON.stringify(k)}: ${jsonText(v)}`).join(', ')}}`
+  return JSON.stringify(value) ?? 'null'
 }
 
 function utf8(hex: string): string | null {
@@ -70,14 +81,29 @@ export function decodeOpenSpool(records: readonly S['NdefRecord'][]): S['Decoded
     if (!obj || typeof obj !== 'object' || (obj as { protocol?: unknown }).protocol !== 'openspool') continue
     const tag = obj as Record<string, unknown>
     const hex = text(tag.color_hex)
+    let rgba = hex ? parseRgba(hex.startsWith('#') ? hex : `#${hex}`) : null
+    const alpha = text(tag.alpha)
+    if (rgba && alpha && /^[0-9a-f]{1,2}$/i.test(alpha)) rgba = rgba.slice(0, 7) + alpha.padStart(2, '0').toUpperCase()
+    const extra = Array.isArray(tag.additional_color_hexes)
+      ? tag.additional_color_hexes.slice(0, 4).map((one) => (typeof one === 'string' ? parseRgba(one.startsWith('#') ? one : `#${one}`) : null))
+      : []
+    const diameter = text(typeof tag.diameter === 'number' ? String(tag.diameter) : tag.diameter)
+    const other = Object.entries(tag).filter(([key]) => !OPENSPOOL_KEYS.has(key)).slice(0, 32)
     return {
       format: 'openspool',
       version: text(tag.version) ?? '',
       material: text(tag.type),
+      subtype: text(tag.subtype),
       brand: text(tag.brand),
-      rgba: hex ? parseRgba(hex.startsWith('#') ? hex : `#${hex}`) : null,
+      rgba,
+      extra_colours: extra.length > 0 && extra.every(Boolean) ? (extra as string[]) : null,
+      diameter_mm: diameter && Number(diameter) > 0 ? diameter : null,
       nozzle_temp_min: temp(tag.min_temp),
       nozzle_temp_max: temp(tag.max_temp),
+      bed_temp_min: temp(tag.bed_min_temp),
+      bed_temp_max: temp(tag.bed_max_temp),
+      label_weight_g: temp(tag.weight),
+      other_keys: other.length > 0 ? Object.fromEntries(other.map(([key, value]) => [key, jsonText(value).slice(0, 128)])) : null,
       warnings: [],
     }
   }
@@ -93,8 +119,13 @@ function draftOf(decoded: S['DecodedSpool']): S['SpoolCreate-Output'] | null {
     brand_id: decoded.brand ? findByKey('brands', decoded.brand) : null,
     subtype_id: decoded.subtype ? findByKey('subtypes', decoded.subtype, material) : null,
     rgba: decoded.rgba ?? null,
+    extra_colours: decoded.extra_colours ?? null,
+    diameter_mm: decoded.diameter_mm ?? null,
     nozzle_temp_min: decoded.nozzle_temp_min ?? null,
     nozzle_temp_max: decoded.nozzle_temp_max ?? null,
+    bed_temp_min: decoded.bed_temp_min ?? null,
+    bed_temp_max: decoded.bed_temp_max ?? null,
+    label_weight_g: decoded.label_weight_g ?? null,
     weight_locked: false,
   }
 }
@@ -160,17 +191,31 @@ const hexOfText = (value: string) => Array.from(new TextEncoder().encode(value),
 
 /** `_openspool_encode` for the spool as its routes answer it. */
 function openSpoolRecords(spool: NonNullable<ReturnType<typeof spoolViewOf>>): S['TagRecords'] {
-  const obj: Record<string, string> = { protocol: 'openspool', version: '1.0' }
+  const obj: Record<string, string | string[]> = { protocol: 'openspool', version: '1.0' }
   const warnings: string[] = []
+  const e = spool.effective
   if (spool.names?.material) obj.type = spool.names.material
   else warnings.push('type')
-  const rgba = spool.effective?.rgba ?? spool.rgba
-  if (rgba) obj.color_hex = rgba.replace('#', '').slice(0, 6).toUpperCase()
+  const rgba = (e?.rgba ?? spool.rgba)?.toUpperCase()
+  if (rgba) obj.color_hex = rgba.slice(1, 7)
   obj.brand = spool.names?.brand ?? 'Generic'
-  const min = spool.effective?.nozzle_temp_min
-  const max = spool.effective?.nozzle_temp_max
-  if (min != null) obj.min_temp = String(min)
-  if (max != null) obj.max_temp = String(max)
+  const extras = (e?.extra_colours ?? []).map((one) => one.toUpperCase().slice(1, 7))
+  if (extras.length > 4) warnings.push('additional_color_hexes')
+  const whole = (value: number | null | undefined) => (value == null ? null : String(value))
+  const alpha = rgba?.slice(7, 9)
+  const rest: Record<string, string | string[] | null> = {
+    min_temp: whole(e?.nozzle_temp_min),
+    max_temp: whole(e?.nozzle_temp_max),
+    subtype: spool.names?.subtype || null,
+    bed_min_temp: whole(e?.bed_temp_min),
+    bed_max_temp: whole(e?.bed_temp_max),
+    alpha: alpha && alpha !== 'FF' ? alpha : null,
+    additional_color_hexes: extras.length > 0 ? extras.slice(0, 4) : null,
+    weight: whole(e?.label_weight_g),
+    // `format(value.normalize(), "f")`: no trailing zeros.
+    diameter: e?.diameter_mm != null ? String(Number(e.diameter_mm)) : null,
+  }
+  for (const [key, value] of Object.entries(rest)) if (value != null) obj[key] = value
   return { format: 'openspool', records: [{ record_type: 'mime', media_type: OPENSPOOL_MEDIA, data_hex: hexOfText(JSON.stringify(obj)) }], warnings }
 }
 
@@ -241,7 +286,7 @@ function resolveRecords(records: readonly S['NdefRecord'][]): S['Resolved'] | nu
 }
 
 /** `read_on`: a reading's answer. A read with a UID finds or makes its tag, marked seen by `source`; with `bindSpoolId` it binds it there. */
-function readOn(uid: string | null, records: readonly S['NdefRecord'][], source: 'phone' | 'agent', bindSpoolId?: string | null): S['TagReadResult'] | Response {
+function readOn(uid: string | null, records: readonly S['NdefRecord'][], source: 'phone' | 'agent', bindSpoolId?: string | null, chip: ChipRead = {}): S['TagReadResult'] | Response {
   const decoded = decodeOpenSpool(records)
   if (bindSpoolId && uid === null) return problem(422, 'a tag with no UID cannot be bound', 'no_uid')
   if (uid === null) {
@@ -249,7 +294,7 @@ function readOn(uid: string | null, records: readonly S['NdefRecord'][], source:
     return { tag: null, spool: null, decoded, draft: decoded ? draftOf(decoded) : null, resolved, next: resolved ? 'open_code' : 'none' }
   }
   const kind = decoded ? 'ntag_openspool' : null
-  const tag = seenTag(uid, kind, source)
+  const tag = seenTag(uid, kind, source, chip)
   if (bindSpoolId) {
     const bound = bindOn(bindSpoolId, uid, null, kind ?? tag.kind, false)
     if (bound instanceof Response) return bound
@@ -308,9 +353,10 @@ export const handlers = [
     const uid = cleanTagUid(body.uid ?? null)
     const records = body.records ?? []
     if (job.kind === 'read') {
-      const found = readOn(uid, records, 'agent')
+      const chip = { chip: body.chip ?? null, max_ndef_bytes: body.max_ndef_bytes ?? null, writable: body.writable ?? null }
+      const found = readOn(uid, records, 'agent', null, chip)
       if (found instanceof Response) return found
-      return HttpResponse.json(Object.assign(job, { state: 'done', result: { ...found, uid, records } }))
+      return HttpResponse.json(Object.assign(job, { state: 'done', result: { ...found, uid, records, ...chip } }))
     }
     const backup = backups.find((one) => one.id === body.backup_id)
     if (!backup || uid === null || backup.reason !== 'agent_write' || backup.job_id !== job.id || backup.uid !== uid) return conflict('backup_mismatch', 'the backup does not cover this write')
@@ -340,7 +386,14 @@ export const handlers = [
     if (!spool) return problem(404, `no spool ${String(params.id)}`)
     const backup = covering(body, 'spool_write')
     if (backup instanceof Response) return backup
-    return HttpResponse.json(openSpoolRecords(spool))
+    const out = openSpoolRecords(spool)
+    // #8366: a message larger than the tag's last known capacity gets a warning.
+    const tag = tagOf(backup.tag_id)
+    const needs = ndefMessageBytes(out.records)
+    if (tag?.max_ndef_bytes != null && needs > tag.max_ndef_bytes) {
+      out.warnings = [...(out.warnings ?? []), `The records need ${needs} bytes, and ${tag.chip ? `this ${tag.chip}` : 'this tag'} holds ${tag.max_ndef_bytes}: the write would fail. Use a tag that holds more.`]
+    }
+    return HttpResponse.json(out)
   }),
   http.post(`${BASE}/spools/:id/tag-written`, async ({ params, request }) => {
     const body = (await request.json()) as S['TagWrittenIn']
@@ -378,7 +431,7 @@ export const handlers = [
   }),
   http.post(`${BASE}/tags/reads`, async ({ request }) => {
     const body = (await request.json()) as S['TagReadIn']
-    const found = readOn(cleanTagUid(body.uid), body.records ?? [], 'phone', body.bind_spool_id)
+    const found = readOn(cleanTagUid(body.uid), body.records ?? [], 'phone', body.bind_spool_id, body)
     return found instanceof Response ? found : HttpResponse.json(found)
   }),
 ]

@@ -1,6 +1,6 @@
 # Inventory kinds and handlers: one base model for every thing (design)
 
-Status: approved by the owner, 2026-11-25. Epic #6949. Proof: [`docs/inventory-model/`](../../inventory-model/README.md).
+Status: approved by the owner, 2026-11-25; K1 built (#6949, K1 1/7 to 7/7). Epic #6949. Proof: [`docs/inventory-model/`](../../inventory-model/README.md).
 
 This design replaces how a kind is defined in
 [`2026-11-21-inventory-and-purchasing-design.md`](2026-11-21-inventory-and-purchasing-design.md)

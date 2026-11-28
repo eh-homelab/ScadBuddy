@@ -9,6 +9,7 @@ from __future__ import annotations
 
 from collections.abc import Collection
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any
 from uuid import UUID
 
@@ -20,6 +21,10 @@ from scadbuddy.entities.refs import EntityRef
 from scadbuddy.orders.models import Actor
 
 Conn = Connection[DictRow]
+
+#: `EntityStore.ensure`'s statement, which Go's inventory store runs too (#7667 §5.1;
+#: `tools/go/core/internal/inventory/store` `EnsureEntity`).
+ENSURE_ENTITY_SQL = (Path(__file__).parent / "shared" / "ensure_entity.sql").read_text()
 
 
 @dataclass(frozen=True)
@@ -63,6 +68,7 @@ KINDS: dict[str, EntityKind] = {
         _kind("insert_type", "filament_insert_types", "uuid"),
         _kind("colour", "filament_colours", "uuid"),
         _kind("location_kind", "filament_location_kinds", "uuid"),
+        _kind("task", "tasks"),
         # A kind is a relationship's end (inventory K1, design §6.3).
         _kind("item_kind", "item_kinds"),
     )
@@ -105,9 +111,12 @@ def _ref_as_id(kind: EntityKind) -> str:
 
 def repoint_entity(conn: Conn, kind: str, gone: str, kept: str, by: Actor) -> None:
     """Make `kind:kept` own what `kind:gone` owned: its files, links and properties (a key
-    both have keeps `kept`'s value), and the stock moves that name it. For a merge that
-    deletes `gone`'s row and keeps `kept`'s (the printers' `PRINTER_REFERENCES`), in its
-    transaction; without it the sweep would take them as an orphan's. ``by`` is the
+    both have keeps `kept`'s value). For a merge that deletes `gone`'s row and keeps
+    `kept`'s (the printers' `PRINTER_REFERENCES`, its one caller), in its transaction;
+    without it the sweep would take them as an orphan's. The stock moves that name `gone`
+    are Go's to move (#6949 K1 Task 16): `MergePrinter` runs `inventory.Repoint` first, and
+    the merge checks that none is left (`printers/store.py` `_no_stock_names`), as a stock
+    move's foreign key would refuse the delete below (R-P2-4). ``by`` is the
     history's actor of each key moved or removed (`set_actor`, which takes the event
     log's lock before the rows below). A printer merge's caller set it already; the
     second call is harmless, as the lock is re-entrant."""
@@ -134,10 +143,6 @@ def repoint_entity(conn: Conn, kind: str, gone: str, kept: str, by: Actor) -> No
     )
     conn.execute(
         "UPDATE entity_links SET entity_id = %s WHERE entity_id = %s", (ids[kept], ids[gone])
-    )
-    # A stock move's foreign key would refuse the delete below (R-P2-4, #7067).
-    conn.execute(
-        "UPDATE stock_moves SET entity_id = %s WHERE entity_id = %s", (ids[kept], ids[gone])
     )
     conn.execute(
         "INSERT INTO entity_properties (entity_id, key, value, source, updated_at, updated_by)"
@@ -175,11 +180,7 @@ class EntityStore:
         """The registry row of `ref`, made on first use."""
         if not self.exists(conn, ref):
             raise EntityNotFound(str(ref))
-        row = conn.execute(
-            "INSERT INTO entities (kind, ref) VALUES (%s, %s)"
-            " ON CONFLICT (kind, ref) DO UPDATE SET kind = EXCLUDED.kind RETURNING id",
-            (ref.kind, ref.ref),
-        ).fetchone()
+        row = conn.execute(ENSURE_ENTITY_SQL, (ref.kind, ref.ref)).fetchone()
         assert row is not None
         return UUID(str(row["id"]))
 

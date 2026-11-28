@@ -52,7 +52,15 @@ from scadbuddy.core.secrets import Envelope, Kek, open_secret, seal_secret
 from scadbuddy.core.settings_cache import settings_written
 from scadbuddy.entities.actor import set_actor
 from scadbuddy.entities.registry import repoint_entity
+from scadbuddy.inventory.core_client import unavailable
 from scadbuddy.orders.models import Actor
+from scadbuddy.orders.stock_start import (
+    MERGE_PRINTER,
+    WAIT,
+    StockStarter,
+    WorkflowAccepted,
+    WorkflowRefused,
+)
 from scadbuddy.printers.models import (
     BambuddyView,
     LanLink,
@@ -163,6 +171,34 @@ class VirtualPrinterRowError(Exception):
     def __init__(self, printer_id: str) -> None:
         super().__init__(f"printer {printer_id} is a Bambuddy virtual printer")
         self.printer_id = printer_id
+
+
+class StockNamesPrinterError(Exception):
+    """A merge found stock rows that still name the printer it deletes (#6949 K1 Task 16):
+    Go writes them, so its `inventory.Repoint` moves them first (`MergePrinter`)."""
+
+    def __init__(self, gone: str, kept: str) -> None:
+        super().__init__(f"stock rows still name printer {gone}")
+        self.gone = gone
+        self.kept = kept
+
+
+class MergeChangedError(Exception):
+    """A merge's workflow found that the caller would now merge another pair of rows."""
+
+    def __init__(self, gone: str, kept: str) -> None:
+        super().__init__(f"the merge of printer {gone} into {kept} is no longer the one to make")
+        self.gone = gone
+        self.kept = kept
+
+
+class MergeRunningError(Exception):
+    """A merge's workflow still runs after the wait (`MergePrinter`); it ends by itself and
+    publishes ``printer.changed``. ``accepted`` names it."""
+
+    def __init__(self, accepted: WorkflowAccepted) -> None:
+        super().__init__(f"the printer merge {accepted.workflow_id} still runs")
+        self.accepted = accepted
 
 
 class LanLinkChangedError(Exception):
@@ -464,6 +500,64 @@ def _repoint_entity(conn: Connection[DictRow], gone: str, into: str, by: Actor) 
     repoint_entity(conn, "printer", gone, into, by)
 
 
+def _no_stock_names(conn: Connection[DictRow], gone: str, kept: str) -> None:
+    """The merge's check before it writes (#6949 K1 Task 16): the gone printer locked `FOR
+    UPDATE`, and both printers' entity rows (in id order, as `repoint_entity` locks them),
+    so no stock write can name it until the merge commits; then `StockNamesPrinterError`
+    when a stock row still names it (`stock_units.printer_id`, or a `stock_moves.entity_id`
+    of ``printer:<gone>``). Go is the one writer of those rows: its `inventory.Repoint`
+    moves them (`MergePrinter`), and the stock tables are not in `PRINTER_REFERENCES`."""
+    conn.execute("SELECT 1 FROM printers WHERE id = %s FOR UPDATE", (gone,))
+    conn.execute(
+        "SELECT id FROM entities WHERE kind = 'printer' AND ref = ANY(%s) ORDER BY id FOR UPDATE",
+        ([gone, kept],),
+    )
+    row = conn.execute(
+        "SELECT EXISTS (SELECT 1 FROM stock_units WHERE printer_id = %s)"
+        " OR EXISTS (SELECT 1 FROM stock_moves m JOIN entities e ON e.id = m.entity_id"
+        "  WHERE e.kind = 'printer' AND e.ref = %s) AS named",
+        (gone, gone),
+    ).fetchone()
+    if row is not None and row["named"]:
+        raise StockNamesPrinterError(gone, kept)
+
+
+def printer_problem(error: Exception) -> dict[str, Any] | None:
+    """A refusal of a merge's own checks as `MergePrinter` fails with it (R-K1-32); None for
+    any other error. `printer_error` reads it back."""
+    if isinstance(error, PrinterNotFoundError):
+        return {"code": "printer_not_found", "status": 404, "printer_id": error.printer_id}
+    if isinstance(error, SerialTakenError):
+        return {"code": "serial_taken", "status": 409, "existing_id": error.existing_id}
+    if isinstance(error, BambuddyLinkTakenError):
+        return {
+            "code": "bambuddy_link_taken",
+            "status": 409,
+            "existing_id": error.existing_id,
+            "bambuddy_printer_id": error.bambuddy_printer_id,
+        }
+    if isinstance(error, VirtualPrinterRowError):
+        return {"code": "virtual_printer_row", "status": 409, "printer_id": error.printer_id}
+    if isinstance(error, MergeChangedError):
+        return {"code": "merge_changed", "status": 409, "gone": error.gone, "kept": error.kept}
+    return None
+
+
+def printer_error(problem: dict[str, Any]) -> Exception:
+    code = problem.get("code")
+    if code == "printer_not_found":
+        return PrinterNotFoundError(str(problem["printer_id"]))
+    if code == "serial_taken":
+        return SerialTakenError(str(problem["existing_id"]))
+    if code == "bambuddy_link_taken":
+        return BambuddyLinkTakenError(
+            str(problem["existing_id"]), int(problem["bambuddy_printer_id"])
+        )
+    if code == "virtual_printer_row":
+        return VirtualPrinterRowError(str(problem["printer_id"]))
+    return MergeChangedError(str(problem.get("gone")), str(problem.get("kept")))
+
+
 #: Everything a merge repoints (I7 of the #4186 review). The extension point for every
 #: later table keyed by ``printers.id``.
 PRINTER_REFERENCES: tuple[PrinterReference | RepointHook, ...] = (
@@ -482,8 +576,6 @@ PRINTER_REFERENCES: tuple[PrinterReference | RepointHook, ...] = (
     PrinterReference("print_runs", "printer"),
     # #4747: the printer a Bambuddy virtual printer forwards to.
     PrinterReference("printers", "forwards_to"),
-    # #7067: the printer a stock unit is (inventory spec §6.4).
-    PrinterReference("stock_units", "printer_id"),
     # #4971: the plate remembered on a printer; the kept printer's own wins.
     PrinterReference("printer_bed_types", "printer", unique=True),
     # #4971: the LAN-only printer a Bambuddy project last printed on.
@@ -628,6 +720,9 @@ class PrinterStore:
         self.previous_kek = previous_kek
         #: Where a merge announces the two rows it touched (``printer.changed``).
         self.events = events
+        #: What starts `MergePrinter` (#6949 K1 Task 16) for a merge whose gone printer
+        #: stock rows name. Set by the printers component; None answers 503 for one.
+        self.merges: StockStarter | None = None
 
     @property
     def pool(self) -> Pool:
@@ -742,13 +837,29 @@ class PrinterStore:
             raise PrinterNotFoundError(printer_id)
         return _row(data)
 
-    def _merge(self, conn: Connection[DictRow], gone: str, kept: str, by: Actor) -> None:
+    def _merge(
+        self,
+        conn: Connection[DictRow],
+        gone: str,
+        kept: str,
+        by: Actor,
+        expect: tuple[str, str] | None = None,
+    ) -> None:
         """Make ``kept`` the printer ``gone`` was: every `PRINTER_REFERENCES` row naming
         ``gone`` names ``kept`` (a unique one is dropped when ``kept`` has its own), then
         ``gone`` is deleted. In the caller's transaction, under its lock. ``by`` is who
         merged: `set_actor` names it, and takes the event log's lock, before any hook
-        locks a row (the entities' rows, `entities/actor.py`)."""
+        locks a row (the entities' rows, `entities/actor.py`). `StockNamesPrinterError`
+        before anything is written when stock rows still name ``gone``
+        (`_no_stock_names`): the caller rolls back and starts `MergePrinter`. ``expect``
+        is the pair a `MergePrinter` run merges: another pair is `MergeChangedError`,
+        checked before the stock."""
         set_actor(conn, by)
+        # The pair first: a run whose pair changed must answer `merge_changed`, not
+        # ``again`` for stock its own Repoint never moves (fix round 1).
+        if expect is not None and expect != (gone, kept):
+            raise MergeChangedError(*expect)
+        _no_stock_names(conn, gone, kept)
         for ref in PRINTER_REFERENCES:
             if not isinstance(ref, PrinterReference):
                 ref(conn, gone, kept, by)
@@ -789,10 +900,31 @@ class PrinterStore:
                 ),
             )
 
-    def link_bambuddy(self, printer_id: str, bambuddy_printer_id: int, by: Actor) -> PrinterRow:
+    def link_bambuddy(
+        self, printer_id: str, bambuddy_printer_id: int, by: Actor, *, wait: float | None = WAIT
+    ) -> PrinterRow:
         """Link ``printer_id`` to a Bambuddy printer. A row `ensure_bambuddy` made for
         that Bambuddy printer while its serial was withheld (a synthetic serial, no LAN
-        link) is merged into this one (`_merge`, by ``by``); any other holder refuses."""
+        link) is merged into this one (`_merge`, by ``by``); any other holder refuses.
+
+        A merge whose gone row stock rows name is `MergePrinter` (#6949 K1 Task 16): this
+        transaction rolls back before it writes, and the workflow repoints the stock, then
+        runs it again. `MergeRunningError` when it takes longer than ``wait`` seconds (None:
+        no cap); it ends by itself."""
+        try:
+            return self._link(printer_id, bambuddy_printer_id, by)
+        except StockNamesPrinterError as named:
+            args = {"printer_id": printer_id, "bambuddy_printer_id": bambuddy_printer_id}
+            row, _ = self._merge_through(named, "link", args, by, wait)
+            return row
+
+    def _link(
+        self,
+        printer_id: str,
+        bambuddy_printer_id: int,
+        by: Actor,
+        expect: tuple[str, str] | None = None,
+    ) -> PrinterRow:
         merged: str | None = None
         with self.pool.connection() as conn, conn.transaction():
             conn.execute(_LOCK)
@@ -809,7 +941,7 @@ class PrinterStore:
             if holder is not None:
                 if not (is_synthetic_serial(holder.serial) and holder.lan_host is None):
                     raise BambuddyLinkTakenError(holder.id, bambuddy_printer_id)
-                self._merge(conn, holder.id, row.id, by)
+                self._merge(conn, holder.id, row.id, by, expect)
                 merged = holder.id
             linked = self._update(
                 conn,
@@ -824,6 +956,70 @@ class PrinterStore:
             settings_written()
             self._announce(merged, linked.id)
         return linked
+
+    def _merge_through(
+        self,
+        named: StockNamesPrinterError,
+        then: Literal["link", "ensure"],
+        args: dict[str, Any],
+        by: Actor,
+        wait: float | None,
+    ) -> tuple[PrinterRow, bool]:
+        """`MergePrinter` for the merge ``named`` found, waited for up to ``wait`` seconds:
+        the caller's row and whether it wrote. Its refusal is the caller's own error."""
+        if self.merges is None:
+            raise unavailable("ScadBuddy's background service is not set up here.")
+        try:
+            done = self.merges.start_and_wait(
+                MERGE_PRINTER,
+                {
+                    "gone": named.gone,
+                    "kept": named.kept,
+                    "then": then,
+                    "args": args,
+                    "actor": by.model_dump(mode="json"),
+                },
+                id=f"entity_merge:printer:{named.gone}:{named.kept}",
+                wait=wait,
+            )
+        except WorkflowRefused as refused:
+            raise printer_error(refused.problem) from None
+        if isinstance(done, WorkflowAccepted):
+            raise MergeRunningError(done)
+        return PrinterRow.model_validate(done.body["row"]), bool(done.body.get("wrote"))
+
+    def merge_commit(
+        self,
+        gone: str,
+        kept: str,
+        then: Literal["link", "ensure"],
+        args: dict[str, Any],
+        by: Actor,
+    ) -> dict[str, Any]:
+        """`MergePrinter`'s second step (`printers_merge_commit`): the caller's whole
+        transaction as it runs without a workflow (`link_bambuddy`'s, or
+        `ensure_bambuddy_written`'s), which merges ``gone`` into ``kept``. ``{row, wrote}``;
+        ``{again: true}`` when a stock row named ``gone`` again meanwhile (it rolled back).
+        The caller's own refusals are raised."""
+        try:
+            if then == "link":
+                row = self._link(
+                    args["printer_id"], int(args["bambuddy_printer_id"]), by, (gone, kept)
+                )
+                return {"row": row.model_dump(mode="json"), "wrote": True}
+            listed = args.get("listed")
+            row, wrote = self._ensure_tx(
+                int(args["bambuddy_printer_id"]),
+                serial=args.get("serial"),
+                name=args["name"],
+                model=args.get("model"),
+                listed=None if listed is None else frozenset(listed),
+                by=by,
+                expect=(gone, kept),
+            )
+            return {"row": row.model_dump(mode="json"), "wrote": wrote}
+        except StockNamesPrinterError:
+            return {"again": True}
 
     def mark_bambuddy_active(self, active: Iterable[int]) -> None:
         """Record which linked Bambuddy printers Bambuddy lists as active now, so a strip
@@ -992,10 +1188,18 @@ class PrinterStore:
         listed: set[int] | frozenset[int] | None = None,
         by: Actor,
     ) -> PrinterRow:
-        """`ensure_bambuddy_written`'s row, for the callers that need only the row."""
-        row, _ = self.ensure_bambuddy_written(
-            bambuddy_printer_id, serial=serial, name=name, model=model, listed=listed, by=by
-        )
+        """`ensure_bambuddy_written`'s row, for the callers that need only the row. While a
+        merge's workflow still runs after the wait, the row linking the Bambuddy printer as
+        it is now."""
+        try:
+            row, _ = self.ensure_bambuddy_written(
+                bambuddy_printer_id, serial=serial, name=name, model=model, listed=listed, by=by
+            )
+        except MergeRunningError:
+            found = self.by_bambuddy_id(bambuddy_printer_id)
+            if found is None:
+                raise
+            return found
         return row
 
     def ensure_bambuddy_written(
@@ -1007,6 +1211,7 @@ class PrinterStore:
         model: str | None,
         listed: set[int] | frozenset[int] | None = None,
         by: Actor,
+        wait: float | None = WAIT,
     ) -> tuple[PrinterRow, bool]:
         """The row for a Bambuddy printer, and whether this call wrote anything, decided
         under the lock (#4861: an adoption another caller made meanwhile is not this
@@ -1020,7 +1225,11 @@ class PrinterStore:
 
         ``listed`` is every id Bambuddy lists now; ``None`` treats every link as live.
         The known case (a row links this id and has nothing to adopt) is read without
-        the lock, so a strip read waits on no writer."""
+        the lock, so a strip read waits on no writer.
+
+        A merge whose gone row stock rows name is `MergePrinter` (#6949 K1 Task 16), as in
+        `link_bambuddy`: `MergeRunningError` when it takes longer than ``wait`` seconds
+        (None: no cap, the print worker's CRUD route)."""
         with self.pool.connection() as conn:
             # One read: the linking row, and whether the serial's row is one the user
             # unlinked from this Bambuddy printer (then there is nothing to adopt).
@@ -1035,6 +1244,32 @@ class PrinterStore:
             return linked, False
         if linked is not None and not self._adopts(linked, serial):
             return linked, False
+        try:
+            return self._ensure_tx(
+                bambuddy_printer_id, serial=serial, name=name, model=model, listed=listed, by=by
+            )
+        except StockNamesPrinterError as named:
+            args = {
+                "bambuddy_printer_id": bambuddy_printer_id,
+                "serial": serial,
+                "name": name,
+                "model": model,
+                "listed": None if listed is None else sorted(listed),
+            }
+            return self._merge_through(named, "ensure", args, by, wait)
+
+    def _ensure_tx(
+        self,
+        bambuddy_printer_id: int,
+        *,
+        serial: str | None,
+        name: str,
+        model: str | None,
+        listed: set[int] | frozenset[int] | None,
+        by: Actor,
+        expect: tuple[str, str] | None = None,
+    ) -> tuple[PrinterRow, bool]:
+        """`ensure_bambuddy_written`'s transaction under the lock."""
         merged: tuple[str, str] | None = None
         with self.pool.connection() as conn, conn.transaction():
             conn.execute(_LOCK)
@@ -1049,6 +1284,7 @@ class PrinterStore:
                 model=model,
                 listed=listed,
                 by=by,
+                expect=expect,
             )
         if merged is not None:
             settings_written()  # after the commit, as in `link_bambuddy`
@@ -1070,6 +1306,7 @@ class PrinterStore:
         model: str | None,
         listed: set[int] | frozenset[int] | None,
         by: Actor,
+        expect: tuple[str, str] | None = None,
     ) -> tuple[PrinterRow, tuple[str, str] | None, bool]:
         """The row, the merge it made (gone, kept), and whether it wrote."""
 
@@ -1103,7 +1340,7 @@ class PrinterStore:
                     _forget_read_intervals(conn, holder.id)
                 merged = None
                 if linked is not None:  # the synthetic row made meanwhile is this printer
-                    self._merge(conn, linked.id, holder.id, by)
+                    self._merge(conn, linked.id, holder.id, by, expect)
                     merged = (linked.id, holder.id)
                 row = self._update(
                     conn, holder.id, "bambuddy_printer_id = %s", (bambuddy_printer_id,)

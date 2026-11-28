@@ -150,6 +150,7 @@ TOKENS: list[dict[str, Any]] = [
         "revoked": -10,
     },
     {"name": "expired", "number": 5, "scope": "write", "expires": -1, "last_used": None},
+    {"name": "fleet", "number": 6, "scope": "fleet", "expires": 90 * DAY, "last_used": None},
 ]
 #: The `service_credentials` rows; `suspended` callers are in `service_caller_suspensions`.
 CREDENTIALS: list[dict[str, Any]] = [
@@ -248,6 +249,7 @@ CALLER_CASES: list[tuple[str, dict[str, str]]] = [
     ("a write token", {"authorization": f"Bearer {P['write']}"}),
     ("a read token", {"authorization": f"Bearer {P['read']}"}),
     ("a token used a moment ago", {"authorization": f"Bearer {P['fresh']}"}),
+    ("a fleet token", {"authorization": f"Bearer {P['fleet']}"}),
     ("a revoked token", {"authorization": f"Bearer {P['revoked']}"}),
     ("an expired token", {"authorization": f"Bearer {P['expired']}"}),
     ("an unknown token", {"authorization": f"Bearer {_bearer('sbpat_', 9, 'unknown')}"}),
@@ -298,6 +300,7 @@ MODE_CALLERS: dict[str, dict[str, str]] = {
     "delegated": {"cookie": f"{COOKIE}={S['delegated']}"},
     "token-read": {"authorization": f"Bearer {P['read']}"},
     "token-write": {"authorization": f"Bearer {P['write']}"},
+    "token-fleet": {"authorization": f"Bearer {P['fleet']}"},
     "service-agent": {"authorization": f"Bearer {C['agent']}"},
     "service-render": {"authorization": f"Bearer {C['render']}"},
     "service-projects": {"authorization": f"Bearer {C['projects']}"},
@@ -311,6 +314,7 @@ MODE_CLASSES = [
     "internal.outputs",
     "crud.agent",
     "crud.render",
+    "crud.fleet-rotator",
     "transfer",
     "exchange",
 ]
@@ -344,6 +348,7 @@ REFUSE_CALLERS = {
     "person-break_glass": Person(_session("break_glass")),
     "token-read": PersonalToken("0000000000000001", f"user:{ISSUER}#alice", "read"),
     "token-write": PersonalToken("0000000000000002", f"user:{ISSUER}#alice", "write"),
+    "token-fleet": PersonalToken("0000000000000006", f"user:{ISSUER}#alice", "fleet"),
     "service-agent-api": Service("agent", frozenset({"api", "crud.agent"})),
     "service-agent-crud": Service("agent", frozenset({"crud.agent"})),
     "service-render": Service("render", frozenset({"crud.render"})),
@@ -369,6 +374,7 @@ ALL_CLASSES = [
     "crud.camera",
     "crud.camera-relay",
     "crud.fleet",
+    "crud.fleet-rotator",
     "flow.host",
 ]
 REASONS = [

@@ -634,6 +634,45 @@ func TestTheFoldKeepsTheTrayTagsNote(t *testing.T) {
 	}
 }
 
+// #8366: the app's chip, capacity and writable reach Python, which keeps them on the tag.
+func TestAReadsChipGoesToPython(t *testing.T) {
+	h := newHarness(t)
+	// A photo or position makes core write the body again for Python (stripScan): the chip stays.
+	body := map[string]any{"uid": "04C10001", "records": []any{}, "chip": "NTAG215", "max_ndef_bytes": 496, "writable": true,
+		"location": map[string]any{"lat": 1.0, "lon": 2.0, "at": time.Now().UTC().Format(time.RFC3339)}}
+	if status, answer := h.post(body); status != http.StatusOK {
+		t.Fatalf("%d %v", status, answer)
+	}
+	got := h.py.bodies[0]
+	if got["chip"] != "NTAG215" || got["max_ndef_bytes"] != 496.0 || got["writable"] != true || got["location"] != nil {
+		t.Errorf("python got %v", got)
+	}
+}
+
+// #8366: a fold keeps the newer chip read of the two tags, as it keeps the newer last-seen fields.
+func TestTheFoldKeepsTheNewerChip(t *testing.T) {
+	for _, c := range []struct {
+		name     string
+		trayRead any
+		want     string
+	}{{"tray tag never read", nil, "NTAG215 496"}, {"tray tag read later", "2026-11-27T12:00:00Z", "NTAG216 868"}} {
+		t.Run(c.name, func(t *testing.T) {
+			h := newHarness(t)
+			h.exec(`INSERT INTO filament_tags (kind, tag_uid, tray_uuid, chip, max_ndef_bytes, chip_read_at)
+ VALUES ('bambu_mifare', $1, $2, CASE WHEN $3::timestamptz IS NULL THEN NULL ELSE 'NTAG216' END,
+ CASE WHEN $3::timestamptz IS NULL THEN NULL ELSE 868 END, $3::timestamptz)`, uidA+"00000100", tray, c.trayRead)
+			h.exec(`INSERT INTO filament_tags (kind, tag_uid, chip, max_ndef_bytes, writable, chip_read_at)
+ VALUES ('other', $1, 'NTAG215', 496, true, '2026-11-27T06:00:00Z')`, uidB+"00000100")
+			if status, answer := h.post(mifareRead(uidB, block0B+" "+shared)); status != http.StatusOK {
+				t.Fatalf("%d %v", status, answer)
+			}
+			if got := h.one("SELECT chip || ' ' || max_ndef_bytes FROM filament_tags"); got != c.want {
+				t.Errorf("chip = %v", got)
+			}
+		})
+	}
+}
+
 // Review of #8161: a body over bodyMax goes to Python whole, which answers its own refusal.
 func TestAnOversizeBodyGoesToPythonWhole(t *testing.T) {
 	h := newHarness(t)

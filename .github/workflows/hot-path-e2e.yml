@@ -24,6 +24,10 @@
 # login, behind an https edge and the fake issuer (e2e-stack/compose.auth.yaml), in the
 # Playwright image's Chromium, Firefox and WebKit (frontend/e2e/real-auth.spec.ts), in
 # `observe` and then, the same app restarted, in `enforce` (#4975 phase 8).
+#
+# #6949 K1: the stack also runs scadbuddy-core (tools/go/core/Dockerfile), and `run.sh`
+# runs frontend/e2e/inventory-core.spec.ts once, on the first mode's stack: the
+# inventory's writes go from the API through Temporal to core's worker.
 name: Hot path e2e
 
 on:
@@ -174,6 +178,17 @@ jobs:
             type=registry,ref=ghcr.io/eh-homelab/scadbuddy-slicer:buildcache
             type=gha,scope=hot-path-slicer
           cache-to: type=gha,scope=hot-path-slicer,mode=min
+
+      # scadbuddy-core, for the inventory spec (#6949 K1): its own scope at mode=min.
+      - name: Build the core image
+        uses: docker/build-push-action@v7
+        with:
+          context: .
+          file: tools/go/core/Dockerfile
+          load: true
+          tags: scadbuddy-core:hot-path
+          cache-from: type=gha,scope=hot-path-core
+          cache-to: type=gha,scope=hot-path-core,mode=min
 
       - uses: actions/setup-node@v7
         with:

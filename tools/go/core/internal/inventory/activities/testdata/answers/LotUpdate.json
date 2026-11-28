@@ -1,0 +1,22 @@
+{
+  "cost_currency": null,
+  "cost_unknown": false,
+  "created_by": {
+    "kind": "browser",
+    "principal": "p1",
+    "run_id": null,
+    "session": null
+  },
+  "foreign_unit_cost_minor": null,
+  "id": "00000000-0000-4000-8000-000000000001",
+  "invoice_line_id": null,
+  "item_id": "00000000-0000-4000-8000-000000000002",
+  "location_id": null,
+  "note": "box 2",
+  "on_hand": "10",
+  "origin": "manual",
+  "production_run_id": null,
+  "received_at": "2026-11-26T12:00:00Z",
+  "received_qty": "10",
+  "unit_cost_minor": "8"
+}

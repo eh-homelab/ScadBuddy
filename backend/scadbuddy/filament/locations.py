@@ -206,15 +206,21 @@ class LocationStore:
     def __init__(self, pool: ConnectionPool[Conn]) -> None:
         self._pool = pool
 
-    def tree(self, *, include_archived: bool = False) -> list[m.LocationNode]:
+    def tree(
+        self, *, include_archived: bool = False, station: bool = False
+    ) -> list[m.LocationNode]:
         """The places nested under their parents, each level by sort order then name, with
         the number of unarchived spools in each. Archived places are left out unless
-        ``include_archived``; a place whose parent is left out is then a root."""
-        where = "" if include_archived else " WHERE archived_at IS NULL"
+        ``include_archived``; a place whose parent is left out is then a root. With
+        ``station``, only the stations (#8062), flat and by name."""
+        conditions = [] if include_archived else ["archived_at IS NULL"]
+        if station:
+            conditions.append("station")
+        where = f" WHERE {' AND '.join(conditions)}" if conditions else ""
+        order = "upper(name), id" if station else "sort_order, upper(name), id"
         with self._pool.connection() as conn:
             rows = conn.execute(
-                f"SELECT {_COLUMNS} FROM filament_locations{where}"
-                " ORDER BY sort_order, upper(name), id"
+                f"SELECT {_COLUMNS} FROM filament_locations{where} ORDER BY {order}"
             ).fetchall()
             counts = {
                 row["location_id"]: row["n"]
@@ -232,7 +238,9 @@ class LocationStore:
         }
         roots: list[m.LocationNode] = []
         for node in nodes.values():
-            parent = nodes.get(node.parent_id) if node.parent_id is not None else None
+            parent = (
+                nodes.get(node.parent_id) if node.parent_id is not None and not station else None
+            )
             (roots if parent is None else parent.children).append(node)
         return roots
 

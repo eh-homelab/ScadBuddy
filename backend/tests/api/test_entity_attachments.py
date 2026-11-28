@@ -8,9 +8,13 @@ import uuid
 from typing import Any
 
 import pytest
+from botocore.exceptions import ConnectTimeoutError
 from fastapi.testclient import TestClient
 
 from scadbuddy.api.attachment_serving import INERT
+from scadbuddy.entities.component import ENTITIES
+from scadbuddy.orders import attachments as attachments_module
+from scadbuddy.orders.store import ATTACHMENT_HOLDER
 from tests.api.test_order_attachments import PAGE, attach, png, shop
 from tests.api.test_settings_runtime import _state
 from tests.support.operations import press
@@ -200,3 +204,66 @@ def test_a_print_archive_lists_its_print_attachments(client: TestClient) -> None
         "",
     )
     assert client.get("/api/v1/entities/print_archive:42/attachments").json() == {"attachments": []}
+
+
+def _rows_and_holds(client: TestClient, entity: str) -> tuple[list[str], list[str]]:
+    with _state(client).refs.pool.connection() as conn:
+        rows = conn.execute(
+            "SELECT id FROM entity_attachments WHERE subject = %s", (entity,)
+        ).fetchall()
+        ids = [str(row["id"]) for row in rows]
+        holds = conn.execute(
+            "SELECT holder_id FROM blob_refs WHERE holder_kind = %s AND holder_id = ANY(%s)",
+            (ATTACHMENT_HOLDER, ids),
+        ).fetchall()
+    return ids, [str(row["holder_id"]) for row in holds]
+
+
+def test_a_connect_timeout_to_the_store_is_tried_again(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#8471: a connect timeout that outlasts the store client's own retries fails the
+    run's first attempt; the next attempt adds the file, once."""
+    entity = _supplier(client)
+    keep = attachments_module.keep
+    calls = 0
+
+    async def flaky(*args: Any) -> str:
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            raise ConnectTimeoutError(endpoint_url="https://store.test/piece/x")
+        return await keep(*args)
+
+    monkeypatch.setattr(attachments_module, "keep", flaky)
+    added = upload(client, entity, png(), "label.png", role="filament_label")
+    assert added.status_code == 200, added.text
+    assert calls == 2
+    assert _rows_and_holds(client, entity) == ([added.json()["id"]], [added.json()["id"]])
+
+
+def test_a_run_that_committed_then_failed_adds_one_row(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#8471: the row's id is the operation's, so the attempt after one that committed
+    the row and then failed (its reply lost) finds that row instead of adding another."""
+    entity = _supplier(client)
+    store = _state(client).components.get(ENTITIES).attachments
+    add = store.add
+    calls = 0
+
+    def committed_then_lost(*args: Any, **kwargs: Any) -> Any:
+        nonlocal calls
+        calls += 1
+        added = add(*args, **kwargs)
+        if calls == 1:
+            raise RuntimeError("the worker stopped after the commit")
+        return added
+
+    monkeypatch.setattr(store, "add", committed_then_lost)
+    added = upload(client, entity, png(), "label.png")
+    assert added.status_code == 200, added.text
+    assert calls == 2
+    assert _rows_and_holds(client, entity) == ([added.json()["id"]], [added.json()["id"]])
+    listed = client.get(f"/api/v1/entities/{entity}/attachments").json()["attachments"]
+    assert [a["id"] for a in listed] == [added.json()["id"]]

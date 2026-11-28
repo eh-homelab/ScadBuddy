@@ -98,7 +98,11 @@ BODY_IDLE: Final = 60.0
 #: 4.5 MB/s, well below the pod network's speed.
 REQUEST_DEADLINE: float = 60.0
 #: After an early refusal, how long the sandbox reads and drops the unread body so the
-#: client sees the answer, not a reset.
+#: client sees the answer, not a reset: this, plus the time the announced body takes at
+#: the rate `REQUEST_DEADLINE` allows a whole body (`linger`, #8363). The client sends
+#: the whole body before it reads the answer, so a close before the body is in resets it.
+#: A body past `MAX_MODEL_FILE_BYTES` (413) is never read whole and gets `LINGER` alone
+#: (#8398): that client may be reset, by design.
 LINGER: Final = 0.5
 _CHUNK: Final = 1 << 20
 _TOKEN: Final = re.compile(r"[!#$%&'*+\-.^_`|~0-9A-Za-z]+")
@@ -525,6 +529,16 @@ async def _receive(reader: asyncio.StreamReader, box_fd: int, length: int, deadl
         os.close(fd)
 
 
+def linger(unread: int | None) -> float:
+    """How long `_send` reads and drops ``unread`` bytes (None: unknown) after an early
+    refusal (#8363): `LINGER`, plus the body at the rate of `MAX_MODEL_FILE_BYTES` in
+    `REQUEST_DEADLINE`. 64 MiB is about 15 s more; the read stops once the body is in. A
+    body past the cap (413) is never read whole, so it keeps `LINGER` (#8398)."""
+    if unread is None or unread > MAX_MODEL_FILE_BYTES:
+        return LINGER
+    return LINGER + REQUEST_DEADLINE * unread / MAX_MODEL_FILE_BYTES
+
+
 async def _send(
     writer: asyncio.StreamWriter,
     status: int,
@@ -535,7 +549,7 @@ async def _send(
     unread: int | None = 0,
 ) -> None:
     """The answer, then ``Connection: close``. With ``reader``, a body left unread
-    (``unread`` bytes, None: unknown) is read and dropped for at most `LINGER`, so the
+    (``unread`` bytes, None: unknown) is read and dropped for at most `linger`, so the
     client reads the answer rather than a reset."""
     lines = [f"HTTP/1.1 {status} {_REASONS[status]}"]
     lines += [f"{name}: {value}" for name, value in headers.items()]
@@ -547,7 +561,7 @@ async def _send(
     with suppress(Exception):
         writer.write_eof()
     loop = asyncio.get_running_loop()
-    deadline = loop.time() + LINGER
+    deadline = loop.time() + linger(unread)
     left = unread
     with suppress(Exception):
         while left is None or left > 0:

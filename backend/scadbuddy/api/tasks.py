@@ -30,6 +30,7 @@ from scadbuddy.api.operations import (
     run_operation,
 )
 from scadbuddy.auth.component import CallerDep
+from scadbuddy.codes.parse import parse_code
 from scadbuddy.core.authorship import browser_principal
 from scadbuddy.core.events import TASK_PLACE_CHAR, TASK_PLACE_MAX
 from scadbuddy.core.problems import PROBLEM_MEDIA_TYPE, ApiError
@@ -50,6 +51,7 @@ from scadbuddy.tasks.models import (
     Task,
     TaskQuestion,
     TaskState,
+    folded_place,
     json_fits,
 )
 from scadbuddy.tasks.validate import validate_answer
@@ -57,6 +59,7 @@ from scadbuddy.workflows.payload_codec import SubjectForgottenError
 
 INVALID_ANSWER = "https://scadbuddy.dev/problems/tasks/invalid-answer"
 MAX_TASKS: Final = 200
+MAX_CODE_CHARS: Final = 40
 #: An answer of `MAX_JSON_BYTES` with its characters escaped, and the body around it.
 MAX_BODY_BYTES: Final = 128 * 1024
 
@@ -116,11 +119,32 @@ def list_tasks(
         str | None,
         Query(min_length=1, max_length=TASK_PLACE_MAX, pattern=rf"^{TASK_PLACE_CHAR}+$"),
     ] = None,
+    code: Annotated[
+        str | None,
+        Query(max_length=MAX_CODE_CHARS, description="A scanned code, in any case, such as `l-7`."),
+    ] = None,
+    assignee: Annotated[Literal["me"] | None, Query()] = None,
     limit: Annotated[int, Query(ge=1, le=MAX_TASKS)] = 100,
 ) -> TaskList:
     """The tasks in ``state``, at ``place`` when it is given, oldest first. Without their
-    answers: ``GET /tasks/{id}`` has one task's own."""
-    return TaskList(tasks=tasks.store.list(state=state, place=place, limit=limit))
+    answers: ``GET /tasks/{id}`` has one task's own. With ``code``, the open tasks that
+    expect that code or its kind (422 for text that is no code). With ``assignee=me``,
+    the tasks for the signed-in person."""
+    parsed = None
+    if code is not None:
+        parsed = parse_code(code)
+        if parsed is None:
+            raise ApiError(status.HTTP_422_UNPROCESSABLE_CONTENT, "That is not a code.")
+    return TaskList(
+        tasks=tasks.store.list(
+            state=state,
+            # A task opened before #8062 kept its place as it was given (`l7`).
+            places=None if place is None else (place, folded_place(place)),
+            code=parsed,
+            assignee=browser_principal()[:MAX_BY_CHARS] if assignee == "me" else None,
+            limit=limit,
+        )
+    )
 
 
 @router.get(
@@ -235,6 +259,10 @@ async def answer_task(
         if task.state != "open":
             raise task_not_open(task.state)
         problems = await asyncio.to_thread(validate_answer, task.schema_, answer)
+        if not problems:
+            problems = await asyncio.to_thread(
+                tasks.store.answer_problems, task.id, task.schema_, answer
+            )
         if problems:
             raise ApiError(
                 status.HTTP_422_UNPROCESSABLE_CONTENT,

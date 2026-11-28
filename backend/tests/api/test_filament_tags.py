@@ -778,3 +778,99 @@ def test_python_checks_a_reads_photo_and_position_and_leaves_them_to_core(
     assert got.status_code == 200, got.text
     body["location"] = {"lat": 91, "lon": 0, "at": "2026-11-27T04:00:00Z"}
     assert client.post(READS, json=body).status_code == 422
+
+
+def test_a_clear_backup_is_kept_with_its_reason(client: TestClient) -> None:
+    # #8362: the phone backs a tag up before it writes it empty.
+    made = client.post(BACKUPS, json={"uid": "04:cc", "records": [_REC], "reason": "clear"})
+    assert made.status_code == 201, made.text
+    tag = client.post(READS, json={"uid": "04cc", "records": []}).json()["tag"]
+    [row] = client.get(f"/api/v1/filament/tags/{tag['id']}/backups").json()
+    assert row["reason"] == "clear" and row["records"][0]["data_hex"] == "7b7d"
+
+
+def test_an_unbind_after_a_clear_records_the_reason_cleared(client: TestClient) -> None:
+    spool = _spool(client)
+    read = client.post(READS, json={"uid": "04dd", "records": [], "bind_spool_id": spool["id"]})
+    tag_id = read.json()["tag"]["id"]
+    binding = f"/api/v1/filament/tags/{tag_id}/binding"
+    assert client.delete(binding, params={"reason": "x"}).status_code == 422
+    closed = client.delete(binding, params={"reason": "cleared"})
+    assert closed.status_code == 200, closed.text
+    assert closed.json()["reason"] == "cleared" and closed.json()["unbound_at"] is not None
+    events = client.get(f"{SPOOLS}/{spool['id']}/events").json()
+    unbound = [one for one in events if one["kind"] == "tag_unbound"]
+    assert unbound and unbound[-1]["data"]["reason"] == "cleared"
+
+
+def test_a_read_keeps_the_chip_and_every_tag_answer_carries_it(client: TestClient) -> None:
+    """#8366: the app's chip, capacity and writable go on the tag; a value a read leaves out
+    (a Web NFC read leaves out all three) keeps the last known one."""
+    got = client.post(
+        READS,
+        json={"uid": "04:c1:00:01", "chip": "NTAG215", "max_ndef_bytes": 496, "writable": True},
+    )
+    assert got.status_code == 200, got.text
+    tag = got.json()["tag"]
+    assert (tag["chip"], tag["max_ndef_bytes"], tag["writable"]) == ("NTAG215", 496, True)
+    assert tag["chip_read_at"]
+    again = client.post(READS, json={"uid": "04:c1:00:01", "writable": False}).json()["tag"]
+    assert (again["chip"], again["max_ndef_bytes"], again["writable"]) == ("NTAG215", 496, False)
+    plain = client.post(READS, json={"uid": "04:c1:00:01"}).json()["tag"]
+    assert plain["chip_read_at"] == again["chip_read_at"]
+    detail = client.get(f"{TAGS}/{tag['id']}").json()
+    assert (detail["chip"], detail["max_ndef_bytes"], detail["writable"]) == ("NTAG215", 496, False)
+    listed = client.get(TAGS, params={"include_unbound": True}).json()
+    assert [t["chip"] for t in listed if t["id"] == tag["id"]] == ["NTAG215"]
+
+
+def test_a_tag_never_read_by_the_app_has_no_chip(client: TestClient) -> None:
+    tag = client.post(READS, json={"uid": "04:c1:00:02"}).json()["tag"]
+    assert tag["chip"] is None and tag["max_ndef_bytes"] is None and tag["writable"] is None
+    assert tag["chip_read_at"] is None
+
+
+@pytest.mark.parametrize(
+    "field", [{"chip": ""}, {"chip": "x" * 33}, {"max_ndef_bytes": -1}, {"max_ndef_bytes": 70000}]
+)
+def test_a_chip_out_of_bounds_is_422(client: TestClient, field: dict[str, object]) -> None:
+    assert client.post(READS, json={"uid": "04:c1:00:03"} | field).status_code == 422
+
+
+def test_a_read_job_answers_and_keeps_the_chip(client: TestClient) -> None:
+    """#8366: the probe is a `read` job, and its result carries what the page read of the chip."""
+    job_id = _armed(client, "read")
+    done = client.post(
+        f"{JOBS}/{job_id}/result",
+        json={"uid": "04:c1:00:04", "chip": "NTAG213", "max_ndef_bytes": 137, "writable": True},
+    )
+    assert done.status_code == 200, done.text
+    result = done.json()["result"]
+    assert (result["chip"], result["max_ndef_bytes"], result["writable"]) == ("NTAG213", 137, True)
+    assert result["tag"]["chip"] == "NTAG213" and result["tag"]["max_ndef_bytes"] == 137
+
+
+def test_a_read_job_with_no_chip_answers_nulls(client: TestClient) -> None:
+    job_id = _armed(client, "read")
+    result = client.post(f"{JOBS}/{job_id}/result", json={"uid": "04:c1:00:05"}).json()["result"]
+    assert result["chip"] is None and result["max_ndef_bytes"] is None
+    assert result["writable"] is None
+
+
+def test_tag_records_warn_when_the_tag_is_too_small(client: TestClient) -> None:
+    """#8366: an OpenSpool record is larger than a tag of 40 bytes, so `tag-records` warns."""
+    spool = _spool(client)
+    uid = "04:c1:00:06"
+    client.post(READS, json={"uid": uid, "chip": "NTAG213", "max_ndef_bytes": 40})
+    got = _records(client, spool["id"], uid=uid)
+    assert got.status_code == 200, got.text
+    assert any("this NTAG213 holds 40" in w for w in got.json()["warnings"]), got.json()
+
+
+def test_tag_records_do_not_warn_for_a_tag_that_holds_them(client: TestClient) -> None:
+    spool = _spool(client)
+    uid = "04:c1:00:07"
+    client.post(READS, json={"uid": uid, "chip": "NTAG216", "max_ndef_bytes": 868})
+    got = _records(client, spool["id"], uid=uid)
+    assert got.status_code == 200, got.text
+    assert not any("holds" in w for w in got.json()["warnings"]), got.json()

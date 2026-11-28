@@ -142,13 +142,17 @@ describe('the Types tab', () => {
       expect((await listCatalog('subtypes')).find((one) => one.id === made.subtype_id)).toMatchObject({ name: 'Galaxy', material_id: M.PETG })
     })
 
-    it('says which catalog names stay when the type itself is refused', async () => {
+    // #8228: the server adds a missing name in the type's transaction, so a refused type adds none.
+    it('adds no catalog name when the type itself is refused', async () => {
       const taken: SpoolTypeCreate = { code: 'ZED-PLA-RED', material_id: M.PLA, rgba: '#FF0000FF', label_weight_g: 1000, diameter_mm: '1.75' }
       await upsertType(taken)
       const row = await api.createFilament({ material: 'PLA', brand: 'Zed', colour_name: 'Red', colour: '#FF0000', cost_per_kg: '20' })
       const { user } = renderPage(<TypesTab />)
       await user.click(await within(await screen.findByTestId(`filament-${row.id}`)).findByRole('button', { name: /Make a type/ }))
-      expect(await screen.findByRole('alert')).toHaveTextContent(/Zed stays in the catalog/)
+      const alert = await screen.findByRole('alert')
+      expect(alert).toHaveTextContent(/already has that name/)
+      expect(alert).not.toHaveTextContent(/stays in the catalog/)
+      expect((await listCatalog('brands', { includeArchived: true })).map((one) => one.name)).not.toContain('Zed')
     })
 
     // #7159 — a row whose brand and colour a type has opens a choice instead of a duplicate.

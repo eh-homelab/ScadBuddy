@@ -20,6 +20,11 @@ public partial class MainPage : ContentPage
 	{
 		InitializeComponent();
 		Web.Navigating += OnNavigating;
+		Web.Navigated += (_, e) =>
+		{
+			loaded = e.Result == WebNavigationResult.Success;
+			if (loaded && waitingSpool is { } spool) OpenSpool(spool);
+		};
 		Web.HandlerChanged += (_, _) =>
 		{
 			if (Web.Handler is null) return;
@@ -44,9 +49,33 @@ public partial class MainPage : ContentPage
 		Loaded += (_, _) =>
 		{
 			DeepLink.Opened += Pair;
+			DeepLink.SpoolOpened += OpenSpool;
 			if (DeepLink.Take() is { } late) Pair(late);
+			if (DeepLink.TakeSpool() is { } spool) OpenSpool(spool);
 		};
-		Unloaded += (_, _) => DeepLink.Opened -= Pair;
+		Unloaded += (_, _) =>
+		{
+			DeepLink.Opened -= Pair;
+			DeepLink.SpoolOpened -= OpenSpool;
+		};
+	}
+
+	bool loaded;
+	string? waitingSpool;
+
+	/// <summary>
+	/// A spool label (#8550): the signed-in page reads the spool and opens <c>/x/S-&lt;n&gt;</c>, so a
+	/// task that waits for the spool comes first. Before the first page has loaded, it waits for it.
+	/// </summary>
+	void OpenSpool(string spool)
+	{
+		if (!loaded)
+		{
+			waitingSpool = spool;
+			return;
+		}
+		waitingSpool = null;
+		_ = Web.EvaluateJavaScriptAsync(DeepLink.OpenSpoolScript(spool));
 	}
 
 	/// <summary>
@@ -78,7 +107,8 @@ public partial class MainPage : ContentPage
 		if (!Uri.TryCreate(e.Url, UriKind.Absolute, out var target)) return;
 		if (target.Scheme == DeepLink.Scheme)
 		{
-			// A pairing link the page shows as a tap link: the app asks, as for one from the browser.
+			// A pairing link the page shows as a tap link: the app asks, as for one from the browser;
+			// a spool label's link opens the spool's code page.
 			e.Cancel = true;
 			DeepLink.Raise(target);
 			return;

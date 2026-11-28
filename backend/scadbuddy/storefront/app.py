@@ -33,9 +33,12 @@ import threading
 from collections.abc import AsyncIterator, Iterator
 from contextlib import asynccontextmanager, contextmanager
 from types import FrameType
+from typing import Final
 
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
+from opentelemetry.instrumentation.fastapi import FastAPIInstrumentor
+from starlette.types import ASGIApp, Receive, Scope, Send
 
 from scadbuddy.api.cross_site import CrossSiteGate
 from scadbuddy.core.origins import is_loopback
@@ -45,6 +48,7 @@ from scadbuddy.core.problems import (
     problem_response,
 )
 from scadbuddy.core.proxies import parse_cidr_list
+from scadbuddy.core.tracing import EXCLUDED_URLS, configure_tracing
 from scadbuddy.crud.client import CrudRefusedError, CrudUnavailableError
 from scadbuddy.crud.storefront import StorefrontCrud
 from scadbuddy.storefront.ratelimit import RequestLimit, UploadAllowance
@@ -92,7 +96,34 @@ def _stopped_by_signals(stop: asyncio.Event) -> Iterator[None]:
             signal.signal(signum, handler)
 
 
+#: The trace headers a visitor's request may carry. The edge is where the shop's traces
+#: start (#8239), so a trace context from the internet is dropped before the server span
+#: reads it: a visitor never names, joins or samples a trace of ours.
+_TRACE_HEADERS: Final = frozenset({b"traceparent", b"tracestate", b"baggage"})
+
+
+class _UntrustedTraceContext:
+    """Outside the server span: the request goes on without `_TRACE_HEADERS`."""
+
+    def __init__(self, app: ASGIApp) -> None:
+        self.app = app
+
+    async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
+        if scope["type"] in {"http", "websocket"}:
+            kept = [(k, v) for k, v in scope["headers"] if k.lower() not in _TRACE_HEADERS]
+            scope = {**scope, "headers": kept}
+        await self.app(scope, receive, send)
+
+
 def create_app(settings: StorefrontSettings, *, crud: StorefrontCrud | None = None) -> FastAPI:
+    # The edge's own spans (#8239), behind the same scrub as the API's (spec §6). It
+    # holds no database, so nothing instruments Postgres.
+    configure_tracing(
+        "scadbuddy-storefront",
+        version=settings.version,
+        revision=settings.revision,
+        instrument_database=False,
+    )
     client = crud if crud is not None else StorefrontCrud.from_settings(settings)
 
     @asynccontextmanager
@@ -194,4 +225,10 @@ def create_app(settings: StorefrontSettings, *, crud: StorefrontCrud | None = No
         loopback=is_loopback(settings.storefront_public_url),
     )
     app.add_middleware(RequestLimit, prefix=STOREFRONT_PREFIX, trusted=app.state.trusted_proxies)
+    # Outermost, so the server span covers every middleware, as the API's does.
+    FastAPIInstrumentor.instrument_app(
+        app, excluded_urls=EXCLUDED_URLS, exclude_spans=["receive", "send"]
+    )
+    traced = app.build_middleware_stack
+    app.build_middleware_stack = lambda: _UntrustedTraceContext(traced())  # type: ignore[method-assign]
     return app

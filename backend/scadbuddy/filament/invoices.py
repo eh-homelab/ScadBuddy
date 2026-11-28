@@ -22,7 +22,12 @@ from pydantic import ValidationError
 
 from scadbuddy.filament import models as m
 from scadbuddy.filament import purchasing_models as pm
-from scadbuddy.filament.catalog import TypeTempError
+from scadbuddy.filament.catalog import (
+    CatalogExistsError,
+    CatalogKeyEmptyError,
+    TypeTempError,
+    find_by_key,
+)
 from scadbuddy.filament.invoice_money import (
     RECONCILE_TOLERANCE,
     allocate,
@@ -261,8 +266,9 @@ class InvoiceStore:
             return None
         spools = self._spools.list(include_archived=True)
         found: _Candidates = []
-        for line in invoice.lines:
-            key = self._line_key(line)
+        with self._pool.connection() as conn:
+            keys = [self._line_key(conn, line) for line in invoice.lines]
+        for line, key in zip(invoice.lines, keys, strict=True):
             matching = [
                 (
                     s.cost_per_kg is not None or s.invoice_line_id is not None,
@@ -290,13 +296,18 @@ class InvoiceStore:
             )
         return found
 
-    def _line_key(self, line: pm.InvoiceLine) -> tuple[UUID, str] | None:
+    def _line_key(self, conn: Conn, line: pm.InvoiceLine) -> tuple[UUID, str] | None:
         if line.type_id is not None:
             kind = self._types.get(line.type_id)
             return None if kind is None else (kind.material_id, kind.rgba)
-        if line.proposed_type is not None:
-            return (line.proposed_type.material_id, line.proposed_type.rgba)
-        return None
+        proposed = line.proposed_type
+        if proposed is None:
+            return None
+        material = proposed.material_id
+        if material is None and proposed.material_name is not None:
+            # A proposed type that names its material (#8228): that material, if it exists.
+            material = find_by_key(conn, "materials", proposed.material_name)
+        return None if material is None else (material, proposed.rgba)
 
     def _detail(self, conn: Conn, invoice_id: UUID) -> pm.InvoiceDetail | None:
         row = conn.execute(
@@ -700,7 +711,13 @@ class InvoiceStore:
             raise InvoiceLineError(
                 position, "its proposed spool type names a catalog row that does not exist"
             ) from exc
-        except (errors.IntegrityError, errors.DataError, TypeTempError) as exc:
+        except (
+            errors.IntegrityError,
+            errors.DataError,
+            TypeTempError,
+            CatalogKeyEmptyError,
+            CatalogExistsError,
+        ) as exc:
             raise InvoiceLineError(position, f"its proposed spool type is invalid ({exc})") from exc
         made[key] = (created.id, created.label_weight_g)
         return made[key]

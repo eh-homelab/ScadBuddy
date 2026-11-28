@@ -315,6 +315,20 @@ git commit -m "feat(filament): one read function for every tag reading (#7273)" 
 | `brand` | `brand` | the name, else `"Generic"` (the README sample's value) | `brand` |
 | `min_temp` | `nozzle_temp_min` | `str(int)`; omit when missing | `nozzle_temp_min` (string or number) |
 | `max_temp` | `nozzle_temp_max` | `str(int)`; omit when missing | `nozzle_temp_max` |
+| `subtype` | `subtype` | the name; omit when missing (#8364) | `subtype` |
+| `bed_min_temp` | `bed_temp_min` | `str(int)`; omit when missing (#8364) | `bed_temp_min` (string or number) |
+| `bed_max_temp` | `bed_temp_max` | `str(int)`; omit when missing (#8364) | `bed_temp_max` |
+| `alpha` | `rgba` | the alpha byte, 2 hex digits; omit when `FF` (#8364) | replaces `rgba`'s alpha |
+| `additional_color_hexes` | `extra_colours` | `RRGGBB` strings, at most 4; a fifth warns `additional_color_hexes` (#8364) | `extra_colours` |
+| `weight` | `label_weight_g` | `str(int)` grams; omit when missing (#8364) | `label_weight_g` |
+| `diameter` | `diameter_mm` | mm, no trailing zeros (`"1.75"`); omit when missing (#8364) | `diameter_mm` |
+| any other key | — | never written | `other_keys`: its JSON text, at most 32 keys, each cut to 128 characters (#8364) |
+
+The extended keys (#8364) come from
+[SnapmakerU1-Extended-Firmware `docs/design/openspool.md` @ 8cb0b4e1](https://github.com/paxx12-snapmaker-u1/SnapmakerU1-Extended-Firmware/blob/8cb0b4e1b1d8f235ca067c0e8a5cabc0197aa11f/docs/design/openspool.md);
+the published seven are those of [openspool.io/rfid.html](https://openspool.io/rfid.html) and
+[spuder/OpenSpool `docs/rfid.md` @ 34cb4f44](https://github.com/spuder/OpenSpool/blob/34cb4f443189698f145434ba93f8b9c3c4989c3c/docs/rfid.md).
+No key carries a price.
 
 Write the keys in that order, with `json.dumps(obj, separators=(",", ":"), ensure_ascii=False)`, as UTF-8.
 

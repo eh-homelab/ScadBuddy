@@ -54,6 +54,11 @@ describe('the scan page without Web NFC (#7273)', () => {
     expect(screen.queryByRole('button', { name: 'Scan' })).toBeNull()
   })
 
+  it('scrolls itself, as the shell clips its main', () => {
+    open()
+    expect(screen.getByTestId('scan-page')).toHaveClass('h-full', 'overflow-y-auto')
+  })
+
   it('has no back link and names what it reads', () => {
     open()
     expect(screen.queryByRole('link', { name: 'Spools' })).not.toBeInTheDocument()
@@ -84,6 +89,7 @@ describe('the scan page (#7273)', () => {
 
   it('starts one scan and lists each read', async () => {
     const { user } = open()
+    expect(within(screen.getByTestId('scan-toggle-slot')).getByRole('button', { name: 'Scan' })).toBeInTheDocument()
     await user.click(screen.getByRole('button', { name: 'Scan' }))
     const on = await screen.findByRole('button', { name: 'Scanning — hold a tag to the phone' })
     // The label says it is on; a toggle state would claim a second tap turns it off.

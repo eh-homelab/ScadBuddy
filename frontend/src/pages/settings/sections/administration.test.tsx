@@ -105,6 +105,33 @@ describe('Administration activity settings', () => {
     expect(put.mock.calls[1]?.[0]).toMatchObject({ activity_ttl_seconds: null })
   })
 
+  it('keeps ended service credentials as long as asked: 0 is every one, empty the default (#8539)', async () => {
+    const put = vi.spyOn(api, 'putSettings')
+    const { user } = renderSettingsSection(<Administration />)
+    await loaded()
+    const days = screen.getByLabelText('Keep ended service credentials for (days)')
+    await user.click(screen.getByRole('button', { name: 'Advanced: service credential retention' }))
+    expect(days).toHaveAttribute('placeholder', 'Default')
+
+    await enter(user, days, '-1')
+    await user.click(save())
+    expect(await screen.findByText(/Enter 1 to 3650 days, 0 to keep every one/)).toBeInTheDocument()
+    expect(put).not.toHaveBeenCalled()
+
+    await user.clear(days)
+    await enter(user, days, '0')
+    await user.click(save())
+    await waitFor(() => expect(put).toHaveBeenCalledTimes(1))
+    expect(put.mock.calls[0]?.[0]).toMatchObject({ service_credential_retention_days: 0 })
+    await waitFor(async () => expect((await api.getSettings()).service_credential_retention_days).toBe(0))
+    await landed(put, 0)
+
+    await user.clear(days)
+    await user.click(save())
+    await waitFor(() => expect(put).toHaveBeenCalledTimes(2))
+    expect(put.mock.calls[1]?.[0]).toMatchObject({ service_credential_retention_days: null })
+  })
+
   it('keeps the retention fields under Advanced', async () => {
     renderSettingsSection(<Administration />)
     await loaded()

@@ -36,7 +36,12 @@ from tests.flows.flows_support import history_payloads
 
 __all__ = ["settings"]
 
-pytestmark = [pytest.mark.requires_postgres, pytest.mark.requires_temporal]
+#: Their `wait_for_human` takes a text: the path of a call from before #8062.
+pytestmark = [
+    pytest.mark.requires_postgres,
+    pytest.mark.requires_temporal,
+    pytest.mark.usefixtures("waits_before_8062"),
+]
 
 EMAIL = {
     "type": "object",

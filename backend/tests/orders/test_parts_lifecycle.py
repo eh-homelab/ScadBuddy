@@ -12,12 +12,10 @@ from psycopg import Connection
 from psycopg.rows import DictRow, dict_row
 from psycopg_pool import ConnectionPool
 
-from scadbuddy.inventory.items import ItemStore
 from scadbuddy.inventory.models import ItemInput, ReceiveLot, RecostResult
-from scadbuddy.inventory.stock import BadQuantity
-from scadbuddy.orders import lifecycle as lifecycle_module
+from scadbuddy.orders import store as store_module
 from scadbuddy.orders.lifecycle import FulfilLine, FulfilmentInput, LifecycleError
-from scadbuddy.orders.models import ColourSlot
+from scadbuddy.orders.models import ColourSlot, OrderItem
 from scadbuddy.orders.parts import (
     ItemPart,
     ItemPartsInput,
@@ -28,11 +26,13 @@ from scadbuddy.orders.parts import (
     order_parts,
 )
 from scadbuddy.orders.reference import ResolvedReference
+from scadbuddy.orders.stock_start import WorkflowRefused
 from scadbuddy.orders.store import OrderStore
 from scadbuddy.render.pg_store import MIGRATIONS, migrate
 from scadbuddy.store.refs import BlobRefs
 from tests.conftest import PgPool
 from tests.orders.test_lifecycle import BY, Shop, resolved
+from tests.support.inventory_rows import ItemRows
 
 pytestmark = pytest.mark.requires_postgres
 
@@ -43,8 +43,15 @@ def _shop(rows: OrderStore, pool: PgPool) -> Shop:
 
 
 def _new_item(shop: Shop, kind_id: str, name: str) -> str:
-    items = ItemStore(shop.rows._pool, shop.rows._entities)
+    items = ItemRows(shop.rows._pool)
     return str(items.create(ItemInput(kind_id=kind_id, name=name), BY).id)
+
+
+def _recost(shop: Shop, lot: UUID) -> RecostResult:
+    """A re-cost as the inline workflow runs it: it always ends before it answers."""
+    result = shop.lifecycle.recost_lot(lot, BY)
+    assert isinstance(result, RecostResult)
+    return result
 
 
 def _item(shop: Shop, name: str, on_hand: int = 50, cost: str = "5.99") -> str:
@@ -56,19 +63,19 @@ def _item(shop: Shop, name: str, on_hand: int = 50, cost: str = "5.99") -> str:
 
 
 def _receive(shop: Shop, item_id: str, qty: int, cost: str) -> UUID:
-    lot = shop.lifecycle.stock.receive_lot(
+    lot = shop.go.stock.receive_lot(
         UUID(item_id), ReceiveLot(qty=Decimal(qty), unit_cost_minor=Decimal(cost)), BY
     )
     return lot.id
 
 
 def _on_hand(shop: Shop, item_id: str) -> Decimal:
-    return sum((lot.on_hand for lot in shop.lifecycle.stock.lots(UUID(item_id))), Decimal(0))
+    return sum((lot.on_hand for lot in shop.go.stock.lots(UUID(item_id))), Decimal(0))
 
 
 def _order_moves(shop: Shop, order_item_id: str) -> list[tuple[Any, ...]]:
     """The order item's moves, oldest first: kind, qty, unit cost, whether it reverses one."""
-    moves = shop.lifecycle.stock.moves(order_item_id=order_item_id)
+    moves = shop.go.stock.moves(order_item_id=order_item_id)
     return [
         (m.kind, m.qty, m.unit_cost_minor, m.reverses_move_id is not None)
         for m in sorted(moves, key=lambda m: (m.at, m.id))
@@ -162,7 +169,7 @@ def test_fulfil_takes_the_parts_from_the_lots_fifo(shop: Shop) -> None:
     shop.fulfilled(order, item)
 
     assert _order_moves(shop, item.id) == [("use", Decimal(-6), Decimal("5.995"), False)]
-    [use] = shop.lifecycle.stock.moves(order_item_id=item.id)
+    [use] = shop.go.stock.moves(order_item_id=item.id)
     assert (use.order_id, use.amount_minor) == (order.id, Decimal("-35.97"))
     assert shop.rows.cost_entries(order.id) == []
     [row] = shop.lifecycle.parts.item_parts([item.id])[item.id]
@@ -180,7 +187,7 @@ def test_a_use_past_the_stock_goes_below_zero(shop: Shop) -> None:
 
     # 6 used of 5: stock goes below zero and never blocks.
     assert _on_hand(shop, hook) == -1
-    flags = sorted(m.needs_review for m in shop.lifecycle.stock.moves(order_item_id=item.id))
+    flags = sorted(m.needs_review for m in shop.go.stock.moves(order_item_id=item.id))
     assert flags == [False, True]
 
 
@@ -194,17 +201,17 @@ def test_a_failed_print_uses_no_parts(shop: Shop) -> None:
     )
 
     assert _on_hand(shop, hook) == 50
-    assert shop.lifecycle.stock.moves(order_item_id=item.id) == []
+    assert shop.go.stock.moves(order_item_id=item.id) == []
 
 
 def test_unfulfil_gives_back_at_the_uses_cost_after_a_lot_cost_change(shop: Shop) -> None:
     """Review Focus 2: the return takes each use's own cost and lot, not today's cost."""
     hook = _item(shop, "Silver hook", on_hand=10, cost="5")
-    lot = shop.lifecycle.stock.lots(UUID(hook))[0].id
+    lot = shop.go.stock.lots(UUID(hook))[0].id
     order, item = shop.accepted(quantity=2)
     shop.lifecycle.set_item_parts(order.id, item.id, [ItemPart(item_id=hook, per_unit=1)], BY)
     shop.fulfilled(order, item)
-    shop.lifecycle.stock.set_lot_cost(lot, Decimal(9), BY)
+    shop.go.stock.set_lot_cost(lot, Decimal(9), BY)
 
     shop.lifecycle.unfulfil_item(order.id, item.id, BY)
 
@@ -212,7 +219,7 @@ def test_unfulfil_gives_back_at_the_uses_cost_after_a_lot_cost_change(shop: Shop
         ("use", Decimal(-2), Decimal(5), False),
         ("return", Decimal(2), Decimal(5), True),
     ]
-    assert {m.lot_id for m in shop.lifecycle.stock.moves(order_item_id=item.id)} == {lot}
+    assert {m.lot_id for m in shop.go.stock.moves(order_item_id=item.id)} == {lot}
     assert _on_hand(shop, hook) == 10
     with shop.rows.transaction() as conn:
         assert _parts_minor(conn, item.id) == 0
@@ -222,7 +229,7 @@ def test_unfulfil_gives_back_at_the_uses_cost_after_a_lot_cost_change(shop: Shop
 
     shop.fulfilled(order, shop.get_item(item))
     assert _on_hand(shop, hook) == 8
-    assert [m.kind for m in shop.lifecycle.stock.moves(order_item_id=item.id)].count("use") == 2
+    assert [m.kind for m in shop.go.stock.moves(order_item_id=item.id)].count("use") == 2
 
 
 def test_a_fulfilled_items_parts_are_fixed(shop: Shop) -> None:
@@ -257,7 +264,7 @@ def test_a_part_of_unknown_cost_moves_stock_with_its_flag(shop: Shop) -> None:
     """R-P2-19: a lot bought in another currency opens cost-unknown; its takes keep the
     flag."""
     hook = _item(shop, "Euro hook", on_hand=0)
-    shop.lifecycle.stock.receive_lot(
+    shop.go.stock.receive_lot(
         UUID(hook), ReceiveLot(qty=Decimal(4), unit_cost_minor=Decimal(3), currency="EUR"), BY
     )
     order, item = shop.accepted()
@@ -266,7 +273,7 @@ def test_a_part_of_unknown_cost_moves_stock_with_its_flag(shop: Shop) -> None:
     shop.fulfilled(order, item)
 
     assert _on_hand(shop, hook) == 3
-    [use] = shop.lifecycle.stock.moves(order_item_id=item.id)
+    [use] = shop.go.stock.moves(order_item_id=item.id)
     assert use.cost_unknown
     assert shop.rows.cost_entries(order.id) == []
 
@@ -285,7 +292,7 @@ def test_a_take_too_large_for_an_amount_is_refused(shop: Shop) -> None:
         shop.lifecycle.accept_fulfilment(order.id, item.id, attempt.id, BY)
 
     assert refused.value.slug == "bad_quantity"
-    assert shop.lifecycle.stock.moves(order_item_id=item.id) == []
+    assert shop.go.stock.moves(order_item_id=item.id) == []
     with pytest.raises(LifecycleError) as estimate:
         shop.lifecycle.parts_unit_cost(item.id, "USD", "USD")
     assert (estimate.value.slug, estimate.value.unprocessable) == ("bad_quantity", True)
@@ -336,13 +343,13 @@ def test_an_order_shows_what_it_is_short(shop: Shop) -> None:
 
 def test_recost_writes_the_change_on_each_order(shop: Shop) -> None:
     hook = _item(shop, "Silver hook", on_hand=10, cost="5")
-    lot = shop.lifecycle.stock.lots(UUID(hook))[0].id
+    lot = shop.go.stock.lots(UUID(hook))[0].id
     order, item = shop.accepted(quantity=2)
     shop.lifecycle.set_item_parts(order.id, item.id, [ItemPart(item_id=hook, per_unit=1)], BY)
     shop.fulfilled(order, item)
-    shop.lifecycle.stock.set_lot_cost(lot, Decimal("7.25"), BY)
+    shop.go.stock.set_lot_cost(lot, Decimal("7.25"), BY)
 
-    result = shop.lifecycle.recost_lot(lot, BY)
+    result = _recost(shop, lot)
 
     assert result.moves == 1
     [changed] = result.orders
@@ -352,6 +359,8 @@ def test_recost_writes_the_change_on_each_order(shop: Shop) -> None:
         Decimal("14.5"),
     )
     [event] = [e for e in shop.rows.events(order.id) if e.kind == "item.parts_recosted"]
+    # The `RecostLot` workflow's id marks the event (#6949 K1 Task 16).
+    assert event.detail.pop("workflow").startswith(f"lot:{lot}:recost:")
     assert event.detail == {
         "lot_id": str(lot),
         "item_id": hook,
@@ -370,7 +379,7 @@ def test_recost_writes_the_change_on_each_order(shop: Shop) -> None:
         ],
     }
     # Nothing changes the second time: no event.
-    assert shop.lifecycle.recost_lot(lot, BY).orders == []
+    assert _recost(shop, lot).orders == []
     assert shop.kinds(order).count("item.parts_recosted") == 1
 
 
@@ -404,9 +413,32 @@ def test_an_item_fulfilled_before_the_migration_unfulfils_to_zero(
             migrate(conn, MIGRATIONS[: _index("parts_to_items")])
         shop = Shop(OrderStore(pool), BlobRefs(pool))
         # The old schema has no `order_item_parts.item_id`: the item is fulfilled with no
-        # parts read, then its parts rows are written as the old code wrote them.
+        # parts read, then its parts rows are written as the old code wrote them. It has no
+        # `order_items.parts_workflow_id` either (#6949 K1 Task 16): the fulfil reads none
+        # and writes none, so no stock workflow stays open on it.
         monkeypatch.setattr(
             shop.lifecycle.parts, "item_parts", lambda ids, conn=None: {i: [] for i in ids}
+        )
+        monkeypatch.setattr(
+            store_module,
+            "_ITEM",
+            store_module._ITEM.replace(", parts_workflow_id", ", NULL::text AS parts_workflow_id"),
+        )
+        monkeypatch.setattr(shop.rows, "set_parts_workflow", lambda *args: None)
+        # `parts_cycle` reads the column too: no unfulfil holds an item here.
+        monkeypatch.setattr(
+            shop.rows,
+            "parts_cycle",
+            lambda conn, order_id, item_id: (
+                int(
+                    conn.execute(
+                        "SELECT count(*) AS n FROM order_events WHERE order_id = %s"
+                        " AND kind = 'parts.returned' AND detail ->> 'item_id' = %s",
+                        (order_id, item_id),
+                    ).fetchone()["n"]
+                ),
+                False,
+            ),
         )
         order, item = shop.accepted(quantity=2)
         shop.fulfilled(order, item)
@@ -470,12 +502,10 @@ def test_an_item_fulfilled_before_the_migration_unfulfils_to_zero(
 # -- the review of Task 7 (R-P2-28, R-P2-29, R-P2-30) ---------------------------------------
 
 
-def test_a_bulk_fulfil_locks_every_part_item_before_any_take(
-    shop: Shop, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """R-P2-28: two order items whose parts cross (the first line uses the later item id)
-    lock the union of their part items in `item_id` order before the first take, so a bulk
-    fulfil never locks a later item before an earlier one."""
+def test_a_bulk_fulfil_takes_every_part_in_item_order(shop: Shop) -> None:
+    """R-P2-28, since #6949 K1 Task 16: two order items whose parts cross (the first line
+    uses the later item id) take their parts in part `item_id` order, one Go `Take` each,
+    each keyed by its item key and part; Go locks each take's own item."""
     one, two = sorted([_item(shop, "Hook A"), _item(shop, "Hook B")])
     order = shop.order()
     first, second = shop.item(order), shop.item(order)
@@ -483,20 +513,6 @@ def test_a_bulk_fulfil_locks_every_part_item_before_any_take(
         shop.quoted(order, line)
         shop.lifecycle.set_item_parts(order.id, line.id, [ItemPart(item_id=part, per_unit=1)], BY)
     shop.lifecycle.accept_order(order.id, BY)
-    calls: list[tuple[str, list[str]]] = []
-    stock = shop.lifecycle.stock
-    lock, take = stock.lock_items, stock.take
-
-    def locking(conn: Any, ids: Any) -> None:
-        calls.append(("lock", [str(i) for i in ids]))
-        lock(conn, ids)
-
-    def taking(conn: Any, item_id: UUID, *args: Any, **kwargs: Any) -> Any:
-        calls.append(("take", [str(item_id)]))
-        return take(conn, item_id, *args, **kwargs)
-
-    monkeypatch.setattr(stock, "lock_items", locking)
-    monkeypatch.setattr(stock, "take", taking)
 
     shop.lifecycle.fulfil_items(
         order.id,
@@ -504,16 +520,19 @@ def test_a_bulk_fulfil_locks_every_part_item_before_any_take(
         BY,
     )
 
-    assert calls[0] == ("lock", [one, two])
-    assert sorted(c[1][0] for c in calls[1:]) == [one, two]
-    assert all(kind == "take" for kind, _ in calls[1:])
+    takes = shop.go.named("inventory.Take")
+    assert [t.arg["params"]["item_id"] for t in takes] == [one, two]
+    assert [t.arg["key"] for t in takes] == [
+        f"order_item:{second.id}:parts:1:{one}",
+        f"order_item:{first.id}:parts:1:{two}",
+    ]
 
 
 def test_the_estimate_keeps_the_known_share_of_a_mixed_plan(shop: Shop) -> None:
     """R-P2-29: a take of 6 from 4 at 6 and 2 of unknown cost: the known 24 is kept (4 a
     unit), and the estimate says a part is unknown."""
     hook = _item(shop, "Silver hook", on_hand=4, cost="6")
-    shop.lifecycle.stock.receive_lot(UUID(hook), ReceiveLot(qty=Decimal(10)), BY)
+    shop.go.stock.receive_lot(UUID(hook), ReceiveLot(qty=Decimal(10)), BY)
     order, item = shop.accepted(quantity=6)
     shop.lifecycle.set_item_parts(order.id, item.id, [ItemPart(item_id=hook, per_unit=1)], BY)
 
@@ -535,19 +554,26 @@ def test_the_parts_events_name_the_shop_currency(shop: Shop) -> None:
     assert details["parts.returned"]["currency"] == "USD"
 
 
-def test_a_give_back_too_large_is_refused(shop: Shop, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_a_refused_give_back_is_recorded(shop: Shop) -> None:
+    """#6949 K1 Task 16: the unfulfil commits first, so Go's refusal of its give-back is
+    not undone: it is recorded as `parts.stock_refused`, and `parts.returned` names no
+    part."""
     hook = _item(shop, "Silver hook", on_hand=10, cost="5")
     order, item = shop.accepted()
     shop.lifecycle.set_item_parts(order.id, item.id, [ItemPart(item_id=hook, per_unit=1)], BY)
     shop.fulfilled(order, item)
+    shop.go.answers["inventory.GiveBack"] = [
+        {"status": 422, "body": {"code": "bad_quantity", "status": 422, "detail": "too much"}}
+    ]
 
-    def refuse(*args: Any, **kwargs: Any) -> Any:
-        raise BadQuantity("9" * 20)
+    unfulfilled = shop.lifecycle.unfulfil_item(order.id, item.id, BY)
 
-    monkeypatch.setattr(shop.lifecycle.stock, "give_back", refuse)
-    with pytest.raises(LifecycleError) as refused:
-        shop.lifecycle.unfulfil_item(order.id, item.id, BY)
-    assert refused.value.slug == "bad_quantity"
+    assert isinstance(unfulfilled, OrderItem) and unfulfilled.status == "approved"
+    assert unfulfilled.parts_settling is None
+    events = {e.kind: e.detail for e in shop.rows.events(order.id)}
+    assert events["parts.returned"]["parts"] == []
+    assert events["parts.stock_refused"]["part_item_id"] == hook
+    assert events["parts.stock_refused"]["problem"]["code"] == "bad_quantity"
 
 
 def test_a_row_that_names_both_keys_is_refused() -> None:
@@ -584,45 +610,42 @@ def test_an_empty_rule_removes_the_rule(shop: Shop) -> None:
 def _fulfilled_on_lot(shop: Shop, cost: str | None) -> tuple[Any, Any, UUID]:
     hook = _item(shop, "Silver hook", on_hand=0)
     received = ReceiveLot(qty=Decimal(10), unit_cost_minor=None if cost is None else Decimal(cost))
-    lot = shop.lifecycle.stock.receive_lot(UUID(hook), received, BY).id
+    lot = shop.go.stock.receive_lot(UUID(hook), received, BY).id
     order, item = shop.accepted(quantity=2)
     shop.lifecycle.set_item_parts(order.id, item.id, [ItemPart(item_id=hook, per_unit=1)], BY)
     shop.fulfilled(order, item)
     return order, item, lot
 
 
-def test_a_recost_starts_again_when_an_order_moved_in(
-    shop: Shop, monkeypatch: pytest.MonkeyPatch
-) -> None:
+_MOVED = {
+    "status": 409,
+    "body": {"code": "recost_orders_moved", "status": 409, "detail": "moved", "orders": []},
+}
+
+
+def test_a_recost_starts_again_when_an_order_moved_in(shop: Shop) -> None:
     order, _, lot = _fulfilled_on_lot(shop, "5")
-    shop.lifecycle.stock.set_lot_cost(lot, Decimal(6), BY)
-    real = shop.lifecycle.stock.recost_lot
-    calls: list[int] = []
+    shop.go.stock.set_lot_cost(lot, Decimal(6), BY)
+    shop.go.answers["inventory.Recost"] = [dict(_MOVED)]
 
-    def once(conn: Any, lot_id: UUID) -> RecostResult:
-        calls.append(1)
-        if len(calls) == 1:
-            raise lifecycle_module._OrdersMoved
-        return real(conn, lot_id)
+    result = _recost(shop, lot)
 
-    monkeypatch.setattr(shop.lifecycle.stock, "recost_lot", once)
-
-    result = shop.lifecycle.recost_lot(lot, BY)
-
-    assert (len(calls), result.moves) == (2, 1)
+    assert isinstance(result, RecostResult)
+    assert (len(shop.go.named("inventory.Recost")), result.moves) == (2, 1)
+    keys = [c.arg["key"] for c in shop.go.named("inventory.Recost")]
+    assert keys[0].endswith(":1") and keys[1].endswith(":2")
     assert shop.kinds(order).count("item.parts_recosted") == 1
 
 
-def test_a_recost_gives_up_after_five_tries(shop: Shop, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_a_recost_gives_up_after_three_rounds(shop: Shop) -> None:
     order, _, lot = _fulfilled_on_lot(shop, "5")
+    shop.go.answers["inventory.Recost"] = [dict(_MOVED) for _ in range(3)]
 
-    def always(conn: Any, lot_id: UUID) -> RecostResult:
-        raise lifecycle_module._OrdersMoved
-
-    monkeypatch.setattr(shop.lifecycle.stock, "recost_lot", always)
-    with pytest.raises(LifecycleError) as refused:
+    with pytest.raises(WorkflowRefused) as refused:
         shop.lifecycle.recost_lot(lot, BY)
-    assert refused.value.slug == "recost_busy"
+
+    assert refused.value.code == "recost_orders_moved"
+    assert len(shop.go.named("inventory.Recost")) == 3
     assert "item.parts_recosted" not in shop.kinds(order)
 
 
@@ -631,9 +654,9 @@ def test_a_recost_of_a_cost_unknown_lot(shop: Shop) -> None:
     makes the order item's parts known."""
     order, item, lot = _fulfilled_on_lot(shop, None)
 
-    assert shop.lifecycle.recost_lot(lot, BY).orders == []
-    shop.lifecycle.stock.set_lot_cost(lot, Decimal(3), BY)
-    [changed] = shop.lifecycle.recost_lot(lot, BY).orders
+    assert _recost(shop, lot).orders == []
+    shop.go.stock.set_lot_cost(lot, Decimal(3), BY)
+    [changed] = _recost(shop, lot).orders
 
     assert (changed.order_item_id, changed.before_unknown, changed.after_unknown) == (
         item.id,
@@ -648,13 +671,13 @@ def test_a_recost_skips_an_order_that_is_gone(shop: Shop) -> None:
     """Moves have no foreign key to orders: a move of an order that no longer exists is
     re-costed, and no event is written for it."""
     hook = _item(shop, "Silver hook", on_hand=10, cost="5")
-    lot = shop.lifecycle.stock.lots(UUID(hook))[0].id
+    lot = shop.go.stock.lots(UUID(hook))[0].id
     with shop.rows.transaction() as conn:
-        shop.lifecycle.stock.take(
+        shop.go.stock.take(
             conn, UUID(hook), Decimal(2), BY, order_id="ord-gone", order_item_id="oi-gone"
         )
-    shop.lifecycle.stock.set_lot_cost(lot, Decimal(6), BY)
+    shop.go.stock.set_lot_cost(lot, Decimal(6), BY)
 
-    result = shop.lifecycle.recost_lot(lot, BY)
+    result = _recost(shop, lot)
 
     assert [(o.order_id, o.after_minor) for o in result.orders] == [("ord-gone", Decimal(12))]

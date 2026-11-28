@@ -547,6 +547,80 @@ def test_a_render_is_priced_by_a_slice_with_the_inputs(
     assert len(sliced.started) == 1 and len(slices(crud)) == 1
 
 
+def ordered_item(crud: CrudCaller, draft: dict[str, Any]) -> dict[str, Any]:
+    sent = submit(crud, draft)
+    assert sent.status_code == 200, sent.text
+    [item] = crud.api.get(f"/api/v1/orders/{draft['id']}").json()["items"]
+    found: dict[str, Any] = item
+    return found
+
+
+@pytest.mark.parametrize("pipeline", [True, False])
+def test_the_order_item_holds_the_output_the_slice_saved(
+    crud: CrudCaller,
+    kit: dict[str, Any],
+    template: dict[str, Any],
+    dense_red: str,
+    sliced: type[FakeSlicer],
+    pipeline: bool,
+) -> None:
+    """#8481: the slice run saves the visitor's render as `storefront_output_id` of its
+    render key, and the order's line holds that output: Print… needs no second render.
+    For a pipeline listing and a plain template's."""
+    api = crud.api
+    if pipeline:
+        listing = publish(api, create(api, kit_body(kit, dense_red))["id"])
+        priced(crud, render_until_done(crud, TOKEN_A, listing, {"width": 40})["id"])
+        values: dict[str, Any] = {"width": 40}
+    else:
+        listing, _ = plain_price(crud, template, dense_red)
+        values = {}
+    [row] = slices(crud)
+    assert row["output_id"] == storefront_output_id(row_render_key(crud))
+    item = ordered_item(crud, add(crud, listing, values))
+    assert item["output_id"] == row["output_id"]
+    assert item["reference"]["render_key"] == row_render_key(crud)
+    assert len(rows(crud, "SELECT id FROM render_jobs")) == 1
+
+
+def test_a_line_added_before_its_slice_saved_holds_the_output_once_submitted(
+    crud: CrudCaller, kit: dict[str, Any], dense_red: str, sliced: type[FakeSlicer]
+) -> None:
+    """#8481: a line added while the slice ran has no output yet; the submit links the
+    one the slice saved since."""
+    listing = publish(crud.api, create(crud.api, kit_body(kit, dense_red))["id"])
+    job = render_until_done(crud, TOKEN_A, listing, {})
+    draft = add(crud, listing, {})
+    with _state(crud.api).projection.pool.connection() as conn:
+        conn.execute("UPDATE order_items SET output_id = NULL")
+    priced(crud, job["id"])
+    # The price that came since is told first (#6153); the page sends it again.
+    assert submit(crud, draft).status_code == 409
+    item = ordered_item(crud, draft)
+    assert item["output_id"] == storefront_output_id(row_render_key(crud))
+
+
+def test_an_order_item_with_no_output_takes_the_saved_one_when_rendered(
+    crud: CrudCaller, kit: dict[str, Any], dense_red: str, sliced: type[FakeSlicer]
+) -> None:
+    """#8481: an item ordered before the link (ORD-2026-26 on prod) has no output; its
+    render takes the output the slice saved, with no new render job."""
+    api = crud.api
+    listing = publish(api, create(api, kit_body(kit, dense_red))["id"])
+    priced(crud, render_until_done(crud, TOKEN_A, listing, {})["id"])
+    draft = add(crud, listing, {})
+    ordered_item(crud, draft)
+    with _state(api).projection.pool.connection() as conn:
+        conn.execute("UPDATE order_items SET output_id = NULL")
+    [item] = draft["items"]
+    started = api.post(f"/api/v1/orders/{draft['id']}/items/{item['id']}/render", headers=press())
+    assert started.status_code == 202, started.text
+    op = follow_operation(api, started.json(), timeout=120, poll=0.2)
+    assert op["status"] == "succeeded", op
+    assert op["result"]["output_id"] == storefront_output_id(row_render_key(crud))
+    assert len(rows(crud, "SELECT id FROM render_jobs")) == 1
+
+
 def test_an_order_priced_by_hand_renders_the_inputs(
     crud: CrudCaller, kit: dict[str, Any], dense_red: str
 ) -> None:
@@ -738,6 +812,10 @@ def test_every_output_of_a_kit_is_sliced_and_priced_once(
     assert [plate["index"] for plate in quote["plates"]] == [1, 2]
     assert [[f["slot"] for f in plate["filaments"]] for plate in quote["plates"]] == [[0], [1]]
     assert len(sliced.started) == 2
+    # #8481: the line holds the kit the slice saved, every output of it, with no new render.
+    assert item["output_id"] == metas[0].id
+    assert item["kit_outputs"] == [meta.id for meta in metas] and item["kit_count"] == 2
+    assert len(rows(crud, "SELECT id FROM render_jobs")) == 1
 
 
 def test_the_order_of_a_kit_renders_and_attaches_every_output(

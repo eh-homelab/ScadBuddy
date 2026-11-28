@@ -128,6 +128,28 @@ describe.skipIf(gitMissing !== undefined)(`a package's path from git${gitMissing
     expect(existsSync(path.join(checkout.dir, 'tools/greeter/skills/hello/SKILL.md'))).toBe(true)
   })
 
+  // A checkout another uid owns, as on an NFS share (#8509): git refuses it unless
+  // `safe.directory` names it. Only the local upstream is marked safe, in a global config
+  // file, since git strips command-line config from a local clone's upload-pack.
+  it.each([
+    ['a partial fetch', 'tools/greeter'],
+    ['a full fetch', ''],
+  ])('checks out with %s when another user owns the checkout', async (_, subpath) => {
+    const r = repo({ ...PLUGIN, ...OTHER })
+    const bin = temp()
+    writeFileSync(path.join(bin, 'gitconfig'), `[safe]\n\tdirectory = ${r.dir}\n\tdirectory = ${path.join(r.dir, '.git')}\n`)
+    writeFileSync(
+      path.join(bin, 'git'),
+      `#!/bin/sh\nGIT_TEST_ASSUME_DIFFERENT_OWNER=1 GIT_CONFIG_GLOBAL=${path.join(bin, 'gitconfig')} exec git "$@"\n`,
+    )
+    chmodSync(path.join(bin, 'git'), 0o755)
+    const foreign = new GitFetcher({ git: path.join(bin, 'git'), protocols: ['file'] })
+    const checkout = await foreign.checkout(pathToFileURL(r.dir).href, r.commit, path.join(temp(), 'repo'), undefined, subpath)
+    expect(checkout.commit).toBe(r.commit)
+    expect(existsSync(path.join(checkout.dir, 'tools/greeter/skills/hello/SKILL.md'))).toBe(true)
+    expect(await foreign.specialPaths(checkout, 'tools/greeter')).toEqual([])
+  })
+
   it('fetches the whole commit when there is no path', async () => {
     const r = repo({ ...GREETER, ...OTHER })
     const checkout = await fetcher.checkout(pathToFileURL(r.dir).href, r.commit, path.join(temp(), 'repo'))

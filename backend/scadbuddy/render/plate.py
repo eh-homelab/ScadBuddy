@@ -87,6 +87,9 @@ PRIME_TOWER_SIDE = 60.0
 
 # What Bambu Studio estimates the tower from, before a slice
 # (``Print::wipe_tower_data``, src/libslic3r/Print.cpp L3243-3311 at tag v02.08.02.61).
+# At v02.09.02.62 (L3663-3738) it differs only in the layer height it divides by, which
+# changes only with mixed nozzle diameters (``wipe_tower_estimate_layer_height``), and
+# ScadBuddy refuses those (read 2026-11-27, #8325).
 # The process and filament presets are not known where the tower is placed, so each
 # value is the BBL presets' default or their largest (#6735).
 

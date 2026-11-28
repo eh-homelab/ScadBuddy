@@ -36,6 +36,11 @@ a `main.go`, except core (`build-go-image.yml:46`, `:133`), as
 `tools/go/core`: `build-image.yml`'s `core` job publishes `scadbuddy-core` with every
 build, and the deploy pins it (#7667).
 
+The phone app's APK is published by `build-app.yml` (#8376) on a push to main that changes
+`app/`: a `FROM scratch` image (`app/Dockerfile`) with only `/scadbuddy.apk` and its SHA-256,
+as `ghcr.io/eh-homelab/scadbuddy-app` (`sha-<7>`, `latest`). Nothing deploys it
+([`app/CLAUDE.md`](../../app/CLAUDE.md)).
+
 ## How an image reaches prod
 
 ```mermaid
@@ -155,6 +160,7 @@ Outside `ci.yml`:
 | Workflow | Trigger | Does |
 |---|---|---|
 | `openscad-bump.yml` | weekly | opens a PR moving the OpenSCAD nightly (never auto-merged) |
+| `bambu-studio-bump.yml` | weekly | opens a PR moving the pinned Bambu Studio release to the newest stable one (never auto-merged, #8325) |
 | `postgres-pin.yml`, `rust-toolchain-pin.yml`, `harness-pin.yml` | weekly | check pinned digests and SHAs against upstream |
 | `link-check.yml` | weekly, dispatch | lychee over `docs/`, `README.md`, every `CLAUDE.md` and `SKILL.md` |
 | `ghcr-cleanup.yml` | monthly | prunes untagged versions of the `scadbuddy` package only (`ghcr-cleanup.yml:63`) |
