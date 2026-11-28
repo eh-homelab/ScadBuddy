@@ -329,6 +329,48 @@ func TestRunBeforeTheMigrationsWarnsOnce(t *testing.T) {
 	}
 }
 
+// TestAnApplyThatSucceedsWarnsAgainLater: the row comes mid-run, an apply succeeds, and
+// the row goes again, so the subscriber waits a second time and warns again (#8463).
+func TestAnApplyThatSucceedsWarnsAgainLater(t *testing.T) {
+	pool := testdb.New(t)
+	logs := &counting{levels: map[slog.Level]int{}}
+	previous := slog.Default()
+	slog.SetDefault(slog.New(logs))
+	t.Cleanup(func() { slog.SetDefault(previous) })
+	run, stop := context.WithTimeout(ctx, 5*time.Second)
+	defer stop()
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		Run(run, pool, Options{Name: "late", Poll: 10 * time.Millisecond})
+	}()
+	until := func(what string, ok func() bool) {
+		t.Helper()
+		for !ok() {
+			if run.Err() != nil {
+				t.Fatalf("timed out waiting for %s", what)
+			}
+			time.Sleep(10 * time.Millisecond)
+		}
+	}
+	until("the first warning", func() bool { return logs.count(slog.LevelWarn) == 1 })
+	if _, err := pool.Exec(ctx, `INSERT INTO event_subscribers (name, seq)
+		SELECT 'late', coalesce(max(seq), 0) FROM events`); err != nil {
+		t.Fatal(err)
+	}
+	// Many polls, so at least one apply finds the row and succeeds.
+	time.Sleep(200 * time.Millisecond)
+	if _, err := pool.Exec(ctx, `DELETE FROM event_subscribers WHERE name = 'late'`); err != nil {
+		t.Fatal(err)
+	}
+	until("the second warning", func() bool { return logs.count(slog.LevelWarn) == 2 })
+	stop()
+	<-done
+	if w, e := logs.count(slog.LevelWarn), logs.count(slog.LevelError); w != 2 || e != 0 {
+		t.Fatalf("%d warnings and %d errors, want 2 and 0", w, e)
+	}
+}
+
 func TestTheHistoryReplaysToTheCurrentProperties(t *testing.T) {
 	pool := testdb.New(t)
 	ids := []string{entity(t, pool, "item", "i1"), entity(t, pool, "spool", "s1"), entity(t, pool, "order", "o1")}
