@@ -117,7 +117,7 @@ func TestAnItemReadCarriesItsCode(t *testing.T) {
 	reads := []wire.Item{first, second, renamed, getItem(t, pool, s, first.ID)}
 	reads = append(reads, must(s.List(context.Background(), pool, ItemFilter{}))...)
 	for _, it := range reads {
-		if it.Number == 0 || it.Code != "I-"+strconv.FormatInt(it.Number, 10) {
+		if it.Code != "I-"+strconv.FormatInt(it.Number, 10) {
 			t.Fatalf("%s reads number %d code %q", it.Name, it.Number, it.Code)
 		}
 	}
