@@ -36,7 +36,6 @@ from temporalio.exceptions import ApplicationError, TimeoutType
 from temporalio.exceptions import TimeoutError as TemporalTimeoutError
 from temporalio.service import RPCError, RPCStatusCode
 from temporalio.worker import Replayer, Worker
-from temporalio.worker._workflow_instance import _WorkflowLogicFlag  # type: ignore[attr-defined]
 
 from scadbuddy.auth.service_credentials import ServiceAuth
 from scadbuddy.core.config import load_config
@@ -116,6 +115,7 @@ from scadbuddy.workflows.pipelines import (
 from tests.crud.crud_support import FixedToken, served_render_jobs
 from tests.support.pipelines import FakeWorld
 from tests.support.renders import legacy_row, namespace_not_found
+from tests.support.temporal import single_batch as with_flag_2
 from tests.support.temporal import temporal_client
 from tests.support.waits import until
 from tests.test_template_pipeline import NEVER_YIELDS
@@ -2322,11 +2322,7 @@ async def test_a_release_that_lands_with_the_load_answer_cancels_before_the_piec
             max_cached_workflows=0,
         )
         if single_batch:
-            # The SDK's only switch for it, as its own tests use it (1.37.0
-            # tests/worker/test_workflow.py).
-            worker._set_default_workflow_logic_flag(
-                _WorkflowLogicFlag.PROCESS_WORKFLOW_ACTIVATION_JOBS_AS_SINGLE_BATCH, enabled=True
-            )
+            with_flag_2(worker)
         return worker
 
     async with temporal_client() as client:

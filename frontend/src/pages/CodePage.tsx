@@ -9,7 +9,7 @@ import { codeTarget } from '../lib/resolvedCode'
 import { isScadBuddyCode, scanSearchPath } from '../lib/scanSearch'
 import { useAsync } from '../lib/useAsync'
 
-/** #6955 — `/x/<code>`: the address a label's QR holds. It opens the place, spool or item kind the code names. */
+/** #6955 — `/x/<code>`: the address a label's QR holds. It opens the place, spool, spool type, item or item kind the code names. */
 export function CodePage() {
   const { code = '' } = useParams()
   const navigate = useNavigate()

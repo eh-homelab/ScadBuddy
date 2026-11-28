@@ -21,7 +21,7 @@ from contextlib import AsyncExitStack, asynccontextmanager, contextmanager, supp
 from datetime import UTC, datetime, timedelta
 from functools import partial
 from types import FrameType
-from typing import Any, Final
+from typing import Any
 
 from fastapi import APIRouter, Depends, FastAPI
 from fastapi.routing import iter_route_contexts
@@ -111,7 +111,7 @@ from scadbuddy.core.paths import BUILTIN_DIR, MODEL_META_NAME
 from scadbuddy.core.pg_events import PgNotifyEventBus
 from scadbuddy.core.problems import ApiError, install_problem_handlers
 from scadbuddy.core.settings import Settings
-from scadbuddy.core.tracing import configure_tracing
+from scadbuddy.core.tracing import EXCLUDED_URLS, configure_tracing
 from scadbuddy.crud import idempotency
 from scadbuddy.crud import listener as crud_listener
 from scadbuddy.entities.component import ENTITIES
@@ -124,6 +124,7 @@ from scadbuddy.filament.bb_sync_run import FilamentSyncActivities, settings_load
 from scadbuddy.filament.component import FILAMENT
 from scadbuddy.filament.inventory import PoolSbSpoolReads
 from scadbuddy.filament.preset_mirror import mirror_after_pull
+from scadbuddy.filament.preset_writes import preset_write_activities
 from scadbuddy.filament.print_uses import PoolPrintUses
 from scadbuddy.filament.sb_presets import PresetImport, import_from_bambuddy
 from scadbuddy.filament.sensor_notify import SensorNotifyActivities
@@ -299,13 +300,6 @@ from scadbuddy.workflows.staged_file import VersionedStagedFile
 from scadbuddy.workflows.store_migration import VersionedStoreMigration
 
 API_PREFIX = "/api/v1"
-
-#: Never traced (spec §6): set in code so no deployment can drop it.
-#: Regexes searched against the full ``scheme://host/path`` URL, so each is anchored on
-#: both ends: an unanchored ``/metrics`` would also drop ``/api/v1/models/metrics-x``.
-EXCLUDED_URLS: Final = ",".join(
-    f"^[a-z]+://[^/]+{path}$" for path in ("/healthz", "/metrics", "/telemetry/v1/traces")
-)
 
 #: How long a batch print nobody touches is kept (#2718 review): long past any print
 #: it started, which Bambuddy's queue and the print runs keep on their own.
@@ -2369,7 +2363,40 @@ async def _run_library_worker(state: AppState, stop: asyncio.Event) -> None:
     current = asyncio.create_task(_make_library_current(client, build_id, queue, routed))
     ops = state.components.get(OPERATIONS)
     trigger_activities, stop_triggers = _flow_triggers(state, client, queue, stop)
-    activities = [
+    activities = _library_activities(state, client, ops, trigger_activities)
+    try:
+        while not stop.is_set():
+            worker = await _built_off_loop(
+                partial(
+                    library_worker,
+                    client,
+                    queue,
+                    activities,
+                    workflows=LIBRARY_WORKFLOWS,
+                    workflow_runner=sandboxed_runner(),
+                    graceful_shutdown_timeout=LIBRARY_GRACEFUL_SHUTDOWN,
+                    deployment_config=library_deployment(build_id),
+                )
+            )
+            if not await _serve_until([worker], stop, name="library"):
+                with suppress(TimeoutError):
+                    await asyncio.wait_for(stop.wait(), PRINT_WORKER_RECONNECT)
+    finally:
+        current.cancel()
+        schedules.cancel()
+        boot_nudge.cancel()
+        await stop_triggers()
+
+
+def _library_activities(
+    state: AppState,
+    client: Client,
+    ops: OperationCommands,
+    trigger_activities: list[Callable[..., Any]],
+) -> list[Callable[..., Any]]:
+    """The activities the ``library`` worker serves (`_run_library_worker`)."""
+    settings = state.settings
+    return [
         *_housekeeping_activities(state),
         *_preview_activities(state),
         # The retired spool-provider activities, for runs opened before
@@ -2405,6 +2432,9 @@ async def _run_library_worker(state: AppState, stop: asyncio.Event) -> None:
         # The activity that links an unknown AMS tray to a spool (#7143, G5). The Go route that
         # starts it is not built yet.
         *_unknown_tray_activities(state),
+        # Copy, edit and send again of ScadBuddy's own filament presets (#7204, N7). The Go
+        # routes that start them are not built yet.
+        *_preset_write_activities(state),
         *operation_activities(ops.store, state.settings_store, _kinds_on(ops, "library")),
         *trigger_activities,
         migrate_activity(lambda: state.settings_store.pool, state.settings),
@@ -2426,28 +2456,6 @@ async def _run_library_worker(state: AppState, stop: asyncio.Event) -> None:
         # A listing's prepared colour combinations (#6237, #6299 review).
         *prepare_activities(state, lambda: state.components.get(ORDERS)),
     ]
-    try:
-        while not stop.is_set():
-            worker = await _built_off_loop(
-                partial(
-                    library_worker,
-                    client,
-                    queue,
-                    activities,
-                    workflows=LIBRARY_WORKFLOWS,
-                    workflow_runner=sandboxed_runner(),
-                    graceful_shutdown_timeout=LIBRARY_GRACEFUL_SHUTDOWN,
-                    deployment_config=library_deployment(build_id),
-                )
-            )
-            if not await _serve_until([worker], stop, name="library"):
-                with suppress(TimeoutError):
-                    await asyncio.wait_for(stop.wait(), PRINT_WORKER_RECONNECT)
-    finally:
-        current.cancel()
-        schedules.cancel()
-        boot_nudge.cancel()
-        await stop_triggers()
 
 
 def _unknown_tray_activities(state: AppState) -> list[Callable[..., Any]]:
@@ -2457,6 +2465,18 @@ def _unknown_tray_activities(state: AppState) -> list[Callable[..., Any]]:
             lambda: state.components.get(FILAMENT), lambda: state.settings_store.pool
         )
     ]
+
+
+def _preset_write_activities(state: AppState) -> list[Callable[..., Any]]:
+    """The copy, edit and send again of a filament preset (#7204): the API alone holds the
+    database secret."""
+    return list(
+        preset_write_activities(
+            lambda: state.settings_store.pool,
+            lambda: state.store.blobs,
+            lambda: state.settings_store.load(),
+        ).values()
+    )
 
 
 def _flow_triggers(

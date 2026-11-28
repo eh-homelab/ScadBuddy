@@ -22,13 +22,15 @@ type Resolved struct {
 }
 
 // lookup is one typed code's prefix: its table and kind (codes/resolve.py PREFIXES). A new
-// prefix there is a new entry here too. name is the column the name is in, "" for none.
+// prefix there is a new entry here too. name is the SQL of the name, "" for none.
 type lookup struct{ table, kind, name string }
 
 var prefixes = map[string]lookup{
 	"L": {"filament_locations", "location", "name"},
 	"S": {"filament_spools", "spool", ""},
 	"K": {"item_kinds", "item_kind", "name"},
+	"T": {"filament_spool_types", "spool_type", "concat_ws(' ', code, colour_name)"},
+	"I": {"items", "item", "name"},
 }
 
 // maxNumber is PostgreSQL's integer maximum (codes/parse.py MAX_NUMBER).

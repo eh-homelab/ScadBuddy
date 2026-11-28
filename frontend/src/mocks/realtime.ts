@@ -28,12 +28,15 @@ export const realtimeHandler = realtimeLink.addEventListener('connection', ({ cl
 
 let seq = 0
 
-/** Deliver `kind` to every client following one of `topics`. */
-export function emitRealtime(kind: string, topics: string[], data: Record<string, unknown> = {}) {
+/**
+ * Deliver `kind` to every client following one of `topics`. With `id`, the event carries that
+ * id, as an event a mock also answers from its own log (`devices.ts`) carries the same id in both.
+ */
+export function emitRealtime(kind: string, topics: string[], data: Record<string, unknown> = {}, id?: string) {
   for (const [client, followed] of followers) {
     const matched = topics.filter((topic) => followed.has(topic))
     if (matched.length === 0) continue
-    client.send(JSON.stringify({ type: 'event', id: `mock-${++seq}`, kind, topics: matched, data }))
+    client.send(JSON.stringify({ type: 'event', id: id ?? `mock-${++seq}`, kind, topics: matched, data }))
   }
 }
 

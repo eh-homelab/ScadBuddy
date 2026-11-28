@@ -491,6 +491,76 @@ func TestAKindsCodeResolvesAsPythonsDoes(t *testing.T) {
 	}
 }
 
+func (h *harness) spoolType(code string, colourName *string) (id string, number int) {
+	h.t.Helper()
+	err := h.pool.QueryRow(context.Background(), `INSERT INTO filament_spool_types (code, material_id, rgba, label_weight_g, colour_name)
+		SELECT $1, id, '#FFFFFFFF', 1000, $2 FROM filament_materials WHERE name = 'PLA' RETURNING id::text, number`,
+		code, colourName).Scan(&id, &number)
+	if err != nil {
+		h.t.Fatal(err)
+	}
+	return id, number
+}
+
+func (h *harness) item(archived bool) (id string, number int) {
+	h.t.Helper()
+	err := h.pool.QueryRow(context.Background(), `INSERT INTO items (kind_id, name, archived_at)
+		VALUES ('hardware', 'Grease', CASE WHEN $1 THEN now() END) RETURNING id::text, number`, archived).Scan(&id, &number)
+	if err != nil {
+		h.t.Fatal(err)
+	}
+	return id, number
+}
+
+func TestATypeCodeResolvesAsPythonsDoes(t *testing.T) {
+	h := newHarness(t)
+	colour := "Charcoal"
+	id, number := h.spoolType("10101", &colour)
+	r, err := resolve(context.Background(), h.pool, "t"+jsonInt(number))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if r == nil || r.Kind != "spool_type" || r.ID != id || r.Code != "T-"+jsonInt(number) ||
+		r.Name == nil || *r.Name != "10101 Charcoal" || r.Archived {
+		t.Errorf("resolved %+v", r)
+	}
+	_, bare := h.spoolType("10102", nil)
+	r, err = resolve(context.Background(), h.pool, "T-"+jsonInt(bare))
+	if err != nil || r == nil || r.Name == nil || *r.Name != "10102" {
+		t.Errorf("a type with no colour name: %+v, %v", r, err)
+	}
+}
+
+func TestAnItemCodeResolvesAsPythonsDoes(t *testing.T) {
+	h := newHarness(t)
+	id, number := h.item(false)
+	r, err := resolve(context.Background(), h.pool, "i"+jsonInt(number))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if r == nil || r.Kind != "item" || r.ID != id || r.Code != "I-"+jsonInt(number) ||
+		r.Name == nil || *r.Name != "Grease" || r.Archived {
+		t.Errorf("resolved %+v", r)
+	}
+	_, gone := h.item(true)
+	r, err = resolve(context.Background(), h.pool, "I-"+jsonInt(gone))
+	if err != nil || r == nil || !r.Archived {
+		t.Errorf("an archived item: %+v, %v", r, err)
+	}
+}
+
+func TestATypeCodeNeverNamesAnItem(t *testing.T) {
+	h := newHarness(t)
+	_, typeNumber := h.spoolType("10102", nil)
+	_, itemNumber := h.item(false)
+	if r, err := resolve(context.Background(), h.pool, "T-"+jsonInt(itemNumber)); err != nil || r != nil {
+		t.Errorf("T with an item's number: %+v, %v", r, err)
+	}
+	if r, err := resolve(context.Background(), h.pool, "I-"+jsonInt(typeNumber)); err != nil || r != nil {
+		t.Errorf("I with a type's number: %+v, %v", r, err)
+	}
+}
+
 func TestAScanThatReadsNothingIsKeptWithItsPhoto(t *testing.T) {
 	h := newHarness(t)
 	for _, c := range []struct {
@@ -627,5 +697,86 @@ func TestAPersonSeesOnlyTheirOwnScans(t *testing.T) {
 	_, mine := h.json("POST", "/api/v1/scan/codes", map[string]any{"key": key})
 	if _, out := h.json("GET", "/api/v1/scan/scans", nil); len(out["scans"].([]any)) != 1 || out["scans"].([]any)[0].(map[string]any)["id"] != mine["id"] {
 		t.Errorf("an anonymous caller lists its own scan only: %v", out)
+	}
+}
+
+// devicePhoto is a paired device's photo read for owner, as the devices area's result writes
+// it (#8244): the photo stored as a scan_image blob, and its device and call.
+func (h *harness) devicePhoto(owner string, body []byte) string {
+	h.t.Helper()
+	stored, err := h.scans.Store(context.Background(), body)
+	if err != nil {
+		h.t.Fatal(err)
+	}
+	var id string
+	if err := h.pool.QueryRow(context.Background(), `WITH d AS (
+		INSERT INTO devices (owner, name, model, app_version, capabilities)
+		VALUES ($1, 'Phone', 'Pixel', '1.0', ARRAY['code.scan']) RETURNING id),
+	c AS (INSERT INTO device_calls (device_id, caller, caller_kind, method, timeout_s, deadline, outcome, ended_at)
+		SELECT id, $1, 'person', 'code.scan', 60, now(), 'done', now() FROM d RETURNING id, device_id)
+	INSERT INTO device_reads (device_id, call_id, kind, blob_key, media_type)
+		SELECT device_id, id, 'photo', $2, $3 FROM c RETURNING id::text`,
+		owner, stored.Key, stored.MediaType).Scan(&id); err != nil {
+		h.t.Fatal(err)
+	}
+	return id
+}
+
+func TestCodeScanFromDeviceRead(t *testing.T) {
+	h := newHarness(t)
+	_, number := h.spool()
+	body := encodePNG(t, qr(t, "S-"+jsonInt(number), 300))
+	read := h.devicePhoto(h.who.Principal, body)
+	status, sc := h.json("POST", "/api/v1/scan/codes", map[string]any{"read_id": read})
+	if status != 200 {
+		t.Fatalf("%d %v", status, sc)
+	}
+	codes := sc["codes"].([]any)
+	if sc["source"] != "app" || sc["actor"] != h.who.Principal || len(codes) != 1 ||
+		codes[0].(map[string]any)["resolved"].(map[string]any)["kind"] != "spool" {
+		t.Errorf("scan %v", sc)
+	}
+	if img := sc["image"].(map[string]any); !strings.HasPrefix(img["key"].(string), "scan_image-") || img["media_type"] != "image/png" {
+		t.Errorf("image %v", img)
+	}
+	// The body may name its source; a key with a read_id is refused.
+	if status, sc := h.json("POST", "/api/v1/scan/codes", map[string]any{"read_id": read, "key": nil, "source": "nfc"}); status != 200 || sc["source"] != "nfc" {
+		t.Errorf("source: %d %v", status, sc)
+	}
+	if status, _ := h.json("POST", "/api/v1/scan/codes", map[string]any{"read_id": read, "key": "scan_image-x"}); status != 422 {
+		t.Errorf("read_id and key: %d", status)
+	}
+	// A null read_id is a scan by key; a tag read is no photo.
+	key := sc["image"].(map[string]any)["key"]
+	if status, out := h.json("POST", "/api/v1/scan/codes", map[string]any{"read_id": nil, "key": key}); status != 200 || out["source"] != "shutter" {
+		t.Errorf("null read_id: %d %v", status, out)
+	}
+	var tagRead string
+	if err := h.pool.QueryRow(context.Background(), `WITH c AS (
+		INSERT INTO device_calls (device_id, caller, caller_kind, method, timeout_s, deadline, outcome, ended_at)
+		SELECT device_id, $2, 'person', 'nfc.read', 60, now(), 'done', now() FROM device_reads WHERE id = $1::uuid
+		RETURNING id, device_id)
+	INSERT INTO device_reads (device_id, call_id, kind, uid, blob_key, media_type)
+		SELECT device_id, id, 'nfc', '9CC69CE3', 'tag_dump-x', 'application/json' FROM c RETURNING id::text`,
+		read, h.who.Principal).Scan(&tagRead); err != nil {
+		t.Fatal(err)
+	}
+	if status, out := h.json("POST", "/api/v1/scan/codes", map[string]any{"read_id": tagRead}); status != 422 || out["reason"] != "read_not_a_photo" {
+		t.Errorf("a tag read: %d %v", status, out)
+	}
+}
+
+func TestCodeScanFromAnotherPersonsDeviceReadIsNotFound(t *testing.T) {
+	h := newHarness(t)
+	read := h.devicePhoto("user:test#bob", encodePNG(t, qr(t, "S-1", 200)))
+	for _, id := range []string{read, "not-an-id", "00000000-0000-0000-0000-000000000000"} {
+		if status, out := h.json("POST", "/api/v1/scan/codes", map[string]any{"read_id": id}); status != 404 {
+			t.Errorf("read %s: %d %v", id, status, out)
+		}
+	}
+	var rows int
+	_ = h.pool.QueryRow(context.Background(), "SELECT count(*) FROM code_scans").Scan(&rows)
+	if rows != 0 {
+		t.Errorf("%d scans of another person's read", rows)
 	}
 }

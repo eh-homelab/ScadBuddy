@@ -605,10 +605,17 @@ MAX_LABELS = 100
 
 
 class LabelsRequest(_In):
-    """#7157: the labels of these spools, then these places, in the order sent."""
+    """#7157: the labels of these spools, then these places, in the order sent. #7169: then
+    these spool types, items and item kinds."""
 
     spool_ids: list[UUID] = Field(default_factory=list, max_length=MAX_LABELS)
     location_ids: list[UUID] = Field(default_factory=list, max_length=MAX_LABELS)
+    type_ids: list[UUID] = Field(default_factory=list, max_length=MAX_LABELS)
+    item_ids: list[UUID] = Field(default_factory=list, max_length=MAX_LABELS)
+    #: An item kind's id is its text id (`printer`, `k12`).
+    kind_ids: list[Annotated[str, Field(max_length=40)]] = Field(
+        default_factory=list, max_length=MAX_LABELS
+    )
     #: ``None``: the stored setting `filament_label_template`.
     template: LabelTemplateChoice | None = None
     #: A one-label template: one label a page (``roll``) or packed on Letter paper
@@ -620,11 +627,21 @@ class LabelsRequest(_In):
     #: The spool label's fields (R-7216-9), put in their print order; ``None``: the setting's.
     fields: LabelFields | None = None
 
+    @property
+    def count(self) -> int:
+        """How many labels the request names."""
+        return (
+            len(self.spool_ids)
+            + len(self.location_ids)
+            + len(self.type_ids)
+            + len(self.item_ids)
+            + len(self.kind_ids)
+        )
+
     @model_validator(mode="after")
     def _one_to_max(self) -> LabelsRequest:
-        count = len(self.spool_ids) + len(self.location_ids)
-        if not 1 <= count <= MAX_LABELS:
-            raise ValueError(f"name 1 to {MAX_LABELS} spools and places")
+        if not 1 <= self.count <= MAX_LABELS:
+            raise ValueError(f"name 1 to {MAX_LABELS} spools, places, types, items and kinds")
         return self
 
 
@@ -921,6 +938,8 @@ class SpoolTypePatch(_Patch):
 
 
 class SpoolType(_Row):
+    # The typed code is `T-<number>` (#7169); `code` is the maker's.
+    number: int
     code: str
     brand_id: UUID | None
     material_id: UUID
@@ -2196,8 +2215,14 @@ class ScanLocation(_In):
 class TagReadIn(_FitsOneTag):
     """What a phone reads from a tag: its UID and its NDEF records, or its MIFARE blocks."""
 
+    #: Empty for a read that names a device read (`read_id`) instead.
+    records: Annotated[list[NdefRecord], Field(max_length=MAX_RECORDS)] = []
     uid: Annotated[str, Field(max_length=64)] | None = None
     tag_type: Annotated[str, Field(max_length=32)] | None = None
+    #: A paired device's tag read (#8244), in place of `uid`, `tag_type`, `records` and
+    #: `mifare_blocks`. Core's area `filament-tag-reads` loads and decodes it; a read with
+    #: `read_id` that reaches Python is a 503 `device_read_needs_core`.
+    read_id: UUID | None = None
     #: Bind the tag to this spool as part of the read.
     bind_spool_id: UUID | None = None
     #: A Bambu tag's data blocks (key trailers left out), which core's area
@@ -2213,7 +2238,10 @@ class TagReadIn(_FitsOneTag):
     tap: bool = True
 
 
-BackupReason = Literal["spool_write", "agent_write", "restore", "place_write"]
+BackupReason = Literal["spool_write", "agent_write", "restore", "place_write", "clear"]
+#: Why a tag left its spool: ``unbound`` by hand, ``cleared`` once the phone wrote it empty
+#: (#8362).
+UnbindReason = Literal["unbound", "cleared"]
 
 
 class TagBackupIn(_FitsOneTag):
@@ -2390,6 +2418,13 @@ class DecodedSpool(BaseModel):
     label_weight_g: int | None = None
     empty_weight_g: int | None = None
     serial: str | None = None
+    other_keys: dict[str, str] | None = Field(
+        default=None,
+        description=(
+            "An OpenSpool tag's keys that ScadBuddy does not use, each value as its JSON "
+            "text (a string keeps its quotes), cut to 128 characters. Untrusted text."
+        ),
+    )
     warnings: list[str] = Field(
         default_factory=list,
         description=(

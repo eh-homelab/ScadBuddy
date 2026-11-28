@@ -38,6 +38,13 @@ def test_a_phone_read_answers_the_tag_and_next(client: TestClient) -> None:
     assert got.json()["tag"]["tag_uid"] == "04A2B3C400000100"
 
 
+def test_a_read_with_no_records_is_a_uid_only_read(client: TestClient) -> None:
+    """#8244: `records` defaults to none, so a body with only a UID is a UID-only read."""
+    got = client.post(READS, json={"uid": "04:a2:b3:c5"})
+    assert got.status_code == 200, got.text
+    assert got.json()["tag"]["tag_uid"] == "04A2B3C500000100"
+
+
 def test_a_read_of_a_place_label_answers_open_code_and_the_place(client: TestClient) -> None:
     place = _location(client, "Shelf 9")
     href = f"https://scadbuddy.example/x/L-{place['number']}?from=label"
@@ -749,6 +756,13 @@ def test_a_mifare_read_that_reaches_python_needs_core(client: TestClient) -> Non
     assert client.post(READS, json=body).status_code == 422
 
 
+def test_a_device_read_that_reaches_python_needs_core(client: TestClient) -> None:
+    """#8244: core's area `filament-tag-reads` loads a device read; Python never does."""
+    got = client.post(READS, json={"read_id": "00000000-0000-0000-0000-000000000001"})
+    assert got.status_code == 503, got.text
+    assert got.json()["code"] == "device_read_needs_core"
+
+
 def test_python_checks_a_reads_photo_and_position_and_leaves_them_to_core(
     client: TestClient,
 ) -> None:
@@ -764,3 +778,26 @@ def test_python_checks_a_reads_photo_and_position_and_leaves_them_to_core(
     assert got.status_code == 200, got.text
     body["location"] = {"lat": 91, "lon": 0, "at": "2026-11-27T04:00:00Z"}
     assert client.post(READS, json=body).status_code == 422
+
+
+def test_a_clear_backup_is_kept_with_its_reason(client: TestClient) -> None:
+    # #8362: the phone backs a tag up before it writes it empty.
+    made = client.post(BACKUPS, json={"uid": "04:cc", "records": [_REC], "reason": "clear"})
+    assert made.status_code == 201, made.text
+    tag = client.post(READS, json={"uid": "04cc", "records": []}).json()["tag"]
+    [row] = client.get(f"/api/v1/filament/tags/{tag['id']}/backups").json()
+    assert row["reason"] == "clear" and row["records"][0]["data_hex"] == "7b7d"
+
+
+def test_an_unbind_after_a_clear_records_the_reason_cleared(client: TestClient) -> None:
+    spool = _spool(client)
+    read = client.post(READS, json={"uid": "04dd", "records": [], "bind_spool_id": spool["id"]})
+    tag_id = read.json()["tag"]["id"]
+    binding = f"/api/v1/filament/tags/{tag_id}/binding"
+    assert client.delete(binding, params={"reason": "x"}).status_code == 422
+    closed = client.delete(binding, params={"reason": "cleared"})
+    assert closed.status_code == 200, closed.text
+    assert closed.json()["reason"] == "cleared" and closed.json()["unbound_at"] is not None
+    events = client.get(f"{SPOOLS}/{spool['id']}/events").json()
+    unbound = [one for one in events if one["kind"] == "tag_unbound"]
+    assert unbound and unbound[-1]["data"]["reason"] == "cleared"

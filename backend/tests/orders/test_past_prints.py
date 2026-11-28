@@ -229,6 +229,59 @@ def test_an_imported_archive_is_no_lan_runs(rows: OrderStore, pool: PgPool) -> N
     assert rows.archive_run_plates(520) == []
 
 
+def test_a_lan_run_of_copies_lists_each_copy(rows: OrderStore, pool: PgPool) -> None:
+    """#8336: copies of one plate are prints of their own (`-c<n>`, #4541), as the queue
+    path sends one item per copy. Each start and each waiting copy is a row of its own."""
+    run_id = "aef57e988a3073ccc863f29c2c2i2ae"
+    starts = [
+        {
+            "subtask_name": f"scadbuddy-{run_id[:8]}-p1",
+            "started_at": "2026-11-26T11:00:00Z",
+            "plate_id": 1,
+        },
+        {
+            "subtask_name": f"scadbuddy-{run_id[:8]}-p1-c2",
+            "started_at": "2026-11-26T12:00:00Z",
+            "plate_id": 1,
+        },
+    ]
+    with pool.connection() as conn:
+        conn.execute(
+            "INSERT INTO print_runs (id, output_id, idempotency_key, status, result)"
+            " VALUES (%s, %s, %s, 'succeeded', %s)",
+            (run_id, OUTPUT, f"k-{run_id}", Jsonb({"lan": starts, "lan_waiting": [1]})),
+        )
+        for archive_id, start in ((391, starts[0]), (392, starts[1])):
+            conn.execute(
+                "INSERT INTO lan_print_archives (archive_id, run_id, subtask_name, plate_id)"
+                " VALUES (%s, %s, %s, 1)",
+                (archive_id, run_id, start["subtask_name"]),
+            )
+    assert rows.archive_run_plates(392) == [(1, 391), (1, 392), (1, None)]
+
+
+def test_a_lan_start_with_a_bad_time_is_still_listed(rows: OrderStore, pool: PgPool) -> None:
+    """#8336: a start whose ``started_at`` is not a time, or is missing, does not fail
+    the read."""
+    run_id = "aef57e988a3073ccc863f29c2c2i2af"
+    starts = [
+        {"subtask_name": f"scadbuddy-{run_id[:8]}-p1", "started_at": "not a time", "plate_id": 1},
+        {"subtask_name": f"scadbuddy-{run_id[:8]}-p2", "plate_id": 2},
+    ]
+    with pool.connection() as conn:
+        conn.execute(
+            "INSERT INTO print_runs (id, output_id, idempotency_key, status, result)"
+            " VALUES (%s, %s, %s, 'succeeded', %s)",
+            (run_id, OUTPUT, f"k-{run_id}", Jsonb({"lan": starts})),
+        )
+        conn.execute(
+            "INSERT INTO lan_print_archives (archive_id, run_id, subtask_name, plate_id)"
+            " VALUES (%s, %s, %s, %s)",
+            (393, run_id, f"scadbuddy-{run_id[:8]}-p1", 1),
+        )
+    assert rows.archive_run_plates(393) == [(1, 393), (2, None)]
+
+
 def test_a_lan_start_with_a_bad_plate_is_no_plate_not_an_error(
     rows: OrderStore, pool: PgPool
 ) -> None:
@@ -555,6 +608,51 @@ async def test_an_archive_quote_refuses_a_print_it_cannot_price(
     gone = await refused(Seam(), 71)
     assert (gone.status, gone.type) == (409, PROBLEMS + "archive_gone")
     assert shop.rows.quotes(shop.item.id) == []
+
+
+async def test_an_archive_quote_names_a_plate_with_no_number(shop: QuoteShop, pool: PgPool) -> None:
+    """#8377: a LAN start whose bad ``plate_id`` is no plate, with no archive, is a plate
+    the quote waits for. The answer names it in words, not as ``None``."""
+    run_id = "f43ab9d22e9a07ccd2a1b3c4d5e6f7a8"
+    starts = [
+        {
+            "subtask_name": f"scadbuddy-{run_id[:8]}-p1",
+            "started_at": "2026-11-26T11:00:00Z",
+            "plate_id": 1,
+        },
+        {
+            "subtask_name": f"scadbuddy-{run_id[:8]}-p2",
+            "started_at": "2026-11-26T12:00:00Z",
+            "plate_id": 2.0,
+        },
+    ]
+    with pool.connection() as conn:
+        conn.execute(
+            "INSERT INTO print_runs (id, output_id, idempotency_key, status, result)"
+            " VALUES (%s, %s, %s, 'succeeded', %s)",
+            (run_id, OUTPUT, f"k-{run_id}", Jsonb({"lan": starts})),
+        )
+        conn.execute(
+            "INSERT INTO lan_print_archives (archive_id, run_id, subtask_name, plate_id)"
+            " VALUES (%s, %s, %s, 1)",
+            (395, run_id, starts[0]["subtask_name"]),
+        )
+    taken_from(pool, shop.item.id, 395)
+
+    with pytest.raises(ApiError) as caught:
+        await quote_from_archive(
+            shop.lifecycle,
+            Seam(plate(395)),
+            Book(),
+            shop.order.id,
+            shop.item.id,
+            archive_request(shop, 395),
+            BY,
+        )
+
+    assert caught.value.type == PROBLEMS + "archive_plates_missing"
+    assert caught.value.detail.endswith("plates with no archive: a plate with no number")
+    assert caught.value.extensions["plates"] == [None]
 
 
 async def test_a_library_file_item_takes_its_slots_from_the_archive(shop: QuoteShop) -> None:
