@@ -262,6 +262,10 @@ func TestATextPastItsBoundIsA422(t *testing.T) {
 	bolt := item(f, "hardware", "M3 bolt")
 	f.call("inventory.ReceiveLot", 201, p("item_id", bolt), map[string]any{"qty": "10", "unit_cost_minor": "5"})
 	f.refused("inventory.Take", 422, "bad_input", p("item_id", bolt), map[string]any{"qty": "1", "entity": long(201)})
+	// An entity of 200 characters passes the bound: no spool has that id, so the lookup
+	// answers, not the bound.
+	f.refused("inventory.Take", 404, "entity_not_found", p("item_id", bolt),
+		map[string]any{"qty": "1", "entity": "spool:" + long(194)})
 	f.refused("inventory.Take", 422, "bad_input", p("item_id", bolt), map[string]any{"qty": "1", "reason": long(4001)})
 	f.call("inventory.Take", 200, p("item_id", bolt), map[string]any{"qty": "1", "reason": long(4000)})
 }
