@@ -15,6 +15,11 @@ impl Hasher {
 
     /// The lowercase hex digest and the bytes seen.
     pub fn finish(self) -> (String, u64) {
-        (format!("{:x}", self.inner.finalize()), self.size)
+        (lower_hex(&self.inner.finalize()), self.size)
     }
+}
+
+/// Lowercase hex of `bytes`. sha2 0.11's digest output does not implement `LowerHex`.
+pub fn lower_hex(bytes: &[u8]) -> String {
+    bytes.iter().map(|b| format!("{b:02x}")).collect()
 }

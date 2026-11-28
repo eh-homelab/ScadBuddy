@@ -11,7 +11,10 @@ use temporalio_sdk::activities::ActivityError;
 use temporalio_sdk::testing::{ActivityEnvironment, ActivityEnvironmentError};
 
 fn sha(bytes: &[u8]) -> String {
-    format!("{:x}", Sha256::digest(bytes))
+    Sha256::digest(bytes)
+        .iter()
+        .map(|b| format!("{b:02x}"))
+        .collect::<String>()
 }
 
 fn application(err: ActivityEnvironmentError) -> (Option<String>, bool) {
