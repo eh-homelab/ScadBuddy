@@ -1,0 +1,28 @@
+{
+  "id": "8181a2a2-0000-4000-8000-000003278466",
+  "run_id": "run-fixture",
+  "title": "Fixture date",
+  "schema": {
+    "type": "object",
+    "properties": {
+      "f": {
+        "type": "string",
+        "format": "date",
+        "title": "Day"
+      }
+    },
+    "required": [
+      "f"
+    ]
+  },
+  "context": [],
+  "place": null,
+  "ui": null,
+  "assignee": null,
+  "expires_at": null,
+  "state": "open",
+  "created_at": "2026-11-28T09:00:00Z",
+  "updated_at": "2026-11-28T09:00:00Z",
+  "native": true,
+  "fallback_url": "/station"
+}

@@ -285,4 +285,33 @@ public class DeviceProtocolTests
 		Assert.Null(DeviceProtocol.WriteRecords(Obj(args), out var error));
 		Assert.StartsWith("bad_args: ", error);
 	}
+	const string TaskId = "8181a2a2-0000-4000-8000-000000000001";
+
+	[Fact]
+	public void TheTasksTopicIsSubscribedOnItsOwn() =>
+		Assert.Equal("""{"type":"subscribe","topics":["tasks"]}""", DeviceProtocol.SubscribeTasks);
+
+	[Fact]
+	public void ATaskChangedFrameGivesItsIdAndState()
+	{
+		var frame = DeviceProtocol.Parse($$$"""{"type":"event","id":"7","kind":"task.changed","topics":["tasks","task:{{{TaskId}}}"],"data":{"task_id":"{{{TaskId}}}","run_id":"r1","state":"answered","place":null}}""", Device);
+		Assert.Equal(new TaskChange(TaskId, "answered"), frame);
+	}
+
+	[Theory]
+	[InlineData("""{"type":"event","kind":"task.updated","data":{"task_id":"8181a2a2-0000-4000-8000-000000000001","state":"open"}}""")]
+	[InlineData("""{"type":"event","kind":"task.changed","data":{"task_id":"8181a2a2-0000-4000-8000-000000000001","state":"gone"}}""")]
+	[InlineData("""{"type":"event","kind":"task.changed","data":{"task_id":"","state":"open"}}""")]
+	[InlineData("""{"type":"event","kind":"task.changed","data":{"task_id":7,"state":"open"}}""")]
+	public void AnotherKindIsNoTaskChange(string frame) => Assert.Same(Frame.Ignored, DeviceProtocol.Parse(frame, Device));
+
+	[Fact]
+	public void AResyncIsAResync() => Assert.Same(Frame.Resync, DeviceProtocol.Parse("""{"type":"resync"}""", Device));
+
+	[Fact]
+	public void TheHeartbeatSaysWhetherTheAppIsInFront()
+	{
+		Assert.Equal("""{"foreground":true}""", DeviceProtocol.Heartbeat(true));
+		Assert.Equal("""{"foreground":false}""", DeviceProtocol.Heartbeat(false));
+	}
 }

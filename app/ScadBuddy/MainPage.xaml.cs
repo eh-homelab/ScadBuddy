@@ -44,6 +44,12 @@ public partial class MainPage : ContentPage
 			Web.Source = url;
 			if (DeepLink.Take() is { } first) Dispatcher.Dispatch(() => Pair(first));
 		};
+#if ANDROID
+		// The open flow questions (#8574): their count on the toolbar, and a notification's tap.
+		// Subscribed for the page's life: a tap while a task screen is in front still opens its task.
+		TaskInbox.Instance.Changed += () => Dispatcher.Dispatch(ShowCount);
+		DeepLink.TaskOpened += OpenTask;
+#endif
 		// A cold start's link was raised after the handler took it (MAUI builds the page inside
 		// base.OnCreate, before MainActivity raises it), so take it again once subscribed.
 		Loaded += (_, _) =>
@@ -52,6 +58,10 @@ public partial class MainPage : ContentPage
 			DeepLink.SpoolOpened += OpenSpool;
 			if (DeepLink.Take() is { } late) Pair(late);
 			if (DeepLink.TakeSpool() is { } spool) OpenSpool(spool);
+#if ANDROID
+			if (DeepLink.TakeTask() is { } task) OpenTask(task);
+			ShowCount();
+#endif
 		};
 		Unloaded += (_, _) =>
 		{
@@ -101,6 +111,38 @@ public partial class MainPage : ContentPage
 	}
 
 	static string OriginOf(string address) => DeepLink.OriginOf(new Uri(address));
+
+#if ANDROID
+	void ShowCount()
+	{
+		var count = TaskInbox.Instance.Open.Count;
+		TasksItem.Text = count == 0 ? "Tasks" : $"Tasks ({count})";
+	}
+
+	async void OnTasksClicked(object? sender, EventArgs e)
+	{
+		if (Navigation.NavigationStack.LastOrDefault() is TaskListPage) return;
+		await Navigation.PushAsync(new TaskListPage(OpenWeb));
+	}
+
+	/// <summary>A notification's tap: the task's own screen, over whatever is in front.</summary>
+	async void OpenTask(string id)
+	{
+		var listed = TaskInbox.Instance.Open.FirstOrDefault(t => t.Id == id);
+		// A task not in the list yet (the list is read as the app opens): its id is enough to read it.
+		listed ??= new DeviceTask(id, "", "", [], [], null, null, "open", false, "/station", null);
+		await TaskPage.Open(Navigation, listed, OpenWeb, this);
+	}
+
+	/// <summary>A task the app cannot draw: the web task screen, in this page's web view, on its own origin.</summary>
+	async void OpenWeb(DeviceTask task)
+	{
+		await Navigation.PopToRootAsync();
+		Web.Source = TaskForm.FallbackOf(OriginOf(url), task.FallbackUrl);
+	}
+#else
+	void OnTasksClicked(object? sender, EventArgs e) { }
+#endif
 
 	void OnNavigating(object? sender, WebNavigatingEventArgs e)
 	{

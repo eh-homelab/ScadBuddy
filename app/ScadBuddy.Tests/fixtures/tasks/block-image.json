@@ -1,0 +1,30 @@
+{
+  "id": "8181a2a2-0000-4000-8000-000008576277",
+  "run_id": "run-fixture",
+  "title": "Fixture block-image",
+  "schema": {
+    "type": "object",
+    "properties": {},
+    "required": []
+  },
+  "context": [
+    {
+      "image": {
+        "entity": "task:x",
+        "attachment_id": "a1b2c3d4-0000-4000-8000-000000000009"
+      }
+    }
+  ],
+  "place": null,
+  "ui": null,
+  "assignee": null,
+  "expires_at": null,
+  "state": "open",
+  "created_at": "2026-11-28T09:00:00Z",
+  "updated_at": "2026-11-28T09:00:00Z",
+  "native": true,
+  "fallback_url": "/station",
+  "context_view": [
+    null
+  ]
+}

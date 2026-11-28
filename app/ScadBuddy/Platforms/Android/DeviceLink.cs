@@ -9,11 +9,13 @@ namespace ScadBuddy;
 
 /// <summary>
 /// The phone as a paired device (#8244, spec docs/superpowers/specs/2026-11-27-devices-design.md).
-/// While the app is in front, it holds ScadBuddy's realtime socket with its device token,
-/// subscribed to its own topic <c>device:&lt;id&gt;</c>, and posts a heartbeat every 30 s. A call
-/// comes as the bus event <c>device.call_requested</c>; <see cref="DeviceMethods"/> runs it, and
-/// its events, uploads and result go back over HTTP with the same token. Both stop in OnPause and
-/// start again in OnResume: Android gives NFC to the app in front only.
+/// While the app is in front, or while <see cref="TaskService"/> holds it, it holds ScadBuddy's
+/// realtime socket with its device token, subscribed to its own topic <c>device:&lt;id&gt;</c> and
+/// to <c>tasks</c> (#8574), and posts a heartbeat every 30 s that says whether the app is in front.
+/// A call comes as the bus event <c>device.call_requested</c>; <see cref="DeviceMethods"/> runs it,
+/// and its events, uploads and result go back over HTTP with the same token. Core sends a call
+/// only to a phone with the app in front: Android gives NFC to the app in front only. A
+/// <c>task.changed</c> goes to <see cref="TaskInbox"/>.
 /// </summary>
 public sealed class DeviceLink
 {
@@ -33,8 +35,16 @@ public sealed class DeviceLink
 	readonly object gate = new();
 	Pairing? pairing;
 	bool loaded;
-	// Whether the app is in front: the socket and the heartbeat run only then.
+	// Whether the app is in front: core sends an NFC call only then (the heartbeat says so).
 	bool front;
+	// Whether TaskService holds the socket: with it, the socket and the heartbeat go on with the
+	// app behind, so flow questions still notify (#8574, spec §6.3).
+	bool held;
+	// Cancelled to send the next heartbeat at once: the app came to the front or went behind.
+	CancellationTokenSource nap = new();
+	// The task list is read again this often on an open socket, so a missed event or a phone
+	// turned back on for tasks is caught up.
+	static readonly TimeSpan TasksEvery = TimeSpan.FromMinutes(5);
 	CancellationTokenSource? link;
 	RunningCall? running;
 	// The calls already run: a call is never run twice, even if its frame comes again.
@@ -74,22 +84,54 @@ public sealed class DeviceLink
 		// The phone keeps one pairing: a new one replaces the old, which expires after its idle hour.
 		await SecureStorage.Default.SetAsync(StoreKey, DeviceProtocol.Stored(paired));
 		lock (gate) { pairing = paired; loaded = true; }
+		// The old pairing's tasks are another owner's, maybe.
+		TaskInbox.Instance.Clear();
 		_ = Open();
+		TaskService.Start(Android.App.Application.Context);
 		return paired;
 	}
 
-	/// <summary>The app came to the front: open the socket and start the heartbeat.</summary>
+	/// <summary>The app came to the front: open the socket and start the heartbeat, which says the app is in front.</summary>
 	public void Resume()
 	{
 		lock (gate) front = true;
+		Wake();
 		_ = Open();
 	}
 
-	/// <summary>The app went to the back: close the socket and stop the heartbeat. A running call goes on (a photo pauses the app).</summary>
+	/// <summary>
+	/// The app went to the back. Without <see cref="TaskService"/> the socket and the heartbeat
+	/// stop; with it they go on, and the heartbeat says the app is behind, so core sends no NFC
+	/// call. A running call goes on (a photo pauses the app).
+	/// </summary>
 	public void Pause()
 	{
-		lock (gate) front = false;
-		Close();
+		bool keep;
+		lock (gate) { front = false; keep = held; }
+		if (keep) Wake();
+		else Close();
+	}
+
+	/// <summary>TaskService started (true) or stopped (false): it keeps the socket with the app behind.</summary>
+	public void Hold(bool on)
+	{
+		bool close;
+		lock (gate) { held = on; close = !on && !front; }
+		if (close) Close();
+		else _ = Open();
+	}
+
+	/// <summary>Whether the phone is paired.</summary>
+	public async Task<bool> Paired() => await Current() is not null;
+
+	/// <summary>The pairing the task routes use, or null.</summary>
+	internal Task<Pairing?> PairingNow() => Current();
+
+	void Wake()
+	{
+		CancellationTokenSource old;
+		lock (gate) { old = nap; nap = new CancellationTokenSource(); }
+		old.Cancel();
 	}
 
 	async Task Open()
@@ -104,7 +146,7 @@ public sealed class DeviceLink
 		CancellationTokenSource cts;
 		lock (gate)
 		{
-			if (!front || link is not null || pairing != p) return;
+			if (!front && !held || link is not null || pairing != p) return;
 			link = cts = new CancellationTokenSource();
 		}
 		_ = Heartbeat(p, cts.Token);
@@ -123,9 +165,13 @@ public sealed class DeviceLink
 	{
 		while (!stop.IsCancellationRequested)
 		{
+			CancellationToken woken;
+			bool inFront;
+			lock (gate) { woken = nap.Token; inFront = front; }
 			try
 			{
 				using var request = Request(p, HttpMethod.Post, "/api/v1/devices/heartbeat");
+				request.Content = new StringContent(DeviceProtocol.Heartbeat(inFront), Encoding.UTF8, "application/json");
 				using var answer = await Http.SendAsync(request, stop);
 				if (answer.StatusCode == HttpStatusCode.Unauthorized)
 				{
@@ -138,7 +184,11 @@ public sealed class DeviceLink
 				// Offline for now: the next beat tries again.
 			}
 			catch (OperationCanceledException) { return; }
-			try { await Task.Delay(HeartbeatEvery, stop); } catch (OperationCanceledException) { return; }
+			// The app came to the front or went behind: the next beat goes at once.
+			using var either = CancellationTokenSource.CreateLinkedTokenSource(stop, woken);
+			try { await Task.Delay(HeartbeatEvery, either.Token); }
+			catch (OperationCanceledException) when (!stop.IsCancellationRequested) { }
+			catch (OperationCanceledException) { return; }
 		}
 	}
 
@@ -156,6 +206,11 @@ public sealed class DeviceLink
 				await ws.ConnectAsync(DeviceProtocol.SocketOf(p.Origin), stop);
 				opened = DateTime.UtcNow;
 				await SendText(ws, DeviceProtocol.Subscribe(p.DeviceId), stop);
+				// The tasks on their own frame: core refuses them alone while this phone may not
+				// answer tasks. Then the list is read, so a task opened while the socket was down
+				// is not missed, and none notifies twice (TaskInbox).
+				await SendText(ws, DeviceProtocol.SubscribeTasks, stop);
+				_ = TaskInbox.Instance.Reload();
 				await Listen(ws, p, stop);
 				if (ws.CloseStatus is (WebSocketCloseStatus)SignedOut)
 				{
@@ -186,8 +241,17 @@ public sealed class DeviceLink
 	{
 		var buffer = new byte[8 << 10];
 		using var text = new MemoryStream();
+		var tasksRead = DateTime.UtcNow;
 		while (ws.State == WebSocketState.Open && !stop.IsCancellationRequested)
 		{
+			// Core pings every 25 s, so this runs on an idle socket too. The subscribe goes again:
+			// a phone turned back on for tasks follows them without a new socket.
+			if (DateTime.UtcNow - tasksRead >= TasksEvery)
+			{
+				tasksRead = DateTime.UtcNow;
+				await SendText(ws, DeviceProtocol.SubscribeTasks, stop);
+				_ = TaskInbox.Instance.Reload();
+			}
 			var got = await ws.ReceiveAsync(buffer, stop);
 			if (got.MessageType == WebSocketMessageType.Close) return;
 			text.Write(buffer, 0, got.Count);
@@ -205,6 +269,13 @@ public sealed class DeviceLink
 					break;
 				case CallEnded ended:
 					lock (gate) if (running?.Call.Call == ended.Call) running.End();
+					break;
+				case TaskChange change:
+					_ = TaskInbox.Instance.OnChange(change.TaskId, change.State);
+					break;
+				case ResyncFrame:
+					// Events were lost: the list is read again.
+					_ = TaskInbox.Instance.Reload();
 					break;
 			}
 		}
@@ -304,7 +375,10 @@ public sealed class DeviceLink
 		}
 		Close();
 		SecureStorage.Default.Remove(StoreKey);
-		NfcBridge.Notify(why ?? "This phone's pairing with ScadBuddy ended. Pair it again from ScadBuddy's Devices page.");
+		// No pairing, no questions: the list empties, its notifications go, and so does the service.
+		TaskInbox.Instance.Clear();
+		TaskService.Stop(Android.App.Application.Context);
+		NfcBridge.Notify(why ??"This phone's pairing with ScadBuddy ended. Pair it again from ScadBuddy's Devices page.");
 	}
 
 	sealed class RunningCall(CallRequest call, CancellationTokenSource cancel, DeviceCall context)

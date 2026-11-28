@@ -1,0 +1,31 @@
+{
+  "id": "8181a2a2-0000-4000-8000-000008798009",
+  "run_id": "run-fixture",
+  "title": "Fixture block-pairs",
+  "schema": {
+    "type": "object",
+    "properties": {},
+    "required": []
+  },
+  "context": [
+    {
+      "order": "SB-1042",
+      "items": [
+        "name keychain",
+        "cable clip"
+      ]
+    }
+  ],
+  "place": null,
+  "ui": null,
+  "assignee": null,
+  "expires_at": null,
+  "state": "open",
+  "created_at": "2026-11-28T09:00:00Z",
+  "updated_at": "2026-11-28T09:00:00Z",
+  "native": true,
+  "fallback_url": "/station",
+  "context_view": [
+    null
+  ]
+}

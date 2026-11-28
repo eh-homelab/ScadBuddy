@@ -1,0 +1,28 @@
+{
+  "id": "8181a2a2-0000-4000-8000-000005131512",
+  "run_id": "run-fixture",
+  "title": "Fixture weight",
+  "schema": {
+    "type": "object",
+    "properties": {
+      "f": {
+        "type": "number",
+        "x-sb-widget": "weight",
+        "title": "Weight"
+      }
+    },
+    "required": [
+      "f"
+    ]
+  },
+  "context": [],
+  "place": null,
+  "ui": null,
+  "assignee": null,
+  "expires_at": null,
+  "state": "open",
+  "created_at": "2026-11-28T09:00:00Z",
+  "updated_at": "2026-11-28T09:00:00Z",
+  "native": true,
+  "fallback_url": "/station"
+}
