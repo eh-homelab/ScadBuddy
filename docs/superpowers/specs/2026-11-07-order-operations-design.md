@@ -284,13 +284,18 @@ main (#5315, #5337, #5347), and #5280 is closed. scadify reviewed §5 against th
   opens by itself (`useSliceQuotes` `landed`). A failed render is the run's
   error, where a failed slice quote shows (`quote-error`). The owner's ruling
   (2026-11-15): "Slice should just render if it needs; don't make another step."
-- #8481, as built: "Print…" does the same for an accepted item with a design and no
-  output (a storefront order, whose acceptance closed Slice…). The render's check
-  (`orders/operations.py` `render_check`) also takes an item to print: an accepted order,
-  the item `approved` or `failed` with an accepted quote. The render changes no quote, so
-  the customer's accepted price stays. The drawer's Print… renders first, then opens the
-  print dialog in item mode on the new output (`PrintItem` `renderFirst`); the row's
-  Print… opens the drawer there. The bulk Print… leaves such an item out.
+- #8481, as built: a storefront line holds the output its slice price was made from. The
+  slice run saves the visitor's render as `storefront_output_id(render_key)`; the line
+  takes it when it is added, or at submit when the slice saved it after the add
+  (`orders/rendering.py` `storefront_output`, while it is the line's render). A kit's later
+  outputs are found from the first by the line's render key (`later_output_id`). So an
+  accepted storefront order prints through the item's Print… with no second render. A line
+  with no output (one ordered before this, or one never sliced) still offers Print… in the
+  drawer: it renders first (`PrintItem` `renderFirst`), and the render takes the saved
+  output when it is there, with no render job. The render's check (`render_check`) also
+  takes an item to print: an accepted order, the item `approved` or `failed` with an
+  accepted quote. It changes no quote, so the customer's accepted price stays. The bulk
+  Print… leaves an item with no output out.
 
 ## 6. A derived machine rate (#4625)
 

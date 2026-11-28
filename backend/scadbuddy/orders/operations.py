@@ -101,8 +101,10 @@ from scadbuddy.orders.quote_preview import start_library_quote_preview, start_qu
 from scadbuddy.orders.rendering import (
     AttachTo,
     RenderedOutput,
-    kit_output_id,
+    attach_output,
+    later_output_id,
     outputs_for_reference,
+    storefront_output,
 )
 from scadbuddy.orders.served_library import ServedLibrary, served_shelf
 from scadbuddy.orders.spools import item_plan
@@ -750,29 +752,40 @@ def order_kinds(core: Core, components: Components) -> list[OperationKind]:
             raise ApiError(status.HTTP_404_NOT_FOUND, f"no order {order_id!r}")
         reference = reference_of(item)
         saved_as = render_output_id(OPERATION_RUN.get())
-        # Every output of a pipeline's render (#5701 PR 5): the item holds the first, and
-        # the order finds the others from it (`kit_output_ids`).
-        await outputs_for_reference(
-            reference,
-            outputs=core.outputs,
-            renders=_Renders(core),
-            create_output=create_output,
-            name=f"{order.label} {item.title}",
-            saved_as=lambda _index: saved_as,
-            later_as=kit_output_id,
-            schema=await reference_schema(core, reference),
-            item=AttachTo(
-                lifecycle=lifecycle,
-                order=order,
-                item=item,
-                by=by,
-                revision_id=item.current_revision_id,
-                # The order or the item may have moved on while it rendered. A refusal
-                # here leaves the output saved: a render of the template like any other
-                # (the model's outputs and Recent renders list it), set on no item.
-                check=lambda: render_check(orders.store, order_id, item_id),
-            ),
+        target = AttachTo(
+            lifecycle=lifecycle,
+            order=order,
+            item=item,
+            by=by,
+            revision_id=item.current_revision_id,
+            # The order or the item may have moved on while it rendered. A refusal
+            # here leaves the output saved: a render of the template like any other
+            # (the model's outputs and Recent renders list it), set on no item.
+            check=lambda: render_check(orders.store, order_id, item_id),
         )
+        # #8481: a storefront line ordered before the submit linked its output takes the
+        # output its slice saved, with no render; its kit is found from it.
+        saved = (
+            None
+            if item.output_id is not None
+            else await asyncio.to_thread(storefront_output, core.outputs, reference)
+        )
+        if saved is not None:
+            await attach_output(target, saved)
+        else:
+            # Every output of a pipeline's render (#5701 PR 5): the item holds the first,
+            # and the order finds the others from it (`kit_output_ids`).
+            await outputs_for_reference(
+                reference,
+                outputs=core.outputs,
+                renders=_Renders(core),
+                create_output=create_output,
+                name=f"{order.label} {item.title}",
+                saved_as=lambda _index: saved_as,
+                later_as=later_output_id(reference.render_key),
+                schema=await reference_schema(core, reference),
+                item=target,
+            )
         rendered = await asyncio.to_thread(orders.store.item, item_id)
         assert rendered is not None
         dumped: dict[str, Any] = rendered.model_dump(mode="json")
