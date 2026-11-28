@@ -1219,16 +1219,47 @@ attempt has one archive per plate: `OrderStore.run_archives` finds them through
 `print_sends` (by `run_id`) and `print_links` (by queue item). A LAN start has no queue
 item, so its archive is found by the start's record, `lan_print_archives` (by `run_id`,
 #8124). The API writes that row when exactly one start of the run has the job name that
-the archive's file carries (`print_history._run_by_file`), on the print's read or as the
-Prints list links it, so two prints of one file never mix. Once the attempt's print
+the archive's file carries (`lan_files.start_by_file`), on the print's read, as the
+Prints list links it, or as the attempt's own archive read finds it, so two prints of one
+file never mix. That last read is for a LAN print that nobody opened (#8281,
+`archives.link_lan_archives`): it reads the archives that a link by content hash gives the
+run's subject and that name no start yet, through the same seam, and records the start
+that each file name names. It adds no Bambuddy read of a new kind, and it finds nothing
+until a link by hash exists (the print watcher or the Prints list writes it). It takes
+only the links made from the run's making to `archives.LAN_LINK_WINDOW` (the print
+watcher's `LOOKBACK`) after the run's newest start that no archive names, so an
+archive that never matches is not read again past that window (#8306). A start gets one
+archive only: a start that another archive became already keeps it, and two archives of
+one read that name one start record neither (`lan_files.starts_by_files`), so the attempt
+never adds two prints' grams and seconds. A database error in that link is logged, and the
+read goes on with the archives already named. Once the
+attempt's print
 settled it copies `archive_ids`, the archives' earliest start and latest end as its
 `started_at`/`finished_at`, and `actual_seconds` and `actual_grams` summed
-(`total_filament_actual_grams`, else `filament_used_grams`). It does not copy the
+(`total_filament_actual_grams`, else `filament_used_grams`). That is the queue path's
+rule. A LAN attempt (#8282) takes each of these facts from ScadBuddy's own record of the
+run instead (`OrderStore.lan_record`, `archives.lan_facts`), and an archive's only where
+that record gives none; the archive gives its media. The start is the first start's
+`started_at` in `print_runs.result.lan`. Each start ends at the printer report that
+showed its plate end: the start's own `ended_at` (#8321, set when a later start waited
+for it and the report showed its own `FINISH` or `FAILED`; an `IDLE` or moved-on end has
+none), else that end as the filament ledger booked it (`filament/prints.py`
+`plate_ended`), and the last start with neither ends at `print_outcomes.settled_at`;
+the end is the last start's end. The seconds are the sum of each start's span; an earlier
+start with no timed end gives none. The grams are the starts' own sliced grams
+(`grams_by_slot`, #8321, every slot) when every plate printed to the end (each earlier
+start ended `done` and the outcome is `finished`). Else they are the ledger's
+`print_ended` grams of the run's uses (`prints.run_uses`): each start books its sliced
+grams per slot whose tray holds an SB spool, so there are none when a start booked no
+use, a use is still open, or a plate did not finish (its end drops the estimate). A LAN attempt writes these with no
+Bambuddy and no archive too. It does not copy the
 outcome: the attempt's is the print path's (`print_outcomes`), read from the same print.
 The times are copied once, told by `archive_copied` (#5273), so one a person corrected
 stands even when the archives give no seconds or grams. An attempt that named archives before that column was
 added is taken as copied (#5276): nothing tells one copied from an archive with neither
-from one never read.
+from one never read. A copy of an attempt copied once that would change nothing writes
+nothing and takes no order lock (#8330). A `result.lan` that does not parse gives no
+record (logged), so the archives give every fact.
 The copy runs on each `print.outcome` heard (`listen_for_prints`' `on_outcome`) and on
 each `GET …/fulfilments/{f}/archives`, which also lists each archive's `finish_` photos
 and whether it has a timelapse, so a link Bambuddy made late is still copied. `POST

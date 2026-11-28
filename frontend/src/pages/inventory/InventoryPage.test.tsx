@@ -5,6 +5,7 @@ import { beforeEach, describe, expect, it } from 'vitest'
 import { api } from '../../api/client'
 import { resetMockState } from '../../mocks/handlers'
 import { INVENTORY, inventoryMock, seedItem, seedLot } from '../../mocks/features/inventory'
+import { inventoryApi } from './api'
 import { server } from '../../mocks/server'
 import { renderPage } from '../../test/utils'
 import { InventoryPage } from './InventoryPage'
@@ -51,12 +52,13 @@ describe('InventoryPage (#7067)', () => {
   })
 
   it('filters by a kind and its children, and by a search, in the address', async () => {
+    seedItem({ kind_id: 'part', name: 'Spare fan' })
     const { user } = render()
     await table()
     const kinds = screen.getByRole('navigation', { name: 'Kinds' })
     await user.click(within(kinds).getByRole('link', { name: 'Part' }))
-    // Hardware and Nozzle are below Part; Service is not.
-    await waitFor(async () => expect(await names()).toEqual(['Hardened steel nozzle 0.4', 'Silver keychain hook']))
+    // Nozzle is below Part; Hardware is not (inventory K1 put it under Consumable).
+    await waitFor(async () => expect(await names()).toEqual(['Hardened steel nozzle 0.4', 'Spare fan']))
     expect(screen.getByTestId('where')).toHaveTextContent('/inventory?kind=part')
 
     await user.type(screen.getByRole('searchbox', { name: 'Search items' }), 'nozzle')
@@ -98,9 +100,54 @@ describe('InventoryPage (#7067)', () => {
     expect(inventoryMock.bodies.find((b) => b.route === 'createItem')?.body).toMatchObject({ kind_id: 'hardware', name: 'M3 bolt' })
   })
 
+  it("asks for the kind's required properties, marks the missing ones and keeps the draft (R-K1-33)", async () => {
+    await inventoryApi.createKind({ id: 'strict', name: 'Strict', parent_id: 'hardware', attribute_schema: { type: 'object', properties: { material: { type: 'string' }, finish: { type: 'string' } }, required: ['material'] } })
+    const { user } = render('/inventory?kind=strict')
+    await screen.findByText('No item matches.')
+    await user.click(screen.getByRole('button', { name: 'New item' }))
+    const form = screen.getByRole('form', { name: 'New item' })
+    const material = await within(form).findByRole('textbox', { name: 'material' })
+    expect(material).toHaveAttribute('aria-required', 'true')
+    const fields = within(form).getAllByTestId('defined-field').map((f) => f.getAttribute('data-key'))
+    expect(fields).toEqual(['material', 'finish'])
+
+    await user.type(within(form).getByLabelText('Name'), 'Bolt')
+    await user.click(within(form).getByRole('button', { name: 'Add item' }))
+    expect(await within(form).findByRole('alert')).toHaveTextContent('Fill the required properties: material')
+    expect(material).toHaveAttribute('aria-invalid', 'true')
+    expect(within(form).getByLabelText('Name')).toHaveValue('Bolt')
+
+    await user.type(material, 'steel')
+    await user.click(within(form).getByRole('button', { name: 'Add item' }))
+    await waitFor(() => expect(screen.getByTestId('where').textContent).toMatch(/^\/inventory\/items\//))
+    expect(inventoryMock.bodies.filter((b) => b.route === 'createItem').at(-1)?.body).toEqual({ kind_id: 'strict', name: 'Bolt', properties: { material: 'steel' } })
+  })
+
+  it('asks for a printer special type\'s model_code', async () => {
+    await inventoryApi.createKind({ id: 'fdm', name: 'FDM printer', parent_id: 'printer', special_type: 'printer' })
+    const { user } = render('/inventory?kind=fdm')
+    await screen.findByText('No item matches.')
+    await user.click(screen.getByRole('button', { name: 'New item' }))
+    const form = screen.getByRole('form', { name: 'New item' })
+    expect(await within(form).findByRole('textbox', { name: 'model_code' })).toHaveAttribute('aria-required', 'true')
+  })
+
+  it('marks an item that lacks a required property, and Only incomplete keeps only those', async () => {
+    await inventoryApi.createKind({ id: 'strict', name: 'Strict', parent_id: 'hardware', attribute_schema: { type: 'object', properties: { material: { type: 'string' } }, required: ['material'] } })
+    seedItem({ kind_id: 'strict', name: 'Old bolt' })
+    const { user } = render('/inventory')
+    const row = (await within(await table()).findByRole('link', { name: 'Old bolt' })).closest('tr')!
+    expect(row).toHaveTextContent('Missing required: material')
+    expect(await names()).toContain('Silver keychain hook')
+
+    await user.click(screen.getByRole('checkbox', { name: 'Only incomplete' }))
+    await waitFor(async () => expect(await names()).toEqual(['Old bolt']))
+    expect(screen.getByTestId('where')).toHaveTextContent('incomplete=true')
+  })
+
   it('saves a model rule over the lot items (#5543, moved from the parts page)', async () => {
     const hook = seedItem({ kind_id: 'hardware', name: 'Silver hook' })
-    const { user } = render('/inventory?kind=part')
+    const { user } = render('/inventory?kind=hardware')
     await table()
     const rules = screen.getByRole('region', { name: 'Model rules' })
 
@@ -133,11 +180,17 @@ describe('InventoryPage (#7067)', () => {
     expect(within(rules).getByText(/Open coaster's rule first/)).toBeInTheDocument()
   })
 
-  it('shows the model rules only for the Part kind and the kinds below it (R-P2-39)', async () => {
+  it("shows the model rules only for the parts' kinds, Hardware and AMS part, and the kinds below them (R-P2-39, #6949)", async () => {
     const { user } = render('/inventory?kind=service')
     await table()
     expect(screen.queryByRole('region', { name: 'Model rules' })).toBeNull()
-    await user.click(within(screen.getByRole('navigation', { name: 'Kinds' })).getByRole('link', { name: 'Hardware' }))
+    const kinds = screen.getByRole('navigation', { name: 'Kinds' })
+    await user.click(within(kinds).getByRole('link', { name: 'Hardware' }))
+    expect(await screen.findByRole('region', { name: 'Model rules' })).toBeInTheDocument()
+    // Inventory K1: Part holds durable units now, not an order's parts.
+    await user.click(within(kinds).getByRole('link', { name: 'Part' }))
+    await waitFor(() => expect(screen.queryByRole('region', { name: 'Model rules' })).toBeNull())
+    await user.click(within(kinds).getByRole('link', { name: 'AMS part' }))
     expect(await screen.findByRole('region', { name: 'Model rules' })).toBeInTheDocument()
     await user.click(within(screen.getByRole('navigation', { name: 'Kinds' })).getByRole('link', { name: 'All items' }))
     await waitFor(() => expect(screen.queryByRole('region', { name: 'Model rules' })).toBeNull())

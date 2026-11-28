@@ -104,6 +104,7 @@ from scadbuddy.core.settings import (
 )
 from scadbuddy.core.settings_cache import SETTINGS_CACHE_TTL, SettingsCache
 from scadbuddy.filament.label_output import LabelOutput
+from scadbuddy.filament.label_printing import LabelJobOptions, server_url
 from scadbuddy.filament.label_templates import LabelTemplateChoice
 from scadbuddy.flows.answerers import MAX_ANSWERERS, AnswererRule
 from scadbuddy.library.asset_fetch import DEFAULT_ASSET_FETCH_DOMAINS, normalise_domain
@@ -274,6 +275,9 @@ RECOVER_BAMBUDDY_LIBRARY_SQL = (
 )
 BAMBUDDY_NOT_READY = (
     "the Bambuddy store needs a Bambuddy URL and a library folder (its inbox) saved first"
+)
+BAMBUDDY_KEY_NOT_READY = (
+    "the Bambuddy store is read with the Bambuddy API key: save it first (Settings, Bambuddy)"
 )
 
 
@@ -549,6 +553,14 @@ class StoredSettings(BambuddyIds):
     #: #7216: the labels file's format, its PNG dpi and the spool label's fields
     #: (R-7216-8). ``None``: `LabelOutput()`, a PDF. Stored only.
     filament_label_output: LabelOutput | None = None
+    #: #7170: the CUPS server's URL, the queue the Labels page printed to last and its job
+    #: options. ``None``: `label_printing.DEFAULT_SERVER_URL`, no queue and
+    #: `LabelJobOptions()`. Stored only: Go's `internal/labelprint` reads
+    #: `filament_label_server_url` by name; the Labels page reads and saves the queue and
+    #: the job options.
+    filament_label_server_url: str | None = None
+    filament_label_queue: str | None = None
+    filament_label_job_options: LabelJobOptions | None = None
 
     # -- the shop's money rules (#5281), stored only: no environment seeds them --------
     #: The deposit policy's rules; ``None`` asks no deposit.
@@ -884,6 +896,11 @@ class SettingsPatch(BaseModel):
     filament_label_template: LabelTemplateChoice | None = None
     #: #7216: the labels output; ``null`` puts back a PDF at 300 dpi.
     filament_label_output: LabelOutput | None = None
+    #: #7170: the label print settings; ``null`` puts back the default server, no queue and
+    #: the default job options. Only a person changes the server.
+    filament_label_server_url: str | None = None
+    filament_label_queue: str | None = Field(default=None, pattern=r"^[A-Za-z0-9_-]{1,127}$")
+    filament_label_job_options: LabelJobOptions | None = None
 
     # -- the shop's money rules (#5281), stored only; only the user sets them ----------
     #: ``null`` asks no deposit.
@@ -1049,6 +1066,11 @@ class SettingsPatch(BaseModel):
         if domains is None:
             return None
         return list(dict.fromkeys(normalise_domain(domain) for domain in domains))
+
+    @field_validator("filament_label_server_url")
+    @classmethod
+    def _server_url(cls, url: str | None) -> str | None:
+        return None if url is None else server_url(url)
 
     @field_validator("flow_answerers")
     @classmethod

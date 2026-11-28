@@ -133,30 +133,16 @@ export const NOT_A_TOOL: readonly { operation: Operation; reason: string }[] = [
     reason: "The shop edits listings on the Storefront page (#5282, spec 2026-11-02 §5.3); the assistant drafts and publishes through storefront_listing_draft and storefront_listing_publish (#6131).",
   },
   {
-    operation: 'POST /api/v1/parts',
-    reason:
-      'Alias of POST /inventory/items with its offer and price (#7067, spec §6.11); it goes after one release. The assistant adds an item with inventory_item_upsert, its offer with inventory_offer_upsert and its stock with inventory_lot_receive.',
-  },
-  {
-    operation: 'PATCH /api/v1/parts/{part_id}',
-    reason:
-      'Alias of PATCH /inventory/items/{item_id} and its offer (#7067, spec §6.11); it goes after one release. The assistant edits an item with inventory_item_upsert and its offer with inventory_offer_upsert.',
-  },
-  {
-    operation: 'POST /api/v1/parts/{part_id}/adjust',
-    reason: 'Alias of POST /inventory/items/{item_id}/count (#7067, spec §6.11); it goes after one release. The assistant records a count with inventory_move_count.',
-  },
-  {
-    operation: 'GET /api/v1/parts/{part_id}/moves',
-    reason: 'Alias of GET /inventory/moves?item_id= (#7067, spec §6.11); it goes after one release. The assistant reads moves with inventory_move_list.',
+    operation: 'GET /api/v1/inventory/kinds/{kind_id}/schema/history',
+    reason: "A kind's schema history is an audit view for people, on the kind's page (#6949, K1); the assistant reads the current schema with inventory_kind_list.",
   },
   {
     operation: 'GET /api/v1/parts/rules/{slug}',
-    reason: "The model rules in Inventory, under the Part kind (#5543, #7067, job cost spec §11): a new item takes its rule, and order_item_parts_set changes an item's parts.",
+    reason: "The model rules in Inventory, under the Hardware and AMS part kinds (#5543, #7067, job cost spec §11): a new item takes its rule, and order_item_parts_set changes an item's parts.",
   },
   {
     operation: 'PUT /api/v1/parts/rules/{slug}',
-    reason: "The model rules in Inventory, under the Part kind (#5543, #7067, job cost spec §11): a new item takes its rule, and order_item_parts_set changes an item's parts.",
+    reason: "The model rules in Inventory, under the Hardware and AMS part kinds (#5543, #7067, job cost spec §11): a new item takes its rule, and order_item_parts_set changes an item's parts.",
   },
   {
     operation: 'GET /api/v1/print/library-copies',

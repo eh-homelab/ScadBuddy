@@ -33,6 +33,7 @@ ServiceCaller = Literal[
     "camera",
     "camera-relay",
     "fleet",
+    "inventory",
     "fleet-rotator",
 ]
 

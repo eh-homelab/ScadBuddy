@@ -1,11 +1,13 @@
 import { PlusIcon } from 'lucide-react'
 import { useId, useMemo, useState, type FormEvent } from 'react'
 import { Link, useNavigate, useSearchParams } from 'react-router'
-import { ApiError } from '../../api/client'
+import { DefinedFields } from '../../components/entities/DefinedFields'
+import { fieldErrorsOf, isIncomplete, propertiesPatch, type FieldErrors, type Values } from '../../components/entities/definedProperties'
+import { IncompleteMark } from '../../components/entities/IncompleteMark'
 import { useMoney } from '../../components/filament/purchasing/useMoney'
 import { PartRules } from '../../components/orders/PartRules'
 import { DataTable, type Column } from '../../components/records/DataTable'
-import { inventoryPaths } from '../../lib/inventoryLinks'
+import { inventoryPaths, isPartKind } from '../../lib/inventoryLinks'
 import { useAsync } from '../../lib/useAsync'
 import { cn } from '@/lib/utils'
 import { Badge } from '@/components/ui/badge'
@@ -15,8 +17,10 @@ import { Input } from '@/components/ui/input'
 import { Label } from '@/components/ui/label'
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select'
 import { Skeleton } from '@/components/ui/skeleton'
+import { failed } from './usePress'
 import { inventoryApi, type Item, type ItemKind } from './api'
 import { dec, qtyText, valueText } from './format'
+import { useItemSchema } from './itemProperties'
 import { kindTree, type KindNode } from './kindTree'
 
 /**
@@ -30,6 +34,8 @@ export function InventoryPage() {
   const q = params.get('q') ?? ''
   const low = params.get('low') === 'true'
   const archived = params.get('archived') === 'true'
+  // R-K1-33: only the items a required property leaves incomplete, as the filament types' filter.
+  const incomplete = params.get('incomplete') === 'true'
   const money = useMoney()
   const kinds = useAsync(() => inventoryApi.kinds(), [])
   const items = useAsync(() => inventoryApi.items({ kind, q, low, archived }), [kind, q, low, archived])
@@ -56,6 +62,7 @@ export function InventoryPage() {
           {item.low && <Badge variant="destructive">Low</Badge>}
           {item.effective_saleable && <Badge variant="secondary">For sale</Badge>}
           {item.archived_at && <Badge variant="outline">Archived</Badge>}
+          <IncompleteMark row={item} />
         </span>
       ),
     },
@@ -122,6 +129,10 @@ export function InventoryPage() {
                 <Checkbox checked={archived} aria-label="Show archived" onCheckedChange={(next) => set('archived', next === true ? 'true' : null)} />
                 Show archived
               </label>
+              <label className="flex items-center gap-2 text-[13px] text-muted-foreground">
+                <Checkbox checked={incomplete} aria-label="Only incomplete" onCheckedChange={(next) => set('incomplete', next === true ? 'true' : null)} />
+                Only incomplete
+              </label>
             </div>
             {items.error ? (
               <p role="alert" className="text-[13px] text-warn">
@@ -134,26 +145,22 @@ export function InventoryPage() {
                 ))}
               </div>
             ) : (
-              <DataTable label="Items" columns={columns} rows={items.data ?? []} rowKey={(item) => item.id} empty={q || low || kind || archived ? 'No item matches.' : 'No items yet. Add the hooks, nozzles or boxes you buy.'} />
+              <DataTable
+                label="Items"
+                columns={columns}
+                rows={(items.data ?? []).filter((item) => !incomplete || isIncomplete(item))}
+                rowKey={(item) => item.id}
+                empty={incomplete ? 'No item is incomplete.' : q || low || kind || archived ? 'No item matches.' : 'No items yet. Add the hooks, nozzles or boxes you buy.'}
+              />
             )}
             {/* #5543 — moved from the parts page (#7067): the parts each unit of a model uses,
-                under the Part kind and the kinds below it only (R-P2-39). */}
-            {kind && underPart(kind, byId) && <PartRules />}
+                under the parts' kinds and the kinds below them only (R-P2-39, `PART_KINDS`). */}
+            {kind && isPartKind(kind, (id) => byId.get(id)?.parent_id) && <PartRules />}
           </div>
         </div>
       </div>
     </div>
   )
-}
-
-/** Whether the kind is `part` or below it (R-P2-39). */
-function underPart(kindId: string, byId: Map<string, ItemKind>): boolean {
-  const seen = new Set<string>()
-  for (let at: string | null | undefined = kindId; at && !seen.has(at); at = byId.get(at)?.parent_id) {
-    if (at === 'part') return true
-    seen.add(at)
-  }
-  return false
 }
 
 const treeLink = (active: boolean) => cn('block truncate rounded-md px-2 py-1 hover:bg-muted', active ? 'bg-muted font-medium text-foreground' : 'text-muted-foreground')
@@ -184,6 +191,10 @@ function NewItemForm({ kinds, kind, onCancel }: { kinds: ItemKind[]; kind: strin
   const [lowStock, setLowStock] = useState('')
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState<string | null>(null)
+  // R-K1-33: the kind's keys as fields, required ones first; a refusal marks its keys.
+  const schema = useItemSchema(kindId || null)
+  const [defined, setDefined] = useState<Values>({})
+  const [fieldErrors, setFieldErrors] = useState<FieldErrors | undefined>()
 
   async function submit(event: FormEvent) {
     event.preventDefault()
@@ -194,10 +205,19 @@ function NewItemForm({ kinds, kind, onCancel }: { kinds: ItemKind[]; kind: strin
     setBusy(true)
     setError(null)
     try {
-      const made = await inventoryApi.createItem({ kind_id: kindId, name: name.trim(), ...(manufacturer.trim() ? { manufacturer: manufacturer.trim() } : {}), ...(low ? { low_stock: low } : {}) })
+      const properties = propertiesPatch(schema.data ?? {}, {}, defined)
+      setFieldErrors(undefined)
+      const made = await inventoryApi.createItem({
+        kind_id: kindId,
+        name: name.trim(),
+        ...(manufacturer.trim() ? { manufacturer: manufacturer.trim() } : {}),
+        ...(low ? { low_stock: low } : {}),
+        ...(Object.keys(properties).length ? { properties } : {}),
+      })
       void navigate(inventoryPaths.item(made.id))
     } catch (cause) {
-      setError(cause instanceof ApiError ? cause.detail : 'The item could not be added. Try again.')
+      setFieldErrors(fieldErrorsOf(cause) ?? undefined)
+      setError(failed(cause, 'The item could not be added. Try again.'))
       setBusy(false)
     }
   }
@@ -207,7 +227,14 @@ function NewItemForm({ kinds, kind, onCancel }: { kinds: ItemKind[]; kind: strin
       <div className="flex flex-wrap items-end gap-3">
         <div className="flex flex-col gap-1">
           <Label htmlFor={`${id}-kind`}>Kind</Label>
-          <Select value={kindId} onValueChange={setKindId}>
+          <Select
+            value={kindId}
+            onValueChange={(next) => {
+              setKindId(next)
+              setDefined({})
+              setFieldErrors(undefined)
+            }}
+          >
             <SelectTrigger id={`${id}-kind`} aria-label="Kind" className="w-48">
               <SelectValue placeholder="Pick a kind" />
             </SelectTrigger>
@@ -233,6 +260,12 @@ function NewItemForm({ kinds, kind, onCancel }: { kinds: ItemKind[]; kind: strin
           <Input id={`${id}-low`} inputMode="decimal" value={lowStock} onChange={(e) => setLowStock(e.target.value)} className="w-24" />
         </div>
       </div>
+      {schema.error && (
+        <p role="alert" className="text-warn">
+          The kind&apos;s properties could not be loaded: {schema.error.message}
+        </p>
+      )}
+      {schema.data && <DefinedFields schema={schema.data} values={defined} onChange={setDefined} errors={fieldErrors} />}
       <div className="flex flex-wrap gap-2">
         <Button type="submit" size="sm" disabled={busy}>
           Add item

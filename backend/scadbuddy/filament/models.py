@@ -609,10 +609,17 @@ MAX_LABELS = 100
 
 
 class LabelsRequest(_In):
-    """#7157: the labels of these spools, then these places, in the order sent."""
+    """#7157: the labels of these spools, then these places, in the order sent. #7169: then
+    these spool types, items and item kinds."""
 
     spool_ids: list[UUID] = Field(default_factory=list, max_length=MAX_LABELS)
     location_ids: list[UUID] = Field(default_factory=list, max_length=MAX_LABELS)
+    type_ids: list[UUID] = Field(default_factory=list, max_length=MAX_LABELS)
+    item_ids: list[UUID] = Field(default_factory=list, max_length=MAX_LABELS)
+    #: An item kind's id is its text id (`printer`, `k12`).
+    kind_ids: list[Annotated[str, Field(max_length=40)]] = Field(
+        default_factory=list, max_length=MAX_LABELS
+    )
     #: ``None``: the stored setting `filament_label_template`.
     template: LabelTemplateChoice | None = None
     #: A one-label template: one label a page (``roll``) or packed on Letter paper
@@ -624,11 +631,21 @@ class LabelsRequest(_In):
     #: The spool label's fields (R-7216-9), put in their print order; ``None``: the setting's.
     fields: LabelFields | None = None
 
+    @property
+    def count(self) -> int:
+        """How many labels the request names."""
+        return (
+            len(self.spool_ids)
+            + len(self.location_ids)
+            + len(self.type_ids)
+            + len(self.item_ids)
+            + len(self.kind_ids)
+        )
+
     @model_validator(mode="after")
     def _one_to_max(self) -> LabelsRequest:
-        count = len(self.spool_ids) + len(self.location_ids)
-        if not 1 <= count <= MAX_LABELS:
-            raise ValueError(f"name 1 to {MAX_LABELS} spools and places")
+        if not 1 <= self.count <= MAX_LABELS:
+            raise ValueError(f"name 1 to {MAX_LABELS} spools, places, types, items and kinds")
         return self
 
 
@@ -838,10 +855,27 @@ class SensorReading(BaseModel):
     value: float
 
 
+#: What a move does when its target is a dry box that holds another spool (#7167):
+#: ``refuse`` (409 ``box_full``) or ``replace`` (that spool is archived at 0 g first).
+IfOccupied = Literal["refuse", "replace"]
+
+
 class SpoolMove(_In):
     """Where a spool goes; ``null`` takes it out of every place."""
 
     location_id: UUID | None
+    #: What to do when the target is a dry box that holds a spool already (#7167).
+    if_occupied: IfOccupied = "refuse"
+    #: The unloaded spool whose home-return prompt this move answers (#7167): its
+    #: ``home_asked_at`` clears though another spool goes into its box.
+    answers: UUID | None = None
+    #: The box's spool the caller saw (#7167), required with ``replace``: a box that holds
+    #: another spool by then is `BoxFullError`, so no spool they did not name is archived.
+    expected_occupant_id: UUID | None = None
+    #: The place where the caller read the spool (#7168), ``null`` for no place. It is
+    #: checked only when the body sends the key: a spool that is in another place, or is
+    #: archived, by then is a 409 ``move_stale``, and nothing is archived or moved.
+    expected_location_id: UUID | None = None
 
 
 # -- spool types ----------------------------------------------------------------------
@@ -908,6 +942,8 @@ class SpoolTypePatch(_Patch):
 
 
 class SpoolType(_Row):
+    # The typed code is `T-<number>` (#7169); `code` is the maker's.
+    number: int
     code: str
     brand_id: UUID | None
     material_id: UUID
@@ -1384,6 +1420,13 @@ class Spool(_Row):
     added_full: bool | None = None
     #: When its tag was written (Bambuddy's ``encode_time``, R-7149-3). Read only.
     tag_encoded_at: datetime | None = None
+    #: The last dry box the spool sat in (#7167). When the spool comes out of its tray and
+    #: it went in from this box, the person is asked which spool goes into the box. Null
+    #: when it has none; it clears when the box is deleted.
+    home_location_id: UUID | None = None
+    #: When capture asked which spool goes into the spool's home box (#7167); null once a
+    #: move, an archive or a load answers it.
+    home_asked_at: datetime | None = None
     #: The values the spool has after its overrides over its type's.
     effective: EffectiveValues = Field(default_factory=EffectiveValues)
     #: The names of the fields the spool overrides.
@@ -1661,6 +1704,7 @@ EventKind = Literal[
     "restored",
     "synced_from_bb",
     "consumed_reset",
+    "non_print_waste",
 ]
 EventSource = Literal["ams_remain", "scale", "print_estimate", "print_actual", "person", "bb"]
 
@@ -1897,6 +1941,10 @@ class Closing(BaseModel):
     final_filament_g: float | None = None
     scale_consumed_g: float | None = None
     drift_g: float | None = None
+    #: Grams left on the spool at the archive, written off as non-print waste
+    #: (`ledger.closing` with ``waste``); null when none is booked (0 g, ``respooled``, or
+    #: an archive that books no waste), #7167.
+    non_print_waste_g: float | None = None
 
 
 class ClosingNotice(BaseModel):
@@ -2171,8 +2219,14 @@ class ScanLocation(_In):
 class TagReadIn(_FitsOneTag):
     """What a phone reads from a tag: its UID and its NDEF records, or its MIFARE blocks."""
 
+    #: Empty for a read that names a device read (`read_id`) instead.
+    records: Annotated[list[NdefRecord], Field(max_length=MAX_RECORDS)] = []
     uid: Annotated[str, Field(max_length=64)] | None = None
     tag_type: Annotated[str, Field(max_length=32)] | None = None
+    #: A paired device's tag read (#8244), in place of `uid`, `tag_type`, `records` and
+    #: `mifare_blocks`. Core's area `filament-tag-reads` loads and decodes it; a read with
+    #: `read_id` that reaches Python is a 503 `device_read_needs_core`.
+    read_id: UUID | None = None
     #: Bind the tag to this spool as part of the read.
     bind_spool_id: UUID | None = None
     #: A Bambu tag's data blocks (key trailers left out), which core's area
@@ -2188,7 +2242,10 @@ class TagReadIn(_FitsOneTag):
     tap: bool = True
 
 
-BackupReason = Literal["spool_write", "agent_write", "restore"]
+BackupReason = Literal["spool_write", "agent_write", "restore", "place_write", "clear"]
+#: Why a tag left its spool: ``unbound`` by hand, ``cleared`` once the phone wrote it empty
+#: (#8362).
+UnbindReason = Literal["unbound", "cleared"]
 
 
 class TagBackupIn(_FitsOneTag):
@@ -2365,6 +2422,13 @@ class DecodedSpool(BaseModel):
     label_weight_g: int | None = None
     empty_weight_g: int | None = None
     serial: str | None = None
+    other_keys: dict[str, str] | None = Field(
+        default=None,
+        description=(
+            "An OpenSpool tag's keys that ScadBuddy does not use, each value as its JSON "
+            "text (a string keeps its quotes), cut to 128 characters. Untrusted text."
+        ),
+    )
     warnings: list[str] = Field(
         default_factory=list,
         description=(

@@ -80,6 +80,7 @@ def export(metrics: Metrics, snapshot: Snapshot) -> None:
     used: dict[tuple[str, str], float] = defaultdict(float)
     for (material, outcome), row_grams in snapshot.used.items():
         used[(mat(material), outcome)] += row_grams
+    non_print = _by_material(snapshot.non_print_waste.items(), mat)
     burn = _by_material(snapshot.burn.items(), mat)
     low = _by_material(snapshot.low_stock.items(), mat)
     reorder = _by_material(snapshot.reorder.items(), mat)
@@ -92,6 +93,7 @@ def export(metrics: Metrics, snapshot: Snapshot) -> None:
         "scadbuddy_filament_stock_spools": spools,
         "scadbuddy_filament_stock_value": {(k, snapshot.currency): v for k, v in value.items()},
         "scadbuddy_filament_used_grams": used,
+        "scadbuddy_filament_non_print_waste_grams": {(k,): v for k, v in non_print.items()},
         "scadbuddy_filament_burn_grams_per_day": {(k,): v for k, v in burn.items()},
         "scadbuddy_filament_days_of_stock": {(k,): v for k, v in days.items()},
         "scadbuddy_filament_low_stock_spools": {(k,): v for k, v in low.items()},

@@ -14,14 +14,14 @@ import pytest
 from PIL import Image
 
 from scadbuddy.filament import label_png
-from scadbuddy.filament.label_pdf import PlaceLabel, SpoolLabel, render_pdf
+from scadbuddy.filament.label_pdf import CodeLabel, SpoolLabel, render_pdf
 from scadbuddy.filament.label_png import png_names, png_pixels, render_pngs, zip_pngs
 from scadbuddy.filament.label_templates import BY_ID
 
 SPOOL = SpoolLabel(
     number=12, material="PLA Basic", colour="Jade White", brand="Bambu Lab", qr="scadbuddy:spool:x"
 )
-PLACE = PlaceLabel(code="L-7", name="H2C AMS 1 slot 2", qr="https://sb.example/x/L-7")
+PLACE = CodeLabel(code="L-7", name="H2C AMS 1 slot 2", qr="https://sb.example/x/L-7")
 
 
 def test_one_roll_label_is_one_png_of_its_size_at_its_dpi() -> None:

@@ -711,7 +711,10 @@ jobs:
           declare -A same=([recorder]="" [edge]="")
           for part in "${wanted[@]}"; do
             [[ "${digest[$part]}" =~ ^sha256:[0-9a-f]{64}$ ]] || continue
-            pinned=$(grep -m1 -oE "${image[$part]//./\\.}[:@][^[:space:]\"']+" "clusters/${manifest[$part]}" || true)
+            # The first image line, as pin_camera reads it: a comment that names the
+            # image elsewhere in the file is not the pin.
+            pinned=$(grep -m1 -E "^\s*(- )?image:\s*${image[$part]//./\\.}[:@]" "clusters/${manifest[$part]}" \
+              | grep -oE "${image[$part]//./\\.}[:@][^[:space:]\"']+" || true)
             [ -n "$pinned" ] || continue
             new_inputs=$(inputs "${image[$part]}:${VERSION}@${digest[$part]}")
             old_inputs=$(inputs "$pinned")

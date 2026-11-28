@@ -7,6 +7,7 @@ import json
 import threading
 import time
 from collections.abc import Callable
+from decimal import Decimal
 from typing import Any
 from uuid import UUID, uuid4
 
@@ -365,6 +366,23 @@ def test_a_new_tag_with_a_known_material_answers_a_draft(pg_pool: PgPool) -> Non
     assert result.draft.rgba == "#FFAABBFF"
 
 
+def test_a_draft_takes_the_extended_openspool_keys(pg_pool: PgPool) -> None:
+    # #8364: the keys of SnapmakerU1-Extended-Firmware docs/design/openspool.md @ 8cb0b4e1.
+    store = FilamentSpoolStore(pg_pool)
+    sample = OPENSPOOL_SAMPLE | {
+        "bed_min_temp": "45",
+        "bed_max_temp": "55",
+        "alpha": "80",
+        "weight": "250",
+        "diameter": "1.75",
+    }
+    result = tags.read(store, _openspool_read(sample=sample), actor="ann", defaults=DEFAULTS)
+    assert result.draft is not None
+    assert (result.draft.bed_temp_min, result.draft.bed_temp_max) == (45, 55)
+    assert result.draft.rgba == "#FFAABB80" and result.draft.label_weight_g == 250
+    assert result.draft.diameter_mm == Decimal("1.75")
+
+
 def test_a_new_tag_with_an_unknown_material_answers_no_draft(pg_pool: PgPool) -> None:
     store = FilamentSpoolStore(pg_pool)
     sample = OPENSPOOL_SAMPLE | {"type": "UNOBTAINIUM"}
@@ -501,6 +519,17 @@ def _armed_job(store: FilamentSpoolStore, kind: str = "write") -> UUID:
     )
     claim = None if records is None else NfcJobClaimIn(records_sha256=records_sha256(records))
     return tags.claim_job(store, job.id, claim, actor="ann").id
+
+
+def test_a_place_write_backup_is_stored(pg_pool: PgPool) -> None:
+    store = FilamentSpoolStore(pg_pool)
+    made = tags.back_up(store, TagBackupIn(uid="04AA", records=[], reason="place_write"), actor="t")
+    assert made.id is not None
+    with pg_pool.connection() as conn:
+        row = conn.execute(
+            "SELECT reason FROM filament_tag_backups WHERE id = %s", (made.id,)
+        ).fetchone()
+    assert row is not None and row["reason"] == "place_write"
 
 
 def test_an_agent_backup_must_match_its_job(pg_pool: PgPool) -> None:

@@ -280,6 +280,7 @@ type TypeLook = {
 function spoolType(look: TypeLook): S['SpoolType'] {
   return {
     id: typeId(look.n),
+    number: look.n,
     code: look.code,
     brand_id: look.brand,
     material_id: look.material,

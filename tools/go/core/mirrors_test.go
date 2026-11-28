@@ -53,7 +53,7 @@ func (o *objects) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 // area refuses to start.
 func TestThePackageMirrorsAreaMountsOverTheBlobStore(t *testing.T) {
 	pool := testdb.New(t)
-	if _, err := newRouter(pool, nil, nil, "package-mirrors", "", nil, nil, nil); err == nil ||
+	if _, err := newRouter(pool, nil, nil, "package-mirrors", "", callerPackages, nil, nil, nil); err == nil ||
 		!strings.Contains(err.Error(), seal.Variable) {
 		t.Fatal(err)
 	}
@@ -74,7 +74,7 @@ func TestThePackageMirrorsAreaMountsOverTheBlobStore(t *testing.T) {
 		"SCADBUDDY_STORE_S3_ACCESS_KEY_ID": "k", "SCADBUDDY_STORE_S3_SECRET_ACCESS_KEY": "s",
 	}
 	lookupEnv := func(name string) (string, bool) { v, ok := env[name]; return v, ok }
-	router, err := newRouter(pool, http.NotFoundHandler(), keys, "package-mirrors", "", nil, lookupEnv, nil)
+	router, err := newRouter(pool, http.NotFoundHandler(), keys, "package-mirrors", "", callerPackages, nil, lookupEnv, nil)
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -92,7 +92,7 @@ func TestAServedRouteIsTracedAndMeasuredWithItsQueries(t *testing.T) {
 	if err := pgxtrace.ObservePool(rec.tel.Meter(), pool, serviceName); err != nil {
 		t.Fatal(err)
 	}
-	router, err := newRouter(pool, http.NotFoundHandler(), nil, "session-events", "", nil, nil, nil)
+	router, err := newRouter(pool, http.NotFoundHandler(), nil, "session-events", "", callerPackages, nil, nil, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -188,7 +188,7 @@ func TestAForwardedRequestIsOneTrace(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	router, err := newRouter(nil, next, nil, "", "", nil, nil, nil)
+	router, err := newRouter(nil, next, nil, "", "", callerPackages, nil, nil, nil)
 	if err != nil {
 		t.Fatal(err)
 	}

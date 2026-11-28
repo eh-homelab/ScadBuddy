@@ -945,7 +945,10 @@ only the sleeps move; a budget on the real clock fails on a slow runner (#6252).
   (`final_reading_g` or `final_grams`, booked as a `weighed` event just before the
   `archived` one by `add_event`'s rules), and the `archived` event's `data` keeps the
   closing, `ledger.closing`: `started_g` and `started_from`, `ledger_consumed_g`,
-  `final_filament_g`, `scale_consumed_g` and `drift_g`; `GET /spools/{id}/closing` is the
+  `final_filament_g`, `scale_consumed_g` and `drift_g`; a person's archive that leaves grams on the spool, unless the reason is `respooled`, books them as a
+  `non_print_waste` event just before the `archived` one (#7167, `archive_on`; the metrics
+  keep them apart from `wasted_g` as `non_print_waste_g`, and the Prometheus series is
+  `scadbuddy_filament_non_print_waste_grams`); `GET /spools/{id}/closing` is the
   archive dialog's preview with its notices against the setting
   `filament_weighing_finished_left_g`; a `SpoolDraft.continued_from` (a respooled spool,
   archived) links the new spool's `created` event and the source's `archived` event,
@@ -978,7 +981,14 @@ only the sleeps move; a budget on the real clock fails on a slow runner (#6252).
   `label_wrong`'s own `label_weight_g` as an `edited` event before the weighing, and keeps
   `resolution` and `shortfall_g` in its `data`, with `expected_g` but no `drift_g`; a
   `tared` weighing's `empty_source` is `tared`), `locations.py` (a spool moves only through `move()`; AMS trays are keyed by
-  printer, AMS and tray, never by name), `bambuddy_pull.py` (import and the scheduled pull,
+  printer, AMS and tray, never by name; `move_on` refuses a full dry box, #7167),
+  `dry_box.py` (#7167: what a dry box is, `BOX`, `occupant_on`, 409 `box_full` and 422
+  `box_has_many`; capacity is enforced for a box only) and `homes.py` (the home return:
+  `move_into` with `if_occupied` `refuse` or `replace`, which needs `expected_occupant_id`,
+  and `answers`; a replace archives the box's spool at 0 g and books its grams as a
+  `non_print_waste` event with `cause` `replaced`; capture's `_put_back` parks only a spool
+  that came from a live box and sets `home_asked_at`, and `GET /filament/spools?awaiting_home=true`
+  lists them), `bambuddy_pull.py` (import and the scheduled pull,
   the BB to SB side only: it writes nothing to Bambuddy (the push is `bb_sync_*.py` below, tags go through `rfid_push.py`); each `filament_sync` data type gates what the pull takes, through `Pulls.of(sync)` (#6265 Decision 3; `weights` since #6268), and BB's suppliers and locations are read only under `pulls(suppliers)` and `pulls(locations)`; it skips a BB spool whose tag an open binding of an SB spool linked elsewhere holds, warned once, and remembers it in `filament_bb_ignored` (the push clears its tag later, and the next pull would otherwise make a second SB spool; nothing un-ignores a row, so a person deletes it by hand, plan Decision 29); it never changes a held binding's `override` (`bind_on` with `override=None`); the Schedule's pull skips when none of the six `filament_sync` data types pulls, read per run (#6262 Task 13, widened by #6265 plan Decision 3, F1; `bb_pull_apply.pull_start`); after a pull it runs `reconcile_trays`, #6713. Since #6772 (plan Decisions 172-186) the CRUD service reads no Bambuddy for the pull: `bb_pull_models.py` is the wire (`PullStart`, the bodies, `BbPullApi`, and `Pulls` and `PullReport`, which `bambuddy_pull` re-exports), `bb_pull_run.py` the print worker's reads in the old order (`run_pull`, `read_and_pull`, `read_catalog`, `read_ha_sensors`, `reconcile_trays`), and `bb_pull_apply.py` the API's apply (`LocalBbPull`, `pull_start`, `execute_pull`); `workflows/filament_pull.py` is `FilamentBbPull` on the `bambuddy` queue (AUTO_UPGRADE; one activity `filament_bb_pull_read`, run once; replays `tests/fixtures/filament_pull_histories/`, so a change to its commands goes behind `workflow.patched`). The spool refresh's `filament_bambuddy_pull` activity (`spools/activities.py`; its commands in `SpoolRefresh` unchanged) and `POST /filament/bambuddy/import` start it and wait; the worker sends what it read to the CRUD area `filament-pull` (`…/print/filament/pull`, `…/pull/usage`, `…/pull/ha-states`, `…/pull/trays`, `…/pull/colours`; client `crud/print.py` `RemoteBbPull`), whose bodies the app's `BodySizeGate` caps at 8 MiB (`api/limits.py` `MAX_TEXT_BODY_BYTES`, 413 on the headers; Decision 182): the five routes carry their own `RouteLimit` (`api/crud_print.py` `PULL_ROUTE_LIMIT`), so the cap holds whatever the content type, header left out included (#6861) and name the Bambuddy instance read (409 `instance_changed` for another than the configured one) and the run's id, never an actor: the import route keeps the person under that id in `filament_pull_actors` (`remember_actor`), the routes read it there, else `bambuddy` (Decision 181); the route drops the row only once the read answered (a report or a problem); a row left behind is deleted by a later `remember_actor` once it is an hour old (`ACTOR_KEPT`, Decision 183). Tests: `tests/filament/pull_support.py` runs both halves in one process for the old pull tests, `test_bb_pull_run.py` the reads, `tests/crud/test_crud_filament_pull.py` the routes), `csv_import.py` (the spools CSV import, #6262 Task 15:
   rows the caller parsed, as text cells; a dry run reads only, so it adds no catalog row and
   takes no spool number; a write is one transaction, refused whole when a line is an error,
@@ -1312,9 +1322,9 @@ only the sleeps move; a budget on the real clock fails on a slow runner (#6252).
   (`LocationDetail`) and `POST /filament/printer-labels` (a POST because it may make places; 422
   for an unknown printer; in `NOT_NUDGED`). The labels PDF (#7157, plan
   `docs/superpowers/plans/2026-11-23-label-templates-pdf.md`): `filament/label_templates.py`
-  (`TEMPLATES`, SB's 50 x 25 mm roll and Bambuddy's six; `LabelTemplateChoice`, the stored-only
-  setting `filament_label_template` and the PDF body's `template`), `labels.py` `pdf_labels`
-  (the labels from SB's rows; a place label needs `label_base_url`, else 409 `no_label_base`,
+  (`TEMPLATES`, SB's 50 x 25 mm roll, the 2 x 1 in roll `roll_2x1in` (50.8 x 25.4 mm, #7170) and Bambuddy's six; `LabelTemplateChoice`, the stored-only
+  setting `filament_label_template` and the PDF body's `template`). `label_printing.py` (#7170) holds three stored-only settings for printing labels through CUPS: `filament_label_server_url`, `filament_label_queue` and `filament_label_job_options`. Only a person changes the server (`api/settings.py` `LABEL_PRINTER`, 403 `person_only`). Go's `internal/labelprint` reads `filament_label_server_url` by name; the Labels page reads and saves the queue and the job options. Also in the PDF code: `labels.py` `pdf_labels`
+  (the labels from SB's rows; a code label (a place, spool type, item or kind, #7169) needs `label_base_url`, else 409 `no_label_base`,
   never the request's host) and `label_pdf.py` (ReportLab: the browser label's lines and a vector
   QR code; its text in `label_fonts.py`, below). Routes `GET /filament/label-templates` and `POST
   /filament/labels` (route `render_labels`: the file as the body, at most 100 labels; in
@@ -1342,7 +1352,7 @@ only the sleeps move; a budget on the real clock fails on a slow runner (#6252).
   PDFium holds no worker of the shared `to_thread` pool; each page a
   greyscale PNG that carries its dpi. One page answers `labels.png` (`image/png`), more
   pages `labels.zip` (`application/zip`, stored, every entry dated 1980-01-01; a roll's
-  entries `spool-<number>.png` and `L-<n>.png`, a sheet's `sheet-<n>.png`). `png_pixels`
+  entries `spool-<number>.png` and `<code>.png` (`L-<n>`, `T-<n>`, `I-<n>`, `K-<n>`), a sheet's `sheet-<n>.png`). `png_pixels`
   counts every page before anything is drawn: past `MAX_PNG_PIXELS` (400 megapixels) the
   route answers 422 `png_too_large`. The text (#7216 R-7216-1 to R-7216-4): `label_fonts.py`
   draws each line as runs of one font each, DejaVu Sans (`DEJAVU`), else the first font of the
@@ -1370,10 +1380,12 @@ only the sleeps move; a budget on the real clock fails on a slow runner (#6252).
   R-7216-14); the PDF route has none
   (`agent/src/tools/coverage.ts` `NOT_A_TOOL`, R-7157-10).
 - `backend/scadbuddy/codes/` — typed label codes (#6955). `parse.py` `parse_code` and `format_code`
-  (`L-12`, `S-142`; any case, dash optional, at most 10 digits, number 1 to 2^31-1), `resolve.py` `PREFIXES`
-  (`L` is `filament_locations`, `S` is `filament_spools`) and `resolve` (`{kind, id, code, name,
-  archived}`; an archived row still resolves). Route `GET /api/v1/codes/{code}` (`api/codes.py`,
-  404 `code_unknown`). A new prefix is one entry in `PREFIXES`.
+  (`L-12`, `S-142`, `T-4`, `I-9`, `K-3`; any case, dash optional, at most 10 digits, number 1 to 2^31-1), `resolve.py` `PREFIXES`
+  (`L` is `filament_locations`, `S` is `filament_spools`, `K` is `item_kinds`, kind `item_kind`, `T` is `filament_spool_types`, kind `spool_type`, `I` is `items`, kind `item`, #7169;
+  `NAME_SQL` is each table's name; the item kind is #6949) and `resolve` (`{kind, id, code, name, archived}`; an archived row still resolves; an
+  item kind's `id` is its text id). Route `GET /api/v1/codes/{code}` (`api/codes.py`,
+  404 `code_unknown`). A new prefix is an entry in `codes/resolve.py` `PREFIXES` and in Go
+  `tools/go/core/internal/scan/resolve.go` `prefixes`.
 - `backend/scadbuddy/store/` — the blob store. Phase 1: the directory-shaped `BlobStore`
   Protocol and `LocalBlobStore` (`local.py`, a piece in `data/blobs/<piece_key>/`),
   `BlobRefs` (`refs.py`, the `blob_refs` table that keeps a blob alive) and `sweep_blobs`
@@ -1903,15 +1915,20 @@ only the sleeps move; a budget on the real clock fails on a slow runner (#6252).
   `mocks/features/activity.ts`.
 - `backend/scadbuddy/inventory/` — the item core (#7067, spec
   `docs/superpowers/specs/2026-11-21-inventory-and-purchasing-design.md` §6.4-6.6; page
-  `docs/features/inventory.md`): `models.py` (the Pydantic models), `kinds.py` (`KindStore`, the
-  `item_kinds` tree and its inherited `attribute_schema`), `items.py` (`ItemStore`; a `filament`
-  kind's items are refused until phase 3), `offers.py` (`OfferStore`: `supplier_offers` and
-  `offer_price_points`), `stock.py` (`StockStore`: lots, units and moves; `_fifo`, `take`,
-  `give_back`, `count_item`, `recost_lot`; `parts_moved`, the one reader of job cost's parts figure;
-  the lock order of R-P2-32: `lock_items` takes, per item in `item_id` order, the item `FOR SHARE`,
-  then `_open_lock` (the advisory lock every lot insert takes first), then the lots `FOR UPDATE` in
-  FIFO order), `part_alias.py` (`PartAliases`: the `/parts` routes over the inventory, for one
-  release), `problems.py` (the 4xx problems, `refused`) and `component.py` (`InventoryComponent`).
+  `docs/features/inventory.md`): `models.py` (the Pydantic models), `core_client.py`
+  (`InventoryCore`, #6949 K1: the kind, item, lot, unit and move routes read over
+  scadbuddy-core's CRUD routes and write by starting its `inventory.<Name>` activity on the
+  queue `inventory`, with the id `inventory.<Name>:<key>`; the input's `key` (the operation
+  id) is the scoped `Idempotency-Key`; a write past the 15 s wait answers 202, followed at
+  `GET /inventory/operations/{id}`), `activity.py` (the Activities
+  tab's `inventory.<Name>` kinds), `kinds.py` (`merged_schema`, `item_schema` and
+  `keys_in_use` of the `item_kinds` tree; Go writes the kinds and items now),
+  `offers.py` (`OfferStore`: `supplier_offers` and
+  `offer_price_points`), `stock.py` (reads only since #6949 K1 Task 16: `estimate_unit_cost`, and
+  `parts_moved`, the one reader of job cost's parts figure; Go writes every stock row, and
+  `tests/test_no_python_stock_writes.py` keeps it so; phase 2's writes live on as the tests' stand-in
+  for Go, `tests/support/python_stock.py`), `problems.py` (the 4xx problems, `refused`) and
+  `component.py` (`InventoryComponent`).
   Only filament reaches Bambuddy: nothing here calls it, and `bb_sync_plan._suppliers()` keeps a
   supplier made for offers out of it (D16, R-P2-8 to R-P2-10). Tests: `backend/tests/inventory/`.
 - `backend/scadbuddy/entities/` — files, links and key-value properties on any row
@@ -1922,7 +1939,8 @@ only the sleeps move; a budget on the real clock fails on a slow runner (#6252).
   `item`, `lot` and `unit` among them since #7067, and one kind per filament catalog, such
   as `insert_type`; `EntityStore`: an `entities` row made by
   `ensure` only for an owner row that exists, and `orphans`, the rows whose owner is gone
-  and that no stock move names; `repoint_entity` also moves a merged entity's stock moves),
+  and that no stock move names; `repoint_entity` moves no stock move since #6949 K1 Task 16:
+  a printer merge moves them first through `MergePrinter`, Go's `inventory.Repoint`),
   `attachments.py` (`EntityAttachmentStore` over
   `entity_attachments`, the old `order_attachments`: an order's files are its rows with an
   `order_id`, written only through the order routes, `ORDER_KINDS`; a print archive's files
@@ -2430,22 +2448,37 @@ only the sleeps move; a budget on the real clock fails on a slow runner (#6252).
   tracks lots): `orders/parts.py` (`PartStore`: the `model_part_rules` and `order_item_parts`
   rows, over `item_id`; `part_id` is read the same for one release), routes `api/parts.py`
   (`GET /orders/{id}/parts`, `PUT /orders/{id}/items/{item}/parts`, the rule routes). The
-  part-row routes (`/parts`, `/parts/{id}`, its `stock`, `adjust` and `moves`) are aliases
-  of the inventory for one release (`inventory/part_alias.py` `PartAliases`): a part is an
-  item of kind `hardware`, its pack and price its newest offer and price point. A part with
-  no supplier has no offer: it reads as a pack of 1 at 0, a pack on a create or an edit is 422
-  (R-P2-34), and Add stock takes the body's price and writes no price point (R-P2-25). The
-  unit cost leaves out lots of unknown cost with no cost entered; with none on hand and no
-  price point it is `cost_unknown` (R-P2-35).
-  `Lifecycle.add_item` copies the model's rule; `accept_fulfilment` or `fulfil_items` making an
-  item `fulfilled` takes its parts from the lots (`StockStore.take`, the part items locked
-  first in `item_id` order by `lock_items`: each item, the lock every lot insert takes, then
-  its lots, so no receive or count adds a lot under it; `parts.used`), and `unfulfil_item` gives each use back to its lot
-  at its cost (`parts.returned`); no cost entry is written: job cost reads the moves as
+  `/parts` part-row alias routes (`/parts`, `/parts/{id}`, its `stock`, `adjust` and `moves`) are gone
+  (#6949, K1 5/7): the inventory routes do their work, and the part bodies went with them.
+  `Lifecycle.add_item` copies the model's rule. The stock workflows (#6949 K1 Task 16,
+  `workflows/order_stock.py` on the `library` queue, steps `orders/stock_activities.py`, starts
+  `orders/stock_start.py`): `accept_fulfilment` or `fulfil_items` making an item `fulfilled`,
+  and `unfulfil_item`, are `FulfilOrderItem` (ids `order_item:<id>:parts:<n>`, `…:return`, and
+  `order:<id>:fulfil:<Idempotency-Key>` for the bulk route): the route's checks with no lock, then
+  the start; its first step commits the order change and sets `order_items.parts_workflow_id`
+  (`OrderItem.parts_settling`), then Go's `Take` (or `GiveBack`) of each part, then the record
+  (`parts.used`, `parts.returned`, `parts.stock_refused`). A route answers 202 `WorkflowAccepted`
+  after 15 s; it ends by itself. A refusal in the first step fails the run, writes nothing and
+  answers as before (R-K1-32). No cost entry is written: job cost reads the moves as
   `parts_minor` (`costs.py`). A fulfilled item's parts are fixed (`item_parts_used`).
-  `POST /inventory/lots/{id}/recost` runs `Lifecycle.recost_lot` (`item.parts_recosted`). The
-  unit-cost history takes `item_id` (`parts_unit_minor`, `parts_unknown`). Agent `part_list`,
-  `part_stock_add`, `order_item_parts_set`.
+  `POST /inventory/lots/{id}/recost` is `RecostLot` (`item.parts_recosted`); a printer merge whose
+  gone row stock names is `MergePrinter` (Go's `Repoint`, then the merge). The app tests run them
+  in line (`tests/support/order_stock.py`); the real ones are `tests/workflows/test_order_stock.py`
+  (`requires_temporal`) and replay `tests/fixtures/order_stock_histories/`.
+  To record the histories again (only after a change to the commands a workflow issues, which
+  goes behind `workflow.patched`; an old history is never re-recorded), dispatch `ci.yml` with
+  the input `record_histories`. Each backend shard sets `SCADBUDDY_RECORD_HISTORIES=1` and
+  uploads the artifact `order-stock-histories-<shard>`. Download the artifacts and commit their
+  files into `tests/fixtures/order_stock_histories/`; `tests/test_order_stock_replay.py` replays
+  them on every run. A closed stock workflow that holds its item is taken over: the waiting
+  workflow's step restarts it, at most 3 times (`TAKEOVERS`; the `takeover` history). The kind `inventory_operation.changed` is a typed,
+  NOTIFY-only event that scadbuddy-core sends (`tools/go/core/internal/bus/event.go`,
+  `agent_changes/hub.py`); `activity/` ingests it as the Activities tab rows. The test image
+  copies the Go vectors that the backend reads (the `COPY tools/go/core/internal/...` lines
+  in the `Dockerfile`, next to `bus/testdata/history`); a new cross-tree vector needs its
+  own line there. The
+  unit-cost history takes `item_id` (`parts_unit_minor`, `parts_unknown`). Agent `part_list` (an order's
+  parts), `order_item_parts_set`.
   The machine rate (#4625, order operations spec 2026-11-07 §6): per registry printer,
   `orders/machine_rate.py` (`compute`, pure; `MachineRateStore` over
   `printer_cost_profiles`, `printer_wear_parts` and `printer_maintenance_costs`, each in

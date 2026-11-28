@@ -86,6 +86,10 @@ func TestStoreRequests(t *testing.T) {
 			"PUT", base + "/channels/ops/members/" + sid, "", ""},
 		{"leave", `{"left":true}`, func(s fleetchat.Store) error { return s.Leave(ctx, sid, "ops") },
 			"DELETE", base + "/channels/ops/members/" + sid, "", ""},
+		{"join a reference", `{"joined":true}`, func(s fleetchat.Store) error { return s.Join(ctx, sid, "eh-homelab/clusters#1234") },
+			"PUT", base + "/channels/~ZWgtaG9tZWxhYi9jbHVzdGVycyMxMjM0/members/" + sid, "", ""},
+		{"leave a run", `{"left":true}`, func(s fleetchat.Store) error { return s.Leave(ctx, sid, "eh-homelab/clusters/runs/99") },
+			"DELETE", base + "/channels/~ZWgtaG9tZWxhYi9jbHVzdGVycy9ydW5zLzk5/members/" + sid, "", ""},
 		{"rewind", `{"seq":7}`, func(s fleetchat.Store) error { return s.Rewind(ctx, sid, 7) },
 			"PUT", base + "/agents/" + sid + "/cursor", "", `{"seq":7}`},
 	}
@@ -210,6 +214,7 @@ func TestStoreErrors(t *testing.T) {
 		{"not member", 403, "not-member", fleetchat.ErrNotMember},
 		{"unknown channel", 404, "unknown-channel", fleetchat.ErrUnknownChannel},
 		{"handle taken", 409, "handle-taken", ErrHandleTaken},
+		{"legacy channel name", 422, "legacy-channel-name", fleetchat.ErrBadChannel},
 	}
 	t.Run("text too long", func(t *testing.T) {
 		s, _ := newStore(t, 422, `{"detail":"text is longer than 16777216 bytes","reason":"text-too-long"}`)

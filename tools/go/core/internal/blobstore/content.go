@@ -5,13 +5,11 @@ package blobstore
 // backend name, put with no key then touch, and stat then get, over the S3 store only.
 
 import (
-	"bytes"
 	"context"
 	"errors"
 	"fmt"
 	"io"
 	"log/slog"
-	"os"
 
 	"github.com/jackc/pgx/v5"
 
@@ -46,7 +44,9 @@ func Reason(err error) string {
 // `touch` of its row: data stored or reused through put (the caps checked only when it
 // uploads), its row at IndexKey(kind, sha256) written as BlobIndex.put_in writes it (no slug,
 // meta {}), and the object the key named before released when it was another of this
-// store's (`release_replaced`). The S3 backend never sees Python's `name`, so there is none.
+// store's (`release_replaced`). As every put, it refuses an object there already that is
+// other bytes (409 store_object_mismatch). The S3 backend never sees Python's `name`, so
+// there is none.
 // It answers the row's key.
 func (b *Blobs) PutContent(ctx context.Context, kind string, data []byte) (string, error) {
 	if !kindPattern.MatchString(kind) || len(kind) > 64 {
@@ -56,20 +56,14 @@ func (b *Blobs) PutContent(ctx context.Context, kind string, data []byte) (strin
 	if err != nil {
 		return "", err
 	}
-	spool, err := os.CreateTemp("", "blob-put-*")
+	file, done, err := spool(data)
 	if err != nil {
 		return "", err
 	}
-	defer func() {
-		_ = spool.Close()
-		_ = os.Remove(spool.Name())
-	}()
-	if _, err := io.Copy(spool, bytes.NewReader(data)); err != nil {
-		return "", err
-	}
+	defer done()
 	var key string
 	var before, stored *Ref
-	_, err = b.put(ctx, store, kind, spool, func(ctx context.Context, ref Ref) (bool, error) {
+	_, err = b.put(ctx, store, kind, "", file, func(ctx context.Context, ref Ref) (bool, error) {
 		key, stored = IndexKey(kind, ref.SHA256), &ref
 		return true, pgx.BeginFunc(ctx, b.Pool, func(tx pgx.Tx) error {
 			var err error

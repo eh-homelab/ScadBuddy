@@ -25,7 +25,7 @@ import { Switch } from '@/components/ui/switch'
 
 interface Loaded {
   nodes: LocationNode[]
-  kinds: { id: string; name: string }[]
+  kinds: { id: string; name: string; dry_storage: boolean }[]
   spools: Spool[]
 }
 
@@ -126,6 +126,7 @@ export function LocationsTab() {
   }, [loadSensors])
 
   const kinds = useMemo(() => new Map((data?.kinds ?? []).map((kind) => [kind.id, kind.name])), [data])
+  const dryKinds = useMemo(() => new Set((data?.kinds ?? []).filter((kind) => kind.dry_storage).map((kind) => kind.id)), [data])
   const spoolsAt = useMemo(() => {
     const at = new Map<string, Spool[]>()
     for (const spool of data?.spools ?? []) {
@@ -298,6 +299,22 @@ export function LocationsTab() {
               onChange={(event) => setDraft({ ...draft, capacity: event.target.value })}
             />
           </label>
+          {/* #7167: a dry box is a dry-storage place of capacity 1; a spool that comes out of its tray is asked about it. */}
+          {dryKinds.has(draft.kind_id) && (
+            <div className="flex flex-col gap-1 sm:col-span-2">
+              <div className="flex items-center gap-2">
+                <Switch
+                  id="place-dry-box"
+                  checked={draft.capacity.trim() === '1'}
+                  onCheckedChange={(on) => setDraft({ ...draft, capacity: on ? '1' : '' })}
+                />
+                <label htmlFor="place-dry-box" className="font-medium">
+                  Dry box
+                </label>
+              </div>
+              <p className="text-muted-foreground">Holds one spool. When that spool comes out of a printer, ScadBuddy asks which spool goes back in.</p>
+            </div>
+          )}
           <label className="flex flex-col gap-1">
             Note
             <Input value={draft.note} onChange={(event) => setDraft({ ...draft, note: event.target.value })} />

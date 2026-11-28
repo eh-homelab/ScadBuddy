@@ -1,7 +1,8 @@
 import { ChevronLeftIcon, PlusIcon } from 'lucide-react'
 import { useId, useState, type FormEvent } from 'react'
 import { Link } from 'react-router'
-import { ApiError } from '../../api/client'
+import { REQUIRED_KINDS } from '../../components/entities/api'
+import { requiredOf } from '../../components/entities/definedProperties'
 import { PropertyKeyTable } from '../../components/entities/PropertyKeyTable'
 import { namedTwice, rowsOf, schemaOf, type KeyRow } from '../../components/entities/propertyKeys'
 import { inventoryPaths } from '../../lib/inventoryLinks'
@@ -14,8 +15,9 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@
 import { inventoryApi, type ItemKind, type KindPatch, type Tracking } from './api'
 import { TRACKING_LABELS } from './format'
 import { kindTree, type KindNode } from './kindTree'
+import { StillWorking } from './StillWorking'
+import { activityHref, failed, usePress } from './usePress'
 
-const failed = (cause: unknown, fallback: string) => (cause instanceof ApiError ? cause.detail : fallback)
 const NONE = '__none'
 type LifeBasis = ItemKind['life_basis']
 const LIFE_LABELS: Record<LifeBasis, string> = { none: 'No service life', hours: 'In print hours', months: 'In months' }
@@ -34,12 +36,13 @@ export function KindsPage() {
   const [adding, setAdding] = useState(false)
   const [editing, setEditing] = useState<string | null>(null)
   const [error, setError] = useState<string | null>(null)
+  const archiving = usePress()
   const all = kinds.data ?? []
 
   async function archive(kind: ItemKind) {
     setError(null)
     try {
-      await (kind.archived_at ? inventoryApi.restoreKind(kind.id) : inventoryApi.archiveKind(kind.id))
+      await archiving.press((o) => (kind.archived_at ? inventoryApi.restoreKind(kind.id, o) : inventoryApi.archiveKind(kind.id, o)), `${kind.archived_at ? 'restore' : 'archive'}:${kind.id}`)
       kinds.refresh()
     } catch (cause) {
       setError(failed(cause, 'The kind could not be changed. Try again.'))
@@ -75,6 +78,7 @@ export function KindsPage() {
           <Checkbox checked={showArchived} aria-label="Show archived kinds" onCheckedChange={(next) => setShowArchived(next === true)} />
           Show archived
         </label>
+        {archiving.running && <StillWorking id={archiving.running.id} href={activityHref(archiving.running.id)} />}
         {error && (
           <p role="alert" className="mb-2 text-warn">
             {error}
@@ -115,6 +119,9 @@ function Node({ node, kinds, editing, onEdit, onArchive, onSaved }: NodeProps) {
         <Link to={inventoryPaths.kind(kind.id)} className="font-medium underline-offset-4 hover:underline">
           {kind.name}
         </Link>
+        <span className="font-mono text-[12px] text-muted-foreground" title="The kind's code">
+          {kind.code}
+        </span>
         <span className="text-muted-foreground">{TRACKING_LABELS[kind.tracking]}</span>
         {kind.uom !== 'each' && <span className="text-muted-foreground">in {kind.uom}</span>}
         {kind.saleable && <span className="text-muted-foreground">for sale</span>}
@@ -232,7 +239,7 @@ function AddKindForm({ kinds, onDone, onCancel }: { kinds: ItemKind[]; onDone: (
   const [uom, setUom] = useState('each')
   const [life, setLife] = useState<LifeBasis>('none')
   const [saleable, setSaleable] = useState(false)
-  const [busy, setBusy] = useState(false)
+  const { busy, running, press } = usePress()
   const [error, setError] = useState<string | null>(null)
   // Until the person picks one, a new kind is counted as its parent is.
   const parentTracking = kinds.find((k) => k.id === parent)?.tracking
@@ -240,16 +247,18 @@ function AddKindForm({ kinds, onDone, onCancel }: { kinds: ItemKind[]; onDone: (
 
   async function submit(event: FormEvent) {
     event.preventDefault()
-    if (!/^[a-z][a-z0-9_]{0,39}$/.test(kindId.trim())) return setError('The id is lower-case letters, digits and _, starting with a letter, such as magnet.')
+    const typed = kindId.trim()
+    // The owner's kind numbers (2026-11-27): an empty id numbers the kind (k12, code K-12).
+    if (typed && !/^[a-z][a-z0-9_]{0,39}$/.test(typed)) return setError('The id is lower-case letters, digits and _, starting with a letter, such as magnet.')
+    if (/^k[0-9]+$/.test(typed)) return setError("An id of k and digits is a made kind's id. Leave the id empty to number the kind.")
     if (!name.trim()) return setError('Give the kind a name.')
-    setBusy(true)
     setError(null)
     try {
-      await inventoryApi.createKind({ id: kindId.trim(), name: name.trim(), parent_id: parent, tracking: counted, uom: uom.trim() || 'each', life_basis: life, saleable })
+      const body = { ...(typed ? { id: typed } : {}), name: name.trim(), parent_id: parent, tracking: counted, uom: uom.trim() || 'each', life_basis: life, saleable }
+      await press((o) => inventoryApi.createKind(body, o), body)
       onDone()
     } catch (cause) {
       setError(failed(cause, 'The kind could not be added. Try again.'))
-      setBusy(false)
     }
   }
 
@@ -257,8 +266,11 @@ function AddKindForm({ kinds, onDone, onCancel }: { kinds: ItemKind[]; onDone: (
     <form aria-label="Add kind" onSubmit={(event) => void submit(event)} className="mb-4 flex flex-col gap-3 rounded-md border p-3">
       <div className="flex flex-wrap items-end gap-3">
         <div className="flex flex-col gap-1">
-          <Label htmlFor={`${id}-id`}>Id</Label>
-          <Input id={`${id}-id`} value={kindId} onChange={(e) => setKindId(e.target.value)} className="w-36" placeholder="magnet" />
+          <Label htmlFor={`${id}-id`}>Id (optional)</Label>
+          <Input id={`${id}-id`} value={kindId} onChange={(e) => setKindId(e.target.value)} className="w-36" placeholder="magnet" aria-describedby={`${id}-id-hint`} />
+          <span id={`${id}-id-hint`} className="text-[12px] text-muted-foreground">
+            Leave empty to number it
+          </span>
         </div>
         <div className="flex flex-col gap-1">
           <Label htmlFor={`${id}-name`}>Name</Label>
@@ -294,9 +306,23 @@ function AddKindForm({ kinds, onDone, onCancel }: { kinds: ItemKind[]; onDone: (
           Cancel
         </Button>
       </div>
+      {running && <StillWorking id={running.id} href={activityHref(running.id)} />}
       <FormError error={error} />
     </form>
   )
+}
+
+/**
+ * R-K1-33 — for each key, about how many items of the kind and of the kinds below it have no
+ * row for it: their count less the key's `keys_in_use` count. Two reads, not one per item. It
+ * is an estimate: `keys_in_use` counts archived items and blank values too (Go's
+ * `Kinds.Schema` counts every row), so the items are counted with the archived ones. The
+ * item read asks for the route's most, 5000 items, so a larger kind's count is capped there.
+ */
+async function lacking(kindId: string, keys: string[]): Promise<Map<string, number>> {
+  const [items, schema] = await Promise.all([inventoryApi.items({ kind: kindId, archived: true, limit: 5000 }), inventoryApi.kindSchema(kindId)])
+  const inUse = new Map(schema.keys_in_use.map((k) => [k.key, k.count]))
+  return new Map(keys.map((key) => [key, Math.max(0, items.length - (inUse.get(key) ?? 0))]))
 }
 
 function EditKindForm({ kind, kinds, onDone, onCancel }: { kind: ItemKind; kinds: ItemKind[]; onDone: () => void; onCancel: () => void }) {
@@ -308,8 +334,12 @@ function EditKindForm({ kind, kinds, onDone, onCancel }: { kind: ItemKind; kinds
   const [life, setLife] = useState<LifeBasis>(kind.life_basis)
   const [saleable, setSaleable] = useState(kind.saleable)
   const [rows, setRows] = useState<KeyRow[]>(() => rowsOf(kind.attribute_schema))
-  const [busy, setBusy] = useState(false)
+  const { busy, running, press } = usePress()
   const [error, setError] = useState<string | null>(null)
+  // R-K1-33: an item kind's key may be required; before the save, how many items lack it.
+  const wasRequired = new Set(requiredOf(kind.attribute_schema))
+  const newlyRequired = [...new Set(rows.filter((row) => row.required && row.key.trim() && !wasRequired.has(row.key.trim())).map((row) => row.key.trim()))]
+  const counts = useAsync(() => (newlyRequired.length ? lacking(kind.id, newlyRequired) : Promise.resolve(new Map<string, number>())), [kind.id, newlyRequired.join('\u001f')])
   // A built-in kind, or one with items, keeps how it is counted (409 `kind_in_use`).
   const trackingFixed = kind.builtin || kind.item_count > 0 || kind.tracking === 'filament'
 
@@ -319,14 +349,12 @@ function EditKindForm({ kind, kinds, onDone, onCancel }: { kind: ItemKind; kinds
     if (namedTwice(rows)) return setError('Each key is named once.')
     const body: KindPatch = { name: name.trim(), parent_id: parent, uom: uom.trim() || 'each', life_basis: life, saleable, attribute_schema: schemaOf(kind.attribute_schema, rows) }
     if (tracking !== kind.tracking) body.tracking = tracking
-    setBusy(true)
     setError(null)
     try {
-      await inventoryApi.patchKind(kind.id, body)
+      await press((o) => inventoryApi.patchKind(kind.id, body, o), body)
       onDone()
     } catch (cause) {
       setError(failed(cause, 'The kind could not be saved. Try again.'))
-      setBusy(false)
     }
   }
 
@@ -361,7 +389,16 @@ function EditKindForm({ kind, kinds, onDone, onCancel }: { kind: ItemKind; kinds
       <fieldset className="flex flex-col gap-2">
         <legend className="mb-1 font-medium">Properties of its items</legend>
         <p className="text-muted-foreground">Each key says what an item's property holds. It types a value; any other key is still kept.</p>
-        <PropertyKeyTable label={`Keys of ${kind.name}`} rows={rows} onChange={setRows} />
+        <PropertyKeyTable label={`Keys of ${kind.name}`} rows={rows} onChange={setRows} requirable={REQUIRED_KINDS.has('item')} />
+        {newlyRequired.length > 0 && (
+          <ul aria-label="Items that lack a newly required key" className="text-xs text-muted-foreground">
+            {newlyRequired.map((key) => {
+              const n = counts.data?.get(key)
+              return <li key={key}>{n === undefined ? `Counting the items that lack ${key}…` : `About ${n} ${n === 1 ? 'item lacks' : 'items lack'} ${key}`}</li>
+            })}
+            <li>An item without a required key reads incomplete, and its next save asks for it.</li>
+          </ul>
+        )}
       </fieldset>
       <div className="flex flex-wrap gap-2">
         <Button type="submit" size="sm" disabled={busy}>
@@ -371,6 +408,7 @@ function EditKindForm({ kind, kinds, onDone, onCancel }: { kind: ItemKind; kinds
           Cancel
         </Button>
       </div>
+      {running && <StillWorking id={running.id} href={activityHref(running.id)} />}
       <FormError error={error} />
     </form>
   )

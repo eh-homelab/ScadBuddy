@@ -77,6 +77,11 @@ The Spools tab's bulk bar acts on the selected spools (#7151, plan
 - **Archive and Restore.** One request each, `POST /filament/spools/bulk-archive` and
   `/bulk-restore`. The answer lists the spools changed, those already so and the ids that
   name no spool, and the bar reports it once.
+- **Reset used.** After a confirm, `POST /filament/spools/reset-consumed` puts a
+  `consumed_reset` event on each selected spool (#7149), in requests of at most 500 ids. The
+  grams left stay; the report says how many counters were reset and names each spool that no
+  longer exists. When a request is refused, the earlier ones stand, the rest are not sent, and
+  the report says which spools were not reset.
 
 An AMS tray's place page that holds a spool has "Take the spool out of this tray"
 (`DELETE /printers/{id}/trays/{ams}/{tray}/spool`): the spool moves to no place.
@@ -345,6 +350,56 @@ label), the ledger used 508 g, the scale says 520 g were used; 12 g less than th
 expected." or "…the ledger used 508 g; not weighed at the end."), and the timeline shows
 the reason on the archive.
 
+Grams left at the end are waste (#7167). A person's archive books them as one
+`non_print_waste` event, the zero reading, after the final weighing and before the
+`archived` event. The waste is what is left after that weighing, so no gram is counted
+twice. The spool then has 0 g left, and `non_print_waste_g` in the closing says how many
+grams were written off. A `respooled` archive books none: the filament moves to the new
+reel. The bulk archive, the Bambuddy pull's archive and an archive by a plain edit (PATCH) book
+none. A restore leaves the spool at 0 g, so a second archive books no second waste and adds
+no second shopping item. An `archived` event that carries waste counts as the archive of a
+spool that was not empty, so the archive adds its one shopping item. The event is not a
+plate, and it adds no shopping item of its own. The code is in
+`backend/scadbuddy/filament/spools.py` (`archive_on`).
+
+The metrics keep this waste apart from the print waste (#7167). `wasted_g` stays the grams of
+the failed and cancelled plates. Each `non_print_waste` event adds its `data.waste_g`, raw, to
+one other figure: `non_print_waste_g` on a spool's metrics, and on the inventory metrics a
+total with rows by material and type (no printer: the waste has none) by the event's UTC day
+in the range. No gram is in both figures, and no rate counts it. The Prometheus export has its
+own series, `scadbuddy_filament_non_print_waste_grams`, by material. The reader is
+`ledger.waste_events` in `backend/scadbuddy/filament/ledger.py`. The sums are in
+`metrics.py` (`spool_metrics`), `metrics_store.py` (`inventory`, `snapshot`) and
+`metrics_export.py`. The Metrics tab shows a "Non-print waste" block under "Waste" only when
+the range has some (`frontend/src/pages/filament/MetricsTab.tsx`).
+
+A dry box is a place of a dry-storage kind (`dry_storage` on the kind), with capacity 1, not
+archived, and with no printer (#7167, `backend/scadbuddy/filament/dry_box.py` `BOX`). Capacity
+was only a number before; for a dry box it is now enforced. A box holds one spool. A move into
+a box that holds another spool is a 409 `box_full` naming it (`occupant_id`), and so are a
+bulk create and a bulk restore. A change that makes a place a box while it holds two spools or
+more (its kind, its capacity or its kind's `dry_storage` flag) is a 422 `box_has_many`. A
+place of another kind, or with another capacity, keeps capacity as a number only. A box is a
+place, so its label is the place label, `L-<n>`; the row of every place on the Locations tab
+has a "Print label" link to it (`frontend/src/components/filament/LocationTree.tsx`).
+
+A spool's home is the last dry box it sat in (#7167). When a spool that went into its tray
+from a place that is a live dry box now comes out of the tray, capture puts it in no place,
+makes that box its home and sets `home_asked_at`: ScadBuddy never assumes which spool goes into
+the box, the unloaded spool included. A spool that went into the tray from a shelf goes back to
+the shelf with no prompt, and its home stays the same.
+`GET /filament/spools?awaiting_home=true` lists the asked spools. The person names the spool
+(a tag scan, a code or a pick by hand), and `POST /filament/spools/{id}/move` with `answers`
+(the unloaded spool) puts it in. With `if_occupied: replace`, the box's own spool is archived
+at 0 g first and its grams are booked as non-print waste (`cause` `replaced`), in one
+transaction. A box's spool that left the box before the replace locked it is not archived.
+A replace names the box's spool the caller saw in `expected_occupant_id`: without it the move is
+a 422 `expected_occupant_required`, and a box that holds another spool by then is a 409
+`box_full` naming it, so no spool the caller did not name is archived.
+Any move, an archive or a reload clears `home_asked_at`. A spool whose box was archived goes to
+no place, and one whose box is no box now goes back to it, as before. The code is in
+`backend/scadbuddy/filament/homes.py` and `capture.py` (`_put_back`).
+
 Respooled offers "Archive and continue as a new spool": the copy flow opens with the final
 filament as the new spool's grams and "Added full: No", and the save sends `continued_from`
 with `copy_of`. The source must be archived (422 `continued_from_not_archived`) and not
@@ -404,7 +459,16 @@ a `url` record whose path ends `/x/<code>` (a printed label) or a `text` record 
 or `S-142`, or a `scadbuddy:spool:<id>` text (`next` `open_code`, with `resolved` in the
 `GET /codes/{code}` shape; `backend/scadbuddy/filament/tag_codes.py`); else it offers to bind
 the tag or make a spool from what the tag says (OpenSpool or OpenTag3D). A code that names no
-row is a new tag. A phone reads a Bambu tag's UID as 4 bytes (`7E7482BB`), and the AMS reports
+row is a new tag. An OpenSpool write holds the published keys of
+[openspool.io/rfid.html](https://openspool.io/rfid.html) and every extended key of
+[SnapmakerU1-Extended-Firmware `docs/design/openspool.md` @ 8cb0b4e1](https://github.com/paxx12-snapmaker-u1/SnapmakerU1-Extended-Firmware/blob/8cb0b4e1b1d8f235ca067c0e8a5cabc0197aa11f/docs/design/openspool.md)
+the spool has a value for (`subtype`, `bed_min_temp`, `bed_max_temp`, `alpha`,
+`additional_color_hexes`, `weight`, `diameter`; #8364). A read fills the draft from all of
+them, and the "On the tag" card also lists any other key the tag holds, as text, under
+"Other keys on the tag". With every key, Spool #114's JSON is 215 bytes (measured
+2026-11-27 with `tag_formats.encode`), more than an NTAG213's 144 bytes of user memory
+([NXP NTAG213/215/216 data sheet](https://www.nxp.com/docs/en/data-sheet/NTAG213_215_216.pdf)),
+so use an NTAG215 or NTAG216, as the OpenSpool README asks. A phone reads a Bambu tag's UID as 4 bytes (`7E7482BB`), and the AMS reports
 the same tag as `7E7482BB00000100`, so ScadBuddy stores every 4-byte UID in the AMS's form
 (`spools/models.py` `clean_tag_uid`, #8042; all 38 Bambu tags on prod end `00000100`, read
 2026-11-26), and a phone's scan of a Bambu spool opens it. A 4-byte tag that is not a Bambu
@@ -421,6 +485,54 @@ job is never cancelled or expired: it ends with the write's result (its read-bac
 page's error), or, when none comes within 10 minutes of the backup, `failed` with `result.code`
 `no_read_back` (the tag may hold the new records, and its backup can restore it). The agent
 waits for either.
+
+### The swap wizard (#7168)
+
+`/filament/swap` ("Swap spools" on the Spools tab's toolbar; `pages/filament/SwapPage.tsx`) is a
+phone page that moves spools by hand, one after the other (spec
+`docs/superpowers/specs/2026-11-27-swap-wizard-design.md`; plan
+`docs/superpowers/plans/2026-11-27-swap-wizard.md`). It asks two questions in turn: "Which
+spool?" and "Where does it go?". The person answers each one with a tag tap, a QR code (the
+camera, or a photo the server reads) or a pick by hand (`IdentifySpool`, `IdentifyPlace`).
+No step has a default answer. When both are named, "Move" sends one
+`POST /filament/spools/{id}/move`. A log under the steps lists each move of this visit.
+
+- **The stale rule.** Each move sends `expected_location_id`: the place the spool was in when the
+  person named it, or `null` for no place. When the spool is somewhere else by then, or archived,
+  the server refuses the move with 409 `move_stale` (`location_id`, `archived`) and moves
+  nothing. The page reads the spool again and shows what changed ("S-12 is now in Shelf 2"). It
+  never sends the move again by itself: the person confirms it. When no spool waits, an archived
+  spool goes back to "Which spool?". When a spool waits, the page says "S-n was archived." and
+  shows the waiting spool's move; that move goes out only when the person confirms it. A 409
+  `move_conflict`, or a move that got no answer, offers "Try again", which sends the same move.
+  When a `move_stale` spool is already in the move's target (the first move went through, but
+  its answer was lost), the move is done: the log lists it, the page says so ("S-12 is already in
+  Shelf 2.") and goes on with the chain. After "Archive S-n", "Try again" keeps the archive, so
+  the log says "S-n archived". "Choose another place" names a place for the spool whose move did
+  not go through: after a failed "Take S-n out first", that is the waiting spool, which then goes
+  to the place named instead of to no place. Each new step moves the focus to its heading; the
+  short "Moving…" step does not.
+- **A full dry box.** A move into a dry box sends `if_occupied: refuse`. A 409 `box_full` shows
+  the box's spool and its choices: "Archive S-n" (a `replace` with `expected_occupant_id`, as
+  #7167 does it), "Move S-n first", or "Choose another place". The page offers "Move S-n first"
+  only for the current spool's move, not for a waiting spool's move. "Move S-n first" makes the box's
+  spool the next one to place, and the first spool waits (`lib/swapChain.ts`). After each move
+  that succeeds, the newest waiting spool's move goes out by itself, with the place it was read
+  in. When the box's spool is itself waiting (a cycle), the page offers "Take S-n out first": it
+  moves that spool to no place, then the other moves follow. Each step is its own request, so a
+  failure in the middle leaves every spool in a real place or in none; the page shows the moves
+  that still wait, and "Clear" drops them.
+- **Tags.** Where Web NFC works, "Write tag" writes a spool's tag (the spool write of the Scan
+  mode) or a place's tag (one NDEF `url` record, the place label's URL `<label base>/x/L-<n>`,
+  `WritePlaceTag`). Each write backs the tag up first and reads it back. The page never makes a
+  tag read-only, so a tag stays reusable. In a browser a Bambu tag gives its UID only (Web NFC
+  reads NDEF only, https://w3c.github.io/web-nfc/), so it names a spool only for a side the AMS
+  saw. In the ScadBuddy app the read also carries the tag's blocks, so either side names it.
+- **The frame rule.** Web NFC and the camera run only on ScadBuddy's own origin, at the top
+  level. Inside Bambuddy's frame the page offers "Open the swap page in its own tab"
+  (`openExternal`, a new tab) and keeps only the typed code, the photo and the pick by hand.
+  Without Web NFC (iOS, a desktop browser) it says "Tags need Chrome on Android or the
+  ScadBuddy app." and keeps the QR code and the pick by hand.
 
 ### Properties (#7026)
 
@@ -595,7 +707,10 @@ matches `[a-z][a-z0-9_]{0,63}`. Limits: 200 keys per entity, 2000 characters per
     is never sent back. BB keeps no reset time, so that event is dated at the newest reading
     that still held the old baseline, or BB's `updated_at` when earlier (R-7149-9). No
     baseline column is kept.
-- Codes (#6955): each place has a number and the code `L-<n>`, each spool `S-<n>`. A code
+- Codes (#6955): each place has a number and the code `L-<n>`, each spool `S-<n>`, each
+  spool type `T-<n>`, each inventory item `I-<n>` (#7169; a type and an item share one
+  number sequence, so no number is both) and each item kind `K-<n>` (#6949; it opens the
+  inventory list of the kind's items). A code
   opens at `/x/<code>` (`frontend/src/pages/CodePage.tsx`; route `GET /api/v1/codes/{code}`,
   `backend/scadbuddy/api/codes.py`). Any case works, with or without the dash. A number is
   never reused, and an archived thing still resolves.
@@ -621,7 +736,11 @@ matches `[a-z][a-z0-9_]{0,63}`. Limits: 200 keys per entity, 2000 characters per
   printer's from the Locations tab). The printer labels first make the place of each AMS unit,
   slot and external holder the printer's latest report lists; a printer with no such report is
   named on the page. Spool labels keep `scadbuddy:spool:<id>`. A place links to its own page,
-  `/filament/locations/<id>`.
+  `/filament/locations/<id>`. `POST /api/v1/filament/labels` also takes `type_ids`, `item_ids`
+  and `kind_ids` (#7169), after the spools and places. A spool type's, an item's and a kind's
+  label is the place label's shape: its code (`T-<n>`, `I-<n>`, `K-<n>`), its name and the QR
+  `<base>/x/<code>`. A type's name is its code and colour name, as `GET /api/v1/codes/{code}`
+  gives it (`codes/resolve.py` `NAME_SQL`). An archived row still gets its label.
 - Label templates and the PDF (#7157, plan
   `docs/superpowers/plans/2026-11-23-label-templates-pdf.md`): the labels page offers SB's
   50 x 25 mm roll label, Bambuddy's six templates (two box labels, two AMS holder labels and
@@ -629,8 +748,8 @@ matches `[a-z][a-z0-9_]{0,63}`. Limits: 200 keys per entity, 2000 characters per
   `filament_label_template`. A sheet template prints on its own grid. "Download" asks
   `POST /api/v1/filament/labels` (`backend/scadbuddy/filament/label_pdf.py`, ReportLab) for
   the same labels at the same template and saves it through `downloadBlob`, so it works
-  inside Bambuddy's frame. A place label's PDF needs the label address or an https public
-  URL (409 `no_label_base` otherwise). The browser print stays.
+  inside Bambuddy's frame. A code label's PDF (a place, type, item or kind label) needs the
+  label address or an https public URL (409 `no_label_base` otherwise). The browser print stays.
   The agent reads codes with `filament_code_resolve`, `filament_location_get` and
   `filament_printer_labels`, and the label sizes with `filament_label_templates`. It saves
   and deletes saved sheets with `filament_label_sheet_upsert` and
@@ -641,11 +760,30 @@ matches `[a-z][a-z0-9_]{0,63}`. Limits: 200 keys per entity, 2000 characters per
   gives each page of the PDF as a greyscale PNG at the chosen dpi, drawn by PDFium
   (`backend/scadbuddy/filament/label_png.py`), so the PNG and the PDF never disagree. Each PNG
   carries its dpi, so label printer software prints it at its size. One page is `labels.png`;
-  more pages are `labels.zip`, a stored ZIP of `spool-<number>.png` and `L-<n>.png` (one label
+  more pages are `labels.zip`, a stored ZIP of `spool-<number>.png` and `<code>.png` (one label
   a page) or `sheet-<n>.png` (a sheet). Past 400 megapixels in all, the route answers 422
   `png_too_large`: choose PDF, a lower dpi or fewer labels. The labels page has the choice
   beside the template: PDF or PNG, and for PNG the dpi (203, 300 or 600). It saves each change
   in `filament_label_output`, and "Download" names the file by the type of the answer.
+- Labels print to a CUPS queue (#7170, design
+  `docs/superpowers/specs/2026-11-27-cups-label-printing-design.md` R7 and R9). The labels page
+  has a "Label printer" row beside "Print" and "Download". It reads the queues of the CUPS
+  server in Settings, Filament, "Label print server" (`filament_label_server_url`; the
+  cluster's `http://cups.cups.svc:8631` by default; only a person changes it) through core's
+  `GET /api/v1/label-printing/queues`. It offers a queue only when CUPS gives the queue's size
+  and that size is the PDF's page within 1 mm each way, in the same orientation. The page is
+  the label for a roll with a one-label template, else the sheet's page (Letter or A4), so a
+  sheet never goes to a 2 x 1 in queue. It picks the last queue used
+  (`filament_label_queue`) when that queue fits, else the only queue that fits, else none. Each
+  queue in the picker shows its state, and the picked queue shows its state and its CUPS message, such as "1.02 in labels are loaded; …". A
+  Zebra ZPL queue also gets the print mode, the darkness and the speed
+  (`filament_label_job_options`; "Printer default" sends nothing). "Print to label printer"
+  asks for the labels' PDF, then sends it with
+  `POST /api/v1/label-printing/queues/{queue}/jobs`, and says "Sent to" with the queue's `info` (its name when `info` is empty) and the job's id
+  when CUPS accepts the job. A queue that is gone (`label_queue_unknown`) reads the list again.
+  When the server does not answer, the row says so, and "Print" and "Download" still work
+  (`frontend/src/pages/filament/LabelQueuePrint.tsx`, `frontend/src/api/labelPrinting.ts`;
+  mocks `frontend/src/mocks/features/labelPrinting.ts`).
 - The fields a spool label prints (#7216, R-7216-9 and R-7216-10): the body's `fields`, else
   the setting `filament_label_output`'s, from `number`, `material` (with its subtype),
   `colour` (its name), `hex` (the effective colour as `#RRGGBB`), `brand`, `location` (its

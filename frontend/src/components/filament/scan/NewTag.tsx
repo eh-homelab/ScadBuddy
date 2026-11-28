@@ -2,14 +2,12 @@ import { LinkIcon, PlusIcon, SearchIcon } from 'lucide-react'
 import { useEffect, useId, useMemo, useState, type ReactNode } from 'react'
 import { Link } from 'react-router'
 import { ApiError } from '../../../api/client'
-import { createSpool, listSpools, postTagRead, type DecodedSpool, type NdefRecord, type Spool, type TagReadResult } from '../../../api/filament'
+import { listSpools, postTagRead, type DecodedSpool, type NdefRecord, type Spool, type TagReadResult } from '../../../api/filament'
 import { filamentLinks } from '../../../lib/filamentLinks'
-import { useAsync } from '../../../lib/useAsync'
-import { entityApi, type PropertyValue } from '../../entities/api'
 import { DefinedFields } from '../../entities/DefinedFields'
-import { fieldErrorsOf, propertiesPatch, refusalText, type FieldErrors } from '../../entities/definedProperties'
 import { RgbaSwatch } from '../RgbaSwatch'
 import { PhotoButtons, type HeldPhotos } from './PhotoButtons'
+import { useSpoolFromTag } from './useSpoolFromTag'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
 
@@ -43,11 +41,28 @@ export function DecodedFields({ decoded }: { decoded: DecodedSpool }) {
       </span>,
     ])
   }
+  const extra = decoded.extra_colours ?? []
+  if (extra.length > 0) {
+    rows.push([
+      'More colours',
+      <span key="extra" className="inline-flex flex-wrap items-center gap-2">
+        {extra.map((rgba, at) => (
+          <span key={at} className="inline-flex items-center gap-1">
+            <RgbaSwatch rgba={rgba} size="sm" />
+            {rgba}
+          </span>
+        ))}
+      </span>,
+    ])
+  }
+  if (decoded.diameter_mm != null) rows.push(['Diameter', `${Number(decoded.diameter_mm)} mm`])
   const nozzle = range(decoded.nozzle_temp_min, decoded.nozzle_temp_max)
   if (nozzle) rows.push(['Nozzle', nozzle])
   const bed = range(decoded.bed_temp_min, decoded.bed_temp_max)
   if (bed) rows.push(['Bed', bed])
   if (decoded.label_weight_g != null) rows.push(['Weight', `${decoded.label_weight_g} g`])
+  // The tag's own keys that ScadBuddy does not use: untrusted, so shown only as text.
+  const other = Object.entries(decoded.other_keys ?? {})
   return (
     <section aria-label="On the tag" className="rounded-xl border border-border bg-card p-4">
       <h2 className="mb-2 font-medium">On the tag</h2>
@@ -59,6 +74,20 @@ export function DecodedFields({ decoded }: { decoded: DecodedSpool }) {
           </div>
         ))}
       </dl>
+      {other.length > 0 && (
+        <section aria-label="Other keys on the tag" className="mt-3 border-t border-border pt-3">
+          <h3 className="text-sm font-medium">Other keys on the tag</h3>
+          <p className="text-sm text-muted-foreground">ScadBuddy does not use these.</p>
+          <dl className="mt-1 grid grid-cols-[auto_1fr] gap-x-4 gap-y-1 text-sm">
+            {other.map(([key, value]) => (
+              <div key={key} className="contents">
+                <dt className="break-all text-muted-foreground">{key}</dt>
+                <dd className="min-w-0 break-all">{value}</dd>
+              </div>
+            ))}
+          </dl>
+        </section>
+      )}
       {cut.length > 0 && <p className="mt-2 text-warn">Cut to 128 characters: {cut.join(', ')}.</p>}
       {unread.length > 0 && <p className="mt-2 text-warn">Some fields could not be read: {unread.join(', ')}.</p>}
     </section>
@@ -95,17 +124,14 @@ export interface NewTagProps {
  */
 export function NewTag({ uid, records, result, onBound, held, onHeld }: NewTagProps) {
   const searchId = useId()
-  const [busy, setBusy] = useState(false)
-  const [error, setError] = useState<string | null>(null)
+  const [binding, setBinding] = useState(false)
+  const [bindError, setBindError] = useState<string | null>(null)
   const [spools, setSpools] = useState<Spool[] | null>(null)
   const [search, setSearch] = useState('')
-  /** The spool "Create" made when its bind failed: the next tap binds it, and makes none. */
-  const [made, setMade] = useState<Spool | null>(null)
-  // #7703: the spool's defined keys, so a create its required keys refuse can be filled here.
-  const keys = useAsync(() => entityApi.propertySchema('spool'), [])
-  const schema = keys.data?.schema ?? {}
-  const [defined, setDefined] = useState<Record<string, PropertyValue | undefined>>({})
-  const [fieldErrors, setFieldErrors] = useState<FieldErrors | undefined>()
+  // #7703 and the kept spool of a failed bind (`made`): the next tap binds it, and makes none.
+  const { schema, defined, setDefined, fieldErrors, made, busy: making, error: makeError, create: makeAndBind } = useSpoolFromTag(uid, records, result.draft)
+  const busy = binding || making
+  const error = bindError ?? makeError
 
   useEffect(() => {
     let live = true
@@ -124,46 +150,21 @@ export function NewTag({ uid, records, result, onBound, held, onHeld }: NewTagPr
     return spools.filter((spool) => matches(spool, words)).slice(0, 8)
   }, [spools, search])
 
-  async function bind(spoolId: string) {
-    const next = await postTagRead({ uid, tag_type: null, records, bind_spool_id: spoolId })
-    onBound(next)
-  }
-
   async function create() {
-    if (!result.draft && !made) return
-    setBusy(true)
-    setError(null)
-    setFieldErrors(undefined)
-    let spool = made
-    try {
-      const properties = propertiesPatch(schema, {}, defined)
-      spool ??= await createSpool(Object.keys(properties).length > 0 ? { ...result.draft!, properties } : result.draft!)
-    } catch (cause) {
-      const refused = fieldErrorsOf(cause)
-      setFieldErrors(refused ?? undefined)
-      setError(refused ? refusalText(refused) : reasonOf(cause, 'ScadBuddy could not make the spool. Try again.'))
-      setBusy(false)
-      return
-    }
-    try {
-      await bind(spool.id)
-    } catch (cause) {
-      setMade(spool)
-      setError(`Spool #${spool.number} was made, but the tag was not bound to it: ${reasonOf(cause, 'the bind failed')}. Tap "Bind to spool #${spool.number}" to try again.`)
-    } finally {
-      setBusy(false)
-    }
+    setBindError(null)
+    const next = await makeAndBind()
+    if (next) onBound(next)
   }
 
   async function choose(spool: Spool) {
-    setBusy(true)
-    setError(null)
+    setBinding(true)
+    setBindError(null)
     try {
-      await bind(spool.id)
+      onBound(await postTagRead({ uid, tag_type: null, records, bind_spool_id: spool.id }))
     } catch (cause) {
-      setError(reasonOf(cause, `ScadBuddy could not bind the tag to spool #${spool.number}. Try again.`))
+      setBindError(reasonOf(cause, `ScadBuddy could not bind the tag to spool #${spool.number}. Try again.`))
     } finally {
-      setBusy(false)
+      setBinding(false)
     }
   }
 

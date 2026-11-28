@@ -340,3 +340,31 @@ class WorkerThread:
             raise self._error
         # The test's own failure is the one to see; this one is logged beside it.
         logger.error("the Temporal worker thread failed too", exc_info=self._error)
+
+
+def single_batch(worker: Worker) -> Worker:
+    """``worker`` (one that runs workflows, not yet started) with workflow logic flag 2
+    on, as every history recorded on temporalio 1.36 has it; 1.37's default for a new run
+    is off (#8318). The SDK's only switch is private (1.37.0
+    ``tests/worker/test_workflow.py`` uses it), so it is reached here alone: a release
+    that renames it fails the tests that ask for the flag, with this message, not every
+    test file at collection."""
+    try:
+        from temporalio.worker._workflow_instance import (  # type: ignore[attr-defined]
+            _WorkflowLogicFlag,
+        )
+
+        flag = _WorkflowLogicFlag.PROCESS_WORKFLOW_ACTIVATION_JOBS_AS_SINGLE_BATCH
+    except (ImportError, AttributeError) as error:
+        raise RuntimeError(_SWITCH_GONE) from error
+    if not hasattr(worker, "_set_default_workflow_logic_flag"):
+        raise RuntimeError(_SWITCH_GONE)
+    worker._set_default_workflow_logic_flag(flag, enabled=True)
+    return worker
+
+
+_SWITCH_GONE = (
+    "temporalio no longer has the private switch for workflow logic flag 2"
+    " (PROCESS_WORKFLOW_ACTIVATION_JOBS_AS_SINGLE_BATCH); update"
+    " tests/support/temporal.py `single_batch`"
+)

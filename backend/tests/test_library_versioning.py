@@ -226,6 +226,10 @@ def test_every_library_workflow_names_its_versioning_behavior() -> None:
         "StagedFile": VersioningBehavior.AUTO_UPGRADE,
         "PrepareListing": VersioningBehavior.AUTO_UPGRADE,
         "AttemptMedia": VersioningBehavior.AUTO_UPGRADE,
+        # #6949 K1 Task 16: the orders' stock writes and the printer merge.
+        "FulfilOrderItem": VersioningBehavior.AUTO_UPGRADE,
+        "RecostLot": VersioningBehavior.AUTO_UPGRADE,
+        "MergePrinter": VersioningBehavior.AUTO_UPGRADE,
     }
 
 

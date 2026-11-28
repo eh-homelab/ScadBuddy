@@ -11,9 +11,10 @@ import { TaskPanel } from '../components/flows/TaskPanel'
 import { inputFields } from '../lib/flowInputs'
 import { flowRunPath } from '../lib/flows'
 import { misfit } from '../lib/scanMisfit'
+import { codeTarget } from '../lib/resolvedCode'
 import { useAsync } from '../lib/useAsync'
 
-/** #6955 — `/x/<code>`: the address a label's QR holds. It opens the place or spool the code names. #8062: an open task that waits for the code comes first. */
+/** #6955 — `/x/<code>`: the address a label's QR holds. It opens the place, spool, spool type, item or item kind the code names. #8062: an open task that waits for the code comes first. */
 export function CodePage() {
   const { code = '' } = useParams()
   const navigate = useNavigate()
@@ -32,7 +33,7 @@ export function CodePage() {
 
   const [done, setDone] = useState<'sent' | 'elsewhere' | null>(null)
 
-  const to = found.data ? (found.data.kind === 'location' ? `/filament/locations/${found.data.id}` : `/filament/spools/${found.data.id}`) : null
+  const to = found.data ? codeTarget(found.data) : null
   const tasks = waiting.data ?? []
   // Both reads first: a task that waits for the code comes before the code's own page.
   if (found.loading || waiting.loading) return <Skeleton role="status" aria-label="Looking up the code" className="m-4 h-8 w-48" />

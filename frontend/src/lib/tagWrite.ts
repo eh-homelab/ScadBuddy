@@ -5,8 +5,9 @@
  * and writing a spool onto a new tag is a rebind.
  */
 import { ApiError } from '../api/client'
-import { createTagBackup, postTagRead, restoreTagBackup, type TagReadResult } from '../api/filament'
-import { notWritable, sameRecords, type NfcSession, type Reading, type WireRecord } from './webNfc'
+import { createTagBackup, postTagRead, restoreTagBackup, unbindTag, type TagReadResult, type TagRow } from '../api/filament'
+import { cleanTagUid } from './tagUid'
+import { ndefMessageBytes, notWritable, sameRecords, type NfcSession, type Reading, type WireRecord } from './webNfc'
 
 export type WriteStep = 'backing_up' | 'writing' | 'reading_back' | 'tap_again'
 
@@ -17,11 +18,16 @@ export type WriteOutcome =
   | { status: 'other_tag'; backupId: string }
   | { status: 'failed'; message: string; backupId: string | null }
 
+/** What a run does to the tag: writes a spool's records, restores a backup, or clears it (#8362). */
+export type WriteMode = 'write' | 'restore' | 'clear'
+
+const CHECKED: Record<WriteMode, string> = { write: 'Written and checked.', restore: 'Restored and checked.', clear: 'Cleared and checked.' }
+
 /** The sentence an outcome is told by, on the screen and in the page's live region. */
-export function headlineOf(outcome: WriteOutcome, restoring: boolean): string {
+export function headlineOf(outcome: WriteOutcome, mode: WriteMode): string {
   switch (outcome.status) {
     case 'checked':
-      return restoring ? 'Restored and checked.' : 'Written and checked.'
+      return CHECKED[mode]
     case 'mismatch':
       return 'The tag does not hold what was sent.'
     case 'other_tag':
@@ -41,6 +47,9 @@ const SENT_MISMATCH = 'The spool changed while the tag was written, so the tag w
 
 const EMPTY_RECORD: WireRecord = { record_type: 'empty', data_hex: '' }
 
+/** Thrown by `prepare` or `confirm` to stop the run with this sentence as its outcome's message. */
+export class WriteRefusedError extends Error {}
+
 const codeOf = (cause: unknown) => (cause instanceof ApiError && cause.status === 409 ? cause.problem.code : undefined)
 
 function detailOf(cause: unknown): string {
@@ -54,8 +63,10 @@ const isAbort = (cause: unknown, signal?: AbortSignal) => signal?.aborted === tr
 
 export interface WriteOptions {
   session: NfcSession
-  reason: 'spool_write' | 'agent_write' | 'restore'
+  reason: 'spool_write' | 'agent_write' | 'restore' | 'place_write' | 'clear'
   jobId?: string
+  /** Runs after the UID check and before the backup; throws `WriteRefusedError` to stop with nothing backed up. */
+  precheck?: (now: Reading) => Promise<void>
   /** The records to write, for the tag as just read and its backup. */
   prepare: (now: Reading, backupId: string) => Promise<WireRecord[]>
   /** Checks the write with the server once the read-back equals what was sent. */
@@ -66,7 +77,7 @@ export interface WriteOptions {
   signal?: AbortSignal
 }
 
-export async function writeWithBackup({ session, reason, jobId, prepare, confirm, onStep, onClaimed, signal }: WriteOptions): Promise<WriteOutcome> {
+export async function writeWithBackup({ session, reason, jobId, precheck, prepare, confirm, onStep, onClaimed, signal }: WriteOptions): Promise<WriteOutcome> {
   const release = session.claim()
   if (!release) return { status: 'failed', message: 'Another write is running. Nothing was written.', backupId: null }
   onClaimed?.()
@@ -82,6 +93,17 @@ export async function writeWithBackup({ session, reason, jobId, prepare, confirm
     if (signal?.aborted) return stopped('Stopped. Nothing was written.')
     if (!now.uid) return { status: 'failed', message: NO_UID, backupId: null }
 
+    if (precheck) {
+      try {
+        await precheck(now)
+      } catch (cause) {
+        if (isAbort(cause, signal)) return stopped('Stopped. Nothing was written.')
+        if (cause instanceof WriteRefusedError) return { status: 'failed', message: cause.message, backupId: null }
+        return { status: 'failed', message: `The tag was not checked, so nothing was written: ${detailOf(cause)}`, backupId: null }
+      }
+      if (signal?.aborted) return stopped('Stopped. Nothing was written.')
+    }
+
     onStep('backing_up')
     try {
       backupId = (await createTagBackup({ uid: now.uid, records: now.records, reason, ...(jobId ? { job_id: jobId } : {}) }, signal)).backup_id
@@ -96,6 +118,7 @@ export async function writeWithBackup({ session, reason, jobId, prepare, confirm
       sent = await prepare(now, backupId)
     } catch (cause) {
       if (isAbort(cause, signal)) return stopped('Stopped. Nothing was written.')
+      if (cause instanceof WriteRefusedError) return { status: 'failed', message: cause.message, backupId }
       if (codeOf(cause) === 'backup_mismatch') return { status: 'failed', message: BACKUP_MISMATCH, backupId }
       return { status: 'failed', message: `ScadBuddy did not give the records to write, so nothing was written: ${detailOf(cause)}`, backupId }
     }
@@ -105,6 +128,10 @@ export async function writeWithBackup({ session, reason, jobId, prepare, confirm
     if (signal?.aborted) return stopped('Stopped. Nothing was written.')
     const refused = notWritable(written)
     if (refused) return { status: 'failed', message: `This record cannot be written from this page: ${refused}. Nothing was written.`, backupId }
+    // The ScadBuddy app says how much the tag holds (#8362); Web NFC does not, and the write then finds out.
+    const holds = now.tag?.max_ndef_bytes
+    const needs = ndefMessageBytes(written, document.documentElement.lang || 'en')
+    if (holds != null && needs > holds) return { status: 'failed', message: `This tag holds ${holds} bytes; the record needs ${needs}. Nothing was written.`, backupId }
     onStep('writing')
     try {
       await session.write(written, signal)
@@ -125,12 +152,13 @@ export async function writeWithBackup({ session, reason, jobId, prepare, confirm
       return stopped('Stopped before the check. Nothing was bound.')
     }
     if (back.uid !== now.uid) return { status: 'other_tag', backupId }
-    const holds = sameRecords(back.records, written) || (sent.length === 0 && back.records.length === 0)
-    if (!holds) return { status: 'mismatch', backupId, readBack: back }
+    const same = sameRecords(back.records, written) || (sent.length === 0 && back.records.length === 0)
+    if (!same) return { status: 'mismatch', backupId, readBack: back }
 
     try {
       return { status: 'checked', result: await confirm(now, backupId, sent, back) }
     } catch (cause) {
+      if (cause instanceof WriteRefusedError) return { status: 'failed', message: cause.message, backupId }
       const code = codeOf(cause)
       if (code === 'read_back_mismatch') return { status: 'mismatch', backupId, readBack: back }
       if (code === 'sent_mismatch') return { status: 'failed', message: SENT_MISMATCH, backupId }
@@ -175,6 +203,49 @@ export function restoreBackup(options: {
       // The read back is no tap: no scan history row (#8148).
       await postTagRead({ uid: back.uid, records: back.records, tap: false })
       return null
+    },
+  })
+}
+
+const BAMBU_REFUSED = 'This is a Bambu (MIFARE Classic) tag. ScadBuddy never writes one. Nothing was written.'
+const OTHER_TAG_REFUSED = 'A different tag answered. Hold the tag shown here to the phone. Nothing was written.'
+
+/** Whether ScadBuddy may write this tag at all: never a Bambu spool's MIFARE Classic tag. */
+export const clearable = (tag: TagRow) => !tag.kind.startsWith('bambu')
+
+/**
+ * #8362 — clears a tag: backs it up (`clear`), writes one empty NDEF record, reads it back, then
+ * takes the tag off its spool (`cleared`) and reads it as ScadBuddy sees it now (no tap, #8148).
+ * Only the tag shown (`tag`) is cleared, and never a Bambu tag. Its backups and history stay, so
+ * a restore of the backup undoes it.
+ */
+export function clearTag(options: {
+  session: NfcSession
+  tag: TagRow
+  /** The checked read-back, before the tag is taken off its spool. */
+  onChecked?: (back: Reading) => void
+  onStep: (step: WriteStep) => void
+  onClaimed?: () => void
+  signal?: AbortSignal
+}): Promise<WriteOutcome> {
+  const { tag, onChecked, ...rest } = options
+  return writeWithBackup({
+    ...rest,
+    reason: 'clear',
+    precheck: async (now) => {
+      if (!clearable(tag) || now.tag?.tech === 'mifare_classic') throw new WriteRefusedError(BAMBU_REFUSED)
+      if (cleanTagUid(now.uid) !== tag.tag_uid) throw new WriteRefusedError(OTHER_TAG_REFUSED)
+    },
+    prepare: async () => [],
+    confirm: async (_now, _backup, _sent, back) => {
+      onChecked?.(back)
+      try {
+        await unbindTag(tag.id, 'cleared')
+      } catch (cause) {
+        // A tag on no spool any more (unbound meanwhile) is cleared all the same.
+        if (!(cause instanceof ApiError && cause.status === 404)) throw new WriteRefusedError(`The tag is empty now, but it is still on its spool: ${detailOf(cause)}. Clear it again.`)
+      }
+      return postTagRead({ uid: back.uid, records: back.records, tap: false })
     },
   })
 }

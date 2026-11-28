@@ -1,0 +1,30 @@
+{
+  "cost_minor": "1500",
+  "cost_unknown": false,
+  "created_by": {
+    "kind": "browser",
+    "principal": "p1",
+    "run_id": null,
+    "session": null
+  },
+  "ends_at": null,
+  "id": "00000000-0000-4000-8000-000000000001",
+  "in_service_at": null,
+  "installed_in_unit_id": null,
+  "invoice_line_id": null,
+  "item_id": "00000000-0000-4000-8000-000000000002",
+  "life_hours": null,
+  "life_months": null,
+  "location_id": null,
+  "location_ref_id": null,
+  "name": "Spare",
+  "origin": "manual",
+  "printer_id": null,
+  "production_run_id": null,
+  "received_at": "2026-11-26T12:00:00Z",
+  "retired_at": null,
+  "serial": "B2",
+  "starts_at": null,
+  "status": "in_stock",
+  "steps": {}
+}

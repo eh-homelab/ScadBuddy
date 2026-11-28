@@ -52,9 +52,10 @@ offers a copy only for what is still missing ([orders spec §8.2](../superpowers
 Since #7067 a part is an inventory item (kind `hardware` for every migrated part), not a
 `parts` row (`backend/scadbuddy/migrations/20261124T0918Z_parts_to_items.sql:1-10`). An order
 item's parts are rows of `order_item_parts` by `item_id`. A model's rule copies them to a new
-item (`Lifecycle.add_item`). When an item becomes `fulfilled`, `StockStore.take` takes each part
-from its lots FIFO; `unfulfil_item` gives each use back at its own cost
-(`backend/scadbuddy/inventory/stock.py:513`, `:557`).
+item (`Lifecycle.add_item`). When an item becomes `fulfilled`, scadbuddy-core's `inventory.Take`
+takes each part from its lots FIFO; `unfulfil_item` gives each use back at its own cost
+(`inventory.GiveBack`). Both run in the `FulfilOrderItem` workflow
+(`backend/scadbuddy/workflows/order_stock.py`, #6949 K1 Task 16).
 
 Job cost has a `parts` part, `Margin.parts_minor`, which `ItemCost` inherits (`backend/scadbuddy/orders/costs.py:183`).
 It is read from `stock_moves`, not from cost entries: the migration deleted the `part:` cost
@@ -68,7 +69,8 @@ quote estimate prices parts at what a FIFO take would cost now and returns `part
 - UI: `frontend/src/pages/OrdersPage.tsx`, `OrderPage.tsx`, `ProfitPage.tsx`,
   `CustomersPage.tsx`; `frontend/src/components/orders/`. Parts and the model part rules are in
   the Inventory area, `frontend/src/pages/inventory/` (#7067); `/orders/parts` redirects to
-  `/inventory?kind=part` (`frontend/src/App.tsx:156`).
+  `/inventory?kind=hardware`, the parts' kind (`PARTS_KIND`, `frontend/src/lib/inventoryLinks.ts`;
+  `frontend/src/App.tsx:158`).
 - Routes: `backend/scadbuddy/api/orders.py:187`, `order_payments.py`, `order_attachments.py`,
   `order_messages.py`, `order_purchases.py`, `order_sources.py`, `order_bank_deposits.py`,
   `customers.py`, `parts.py`, `machine_rates.py`.

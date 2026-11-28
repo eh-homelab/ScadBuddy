@@ -548,7 +548,7 @@ func (x *session) frame(ctx context.Context, m message) error {
 			ok, seen := allowed[t.Str]
 			if !seen && len(allowed) < MaxCallTopics {
 				// Past the cap a topic is refused unread, and the map stays at the cap.
-				ok = x.topicAllowed(ctx, t)
+				ok = x.topicShaped(t) && x.topicAllowed(ctx, t)
 				allowed[t.Str] = ok
 			}
 			if !ok {

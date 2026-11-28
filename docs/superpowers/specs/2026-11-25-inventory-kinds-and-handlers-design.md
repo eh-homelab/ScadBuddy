@@ -1,6 +1,6 @@
 # Inventory kinds and handlers: one base model for every thing (design)
 
-Status: approved by the owner, 2026-11-25. Epic #6949. Proof: [`docs/inventory-model/`](../../inventory-model/README.md).
+Status: approved by the owner, 2026-11-25; K1 built (#6949, K1 1/7 to 7/7). Epic #6949. Proof: [`docs/inventory-model/`](../../inventory-model/README.md).
 
 This design replaces how a kind is defined in
 [`2026-11-21-inventory-and-purchasing-design.md`](2026-11-21-inventory-and-purchasing-design.md)
@@ -607,7 +607,9 @@ The migration places every phase 2 row by these rules, and reports each count:
   (scadbuddy-09, 2026-11-24), so this is expected to touch no rows.
 - **`items.compatible_with`** (printer model codes): each distinct code becomes a kind
   under `printer` named by the code (`H2C`), and each item gets a `compatible_with`
-  relationship to it. A printer item takes its model kind. The list filter
+  relationship to it. The code is the kind's name only. A new model kind takes the next
+  kind number, and its id is `k` and that number (`k28`; the owner's decision of
+  2026-11-27). A printer item takes its model kind. The list filter
   `?compatible=<model code>` keeps working: it reads the relationship to the kind of that
   name.
 - **Spool types and spools**: items and units (plan #7666 R-P3-30, kept). The filament

@@ -31,6 +31,7 @@ import (
 	"github.com/eh-homelab/ScadBuddy/tools/go/core/internal/auth"
 	"github.com/eh-homelab/ScadBuddy/tools/go/core/internal/blobstore"
 	"github.com/eh-homelab/ScadBuddy/tools/go/core/internal/crud"
+	"github.com/eh-homelab/ScadBuddy/tools/go/core/internal/devices"
 	"github.com/eh-homelab/ScadBuddy/tools/go/core/internal/httpx"
 	"github.com/eh-homelab/ScadBuddy/tools/go/core/internal/seal"
 )
@@ -59,12 +60,14 @@ var Sources = []string{"shutter", "nfc", "file", "app"}
 type Scans struct {
 	Pool  *pgxpool.Pool
 	Blobs *blobstore.Blobs
-	slots chan struct{}
+	// Devices loads a body's read_id, a paired device's photo (#8244).
+	Devices *devices.Store
+	slots   chan struct{}
 }
 
 // New is the area over pool and the blob store.
 func New(pool *pgxpool.Pool, blobs *blobstore.Blobs) *Scans {
-	return &Scans{Pool: pool, Blobs: blobs, slots: make(chan struct{}, decodeSlots)}
+	return &Scans{Pool: pool, Blobs: blobs, Devices: &devices.Store{Pool: pool}, slots: make(chan struct{}, decodeSlots)}
 }
 
 // PublicAreas are the area's public routes (main.go publicPackages). The blob store opens
@@ -407,9 +410,9 @@ func (s *Scans) upload(r *http.Request) (any, error) {
 	return s.Store(r.Context(), body)
 }
 
-// input reads a body's source and location.
-func input(r *http.Request, body *crud.Body) Input {
-	in := Input{Actor: actorOf(r.Context()), Source: body.ChoiceOr("source", "shutter", Sources...)}
+// input reads a body's source, fallback when it names none, and its location.
+func input(r *http.Request, body *crud.Body, fallback string) Input {
+	in := Input{Actor: actorOf(r.Context()), Source: body.ChoiceOr("source", fallback, Sources...)}
 	if place := body.Object("location", "lat", "lon", "accuracy_m", "at"); place != nil {
 		lat := place.OptFloat("lat", -90, 90)
 		lon := place.OptFloat("lon", -180, 180)
@@ -447,15 +450,38 @@ func parseTime(s string) (time.Time, error) {
 	return time.Time{}, errors.New("scan: not a time")
 }
 
+// codes decodes a stored photo: {key}, or {read_id}, a paired device's photo read (#8244),
+// whose source is "app" unless the body names one. A read of a device the caller does not own
+// is a 404, as a read that is not there.
 func (s *Scans) codes(r *http.Request) (any, error) {
-	body, err := crud.ReadBody(r, "key", "source", "location")
+	body, err := crud.ReadBody(r, "key", "read_id", "source", "location")
 	if err != nil {
 		return nil, err
 	}
-	key := body.Text("key", 1, 128)
-	in := input(r, body)
+	var key, readID string
+	source := "shutter"
+	if !body.Null("read_id") {
+		source = "app"
+		readID = body.Text("read_id", 1, 64)
+		if !body.Null("key") {
+			body.Fail([]string{"key"}, "read_id comes in place of key")
+		}
+	} else {
+		key = body.Text("key", 1, 128)
+	}
+	in := input(r, body, source)
 	if err := body.Err(); err != nil {
 		return nil, err
+	}
+	if readID != "" {
+		read, err := s.Devices.OwnRead(r.Context(), readID)
+		if err != nil {
+			return nil, err
+		}
+		if read.Kind != "photo" {
+			return nil, refused(http.StatusUnprocessableEntity, "read_not_a_photo", "this device read is a tag, not a photo")
+		}
+		key = read.BlobKey
 	}
 	return s.Decode(r.Context(), key, in)
 }

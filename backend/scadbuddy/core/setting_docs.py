@@ -508,6 +508,22 @@ SETTING_DOCS: Final[Mapping[str, SettingDoc]] = MappingProxyType(
             " their code, name and QR code. The Labels page saves the last format, dpi and"
             " fields.",
         ),
+        "filament_label_server_url": SettingDoc(
+            "Label print server",
+            "The CUPS server that the Labels page prints to, as an http or https URL. The"
+            " default is the cluster's own server, http://cups.cups.svc:8631. Only a person's"
+            " session changes it.",
+        ),
+        "filament_label_queue": SettingDoc(
+            "Label queue",
+            "The CUPS queue that the Labels page printed to last. The Labels page saves it.",
+        ),
+        "filament_label_job_options": SettingDoc(
+            "Label print options",
+            "Thermal transfer or direct thermal, darkness and print speed for a Zebra ZPL"
+            " queue. Printer default leaves the printer's own setting. The Labels page saves"
+            " the last choice.",
+        ),
         "filament_shopping_auto_add_empty": SettingDoc(
             "Add empty spools to the shopping list",
             "On, a spool whose filament reaches 0 g, or that is archived, adds its type to the"
@@ -897,6 +913,10 @@ SETTING_DOCS: Final[Mapping[str, SettingDoc]] = MappingProxyType(
             "Profile fetch task queue",
             _TEMPORAL_QUEUE.format(what="the exports of a type's slicer profiles"),
         ),
+        "temporal_task_queue_inventory": SettingDoc(
+            "Inventory task queue",
+            _TEMPORAL_QUEUE.format(what="the inventory's writes (scadbuddy-core's worker)"),
+        ),
         "profile_fetch_nozzles": SettingDoc(
             "Nozzles to fetch from 3DFP",
             "The nozzle diameters that Fetch from 3DFP exports for each printer model: any"
@@ -955,6 +975,11 @@ SETTING_DOCS: Final[Mapping[str, SettingDoc]] = MappingProxyType(
             "API internal URL",
             "Where the workers reach the API inside the cluster. The API also makes the"
             " native slicer's transfer URLs under it.",
+        ),
+        "core_crud_url": SettingDoc(
+            "Core CRUD URL",
+            "Where the API reads the inventory from scadbuddy-core, in its own pod. Unset,"
+            " every inventory read answers that the inventory is unavailable.",
         ),
         "slicer_profiles_dir": SettingDoc(
             "Slicer profiles folder",

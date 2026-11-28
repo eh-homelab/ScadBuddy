@@ -36,7 +36,7 @@ telemetry's `Transport`); `(*Exchange).WrapTransport` does the same for the exch
   |---|---|
   | `Touch` | `POST /agents/{session_id}/touch` |
   | `Agents` | `GET /agents` (`{"agents"}`) |
-  | `Join` / `Leave` | `PUT` / `DELETE /channels/{name}/members/{session_id}` |
+  | `Join` / `Leave` | `PUT` / `DELETE /channels/{name}/members/{session_id}`, `{name}` from `fleetchat.ChannelSegment`: a plain name as it is, a GitHub reference as `~` and its unpadded base64url, since core cannot take an escaped `/` or `#` in a path (#8149) |
   | `Channels` | `GET /agents/{session_id}/channels` (`{"channels"}`) |
   | `Send` | `POST /messages` `{"from", "channel" or "agent", "text"}` (`{"seq", "recipients"}`) |
   | `Inbox` | `GET /agents/{session_id}/inbox?limit=&peek=` (`{"messages", "more"}`; a page holds at most 4 MiB of text, and at least one message) |

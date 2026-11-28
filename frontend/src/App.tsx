@@ -2,7 +2,7 @@ import { Suspense, type ReactNode } from 'react'
 import { Navigate, Route, Routes } from 'react-router'
 import { Skeleton } from '@/components/ui/skeleton'
 import { AppShell } from './components/AppShell'
-import { inventoryPaths } from './lib/inventoryLinks'
+import { inventoryPaths, PARTS_KIND } from './lib/inventoryLinks'
 import { lazyRetry } from './lib/lazyRetry'
 import { ActivityPage } from './pages/ActivityPage'
 import { CataloguePage } from './pages/CataloguePage'
@@ -25,7 +25,9 @@ const TypePage = lazyRetry(async () => ({ default: (await import('./pages/filame
 const PresetPage = lazyRetry(async () => ({ default: (await import('./pages/filament/PresetPage')).PresetPage }))
 const LocationPage = lazyRetry(async () => ({ default: (await import('./pages/filament/LocationPage')).LocationPage }))
 const LabelsPage = lazyRetry(async () => ({ default: (await import('./pages/filament/LabelsPage')).LabelsPage }))
+const SwapPage = lazyRetry(async () => ({ default: (await import('./pages/filament/SwapPage')).SwapPage }))
 const ScanPage = lazyRetry(async () => ({ default: (await import('./pages/filament/ScanPage')).ScanPage }))
+const DevicesPage = lazyRetry(async () => ({ default: (await import('./pages/DevicesPage')).DevicesPage }))
 const SupplierPage = lazyRetry(async () => ({ default: (await import('./pages/filament/SupplierPage')).SupplierPage }))
 const InvoicePage = lazyRetry(async () => ({ default: (await import('./pages/filament/InvoicePage')).InvoicePage }))
 const FilamentPage = lazyRetry(async () => ({ default: (await import('./pages/filament/FilamentPage')).FilamentPage }))
@@ -123,6 +125,7 @@ export function App() {
         <Route path="m/:slug/prints" element={<TemplatePrintsPage />} />
         <Route path="prints" element={<PrintsPage />} />
         <Route path="scan" element={<ScanPage />} />
+        <Route path="devices" element={<DevicesPage />} />
         <Route path="edit/:outputId" element={<EditPage />} />
         <Route path="prints/:archiveId" element={<PrintDetailPage />} />
         <Route path="prints/queue/:itemId" element={<QueueItemPage />} />
@@ -130,6 +133,8 @@ export function App() {
         <Route path="filament" element={<Navigate to={FILAMENT_HOME} replace />} />
         <Route path="filament/spools/:id" element={<SpoolPage />} />
         <Route path="filament/labels" element={<LabelsPage />} />
+        {/* The swap wizard (#7168): name a spool, then its new place. */}
+        <Route path="filament/swap" element={<SwapPage />} />
         {/* The hand-held Scan mode (#7273) moved to the top level; the old address redirects. */}
         <Route path="filament/scan" element={<Navigate to="/scan" replace />} />
         <Route path="filament/locations/:id" element={<LocationPage />} />
@@ -158,8 +163,8 @@ export function App() {
         <Route path="x/:code" element={<CodePage />} />
         <Route path="orders" element={<OrdersPage />} />
         <Route path="orders/profit" element={<ProfitPage />} />
-        {/* #7067, spec §6.11 — the parts page moved into the Inventory, on the Part kind. */}
-        <Route path="orders/parts" element={<Navigate to={inventoryPaths.kind('part')} replace />} />
+        {/* #7067, spec §6.11 — the parts page moved into the Inventory, on the parts' kind (`PARTS_KIND`). */}
+        <Route path="orders/parts" element={<Navigate to={inventoryPaths.kind(PARTS_KIND)} replace />} />
         <Route path="orders/:id" element={<OrderPage />} />
         <Route path="customers" element={<CustomersPage />} />
         <Route path="customers/:id" element={<CustomerPage />} />

@@ -441,6 +441,22 @@ def _skip_without_slicer_profiles(request: pytest.FixtureRequest) -> None:
 
 
 @pytest.fixture(autouse=True)
+def _inline_stock_workflows(
+    request: pytest.FixtureRequest, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#6949 K1 Task 16: an app under test runs the orders' stock workflows in line
+    (`tests/support/order_stock.py`), with phase 2's stock writes standing for Go, so a
+    test that fulfils an item needs no Temporal. A test marked `real_stock_workflows`
+    (`tests/workflows/test_order_stock.py`) keeps the app's Temporal starter."""
+    if request.node.get_closest_marker("real_stock_workflows"):
+        return
+    from scadbuddy.orders import stock_start
+    from tests.support.order_stock import inline_starter
+
+    monkeypatch.setattr(stock_start, "make_starter", inline_starter)
+
+
+@pytest.fixture(autouse=True)
 def _skip_without_temporal(request: pytest.FixtureRequest) -> None:
     if request.node.get_closest_marker("requires_temporal") and not temporal_available():
         pytest.skip(

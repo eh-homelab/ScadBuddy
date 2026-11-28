@@ -5,6 +5,7 @@ the estimate price with the same book."""
 
 from __future__ import annotations
 
+from scadbuddy.core.settings import Settings
 from scadbuddy.library.settings_store import SettingsStore
 from scadbuddy.orders.currency import minor_exponent
 from scadbuddy.orders.models import PriceBook, PricingPolicy
@@ -18,15 +19,7 @@ class PriceBookReader:
 
     def policy(self) -> tuple[str, PricingPolicy, str]:
         """``orders_currency``, the policy and ``rough_estimate_factor``, as stored now."""
-        runtime = self.settings.snapshot().runtime
-        policy = PricingPolicy(
-            machine_rate_per_hour=runtime.pricing_machine_rate_per_hour,
-            setup_fee=runtime.pricing_setup_fee,
-            labour_per_item=runtime.pricing_labour_per_item,
-            markup_percent=runtime.pricing_markup_percent,
-            rounding=runtime.pricing_rounding,
-        )
-        return runtime.orders_currency, policy, runtime.rough_estimate_factor
+        return policy_of(self.settings.snapshot().runtime)
 
     def snapshot(self, *, include_archived: bool = False) -> PriceBook:
         """The book in one read; ``include_archived`` adds the archived filaments, for
@@ -39,3 +32,16 @@ class PriceBookReader:
             rough_estimate_factor=factor,
             filaments=self.store.filaments(include_archived=include_archived),
         )
+
+
+def policy_of(runtime: Settings) -> tuple[str, PricingPolicy, str]:
+    """:meth:`PriceBookReader.policy` of a snapshot already read, for a caller that reads
+    the settings once (#8240)."""
+    policy = PricingPolicy(
+        machine_rate_per_hour=runtime.pricing_machine_rate_per_hour,
+        setup_fee=runtime.pricing_setup_fee,
+        labour_per_item=runtime.pricing_labour_per_item,
+        markup_percent=runtime.pricing_markup_percent,
+        rounding=runtime.pricing_rounding,
+    )
+    return runtime.orders_currency, policy, runtime.rough_estimate_factor

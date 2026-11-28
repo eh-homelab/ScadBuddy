@@ -47,6 +47,12 @@ echo "# unrelated" >> "$work/repo/backend/scadbuddy/render/__init__.py"
 [ "$(hash recorder)" = "$recorder" ] || fail "an unrelated backend change moved the recorder"
 [ "$(hash edge)" = "$edge" ] || fail "an unrelated backend change moved the edge"
 
+# An import inside a module-level `match` case is followed.
+fresh
+printf '%s\n' 'match 1:' '    case 1:' '        import scadbuddy.render' >> "$work/repo/backend/scadbuddy/camera/recorder.py"
+(cd "$work/repo" && bash "$script" recorder --files) | grep -qxF backend/scadbuddy/render/__init__.py \
+  || fail "an import in a match case is not followed"
+
 # A camera module, and a shared module it imports: every part moves.
 for path in camera/recorder.py crud/client.py; do
   fresh

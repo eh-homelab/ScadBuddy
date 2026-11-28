@@ -450,7 +450,8 @@ opens every one and seals it again byte for byte).
     replays. Temporal tests (`test/*temporal*.test.ts`)
     skip unless `SCADBUDDY_TEST_TEMPORAL_DEV_SERVER` names a Temporal CLI (or
     `temporal` is on `PATH`); the `agent` CI job installs the Dockerfile's pinned one.
-    The `@temporalio/*` packages are pinned exactly, all one version.
+    The `@temporalio/*` packages take a `^` range on the newest release and lock to one
+    version; Dependabot's `temporal` group moves them together.
   - The tool-call gate (#1056 phase 5b, spec 2026-10-01 §6.6, plan
     `docs/superpowers/plans/2026-10-08-durable-phase-5b-tool-call-gate.md`) is
     `src/gate/`: request ids (`ids.ts`: `approval:`, `question:`, `durable:<session>:<run>:<tool_use_id>`),
@@ -600,12 +601,12 @@ opens every one and seals it again byte for byte).
     `routes: []`. A 404 with no `code` means core does not serve the area yet. `presetOk` then
     throws a `ToolError` that names the area `filament-presets`. Tests: `test/filament.test.ts`
     and the wire fixture `test-fixtures/filament/preset-wire.json`.
-  - The inventory (#7067, `docs/features/inventory.md`): `tools/inventory.ts`, 18 `inventory_*` tools
-    (kinds, items, offers and price points, lots, units, moves), `read` for the lists and gets and
-    `write` for the rest, `inventory_lot_recost` included (Ruling 8); each answer carries `ui_path`
+  - The inventory (#7067, `docs/features/inventory.md`): `tools/inventory.ts`, 19 `inventory_*` tools
+    (kinds, items, offers and price points, lots, units, moves, and `inventory_operation_get`, which reads a write that answered 202), `read` for the lists and gets and
+    `write` for the rest, `inventory_lot_recost` included (Ruling 8); each answer but that one's carries `ui_path`
     from `tools/inventoryLinks.ts`, whose vectors `test-fixtures/inventory/ui-paths.json` the frontend's
-    `lib/inventoryLinks.ts` shares. `part_list` and `part_stock_add` (`tools/orders.ts`) are aliases of
-    `inventory_item_list` and `inventory_lot_receive`, and go after one release. Tests:
+    `lib/inventoryLinks.ts` shares. `part_list` (`tools/orders.ts`) lists an order's parts only; the old stock tool is gone
+    (#6949, K1 5/7): `inventory_lot_receive` receives the stock, and `inventory_item_list` with `kind=hardware` or `kind=ams_part` lists every part. Tests:
     `test/inventory.test.ts`, `test/inventoryLinks.test.ts`.
   - The storefront (#6131, design 2026-11-13 §6): `tools/storefront.ts`
     `storefront_listing_draft` (`write`: a listing from an output or a model, unpublished,

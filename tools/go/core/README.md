@@ -15,6 +15,10 @@ unchanged, to the Python API: WebSockets, SSE and large bodies included. On prod
 | `SCADBUDDY_AUTH_MODE` | `off` | Only `enforce` changes a refusal's words |
 | `SCADBUDDY_SECRET_KEY_FILE` | none | The KEK, read as Python reads it. A sealed area (†) does not start without it; a file that is set and cannot be read stops the start |
 | `SCADBUDDY_SECRET_KEY_PREVIOUS_FILE` | none | The KEK before it, during a rotation: what it sealed still opens |
+| `SCADBUDDY_TEMPORAL_ADDRESS` | required with area `inventory` | Temporal's frontend (`host:port`, no TLS, as the Python client). Without it, a start that names `inventory` stops. With only `inventory:read`, it is optional: the operation read then asks Temporal about a stale row |
+| `SCADBUDDY_TEMPORAL_NAMESPACE` | `scadbuddy` | As `core/config.py` `DEFAULT_TEMPORAL_NAMESPACE` |
+| `SCADBUDDY_TEMPORAL_TASK_QUEUE_INVENTORY` | `inventory` | The task queue the inventory worker polls |
+| `SCADBUDDY_ORDERS_CURRENCY` | `USD` | The shop's currency when the setting `orders_currency` has no row (a lot's cost is in it) |
 
 | Area | Routes under `/api/v1/internal/crud/agent` |
 |---|---|
@@ -121,14 +125,19 @@ The document is the zip member `file`. Its credential keys are stripped, as
 
 Area `fleet` (`internal/fleet`) is caller `fleet`'s (scope `crud.fleet`), under
 `/api/v1/internal/crud/fleet`: `POST /agents/{session_id}/touch`, `GET /agents`, `PUT` and
-`DELETE /channels/{name}/members/{session_id}`, `GET /agents/{session_id}/channels`, `POST
-/messages`, `GET /agents/{session_id}/inbox`, `PUT /agents/{session_id}/cursor`. A send publishes
+`DELETE /channels/{name}/members/{session_id}` (`{name}` is a plain name, or `~` and the
+unpadded base64url of any name; a GitHub reference must take that form, because its `/` and `#` would need escapes, and the router
+leaves a path with an escape in it to Python; a bad `~` segment is a 422), `GET
+/agents/{session_id}/channels`, `POST /messages`, `GET /agents/{session_id}/inbox`, `PUT /agents/{session_id}/cursor`. A send publishes
 `fleet.message` after its commit. An inbox page holds up to `limit` messages (50 by
 default, at most 200) and at most 4 MiB of message text: it stops before the message that
 would pass 4 MiB, always holds at least one, and then says `more`; the cursor moves only past
 the messages returned. A text over 16 MiB is a 422 whose detail names the limit (reason
 `text-too-long`). A cursor `PUT` only moves it back: a `seq` past the cursor is a 422
-(reason `seq-ahead`). Its `GET /changes` is area `changes` (below).
+(reason `seq-ahead`). A channel's name follows fleetchat's rule (#8149,
+`tools/go/fleetchat/README.md`), as does the `fleet_channels` CHECK; a join that would make a channel with a name valid
+only under the rule before it is a 422 (reason `legacy-channel-name`). Its `GET /changes` is
+area `changes` (below).
 
 ## The event stream (#7768)
 
@@ -230,10 +239,21 @@ commit of it is a 404. Refusals carry a `reason`: 422 `kind_not_allowed`, 413 `u
 `upload_mismatch`, 409 `store_object_mismatch`, 503 `store_unavailable` or `store_busy`.
 A Go handler in core reads a blob in-process with `Blobs.OpenKey(ctx, key)` (a `store_blobs` key, the form Python's `blob_key` and `blob_refs` hold) or `Blobs.Open(ctx, kind, sha256)`. It adds no route. The read looks up the row, sends a presigned GET to the row's S3 object, waits at most a minute for its headers, and streams the bytes with their `Ref` for as long as the caller's context allows. The stream checks size and SHA-256 and ends with `ErrBlobMismatch` on a wrong object. A missing row or object is `ErrBlobNotFound`. A store that is not S3, or a row on another backend, is `ErrNotConfigured`.
 A Go handler in core that took the bytes itself stores them with `Blobs.Put(ctx, kind, mediaType, body)`:
-the commit's own steps with no staging object (the kind's limit, the store's caps, the stage lock, a
-content object that is there never written, the same row), with the same refusals.
+the kind's limit checked, then the bytes spooled to a temporary file and stored through `put` (below)
+with the commit's row (`record`, with `verified_at`), the object PUT typed and private as a commit's is.
+Like `PublishFile` and `PutContent`, it checks the store's caps only when it uploads, so the same bytes
+stored again are never refused `store_full`.
 
-`Blobs.Claim`, `Blobs.PublishFile` and `Blobs.ReadFile` (#8137) are the rest of the store in process, for area `package-mirrors` (above). A publish goes through `put`: the bytes spooled and hashed, the object's stage lock held shared as a commit holds it, the object reused or stored with the caps checked (`stage`), the row written by the caller's `indexer`, and the object removed again when that writes no row and no other row names it (`removeUnnamed`). It adds no route; the upload routes and their kinds are as above. `Blobs.Backend`, `Blobs.PutContent` and `Blobs.Fetch` (#8131) are ContentStore's backend name, `put` with no key then `touch`, and `stat` then `get`, for area `workspace`: a put goes through `put` too, its row written by `putIn` at `<kind>-<sha256>` in a transaction, and the object the key named before released when it was another of this store's (`release_replaced`); a fetch of a lost object forgets its row. They take any kind, `workspace` among them; the upload routes' kinds stay as above. Area `package-mirrors` answers a stored blob past its read bound (`ErrTooLarge`) as a 500 with reason `blob-too-large`, its key logged.
+`put` is core's one in-process write path (#8250): `Put`, `PublishFile` and `PutContent` all go
+through it. Its `stage` checks every object it would use, the one a row names and the content
+object alike, where Python's `store/s3.py` `upload` trusts one it finds: a GET that declares
+another size is a mismatch with no byte read, else the object is read and hashed, within a minute
+plus a second per MiB. A row-named object that is not the blob's bytes is logged and passed over,
+so the content object is checked or written instead and the row moves to it. Only a content
+object that is not the blob's bytes is a 409 `store_object_mismatch`, left as it is, with nothing
+indexed, for every caller.
+
+`Blobs.Claim`, `Blobs.PublishFile` and `Blobs.ReadFile` (#8137) are the rest of the store in process, for area `package-mirrors` (above). A publish goes through `put`: the bytes spooled and hashed, the object's stage lock held shared as a commit holds it, the object reused or stored, read and checked first and the caps checked when it uploads (`stage`, above), the row written by the caller's `indexer`, and the object removed again when that writes no row and no other row names it (`removeUnnamed`). It adds no route; the upload routes and their kinds are as above. `Blobs.Backend`, `Blobs.PutContent` and `Blobs.Fetch` (#8131) are ContentStore's backend name, `put` with no key then `touch`, and `stat` then `get`, for area `workspace`: a put goes through `put` too, its row written by `putIn` at `<kind>-<sha256>` in a transaction, and the object the key named before released when it was another of this store's (`release_replaced`); a fetch of a lost object forgets its row. They take any kind, `workspace` among them; the upload routes' kinds stay as above. Area `package-mirrors` answers a stored blob past its read bound (`ErrTooLarge`) as a 500 with reason `blob-too-large`, its key logged.
 `internal/blobclient` is its Go client: `New(baseURL, token, tel)`, `Upload(ctx, kind, mediaType, body)`; each call to core may take 2 minutes, longer than a busy commit takes to answer `store_busy`.
 Both sides trace their requests with `telemetry`'s `Transport`: each span records the method, the
 status and the peer (`s3` for the store), never a URL, so a presigned query is never recorded. A
@@ -247,6 +267,54 @@ channel's members, or as a DM to one agent by its handle. An unknown sender is a
 `unknown-sender`). A `POST /messages` DM to a virtual sender's name is a 422 (reason
 `virtual-sender`) whose detail is the sender's reject message. An inbox entry from a virtual
 sender has its name as `from`.
+
+Areas `inventory` and `inventory:read` (`internal/inventory`, #6949 K1) are caller `inventory`'s
+(scope `crud.inventory`, minted in process by the API), under `/api/v1/internal/crud/inventory`.
+Both have the same routes, all reads: `GET /operations/one?id=` (the id is a query value, since a
+key holds `:`), `/kinds` (`?archived=`), `/kinds/{kind_id}`, `/kinds/{kind_id}/schema`, `/items`
+(`?kind=&descendants=&q=&low=&archived=&compatible=&limit=`), `/items/{item_id}`, `…/lots`,
+`…/units` (`?status=`), `…/estimate?qty=`, `/lots/{lot_id}`, `/units/{unit_id}`, `/moves`
+(`?item_id=&lot_id=&unit_id=&order_item_id=&limit=`). Each answers the public route's JSON. There
+is no write route. Area `inventory` also runs the inventory worker.
+
+### The inventory worker
+
+With area `inventory`, core runs a Temporal worker on the task queue
+`SCADBUDDY_TEMPORAL_TASK_QUEUE_INVENTORY` beside its HTTP servers, and stops it with them
+(`internal/inventory/activities`). Its client is lazy: Temporal out of reach does not stop core.
+The worker asks Temporal's `CheckHealth` every 5 s until it answers, then builds a worker and
+starts it. The SDK keeps a worker's first `Start` result, so after a failed start the next try
+builds a new worker. At shutdown core stops the worker within the drain's 20 s. Each write of the inventory is one activity,
+registered by its name: `inventory.KindCreate`, `…KindUpdate`, `…KindArchive`, `…KindRestore`,
+`…ItemCreate`, `…ItemUpdate`, `…ItemArchive`, `…ItemRestore`, `…ReceiveLot`, `…ReceiveUnits`,
+`…LotUpdate` (cost, place, note), `…LotAdjust`, `…Take` (a use, and an order's take), `…Count`,
+`…UnitUpdate` (name, serial, place), `…UnitStatus`, `…GiveBack`, `…Recost`, `…Repoint`.
+
+- The input is `{key, actor, params, body}`: the idempotency key, the Actor object, the public
+  route's path parameters, and its public body. The code reads `key`, never the activity id.
+  A public write's activity id is `inventory.<Name>:<key>` (`store.ActivityID`, Python's
+  `core_client.activity_id`; both test `internal/inventory/store/testdata/activity_ids.json`),
+  so a key reused on another write runs as another activity, which the ledger refuses.
+- The answer is `{status, body}`: the public route's status and JSON, or its problem. A refusal is
+  an answer, so Temporal does not retry it. Only an infrastructure error (the database out of
+  reach) fails the activity, and Temporal retries it. A bad actor fails it, not retried.
+- Each activity is one `store.Write` under the caller `inventory` with `key`: an activity that runs
+  twice writes once, and the same key with another input is 422 `idempotency-key-reused`.
+- The record (`inventory_operations`, R-K1-22): before each attempt the worker's interceptor
+  writes the row as `running` and sends `inventory_operation.changed` on `scadbuddy_events`
+  (`publish.Notify`, a notice with no log row, as the agent's `ai_operation.changed`). The write
+  ends the row (`succeeded`, or `failed` with the problem) in its own transaction, so the end
+  commits with the stock write or not at all. An attempt that fails keeps the row `running` with
+  `last_error`. A record write that fails is logged and counted
+  (`scadbuddy_inventory_record_failures`); it never fails the activity.
+- `GET /operations/one` reads a `running` row older than 60 s with Temporal (the activity's
+  Describe, or the workflow's): one that Temporal closed without a result answers `failed` with
+  the problem `inventory_activity_failed`. One that completed answers from its answer in
+  `crud_requests` (`succeeded` with the result, or `failed` with the problem), or `failed` when
+  there is none. The read writes nothing.
+- The SDK is `go.temporal.io/sdk` v1.52.0 (Standalone Activities on the client side,
+  [`internal/internal_activity_client.go`](https://github.com/temporalio/sdk-go/blob/v1.52.0/internal/internal_activity_client.go)),
+  with its OpenTelemetry tracing interceptor (`contrib/opentelemetry` v0.9.0) when traces are on.
 
 Each of `browser-origins`, `bridge-tabs`, `pairings`, `mcp-tokens`, `plugin-packages` and
 `plugin-feeds` also has a `:read` form, its GETs only. Area `package-mirrors`
@@ -300,6 +368,18 @@ A read's source is the caller's: an access token or a service credential is `age
 `image` (a committed `scan_image` blob) and `location` are checked and stored on the row.
 `Reads.RecordMifare(ctx, body, actor, source)` is the same write for a Go caller (#8157). With
 the area off, Python answers a MIFARE read 503 `mifare_needs_core`.
+A body with a `read_id` that is not null (#8244) names a paired device's read in place of `uid`, `tag_type`,
+`records` and `mifare_blocks` (with any of them not null, or a `records` that is not empty, it is a 422 `device_read_invalid`, as is a photo read). Core loads the
+read (`devices.Store.OwnRead`: a read of a device the caller does not own is a 404
+`read_not_found`, with `code`, as a read that is not there), reads its `tag_dump` blob, and takes the dump's
+UID, its tech as `tag_type` (cut to 32 bytes, on a whole character), and its blocks as `mifare_blocks`. A dump
+that is no MIFARE Classic 1K read (no block, a UID that is not 4 bytes, or blocks past 63) gives
+a UID-only read with the dump's records instead. Then it decodes the read as an inline one. The
+history row's source is `app`, and its `device_read_id` names the read. Only the history row is
+idempotent: a second post of the same read answers the first row's `tag_read_id` and writes no
+second row, but the rest runs again (Python's answer and last-seen mark, the tag's update), and
+an `image` sent with it is not kept. With the area off, Python answers a `read_id` 503
+`device_read_needs_core`.
 
 A request that reaches Python carries one `X-Forwarded-For` value: its client, as the trusted
 proxies name it (`core/proxies.py`). So Python runs with `SCADBUDDY_TRUSTED_PROXIES=127.0.0.1`
@@ -327,7 +407,7 @@ CORS rule and the app's CSP admit only the storefront), so core takes the photo'
 | Route | Body | Answer |
 |---|---|---|
 | `POST /api/v1/scan/images` | the photo's bytes (JPEG, PNG or WebP; at most 12 MiB) | `{key, media_type, sha256, size}`: a `scan_image` blob, its type read from its bytes, never from a header. 415 `image_not_supported` for any other bytes; a HEIC, HEIF or AVIF photo is refused with its own words (no decoder in pure Go reads one: the page draws a chosen photo on a canvas and sends a JPEG) |
-| `POST /api/v1/scan/codes` | `{key, source?, location?}`: `source` `shutter` (the default), `nfc`, `file` or `app`; `location` `{lat, lon, accuracy_m?, at?}`, lat -90 to 90, lon -180 to 180, accuracy 0 to 1,000,000 m | a scan (below), recorded. 404 `image_not_found` for a key that is no `scan_image` blob |
+| `POST /api/v1/scan/codes` | `{key, source?, location?}`, or `{read_id, source?, location?}` (#8244: a paired device's photo read in place of `key`, a null `read_id` as none; its `source` defaults to `app`): `source` `shutter` (the default), `nfc`, `file` or `app`; `location` `{lat, lon, accuracy_m?, at?}`, lat -90 to 90, lon -180 to 180, accuracy 0 to 1,000,000 m | a scan (below), recorded. 404 `image_not_found` for a key that is no `scan_image` blob; 404 `read_not_found` for a read of a device the caller does not own, as for one that is not there; 422 `read_not_a_photo` for a tag read. Each post is a new scan, of a `read_id` as of a `key` |
 | `GET /api/v1/scan/scans?limit=&before=` | | `{scans}`, newest first, at most 100 (50 by default); `before` is a scan id. A person sees only their own scans (a scan holds its photo and GPS fix); a service sees all; any other caller (anonymous, as under auth `off` or `observe`) sees only the scans made with no actor. The same holds for every route below: another person's scan is a 404 |
 | `GET /api/v1/scan/scans/{id}` | | a scan, or 404 `scan_not_found` |
 | `GET /api/v1/scan/scans/{id}/image` | | the photo's bytes with its media type, `nosniff` (scriptless, for an `<img>`) |
@@ -354,6 +434,40 @@ same text (a photo's grain passes an EAN's check digit on about one row in ten).
 transaction, success or not, so the photo is kept until the scan is deleted. `Scans.Record(ctx,
 body, Input)` is a whole scan from bytes for a Go caller (#8157's result route), and
 `Scans.Decode(ctx, key, Input)` one of a stored photo.
+
+### Label printing (#7170)
+
+Area `label-printing` (`internal/labelprint`, design
+`docs/superpowers/specs/2026-11-27-cups-label-printing-design.md`) is a public area, class `api`.
+It sends a label PDF to a queue of the cluster's CUPS server (`deploy/cups/`) with one IPP
+`Print-Job`. It has its own `case` in `newRouter`, because its client uses the process's
+telemetry (peer `cups`).
+
+The server is the stored setting `filament_label_server_url` (only a person's own session
+writes it). No row, or JSON `null`, is `http://cups.cups.svc:8631`. Core checks the value again
+when it reads it: `http` or `https`, a host, no user, no query, no fragment, and a path of `/`
+or none. A bad value is no server (502). A request never names a server.
+
+| Route | Body | Answer |
+|---|---|---|
+| `GET /api/v1/label-printing/queues` | none | `{queues}`, in CUPS's order. A queue is `{name, info, make_and_model, state, state_reasons, state_message, accepting, media, width_mm, height_mm}`; the size comes from `media`, or is null |
+| `POST /api/v1/label-printing/queues/{queue}/jobs?media_type=&darkness=&print_rate=` | the PDF's bytes, at most 8 MiB | 202 `{queue, job_id, job_state, job_state_reasons}` when CUPS accepts the job, not when the label prints. `media_type` is `Saved`, `Thermal` or `Direct`; `darkness` `-1` or `1` to `30`; `print_rate` `Default` or `1` to `12`. A missing value or the default sends no attribute |
+
+The queue name must be 1 to 127 of `[A-Za-z0-9_-]` and in the list that CUPS gives, before core
+prints. The list times out after 5 s and the print after 30 s. Core follows no redirect, uses no
+proxy, and reads at most 1 MiB of a reply. Each job is logged with its queue, job id, size and
+the caller's kind, never the document.
+
+| Problem | When |
+|---|---|
+| 413 `label_too_large` | the body is past 8 MiB |
+| 415 `label_not_pdf` | the body does not start with `%PDF-` |
+| 422 `label_option_invalid` | an option value is not in the lists above |
+| 422 `label_queue_unknown` | the name is malformed or not in CUPS's list, or CUPS answers `client-error-not-found` |
+| 502 `label_server_unreachable` | no server (a bad stored value), or CUPS does not answer, times out, or answers bytes that are not IPP |
+| 502 `label_print_refused` | CUPS answers another error status, to the queue list too; `detail` is its `status-message` (at most 300 characters) and `ipp_status` the status code |
+
+CUPS owns the size check, the order of the jobs and the retries.
 
 ## Public routes
 
@@ -579,6 +693,32 @@ At a stop, the servers drain and the three signals flush within the 20 s shutdow
 - `POST /sessions`: a scope's size counts each number as it was sent; Python counted its own
   spelling of it (`1e3` as `1000.0`).
 - `POST /workspace-blob-refs` answers 204 with no `Content-Type`.
+- Inventory: a service's `use` is 409 `handler_not_built` (its consume is `consume.service`,
+  which K1 does not build, R-K1-7); phase 2 answered `item_not_counted`. The other new codes
+  replace phase 2's as R-K1-23 says. A problem's extensions are written `code` first, then by
+  name.
+- Inventory: the shop's currency is the `orders_currency` row when it holds a code, else
+  `SCADBUDDY_ORDERS_CURRENCY`, else `USD`. A row that holds JSON `null` reads as no row.
+- Inventory: every kind read carries `number` (from `item_kinds_number_seq`) and `code`,
+  `K-<number>` (#6955, the owner's decision of 2026-11-27). A kind create with no `id`, and a
+  model kind that a `compatible_with` code makes, get the id `k<number>`. A typed id of `k`
+  and digits is 422 `bad_input`, as `KindInput` refuses it.
+- Inventory: `GET /items/{id}/estimate` is new (Python's `estimate_unit_cost` had no route): it
+  answers `{unit_cost_minor, cost_unknown}`, or the refusal a take of `qty` would give.
+- Inventory: an item create or save that is not complete is 422 `missing_required_properties`
+  (R-K1-33). Each `invalid[].reason` is `does not fit '<keyword>'`, and not the message of
+  `jsonschema`'s `best_match`. A sent value that does not fit is 422 `bad_property_value` with
+  the detail `property '<key>': does not fit '<keyword>'`. The keys, the keyword and the status
+  are Python's; `store/testdata/property_values.json` holds the vectors that both languages
+  run. Where a list's string does not fit, the keyword is that string's keyword, as
+  `best_match` names it, not `items`. A patch with more than one bad key names the first key
+  in key order; Python names the first in the order sent.
+- Inventory: `GET /kinds/{kind_id}/schema` also answers `item_required` (R-K1-33): the keys an
+  item of the kind must have a value for. They are the kinds' merged `required` keys, ancestor
+  first, then the special type's `requires_properties`, each once (`store.Kinds.Schema`).
+  `backend/scadbuddy/inventory/kinds.py` `kind_item_schema` gives the same keys;
+  `store/testdata/special_requires.json` holds the `requires_properties` that both languages
+  test.
 - `POST /workspace/file-writes`: a body over 32 MiB is refused (413) by core's body bound in its
   words; Python's body gate refuses it in its own. A store failure's 503 names the store error's
   class (`Class()`), else `Exception`, where Python names the exception's type. A meta that is no

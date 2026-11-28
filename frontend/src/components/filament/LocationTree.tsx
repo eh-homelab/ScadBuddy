@@ -1,4 +1,5 @@
-import { ArchiveIcon, ArchiveRestoreIcon, PencilIcon } from 'lucide-react'
+import { ArchiveIcon, ArchiveRestoreIcon, PencilIcon, PrinterIcon } from 'lucide-react'
+import { Link } from 'react-router'
 import type { LocationNode, Sensor, Spool } from '../../api/filament'
 import { Button } from '@/components/ui/button'
 import { LocationSensors } from './LocationSensors'
@@ -61,6 +62,12 @@ function Place({ node, ...tree }: Omit<LocationTreeProps, 'nodes'> & { node: Loc
         )}
         {!tray && !unit && (
           <span className="ml-auto flex gap-1">
+            {/* #7167: a dry box is a place, so its label is the place label (#6955). */}
+            <Button asChild size="xs" variant="ghost">
+              <Link to={filamentLinks.locationLabel(node.id)} aria-label={`Print label for ${node.name}`}>
+                <PrinterIcon /> Print label
+              </Link>
+            </Button>
             <Button type="button" size="xs" variant="ghost" aria-label={`Edit ${node.name}`} onClick={() => tree.onEdit(node)}>
               <PencilIcon /> Edit
             </Button>

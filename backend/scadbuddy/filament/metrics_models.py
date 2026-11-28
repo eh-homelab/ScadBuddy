@@ -63,8 +63,11 @@ class SpoolMetrics(BaseModel):
     consumed_since: datetime | None = None
     prints: int
     grams_per_print: float | None
-    #: Grams of ``failed`` and ``cancelled`` plates (plan Decision 7).
+    #: Grams of ``failed`` and ``cancelled`` plates (plan Decision 7); not non-print waste.
     wasted_g: float
+    #: Grams of the spool's ``non_print_waste`` events (#7167): filament thrown away off
+    #: the printer (an archive, a box replacement). Never in ``wasted_g`` or ``used_g``.
+    non_print_waste_g: float = 0.0
     cost_used: Decimal | None
     value_left: Decimal | None
     burn_g_per_day: float | None
@@ -152,6 +155,16 @@ class WasteRow(BaseModel):
     rate: float | None
 
 
+class NonPrintWasteRow(BaseModel):
+    """The ``non_print_waste`` events of one material or type (#7167); no printer, as
+    the waste has none. ``wasted_g`` is the sum of the events' ``data.waste_g``."""
+
+    dimension: WasteDimension
+    key: str | None
+    label: str
+    wasted_g: float
+
+
 class InventoryMetrics(BaseModel):
     """Stock now, and the consumption and waste of the plates from ``since`` to ``until``
     (both days included). Money is in ``currency``, the shop's."""
@@ -164,6 +177,11 @@ class InventoryMetrics(BaseModel):
     stock: list[StockRow]
     consumption: list[ConsumptionRow]
     waste: list[WasteRow]
+    #: The ``non_print_waste`` events by the event's UTC day from ``since`` to ``until``
+    #: (#7167), archived spools too: the total and its rows by material and type. Apart
+    #: from ``waste``, whose rates count the plates only.
+    non_print_waste_g: float
+    non_print_waste: list[NonPrintWasteRow]
 
 
 class MaterialNumberType(BaseModel):
@@ -288,3 +306,5 @@ class Snapshot(BaseModel):
     low_stock: dict[str | None, int]
     reorder: dict[str | None, int]
     currency: str
+    #: Grams of every ``non_print_waste`` event by material (#7167).
+    non_print_waste: dict[str | None, float]

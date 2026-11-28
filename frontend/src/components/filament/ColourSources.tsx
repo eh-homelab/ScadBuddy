@@ -1,8 +1,9 @@
-import { RefreshCwIcon } from 'lucide-react'
-import { useCallback, useEffect, useRef, useState } from 'react'
+import { RefreshCwIcon, SearchIcon } from 'lucide-react'
+import { useCallback, useEffect, useRef, useState, type FormEvent } from 'react'
 import { ApiError } from '../../api/client'
-import { listColourSyncs, startColourSync, type ColourSync, type ColourSyncSource } from '../../api/filament'
+import { listColourSyncs, lookupBambuColourCode, startColourSync, type ColourCode, type ColourSync, type ColourSyncSource } from '../../api/filament'
 import { Button } from '@/components/ui/button'
+import { Input } from '@/components/ui/input'
 import { Spinner } from '@/components/ui/spinner'
 
 /** How often the panel reads a running sync's progress. */
@@ -38,6 +39,90 @@ function outcome(run: ColourSync): string {
   const what = parts.join(', ')
   if (run.state === 'failed') return `Stopped: ${run.error ?? 'the source could not be read'}. ${what}; what was read before stays.`
   return `Done: ${what}.`
+}
+
+/**
+ * #6907 — one Bambu colour code looked up in Bambu Studio's table (`GET /filament/bambu-colour-codes`):
+ * the code is the digits of a Bambu spool's SKU. It shows the colour's name, each RGBA (a translucent
+ * one keeps its alpha) and the filament type and id; it adds nothing to the catalog.
+ */
+function ColourCodeLookup() {
+  const [code, setCode] = useState('')
+  const [busy, setBusy] = useState(false)
+  const [found, setFound] = useState<ColourCode | null>(null)
+  const [error, setError] = useState<string | null>(null)
+  const asked = useRef(0)
+  // An answer that comes after the panel unmounts is dropped, as a stale one is.
+  useEffect(
+    () => () => {
+      asked.current += 1
+    },
+    [],
+  )
+
+  async function lookUp(event: FormEvent) {
+    event.preventDefault()
+    const wanted = code.trim()
+    if (!wanted) return
+    const ask = ++asked.current
+    setBusy(true)
+    setError(null)
+    setFound(null)
+    try {
+      const answer = await lookupBambuColourCode(wanted)
+      if (ask === asked.current) setFound(answer)
+    } catch (cause) {
+      if (ask !== asked.current) return
+      if (cause instanceof ApiError && cause.status === 404) setError(`Bambu Studio's colour table has no code ${wanted}.`)
+      else setError(cause instanceof ApiError ? cause.detail : 'The code could not be looked up. Try again.')
+    } finally {
+      if (ask === asked.current) setBusy(false)
+    }
+  }
+
+  return (
+    <div className="flex flex-col gap-1.5">
+      <form onSubmit={(event) => void lookUp(event)} className="flex flex-wrap items-center gap-2">
+        <Input
+          aria-label="Bambu colour code"
+          placeholder="The digits of a Bambu SKU"
+          inputMode="numeric"
+          className="h-8 w-56"
+          value={code}
+          onChange={(event) => setCode(event.target.value)}
+        />
+        <Button type="submit" size="sm" variant="ghost" disabled={busy || !code.trim()}>
+          {busy ? <Spinner /> : <SearchIcon />} Look up
+        </Button>
+      </form>
+      {found && (
+        <div role="group" aria-label={`Bambu colour code ${found.code}`} className="flex flex-wrap items-center gap-x-3 gap-y-1">
+          <span className="flex items-center gap-1">
+            {found.rgba.map((rgba, at) => (
+              <span
+                key={at}
+                role="img"
+                aria-label={rgba}
+                className="size-4 rounded-sm border bg-[linear-gradient(45deg,#ccc_25%,transparent_25%,transparent_75%,#ccc_75%)] bg-[length:6px_6px]"
+              >
+                <span className="block size-full rounded-[inherit]" style={{ backgroundColor: rgba }} />
+              </span>
+            ))}
+          </span>
+          <span className="font-medium">{found.name}</span>
+          <span className="font-mono text-muted-foreground">{found.rgba.join(' ')}</span>
+          <span className="text-muted-foreground">
+            {found.fila_type}, filament id {found.fila_id}
+          </span>
+        </div>
+      )}
+      {error && (
+        <p role="alert" className="text-warn">
+          {error}
+        </p>
+      )}
+    </div>
+  )
 }
 
 /**
@@ -120,6 +205,7 @@ export function ColourSources({ onSynced }: { onSynced: () => void }) {
                 </span>
               )}
               {fraction !== null && <progress aria-label={`${title} progress`} value={fraction} max={1} className="h-1.5 w-full max-w-xs accent-primary" />}
+              {source === 'bambu' && <ColourCodeLookup />}
             </div>
             <div className="flex shrink-0 gap-2">
               {run?.state === 'unchanged' && source === 'filamentcolors' && (
