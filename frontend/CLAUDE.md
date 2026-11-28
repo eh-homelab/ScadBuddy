@@ -352,7 +352,7 @@ same way, `vite.config.ts`).
   payload over 84 bytes is refused with an alert). Both place modes draw at most `MAX_LABELS` (100)
   labels, as spool labels do, and none past it (#7081).
   The spool and type pages' section "Files, links and properties" (on the spool page, anchor `#files-and-links`) holds
-  `components/entities/PropertiesPanel.tsx` (#7026), which lists only the keys the form above it does not show: each page passes `hideKeys={definedKeys(schema)}`, as does a catalog row's edit form (#8227); `lib/filamentSearch.ts` `propertyTexts` makes
+  `components/entities/PropertiesPanel.tsx` (#7026), which lists only the keys the form above it does not show: the spool and type pages and a catalog row's edit form pass `hideKeys={definedKeys(schema)}` (#8227), and the item page passes it while it edits; `lib/filamentSearch.ts` `propertyTexts` makes
   search match property values.
   History and metrics (#6269, plan `docs/superpowers/plans/2026-11-18-filament-history-metrics.md`):
   the spool page's timeline (`SpoolTimeline`, `eventText.ts`), grams-left chart (`GramsChart` over
