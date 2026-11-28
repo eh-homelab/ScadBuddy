@@ -177,6 +177,9 @@ const csvRows = z
   .max(5000)
   .describe('One object per CSV row, column name to cell text')
 
+/** #8228: the catalog names a type add takes instead of their ids. */
+const NAME_FIELDS = ['brand_name', 'material_name', 'subtype_name'] as const
+
 const tools: Tool[] = [
   defineTool({
     name: 'filament_catalog_list',
@@ -418,8 +421,12 @@ const tools: Tool[] = [
     label: 'Add or edit a spool type',
     description:
       'Add a spool type (no `type_id`), or edit one: only the `fields` given change, and `null` clears a ' +
-      'nullable one. A new type needs `code`, `material_id`, `rgba` (`#RRGGBB` or `#RRGGBBAA`) and ' +
-      '`label_weight_g`; ids come from filament_catalog_list. With a `cost_per_kg` it also keeps the price ' +
+      'nullable one. A new type needs `code`, `material_id` (or `material_name`), `rgba` (`#RRGGBB` or `#RRGGBBAA`) and ' +
+      '`label_weight_g`; ids come from filament_catalog_list. On an add only, `brand_name`, `material_name` and ' +
+      '`subtype_name` (#8228) are the other way to give `brand_id`, `material_id` and `subtype_id` (one or the other, ' +
+      'not both): the catalog row of that name or alias, else a new row added unchecked with the type (a subtype of ' +
+      "the type's material), which a refused type does not add. An effect is never added. " +
+      'With a `cost_per_kg` it also keeps the price ' +
       'book row of its material, subtype, brand, colour and alpha in step; a new row takes its stops and effect. ' +
       '`lead_time_days` and `safety_margin_days` (days, `null` clears) set the type\'s own reorder timing. ' +
       '`archived: true` takes a type off the lists and frees its code. `tdfp_id` (a positive integer below 2^31, `null` ' +
@@ -456,6 +463,14 @@ const tools: Tool[] = [
             .nullable()
             .optional()
             .describe('The drying time in hours a drying of its spools defaults to, a decimal such as `8`; null clears it'),
+          brand_name: z.string().min(1).max(128).optional().describe('Add only: the brand by name instead of `brand_id`; a missing one is added'),
+          material_name: z.string().min(1).max(128).optional().describe('Add only: the material by name instead of `material_id`; a missing one is added'),
+          subtype_name: z
+            .string()
+            .min(1)
+            .max(128)
+            .optional()
+            .describe("Add only: the subtype by name instead of `subtype_id`, under the type's material; a missing one is added"),
         })
         .catchall(z.unknown())
         .default({})
@@ -479,6 +494,8 @@ const tools: Tool[] = [
       if (type_id === undefined) {
         if (archived !== undefined) throw new ToolError('archived needs a type_id')
         row = await ok(backend.POST('/api/v1/filament/types', { body: { ...fields, properties } as never }), 'add a spool type')
+      } else if (NAME_FIELDS.some((name) => (fields as Record<string, unknown>)[name] !== undefined)) {
+        throw new ToolError(`${NAME_FIELDS.join(', ')} are for an add only; edit a type with ids`)
       } else if (properties !== undefined && archived === undefined && Object.keys(fields).length === 0) {
         // Properties only: no row PATCH, which would move the type's `updated_at` and so its sync time.
         const set = await setPropertiesAfter(backend, `spool_type:${type_id}`, properties)

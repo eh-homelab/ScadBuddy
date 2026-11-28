@@ -154,6 +154,26 @@ def test_a_type_save_is_checked_but_an_archive_and_the_cost_route_are_not(
     assert saved.json()["missing_properties"] == []
 
 
+def test_a_type_create_adds_a_named_brand_unchecked_and_a_refused_one_adds_none(
+    client: TestClient,
+) -> None:
+    """#8228, spec 6.3b: a brand added on the way to a type is not checked, and it goes
+    with a refused type."""
+    _require(client, "brand", "site")
+    made = _new_type(client, brand_name="Acme")
+    assert made.status_code == 201, made.text
+    brands = {r["name"]: r for r in client.get(f"{CATALOG}/brands").json()}
+    assert made.json()["brand_id"] == brands["Acme"]["id"]
+    assert brands["Acme"]["missing_properties"] == ["site"]
+    taken = _new_type(client, brand_name="Zenith")
+    assert taken.status_code == 409, taken.text
+    assert "Zenith" not in {r["name"] for r in client.get(f"{CATALOG}/brands").json()}
+    assert _new_type(client, "PLA-GRN", brand_name="!!").status_code == 422
+    _require(client, "spool_type", "mpn")
+    _refused(_new_type(client, "PLA-BLU", brand_name="Nadir"), ["mpn"])
+    assert "Nadir" not in {r["name"] for r in client.get(f"{CATALOG}/brands").json()}
+
+
 def test_the_cost_route_answers_404_for_no_type(client: TestClient) -> None:
     gone = "00000000-0000-0000-0000-000000000000"
     assert client.put(f"{TYPES}/{gone}/cost-per-kg", json={"cost_per_kg": "1"}).status_code == 404

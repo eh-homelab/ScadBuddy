@@ -610,7 +610,11 @@ matches `[a-z][a-z0-9_]{0,63}`. Limits: 200 keys per entity, 2000 characters per
   `invalid`. An empty or blank string and an empty list are no value; `false` and `0` are.
   Not checked: a save that sends only `archived` or `sort_order`, bulk-update, events,
   syncs, imports, invoice confirm, a catalog row added on the way to another, and
-  `PUT /filament/types/{id}/cost-per-kg`, which sets only the cost. Reads carry
+  `PUT /filament/types/{id}/cost-per-kg`, which sets only the cost. A type create may name
+  its brand, material and subtype (`brand_name`, `material_name`, `subtype_name`) in place
+  of their ids; a name the catalog lacks is added, unchecked, in the type's transaction, so
+  a refused type adds no row (#8228). The price book's "Make a type" sends the names
+  (`frontend/src/components/filament/makeType.ts`). Reads carry
   `missing_properties` and `invalid_properties` (keys only); an archived row is never
   marked. `PATCH /entities/{ref}/properties` refuses removing or emptying a required key
   that has a value (`backend/scadbuddy/entities/required.py`). Items and item kinds follow
