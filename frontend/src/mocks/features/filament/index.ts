@@ -2175,15 +2175,27 @@ export { cleanTagUid }
  * holds it, marked seen by `source`. A read in a known format gives the tag that format's kind
  * (R13), but a Bambu tag's.
  */
-export function seenTag(uid: string, kind: S['Tag']['kind'] | null, source: 'phone' | 'agent' = 'phone'): S['Tag'] {
+export function seenTag(uid: string, kind: S['Tag']['kind'] | null, source: 'phone' | 'agent' = 'phone', chip: ChipRead = {}): S['Tag'] {
   let tag = state.tags.find((one) => one.tag_uid === uid)
   if (!tag) {
     tag = { id: newId(), kind: kind ?? 'other', tag_uid: uid, tray_uuid: null, raw_blob: null, note: null, created_at: now() }
     state.tags.push(tag)
   } else if (kind && tag.kind !== 'bambu_mifare') tag.kind = kind
   Object.assign(tag, { last_seen_at: now(), last_seen_source: source })
+  // #8366 `_mark`: each chip value the read told is kept; one it left out stays as it was.
+  if (chip.chip != null || chip.max_ndef_bytes != null || chip.writable != null) {
+    Object.assign(tag, {
+      chip: chip.chip ?? tag.chip ?? null,
+      max_ndef_bytes: chip.max_ndef_bytes ?? tag.max_ndef_bytes ?? null,
+      writable: chip.writable ?? tag.writable ?? null,
+      chip_read_at: now(),
+    })
+  }
   return tag
 }
+
+/** What the ScadBuddy app read of a tag's chip beside its records (#8366). */
+export type ChipRead = Pick<S['TagReadIn'], 'chip' | 'max_ndef_bytes' | 'writable'>
 
 /** A tag as the tag list shows it: with its open binding and its spool's number. */
 export function tagRowOf(tag: S['Tag']): S['TagRow'] {

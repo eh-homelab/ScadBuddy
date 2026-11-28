@@ -833,6 +833,7 @@ export const TOUCHES_NOTHING: ReadonlySet<string> = new Set([
   'filament_sync_reset_links',
   // #7273: a tag and an NFC job are no recorded resource kind.
   'nfc_read',
+  'nfc_probe',
   'nfc_write',
   // Purchasing (#6266: suppliers, products, price points, invoices, the shopping list) is
   // no recorded resource kind either; an invoice's spools are in each spool's ledger.

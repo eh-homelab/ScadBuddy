@@ -2230,7 +2230,11 @@ async def get_tag(filament: FilamentDep, tag_id: UUID) -> m.TagDetail:
         "`records` and `mifare_blocks` (#8244): core loads it and decodes it as an inline "
         "read; 404 `read_not_found` for a read of a device the caller does not own, 422 "
         "`device_read_invalid` for a photo read or for inline fields beside it, and 503 "
-        "`device_read_needs_core` when that area does not run."
+        "`device_read_needs_core` when that area does not run. "
+        "The ScadBuddy app also sends what it read of the chip (#8366): `chip` (NTAG "
+        "GET_VERSION's `NTAG213`, `NTAG215` or `NTAG216`), `max_ndef_bytes` (Android's "
+        "`Ndef.getMaxSize()`) and `writable`; each one sent is kept on the tag with "
+        "`chip_read_at`, and every tag answer carries the last known values."
     ),
 )
 async def read_tag(
@@ -2257,7 +2261,13 @@ async def read_tag(
             code="mifare_needs_core",
         )
     reading = tags.TagRead(
-        source="phone", uid=body.uid, tag_type=body.tag_type, records=tuple(body.records)
+        source="phone",
+        uid=body.uid,
+        tag_type=body.tag_type,
+        records=tuple(body.records),
+        chip=body.chip,
+        max_ndef_bytes=body.max_ndef_bytes,
+        writable=body.writable,
     )
 
     def run() -> m.TagReadResult:
@@ -2350,7 +2360,8 @@ def _empty_weight_of(filament: Filament) -> Callable[[UUID], int | None]:
         "Takes the tag as just read (`uid` and `records`) and the `backup_id` of the backup "
         "taken of it for this write, and answers the records to write: in the tag's own "
         "format when it holds OpenSpool or OpenTag3D, else in the `filament_tag_format` "
-        "setting. Answers the records only. The browser writes them, and a write that skips "
+        "setting. A message larger than the tag's last known `max_ndef_bytes` (#8366) "
+        "gets a warning. Answers the records only. The browser writes them, and a write that skips "
         "this route has no backup. 404 for no spool. 409 `backup_mismatch` when the backup "
         "is unknown, does not hold the `records` sent, is of another UID, is over 10 minutes "
         "old or is not a `spool_write` "
@@ -2571,7 +2582,9 @@ async def cancel_nfc_job(filament: FilamentDep, job_id: UUID) -> m.NfcJob:
     description=(
         "What the phone page got from the tag. An `error` fails the job and nothing else is "
         "read. A `read` job records the reading as `POST /tags/reads` does (`source` "
-        "`agent`); its `result` is that answer with the `uid` and `records`. A `write` job "
+        "`agent`); its `result` is that answer with the `uid` and `records`, and the "
+        "`chip`, `max_ndef_bytes` and `writable` the page sent (null when it read none, "
+        "#8366). A `write` job "
         "names its `agent_write` backup as `backup_id`, and `records` is the read-back: the "
         "job is `done` when it equals the records sent, else `failed`. 404 for no job, 409 "
         "`job_not_armed` for a job that is not armed, 409 `backup_mismatch` for a backup that "

@@ -281,6 +281,12 @@ export const getNfcJob = (id: string) => request<NfcJob>(`${BASE}/nfc-jobs/${seg
  */
 export const claimNfcJob = (id: string, body: NfcJobClaimIn = {}) => request<NfcJob>(`${BASE}/nfc-jobs/${seg(id)}/claim`, json('POST', body))
 
+/** Queues a job for the phone page; the Tags tab's "Read chip" queues a `read` (#8366). */
+export const createNfcJob = (body: Schemas['NfcJobIn']) => request<NfcJob>(`${BASE}/nfc-jobs`, json('POST', body))
+
+/** Stops waiting for a job: a pending or armed one is `cancelled`. */
+export const cancelNfcJob = (id: string) => request<NfcJob>(`${BASE}/nfc-jobs/${seg(id)}/cancel`, { method: 'POST' })
+
 /** Ends an armed job with what the tag gave, or with an `error`. */
 export const postNfcJobResult = (id: string, body: NfcJobResultIn) => request<NfcJob>(`${BASE}/nfc-jobs/${seg(id)}/result`, json('POST', body))
 

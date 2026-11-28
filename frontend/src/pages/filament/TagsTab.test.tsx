@@ -1,6 +1,7 @@
 import { screen, waitFor, within } from '@testing-library/react'
 import { delay, http, HttpResponse } from 'msw'
 import { describe, expect, it } from 'vitest'
+import { claimNfcJob, listPendingNfcJobs, postNfcJobResult } from '../../api/filament'
 import { server } from '../../mocks/server'
 import { spoolId, TAG } from '../../mocks/features/filament/seed'
 import { renderPage } from '../../test/utils'
@@ -116,6 +117,42 @@ describe('the Tags tab', () => {
     await user.click(screen.getByRole('button', { name: 'Close' }))
     await delay(400)
     expect(screen.queryByRole('region', { name: 'Tag history' })).toBeNull()
+  })
+
+  it("shows a tag's chip as the app read it, and a Bambu tag as MIFARE Classic (#8366)", async () => {
+    renderPage(<TagsTab />)
+    await table()
+    expect(within(await rowOf(TAG.MOVED)).getByLabelText(/Chip of/)).toHaveTextContent('NTAG215 · 496 bytes')
+    expect(within(await rowOf(TAG.BLACK)).getByText('MIFARE Classic')).toBeInTheDocument()
+    expect(within(await rowOf(TAG.BLACK)).queryByRole('button', { name: /Read the chip/ })).toBeNull()
+    expect(within(await rowOf(TAG.LOOSE)).getByText('Not read yet')).toBeInTheDocument()
+  })
+
+  it('"Read chip" queues a read job, and shows the chip once the phone has read the tag (#8366)', async () => {
+    const { user } = renderPage(<TagsTab />)
+    await table()
+    await user.click(within(await rowOf(TAG.LOOSE)).getByRole('button', { name: /Read the chip/ }))
+    expect(await within(await rowOf(TAG.LOOSE)).findByRole('status')).toHaveTextContent('Open Scan on the phone')
+    const [job] = await listPendingNfcJobs()
+    expect(job).toMatchObject({ kind: 'read', records: null })
+    // The phone's Scan page arms it and posts what the ScadBuddy app read.
+    await claimNfcJob(job!.id)
+    await postNfcJobResult(job!.id, { uid: '04FFEE0011223344', records: [], chip: 'NTAG213', max_ndef_bytes: 137, writable: true })
+    await waitFor(async () => expect(within(await rowOf(TAG.LOOSE)).getByLabelText(/Chip of/)).toHaveTextContent('NTAG213 · 137 bytes'), { timeout: 5000 })
+  })
+
+  it('"Stop" cancels the read job, and a read with no chip says how to get one (#8366)', async () => {
+    const { user } = renderPage(<TagsTab />)
+    await table()
+    await user.click(within(await rowOf(TAG.LOOSE)).getByRole('button', { name: /Read the chip/ }))
+    await user.click(await within(await rowOf(TAG.LOOSE)).findByRole('button', { name: 'Stop' }))
+    expect(within(await rowOf(TAG.LOOSE)).getByText('Stopped. Nothing was read.')).toBeInTheDocument()
+    await waitFor(async () => expect(await listPendingNfcJobs()).toEqual([]))
+    await user.click(within(await rowOf(TAG.LOOSE)).getByRole('button', { name: /Read the chip/ }))
+    const [job] = await listPendingNfcJobs()
+    await claimNfcJob(job!.id)
+    await postNfcJobResult(job!.id, { uid: '04FFEE0011223344', records: [] })
+    expect(await within(await rowOf(TAG.LOOSE)).findByText(/The phone read no chip/, {}, { timeout: 5000 })).toBeInTheDocument()
   })
 
   it('says why the tags could not be read', async () => {

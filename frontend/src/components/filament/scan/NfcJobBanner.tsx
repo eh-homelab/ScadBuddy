@@ -2,7 +2,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { ApiError } from '../../../api/client'
 import { claimNfcJob, getNfcJob, listPendingNfcJobs, postNfcJobResult, type NfcJob } from '../../../api/filament'
 import { headlineOf, writeWithBackup, type WriteOutcome, type WriteStep } from '../../../lib/tagWrite'
-import { decodeText, notWritable, posterRecords, recordsSha256, visibleText, type NfcSession, type PosterRecord, type WireRecord } from '../../../lib/webNfc'
+import { chipFields, decodeText, notWritable, posterRecords, recordsSha256, visibleText, type NfcSession, type PosterRecord, type WireRecord } from '../../../lib/webNfc'
 import { Button } from '@/components/ui/button'
 import { cn } from '@/lib/utils'
 
@@ -293,7 +293,7 @@ export function NfcJobBanner({ session, onAnnounce }: { session: NfcSession; onA
           return
         }
         try {
-          await postNfcJobResult(target.id, { uid: reading.uid || null, records: reading.records })
+          await postNfcJobResult(target.id, { uid: reading.uid || null, records: reading.records, ...chipFields(reading.tag) })
           end(target.id, 'Agent job done: the tag was read.')
         } catch (cause) {
           if (codeOf(cause) === 'job_not_armed') end(target.id, STOPPED_WAITING)
