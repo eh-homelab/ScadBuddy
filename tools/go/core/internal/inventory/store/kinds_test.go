@@ -358,6 +358,7 @@ func TestAKindWithItemsKeepsItsUnit(t *testing.T) {
 
 	_, err := updateKind(t, pool, k, "fastener", wire.KindPatch{UOM: ptr("g")})
 	refusal(t, err, 409, "kind_in_use")
+	must(updateKind(t, pool, k, "fastener", wire.KindPatch{UOM: ptr("each")}))
 	must(updateKind(t, pool, k, "fastener", wire.KindPatch{UOM: ptr("each"), Name: ptr("Fasteners")}))
 
 	must(createKind(t, pool, k, wire.KindInput{ID: "cable", Name: "Cable", ParentID: ptr("part")}))

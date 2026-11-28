@@ -903,7 +903,10 @@ export const handlers = [
       if (!k) throw new Refused(404, 'kind_not_found', `no item kind '${String(p.id)}'`)
       kindProblem(input, k.id)
       if (input.tracking && input.tracking !== k.tracking && (k.builtin || inventoryMock.items.some((i) => i.kind_id === k.id))) {
-        throw new Refused(409, 'kind_in_use', "the kind's items or built-in status forbid it")
+        throw new Refused(409, 'kind_in_use', "the kind's items, child kinds or built-in status forbid it")
+      }
+      if (input.uom && input.uom !== k.uom && inventoryMock.items.some((i) => i.kind_id === k.id)) {
+        throw new Refused(409, 'kind_in_use', `the kind's items, child kinds or built-in status forbid it: ${k.id} has items; its unit stays`)
       }
       if ('parent_id' in input) k.parent_id = input.parent_id ?? null
       for (const key of ['name', 'tracking', 'uom', 'attribute_schema', 'life_basis', 'saleable'] as const) {
@@ -916,7 +919,10 @@ export const handlers = [
     answer(request, () => {
       const k = kindOf(String(p.id))
       if (!k) throw new Refused(404, 'kind_not_found', `no item kind '${String(p.id)}'`)
-      if (inventoryMock.items.some((i) => i.kind_id === k.id && !i.archived_at)) throw new Refused(409, 'kind_in_use', "the kind's items or built-in status forbid it")
+      if (inventoryMock.items.some((i) => i.kind_id === k.id && !i.archived_at)) throw new Refused(409, 'kind_in_use', "the kind's items, child kinds or built-in status forbid it")
+      if (inventoryMock.kinds.some((c) => c.parent_id === k.id && !c.archived_at)) {
+        throw new Refused(409, 'kind_in_use', `the kind's items, child kinds or built-in status forbid it: ${k.id} has child kinds; archive them first`)
+      }
       k.archived_at = now()
       return answerKind(k)
     }),
@@ -925,6 +931,8 @@ export const handlers = [
     answer(request, () => {
       const k = kindOf(String(p.id))
       if (!k) throw new Refused(404, 'kind_not_found', `no item kind '${String(p.id)}'`)
+      const parent = k.parent_id ? kindOf(k.parent_id) : undefined
+      if (parent?.archived_at) throw new Refused(409, 'kind_archived', `the item kind is archived; restore it first: ${parent.id}`)
       k.archived_at = null
       return answerKind(k)
     }),
