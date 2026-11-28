@@ -18,6 +18,7 @@ from typing import Any
 import pytest
 
 from scadbuddy.api.deps import build_state
+from scadbuddy.core.gitrepo import git_env
 from scadbuddy.core.paths import DataPaths
 from scadbuddy.core.settings import Settings
 from scadbuddy.library import url_import
@@ -163,6 +164,51 @@ def test_a_clone_that_finds_its_commit_already_there_keeps_that_checkout(
     assert second == first
     assert marker.is_file()
     assert [entry.name for entry in paths.libraries.iterdir()] == ["BOSL2"]
+
+
+@pytest.fixture
+def foreign_owner(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, upstream: tuple[str, dict[str, str]]
+) -> None:
+    """Git sees every repository as another user's, as on prod's NFS volume (#8509),
+    which writes every file as uid 1024 while the API runs as uid 10001. Only the local
+    upstream is marked safe (prod clones over https), in a global config file, since
+    git strips command-line config from the upload-pack of a local clone."""
+    url, _ = upstream
+    config = tmp_path / "gitconfig"
+    config.write_text(f"[safe]\n\tdirectory = {url.removeprefix('file://')}\n", encoding="utf-8")
+    monkeypatch.setattr(
+        "scadbuddy.library.libraries.git_env",
+        lambda: {
+            **git_env(),
+            "GIT_TEST_ASSUME_DIFFERENT_OWNER": "1",
+            "GIT_CONFIG_GLOBAL": str(config),
+        },
+    )
+
+
+@pytest.mark.usefixtures("foreign_owner")
+def test_a_checkout_another_user_owns_is_still_pinned(
+    store: LibraryStore, paths: DataPaths, upstream: tuple[str, dict[str, str]]
+) -> None:
+    _, commits = upstream
+
+    assert store.resolve("BOSL2").commit == commits["v1"]
+    assert (paths.libraries / "BOSL2" / commits["v1"] / "BOSL2" / "std.scad").is_file()
+
+
+@pytest.mark.usefixtures("foreign_owner")
+def test_a_moved_ref_another_user_owns_is_still_fetched_at_its_commit(
+    store: LibraryStore, paths: DataPaths, upstream: tuple[str, dict[str, str]]
+) -> None:
+    """The ref names v1 now, so :meth:`LibraryStore.fetch` fetches and checks out the
+    recorded commit in the clone: every git call there meets the ownership check."""
+    url, commits = upstream
+
+    store.fetch(ModelLibrary(name="BOSL2", url=url, ref="v1", commit=commits["v2"]))
+
+    checkout = paths.libraries / "BOSL2" / commits["v2"] / "BOSL2" / "std.scad"
+    assert checkout.read_text(encoding="utf-8") == V2
 
 
 def test_concurrent_clones_of_one_commit_both_succeed(
