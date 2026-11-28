@@ -104,6 +104,25 @@ func TestDevicePathOnlyTakesADeviceToken(t *testing.T) {
 	}
 }
 
+// Only an upgrade is the socket: a plain GET of the device path, even with a live device
+// token, goes on to the next handler, so a public route for the path opens nothing more.
+func TestDevicePathPlainGetGoesOn(t *testing.T) {
+	server := deviceServer(t, auth.Observe)
+	req, err := http.NewRequest("GET", server.URL+DevicePath, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	req.Header.Set("Authorization", token)
+	res, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	res.Body.Close()
+	if res.StatusCode != http.StatusNotFound {
+		t.Fatalf("a plain GET of the device path: %d, want the next handler's 404", res.StatusCode)
+	}
+}
+
 // A device token follows its own topic only: another device's, or any realtime topic, is
 // refused.
 func TestRealtimeDeviceOwnTopicOnly(t *testing.T) {

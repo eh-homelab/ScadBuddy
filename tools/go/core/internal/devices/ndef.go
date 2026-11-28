@@ -71,8 +71,8 @@ func allowedKeys(t string) (required, optional []string, ok bool) {
 	return nil, nil, false
 }
 
-// argsTooLarge is the 422 of args whose call would not fit in its device.call_requested
-// event, or the table's CHECK.
+// argsTooLarge is the 422 of args that are too large: over argsMax (checkArgs), or too large
+// for the call's device.call_requested event to fit bus.PayloadMax (bus.Fits in call).
 func argsTooLarge() error {
 	return httpx.WithReason(http.StatusUnprocessableEntity, "The call's args are too large.", "args_too_large")
 }
