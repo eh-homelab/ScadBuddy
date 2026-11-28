@@ -12,6 +12,7 @@ from __future__ import annotations
 import base64
 import binascii
 import contextvars
+import logging
 from collections.abc import Collection, Iterator, Sequence
 from contextlib import AbstractContextManager, contextmanager
 from dataclasses import dataclass, field
@@ -25,7 +26,7 @@ from psycopg import Connection, errors, sql
 from psycopg.rows import DictRow
 from psycopg.types.json import Jsonb
 from psycopg_pool import ConnectionPool
-from pydantic import TypeAdapter
+from pydantic import TypeAdapter, ValidationError
 
 from scadbuddy.bambuddy.print_links import LanArchiveLink, record_lan_start_in
 from scadbuddy.bambuddy.runs import PrintRun, lan_started_in
@@ -148,6 +149,8 @@ class RowNotOwnedError(LookupError):
         self.customer_id = customer_id
 
 
+logger = logging.getLogger(__name__)
+
 #: A run's ``result.lan``, as `OrderStore.lan_record` reads it.
 _LAN_STARTS = TypeAdapter(list[LanStarted])
 
@@ -162,6 +165,9 @@ class LanRecord:
     settled_at: datetime | None
     #: What the starts booked in the filament ledger, one per start and slot.
     uses: list[RunUse]
+    #: How the run's follow read the print end (``print_outcomes.outcome``:
+    #: ``finished``, ``failed``, ``cancelled`` or ``unknown``); ``None`` until then.
+    outcome: str | None = None
 
 
 class ArchiveCopyExistsError(ValueError):
@@ -2269,20 +2275,36 @@ class OrderStore:
     def lan_record(self, run_id: str) -> LanRecord | None:
         """ScadBuddy's own record of a LAN run (#8282): the starts its result lists
         (``print_runs.result.lan``), when its follow read the print settled
-        (``print_outcomes.settled_at``), and what its starts booked in the filament ledger
-        (`filament/prints.py` `run_uses`). None for a run with no LAN start (Bambuddy's
-        queue), or whose row is pruned."""
+        (``print_outcomes.settled_at``) and how it ended (``print_outcomes.outcome``), and
+        what its starts booked in the filament ledger (`filament/prints.py` `run_uses`).
+        None for a run with no LAN start (Bambuddy's queue), or whose row is pruned. None
+        also for a ``result.lan`` that does not parse (#8330): the error is logged, and the
+        attempt takes its facts from its archives."""
         with self._read(None) as c:
             row = c.execute(
-                "SELECT r.result -> 'lan' AS lan, o.settled_at FROM print_runs r"
+                "SELECT r.result -> 'lan' AS lan, o.settled_at, o.outcome FROM print_runs r"
                 " LEFT JOIN print_outcomes o ON o.run_id = r.id WHERE r.id = %s",
                 (run_id,),
             ).fetchone()
             if row is None or not isinstance(row["lan"], list) or not row["lan"]:
                 return None
-            starts = _LAN_STARTS.validate_python(row["lan"])
+            try:
+                starts = _LAN_STARTS.validate_python(row["lan"])
+            except ValidationError as error:
+                # Only the error count and the first location: never the payload.
+                first = error.errors(include_input=False)[0]
+                logger.warning(
+                    "the LAN starts of print run %s do not parse (%d errors; first at %s: %s)",
+                    run_id,
+                    error.error_count(),
+                    first["loc"],
+                    first["msg"],
+                )
+                return None
             uses = run_uses(c, run_id)
-        return LanRecord(starts=starts, settled_at=row["settled_at"], uses=uses)
+        return LanRecord(
+            starts=starts, settled_at=row["settled_at"], uses=uses, outcome=row["outcome"]
+        )
 
     def lan_runs(self, run_subject: str, subtask_names: list[str]) -> list[PrintRun]:
         """The subject's runs with a LAN start under one of ``subtask_names``, as
@@ -2458,6 +2480,15 @@ class OrderStore:
             (attempt_id, list(archive_ids)),
         ).fetchall()
         return [int(row["a"]) for row in rows]
+
+    def archive_copied(self, attempt_id: str) -> bool:
+        """Whether the attempt's archive facts were copied once (``archive_copied``): a
+        later `set_archive_facts` keeps its times (#5273)."""
+        with self._read(None) as c:
+            row = c.execute(
+                "SELECT archive_copied FROM order_item_fulfilments WHERE id = %s", (attempt_id,)
+            ).fetchone()
+        return row is not None and bool(row["archive_copied"])
 
     def set_archive_facts(
         self,
