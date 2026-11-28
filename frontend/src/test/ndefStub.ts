@@ -1,9 +1,11 @@
-import type { NDEFReadingEvent, NDEFRecordInit } from '../lib/webNfc'
+import type { NDEFReadingEvent, NDEFRecordInit, TagInfo } from '../lib/webNfc'
 
 /** What one tap of a tag hands the page: its serial number and its records' bytes. */
 export interface StubReading {
   serialNumber: string
   records: Array<{ recordType: string; mediaType?: string; data: Uint8Array }>
+  /** What the ScadBuddy app's polyfill adds of the tag (#8362); Chrome adds none. */
+  tag?: TagInfo
 }
 
 /**
@@ -79,6 +81,7 @@ export function installNdefStub(): NdefStub {
       for (const reader of live()) {
         const event = Object.assign(new Event('reading'), {
           serialNumber: reading.serialNumber,
+          ...(reading.tag ? { scadbuddyTag: reading.tag } : {}),
           message: {
             records: reading.records.map((record) => ({
               recordType: record.recordType,

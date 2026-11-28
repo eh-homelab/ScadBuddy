@@ -2939,10 +2939,12 @@ export const handlers = [
     const bound = bindOn(row.id, uid, tray, body.kind ?? 'other', body.override ?? false)
     return bound instanceof Response ? bound : HttpResponse.json(bound, { status: 201 })
   }),
-  http.delete(`${BASE}/tags/:id/binding`, ({ params }) => {
+  http.delete(`${BASE}/tags/:id/binding`, ({ params, request }) => {
+    const reason = new URL(request.url).searchParams.get('reason') ?? 'unbound'
+    if (reason !== 'unbound' && reason !== 'cleared') return problem(422, `no unbind reason ${reason}`)
     const binding = openBinding(String(params.id))
     if (!binding) return problem(404, `tag ${String(params.id)} is on no spool`)
-    closeBinding(binding, 'unbound')
+    closeBinding(binding, reason)
     return HttpResponse.json(binding)
   }),
   http.get(`${BASE}/spools/:id/presets`, ({ params }) =>

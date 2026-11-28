@@ -36,6 +36,23 @@ describe('NewTag (#7273)', () => {
     expect(within(region).getByText('Some fields could not be read: min_temp.')).toBeInTheDocument()
   })
 
+  it("shows every key a read OpenSpool tag holds, its unknown keys as text (#8364)", async () => {
+    const tag = '{"protocol":"openspool","version":"1.0","type":"PLA+","subtype":"Silk","color_hex":"779E7C","additional_color_hexes":["112233"],"weight":"250","diameter":"1.75","bed_min_temp":"45","bed_max_temp":"55","lot":"<img src=x onerror=alert(1)>","batch":7}'
+    const result = await postTagRead({ uid: '04:01:02:03:04:05:0a', records: [{ record_type: 'mime', media_type: 'application/json', data_hex: hex(tag) }] })
+    renderPage(<DecodedFields decoded={result.decoded!} />)
+    const region = screen.getByRole('region', { name: 'On the tag' })
+    expect(within(region).getByText('PLA+ Silk')).toBeInTheDocument()
+    expect(within(region).getByText('250 g')).toBeInTheDocument()
+    expect(within(region).getByText('1.75 mm')).toBeInTheDocument()
+    expect(within(region).getByText('45–55 °C')).toBeInTheDocument()
+    expect(within(region).getByText('#112233FF')).toBeInTheDocument()
+    const other = within(region).getByRole('region', { name: 'Other keys on the tag' })
+    expect(within(other).getByText('ScadBuddy does not use these.')).toBeInTheDocument()
+    expect(within(other).getByText('"<img src=x onerror=alert(1)>"')).toBeInTheDocument()
+    expect(within(other).getByText('7')).toBeInTheDocument()
+    expect(other.querySelector('img')).toBeNull()
+  })
+
   it('binds the spool it made when the bind failed, and makes no second spool', async () => {
     const uid = '04:01:02:03:04:05:08'
     const result = await postTagRead({ uid, records: OPENSPOOL })
