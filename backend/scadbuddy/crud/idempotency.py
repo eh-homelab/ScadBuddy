@@ -187,6 +187,11 @@ def prune(conn: Connection[DictRow], older_than: timedelta = RETENTION) -> int:
     cursor = conn.execute(
         "DELETE FROM crud_requests WHERE created_at < now() - COALESCE("
         "(SELECT (r.value #>> '{}')::interval FROM jsonb_each(%s) r WHERE r.key = caller), %s)",
-        (Jsonb({c: str(d) for c, d in RETENTION_BY_CALLER.items()}), older_than),
+        # Seconds, which any interval parser reads, not `str(timedelta)`'s "7 days, 0:00:00"
+        # (#8308).
+        (
+            Jsonb({c: f"{d.total_seconds()} seconds" for c, d in RETENTION_BY_CALLER.items()}),
+            older_than,
+        ),
     )
     return cursor.rowcount
