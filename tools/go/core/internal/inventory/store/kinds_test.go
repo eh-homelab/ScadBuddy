@@ -387,6 +387,45 @@ func TestACreateThatWaitsOnAnArchiveOfItsParentIsRefused(t *testing.T) {
 	refusal(t, <-created, 409, "kind_archived")
 }
 
+// A restore of a kind waits on an uncommitted archive of its parent, then is refused, as a
+// create is (#8503).
+func TestARestoreThatWaitsOnAnArchiveOfItsParentIsRefused(t *testing.T) {
+	pool, k := testdb.New(t), kindStore()
+	must(createKind(t, pool, k, wire.KindInput{ID: "widget", Name: "Widget", Tracking: ptr("lot")}))
+	must(createKind(t, pool, k, wire.KindInput{ID: "gizmo", Name: "Gizmo", ParentID: ptr("widget"), Tracking: ptr("lot")}))
+	must(archiveKind(t, pool, k, "gizmo"))
+	ctx := context.Background()
+	archived := make(chan struct{})
+	release := make(chan struct{})
+	done := make(chan error, 1)
+	go func() {
+		done <- Tx(ctx, pool, Actor(browser), func(tx pgx.Tx) error {
+			if _, err := k.Archive(ctx, tx, "widget"); err != nil {
+				return err
+			}
+			close(archived)
+			<-release
+			return nil
+		})
+	}()
+	<-archived
+	restored := make(chan error, 1)
+	go func() {
+		_, err := restoreKind(t, pool, k, "gizmo")
+		restored <- err
+	}()
+	select {
+	case err := <-restored:
+		t.Fatalf("the restore did not wait for the archive: %v", err)
+	case <-time.After(200 * time.Millisecond):
+	}
+	close(release)
+	if err := <-done; err != nil {
+		t.Fatal(err)
+	}
+	refusal(t, <-restored, 409, "kind_archived")
+}
+
 // A kind's unit changes only while it has no items, archived ones too (#7536): a lot
 // counted in grams is not a count of whole units.
 func TestAKindWithItemsKeepsItsUnit(t *testing.T) {
