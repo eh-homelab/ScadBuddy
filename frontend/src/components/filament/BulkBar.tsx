@@ -47,8 +47,8 @@ const listed = (numbers: number[]) => {
 
 /**
  * #6262 — what to do with the selected spools: archive, restore, delete, move, set their
- * type, edit any field or reset the used counter. Archive, Restore, Edit fields and Reset used
- * (#7149, after a confirm) are one request each (#7151),
+ * type, edit any field or reset the used counter. Archive, Restore and Edit fields are one
+ * request each (#7151); Reset used (#7149, after a confirm) is one request per 500 spools,
  * and the report says once what each did; the rest are one request per spool, in number
  * order, and the report names each spool that failed and why. Delete reads each spool
  * first and skips one that has printed (its `in_use`), naming it: the backend would
@@ -85,26 +85,39 @@ export function BulkBar({ selected, places, types, onDone, onClear }: Props) {
     }
   }
 
-  /** #7149 — one request; the grams left stay, and the used counter of each spool starts again. */
+  /**
+   * #7149 — in requests of at most 500 ids, in number order; the grams left stay, and the used
+   * counter of each spool starts again. Each request is one transaction: when one is refused, the
+   * earlier ones stand, the rest are not sent, and the report says both.
+   */
   const resetAll = async () => {
     setBusy(true)
-    try {
-      // The route takes at most 500 ids, so a larger selection goes in requests of 500.
-      const ids = ordered.map((spool) => spool.id)
-      const done = { reset: 0, not_found: [] as string[] }
-      for (let at = 0; at < ids.length; at += RESET_BATCH) {
+    const ids = ordered.map((spool) => spool.id)
+    const done = { reset: 0, not_found: [] as string[] }
+    let refused: { at: number; cause: unknown } | null = null
+    for (let at = 0; at < ids.length; at += RESET_BATCH) {
+      try {
         const part = await resetSpoolsConsumed(ids.slice(at, at + RESET_BATCH))
         done.reset += part.reset
         done.not_found.push(...part.not_found)
+      } catch (cause) {
+        refused = { at, cause }
+        break
       }
-      const notes = [`Reset the used counter of ${spools(done.reset)}.`]
-      if (done.not_found.length) notes.push(`${numbers(done.not_found)} no longer ${done.not_found.length === 1 ? 'exists' : 'exist'}.`)
-      onDone(notes.join(' '))
-    } catch (cause) {
-      onDone(`Reset no counter: ${why(cause)}.`)
-    } finally {
-      setBusy(false)
     }
+    setBusy(false)
+    if (refused && refused.at === 0) {
+      onDone(`Reset no counter: ${why(refused.cause)}.`)
+      return
+    }
+    const notes = [`Reset the used counter of ${spools(done.reset)}.`]
+    if (done.not_found.length) notes.push(`${numbers(done.not_found)} no longer ${done.not_found.length === 1 ? 'exists' : 'exist'}.`)
+    if (refused) {
+      const left = ids.slice(refused.at)
+      const named = left.length <= 10 ? numbers(left) : `The other ${spools(left.length)}`
+      notes.push(`${named} ${left.length === 1 ? 'was' : 'were'} not reset: ${why(refused.cause)}.`)
+    }
+    onDone(notes.join(' '))
   }
 
   const run = async (said: (count: string) => string, each: (spool: Spool) => Promise<'skip' | void>, skipped: (spool: Spool) => string = () => '') => {
@@ -193,7 +206,7 @@ export function BulkBar({ selected, places, types, onDone, onClear }: Props) {
       <AlertDialog open={confirmReset} onOpenChange={setConfirmReset}>
         <AlertDialogContent>
           <AlertDialogHeader>
-            <AlertDialogTitle>Reset the used counter of {spools(selected.length)}?</AlertDialogTitle>
+            <AlertDialogTitle>Reset the used counter of {spools(ordered.length)}?</AlertDialogTitle>
             <AlertDialogDescription>
               Used starts again from 0 g on each spool. The grams left, the lifetime total and the cost stay. A spool linked to Bambuddy has its consumed counter reset there too when weights sync to it.
             </AlertDialogDescription>
