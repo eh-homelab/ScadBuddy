@@ -1259,9 +1259,10 @@ USER root
 
 # The Temporal CLI's dev server backs the `requires_temporal` tests
 # (tests/support/temporal.py). Pinned by version and per-arch digest like openscad-lsp
-# above (the release's checksums.txt). ci.yml's `agent` job installs the same version
-# and amd64 digest for the agent's Temporal tests (#1055); bump them together, with
-# TEMPORAL_CLI_ASSET_ARM64 below.
+# above (the release's checksums.txt). ci.yml's `agent` and `rust` jobs and
+# go-module-ci.yml's `build-and-test` job install the same version and amd64 digest for
+# their Temporal tests (#1055, #8256); bump them together, with TEMPORAL_CLI_ASSET_ARM64
+# below.
 # When the GitHub release URL still fails after its retries, a second URL serves the
 # same tarball (#5706); the sha256 check is the same for both. For amd64 it is
 # Temporal's own download site. For arm64 it is the release asset through the REST API
