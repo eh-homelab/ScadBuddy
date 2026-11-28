@@ -3,7 +3,7 @@ name: Build App
 
 # Publishes the phone app's APK (app/, #8376) as ghcr.io/eh-homelab/scadbuddy-app:
 # a `FROM scratch` image (app/Dockerfile) with only /scadbuddy.apk and
-# /scadbuddy.apk.sha256, tagged `sha-<7>` and `latest`. GHCR only, no GitHub
+# /scadbuddy.apk.sha256, tagged `sha-<7>`, and `latest` only for a main build. GHCR only, no GitHub
 # release (the owner, 2026-11-27: "use ghcr for now"). How to get the APK out:
 # app/CLAUDE.md.
 #
@@ -67,8 +67,9 @@ jobs:
         run: dotnet test
       - name: Install the maui-android workload
         run: dotnet workload install maui-android --version 10.0.303.1
-      # A re-run keeps github.run_number, so it republishes the same version over the same
-      # `sha-<7>`: intended, the commit and its APK do not change.
+      # A re-run keeps github.run_number, so it rebuilds the same version and overwrites the
+      # same `sha-<7>` (and `latest` on main). The APK is new: the runner signs it with its own
+      # debug key (app/CLAUDE.md), so its SHA-256 and the image digest change.
       - name: Build (Release)
         env:
           RUN_NUMBER: ${{ github.run_number }}
