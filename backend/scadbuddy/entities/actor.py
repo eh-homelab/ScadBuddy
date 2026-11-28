@@ -24,6 +24,12 @@ SWEEP_ACTOR = Actor(kind="provider", principal="entities_sweep")
 
 def set_actor(conn: Conn, by: Actor) -> None:
     """Take the event log's lock, then name ``by`` as ``scadbuddy.actor`` until the
-    transaction ends. Call it in a transaction, before any row lock."""
+    transaction ends. Call it in a transaction, before any row lock.
+
+    The lock is held to commit (`hold_event_log`), so a write with properties runs one at
+    a time with every other event publisher. That is the cost of a log whose rows commit
+    in ``seq`` order, which the history subscriber's cursor needs (`core/pg_events.py`).
+    It is accepted (#8116): each such transaction is short, and the longest, a spool
+    `bulk_on` create, is capped at `BULK_MAX` spools."""
     hold_event_log(conn)
     conn.execute("SELECT set_config('scadbuddy.actor', %s, true)", (by.model_dump_json(),))

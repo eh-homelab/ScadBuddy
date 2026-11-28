@@ -24,7 +24,8 @@ type Resolution struct {
 }
 
 // Problem is one step that does not resolve to a usable handler. Missing names the
-// parameters concerned (the class keys, for special_needs).
+// parameters concerned (the class keys, for special_needs). unknown_special is a special
+// type that is not in the catalog: it has no step and no Missing.
 type Problem struct {
 	Step    Step
 	Handler string
@@ -43,6 +44,7 @@ const (
 	NotInEnum        = "not_in_enum"
 	MissingParam     = "missing_param"
 	SpecialNeeds     = "special_needs"
+	UnknownSpecial   = "unknown_special"
 	UnitNamesHandler = "unit_names_handler"
 )
 
@@ -113,11 +115,15 @@ func (c *Catalog) resolve(chain model.Chain, item, unit model.Steps, openOK bool
 
 	if special != "" {
 		sp, ok := c.Special[special]
-		if miss := unmatched(cls, sp.Needs, openOK); !ok || miss != nil {
-			problems = append(problems, Problem{Reason: SpecialNeeds, Missing: miss})
-		}
-		for step, id := range sp.Handlers {
-			res.Steps[step] = Choice{Handler: id}
+		if !ok {
+			problems = append(problems, Problem{Reason: UnknownSpecial})
+		} else {
+			if miss := unmatched(cls, sp.Needs, openOK); miss != nil {
+				problems = append(problems, Problem{Reason: SpecialNeeds, Missing: miss})
+			}
+			for step, id := range sp.Handlers {
+				res.Steps[step] = Choice{Handler: id}
+			}
 		}
 	}
 

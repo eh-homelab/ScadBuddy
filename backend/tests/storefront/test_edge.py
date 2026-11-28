@@ -17,6 +17,8 @@ import pytest
 import respx
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
+from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanExporter
+from opentelemetry.trace import SpanKind
 from pydantic import ValidationError
 
 from scadbuddy.storefront.__main__ import main
@@ -406,3 +408,73 @@ async def test_a_sigterm_ends_the_wait_for_the_areas(edge_env: None) -> None:
     assert seen == [signal.SIGTERM]
     assert served == []
     assert crud.closed
+
+
+def test_a_visitor_request_is_traced_and_its_crud_call_continues_the_trace(
+    edge_env: None, crud_mock: respx.Router, spans: InMemorySpanExporter
+) -> None:
+    """#8239: the edge sent no spans, so every storefront trace began at core's proxy.
+    Its server span is the root, and the CRUD call names it as the parent."""
+    spans.clear()
+    with TestClient(create_app(load()), client=CLIENT) as c:
+        assert c.get("/api/store/v1/listings").status_code == 200
+    server = next(
+        s
+        for s in spans.get_finished_spans()
+        if s.kind is SpanKind.SERVER
+        and (s.attributes or {}).get("http.route") == "/api/store/v1/listings"
+    )
+    assert server.parent is None
+    sent = crud_mock["listings"].calls.last.request.headers["traceparent"]
+    assert sent.split("-")[1] == format(server.context.trace_id, "032x")
+
+
+def test_a_visitors_own_trace_context_is_dropped(
+    edge_env: None, crud_mock: respx.Router, spans: InMemorySpanExporter
+) -> None:
+    """The edge faces the internet (#8239): a visitor never names or joins a trace of ours."""
+    forged = "00-" + "ab" * 16 + "-" + "cd" * 8 + "-01"
+    spans.clear()
+    with TestClient(create_app(load()), client=CLIENT) as c:
+        r = c.get(
+            "/api/store/v1/listings",
+            headers={"traceparent": forged, "tracestate": "x=1", "baggage": "user=1"},
+        )
+    assert r.status_code == 200
+    server = next(
+        s
+        for s in spans.get_finished_spans()
+        if s.kind is SpanKind.SERVER
+        and (s.attributes or {}).get("http.route") == "/api/store/v1/listings"
+    )
+    assert server.parent is None
+    assert format(server.context.trace_id, "032x") != "ab" * 16
+    sent = crud_mock["listings"].calls.last.request.headers
+    assert "ab" * 16 not in sent["traceparent"]
+    assert "baggage" not in sent and "tracestate" not in sent
+
+
+def test_a_rebuilt_edge_still_drops_a_visitors_trace_context(
+    edge_env: None, crud_mock: respx.Router, spans: InMemorySpanExporter
+) -> None:
+    """#8394: the drop wraps the stack that `FastAPIInstrumentor` builds. A second app in
+    one process, and a rebuild of the stack, must keep it outside the server span."""
+    forged = "00-" + "ab" * 16 + "-" + "cd" * 8 + "-01"
+    create_app(load())
+    app = create_app(load())
+    with TestClient(app, client=CLIENT) as c:
+        for _ in range(2):
+            spans.clear()
+            app.middleware_stack = None
+            r = c.get("/api/store/v1/listings", headers={"traceparent": forged})
+            assert r.status_code == 200
+            server = next(
+                s
+                for s in spans.get_finished_spans()
+                if s.kind is SpanKind.SERVER
+                and (s.attributes or {}).get("http.route") == "/api/store/v1/listings"
+            )
+            assert server.parent is None
+            assert format(server.context.trace_id, "032x") != "ab" * 16
+            sent = crud_mock["listings"].calls.last.request.headers
+            assert "ab" * 16 not in sent["traceparent"]

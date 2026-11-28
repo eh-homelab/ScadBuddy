@@ -19,6 +19,7 @@ import {
   ReceiptIcon,
   ScanLineIcon,
   SettingsIcon,
+  SmartphoneIcon,
   SparklesIcon,
   SpoolIcon,
   StoreIcon,
@@ -117,6 +118,8 @@ const NAV = [
   { to: '/filament', label: 'Filament', end: false, icon: SpoolIcon },
   // #7273 — the hand-held Scan mode: a tag or a label opens what it names.
   { to: '/scan', label: 'Scan', end: true, icon: ScanLineIcon },
+  // #7905 — paired phones: the ScadBuddy app as an NFC reader and writer, a code scanner and a camera.
+  { to: '/devices', label: 'Devices', end: true, icon: SmartphoneIcon },
   { to: '/inventory', label: 'Inventory', end: false, icon: PackageIcon },
   { to: '/orders', label: 'Orders', end: false, icon: ReceiptIcon },
   { to: '/storefront', label: 'Storefront', end: false, icon: StoreIcon },

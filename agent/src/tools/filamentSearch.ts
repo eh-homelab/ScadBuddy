@@ -15,7 +15,13 @@ import { ok } from './call.js'
  *   contains it, with or without its `#`.
  * - #7151: from 4 hex digits (`:` and `-` left out), a tag UID or tray UUID that holds it.
  * - A spool's or type's property values (#7026) are text fields too (a GTIN, an MPN, a lot);
- *   a key's name is not.
+ *   a key's name is not. A spool's search reads its type's property values too (#8372).
+ * - #8372: a `key:value` token (`gtin:06975337041234`, lower case, key `[a-z][a-z0-9_]{0,63}`)
+ *   also matches a property with that key whose whole value, or one item of a list, equals the
+ *   value in any case. It is not a substring match. Two values of 8 to 14 digits are equal when
+ *   they are equal padded to 14 digits (the GTIN-14 form), so an EAN-13 equals its stored GTIN-14.
+ *   A `key:value` token still matches by every plain rule on its whole text, so a tag UID
+ *   such as `a1:b2:c3:d4` is found as before.
  */
 type Spool = components['schemas']['Spool']
 type SpoolType = components['schemas']['SpoolType']
@@ -23,6 +29,12 @@ type SpoolType = components['schemas']['SpoolType']
 export interface SearchToken {
   text: string
   numberOnly: boolean
+  property?: { key: string; value: string }
+}
+
+export interface PropertyText {
+  key: string
+  text: string
 }
 
 export interface SearchDoc {
@@ -30,6 +42,8 @@ export interface SearchDoc {
   texts: readonly (string | null | undefined)[]
   hexes: readonly (string | null | undefined)[]
   tags?: readonly string[]
+  /** #7026, #8372 — its property values as text, each with its key. */
+  properties?: readonly PropertyText[]
 }
 
 export function parseSearch(query: string | null | undefined): SearchToken[] {
@@ -37,15 +51,31 @@ export function parseSearch(query: string | null | undefined): SearchToken[] {
     .toLowerCase()
     .split(/\s+/)
     .filter((raw) => raw !== '' && raw !== '#')
-    .map((raw) => ({ text: raw.replace(/^#/, ''), numberOnly: /^#\d{1,5}$/.test(raw) }))
+    .map((raw) => {
+      const text = raw.replace(/^#/, '')
+      const found = /^([a-z][a-z0-9_]{0,63}):(.+)$/.exec(text)
+      return { text, numberOnly: /^#\d{1,5}$/.test(raw), ...(found && { property: { key: found[1]!, value: found[2]! } }) }
+    })
 }
 
 const isNumber = (text: string, number: number | null | undefined) => number != null && /^\d+$/.test(text) && Number(text) === number
+
+const isGtinLength = (text: string) => /^\d{8,14}$/.test(text)
+
+/** A stored value equals the token's: in any case, or as GTIN-14 when both are 8 to 14 digits. */
+function equalsValue(text: string, value: string): boolean {
+  const stored = text.trim().toLowerCase()
+  return stored === value || (isGtinLength(stored) && isGtinLength(value) && stored.padStart(14, '0') === value.padStart(14, '0'))
+}
 
 function matchesToken(doc: SearchDoc, token: SearchToken): boolean {
   if (isNumber(token.text, doc.number)) return true
   if (token.numberOnly) return false
   if (doc.texts.some((text) => text?.toLowerCase().includes(token.text))) return true
+  const properties = doc.properties ?? []
+  if (properties.some((property) => property.text.toLowerCase().includes(token.text))) return true
+  const wanted = token.property
+  if (wanted && properties.some((property) => property.key === wanted.key && equalsValue(property.text, wanted.value))) return true
   if (token.text.length >= 3 && /^[0-9a-f]+$/.test(token.text) && doc.hexes.some((hex) => hex?.toLowerCase().replace(/^#/, '').includes(token.text))) return true
   // #7151: a tag key as a reader prints it, `04:A1:B2` or `04-a1-b2`, is the same hex.
   const key = token.text.replace(/[:-]/g, '')
@@ -63,20 +93,24 @@ export interface SpoolExtras {
   /** #7151 — its open tag's UID and tray UUID. */
   tags?: readonly string[]
   /** The spool's property values as text (`propertyTexts`). */
-  properties?: readonly string[]
+  properties?: readonly PropertyText[]
+  /** #8372 — its type's property values as text (`propertyTexts`). */
+  typeProperties?: readonly PropertyText[]
 }
 
 /** What else a type is searched by: its property values as text (`propertyTexts`). */
 export interface TypeExtras {
-  properties?: readonly string[]
+  properties?: readonly PropertyText[]
 }
 
 /**
- * An entity's property values as search text: a string as it is, each list item, a number as text.
- * A boolean is left out: "true" would match every entity with any yes/no property.
+ * An entity's property values as search text, each with its key: a string as it is, each list item,
+ * a number as text. A boolean is left out: "true" would match every entity with any yes/no property.
  */
-export function propertyTexts(values: Readonly<Record<string, string | number | boolean | readonly string[]>> | undefined): string[] {
-  return Object.values(values ?? {}).flatMap((value) => (Array.isArray(value) ? value : typeof value === 'boolean' ? [] : [String(value)]))
+export function propertyTexts(values: Readonly<Record<string, string | number | boolean | readonly string[]>> | undefined): PropertyText[] {
+  return Object.entries(values ?? {}).flatMap(([key, value]) =>
+    (Array.isArray(value) ? value : typeof value === 'boolean' ? [] : [String(value)]).map((text: string) => ({ key, text })),
+  )
 }
 
 export function spoolSearchDoc(spool: Spool, extras: SpoolExtras = {}): SearchDoc {
@@ -92,18 +126,19 @@ export function spoolSearchDoc(spool: Spool, extras: SpoolExtras = {}): SearchDo
       extras.typeCode,
       extras.tray,
       ...(extras.skus ?? []),
-      ...(extras.properties ?? []),
     ],
     hexes: [spool.effective?.rgba ?? spool.rgba],
     tags: extras.tags ?? [],
+    properties: [...(extras.properties ?? []), ...(extras.typeProperties ?? [])],
   }
 }
 
 export function typeSearchDoc(type: SpoolType, names: ReadonlyMap<string, string>, skus: readonly string[] = [], extras: TypeExtras = {}): SearchDoc {
   const name = (id: string | null | undefined) => (id ? names.get(id) : null)
   return {
-    texts: [type.code, name(type.brand_id), name(type.material_id), name(type.subtype_id), type.colour_name, ...skus, ...(extras.properties ?? [])],
+    texts: [type.code, name(type.brand_id), name(type.material_id), name(type.subtype_id), type.colour_name, ...skus],
     hexes: [type.rgba],
+    properties: extras.properties ?? [],
   }
 }
 
@@ -118,7 +153,7 @@ export const SEARCH_ROUTES = [
  * #7026: each `kind` entity's property values as search text, by its id (the read keys each
  * entity by its ref within the kind, the spool's or type's id), for those that have properties.
  */
-export async function kindPropertyTexts(backend: BackendClient, kind: 'spool' | 'spool_type'): Promise<Map<string, string[]>> {
+export async function kindPropertyTexts(backend: BackendClient, kind: 'spool' | 'spool_type'): Promise<Map<string, PropertyText[]>> {
   const { properties } = await ok(backend.GET('/api/v1/entity-kinds/{kind}/properties', { params: { path: { kind } } }), `read the ${kind} properties`)
   return new Map(Object.entries(properties).map(([id, values]) => [id, propertyTexts(values)]))
 }

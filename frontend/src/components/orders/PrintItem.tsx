@@ -4,7 +4,8 @@ import type { Order, OrderItemDetail, Output, PartSettingsMap, PrintRunRequest, 
 import { orderItemSource } from '../../lib/printSource'
 import { PrintPicker } from '../PrintPicker'
 import { quoteToPrint } from './price'
-import { isKit, offersPrint } from './itemActions'
+import { isKit, offersPrint, rendersToPrint } from './itemActions'
+import type { SliceQuoteRun } from './useSliceQuotes'
 import { Button } from '@/components/ui/button'
 
 /** #4673 — what a print refused because its setup differs from the quote's
@@ -70,18 +71,49 @@ function offersTestPrint(order: Order, item: OrderItemDetail): boolean {
  * the item becomes `queued` and then follows the print, which the order's own refresh
  * shows. A refusal (`requote_needed`, a print run's own) stays in the dialog.
  * With `testRevision` (#5280) it is the test print of that revision instead: one copy,
- * offered before the order is accepted, which counts for nothing.
+ * offered before the order is accepted, which counts for nothing. #8481 — an item with a
+ * design and no output (a storefront item) is rendered first, in the same press
+ * (`renderFirst`): the price section shows the render's run, and the dialog opens by itself
+ * on the new output.
  */
-export function PrintItem({ order, item, onChanged, testRevision }: { order: Order; item: OrderItemDetail; onChanged: () => void; testRevision?: Revision }) {
+export function PrintItem({
+  order,
+  item,
+  onChanged,
+  testRevision,
+  renderFirst,
+}: {
+  order: Order
+  item: OrderItemDetail
+  onChanged: () => void
+  testRevision?: Revision
+  /** #8481 — the page's render of an item with a design and no output (`useSliceQuotes`
+   * `render`, #6324), and its run: Print… renders it first, then opens the dialog on the
+   * new output. Without it such an item offers no Print…. */
+  renderFirst?: { run?: SliceQuoteRun; start: () => Promise<boolean> }
+}) {
   const [open, setOpen] = useState(false)
-  if (!(testRevision ? offersTestPrint(order, item) : offersPrint(order, item)) || !orderItemSource(item)) return null
+  const source = orderItemSource(item)
+  const renders = !testRevision && source === null && rendersToPrint(item) && renderFirst !== undefined
+  if (!(testRevision ? offersTestPrint(order, item) : offersPrint(order, item)) || !(source || renders)) return null
   if (!testRevision && isKit(item)) return <KitPrints item={item} onChanged={onChanged} />
+  // One render at a time: the press is held while one runs; after a failed one it is offered again.
+  const rendering = renders && renderFirst.run !== undefined && !renderFirst.run.error
+  function begin() {
+    if (source) setOpen(true)
+    else if (renders && !rendering) {
+      void renderFirst.start().then(
+        (rendered) => setOpen(rendered),
+        () => setOpen(false),
+      )
+    }
+  }
   return (
     <>
-      <Button variant="outline" onClick={() => setOpen(true)} data-testid={testRevision ? 'test-print-item' : 'print-item'}>
+      <Button variant="outline" disabled={rendering} onClick={begin} data-testid={testRevision ? 'test-print-item' : 'print-item'}>
         {testRevision ? 'Test print' : item.status === 'failed' ? 'Print again…' : 'Print…'}
       </Button>
-      {open && <ItemPrintDialog order={order} item={item} testRevision={testRevision} onClose={() => setOpen(false)} onChanged={onChanged} />}
+      {open && source && <ItemPrintDialog order={order} item={item} testRevision={testRevision} onClose={() => setOpen(false)} onChanged={onChanged} />}
     </>
   )
 }

@@ -68,4 +68,29 @@ public class DeepLinkTests
 		Assert.Contains("They differ", other);
 		Assert.Contains("https://mine.example", other);
 	}
+
+	[Theory]
+	[InlineData("scadbuddy:spool:0a1B2c3D-4e5f-6a7b-8c9d-0e1f2a3b4c5d", "0a1b2c3d-4e5f-6a7b-8c9d-0e1f2a3b4c5d")]
+	public void ASpoolLabelGivesItsSpool(string link, string spool) => Assert.Equal(spool, DeepLink.SpoolOf(new Uri(link)));
+
+	[Theory]
+	[InlineData("scadbuddy:spool:not-a-uuid")]
+	[InlineData("scadbuddy:spool:0a1b2c3d-4e5f-6a7b-8c9d-0e1f2a3b4c5d';alert(1)//")]
+	[InlineData("scadbuddy:spool:0a1b2c3d-4e5f-6a7b-8c9d-0e1f2a3b4c5d/x")]
+	[InlineData("scadbuddy://pair?url=x")]
+	[InlineData("https://sb.example/spool:0a1b2c3d-4e5f-6a7b-8c9d-0e1f2a3b4c5d")]
+	public void OtherLinksNameNoSpool(string link) => Assert.Null(DeepLink.SpoolOf(new Uri(link)));
+
+	[Fact]
+	public void ASpoolLabelIsNoPairing() =>
+		Assert.Null(Target("scadbuddy:spool:0a1b2c3d-4e5f-6a7b-8c9d-0e1f2a3b4c5d"));
+
+	[Fact]
+	public void TheSpoolScriptOpensTheCodePageElseTheSpool()
+	{
+		var script = DeepLink.OpenSpoolScript("0a1b2c3d-4e5f-6a7b-8c9d-0e1f2a3b4c5d");
+		Assert.Contains("'/api/v1/filament/spools/'+id", script);
+		Assert.Contains("'/x/S-'+s.number", script);
+		Assert.Contains("'/filament/spools/'+id", script);
+	}
 }

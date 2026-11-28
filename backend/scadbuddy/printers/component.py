@@ -10,7 +10,8 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from collections.abc import Awaitable, Callable
+from collections.abc import AsyncIterator, Awaitable, Callable
+from contextlib import asynccontextmanager
 from typing import Annotated
 
 from fastapi import Depends
@@ -23,6 +24,7 @@ from scadbuddy.core.components import Component, Components, Core, Key
 from scadbuddy.core.events import PrinterEvent, emit
 from scadbuddy.core.secrets import Kek
 from scadbuddy.library.settings_store import settings_kek
+from scadbuddy.orders import stock_start
 from scadbuddy.printers.address import lan_address
 from scadbuddy.printers.command_data import PrinterCommandData
 from scadbuddy.printers.lan import LanPrinter, fetch_cert_sha256
@@ -152,10 +154,22 @@ PRINTERS: Key[Printers] = Key("printers")
 
 
 def _build(core: Core, components: Components) -> Printers:
-    return Printers(core, components.get(ROWS).pool)
+    printers = Printers(core, components.get(ROWS).pool)
+    # #6949 K1 Task 16: a merge whose gone printer stock rows name is `MergePrinter`.
+    printers._store.merges = stock_start.make_starter(core, components)
+    return printers
 
 
-COMPONENT = Component(PRINTERS, build=_build)
+@asynccontextmanager
+async def _run(printers: Printers) -> AsyncIterator[None]:
+    merges = printers._store.merges
+    if merges is not None:
+        # The merges start on this loop, from the routes' threads.
+        merges.bind(asyncio.get_running_loop())
+    yield
+
+
+COMPONENT = Component(PRINTERS, build=_build, run=_run)
 
 PrintersDep = Annotated[Printers, component_dep(PRINTERS)]
 

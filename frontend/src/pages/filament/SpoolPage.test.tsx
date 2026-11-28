@@ -969,6 +969,16 @@ describe("the spool page's Advanced toggle", () => {
       expect(entityMock.properties.get(`spool:${made.id}`)?.map((p) => [p.key, p.value])).toEqual([['lot_number', 'L-7']])
     })
 
+    // #8227 (spec §6.3b): the panel lists only the keys the form does not show.
+    it('lists in the Properties panel only the keys the form does not show (#8227)', async () => {
+      seedEntityProperties(`spool:${spoolId(1)}`, { lot_number: 'L-1', shelf_note: 'top' })
+      open(1)
+      const panel = await screen.findByRole('region', { name: 'Properties' })
+      expect(await within(panel).findByText('shelf_note')).toBeVisible()
+      expect(within(panel).queryByText('lot_number')).not.toBeInTheDocument()
+      expect(await screen.findByLabelText('lot_number')).toHaveValue('L-1')
+    })
+
     it('an edit sends a changed defined property with its PATCH', async () => {
       const patches = recorded('PATCH', new RegExp(`/filament/spools/${spoolId(1)}$`))
       const { user } = open(1)

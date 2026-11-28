@@ -1,11 +1,13 @@
 import { CopyIcon, NfcIcon } from 'lucide-react'
 import { useCallback, useEffect, useId, useRef, useState, useSyncExternalStore } from 'react'
+import { createPortal } from 'react-dom'
 import { useNavigate } from 'react-router'
 import { ApiError } from '../../api/client'
 import { postTagRead, type TagReadResult } from '../../api/filament'
+import { UseMyPhone } from '../../components/devices/UseMyPhone'
 import { BambuFields, type BambuTag } from '../../components/filament/scan/BambuFields'
 import { CodeCard } from '../../components/filament/scan/CodeCard'
-import { KnownTag } from '../../components/filament/scan/KnownTag'
+import { KnownTag, TagChipLine } from '../../components/filament/scan/KnownTag'
 import { NfcJobBanner } from '../../components/filament/scan/NfcJobBanner'
 import { DecodedFields, NewTag } from '../../components/filament/scan/NewTag'
 import type { HeldPhotos } from '../../components/filament/scan/PhotoButtons'
@@ -14,7 +16,7 @@ import { ScanCode } from '../../components/filament/scan/ScanCode'
 import { filamentLinks } from '../../lib/filamentLinks'
 import { codeLabel, codeTarget } from '../../lib/resolvedCode'
 import { takeMifare } from '../../lib/nativeMifare'
-import { NfcSession, nfcSupport, type Reading, type WireRecord } from '../../lib/webNfc'
+import { chipFields, NfcSession, nfcSupport, type Reading, type TagInfo, type WireRecord } from '../../lib/webNfc'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
 import { Switch } from '@/components/ui/switch'
@@ -28,6 +30,8 @@ interface Entry {
   records: WireRecord[]
   result: TagReadResult
   held: HeldPhotos
+  /** The tag's chip and capacity, when the ScadBuddy app read them (#8362). */
+  tag?: TagInfo
 }
 
 const timeOf = (at: Date) => at.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' })
@@ -77,16 +81,27 @@ function scanRefusal(cause: unknown): string {
  */
 export function ScanPage() {
   const [support] = useState(nfcSupport)
+  // The scan toggle sits in the title row, which stays at the top, so it never covers the reads.
+  const [toggleSlot, setToggleSlot] = useState<HTMLElement | null>(null)
+  // The shell's <main> clips overflow, so the page scrolls itself, as every page does; the sticky
+  // title row sticks to the top of this pane.
   return (
-    <div className="mx-auto flex min-h-full w-full max-w-md min-w-0 flex-col gap-5 px-4 pt-4 text-[13px]">
-      <div className="flex flex-col gap-1">
+    <div data-testid="scan-page" className="h-full overflow-y-auto">
+    <div className="mx-auto flex min-h-full w-full max-w-md min-w-0 flex-col gap-5 px-4 pt-4 pb-[max(1rem,env(safe-area-inset-bottom))] text-[13px]">
+      {/* A child of the page column itself, so it stays at the top for the whole page. */}
+      <div className="sticky top-0 z-10 -mx-4 -mb-4 flex min-h-11 items-center justify-between gap-3 bg-background/95 px-4 py-1.5 backdrop-blur supports-[backdrop-filter]:bg-background/80">
         <h1 className="text-lg font-semibold tracking-tight">Scan</h1>
+        <div ref={setToggleSlot} data-testid="scan-toggle-slot" className="flex items-center" />
+      </div>
+      <div className="flex flex-col gap-1">
         <p className="text-muted-foreground">Hold a tag or a label to the phone: a spool's tag, a place's tag, or a label with a code such as L-12 or S-142.</p>
+        <UseMyPhone />
       </div>
       <ScanCameraProvider>
         <ScanCode />
-        {support === 'ok' ? <Scanner /> : <Unsupported embedded={support === 'embedded'} />}
+        {support === 'ok' ? <Scanner toggleSlot={toggleSlot} /> : <Unsupported embedded={support === 'embedded'} />}
       </ScanCameraProvider>
+    </div>
     </div>
   )
 }
@@ -138,7 +153,7 @@ function Unsupported({ embedded }: { embedded: boolean }) {
 const forTag = (entries: Entry[], uid: string, change: Partial<Entry>) => entries.map((one) => (one.uid === uid ? { ...one, ...change } : one))
 
 /** Screens 1 to 3. */
-function Scanner() {
+function Scanner({ toggleSlot }: { toggleSlot: HTMLElement | null }) {
   const [session] = useState(() => new NfcSession())
   // The scan may be started here, by an agent job's Arm or by a write: the button follows the session.
   const scanning = useSyncExternalStore(
@@ -178,7 +193,7 @@ function Scanner() {
       // still finds the tag by its UID and records, as before. Any other refusal is the answer:
       // core may have recorded the read, so a second post would record the tap twice.
       const mifare = takeMifare(reading.uid)
-      const plain = { uid: reading.uid || null, tag_type: null, records: reading.records }
+      const plain = { uid: reading.uid || null, tag_type: null, records: reading.records, ...chipFields(reading.tag) }
       const read = mifare
         ? postTagRead({ ...mifare, records: [] }).catch((cause: unknown) => {
             if (cause instanceof ApiError && ((cause.status === 422 && (cause.problem.code === 'mifare_unreadable' || cause.problem.code === 'mifare_invalid')) || (cause.status === 503 && cause.problem.code === 'mifare_needs_core'))) return postTagRead(plain)
@@ -189,7 +204,7 @@ function Scanner() {
         (result) => {
           if (!alive || navigated) return
           const key = (nextKey.current += 1)
-          setEntries((now) => [{ key, at: new Date(), uid: reading.uid, records: reading.records, result, held: {} }, ...now])
+          setEntries((now) => [{ key, at: new Date(), uid: reading.uid, records: reading.records, result, held: {}, ...(reading.tag ? { tag: reading.tag } : {}) }, ...now])
           setOpenKey(key)
           setError(null)
           // The read's number makes each announcement new: a live region says nothing when its text stays the same.
@@ -336,23 +351,26 @@ function Scanner() {
           </ul>
         )}
       </section>
-      <div className="sticky bottom-0 mt-auto -mx-4 bg-gradient-to-t from-background from-70% to-transparent px-4 pt-6 pb-[max(1rem,env(safe-area-inset-bottom))]">
-        <button
-          type="button"
-          disabled={starting}
-          onClick={() => void start()}
-          className={cn(
-            'relative flex h-16 w-full items-center justify-center gap-3 rounded-2xl text-base font-semibold transition-colors focus-visible:outline-3 focus-visible:outline-offset-2 focus-visible:outline-ring',
-            scanning ? 'border-2 border-primary bg-primary/10 text-foreground' : 'bg-primary text-primary-foreground hover:bg-primary/90',
-          )}
-        >
-          <span className="relative flex size-6 items-center justify-center" aria-hidden="true">
-            {scanning && <span className="absolute inset-0 rounded-full bg-primary/40 motion-safe:animate-ping" />}
-            <NfcIcon className="relative size-6" />
-          </span>
-          {scanning ? 'Scanning — hold a tag to the phone' : 'Scan'}
-        </button>
-      </div>
+      {toggleSlot &&
+        createPortal(
+          <button
+            type="button"
+            disabled={starting}
+            onClick={() => void start()}
+            aria-label={scanning ? 'Scanning — hold a tag to the phone' : 'Scan'}
+            className={cn(
+              'inline-flex h-9 items-center gap-2 rounded-full px-3.5 text-[13px] font-semibold transition-colors focus-visible:outline-3 focus-visible:outline-offset-2 focus-visible:outline-ring disabled:opacity-60',
+              scanning ? 'border border-primary/60 bg-primary/10 text-foreground' : 'bg-primary text-primary-foreground hover:bg-primary/90',
+            )}
+          >
+            <span className="relative flex size-4 items-center justify-center" aria-hidden="true">
+              {scanning && <span className="absolute inset-0 rounded-full bg-primary/40 motion-safe:animate-ping" />}
+              <NfcIcon className="relative size-4" />
+            </span>
+            {scanning ? 'Scanning' : 'Scan'}
+          </button>,
+          toggleSlot,
+        )}
     </>
   )
 }
@@ -379,6 +397,7 @@ function ReadView({
       <KnownTag
         spool={result.spool}
         tag={result.tag}
+        tagInfo={entry.tag}
         session={session}
         held={entry.held}
         onHeld={(held) => onChange({ held })}
@@ -393,6 +412,8 @@ function ReadView({
   }
   if (result.next === 'bind_or_create') {
     return (
+      <>
+      <TagChipLine info={entry.tag} />
       <NewTag
         uid={entry.uid}
         records={entry.records}
@@ -401,6 +422,7 @@ function ReadView({
         onHeld={(held) => onChange({ held })}
         onBound={onResult}
       />
+      </>
     )
   }
   return (

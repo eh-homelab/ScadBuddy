@@ -98,6 +98,7 @@ from scadbuddy.orders.lifecycle import (
     stale_attempt,
 )
 from scadbuddy.orders.models import (
+    Actor,
     Approval,
     ArchiveCopyMedia,
     Attachment,
@@ -152,7 +153,7 @@ from scadbuddy.orders.quote import (
     subject_of,
 )
 from scadbuddy.orders.reference import ReferenceError, TemplateDeletedError, resolve_reference
-from scadbuddy.orders.rendering import JobReads, kit_count, kit_output_id, kit_output_ids
+from scadbuddy.orders.rendering import JobReads, kit_count, kit_output_ids, later_output_id
 from scadbuddy.orders.report import (
     DEFAULT_DAYS,
     ProfitReport,
@@ -165,6 +166,7 @@ from scadbuddy.orders.served_library import ServedLibrary
 from scadbuddy.orders.spool_import import density_for, inventory_groups
 from scadbuddy.orders.spool_import import fill_densities as fill_densities_in
 from scadbuddy.orders.spool_import import import_spools as import_spools_into
+from scadbuddy.orders.stock_start import WorkflowAccepted, accepted_response
 from scadbuddy.orders.store import (
     UNSET,
     FilamentExistsError,
@@ -593,9 +595,10 @@ def _kit_outputs(
     if item.reference is None or item.output_id is None:
         return [], 0
     first = item.output_id
+    key = item.reference.render_key
     try:
-        if outputs.existing([kit_output_id(first, 1)]):
-            kit = kit_output_ids(outputs, first)
+        if outputs.existing([later_output_id(key)(first, 1)]):
+            kit = kit_output_ids(outputs, first, key)
         else:
             kit = [first]
         return kit, kit_count(outputs, jobs, first, len(kit))
@@ -2710,7 +2713,10 @@ async def render_item(
     the operation's error. Refused before anything runs: 404 for an unknown order or
     item, 409 ``order_not_submitted`` (a storefront cart), ``item_library_file``,
     ``item_custom``, ``item_has_no_design``, ``order_not_open`` and ``item_not_open``,
-    as the slice quote refuses them."""
+    as the slice quote refuses them. #8481: an item to print (an accepted order, the item
+    `approved` or `failed` with an accepted quote) renders too; its accepted quote stays.
+    An item with no output whose storefront slice saved its render
+    (``storefront_output_id`` of its render key) takes that output, with no render."""
     check_path(order_id, item_id)
     result = await run_operation(
         ops,
@@ -3308,6 +3314,32 @@ async def copy_archive_media(
     return operation_answer(result, Attachment)
 
 
+_STOCK_ACCEPTED = {
+    "model": WorkflowAccepted,
+    "description": (
+        "The change moves stock (#6949 K1): its workflow still runs after 15 s. It "
+        "finishes by itself; `order_item.changed` on the order's stream brings the item "
+        "once its `parts_settling` is empty. Sent again, the same request attaches to it."
+    ),
+}
+_STOCK_UNAVAILABLE = {
+    "description": "`inventory_unavailable`: Temporal did not answer; nothing was changed."
+}
+
+
+def _scoped(by: Actor, key: str | None) -> str | None:
+    """The request's ``Idempotency-Key`` scoped to who sent it, so two people's keys never
+    meet; None when it has none."""
+    return None if key is None else f"{by.kind}:{by.principal or ''}:{key}"
+
+
+def _stock_answer[T](answer: T | WorkflowAccepted) -> T | JSONResponse:
+    """A stock change's answer, or 202 with its workflow while it still runs."""
+    if isinstance(answer, WorkflowAccepted):
+        return accepted_response(answer)
+    return answer
+
+
 _PARTS_TOO_LARGE = (
     "`bad_quantity` when the item's parts (from the inventory lots, #7067) are more than "
     "one stock move holds: a count past 2,147,483,647, or a count times its lot's cost "
@@ -3327,15 +3359,26 @@ _PARTS_TOO_LARGE = (
         "#5350): it printed an earlier design. A fulfilled item takes its parts from the "
         "inventory lots: 409 " + _PARTS_TOO_LARGE + "."
     ),
-    responses={409: {"description": "A refusal; among them " + _PARTS_TOO_LARGE + "."}},
+    responses={
+        202: _STOCK_ACCEPTED,
+        409: {"description": "A refusal; among them " + _PARTS_TOO_LARGE + "."},
+        503: _STOCK_UNAVAILABLE,
+    },
 )
 async def accept_fulfilment(
-    order_id: str, item_id: str, fulfilment_id: str, orders: OrdersDep
-) -> Fulfilment:
+    order_id: str,
+    item_id: str,
+    fulfilment_id: str,
+    orders: OrdersDep,
+    idempotency_key: IdempotencyKey = None,
+) -> Fulfilment | JSONResponse:
     check_path(order_id, item_id, fulfilment_id)
     by = current_actor()
-    return await _run(
-        lambda: orders.lifecycle.accept_fulfilment(order_id, item_id, fulfilment_id, by)
+    # The workflow's id is the item key (`Lifecycle._parts_key`), so the header changes
+    # nothing here: the same accept sent again attaches to its run.
+    del idempotency_key
+    return _stock_answer(
+        await _run(lambda: orders.lifecycle.accept_fulfilment(order_id, item_id, fulfilment_id, by))
     )
 
 
@@ -3362,12 +3405,24 @@ class FulfilBody(BaseModel):
         "twice; 404 for an item not the order's. A fulfilled item takes its parts from the "
         "inventory lots: 409 " + _PARTS_TOO_LARGE + ". The attempts, in the body's order."
     ),
-    responses={409: {"description": "A refusal; among them " + _PARTS_TOO_LARGE + "."}},
+    responses={
+        202: _STOCK_ACCEPTED,
+        409: {"description": "A refusal; among them " + _PARTS_TOO_LARGE + "."},
+        503: _STOCK_UNAVAILABLE,
+    },
 )
-async def fulfil_items(order_id: str, body: FulfilBody, orders: OrdersDep) -> list[Fulfilment]:
+async def fulfil_items(
+    order_id: str, body: FulfilBody, orders: OrdersDep, idempotency_key: IdempotencyKey = None
+) -> list[Fulfilment] | JSONResponse:
     check_path(order_id)
     by = current_actor()
-    return await _run(lambda: orders.lifecycle.fulfil_items(order_id, body.items, by))
+    return _stock_answer(
+        await _run(
+            lambda: orders.lifecycle.fulfil_items(
+                order_id, body.items, by, request_key=_scoped(by, idempotency_key)
+            )
+        )
+    )
 
 
 @router.post(
@@ -3381,22 +3436,37 @@ async def fulfil_items(order_id: str, body: FulfilBody, orders: OrdersDep) -> li
         "`order_item_shipped` (a shipment carries it: its `shipments` name them), "
         "`order_on_hold`, `order_closed`/`order_cancelled`, and "
         "`unfulfil_disabled` while the stored setting `orders_allow_unfulfil` is off. The "
-        "item's parts go back to the lots they came from at their use's cost; 409 "
-        "`bad_quantity` when a lot cannot hold them."
+        "item's parts go back to the lots they came from at their use's cost, through "
+        "scadbuddy-core (#6949 K1); a give-back it refuses is recorded on the order as "
+        "`parts.stock_refused`."
     ),
-    responses={409: {"description": "A refusal; among them `bad_quantity` (a give-back)."}},
+    responses={
+        202: _STOCK_ACCEPTED,
+        409: {
+            "description": "A refusal: `item_not_fulfilled`, `order_item_shipped`, "
+            "`order_on_hold`, `order_closed`/`order_cancelled`, `unfulfil_disabled`, or "
+            "`order_item_changed` (it changed while its stock workflow started)."
+        },
+        503: _STOCK_UNAVAILABLE,
+    },
 )
 async def unfulfil_item(
-    order_id: str, item_id: str, orders: OrdersDep, settings: SettingsStoreDep
-) -> OrderItem:
+    order_id: str,
+    item_id: str,
+    orders: OrdersDep,
+    settings: SettingsStoreDep,
+    idempotency_key: IdempotencyKey = None,
+) -> OrderItem | JSONResponse:
     check_path(order_id, item_id)
     by = current_actor()
+    # The workflow's id is the item key, as for an accept.
+    del idempotency_key
 
-    def unfulfil() -> OrderItem:
+    def unfulfil() -> OrderItem | WorkflowAccepted:
         allowed = settings.snapshot().runtime.orders_allow_unfulfil
         return orders.lifecycle.unfulfil_item(order_id, item_id, by, allowed=allowed)
 
-    return await _run(unfulfil)
+    return _stock_answer(await _run(unfulfil))
 
 
 # -- shipments (§6.3) --------------------------------------------------------------------------

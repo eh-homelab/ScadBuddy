@@ -22,7 +22,8 @@ agent ``reconnected``, so what had no row in the log (the other channels, the ag
 **Replay.** Each logged event (every one the backend publishes is in the ``events`` log,
 `core/pg_events.py`) goes out with its event id as the frame's ``id``, and the ``ready`` frame
 carries the newest logged id, or :data:`START` for an empty log. The kinds the agent NOTIFYs
-itself and the log never holds (:data:`NOTIFY_ONLY`: ``session.*``, ``ai_operation.changed``),
+itself and the log never holds (:data:`NOTIFY_ONLY`: ``session.*``, ``ai_operation.changed``,
+``inventory_operation.changed``),
 and a payload the bus cannot decode, go out with no ``id``, so the agent's place stays on a
 logged event. A reconnect
 sends the last one as ``Last-Event-ID``; the stream subscribes first, then replays the log after
@@ -70,6 +71,7 @@ from scadbuddy.core.events import (
     PG_CHANNEL,
     AgentOperationEvent,
     AnyEvent,
+    InventoryOperationEvent,
     SessionBusEvent,
     encode_event,
 )
@@ -88,9 +90,10 @@ CHANNELS: Final = (
     "scadbuddy_warm_evict",
     "scadbuddy_settings",
 )
-#: The bus's kinds that only the agent NOTIFYs, never in the ``events`` log: their frames carry
-#: no ``id``, since a ``Last-Event-ID`` naming one could not be placed (a resync).
-NOTIFY_ONLY: Final = (SessionBusEvent, AgentOperationEvent)
+#: The bus's kinds that only the agent (or scadbuddy-core, for ``inventory_operation.changed``)
+#: NOTIFYs, never in the ``events`` log: their frames carry no ``id``, since a
+#: ``Last-Event-ID`` naming one could not be placed (a resync).
+NOTIFY_ONLY: Final = (SessionBusEvent, AgentOperationEvent, InventoryOperationEvent)
 #: The stream's place before the first logged event: replay from the log's start.
 START: Final = "0"
 #: An event's id as `core/events.py` makes it (32 hex digits), or one a newer build might: a

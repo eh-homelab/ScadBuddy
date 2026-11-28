@@ -469,7 +469,7 @@ export const entityTools = [
     name: 'entity_property_history',
     label: "Read an entity's property history",
     description:
-      "Each set and remove of an entity's properties, newest first: `key`, `op` (`set` or `remove`), `old`, `new`, `source`, `at` " +
+      "Each set and remove of an entity's properties, newest first: `event_seq` (the change's place in the event log), `key`, `op` (`set` or `remove`), `old`, `new`, `source`, `at` " +
       'and `actor`. Give `key` for one key, and `limit` (1 to 500, 100 when left out) for fewer. The history stays after the entity goes. ' +
       'A print archive has none (422 `unknown_entity_kind`).',
     input: z.object({ entity, key: z.string().regex(PROPERTY_KEY).optional(), limit: z.number().int().min(1).max(500).optional() }),

@@ -40,6 +40,11 @@ describe('openapi coverage', () => {
     expect([...allowlisted].filter((op) => !known.has(op))).toEqual([])
   })
 
+  it('lists no /api/v1/parts alias route (R-K1-17)', () => {
+    const aliases = (op: string) => /^\w+ \/api\/v1\/parts(\/\{part_id\}(\/.*)?)?$/.test(op)
+    expect([...allowlisted, ...pending, ...byTool.keys()].filter(aliases)).toEqual([])
+  })
+
   it('does not both allowlist and map an operation', () => {
     expect([...allowlisted].filter((op) => byTool.has(op) || pending.has(op))).toEqual([])
     expect([...pending].filter((op) => byTool.has(op))).toEqual([])

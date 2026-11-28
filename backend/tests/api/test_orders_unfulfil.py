@@ -68,6 +68,9 @@ def test_an_item_with_one_attempt_goes_back_to_approved(client: TestClient) -> N
         "fulfilment_id": accepted["id"],
         "attempt": 1,
         "to": "approved",
+        # #6949 K1 Task 16: the stock workflow that wrote it, and its Go calls (no parts).
+        "workflow": f"order_item:{item_id}:parts:1:return",
+        "stock": [],
     }
     assert undo["by"]["kind"] == "browser"
     # Accepted again, it is fulfilled again.

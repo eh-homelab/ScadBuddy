@@ -11,12 +11,18 @@ const ON_HOLD = 'The order is on hold. Release it first.'
  * first, in the same Slice… press (#6324). */
 export const NO_SLICE_SOURCE = 'Nothing to slice yet: add a design to this item first.'
 
+/** #8481 — whether Print… renders the item first: a design with no output yet (a storefront
+ * item), rendered at its reference's commit and inputs (`POST …/render`, #6324). */
+export function rendersToPrint(item: Pick<OrderItemDetail, 'kind' | 'output_id' | 'reference' | 'library_file'>): boolean {
+  return item.kind !== 'custom' && !item.library_file && item.reference !== null && !item.output_id
+}
+
 /** Whether the item can be printed now: a model or library file item of an accepted order
  * not on hold, `approved` (or `failed`, for a reprint), with the output (or the library
- * file) its quote was made from. */
+ * file) its quote was made from, or a design that Print… renders first (#8481). */
 export function offersPrint(order: Order, item: OrderItemDetail): boolean {
   return (
-    orderItemSource(item) !== null &&
+    (orderItemSource(item) !== null || rendersToPrint(item)) &&
     IN_PRODUCTION.has(order.status) &&
     !order.on_hold &&
     (item.status === 'approved' || item.status === 'failed') &&

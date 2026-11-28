@@ -1098,6 +1098,19 @@ A replica makes its build current once, when it first connects, not each time it
 worker restarts, so a replica of an older build that restarts its worker late in a
 rollout does not take the deployment back from a newer one.
 
+**A migration the old build cannot run beside.** With `RollingUpdate`, old replicas keep
+serving after the new build's migrations commit, until they stop. Two K1 changes (#6949)
+had such a window (#8256):
+
+- The property history's trigger (`20261126T0308Z_property_history_events.sql`) refuses a
+  property remove with no `scadbuddy.actor`. An old replica never sets it, so its orphan
+  sweep and property removes fail with "a property remove needs scadbuddy.actor".
+- After the K1 inventory migrations, Go core writes the stock. An old replica still runs
+  phase 2's Python stock writes until it stops.
+
+Both windows end with the roll. A later migration of this kind says so in its PR. If the
+window is not acceptable, roll the API with `Recreate` for that change.
+
 **Rolling back to an image from before #4090** stops the `library` queue. Unversioned
 workers get no tasks while `scadbuddy-library` has a current version, and the old
 image never clears it. Before the old pods start, run
@@ -2197,8 +2210,10 @@ The `slicer` task queue's worker (spec
 `docs/superpowers/specs/2026-10-16-own-store-slicer-rust-workers-design.md` §7) runs on
 `ghcr.io/eh-homelab/scadbuddy-slicer` (the Dockerfile's `--target slicer`, published
 by the `slicer` job in `build-image.yml` with the same tags). It is the Rust worker
-`scadbuddy-slicer` with the Bambu Studio CLI v02.08.02.61, pinned by the AppImage's
-sha256 (`BAMBU_STUDIO_VERSION` in the image), and runs as a Deployment of its own.
+`scadbuddy-slicer` with the Bambu Studio CLI, pinned by version and the AppImage's
+sha256 (`BAMBU_STUDIO_VERSION` in the image), and runs as a Deployment of its own. The
+weekly `bambu-studio-bump.yml` opens a PR that moves the pin when Bambu Studio publishes
+a newer stable release (#8325); it is never auto-merged.
 
 - Its whole configuration is six variables: `SCADBUDDY_TEMPORAL_ADDRESS` (required),
   `SCADBUDDY_TEMPORAL_NAMESPACE` (default `default`),

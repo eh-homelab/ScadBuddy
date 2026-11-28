@@ -31,6 +31,16 @@ describe('the tag mocks (#7273)', () => {
     expect(tag.last_seen_source).toBe('agent')
   })
 
+  it("keeps a read's chip on the tag, and tag-records warn when the tag is too small (#8366)", async () => {
+    const read = await postTagRead({ uid: '04:0d:0d:0d', tag_type: null, records: [], chip: 'NTAG213', max_ndef_bytes: 40, writable: true })
+    expect(read.tag).toMatchObject({ chip: 'NTAG213', max_ndef_bytes: 40, writable: true })
+    const again = await postTagRead({ uid: '04:0d:0d:0d', tag_type: null, records: [] })
+    expect(again.tag).toMatchObject({ chip: 'NTAG213', max_ndef_bytes: 40 })
+    const { backup_id } = await createTagBackup({ uid: '04:0d:0d:0d', records: [], reason: 'spool_write' })
+    const out = await spoolTagRecords(spoolId(3), { uid: '04:0d:0d:0d', records: [], backup_id })
+    expect((out.warnings ?? []).some((one) => one.includes('this NTAG213 holds 40'))).toBe(true)
+  })
+
   // The hand-held Scan mode (#6955): `tag_codes.resolve_records` over the seed's places and spools.
   const hex = (text: string) => Array.from(new TextEncoder().encode(text), (byte) => byte.toString(16).padStart(2, '0')).join('')
   const url = (href: string) => ({ record_type: 'url', data_hex: hex(href) })
@@ -96,6 +106,27 @@ describe('the tag mocks (#7273)', () => {
     const { backup_id } = await createTagBackup({ uid: UID, records: [], reason: 'spool_write' })
     vi.setSystemTime(Date.now() + 10 * 60 * 1000 + 1000)
     expect(await codeOf(spoolTagRecords(spoolId(1), { uid: UID, records: [], backup_id }))).toEqual({ status: 409, code: 'backup_mismatch' })
+  })
+
+  // #8364: `_openspool_encode` writes the extended keys after the published 7, in a fixed order.
+  it("writes the spool's extended OpenSpool keys after the published ones, and reads them back", async () => {
+    const { backup_id } = await createTagBackup({ uid: UID, records: [], reason: 'spool_write' })
+    const { records } = await spoolTagRecords(spoolId(1), { uid: UID, records: [], backup_id })
+    const json = new TextDecoder().decode(Uint8Array.from(records[0]!.data_hex.match(/../g)!, (byte) => parseInt(byte, 16)))
+    const keys = Object.keys(JSON.parse(json) as object)
+    const order = ['protocol', 'version', 'type', 'color_hex', 'brand', 'min_temp', 'max_temp', 'subtype', 'bed_min_temp', 'bed_max_temp', 'alpha', 'additional_color_hexes', 'weight', 'diameter']
+    expect(keys).toEqual(order.filter((key) => keys.includes(key)))
+    const spool = await getSpool(spoolId(1))
+    if (spool.effective?.label_weight_g != null) expect(keys).toContain('weight')
+    if (spool.effective?.diameter_mm != null) expect(keys).toContain('diameter')
+    const read = await postTagRead({ uid: '04:0d:0d:0d:0d:0d:0d', tag_type: null, records })
+    expect(read.decoded).toMatchObject({ format: 'openspool', label_weight_g: spool.effective?.label_weight_g ?? null })
+  })
+
+  it('reads an OpenSpool tag\'s unknown keys as their JSON text', async () => {
+    const tag = { protocol: 'openspool', version: '1.0', type: 'PLA', weight: '1000', diameter: '1.75', lot: 7, note: '<b>hi</b>' }
+    const read = await postTagRead({ uid: '04:0e:0e:0e:0e:0e:0e', tag_type: null, records: [{ record_type: 'mime', media_type: 'application/json', data_hex: hex(JSON.stringify(tag)) }] })
+    expect(read.decoded).toMatchObject({ label_weight_g: 1000, diameter_mm: '1.75', other_keys: { lot: '7', note: '"<b>hi</b>"' } })
   })
 
   it("gives a checked write the format's origin and the write's time", async () => {

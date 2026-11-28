@@ -167,6 +167,7 @@ def test_the_inputs_are_sealed_in_the_runs_history(client: TestClient, settings:
     assert secret not in asyncio.run(history())
 
 
+@pytest.mark.usefixtures("waits_before_8062")
 def test_a_reset_runs_again_with_the_runs_own_inputs(client: TestClient, pg_conninfo: str) -> None:
     definition = register(
         client,

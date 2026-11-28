@@ -2,15 +2,17 @@ import { act, screen, waitFor, within } from '@testing-library/react'
 import { http, HttpResponse } from 'msw'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { api } from '../../api/client'
+import { listTypes, upsertType, type SpoolTypeCreate } from '../../api/filament'
+import { inventoryApi } from '../inventory/api'
 import type * as embed from '../../lib/embed'
 import { downloadBlob } from '../../lib/embed'
 import { LABEL_TEMPLATES } from '../../mocks/features/filament'
-import { L } from '../../mocks/features/filament/seed'
+import { B, L, M } from '../../mocks/features/filament/seed'
 import { server } from '../../mocks/server'
 import { choose } from '../../test/select'
 import { renderPage } from '../../test/utils'
 import { printTiming } from '../../components/filament/labelSheet'
-import { LabelsPage } from './LabelsPage'
+import { LabelsPage, READ_AT_ONCE } from './LabelsPage'
 
 // Loads the file the way the real one does; saving it is lib/embed's own test.
 const saved: Blob[] = []
@@ -243,7 +245,7 @@ describe('the label template (#7157)', () => {
     await user.click(screen.getByRole('button', { name: 'Download' }))
     await waitFor(() => expect(saved).toHaveLength(1))
     expect(savedName()).toBe('labels.pdf')
-    expect(body).toEqual({ spool_ids: ['a', 'b'], location_ids: [], template: { template: 'box_40x30' }, layout: 'roll', format: 'pdf', dpi: 300, fields: ['number', 'material', 'colour', 'brand', 'qr'] })
+    expect(body).toEqual({ spool_ids: ['a', 'b'], location_ids: [], type_ids: [], item_ids: [], kind_ids: [], template: { template: 'box_40x30' }, layout: 'roll', format: 'pdf', dpi: 300, fields: ['number', 'material', 'colour', 'brand', 'qr'] })
   })
 
   it('says why the PDF was refused', async () => {
@@ -285,7 +287,7 @@ describe('the label template (#7157)', () => {
     await waitFor(() => expect(screen.getAllByTestId('label')).toHaveLength(1))
     const button = screen.getByRole('button', { name: 'Download' })
     expect(button).toBeDisabled()
-    expect(button).toHaveAccessibleDescription('A download of place labels needs a label address. Set one in Settings, or an https public URL.')
+    expect(button).toHaveAccessibleDescription('A download of code labels needs a label address. Set one in Settings, or an https public URL.')
     unmount()
     // The same for the printers' places, when `printerLabels` answers no address.
     server.use(http.post('*/api/v1/filament/printer-labels', () => HttpResponse.json({ base_url: null, labels: [{ location_id: 'x', code: 'L-12', name: 'H2C', depth: 0 }], no_report: [] })))
@@ -298,6 +300,182 @@ describe('the label template (#7157)', () => {
     renderPage(<LabelsPage />, { route: '/filament/labels?ids=a' })
     await waitFor(() => expect(screen.getByRole('button', { name: 'Download' })).toBeEnabled())
     expect(screen.queryByText(/needs a label address/)).toBeNull()
+  })
+})
+
+describe('spool type, item and kind labels (#7169)', () => {
+  const serveTypes = () =>
+    server.use(
+      http.get('*/api/v1/filament/types/:id', ({ params }) =>
+        params.id === 'b'
+          ? HttpResponse.json({ type: 'about:blank', title: 'Not Found', status: 404, detail: 'no type b' }, { status: 404 })
+          : HttpResponse.json({ id: String(params.id), number: 4, code: '10101', colour_name: 'Charcoal' }),
+      ),
+    )
+  const captureDownload = () => {
+    const bodies: Record<string, unknown>[] = []
+    server.use(
+      http.post('*/api/v1/filament/labels', async ({ request }) => {
+        bodies.push((await request.json()) as Record<string, unknown>)
+        return new HttpResponse(new Blob(['%PDF-1.4'], { type: 'application/pdf' }), { headers: { 'Content-Type': 'application/pdf' } })
+      }),
+    )
+    return bodies
+  }
+
+  it('draws a spool type label from ?types=', async () => {
+    serveTypes()
+    const bodies = captureDownload()
+    const { user } = renderPage(<LabelsPage />, { route: '/filament/labels?types=a' })
+    expect(screen.getByRole('heading', { name: 'Spool type labels' })).toBeInTheDocument()
+    await waitFor(() => expect(screen.getAllByTestId('label')).toHaveLength(1))
+    expect(screen.getByTestId('label')).toHaveTextContent('T-4')
+    expect(screen.getByTestId('label')).toHaveTextContent('10101 Charcoal')
+    expect(screen.getByRole('link', { name: /Types/ })).toHaveAttribute('href', '/filament/types')
+    await waitFor(() => expect(screen.getByRole('button', { name: 'Download' })).toBeEnabled())
+    await user.click(screen.getByRole('button', { name: 'Download' }))
+    await waitFor(() => expect(bodies).toHaveLength(1))
+    expect(bodies[0]).toMatchObject({ type_ids: ['a'], spool_ids: [], location_ids: [], item_ids: [], kind_ids: [] })
+  })
+
+  it('draws item and kind labels from ?items= and ?kinds=', async () => {
+    server.use(
+      http.get('*/api/v1/inventory/items/:id', ({ params }) => HttpResponse.json({ id: String(params.id), number: 9, code: 'I-9', name: 'M3 nut' })),
+      http.get('*/api/v1/inventory/kinds', () => HttpResponse.json({ kinds: [{ id: 'hardware', number: 3, code: 'K-3', name: 'Hardware' }] })),
+    )
+    const bodies = captureDownload()
+    const items = renderPage(<LabelsPage />, { route: '/filament/labels?items=x' })
+    expect(screen.getByRole('heading', { name: 'Item labels' })).toBeInTheDocument()
+    await waitFor(() => expect(screen.getAllByTestId('label')).toHaveLength(1))
+    expect(screen.getByTestId('label')).toHaveTextContent('I-9')
+    expect(screen.getByTestId('label')).toHaveTextContent('M3 nut')
+    expect(screen.getByRole('link', { name: /Inventory/ })).toHaveAttribute('href', '/inventory')
+    await waitFor(() => expect(screen.getByRole('button', { name: 'Download' })).toBeEnabled())
+    await items.user.click(screen.getByRole('button', { name: 'Download' }))
+    await waitFor(() => expect(bodies).toHaveLength(1))
+    expect(bodies[0]).toMatchObject({ item_ids: ['x'], kind_ids: [], type_ids: [] })
+    items.unmount()
+
+    const { user } = renderPage(<LabelsPage />, { route: '/filament/labels?kinds=hardware' })
+    expect(screen.getByRole('heading', { name: 'Kind labels' })).toBeInTheDocument()
+    await waitFor(() => expect(screen.getAllByTestId('label')).toHaveLength(1))
+    expect(screen.getByTestId('label')).toHaveTextContent('K-3')
+    expect(screen.getByRole('link', { name: /Kinds/ })).toHaveAttribute('href', '/inventory/kinds')
+    await waitFor(() => expect(screen.getByRole('button', { name: 'Download' })).toBeEnabled())
+    await user.click(screen.getByRole('button', { name: 'Download' }))
+    await waitFor(() => expect(bodies).toHaveLength(2))
+    expect(bodies[1]).toMatchObject({ kind_ids: ['hardware'], item_ids: [], type_ids: [] })
+  })
+
+  it('numbers a new type and a new item one past the highest of both, and the mock label shows it', async () => {
+    const types = (await listTypes({ includeArchived: true })).map((type) => type.number)
+    const items = (await inventoryApi.items({ archived: true })).map((item) => item.number)
+    const made = await upsertType({ code: 'NEW-PLA-RED', material_id: M.PLA, brand_id: B.BAMBU, rgba: '#ff0000ff', label_weight_g: 1000 } as SpoolTypeCreate)
+    expect(made.number).toBe(Math.max(...types, ...items) + 1)
+    const first = await inventoryApi.createItem({ kind_id: 'hardware', name: 'M3 nut' })
+    const second = await inventoryApi.createItem({ kind_id: 'hardware', name: 'M3 bolt' })
+    expect(first.number).toBe(made.number + 1)
+    expect(second.number).toBe(first.number + 1)
+    renderPage(<LabelsPage />, { route: `/filament/labels?types=${made.id}` })
+    await waitFor(() => expect(screen.getAllByTestId('label')).toHaveLength(1))
+    expect(screen.getByTestId('label')).toHaveTextContent(`T-${made.number}`)
+  })
+
+  it('names a type that could not be read and draws the rest', async () => {
+    serveTypes()
+    renderPage(<LabelsPage />, { route: '/filament/labels?types=a,b' })
+    await waitFor(() => expect(screen.getAllByTestId('label')).toHaveLength(1))
+    expect(screen.getByText(/The label of b could not be read/)).toBeInTheDocument()
+  })
+
+  const serveKinds = () =>
+    server.use(http.get('*/api/v1/inventory/kinds', () => HttpResponse.json({ kinds: [{ id: 'hardware', number: 3, code: 'K-3', name: 'Hardware' }] })))
+  const serveItems = () =>
+    server.use(
+      http.get('*/api/v1/inventory/items/:id', ({ params }) =>
+        params.id === 'bad'
+          ? HttpResponse.json({ type: 'about:blank', title: 'Not Found', status: 404, detail: 'no item bad' }, { status: 404 })
+          : HttpResponse.json({ id: String(params.id), number: 9, code: 'I-9', name: 'M3 nut' }),
+      ),
+    )
+
+  it('names an item that could not be read and draws the rest', async () => {
+    serveItems()
+    renderPage(<LabelsPage />, { route: '/filament/labels?items=x,bad' })
+    await waitFor(() => expect(screen.getAllByTestId('label')).toHaveLength(1))
+    expect(screen.getByText(/The label of bad could not be read/)).toBeInTheDocument()
+  })
+
+  it('names a kind that is not in the list and draws the rest', async () => {
+    serveKinds()
+    renderPage(<LabelsPage />, { route: '/filament/labels?kinds=hardware,gone' })
+    await waitFor(() => expect(screen.getAllByTestId('label')).toHaveLength(1))
+    expect(screen.getByText(/The label of gone could not be read/)).toBeInTheDocument()
+  })
+
+  it('names each kind as unreadable when the kinds list fails, and draws the other subjects', async () => {
+    serveTypes()
+    server.use(http.get('*/api/v1/inventory/kinds', () => HttpResponse.json({ type: 'about:blank', title: 'Server Error', status: 500 }, { status: 500 })))
+    renderPage(<LabelsPage />, { route: '/filament/labels?types=a&kinds=hardware,gone' })
+    await waitFor(() => expect(screen.getAllByTestId('label')).toHaveLength(1))
+    expect(screen.getByTestId('label')).toHaveTextContent('T-4')
+    expect(screen.getByText(/The labels of hardware, gone could not be read/)).toBeInTheDocument()
+  })
+
+  it('draws types and items together and sends both id lists', async () => {
+    serveTypes()
+    serveItems()
+    const bodies = captureDownload()
+    const { user } = renderPage(<LabelsPage />, { route: '/filament/labels?types=a&items=x' })
+    await waitFor(() => expect(screen.getAllByTestId('label')).toHaveLength(2))
+    expect(screen.getAllByTestId('label')[0]).toHaveTextContent('T-4')
+    expect(screen.getAllByTestId('label')[1]).toHaveTextContent('I-9')
+    await waitFor(() => expect(screen.getByRole('button', { name: 'Download' })).toBeEnabled())
+    await user.click(screen.getByRole('button', { name: 'Download' }))
+    await waitFor(() => expect(bodies).toHaveLength(1))
+    expect(bodies[0]).toMatchObject({ type_ids: ['a'], item_ids: ['x'], kind_ids: [], location_ids: [] })
+  })
+
+  it('keeps at most READ_AT_ONCE reads open across places, types and items together', async () => {
+    const held: (() => void)[] = []
+    let open = 0
+    let most = 0
+    const hold = async (body: Record<string, unknown>) => {
+      open += 1
+      most = Math.max(most, open)
+      await new Promise<void>((release) => held.push(release))
+      open -= 1
+      return HttpResponse.json(body)
+    }
+    server.use(
+      http.get('*/api/v1/filament/locations/:id', ({ params }) => hold({ id: String(params.id), number: 1, code: `L-${String(params.id)}`, name: 'Shelf' })),
+      http.get('*/api/v1/filament/types/:id', ({ params }) => hold({ id: String(params.id), number: 4, code: '10101', colour_name: 'Charcoal' })),
+      http.get('*/api/v1/inventory/items/:id', ({ params }) => hold({ id: String(params.id), number: 9, code: 'I-9', name: 'M3 nut' })),
+    )
+    const ids = (prefix: string) => Array.from({ length: 10 }, (_, at) => `${prefix}${at}`).join(',')
+    renderPage(<LabelsPage />, { route: `/filament/labels?locations=${ids('l')}&types=${ids('t')}&items=${ids('i')}` })
+    let answered = 0
+    while (answered < 30) {
+      // Wait until the pool is full (or holds the rest), so the count does not hang on the runner's speed.
+      await waitFor(() => expect(held.length).toBe(Math.min(READ_AT_ONCE, 30 - answered)))
+      const now = held.splice(0)
+      answered += now.length
+      now.forEach((release) => release())
+    }
+    await waitFor(() => expect(screen.getAllByTestId('label')).toHaveLength(30))
+    expect(most).toBe(READ_AT_ONCE)
+  })
+
+  it('says a type label needs the label address, as the place labels do', async () => {
+    serveTypes()
+    server.use(
+      http.get('*/api/v1/settings', () => HttpResponse.json({ filament_label_template: { template: 'roll_50x25', width_mm: null, height_mm: null }, filament_label_base_url: null, public_url: null })),
+    )
+    renderPage(<LabelsPage />, { route: '/filament/labels?types=a' })
+    await waitFor(() => expect(screen.getAllByTestId('label')).toHaveLength(1))
+    const button = screen.getByRole('button', { name: 'Download' })
+    expect(button).toBeDisabled()
+    expect(button).toHaveAccessibleDescription('A download of code labels needs a label address. Set one in Settings, or an https public URL.')
   })
 })
 
@@ -539,7 +717,7 @@ describe('the label output (#7216)', () => {
     expect(screen.getByTestId('label').querySelector('svg')).not.toBeNull()
     expect(screen.getByTestId('label')).toHaveTextContent(/^L-/)
     expect(screen.queryByRole('checkbox')).toBeNull()
-    expect(screen.getByText('A place label prints its code, its name and its QR code.')).toBeInTheDocument()
+    expect(screen.getByText('A code label prints its code, its name and its QR code.')).toBeInTheDocument()
   })
 
   it('hides the dpi for PDF', async () => {

@@ -1,0 +1,6 @@
+{
+  "metadata": {
+    "encoding": "json/plain"
+  },
+  "data": "{\"key\":\"browser:p1:k1\",\"actor\":{\"kind\":\"browser\",\"principal\":\"p1\",\"session\":null,\"run_id\":null},\"params\":{\"item_id\":\"00000000-0000-4000-8000-000000000001\"},\"body\":{\"qty\":\"2.5\",\"lot_id\":\"00000000-0000-4000-8000-000000000002\",\"reason\":\"fit a hotend\"}}"
+}

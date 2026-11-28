@@ -2,15 +2,24 @@
 
 from __future__ import annotations
 
+import json
 import threading
 from datetime import timedelta
+from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
 
 import pytest
 
 from scadbuddy.core.problems import ApiError
-from scadbuddy.crud.idempotency import Replay, idempotent, idempotent_write, prune, record
+from scadbuddy.crud.idempotency import (
+    RETENTION_BY_CALLER,
+    Replay,
+    idempotent,
+    idempotent_write,
+    prune,
+    record,
+)
 from scadbuddy.main import _prune_crud_requests
 from tests.conftest import PgPool
 
@@ -97,6 +106,24 @@ def test_the_prune_drops_rows_past_the_retention_only(pool: PgPool) -> None:
     assert keys == ["new"]
 
 
+def test_prune_reads_a_retention_of_fractional_seconds(
+    pool: PgPool, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#8477: a retention is sent as a JSON number of seconds, fractions too."""
+    monkeypatch.setitem(RETENTION_BY_CALLER, "inventory", timedelta(seconds=90.5))
+    with pool.connection() as conn:
+        for key, age in (("kept", "90 seconds"), ("gone", "91 seconds")):
+            conn.execute(
+                "INSERT INTO crud_requests"
+                " (caller, key, route, body_sha256, status, body, created_at)"
+                " VALUES ('inventory', %s, %s, 'h', 200, '{}', now() - %s::interval)",
+                (key, ROUTE, age),
+            )
+        assert prune(conn) == 1
+        keys = [r["key"] for r in conn.execute("SELECT key FROM crud_requests").fetchall()]
+    assert keys == ["kept"]
+
+
 def test_prune_keeps_inventory_keys_seven_days(pool: PgPool) -> None:
     with pool.connection() as conn:
         for caller, key, age in (
@@ -181,3 +208,16 @@ def test_a_second_request_with_the_key_waits_for_the_first(pool: PgPool, commit:
     with pool.connection() as conn:
         assert _count(conn) == 1
         assert _count(conn, "crud_requests") == 1
+
+
+GO_RETENTION = (
+    Path(__file__).resolve().parents[3]
+    / "tools/go/core/internal/inventory/store/testdata/retention.json"
+)
+
+
+def test_the_inventory_retention_is_gos() -> None:
+    """Go's operations prune keeps a row a day past this retention (`requestRetention`,
+    whose test reads the same file), so the two cannot drift (#8448)."""
+    seconds = json.loads(GO_RETENTION.read_text())["inventory_request_retention_seconds"]
+    assert RETENTION_BY_CALLER["inventory"] == timedelta(seconds=seconds)

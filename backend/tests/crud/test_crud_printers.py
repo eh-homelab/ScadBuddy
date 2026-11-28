@@ -45,12 +45,15 @@ from scadbuddy.crud.print import (
     RemoteReports,
 )
 from scadbuddy.crud.wire import CRUD_HEADERS, NOT_CONFIGURED
+from scadbuddy.entities.actor import set_actor
 from scadbuddy.library.settings_store import SettingsStore
 from scadbuddy.orders.machine_rate import CostProfile, MachineRateInputs, MachineRateStore
+from scadbuddy.orders.models import Actor
 from scadbuddy.printers import run_hours
 from scadbuddy.printers.models import BambuddyView, LanLink, PrinterCreate
 from scadbuddy.printers.reports import Advance, PrintEnd, PrinterReportStore
 from scadbuddy.printers.store import (
+    BAMBUDDY_ACTOR,
     KekMissingError,
     NoAccessCodeError,
     PrinterNotFoundError,
@@ -120,17 +123,19 @@ def test_every_report_method_is_remote() -> None:
 
 def test_the_worker_store_overrides_every_method_that_merges_rows() -> None:
     """A row merge moves another service's rows (#4625): each PrinterStore method that
-    merges is the API's, so the worker's store overrides it."""
+    merges is the API's, so the worker's store overrides it. Since #6949 K1 Task 16 a
+    merge goes through `_link` and `_ensure_tx` (the merge whose stock moves first, through
+    `MergePrinter`), and `merge_commit` is its workflow's step."""
     merging = {
         name
         for name, method in inspect.getmembers(PrinterStore, inspect.isfunction)
         if not name.startswith("_")
-        and (
-            "self._merge(" in inspect.getsource(method)
-            or "self._ensure_locked(" in inspect.getsource(method)
+        and any(
+            call in inspect.getsource(method)
+            for call in ("self._merge(", "self._ensure_locked(", "self._link(", "self._ensure_tx(")
         )
     }
-    assert merging >= {"ensure_bambuddy_written", "link_bambuddy"}
+    assert merging >= {"ensure_bambuddy_written", "link_bambuddy", "merge_commit"}
     assert merging <= set(vars(RemotePrinterStore))
 
 
@@ -341,6 +346,44 @@ def test_the_workers_merge_runs_on_the_api(store: SettingsStore, printers: Print
         )
         assert again.id == mine.id and not wrote
         assert _rows(store, "printers") == before
+
+
+@pytest.mark.requires_postgres
+def test_the_workers_merge_names_bambuddy_as_an_in_process_merge_does(
+    store: SettingsStore, printers: PrinterStore
+) -> None:
+    """#8190, #8423: the merge was credited to `print` through the route and to `bambuddy`
+    in process, so the history's actor hung on where the worker ran. A real merge through
+    the route publishes each key it moves with `bambuddy` as the actor."""
+    gone = printers.ensure_bambuddy(4, serial=None, name="H2C", model="H2C", by=MERGED_BY)
+    mine = printers.create(PrinterCreate(serial=SERIAL, name="Mine"))
+    person = Jsonb(Actor(kind="browser").model_dump(mode="json"))
+    with store.pool.connection() as conn:
+        for printer, key in ((gone.id, "nozzle_note"), (mine.id, "bed_note")):
+            with conn.transaction():
+                set_actor(conn, Actor(kind="browser"))
+                conn.execute(
+                    "WITH e AS (INSERT INTO entities (kind, ref) VALUES ('printer', %s)"
+                    " RETURNING id) INSERT INTO entity_properties"
+                    " (entity_id, key, value, updated_by) SELECT id, %s, '1', %s FROM e",
+                    (printer, key, person),
+                )
+        row = conn.execute("SELECT coalesce(max(seq), 0) AS seq FROM events").fetchone()
+        assert row is not None
+        mark = row["seq"]
+    with threaded_print_crud(store, printers=printers) as client:
+        merged, written = RemotePrinterStore(client).ensure_bambuddy_written(
+            4, serial=SERIAL, name="H2C", model="H2C", listed={4}, by=MERGED_BY
+        )
+    assert merged.id == mine.id and written
+    with store.pool.connection() as conn:
+        events = conn.execute(
+            "SELECT payload FROM events WHERE kind = 'entity_property.changed' AND seq > %s",
+            (mark,),
+        ).fetchall()
+    moved = {(e["payload"]["op"], e["payload"]["key"]) for e in events}
+    assert moved == {("set", "nozzle_note"), ("remove", "nozzle_note")}
+    assert [Actor.model_validate(e["payload"]["actor"]) for e in events] == [BAMBUDDY_ACTOR] * 2
 
 
 @pytest.mark.requires_postgres

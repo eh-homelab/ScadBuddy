@@ -488,6 +488,14 @@ describe('the filament mocks', () => {
     })
   })
 
+  it('resolves a T- code to the type code and colour name, as the server does (#7169)', async () => {
+    const body = { code: 'NEW-PLA-RED', colour_name: 'Red', material_id: M.PLA, brand_id: B.BAMBU, rgba: '#ff0000ff', label_weight_g: 1000 } as SpoolTypeCreate
+    const made = await upsertType(body)
+    expect(await request<{ name: string }>(`/codes/T-${made.number}`)).toMatchObject({ kind: 'spool_type', name: 'NEW-PLA-RED Red' })
+    const bare = await upsertType({ ...body, code: 'NEW-PLA-BARE', colour_name: null })
+    expect(await request<{ name: string }>(`/codes/T-${bare.number}`)).toMatchObject({ name: 'NEW-PLA-BARE' })
+  })
+
   it('adds a priced type with its price book row, and refuses a bad one', async () => {
     const body = { code: 'BL-PLA-BASIC-CYAN', material_id: M.PLA, brand_id: B.BAMBU, rgba: '#0086d680', label_weight_g: 1000, cost_per_kg: '18.5' } as SpoolTypeCreate
     const made = await upsertType(body)
@@ -513,6 +521,23 @@ describe('the filament mocks', () => {
       status: 422,
       detail: 'nozzle_temp_min is above nozzle_temp_max',
     })
+  })
+
+  // #8228, `types.py` `create_on`: a name is the other way to give a catalog id; a missing row is added with the type, and goes with a refused one.
+  it('takes catalog names on a type create, as the server does', async () => {
+    const body = { code: 'ZED-WAX-RED', material_name: 'p.l.a', brand_name: 'Zed', subtype_name: 'Glossy', rgba: '#FF0000', label_weight_g: 1000 } as SpoolTypeCreate
+    const made = await upsertType(body)
+    expect(made.material_id).toBe(M.PLA)
+    const brands = await listCatalog('brands')
+    expect(brands.find((row) => row.id === made.brand_id)?.name).toBe('Zed')
+    expect((await listCatalog('subtypes')).find((row) => row.id === made.subtype_id)).toMatchObject({ name: 'Glossy', material_id: M.PLA })
+    expect(await refusal(upsertType({ ...body, brand_name: 'Nadir' }))).toMatchObject({ status: 409 })
+    expect((await listCatalog('brands')).map((row) => row.name)).not.toContain('Nadir')
+    expect((await upsertType({ ...body, code: 'ZED-2', brand_name: 'zed' })).brand_id).toBe(made.brand_id)
+    expect((await listCatalog('brands')).length).toBe(brands.length)
+    expect(await refusal(upsertType({ ...body, code: 'X', brand_id: B.BAMBU }))).toMatchObject({ status: 422, detail: expect.stringContaining('brand_id or brand_name, not both') })
+    expect(await refusal(upsertType({ code: 'X', rgba: '#FF0000', label_weight_g: 1000 } as SpoolTypeCreate))).toMatchObject({ status: 422, detail: expect.stringContaining('material_id or material_name') })
+    expect(await refusal(upsertType({ brand_name: 'Zed' } as never, made.id))).toMatchObject({ status: 422, detail: expect.stringContaining('Extra inputs are not permitted') })
   })
 
   it("compares a type's code in any case, as `filament_spool_types_code` does", async () => {

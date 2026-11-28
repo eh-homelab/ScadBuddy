@@ -236,7 +236,8 @@ export const handlers = [
       .filter((r) => !sp.has('parent') || r.parent_id === sp.get('parent'))
       .filter((r) => !since || at(r) >= Date.parse(since))
       .filter((r) => !until || at(r) <= Date.parse(until))
-      .filter((r) => !q || `${r.title} ${r.subject}`.toLowerCase().includes(q))
+      // #6949 K1: or the row's exact source id, as the backend's `q` matches it.
+      .filter((r) => !q || `${r.title} ${r.subject}`.toLowerCase().includes(q) || r.source_id === sp.get('q')?.trim())
       .filter((r) => facetFilters.every(([name, value]) => String(r.facets?.[name]) === value))
       .sort((a, b) => at(b) - at(a) || b.id.localeCompare(a.id))
     // Keyset: everything after the cursor's (created_at, id), newest first.

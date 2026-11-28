@@ -22,6 +22,12 @@ from scadbuddy.operations.kinds import OperationKind
 if TYPE_CHECKING:
     from scadbuddy.api.deps import AppState
 
+#: The run attempts of ``asset_upload`` and ``asset_fetch`` (#8471). Every attempt writes
+#: the same asset: its id is its bytes' sha256, `AssetStore.put` upserts by it, and the
+#: mirror's blob is keyed by it too. A store, database or source briefly away is tried
+#: again.
+RUN_ATTEMPTS = 3
+
 
 def asset_kinds(state: AppState) -> list[OperationKind]:
     """The asset kinds, bound to this process's state; ``library/operations.py``
@@ -67,6 +73,7 @@ def asset_kinds(state: AppState) -> list[OperationKind]:
             name,
             answered_as_routes(check),
             answered_as_routes(run),
+            run_attempts=RUN_ATTEMPTS,
             queue="library",
             where="the template's uploaded files",
         )

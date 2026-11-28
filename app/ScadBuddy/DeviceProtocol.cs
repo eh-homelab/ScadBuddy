@@ -204,8 +204,23 @@ public static class DeviceProtocol
 		["tech"] = tech,
 		["blocks"] = new JsonArray(blocks.Where(b => !IsTrailer(b.Index)).OrderBy(b => b.Index)
 			.Select(b => (JsonNode)new JsonObject { ["index"] = b.Index, ["data_hex"] = b.Hex }).ToArray()),
-		["records"] = records.DeepClone(),
+		["records"] = new JsonArray(records.Select(r => (JsonNode)ApiRecord(r!.AsObject())).ToArray()),
 	}.ToJsonString();
+
+	/// <summary>
+	/// One record as the API's <c>NdefRecord</c> takes it (snake case, <c>data_hex</c> never null):
+	/// core hands a dump's records to <c>POST /filament/tags/reads</c> as they are, and that body
+	/// refuses the Web NFC wire's <c>recordType</c> and <c>dataHex</c>.
+	/// </summary>
+	public static JsonObject ApiRecord(JsonObject record) => new()
+	{
+		["record_type"] = record["recordType"]?.GetValue<string>(),
+		["media_type"] = record["mediaType"]?.GetValue<string>(),
+		["id"] = record["id"]?.GetValue<string>(),
+		["encoding"] = record["encoding"]?.GetValue<string>(),
+		["lang"] = record["lang"]?.GetValue<string>(),
+		["data_hex"] = record["dataHex"]?.GetValue<string>() ?? "",
+	};
 
 	/// <summary>An nfc.read's or an nfc.write's result: the uploaded dump and what it holds.</summary>
 	public static JsonObject NfcResult(string blobKey, string uid, string tech, IReadOnlyList<int> missing) => Done(new JsonObject

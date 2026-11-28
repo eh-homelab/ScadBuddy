@@ -7,7 +7,6 @@ import {
   setTypeCost,
   setTypeKValues,
   setTypePresets,
-  upsertCatalog,
   upsertType,
   type AliasedKind,
   type CatalogRows,
@@ -17,17 +16,6 @@ import {
 } from '../../api/filament'
 import type { Filament } from '../../api/types'
 import type { PropertyValue } from '../entities/api'
-
-/** What `makeTypeFromBook` added to the catalog, then the refusal of the type itself. */
-export class MakeTypeError extends Error {
-  override cause: unknown
-  added: string[]
-  constructor(cause: unknown, added: string[]) {
-    super('the type was refused')
-    this.cause = cause
-    this.added = added
-  }
-}
 
 /**
  * #6706 — the row of `kind` whose name or alias has `name`'s key (the server's
@@ -41,19 +29,6 @@ async function resolved<K extends AliasedKind>(kind: K, name: string, materialId
     if (cause instanceof ApiError && cause.status === 404) return null
     throw cause
   }
-}
-
-/**
- * The row of `kind` that `name` resolves to, added when there is none, as the Bambuddy
- * pull and the CSV import add one (a subtype of `materialId`). `added` collects what this
- * call made.
- */
-async function named<K extends AliasedKind>(kind: K, name: string, added: string[], materialId?: string): Promise<CatalogRows[K]> {
-  const found = await resolved(kind, name, materialId)
-  if (found) return found
-  const made = await upsertCatalog(kind, { name, ...(materialId ? { material_id: materialId } : {}) } as Parameters<typeof upsertCatalog<K>>[1])
-  added.push(name)
-  return made
 }
 
 /** A type's code from a book row's identity: `BAMBU-PLA-BASIC-JADE-WHITE`. */
@@ -70,22 +45,19 @@ export function typeCodeOf(row: Pick<Filament, 'brand' | 'material' | 'subtype' 
  * #6262 — "Make a type": a price book row's material, subtype, brand, colour (with its
  * alpha, as `#RRGGBBAA`), effect and cost become a spool type, the identity the row
  * already has. The server links the new type to that row (`filament_id`), since the type
- * has the row's identity. A name the catalog lacks is added first (the type needs its id),
- * and stays if the type is then refused: the refusal is a `MakeTypeError` that lists them.
+ * has the row's identity. The material, brand and subtype go as names: the server finds
+ * each row by key and alias, else adds it, unchecked, in the type's own transaction, so a
+ * refused type adds no row (#8228, spec 2026-11-21-inventory-and-purchasing-design.md §6.3b).
  */
 export async function makeTypeFromBook(row: Filament, properties?: Record<string, PropertyValue>): Promise<SpoolType> {
-  const added: string[] = []
-  const material = await named('materials', row.material, added)
-  const brand = row.brand ? await named('brands', row.brand, added) : null
-  const subtype = row.subtype ? await named('subtypes', row.subtype, added, material.id) : null
   // The book's `dual-color` is the catalog's `Dual Color` by key; an effect is never added.
   const effect = row.effect ? await resolved('effects', row.effect) : null
   const alpha = row.alpha.toString(16).padStart(2, '0')
   return upsertType({
     code: typeCodeOf(row),
-    material_id: material.id,
-    subtype_id: subtype?.id ?? null,
-    brand_id: brand?.id ?? null,
+    material_name: row.material,
+    ...(row.subtype ? { subtype_name: row.subtype } : {}),
+    ...(row.brand ? { brand_name: row.brand } : {}),
     effect_id: effect?.id ?? null,
     colour_name: row.colour_name,
     rgba: `${row.colour}${alpha}`.toUpperCase(),
@@ -95,8 +67,6 @@ export async function makeTypeFromBook(row: Filament, properties?: Record<string
     diameter_mm: '1.75',
     label_weight_g: 1000,
     ...(properties && Object.keys(properties).length > 0 ? { properties } : {}),
-  }).catch((cause: unknown) => {
-    throw new MakeTypeError(cause, added)
   })
 }
 

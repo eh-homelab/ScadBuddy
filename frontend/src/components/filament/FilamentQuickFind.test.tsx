@@ -79,8 +79,21 @@ describe('the filament quick find', () => {
     await user.type(input, 'LOT-77')
     await waitFor(async () => expect((await options()).map((one) => one.textContent)).toEqual([expect.stringContaining('#3 ·')]))
     await user.clear(input)
+    // #8372: the type's value finds its spool too.
     await user.type(input, '0099887766')
-    await waitFor(async () => expect((await options()).map((one) => one.textContent)).toEqual([expect.stringContaining('EL-PLA-SILK-GOLD')]))
+    await waitFor(async () =>
+      expect((await options()).map((one) => one.textContent)).toEqual([expect.stringContaining('#9 ·'), expect.stringContaining('EL-PLA-SILK-GOLD')]),
+    )
+  })
+
+  it("finds a spool by its type's barcode as gtin:<digits> (#8372)", async () => {
+    seedEntityProperties(`spool_type:${T.GOLD}`, { gtin: ['6975373321234'] })
+    const { user } = render()
+    await user.keyboard('{Control>}k{/Control}')
+    await user.type(await screen.findByRole('combobox'), 'gtin:6975373321234')
+    await waitFor(async () =>
+      expect((await options()).map((one) => one.textContent)).toEqual([expect.stringContaining('#9 ·'), expect.stringContaining('EL-PLA-SILK-GOLD')]),
+    )
   })
 
   it('still opens and searches when the property values cannot be read (#7379)', async () => {

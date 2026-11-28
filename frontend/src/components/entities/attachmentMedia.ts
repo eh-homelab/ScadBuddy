@@ -71,7 +71,8 @@ type Source = { url: string; label: string; delivered: boolean; finished?: boole
 /**
  * Where an item's picture comes from, best first (#4251): the photo marked as what was
  * delivered, then the item's newest finished-print photo (on the item or on one of its
- * attempts), then the output it was ordered from, then its template's own thumbnail.
+ * attempts), then the output it was ordered from (its thumbnail, then its first plate's
+ * cover), and only with no output its template's own thumbnail (#8481).
  * A source that fails to load (an output deleted since) gives way to the next.
  */
 export function itemPictureSources(orderId: string, item: OrderItem, attachments: OrderAttachment[]): Source[] {
@@ -85,9 +86,13 @@ export function itemPictureSources(orderId: string, item: OrderItem, attachments
     .map((a) => attachmentImageUrl(orderId, a))
     .find((url) => url !== null)
   if (finished) sources.push({ url: finished, label: `The finished print: ${item.title}`, delivered: false, finished: true })
-  if (item.output_id) sources.push({ url: api.outputThumbnailUrl(item.output_id), label: `The render of ${item.title}`, delivered: false })
-  // A custom item (#4954) names no template, so it has no template thumbnail.
-  if (item.reference) {
+  if (item.output_id) {
+    // #8481: what the customer ordered, never the template's picture: the render's
+    // thumbnail, then its first plate's cover.
+    sources.push({ url: api.outputThumbnailUrl(item.output_id), label: `The render of ${item.title}`, delivered: false })
+    sources.push({ url: api.outputPlateThumbnailUrl(item.output_id, 1), label: `The render of ${item.title}`, delivered: false })
+  } else if (item.reference) {
+    // A custom item (#4954) names no template, so it has no template thumbnail.
     sources.push({
       url: `${API_BASE}/models/${encodeURIComponent(item.reference.slug)}/thumbnail`,
       label: `${item.reference.template_name}'s picture`,

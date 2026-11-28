@@ -31,7 +31,13 @@ from typing import Any, Protocol
 from fastapi import status
 
 from scadbuddy.core.problems import ApiError
-from scadbuddy.library.outputs import BACK_OFFICE, OutputMeta, OutputNotFoundError, OutputSource
+from scadbuddy.library.outputs import (
+    BACK_OFFICE,
+    OutputMeta,
+    OutputNotFoundError,
+    OutputSource,
+    storefront_output_id,
+)
 from scadbuddy.orders.lifecycle import Lifecycle, LifecycleError
 from scadbuddy.orders.models import Actor, Order, OrderItem, Reference
 from scadbuddy.orders.problems import refused
@@ -296,19 +302,47 @@ def kit_output_id(first: str, index: int) -> str:
     return uuid.uuid5(uuid.NAMESPACE_URL, f"scadbuddy:kit_output:{first}:{index}").hex
 
 
-def kit_output_ids(outputs: OutputsRead, first: str) -> list[str]:
+def later_output_id(render_key: str | None) -> Callable[[str, int], str]:
+    """Where output ``index`` (> 0) of the render an item's output ``first`` came from is
+    saved: under ``storefront_output_id(render_key, index)`` when ``first`` is the
+    storefront slice run's output of the item's render key (#8481), else under
+    :func:`kit_output_id`."""
+
+    def later(first: str, index: int) -> str:
+        if render_key is not None and first == storefront_output_id(render_key):
+            return storefront_output_id(render_key, index)
+        return kit_output_id(first, index)
+
+    return later
+
+
+def storefront_output(outputs: OutputsRead, reference: Reference) -> RenderedOutput | None:
+    """#8481 — the output the storefront slice run saved for ``reference``'s render key
+    (``storefront_output_id``), while it is the reference's render: what a storefront
+    order's line prints, with no render of its own. None when it was never saved (the
+    line was not sliced) or is gone."""
+    output_id = storefront_output_id(reference.render_key)
+    meta = reference_matches(outputs, output_id, reference)
+    if meta is None:
+        return None
+    return RenderedOutput(output_id, list(meta.colors), reference.render_key, meta.job_id)
+
+
+def kit_output_ids(outputs: OutputsRead, first: str, render_key: str | None = None) -> list[str]:
     """Every output of the render the item's output ``first`` was saved from, in output
     order (#5701 PR 5, spec 2026-11-17 §7.4 "The order"): ``first``, then each later one
-    under :func:`kit_output_id` while it is there and records the same render job
-    (``job_id``). One output only (``[first]``) when the render made one, when ``first``
-    cannot be read, or when the next id holds no output of that job."""
+    under :func:`later_output_id` of the item's ``render_key`` while it is there and
+    records the same render job (``job_id``). One output only (``[first]``) when the
+    render made one, when ``first`` cannot be read, or when the next id holds no output
+    of that job."""
     try:
         job_id = outputs.get(first).job_id
     except (OutputNotFoundError, OSError, ValueError):
         return [first]
+    later_as = later_output_id(render_key)
     found = [first]
     while True:
-        output_id = kit_output_id(first, len(found))
+        output_id = later_as(first, len(found))
         try:
             later = outputs.get(output_id)
         except (OutputNotFoundError, OSError, ValueError):

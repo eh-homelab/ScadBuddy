@@ -356,6 +356,8 @@ async def test_another_bambuddy_reads_nothing() -> None:
         assert not router.calls
     assert (outcome.outcome, outcome.error) == ("skipped", None)
     assert strict.error is not None and strict.error.status == 409
+    # The page tells it apart from "no Bambuddy is set up", which shares its problem type.
+    assert strict.error.extensions == {"code": "url_changed"}
     assert api.calls == []
 
 

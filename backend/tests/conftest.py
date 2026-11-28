@@ -441,6 +441,22 @@ def _skip_without_slicer_profiles(request: pytest.FixtureRequest) -> None:
 
 
 @pytest.fixture(autouse=True)
+def _inline_stock_workflows(
+    request: pytest.FixtureRequest, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#6949 K1 Task 16: an app under test runs the orders' stock workflows in line
+    (`tests/support/order_stock.py`), with phase 2's stock writes standing for Go, so a
+    test that fulfils an item needs no Temporal. A test marked `real_stock_workflows`
+    (`tests/workflows/test_order_stock.py`) keeps the app's Temporal starter."""
+    if request.node.get_closest_marker("real_stock_workflows"):
+        return
+    from scadbuddy.orders import stock_start
+    from tests.support.order_stock import inline_starter
+
+    monkeypatch.setattr(stock_start, "make_starter", inline_starter)
+
+
+@pytest.fixture(autouse=True)
 def _skip_without_temporal(request: pytest.FixtureRequest) -> None:
     if request.node.get_closest_marker("requires_temporal") and not temporal_available():
         pytest.skip(
@@ -1035,3 +1051,22 @@ def one_whole_read_at_a_time(tmp_path_factory: pytest.TempPathFactory) -> Iterat
     with lock.open("a") as handle:
         fcntl.flock(handle, fcntl.LOCK_EX)
         yield
+
+
+@pytest.fixture
+def waits_before_8062(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A new run's `wait_for_human` takes the path of a call from before #8062: the text
+    callback, with no task. Prod reaches that path only in a replay, so a live test of the
+    text answer (`flow_answer`, `POST /workflow-runs/{id}/answer`) takes this fixture. The
+    in-process worker shares `temporalio.workflow` with the test: the sandbox passes
+    `temporalio` through."""
+    from temporalio import workflow
+
+    from scadbuddy.workflows.flow_tools import HUMAN_PROMPT_PATCH
+
+    patched = workflow.patched
+
+    def before(patch_id: str) -> bool:
+        return not patch_id.startswith(f"{HUMAN_PROMPT_PATCH}:") and patched(patch_id)
+
+    monkeypatch.setattr(workflow, "patched", before)

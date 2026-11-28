@@ -36,7 +36,11 @@ class TasksComponent:
 
     # The store's writes as `RemoteTasks` has them, for the in-process worker.
 
-    async def open(self, task: TaskOpen, *, workflow_run_id: str | None = None) -> Task:
+    async def open(
+        self, task: TaskOpen, *, widgets: bool = False, workflow_run_id: str | None = None
+    ) -> Task:
+        # The activity checked it by those rules; the store checks nothing of them.
+        del widgets
         return await asyncio.to_thread(self.store.open, task, workflow_run_id=workflow_run_id)
 
     async def close(

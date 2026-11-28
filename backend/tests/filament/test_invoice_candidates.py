@@ -80,6 +80,22 @@ def test_a_proposed_type_matches_by_material_and_rgba(pg_pool: PgPool) -> None:
     assert line.costed == []
 
 
+def test_a_proposed_type_that_names_its_material_matches_that_material(pg_pool: PgPool) -> None:
+    shop = Shop(pg_pool)
+    match = _spool(shop, shop.type_id())
+    named = shop.type_body("PLA-NEW", material_id=None, material_name="pla")
+    unknown = shop.type_body("XYZ-NEW", material_id=None, material_name="Unobtainium")
+    invoice = shop.draft(
+        [
+            InvoiceLineIn(description="a", quantity=1, unit_price=D(20), proposed_type=named),
+            InvoiceLineIn(description="b", quantity=1, unit_price=D(20), proposed_type=unknown),
+        ]
+    )
+    first, second = _candidates(shop, invoice.id)
+    assert [s.number for s in first.uncosted] == [match]
+    assert (second.uncosted, second.costed) == ([], [])
+
+
 def test_a_line_with_no_type_has_no_candidates(pg_pool: PgPool) -> None:
     shop = Shop(pg_pool)
     _spool(shop, shop.type_id())

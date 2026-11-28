@@ -4,7 +4,7 @@ import { mockSettings, setMockSettings } from '../../handlers'
 // A module cycle (`filament/index.ts` imports `linkTypeFilament` from here): use it only inside functions.
 import { inventoryRows } from '../filament'
 import { acceptOperation } from '../operations'
-import { FilamentsRefused, event, itemOf, lock, notEnded, quotesOf, rederive, requoteOpen, refused, SETTLED, TAKES_ITEMS, withFilaments } from './orders'
+import { DERIVED, FilamentsRefused, FULFILLABLE, event, itemOf, lock, notEnded, quotesOf, rederive, requoteOpen, refused, SETTLED, TAKES_ITEMS, withFilaments } from './orders'
 import { machineRateFor } from './machineRates'
 import { pushRevision } from './revisions'
 import { pastPrint } from './pastPrints'
@@ -531,7 +531,9 @@ export const handlers = [
       // `quote.py` `reference_of`: a request has no design until its first revision.
       if (found.reference === null && found.kind === 'request') throw new Refused('item_has_no_design', `item ${found.id} is a request with no design yet: add a revision first`, [found.id])
       if (found.reference === null) throw new Refused('item_custom', `item ${found.id} is a custom item: it has no model to render or slice`, [found.id])
-      if (!requoteOpen(order, found)) throw new Refused('order_not_open', `order ${order.number} is ${order.status}: an item is rendered for a quote while it is draft or quoted`)
+      // #8481: an accepted item to print renders too.
+      const toPrint = DERIVED.has(order.status) && FULFILLABLE.has(found.status) && quotesOf(found.id).some((q) => q.accepted)
+      if (!toPrint && !requoteOpen(order, found)) throw new Refused('order_not_open', `order ${order.number} is ${order.status}: an item is rendered for a quote while it is draft or quoted, or for a print once accepted`)
       if (SETTLED.has(found.status)) throw new Refused('item_not_open', `item ${found.id} is ${found.status}`)
       const design = (found.reference.inputs as { params?: Record<string, unknown> }).params ?? {}
       if (design.name === 'fail') {

@@ -6,7 +6,6 @@ from __future__ import annotations
 
 import pytest
 
-from scadbuddy.inventory.items import ItemStore
 from scadbuddy.inventory.models import ItemInput
 from scadbuddy.orders.lifecycle import FulfilLine, FulfilmentInput, Lifecycle, LifecycleError
 from scadbuddy.orders.models import LibraryFileRef
@@ -16,6 +15,7 @@ from scadbuddy.orders.storefront.visitors import VisitorStore, visitor_actor
 from scadbuddy.store.refs import BlobRefs
 from tests.conftest import PgPool
 from tests.orders.test_lifecycle import BY, Shop
+from tests.support.inventory_rows import ItemRows
 
 pytestmark = pytest.mark.requires_postgres
 
@@ -114,6 +114,7 @@ def test_several_items_are_fulfilled_at_once(shop: Shop) -> None:
         [FulfilLine(item_id=first, quantity=2), FulfilLine(item_id=second, quantity=1)],
         BY,
     )
+    assert isinstance(attempts, list)
     assert [(a.quantity, a.outcome, a.accepted_at is not None) for a in attempts] == [
         (2, "succeeded", True),
         (1, "succeeded", True),
@@ -187,7 +188,7 @@ def test_a_request_item_is_duplicated(shop: Shop) -> None:
 def test_a_duplicate_keeps_the_parts_set_by_hand(shop: Shop) -> None:
     order = shop.order()
     item = shop.item(order)
-    items = ItemStore(shop.rows._pool, shop.rows._entities)
+    items = ItemRows(shop.rows._pool)
     ring = str(items.create(ItemInput(kind_id="hardware", name="Key ring"), BY).id)
     shop.lifecycle.set_item_parts(order.id, item.id, [ItemPart(item_id=ring, per_unit=2)], BY)
     copy = shop.lifecycle.duplicate_item(order.id, item.id, BY)

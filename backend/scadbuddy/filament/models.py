@@ -510,10 +510,12 @@ class LocationCreate(_In):
     ams_id: Idx | None = None
     tray_id: Idx | None = None
     note: Note | None = None
+    #: A station for flow tasks (#8062).
+    station: bool = False
 
 
 class LocationPatch(_Patch):
-    not_null = frozenset({"name", "sort_order", "kind_id"})
+    not_null = frozenset({"name", "sort_order", "kind_id", "station"})
     name: Name | None = None
     sort_order: SortOrder | None = None
     kind_id: UUID | None = None
@@ -524,6 +526,7 @@ class LocationPatch(_Patch):
     ams_id: Idx | None = None
     tray_id: Idx | None = None
     note: Note | None = None
+    station: bool | None = None
     archived: bool | None = None
 
 
@@ -538,6 +541,7 @@ class Location(_Catalog):
     ams_id: int | None
     tray_id: int | None
     note: str | None
+    station: bool
 
 
 class LocationNode(Location):
@@ -878,10 +882,19 @@ class SpoolMove(_In):
 
 
 class SpoolTypeCreate(_In):
+    """A new type. ``brand_name``, ``material_name`` and ``subtype_name`` are the other way
+    to give ``brand_id``, ``material_id`` and ``subtype_id`` (one or the other, not both): the
+    row of that name, else a new one, added unchecked in the type's transaction (spec
+    2026-11-21-inventory-and-purchasing-design.md §6.3b, #8228). A ``subtype_name`` is a
+    subtype of the type's material."""
+
     code: Name
     brand_id: UUID | None = None
-    material_id: UUID
+    brand_name: Name | None = None
+    material_id: UUID | None = None
+    material_name: Name | None = None
     subtype_id: UUID | None = None
+    subtype_name: Name | None = None
     category_id: UUID | None = None
     effect_id: UUID | None = None
     colour_name: Text | None = None
@@ -904,6 +917,22 @@ class SpoolTypeCreate(_In):
     tdfp_id: TdfpId | None = None
     note: Note | None = None
     properties: dict[str, JsonValue] | None = None
+
+    @model_validator(mode="after")
+    def _id_or_name(self) -> SpoolTypeCreate:
+        for noun in _NAMED_ROWS:
+            if (
+                getattr(self, f"{noun}_id") is not None
+                and getattr(self, f"{noun}_name") is not None
+            ):
+                raise ValueError(f"give {noun}_id or {noun}_name, not both")
+        if self.material_id is None and self.material_name is None:
+            raise ValueError("give material_id or material_name")
+        return self
+
+
+#: The catalog rows a type create can name instead of giving their id (#8228).
+_NAMED_ROWS: Final = ("brand", "material", "subtype")
 
 
 class SpoolTypePatch(_Patch):
@@ -1740,6 +1769,14 @@ class Tag(BaseModel):
     created_at: datetime
     last_seen_at: datetime | None = None
     last_seen_source: str | None = None
+    #: What the ScadBuddy app last read of the tag (#8366): the NTAG chip from GET_VERSION
+    #: (`NTAG213`, `NTAG215`, `NTAG216`), the largest NDEF message it takes (Android's
+    #: `Ndef.getMaxSize()`), whether it takes a write, and when. None when no read told them
+    #: (a Web NFC read, an older app): an NFC `read` job on the app (agent `nfc_probe`) tells.
+    chip: str | None = None
+    max_ndef_bytes: int | None = None
+    writable: bool | None = None
+    chip_read_at: datetime | None = None
 
 
 class TagBindingCreate(_In):
@@ -2178,6 +2215,12 @@ def _check_fits(records: Sequence[NdefRecord]) -> None:
         raise ValueError(f"the records hold more than {MAX_RECORD_BYTES} bytes")
 
 
+#: A tag's chip as the ScadBuddy app reads it (#8366): NTAG GET_VERSION's chip name.
+Chip = Annotated[str, Field(min_length=1, max_length=32, pattern=r"^[A-Za-z0-9 ._-]+$")]
+#: Android's `Ndef.getMaxSize()`: the largest NDEF message the tag takes, in bytes.
+MaxNdefBytes = Annotated[int, Field(ge=0, le=65535)]
+
+
 class _FitsOneTag(_In):
     """A body whose NDEF ``records`` must fit one tag."""
 
@@ -2236,9 +2279,18 @@ class TagReadIn(_FitsOneTag):
     #: False for a page's lookup of a tag it read before (the old tag after a move, a
     #: restore's read back): core then writes no `filament_tag_reads` row for it (#8148).
     tap: bool = True
+    #: What the ScadBuddy app read of the tag beside its records (#8366): its NTAG chip, the
+    #: largest NDEF message it takes and whether it takes a write. Each is kept on the tag
+    #: when sent; one left out keeps the tag's last known value.
+    chip: Chip | None = None
+    max_ndef_bytes: MaxNdefBytes | None = None
+    writable: bool | None = None
 
 
-BackupReason = Literal["spool_write", "agent_write", "restore", "place_write"]
+BackupReason = Literal["spool_write", "agent_write", "restore", "place_write", "clear"]
+#: Why a tag left its spool: ``unbound`` by hand, ``cleared`` once the phone wrote it empty
+#: (#8362).
+UnbindReason = Literal["unbound", "cleared"]
 
 
 class TagBackupIn(_FitsOneTag):
@@ -2381,6 +2433,11 @@ class NfcJobResultIn(_In):
     )
     backup_id: UUID | None = None
     error: Annotated[str, Field(max_length=500)] | None = None
+    #: What the ScadBuddy app read of the tag (#8366), as `TagReadIn` takes them; a `read`
+    #: job's result carries them as sent.
+    chip: Chip | None = None
+    max_ndef_bytes: MaxNdefBytes | None = None
+    writable: bool | None = None
 
     @field_validator("error")
     @classmethod
@@ -2415,6 +2472,13 @@ class DecodedSpool(BaseModel):
     label_weight_g: int | None = None
     empty_weight_g: int | None = None
     serial: str | None = None
+    other_keys: dict[str, str] | None = Field(
+        default=None,
+        description=(
+            "An OpenSpool tag's keys that ScadBuddy does not use, each value as its JSON "
+            "text (a string keeps its quotes), cut to 128 characters. Untrusted text."
+        ),
+    )
     warnings: list[str] = Field(
         default_factory=list,
         description=(

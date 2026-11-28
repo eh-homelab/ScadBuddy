@@ -18,6 +18,9 @@ import {
   newRequestId,
   STILL_ACCEPTING,
   printRunPoll,
+  settled,
+  stockFollow,
+  stockWrite,
 } from './client'
 import type { MediaView } from './types'
 import { CURSOR_HEADER, inReadScope, ReadScope } from '../lib/readCursor'
@@ -2077,5 +2080,39 @@ describe('listModelsWindow reads past the backend page cap (#5289 review)', () =
     )
     const window = await api.listModelsWindow(filters, 900)
     expect(window.items).toHaveLength(3)
+  })
+})
+
+// #6949 K1 Task 16, fix round 1: a stock write and the follow of its 202.
+describe('stockWrite and settled', () => {
+  const running = { workflow_id: 'lot:l1:recost:k', kind: 'RecostLot', started_at: '2026-11-27T00:00:00Z', repeated: false }
+
+  it('keeps the headers a Headers instance carries beside its Idempotency-Key', async () => {
+    const seen: (string | null)[][] = []
+    server.use(
+      http.post('/api/v1/stock-probe', ({ request }) => {
+        seen.push([request.headers.get('X-Probe'), request.headers.get('Idempotency-Key')])
+        return HttpResponse.json({ ok: true })
+      }),
+    )
+    await stockWrite('/stock-probe', { method: 'POST', headers: new Headers({ 'X-Probe': 'kept' }) }, 'key-1')
+    expect(seen).toEqual([['kept', 'key-1']])
+  })
+
+  it('sends the write again with its key until it answers, then gives the answer', async () => {
+    stockFollow.intervalMs = 1
+    const keys: (string | null)[] = []
+    server.use(
+      http.post('/api/v1/inventory/lots/l1/recost', ({ request }) => {
+        keys.push(request.headers.get('Idempotency-Key'))
+        return keys.length < 3 ? HttpResponse.json(running, { status: 202 }) : HttpResponse.json({ moves: 2, orders: [] })
+      }),
+    )
+    const accepted = vi.fn()
+    const answer = await settled(() => stockWrite('/inventory/lots/l1/recost', { method: 'POST' }, 'key-2'), accepted)
+    expect(answer).toEqual({ moves: 2, orders: [] })
+    expect(keys).toEqual(['key-2', 'key-2', 'key-2'])
+    expect(accepted).toHaveBeenCalledTimes(1)
+    expect(accepted).toHaveBeenCalledWith(running)
   })
 })

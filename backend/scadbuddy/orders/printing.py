@@ -308,7 +308,7 @@ async def print_check(
     await _none_in_flight(store, item)
     if reference is not None and item.output_id is not None:
         output_id = item.output_id
-        kit = await asyncio.to_thread(kit_output_ids, outputs, output_id)
+        kit = await asyncio.to_thread(kit_output_ids, outputs, output_id, reference.render_key)
         count = await asyncio.to_thread(kit_count, outputs, jobs, output_id, len(kit))
         if count > 1:
             # One attempt prints one output and would count the whole kit made.

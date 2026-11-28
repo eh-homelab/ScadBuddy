@@ -14,7 +14,6 @@ from psycopg.types.json import Jsonb
 from scadbuddy.bambuddy.models import BbSupplier
 from scadbuddy.bambuddy.models import Spool as BbSpool
 from scadbuddy.core.settings import FilamentSync, SyncDirection
-from scadbuddy.entities.registry import EntityStore
 from scadbuddy.filament.bb_sync_models import BbSnapshot, BbWrite, SyncPlan, seen_row
 from scadbuddy.filament.bb_sync_plan import (
     _CATALOG_FIELDS,
@@ -56,12 +55,12 @@ from scadbuddy.filament.shopping import ShoppingStore
 from scadbuddy.filament.spools import FilamentSpoolStore
 from scadbuddy.filament.suppliers import SuppliersStore
 from scadbuddy.filament.types import SpoolTypeStore
-from scadbuddy.inventory.items import ItemStore
 from scadbuddy.inventory.models import ItemInput, OfferInput
 from scadbuddy.inventory.offers import OfferStore
 from scadbuddy.orders.models import Actor
 from tests.bambuddy.conftest import recording
 from tests.conftest import PgPool
+from tests.support.inventory_rows import ItemRows
 
 pytestmark = pytest.mark.requires_postgres
 
@@ -663,10 +662,10 @@ def test_a_supplier_with_only_item_offers_has_no_link(pg_pool: PgPool) -> None:
     shop = f.suppliers.create(SupplierCreate(name="Bolt Depot"))
     with pg_pool.connection() as conn:
         conn.execute("UPDATE filament_suppliers SET bb_supplier_id = 7")
-    items = ItemStore(pg_pool, EntityStore(pg_pool))
+    items = ItemRows(pg_pool)
     nut = items.create(ItemInput(kind_id="hardware", name="M3 nut"), Actor(kind="browser"))
     OfferStore(pg_pool, lambda: "USD").create(
-        OfferInput(supplier_id=shop.id, item_id=nut.id, sku="NUT-3"), Actor(kind="browser")
+        OfferInput(supplier_id=shop.id, item_id=nut.id, sku="NUT-3")
     )
     sync = SPOOLS.model_copy(update={"spools": "off", "suppliers": "sb_to_bb"})
     _link(pg_pool, spool, 50)
@@ -678,10 +677,10 @@ def test_an_unlinked_supplier_with_only_item_offers_is_not_created(pg_pool: PgPo
     a Bambuddy id already. One with only an item offer gets no create and no intent."""
     f = _filament(pg_pool)
     shop = f.suppliers.create(SupplierCreate(name="Bolt Depot"))
-    items = ItemStore(pg_pool, EntityStore(pg_pool))
+    items = ItemRows(pg_pool)
     nut = items.create(ItemInput(kind_id="hardware", name="M3 nut"), Actor(kind="browser"))
     OfferStore(pg_pool, lambda: "USD").create(
-        OfferInput(supplier_id=shop.id, item_id=nut.id, sku="NUT-3"), Actor(kind="browser")
+        OfferInput(supplier_id=shop.id, item_id=nut.id, sku="NUT-3")
     )
     sync = SPOOLS.model_copy(update={"spools": "off", "suppliers": "sb_to_bb"})
     writes = _plan(f, _snap([], suppliers=[]), sync).writes

@@ -1,6 +1,7 @@
 import { Fragment, useId, useState, type KeyboardEvent } from 'react'
 import { MoreHorizontalIcon, PencilIcon } from 'lucide-react'
 import { api } from '../../api/client'
+import { editPath } from '../../lib/deeplink'
 import type { Order, OrderAttachment, OrderCosts, OrderItemDetail, OrderStatus, Quote, Shipment } from '../../api/types'
 import { formatMoney, toMajor } from '../../lib/money'
 import { Button } from '@/components/ui/button'
@@ -35,6 +36,7 @@ import { UNFULFIL_OFF as UNFULFIL_OFF_TEXT, UNFULFIL_SETTING } from './unfulfilR
 import { itemActions, itemEdits, itemSource, type ItemAction, type ItemSection } from './itemActions'
 import { MarginBadge } from './OrderCosts'
 import { Link } from 'react-router'
+import { StillWorking } from '../../pages/inventory/StillWorking'
 
 /**
  * An order's line items (§3.3), as one card (#4955, spec 2026-11-07 §4.1): its header adds
@@ -168,7 +170,19 @@ export function OrderItemsTable({
       key: 'picture',
       header: <span className="sr-only">Picture</span>,
       className: 'w-14',
-      cell: (item) => <ItemPicture orderId={orderId} item={item} attachments={attachments} />,
+      // #8481: the picture opens the render the line was ordered as, when it has one.
+      cell: (item) =>
+        item.output_id ? (
+          <Link
+            to={editPath(item.output_id)}
+            aria-label={`Open the render of ${item.title}`}
+            className="block w-fit rounded-md focus-visible:ring-2 focus-visible:ring-ring focus-visible:outline-none"
+          >
+            <ItemPicture orderId={orderId} item={item} attachments={attachments} />
+          </Link>
+        ) : (
+          <ItemPicture orderId={orderId} item={item} attachments={attachments} />
+        ),
     },
     {
       key: 'title',
@@ -386,6 +400,9 @@ function GroupLabel({ kind, items, currency, exponent }: { kind: ItemGroupKey; i
   )
 }
 
+/** An item whose parts' stock still moves after its fulfil or unfulfil answered (a 202). */
+export const SETTLING_TEXT = 'Order fulfilled; stock still settling.'
+
 /**
  * #5554 — an item's status, with when its quotes were made (the newest, and the accepted one
  * when it is another) and its slice quote's run: started and running for, or started, ended
@@ -399,6 +416,8 @@ function ItemStatus({ item, run }: { item: OrderItemDetail; run: SliceQuoteRun |
   return (
     <span className="flex flex-col items-start gap-0.5">
       <ItemStatusBadge status={item.status} />
+      {/* #6949 K1 Task 16: its stock workflow still runs; `order_item.changed` brings the item once it ends. */}
+      {item.parts_settling && <StillWorking id={item.parts_settling.workflow_id} label={item.status === 'fulfilled' ? SETTLING_TEXT : 'Unfulfilled; stock still settling.'} />}
       {newest && (
         <span className="text-[11px] text-muted-foreground" data-testid={`item-quoted-${item.id}`}>
           {accepted?.id === newest.id ? 'Accepted quote' : 'Newest quote'} <When at={newest.created_at} />

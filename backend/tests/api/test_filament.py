@@ -758,6 +758,8 @@ def test_an_import_that_did_not_finish_keeps_its_actor_and_says_it_may_run_on(
     answer = client.post(IMPORT_BB)
     assert answer.status_code == 503, answer.text
     assert "may still be running" in answer.json()["detail"]
+    # The page tells it apart from any other 503 by its code.
+    assert answer.json()["code"] == "import_unfinished"
     ((pull_id, kept),) = _kept_actors(pg_conninfo)
     assert pull_id.startswith("filament-bb-pull-")
     assert kept == actor(ANONYMOUS)

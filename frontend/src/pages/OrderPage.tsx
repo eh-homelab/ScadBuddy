@@ -13,6 +13,8 @@ import { OrderSummary } from '../components/orders/OrderSummary'
 import { BambuddyProject } from '../components/orders/BambuddyProject'
 import { FulfilmentForm } from '../components/orders/FulfilmentForm'
 import { ItemPicture } from '../components/orders/ItemPicture'
+import { ArrangedPlates } from '../components/ArrangedPlates'
+import { editPath } from '../lib/deeplink'
 import { DepositSuggestions } from '../components/orders/DepositSuggestions'
 import { PaymentRequests } from '../components/orders/PaymentRequests'
 import { OrderAttachments } from '../components/orders/OrderAttachments'
@@ -815,6 +817,15 @@ function ItemDrawer({
       }
     >
       <ItemPicture orderId={order.id} item={item} attachments={detail.attachments} size="lg" />
+      {/* #8481: what the customer ordered: the render's page, and its plates. */}
+      {item.output_id && (
+        <div className="flex flex-col gap-1" data-testid="item-output">
+          <Link to={editPath(item.output_id)} className="w-fit text-[13px] text-primary hover:underline">
+            Open the ordered design
+          </Link>
+          <ArrangedPlates outputId={item.output_id} size="sm" />
+        </div>
+      )}
       <form
         className="flex flex-wrap items-end gap-2"
         onSubmit={(event) => {
@@ -903,7 +914,7 @@ function ItemDrawer({
       {itemProject && <BambuddyProject projectId={itemProject.project_id} label="The item's Bambuddy project" />}
       {!isCart(order) && (
         <div id="item-section-print" data-testid="item-section-print" ref={sectionRef('print')}>
-          <PrintItem order={order} item={item} onChanged={onChanged} />
+          <PrintItem order={order} item={item} onChanged={onChanged} renderFirst={{ run: slices.runs.get(item.id), start: () => slices.render(item.id, item.quotes.map((q) => q.id)) }} />
         </div>
       )}
       <div id="item-section-fulfil" data-testid="item-section-fulfil" ref={sectionRef('fulfil')}>

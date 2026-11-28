@@ -98,7 +98,8 @@ class ActivityFilter:
     via_tool: str | None = None
     subject: str | None = None
     parent: str | None = None
-    #: A substring of the title, case-insensitive.
+    #: A substring of the title, case-insensitive, or a row's exact source id (#6949 K1:
+    #: an inventory operation's id, which `StillWorking` links).
     q: str | None = None
     since: datetime | None = None
     until: datetime | None = None
@@ -204,7 +205,9 @@ def _conditions(filters: ActivityFilter) -> tuple[list[sql.Composable], list[Any
             where.append(sql.SQL("{} = %s").format(sql.Identifier(column)))
             params.append(value)
     if filters.q is not None:
-        add("title ILIKE '%%' || %s || '%%'", _escape_like(filters.q))
+        add(
+            "(title ILIKE '%%' || %s || '%%' OR source_id = %s)", _escape_like(filters.q), filters.q
+        )
     if filters.since is not None:
         add("created_at >= %s", filters.since)
     if filters.until is not None:
@@ -444,6 +447,58 @@ class ActivityIndex:
             restore=restore,
         )
 
+    async def ingest_inventory_operation(self, operation_id: str) -> None:
+        """Mirror an ``inventory_operations`` row that scadbuddy-core wrote and announced
+        (``inventory_operation.changed``, #6949 K1, R-K1-22)."""
+        await asyncio.to_thread(self._ingest_inventory_operation, operation_id)
+
+    def _ingest_inventory_operation(self, operation_id: str, *, restore: bool = False) -> bool:
+        with self.pool.connection() as conn, conn.transaction():
+            return self.ingest_inventory_operation_in(conn, operation_id, restore=restore)
+
+    def ingest_inventory_operation_in(
+        self, conn: Connection[Any], operation_id: str, *, restore: bool = False
+    ) -> bool:
+        """Mirror the ``inventory_operations`` row in the caller's transaction: its kind is
+        the activity's name (``inventory.Take``), its title the kind's label and the
+        subject. Go alone writes the row; this reads it. A no-op for no such row."""
+        from scadbuddy.inventory.activity import title
+
+        op = conn.execute(
+            "SELECT id, kind, subject, status, workflow_id, attempt, actor, problem,"
+            " last_error, created_at, finished_at FROM inventory_operations WHERE id = %s",
+            (operation_id,),
+        ).fetchone()
+        if op is None:
+            return False
+        actor = op["actor"] or {}
+        return self.upsert_in(
+            conn,
+            lambda: ActivityRow(
+                id=f"inventory_operation:{op['id']}",
+                kind=op["kind"],
+                subject=op["subject"],
+                status=_AGENT_STATUS[op["status"]],
+                title=title(op["kind"], op["subject"]),
+                source="inventory_operations",
+                source_id=op["id"],
+                workflow_id=op["workflow_id"],
+                created_at=op["created_at"],
+                finished_at=op["finished_at"],
+                detail={
+                    "problem": op["problem"],
+                    "attempt": op["attempt"],
+                    "last_error": op["last_error"],
+                },
+            ),
+            attribution=Attribution(
+                actor.get("principal") or actor.get("kind") or "browser",
+                actor.get("session"),
+                None,
+            ),
+            restore=restore,
+        )
+
     async def prune(self, ttl: float, placeholder_ttl: float) -> int:
         """Delete finished rows older than ``ttl`` seconds and placeholders older than
         ``placeholder_ttl`` (long enough for ``repair`` to fill one, and no longer)."""
@@ -571,6 +626,27 @@ class ActivityIndex:
                 restored += self._ingest_agent_operation(agent_id, restore=True)
             except Exception:
                 logger.exception("an activity repair failed", extra={"activity_id": agent_id})
+                self._count_failure()
+        # #6949 K1 (C13): scadbuddy-core's inventory operations, whose notice the API
+        # missed while it was down.
+        try:
+            with self.pool.connection() as conn:
+                inventory_ids = [
+                    r["id"]
+                    for r in conn.execute(
+                        self._missing("inventory_operation:", "inventory_operations", "r.id"),
+                        {"window": window},
+                    ).fetchall()
+                ]
+        except Exception:
+            logger.exception("an activity repair failed", extra={"table": "inventory_operations"})
+            self._count_failure()
+            inventory_ids = []
+        for inventory_id in inventory_ids:
+            try:
+                restored += self._ingest_inventory_operation(inventory_id, restore=True)
+            except Exception:
+                logger.exception("an activity repair failed", extra={"activity_id": inventory_id})
                 self._count_failure()
         return restored
 

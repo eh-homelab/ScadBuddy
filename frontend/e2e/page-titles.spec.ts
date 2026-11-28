@@ -66,6 +66,9 @@ const PAGES = [
   // A place's page and a scanned code (#6955): the code opens the place, slot 1 of AMS-A.
   `/filament/locations/${L.AMS_A1}`,
   '/x/L-4',
+  // Flow task stations (#8062): the list of stations, and the Workshop's open tasks.
+  '/station',
+  `/station/${L.WORKSHOP}`,
   '/filament/catalog',
   '/filament/metrics',
   '/filament/shopping-list',
@@ -78,6 +81,8 @@ const PAGES = [
   // how to open it on a phone. `/filament/scan`, its old address, redirects to it.
   '/scan',
   '/filament/scan',
+  // Paired phones (#7905), with the mock's two devices (src/mocks/features/devices.ts).
+  '/devices',
   // The Inventory area (#7067), with the mock's seeded items (src/mocks/features/inventorySeed.ts).
   '/inventory',
   '/inventory/kinds',

@@ -20,6 +20,7 @@ from scadbuddy.orders.rendering import (
     kit_count,
     kit_output_id,
     kit_output_ids,
+    later_output_id,
     output_for_reference,
     outputs_for_reference,
 )
@@ -446,6 +447,19 @@ async def test_a_later_output_is_found_from_the_items_own_output(shop: Shop) -> 
     ids = await order_render(shop, outputs, SeveralRenders(2))
     assert ids == ["own", kit_output_id("own", 1)]
     assert kit_output_ids(outputs, "own") == ids
+
+
+async def test_a_storefront_kit_is_found_from_its_first_output(shop: Shop) -> None:
+    """#8481: an order line holds the storefront slice run's first output; the later ones
+    are its `storefront_output_id`s, found by the line's render key."""
+    outputs = SavedOutputs()
+    made = await every_output(shop, outputs, SeveralRenders(3))
+    key = reference_of(shop).render_key
+    ids = [one.output_id for one in made]
+    assert kit_output_ids(outputs, ids[0], key) == ids
+    # Without the key, or for another key's output, no storefront id is looked for.
+    assert kit_output_ids(outputs, ids[0]) == [ids[0]]
+    assert later_output_id(key)("other", 1) == kit_output_id("other", 1)
 
 
 @pytest.mark.parametrize("count", [0, 1])

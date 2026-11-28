@@ -67,6 +67,12 @@ export const filamentLinks = {
   printerLabels: (printerId: string) => `${BASE}/labels?printers=${encodeURIComponent(printerId)}`,
   /** #6955 — the labels page for one place. */
   locationLabel: (id: string) => `${BASE}/labels?locations=${encodeURIComponent(id)}`,
+  /** #7169 — the labels page for one spool type. */
+  typeLabel: (id: string) => `${BASE}/labels?types=${encodeURIComponent(id)}`,
+  /** #7169 — the labels page for one inventory item. */
+  itemLabel: (id: string) => `${BASE}/labels?items=${encodeURIComponent(id)}`,
+  /** #7169 — the labels page for one item kind. */
+  kindLabel: (id: string) => `${BASE}/labels?kinds=${encodeURIComponent(id)}`,
   /** A catalog entry's list (the Catalog tab opens on materials). */
   catalog: (kind: CatalogKind) => (kind === 'materials' ? catalog : query(catalog, { kind })),
   shoppingList,
