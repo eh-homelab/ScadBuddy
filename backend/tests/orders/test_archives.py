@@ -1019,19 +1019,38 @@ def test_lan_facts_prefer_the_sliced_grams_of_a_finished_run() -> None:
     assert lan_facts(record).actual_grams == 7.5
 
 
-def test_lan_facts_of_a_run_stopped_before_its_last_plate_sum_the_started_plates() -> None:
-    """#8401: a run of three plates stopped after its second finished (``lan_stopped``,
-    plate 3 never started). The print the follow read is plate 2's, which finished, so
-    the sliced grams are those of the two plates the printer took, never plate 3's."""
-    record = LanRecord(
-        starts=[
-            own_start(1, ended="done", ended_at=timedelta(minutes=30), grams={1: 4.0}),
-            own_start(2, grams={1: 2.5, 2: 1.0}),
-        ],
-        settled_at=T0 + timedelta(hours=2),
-        uses=[ledger_use("p1", 4.0)],
-        outcome="finished",
+async def test_lan_facts_of_a_run_stopped_before_its_last_plate_sum_the_started_plates(
+    shop: Shop, pool: PgPool
+) -> None:
+    """#8401, #8415: a run of three plates stopped after its second finished. Plate 3
+    never started: it stays in ``lan_waiting``, with ``lan_stopped`` set. The follow read
+    plate 2's print, which finished. The sliced grams are those of the two plates the
+    printer took; the record has no start for plate 3, and it adds nothing."""
+    _, _, _, run_id = own_lan_print(
+        shop,
+        pool,
+        [timedelta(0), timedelta(hours=1)],
+        {},
+        settled_after=timedelta(hours=2),
+        fields={
+            1: {
+                "ended": "done",
+                "ended_at": (T0 + timedelta(minutes=30)).isoformat(),
+                "grams_by_slot": {"1": 4.0},
+            },
+            2: {"grams_by_slot": {"1": 2.5, "2": 1.0}},
+        },
     )
+    stopped = {"stage": "cancelled", "message": "stopped before plate 3"}
+    with pool.connection() as conn:
+        conn.execute(
+            "UPDATE print_runs SET result = result || %s WHERE id = %s",
+            (Jsonb({"lan_waiting": [3], "lan_stopped": stopped}), run_id),
+        )
+    record = shop.rows.lan_record(run_id)
+    assert record is not None and record.outcome == "finished"
+    assert [s.plate_id for s in record.starts] == [1, 2]
+    assert record.uses == []
     assert lan_facts(record).actual_grams == 7.5
 
 
