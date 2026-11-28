@@ -8,6 +8,7 @@ import { SUPPLIER } from '../../mocks/features/filamentPurchasingSeed'
 import { server } from '../../mocks/server'
 import { entityMock } from '../../mocks/features/entities'
 import { T } from '../../mocks/features/filament/seed'
+import { filamentLinks } from '../../lib/filamentLinks'
 import { choose } from '../../test/select'
 import { renderPage } from '../../test/utils'
 import { TypePage } from './TypePage'
@@ -35,6 +36,17 @@ describe('the type page', () => {
     expect(within(screen.getByRole('table', { name: 'K values' })).getByDisplayValue('0.020')).toBeInTheDocument()
     const spools = screen.getByRole('table', { name: 'Spools of this type' })
     expect(await within(spools).findByRole('link', { name: '#1' })).toBeInTheDocument()
+  })
+
+  it('links to its label', async () => {
+    render(`/filament/types/${T.JADE}`)
+    expect(await screen.findByRole('link', { name: 'Print label' })).toHaveAttribute('href', filamentLinks.typeLabel(T.JADE))
+  })
+
+  it('has no label link on the new type page', async () => {
+    render('/filament/types/new')
+    await code()
+    expect(screen.queryByRole('link', { name: 'Print label' })).toBeNull()
   })
 
   it('saves a new 0.6 preset with one PUT of the presets, and the old row stays', async () => {

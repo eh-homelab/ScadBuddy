@@ -738,7 +738,9 @@ matches `[a-z][a-z0-9_]{0,63}`. Limits: 200 keys per entity, 2000 characters per
   a concurrent write answers 409 `printer_delete_conflict`, and the person tries again.
 - Labels: a place's QR is `<base>/x/L-<n>`. The labels page (`/filament/labels`) prints places
   with `?locations=` and printers with `?printers=` (one printer's from its place page, every
-  printer's from the Locations tab). The printer labels first make the place of each AMS unit,
+  printer's from the Locations tab). It prints spool types with `?types=`, items with `?items=`
+  and kinds with `?kinds=` (#7169). A saved spool type's page has a "Print label" link that opens
+  it with that type chosen. The printer labels first make the place of each AMS unit,
   slot and external holder the printer's latest report lists; a printer with no such report is
   named on the page. Spool labels keep `scadbuddy:spool:<id>`. A place links to its own page,
   `/filament/locations/<id>`. `POST /api/v1/filament/labels` also takes `type_ids`, `item_ids`

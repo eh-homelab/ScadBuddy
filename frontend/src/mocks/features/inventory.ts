@@ -3,11 +3,12 @@ import { addDecimals, cmpDecimals, divDecimal, mulDecimals, roundDecimal, subDec
 import type { components } from '../../api/schema'
 import { mockSettings } from '../handlers'
 import { itemKeysInUse, marksOf, rowPropertiesRefusal, saveRowProperties, schemaProblem } from './entities'
-import { locationExists } from './filament'
+import { locationExists, mockTypes } from './filament'
 import { supplierById } from './filamentPurchasing'
 import { SUPPLIER } from './filamentPurchasingSeed'
 import { INVENTORY } from './inventorySeed'
 import { BROWSER, fieldProblem, now, problem, PROBLEMS as ORDER_PROBLEMS, state as orders } from './orders/state'
+import { nextNumber } from '../nextNumber'
 
 /**
  * #7067 — the inventory (`backend/scadbuddy/api/inventory.py`, `inventory_stock.py`): item
@@ -28,6 +29,8 @@ const KIND_ID = /^[a-z][a-z0-9_]{0,39}$/
 type MockKind = Omit<S['ItemKind'], 'item_count' | 'code'>
 type MockItem = {
   id: string
+  /** From `item_numbers_seq`, which numbers spool types too (`nextItemNumber`); the code is I-<number>. */
+  number: number
   kind_id: string
   name: string
   manufacturer: string
@@ -191,6 +194,7 @@ export function seedItem(fields: Partial<MockItem> & { name: string; kind_id: st
   ready()
   const item: MockItem = {
     id: id(),
+    number: nextItemNumber(),
     manufacturer: '',
     compatible_with: [],
     low_stock: '0',
@@ -356,6 +360,8 @@ function answerItem(item: MockItem): S['Item'] {
   }
   return {
     id: item.id,
+    number: item.number,
+    code: `I-${item.number}`,
     kind_id: item.kind_id,
     kind_path: kindPath(item.kind_id).map((p) => p.id),
     tracking,
@@ -387,6 +393,21 @@ export function inventoryItem(itemId: string): S['Item'] | undefined {
   ready()
   const item = inventoryMock.items.find((i) => i.id === itemId)
   return item ? answerItem(item) : undefined
+}
+
+/**
+ * The next number of `item_numbers_seq`: one sequence numbers spool types and items, so a
+ * T-<n> and an I-<n> never share n. The seeded items come after the seeded types.
+ */
+export function nextItemNumber(): number {
+  ready()
+  return nextNumber([...mockTypes(), ...inventoryMock.items])
+}
+
+/** The item an I-<number> code names, or undefined. */
+export const itemByNumber = (number: number): MockItem | undefined => {
+  ready()
+  return inventoryMock.items.find((i) => i.number === number)
 }
 
 /** The kind a K-<number> code names (`codes/resolve.py`), or undefined. */
@@ -853,7 +874,7 @@ export const handlers = [
         if (input.id != null && kindOf(input.id)) throw new Refused(409, 'kind_exists', `an item kind has that id: ${input.id}`)
         kindProblem(input, null)
         // The next number of `item_kinds_number_seq`; with no id, the kind is k<number>.
-        const number = Math.max(0, ...inventoryMock.kinds.map((k) => k.number)) + 1
+        const number = nextNumber(inventoryMock.kinds)
         const made: MockKind = {
           id: input.id ?? `k${number}`,
           number,

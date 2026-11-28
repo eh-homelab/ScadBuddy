@@ -1,4 +1,4 @@
-import { ArchiveIcon, ArchiveRestoreIcon, ChevronLeftIcon, ExternalLinkIcon, ShoppingCartIcon, SlidersHorizontalIcon } from 'lucide-react'
+import { ArchiveIcon, ArchiveRestoreIcon, ChevronLeftIcon, ExternalLinkIcon, PrinterIcon, ShoppingCartIcon, SlidersHorizontalIcon } from 'lucide-react'
 import { useEffect, useMemo, useState, type ReactNode } from 'react'
 import { Link, useLocation, useParams } from 'react-router'
 import { AttachmentsPanel } from '../../components/entities/AttachmentsPanel'
@@ -576,6 +576,14 @@ export function TypePage() {
           <Button type="button" variant="outline" size="sm" disabled={busy} onClick={() => void archive(!saved.archived_at)}>
             {saved.archived_at ? <ArchiveRestoreIcon /> : <ArchiveIcon />}
             {saved.archived_at ? 'Restore' : 'Archive'}
+          </Button>
+        )}
+        {!creating && saved && (
+          <Button asChild variant="outline" size="sm">
+            <Link to={filamentLinks.typeLabel(saved.id)}>
+              <PrinterIcon />
+              Print label
+            </Link>
           </Button>
         )}
         {!creating && (

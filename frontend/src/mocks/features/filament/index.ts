@@ -16,7 +16,8 @@ import { H2C, L, LK, seed, spoolId, type Catalogs, type Seed, type SpoolRow } fr
 import { jobOf } from '../../../components/filament/eventText'
 import { CATALOGS } from '../../../components/filament/catalogs'
 import { checksSave, marksOf, rowPropertiesRefusal, saveRowProperties } from '../entities'
-import { kindByNumber } from '../inventory'
+import { itemByNumber, kindByNumber, nextItemNumber } from '../inventory'
+import { nextNumber } from '../../nextNumber'
 
 type S = components['schemas']
 
@@ -158,6 +159,9 @@ const MOCK_COLOUR_CODES: components['schemas']['ColourCode'][] = [
 export function locationExists(id: string): boolean {
   return state.locations.some((place) => place.id === id)
 }
+
+/** #7169 — the spool types, archived ones too, for the inventory mock's `nextItemNumber`. */
+export const mockTypes = (): readonly { number: number }[] => state.types
 
 export function reset() {
   state = seed()
@@ -567,7 +571,7 @@ export function seedHomeReturn({ empty = false }: { empty?: boolean } = {}): { b
   if (!state.locations.some((one) => one.id === HOME_BOX)) {
     state.locations.push({
       id: HOME_BOX,
-      number: Math.max(0, ...state.locations.map((place) => place.number)) + 1,
+      number: nextNumber(state.locations),
       name: 'Dry box 2',
       kind_id: LK.DRY_BOX,
       parent_id: L.WORKSHOP,
@@ -1249,7 +1253,7 @@ function under(parent: string, id: string): boolean {
 function newSpool(body: Record<string, unknown>): SpoolRow {
   const blank: SpoolRow = {
     id: newId(),
-    number: Math.max(0, ...state.spools.map((row) => row.number)) + 1,
+    number: nextNumber(state.spools),
     type_id: null,
     brand_id: null,
     material_id: null,
@@ -1323,7 +1327,7 @@ export function createType(raw: unknown): S['SpoolType'] | Response {
     ...body,
     drying_hours: body.drying_hours ?? null,
     id: newId(),
-    number: Math.max(0, ...state.types.map((t) => t.number)) + 1,
+    number: nextItemNumber(),
     filament_id: null,
     archived_at: null,
     created_at: now(),
@@ -2105,6 +2109,14 @@ export function resolveCodeText(text: string): S['Resolved'] | null {
     const kind = kindByNumber(parsed.number)
     return kind ? { kind: 'item_kind', id: kind.id, code: `K-${kind.number}`, name: kind.name, archived: !!kind.archived_at } : null
   }
+  if (parsed.prefix === 'T') {
+    const type = state.types.find((one) => one.number === parsed.number)
+    return type ? { kind: 'spool_type', id: type.id, code: `T-${type.number}`, name: [type.code, type.colour_name].filter(Boolean).join(' '), archived: !!type.archived_at } : null
+  }
+  if (parsed.prefix === 'I') {
+    const item = itemByNumber(parsed.number)
+    return item ? { kind: 'item', id: item.id, code: `I-${item.number}`, name: item.name, archived: !!item.archived_at } : null
+  }
   return null
 }
 
@@ -2255,7 +2267,7 @@ export function placeSpoolAtTray(spool: string, printer: string, ams: number, tr
   if (!place) {
     const unit = state.locations.find((one) => one.printer_id === printer && one.ams_id === ams && one.tray_id == null && !one.archived_at)
     place = {
-      number: Math.max(0, ...state.locations.map((one) => one.number)) + 1,
+      number: nextNumber(state.locations),
       printer_root: false,
       parent_id: unit?.id ?? null,
       identifier: null,
@@ -2717,7 +2729,7 @@ export const handlers = [
       const fields = normalised(body.spool)
       const made: SpoolRow[] = []
       for (let n = 0; n < quantity; n += 1) {
-        const row = { ...newSpool(fields), number: Math.max(0, ...state.spools.map((one) => one.number), ...made.map((one) => one.number)) + 1, location_id: place?.id ?? null }
+        const row = { ...newSpool(fields), number: nextNumber([...state.spools, ...made]), location_id: place?.id ?? null }
         const refused = spoolRefusal(row)
         if (refused) return refused
         // #7167 `move_on`: each spool's move into a dry box asks for its occupant, the one before it included.
@@ -3283,7 +3295,7 @@ export const handlers = [
     if (placeTaken(body)) return problem(409, REFUSED.locationExists)
     if (badRef(body, LOCATION_REFS)) return problem(422, REFUSED.catalogRef)
     const made: S['Location'] = {
-      number: Math.max(0, ...state.locations.map((place) => place.number)) + 1,
+      number: nextNumber(state.locations),
       printer_root: false,
       parent_id: null,
       identifier: null,

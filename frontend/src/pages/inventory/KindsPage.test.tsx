@@ -7,6 +7,7 @@ import { seedEntityProperties } from '../../mocks/features/entities'
 import { server } from '../../mocks/server'
 import { renderPage } from '../../test/utils'
 import { choose } from '../../test/select'
+import { filamentLinks } from '../../lib/filamentLinks'
 import { KindsPage } from './KindsPage'
 
 const bodyOf = (route: string) => inventoryMock.bodies.filter((b) => b.route === route).map((b) => b.body)
@@ -26,6 +27,12 @@ describe('KindsPage (#7067)', () => {
     expect(kindItem(part, 'Nozzle')).toHaveTextContent('units')
     expect(kindItem(tree, 'Service')).toHaveTextContent('not counted')
     expect(screen.queryByRole('tree')).toBeNull()
+  })
+
+  it('links each kind to its label', async () => {
+    renderPage(<KindsPage />)
+    const tree = await kindList()
+    expect(within(kindItem(tree, 'Hardware')).getByRole('link', { name: 'Print label for Hardware' })).toHaveAttribute('href', filamentLinks.kindLabel('hardware'))
   })
 
   it('adds a kind under a parent', async () => {
