@@ -151,11 +151,11 @@ func NoteError(ctx context.Context, pool *pgxpool.Pool, op Operation, cause erro
 		if err != nil || tag.RowsAffected() == 0 {
 			return err
 		}
-		return notifyOperation(ctx, tx, id)
+		return notifyOperation(ctx, tx, op.ID)
 	})
 }
 
-// FailOperation ends the operation id as failed: its attempt failed with an error that
+// FailOperation ends the operation op as failed: its attempt failed with an error that
 // Temporal does not retry, so no later attempt ends the row (#8256). The row keeps the
 // error and the attempt, and its problem is the one ReadOperation answers for an activity
 // that Temporal closed without a result: 500 inventory_activity_failed. As NoteError, it
@@ -174,7 +174,7 @@ func FailOperation(ctx context.Context, pool *pgxpool.Pool, op Operation, cause 
 		if err != nil || tag.RowsAffected() == 0 {
 			return err
 		}
-		return notifyOperation(ctx, tx, id)
+		return notifyOperation(ctx, tx, op.ID)
 	})
 }
 
