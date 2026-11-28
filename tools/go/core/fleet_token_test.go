@@ -5,9 +5,12 @@ import (
 	"crypto/sha256"
 	"encoding/base64"
 	"encoding/hex"
+	"net/http"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
+	"sync"
 	"testing"
 )
 
@@ -135,9 +138,15 @@ func TestAMachineBelongsToItsToken(t *testing.T) {
 	expect(t, put("/machines/"+laptopID, machineBody(), theirs).status, 200)
 
 	stolen := object("hostname", "stolen", "os", "linux", "os_user", "u", "service_version", "1")
-	for name, token := range map[string]string{"another token": theirs, "a bootstrap proof": g.rotatorToken} {
+	// The other token is the same person's and lives: machine-token-live. A proof never
+	// takes a token's machine: machine-of-another-proof.
+	for name, c := range map[string]struct{ token, reason string }{
+		"another token":     {theirs, "machine-token-live"},
+		"a bootstrap proof": {g.rotatorToken, "machine-of-another-proof"},
+	} {
+		token := c.token
 		got := put("/machines/"+machineID, stolen, token)
-		if got.status != 403 || got.body["reason"] != "machine-of-another-proof" {
+		if got.status != 403 || got.body["reason"] != c.reason {
 			t.Errorf("%s takes the machine over: %d %s", name, got.status, got.raw)
 		}
 		got = put(onMachine+uuid(), sessionBody(), token)
@@ -173,7 +182,7 @@ func TestAMachineMovesToItsPersonsNewToken(t *testing.T) {
 			// While the old token lives, the new one is refused.
 			got := put(fresh)
 			expect(t, got.status, 403)
-			expect(t, got.body["reason"], "machine-of-another-proof")
+			expect(t, got.body["reason"], "machine-token-live")
 			a.sql(kill, oldID)
 			if got := put(fresh); got.status != 200 {
 				t.Fatalf("the new token: %d %s", got.status, got.raw)
@@ -247,4 +256,63 @@ func TestAProofNeverTakesATokensMachine(t *testing.T) {
 	expect(t, got.status, 403)
 	expect(t, got.body["reason"], "machine-of-another-proof")
 	expect(t, g.count(`SELECT count(*) FROM fleet_machines WHERE token_id = $1 AND proof_name IS NULL`, id), 1)
+}
+
+// Two new tokens of the same person race for a dead token's machine: the row lock lets one
+// take it, and the other then finds a live token (#8370).
+func TestTwoNewTokensRaceForADeadTokensMachine(t *testing.T) {
+	a := newAPI(t, "fleet")
+	old, oldID := accessToken(a, "fleet")
+	put := func(token string) answer {
+		return a.do("PUT", rotatorBase+"/machines/"+machineID, machineBody(), bearer(token))
+	}
+	expect(t, put(old).status, 200)
+	a.sql(`UPDATE personal_access_tokens SET revoked_at = now() WHERE id = $1`, oldID)
+	first, firstID := accessToken(a, "fleet")
+	second, secondID := accessToken(a, "fleet")
+	var (
+		wg    sync.WaitGroup
+		start = make(chan struct{})
+		got   [2]answer
+	)
+	for i, token := range []string{first, second} {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			<-start
+			got[i] = put(token)
+		}()
+	}
+	close(start)
+	wg.Wait()
+	statuses := []int{got[0].status, got[1].status}
+	slices.Sort(statuses)
+	if statuses[0] != 200 || statuses[1] != 403 {
+		t.Fatalf("the race: %d %s, %d %s; want one 200 and one 403", got[0].status, got[0].raw, got[1].status, got[1].raw)
+	}
+	loser := got[0]
+	if loser.status == 200 {
+		loser = got[1]
+	}
+	expect(t, loser.body["reason"], "machine-token-live")
+	expect(t, a.count(`SELECT count(*) FROM fleet_machines WHERE token_id IN ($1, $2)`, firstID, secondID), 1)
+}
+
+// A refused fleet token's WebSocket handshake is a 403 with no body, before any upgrade: what
+// Python's auth_check answers when it closes the socket with 1008 before accept (Starlette
+// sends a 403 for a close before accept). Pinned in every mode.
+func TestAFleetTokensWebSocketHandshakeIsRefused(t *testing.T) {
+	for _, mode := range []string{"", "observe", "enforce"} {
+		a := newAPIInMode(t, "fleet,unknown-trays", mode)
+		token, _ := accessToken(a, "fleet")
+		got := a.do("GET", "/api/v1/filament/unknown-trays", "", bearer(token), func(r *http.Request) {
+			r.Header.Set("Connection", "Upgrade")
+			r.Header.Set("Upgrade", "websocket")
+			r.Header.Set("Sec-WebSocket-Version", "13")
+			r.Header.Set("Sec-WebSocket-Key", "dGhlIHNhbXBsZSBub25jZQ==")
+		})
+		if got.status != 403 || got.raw != "" {
+			t.Errorf("mode %q: %d %q; want a 403 with no body", mode, got.status, got.raw)
+		}
+	}
 }

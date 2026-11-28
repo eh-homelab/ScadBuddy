@@ -226,6 +226,11 @@ func run(ctx context.Context, lookupEnv func(string) (string, bool), tel *teleme
 		<-ctx.Done()
 		hub.Close()
 	}()
+	if env("SCADBUDDY_SERVICE_BOOTSTRAP_DIR") == "" {
+		// Said once at start (#8175): with no directory, no machine has its proof file.
+		slog.Warn("SCADBUDDY_SERVICE_BOOTSTRAP_DIR is unset: core refuses, and revokes, every " +
+			"fleet-rotator credential that names a machine")
+	}
 	router, err := newRouter(pool, upstream, keys, areas, env("SCADBUDDY_AUTH_MODE"), callers, tel.Meter(), lookupEnv, tel, options...)
 	if err != nil {
 		return err
@@ -638,7 +643,8 @@ func newRouter(pool *pgxpool.Pool, next http.Handler, keys *seal.Keys, areas, au
 			// fleetd's registry writes take its `fleet` access token too (#8041). Virtual
 			// senders stay service-only: a machine's token never posts as `rotator` or
 			// `github`.
-			router.AddForToken(fleet.RotatorCaller, auth.FleetScope, fleet.RegistryWrites(pool)...)
+			router.AddForToken(fleet.RotatorCaller, auth.FleetScope, fleet.RegistryWrites(pool,
+				func(machine string) bool { return resolver.HasProof(fleet.RotatorCaller, machine) })...)
 			router.Add(fleet.VirtualCaller, fleet.VirtualRoutes(pool)...)
 		case blobstore.Area:
 			// A shared area (#7958): any caller whose scopes hold crud.blobs.

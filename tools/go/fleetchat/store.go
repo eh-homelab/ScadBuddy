@@ -50,6 +50,8 @@ type Store interface {
 	// ErrNotMember when the agent is not in it.
 	Leave(ctx context.Context, sessionID, channel string) error
 	Channels(ctx context.Context, sessionID string) ([]ChannelInfo, error)
+	// ChannelExists says whether a channel has the name.
+	ChannelExists(ctx context.Context, channel string) (bool, error)
 	// Send stores the message and delivers it: to the agent of a DM, or to
 	// the channel's members at send time (sender included). It returns the
 	// message's seq and the recipients' session ids. It returns

@@ -7,6 +7,7 @@ import (
 	"errors"
 	"net/url"
 	"os"
+	"strings"
 	"testing"
 
 	"github.com/jackc/pgx/v5/pgconn"
@@ -46,6 +47,15 @@ func memberRoute(v channelVectors, session, channel string) string {
 	return "/channels/" + segment + "/members/" + session
 }
 
+// channelRoute is a channel's own route, as memberRoute names it.
+func channelRoute(v channelVectors, channel string) string {
+	segment, ok := v.Segments[channel]
+	if !ok {
+		segment = channel
+	}
+	return "/channels/" + segment
+}
+
 func TestANewChannelTakesEveryValidName(t *testing.T) {
 	a := newFleet(t)
 	ann := a.agent()
@@ -70,8 +80,15 @@ func TestNoChannelTakesAnInvalidName(t *testing.T) {
 	v := readChannelVectors(t)
 	for _, ch := range v.Invalid {
 		route := fleetBase + "/channels/~" + base64.RawURLEncoding.EncodeToString([]byte(ch)) + "/members/" + ann
-		if got := a.do("PUT", route, ""); got.status != 422 {
+		got := a.do("PUT", route, "")
+		if got.status != 422 {
 			t.Errorf("a join of %q: %d %s; want 422", ch, got.status, got.raw)
+		}
+		// The 422 names the rules a new channel follows, as fleetchat's ErrBadChannel does,
+		// and not the legacy alternative.
+		if !strings.Contains(got.raw, "an issue or PR reference (owner/repo#123)") ||
+			strings.Contains(got.raw, "should match pattern") {
+			t.Errorf("a join of %q: %s; want fleetchat's ErrBadChannel text", ch, got.raw)
 		}
 		if got := a.send(ann, ch, "hi"); ch != "" && got.status != 422 {
 			t.Errorf("a post to %q: %d %s; want 422", ch, got.status, got.raw)
@@ -97,9 +114,12 @@ func TestAnOldStyleNameIsKeptOnlyByAChannelMadeBefore(t *testing.T) {
 	for _, ch := range v.Legacy {
 		refused := a.fleet("PUT", memberRoute(v, ann, ch), "", 422)
 		expect(t, refused.body["reason"], "legacy-channel-name")
+		// fleetchat's Store.ChannelExists: 404 until the channel is there, then 200.
+		expect(t, a.fleet("GET", channelRoute(v, ch), "", 404).body["reason"], "unknown-channel")
 		if _, err := a.pool.Exec(context.Background(), `INSERT INTO fleet_channels (name) VALUES ($1)`, ch); err != nil {
 			t.Fatalf("a channel made before #8149, %q: %v", ch, err)
 		}
+		expect(t, a.fleet("GET", channelRoute(v, ch), "", 200).body["name"], ch)
 		a.fleet("PUT", memberRoute(v, ann, ch), "", 200)
 		if got := a.send(ann, ch, "hi"); got.status != 200 {
 			t.Errorf("a post to %q: %d %s", ch, got.status, got.raw)

@@ -514,6 +514,26 @@ async def test_each_machine_has_its_own_fleet_rotator_secret(tmp_path: Path) -> 
     assert await verifier.verify(laptop) == on_laptop
 
 
+async def test_the_revoke_checks_read_the_file_alone(tmp_path: Path) -> None:
+    """#8003 review: a machine whose file came after the start keeps its credentials on this
+    replica (``has_machine``, ``machines``), as core's ``HasProof`` does, but its secret mints
+    nothing here: issuing still needs the hash read at start."""
+    directory = _bootstrap_dir(tmp_path)
+    verifier = BootstrapVerifier.from_dir(directory)
+    late = secrets.token_urlsafe(32)
+    (directory / "fleet-rotator.late").write_text(late)
+    (directory / "fleet-rotator.late.bak").write_text(secrets.token_urlsafe(32))
+    assert verifier.has_machine("fleet-rotator", "late")
+    assert verifier.machines() == {"late"}
+    assert await verifier.verify(late) is None
+    # No other caller, no bad name, and no file is no machine.
+    assert not verifier.has_machine("render", "late")
+    assert not verifier.has_machine("fleet-rotator", "../late")
+    (directory / "fleet-rotator.late").unlink()
+    assert not verifier.has_machine("fleet-rotator", "late")
+    assert verifier.machines() == set()
+
+
 def test_a_fleet_rotator_secret_names_its_machine(tmp_path: Path) -> None:
     directory = _bootstrap_dir(tmp_path)
     (directory / "fleet-rotator").write_text(secrets.token_urlsafe(32))

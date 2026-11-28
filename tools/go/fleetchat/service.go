@@ -5,7 +5,6 @@ import (
 	"fmt"
 	"log/slog"
 	"regexp"
-	"slices"
 	"strings"
 	"time"
 )
@@ -143,12 +142,12 @@ func (s *Service) Join(ctx context.Context, sessionID, channel string) error {
 	if legacyOnly(channel) {
 		// Only an existing channel keeps an old-style name; a join never makes one. A
 		// ScadBuddy store refuses it too (core's channelExists); this check is for stores
-		// that do not, and it lists the channels only for such a name.
-		chans, err := s.store.Channels(ctx, sessionID)
+		// that do not, and it asks only for such a name.
+		exists, err := s.store.ChannelExists(ctx, channel)
 		if err != nil {
 			return err
 		}
-		if !slices.ContainsFunc(chans, func(c ChannelInfo) bool { return c.Name == channel }) {
+		if !exists {
 			return fmt.Errorf("%w: %q starts or ends with \"-\", which only a channel made before #8149 may", ErrBadChannel, channel)
 		}
 	}

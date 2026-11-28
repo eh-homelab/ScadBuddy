@@ -69,7 +69,17 @@ var (
 	// namePattern is a virtual sender's name or a DM's agent name.
 	namePattern   = regexp.MustCompile(`^` + legacyRule + `$`)
 	handlePattern = regexp.MustCompile(`^[0-9a-f]{8}$`)
+	// hexPattern is a name in a handle's alphabet.
+	hexPattern = regexp.MustCompile(`^[0-9a-f]+$`)
 )
+
+// badChannel is a bad {name} segment's 422: the reference and DNS rules a new channel
+// follows, word for word fleetchat's ErrBadChannel (store.go). It leaves out legacyRule, which
+// only a channel made before #8149 may keep.
+const badChannel = "channel must be, in lower case and at most 256 characters, an issue or PR " +
+	"reference (owner/repo#123), an Actions run reference (owner/repo/runs/123) or a name under " +
+	"Kubernetes' rules (a DNS-1123 subdomain: a-z, 0-9, - and ., each dot-separated part 1-63 " +
+	"characters that starts and ends with a letter or digit)"
 
 // isChannel says whether name is any channel's name.
 func isChannel(name string) bool {
@@ -92,6 +102,7 @@ func Routes(pool *pgxpool.Pool) []crud.Route {
 	return []crud.Route{
 		{Method: "POST", Path: "/agents/{session_id}/touch", Handle: f.touch},
 		{Method: "GET", Path: "/agents", Handle: f.agents},
+		{Method: "GET", Path: "/channels/{name}", Handle: f.channel},
 		{Method: "PUT", Path: "/channels/{name}/members/{session_id}", Handle: f.join},
 		{Method: "DELETE", Path: "/channels/{name}/members/{session_id}", Handle: f.leave},
 		{Method: "GET", Path: "/agents/{session_id}/channels", Handle: f.channels},
@@ -154,7 +165,7 @@ func channelOf(p crud.Params) (string, error) {
 	}
 	return "", httpx.Invalid(httpx.Issue{
 		Loc: loc,
-		Msg: fmt.Sprintf("String should match pattern '%s' and have at most %d characters", channelPattern, channelMax),
+		Msg: badChannel,
 	})
 }
 
@@ -265,6 +276,24 @@ func (f *Fleet) join(r *http.Request, p crud.Params) (any, error) {
 	return map[string]string{"joined": channel}, nil
 }
 
+// channel says whether a channel has the name (fleetchat's Store.ChannelExists): 200 with
+// its name, or 404 unknown-channel.
+func (f *Fleet) channel(r *http.Request, p crud.Params) (any, error) {
+	name, err := channelOf(p)
+	if err != nil {
+		return nil, err
+	}
+	var one int
+	err = f.Pool.QueryRow(r.Context(), `SELECT 1 FROM fleet_channels WHERE name = $1`, name).Scan(&one)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return nil, unknownChannel(name)
+	}
+	if err != nil {
+		return nil, err
+	}
+	return map[string]string{"name": name}, nil
+}
+
 // leave takes the agent out of the channel; the channel stays.
 func (f *Fleet) leave(r *http.Request, p crud.Params) (any, error) {
 	var channel string
@@ -347,6 +376,12 @@ func (f *Fleet) send(r *http.Request, _ crud.Params) (any, error) {
 	channel := b.OptText("channel", 1, channelMax, channelPattern)
 	// An agent is a handle, or a name: a DM to a virtual sender's name is refused below.
 	agent := b.OptText("agent", 1, 40, namePattern)
+	if agent != nil && namePattern.MatchString(*agent) && hexPattern.MatchString(*agent) &&
+		!handlePattern.MatchString(*agent) {
+		// All hex is a handle's alphabet, and no virtual sender's name: a wrong handle gets
+		// the handle's 422, as before #8036, not a 404.
+		b.OptText("agent", 8, 8, handlePattern)
+	}
 	// The length is checked below, in bytes, with a detail that names the limit.
 	text := b.Text("text", 1, math.MaxInt)
 	if err := b.Err(); err != nil {

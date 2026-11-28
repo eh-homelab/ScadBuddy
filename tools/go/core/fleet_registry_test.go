@@ -428,6 +428,40 @@ func TestARevokedMachineIsRefused(t *testing.T) {
 	g.write("/machines/"+machineID, machineBody(), 401)
 }
 
+// A machine provisioned again under a new proof name takes its row once the old proof is
+// dead: no file and no live credential (#8003). Until then the new proof is refused.
+func TestANewProofTakesADeadProofsMachine(t *testing.T) {
+	g := newRegistry(t)
+	g.write("/machines/"+machineID, machineBody(), 200)
+	renamed := rotatorCredential(g.api, "devbox-2")
+	put := func() answer {
+		return g.do("PUT", rotatorBase+"/machines/"+machineID, machineBody(), bearer(renamed))
+	}
+	// The old file is there.
+	got := put()
+	expect(t, got.status, 403)
+	expect(t, got.body["reason"], "machine-of-another-proof")
+	// The file is gone, but the old proof's credential still lives in the database.
+	if err := os.Remove(filepath.Join(g.bootstrap, "fleet-rotator.devbox")); err != nil {
+		t.Fatal(err)
+	}
+	got = put()
+	expect(t, got.status, 403)
+	expect(t, got.body["reason"], "machine-of-another-proof")
+	// The old credential is revoked (or expires): the new proof takes the row.
+	g.sql(`UPDATE service_credentials SET revoked_at = now() WHERE machine = 'devbox'`)
+	if got := put(); got.status != 200 {
+		t.Fatalf("the new proof: %d %s", got.status, got.raw)
+	}
+	expect(t, g.count(`SELECT count(*) FROM fleet_machines WHERE proof_name = 'devbox-2' AND token_id IS NULL`), 1)
+	if got := g.do("PUT", rotatorBase+onMachine+uuid(), sessionBody(), bearer(renamed)); got.status != 200 {
+		t.Fatalf("the new proof's session: %d %s", got.status, got.raw)
+	}
+	// A token still never takes a proof's machine, nor a proof a token's.
+	token, _ := accessToken(g.api, "fleet")
+	expect(t, g.do("PUT", rotatorBase+"/machines/"+machineID, machineBody(), bearer(token)).body["reason"], "machine-of-a-proof")
+}
+
 // One Claude Code session id can run on two machines at once. Each machine writes its own
 // row of the session, and no machine changes another machine's row.
 func TestASessionRunsOnSeveralMachines(t *testing.T) {

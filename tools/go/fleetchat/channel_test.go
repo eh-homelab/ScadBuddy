@@ -127,6 +127,13 @@ func TestAnOldStyleNameIsKeptOnlyByAnExistingChannel(t *testing.T) {
 	if err := svc.Join(ctx, sidA, "-ops"); err != nil {
 		t.Fatalf("a join of an existing \"-ops\": %v", err)
 	}
+	// Each old-style join asks the store about its one channel; a new-style one asks nothing.
+	if st.existsAsked != 2 {
+		t.Errorf("ChannelExists asked %d times; want 2", st.existsAsked)
+	}
+	if err := svc.Join(ctx, sidA, "ops"); err != nil || st.existsAsked != 2 {
+		t.Errorf("a join of \"ops\": %v, ChannelExists asked %d times; want 2", err, st.existsAsked)
+	}
 	if _, err := svc.Send(ctx, sidA, Target{Channel: "-ops"}, "hi"); err != nil {
 		t.Errorf("a post to \"-ops\": %v", err)
 	}

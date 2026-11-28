@@ -123,6 +123,14 @@ func anotherProof() error {
 		"another machine's token or proof registered that machine", "machine-of-another-proof")
 }
 
+// tokenLive is the 403 for a token of the machine's person while the token that registered
+// the machine still lives: one live token is one machine.
+func tokenLive() error {
+	return httpx.WithReason(http.StatusForbidden,
+		"that machine's token still lives: revoke it (or let it expire) before a new token takes "+
+			"the machine", "machine-token-live")
+}
+
 // anotherPerson is the 403 for a token on a machine whose dead token was another person's.
 func anotherPerson() error {
 	return httpx.WithReason(http.StatusForbidden,
@@ -154,9 +162,14 @@ func RegistryReads(pool *pgxpool.Pool) []crud.Route {
 }
 
 // RegistryWrites are caller fleet-rotator's registry routes, under
-// /api/v1/internal/crud/fleet-rotator.
-func RegistryWrites(pool *pgxpool.Pool) []crud.Route {
-	w := &registryWriter{Fleet: Fleet{Pool: pool}}
+// /api/v1/internal/crud/fleet-rotator. hasProof says whether a machine's bootstrap proof
+// file fleet-rotator.<machine> is there now (auth.Resolver.HasProof); nil is no file for
+// any machine.
+func RegistryWrites(pool *pgxpool.Pool, hasProof func(machine string) bool) []crud.Route {
+	if hasProof == nil {
+		hasProof = func(string) bool { return false }
+	}
+	w := &registryWriter{Fleet: Fleet{Pool: pool}, hasProof: hasProof}
 	f := &w.Fleet
 	return []crud.Route{
 		{Method: "PUT", Path: "/machines/{id}", Handle: w.putMachine, MaxBody: registryBodyMax},
@@ -187,13 +200,17 @@ func (m *machine) targets() []any {
 
 type registryWriter struct {
 	Fleet
+	hasProof func(machine string) bool
 }
 
 // putMachine registers the machine under the caller's token or proof name, or refreshes its
 // facts and last_seen. A machine another token or proof registered is a 403, unless its
 // owner is dead: a token's machine moves to a new token of the same person once the old
-// token is revoked or expired. A token never takes a proof's machine (403 machine-of-a-proof:
-// an admin deletes the row first), and a proof never takes a token's machine. The row is locked while this decides.
+// token is revoked or expired, and a proof's machine moves to a new proof once the old
+// proof's file is gone and it has no live credential (a machine provisioned again under a
+// new name). A token never takes a proof's machine (403 machine-of-a-proof: an admin deletes
+// the row first), and a proof never takes a token's machine. The row is locked while this
+// decides.
 func (f *registryWriter) putMachine(r *http.Request, p crud.Params) (any, error) {
 	own, err := ownerOf(r)
 	if err != nil {
@@ -263,8 +280,18 @@ func (f *registryWriter) mayTake(ctx context.Context, tx pgx.Tx, row, own owner)
 		return nil
 	}
 	if own.token == nil {
-		// A proof never takes another owner's machine.
-		return anotherProof()
+		// A proof never takes a token's machine, nor a live proof's.
+		if row.proof == nil {
+			return anotherProof()
+		}
+		dead, err := f.proofDead(ctx, tx, *row.proof)
+		if err != nil {
+			return err
+		}
+		if !dead {
+			return anotherProof()
+		}
+		return nil
 	}
 	if row.proof != nil {
 		// A proof has no person, so no token can show it is the machine's: fail closed.
@@ -286,9 +313,22 @@ func (f *registryWriter) mayTake(ctx context.Context, tx pgx.Tx, row, own owner)
 		return anotherPerson()
 	}
 	if !dead {
-		return anotherProof()
+		return tokenLive()
 	}
 	return nil
+}
+
+// proofDead says whether the proof name has no file in the bootstrap directory and no live
+// (unrevoked, unexpired) fleet-rotator credential: no machine holds that proof now.
+func (f *registryWriter) proofDead(ctx context.Context, tx pgx.Tx, proof string) (bool, error) {
+	if f.hasProof(proof) {
+		return false, nil
+	}
+	var live bool
+	err := tx.QueryRow(ctx, `SELECT EXISTS (SELECT 1 FROM service_credentials
+		WHERE caller = $1 AND machine = $2 AND revoked_at IS NULL AND expires_at > now())`,
+		RotatorCaller, proof).Scan(&live)
+	return !live, err
 }
 
 // putSession writes the session's row on the machine whole: an optional field left out is

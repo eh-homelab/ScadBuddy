@@ -19,7 +19,9 @@ type fakeStore struct {
 	cursor    map[string]int64
 	lastLimit int
 	touches   int
-	virtual   map[string]string // virtual sender name -> reject message
+	// existsAsked counts ChannelExists calls.
+	existsAsked int
+	virtual     map[string]string // virtual sender name -> reject message
 }
 
 const rotatorReject = `"rotator" is the login rotator, a virtual sender: it reads no messages.`
@@ -95,6 +97,14 @@ func (f *fakeStore) Channels(_ context.Context, sessionID string) ([]ChannelInfo
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].Name < out[j].Name })
 	return out, nil
+}
+
+func (f *fakeStore) ChannelExists(_ context.Context, channel string) (bool, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.existsAsked++
+	_, ok := f.members[channel]
+	return ok, nil
 }
 
 func (f *fakeStore) Send(_ context.Context, sessionID string, t Target, text string) (int64, []string, error) {

@@ -240,6 +240,36 @@ def test_a_fleet_rotator_credential_lives_only_while_its_machines_proof_does(
         assert credentials.resolve(t2) is None
 
 
+def test_the_sweep_reads_the_proof_files_now_not_at_start(settings: Settings) -> None:
+    """#8003 review: a machine read at start whose file is gone at sweep time is revoked by
+    the sweep, and a machine whose file came after this replica's start (a new machine, its
+    credential issued by a newer replica) is revoked neither by the sweep nor at resolve."""
+    from scadbuddy.main import _rotate_service_credentials, create_app
+
+    bootstrap = settings.service_bootstrap_dir
+    assert bootstrap is not None
+    (bootstrap / "fleet-rotator.old").write_text(secrets.token_urlsafe(32))
+    app = create_app(settings)
+    with TestClient(app, base_url=PUBLIC):
+        state = getattr(app.state, STATE_ATTR)
+        credentials = state.components.get(AUTH).credentials
+        old = credentials.issue("fleet-rotator", "bootstrap", machine="old", rate_limited=False)
+        # The new machine's file comes after this replica's start.
+        (bootstrap / "fleet-rotator.new").write_text(secrets.token_urlsafe(32))
+        new = credentials.issue("fleet-rotator", "bootstrap", machine="new", rate_limited=False)
+        # The old machine's file goes; the sweep comes before any resolve.
+        (bootstrap / "fleet-rotator.old").unlink()
+        _rotate_service_credentials(state)
+        live = {
+            row.machine
+            for row in credentials.list()
+            if row.caller == "fleet-rotator" and row.revoked_at is None
+        }
+        assert live == {"new"}
+        assert credentials.resolve(old.token) is None
+        assert credentials.resolve(new.token) is not None
+
+
 def test_rate_limited_per_pod_with_retry_after(client: TestClient, app: FastAPI) -> None:
     for _ in range(6):
         assert _exchange(client, JWT_PRINT).status_code == 200
