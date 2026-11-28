@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgxpool"
 )
 
 // fakeTemporal answers a Describe as the test says, and counts the calls.
@@ -269,5 +270,69 @@ func TestACompletedActivityWhoseRowRunsReadsItsLedger(t *testing.T) {
 	got, _, err = ReadOperation(ctx, pool, "lost", completed)
 	if err != nil || got.Status != "failed" || got.Error.Extensions["code"] != "inventory_activity_failed" {
 		t.Fatalf("%+v %v", got, err)
+	}
+}
+
+// aged writes a row of id with the status, changed ago (and finished ago, unless running).
+func aged(t *testing.T, pool *pgxpool.Pool, id, status, ago string) {
+	t.Helper()
+	if _, err := pool.Exec(context.Background(), `INSERT INTO inventory_operations
+		(id, kind, status, created_at, updated_at, finished_at)
+		VALUES ($1, 'inventory.Test', $2::text, now() - $3::interval, now() - $3::interval,
+			CASE WHEN $2::text = 'running' THEN NULL ELSE now() - $3::interval END)`,
+		id, status, ago); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func operationIDs(t *testing.T, pool *pgxpool.Pool) []string {
+	t.Helper()
+	rows, err := pool.Query(context.Background(), `SELECT id FROM inventory_operations ORDER BY id`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ids, err := pgx.CollectRows(rows, pgx.RowTo[string])
+	if err != nil {
+		t.Fatal(err)
+	}
+	return ids
+}
+
+func TestAStartPrunesFinishedOperationsPastTheRetention(t *testing.T) {
+	pool := setup(t)
+	ctx := context.Background()
+	aged(t, pool, "old-failed", "failed", "9 days")
+	aged(t, pool, "old-running", "running", "30 days")
+	aged(t, pool, "old-succeeded", "succeeded", "9 days")
+	// Past the ledger's 7 days, but inside the retention: it stays.
+	aged(t, pool, "ledger-gone", "succeeded", "7 days 12 hours")
+	aged(t, pool, "recent", "succeeded", "1 hour")
+	op := Operation{ID: "new", Kind: "inventory.Test", Attempt: 1, Actor: Actor(browser)}
+	if err := StartOperation(ctx, pool, op); err != nil {
+		t.Fatal(err)
+	}
+	got := operationIDs(t, pool)
+	want := []string{"ledger-gone", "new", "old-running", "recent"}
+	if len(got) != len(want) {
+		t.Fatalf("rows %v, want %v", got, want)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("rows %v, want %v", got, want)
+		}
+	}
+}
+
+func TestAStartKeepsTheOldFinishedRowOfItsOwnKey(t *testing.T) {
+	pool := setup(t)
+	ctx := context.Background()
+	aged(t, pool, "replayed", "succeeded", "9 days")
+	op := Operation{ID: "replayed", Kind: "inventory.Test", Attempt: 1, Actor: Actor(browser)}
+	if err := StartOperation(ctx, pool, op); err != nil {
+		t.Fatal(err)
+	}
+	if n := count(t, pool, `SELECT count(*) FROM inventory_operations
+		WHERE id = 'replayed' AND status = 'succeeded' AND finished_at < now() - interval '8 days'`); n != 1 {
+		t.Fatalf("the replayed key's row changed: %d", n)
 	}
 }

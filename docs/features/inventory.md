@@ -51,6 +51,12 @@ no log row (NOTIFY only; `tools/go/core/internal/bus/event.go`,
 `backend/scadbuddy/agent_changes/hub.py`). Python's `ActivityIndex.ingest_inventory_operation`
 turns it into an `activity` row (R-K1-22).
 
+A finished row (`succeeded` or `failed`) stays 8 days after its end. Then the next start of
+an activity deletes it (`tools/go/core/internal/inventory/store/operations.go`
+`pruneOperations`, #8438). A `running` row is never deleted. The 8 days are longer than the
+7 days that `crud_requests` keeps an `inventory` key, so a replay of the key and a read of
+its operation still find the row. The `activity` row stays after its source row is gone.
+
 ### The class and the steps
 
 A kind answers a **class** with four keys (`tools/go/core/internal/inventory/model/class.go`,
