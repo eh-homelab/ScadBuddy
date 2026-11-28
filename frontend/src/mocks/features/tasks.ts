@@ -1,4 +1,5 @@
 import { HttpResponse, http } from 'msw'
+import { resolveCodeText } from './filament'
 import type { AnswerProblem, Task, TaskQuestion } from '../../api/types'
 
 /**
@@ -12,6 +13,9 @@ import type { AnswerProblem, Task, TaskQuestion } from '../../api/types'
 
 /** The task `run-prompt` (`flows.ts`) waits on. */
 export const PROMPT_TASK_ID = '5f0c7a52-3c1d-4c53-9d0e-7b1a2f6e8c41'
+
+/** The scan task waiting at the Workshop station (#8062): it expects spool S-9. */
+export const STATION_TASK_ID = '8062a2a2-0000-4000-8000-000000000001'
 
 const INVALID = 'https://scadbuddy.dev/problems/tasks/invalid-answer'
 const NOT_OPEN = 'https://scadbuddy.dev/problems/tasks/not-open'
@@ -67,6 +71,29 @@ function defaults(): Task[] {
       created_at: at(2),
       updated_at: at(2),
     },
+    {
+      id: STATION_TASK_ID,
+      run_id: 'run-station',
+      title: 'Shelve the new spool',
+      schema: {
+        type: 'object',
+        properties: {
+          spool: { type: 'string', title: 'Spool', 'x-sb-widget': 'scan', expects: { codes: ['S-9'] } },
+        },
+        required: ['spool'],
+      },
+      context: [{ text: 'Scan the gold spool, then put it on the shelf.' }],
+      // A station's place is its location's code: the Workshop is L-1.
+      place: 'L-1',
+      ui: null,
+      expires_at: null,
+      state: 'open',
+      answer: null,
+      answered_by: null,
+      admitted_by: null,
+      created_at: at(1),
+      updated_at: at(1),
+    },
   ]
 }
 
@@ -94,6 +121,27 @@ export function taskAnswers(): readonly { id: string; key: string | null; body: 
 /** Tests: a task as the server has it now; `updated_at` moves on with it. */
 export function setTask(id: string, fields: Partial<Task>): void {
   tasks = tasks.map((task) => (task.id === id ? { ...task, updated_at: new Date().toISOString(), ...fields } : task))
+}
+
+/** Tests: adds a task, as the server would hold it. */
+export function addTask(task: Partial<Task> & Pick<Task, 'id' | 'title'>): Task {
+  const made: Task = {
+    run_id: 'run-station',
+    schema: { type: 'object', properties: {} },
+    context: [],
+    place: null,
+    ui: null,
+    expires_at: null,
+    state: 'open',
+    answer: null,
+    answered_by: null,
+    admitted_by: null,
+    created_at: at(1),
+    updated_at: at(1),
+    ...task,
+  }
+  tasks = [...tasks, made]
+  return made
 }
 
 /** A task as a run's page has it: without its answer. Null for a call that has none. */
@@ -149,6 +197,30 @@ function problemsOf(schema: Task['schema'], answer: Record<string, unknown>): An
 }
 
 export const handlers = [
+  http.get('/api/v1/tasks', ({ request }) => {
+    const query = new URL(request.url).searchParams
+    const state = query.get('state') ?? 'open'
+    const place = query.get('place')
+    const code = query.get('code')
+    const resolved = code ? resolveCodeText(code) : null
+    if (code && !resolved) return problem(422, 'That is not a code.')
+    // The server's rule: the code is one of a scan field's `codes`, or its kind one of `kinds`.
+    const waits = (task: Task) =>
+      Object.values((task.schema['properties'] ?? {}) as Record<string, Record<string, unknown>>).some((prop) => {
+        const expects = prop['expects'] as { kinds?: string[]; codes?: string[] } | undefined
+        return (
+          prop['x-sb-widget'] === 'scan' &&
+          !!expects &&
+          !!resolved &&
+          (!!expects.kinds?.includes(resolved.kind) || !!expects.codes?.some((one) => one.toUpperCase() === resolved.code))
+        )
+      })
+    const found = tasks
+      .filter((task) => task.state === state && (!place || task.place === place) && (!code || (task.state === 'open' && waits(task))))
+      .sort((a, b) => a.created_at.localeCompare(b.created_at))
+      .map(({ answer: _answer, answered_by: _by, ...question }) => question)
+    return HttpResponse.json({ tasks: found })
+  }),
   http.get('/api/v1/tasks/:id', ({ params }) => {
     const found = tasks.find((task) => task.id === params['id'])
     return found ? HttpResponse.json(found) : problem(404, 'No such task.')

@@ -66,6 +66,9 @@ const PAGES = [
   // A place's page and a scanned code (#6955): the code opens the place, slot 1 of AMS-A.
   `/filament/locations/${L.AMS_A1}`,
   '/x/L-4',
+  // Flow task stations (#8062): the list of stations, and the Workshop's open tasks.
+  '/station',
+  `/station/${L.WORKSHOP}`,
   '/filament/catalog',
   '/filament/metrics',
   '/filament/shopping-list',

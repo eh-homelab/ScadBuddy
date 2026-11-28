@@ -52,6 +52,7 @@ const SettingsPage = lazyRetry(async () => ({ default: (await import('./pages/Se
 const StorefrontPage = lazyRetry(async () => ({ default: (await import('./pages/StorefrontPage')).StorefrontPage }))
 const StorefrontListingPage = lazyRetry(async () => ({ default: (await import('./pages/StorefrontListingPage')).StorefrontListingPage }))
 const VersionsPage = lazyRetry(async () => ({ default: (await import('./pages/VersionsPage')).VersionsPage }))
+const StationPage = lazyRetry(async () => ({ default: (await import('./pages/StationPage')).StationPage }))
 const WorkflowRunPage = lazyRetry(async () => ({ default: (await import('./pages/WorkflowRunPage')).WorkflowRunPage }))
 const WorkflowsPage = lazyRetry(async () => ({ default: (await import('./pages/WorkflowsPage')).WorkflowsPage }))
 // #3653 — the component gallery, in the mocked build only: a production bundle has neither
@@ -169,6 +170,8 @@ export function App() {
         <Route path="customers/:id" element={<CustomerPage />} />
         <Route path="storefront" element={<StorefrontPage />} />
         <Route path="storefront/listings/:id" element={<StorefrontListingPage />} />
+        <Route path="station" element={<StationPage />} />
+        <Route path="station/:place" element={<StationPage />} />
         <Route path="workflows" element={<WorkflowsPage />} />
         <Route path="workflows/flows" element={<WorkflowsPage tab="flows" />} />
         <Route path="workflows/flows/:id" element={<FlowPage />} />

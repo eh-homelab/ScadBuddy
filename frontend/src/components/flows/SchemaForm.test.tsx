@@ -2,7 +2,6 @@ import { fireEvent, screen } from '@testing-library/react'
 import { describe, expect, it, vi } from 'vitest'
 import type { AnswerProblem } from '../../api/types'
 import { renderPage } from '../../test/utils'
-import { choose } from '../../test/select'
 import { SchemaForm } from './SchemaForm'
 
 // #7364 — the form drawn from a JSON schema: a flow's inputs, and a prompt's answer.
@@ -73,10 +72,10 @@ describe('SchemaForm (#7364)', () => {
     })
     await user.click(press())
     expect(onSubmit).toHaveBeenLastCalledWith({ copies: 2, also_sms: false })
-    await choose(user, screen.getByRole('combobox', { name: /colour/ }), 'blue')
+    await user.click(screen.getByRole('radio', { name: 'blue' }))
     await user.type(screen.getByRole('spinbutton', { name: /size/ }), '1.5')
     await user.type(screen.getByRole('textbox', { name: /tags/ }), 'a{Enter}b')
-    await user.click(screen.getByRole('checkbox', { name: /also_sms/ }))
+    await user.click(screen.getByRole('switch', { name: /also_sms/ }))
     await user.click(press())
     expect(onSubmit).toHaveBeenLastCalledWith({ colour: 'blue', copies: 2, size: 1.5, tags: ['a', 'b'], also_sms: true })
   })

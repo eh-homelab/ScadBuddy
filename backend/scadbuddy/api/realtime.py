@@ -159,6 +159,7 @@ from scadbuddy.core.origins import origin_allowed as origin_allowed
 from scadbuddy.library.outputs import OUTPUT_ID_PATTERN
 from scadbuddy.library.settings_store import PUBLIC_URL
 from scadbuddy.library.slugs import MAX_MODEL_ID_LENGTH, MODEL_ID_PATTERN
+from scadbuddy.tasks.models import folded_place
 
 logger = logging.getLogger(__name__)
 
@@ -273,7 +274,12 @@ def topics_of(event: AnyEvent) -> list[str]:
             return ["flows"]
         case TaskChanged():
             topics = ["tasks", f"task:{event.task_id}"]
-            return [*topics, f"tasks:{event.place}"] if event.place else topics
+            if not event.place:
+                return topics
+            # A task opened before #8062 kept its place as it was given (`l7`): its
+            # station listens on the folded one (`L-7`).
+            places = dict.fromkeys((event.place, folded_place(event.place)))
+            return [*topics, *(f"tasks:{place}" for place in places)]
         case PreviewSliceEvent():
             return [f"preview-slice:{event.slicer}:{event.job_id}"]
         case PrinterEvent() | CameraFeedEvent() | CameraReconnectEvent():

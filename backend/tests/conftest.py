@@ -1051,3 +1051,22 @@ def one_whole_read_at_a_time(tmp_path_factory: pytest.TempPathFactory) -> Iterat
     with lock.open("a") as handle:
         fcntl.flock(handle, fcntl.LOCK_EX)
         yield
+
+
+@pytest.fixture
+def waits_before_8062(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A new run's `wait_for_human` takes the path of a call from before #8062: the text
+    callback, with no task. Prod reaches that path only in a replay, so a live test of the
+    text answer (`flow_answer`, `POST /workflow-runs/{id}/answer`) takes this fixture. The
+    in-process worker shares `temporalio.workflow` with the test: the sandbox passes
+    `temporalio` through."""
+    from temporalio import workflow
+
+    from scadbuddy.workflows.flow_tools import HUMAN_PROMPT_PATCH
+
+    patched = workflow.patched
+
+    def before(patch_id: str) -> bool:
+        return not patch_id.startswith(f"{HUMAN_PROMPT_PATCH}:") and patched(patch_id)
+
+    monkeypatch.setattr(workflow, "patched", before)

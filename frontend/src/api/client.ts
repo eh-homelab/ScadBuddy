@@ -149,6 +149,7 @@ import type {
   FlowDecided,
   FlowProposal,
   Task,
+  TaskQuestion,
   FlowRunQueue,
   FlowCommitMessage,
   FlowDefinition,
@@ -1266,6 +1267,14 @@ export const api = {
       method: 'POST',
       body: JSON.stringify({ call_id: callId, answer }),
     }),
+
+  /** #8062 — the open tasks at a place, for a code, or for the signed-in person; oldest first. */
+  listTasks: (filter: { place?: string; code?: string; assignee?: 'me'; limit?: number }) => {
+    const params = new URLSearchParams()
+    for (const [name, value] of Object.entries(filter)) if (value) params.set(name, String(value))
+    const text = params.toString()
+    return request<{ tasks: TaskQuestion[] }>(`/tasks${text ? `?${text}` : ''}`).then((body) => body.tasks)
+  },
 
   /** #7364 — a flow prompt's task, its answer too. */
   getTask: (id: string) => request<Task>(`/tasks/${seg(id)}`),

@@ -2918,13 +2918,16 @@ _LOCATION_REFUSED = (CatalogRefError, LocationExistsError, LocationCycleError, B
         "The places spools sit in (room, shelf, bin, AMS tray) nested under their parents, "
         "each level by sort order then name. Each carries `spool_count`, the unarchived "
         "spools in it, and its `children`. Archived places only with `include_archived`; a "
-        "place whose parent is left out is then a root."
+        "place whose parent is left out is then a root. With `station=true`, only the "
+        "stations for flow tasks (#8062), flat and by name."
     ),
 )
 async def list_locations(
-    filament: FilamentDep, include_archived: bool = False
+    filament: FilamentDep, include_archived: bool = False, station: bool = False
 ) -> list[m.LocationNode]:
-    return await asyncio.to_thread(filament.locations.tree, include_archived=include_archived)
+    return await asyncio.to_thread(
+        filament.locations.tree, include_archived=include_archived, station=station
+    )
 
 
 @router.post(

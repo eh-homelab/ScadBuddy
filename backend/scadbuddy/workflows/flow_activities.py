@@ -3,6 +3,7 @@ its row, the `close` that ends its execution, and its prompts' tasks (#7364)."""
 
 import asyncio
 from collections.abc import Callable
+from functools import partial
 from typing import TYPE_CHECKING, Any, Literal, Protocol
 
 from pydantic import ValidationError
@@ -64,7 +65,9 @@ class FlowActivities:
 class RunTasks(Protocol):
     """Where a run's tasks are written: `RemoteTasks`, or the API's own `TasksComponent`."""
 
-    async def open(self, task: TaskOpen, *, workflow_run_id: str | None = None) -> Task: ...
+    async def open(
+        self, task: TaskOpen, *, widgets: bool = False, workflow_run_id: str | None = None
+    ) -> Task: ...
 
     async def close(
         self,
@@ -132,8 +135,12 @@ class FlowTaskActivities:
         script's (#7437, #7688)."""
         try:
             # Off the loop: the check of a default runs its pattern.
-            checked = await asyncio.to_thread(TaskOpen.model_validate, task)
-            await self._tasks.open(checked, workflow_run_id=_execution())
+            # A task from before #8062 has no `widgets` key: the rules it was asked under.
+            widgets = task.get("widgets") is True
+            checked = await asyncio.to_thread(
+                partial(TaskOpen.model_validate, task, context={"widgets": widgets})
+            )
+            await self._tasks.open(checked, widgets=widgets, workflow_run_id=_execution())
         except ValidationError as error:
             raise _refused(TASK_REFUSED, open_problems(error)) from None
         except RunEndedError:

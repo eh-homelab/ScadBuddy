@@ -277,9 +277,10 @@ output, queue a print, arrange. `tool(...)` and `agent_session(...)` go to the a
 `agent-tools` queue. Triggers start `FlowTriggerFire` (`scadbuddy/workflows/flow_triggers.py:55`)
 from a Temporal Schedule or a bus event (`scadbuddy/flow_triggers/events.py:166-196`).
 
-A script's question to a person is a harness callback tool. `wait_for_human` waits on
-`human_answer_open` and `prompt` on `task_answer` (`flow_tools.py`), both with no default
-limit. A prompt also has a row in `tasks`, which the activities `flow_task_open`,
+A script's question to a person is a harness callback tool. `prompt`, and since #8062
+`wait_for_human` (`HUMAN_PROMPT_PATCH`), wait on `task_answer` (`flow_tools.py`), with no
+default limit; a `wait_for_human` from before replays on `human_answer_open` or
+`human_answer`. Such a question also has a row in `tasks`, which the activities `flow_task_open`,
 `flow_task_answered` and `flow_task_close` write through the API
 (`scadbuddy/workflows/flow_activities.py` `FlowTaskActivities`). The answers are the
 operation kinds `flow_answer` and `task_answer` on `projects`, and `flow_agent_answer` for an
@@ -287,6 +288,18 @@ assistant that the setting `flow_answerers` or the run's grant admits (#7471;
 `scadbuddy/flows/operations.py` `flow_kinds`). A grant-admitted answer is recorded only
 while the grant chain is in force (`FlowStore.record_decision`, 409 `grant_lapsed` over the
 CRUD route).
+A prompt's scan fields that name `expects` also put `kind:<kind>` and `code:<CODE>` entries in
+the task's `expects` column (`scadbuddy/tasks/widgets.py` `expects_entries`), which
+`GET /tasks?code=` reads, and the task keeps its `assignee`. A change of what `prompt` or
+`wait_for_human` checks or opens is a Temporal patch, because a refusal there schedules
+nothing and a replayed run must refuse as it did. `HUMAN_PROMPT_PATCH` gates the task of a
+`wait_for_human`, and `PROMPT_WIDGETS_PATCH` (a patch id per call) gates the widget keys
+and the checked context blocks of a `prompt`: a call from before replays with the rules it
+was checked by (`scadbuddy/tasks/models.py` `BEFORE_WIDGETS`). The open activity and the CRUD
+route that opens the task check by the same rules: a call under `PROMPT_WIDGETS_PATCH` puts
+`widgets: true` in the activity's input, which the client sends on
+(`backend/scadbuddy/api/crud_tasks.py` `OpenWrite`). A task without it, from an older call or
+from a worker from before #8062 during a rollout, is checked by the rules from before.
 See [features/flows.md](../features/flows.md#questions-to-a-person).
 
 ## Housekeeping

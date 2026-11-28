@@ -252,7 +252,7 @@ def test_list_filters_by_place(store: TaskStore) -> None:
     store.open(_task("b", place="room/b"))
     store.open(_task("c"))
     store.mark_answered("c", {"ok": True}, "u1", "x")
-    assert [t.id for t in store.list(place="room/a")] == ["a"]
+    assert [t.id for t in store.list(places=("room/a",))] == ["a"]
     assert sorted(t.id for t in store.list()) == ["a", "b"]
     assert [t.id for t in store.list(state="answered")] == ["c"]
     assert len(store.list(state=None)) == 3

@@ -27,7 +27,14 @@ with workflow.unsafe.imports_passed_through():
     from temporal_agent_harness.harness.agent_workflow import AgentWorkflowRunner
 
     from scadbuddy.flows.inputs import InputsError, filled, inputs_model
-    from scadbuddy.tasks.models import UNCHECKED_DEFAULTS, TaskOpen, open_problems
+    from scadbuddy.tasks.models import (
+        BEFORE_WIDGETS,
+        HUMAN_ANSWER_SCHEMA,
+        TASK_TITLE_MAX,
+        UNCHECKED_DEFAULTS,
+        TaskOpen,
+        open_problems,
+    )
     from scadbuddy.workflows.flow_activities import (
         FLOW_TASK_ANSWERED,
         FLOW_TASK_CLOSE,
@@ -78,6 +85,13 @@ OPEN_WAIT = timedelta(days=3650)
 #: `wait_for_human` has no limit but its `timeout_s` (#7364). One id per call, as
 #: `FLOW_PINNED_CALL_PATCH`, so that a run from before asks its next question openly.
 WAIT_OPEN_PATCH = "flow-open-wait-7364"
+#: `wait_for_human` opens a task with one text field, as `prompt()` does (#8062). One id
+#: per call, as `WAIT_OPEN_PATCH`: a run from before asks its next question as a task.
+HUMAN_PROMPT_PATCH = "flow-human-prompt-8062"
+#: `prompt()` takes the widget keys of a property (`x-sb-widget`, `expects`, `kind`) and
+#: checks its context's blocks (#8062). One id per call, as `HUMAN_PROMPT_PATCH`: a call
+#: from before replays with the rules it was checked by (`tasks/models.BEFORE_WIDGETS`).
+PROMPT_WIDGETS_PATCH = "flow-prompt-widgets-8062"
 #: One try of a prompt's task write, past the CRUD client's own budget
 #: (`crud/client.UNAVAILABLE_BUDGET`). Tried again without limit: the task and the run
 #: must agree.
@@ -123,19 +137,46 @@ def _people_only(people_only: bool) -> bool:
     return people_only
 
 
+def _human_question(question: str) -> tuple[str, list[dict[str, Any]]]:
+    """The title and context of a `wait_for_human`'s task. A question longer than a title
+    is cut to fit, and the whole question is a text block of the context."""
+    if len(question) <= TASK_TITLE_MAX:
+        return question, []
+    return question[: TASK_TITLE_MAX - 1] + "…", [{"text": question}]
+
+
 @agent.tool_defn(inherently_safe=True)
 async def wait_for_human(
     question: str, timeout_s: int | None = None, people_only: bool = False
 ) -> HumanAnswer:
     """Ask a person `question` and wait for the answer, with no limit unless `timeout_s`
-    (at least 10 seconds) sets one. Raises TimeoutError if nobody answers in that time.
-    With `people_only`, only a person may answer; otherwise the setting `flow_answerers`
-    or the run's grant may also let an assistant answer."""
+    (at least 10 seconds) sets one. The question is a task with one text field, as a
+    `prompt` is. A question longer than a task title (500 characters) is cut in the title
+    and shown whole in the task's context, up to 4000 characters. Raises ValueError for a
+    question or timeout_s it does not take, and TimeoutError if nobody answers in that
+    time. With `people_only`, only a person may answer; otherwise the setting
+    `flow_answerers` or the run's grant may also let an assistant answer."""
     people_only = _people_only(people_only)
     timeout_s = _wait_s(timeout_s)
     owner: StepOwner = workflow.instance()
     drawn = workflow.random().getstate() if timeout_s and timeout_s > MAX_WAIT_S else None
     call_id = str(workflow.uuid4())
+    if workflow.patched(f"{HUMAN_PROMPT_PATCH}:{call_id}"):
+        title, context = _human_question(question)
+        asked = await _task_wait(
+            owner,
+            call_id,
+            "wait_for_human",
+            title,
+            HUMAN_ANSWER_SCHEMA,
+            timeout_s,
+            people_only,
+            # The task path is new with #8062: it has the rules of #8062 from its first call.
+            widgets=True,
+            context=context,
+        )
+        return HumanAnswer(answer=asked["answer"])
+    # Replaying a call from before #8062: the callback path, as it was.
     callback = human_answer_open
     if not workflow.patched(f"{WAIT_OPEN_PATCH}:{call_id}"):
         # Replaying a call from before it.
@@ -173,17 +214,22 @@ async def task_answer(  # type: ignore[empty-body]
     ...
 
 
-def _prompt_task(call_id: str, run_id: str, **fields: Any) -> dict[str, Any]:
+def _prompt_task(call_id: str, run_id: str, *, widgets: bool, **fields: Any) -> dict[str, Any]:
     """The prompt's task as the open activity takes it. ValueError names what is wrong.
+    Without ``widgets``, it checks by the rules from before #8062 (`PROMPT_WIDGETS_PATCH`).
 
     A refusal here schedules nothing, so a run replays only if its calls are refused and
     taken as they were. A change of what this takes needs a patch, in either direction: a
     rule added, a rule loosened, or a dependency bump that moves one."""
     try:
         task = TaskOpen.model_validate(
-            {"id": call_id, "run_id": run_id, **fields}, context=UNCHECKED_DEFAULTS
+            {"id": call_id, "run_id": run_id, **fields},
+            context=UNCHECKED_DEFAULTS if widgets else BEFORE_WIDGETS,
         )
-        return task.model_dump(mode="json", by_alias=True)
+        dumped = task.model_dump(mode="json", by_alias=True)
+        # The open activity and the route check it by the same rules. A call from before
+        # #8062 adds no key, so its activity's input is as it was.
+        return dumped | {"widgets": True} if widgets else dumped
     except ValidationError as err:
         raise ValueError(open_problems(err)) from None
     except TypeError:
@@ -217,38 +263,89 @@ async def prompt(
     ui: str | None = None,
     timeout_s: int | None = None,
     people_only: bool = False,
+    assignee: str | None = None,
 ) -> dict[str, Any]:
     """Ask a person the question `title` and wait for a typed answer, with no limit unless
     `timeout_s` (at least 10 seconds) sets one. `schema` declares the answer's fields as a
     flow's inputs.json does, and a string may also have a `format` of `email`, `date` or
     `date-time`. Returns the answer as a dict by field name. A field left out is its
     default; with no default, a boolean is False and any other field is None. `context` is
-    a list of JSON objects kept with the question, `place` the name of the place that shows
-    it, and `ui` the name of its screen. `title`, `context` and `ui` are limited in size,
+    a list of JSON objects kept with the question, `place` the code of the station that
+    shows it (a location's code, such as `L-7`; `l7` is stored as `L-7`), and `ui` the name
+    of its screen. `title`, `context` and `ui` are limited in size,
     and a refusal names the limit. Raises ValueError for a schema, title, context, place,
-    ui or timeout_s it does not take, and for an answer that fits the schema and not the
+    ui, assignee or timeout_s it does not take, and for an answer that fits the schema and not the
     field's type (a huge number). Raises TimeoutError if nobody answers in time. With
     `people_only`, only a person may answer; otherwise the setting `flow_answerers` or
-    the run's grant may also let an assistant answer."""
+    the run's grant may also let an assistant answer. `assignee` names who the task is for:
+    the task card shows it and `GET /tasks?assignee=me` lists it. It does not limit who
+    may answer.
+
+    A property may add `x-sb-widget` to draw a control for its type: `scan` (a string, a
+    code; `expects` `{"kinds": ["spool"], "codes": ["S-3"]}` limits it), `photo` or `file`
+    (a string, an attachment's id), `entity` (a string, with `kind` of `library_file`,
+    `location` or `spool`), `weight` (a number, in grams) and `confirm` (a boolean). A
+    `context` item with one key may be a block: `entity` (`"<kind>:<ref>"`), `text`,
+    `image` (`{entity, attachment_id}`), `table` (`{columns, rows}`), `checklist` (a list
+    of texts) or `expect` (`{weight_g, tolerance_g}`). A widget on a type it does not fit,
+    or a malformed block, raises ValueError."""
     people_only = _people_only(people_only)
     timeout_s = _wait_s(timeout_s)
     owner: StepOwner = workflow.instance()
     call_id = str(workflow.uuid4())
+    # Before the task is checked: a call refused by the rules of #8062 has the marker too,
+    # so its replay is refused by the same rules. A call from before has none.
+    widgets = workflow.patched(f"{PROMPT_WIDGETS_PATCH}:{call_id}")
+    answer = await _task_wait(
+        owner,
+        call_id,
+        "prompt",
+        title,
+        schema,
+        timeout_s,
+        people_only,
+        widgets=widgets,
+        context=[] if context is None else context,
+        place=place,
+        ui=ui,
+        assignee=assignee,
+    )
+    try:
+        return filled(schema, answer)
+    except InputsError as err:
+        # A number that fits the schema and not the model's type.
+        raise ValueError(f"the answer does not fit: {err}") from None
+
+
+async def _task_wait(
+    owner: StepOwner,
+    call_id: str,
+    fn: str,
+    title: str,
+    schema: dict[str, Any],
+    timeout_s: int | None,
+    people_only: bool,
+    *,
+    widgets: bool,
+    **fields: Any,
+) -> dict[str, Any]:
+    """Open the task `call_id` and wait for its answer, in the step `fn`. Returns the
+    answer as its answerer sent it. `widgets` as `_prompt_task`; `fields` are the task's
+    other fields."""
     expires = None if timeout_s is None else workflow.now() + timedelta(seconds=timeout_s)
     task = _prompt_task(
         call_id,
         owner.run_id,
+        widgets=widgets,
         title=title,
         schema=schema,
-        context=[] if context is None else context,
-        place=place,
-        ui=ui,
         expires_at=expires,
+        **fields,
     )
     await _open_task(task)
     try:
         async with step(
-            "prompt",
+            fn,
             call_id,
             outward=False,
             waiting="answer",
@@ -274,11 +371,7 @@ async def prompt(
         await _task_write(FLOW_TASK_CLOSE, call_id, "cancelled")
         raise
     await _task_write(FLOW_TASK_ANSWERED, call_id, answered.answer)
-    try:
-        return filled(schema, answered.answer)
-    except InputsError as err:
-        # A number that fits the schema and not the model's type.
-        raise ValueError(f"the answer does not fit: {err}") from None
+    return answered.answer
 
 
 @agent.tool_defn(inherently_safe=True)

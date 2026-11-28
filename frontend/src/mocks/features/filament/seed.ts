@@ -233,6 +233,7 @@ function place(n: number, name: string, kind_id: string, values: Partial<S['Loca
     kind_id,
     number: n,
     printer_root: false,
+    station: false,
     parent_id: null,
     identifier: null,
     capacity: null,

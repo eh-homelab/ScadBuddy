@@ -422,9 +422,10 @@ describe('answer_flow_question (#7471)', () => {
     expect(sent).toBe(0)
   })
 
-  it("sends a text to the run's answer route", async () => {
+  it("sends a text to the run's answer route when the call has no task", async () => {
     const seen: unknown[] = []
     server.use(
+      http.get(`${BACKEND}/api/v1/tasks/${CALL}`, () => HttpResponse.json({ detail: 'No such task.' }, { status: 404 })),
       http.post(`${BACKEND}/api/v1/workflow-runs/${RUN}/answer`, async ({ request }) => {
         seen.push({ key: request.headers.get('Idempotency-Key'), body: await request.json() })
         return HttpResponse.json({ run_id: RUN, call_id: CALL, outcome: 'answered' })
@@ -447,6 +448,22 @@ describe('answer_flow_question (#7471)', () => {
     expect(seen).toEqual([{ answer: { size: 'S' } }])
   })
 
+  it("sends a text to a wait_for_human's task as its answer field (#8062)", async () => {
+    const seen: unknown[] = []
+    let texts = 0
+    server.use(
+      http.get(`${BACKEND}/api/v1/tasks/${CALL}`, () => HttpResponse.json({ id: CALL, run_id: RUN, state: 'open' })),
+      http.post(`${BACKEND}/api/v1/workflow-runs/${RUN}/answer`, () => { texts++; return HttpResponse.json({}) }),
+      http.post(`${BACKEND}/api/v1/tasks/${CALL}/answer`, async ({ request }) => {
+        seen.push(await request.json())
+        return HttpResponse.json({ id: CALL, run_id: RUN, state: 'answered' })
+      }),
+    )
+    expect(firstText(await answer({ answer: 'yes' }))).toMatchObject({ state: 'answered' })
+    expect(seen).toEqual([{ answer: { answer: 'yes' } }])
+    expect(texts).toBe(0)
+  })
+
   it('refuses a task of another run', async () => {
     let sent = 0
     server.use(
@@ -460,6 +477,7 @@ describe('answer_flow_question (#7471)', () => {
   it("gives the 403's reason to the model", async () => {
     const detail = "Only a person answers this flow's questions. The setting flow_answerers says who else may."
     server.use(
+      http.get(`${BACKEND}/api/v1/tasks/${CALL}`, () => HttpResponse.json({ detail: 'No such task.' }, { status: 404 })),
       http.post(`${BACKEND}/api/v1/workflow-runs/${RUN}/answer`, () =>
         HttpResponse.json(
           { type: 'https://scadbuddy.dev/problems/flow-answer-not-allowed', status: 403, detail },

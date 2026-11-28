@@ -68,6 +68,7 @@ KINDS: dict[str, EntityKind] = {
         _kind("insert_type", "filament_insert_types", "uuid"),
         _kind("colour", "filament_colours", "uuid"),
         _kind("location_kind", "filament_location_kinds", "uuid"),
+        _kind("task", "tasks"),
         # A kind is a relationship's end (inventory K1, design §6.3).
         _kind("item_kind", "item_kinds"),
     )

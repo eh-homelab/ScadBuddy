@@ -41,6 +41,11 @@ EMAIL: dict[str, Any] = {
 }
 JANE = {"email": "jane@example.com"}
 FULL = {**JANE, "also_sms": True, "note": None}
+WAITED: dict[str, Any] = {
+    "type": "object",
+    "properties": {"answer": {"type": "string", "title": "Answer", "minLength": 1}},
+    "required": ["answer"],
+}
 ASK = f"a = await prompt('Where to?', {EMAIL!r}, context=[{{'text': 'hi'}}], place='bench')"
 
 
@@ -142,6 +147,41 @@ def test_a_prompt_answer_reaches_the_script_as_a_dict(
     assert timers == [OPEN_WAIT]
     if RECORD:
         (HISTORIES / "prompted.json").write_text(history.to_json())
+
+
+def test_a_wait_for_human_is_a_task_answered_through_its_route(
+    client: TestClient, settings: Settings
+) -> None:
+    """A new run's `wait_for_human` opens a task with one text field (#8062)."""
+    run_id, entry = parked(client, "a = await wait_for_human('Swap to pink?')", "return a")
+    assert (entry["kind"], entry["fn"], entry["prompt"]) == (
+        "answer",
+        "wait_for_human",
+        "Swap to pink?",
+    )
+    call_id = entry["call_id"]
+    held = task(client, call_id)
+    assert (held["state"], held["title"], held["schema"]) == ("open", "Swap to pink?", WAITED)
+    assert entry["task"]["id"] == call_id
+    text = client.post(
+        f"/api/v1/workflow-runs/{run_id}/answer",
+        json={"call_id": call_id, "answer": "yes"},
+        headers={"Idempotency-Key": "t"},
+    )
+    assert text.status_code == 409 and text.json()["task_id"] == call_id
+    # A blank answer is refused, as the text route refuses one (#2379): empty, or only spaces.
+    for n, blank in enumerate(["", "   ", "\n", "\t \n"]):
+        refused = answer(client, call_id, {"answer": blank}, f"blank-{n}")
+        assert refused.status_code == 422, refused.text
+    given = answer(client, call_id, {"answer": "yes"})
+    assert given.status_code == 200, given.text
+    done = finished(client, run_id)
+    assert done["run"]["result"] == "result: {'answer': 'yes'}"
+    after = task(client, call_id)
+    assert (after["state"], after["answer"]) == ("answered", {"answer": "yes"})
+    if RECORD:
+        history = asyncio.run(_history(settings, run_id))
+        (HISTORIES / "waited_task.json").write_text(history.to_json())
 
 
 def test_omitted_fields_reach_the_script_and_the_task_ends_answered(client: TestClient) -> None:
@@ -303,11 +343,7 @@ def test_a_reset_before_the_answer_opens_the_task_again(client: TestClient) -> N
     given = answer(client, call_id, JANE, "k2")
     assert given.status_code == 200, given.text
     view = until(client, run_id, lambda v: [p["prompt"] for p in v["pending"]] == ["Second?"])
-    go = client.post(
-        f"/api/v1/workflow-runs/{run_id}/answer",
-        json={"call_id": view["pending"][0]["call_id"], "answer": "go"},
-        headers={"Idempotency-Key": "go"},
-    )
+    go = answer(client, view["pending"][0]["call_id"], {"answer": "go"}, "go")
     assert go.status_code == 200, go.text
     assert finished(client, run_id)["run"]["result"] == "result: ['jane@example.com', 'go']"
     assert task(client, call_id)["answer"] == JANE
@@ -354,8 +390,7 @@ def test_a_run_page_reads_its_tasks_once_and_only_its_own(
     view = client.get(f"/api/v1/workflow-runs/{run_id}").json()
     assert reads == [(run_id, sorted(p["call_id"] for p in view["pending"]))]
     by_prompt = {p["prompt"]: p["task"] for p in view["pending"]}
-    assert by_prompt["C?"] is None
-    assert {by_prompt[q]["title"] for q in ("A?", "B?")} == {"A?", "B?"}
+    assert {by_prompt[q]["title"] for q in ("A?", "B?", "C?")} == {"A?", "B?", "C?"}
     # A run with nothing parked reads none.
     reads.clear()
     other = start(client, register(client, script("return 1"), name="other")["id"], "o").json()[

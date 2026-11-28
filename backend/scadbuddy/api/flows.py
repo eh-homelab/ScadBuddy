@@ -279,8 +279,9 @@ class PendingEntry(BaseModel):
     #: With `summary`: the input hash the approval binds (the printer the summary names),
     #: which an approval sends back as `bound_hash` (#4445).
     bound_hash: str | None = None
-    #: A prompt's task (#7364), which takes its answer at `POST /tasks/{id}/answer`; None
-    #: for a `wait_for_human`, whose answer is a text. Its own route has the answer.
+    #: A prompt's task (#7364), or a `wait_for_human`'s since #8062, which takes its answer
+    #: at `POST /tasks/{id}/answer`; None for a `wait_for_human` from before, whose answer
+    #: is a text. Its own route has the answer.
     task: TaskQuestion | None = None
     #: Whether only a person may answer the question (#7471). True for an approval and for
     #: a question parked before the flag: only a script's False opens it.
