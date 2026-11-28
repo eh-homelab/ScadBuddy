@@ -4,6 +4,8 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"os"
+	"reflect"
 	"testing"
 	"time"
 
@@ -334,5 +336,54 @@ func TestAStartKeepsTheOldFinishedRowOfItsOwnKey(t *testing.T) {
 	if n := count(t, pool, `SELECT count(*) FROM inventory_operations
 		WHERE id = 'replayed' AND status = 'succeeded' AND finished_at < now() - interval '8 days'`); n != 1 {
 		t.Fatalf("the replayed key's row changed: %d", n)
+	}
+}
+
+// TestAFailedOperationReadsAsItsGoldenFile: a refused write's operation reads as
+// testdata/operation_failed.json, which backend/tests/inventory/test_go_answers.py validates
+// with Python's Operation model (#8569). The times are set, so the file stays the same.
+func TestAFailedOperationReadsAsItsGoldenFile(t *testing.T) {
+	pool := setup(t)
+	ctx := context.Background()
+	op := Operation{ID: "browser:op:golden", Kind: "inventory.Take", Subject: "lot:l1", Attempt: 1, Actor: Actor(browser)}
+	if err := StartOperation(ctx, pool, op); err != nil {
+		t.Fatal(err)
+	}
+	_, err := Write(WithOperation(ctx, op.ID), pool, req(op.ID, `{}`), func(pgx.Tx) (int, any, error) {
+		return 0, nil, &Refused{Status: 409, Code: "lot_empty", Detail: "no stock", Fields: map[string]any{"lot": "l1"}}
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := pool.Exec(ctx, `UPDATE inventory_operations SET created_at = '2026-11-26T12:00:00Z',
+		finished_at = '2026-11-26T12:00:00Z' WHERE id = $1`, op.ID); err != nil {
+		t.Fatal(err)
+	}
+	got, _, err := ReadOperation(ctx, pool, op.ID, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got.CreatedAt = got.CreatedAt.UTC()
+	if got.FinishedAt != nil {
+		at := got.FinishedAt.UTC()
+		got.FinishedAt = &at
+	}
+	raw, err := json.Marshal(got)
+	if err != nil {
+		t.Fatal(err)
+	}
+	file, err := os.ReadFile("testdata/operation_failed.json")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var have, want any
+	if err := json.Unmarshal(raw, &have); err != nil {
+		t.Fatal(err)
+	}
+	if err := json.Unmarshal(file, &want); err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(have, want) {
+		t.Fatalf("the read differs from testdata/operation_failed.json:\n%s", raw)
 	}
 }

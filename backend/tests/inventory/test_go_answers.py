@@ -1,7 +1,7 @@
 """Go's recorded answers fit the public models (#6949 K1, R-K1-21): each file Go's
 `TestTheAnswersMatchTheirGoldenFiles` writes validates with its pydantic model, and the
 model writes it back unchanged. Go's `inventory_operation.changed` notice decodes as
-Python's event."""
+Python's event. Go's read of a failed operation fits Python's Operation."""
 
 from __future__ import annotations
 
@@ -28,10 +28,12 @@ from scadbuddy.inventory.models import (
     Unit,
 )
 from scadbuddy.inventory.problems import PROBLEMS as INVENTORY_PROBLEMS
+from scadbuddy.operations.store import Operation
 
 ROOT = Path(__file__).resolve().parents[3]
 ANSWERS = ROOT / "tools/go/core/internal/inventory/activities/testdata/answers"
 NOTICE = ROOT / "tools/go/core/internal/publish/testdata/inventory_operation_changed.json"
+OPERATION = ROOT / "tools/go/core/internal/inventory/store/testdata/operation_failed.json"
 
 #: Each recorded answer's public model: the activity's, or the read family's.
 MODELS: dict[str, type[BaseModel]] = {
@@ -120,3 +122,13 @@ def test_gos_notice_decodes_as_the_event() -> None:
 
     assert isinstance(event, InventoryOperationEvent)
     assert event.operation_id == "browser:op:k"
+
+
+def test_gos_failed_operation_fits_the_operation_model() -> None:
+    recorded: Any = json.loads(OPERATION.read_text(encoding="utf-8"))
+
+    operation = Operation.model_validate(recorded)
+
+    assert operation.status == "failed"
+    assert operation.error is not None
+    assert operation.model_dump(mode="json") == recorded
