@@ -171,10 +171,11 @@ API process serves. Go writes no row.
 - Without `SCADBUDDY_TEMPORAL_ADDRESS` core still starts with the area, the reads serve, no
   worker runs, and each write answers 503 `writes_not_configured`.
 - The `library` worker is versioned (deployment `scadbuddy-library`). Core's workflow is not,
-  so its activity task carries no version. We expect Temporal to give it to the queue's current
-  version: the API build that made itself current at its start
-  (`main._make_library_current`). This is not measured yet. The plan's B6 Step 4 checks it on
-  prod after the deploy, with one copy and one send again.
+  so its activity task carries no version. Temporal gives it to the queue's current version: the
+  API build that made itself current at its start (`main._make_library_current`). Measured on
+  prod on 2026-11-28 (#8428): one copy and one send again, with core and the API on build
+  `758cdcdbe`. The history's `ACTIVITY_TASK_STARTED` events name worker build id `758cdcdbe…`
+  for both activities (read through the Temporal UI's `/history` API).
 
 ## The unknown-tray resolve
 
