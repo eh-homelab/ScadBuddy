@@ -158,6 +158,12 @@ async def test_a_run_with_a_new_host_function_waits_for_the_build_that_has_it(
             assert recorded is not None and recorded.steps == []
             async with new:
                 await _make(client, name, "new")
+                # As the library test waits: the run's wait starts once the queue routes
+                # to the new build. Under load the switch took most of the run's 30 s
+                # wait, and the script started 0.5 s before it ran out (#8501).
+                assert await wait_until_build_serves(
+                    client, queue, "new", timeout=30, poll=0.05, max_poll=0.5, deployment_name=name
+                )
                 run = await flows.finished(run_id)
     finally:
         await terminate_open_workflows(client, queue)
