@@ -134,6 +134,8 @@ func TestAFailedStartBuildsANewWorker(t *testing.T) {
 
 func TestAStopAfterTheDrainStillStopsAStartedWorker(t *testing.T) {
 	setWorkerRetry(t, time.Millisecond)
+	// The test swaps the process-wide default logger, as setWorkerRetry swaps workerRetry. That
+	// holds only while no test of this package calls t.Parallel (#8607).
 	logs := &logLines{}
 	before := slog.Default()
 	t.Cleanup(func() { slog.SetDefault(before) })
