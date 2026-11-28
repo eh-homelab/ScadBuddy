@@ -761,7 +761,9 @@ func TestASaveThatChangesNothingOnACompleteItemAnswersTheItem(t *testing.T) {
 	_, s, _ := tagged(t, pool)
 	made := must(createItem(t, pool, s, wire.ItemInput{KindID: "tagged", Name: "Bolt",
 		Properties: props(t, map[string]any{"material": "PLA", "diameter_mm": 1.75})}))
-	before := propertyEvents(t, pool, made.ID)
+	const events = `SELECT count(*) FROM events
+		WHERE kind = 'entity_property.changed' AND payload->>'entity_kind' = 'item' AND payload->>'ref' = $1`
+	before := count(t, pool, events, made.ID)
 	saved := must(updateItem(t, pool, s, made.ID, wire.InventoryItemPatch{Name: ptr(made.Name),
 		Properties: props(t, map[string]any{"material": "PLA", "diameter_mm": 1.75})}))
 	if saved.ID != made.ID || saved.Name != made.Name || len(saved.MissingProperties) != 0 ||
@@ -772,21 +774,9 @@ func TestASaveThatChangesNothingOnACompleteItemAnswersTheItem(t *testing.T) {
 		t.Fatalf("stored %v", got)
 	}
 	// The property history stays as it was (#8455): an unchanged value writes no event.
-	if after := propertyEvents(t, pool, made.ID); before == 0 || after != before {
+	if after := count(t, pool, events, made.ID); before == 0 || after != before {
 		t.Fatalf("property events %d before the save, %d after", before, after)
 	}
-}
-
-// propertyEvents is how many entity_property.changed events the item has in the log.
-func propertyEvents(t *testing.T, pool *pgxpool.Pool, itemID string) int {
-	t.Helper()
-	var n int
-	if err := pool.QueryRow(context.Background(), `SELECT count(*) FROM events
-		WHERE kind = 'entity_property.changed' AND payload->>'entity_kind' = 'item' AND payload->>'ref' = $1`,
-		itemID).Scan(&n); err != nil {
-		t.Fatal(err)
-	}
-	return n
 }
 
 func TestAStoredValueThatNoLongerFitsIsInvalid(t *testing.T) {
