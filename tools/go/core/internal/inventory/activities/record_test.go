@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"testing"
 	"time"
 
@@ -255,6 +256,12 @@ func TestFinalKnowsWhenNoAttemptFollows(t *testing.T) {
 		if got := final(c.err, c.attempt, c.policy); got != c.want {
 			t.Errorf("%s: final %v, want %v", name, got, c.want)
 		}
+	}
+	// A wrapped ApplicationError is retried, as the SDK reads only the top-level error
+	// (#8529).
+	if final(fmt.Errorf("step: %w", temporal.NewNonRetryableApplicationError("no", "bad_actor", nil)), 1, nil) ||
+		final(fmt.Errorf("step: %w", typed), 1, never) {
+		t.Error("a wrapped ApplicationError was final")
 	}
 }
 

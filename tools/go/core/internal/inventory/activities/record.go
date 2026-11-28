@@ -3,7 +3,6 @@ package activities
 import (
 	"context"
 	"encoding/json"
-	"errors"
 	"log/slog"
 	"slices"
 
@@ -88,9 +87,13 @@ func (r *recordInbound) ExecuteActivity(ctx context.Context, in *interceptor.Exe
 // an ApplicationError whose type the policy names in NonRetryableErrorTypes, or any error
 // on the policy's last attempt (MaximumAttempts). A schedule-to-close timeout that ends the
 // retries is not known here; a stale read asks Temporal about it (store.ReadOperation).
+//
+// Only err itself counts, not an ApplicationError wrapped inside it: the SDK's failure
+// converter reads NonRetryable and Type from the top-level error only (its ErrorToFailure
+// switches on err's type), so Temporal retries a wrapped one (#8529).
 func final(err error, attempt int32, policy *temporal.RetryPolicy) bool {
-	var app *temporal.ApplicationError
-	if errors.As(err, &app) && app.NonRetryable() {
+	app, _ := err.(*temporal.ApplicationError)
+	if app != nil && app.NonRetryable() {
 		return true
 	}
 	if policy == nil {

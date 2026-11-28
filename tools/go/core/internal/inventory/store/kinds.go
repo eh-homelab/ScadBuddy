@@ -815,15 +815,18 @@ func (k *Kinds) Update(ctx context.Context, tx pgx.Tx, id string, p wire.KindPat
 			return wire.ItemKind{}, &Refused{Status: 422, Code: "class_changed",
 				Detail: "the change would change the class of " + d + ", which has items", Problems: []ClassProblem{*change}}
 		}
-		if d == id {
-			continue
-		}
-		// Design §4.2: every step of every kind below must still resolve.
+		// Design §4.2: every step of the kind and of every kind below must still resolve.
+		// The kind's own problems name no owner, as stepsRefusal's do; they come first, as
+		// it is first in the subtree (#8528).
 		_, problems, err := k.Cat.ResolveKind(next.chain(d))
 		if err != nil {
 			return wire.ItemKind{}, classRefusal(err)
 		}
-		broken = append(broken, ownedProblems("item_kind:"+d, problems)...)
+		owner := "item_kind:" + d
+		if d == id {
+			owner = ""
+		}
+		broken = append(broken, ownedProblems(owner, problems)...)
 	}
 	items, err := k.checkItems(ctx, tx, next, below)
 	if err != nil {

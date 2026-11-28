@@ -583,16 +583,30 @@ func TestAHandlerSwapNamesEveryOwnerItBreaks(t *testing.T) {
 		Steps: model.Steps{"life": {Params: map[string]any{"hours": 50}}}}))
 
 	_, err := updateKind(t, pool, k, "spindle", wire.KindPatch{Steps: &model.Steps{"life": {Handler: "life.months", Params: map[string]any{"months": 6}}}})
-	r := refusal(t, err, 422, "steps_invalid")
-	var owners []string
+	// In the answer's order: kinds below in subtree order (each level by id), then items
+	// by id (#8528).
+	want := []string{"item_kind:fast_spindle", "item_kind:slow_spindle", "item:" + made.ID}
+	if got := owners(refusal(t, err, 422, "steps_invalid")); !slices.Equal(got, want) {
+		t.Fatalf("owners %v, want %v", got, want)
+	}
+
+	// A patch that breaks the kind itself too names it first, with no owner, in the same
+	// refusal.
+	_, err = updateKind(t, pool, k, "spindle", wire.KindPatch{Steps: &model.Steps{"life": {Handler: "life.months",
+		Params: map[string]any{"months": 6, "hours": 1}}}})
+	got := owners(refusal(t, err, 422, "steps_invalid"))
+	if len(got) < 4 || got[0] != "" || !slices.Equal(got[len(got)-3:], want) {
+		t.Fatalf("owners %v, want the kind first, then %v", got, want)
+	}
+}
+
+// owners is the owner of each problem of a steps_invalid refusal, in its order.
+func owners(r *Refused) []string {
+	var out []string
 	for _, p := range r.Problems.([]StepProblem) {
-		owners = append(owners, p.Owner)
+		out = append(out, p.Owner)
 	}
-	slices.Sort(owners)
-	want := []string{"item:" + made.ID, "item_kind:fast_spindle", "item_kind:slow_spindle"}
-	if !slices.Equal(owners, want) {
-		t.Fatalf("owners %v, want %v", owners, want)
-	}
+	return out
 }
 
 func TestALifeBasisNoneUnderPrinterReadsNone(t *testing.T) {
