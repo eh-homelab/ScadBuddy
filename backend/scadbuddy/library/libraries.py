@@ -1505,6 +1505,16 @@ class LibraryStore:
         """Run git; with ``watch``, also kill it once that directory grows past
         ``max_bytes``, so an oversized clone is stopped rather than finished."""
         env = {**git_env(), "GIT_ALLOW_PROTOCOL": ":".join(self.protocols)}
+        # The checkout `-C` names is this process's own clone, but a volume can own it
+        # as another uid (prod's NFS share writes every file as 1024, the API runs as
+        # 10001), and git then refuses it as "dubious ownership" (#8509). Command-line
+        # config is a protected scope, so git honours it, as in `core/gitrepo.py`.
+        safe = [
+            part
+            for i, arg in enumerate(args[:-1])
+            if arg == "-C"
+            for part in ("-c", f"safe.directory={args[i + 1]}")
+        ]
         try:
             # A fixed argv with no shell; the URL and ref are validated above and
             # the URL follows `--`.
@@ -1520,6 +1530,7 @@ class LibraryStore:
                     "core.hooksPath=/dev/null",
                     "-c",
                     "http.followRedirects=false",
+                    *safe,
                     *args,
                 ],
                 env=env,
@@ -1561,7 +1572,10 @@ class LibraryStore:
             logger.warning(
                 "git failed", extra={"git_args": args, "git_stderr": completed.stderr.strip()}
             )
-            raise LibraryFetchError("no such ref, or the repository could not be reached")
+            if "clone" in args or "fetch" in args:
+                raise LibraryFetchError("no such ref, or the repository could not be reached")
+            # Not the network: git could not use the clone on this server's volume.
+            raise LibraryFetchError("git could not read the library's checkout on the server")
         return completed.stdout.strip()
 
     def _over(self, size: int) -> str:
