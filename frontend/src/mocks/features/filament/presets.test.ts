@@ -3,7 +3,7 @@ import { beforeEach, describe, expect, it } from 'vitest'
 import { ApiError } from '../../../api/client'
 import { copyPreset, diffPreset, editPreset, getPreset, listPresets, mirrorPreset, routeMissing, type PresetEdit } from '../../../api/filamentPresets'
 import { resetMockState } from '../../handlers'
-import { LOST_PRESET, mirrorShows, presetsOff, writePending, writesOff } from './presets'
+import { LOST_PRESET, keyReused, mirrorShows, presetsOff, writePending, writesOff } from './presets'
 
 // #7204 — the preset mocks answer as `tools/go/core/internal/filamentpresets` does.
 
@@ -149,6 +149,14 @@ describe('the preset mocks (#7204)', () => {
         expect((await send('/3/copy', 'POST', { 'Idempotency-Key': 'k'.repeat(200) })).status).toBe(201)
       })
 
+      it.each(['not json', '[]', 'null', '"x"', '1'])('answer 422 invalid_input for the body %s, as Go does', async (body) => {
+        for (const [path, method] of [['/3/copy', 'POST'], ['/3', 'PATCH']] as const) {
+          const response = await send(path, method, { 'Idempotency-Key': 'k' }, body)
+          expect(response.status).toBe(422)
+          expect(await response.json()).toMatchObject({ code: 'invalid_input', detail: 'the body is not a JSON object' })
+        }
+      })
+
       it('refuse a credential key whose name has the dotted capital I (U+0130), as Go does', async () => {
         const cause = await failure(editPreset(3, { expected_version: 2, set: { 'PR\u0130NTHOST_AP\u0130KEY': 'x' } }, 'k'))
         expect(cause).toMatchObject({ status: 422, problem: { code: 'key_refused' } })
@@ -219,6 +227,17 @@ describe('the preset mocks (#7204)', () => {
       expect(keys(result)).toEqual(keys(wire.mirror_again_outcome))
       expect(result.preset.mirror).toBe('failed')
       if (outcome === 'failed') expect(result.preset.mirror_error).not.toBeNull()
+    })
+
+    it('answer 422 idempotency_key_reused on a copy and an edit while keyReused() is on', async () => {
+      keyReused()
+      for (const call of [() => copyPreset(3, 'x', 'k'), () => editPreset(3, { expected_version: 2, name: 'y' }, 'k')]) {
+        const cause = await failure(call())
+        expect(cause).toMatchObject({ status: 422, problem: { code: 'idempotency_key_reused', type: 'https://scadbuddy.dev/problems/crud/idempotency-key-reused' } })
+      }
+      expect((await mirrorPreset(3)).outcome).toBe('sent')
+      keyReused(false)
+      expect((await copyPreset(3, 'x', 'k')).name).toBe('x')
     })
 
     it('answer 503 writes_not_configured on every write while writesOff() is on', async () => {

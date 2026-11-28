@@ -327,22 +327,19 @@ func TestThePresetsAreaStartsWithoutTemporal(t *testing.T) {
 	if res.StatusCode != http.StatusServiceUnavailable || !strings.Contains(string(body), `"code":"writes_not_configured"`) {
 		t.Errorf("%d %s", res.StatusCode, body)
 	}
+	// No wait here has a limit of its own, so a slow runner cannot fail the test: a core that
+	// never serves or never stops ends at the go test -timeout.
 	cancel()
-	select {
-	case err := <-done:
-		if err != nil {
-			t.Fatal(err)
-		}
-	case <-time.After(30 * time.Second):
-		t.Fatal("run did not stop")
+	if err := <-done; err != nil {
+		t.Fatal(err)
 	}
 }
 
 // waitServing is true once the area's list answers 200 at address, and false when run ended
-// first (its bind failed) or the wait ran out.
+// first (its bind failed) or the address answered another status. It waits for one of these
+// with no limit of its own.
 func waitServing(address string, done chan error) bool {
-	deadline := time.Now().Add(10 * time.Second)
-	for time.Now().Before(deadline) {
+	for {
 		select {
 		case err := <-done:
 			done <- err
@@ -356,5 +353,4 @@ func waitServing(address string, done chan error) bool {
 		}
 		time.Sleep(20 * time.Millisecond)
 	}
-	return false
 }

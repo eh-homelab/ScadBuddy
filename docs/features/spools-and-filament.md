@@ -197,7 +197,9 @@ activity sends the preset to Bambuddy while the stored setting `filament_preset_
 failure never fails the write. A copy or an edit bounds its mirror at 30 s and a send again
 bounds it at 60 s; a mirror that is not done in time is the outcome `pending`. The activity
 has one attempt. Its start-to-close is its bound plus 30 s. The route waits for that time plus
-10 s, then answers 503 `preset_write_pending`, and the client sends the same key again.
+10 s, then answers 503 `preset_write_pending`, and the client sends a copy or an edit again with
+the same key. The run closes when the route stops waiting, so a write that no worker started by
+then does not start later.
 
 A copy and an edit need an `Idempotency-Key` of 1 to 200 characters. Without one the answer is
 428 with the type `https://scadbuddy.dev/problems/crud/idempotency-key-required`, and nothing

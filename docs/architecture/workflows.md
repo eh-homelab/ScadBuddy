@@ -20,7 +20,8 @@ Queue names are settings (`scadbuddy/core/config.py:40`, `scadbuddy/core/setting
 | `render` | render worker, `python -m scadbuddy.worker` (`scadbuddy/worker.py:1075`) | `RenderPiece`, `RenderPreview`, `TemplatePipeline`, `MigrateInputs` (`scadbuddy/workflows/client.py:143`) |
 | `bambuddy` | print worker, `--queue bambuddy` (`scadbuddy/worker.py:1511`) | `PrintRun`, `PrintLanSequence`, `Operation` (bambuddy kinds), `FollowPrint`, `PrinterWatch`, `LanAutoImport`, `FilamentBbSync`, `FilamentBbPull`, `SensorNotifyPass`, `LanCommand` (a printer's K-profile and AMS commands over its LAN link, #7276; started and awaited by the API, `scadbuddy/workflows/lan_command.py`) (`scadbuddy/workflows/client.py:202-224`) |
 | `bambuddy-follow` | print worker | activities only: `follow_print`, `printer_watch` (`scadbuddy/workflows/client.py:229-250`) |
-| `library` | the API process (`scadbuddy/main.py:1899-1989`) | `Housekeeping`, `PreviewBackfill`, `Operation` (library kinds), `FlowTriggerFire`, `StoreMigration`, `LibraryCopy`, `SliceWorkflow`, `SpoolRefresh`, `StagedFile`, `PrepareListing`, `AttemptMedia` (`scadbuddy/main.py:1832-1842`), `FulfilOrderItem`, `RecostLot`, `MergePrinter` (the stock workflows, #6949 K1, `scadbuddy/workflows/order_stock.py`) |
+| `library` | the API process (`scadbuddy/main.py:1899-1989`) | `Housekeeping`, `PreviewBackfill`, `Operation` (library kinds), `FlowTriggerFire`, `StoreMigration`, `LibraryCopy`, `SliceWorkflow`, `SpoolRefresh`, `StagedFile`, `PrepareListing`, `AttemptMedia` (`scadbuddy/main.py:1832-1842`), `FulfilOrderItem`, `RecostLot`, `MergePrinter` (the stock workflows, #6949 K1, `scadbuddy/workflows/order_stock.py`); also the activities `filament_preset_copy`, `filament_preset_edit` and `filament_preset_mirror_again` (#7204, `scadbuddy/filament/preset_writes.py`), the one step of core's `FilamentPresetWrite` |
+| `filament-presets` | scadbuddy-core, the Go worker, when `SCADBUDDY_CORE_AREAS` names `filament-presets` and `SCADBUDDY_TEMPORAL_ADDRESS` is set (`tools/go/core/main.go`; queue `SCADBUDDY_TEMPORAL_TASK_QUEUE_FILAMENT_PRESETS`) | `FilamentPresetWrite` (#7204, `tools/go/core/internal/filamentpresets/temporal.go`): one run per preset write, started by core's routes; its one activity runs on `library`, one attempt, and the run closes when the route stops waiting |
 | `inventory` | scadbuddy-core, the Go worker (`tools/go/core/internal/inventory/activities`) | no workflow of its own: the 19 activities `inventory.<Name>`, started by the API as standalone activities (id `inventory.<Name>:<scoped key>`) and run as workflow steps of the stock workflows (activity id = the key, `scadbuddy/workflows/order_stock.py`) (#6949 K1) |
 | `projects` | projects worker, `--queue projects` (`scadbuddy/worker.py:1597`) | `ProjectWorkflow` (flow runs), `Operation` (flow kinds) (`scadbuddy/workflows/projects_worker.py:81-110`) |
 | `slicer` | the Rust slicer (`workers/rust/bins/scadbuddy-slicer/src/main.rs:103-107`) | activity `slice_plate` only (`workers/rust/crates/sb-slicer/src/activity.rs:22-23`) |
@@ -38,8 +39,11 @@ Versioned deployments: `scadbuddy-library`, `scadbuddy-render`, `scadbuddy-proje
 (`scadbuddy/workflows/client.py:63-68`), `scadbuddy-print` for the print worker given a
 build id (`scadbuddy/workflows/client.py:256-265`, `scadbuddy/worker.py:1543-1567`) and the
 agent's `scadbuddy-agent`. Unversioned: the API's in-process print worker in development
-(`scadbuddy/main.py:1703-1791`) and the slicer
-(`workers/rust/bins/scadbuddy-slicer/src/lib.rs:1-2`).
+(`scadbuddy/main.py:1703-1791`), the slicer
+(`workers/rust/bins/scadbuddy-slicer/src/lib.rs:1-2`) and core's `inventory` and
+`filament-presets` workers (`tools/go/core/main.go`). A `FilamentPresetWrite` run is not
+versioned either, so the activity task it puts on the versioned `library` queue carries no
+version (`tools/go/core/README.md`, "The preset writes").
 
 ## Operations: one shape for writes
 

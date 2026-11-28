@@ -24,15 +24,16 @@ import (
 type fakeStarter struct {
 	mu     sync.Mutex
 	writes []Write
-	waits  []time.Duration
-	answer func(Write) (json.RawMessage, error)
+	// deadlines are the wait's end of each Run, by its context.
+	deadlines []time.Time
+	answer    func(Write) (json.RawMessage, error)
 }
 
 func (f *fakeStarter) Run(ctx context.Context, w Write) (json.RawMessage, error) {
 	f.mu.Lock()
 	f.writes = append(f.writes, w)
 	if deadline, ok := ctx.Deadline(); ok {
-		f.waits = append(f.waits, time.Until(deadline))
+		f.deadlines = append(f.deadlines, deadline)
 	}
 	answer := f.answer
 	f.mu.Unlock()
@@ -182,11 +183,24 @@ func TestWritesStartTheActivityOnLibrary(t *testing.T) {
 	id := e.preset("manual", "PLA", `{"name":"PLA"}`)
 	e.starter.answer = written(id, 2, true)
 	token := auth.Caller{Kind: auth.KindToken, Principal: "user:test#bob", TokenScope: "write"}
-	e.send(person, http.MethodPost, fmt.Sprintf("%s/%d/copy", listPath, id), "c1", `{"name":"Mine"}`)
-	e.send(token, http.MethodPatch, fmt.Sprintf("%s/%d", listPath, id), "e1",
-		`{"expected_version":1,"name":"PLA 2","set":{"z":"1","a":["2","3"]},"unset":["b"]}`)
+	// Each send's time span: the route's wait starts inside it.
+	var spans [][2]time.Time
+	timed := func(send func()) {
+		before := time.Now()
+		send()
+		spans = append(spans, [2]time.Time{before, time.Now()})
+	}
+	timed(func() {
+		e.send(person, http.MethodPost, fmt.Sprintf("%s/%d/copy", listPath, id), "c1", `{"name":"Mine"}`)
+	})
+	timed(func() {
+		e.send(token, http.MethodPatch, fmt.Sprintf("%s/%d", listPath, id), "e1",
+			`{"expected_version":1,"name":"PLA 2","set":{"z":"1","a":["2","3"]},"unset":["b"]}`)
+	})
 	e.starter.answer = func(Write) (json.RawMessage, error) { return json.RawMessage(`"sent"`), nil }
-	e.send(auth.Caller{Kind: auth.KindAnonymous}, http.MethodPost, fmt.Sprintf("%s/%d/mirror", listPath, id), "", ``)
+	timed(func() {
+		e.send(auth.Caller{Kind: auth.KindAnonymous}, http.MethodPost, fmt.Sprintf("%s/%d/mirror", listPath, id), "", ``)
+	})
 	writes := e.starter.started()
 	if len(writes) != 3 {
 		t.Fatalf("%d writes", len(writes))
@@ -204,12 +218,17 @@ func TestWritesStartTheActivityOnLibrary(t *testing.T) {
 			t.Errorf("write %d: %s %s %s", i, w.Activity, jsonv.Dumps(w.Input), w.Timeout)
 		}
 	}
-	// The route waits for the result the activity's bound plus 10 s (R11), and no longer.
+	// The route waits for the result the activity's bound plus 10 s (R11), and no longer: the
+	// wait ends that long after a time inside the send, whatever the runner's speed.
 	e.starter.mu.Lock()
 	defer e.starter.mu.Unlock()
-	for i, wait := range e.starter.waits {
-		if limit := want[i].timeout + 10*time.Second; wait > limit || wait < limit-5*time.Second {
-			t.Errorf("write %d waits %s", i, wait)
+	if len(e.starter.deadlines) != len(spans) {
+		t.Fatalf("%d deadlines", len(e.starter.deadlines))
+	}
+	for i, deadline := range e.starter.deadlines {
+		limit := want[i].timeout + 10*time.Second
+		if deadline.Before(spans[i][0].Add(limit)) || deadline.After(spans[i][1].Add(limit)) {
+			t.Errorf("write %d waits until %s, not %s after a time in %v", i, deadline, limit, spans[i])
 		}
 	}
 }
@@ -324,6 +343,12 @@ func TestAWriteTimeoutIs503Pending(t *testing.T) {
 		if status != http.StatusServiceUnavailable || code(problem) != writePending {
 			t.Errorf("%v: %d %s", err, status, jsonv.Dumps(problem))
 		}
+	}
+	// A send again has no key, so the text must not ask every write for one.
+	status, problem := e.send(person, http.MethodPost, fmt.Sprintf("%s/%d/mirror", listPath, id), "", ``)
+	detail, _ := problem.Text("detail")
+	if status != http.StatusServiceUnavailable || code(problem) != writePending || !strings.Contains(detail, "a copy or an edit with the same Idempotency-Key") {
+		t.Errorf("mirror: %d %s", status, jsonv.Dumps(problem))
 	}
 }
 

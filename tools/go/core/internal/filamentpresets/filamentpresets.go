@@ -103,7 +103,7 @@ var problems = map[string]struct {
 	notMirrored:         {http.StatusConflict, "A Bambuddy preset is Bambuddy's own: it is not sent."},
 	keyReused:           {http.StatusUnprocessableEntity, "This Idempotency-Key was used for another request."},
 	invalidInput:        {http.StatusUnprocessableEntity, "The request is not a valid write."},
-	writePending:        {http.StatusServiceUnavailable, "The write has not answered yet. Send it again, with the same Idempotency-Key."},
+	writePending:        {http.StatusServiceUnavailable, "The write has not answered yet, and it may still run. Send it again: a copy or an edit with the same Idempotency-Key."},
 	writesNotConfigured: {http.StatusServiceUnavailable, "Preset writes need Temporal, and this server has no address for it."},
 }
 

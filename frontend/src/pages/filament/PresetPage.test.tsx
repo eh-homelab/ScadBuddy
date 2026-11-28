@@ -351,7 +351,7 @@ describe('the preset page', () => {
       await user.type(within(form).getByRole('textbox', { name: 'New key' }), 'k')
       await user.type(within(form).getByRole('textbox', { name: 'New value' }), 'v')
       await user.click(within(form).getByRole('button', { name: 'Save edit' }))
-      expect(await within(form).findByText('The write has not finished yet. Try again. It will not be done twice.')).toBeInTheDocument()
+      expect(await within(form).findByText('The write has not finished yet, and it may still run. Try again: a copy or an edit is not done twice.')).toBeInTheDocument()
       await user.click(within(form).getByRole('button', { name: 'Save edit' }))
       await waitFor(() => expect(seen).toHaveLength(2))
       expect(seen[1]!.key).toBe(seen[0]!.key)

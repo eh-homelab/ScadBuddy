@@ -6,7 +6,7 @@ export interface WriteFailure {
   text: string
   /** The server has no writes yet (503 `writes_not_configured`): offer no retry. */
   off: boolean
-  /** 503 `preset_write_pending`: the write may still run, so the same key goes again. */
+  /** 503 `preset_write_pending`: the write may still run, so it goes again (a copy or an edit with the same key). */
   pending: boolean
   /** 409 `version_moved`: another edit came first. */
   moved: boolean
@@ -16,7 +16,7 @@ export const WRITES_OFF_TEXT = 'Writes are not on yet on this server.'
 
 const TEXT: Record<string, string> = {
   writes_not_configured: WRITES_OFF_TEXT,
-  preset_write_pending: 'The write has not finished yet. Try again. It will not be done twice.',
+  preset_write_pending: 'The write has not finished yet, and it may still run. Try again: a copy or an edit is not done twice.',
   version_moved: 'Another edit came first. The preset is loaded again. Make your change again.',
   not_manual: 'Only a manual preset can be edited. Make a copy first.',
   preset_not_found: 'There is no such preset.',

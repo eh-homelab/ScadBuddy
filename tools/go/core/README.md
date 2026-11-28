@@ -139,9 +139,13 @@ API process serves. Go writes no row.
   the activity, with one JSON object as its argument, and one attempt. The mirror bound is
   30 s for copy and edit and 60 s for a send again. The activity's start-to-close is that
   bound plus 30 s: 60 s for copy and edit, 90 s for a send again. Its schedule-to-start is
-  the route's wait, the start-to-close plus 10 s, so a task that no worker took by then never
-  runs late. The route waits for the result for that same time, then answers 503
-  `preset_write_pending`.
+  the route's wait, the start-to-close plus 10 s (plan ruling P23). The route waits for the
+  result for that same time, then answers 503 `preset_write_pending`. The run's execution
+  timeout is that time too (P26): the schedule-to-start starts only when core's worker runs
+  the workflow task, so a run whose workflow task no core worker took in time closes as the
+  route answers, and Temporal gives a closed run's activity task to no worker. So a write
+  does not start after the route answered. An activity that started in time can still end
+  after that: its write stands, and a copy or an edit keeps its reply in the ledger.
 - The run's id is `filament-preset-copy-` or `filament-preset-edit-` and the SHA-256 of the
   actor, the key, the preset id and the JSON body that Go sends the activity, joined by
   `\x1f`, so one key with another body runs apart; a send again's is
@@ -166,9 +170,10 @@ API process serves. Go writes no row.
 - Without `SCADBUDDY_TEMPORAL_ADDRESS` core still starts with the area, the reads serve, no
   worker runs, and each write answers 503 `writes_not_configured`.
 - The `library` worker is versioned (deployment `scadbuddy-library`). Core's workflow is not,
-  so its activity task carries no version, and Temporal gives it to the queue's current
+  so its activity task carries no version. We expect Temporal to give it to the queue's current
   version: the API build that made itself current at its start
-  (`main._make_library_current`).
+  (`main._make_library_current`). This is not measured yet. The plan's B6 Step 4 checks it on
+  prod after the deploy, with one copy and one send again.
 
 Area `fleet` (`internal/fleet`) is caller `fleet`'s (scope `crud.fleet`), under
 `/api/v1/internal/crud/fleet`: `POST /agents/{session_id}/touch`, `GET /agents`, `PUT` and

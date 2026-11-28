@@ -114,6 +114,14 @@ flowchart LR
   standalone activities `inventory.<Name>`, each one write of a kind, item, lot, unit or move.
   It needs `SCADBUDDY_TEMPORAL_ADDRESS`, and the Python API reads through core's CRUD port
   (`SCADBUDDY_CORE_CRUD_URL`).
+- **Preset write worker (#7204).** With the area `filament-presets` and
+  `SCADBUDDY_TEMPORAL_ADDRESS` set, core also runs an unversioned Temporal worker on the task
+  queue `filament-presets` (`SCADBUDDY_TEMPORAL_TASK_QUEUE_FILAMENT_PRESETS`;
+  `tools/go/core/internal/filamentpresets/temporal.go`). It runs the workflow
+  `FilamentPresetWrite`, whose one step is a Python activity on `library`:
+  `filament_preset_copy`, `filament_preset_edit` or `filament_preset_mirror_again`. Without
+  the address no worker starts, the reads serve, and each write answers 503
+  `writes_not_configured` (plan ruling P22).
 - **History subscriber.** `internal/history` writes the property and parameter history from
   the event stream (row `history` of `event_subscribers`).
 

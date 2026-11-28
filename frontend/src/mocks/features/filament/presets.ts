@@ -13,7 +13,9 @@ import { T } from './seed'
  * body (R7: 422 `key_refused` and `invalid_input`), then the preset (404), `not_manual` and
  * `version_moved`. `writePending()` answers 503 `preset_write_pending`, and `mirrorShows()` answers a send
  * again with a refusal (409 `mirror_off`, `not_configured`, `instance_changed`) or an outcome (`busy`,
- * `pending`, `failed`). One key with one body answers the first result again.
+ * `pending`, `failed`). One key with one body answers the first result again. A body that is not a
+ * JSON object is 422 `invalid_input`, and `keyReused()` answers each copy and edit 422
+ * `idempotency_key_reused`, as the activity does for one key sent with another body.
  * Key sets are tested against `test-fixtures/filament/preset-wire.json`.
  */
 
@@ -114,6 +116,7 @@ let presets = seeded()
 let off = false
 let noWrites = false
 let pendingWrites = false
+let reusedKeys = false
 let mirrorForced: MirrorForced | null = null
 let answered = new Map<string, unknown>()
 
@@ -132,6 +135,11 @@ export function writePending(on = true) {
   pendingWrites = on
 }
 
+/** The ledger that holds each key with another body: 422 `idempotency_key_reused` on each copy and edit. */
+export function keyReused(on = true) {
+  reusedKeys = on
+}
+
 /** What a send again answers: a refusal or an outcome of the mirror. `null` is the plain answer. */
 export function mirrorShows(forced: MirrorForced | null) {
   mirrorForced = forced
@@ -142,6 +150,7 @@ export function reset() {
   off = false
   noWrites = false
   pendingWrites = false
+  reusedKeys = false
   mirrorForced = null
   answered = new Map()
 }
@@ -217,8 +226,25 @@ function begin(request: Request, id: string | readonly string[] | undefined, key
   return { key }
 }
 
+/** The body as `begin` in Go reads it: a JSON object, else 422 `invalid_input`. */
+async function bodyOf<T>(request: Request): Promise<T | Response> {
+  let body: unknown
+  try {
+    body = JSON.parse(await request.text())
+  } catch {
+    body = undefined
+  }
+  if (!body || typeof body !== 'object' || Array.isArray(body)) return invalid('the body is not a JSON object')
+  return body as T
+}
+
 /** The write that started and did not finish: it is checked after the body and before the activity. */
 const pendingAnswer = () => (pendingWrites ? problem(503, 'preset_write_pending', 'The write has not finished yet.') : null)
+
+const KEY_REUSED = 'https://scadbuddy.dev/problems/crud/idempotency-key-reused'
+/** The activity's ledger answers first (P17), before it reads the preset. */
+const reusedAnswer = () =>
+  reusedKeys ? problem(422, 'idempotency_key_reused', 'This Idempotency-Key was used for another request.', { type: KEY_REUSED }) : null
 
 /** `nameOf`: a string of 1 to 200 characters once stripped. */
 function nameRefusal(name: unknown, required: boolean): Response | null {
@@ -289,11 +315,12 @@ export const handlers = [
   http.post(`${BASE}/:id/copy`, async ({ request, params }) => {
     const began = begin(request, params.id, true)
     if (began instanceof Response) return began
-    const body = (await request.json()) as { name?: string }
+    const body = await bodyOf<{ name?: string }>(request)
+    if (body instanceof Response) return body
     const refusal = nameRefusal(body.name, true)
     if (refusal) return refusal
     const name = (body.name as string).trim()
-    const late = pendingAnswer()
+    const late = pendingAnswer() ?? reusedAnswer()
     if (late) return late
     const one = find(params.id)
     if (!one) return problem(404, 'preset_not_found', 'no such preset')
@@ -313,10 +340,11 @@ export const handlers = [
   http.patch(`${BASE}/:id`, async ({ request, params }) => {
     const began = begin(request, params.id, true)
     if (began instanceof Response) return began
-    const body = (await request.json()) as PresetEdit
+    const body = await bodyOf<PresetEdit>(request)
+    if (body instanceof Response) return body
     const refusal = editRefusal(body)
     if (refusal) return refusal
-    const late = pendingAnswer()
+    const late = pendingAnswer() ?? reusedAnswer()
     if (late) return late
     const one = find(params.id)
     if (!one) return problem(404, 'preset_not_found', 'no such preset')

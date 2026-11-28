@@ -23,8 +23,9 @@ const timeoutFailure = "temporal_timeout"
 
 // WriteRun is the workflow's input: the activity by name, its queue, its one JSON object
 // argument, its start-to-close timeout in seconds, and its schedule-to-start timeout in
-// seconds: the time the route waits (plan ruling P23), so a task no worker took by the time
-// the route answered never runs late.
+// seconds: the time the route waits (plan ruling P23). The run's own execution timeout is
+// that time too (P26), so the activity does not start after the route answered: see
+// TemporalStarter.
 type WriteRun struct {
 	Activity         string          `json:"activity"`
 	Queue            string          `json:"queue"`
@@ -73,6 +74,14 @@ func WriteWorkflow(ctx workflow.Context, in WriteRun) (json.RawMessage, error) {
 //
 // The id also hashes the body (plan ruling P24), so one key with another body runs apart and
 // the ledger answers it idempotency_key_reused.
+//
+// The run's execution timeout is the route's wait (plan ruling P26). The schedule-to-start
+// timeout of P23 starts only when the workflow task schedules the activity, and that needs
+// core's own worker. When no core worker takes the workflow task in time, the run closes as
+// the route answers 503 (its timer starts when Temporal records the start, a moment after
+// the route's), and Temporal gives a closed run's activity task to no worker. So a write
+// does not start after that moment. An activity that started in time may still end after
+// the run closed: its write stands, and a copy or an edit keeps its reply in the ledger.
 type TemporalStarter struct {
 	Client              client.Client
 	Queue, LibraryQueue string
@@ -91,6 +100,7 @@ func (s TemporalStarter) Run(ctx context.Context, w Write) (json.RawMessage, err
 		TaskQueue:                s.Queue,
 		WorkflowIDConflictPolicy: enumspb.WORKFLOW_ID_CONFLICT_POLICY_USE_EXISTING,
 		WorkflowIDReusePolicy:    enumspb.WORKFLOW_ID_REUSE_POLICY_ALLOW_DUPLICATE,
+		WorkflowExecutionTimeout: w.Timeout + waitMargin,
 	}, WorkflowName, in)
 	if err != nil {
 		return nil, err
