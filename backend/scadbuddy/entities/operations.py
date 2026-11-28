@@ -6,7 +6,6 @@ upload by its sha256 (``api/entity_attachments.py``), and the run keeps it as th
 from __future__ import annotations
 
 import asyncio
-import uuid
 from typing import TYPE_CHECKING, Any
 
 from fastapi import status
@@ -73,8 +72,9 @@ def _kinds(core: Core, components: Components) -> list[OperationKind]:
                     conn,
                     ref,
                     # Made here, not in the request, so a re-sent upload (the same
-                    # Idempotency-Key) is the same request; the run has one attempt.
-                    attachment_id=str(uuid.uuid4()),
+                    # Idempotency-Key) is the same request; the operation's own, so a
+                    # second attempt finds the row a first one committed (#8471).
+                    attachment_id=attachments.run_attachment_id(ENTITY_ATTACHMENT_ADD),
                     kind=request["kind"],
                     role=request["role"],
                     filename=request["filename"],
@@ -98,9 +98,11 @@ def _kinds(core: Core, components: Components) -> list[OperationKind]:
             ENTITY_ATTACHMENT_ADD,
             check,
             run,
-            # As `order_attachment_add`: a second attempt would only repeat the same
-            # claimed bytes; the caller re-sends instead.
-            run_attempts=1,
+            # As `order_attachment_add` (#8471): every step may run again. A blob of the
+            # same bytes is kept once (`attachments.keep` finds it), and the row's id is
+            # the operation's, so an attempt after one that committed finds that row. A
+            # store or database briefly away is tried again.
+            run_attempts=attachments.RUN_ATTEMPTS,
             queue="library",
             run_timeout=PIN_TIMEOUT,
             where="the entity's attachments",

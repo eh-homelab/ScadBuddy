@@ -6588,7 +6588,9 @@ class Lifecycle:
         ``conn`` as `delete_item`'s. ``archive_id`` and ``archive_media`` name the
         Bambuddy archive copy it is (#7232); a second copy of one archive file raises
         `ArchiveCopyExistsError` and writes nothing. ``source`` goes on the audit line
-        (``archive`` for a copy, spec 2026-11-05 §4.5)."""
+        (``archive`` for a copy, spec 2026-11-05 §4.5). An ``attachment_id`` the order
+        has already is that row as it is, so a retried run that made the same id writes
+        nothing a second time (#8471)."""
         if revision_id is None:
             _refuse_revision_role(role)
         tell = conn is None
@@ -6625,37 +6627,45 @@ class Lifecycle:
                     subject = fulfilment_subject(attempt.id)
             elif revision_id is None:
                 subject = order_subject(order.id) if item is None else item_subject(item.id)
-            attachment = self.store.insert_attachment(
-                conn,
-                subject_item_id=None if fulfilment_id is None and revision_id is None else item_id,
-                fulfilment_id=fulfilment_id if revision_id is not None else None,
-                attachment_id=attachment_id,
-                order_id=order.id,
-                subject=subject,
-                kind=kind,
-                role=role,
-                filename=filename,
-                media_type=media_type,
-                size_bytes=size_bytes,
-                sha256=sha256,
-                blob_key=blob_key,
-                caption=caption,
-                created_by=by,
-                archive_id=archive_id,
-                archive_media=archive_media,
-            )
-            self._event(
-                conn,
-                order,
-                by,
-                "attachment.added",
-                attachment_id=attachment.id,
-                item_id=attachment.item_id,
-                fulfilment_id=attachment.fulfilment_id,
-                revision_id=attachment.revision_id,
-                role=attachment.role,
-                source=source,
-            )
+            kept = self.store.attachment(attachment_id, conn=conn)
+            if kept is not None and kept[0].order_id == order.id:
+                # Another attempt of the same operation, whose id this is (#8471): the
+                # row an earlier attempt committed, with no second hold or audit line.
+                attachment = kept[0]
+            else:
+                attachment = self.store.insert_attachment(
+                    conn,
+                    subject_item_id=None
+                    if fulfilment_id is None and revision_id is None
+                    else item_id,
+                    fulfilment_id=fulfilment_id if revision_id is not None else None,
+                    attachment_id=attachment_id,
+                    order_id=order.id,
+                    subject=subject,
+                    kind=kind,
+                    role=role,
+                    filename=filename,
+                    media_type=media_type,
+                    size_bytes=size_bytes,
+                    sha256=sha256,
+                    blob_key=blob_key,
+                    caption=caption,
+                    created_by=by,
+                    archive_id=archive_id,
+                    archive_media=archive_media,
+                )
+                self._event(
+                    conn,
+                    order,
+                    by,
+                    "attachment.added",
+                    attachment_id=attachment.id,
+                    item_id=attachment.item_id,
+                    fulfilment_id=attachment.fulfilment_id,
+                    revision_id=attachment.revision_id,
+                    role=attachment.role,
+                    source=source,
+                )
             change = _Change(order)
             self._subject_item(change, conn, attachment)
         if tell:

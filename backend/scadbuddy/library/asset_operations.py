@@ -67,6 +67,10 @@ def asset_kinds(state: AppState) -> list[OperationKind]:
             name,
             answered_as_routes(check),
             answered_as_routes(run),
+            # Every attempt writes the same asset (#8471): its id is its bytes' sha256,
+            # `AssetStore.put` upserts by it, and the mirror's blob is keyed by it too.
+            # A store, database or source briefly away is tried again.
+            run_attempts=3,
             queue="library",
             where="the template's uploaded files",
         )
