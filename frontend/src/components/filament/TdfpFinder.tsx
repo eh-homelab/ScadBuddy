@@ -27,8 +27,8 @@ interface Props {
   hasSavedId: boolean
   /** A match was chosen: the page puts it in the 3DFP id field, unsaved. */
   onUse: (tdfpId: number) => void
-  /** A create gave the type its id: the page reads the type again. */
-  onCreated: (tdfpId: number, typeTookIt: boolean) => void
+  /** A create for the linked type ended: the page reads the type again and answers the 3DFP id it holds. */
+  onCreated: (tdfpId: number, typeTookIt: boolean) => Promise<number | null>
 }
 
 const detailOf = (cause: unknown, fallback: string) => (cause instanceof ApiError ? cause.detail || fallback : fallback)
@@ -122,6 +122,13 @@ export function TdfpFinder({ defaults, linkTypeId, hasSavedId, onUse, onCreated 
           // The search starts from what the type's fields say now, unsaved edits too.
           setAsk({ brand: defaults.brand, material: defaults.material, materialType: defaults.materialType, colour: defaults.colour })
           setAdd({ brand: defaults.brand, material: defaults.material, materialType: defaults.materialType, colour: defaults.colour, hexes: defaults.hexes.join(', '), nominalWeight: defaults.nominalWeight })
+          // The last time's matches and words belong to the fields it searched with.
+          setFound(null)
+          setError(null)
+          setDone(null)
+          setDuplicate(null)
+          setDiffer([])
+          setAdding(false)
           setOpen(true)
         }}
       >
@@ -169,6 +176,10 @@ export function TdfpFinder({ defaults, linkTypeId, hasSavedId, onUse, onCreated 
   async function create(event?: FormEvent) {
     event?.preventDefault()
     const weight = add.nominalWeight.trim()
+    if (weight && !/^\d+$/.test(weight)) {
+      setError('Enter the nominal weight in grams, as a whole number.')
+      return
+    }
     const body: TdfpCreateRequest = {
       brand: add.brand.trim(),
       material: add.material.trim(),
@@ -195,9 +206,17 @@ export function TdfpFinder({ defaults, linkTypeId, hasSavedId, onUse, onCreated 
       if (id == null) return
       setDuplicate(null)
       setAdding(false)
-      setDone(answer.type_tdfp_id_set ? `Added to 3DFP as ${id}. The type’s 3DFP id is now ${id}.` : `Added to 3DFP as ${id}. Save the type to keep the id.`)
-      if (!answer.type_tdfp_id_set) onUse(id)
-      onCreated(id, answer.type_tdfp_id_set)
+      if (answer.type_tdfp_id_set) {
+        setDone(`Added to 3DFP as ${id}. The type’s 3DFP id is now ${id}.`)
+        void onCreated(id, true)
+      } else if (body.type_id) {
+        // The type took an id another way while the add ran (R-7025-14): it keeps that one.
+        const held = await onCreated(id, false)
+        setDone(held == null ? `Added to 3DFP as ${id}.` : `Added to 3DFP as ${id}. The type already holds 3DFP id ${held}, so it keeps it.`)
+      } else {
+        setDone(`Added to 3DFP as ${id}. Save the type to keep the id.`)
+        onUse(id)
+      }
     } catch (cause) {
       setError(createProblem(cause))
     } finally {

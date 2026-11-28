@@ -541,15 +541,17 @@ export function TypePage() {
     set('tdfp_id', String(tdfpId))
     setNotice(`The 3DFP id is now ${tdfpId}. Save the type to keep it.`)
   }
-  const tdfpCreated = (tdfpId: number, typeTookIt: boolean) => {
-    if (!typeTookIt) return
-    getType(madeId ?? id).then(
-      (fresh) => {
-        setSaved(fresh)
-        setDraft((was) => ({ ...was, tdfp_id: String(tdfpId) }))
-      },
-      (cause) => setError(message(cause)),
-    )
+  /** A 3DFP create for this saved type ended: the type is read again, and the field shows the id it holds. */
+  const tdfpCreated = async (tdfpId: number, typeTookIt: boolean): Promise<number | null> => {
+    try {
+      const fresh = await getType(madeId ?? id)
+      setSaved(fresh)
+      setDraft((was) => ({ ...was, tdfp_id: str(fresh.tdfp_id ?? (typeTookIt ? tdfpId : null)) }))
+      return fresh.tdfp_id ?? null
+    } catch (cause) {
+      setError(message(cause))
+      return null
+    }
   }
   const subtypes = lists.subtypes.filter((one) => !one.material_id || one.material_id === draft.material_id)
   const models = [...new Set(lists.printers.map((p) => p.model).filter((m): m is string => !!m))]
