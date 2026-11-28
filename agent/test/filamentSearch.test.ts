@@ -49,7 +49,7 @@ const spool = (values: Partial<Spool>) =>
 type Cases = { query: string; match: boolean }[]
 type Properties = Parameters<typeof propertyTexts>[0]
 type Vector =
-  | { name: string; kind: 'spool'; spool: Spool; extras: Parameters<typeof spoolSearchDoc>[1]; properties?: Properties; cases: Cases }
+  | { name: string; kind: 'spool'; spool: Spool; extras: Parameters<typeof spoolSearchDoc>[1]; properties?: Properties; typeProperties?: Properties; cases: Cases }
   | { name: string; kind: 'type'; type: SpoolType; names: Record<string, string>; skus: string[]; properties?: Properties; cases: Cases }
 
 const { groups } = JSON.parse(readFileSync(`${import.meta.dirname}/../../test-fixtures/filament/search-vectors.json`, 'utf8')) as { groups: Vector[] }
@@ -60,7 +60,7 @@ describe('the filament search matcher', () => {
       const properties = propertyTexts(group.properties)
       const doc =
         group.kind === 'spool'
-          ? spoolSearchDoc(group.spool, { ...group.extras, properties })
+          ? spoolSearchDoc(group.spool, { ...group.extras, properties, typeProperties: propertyTexts(group.typeProperties) })
           : typeSearchDoc(group.type, new Map(Object.entries(group.names)), group.skus, { properties })
       for (const { query, match } of group.cases) expect(matchesSearch(doc, parseSearch(query)), JSON.stringify(query)).toBe(match)
     })
@@ -153,6 +153,12 @@ describe('filament_spool_list q', () => {
     propertiesDown()
     expect(numbers(await runTool(tool('filament_spool_list'), { q: 'l-2207' }, ctx()))).toEqual([])
     expect(numbers(await runTool(tool('filament_spool_list'), { q: 'pink' }, ctx()))).toEqual([87])
+  })
+
+  it("finds a spool by its type's property by key:value (#8372)", async () => {
+    backend()
+    expect(numbers(await runTool(tool('filament_spool_list'), { q: 'gtin:6975337041234' }, ctx()))).toEqual([4])
+    expect(numbers(await runTool(tool('filament_spool_list'), { q: 'gtin:l-2207' }, ctx()))).toEqual([])
   })
 })
 

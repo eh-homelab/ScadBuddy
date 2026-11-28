@@ -335,6 +335,9 @@ function KProfileForm({
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState<string | null>(null)
 
+  /** The name or K differs from the profile being edited: what Save writes, and what Delete note would drop. */
+  const profileEdited = was !== undefined && (name.trim() !== was.name || Number(k.trim()) !== Number(was.k_value))
+
   async function submit(event: FormEvent) {
     event.preventDefault()
     setBusy(true)
@@ -356,7 +359,7 @@ function KProfileForm({
     const noteChanged = text !== (note?.note ?? '')
     // A profile write runs once and on a single-nozzle printer is a delete and an add, so an
     // edit that changes only the note sends only the note.
-    const profileChanged = !was || name.trim() !== was.name || Number(k.trim()) !== Number(was.k_value)
+    const profileChanged = !was || profileEdited
     let result: KProfileWriteResult | undefined
     try {
       if (profileChanged) {
@@ -395,8 +398,15 @@ function KProfileForm({
         if (noteDeleted) await api.deleteKProfileNote(row.id, key)
         else await api.setKProfileNote(row.id, key, text)
       } catch (cause) {
+        const why = problem(cause, noteDeleted ? 'the note could not be deleted' : 'the note could not be saved')
+        // Only the note was sent: nothing else ran, so the form stays open to try again.
+        if (!result) {
+          setError(why)
+          setBusy(false)
+          return
+        }
         // The profile write is done and must not be sent again: close, and say what failed.
-        onDone({ text: `${saved}, but not its note: ${problem(cause, 'the note could not be saved')}.`, warn: true })
+        onDone({ text: `${saved}, but ${noteDeleted ? 'its note was not deleted' : 'not its note'}: ${why}.`, warn: true })
         return
       }
     }
@@ -491,9 +501,25 @@ function KProfileForm({
           Cancel
         </Button>
         {note && was && (
-          <Button type="button" size="sm" variant="ghost" className="ml-auto" disabled={busy} onClick={() => void deleteNote()}>
-            <Trash2Icon /> Delete note
-          </Button>
+          <>
+            <Button
+              type="button"
+              size="sm"
+              variant="ghost"
+              className="ml-auto"
+              // Delete note closes the form: an unsaved name or K edit would be dropped without a word.
+              disabled={busy || profileEdited}
+              aria-describedby={profileEdited ? `kp-note-delete-${row.id}` : undefined}
+              onClick={() => void deleteNote()}
+            >
+              <Trash2Icon /> Delete note
+            </Button>
+            {profileEdited && (
+              <span id={`kp-note-delete-${row.id}`} className="text-xs text-muted-foreground">
+                Save or undo the other edits first.
+              </span>
+            )}
+          </>
         )}
         {busy && <Spinner />}
       </div>

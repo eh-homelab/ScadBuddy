@@ -200,6 +200,45 @@ describe('PrinterKProfiles (#7154)', () => {
     expect(screen.queryByRole('form', { name: 'Edit Bambu PLA Basic' })).not.toBeInTheDocument()
   })
 
+  it('turns Delete note off while the name or K has an unsaved edit, so the edit is not dropped', async () => {
+    const { user } = await opened()
+    await user.click(await screen.findByRole('button', { name: 'Edit Bambu PLA Basic' }))
+    const form = screen.getByRole('form', { name: 'Edit Bambu PLA Basic' })
+    expect(within(form).getByRole('button', { name: 'Delete note' })).toBeEnabled()
+    await user.clear(within(form).getByLabelText('K value'))
+    await user.type(within(form).getByLabelText('K value'), '0.025')
+    expect(within(form).getByRole('button', { name: 'Delete note' })).toBeDisabled()
+    expect(within(form).getByRole('button', { name: 'Delete note' })).toHaveAccessibleDescription('Save or undo the other edits first.')
+  })
+
+  it('says the profile saved but its note was not deleted when the cleared-note delete fails', async () => {
+    server.use(
+      http.delete('/api/v1/printers/:id/kprofiles/notes/:key', () => HttpResponse.json({ detail: 'boom' }, { status: 500 })),
+    )
+    const { user } = await opened()
+    await user.click(await screen.findByRole('button', { name: 'Edit Bambu PLA Basic' }))
+    const form = screen.getByRole('form', { name: 'Edit Bambu PLA Basic' })
+    await user.clear(within(form).getByLabelText('K value'))
+    await user.type(within(form).getByLabelText('K value'), '0.025')
+    await user.clear(within(form).getByLabelText('Note'))
+    await user.click(within(form).getByRole('button', { name: 'Save K-profile' }))
+    await said('Saved Bambu PLA Basic, but its note was not deleted: boom.')
+  })
+
+  it('keeps the form open when only the note changed and its write fails', async () => {
+    server.use(
+      http.delete('/api/v1/printers/:id/kprofiles/notes/:key', () => HttpResponse.json({ detail: 'boom' }, { status: 500 })),
+    )
+    const { user } = await opened()
+    await user.click(await screen.findByRole('button', { name: 'Edit Bambu PLA Basic' }))
+    const form = screen.getByRole('form', { name: 'Edit Bambu PLA Basic' })
+    await user.clear(within(form).getByLabelText('Note'))
+    await user.click(within(form).getByRole('button', { name: 'Save K-profile' }))
+    expect(await within(form).findByRole('alert')).toHaveTextContent('boom')
+    expect(screen.getByRole('form', { name: 'Edit Bambu PLA Basic' })).toBeInTheDocument()
+    expect(mockKProfileNotes().PFUS1).toBeDefined()
+  })
+
   it('keeps the form open and says why when a note delete fails', async () => {
     server.use(
       http.delete('/api/v1/printers/:id/kprofiles/notes/:key', () => HttpResponse.json({ detail: 'boom' }, { status: 500 })),

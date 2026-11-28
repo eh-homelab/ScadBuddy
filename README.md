@@ -2197,8 +2197,10 @@ The `slicer` task queue's worker (spec
 `docs/superpowers/specs/2026-10-16-own-store-slicer-rust-workers-design.md` §7) runs on
 `ghcr.io/eh-homelab/scadbuddy-slicer` (the Dockerfile's `--target slicer`, published
 by the `slicer` job in `build-image.yml` with the same tags). It is the Rust worker
-`scadbuddy-slicer` with the Bambu Studio CLI v02.08.02.61, pinned by the AppImage's
-sha256 (`BAMBU_STUDIO_VERSION` in the image), and runs as a Deployment of its own.
+`scadbuddy-slicer` with the Bambu Studio CLI, pinned by version and the AppImage's
+sha256 (`BAMBU_STUDIO_VERSION` in the image), and runs as a Deployment of its own. The
+weekly `bambu-studio-bump.yml` opens a PR that moves the pin when Bambu Studio publishes
+a newer stable release (#8325); it is never auto-merged.
 
 - Its whole configuration is six variables: `SCADBUDDY_TEMPORAL_ADDRESS` (required),
   `SCADBUDDY_TEMPORAL_NAMESPACE` (default `default`),

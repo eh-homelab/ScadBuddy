@@ -1,0 +1,30 @@
+{
+  "moves": [
+    {
+      "actor": {
+        "kind": "browser",
+        "principal": "p1",
+        "run_id": null,
+        "session": null
+      },
+      "amount_minor": "-24",
+      "at": "2026-11-26T12:00:00Z",
+      "cost_unknown": false,
+      "entity_id": null,
+      "id": "00000000-0000-4000-8000-000000000001",
+      "item_id": "00000000-0000-4000-8000-000000000002",
+      "kind": "adjust",
+      "lot_id": "00000000-0000-4000-8000-000000000003",
+      "needs_review": false,
+      "order_id": null,
+      "order_item_id": null,
+      "print_run_id": null,
+      "production_run_id": null,
+      "qty": "-3",
+      "reason": "stocktake",
+      "reverses_move_id": null,
+      "unit_cost_minor": "8",
+      "unit_id": null
+    }
+  ]
+}

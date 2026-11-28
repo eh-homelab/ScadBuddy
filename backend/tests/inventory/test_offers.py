@@ -10,7 +10,6 @@ from uuid import UUID, uuid4
 import pytest
 from pydantic import ValidationError
 
-from scadbuddy.inventory.items import FilamentItemRefused, ItemNotFound, ItemStore
 from scadbuddy.inventory.models import ItemInput, Offer, OfferInput, OfferPatch, PriceInput
 from scadbuddy.inventory.offers import (
     OfferExists,
@@ -18,8 +17,10 @@ from scadbuddy.inventory.offers import (
     OfferStore,
     SupplierNotFound,
 )
+from scadbuddy.inventory.stock import FilamentItemRefused, ItemNotFound
 from scadbuddy.orders.models import Actor
 from tests.conftest import PgPool
+from tests.support.inventory_rows import ItemRows
 
 pytestmark = pytest.mark.requires_postgres
 
@@ -41,12 +42,12 @@ def _supplier(pg_pool: PgPool, name: str = "Bolt Depot", archived: bool = False)
     return UUID(str(row["id"]))
 
 
-def _item(items: ItemStore, name: str) -> UUID:
+def _item(items: ItemRows, name: str) -> UUID:
     return items.create(ItemInput(kind_id="hardware", name=name), BY).id
 
 
 def test_a_bundle_sku_covers_several_items(
-    offers: OfferStore, items: ItemStore, pg_pool: PgPool
+    offers: OfferStore, items: ItemRows, pg_pool: PgPool
 ) -> None:
     shop = _supplier(pg_pool)
     red, blue = _item(items, "Bundle red"), _item(items, "Bundle blue")
@@ -66,7 +67,7 @@ def test_a_bundle_sku_covers_several_items(
 
 
 def test_an_archived_offer_frees_its_sku(
-    offers: OfferStore, items: ItemStore, pg_pool: PgPool
+    offers: OfferStore, items: ItemRows, pg_pool: PgPool
 ) -> None:
     shop = _supplier(pg_pool)
     nut = _item(items, "M3 nut")
@@ -81,7 +82,7 @@ def test_an_archived_offer_frees_its_sku(
 
 
 def test_an_archived_or_unknown_supplier_is_refused(
-    offers: OfferStore, items: ItemStore, pg_pool: PgPool
+    offers: OfferStore, items: ItemRows, pg_pool: PgPool
 ) -> None:
     nut = _item(items, "M3 nut")
 
@@ -96,7 +97,7 @@ def test_an_archived_or_unknown_supplier_is_refused(
 
 
 def test_a_filament_item_takes_no_offer(
-    offers: OfferStore, items: ItemStore, pg_pool: PgPool
+    offers: OfferStore, items: ItemRows, pg_pool: PgPool
 ) -> None:
     # No filament item can be made through the store (Ruling 9); one from phase 3 is a row.
     with pg_pool.connection() as conn:
@@ -112,7 +113,7 @@ def test_a_filament_item_takes_no_offer(
 
 
 def test_a_price_is_manual_in_any_iso_currency(
-    offers: OfferStore, items: ItemStore, pg_pool: PgPool
+    offers: OfferStore, items: ItemRows, pg_pool: PgPool
 ) -> None:
     offer = offers.create(
         OfferInput(supplier_id=_supplier(pg_pool), item_id=_item(items, "M3 nut"), sku="N"), BY
@@ -134,7 +135,7 @@ def test_a_price_is_manual_in_any_iso_currency(
 
 
 def test_update_keeps_the_sku_rule_and_blanks_the_url(
-    offers: OfferStore, items: ItemStore, pg_pool: PgPool
+    offers: OfferStore, items: ItemRows, pg_pool: PgPool
 ) -> None:
     shop = _supplier(pg_pool)
     nut = _item(items, "M3 nut")
@@ -162,9 +163,7 @@ def _offer(offers: OfferStore, shop: UUID, item: UUID, sku: str = "NUT-3") -> Of
     return offers.create(OfferInput(supplier_id=shop, item_id=item, sku=sku), BY)
 
 
-def test_restore_brings_an_offer_back(
-    offers: OfferStore, items: ItemStore, pg_pool: PgPool
-) -> None:
+def test_restore_brings_an_offer_back(offers: OfferStore, items: ItemRows, pg_pool: PgPool) -> None:
     offer = _offer(offers, _supplier(pg_pool), _item(items, "M3 nut"))
     offers.archive(offer.id)
 
@@ -174,7 +173,7 @@ def test_restore_brings_an_offer_back(
 
 
 def test_restore_refuses_an_archived_supplier_or_item(
-    offers: OfferStore, items: ItemStore, pg_pool: PgPool
+    offers: OfferStore, items: ItemRows, pg_pool: PgPool
 ) -> None:
     shop = _supplier(pg_pool)
     nut = _item(items, "M3 nut")
@@ -212,7 +211,7 @@ def test_restore_refuses_a_filament_item(offers: OfferStore, pg_pool: PgPool) ->
 
 
 def test_an_archived_item_takes_no_offer(
-    offers: OfferStore, items: ItemStore, pg_pool: PgPool
+    offers: OfferStore, items: ItemRows, pg_pool: PgPool
 ) -> None:
     nut = _item(items, "M3 nut")
     items.archive(nut)
@@ -222,7 +221,7 @@ def test_an_archived_item_takes_no_offer(
 
 
 def test_a_null_clears_the_note_and_keeps_the_pack_size(
-    offers: OfferStore, items: ItemStore, pg_pool: PgPool
+    offers: OfferStore, items: ItemRows, pg_pool: PgPool
 ) -> None:
     offer = offers.create(
         OfferInput(
@@ -254,7 +253,7 @@ def test_inputs_refuse_bad_links_skus_and_currencies() -> None:
 
 
 def test_the_latest_price_is_the_later_write_on_one_day(
-    offers: OfferStore, items: ItemStore, pg_pool: PgPool
+    offers: OfferStore, items: ItemRows, pg_pool: PgPool
 ) -> None:
     offer = _offer(offers, _supplier(pg_pool), _item(items, "M3 nut"))
     day = date(2026, 11, 20)
@@ -267,7 +266,7 @@ def test_the_latest_price_is_the_later_write_on_one_day(
 
 
 def test_archived_offers_are_listed_only_when_asked(
-    offers: OfferStore, items: ItemStore, pg_pool: PgPool
+    offers: OfferStore, items: ItemRows, pg_pool: PgPool
 ) -> None:
     shop = _supplier(pg_pool)
     offer = _offer(offers, shop, _item(items, "M3 nut"))

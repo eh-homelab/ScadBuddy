@@ -104,6 +104,7 @@ async def deliver_pending(
     limit: int = PASS_LIMIT,
     budget: float = PASS_BUDGET,
     phase_timeout: float = SEND_PHASE_TIMEOUT,
+    clock: Callable[[], float] = time.monotonic,
 ) -> DeliveryReport:
     """Send up to ``limit`` queued notifications through Bambuddy. With no Bambuddy URL
     nothing is claimed: the rows wait for one. The Bambuddy client is built before the
@@ -111,7 +112,7 @@ async def deliver_pending(
     ended ``failed`` with its code; the others are still sent. A failed end (SB out of
     reach) raises: the rows claimed and not ended are ended ``interrupted`` by a later
     claim. The pass starts no send after ``budget`` seconds; the rows it did not try go
-    back to ``queued``."""
+    back to ``queued``. ``clock`` measures the budget (a test's own, #8412)."""
     settings = await load()
     if not settings.bambuddy_url:
         return DeliveryReport(sent=0, failed=0)
@@ -121,9 +122,9 @@ async def deliver_pending(
     # ``interrupted``.
     async with client_for(settings) as client:
         rows = await api.claim(limit)
-        deadline = time.monotonic() + budget
+        deadline = clock() + budget
         for row in rows:
-            if time.monotonic() >= deadline:
+            if clock() >= deadline:
                 await api.end(row.id, NotificationEnd(requeue=True))
                 continue
             try:

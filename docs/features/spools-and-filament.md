@@ -77,6 +77,11 @@ The Spools tab's bulk bar acts on the selected spools (#7151, plan
 - **Archive and Restore.** One request each, `POST /filament/spools/bulk-archive` and
   `/bulk-restore`. The answer lists the spools changed, those already so and the ids that
   name no spool, and the bar reports it once.
+- **Reset used.** After a confirm, `POST /filament/spools/reset-consumed` puts a
+  `consumed_reset` event on each selected spool (#7149), in requests of at most 500 ids. The
+  grams left stay; the report says how many counters were reset and names each spool that no
+  longer exists. When a request is refused, the earlier ones stand, the rest are not sent, and
+  the report says which spools were not reset.
 
 An AMS tray's place page that holds a spool has "Take the spool out of this tray"
 (`DELETE /printers/{id}/trays/{ams}/{tray}/spool`): the spool moves to no place.
@@ -596,6 +601,9 @@ matches `[a-z][a-z0-9_]{0,63}`. Limits: 200 keys per entity, 2000 characters per
   `frontend/src/components/entities/api.ts`). The agent's search matches them too
   (`agent/src/tools/filament.ts` loads them, `agent/src/tools/filamentSearch.ts` matches); both use the shared vectors
   `test-fixtures/filament/search-vectors.json`.
+  A `key:value` token (#8372, such as `gtin:06975337041234`) also matches a property with that
+  key whose whole value, or one list item, equals the value; 8 to 14 digits compare as GTIN-14,
+  and a spool also matches by its type's property values.
 - Agent: `entity_property_list`, `entity_property_set`, `entity_property_schema_get` and
   `entity_property_schema_set` (`agent/src/tools/entities.ts`), and a `properties` field on
   `filament_type_upsert` and `filament_spool_upsert` (`agent/src/tools/filament.ts`). An
@@ -708,7 +716,9 @@ matches `[a-z][a-z0-9_]{0,63}`. Limits: 200 keys per entity, 2000 characters per
   inventory list of the kind's items). A code
   opens at `/x/<code>` (`frontend/src/pages/CodePage.tsx`; route `GET /api/v1/codes/{code}`,
   `backend/scadbuddy/api/codes.py`). Any case works, with or without the dash. A number is
-  never reused, and an archived thing still resolves.
+  never reused, and an archived thing still resolves. A `/x/<text>` that names nothing and has
+  no code shape (a maker's barcode), and the scan page's "Search spools for" link, go to the
+  Spools tab's search with `from=scan`, which opens the spool when only one matches (#8372).
 - Printer places: a printer has its own place (`filament_locations.printer_root`, kind
   "Printer"). Its AMS units and external holder hang under it
   (`LocationStore.ensure_printer_on`, `backend/scadbuddy/filament/locations.py`). A printer
@@ -728,7 +738,9 @@ matches `[a-z][a-z0-9_]{0,63}`. Limits: 200 keys per entity, 2000 characters per
   a concurrent write answers 409 `printer_delete_conflict`, and the person tries again.
 - Labels: a place's QR is `<base>/x/L-<n>`. The labels page (`/filament/labels`) prints places
   with `?locations=` and printers with `?printers=` (one printer's from its place page, every
-  printer's from the Locations tab). The printer labels first make the place of each AMS unit,
+  printer's from the Locations tab). It prints spool types with `?types=`, items with `?items=`
+  and kinds with `?kinds=` (#7169). A saved spool type's page has a "Print label" link that opens
+  it with that type chosen. The printer labels first make the place of each AMS unit,
   slot and external holder the printer's latest report lists; a printer with no such report is
   named on the page. Spool labels keep `scadbuddy:spool:<id>`. A place links to its own page,
   `/filament/locations/<id>`. `POST /api/v1/filament/labels` also takes `type_ids`, `item_ids`

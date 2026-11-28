@@ -13,6 +13,7 @@ import {
   matchesSearch,
   orElse,
   parseSearch,
+  type PropertyText,
   SEARCH_ROUTES,
   spoolSearchDoc,
   spoolTags,
@@ -351,7 +352,9 @@ const tools: Tool[] = [
       'The spool types, by code. A type is a product: what a maker sells under one code (brand, material, ' +
       'subtype, colour `#RRGGBBAA`, label weight, print values a spool inherits, `cost_per_kg`, `filament_id` of ' +
       'its price book row). Archived types only with `include_archived`. `q` keeps the types whose code, brand, ' +
-      'material, subtype, colour name, hex, supplier SKU or a property value (a GTIN, an MPN) match it.',
+      'material, subtype, colour name, hex, supplier SKU or a property value (a GTIN, an MPN) match it. ' +
+      'A `key:value` token (such as `gtin:06975337041234`) also matches a property of that key whose whole value equals it; ' +
+      'two values of 8 to 14 digits are equal when they are equal padded to 14 digits.',
     input: z.object({ include_archived: z.boolean().default(false), q: searchQuery }),
     risk: 'read',
     source: SOURCE,
@@ -366,7 +369,7 @@ const tools: Tool[] = [
       const [names, skus, properties] = await Promise.all([
         catalogNames(backend),
         orElse(typeSkus(backend), new Map<string, string[]>()),
-        orElse(kindPropertyTexts(backend, 'spool_type'), new Map<string, string[]>()),
+        orElse(kindPropertyTexts(backend, 'spool_type'), new Map<string, PropertyText[]>()),
       ])
       return json(
         types.filter((type) => matchesSearch(typeSearchDoc(type, names, skus.get(type.id), { properties: properties.get(type.id) }), tokens)),
@@ -837,8 +840,10 @@ const tools: Tool[] = [
       'with `include_archived`. `awaiting_home: true` lists only the spools that came out of a tray and are asked ' +
       'which spool goes into their home dry box (`home_location_id`, asked at `home_asked_at`); ask the user to ' +
       'identify the spool, then answer with filament_spool_move `answers`. `q` keeps the spools whose number, brand, material, subtype, colour name, hex, ' +
-      "place, tray, type code, type's supplier SKU, one of the spool's property values (a lot) or open tag's UID or " +
-      'tray UUID (from 4 hex digits; `:` and `-` are left out, so `04:A1:B2` finds tag `04A1B2…`) match it.',
+      "place, tray, type code, type's supplier SKU, one of the spool's or its type's property values (a lot, a GTIN) or open tag's UID or " +
+      'tray UUID (from 4 hex digits; `:` and `-` are left out, so `04:A1:B2` finds tag `04A1B2…`) match it. ' +
+      'A `key:value` token (such as `gtin:06975337041234`) also matches a property of that key whose whole value equals it; ' +
+      'two values of 8 to 14 digits are equal when they are equal padded to 14 digits.',
     input: z.object({
       include_archived: z.boolean().default(false),
       needs_type: z.boolean().optional(),
@@ -862,7 +867,7 @@ const tools: Tool[] = [
       const tokens = parseSearch(q)
       if (!tokens.length) return json(spools)
       // The type codes, SKUs, trays, tags and properties only add to the search: one that cannot be read leaves its field out.
-      const [types, skus, trays, tags, properties] = await Promise.all([
+      const [types, skus, trays, tags, properties, typeProperties] = await Promise.all([
         orElse(
           ok(backend.GET('/api/v1/filament/types', { params: { query: { include_archived: true } } }), 'list the spool types'),
           [],
@@ -870,7 +875,8 @@ const tools: Tool[] = [
         orElse(typeSkus(backend), new Map<string, string[]>()),
         orElse(spoolTrays(backend), new Map<string, string>()),
         orElse(spoolTags(backend), new Map<string, string[]>()),
-        orElse(kindPropertyTexts(backend, 'spool'), new Map<string, string[]>()),
+        orElse(kindPropertyTexts(backend, 'spool'), new Map<string, PropertyText[]>()),
+        orElse(kindPropertyTexts(backend, 'spool_type'), new Map<string, PropertyText[]>()),
       ])
       const codes = new Map(types.map((type) => [type.id, type.code]))
       return json(
@@ -882,6 +888,7 @@ const tools: Tool[] = [
               tray: trays.get(spool.id),
               tags: tags.get(spool.id),
               properties: properties.get(spool.id),
+              typeProperties: spool.type_id ? typeProperties.get(spool.type_id) : undefined,
             }),
             tokens,
           ),

@@ -1909,15 +1909,20 @@ only the sleeps move; a budget on the real clock fails on a slow runner (#6252).
   `mocks/features/activity.ts`.
 - `backend/scadbuddy/inventory/` — the item core (#7067, spec
   `docs/superpowers/specs/2026-11-21-inventory-and-purchasing-design.md` §6.4-6.6; page
-  `docs/features/inventory.md`): `models.py` (the Pydantic models), `kinds.py` (`KindStore`, the
-  `item_kinds` tree and its inherited `attribute_schema`), `items.py` (`ItemStore`; a `filament`
-  kind's items are refused until phase 3), `offers.py` (`OfferStore`: `supplier_offers` and
-  `offer_price_points`), `stock.py` (`StockStore`: lots, units and moves; `_fifo`, `take`,
-  `give_back`, `count_item`, `recost_lot`; `parts_moved`, the one reader of job cost's parts figure;
-  the lock order of R-P2-32: `lock_items` takes, per item in `item_id` order, the item `FOR SHARE`,
-  then `_open_lock` (the advisory lock every lot insert takes first), then the lots `FOR UPDATE` in
-  FIFO order), `part_alias.py` (`PartAliases`: the `/parts` routes over the inventory, for one
-  release), `problems.py` (the 4xx problems, `refused`) and `component.py` (`InventoryComponent`).
+  `docs/features/inventory.md`): `models.py` (the Pydantic models), `core_client.py`
+  (`InventoryCore`, #6949 K1: the kind, item, lot, unit and move routes read over
+  scadbuddy-core's CRUD routes and write by starting its `inventory.<Name>` activity on the
+  queue `inventory`, with the id `inventory.<Name>:<key>`; the input's `key` (the operation
+  id) is the scoped `Idempotency-Key`; a write past the 15 s wait answers 202, followed at
+  `GET /inventory/operations/{id}`), `activity.py` (the Activities
+  tab's `inventory.<Name>` kinds), `kinds.py` (`merged_schema`, `item_schema` and
+  `keys_in_use` of the `item_kinds` tree; Go writes the kinds and items now),
+  `offers.py` (`OfferStore`: `supplier_offers` and
+  `offer_price_points`), `stock.py` (reads only since #6949 K1 Task 16: `estimate_unit_cost`, and
+  `parts_moved`, the one reader of job cost's parts figure; Go writes every stock row, and
+  `tests/test_no_python_stock_writes.py` keeps it so; phase 2's writes live on as the tests' stand-in
+  for Go, `tests/support/python_stock.py`), `problems.py` (the 4xx problems, `refused`) and
+  `component.py` (`InventoryComponent`).
   Only filament reaches Bambuddy: nothing here calls it, and `bb_sync_plan._suppliers()` keeps a
   supplier made for offers out of it (D16, R-P2-8 to R-P2-10). Tests: `backend/tests/inventory/`.
 - `backend/scadbuddy/entities/` — files, links and key-value properties on any row
@@ -1928,7 +1933,8 @@ only the sleeps move; a budget on the real clock fails on a slow runner (#6252).
   `item`, `lot` and `unit` among them since #7067, and one kind per filament catalog, such
   as `insert_type`; `EntityStore`: an `entities` row made by
   `ensure` only for an owner row that exists, and `orphans`, the rows whose owner is gone
-  and that no stock move names; `repoint_entity` also moves a merged entity's stock moves),
+  and that no stock move names; `repoint_entity` moves no stock move since #6949 K1 Task 16:
+  a printer merge moves them first through `MergePrinter`, Go's `inventory.Repoint`),
   `attachments.py` (`EntityAttachmentStore` over
   `entity_attachments`, the old `order_attachments`: an order's files are its rows with an
   `order_id`, written only through the order routes, `ORDER_KINDS`; a print archive's files
@@ -2436,22 +2442,37 @@ only the sleeps move; a budget on the real clock fails on a slow runner (#6252).
   tracks lots): `orders/parts.py` (`PartStore`: the `model_part_rules` and `order_item_parts`
   rows, over `item_id`; `part_id` is read the same for one release), routes `api/parts.py`
   (`GET /orders/{id}/parts`, `PUT /orders/{id}/items/{item}/parts`, the rule routes). The
-  part-row routes (`/parts`, `/parts/{id}`, its `stock`, `adjust` and `moves`) are aliases
-  of the inventory for one release (`inventory/part_alias.py` `PartAliases`): a part is an
-  item of kind `hardware`, its pack and price its newest offer and price point. A part with
-  no supplier has no offer: it reads as a pack of 1 at 0, a pack on a create or an edit is 422
-  (R-P2-34), and Add stock takes the body's price and writes no price point (R-P2-25). The
-  unit cost leaves out lots of unknown cost with no cost entered; with none on hand and no
-  price point it is `cost_unknown` (R-P2-35).
-  `Lifecycle.add_item` copies the model's rule; `accept_fulfilment` or `fulfil_items` making an
-  item `fulfilled` takes its parts from the lots (`StockStore.take`, the part items locked
-  first in `item_id` order by `lock_items`: each item, the lock every lot insert takes, then
-  its lots, so no receive or count adds a lot under it; `parts.used`), and `unfulfil_item` gives each use back to its lot
-  at its cost (`parts.returned`); no cost entry is written: job cost reads the moves as
+  `/parts` part-row alias routes (`/parts`, `/parts/{id}`, its `stock`, `adjust` and `moves`) are gone
+  (#6949, K1 5/7): the inventory routes do their work, and the part bodies went with them.
+  `Lifecycle.add_item` copies the model's rule. The stock workflows (#6949 K1 Task 16,
+  `workflows/order_stock.py` on the `library` queue, steps `orders/stock_activities.py`, starts
+  `orders/stock_start.py`): `accept_fulfilment` or `fulfil_items` making an item `fulfilled`,
+  and `unfulfil_item`, are `FulfilOrderItem` (ids `order_item:<id>:parts:<n>`, `…:return`, and
+  `order:<id>:fulfil:<Idempotency-Key>` for the bulk route): the route's checks with no lock, then
+  the start; its first step commits the order change and sets `order_items.parts_workflow_id`
+  (`OrderItem.parts_settling`), then Go's `Take` (or `GiveBack`) of each part, then the record
+  (`parts.used`, `parts.returned`, `parts.stock_refused`). A route answers 202 `WorkflowAccepted`
+  after 15 s; it ends by itself. A refusal in the first step fails the run, writes nothing and
+  answers as before (R-K1-32). No cost entry is written: job cost reads the moves as
   `parts_minor` (`costs.py`). A fulfilled item's parts are fixed (`item_parts_used`).
-  `POST /inventory/lots/{id}/recost` runs `Lifecycle.recost_lot` (`item.parts_recosted`). The
-  unit-cost history takes `item_id` (`parts_unit_minor`, `parts_unknown`). Agent `part_list`,
-  `part_stock_add`, `order_item_parts_set`.
+  `POST /inventory/lots/{id}/recost` is `RecostLot` (`item.parts_recosted`); a printer merge whose
+  gone row stock names is `MergePrinter` (Go's `Repoint`, then the merge). The app tests run them
+  in line (`tests/support/order_stock.py`); the real ones are `tests/workflows/test_order_stock.py`
+  (`requires_temporal`) and replay `tests/fixtures/order_stock_histories/`.
+  To record the histories again (only after a change to the commands a workflow issues, which
+  goes behind `workflow.patched`; an old history is never re-recorded), dispatch `ci.yml` with
+  the input `record_histories`. Each backend shard sets `SCADBUDDY_RECORD_HISTORIES=1` and
+  uploads the artifact `order-stock-histories-<shard>`. Download the artifacts and commit their
+  files into `tests/fixtures/order_stock_histories/`; `tests/test_order_stock_replay.py` replays
+  them on every run. A closed stock workflow that holds its item is taken over: the waiting
+  workflow's step restarts it, at most 3 times (`TAKEOVERS`; the `takeover` history). The kind `inventory_operation.changed` is a typed,
+  NOTIFY-only event that scadbuddy-core sends (`tools/go/core/internal/bus/event.go`,
+  `agent_changes/hub.py`); `activity/` ingests it as the Activities tab rows. The test image
+  copies the Go vectors that the backend reads (the `COPY tools/go/core/internal/...` lines
+  in the `Dockerfile`, next to `bus/testdata/history`); a new cross-tree vector needs its
+  own line there. The
+  unit-cost history takes `item_id` (`parts_unit_minor`, `parts_unknown`). Agent `part_list` (an order's
+  parts), `order_item_parts_set`.
   The machine rate (#4625, order operations spec 2026-11-07 §6): per registry printer,
   `orders/machine_rate.py` (`compute`, pure; `MachineRateStore` over
   `printer_cost_profiles`, `printer_wear_parts` and `printer_maintenance_costs`, each in

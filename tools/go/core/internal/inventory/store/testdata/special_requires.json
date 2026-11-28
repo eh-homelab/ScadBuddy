@@ -1,0 +1,7 @@
+{
+  "_doc": "Each special type's requires_properties (handlers.Builtin). special_requires_test.go checks the catalog against it; backend tests/inventory/test_kinds_required.py checks Python's SPECIAL_REQUIRES against it.",
+  "special_types": {
+    "filament_spool": ["rgba", "diameter_mm"],
+    "printer": ["model_code"]
+  }
+}

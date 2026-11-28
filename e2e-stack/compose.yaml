@@ -1,11 +1,13 @@
 # The hot-path stack (#3818 tier A, plan 2026-10-18 Task 13): ScadBuddy with its own
 # store, library and slicer, a fake LAN printer and a Bambuddy that fails every call.
 # `e2e-stack/run.sh` brings it up as project `sb-hotpath`, seeds it (`seed.sh`) and runs
-# `frontend/e2e/real-hot-path.spec.ts` against it; read run.sh before running this alone.
+# `frontend/e2e/real-hot-path.spec.ts` against it, and on the first stack also
+# `frontend/e2e/inventory-core.spec.ts`; read run.sh before running this alone.
 #
 # Images: `app`, `slicer` and `tools` are this repo's Dockerfile, built by run.sh
 # (`--target runtime`, `--target slicer`, `--target test`), named by SB_HOTPATH_APP_IMAGE,
-# SB_HOTPATH_SLICER_IMAGE and SB_HOTPATH_TOOLS_IMAGE. The two fakes are built here from
+# SB_HOTPATH_SLICER_IMAGE and SB_HOTPATH_TOOLS_IMAGE. `core` is tools/go/core/Dockerfile,
+# built by run.sh as SB_HOTPATH_CORE_IMAGE. The two fakes are built here from
 # their own folders. Postgres is pinned by digest, through Google's Docker Hub mirror as
 # CI's service containers are (#3370); the digest matched Docker Hub's on 2026-10-24
 # (`docker buildx imagetools inspect`).
@@ -89,6 +91,10 @@ services:
       SCADBUDDY_SECRET_KEY_FILE: /run/secrets/kek
       # The slicer worker's transfer URLs name the internal blob routes at this base.
       SCADBUDDY_API_INTERNAL_URL: http://app:8080
+      # The inventory's reads go to scadbuddy-core's CRUD port (#6949 K1). Its writes go
+      # to core's worker on the Temporal queue `inventory` (the default of
+      # SCADBUDDY_TEMPORAL_TASK_QUEUE_INVENTORY).
+      SCADBUDDY_CORE_CRUD_URL: http://core:8082/api/v1
     secrets:
       - kek
     volumes:
@@ -103,6 +109,34 @@ services:
       timeout: 5s
       start_period: 120s
       retries: 40
+
+  # scadbuddy-core (tools/go/core, #6949 K1): the inventory's CRUD reads on 8082 and the
+  # inventory worker on the Temporal queue `inventory`. It is a container of its own here;
+  # on prod it is a container in the API's pod. It starts after the app, because the app
+  # applies the migrations whose tables core reads. Its image has no curl and core has no
+  # probe command, so it has no healthcheck: `up --wait` waits only until it runs, and a
+  # start that fails stops `up`. frontend/e2e/inventory-core.spec.ts waits for its reads.
+  # The dev server of the Temporal CLI 1.9.1 (the test image's) is server 1.32.0 and turns
+  # Standalone Activities on by itself, so it needs no dynamic-config switch.
+  core:
+    image: ${SB_HOTPATH_CORE_IMAGE:-scadbuddy-core:hot-path}
+    pull_policy: never
+    depends_on:
+      app:
+        condition: service_healthy
+      temporal:
+        condition: service_healthy
+    environment:
+      SCADBUDDY_DATABASE_URL: postgresql://postgres:postgres@postgres:5432/scadbuddy
+      # What core does not answer goes to Python: the full API, and on the CRUD port
+      # Python's own CRUD listener (SCADBUDDY_CRUD_PORT, 8082 by default).
+      SCADBUDDY_CORE_UPSTREAM: http://app:8080
+      SCADBUDDY_CORE_CRUD_UPSTREAM: http://app:8082
+      SCADBUDDY_CORE_AREAS: inventory,inventory:read
+      SCADBUDDY_CORE_CRUD_LISTEN: ":8082"
+      SCADBUDDY_TEMPORAL_ADDRESS: temporal:7233
+      SCADBUDDY_TEMPORAL_NAMESPACE: default
+      SCADBUDDY_TEMPORAL_TASK_QUEUE_INVENTORY: inventory
 
   slicer:
     image: ${SB_HOTPATH_SLICER_IMAGE:-scadbuddy-slicer:hot-path}

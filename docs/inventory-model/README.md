@@ -15,6 +15,12 @@ a ream of paper. It adds a warranty, an hourly service and a flat-rate service.
 | [`examples.yaml`](examples.yaml) | The items, the instances you have, and the relationships between them |
 | [`check.py`](check.py) | Resolves and checks all of it (below) |
 
+The Go proof is the test `tools/go/core/internal/inventory/modeldata` (#6949 K1, R-K1-19). It
+checks the catalog, the kinds, the items, the instances and the table of the design with the
+real Go code, and that the seeded kinds match `kinds.yaml`. The property history replay is
+`tools/go/core/internal/history/proof_test.go`. `check.py` keeps the relation checks and the
+replay of lives and cached values, which come in K2.
+
 Run the check from the repo root:
 
 ```bash

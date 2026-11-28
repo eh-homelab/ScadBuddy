@@ -22,6 +22,7 @@ import (
 
 	"github.com/jackc/pgx/v5/pgxpool"
 
+	"github.com/eh-homelab/ScadBuddy/tools/go/core/internal/inventory"
 	"github.com/eh-homelab/ScadBuddy/tools/go/core/internal/seal"
 	"github.com/eh-homelab/ScadBuddy/tools/go/core/internal/testdb"
 )
@@ -54,7 +55,7 @@ func newAPI(t *testing.T, areas string) *api {
 		}
 		return "", false
 	}
-	router, err := newRouter(pool, next, nil, areas, "", nil, lookupEnv, nil)
+	router, err := newRouter(pool, next, nil, areas, "", callerPackages, nil, lookupEnv, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -490,7 +491,7 @@ func TestWhatIsNotListedGoesToPython(t *testing.T) {
 			t.Errorf("%s %s has the CRUD header", c.method, c.path)
 		}
 	}
-	if _, err := newRouter(a.pool, nil, nil, "session-evnets", "", nil, nil, nil); err == nil {
+	if _, err := newRouter(a.pool, nil, nil, "session-evnets", "", callerPackages, nil, nil, nil); err == nil {
 		t.Error("an unknown area was taken")
 	}
 }
@@ -498,7 +499,7 @@ func TestWhatIsNotListedGoesToPython(t *testing.T) {
 func TestNamingTheFullAndTheReadOnlyUnknownTraysAreaMountsItOnce(t *testing.T) {
 	pool := testdb.New(t)
 	for _, areas := range []string{"unknown-trays, unknown-trays:read", "unknown-trays:read, unknown-trays"} {
-		if _, err := newRouter(pool, nil, nil, areas, "", nil, nil, nil); err != nil {
+		if _, err := newRouter(pool, nil, nil, areas, "", callerPackages, nil, nil, nil); err != nil {
 			t.Errorf("%s: %v", areas, err)
 		}
 	}
@@ -508,13 +509,13 @@ func TestASealedAreaNeedsTheKEKAndTheOthersDoNot(t *testing.T) {
 	pool := testdb.New(t)
 	for _, area := range []string{"credentials", "credentials:read", "payload-keys", "keys", "notify",
 		"notify:read", "transcripts", "transcripts:read", "blobs", "filament-tag-reads"} {
-		_, err := newRouter(pool, nil, nil, area, "", nil, nil, nil)
+		_, err := newRouter(pool, nil, nil, area, "", callerPackages, nil, nil, nil)
 		if err == nil || !strings.Contains(err.Error(), "SCADBUDDY_SECRET_KEY_FILE") {
 			t.Errorf("%s: %v", area, err)
 		}
 	}
 	every := "settings, access, plugin-sessions, mcp-relay, session-events, session-turns:read"
-	if _, err := newRouter(pool, nil, nil, every, "", nil, nil, nil); err != nil {
+	if _, err := newRouter(pool, nil, nil, every, "", callerPackages, nil, nil, nil); err != nil {
 		t.Fatal(err)
 	}
 	key := filepath.Join(t.TempDir(), "kek")
@@ -527,7 +528,7 @@ func TestASealedAreaNeedsTheKEKAndTheOthersDoNot(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := newRouter(pool, nil, keys, every+", credentials, payload-keys, keys, notify, transcripts, blobs, filament-tag-reads", "", nil, nil, nil); err != nil {
+	if _, err := newRouter(pool, nil, keys, every+", credentials, payload-keys, keys, notify, transcripts, blobs, filament-tag-reads", "", callerPackages, nil, nil, nil); err != nil {
 		t.Fatal(err)
 	}
 }
@@ -713,6 +714,89 @@ func TestTheCRUDPortNeedsPythonsCRUDListener(t *testing.T) {
 	err := run(context.Background(), func(k string) (string, bool) { v, ok := env[k]; return v, ok }, nil)
 	if err == nil || !strings.Contains(err.Error(), "SCADBUDDY_CORE_CRUD_UPSTREAM") {
 		t.Fatalf("got %v", err)
+	}
+}
+
+func TestTheInventoryAreaAnswersOnlyItsCaller(t *testing.T) {
+	for _, area := range []string{"inventory", "inventory:read"} {
+		a := newAPI(t, area)
+		path := "/api/v1/internal/crud/inventory/kinds"
+		got := a.do("GET", path, "")
+		expect(t, got.status, 403)
+		expect(t, got.body["reason"], "wrong_caller")
+		a.token = a.credential("inventory", "crud.inventory")
+		got = a.do("GET", path, "")
+		if got.status != 200 || got.header.Get("X-ScadBuddy-Crud") != "1" || len(got.body["kinds"].([]any)) == 0 {
+			t.Fatalf("%s: %d %s", area, got.status, got.raw)
+		}
+		// The agent's prefix does not have the inventory's routes.
+		a.token = a.credential("agent", "crud.agent")
+		expect(t, a.do("GET", "/api/v1/internal/crud/agent/kinds", "").status, http.StatusTeapot)
+	}
+}
+
+func TestAnAreaInTwoPackagesStopsTheStart(t *testing.T) {
+	pool := testdb.New(t)
+	twice := map[string]areaRoutes{"inventory": inventory.Areas, "other": inventory.Areas}
+	if _, err := newRouter(pool, nil, nil, "", "", twice, nil, nil, nil); err == nil || !strings.Contains(err.Error(), "two packages") {
+		t.Fatalf("got %v", err)
+	}
+}
+
+func TestInventoryNeedsTemporal(t *testing.T) {
+	env := map[string]string{
+		"SCADBUDDY_CORE_UPSTREAM": "http://127.0.0.1:1",
+		"SCADBUDDY_DATABASE_URL":  "postgres://postgres@127.0.0.1:1/postgres",
+		"SCADBUDDY_CORE_LISTEN":   "127.0.0.1:0",
+		"SCADBUDDY_CORE_AREAS":    "session-events, inventory",
+	}
+	err := run(context.Background(), func(k string) (string, bool) { v, ok := env[k]; return v, ok }, nil)
+	if err == nil || !strings.Contains(err.Error(), "SCADBUDDY_TEMPORAL_ADDRESS") {
+		t.Fatalf("got %v", err)
+	}
+}
+
+func TestTheInventoryWorkerStartsAndStopsWithTheServers(t *testing.T) {
+	pool := testdb.New(t)
+	free, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	address := free.Addr().String()
+	free.Close()
+	env := map[string]string{
+		"SCADBUDDY_CORE_UPSTREAM":    "http://127.0.0.1:1",
+		"SCADBUDDY_DATABASE_URL":     pool.Config().ConnString(),
+		"SCADBUDDY_CORE_LISTEN":      address,
+		"SCADBUDDY_CORE_AREAS":       "inventory",
+		"SCADBUDDY_TEMPORAL_ADDRESS": "127.0.0.1:1",
+	}
+	setWorkerRetry(t, 10*time.Millisecond)
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() { done <- run(ctx, func(k string) (string, bool) { v, ok := env[k]; return v, ok }, nil) }()
+	// Temporal out of reach does not stop core: its routes answer.
+	deadline := time.Now().Add(10 * time.Second)
+	for {
+		res, err := http.Get("http://" + address + "/api/v1/internal/crud/inventory/kinds")
+		if err == nil {
+			res.Body.Close()
+			expect(t, res.StatusCode, 401)
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal(err)
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	cancel()
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-time.After(30 * time.Second):
+		t.Fatal("run did not stop")
 	}
 }
 
