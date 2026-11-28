@@ -2,15 +2,24 @@
 
 from __future__ import annotations
 
+import json
 import threading
 from datetime import timedelta
+from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
 
 import pytest
 
 from scadbuddy.core.problems import ApiError
-from scadbuddy.crud.idempotency import Replay, idempotent, idempotent_write, prune, record
+from scadbuddy.crud.idempotency import (
+    RETENTION_BY_CALLER,
+    Replay,
+    idempotent,
+    idempotent_write,
+    prune,
+    record,
+)
 from scadbuddy.main import _prune_crud_requests
 from tests.conftest import PgPool
 
@@ -181,3 +190,16 @@ def test_a_second_request_with_the_key_waits_for_the_first(pool: PgPool, commit:
     with pool.connection() as conn:
         assert _count(conn) == 1
         assert _count(conn, "crud_requests") == 1
+
+
+GO_RETENTION = (
+    Path(__file__).resolve().parents[3]
+    / "tools/go/core/internal/inventory/store/testdata/retention.json"
+)
+
+
+def test_the_inventory_retention_is_gos() -> None:
+    """Go's operations prune keeps a row a day past this retention (`requestRetention`,
+    whose test reads the same file), so the two cannot drift (#8448)."""
+    seconds = json.loads(GO_RETENTION.read_text())["inventory_request_retention_seconds"]
+    assert RETENTION_BY_CALLER["inventory"] == timedelta(seconds=seconds)
