@@ -14,6 +14,10 @@ dotnet build -f net10.0-android -c Release -p:AndroidSdkDirectory=$ANDROID_HOME 
 adb install -r bin/Release/net10.0-android/com.ehhomelab.scadbuddy-Signed.apk
 ```
 
+`app/Taskfile.yml` ([go-task](https://taskfile.dev) v3) does both in one step: `cd app && task
+phone` builds the latest origin/main in a worktree of its own (`~/.cache/scadbuddy-app-build`) and
+installs it over adb on port 5039. `REINSTALL=1` uninstalls first (needed over a CI build's key).
+
 CI's `android` job (`ci.yml`, lane `android` in `select-lanes.sh`) runs the tests and the same
 build on `ubuntu-latest` with JDK 17. It pins the .NET SDK (`10.0.301`, in `app/global.json` too: the runner image also has a .NET 11
 SDK, which `dotnet` would otherwise pick, and whose manifests conflict with this workload set) and the workload set
