@@ -78,8 +78,12 @@ PRICE_ROUTE: Final = "POST /inventory/offers/{offer_id}/prices"
 
 
 def offer_key(by: Actor, key: str) -> str:
-    """The ledger key of ``key`` from ``by``: the keys of two senders never meet."""
-    return f"offer:{by.kind}:{by.principal or ''}:{key}"
+    """The ledger key of ``key`` from ``by``: the keys of two senders never meet. The
+    principal goes with its length, so one with a ``:`` cannot end where another's key
+    starts (`agent`/`a:b` with `c` is not `agent`/`a` with `b:c`; the review of #8441).
+    The kind is a fixed word with no ``:``."""
+    principal = by.principal or ""
+    return f"offer:{by.kind}:{len(principal)}:{principal}:{key}"
 
 
 class OfferStore:
@@ -145,14 +149,14 @@ class OfferStore:
             reply = idempotent_write(conn, LEDGER_CALLER, key, route, asked, run)
         return model.model_validate(reply.body)
 
-    def create(self, body: OfferInput, by: Actor, key: str | None = None) -> Offer:
+    def create(self, body: OfferInput, key: str | None = None) -> Offer:
         """`SupplierNotFound` for an unknown or archived supplier, `ItemNotFound` for an
         unknown or archived item, `FilamentItemRefused` for a filament item, `OfferExists`
         for a SKU the item already has at the supplier."""
         asked = body.model_dump(mode="json")
         return self._once(key, CREATE_ROUTE, asked, 201, Offer, lambda conn: _create(conn, body))
 
-    def update(self, offer_id: UUID, patch: OfferPatch, by: Actor, key: str | None = None) -> Offer:
+    def update(self, offer_id: UUID, patch: OfferPatch, key: str | None = None) -> Offer:
         """The fields `patch` names: `OfferNotFound`, or `OfferExists` for a SKU the item
         already has at the supplier."""
         asked = {"offer_id": str(offer_id), **patch.model_dump(mode="json", exclude_unset=True)}

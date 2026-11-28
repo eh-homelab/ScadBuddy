@@ -49,8 +49,8 @@ An offer write is not an activity: Python's `OfferStore` writes it (#8437). An o
 edit, archive and price add take an `Idempotency-Key` too. The store keeps the reply in
 `crud_requests` under the caller `inventory`, in the write's own transaction, with a key
 that starts with `offer:` and names the sender (`inventory/offers.py` `offer_key`). A retry
-with the same key gets the first reply and writes nothing. The same key with another body is
-a 422. A refused write keeps no reply. A write with no key is a write of its own. The
+with the same key gets the first reply and writes nothing. The same key with another body,
+another offer or another route is a 422. A refused write keeps no reply. A write with no key is a write of its own. The
 agent's `inventory_offer_upsert` and `inventory_offer_price_add` send one key per write of a
 call, the same on each retry of that call.
 
