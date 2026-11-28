@@ -5,7 +5,7 @@ import { beforeEach, describe, expect, it, vi } from 'vitest'
 import type { UnknownSpoolTray } from '../../api/unknownTrays'
 import { listUnknownTrays } from '../../api/unknownTrays'
 import { spoolId } from '../../mocks/features/filament/seed'
-import { seedUnknownTray } from '../../mocks/features/filament/unknownTrays'
+import { resolvePendingOnce, resolveWritesOff, seedUnknownTray } from '../../mocks/features/filament/unknownTrays'
 import { resetMockState } from '../../mocks/handlers'
 import { server } from '../../mocks/server'
 import { NeedsYouContext, type NeedsYou } from '../../lib/needsYou'
@@ -113,13 +113,59 @@ describe('UnknownSpoolDialog (#7143)', () => {
     expect(onResolved).not.toHaveBeenCalled()
   })
 
-  it('says what the server answered, and where to link when it has no such route', async () => {
-    server.use(http.post(RESOLVE, () => problem(503, null, 'Temporal is not ready.')))
+  it('says when the spool is archived (the mock answers as Go does)', async () => {
+    const { dialog, onResolved } = await show()
+    await userEvent.type(within(dialog).getByLabelText('Spool code'), 'S-19')
+    await userEvent.type(within(dialog).getByLabelText('Net weight (g)'), '500')
+    await userEvent.click(within(dialog).getByRole('button', { name: 'Link spool' }))
+    expect(await within(dialog).findByRole('alert')).toHaveTextContent('That spool is archived. Choose a spool that is in use.')
+    expect(onResolved).not.toHaveBeenCalled()
+  })
+
+  it.each([
+    [404, 'spool_missing', 'no spool x', 'That spool does not exist now. Choose another spool.'],
+    [409, 'no_ams_kind', 'no kind', 'No location kind is marked AMS, so the tray has no place. Mark one in Filament, Catalog, Location kinds, then try again.'],
+    [409, 'tag_clash', 'The tag on AMS-A slot 2 is on S-3.', 'The tag in this tray is on another spool. The tag on AMS-A slot 2 is on S-3.'],
+    [422, 'invalid_input', 'net_weight_g: more than 0 and at most 100000', 'The server refused the request: net_weight_g: more than 0 and at most 100000.'],
+    [500, null, 'Internal Server Error', 'The server could not link the spool. Try again.'],
+  ])('says what a %i %s means', async (status, code, detail, text) => {
+    server.use(http.post(RESOLVE, () => problem(status, code, detail)))
+    const { dialog, onResolved } = await show()
+    await userEvent.type(within(dialog).getByLabelText('Spool code'), 'S-1')
+    await userEvent.type(within(dialog).getByLabelText('Net weight (g)'), '500')
+    await userEvent.click(within(dialog).getByRole('button', { name: 'Link spool' }))
+    expect(await within(dialog).findByRole('alert')).toHaveTextContent(text)
+    expect(onResolved).not.toHaveBeenCalled()
+  })
+
+  it('says a link that did not answer in time may still finish, and reads the list again', async () => {
+    resolvePendingOnce()
+    const { dialog, refresh, onResolved } = await show()
+    await userEvent.type(within(dialog).getByLabelText('Spool code'), 'S-1')
+    await userEvent.type(within(dialog).getByLabelText('Net weight (g)'), '500')
+    await userEvent.click(within(dialog).getByRole('button', { name: 'Link spool' }))
+    expect(await within(dialog).findByRole('alert')).toHaveTextContent('The link did not finish in time, and it can still finish.')
+    expect(refresh).toHaveBeenCalled()
+    expect(onResolved).not.toHaveBeenCalled()
+  })
+
+  it('points to the slot page when the server has no Temporal for the link', async () => {
+    resolveWritesOff()
     const { dialog } = await show()
     await userEvent.type(within(dialog).getByLabelText('Spool code'), 'S-1')
     await userEvent.type(within(dialog).getByLabelText('Net weight (g)'), '500')
     await userEvent.click(within(dialog).getByRole('button', { name: 'Link spool' }))
-    expect(await within(dialog).findByRole('alert')).toHaveTextContent('Temporal is not ready.')
+    await waitFor(() => expect(within(dialog).getByRole('alert')).toHaveTextContent('New spool from this tray'))
+    expect(within(dialog).getByRole('link', { name: 'Open Locations' })).toHaveAttribute('href', '/filament/locations')
+  })
+
+  it('says what the server answered, and where to link when it has no such route', async () => {
+    server.use(http.post(RESOLVE, () => problem(409, null, 'Something else is in the way.')))
+    const { dialog } = await show()
+    await userEvent.type(within(dialog).getByLabelText('Spool code'), 'S-1')
+    await userEvent.type(within(dialog).getByLabelText('Net weight (g)'), '500')
+    await userEvent.click(within(dialog).getByRole('button', { name: 'Link spool' }))
+    expect(await within(dialog).findByRole('alert')).toHaveTextContent('Something else is in the way.')
     server.use(http.post(RESOLVE, () => problem(404, null, 'Not Found')))
     await userEvent.click(within(dialog).getByRole('button', { name: 'Link spool' }))
     await waitFor(() => expect(within(dialog).getByRole('alert')).toHaveTextContent('Filament, then Locations'))

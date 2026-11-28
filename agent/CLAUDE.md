@@ -402,8 +402,9 @@ opens every one and seals it again byte for byte).
     `spool`; it takes `seen_at` as listed and the user's own choice, never a candidate the agent picks)
     are in `src/tools/filament.ts`. They call the Go routes through `src/api/unknownTrays.ts`, whose
     types are written by hand, because `pnpm gen:api` exports Python's OpenAPI only. There is no
-    dismiss tool (D10). The Go resolve route is not built yet, so the resolve tool gets a 404 until
-    it is. Tests: `test/filament.test.ts`.
+    dismiss tool (D10). The resolve tool's errors name the Go route's code (`resolveOk`: only a code
+    of `RESOLVE_CODES`, #8489), and a 404 with no code says the area `unknown-trays` is off.
+    Tests: `test/filament.test.ts`.
   - Data: the agent has no database ("Database access" above); the API owns the `ai_*`
     tables and applies their migrations (#5299 D6). The tests make their schemas with
     `test/support/migrations.ts` (`test/support/postgres.ts` `migrateSchema`), and

@@ -273,8 +273,11 @@ same way, `vite.config.ts`).
   dialog through `useUnknownSpoolDialog` and `UnknownSpoolButton`: the Needs-you list (`AppShell.tsx`),
   Filament → Locations (`LocationsTab.tsx`), a place's page (`LocationPage.tsx`) and the print dialog's
   verdict (`components/print/PrintVerdict.tsx`, from `PrintCheck.unknown_trays`). Mocks
-  `src/mocks/features/filament/unknownTrays.ts`. Until the Go resolve route exists, the dialog's
-  "Link spool" gets a 404 and names the same path (Filament → Locations → the place). The print
+  `src/mocks/features/filament/unknownTrays.ts`, which checks the body and answers each code as Go's
+  resolve route does (`resolveWritesOff`, `resolvePendingOnce`; #8489). The dialog has its own text
+  for each code; a 404 with no code (the area off) or a 503 `writes_not_configured` names the same
+  path as the button (Filament → Locations → the place), and a 503 `resolve_pending` reads the list
+  again. The print
   verdict e2e is `e2e/unknown-spool.spec.ts` (the mock tray: `unknownTrays.ts` `UNKNOWN_TRAY_SEED_KEY`).
 - Devices (#7905, spec `docs/superpowers/specs/2026-11-27-devices-design.md`, plan Task 9): `api/devices.ts`
   (Go core's `/devices` routes, typed by hand because Python's spec has none; the decoders' bodies and answers are the spec's `TagReadIn`/`TagReadResult` and `api/scan.ts` `CodeScan`), `pages/DevicesPage.tsx` at `/devices`

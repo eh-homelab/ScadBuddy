@@ -1174,6 +1174,43 @@ describe('filament location tools', () => {
     expect((firstText(resolved) as { ui_path: string }).ui_path).toBe(`/filament/spools/${ROW}`)
   })
 
+  it.each([
+    [409, 'tray_changed'],
+    [409, 'tag_clash'],
+    [503, 'resolve_pending'],
+    [503, 'writes_not_configured'],
+  ])('shows a %i %s from the Go resolve route as its code (#8489)', async (status, code) => {
+    server.use(
+      http.post(`${BACKEND}/api/v1/filament/unknown-trays/${ROW}/resolve`, () =>
+        HttpResponse.json({ status, code, detail: 'the detail' }, { status, headers: { 'Content-Type': 'application/problem+json' } }),
+      ),
+    )
+    const result = await runTool(tool('filament_unknown_tray_resolve'), { tray_id: ROW, code: 'S-12', net_weight_g: 980, seen_at: 'x' }, ctx())
+    expect(result.isError).toBe(true)
+    expect(JSON.stringify(result.content)).toContain(`HTTP ${status}`)
+    expect(JSON.stringify(result.content)).toContain(code)
+  })
+
+  it('says the area is off on a 404 with no code', async () => {
+    server.use(http.post(`${BACKEND}/api/v1/filament/unknown-trays/${ROW}/resolve`, () => HttpResponse.json({ detail: 'Not Found' }, { status: 404 })))
+    const result = await runTool(tool('filament_unknown_tray_resolve'), { tray_id: ROW, code: 'S-12', net_weight_g: 980, seen_at: 'x' }, ctx())
+    expect(result.isError).toBe(true)
+    expect(JSON.stringify(result.content)).toContain('core area unknown-trays')
+  })
+
+  it('refuses a net weight over 100000 g before it sends', async () => {
+    let posted = false
+    server.use(
+      http.post(`${BACKEND}/api/v1/filament/unknown-trays/${ROW}/resolve`, () => {
+        posted = true
+        return HttpResponse.json({})
+      }),
+    )
+    const result = await runTool(tool('filament_unknown_tray_resolve'), { tray_id: ROW, code: 'S-12', net_weight_g: 100001, seen_at: 'x' }, ctx())
+    expect(result.isError).toBe(true)
+    expect(posted).toBe(false)
+  })
+
   it('refuses both or neither of spool_id and code', async () => {
     const base = { tray_id: ROW, net_weight_g: 980, seen_at: 'x' }
     let posted = false

@@ -87,7 +87,7 @@ unchanged, to the Python API: WebSockets, SSE and large bodies included. On prod
 | `audit` | `POST` `/audit/record`, `…/list`, `…/prune` |
 | `order-costs` | `POST /orders/{id}/assistant-cost`: the cost entry, its `order_events` row and, after the commit, `order.changed` and `order_item.changed`. It reads `pricing_usd_rate` and `orders_currency` from `settings`, else `SCADBUDDY_PRICING_USD_RATE` and `SCADBUDDY_ORDERS_CURRENCY` from core's own environment, else `1` and `USD`, so core needs the API's values of those two |
 | `unknown-trays:read` | `GET /api/v1/filament/unknown-trays` (public, caller `api`), and the print worker's `GET …/crud/print/filament/printers/{printer_id}/unknown-trays` (caller `print`) |
-| `unknown-trays` | those, and `POST /api/v1/filament/unknown-trays/{id}/dismiss` (public). Go writes no spool here (#7143). The resolve route (`POST …/{id}/resolve`, which would start Python's activity `filament_resolve_unknown_tray` on queue `library`) is not built yet: it waits for `internal/temporalx`, so a resolve gets a 404 |
+| `unknown-trays` | those, and `POST /api/v1/filament/unknown-trays/{id}/dismiss` and `POST …/{id}/resolve` (public). Go writes no spool here (#7143): the resolve runs Python's activity `filament_resolve_unknown_tray` on queue `library` ("The unknown-tray resolve") |
 | `filament-presets` † | Public, class `api`: `GET /api/v1/filament/presets` (`?source=`, `?type_id=`), `GET …/presets/{preset_id}` and `GET …/presets/{preset_id}/diff` (`?from_version=`, `?to_version=`); the writes `POST …/presets/{preset_id}/copy`, `PATCH …/presets/{preset_id}` and `POST …/presets/{preset_id}/mirror`, each a Python activity on queue `library` ("The preset writes"). `POST …/presets/bambuddy-import` stays Python's. Go writes no preset row (#7204) |
 
 The `unknown-trays` public routes use `internal/auth` (see "Public routes"). Their CRUD route is caller `print`'s, so it has its own `case` in `newRouter` (areaPackages mounts on caller `agent`).
@@ -133,8 +133,8 @@ P22) run Python's activities `filament_preset_copy`, `filament_preset_edit` and
 `filament_preset_mirror_again` (`filament/preset_writes.py`) on the queue `library`, which the
 API process serves. Go writes no row.
 
-- Each write is one run of core's workflow `FilamentPresetWrite`
-  (`internal/filamentpresets/temporal.go`), on the queue
+- Each write is one run of core's workflow `LibraryRun` (`internal/libraryrun`, #8489; it was
+  `FilamentPresetWrite` until then), on the queue
   `SCADBUDDY_TEMPORAL_TASK_QUEUE_FILAMENT_PRESETS`. Core's own worker runs it. Its one step is
   the activity, with one JSON object as its argument, and one attempt. The mirror bound is
   30 s for copy and edit and 60 s for a send again. The activity's start-to-close is that
@@ -175,6 +175,39 @@ API process serves. Go writes no row.
   version: the API build that made itself current at its start
   (`main._make_library_current`). This is not measured yet. The plan's B6 Step 4 checks it on
   prod after the deploy, with one copy and one send again.
+
+## The unknown-tray resolve
+
+`POST /api/v1/filament/unknown-trays/{id}/resolve` (#8489; plan
+`docs/superpowers/plans/2026-11-23-unknown-spool-flow.md` Task 3B, rulings G5, G6, U1 to U4)
+runs Python's activity `filament_resolve_unknown_tray` (`filament/unknown_resolve.py`) on the
+queue `library`. Go writes no spool: the activity links the spool, books its first weight and
+deletes the tray's row in one transaction.
+
+- It is one run of `LibraryRun` on core's own worker, as a preset write is. The activity's
+  start-to-close is 30 s, with one attempt. The route waits that plus 10 s, then answers 503
+  `resolve_pending`. A timeout of the activity, or a start that Temporal refuses, is
+  `resolve_pending` too.
+- Go checks the body before the start: `{spool_id?: uuid, code?: string, net_weight_g:
+  number, seen_at: string}`. Exactly one of `spool_id` and `code`, `net_weight_g` above 0 and
+  at most 100000, `seen_at` an RFC 3339 time with a zone, and no other field. Anything else is
+  422 `invalid_input`, and nothing starts. A path id that is no UUID is 409 `tray_changed`.
+  The activity gets `{tray_id, spool_id, code, net_weight_g, seen_at, actor}`, `seen_at` as
+  sent and `actor` from the caller (as a preset write's).
+- The run's id is `unknown-tray-resolve-` and the SHA-256 of the actor, the tray id and that
+  input. `USE_EXISTING` and `ALLOW_DUPLICATE`, so two equal sends join one run, and another
+  body runs apart: the activity's `seen_at` check and the tray's lock then refuse the second
+  with `tray_changed`.
+- An activity failure's `type` is the problem's `code`: 409 `tray_changed`, `spool_archived`,
+  `no_ams_kind` and `tag_clash` (its detail is the activity's message); 404 `code_unknown` and
+  `spool_missing`. Any other type is a 500 with no message.
+- It answers 200 `{id, number, code, location_id}`, the spool the tray holds now (G6).
+- Without `SCADBUDDY_TEMPORAL_ADDRESS` the list and dismiss serve, and a resolve answers 503
+  `writes_not_configured`. Area `unknown-trays:read` does not serve the resolve.
+
+Core runs the one `LibraryRun` worker when `SCADBUDDY_TEMPORAL_ADDRESS` is set and
+`SCADBUDDY_CORE_AREAS` names `filament-presets` or `unknown-trays`. Its queue is still
+`SCADBUDDY_TEMPORAL_TASK_QUEUE_FILAMENT_PRESETS` (default `filament-presets`).
 
 Area `fleet` (`internal/fleet`) is caller `fleet`'s (scope `crud.fleet`), under
 `/api/v1/internal/crud/fleet`: `POST /agents/{session_id}/touch`, `GET /agents`, `PUT` and
