@@ -178,7 +178,7 @@ func TestAFilamentItemIsRefused(t *testing.T) {
 
 // No source is manual, and an empty or a null one is 422, as models.py ItemInput answers
 // (#8256, #8493).
-func TestAnItemWithNoSourceIsManualAndAnEmptyOneIsRefused(t *testing.T) {
+func TestAnItemWithNoSourceIsManualAndAnEmptyOrNullOneIsRefused(t *testing.T) {
 	pool, s := testdb.New(t), itemStore()
 	made := must(createItem(t, pool, s, wire.ItemInput{KindID: "hardware", Name: "M3 nut"}))
 	if made.Source != "manual" {

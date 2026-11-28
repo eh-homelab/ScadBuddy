@@ -258,6 +258,8 @@ func TestATextPastItsBoundIsA422(t *testing.T) {
 	f.call("inventory.ItemCreate", 201, nil, map[string]any{"kind_id": "hardware", "name": long(200), "note": long(4000)})
 	f.refused("inventory.ItemCreate", 422, "bad_input", nil, map[string]any{"kind_id": "hardware", "name": long(201)})
 	f.refused("inventory.ItemCreate", 422, "bad_input", nil, map[string]any{"kind_id": "hardware", "name": "x", "note": long(4001)})
+	// A JSON null source reaches the store as set and null, not as absent (#8493, #8504).
+	f.refused("inventory.ItemCreate", 422, "bad_input", nil, map[string]any{"kind_id": "hardware", "name": "x", "source": nil})
 
 	bolt := item(f, "hardware", "M3 bolt")
 	f.call("inventory.ReceiveLot", 201, p("item_id", bolt), map[string]any{"qty": "10", "unit_cost_minor": "5"})
