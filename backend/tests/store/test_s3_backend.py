@@ -609,6 +609,32 @@ async def test_a_connect_timeout_on_a_put_is_tried_again(
         await backend.aclose()
 
 
+async def test_a_retried_put_starts_where_the_stream_was(
+    s3: S3Settings, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A caller that gives the digest of the bytes from the stream's position gets those
+    bytes on every try, not the file from its start."""
+    backend = S3ContentBackend(s3, connect_backoff=(0, 0, 0))
+    try:
+        client = await backend._s3()
+        puts: list[int] = []
+        monkeypatch.setattr(
+            client,
+            "put_object",
+            _failing_first(client.put_object, [ConnectTimeoutError(endpoint_url=URL)], puts),
+        )
+        f = tmp_path / "piece"
+        f.write_bytes(b"headbody")
+        with f.open("rb") as fh:
+            fh.seek(4)
+            digest = (hashlib.sha256(b"body").hexdigest(), 4)
+            key = await backend.upload("piece", fh, name="p.zip", scope=SCOPE, digest=digest)
+        assert len(puts) == 2
+        assert b"".join([c async for c in backend.download(key)]) == b"body"
+    finally:
+        await backend.aclose()
+
+
 async def test_a_connect_failure_past_the_backoff_propagates(
     s3: S3Settings, monkeypatch: pytest.MonkeyPatch
 ) -> None:

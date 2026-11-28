@@ -6631,6 +6631,8 @@ class Lifecycle:
             if kept is not None and kept[0].order_id == order.id:
                 # Another attempt of the same operation, whose id this is (#8471): the
                 # row an earlier attempt committed, with no second hold or audit line.
+                # The change is told again below: the earlier attempt may have failed
+                # before it told it, and a second telling only refreshes a view.
                 attachment = kept[0]
             else:
                 attachment = self.store.insert_attachment(
