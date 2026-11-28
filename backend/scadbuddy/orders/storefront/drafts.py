@@ -54,6 +54,7 @@ from scadbuddy.orders.lifecycle import (
     NewRequestItem,
 )
 from scadbuddy.orders.models import Attachment, AttachmentKind, Order, OrderItem
+from scadbuddy.orders.rendering import storefront_output
 from scadbuddy.orders.store import item_subject
 from scadbuddy.orders.storefront.file_prices import checked_file_choice, library_file
 from scadbuddy.orders.storefront.limits import RenderLimits
@@ -511,8 +512,11 @@ async def add_listing_item(
             variant_key=variant_key(listing, choice, body.colours),
         )
         price = None if variant is None else await price_of(state, resolved.reference, variant)
+        # #8481: the line holds the render its slice saved, so the shop prints it as is.
+        saved = await asyncio.to_thread(storefront_output, state.outputs, resolved.reference)
         entry = NewModelItem(
             resolved=resolved,
+            output_id=None if saved is None else saved.output_id,
             quantity=body.quantity,
             title=listing.title,
             storefront_offered=tuple(listing.params),

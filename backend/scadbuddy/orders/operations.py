@@ -62,6 +62,8 @@ from scadbuddy.orders.archives import copy_check, copy_in
 from scadbuddy.orders.component import ORDERS
 from scadbuddy.orders.held_print import restore_held
 from scadbuddy.orders.lifecycle import (
+    DERIVED,
+    FULFILLABLE,
     QUOTE_TIMEOUT,
     SETTLED,
     LifecycleError,
@@ -99,8 +101,10 @@ from scadbuddy.orders.quote_preview import start_library_quote_preview, start_qu
 from scadbuddy.orders.rendering import (
     AttachTo,
     RenderedOutput,
-    kit_output_id,
+    attach_output,
+    later_output_id,
     outputs_for_reference,
+    storefront_output,
 )
 from scadbuddy.orders.served_library import ServedLibrary, served_shelf
 from scadbuddy.orders.spools import item_plan
@@ -570,8 +574,9 @@ def render_check(store: OrderStore, order_id: str, item_id: str) -> None:
     404 for an unknown order or item, 409 ``order_not_submitted`` for a storefront cart,
     ``item_library_file`` (it slices its file), ``item_custom`` and
     ``item_has_no_design`` (``reference_of``), ``order_not_open`` while the item takes no
-    new quote (``requote_open``) and ``item_not_open`` for a settled item: what the slice
-    quote's own check refuses."""
+    new quote (``requote_open``) and is not one to print (#8481: an accepted order, the
+    item `approved` or `failed` with an accepted quote), and ``item_not_open`` for a
+    settled item: what the slice quote's own check refuses."""
     order = store.order(order_id)
     if order is None:
         raise ApiError(status.HTTP_404_NOT_FOUND, f"no order {order_id!r}")
@@ -591,12 +596,21 @@ def render_check(store: OrderStore, order_id: str, item_id: str) -> None:
             items=[item.id],
         )
     reference_of(item)
-    if not requote_open(order, item, store.quotes(item.id)):
+    quotes = store.quotes(item.id)
+    # #8481: an accepted item to print (a storefront item has no output) renders too. The
+    # render changes no quote, so the accepted price stays.
+    to_print = (
+        order.status in DERIVED
+        and item.status in FULFILLABLE
+        and any(quote.accepted for quote in quotes)
+    )
+    if not (to_print or requote_open(order, item, quotes)):
         raise ApiError(
             status.HTTP_409_CONFLICT,
             f"order {order.label} is {order.status}: an item is rendered for a quote while"
             " the order is draft or quoted, or, past that, while the item has no accepted"
-            " quote or was revised after acceptance",
+            " quote or was revised after acceptance, and for a print while the order is"
+            " accepted and the item approved or failed with an accepted quote",
             type_=PROBLEMS + "order_not_open",
         )
     if item.status in SETTLED:
@@ -738,29 +752,40 @@ def order_kinds(core: Core, components: Components) -> list[OperationKind]:
             raise ApiError(status.HTTP_404_NOT_FOUND, f"no order {order_id!r}")
         reference = reference_of(item)
         saved_as = render_output_id(OPERATION_RUN.get())
-        # Every output of a pipeline's render (#5701 PR 5): the item holds the first, and
-        # the order finds the others from it (`kit_output_ids`).
-        await outputs_for_reference(
-            reference,
-            outputs=core.outputs,
-            renders=_Renders(core),
-            create_output=create_output,
-            name=f"{order.label} {item.title}",
-            saved_as=lambda _index: saved_as,
-            later_as=kit_output_id,
-            schema=await reference_schema(core, reference),
-            item=AttachTo(
-                lifecycle=lifecycle,
-                order=order,
-                item=item,
-                by=by,
-                revision_id=item.current_revision_id,
-                # The order or the item may have moved on while it rendered. A refusal
-                # here leaves the output saved: a render of the template like any other
-                # (the model's outputs and Recent renders list it), set on no item.
-                check=lambda: render_check(orders.store, order_id, item_id),
-            ),
+        target = AttachTo(
+            lifecycle=lifecycle,
+            order=order,
+            item=item,
+            by=by,
+            revision_id=item.current_revision_id,
+            # The order or the item may have moved on while it rendered. A refusal
+            # here leaves the output saved: a render of the template like any other
+            # (the model's outputs and Recent renders list it), set on no item.
+            check=lambda: render_check(orders.store, order_id, item_id),
         )
+        # #8481: a storefront line ordered before the submit linked its output takes the
+        # output its slice saved, with no render; its kit is found from it.
+        saved = (
+            None
+            if item.output_id is not None
+            else await asyncio.to_thread(storefront_output, core.outputs, reference)
+        )
+        if saved is not None:
+            await attach_output(target, saved)
+        else:
+            # Every output of a pipeline's render (#5701 PR 5): the item holds the first,
+            # and the order finds the others from it (`kit_output_ids`).
+            await outputs_for_reference(
+                reference,
+                outputs=core.outputs,
+                renders=_Renders(core),
+                create_output=create_output,
+                name=f"{order.label} {item.title}",
+                saved_as=lambda _index: saved_as,
+                later_as=later_output_id(reference.render_key),
+                schema=await reference_schema(core, reference),
+                item=target,
+            )
         rendered = await asyncio.to_thread(orders.store.item, item_id)
         assert rendered is not None
         dumped: dict[str, Any] = rendered.model_dump(mode="json")

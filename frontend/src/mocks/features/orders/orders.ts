@@ -54,9 +54,9 @@ export const OPEN_FOR_EDITS = new Set<OrderStatus>(['draft', 'quoted'])
 /** `lifecycle.py` `TAKES_ITEMS` (#5349): past acceptance, the states that still take an item. */
 export const TAKES_ITEMS = new Set<OrderStatus>(['accepted', 'in_production', 'ready'])
 const ENDED = new Set<OrderStatus>(['closed', 'cancelled'])
-const DERIVED = new Set<OrderStatus>(['accepted', 'in_production', 'ready', 'shipped'])
+export const DERIVED = new Set<OrderStatus>(['accepted', 'in_production', 'ready', 'shipped'])
 export const SETTLED = new Set(['fulfilled', 'cancelled'])
-const FULFILLABLE = new Set(['approved', 'failed'])
+export const FULFILLABLE = new Set(['approved', 'failed'])
 /** #4719 — the print path's states: an attempt is edited, or accepted once printed, in them. */
 const PRINTING = new Set(['queued', 'printing', 'printed'])
 

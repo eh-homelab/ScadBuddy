@@ -35,9 +35,11 @@ from fastapi import status
 
 from scadbuddy.core.problems import ApiError
 from scadbuddy.crud.idempotency import Replay, idempotent_write, stored
+from scadbuddy.library.outputs import storefront_output_id
 from scadbuddy.orders.component import ORDERS, OrdersComponent
 from scadbuddy.orders.lifecycle import LifecycleError, SubmitInput
 from scadbuddy.orders.models import Order, OrderItem
+from scadbuddy.orders.rendering import storefront_output
 from scadbuddy.orders.storefront.accounts import Account
 from scadbuddy.orders.storefront.addresses import EmailInvalidError, check_address
 from scadbuddy.orders.storefront.line_prices import reprice
@@ -74,6 +76,19 @@ def _cart_items(state: AppState, visitor_id: str, body: SubmitBody) -> list[Orde
     ):
         return []
     return orders.store.items(order.id)
+
+
+def _saved_outputs(state: AppState, items: list[OrderItem]) -> dict[str, str]:
+    """#8481 — by item, the output the storefront slice run saved for each design line
+    with none (`rendering.py` `storefront_output`). Blocking."""
+    found: dict[str, str] = {}
+    for item in items:
+        if item.kind != "model" or item.reference is None or item.output_id is not None:
+            continue
+        saved = storefront_output(state.outputs, item.reference)
+        if saved is not None:
+            found[item.id] = saved.output_id
+    return found
 
 
 def draft_not_found() -> ApiError:
@@ -168,7 +183,9 @@ async def submit_draft(
     if ITEM_ID.fullmatch(body.draft_id) is None:
         raise draft_not_found()
     # Each line priced again by its variant's key (#6153), never by the browser.
-    repriced = await reprice(state, await asyncio.to_thread(_cart_items, state, visitor_id, body))
+    cart = await asyncio.to_thread(_cart_items, state, visitor_id, body)
+    repriced = await reprice(state, cart)
+    saved = await asyncio.to_thread(_saved_outputs, state, cart)
     if repriced.told:
         raise problem(
             status.HTTP_409_CONFLICT,
@@ -193,6 +210,17 @@ async def submit_draft(
             order, _token = orders.lifecycle.submit_order(
                 body.draft_id, entry, by, cart_of=visitor.id, conn=conn, firm=repriced.firm
             )
+            # #8481: a line added before its slice saved the render holds it now, under the
+            # order's lock the submit took, while the line is still that design with none.
+            for item in orders.store.items(order.id, conn=conn):
+                output_id = saved.get(item.id)
+                if (
+                    output_id is not None
+                    and item.output_id is None
+                    and item.reference is not None
+                    and storefront_output_id(item.reference.render_key) == output_id
+                ):
+                    orders.store.update_item(conn, item.id, output_id=output_id)
             changes.append((order, orders.store.items(order.id, conn=conn)))
             assert order.number is not None
             # The address the link was mailed to: `submit_order` checked it the same way.

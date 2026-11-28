@@ -153,7 +153,7 @@ from scadbuddy.orders.quote import (
     subject_of,
 )
 from scadbuddy.orders.reference import ReferenceError, TemplateDeletedError, resolve_reference
-from scadbuddy.orders.rendering import JobReads, kit_count, kit_output_id, kit_output_ids
+from scadbuddy.orders.rendering import JobReads, kit_count, kit_output_ids, later_output_id
 from scadbuddy.orders.report import (
     DEFAULT_DAYS,
     ProfitReport,
@@ -595,9 +595,10 @@ def _kit_outputs(
     if item.reference is None or item.output_id is None:
         return [], 0
     first = item.output_id
+    key = item.reference.render_key
     try:
-        if outputs.existing([kit_output_id(first, 1)]):
-            kit = kit_output_ids(outputs, first)
+        if outputs.existing([later_output_id(key)(first, 1)]):
+            kit = kit_output_ids(outputs, first, key)
         else:
             kit = [first]
         return kit, kit_count(outputs, jobs, first, len(kit))
@@ -2712,7 +2713,10 @@ async def render_item(
     the operation's error. Refused before anything runs: 404 for an unknown order or
     item, 409 ``order_not_submitted`` (a storefront cart), ``item_library_file``,
     ``item_custom``, ``item_has_no_design``, ``order_not_open`` and ``item_not_open``,
-    as the slice quote refuses them."""
+    as the slice quote refuses them. #8481: an item to print (an accepted order, the item
+    `approved` or `failed` with an accepted quote) renders too; its accepted quote stays.
+    An item with no output whose storefront slice saved its render
+    (``storefront_output_id`` of its render key) takes that output, with no render."""
     check_path(order_id, item_id)
     result = await run_operation(
         ops,

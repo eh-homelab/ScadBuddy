@@ -2105,7 +2105,10 @@ only the sleeps move; a budget on the real clock fails on a slow runner (#6252).
   /orders/{id}/items/{item}/render`, subject `order_item:<id>`, check `render_check`, the
   quote's refusals; the output saved under `render_output_id`, one per operation), which
   renders the item's reference and sets the output on it, and saves every later output of a
-  pipeline's render under `kit_output_id` (#5701 PR 5, `outputs_for_reference`). "Slice…" on an item with a design
+  pipeline's render under `later_output_id` (`kit_output_id`, or the storefront's ids for a
+  line that holds the storefront's output, #8481; #5701 PR 5, `outputs_for_reference`). A
+  storefront line takes the output its slice saved (`storefront_output`) at add or submit,
+  and its render takes it too, with no render job. "Slice…" on an item with a design
   and no output starts it, then opens the print dialog on the new output (`useSliceQuotes`
   `render`, the run's `stage` `rendering`); the agent's `order_item_quote` needs none.
   Attachments (#4251, spec §6.2 "As built"): any file on an order, a line item or a print attempt,
@@ -2760,8 +2763,9 @@ only the sleeps move; a budget on the real clock fails on a slow runner (#6252).
   one `price_plates` over every plate (`slice_and_price`'s `place`). Every path gives that
   price, since the order makes every output (#5701 PR 5): the item's render
   (`order_item_render`) and its slice quote (`ensure_output`) save each later output under
-  `orders/rendering.py` `kit_output_id(<the item's output>, index)`, `kit_output_ids` finds
-  them by that id and the job (`ItemDetail.kit_outputs`), and the item's print refuses a kit
+  `orders/rendering.py` `kit_output_id(<the item's output>, index)` (`later_output_id`: a
+  line that holds the storefront's first output finds its `storefront_output_id(render_key,
+  index)` ones, #8481), `kit_output_ids` finds them by that id and the job (`ItemDetail.kit_outputs`), and the item's print refuses a kit
   (409 `item_kit`; also by the output's render job while it lasts, `kit_count`, which the
   order read gives as `ItemDetail.kit_count`), whose outputs the order page prints one by one. A pipeline's cart line needs its row's
   `every_output`. A file listing has no `inputs`.

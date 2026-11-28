@@ -1,6 +1,7 @@
 import { Fragment, useId, useState, type KeyboardEvent } from 'react'
 import { MoreHorizontalIcon, PencilIcon } from 'lucide-react'
 import { api } from '../../api/client'
+import { editPath } from '../../lib/deeplink'
 import type { Order, OrderAttachment, OrderCosts, OrderItemDetail, OrderStatus, Quote, Shipment } from '../../api/types'
 import { formatMoney, toMajor } from '../../lib/money'
 import { Button } from '@/components/ui/button'
@@ -169,7 +170,19 @@ export function OrderItemsTable({
       key: 'picture',
       header: <span className="sr-only">Picture</span>,
       className: 'w-14',
-      cell: (item) => <ItemPicture orderId={orderId} item={item} attachments={attachments} />,
+      // #8481: the picture opens the render the line was ordered as, when it has one.
+      cell: (item) =>
+        item.output_id ? (
+          <Link
+            to={editPath(item.output_id)}
+            aria-label={`Open the render of ${item.title}`}
+            className="block w-fit rounded-md focus-visible:ring-2 focus-visible:ring-ring focus-visible:outline-none"
+          >
+            <ItemPicture orderId={orderId} item={item} attachments={attachments} />
+          </Link>
+        ) : (
+          <ItemPicture orderId={orderId} item={item} attachments={attachments} />
+        ),
     },
     {
       key: 'title',
