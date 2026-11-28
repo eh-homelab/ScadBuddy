@@ -16,6 +16,7 @@ import { H2C, L, LK, seed, spoolId, type Catalogs, type Seed, type SpoolRow } fr
 import { jobOf } from '../../../components/filament/eventText'
 import { CATALOGS } from '../../../components/filament/catalogs'
 import { checksSave, marksOf, rowPropertiesRefusal, saveRowProperties } from '../entities'
+import { kindByNumber } from '../inventory'
 
 type S = components['schemas']
 
@@ -2082,6 +2083,11 @@ export function resolveCodeText(text: string): S['Resolved'] | null {
     const row = state.spools.find((one) => one.number === parsed.number)
     return row ? resolvedSpool(row) : null
   }
+  if (parsed.prefix === 'K') {
+    // An item kind resolves by its text id (#6949, the owner's kind numbers of 2026-11-27).
+    const kind = kindByNumber(parsed.number)
+    return kind ? { kind: 'item_kind', id: kind.id, code: `K-${kind.number}`, name: kind.name, archived: !!kind.archived_at } : null
+  }
   return null
 }
 
@@ -2758,6 +2764,18 @@ export const handlers = [
       addEvent(row.id, 'edited', { data: { changes } })
     }
     return HttpResponse.json({ changed, unchanged: found.map((row) => row.id).filter((id) => !changed.includes(id)), not_found: [...new Set(ids)].filter((id) => !found.some((row) => row.id === id)) })
+  }),
+  // #7149 — `POST /filament/spools/reset-consumed`: a `consumed_reset` event on each spool named; the grams left stay.
+  http.post(`${BASE}/spools/reset-consumed`, async ({ request }) => {
+    const raw = (await request.json()) as { spool_ids?: string[] }
+    const extra = extraKeys(raw, ['spool_ids'])
+    if (extra) return extra
+    const ids = raw.spool_ids ?? []
+    if (ids.length < 1 || ids.length > 500) return problem(422, 'spool_ids: List should have 1 to 500 items')
+    const found = new Set(state.spools.filter((row) => ids.includes(row.id)).map((row) => row.id))
+    const at = now()
+    found.forEach((id) => addEvent(id, 'consumed_reset', { at, source: 'person' }))
+    return HttpResponse.json({ reset: found.size, not_found: [...new Set(ids)].filter((id) => !found.has(id)) } satisfies S['ConsumedResetDone'])
   }),
   // #7151 — `POST /filament/spools/bulk-archive` and `bulk-restore`: each spool's outcome, reported once.
   ...([true, false] as const).map((archived) =>

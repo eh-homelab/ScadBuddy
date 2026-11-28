@@ -140,6 +140,7 @@ export function DeviceCall({
   }, [callId, status, read])
 
   const deadline = phase.kind === 'open' ? phase.deadline : undefined
+  // When the call ends, `callId` is undefined, so this cleanup clears the late poll.
   useEffect(() => {
     if (!callId) return
     const at = deadline ? new Date(deadline).getTime() : Date.now() + timeoutS * 1000

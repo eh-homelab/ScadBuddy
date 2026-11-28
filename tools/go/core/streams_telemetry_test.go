@@ -26,7 +26,7 @@ func TestAStreamIsTracedAtItsStartAndMeasured(t *testing.T) {
 	pool := testdb.New(t)
 	hub := bus.NewHub(pool, rec.tel.Meter())
 	t.Cleanup(hub.Close)
-	router, err := newRouter(pool, http.NotFoundHandler(), nil, "changes", "", nil, nil, nil, &streams{hub: hub, env: func(string) string { return "" }})
+	router, err := newRouter(pool, http.NotFoundHandler(), nil, "changes", "", nil, nil, nil, nil, &streams{hub: hub, env: func(string) string { return "" }})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -83,7 +83,7 @@ func socketTelemetry(t *testing.T, env map[string]string) (*recorded, *streamAPI
 	hub := bus.NewHub(pool, rec.tel.Meter())
 	t.Cleanup(hub.Close)
 	st := &streams{hub: hub, env: func(name string) string { return env[name] }}
-	router, err := newRouter(pool, http.NotFoundHandler(), nil, "ws", env["SCADBUDDY_AUTH_MODE"], rec.tel.Meter(), nil, nil, st)
+	router, err := newRouter(pool, http.NotFoundHandler(), nil, "ws", env["SCADBUDDY_AUTH_MODE"], nil, rec.tel.Meter(), nil, nil, st)
 	if err != nil {
 		t.Fatal(err)
 	}

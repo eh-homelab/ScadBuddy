@@ -346,6 +346,16 @@ class AgentOperationEvent(BaseEvent):
     operation_id: str
 
 
+class InventoryOperationEvent(BaseEvent):
+    """scadbuddy-core wrote or ended an ``inventory_operations`` row (#6949 K1, R-K1-22): the
+    record of one inventory activity, which Go's worker sends with ``publish.Notify``. The
+    activity component ingests it, as ``AgentOperationEvent``; it goes to no WebSocket
+    topic."""
+
+    kind: Literal["inventory_operation.changed"] = "inventory_operation.changed"
+    operation_id: str
+
+
 class LibraryChanged(BaseEvent):
     """A library was pinned to, re-pinned on, or removed from a model."""
 
@@ -484,6 +494,7 @@ Event = Annotated[
     | OrderItemChanged
     | OrderBankDepositsChanged
     | AgentOperationEvent
+    | InventoryOperationEvent
     | AuthSessionRevoked
     | LibraryChanged
     | LibraryRemoved

@@ -44,12 +44,15 @@ func (o Options) withDefaults() Options {
 	return o
 }
 
-// The history kinds this subscriber writes, each to its table. handler_config.changed and
-// handler_value.changed get theirs with their tables (design §4.7); until then the cursor
-// passes them, as any other kind.
+// The history kinds this subscriber writes, each to its table. handler_value.changed gets
+// its table with handler_values in K2 (design §4.7); until then the cursor passes it, as
+// any other kind.
 const (
 	propertyChanged = "entity_property.changed"
 	schemaChanged   = "entity_property_schema.changed"
+	// configChanged is the inventory's parameter history (R-K1-13): a step's resolved
+	// handler and parameters, before and after a save (inventory/store publishConfig).
+	configChanged = "handler_config.changed"
 )
 
 // Apply reads, in one transaction, at most Batch events past the cursor, inserts a row for
@@ -179,6 +182,8 @@ type payload struct {
 	Key       *string         `json:"key"`
 	Op        *string         `json:"op"`
 	Owner     *string         `json:"owner"`
+	Step      *string         `json:"step"`
+	Handler   json.RawMessage `json:"handler"`
 	Old       json.RawMessage `json:"old"`
 	New       json.RawMessage `json:"new"`
 	Source    json.RawMessage `json:"source"`
@@ -186,7 +191,7 @@ type payload struct {
 }
 
 func insert(ctx context.Context, tx pgx.Tx, e event) error {
-	if e.kind != propertyChanged && e.kind != schemaChanged {
+	if e.kind != propertyChanged && e.kind != schemaChanged && e.kind != configChanged {
 		return nil
 	}
 	bad := func(reason string) error { return &badPayload{seq: e.seq, reason: reason} }
@@ -207,6 +212,24 @@ func insert(ctx context.Context, tx pgx.Tx, e event) error {
 	}
 	if !object(p.Actor) {
 		return bad("actor is not an object")
+	}
+	if e.kind == configChanged {
+		if p.Owner == nil {
+			return bad("no owner")
+		}
+		if p.Step == nil {
+			return bad("no step")
+		}
+		var handler *string
+		if h := value(p.Handler); h != nil {
+			if err := json.Unmarshal(h, &handler); err != nil {
+				return bad("handler is not a string")
+			}
+		}
+		_, err := tx.Exec(ctx, `INSERT INTO handler_config_history (event_seq, owner, step, handler, old, new, at, actor)
+			VALUES ($1, $2, $3, $4, $5::jsonb, $6::jsonb, $7::timestamptz, $8::jsonb) ON CONFLICT (event_seq) DO NOTHING`,
+			e.seq, *p.Owner, *p.Step, handler, value(p.Old), value(p.New), at, []byte(p.Actor))
+		return stored(e.seq, err)
 	}
 	if e.kind == schemaChanged {
 		if p.Owner == nil {

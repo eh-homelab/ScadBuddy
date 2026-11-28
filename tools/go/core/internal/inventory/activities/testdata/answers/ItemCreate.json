@@ -1,0 +1,39 @@
+{
+  "archived_at": null,
+  "class": {
+    "billing": null,
+    "counting": "lot",
+    "nature": "physical",
+    "role": "consumable"
+  },
+  "compatible_with": [],
+  "cost_unknown": false,
+  "edited_fields": [],
+  "effective_saleable": false,
+  "id": "00000000-0000-4000-8000-000000000001",
+  "incomplete_steps": [],
+  "invalid_properties": [],
+  "kind_id": "hardware",
+  "kind_path": [
+    "consumable",
+    "hardware"
+  ],
+  "life_hours": null,
+  "life_months": null,
+  "low": false,
+  "low_stock": "0",
+  "manufacturer": "",
+  "missing_properties": [],
+  "name": "M3 bolt",
+  "note": "",
+  "offer_count": 0,
+  "on_hand": "0",
+  "saleable": null,
+  "source": "manual",
+  "source_ref": null,
+  "special_type": null,
+  "steps": {},
+  "stock_value_minor": "0",
+  "tracking": "lot",
+  "uom": "each"
+}

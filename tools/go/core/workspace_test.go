@@ -24,7 +24,7 @@ import (
 // the area refuses to start.
 func TestTheWorkspaceAreaMountsOverTheBlobStore(t *testing.T) {
 	pool := testdb.New(t)
-	if _, err := newRouter(pool, nil, nil, "workspace", "", nil, nil, nil); err == nil ||
+	if _, err := newRouter(pool, nil, nil, "workspace", "", nil, nil, nil, nil); err == nil ||
 		!strings.Contains(err.Error(), seal.Variable) {
 		t.Fatal(err)
 	}
@@ -85,7 +85,7 @@ func blobArea(t *testing.T, pool *pgxpool.Pool, area string) (*api, *objects) {
 		"SCADBUDDY_STORE_S3_ACCESS_KEY_ID": "k", "SCADBUDDY_STORE_S3_SECRET_ACCESS_KEY": "s",
 	}
 	lookupEnv := func(name string) (string, bool) { v, ok := env[name]; return v, ok }
-	router, err := newRouter(pool, http.NotFoundHandler(), keys, area, "", nil, lookupEnv, nil)
+	router, err := newRouter(pool, http.NotFoundHandler(), keys, area, "", nil, nil, lookupEnv, nil)
 	if err != nil {
 		t.Fatal(err)
 	}

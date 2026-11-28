@@ -15,6 +15,7 @@ import re
 from collections.abc import Collection, Mapping
 from dataclasses import dataclass
 from datetime import datetime
+from pathlib import Path
 from typing import Any, Literal
 
 from jsonschema import Draft202012Validator
@@ -51,10 +52,12 @@ TOP_KEYWORDS = frozenset(
     }
 )
 #: The kinds whose create and save check required keys (#7703, spec 6.3b): only their
-#: schema may hold `required`, so a mark never promises a check that does not run. Items join
-#: when their create and save check too.
+#: schema may hold `required`, so a mark never promises a check that does not run. `item`
+#: joined with R-K1-33 (#7950): Go's item create and save check, and Go writes the item
+#: kinds' schemas, so `set_schema` still refuses `item` (`SchemaOwnedByKind`).
 REQUIRED_KINDS = frozenset(
     {
+        "item",
         "spool",
         "spool_type",
         "material",
@@ -105,6 +108,11 @@ KEY_TYPES = frozenset({"string", "number", "integer", "boolean", "array"})
 ITEM_TYPES = frozenset({"string"})
 #: The only `$schema` a schema may name.
 DRAFT_2020_12 = "https://json-schema.org/draft/2020-12/schema"
+#: The statements `apply_on` runs to set and to remove a key. Go's ``scadbuddy-core`` runs
+#: the same texts for an item's properties (#7667 §5.1, #6949 K1), and each language
+#: compares its text with these files.
+UPSERT_PROPERTY_SQL = (Path(__file__).parent / "shared" / "entity_property_upsert.sql").read_text()
+DELETE_PROPERTY_SQL = (Path(__file__).parent / "shared" / "entity_property_delete.sql").read_text()
 
 PropertyValue = str | float | int | bool | list[str]
 
@@ -454,8 +462,8 @@ class SchemaOwnedByKind(ValueError):  # noqa: N818
 
 
 def schema_for(conn: Conn, ref: EntityRef) -> dict[str, Any]:
-    """The schema that types `ref`'s properties: an item's kind's merged schema, else the
-    entity kind's own."""
+    """The schema that types `ref`'s properties: an item's kind's merged schema with its
+    special type's required keys (`kind_item_schema`), else the entity kind's own."""
     if ref.kind == ITEM:
         # Imported here: the inventory imports this module's schema check.
         from scadbuddy.inventory.kinds import item_schema
@@ -535,18 +543,9 @@ class EntityPropertyStore:
         actor = Jsonb(by.model_dump(mode="json"))
         for key, value in patch.set.items():
             if value is None:
-                conn.execute(
-                    "DELETE FROM entity_properties WHERE entity_id = %s AND key = %s",
-                    (entity_id, key),
-                )
+                conn.execute(DELETE_PROPERTY_SQL, (entity_id, key))
                 continue
-            conn.execute(
-                "INSERT INTO entity_properties (entity_id, key, value, source, updated_by)"
-                " VALUES (%s, %s, %s, 'manual', %s) ON CONFLICT (entity_id, key) DO UPDATE"
-                " SET value = EXCLUDED.value, source = 'manual',"
-                " updated_at = clock_timestamp(), updated_by = EXCLUDED.updated_by",
-                (entity_id, key, Jsonb(value), actor),
-            )
+            conn.execute(UPSERT_PROPERTY_SQL, (entity_id, key, Jsonb(value), actor))
         rows = conn.execute(_LIST, (entity_id,)).fetchall()
         if len(rows) > max(MAX_KEYS, len(before)):
             raise BadPropertyValue("*", f"an entity has at most {MAX_KEYS} keys")

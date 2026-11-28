@@ -22,6 +22,9 @@ import (
 
 	"github.com/jackc/pgx/v5/pgxpool"
 	"go.opentelemetry.io/otel/metric"
+	"go.temporal.io/sdk/client"
+	"go.temporal.io/sdk/interceptor"
+	"go.temporal.io/sdk/worker"
 
 	"github.com/eh-homelab/ScadBuddy/tools/go/telemetry"
 	"github.com/eh-homelab/ScadBuddy/tools/go/telemetry/pgxtrace"
@@ -49,6 +52,8 @@ import (
 	"github.com/eh-homelab/ScadBuddy/tools/go/core/internal/front"
 	"github.com/eh-homelab/ScadBuddy/tools/go/core/internal/gate"
 	"github.com/eh-homelab/ScadBuddy/tools/go/core/internal/history"
+	"github.com/eh-homelab/ScadBuddy/tools/go/core/internal/inventory"
+	"github.com/eh-homelab/ScadBuddy/tools/go/core/internal/inventory/activities"
 	"github.com/eh-homelab/ScadBuddy/tools/go/core/internal/labelprint"
 	"github.com/eh-homelab/ScadBuddy/tools/go/core/internal/mcprelay"
 	"github.com/eh-homelab/ScadBuddy/tools/go/core/internal/notify"
@@ -67,6 +72,7 @@ import (
 	"github.com/eh-homelab/ScadBuddy/tools/go/core/internal/sweeps"
 	"github.com/eh-homelab/ScadBuddy/tools/go/core/internal/tagreads"
 	"github.com/eh-homelab/ScadBuddy/tools/go/core/internal/tasks"
+	"github.com/eh-homelab/ScadBuddy/tools/go/core/internal/temporalx"
 	"github.com/eh-homelab/ScadBuddy/tools/go/core/internal/transcripts"
 	"github.com/eh-homelab/ScadBuddy/tools/go/core/internal/turns"
 	"github.com/eh-homelab/ScadBuddy/tools/go/core/internal/unknowntrays"
@@ -147,6 +153,18 @@ func run(ctx context.Context, lookupEnv func(string) (string, bool), tel *teleme
 	if err != nil {
 		return err
 	}
+	// The inventory's writes are activities on Temporal (#6949 K1): the area inventory runs
+	// the worker, so it needs Temporal's address; inventory:read alone asks Temporal about a
+	// stale operation when the address is given.
+	areas := env("SCADBUDDY_CORE_AREAS")
+	var temporal *temporalx.Config
+	if namesArea(areas, "inventory") || namesArea(areas, "inventory:read") && env("SCADBUDDY_TEMPORAL_ADDRESS") != "" {
+		c, err := temporalx.FromEnv(env)
+		if err != nil {
+			return err
+		}
+		temporal = &c
+	}
 	dsn := env("SCADBUDDY_DATABASE_URL")
 	if dsn == "" {
 		return errors.New("SCADBUDDY_DATABASE_URL is required")
@@ -176,6 +194,15 @@ func run(ctx context.Context, lookupEnv func(string) (string, bool), tel *teleme
 	if err != nil {
 		return err
 	}
+	callers := callerPackages
+	var temporalClient client.Client
+	if temporal != nil {
+		if temporalClient, err = temporalx.Client(*temporal, tel.Tracer()); err != nil {
+			return err
+		}
+		defer temporalClient.Close()
+		callers = map[string]areaRoutes{inventory.Caller: inventory.AreasWith(temporalx.Checker{Client: temporalClient})}
+	}
 	// The event stream's one LISTEN connection, which both listeners' streams share.
 	hub := bus.NewHub(pool, tel.Meter())
 	stream := &streams{hub: hub, env: env}
@@ -184,7 +211,7 @@ func run(ctx context.Context, lookupEnv func(string) (string, bool), tel *teleme
 		<-ctx.Done()
 		hub.Close()
 	}()
-	router, err := newRouter(pool, upstream, keys, env("SCADBUDDY_CORE_AREAS"), env("SCADBUDDY_AUTH_MODE"), tel.Meter(), lookupEnv, tel, stream)
+	router, err := newRouter(pool, upstream, keys, areas, env("SCADBUDDY_AUTH_MODE"), callers, tel.Meter(), lookupEnv, tel, stream)
 	if err != nil {
 		return err
 	}
@@ -204,7 +231,7 @@ func run(ctx context.Context, lookupEnv func(string) (string, bool), tel *teleme
 		if err != nil {
 			return fmt.Errorf("SCADBUDDY_CORE_CRUD_UPSTREAM: %w", err)
 		}
-		crudRouter, err := newRouter(pool, crudUpstream, keys, env("SCADBUDDY_CORE_AREAS"), env("SCADBUDDY_AUTH_MODE"), tel.Meter(), lookupEnv, tel, stream)
+		crudRouter, err := newRouter(pool, crudUpstream, keys, areas, env("SCADBUDDY_AUTH_MODE"), callers, tel.Meter(), lookupEnv, tel, stream)
 		if err != nil {
 			return err
 		}
@@ -212,7 +239,94 @@ func run(ctx context.Context, lookupEnv func(string) (string, bool), tel *teleme
 	}
 	// The history subscriber (#6949): every replica runs it, and one at a time applies.
 	go history.Run(ctx, pool, history.Options{})
-	return serve(ctx, servers, tel.Shutdown)
+	stopWorker := func(context.Context) {}
+	if namesArea(areas, "inventory") {
+		acts := activities.New(pool, or(env("SCADBUDDY_ORDERS_CURRENCY"), "USD"))
+		record := activities.Record(pool, tel.Meter())
+		health := func(ctx context.Context) error {
+			_, err := temporalClient.CheckHealth(ctx, &client.CheckHealthRequest{})
+			return err
+		}
+		stopWorker = startWorker(ctx, health, func() worker.Worker {
+			w := worker.New(temporalClient, temporal.InventoryQueue, worker.Options{
+				Interceptors: []interceptor.WorkerInterceptor{record},
+			})
+			activities.Register(w, acts)
+			return w
+		})
+	}
+	return serve(ctx, servers, func(drain context.Context) {
+		stopWorker(drain)
+		tel.Shutdown(drain)
+	})
+}
+
+// namesArea says whether the comma-separated areas name area.
+func namesArea(areas, area string) bool {
+	for name := range strings.SplitSeq(areas, ",") {
+		if strings.TrimSpace(name) == area {
+			return true
+		}
+	}
+	return false
+}
+
+// workerRetry is how long the worker waits before it asks Temporal again.
+var workerRetry = 5 * time.Second
+
+// startWorker starts the inventory worker beside the HTTP servers. A Temporal out of reach
+// does not stop core, which is the API pod's front. Until health (Temporal's CheckHealth)
+// answers, the worker waits workerRetry and asks again. Then it builds a worker and starts it.
+// The SDK keeps a worker's first Start result (sync.OnceValue), so a worker whose Start
+// failed is never started again: the next try builds a new one. The function it gives stops
+// the started worker, and waits for it at most until drain ends.
+func startWorker(ctx context.Context, health func(context.Context) error, build func() worker.Worker) (stop func(drain context.Context)) {
+	started := make(chan worker.Worker, 1)
+	go func() {
+		for {
+			ask, cancel := context.WithTimeout(ctx, 10*time.Second)
+			err := health(ask)
+			cancel()
+			if err == nil {
+				w := build()
+				if err = w.Start(); err == nil {
+					slog.Info("the inventory worker polls Temporal")
+					started <- w
+					return
+				}
+			}
+			if ctx.Err() == nil {
+				slog.Warn("the inventory worker could not start", "error", err.Error())
+			}
+			select {
+			case <-ctx.Done():
+				started <- nil
+				return
+			case <-time.After(workerRetry):
+			}
+		}
+	}()
+	return func(drain context.Context) {
+		var w worker.Worker
+		select {
+		case w = <-started:
+		case <-drain.Done():
+			return
+		}
+		if w == nil {
+			return
+		}
+		stopped := make(chan struct{})
+		go func() {
+			w.Stop()
+			close(stopped)
+		}()
+		select {
+		case <-stopped:
+		case <-drain.Done():
+			slog.Warn("the inventory worker did not stop before the drain ended")
+		}
+	}
 }
 
 func or(value, fallback string) string {
@@ -279,6 +393,10 @@ var areaPackages = []areaRoutes{
 	transcripts.Areas, workspace.Areas,
 	assistantcost.Areas, fetchgrants.Areas,
 }
+
+// callerPackages are the packages whose areas are mounted for a caller of their own (the
+// key), not for the agent.
+var callerPackages = map[string]areaRoutes{inventory.Caller: inventory.Areas}
 
 // publicAreas is a package's public routes by area name, over the pool, with the KEKs.
 // newRouter serves each behind the one person-auth gate (internal/auth); an area may have
@@ -358,7 +476,11 @@ type streams struct {
 // and tel the process's telemetry (nil for none), which traces its store requests.
 // stream is the process's event stream; without one, an area that needs it gets a hub of
 // its own.
-func newRouter(pool *pgxpool.Pool, next http.Handler, keys *seal.Keys, areas, authMode string, meter metric.MeterProvider,
+// The areas of areaPackages are the agent's; those of callers are their caller's. An area
+// name that two callers' packages give stops the start; the agent's packages may share one
+// (keys: secrets and fetchgrants).
+func newRouter(pool *pgxpool.Pool, next http.Handler, keys *seal.Keys, areas, authMode string,
+	callers map[string]areaRoutes, meter metric.MeterProvider,
 	lookupEnv func(string) (string, bool), tel *telemetry.Telemetry, stream ...*streams) (http.Handler, error) {
 	mode, err := auth.ParseMode(authMode, authMode != "")
 	if err != nil {
@@ -405,10 +527,24 @@ func newRouter(pool *pgxpool.Pool, next http.Handler, keys *seal.Keys, areas, au
 	}
 	log, turn := &events.Log{Pool: pool}, &turns.Turns{Pool: pool}
 	more := map[string][]crud.Route{}
-	for _, p := range areaPackages {
+	callerOf := map[string]string{}
+	add := func(caller string, p areaRoutes) error {
 		for name, routes := range p(pool, keys) {
-			// Two packages may serve one area (keys: secrets and fetchgrants).
-			more[name] = append(more[name], routes...)
+			if prev, twice := callerOf[name]; twice && prev != caller {
+				return fmt.Errorf("two packages give the area %q", name)
+			}
+			more[name], callerOf[name] = append(more[name], routes...), caller
+		}
+		return nil
+	}
+	for _, p := range areaPackages {
+		if err := add("agent", p); err != nil {
+			return nil, err
+		}
+	}
+	for caller, p := range callers {
+		if err := add(caller, p); err != nil {
+			return nil, err
 		}
 	}
 	// Naming filament-presets twice mounts it once: a pattern given twice panics.
@@ -528,7 +664,7 @@ func newRouter(pool *pgxpool.Pool, next http.Handler, keys *seal.Keys, areas, au
 			if !ok && !open {
 				return nil, fmt.Errorf("SCADBUDDY_CORE_AREAS names %q, which this build does not have", name)
 			}
-			router.Add("agent", routes...)
+			router.Add(callerOf[name], routes...)
 			mountPublic(name)
 		}
 	}

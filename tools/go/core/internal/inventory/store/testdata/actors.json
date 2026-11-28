@@ -1,0 +1,24 @@
+{
+  "fields": ["kind", "principal", "session", "run_id"],
+  "kinds": ["browser", "agent", "provider", "visitor", "customer"],
+  "accepted": {
+    "{\"kind\":\"browser\"}": "{\"kind\":\"browser\",\"principal\":null,\"session\":null,\"run_id\":null}",
+    "{ \"run_id\": \"r1\", \"kind\": \"agent\", \"principal\": \"assistant\", \"session\": \"s1\" }": "{\"kind\":\"agent\",\"principal\":\"assistant\",\"session\":\"s1\",\"run_id\":\"r1\"}",
+    "{\"kind\":\"provider\",\"principal\":\"inventory\",\"session\":null}": "{\"kind\":\"provider\",\"principal\":\"inventory\",\"session\":null,\"run_id\":null}",
+    "{\"kind\":\"visitor\",\"principal\":\"storefront_visitor:3\"}": "{\"kind\":\"visitor\",\"principal\":\"storefront_visitor:3\",\"session\":null,\"run_id\":null}",
+    "{\"kind\":\"customer\",\"principal\":\"customer:\\u00e9<&>\",\"session\":\"visitor:1\"}": "{\"kind\":\"customer\",\"principal\":\"customer:é<&>\",\"session\":\"visitor:1\",\"run_id\":null}"
+  },
+  "refused": [
+    "{\"kind\":\"browser\",\"extra\":1}",
+    "{\"principal\":\"p\"}",
+    "{\"kind\":\"robot\"}",
+    "{\"kind\":null}",
+    "{\"kind\":\"agent\",\"principal\":7}",
+    "{\"kind\":\"browser\",\"kind\":\"agent\"}",
+    "[\"browser\"]",
+    "null",
+    "\"browser\"",
+    "{\"kind\":\"browser\"} {}",
+    ""
+  ]
+}

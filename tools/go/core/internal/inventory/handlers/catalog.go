@@ -48,6 +48,12 @@ type Catalog struct {
 	Special map[string]SpecialType
 }
 
+// SpecialType is the special type id, and whether the catalog has it.
+func (c *Catalog) SpecialType(id string) (SpecialType, bool) {
+	sp, ok := c.Special[id]
+	return sp, ok
+}
+
 func spec(id string, steps []Step, applies map[string]string, params map[string]Param) Spec {
 	return Spec{ID: id, Steps: steps, Applies: applies, Params: params}
 }

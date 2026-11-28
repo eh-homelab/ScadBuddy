@@ -1043,10 +1043,12 @@ class RemotePrinterStore(PrinterStore):
         model: str | None,
         listed: set[int] | frozenset[int] | None = None,
         by: Actor,
+        wait: float | None = None,
     ) -> tuple[PrinterRow, bool]:
         # ``by`` stays here: the route names the print worker (`print`) as the merge's
-        # actor, whoever this process says it is (#6949).
-        del by
+        # actor, whoever this process says it is (#6949). ``wait`` too: the route waits for a
+        # merge with no cap (#6949 K1 Task 16).
+        del by, wait
         body = {
             "bambuddy_printer_id": bambuddy_printer_id,
             "serial": serial,
@@ -1121,6 +1123,8 @@ PRINTERS_API_ONLY = (
     "record_bambuddy_view",
     "set_lan_sync_error",
     "delete",
+    # `MergePrinter`'s step 2 (#6949 K1 Task 16): the API's library worker runs it.
+    "merge_commit",
 )
 #: The `PrinterStore` methods that only call others of its own, each of which the worker
 #: sends over a route: ``require`` (``get``) and ``ensure_bambuddy``

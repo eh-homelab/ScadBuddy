@@ -1,7 +1,7 @@
 import { createHash } from 'node:crypto'
 import { z } from 'zod'
 import type { components } from '../api/schema.js'
-import { ok } from './call.js'
+import { ok, settling } from './call.js'
 import { command } from './command.js'
 import {
   nozzles,
@@ -20,7 +20,6 @@ import {
   tier,
 } from './print.js'
 import { messageArguments, openChecked } from '../orders/messaging.js'
-import { withInventoryPaths } from './inventoryLinks.js'
 import { defineTool, idempotencyKey, json, type Tool, type ToolContext, ToolError } from './registry.js'
 import { FROM_WORKSPACE_ONLY, uploadInit, uploadName, withSent, workspaceFile, workspacePathInput, workspaceShaInput } from './workspaceUploads.js'
 
@@ -1567,68 +1566,28 @@ export const orderTools: Tool[] = [
         ),
       ),
   }),
-  // Parts inventory (#5543, job cost spec §11): the hooks, rings and magnets an item uses
-  // beside its filament. Since #7067 a part is an inventory item of a kind under `hardware` or
-  // `ams_part` (inventory K1 put both under `consumable`), and
-  // part_list and part_stock_add are aliases of inventory_item_list and inventory_lot_receive.
-  // They keep their old answers, which only the `/parts` alias routes build (the pack, its
-  // price and its currency, inventory/part_alias.py), so they call those; both the tools
-  // and the routes go after one release (spec §6.11).
+  // Parts (#5543, job cost spec §11): the hooks, rings and magnets an item uses beside its
+  // filament. Since #7067 a part is an inventory item of a kind under `hardware` or `ams_part`
+  // (inventory K1 put both under `consumable`). The old part-row routes and the stock tool
+  // are gone (#6949, K1 5/7): the items are inventory_item_list, the stock inventory_lot_receive.
   defineTool({
     name: 'part_list',
-    label: 'List parts',
+    label: "List an order's parts",
     description:
-      'Alias of inventory_item_list; goes after one release (#7067): use inventory_item_list with `kind: "hardware"` or `kind: "ams_part"`. ' +
-      'The parts inventory (keychain hooks, rings, magnets), each part an inventory item: its pack, its unit cost (a ' +
-      'decimal string in minor units, the weighted average of the stock on hand of known cost; `cost_unknown` when ' +
-      'nothing says what a unit costs), what is `on_hand` (below zero when more was used ' +
-      'than recorded) and `low` at or below its low-stock level. With `low`, only the low ones. With `order_id`, ' +
-      "that order's items' parts per unit and `short`: the parts its open items need beyond what is on hand " +
-      "(there `on_hand` and `short` are decimal strings, the lots summed). Without `order_id`, each part has `ui_path`, " +
-      "its item's page in ScadBuddy's UI; link its name with it.",
+      "An order's items' parts per unit and `short`: the parts its open items need beyond what is on hand (`on_hand` " +
+      'and `short` are decimal strings, the lots summed). `order_id` is required. To list every part, use ' +
+      'inventory_item_list with `kind: "hardware"` and again with `kind: "ams_part"`: both kinds hold parts. To add ' +
+      'stock, use inventory_lot_receive.',
     input: z.object({
-      low: z.boolean().default(false),
-      order_id: orderId.optional(),
+      order_id: orderId,
     }),
     risk: 'read',
-    routes: ['GET /api/v1/parts', 'GET /api/v1/orders/{order_id}/parts'],
-    handler: async ({ low, order_id }, { backend }) => {
-      if (order_id !== undefined) {
-        return json(
-          await ok(
-            backend.GET('/api/v1/orders/{order_id}/parts', { params: { path: { order_id } } }),
-            `get the parts of order ${order_id}`,
-          ),
-        )
-      }
-      return json(withInventoryPaths(await ok(backend.GET('/api/v1/parts', { params: { query: { low } } }), 'list the parts'), 'item'))
-    },
-  }),
-  defineTool({
-    name: 'part_stock_add',
-    label: 'Add stock to a part',
-    description:
-      'Alias of inventory_lot_receive; goes after one release (#7067): use inventory_lot_receive with the cost of ' +
-      "the whole quantity. Record packs bought: `packs` of the part's pack join the stock as one lot, at " +
-      "`pack_price_minor` each (with tax, in the part's currency's minor units) when given, which becomes the part's " +
-      'pack price. A part with no supplier has no pack: `packs` are single units at `pack_price_minor`, no price point ' +
-      'is written, and with no price the stock is of unknown cost. A part priced in another currency than the ' +
-      "shop's receives a lot of unknown cost. Orders already fulfilled keep their cost. Answers the part, with " +
-      "`ui_path`, its item's page.",
-    input: z.object({
-      part_id: ID.describe('A part id (its inventory item id), as part_list returns it'),
-      packs: z.number().int().min(1).max(10_000).default(1),
-      pack_price_minor: z.number().int().min(0).optional(),
-      note: z.string().max(1000).default(''),
-    }),
-    risk: 'write',
-    routes: ['POST /api/v1/parts/{part_id}/stock'],
-    title: ({ part_id, packs }) => `Add ${packs} pack(s) to part ${part_id}`,
-    handler: async ({ part_id, ...body }, { backend }) =>
+    routes: ['GET /api/v1/orders/{order_id}/parts'],
+    handler: async ({ order_id }, { backend }) =>
       json(
-        withInventoryPaths(
-          await ok(backend.POST('/api/v1/parts/{part_id}/stock', { params: { path: { part_id } }, body }), `add stock to part ${part_id}`),
-          'item',
+        await ok(
+          backend.GET('/api/v1/orders/{order_id}/parts', { params: { path: { order_id } } }),
+          `get the parts of order ${order_id}`,
         ),
       ),
   }),
@@ -2205,9 +2164,11 @@ export const orderTools: Tool[] = [
         )
       }
       if (accept) {
-        result = await ok(
-          backend.POST('/api/v1/orders/{order_id}/items/{item_id}/fulfilments/{fulfilment_id}/accept', { params: { path } }),
-          `accept attempt ${fulfilment_id}`,
+        result = settling(
+          await ok(
+            backend.POST('/api/v1/orders/{order_id}/items/{item_id}/fulfilments/{fulfilment_id}/accept', { params: { path } }),
+            `accept attempt ${fulfilment_id}`,
+          ),
         )
       }
       if (result === undefined) throw new ToolError('give an attempt to edit, or accept: true')
@@ -2391,9 +2352,11 @@ export const orderTools: Tool[] = [
     summarize: ({ order_id, item_id }) => `Undo the fulfilment of item ${item_id} of order ${order_id}`,
     handler: async ({ order_id, item_id }, { backend }) =>
       json(
-        await ok(
-          backend.POST('/api/v1/orders/{order_id}/items/{item_id}/unfulfil', { params: { path: { order_id, item_id } } }),
-          `unfulfil item ${item_id}`,
+        settling(
+          await ok(
+            backend.POST('/api/v1/orders/{order_id}/items/{item_id}/unfulfil', { params: { path: { order_id, item_id } } }),
+            `unfulfil item ${item_id}`,
+          ),
         ),
       ),
   }),
@@ -2448,9 +2411,11 @@ export const orderTools: Tool[] = [
     summarize: ({ order_id, items }) => `Fulfil ${items.length} item${items.length === 1 ? '' : 's'} of order ${order_id}`,
     handler: async ({ order_id, items }, { backend }) =>
       json(
-        await ok(
-          backend.POST('/api/v1/orders/{order_id}/fulfil', { params: { path: { order_id } }, body: { items } }),
-          `fulfil ${items.length} items of order ${order_id}`,
+        settling(
+          await ok(
+            backend.POST('/api/v1/orders/{order_id}/fulfil', { params: { path: { order_id } }, body: { items } }),
+            `fulfil ${items.length} items of order ${order_id}`,
+          ),
         ),
       ),
   }),

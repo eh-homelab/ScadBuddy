@@ -9,6 +9,15 @@ import (
 	"github.com/eh-homelab/ScadBuddy/tools/go/core/internal/httpx"
 )
 
+// HoldLog takes the event log's lock in tx now, as core/pg_events.py hold_event_log does: a
+// transaction that will publish (itself, or through a trigger on a row it writes) takes it
+// before any row lock, so every writer keeps one order, the event log first, then rows. The
+// lock is held to the end of tx; taking it again later is free.
+func HoldLog(ctx context.Context, tx pgx.Tx) error {
+	_, err := tx.Exec(ctx, `SELECT pg_advisory_xact_lock($1)`, logLock)
+	return err
+}
+
 // PublishIn publishes the event kind with fields in the caller's transaction tx, through the
 // database's scadbuddy_publish_event (#6949, design §4.8): the event log's lock, held to the
 // commit, the row in events, and the NOTIFY that Postgres sends on commit. The event

@@ -1,6 +1,6 @@
 import { useState, type FormEvent } from 'react'
 import { USER_ONLY } from '../../agent/dom'
-import { api, ApiError } from '../../api/client'
+import { api, ApiError, settled } from '../../api/client'
 import type { DiscoveredPrinter, PrinterRow, PrinterSyncEntry, PrinterSyncResult, PrintPath } from '../../api/types'
 import { PRINTER_TOPICS as TOPICS, registryNews, syncSummary } from '../../lib/printerRegistry'
 import { useAsync } from '../../lib/useAsync'
@@ -12,6 +12,7 @@ import { Spinner } from '../ui/spinner'
 import { VirtualPrintersPanel } from './VirtualPrinters'
 import { PrinterAmsSlots } from './PrinterAmsSlots'
 import { PrinterKProfiles } from './PrinterKProfiles'
+import { StillWorking } from '../../pages/inventory/StillWorking'
 
 /**
  * Settings → Printers (#3823, plan 2026-10-16, Task 10): the printer registry, one row per
@@ -110,6 +111,9 @@ function PrinterItem({
 }) {
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState<string | null>(null)
+  // #6949 K1 Task 16 — a link whose merge moves stock answers 202 while its `MergePrinter`
+  // runs; the link is sent again until it answers with the row.
+  const [merging, setMerging] = useState<{ id: string } | null>(null)
 
   async function act(work: () => Promise<PrinterRow | void>, fallback: string) {
     setBusy(true)
@@ -122,6 +126,7 @@ function PrinterItem({
       setError(problem(cause, fallback))
     } finally {
       setBusy(false)
+      setMerging(null)
     }
   }
 
@@ -194,6 +199,7 @@ function PrinterItem({
             )}
           </div>
 
+          {merging && <StillWorking id={merging.id} />}
           {free.length > 0 && (
             <div className="space-y-1">
               <p className="text-xs font-medium">Link a Bambuddy printer</p>
@@ -206,10 +212,15 @@ function PrinterItem({
                       disabled={busy || !printer.linkable}
                       aria-label={`Link Bambuddy printer ${printer.name}`}
                       onClick={() =>
-                        void act(
-                          () => api.linkPrinterBambuddy(row.id, printer.bambuddy_printer_id),
-                          'Could not link that Bambuddy printer.',
-                        )
+                        void act(() => {
+                          // A 202 is the merge's workflow: the same link goes again until it
+                          // answers, so the route fills the LAN link once the merge ended.
+                          const key = crypto.randomUUID()
+                          return settled(
+                            () => api.linkPrinterBambuddy(row.id, printer.bambuddy_printer_id, key),
+                            (running) => setMerging({ id: running.workflow_id }),
+                          )
+                        }, 'Could not link that Bambuddy printer.')
                       }
                     >
                       {printer.name}
@@ -324,6 +335,7 @@ const OUTCOMES: Record<PrinterSyncEntry['action'], string> = {
   skipped: 'skipped',
   conflict: 'conflict',
   missing: 'no longer in Bambuddy',
+  merging: 'merging (stock moves to the kept printer; it finishes by itself)',
 }
 
 /**
