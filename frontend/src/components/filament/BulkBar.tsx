@@ -92,6 +92,14 @@ export function BulkBar({ selected, places, types, onDone, onClear }: Props) {
    */
   const resetAll = async () => {
     setBusy(true)
+    try {
+      await resetBatches()
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  const resetBatches = async () => {
     const ids = ordered.map((spool) => spool.id)
     const done = { reset: 0, not_found: [] as string[] }
     let refused: { at: number; cause: unknown } | null = null
@@ -105,7 +113,6 @@ export function BulkBar({ selected, places, types, onDone, onClear }: Props) {
         break
       }
     }
-    setBusy(false)
     if (refused && refused.at === 0) {
       onDone(`Reset no counter: ${why(refused.cause)}.`)
       return
