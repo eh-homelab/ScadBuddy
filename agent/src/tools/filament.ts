@@ -347,7 +347,8 @@ const tools: Tool[] = [
       'subtype, colour `#RRGGBBAA`, label weight, print values a spool inherits, `cost_per_kg`, `filament_id` of ' +
       'its price book row). Archived types only with `include_archived`. `q` keeps the types whose code, brand, ' +
       'material, subtype, colour name, hex, supplier SKU or a property value (a GTIN, an MPN) match it. ' +
-      'A `key:value` token (such as `gtin:06975337041234`) also matches a property of that key whose whole value equals it.',
+      'A `key:value` token (such as `gtin:06975337041234`) also matches a property of that key whose whole value equals it; ' +
+      'two values of 8 to 14 digits are equal when they are equal padded to 14 digits.',
     input: z.object({ include_archived: z.boolean().default(false), q: searchQuery }),
     risk: 'read',
     source: SOURCE,
