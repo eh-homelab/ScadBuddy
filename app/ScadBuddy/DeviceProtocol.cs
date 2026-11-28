@@ -117,8 +117,20 @@ public static class DeviceProtocol
 		new JsonObject { ["type"] = "subscribe", ["topics"] = new JsonArray("device:" + deviceId) }.ToJsonString();
 
 	/// <summary>
+	/// The subscribe frame for the open tasks (#8574). It goes on its own, after the device's
+	/// topic: core refuses it with an error frame while the phone may not answer tasks, and
+	/// the device's topic stays.
+	/// </summary>
+	public const string SubscribeTasks = """{"type":"subscribe","topics":["tasks"]}""";
+
+	/// <summary>The heartbeat's body: whether the app is in front, the only time core sends it an NFC call.</summary>
+	public static string Heartbeat(bool foreground) => new JsonObject { ["foreground"] = foreground }.ToJsonString();
+
+	static readonly string[] TaskStates = ["open", "answered", "cancelled", "expired"];
+
+	/// <summary>
 	/// What a socket frame means to the device: a call for it, a ping, the end of a call (core
-	/// ended it: done, or failed at its deadline), or nothing.
+	/// ended it: done, or failed at its deadline), a task that changed, a resync, or nothing.
 	/// </summary>
 	public static Frame Parse(string text, string deviceId)
 	{
@@ -129,8 +141,16 @@ public static class DeviceProtocol
 		{
 			var type = o?["type"]?.GetValue<string>();
 			if (type == "ping") return Frame.Ping;
+			if (type == "resync") return Frame.Resync;
 			if (type != "event" || o!["data"] is not JsonObject data) return Frame.Ignored;
 			var kind = o["kind"]?.GetValue<string>();
+			if (kind == "task.changed")
+			{
+				// Ids only: the phone reads the task again (GET /devices/task).
+				var task = data["task_id"]?.GetValue<string>();
+				var state = data["state"]?.GetValue<string>();
+				return string.IsNullOrEmpty(task) || task.Length > 200 || state is null || !TaskStates.Contains(state) ? Frame.Ignored : new TaskChange(task, state);
+			}
 			var call = data["call"]?.GetValue<string>();
 			if (data["device"]?.GetValue<string>() != deviceId || call is null || !Uuid.IsMatch(call)) return Frame.Ignored;
 			if (kind is "device.call_done" or "device.call_failed") return new CallEnded(call);
@@ -355,7 +375,14 @@ public abstract record Frame
 {
 	public static readonly Frame Ignored = new IgnoredFrame();
 	public static readonly Frame Ping = new PingFrame();
+	public static readonly Frame Resync = new ResyncFrame();
 }
+
+/// <summary>Core lost track of what the socket follows: the device reads its state again.</summary>
+public sealed record ResyncFrame : Frame;
+
+/// <summary>task.changed: a task the device may follow moved to <paramref name="State"/>.</summary>
+public sealed record TaskChange(string TaskId, string State) : Frame;
 
 /// <summary>A frame the device does nothing with.</summary>
 public sealed record IgnoredFrame : Frame;
