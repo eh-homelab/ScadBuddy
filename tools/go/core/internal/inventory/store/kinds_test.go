@@ -594,9 +594,15 @@ func TestAHandlerSwapNamesEveryOwnerItBreaks(t *testing.T) {
 	// refusal.
 	_, err = updateKind(t, pool, k, "spindle", wire.KindPatch{Steps: &model.Steps{"life": {Handler: "life.months",
 		Params: map[string]any{"months": 6, "hours": 1}}}})
+	// Exactly: the kind's own problems (one or more, no owner), then the three owners, with
+	// nothing between or after them (#8553).
 	got := owners(refusal(t, err, 422, "steps_invalid"))
-	if len(got) < 4 || got[0] != "" || !slices.Equal(got[len(got)-3:], want) {
-		t.Fatalf("owners %v, want the kind first, then %v", got, want)
+	own := 0
+	for own < len(got) && got[own] == "" {
+		own++
+	}
+	if own == 0 || !slices.Equal(got[own:], want) {
+		t.Fatalf("owners %v, want the kind's own first, then exactly %v", got, want)
 	}
 }
 
