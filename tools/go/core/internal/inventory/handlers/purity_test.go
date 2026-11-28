@@ -18,7 +18,11 @@ import (
 // catalog.go, which is the catalog's data, aside) is a kind id of kinds.yaml or a special
 // type id.
 func TestTheBaseFlowNamesNoKind(t *testing.T) {
-	m, err := modeldata.Load(modeldata.Dir())
+	dir, err := modeldata.Dir()
+	if err != nil {
+		t.Fatal(err)
+	}
+	m, err := modeldata.Load(dir)
 	if err != nil {
 		t.Fatal(err)
 	}
