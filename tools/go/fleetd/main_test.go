@@ -51,6 +51,25 @@ func TestParse(t *testing.T) {
 	}
 }
 
+func TestParseUpdateFlags(t *testing.T) {
+	t.Setenv("FLEETD_UPDATE_INTERVAL", "")
+	var stderr bytes.Buffer
+	cfg, err := parse([]string{"run", "--token-file", "/t"}, &stderr)
+	if err != nil || cfg.UpdateInterval != 15*time.Minute || cfg.NoUpdate {
+		t.Fatalf("defaults: %+v %v", cfg, err)
+	}
+	t.Setenv("FLEETD_UPDATE_INTERVAL", "1h")
+	if cfg, err = parse([]string{"run", "--token-file", "/t"}, &stderr); err != nil || cfg.UpdateInterval != time.Hour {
+		t.Fatalf("env: %+v %v", cfg, err)
+	}
+	if _, err := parse([]string{"run", "--token-file", "/t", "--update-interval", "10s"}, &stderr); err == nil {
+		t.Fatal("a 10s update interval was accepted")
+	}
+	if cfg, err = parse([]string{"run", "--token-file", "/t", "--no-update"}, &stderr); err != nil || !cfg.NoUpdate {
+		t.Fatalf("--no-update: %+v %v", cfg, err)
+	}
+}
+
 func TestHelpExitsZero(t *testing.T) {
 	var out, errb bytes.Buffer
 	if code := realMain([]string{"--help"}, &out, &errb); code != 0 {

@@ -269,7 +269,8 @@ The backend's migration files and its settings tables: `backend/CLAUDE.md`.
   `slicer-build` stage's cargo-chef dependency layer is kept. Only `build-image.yml`'s
   `slicer` job writes it; `ci.yml`'s `slicer-image` and `hot-path-e2e.yml` only read it,
   which works on fork PRs too because the package is public.
-- No CI job builds arm64. `build-image.yml` (every image) and `build-go-image.yml`
+- No CI job builds an arm64 image (`fleetd-release.yml` cross-compiles a linux/arm64 Go
+  binary on amd64, with no QEMU, #8588). `build-image.yml` (every image) and `build-go-image.yml`
   publish `linux/amd64` only, and nothing in `build-image.yml` runs on PRs. arm64
   (QEMU-emulated, with a PR-time `openscad-lsp-arm64` check, #199) was dropped; the
   Dockerfile still handles `TARGETARCH=arm64`, so re-enabling it is `platforms` plus

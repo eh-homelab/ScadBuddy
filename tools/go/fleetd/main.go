@@ -16,14 +16,17 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"runtime"
 	"runtime/debug"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 
 	"github.com/eh-homelab/ScadBuddy/tools/go/fleetd/internal/discover"
 	"github.com/eh-homelab/ScadBuddy/tools/go/fleetd/internal/registry"
 	"github.com/eh-homelab/ScadBuddy/tools/go/fleetd/internal/report"
+	"github.com/eh-homelab/ScadBuddy/tools/go/fleetd/internal/update"
 	"github.com/eh-homelab/ScadBuddy/tools/go/fleetd/internal/watch"
 )
 
@@ -36,7 +39,9 @@ var version string
 const (
 	defaultInterval = 10 * time.Second
 	defaultRefresh  = 5 * time.Minute
-	gitTimeout      = 5 * time.Second
+	// defaultUpdateInterval is how often run looks for a new release (#8588).
+	defaultUpdateInterval = 15 * time.Minute
+	gitTimeout            = 5 * time.Second
 	// settle lets a burst of file changes end before the scan they start.
 	settle = 250 * time.Millisecond
 )
@@ -55,6 +60,9 @@ type config struct {
 	Interval   time.Duration
 	Refresh    time.Duration
 	Telemetry  telemetryConfig
+	// UpdateInterval and NoUpdate drive auto-update (#8588).
+	UpdateInterval time.Duration
+	NoUpdate       bool
 }
 
 func defaultConfigDir() string {
@@ -77,12 +85,14 @@ func defaultAPI() string {
 
 const usage = `fleetd keeps ScadBuddy's fleet session registry up to date for this machine.
 
-  fleetd run  [--api <url>] [--token-file <file>] [--config-dir <dir>]... [--interval 10s] [--refresh 5m] [--otel-endpoint <url>] [--no-telemetry]
+  fleetd run  [--api <url>] [--token-file <file>] [--config-dir <dir>]... [--interval 10s] [--refresh 5m] [--otel-endpoint <url>] [--no-telemetry] [--update-interval 15m] [--no-update]
   fleetd scan [--config-dir <dir>]...
   fleetd version
 
 run sends the machine and its live sessions every --interval and on each change in
 <config dir>/sessions: only the rows that changed, and all of them every --refresh.
+run also replaces itself with the newest signed fleetd release, checked every
+--update-interval, and restarts in place, unless --no-update is given or this is a dev build.
 scan prints what run would send, as JSON, and sends nothing.
 `
 
@@ -96,6 +106,8 @@ func newFlagSet(cmd string, cfg *config, dirs *stringList) *flag.FlagSet {
 		set.DurationVar(&cfg.Refresh, "refresh", defaultRefresh, "how often to send every row again, changed or not")
 		set.StringVar(&cfg.Telemetry.Endpoint, "otel-endpoint", "", "OTLP/HTTP collector base URL for traces, metrics and logs (default $OTEL_EXPORTER_OTLP_ENDPOINT, else "+telemetryDefaultEndpoint+")")
 		set.BoolVar(&cfg.Telemetry.Disabled, "no-telemetry", false, "send no traces, metrics or logs")
+		set.DurationVar(&cfg.UpdateInterval, "update-interval", defaultUpdateIntervalFromEnv(), "how often to look for a new signed release (default $FLEETD_UPDATE_INTERVAL, else 15m)")
+		set.BoolVar(&cfg.NoUpdate, "no-update", false, "never replace this binary with a new release")
 	}
 	return set
 }
@@ -145,11 +157,22 @@ func parse(args []string, stderr io.Writer) (config, error) {
 		if _, err := registry.CheckAPI(cfg.API); err != nil {
 			return cfg, err
 		}
+		if !cfg.NoUpdate && cfg.UpdateInterval < time.Minute {
+			return cfg, errors.New("--update-interval must be at least 1m")
+		}
 		if cfg.TokenFile == "" {
 			return cfg, errors.New("no token file: pass --token-file or set $FLEETD_TOKEN_FILE")
 		}
 	}
 	return cfg, nil
+}
+
+// defaultUpdateIntervalFromEnv is $FLEETD_UPDATE_INTERVAL when it parses, else 15m.
+func defaultUpdateIntervalFromEnv() time.Duration {
+	if d, err := time.ParseDuration(os.Getenv("FLEETD_UPDATE_INTERVAL")); err == nil {
+		return d
+	}
+	return defaultUpdateInterval
 }
 
 // serviceVersion is version, else "dev+<12 hex of the commit>", else "dev".
@@ -207,7 +230,20 @@ func writeScan(w io.Writer, m discover.Machine, rows []discover.Row) error {
 	return enc.Encode(out)
 }
 
-func main() { os.Exit(realMain(os.Args[1:], os.Stdout, os.Stderr)) }
+// reexecPath is set by run when a new release is in place: main execs it once run's
+// loops and telemetry have stopped (#8588).
+var reexecPath string
+
+func main() {
+	code := realMain(os.Args[1:], os.Stdout, os.Stderr)
+	if reexecPath != "" {
+		// Same pid, args and environment, so systemd keeps the service.
+		err := syscall.Exec(reexecPath, os.Args, os.Environ())
+		fmt.Fprintf(os.Stderr, "fleetd: re-exec of the new release failed: %v\n", err)
+		os.Exit(1)
+	}
+	os.Exit(code)
+}
 
 func realMain(args []string, stdout, stderr io.Writer) int {
 	cfg, err := parse(args, stderr)
@@ -265,8 +301,22 @@ func run(cfg config, stderr io.Writer) int {
 		defer w.Close()
 		changes = w.Changes()
 	}
-	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
+	sigCtx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
+	// ctx also ends when a new release is in place, so the loops stop before the re-exec.
+	ctx, cancel := context.WithCancel(sigCtx)
+	defer cancel()
+	var updating sync.WaitGroup
+	if up := newUpdater(cfg); up != nil {
+		updating.Add(1)
+		go func() {
+			defer updating.Done()
+			if up.Loop(ctx, cfg.UpdateInterval) {
+				reexecPath = up.Exe
+				cancel()
+			}
+		}()
+	}
 	rep := report.New(client, m, cfg.Refresh)
 	slog.Info("fleetd: started", "config_dirs", len(cfg.ConfigDirs), "version", m.ServiceVersion)
 	scan := func() {
@@ -279,6 +329,8 @@ func run(cfg config, stderr io.Writer) int {
 		})
 	}
 	loop(ctx, cfg.Interval, changes, scan)
+	cancel()
+	updating.Wait()
 	slog.Info("fleetd: stopped")
 	return 0
 }
@@ -309,4 +361,33 @@ func loop(ctx context.Context, interval time.Duration, changes <-chan struct{}, 
 		}
 		scan()
 	}
+}
+
+// updaterRun is an update.Updater and the path it replaces.
+type updaterRun struct {
+	*update.Updater
+	Exe string
+}
+
+// newUpdater is run's auto-updater, or nil when it is off (#8588).
+func newUpdater(cfg config) *updaterRun {
+	if cfg.NoUpdate {
+		slog.Info("fleetd: auto-update is off (--no-update)")
+		return nil
+	}
+	exe, err := os.Executable()
+	if err == nil {
+		// The real file, read before any swap: after one, /proc/self/exe names the .old.
+		exe, err = filepath.EvalSymlinks(exe)
+	}
+	if err != nil {
+		slog.Warn("fleetd: auto-update is off: cannot find this binary", "err", err)
+		return nil
+	}
+	up, err := update.New(update.Config{Current: version, Exe: exe, GOOS: runtime.GOOS, GOARCH: runtime.GOARCH})
+	if err != nil {
+		slog.Info("fleetd: auto-update is off", "err", err)
+		return nil
+	}
+	return &updaterRun{Updater: up, Exe: exe}
 }

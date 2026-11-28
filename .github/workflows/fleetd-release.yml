@@ -1,0 +1,136 @@
+---
+name: fleetd Release
+
+# Publishes fleetd as signed binaries, the GitHub release `fleetd-<sha7>` (#8588, refs
+# #7993). A running fleetd takes the newest one and replaces itself
+# (tools/go/fleetd/internal/update, README "Auto-update").
+#
+# Each release holds fleetd-linux-amd64, fleetd-linux-arm64, SHA256SUMS and
+# SHA256SUMS.sig: an ed25519 signature of SHA256SUMS (raw 64 bytes, base64) by the repo
+# secret FLEETD_RELEASE_SIGNING_KEY (a PEM PKCS#8 ed25519 private key). fleetd checks it
+# with the public key compiled into internal/update. With no secret, or a secret whose
+# public half is not that key, the job fails and publishes nothing.
+#
+# arm64 is a Go cross-compile (CGO_ENABLED=0), with no QEMU and no image; the "no arm64
+# CI" rule (root CLAUDE.md) is about images. Hosted runners only.
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "tools/go/fleetd/**"
+      - "tools/go/claudecreds/**"
+      - "tools/go/telemetry/**"
+      - "go.work"
+      - "go.work.sum"
+      - "vendor/**"
+      - ".github/workflows/fleetd-release.yml"
+      - "!**/CLAUDE.md"
+      - "!**/AGENTS.md"
+      - "!tools/go/fleetd/README.md"
+      # A vendored module's CLAUDE.md or AGENTS.md is code (select-lanes.sh).
+      - "**/vendor/**"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+# One release at a time, in push order; a run is never cancelled half-published.
+concurrency:
+  group: fleetd-release
+  cancel-in-progress: false
+
+env:
+  GOTOOLCHAIN: go1.26.9+auto
+
+jobs:
+  release:
+    name: release
+    # main only: a branch ahead of the running commit would pass fleetd's "newer" check.
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: go.work
+          cache-dependency-path: tools/go/*/go.sum
+
+      - name: Build
+        run: |
+          set -euo pipefail
+          sha=$(git rev-parse HEAD)
+          mkdir dist
+          for arch in amd64 arm64; do
+            CGO_ENABLED=0 GOOS=linux GOARCH="$arch" GOFLAGS=-mod=vendor \
+              go build -trimpath -ldflags="-s -w -X main.version=${sha}" \
+              -o "dist/fleetd-linux-${arch}" ./tools/go/fleetd
+          done
+          # The stamp is what a running fleetd's smoke test checks.
+          got=$(dist/fleetd-linux-amd64 version)
+          if [ "$got" != "$sha" ]; then
+            echo "::error::fleetd-linux-amd64 version printed '$got', want $sha"
+            exit 1
+          fi
+          (cd dist && sha256sum fleetd-linux-amd64 fleetd-linux-arm64 > SHA256SUMS)
+          cat dist/SHA256SUMS
+
+      - name: Sign
+        env:
+          FLEETD_RELEASE_SIGNING_KEY: ${{ secrets.FLEETD_RELEASE_SIGNING_KEY }}
+        run: |
+          set -euo pipefail
+          if [ -z "${FLEETD_RELEASE_SIGNING_KEY}" ]; then
+            echo "::error::The repo secret FLEETD_RELEASE_SIGNING_KEY is empty; refusing to publish an unsigned release."
+            exit 1
+          fi
+          work=$(mktemp -d)
+          trap 'rm -rf "$work"' EXIT
+          (umask 077 && printf '%s\n' "$FLEETD_RELEASE_SIGNING_KEY" > "$work/key.pem")
+          # The key's public half must be the one fleetd trusts.
+          want=$(sed -n 's/^const publicKey = "\(.*\)"$/\1/p' tools/go/fleetd/internal/update/update.go)
+          got=$(openssl pkey -in "$work/key.pem" -pubout -outform DER | tail -c 32 | base64 -w0)
+          if [ -z "$want" ] || [ "$got" != "$want" ]; then
+            echo "::error::FLEETD_RELEASE_SIGNING_KEY's public key ($got) is not internal/update's publicKey ($want)."
+            exit 1
+          fi
+          openssl pkeyutl -sign -inkey "$work/key.pem" -rawin -in dist/SHA256SUMS -out "$work/sig.bin"
+          openssl pkey -in "$work/key.pem" -pubout -out "$work/pub.pem"
+          openssl pkeyutl -verify -pubin -inkey "$work/pub.pem" -rawin -in dist/SHA256SUMS -sigfile "$work/sig.bin"
+          base64 -w0 "$work/sig.bin" > dist/SHA256SUMS.sig
+
+      - name: Publish
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          sha=$(git rev-parse HEAD)
+          tag="fleetd-${sha:0:7}"
+          # Idempotent: a re-run of a published commit does nothing; a draft left by a
+          # failed upload is replaced.
+          if draft=$(gh release view "$tag" -R "$REPO" --json isDraft -q .isDraft 2>/dev/null); then
+            if [ "$draft" = true ]; then
+              gh release delete "$tag" -R "$REPO" --yes --cleanup-tag
+            else
+              echo "Release $tag exists; nothing to do."
+              exit 0
+            fi
+          fi
+          gh release create "$tag" -R "$REPO" --target "$sha" --latest=false \
+            --title "fleetd ${sha:0:7}" \
+            --notes "fleetd built from ${sha}. Signed SHA256SUMS; see tools/go/fleetd/README.md (Auto-update)." \
+            dist/fleetd-linux-amd64 dist/fleetd-linux-arm64 dist/SHA256SUMS dist/SHA256SUMS.sig
+          {
+            echo "### Published \`${tag}\`"
+            echo
+            echo '```'
+            cat dist/SHA256SUMS
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
