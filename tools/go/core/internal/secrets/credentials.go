@@ -1105,24 +1105,34 @@ type recorded struct{ Before, Raw, After string }
 // or disables a fleet login.
 func (s *Store) recordEvent(ctx context.Context, id string, epoch int64, kind string, reason *string,
 	until, replacing *time.Time, agent bool) (*recorded, error) {
-	sql := "WITH b AS (" + before(agent) + ") " + record[kind] +
-		" FROM b WHERE c.id = b.id RETURNING b.status AS before, b.raw AS raw, c.status AS after"
 	var found *recorded
 	err := pgx.BeginFunc(ctx, s.Pool, func(tx pgx.Tx) error {
-		var r recorded
-		err := tx.QueryRow(ctx, sql, pgx.NamedArgs{
-			"id": id, "epoch": epoch, "reason": reason, "until": until, "replacing": replacing,
-		}).Scan(&r.Before, &r.Raw, &r.After)
-		if errors.Is(err, pgx.ErrNoRows) {
-			if agent {
-				return refuseIfFleets(ctx, tx, id)
-			}
-			return nil
-		}
-		found = &r
+		var err error
+		found, err = recordIn(ctx, tx, id, epoch, kind, reason, until, replacing, agent)
 		return err
 	})
 	return found, err
+}
+
+// recordIn is recordEvent in the caller's transaction.
+func recordIn(ctx context.Context, tx pgx.Tx, id string, epoch int64, kind string, reason *string,
+	until, replacing *time.Time, agent bool) (*recorded, error) {
+	sql := "WITH b AS (" + before(agent) + ") " + record[kind] +
+		" FROM b WHERE c.id = b.id RETURNING b.status AS before, b.raw AS raw, c.status AS after"
+	var r recorded
+	err := tx.QueryRow(ctx, sql, pgx.NamedArgs{
+		"id": id, "epoch": epoch, "reason": reason, "until": until, "replacing": replacing,
+	}).Scan(&r.Before, &r.Raw, &r.After)
+	if errors.Is(err, pgx.ErrNoRows) {
+		if agent {
+			return nil, refuseIfFleets(ctx, tx, id)
+		}
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	return &r, nil
 }
 
 // opened is the agent's Credential: the secret in plaintext.

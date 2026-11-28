@@ -32,6 +32,7 @@ import { Label } from '@/components/ui/label'
 import { RadioGroup, RadioGroupItem } from '@/components/ui/radio-group'
 import { Skeleton } from '@/components/ui/skeleton'
 import { Spinner } from '../ui/spinner'
+import { FleetLoginForm } from './FleetLoginForm'
 import { Tip } from './Tip'
 
 const KIND_LABEL: Record<AiStoredCredentialKind, string> = {
@@ -872,6 +873,8 @@ export function AiCredentialSection() {
           </Button>
         </div>
       </form>
+
+      <FleetLoginForm onAdded={reread} />
 
       {notice && (
         <p role="status" className="text-xs text-ok">

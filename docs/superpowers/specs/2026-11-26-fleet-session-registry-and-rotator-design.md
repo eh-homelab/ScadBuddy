@@ -137,7 +137,7 @@ Where the accounts live:
 | Part | Where | What |
 |---|---|---|
 | 1 | `backend/scadbuddy/migrations_agent/`, `tools/go/core/internal/secrets` | The pool learns a subscription-login kind, a scope and a machine lease (§6.1) |
-| 2 | `tools/go/core` (new `internal/fleetrotator`), the API's auth | A `fleet-rotator` caller and its routes (§6.2) |
+| 2 | `tools/go/core` (`internal/secrets/fleet_logins.go`, area `fleet-logins`, #7984), the API's auth | A `fleet-rotator` caller and its routes (§6.2) |
 | 3 | `tools/go/core/internal/fleet`, a migration | The session registry (§6.3) |
 | 4 | `tools/go/claudecreds` (new library module) | Reading transcripts, the reset parser, and the login file writer (§6.4, §6.5) |
 | 5 | `tools/go/fleetd` (new binary module) | The machine service (§6.6) |
@@ -197,12 +197,19 @@ Where the accounts live:
     the lease is held, keyed by `lease_epoch`.
   - `DELETE /leases/{credential}`: release. A lease whose login was installed is released after a
     final write-back; a lease that was never installed (§6.6 step 3) is released without one.
-  - `POST /events`: a rate limit, auth failure or recovery, with its source (transcript, session,
-    entry uuid), deduplicated on the entry uuid.
+  - `POST /events`: a rate limit, a permanent or transient failure, or a recovery (`kind`
+    `rate_limit`, `permanent`, `transient`, `recovery`: `claudecreds`' kinds and one more), with
+    its source (transcript, session, entry uuid), deduplicated on the entry uuid. Only for a
+    login the machine leases.
   - `POST /rotations`, `PUT /rotations/{id}`: a rotation (from, to, reason, time) and its check
     (each session's result, `verified_at`).
+  - Each of these names its `machine_id`, which the caller's token or proof must own.
 - Secrets travel only on these routes, on core's authenticated path, never through the fleet
   chat server.
+- A person adds a fleet login (a `claude_login`, or another kind of scope `fleet` or `both`)
+  with core's `POST /api/v1/fleet/logins`, which only a person signed in themselves may call
+  (Settings, "Add a Claude login for the fleet"); the agent's caller writes no fleet row (#8009).
+  The routes' bodies and answers are in `tools/go/core/README.md`, "Area `fleet-logins`".
 
 ### 6.3 The session registry
 
@@ -331,6 +338,8 @@ Where the accounts live:
   `fleet` token (§6.2) required. Machines do not use the exchange route; only the in-cluster
   `github` mode does, inside the cluster. The ingress change is in
   eh-homelab/clusters, dry-run on the server before merge.
+- Core's `SCADBUDDY_CORE_AREAS` names `fleet` and `fleet-logins` (the leases need core's KEK,
+  `SCADBUDDY_SECRET_KEY_FILE`).
 - Each machine gets a `fleet` token (§6.2), made in Settings → System → Access tokens and
   written to a 0600 file on the machine.
 - `fleetd` is published as a binary for linux/amd64 on a release tag, beside its image (every Go

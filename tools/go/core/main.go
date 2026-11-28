@@ -640,6 +640,17 @@ func newRouter(pool *pgxpool.Pool, next http.Handler, keys *seal.Keys, areas, au
 			// `github`.
 			router.AddForToken(fleet.RotatorCaller, auth.FleetScope, fleet.RegistryWrites(pool)...)
 			router.Add(fleet.VirtualCaller, fleet.VirtualRoutes(pool)...)
+		case secrets.FleetLoginsArea:
+			// The rotator's leases reveal a sealed login, and a person's fleet login is sealed
+			// (#7984): the area needs the KEK. Its machine binding reads area fleet's tables.
+			if keys == nil {
+				return nil, fmt.Errorf("SCADBUDDY_CORE_AREAS names %q, which needs %s", name, seal.Variable)
+			}
+			router.AddForToken(fleet.RotatorCaller, auth.FleetScope, secrets.RotatorRoutes(pool, keys)...)
+			for _, p := range secrets.FleetLoginRoutes(pool, keys) {
+				public.Handle(p.Pattern, gate.Wrap(p.Route, p.Handler))
+				served = true
+			}
 		case blobstore.Area:
 			// A shared area (#7958): any caller whose scopes hold crud.blobs.
 			if keys == nil {

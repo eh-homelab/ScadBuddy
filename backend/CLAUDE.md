@@ -1303,7 +1303,13 @@ only the sleeps move; a budget on the real clock fails on a slow runner (#6252).
   routes, so `auth/check.py` `auth_check` refuses a `fleet` token (403 `out_of_scope`) on every
   route Python serves, in every mode, and `auth/routes.py` `would_refuse` says so for every
   class but `crud.fleet-rotator` (#8179); the shared `tests/fixtures/auth-vectors.json` holds
-  core to the same. #8367 retires the machines' bootstrap proofs.
+  core to the same. #8367 retires the machines' bootstrap proofs. The login rotator's lease,
+  write-back, release, event and rotation routes (#7984) are core's too (area `fleet-logins`,
+  `tools/go/core/README.md`), with the migration `20261128T1445Z_fleet_credential_events_rotations.sql`
+  (`fleet_credential_events`, one row per transcript entry uuid; `fleet_rotations`). Python
+  serves none of them and keeps its `agent_data/credentials.py` `agent=False` path unused; a person
+  adds a fleet login through core's `POST /api/v1/fleet/logins`, which calls Go's own `agent=False`
+  insert.
 - `backend/scadbuddy/filament/` labels and printer places (#6955, plan
   `docs/superpowers/plans/2026-11-22-printer-location-labels.md`). A location has a `number`
   (identity, never reused; its code is `L-<n>`; migration `20261122T0603Z_filament_location_numbers.sql`).
