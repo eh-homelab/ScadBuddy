@@ -658,10 +658,13 @@ func TestUnitStatusWritesItsMove(t *testing.T) {
 func TestAUnitStatusChangeWithNoMoveRefusesANote(t *testing.T) {
 	f, pool := setup(t)
 	nozzle := newItem(t, pool, "nozzle", "0.6 hardened")
-	units := out(receiveUnits(f, t, nozzle, wire.ReceiveUnits{Count: 1, CostMinor: ptr(wire.Decimal("3000"))})).ok(t)
-	one := units[0]
+	units := out(receiveUnits(f, t, nozzle, wire.ReceiveUnits{Count: 2, CostMinor: ptr(wire.Decimal("3000"))})).ok(t)
+	one, spare := units[0], units[1]
+	// A repeat of in_stock moves no stock either (#8465).
+	_, refused := retire(f, t, spare.ID, wire.UnitStatusInput{Status: "in_stock", Note: "Checked"})
+	wantRefused(t, refused, 422, "bad_input")
 	out(retire(f, t, one.ID, wire.UnitStatusInput{Status: "in_service", Note: "Fitted"})).ok(t)
-	_, refused := retire(f, t, one.ID, wire.UnitStatusInput{Status: "retired", Note: "Worn"})
+	_, refused = retire(f, t, one.ID, wire.UnitStatusInput{Status: "retired", Note: "Worn"})
 	wantRefused(t, refused, 422, "bad_input")
 	_, refused = retire(f, t, one.ID, wire.UnitStatusInput{Status: "retired", Entity: ptr("printer:p1")})
 	wantRefused(t, refused, 422, "bad_input")

@@ -417,7 +417,9 @@ async def patch_unit(
         "`sold` a `sell`, `retired` a `retire`, `scrapped` a `scrap`); coming back writes a "
         "`return` of +1; a change between two statuses out of stock moves no stock. "
         "`entity` (`kind:ref`) names what it went into or to. `entity` and `note` go on the "
-        "move, so a change that writes none refuses them (422 `bad_input`). A unit fitted in "
+        "move, so a change that writes none refuses them (422 `bad_input`). That includes a "
+        "repeat of a change the unit already made: to resend one whose answer was lost, send "
+        "the same `Idempotency-Key`, which answers the first change. A unit fitted in "
         "another is 409 `unit_installed`."
     ),
     responses=write_codes(
