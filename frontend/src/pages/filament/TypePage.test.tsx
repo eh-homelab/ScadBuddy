@@ -561,6 +561,9 @@ describe('the 3DFP id and fetch (#6625)', () => {
 })
 
 describe('finding and adding the 3DFP filament (#7025)', () => {
+  // The request listeners each test adds end with it.
+  afterEach(() => server.events.removeAllListeners())
+
   /** Each 3DFP request the page sends: its path, body and Idempotency-Key. */
   function tdfpRequests() {
     const sent: { path: string; body: Record<string, unknown>; key: string | null }[] = []
