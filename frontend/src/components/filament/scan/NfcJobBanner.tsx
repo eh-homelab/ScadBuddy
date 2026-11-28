@@ -20,6 +20,13 @@ const PHASE_TEXT: Record<Phase, string> = {
   tap_again: 'Lift the tag and tap it again to check it.',
 }
 
+/** What Cancel job says for the state the cancel answered: a job that had ended another way is not "cancelled". */
+const CANCEL_TEXT: Partial<Record<NfcJob['state'], string>> = {
+  cancelled: 'Cancelled. The agent was told.',
+  done: 'The job had already ended: the agent has its result.',
+  failed: 'The job had already ended: the agent was told it failed.',
+  expired: 'The job had already expired. Nothing was cancelled.',
+}
 const CHANGED = 'The job changed. Nothing was written.'
 const STOPPED_WAITING = 'The agent stopped waiting.'
 /** The reason a run is stopped with at 0:00. */
@@ -155,7 +162,8 @@ export function NfcJobBanner({ session, onAnnounce }: { session: NfcSession; onA
   const [notice, setNotice] = useState<string | null>(null)
   const [hash, setHash] = useState<{ key: string; value: string } | null>(null)
   const [now, setNow] = useState(() => Date.now())
-  const [cancelling, setCancelling] = useState(false)
+  /** The job whose cancel waits for its answer: only that job's buttons are held. */
+  const [cancelling, setCancelling] = useState<string | null>(null)
   /** The running job's id and the controller that stops its run. */
   const stop = useRef<{ id: string; controller: AbortController } | null>(null)
   const announce = useRef(onAnnounce)
@@ -360,19 +368,23 @@ export function NfcJobBanner({ session, onAnnounce }: { session: NfcSession; onA
     end(target.id, 'Declined. The agent was told.')
   }
 
-  /** R23 from the page: ends a pending job as cancelled; it is never armed, so nothing is read or written. */
+  /**
+   * R23 from the page: ends a pending job as cancelled; it is never armed, so nothing is read or
+   * written. The route answers a job that had already ended unchanged, so the words follow its state.
+   */
   async function cancel(target: NfcJob) {
     setNotice(null)
-    setCancelling(true)
+    setCancelling(target.id)
+    let ended: NfcJob
     try {
-      await cancelNfcJob(target.id)
+      ended = await cancelNfcJob(target.id)
     } catch (cause) {
       say(`ScadBuddy could not cancel the job: ${detailOf(cause)}.`)
       return
     } finally {
-      setCancelling(false)
+      setCancelling((now) => (now === target.id ? null : now))
     }
-    end(target.id, 'Cancelled. The agent was told.')
+    end(target.id, CANCEL_TEXT[ended.state] ?? 'Cancelled. The agent was told.')
   }
 
   if (!job && !notice) return null
@@ -439,18 +451,18 @@ export function NfcJobBanner({ session, onAnnounce }: { session: NfcSession; onA
               })}
             </ul>
           )}
-          {refused && !run && <p className="font-medium text-warn">This job cannot be written from this page: {refused}. Decline it to tell the agent.</p>}
+          {refused && !run && <p className="font-medium text-warn">This job cannot be written from this page: {refused}. Cancel or decline it to tell the agent.</p>}
           {run ? (
             <p className="text-base font-medium">{PHASE_TEXT[run.phase]}</p>
           ) : (
             <div className="grid grid-cols-2 gap-3">
-              <Button type="button" className="h-11" disabled={!ready || refused !== null || cancelling} onClick={() => void arm(job, sha)}>
+              <Button type="button" className="h-11" disabled={!ready || refused !== null || cancelling === job.id} onClick={() => void arm(job, sha)}>
                 Arm
               </Button>
-              <Button type="button" variant="outline" className="h-11" disabled={!ready || cancelling} onClick={() => void decline(job, sha)}>
+              <Button type="button" variant="outline" className="h-11" disabled={!ready || cancelling === job.id} onClick={() => void decline(job, sha)}>
                 Decline
               </Button>
-              <Button type="button" variant="ghost" className="col-span-2" disabled={expired || cancelling} onClick={() => void cancel(job)}>
+              <Button type="button" variant="ghost" className="col-span-2" disabled={expired || cancelling === job.id} onClick={() => void cancel(job)}>
                 Cancel job
               </Button>
             </div>

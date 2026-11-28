@@ -179,6 +179,52 @@ describe('NfcJobBanner (#7273)', () => {
     await waitFor(() => expect(log.lines()).toContain(`POST ${JOBS}/${job.id}/cancel`))
   })
 
+  it.each([
+    ['done', 'The job had already ended: the agent has its result.'],
+    ['failed', 'The job had already ended: the agent was told it failed.'],
+    ['expired', 'The job had already expired. Nothing was cancelled.'],
+  ] as const)('says the job had ended when the cancel answers it %s', async (state, text) => {
+    seedNfcJob({ kind: 'read' })
+    server.use(
+      http.post(`${JOBS}/:id/cancel`, async ({ params }) => {
+        const job = (await (await fetch(`${JOBS}/${String(params.id)}`)).json()) as Record<string, unknown>
+        return HttpResponse.json({ ...job, state })
+      }),
+    )
+    const { user, onAnnounce } = render()
+    await user.click(await screen.findByRole('button', { name: 'Cancel job' }))
+    await waitFor(() => expect(onAnnounce).toHaveBeenLastCalledWith(text))
+    expect(onAnnounce).not.toHaveBeenCalledWith('Cancelled. The agent was told.')
+  })
+
+  it('keeps the next job usable while an earlier cancel waits', async () => {
+    const first = seedNfcJob({ kind: 'read' })
+    seedNfcJob({ kind: 'read' })
+    let answer: () => void = () => {}
+    const answered = new Promise<void>((resolve) => (answer = resolve))
+    server.use(
+      http.post(`${JOBS}/:id/cancel`, async ({ params }) => {
+        if (String(params.id) !== first.id) return undefined
+        // The job ends at once, so the next poll shows the next one; the answer comes later.
+        first.state = 'cancelled'
+        await answered
+        return HttpResponse.json(first)
+      }),
+    )
+    const { user } = render()
+    await user.click(await screen.findByRole('button', { name: 'Cancel job' }))
+    expect(screen.getByRole('button', { name: 'Cancel job' })).toBeDisabled()
+    // The 2 s poll drops the first job; the second one's buttons are not held by the first cancel.
+    await waitFor(() => expect(screen.getByRole('button', { name: 'Cancel job' })).toBeEnabled(), { timeout: 4000 })
+    answer()
+  })
+
+  it('names Cancel job as a way out of a job this page cannot write', async () => {
+    seedNfcJob({ kind: 'write', records: [{ record_type: 'smart-poster', data_hex: 'd3010078' }] })
+    render()
+    expect(await screen.findByText(/This job cannot be written from this page: .*\. Cancel or decline it to tell the agent\./)).toBeInTheDocument()
+  })
+
   it('says why when ScadBuddy refuses the cancel, and keeps the job', async () => {
     seedNfcJob({ kind: 'read' })
     server.use(http.post(`${JOBS}/:id/cancel`, () => HttpResponse.json({ detail: 'boom' }, { status: 500 })))
