@@ -336,9 +336,11 @@ class S3ContentBackend:
         try:
             if size <= self.multipart_threshold:
                 stream = data
+                # Where the first try starts; each later try starts there again.
+                start = stream.tell()
 
                 async def put_file() -> None:
-                    stream.seek(0)
+                    stream.seek(start)
                     # The file itself: botocore and aiohttp read it a chunk at a time.
                     with _request("PutObject", kind, size=size):
                         await client.put_object(
