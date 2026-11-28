@@ -522,8 +522,8 @@ export function LabelsPage() {
       : settingsBase().catch((cause: unknown) => {
           throw new SettingsReadError(cause)
         })
-    // The kinds come as one list.
-    const kinds = wantedKinds.length > 0 ? inventoryApi.kinds(true) : null
+    // The kinds come as one list; a failed read leaves each asked kind unread, as a failed type or item read does.
+    const kinds = wantedKinds.length > 0 ? inventoryApi.kinds(true).catch(() => []) : null
     Promise.all([
       printed ?? Promise.resolve(null),
       base,

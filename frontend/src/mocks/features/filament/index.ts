@@ -2091,7 +2091,7 @@ export function resolveCodeText(text: string): S['Resolved'] | null {
   }
   if (parsed.prefix === 'T') {
     const type = state.types.find((one) => one.number === parsed.number)
-    return type ? { kind: 'spool_type', id: type.id, code: `T-${type.number}`, name: type.colour_name ?? type.code, archived: !!type.archived_at } : null
+    return type ? { kind: 'spool_type', id: type.id, code: `T-${type.number}`, name: [type.code, type.colour_name].filter(Boolean).join(' '), archived: !!type.archived_at } : null
   }
   if (parsed.prefix === 'I') {
     const item = itemByNumber(parsed.number)
@@ -2247,7 +2247,7 @@ export function placeSpoolAtTray(spool: string, printer: string, ams: number, tr
   if (!place) {
     const unit = state.locations.find((one) => one.printer_id === printer && one.ams_id === ams && one.tray_id == null && !one.archived_at)
     place = {
-      number: Math.max(0, ...state.locations.map((one) => one.number)) + 1,
+      number: nextNumber(state.locations),
       printer_root: false,
       parent_id: unit?.id ?? null,
       identifier: null,
@@ -2668,7 +2668,7 @@ export const handlers = [
       const fields = normalised(body.spool)
       const made: SpoolRow[] = []
       for (let n = 0; n < quantity; n += 1) {
-        const row = { ...newSpool(fields), number: Math.max(0, ...state.spools.map((one) => one.number), ...made.map((one) => one.number)) + 1, location_id: place?.id ?? null }
+        const row = { ...newSpool(fields), number: nextNumber([...state.spools, ...made]), location_id: place?.id ?? null }
         const refused = spoolRefusal(row)
         if (refused) return refused
         // #7167 `move_on`: each spool's move into a dry box asks for its occupant, the one before it included.

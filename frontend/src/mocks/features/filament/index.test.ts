@@ -488,6 +488,14 @@ describe('the filament mocks', () => {
     })
   })
 
+  it('resolves a T- code to the type code and colour name, as the server does (#7169)', async () => {
+    const body = { code: 'NEW-PLA-RED', colour_name: 'Red', material_id: M.PLA, brand_id: B.BAMBU, rgba: '#ff0000ff', label_weight_g: 1000 } as SpoolTypeCreate
+    const made = await upsertType(body)
+    expect(await request<{ name: string }>(`/codes/T-${made.number}`)).toMatchObject({ kind: 'spool_type', name: 'NEW-PLA-RED Red' })
+    const bare = await upsertType({ ...body, code: 'NEW-PLA-BARE', colour_name: null })
+    expect(await request<{ name: string }>(`/codes/T-${bare.number}`)).toMatchObject({ name: 'NEW-PLA-BARE' })
+  })
+
   it('adds a priced type with its price book row, and refuses a bad one', async () => {
     const body = { code: 'BL-PLA-BASIC-CYAN', material_id: M.PLA, brand_id: B.BAMBU, rgba: '#0086d680', label_weight_g: 1000, cost_per_kg: '18.5' } as SpoolTypeCreate
     const made = await upsertType(body)
