@@ -149,11 +149,13 @@ export const inventoryTools = [
       'Add a kind (`create: true`, with `name` and `tracking`), or edit one: only the `fields` given change. ' +
       'A new kind may leave out `kind_id`: it is then numbered, id `k<number>` and code `K-<number>`, which the answer ' +
       'holds. A `kind_id` of `k` and digits only (`k12`) is 422: that id is a numbered kind\'s. ' +
-      '`archived: true` archives it (409 `kind_in_use` while it has unarchived items), `false` restores it. The ' +
+      '`archived: true` archives it (409 `kind_in_use` while it has unarchived items or child kinds), `false` restores it ' +
+      '(409 `kind_archived` while its parent is archived). The ' +
       "`attribute_schema` documents and types its items' properties and never refuses a key (422 `bad_property_schema` " +
       'for a keyword outside the subset entity_property_schema_set lists, and the old schema stays); a child kind ' +
       'inherits its parent\'s keys. A parent at or below the kind is 422 `kind_cycle`; a tracking change on a built-in ' +
-      'kind or one with items is 409 `kind_in_use`. Only what the user says. Writes ScadBuddy only.' +
+      'kind or one with items, or a `uom` change on a kind with items, is 409 `kind_in_use`. Only what the user says. ' +
+      'Writes ScadBuddy only.' +
       INVENTORY_UI_PATH_NOTE,
     input: z.object({
       kind_id: kindId.optional().describe('The kind; when it is added, leave it out to number the kind (`k<number>`)'),

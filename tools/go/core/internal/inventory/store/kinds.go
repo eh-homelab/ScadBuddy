@@ -684,7 +684,14 @@ func (k *Kinds) Update(ctx context.Context, tx pgx.Tx, id string, p wire.KindPat
 	if p.Name != nil {
 		kind.Name = *p.Name
 	}
-	if p.UOM != nil {
+	if p.UOM != nil && *p.UOM != old.UOM {
+		has, err := kindsWithItems(ctx, tx, []string{id})
+		if err != nil {
+			return wire.ItemKind{}, err
+		}
+		if has[id] {
+			return wire.ItemKind{}, kindInUse(id + " has items; its unit stays")
+		}
 		kind.UOM = *p.UOM
 	}
 	if p.Saleable != nil {
@@ -893,7 +900,9 @@ func deref(s *string) string {
 	return *s
 }
 
-// Archive archives the kind: kind_in_use while it has unarchived items.
+// Archive archives the kind: kind_in_use while it has unarchived items or unarchived child
+// kinds. The row lock waits for a create, move or restore under the kind, which holds the
+// kind FOR SHARE until it commits (lockParent).
 func (k *Kinds) Archive(ctx context.Context, tx pgx.Tx, id string) (wire.ItemKind, error) {
 	err := tx.QueryRow(ctx, `SELECT id FROM item_kinds WHERE id = $1 FOR UPDATE`, id).Scan(new(string))
 	if errors.Is(err, pgx.ErrNoRows) {
@@ -902,13 +911,17 @@ func (k *Kinds) Archive(ctx context.Context, tx pgx.Tx, id string) (wire.ItemKin
 	if err != nil {
 		return wire.ItemKind{}, err
 	}
-	var live bool
-	if err := tx.QueryRow(ctx, `SELECT EXISTS (SELECT 1 FROM items WHERE kind_id = $1 AND archived_at IS NULL)`, id).
-		Scan(&live); err != nil {
+	var live, children bool
+	if err := tx.QueryRow(ctx, `SELECT EXISTS (SELECT 1 FROM items WHERE kind_id = $1 AND archived_at IS NULL),
+		EXISTS (SELECT 1 FROM item_kinds WHERE parent_id = $1 AND archived_at IS NULL)`, id).
+		Scan(&live, &children); err != nil {
 		return wire.ItemKind{}, err
 	}
 	if live {
 		return wire.ItemKind{}, kindInUse(id + " has items; archive them first")
+	}
+	if children {
+		return wire.ItemKind{}, kindInUse(id + " has child kinds; archive them first")
 	}
 	if _, err := tx.Exec(ctx, `UPDATE item_kinds SET archived_at = coalesce(archived_at, now()), updated_at = now()
 		WHERE id = $1`, id); err != nil {
@@ -917,14 +930,24 @@ func (k *Kinds) Archive(ctx context.Context, tx pgx.Tx, id string) (wire.ItemKin
 	return k.Get(ctx, tx, id)
 }
 
-// Restore unarchives the kind.
+// Restore unarchives the kind: kind_archived while its parent is archived, as a create or
+// a move under that parent is.
 func (k *Kinds) Restore(ctx context.Context, tx pgx.Tx, id string) (wire.ItemKind, error) {
-	tag, err := tx.Exec(ctx, `UPDATE item_kinds SET archived_at = NULL, updated_at = now() WHERE id = $1`, id)
+	var parent *string
+	err := tx.QueryRow(ctx, `SELECT parent_id FROM item_kinds WHERE id = $1 FOR UPDATE`, id).Scan(&parent)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return wire.ItemKind{}, notFound(id)
+	}
 	if err != nil {
 		return wire.ItemKind{}, err
 	}
-	if tag.RowsAffected() == 0 {
-		return wire.ItemKind{}, notFound(id)
+	if parent != nil {
+		if err := lockParent(ctx, tx, *parent); err != nil {
+			return wire.ItemKind{}, err
+		}
+	}
+	if _, err := tx.Exec(ctx, `UPDATE item_kinds SET archived_at = NULL, updated_at = now() WHERE id = $1`, id); err != nil {
+		return wire.ItemKind{}, err
 	}
 	return k.Get(ctx, tx, id)
 }

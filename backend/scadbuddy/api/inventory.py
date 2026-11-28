@@ -202,8 +202,8 @@ async def create_kind(
         "or `special_type` null leaves it open. `steps` replaces the kind's own steps. A "
         "parent at or below the kind is 422 `kind_cycle`; a change that changes the class "
         "of a kind with items is 422 `class_changed`; a class or special type change on a "
-        "built-in kind is 409 `kind_in_use`. A bad schema is 422 `bad_property_schema`, and "
-        "the old schema stays."
+        "built-in kind, or a `uom` change on a kind with items, is 409 `kind_in_use`. A bad "
+        "schema is 422 `bad_property_schema`, and the old schema stays."
     ),
     responses=write_codes(
         (404, "`kind_not_found`"),
@@ -236,7 +236,7 @@ async def patch_kind(
     "/inventory/kinds/{kind_id}/archive",
     response_model=ItemKind,
     summary="Archive an item kind",
-    description="409 `kind_in_use` while the kind has unarchived items.",
+    description="409 `kind_in_use` while the kind has unarchived items or unarchived child kinds.",
     responses=write_codes((404, "`kind_not_found`"), (409, "`kind_in_use`")),
 )
 async def archive_kind(
@@ -256,8 +256,11 @@ async def archive_kind(
     "/inventory/kinds/{kind_id}/restore",
     response_model=ItemKind,
     summary="Restore an archived item kind",
-    description="The kind is listed again and takes new items.",
-    responses=write_codes((404, "`kind_not_found`")),
+    description=(
+        "The kind is listed again and takes new items. 409 `kind_archived` while its parent "
+        "is archived: restore the parent first."
+    ),
+    responses=write_codes((404, "`kind_not_found`"), (409, "`kind_archived` (the parent)")),
 )
 async def restore_kind(
     kind_id: KindId, inventory: InventoryDep, idempotency_key: IdempotencyKey = None
