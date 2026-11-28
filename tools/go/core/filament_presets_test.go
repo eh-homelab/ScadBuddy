@@ -25,6 +25,7 @@ import (
 
 	"github.com/eh-homelab/ScadBuddy/tools/go/core/internal/auth"
 	"github.com/eh-homelab/ScadBuddy/tools/go/core/internal/filamentpresets"
+	"github.com/eh-homelab/ScadBuddy/tools/go/core/internal/libraryrun"
 	"github.com/eh-homelab/ScadBuddy/tools/go/core/internal/seal"
 	"github.com/eh-homelab/ScadBuddy/tools/go/core/internal/testdb"
 )
@@ -219,7 +220,7 @@ type countingStarter struct {
 	runs int
 }
 
-func (s *countingStarter) Run(context.Context, filamentpresets.Write) (json.RawMessage, error) {
+func (s *countingStarter) Run(context.Context, libraryrun.Write) (json.RawMessage, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.runs++
@@ -256,7 +257,7 @@ func TestAReadTokenCannotWrite(t *testing.T) {
 		return res.StatusCode, string(body)
 	}
 	starter := &countingStarter{}
-	enforce, err := newRouter(pool, teapot, keys, filamentpresets.Area, "enforce", nil, nil, nil, nil, withPresetWrites(starter))
+	enforce, err := newRouter(pool, teapot, keys, filamentpresets.Area, "enforce", nil, nil, nil, nil, withLibraryRuns(starter))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -264,7 +265,7 @@ func TestAReadTokenCannotWrite(t *testing.T) {
 		t.Errorf("enforce: %d %s, %d writes", status, body, starter.count())
 	}
 	rec := recordTelemetry(t)
-	observe, err := newRouter(pool, teapot, keys, filamentpresets.Area, "observe", nil, rec.tel.Meters, nil, nil, withPresetWrites(starter))
+	observe, err := newRouter(pool, teapot, keys, filamentpresets.Area, "observe", nil, rec.tel.Meters, nil, nil, withLibraryRuns(starter))
 	if err != nil {
 		t.Fatal(err)
 	}

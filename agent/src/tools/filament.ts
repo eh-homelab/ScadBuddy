@@ -71,6 +71,38 @@ async function presetOk<T>(pending: Promise<{ data?: T; error?: unknown; respons
   return ok(Promise.resolve(result), what)
 }
 
+/** The Go resolve route's problem codes (`tools/go/core/internal/unknowntrays/resolve.go`), #8489. */
+const RESOLVE_CODES = new Set([
+  'tray_changed',
+  'code_unknown',
+  'spool_archived',
+  'no_ams_kind',
+  'spool_missing',
+  'tag_clash',
+  'invalid_input',
+  'resolve_pending',
+  'writes_not_configured',
+])
+
+/**
+ * #8489: the resolve's answer, or a ToolError whose summary names the route's code, so the model can
+ * tell `tray_changed` from `tag_clash`. Only a code of `RESOLVE_CODES` is named; the detail stays untrusted.
+ */
+async function resolveOk<T>(pending: Promise<{ data?: T; error?: unknown; response: Response }>, what: string): Promise<T> {
+  const result = await pending
+  const status = result.response.status
+  const problem = result.error as { code?: unknown; detail?: unknown } | undefined
+  const code = typeof problem?.code === 'string' && RESOLVE_CODES.has(problem.code) ? problem.code : undefined
+  if (status === 404 && typeof problem?.code !== 'string') {
+    throw new ToolError(`${what} failed (HTTP 404): this server does not serve the unknown-spool area yet (core area unknown-trays)`, status)
+  }
+  if (!result.response.ok && code !== undefined) {
+    const extra = code === 'resolve_pending' ? ' It may still finish: read filament_unknown_trays before you send it again.' : ''
+    throw new ToolError(`${what} failed (HTTP ${status}, ${code}).${extra}`, status, typeof problem?.detail === 'string' ? problem.detail : undefined, code)
+  }
+  return ok(Promise.resolve(result), what)
+}
+
 type SpoolCreate = components['schemas']['SpoolCreate-Input']
 type SpoolDraft = components['schemas']['SpoolDraft']
 type SpoolBulkCreate = components['schemas']['SpoolBulkCreate']
@@ -2116,16 +2148,20 @@ const tools: Tool[] = [
     description:
       'Link a spool to an unknown tray (#7143). Give `tray_id` (filament_unknown_trays `id`), exactly one of ' +
       "`spool_id` and `code` (a label code such as `S-12`), `net_weight_g` (the spool's weight without its core, " +
-      "more than 0) and `seen_at` (the row's `seen_at`, as listed, never changed). It answers `{id, number, code, " +
-      'location_id}`. 409 `tray_changed`: the tray changed after the list; read the list again. 404 `code_unknown`: ' +
-      'no spool has that code. 409 `spool_archived`. 409 `no_ams_kind`. 404 `spool_missing`: the spool was archived ' +
-      'or deleted while it linked. 409 `tag_clash`: the tag on the tray is on another spool. Use only what the user says: never pick a ' +
-      'candidate yourself. Writes ScadBuddy only.',
+      "more than 0 and at most 100000) and `seen_at` (the row's `seen_at`, as listed, never changed). It answers " +
+      '`{id, number, code, location_id}`. 409 `tray_changed`: the tray changed after the list; read the list again. ' +
+      '404 `code_unknown`: no spool has that code. 409 `spool_archived`. 409 `no_ams_kind`: no location kind is ' +
+      'marked AMS. 404 `spool_missing`: the spool was archived or deleted while it linked. 409 `tag_clash`: the tag ' +
+      'on the tray is on another spool. 422 `invalid_input`: the body is not valid. 503 `resolve_pending`: the link ' +
+      'did not answer in time and may still finish; read the list before you send it again. 503 ' +
+      '`writes_not_configured`: this server has no Temporal for the link. A 404 with no `code`: the server does not ' +
+      'serve the unknown-spool area yet. Use only what the user says: never pick a candidate yourself. Writes ' +
+      'ScadBuddy only.',
     input: z.object({
       tray_id: z.string().uuid(),
       spool_id: z.string().uuid().optional(),
       code: z.string().min(1).optional(),
-      net_weight_g: z.number().positive(),
+      net_weight_g: z.number().positive().max(100000),
       seen_at: z.string().min(1),
     }),
     risk: 'write',
@@ -2136,7 +2172,7 @@ const tools: Tool[] = [
       if ((spool_id === undefined) === (code === undefined)) throw new ToolError('give exactly one of spool_id and code')
       const body = spool_id !== undefined ? { spool_id, net_weight_g, seen_at } : { code: code as string, net_weight_g, seen_at }
       return json(
-        await ok(
+        await resolveOk(
           unknownTrayClient(backend).POST('/api/v1/filament/unknown-trays/{tray_id}/resolve', {
             params: { path: { tray_id } },
             body,

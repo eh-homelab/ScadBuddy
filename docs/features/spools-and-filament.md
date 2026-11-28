@@ -188,7 +188,7 @@ The Presets view has three writes (plan R2, R7, R11, R12, P21 to P25):
   answers 200 and `{outcome, preset}`. `outcome` is `sent`, `failed`, `busy`, `in_sync` or
   `pending`.
 
-Go checks the body and then starts core's workflow `FilamentPresetWrite`. Its one step is a
+Go checks the body and then starts core's workflow `LibraryRun`. Its one step is a
 Python activity on the `library` queue (`filament_preset_copy`, `filament_preset_edit` or
 `filament_preset_mirror_again`, `backend/scadbuddy/filament/preset_writes.py`), which the API
 process serves, because only the API writes the rows. Go writes no row. After the commit, the
@@ -299,15 +299,22 @@ A tray that a printer reports as loaded, with no spool in it, is an unknown spoo
   colour (a spool with no colour last), then the spool number; archived spools are left out.
   `POST …/{id}/dismiss` deletes a row (204, or 404 `tray_gone`). A dismiss is only for a slot
   that is no longer there: a spool that is still loaded comes back on the next report.
+  `POST …/{id}/resolve` takes `{spool_id or code, net_weight_g, seen_at}` and answers 200
+  `{id, number, code, location_id}` (below).
 - **Resolve** links a spool to the tray, books the typed net weight as a `weighed` reading and
   deletes the row, in one transaction. It is a Temporal activity, `filament_resolve_unknown_tray`,
   on the `library` queue (G5), so the Python write that links a spool stays the only one. Only a
   spool with no reading, use or load yet takes the net weight as its label weight (D4). The lock
-  order stays in Python (G9). **The Go route that starts the activity is not built yet.** It waits
-  for a Temporal client in Go (`tools/go/core/internal/temporalx`). Until then, the dialog's and
-  the tool's resolve get a 404 and cannot resolve a tray. The existing link paths still clear the
-  row: the print dialog's tray question, the place page's "New spool from this tray" and the
-  agent's `link_tray_spool`.
+  order stays in Python (G9). The Go route checks the body first: exactly one of `spool_id` and
+  `code`, `net_weight_g` above 0 and at most 100000, `seen_at` an RFC 3339 time with a zone, and no
+  other field, else 422 `invalid_input`. Then it starts the activity as a run of core's workflow
+  `LibraryRun` (#8489), one attempt with a 30 s timeout. A refusal keeps its code: 409
+  `tray_changed`, `spool_archived`, `no_ams_kind` and `tag_clash`, 404 `code_unknown` and
+  `spool_missing`. An answer that does not come in time is 503 `resolve_pending`: the link can
+  still finish, so the dialog and the tool read the list again. Without
+  `SCADBUDDY_TEMPORAL_ADDRESS` on core, a resolve is 503 `writes_not_configured`, and the dialog
+  points to the slot's page. The other link paths also clear the row: the print dialog's tray
+  question, the place page's "New spool from this tray" and the agent's `link_tray_spool`.
 - **The block.** A print to a printer that has a row is refused with 422 `unknown_spool_loaded`.
   `prepare_run` and the print check do it (`PrintCheck.unknown_trays` names the trays), and so does
   `lan_print`. On Bambuddy's path, a tray that the inventory read gives an SB spool is not counted
@@ -952,7 +959,7 @@ matches `[a-z][a-z0-9_]{0,63}`. Limits: 200 keys per entity, 2000 characters per
   that report is not caught by ScadBuddy's guard (`backend/scadbuddy/printers/ams_slots.py`
   `guard`), whose refusals are its own 409 codes (`printer_busy`, `ams_busy`, `no_slot`,
   `printer_offline` and the rest above).
-- Unknown spools (#7143): the Go resolve route is not built yet (above). A print started in
+- Unknown spools (#7143): a print started in
   Bambuddy, or on the printer itself, is not blocked: only ScadBuddy's own prints check. A tray
   of the external holder (D2) gets no row, so it never blocks a print. A row whose unit the
   report no longer shows stays until that unit returns; deleting or merging the printer drops it.

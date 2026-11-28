@@ -27,8 +27,8 @@ const (
 	DefaultNamespace = "scadbuddy"
 	// DefaultInventoryQueue is the inventory activities' task queue (design §6.1a).
 	DefaultInventoryQueue = "inventory"
-	// DefaultFilamentPresetsQueue is the task queue of core's FilamentPresetWrite workflow
-	// (#7204, plan ruling P21).
+	// DefaultFilamentPresetsQueue is the task queue of core's LibraryRun workflow
+	// (#7204, plan ruling P21; #8489 U2: the preset writes and the unknown-tray resolve).
 	DefaultFilamentPresetsQueue = "filament-presets"
 	// DefaultLibraryQueue is core/settings.py temporal_task_queue_library: the Python queue
 	// the preset write activities run on.

@@ -2441,12 +2441,12 @@ def _library_activities(
             LanCommands(lambda: client, settings.temporal_task_queue_bambuddy),
             lambda: state.components.get(SLICING).profiles,
         ),
-        # The activity that links an unknown AMS tray to a spool (#7143, G5). The Go route that
-        # starts it is not built yet.
+        # The activity that links an unknown AMS tray to a spool (#7143, G5). The Go route in
+        # tools/go/core/internal/unknowntrays starts it, through core's workflow LibraryRun.
         *_unknown_tray_activities(state),
         # Copy, edit and send again of ScadBuddy's own filament presets (#7204, N7). The Go
         # routes in tools/go/core/internal/filamentpresets start them, through core's
-        # workflow FilamentPresetWrite.
+        # workflow LibraryRun.
         *_preset_write_activities(state),
         *operation_activities(ops.store, state.settings_store, _kinds_on(ops, "library")),
         *trigger_activities,
