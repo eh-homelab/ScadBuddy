@@ -378,7 +378,8 @@ def test_history_lists_a_value_an_older_rule_allowed(
         (21, {"w": 1}, [1, 2]),
         (20, None, {"w": 1}),
     ]
-    # The keyed read (the other branch of the UNION) lists them alike.
+    # The keyed read (`key = 'dims'`, which filters both branches of the UNION) lists
+    # them alike.
     keyed = store.history(ref, "dims", 100)
     assert [(c.event_seq, c.old, c.new) for c in keyed] == [
         (21, {"w": 1}, [1, 2]),
@@ -410,8 +411,14 @@ def test_history_follows_an_entity_a_merge_renamed(
         )
         with conn.transaction():
             repoint_entity(conn, "printer", "b", "a", AGENT)
-    changes = store.history(EntityRef("printer", "a"), None, 100)
+    kept = EntityRef("printer", "a")
+    changes = store.history(kept, None, 100)
     assert [(c.key, c.op, c.new) for c in changes] == [("nozzle_note", "set", "hardened")]
+    # Only the current entity's branch finds these rows (no row has ref "a"), and a key
+    # filters it too (#8461).
+    keyed = store.history(kept, "nozzle_note", 100)
+    assert [(c.key, c.op, c.new) for c in keyed] == [("nozzle_note", "set", "hardened")]
+    assert store.history(kept, "other", 100) == []
 
 
 def test_schema_history_lists_an_owners_changes_newest_first(
