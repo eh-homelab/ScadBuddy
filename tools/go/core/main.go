@@ -306,10 +306,11 @@ var workerRetry = 5 * time.Second
 // answers, the worker waits workerRetry and asks again. Then it builds a worker and starts it.
 // The SDK keeps a worker's first Start result (sync.OnceValue), so a worker whose Start
 // failed is never started again: it is stopped, so it lets go of what Start took, and the
-// next try builds a new one. A worker that starts after ctx ends is stopped at once. The
-// function it gives stops the started worker, and waits for it at most until drain ends. A
-// worker that started before stop is called is always stopped, even when drain has already
-// ended (#8256).
+// next try builds a new one. That Stop sends the SDK's ShutdownWorker call, so each failed
+// try can add up to the client's RPC timeout and the SDK's warning that the call failed. A
+// worker that starts after ctx ends is stopped at once. The function it gives stops the
+// started worker, and waits for it at most until drain ends. A worker already handed on when
+// stop is called is always stopped, even when drain has already ended (#8256, #8571).
 func startWorker(ctx context.Context, name string, health func(context.Context) error, build func() worker.Worker) (stop func(drain context.Context)) {
 	started := make(chan worker.Worker, 1)
 	go func() {
@@ -325,8 +326,8 @@ func startWorker(ctx context.Context, name string, health func(context.Context) 
 						started <- nil
 						return
 					}
-					slog.Info("the " + name + " worker polls Temporal")
 					started <- w
+					slog.Info("the " + name + " worker polls Temporal")
 					return
 				}
 				w.Stop()

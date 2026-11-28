@@ -134,13 +134,20 @@ func TestAFailedStartBuildsANewWorker(t *testing.T) {
 
 func TestAStopAfterTheDrainStillStopsAStartedWorker(t *testing.T) {
 	setWorkerRetry(t, time.Millisecond)
+	logs := &logLines{}
+	before := slog.Default()
+	t.Cleanup(func() { slog.SetDefault(before) })
+	slog.SetDefault(slog.New(logs))
 	w := &fakeWorker{ok: true}
-	stop := startWorker(context.Background(), "test", func(context.Context) error { return nil }, func() worker.Worker { return w })
-	for w.starts.Load() == 0 {
+	// A name no other test uses, so a line of another test's late goroutine cannot answer the wait.
+	stop := startWorker(context.Background(), "drain-test", func(context.Context) error { return nil }, func() worker.Worker { return w })
+	// The worker logs that it polls once it has handed the worker on.
+	for deadline := time.Now().Add(5 * time.Second); !logs.has("the drain-test worker polls Temporal"); {
+		if time.Now().After(deadline) {
+			t.Fatal("the worker was not handed on")
+		}
 		time.Sleep(time.Millisecond)
 	}
-	// The worker is in the channel once Start has returned; give the send its moment.
-	time.Sleep(20 * time.Millisecond)
 	drain, cancel := context.WithCancel(context.Background())
 	cancel()
 	stop(drain)
