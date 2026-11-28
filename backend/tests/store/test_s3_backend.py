@@ -613,7 +613,7 @@ async def test_a_retried_put_starts_where_the_stream_was(
     s3: S3Settings, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """A caller that gives the digest of the bytes from the stream's position gets those
-    bytes on every try, not the file from its start."""
+    bytes on every try, not the file from its start, and the stream is left there."""
     backend = S3ContentBackend(s3, connect_backoff=(0, 0, 0))
     try:
         client = await backend._s3()
@@ -629,6 +629,7 @@ async def test_a_retried_put_starts_where_the_stream_was(
             fh.seek(4)
             digest = (hashlib.sha256(b"body").hexdigest(), 4)
             key = await backend.upload("piece", fh, name="p.zip", scope=SCOPE, digest=digest)
+            assert fh.tell() == 4
         assert len(puts) == 2
         assert b"".join([c async for c in backend.download(key)]) == b"body"
     finally:
