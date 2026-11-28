@@ -224,9 +224,11 @@ Assistant, Tools & plugins, MCP access and Audits are served by the agent. When
 section components' state under one shell that stays mounted across areas, so moving
 between areas keeps every edit. The guard asks only when leaving Settings with edits
 anywhere. Back keeps the #3247 behaviour inside an area.
-Every area stays mounted on purpose (`SettingsShell.tsx` hides the others), so drafts
-survive moving between areas, and every section loads on the first open of Settings; do
-not unmount hidden areas.
+An area mounts the first time it is opened and then stays mounted (`SettingsShell.tsx`
+hides the others), so drafts survive moving between areas; do not unmount an opened area.
+The areas that hold a field the agent's `set_field` reaches (`agentFields.tsx`
+`AGENT_FIELD_HOME`) mount on the first open of Settings. The others wait to be opened:
+mounted at once, Tools & plugins and System made every Settings page slow on prod.
 
 ### 3.5 Small fixes on the way
 
