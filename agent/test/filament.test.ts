@@ -11,7 +11,7 @@ import type {
   FilamentPresetVersion,
 } from '../src/api/filamentPresets.js'
 import { tiersUpTo } from '../src/auth/principal.js'
-import { TOUCHES_NOTHING } from '../src/sessions/touched.js'
+import { EXTRACTORS, TOUCHES_NOTHING } from '../src/sessions/touched.js'
 import { toolActivities, toolCallActivities } from '../src/temporal/toolActivities.js'
 import { toolCallActivity } from '../src/temporal/toolCall.js'
 import { withUiPaths } from '../src/tools/filamentLinks.js'
@@ -2435,6 +2435,100 @@ describe('filament preset read tools (#7204)', () => {
   })
 
   it('the preset tools run in durable mode', () => {
+    const deps = { services: services(), sessions: { ownerOf: async () => undefined } }
+    const activities = toolActivities(ALL_TOOLS, deps)
+    const calls = toolCallActivities(ALL_TOOLS, deps)
+    for (const name of NAMES) {
+      expect(activities[name]).toBeTypeOf('function')
+      expect(calls[toolCallActivity(name)]).toBeTypeOf('function')
+    }
+  })
+})
+
+describe('filament preset write tools (#7204)', () => {
+  const wire = JSON.parse(readFileSync(`${import.meta.dirname}/../../test-fixtures/filament/preset-wire.json`, 'utf8')) as {
+    detail: Record<string, unknown>
+    edited: Record<string, unknown>
+    mirror_again_outcome: Record<string, unknown>
+  }
+  const PRESETS = `${BACKEND}/api/v1/filament/presets`
+  const NAMES = ['filament_preset_copy', 'filament_preset_update', 'filament_preset_mirror']
+
+  it.each(NAMES)('%s is outward tier, gated, with no OpenAPI route', (name) => {
+    expect(tool(name).risk).toBe('outward')
+    expect(tool(name).gated).toBe(true)
+    expect(tool(name).routes).toEqual([])
+  })
+
+  it('describes the mirror and the manual-only rule', () => {
+    for (const name of NAMES) expect(tool(name).description).toContain('filament_preset_mirror')
+    expect(tool('filament_preset_update').description).toContain('`manual`')
+  })
+
+  it('copies a preset under a new name with a key', async () => {
+    let seen: { key: string | null; body: unknown } | undefined
+    server.use(
+      http.post(`${PRESETS}/7/copy`, async ({ request }) => {
+        seen = { key: request.headers.get('Idempotency-Key'), body: await request.json() }
+        return HttpResponse.json(wire.detail, { status: 201 })
+      }),
+    )
+    const out = await tool('filament_preset_copy').execute(tool('filament_preset_copy').parse({ preset_id: 7, name: 'Mine' }), ctx('outward'))
+    expect(out.isError).toBeFalsy()
+    expect(seen?.key).toBeTruthy()
+    expect(seen?.body).toEqual({ name: 'Mine' })
+  })
+
+  it('sends an edit as a PATCH with its key and answers the new version', async () => {
+    let seen: { key: string | null; body: unknown } | undefined
+    server.use(
+      http.patch(`${PRESETS}/7`, async ({ request }) => {
+        seen = { key: request.headers.get('Idempotency-Key'), body: await request.json() }
+        return HttpResponse.json(wire.edited)
+      }),
+    )
+    const input = { preset_id: 7, expected_version: 3, set: { nozzle_temperature: ['215', '220'], note: 'x' }, unset: ['y'] }
+    const out = await tool('filament_preset_update').execute(tool('filament_preset_update').parse(input), ctx('outward'))
+    expect(seen?.key).toBeTruthy()
+    expect(seen?.body).toEqual({ expected_version: 3, set: input.set, unset: ['y'] })
+    expect(firstText(out)).toMatchObject({ changed: true, preset: { id: 7, version: 3 } })
+  })
+
+  it('says a stale edit is version_moved and names the current version', async () => {
+    server.use(
+      http.patch(`${PRESETS}/7`, () =>
+        HttpResponse.json(
+          { type: 'about:blank', title: 'Conflict', status: 409, code: 'version_moved', detail: 'The preset moved.', current_version: 5 },
+          { status: 409, headers: { 'content-type': 'application/problem+json' } },
+        ),
+      ),
+    )
+    const update = tool('filament_preset_update')
+    const stale = update.execute(update.parse({ preset_id: 7, expected_version: 3, name: 'N' }), ctx('outward'))
+    await expect(stale).rejects.toThrow(/version_moved.*current version is 5/)
+  })
+
+  it('takes no set value that is not a string or a string list', () => {
+    const update = tool('filament_preset_update')
+    const bad = [{ a: 1 }, { a: true }, { a: null }, { a: [1] }, { a: { b: 'c' } }]
+    for (const set of bad) expect(() => update.parse({ preset_id: 7, expected_version: 1, set })).toThrow()
+    expect(() => update.parse({ preset_id: 7, expected_version: 1, set: { a: 'x', b: ['y'] } })).not.toThrow()
+  })
+
+  it('sends a preset again', async () => {
+    server.use(http.post(`${PRESETS}/7/mirror`, () => HttpResponse.json(wire.mirror_again_outcome)))
+    const out = await tool('filament_preset_mirror').execute(tool('filament_preset_mirror').parse({ preset_id: 7 }), ctx('outward'))
+    expect(firstText(out)).toMatchObject({ outcome: 'sent' })
+  })
+
+  it('the preset writes touch no recorded kind', () => {
+    for (const name of NAMES) {
+      expect(TOUCHES_NOTHING.has(name)).toBe(true)
+      expect(EXTRACTORS[name]).toBeUndefined()
+    }
+  })
+
+  it('the preset write tools run in durable mode', () => {
     const deps = { services: services(), sessions: { ownerOf: async () => undefined } }
     const activities = toolActivities(ALL_TOOLS, deps)
     const calls = toolCallActivities(ALL_TOOLS, deps)
