@@ -1098,6 +1098,19 @@ A replica makes its build current once, when it first connects, not each time it
 worker restarts, so a replica of an older build that restarts its worker late in a
 rollout does not take the deployment back from a newer one.
 
+**A migration the old build cannot run beside.** With `RollingUpdate`, old replicas keep
+serving after the new build's migrations commit, until they stop. Two K1 changes (#6949)
+had such a window (#8256):
+
+- The property history's trigger (`20261126T0308Z_property_history_events.sql`) refuses a
+  property remove with no `scadbuddy.actor`. An old replica never sets it, so its orphan
+  sweep and property removes fail with "a property remove needs scadbuddy.actor".
+- After the K1 inventory migrations, Go core writes the stock. An old replica still runs
+  phase 2's Python stock writes until it stops.
+
+Both windows end with the roll. A later migration of this kind says so in its PR. If the
+window is not acceptable, roll the API with `Recreate` for that change.
+
 **Rolling back to an image from before #4090** stops the `library` queue. Unversioned
 workers get no tasks while `scadbuddy-library` has a current version, and the old
 image never clears it. Before the old pods start, run
