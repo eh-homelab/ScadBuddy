@@ -40,6 +40,26 @@ public static partial class DeepLink
 		return spool;
 	}
 
+	static string? pendingTask;
+
+	/// <summary>Raised on the main thread with the id of a task whose notification was tapped (#8574).</summary>
+	public static event Action<string>? TaskOpened;
+
+	public static void RaiseTask(string? task)
+	{
+		if (string.IsNullOrEmpty(task)) return;
+		if (TaskOpened is { } opened) MainThread.BeginInvokeOnMainThread(() => opened(task));
+		else pendingTask = task;
+	}
+
+	/// <summary>The tapped task the app was started with, once.</summary>
+	public static string? TakeTask()
+	{
+		var task = pendingTask;
+		pendingTask = null;
+		return task;
+	}
+
 	/// <summary>The link the app was started with, once.</summary>
 	public static Uri? Take()
 	{
