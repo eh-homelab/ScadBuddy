@@ -271,12 +271,38 @@ func TestRunLogsAStuckEventOnce(t *testing.T) {
 		t.Fatal(err)
 	}
 	logs := countLogs(t)
-	run, stop := context.WithTimeout(ctx, 300*time.Millisecond)
-	defer stop()
-	Run(run, pool, Options{Poll: 10 * time.Millisecond})
-	if e := logs.count(slog.LevelError); e != 1 {
-		t.Fatalf("%d errors, want 1", e)
+	run, stop := context.WithTimeout(ctx, 20*time.Second)
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		Run(run, pool, Options{Poll: 10 * time.Millisecond})
+	}()
+	t.Cleanup(func() {
+		stop()
+		<-done
+	})
+	errorsAre := func(want int) {
+		t.Helper()
+		for logs.count(slog.LevelError) < want && run.Err() == nil {
+			time.Sleep(10 * time.Millisecond)
+		}
+		// Many Polls more at the same event log nothing more.
+		time.Sleep(200 * time.Millisecond)
+		if e := logs.count(slog.LevelError); e != want {
+			t.Fatalf("%d errors, want %d", e, want)
+		}
 	}
+	errorsAre(1)
+
+	// Once the subscriber passes it and stops at another bad event, that one is logged too.
+	if _, err := pool.Exec(ctx, `UPDATE events SET payload = payload || '{"key": "c"}' WHERE event_id = 'bad'`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := pool.Exec(ctx, `INSERT INTO events (event_id, kind, at, payload)
+		SELECT 'bad2', kind, at, payload - 'key' || '{"id": "bad2"}' FROM events WHERE event_id = 'bad'`); err != nil {
+		t.Fatal(err)
+	}
+	errorsAre(2)
 }
 
 func stoppedAt(t *testing.T, pool *pgxpool.Pool) *int64 {

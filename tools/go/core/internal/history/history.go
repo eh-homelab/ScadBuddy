@@ -146,8 +146,9 @@ func (n *noSubscriber) Error() string {
 // error is logged, and Apply runs again after Poll. Before the API's migrations have made
 // the event log, it logs that once, at warn, until an Apply ends any other way: a success
 // or another error (#8116, #8463). An event it cannot store is logged once, at error,
-// until the subscriber passes it or stops at another one: the subscriber's stopped_seq and
-// its alert say that it is still stuck, so a log every Poll adds nothing (#8256). Every
+// until an Apply ends any other way: it passes the event, stops at another one, or fails
+// otherwise. The subscriber's stopped_seq and its alert say that it is still stuck, so a
+// log every Poll adds nothing (#8256). Every
 // replica runs it; the cursor's row lock lets one apply at a time.
 func Run(ctx context.Context, pool *pgxpool.Pool, o Options) {
 	o = o.withDefaults()
