@@ -176,20 +176,23 @@ function PatchFeedback({ patch, locked }: { patch: ReturnType<typeof usePatch>; 
  * lot number. Each row shows the key, its value (a list as chips) and what the kind's schema
  * says of the key. A key is edited in place; renaming one is one PATCH that removes the old
  * key and sets the new. The server decides what a key and a value may be (`bad_property_value`).
+ * `hideKeys` (R-K1-33): keys a form on the page holds as its own fields, which the panel does
+ * not list, so it lists only the other keys. They stay known to the add form.
  */
-export const PropertiesPanel = memo(function PropertiesPanel({ entity, title }: { entity: string; title?: string }) {
+export const PropertiesPanel = memo(function PropertiesPanel({ entity, title, hideKeys }: { entity: string; title?: string; hideKeys?: readonly string[] }) {
   // Keyed by its entity: a page that keeps the panel while its id changes (the quick find
   // opens another type from a type's page) gets a fresh one, so an earlier entity's PATCH
   // reply, edit or write lock never lands on the next one.
-  return <EntityProperties key={entity} entity={entity} title={title} />
+  return <EntityProperties key={entity} entity={entity} title={title} hideKeys={hideKeys} />
 })
 
-function EntityProperties({ entity, title = 'Properties' }: { entity: string; title?: string }) {
+function EntityProperties({ entity, title = 'Properties', hideKeys }: { entity: string; title?: string; hideKeys?: readonly string[] }) {
   const list = useAsync(() => entityApi.properties(entity), [entity])
   // #7067 — per entity: an item's schema is its item kind's, which `GET /entity-kinds/item/…` refuses.
   const schema = useAsync(() => entityApi.entityPropertySchema(entity), [entity])
-  const properties = list.data ?? []
-  const keys = new Set(properties.map((property) => property.key))
+  const all = list.data ?? []
+  const keys = new Set(all.map((property) => property.key))
+  const properties = hideKeys?.length ? all.filter((property) => !hideKeys.includes(property.key)) : all
   const docs = keyDocs(schema.data)
   const suggestions = [...new Set([...Object.keys(docs), ...(schema.data?.keys_in_use ?? []).map((row) => row.key)])].sort()
   const keysId = useId()
@@ -564,11 +567,16 @@ function PropertyRow({
   )
 }
 
-/** The text of a change's value: a list joined, a yes or no for a boolean, an empty string for none. */
+/**
+ * The text of a change's value: a list of strings joined, a yes or no for a boolean, an
+ * empty string for none. A value an older rule allowed (an object, a list with other
+ * items) is its JSON, so `[1, "a"]` never reads as `["1", "a"]` does (#8116).
+ */
 function changeText(value: PropertyChange['new']): string {
-  if (value === null) return ''
-  if (Array.isArray(value)) return value.join(', ')
+  if (value === null || value === undefined) return ''
   if (typeof value === 'boolean') return value ? 'Yes' : 'No'
+  if (Array.isArray(value) && value.every((item) => typeof item === 'string')) return value.join(', ')
+  if (typeof value === 'object') return JSON.stringify(value)
   return String(value)
 }
 
@@ -615,8 +623,8 @@ function PropertyHistory({ entity, property }: { entity: string; property: Entit
     <>
     {pending}
     <ul aria-label={`History of ${key}`} className="flex flex-col gap-1 text-xs">
-      {history.data.map((change, at) => (
-        <li key={at} className="flex flex-wrap gap-x-3">
+      {history.data.map((change) => (
+        <li key={change.event_seq} className="flex flex-wrap gap-x-3">
           <time dateTime={change.at} className="text-muted-foreground tabular-nums">
             {new Date(change.at).toLocaleString()}
           </time>

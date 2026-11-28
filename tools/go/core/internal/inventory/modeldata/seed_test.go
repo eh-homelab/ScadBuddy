@@ -40,9 +40,10 @@ func TestSeededKindsMatchTheProof(t *testing.T) {
 		var name, uom string
 		var parent, nature, role, counting, billing, special *string
 		var steps []byte
+		var builtin bool
 		err := pool.QueryRow(ctx, "SELECT name, parent_id, nature, role, counting, billing,"+
-			" special_type, uom, steps FROM item_kinds WHERE id = $1", k.ID).
-			Scan(&name, &parent, &nature, &role, &counting, &billing, &special, &uom, &steps)
+			" special_type, uom, steps, builtin FROM item_kinds WHERE id = $1", k.ID).
+			Scan(&name, &parent, &nature, &role, &counting, &billing, &special, &uom, &steps, &builtin)
 		if err != nil {
 			t.Errorf("kind %s: %v", k.ID, err)
 			continue
@@ -72,6 +73,13 @@ func TestSeededKindsMatchTheProof(t *testing.T) {
 		}
 		if !reflect.DeepEqual(got, want) {
 			t.Errorf("kind %s: got %v, want %v", k.ID, got, want)
+		}
+		chain, err := Chain(m, k.ID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if leaf := chain[len(chain)-1]; leaf.Builtin != builtin {
+			t.Errorf("kind %s: builtin %v, Chain says %v", k.ID, builtin, leaf.Builtin)
 		}
 		var gotSteps any
 		if err := json.Unmarshal(steps, &gotSteps); err != nil {

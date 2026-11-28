@@ -1,7 +1,7 @@
 import { render, screen } from '@testing-library/react'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import type { SpoolDetail } from '../../api/filament'
-import { Label, LocationLabel } from './Label'
+import { Label, CodeLabel } from './Label'
 import { resetMeasuring } from './labelSheet'
 
 const spool = (colour: string) =>
@@ -92,8 +92,8 @@ describe('a label at another size (#7157)', () => {
     expect(size * 0.62 * '#999'.length).toBeLessThanOrEqual(12.01)
   })
 
-  it('draws a place label at the size it is given', () => {
-    render(<LocationLabel code="L-3" name="Shelf" svg="<svg></svg>" size={{ widthMm: 75, heightMm: 55, sheet: null }} />)
+  it('draws a code label at the size it is given', () => {
+    render(<CodeLabel code="L-3" name="Shelf" svg="<svg></svg>" size={{ widthMm: 75, heightMm: 55, sheet: null }} />)
     expect(screen.getByTestId('label').getAttribute('style')).toMatch(/width: 75mm; height: 55mm/)
   })
 })

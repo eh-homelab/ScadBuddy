@@ -289,6 +289,8 @@ def test_every_kind_from_the_spec_is_known() -> None:
         "session.done",
         "session.message",
         "ai_operation.changed",
+        # scadbuddy-core's record of an inventory activity (#6949 K1, R-K1-22).
+        "inventory_operation.changed",
         # A signed-in session revoked (#4975).
         "auth.session_revoked",
         # Not a state change: the Postgres bus's marker for a listener gap.

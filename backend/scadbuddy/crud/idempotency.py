@@ -29,6 +29,7 @@ import json
 from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import timedelta
+from pathlib import Path
 from typing import Annotated, Any, Final, Literal
 
 from fastapi import Header
@@ -48,10 +49,17 @@ LedgerCaller = CrudCaller | Literal["filament"]
 #: How long a reply is kept for a retry (D5).
 RETENTION: Final = timedelta(hours=24)
 #: A caller whose replies are kept longer than ``RETENTION`` (R-K1-2): an inventory
-#: write's reply stays 7 days.
+#: write's reply stays 7 days. Go's operations prune keeps a row a day longer
+#: (`store/operations.go` `requestRetention`); both tests read
+#: `store/testdata/retention.json`, so change the three together.
 RETENTION_BY_CALLER: Final = {"inventory": timedelta(days=7)}
 #: The advisory lock class of a ``(caller, key)`` ("SCRQ").
 LOCK_CLASS: Final = 0x5343_5251
+#: The ledger's read and insert, which Go's inventory store runs too (#7667 §5.1;
+#: `tools/go/core/internal/inventory/store`). The insert answers the stored body, which Go
+#: gives as its first answer, so a retry's answer is byte-equal to it.
+SELECT_SQL: Final = (Path(__file__).parent / "shared" / "crud_requests_select.sql").read_text()
+INSERT_SQL: Final = (Path(__file__).parent / "shared" / "crud_requests_insert.sql").read_text()
 KEY_PROBLEM: Final = "https://scadbuddy.dev/problems/crud/idempotency-key-reused"
 #: A write sent without its ``Idempotency-Key`` (`required_key`): nothing was done.
 KEY_REQUIRED_PROBLEM: Final = "https://scadbuddy.dev/problems/crud/idempotency-key-required"
@@ -110,10 +118,7 @@ def stored(
     any other work, so a retry gets the first answer whatever changed since. None when
     the key is new, or its write has not committed yet; then `idempotent_write` decides.
     422 for a key used with another route or body."""
-    row = conn.execute(
-        "SELECT route, body_sha256, status, body FROM crud_requests WHERE caller = %s AND key = %s",
-        (caller, key),
-    ).fetchone()
+    row = conn.execute(SELECT_SQL, (caller, key)).fetchone()
     if row is None:
         return None
     if row["route"] != route or row["body_sha256"] != _digest(body):
@@ -145,11 +150,7 @@ def record(
     reply: Replay,
 ) -> None:
     """After the write, in its transaction: the reply a retry of ``key`` gets."""
-    conn.execute(
-        "INSERT INTO crud_requests (caller, key, route, body_sha256, status, body)"
-        " VALUES (%s, %s, %s, %s, %s, %s)",
-        (caller, key, route, _digest(body), reply.status, Jsonb(reply.body)),
-    )
+    conn.execute(INSERT_SQL, (caller, key, route, _digest(body), reply.status, Jsonb(reply.body)))
 
 
 def idempotent_write(
@@ -187,7 +188,13 @@ def prune(conn: Connection[DictRow], older_than: timedelta = RETENTION) -> int:
     else ``older_than``; how many there were."""
     cursor = conn.execute(
         "DELETE FROM crud_requests WHERE created_at < now() - COALESCE("
-        "(SELECT (r.value #>> '{}')::interval FROM jsonb_each(%s) r WHERE r.key = caller), %s)",
-        (Jsonb({c: str(d) for c, d in RETENTION_BY_CALLER.items()}), older_than),
+        "(SELECT make_interval(secs => r.value::float8) FROM jsonb_each(%s) r"
+        " WHERE r.key = caller), %s)",
+        # Seconds as a JSON number: no text of a timedelta reaches the interval parser
+        # (#8308, #8451).
+        (
+            Jsonb({c: d.total_seconds() for c, d in RETENTION_BY_CALLER.items()}),
+            older_than,
+        ),
     )
     return cursor.rowcount

@@ -1,13 +1,21 @@
 """`/api/v1/inventory` stock: lots, units and moves (#7067, spec
 2026-11-21-inventory-and-purchasing-design.md §6.4 and §6.6).
 
+Since K1 (#6949, design §6.1a) scadbuddy-core owns the stock: each route here parses its
+request, then reads Go's CRUD route or starts Go's activity on the queue `inventory`
+(`inventory/core_client.py`), and answers Go's JSON, or 202 `OperationAccepted` when the
+write takes longer than 15 s. Go's problems pass through with their codes (R-K1-23): a lots
+call on an item counted in units, or the reverse, is 409 `wrong_counting`; a step the
+item's class has none of (a service's receive) is 409 `step_not_applicable`; a handler K1
+does not build (a durable's use, a service's) is 409 `handler_not_built`; a step that lacks
+a required parameter is 409 `step_incomplete`.
+
 A lot item's stock is in lots, each at its own cost; a use takes FIFO by received time
 unless a lot is named (D2), and a use past the stock on hand goes on the newest lot,
-flagged `needs_review`. A move's cost is a snapshot (D14): a later lot cost change moves no
-past move. A unit item's stock is its units in stock. A kind with tracking `none` is not
-counted: every call here refuses its items (409 `item_not_counted`). "Re-cost past uses"
-(`POST /inventory/lots/{lot_id}/recost`) runs through the orders' lifecycle, as it locks
-the orders and writes their events. Only this process reads or writes the tables (#5295).
+flagged `needs_review`. A move's cost is a snapshot (D14). "Re-cost past uses"
+(`POST /inventory/lots/{lot_id}/recost`) is the `RecostLot` workflow (Task 16,
+`workflows/order_stock.py`): it reads the orders the lot's moves name, runs Go's `Recost`,
+then writes the orders' events.
 
 No ``from __future__ import annotations``: FastAPI reads the dependency annotations at
 runtime (``api/components.py``).
@@ -17,10 +25,19 @@ from typing import Annotated
 from uuid import UUID
 
 from fastapi import APIRouter, Query, status
+from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 
-from scadbuddy.api.inventory import NO_NUL, codes, run
+from scadbuddy.api.inventory import (
+    NO_NUL,
+    IdempotencyKey,
+    codes,
+    forward,
+    run,
+    write_codes,
+)
 from scadbuddy.inventory.component import InventoryDep
+from scadbuddy.inventory.core_client import operation_key, passed_through
 from scadbuddy.inventory.models import (
     AdjustInput,
     CountInput,
@@ -35,16 +52,18 @@ from scadbuddy.inventory.models import (
     UnitStatusInput,
     UseInput,
 )
-from scadbuddy.inventory.problems import lot_not_found, unit_not_found
 from scadbuddy.orders.actor import current_actor
 from scadbuddy.orders.component import OrdersDep
-from scadbuddy.orders.lifecycle import LifecycleError
-from scadbuddy.orders.problems import refused as order_refused
+from scadbuddy.orders.stock_start import WorkflowAccepted, WorkflowRefused, accepted_response
 
 router = APIRouter(tags=["inventory"])
 
-_ITEM_CODES = "`item_not_counted`, `wrong_tracking` or `filament_item_refused`"
+_ITEM_CODES = (
+    "`step_not_applicable`, `wrong_counting`, `handler_not_built`, `step_incomplete` or "
+    "`filament_item_refused`"
+)
 _ENTITY = "`bad_entity_ref` or `unknown_entity_kind` (the `entity`)"
+_UNAVAILABLE = (503, "`inventory_unavailable`: scadbuddy-core did not answer")
 
 
 class LotList(BaseModel):
@@ -59,6 +78,10 @@ class MoveList(BaseModel):
     moves: list[Move]
 
 
+def _item(item_id: UUID) -> dict[str, str]:
+    return {"item_id": str(item_id)}
+
+
 # -- lots --------------------------------------------------------------------------------
 
 
@@ -71,10 +94,10 @@ class MoveList(BaseModel):
         "decimal strings; costs in minor units of the shop currency. `on_hand` is below 0 "
         "after a shortfall."
     ),
-    responses=codes((404, "`item_not_found`"), (409, _ITEM_CODES)),
+    responses=codes((404, "`item_not_found`"), (409, _ITEM_CODES), _UNAVAILABLE),
 )
 async def list_lots(item_id: UUID, inventory: InventoryDep) -> LotList:
-    return LotList(lots=await run(inventory.stock.lots, item_id))
+    return LotList.model_validate(await inventory.core.read(f"/items/{item_id}/lots"))
 
 
 @router.post(
@@ -90,14 +113,27 @@ async def list_lots(item_id: UUID, inventory: InventoryDep) -> LotList:
         "`foreign_unit_cost_minor`. An `each` item takes whole quantities only "
         "(422 `bad_quantity`)."
     ),
-    responses=codes(
+    responses=write_codes(
         (404, "`item_not_found` or `location_not_found`"),
         (409, _ITEM_CODES),
-        (422, "`bad_quantity`"),
+        (422, "`bad_quantity` or `bad_input`"),
     ),
 )
-async def receive_lot(item_id: UUID, body: ReceiveLot, inventory: InventoryDep) -> Lot:
-    return await run(inventory.stock.receive_lot, item_id, body, current_actor())
+async def receive_lot(
+    item_id: UUID,
+    body: ReceiveLot,
+    inventory: InventoryDep,
+    idempotency_key: IdempotencyKey = None,
+) -> JSONResponse:
+    return await forward(
+        inventory,
+        "ReceiveLot",
+        Lot,
+        key=idempotency_key,
+        subject=f"item:{item_id}",
+        params=_item(item_id),
+        body=body,
+    )
 
 
 @router.get(
@@ -105,13 +141,10 @@ async def receive_lot(item_id: UUID, body: ReceiveLot, inventory: InventoryDep) 
     response_model=Lot,
     summary="A lot",
     description="The lot with what is on hand and its cost now.",
-    responses=codes((404, "`lot_not_found`")),
+    responses=codes((404, "`lot_not_found`"), _UNAVAILABLE),
 )
 async def get_lot(lot_id: UUID, inventory: InventoryDep) -> Lot:
-    lot = await run(inventory.stock.lot, lot_id)
-    if lot is None:
-        raise lot_not_found(lot_id)
-    return lot
+    return Lot.model_validate(await inventory.core.read(f"/lots/{lot_id}"))
 
 
 @router.patch(
@@ -124,14 +157,27 @@ async def get_lot(lot_id: UUID, inventory: InventoryDep) -> Lot:
         "snapshot) until the lot's past uses are re-costed. `location_id` null clears the "
         "location."
     ),
-    responses=codes(
+    responses=write_codes(
         (404, "`lot_not_found` or `location_not_found`"),
         (409, _ITEM_CODES),
-        (422, "`bad_quantity` (the cost)"),
+        (422, "`bad_quantity` (the cost) or `bad_input`"),
     ),
 )
-async def patch_lot(lot_id: UUID, body: LotPatch, inventory: InventoryDep) -> Lot:
-    return await run(inventory.stock.update_lot, lot_id, body)
+async def patch_lot(
+    lot_id: UUID,
+    body: LotPatch,
+    inventory: InventoryDep,
+    idempotency_key: IdempotencyKey = None,
+) -> JSONResponse:
+    return await forward(
+        inventory,
+        "LotUpdate",
+        Lot,
+        key=idempotency_key,
+        subject=f"lot:{lot_id}",
+        params={"lot_id": str(lot_id)},
+        body=body,
+    )
 
 
 @router.post(
@@ -142,10 +188,25 @@ async def patch_lot(lot_id: UUID, body: LotPatch, inventory: InventoryDep) -> Lo
         "Sets the lot's `on_hand` to the count, with one `adjust` move of the difference at "
         "the lot's cost; none when the count matches. The note says why."
     ),
-    responses=codes((404, "`lot_not_found`"), (409, _ITEM_CODES), (422, "`bad_quantity`")),
+    responses=write_codes(
+        (404, "`lot_not_found`"), (409, _ITEM_CODES), (422, "`bad_quantity` or `bad_input`")
+    ),
 )
-async def adjust_lot(lot_id: UUID, body: AdjustInput, inventory: InventoryDep) -> Lot:
-    return await run(inventory.stock.adjust_lot, lot_id, body, current_actor())
+async def adjust_lot(
+    lot_id: UUID,
+    body: AdjustInput,
+    inventory: InventoryDep,
+    idempotency_key: IdempotencyKey = None,
+) -> JSONResponse:
+    return await forward(
+        inventory,
+        "LotAdjust",
+        Lot,
+        key=idempotency_key,
+        subject=f"lot:{lot_id}",
+        params={"lot_id": str(lot_id)},
+        body=body,
+    )
 
 
 @router.post(
@@ -159,20 +220,28 @@ async def adjust_lot(lot_id: UUID, body: AdjustInput, inventory: InventoryDep) -
         "flag changed as job cost reads them (`parts_minor`: the known-cost moves; unknown "
         "while a use not given back is of unknown cost), before and after. Each such "
         "order gets one `item.parts_recosted` event with its items' before and after. "
-        "409 `recost_busy` (orders problem) when new order moves kept reaching the lot; "
-        "try again."
+        "It runs as a workflow (#6949 K1): 202 with it when it takes longer than 15 s; the "
+        "same `Idempotency-Key` again attaches to it. 409 `recost_orders_moved` when new "
+        "order moves kept reaching the lot; nothing was written, try again."
     ),
-    responses=codes(
+    responses=write_codes(
         (404, "`lot_not_found`"),
-        (409, _ITEM_CODES + " or `recost_busy`"),
+        (409, _ITEM_CODES + " or `recost_orders_moved`"),
         (422, "`bad_quantity` (a move's amount at the cost)"),
     ),
 )
-async def recost_lot(lot_id: UUID, orders: OrdersDep) -> RecostResult:
+async def recost_lot(
+    lot_id: UUID, orders: OrdersDep, idempotency_key: IdempotencyKey = None
+) -> RecostResult | JSONResponse:
+    by = current_actor()
+    key = operation_key(by, idempotency_key)
     try:
-        return await run(orders.lifecycle.recost_lot, lot_id, current_actor())
-    except LifecycleError as error:
-        raise order_refused(error) from None
+        answer = await run(lambda: orders.lifecycle.recost_lot(lot_id, by, request_key=key))
+    except WorkflowRefused as refused:
+        raise passed_through(int(refused.problem.get("status") or 409), refused.problem) from None
+    if isinstance(answer, WorkflowAccepted):
+        return accepted_response(answer)
+    return answer
 
 
 @router.post(
@@ -184,16 +253,30 @@ async def recost_lot(lot_id: UUID, orders: OrdersDep) -> RecostResult:
         "cost now (a snapshot). A named lot with no stock on hand is 409 `lot_empty`. "
         "What no lot holds goes on the newest lot, below 0, flagged `needs_review`; an item "
         "with no lot opens a zero-cost `adjustment` lot of unknown cost. "
-        "`entity` (`kind:ref`, such as `printer:<id>`) names what it was used on."
+        "`entity` (`kind:ref`, such as `printer:<id>`) names what it was used on. A use of "
+        "a durable or a service is 409 `handler_not_built` until K2 builds its handler."
     ),
-    responses=codes(
+    responses=write_codes(
         (404, "`item_not_found`, `lot_not_found` or `entity_not_found`"),
         (409, _ITEM_CODES + " or `lot_empty` (the named lot has no stock)"),
-        (422, "`bad_quantity`, " + _ENTITY),
+        (422, "`bad_quantity`, `bad_input`, " + _ENTITY),
     ),
 )
-async def use_item(item_id: UUID, body: UseInput, inventory: InventoryDep) -> MoveList:
-    return MoveList(moves=await run(inventory.stock.use, item_id, body, current_actor()))
+async def use_item(
+    item_id: UUID,
+    body: UseInput,
+    inventory: InventoryDep,
+    idempotency_key: IdempotencyKey = None,
+) -> JSONResponse:
+    return await forward(
+        inventory,
+        "Take",
+        MoveList,
+        key=idempotency_key,
+        subject=f"item:{item_id}",
+        params=_item(item_id),
+        body=body,
+    )
 
 
 @router.post(
@@ -206,11 +289,25 @@ async def use_item(item_id: UUID, body: UseInput, inventory: InventoryDep) -> Mo
         "lot at its cost, or to a new `adjustment` lot of unknown cost when there is none. "
         "The moves written; none when the count matches. The note says why."
     ),
-    responses=codes((404, "`item_not_found`"), (409, _ITEM_CODES), (422, "`bad_quantity`")),
+    responses=write_codes(
+        (404, "`item_not_found`"), (409, _ITEM_CODES), (422, "`bad_quantity` or `bad_input`")
+    ),
 )
-async def count_item(item_id: UUID, body: CountInput, inventory: InventoryDep) -> MoveList:
-    moves = await run(inventory.stock.count_item, item_id, body.on_hand, body.note, current_actor())
-    return MoveList(moves=moves)
+async def count_item(
+    item_id: UUID,
+    body: CountInput,
+    inventory: InventoryDep,
+    idempotency_key: IdempotencyKey = None,
+) -> JSONResponse:
+    return await forward(
+        inventory,
+        "Count",
+        MoveList,
+        key=idempotency_key,
+        subject=f"item:{item_id}",
+        params=_item(item_id),
+        body=body,
+    )
 
 
 # -- units -------------------------------------------------------------------------------
@@ -221,17 +318,18 @@ async def count_item(item_id: UUID, body: CountInput, inventory: InventoryDep) -
     response_model=UnitList,
     summary="An item's units",
     description="The item's units, oldest first; only those of `status` when given.",
-    responses=codes((404, "`item_not_found`"), (409, _ITEM_CODES)),
+    responses=codes((404, "`item_not_found`"), (409, _ITEM_CODES), _UNAVAILABLE),
 )
 async def list_units(
     item_id: UUID,
     inventory: InventoryDep,
     status_: Annotated[
         str | None,
-        Query(alias="status", pattern="^(in_stock|in_service|retired|scrapped|sold)$"),
+        Query(alias="status", pattern="^(in_stock|in_service|retired|scrapped|sold|ended)$"),
     ] = None,
 ) -> UnitList:
-    return UnitList(units=await run(inventory.stock.units, item_id, status_))
+    read = await inventory.core.read(f"/items/{item_id}/units", params={"status": status_})
+    return UnitList.model_validate(read)
 
 
 @router.post(
@@ -245,13 +343,27 @@ async def list_units(
         "entry per unit; a blank one is no serial. A serial is unique within the item "
         "(409 `serial_exists`)."
     ),
-    responses=codes(
+    responses=write_codes(
         (404, "`item_not_found` or `location_not_found`"),
         (409, _ITEM_CODES + " or `serial_exists`"),
+        (422, "`bad_input`"),
     ),
 )
-async def receive_units(item_id: UUID, body: ReceiveUnits, inventory: InventoryDep) -> UnitList:
-    return UnitList(units=await run(inventory.stock.receive_units, item_id, body, current_actor()))
+async def receive_units(
+    item_id: UUID,
+    body: ReceiveUnits,
+    inventory: InventoryDep,
+    idempotency_key: IdempotencyKey = None,
+) -> JSONResponse:
+    return await forward(
+        inventory,
+        "ReceiveUnits",
+        UnitList,
+        key=idempotency_key,
+        subject=f"item:{item_id}",
+        params=_item(item_id),
+        body=body,
+    )
 
 
 @router.get(
@@ -259,13 +371,10 @@ async def receive_units(item_id: UUID, body: ReceiveUnits, inventory: InventoryD
     response_model=Unit,
     summary="A unit",
     description="The unit with its status, cost and service dates.",
-    responses=codes((404, "`unit_not_found`")),
+    responses=codes((404, "`unit_not_found`"), _UNAVAILABLE),
 )
 async def get_unit(unit_id: UUID, inventory: InventoryDep) -> Unit:
-    unit = await run(inventory.stock.unit, unit_id)
-    if unit is None:
-        raise unit_not_found(unit_id)
-    return unit
+    return Unit.model_validate(await inventory.core.read(f"/units/{unit_id}"))
 
 
 @router.patch(
@@ -276,13 +385,27 @@ async def get_unit(unit_id: UUID, inventory: InventoryDep) -> Unit:
         "Only what is sent changes: its name, its serial (null or blank clears it; unique "
         "within the item) and its location (null clears it). No stock moves."
     ),
-    responses=codes(
+    responses=write_codes(
         (404, "`unit_not_found` or `location_not_found`"),
         (409, "`serial_exists`"),
+        (422, "`bad_input`"),
     ),
 )
-async def patch_unit(unit_id: UUID, body: UnitPatch, inventory: InventoryDep) -> Unit:
-    return await run(inventory.stock.update_unit, unit_id, body)
+async def patch_unit(
+    unit_id: UUID,
+    body: UnitPatch,
+    inventory: InventoryDep,
+    idempotency_key: IdempotencyKey = None,
+) -> JSONResponse:
+    return await forward(
+        inventory,
+        "UnitUpdate",
+        Unit,
+        key=idempotency_key,
+        subject=f"unit:{unit_id}",
+        params={"unit_id": str(unit_id)},
+        body=body,
+    )
 
 
 @router.post(
@@ -293,17 +416,33 @@ async def patch_unit(unit_id: UUID, body: UnitPatch, inventory: InventoryDep) ->
         "Leaving `in_stock` writes a move of -1 at the unit's cost (`in_service` a `use`, "
         "`sold` a `sell`, `retired` a `retire`, `scrapped` a `scrap`); coming back writes a "
         "`return` of +1; a change between two statuses out of stock moves no stock. "
-        "`entity` (`kind:ref`) names what it went into or to. A unit fitted in another is "
-        "409 `unit_installed`."
+        "`entity` (`kind:ref`) names what it went into or to. `entity` and `note` go on the "
+        "move, so a change that writes none refuses them (422 `bad_input`). That includes a "
+        "repeat of a change the unit already made: to resend one whose answer was lost, send "
+        "the same `Idempotency-Key`, which answers the first change. A unit fitted in "
+        "another is 409 `unit_installed`."
     ),
-    responses=codes(
+    responses=write_codes(
         (404, "`unit_not_found` or `entity_not_found`"),
-        (409, "`unit_installed`"),
-        (422, _ENTITY),
+        (409, "`unit_installed`, `step_not_applicable` or `handler_not_built`"),
+        (422, "`bad_input`, " + _ENTITY),
     ),
 )
-async def set_unit_status(unit_id: UUID, body: UnitStatusInput, inventory: InventoryDep) -> Unit:
-    return await run(inventory.stock.set_unit_status, unit_id, body, current_actor())
+async def set_unit_status(
+    unit_id: UUID,
+    body: UnitStatusInput,
+    inventory: InventoryDep,
+    idempotency_key: IdempotencyKey = None,
+) -> JSONResponse:
+    return await forward(
+        inventory,
+        "UnitStatus",
+        Unit,
+        key=idempotency_key,
+        subject=f"unit:{unit_id}",
+        params={"unit_id": str(unit_id)},
+        body=body,
+    )
 
 
 # -- moves -------------------------------------------------------------------------------
@@ -318,6 +457,7 @@ async def set_unit_status(unit_id: UUID, body: UnitStatusInput, inventory: Inven
         "cost when it was written (`unit_cost_minor`, `amount_minor`), a decimal string in "
         "minor units of the shop currency; `qty` below 0 takes stock."
     ),
+    responses=codes(_UNAVAILABLE),
 )
 async def list_moves(
     inventory: InventoryDep,
@@ -327,13 +467,11 @@ async def list_moves(
     order_item_id: Annotated[str | None, Query(max_length=100, pattern=NO_NUL)] = None,
     limit: Annotated[int, Query(ge=1, le=1000)] = 200,
 ) -> MoveList:
-    def listed() -> list[Move]:
-        return inventory.stock.moves(
-            item_id=item_id,
-            lot_id=lot_id,
-            unit_id=unit_id,
-            order_item_id=order_item_id,
-            limit=limit,
-        )
-
-    return MoveList(moves=await run(listed))
+    params = {
+        "item_id": item_id,
+        "lot_id": lot_id,
+        "unit_id": unit_id,
+        "order_item_id": order_item_id,
+        "limit": limit,
+    }
+    return MoveList.model_validate(await inventory.core.read("/moves", params=params))

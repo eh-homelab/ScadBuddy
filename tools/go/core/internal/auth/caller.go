@@ -33,7 +33,8 @@ const failureLogInterval = time.Minute
 // The bearer prefixes auth/gate.py reads.
 const (
 	servicePrefix = "sbsvc_"
-	tokenPrefix   = "sbpat_"
+	// TokenPrefix starts every personal access token (crud.Router.token reads it too).
+	TokenPrefix = "sbpat_"
 )
 
 var (
@@ -66,10 +67,38 @@ type Caller struct {
 	// SessionID is a person's session row: the hex SHA-256 of its cookie (Python's
 	// id_hash.hex()), what an auth.session_revoked names. It is an id, never logged.
 	SessionID string
-	// TokenID is an access token's id, TokenScope its scope: "read" or "write".
+	// TokenID is an access token's id, TokenScope its scope: "read", "write" or "fleet".
 	TokenID, TokenScope string
 	// Service is the credential's caller and scopes, for KindService.
 	Service *Service
+}
+
+// PersonScopes are the access token scopes that act as their person on the api routes
+// (auth/personal_tokens.py PERSON_SCOPES); "fleet" (#8041) does not.
+var PersonScopes = []string{"read", "write"}
+
+// FleetScope is fleetd's access token scope (#8041): core's rotator routes only.
+const FleetScope = "fleet"
+
+// IsFleetToken says whether c is an access token of a scope that acts as no person: fleetd's.
+func (c Caller) IsFleetToken() bool {
+	return c.Kind == KindToken && !slices.Contains(PersonScopes, c.TokenScope)
+}
+
+// Token is the live access token an Authorization header names, or nil: no sbpat_ bearer,
+// a dead or unknown token, or a lookup that failed (logged as Caller logs it). The CRUD
+// routes that take an access token read it here (#8041).
+func (r *Resolver) Token(ctx context.Context, authorization string) *Caller {
+	scheme, bearer, _ := strings.Cut(authorization, " ")
+	if strings.ToLower(scheme) != "bearer" || !strings.HasPrefix(bearer, TokenPrefix) {
+		return nil
+	}
+	c, err := r.personalToken(ctx, pyStrip(bearer))
+	if err != nil {
+		r.failed(ctx, err)
+		return nil
+	}
+	return c
 }
 
 // Scopes are the caller's scopes: a service credential's, or an access token's one scope.
@@ -99,7 +128,7 @@ func (r *Resolver) Caller(ctx context.Context, h http.Header) Caller {
 			return Caller{Kind: KindAnonymous}
 		}
 		return Caller{Kind: KindService, Service: s}
-	case isBearer && strings.HasPrefix(bearer, tokenPrefix):
+	case isBearer && strings.HasPrefix(bearer, TokenPrefix):
 		c, err := r.personalToken(ctx, pyStrip(bearer))
 		if err != nil || c == nil {
 			r.failed(ctx, err)

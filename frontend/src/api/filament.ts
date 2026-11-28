@@ -217,6 +217,12 @@ export const closingPreview = (id: string, reason: ArchiveReason | null, finalRe
 export const bulkUpdateSpools = (spoolIds: string[], patch: SpoolPatch) =>
   request<SpoolBulkUpdated>(`${BASE}/spools/bulk-update`, json('POST', { spool_ids: spoolIds, patch }))
 
+export type ConsumedResetDone = Schemas['ConsumedResetDone']
+
+/** #7149: a `consumed_reset` event on each spool named (1 to 500); the grams left stay. */
+export const resetSpoolsConsumed = (spoolIds: string[]) =>
+  request<ConsumedResetDone>(`${BASE}/spools/reset-consumed`, json('POST', { spool_ids: spoolIds }))
+
 /** #7151 — archive (`true`) or restore several spools in one request; each spool's outcome is in the answer. */
 export const bulkArchiveSpools = (spoolIds: string[], archived: boolean) =>
   request<SpoolsArchived>(`${BASE}/spools/${archived ? 'bulk-archive' : 'bulk-restore'}`, json('POST', { spool_ids: spoolIds }))
@@ -281,6 +287,17 @@ export const getNfcJob = (id: string) => request<NfcJob>(`${BASE}/nfc-jobs/${seg
  */
 export const claimNfcJob = (id: string, body: NfcJobClaimIn = {}) => request<NfcJob>(`${BASE}/nfc-jobs/${seg(id)}/claim`, json('POST', body))
 
+/** Queues a job for the phone page; the Tags tab's "Read chip" queues a `read` (#8366). */
+export const createNfcJob = (body: Schemas['NfcJobIn']) => request<NfcJob>(`${BASE}/nfc-jobs`, json('POST', body))
+
+/**
+ * Ends a job as cancelled without arming it; the agent's tool sees `cancelled`. The route also
+ * cancels an `armed` job whose write has not begun, so a page that armed it since the last poll
+ * stops; 409 `write_begun` once a write's backup is kept. A job that had already ended is answered
+ * unchanged.
+ */
+export const cancelNfcJob = (id: string) => request<NfcJob>(`${BASE}/nfc-jobs/${seg(id)}/cancel`, { method: 'POST' })
+
 /** Ends an armed job with what the tag gave, or with an `error`. */
 export const postNfcJobResult = (id: string, body: NfcJobResultIn) => request<NfcJob>(`${BASE}/nfc-jobs/${seg(id)}/result`, json('POST', body))
 
@@ -312,6 +329,11 @@ export const getSyncStatus = () => request<SyncStatus>(`${BASE}/sync/status`)
 export const runSync = () => request<Schemas['SyncRun']>(`${BASE}/sync/run`, { method: 'POST' })
 
 export type PresetImport = Schemas['PresetImport']
+
+export type PullReport = Schemas['PullReport']
+
+/** #6261: a one-time pull of Bambuddy's spools into ScadBuddy's own; it waits for the print worker (up to 4.5 min). */
+export const importBambuddySpools = () => request<PullReport>(`${BASE}/bambuddy/import`, { method: 'POST' })
 
 /** #7244 — bring Bambuddy's filament presets into ScadBuddy's own once, whatever the presets direction says. */
 export const importBambuddyPresets = () => request<PresetImport>(`${BASE}/presets/bambuddy-import`, { method: 'POST' })
@@ -349,7 +371,9 @@ export const resetSyncLinks = (confirmInstance: string, expectKept: boolean) =>
     json('POST', { confirm_instance: confirmInstance, expect_kept: expectKept }),
   )
 
-export const unbindTag = (tagId: string) => request<TagBinding>(`${BASE}/tags/${seg(tagId)}/binding`, { method: 'DELETE' })
+/** Takes a tag off its spool; `cleared` when the phone wrote the tag empty first (#8362). */
+export const unbindTag = (tagId: string, reason: 'unbound' | 'cleared' = 'unbound') =>
+  request<TagBinding>(`${BASE}/tags/${seg(tagId)}/binding${reason === 'unbound' ? '' : `?reason=${reason}`}`, { method: 'DELETE' })
 
 /** Replaces the spool's own presets; the answer is its effective set. */
 export const setSpoolPresets = (id: string, rows: PresetInput[]) =>
@@ -467,6 +491,22 @@ export type ProfileFetchStarted = Schemas['ProfileFetchStarted']
 export type ProfileFetchStatus = Schemas['ProfileFetchStatus']
 export type MissingKey = Schemas['MissingKey']
 
+export type TdfpSearchAsk = Schemas['SearchAsk']
+export type TdfpCandidate = Schemas['Candidate']
+export type TdfpSearchAnswer = Schemas['SearchAnswer']
+export type TdfpCreateRequest = Schemas['TdfpCreateRequest']
+export type TdfpCreated = Schemas['TdfpCreated']
+
+/** #7025: searches 3dfilamentprofiles.com on the profile-fetch worker; it reads only and stores nothing. */
+export const searchTdfp = (ask: TdfpSearchAsk) => request<TdfpSearchAnswer>(`${BASE}/tdfp/search`, json('POST', ask))
+
+/**
+ * #7025: adds a filament to 3dfilamentprofiles.com, once per `key` (the same key and body answer the
+ * first outcome). `status` `duplicate` saved nothing; `type_id`, when sent, takes the new id.
+ */
+export const createTdfpFilament = (body: TdfpCreateRequest, key: string) =>
+  request<TdfpCreated>(`${BASE}/tdfp/filaments`, { ...json('POST', body), headers: { 'Idempotency-Key': key } })
+
 /**
  * Starts a fetch of the type's presets from 3dfilamentprofiles.com (its saved `tdfp_id`),
  * or joins the one that runs (`joined`). 422 `no_tdfp_id` or `no_printer_models`; 503 when
@@ -488,6 +528,12 @@ export const listCatalog = <K extends CatalogKind>(kind: K, options: { includeAr
 
 export type ColourSync = Schemas['ColourSync']
 export type ColourSyncSource = ColourSync['source']
+
+export type ColourCode = Schemas['ColourCode']
+
+/** #6907: Bambu Studio's colour table by the `code` digits of a Bambu SKU; 404 for an unknown code, 503 with no table. */
+export const lookupBambuColourCode = (code: string) =>
+  request<ColourCode>(`${BASE}/bambu-colour-codes?code=${encodeURIComponent(code)}`)
 
 /** Each source's newest run, with its progress while it runs. */
 export const listColourSyncs = () => request<ColourSync[]>(`${BASE}/colour-syncs`)

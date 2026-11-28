@@ -90,6 +90,15 @@ class TagRead:
     printer_id: UUID | None = None
     ams_id: int | None = None
     tray_id: int | None = None
+    #: What the ScadBuddy app read of the tag beside its records (#8366); None when the read
+    #: did not tell it.
+    chip: str | None = None
+    max_ndef_bytes: int | None = None
+    writable: bool | None = None
+
+    @property
+    def tells_chip(self) -> bool:
+        return self.chip is not None or self.max_ndef_bytes is not None or self.writable is not None
 
 
 #: The tag a tray UUID names, and the tag a UID names: any of a tag's UIDs, through
@@ -235,6 +244,14 @@ def _mark(conn: Conn, tag_id: UUID, read: TagRead) -> None:
         " last_seen_records = %s WHERE id = %s",
         (read.source, Jsonb([r.model_dump() for r in read.records]), tag_id),
     )
+    if read.tells_chip:
+        # The last known values (#8366): a value the read left out stays as it was.
+        conn.execute(
+            "UPDATE filament_tags SET chip = COALESCE(%s, chip),"
+            " max_ndef_bytes = COALESCE(%s, max_ndef_bytes),"
+            " writable = COALESCE(%s, writable), chip_read_at = now() WHERE id = %s",
+            (read.chip, read.max_ndef_bytes, read.writable, tag_id),
+        )
 
 
 def read_on(
@@ -516,6 +533,52 @@ def _encoded(
     return m.TagRecords(format=encoded.format, records=encoded.records, warnings=encoded.warnings)
 
 
+def ndef_message_bytes(records: Sequence[m.NdefRecord], lang: str = "en") -> int:
+    """The bytes of the NDEF message these records make, as Android counts it against
+    ``Ndef.getMaxSize()`` (NFC Forum NDEF 1.0, section 3.2: a header byte, the type length, a
+    payload length of 1 byte (SR) or 4, an id length when there is an id, then the type, id
+    and payload). The page's ``ndefMessageBytes`` (``frontend/src/lib/webNfc.ts``) counts the
+    same way: a text record's payload is its status byte, its language and its text; a URL is
+    counted with no prefix code saved, so the count is never low; no records is one empty
+    record (3 bytes)."""
+
+    def one(record: m.NdefRecord) -> int:
+        data = len(record.data_hex) // 2
+        kind = record.record_type
+        type_len, payload = 0, data
+        if kind == "empty":
+            payload = 0
+        elif kind == "text":
+            type_len, payload = 1, 1 + len((record.lang or lang).encode()) + data
+        elif kind == "url":
+            type_len, payload = 1, 1 + data
+        elif kind == "smart-poster":
+            type_len = 2
+        elif kind == "mime":
+            type_len = len((record.media_type or "application/octet-stream").encode())
+        elif kind == "absolute-url":
+            type_len, payload = data, 0
+        elif kind.startswith(":"):
+            type_len = len(kind) - 1
+        elif ":" in kind:
+            type_len = len(kind)
+        id_len = len(record.id.encode()) if record.id else 0
+        return 2 + (1 if payload < 256 else 4) + (1 if id_len else 0) + type_len + id_len + payload
+
+    return 3 if not records else sum(one(r) for r in records)
+
+
+def _capacity_of(conn: Conn, uid: str) -> tuple[int | None, str | None]:
+    """The tag's last known ``(max_ndef_bytes, chip)`` by its UID (#8366)."""
+    tag_id = _find(conn, clean_tag_uid(uid), None)
+    if tag_id is None:
+        return None, None
+    row = conn.execute(
+        "SELECT max_ndef_bytes, chip FROM filament_tags WHERE id = %s", (tag_id,)
+    ).fetchone()
+    return (None, None) if row is None else (row["max_ndef_bytes"], row["chip"])
+
+
 def records_for_spool(
     spools: FilamentSpoolStore,
     spool_id: UUID,
@@ -527,7 +590,8 @@ def records_for_spool(
 ) -> m.TagRecords | None:
     """The records that put the spool on the tag, in the tag's own format, else
     ``default``; ``None`` for no such spool, before the backup is checked. The backup must
-    cover this write: it holds the records the tag holds now (R19)."""
+    cover this write: it holds the records the tag holds now (R19). A message larger than
+    the tag's last known capacity gets a warning (#8366); the phone refuses that write."""
     with spools.transaction() as conn:
         spool = FilamentSpoolStore.read(conn, spool_id, defaults=defaults)
         if spool is None:
@@ -535,7 +599,16 @@ def records_for_spool(
         backup = valid_backup(conn, body.backup_id, body.uid, "spool_write")
         if not same_records(body.records, backup.records):
             raise BackupMismatchError()
-    return _encoded(spool, pick_format(body.records, default), empty_weight_g)
+        holds, chip = _capacity_of(conn, body.uid)
+    out = _encoded(spool, pick_format(body.records, default), empty_weight_g)
+    needs = ndef_message_bytes(out.records)
+    if holds is not None and needs > holds:
+        name = f"this {chip}" if chip else "this tag"
+        out.warnings.append(
+            f"The records need {needs} bytes, and {name} holds {holds}: the write would fail."
+            " Use a tag that holds more."
+        )
+    return out
 
 
 def written(
@@ -840,10 +913,24 @@ def finish_job(
             return _set_job(conn, job_id, "failed", {"error": body.error})
         records = [r.model_dump() for r in body.records]
         uid = clean_tag_uid(body.uid)
-        reading = TagRead(source="agent", uid=body.uid, records=tuple(body.records))
+        reading = TagRead(
+            source="agent",
+            uid=body.uid,
+            records=tuple(body.records),
+            chip=body.chip,
+            max_ndef_bytes=body.max_ndef_bytes,
+            writable=body.writable,
+        )
         if job.kind == "read":
             found = read_on(conn, reading, actor=actor, defaults=defaults)
-            result = found.model_dump(mode="json") | {"uid": uid, "records": records}
+            result = found.model_dump(mode="json") | {
+                "uid": uid,
+                "records": records,
+                # What this read told of the chip (#8366), None where it told nothing.
+                "chip": body.chip,
+                "max_ndef_bytes": body.max_ndef_bytes,
+                "writable": body.writable,
+            }
             return _set_job(conn, job_id, "done", result)
         if body.backup_id is None or body.uid is None:
             raise BackupMismatchError()

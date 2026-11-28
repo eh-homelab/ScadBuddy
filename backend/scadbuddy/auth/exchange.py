@@ -139,6 +139,9 @@ REVIEW_TIMEOUT = 5.0
 MIN_BOOTSTRAP_CHARS = 32
 #: The callers with one bootstrap secret per machine, each in ``<caller>.<machine>``.
 PER_MACHINE_CALLERS: frozenset[ServiceCaller] = frozenset({"fleet-rotator"})
+#: The callers the API mints in process and never over the exchange (#8308): a bootstrap
+#: file named for one is a start error, so no file can mint its credential.
+IN_PROCESS_CALLERS: frozenset[ServiceCaller] = frozenset({"inventory"})
 #: A machine's name in such a file.
 MACHINE_NAME = re.compile(r"[a-z0-9](?:[a-z0-9-]{0,62})")
 
@@ -510,6 +513,19 @@ class BootstrapVerifier:
             )
         files: dict[str, ServiceCaller] = {}
         for caller in CALLERS:
+            if caller in IN_PROCESS_CALLERS:
+                found = sorted(directory.glob(f"{caller}.*"))
+                if (directory / caller).exists():
+                    found.insert(0, directory / caller)
+                if found:
+                    # Any such file shows intent, a backup's leftover too; name each one,
+                    # so the operator knows what to remove.
+                    raise BootstrapConfigError(
+                        f"SCADBUDDY_SERVICE_BOOTSTRAP_DIR: the {caller} caller is minted in"
+                        " process by the API and has no bootstrap secret; remove "
+                        + ", ".join(repr(path.name) for path in found)
+                    )
+                continue
             if caller in PER_MACHINE_CALLERS:
                 if (directory / caller).exists():
                     raise BootstrapConfigError(

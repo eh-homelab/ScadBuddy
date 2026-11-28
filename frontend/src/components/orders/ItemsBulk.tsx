@@ -146,6 +146,11 @@ function FulfilDialog({
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const titles = new Map(items.map((item) => [item.id, item.title]))
+  // #6949 K1 Task 16: one Idempotency-Key while the dialog is open, so a press sent again after a
+  // lost answer attaches to the same `FulfilOrderItem` run. A 202 closes the dialog: the run goes
+  // on by itself. It may not have committed yet (it waits while an item's unfulfil still settles),
+  // so the items can still read approved until it does.
+  const [key] = useState(() => crypto.randomUUID())
 
   async function submit() {
     const lines = items.map((item) => ({ item_id: item.id, quantity: parseQuantity(typed[item.id] ?? String(remaining(item))) }))
@@ -154,7 +159,7 @@ function FulfilDialog({
     onWriting(true)
     setError(null)
     try {
-      await api.fulfilOrderItems(orderId, lines.map((line) => ({ item_id: line.item_id, quantity: line.quantity! })))
+      await api.fulfilOrderItems(orderId, lines.map((line) => ({ item_id: line.item_id, quantity: line.quantity! })), key)
       onDone()
     } catch (err) {
       const named = refusalItems(err).map((id) => titles.get(id) ?? id)

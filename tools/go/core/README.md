@@ -15,6 +15,10 @@ unchanged, to the Python API: WebSockets, SSE and large bodies included. On prod
 | `SCADBUDDY_AUTH_MODE` | `off` | Only `enforce` changes a refusal's words |
 | `SCADBUDDY_SECRET_KEY_FILE` | none | The KEK, read as Python reads it. A sealed area (†) does not start without it; a file that is set and cannot be read stops the start |
 | `SCADBUDDY_SECRET_KEY_PREVIOUS_FILE` | none | The KEK before it, during a rotation: what it sealed still opens |
+| `SCADBUDDY_TEMPORAL_ADDRESS` | required with area `inventory` | Temporal's frontend (`host:port`, no TLS, as the Python client). Without it, a start that names `inventory` stops. With only `inventory:read`, it is optional: the operation read then asks Temporal about a stale row |
+| `SCADBUDDY_TEMPORAL_NAMESPACE` | `scadbuddy` | As `core/config.py` `DEFAULT_TEMPORAL_NAMESPACE` |
+| `SCADBUDDY_TEMPORAL_TASK_QUEUE_INVENTORY` | `inventory` | The task queue the inventory worker polls |
+| `SCADBUDDY_ORDERS_CURRENCY` | `USD` | The shop's currency when the setting `orders_currency` has no row (a lot's cost is in it) |
 
 | Area | Routes under `/api/v1/internal/crud/agent` |
 |---|---|
@@ -196,8 +200,35 @@ credential that names a machine passes only while `fleet-rotator.<machine>` is a
 there (one stat per resolve, as `exchange.py` `BootstrapVerifier.has_machine`). When the file is
 gone, `internal/auth` refuses the credential and revokes its row at once. With the variable
 unset, core refuses every such credential, so the core container needs the API's bootstrap
-secret directory mounted and the variable set. `fleetd` sends a
-`fleet` PAT today, which these routes refuse until #8041.
+secret directory mounted and the variable set.
+
+The two `fleet-rotator` `PUT`s also take a person's access token of scope `fleet` (#8041), which
+`fleetd` sends; `POST /virtual-messages` does not, so a machine's token never posts as a virtual
+sender such as `rotator` or `github`: `crud.Router.AddForToken` mounts
+them, and `auth.Resolver.Token`, the shared `sbpat_` lookup, reads it. A handler finds the token
+with `auth.CallerOf`; `crud.ServiceOf` is nil then. One live token is one machine: the first
+`PUT /machines/{id}` records the token's id in `fleet_machines.token_id`, and while that token
+lives, every write to that machine from another token, or from a bootstrap proof, is 403
+`machine-of-another-proof`. Each row names exactly one owner, its `proof_name` or its
+`token_id`. A row moves to a new owner only when its owner is dead, on a `PUT /machines/{id}`
+that locks the row (`FOR UPDATE`) while it decides: a token's machine moves to a new `fleet`
+token of the same person (`personal_access_tokens.principal`) once the old token is revoked or
+expired. A token never takes a machine a bootstrap proof registered (403 `machine-of-a-proof`):
+a proof has no person to match, so an admin deletes the row first (#8450). A token of another
+person never takes a machine (403 `machine-of-another-person`), and a proof never takes a
+token's machine. A row deleted while a `PUT` writes it is inserted again once; a second miss is
+409 `machine-changed`. When the old token's row is gone, its person is unknown and every token is refused
+(403 `machine-of-unknown-owner`); no route deletes a machine row yet (#8450), so an admin deletes it. A
+session `PUT` takes only the row's current owner, so fleetd's machine `PUT` moves the row
+first. A revoked, expired or unknown `sbpat_` token on these routes is 401 `no_credential`, so
+a person stops a machine's writes by revoking its token in Settings, with no restart; a new
+token of that person then takes the machine over.
+A `read` or `write` token there is 403 `out_of_scope`. A `fleet` token is 403 `out_of_scope` on
+every other route, in every `SCADBUDDY_AUTH_MODE`: every other CRUD route, and every public route
+behind `internal/auth`'s gate (`auth.WouldRefuse`, `Gate.Wrap`), as Python's `auth/check.py`
+`auth_check` refuses it on every route Python serves (#8179). A `read` or `write` token on
+another caller's CRUD route stays 401, as Python's guard answers it. The bootstrap proofs keep
+working until #8367 retires them for machines.
 
 Area `blobs` † (`internal/blobstore`, #7958) is a shared area: any service credential whose scopes
 hold `crud.blobs` may call it, under `/api/v1/internal/crud/blobs`; no caller is granted that scope
@@ -263,6 +294,58 @@ channel's members, or as a DM to one agent by its handle. An unknown sender is a
 `unknown-sender`). A `POST /messages` DM to a virtual sender's name is a 422 (reason
 `virtual-sender`) whose detail is the sender's reject message. An inbox entry from a virtual
 sender has its name as `from`.
+
+Areas `inventory` and `inventory:read` (`internal/inventory`, #6949 K1) are caller `inventory`'s
+(scope `crud.inventory`, minted in process by the API), under `/api/v1/internal/crud/inventory`.
+Both have the same routes, all reads: `GET /operations/one?id=` (the id is a query value, since a
+key holds `:`), `/kinds` (`?archived=`), `/kinds/{kind_id}`, `/kinds/{kind_id}/schema`, `/items`
+(`?kind=&descendants=&q=&low=&archived=&compatible=&limit=`), `/items/{item_id}`, `…/lots`,
+`…/units` (`?status=`), `…/estimate?qty=`, `/lots/{lot_id}`, `/units/{unit_id}`, `/moves`
+(`?item_id=&lot_id=&unit_id=&order_item_id=&limit=`). Each answers the public route's JSON. There
+is no write route. Area `inventory` also runs the inventory worker.
+
+### The inventory worker
+
+With area `inventory`, core runs a Temporal worker on the task queue
+`SCADBUDDY_TEMPORAL_TASK_QUEUE_INVENTORY` beside its HTTP servers, and stops it with them
+(`internal/inventory/activities`). Its client is lazy: Temporal out of reach does not stop core.
+The worker asks Temporal's `CheckHealth` every 5 s until it answers, then builds a worker and
+starts it. The SDK keeps a worker's first `Start` result, so after a failed start the next try
+builds a new worker. At shutdown core stops the worker within the drain's 20 s. Each write of the inventory is one activity,
+registered by its name: `inventory.KindCreate`, `…KindUpdate`, `…KindArchive`, `…KindRestore`,
+`…ItemCreate`, `…ItemUpdate`, `…ItemArchive`, `…ItemRestore`, `…ReceiveLot`, `…ReceiveUnits`,
+`…LotUpdate` (cost, place, note), `…LotAdjust`, `…Take` (a use, and an order's take), `…Count`,
+`…UnitUpdate` (name, serial, place), `…UnitStatus`, `…GiveBack`, `…Recost`, `…Repoint`.
+
+- The input is `{key, actor, params, body}`: the idempotency key, the Actor object, the public
+  route's path parameters, and its public body. The code reads `key`, never the activity id.
+  A public write's activity id is `inventory.<Name>:<key>` (`store.ActivityID`, Python's
+  `core_client.activity_id`; both test `internal/inventory/store/testdata/activity_ids.json`),
+  so a key reused on another write runs as another activity, which the ledger refuses.
+- The answer is `{status, body}`: the public route's status and JSON, or its problem. A refusal is
+  an answer, so Temporal does not retry it. Only an infrastructure error (the database out of
+  reach) fails the activity, and Temporal retries it. A bad actor fails it, not retried.
+- Each activity is one `store.Write` under the caller `inventory` with `key`: an activity that runs
+  twice writes once, and the same key with another input is 422 `idempotency-key-reused`.
+- The record (`inventory_operations`, R-K1-22): before each attempt the worker's interceptor
+  writes the row as `running` and sends `inventory_operation.changed` on `scadbuddy_events`
+  (`publish.Notify`, a notice with no log row, as the agent's `ai_operation.changed`). The write
+  ends the row (`succeeded`, or `failed` with the problem) in its own transaction, so the end
+  commits with the stock write or not at all. An attempt that fails keeps the row `running` with
+  `last_error`. A record write that fails is logged and counted
+  (`scadbuddy_inventory_record_failures`); it never fails the activity. Each start first deletes
+  the finished rows (`succeeded` or `failed`) that ended more than 8 days ago
+  (`store.pruneOperations`, as `insertOperation` prunes `ai_operations`). A `running` row stays.
+  The 8 days are longer than the 7 days that `crud_requests` keeps an `inventory` key, so a replay
+  of the key and a read of its operation still find the row while the ledger keeps the answer.
+- `GET /operations/one` reads a `running` row older than 60 s with Temporal (the activity's
+  Describe, or the workflow's): one that Temporal closed without a result answers `failed` with
+  the problem `inventory_activity_failed`. One that completed answers from its answer in
+  `crud_requests` (`succeeded` with the result, or `failed` with the problem), or `failed` when
+  there is none. The read writes nothing.
+- The SDK is `go.temporal.io/sdk` v1.52.0 (Standalone Activities on the client side,
+  [`internal/internal_activity_client.go`](https://github.com/temporalio/sdk-go/blob/v1.52.0/internal/internal_activity_client.go)),
+  with its OpenTelemetry tracing interceptor (`contrib/opentelemetry` v0.9.0) when traces are on.
 
 Each of `browser-origins`, `bridge-tabs`, `pairings`, `mcp-tokens`, `plugin-packages` and
 `plugin-feeds` also has a `:read` form, its GETs only. Area `package-mirrors`
@@ -641,6 +724,32 @@ At a stop, the servers drain and the three signals flush within the 20 s shutdow
 - `POST /sessions`: a scope's size counts each number as it was sent; Python counted its own
   spelling of it (`1e3` as `1000.0`).
 - `POST /workspace-blob-refs` answers 204 with no `Content-Type`.
+- Inventory: a service's `use` is 409 `handler_not_built` (its consume is `consume.service`,
+  which K1 does not build, R-K1-7); phase 2 answered `item_not_counted`. The other new codes
+  replace phase 2's as R-K1-23 says. A problem's extensions are written `code` first, then by
+  name.
+- Inventory: the shop's currency is the `orders_currency` row when it holds a code, else
+  `SCADBUDDY_ORDERS_CURRENCY`, else `USD`. A row that holds JSON `null` reads as no row.
+- Inventory: every kind read carries `number` (from `item_kinds_number_seq`) and `code`,
+  `K-<number>` (#6955, the owner's decision of 2026-11-27). A kind create with no `id`, and a
+  model kind that a `compatible_with` code makes, get the id `k<number>`. A typed id of `k`
+  and digits is 422 `bad_input`, as `KindInput` refuses it.
+- Inventory: `GET /items/{id}/estimate` is new (Python's `estimate_unit_cost` had no route): it
+  answers `{unit_cost_minor, cost_unknown}`, or the refusal a take of `qty` would give.
+- Inventory: an item create or save that is not complete is 422 `missing_required_properties`
+  (R-K1-33). Each `invalid[].reason` is `does not fit '<keyword>'`, and not the message of
+  `jsonschema`'s `best_match`. A sent value that does not fit is 422 `bad_property_value` with
+  the detail `property '<key>': does not fit '<keyword>'`. The keys, the keyword and the status
+  are Python's; `store/testdata/property_values.json` holds the vectors that both languages
+  run. Where a list's string does not fit, the keyword is that string's keyword, as
+  `best_match` names it, not `items`. A patch with more than one bad key names the first key
+  in key order; Python names the first in the order sent.
+- Inventory: `GET /kinds/{kind_id}/schema` also answers `item_required` (R-K1-33): the keys an
+  item of the kind must have a value for. They are the kinds' merged `required` keys, ancestor
+  first, then the special type's `requires_properties`, each once (`store.Kinds.Schema`).
+  `backend/scadbuddy/inventory/kinds.py` `kind_item_schema` gives the same keys;
+  `store/testdata/special_requires.json` holds the `requires_properties` that both languages
+  test.
 - `POST /workspace/file-writes`: a body over 32 MiB is refused (413) by core's body bound in its
   words; Python's body gate refuses it in its own. A store failure's 503 names the store error's
   class (`Class()`), else `Exception`, where Python names the exception's type. A meta that is no

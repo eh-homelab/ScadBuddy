@@ -1784,13 +1784,21 @@ async def _push_now(filament: Filament, store: SettingsStore) -> None:
     summary="Take a tag off its spool",
     description=(
         "Closes the tag's open binding, with a `tag_unbound` ledger event on its spool, "
-        "and answers the closed binding. 404 when the tag is on no spool."
+        "and answers the closed binding. `reason` is the binding's reason: `unbound` (the "
+        "default), or `cleared` when the phone wrote the tag empty first (#8362). 404 when "
+        "the tag is on no spool."
     ),
 )
 async def unbind_tag(
-    filament: FilamentDep, store: SettingsStoreDep, caller: CallerDep, tag_id: UUID
+    filament: FilamentDep,
+    store: SettingsStoreDep,
+    caller: CallerDep,
+    tag_id: UUID,
+    reason: m.UnbindReason = "unbound",
 ) -> m.TagBinding:
-    closed = await asyncio.to_thread(filament.spools.unbind_tag, tag_id, actor=actor(caller))
+    closed = await asyncio.to_thread(
+        filament.spools.unbind_tag, tag_id, actor=actor(caller), reason=reason
+    )
     if closed is None:
         raise ApiError(status.HTTP_404_NOT_FOUND, f"tag {tag_id} is on no spool")
     await _push_now(filament, store)
@@ -2222,7 +2230,11 @@ async def get_tag(filament: FilamentDep, tag_id: UUID) -> m.TagDetail:
         "`records` and `mifare_blocks` (#8244): core loads it and decodes it as an inline "
         "read; 404 `read_not_found` for a read of a device the caller does not own, 422 "
         "`device_read_invalid` for a photo read or for inline fields beside it, and 503 "
-        "`device_read_needs_core` when that area does not run."
+        "`device_read_needs_core` when that area does not run. "
+        "The ScadBuddy app also sends what it read of the chip (#8366): `chip` (NTAG "
+        "GET_VERSION's `NTAG213`, `NTAG215` or `NTAG216`), `max_ndef_bytes` (Android's "
+        "`Ndef.getMaxSize()`) and `writable`; each one sent is kept on the tag with "
+        "`chip_read_at`, and every tag answer carries the last known values."
     ),
 )
 async def read_tag(
@@ -2249,7 +2261,13 @@ async def read_tag(
             code="mifare_needs_core",
         )
     reading = tags.TagRead(
-        source="phone", uid=body.uid, tag_type=body.tag_type, records=tuple(body.records)
+        source="phone",
+        uid=body.uid,
+        tag_type=body.tag_type,
+        records=tuple(body.records),
+        chip=body.chip,
+        max_ndef_bytes=body.max_ndef_bytes,
+        writable=body.writable,
     )
 
     def run() -> m.TagReadResult:
@@ -2282,7 +2300,8 @@ async def read_tag(
     description=(
         "Keeps what a tag holds (its `uid` and NDEF `records`) just before a write, and makes "
         "the tag when ScadBuddy has not seen it. `reason` is `spool_write`, `agent_write` (with "
-        "the NFC job's `job_id`; no other reason takes one) or `restore`. The answer is the "
+        "the NFC job's `job_id`; no other reason takes one), `restore`, `place_write` or "
+        "`clear` (the phone writes the tag empty, #8362). The answer is the "
         "`backup_id` the write names. 422 `no_uid` for a UID that cleans to nothing. 409 "
         "`job_not_armed` for an `agent_write` whose job is not an armed `write` job."
     ),
@@ -2341,7 +2360,8 @@ def _empty_weight_of(filament: Filament) -> Callable[[UUID], int | None]:
         "Takes the tag as just read (`uid` and `records`) and the `backup_id` of the backup "
         "taken of it for this write, and answers the records to write: in the tag's own "
         "format when it holds OpenSpool or OpenTag3D, else in the `filament_tag_format` "
-        "setting. Answers the records only. The browser writes them, and a write that skips "
+        "setting. A message larger than the tag's last known `max_ndef_bytes` (#8366) "
+        "gets a warning. Answers the records only. The browser writes them, and a write that skips "
         "this route has no backup. 404 for no spool. 409 `backup_mismatch` when the backup "
         "is unknown, does not hold the `records` sent, is of another UID, is over 10 minutes "
         "old or is not a `spool_write` "
@@ -2562,7 +2582,9 @@ async def cancel_nfc_job(filament: FilamentDep, job_id: UUID) -> m.NfcJob:
     description=(
         "What the phone page got from the tag. An `error` fails the job and nothing else is "
         "read. A `read` job records the reading as `POST /tags/reads` does (`source` "
-        "`agent`); its `result` is that answer with the `uid` and `records`. A `write` job "
+        "`agent`); its `result` is that answer with the `uid` and `records`, and the "
+        "`chip`, `max_ndef_bytes` and `writable` the page sent (null when it read none, "
+        "#8366). A `write` job "
         "names its `agent_write` backup as `backup_id`, and `records` is the read-back: the "
         "job is `done` when it equals the records sent, else `failed`. 404 for no job, 409 "
         "`job_not_armed` for a job that is not armed, 409 `backup_mismatch` for a backup that "
@@ -3449,6 +3471,8 @@ IMPORT_UNFINISHED = (
     "the print worker did not finish the import in time; it may still be running, so check"
     " the spools before importing again"
 )
+#: Its ``code``, so a client tells it apart from any other 503.
+IMPORT_UNFINISHED_CODE = "import_unfinished"
 
 
 @router.post(
@@ -3478,10 +3502,11 @@ IMPORT_UNFINISHED = (
         "spool (Bambuddy's archive time, what is left, its usage rows), counted in `created` "
         "and in `archived_created`; Bambuddy archiving a linked spool changes nothing. "
         "The print worker reads Bambuddy and ScadBuddy pulls what it read, so the import "
-        "waits for it (at most 4.5 minutes); 503 when the worker did not finish it in time "
-        "(it may still be running: check the spools before importing again); 502 when "
+        "waits for it (at most 4.5 minutes); 503 `import_unfinished` when the worker did not "
+        "finish it in time (it may still be running: check the spools before importing "
+        "again); 502 when "
         "ScadBuddy refused what the worker read (importing again gets the same answer); 409 "
-        "when the Bambuddy URL changed during the import. "
+        "with `code` `url_changed` when the Bambuddy URL changed during the import. "
         "The ledger events name the caller. Answers the counts and ids made, linked, changed, "
         "still needing a type and archived, the BB spool ids it could not pull, the count "
         "(and ids) of BB rows it could not read, and the duplicates it skipped. 409 when no "
@@ -3528,10 +3553,14 @@ async def import_bambuddy(
         # sending bodies, so the person stays kept for them; a later `remember_actor` drops the
         # row once it is `ACTOR_KEPT` old.
         logger.warning("the Bambuddy import did not finish", extra={"error": type(error).__name__})
-        raise ApiError(status.HTTP_503_SERVICE_UNAVAILABLE, IMPORT_UNFINISHED) from error
+        raise ApiError(
+            status.HTTP_503_SERVICE_UNAVAILABLE, IMPORT_UNFINISHED, code=IMPORT_UNFINISHED_CODE
+        ) from error
     if outcome.outcome == "failed" and outcome.error is None:
         # The read raised or timed out (Temporal's timeout does not stop it): kept as above.
-        raise ApiError(status.HTTP_503_SERVICE_UNAVAILABLE, IMPORT_UNFINISHED)
+        raise ApiError(
+            status.HTTP_503_SERVICE_UNAVAILABLE, IMPORT_UNFINISHED, code=IMPORT_UNFINISHED_CODE
+        )
     # The read answered, so no body of this run is still to come (Decision 183).
     try:
         await asyncio.to_thread(forget_actor, filament, start.pull_id)
@@ -3543,7 +3572,9 @@ async def import_bambuddy(
     if outcome.error is not None:
         raise outcome.error.error()
     if outcome.report is None:
-        raise ApiError(status.HTTP_503_SERVICE_UNAVAILABLE, IMPORT_UNFINISHED)
+        raise ApiError(
+            status.HTTP_503_SERVICE_UNAVAILABLE, IMPORT_UNFINISHED, code=IMPORT_UNFINISHED_CODE
+        )
     return outcome.report
 
 

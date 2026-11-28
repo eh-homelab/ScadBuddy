@@ -32,15 +32,16 @@ from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from typing import Annotated, Any, Literal
 from urllib.parse import urlsplit
-from uuid import UUID
+from uuid import UUID, uuid4
 
 from psycopg import errors
 from pydantic import BaseModel, ConfigDict, Field, StringConstraints, field_validator
 
 from scadbuddy.core.events import EventBus, OrderChanged, OrderItemChanged, emit
 from scadbuddy.core.secrets import Kek
+from scadbuddy.inventory.core_client import unavailable
 from scadbuddy.inventory.models import RecostedItem, RecostResult
-from scadbuddy.inventory.stock import BadQuantity, StockStore
+from scadbuddy.inventory.stock import BadQuantity, estimate_unit_cost
 from scadbuddy.orders.models import (
     OPEN_FOR_EDITS,
     PURCHASE_SOURCE_PREFIX,
@@ -105,6 +106,13 @@ from scadbuddy.orders.parts import (
 from scadbuddy.orders.pricing import Plate, Priced, to_minor
 from scadbuddy.orders.reference import ResolvedReference
 from scadbuddy.orders.revisions import RevisionAnswerInput
+from scadbuddy.orders.stock_start import (
+    FULFIL_ORDER_ITEM,
+    RECOST_LOT,
+    StockStarter,
+    WorkflowAccepted,
+    WorkflowRefused,
+)
 from scadbuddy.orders.store import (
     LIFECYCLE_CHARGES,
     MAIL_QUEUED,
@@ -450,14 +458,6 @@ class NewRequestItem(NewItem):
     title: str
 
 
-class _OrdersMoved(Exception):  # noqa: N818
-    """A re-cost found a move of an order it had not locked: start again."""
-
-
-#: How often ``Lifecycle.recost_lot`` starts again before it gives up.
-_RECOST_TRIES = 5
-
-
 @dataclass
 class _Change:
     """What one transition did, told after commit."""
@@ -623,6 +623,67 @@ def _minor(value: Decimal) -> str:
     return format(value.normalize(), "f")
 
 
+#: What a stock workflow does to its items (`FulfilOrderItem`'s ``op``).
+StockOp = Literal["fulfil", "accept", "unfulfil"]
+
+
+@dataclass
+class StockStep:
+    """`Lifecycle.stock_commit`'s answer: the Go calls to make (``key``, the part's
+    ``item_id``, ``qty``, ``order_item_id``) and the attempts it accepted; or the other
+    open workflow to wait for; or ``reread``, the quantities changed since they were read."""
+
+    calls: list[dict[str, Any]] = field(default_factory=list)
+    attempts: list[str] = field(default_factory=list)
+    wait_for: str | None = None
+    reread: bool = False
+    #: The step committed before (a retry after its commit): ``calls`` are what it found.
+    done: bool = False
+
+
+def lifecycle_problem(error: LifecycleError) -> dict[str, Any]:
+    """A refusal as a stock workflow fails with it (R-K1-32): the problem's members, which
+    `lifecycle_error` reads back on the route's side."""
+    return {
+        "code": error.slug,
+        "status": 404 if error.not_found else 422 if error.unprocessable else 409,
+        "detail": str(error),
+        "items": error.items,
+        "shipments": error.shipments,
+        "sources": error.sources,
+        "not_found": error.not_found,
+        "unprocessable": error.unprocessable,
+    }
+
+
+def lifecycle_error(problem: Mapping[str, Any]) -> LifecycleError:
+    return LifecycleError(
+        str(problem.get("code", "")),
+        str(problem.get("detail", "")),
+        items=problem.get("items") or (),
+        shipments=problem.get("shipments") or (),
+        sources=problem.get("sources") or (),
+        not_found=bool(problem.get("not_found")),
+        unprocessable=bool(problem.get("unprocessable")),
+    )
+
+
+def _moved_part(result: Mapping[str, Any], *, taken: bool) -> dict[str, Any]:
+    """One part of a `parts.used` (``taken``) or `parts.returned` event, from Go's answer
+    to its `Take` or `GiveBack`: the count, the moves' amount (a take's as a cost, so
+    above 0) and, for a take, whether some of it is of unknown cost."""
+    moves = (result.get("body") or {}).get("moves") or []
+    total = sum((Decimal(str(m["amount_minor"])) for m in moves), Decimal(0))
+    part: dict[str, Any] = {
+        "item_id": result["item_id"],
+        "count": int(Decimal(str(result["qty"]))),
+        "amount_minor": _minor(-total if taken else total),
+    }
+    if taken:
+        part["cost_unknown"] = any(m.get("cost_unknown") for m in moves)
+    return part
+
+
 #: The most one order item may take of one part: `order_item_parts.used` is an `integer`.
 MAX_USED = 2**31 - 1
 
@@ -657,7 +718,7 @@ class Lifecycle:
         bus: EventBus | None,
         refs: BlobRefs | None = None,
         rules: Callable[[], OrderRules] = lambda: NO_RULES,
-        stock: StockStore | None = None,
+        starter: StockStarter | None = None,
     ):
         self.store = store
         self.bus = bus
@@ -669,11 +730,10 @@ class Lifecycle:
         #: An item's parts and the models' rules (#5543): the items it takes when it is
         #: fulfilled.
         self.parts = PartStore(store)
-        #: The inventory's lots (#7067), which an item's parts are taken from and given
-        #: back to, in the transition's own transaction. Set by ``OrdersComponent``.
-        self.stock = stock or StockStore(
-            store._pool, store._entities, lambda: self.rules().shop_currency
-        )
+        #: What starts the stock workflows (#6949 K1 Task 16): a fulfil, an accept that
+        #: fulfils, an unfulfil and a re-cost move stock through Go's activities in
+        #: `workflows/order_stock.py`. Set by ``OrdersComponent``; None answers 503.
+        self.starter = starter
         #: The payment providers offered (#4957, ``payments/registry.py``): a default
         #: provider not among them is no provider. Set by ``OrdersComponent``.
         self.offered_providers: frozenset[str] = frozenset()
@@ -5050,8 +5110,13 @@ class Lifecycle:
         return item, attempt
 
     def fulfil_items(
-        self, order_id: str, lines: Sequence[FulfilLine], by: Actor
-    ) -> list[Fulfilment]:
+        self,
+        order_id: str,
+        lines: Sequence[FulfilLine],
+        by: Actor,
+        *,
+        request_key: str | None = None,
+    ) -> list[Fulfilment] | WorkflowAccepted:
         """#4955 (order operations spec 2026-11-07 §4.2): each line's item made by hand,
         ``quantity`` of it, in one transaction: an attempt `succeeded`, recorded and
         accepted as `record_fulfilment` and `accept_fulfilment` do one by one. An item is
@@ -5059,46 +5124,36 @@ class Lifecycle:
         writes nothing: an order not accepted or on hold, an item named twice (422
         ``items``), and an item not `approved` or `failed` (``item_not_open`` for a settled
         one, else ``item_not_approved``: a printed item's print attempt is accepted on its
-        own). The attempts, in the lines' order."""
+        own). The attempts, in the lines' order.
+
+        Since #6949 K1 Task 16 it is one `FulfilOrderItem` workflow (`stock_commit`, Go's
+        `Take` of each fulfilled item's parts, `stock_record`), whose id is
+        ``order:<order_id>:fulfil:<request_key>`` (the request's ``Idempotency-Key``, else
+        a new one): the call records new attempts each time, so the item keys would answer
+        a second real batch with the first one's result. The checks run here first, with
+        no lock, so a person's mistake is a 4xx and nothing starts; the workflow's first
+        step runs them again under the lock. `WorkflowAccepted` when it takes longer than
+        the wait."""
         ids = [line.item_id for line in lines]
         if not ids or len(set(ids)) != len(ids):
             raise LifecycleError(
                 "items", "name each item once, and at least one", unprocessable=True
             )
+        workflow_id = f"order:{order_id}:fulfil:{request_key or uuid4()}"
+        wire = [{"item_id": line.item_id, "quantity": line.quantity} for line in lines]
         with self.store.transaction() as conn:
-            order = self._lock(conn, order_id)
-            check_submitted(order)
-            self._producing(order)
-            items = [self._item_of(conn, order, line.item_id) for line in lines]
-            for item in items:
-                if item.status not in FULFILLABLE:
-                    raise LifecycleError(
-                        "item_not_open" if item.status in SETTLED else "item_not_approved",
-                        f"item {item.id} is {item.status}",
-                        items=[item.id],
-                    )
-            self._lock_parts_of(
-                conn,
-                [
-                    item
-                    for item, line in zip(items, lines, strict=True)
-                    if self._made(conn, item) + line.quantity >= item.quantity
-                ],
-            )
-            attempts: list[Fulfilment] = []
-            changed: list[tuple[OrderItem, int | None]] = []
-            for item, line in zip(items, lines, strict=True):
-                if item.status == "failed":
-                    # Ruling 4, as `record_fulfilment`.
-                    item = self.store.update_item(conn, item.id, status="approved")
-                body = FulfilmentInput(quantity=line.quantity, outcome="succeeded")
-                item, attempt = self._insert_attempt(conn, order, item, body, by)
-                item, attempt = self._accept_attempt(conn, order, item, attempt, by)
-                attempts.append(attempt)
-                changed.append((item, attempt.attempt))
-            order = self._rederive(conn, order, by)
-        self._told(_Change(order, changed))
-        return attempts
+            order = self._read_order(conn, order_id)
+            items = [self._item_of(conn, order, item_id) for item_id in ids]
+            if not all(self._settling(item, workflow_id) for item in items):
+                self._checked(conn, order, "fulfil", wire)
+            for line, item in zip(wire, items, strict=True):
+                line["key"] = self._parts_key(conn, order.id, item.id)
+        answer = self._start_stock(
+            workflow_id, {"order_id": order_id, "op": "fulfil", "lines": wire}, by
+        )
+        if isinstance(answer, WorkflowAccepted):
+            return answer
+        return [Fulfilment.model_validate(a) for a in answer]
 
     def _attempt_of(
         self,
@@ -5198,31 +5253,46 @@ class Lifecycle:
 
     def accept_fulfilment(
         self, order_id: str, item_id: str, fulfilment_id: str, by: Actor
-    ) -> Fulfilment:
+    ) -> Fulfilment | WorkflowAccepted:
         """§6.1: the attempt's quantity counts as made; the item is `fulfilled` once its
         accepted attempts reach its quantity. An attempt that printed a revision earlier than
         the accepted quote's printed an earlier design (an item revised after acceptance,
-        #5350): it is refused (`fulfilment_stale`)."""
+        #5350): it is refused (`fulfilment_stale`).
+
+        An accept that fulfils the item moves its parts out of stock, so it is a
+        `FulfilOrderItem` workflow (#6949 K1 Task 16) with the item key
+        ``order_item:<item_id>:parts:<n>`` (`_parts_key`): the same accept sent again while
+        it runs attaches to it, and `WorkflowAccepted` answers one that takes longer than
+        the wait. An accept that does not fulfil the item (fewer made than ordered) moves no
+        stock and commits here; if, under the lock, it would fulfil after all, it refuses
+        ``order_item_changed`` and writes nothing."""
+        line = {"item_id": item_id, "fulfilment_id": fulfilment_id}
         with self.store.transaction() as conn:
-            order, item = self._in_production(conn, order_id, item_id)
-            attempt = self._attempt_of(conn, item, fulfilment_id)
-            if attempt.accepted_at is not None:
+            order = self._read_order(conn, order_id)
+            item = self._item_of(conn, order, item_id)
+            line["key"] = self._parts_key(conn, order.id, item.id)
+            settling = self._settling(item, line["key"])
+            fulfils = settling or self._fulfils(
+                conn, "accept", self._checked(conn, order, "accept", [line])[0]
+            )
+        if fulfils:
+            answer = self._start_stock(
+                line["key"], {"order_id": order_id, "op": "accept", "lines": [line]}, by
+            )
+            if isinstance(answer, WorkflowAccepted):
+                return answer
+            return Fulfilment.model_validate(answer[0])
+        with self.store.transaction() as conn:
+            order = self._lock(conn, order_id)
+            checked = self._checked(conn, order, "accept", [line])[0]
+            if self._fulfils(conn, "accept", checked):
                 raise LifecycleError(
-                    "fulfilment_accepted", f"attempt {attempt.attempt} is already accepted"
+                    "order_item_changed",
+                    f"item {item_id} changed meanwhile: this accept now fulfils it; send it again",
+                    items=[item_id],
                 )
-            if item.status not in FULFILLABLE | {"printed"}:
-                raise LifecycleError("item_not_open", f"item {item_id} is {item.status}")
-            if attempt.outcome == "failed":
-                raise LifecycleError(
-                    "fulfilment_failed", f"attempt {attempt.attempt} failed; nothing was made"
-                )
-            if self._before_priced_design(conn, item, attempt):
-                raise LifecycleError(
-                    "fulfilment_stale",
-                    f"attempt {attempt.attempt} printed an earlier design than the accepted"
-                    " quote's",
-                    items=[item.id],
-                )
+            item, attempt = checked[0], checked[1]
+            assert attempt is not None
             item, attempt = self._accept_attempt(conn, order, item, attempt, by)
             changed: list[tuple[OrderItem, int | None]] = [(item, attempt.attempt)]
             order = self._rederive(conn, order, by)
@@ -5230,15 +5300,22 @@ class Lifecycle:
         return attempt
 
     def _accept_attempt(
-        self, conn: Conn, order: Order, item: OrderItem, attempt: Fulfilment, by: Actor
+        self,
+        conn: Conn,
+        order: Order,
+        item: OrderItem,
+        attempt: Fulfilment,
+        by: Actor,
+        **mark: Any,
     ) -> tuple[OrderItem, Fulfilment]:
         """The attempt accepted, the item `fulfilled` once its accepted attempts reach its
-        quantity (its parts out of stock), and the audit row."""
+        quantity, and the audit row, which carries ``mark`` (a stock workflow's id and the
+        item's stock calls, `stock_commit`). Its parts leave stock in the workflow's next
+        step, never here."""
         attempt = self.store.accept_fulfilment(conn, attempt.id, datetime.now(UTC))
         made = self._made(conn, item)
         if made >= item.quantity:
             item = self.store.update_item(conn, item.id, status="fulfilled")
-            self._use_parts(conn, order, item, by)
         elif item.status == "printed":
             # Some are still to make: the next print is for the rest (§5.4 `copies`).
             item = self.store.update_item(conn, item.id, status="approved")
@@ -5251,71 +5328,48 @@ class Lifecycle:
             fulfilment_id=attempt.id,
             attempt=attempt.attempt,
             made=made,
+            **mark,
         )
         return item, attempt
 
     def unfulfil_item(
         self, order_id: str, item_id: str, by: Actor, *, allowed: bool = True
-    ) -> OrderItem:
+    ) -> OrderItem | WorkflowAccepted:
         """Undo a fulfilment (#4952, §3.5 "Undo"): the item's latest accepted attempt
         is marked not accepted (the row stays), and the item takes the status its
         latest attempt gives it (`approved`, or `failed`). Refused for an item not
         `fulfilled` and for one a shipment carries (take it off the shipment first),
         and with ``allowed`` false (``orders_allow_unfulfil`` off, #4953) before
-        anything is read."""
+        anything is read.
+
+        Its parts come back to stock, so it is a `FulfilOrderItem` workflow (#6949 K1
+        Task 16) with the item key ``order_item:<item_id>:parts:<n>:return``. While the
+        item's fulfil still settles, the workflow waits for it, and nobody retries by
+        hand. `WorkflowAccepted` when it takes longer than the wait."""
         if not allowed:
             raise LifecycleError(
                 "unfulfil_disabled",
                 "unfulfilling a line item is turned off in Settings (orders_allow_unfulfil)",
             )
+        line = {"item_id": item_id}
         with self.store.transaction() as conn:
-            order, item = self._in_production(conn, order_id, item_id)
-            if item.status != "fulfilled":
-                raise LifecycleError(
-                    "item_not_fulfilled",
-                    f"item {item_id} is {item.status}: only a fulfilled item unfulfils",
-                    items=[item.id],
-                )
-            carrying = [
-                shipment.id
-                for shipment in self.store.shipments(order.id, conn=conn)
-                if any(line.order_item_id == item.id for line in shipment.items)
-            ]
-            if carrying:
-                raise LifecycleError(
-                    "order_item_shipped",
-                    f"item {item_id} is on a shipment: take it off the shipment first",
-                    items=[item.id],
-                    shipments=carrying,
-                )
-            attempts = self.store.fulfilments(item.id, conn=conn)
-            # The accept that made it fulfilled: the latest one.
-            _, _, accepted = max(
-                (a.accepted_at, a.attempt, a) for a in attempts if a.accepted_at is not None
-            )
-            attempt = self.store.unaccept_fulfilment(conn, accepted.id)
-            status = self._after(attempts[-1], item.status)
-            item = self.store.update_item(conn, item.id, status=status)
-            self._return_parts(conn, order, item, by)
-            self._event(
-                conn,
-                order,
-                by,
-                "item.unfulfilled",
-                item_id=item.id,
-                fulfilment_id=attempt.id,
-                attempt=attempt.attempt,
-                to=status,
-            )
-            order = self._rederive(conn, order, by)
-        self._told(_Change(order, [(item, attempt.attempt)]))
-        return item
+            order = self._read_order(conn, order_id)
+            item = self._item_of(conn, order, item_id)
+            line["key"] = self._parts_key(conn, order.id, item.id, unfulfil=True)
+            if not self._settling(item, line["key"]):
+                self._checked(conn, order, "unfulfil", [line])
+        answer = self._start_stock(
+            line["key"], {"order_id": order_id, "op": "unfulfil", "lines": [line]}, by
+        )
+        if isinstance(answer, WorkflowAccepted):
+            return answer
+        return OrderItem.model_validate(answer)
 
     # -- parts (job cost spec §11, #5543; inventory lots, #7067) ---------------------------
     # An item's parts leave stock when it becomes `fulfilled` and come back when it is
-    # unfulfilled, under the order's lock and then the items' (in `item_id` order, then
-    # each item's lots: `StockStore.take`). Stock never refuses: it can go below zero. A
-    # failed attempt uses nothing. No cost entry is written: job cost reads the moves.
+    # unfulfilled, through the stock workflow below (Go's `Take` and `GiveBack`, #6949 K1
+    # Task 16). Stock never refuses: it can go below zero. A failed attempt uses nothing.
+    # No cost entry is written: job cost reads the moves.
 
     def set_item_parts(
         self, order_id: str, item_id: str, parts: Sequence[ItemPart], by: Actor
@@ -5353,107 +5407,11 @@ class Lifecycle:
             if f.accepted_at is not None
         )
 
-    def _lock_parts_of(self, conn: Conn, items: Sequence[OrderItem]) -> None:
-        """The part items that ``items`` take when fulfilled, locked together in
-        `item_id` order (`StockStore.lock_items`) before the first take, so a transition
-        that fulfils several order items never locks a later part item before an earlier
-        one (R-P2-28)."""
-        rows = self.parts.item_parts([item.id for item in items], conn=conn)
-        wanted = {UUID(r.item_id) for found in rows.values() for r in found if r.used == 0}
-        if wanted:
-            self.stock.lock_items(conn, sorted(wanted))
-
-    def _use_parts(self, conn: Conn, order: Order, item: OrderItem, by: Actor) -> None:
-        """The item's parts times its quantity out of the lots (`StockStore.take`: FIFO,
-        each move at its lot's cost now, of unknown cost where the lot's is), in
-        `item_id` order. ``bad_quantity`` when a part's count is past what
-        `order_item_parts.used` holds, or its cost past what a move's amount holds
-        (R-P2-16)."""
-        rows = [r for r in self.parts.item_parts([item.id], conn=conn)[item.id] if r.used == 0]
-        if not rows:
-            return
-        used: list[dict[str, Any]] = []
-        for row in sorted(rows, key=lambda r: r.item_id):
-            count = row.per_unit * item.quantity
-            try:
-                if count > MAX_USED:
-                    raise BadQuantity(str(count))
-                moves = self.stock.take(
-                    conn,
-                    UUID(row.item_id),
-                    Decimal(count),
-                    by,
-                    order_id=order.id,
-                    order_item_id=item.id,
-                )
-            except BadQuantity:
-                raise LifecycleError(
-                    "bad_quantity",
-                    f"item {item.id} uses {count} of part {row.item_id}: more than one"
-                    " stock move holds at its cost",
-                    items=[item.id],
-                ) from None
-            self.parts.set_used(conn, item.id, row.item_id, count)
-            used.append(
-                {
-                    "item_id": row.item_id,
-                    "count": count,
-                    "amount_minor": _minor(-sum((m.amount_minor for m in moves), Decimal(0))),
-                    "cost_unknown": any(m.cost_unknown for m in moves),
-                }
-            )
-        self._event(
-            conn,
-            order,
-            by,
-            "parts.used",
-            item_id=item.id,
-            currency=self.rules().shop_currency,
-            parts=used,
-        )
-
-    def _return_parts(self, conn: Conn, order: Order, item: OrderItem, by: Actor) -> None:
-        """What the item's fulfilment took, back to the lots it came from, each use at its
-        own cost (`StockStore.give_back`), in `item_id` order."""
-        rows = [r for r in self.parts.item_parts([item.id], conn=conn)[item.id] if r.used > 0]
-        if not rows:
-            return
-        returned: list[dict[str, Any]] = []
-        for row in sorted(rows, key=lambda r: r.item_id):
-            try:
-                moves = self.stock.give_back(
-                    conn, order_item_id=item.id, item_id=UUID(row.item_id), by=by
-                )
-            except BadQuantity:
-                raise LifecycleError(
-                    "bad_quantity",
-                    f"item {item.id} gives back {row.used} of part {row.item_id}: more than"
-                    " its lot holds",
-                    items=[item.id],
-                ) from None
-            self.parts.set_used(conn, item.id, row.item_id, 0)
-            returned.append(
-                {
-                    "item_id": row.item_id,
-                    "count": row.used,
-                    "amount_minor": _minor(sum((m.amount_minor for m in moves), Decimal(0))),
-                }
-            )
-        self._event(
-            conn,
-            order,
-            by,
-            "parts.returned",
-            item_id=item.id,
-            currency=self.rules().shop_currency,
-            parts=returned,
-        )
-
     def parts_unit_cost(
         self, order_item_id: str, currency: str, shop_currency: str
     ) -> tuple[Decimal, bool]:
         """One unit of the order item's parts at what a FIFO take of its quantity would
-        cost now (the plan's Ruling 10, `StockStore.estimate_unit_cost`), in the shop's
+        cost now (the plan's Ruling 10, `inventory/stock.py` `estimate_unit_cost`), in the shop's
         currency, and whether some of it is of unknown cost: the known share is kept and
         the flag says the rest is missing (R-P2-29). In any other currency stock costs do
         not apply: the parts are `(0, True)` when the item has any, as job cost reads them
@@ -5472,9 +5430,7 @@ class Lifecycle:
             for row in rows:
                 count = row.per_unit * item.quantity
                 try:
-                    cost, some_unknown = self.stock.estimate_unit_cost(
-                        conn, UUID(row.item_id), Decimal(count)
-                    )
+                    cost, some_unknown = estimate_unit_cost(conn, UUID(row.item_id), Decimal(count))
                 except BadQuantity:
                     raise LifecycleError(
                         "bad_quantity",
@@ -5486,60 +5442,463 @@ class Lifecycle:
                 unknown = unknown or some_unknown
         return total, unknown
 
-    def recost_lot(self, lot_id: UUID, by: Actor) -> RecostResult:
+    def recost_lot(
+        self, lot_id: UUID, by: Actor, *, request_key: str | None = None
+    ) -> RecostResult | WorkflowAccepted:
         """ "Re-cost past uses" (spec §6.6): every past `use`, `return` and `adjust` of the
-        lot takes its cost now (`StockStore.recost_lot`), and each order whose items' parts
-        cost changed gets one `item.parts_recosted` event with each item's before and
-        after. The orders are locked before the lot (the plan's lock order), in id order.
-        A move of another order written between the read of the orders and the lot's lock
-        starts the whole re-cost again."""
-        for _ in range(_RECOST_TRIES):
-            try:
-                return self._recost_lot(lot_id, by)
-            except _OrdersMoved:
-                continue
-        raise LifecycleError("recost_busy", f"lot {lot_id} kept taking new order moves: try again")
+        lot takes its cost now, and each order whose items' parts cost changed gets one
+        `item.parts_recosted` event with each item's before and after. Since #6949 K1 Task
+        16 it is the `RecostLot` workflow, id ``lot:<lot_id>:recost:<request_key>``: the
+        orders the lot's moves name (Go's read), Go's `Recost`, then the events
+        (`recost_record`). Nothing is committed before Go answers. Go's refusal raises
+        `WorkflowRefused` with Go's problem; `WorkflowAccepted` when it takes longer than
+        the wait."""
+        workflow_id = f"lot:{lot_id}:recost:{request_key or uuid4()}"
+        done = self._starter().start_and_wait(
+            RECOST_LOT, {"lot_id": str(lot_id), "actor": by.model_dump(mode="json")}, id=workflow_id
+        )
+        if isinstance(done, WorkflowAccepted):
+            return done
+        return RecostResult.model_validate(done.body)
 
-    def _recost_lot(self, lot_id: UUID, by: Actor) -> RecostResult:
-        changes: list[_Change] = []
+    # -- the stock workflows' steps (#6949 K1 Task 16, design §6.1a) -----------------------
+    # A fulfil, an accept that fulfils and an unfulfil are `FulfilOrderItem`
+    # (`workflows/order_stock.py`): `stock_commit` (the order change, under the order's
+    # lock), Go's `Take` or `GiveBack` of each part, then `stock_record` (Go's answers on
+    # the order). The route runs `_checked` first with no lock, so a person's mistake is a
+    # 4xx at once and nothing starts. The item's `parts_workflow_id` names the open
+    # workflow, so a fulfil and an unfulfil of one item never overlap.
+
+    def _starter(self) -> StockStarter:
+        if self.starter is None:
+            raise unavailable("ScadBuddy's background service is not set up here.")
+        return self.starter
+
+    def _start_stock(self, workflow_id: str, arg: dict[str, Any], by: Actor) -> Any:
+        """``FulfilOrderItem`` ``workflow_id`` started and waited for: its answer's JSON,
+        or `WorkflowAccepted`. Its refusal is raised as the `LifecycleError` it was."""
+        try:
+            done = self._starter().start_and_wait(
+                FULFIL_ORDER_ITEM, {**arg, "actor": by.model_dump(mode="json")}, id=workflow_id
+            )
+        except WorkflowRefused as refused:
+            raise lifecycle_error(refused.problem) from None
+        return done if isinstance(done, WorkflowAccepted) else done.body
+
+    def _read_order(self, conn: Conn, order_id: str) -> Order:
+        """The order as it is, with no lock: the route's pre-check (R-K1-30)."""
+        order = self.store.order(order_id, conn=conn)
+        if order is None:
+            raise LifecycleError("order_not_found", f"no order {order_id}", not_found=True)
+        return order
+
+    @staticmethod
+    def _settling(item: OrderItem, workflow_id: str) -> bool:
+        """Whether ``workflow_id`` is the item's open stock workflow: a request sent again
+        while it runs attaches to it, past the checks its first step already passed."""
+        return item.parts_settling is not None and item.parts_settling.workflow_id == workflow_id
+
+    def _parts_key(self, conn: Conn, order_id: str, item_id: str, *, unfulfil: bool = False) -> str:
+        """The item key of a change that moves the item's stock once per fulfilment cycle
+        (R-K1-31, C9): ``order_item:<item_id>:parts:<n>`` for a fulfil, with ``:return`` for
+        an unfulfil, where ``n`` is 1 plus the item's `parts.returned` events. Each
+        unfulfil records exactly one, so each finished cycle moves ``n``.
+
+        An unfulfil that committed and has not recorded yet (the item's
+        `parts_workflow_id` names an ``:return`` run) has ended its cycle: the item is
+        `approved` again. So a fulfil's key counts it too, and a fulfil or an accept sent
+        meanwhile is the next cycle's, never the ended one's (PR #8323). Its run waits for
+        the unfulfil, and then its key is the one its commit computes. An unfulfil's own
+        key does not count it, so a resend of that unfulfil attaches to its run."""
+        # One snapshot (`parts_cycle`): two reads could straddle the unfulfil's record and
+        # see neither its event nor its hold.
+        returned, returning = self.store.parts_cycle(conn, order_id, item_id)
+        n = 1 + returned + (1 if returning and not unfulfil else 0)
+        return f"order_item:{item_id}:parts:{n}" + (":return" if unfulfil else "")
+
+    def _checked(
+        self, conn: Conn, order: Order, op: StockOp, lines: Sequence[Mapping[str, Any]]
+    ) -> list[tuple[OrderItem, Fulfilment | None, Mapping[str, Any]]]:
+        """Every check `fulfil_items`, `accept_fulfilment` and `unfulfil_item` made before
+        Task 16, in their order, on ``order`` as the caller read it (locked in
+        `stock_commit`, not in the route's pre-check). Each line's item, the attempt an
+        accept names, and the line."""
+        if op == "fulfil":
+            check_submitted(order)
+            self._producing(order)
+            items = [self._item_of(conn, order, line["item_id"]) for line in lines]
+            for item in items:
+                if item.status not in FULFILLABLE:
+                    raise LifecycleError(
+                        "item_not_open" if item.status in SETTLED else "item_not_approved",
+                        f"item {item.id} is {item.status}",
+                        items=[item.id],
+                    )
+            return [(item, None, line) for item, line in zip(items, lines, strict=True)]
+        self._producing(order)
+        [line] = lines
+        item = self._item_of(conn, order, line["item_id"])
+        if op == "accept":
+            attempt = self._attempt_of(conn, item, line["fulfilment_id"])
+            if attempt.accepted_at is not None:
+                raise LifecycleError(
+                    "fulfilment_accepted", f"attempt {attempt.attempt} is already accepted"
+                )
+            if item.status not in FULFILLABLE | {"printed"}:
+                raise LifecycleError("item_not_open", f"item {item.id} is {item.status}")
+            if attempt.outcome == "failed":
+                raise LifecycleError(
+                    "fulfilment_failed", f"attempt {attempt.attempt} failed; nothing was made"
+                )
+            if self._before_priced_design(conn, item, attempt):
+                raise LifecycleError(
+                    "fulfilment_stale",
+                    f"attempt {attempt.attempt} printed an earlier design than the accepted"
+                    " quote's",
+                    items=[item.id],
+                )
+            return [(item, attempt, line)]
+        if item.status != "fulfilled":
+            raise LifecycleError(
+                "item_not_fulfilled",
+                f"item {item.id} is {item.status}: only a fulfilled item unfulfils",
+                items=[item.id],
+            )
+        carrying = [
+            shipment.id
+            for shipment in self.store.shipments(order.id, conn=conn)
+            if any(s.order_item_id == item.id for s in shipment.items)
+        ]
+        if carrying:
+            raise LifecycleError(
+                "order_item_shipped",
+                f"item {item.id} is on a shipment: take it off the shipment first",
+                items=[item.id],
+                shipments=carrying,
+            )
+        return [(item, None, line)]
+
+    def _fulfils(
+        self,
+        conn: Conn,
+        op: StockOp,
+        checked: tuple[OrderItem, Fulfilment | None, Mapping[str, Any]],
+    ) -> bool:
+        """Whether a fulfil or an accept of the line makes the item `fulfilled`."""
+        item, attempt, line = checked
+        made = self._made(conn, item)
+        if op == "fulfil":
+            return made + int(line["quantity"]) >= item.quantity
+        if op == "accept":
+            assert attempt is not None
+            return made + attempt.quantity >= item.quantity
+        return False
+
+    def _stock_calls(
+        self,
+        conn: Conn,
+        op: StockOp,
+        checked: Sequence[tuple[OrderItem, Fulfilment | None, Mapping[str, Any]]],
+    ) -> list[dict[str, Any]]:
+        """The Go calls the change makes, in part `item_id` order: for each item a fulfil
+        or an accept fulfils, a `Take` of each part not taken yet (its count times the
+        item's quantity); for an unfulfil, a `GiveBack` of each part taken. Each key is the
+        line's item key plus ``:<part item_id>``. ``bad_quantity`` for a count past what
+        `order_item_parts.used` holds (R-P2-16)."""
+        calls: list[dict[str, Any]] = []
+        for one in checked:
+            item, _, line = one
+            if op != "unfulfil" and not self._fulfils(conn, op, one):
+                continue
+            for row in self.parts.item_parts([item.id], conn=conn)[item.id]:
+                if op == "unfulfil":
+                    if row.used == 0:
+                        continue
+                    count = row.used
+                else:
+                    if row.used != 0:
+                        continue
+                    count = row.per_unit * item.quantity
+                    if count > MAX_USED:
+                        raise LifecycleError(
+                            "bad_quantity",
+                            f"item {item.id} uses {count} of part {row.item_id}: more than one"
+                            " stock move holds at its cost",
+                            items=[item.id],
+                        )
+                calls.append(
+                    {
+                        "key": f"{line['key']}:{row.item_id}",
+                        "item_id": row.item_id,
+                        "qty": str(count),
+                        "order_item_id": item.id,
+                    }
+                )
+        return sorted(calls, key=lambda c: (c["item_id"], c["order_item_id"]))
+
+    def stock_plan(
+        self, workflow_id: str, op: StockOp, order_id: str, lines: Sequence[Mapping[str, Any]]
+    ) -> StockStep:
+        """`stock_commit` with nothing written: what it would do now. The step reads Go's
+        estimate of each take with no lock held, then commits with what it read."""
+        return self._stock_step(workflow_id, op, order_id, lines, None, None)
+
+    def stock_commit(
+        self,
+        workflow_id: str,
+        op: StockOp,
+        order_id: str,
+        lines: Sequence[Mapping[str, Any]],
+        by: Actor,
+        read: Sequence[Mapping[str, Any]],
+    ) -> StockStep:
+        """`FulfilOrderItem`'s first step: under the order's lock, every check and write
+        `fulfil_items`, `accept_fulfilment` or `unfulfil_item` made before Task 16, in the
+        same order (the attempt rows, `_accept_attempt`, `_rederive`, the audit rows), with
+        `order_item_parts.used` set (or cleared for an unfulfil) and each item's
+        `parts_workflow_id` set to ``workflow_id``. ``read`` is the calls whose quantities
+        the step read Go's estimate for; when they changed meanwhile it writes nothing and
+        answers ``reread``. ``order_item_changed`` when an item's key is not the one under
+        the lock. When an item's open workflow is another one, it writes nothing and
+        answers ``wait_for``. A second run for ``workflow_id`` finds its audit rows
+        (``detail.workflow``) and answers what it answered the first time."""
+        return self._stock_step(workflow_id, op, order_id, lines, by, read)
+
+    def _stock_step(
+        self,
+        workflow_id: str,
+        op: StockOp,
+        order_id: str,
+        lines: Sequence[Mapping[str, Any]],
+        by: Actor | None,
+        read: Sequence[Mapping[str, Any]] | None,
+    ) -> StockStep:
+        attempts: list[Fulfilment] = []
+        changed: list[tuple[OrderItem, int | None]] = []
         with self.store.transaction() as conn:
-            named = conn.execute(
-                "SELECT DISTINCT order_id FROM stock_moves WHERE lot_id = %s"
-                " AND order_id IS NOT NULL ORDER BY order_id",
-                (lot_id,),
-            ).fetchall()
-            locked: dict[str, Order] = {}
-            for row in named:
-                try:
-                    locked[row["order_id"]] = self.store.lock_order(conn, row["order_id"])
-                except OrderNotFoundError:
-                    continue
-            result = self.stock.recost_lot(conn, lot_id)
-            by_order: dict[str, list[RecostedItem]] = {}
-            for changed in result.orders:
-                if changed.order_id is not None:
-                    by_order.setdefault(changed.order_id, []).append(changed)
-            if any(o not in {r["order_id"] for r in named} for o in by_order):
-                # A move of an order not locked here: its event would be written without
-                # its lock, and locking it now, after the lot, could deadlock.
-                raise _OrdersMoved
-            wire = result.model_dump(mode="json")
+            order = self._lock(conn, order_id)
+            done = self.store.workflow_commit(conn, order.id, workflow_id)
+            if done is not None:
+                return StockStep(calls=done[0], attempts=done[1], done=True)
+            items = [self._item_of(conn, order, line["item_id"]) for line in lines]
+            for item in items:
+                if (
+                    item.parts_settling is not None
+                    and item.parts_settling.workflow_id != workflow_id
+                ):
+                    return StockStep(wait_for=item.parts_settling.workflow_id)
+            for item, line in zip(items, lines, strict=True):
+                if (
+                    self._parts_key(conn, order.id, item.id, unfulfil=op == "unfulfil")
+                    != line["key"]
+                ):
+                    raise LifecycleError(
+                        "order_item_changed",
+                        f"item {item.id} was unfulfilled and fulfilled again meanwhile",
+                        items=[item.id],
+                    )
+            checked = self._checked(conn, order, op, lines)
+            calls = self._stock_calls(conn, op, checked)
+            if by is None:
+                return StockStep(calls=calls)
+            if op != "unfulfil" and [(c["key"], c["qty"]) for c in calls] != [
+                (c["key"], c["qty"]) for c in (read or [])
+            ]:
+                return StockStep(calls=calls, reread=True)
+            for item, attempt, line in checked:
+                mark = {
+                    "workflow": workflow_id,
+                    "stock": [c for c in calls if c["order_item_id"] == item.id],
+                }
+                if op == "unfulfil":
+                    item, attempt = self._unfulfil_locked(conn, order, item, by, mark)
+                else:
+                    if op == "fulfil":
+                        if item.status == "failed":
+                            # Ruling 4, as `record_fulfilment`.
+                            item = self.store.update_item(conn, item.id, status="approved")
+                        body = FulfilmentInput(quantity=line["quantity"], outcome="succeeded")
+                        item, attempt = self._insert_attempt(conn, order, item, body, by)
+                    assert attempt is not None
+                    item, attempt = self._accept_attempt(conn, order, item, attempt, by, **mark)
+                    attempts.append(attempt)
+                changed.append((item, attempt.attempt))
+            for call in calls:
+                used = 0 if op == "unfulfil" else int(call["qty"])
+                self.parts.set_used(conn, call["order_item_id"], call["item_id"], used)
+            self.store.set_parts_workflow(conn, [item.id for item in items], workflow_id)
+            order = self._rederive(conn, order, by)
+        self._told(_Change(order, changed))
+        return StockStep(calls=calls, attempts=[a.id for a in attempts])
+
+    def _unfulfil_locked(
+        self, conn: Conn, order: Order, item: OrderItem, by: Actor, mark: dict[str, Any]
+    ) -> tuple[OrderItem, Fulfilment]:
+        """`unfulfil_item`'s writes: the latest accepted attempt marked not accepted, the
+        item's status from its latest attempt, and the audit row with ``mark``."""
+        attempts = self.store.fulfilments(item.id, conn=conn)
+        # The accept that made it fulfilled: the latest one.
+        _, _, accepted = max(
+            (a.accepted_at, a.attempt, a) for a in attempts if a.accepted_at is not None
+        )
+        attempt = self.store.unaccept_fulfilment(conn, accepted.id)
+        status = self._after(attempts[-1], item.status)
+        item = self.store.update_item(conn, item.id, status=status)
+        self._event(
+            conn,
+            order,
+            by,
+            "item.unfulfilled",
+            item_id=item.id,
+            fulfilment_id=attempt.id,
+            attempt=attempt.attempt,
+            to=status,
+            **mark,
+        )
+        return item, attempt
+
+    def stock_takeover(self, order_id: str, workflow_id: str) -> dict[str, Any] | None:
+        """The input of a new run of ``workflow_id`` when it committed and then closed
+        without its record (terminated, timed out, or past retention, #6949 K1 Task 16 fix
+        round 1): its items still name it. The input comes from its rows, so it needs no
+        history: the items that name it, the op its id gives (``:return`` is an unfulfil),
+        and who started it. The new run's first step finds its own commit and answers its
+        calls, then Go's steps and the record run. None when no item names it (it recorded,
+        or never committed)."""
+        with self.store.transaction() as conn:
+            order = self._lock(conn, order_id)
+            item_ids, actor = self.store.workflow_holds(conn, order.id, workflow_id)
+            if not item_ids or actor is None:
+                return None
+            unfulfil = workflow_id.endswith(":return")
+            return {
+                "order_id": order.id,
+                "op": "unfulfil" if unfulfil else "fulfil",
+                "lines": [
+                    {
+                        "item_id": item_id,
+                        "key": self._parts_key(conn, order.id, item_id, unfulfil=unfulfil),
+                    }
+                    for item_id in item_ids
+                ],
+                "actor": actor,
+            }
+
+    def stock_record(
+        self,
+        workflow_id: str,
+        op: StockOp,
+        order_id: str,
+        item_ids: Sequence[str],
+        attempts: Sequence[str],
+        results: Sequence[Mapping[str, Any]],
+        by: Actor,
+    ) -> Any:
+        """`FulfilOrderItem`'s last step: under the order's lock, Go's answers on the order:
+        `parts.used` with the takes' moves (or `parts.returned` with the give-backs'; an
+        unfulfil writes exactly one, with empty ``parts`` when nothing came back),
+        `parts.stock_refused` for each refusal, and each item's `parts_workflow_id` back to
+        NULL; then `order_item.changed`. A second run finds no item that names
+        ``workflow_id`` and writes nothing. The workflow's answer: the attempts, or the
+        unfulfilled item."""
+        changed: list[tuple[OrderItem, int | None]] = []
+        with self.store.transaction() as conn:
+            order = self._lock(conn, order_id)
+            items = [self._item_of(conn, order, item_id) for item_id in item_ids]
+            pending = [item for item in items if self._settling(item, workflow_id)]
+            currency = self.rules().shop_currency
+            for item in pending:
+                answered = [r for r in results if r["order_item_id"] == item.id]
+                moved = [r for r in answered if int(r["status"]) < 400]
+                if op == "unfulfil":
+                    self._event(
+                        conn,
+                        order,
+                        by,
+                        "parts.returned",
+                        item_id=item.id,
+                        currency=currency,
+                        parts=[_moved_part(r, taken=False) for r in moved],
+                        workflow=workflow_id,
+                    )
+                elif moved:
+                    self._event(
+                        conn,
+                        order,
+                        by,
+                        "parts.used",
+                        item_id=item.id,
+                        currency=currency,
+                        parts=[_moved_part(r, taken=True) for r in moved],
+                        workflow=workflow_id,
+                    )
+                for refused in (r for r in answered if int(r["status"]) >= 400):
+                    self._event(
+                        conn,
+                        order,
+                        by,
+                        "parts.stock_refused",
+                        item_id=item.id,
+                        part_item_id=refused["item_id"],
+                        key=refused["key"],
+                        status=int(refused["status"]),
+                        problem=refused["body"],
+                        workflow=workflow_id,
+                    )
+            if pending:
+                self.store.set_parts_workflow(conn, [item.id for item in pending], None)
+                changed = [(self._item_of(conn, order, item.id), None) for item in pending]
+            if op == "unfulfil":
+                answer: Any = self._item_of(conn, order, item_ids[0]).model_dump(mode="json")
+            else:
+                answer = [
+                    self._attempt_of(conn, item, a, purpose=None).model_dump(mode="json")
+                    for a, item in zip(attempts, items, strict=False)
+                ]
+        for item, _ in changed:
+            # The item only: the order's status did not move.
+            emit(
+                self.bus,
+                OrderItemChanged(
+                    order_id=order.id, item_id=item.id, status=item.status, cart=order.unsubmitted
+                ),
+            )
+        return answer
+
+    def recost_record(
+        self, workflow_id: str, lot_id: str, result: RecostResult, by: Actor
+    ) -> RecostResult:
+        """`RecostLot`'s last step: under the named orders' locks, in id order, one
+        `item.parts_recosted` event per order whose items' parts cost changed, with each
+        item's before and after. An order gone meanwhile is skipped. A second run finds
+        its events (``detail.workflow``) and writes nothing."""
+        by_order: dict[str, list[RecostedItem]] = {}
+        for changed in result.orders:
+            if changed.order_id is not None:
+                by_order.setdefault(changed.order_id, []).append(changed)
+        changes: list[_Change] = []
+        wire = result.model_dump(mode="json")
+        with self.store.transaction() as conn:
+            if self.store.workflow_wrote(conn, sorted(by_order), workflow_id):
+                return result
             for order_id, items in sorted(by_order.items()):
-                order = locked.get(order_id)
-                if order is None:
+                try:
+                    order = self.store.lock_order(conn, order_id)
+                except OrderNotFoundError:
                     continue
                 self._event(
                     conn,
                     order,
                     by,
                     "item.parts_recosted",
-                    lot_id=str(lot_id),
+                    lot_id=lot_id,
                     item_id=str(result.item_id),
                     # The same decimal strings as the route's `RecostResult` (R-P2-13).
                     unit_cost_minor=wire["unit_cost_minor"],
                     before_unit_costs_minor=wire["before_unit_costs_minor"],
                     currency=self.rules().shop_currency,
                     items=[i.model_dump(mode="json", exclude={"order_id"}) for i in items],
+                    workflow=workflow_id,
                 )
                 changes.append(_Change(order))
         for change in changes:
@@ -6229,7 +6588,9 @@ class Lifecycle:
         ``conn`` as `delete_item`'s. ``archive_id`` and ``archive_media`` name the
         Bambuddy archive copy it is (#7232); a second copy of one archive file raises
         `ArchiveCopyExistsError` and writes nothing. ``source`` goes on the audit line
-        (``archive`` for a copy, spec 2026-11-05 §4.5)."""
+        (``archive`` for a copy, spec 2026-11-05 §4.5). An ``attachment_id`` the order
+        has already is that row as it is, so a retried run that made the same id writes
+        nothing a second time (#8471)."""
         if revision_id is None:
             _refuse_revision_role(role)
         tell = conn is None
@@ -6266,37 +6627,47 @@ class Lifecycle:
                     subject = fulfilment_subject(attempt.id)
             elif revision_id is None:
                 subject = order_subject(order.id) if item is None else item_subject(item.id)
-            attachment = self.store.insert_attachment(
-                conn,
-                subject_item_id=None if fulfilment_id is None and revision_id is None else item_id,
-                fulfilment_id=fulfilment_id if revision_id is not None else None,
-                attachment_id=attachment_id,
-                order_id=order.id,
-                subject=subject,
-                kind=kind,
-                role=role,
-                filename=filename,
-                media_type=media_type,
-                size_bytes=size_bytes,
-                sha256=sha256,
-                blob_key=blob_key,
-                caption=caption,
-                created_by=by,
-                archive_id=archive_id,
-                archive_media=archive_media,
-            )
-            self._event(
-                conn,
-                order,
-                by,
-                "attachment.added",
-                attachment_id=attachment.id,
-                item_id=attachment.item_id,
-                fulfilment_id=attachment.fulfilment_id,
-                revision_id=attachment.revision_id,
-                role=attachment.role,
-                source=source,
-            )
+            kept = self.store.attachment(attachment_id, conn=conn)
+            if kept is not None and kept[0].order_id == order.id:
+                # Another attempt of the same operation, whose id this is (#8471): the
+                # row an earlier attempt committed, with no second hold or audit line.
+                # The change is told again below: the earlier attempt may have failed
+                # before it told it, and a second telling only refreshes a view.
+                attachment = kept[0]
+            else:
+                attachment = self.store.insert_attachment(
+                    conn,
+                    subject_item_id=None
+                    if fulfilment_id is None and revision_id is None
+                    else item_id,
+                    fulfilment_id=fulfilment_id if revision_id is not None else None,
+                    attachment_id=attachment_id,
+                    order_id=order.id,
+                    subject=subject,
+                    kind=kind,
+                    role=role,
+                    filename=filename,
+                    media_type=media_type,
+                    size_bytes=size_bytes,
+                    sha256=sha256,
+                    blob_key=blob_key,
+                    caption=caption,
+                    created_by=by,
+                    archive_id=archive_id,
+                    archive_media=archive_media,
+                )
+                self._event(
+                    conn,
+                    order,
+                    by,
+                    "attachment.added",
+                    attachment_id=attachment.id,
+                    item_id=attachment.item_id,
+                    fulfilment_id=attachment.fulfilment_id,
+                    revision_id=attachment.revision_id,
+                    role=attachment.role,
+                    source=source,
+                )
             change = _Change(order)
             self._subject_item(change, conn, attachment)
         if tell:

@@ -4,8 +4,9 @@ and the Go client present instead of a browser's session.
 A signed-in person mints one in Settings ("Access tokens"); it is shown once and kept as
 its SHA-256. It is ``sbpat_<id>.<secret>`` (32 random bytes), sent as ``Authorization:
 Bearer``. Its scope is ``read`` (safe methods only) or ``write``; it acts as the person who
-minted it on the ``api`` routes, never on a ``person`` route (`auth/routes.py`). A token is a
-bearer secret: never log one.
+minted it on the ``api`` routes, never on a ``person`` route (`auth/routes.py`). Scope ``fleet``
+(#8041) is fleetd's on a machine: it reaches only core's ``fleet-rotator`` routes, and every
+route here refuses it (`auth/check.py` `auth_check`). A token is a bearer secret: never log one.
 """
 
 from __future__ import annotations
@@ -20,7 +21,9 @@ from typing import Literal
 from scadbuddy.auth.models import PersonalToken
 from scadbuddy.auth.store import Pool
 
-TokenScope = Literal["read", "write"]
+TokenScope = Literal["read", "write", "fleet"]
+#: The scopes that act as their person on the ``api`` routes; ``fleet`` does not.
+PERSON_SCOPES: frozenset[str] = frozenset({"read", "write"})
 PREFIX = "sbpat_"
 #: The longest a token may live, and the default.
 MAX_LIFETIME = timedelta(days=365)

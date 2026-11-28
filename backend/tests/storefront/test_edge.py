@@ -452,3 +452,29 @@ def test_a_visitors_own_trace_context_is_dropped(
     sent = crud_mock["listings"].calls.last.request.headers
     assert "ab" * 16 not in sent["traceparent"]
     assert "baggage" not in sent and "tracestate" not in sent
+
+
+def test_a_rebuilt_edge_still_drops_a_visitors_trace_context(
+    edge_env: None, crud_mock: respx.Router, spans: InMemorySpanExporter
+) -> None:
+    """#8394: the drop wraps the stack that `FastAPIInstrumentor` builds. A second app in
+    one process, and a rebuild of the stack, must keep it outside the server span."""
+    forged = "00-" + "ab" * 16 + "-" + "cd" * 8 + "-01"
+    create_app(load())
+    app = create_app(load())
+    with TestClient(app, client=CLIENT) as c:
+        for _ in range(2):
+            spans.clear()
+            app.middleware_stack = None
+            r = c.get("/api/store/v1/listings", headers={"traceparent": forged})
+            assert r.status_code == 200
+            server = next(
+                s
+                for s in spans.get_finished_spans()
+                if s.kind is SpanKind.SERVER
+                and (s.attributes or {}).get("http.route") == "/api/store/v1/listings"
+            )
+            assert server.parent is None
+            assert format(server.context.trace_id, "032x") != "ab" * 16
+            sent = crud_mock["listings"].calls.last.request.headers
+            assert "ab" * 16 not in sent["traceparent"]

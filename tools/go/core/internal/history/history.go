@@ -4,7 +4,8 @@
 // subscriber reads the event log from its durable cursor (event_subscribers) and inserts
 // one history row per event, keyed by the event's seq, so a replay inserts nothing twice.
 // It never skips a history event: a payload that does not fit its table stops the cursor
-// just before it.
+// just before it, and event_subscribers.stopped_seq names that event until the cursor
+// passes it (#8074), so the API's scrape can tell a stopped cursor from a slow one.
 package history
 
 import (
@@ -18,6 +19,7 @@ import (
 	"time"
 
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
@@ -44,19 +46,23 @@ func (o Options) withDefaults() Options {
 	return o
 }
 
-// The history kinds this subscriber writes, each to its table. handler_config.changed and
-// handler_value.changed get theirs with their tables (design §4.7); until then the cursor
-// passes them, as any other kind.
+// The history kinds this subscriber writes, each to its table. handler_value.changed gets
+// its table with handler_values in K2 (design §4.7); until then the cursor passes it, as
+// any other kind.
 const (
 	propertyChanged = "entity_property.changed"
 	schemaChanged   = "entity_property_schema.changed"
+	// configChanged is the inventory's parameter history (R-K1-13): a step's resolved
+	// handler and parameters, before and after a save (inventory/store publishConfig).
+	configChanged = "handler_config.changed"
 )
 
 // Apply reads, in one transaction, at most Batch events past the cursor, inserts a row for
 // each history event, and moves the cursor past every event it read. It returns how many
 // events the cursor passed: 0 when another replica holds the cursor. A payload that does
-// not fit its table is an error that names its seq; the events before it are applied, and
-// the cursor stops just before it.
+// not fit its table is an error that names its seq; the events before it are applied, the
+// cursor stops just before it, and stopped_seq is set to its seq. stopped_seq is cleared
+// once an Apply stops at no event.
 func Apply(ctx context.Context, pool *pgxpool.Pool, o Options) (applied int, err error) {
 	o = o.withDefaults()
 	tx, err := pool.Begin(ctx)
@@ -65,8 +71,9 @@ func Apply(ctx context.Context, pool *pgxpool.Pool, o Options) (applied int, err
 	}
 	defer tx.Rollback(ctx) // a no-op after the commit
 	var cursor int64
-	err = tx.QueryRow(ctx, `SELECT seq FROM event_subscribers WHERE name = $1 FOR UPDATE SKIP LOCKED`,
-		o.Name).Scan(&cursor)
+	var wasStopped *int64
+	err = tx.QueryRow(ctx, `SELECT seq, stopped_seq FROM event_subscribers WHERE name = $1
+		FOR UPDATE SKIP LOCKED`, o.Name).Scan(&cursor, &wasStopped)
 	if errors.Is(err, pgx.ErrNoRows) {
 		var exists bool
 		if err := tx.QueryRow(ctx, `SELECT EXISTS (SELECT 1 FROM event_subscribers WHERE name = $1)`,
@@ -74,7 +81,7 @@ func Apply(ctx context.Context, pool *pgxpool.Pool, o Options) (applied int, err
 			return 0, err
 		}
 		if !exists {
-			return 0, fmt.Errorf("history: event_subscribers has no subscriber %q", o.Name)
+			return 0, &noSubscriber{name: o.Name}
 		}
 		return 0, nil // another replica applies
 	}
@@ -87,6 +94,7 @@ func Apply(ctx context.Context, pool *pgxpool.Pool, o Options) (applied int, err
 	}
 	last := cursor
 	var stopped error
+	var stoppedSeq *int64
 	for _, e := range events {
 		if err := insert(ctx, tx, e); err != nil {
 			var bad *badPayload
@@ -94,14 +102,15 @@ func Apply(ctx context.Context, pool *pgxpool.Pool, o Options) (applied int, err
 				return 0, err
 			}
 			stopped = err
+			stoppedSeq = &bad.seq
 			break
 		}
 		last = e.seq
 		applied++
 	}
-	if last != cursor {
-		if _, err := tx.Exec(ctx, `UPDATE event_subscribers SET seq = $2, updated_at = clock_timestamp()
-			WHERE name = $1`, o.Name, last); err != nil {
+	if last != cursor || !sameSeq(wasStopped, stoppedSeq) {
+		if _, err := tx.Exec(ctx, `UPDATE event_subscribers SET seq = $2, stopped_seq = $3,
+			updated_at = clock_timestamp() WHERE name = $1`, o.Name, last, stoppedSeq); err != nil {
 			return 0, err
 		}
 	}
@@ -111,14 +120,48 @@ func Apply(ctx context.Context, pool *pgxpool.Pool, o Options) (applied int, err
 	return applied, stopped
 }
 
+func sameSeq(a, b *int64) bool {
+	return (a == nil && b == nil) || (a != nil && b != nil && *a == *b)
+}
+
+// unmigrated is an Apply error that the API's migrations have not run yet: a table or
+// column of the event log is missing, or the subscriber has no row.
+func unmigrated(err error) bool {
+	var pg *pgconn.PgError
+	if errors.As(err, &pg) && (pg.Code == "42P01" || pg.Code == "42703") {
+		return true
+	}
+	var none *noSubscriber
+	return errors.As(err, &none)
+}
+
+// noSubscriber is an Apply of a name event_subscribers has no row for.
+type noSubscriber struct{ name string }
+
+func (n *noSubscriber) Error() string {
+	return fmt.Sprintf("history: event_subscribers has no subscriber %q", n.name)
+}
+
 // Run applies until ctx ends: at once while a batch comes back full, else after Poll. An
-// error is logged, and Apply runs again after Poll. Every replica runs it; the cursor's row
-// lock lets one apply at a time.
+// error is logged, and Apply runs again after Poll. Before the API's migrations have made
+// the event log, it logs that once, at warn, until an Apply ends any other way: a success
+// or another error (#8116, #8463). Every replica runs it; the cursor's row lock lets one
+// apply at a time.
 func Run(ctx context.Context, pool *pgxpool.Pool, o Options) {
 	o = o.withDefaults()
+	waiting := false
 	for {
 		applied, err := Apply(ctx, pool, o)
-		if err != nil && ctx.Err() == nil {
+		if err == nil || !unmigrated(err) {
+			waiting = false
+		}
+		if err != nil && ctx.Err() == nil && unmigrated(err) {
+			if !waiting {
+				slog.WarnContext(ctx, "the history subscriber waits for the API's migrations",
+					"subscriber", o.Name, "error", err.Error())
+				waiting = true
+			}
+		} else if err != nil && ctx.Err() == nil {
 			var bad *badPayload
 			if errors.As(err, &bad) {
 				slog.ErrorContext(ctx, "the history subscriber stopped at an event it cannot store",
@@ -179,6 +222,8 @@ type payload struct {
 	Key       *string         `json:"key"`
 	Op        *string         `json:"op"`
 	Owner     *string         `json:"owner"`
+	Step      *string         `json:"step"`
+	Handler   json.RawMessage `json:"handler"`
 	Old       json.RawMessage `json:"old"`
 	New       json.RawMessage `json:"new"`
 	Source    json.RawMessage `json:"source"`
@@ -186,7 +231,7 @@ type payload struct {
 }
 
 func insert(ctx context.Context, tx pgx.Tx, e event) error {
-	if e.kind != propertyChanged && e.kind != schemaChanged {
+	if e.kind != propertyChanged && e.kind != schemaChanged && e.kind != configChanged {
 		return nil
 	}
 	bad := func(reason string) error { return &badPayload{seq: e.seq, reason: reason} }
@@ -207,6 +252,24 @@ func insert(ctx context.Context, tx pgx.Tx, e event) error {
 	}
 	if !object(p.Actor) {
 		return bad("actor is not an object")
+	}
+	if e.kind == configChanged {
+		if p.Owner == nil {
+			return bad("no owner")
+		}
+		if p.Step == nil {
+			return bad("no step")
+		}
+		var handler *string
+		if h := value(p.Handler); h != nil {
+			if err := json.Unmarshal(h, &handler); err != nil {
+				return bad("handler is not a string")
+			}
+		}
+		_, err := tx.Exec(ctx, `INSERT INTO handler_config_history (event_seq, owner, step, handler, old, new, at, actor)
+			VALUES ($1, $2, $3, $4, $5::jsonb, $6::jsonb, $7::timestamptz, $8::jsonb) ON CONFLICT (event_seq) DO NOTHING`,
+			e.seq, *p.Owner, *p.Step, handler, value(p.Old), value(p.New), at, []byte(p.Actor))
+		return stored(e.seq, err)
 	}
 	if e.kind == schemaChanged {
 		if p.Owner == nil {

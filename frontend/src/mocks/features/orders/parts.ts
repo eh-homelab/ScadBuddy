@@ -13,7 +13,7 @@ import { BROWSER, fieldProblem, now, problem, PROBLEMS, Refused, state } from '.
  * fulfilled (`useParts`; job cost reads what they cost from the moves as the item's
  * `parts_minor`, no cost entry) and come back at the cost they were taken at when it is
  * unfulfilled (`returnParts`); `orders.ts` calls both, and `fillFromRule` when a model item is
- * added. The `/parts` part-row aliases are not mocked: the UI reads `/inventory`.
+ * added. The `/parts` part-row routes are gone (#6949): the UI reads `/inventory`.
  */
 
 type Parts = {
