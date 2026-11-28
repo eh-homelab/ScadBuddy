@@ -19,7 +19,11 @@ So :meth:`Profiles.machine` and its siblings look an id up by ``setting_id``, th
 How ``inherits`` is flattened follows ``PresetBundle::load_vendor_configs_from_json`` in
 v02.08.02.61
 (https://github.com/bambulab/BambuStudio/blob/v02.08.02.61/src/libslic3r/PresetBundle.cpp,
-the ``parse_subfile`` lambda):
+the ``parse_subfile`` lambda). v02.09.02.62 loads the presets in parallel instead
+(https://github.com/bambulab/BambuStudio/blob/v02.09.02.62/src/libslic3r/PresetBundle.cpp,
+``PresetSlot`` and ``resolve_dep``) with the same rules, except that a parent or an
+included preset is found among all the presets of its kind, not only those loaded
+before it. :func:`flatten` already looks in the whole tree (read 2026-11-27, #8325):
 
 - A preset's parent is found by ``name`` among the presets of its own kind loaded so far
   (``config_maps``), never by ``setting_id``; one missing is "Can not find inherits" and
@@ -39,7 +43,12 @@ the ``parse_subfile`` lambda):
   root, and each of its options is a G-code text or a list of two to six values, where
   a built-in default is a short G-code or a one-value list. So every option it holds
   differs from the default, and applying all of them is the same flattening (measured
-  on 2026-10-25). An included preset that has a parent, or names an ``include`` of its
+  on 2026-10-25). In v02.09.02.62 it is 31 machine presets and 1809 filament presets
+  from six templates, every included preset still a root. The two new templates
+  (``fdm_filament_template_h3c``, ``_p3c``) also state ``min_temperature_when_ec`` as
+  one value, ``0`` and ``80``, where the built-in default is ``-1`` (``PrintConfig.cpp``),
+  so it differs from the default too (measured 2026-11-27 on the release's AppImage,
+  #8325). An included preset that has a parent, or names an ``include`` of its
   own, is refused, because its options cannot be told from its parent's. So is one
   that is missing: Bambu Studio only logs "can not find include" and slices without
   it, and a preset without its G-code is worse than none.
@@ -52,9 +61,10 @@ the ``parse_subfile`` lambda):
   that has ``filament_diameter`` to that list's length (:data:`_PER_FILAMENT`). In
   v02.08.02.61 that cuts 14 lists of BBL filament presets (``Fiberon PA12-CF @BBL
   H2D``'s ``nozzle_temperature_range_low`` has two values for one filament) and pads
-  none, measured by flattening every preset of the image's tree on 2026-10-18; a short
-  one would be padded with a built-in default, so it is refused. The rest of
-  ``normalize`` is SLA's, or repairs ``nil`` values no BBL preset has.
+  none, measured by flattening every preset of the image's tree on 2026-10-18, and the
+  same 14 in v02.09.02.62 (measured 2026-11-27, #8325); a short one would be padded
+  with a built-in default, so it is refused. The rest of ``normalize`` is SLA's, or
+  repairs ``nil`` values no BBL preset has.
 
 Values are kept as Bambu Studio's JSON stores them, a string or a list of strings; any
 other value is refused as a preset the native slicer cannot read.
@@ -88,7 +98,11 @@ _LISTS: dict[Kind, str] = {
 #: The per-filament options ``Preset::normalize`` resizes to ``filament_diameter``'s
 #: length: ``s_Preset_filament_options`` (Preset.cpp) less ``compatible_prints``,
 #: ``compatible_printers``, ``filament_options_with_variant`` (PrintConfig.cpp) and
-#: ``filament_dev_options``, plus ``filament_settings_id``, as of v02.08.02.61.
+#: ``filament_dev_options``, plus ``filament_settings_id``, as of v02.09.02.62. Derived
+#: on 2026-11-27 from both tags' ``Preset.cpp`` and ``PrintConfig.cpp`` (#8325): the rule
+#: gives v02.08.02.61's list exactly, and v02.09.02.62 adds 11 options (the
+#: ``optional_*`` fan options, ``effect_plate_temp*``, ``filament_pre_heating_enabled``
+#: and others). ``Preset::normalize`` itself is unchanged but for its nil repair.
 _PER_FILAMENT: frozenset[str] = frozenset(
     {
         "activate_air_filtration",
@@ -99,6 +113,7 @@ _PER_FILAMENT: frozenset[str] = frozenset(
         "circle_compensation_speed",
         "close_additional_fan_first_x_layers",
         "close_fan_the_first_x_layers",
+        "close_optional_fan_first_x_layers",
         "compatible_printers_condition",
         "compatible_prints_condition",
         "complete_print_exhaust_fan_speed",
@@ -114,6 +129,8 @@ _PER_FILAMENT: frozenset[str] = frozenset(
         "default_filament_colour",
         "diameter_limit",
         "during_print_exhaust_fan_speed",
+        "effect_plate_temp",
+        "effect_plate_temp_initial_layer",
         "enable_overhang_bridge_fan",
         "enable_pressure_advance",
         "eng_plate_temp",
@@ -130,10 +147,13 @@ _PER_FILAMENT: frozenset[str] = frozenset(
         "filament_diameter",
         "filament_end_gcode",
         "filament_extruder_compatibility",
+        "filament_idle_travel_cooling_enabled",
         "filament_is_support",
         "filament_metal_stickiness",
         "filament_minimal_purge_on_wipe_tower",
         "filament_notes",
+        "filament_pre_heating_enabled",
+        "filament_prime_tower_speed_factor_curve",
         "filament_prime_volume",
         "filament_prime_volume_nc",
         "filament_printable",
@@ -153,7 +173,9 @@ _PER_FILAMENT: frozenset[str] = frozenset(
         "filament_type",
         "filament_velocity_adaptation_factor",
         "filament_vendor",
+        "fins_extrude_safe_temp",
         "first_x_layer_fan_speed",
+        "first_x_layer_optional_fan_speed",
         "first_x_layer_part_fan_speed",
         "full_fan_speed_layer",
         "hole_coef_1",
@@ -166,9 +188,12 @@ _PER_FILAMENT: frozenset[str] = frozenset(
         "impact_strength_z",
         "inherits",
         "ironing_fan_speed",
+        "min_temperature_when_ec",
         "no_slow_down_for_cooling_on_outwalls",
         "nozzle_temperature_range_high",
         "nozzle_temperature_range_low",
+        "optional_cooling_fan_speed",
+        "optional_fan_full_speed_layer",
         "overhang_fan_speed",
         "overhang_fan_threshold",
         "overhang_threshold_participating_cooling",
@@ -327,7 +352,8 @@ class Profiles:
 
     @cached_property
     def profile_version(self) -> str:
-        """``BBL.json``'s own ``version`` (``02.08.00.05`` in v02.08.02.61): a check of
+        """``BBL.json``'s own ``version`` (``02.08.00.05`` in v02.08.02.61, ``02.09.00.89``
+        in v02.09.02.62): a check of
         the tree, never a key, since it need not move with the slicer."""
         try:
             return str(self._vendor["version"])
