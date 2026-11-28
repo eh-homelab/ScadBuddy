@@ -93,6 +93,8 @@ USAGE_READ_ROWS = USAGE_BODY_ROWS
 
 #: The import's answer when the Bambuddy URL changed between the route and the read.
 URL_CHANGED = "the Bambuddy URL changed during the import; import again"
+#: Its ``code``: it shares the not-configured problem type with "no Bambuddy is set up".
+URL_CHANGED_CODE = "url_changed"
 
 
 def _failed(message: str, error: Exception) -> None:
@@ -166,7 +168,11 @@ def _refused(refused: CrudRefusedError) -> PullProblem:
 
 
 def _skipped(start: PullStart) -> PullOutcome:
-    error = PullProblem.of(not_configured(URL_CHANGED)) if start.strict else None
+    if not start.strict:
+        return PullOutcome(outcome="skipped", error=None)
+    changed = not_configured(URL_CHANGED)
+    changed.extensions["code"] = URL_CHANGED_CODE
+    error = PullProblem.of(changed)
     return PullOutcome(outcome="skipped", error=error)
 
 

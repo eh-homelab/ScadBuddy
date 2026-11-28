@@ -327,6 +327,11 @@ export const runSync = () => request<Schemas['SyncRun']>(`${BASE}/sync/run`, { m
 
 export type PresetImport = Schemas['PresetImport']
 
+export type PullReport = Schemas['PullReport']
+
+/** #6261: a one-time pull of Bambuddy's spools into ScadBuddy's own; it waits for the print worker (up to 4.5 min). */
+export const importBambuddySpools = () => request<PullReport>(`${BASE}/bambuddy/import`, { method: 'POST' })
+
 /** #7244 — bring Bambuddy's filament presets into ScadBuddy's own once, whatever the presets direction says. */
 export const importBambuddyPresets = () => request<PresetImport>(`${BASE}/presets/bambuddy-import`, { method: 'POST' })
 
