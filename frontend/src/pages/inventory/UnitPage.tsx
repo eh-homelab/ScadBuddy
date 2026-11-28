@@ -207,7 +207,7 @@ function StatusForm({ unit, onChanged }: { unit: Unit; onChanged: (unit: Unit) =
           <Label htmlFor={`${id}-status`}>New status</Label>
           <Select value={status ?? undefined} onValueChange={(next) => setStatus(next as SettableStatus)}>
             <SelectTrigger id={`${id}-status`} aria-label="New status" className="w-40">
-              <SelectValue />
+              <SelectValue placeholder="Pick a status" />
             </SelectTrigger>
             <SelectContent position="popper">
               {SETTABLE_STATUSES.map((value) => (

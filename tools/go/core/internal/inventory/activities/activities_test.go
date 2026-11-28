@@ -750,13 +750,20 @@ func TestTheAnswersMatchTheirGoldenFiles(t *testing.T) {
 // fixtureOf is the fixture a test function made; golden runs the test and keeps it.
 var fixtureOf = map[*testing.T]*fixture{}
 
+// A test that skipped (no test database, testdb.New) skips its golden too, rather than
+// failing it (#8256).
 func golden(t *testing.T, test func(*testing.T)) *fixture {
 	t.Helper()
 	var made *fixture
+	skipped := false
 	t.Run("", func(t *testing.T) {
+		defer func() { skipped = t.Skipped() }()
 		test(t)
 		made = fixtureOf[t]
 	})
+	if skipped {
+		t.Skip("the test skipped")
+	}
 	if made == nil {
 		t.Fatal("the test made no fixture")
 	}
