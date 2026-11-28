@@ -414,13 +414,16 @@ func firstErr(errs ...error) error {
 // entity_property.changed per key it sets.
 func (s *Items) Create(ctx context.Context, tx pgx.Tx, in wire.ItemInput, by Actor) (wire.Item, error) {
 	// No source is manual, as models.py ItemInput's default; an empty one is refused, as
-	// its min_length is (#8256).
+	// its min_length is (#8256), and a null one, as its type is not Optional (#8493).
 	source := "manual"
-	if in.Source != nil {
-		if *in.Source == "" {
+	if in.Source.Set {
+		switch {
+		case in.Source.Value == nil:
+			return wire.Item{}, badInput("source is a text, not null")
+		case *in.Source.Value == "":
 			return wire.Item{}, badInput("source is at least 1 character")
 		}
-		source = *in.Source
+		source = *in.Source.Value
 	}
 	if err := checkItemTexts(&in.Name, &in.Manufacturer, &in.Note, &in.CompatibleWith, in.LifeMonths); err != nil {
 		return wire.Item{}, err
