@@ -437,7 +437,9 @@ same way, `vite.config.ts`).
   `linkOtherBambuddy(id, { same: true })`; a 409 `proof_changed` reads the dry run again and
   says why, `loseSameBambuddy`; a dry run with `changed_since_pull` says every linked spool (or, with no spool linked, every linked filament preset) ScadBuddy could compare (a time on both sides) changed in Bambuddy since ScadBuddy last saw it, and offers the delete, `linkOtherBambuddy(id, { changed: true })`; a dry run that cannot read Bambuddy notes it and offers the
   delete, `linkOtherBambuddy(id, { unreadable: true })`). It also has the "RFID override mode" switch with "Apply now", #6264, and above it the stored switch `filament_auto_add_unknown_rfid` (#7156; the mode's status line says when that setting holds Bambuddy's auto-add off, and both statuses are read again after "Save Filament"), and the drying defaults `filament_drying_temp_c` and `filament_drying_hours` (empty offers none; the spool page then says "the default in Settings");
-  the mocks for the sync routes are `src/mocks/features/filament/sync.ts`, the e2e is
+  the mocks for the sync routes are `src/mocks/features/filament/sync.ts` (its spool import answers
+  503 `import_unfinished` after `leaveImportUnfinished`, or with any value under `sessionStorage`
+  `IMPORT_UNFINISHED_SEED_KEY` for the dev preview, #6261), the e2e is
   `e2e/filament-sync.spec.ts`; the old anchors `#native-spools` and
   `#inventory` land on it. Colour is `#RRGGBBAA` (`lib/rgba.ts`). Mocks:
   `src/mocks/features/filament/` (`seed.ts` has 12 spools that cover the cases; `rfid.ts` owns
