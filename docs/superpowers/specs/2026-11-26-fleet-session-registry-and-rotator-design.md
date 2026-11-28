@@ -177,8 +177,8 @@ Where the accounts live:
   live token is one machine: the machine row records the token's id, and a person stops a
   machine's writes by revoking its token in Settings. A row moves to a new owner only when its
   owner is dead: to a new `fleet` token of the same person once the old token is revoked or
-  expired, or, for a proof's machine, to a token once its proof file is gone. A proof never
-  takes a token's machine, and a machine whose token row is gone is refused to every token. A `fleet` token can call only these routes. #8003's
+  expired. No token takes a proof's machine (a proof has no person to match; an admin deletes
+  the row first), a proof never takes a token's machine, and a machine whose token row is gone is refused to every token. A `fleet` token can call only these routes. #8003's
   per-machine bootstrap proofs (`fleet-rotator.<machine>`) still work beside the tokens; #8367
   retires them for machines.
 - Proof in the cluster: the `github` mode (#8012) keeps a `fleet-rotator` service credential from

@@ -152,12 +152,11 @@ func TestAMachineBelongsToItsToken(t *testing.T) {
 	g.write("/machines/"+strings.Repeat("2", 64), machineBody(), 200)
 	got := put("/machines/"+strings.Repeat("2", 64), stolen, mine)
 	expect(t, got.status, 403)
-	expect(t, got.body["reason"], "machine-of-another-proof")
+	expect(t, got.body["reason"], "machine-of-a-proof")
 }
 
 // A machine moves to a new token only when its owner is dead: a token's machine to a new
-// token of the same person once the old token is revoked, expired or gone, and a proof's
-// machine to a token once the machine's proof file is gone.
+// token of the same person once the old token is revoked or expired.
 func TestAMachineMovesToItsPersonsNewToken(t *testing.T) {
 	for name, kill := range map[string]string{
 		"expired": `UPDATE personal_access_tokens SET expires_at = now() - interval '1 second' WHERE id = $1`,
@@ -218,7 +217,8 @@ func TestAMachineOfAForgottenTokenIsRefused(t *testing.T) {
 	expect(t, a.count(`SELECT count(*) FROM fleet_machines WHERE token_id = $1`, oldID), 1)
 }
 
-func TestAProofMachineMovesToATokenOnlyOnceItsProofIsGone(t *testing.T) {
+// A proof has no person, so no token takes its machine, even once the proof file is gone.
+func TestATokenNeverTakesAProofsMachine(t *testing.T) {
 	g := newRegistry(t)
 	token, id := accessToken(g.api, "fleet")
 	put := func(tok string) answer {
@@ -227,14 +227,14 @@ func TestAProofMachineMovesToATokenOnlyOnceItsProofIsGone(t *testing.T) {
 	g.write("/machines/"+machineID, machineBody(), 200)
 	got := put(token)
 	expect(t, got.status, 403)
-	expect(t, got.body["reason"], "machine-of-another-proof")
+	expect(t, got.body["reason"], "machine-of-a-proof")
 	if err := os.Remove(filepath.Join(g.bootstrap, "fleet-rotator.devbox")); err != nil {
 		t.Fatal(err)
 	}
-	if got := put(token); got.status != 200 {
-		t.Fatalf("the token after the proof went: %d %s", got.status, got.raw)
-	}
-	expect(t, g.count(`SELECT count(*) FROM fleet_machines WHERE token_id = $1 AND proof_name IS NULL`, id), 1)
+	got = put(token)
+	expect(t, got.status, 403)
+	expect(t, got.body["reason"], "machine-of-a-proof")
+	expect(t, g.count(`SELECT count(*) FROM fleet_machines WHERE token_id = $1`, id), 0)
 }
 
 func TestAProofNeverTakesATokensMachine(t *testing.T) {

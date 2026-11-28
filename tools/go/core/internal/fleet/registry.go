@@ -125,16 +125,16 @@ func anotherProof() error {
 
 // unknownOwner is the 403 for a machine whose token row is gone: its person is unknown, so
 // no token takes it over.
+func proofOwner() error {
+	return httpx.WithReason(http.StatusForbidden,
+		"a bootstrap proof registered that machine, and no token takes over a proof's machine: "+
+			"ask an admin to delete the machine's row", "machine-of-a-proof")
+}
+
 func unknownOwner() error {
 	return httpx.WithReason(http.StatusForbidden,
 		"the token that registered that machine is gone, so its owner is unknown and no token "+
 			"can take it over: ask an admin to delete the machine's row", "machine-of-unknown-owner")
-}
-
-// ProofChecker says whether a machine's bootstrap proof file is there now
-// (auth.Resolver.HasProof).
-type ProofChecker interface {
-	HasProof(caller, machine string) bool
 }
 
 // RegistryReads are caller fleet's registry routes, under /api/v1/internal/crud/fleet.
@@ -147,10 +147,9 @@ func RegistryReads(pool *pgxpool.Pool) []crud.Route {
 }
 
 // RegistryWrites are caller fleet-rotator's registry routes, under
-// /api/v1/internal/crud/fleet-rotator. proofs says whether a proof-owned machine's proof is
-// still there, so a token may take the machine over only once it is gone.
-func RegistryWrites(pool *pgxpool.Pool, proofs ProofChecker) []crud.Route {
-	w := &registryWriter{Fleet: Fleet{Pool: pool}, proofs: proofs}
+// /api/v1/internal/crud/fleet-rotator.
+func RegistryWrites(pool *pgxpool.Pool) []crud.Route {
+	w := &registryWriter{Fleet: Fleet{Pool: pool}}
 	f := &w.Fleet
 	return []crud.Route{
 		{Method: "PUT", Path: "/machines/{id}", Handle: w.putMachine, MaxBody: registryBodyMax},
@@ -181,14 +180,13 @@ func (m *machine) targets() []any {
 
 type registryWriter struct {
 	Fleet
-	proofs ProofChecker
 }
 
 // putMachine registers the machine under the caller's token or proof name, or refreshes its
 // facts and last_seen. A machine another token or proof registered is a 403, unless its
 // owner is dead: a token's machine moves to a new token of the same person once the old
-// token is revoked or expired, and a proof's machine moves to a token once its proof file
-// is gone. A proof never takes a token's machine. The row is locked while this decides.
+// token is revoked or expired. A token never takes a proof's machine (403 machine-of-a-proof:
+// an admin deletes the row first), and a proof never takes a token's machine. The row is locked while this decides.
 func (f *registryWriter) putMachine(r *http.Request, p crud.Params) (any, error) {
 	own, err := ownerOf(r)
 	if err != nil {
@@ -251,10 +249,8 @@ func (f *registryWriter) mayTake(ctx context.Context, tx pgx.Tx, row, own owner)
 		return anotherProof()
 	}
 	if row.proof != nil {
-		if f.proofs == nil || f.proofs.HasProof(RotatorCaller, *row.proof) {
-			return anotherProof()
-		}
-		return nil
+		// A proof has no person, so no token can show it is the machine's: fail closed.
+		return proofOwner()
 	}
 	var (
 		principal string
