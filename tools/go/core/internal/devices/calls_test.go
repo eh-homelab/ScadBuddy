@@ -425,6 +425,8 @@ func TestCallArgsTooLargeForTheBus(t *testing.T) {
 	expectStatus(t, got, 413)
 	expect(t, got.body["reason"], any("args_too_large"))
 	expect(t, h.count(`SELECT count(*) FROM device_calls`), 0)
+	// The check comes before the publish: no event of the call was logged.
+	expect(t, h.count(`SELECT count(*) FROM events WHERE kind = 'device.call_requested'`), 0)
 }
 
 // An event's data is at most eventDataMax bytes, so a posted event always fits the bus. A
