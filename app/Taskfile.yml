@@ -1,0 +1,60 @@
+# Build the phone app from the latest origin/main and install it over adb (go-task v3,
+# https://taskfile.dev). Run from app/: `task phone`. See app/CLAUDE.md "Commands".
+#
+# The build runs in a worktree of its own (BUILD_DIR), so the checkout you work in is not
+# touched. A local build is signed with this machine's debug key, which does not change, so
+# `install -r` keeps the stored pairing. Over a build signed with another key (a CI build from
+# ghcr.io/eh-homelab/scadbuddy-app) it fails: run `task phone REINSTALL=1`, which uninstalls
+# first and so drops the pairing.
+version: '3'
+
+vars:
+  ANDROID_HOME: '{{env "ANDROID_HOME" | default (printf "%s/android-sdk" (env "HOME"))}}'
+  JAVA_HOME: '{{env "JAVA_HOME" | default (printf "%s/openjdk-ms" (env "HOME"))}}'
+  ADB: '{{.ANDROID_HOME}}/platform-tools/adb'
+  ADB_PORT: '{{env "ADB_PORT" | default "5039"}}'
+  BUILD_DIR: '{{env "SCADBUDDY_APP_BUILD_DIR" | default (printf "%s/.cache/scadbuddy-app-build" (env "HOME"))}}'
+  APK: '{{.BUILD_DIR}}/app/ScadBuddy/bin/Release/net10.0-android/com.ehhomelab.scadbuddy-Signed.apk'
+  PACKAGE: com.ehhomelab.scadbuddy
+
+tasks:
+  default:
+    cmds:
+      - task: phone
+
+  phone:
+    desc: Build origin/main and install it on the phone over adb
+    cmds:
+      - task: build
+      - task: install
+
+  build:
+    desc: Build the APK from the latest origin/main in BUILD_DIR
+    cmds:
+      - git fetch origin main
+      - |
+        if [ -e "{{.BUILD_DIR}}/.git" ]; then
+          git -C "{{.BUILD_DIR}}" checkout --quiet --force --detach origin/main
+        else
+          git worktree prune
+          git worktree add --detach "{{.BUILD_DIR}}" origin/main
+        fi
+      - git -C "{{.BUILD_DIR}}" log --oneline -1
+      - >-
+        cd "{{.BUILD_DIR}}/app/ScadBuddy" &&
+        dotnet build -f net10.0-android -c Release
+        -p:AndroidSdkDirectory="{{.ANDROID_HOME}}" -p:JavaSdkDirectory="{{.JAVA_HOME}}"
+
+  install:
+    desc: Install the built APK on the phone (REINSTALL=1 uninstalls first)
+    preconditions:
+      - sh: test -f "{{.APK}}"
+        msg: 'No APK at {{.APK}}: run `task build` first.'
+      - sh: '"{{.ADB}}" -P {{.ADB_PORT}} get-state'
+        msg: 'No phone on adb port {{.ADB_PORT}} (see app/CLAUDE.md "Wireless adb").'
+    cmds:
+      - |
+        if [ "{{.REINSTALL}}" = "1" ]; then
+          "{{.ADB}}" -P {{.ADB_PORT}} uninstall {{.PACKAGE}} || true
+        fi
+      - '"{{.ADB}}" -P {{.ADB_PORT}} install -r "{{.APK}}"'
