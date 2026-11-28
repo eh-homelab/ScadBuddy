@@ -8,7 +8,7 @@ import { entityApi, type PropertyValue } from '../entities/api'
 import { AttachmentsPanel } from '../entities/AttachmentsPanel'
 import { DefinedFields } from '../entities/DefinedFields'
 import { IncompleteMark } from '../entities/IncompleteMark'
-import { fieldErrorsOf, isIncomplete, propertiesPatch, refusalText, type FieldErrors } from '../entities/definedProperties'
+import { definedKeys, fieldErrorsOf, isIncomplete, propertiesPatch, refusalText, type FieldErrors } from '../entities/definedProperties'
 import { KindKeysForm } from '../entities/KindKeysForm'
 import { LinksPanel } from '../entities/LinksPanel'
 import { PropertiesPanel } from '../entities/PropertiesPanel'
@@ -510,7 +510,7 @@ export function CatalogList({ kind }: { kind: CatalogKind }) {
                                 <AttachmentsPanel entity={`${spec.entity}:${row.id}`} />
                                 <div className="flex flex-col gap-6">
                                   <LinksPanel entity={`${spec.entity}:${row.id}`} />
-                                  <PropertiesPanel entity={`${spec.entity}:${row.id}`} />
+                                  <PropertiesPanel entity={`${spec.entity}:${row.id}`} hideKeys={definedKeys(schema)} />
                                 </div>
                               </section>
                             </div>

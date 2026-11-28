@@ -66,7 +66,7 @@ import { LinksPanel } from '../../components/entities/LinksPanel'
 import { PropertiesPanel } from '../../components/entities/PropertiesPanel'
 import { entityApi, type PropertyValue } from '../../components/entities/api'
 import { DefinedFields } from '../../components/entities/DefinedFields'
-import { fieldErrorsOf, propertiesPatch, refusalText, sentValues, requiredOf, type FieldErrors } from '../../components/entities/definedProperties'
+import { definedKeys, fieldErrorsOf, propertiesPatch, refusalText, sentValues, requiredOf, type FieldErrors } from '../../components/entities/definedProperties'
 import { RequiredKeysDialog } from '../../components/entities/RequiredKeysDialog'
 import { useAsync } from '../../lib/useAsync'
 import { AlertDialog, AlertDialogCancel, AlertDialogContent, AlertDialogDescription, AlertDialogFooter, AlertDialogHeader, AlertDialogTitle } from '@/components/ui/alert-dialog'
@@ -1315,7 +1315,7 @@ export function SpoolPage() {
                 <AttachmentsPanel entity={`spool:${saved.id}`} />
                 <div className="flex flex-col gap-6">
                   <LinksPanel entity={`spool:${saved.id}`} />
-                  <PropertiesPanel entity={`spool:${saved.id}`} />
+                  <PropertiesPanel entity={`spool:${saved.id}`} hideKeys={definedKeys(schema)} />
                 </div>
               </div>
             ) : (

@@ -6,7 +6,7 @@ import { getType, listTypes, startProfileFetch, upsertType } from '../../api/fil
 import { listShopping, patchSupplier } from '../../api/filamentPurchasing'
 import { SUPPLIER } from '../../mocks/features/filamentPurchasingSeed'
 import { server } from '../../mocks/server'
-import { entityMock } from '../../mocks/features/entities'
+import { entityMock, seedEntityProperties } from '../../mocks/features/entities'
 import { T } from '../../mocks/features/filament/seed'
 import { filamentLinks } from '../../lib/filamentLinks'
 import { choose } from '../../test/select'
@@ -532,6 +532,16 @@ describe('the 3DFP id and fetch (#6625)', () => {
   })
 
   describe('defined and required properties (#7703)', () => {
+    // #8227 (spec §6.3b): the panel lists only the keys the form does not show.
+    it('lists in the Properties panel only the keys the form does not show (#8227)', async () => {
+      seedEntityProperties(`spool_type:${T.JADE}`, { mpn: 'A00-W1', shelf_note: 'top' })
+      render(`/filament/types/${T.JADE}`)
+      const panel = await screen.findByRole('region', { name: 'Properties' })
+      expect(await within(panel).findByText('shelf_note')).toBeVisible()
+      expect(within(panel).queryByText('mpn')).not.toBeInTheDocument()
+      expect(await screen.findByLabelText('mpn')).toHaveValue('A00-W1')
+    })
+
     it('saves the row and its defined properties with one request', async () => {
       const patches: Record<string, unknown>[] = []
       server.events.on('request:start', ({ request }) => {

@@ -6,7 +6,7 @@ import { LinksPanel } from '../../components/entities/LinksPanel'
 import { PropertiesPanel } from '../../components/entities/PropertiesPanel'
 import { entityApi, type PropertyValue } from '../../components/entities/api'
 import { DefinedFields } from '../../components/entities/DefinedFields'
-import { fieldErrorsOf, propertiesPatch, refusalText, sentValues, type FieldErrors } from '../../components/entities/definedProperties'
+import { definedKeys, fieldErrorsOf, propertiesPatch, refusalText, sentValues, type FieldErrors } from '../../components/entities/definedProperties'
 import { useAsync } from '../../lib/useAsync'
 import { api, ApiError } from '../../api/client'
 import {
@@ -756,7 +756,7 @@ export function TypePage() {
             <AttachmentsPanel entity={`spool_type:${madeId ?? id}`} />
             <div className="flex flex-col gap-6">
               <LinksPanel entity={`spool_type:${madeId ?? id}`} />
-              <PropertiesPanel entity={`spool_type:${madeId ?? id}`} />
+              <PropertiesPanel entity={`spool_type:${madeId ?? id}`} hideKeys={definedKeys(schema)} />
             </div>
           </div>
         </section>
