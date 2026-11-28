@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"crypto/sha256"
+	"encoding/json"
 	"log/slog"
 	"net"
 	"net/http"
@@ -15,6 +16,7 @@ import (
 	"time"
 
 	"github.com/eh-homelab/ScadBuddy/tools/go/core/internal/auth"
+	"github.com/eh-homelab/ScadBuddy/tools/go/core/internal/libraryrun"
 	"github.com/eh-homelab/ScadBuddy/tools/go/core/internal/testdb"
 )
 
@@ -206,6 +208,47 @@ func TestAReadTokenCannotResolve(t *testing.T) {
 	}
 	if _, ok := rec.metrics(t)[auth.WouldRefuseMetric]; !ok {
 		t.Error("observe counted nothing")
+	}
+}
+
+// failingStarter is a Temporal whose activity fails with one typed failure.
+type failingStarter struct{ failure libraryrun.Failure }
+
+func (s failingStarter) Run(context.Context, libraryrun.Write) (json.RawMessage, error) {
+	failure := s.failure
+	return nil, &failure
+}
+
+func TestTheRouterMapsAResolveFailureToItsProblem(t *testing.T) {
+	pool := testdb.New(t)
+	a := &api{t: t, pool: pool}
+	seedTrays(a)
+	token := "sbpat_0123456789abcdef." + strings.Repeat("A", 43)
+	sum := sha256.Sum256([]byte(token))
+	a.sql(`INSERT INTO personal_access_tokens (id, principal, name, scope, token_hash, expires_at)
+		VALUES ('t1', 'user:test#me', 'write', 'write', $1, now() + interval '1 day')`, sum[:])
+	starter := failingStarter{libraryrun.Failure{Type: "spool_archived", Message: "that spool is archived"}}
+	router, err := newRouter(pool, teapot, nil, "unknown-trays", "enforce", callerPackages, nil, nil, nil, withLibraryRuns(starter))
+	if err != nil {
+		t.Fatal(err)
+	}
+	server := httptest.NewServer(router)
+	defer server.Close()
+	req, _ := http.NewRequest(http.MethodPost, server.URL+resolvePath, strings.NewReader(resolveBody))
+	req.Header.Set("Authorization", "Bearer "+token)
+	res, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer res.Body.Close()
+	var problem struct {
+		Code string `json:"code"`
+	}
+	if err := json.NewDecoder(res.Body).Decode(&problem); err != nil {
+		t.Fatal(err)
+	}
+	if res.StatusCode != http.StatusConflict || res.Header.Get("Content-Type") != "application/problem+json" || problem.Code != "spool_archived" {
+		t.Errorf("%d %q code %q", res.StatusCode, res.Header.Get("Content-Type"), problem.Code)
 	}
 }
 

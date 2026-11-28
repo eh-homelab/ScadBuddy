@@ -52,7 +52,7 @@ export function writeFailure(cause: unknown): WriteFailure {
   }
 }
 
-export const SEND_PENDING_TEXT = 'The send has not finished yet, and it may still run. Wait a moment, then send again. The server does not run the same send twice.'
+export const SEND_PENDING_TEXT = 'The send has not finished yet, and it may still run. Wait a moment, then send again. If the first send finished, the second finds the preset in sync.'
 
 /** A failed send again: as `writeFailure`, but a pending write reads as a send, not as a copy or an edit. */
 export function sendFailure(cause: unknown): WriteFailure {
