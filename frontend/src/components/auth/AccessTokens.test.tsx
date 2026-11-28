@@ -22,4 +22,19 @@ describe('AccessTokens', () => {
     await user.click(within(list).getByRole('button', { name: 'Revoke' }))
     expect(await within(list).findByText('revoked')).toBeInTheDocument()
   })
+
+  it('offers fleetd a fleet token and says what it reaches', async () => {
+    const user = userEvent.setup()
+    renderPage(<AccessTokens />)
+    const list = await screen.findByRole('list', { name: 'Access tokens' })
+    await user.type(screen.getByLabelText('Name'), 'devbox')
+    await user.click(screen.getByRole('combobox', { name: 'Scope' }))
+    await user.click(await screen.findByRole('option', { name: 'Fleet' }))
+    expect(
+      screen.getByText('fleetd on a machine: registers the machine and its Claude sessions; nothing else.'),
+    ).toBeInTheDocument()
+    await user.click(screen.getByRole('button', { name: 'Create token' }))
+    expect(await screen.findByLabelText('New token')).toHaveTextContent(/^sbpat_/)
+    expect(await within(list).findByText('fleet')).toBeInTheDocument()
+  })
 })

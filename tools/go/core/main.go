@@ -506,6 +506,7 @@ func newRouter(pool *pgxpool.Pool, next http.Handler, keys *seal.Keys, areas, au
 	socket := false
 	router := &crud.Router{
 		Resolver: resolver,
+		Tokens:   resolver,
 		Enforce:  mode == auth.Enforce,
 		Next:     next,
 	}
@@ -570,7 +571,10 @@ func newRouter(pool *pgxpool.Pool, next http.Handler, keys *seal.Keys, areas, au
 		case "fleet":
 			router.Add(fleet.Caller, fleet.Routes(pool)...)
 			router.Add(fleet.Caller, fleet.RegistryReads(pool)...)
-			router.Add(fleet.RotatorCaller, fleet.RegistryWrites(pool)...)
+			// fleetd's registry writes take its `fleet` access token too (#8041). Virtual
+			// senders stay service-only: a machine's token never posts as `rotator` or
+			// `github`.
+			router.AddForToken(fleet.RotatorCaller, auth.FleetScope, fleet.RegistryWrites(pool)...)
 			router.Add(fleet.VirtualCaller, fleet.VirtualRoutes(pool)...)
 		case blobstore.Area:
 			// A shared area (#7958): any caller whose scopes hold crud.blobs.

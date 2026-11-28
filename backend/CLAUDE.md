@@ -1289,8 +1289,14 @@ only the sleeps move; a budget on the real clock fails on a slow runner (#6252).
   (`BootstrapVerifier.has_machine`), and core's resolver does the same over the same
   `SCADBUDDY_SERVICE_BOOTSTRAP_DIR` (#8172; unset, core refuses them all); `main.py` `_rotate_service_credentials` (every start and
   auth sweep) revokes the rest (`revoke_machines_without_proof`). A `fleet-rotator.*` file
-  whose suffix names no machine is skipped with a warning. `fleetd` sends a `fleet` PAT today,
-  which these routes refuse until #8041.
+  whose suffix names no machine is skipped with a warning. `fleetd` sends a personal access
+  token of scope `fleet` (#8041; `auth/personal_tokens.py` `TokenScope`, migration
+  `20261127T2101Z_fleet_token_scope.sql`), which core's two rotator `PUT`s take beside the proofs (not `POST /virtual-messages`, which stays service-only)
+  and record as the machine's owner (`fleet_machines.token_id`). Python serves none of those
+  routes, so `auth/check.py` `auth_check` refuses a `fleet` token (403 `out_of_scope`) on every
+  route Python serves, in every mode, and `auth/routes.py` `would_refuse` says so for every
+  class but `crud.fleet-rotator` (#8179); the shared `tests/fixtures/auth-vectors.json` holds
+  core to the same. #8367 retires the machines' bootstrap proofs.
 - `backend/scadbuddy/filament/` labels and printer places (#6955, plan
   `docs/superpowers/plans/2026-11-22-printer-location-labels.md`). A location has a `number`
   (identity, never reused; its code is `L-<n>`; migration `20261122T0603Z_filament_location_numbers.sql`).

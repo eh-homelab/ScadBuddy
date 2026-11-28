@@ -11,9 +11,21 @@ import { useAsync } from '../../lib/useAsync'
 // #4975 phase 6 — Settings → System → Access tokens (spec 2026-11-01 §7.5; D6): a signed-in
 // person's personal access tokens, for bambuddy-fs and the Go client. A new token is shown
 // once, here; ScadBuddy keeps only its SHA-256. `read` reaches every read, `write` every
-// change; neither reaches what only a person does in the browser.
+// change; neither reaches what only a person does in the browser. `fleet` (#8041) is fleetd's:
+// core's fleet-rotator routes and nothing else.
 
 const day = (iso: string) => new Date(iso).toLocaleDateString()
+
+// What each scope is called, in the picker and the list, and what it reaches.
+const SCOPES: Record<AccessTokenScope, { label: string; listed: string; help: string }> = {
+  read: { label: 'Read', listed: 'read', help: 'Reads everything you can read; changes nothing.' },
+  write: { label: 'Read and write', listed: 'read and write', help: 'Reads and changes what you can.' },
+  fleet: {
+    label: 'Fleet',
+    listed: 'fleet',
+    help: 'fleetd on a machine: registers the machine and its Claude sessions; nothing else.',
+  },
+}
 
 export function AccessTokens() {
   const listed = useAsync(() => api.listAccessTokens(), [])
@@ -70,7 +82,8 @@ export function AccessTokens() {
     <div className="space-y-4">
       <p className="text-xs text-muted-foreground">
         For bambuddy-fs and other programs that call ScadBuddy as you: pass the token with{' '}
-        <code>--token-file</code> or <code>$BAMBUDDY_FS_TOKEN_FILE</code>. A read token reads only.
+        <code>--token-file</code> or <code>$BAMBUDDY_FS_TOKEN_FILE</code> (fleetd: <code>$FLEETD_TOKEN_FILE</code>). A read
+        token reads only.
       </p>
       <form
         className="flex flex-wrap items-end gap-2"
@@ -87,12 +100,15 @@ export function AccessTokens() {
         <div className="grid gap-1 text-xs">
           <span id="access-token-scope">Scope</span>
           <Select value={scope} onValueChange={(value) => setScope(value as AccessTokenScope)}>
-            <SelectTrigger size="sm" aria-labelledby="access-token-scope">
+            <SelectTrigger size="sm" aria-labelledby="access-token-scope" aria-describedby="access-token-scope-help">
               <SelectValue />
             </SelectTrigger>
             <SelectContent>
-              <SelectItem value="read">Read</SelectItem>
-              <SelectItem value="write">Read and write</SelectItem>
+              {(Object.keys(SCOPES) as AccessTokenScope[]).map((value) => (
+                <SelectItem key={value} value={value}>
+                  {SCOPES[value].label}
+                </SelectItem>
+              ))}
             </SelectContent>
           </Select>
         </div>
@@ -109,6 +125,9 @@ export function AccessTokens() {
         <Button type="submit" size="sm" disabled={busy || name.trim() === ''} {...USER_ONLY}>
           Create token
         </Button>
+        <p id="access-token-scope-help" className="basis-full text-xs text-muted-foreground">
+          {SCOPES[scope].help}
+        </p>
       </form>
       {minted && (
         <div role="status" className="space-y-1 rounded-md border p-3 text-sm">
@@ -127,7 +146,7 @@ export function AccessTokens() {
           <li key={row.id} className="flex flex-wrap items-center justify-between gap-2 px-3 py-2 text-sm">
             <div>
               <p>
-                {row.name} <span className="text-xs text-muted-foreground">{row.scope === 'write' ? 'read and write' : 'read'}</span>
+                {row.name} <span className="text-xs text-muted-foreground">{SCOPES[row.scope]?.listed ?? row.scope}</span>
                 {!row.live && (
                   <span className="ml-2 text-xs text-muted-foreground">{row.revoked_at ? 'revoked' : 'expired'}</span>
                 )}

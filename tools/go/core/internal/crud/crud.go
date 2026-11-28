@@ -3,7 +3,8 @@
 // auth mode, the CRUD headers on every answer of a matched route, and a database that is out
 // of reach as a 503 a client can tell from a route's own 500. A shared area's routes, under
 // /api/v1/internal/crud/<area>/ (AddShared, #7958), take any caller whose scopes hold
-// crud.<area>.
+// crud.<area>. A caller's routes added with AddForToken also take a person's access token of
+// one scope (#8041: fleetd's `fleet` token on the fleet-rotator routes).
 package crud
 
 import (
@@ -57,9 +58,17 @@ type Resolver interface {
 	Resolve(ctx context.Context, authorization string) *auth.Service
 }
 
+// TokenResolver finds the live access token a request's Authorization header names, nil for
+// none (auth.Resolver.Token).
+type TokenResolver interface {
+	Token(ctx context.Context, authorization string) *auth.Caller
+}
+
 // Router answers the routes added to it, and gives every other request to Next unchanged.
 type Router struct {
 	Resolver Resolver
+	// Tokens finds an sbpat_ bearer's token. Without it every access token is no credential.
+	Tokens TokenResolver
 	// Enforce is SCADBUDDY_AUTH_MODE=enforce, whose refusals auth/check.py words.
 	Enforce bool
 	Next    http.Handler
@@ -69,9 +78,11 @@ type Router struct {
 
 type mounted struct {
 	Route
-	caller   string
-	shared   bool
-	segments []string
+	caller string
+	shared bool
+	// tokenScope is the access token scope the route also takes, "" for none.
+	tokenScope string
+	segments   []string
 	// template is the route as Starlette writes it ({name...} is {name:path}): its spans'
 	// and metrics' http.route, as the Python route's.
 	template string
@@ -85,7 +96,17 @@ func (rt *Router) Add(caller string, routes ...Route) {
 	for _, r := range routes {
 		segments := strings.Split(strings.TrimPrefix(Prefix, "/")+caller+r.Path, "/")
 		template := rest.ReplaceAllString(Prefix+caller+r.Path, "{$1:path}")
-		rt.routes = append(rt.routes, mounted{r, caller, false, segments, template})
+		rt.routes = append(rt.routes, mounted{r, caller, false, "", segments, template})
+	}
+}
+
+// AddForToken serves a caller's routes as Add does, and also for a person's live access
+// token of scope (#8041). The handler reads that token with auth.CallerOf; ServiceOf is nil.
+func (rt *Router) AddForToken(caller, scope string, routes ...Route) {
+	start := len(rt.routes)
+	rt.Add(caller, routes...)
+	for i := start; i < len(rt.routes); i++ {
+		rt.routes[i].tokenScope = scope
 	}
 }
 
@@ -95,7 +116,7 @@ func (rt *Router) AddShared(area string, routes ...Route) {
 	for _, r := range routes {
 		segments := strings.Split(strings.TrimPrefix(Prefix, "/")+area+r.Path, "/")
 		template := rest.ReplaceAllString(Prefix+area+r.Path, "{$1:path}")
-		rt.routes = append(rt.routes, mounted{r, area, true, segments, template})
+		rt.routes = append(rt.routes, mounted{r, area, true, "", segments, template})
 	}
 }
 
@@ -135,11 +156,18 @@ func ServiceOf(r *http.Request) *auth.Service {
 }
 
 func (rt *Router) answer(route *mounted, r *http.Request, params Params) (any, error) {
-	service, p := rt.refusal(route, r)
-	if p != nil {
-		return nil, p
+	if token, p, isToken := rt.token(route, r); isToken {
+		if p != nil {
+			return nil, p
+		}
+		r = r.WithContext(auth.WithCaller(r.Context(), *token))
+	} else {
+		service, p := rt.refusal(route, r)
+		if p != nil {
+			return nil, p
+		}
+		r = r.WithContext(auth.WithService(r.Context(), service))
 	}
-	r = r.WithContext(auth.WithService(r.Context(), service))
 	if route.MaxBody > 0 {
 		if r.ContentLength < 0 && !route.OwnLength {
 			return nil, &httpx.Problem{
@@ -188,6 +216,39 @@ next:
 		return route, params
 	}
 	return nil, nil
+}
+
+// token is the guard's answer to an access token, isToken false when the request carries none
+// the router should judge: no sbpat_ bearer, or a read or write token on a route that takes
+// no token, which is no service credential, as Python's guard answers it (refusal). A token
+// of the route's scope passes. A dead one is a 401. A live one of another scope is a 403: a
+// read or write token on a route that takes a token, and a fleet token anywhere else, as
+// auth/check.py refuses it there in every mode.
+func (rt *Router) token(route *mounted, r *http.Request) (*auth.Caller, *httpx.Problem, bool) {
+	header := r.Header.Get("Authorization")
+	scheme, bearer, _ := strings.Cut(header, " ")
+	if rt.Tokens == nil || !strings.EqualFold(scheme, "bearer") || !strings.HasPrefix(bearer, auth.TokenPrefix) {
+		return nil, nil, false
+	}
+	c := rt.Tokens.Token(r.Context(), header)
+	switch {
+	case c == nil && route.tokenScope == "":
+		return nil, nil, false
+	case c == nil:
+		p := httpx.WithReason(http.StatusUnauthorized,
+			"This route needs a live access token or service credential.", "no_credential")
+		p.Type = problems + "signed-out"
+		p.Headers = map[string]string{"WWW-Authenticate": `Bearer realm="scadbuddy"`}
+		return nil, p, true
+	case route.tokenScope != "" && c.TokenScope == route.tokenScope:
+		return c, nil, true
+	case route.tokenScope == "" && !c.IsFleetToken():
+		return nil, nil, false
+	}
+	p := httpx.WithReason(http.StatusForbidden,
+		"This credential's scope does not cover this request.", auth.OutOfScope)
+	p.Type = problems + "forbidden"
+	return nil, p, true
 }
 
 func (rt *Router) refusal(route *mounted, r *http.Request) (*auth.Service, *httpx.Problem) {
