@@ -151,11 +151,11 @@ twice; when a newer version was written since, it is created again and its `mirr
 names the copy the lost create left (#7343); one preset's failure, a Bambuddy id another ScadBuddy preset holds included, is its
 own `mirror_error` and never stops the rest.
 
-The Presets view (#7204, plan `docs/superpowers/plans/2026-11-26-filament-presets-view.md`) is
-read-only. Go core serves it, not Python: area `filament-presets` in
+The Presets view (#7204, plan `docs/superpowers/plans/2026-11-26-filament-presets-view.md`)
+reads and writes ScadBuddy's own presets. Go core serves it, not Python: area `filament-presets` in
 `tools/go/core/internal/filamentpresets`, with `GET /api/v1/filament/presets` (`?source=`,
-`?type_id=`), `GET …/presets/{preset_id}` and `GET …/presets/{preset_id}/diff`
-(`tools/go/core/README.md`). The area is on only when `SCADBUDDY_CORE_AREAS` names it
+`?type_id=`), `GET …/presets/{preset_id}` and `GET …/presets/{preset_id}/diff`, and the writes
+described below (`tools/go/core/README.md`). The area is on only when `SCADBUDDY_CORE_AREAS` names it
 (`tools/go/core/main.go`). Until then the paths go on to Python, which has a handler for none
 of them and answers a 404 with no `code`. The Presets tab and the preset page tell that apart
 from a Go 404, which has a `code`, and show "Presets are not on yet on this server"
@@ -170,11 +170,57 @@ the same rule through shared vectors
 (`backend/tests/fixtures/filament-preset-vectors.json`,
 `backend/tests/filament/test_filament_preset_vectors.py`, `test-fixtures/filament/preset-wire.json`).
 Every answer is `no-store`, and a document over 1 MiB is not read
-(`tools/go/core/internal/filamentpresets/document.go`). Only a `manual` preset can be edited,
-when the edit routes come: a `3dfp` preset would get a new version from the next fetch, and a
-`bambuddy` preset from the next Bambuddy refresh, so each of them is copied first (plan R3). The
-page and the three read tools `filament_preset_list`, `filament_preset_get` and
+(`tools/go/core/internal/filamentpresets/document.go`). Only a `manual` preset can be edited: a `3dfp` preset would get a new version from the next
+fetch, and a `bambuddy` preset from the next Bambuddy refresh, so each of them is copied first
+(plan R3). The three read tools `filament_preset_list`, `filament_preset_get` and
 `filament_preset_diff` change nothing (`agent/src/tools/filament.ts`).
+
+The Presets view has three writes (plan R2, R7, R11, R12, P21 to P25):
+
+- `POST /api/v1/filament/presets/{preset_id}/copy` (body `{name}`) makes a new `manual` preset
+  at version 1 from the preset's current document, whatever its source. It answers 201 and the
+  new preset's detail.
+- `PATCH /api/v1/filament/presets/{preset_id}` (body `{expected_version, name?, set?, unset?}`)
+  makes the next version of a `manual` preset. It answers 200 and `{changed, preset}`. An edit
+  that changes nothing writes no version (`changed` is false). `expected_version` is a JSON
+  integer above 0.
+- `POST /api/v1/filament/presets/{preset_id}/mirror` sends one preset to Bambuddy again. It
+  answers 200 and `{outcome, preset}`. `outcome` is `sent`, `failed`, `busy`, `in_sync` or
+  `pending`.
+
+Go checks the body and then starts core's workflow `FilamentPresetWrite`. Its one step is a
+Python activity on the `library` queue (`filament_preset_copy`, `filament_preset_edit` or
+`filament_preset_mirror_again`, `backend/scadbuddy/filament/preset_writes.py`), which the API
+process serves, because only the API writes the rows. Go writes no row. After the commit, the
+activity sends the preset to Bambuddy while the stored setting `filament_preset_mirror` is on
+(`backend/scadbuddy/filament/preset_mirror.py` `mirror_pending`, `mirror_again`). A mirror
+failure never fails the write. A copy or an edit bounds its mirror at 30 s and a send again
+bounds it at 60 s; a mirror that is not done in time is the outcome `pending`. The activity
+has one attempt. Its start-to-close is its bound plus 30 s. The route waits for that time plus
+10 s, then answers 503 `preset_write_pending`, and the client sends the same key again.
+
+A copy and an edit need an `Idempotency-Key` of 1 to 200 characters. Without one the answer is
+428 with the type `https://scadbuddy.dev/problems/crud/idempotency-key-required`, and nothing
+starts. Two sends of one key and one body at the same time join one run. The activity keeps
+its reply in the idempotency ledger under the actor, the key and the preset, so a repeat gets
+the first reply, for as long as the ledger keeps it (24 hours). The same key with another body
+is 422 `idempotency_key_reused`. A send again needs no key.
+
+The codes (each is the problem's `code`): 404 `preset_not_found`; 409 `not_manual`,
+`version_moved` (with `current_version`), `document_missing`, `mirror_off`, `not_configured`,
+`instance_changed` and `not_mirrored`; 422 `key_refused` (with the `key`; the key is `name`, a
+print-host credential key, a key that does not match `[A-Za-z0-9_.-]{1,128}`, or a key that is both set
+and unset), `invalid_input` and `idempotency_key_reused`; 503 `preset_write_pending` and
+`writes_not_configured`. An edit sets and unsets at most 500 keys, and a `set` value is a
+string or a list of strings (an empty list is allowed). A name is 1 to 200 characters.
+
+The writes need `SCADBUDDY_TEMPORAL_ADDRESS` on the core container. Without it, core starts
+with the area, the reads serve, no worker starts, and each write answers 503
+`writes_not_configured`. The area name in `SCADBUDDY_CORE_AREAS` and the address are two
+separate settings in the cluster config (eh-homelab/clusters): naming the area does not give
+core an address. The page and the three write tools `filament_preset_copy`,
+`filament_preset_update` and `filament_preset_mirror` (`outward`, so a person approves each)
+are in `frontend/src/pages/filament/` and `agent/src/tools/filament.ts`.
 
 A fetch writes ScadBuddy only: each file is the type's `3dfp` preset of its key, a changed
 one a new version with its changed keys in the run's notes, and the type's own nozzle range

@@ -15,7 +15,7 @@ unchanged, to the Python API: WebSockets, SSE and large bodies included. On prod
 | `SCADBUDDY_AUTH_MODE` | `off` | Only `enforce` changes a refusal's words |
 | `SCADBUDDY_SECRET_KEY_FILE` | none | The KEK, read as Python reads it. A sealed area (†) does not start without it; a file that is set and cannot be read stops the start |
 | `SCADBUDDY_SECRET_KEY_PREVIOUS_FILE` | none | The KEK before it, during a rotation: what it sealed still opens |
-| `SCADBUDDY_TEMPORAL_ADDRESS` | required with area `inventory` | Temporal's frontend (`host:port`, no TLS, as the Python client). Without it, a start that names `inventory` stops. With only `inventory:read`, it is optional: the operation read then asks Temporal about a stale row |
+| `SCADBUDDY_TEMPORAL_ADDRESS` | required with area `inventory` | Temporal's frontend (`host:port`, no TLS, as the Python client). Without it, a start that names `inventory` stops. With only `inventory:read`, it is optional: the operation read then asks Temporal about a stale row. With `filament-presets`, it is optional too: without it the reads serve and each write answers 503 `writes_not_configured` ("The preset writes"). Naming the area does not set it: the container needs the variable as well |
 | `SCADBUDDY_TEMPORAL_NAMESPACE` | `scadbuddy` | As `core/config.py` `DEFAULT_TEMPORAL_NAMESPACE` |
 | `SCADBUDDY_TEMPORAL_TASK_QUEUE_INVENTORY` | `inventory` | The task queue the inventory worker polls |
 | `SCADBUDDY_TEMPORAL_TASK_QUEUE_FILAMENT_PRESETS` | `filament-presets` | The task queue of the preset writes' workflow, which core's own worker polls when the area `filament-presets` is named and `SCADBUDDY_TEMPORAL_ADDRESS` is set |
@@ -125,7 +125,7 @@ The document is the zip member `file`. Its credential keys are stripped, as
 `core/credentials.py` strips them. A document that is not read leaves the detail's
 `document` null and names why in `document_error`; the diff answers that code as a problem.
 
-### The preset writes
+## The preset writes
 
 The three writes of `filament-presets` (plan
 `docs/superpowers/plans/2026-11-26-filament-presets-view.md`, rulings R7, R11, R12, P21 and

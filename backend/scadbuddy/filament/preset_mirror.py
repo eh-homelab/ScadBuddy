@@ -39,10 +39,9 @@ the lost create, nothing above the floor holds it: the preset is created again a
 preset's failure, a Bambuddy id another ScadBuddy preset holds included, is its own
 ``mirror_error`` and never stops the presets after it.
 
-A person will send one preset again with the Go route ``POST
-/api/v1/filament/presets/{preset_id}/mirror`` (#7204). That route is not built yet: it
-waits for ``internal/temporalx`` (ruling N7). It runs `mirror_again` as the ``library``
-activity ``filament_preset_mirror_again`` (`preset_writes.py`), bounded by
+A person sends one preset again with the Go route ``POST
+/api/v1/filament/presets/{preset_id}/mirror`` (#7204). It runs `mirror_again` as the
+``library`` activity ``filament_preset_mirror_again`` (`preset_writes.py`), bounded by
 `RESEND_TIMEOUT` (R11).
 """
 
