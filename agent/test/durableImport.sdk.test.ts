@@ -96,8 +96,16 @@ describe('a DurableSession conversation under the TypeScript CLI (plan Step 7.1)
     expect([...new Set(written.map((e) => e.type))].filter((t) => !durableTypes.has(t))).toEqual(['cost-state'])
     // The transcript entries carry the same fields, but those a newer Claude Code adds
     // to an assistant entry (2.1.310 over 2.1.292; `madeBy` and `promptCacheRequested`
-    // by 2.1.327), which a resume does not need.
-    for (const type of ['user', 'attachment', 'last-prompt']) expect(keysOf(entries, type), type).toEqual(keysOf(written, type))
+    // by 2.1.327), and to a user entry (`rowSource` by 2.1.331), which a resume does not need.
+    // After an SDK bump fails here: vitest's "Expected" is the second argument, the new
+    // CLI's keys. A key only the new CLI writes goes into its entry type's list below, with
+    // its version above; the "resumes" test shows the old entries still resume. A key only
+    // the fixture has is not that case: check that a resume does not need it first.
+    // (`rowSource` labels where a user entry came from: `local`, `harness`, `recorded` or
+    // `hook`, read with `grep -ao` from the bundled 2.1.331 binary; no agent code reads it.)
+    for (const type of ['attachment', 'last-prompt']) expect(keysOf(entries, type), type).toEqual(keysOf(written, type))
+    expect(keysOf(written, 'user').filter((k) => !keysOf(entries, 'user').includes(k))).toEqual(['rowSource'])
+    expect(keysOf(entries, 'user').filter((k) => !keysOf(written, 'user').includes(k))).toEqual([])
     expect(keysOf(written, 'assistant').filter((k) => !keysOf(entries, 'assistant').includes(k))).toEqual(['madeBy', 'promptCacheRequested', 'requestRef', 'requestedModel'])
     expect(keysOf(entries, 'assistant').filter((k) => !keysOf(written, 'assistant').includes(k))).toEqual([])
     // The durable conversation is one session, ending at the workflow's checkpoint.
