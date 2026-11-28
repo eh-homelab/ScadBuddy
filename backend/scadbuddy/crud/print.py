@@ -1045,8 +1045,8 @@ class RemotePrinterStore(PrinterStore):
         by: Actor,
         wait: float | None = None,
     ) -> tuple[PrinterRow, bool]:
-        # ``by`` stays here: the route names the print worker (`print`) as the merge's
-        # actor, whoever this process says it is (#6949). ``wait`` too: the route waits for a
+        # ``by`` stays here: the route names Bambuddy (`bambuddy`) as the merge's actor,
+        # whoever this process says it is (#6949, #8190). ``wait`` too: the route waits for a
         # merge with no cap (#6949 K1 Task 16).
         del by, wait
         body = {
