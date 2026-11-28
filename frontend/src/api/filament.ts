@@ -349,7 +349,9 @@ export const resetSyncLinks = (confirmInstance: string, expectKept: boolean) =>
     json('POST', { confirm_instance: confirmInstance, expect_kept: expectKept }),
   )
 
-export const unbindTag = (tagId: string) => request<TagBinding>(`${BASE}/tags/${seg(tagId)}/binding`, { method: 'DELETE' })
+/** Takes a tag off its spool; `cleared` when the phone wrote the tag empty first (#8362). */
+export const unbindTag = (tagId: string, reason: 'unbound' | 'cleared' = 'unbound') =>
+  request<TagBinding>(`${BASE}/tags/${seg(tagId)}/binding${reason === 'unbound' ? '' : `?reason=${reason}`}`, { method: 'DELETE' })
 
 /** Replaces the spool's own presets; the answer is its effective set. */
 export const setSpoolPresets = (id: string, rows: PresetInput[]) =>
@@ -488,6 +490,12 @@ export const listCatalog = <K extends CatalogKind>(kind: K, options: { includeAr
 
 export type ColourSync = Schemas['ColourSync']
 export type ColourSyncSource = ColourSync['source']
+
+export type ColourCode = Schemas['ColourCode']
+
+/** #6907: Bambu Studio's colour table by the `code` digits of a Bambu SKU; 404 for an unknown code, 503 with no table. */
+export const lookupBambuColourCode = (code: string) =>
+  request<ColourCode>(`${BASE}/bambu-colour-codes?code=${encodeURIComponent(code)}`)
 
 /** Each source's newest run, with its progress while it runs. */
 export const listColourSyncs = () => request<ColourSync[]>(`${BASE}/colour-syncs`)

@@ -454,7 +454,16 @@ a `url` record whose path ends `/x/<code>` (a printed label) or a `text` record 
 or `S-142`, or a `scadbuddy:spool:<id>` text (`next` `open_code`, with `resolved` in the
 `GET /codes/{code}` shape; `backend/scadbuddy/filament/tag_codes.py`); else it offers to bind
 the tag or make a spool from what the tag says (OpenSpool or OpenTag3D). A code that names no
-row is a new tag. A phone reads a Bambu tag's UID as 4 bytes (`7E7482BB`), and the AMS reports
+row is a new tag. An OpenSpool write holds the published keys of
+[openspool.io/rfid.html](https://openspool.io/rfid.html) and every extended key of
+[SnapmakerU1-Extended-Firmware `docs/design/openspool.md` @ 8cb0b4e1](https://github.com/paxx12-snapmaker-u1/SnapmakerU1-Extended-Firmware/blob/8cb0b4e1b1d8f235ca067c0e8a5cabc0197aa11f/docs/design/openspool.md)
+the spool has a value for (`subtype`, `bed_min_temp`, `bed_max_temp`, `alpha`,
+`additional_color_hexes`, `weight`, `diameter`; #8364). A read fills the draft from all of
+them, and the "On the tag" card also lists any other key the tag holds, as text, under
+"Other keys on the tag". With every key, Spool #114's JSON is 215 bytes (measured
+2026-11-27 with `tag_formats.encode`), more than an NTAG213's 144 bytes of user memory
+([NXP NTAG213/215/216 data sheet](https://www.nxp.com/docs/en/data-sheet/NTAG213_215_216.pdf)),
+so use an NTAG215 or NTAG216, as the OpenSpool README asks. A phone reads a Bambu tag's UID as 4 bytes (`7E7482BB`), and the AMS reports
 the same tag as `7E7482BB00000100`, so ScadBuddy stores every 4-byte UID in the AMS's form
 (`spools/models.py` `clean_tag_uid`, #8042; all 38 Bambu tags on prod end `00000100`, read
 2026-11-26), and a phone's scan of a Bambu spool opens it. A 4-byte tag that is not a Bambu
