@@ -452,7 +452,7 @@ describe('inventory tools', () => {
   it("sends each offer write of a call its own Idempotency-Key, and a retried call's the same (#8437)", async () => {
     const keys: string[] = []
     const offer = { id: OFFER, item_id: ITEM, supplier_id: SUPPLIER }
-    const keep = (request: Request, body: unknown) => {
+    const keep = (request: Request, body: Record<string, unknown>) => {
       keys.push(`${request.method} ${new URL(request.url).pathname} ${request.headers.get('Idempotency-Key')}`)
       return HttpResponse.json(body)
     }
