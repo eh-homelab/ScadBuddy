@@ -153,7 +153,9 @@ func (n *noSubscriber) Error() string {
 func Run(ctx context.Context, pool *pgxpool.Pool, o Options) {
 	o = o.withDefaults()
 	waiting := false
-	var stuck *int64
+	// stuck is the seq of the event that was logged as stuck, while stuckSet holds.
+	var stuck int64
+	stuckSet := false
 	for {
 		applied, err := Apply(ctx, pool, o)
 		if !unmigrated(err) {
@@ -161,7 +163,7 @@ func Run(ctx context.Context, pool *pgxpool.Pool, o Options) {
 		}
 		var bad *badPayload
 		if !errors.As(err, &bad) {
-			stuck = nil
+			stuckSet = false
 		}
 		if err != nil && ctx.Err() == nil && unmigrated(err) {
 			if !waiting {
@@ -171,10 +173,10 @@ func Run(ctx context.Context, pool *pgxpool.Pool, o Options) {
 			}
 		} else if err != nil && ctx.Err() == nil {
 			if bad != nil {
-				if stuck == nil || *stuck != bad.seq {
+				if !stuckSet || stuck != bad.seq {
 					slog.ErrorContext(ctx, "the history subscriber stopped at an event it cannot store",
 						"subscriber", o.Name, "seq", bad.seq, "error", err.Error())
-					stuck = &bad.seq
+					stuck, stuckSet = bad.seq, true
 				}
 			} else {
 				slog.ErrorContext(ctx, "the history subscriber could not apply events",
