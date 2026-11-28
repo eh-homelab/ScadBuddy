@@ -105,9 +105,12 @@ it('goes back to the slow poll once a phone it is pairing comes online', async (
   await vi.advanceTimersByTimeAsync(PAIRING_POLL_MS)
   await screen.findByRole('button', { name: 'Read a tag' })
   const before = reads
-  await vi.advanceTimersByTimeAsync(LIST_POLL_MS - 1_000)
+  // The slow poll's interval began when the phone came online, and the real time that
+  // findByRole took moved the fake clock too (shouldAdvanceTime). So the check stays far
+  // from the slow poll's due time: in two fast-poll periods a fast poll reads twice (#8508).
+  await vi.advanceTimersByTimeAsync(2 * PAIRING_POLL_MS)
   expect(reads).toBe(before)
-  await vi.advanceTimersByTimeAsync(1_000)
+  await vi.advanceTimersByTimeAsync(LIST_POLL_MS)
   await waitFor(() => expect(reads).toBe(before + 1))
 })
 
@@ -141,7 +144,8 @@ it('stays on the slow poll when a code comes back after a phone came online', as
   release()
   await vi.advanceTimersByTimeAsync(100)
   const before = reads
-  await vi.advanceTimersByTimeAsync(LIST_POLL_MS - 1_000)
+  // As above: two fast-poll periods, far from the slow poll's due time (#8508).
+  await vi.advanceTimersByTimeAsync(2 * PAIRING_POLL_MS)
   expect(reads).toBe(before)
 })
 
