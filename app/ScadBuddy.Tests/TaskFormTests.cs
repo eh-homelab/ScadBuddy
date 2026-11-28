@@ -291,4 +291,29 @@ public class TaskFormTests
 		Assert.Equal("https://sb.example/station", TaskForm.FallbackOf("https://sb.example", "https://evil.example/x"));
 		Assert.Equal("https://sb.example/station", TaskForm.FallbackOf("https://sb.example", "//evil.example/x"));
 	}
+
+	[Theory]
+	[InlineData("s03", "S-3")]
+	[InlineData(" l-12 ", "L-12")]
+	[InlineData("T7", "T-7")]
+	[InlineData("hello", "HELLO")]
+	public void ATypedCodeIsWrittenAsTheServerWritesIt(string typed, string code) =>
+		Assert.Equal(code, TaskForm.CanonicalCode(typed));
+
+	[Fact]
+	public void ATypedCodeFitsWhatTheFieldExpects()
+	{
+		var expects = JsonNode.Parse("""{"codes":["S-9"],"kinds":["location"]}""")!.AsObject();
+		Assert.True(TaskForm.CodeFits("s9", expects));
+		Assert.True(TaskForm.CodeFits("L-4", expects));
+		Assert.False(TaskForm.CodeFits("S-10", expects));
+		Assert.True(TaskForm.CodeFits("S-10", null));
+	}
+
+	[Fact]
+	public void ASingleConfirmIsTheSendButton()
+	{
+		Assert.Equal("The plate is clear", TaskForm.SendText(TaskForm.Fields(Fixture("field-confirm").Schema)!));
+		Assert.Equal("Send", TaskForm.SendText(TaskForm.Fields(Fixture("field-scan").Schema)!));
+	}
 }

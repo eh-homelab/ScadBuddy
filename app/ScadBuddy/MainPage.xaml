@@ -4,6 +4,7 @@
              x:Class="ScadBuddy.MainPage"
              Title="ScadBuddy">
     <ContentPage.ToolbarItems>
+        <ToolbarItem x:Name="TasksItem" Text="Tasks" Clicked="OnTasksClicked" />
         <ToolbarItem Text="Server" Clicked="OnServerClicked" />
         <ToolbarItem Text="Reload" Clicked="OnReloadClicked" />
         <ToolbarItem Text="Telemetry" Order="Secondary" Clicked="OnTelemetryClicked" />

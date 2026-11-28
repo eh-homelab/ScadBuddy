@@ -365,6 +365,34 @@ public static class TaskForm
 		return new Uri(new Uri(origin), path).ToString();
 	}
 
+	static readonly System.Text.RegularExpressions.Regex Code = new("^([A-Z])-?([0-9]{1,10})$", System.Text.RegularExpressions.RegexOptions.CultureInvariant);
+
+	/// <summary>The kind each code prefix names (backend codes/resolve.py PREFIXES).</summary>
+	static readonly Dictionary<char, string> Kinds = new() { ['L'] = "location", ['S'] = "spool", ['T'] = "spool_type", ['I'] = "item", ['K'] = "item_kind" };
+
+	/// <summary>A typed code as the server writes it (<c>s03</c> is <c>S-3</c>); other text upper case, as the web's <c>canonicalCode</c>.</summary>
+	public static string CanonicalCode(string text)
+	{
+		var upper = text.Trim().ToUpperInvariant();
+		var found = Code.Match(upper);
+		return found.Success && long.TryParse(found.Groups[2].Value, CultureInfo.InvariantCulture, out var n) ? $"{found.Groups[1].Value}-{n}" : upper;
+	}
+
+	/// <summary>Whether a typed code fits a field's <c>expects</c> (the web's <c>misfit</c> rule): one of its codes, or of its kinds, or it names neither.</summary>
+	public static bool CodeFits(string text, JsonObject? expects)
+	{
+		var codes = (expects?["codes"] as JsonArray ?? []).Select(c => CanonicalCode(ChoiceText(c))).ToList();
+		var kinds = (expects?["kinds"] as JsonArray ?? []).Select(ChoiceText).ToList();
+		if (codes.Count == 0 && kinds.Count == 0) return true;
+		var code = CanonicalCode(text);
+		if (codes.Contains(code)) return true;
+		return code.Length > 0 && Kinds.TryGetValue(code[0], out var kind) && Code.IsMatch(code) && kinds.Contains(kind);
+	}
+
+	/// <summary>The send button's text: a form of one confirm is that one large button (spec §6.4).</summary>
+	public static string SendText(IReadOnlyList<FieldSpec> fields) =>
+		fields is [{ Kind: ControlKind.Confirm } only] ? only.Label : "Send";
+
 	static string? Str(JsonObject o, string key) => o[key] is JsonValue v && v.TryGetValue<string>(out var s) ? s : null;
 
 	static double? Num(JsonObject o, string key) =>
