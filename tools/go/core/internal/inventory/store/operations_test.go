@@ -111,7 +111,7 @@ func TestNoteErrorKeepsTheOperationRunning(t *testing.T) {
 	if err := StartOperation(ctx, pool, op); err != nil {
 		t.Fatal(err)
 	}
-	if err := NoteError(ctx, pool, op.ID, 1, errors.New("connection refused")); err != nil {
+	if err := NoteError(ctx, pool, op, errors.New("connection refused")); err != nil {
 		t.Fatal(err)
 	}
 	var status, lastError string
@@ -349,17 +349,23 @@ func TestAStaleAttemptLeavesTheRowToTheLaterOne(t *testing.T) {
 		t.Fatal(err)
 	}
 	// Attempt 1 timed out and fails while attempt 2 runs.
-	if err := NoteError(ctx, pool, op.ID, 1, errors.New("late")); err != nil {
+	stale := op
+	stale.Attempt = 1
+	if err := NoteError(ctx, pool, stale, errors.New("late")); err != nil {
 		t.Fatal(err)
 	}
+	if err := FailOperation(ctx, pool, stale, errors.New("late and final")); err != nil {
+		t.Fatal(err)
+	}
+	var status string
 	var attempt int
 	var lastError *string
-	if err := pool.QueryRow(ctx, `SELECT attempt, last_error FROM inventory_operations WHERE id = $1`, op.ID).
-		Scan(&attempt, &lastError); err != nil {
+	if err := pool.QueryRow(ctx, `SELECT status, attempt, last_error FROM inventory_operations WHERE id = $1`, op.ID).
+		Scan(&status, &attempt, &lastError); err != nil {
 		t.Fatal(err)
 	}
-	if attempt != 2 || lastError != nil {
-		t.Fatal(attempt, lastError)
+	if status != "running" || attempt != 2 || lastError != nil {
+		t.Fatal(status, attempt, lastError)
 	}
 }
 
@@ -375,12 +381,30 @@ func TestAReusedKeyLeavesTheRowToTheFirstRun(t *testing.T) {
 	if err := StartOperation(ctx, pool, second); err != nil {
 		t.Fatal(err)
 	}
-	var workflowID string
-	if err := pool.QueryRow(ctx, `SELECT workflow_id FROM inventory_operations WHERE id = $1`, first.ID).
-		Scan(&workflowID); err != nil {
+	// The second run's error and failure are not the first run's (#8575).
+	if err := NoteError(ctx, pool, second, errors.New("second's error")); err != nil {
 		t.Fatal(err)
 	}
-	if workflowID != "wf-first" {
-		t.Fatalf("workflow_id %q, want wf-first", workflowID)
+	if err := FailOperation(ctx, pool, second, errors.New("second's failure")); err != nil {
+		t.Fatal(err)
+	}
+	var workflowID, status string
+	var lastError *string
+	if err := pool.QueryRow(ctx, `SELECT workflow_id, status, last_error FROM inventory_operations WHERE id = $1`, first.ID).
+		Scan(&workflowID, &status, &lastError); err != nil {
+		t.Fatal(err)
+	}
+	if workflowID != "wf-first" || status != "running" || lastError != nil {
+		t.Fatalf("workflow_id %q, status %q, last_error %v; want wf-first, running, none", workflowID, status, lastError)
+	}
+	// The first run's own failure ends the row.
+	if err := FailOperation(ctx, pool, first, errors.New("first's failure")); err != nil {
+		t.Fatal(err)
+	}
+	if err := pool.QueryRow(ctx, `SELECT status FROM inventory_operations WHERE id = $1`, first.ID).Scan(&status); err != nil {
+		t.Fatal(err)
+	}
+	if status != "failed" {
+		t.Fatalf("status %q, want failed", status)
 	}
 }

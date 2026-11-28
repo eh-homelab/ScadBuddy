@@ -67,7 +67,10 @@ func OperationFrom(ctx context.Context) (string, bool) {
 // notice. A running row of the id and kind takes this attempt only when the row's attempt is
 // an earlier one; its last_error stays. A start of the same or an earlier attempt (another
 // activity that reuses the key while the first runs) leaves the row to the first, with its
-// workflow_id (#8567). A finished row is never opened again: a replay or a reuse of its key
+// workflow_id (#8567). That also holds when the first run's workflow closed before it wrote
+// the row's end: the row keeps that workflow, so a stale read asks Temporal about it and
+// answers failed, the end of that run, until the new run's write ends the row (#8575). A
+// finished row is never opened again: a replay or a reuse of its key
 // changes nothing and sends nothing. A running row of another kind (its key reused on
 // another write, which runs as another activity) is left as it is, too. Before it writes,
 // the start prunes the finished rows past the retention (pruneOperations), as the agent's
@@ -138,12 +141,13 @@ func FinishOperation(ctx context.Context, tx pgx.Tx, id string, a Answer) error 
 // NoteError records that an attempt failed with an infrastructure error: the row stays
 // running, Temporal retries the activity, and the row keeps the error and the attempt. An
 // attempt older than the row's (one that timed out and failed while a later one runs)
-// changes nothing (#8567).
-func NoteError(ctx context.Context, pool *pgxpool.Pool, id string, attempt int, cause error) error {
+// changes nothing (#8567), and so does an attempt of another workflow that reuses the key
+// (#8575; see runOf).
+func NoteError(ctx context.Context, pool *pgxpool.Pool, op Operation, cause error) error {
 	return pgx.BeginFunc(ctx, pool, func(tx pgx.Tx) error {
 		tag, err := tx.Exec(ctx, `UPDATE inventory_operations SET last_error = $2, attempt = $3,
-			updated_at = clock_timestamp() WHERE id = $1 AND status = 'running' AND attempt <= $3`,
-			id, lastError(cause), attempt)
+			updated_at = clock_timestamp() WHERE id = $1 AND status = 'running'`+runOf,
+			op.ID, lastError(cause), op.Attempt, op.WorkflowID)
 		if err != nil || tag.RowsAffected() == 0 {
 			return err
 		}
@@ -154,8 +158,9 @@ func NoteError(ctx context.Context, pool *pgxpool.Pool, id string, attempt int, 
 // FailOperation ends the operation id as failed: its attempt failed with an error that
 // Temporal does not retry, so no later attempt ends the row (#8256). The row keeps the
 // error and the attempt, and its problem is the one ReadOperation answers for an activity
-// that Temporal closed without a result: 500 inventory_activity_failed.
-func FailOperation(ctx context.Context, pool *pgxpool.Pool, id string, attempt int, cause error) error {
+// that Temporal closed without a result: 500 inventory_activity_failed. As NoteError, it
+// changes nothing for an older attempt or another workflow's run (#8575).
+func FailOperation(ctx context.Context, pool *pgxpool.Pool, op Operation, cause error) error {
 	text := lastError(cause)
 	failed := &problem.Refused{Status: 500, Code: "inventory_activity_failed", Detail: text}
 	body, err := httpx.Marshal(failed.Body())
@@ -164,14 +169,20 @@ func FailOperation(ctx context.Context, pool *pgxpool.Pool, id string, attempt i
 	}
 	return pgx.BeginFunc(ctx, pool, func(tx pgx.Tx) error {
 		tag, err := tx.Exec(ctx, `UPDATE inventory_operations SET status = 'failed', problem = $2::jsonb,
-			last_error = $3, attempt = $4, finished_at = clock_timestamp(), updated_at = clock_timestamp()
-			WHERE id = $1 AND status = 'running'`, id, string(body), text, attempt)
+			last_error = $5, attempt = $3, finished_at = clock_timestamp(), updated_at = clock_timestamp()
+			WHERE id = $1 AND status = 'running'`+runOf, op.ID, string(body), op.Attempt, op.WorkflowID, text)
 		if err != nil || tag.RowsAffected() == 0 {
 			return err
 		}
 		return notifyOperation(ctx, tx, id)
 	})
 }
+
+// runOf limits an end or a note to the row's own run: the row's attempt is this one or an
+// earlier one ($3), and its workflow is this one ($4; '' for a standalone activity). Two
+// standalone activities that reuse a key both have no workflow, so it does not tell them
+// apart.
+const runOf = ` AND attempt <= $3 AND workflow_id IS NOT DISTINCT FROM NULLIF($4, '')`
 
 // lastError is cause's text, at most lastErrorMax characters.
 func lastError(cause error) string {
