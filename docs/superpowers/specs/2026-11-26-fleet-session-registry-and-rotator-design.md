@@ -137,7 +137,7 @@ Where the accounts live:
 | Part | Where | What |
 |---|---|---|
 | 1 | `backend/scadbuddy/migrations_agent/`, `tools/go/core/internal/secrets` | The pool learns a subscription-login kind, a scope and a machine lease (§6.1) |
-| 2 | `tools/go/core` (new `internal/fleetrotator`), the API's auth | A `fleet-rotator` caller and its routes (§6.2) |
+| 2 | `tools/go/core` (`internal/secrets/fleet_logins.go`, area `fleet-logins`, #7984), the API's auth | A `fleet-rotator` caller and its routes (§6.2) |
 | 3 | `tools/go/core/internal/fleet`, a migration | The session registry (§6.3) |
 | 4 | `tools/go/claudecreds` (new library module) | Reading transcripts, the reset parser, and the login file writer (§6.4, §6.5) |
 | 5 | `tools/go/fleetd` (new binary module) | The machine service (§6.6) |
@@ -192,17 +192,31 @@ Where the accounts live:
   - `POST /leases`: lease the best usable `claude_login` row with scope `fleet` for this machine
     (priority order, no cooldown, not disabled, not leased elsewhere), and reveal it. Only
     `claude_login` rows are leased: `fleetd` writes only a `claudeAiOauth` login (§4, §6.6).
-    Answers `recovers_at` when none is usable.
+    Answers `recovers_at` when none is usable. A lease is for one config dir (`config_dir`): a
+    dir holds one, and asked again the route answers the one it holds. A rotation names the
+    lease it replaces (`replacing`), and the dir holds that lease's successor too until step 5
+    of §6.6 releases the old one.
   - `PUT /leases/{credential}`: write back the current login (the refresh token changes) while
-    the lease is held, keyed by `lease_epoch`.
+    the lease is held, keyed by `lease_epoch`. It never sets or changes the row's account: a row
+    with an account takes only a login of that account.
+  - `POST /leases/{credential}/renew`: extend the lease (§6.6, "Lease length").
   - `DELETE /leases/{credential}`: release. A lease whose login was installed is released after a
     final write-back; a lease that was never installed (§6.6 step 3) is released without one.
-  - `POST /events`: a rate limit, auth failure or recovery, with its source (transcript, session,
-    entry uuid), deduplicated on the entry uuid.
+  - `POST /events`: a rate limit, a permanent or transient failure, or a recovery (`kind`
+    `rate_limit`, `permanent`, `transient`, `recovery`: `claudecreds`' kinds and one more), with
+    its source (transcript, session, entry uuid), deduplicated on the entry uuid. Only for a
+    login the machine leases. A rate limit's `until` is from now to 7 days on: Claude's usage
+    windows are five hours and a week (`claudecreds` `Event.LimitType`), and the cooldown
+    cools every login of the account, so a later one is refused.
   - `POST /rotations`, `PUT /rotations/{id}`: a rotation (from, to, reason, time) and its check
     (each session's result, `verified_at`).
+  - Each of these names its `machine_id`, which the caller's token or proof must own.
 - Secrets travel only on these routes, on core's authenticated path, never through the fleet
   chat server.
+- A person adds a fleet login (a `claude_login`, or another kind of scope `fleet` or `both`)
+  with core's `POST /api/v1/fleet/logins`, which only a person signed in themselves may call
+  (Settings, "Add a Claude login for the fleet"); the agent's caller writes no fleet row (#8009).
+  The routes' bodies and answers are in `tools/go/core/README.md`, "Area `fleet-logins`".
 
 ### 6.3 The session registry
 
@@ -276,6 +290,12 @@ Where the accounts live:
      it.
   6. Update `oauthAccount` in `~/.claude.json`, best effort (below).
   7. Record the rotation, then send continue (§6.7).
+- Lease length (#7984): a lease lasts 24 hours from its start, its last write-back or its last
+  renew (`POST /leases/{credential}/renew`). The service renews each lease it holds well inside
+  that. A lease no one renews ends, and any machine may then lease the row; that moves
+  `lease_epoch` on, so the old holder's write-back, renew and release are refused. 24 hours is
+  a call: it frees an abandoned machine's login within a day and is far longer than any gap
+  between renews.
 - `~/.claude.json` has no lock that the service can share. No lock around its writes was found
   in Claude Code 2.1.332's code (read 2026-11-26), and Claude Code rewrites the file often. The
   service reads the file, changes only `oauthAccount` (other keys kept), writes a temp file and
@@ -331,6 +351,8 @@ Where the accounts live:
   `fleet` token (§6.2) required. Machines do not use the exchange route; only the in-cluster
   `github` mode does, inside the cluster. The ingress change is in
   eh-homelab/clusters, dry-run on the server before merge.
+- Core's `SCADBUDDY_CORE_AREAS` names `fleet` and `fleet-logins` (the leases need core's KEK,
+  `SCADBUDDY_SECRET_KEY_FILE`).
 - Each machine gets a `fleet` token (§6.2), made in Settings → System → Access tokens and
   written to a 0600 file on the machine.
 - `fleetd` is published as a binary for linux/amd64 on a release tag, beside its image (every Go

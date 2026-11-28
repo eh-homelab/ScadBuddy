@@ -144,6 +144,47 @@ func unknownOwner() error {
 			"can take it over: ask an admin to delete the machine's row", "machine-of-unknown-owner")
 }
 
+// MachinePattern is a machine id's form, for the rotator's routes in other packages.
+var MachinePattern = machinePattern
+
+// OwnMachine is nil when the request's fleet token or bootstrap proof owns machine id: the
+// rotator's lease, event and rotation routes (#7984) bind each write to the caller's machine.
+// It takes the row's KEY SHARE lock in tx, so the row cannot move to another owner before tx
+// ends. An unknown machine is 404 unknown-machine; another owner's is 403.
+func OwnMachine(ctx context.Context, tx pgx.Tx, r *http.Request, id string) error {
+	own, err := ownerOf(r)
+	if err != nil {
+		return err
+	}
+	var row owner
+	err = tx.QueryRow(ctx, `SELECT proof_name, token_id FROM fleet_machines WHERE id = $1 FOR KEY SHARE`,
+		id).Scan(&row.proof, &row.token)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return httpx.WithReason(http.StatusNotFound,
+			"no fleet machine has that id: register it first", "unknown-machine")
+	}
+	if err != nil {
+		return err
+	}
+	if !same(row.proof, own.proof) || !same(row.token, own.token) {
+		return anotherProof()
+	}
+	return nil
+}
+
+// Principal is who an audit row names for the request's machine credential: a fleet token's
+// person and the token's id, or the fleet-rotator service and its proof's machine.
+func Principal(r *http.Request) (kind, id, label string) {
+	if c := auth.CallerOf(r.Context()); c.Kind == auth.KindToken && c.TokenID != "" {
+		return "person", c.Principal, "fleet token " + c.TokenID
+	}
+	machine := ""
+	if s := crud.ServiceOf(r); s != nil {
+		machine = s.Machine
+	}
+	return "service", RotatorCaller, "fleet-rotator " + machine
+}
+
 // RegistryReads are caller fleet's registry routes, under /api/v1/internal/crud/fleet.
 func RegistryReads(pool *pgxpool.Pool) []crud.Route {
 	f := &Fleet{Pool: pool}

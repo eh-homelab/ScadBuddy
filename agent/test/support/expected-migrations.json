@@ -438,5 +438,9 @@
   {
     "id": "20261126T1613Z_credential_claude_login_scope_lease",
     "sha256": "4e836673e38907624c7646df0b8cdfd8b87b59d221c12dad027ca6427e85f406"
+  },
+  {
+    "id": "20261128T1530Z_credential_lease_dir_expiry",
+    "sha256": "42f6e9c6ce46bd74ec1509556cf58371063bc4f70c0f64c4f53073e0b69f8c67"
   }
 ]

@@ -191,6 +191,38 @@ export const handlers = [
     return HttpResponse.json(created, { status: 201 })
   }),
 
+  // Core's person route (#7984): a claude_login for the fleet, which the assistant never uses.
+  http.post('/api/v1/fleet/logins', async ({ request }) => {
+    const body = (await request.json()) as { kind?: string; secret?: string; name?: string }
+    if (body.kind !== 'claude_login') {
+      return detail('a fleet login is a claude_login, or another kind whose scope is "fleet" or "both"', 422)
+    }
+    let login: Record<string, unknown> | null
+    try {
+      login = JSON.parse(body.secret ?? '') as Record<string, unknown>
+    } catch {
+      login = null
+    }
+    if (!login || typeof login.accessToken !== 'string' || typeof login.refreshToken !== 'string') {
+      return detail('a claude_login secret needs accessToken and refreshToken as text and expiresAt as a number', 400)
+    }
+    const name = named(body.name)
+    if (name instanceof Response) return name
+    const created = entry({
+      id: `c${state.nextId++}`,
+      priority: state.credentials.length,
+      kind: 'claude_login',
+      name: name.name,
+      last4: last4(login.accessToken),
+      scope: 'fleet',
+      agent_uses: false,
+      subscription_type: typeof login.subscriptionType === 'string' ? login.subscriptionType : null,
+      updated_at: new Date().toISOString(),
+    })
+    state.credentials = [...state.credentials, created]
+    return HttpResponse.json({ credential: created })
+  }),
+
   http.put(`${base}/order`, async ({ request }) => {
     // The agent's rows only (#7983): a fleet row is refused, and keeps its place in the list.
     const { ids } = (await request.json()) as { ids: string[] }

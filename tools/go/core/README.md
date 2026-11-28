@@ -317,6 +317,75 @@ behind `internal/auth`'s gate (`auth.WouldRefuse`, `Gate.Wrap`), as Python's `au
 another caller's CRUD route stays 401, as Python's guard answers it. The bootstrap proofs keep
 working until #8367 retires them for machines.
 
+Area `fleet-logins` † (`internal/secrets/fleet_logins.go`, #7984; spec
+`docs/superpowers/specs/2026-11-26-fleet-session-registry-and-rotator-design.md` §6.2) is the
+login rotator's secret path. It needs the KEK, and the machine routes read area `fleet`'s
+`fleet_machines`, so name both. Caller `fleet-rotator` (and a `fleet` token, through
+`AddForToken`, as the registry `PUT`s) gets these routes under
+`/api/v1/internal/crud/fleet-rotator`. Each names a `machine_id` that the caller's token or proof
+must own (`fleet.OwnMachine`: 404 `unknown-machine`, 403 `machine-of-another-proof`), so a
+machine leases, writes back, records and rotates only for its own machines:
+
+- `POST /leases` `{machine_id, config_dir, replacing?: {credential_id, lease_epoch}}`: a config
+  dir's lease. A config dir holds one: asked again, the route answers the lease the dir holds and
+  reveals no other. A rotation names the lease it replaces (`replacing`, held at that epoch, else
+  409 `lease-stale`); while that one is still held (§6.6 step 5 releases it last) the dir holds
+  its successor too, and asked again the route answers that successor. Otherwise it leases the
+  first `claude_login` by priority whose scope is `fleet` or `both` and that is not disabled, not
+  cooling down, of no account with a login cooling down, held by no machine (a lease that ended
+  is free), and sealed under the current KEK (`FOR UPDATE SKIP LOCKED`). It sets `leased_to`,
+  `leased_at`, `lease_dir`, `lease_expires_at` (now + 24 hours) and `lease_epoch + 1`, and answers
+  `{lease: {credential, lease_epoch, login}, recovers_at: null}`: `login` is the `claudeAiOauth`
+  object, the only secret these routes answer. With none it answers `{lease: null, recovers_at}`,
+  the soonest time one is usable again (null when none recovers on its own). A row that does not
+  open is 409 `credential-sealed`.
+- `PUT /leases/{credential}` `{machine_id, lease_epoch, login}`: the write-back. It seals the
+  login over the row (the AAD of every credential row) while the machine holds the lease at that
+  epoch, else 409 `lease-stale`, and moves the lease's end to now + 24 hours. It never sets or
+  changes the row's account: a row with an `account_uuid` takes only a login that names the same
+  one (one that names another or none is 409 `another-account`), and a row with none keeps none
+  (only a person's add sets it). The row's health and `epoch` stay. The 10 s timeout and what
+  fleetd does on a failure are the client's (§6.6 step 3).
+- `POST /leases/{credential}/renew` `{machine_id, lease_epoch}`: moves the lease's end to now +
+  24 hours (409 `lease-stale`). A lease no one renews or writes back for 24 hours ends: any
+  machine may then lease the row, which moves `lease_epoch` on, so the old holder's epoch is
+  stale (migration `20261128T1530Z_credential_lease_dir_expiry.sql`).
+- `DELETE /leases/{credential}?machine_id=&lease_epoch=`: the release, at that epoch (409
+  `lease-stale`); `lease_epoch` moves on.
+- `POST /events` `{machine_id, entry_uuid, session_id?, credential_id, epoch, kind, reason?,
+  until?, reset_source?}`: `kind` is `rate_limit` (needs `until`), `permanent`, `transient`
+  (each needs a `reason`) or `recovery`, written as the agent's `cooling_down`, `disabled`,
+  `transient` and `used` health writes, keyed by the row's `epoch`. A rate limit's `until` is
+  from now to 7 days on, else 400: Claude's usage windows are five hours and a week
+  (`tools/go/claudecreds` `Event.LimitType`), and the cooldown cools the whole account. The row must be a fleet
+  login the machine leases (409 `not-leased`). `fleet_credential_events` keeps one row per
+  `entry_uuid`: a repeat answers `{duplicate: true}` and writes nothing. A rate limit also cools
+  every other `claude_login` of the row's `account_uuid`, by the same later-wins rule, and
+  answers their ids as `cooled`.
+- `POST /rotations` (201) `{machine_id, config_dir?, from_credential_id?, to_credential_id?,
+  reason, rotated_at?}` and `PUT /rotations/{id}` `{sessions: [{session_id, result, at?}],
+  verified_at?}`, the check written whole (`result` `pending`, `passed`, `failed`, `no-answer`
+  or `unreachable`): `fleet_rotations`. Only the rotation's machine's owner writes it (404
+  `unknown-rotation`).
+
+Each lease, reveal, write-back, release, rotation and check writes an `ai_audit` row of kind
+`credential` (actions `fleet.lease`, `fleet.reveal`, `fleet.write_back`, `fleet.release`,
+`fleet.rotation`, `fleet.rotation_check`; a lease with no login is `refused`), naming the token's
+person or the proof's machine, never a secret. The fleet chat server's caller `fleet` gets 403
+`wrong_caller` on all of them, a `read` or `write` token 403 `out_of_scope`. No route here
+publishes to the event log, so none takes the event-log lock.
+
+The area also serves a person's route, `POST /api/v1/fleet/logins` (class `person`), that adds a
+fleet login with the store's `agent=False` path (#8009 refuses the agent's caller every fleet
+row): the agent's credential body (`kind`, `secret`, `name`, `scope`, `email`, `base_url`), a
+`claude_login` (scope `fleet`) or another kind whose scope is `fleet` or `both` (422 otherwise).
+It answers `{credential}`, never the secret, and writes an `ai_audit` row `fleet.add`. Only a
+person signed in themselves (a `login` or `break_glass` session cookie with `X-ScadBuddy-Request:
+1`) may call it, in every `SCADBUDDY_AUTH_MODE`, not only in `enforce`: a token, a service or no
+one is refused with the gate's problem. Settings → Assistant offers it as "Add a Claude login for
+the fleet" (`frontend/src/components/assistant/FleetLoginForm.tsx`). The agent's reveal still
+opens no `claude_login` and no `fleet` row (`agentsOwn`).
+
 Area `blobs` † (`internal/blobstore`, #7958) is a shared area: any service credential whose scopes
 hold `crud.blobs` may call it, under `/api/v1/internal/crud/blobs`; no caller is granted that scope
 yet. Python has no such routes. `POST /uploads` with `{kind, size, sha256, media_type}` answers
