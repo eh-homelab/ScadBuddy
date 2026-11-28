@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"reflect"
 	"slices"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -99,6 +100,29 @@ func TestAnUncountedItemHasNoStockAndIsNeverLow(t *testing.T) {
 	made := must(createItem(t, pool, itemStore(), wire.ItemInput{KindID: "flat_service", Name: "Laser cutting", LowStock: dec("5")}))
 	if made.Tracking != "none" || made.OnHand != "0" || made.StockValueMinor != "0" || made.Low {
 		t.Fatalf("%+v", made)
+	}
+}
+
+// The owner's item numbers (#7169): every item has a number and the code I-<number>, on every
+// read and every write's answer.
+
+func TestAnItemReadCarriesItsCode(t *testing.T) {
+	pool, s := testdb.New(t), itemStore()
+	first := must(createItem(t, pool, s, wire.ItemInput{KindID: "hardware", Name: "M3 nut"}))
+	second := must(createItem(t, pool, s, wire.ItemInput{KindID: "hardware", Name: "M3 bolt"}))
+	if first.Number <= 0 || second.Number <= first.Number {
+		t.Fatalf("numbers %d then %d", first.Number, second.Number)
+	}
+	renamed := must(updateItem(t, pool, s, first.ID, wire.InventoryItemPatch{Name: ptr("M3 nyloc")}))
+	reads := []wire.Item{first, second, renamed, getItem(t, pool, s, first.ID)}
+	reads = append(reads, must(s.List(context.Background(), pool, ItemFilter{}))...)
+	for _, it := range reads {
+		if it.Number == 0 || it.Code != "I-"+strconv.FormatInt(it.Number, 10) {
+			t.Fatalf("%s reads number %d code %q", it.Name, it.Number, it.Code)
+		}
+	}
+	if renamed.Number != first.Number {
+		t.Fatalf("a patch changed the number from %d to %d", first.Number, renamed.Number)
 	}
 }
 

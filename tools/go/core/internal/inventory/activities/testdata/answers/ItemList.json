@@ -8,6 +8,7 @@
         "nature": "physical",
         "role": "consumable"
       },
+      "code": "I-1",
       "compatible_with": [],
       "cost_unknown": false,
       "edited_fields": [],
@@ -28,6 +29,7 @@
       "missing_properties": [],
       "name": "Brass insert M3",
       "note": "for lids",
+      "number": 1,
       "offer_count": 0,
       "on_hand": "0",
       "saleable": null,

@@ -194,6 +194,9 @@ class Item(_Decimals):
     model_config = ConfigDict(populate_by_name=True)
 
     id: UUID
+    #: The item's number from `item_numbers_seq`, and its short code `I-<number>` (#7169).
+    number: int
+    code: str
     kind_id: str
     #: The kind's ancestors and the kind, root first.
     kind_path: list[str]

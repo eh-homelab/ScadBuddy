@@ -28,6 +28,8 @@ const KIND_ID = /^[a-z][a-z0-9_]{0,39}$/
 type MockKind = Omit<S['ItemKind'], 'item_count' | 'code'>
 type MockItem = {
   id: string
+  /** The next number of `item_numbers_seq`; the code is I-<number>. */
+  number: number
   kind_id: string
   name: string
   manufacturer: string
@@ -191,6 +193,7 @@ export function seedItem(fields: Partial<MockItem> & { name: string; kind_id: st
   ready()
   const item: MockItem = {
     id: id(),
+    number: Math.max(0, ...inventoryMock.items.map((i) => i.number)) + 1,
     manufacturer: '',
     compatible_with: [],
     low_stock: '0',
@@ -356,6 +359,8 @@ function answerItem(item: MockItem): S['Item'] {
   }
   return {
     id: item.id,
+    number: item.number,
+    code: `I-${item.number}`,
     kind_id: item.kind_id,
     kind_path: kindPath(item.kind_id).map((p) => p.id),
     tracking,

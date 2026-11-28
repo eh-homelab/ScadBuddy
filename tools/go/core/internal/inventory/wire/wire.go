@@ -161,7 +161,11 @@ type PropertyPatch map[string]json.RawMessage
 // its kinds' schemas define whose stored value does not fit. Both are sorted, read on
 // every read and never stored, and empty for an archived item (R-K1-33).
 type Item struct {
-	ID                string      `json:"id"`
+	ID string `json:"id"`
+	// Number is the item's number from item_numbers_seq; Code is its short code I-<number>
+	// (#7169).
+	Number            int64       `json:"number"`
+	Code              string      `json:"code"`
 	KindID            string      `json:"kind_id"`
 	KindPath          []string    `json:"kind_path"`
 	Tracking          string      `json:"tracking"`
