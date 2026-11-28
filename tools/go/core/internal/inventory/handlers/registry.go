@@ -21,8 +21,13 @@ type Registry struct {
 	impls   map[string]any
 }
 
-// Implement registers impl for the handler id.
+// Implement registers impl for the handler id. An id the catalog has no handler for is a
+// mistake in the code that registers it, so it panics at start rather than leave the
+// handler unbuilt without a word (#8256).
 func (r *Registry) Implement(id string, impl any) {
+	if _, ok := r.Catalog.Specs[id]; !ok {
+		panic(fmt.Sprintf("handlers: Implement(%q): the catalog has no such handler", id))
+	}
 	if r.impls == nil {
 		r.impls = map[string]any{}
 	}
