@@ -7,6 +7,7 @@ import (
 	"errors"
 	"net/url"
 	"os"
+	"strings"
 	"testing"
 
 	"github.com/jackc/pgx/v5/pgconn"
@@ -70,8 +71,15 @@ func TestNoChannelTakesAnInvalidName(t *testing.T) {
 	v := readChannelVectors(t)
 	for _, ch := range v.Invalid {
 		route := fleetBase + "/channels/~" + base64.RawURLEncoding.EncodeToString([]byte(ch)) + "/members/" + ann
-		if got := a.do("PUT", route, ""); got.status != 422 {
+		got := a.do("PUT", route, "")
+		if got.status != 422 {
 			t.Errorf("a join of %q: %d %s; want 422", ch, got.status, got.raw)
+		}
+		// The 422 names the rules a new channel follows, as fleetchat's ErrBadChannel does,
+		// and not the legacy alternative.
+		if !strings.Contains(got.raw, "an issue or PR reference (owner/repo#123)") ||
+			strings.Contains(got.raw, "should match pattern") {
+			t.Errorf("a join of %q: %s; want fleetchat's ErrBadChannel text", ch, got.raw)
 		}
 		if got := a.send(ann, ch, "hi"); ch != "" && got.status != 422 {
 			t.Errorf("a post to %q: %d %s; want 422", ch, got.status, got.raw)

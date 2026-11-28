@@ -44,7 +44,9 @@ type Store interface {
 	// Touch records that the agent was seen now, creating it on first use.
 	Touch(ctx context.Context, sessionID, handle string) error
 	Agents(ctx context.Context) ([]AgentInfo, error)
-	// Join adds the agent to the channel, creating the channel.
+	// Join adds the agent to the channel, creating the channel. A name valid only
+	// before #8149 is never created: when no channel has it, Join returns
+	// ErrBadChannel and changes nothing.
 	Join(ctx context.Context, sessionID, channel string) error
 	// Leave returns ErrUnknownChannel when no channel has the name, and
 	// ErrNotMember when the agent is not in it.

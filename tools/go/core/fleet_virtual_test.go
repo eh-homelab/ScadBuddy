@@ -39,6 +39,31 @@ func TestADMToAVirtualSenderGetsItsRejectMessage(t *testing.T) {
 	expect(t, dm("nobody").body["reason"], "unknown-agent")
 	// An agent field that is no handle and no name is a 422.
 	expect(t, dm("Not_A_Name").status, 422)
+	// An all-hex agent that is no handle gets the handle's 422, as before #8036, not a 404:
+	// no virtual sender's name is all hex.
+	for _, bad := range []string{"abc", "0a1b2c3d4", "12345"} {
+		out := dm(bad)
+		expect(t, out.status, 422)
+		if _, ok := out.body["errors"]; !ok {
+			t.Errorf("agent %q: %s; want the handle's validation errors", bad, out.raw)
+		}
+	}
+}
+
+// A virtual sender's channel post (from_session NULL) counts in its members' unread.
+func TestAVirtualPostCountsAsUnread(t *testing.T) {
+	a := newFleet(t)
+	rotator := a.credential("fleet-rotator", "crud.fleet-rotator")
+	ann := a.agent()
+	a.fleet("PUT", "/channels/ops/members/"+ann, "", 200)
+	expect(t, a.virtual(rotator, object("sender", "rotator", "channel", "ops", "text", "logins moved")).status, 200)
+	expect(t, a.count(`SELECT count(*) FROM fleet_messages WHERE from_session IS NULL`), 1)
+	chans := a.fleet("GET", "/agents/"+ann+"/channels", "", 200).body["channels"].([]any)
+	expect(t, len(chans), 1)
+	expect(t, chans[0].(map[string]any)["unread"], float64(1))
+	a.inbox(ann, "")
+	chans = a.fleet("GET", "/agents/"+ann+"/channels", "", 200).body["channels"].([]any)
+	expect(t, chans[0].(map[string]any)["unread"], float64(0))
 }
 
 func TestTheVirtualSenderNamesCanNeverBeAHandle(t *testing.T) {

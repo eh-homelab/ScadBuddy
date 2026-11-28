@@ -470,8 +470,10 @@ class BootstrapVerifier:
     secret passes only while its file is still there (one stat per exchange), and every
     start and auth sweep revokes the credentials of a machine with no file
     (``revoke_machines_without_proof``). Python's ``resolve`` refuses such a credential
-    at once too (``has_machine``), and revokes it. A file whose suffix names no machine is
-    skipped with a warning.
+    at once too (``has_machine``), and revokes it. Those two revoke checks read the file
+    alone, never what this replica read at start, so a replica started before a machine's
+    file never revokes that machine during a rollout; core's ``auth.Resolver.HasProof`` is
+    the same rule. A file whose suffix names no machine is skipped with a warning.
 
     ``hashes`` is keyed by file name; ``callers`` names each file's caller; ``directory``
     is where the per-machine files are looked for again."""
@@ -490,20 +492,33 @@ class BootstrapVerifier:
         return self.directory is None or (self.directory / name).is_file()
 
     def machines(self, caller: ServiceCaller = "fleet-rotator") -> set[str]:
-        """The machines of ``caller`` whose proof file is still there, of those read at
-        start."""
+        """The machines of ``caller`` whose proof file is there now, by the directory
+        alone: during a rollout a replica older than a new machine's file still keeps that
+        machine's credentials. With no directory, those read at start."""
+        if caller not in PER_MACHINE_CALLERS:
+            return set()
+        if self.directory is None:
+            return {
+                name[len(caller) + 1 :] for name, owner in self.callers.items() if owner == caller
+            }
         return {
-            name[len(caller) + 1 :]
-            for name, owner in self.callers.items()
-            if owner == caller and caller in PER_MACHINE_CALLERS and self._present(name)
+            path.name[len(caller) + 1 :]
+            for path in self.directory.glob(f"{caller}.*")
+            if MACHINE_NAME.fullmatch(path.name[len(caller) + 1 :]) and path.is_file()
         }
 
     def has_machine(self, caller: str, machine: str) -> bool:
-        """Whether ``machine``'s proof file of ``caller`` was read at start and is still
-        there (one stat): a credential bound to a machine without it is refused when it is
-        resolved (`service_credentials.py` ``resolve``)."""
+        """Whether ``machine``'s proof file of ``caller`` is there now (one stat), whether or
+        not this replica read it at start, as core's ``auth.Resolver.HasProof``: a
+        credential bound to a machine without it is refused when it is resolved
+        (`service_credentials.py` ``resolve``). Issuing still needs the hash read at start
+        (``verify``)."""
+        if caller not in PER_MACHINE_CALLERS or not MACHINE_NAME.fullmatch(machine):
+            return False
         name = f"{caller}.{machine}"
-        return self.callers.get(name) == caller and self._present(name)
+        if self.directory is None:
+            return self.callers.get(name) == caller
+        return (self.directory / name).is_file()
 
     @classmethod
     def from_dir(cls, directory: Path) -> BootstrapVerifier:

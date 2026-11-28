@@ -223,7 +223,11 @@ the messages returned. A text over 16 MiB is a 422 whose detail names the limit 
 `text-too-long`). A cursor `PUT` only moves it back: a `seq` past the cursor is a 422
 (reason `seq-ahead`). A channel's name follows fleetchat's rule (#8149,
 `tools/go/fleetchat/README.md`), as does the `fleet_channels` CHECK; a join that would make a channel with a name valid
-only under the rule before it is a 422 (reason `legacy-channel-name`). Its `GET /changes` is
+only under the rule before it is a 422 (reason `legacy-channel-name`). A bad `{name}` is a 422
+whose message names the reference and DNS rules, word for word fleetchat's `ErrBadChannel`.
+The join checks an old-style name in its own transaction, so fleetchat's `Service.Join` lists
+no channels: sbfleet maps the 422 `legacy-channel-name` to `fleetchat.ErrBadChannel`. A `POST /messages` whose `agent` is all hex digits but no handle is a 422
+(the handle's check), not a 404. Its `GET /changes` is
 area `changes` (below).
 
 ## The event stream (#7768)
@@ -280,14 +284,21 @@ gives a handler the verified service). The machine's `id` is the service's own h
 first `PUT /machines/{id}` records the caller's proof name in `fleet_machines.proof_name`. A
 `PUT /machines/{id}` of a row another proof registered is a 403 (reason
 `machine-of-another-proof`), and so is a session `PUT` whose machine is registered to
-another proof. So two machines of different proofs each hold a row of the same session id,
+another proof. This holds when the old proof is dead too (no file, no live credential):
+nothing links two proofs, so taking a dead proof's row would let any machine's proof take
+it. A machine provisioned again under a new proof name (#8003) needs an admin to delete its
+old `fleet_machines` row first, or it keeps its old proof file name. So two machines of different proofs each hold a row of the same session id,
 and neither changes the other's. A `fleet-rotator` credential with no machine writes
 nothing (403 `no-machine`). Core reads Python's `SCADBUDDY_SERVICE_BOOTSTRAP_DIR` (#8172): a
 credential that names a machine passes only while `fleet-rotator.<machine>` is a regular file
-there (one stat per resolve, as `exchange.py` `BootstrapVerifier.has_machine`). When the file is
-gone, `internal/auth` refuses the credential and revokes its row at once. With the variable
-unset, core refuses every such credential, so the core container needs the API's bootstrap
-secret directory mounted and the variable set.
+there (one stat per resolve, `auth.Resolver.HasProof`). The file alone decides: Python's
+`exchange.py` `BootstrapVerifier.has_machine` and the auth sweep's `machines` read the same
+directory now, not what a replica read at start, so during a rollout an older replica never
+revokes a new machine's credentials (#8003). Only issuing a credential needs the secret's hash
+read at the API's start. When the file is gone, `internal/auth` refuses the credential and
+revokes its row at once. With the variable unset, core refuses every such credential, and says
+so once at start; so the core container needs the API's bootstrap secret directory mounted and
+the variable set.
 
 The two `fleet-rotator` `PUT`s also take a person's access token of scope `fleet` (#8041), which
 `fleetd` sends; `POST /virtual-messages` does not, so a machine's token never posts as a virtual
@@ -295,8 +306,10 @@ sender such as `rotator` or `github`: `crud.Router.AddForToken` mounts
 them, and `auth.Resolver.Token`, the shared `sbpat_` lookup, reads it. A handler finds the token
 with `auth.CallerOf`; `crud.ServiceOf` is nil then. One live token is one machine: the first
 `PUT /machines/{id}` records the token's id in `fleet_machines.token_id`, and while that token
-lives, every write to that machine from another token, or from a bootstrap proof, is 403
-`machine-of-another-proof`. Each row names exactly one owner, its `proof_name` or its
+lives, every write to that machine from another token of the same person is 403
+`machine-token-live`, and from another person's token (403 `machine-of-another-person`) or a
+bootstrap proof (403 `machine-of-another-proof`) likewise; a session `PUT` of a machine the
+caller does not own is 403 `machine-of-another-proof`. Each row names exactly one owner, its `proof_name` or its
 `token_id`. A row moves to a new owner only when its owner is dead, on a `PUT /machines/{id}`
 that locks the row (`FOR UPDATE`) while it decides: a token's machine moves to a new `fleet`
 token of the same person (`personal_access_tokens.principal`) once the old token is revoked or
@@ -313,7 +326,9 @@ token of that person then takes the machine over.
 A `read` or `write` token there is 403 `out_of_scope`. A `fleet` token is 403 `out_of_scope` on
 every other route, in every `SCADBUDDY_AUTH_MODE`: every other CRUD route, and every public route
 behind `internal/auth`'s gate (`auth.WouldRefuse`, `Gate.Wrap`), as Python's `auth/check.py`
-`auth_check` refuses it on every route Python serves (#8179). A `read` or `write` token on
+`auth_check` refuses it on every route Python serves (#8179). On a WebSocket handshake that
+refusal is a 403 with no body and no upgrade, what Starlette sends when Python closes the socket
+(1008) before it accepts it (`fleet_token_test.go`). A `read` or `write` token on
 another caller's CRUD route stays 401, as Python's guard answers it. The bootstrap proofs keep
 working until #8367 retires them for machines.
 

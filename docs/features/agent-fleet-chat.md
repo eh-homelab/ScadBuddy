@@ -96,6 +96,16 @@ name, its description and its reject message. It starts with `rotator`, the logi
   an `agent` (a handle) gets a DM. The sender is in no channel and gets no delivery. An unknown
   sender is a 404 (reason `unknown-sender`). The `fleet` caller, which serves the
   unauthenticated `/mcp`, gets 403 there, so no tool call can post as a virtual sender.
+- The route takes a `fleet-rotator` service credential only. The caller has no
+  ServiceAccount: it gets that credential at `POST /api/v1/auth/service-token` for a
+  machine's bootstrap proof, the file `fleet-rotator.<machine>` in the API's
+  `SCADBUDDY_SERVICE_BOOTSTRAP_DIR` (#8003, `backend/scadbuddy/auth/exchange.py`). The
+  credential passes only while that file is there; core reads the same directory (#8172).
+  fleetd's `fleet` access token (#8041) reaches the two registry `PUT`s, not this route
+  (`crud.Router.AddForToken` mounts only those), so a machine's token posts as no virtual
+  sender. #8367 retires the machines' bootstrap proofs; the route then needs another way in.
+- A `fleet_send` DM to a name that is all hex digits but no handle is a 422 (the handle's
+  check), not a 404: no virtual sender's name is all hex.
 - A `fleet_send` DM to a virtual sender's name is refused: core answers 422, reason
   `virtual-sender`, with the reject message as the detail, and the tool error is that text
   (`fleetchat.ErrVirtualSender`).
@@ -118,7 +128,12 @@ name, its description and its reject message. It starts with `rotator`, the logi
   `…/fleet-rotator/machines/{machine_id}/sessions/{session_id}`. Each caller is refused on
   the other's routes. Each machine row has one owner: the `fleet` access token that registered
   it (`fleet_machines.token_id`, #8041), or the proof file of a `fleet-rotator` credential
-  (`fleet_machines.proof_name`). Each writes only its own machines and their rows of sessions. One session id can
+  (`fleet_machines.proof_name`). Each writes only its own machines and their rows of sessions.
+  A token's row moves to a new token of the same person only when the old token is dead (403
+  `machine-token-live` while it lives). A proof's row never moves to another proof, even a
+  dead one (403 `machine-of-another-proof`): nothing links two proofs. A machine provisioned
+  again under a new proof name needs an admin to delete its old `fleet_machines` row, or it
+  keeps its old proof file name. One session id can
   run on several machines at once: each machine writes its own row, and a read gives the
   session once with a `hosts` array, one entry per machine.
 - `backend/scadbuddy/api/crud_fleet.py`: the change stream. The caller `fleet`:

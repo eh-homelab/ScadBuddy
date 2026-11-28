@@ -3,6 +3,7 @@ package fleetchat
 import (
 	"context"
 	"errors"
+	"fmt"
 	"slices"
 	"sort"
 	"sync"
@@ -57,6 +58,10 @@ func (f *fakeStore) Join(_ context.Context, sessionID, channel string) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	if f.members[channel] == nil {
+		if legacyOnly(channel) {
+			// As core's join: an old-style name is kept, never made.
+			return fmt.Errorf("%w: %q starts or ends with \"-\", which only a channel made before #8149 may", ErrBadChannel, channel)
+		}
 		f.members[channel] = map[string]struct{}{}
 	}
 	f.members[channel][sessionID] = struct{}{}

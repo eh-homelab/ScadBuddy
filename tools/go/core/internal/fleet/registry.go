@@ -123,6 +123,14 @@ func anotherProof() error {
 		"another machine's token or proof registered that machine", "machine-of-another-proof")
 }
 
+// tokenLive is the 403 for a token of the machine's person while the token that registered
+// the machine still lives: one live token is one machine.
+func tokenLive() error {
+	return httpx.WithReason(http.StatusForbidden,
+		"that machine's token still lives: revoke it (or let it expire) before a new token takes "+
+			"the machine", "machine-token-live")
+}
+
 // anotherPerson is the 403 for a token on a machine whose dead token was another person's.
 func anotherPerson() error {
 	return httpx.WithReason(http.StatusForbidden,
@@ -192,8 +200,11 @@ type registryWriter struct {
 // putMachine registers the machine under the caller's token or proof name, or refreshes its
 // facts and last_seen. A machine another token or proof registered is a 403, unless its
 // owner is dead: a token's machine moves to a new token of the same person once the old
-// token is revoked or expired. A token never takes a proof's machine (403 machine-of-a-proof:
-// an admin deletes the row first), and a proof never takes a token's machine. The row is locked while this decides.
+// token is revoked or expired. A proof never takes another proof's machine, dead or not
+// (403 machine-of-another-proof): nothing links two proofs, so a machine provisioned again
+// under a new proof name needs an admin to delete its old row first. A token never takes a
+// proof's machine (403 machine-of-a-proof), and a proof never takes a token's machine. The
+// row is locked while this decides.
 func (f *registryWriter) putMachine(r *http.Request, p crud.Params) (any, error) {
 	own, err := ownerOf(r)
 	if err != nil {
@@ -263,7 +274,7 @@ func (f *registryWriter) mayTake(ctx context.Context, tx pgx.Tx, row, own owner)
 		return nil
 	}
 	if own.token == nil {
-		// A proof never takes another owner's machine.
+		// A proof never takes another owner's machine: nothing links two proofs.
 		return anotherProof()
 	}
 	if row.proof != nil {
@@ -286,7 +297,7 @@ func (f *registryWriter) mayTake(ctx context.Context, tx pgx.Tx, row, own owner)
 		return anotherPerson()
 	}
 	if !dead {
-		return anotherProof()
+		return tokenLive()
 	}
 	return nil
 }
