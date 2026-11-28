@@ -575,7 +575,8 @@ def render_check(store: OrderStore, order_id: str, item_id: str) -> None:
     ``item_library_file`` (it slices its file), ``item_custom`` and
     ``item_has_no_design`` (``reference_of``), ``order_not_open`` while the item takes no
     new quote (``requote_open``) and is not one to print (#8481: an accepted order, the
-    item `approved` or `failed` with an accepted quote), and ``item_not_open`` for a
+    item `approved` or `failed` with an accepted quote), ``order_on_hold`` for an item to
+    print of an order on hold, as its print refuses it, and ``item_not_open`` for a
     settled item: what the slice quote's own check refuses."""
     order = store.order(order_id)
     if order is None:
@@ -604,7 +605,16 @@ def render_check(store: OrderStore, order_id: str, item_id: str) -> None:
         and item.status in FULFILLABLE
         and any(quote.accepted for quote in quotes)
     )
-    if not (to_print or requote_open(order, item, quotes)):
+    requote = requote_open(order, item, quotes)
+    if to_print and not requote and order.on_hold:
+        # As the print refuses it (`printing.py` `print_check`): a hold stops the render
+        # that changes what prints.
+        raise ApiError(
+            status.HTTP_409_CONFLICT,
+            f"order {order.label} is on hold",
+            type_=PROBLEMS + "order_on_hold",
+        )
+    if not (to_print or requote):
         raise ApiError(
             status.HTTP_409_CONFLICT,
             f"order {order.label} is {order.status}: an item is rendered for a quote while"

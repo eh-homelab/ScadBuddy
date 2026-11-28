@@ -294,8 +294,11 @@ main (#5315, #5337, #5347), and #5280 is closed. scadify reviewed §5 against th
   drawer: it renders first (`PrintItem` `renderFirst`), and the render takes the saved
   output when it is there, with no render job. The render's check (`render_check`) also
   takes an item to print: an accepted order, the item `approved` or `failed` with an
-  accepted quote. It changes no quote, so the customer's accepted price stays. The bulk
-  Print… leaves an item with no output out.
+  accepted quote, and refuses it `order_on_hold` while the order is on hold, as the print
+  does. It changes no quote, so the customer's accepted price stays. The bulk Print… leaves
+  an item with no output out. One storefront output can be the `output_id` of lines in
+  several orders (every line of one render key shares it), so an order item's output is
+  not always its own: never delete or change it as the item's alone.
 
 ## 6. A derived machine rate (#4625)
 
