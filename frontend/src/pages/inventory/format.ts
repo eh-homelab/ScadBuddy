@@ -1,7 +1,7 @@
 import type { ShopMoney } from '../../components/filament/purchasing/useMoney'
 import { divDecimal, fromScaled, mulDecimals, parseDecimal, toScaled } from '../../lib/decimal'
 import { formatUnitCost } from '../../lib/money'
-import type { Offer, Tracking, Unit, UnitStatus } from './api'
+import type { Offer, SettableStatus, Tracking, Unit, UnitStatus } from './api'
 
 /** What each tracking means to a person. */
 export const TRACKING_LABELS: Record<Tracking, string> = { lot: 'lots', unit: 'units', filament: 'filament', none: 'not counted' }
@@ -78,7 +78,9 @@ export function minorToMajor(minor: string, exponent: number): string {
 /** A date-time as the viewer's day. */
 export const dayText = (at: string) => new Date(at).toLocaleDateString()
 
-export const STATUS_LABELS: Record<UnitStatus, string> = { in_stock: 'In stock', in_service: 'In service', retired: 'Retired', scrapped: 'Scrapped', sold: 'Sold' }
+export const STATUS_LABELS: Record<UnitStatus, string> = { in_stock: 'In stock', in_service: 'In service', retired: 'Retired', scrapped: 'Scrapped', sold: 'Sold', ended: 'Ended' }
+/** The statuses a person can choose, as `STATUS_LABELS` orders them. */
+export const SETTABLE_STATUSES = (Object.keys(STATUS_LABELS) as UnitStatus[]).filter((status): status is SettableStatus => status !== 'ended')
 
 /** The newest offer price in the shop's currency: what "Receive" prefills from (Ruling 4). */
 export function pricedOffer(offers: Offer[], currency: string | null): Offer | undefined {

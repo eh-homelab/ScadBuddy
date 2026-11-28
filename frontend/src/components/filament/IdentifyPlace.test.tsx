@@ -2,6 +2,7 @@ import { screen, waitFor, within } from '@testing-library/react'
 import { http, HttpResponse } from 'msw'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { L } from '../../mocks/features/filament/seed'
+import { queueScanCodes } from '../../mocks/features/scan'
 import { resetMockState } from '../../mocks/handlers'
 import { server } from '../../mocks/server'
 import { installNdefStub, type NdefStub } from '../../test/ndefStub'
@@ -26,14 +27,23 @@ function installCamera(rawValue: string) {
   const stop = vi.fn()
   const stream = { getTracks: () => [{ stop }] }
   const before = navigator.mediaDevices
+  /** The formats each detector was made with. */
+  const formats: string[][] = []
   Object.defineProperty(navigator, 'mediaDevices', { value: { getUserMedia: vi.fn(() => Promise.resolve(stream)) }, configurable: true })
   ;(window as unknown as { BarcodeDetector: unknown }).BarcodeDetector = class {
+    static getSupportedFormats() {
+      return Promise.resolve(['qr_code', 'ean_13', 'ean_8', 'upc_a', 'upc_e'])
+    }
+    constructor(options?: { formats: string[] }) {
+      formats.push(options?.formats ?? [])
+    }
     detect() {
       return Promise.resolve([{ rawValue, format: 'qr_code' }])
     }
   }
   return {
     stop,
+    formats,
     restore() {
       delete (window as unknown as { BarcodeDetector?: unknown }).BarcodeDetector
       Object.defineProperty(navigator, 'mediaDevices', { value: before, configurable: true })
@@ -49,6 +59,26 @@ describe('IdentifyPlace (#7168)', () => {
   })
   afterEach(() => {
     vi.restoreAllMocks()
+  })
+
+  it('keeps the no-label sentence for a photo whose only code names no ScadBuddy thing (#8372)', async () => {
+    // jsdom draws nothing: a canvas that "draws" and makes a small JPEG, and a photo it can open.
+    vi.spyOn(HTMLCanvasElement.prototype, 'getContext').mockReturnValue({ drawImage: () => undefined } as unknown as CanvasRenderingContext2D)
+    vi.spyOn(HTMLCanvasElement.prototype, 'toBlob').mockImplementation(function (callback: BlobCallback) {
+      callback(new Blob([new Uint8Array([0xff, 0xd8, 0xff, 0xd9])], { type: 'image/jpeg' }))
+    })
+    vi.stubGlobal('createImageBitmap', async () => ({ width: 4000, height: 3000, close: () => undefined }))
+    try {
+      queueScanCodes([{ format: 'ean_13', text: '6975373321234' }])
+      const { user, onIdentified } = show('no_api')
+      await user.click(screen.getByRole('radio', { name: 'QR code' }))
+      await user.upload(screen.getByLabelText('Photo of the label'), new File([new Uint8Array([0xff, 0xd8])], 'label.jpg', { type: 'image/jpeg' }))
+      expect(await screen.findByText('No place label was found in the photo. Take it again, or type the code.')).toBeInTheDocument()
+      expect(screen.getByLabelText('Place code')).toBeInTheDocument()
+      expect(identified(onIdentified)).toHaveLength(0)
+    } finally {
+      vi.unstubAllGlobals()
+    }
   })
 
   it('offers the ways with none chosen', () => {
@@ -115,6 +145,8 @@ describe('IdentifyPlace (#7168)', () => {
       await user.click(screen.getByRole('button', { name: 'Use camera' }))
       await waitFor(() => expect(identified(onIdentified)).toHaveLength(1))
       expect(identified(onIdentified)[0]).toMatchObject({ id: L.AMS_A1, code: 'L-4' })
+      // A place's label is a QR code only, though the detector reads barcodes too (#8372).
+      expect(camera.formats).toEqual([['qr_code']])
       await waitFor(() => expect(camera.stop).toHaveBeenCalled())
     } finally {
       camera.restore()

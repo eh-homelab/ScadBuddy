@@ -20,6 +20,7 @@ import type {
   Shipment,
   ShipmentEdit,
   ShipmentInput,
+  WorkflowAccepted,
 } from '../../../api/types'
 import { mockModels, mockOutput, mockSettings } from '../../handlers'
 import { versionIds } from '../../fixtures'
@@ -31,6 +32,7 @@ import { pushRevision } from './revisions'
 import { orderRow } from './costs'
 import { productOf } from './report'
 import { fillFromRule, returnParts, useParts } from './parts'
+import { emitRealtime } from '../../realtime'
 import { archiveCopies, pastPrint } from './pastPrints'
 import { compareCharges } from '../../../components/orders/chargeOrder'
 import { balanceUnpaid, closeDeposit, noOptionShips, openBalance, replaceCharges, retax, typedCharges } from './money'
@@ -137,6 +139,7 @@ export const printsStarting = new Set<string>()
 
 export function reset(): void {
   printsStarting.clear()
+  resetStockSettling()
 }
 
 /** `OrderStore.print_in_flight`: the item's attempt still open, of either purpose. A claim
@@ -443,9 +446,60 @@ export function acceptQuote(order: Order, found: OrderItem, quote: Quote): Order
 }
 
 /** A transition: the lifecycle's rules, then the derivation, then the answer. */
+/**
+ * #6949 K1 Task 16 — the stock workflow of a fulfil, accept or unfulfil still running after the
+ * route's 15 s wait: its 202 body (`WorkflowAccepted`). The item is changed and names the run in
+ * `parts_settling`; {@link settleStock} ends it.
+ */
+class StockAccepted {
+  readonly body: WorkflowAccepted
+  constructor(body: WorkflowAccepted) {
+    this.body = body
+  }
+}
+
+/** Order items whose stock workflow still runs, and what ends it. */
+const settling = new Map<string, { order: Order; item: OrderItem; finish: () => void }>()
+let slowStock = false
+
+/** The next stock change answers 202 and stays settling until {@link settleStock} (a test's slow Take). */
+export function slowStockOnce(): void {
+  slowStock = true
+}
+
+/** As the workflow's record step: each settling item's parts move, `parts_settling` clears,
+ * and `order_item.changed` on `order:<id>` brings the item again. */
+export function settleStock(): void {
+  for (const [id, { order, item, finish }] of settling) {
+    settling.delete(id)
+    finish()
+    item.parts_settling = null
+    emitRealtime('order_item.changed', [`order:${order.id}`], { order_id: order.id, item_id: item.id })
+  }
+}
+
+function resetStockSettling(): void {
+  settling.clear()
+  slowStock = false
+}
+
+/** A stock change of `item`: now, or (once after {@link slowStockOnce}) a 202 that settles later. */
+function moveStock(order: Order, item: OrderItem, workflowId: string, finish: () => void): StockAccepted | null {
+  if (!slowStock) {
+    finish()
+    return null
+  }
+  slowStock = false
+  item.parts_settling = { workflow_id: workflowId }
+  settling.set(item.id, { order, item, finish })
+  return new StockAccepted({ workflow_id: workflowId, kind: 'FulfilOrderItem', started_at: now(), repeated: false })
+}
+
 export function transition<T>(request: Request, run: () => T) {
   try {
-    return HttpResponse.json(run() as unknown as Record<string, unknown>)
+    const answer = run()
+    if (answer instanceof StockAccepted) return HttpResponse.json(answer.body, { status: 202 })
+    return HttpResponse.json(answer as unknown as Record<string, unknown>)
   } catch (error) {
     return refused(request, error)
   }
@@ -1663,13 +1717,14 @@ export const handlers = [
       }
       attempt.accepted_at = now()
       const made = attemptsOf(found.id).filter((f) => f.accepted_at).reduce((sum, f) => sum + f.quantity, 0)
+      let slow: StockAccepted | null = null
       if (made >= found.quantity) {
         found.status = 'fulfilled'
-        useParts(order, found)
+        slow = moveStock(order, found, `order_item:${found.id}:parts:1`, () => useParts(order, found))
       } else if (found.status === 'printed') found.status = 'approved'
       event(order, 'fulfilment.accepted', { item_id: found.id, fulfilment_id: attempt.id, attempt: attempt.attempt, made })
       rederive(order)
-      return attempt
+      return slow ?? attempt
     }),
   ),
   // #4719 — `order_item_print` (`orders/printing.py` `print_check`, then
@@ -1774,10 +1829,10 @@ export const handlers = [
       accepted.accepted_at = null
       found.status = productionOf(found.id).at(-1)!.outcome === 'failed' ? 'failed' : 'approved'
       found.updated_at = now()
-      returnParts(order, found)
+      const slow = moveStock(order, found, `order_item:${found.id}:parts:1:return`, () => returnParts(order, found))
       event(order, 'item.unfulfilled', { item_id: found.id, fulfilment_id: accepted.id, attempt: accepted.attempt, to: found.status })
       rederive(order)
-      return found
+      return slow ?? found
     }),
   ),
 

@@ -252,3 +252,9 @@ def test_subscriber_lag_is_exported(pg_pool: PgPool) -> None:
     assert registry.get_sample_value("scadbuddy_event_subscriber_lag_events", labels) == 3
     lag = registry.get_sample_value("scadbuddy_event_subscriber_lag_seconds", labels)
     assert lag is not None and lag >= 5
+    assert registry.get_sample_value("scadbuddy_event_subscriber_stopped_seq", labels) == 0
+    # #8074: the subscriber's row names the event it cannot pass.
+    with pg_pool.connection() as conn:
+        conn.execute("UPDATE event_subscribers SET stopped_seq = 42 WHERE name = 'history'")
+    api_metrics.refresh_subscriber_metrics(state)
+    assert registry.get_sample_value("scadbuddy_event_subscriber_stopped_seq", labels) == 42

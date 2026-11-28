@@ -4,13 +4,16 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"log/slog"
 	"math/rand/v2"
 	"reflect"
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/eh-homelab/ScadBuddy/tools/go/core/internal/testdb"
@@ -240,6 +243,10 @@ func TestABadPayloadStopsTheCursor(t *testing.T) {
 	if c := cursor(t, pool); c != bad-1 {
 		t.Fatalf("cursor %d, want %d, just before the bad event", c, bad-1)
 	}
+	// #8074: the subscriber's row names the event it cannot pass, for the API's scrape.
+	if s := stoppedAt(t, pool); s == nil || *s != bad {
+		t.Fatalf("stopped_seq %v, want %d", s, bad)
+	}
 	// Once the payload is fixed, the event is applied, and the ones after it.
 	if _, err := pool.Exec(ctx, `UPDATE events SET payload = payload || '{"key": "c"}' WHERE seq = $1`, bad); err != nil {
 		t.Fatal(err)
@@ -247,6 +254,171 @@ func TestABadPayloadStopsTheCursor(t *testing.T) {
 	apply(t, pool)
 	if n := rows(t, pool); n != 3 {
 		t.Fatalf("%d rows after the fix, want 3", n)
+	}
+	if s := stoppedAt(t, pool); s != nil {
+		t.Fatalf("stopped_seq %d after the fix, want NULL", *s)
+	}
+}
+
+func stoppedAt(t *testing.T, pool *pgxpool.Pool) *int64 {
+	t.Helper()
+	return scalar[*int64](t, pool, `SELECT stopped_seq FROM event_subscribers WHERE name = 'history'`)
+}
+
+func TestAnErrorBeforeTheMigrationsIsUnmigrated(t *testing.T) {
+	for _, err := range []error{
+		&noSubscriber{name: "history"},
+		fmt.Errorf("read: %w", &pgconn.PgError{Code: "42P01"}),
+		&pgconn.PgError{Code: "42703"},
+	} {
+		if !unmigrated(err) {
+			t.Errorf("unmigrated(%v) = false, want true", err)
+		}
+	}
+	for _, err := range []error{&badPayload{seq: 1}, &pgconn.PgError{Code: "57014"}} {
+		if unmigrated(err) {
+			t.Errorf("unmigrated(%v) = true, want false", err)
+		}
+	}
+}
+
+// counting counts the records at each level.
+type counting struct {
+	mu     sync.Mutex
+	levels map[slog.Level]int
+}
+
+func (c *counting) Enabled(context.Context, slog.Level) bool {
+	return true
+}
+
+func (c *counting) Handle(_ context.Context, r slog.Record) error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.levels[r.Level]++
+	return nil
+}
+
+func (c *counting) WithAttrs([]slog.Attr) slog.Handler {
+	return c
+}
+
+func (c *counting) WithGroup(string) slog.Handler {
+	return c
+}
+
+func (c *counting) count(l slog.Level) int {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.levels[l]
+}
+
+// TestRunBeforeTheMigrationsWarnsOnce: a subscriber with no row yet (the API has not
+// migrated) is one warning, not an error every Poll (#8116).
+func TestRunBeforeTheMigrationsWarnsOnce(t *testing.T) {
+	pool := testdb.New(t)
+	logs := &counting{levels: map[slog.Level]int{}}
+	previous := slog.Default()
+	slog.SetDefault(slog.New(logs))
+	t.Cleanup(func() { slog.SetDefault(previous) })
+	run, stop := context.WithTimeout(ctx, 300*time.Millisecond)
+	defer stop()
+	Run(run, pool, Options{Name: "nobody", Poll: 10 * time.Millisecond})
+	if w, e := logs.count(slog.LevelWarn), logs.count(slog.LevelError); w != 1 || e != 0 {
+		t.Fatalf("%d warnings and %d errors, want 1 and 0", w, e)
+	}
+}
+
+// lateRun runs Run for the subscriber late in the background, its logs counted. until
+// waits for ok, and fails the test when the run's time is up; finish stops the run and
+// gives its warnings and errors.
+func lateRun(t *testing.T, pool *pgxpool.Pool) (until func(string, func() bool), logs *counting, finish func() (int, int)) {
+	t.Helper()
+	logs = &counting{levels: map[slog.Level]int{}}
+	previous := slog.Default()
+	slog.SetDefault(slog.New(logs))
+	t.Cleanup(func() { slog.SetDefault(previous) })
+	run, stop := context.WithTimeout(ctx, 20*time.Second)
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		Run(run, pool, Options{Name: "late", Poll: 10 * time.Millisecond})
+	}()
+	t.Cleanup(func() {
+		stop()
+		<-done
+	})
+	until = func(what string, ok func() bool) {
+		t.Helper()
+		for !ok() {
+			if run.Err() != nil {
+				t.Fatalf("timed out waiting for %s", what)
+			}
+			time.Sleep(10 * time.Millisecond)
+		}
+	}
+	finish = func() (int, int) {
+		stop()
+		<-done
+		return logs.count(slog.LevelWarn), logs.count(slog.LevelError)
+	}
+	return until, logs, finish
+}
+
+func lateAt(t *testing.T, pool *pgxpool.Pool, seq int64) {
+	t.Helper()
+	if _, err := pool.Exec(ctx, `INSERT INTO event_subscribers (name, seq) VALUES ('late', $1)`, seq); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func lateGone(t *testing.T, pool *pgxpool.Pool) {
+	t.Helper()
+	if _, err := pool.Exec(ctx, `DELETE FROM event_subscribers WHERE name = 'late'`); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// TestAnApplyThatSucceedsWarnsAgainLater: the row comes mid-run, an apply succeeds (the
+// cursor passes an event), and the row goes again, so the subscriber waits a second time
+// and warns again (#8463).
+func TestAnApplyThatSucceedsWarnsAgainLater(t *testing.T) {
+	pool := testdb.New(t)
+	set(t, pool, entity(t, pool, "item", "i1"), "a", `1`, person)
+	last := newest(t, pool)
+	until, logs, finish := lateRun(t, pool)
+	until("the first warning", func() bool { return logs.count(slog.LevelWarn) == 1 })
+	lateAt(t, pool, last-1)
+	until("an apply that succeeds", func() bool {
+		return scalar[int64](t, pool, `SELECT coalesce(max(seq), 0) FROM event_subscribers WHERE name = 'late'`) == last
+	})
+	lateGone(t, pool)
+	until("the second warning", func() bool { return logs.count(slog.LevelWarn) == 2 })
+	if w, e := finish(); w != 2 || e != 0 {
+		t.Fatalf("%d warnings and %d errors, want 2 and 0", w, e)
+	}
+}
+
+// TestAnotherErrorBetweenWaitsWarnsAgain: the row comes at an event the subscriber cannot
+// store, so each apply fails with another error, and the row goes again: the second wait
+// warns again too (#8463). On the old rule (a reset only after a success) it warned once.
+func TestAnotherErrorBetweenWaitsWarnsAgain(t *testing.T) {
+	pool := testdb.New(t)
+	set(t, pool, entity(t, pool, "item", "i1"), "a", `1`, person)
+	var bad int64
+	if err := pool.QueryRow(ctx, `INSERT INTO events (event_id, kind, at, payload)
+		SELECT 'bad', kind, at, payload - 'key' || '{"id": "bad"}' FROM events WHERE seq = $1
+		RETURNING seq`, newest(t, pool)).Scan(&bad); err != nil {
+		t.Fatal(err)
+	}
+	until, logs, finish := lateRun(t, pool)
+	until("the first warning", func() bool { return logs.count(slog.LevelWarn) == 1 })
+	lateAt(t, pool, bad-1)
+	until("an apply that fails at the bad event", func() bool { return logs.count(slog.LevelError) >= 1 })
+	lateGone(t, pool)
+	until("the second warning", func() bool { return logs.count(slog.LevelWarn) == 2 })
+	if w, e := finish(); w != 2 || e < 1 {
+		t.Fatalf("%d warnings and %d errors, want 2 and at least 1", w, e)
 	}
 }
 

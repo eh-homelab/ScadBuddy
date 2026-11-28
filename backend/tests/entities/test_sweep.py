@@ -26,6 +26,7 @@ from scadbuddy.orders.store import ATTACHMENT_HOLDER
 from scadbuddy.printers.models import PrinterCreate
 from scadbuddy.printers.store import PrinterStore
 from tests.conftest import PgPool
+from tests.support.order_stock import GoStock, InlineStarter
 from tests.support.printers import MERGED_BY
 
 pytestmark = pytest.mark.requires_postgres
@@ -325,9 +326,11 @@ def test_a_sweep_rechecks_the_moves_under_its_lock(
 
 def test_a_printer_merge_moves_the_stock_moves_to_the_kept_printer(pg_pool: PgPool) -> None:
     """R-P2-4: a merge deletes the gone printer's entity, so a move that named it names
-    the kept printer after it, as its files and links do."""
+    the kept printer after it, as its files and links do. Since #6949 K1 Task 16 the move
+    goes through `MergePrinter` (Go's `Repoint`, here its stand-in), not `repoint_entity`."""
     entities = EntityStore(pg_pool)
     printers = PrinterStore(pg_pool, None)
+    printers.merges = InlineStarter(None, GoStock(pg_pool), lambda: printers)
     synthetic = printers.ensure_bambuddy(6, serial=None, name="H2C", model="H2C", by=MERGED_BY)
     gone = EntityRef("printer", synthetic.id)
     _move_on(pg_pool, gone)

@@ -12,6 +12,7 @@ from __future__ import annotations
 import base64
 import binascii
 import contextvars
+import logging
 from collections.abc import Collection, Iterator, Sequence
 from contextlib import AbstractContextManager, contextmanager
 from dataclasses import dataclass, field
@@ -25,7 +26,7 @@ from psycopg import Connection, errors, sql
 from psycopg.rows import DictRow
 from psycopg.types.json import Jsonb
 from psycopg_pool import ConnectionPool
-from pydantic import TypeAdapter
+from pydantic import TypeAdapter, ValidationError
 
 from scadbuddy.bambuddy.print_links import LanArchiveLink, record_lan_start_in
 from scadbuddy.bambuddy.runs import PrintRun, lan_started_in
@@ -74,6 +75,7 @@ from scadbuddy.orders.models import (
     OrderProject,
     OrderStatus,
     Outcome,
+    PartsSettling,
     Payment,
     PurchaseCostKind,
     PurchaseSource,
@@ -148,6 +150,8 @@ class RowNotOwnedError(LookupError):
         self.customer_id = customer_id
 
 
+logger = logging.getLogger(__name__)
+
 #: A run's ``result.lan``, as `OrderStore.lan_record` reads it.
 _LAN_STARTS = TypeAdapter(list[LanStarted])
 
@@ -162,6 +166,9 @@ class LanRecord:
     settled_at: datetime | None
     #: What the starts booked in the filament ledger, one per start and slot.
     uses: list[RunUse]
+    #: How the run's follow read the print end (``print_outcomes.outcome``:
+    #: ``finished``, ``failed``, ``cancelled`` or ``unknown``); ``None`` until then.
+    outcome: str | None = None
 
 
 class ArchiveCopyExistsError(ValueError):
@@ -219,7 +226,7 @@ _ITEM = (
     " slug, commit, inputs, libraries, template_name, render_key, colours, output_id,"
     " delivered_attachment_id, current_revision_id, approval, created_at, updated_at,"
     " revised_after_acceptance, library_file_id, library_filename, library_source,"
-    " origin_archive_ids, library_sha256, library_copy_key"
+    " origin_archive_ids, library_sha256, library_copy_key, parts_workflow_id"
 )
 _REVISION = (
     "id, item_id, number, slug, commit, inputs, libraries, template_name, render_key, colours,"
@@ -368,6 +375,9 @@ def _item_of(row: DictRow) -> OrderItem:
         approval=row["approval"],
         revised_after_acceptance=row["revised_after_acceptance"],
         origin_archive_ids=row["origin_archive_ids"],
+        parts_settling=None
+        if row["parts_workflow_id"] is None
+        else PartsSettling(workflow_id=row["parts_workflow_id"]),
         created_at=row["created_at"],
         updated_at=row["updated_at"],
     )
@@ -2201,7 +2211,9 @@ class OrderStore:
         A LAN start has no queue item (#8124), so its archive is found by the start's
         record, ``lan_print_archives`` by run: the API writes that row only when exactly
         one start of the run has the job name the archive's file carries
-        (`print_history._run_by_file`), so two prints of one file never mix. One an
+        (`lan_files.start_by_file`, from the print read, the prints list's scan and the
+        orders read), and one archive per start (`lan_files.starts_by_files`,
+        `record_lan_start_in`), so two prints of one file never mix. One an
         attempt not of this run names is that attempt's (#5273: named by hand before
         Bambuddy linked it), and left out."""
         with self._read(conn) as c:
@@ -2267,20 +2279,36 @@ class OrderStore:
     def lan_record(self, run_id: str) -> LanRecord | None:
         """ScadBuddy's own record of a LAN run (#8282): the starts its result lists
         (``print_runs.result.lan``), when its follow read the print settled
-        (``print_outcomes.settled_at``), and what its starts booked in the filament ledger
-        (`filament/prints.py` `run_uses`). None for a run with no LAN start (Bambuddy's
-        queue), or whose row is pruned."""
+        (``print_outcomes.settled_at``) and how it ended (``print_outcomes.outcome``), and
+        what its starts booked in the filament ledger (`filament/prints.py` `run_uses`).
+        None for a run with no LAN start (Bambuddy's queue), or whose row is pruned. None
+        also for a ``result.lan`` that does not parse (#8330): the error is logged, and the
+        attempt takes its facts from its archives."""
         with self._read(None) as c:
             row = c.execute(
-                "SELECT r.result -> 'lan' AS lan, o.settled_at FROM print_runs r"
+                "SELECT r.result -> 'lan' AS lan, o.settled_at, o.outcome FROM print_runs r"
                 " LEFT JOIN print_outcomes o ON o.run_id = r.id WHERE r.id = %s",
                 (run_id,),
             ).fetchone()
             if row is None or not isinstance(row["lan"], list) or not row["lan"]:
                 return None
-            starts = _LAN_STARTS.validate_python(row["lan"])
+            try:
+                starts = _LAN_STARTS.validate_python(row["lan"])
+            except ValidationError as error:
+                # Only the error count and the first location: never the payload.
+                first = error.errors(include_input=False)[0]
+                logger.warning(
+                    "the LAN starts of print run %s do not parse (%d errors; first at %s: %s)",
+                    run_id,
+                    error.error_count(),
+                    first["loc"],
+                    first["msg"],
+                )
+                return None
             uses = run_uses(c, run_id)
-        return LanRecord(starts=starts, settled_at=row["settled_at"], uses=uses)
+        return LanRecord(
+            starts=starts, settled_at=row["settled_at"], uses=uses, outcome=row["outcome"]
+        )
 
     def lan_runs(self, run_subject: str, subtask_names: list[str]) -> list[PrintRun]:
         """The subject's runs with a LAN start under one of ``subtask_names``, as
@@ -2358,7 +2386,11 @@ class OrderStore:
                     # A plate only as `print_links._LAN_JOBS` reads one (#8078, #8083): a
                     # start's bad `plate_id` (2.0, 10**12, 0) is no plate, never an error.
                     " starts AS (SELECT r.run_id, e->>'subtask_name' AS subtask,"
-                    "  (e->>'started_at')::timestamptz AS started_at,"
+                    # Ordered as text (#8336): a bad `started_at` must not fail the read.
+                    # The text order is the time order only while every writer stores UTC
+                    # in pydantic's `Z` form (`LanStarted.started_at`, from the reports'
+                    # `received_at`); a writer that keeps another offset changes it.
+                    "  e->>'started_at' AS started_at,"
                     "  CASE WHEN jsonb_typeof(e->'plate_id') = 'number'"
                     "   AND e->>'plate_id' ~ '^[1-9][0-9]{0,8}$'"
                     "   THEN (e->>'plate_id')::int END AS plate"
@@ -2452,6 +2484,15 @@ class OrderStore:
             (attempt_id, list(archive_ids)),
         ).fetchall()
         return [int(row["a"]) for row in rows]
+
+    def archive_copied(self, attempt_id: str) -> bool:
+        """Whether the attempt's archive facts were copied once (``archive_copied``): a
+        later `set_archive_facts` keeps its times (#5273)."""
+        with self._read(None) as c:
+            row = c.execute(
+                "SELECT archive_copied FROM order_item_fulfilments WHERE id = %s", (attempt_id,)
+            ).fetchone()
+        return row is not None and bool(row["archive_copied"])
 
     def set_archive_facts(
         self,
@@ -3691,6 +3732,78 @@ class OrderStore:
         ).fetchone()
         assert row is not None
         return OrderEvent.model_validate(row)
+
+    # -- the stock workflows' marks (#6949 K1 Task 16) -----------------------------------
+
+    def parts_cycle(self, conn: Conn, order_id: str, item_id: str) -> tuple[int, bool]:
+        """How many `parts.returned` events the item has (each unfulfil writes one), and
+        whether an unfulfil holds it (its `parts_workflow_id` names an ``:return`` run).
+        One statement, so one snapshot: an unfulfil's record writes its event and clears
+        the hold in one commit, and the pair never sees one without the other."""
+        row = conn.execute(
+            "SELECT (SELECT count(*) FROM order_events WHERE order_id = %s"
+            " AND kind = 'parts.returned' AND detail ->> 'item_id' = %s) AS n,"
+            " COALESCE((SELECT parts_workflow_id LIKE '%%:return' FROM order_items"
+            " WHERE id = %s), false) AS returning",
+            (order_id, item_id, item_id),
+        ).fetchone()
+        assert row is not None
+        return int(row["n"]), bool(row["returning"])
+
+    def workflow_commit(
+        self, conn: Conn, order_id: str, workflow_id: str
+    ) -> tuple[list[dict[str, Any]], list[str]] | None:
+        """What the stock workflow's first step committed, from its audit rows (the ones
+        whose detail names the ``workflow`` and carries its ``stock`` calls): the calls,
+        and the attempts it accepted, in the rows' order. None before it committed."""
+        rows = conn.execute(
+            "SELECT kind, detail FROM order_events WHERE order_id = %s"
+            " AND detail ->> 'workflow' = %s AND detail ? 'stock' ORDER BY id",
+            (order_id, workflow_id),
+        ).fetchall()
+        if not rows:
+            return None
+        calls = [call for row in rows for call in row["detail"]["stock"]]
+        attempts = [
+            row["detail"]["fulfilment_id"] for row in rows if row["kind"] == "fulfilment.accepted"
+        ]
+        return sorted(calls, key=lambda c: (c["item_id"], c["order_item_id"])), attempts
+
+    def workflow_holds(
+        self, conn: Conn, order_id: str, workflow_id: str
+    ) -> tuple[list[str], dict[str, Any] | None]:
+        """The order's items whose open stock workflow is ``workflow_id``, in id order, and
+        who started it (the ``by`` of its first audit row that names it); None when none
+        names it."""
+        items = conn.execute(
+            "SELECT id FROM order_items WHERE order_id = %s AND parts_workflow_id = %s ORDER BY id",
+            (order_id, workflow_id),
+        ).fetchall()
+        actor = conn.execute(
+            "SELECT by FROM order_events WHERE order_id = %s AND detail ->> 'workflow' = %s"
+            " ORDER BY id LIMIT 1",
+            (order_id, workflow_id),
+        ).fetchone()
+        return [str(row["id"]) for row in items], None if actor is None else dict(actor["by"])
+
+    def set_parts_workflow(
+        self, conn: Conn, item_ids: Sequence[str], workflow_id: str | None
+    ) -> None:
+        """The items' open stock workflow (`order_items.parts_workflow_id`); None clears it."""
+        conn.execute(
+            "UPDATE order_items SET parts_workflow_id = %s WHERE id = ANY(%s)",
+            (workflow_id, list(item_ids)),
+        )
+
+    def workflow_wrote(self, conn: Conn, order_ids: Sequence[str], workflow_id: str) -> bool:
+        """Whether an event of one of the orders names the workflow (a re-cost's record)."""
+        row = conn.execute(
+            "SELECT EXISTS (SELECT 1 FROM order_events WHERE order_id = ANY(%s)"
+            " AND detail ->> 'workflow' = %s) AS wrote",
+            (list(order_ids), workflow_id),
+        ).fetchone()
+        assert row is not None
+        return bool(row["wrote"])
 
     def events(self, order_id: str, *, conn: Conn | None = None) -> list[OrderEvent]:
         with self._read(conn) as c:

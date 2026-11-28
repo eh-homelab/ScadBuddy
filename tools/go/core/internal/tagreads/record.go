@@ -268,12 +268,23 @@ func insertRead(ctx context.Context, tx pgx.Tx, row historyRow) (string, error) 
 		decoded = string(row.decoded)
 	}
 	var id string
-	if err := tx.QueryRow(ctx, `INSERT INTO filament_tag_reads
+	// A device read makes one row: a second post of it answers the first row, and holds nothing.
+	err := tx.QueryRow(ctx, `INSERT INTO filament_tag_reads
  (tag_id, source, actor, uid, tray_uuid, tag_type, records, dump_key, decoded, image_key, image_media_type,
-  location_lat, location_lon, location_accuracy_m, location_at)
- VALUES ($1, $2, $3, $4, $5, $6, $7::jsonb, $8, $9::jsonb, $10, $11, $12, $13, $14, $15) RETURNING id::text`,
+  location_lat, location_lon, location_accuracy_m, location_at, device_read_id)
+ VALUES ($1, $2, $3, $4, $5, $6, $7::jsonb, $8, $9::jsonb, $10, $11, $12, $13, $14, $15, $16::uuid)
+ ON CONFLICT (device_read_id) WHERE device_read_id IS NOT NULL DO NOTHING RETURNING id::text`,
 		row.tagID, row.source, row.actor, text(row.uid), text(row.tray), row.tagType, records,
-		text(row.dumpKey), decoded, imageKey, imageType, lat, lon, accuracy, at).Scan(&id); err != nil {
+		text(row.dumpKey), decoded, imageKey, imageType, lat, lon, accuracy, at, text(row.scan.deviceRead)).Scan(&id)
+	if errors.Is(err, pgx.ErrNoRows) {
+		// The first row holds its dump. This post's dump has the same bytes, so its Put found
+		// the same content key: nothing new to hold. The same read finds the same tag (its
+		// tray UUID and UID), and a fold since then moved the first row's tag_id with it.
+		err = tx.QueryRow(ctx, "SELECT id::text FROM filament_tag_reads WHERE device_read_id = $1::uuid",
+			row.scan.deviceRead).Scan(&id)
+		return id, err
+	}
+	if err != nil {
 		return "", err
 	}
 	for _, key := range []any{text(row.dumpKey), imageKey} {
@@ -312,8 +323,9 @@ func enqueue(ctx context.Context, tx pgx.Tx, tagID string) error {
 
 // fold moves a UID-only tag into the tag of its spool's tray ("Same spool as…", spec G3), as
 // 20261126T1817Z_filament_tag_uid_canonical.sql merges a tag's two UID forms: its UIDs,
-// bindings, reads, the ledger's copies of its id, its Bambuddy queue row and its newer
-// last-seen fields move, and its note only when the tray's tag has none; then the row goes.
+// bindings, reads, the ledger's copies of its id, its Bambuddy queue row, its newer
+// last-seen fields and its newer chip read (chip, max_ndef_bytes, writable, chip_read_at,
+// #8366) move, and its note only when the tray's tag has none; then the row goes.
 // The folded tag's kind is dropped: the tray's tag keeps its own (a tray UUID makes it a
 // Bambu tag). A tag with backups is refused (backups are never
 // changed), and so is a pair where both tags hold an open binding.
@@ -348,8 +360,13 @@ func fold(ctx context.Context, tx pgx.Tx, from, into string) error {
  last_seen_at = CASE WHEN newer THEN f.last_seen_at ELSE t.last_seen_at END,
  last_seen_source = CASE WHEN newer THEN f.last_seen_source ELSE t.last_seen_source END,
  last_seen_records = CASE WHEN newer THEN f.last_seen_records ELSE t.last_seen_records END,
+ chip = CASE WHEN chip_newer THEN f.chip ELSE t.chip END,
+ max_ndef_bytes = CASE WHEN chip_newer THEN f.max_ndef_bytes ELSE t.max_ndef_bytes END,
+ writable = CASE WHEN chip_newer THEN f.writable ELSE t.writable END,
+ chip_read_at = CASE WHEN chip_newer THEN f.chip_read_at ELSE t.chip_read_at END,
  note = COALESCE(t.note, f.note)
- FROM (SELECT g.*, g.last_seen_at IS NOT NULL AND (i.last_seen_at IS NULL OR g.last_seen_at > i.last_seen_at) AS newer
+ FROM (SELECT g.*, g.last_seen_at IS NOT NULL AND (i.last_seen_at IS NULL OR g.last_seen_at > i.last_seen_at) AS newer,
+  g.chip_read_at IS NOT NULL AND (i.chip_read_at IS NULL OR g.chip_read_at > i.chip_read_at) AS chip_newer
   FROM filament_tags g, filament_tags i WHERE g.id = $1 AND i.id = $2) AS f
  WHERE t.id = $2`,
 		"DELETE FROM filament_tags WHERE id = $1",

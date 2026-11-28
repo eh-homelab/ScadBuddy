@@ -20,6 +20,7 @@ import (
 
 	"github.com/eh-homelab/ScadBuddy/tools/go/core/internal/auth"
 	"github.com/eh-homelab/ScadBuddy/tools/go/core/internal/blobstore"
+	"github.com/eh-homelab/ScadBuddy/tools/go/core/internal/devices"
 	"github.com/eh-homelab/ScadBuddy/tools/go/core/internal/seal"
 	"github.com/eh-homelab/ScadBuddy/tools/go/core/internal/testdb"
 )
@@ -107,6 +108,8 @@ func (p *python) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 }
 
 type harness struct {
+	// who is the caller of each request; the zero Caller is none (auth off).
+	who   auth.Caller
 	t     *testing.T
 	pool  *pgxpool.Pool
 	s3    *fakeS3
@@ -134,14 +137,22 @@ func newHarness(t *testing.T) *harness {
 		LookupEnv: func(n string) (string, bool) { v, ok := env[n]; return v, ok },
 		HTTP:      store.Client(), Stream: store.Client(), Now: time.Now}
 	py := &python{}
-	reads := &Reads{Pool: pool, Blobs: blobs, Upstream: py}
+	reads := &Reads{Pool: pool, Blobs: blobs, Upstream: py, Devices: &devices.Store{Pool: pool}}
+	h := &harness{t: t, pool: pool, s3: s3, py: py, reads: reads}
 	mux := http.NewServeMux()
 	for _, p := range reads.Public()[Area] {
-		mux.Handle(p.Pattern, p.Handler)
+		handler := p.Handler
+		mux.Handle(p.Pattern, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if h.who.Kind != "" {
+				r = r.WithContext(auth.WithCaller(r.Context(), h.who))
+			}
+			handler.ServeHTTP(w, r)
+		}))
 	}
 	api := httptest.NewServer(mux)
 	t.Cleanup(api.Close)
-	return &harness{t: t, pool: pool, s3: s3, py: py, url: api.URL + Path, reads: reads}
+	h.url = api.URL + Path
+	return h
 }
 
 func (h *harness) post(body any) (int, map[string]any) {
@@ -623,6 +634,45 @@ func TestTheFoldKeepsTheTrayTagsNote(t *testing.T) {
 	}
 }
 
+// #8366: the app's chip, capacity and writable reach Python, which keeps them on the tag.
+func TestAReadsChipGoesToPython(t *testing.T) {
+	h := newHarness(t)
+	// A photo or position makes core write the body again for Python (stripScan): the chip stays.
+	body := map[string]any{"uid": "04C10001", "records": []any{}, "chip": "NTAG215", "max_ndef_bytes": 496, "writable": true,
+		"location": map[string]any{"lat": 1.0, "lon": 2.0, "at": time.Now().UTC().Format(time.RFC3339)}}
+	if status, answer := h.post(body); status != http.StatusOK {
+		t.Fatalf("%d %v", status, answer)
+	}
+	got := h.py.bodies[0]
+	if got["chip"] != "NTAG215" || got["max_ndef_bytes"] != 496.0 || got["writable"] != true || got["location"] != nil {
+		t.Errorf("python got %v", got)
+	}
+}
+
+// #8366: a fold keeps the newer chip read of the two tags, as it keeps the newer last-seen fields.
+func TestTheFoldKeepsTheNewerChip(t *testing.T) {
+	for _, c := range []struct {
+		name     string
+		trayRead any
+		want     string
+	}{{"tray tag never read", nil, "NTAG215 496"}, {"tray tag read later", "2026-11-27T12:00:00Z", "NTAG216 868"}} {
+		t.Run(c.name, func(t *testing.T) {
+			h := newHarness(t)
+			h.exec(`INSERT INTO filament_tags (kind, tag_uid, tray_uuid, chip, max_ndef_bytes, chip_read_at)
+ VALUES ('bambu_mifare', $1, $2, CASE WHEN $3::timestamptz IS NULL THEN NULL ELSE 'NTAG216' END,
+ CASE WHEN $3::timestamptz IS NULL THEN NULL ELSE 868 END, $3::timestamptz)`, uidA+"00000100", tray, c.trayRead)
+			h.exec(`INSERT INTO filament_tags (kind, tag_uid, chip, max_ndef_bytes, writable, chip_read_at)
+ VALUES ('other', $1, 'NTAG215', 496, true, '2026-11-27T06:00:00Z')`, uidB+"00000100")
+			if status, answer := h.post(mifareRead(uidB, block0B+" "+shared)); status != http.StatusOK {
+				t.Fatalf("%d %v", status, answer)
+			}
+			if got := h.one("SELECT chip || ' ' || max_ndef_bytes FROM filament_tags"); got != c.want {
+				t.Errorf("chip = %v", got)
+			}
+		})
+	}
+}
+
 // Review of #8161: a body over bodyMax goes to Python whole, which answers its own refusal.
 func TestAnOversizeBodyGoesToPythonWhole(t *testing.T) {
 	h := newHarness(t)
@@ -790,5 +840,180 @@ func TestCleanUIDIsPythons(t *testing.T) {
 		if got := CleanUID(in); got != want {
 			t.Errorf("CleanUID(%q) = %q, want %q", in, got, want)
 		}
+	}
+}
+
+// deviceRead is a paired device's tag read for owner, as the devices area's result writes it
+// (#8244): the dump stored as a tag_dump blob, and its device and call.
+func (h *harness) deviceRead(owner, uid, blocks string) string {
+	h.t.Helper()
+	return h.deviceDump(owner, map[string]any{"uid": uid, "tech": "MifareClassic", "blocks": blocksOf(blocks), "records": []any{}})
+}
+
+// deviceDump is a paired device's tag read for owner of the dump d.
+func (h *harness) deviceDump(owner string, d map[string]any) string {
+	h.t.Helper()
+	ctx := context.Background()
+	body, _ := json.Marshal(d)
+	uid := d["uid"]
+	put, err := h.reads.Blobs.Put(ctx, dumpKind, mediaType, body)
+	if err != nil {
+		h.t.Fatal(err)
+	}
+	var id string
+	if err := h.pool.QueryRow(ctx, `WITH d AS (
+		INSERT INTO devices (owner, name, model, app_version, capabilities)
+		VALUES ($1, 'Phone', 'Pixel', '1.0', ARRAY['nfc.read']) RETURNING id),
+	c AS (INSERT INTO device_calls (device_id, caller, caller_kind, method, timeout_s, deadline, outcome, ended_at)
+		SELECT id, $1, 'person', 'nfc.read', 60, now(), 'done', now() FROM d RETURNING id, device_id)
+	INSERT INTO device_reads (device_id, call_id, kind, uid, tech, blob_key, media_type, complete)
+		SELECT device_id, id, 'nfc', $2, 'MifareClassic', $3, $4, false FROM c RETURNING id::text`,
+		owner, uid, put.Key, mediaType).Scan(&id); err != nil {
+		h.t.Fatal(err)
+	}
+	return id
+}
+
+var ada = auth.Caller{Kind: auth.KindPerson, Principal: "user:test#ada", SessionKind: "login"}
+
+func TestTagReadFromDeviceRead(t *testing.T) {
+	h := newHarness(t)
+	h.who = ada
+	// A phone's Web NFC scan made a UID-only tag of side B: B's read folds it in.
+	h.exec("INSERT INTO filament_tags (kind, tag_uid) VALUES ('other', $1)", uidB+"00000100")
+	readA := h.deviceRead(ada.Principal, uidA, block0A+" "+shared)
+	readB := h.deviceRead(ada.Principal, uidB, block0B+" "+shared)
+	for _, read := range []string{readA, readB} {
+		status, answer := h.post(map[string]any{"read_id": read})
+		if status != http.StatusOK {
+			t.Fatalf("%s: %d %v", read, status, answer)
+		}
+		if bambu := answer["bambu"].(map[string]any); bambu["tray_uid"] != tray || answer["tag_read_id"] == nil {
+			t.Errorf("answer = %v", answer)
+		}
+	}
+	tag := h.tagOf(uidA + "00000100")
+	if got := h.tagOf(uidB + "00000100"); got != tag {
+		t.Fatalf("the two sides are tags %s and %s", tag, got)
+	}
+	if got := h.one("SELECT tray_uuid FROM filament_tags WHERE id = $1::uuid", tag); got != tray {
+		t.Errorf("tray_uuid = %v", got)
+	}
+	for _, read := range []string{readA, readB} {
+		if got := h.one(`SELECT source || ' ' || tag_type FROM filament_tag_reads
+			WHERE device_read_id = $1::uuid AND tag_id = $2::uuid`, read, tag); got != "app MifareClassic" {
+			t.Errorf("read %s: %v", read, got)
+		}
+	}
+	// Python got UID-only reads, without the read_id.
+	for _, b := range h.py.bodies {
+		if _, ok := b["read_id"]; ok || b["mifare_blocks"] != nil {
+			t.Errorf("forwarded %v", b)
+		}
+	}
+	// The same read posted again answers its first row and writes no second one.
+	first := h.one("SELECT id::text FROM filament_tag_reads WHERE device_read_id = $1::uuid", readA)
+	if status, answer := h.post(map[string]any{"read_id": readA}); status != http.StatusOK || answer["tag_read_id"] != first {
+		t.Errorf("again: %d %v, want row %v", status, answer, first)
+	}
+	// B posted again after its fold: its first row names the tag the fold kept.
+	firstB := h.one("SELECT id::text FROM filament_tag_reads WHERE device_read_id = $1::uuid", readB)
+	if status, answer := h.post(map[string]any{"read_id": readB}); status != http.StatusOK || answer["tag_read_id"] != firstB {
+		t.Errorf("B again: %d %v, want row %v", status, answer, firstB)
+	}
+	if got := h.one("SELECT tag_id::text FROM filament_tag_reads WHERE device_read_id = $1::uuid", readB); got != tag {
+		t.Errorf("B's row names tag %v, want %s", got, tag)
+	}
+	if got := h.one("SELECT count(*) FROM filament_tag_reads"); got != int64(2) {
+		t.Errorf("%v reads, want 2", got)
+	}
+	// A read_id comes in place of the inline read; an empty records (the model's default) may
+	// come with it.
+	if status, answer := h.post(map[string]any{"read_id": readA, "uid": uidA}); status != http.StatusUnprocessableEntity {
+		t.Errorf("read_id and uid: %d %v", status, answer)
+	}
+	if status, answer := h.post(map[string]any{"read_id": readA, "records": []any{}, "uid": nil, "tag_type": nil,
+		"mifare_blocks": nil}); status != http.StatusOK {
+		t.Errorf("read_id and records []: %d %v", status, answer)
+	}
+	// A second post with a photo keeps no photo: the first row stands.
+	photo := "scan_image-" + strings.Repeat("ab", 32)
+	h.exec(`INSERT INTO store_blobs (sha256, kind, backend, backend_id, size, meta, key)
+ VALUES ($1, 'scan_image', 's3', 't/scan_image/x', 10, '{}'::jsonb, $2)`, strings.Repeat("ab", 32), photo)
+	if status, answer := h.post(map[string]any{"read_id": readA, "image": map[string]any{"key": photo, "media_type": "image/jpeg"}}); status != http.StatusOK || answer["tag_read_id"] != first {
+		t.Errorf("again with a photo: %d %v", status, answer)
+	}
+	if got := h.one("SELECT count(*) FROM blob_refs WHERE key = $1", photo); got != int64(0) {
+		t.Errorf("%v holds of the repeat's photo", got)
+	}
+	if got := h.one("SELECT count(*) FROM filament_tag_reads WHERE image_key IS NOT NULL"); got != int64(0) {
+		t.Errorf("%v rows with a photo", got)
+	}
+	// A photo read is no tag read.
+	photoRead := h.one(`WITH c AS (INSERT INTO device_calls (device_id, caller, caller_kind, method, timeout_s, deadline, outcome, ended_at)
+ SELECT device_id, $2, 'person', 'code.scan', 60, now(), 'done', now() FROM device_reads WHERE id = $1::uuid RETURNING id, device_id)
+ INSERT INTO device_reads (device_id, call_id, kind, blob_key, media_type)
+ SELECT device_id, id, 'photo', $3, 'image/jpeg' FROM c RETURNING id::text`, readA, ada.Principal, photo)
+	if status, answer := h.post(map[string]any{"read_id": photoRead}); status != http.StatusUnprocessableEntity {
+		t.Errorf("a photo read: %d %v", status, answer)
+	}
+}
+
+func TestANullReadIDIsAnInlineRead(t *testing.T) {
+	h := newHarness(t)
+	body := mifareRead(uidA, block0A+" "+shared)
+	body["read_id"] = nil
+	if status, answer := h.post(body); status != http.StatusOK || answer["bambu"] == nil {
+		t.Fatalf("%d %v", status, answer)
+	}
+	if _, ok := h.py.bodies[0]["read_id"]; ok {
+		t.Errorf("forwarded %v", h.py.bodies[0])
+	}
+	tag := h.one("INSERT INTO filament_tags (kind, tag_uid) VALUES ('ntag_openspool', '53F64B94420001') RETURNING id::text")
+	h.py.answer = `{"tag":{"id":"` + tag.(string) + `"},"spool":null,"decoded":null,"draft":null,"next":"bind_or_create"}`
+	if status, answer := h.post(map[string]any{"uid": "53F64B94420001", "records": []any{}, "read_id": nil}); status != http.StatusOK {
+		t.Errorf("NDEF: %d %v", status, answer)
+	}
+	if _, ok := h.py.bodies[1]["read_id"]; ok {
+		t.Errorf("forwarded %v", h.py.bodies[1])
+	}
+}
+
+func TestADeviceReadThatIsNoClassic1KIsAUIDOnlyRead(t *testing.T) {
+	h := newHarness(t)
+	h.who = ada
+	// A 7-byte UID, with a block, and a tech longer than tag_type holds, cut on a rune.
+	read := h.deviceDump(ada.Principal, map[string]any{"uid": "04A1B2C3D4E5F6", "tech": strings.Repeat("t", 31) + "é" + "ttt",
+		"blocks": blocksOf(block0A), "records": []any{}})
+	tag := h.one("INSERT INTO filament_tags (kind, tag_uid) VALUES ('other', '04A1B2C3D4E5F6') RETURNING id::text")
+	h.py.answer = `{"tag":{"id":"` + tag.(string) + `"},"spool":null,"decoded":null,"draft":null,"next":"bind_or_create"}`
+	status, answer := h.post(map[string]any{"read_id": read})
+	if status != http.StatusOK {
+		t.Fatalf("%d %v", status, answer)
+	}
+	got := h.py.bodies[0]
+	if _, ok := got["mifare_blocks"]; ok || got["uid"] != "04A1B2C3D4E5F6" || got["tag_type"] != strings.Repeat("t", 31) ||
+		len(got["records"].([]any)) != 0 {
+		t.Errorf("forwarded %v", got)
+	}
+	if got := h.one("SELECT source FROM filament_tag_reads WHERE device_read_id = $1::uuid", read); got != "app" {
+		t.Errorf("source = %v", got)
+	}
+}
+
+func TestTagReadFromAnotherPersonsDeviceReadIsNotFound(t *testing.T) {
+	h := newHarness(t)
+	h.who = ada
+	bobs := h.deviceRead("user:test#bob", uidA, block0A+" "+shared)
+	for _, id := range []string{bobs, "not-an-id", "00000000-0000-0000-0000-000000000000"} {
+		if status, answer := h.post(map[string]any{"read_id": id}); status != http.StatusNotFound || answer["code"] != "read_not_found" {
+			t.Errorf("read %s: %d %v", id, status, answer)
+		}
+	}
+	if got := h.one("SELECT count(*) FROM filament_tags"); got != int64(0) {
+		t.Errorf("%v tags from another person's read", got)
+	}
+	if len(h.py.bodies) != 0 {
+		t.Errorf("Python got %v", h.py.bodies)
 	}
 }

@@ -128,6 +128,7 @@ from scadbuddy.core.events import (
     FlowChanged,
     FlowRunEvent,
     FontInstalled,
+    InventoryOperationEvent,
     JobEvent,
     JobProgress,
     LibraryChanged,
@@ -295,7 +296,7 @@ def topics_of(event: AnyEvent) -> list[str]:
             return ["orders", f"order:{event.order_id}"]
         case OrderBankDepositsChanged():
             return [f"order:{event.order_id}"]
-        case AgentOperationEvent():
+        case AgentOperationEvent() | InventoryOperationEvent():
             return []
         case AuthSessionRevoked():
             # The sockets close on it themselves (spec 2026-11-01 §5.4); news for no page.

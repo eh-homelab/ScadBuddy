@@ -30,9 +30,17 @@ type S = components['schemas']
  * #7244 — `POST /api/v1/filament/presets/bambuddy-import`: 409 with no Bambuddy, 409
  * `instance_changed` while the links are another Bambuddy's; else the first import adopts two
  * presets and updates one, and every later one finds nothing new, as a second import does.
+ *
+ * #6261 — `POST /api/v1/filament/bambuddy/import`: the same two 409s; else the first import reports
+ * two spools made, one linked, one updated, one needing a type and one Bambuddy row it could not
+ * read, and every later one finds nothing new. It changes no spool in the mock's inventory.
+ * `leaveImportUnfinished` (or the `IMPORT_UNFINISHED_SEED_KEY` seed) makes it answer 503
+ * `import_unfinished`, as when the print worker did not finish in time.
  */
 
-const BASE = '/api/v1/filament/sync'
+/** The filament routes' prefix, as `api/filament.ts` has it. */
+const FILAMENT_BASE = '/api/v1/filament'
+const BASE = `${FILAMENT_BASE}/sync`
 const FIRST_PASS = '2026-11-15T07:00:00Z'
 
 const seedErrors = (): S['SyncError'][] => [
@@ -68,12 +76,29 @@ let onlyPresets = false
 
 /** #7244 — whether the presets import ran: the next one finds nothing new. */
 let presetsImported = false
+let spoolsImported = false
+/** #6261 — the next spool imports answer 503 `import_unfinished`. */
+let importUnfinished = false
 /** #7244 — Bambuddy ids that bindings still name after an import (`unresolved`). */
 let unresolvedPresets = 0
 
 /** #7244 — the next imports find `count` bound Bambuddy ids they cannot import. */
 export function leaveUnresolvedPresets(count: number) {
   unresolvedPresets = count
+}
+
+/** #6261 — the print worker does not finish the spool imports in time: each answers 503 `import_unfinished`. */
+export function leaveImportUnfinished() {
+  importUnfinished = true
+}
+
+/** An e2e test or the dev preview sets this `sessionStorage` key (any value) before the page loads to call `leaveImportUnfinished`. */
+export const IMPORT_UNFINISHED_SEED_KEY = 'scadbuddy.mock.filament-import-unfinished'
+
+try {
+  if (typeof sessionStorage !== 'undefined' && sessionStorage.getItem(IMPORT_UNFINISHED_SEED_KEY) !== null) leaveImportUnfinished()
+} catch {
+  // Storage blocked: the import answers as usual.
 }
 
 /**
@@ -131,6 +156,8 @@ export function reset() {
   unreadable = false
   onlyColours = false
   presetsImported = false
+  spoolsImported = false
+  importUnfinished = false
   unresolvedPresets = 0
   onlyPresets = false
   passes = seedPasses()
@@ -255,10 +282,66 @@ function status(): S['SyncStatus'] {
   }
 }
 
+/** A pull that found nothing: every count 0, every list empty. */
+export const EMPTY_PULL: S['PullReport'] = {
+  created: 0,
+  archived_created: 0,
+  linked: 0,
+  updated: 0,
+  needs_type: 0,
+  archived: 0,
+  invalid: 0,
+  catalog_failed: false,
+  catalog_skipped: 0,
+  names_skipped: 0,
+  created_ids: [],
+  linked_ids: [],
+  updated_ids: [],
+  needs_type_ids: [],
+  archived_ids: [],
+  failed_bb_ids: [],
+  invalid_bb_ids: [],
+  usage_booked: 0,
+  usage_unlinked: 0,
+  rfid_duplicates: 0,
+  rfid_duplicate_bb_ids: [],
+  archived_deferred: 0,
+  archived_deferred_bb_ids: [],
+  claimed: 0,
+  suppliers: 0,
+  locations: 0,
+  moved: 0,
+  conflicts: 0,
+  colours: 0,
+  colours_kept: 0,
+  colours_failed: false,
+}
+
+/**
+ * What `POST /filament/bambuddy/import` answers: the first import finds spools, a later one
+ * nothing. The ids name seed spools, so a page that follows them finds them; the mock changes none.
+ */
+function pullReport(first: boolean): S['PullReport'] {
+  if (!first) return EMPTY_PULL
+  return {
+    ...EMPTY_PULL,
+    created: 2,
+    linked: 1,
+    updated: 1,
+    needs_type: 1,
+    invalid: 1,
+    created_ids: [spoolId(5), spoolId(6)],
+    linked_ids: [spoolId(3)],
+    updated_ids: [spoolId(4)],
+    needs_type_ids: [spoolId(6)],
+    invalid_bb_ids: [77],
+  }
+}
+
 const conflict = (detail: string, code: string) => problem(409, 'Conflict', detail, { code })
 
 export const handlers = [
-  http.post('/api/v1/filament/presets/bambuddy-import', () => {
+  http.post(`${FILAMENT_BASE}/presets/bambuddy-import`, () => {
     if (!configured()) return conflict('no Bambuddy URL is configured; set one in Settings', 'no_bambuddy')
     if (linksInstance() !== null && linksInstance() !== configured())
       return conflict('the Bambuddy links belong to another Bambuddy; reset them first', 'instance_changed')
@@ -267,6 +350,21 @@ export const handlers = [
       : { adopted: 2, updated: 1, unresolved: unresolvedPresets }
     presetsImported = true
     return HttpResponse.json(done)
+  }),
+  http.post(`${FILAMENT_BASE}/bambuddy/import`, () => {
+    if (!configured()) return conflict('no Bambuddy URL is configured; set one in Settings', 'no_bambuddy')
+    if (linksInstance() !== null && linksInstance() !== configured())
+      return conflict('the Bambuddy links belong to another Bambuddy; reset them first', 'instance_changed')
+    if (importUnfinished)
+      return problem(
+        503,
+        'Service Unavailable',
+        'the print worker did not finish the import in time; it may still be running, so check the spools before importing again',
+        { code: 'import_unfinished' },
+      )
+    const first = !spoolsImported
+    spoolsImported = true
+    return HttpResponse.json(pullReport(first))
   }),
   http.get(`${BASE}/status`, () => {
     if (running !== null) {

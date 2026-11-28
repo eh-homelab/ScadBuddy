@@ -31,6 +31,7 @@ from pathlib import Path, PurePosixPath
 from typing import BinaryIO
 
 from scadbuddy.operations.claims import ClaimStore
+from scadbuddy.operations.kinds import OPERATION_RUN
 from scadbuddy.orders.models import AttachmentKind
 from scadbuddy.store import BlobStore
 from scadbuddy.store.cache import StaleBlobError
@@ -42,6 +43,10 @@ SNIFF_BYTES = 16
 BLOB_FILE = "file"
 #: The longest kept file name, in characters (the column's own bound).
 MAX_FILENAME = 255
+#: The run attempts of the kinds that keep an upload and add its row
+#: (``order_attachment_add``, ``entity_attachment_add``, #8471): every step may run
+#: again (`keep`, `run_attachment_id`).
+RUN_ATTEMPTS = 3
 
 #: The ISO base media brands of a still image (HEIF and AVIF share the container
 #: with MP4: https://www.iana.org/assignments/media-types/image/heic).
@@ -119,6 +124,19 @@ def clean_filename(sent: str) -> str:
 
 def blob_key(sha256: str) -> str:
     return f"attachment-{sha256}"
+
+
+def run_attachment_id(kind: str) -> str:
+    """The id an operation ``kind``'s run gives the row it adds (#8471): one per
+    operation (its workflow's id, the same on every attempt), so an attempt that runs
+    again after an earlier one committed the row finds that row instead of adding a
+    second. A re-sent upload with the same Idempotency-Key is the same operation, so it
+    gets the same id too; another key is another operation and another row, as before.
+    A run outside an operation gets an id of its own."""
+    operation = OPERATION_RUN.get()
+    if operation is None:
+        return str(uuid.uuid4())
+    return str(uuid.uuid5(uuid.NAMESPACE_URL, f"scadbuddy:{kind}:{operation}"))
 
 
 def _place(blobs: BlobStore, key: str, write: Callable[[Path], None]) -> None:

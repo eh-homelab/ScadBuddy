@@ -12,9 +12,10 @@ import asyncio
 from typing import Annotated, Any
 from uuid import UUID
 
-from fastapi import APIRouter, Path, Query
+from fastapi import APIRouter, Path, Query, status
 from pydantic import BaseModel, ConfigDict, Field
 
+from scadbuddy.core.problems import ApiError
 from scadbuddy.entities.component import EntitiesDep
 from scadbuddy.entities.problems import (
     bad_property_schema,
@@ -41,6 +42,7 @@ from scadbuddy.entities.properties import (
 from scadbuddy.entities.refs import EntityRef
 from scadbuddy.entities.registry import KINDS, EntityNotFound
 from scadbuddy.inventory.component import InventoryDep
+from scadbuddy.inventory.kinds import keys_in_use
 from scadbuddy.orders.actor import current_actor
 
 router = APIRouter(tags=["entities"])
@@ -174,10 +176,19 @@ async def get_entity_property_schema(
 
     found = await asyncio.to_thread(schema)
     if entity.kind == ITEM:
-        item = await asyncio.to_thread(inventory.items.get, UUID(entity.ref))
-        if item is None:
-            raise entity_not_found(entity)
-        keys = await asyncio.to_thread(inventory.kinds.keys_in_use, item.kind_id)
+        # The item's kind is scadbuddy-core's to read (#6949 K1, C16); the keys are rows.
+        try:
+            item = await inventory.core.read(f"/items/{UUID(entity.ref)}")
+        except ApiError as missing:
+            if missing.status == status.HTTP_404_NOT_FOUND:
+                raise entity_not_found(entity) from None
+            raise
+
+        def keys_of_kind() -> list[tuple[str, int]]:
+            with entities.opened().connection() as conn:
+                return keys_in_use(conn, str(item["kind_id"]))
+
+        keys = await asyncio.to_thread(keys_of_kind)
     else:
         keys = await asyncio.to_thread(entities.properties.keys_in_use, entity.kind)
     return KindPropertySchema(
@@ -202,7 +213,9 @@ async def get_entity_property_schema(
         422: {
             "description": _CODES
             + ", `bad_property_value`, or `missing_required_properties` for a patch that"
-            " removes or empties a required key that has a value"
+            " removes or empties a required key that has a value. An item's required keys"
+            " are its item kind's and its special type's: a printer item's `model_code`, a"
+            " filament spool item's `rgba` and `diameter_mm` (R-K1-33)"
         },
     },
 )

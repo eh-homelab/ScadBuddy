@@ -53,7 +53,10 @@ const ARMED_MARGIN_MS = 60_000
  * seen begun, plus the margin. Any other job still open then, or when the call is aborted, is
  * cancelled first, so no page can arm it later (M1).
  */
-async function runJob(ctx: ToolContext, body: { kind: 'read' | 'write'; ttl_s: number; records?: z.infer<typeof RECORD>[] }) {
+async function followJob(
+  ctx: ToolContext,
+  body: { kind: 'read' | 'write'; ttl_s: number; records?: z.infer<typeof RECORD>[] },
+): Promise<JobOutcome> {
   const made: Job = await ok(ctx.backend.POST('/api/v1/filament/nfc-jobs', { body }), `queue an NFC ${body.kind}`)
   const job_id = made.id
   const path = { params: { path: { job_id } } }
@@ -76,7 +79,7 @@ async function runJob(ctx: ToolContext, body: { kind: 'read' | 'write'; ttl_s: n
       await ctx.progress(0, undefined, found.state)
     }
   }
-  const begun = () => json({ job_id, state: found.state, result: found.result ?? null, write_begun: true })
+  const begun = (): JobOutcome => ({ job_id, state: found.state, result: found.result ?? null, write_begun: true })
   await wait()
   // A begun write is never cancelled: the tag may hold the new records, and the server ends it.
   if (!ENDED.has(found.state) && found.write_begun) return begun()
@@ -90,16 +93,59 @@ async function runJob(ctx: ToolContext, body: { kind: 'read' | 'write'; ttl_s: n
         // The write began after the last read (#7419 round 3): wait for it as for any begun write.
         found = { ...(await read()), write_begun: true }
         await wait()
-        return ENDED.has(found.state) ? json({ job_id, state: found.state, result: found.result ?? null }) : begun()
+        return ENDED.has(found.state) ? { job_id, state: found.state, result: found.result ?? null } : begun()
       }
       await ok(Promise.resolve(cancel), `cancel NFC job ${job_id}`)
       found = await read()
     } catch (err) {
       const cancel_failed = err instanceof Error ? err.message : String(err)
-      return json({ job_id, state: found.state, result: found.result ?? null, cancel_failed })
+      return { job_id, state: found.state, result: found.result ?? null, cancel_failed }
     }
   }
-  return json({ job_id, state: found.state, result: found.result ?? null })
+  return { job_id, state: found.state, result: found.result ?? null }
+}
+
+type JobOutcome = { job_id: string; state: string; result: Record<string, unknown> | null; write_begun?: true; cancel_failed?: string }
+
+const runJob = async (...args: Parameters<typeof followJob>) => json(await followJob(...args))
+
+/** A read job's result, as filament/tags.py `finish_job` writes it. */
+type ReadResult = {
+  uid?: string | null
+  chip?: string | null
+  max_ndef_bytes?: number | null
+  writable?: boolean | null
+  tag?: { id?: string } | null
+  error?: string
+}
+
+const PROBE_UNTOLD =
+  "The page read the tag but no chip: Chrome's Web NFC tells none. Run the probe again with /scan open in the ScadBuddy app on Android."
+
+/**
+ * #8366: what a probe answers: the chip, the largest NDEF message and whether the tag takes a
+ * write, as the page read them, and the tag ScadBuddy keeps them on. A page that read none of
+ * them (Chrome's Web NFC, an older app) answers nulls and says so.
+ */
+function probeOf(outcome: JobOutcome) {
+  const read = (outcome.result ?? {}) as ReadResult
+  const { job_id, state, cancel_failed } = outcome
+  const told = read.chip != null || read.max_ndef_bytes != null || read.writable != null
+  return {
+    job_id,
+    state,
+    ...(cancel_failed === undefined ? {} : { cancel_failed }),
+    ...(state === 'done'
+      ? {
+          uid: read.uid ?? null,
+          tag_id: read.tag?.id ?? null,
+          chip: read.chip ?? null,
+          max_ndef_bytes: read.max_ndef_bytes ?? null,
+          writable: read.writable ?? null,
+          ...(told ? {} : { note: PROBE_UNTOLD }),
+        }
+      : { error: read.error ?? null }),
+  }
 }
 
 /** Whether the call has no person behind it (see nfc_write). */
@@ -116,7 +162,8 @@ export const nfcTools = [
     description:
       `Read any NFC tag through the user's phone. ${WAIT} ${HOW} Any tag, not only a ` +
       "spool's. The result is the tag's UID, its records and what ScadBuddy makes of them (the spool that holds " +
-      'it, or what to do next).',
+      "it, or what to do next), and, when the page is the ScadBuddy app, the tag's `chip` (NTAG213, NTAG215 or " +
+      'NTAG216), `max_ndef_bytes` (the largest NDEF message it takes) and `writable` (null when the page read none).',
     input: z.object({ timeout_s: TIMEOUT }),
     // #7273 R8: it makes a job row (and its result records the tag as seen); the tap is the person's own act.
     risk: 'write',
@@ -124,6 +171,25 @@ export const nfcTools = [
     routes: ROUTES,
     waitsMs: ({ timeout_s }) => timeout_s * 1000 + ARM_MS + ARMED_MARGIN_MS,
     handler: async ({ timeout_s }, ctx) => runJob(ctx, { kind: 'read', ttl_s: timeout_s }),
+  }),
+  defineTool({
+    name: 'nfc_probe',
+    label: 'Probe an NFC tag’s chip',
+    description:
+      "Ask the user's phone for a tag's chip and capacity, when filament_tag_get or filament_tag_list show " +
+      "`chip`, `max_ndef_bytes` or `writable` as null (a tag read only by Chrome's Web NFC, or by an older app). " +
+      `It runs an NFC read job, as nfc_read does, and writes nothing to the tag. ${WAIT} The user opens ScadBuddy's ` +
+      '/scan page (Scan in the nav) in the ScadBuddy app on Android; it shows the job, the user taps Arm and holds the tag. Only the ScadBuddy ' +
+      'app on Android reads the chip (NTAG GET_VERSION: NTAG213, NTAG215 or NTAG216), `max_ndef_bytes` (the largest ' +
+      'NDEF message the tag takes) and `writable`; ScadBuddy keeps them on the tag (`tag_id`). A Bambu tag (MIFARE ' +
+      'Classic) has no NTAG chip, so it answers nulls.',
+    input: z.object({ timeout_s: TIMEOUT }),
+    // As nfc_read: a job row, and its result records the tag as seen; the tap is the person's own act.
+    risk: 'write',
+    source: SOURCE,
+    routes: ROUTES,
+    waitsMs: ({ timeout_s }) => timeout_s * 1000 + ARM_MS + ARMED_MARGIN_MS,
+    handler: async ({ timeout_s }, ctx) => json(probeOf(await followJob(ctx, { kind: 'read', ttl_s: timeout_s }))),
   }),
   defineTool({
     name: 'nfc_write',

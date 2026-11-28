@@ -13,7 +13,11 @@ import (
 
 func load(t *testing.T) *Model {
 	t.Helper()
-	m, err := Load(Dir())
+	dir, err := Dir()
+	if err != nil {
+		t.Fatal(err)
+	}
+	m, err := Load(dir)
 	if err != nil {
 		t.Fatal(err)
 	}

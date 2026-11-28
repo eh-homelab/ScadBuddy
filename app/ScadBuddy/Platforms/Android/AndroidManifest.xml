@@ -10,4 +10,11 @@
 	<uses-permission android:name="android.permission.ACCESS_FINE_LOCATION" />
 	<uses-feature android:name="android.hardware.location.gps" android:required="false" />
 	<uses-feature android:name="android.hardware.nfc" android:required="true" />
+	<!-- MediaPicker's photo capture: on Android 11+ the camera app must be visible, or
+	     CapturePhotoAsync says capture is not supported (https://learn.microsoft.com/dotnet/maui/platform-integration/device-media/picker). -->
+	<queries>
+		<intent>
+			<action android:name="android.media.action.IMAGE_CAPTURE" />
+		</intent>
+	</queries>
 </manifest>

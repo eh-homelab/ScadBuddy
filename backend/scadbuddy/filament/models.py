@@ -605,10 +605,17 @@ MAX_LABELS = 100
 
 
 class LabelsRequest(_In):
-    """#7157: the labels of these spools, then these places, in the order sent."""
+    """#7157: the labels of these spools, then these places, in the order sent. #7169: then
+    these spool types, items and item kinds."""
 
     spool_ids: list[UUID] = Field(default_factory=list, max_length=MAX_LABELS)
     location_ids: list[UUID] = Field(default_factory=list, max_length=MAX_LABELS)
+    type_ids: list[UUID] = Field(default_factory=list, max_length=MAX_LABELS)
+    item_ids: list[UUID] = Field(default_factory=list, max_length=MAX_LABELS)
+    #: An item kind's id is its text id (`printer`, `k12`).
+    kind_ids: list[Annotated[str, Field(max_length=40)]] = Field(
+        default_factory=list, max_length=MAX_LABELS
+    )
     #: ``None``: the stored setting `filament_label_template`.
     template: LabelTemplateChoice | None = None
     #: A one-label template: one label a page (``roll``) or packed on Letter paper
@@ -620,11 +627,21 @@ class LabelsRequest(_In):
     #: The spool label's fields (R-7216-9), put in their print order; ``None``: the setting's.
     fields: LabelFields | None = None
 
+    @property
+    def count(self) -> int:
+        """How many labels the request names."""
+        return (
+            len(self.spool_ids)
+            + len(self.location_ids)
+            + len(self.type_ids)
+            + len(self.item_ids)
+            + len(self.kind_ids)
+        )
+
     @model_validator(mode="after")
     def _one_to_max(self) -> LabelsRequest:
-        count = len(self.spool_ids) + len(self.location_ids)
-        if not 1 <= count <= MAX_LABELS:
-            raise ValueError(f"name 1 to {MAX_LABELS} spools and places")
+        if not 1 <= self.count <= MAX_LABELS:
+            raise ValueError(f"name 1 to {MAX_LABELS} spools, places, types, items and kinds")
         return self
 
 
@@ -921,6 +938,8 @@ class SpoolTypePatch(_Patch):
 
 
 class SpoolType(_Row):
+    # The typed code is `T-<number>` (#7169); `code` is the maker's.
+    number: int
     code: str
     brand_id: UUID | None
     material_id: UUID
@@ -1721,6 +1740,14 @@ class Tag(BaseModel):
     created_at: datetime
     last_seen_at: datetime | None = None
     last_seen_source: str | None = None
+    #: What the ScadBuddy app last read of the tag (#8366): the NTAG chip from GET_VERSION
+    #: (`NTAG213`, `NTAG215`, `NTAG216`), the largest NDEF message it takes (Android's
+    #: `Ndef.getMaxSize()`), whether it takes a write, and when. None when no read told them
+    #: (a Web NFC read, an older app): an NFC `read` job on the app (agent `nfc_probe`) tells.
+    chip: str | None = None
+    max_ndef_bytes: int | None = None
+    writable: bool | None = None
+    chip_read_at: datetime | None = None
 
 
 class TagBindingCreate(_In):
@@ -2159,6 +2186,12 @@ def _check_fits(records: Sequence[NdefRecord]) -> None:
         raise ValueError(f"the records hold more than {MAX_RECORD_BYTES} bytes")
 
 
+#: A tag's chip as the ScadBuddy app reads it (#8366): NTAG GET_VERSION's chip name.
+Chip = Annotated[str, Field(min_length=1, max_length=32, pattern=r"^[A-Za-z0-9 ._-]+$")]
+#: Android's `Ndef.getMaxSize()`: the largest NDEF message the tag takes, in bytes.
+MaxNdefBytes = Annotated[int, Field(ge=0, le=65535)]
+
+
 class _FitsOneTag(_In):
     """A body whose NDEF ``records`` must fit one tag."""
 
@@ -2196,8 +2229,14 @@ class ScanLocation(_In):
 class TagReadIn(_FitsOneTag):
     """What a phone reads from a tag: its UID and its NDEF records, or its MIFARE blocks."""
 
+    #: Empty for a read that names a device read (`read_id`) instead.
+    records: Annotated[list[NdefRecord], Field(max_length=MAX_RECORDS)] = []
     uid: Annotated[str, Field(max_length=64)] | None = None
     tag_type: Annotated[str, Field(max_length=32)] | None = None
+    #: A paired device's tag read (#8244), in place of `uid`, `tag_type`, `records` and
+    #: `mifare_blocks`. Core's area `filament-tag-reads` loads and decodes it; a read with
+    #: `read_id` that reaches Python is a 503 `device_read_needs_core`.
+    read_id: UUID | None = None
     #: Bind the tag to this spool as part of the read.
     bind_spool_id: UUID | None = None
     #: A Bambu tag's data blocks (key trailers left out), which core's area
@@ -2211,9 +2250,18 @@ class TagReadIn(_FitsOneTag):
     #: False for a page's lookup of a tag it read before (the old tag after a move, a
     #: restore's read back): core then writes no `filament_tag_reads` row for it (#8148).
     tap: bool = True
+    #: What the ScadBuddy app read of the tag beside its records (#8366): its NTAG chip, the
+    #: largest NDEF message it takes and whether it takes a write. Each is kept on the tag
+    #: when sent; one left out keeps the tag's last known value.
+    chip: Chip | None = None
+    max_ndef_bytes: MaxNdefBytes | None = None
+    writable: bool | None = None
 
 
-BackupReason = Literal["spool_write", "agent_write", "restore", "place_write"]
+BackupReason = Literal["spool_write", "agent_write", "restore", "place_write", "clear"]
+#: Why a tag left its spool: ``unbound`` by hand, ``cleared`` once the phone wrote it empty
+#: (#8362).
+UnbindReason = Literal["unbound", "cleared"]
 
 
 class TagBackupIn(_FitsOneTag):
@@ -2356,6 +2404,11 @@ class NfcJobResultIn(_In):
     )
     backup_id: UUID | None = None
     error: Annotated[str, Field(max_length=500)] | None = None
+    #: What the ScadBuddy app read of the tag (#8366), as `TagReadIn` takes them; a `read`
+    #: job's result carries them as sent.
+    chip: Chip | None = None
+    max_ndef_bytes: MaxNdefBytes | None = None
+    writable: bool | None = None
 
     @field_validator("error")
     @classmethod
@@ -2390,6 +2443,13 @@ class DecodedSpool(BaseModel):
     label_weight_g: int | None = None
     empty_weight_g: int | None = None
     serial: str | None = None
+    other_keys: dict[str, str] | None = Field(
+        default=None,
+        description=(
+            "An OpenSpool tag's keys that ScadBuddy does not use, each value as its JSON "
+            "text (a string keeps its quotes), cut to 128 characters. Untrusted text."
+        ),
+    )
     warnings: list[str] = Field(
         default_factory=list,
         description=(

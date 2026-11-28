@@ -1,0 +1,19 @@
+{
+  "before_unit_costs_minor": [
+    "500"
+  ],
+  "cost_unknown": false,
+  "item_id": "00000000-0000-4000-8000-000000000001",
+  "moves": 1,
+  "orders": [
+    {
+      "after_minor": "1800",
+      "after_unknown": false,
+      "before_minor": "1500",
+      "before_unknown": false,
+      "order_id": "o1",
+      "order_item_id": "oi1"
+    }
+  ],
+  "unit_cost_minor": "600"
+}

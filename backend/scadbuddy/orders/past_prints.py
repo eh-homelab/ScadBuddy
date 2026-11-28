@@ -329,7 +329,7 @@ async def quote_from_archive(
         raise _conflict(
             "archive_plates_missing",
             f"archive {archive_id}'s print run has plates with no archive:"
-            f" {', '.join(str(p) for p in missing)}",
+            f" {', '.join('a plate with no number' if p is None else str(p) for p in missing)}",
             archive_id=archive_id,
             plates=missing,
         )

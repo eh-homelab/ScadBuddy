@@ -16,11 +16,13 @@ from typing import Any
 
 import httpx
 import pytest
+from opentelemetry import baggage, context, propagate, trace
 from prometheus_client import CollectorRegistry
 from temporalio import activity
 
 from scadbuddy.auth.service_credentials import ExchangeReader, ServiceAuth
 from scadbuddy.core.metrics import Metrics
+from scadbuddy.core.tracing import configure_tracing
 from scadbuddy.crud.client import (
     CrudClient,
     CrudRefusedError,
@@ -625,3 +627,29 @@ async def test_a_stream_is_counted_once_its_body_is_relayed(
     assert (count(metrics, "ok"), count(metrics, "relay_failed")) == (
         (1, 0) if outcome == "ok" else (0, 1)
     )
+
+
+async def test_a_crud_request_carries_the_trace_and_no_baggage() -> None:
+    """#8395: once a process has configured tracing, only the trace context crosses into
+    a CRUD call (spec §4). Baggage set by the caller stays in the caller's process."""
+    default = propagate.get_global_textmap()
+    configure_tracing(
+        "scadbuddy-render", version="test", revision="test", instrument_database=False
+    )
+    token = context.attach(baggage.set_baggage("user", "1"))
+    try:
+        script = Script(ok())
+        client, _ = make(script)
+        with trace.get_tracer(__name__).start_as_current_span("caller") as span:
+            await client.request("GET", PATH)
+        sent = script.requests[0].headers
+        # The caller span is the parent: its trace id and its span id (#8421).
+        caller = span.get_span_context()
+        assert sent["traceparent"].split("-")[1:3] == [
+            format(caller.trace_id, "032x"),
+            format(caller.span_id, "016x"),
+        ]
+        assert "baggage" not in sent
+    finally:
+        context.detach(token)
+        propagate.set_global_textmap(default)

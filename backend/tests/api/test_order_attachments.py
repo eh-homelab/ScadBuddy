@@ -12,6 +12,7 @@ from pathlib import Path
 from typing import Any
 
 import pytest
+from botocore.exceptions import ConnectTimeoutError
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 from PIL import Image
@@ -809,3 +810,62 @@ def test_a_video_past_the_media_upload_limit_is_413(
 
     assert answer.status_code == 413, answer.text
     assert "media_upload_max_bytes" in answer.json()["detail"]
+
+
+def test_a_connect_timeout_to_the_store_is_tried_again(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#8471: a connect timeout that outlasts the store client's own retries fails the
+    run's first attempt; the next attempt adds the file, once."""
+    order, _ = shop(client)
+    keep = attachments_module.keep
+    calls = 0
+
+    async def flaky(*args: Any) -> str:
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            raise ConnectTimeoutError(endpoint_url="https://store.test/piece/x")
+        return await keep(*args)
+
+    monkeypatch.setattr(attachments_module, "keep", flaky)
+    added = attach(client, order["id"], PDF, "brief.pdf")
+    assert added.status_code == 200, added.text
+    assert calls == 2
+    detail = client.get(f"/api/v1/orders/{order['id']}").json()
+    assert [a["id"] for a in detail["attachments"]] == [added.json()["id"]]
+
+
+def test_a_run_that_committed_then_failed_adds_one_row(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#8471: the row's id is the operation's, so the attempt after one that committed
+    the row and then failed (its reply lost) finds that row, with no second hold or
+    audit line."""
+    order, _ = shop(client)
+    lifecycle = _state(client).components.get(ORDERS).lifecycle
+    add = lifecycle.add_attachment
+    calls = 0
+
+    def committed_then_lost(*args: Any, **kwargs: Any) -> Any:
+        nonlocal calls
+        calls += 1
+        added = add(*args, **kwargs)
+        if calls == 1:
+            raise RuntimeError("the worker stopped after the commit")
+        return added
+
+    monkeypatch.setattr(lifecycle, "add_attachment", committed_then_lost)
+    added = attach(client, order["id"], PDF, "brief.pdf")
+    assert added.status_code == 200, added.text
+    assert calls == 2
+    kept = added.json()
+    detail = client.get(f"/api/v1/orders/{order['id']}").json()
+    assert [a["id"] for a in detail["attachments"]] == [kept["id"]]
+    assert holders(client) == {kept["id"]: f"attachment-{kept['sha256']}"}
+    with _state(client).refs.pool.connection() as conn:
+        lines = conn.execute(
+            "SELECT count(*) AS n FROM order_events WHERE order_id = %s AND kind = %s",
+            (order["id"], "attachment.added"),
+        ).fetchone()
+    assert lines is not None and lines["n"] == 1

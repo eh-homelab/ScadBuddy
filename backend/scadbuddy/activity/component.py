@@ -1,5 +1,5 @@
 """Activity as a component (spec 2026-10-09): the index, the kinds, and the bus
-consumer that ingests the agent's operations."""
+consumer that ingests the agent's operations and scadbuddy-core's inventory operations."""
 
 from __future__ import annotations
 
@@ -7,16 +7,17 @@ import asyncio
 import contextlib
 import logging
 import time
-from collections.abc import AsyncIterator, Callable
+from collections.abc import AsyncIterator, Callable, Coroutine
 from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
+from typing import Any
 
 from scadbuddy.activity.index import ActivityIndex
 from scadbuddy.activity.kinds import KindRegistry, discover_kinds, load_agent_kinds
 from scadbuddy.activity.subject_labels import SubjectLabels
 from scadbuddy.api.deps import transactional_events
 from scadbuddy.core.components import Component, Components, Core, Key
-from scadbuddy.core.events import AgentOperationEvent, Event, EventBus
+from scadbuddy.core.events import AgentOperationEvent, Event, EventBus, InventoryOperationEvent
 from scadbuddy.operations.component import OPERATIONS
 
 logger = logging.getLogger(__name__)
@@ -59,14 +60,15 @@ def _build(core: Core, components: Components) -> ActivityComponent:
 
 @asynccontextmanager
 async def _run(component: ActivityComponent) -> AsyncIterator[None]:
-    """Ingest every ``ai_operation.changed`` while the app runs. The bus calls listeners
+    """Ingest every ``ai_operation.changed`` and ``inventory_operation.changed`` while the
+    app runs. The bus calls listeners
     on its own thread (``PgNotifyEventBus.add_listener``), so hop onto the loop, as
     ``api/runtime.py`` ``follow_changes`` does."""
     loop = asyncio.get_running_loop()
     pending: set[asyncio.Task[None]] = set()
 
-    def ingest(operation_id: str) -> None:
-        task = loop.create_task(component.index.ingest_agent_operation(operation_id))
+    def ingest(read: Callable[[str], Coroutine[Any, Any, None]], operation_id: str) -> None:
+        task = loop.create_task(read(operation_id))
         pending.add(task)
         task.add_done_callback(pending.discard)
         task.add_done_callback(failed)
@@ -74,14 +76,20 @@ async def _run(component: ActivityComponent) -> AsyncIterator[None]:
     def failed(task: asyncio.Task[None]) -> None:
         if task.cancelled() or task.exception() is None:
             return
-        logger.error("ingesting an agent operation failed", exc_info=task.exception())
+        logger.error("ingesting an operation failed", exc_info=task.exception())
         if component.index.metrics is not None:
             component.index.metrics.activity_write_failures.inc()
 
     def on_event(event: Event) -> None:
+        index = component.index
         if isinstance(event, AgentOperationEvent):
             with contextlib.suppress(RuntimeError):
-                loop.call_soon_threadsafe(ingest, event.operation_id)
+                loop.call_soon_threadsafe(ingest, index.ingest_agent_operation, event.operation_id)
+        elif isinstance(event, InventoryOperationEvent):
+            with contextlib.suppress(RuntimeError):
+                loop.call_soon_threadsafe(
+                    ingest, index.ingest_inventory_operation, event.operation_id
+                )
 
     remove = component.bus.add_listener(on_event)
     try:

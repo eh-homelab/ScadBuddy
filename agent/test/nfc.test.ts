@@ -53,6 +53,7 @@ function job(state: string, extra: Record<string, unknown> = {}, inMs = 600_000)
 describe('NFC job tools', () => {
   it.each([
     ['nfc_read', 'write', false],
+    ['nfc_probe', 'write', false],
     ['nfc_write', 'outward', false],
   ])('%s is %s tier, gated: %s', (name, risk, gated) => {
     expect(tool(name).risk).toBe(risk)
@@ -80,6 +81,37 @@ describe('NFC job tools', () => {
     expect(bodies).toEqual([{ kind: 'read', ttl_s: 30 }])
     expect(firstText(got)).toEqual({ job_id: JOB, state: 'done', result })
     expect(reads).toBe(3)
+  })
+
+  it('nfc_probe runs a read job and answers the chip it read (#8366)', async () => {
+    const bodies: unknown[] = []
+    const result = { next: 'bind_or_create', uid: '04AA', records: [], chip: 'NTAG215', max_ndef_bytes: 496, writable: true, tag: { id: 't1' } }
+    server.use(
+      http.post(JOBS, async ({ request }) => {
+        bodies.push(await request.json())
+        return HttpResponse.json(job('pending'), { status: 201 })
+      }),
+      http.get(`${JOBS}/${JOB}`, () => HttpResponse.json(job('done', { result }))),
+    )
+    const got = await runTool(tool('nfc_probe'), { timeout_s: 30 }, ctx())
+    expect(got.isError).toBeFalsy()
+    expect(bodies).toEqual([{ kind: 'read', ttl_s: 30 }])
+    expect(firstText(got)).toEqual({ job_id: JOB, state: 'done', uid: '04AA', tag_id: 't1', chip: 'NTAG215', max_ndef_bytes: 496, writable: true })
+  })
+
+  it('nfc_probe says why when the page read no chip, and passes a failed job on', async () => {
+    let state = 'done'
+    server.use(
+      http.post(JOBS, () => HttpResponse.json(job('pending'), { status: 201 })),
+      http.get(`${JOBS}/${JOB}`, () =>
+        HttpResponse.json(job(state, { result: state === 'done' ? { uid: '04AA', records: [], chip: null, max_ndef_bytes: null, writable: null, tag: null } : { error: 'no tag' } })),
+      ),
+    )
+    const untold = firstText(await runTool(tool('nfc_probe'), { timeout_s: 30 }, ctx())) as Record<string, unknown>
+    expect(untold).toMatchObject({ state: 'done', chip: null, max_ndef_bytes: null, writable: null, tag_id: null })
+    expect(untold.note).toMatch(/ScadBuddy app/)
+    state = 'failed'
+    expect(firstText(await runTool(tool('nfc_probe'), { timeout_s: 30 }, ctx()))).toEqual({ job_id: JOB, state: 'failed', error: 'no tag' })
   })
 
   it('nfc_write sends the records and answers expired when the job expires', async () => {

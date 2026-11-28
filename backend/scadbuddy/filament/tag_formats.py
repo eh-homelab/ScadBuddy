@@ -1,8 +1,14 @@
 """The two spool-tag formats ScadBuddy reads and writes (#7273): OpenSpool and OpenTag3D.
 
 OpenSpool (https://github.com/spuder/OpenSpool/blob/c060a06c/README.md, "OpenSpool
-Protocol") is one NDEF record of type ``application/json`` whose object has
-``"protocol": "openspool"``; every value is a string.
+Protocol"; https://openspool.io/rfid.html) is one NDEF record of type ``application/json``
+whose object has ``"protocol": "openspool"``; every value is a string. ScadBuddy writes the
+published keys (``protocol``, ``version``, ``type``, ``color_hex``, ``brand``, ``min_temp``,
+``max_temp``), then each extended key the spool has a value for (#8364), from
+https://github.com/paxx12-snapmaker-u1/SnapmakerU1-Extended-Firmware/blob/8cb0b4e1b1d8f235ca067c0e8a5cabc0197aa11f/docs/design/openspool.md:
+``subtype``, ``bed_min_temp``, ``bed_max_temp``, ``alpha``, ``additional_color_hexes``,
+``weight`` and ``diameter``. It reads every one of them, as a string or a number, and keeps
+any other key as its JSON text in ``DecodedSpool.other_keys``.
 
 OpenTag3D (https://github.com/queengooborg/OpenTag3D at
 e14ee7ee5ff34629eb41f9f80d4830eac073cb4a: ``_data/spec.json`` v2.004, ``spec.md`` "Reader
@@ -140,6 +146,10 @@ def _media(record: m.NdefRecord) -> str | None:
     return record.media_type.split(";", 1)[0].strip().lower()
 
 
+class _Number(str):
+    """A JSON number's text, so `_json_text` can write it back unquoted."""
+
+
 def _openspool_object(record: m.NdefRecord) -> dict[str, Any] | None:
     """The record's JSON object when it is an OpenSpool one. A tag is untrusted, so every
     number is kept as its text (no ``int()`` of a huge literal, which Python refuses past
@@ -148,8 +158,8 @@ def _openspool_object(record: m.NdefRecord) -> dict[str, Any] | None:
     try:
         obj = json.loads(
             bytes.fromhex(record.data_hex).decode("utf-8"),
-            parse_int=str,
-            parse_float=str,
+            parse_int=_Number,
+            parse_float=_Number,
             parse_constant=float,
         )
     except (ValueError, RecursionError):  # JSONDecodeError and UnicodeDecodeError among them
@@ -184,8 +194,42 @@ def _half_up(value: Decimal) -> int:
 # --- OpenSpool -------------------------------------------------------------------------
 
 
+#: The most extra colours ``additional_color_hexes`` holds (the extended spec's "up to 4").
+_OPENSPOOL_EXTRA_MAX: Final = 4
+#: Every key `_openspool_decode` reads into a field; any other is kept in ``other_keys``.
+_OPENSPOOL_KEYS: Final = frozenset(
+    {
+        "protocol",
+        "version",
+        "type",
+        "color_hex",
+        "brand",
+        "min_temp",
+        "max_temp",
+        "subtype",
+        "bed_min_temp",
+        "bed_max_temp",
+        "alpha",
+        "additional_color_hexes",
+        "weight",
+        "diameter",
+    }
+)
+#: The most unknown keys a read keeps; the rest are named in one warning.
+_OTHER_KEYS_MAX: Final = 32
+
+
+def _whole_text(value: int | None) -> str | None:
+    return None if value is None else str(int(value))
+
+
+def _decimal_text(value: Decimal | None) -> str | None:
+    """``1.75`` for ``Decimal("1.750")``, never an exponent."""
+    return None if value is None else format(value.normalize(), "f")
+
+
 def _openspool_encode(facts: SpoolFacts) -> EncodedTag:
-    obj: dict[str, str] = {"protocol": "openspool", "version": "1.0"}
+    obj: dict[str, str | list[str]] = {"protocol": "openspool", "version": "1.0"}
     warnings = []
     if facts.material:
         obj["type"] = facts.material
@@ -195,10 +239,23 @@ def _openspool_encode(facts: SpoolFacts) -> EncodedTag:
     if rgba is not None:
         obj["color_hex"] = rgba[1:7]
     obj["brand"] = facts.brand or "Generic"
-    if facts.nozzle_temp_min is not None:
-        obj["min_temp"] = str(int(facts.nozzle_temp_min))
-    if facts.nozzle_temp_max is not None:
-        obj["max_temp"] = str(int(facts.nozzle_temp_max))
+    extras = [c[1:7] for c in map(canonical_rgba, facts.extra_colours) if c is not None]
+    if len(extras) > _OPENSPOOL_EXTRA_MAX:
+        # The extended spec holds 4; the colours after them are not written.
+        warnings.append("additional_color_hexes")
+    rest: dict[str, str | list[str] | None] = {
+        "min_temp": _whole_text(facts.nozzle_temp_min),
+        "max_temp": _whole_text(facts.nozzle_temp_max),
+        "subtype": facts.subtype or None,
+        "bed_min_temp": _whole_text(facts.bed_temp_min),
+        "bed_max_temp": _whole_text(facts.bed_temp_max),
+        # The extended spec's default is FF, so an opaque colour has no key.
+        "alpha": None if rgba is None or rgba[7:9] == "FF" else rgba[7:9],
+        "additional_color_hexes": extras[:_OPENSPOOL_EXTRA_MAX] or None,
+        "weight": _whole_text(facts.label_weight_g),
+        "diameter": _decimal_text(facts.diameter_mm),
+    }
+    obj |= {k: v for k, v in rest.items() if v is not None}
     text = json.dumps(obj, separators=(",", ":"), ensure_ascii=False)
     return EncodedTag("openspool", [_mime(OPENSPOOL_MEDIA, text.encode("utf-8"))], warnings)
 
@@ -256,12 +313,92 @@ def _whole(value: object) -> int:
     return int(number)
 
 
+def _decimal(value: object) -> Decimal:
+    """A positive finite number given as a number or a string, ``1.75`` or ``"1.75"``.
+    `ValueError` otherwise, or for text longer than 16 characters or at least 10,000,000."""
+    if isinstance(value, bool) or not isinstance(value, (str, int, float)):
+        raise ValueError(value)
+    text = str(value).strip()
+    if len(text) > _WHOLE_MAX_CHARS:
+        raise ValueError("too long")
+    try:
+        number = Decimal(text)
+    except InvalidOperation:
+        raise ValueError(value) from None
+    if not number.is_finite() or number <= 0 or number.adjusted() > _WHOLE_MAX_EXPONENT:
+        raise ValueError(value)
+    return number
+
+
+def _alpha(value: object) -> str:
+    """The alpha byte, ``00`` to ``FF``, as two upper-case hex digits. A JSON number is
+    read as its digits, as hex: ``80`` is ``"80"``."""
+    text = value.strip() if isinstance(value, str) else ""
+    if len(text) not in (1, 2) or any(c not in "0123456789abcdefABCDEF" for c in text):
+        raise ValueError(value)
+    return f"{int(text, 16):02X}"
+
+
+#: How deep `_json_text` writes a nested value; deeper is ``…``.
+_JSON_TEXT_DEPTH: Final = 8
+
+
+def _json_text(value: object, depth: int = 0) -> str:
+    """``value`` as JSON text, a number as the tag wrote it. A tag is untrusted, so a value
+    nested deeper than `_JSON_TEXT_DEPTH` is written ``…``."""
+    if isinstance(value, _Number):
+        return str(value)
+    if isinstance(value, (list, dict)) and depth >= _JSON_TEXT_DEPTH:
+        return "…"
+    if isinstance(value, list):
+        return "[" + ", ".join(_json_text(v, depth + 1) for v in value) + "]"
+    if isinstance(value, dict):
+        items = [
+            f"{json.dumps(k, ensure_ascii=False)}: {_json_text(v, depth + 1)}"
+            for k, v in value.items()
+        ]
+        return "{" + ", ".join(items) + "}"
+    return json.dumps(value, ensure_ascii=False)
+
+
+def _colours(value: object) -> list[str]:
+    """``additional_color_hexes``: a list of ``RRGGBB`` strings, as ``#RRGGBBFF``; the first
+    4 are read. `ValueError` when it is not a list or a colour in it is not one."""
+    if not isinstance(value, list):
+        raise ValueError(value)
+    picked = value[:_OPENSPOOL_EXTRA_MAX]
+    colours = [canonical_rgba(c) if isinstance(c, str) else None for c in picked]
+    if any(c is None for c in colours):
+        raise ValueError(value)
+    return [c for c in colours if c is not None]
+
+
+def _other_keys(obj: dict[str, Any], warnings: list[str]) -> dict[str, str] | None:
+    """The keys ScadBuddy does not read, each value as its JSON text. A tag is untrusted:
+    a key or a value is cut to 128 characters and named, and only the first 32 are kept."""
+    other: dict[str, str] = {}
+    unknown = [k for k in obj if k not in _OPENSPOOL_KEYS]
+    for key in unknown[:_OTHER_KEYS_MAX]:
+        name = key
+        if len(name) > _TEXT_MAX_CHARS:
+            name = name[:_TEXT_MAX_CHARS]
+            warnings.append(f"{name} cut to {_TEXT_MAX_CHARS} characters")
+        text = _json_text(obj[key])
+        if len(text) > _TEXT_MAX_CHARS:
+            text = text[:_TEXT_MAX_CHARS]
+            warnings.append(f"{name} cut to {_TEXT_MAX_CHARS} characters")
+        other[name] = text
+    if len(unknown) > _OTHER_KEYS_MAX:
+        warnings.append(f"{len(unknown) - _OTHER_KEYS_MAX} more unknown keys not kept")
+    return other or None
+
+
 def _openspool_decode(obj: dict[str, Any]) -> m.DecodedSpool:
     hex_ = obj.get("color_hex")
     warnings: list[str] = []
-    temps: dict[str, int | None] = {}
-    for key in ("min_temp", "max_temp"):
-        temps[key] = None
+    wholes: dict[str, int | None] = {}
+    for key in ("min_temp", "max_temp", "bed_min_temp", "bed_max_temp", "weight"):
+        wholes[key] = None
         if obj.get(key) is None:
             continue
         try:
@@ -269,18 +406,46 @@ def _openspool_decode(obj: dict[str, Any]) -> m.DecodedSpool:
         except ValueError:
             warnings.append(key)
             continue
-        temps[key] = number if number > 0 else None
+        wholes[key] = number if number > 0 else None
     version = _capped(obj.get("version"), "version", warnings)
     material = _capped(obj.get("type"), "type", warnings)
     brand = _capped(obj.get("brand"), "brand", warnings)
+    subtype = _capped(obj.get("subtype"), "subtype", warnings)
+    rgba = canonical_rgba(hex_) if isinstance(hex_, str) else None
+    if obj.get("alpha") is not None:
+        try:
+            alpha = _alpha(obj["alpha"])
+        except ValueError:
+            warnings.append("alpha")
+        else:
+            rgba = None if rgba is None else rgba[:7] + alpha
+    extra: list[str] | None = None
+    if obj.get("additional_color_hexes") is not None:
+        try:
+            extra = _colours(obj["additional_color_hexes"]) or None
+        except ValueError:
+            warnings.append("additional_color_hexes")
+    diameter: Decimal | None = None
+    if obj.get("diameter") is not None:
+        try:
+            diameter = _decimal(obj["diameter"])
+        except ValueError:
+            warnings.append("diameter")
     return m.DecodedSpool(
         format="openspool",
         version=version or "",
         material=material,
+        subtype=subtype,
         brand=brand,
-        rgba=canonical_rgba(hex_) if isinstance(hex_, str) else None,
-        nozzle_temp_min=temps["min_temp"],
-        nozzle_temp_max=temps["max_temp"],
+        rgba=rgba,
+        extra_colours=extra,
+        diameter_mm=diameter,
+        nozzle_temp_min=wholes["min_temp"],
+        nozzle_temp_max=wholes["max_temp"],
+        bed_temp_min=wholes["bed_min_temp"],
+        bed_temp_max=wholes["bed_max_temp"],
+        label_weight_g=wholes["weight"],
+        other_keys=_other_keys(obj, warnings),
         warnings=warnings,
     )
 

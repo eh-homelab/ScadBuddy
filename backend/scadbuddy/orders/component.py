@@ -35,8 +35,8 @@ from scadbuddy.filament.sb_presets import FilamentPresetStore
 from scadbuddy.flow_triggers.store import TriggerStore
 from scadbuddy.flows.component import FLOWS
 from scadbuddy.flows.definitions import FlowDefinitions
-from scadbuddy.inventory.component import INVENTORY
 from scadbuddy.library.settings_store import settings_kek
+from scadbuddy.orders import stock_start
 from scadbuddy.orders.archives import mirror_run
 from scadbuddy.orders.attempt_media import MediaStarter, TemporalMediaStarter
 from scadbuddy.orders.builtin_flow import ensure_builtin_flow
@@ -47,6 +47,7 @@ from scadbuddy.orders.machine_rate import MachineRates, MachineRateStore
 from scadbuddy.orders.money import OrderRules
 from scadbuddy.orders.pricebook import PriceBookReader
 from scadbuddy.orders.printing import listen_for_prints
+from scadbuddy.orders.stock_start import StockStarter
 from scadbuddy.orders.store import OrderStore
 from scadbuddy.orders.storefront.listings import ListingStore
 from scadbuddy.orders.storefront.mail import MAIL_SETTINGS, MailConfig, StorefrontMail
@@ -86,6 +87,7 @@ class OrdersComponent:
         self._store: OrderStore | None = None
         self._lifecycle: Lifecycle | None = None
         self._media_starter: MediaStarter | None = None
+        self._stock_starter: StockStarter | None = None
         self._listings: ListingStore | None = None
         self._mail: StorefrontMail | None = None
         self._integrations: tuple[str | None, OrderIntegrations] | None = None
@@ -219,12 +221,19 @@ class OrdersComponent:
         return self._media_starter
 
     @property
+    def stock_starter(self) -> StockStarter:
+        """What starts the orders' stock workflows on the ``library`` queue (#6949 K1 Task
+        16): a fulfil, an accept that fulfils, an unfulfil and a re-cost. Bound to the
+        app's loop when the component runs."""
+        if self._stock_starter is None:
+            self._stock_starter = stock_start.make_starter(self.core, self._components)
+        return self._stock_starter
+
+    @property
     def lifecycle(self) -> Lifecycle:
         if self._lifecycle is None:
-            # The inventory's stock store (#7067): an item's parts leave its lots.
-            stock = None if self._components is None else self._components.get(INVENTORY).stock
             self._lifecycle = Lifecycle(
-                self.store, self.core.events, self.refs, self.rules, stock=stock
+                self.store, self.core.events, self.refs, self.rules, starter=self.stock_starter
             )
             self._lifecycle.offered_providers = frozenset(
                 providers(fake=self.core.settings.payments_fake_provider)
@@ -263,6 +272,8 @@ async def _run(orders: OrdersComponent) -> AsyncIterator[None]:
     # media import (#7233).
     # #5283: a commit that queued storefront mail sends it on this loop, off the request.
     orders.mail.bind(asyncio.get_running_loop())
+    # #6949 K1 Task 16: the stock workflows start on this loop, from the routes' threads.
+    orders.stock_starter.bind(asyncio.get_running_loop())
     remove = listen_for_prints(
         orders.core.events,
         orders.lifecycle,

@@ -16,6 +16,8 @@ import { H2C, L, LK, seed, spoolId, type Catalogs, type Seed, type SpoolRow } fr
 import { jobOf } from '../../../components/filament/eventText'
 import { CATALOGS } from '../../../components/filament/catalogs'
 import { checksSave, marksOf, rowPropertiesRefusal, saveRowProperties } from '../entities'
+import { itemByNumber, kindByNumber, nextItemNumber } from '../inventory'
+import { nextNumber } from '../../nextNumber'
 
 type S = components['schemas']
 
@@ -56,7 +58,7 @@ function fillType(type: S['SpoolType'], options: { refresh?: boolean; apply?: Pa
   const result: S['TypeFill'] = { type_id: type.id, code: type.code, filled: {}, previous: {}, skipped: {}, k_values: [], written: false }
   const found = profileOf(type)
   if (!found) return { ...result, reason: 'the type has no slicer preset' }
-  if (!found.profile) return { ...result, reason: `Bambu Studio 02.08.02.61 has no filament preset ${found.preset.slicer_filament}` }
+  if (!found.profile) return { ...result, reason: `Bambu Studio has no filament preset ${found.preset.slicer_filament}` }
   result.source = { preset_id: found.preset.slicer_filament, name: found.profile.name, origin: 'system', printer_model: found.preset.printer_model, nozzle_diameter: found.preset.nozzle_diameter }
   result.cost_hint = found.profile.cost_hint
   const at = state.types.findIndex((one) => one.id === type.id)
@@ -131,13 +133,40 @@ const MOCK_SYNC_COLOURS = {
   ],
 } as const
 
+/** #7025 — the one filament the mock's 3DFP holds, and the ids the mock's creates give from. */
+const TDFP_JADE: components['schemas']['Candidate'] = {
+  tdfp_id: 4411,
+  name: 'Jade White (1000g)',
+  brand: 'Bambu Lab',
+  material: 'PLA',
+  material_type: 'Basic',
+  hexes: ['#FFFFFF'],
+  nominal_weight_g: 1000,
+}
+const TDFP_FIRST_NEW = 38600
+let tdfpNext = TDFP_FIRST_NEW
+/** Each create's answer by its Idempotency-Key, as the server answers a repeated key. */
+const tdfpCreates = new Map<string, { body: string; answer: components['schemas']['TdfpCreated'] }>()
+
+/** #6907 — a few rows of Bambu Studio's colour table, for `GET /filament/bambu-colour-codes` (mock data). */
+const MOCK_COLOUR_CODES: components['schemas']['ColourCode'][] = [
+  { code: '10100', name: 'Jade White', rgba: ['#FFFFFFFF'], fila_type: 'PLA', fila_id: 'GFA00' },
+  { code: '13612', name: 'Translucent Yellow', rgba: ['#F4EE2A80'], fila_type: 'PLA', fila_id: 'GFA08' },
+  { code: '15900', name: 'Dawn Radiance', rgba: ['#EC984CFF', '#6CD4BCFF'], fila_type: 'PLA', fila_id: 'GFA05' },
+]
+
 /** #7067 — whether a place exists, for the inventory mock's `location_not_found`. */
 export function locationExists(id: string): boolean {
   return state.locations.some((place) => place.id === id)
 }
 
+/** #7169 — the spool types, archived ones too, for the inventory mock's `nextItemNumber`. */
+export const mockTypes = (): readonly { number: number }[] => state.types
+
 export function reset() {
   state = seed()
+  tdfpCreates.clear()
+  tdfpNext = TDFP_FIRST_NEW
   colourSyncs = []
   bambuddyKValues.clear()
   imports.clear()
@@ -542,7 +571,7 @@ export function seedHomeReturn({ empty = false }: { empty?: boolean } = {}): { b
   if (!state.locations.some((one) => one.id === HOME_BOX)) {
     state.locations.push({
       id: HOME_BOX,
-      number: Math.max(0, ...state.locations.map((place) => place.number)) + 1,
+      number: nextNumber(state.locations),
       name: 'Dry box 2',
       kind_id: LK.DRY_BOX,
       parent_id: L.WORKSHOP,
@@ -1224,7 +1253,7 @@ function under(parent: string, id: string): boolean {
 function newSpool(body: Record<string, unknown>): SpoolRow {
   const blank: SpoolRow = {
     id: newId(),
-    number: Math.max(0, ...state.spools.map((row) => row.number)) + 1,
+    number: nextNumber(state.spools),
     type_id: null,
     brand_id: null,
     material_id: null,
@@ -1298,6 +1327,7 @@ export function createType(raw: unknown): S['SpoolType'] | Response {
     ...body,
     drying_hours: body.drying_hours ?? null,
     id: newId(),
+    number: nextItemNumber(),
     filament_id: null,
     archived_at: null,
     created_at: now(),
@@ -2074,6 +2104,19 @@ export function resolveCodeText(text: string): S['Resolved'] | null {
     const row = state.spools.find((one) => one.number === parsed.number)
     return row ? resolvedSpool(row) : null
   }
+  if (parsed.prefix === 'K') {
+    // An item kind resolves by its text id (#6949, the owner's kind numbers of 2026-11-27).
+    const kind = kindByNumber(parsed.number)
+    return kind ? { kind: 'item_kind', id: kind.id, code: `K-${kind.number}`, name: kind.name, archived: !!kind.archived_at } : null
+  }
+  if (parsed.prefix === 'T') {
+    const type = state.types.find((one) => one.number === parsed.number)
+    return type ? { kind: 'spool_type', id: type.id, code: `T-${type.number}`, name: [type.code, type.colour_name].filter(Boolean).join(' '), archived: !!type.archived_at } : null
+  }
+  if (parsed.prefix === 'I') {
+    const item = itemByNumber(parsed.number)
+    return item ? { kind: 'item', id: item.id, code: `I-${item.number}`, name: item.name, archived: !!item.archived_at } : null
+  }
   return null
 }
 
@@ -2174,15 +2217,27 @@ export { cleanTagUid }
  * holds it, marked seen by `source`. A read in a known format gives the tag that format's kind
  * (R13), but a Bambu tag's.
  */
-export function seenTag(uid: string, kind: S['Tag']['kind'] | null, source: 'phone' | 'agent' = 'phone'): S['Tag'] {
+export function seenTag(uid: string, kind: S['Tag']['kind'] | null, source: 'phone' | 'agent' = 'phone', chip: ChipRead = {}): S['Tag'] {
   let tag = state.tags.find((one) => one.tag_uid === uid)
   if (!tag) {
     tag = { id: newId(), kind: kind ?? 'other', tag_uid: uid, tray_uuid: null, raw_blob: null, note: null, created_at: now() }
     state.tags.push(tag)
   } else if (kind && tag.kind !== 'bambu_mifare') tag.kind = kind
   Object.assign(tag, { last_seen_at: now(), last_seen_source: source })
+  // #8366 `_mark`: each chip value the read told is kept; one it left out stays as it was.
+  if (chip.chip != null || chip.max_ndef_bytes != null || chip.writable != null) {
+    Object.assign(tag, {
+      chip: chip.chip ?? tag.chip ?? null,
+      max_ndef_bytes: chip.max_ndef_bytes ?? tag.max_ndef_bytes ?? null,
+      writable: chip.writable ?? tag.writable ?? null,
+      chip_read_at: now(),
+    })
+  }
   return tag
 }
+
+/** What the ScadBuddy app read of a tag's chip beside its records (#8366). */
+export type ChipRead = Pick<S['TagReadIn'], 'chip' | 'max_ndef_bytes' | 'writable'>
 
 /** A tag as the tag list shows it: with its open binding and its spool's number. */
 export function tagRowOf(tag: S['Tag']): S['TagRow'] {
@@ -2224,7 +2279,7 @@ export function placeSpoolAtTray(spool: string, printer: string, ams: number, tr
   if (!place) {
     const unit = state.locations.find((one) => one.printer_id === printer && one.ams_id === ams && one.tray_id == null && !one.archived_at)
     place = {
-      number: Math.max(0, ...state.locations.map((one) => one.number)) + 1,
+      number: nextNumber(state.locations),
       printer_root: false,
       parent_id: unit?.id ?? null,
       identifier: null,
@@ -2276,6 +2331,12 @@ export const handlers = [
     )
   }),
   // -- the colour catalog's syncs (#6907) --
+  http.get(`${BASE}/bambu-colour-codes`, ({ request }) => {
+    const code = new URL(request.url).searchParams.get('code')
+    if (code === null) return problem(422, 'code: Field required')
+    const found = MOCK_COLOUR_CODES.find((one) => one.code === code)
+    return found ? HttpResponse.json(found) : problem(404, `no Bambu colour code ${code}`)
+  }),
   http.get(`${BASE}/colour-syncs`, () => HttpResponse.json(colourSyncs)),
   http.post(`${BASE}/colour-syncs`, async ({ request }) => {
     const { source } = (await request.json()) as { source?: string }
@@ -2504,6 +2565,47 @@ export const handlers = [
     state.typePresets = [...state.typePresets.filter((one) => one.type_id !== typeId), ...rows]
     return HttpResponse.json(rows)
   }),
+  // #7025 — 3DFP search and create. The mock's 3DFP knows one filament (Bambu Lab PLA Basic Jade White).
+  http.post(`${BASE}/tdfp/search`, async ({ request }) => {
+    const ask = (await request.json()) as S['SearchAsk']
+    if (!ask.brand?.trim()) return problem(422, 'brand: String should have at least 1 character')
+    const words = [ask.brand, ask.material_type, ask.colour].filter(Boolean).join(' ').toLowerCase().split(/\s+/)
+    const text = `${TDFP_JADE.brand} ${TDFP_JADE.material_type} ${TDFP_JADE.name}`.toLowerCase()
+    const candidates = words.every((word) => text.includes(word)) ? [TDFP_JADE] : []
+    return HttpResponse.json({ query: words.join(' '), candidates } satisfies S['SearchAnswer'])
+  }),
+  http.post(`${BASE}/tdfp/filaments`, async ({ request }) => {
+    const key = request.headers.get('Idempotency-Key')
+    if (!key) return problem(428, 'an Idempotency-Key header is required')
+    const raw = await request.text()
+    const was = tdfpCreates.get(key)
+    if (was) return was.body === raw ? HttpResponse.json(was.answer) : problem(422, 'the Idempotency-Key was used with another body', { code: 'idempotency_key_reused' })
+    const body = JSON.parse(raw) as S['TdfpCreateRequest']
+    const type = body.type_id ? state.types.find((one) => one.id === body.type_id) : undefined
+    if (body.type_id && !type) return problem(404, `no spool type ${body.type_id}`)
+    if (type?.tdfp_id != null) return problem(409, 'the type already has a 3DFP id', { code: 'type_has_tdfp_id' })
+    if (!body.hexes.length || body.hexes.length > 4) return problem(422, 'hexes: List should have 1 to 4 items')
+    const same = body.brand === TDFP_JADE.brand && body.material === TDFP_JADE.material && body.material_type === TDFP_JADE.material_type
+    const close = same && TDFP_JADE.hexes!.some((hex) => body.hexes.some((one) => one.slice(0, 7).toUpperCase() === hex))
+    if (close && !(body.not_duplicates ?? []).includes(TDFP_JADE.tdfp_id)) {
+      const answer = {
+        create: { status: 'duplicate', duplicates: [TDFP_JADE], likely: [{ tdfp_id: TDFP_JADE.tdfp_id, reason: 'same colour' }], duplicate_text: '' },
+        type_id: body.type_id ?? null,
+        type_tdfp_id_set: false,
+      } satisfies S['TdfpCreated']
+      tdfpCreates.set(key, { body: raw, answer })
+      return HttpResponse.json(answer)
+    }
+    const tdfpId = tdfpNext++
+    if (type) type.tdfp_id = tdfpId
+    const answer = {
+      create: { status: 'created', tdfp_id: tdfpId, sent: ['brand', 'material', 'material_type', 'colour', 'hexes'], not_sent: [], duplicate_text: '' },
+      type_id: body.type_id ?? null,
+      type_tdfp_id_set: type !== undefined,
+    } satisfies S['TdfpCreated']
+    tdfpCreates.set(key, { body: raw, answer })
+    return HttpResponse.json(answer)
+  }),
   http.post(`${BASE}/types/:id/profile-fetch`, ({ params }) => {
     const typeId = String(params.id)
     const type = state.types.find((one) => one.id === typeId)
@@ -2639,7 +2741,7 @@ export const handlers = [
       const fields = normalised(body.spool)
       const made: SpoolRow[] = []
       for (let n = 0; n < quantity; n += 1) {
-        const row = { ...newSpool(fields), number: Math.max(0, ...state.spools.map((one) => one.number), ...made.map((one) => one.number)) + 1, location_id: place?.id ?? null }
+        const row = { ...newSpool(fields), number: nextNumber([...state.spools, ...made]), location_id: place?.id ?? null }
         const refused = spoolRefusal(row)
         if (refused) return refused
         // #7167 `move_on`: each spool's move into a dry box asks for its occupant, the one before it included.
@@ -2744,6 +2846,18 @@ export const handlers = [
       addEvent(row.id, 'edited', { data: { changes } })
     }
     return HttpResponse.json({ changed, unchanged: found.map((row) => row.id).filter((id) => !changed.includes(id)), not_found: [...new Set(ids)].filter((id) => !found.some((row) => row.id === id)) })
+  }),
+  // #7149 — `POST /filament/spools/reset-consumed`: a `consumed_reset` event on each spool named; the grams left stay.
+  http.post(`${BASE}/spools/reset-consumed`, async ({ request }) => {
+    const raw = (await request.json()) as { spool_ids?: string[] }
+    const extra = extraKeys(raw, ['spool_ids'])
+    if (extra) return extra
+    const ids = raw.spool_ids ?? []
+    if (ids.length < 1 || ids.length > 500) return problem(422, 'spool_ids: List should have 1 to 500 items')
+    const found = new Set(state.spools.filter((row) => ids.includes(row.id)).map((row) => row.id))
+    const at = now()
+    found.forEach((id) => addEvent(id, 'consumed_reset', { at, source: 'person' }))
+    return HttpResponse.json({ reset: found.size, not_found: [...new Set(ids)].filter((id) => !found.has(id)) } satisfies S['ConsumedResetDone'])
   }),
   // #7151 — `POST /filament/spools/bulk-archive` and `bulk-restore`: each spool's outcome, reported once.
   ...([true, false] as const).map((archived) =>
@@ -2880,10 +2994,12 @@ export const handlers = [
     const bound = bindOn(row.id, uid, tray, body.kind ?? 'other', body.override ?? false)
     return bound instanceof Response ? bound : HttpResponse.json(bound, { status: 201 })
   }),
-  http.delete(`${BASE}/tags/:id/binding`, ({ params }) => {
+  http.delete(`${BASE}/tags/:id/binding`, ({ params, request }) => {
+    const reason = new URL(request.url).searchParams.get('reason') ?? 'unbound'
+    if (reason !== 'unbound' && reason !== 'cleared') return problem(422, `no unbind reason ${reason}`)
     const binding = openBinding(String(params.id))
     if (!binding) return problem(404, `tag ${String(params.id)} is on no spool`)
-    closeBinding(binding, 'unbound')
+    closeBinding(binding, reason)
     return HttpResponse.json(binding)
   }),
   http.get(`${BASE}/spools/:id/presets`, ({ params }) =>
@@ -3154,8 +3270,9 @@ export const handlers = [
     const body = (await request.json()) as S['LabelsRequest']
     const spools = body.spool_ids ?? []
     const places = body.location_ids ?? []
-    const count = spools.length + places.length
-    if (count < 1 || count > 100) return problem(422, 'name 1 to 100 spools and places')
+    const codes = (body.type_ids?.length ?? 0) + (body.item_ids?.length ?? 0) + (body.kind_ids?.length ?? 0)
+    const count = spools.length + places.length + codes
+    if (count < 1 || count > 100) return problem(422, 'name 1 to 100 spools, places, types, items and kinds')
     const noSpool = spools.find((id) => !findSpool(id))
     if (noSpool) return problem(404, `no spool ${noSpool}`)
     const noPlace = places.find((id) => !state.locations.some((one) => one.id === id))
@@ -3165,8 +3282,8 @@ export const handlers = [
     const chosen = body.template ?? settings.filament_label_template
     if (chosen?.template === 'saved' && !savedSheets.some((one) => one.id === chosen.sheet_id))
       return problem(409, 'The saved sheet was deleted. Choose another template.', { code: 'label_sheet_gone' })
-    if (places.length > 0 && !settings.filament_label_base_url && !settings.public_url?.startsWith('https://'))
-      return problem(409, 'A place label needs an address: set the label address in Settings, or the public URL.', { code: 'no_label_base' })
+    if (places.length + codes > 0 && !settings.filament_label_base_url && !settings.public_url?.startsWith('https://'))
+      return problem(409, 'A code label needs an address: set the label address in Settings, or the public URL.', { code: 'no_label_base' })
     // #7216 — a PNG answer is one byte of the type the real route gives: one page is one PNG, more pages are a ZIP
     // (R-7216-6). The real route reads the stored settings when the request names no format or template.
     if ((body.format ?? settings.filament_label_output?.format) === 'png') {
@@ -3190,7 +3307,7 @@ export const handlers = [
     if (placeTaken(body)) return problem(409, REFUSED.locationExists)
     if (badRef(body, LOCATION_REFS)) return problem(422, REFUSED.catalogRef)
     const made: S['Location'] = {
-      number: Math.max(0, ...state.locations.map((place) => place.number)) + 1,
+      number: nextNumber(state.locations),
       printer_root: false,
       parent_id: null,
       identifier: null,
@@ -3306,42 +3423,6 @@ export const handlers = [
     return done instanceof Response ? done : HttpResponse.json(done)
   }),
 
-  // -- the pull: the mock has no Bambuddy spools to pull, so it changes nothing --
-  http.post(`${BASE}/bambuddy/import`, () =>
-    HttpResponse.json({
-      created: 0,
-      archived_created: 0,
-      linked: 0,
-      updated: 0,
-      needs_type: 0,
-      archived: 0,
-      invalid: 0,
-      catalog_failed: false,
-      catalog_skipped: 0,
-      names_skipped: 0,
-      created_ids: [],
-      linked_ids: [],
-      updated_ids: [],
-      needs_type_ids: [],
-      archived_ids: [],
-      failed_bb_ids: [],
-      invalid_bb_ids: [],
-      usage_booked: 0,
-      usage_unlinked: 0,
-      rfid_duplicates: 0,
-      rfid_duplicate_bb_ids: [],
-      archived_deferred: 0,
-      archived_deferred_bb_ids: [],
-      claimed: 0,
-      suppliers: 0,
-      locations: 0,
-      moved: 0,
-      conflicts: 0,
-      colours: 0,
-      colours_kept: 0,
-      colours_failed: false,
-    } satisfies S['PullReport']),
-  ),
 ]
 
 /**

@@ -77,6 +77,11 @@ The Spools tab's bulk bar acts on the selected spools (#7151, plan
 - **Archive and Restore.** One request each, `POST /filament/spools/bulk-archive` and
   `/bulk-restore`. The answer lists the spools changed, those already so and the ids that
   name no spool, and the bar reports it once.
+- **Reset used.** After a confirm, `POST /filament/spools/reset-consumed` puts a
+  `consumed_reset` event on each selected spool (#7149), in requests of at most 500 ids. The
+  grams left stay; the report says how many counters were reset and names each spool that no
+  longer exists. When a request is refused, the earlier ones stand, the rest are not sent, and
+  the report says which spools were not reset.
 
 An AMS tray's place page that holds a spool has "Take the spool out of this tray"
 (`DELETE /printers/{id}/trays/{ams}/{tray}/spool`): the spool moves to no place.
@@ -454,7 +459,16 @@ a `url` record whose path ends `/x/<code>` (a printed label) or a `text` record 
 or `S-142`, or a `scadbuddy:spool:<id>` text (`next` `open_code`, with `resolved` in the
 `GET /codes/{code}` shape; `backend/scadbuddy/filament/tag_codes.py`); else it offers to bind
 the tag or make a spool from what the tag says (OpenSpool or OpenTag3D). A code that names no
-row is a new tag. A phone reads a Bambu tag's UID as 4 bytes (`7E7482BB`), and the AMS reports
+row is a new tag. An OpenSpool write holds the published keys of
+[openspool.io/rfid.html](https://openspool.io/rfid.html) and every extended key of
+[SnapmakerU1-Extended-Firmware `docs/design/openspool.md` @ 8cb0b4e1](https://github.com/paxx12-snapmaker-u1/SnapmakerU1-Extended-Firmware/blob/8cb0b4e1b1d8f235ca067c0e8a5cabc0197aa11f/docs/design/openspool.md)
+the spool has a value for (`subtype`, `bed_min_temp`, `bed_max_temp`, `alpha`,
+`additional_color_hexes`, `weight`, `diameter`; #8364). A read fills the draft from all of
+them, and the "On the tag" card also lists any other key the tag holds, as text, under
+"Other keys on the tag". With every key, Spool #114's JSON is 215 bytes (measured
+2026-11-27 with `tag_formats.encode`), more than an NTAG213's 144 bytes of user memory
+([NXP NTAG213/215/216 data sheet](https://www.nxp.com/docs/en/data-sheet/NTAG213_215_216.pdf)),
+so use an NTAG215 or NTAG216, as the OpenSpool README asks. A phone reads a Bambu tag's UID as 4 bytes (`7E7482BB`), and the AMS reports
 the same tag as `7E7482BB00000100`, so ScadBuddy stores every 4-byte UID in the AMS's form
 (`spools/models.py` `clean_tag_uid`, #8042; all 38 Bambu tags on prod end `00000100`, read
 2026-11-26), and a phone's scan of a Bambu spool opens it. A 4-byte tag that is not a Bambu
@@ -587,6 +601,9 @@ matches `[a-z][a-z0-9_]{0,63}`. Limits: 200 keys per entity, 2000 characters per
   `frontend/src/components/entities/api.ts`). The agent's search matches them too
   (`agent/src/tools/filament.ts` loads them, `agent/src/tools/filamentSearch.ts` matches); both use the shared vectors
   `test-fixtures/filament/search-vectors.json`.
+  A `key:value` token (#8372, such as `gtin:06975337041234`) also matches a property with that
+  key whose whole value, or one list item, equals the value; 8 to 14 digits compare as GTIN-14,
+  and a spool also matches by its type's property values.
 - Agent: `entity_property_list`, `entity_property_set`, `entity_property_schema_get` and
   `entity_property_schema_set` (`agent/src/tools/entities.ts`), and a `properties` field on
   `filament_type_upsert` and `filament_spool_upsert` (`agent/src/tools/filament.ts`). An
@@ -693,11 +710,15 @@ matches `[a-z][a-z0-9_]{0,63}`. Limits: 200 keys per entity, 2000 characters per
     is never sent back. BB keeps no reset time, so that event is dated at the newest reading
     that still held the old baseline, or BB's `updated_at` when earlier (R-7149-9). No
     baseline column is kept.
-- Codes (#6955): each place has a number and the code `L-<n>`, each spool `S-<n>`, and each
-  item kind `K-<n>` (#6949; it opens the inventory list of the kind's items). A code
+- Codes (#6955): each place has a number and the code `L-<n>`, each spool `S-<n>`, each
+  spool type `T-<n>`, each inventory item `I-<n>` (#7169; a type and an item share one
+  number sequence, so no number is both) and each item kind `K-<n>` (#6949; it opens the
+  inventory list of the kind's items). A code
   opens at `/x/<code>` (`frontend/src/pages/CodePage.tsx`; route `GET /api/v1/codes/{code}`,
   `backend/scadbuddy/api/codes.py`). Any case works, with or without the dash. A number is
-  never reused, and an archived thing still resolves.
+  never reused, and an archived thing still resolves. A `/x/<text>` that names nothing and has
+  no code shape (a maker's barcode), and the scan page's "Search spools for" link, go to the
+  Spools tab's search with `from=scan`, which opens the spool when only one matches (#8372).
 - Printer places: a printer has its own place (`filament_locations.printer_root`, kind
   "Printer"). Its AMS units and external holder hang under it
   (`LocationStore.ensure_printer_on`, `backend/scadbuddy/filament/locations.py`). A printer
@@ -717,10 +738,16 @@ matches `[a-z][a-z0-9_]{0,63}`. Limits: 200 keys per entity, 2000 characters per
   a concurrent write answers 409 `printer_delete_conflict`, and the person tries again.
 - Labels: a place's QR is `<base>/x/L-<n>`. The labels page (`/filament/labels`) prints places
   with `?locations=` and printers with `?printers=` (one printer's from its place page, every
-  printer's from the Locations tab). The printer labels first make the place of each AMS unit,
+  printer's from the Locations tab). It prints spool types with `?types=`, items with `?items=`
+  and kinds with `?kinds=` (#7169). A saved spool type's page has a "Print label" link that opens
+  it with that type chosen. The printer labels first make the place of each AMS unit,
   slot and external holder the printer's latest report lists; a printer with no such report is
   named on the page. Spool labels keep `scadbuddy:spool:<id>`. A place links to its own page,
-  `/filament/locations/<id>`.
+  `/filament/locations/<id>`. `POST /api/v1/filament/labels` also takes `type_ids`, `item_ids`
+  and `kind_ids` (#7169), after the spools and places. A spool type's, an item's and a kind's
+  label is the place label's shape: its code (`T-<n>`, `I-<n>`, `K-<n>`), its name and the QR
+  `<base>/x/<code>`. A type's name is its code and colour name, as `GET /api/v1/codes/{code}`
+  gives it (`codes/resolve.py` `NAME_SQL`). An archived row still gets its label.
 - Label templates and the PDF (#7157, plan
   `docs/superpowers/plans/2026-11-23-label-templates-pdf.md`): the labels page offers SB's
   50 x 25 mm roll label, Bambuddy's six templates (two box labels, two AMS holder labels and
@@ -728,8 +755,8 @@ matches `[a-z][a-z0-9_]{0,63}`. Limits: 200 keys per entity, 2000 characters per
   `filament_label_template`. A sheet template prints on its own grid. "Download" asks
   `POST /api/v1/filament/labels` (`backend/scadbuddy/filament/label_pdf.py`, ReportLab) for
   the same labels at the same template and saves it through `downloadBlob`, so it works
-  inside Bambuddy's frame. A place label's PDF needs the label address or an https public
-  URL (409 `no_label_base` otherwise). The browser print stays.
+  inside Bambuddy's frame. A code label's PDF (a place, type, item or kind label) needs the
+  label address or an https public URL (409 `no_label_base` otherwise). The browser print stays.
   The agent reads codes with `filament_code_resolve`, `filament_location_get` and
   `filament_printer_labels`, and the label sizes with `filament_label_templates`. It saves
   and deletes saved sheets with `filament_label_sheet_upsert` and
@@ -740,7 +767,7 @@ matches `[a-z][a-z0-9_]{0,63}`. Limits: 200 keys per entity, 2000 characters per
   gives each page of the PDF as a greyscale PNG at the chosen dpi, drawn by PDFium
   (`backend/scadbuddy/filament/label_png.py`), so the PNG and the PDF never disagree. Each PNG
   carries its dpi, so label printer software prints it at its size. One page is `labels.png`;
-  more pages are `labels.zip`, a stored ZIP of `spool-<number>.png` and `L-<n>.png` (one label
+  more pages are `labels.zip`, a stored ZIP of `spool-<number>.png` and `<code>.png` (one label
   a page) or `sheet-<n>.png` (a sheet). Past 400 megapixels in all, the route answers 422
   `png_too_large`: choose PDF, a lower dpi or fewer labels. The labels page has the choice
   beside the template: PDF or PNG, and for PNG the dpi (203, 300 or 600). It saves each change

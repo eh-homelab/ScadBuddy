@@ -335,6 +335,9 @@ function KProfileForm({
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState<string | null>(null)
 
+  /** The name or K differs from the profile being edited: what Save writes, and what Delete note would drop. */
+  const profileEdited = was !== undefined && (name.trim() !== was.name || Number(k.trim()) !== Number(was.k_value))
+
   async function submit(event: FormEvent) {
     event.preventDefault()
     setBusy(true)
@@ -356,7 +359,7 @@ function KProfileForm({
     const noteChanged = text !== (note?.note ?? '')
     // A profile write runs once and on a single-nozzle printer is a delete and an add, so an
     // edit that changes only the note sends only the note.
-    const profileChanged = !was || name.trim() !== was.name || Number(k.trim()) !== Number(was.k_value)
+    const profileChanged = !was || profileEdited
     let result: KProfileWriteResult | undefined
     try {
       if (profileChanged) {
@@ -385,23 +388,50 @@ function KProfileForm({
       return
     }
     const saved = was ? `Saved ${name.trim()}` : `Added ${name.trim()}`
+    // A note cleared to blank is deleted under the key it was read from.
+    const noteDeleted = noteChanged && note !== undefined && !text.trim()
     if (noteChanged) {
       // The key the note was read under; else, for a new profile, the one Bambuddy's page
       // gives it (its slot and setting are not known until the printer answers).
       const key = note?.key ?? (was ? noteKeyFor(was) : `name_${name.trim()}_${filament.trim()}`)
       try {
-        await api.setKProfileNote(row.id, key, text)
+        if (noteDeleted) await api.deleteKProfileNote(row.id, key)
+        else await api.setKProfileNote(row.id, key, text)
       } catch (cause) {
+        const why = problem(cause, noteDeleted ? 'the note could not be deleted' : 'the note could not be saved')
+        // Only the note was sent: nothing else ran, so the form stays open to try again.
+        if (!result) {
+          setError(why)
+          setBusy(false)
+          return
+        }
         // The profile write is done and must not be sent again: close, and say what failed.
-        onDone({ text: `${saved}, but not its note: ${problem(cause, 'the note could not be saved')}.`, warn: true })
+        onDone({ text: `${saved}, but ${noteDeleted ? 'its note was not deleted' : 'not its note'}: ${why}.`, warn: true })
         return
       }
     }
     if (!result) {
-      onDone({ text: noteChanged ? `Saved the note on ${was?.name}.` : 'Nothing changed.', warn: false })
+      onDone({
+        text: !noteChanged ? 'Nothing changed.' : noteDeleted ? `Deleted the note on ${was?.name}.` : `Saved the note on ${was?.name}.`,
+        warn: false,
+      })
       return
     }
     onDone(said(result, `${saved}.`))
+  }
+
+  async function deleteNote() {
+    if (!note || !was) return
+    setBusy(true)
+    setError(null)
+    try {
+      await api.deleteKProfileNote(row.id, note.key)
+    } catch (cause) {
+      setError(problem(cause, 'The note could not be deleted.'))
+      setBusy(false)
+      return
+    }
+    onDone({ text: `Deleted the note on ${was.name}.`, warn: false })
   }
 
   return (
@@ -470,6 +500,27 @@ function KProfileForm({
         <Button type="button" size="sm" variant="ghost" disabled={busy} onClick={onCancel}>
           Cancel
         </Button>
+        {note && was && (
+          <>
+            <Button
+              type="button"
+              size="sm"
+              variant="ghost"
+              className="ml-auto"
+              // Delete note closes the form: an unsaved name or K edit would be dropped without a word.
+              disabled={busy || profileEdited}
+              aria-describedby={profileEdited ? `kp-note-delete-${row.id}` : undefined}
+              onClick={() => void deleteNote()}
+            >
+              <Trash2Icon /> Delete note
+            </Button>
+            {profileEdited && (
+              <span id={`kp-note-delete-${row.id}`} className="text-xs text-muted-foreground">
+                Save or undo the other edits first.
+              </span>
+            )}
+          </>
+        )}
         {busy && <Spinner />}
       </div>
     </form>

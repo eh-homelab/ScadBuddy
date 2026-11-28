@@ -57,10 +57,11 @@ export function Label({
 }
 
 /**
- * #6955 — one place label (a printer, an AMS unit or slot, the external holder), 50 x 25 mm unless `size` says
- * otherwise (#7157): the same QR box as the spool label, the code large, the place's name below it in at most two lines.
+ * #6955, #7169 — one code label, 50 x 25 mm unless `size` says otherwise (#7157): a place (a printer, an AMS unit or
+ * slot, the external holder), a spool type, an item or a kind. The same QR box as the spool label, the code large, the
+ * name below it in at most two lines.
  */
-export function LocationLabel({ code, name, svg, size = DEFAULT_SIZE, testId = 'label' }: { code: string; name: string; svg: string; size?: LabelSize; testId?: string }) {
+export function CodeLabel({ code, name, svg, size = DEFAULT_SIZE, testId = 'label' }: { code: string; name: string; svg: string; size?: LabelSize; testId?: string }) {
   // 8 mm up to "L-999" on a 50 mm label; a longer code, or a narrower label, gets smaller so it fits the text column.
   const codeMm = bigTextMm(code, CODE_MM, size.widthMm)
   return (

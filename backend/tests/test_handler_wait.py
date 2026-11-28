@@ -13,9 +13,9 @@ import pytest_asyncio
 from temporalio import workflow
 from temporalio.client import Client, WorkflowUpdateStage
 from temporalio.worker import UnsandboxedWorkflowRunner, Worker
-from temporalio.worker._workflow_instance import _WorkflowLogicFlag  # type: ignore[attr-defined]
 
 from scadbuddy.workflows.handlers import handler_wait
+from tests.support.temporal import single_batch as with_flag_2
 from tests.support.temporal import temporal_available, temporal_client
 
 #: One dev server for the module's tests, on one loop.
@@ -104,11 +104,7 @@ async def test_a_workflow_cancel_while_the_condition_is_false_leaves_the_handler
         client, task_queue=queue, workflows=[_Waits], workflow_runner=UnsandboxedWorkflowRunner()
     )
     if single_batch:
-        # The SDK's only switch for it, as its own tests use it (1.37.0
-        # tests/worker/test_workflow.py).
-        worker._set_default_workflow_logic_flag(
-            _WorkflowLogicFlag.PROCESS_WORKFLOW_ACTIVATION_JOBS_AS_SINGLE_BATCH, enabled=True
-        )
+        with_flag_2(worker)
     async with worker:
         handle = await client.start_workflow(_Waits.run, id=queue, task_queue=queue)
         update = await handle.start_update(

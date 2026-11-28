@@ -492,9 +492,15 @@ class LanActivities:
     @staticmethod
     def _named(started: LanStarted, input: LanPrintInput) -> LanStarted:
         """``started`` with its run and plate (#4543, #4644), which the run's record,
-        its last print and ``lan_wait``'s settle of the rack picks read."""
+        its last print and ``lan_wait``'s settle of the rack picks read, and the plate's
+        sliced grams per slot (#8321), which an order attempt reads (`orders/archives.py`
+        `lan_facts`)."""
         return started.model_copy(
-            update={"run_id": input.uploaded.run_id, "plate_id": input.plate_id}
+            update={
+                "run_id": input.uploaded.run_id,
+                "plate_id": input.plate_id,
+                "grams_by_slot": dict(input.uploaded.grams_by_slot),
+            }
         )
 
     async def _save_picks(
