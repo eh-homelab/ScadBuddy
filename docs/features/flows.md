@@ -242,8 +242,9 @@ who gave them (`TaskQuestion`). `GET /api/v1/tasks/{task_id}` reads one with bot
 (`backend/scadbuddy/api/tasks.py`). A run's page gets
 the question, without its answer, in its pending entry (`PendingEntry.task`). A task that
 opens or moves to another state publishes `task.changed` on the realtime topics `tasks`,
-`task:<id>` and, with a place, `tasks:<place>` (`backend/scadbuddy/api/realtime.py`
-`topics_of`). The station page lists tasks by place. Nothing reads `ui`.
+`task:<id>` and, with a place, `tasks:<place>`, plus `tasks:L-7` for a place kept as `l7` before
+#8062 (`backend/scadbuddy/api/realtime.py` `topics_of`; Go core's `/api/v1/ws` in
+`tools/go/core/internal/bus/event.go`, checked by the shared event-stream vectors). The station page lists tasks by place. Nothing reads `ui`.
 
 ## Decisions on an outward call
 

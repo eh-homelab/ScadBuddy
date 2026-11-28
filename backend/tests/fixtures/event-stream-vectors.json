@@ -1948,6 +1948,70 @@
       }
     },
     {
+      "name": "a task whose place is a location code as it was given",
+      "payload": "{\"id\":\"44444444444444444444444444444451\",\"at\":\"2026-11-26T10:00:00Z\",\"kind\":\"task.changed\",\"task_id\":\"5b8f0c3e-1a2b-4c3d-8e9f-0a1b2c3d4e5f\",\"run_id\":\"r\",\"state\":\"open\",\"place\":\"l7\"}",
+      "stored": "{\"at\": \"2026-11-26T10:00:00Z\", \"id\": \"44444444444444444444444444444451\", \"kind\": \"task.changed\", \"place\": \"l7\", \"state\": \"open\", \"run_id\": \"r\", \"task_id\": \"5b8f0c3e-1a2b-4c3d-8e9f-0a1b2c3d4e5f\"}",
+      "want": {
+        "decodes": true,
+        "live": "id: 44444444444444444444444444444451\nevent: change\ndata: {\"c\":\"scadbuddy_events\",\"p\":\"{\\\"id\\\":\\\"44444444444444444444444444444451\\\",\\\"at\\\":\\\"2026-11-26T10:00:00Z\\\",\\\"kind\\\":\\\"task.changed\\\",\\\"task_id\\\":\\\"5b8f0c3e-1a2b-4c3d-8e9f-0a1b2c3d4e5f\\\",\\\"run_id\\\":\\\"r\\\",\\\"state\\\":\\\"open\\\",\\\"place\\\":\\\"l7\\\"}\"}\n\n",
+        "keep": {
+          "agent": true,
+          "fleet": false,
+          "camera": false
+        },
+        "replay": "id: 44444444444444444444444444444451\nevent: change\ndata: {\"c\":\"scadbuddy_events\",\"p\":\"{\\\"id\\\":\\\"44444444444444444444444444444451\\\",\\\"at\\\":\\\"2026-11-26T10:00:00Z\\\",\\\"kind\\\":\\\"task.changed\\\",\\\"task_id\\\":\\\"5b8f0c3e-1a2b-4c3d-8e9f-0a1b2c3d4e5f\\\",\\\"run_id\\\":\\\"r\\\",\\\"state\\\":\\\"open\\\",\\\"place\\\":\\\"l7\\\"}\"}\n\n",
+        "topics": [
+          "tasks",
+          "task:5b8f0c3e-1a2b-4c3d-8e9f-0a1b2c3d4e5f",
+          "tasks:l7",
+          "tasks:L-7"
+        ],
+        "ws": "{\"type\":\"event\",\"id\":\"44444444444444444444444444444451\",\"kind\":\"task.changed\",\"topics\":[\"tasks\",\"task:5b8f0c3e-1a2b-4c3d-8e9f-0a1b2c3d4e5f\",\"tasks:l7\",\"tasks:L-7\"],\"data\":{\"task_id\":\"5b8f0c3e-1a2b-4c3d-8e9f-0a1b2c3d4e5f\",\"run_id\":\"r\",\"state\":\"open\",\"place\":\"l7\"}}"
+      }
+    },
+    {
+      "name": "a task whose place is a folded location code",
+      "payload": "{\"id\":\"44444444444444444444444444444452\",\"at\":\"2026-11-26T10:00:00Z\",\"kind\":\"task.changed\",\"task_id\":\"5b8f0c3e-1a2b-4c3d-8e9f-0a1b2c3d4e5f\",\"run_id\":\"r\",\"state\":\"open\",\"place\":\"L-7\"}",
+      "stored": "{\"at\": \"2026-11-26T10:00:00Z\", \"id\": \"44444444444444444444444444444452\", \"kind\": \"task.changed\", \"place\": \"L-7\", \"state\": \"open\", \"run_id\": \"r\", \"task_id\": \"5b8f0c3e-1a2b-4c3d-8e9f-0a1b2c3d4e5f\"}",
+      "want": {
+        "decodes": true,
+        "live": "id: 44444444444444444444444444444452\nevent: change\ndata: {\"c\":\"scadbuddy_events\",\"p\":\"{\\\"id\\\":\\\"44444444444444444444444444444452\\\",\\\"at\\\":\\\"2026-11-26T10:00:00Z\\\",\\\"kind\\\":\\\"task.changed\\\",\\\"task_id\\\":\\\"5b8f0c3e-1a2b-4c3d-8e9f-0a1b2c3d4e5f\\\",\\\"run_id\\\":\\\"r\\\",\\\"state\\\":\\\"open\\\",\\\"place\\\":\\\"L-7\\\"}\"}\n\n",
+        "keep": {
+          "agent": true,
+          "fleet": false,
+          "camera": false
+        },
+        "replay": "id: 44444444444444444444444444444452\nevent: change\ndata: {\"c\":\"scadbuddy_events\",\"p\":\"{\\\"id\\\":\\\"44444444444444444444444444444452\\\",\\\"at\\\":\\\"2026-11-26T10:00:00Z\\\",\\\"kind\\\":\\\"task.changed\\\",\\\"task_id\\\":\\\"5b8f0c3e-1a2b-4c3d-8e9f-0a1b2c3d4e5f\\\",\\\"run_id\\\":\\\"r\\\",\\\"state\\\":\\\"open\\\",\\\"place\\\":\\\"L-7\\\"}\"}\n\n",
+        "topics": [
+          "tasks",
+          "task:5b8f0c3e-1a2b-4c3d-8e9f-0a1b2c3d4e5f",
+          "tasks:L-7"
+        ],
+        "ws": "{\"type\":\"event\",\"id\":\"44444444444444444444444444444452\",\"kind\":\"task.changed\",\"topics\":[\"tasks\",\"task:5b8f0c3e-1a2b-4c3d-8e9f-0a1b2c3d4e5f\",\"tasks:L-7\"],\"data\":{\"task_id\":\"5b8f0c3e-1a2b-4c3d-8e9f-0a1b2c3d4e5f\",\"run_id\":\"r\",\"state\":\"open\",\"place\":\"L-7\"}}"
+      }
+    },
+    {
+      "name": "a task whose place is a spool code",
+      "payload": "{\"id\":\"44444444444444444444444444444453\",\"at\":\"2026-11-26T10:00:00Z\",\"kind\":\"task.changed\",\"task_id\":\"5b8f0c3e-1a2b-4c3d-8e9f-0a1b2c3d4e5f\",\"run_id\":\"r\",\"state\":\"open\",\"place\":\"s07\"}",
+      "stored": "{\"at\": \"2026-11-26T10:00:00Z\", \"id\": \"44444444444444444444444444444453\", \"kind\": \"task.changed\", \"place\": \"s07\", \"state\": \"open\", \"run_id\": \"r\", \"task_id\": \"5b8f0c3e-1a2b-4c3d-8e9f-0a1b2c3d4e5f\"}",
+      "want": {
+        "decodes": true,
+        "live": "id: 44444444444444444444444444444453\nevent: change\ndata: {\"c\":\"scadbuddy_events\",\"p\":\"{\\\"id\\\":\\\"44444444444444444444444444444453\\\",\\\"at\\\":\\\"2026-11-26T10:00:00Z\\\",\\\"kind\\\":\\\"task.changed\\\",\\\"task_id\\\":\\\"5b8f0c3e-1a2b-4c3d-8e9f-0a1b2c3d4e5f\\\",\\\"run_id\\\":\\\"r\\\",\\\"state\\\":\\\"open\\\",\\\"place\\\":\\\"s07\\\"}\"}\n\n",
+        "keep": {
+          "agent": true,
+          "fleet": false,
+          "camera": false
+        },
+        "replay": "id: 44444444444444444444444444444453\nevent: change\ndata: {\"c\":\"scadbuddy_events\",\"p\":\"{\\\"id\\\":\\\"44444444444444444444444444444453\\\",\\\"at\\\":\\\"2026-11-26T10:00:00Z\\\",\\\"kind\\\":\\\"task.changed\\\",\\\"task_id\\\":\\\"5b8f0c3e-1a2b-4c3d-8e9f-0a1b2c3d4e5f\\\",\\\"run_id\\\":\\\"r\\\",\\\"state\\\":\\\"open\\\",\\\"place\\\":\\\"s07\\\"}\"}\n\n",
+        "topics": [
+          "tasks",
+          "task:5b8f0c3e-1a2b-4c3d-8e9f-0a1b2c3d4e5f",
+          "tasks:s07"
+        ],
+        "ws": "{\"type\":\"event\",\"id\":\"44444444444444444444444444444453\",\"kind\":\"task.changed\",\"topics\":[\"tasks\",\"task:5b8f0c3e-1a2b-4c3d-8e9f-0a1b2c3d4e5f\",\"tasks:s07\"],\"data\":{\"task_id\":\"5b8f0c3e-1a2b-4c3d-8e9f-0a1b2c3d4e5f\",\"run_id\":\"r\",\"state\":\"open\",\"place\":\"s07\"}}"
+      }
+    },
+    {
       "name": "a task with no place",
       "payload": "{\"id\":\"44444444444444444444444444444445\",\"at\":\"2026-11-26T10:00:00Z\",\"kind\":\"task.changed\",\"task_id\":\"5b8f0c3e-1a2b-4c3d-8e9f-0a1b2c3d4e5f\",\"run_id\":\"r\",\"state\":\"answered\"}",
       "stored": "{\"at\": \"2026-11-26T10:00:00Z\", \"id\": \"44444444444444444444444444444445\", \"kind\": \"task.changed\", \"state\": \"answered\", \"run_id\": \"r\", \"task_id\": \"5b8f0c3e-1a2b-4c3d-8e9f-0a1b2c3d4e5f\"}",

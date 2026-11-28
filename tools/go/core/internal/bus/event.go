@@ -207,7 +207,12 @@ func (e *Event) Topics() []string {
 	case "task.changed":
 		topics := []string{"tasks", "task:" + t("task_id")}
 		if place := t("place"); place != "" {
+			// A task opened before #8062 kept its place as it was given (`l7`): its
+			// station listens on the folded one (`L-7`), as Python's topics_of says.
 			topics = append(topics, "tasks:"+place)
+			if folded := foldedPlace(place); folded != place {
+				topics = append(topics, "tasks:"+folded)
+			}
 		}
 		return topics
 	case "preview_slice.progress", "preview_slice.settled":
@@ -446,4 +451,21 @@ func formatAt(t time.Time, zone string) string {
 		layout += ".000000"
 	}
 	return t.Format(layout) + zone
+}
+
+// placeCode is codes/parse.py's _CODE, on text trimmed and upper-cased as parse_code does.
+var placeCode = regexp.MustCompile(`^([A-Z])-?([0-9]{1,10})$`)
+
+// foldedPlace is tasks/models.py folded_place: a place that is a location's code (`l7`,
+// `L-07`) as `L-7`, and any other as it is.
+func foldedPlace(place string) string {
+	m := placeCode.FindStringSubmatch(strings.ToUpper(strings.TrimSpace(place)))
+	if m == nil || m[1] != "L" {
+		return place
+	}
+	n, err := strconv.Atoi(m[2])
+	if err != nil || n < 1 || n > math.MaxInt32 {
+		return place
+	}
+	return "L-" + strconv.Itoa(n)
 }
