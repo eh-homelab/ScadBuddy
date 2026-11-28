@@ -64,11 +64,17 @@ CI sets `SCADBUDDY_TEST_POSTGRES_REQUIRED`). The Go toolchain is pinned in these
 
 `.github/workflows/fleetd-release.yml` publishes each main build of fleetd as the GitHub
 release `fleetd-<sha7>`: `fleetd-linux-amd64`, `fleetd-linux-arm64` (`CGO_ENABLED=0`,
-`-X main.version=<full sha>`), `SHA256SUMS` and `SHA256SUMS.sig` (ed25519 over SHA256SUMS,
-raw 64 bytes, base64, by the repo secret `FLEETD_RELEASE_SIGNING_KEY`). Running fleetds
-take the newest one (`internal/update`). arm64 here is a Go cross-compile on a hosted
+`-X main.version=<full sha>`), `SHA256SUMS` (first line `commit <full sha>`, then the
+binaries' sums) and `SHA256SUMS.sig` (ed25519 over SHA256SUMS, raw 64 bytes, base64, by
+`FLEETD_RELEASE_SIGNING_KEY`). The key is a secret of the environment `fleetd-release`,
+whose deployment branch policy allows only `main`. It is never a repo secret. The `build`
+job holds no secret and uploads the binaries as an artifact. The `release` job runs in that
+environment: it checks the artifact's sha256 against `build`'s output, signs and publishes.
+Running fleetds take the newest one (`internal/update`). They refuse it unless the signed
+commit line is the release tag's commit, which is also the commit the compare API said is
+ahead. arm64 here is a Go cross-compile on a hosted
 amd64 runner, with no QEMU and no image, so the root "No CI job builds an arm64 image" rule
-still holds. The job fails on an empty secret or one whose public half is not
+still holds. The run fails on an empty secret or one whose public half is not
 `internal/update`'s `publicKey`; it never publishes unsigned. It runs on main only (a
 branch release could pass fleetd's "ahead" check), one run at a time, and a re-run of a
 published commit does nothing. A change to the paths in its `on.push.paths` (fleetd,

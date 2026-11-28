@@ -2,10 +2,13 @@
 //
 // fleetd-release.yml publishes each build of main as the GitHub release `fleetd-<sha7>`,
 // with one binary per platform, SHA256SUMS and SHA256SUMS.sig (an ed25519 signature of
-// SHA256SUMS, base64). The updater takes the newest `fleetd-` release, asks GitHub's
-// compare API whether its commit is ahead of the running one, verifies the signature with
-// the key compiled in here, then the binary's sha256, runs `<new> version`, keeps the
-// running binary as `<name>.old` and moves the new one into its place.
+// SHA256SUMS, base64). SHA256SUMS's first line is `commit <full sha>`, so a signature
+// binds the binaries to one commit. The updater takes the newest `fleetd-` release,
+// resolves its tag to a commit (which must be the release's target), asks GitHub's
+// compare API whether that commit is ahead of the running one, verifies the signature
+// with the key compiled in here and that it signs that commit, then the binary's sha256,
+// runs `<new> version`, keeps the running binary as `<name>.old` and moves the new one
+// into its place.
 package update
 
 import (
@@ -33,7 +36,8 @@ import (
 )
 
 // publicKey is the release signing key's public half: raw 32 bytes, base64. Its private
-// half is the repo secret FLEETD_RELEASE_SIGNING_KEY; fleetd-release.yml checks the two
+// half is FLEETD_RELEASE_SIGNING_KEY, a secret of the main-only environment
+// fleetd-release; fleetd-release.yml checks the two
 // match before it signs.
 const publicKey = "XLVoFjOOmaMxLpAg41zfmZ661BVZkwb3MSOMTGXP0h0="
 
@@ -63,6 +67,8 @@ var (
 	ErrChecksum = errors.New("binary checksum does not match SHA256SUMS")
 	// ErrSmokeTest: `<new> version` failed or printed another version.
 	ErrSmokeTest = errors.New("new binary failed its smoke test")
+	// ErrCommit: the signed SHA256SUMS does not name the commit the release's tag points at.
+	ErrCommit = errors.New("the signed commit is not the release's commit")
 
 	shaRE = regexp.MustCompile(`^[0-9a-f]{40}$`)
 )
@@ -243,7 +249,14 @@ func (u *Updater) Check(ctx context.Context) (bool, error) {
 	if rel.Target == u.cfg.Current {
 		return false, nil
 	}
-	ahead, err := u.ahead(ctx, rel.Target)
+	commit, err := u.tagCommit(ctx, rel.Tag)
+	if err != nil {
+		return false, fmt.Errorf("%s: %w", rel.Tag, err)
+	}
+	if commit != rel.Target {
+		return false, fmt.Errorf("%s: %w: its tag points at %s, its target is %s", rel.Tag, ErrCommit, commit, rel.Target)
+	}
+	ahead, err := u.ahead(ctx, commit)
 	if err != nil {
 		return false, fmt.Errorf("%s: %w", rel.Tag, err)
 	}
@@ -251,7 +264,7 @@ func (u *Updater) Check(ctx context.Context) (bool, error) {
 		u.once(slog.LevelInfo, "fleetd: the newest release is not ahead of this one; staying", rel.Tag+": not ahead")
 		return false, nil
 	}
-	if err := u.install(ctx, *rel); err != nil {
+	if err := u.install(ctx, *rel, commit); err != nil {
 		return false, fmt.Errorf("%s: %w", rel.Tag, err)
 	}
 	u.cfg.Log.Info("fleetd: installed a new release; restarting", "release", rel.Tag)
@@ -281,6 +294,29 @@ func (u *Updater) latest(ctx context.Context) (*release, error) {
 	return best, nil
 }
 
+// tagCommit is the commit the release's tag points at, from GitHub's git refs API. The
+// workflow makes lightweight tags; a tag object is refused.
+func (u *Updater) tagCommit(ctx context.Context, tag string) (string, error) {
+	body, err := u.get(ctx, u.cfg.API+"/repos/"+u.cfg.Repo+"/git/ref/tags/"+url.PathEscape(tag), true, maxJSON)
+	if err != nil {
+		return "", fmt.Errorf("resolving the tag: %w", err)
+	}
+	var ref struct {
+		Ref    string `json:"ref"`
+		Object struct {
+			SHA  string `json:"sha"`
+			Type string `json:"type"`
+		} `json:"object"`
+	}
+	if err := json.Unmarshal(body, &ref); err != nil {
+		return "", fmt.Errorf("resolving the tag: %w", err)
+	}
+	if ref.Ref != "refs/tags/"+tag || ref.Object.Type != "commit" || !IsRelease(ref.Object.SHA) {
+		return "", fmt.Errorf("%w: the tag is not a lightweight tag of a commit (ref %q, %s %q)", ErrCommit, ref.Ref, ref.Object.Type, ref.Object.SHA)
+	}
+	return ref.Object.SHA, nil
+}
+
 // ahead asks GitHub whether target is a descendant of the running commit. A release cut
 // from an older commit, or from another branch, is never taken.
 func (u *Updater) ahead(ctx context.Context, target string) (bool, error) {
@@ -297,7 +333,9 @@ func (u *Updater) ahead(ctx context.Context, target string) (bool, error) {
 	return cmp.Status == "ahead", nil
 }
 
-func (u *Updater) install(ctx context.Context, rel release) error {
+// install downloads, verifies and moves in the release built from commit: the tag's
+// commit, which Check compared.
+func (u *Updater) install(ctx context.Context, rel release, commit string) error {
 	name := "fleetd-" + u.cfg.GOOS + "-" + u.cfg.GOARCH
 	sumsURL, err := rel.asset(sumsName)
 	if err != nil {
@@ -322,6 +360,9 @@ func (u *Updater) install(ctx context.Context, rel release) error {
 	sig, err := base64.StdEncoding.DecodeString(strings.TrimSpace(string(sigText)))
 	if err != nil || len(sig) != ed25519.SignatureSize || !ed25519.Verify(u.cfg.PublicKey, sums, sig) {
 		return ErrSignature
+	}
+	if signed, ok := signedCommit(sums); !ok || signed != commit {
+		return fmt.Errorf("%w: %s signs %q, the release is %s", ErrCommit, sumsName, signed, commit)
 	}
 	want, err := lookupSum(sums, name)
 	if err != nil {
@@ -356,7 +397,7 @@ func (u *Updater) install(ctx context.Context, rel release) error {
 	if err != nil {
 		return fmt.Errorf("%w: %v", ErrSmokeTest, err)
 	}
-	if got := strings.TrimSpace(out); got != rel.Target {
+	if got := strings.TrimSpace(out); got != commit {
 		return fmt.Errorf("%w: it reports version %q", ErrSmokeTest, got)
 	}
 
@@ -372,6 +413,16 @@ func (u *Updater) install(ctx context.Context, rel release) error {
 	}
 	keep = true
 	return nil
+}
+
+// signedCommit reads SHA256SUMS's first line, `commit <full sha>`.
+func signedCommit(sums []byte) (string, bool) {
+	first, _, _ := bytes.Cut(sums, []byte("\n"))
+	sha, ok := strings.CutPrefix(string(first), "commit ")
+	if !ok || !IsRelease(sha) {
+		return "", false
+	}
+	return sha, true
 }
 
 // lookupSum finds name's sha256 in a sha256sum listing.

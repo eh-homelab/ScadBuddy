@@ -146,11 +146,21 @@ changes fleetd or a module it builds from, and on a dispatch of main. It cross-c
 fleetd for linux/amd64 and linux/arm64, stamped with the full commit sha (`fleetd version`
 prints it). It publishes the release `fleetd-<sha7>` with `fleetd-linux-amd64`,
 `fleetd-linux-arm64`, `SHA256SUMS` and `SHA256SUMS.sig`. The release is never the repo's
-"latest".
+"latest". Its tag is a lightweight tag at the commit. `SHA256SUMS`'s first line is
+`commit <full sha>`. Then comes one `sha256sum` line per binary.
+
+The workflow has two jobs. `build` holds no secret and only reads the repo. It builds,
+writes `SHA256SUMS` and uploads both as an artifact. `release` runs in the environment
+`fleetd-release`. It checks the artifact's sha256 against the one `build` output. It checks
+the commit line and the binaries' sums. Then it signs and publishes. Only this job may
+write releases.
 
 **The key.** `SHA256SUMS.sig` is an ed25519 signature of `SHA256SUMS`: the raw 64 bytes, in
-base64. The private key is the repo secret `FLEETD_RELEASE_SIGNING_KEY` (PEM, PKCS#8). The
-public key is compiled into fleetd (`internal/update`, `publicKey`):
+base64. The private key is `FLEETD_RELEASE_SIGNING_KEY` (PEM, PKCS#8). It is a secret of the
+environment `fleetd-release`, not of the repo. That environment's deployment branch policy
+allows only `main`, so a workflow on another branch cannot read the key. The job also
+checks `github.ref` itself. The signature covers the commit line, so a signature for one
+commit cannot vouch for the release of another commit. The public key is compiled into fleetd (`internal/update`, `publicKey`):
 `XLVoFjOOmaMxLpAg41zfmZ661BVZkwb3MSOMTGXP0h0=`. The workflow fails, and publishes nothing,
 when the secret is empty or its public half is not that key. To change the key, change both
 in one PR. A fleetd with the old key refuses releases signed by the new one, so install the
@@ -159,10 +169,14 @@ new build by hand on each machine.
 **What `run` does.** At start and every `--update-interval`:
 
 1. It lists the repo's releases and takes the newest `fleetd-` release by `created_at`.
-2. It does nothing when that release is the running commit. Else it asks GitHub's compare
-   API whether the release's commit is ahead of the running one. A release that is behind,
+2. It does nothing when that release is the running commit. Else it resolves the release's
+   tag with GitHub's git refs API. The tag must be a lightweight tag of the release's
+   target commit (`target_commitish`, which the tag name also names). Then it asks GitHub's
+   compare API whether that commit is ahead of the running one. A release that is behind,
    or on another line, is never taken.
-3. It downloads `SHA256SUMS` and `SHA256SUMS.sig` and verifies the signature.
+3. It downloads `SHA256SUMS` and `SHA256SUMS.sig` and verifies the signature. The signed
+   first line must be `commit <that commit>`. It refuses a manifest signed for another
+   commit, or one with no commit line.
 4. It downloads `fleetd-<GOOS>-<GOARCH>` and checks its sha256 against the signed list.
    Downloads go only to `github.com`, `objects.githubusercontent.com` and
    `release-assets.githubusercontent.com`, over https, redirects included.
@@ -184,7 +198,8 @@ install a release binary:
 tag=$(gh release list -R eh-homelab/ScadBuddy --json tagName,createdAt \
   -q '[.[] | select(.tagName | startswith("fleetd-"))] | sort_by(.createdAt) | last | .tagName')
 gh release download "$tag" -R eh-homelab/ScadBuddy -p "fleetd-linux-$(dpkg --print-architecture)" -p 'SHA256SUMS*'
-sha256sum --ignore-missing -c SHA256SUMS
+head -n1 SHA256SUMS   # commit <the full sha of $tag>
+grep -v '^commit ' SHA256SUMS | sha256sum --ignore-missing -c -
 install -m 0755 "fleetd-linux-$(dpkg --print-architecture)" ~/.local/bin/fleetd
 ```
 

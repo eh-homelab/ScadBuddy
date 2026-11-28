@@ -6,10 +6,18 @@ name: fleetd Release
 # (tools/go/fleetd/internal/update, README "Auto-update").
 #
 # Each release holds fleetd-linux-amd64, fleetd-linux-arm64, SHA256SUMS and
-# SHA256SUMS.sig: an ed25519 signature of SHA256SUMS (raw 64 bytes, base64) by the repo
-# secret FLEETD_RELEASE_SIGNING_KEY (a PEM PKCS#8 ed25519 private key). fleetd checks it
-# with the public key compiled into internal/update. With no secret, or a secret whose
-# public half is not that key, the job fails and publishes nothing.
+# SHA256SUMS.sig. SHA256SUMS's first line is `commit <full sha>`, then one sha256sum line
+# per binary. SHA256SUMS.sig is an ed25519 signature of SHA256SUMS (raw 64 bytes, base64)
+# by FLEETD_RELEASE_SIGNING_KEY (a PEM PKCS#8 ed25519 private key). That key is a secret
+# of the environment `fleetd-release`, whose deployment branch policy allows only main; it
+# is not a repo secret. fleetd checks the signature with the public key compiled into
+# internal/update, and checks that the signed commit is the release tag's commit. With no
+# secret, or a secret whose public half is not that key, the run fails and publishes
+# nothing.
+#
+# Two jobs, least privilege each: `build` holds no secret and no write token; it uploads
+# dist/ as an artifact. `release` runs in the environment, checks the artifact's sha256
+# against what `build` output, signs and publishes.
 #
 # arm64 is a Go cross-compile (CGO_ENABLED=0), with no QEMU and no image; the "no arm64
 # CI" rule (root CLAUDE.md) is about images. Hosted runners only.
@@ -32,8 +40,7 @@ on:
       - "**/vendor/**"
   workflow_dispatch:
 
-permissions:
-  contents: read
+permissions: {}
 
 # One release at a time, in push order; a run is never cancelled half-published.
 concurrency:
@@ -44,14 +51,17 @@ env:
   GOTOOLCHAIN: go1.26.9+auto
 
 jobs:
-  release:
-    name: release
+  build:
+    name: build
     # main only: a branch ahead of the running commit would pass fleetd's "newer" check.
     if: github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
     timeout-minutes: 15
     permissions:
-      contents: write
+      contents: read
+    outputs:
+      sha: ${{ steps.build.outputs.sha }}
+      sums_sha256: ${{ steps.build.outputs.sums_sha256 }}
     steps:
       - uses: actions/checkout@v7
         with:
@@ -63,6 +73,7 @@ jobs:
           cache-dependency-path: tools/go/*/go.sum
 
       - name: Build
+        id: build
         run: |
           set -euo pipefail
           sha=$(git rev-parse HEAD)
@@ -78,8 +89,70 @@ jobs:
             echo "::error::fleetd-linux-amd64 version printed '$got', want $sha"
             exit 1
           fi
-          (cd dist && sha256sum fleetd-linux-amd64 fleetd-linux-arm64 > SHA256SUMS)
+          # The first line binds the signature to this commit; fleetd refuses a manifest
+          # whose commit is not the release tag's commit.
+          {
+            echo "commit ${sha}"
+            (cd dist && sha256sum fleetd-linux-amd64 fleetd-linux-arm64)
+          } > dist/SHA256SUMS
           cat dist/SHA256SUMS
+          {
+            echo "sha=${sha}"
+            echo "sums_sha256=$(sha256sum dist/SHA256SUMS | cut -d' ' -f1)"
+          } >> "$GITHUB_OUTPUT"
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: fleetd-dist
+          path: dist/
+          if-no-files-found: error
+          retention-days: 1
+
+  release:
+    name: release
+    needs: build
+    if: github.ref == 'refs/heads/main'
+    # The signing key is this environment's secret; its branch policy allows only main.
+    environment: fleetd-release
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: write
+    steps:
+      # Only for internal/update's publicKey; nothing from the tree is run.
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+          sparse-checkout: tools/go/fleetd/internal/update/update.go
+          sparse-checkout-cone-mode: false
+
+      - uses: actions/download-artifact@v8
+        with:
+          name: fleetd-dist
+          path: dist
+
+      - name: Check the artifact
+        env:
+          WANT_SHA: ${{ needs.build.outputs.sha }}
+          WANT_SUMS: ${{ needs.build.outputs.sums_sha256 }}
+          RUN_SHA: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+          if [ "$WANT_SHA" != "$RUN_SHA" ] || [ "$(git rev-parse HEAD)" != "$RUN_SHA" ]; then
+            echo "::error::build sha $WANT_SHA, run sha $RUN_SHA, checkout $(git rev-parse HEAD) disagree."
+            exit 1
+          fi
+          got=$(sha256sum dist/SHA256SUMS | cut -d' ' -f1)
+          if [ -z "$WANT_SUMS" ] || [ "$got" != "$WANT_SUMS" ]; then
+            echo "::error::SHA256SUMS sha256 is $got; the build job output $WANT_SUMS."
+            exit 1
+          fi
+          if [ "$(head -n1 dist/SHA256SUMS)" != "commit ${RUN_SHA}" ]; then
+            echo "::error::SHA256SUMS does not start with 'commit ${RUN_SHA}'."
+            exit 1
+          fi
+          (cd dist && tail -n +2 SHA256SUMS | sha256sum --strict -c -)
+          ls dist
 
       - name: Sign
         env:
@@ -87,7 +160,7 @@ jobs:
         run: |
           set -euo pipefail
           if [ -z "${FLEETD_RELEASE_SIGNING_KEY}" ]; then
-            echo "::error::The repo secret FLEETD_RELEASE_SIGNING_KEY is empty; refusing to publish an unsigned release."
+            echo "::error::The fleetd-release environment secret FLEETD_RELEASE_SIGNING_KEY is empty; refusing to publish an unsigned release."
             exit 1
           fi
           work=$(mktemp -d)
@@ -109,10 +182,10 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           REPO: ${{ github.repository }}
+          SHA: ${{ github.sha }}
         run: |
           set -euo pipefail
-          sha=$(git rev-parse HEAD)
-          tag="fleetd-${sha:0:7}"
+          tag="fleetd-${SHA:0:7}"
           # Idempotent: a re-run of a published commit does nothing; a draft left by a
           # failed upload is replaced.
           if draft=$(gh release view "$tag" -R "$REPO" --json isDraft -q .isDraft 2>/dev/null); then
@@ -123,9 +196,10 @@ jobs:
               exit 0
             fi
           fi
-          gh release create "$tag" -R "$REPO" --target "$sha" --latest=false \
-            --title "fleetd ${sha:0:7}" \
-            --notes "fleetd built from ${sha}. Signed SHA256SUMS; see tools/go/fleetd/README.md (Auto-update)." \
+          # A lightweight tag at SHA: fleetd resolves the tag and refuses a tag object.
+          gh release create "$tag" -R "$REPO" --target "$SHA" --latest=false \
+            --title "fleetd ${SHA:0:7}" \
+            --notes "fleetd built from ${SHA}. Signed SHA256SUMS (first line: the commit); see tools/go/fleetd/README.md (Auto-update)." \
             dist/fleetd-linux-amd64 dist/fleetd-linux-arm64 dist/SHA256SUMS dist/SHA256SUMS.sig
           {
             echo "### Published \`${tag}\`"

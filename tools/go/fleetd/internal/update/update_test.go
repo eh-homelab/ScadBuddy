@@ -44,6 +44,14 @@ type fakeGitHub struct {
 	failList atomic.Int32 // answer 502 this many times first
 	limited  bool
 	extra    []map[string]any
+	// commit is the signed manifest's commit line's sha; "" = sha, "-" = no line.
+	commit string
+	// tagSHA and tagType are what the tag's git ref points at; "" = target and "commit".
+	tagSHA  string
+	tagType string
+	target  string // target_commitish; "" = sha
+	// compared lists each compare call's "base...head".
+	compared []string
 }
 
 func newFake(t *testing.T) *fakeGitHub {
@@ -64,7 +72,22 @@ func (f *fakeGitHub) sumsBody() []byte {
 		return f.sums
 	}
 	h := sha256.Sum256(f.binary)
-	return []byte(fmt.Sprintf("%s  fleetd-linux-amd64\n%s  fleetd-linux-arm64\n", hex.EncodeToString(h[:]), strings.Repeat("0", 64)))
+	head := "commit " + f.sha + "\n"
+	switch f.commit {
+	case "":
+	case "-":
+		head = ""
+	default:
+		head = "commit " + f.commit + "\n"
+	}
+	return []byte(head + fmt.Sprintf("%s  fleetd-linux-amd64\n%s  fleetd-linux-arm64\n", hex.EncodeToString(h[:]), strings.Repeat("0", 64)))
+}
+
+func or(s, def string) string {
+	if s == "" {
+		return def
+	}
+	return s
 }
 
 func (f *fakeGitHub) serve(w http.ResponseWriter, r *http.Request) {
@@ -86,7 +109,7 @@ func (f *fakeGitHub) serve(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		rel := map[string]any{
-			"tag_name": "fleetd-" + f.sha[:7], "target_commitish": f.sha, "created_at": f.created,
+			"tag_name": "fleetd-" + or(f.target, f.sha)[:7], "target_commitish": or(f.target, f.sha), "created_at": f.created,
 			"draft": false, "prerelease": false,
 			"assets": []map[string]any{
 				{"name": "fleetd-linux-amd64", "browser_download_url": f.asset("fleetd-linux-amd64")},
@@ -96,7 +119,13 @@ func (f *fakeGitHub) serve(w http.ResponseWriter, r *http.Request) {
 		}
 		list := append([]map[string]any{rel}, f.extra...)
 		_ = json.NewEncoder(w).Encode(list)
+	case r.URL.Path == "/repos/o/r/git/ref/tags/fleetd-"+or(f.target, f.sha)[:7]:
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"ref":    "refs/tags/fleetd-" + or(f.target, f.sha)[:7],
+			"object": map[string]any{"sha": or(f.tagSHA, or(f.target, f.sha)), "type": or(f.tagType, "commit")},
+		})
 	case strings.HasPrefix(r.URL.Path, "/repos/o/r/compare/"):
+		f.compared = append(f.compared, strings.TrimPrefix(r.URL.Path, "/repos/o/r/compare/"))
 		_ = json.NewEncoder(w).Encode(map[string]any{"status": f.status})
 	case r.URL.Path == "/dl/fleetd-linux-amd64":
 		_, _ = w.Write(f.binary)
@@ -242,7 +271,7 @@ func TestBadSignatureRefused(t *testing.T) {
 
 func TestChecksumMismatchRefused(t *testing.T) {
 	h := newHarness(t)
-	h.f.sums = []byte(strings.Repeat("a", 64) + "  fleetd-linux-amd64\n")
+	h.f.sums = []byte("commit " + newSHA + "\n" + strings.Repeat("a", 64) + "  fleetd-linux-amd64\n")
 	u, _ := h.updater(t, oldSHA)
 	done, err := u.Check(context.Background())
 	if done || !errors.Is(err, ErrChecksum) {
@@ -376,7 +405,7 @@ func TestDefaultAllowHost(t *testing.T) {
 
 func TestLoopLogsOncePerRelease(t *testing.T) {
 	h := newHarness(t)
-	h.f.sums = []byte(strings.Repeat("a", 64) + "  fleetd-linux-amd64\n")
+	h.f.sums = []byte("commit " + newSHA + "\n" + strings.Repeat("a", 64) + "  fleetd-linux-amd64\n")
 	u, _ := h.updater(t, oldSHA)
 	ctx, cancel := context.WithCancel(context.Background())
 	go func() {
@@ -396,5 +425,67 @@ func TestLoopLogsOncePerRelease(t *testing.T) {
 func TestPublicKeyDecodes(t *testing.T) {
 	if k := PublicKey(); len(k) != ed25519.PublicKeySize {
 		t.Fatalf("key length %d", len(k))
+	}
+}
+
+// refusedAsCommit checks that Check refused with ErrCommit and touched nothing.
+func refusedAsCommit(t *testing.T, h *harness) {
+	t.Helper()
+	u, _ := h.updater(t, oldSHA)
+	done, err := u.Check(context.Background())
+	if done || !errors.Is(err, ErrCommit) {
+		t.Fatalf("Check = %v, %v", done, err)
+	}
+	if got := h.mustRead(t, h.exe); got != "old fleetd binary" {
+		t.Errorf("binary changed: %q", got)
+	}
+	if len(h.ran) != 0 {
+		t.Errorf("ran a binary signed for another commit")
+	}
+	h.noStrays(t)
+}
+
+func TestManifestForAnotherCommitRefused(t *testing.T) {
+	for name, commit := range map[string]string{
+		"another commit": strings.Repeat("3", 40),
+		"no commit line": "-",
+		"short sha":      newSHA[:7],
+	} {
+		t.Run(name, func(t *testing.T) {
+			h := newHarness(t)
+			h.f.commit = commit // validly signed, but not for this release's commit
+			refusedAsCommit(t, h)
+		})
+	}
+}
+
+func TestReleaseDisagreeingWithSignedCommitRefused(t *testing.T) {
+	for name, mutate := range map[string]func(f *fakeGitHub){
+		// The release names newSHA and its manifest signs newSHA, but its tag points elsewhere.
+		"tag points elsewhere": func(f *fakeGitHub) { f.tagSHA = newSHA[:7] + strings.Repeat("3", 33) },
+		// The tag is an annotated tag object, not a commit.
+		"annotated tag": func(f *fakeGitHub) { f.tagType = "tag" },
+		// The release and its tag name another commit than the signed one.
+		"target is not the signed commit": func(f *fakeGitHub) {
+			f.commit = f.sha
+			f.target = strings.Repeat("3", 40)
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			h := newHarness(t)
+			mutate(h.f)
+			refusedAsCommit(t, h)
+		})
+	}
+}
+
+func TestComparesTheTagsCommit(t *testing.T) {
+	h := newHarness(t)
+	u, _ := h.updater(t, oldSHA)
+	if done, err := u.Check(context.Background()); err != nil || !done {
+		t.Fatalf("Check = %v, %v", done, err)
+	}
+	if want := []string{oldSHA + "..." + newSHA}; fmt.Sprint(h.f.compared) != fmt.Sprint(want) {
+		t.Errorf("compared %v, want %v", h.f.compared, want)
 	}
 }
