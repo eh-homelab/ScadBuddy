@@ -33,6 +33,12 @@ import { defineTool, idempotencyKey, json, ToolError, type Tool } from './regist
 
 const SOURCE = "ScadBuddy's own filament inventory"
 
+/** #8366: what a tag answer says of its chip, and the probe that tells it when it is unknown. */
+const CHIP_FIELDS =
+  'Each tag has `chip` (NTAG213, NTAG215 or NTAG216), `max_ndef_bytes` (the largest NDEF message it takes), ' +
+  '`writable` and `chip_read_at`, as the ScadBuddy app last read them; all null when no app read told them (a ' +
+  "Chrome Web NFC read, an older app, a Bambu tag). To learn them, call nfc_probe: the user's phone reads the tag."
+
 /**
  * #7204: the preset routes are Go's. Until core serves the area `filament-presets`, the path goes on to
  * Python, which answers a 404 with no `code`; a real answer of Go's has one (`preset_not_found`).
@@ -1294,7 +1300,8 @@ const tools: Tool[] = [
     label: 'List spool tags',
     description:
       "ScadBuddy's spool tags (RFID or NFC), oldest first, each with its open `binding` and the `spool_number` " +
-      'it is on. A tag on no spool only with `include_unbound`.',
+      'it is on. A tag on no spool only with `include_unbound`. ' +
+      CHIP_FIELDS,
     input: z.object({ include_unbound: z.boolean().default(false) }),
     risk: 'read',
     source: SOURCE,
@@ -1311,7 +1318,7 @@ const tools: Tool[] = [
   defineTool({
     name: 'filament_tag_get',
     label: 'Read a spool tag',
-    description: 'One tag with its open binding and every binding it has had, newest first. 404 for none.',
+    description: 'One tag with its open binding and every binding it has had, newest first. 404 for none. ' + CHIP_FIELDS,
     input: z.object({ tag_id: z.string().uuid().describe("A tag's `id` from filament_tag_list") }),
     risk: 'read',
     source: SOURCE,

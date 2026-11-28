@@ -287,6 +287,9 @@ export const getNfcJob = (id: string) => request<NfcJob>(`${BASE}/nfc-jobs/${seg
  */
 export const claimNfcJob = (id: string, body: NfcJobClaimIn = {}) => request<NfcJob>(`${BASE}/nfc-jobs/${seg(id)}/claim`, json('POST', body))
 
+/** Queues a job for the phone page; the Tags tab's "Read chip" queues a `read` (#8366). */
+export const createNfcJob = (body: Schemas['NfcJobIn']) => request<NfcJob>(`${BASE}/nfc-jobs`, json('POST', body))
+
 /**
  * Ends a job as cancelled without arming it; the agent's tool sees `cancelled`. The route also
  * cancels an `armed` job whose write has not begun, so a page that armed it since the last poll

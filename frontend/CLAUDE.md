@@ -463,6 +463,10 @@ same way, `vite.config.ts`).
   `lib/tagWrite.ts` `writeWithBackup` (backup, write, read back; in the ScadBuddy app a record
   larger than the reading's `tag.max_ndef_bytes` stops before the write), and an agent's NFC job shows
   in `NfcJobBanner` (`components/filament/scan/`); tests stub Web NFC with `src/test/ndefStub.ts`.
+  A read posts the app's chip, `max_ndef_bytes` and `writable` (`webNfc.ts` `chipFields`, #8366), and
+  the Tags tab's Chip column shows the tag's last known ones; with none, "Read chip" queues an NFC `read`
+  job (`POST /nfc-jobs`, as the agent's `nfc_probe` does), reads it every `PROBE_POLL_MS` and cancels it on
+  Stop or when the tab goes. A Bambu tag shows "MIFARE Classic" and offers no read.
   "Scan code" (#8155, `components/filament/scan/ScanCode.tsx`) shows the rear camera's live
   preview, or a chosen photo where the browser gives no camera (inside Bambuddy's frame too).
   An unresolved code that `searchesSpools` allows gets a "Search spools for" link (#8372).

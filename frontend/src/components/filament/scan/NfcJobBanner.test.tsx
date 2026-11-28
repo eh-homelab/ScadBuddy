@@ -127,6 +127,15 @@ describe('NfcJobBanner (#7273)', () => {
     await waitFor(() => expect(onAnnounce).toHaveBeenLastCalledWith('Agent job done: the tag was read.'))
   })
 
+  it("posts the chip the ScadBuddy app read with a read job's result (#8366)", async () => {
+    const job = seedNfcJob({ kind: 'read' })
+    const { user } = render()
+    await user.click(await armButton())
+    expect(await screen.findByText('Hold a tag to the phone')).toBeInTheDocument()
+    stub.tap({ serialNumber: UID, records: [], tag: { chip: 'NTAG215', user_bytes: 504, max_ndef_bytes: 496, writable: true } })
+    await waitFor(() => expect(log.bodyOf(`POST ${JOBS}/${job.id}/result`)).toEqual({ uid: UID, records: [], chip: 'NTAG215', max_ndef_bytes: 496, writable: true }))
+  })
+
   it('arms a write job, backs up with the job id, writes the records and posts the read-back', async () => {
     const job = seedNfcJob({ kind: 'write', records: RECORDS })
     const { user, onAnnounce } = render()
