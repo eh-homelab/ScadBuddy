@@ -523,10 +523,10 @@ class PriceList(BaseModel):
 
 #: What an offer write says of its `Idempotency-Key` (#8437).
 _OFFER_KEY = (
-    " With an `Idempotency-Key`, a retry with the same key answers the first result and "
-    "writes nothing; the key with another body, offer or route is a 422. A write that was "
-    "refused keeps "
-    "no result. Without a key, each request is a write of its own."
+    " With an `Idempotency-Key`, a retry with the same key answers the first result and"
+    " writes nothing; the key with another body, offer or route is a 422."
+    " A write that was refused keeps no result."
+    " Without a key, each request is a write of its own."
 )
 _KEY_REUSED = (422, "`Idempotency-Key` used for another request")
 
