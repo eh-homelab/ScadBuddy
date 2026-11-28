@@ -206,6 +206,11 @@ export function NfcJobBanner({ session, onAnnounce }: { session: NfcSession; onA
   const expired = job !== null && left <= 0 && !begun
 
   const shownId = job?.id ?? null
+  /** The job on screen, for an answer that comes after the banner moved on. */
+  const shown = useRef<string | null>(null)
+  useEffect(() => {
+    shown.current = shownId
+  })
   useEffect(() => {
     if (!shownId) return
     setNow(Date.now())
@@ -375,22 +380,27 @@ export function NfcJobBanner({ session, onAnnounce }: { session: NfcSession; onA
   async function cancel(target: NfcJob) {
     setNotice(null)
     setCancelling(target.id)
-    let ended: NfcJob
+    let text: string
     try {
-      ended = await cancelNfcJob(target.id)
+      const ended = await cancelNfcJob(target.id)
+      text = CANCEL_TEXT[ended.state] ?? 'Cancelled. The agent was told.'
+      // A cancel never runs a job, so it resets no run: another job may be running by now.
+      drop(target.id)
+      reload()
     } catch (cause) {
-      say(`ScadBuddy could not cancel the job: ${detailOf(cause)}.`)
-      return
+      text = `ScadBuddy could not cancel the job: ${detailOf(cause)}.`
     } finally {
       setCancelling((now) => (now === target.id ? null : now))
     }
-    end(target.id, CANCEL_TEXT[ended.state] ?? 'Cancelled. The agent was told.')
+    // Once the poll moved on to another job, the outcome is announced, not shown on that job.
+    if (shown.current === target.id || shown.current === null) say(text)
+    else announce.current?.(text)
   }
 
   if (!job && !notice) return null
   const sha = recordsKey !== null && hash?.key === recordsKey ? hash.value : null
   const ready = job !== null && !expired && !run && (job.kind === 'read' || sha !== null)
-  // A record Web NFC would refuse is named as the job is shown: it can be declined, never armed.
+  // A record Web NFC would refuse is named as the job is shown: it can be cancelled or declined, never armed.
   const refused = job?.kind === 'write' ? notWritable(job.records ?? []) : null
   const count = job?.records?.length ?? 0
 
