@@ -129,6 +129,10 @@ Measured 2026-09-22 against `docker.io/openscad/openscad:dev`
   `printable_height` through `opt_float` (2095) with **no null checks**: a file
   that omits one does not fail validation, it segfaults before slicing starts.
   Removing any single one of the five reproduces the crash.
+  In v02.09.02.62 the same five are still read with no null check
+  ([`BambuStudio.cpp` L2242-2246 and L2330](https://github.com/bambulab/BambuStudio/blob/v02.09.02.62/src/BambuStudio.cpp#L2242-L2246)),
+  and `bbs_3mf.cpp` still loads the config only for an `Application` that starts
+  with `BambuStudio-` (read 2026-11-27, #8325; the crash was not re-run).
   The values need not be real — the CLI reads them into `current_*`/`old_*`
   locals used for reporting and compatibility comparisons, while the settings
   actually sliced with come from `--load-settings`/`--load-filaments`.

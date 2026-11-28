@@ -1,10 +1,12 @@
-import { screen, waitFor, within } from '@testing-library/react'
-import { useLocation } from 'react-router'
+import { act, render as rtlRender, screen, waitFor, within } from '@testing-library/react'
+import userEvent from '@testing-library/user-event'
+import { MemoryRouter, Route, Routes, useLocation, useNavigate, useParams } from 'react-router'
 import { http, HttpResponse } from 'msw'
+import { Fragment, StrictMode } from 'react'
 import { describe, expect, it } from 'vitest'
 import { server } from '../../mocks/server'
 import { seedEntityProperties } from '../../mocks/features/entities'
-import { spoolId } from '../../mocks/features/filament/seed'
+import { spoolId, T } from '../../mocks/features/filament/seed'
 import { renderPage } from '../../test/utils'
 import { SpoolsTab } from './SpoolsTab'
 
@@ -126,5 +128,175 @@ describe('the Spools tab search', () => {
     await waitFor(() => expect(failed).toBeGreaterThan(0))
     await new Promise((resolve) => setTimeout(resolve, 50))
     expect(numbers(await table())).toEqual(['3'])
+  })
+})
+
+// #8372: a scan-made search (`from=scan`) opens its one match.
+
+const GTIN = '6975373321234'
+const SCAN = `/filament/spools?q=gtin:${GTIN}&from=scan`
+
+function SpoolPageStub() {
+  const navigate = useNavigate()
+  return (
+    <>
+      <h1>Spool page {useParams().id}</h1>
+      <button type="button" onClick={() => void navigate(-1)}>
+        Back
+      </button>
+    </>
+  )
+}
+
+function renderScan(route = SCAN, strict = false) {
+  const Wrap = strict ? StrictMode : Fragment
+  const user = userEvent.setup()
+  rtlRender(
+    <Wrap>
+      <MemoryRouter initialEntries={['/start', route]} initialIndex={1}>
+        <Routes>
+          <Route path="/start" element={<h1>Start</h1>} />
+          <Route
+            path="/filament/spools"
+            element={
+              <>
+                <SpoolsTab />
+                <Search />
+              </>
+            }
+          />
+          <Route path="/filament/spools/:id" element={<SpoolPageStub />} />
+        </Routes>
+      </MemoryRouter>
+    </Wrap>,
+  )
+  return { user }
+}
+
+describe('a scan-made spool search (#8372)', () => {
+  it("opens the one spool whose type has the code, in the list's place in the history", async () => {
+    seedEntityProperties(`spool_type:${T.ORANGE}`, { gtin: [GTIN] })
+    const { user } = renderScan()
+    expect(await screen.findByRole('heading', { name: `Spool page ${spoolId(2)}` })).toBeInTheDocument()
+    await user.click(screen.getByRole('button', { name: 'Back' }))
+    expect(await screen.findByRole('heading', { name: 'Start' })).toBeInTheDocument()
+  })
+
+  it('lists several matches, takes from out of the address, and a later edit does not open one', async () => {
+    seedEntityProperties(`spool_type:${T.ORANGE}`, { gtin: [GTIN] })
+    seedEntityProperties(`spool_type:${T.PINK}`, { gtin: [GTIN] })
+    const { user } = renderScan()
+    await waitFor(async () => expect(numbers(await table())).toEqual(['2', '3']))
+    await waitFor(() => expect(screen.getByTestId('search').textContent).toBe(`?q=gtin%3A${GTIN}`))
+    await user.type(screen.getByRole('searchbox', { name: 'Search spools' }), ' pink')
+    await waitFor(async () => expect(numbers(await table())).toEqual(['3']))
+    expect(screen.queryByRole('heading', { name: /Spool page/ })).not.toBeInTheDocument()
+  })
+
+  it('shows an empty list with the code in the search box when nothing matches', async () => {
+    renderScan()
+    expect(await screen.findByText(`No spool matches “gtin:${GTIN}” with these filters.`)).toBeInTheDocument()
+    expect(screen.getByRole('searchbox', { name: 'Search spools' })).toHaveValue(`gtin:${GTIN}`)
+    await waitFor(() => expect(screen.getByTestId('search').textContent).toBe(`?q=gtin%3A${GTIN}`))
+  })
+
+  it('waits for the type properties before it decides', async () => {
+    seedEntityProperties(`spool_type:${T.ORANGE}`, { gtin: [GTIN] })
+    let release = () => {}
+    const held = new Promise<void>((resolve) => (release = resolve))
+    let reached = false
+    server.use(
+      http.get('/api/v1/entity-kinds/spool_type/properties', async () => {
+        reached = true
+        await held
+        return undefined
+      }),
+    )
+    renderScan()
+    await waitFor(() => expect(reached).toBe(true))
+    expect(await screen.findByText(`Looking for “gtin:${GTIN}”…`)).toBeInTheDocument()
+    expect(screen.queryByText(/No spool matches/)).not.toBeInTheDocument()
+    expect(screen.queryByRole('heading', { name: /Spool page/ })).not.toBeInTheDocument()
+    expect(screen.getByTestId('search').textContent).toContain('from=scan')
+    release()
+    expect(await screen.findByRole('heading', { name: `Spool page ${spoolId(2)}` })).toBeInTheDocument()
+  })
+
+  it('shows no rows while it looks, though a partial read already matches one', async () => {
+    seedEntityProperties(`spool:${spoolId(3)}`, { gtin: [GTIN] })
+    seedEntityProperties(`spool_type:${T.ORANGE}`, { gtin: [GTIN] })
+    let release = () => {}
+    const held = new Promise<void>((resolve) => (release = resolve))
+    // The spool list and the spools' own properties answer; only the type properties are held.
+    const answered = new Set<string>()
+    const onAnswer = ({ request }: { request: Request }) => {
+      const { pathname } = new URL(request.url)
+      if (request.method === 'GET' && (pathname === '/api/v1/filament/spools' || pathname === '/api/v1/entity-kinds/spool/properties')) answered.add(pathname)
+    }
+    server.events.on('response:mocked', onAnswer)
+    server.use(
+      http.get('/api/v1/entity-kinds/spool_type/properties', async () => {
+        await held
+        return undefined
+      }),
+    )
+    try {
+      renderScan()
+      await waitFor(() => expect(answered.size).toBe(2))
+      await act(async () => {})
+      expect(await screen.findByText(`Looking for “gtin:${GTIN}”…`)).toBeInTheDocument()
+      expect(screen.queryByRole('table', { name: 'Spools' })).toBeNull()
+      release()
+      await waitFor(async () => expect(numbers(await table())).toEqual(['2', '3']))
+      expect(screen.queryByText(`Looking for “gtin:${GTIN}”…`)).toBeNull()
+    } finally {
+      server.events.removeListener('response:mocked', onAnswer)
+    }
+  })
+
+  it('does not decide on the answer of a load a newer one replaced', async () => {
+    seedEntityProperties(`spool_type:${T.ORANGE}`, { gtin: [GTIN] })
+    // StrictMode runs the mount effect twice, so two loads start. The first load's type read
+    // answers at once; the second's is held.
+    let reads = 0
+    let release = () => {}
+    const held = new Promise<void>((resolve) => (release = resolve))
+    server.use(
+      http.get('/api/v1/entity-kinds/spool_type/properties', async () => {
+        reads++
+        if (reads === 2) await held
+        return undefined
+      }),
+    )
+    // The reads of both loads: the first load's answers all come back while the second's type
+    // read is held. Counted as the mock answers them, with no wait on the clock.
+    const answered = { list: 0, typeProperties: 0 }
+    const onAnswer = ({ request }: { request: Request }) => {
+      const { pathname } = new URL(request.url)
+      if (request.method !== 'GET') return
+      if (pathname.endsWith('/filament/spools')) answered.list++
+      if (pathname.endsWith('/entity-kinds/spool_type/properties') && reads === 1) answered.typeProperties++
+    }
+    server.events.on('response:mocked', onAnswer)
+    try {
+      renderScan(SCAN, true)
+      await waitFor(() => expect(reads).toBe(2))
+      await waitFor(() => expect(answered).toEqual({ list: 2, typeProperties: 1 }))
+      // Let React take the answers in.
+      await act(async () => {})
+    } finally {
+      server.events.removeListener('response:mocked', onAnswer)
+    }
+    expect(screen.getByText(`Looking for “gtin:${GTIN}”…`)).toBeInTheDocument()
+    expect(screen.getByTestId('search').textContent).toContain('from=scan')
+    release()
+    expect(await screen.findByRole('heading', { name: `Spool page ${spoolId(2)}` })).toBeInTheDocument()
+  })
+
+  it('does not open one match without from=scan', async () => {
+    seedEntityProperties(`spool_type:${T.ORANGE}`, { gtin: [GTIN] })
+    renderScan(`/filament/spools?q=gtin:${GTIN}`)
+    await waitFor(async () => expect(numbers(await table())).toEqual(['2']))
+    expect(screen.queryByRole('heading', { name: /Spool page/ })).not.toBeInTheDocument()
   })
 })

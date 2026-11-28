@@ -1019,6 +1019,22 @@ def test_lan_facts_prefer_the_sliced_grams_of_a_finished_run() -> None:
     assert lan_facts(record).actual_grams == 7.5
 
 
+def test_lan_facts_of_a_run_stopped_before_its_last_plate_sum_the_started_plates() -> None:
+    """#8401: a run of three plates stopped after its second finished (``lan_stopped``,
+    plate 3 never started). The print the follow read is plate 2's, which finished, so
+    the sliced grams are those of the two plates the printer took, never plate 3's."""
+    record = LanRecord(
+        starts=[
+            own_start(1, ended="done", ended_at=timedelta(minutes=30), grams={1: 4.0}),
+            own_start(2, grams={1: 2.5, 2: 1.0}),
+        ],
+        settled_at=T0 + timedelta(hours=2),
+        uses=[ledger_use("p1", 4.0)],
+        outcome="finished",
+    )
+    assert lan_facts(record).actual_grams == 7.5
+
+
 @pytest.mark.parametrize(
     ("first", "outcome", "second"),
     [

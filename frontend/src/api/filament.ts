@@ -287,6 +287,14 @@ export const getNfcJob = (id: string) => request<NfcJob>(`${BASE}/nfc-jobs/${seg
  */
 export const claimNfcJob = (id: string, body: NfcJobClaimIn = {}) => request<NfcJob>(`${BASE}/nfc-jobs/${seg(id)}/claim`, json('POST', body))
 
+/**
+ * Ends a job as cancelled without arming it; the agent's tool sees `cancelled`. The route also
+ * cancels an `armed` job whose write has not begun, so a page that armed it since the last poll
+ * stops; 409 `write_begun` once a write's backup is kept. A job that had already ended is answered
+ * unchanged.
+ */
+export const cancelNfcJob = (id: string) => request<NfcJob>(`${BASE}/nfc-jobs/${seg(id)}/cancel`, { method: 'POST' })
+
 /** Ends an armed job with what the tag gave, or with an `error`. */
 export const postNfcJobResult = (id: string, body: NfcJobResultIn) => request<NfcJob>(`${BASE}/nfc-jobs/${seg(id)}/result`, json('POST', body))
 
@@ -474,6 +482,22 @@ export type ProfileFetch = Schemas['ProfileFetch']
 export type ProfileFetchStarted = Schemas['ProfileFetchStarted']
 export type ProfileFetchStatus = Schemas['ProfileFetchStatus']
 export type MissingKey = Schemas['MissingKey']
+
+export type TdfpSearchAsk = Schemas['SearchAsk']
+export type TdfpCandidate = Schemas['Candidate']
+export type TdfpSearchAnswer = Schemas['SearchAnswer']
+export type TdfpCreateRequest = Schemas['TdfpCreateRequest']
+export type TdfpCreated = Schemas['TdfpCreated']
+
+/** #7025: searches 3dfilamentprofiles.com on the profile-fetch worker; it reads only and stores nothing. */
+export const searchTdfp = (ask: TdfpSearchAsk) => request<TdfpSearchAnswer>(`${BASE}/tdfp/search`, json('POST', ask))
+
+/**
+ * #7025: adds a filament to 3dfilamentprofiles.com, once per `key` (the same key and body answer the
+ * first outcome). `status` `duplicate` saved nothing; `type_id`, when sent, takes the new id.
+ */
+export const createTdfpFilament = (body: TdfpCreateRequest, key: string) =>
+  request<TdfpCreated>(`${BASE}/tdfp/filaments`, { ...json('POST', body), headers: { 'Idempotency-Key': key } })
 
 /**
  * Starts a fetch of the type's presets from 3dfilamentprofiles.com (its saved `tdfp_id`),

@@ -32,6 +32,11 @@ concurrency:
 jobs:
   bump:
     runs-on: ubuntu-latest
+    # `shell: bash` runs each step with pipefail; the default `bash -e` does not, so
+    # a failed lookup piped into `tee` would pass green.
+    defaults:
+      run:
+        shell: bash
     timeout-minutes: 15
     steps:
       - name: Generate app token

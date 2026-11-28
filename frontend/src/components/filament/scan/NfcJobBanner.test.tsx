@@ -157,6 +157,124 @@ describe('NfcJobBanner (#7273)', () => {
     await waitFor(() => expect(screen.queryByRole('heading', { name: /Agent wants/ })).toBeNull())
   })
 
+  it('cancels a pending job without arming it', async () => {
+    const job = seedNfcJob({ kind: 'write', records: RECORDS })
+    const { user, onAnnounce } = render()
+    await user.click(await screen.findByRole('button', { name: 'Cancel job' }))
+    await waitFor(() => expect(log.lines()).toContain(`POST ${JOBS}/${job.id}/cancel`))
+    expect(log.lines()).not.toContain(`POST ${JOBS}/${job.id}/claim`)
+    expect(stub.writes).toHaveLength(0)
+    await waitFor(() => expect(onAnnounce).toHaveBeenLastCalledWith('Cancelled. The agent was told.'))
+    expect(screen.queryByRole('heading', { name: /Agent wants/ })).toBeNull()
+  })
+
+  it('cancels a job that cannot be written from this page', async () => {
+    // A smart poster that holds an absolute-URL record, which Web NFC refuses inside one.
+    const job = seedNfcJob({ kind: 'write', records: [{ record_type: 'smart-poster', data_hex: 'd3010078' }] })
+    const { user } = render()
+    expect(await screen.findByText(/This job cannot be written from this page/)).toBeInTheDocument()
+    const cancel = await screen.findByRole('button', { name: 'Cancel job' })
+    expect(cancel).toBeEnabled()
+    await user.click(cancel)
+    await waitFor(() => expect(log.lines()).toContain(`POST ${JOBS}/${job.id}/cancel`))
+  })
+
+  it.each([
+    ['done', 'The job had already ended: the agent has its result.'],
+    ['failed', 'The job had already ended: the agent was told it failed.'],
+    ['expired', 'The job had already expired. Nothing was cancelled.'],
+  ] as const)('says the job had ended when the cancel answers it %s', async (state, text) => {
+    seedNfcJob({ kind: 'read' })
+    server.use(
+      http.post(`${JOBS}/:id/cancel`, async ({ params }) => {
+        const job = (await (await fetch(`${JOBS}/${String(params.id)}`)).json()) as Record<string, unknown>
+        return HttpResponse.json({ ...job, state })
+      }),
+    )
+    const { user, onAnnounce } = render()
+    await user.click(await screen.findByRole('button', { name: 'Cancel job' }))
+    await waitFor(() => expect(onAnnounce).toHaveBeenLastCalledWith(text))
+    expect(onAnnounce).not.toHaveBeenCalledWith('Cancelled. The agent was told.')
+  })
+
+  it('keeps the next job usable while an earlier cancel waits', async () => {
+    const first = seedNfcJob({ kind: 'read' })
+    seedNfcJob({ kind: 'read' })
+    let answer: () => void = () => {}
+    const answered = new Promise<void>((resolve) => (answer = resolve))
+    server.use(
+      http.post(`${JOBS}/:id/cancel`, async ({ params }) => {
+        if (String(params.id) !== first.id) return undefined
+        // The job ends at once, so the next poll shows the next one; the answer comes later.
+        first.state = 'cancelled'
+        await answered
+        return HttpResponse.json(first)
+      }),
+    )
+    const { user } = render()
+    await user.click(await screen.findByRole('button', { name: 'Cancel job' }))
+    expect(screen.getByRole('button', { name: 'Cancel job' })).toBeDisabled()
+    // The 2 s poll drops the first job; the second one's buttons are not held by the first cancel.
+    await waitFor(() => expect(screen.getByRole('button', { name: 'Cancel job' })).toBeEnabled(), { timeout: 4000 })
+    answer()
+  })
+
+  it("leaves the next job's run alone when an earlier cancel answers late", async () => {
+    const first = seedNfcJob({ kind: 'read' })
+    seedNfcJob({ kind: 'read' })
+    let answer: () => void = () => {}
+    const answered = new Promise<void>((resolve) => (answer = resolve))
+    server.use(
+      http.post(`${JOBS}/:id/cancel`, async ({ params }) => {
+        if (String(params.id) !== first.id) return undefined
+        first.state = 'cancelled'
+        await answered
+        return HttpResponse.json(first)
+      }),
+    )
+    const { user, onAnnounce } = render()
+    await user.click(await screen.findByRole('button', { name: 'Cancel job' }))
+    // The poll shows the second job; it is armed while the first cancel still waits.
+    const arm = await screen.findByRole('button', { name: 'Arm' })
+    await waitFor(() => expect(arm).toBeEnabled(), { timeout: 4000 })
+    await user.click(arm)
+    expect(await screen.findByText('Hold a tag to the phone')).toBeInTheDocument()
+    answer()
+    await waitFor(() => expect(onAnnounce).toHaveBeenCalledWith('Cancelled. The agent was told.'))
+    expect(screen.getByText('Hold a tag to the phone')).toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: 'Arm' })).not.toBeInTheDocument()
+    // The running job's banner shows no notice about the other job.
+    expect(screen.queryByText('Cancelled. The agent was told.')).not.toBeInTheDocument()
+  })
+
+  it('names Cancel job as a way out of a job this page cannot write', async () => {
+    seedNfcJob({ kind: 'write', records: [{ record_type: 'smart-poster', data_hex: 'd3010078' }] })
+    render()
+    expect(await screen.findByText(/This job cannot be written from this page: .*\. Cancel or decline it to tell the agent\./)).toBeInTheDocument()
+  })
+
+  it('says the write has begun elsewhere when the cancel answers 409 write_begun, and keeps the job', async () => {
+    seedNfcJob({ kind: 'read' })
+    server.use(
+      http.post(`${JOBS}/:id/cancel`, () =>
+        HttpResponse.json({ type: 'about:blank', title: 'Conflict', status: 409, detail: 'the write has begun: the job ends only with its result', code: 'write_begun' }, { status: 409 }),
+      ),
+    )
+    const { user, onAnnounce } = render()
+    await user.click(await screen.findByRole('button', { name: 'Cancel job' }))
+    await waitFor(() => expect(onAnnounce).toHaveBeenLastCalledWith('Another page has begun writing this job. It ends with that write’s result.'))
+    expect(screen.getByRole('heading', { name: 'Agent wants to read a tag' })).toBeInTheDocument()
+  })
+
+  it('says why when ScadBuddy refuses the cancel, and keeps the job', async () => {
+    seedNfcJob({ kind: 'read' })
+    server.use(http.post(`${JOBS}/:id/cancel`, () => HttpResponse.json({ detail: 'boom' }, { status: 500 })))
+    const { user } = render()
+    await user.click(await screen.findByRole('button', { name: 'Cancel job' }))
+    expect(await screen.findByText(/could not cancel the job: boom/)).toBeInTheDocument()
+    expect(screen.getByRole('heading', { name: 'Agent wants to read a tag' })).toBeInTheDocument()
+  })
+
   it("posts the browser's error as a failed job", async () => {
     const job = seedNfcJob({ kind: 'write', records: RECORDS })
     const { user } = render()

@@ -1,5 +1,5 @@
 {
-  "comment": "#6894, #7151: the filament text search's cases. frontend/src/lib/filamentSearch.test.ts and agent/test/filamentSearch.test.ts both run every group, so the two copies of the matcher cannot drift apart. A spool group gives the spool and its extras; a type group gives the type, its catalog names and its SKUs. Either may give `properties`, the entity's property values (#7026), which each test turns into search text with `propertyTexts`.",
+  "comment": "#6894, #7151: the filament text search's cases. frontend/src/lib/filamentSearch.test.ts and agent/test/filamentSearch.test.ts both run every group, so the two copies of the matcher cannot drift apart. A spool group gives the spool and its extras; a type group gives the type, its catalog names and its SKUs. Either may give `properties`, the entity's property values (#7026), and a spool may give `typeProperties`, its type's (#8372); each test turns them into search text with `propertyTexts`. A `key:value` query (#8372) matches a property of that key by its whole value.",
   "groups": [
     {
       "name": "a pink Bambu spool in a tray",
@@ -106,7 +106,19 @@
         { "query": "true", "match": false },
         { "query": "a00-k0 black", "match": true },
         { "query": "gtin", "match": false },
-        { "query": "food_safe", "match": false }
+        { "query": "food_safe", "match": false },
+        { "query": "gtin:06975337041234", "match": true },
+        { "query": "GTIN:06975337049999", "match": true },
+        { "query": "gtin:6975337041234", "match": true },
+        { "query": "gtin:0697533704123", "match": false },
+        { "query": "gtin:7041234", "match": false },
+        { "query": "mpn:a00-k0", "match": true },
+        { "query": "mpn:a00", "match": false },
+        { "query": "td:1.8", "match": true },
+        { "query": "food_safe:true", "match": false },
+        { "query": "asin:06975337041234", "match": false },
+        { "query": "gtin:06975337041234 black", "match": true },
+        { "query": "gtin:06975337041234 white", "match": false }
       ]
     },
     {
@@ -119,6 +131,38 @@
         { "query": "l-2207", "match": true },
         { "query": "lot_number", "match": false }
       ]
+    },
+    {
+      "name": "a spool is found by its type's property values (#8372)",
+      "kind": "spool",
+      "spool": { "number": 9, "names": {}, "effective": {} },
+      "extras": {},
+      "properties": { "lot_number": "L-2207" },
+      "typeProperties": { "gtin": ["06975337041234"] },
+      "cases": [
+        { "query": "gtin:6975337041234", "match": true },
+        { "query": "06975337041234", "match": true },
+        { "query": "lot_number:l-2207", "match": true },
+        { "query": "gtin:l-2207", "match": false },
+        { "query": "lot_number:06975337041234", "match": false }
+      ]
+    },
+    {
+      "name": "a tag UID with colons is found as a plain token, not as a property (#8372)",
+      "kind": "spool",
+      "spool": { "number": 13, "names": {}, "effective": {} },
+      "extras": { "tags": ["A1B2C3D4E5"] },
+      "cases": [
+        { "query": "a1:b2:c3:d4", "match": true },
+        { "query": "e5:ff:00:11", "match": false }
+      ]
+    },
+    {
+      "name": "a tag UID with colons does not match another spool's tag (#8372)",
+      "kind": "spool",
+      "spool": { "number": 14, "names": {}, "effective": {} },
+      "extras": { "tags": ["FFEE112233"] },
+      "cases": [{ "query": "a1:b2:c3:d4", "match": false }]
     }
   ]
 }
