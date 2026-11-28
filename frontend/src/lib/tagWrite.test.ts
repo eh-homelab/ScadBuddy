@@ -1,12 +1,12 @@
 import { waitFor } from '@testing-library/react'
 import { http, HttpResponse } from 'msw'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import { spoolTagRecords, spoolTagWritten } from '../api/filament'
-import { spoolId } from '../mocks/features/filament/seed'
+import { getTag, spoolTagRecords, spoolTagWritten } from '../api/filament'
+import { spoolId, TAG } from '../mocks/features/filament/seed'
 import { server } from '../mocks/server'
 import { installNdefStub, type NdefStub, type StubReading } from '../test/ndefStub'
-import { writeWithBackup, type WriteStep } from './tagWrite'
-import { NfcSession, type WireRecord } from './webNfc'
+import { clearTag, writeWithBackup, type WriteStep } from './tagWrite'
+import { ndefMessageBytes, NfcSession, type WireRecord } from './webNfc'
 
 const SPOOL = spoolId(3)
 /** Spool #3's tag in the seed. */
@@ -261,5 +261,111 @@ describe('writeWithBackup (#7273)', () => {
     expect(seen).toEqual([])
     stub.tap({ serialNumber: UID, records: [] })
     expect(seen).toEqual([UID])
+  })
+})
+
+describe('the tag size check (#8362)', () => {
+  let stub: NdefStub
+  let session: NfcSession
+  beforeEach(async () => {
+    stub = installNdefStub()
+    session = new NfcSession()
+    await session.start()
+  })
+  afterEach(() => {
+    session.stop()
+    stub.restore()
+  })
+
+  it('counts an NDEF message as Android does', () => {
+    expect(ndefMessageBytes([])).toBe(3)
+    expect(ndefMessageBytes([{ record_type: 'empty', data_hex: '' }])).toBe(3)
+    // Header, type length, payload length (SR), "application/json" (16), 2 bytes.
+    expect(ndefMessageBytes([{ record_type: 'mime', media_type: 'application/json', data_hex: '7b7d' }])).toBe(21)
+    // 300 bytes: a 4-byte payload length.
+    expect(ndefMessageBytes([{ record_type: 'mime', media_type: 'application/json', data_hex: '00'.repeat(300) }])).toBe(2 + 4 + 16 + 300)
+    // Status byte and "en", then the text.
+    expect(ndefMessageBytes([{ record_type: 'text', data_hex: '6869' }])).toBe(2 + 1 + 1 + 1 + 2 + 2)
+  })
+
+  it('stops before the write when the record is bigger than the tag holds', async () => {
+    const outcome = writeWithBackup({
+      session,
+      reason: 'spool_write',
+      prepare: (now, backupId) => spoolTagRecords(SPOOL, { uid: now.uid, records: now.records, backup_id: backupId }).then((answer) => answer.records),
+      confirm: () => Promise.resolve(null),
+      onStep: () => {},
+    })
+    stub.tap({ serialNumber: UID, records: [], tag: { chip: 'NTAG213', user_bytes: 144, max_ndef_bytes: 40, writable: true } })
+    const done = await outcome
+    expect(done.status).toBe('failed')
+    expect(done.status === 'failed' && done.message).toMatch(/^This tag holds 40 bytes; the record needs \d+\. Nothing was written\.$/)
+    expect(done.status === 'failed' && done.backupId).toBeTruthy()
+    expect(stub.writes).toHaveLength(0)
+  })
+})
+
+describe('clearTag (#8362)', () => {
+  let stub: NdefStub
+  let session: NfcSession
+  let steps: WriteStep[]
+  beforeEach(async () => {
+    stub = installNdefStub()
+    session = new NfcSession()
+    await session.start()
+    steps = []
+  })
+  afterEach(() => {
+    session.stop()
+    stub.restore()
+  })
+
+  /** Starts a clear of the tag once it is read, so a tap after it reaches the run. */
+  const clear = async (tagId: string) => {
+    const tag = await getTag(tagId)
+    return { outcome: clearTag({ session, tag, onStep: (step) => steps.push(step) }) }
+  }
+
+  it('backs up, writes one empty record, checks it, then takes the tag off its spool', async () => {
+    const log = sent()
+    try {
+      const { outcome } = await clear(TAG.MOVED)
+      stub.tap(tapOf(UID, [{ record_type: 'mime', media_type: 'application/json', data_hex: '7b7d' }]))
+      await waitFor(() => expect(steps).toContain('reading_back'))
+      expect(stub.writes.at(-1)).toEqual([{ recordType: 'empty' }])
+      stub.tap({ serialNumber: UID, records: [{ recordType: 'empty', data: new Uint8Array() }] })
+      const done = await outcome
+      expect(done.status).toBe('checked')
+      expect(done.status === 'checked' && done.result?.next).toBe('bind_or_create')
+      expect(log.lines.filter((line) => !line.startsWith('GET'))).toEqual([
+        'POST /api/v1/filament/tags/backups',
+        `DELETE /api/v1/filament/tags/${TAG.MOVED}/binding`,
+        'POST /api/v1/filament/tags/reads',
+      ])
+      const tag = await getTag(TAG.MOVED)
+      expect(tag.binding).toBeNull()
+      expect(tag.history?.[0]).toMatchObject({ spool_id: spoolId(3), reason: 'cleared' })
+    } finally {
+      log.off()
+    }
+  })
+
+  it('never writes a Bambu tag', async () => {
+    const { outcome } = await clear(TAG.BLACK)
+    stub.tap({ serialNumber: 'a1:b2:c3:d4', records: [], tag: { tech: 'mifare_classic' } })
+    const done = await outcome
+    expect(done).toMatchObject({ status: 'failed', backupId: null })
+    expect(done.status === 'failed' && done.message).toMatch(/Bambu \(MIFARE Classic\) tag\. ScadBuddy never writes one/)
+    expect(stub.writes).toHaveLength(0)
+  })
+
+  it('clears only the tag on screen', async () => {
+    const { outcome } = await clear(TAG.MOVED)
+    stub.tap({ serialNumber: '04:ff:ee:00:11:22:33:44', records: [] })
+    const done = await outcome
+    expect(done).toMatchObject({ status: 'failed', backupId: null })
+    expect(done.status === 'failed' && done.message).toMatch(/^A different tag answered/)
+    expect(stub.writes).toHaveLength(0)
+    expect((await getTag(TAG.MOVED)).binding).not.toBeNull()
   })
 })

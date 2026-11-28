@@ -332,7 +332,7 @@ export function NfcJobBanner({ session, onAnnounce }: { session: NfcSession; onA
       signal,
     })
     if (outcome.status === 'checked') {
-      end(target.id, `Agent job done: ${headlineOf(outcome, false)}`)
+      end(target.id, `Agent job done: ${headlineOf(outcome, 'write')}`)
       return
     }
     if (signal.reason === NO_READ_BACK) {
@@ -357,7 +357,7 @@ export function NfcJobBanner({ session, onAnnounce }: { session: NfcSession; onA
       )
       if (!posted) await fail(target.id, 'the tag does not hold what was sent')
     } else await fail(target.id, errorOf(outcome))
-    end(target.id, headlineOf(outcome, false))
+    end(target.id, headlineOf(outcome, 'write'))
   }
 
   async function decline(target: NfcJob, sha: string | null) {

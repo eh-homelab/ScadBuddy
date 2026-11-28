@@ -75,6 +75,25 @@ const MAX_MS = 30_000
 const IDLE_MS = 60_000
 /** How long a `check` waits for its answer before it counts every topic as changed. */
 export const CHECK_MS = 3_000
+/**
+ * Core reads who may follow each `device:call:<id>` topic, so one subscribe frame may name at
+ * most this many (core `realtime/device.go` `MaxCallTopics`); a frame with more is refused whole.
+ */
+export const MAX_CALL_TOPICS = 8
+const CALL_TOPIC = 'device:call:'
+
+/**
+ * The subscribe frames that resubscribe `topics` after a reconnect: the call topics in frames
+ * of at most `MAX_CALL_TOPICS`, the rest in a frame of their own, so a refused call topic never
+ * takes the other topics with it.
+ */
+export function subscribeFrames(topics: string[]): string[][] {
+  const calls = topics.filter((topic) => topic.startsWith(CALL_TOPIC))
+  const frames = [topics.filter((topic) => !topic.startsWith(CALL_TOPIC))]
+  for (let at = 0; at < calls.length; at += MAX_CALL_TOPICS) frames.push(calls.slice(at, at + MAX_CALL_TOPICS))
+  return frames.filter((frame) => frame.length > 0)
+}
+
 /** The server's error messages for a check it would not run (backend `api/realtime.py`). */
 const CHECK_REFUSALS = ['a check needs', 'expected subscribe or unsubscribe']
 
@@ -222,8 +241,7 @@ export class RealtimeClient {
       this.fallbackTimer = undefined
       this.setStatus('live')
       this.touch()
-      const topics = [...this.listeners.keys()]
-      if (topics.length > 0) this.send({ type: 'subscribe', topics })
+      for (const topics of subscribeFrames([...this.listeners.keys()])) this.send({ type: 'subscribe', topics })
     }
     socket.onmessage = (message: MessageEvent) => {
       if (this.socket !== socket) return
