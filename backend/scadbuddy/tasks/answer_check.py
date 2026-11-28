@@ -1,4 +1,5 @@
-"""What an answer's scan and photo fields name (#8062): the checks that need the database.
+"""What an answer's scan, photo and library file fields name (#8062): the checks that need
+the database.
 `validate.py` has checked the answer against the schema first. A message never quotes the
 answer, and never says which of the reasons it is that a code is refused."""
 
@@ -37,6 +38,20 @@ def _coded_fields(schema: dict[str, Any]) -> dict[str, Expects]:
     return found
 
 
+def _library_fields(schema: dict[str, Any]) -> list[str]:
+    """The `entity` fields of kind `library_file`: their answer is a library file's id."""
+    properties = schema.get("properties")
+    if not isinstance(properties, dict):
+        return []
+    return [
+        name
+        for name, prop in properties.items()
+        if isinstance(prop, dict)
+        and prop.get("x-sb-widget") == "entity"
+        and prop.get("kind") == "library_file"
+    ]
+
+
 def _file_fields(schema: dict[str, Any]) -> list[str]:
     properties = schema.get("properties")
     if not isinstance(properties, dict):
@@ -69,8 +84,8 @@ def scan_and_file_problems(
 ) -> list[AnswerProblem]:
     """The scan fields, and the entity fields of a location or a spool, whose code is not
     one the question takes (it parses, is of a kind or is a code the field expects, and
-    names a row that is not archived), and the photo and file fields that are not an
-    attachment of this task."""
+    names a row that is not archived), the library file fields that name no library file
+    out of the trash, and the photo and file fields that are not an attachment of this task."""
     problems: list[AnswerProblem] = []
     for name, expects in _coded_fields(schema).items():
         value = answer.get(name)
@@ -84,6 +99,22 @@ def scan_and_file_problems(
         found = resolve(conn, code)
         if found is None or found.archived:
             problems.append(AnswerProblem(field=name, message="names nothing that is in use"))
+    for name in _library_fields(schema):
+        value = answer.get(name)
+        if not isinstance(value, str):
+            continue
+        live = (
+            value.isascii()
+            and value.isdigit()
+            and len(value) <= 18
+            and conn.execute(
+                "SELECT 1 FROM library_files WHERE id = %s AND deleted_at IS NULL",
+                (int(value),),
+            ).fetchone()
+            is not None
+        )
+        if not live:
+            problems.append(AnswerProblem(field=name, message="names no library file in use"))
     for name in _file_fields(schema):
         value = answer.get(name)
         if not isinstance(value, str):

@@ -1,5 +1,5 @@
 """Task screens (#8062): the filters that find a task by its scan code and its assignee,
-the server's check of scan and photo answers, and the entity kind `task`."""
+the server's check of scan, photo and library file answers, and the entity kind `task`."""
 
 from __future__ import annotations
 
@@ -200,12 +200,37 @@ def test_an_entity_field_is_offered_no_scan(client: TestClient, rows: Rows) -> N
     assert listed(client, "code=S-1") == []
 
 
-def test_a_library_file_entity_answer_is_not_a_code(
+def test_a_library_file_entity_answer_names_a_file_in_use(
     client: TestClient, rows: Rows, harness: Harness
 ) -> None:
     run_id, call_id = parked(client)
     add(rows, run_id, entity_schema("library_file"), task_id=call_id)
-    assert post(client, call_id, {"where": str(uuid.uuid4())}).status_code == 200
+    found = rows.conn.execute(
+        "INSERT INTO library_files (name, size, sha256, blob_key, media_type)"
+        " VALUES ('plate.3mf', 1, 'x', %s, 'model/3mf') RETURNING id",
+        (f"test/{uuid.uuid4()}",),
+    ).fetchone()
+    assert found is not None
+    file_id = str(found[0])
+
+    for key, bad in (
+        ("k1", str(uuid.uuid4())),
+        ("k2", "999"),
+        ("k3", "9" * 30),
+        ("k4", "L-1"),
+        ("k5", "\u0661\u0662"),
+    ):
+        refused = post(client, call_id, {"where": bad}, key)
+        assert refused.status_code == 422, refused.text
+        assert refused.json()["problems"] == [
+            {"field": "where", "message": "names no library file in use"}
+        ]
+    rows.conn.execute("UPDATE library_files SET deleted_at = now() WHERE id = %s", (found[0],))
+    assert post(client, call_id, {"where": file_id}, "k6").status_code == 422
+    assert harness.sends == []
+
+    rows.conn.execute("UPDATE library_files SET deleted_at = NULL WHERE id = %s", (found[0],))
+    assert post(client, call_id, {"where": file_id}, "k7").status_code == 200
 
 
 def test_list_by_place_folds_a_location_code(client: TestClient, rows: Rows) -> None:

@@ -117,6 +117,20 @@ describe('the station page', () => {
     await waitFor(() => expect(field).toHaveValue('S-1'))
   })
 
+  it('fills the first scan field when the server lists a task that no field fits', async () => {
+    const field = (title: string) => ({ type: 'string', title, 'x-sb-widget': 'scan', expects: { kinds: ['spool'] } })
+    addTask({ id: 'nofit', title: 'No fit', place: 'L-2', schema: { type: 'object', properties: { first: field('First'), second: field('Second') } } })
+    const listTasks = api.listTasks.bind(api)
+    // The server's rule lists the task; the page's own rule finds no field that fits L-2.
+    vi.spyOn(api, 'listTasks').mockImplementation(async (query) => listTasks({ ...query, code: undefined }))
+    const { user } = station()
+    await user.type(await screen.findByRole('textbox', { name: 'Scan a code' }), 'L-2{Enter}')
+    const mine = within(await screen.findByRole('region', { name: 'No fit' }))
+    await waitFor(() => expect(mine.getByRole('textbox', { name: /First/ })).toHaveValue('L-2'))
+    expect(mine.getByRole('textbox', { name: /Second/ })).toHaveValue('')
+    expect(await mine.findByText('Expected a spool')).toBeInTheDocument()
+  })
+
   it('never offers a scan to an entity field', async () => {
     addTask({
       id: 'ent',

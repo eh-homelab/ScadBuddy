@@ -372,8 +372,8 @@ only the sleeps move; a budget on the real clock fails on a slow runner (#6252).
   answer), `schema.py` (`prompt_schema_problems`: `core/input_schema.py` with `formats`),
   `validate.py` (`validate_answer`: its problems never quote a value), `widgets.py`
   (`x-sb-widget`, `expects` and the context blocks: `widget_problems`, `context_problems`,
-  `expects_entries`; no I/O, a workflow imports it), `answer_check.py` (the scan, photo and
-  file fields of an answer, which need the database), `store.py`
+  `expects_entries`; no I/O, a workflow imports it), `answer_check.py` (the scan, photo, file
+  and library file fields of an answer, which need the database), `store.py`
   (`TaskStore`, the table `tasks`), `component.py` (`TASKS`, `TasksDep`). Routes
   `api/tasks.py`: `GET /tasks` (`TaskQuestion`s, by `state`, `place`, `code` and `assignee=me`; a task keeps its
   scan fields' `expects` and its `assignee`), `GET /tasks/{id}` and `POST /tasks/{id}/answer`

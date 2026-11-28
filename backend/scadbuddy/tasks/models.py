@@ -71,7 +71,7 @@ def json_fits(value: Any) -> bool:
 TASK_TITLE_MAX = 500
 
 
-class _TaskFields(BaseModel):
+class TaskFields(BaseModel):
     model_config = ConfigDict(populate_by_name=True)
 
     #: The harness call id.
@@ -96,7 +96,7 @@ class _TaskFields(BaseModel):
     )
 
 
-class TaskOpen(_TaskFields):
+class TaskOpen(TaskFields):
     """What a flow gives to open a task. Only this way in checks the schema, so a stored
     row still reads when the rules tighten later. Its context and its schema nest at most
     `MAX_DEPTH` deep, counted without recursion."""
@@ -157,7 +157,7 @@ def open_problems(error: ValidationError) -> str:
     )
 
 
-class TaskQuestion(_TaskFields):
+class TaskQuestion(TaskFields):
     """A task without its answer, and without who gave it."""
 
     state: TaskState

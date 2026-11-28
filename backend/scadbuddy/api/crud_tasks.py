@@ -28,8 +28,8 @@ from scadbuddy.tasks.models import (
     MAX_BY_CHARS,
     MAX_JSON_BYTES,
     Task,
+    TaskFields,
     TaskOpen,
-    _TaskFields,
     json_fits,
 )
 from scadbuddy.tasks.store import (
@@ -51,7 +51,7 @@ _UUID = re.compile(UUID_PATTERN)
 router = crud_router("projects")
 
 
-class OpenWrite(_TaskFields):
+class OpenWrite(TaskFields):
     """A `TaskOpen`, which the route checks by the rules ``widgets`` names."""
 
     #: The rules of #8062: a schema's widget keys and the context's blocks. A worker from

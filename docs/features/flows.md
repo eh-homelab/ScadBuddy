@@ -92,7 +92,8 @@ the answer is still the type's value:
 A `scan` field may also have `expects`, with `kinds` (`spool`, `location`) and `codes` (such
 as `S-3`). The route refuses an answer whose code is none of them, or names an archived row
 (`backend/scadbuddy/tasks/answer_check.py`). It never says which of the reasons it is. An
-`entity` field of kind `location` or `spool` is checked the same way, as a scan of that kind. An
+`entity` field of kind `location` or `spool` is checked the same way, as a scan of that kind;
+one of kind `library_file` must name a library file that is not in the trash. An
 unknown `x-sb-widget` is logged and draws the plain control of the type. A widget on a type
 it does not fit, `kind` on a field that is not an `entity`, and `expects` on one that is not
 a `scan` are refused when the prompt opens (`widget_problems`). The inputs of a flow refuse
