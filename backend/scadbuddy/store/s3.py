@@ -333,11 +333,12 @@ class S3ContentBackend:
             # The key is the bytes' sha256: a second PUT writes the same object.
             await self._connect_retried("PutObject", put_bytes)
             return key
+        # Where the bytes start: each try starts there, and the stream is left there, so
+        # a caller that hands the same stream on (`ContentStore.put`) sends the same bytes.
+        start = data.tell()
         try:
             if size <= self.multipart_threshold:
                 stream = data
-                # Where the first try starts; each later try starts there again.
-                start = stream.tell()
 
                 async def put_file() -> None:
                     stream.seek(start)
@@ -351,7 +352,7 @@ class S3ContentBackend:
             else:
                 await self._multipart(client, key, data, kind)
         finally:
-            data.seek(0)
+            data.seek(start)
         return key
 
     async def _multipart(self, client: S3Client, key: str, data: BinaryIO, kind: str) -> None:
