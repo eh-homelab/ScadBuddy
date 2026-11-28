@@ -16,6 +16,7 @@ import { H2C, L, LK, seed, spoolId, type Catalogs, type Seed, type SpoolRow } fr
 import { jobOf } from '../../../components/filament/eventText'
 import { CATALOGS } from '../../../components/filament/catalogs'
 import { checksSave, marksOf, rowPropertiesRefusal, saveRowProperties } from '../entities'
+import { kindByNumber } from '../inventory'
 
 type S = components['schemas']
 
@@ -2081,6 +2082,11 @@ export function resolveCodeText(text: string): S['Resolved'] | null {
   if (parsed.prefix === 'S') {
     const row = state.spools.find((one) => one.number === parsed.number)
     return row ? resolvedSpool(row) : null
+  }
+  if (parsed.prefix === 'K') {
+    // An item kind resolves by its text id (#6949, the owner's kind numbers of 2026-11-27).
+    const kind = kindByNumber(parsed.number)
+    return kind ? { kind: 'item_kind', id: kind.id, code: `K-${kind.number}`, name: kind.name, archived: !!kind.archived_at } : null
   }
   return null
 }

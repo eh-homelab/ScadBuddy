@@ -137,10 +137,11 @@ func number(v Value) (float64, bool) {
 	return 0, false
 }
 
-// NotifyOnly says whether the kind is one only the agent NOTIFYs and the log never holds
+// NotifyOnly says whether the kind is one only the agent or scadbuddy-core NOTIFYs and the log never holds
 // (agent_changes/hub.py NOTIFY_ONLY): its change frame carries no id.
 func (e *Event) NotifyOnly() bool {
-	return !e.Opaque && (strings.HasPrefix(e.Kind, "session.") || e.Kind == "ai_operation.changed")
+	return !e.Opaque && (strings.HasPrefix(e.Kind, "session.") ||
+		e.Kind == "ai_operation.changed" || e.Kind == "inventory_operation.changed")
 }
 
 // Encoded is core/events.py encode_event of the event: a typed one as pydantic's

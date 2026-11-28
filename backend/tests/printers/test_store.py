@@ -774,8 +774,8 @@ def test_ids_are_uuids_and_a_malformed_id_is_not_found(printers: PrinterStore) -
 
 def test_every_reference_to_a_printer_is_merged(pg_pool: PgPool) -> None:
     """I7: every foreign key to `printers.id` is in `PRINTER_REFERENCES`, so a merge
-    repoints it. A table that names a printer without one (Task 8's activity
-    attribution) must add itself too."""
+    repoints it, but the stock's, which Go repoints. A table that names a printer without
+    one (Task 8's activity attribution) must add itself too."""
     with pg_pool.connection() as conn:
         rows = conn.execute(
             "SELECT cl.relname AS t, a.attname AS c FROM pg_constraint co"
@@ -788,7 +788,9 @@ def test_every_reference_to_a_printer_is_merged(pg_pool: PgPool) -> None:
     listed = {
         (ref.table, ref.column) for ref in PRINTER_REFERENCES if isinstance(ref, PrinterReference)
     }
-    assert fks <= listed
+    # Go writes the stock rows: its `inventory.Repoint` moves a unit's printer before the
+    # merge commits (`MergePrinter`, #6949 K1 Task 16; `tests/printers/test_merge_stock.py`).
+    assert fks - {("stock_units", "printer_id")} <= listed
 
 
 def test_a_synthetic_row_merges_into_the_row_holding_the_serial(
@@ -812,33 +814,6 @@ def test_a_synthetic_row_merges_into_the_row_holding_the_serial(
     assert printers.get(synthetic.id) is None
     assert reports.get(mine.id) is not None and reports.get(synthetic.id) is None
     assert set(bus.changed()) == {synthetic.id, mine.id}
-
-
-def test_a_merge_moves_a_stock_unit_to_the_kept_printer(
-    printers: PrinterStore, pg_pool: PgPool
-) -> None:
-    """#7067: `stock_units.printer_id` names the printer a unit is; a merge repoints it."""
-    synthetic = printers.ensure_bambuddy(4, serial=None, name="H2C", model="H2C", by=MERGED_BY)
-    with pg_pool.connection() as conn:
-        item = conn.execute(
-            "INSERT INTO items (kind_id, name) VALUES ('printer', 'H2C') RETURNING id"
-        ).fetchone()
-        assert item is not None
-        unit = conn.execute(
-            "INSERT INTO stock_units (item_id, printer_id, cost_minor, origin, created_by)"
-            " VALUES (%s, %s, 0, 'manual', '{}') RETURNING id",
-            (item["id"], synthetic.id),
-        ).fetchone()
-        assert unit is not None
-    mine = printers.create(PrinterCreate(serial=SERIAL, name="Mine"))
-
-    printers.ensure_bambuddy(4, serial=SERIAL, name="H2C", model="H2C", by=MERGED_BY)
-
-    with pg_pool.connection() as conn:
-        row = conn.execute(
-            "SELECT printer_id FROM stock_units WHERE id = %s", (unit["id"],)
-        ).fetchone()
-    assert row is not None and str(row["printer_id"]) == mine.id
 
 
 def test_a_merge_drops_the_gone_printers_override_slots_and_keeps_the_kept_ones(

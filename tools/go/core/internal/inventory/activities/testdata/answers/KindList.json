@@ -1,0 +1,790 @@
+{
+  "kinds": [
+    {
+      "archived_at": null,
+      "attribute_schema": {
+        "properties": {},
+        "type": "object"
+      },
+      "billing": null,
+      "builtin": true,
+      "code": "K-1",
+      "counting": "lot",
+      "id": "ams_part",
+      "incomplete_steps": [],
+      "item_count": 0,
+      "life_basis": "none",
+      "name": "AMS part",
+      "nature": null,
+      "number": 1,
+      "parent_id": "consumable",
+      "role": null,
+      "saleable": false,
+      "special_type": null,
+      "steps": {},
+      "tracking": "lot",
+      "uom": "each"
+    },
+    {
+      "archived_at": null,
+      "attribute_schema": {
+        "properties": {},
+        "type": "object"
+      },
+      "billing": null,
+      "builtin": true,
+      "code": "K-2",
+      "counting": "lot",
+      "id": "assembly",
+      "incomplete_steps": [],
+      "item_count": 0,
+      "life_basis": "none",
+      "name": "Assembly",
+      "nature": null,
+      "number": 2,
+      "parent_id": "consumable",
+      "role": null,
+      "saleable": true,
+      "special_type": null,
+      "steps": {},
+      "tracking": "lot",
+      "uom": "each"
+    },
+    {
+      "archived_at": null,
+      "attribute_schema": {
+        "properties": {},
+        "type": "object"
+      },
+      "billing": null,
+      "builtin": true,
+      "code": "K-3",
+      "counting": null,
+      "id": "belt",
+      "incomplete_steps": [],
+      "item_count": 0,
+      "life_basis": "hours",
+      "name": "Belt",
+      "nature": null,
+      "number": 3,
+      "parent_id": "part",
+      "role": null,
+      "saleable": false,
+      "special_type": null,
+      "steps": {
+        "life": {
+          "handler": "life.hours",
+          "params": {
+            "hours": 3000,
+            "source": "container_run_hours"
+          }
+        }
+      },
+      "tracking": "unit",
+      "uom": "each"
+    },
+    {
+      "archived_at": null,
+      "attribute_schema": {
+        "properties": {
+          "thread": {
+            "type": "string"
+          }
+        },
+        "type": "object"
+      },
+      "billing": null,
+      "builtin": false,
+      "code": "K-28",
+      "counting": null,
+      "id": "bolt",
+      "incomplete_steps": [],
+      "item_count": 0,
+      "life_basis": "none",
+      "name": "Bolt",
+      "nature": null,
+      "number": 28,
+      "parent_id": "fastener",
+      "role": null,
+      "saleable": false,
+      "special_type": null,
+      "steps": {},
+      "tracking": "lot",
+      "uom": "each"
+    },
+    {
+      "archived_at": null,
+      "attribute_schema": {
+        "properties": {},
+        "type": "object"
+      },
+      "billing": null,
+      "builtin": true,
+      "code": "K-4",
+      "counting": null,
+      "id": "build_plate",
+      "incomplete_steps": [],
+      "item_count": 0,
+      "life_basis": "none",
+      "name": "Build plate",
+      "nature": null,
+      "number": 4,
+      "parent_id": "part",
+      "role": null,
+      "saleable": false,
+      "special_type": null,
+      "steps": {
+        "life": {
+          "handler": "life.uses",
+          "params": {
+            "uses": 1000,
+            "warn_pct": 90
+          }
+        }
+      },
+      "tracking": "unit",
+      "uom": "each"
+    },
+    {
+      "archived_at": null,
+      "attribute_schema": {
+        "properties": {},
+        "type": "object"
+      },
+      "billing": null,
+      "builtin": true,
+      "code": "K-5",
+      "counting": null,
+      "id": "consumable",
+      "incomplete_steps": [],
+      "item_count": 0,
+      "life_basis": "none",
+      "name": "Consumable",
+      "nature": "physical",
+      "number": 5,
+      "parent_id": null,
+      "role": "consumable",
+      "saleable": false,
+      "special_type": null,
+      "steps": {},
+      "tracking": "lot",
+      "uom": "each"
+    },
+    {
+      "archived_at": null,
+      "attribute_schema": {
+        "properties": {},
+        "type": "object"
+      },
+      "billing": null,
+      "builtin": true,
+      "code": "K-6",
+      "counting": "lot",
+      "id": "desiccant",
+      "incomplete_steps": [],
+      "item_count": 0,
+      "life_basis": "none",
+      "name": "Desiccant",
+      "nature": null,
+      "number": 6,
+      "parent_id": "consumable",
+      "role": null,
+      "saleable": false,
+      "special_type": null,
+      "steps": {},
+      "tracking": "lot",
+      "uom": "g"
+    },
+    {
+      "archived_at": null,
+      "attribute_schema": {
+        "properties": {},
+        "type": "object"
+      },
+      "billing": null,
+      "builtin": true,
+      "code": "K-7",
+      "counting": null,
+      "id": "dry_bin",
+      "incomplete_steps": [],
+      "item_count": 0,
+      "life_basis": "months",
+      "name": "Dry bin",
+      "nature": null,
+      "number": 7,
+      "parent_id": "equipment",
+      "role": null,
+      "saleable": false,
+      "special_type": null,
+      "steps": {},
+      "tracking": "unit",
+      "uom": "each"
+    },
+    {
+      "archived_at": null,
+      "attribute_schema": {
+        "properties": {},
+        "type": "object"
+      },
+      "billing": null,
+      "builtin": true,
+      "code": "K-21",
+      "counting": "unit",
+      "id": "durable",
+      "incomplete_steps": [],
+      "item_count": 0,
+      "life_basis": "none",
+      "name": "Durable",
+      "nature": "physical",
+      "number": 21,
+      "parent_id": null,
+      "role": "durable",
+      "saleable": false,
+      "special_type": null,
+      "steps": {},
+      "tracking": "unit",
+      "uom": "each"
+    },
+    {
+      "archived_at": null,
+      "attribute_schema": {
+        "properties": {},
+        "type": "object"
+      },
+      "billing": null,
+      "builtin": true,
+      "code": "K-8",
+      "counting": null,
+      "id": "equipment",
+      "incomplete_steps": [],
+      "item_count": 0,
+      "life_basis": "months",
+      "name": "Equipment",
+      "nature": null,
+      "number": 8,
+      "parent_id": "durable",
+      "role": null,
+      "saleable": false,
+      "special_type": null,
+      "steps": {
+        "life": {
+          "handler": "life.months",
+          "params": {
+            "months": 60
+          }
+        }
+      },
+      "tracking": "unit",
+      "uom": "each"
+    },
+    {
+      "archived_at": null,
+      "attribute_schema": {
+        "properties": {
+          "mpn": {
+            "type": "string"
+          }
+        },
+        "type": "object"
+      },
+      "billing": null,
+      "builtin": false,
+      "code": "K-27",
+      "counting": "lot",
+      "id": "fastener",
+      "incomplete_steps": [],
+      "item_count": 0,
+      "life_basis": "none",
+      "name": "Fastener",
+      "nature": null,
+      "number": 27,
+      "parent_id": "consumable",
+      "role": null,
+      "saleable": false,
+      "special_type": null,
+      "steps": {},
+      "tracking": "lot",
+      "uom": "each"
+    },
+    {
+      "archived_at": null,
+      "attribute_schema": {
+        "properties": {},
+        "type": "object"
+      },
+      "billing": null,
+      "builtin": true,
+      "code": "K-9",
+      "counting": "unit",
+      "id": "filament",
+      "incomplete_steps": [],
+      "item_count": 0,
+      "life_basis": "none",
+      "name": "Filament",
+      "nature": null,
+      "number": 9,
+      "parent_id": "consumable",
+      "role": null,
+      "saleable": false,
+      "special_type": "filament_spool",
+      "steps": {},
+      "tracking": "filament",
+      "uom": "g"
+    },
+    {
+      "archived_at": null,
+      "attribute_schema": {
+        "properties": {},
+        "type": "object"
+      },
+      "billing": "flat",
+      "builtin": true,
+      "code": "K-22",
+      "counting": null,
+      "id": "flat_service",
+      "incomplete_steps": [],
+      "item_count": 0,
+      "life_basis": "none",
+      "name": "Flat-rate service",
+      "nature": null,
+      "number": 22,
+      "parent_id": "service",
+      "role": null,
+      "saleable": false,
+      "special_type": null,
+      "steps": {},
+      "tracking": "none",
+      "uom": "each"
+    },
+    {
+      "archived_at": null,
+      "attribute_schema": {
+        "properties": {},
+        "type": "object"
+      },
+      "billing": null,
+      "builtin": true,
+      "code": "K-23",
+      "counting": "lot",
+      "id": "general_consumable",
+      "incomplete_steps": [],
+      "item_count": 0,
+      "life_basis": "none",
+      "name": "General consumable",
+      "nature": null,
+      "number": 23,
+      "parent_id": "consumable",
+      "role": null,
+      "saleable": false,
+      "special_type": null,
+      "steps": {},
+      "tracking": "lot",
+      "uom": "each"
+    },
+    {
+      "archived_at": null,
+      "attribute_schema": {
+        "properties": {},
+        "type": "object"
+      },
+      "billing": null,
+      "builtin": true,
+      "code": "K-10",
+      "counting": "lot",
+      "id": "hardware",
+      "incomplete_steps": [],
+      "item_count": 0,
+      "life_basis": "none",
+      "name": "Hardware",
+      "nature": null,
+      "number": 10,
+      "parent_id": "consumable",
+      "role": null,
+      "saleable": false,
+      "special_type": null,
+      "steps": {},
+      "tracking": "lot",
+      "uom": "each"
+    },
+    {
+      "archived_at": null,
+      "attribute_schema": {
+        "properties": {},
+        "type": "object"
+      },
+      "billing": null,
+      "builtin": true,
+      "code": "K-11",
+      "counting": null,
+      "id": "hotend",
+      "incomplete_steps": [],
+      "item_count": 0,
+      "life_basis": "hours",
+      "name": "Hotend",
+      "nature": null,
+      "number": 11,
+      "parent_id": "part",
+      "role": null,
+      "saleable": false,
+      "special_type": null,
+      "steps": {
+        "life": {
+          "handler": "life.hours",
+          "params": {
+            "hours": 2000,
+            "source": "container_run_hours"
+          }
+        }
+      },
+      "tracking": "unit",
+      "uom": "each"
+    },
+    {
+      "archived_at": null,
+      "attribute_schema": {
+        "properties": {},
+        "type": "object"
+      },
+      "billing": "hourly",
+      "builtin": true,
+      "code": "K-24",
+      "counting": null,
+      "id": "labour",
+      "incomplete_steps": [],
+      "item_count": 0,
+      "life_basis": "none",
+      "name": "Labour",
+      "nature": null,
+      "number": 24,
+      "parent_id": "service",
+      "role": null,
+      "saleable": false,
+      "special_type": null,
+      "steps": {},
+      "tracking": "none",
+      "uom": "each"
+    },
+    {
+      "archived_at": null,
+      "attribute_schema": {
+        "properties": {},
+        "type": "object"
+      },
+      "billing": null,
+      "builtin": true,
+      "code": "K-12",
+      "counting": "lot",
+      "id": "lubricant",
+      "incomplete_steps": [],
+      "item_count": 0,
+      "life_basis": "none",
+      "name": "Lubricant",
+      "nature": null,
+      "number": 12,
+      "parent_id": "consumable",
+      "role": null,
+      "saleable": false,
+      "special_type": null,
+      "steps": {},
+      "tracking": "lot",
+      "uom": "ml"
+    },
+    {
+      "archived_at": null,
+      "attribute_schema": {
+        "properties": {},
+        "type": "object"
+      },
+      "billing": null,
+      "builtin": true,
+      "code": "K-13",
+      "counting": null,
+      "id": "nozzle",
+      "incomplete_steps": [],
+      "item_count": 0,
+      "life_basis": "hours",
+      "name": "Nozzle",
+      "nature": null,
+      "number": 13,
+      "parent_id": "part",
+      "role": null,
+      "saleable": false,
+      "special_type": null,
+      "steps": {
+        "life": {
+          "handler": "life.hours",
+          "params": {
+            "hours": 1000,
+            "source": "container_run_hours",
+            "warn_pct": 90
+          }
+        }
+      },
+      "tracking": "unit",
+      "uom": "each"
+    },
+    {
+      "archived_at": null,
+      "attribute_schema": {
+        "properties": {},
+        "type": "object"
+      },
+      "billing": null,
+      "builtin": true,
+      "code": "K-14",
+      "counting": "lot",
+      "id": "packaging",
+      "incomplete_steps": [],
+      "item_count": 0,
+      "life_basis": "none",
+      "name": "Packaging",
+      "nature": null,
+      "number": 14,
+      "parent_id": "consumable",
+      "role": null,
+      "saleable": false,
+      "special_type": null,
+      "steps": {},
+      "tracking": "lot",
+      "uom": "each"
+    },
+    {
+      "archived_at": null,
+      "attribute_schema": {
+        "properties": {},
+        "type": "object"
+      },
+      "billing": null,
+      "builtin": true,
+      "code": "K-15",
+      "counting": null,
+      "id": "part",
+      "incomplete_steps": [],
+      "item_count": 0,
+      "life_basis": "none",
+      "name": "Part",
+      "nature": null,
+      "number": 15,
+      "parent_id": "durable",
+      "role": null,
+      "saleable": false,
+      "special_type": null,
+      "steps": {},
+      "tracking": "unit",
+      "uom": "each"
+    },
+    {
+      "archived_at": null,
+      "attribute_schema": {
+        "properties": {},
+        "type": "object"
+      },
+      "billing": null,
+      "builtin": true,
+      "code": "K-16",
+      "counting": "lot",
+      "id": "printed_part",
+      "incomplete_steps": [],
+      "item_count": 0,
+      "life_basis": "none",
+      "name": "Printed part",
+      "nature": null,
+      "number": 16,
+      "parent_id": "consumable",
+      "role": null,
+      "saleable": true,
+      "special_type": null,
+      "steps": {},
+      "tracking": "lot",
+      "uom": "each"
+    },
+    {
+      "archived_at": null,
+      "attribute_schema": {
+        "properties": {},
+        "type": "object"
+      },
+      "billing": null,
+      "builtin": true,
+      "code": "K-17",
+      "counting": null,
+      "id": "printer",
+      "incomplete_steps": [],
+      "item_count": 0,
+      "life_basis": "hours",
+      "name": "Printer",
+      "nature": null,
+      "number": 17,
+      "parent_id": "durable",
+      "role": null,
+      "saleable": false,
+      "special_type": null,
+      "steps": {
+        "life": {
+          "handler": "life.hours",
+          "params": {
+            "hours": 10000,
+            "source": "own_run_hours"
+          }
+        }
+      },
+      "tracking": "unit",
+      "uom": "each"
+    },
+    {
+      "archived_at": null,
+      "attribute_schema": {
+        "properties": {},
+        "type": "object"
+      },
+      "billing": null,
+      "builtin": true,
+      "code": "K-18",
+      "counting": null,
+      "id": "service",
+      "incomplete_steps": [],
+      "item_count": 0,
+      "life_basis": "none",
+      "name": "Service",
+      "nature": "service",
+      "number": 18,
+      "parent_id": null,
+      "role": null,
+      "saleable": false,
+      "special_type": null,
+      "steps": {},
+      "tracking": "none",
+      "uom": "each"
+    },
+    {
+      "archived_at": null,
+      "attribute_schema": {
+        "properties": {},
+        "type": "object"
+      },
+      "billing": "term",
+      "builtin": true,
+      "code": "K-25",
+      "counting": null,
+      "id": "service_plan",
+      "incomplete_steps": [
+        "receive"
+      ],
+      "item_count": 0,
+      "life_basis": "none",
+      "name": "Service plan",
+      "nature": null,
+      "number": 25,
+      "parent_id": "service",
+      "role": null,
+      "saleable": false,
+      "special_type": null,
+      "steps": {
+        "life": {
+          "params": {
+            "warn_days": 30
+          }
+        }
+      },
+      "tracking": "none",
+      "uom": "each"
+    },
+    {
+      "archived_at": null,
+      "attribute_schema": {
+        "properties": {
+          "empty_weight_g": {
+            "description": "Weight of the empty part in grams",
+            "exclusiveMinimum": 0,
+            "type": "integer"
+          },
+          "role": {
+            "description": "A reusable shell, or an addon such as an AMS adaptor",
+            "enum": [
+              "shell",
+              "addon"
+            ],
+            "type": "string"
+          }
+        },
+        "type": "object"
+      },
+      "billing": null,
+      "builtin": true,
+      "code": "K-19",
+      "counting": null,
+      "id": "spool_part",
+      "incomplete_steps": [],
+      "item_count": 0,
+      "life_basis": "none",
+      "name": "Spool insert",
+      "nature": null,
+      "number": 19,
+      "parent_id": "durable",
+      "role": null,
+      "saleable": false,
+      "special_type": null,
+      "steps": {},
+      "tracking": "unit",
+      "uom": "each"
+    },
+    {
+      "archived_at": null,
+      "attribute_schema": {
+        "properties": {},
+        "type": "object"
+      },
+      "billing": null,
+      "builtin": true,
+      "code": "K-20",
+      "counting": null,
+      "id": "tool",
+      "incomplete_steps": [],
+      "item_count": 0,
+      "life_basis": "months",
+      "name": "Tool",
+      "nature": null,
+      "number": 20,
+      "parent_id": "equipment",
+      "role": null,
+      "saleable": false,
+      "special_type": null,
+      "steps": {},
+      "tracking": "unit",
+      "uom": "each"
+    },
+    {
+      "archived_at": null,
+      "attribute_schema": {
+        "properties": {},
+        "type": "object"
+      },
+      "billing": "term",
+      "builtin": true,
+      "code": "K-26",
+      "counting": null,
+      "id": "warranty",
+      "incomplete_steps": [
+        "receive"
+      ],
+      "item_count": 0,
+      "life_basis": "none",
+      "name": "Warranty",
+      "nature": null,
+      "number": 26,
+      "parent_id": "service",
+      "role": null,
+      "saleable": false,
+      "special_type": null,
+      "steps": {
+        "life": {
+          "params": {
+            "warn_days": 30
+          }
+        }
+      },
+      "tracking": "none",
+      "uom": "each"
+    }
+  ]
+}

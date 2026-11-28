@@ -55,6 +55,7 @@ describe('inventory tools', () => {
         ],
       ],
       inventory_item_list: ['read', ['GET /api/v1/inventory/items']],
+      inventory_operation_get: ['read', ['GET /api/v1/inventory/operations/{operation_id}']],
       inventory_item_get: [
         'read',
         [
@@ -113,10 +114,11 @@ describe('inventory tools', () => {
     expect(tool('inventory_item_list').description).toContain('until inventory_lot_recost')
     expect(tool('inventory_lot_recost').description).toMatch(/past order/)
     expect(tool('inventory_unit_status').description).toContain('`kind:ref`')
-    for (const t of ALL_TOOLS.filter((x) => x.name.startsWith('inventory_'))) expect(t.description, t.name).toContain('ui_path')
+    // An operation's answer is a status record, with no item or lot page of its own.
+    for (const t of ALL_TOOLS.filter((x) => x.name.startsWith('inventory_') && x.name !== 'inventory_operation_get')) expect(t.description, t.name).toContain('ui_path')
   })
 
-  it('adds an item, then sets its properties in one PATCH, and answers both with its page', async () => {
+  it('adds an item with its properties in the same request, and answers it with its page (R-K1-33)', async () => {
     const calls: string[] = []
     server.use(
       http.post(`${INV}/items`, async ({ request }) => {
@@ -125,49 +127,60 @@ describe('inventory tools', () => {
       }),
       http.patch(props, async ({ request }) => {
         calls.push(`PATCH props ${JSON.stringify(await request.json())}`)
-        return HttpResponse.json({ properties: [{ key: 'thread', value: 'M3', source: 'manual' }] })
+        return HttpResponse.json({ properties: [] })
       }),
     )
     const answer = firstText(
       await runTool(tool('inventory_item_upsert'), { fields: { kind_id: 'hardware', name: 'M3 nut' }, properties: { thread: 'M3' } }, ctx()),
     )
-    expect(calls).toEqual(['POST item {"kind_id":"hardware","name":"M3 nut"}', 'PATCH props {"set":{"thread":"M3"}}'])
-    expect(answer).toMatchObject({
-      id: ITEM,
-      ui_path: `/inventory/items/${ITEM}`,
-      kind_ui_path: '/inventory?kind=hardware',
-      properties: [{ key: 'thread', value: 'M3' }],
-    })
+    expect(calls).toEqual(['POST item {"kind_id":"hardware","name":"M3 nut","properties":{"thread":"M3"}}'])
+    expect(answer).toMatchObject({ id: ITEM, ui_path: `/inventory/items/${ITEM}`, kind_ui_path: '/inventory?kind=hardware' })
   })
 
-  it('reports a saved item and the backend reason when its properties are refused', async () => {
+  it('edits fields and properties in one PATCH', async () => {
+    const calls: string[] = []
     server.use(
-      http.post(`${INV}/items`, () => HttpResponse.json(item(), { status: 201 })),
-      http.patch(props, () =>
+      http.patch(`${INV}/items/${ITEM}`, async ({ request }) => {
+        calls.push(`PATCH item ${JSON.stringify(await request.json())}`)
+        return HttpResponse.json(item())
+      }),
+    )
+    await runTool(tool('inventory_item_upsert'), { item_id: ITEM, fields: { name: 'M3 nut' }, properties: { thread: null } }, ctx())
+    expect(calls).toEqual(['PATCH item {"name":"M3 nut","properties":{"thread":null}}'])
+  })
+
+  it('names each missing and ill-fitting key when a required property is missing, and says nothing was written', async () => {
+    server.use(
+      http.post(`${INV}/items`, () =>
         HttpResponse.json(
-          { type: 'https://scadbuddy.dev/problems/entities/bad_property_value', title: 'Bad value', status: 422, detail: 'thread: not a number' },
+          {
+            type: 'https://scadbuddy.dev/problems/entities/missing_required_properties',
+            title: 'Unprocessable Content',
+            status: 422,
+            detail: 'missing required properties: material',
+            code: 'missing_required_properties',
+            missing: ['material'],
+            invalid: [{ key: 'thread', reason: "does not fit 'type'" }],
+          },
           { status: 422 },
         ),
       ),
     )
     const err = await tool('inventory_item_upsert')
-      .execute({ fields: { kind_id: 'hardware', name: 'M3 nut' }, properties: { thread: 'M3' } }, ctx())
+      .execute({ fields: { kind_id: 'strict', name: 'M3 nut' }, properties: { thread: 3 } }, ctx())
       .catch((e: unknown) => e)
     expect(err).toBeInstanceOf(ToolError)
-    expect((err as ToolError).message).toContain(`inventory item ${ITEM} was saved; its properties were not`)
-    expect((err as ToolError).message).toContain('entity_property_set')
-    expect((err as ToolError).status).toBe(422)
-    expect((err as ToolError).problem).toBe('bad_property_value')
-    expect((err as ToolError).untrusted).toBe('Bad value: thread: not a number')
+    expect((err as ToolError).message).toContain('missing: material')
+    expect((err as ToolError).message).toContain('values that do not fit: thread')
+    expect((err as ToolError).message).toContain('Nothing was written')
+    expect((err as ToolError).problem).toBe('missing_required_properties')
+  })
 
-    const run = await runTool(tool('inventory_item_upsert'), { fields: { kind_id: 'hardware', name: 'M3 nut' }, properties: { thread: 'M3' } }, ctx())
-    expect(run.isError).toBe(true)
-    const shown = (run.content[0] as { text: string }).text
-    const envelope = shown.indexOf('"untrusted_data"')
-    expect(shown.slice(0, envelope)).toContain(`inventory item ${ITEM} was saved`)
-    expect(envelope).toBeGreaterThan(0)
-    expect(shown.slice(envelope)).toContain('thread: not a number')
-    expect(shown.slice(0, envelope)).not.toContain('thread: not a number')
+  it('says in its description that a missing required key writes nothing', () => {
+    const text = tool('inventory_item_upsert').description
+    expect(text).toMatch(/missing_required_properties/)
+    expect(text).toMatch(/writes nothing/)
+    expect(text).not.toMatch(/set on the item after it is saved/)
   })
 
   it('says nothing was saved when a properties-only edit is refused', async () => {
@@ -239,6 +252,20 @@ describe('inventory tools', () => {
     expect((answer as { moves: Record<string, unknown>[] }).moves[0]).not.toHaveProperty('ui_path')
   })
 
+  it('reads a write that answered 202 by its operation id, in each of its three states', async () => {
+    const OP = 'req:7c1a0000-0000-4000-8000-000000000001'
+    const answers = [
+      { id: OP, status: 'running' },
+      { id: OP, status: 'succeeded', result: { id: ITEM, name: 'M3 nut' } },
+      { id: OP, status: 'failed', error: { status: 409, title: 'item_exists' } },
+    ]
+    server.use(http.get(`${INV}/operations/${encodeURIComponent(OP)}`, () => HttpResponse.json(answers.shift())))
+    const read = async () => firstText(await runTool(tool('inventory_operation_get'), { operation_id: OP }, ctx()))
+    expect(await read()).toMatchObject({ status: 'running' })
+    expect(await read()).toMatchObject({ status: 'succeeded', result: { id: ITEM } })
+    expect(await read()).toMatchObject({ status: 'failed', error: { title: 'item_exists' } })
+  })
+
   it("reads a unit item's units, and nothing of stock for a kind that is not counted", async () => {
     server.use(
       http.get(`${INV}/units/${UNIT}`, () => HttpResponse.json({ id: UNIT, item_id: ITEM, status: 'in_stock' })),
@@ -299,6 +326,21 @@ describe('inventory tools', () => {
     })
   })
 
+  it('adds a numbered kind when no kind_id is given, and names the k-and-digits refusal', async () => {
+    const posted: unknown[] = []
+    server.use(
+      http.post(`${INV}/kinds`, async ({ request }) => {
+        posted.push(await request.clone().json())
+        return HttpResponse.json({ id: 'k31', number: 31, code: 'K-31' }, { status: 201 })
+      }),
+    )
+    const made = firstText(await runTool(tool('inventory_kind_upsert'), { create: true, fields: { name: 'Bearing', tracking: 'lot' } }, ctx()))
+    expect(posted).toEqual([{ name: 'Bearing', tracking: 'lot' }])
+    expect(made).toMatchObject({ id: 'k31', code: 'K-31' })
+    await expect(tool('inventory_kind_upsert').execute({ fields: { name: 'B' } }, ctx())).rejects.toThrow('kind_id')
+    expect(tool('inventory_kind_upsert').description).toContain('`k` and digits')
+  })
+
   it('adds, edits, archives and restores a kind', async () => {
     const calls: string[] = []
     const kind = (request: Request, what: string) => {
@@ -325,6 +367,31 @@ describe('inventory tools', () => {
     await expect(
       tool('inventory_kind_upsert').execute({ kind_id: 'bearing', create: true, fields: { name: 'B', tracking: 'lot' }, archived: false }, ctx()),
     ).rejects.toThrow('archived')
+  })
+
+  it("sends each write of a call its own Idempotency-Key, and a retried call's the same (#6949 K1)", async () => {
+    const keys: string[] = []
+    const kind = (request: Request) => {
+      keys.push(`${new URL(request.url).pathname} ${request.headers.get('Idempotency-Key')}`)
+      return HttpResponse.json({ id: 'bearing' })
+    }
+    server.use(
+      http.patch(`${INV}/kinds/bearing`, ({ request }) => kind(request)),
+      http.post(`${INV}/kinds/bearing/archive`, ({ request }) => kind(request)),
+      http.post(`${INV}/items/${ITEM}/use`, ({ request }) => kind(request)),
+    )
+    const call = { ...ctx(), callKey: 'session-1:tool-1' }
+    const edit = { kind_id: 'bearing', fields: { parent_id: null }, archived: true }
+    await runTool(tool('inventory_kind_upsert'), edit, call)
+    await runTool(tool('inventory_kind_upsert'), edit, call)
+    await runTool(tool('inventory_move_use'), { item_id: ITEM, qty: '1' }, { ...ctx(), callKey: 'session-1:tool-2' })
+    const [patch, archive, again, archiveAgain, use] = keys
+    expect(patch).toMatch(/^\/api\/v1\/inventory\/kinds\/bearing [0-9a-f]{64}:edit$/)
+    expect(archive).toMatch(/^\/api\/v1\/inventory\/kinds\/bearing\/archive [0-9a-f]{64}:archive$/)
+    expect(patch!.split(' ')[1]!.split(':')[0]).toBe(archive!.split(' ')[1]!.split(':')[0])
+    expect([again, archiveAgain]).toEqual([patch, archive])
+    expect(use).toMatch(/ [0-9a-f]{64}:use$/)
+    expect(use!.split(' ')[1]!.split(':')[0]).not.toBe(patch!.split(' ')[1]!.split(':')[0])
   })
 
   it('archives and restores an item', async () => {
@@ -420,6 +487,37 @@ describe('inventory tools', () => {
     expect(() => tool('inventory_item_upsert').parse({ item_id: ITEM, fields: { life_hours: 0 } })).toThrow()
     await expect(tool('inventory_move_count').execute({ item_id: ITEM, lot_id: LOT, on_hand: 1, note: 'x' }, ctx())).rejects.toThrow('one of')
     await expect(tool('inventory_lot_update').execute({ lot_id: LOT }, ctx())).rejects.toThrow('nothing to change')
+  })
+
+  it('says a write past the wait still runs, names its operation and sends it once (#6949 K1)', async () => {
+    let uses = 0
+    let patches = 0
+    const accepted = (id: string) =>
+      HttpResponse.json({ id, kind: 'inventory.Take', subject: `item:${ITEM}`, status: 'running', created_at: '2026-11-26T12:00:00Z', repeated: false }, { status: 202 })
+    server.use(
+      http.post(`${INV}/items/${ITEM}/use`, () => (uses++, accepted('req:op-1'))),
+      http.post(`${INV}/items`, () => accepted('req:op-2')),
+      http.patch(props, () => (patches++, HttpResponse.json({ properties: [] }))),
+    )
+
+    const used = firstText(await runTool(tool('inventory_move_use'), { item_id: ITEM, qty: '2' }, ctx()))
+    const made = firstText(await runTool(tool('inventory_item_upsert'), { fields: { kind_id: 'hardware', name: 'M3 nut' }, properties: { thread: 'M3' } }, ctx()))
+
+    expect(used).toMatchObject({ still_running: true, operation_id: 'req:op-1' })
+    expect((used as { note: string }).note).toContain('still running, operation req:op-1')
+    expect(uses).toBe(1)
+    expect(made).toMatchObject({ still_running: true, operation_id: 'req:op-2' })
+    expect((made as { note: string }).note).not.toContain('The properties were not set')
+    expect(patches).toBe(0)
+  })
+
+  it("names Go's codes for a stock call on the wrong item", () => {
+    expect(tool('inventory_lot_receive').description).toContain('`wrong_counting`')
+    expect(tool('inventory_lot_receive').description).toContain('`step_not_applicable`')
+    expect(tool('inventory_unit_receive').description).toContain('`wrong_counting`')
+    for (const t of ALL_TOOLS.filter((x) => x.name.startsWith('inventory_'))) {
+      expect(t.description, t.name).not.toMatch(/wrong_tracking|item_not_counted/)
+    }
   })
 
   it('receives units, edits one and changes its status', async () => {

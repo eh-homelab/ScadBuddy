@@ -6,6 +6,7 @@ import { takeSnapshot } from '../../agent/snapshot'
 import { PROBE_FAILED, UNREACHABLE, printersState, setLanLinked } from '../../mocks/features/printers'
 import { emitRealtime } from '../../mocks/realtime'
 import { server } from '../../mocks/server'
+import { stockFollow } from '../../api/client'
 import { renderPage } from '../../test/utils'
 import { choose } from '../../test/select'
 import { SIGNAL_READ_MIN_MS } from '../../lib/useAsync'
@@ -104,6 +105,34 @@ describe('PrintersPanel (#3823)', () => {
 
     await user.click(within(garage).getByRole('button', { name: 'Unlink Bambuddy from Garage' }))
     await waitFor(() => expect(garage).toHaveTextContent('Not linked to Bambuddy'))
+  })
+
+  // #6949 K1 Task 16, fix round 1: a link whose merge moves stock answers 202; the panel says
+  // it still works and sends the link again (same key) until the row comes back.
+  it('follows a link that answers 202 until the merge ends', async () => {
+    stockFollow.intervalMs = 1
+    const keys: (string | null)[] = []
+    let release = () => {}
+    const held = new Promise<void>((resolve) => (release = resolve))
+    server.use(
+      http.put('/api/v1/printers/:id/bambuddy', async ({ request }) => {
+        keys.push(request.headers.get('Idempotency-Key'))
+        if (keys.length === 1) return HttpResponse.json({ workflow_id: 'entity_merge:printer:a:b', kind: 'MergePrinter', started_at: '2026-11-27T00:00:00Z', repeated: false }, { status: 202 })
+        await held
+        return undefined
+      }),
+    )
+    const { user } = renderPage(<PrintersPanel />)
+    const garage = await screen.findByRole('listitem', { name: GARAGE })
+
+    await user.click(await within(garage).findByRole('button', { name: 'Link Bambuddy printer 3DP-77A-114' }))
+
+    expect(await within(garage).findByText(/Still working/)).toBeInTheDocument()
+    release()
+    await waitFor(() => expect(garage).toHaveTextContent('Bambuddy printer 2'))
+    expect(within(garage).queryByText(/Still working/)).toBeNull()
+    expect(keys.length).toBe(2)
+    expect(keys[1]).toBe(keys[0])
   })
 
   it('links a LAN printer and never shows the code again', async () => {

@@ -674,6 +674,10 @@ class Settings(BaseSettings):
     # 3dfilamentprofiles.com, through its browser service (#6780); the API starts
     # `ProfileFetch` on it.
     temporal_task_queue_profile_fetch: str = "profile-fetch"
+    # SCADBUDDY_TEMPORAL_TASK_QUEUE_INVENTORY: where scadbuddy-core's worker serves the
+    # inventory's writes as activities (#6949 K1, design §6.1a); the API starts each write
+    # of a person or the agent on it (`inventory/core_client.py`).
+    temporal_task_queue_inventory: str = "inventory"
     # The nozzle diameters one profile fetch exports for each printer model (#6625), each
     # one of the resolver's sizes. A JSON list: SCADBUDDY_PROFILE_FETCH_NOZZLES='["0.4"]'.
     profile_fetch_nozzles: list[NozzleSize] = Field(
@@ -713,6 +717,12 @@ class Settings(BaseSettings):
     # worker reads its store settings through (#5298). Also the base the API mints the
     # native slicer's transfer URLs under (`slicing/transfer.py`, #3822).
     api_internal_url: str | None = None
+    # SCADBUDDY_CORE_CRUD_URL: scadbuddy-core's CRUD port in the API's own pod, with the
+    # API prefix (`http://127.0.0.1:8082/api/v1`): the inventory's reads go to its routes
+    # (#6949 K1, R-K1-4). Unset, every inventory kind, item and stock read and the
+    # operation read answer 503 `inventory_unavailable`: Go is the one writer, so Python
+    # has no fallback.
+    core_crud_url: str | None = None
     # SCADBUDDY_CAMERA_EDGE_WHEP_URL (camera live view): the live edge's cluster-internal
     # WHEP URL (MediaMTX's WebRTC port, :8889), which the API proxies the browser's WHEP to.
     # SCADBUDDY_CAMERA_EDGE_HLS_URL: its LL-HLS URL (:8888). The edge's read user,
@@ -737,6 +747,16 @@ class Settings(BaseSettings):
         parts = urlsplit(value)
         if parts.scheme not in {"http", "https"} or not parts.netloc:
             raise ValueError(f"SCADBUDDY_API_INTERNAL_URL must be an http(s) URL, not {value!r}")
+        return value
+
+    @field_validator("core_crud_url")
+    @classmethod
+    def _core_crud_url_is_http(cls, value: str | None) -> str | None:
+        if value is None or not value.strip():
+            return None
+        parts = urlsplit(value)
+        if parts.scheme != "http" or not parts.netloc:
+            raise ValueError(f"SCADBUDDY_CORE_CRUD_URL must be an http:// URL, not {value!r}")
         return value
 
     @field_validator("camera_edge_whep_url", "camera_edge_hls_url")
@@ -804,6 +824,7 @@ class Settings(BaseSettings):
         "temporal_task_queue_slicer",
         "temporal_task_queue_customer_files",
         "temporal_task_queue_profile_fetch",
+        "temporal_task_queue_inventory",
     )
     @classmethod
     def _temporal_without_whitespace(cls, value: str, info: ValidationInfo) -> str:
@@ -1143,6 +1164,14 @@ BOOTSTRAP_FIELDS: Final[Mapping[str, str]] = MappingProxyType(
         "temporal_task_queue_profile_fetch": (
             "Paired with the Temporal address: the API starts profile fetches on it, and the"
             " profile-fetch worker must name the same queue."
+        ),
+        "temporal_task_queue_inventory": (
+            "Paired with the Temporal address: the API starts the inventory's writes on it,"
+            " and scadbuddy-core's worker must name the same queue."
+        ),
+        "core_crud_url": (
+            "Where the API reaches scadbuddy-core's CRUD port in its own pod, which the"
+            " deployment lays out."
         ),
         "temporal_task_queue_agent_tools": (
             "Paired with the agent service's worker, which serves its tools on that queue."

@@ -136,7 +136,7 @@ var teapot = http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { w.W
 func TestThePresetsRoutesUseTheGate(t *testing.T) {
 	pool := testdb.New(t)
 	keys := presetKeys(t)
-	enforce, err := newRouter(pool, teapot, keys, filamentpresets.Area, "enforce", nil, nil, nil)
+	enforce, err := newRouter(pool, teapot, keys, filamentpresets.Area, "enforce", nil, nil, nil, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -145,7 +145,7 @@ func TestThePresetsRoutesUseTheGate(t *testing.T) {
 		t.Errorf("enforce, signed out: %d %s, Cache-Control %q", status, body, cache)
 	}
 	rec := recordTelemetry(t)
-	observe, err := newRouter(pool, teapot, keys, filamentpresets.Area, "observe", rec.tel.Meters, nil, nil)
+	observe, err := newRouter(pool, teapot, keys, filamentpresets.Area, "observe", nil, rec.tel.Meters, nil, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -163,7 +163,7 @@ func TestTheDetailReadsItsDocumentFromTheStore(t *testing.T) {
 	s3 := httptest.NewServer(store)
 	t.Cleanup(s3.Close)
 	id := keepPreset(t, pool, store, `{"name":"PLA","printhost_password":"p","nozzle_temperature":["220"]}`)
-	router, err := newRouter(pool, teapot, presetKeys(t), filamentpresets.Area, "", nil, presetEnv(s3.URL), nil)
+	router, err := newRouter(pool, teapot, presetKeys(t), filamentpresets.Area, "", nil, nil, presetEnv(s3.URL), nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -181,7 +181,7 @@ func TestTheDetailReadsItsDocumentFromTheStore(t *testing.T) {
 
 func TestAnUnswitchedPresetsAreaForwardsToNext(t *testing.T) {
 	pool := testdb.New(t)
-	router, err := newRouter(pool, teapot, presetKeys(t), "", "", nil, nil, nil)
+	router, err := newRouter(pool, teapot, presetKeys(t), "", "", nil, nil, nil, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -192,7 +192,7 @@ func TestAnUnswitchedPresetsAreaForwardsToNext(t *testing.T) {
 
 func TestTheAreaNeedsTheKEK(t *testing.T) {
 	pool := testdb.New(t)
-	_, err := newRouter(pool, teapot, nil, filamentpresets.Area, "", nil, nil, nil)
+	_, err := newRouter(pool, teapot, nil, filamentpresets.Area, "", nil, nil, nil, nil)
 	if err == nil || !strings.Contains(err.Error(), seal.Variable) {
 		t.Fatalf("%v", err)
 	}
@@ -200,7 +200,7 @@ func TestTheAreaNeedsTheKEK(t *testing.T) {
 
 func TestTheImportPostStillReachesPython(t *testing.T) {
 	pool := testdb.New(t)
-	router, err := newRouter(pool, teapot, presetKeys(t), filamentpresets.Area+", "+filamentpresets.Area, "", nil, nil, nil)
+	router, err := newRouter(pool, teapot, presetKeys(t), filamentpresets.Area+", "+filamentpresets.Area, "", nil, nil, nil, nil)
 	if err != nil {
 		t.Fatal(err)
 	}

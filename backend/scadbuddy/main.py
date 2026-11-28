@@ -138,6 +138,7 @@ from scadbuddy.flows.component import FLOWS
 from scadbuddy.flows.sweep import sweep_flow_runs, sweep_orphan_grants
 from scadbuddy.git_remote.component import GIT_REMOTE
 from scadbuddy.git_remote.push import PushError
+from scadbuddy.inventory.component import INVENTORY
 from scadbuddy.library.assets import referenced_asset_ids, stopped
 from scadbuddy.library.backfill import attach_backfills, attach_job_backfills, follow_backfills
 from scadbuddy.library.history import GitError
@@ -165,6 +166,7 @@ from scadbuddy.operations.store import OperationStore
 from scadbuddy.orders.archives import mirror_attempt, sweep_media
 from scadbuddy.orders.component import ORDERS
 from scadbuddy.orders.lifecycle import reap_quote_holds as reap_orphan_quote_holds
+from scadbuddy.orders.stock_activities import OrderStockSteps, order_stock_activities
 from scadbuddy.orders.storefront.prepare import prepare_activities, warm_unpriced
 from scadbuddy.orders.storefront.staged_files import staged_file_activities, sweep_staged
 from scadbuddy.orders.storefront.visitors import VisitorStore
@@ -185,6 +187,7 @@ from scadbuddy.printers.bambuddy_sync import (
     sync_printers,
 )
 from scadbuddy.printers.component import PRINTERS
+from scadbuddy.printers.merge_activities import merge_activities
 from scadbuddy.printers.native import LanCommands
 from scadbuddy.printers.print_activities import LanActivities, LanDeps
 from scadbuddy.printers.store import BAMBUDDY_ACTOR
@@ -282,6 +285,11 @@ from scadbuddy.workflows.housekeeping import (
 from scadbuddy.workflows.library_copy import VersionedLibraryCopy
 from scadbuddy.workflows.operation import VersionedOperationWorkflow
 from scadbuddy.workflows.operation_activities import operation_activities
+from scadbuddy.workflows.order_stock import (
+    VersionedFulfilOrderItem,
+    VersionedMergePrinter,
+    VersionedRecostLot,
+)
 from scadbuddy.workflows.prepare_listing import VersionedPrepareListing
 from scadbuddy.workflows.previews import (
     DUE_ACTIVITY,
@@ -2239,6 +2247,10 @@ LIBRARY_WORKFLOWS: tuple[type, ...] = (
     VersionedStagedFile,
     VersionedPrepareListing,
     VersionedAttemptMedia,
+    # #6949 K1 Task 16: the orders' stock writes and the printer merge's stock repoint.
+    VersionedFulfilOrderItem,
+    VersionedRecostLot,
+    VersionedMergePrinter,
 )
 
 
@@ -2455,6 +2467,16 @@ def _library_activities(
         _attempt_media_activity(state),
         # A listing's prepared colour combinations (#6237, #6299 review).
         *prepare_activities(state, lambda: state.components.get(ORDERS)),
+        # The orders' stock workflows' Python steps, and the printer merge's (#6949 K1
+        # Task 16): they write Python-owned rows, so only the API runs them.
+        *order_stock_activities(
+            lambda: OrderStockSteps(
+                lambda: state.components.get(ORDERS).lifecycle,
+                lambda: state.components.get(INVENTORY).core,
+            ),
+            lambda: client,
+        ),
+        *merge_activities(lambda: state.components.get(PRINTERS).store),
     ]
 
 

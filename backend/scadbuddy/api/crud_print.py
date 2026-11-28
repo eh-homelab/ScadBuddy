@@ -173,6 +173,7 @@ import re
 from collections import OrderedDict
 from collections.abc import Awaitable, Callable
 from datetime import datetime, timedelta
+from functools import partial
 from typing import Annotated, Any
 from uuid import UUID
 
@@ -340,6 +341,8 @@ router.routes.extend(operations_router("print").routes)
 #: The actor of a printer merge the print worker's `ensure-bambuddy` makes (#6949).
 PRINT_ACTOR = Actor(kind="provider", principal="print")
 #: A run the request names that is not kept.
+#: The actor of a printer merge the print worker's `ensure-bambuddy` makes (#6949).
+PRINT_ACTOR = Actor(kind="provider", principal="print")
 NO_SUCH_RUN = "no-such-run"
 #: An event of a kind the print worker does not publish.
 EVENT_KIND_REFUSED = "event-kind-refused"
@@ -794,14 +797,21 @@ class EnsuredPrinter(BaseModel):
 
 @router.post("/printers/ensure-bambuddy", name="crud_print_ensure_bambuddy")
 async def ensure_bambuddy(body: EnsureBambuddy, printers: PrintersDep) -> EnsuredPrinter:
+    """A merge it makes waits for its `MergePrinter` with no cap of its own (#6949 K1 Task
+    16): the print worker's CRUD client bounds each request and sends it again with the
+    same `Idempotency-Key`, and the same inputs give the same workflow id, so its retry
+    attaches to the running merge."""
     row, written = await asyncio.to_thread(
-        printers.store.ensure_bambuddy_written,
-        body.bambuddy_printer_id,
-        serial=body.serial,
-        name=body.name,
-        model=body.model,
-        listed=None if body.listed is None else frozenset(body.listed),
-        by=PRINT_ACTOR,
+        partial(
+            printers.store.ensure_bambuddy_written,
+            body.bambuddy_printer_id,
+            serial=body.serial,
+            name=body.name,
+            model=body.model,
+            listed=None if body.listed is None else frozenset(body.listed),
+            by=PRINT_ACTOR,
+            wait=None,
+        )
     )
     return EnsuredPrinter(row=row, written=written)
 

@@ -1,0 +1,7 @@
+{
+  "code": "bad_property_value",
+  "detail": "property 'material': does not fit 'type'",
+  "status": 422,
+  "title": "Unprocessable Content",
+  "type": "https://scadbuddy.dev/problems/entities/bad_property_value"
+}

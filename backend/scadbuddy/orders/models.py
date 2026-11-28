@@ -496,6 +496,12 @@ class LibraryFileRef(BaseModel):
     copy_key: str | None = None
 
 
+class PartsSettling(BaseModel):
+    """An item's open stock workflow (`OrderItem.parts_settling`)."""
+
+    workflow_id: str
+
+
 class OrderItem(BaseModel):
     id: str
     order_id: str
@@ -530,6 +536,10 @@ class OrderItem(BaseModel):
     #: The Bambuddy archives a past print's item was taken from (#4777, order operations
     #: spec §3.2): the one picked and its run's other plates; empty for any other source.
     origin_archive_ids: list[int] = Field(default_factory=list)
+    #: The workflow that still moves the item's parts in stock (#6949 K1, design §6.1a):
+    #: its fulfil or unfulfil committed, and Go's answer is not recorded yet. None when no
+    #: such workflow is open. It ends by itself; nothing waits on a person.
+    parts_settling: PartsSettling | None = None
     created_at: datetime
     updated_at: datetime
 

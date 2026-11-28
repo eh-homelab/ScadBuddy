@@ -22,9 +22,10 @@ export type KindPropertySchema = Schemas['KindPropertySchema']
 export const ORDER_KINDS = new Set(['order', 'order_item', 'order_item_fulfilment', 'order_item_revision'])
 /**
  * #7703 — the kinds whose schema may list `required` keys, checked on the row's own create and
- * save (`backend/scadbuddy/entities/properties.py` `REQUIRED_KINDS`; items follow later).
+ * save (`backend/scadbuddy/entities/properties.py` `REQUIRED_KINDS`). `item` joined with
+ * R-K1-33 (#7950): an item kind's schema marks them, and Go's item create and save check.
  */
-export const REQUIRED_KINDS = new Set(['spool', 'spool_type', 'material', 'subtype', 'brand', 'category', 'effect', 'insert_material', 'insert_type', 'colour', 'location_kind'])
+export const REQUIRED_KINDS = new Set(['item', 'spool', 'spool_type', 'material', 'subtype', 'brand', 'category', 'effect', 'insert_material', 'insert_type', 'colour', 'location_kind'])
 
 /** Whether a property has a value (spec §6.3b): a blank string and an empty list do not; `false` and `0` do. */
 export function hasValue(value: PropertyValue | null | undefined): boolean {
