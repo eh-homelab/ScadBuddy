@@ -41,11 +41,28 @@ export function DecodedFields({ decoded }: { decoded: DecodedSpool }) {
       </span>,
     ])
   }
+  const extra = decoded.extra_colours ?? []
+  if (extra.length > 0) {
+    rows.push([
+      'More colours',
+      <span key="extra" className="inline-flex flex-wrap items-center gap-2">
+        {extra.map((rgba, at) => (
+          <span key={at} className="inline-flex items-center gap-1">
+            <RgbaSwatch rgba={rgba} size="sm" />
+            {rgba}
+          </span>
+        ))}
+      </span>,
+    ])
+  }
+  if (decoded.diameter_mm != null) rows.push(['Diameter', `${Number(decoded.diameter_mm)} mm`])
   const nozzle = range(decoded.nozzle_temp_min, decoded.nozzle_temp_max)
   if (nozzle) rows.push(['Nozzle', nozzle])
   const bed = range(decoded.bed_temp_min, decoded.bed_temp_max)
   if (bed) rows.push(['Bed', bed])
   if (decoded.label_weight_g != null) rows.push(['Weight', `${decoded.label_weight_g} g`])
+  // The tag's own keys that ScadBuddy does not use: untrusted, so shown only as text.
+  const other = Object.entries(decoded.other_keys ?? {})
   return (
     <section aria-label="On the tag" className="rounded-xl border border-border bg-card p-4">
       <h2 className="mb-2 font-medium">On the tag</h2>
@@ -57,6 +74,20 @@ export function DecodedFields({ decoded }: { decoded: DecodedSpool }) {
           </div>
         ))}
       </dl>
+      {other.length > 0 && (
+        <section aria-label="Other keys on the tag" className="mt-3 border-t border-border pt-3">
+          <h3 className="text-sm font-medium">Other keys on the tag</h3>
+          <p className="text-sm text-muted-foreground">ScadBuddy does not use these.</p>
+          <dl className="mt-1 grid grid-cols-[auto_1fr] gap-x-4 gap-y-1 text-sm">
+            {other.map(([key, value]) => (
+              <div key={key} className="contents">
+                <dt className="break-all text-muted-foreground">{key}</dt>
+                <dd className="min-w-0 break-all">{value}</dd>
+              </div>
+            ))}
+          </dl>
+        </section>
+      )}
       {cut.length > 0 && <p className="mt-2 text-warn">Cut to 128 characters: {cut.join(', ')}.</p>}
       {unread.length > 0 && <p className="mt-2 text-warn">Some fields could not be read: {unread.join(', ')}.</p>}
     </section>

@@ -7,6 +7,7 @@ import json
 import threading
 import time
 from collections.abc import Callable
+from decimal import Decimal
 from typing import Any
 from uuid import UUID, uuid4
 
@@ -363,6 +364,23 @@ def test_a_new_tag_with_a_known_material_answers_a_draft(pg_pool: PgPool) -> Non
     assert result.draft is not None and result.draft.material_id == _pla(pg_pool)
     assert (result.draft.nozzle_temp_min, result.draft.nozzle_temp_max) == (220, 240)
     assert result.draft.rgba == "#FFAABBFF"
+
+
+def test_a_draft_takes_the_extended_openspool_keys(pg_pool: PgPool) -> None:
+    # #8364: the keys of SnapmakerU1-Extended-Firmware docs/design/openspool.md @ 8cb0b4e1.
+    store = FilamentSpoolStore(pg_pool)
+    sample = OPENSPOOL_SAMPLE | {
+        "bed_min_temp": "45",
+        "bed_max_temp": "55",
+        "alpha": "80",
+        "weight": "250",
+        "diameter": "1.75",
+    }
+    result = tags.read(store, _openspool_read(sample=sample), actor="ann", defaults=DEFAULTS)
+    assert result.draft is not None
+    assert (result.draft.bed_temp_min, result.draft.bed_temp_max) == (45, 55)
+    assert result.draft.rgba == "#FFAABB80" and result.draft.label_weight_g == 250
+    assert result.draft.diameter_mm == Decimal("1.75")
 
 
 def test_a_new_tag_with_an_unknown_material_answers_no_draft(pg_pool: PgPool) -> None:

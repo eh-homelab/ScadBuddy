@@ -156,7 +156,12 @@ public sealed class NfcBridge : Java.Lang.Object, NfcAdapter.IReaderCallback, We
 			return;
 		}
 		if (pending is not null) { TryWrite(tag, fromTap: true); return; }
-		if (reading) Emit(Read(tag));
+		if (!reading) return;
+		var read = ReadTagFor(tag, null, out var ndefFailed);
+		// A tag whose NDEF read failed is Web NFC's `readingerror`, never a reading with no records:
+		// a write's read-back would take that for an empty tag (#8362).
+		if (ndefFailed && !IsClassic(tag)) Send(new JsonObject { ["type"] = "readingerror" }.ToJsonString());
+		else Emit(read);
 	}
 
 	void TryWrite(Tag tag, bool fromTap)
@@ -166,11 +171,16 @@ public sealed class NfcBridge : Java.Lang.Object, NfcAdapter.IReaderCallback, We
 		if (pending is null) return;
 		try
 		{
-			WriteNdef(tag, pending.Message);
+			var back = WriteNdef(tag, pending.Message, readBack: true);
 			lock (gate) if (write == pending) write = null; else return;
 			Reply(pending.JsId, true);
-			// The read-back the page waits for next (tagWrite.ts `readBack`).
-			Emit(Read(tag));
+			// The read-back the page waits for next (tagWrite.ts `readBack`), read on the write's own
+			// connection: Android dispatches a tag only when it finds it, so a tag that stays on the
+			// phone gives no second tap, and a new connection to it just after the write failed on
+			// prod (#8362: each read-back was an `nfc.read` with outcome `error` and 0 records). With
+			// none, the page asks to lift the tag and tap it again, and that tap is read as any other.
+			if (back is not null) Emit(Reading(tag, back.Value.Records, InfoOf(tag, back.Value.MaxSize, back.Value.Writable)));
+			else Android.Util.Log.Info("ScadBuddyNfc", $"wrote {Convert.ToHexString(tag.GetId() ?? [])}; no read-back on the write's connection, waiting for a tap");
 		}
 		catch (BridgeError error)
 		{
@@ -190,9 +200,20 @@ public sealed class NfcBridge : Java.Lang.Object, NfcAdapter.IReaderCallback, We
 
 	/// <summary>
 	/// Writes an NDEF message to the tag. A refusal (a MIFARE Classic tag, a read-only tag, a tag
-	/// with no NDEF) is a <see cref="BridgeError"/>; any other exception is a failed transfer.
+	/// with no NDEF, a message larger than the tag holds) is a <see cref="BridgeError"/>; any other
+	/// exception is a failed transfer.
 	/// </summary>
-	public static void WriteNdef(Tag tag, NdefMessage message)
+	public static void WriteNdef(Tag tag, NdefMessage message) => WriteNdef(tag, message, readBack: false);
+
+	/// <summary>What a tag holds just after a write, read on the write's own connection.</summary>
+	public readonly record struct ReadBack(JsonArray Records, int MaxSize, bool Writable);
+
+	/// <summary>
+	/// <see cref="WriteNdef(Tag, NdefMessage)"/>, and with <paramref name="readBack"/> the message read
+	/// again before the connection closes; null when that read fails, or when the tag was formatted
+	/// (its Tag object names no Ndef tech until Android finds it again).
+	/// </summary>
+	public static ReadBack? WriteNdef(Tag tag, NdefMessage message, bool readBack)
 	{
 		// A Bambu spool's tag is MIFARE Classic, and a Bambu tag is never written: refuse every
 		// MIFARE Classic tag, before NdefFormatable could format it.
@@ -205,10 +226,25 @@ public sealed class NfcBridge : Java.Lang.Object, NfcAdapter.IReaderCallback, We
 			{
 				ndef.Connect();
 				if (!ndef.IsWritable) throw new BridgeError("NotAllowedError", "This tag is read-only.");
+				// A message larger than the tag holds fails part way: refuse it before anything is written.
+				var size = message.ToByteArray()?.Length ?? 0;
+				if (size > ndef.MaxSize)
+					throw new BridgeError("NotAllowedError", $"This tag holds {ndef.MaxSize} bytes; the record needs {size}. Nothing was written.");
 				ndef.WriteNdefMessage(message);
+				if (!readBack) return null;
+				try
+				{
+					var records = new JsonArray();
+					foreach (var record in ndef.NdefMessage?.GetRecords() ?? []) records.Add(NdefWire.Parse(record));
+					return new ReadBack(records, ndef.MaxSize, ndef.IsWritable);
+				}
+				catch (Exception error)
+				{
+					Android.Util.Log.Info("ScadBuddyNfc", $"read-back on the write's connection failed: {error.GetType().Name}");
+					return null;
+				}
 			}
 			finally { Close(ndef); }
-			return;
 		}
 		var formatable = NdefFormatable.Get(tag) ??
 			throw new BridgeError("NotSupportedError", "This tag cannot hold NDEF records.");
@@ -218,6 +254,7 @@ public sealed class NfcBridge : Java.Lang.Object, NfcAdapter.IReaderCallback, We
 			formatable.Format(message);
 		}
 		finally { Close(formatable); }
+		return null;
 	}
 
 	public static bool IsClassic(Tag tag) => tag.GetTechList()?.Contains("android.nfc.tech.MifareClassic") == true;
@@ -238,7 +275,65 @@ public sealed class NfcBridge : Java.Lang.Object, NfcAdapter.IReaderCallback, We
 	/// A device call's read: the page's reading (<c>serialNumber</c>, <c>records</c>, and
 	/// <c>mifare</c> for a MIFARE Classic tag), with its progress told to <paramref name="progress"/>.
 	/// </summary>
-	public static JsonObject ReadTag(Tag tag, ITagProgress progress) => Read(tag, progress);
+	public static JsonObject ReadTag(Tag tag, ITagProgress progress) => ReadTagFor(tag, progress, out _);
+
+	/// <summary>
+	/// The tag's chip and capacity (#8362), for the page beside its records: Android's
+	/// <c>Ndef.getMaxSize()</c> and <c>isWritable()</c>, and for an NTAG the chip from GET_VERSION
+	/// (command 0x60; byte 6 of the reply is the storage size: 0x0F NTAG213, 144 bytes of user
+	/// memory, 0x11 NTAG215, 504, 0x13 NTAG216, 888; NXP NTAG213/215/216 data sheet,
+	/// https://www.nxp.com/docs/en/data-sheet/NTAG213_215_216.pdf). A tag that does not answer
+	/// GET_VERSION has no chip name.
+	/// </summary>
+	static JsonObject InfoOf(Tag tag, int? maxSize, bool? writable)
+	{
+		var (chip, userBytes) = ChipOf(tag);
+		return new JsonObject
+		{
+			["tech"] = TechOf(tag),
+			["chip"] = chip,
+			["user_bytes"] = userBytes,
+			["max_ndef_bytes"] = maxSize,
+			["writable"] = writable,
+		};
+	}
+
+	static (string? Chip, int? UserBytes) ChipOf(Tag tag)
+	{
+		// NTAGs show as MifareUltralight; GET_VERSION goes to no other tag, so no other tag is
+		// left halted by a command it does not know.
+		if (tag.GetTechList()?.Contains("android.nfc.tech.MifareUltralight") != true) return (null, null);
+		NfcA? nfcA = null;
+		try
+		{
+			nfcA = NfcA.Get(tag);
+			if (nfcA is null) return (null, null);
+			nfcA.Connect();
+			var version = nfcA.Transceive([0x60]);
+			// Byte 1 is the vendor (0x04, NXP), byte 2 the product type (0x04, NTAG).
+			if (version is null || version.Length < 8 || version[1] != 0x04 || version[2] != 0x04) return (null, null);
+			return version[6] switch
+			{
+				0x0F => ("NTAG213", 144),
+				0x11 => ("NTAG215", 504),
+				0x13 => ("NTAG216", 888),
+				_ => (null, null),
+			};
+		}
+		catch (Exception) { return (null, null); }
+		finally { Close(nfcA); }
+	}
+
+	/// <summary>The page's reading of a tag: its serial number, records and chip.</summary>
+	static JsonObject Reading(Tag tag, JsonArray records, JsonObject info) =>
+		new() { ["type"] = "reading", ["serialNumber"] = SerialOf(tag), ["records"] = records, ["tag"] = info };
+
+	static string SerialOf(Tag tag)
+	{
+		var uid = tag.GetId() ?? [];
+		var serial = string.Join(":", uid.Select(b => b.ToString("x2")));
+		return IsClassic(tag) && uid.Length == 4 ? serial + AmsUidSuffix : serial;
+	}
 
 	// Reads by kind (mifare_classic or ndef) and outcome: complete, partial (a sector refused,
 	// or the read stopped and the next tap resumes it) or error.
@@ -247,17 +342,18 @@ public sealed class NfcBridge : Java.Lang.Object, NfcAdapter.IReaderCallback, We
 	// MIFARE reads that started from the sectors an earlier, partial read of the same tag kept.
 	static readonly Counter<long> ResumedReads = Telemetry.Meter.CreateCounter<long>("scadbuddy_app.nfc.resumed_reads");
 
-	static JsonObject Read(Tag tag, ITagProgress? progress = null)
+	static JsonObject ReadTagFor(Tag tag, ITagProgress? progress, out bool ndefFailed)
 	{
 		using var span = Telemetry.Source.StartActivity("nfc.read");
 		var started = System.Diagnostics.Stopwatch.GetTimestamp();
-		var ndefFailed = false;
+		ndefFailed = false;
 		var resumed = false;
+		int? maxSize = null;
+		bool? writable = null;
 		var uid = tag.GetId() ?? [];
 		var techs = tag.GetTechList() ?? [];
 		var isClassic = techs.Contains("android.nfc.tech.MifareClassic");
-		var serial = string.Join(":", uid.Select(b => b.ToString("x2")));
-		if (isClassic && uid.Length == 4) serial += AmsUidSuffix;
+		var serial = SerialOf(tag);
 		var records = new JsonArray();
 		JsonObject? mifare = null;
 		Ndef? ndef = null;
@@ -267,6 +363,8 @@ public sealed class NfcBridge : Java.Lang.Object, NfcAdapter.IReaderCallback, We
 			if (ndef is not null)
 			{
 				ndef.Connect();
+				maxSize = ndef.MaxSize;
+				writable = ndef.IsWritable;
 				var message = ndef.NdefMessage ?? ndef.CachedNdefMessage;
 				foreach (var record in message?.GetRecords() ?? []) records.Add(NdefWire.Parse(record));
 			}
@@ -300,6 +398,7 @@ public sealed class NfcBridge : Java.Lang.Object, NfcAdapter.IReaderCallback, We
 		}
 		var reading = new JsonObject { ["type"] = "reading", ["serialNumber"] = serial, ["records"] = records };
 		if (mifare is not null) reading["mifare"] = mifare;
+		else reading["tag"] = InfoOf(tag, maxSize, writable);
 		return reading;
 	}
 
