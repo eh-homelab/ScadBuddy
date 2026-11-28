@@ -6,7 +6,6 @@ in-process print worker runs it; the CRUD routes are `tests/crud/test_crud_senso
 
 from __future__ import annotations
 
-import asyncio
 import json
 from datetime import timedelta
 from typing import Any
@@ -189,13 +188,19 @@ async def test_a_slow_bambuddy_hands_the_unsent_rows_back(pg_pool: PgPool) -> No
         _record(pg_pool, sensor, 60.0, T0 + timedelta(minutes=n))
         sensors.append(sensor)
 
+    # Each send takes 0.3 s of the pass's own clock, so the database's speed on the
+    # runner does not decide how many sends start (#8412).
+    now = [0.0]
+
     async def slow(request: httpx.Request) -> httpx.Response:
-        await asyncio.sleep(0.3)
+        now[0] += 0.3
         return httpx.Response(200, json={"channels": 1})
 
     with respx.mock() as router:
         send = router.post(SEND).mock(side_effect=slow)
-        report = await sensor_notify.deliver_pending(api, _settings, budget=0.5)
+        report = await sensor_notify.deliver_pending(
+            api, _settings, budget=0.5, clock=lambda: now[0]
+        )
     assert (report.sent, report.failed) == (2, 0)
     assert send.call_count == 2
     states = [_rows(pg_pool, s)[0] for s in sensors]
