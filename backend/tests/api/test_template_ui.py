@@ -199,11 +199,12 @@ def test_the_page_carries_the_csp() -> None:
 
     from scadbuddy.api.static import PAGE_CSP
 
-    # 'self', one hash (index.html's inline entry-reload handler, #4873) and Plaid Link's
-    # one script (#4961); nothing else.
+    # 'self', one hash (index.html's inline entry-reload handler, #4873), Plaid Link's
+    # one script (#4961) and Cloudflare Web Analytics' beacon; nothing else.
     assert re.search(
         r"script-src 'self' 'sha256-[A-Za-z0-9+/]{43}='"
-        r" https://cdn\.plaid\.com/link/v2/stable/link-initialize\.js;",
+        r" https://cdn\.plaid\.com/link/v2/stable/link-initialize\.js"
+        r" https://static\.cloudflareinsights\.com/beacon\.min\.js/;",
         PAGE_CSP,
     )
     # #4961: Link's frame and Plaid's two API hosts, as Plaid's CSP section lists them.
