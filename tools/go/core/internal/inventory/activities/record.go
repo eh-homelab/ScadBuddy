@@ -76,7 +76,7 @@ func (r *recordInbound) ExecuteActivity(ctx context.Context, in *interceptor.Exe
 		if final(err, info.Attempt, info.RetryPolicy) {
 			end, msg = store.FailOperation, "could not record an inventory activity's failure"
 		}
-		if note := end(context.WithoutCancel(ctx), r.pool, op.ID, op.Attempt, err); note != nil {
+		if note := end(context.WithoutCancel(ctx), r.pool, op, err); note != nil {
 			r.failed(ctx, msg, op.ID, note)
 		}
 	}
