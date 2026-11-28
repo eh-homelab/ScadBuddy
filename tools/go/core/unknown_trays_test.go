@@ -260,6 +260,7 @@ func TestTheUnknownTraysAreaStartsTheLibraryRunWorkerOnlyWithTemporal(t *testing
 		setWorkerRetry(t, 10*time.Millisecond)
 		logs := &logLines{}
 		before := slog.Default()
+		t.Cleanup(func() { slog.SetDefault(before) })
 		slog.SetDefault(slog.New(logs))
 		ctx, cancel := context.WithCancel(context.Background())
 		done := make(chan error, 1)

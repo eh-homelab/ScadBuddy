@@ -52,7 +52,7 @@ export function writeFailure(cause: unknown): WriteFailure {
   }
 }
 
-export const SEND_PENDING_TEXT = 'The send has not finished yet, and it may still run. Wait a moment, then send again: the send is not done twice.'
+export const SEND_PENDING_TEXT = 'The send has not finished yet, and it may still run. Wait a moment, then send again. The server does not run the same send twice.'
 
 /** A failed send again: as `writeFailure`, but a pending write reads as a send, not as a copy or an edit. */
 export function sendFailure(cause: unknown): WriteFailure {
@@ -60,7 +60,7 @@ export function sendFailure(cause: unknown): WriteFailure {
   return failure.pending ? { ...failure, text: SEND_PENDING_TEXT } : failure
 }
 
-export const OUTCOME_TEXT:Record<MirrorOutcome, string> = {
+export const OUTCOME_TEXT: Record<MirrorOutcome, string> = {
   sent: 'Sent to Bambuddy.',
   failed: 'The send failed. See the reason with the preset.',
   busy: 'A send is running now. Wait a moment, then send again.',

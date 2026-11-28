@@ -216,11 +216,11 @@ section and the text above differ, this section is what the code does.
   (`backend/scadbuddy/filament/unknown_resolve.py`) on the `library` queue, served by the API process
   (G5). It answers `{id, number, code, location_id}`, publishes no event (G8), and keeps the lock
   order in Python (G9). The label weight changes only for a first weight (D4). There is no Go spool
-  writer. The Go resolve route (#8489) checks the body, then runs the
-  activity as a run of core's workflow `LibraryRun`: 30 s, one attempt. A refusal keeps its code. An
-  answer that comes too late is 503 `resolve_pending`. Without `SCADBUDDY_TEMPORAL_ADDRESS` on core,
-  the route is 503 `writes_not_configured`. The existing link paths still clear the row (`link_on`: the print dialog's tray question,
-  the place page's "New spool from this tray", the agent's `link_tray_spool`). The rest of the
+  writer. The Go resolve route (#8489) checks the body, then runs the activity as a run of core's
+  workflow `LibraryRun`: 30 s, one attempt. A refusal keeps its code. An answer that comes too late
+  is 503 `resolve_pending`. Without `SCADBUDDY_TEMPORAL_ADDRESS` on core, the route is 503
+  `writes_not_configured`. The existing link paths still clear the row (`link_on`: the print
+  dialog's tray question, the place page's "New spool from this tray", the agent's `link_tray_spool`). The rest of the
   flow works.
 - **Block.** `prepare_run` (and so the check, `PrintCheck.unknown_trays`) and `lan_print` refuse a
   run with 422 `unknown_spool_loaded`. The print worker reads a CRUD route of caller `print`
