@@ -206,12 +206,22 @@ The two `fleet-rotator` `PUT`s also take a person's access token of scope `fleet
 `fleetd` sends; `POST /virtual-messages` does not, so a machine's token never posts as a virtual
 sender such as `rotator` or `github`: `crud.Router.AddForToken` mounts
 them, and `auth.Resolver.Token`, the shared `sbpat_` lookup, reads it. A handler finds the token
-with `auth.CallerOf`; `crud.ServiceOf` is nil then. One token is one machine: the first `PUT
-/machines/{id}` records the token's id in `fleet_machines.token_id`, and every write to that
-machine from another token, or from a bootstrap proof, is 403 `machine-of-another-proof` (the
-same for a proof's machine and a token). Each row names exactly one owner, its `proof_name` or
-its `token_id`. A revoked, expired or unknown `sbpat_` token on these routes is 401
-`no_credential`, so a person revokes a machine by revoking its token in Settings, with no restart.
+with `auth.CallerOf`; `crud.ServiceOf` is nil then. One live token is one machine: the first
+`PUT /machines/{id}` records the token's id in `fleet_machines.token_id`, and while that token
+lives, every write to that machine from another token, or from a bootstrap proof, is 403
+`machine-of-another-proof`. Each row names exactly one owner, its `proof_name` or its
+`token_id`. A row moves to a new owner only when its owner is dead, on a `PUT /machines/{id}`
+that locks the row (`FOR UPDATE`) while it decides: a token's machine moves to a new `fleet`
+token of the same person (`personal_access_tokens.principal`) once the old token is revoked or
+expired; a proof's machine moves to any `fleet` token once its `fleet-rotator.<machine>` file is
+gone (`auth.Resolver.HasProof`; no bootstrap directory means gone), and its `proof_name` is
+cleared. A token of another person never takes a machine, and a proof never takes a token's
+machine. When the old token's row is gone, its person is unknown and every token is refused
+(403 `machine-of-unknown-owner`); no route deletes a machine row yet (#8450), so an admin deletes it. A
+session `PUT` takes only the row's current owner, so fleetd's machine `PUT` moves the row
+first. A revoked, expired or unknown `sbpat_` token on these routes is 401 `no_credential`, so
+a person stops a machine's writes by revoking its token in Settings, with no restart; a new
+token of that person then takes the machine over.
 A `read` or `write` token there is 403 `out_of_scope`. A `fleet` token is 403 `out_of_scope` on
 every other route, in every `SCADBUDDY_AUTH_MODE`: every other CRUD route, and every public route
 behind `internal/auth`'s gate (`auth.WouldRefuse`, `Gate.Wrap`), as Python's `auth/check.py`

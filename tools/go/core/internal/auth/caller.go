@@ -33,7 +33,8 @@ const failureLogInterval = time.Minute
 // The bearer prefixes auth/gate.py reads.
 const (
 	servicePrefix = "sbsvc_"
-	tokenPrefix   = "sbpat_"
+	// TokenPrefix starts every personal access token (crud.Router.token reads it too).
+	TokenPrefix = "sbpat_"
 )
 
 var (
@@ -89,7 +90,7 @@ func (c Caller) IsFleetToken() bool {
 // routes that take an access token read it here (#8041).
 func (r *Resolver) Token(ctx context.Context, authorization string) *Caller {
 	scheme, bearer, _ := strings.Cut(authorization, " ")
-	if strings.ToLower(scheme) != "bearer" || !strings.HasPrefix(bearer, tokenPrefix) {
+	if strings.ToLower(scheme) != "bearer" || !strings.HasPrefix(bearer, TokenPrefix) {
 		return nil
 	}
 	c, err := r.personalToken(ctx, pyStrip(bearer))
@@ -127,7 +128,7 @@ func (r *Resolver) Caller(ctx context.Context, h http.Header) Caller {
 			return Caller{Kind: KindAnonymous}
 		}
 		return Caller{Kind: KindService, Service: s}
-	case isBearer && strings.HasPrefix(bearer, tokenPrefix):
+	case isBearer && strings.HasPrefix(bearer, TokenPrefix):
 		c, err := r.personalToken(ctx, pyStrip(bearer))
 		if err != nil || c == nil {
 			r.failed(ctx, err)

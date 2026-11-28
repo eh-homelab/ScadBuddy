@@ -5,6 +5,8 @@ import (
 	"crypto/sha256"
 	"encoding/base64"
 	"encoding/hex"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 )
@@ -17,6 +19,14 @@ import (
 // one (auth/personal_tokens.py mint), and its id.
 func accessToken(a *api, scope string) (token, id string) {
 	a.t.Helper()
+	return accessTokenOf(a, scope, alice)
+}
+
+const alice = "user:https://idp.example#alice"
+
+// accessTokenOf is accessToken minted by principal.
+func accessTokenOf(a *api, scope, principal string) (token, id string) {
+	a.t.Helper()
 	raw, secret := make([]byte, 8), make([]byte, 32)
 	_, _ = rand.Read(raw)
 	_, _ = rand.Read(secret)
@@ -24,8 +34,8 @@ func accessToken(a *api, scope string) (token, id string) {
 	token = "sbpat_" + id + "." + base64.RawURLEncoding.EncodeToString(secret)
 	hash := sha256.Sum256([]byte(token))
 	a.sql(`INSERT INTO personal_access_tokens (id, principal, name, scope, token_hash, expires_at)
-		VALUES ($1, 'user:https://idp.example#alice', 'fleetd', $2, $3, now() + interval '90 days')`,
-		id, scope, hash[:])
+		VALUES ($1, $4, 'fleetd', $2, $3, now() + interval '90 days')`,
+		id, scope, hash[:], principal)
 	return token, id
 }
 
@@ -143,4 +153,98 @@ func TestAMachineBelongsToItsToken(t *testing.T) {
 	got := put("/machines/"+strings.Repeat("2", 64), stolen, mine)
 	expect(t, got.status, 403)
 	expect(t, got.body["reason"], "machine-of-another-proof")
+}
+
+// A machine moves to a new token only when its owner is dead: a token's machine to a new
+// token of the same person once the old token is revoked, expired or gone, and a proof's
+// machine to a token once the machine's proof file is gone.
+func TestAMachineMovesToItsPersonsNewToken(t *testing.T) {
+	for name, kill := range map[string]string{
+		"expired": `UPDATE personal_access_tokens SET expires_at = now() - interval '1 second' WHERE id = $1`,
+		"revoked": `UPDATE personal_access_tokens SET revoked_at = now() WHERE id = $1`,
+	} {
+		t.Run(name, func(t *testing.T) {
+			a := newAPI(t, "fleet")
+			old, oldID := accessToken(a, "fleet")
+			fresh, freshID := accessToken(a, "fleet")
+			put := func(token string) answer {
+				return a.do("PUT", rotatorBase+"/machines/"+machineID, machineBody(), bearer(token))
+			}
+			expect(t, put(old).status, 200)
+			// While the old token lives, the new one is refused.
+			got := put(fresh)
+			expect(t, got.status, 403)
+			expect(t, got.body["reason"], "machine-of-another-proof")
+			a.sql(kill, oldID)
+			if got := put(fresh); got.status != 200 {
+				t.Fatalf("the new token: %d %s", got.status, got.raw)
+			}
+			expect(t, a.count(`SELECT count(*) FROM fleet_machines WHERE token_id = $1 AND proof_name IS NULL`, freshID), 1)
+			if got := a.do("PUT", rotatorBase+onMachine+uuid(), sessionBody(), bearer(fresh)); got.status != 200 {
+				t.Fatalf("the new token's session: %d %s", got.status, got.raw)
+			}
+		})
+	}
+}
+
+func TestAnotherPersonsTokenNeverTakesAMachine(t *testing.T) {
+	a := newAPI(t, "fleet")
+	old, oldID := accessToken(a, "fleet")
+	bob, _ := accessTokenOf(a, "fleet", "user:https://idp.example#bob")
+	put := func(token string) answer {
+		return a.do("PUT", rotatorBase+"/machines/"+machineID, machineBody(), bearer(token))
+	}
+	expect(t, put(old).status, 200)
+	a.sql(`UPDATE personal_access_tokens SET revoked_at = now() WHERE id = $1`, oldID)
+	got := put(bob)
+	expect(t, got.status, 403)
+	expect(t, got.body["reason"], "machine-of-another-proof")
+	expect(t, a.count(`SELECT count(*) FROM fleet_machines WHERE token_id = $1`, oldID), 1)
+}
+
+// A machine whose token row is gone has no known person: no token takes it.
+func TestAMachineOfAForgottenTokenIsRefused(t *testing.T) {
+	a := newAPI(t, "fleet")
+	old, oldID := accessToken(a, "fleet")
+	fresh, _ := accessToken(a, "fleet")
+	put := func(token string) answer {
+		return a.do("PUT", rotatorBase+"/machines/"+machineID, machineBody(), bearer(token))
+	}
+	expect(t, put(old).status, 200)
+	a.sql(`DELETE FROM personal_access_tokens WHERE id = $1`, oldID)
+	got := put(fresh)
+	expect(t, got.status, 403)
+	expect(t, got.body["reason"], "machine-of-unknown-owner")
+	expect(t, a.count(`SELECT count(*) FROM fleet_machines WHERE token_id = $1`, oldID), 1)
+}
+
+func TestAProofMachineMovesToATokenOnlyOnceItsProofIsGone(t *testing.T) {
+	g := newRegistry(t)
+	token, id := accessToken(g.api, "fleet")
+	put := func(tok string) answer {
+		return g.do("PUT", rotatorBase+"/machines/"+machineID, machineBody(), bearer(tok))
+	}
+	g.write("/machines/"+machineID, machineBody(), 200)
+	got := put(token)
+	expect(t, got.status, 403)
+	expect(t, got.body["reason"], "machine-of-another-proof")
+	if err := os.Remove(filepath.Join(g.bootstrap, "fleet-rotator.devbox")); err != nil {
+		t.Fatal(err)
+	}
+	if got := put(token); got.status != 200 {
+		t.Fatalf("the token after the proof went: %d %s", got.status, got.raw)
+	}
+	expect(t, g.count(`SELECT count(*) FROM fleet_machines WHERE token_id = $1 AND proof_name IS NULL`, id), 1)
+}
+
+func TestAProofNeverTakesATokensMachine(t *testing.T) {
+	g := newRegistry(t)
+	token, id := accessToken(g.api, "fleet")
+	expect(t, g.do("PUT", rotatorBase+"/machines/"+machineID, machineBody(), bearer(token)).status, 200)
+	// Even with the token dead, the proof is refused.
+	g.sql(`UPDATE personal_access_tokens SET revoked_at = now() WHERE id = $1`, id)
+	got := g.do("PUT", rotatorBase+"/machines/"+machineID, machineBody(), bearer(g.rotatorToken))
+	expect(t, got.status, 403)
+	expect(t, got.body["reason"], "machine-of-another-proof")
+	expect(t, g.count(`SELECT count(*) FROM fleet_machines WHERE token_id = $1 AND proof_name IS NULL`, id), 1)
 }

@@ -119,7 +119,7 @@ func (r *Resolver) lookup(ctx context.Context, hash [32]byte, now time.Time) (*S
 	if err != nil {
 		return nil, err
 	}
-	if s.Machine != "" && !r.hasProof(s.Caller, s.Machine) {
+	if s.Machine != "" && !r.HasProof(s.Caller, s.Machine) {
 		// The machine was revoked (its proof file went): refused now and revoked, as
 		// service_credentials.py resolve does.
 		if _, err := r.Pool.Exec(ctx,
@@ -148,10 +148,10 @@ func proofName(caller, machine string) (string, bool) {
 	return caller + "." + machine, true
 }
 
-// hasProof says whether the proof file of caller's machine is a regular file in the
+// HasProof says whether the proof file of caller's machine is a regular file in the
 // bootstrap directory now (one stat), as exchange.py BootstrapVerifier.has_machine does.
 // With no bootstrap directory, no machine has its proof.
-func (r *Resolver) hasProof(caller, machine string) bool {
+func (r *Resolver) HasProof(caller, machine string) bool {
 	name, ok := proofName(caller, machine)
 	if !ok || r.BootstrapDir == "" {
 		return false

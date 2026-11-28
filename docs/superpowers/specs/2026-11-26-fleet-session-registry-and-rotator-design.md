@@ -174,8 +174,11 @@ Where the accounts live:
   the chat server never does.
 - Proof on a machine: a personal access token of the scope `fleet`, read from `--token-file`
   and sent as `Authorization: Bearer`, as `bambuddy-fs` does (owner, 2026-11-26; #8041). One
-  token is one machine: the machine row records the token's id, and a person revokes a machine
-  by revoking its token in Settings. A `fleet` token can call only these routes. #8003's
+  live token is one machine: the machine row records the token's id, and a person stops a
+  machine's writes by revoking its token in Settings. A row moves to a new owner only when its
+  owner is dead: to a new `fleet` token of the same person once the old token is revoked or
+  expired, or, for a proof's machine, to a token once its proof file is gone. A proof never
+  takes a token's machine, and a machine whose token row is gone is refused to every token. A `fleet` token can call only these routes. #8003's
   per-machine bootstrap proofs (`fleet-rotator.<machine>`) still work beside the tokens; #8367
   retires them for machines.
 - Proof in the cluster: the `github` mode (#8012) keeps a `fleet-rotator` service credential from

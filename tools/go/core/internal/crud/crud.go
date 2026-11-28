@@ -227,7 +227,7 @@ next:
 func (rt *Router) token(route *mounted, r *http.Request) (*auth.Caller, *httpx.Problem, bool) {
 	header := r.Header.Get("Authorization")
 	scheme, bearer, _ := strings.Cut(header, " ")
-	if rt.Tokens == nil || !strings.EqualFold(scheme, "bearer") || !strings.HasPrefix(bearer, "sbpat_") {
+	if rt.Tokens == nil || !strings.EqualFold(scheme, "bearer") || !strings.HasPrefix(bearer, auth.TokenPrefix) {
 		return nil, nil, false
 	}
 	c := rt.Tokens.Token(r.Context(), header)

@@ -7,6 +7,7 @@ package fleet
 // A read gives a credential's id, name, kind and last 4 characters, never its secret.
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"net/http"
@@ -98,12 +99,15 @@ func remoteProblem(remote string) string {
 
 // owner is who may write a machine's rows: a fleet access token's id (#8041), or the
 // machine of a credential's bootstrap proof (fleet-rotator.<machine>, #8003). Exactly one is
-// set; a credential that names no machine is a 403.
-type owner struct{ proof, token *string }
+// set; a credential that names no machine is a 403. principal is a token's person.
+type owner struct {
+	proof, token *string
+	principal    string
+}
 
 func ownerOf(r *http.Request) (owner, error) {
 	if c := auth.CallerOf(r.Context()); c.Kind == auth.KindToken && c.TokenID != "" {
-		return owner{token: &c.TokenID}, nil
+		return owner{token: &c.TokenID, principal: c.Principal}, nil
 	}
 	if s := crud.ServiceOf(r); s != nil && s.Machine != "" {
 		return owner{proof: &s.Machine}, nil
@@ -119,6 +123,20 @@ func anotherProof() error {
 		"another machine's token or proof registered that machine", "machine-of-another-proof")
 }
 
+// unknownOwner is the 403 for a machine whose token row is gone: its person is unknown, so
+// no token takes it over.
+func unknownOwner() error {
+	return httpx.WithReason(http.StatusForbidden,
+		"the token that registered that machine is gone, so its owner is unknown and no token "+
+			"can take it over: ask an admin to delete the machine's row", "machine-of-unknown-owner")
+}
+
+// ProofChecker says whether a machine's bootstrap proof file is there now
+// (auth.Resolver.HasProof).
+type ProofChecker interface {
+	HasProof(caller, machine string) bool
+}
+
 // RegistryReads are caller fleet's registry routes, under /api/v1/internal/crud/fleet.
 func RegistryReads(pool *pgxpool.Pool) []crud.Route {
 	f := &Fleet{Pool: pool}
@@ -129,11 +147,13 @@ func RegistryReads(pool *pgxpool.Pool) []crud.Route {
 }
 
 // RegistryWrites are caller fleet-rotator's registry routes, under
-// /api/v1/internal/crud/fleet-rotator.
-func RegistryWrites(pool *pgxpool.Pool) []crud.Route {
-	f := &Fleet{Pool: pool}
+// /api/v1/internal/crud/fleet-rotator. proofs says whether a proof-owned machine's proof is
+// still there, so a token may take the machine over only once it is gone.
+func RegistryWrites(pool *pgxpool.Pool, proofs ProofChecker) []crud.Route {
+	w := &registryWriter{Fleet: Fleet{Pool: pool}, proofs: proofs}
+	f := &w.Fleet
 	return []crud.Route{
-		{Method: "PUT", Path: "/machines/{id}", Handle: f.putMachine, MaxBody: registryBodyMax},
+		{Method: "PUT", Path: "/machines/{id}", Handle: w.putMachine, MaxBody: registryBodyMax},
 		{Method: "PUT", Path: "/machines/{machine_id}/sessions/{session_id}", Handle: f.putSession,
 			MaxBody: registryBodyMax},
 	}
@@ -159,9 +179,17 @@ func (m *machine) targets() []any {
 		&m.CreatedAt, &m.UpdatedAt}
 }
 
+type registryWriter struct {
+	Fleet
+	proofs ProofChecker
+}
+
 // putMachine registers the machine under the caller's token or proof name, or refreshes its
-// facts and last_seen. A machine another token or proof registered is a 403.
-func (f *Fleet) putMachine(r *http.Request, p crud.Params) (any, error) {
+// facts and last_seen. A machine another token or proof registered is a 403, unless its
+// owner is dead: a token's machine moves to a new token of the same person once the old
+// token is revoked or expired, and a proof's machine moves to a token once its proof file
+// is gone. A proof never takes a token's machine. The row is locked while this decides.
+func (f *registryWriter) putMachine(r *http.Request, p crud.Params) (any, error) {
 	own, err := ownerOf(r)
 	if err != nil {
 		return nil, err
@@ -181,22 +209,69 @@ func (f *Fleet) putMachine(r *http.Request, p crud.Params) (any, error) {
 	if err := b.Err(); err != nil {
 		return nil, err
 	}
+	ctx := r.Context()
 	var m machine
-	err = f.Pool.QueryRow(r.Context(), `INSERT INTO fleet_machines AS m
-			(id, hostname, os, os_user, service_version, proof_name, token_id)
-			VALUES ($1, $2, $3, $4, $5, $6, $7)
-		ON CONFLICT (id) DO UPDATE SET hostname = $2, os = $3, os_user = $4, service_version = $5,
-			last_seen = now(), updated_at = now()
-		WHERE m.proof_name IS NOT DISTINCT FROM $6 AND m.token_id IS NOT DISTINCT FROM $7
-		RETURNING `+machineColumns, id, hostname, os, user, version, own.proof, own.token).Scan(m.targets()...)
-	if errors.Is(err, pgx.ErrNoRows) {
-		// The row exists and another token or proof registered it: ON CONFLICT updated nothing.
-		return nil, anotherProof()
-	}
+	err = pgx.BeginFunc(ctx, f.Pool, func(tx pgx.Tx) error {
+		err := tx.QueryRow(ctx, `INSERT INTO fleet_machines AS m
+				(id, hostname, os, os_user, service_version, proof_name, token_id)
+				VALUES ($1, $2, $3, $4, $5, $6, $7)
+			ON CONFLICT (id) DO NOTHING
+			RETURNING `+machineColumns, id, hostname, os, user, version, own.proof, own.token).Scan(m.targets()...)
+		if !errors.Is(err, pgx.ErrNoRows) {
+			return err
+		}
+		// The row exists: lock it, then decide whether the caller may write it.
+		var row owner
+		if err := tx.QueryRow(ctx, `SELECT proof_name, token_id FROM fleet_machines WHERE id = $1 FOR UPDATE`,
+			id).Scan(&row.proof, &row.token); err != nil {
+			return err
+		}
+		if err := f.mayTake(ctx, tx, row, own); err != nil {
+			return err
+		}
+		return tx.QueryRow(ctx, `UPDATE fleet_machines AS m SET hostname = $2, os = $3, os_user = $4,
+				service_version = $5, proof_name = $6, token_id = $7, last_seen = now(), updated_at = now()
+			WHERE id = $1
+			RETURNING `+machineColumns, id, hostname, os, user, version, own.proof, own.token).Scan(m.targets()...)
+	})
 	if err != nil {
 		return nil, err
 	}
 	return m, nil
+}
+
+// mayTake is nil when own may write a machine row owns: own is row's owner, or row's owner
+// is dead and own may take its place.
+func (f *registryWriter) mayTake(ctx context.Context, tx pgx.Tx, row, own owner) error {
+	if same(row.proof, own.proof) && same(row.token, own.token) {
+		return nil
+	}
+	if own.token == nil {
+		// A proof never takes another owner's machine.
+		return anotherProof()
+	}
+	if row.proof != nil {
+		if f.proofs == nil || f.proofs.HasProof(RotatorCaller, *row.proof) {
+			return anotherProof()
+		}
+		return nil
+	}
+	var (
+		principal string
+		dead      bool
+	)
+	err := tx.QueryRow(ctx, `SELECT principal, revoked_at IS NOT NULL OR expires_at <= now()
+		FROM personal_access_tokens WHERE id = $1`, *row.token).Scan(&principal, &dead)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return unknownOwner()
+	}
+	if err != nil {
+		return err
+	}
+	if !dead || principal != own.principal {
+		return anotherProof()
+	}
+	return nil
 }
 
 // putSession writes the session's row on the machine whole: an optional field left out is
