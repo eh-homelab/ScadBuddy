@@ -514,10 +514,16 @@ class BootstrapVerifier:
         files: dict[str, ServiceCaller] = {}
         for caller in CALLERS:
             if caller in IN_PROCESS_CALLERS:
-                if (directory / caller).exists() or any(directory.glob(f"{caller}.*")):
+                found = sorted(directory.glob(f"{caller}.*"))
+                if (directory / caller).exists():
+                    found.insert(0, directory / caller)
+                if found:
+                    # Any such file shows intent, a backup's leftover too; name each one,
+                    # so the operator knows what to remove.
                     raise BootstrapConfigError(
                         f"SCADBUDDY_SERVICE_BOOTSTRAP_DIR: the {caller} caller is minted in"
-                        " process by the API and has no bootstrap secret"
+                        " process by the API and has no bootstrap secret; remove "
+                        + ", ".join(repr(path.name) for path in found)
                     )
                 continue
             if caller in PER_MACHINE_CALLERS:

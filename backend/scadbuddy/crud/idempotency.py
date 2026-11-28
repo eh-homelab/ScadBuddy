@@ -188,11 +188,12 @@ def prune(conn: Connection[DictRow], older_than: timedelta = RETENTION) -> int:
     else ``older_than``; how many there were."""
     cursor = conn.execute(
         "DELETE FROM crud_requests WHERE created_at < now() - COALESCE("
-        "(SELECT (r.value #>> '{}')::interval FROM jsonb_each(%s) r WHERE r.key = caller), %s)",
-        # Seconds, which any interval parser reads, not `str(timedelta)`'s "7 days, 0:00:00"
-        # (#8308).
+        "(SELECT make_interval(secs => r.value::float8) FROM jsonb_each(%s) r"
+        " WHERE r.key = caller), %s)",
+        # Seconds as a JSON number: no text of a timedelta reaches the interval parser
+        # (#8308, #8451).
         (
-            Jsonb({c: f"{d.total_seconds()} seconds" for c, d in RETENTION_BY_CALLER.items()}),
+            Jsonb({c: d.total_seconds() for c, d in RETENTION_BY_CALLER.items()}),
             older_than,
         ),
     )
