@@ -23,7 +23,8 @@ build on `ubuntu-latest` with JDK 17. It pins the .NET SDK (`10.0.301`, in `app/
 SDK, which `dotnet` would otherwise pick, and whose manifests conflict with this workload set) and the workload set
 (`dotnet workload install maui-android --version 10.0.303.1`), the pair measured working here on
 2026-11-27 (`dotnet --version`, `dotnet workload --version`); move them together. The tests (`app/ScadBuddy.Tests`, xunit on `net10.0`, no
-Android) compile the app's pure files by link, today `DeepLink.Links.cs` and `DeviceProtocol.cs`:
+Android) compile the app's pure files by link, today `DeepLink.Links.cs`, `DeviceProtocol.cs` and
+`TaskForm.cs` (with the task fixtures in `ScadBuddy.Tests/fixtures/tasks/`):
 
 ```bash
 cd app/ScadBuddy.Tests && dotnet test
@@ -36,6 +37,19 @@ From WSL, run adb's server on port 5039: `~/android-sdk/platform-tools/adb -P 50
 an APK only over wireless debugging: pair once with `adb -P 5039 pair <ip:port> <code>` (the code
 from "Pair device with pairing code"), then the phone shows in `adb -P 5039 devices` through mDNS.
 The app logs each read under the logcat tag `ScadBuddyNfc`.
+
+## Phone checks
+
+With the app installed and paired, and the app behind:
+
+```bash
+adb -P 5039 shell dumpsys activity services com.ehhomelab.scadbuddy   # TaskService, isForeground=true
+adb -P 5039 shell dumpsys notification --noredact | grep -A3 questions  # a posted task
+```
+
+Then open a flow task the phone's owner may answer (a confirm, an enum, a scan by tag and by
+code, a photo, an entity), answer each from the phone, and read the run: each answer is there
+with `answered_by` "… via device …".
 
 ## The published APK
 
@@ -72,10 +86,41 @@ That stays until a release key signs every build (the #8376 follow-up).
   result, the tag dump, and the `nfc.write` record check. It uses no MAUI or Android type.
   Core's side is `tools/go/core/internal/devices` and `internal/realtime` (`device.go`).
 - `Platforms/Android/DeviceLink.cs`: the phone as a paired device. The token is in
-  `SecureStorage`. While the app is in front, it holds the realtime socket (`/api/v1/ws`,
-  `Authorization: Bearer sbdev_…`, subscribed to `device:<id>`), and posts
-  `/api/v1/devices/heartbeat` every 30 s. It runs one `device.call_requested` at a time, and
-  posts its events, uploads and result. A 401, or close code 4401, ends the pairing.
+  `SecureStorage`. While the app is in front, or while `TaskService` holds it, it holds the
+  realtime socket (`/api/v1/ws`, `Authorization: Bearer sbdev_…`, subscribed to `device:<id>`,
+  then to `tasks` on a frame of its own), and posts `/api/v1/devices/heartbeat` every 30 s with
+  `{"foreground": bool}` (a change of front sends one at once). It runs one
+  `device.call_requested` at a time, and posts its events, uploads and result. It hands
+  `task.changed` and `resync` to `TaskInbox`, and sends the `tasks` subscribe again and reads
+  the list every 5 minutes. A 401, or close code 4401, ends the pairing.
+- Flow questions on the phone (#8574, spec
+  `docs/superpowers/specs/2026-11-28-native-task-screens-design.md`, plan
+  `docs/superpowers/plans/2026-11-28-native-task-screens.md` Part B):
+  - `TaskForm.cs` (pure, tested): a task as core's device task routes send it (`TaskQuestion`'s
+    JSON plus `native`, `fallback_url`, `context_view`), the control each field takes (spec
+    §6.4; `Fields` is null for a field the app does not draw, the second guard after
+    `native`), the answer and the local check, the context blocks, and the replies of the
+    answer, photo and scan routes.
+  - `Platforms/Android/TaskInbox.cs`: the live list over `GET /api/v1/devices/tasks` and
+    `GET /api/v1/devices/task?id=`, and `task-answer`, `task-photo`, `task-scan` and
+    `task-image`. A task notifies once per id in a process (`Arrived`). A 404 from the list
+    (a core without the routes) is no tasks; a 403 `device_tasks_off` empties the list.
+  - `Platforms/Android/TaskService.cs`: the `dataSync` foreground service that keeps the socket
+    with the app behind, from pairing (or the next resume) until the app is swiped away or the
+    pairing ends. Android 15 stops it after 6 hours a day (`OnTimeout`); the next resume starts
+    it again.
+  - `Platforms/Android/TaskNotifications.cs`: channel `questions` ("Questions for you", high),
+    one notification per task tagged with its id, private on the lock screen with the public
+    text "ScadBuddy: Question for you", cancelled when the task leaves the list; channel
+    `listening` (min) for the service's own. Android 13+ asks `POST_NOTIFICATIONS` when the
+    first task arrives, from the activity. A tap carries the extra `task_id` to `MainActivity`
+    (`DeepLink.RaiseTask`).
+  - `TaskListPage.cs`, `TaskPage.cs`, `TaskControls.cs` (one view per `ControlKind`),
+    `ContextViews.cs`, `TaskTheme.cs` (the web's tokens) and `Platforms/Android/TaskReads.cs`
+    (a tag read for a scan field, read only, and a photo). The toolbar's "Tasks (n)" opens the
+    list. A task with `native` false, a `ui`, or a field `Fields` refuses opens
+    `fallback_url` on the web view's own origin (`TaskForm.FallbackOf`). An answer keeps its
+    `Idempotency-Key` across retries and takes a new one after a 422.
 - `Platforms/Android/DeviceMethods.cs`: the four methods (`nfc.read`, `nfc.write`,
   `code.scan`, `camera.capture`), and the full-screen "Tap the tag" view.
 - `Platforms/Android/NfcBridge.cs`: reader mode, MIFARE reads (keys from the
@@ -100,8 +145,12 @@ That stays until a release key signs every build (the #8376 follow-up).
 - Only the set origin's page gets the NFC bridge, the camera and the location. A pairing
   link always asks first. The question names the link's origin in punycode, and the set
   address too when it differs.
-- The socket and the heartbeat run only while the app is in front: they stop in `OnPause`
-  and start in `OnResume`. A running call goes on while a photo pauses the app.
+- Without `TaskService`, the socket and the heartbeat run only while the app is in front: they
+  stop in `OnPause` and start in `OnResume`. With it they go on behind, and the heartbeat says
+  `foreground: false`, so core sends no NFC call to a phone behind. A running call goes on
+  while a photo pauses the app.
+- A notification shows a task's title and its first entity card's title only, never other task
+  content, and is private on the lock screen. Nothing logs a task's schema, context or answer.
 - Bytes go up as one blob per read (`tag_dump` or `scan_image`, `POST /api/v1/devices/uploads`),
   never in an event or a result. A tag dump never holds a sector trailer (its keys).
 - Take the routes, the JSON shapes and the event kinds from core's code and tests, not from
