@@ -261,20 +261,6 @@ mode branch in `agent/src`, `frontend/src` or `backend/scadbuddy` (`.ts`, `.tsx`
 `harness/testConnection.ts`, or `agent-durable/` importing or depending on the Claude Agent
 SDK or naming `DurableSession` (plan Step 8.1).
 
-An SDK bump that fails `test/durableImport.sdk.test.ts` "the same fields" usually means only
-that the bundled Claude Code writes a new field on a transcript entry. The test compares each
-entry type's field names with a DurableSession fixture recorded under Claude Code 2.1.292, so
-that copied transcripts resume with no converter (plan 2026-10-13 Step 7.2). Read the diff's
-direction first: vitest's "Expected" is the second argument, `keysOf(written, …)`, the new
-CLI's. A field only the new CLI writes goes into that entry type's list of added fields, with
-its version in the comment (`madeBy` and `promptCacheRequested` on an assistant entry by
-2.1.327; `rowSource` on a user entry by 2.1.331, #8064). The file's "resumes" test is what
-shows the old entries still resume; it must still pass. A field the fixture has and the new
-CLI no longer writes is not that case: check that a resume does not need it before you change
-the test. `rowSource` labels where a user entry came from (`local`, `harness`, `recorded`,
-`hook`); this is read from the bundled 2.1.331 binary (`grep -ao` on
-`@anthropic-ai/claude-agent-sdk-linux-x64/claude`), and no agent code reads it.
-
 `agent/test/fixtures/secret-vectors.json` is written by `agent/test/secretVectors.test.ts`
 (`UPDATE_SECRET_VECTORS=1`) and opened by `agent-durable/tests`: a change to
 `agent/src/secrets.ts`'s format or `credentials.ts`'s AAD needs new vectors, and the port must open them.

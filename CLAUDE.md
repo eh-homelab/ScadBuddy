@@ -236,7 +236,9 @@ The backend's migration files and its settings tables: `backend/CLAUDE.md`.
   binary reports the version the SDK declares (`agent/src/check-cli-version.ts`), so
   no second pin moves with a bump (#1540). A bump still changes the harness under
   every query: the `*.e2e`/`*.sdk` tests run the real binary, and a "measured on"
-  note is re-dated only when what backs it was re-checked.
+  note is re-dated only when what backs it was re-checked. A new field on a transcript
+  entry fails `agent/test/durableImport.sdk.test.ts`'s field check; its comment says how
+  to read and fix that (#8064).
 - The `agent` jobs in `ci.yml` and `build-image.yml` use the buildx `type=gha` cache
   with `scope=agent`, so they do not overwrite the backend image's cache index.
 - Every `docker/setup-buildx-action` step sets `driver-opts:
