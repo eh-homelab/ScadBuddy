@@ -28,6 +28,28 @@ public static partial class DeepLink
 		return ClaimPath.IsMatch(claim.AbsolutePath) ? claim : null;
 	}
 
+	// A spool label's QR text (frontend labelSheet.ts labelPayload): no "//" and no host, so it
+	// outlives a move of the app (#8550).
+	static readonly Regex SpoolLabel = new("^scadbuddy:spool:([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12})$", RegexOptions.CultureInvariant);
+
+	/// <summary>The spool id a spool label's link <c>scadbuddy:spool:&lt;uuid&gt;</c> names, in lower case, or null.</summary>
+	public static string? SpoolOf(Uri? link)
+	{
+		if (link is null || link.Scheme != Scheme) return null;
+		var m = SpoolLabel.Match(link.OriginalString);
+		return m.Success ? m.Groups[1].Value.ToLowerInvariant() : null;
+	}
+
+	/// <summary>
+	/// The script the app runs in the signed-in page for a spool label: it reads the spool, then
+	/// opens <c>/x/S-&lt;n&gt;</c>, which offers a task that waits for the spool first (CodePage);
+	/// when the read fails it opens the spool's page. <paramref name="spool"/> is a checked uuid.
+	/// </summary>
+	public static string OpenSpoolScript(string spool) =>
+		"(async()=>{const id='" + spool + "';try{const r=await fetch('/api/v1/filament/spools/'+id,{credentials:'same-origin'});" +
+		"if(r.ok){const s=await r.json();if(Number.isInteger(s.number)){location.assign('/x/S-'+s.number);return}}}catch(e){}" +
+		"location.assign('/filament/spools/'+id)})()";
+
 	/// <summary>The origin with its host in ASCII (punycode), so a look-alike host never reads as another.</summary>
 	public static string OriginOf(Uri address) => $"{address.Scheme}://{address.IdnHost}{(address.IsDefaultPort ? "" : $":{address.Port}")}";
 
