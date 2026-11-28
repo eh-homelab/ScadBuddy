@@ -882,7 +882,8 @@ def _created(agent: Agent, body: dict[str, Any]) -> dict[str, Any]:
 
 def _fleet(tables: PgPool, body: dict[str, Any], row_id: str | None = None) -> dict[str, Any]:
     """A create (or, with ``row_id``, a save) by a caller other than the agent's: the agent's
-    routes refuse a claude_login and a fleet row, so the fleet's rows are written here."""
+    routes refuse a claude_login, a fleet row and a row whose scope is both (#8587), so the
+    fleet's rows are written here."""
     update = store.Update(**body)
     with tables.connection() as conn:
         row = (
@@ -955,7 +956,7 @@ def test_the_agents_reveal_never_opens_a_fleet_row(agent: Agent, tables: PgPool)
     login = _fleet(tables, {"kind": "claude_login", "secret": LOGIN})
     fleet = _fleet(tables, {"kind": "anthropic_api_key", "secret": API_KEY + "f", "scope": "fleet"})
     own = _created(agent, {"kind": "anthropic_api_key", "secret": API_KEY})
-    both = _created(agent, {"kind": "anthropic_api_key", "secret": API_KEY + "b", "scope": "both"})
+    both = _fleet(tables, {"kind": "anthropic_api_key", "secret": API_KEY + "b", "scope": "both"})
     every = agent.post("/credentials/reveal", {"all": True, "purpose": "turn"})
     assert [r["stored"]["id"] for r in every.json()["credentials"]] == [own["id"], both["id"]]
     assert REFRESH not in every.text and API_KEY + "f" not in every.text
@@ -1038,7 +1039,7 @@ def test_the_agents_caller_changes_no_fleet_row(agent: Agent, tables: PgPool) ->
     login = _fleet(tables, {"kind": "claude_login", "secret": LOGIN})
     own = _created(agent, {"kind": "anthropic_api_key", "secret": API_KEY})
     fleet = _fleet(tables, {"kind": "anthropic_api_key", "secret": API_KEY + "f", "scope": "fleet"})
-    both = _created(agent, {"kind": "anthropic_api_key", "secret": API_KEY + "b", "scope": "both"})
+    both = _fleet(tables, {"kind": "anthropic_api_key", "secret": API_KEY + "b", "scope": "both"})
     before = _state(agent)
     for row in (login, fleet):
         for path, body in (
@@ -1088,20 +1089,141 @@ def test_the_agents_caller_changes_no_fleet_row(agent: Agent, tables: PgPool) ->
     priorities = {i: p for i, (p, *_) in _state(agent).items()}
     assert (priorities[login["id"]], priorities[fleet["id"]]) == (0, 2)
     # With no id, a read, a save and a delete go to the first row the agent uses, never the
-    # fleet's login before it.
+    # fleet's login before it. That row's scope is both, so the save and the delete are
+    # refused (#8587).
     first = agent.get("/credentials/one").json()["credential"]
     assert first["id"] == both["id"]
     saved = agent.post(
         "/credentials/save", {"update": {"kind": "anthropic_api_key", "secret": "k"}}
     )
-    assert (saved.status_code, saved.json()["credential"]["id"]) == (200, both["id"]), saved.text
-    assert agent.post("/credentials/delete", {}).json() == {"deleted": True}
+    assert (saved.status_code, saved.json()["detail"]) == (409, store.SHARED_ROW_MESSAGE), (
+        saved.text
+    )
+    gone = agent.post("/credentials/delete", {})
+    assert (gone.status_code, gone.json()["detail"]) == (409, store.SHARED_ROW_MESSAGE), gone.text
+    assert agent.post("/credentials/delete", {"id": own["id"]}).json() == {"deleted": True}
     left = _state(agent)
-    assert set(left) == {login["id"], fleet["id"], own["id"]}
+    assert set(left) == {login["id"], both["id"], fleet["id"]}
     # The rest close up; the fleet's rows are otherwise as they were.
     assert left[login["id"]] == before[login["id"]]
-    assert left[fleet["id"]] == (1, *before[fleet["id"]][1:])
+    assert left[fleet["id"]] == before[fleet["id"]]
     assert _secrets(tables)[login["id"]] == LOGIN
+    assert _secrets(tables)[both["id"]] == API_KEY + "b"
+
+
+def _shared_refused(r: Any) -> None:
+    assert (r.status_code, r.json().get("reason"), r.json().get("detail")) == (
+        409,
+        "credential-refused",
+        store.SHARED_ROW_MESSAGE,
+    ), r.text
+
+
+def test_the_agents_caller_never_widens_a_row_to_the_fleet(agent: Agent, tables: PgPool) -> None:
+    """The fleet's rotator reads a row whose scope is both (#8587), so the agent's caller may
+    not make one, nor move its own row to both."""
+    _shared_refused(
+        agent.post(
+            "/credentials", {"kind": "anthropic_api_key", "secret": API_KEY, "scope": "both"}
+        )
+    )
+    _shared_refused(
+        agent.post(
+            "/credentials",
+            {
+                "kind": "gateway",
+                "base_url": "https://gw.example.com",
+                "secret": API_KEY,
+                "scope": "both",
+            },
+        )
+    )
+    own = _created(agent, {"kind": "anthropic_api_key", "secret": API_KEY, "scope": "agent"})
+    assert own["scope"] == "agent"
+    for update in (
+        {"kind": "anthropic_api_key", "scope": "both"},
+        {"kind": "anthropic_api_key", "secret": API_KEY + "x", "scope": "both"},
+    ):
+        _shared_refused(agent.post("/credentials/save", {"id": own["id"], "update": update}))
+    # With no id, the save goes to the agent's first row, and is refused the same way.
+    _shared_refused(
+        agent.post("/credentials/save", {"update": {"kind": "anthropic_api_key", "scope": "both"}})
+    )
+    listed = agent.get("/credentials").json()["credentials"]
+    assert [(c["id"], c["scope"], c["epoch"]) for c in listed] == [(own["id"], "agent", 0)]
+    assert _secrets(tables) == {own["id"]: API_KEY}
+
+
+def test_the_agents_caller_never_rewrites_a_shared_row(agent: Agent, tables: PgPool) -> None:
+    """A row whose scope is both (#8587): the agent's caller may not change its secret, kind,
+    base URL or scope, delete it or disable it. Each is a 409, and the row is as it was."""
+    shared = _fleet(tables, {"kind": "anthropic_api_key", "secret": API_KEY + "b", "scope": "both"})
+    gateway = _fleet(
+        tables,
+        {
+            "kind": "gateway",
+            "base_url": "https://gw.example.com",
+            "secret": API_KEY + "g",
+            "scope": "both",
+        },
+    )
+    before = _state(agent)
+    for row_id, update in (
+        (shared["id"], {"kind": "anthropic_api_key", "secret": API_KEY + "x"}),
+        (shared["id"], {"kind": "anthropic_api_key", "secret": API_KEY + "x", "scope": "agent"}),
+        (shared["id"], {"kind": "anthropic_api_key", "scope": "agent"}),
+        (shared["id"], {"kind": "claude_oauth_token", "secret": "sk-ant-oat01-x"}),
+        (
+            shared["id"],
+            {"kind": "gateway", "base_url": "https://evil.example.com", "secret": API_KEY},
+        ),
+        (
+            gateway["id"],
+            {"kind": "gateway", "base_url": "https://evil.example.com", "secret": API_KEY},
+        ),
+        (gateway["id"], {"kind": "gateway", "base_url": "https://gw.example.com"}),
+    ):
+        _shared_refused(agent.post("/credentials/save", {"id": row_id, "update": update}))
+    for row in (shared, gateway):
+        _shared_refused(agent.post("/credentials/delete", {"id": row["id"]}))
+        disabled = {"id": row["id"], "epoch": 0, "event": {"kind": "disabled", "reason": "401"}}
+        _shared_refused(agent.post("/credentials/events", disabled))
+    _shared_refused(agent.post("/credentials/delete", {}))
+    assert _state(agent) == before
+    listed = {c["id"]: c for c in agent.get("/credentials").json()["credentials"]}
+    assert [(listed[r["id"]]["kind"], listed[r["id"]]["base_url"]) for r in (shared, gateway)] == [
+        ("anthropic_api_key", None),
+        ("gateway", "https://gw.example.com"),
+    ]
+    assert _secrets(tables) == {shared["id"]: API_KEY + "b", gateway["id"]: API_KEY + "g"}
+
+
+def test_the_agent_still_uses_a_shared_row(agent: Agent, tables: PgPool) -> None:
+    """The agent uses a row whose scope is both (#8587): it reads and opens it, renames, resets
+    and reorders it, and records its use, a rate limit and a transient error on it."""
+    shared = _fleet(tables, {"kind": "anthropic_api_key", "secret": API_KEY + "b", "scope": "both"})
+    own = _created(agent, {"kind": "anthropic_api_key", "secret": API_KEY})
+    opened = agent.post("/credentials/reveal", {"id": shared["id"], "purpose": "test"})
+    assert opened.json()["credential"]["secret"] == API_KEY + "b"
+    used = {"id": shared["id"], "epoch": 0, "event": {"kind": "used"}}
+    assert agent.post("/credentials/events", used).json()["transition"]["after"] == "active"
+    transient = {"id": shared["id"], "epoch": 0, "event": {"kind": "transient", "reason": "503"}}
+    assert agent.post("/credentials/events", transient).json()["transition"]["after"] == "active"
+    cool = {
+        "id": shared["id"],
+        "epoch": 0,
+        "event": {"kind": "cooling_down", "until": "2099-01-01T00:00:00Z", "reason": "429"},
+    }
+    assert agent.post("/credentials/events", cool).json()["transition"]["after"] == "cooling_down"
+    reset = agent.post("/credentials/reset", {"id": shared["id"]}).json()["credential"]
+    assert (reset["status"], reset["epoch"]) == ("active", 1)
+    renamed = agent.post("/credentials/name", {"id": shared["id"], "name": "Shared"})
+    assert renamed.json()["credential"]["name"] == "Shared"
+    ordered = agent.post("/credentials/order", {"ids": [own["id"], shared["id"]]})
+    assert [c["id"] for c in ordered.json()["credentials"]] == [own["id"], shared["id"]]
+    row = agent.get("/credentials/one", id=shared["id"]).json()["credential"]
+    assert (row["scope"], row["kind"]) == ("both", "anthropic_api_key")
+    assert _secrets(tables)[shared["id"]] == API_KEY + "b"
 
 
 def test_the_fleets_caller_still_changes_its_rows(agent: Agent, tables: PgPool) -> None:
@@ -1168,9 +1290,11 @@ def test_the_scope_defaults_to_the_agent_and_a_save_moves_it(agent: Agent, table
 
     key = _created(agent, {"kind": "anthropic_api_key", "secret": API_KEY})
     assert (key["scope"], key["account_uuid"], key["email"]) == ("agent", None, None)
-    moved = save(key["id"], {"kind": "anthropic_api_key", "scope": "both"})
+    assert save(key["id"], {"kind": "anthropic_api_key", "scope": "agent"})["scope"] == "agent"
+    # Only a caller other than the agent's widens a row to both (#8587).
+    moved = _fleet(tables, {"kind": "anthropic_api_key", "scope": "both"}, key["id"])
     assert (moved["scope"], moved["epoch"]) == ("both", 0)
-    kept = save(key["id"], {"kind": "anthropic_api_key", "secret": API_KEY + "y"})
+    kept = _fleet(tables, {"kind": "anthropic_api_key", "secret": API_KEY + "y"}, key["id"])
     assert (kept["scope"], kept["epoch"]) == ("both", 1)
     # The fleet's caller turns it into a login, and back.
     as_login = _fleet(
@@ -1197,10 +1321,7 @@ def test_a_scope_or_email_save_moves_updated_at(agent: Agent, tables: PgPool) ->
     login = _fleet(tables, {"kind": "claude_login", "secret": LOGIN})
     with tables.connection() as conn:
         conn.execute("UPDATE ai_credentials SET updated_at = '2026-01-01T00:00:00Z'")
-    moved = agent.post(
-        "/credentials/save",
-        {"id": key["id"], "update": {"kind": "anthropic_api_key", "scope": "both"}},
-    ).json()["credential"]
+    moved = _fleet(tables, {"kind": "anthropic_api_key", "scope": "both"}, key["id"])
     mailed = _fleet(tables, {"kind": "claude_login", "email": "ops@example.com"}, login["id"])
     for row in (moved, mailed):
         assert row["epoch"] == 0

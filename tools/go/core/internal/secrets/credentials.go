@@ -45,6 +45,13 @@ const (
 	fleetRowMessage = "the fleet's credentials are not changed here: the assistant may not save, delete," +
 		" rename, reset, reorder or record an event on a claude_login or a credential whose" +
 		" scope is fleet"
+	// sharedRowMessage refuses the agent's caller a change to a row the fleet's login rotator reads
+	// too (#8587): the agent's caller never gives a row a scope other than agent, and never saves
+	// over, deletes or disables a row whose scope is both. It may still use, rename, reset and
+	// reorder such a row, and record its other health events.
+	sharedRowMessage = "a credential whose scope is both is shared with the fleet: the assistant may use it, but" +
+		" may not give a credential a scope other than agent, or save over, delete or disable a" +
+		" credential whose scope is both"
 )
 
 var kinds = []string{"anthropic_api_key", "claude_login", "claude_oauth_token", "gateway"}
@@ -195,6 +202,10 @@ type querier interface {
 // every read of sealed bytes takes it, in the SQL: a fleet row reads as no row.
 const agentsOwn = "scope IN ('agent', 'both') AND kind <> 'claude_login'"
 
+// notShared is what the agent's caller's delete and disable add to agentsOwn (#8587): never a row
+// whose scope is both, which the fleet's login rotator reads too.
+const notShared = "scope <> 'both'"
+
 // rows are the credentials as of the database's clock: an expired cooldown reads as active.
 // With sealed, the sealed bytes too, of the agent's own rows only.
 func rows(ctx context.Context, q querier, id *string, sealed bool) ([]row, error) {
@@ -245,14 +256,19 @@ func firstOf(ctx context.Context, q querier, id *string, agent bool) (*row, erro
 func (r *row) fleets() bool { return r.Kind == claudeLogin || r.Scope == "fleet" }
 
 // refuseIfFleets runs after a write of the agent's caller that matched no row of agentsOwn: a 409
-// when the row is the fleet's, so the caller tells a fleet row from a row that is gone.
-func refuseIfFleets(ctx context.Context, q querier, id string) error {
+// when the row is the fleet's, so the caller tells a fleet row from a row that is gone. With
+// shared, the write also left out rows whose scope is both (notShared), so such a row is a 409
+// too (#8587).
+func refuseIfFleets(ctx context.Context, q querier, id string, shared bool) error {
 	found, err := first(ctx, q, &id)
 	if err != nil {
 		return err
 	}
 	if found != nil && found.fleets() {
 		return refused(409, fleetRowMessage)
+	}
+	if shared && found != nil && found.Scope == "both" {
+		return refused(409, sharedRowMessage)
 	}
 	return nil
 }
@@ -261,6 +277,15 @@ func refuseIfFleets(ctx context.Context, q querier, id string) error {
 func ownOnly(agent bool) string {
 	if agent {
 		return " AND " + agentsOwn
+	}
+	return ""
+}
+
+// notSharedOnly is the notShared condition the agent's caller's delete and disable add after
+// ownOnly (#8587).
+func notSharedOnly(agent bool) string {
+	if agent {
+		return " AND " + notShared
 	}
 	return ""
 }
@@ -549,13 +574,21 @@ func loginAccount(secret string) (account, string, error) {
 // refuseFleetRows is a create or save of the agent's caller (#7983): never a claude_login, never a
 // row whose scope is or becomes fleet. A 409, which the agent's store passes on. Its delete,
 // rename, reset and events refuse a fleet row with the same 409 (refuseIfFleets), and so does a
-// reorder that names one.
+// reorder that names one. #8587: the fleet reads a row whose scope is both too, so the agent's
+// caller asks no scope but agent, and never saves over a row whose scope is both (its secret,
+// kind, base URL or scope), with the same 409 shape.
 func refuseFleetRows(u update, current *row) error {
 	if u.kind == claudeLogin || (u.scope != nil && *u.scope == "fleet") {
 		return refused(409, fleetRowMessage)
 	}
 	if current != nil && (current.Kind == claudeLogin || current.Scope == "fleet") {
 		return refused(409, fleetRowMessage)
+	}
+	if u.scope != nil && *u.scope != "agent" {
+		return refused(409, sharedRowMessage)
+	}
+	if current != nil && current.Scope == "both" {
+		return refused(409, sharedRowMessage)
 	}
 	return nil
 }
@@ -813,8 +846,8 @@ func (s *Store) delete(r *http.Request, _ crud.Params) (any, error) {
 }
 
 // deleteRow deletes a credential (the first by priority when id is nil); the rest close up.
-// agent: the agent's caller deletes the agent's rows only, a fleet row is a 409, and with no id it
-// deletes the first row the agent uses.
+// agent: the agent's caller deletes the agent's rows only, a fleet row or a row whose scope is
+// both is a 409 (#8587), and with no id it deletes the first row the agent uses.
 func (s *Store) deleteRow(ctx context.Context, id *string, agent bool) (bool, error) {
 	deleted := false
 	err := pgx.BeginFunc(ctx, s.Pool, func(tx pgx.Tx) error {
@@ -829,13 +862,13 @@ func (s *Store) deleteRow(ctx context.Context, id *string, agent bool) (bool, er
 			}
 			target = &current.ID
 		}
-		tag, err := tx.Exec(ctx, `DELETE FROM ai_credentials WHERE id = $1`+ownOnly(agent), *target)
+		tag, err := tx.Exec(ctx, `DELETE FROM ai_credentials WHERE id = $1`+ownOnly(agent)+notSharedOnly(agent), *target)
 		if err != nil {
 			return err
 		}
 		if tag.RowsAffected() == 0 {
 			if agent {
-				return refuseIfFleets(ctx, tx, *target)
+				return refuseIfFleets(ctx, tx, *target, true)
 			}
 			return nil
 		}
@@ -952,7 +985,7 @@ func (s *Store) resetRow(ctx context.Context, id string, agent bool) (*row, erro
 		}
 		if tag.RowsAffected() == 0 {
 			if agent {
-				return refuseIfFleets(ctx, tx, id)
+				return refuseIfFleets(ctx, tx, id, false)
 			}
 			return nil
 		}
@@ -997,7 +1030,7 @@ func (s *Store) renameRow(ctx context.Context, id string, name *string, agent bo
 		}
 		if tag.RowsAffected() == 0 {
 			if agent {
-				return refuseIfFleets(ctx, tx, id)
+				return refuseIfFleets(ctx, tx, id, false)
 			}
 			return nil
 		}
@@ -1007,11 +1040,12 @@ func (s *Store) renameRow(ctx context.Context, id string, name *string, agent bo
 	return out, err
 }
 
-// before locks the row an event is recorded on; with agent, a row of the agent's only.
-func before(agent bool) string {
+// before locks the row an event is recorded on; with agent, a row of the agent's only, and with
+// shared too, never a row whose scope is both (#8587).
+func before(agent, shared bool) string {
 	return `SELECT id, status AS raw, CASE WHEN status = 'cooling_down' AND cooldown_until <= now()
 	THEN 'active' ELSE status END AS status FROM ai_credentials
-	WHERE id = @id AND epoch = @epoch` + ownOnly(agent) + ` FOR UPDATE`
+	WHERE id = @id AND epoch = @epoch` + ownOnly(agent) + notSharedOnly(shared) + ` FOR UPDATE`
 }
 
 var record = map[string]string{
@@ -1102,10 +1136,12 @@ type recorded struct{ Before, Raw, After string }
 // recordEvent records what a query learned; nil when the row is gone or its epoch moved on. before
 // locks the row, so the transition answered is the one written even when several pods report at
 // once. agent: the agent's rows only, a fleet row is a 409, so the agent's caller never cools down
-// or disables a fleet login.
+// or disables a fleet login. Its disabled on a row whose scope is both is a 409 too (#8587), so it
+// cannot take that row from the fleet. Its other events on such a row are recorded as before.
 func (s *Store) recordEvent(ctx context.Context, id string, epoch int64, kind string, reason *string,
 	until, replacing *time.Time, agent bool) (*recorded, error) {
-	sql := "WITH b AS (" + before(agent) + ") " + record[kind] +
+	shared := agent && kind == "disabled"
+	sql := "WITH b AS (" + before(agent, shared) + ") " + record[kind] +
 		" FROM b WHERE c.id = b.id RETURNING b.status AS before, b.raw AS raw, c.status AS after"
 	var found *recorded
 	err := pgx.BeginFunc(ctx, s.Pool, func(tx pgx.Tx) error {
@@ -1115,7 +1151,7 @@ func (s *Store) recordEvent(ctx context.Context, id string, epoch int64, kind st
 		}).Scan(&r.Before, &r.Raw, &r.After)
 		if errors.Is(err, pgx.ErrNoRows) {
 			if agent {
-				return refuseIfFleets(ctx, tx, id)
+				return refuseIfFleets(ctx, tx, id, shared)
 			}
 			return nil
 		}

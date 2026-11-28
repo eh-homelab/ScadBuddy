@@ -209,7 +209,10 @@ security: [browser-bridge.md](../ai/browser-bridge.md).
   `claude_login` or a `fleet` row in any way: a create, save, delete, rename, reset or event
   on one is a 409 from the API, a reorder names the agent's rows only (fleet rows keep their
   priorities), and a call with no id (the deprecated single-credential routes) takes the first
-  row the agent uses. Settings shows fleet rows read-only.
+  row the agent uses. The fleet reads a `both` row too (#8587), so the agent's caller may not
+  name a scope other than `agent`, save over a `both` row, delete one or record `disabled` on
+  one (each a 409); it still uses, renames, resets and reorders a `both` row and records its
+  other health events. Settings shows fleet rows read-only.
 
 ## Tests and evals
 

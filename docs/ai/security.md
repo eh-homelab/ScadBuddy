@@ -417,10 +417,19 @@ The agent reads no KEK (#5299 step 12).
   write's SQL matches the agent's rows only). Its reorder names the agent's rows only (an
   order that names a fleet row is the 409), and every fleet row keeps its priority. With no
   id, its read, save and delete take the first row the agent uses, never a fleet row, so the
-  deprecated single-credential routes act on that row. So a compromised agent pod can neither
-  plant a login that a fleet machine installs nor replace, delete, rename, reset, cool down or
-  disable a fleet login. Only the fleet's own caller (#7984, `agent=False` in the store) writes
-  fleet rows. Any other caller's save that widens a `fleet` row to `agent` or `both` must carry
+  deprecated single-credential routes act on that row. The fleet's login rotator also reads a
+  row whose `scope` is `both`, so the agent's caller is refused (the same 409
+  `credential-refused`, with its own detail, `SHARED_ROW_MESSAGE`, core's `sharedRowMessage`,
+  #8587) a create or save that names a `scope` other than `agent`, any save over a `both` row
+  (its secret, kind, base URL or scope), and a delete or a `disabled` event on a `both` row
+  (that delete and that event match no `both` row in their SQL, `NOT_SHARED`, core's
+  `notShared`). The agent still uses a `both` row: it opens it in a reveal, renames, resets and
+  reorders it, and records `used`, `cooling_down` and `transient` events on it. So a
+  compromised agent pod can neither plant a credential that a fleet machine installs (a
+  `claude_login`, a `fleet` row or a `both` row) nor replace, delete or disable one. It can
+  still rename, reset or reorder a `both` row and cool one down, for a time it chooses, as the
+  agent's own health writes need. Only a caller other than the agent's (the fleet's own caller,
+  #7984, `agent=False` in the store) writes fleet rows and `both` rows. Any other caller's save that widens a `fleet` row to `agent` or `both` must carry
   the secret again, else it is a 422), a
   subject's payload data key from `POST …/crud/agent/payload-keys/{subject}`, never the
   KEK. Each answers the `agent` service credential only, writes its `ai_audit` row in the

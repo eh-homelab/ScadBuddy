@@ -65,6 +65,15 @@ FLEET_ROW_MESSAGE = (
     " rename, reset, reorder or record an event on a claude_login or a credential whose"
     " scope is fleet"
 )
+#: The agent's caller uses a row whose scope is both, but the fleet's login rotator reads that row
+#: too (#8587). So the agent's caller never gives a row a scope other than agent, and never saves
+#: over, deletes or disables a row whose scope is both. It may still use, rename, reset and
+#: reorder such a row, and record its other health events.
+SHARED_ROW_MESSAGE = (
+    "a credential whose scope is both is shared with the fleet: the assistant may use it, but"
+    " may not give a credential a scope other than agent, or save over, delete or disable a"
+    " credential whose scope is both"
+)
 LOGIN_MESSAGE = "a claude_login secret must be a claudeAiOauth JSON object"
 LOGIN_NEEDS = (
     "a claude_login secret needs accessToken and refreshToken as text and expiresAt as a number"
@@ -191,6 +200,9 @@ def _dict(row: Any, names: list[str]) -> dict[str, Any]:
 #: The agent's rows only (#7983): never a fleet row. The reveal is the agent's, so every read
 #: of sealed bytes takes it, in the SQL: a fleet row reads as no row.
 AGENTS_OWN = "scope IN ('agent', 'both') AND kind <> 'claude_login'"
+#: What the agent's caller's delete and disable add to ``AGENTS_OWN`` (#8587): never a row whose
+#: scope is both, which the fleet's login rotator reads too.
+NOT_SHARED = "scope <> 'both'"
 
 
 def _rows(
@@ -222,12 +234,16 @@ def _fleets(row: dict[str, Any]) -> bool:
     return bool(row["kind"] == CLAUDE_LOGIN or row["scope"] == "fleet")
 
 
-def _refuse_if_fleets(conn: Connection[Any], row_id: str) -> None:
+def _refuse_if_fleets(conn: Connection[Any], row_id: str, *, shared: bool = False) -> None:
     """After a write of the agent's caller that matched no row of ``AGENTS_OWN``: a 409 when
-    the row is the fleet's, so the caller tells a fleet row from a row that is gone."""
+    the row is the fleet's, so the caller tells a fleet row from a row that is gone. With
+    ``shared``, the write also left out rows whose scope is both (``NOT_SHARED``), so such a
+    row is a 409 too (#8587)."""
     found = _rows(conn, row_id)
     if found and _fleets(found[0]):
         raise CredentialRefusedError(FLEET_ROW_MESSAGE, 409)
+    if shared and found and found[0]["scope"] == "both":
+        raise CredentialRefusedError(SHARED_ROW_MESSAGE, 409)
 
 
 def stored(row: dict[str, Any]) -> dict[str, Any]:
@@ -390,11 +406,17 @@ def _refuse_fleet_rows(update: Update, current: dict[str, Any] | None) -> None:
     """A create or save of the agent's caller (#7983): never a claude_login, never a row whose
     scope is or becomes fleet. A 409, which the agent's store passes on. Its delete, rename,
     reset and events refuse a fleet row with the same 409 (``_refuse_if_fleets``), and so
-    does a reorder that names one."""
+    does a reorder that names one. #8587: the fleet reads a row whose scope is both too, so
+    the agent's caller asks no scope but agent, and never saves over a row whose scope is
+    both (its secret, kind, base URL or scope), with the same 409 shape."""
     if update.kind == CLAUDE_LOGIN or update.scope == "fleet":
         raise CredentialRefusedError(FLEET_ROW_MESSAGE, 409)
     if current is not None and (current["kind"] == CLAUDE_LOGIN or current["scope"] == "fleet"):
         raise CredentialRefusedError(FLEET_ROW_MESSAGE, 409)
+    if update.scope not in (None, "agent"):
+        raise CredentialRefusedError(SHARED_ROW_MESSAGE, 409)
+    if current is not None and current["scope"] == "both":
+        raise CredentialRefusedError(SHARED_ROW_MESSAGE, 409)
 
 
 def _plan(
@@ -584,17 +606,18 @@ def put(
 def delete(conn: Connection[Any], row_id: str | None, *, agent: bool = True) -> bool:
     """Deletes a credential (the first by priority when ``row_id`` is None); the rest
     close up. ``agent`` (the default): the agent's caller deletes the agent's rows only, a
-    fleet row is a 409, and with no ``row_id`` it deletes the first row the agent uses."""
+    fleet row or a row whose scope is both is a 409 (#8587), and with no ``row_id`` it deletes
+    the first row the agent uses."""
     with conn.transaction():
         _lock(conn)
         target = row_id if row_id is not None else _first_id(conn, agent=agent)
         if target is None:
             return False
-        own = f" AND {AGENTS_OWN}" if agent else ""
+        own = f" AND {AGENTS_OWN} AND {NOT_SHARED}" if agent else ""
         deleted = conn.execute(f"DELETE FROM ai_credentials WHERE id = %s{own}", (target,))
         if deleted.rowcount == 0:
             if agent:
-                _refuse_if_fleets(conn, target)
+                _refuse_if_fleets(conn, target, shared=True)
             return False
         conn.execute(
             "UPDATE ai_credentials c SET priority = n.rn - 1 FROM (SELECT id,"
@@ -711,8 +734,14 @@ def record_event(
     """Records what a query learned; None when the row is gone or its epoch moved on.
     ``before`` locks the row, so the transition answered is the one written even when
     several pods report at once. ``agent`` (the default): the agent's rows only, a fleet row
-    is a 409, so the agent's caller never cools down or disables a fleet login."""
-    before = _BEFORE.format(own=f" AND {AGENTS_OWN}" if agent else "")
+    is a 409, so the agent's caller never cools down or disables a fleet login. Its
+    ``disabled`` on a row whose scope is both is a 409 too (#8587), so it cannot take that row
+    from the fleet. Its other events on such a row are recorded as before."""
+    shared = agent and event.kind == "disabled"
+    own = ""
+    if agent:
+        own = f" AND {AGENTS_OWN} AND {NOT_SHARED}" if shared else f" AND {AGENTS_OWN}"
+    before = _BEFORE.format(own=own)
     sql = (
         f"WITH b AS ({before}) {_RECORD[event.kind]} FROM b WHERE c.id = b.id"
         " RETURNING b.status AS before, b.raw AS raw, c.status AS after"
@@ -729,7 +758,7 @@ def record_event(
         names = [d.name for d in cur.description or []]
         row = cur.fetchone()
         if row is None and agent:
-            _refuse_if_fleets(conn, row_id)
+            _refuse_if_fleets(conn, row_id, shared=shared)
     if row is None:
         return None
     found = _dict(row, names)
