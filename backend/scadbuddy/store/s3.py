@@ -12,15 +12,17 @@ from __future__ import annotations
 import asyncio
 import logging
 import re
-from collections.abc import AsyncGenerator, Callable, Iterator
+import socket
+from collections.abc import AsyncGenerator, Awaitable, Callable, Iterator, Sequence
 from contextlib import AbstractAsyncContextManager, AsyncExitStack, contextmanager
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
-from typing import TYPE_CHECKING, BinaryIO, Final, get_args
+from typing import TYPE_CHECKING, Any, BinaryIO, Final, get_args
 
 from aiobotocore.config import AioConfig
 from aiobotocore.session import AioSession, get_session
-from botocore.exceptions import ClientError
+from aiohttp import ClientConnectorError
+from botocore.exceptions import ClientError, ConnectTimeoutError, EndpointConnectionError
 from opentelemetry.trace import Span, SpanKind
 
 from scadbuddy.core.tracing import span, traced_thread
@@ -67,6 +69,9 @@ _CHUNK = 1 << 20
 #: tries (measured from the homelab LAN on 2026-11-24, #7287). Well under the 60 s.
 KEEPALIVE_S: Final = 40
 _MISSING = frozenset({"404", "NoSuchKey", "NotFound"})
+#: The waits before each retry of a content request whose connection was never made
+#: (`connect_failed`, #8471), on top of botocore's own standard-mode attempts.
+CONNECT_BACKOFF: Final = (0.5, 1.0, 2.0)
 _OBJECT = re.compile(
     "(" + "|".join(re.escape(kind) for kind in get_args(BlobKind)) + ")/[0-9a-f]{64}"
 )
@@ -126,6 +131,22 @@ def _missing(error: ClientError) -> bool:
     return error.response.get("Error", {}).get("Code") in _MISSING
 
 
+def connect_failed(error: BaseException) -> bool:
+    """Whether ``error`` is a request whose connection was never made, so no byte of it
+    reached the store (#8471): a connect timeout, or an ``EndpointConnectionError`` over
+    a refused connection or a failed name lookup. aiobotocore 3.10 raises
+    ``EndpointConnectionError`` for any aiohttp ``ClientConnectionError`` too
+    (``aiobotocore/httpsession.py``), a reset in the middle of a body included, so only
+    those two causes count. A read timeout (``ReadTimeoutError``) or a closed connection
+    (``ConnectionClosedError``) follows a sent request and is never one."""
+    if isinstance(error, ConnectTimeoutError):
+        return True
+    if isinstance(error, EndpointConnectionError):
+        cause = error.kwargs.get("error")
+        return isinstance(cause, ClientConnectorError | socket.gaierror)
+    return False
+
+
 @contextmanager
 def _request(operation: str, kind: str, *, size: int | None = None) -> Iterator[Span]:
     """One span per S3 request (#7245), named as OpenTelemetry's AWS SDK conventions name
@@ -166,11 +187,15 @@ class S3ContentBackend:
         multipart_threshold: int = 64 << 20,
         part_size: int = 16 << 20,
         config: AioConfig | None = None,
+        connect_backoff: Sequence[float] = CONNECT_BACKOFF,
     ) -> None:
         """``config`` is merged over the default, botocore's standard retry mode (three
         attempts, https://docs.aws.amazon.com/sdkref/latest/guide/feature-retry-behavior.html);
-        a check that must fail fast passes its own ``retries``."""
+        a check that must fail fast passes its own ``retries``. A content request whose
+        connection was never made is tried again after each wait of ``connect_backoff``
+        (`_connect_retried`, #8471)."""
         self.settings = settings
+        self.connect_backoff = tuple(connect_backoff)
         self.multipart_threshold = multipart_threshold
         self.part_size = part_size
         self.config = AioConfig(
@@ -246,6 +271,27 @@ class S3ContentBackend:
         """The backend's client, opened on first use."""
         return await self._s3()
 
+    async def _connect_retried[T](self, operation: str, call: Callable[[], Awaitable[T]]) -> T:
+        """``call`` (one request), made again after each wait of `connect_backoff` while
+        it fails before its connection was made (`connect_failed`). No byte of such a
+        request reached the store, so another try repeats no effect. Any other error, a
+        read timeout after the request was sent included, propagates at once. On
+        2026-11-28 one ``entity_attachment_add`` failed on a connect timeout to DO Spaces
+        that outlasted botocore's own three attempts, 7 minutes after its pod started
+        (#8471)."""
+        for wait in self.connect_backoff:
+            try:
+                return await call()
+            except (ConnectTimeoutError, EndpointConnectionError) as error:
+                if not connect_failed(error):
+                    raise
+                logger.warning(
+                    "the store took no connection; trying the request again",
+                    extra={"operation": operation, "wait_s": wait, "error": type(error).__name__},
+                )
+            await asyncio.sleep(wait)
+        return await call()
+
     async def aclose(self) -> None:
         await self._exits.aclose()
         self._client = None
@@ -278,14 +324,28 @@ class S3ContentBackend:
         client = await self._s3()
         bucket = self.settings.bucket
         if isinstance(data, bytes):
-            with _request("PutObject", kind, size=size):
-                await client.put_object(Bucket=bucket, Key=key, Body=data)
+            body = data
+
+            async def put_bytes() -> None:
+                with _request("PutObject", kind, size=size):
+                    await client.put_object(Bucket=bucket, Key=key, Body=body)
+
+            # The key is the bytes' sha256: a second PUT writes the same object.
+            await self._connect_retried("PutObject", put_bytes)
             return key
         try:
             if size <= self.multipart_threshold:
-                # The file itself: botocore and aiohttp read it a chunk at a time.
-                with _request("PutObject", kind, size=size):
-                    await client.put_object(Bucket=bucket, Key=key, Body=data, ContentLength=size)
+                stream = data
+
+                async def put_file() -> None:
+                    stream.seek(0)
+                    # The file itself: botocore and aiohttp read it a chunk at a time.
+                    with _request("PutObject", kind, size=size):
+                        await client.put_object(
+                            Bucket=bucket, Key=key, Body=stream, ContentLength=size
+                        )
+
+                await self._connect_retried("PutObject", put_file)
             else:
                 await self._multipart(client, key, data, kind)
         finally:
@@ -294,24 +354,41 @@ class S3ContentBackend:
 
     async def _multipart(self, client: S3Client, key: str, data: BinaryIO, kind: str) -> None:
         bucket = self.settings.bucket
-        with _request("CreateMultipartUpload", kind):
-            created = await client.create_multipart_upload(Bucket=bucket, Key=key)
-        upload_id = created["UploadId"]
+
+        async def create() -> str:
+            with _request("CreateMultipartUpload", kind):
+                created = await client.create_multipart_upload(Bucket=bucket, Key=key)
+            return created["UploadId"]
+
+        upload_id = await self._connect_retried("CreateMultipartUpload", create)
         try:
             parts: list[CompletedPartTypeDef] = []
             number = 1
             while part := await asyncio.to_thread(data.read, self.part_size):
-                with _request("UploadPart", kind, size=len(part)):
-                    done = await client.upload_part(
-                        Bucket=bucket, Key=key, UploadId=upload_id, PartNumber=number, Body=part
-                    )
-                parts.append({"ETag": done["ETag"], "PartNumber": number})
+                # Bound as defaults: the loop moves `part` and `number` on.
+                async def put_part(part: bytes = part, number: int = number) -> str:
+                    with _request("UploadPart", kind, size=len(part)):
+                        done = await client.upload_part(
+                            Bucket=bucket, Key=key, UploadId=upload_id, PartNumber=number, Body=part
+                        )
+                    return done["ETag"]
+
+                # A part sent again under its number replaces the first copy.
+                etag = await self._connect_retried("UploadPart", put_part)
+                parts.append({"ETag": etag, "PartNumber": number})
                 number += 1
-            with _request("CompleteMultipartUpload", kind) as current:
-                current.set_attribute("scadbuddy.parts", len(parts))
-                await client.complete_multipart_upload(
-                    Bucket=bucket, Key=key, UploadId=upload_id, MultipartUpload={"Parts": parts}
-                )
+
+            async def complete() -> None:
+                with _request("CompleteMultipartUpload", kind) as current:
+                    current.set_attribute("scadbuddy.parts", len(parts))
+                    await client.complete_multipart_upload(
+                        Bucket=bucket,
+                        Key=key,
+                        UploadId=upload_id,
+                        MultipartUpload={"Parts": parts},
+                    )
+
+            await self._connect_retried("CompleteMultipartUpload", complete)
         except BaseException:
             try:
                 with _request("AbortMultipartUpload", kind):
@@ -326,15 +403,20 @@ class S3ContentBackend:
         # The request up to its headers only: a span held across this generator's
         # `yield` would be current in its consumer. The consumer's own span (the
         # download cache's) covers the body's read.
-        with _request("GetObject", _kind_of(self.settings.prefix, key)) as current:
-            try:
-                response = await client.get_object(Bucket=self.settings.bucket, Key=key)
-            except ClientError as error:
-                if _missing(error):
-                    current.set_attribute("scadbuddy.blob_found", False)
-                    raise BlobMissingError(backend_id) from None
-                raise
-            current.set_attribute("scadbuddy.bytes", response["ContentLength"])
+
+        async def get() -> Any:
+            with _request("GetObject", _kind_of(self.settings.prefix, key)) as current:
+                try:
+                    response = await client.get_object(Bucket=self.settings.bucket, Key=key)
+                except ClientError as error:
+                    if _missing(error):
+                        current.set_attribute("scadbuddy.blob_found", False)
+                        raise BlobMissingError(backend_id) from None
+                    raise
+                current.set_attribute("scadbuddy.bytes", response["ContentLength"])
+            return response
+
+        response = await self._connect_retried("GetObject", get)
         body = response["Body"]
         async with body:
             async for chunk in body.iter_chunks(_CHUNK):
@@ -343,16 +425,20 @@ class S3ContentBackend:
     async def exists(self, backend_id: str) -> bool:
         key = self._key(backend_id)
         client = await self._s3()
-        with _request("HeadObject", _kind_of(self.settings.prefix, key)) as current:
-            try:
-                await client.head_object(Bucket=self.settings.bucket, Key=key)
-            except ClientError as error:
-                if _missing(error):
-                    current.set_attribute("scadbuddy.blob_found", False)
-                    return False
-                raise
-            current.set_attribute("scadbuddy.blob_found", True)
-        return True
+
+        async def head() -> bool:
+            with _request("HeadObject", _kind_of(self.settings.prefix, key)) as current:
+                try:
+                    await client.head_object(Bucket=self.settings.bucket, Key=key)
+                except ClientError as error:
+                    if _missing(error):
+                        current.set_attribute("scadbuddy.blob_found", False)
+                        return False
+                    raise
+                current.set_attribute("scadbuddy.blob_found", True)
+            return True
+
+        return await self._connect_retried("HeadObject", head)
 
     async def presign_get(
         self,
@@ -380,8 +466,13 @@ class S3ContentBackend:
     async def remove(self, backend_id: str) -> None:
         key = self._key(backend_id)
         client = await self._s3()
-        with _request("DeleteObject", _kind_of(self.settings.prefix, key)):
-            await client.delete_object(Bucket=self.settings.bucket, Key=key)
+
+        async def delete() -> None:
+            with _request("DeleteObject", _kind_of(self.settings.prefix, key)):
+                await client.delete_object(Bucket=self.settings.bucket, Key=key)
+
+        # S3's delete is idempotent: a second one of a gone object is no error.
+        await self._connect_retried("DeleteObject", delete)
 
     def _staged(self, key: str) -> str:
         prefix = f"{self.settings.prefix}/"

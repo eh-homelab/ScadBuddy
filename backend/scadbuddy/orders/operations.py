@@ -1093,8 +1093,9 @@ def order_kinds(core: Core, components: Components) -> list[OperationKind]:
                     request["item_id"],
                     Actor.model_validate(request["by"]),
                     # Made here, not in the request, so a re-sent upload (the same
-                    # Idempotency-Key) is the same request; the run has one attempt.
-                    attachment_id=str(uuid.uuid4()),
+                    # Idempotency-Key) is the same request; the operation's own, so a
+                    # second attempt finds the row a first one committed (#8471).
+                    attachment_id=attachments.run_attachment_id(ORDER_ATTACHMENT_ADD),
                     kind=request["kind"],
                     role=request["role"],
                     filename=request["filename"],
@@ -1244,9 +1245,11 @@ def order_kinds(core: Core, components: Components) -> list[OperationKind]:
             ORDER_ATTACHMENT_ADD,
             attachment_check,
             attachment_run,
-            # A second attempt after a partial failure would only repeat the same
-            # claimed bytes: the caller re-sends instead.
-            run_attempts=1,
+            # Every step may run again (#8471). A blob of the same bytes is kept once
+            # (`attachments.keep` finds it), and the row's id is the operation's, so an
+            # attempt after one that committed finds that row (`add_attachment`). A
+            # store or database briefly away is tried again.
+            run_attempts=attachments.RUN_ATTEMPTS,
             queue="library",
             # Moves (or copies) up to the upload limit into the blob store and publishes it.
             run_timeout=PIN_TIMEOUT,

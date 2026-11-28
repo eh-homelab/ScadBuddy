@@ -15,16 +15,25 @@ from urllib.parse import parse_qs, urlsplit
 import httpx
 import pytest
 from aiobotocore.config import AioConfig
-from botocore.exceptions import EndpointConnectionError
+from aiohttp import ClientConnectorError, ClientOSError
+from aiohttp.client_reqrep import ConnectionKey
+from botocore.exceptions import (
+    ConnectionClosedError,
+    ConnectTimeoutError,
+    EndpointConnectionError,
+    ReadTimeoutError,
+)
 from botocore.loaders import JSONFileLoader
 
 from scadbuddy.library.settings_store import S3Settings
 from scadbuddy.store.content import ContentBackend
 from scadbuddy.store.content_models import BlobMissingError, BlobScope
 from scadbuddy.store.s3 import (
+    CONNECT_BACKOFF,
     KEEPALIVE_S,
     STAGED_PUT_HEADERS,
     S3ContentBackend,
+    connect_failed,
     object_key,
     staged_upload,
     staging_key,
@@ -319,6 +328,7 @@ async def test_a_connection_error_is_not_a_missing_object() -> None:
         ),
         # One attempt: a refused connection fails at once, not after standard's retries.
         config=AioConfig(retries={"max_attempts": 1}),
+        connect_backoff=(),
     )
     try:
         # Not a BlobMissingError, which would drop the index row of a blob still there.
@@ -505,5 +515,149 @@ async def test_sweep_unrecorded_never_touches_the_staging_area(s3: S3Settings) -
         swept = await backend.sweep_unrecorded(cutoff=datetime.now(UTC), recorded=lambda _: False)
         assert swept == 0
         assert await backend.staged_size(staging_key("t", STAGED)) == 1
+    finally:
+        await backend.aclose()
+
+
+URL = "https://store.test/t/piece/" + "0" * 64
+
+
+def _refused() -> EndpointConnectionError:
+    key = ConnectionKey("store.test", 443, True, True, None, None, None)
+    return EndpointConnectionError(
+        endpoint_url=URL, error=ClientConnectorError(key, ConnectionRefusedError(111, "refused"))
+    )
+
+
+def test_only_a_connection_never_made_is_a_connect_failure() -> None:
+    """#8471: a connect timeout, a refused connection and a failed lookup sent no byte;
+    a read timeout, a closed connection or a reset during the body may have."""
+    assert connect_failed(ConnectTimeoutError(endpoint_url=URL))
+    assert connect_failed(_refused())
+    assert connect_failed(
+        EndpointConnectionError(endpoint_url=URL, error=socket.gaierror(-2, "unknown name"))
+    )
+    assert not connect_failed(ReadTimeoutError(endpoint_url=URL))
+    assert not connect_failed(ConnectionClosedError(endpoint_url=URL))
+    # aiobotocore wraps any aiohttp `ClientConnectionError` so, a reset mid-body included.
+    reset = EndpointConnectionError(endpoint_url=URL, error=ClientOSError(104, "reset"))
+    assert not connect_failed(reset)
+    assert not connect_failed(RuntimeError("no"))
+
+
+def _failing_first(real: Any, errors: list[Exception], calls: list[int]) -> Any:
+    async def call(*args: Any, **kwargs: Any) -> Any:
+        calls.append(1)
+        if errors:
+            raise errors.pop(0)
+        return await real(*args, **kwargs)
+
+    return call
+
+
+async def test_a_connect_timeout_on_a_read_is_tried_again(
+    s3: S3Settings, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#8471: the HEAD that `claim` and `upload` make, and the GET of a download."""
+    backend = S3ContentBackend(s3, connect_backoff=(0, 0, 0))
+    try:
+        key = await backend.upload("piece", b"kept", name="p", scope=SCOPE)
+        client = await backend._s3()
+        heads: list[int] = []
+        monkeypatch.setattr(
+            client,
+            "head_object",
+            _failing_first(client.head_object, [ConnectTimeoutError(endpoint_url=URL)], heads),
+        )
+        assert await backend.exists(key)
+        assert len(heads) == 2
+        gets: list[int] = []
+        monkeypatch.setattr(
+            client, "get_object", _failing_first(client.get_object, [_refused()], gets)
+        )
+        assert b"".join([c async for c in backend.download(key)]) == b"kept"
+        assert len(gets) == 2
+    finally:
+        await backend.aclose()
+
+
+async def test_a_connect_timeout_on_a_put_is_tried_again(
+    s3: S3Settings, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#8471: no byte of the first PUT was sent; the key is the bytes' own, so the
+    second PUT writes the object once, from the start of the file."""
+    backend = S3ContentBackend(s3, connect_backoff=(0, 0, 0))
+    try:
+        client = await backend._s3()
+        puts: list[int] = []
+        monkeypatch.setattr(
+            client,
+            "put_object",
+            _failing_first(
+                client.put_object,
+                [ConnectTimeoutError(endpoint_url=URL), ConnectTimeoutError(endpoint_url=URL)],
+                puts,
+            ),
+        )
+        f = tmp_path / "piece"
+        f.write_bytes(b"piece bytes")
+        with f.open("rb") as fh:
+            key = await backend.upload("piece", fh, name="p.zip", scope=SCOPE)
+        assert len(puts) == 3
+        assert b"".join([c async for c in backend.download(key)]) == b"piece bytes"
+    finally:
+        await backend.aclose()
+
+
+async def test_a_connect_failure_past_the_backoff_propagates(
+    s3: S3Settings, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Each wait of the backoff, then one last try; its error is the caller's."""
+    backend = S3ContentBackend(s3)
+    waits: list[float] = []
+
+    real_sleep = asyncio.sleep
+
+    async def sleep(wait: float) -> None:
+        waits.append(wait)
+        await real_sleep(0)
+
+    monkeypatch.setattr(asyncio, "sleep", sleep)
+    try:
+        client = await backend._s3()
+        heads: list[int] = []
+        errors: list[Exception] = [ConnectTimeoutError(endpoint_url=URL) for _ in range(9)]
+        monkeypatch.setattr(
+            client, "head_object", _failing_first(client.head_object, errors, heads)
+        )
+        with pytest.raises(ConnectTimeoutError):
+            await backend.exists(MISSING)
+        assert waits == list(CONNECT_BACKOFF) == [0.5, 1.0, 2.0]
+        assert len(heads) == 4
+    finally:
+        await backend.aclose()
+
+
+@pytest.mark.parametrize(
+    "error",
+    [
+        ReadTimeoutError(endpoint_url=URL),
+        ConnectionClosedError(endpoint_url=URL),
+        EndpointConnectionError(endpoint_url=URL, error=ClientOSError(104, "reset")),
+    ],
+    ids=["read-timeout", "closed", "reset-mid-body"],
+)
+async def test_an_error_after_the_request_was_sent_is_not_tried_again(
+    s3: S3Settings, monkeypatch: pytest.MonkeyPatch, error: Exception
+) -> None:
+    """#8471: the store may have taken the request, so the error is the caller's."""
+    backend = S3ContentBackend(s3, connect_backoff=(0, 0, 0))
+    try:
+        client = await backend._s3()
+        puts: list[int] = []
+        monkeypatch.setattr(client, "put_object", _failing_first(client.put_object, [error], puts))
+        with pytest.raises(type(error)):
+            await backend.upload("piece", b"once", name="p", scope=SCOPE)
+        assert len(puts) == 1
     finally:
         await backend.aclose()
