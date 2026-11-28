@@ -2,7 +2,7 @@ import { screen, waitFor, within } from '@testing-library/react'
 import { http, HttpResponse } from 'msw'
 import { beforeEach, describe, expect, it } from 'vitest'
 import { api } from '../../api/client'
-import { listTypes } from '../../api/filament'
+import { listCatalog, listTypes } from '../../api/filament'
 import { T } from '../../mocks/features/filament/seed'
 import { server } from '../../mocks/server'
 import { mockSettings, resetMockState, setMockSettings } from '../../mocks/handlers'
@@ -226,8 +226,8 @@ describe('FilamentsEditor (#4250)', () => {
     expect(entityMock.properties.get(`spool_type:${made.id}`)?.map((p) => [p.key, p.value])).toEqual([['mpn', 'P-1']])
   })
 
-  // #7952: a refused create in the dialog still names the catalog rows it added.
-  it('the dialog says which catalog rows stay when the type is refused (#7952)', async () => {
+  // #8228: a refused create in the dialog adds no catalog row, so it names none.
+  it('the dialog marks the refused fields and adds no catalog row (#8228)', async () => {
     entityMock.schemas.spool_type = { ...entityMock.schemas.spool_type!, required: ['mpn'] }
     server.use(
       http.post('/api/v1/filament/types', () =>
@@ -242,6 +242,7 @@ describe('FilamentsEditor (#4250)', () => {
     await user.click(within(dialog).getByRole('button', { name: 'Create type' }))
     const alert = await within(dialog).findByRole('alert')
     expect(alert).toHaveTextContent('Fill the required properties first: mpn.')
-    expect(alert).toHaveTextContent('Zed stays in the catalog.')
+    expect(alert).not.toHaveTextContent(/stays in the catalog/)
+    expect((await listCatalog('brands', { includeArchived: true })).map((one) => one.name)).not.toContain('Zed')
   })
 })

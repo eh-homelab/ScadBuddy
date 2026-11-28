@@ -1292,13 +1292,66 @@ function newSpool(body: Record<string, unknown>): SpoolRow {
   return { ...blank, ...(body as Partial<SpoolRow>) }
 }
 
+/** #8228: the names a type create may give instead of a catalog id, and their catalogs. */
+const TYPE_NAMES = { brand: 'brands', material: 'materials', subtype: 'subtypes' } as const
+const TYPE_CREATE_FIELDS = [...FIELDS.typeCreate, ...Object.keys(TYPE_NAMES).map((noun) => `${noun}_name`)]
+
+/**
+ * `types.py` `create_on` (#8228, spec §6.3b): each `*_name` as its `*_id`, the row of that
+ * key or alias (a subtype the material's own, else one for every material), else a new row
+ * (sort 1000), added unchecked. `undo` takes the new rows back, as a refused type's rollback does.
+ */
+function namedIds(raw: Record<string, unknown>): { body: Record<string, unknown>; undo: () => void } | Response {
+  const body = { ...raw }
+  for (const noun of Object.keys(TYPE_NAMES)) {
+    if (body[`${noun}_id`] != null && body[`${noun}_name`] != null) return problem(422, `Value error, give ${noun}_id or ${noun}_name, not both`)
+  }
+  if (body.material_id == null && body.material_name == null) return problem(422, 'Value error, give material_id or material_name')
+  const added: [Aliased, string][] = []
+  const undo = () => {
+    for (const [kind, id] of added) state.catalogs[kind] = (state.catalogs[kind] as AliasedRow[]).filter((row) => row.id !== id) as never
+  }
+  for (const [noun, kind] of Object.entries(TYPE_NAMES)) {
+    const raw = body[`${noun}_name`]
+    delete body[`${noun}_name`]
+    if (raw == null) continue
+    const name = String(raw).trim()
+    if (name === '' || name.length > 128) {
+      undo()
+      return problem(422, `${noun}_name: String should have 1 to 128 characters`)
+    }
+    if (catalogKey(name) === '') {
+      undo()
+      return problem(422, `the name '${name}' has no letter or digit`)
+    }
+    const material = (body.material_id as string | undefined) ?? null
+    const found = kind === 'subtypes' ? (keyHolder(kind, name, material, undefined, false) ?? keyHolder(kind, name, null, undefined, false)) : keyHolder(kind, name, null, undefined, false)
+    if (found) {
+      body[`${noun}_id`] = found.id
+      continue
+    }
+    const blank = Object.fromEntries([...CATALOG_FIELDS[kind]].map((field) => [field, null]))
+    const made = { ...blank, name, sort_order: 1000, aliases: [], id: newId(), archived_at: null, created_at: now(), updated_at: now() }
+    if (kind === 'subtypes') Object.assign(made, { material_id: material })
+    ;(state.catalogs[kind] as unknown[]).push(made)
+    added.push([kind, made.id])
+    body[`${noun}_id`] = made.id
+  }
+  return { body, undo }
+}
+
 /** `POST /filament/types`: the new type, or the refusal; an invoice's confirm makes its proposed types here too (#6266). */
 export function createType(raw: unknown): S['SpoolType'] | Response {
-  const extra = extraKeys(raw, FIELDS.typeCreate)
+  const extra = extraKeys(raw, TYPE_CREATE_FIELDS)
   if (extra) return extra
-  const body = normalised(raw as S['SpoolTypeCreate-Input'])
+  const named = namedIds(raw as Record<string, unknown>)
+  if (named instanceof Response) return named
+  const body = normalised(named.body as S['SpoolTypeCreate-Input'])
   const refused = typeRefusal(body)
-  if (refused) return refused
+  if (refused) {
+    named.undo()
+    return refused
+  }
   const made = linkPriceBook({
     brand_id: null,
     subtype_id: null,
@@ -1321,6 +1374,8 @@ export function createType(raw: unknown): S['SpoolType'] | Response {
     tdfp_id: null,
     diameter_mm: '1.75',
     ...body,
+    // `typeRefusal` has checked it: a name is its id by now (#8228).
+    material_id: body.material_id as string,
     drying_hours: body.drying_hours ?? null,
     id: newId(),
     number: Math.max(0, ...state.types.map((t) => t.number)) + 1,
@@ -1733,7 +1788,14 @@ export function metricsInput() {
 
 /** What `createType` would refuse for a proposed type, or `null`: checked before an invoice's confirm writes anything (#6266). */
 export function checkTypeProposal(raw: unknown): Response | null {
-  return extraKeys(raw, FIELDS.typeCreate) ?? typeRefusal(normalised(raw as S['SpoolTypeCreate-Input']))
+  const extra = extraKeys(raw, TYPE_CREATE_FIELDS)
+  if (extra) return extra
+  const named = namedIds(raw as Record<string, unknown>)
+  if (named instanceof Response) return named
+  const refused = typeRefusal(normalised(named.body as S['SpoolTypeCreate-Input']))
+  // A check writes nothing: the rows it named are taken back.
+  named.undo()
+  return refused
 }
 
 /**
