@@ -505,7 +505,7 @@ HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \
 # own code keeps the recipe, so the cook layer comes from the cache and only the
 # workspace crates compile. A change to a Cargo.toml or Cargo.lock cooks again.
 # build-image.yml keeps these layers in a GHCR registry cache at mode=max.
-FROM rust:1.100.0-bookworm@sha256:ade39a710ef85f3506cffcfec3e8a24ba090badef1dff2fb798f71d878833fea AS slicer-chef
+FROM rust:1.100.0-bookworm@sha256:75d26c23c24cc6ea1cdabf0714a6bff8fd7bf3248716043fd7ae86dac7f41b94 AS slicer-chef
 
 # hadolint ignore=DL3008
 RUN apt-get update \
