@@ -648,6 +648,7 @@ async def post_colour_sync(
 _TYPE_REFUSED = (
     FilamentExistsError,
     CatalogExistsError,
+    CatalogKeyEmptyError,
     CatalogRefError,
     TypeTempError,
     TypeRowsDuplicateError,
@@ -690,14 +691,21 @@ async def list_types(filament: FilamentDep, include_archived: bool = False) -> l
         "`missing_required_properties` (with `missing` and `invalid` keys) when the type's "
         "required properties are not all filled after it; nothing is written (#7703). "
         "A type has a `code`, a material, an `rgba` (`#RRGGBB` or `#RRGGBBAA`, stored with "
-        "its alpha), a `label_weight_g` and optional print values a spool inherits. With a "
+        "its alpha), a `label_weight_g` and optional print values a spool inherits. "
+        "`brand_name`, `material_name` and `subtype_name` are the other way to give "
+        "`brand_id`, `material_id` and `subtype_id`: give one or the other, not both (422); "
+        "with neither `material_id` nor `material_name` it is 422. Each name is the catalog "
+        "row of that name or alias, else a new row of that name (a subtype of the type's "
+        "material), added unchecked in the type's transaction (spec 6.3b): a refused type "
+        "adds no row (#8228). An effect is never added. With a "
         "`cost_per_kg` it also writes the price book row of its material, subtype, brand, "
         "colour and alpha (`filament_id`), which takes its stops and effect when it is new "
         "(#6209). A type made has no preset, so nothing is filled yet: it is filled from its "
         "slicer profile when its first presets arrive (`PUT /filament/types/{type_id}/presets`, "
         "or a 3DFP preset fetch's import, #6714). 409 when an "
         "unarchived type has the code, 422 for a bad field, a row it "
-        "points at that does not exist, or a minimum temperature above its maximum."
+        "points at that does not exist, a name with no letter or digit, or a minimum "
+        "temperature above its maximum."
     ),
 )
 async def create_type(filament: FilamentDep, body: m.SpoolTypeCreate) -> m.SpoolType:

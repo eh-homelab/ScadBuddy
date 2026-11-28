@@ -36,6 +36,7 @@ from scadbuddy.filament.catalog import (
     catalog_key,
     check_temps,
     lookup_key,
+    resolve_or_add,
 )
 from scadbuddy.filament.catalog import (
     TypeTempError as TypeTempError,
@@ -55,6 +56,12 @@ _Kept = tuple[m.TypeKValue, dict[str, Any]]
 #: The K rows a fetch did not write, each with the row that kept its key (`merge_k_values`).
 _KeptK = list[_Kept]
 _Ids = list[int]
+
+#: Where a catalog row a type create names first is sorted: after the seeded ones, as the
+#: Bambuddy pull and the CSV import add theirs (`bambuddy_pull._ADDED_SORT`).
+_ADDED_SORT = 1000
+#: The fields of a type create that name a catalog row instead of giving its id.
+_NAMES = frozenset({"brand_name", "material_name", "subtype_name"})
 
 #: The fields whose change rewrites a type's price book row.
 _PRICED = frozenset({"cost_per_kg", "material_id", "subtype_id", "brand_id", "rgba"})
@@ -271,10 +278,28 @@ class SpoolTypeStore:
         """`create` on ``conn``, in the caller's transaction (confirming an invoice,
         #6266). A duplicate or a missing catalog row is the driver's `UniqueViolation` or
         `ForeignKeyViolation`; `create` maps them. It writes no ``properties`` and checks
-        nothing (#7703): `create` does."""
+        nothing (#7703): `create` does. A ``brand_name``, ``material_name`` or
+        ``subtype_name`` is its row, else a new one added on ``conn``, unchecked (spec
+        §6.3b, #8228), so a refused type takes it back with it."""
         if body.properties is not None:
             raise ValueError("create_on writes no properties")
-        data = body.model_dump(exclude={"properties"})
+        data = body.model_dump(exclude={"properties", *_NAMES})
+        if body.material_name is not None:
+            data["material_id"] = resolve_or_add(
+                conn, "materials", body.material_name, sort_order=_ADDED_SORT
+            )
+        if body.brand_name is not None:
+            data["brand_id"] = resolve_or_add(
+                conn, "brands", body.brand_name, sort_order=_ADDED_SORT
+            )
+        if body.subtype_name is not None:
+            data["subtype_id"] = resolve_or_add(
+                conn,
+                "subtypes",
+                body.subtype_name,
+                sort_order=_ADDED_SORT,
+                material=data["material_id"],
+            )
         check_temps(data)
         names = list(data)
         row = conn.execute(

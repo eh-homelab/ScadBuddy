@@ -878,10 +878,18 @@ class SpoolMove(_In):
 
 
 class SpoolTypeCreate(_In):
+    """A new type. ``brand_name``, ``material_name`` and ``subtype_name`` are the other way
+    to give ``brand_id``, ``material_id`` and ``subtype_id`` (one or the other, not both): the
+    row of that name, else a new one, added unchecked in the type's transaction (spec
+    §6.3b, #8228). A ``subtype_name`` is a subtype of the type's material."""
+
     code: Name
     brand_id: UUID | None = None
-    material_id: UUID
+    brand_name: Name | None = None
+    material_id: UUID | None = None
+    material_name: Name | None = None
     subtype_id: UUID | None = None
+    subtype_name: Name | None = None
     category_id: UUID | None = None
     effect_id: UUID | None = None
     colour_name: Text | None = None
@@ -904,6 +912,22 @@ class SpoolTypeCreate(_In):
     tdfp_id: TdfpId | None = None
     note: Note | None = None
     properties: dict[str, JsonValue] | None = None
+
+    @model_validator(mode="after")
+    def _id_or_name(self) -> SpoolTypeCreate:
+        for noun in _NAMED_ROWS:
+            if (
+                getattr(self, f"{noun}_id") is not None
+                and getattr(self, f"{noun}_name") is not None
+            ):
+                raise ValueError(f"give {noun}_id or {noun}_name, not both")
+        if self.material_id is None and self.material_name is None:
+            raise ValueError("give material_id or material_name")
+        return self
+
+
+#: The catalog rows a type create can name instead of giving their id (#8228).
+_NAMED_ROWS: Final = ("brand", "material", "subtype")
 
 
 class SpoolTypePatch(_Patch):
