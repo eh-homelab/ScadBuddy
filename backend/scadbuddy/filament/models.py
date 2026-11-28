@@ -2238,7 +2238,10 @@ class TagReadIn(_FitsOneTag):
     tap: bool = True
 
 
-BackupReason = Literal["spool_write", "agent_write", "restore", "place_write"]
+BackupReason = Literal["spool_write", "agent_write", "restore", "place_write", "clear"]
+#: Why a tag left its spool: ``unbound`` by hand, ``cleared`` once the phone wrote it empty
+#: (#8362).
+UnbindReason = Literal["unbound", "cleared"]
 
 
 class TagBackupIn(_FitsOneTag):

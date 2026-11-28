@@ -1775,9 +1775,12 @@ class FilamentSpoolStore:
         ).fetchall()
         return {spool.id: spool for spool in _hydrate(conn, rows, hours=False)}
 
-    def unbind_tag(self, tag_id: UUID, *, actor: str) -> m.TagBinding | None:
+    def unbind_tag(
+        self, tag_id: UUID, *, actor: str, reason: m.UnbindReason = "unbound"
+    ) -> m.TagBinding | None:
         """Take a tag off its spool, with a ``tag_unbound`` event; ``None`` when the tag
-        is on no spool. Locks the tag, then the spool, as `bind_tag` does."""
+        is on no spool. Locks the tag, then the spool, as `bind_tag` does. ``reason`` is
+        ``cleared`` when the phone wrote the tag empty first (#8362)."""
         with self._pool.connection() as conn, conn.transaction():
             conn.execute("SELECT 1 FROM filament_tags WHERE id = %s FOR UPDATE", (tag_id,))
             holder = conn.execute(
@@ -1791,9 +1794,9 @@ class FilamentSpoolStore:
                 "SELECT 1 FROM filament_spools WHERE id = %s FOR UPDATE", (holder["spool_id"],)
             )
             row = conn.execute(
-                "UPDATE filament_tag_bindings SET unbound_at = now(), reason = 'unbound'"
+                "UPDATE filament_tag_bindings SET unbound_at = now(), reason = %s"
                 f" WHERE tag_id = %s AND unbound_at IS NULL RETURNING {_BINDING_COLUMNS}",
-                (tag_id,),
+                (reason, tag_id),
             ).fetchone()
             if row is None:
                 return None
@@ -1802,7 +1805,7 @@ class FilamentSpoolStore:
                 row["spool_id"],
                 "tag_unbound",
                 actor=actor,
-                data={"tag_id": tag_id, "reason": "unbound"},
+                data={"tag_id": tag_id, "reason": reason},
             )
             enqueue_tag(conn, tag_id)
         return m.TagBinding.model_validate(row)
