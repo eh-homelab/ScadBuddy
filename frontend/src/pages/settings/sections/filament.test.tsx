@@ -4,7 +4,7 @@ import { api } from '../../../api/client'
 import { getResetPreview, getSyncStatus, listSyncPasses, resetSyncLinks, type PullReport } from '../../../api/filament'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { spoolId } from '../../../mocks/features/filament/seed'
-import { EMPTY_PULL, leaveOnlyColourLinks, leaveOnlyPresetLinks, leaveUnresolvedPresets, linkOtherBambuddy, loseSameBambuddy } from '../../../mocks/features/filament/sync'
+import { EMPTY_PULL, leaveImportUnfinished, leaveOnlyColourLinks, leaveOnlyPresetLinks, leaveUnresolvedPresets, linkOtherBambuddy, loseSameBambuddy } from '../../../mocks/features/filament/sync'
 import { mockSettings } from '../../../mocks/handlers'
 import { server } from '../../../mocks/server'
 import { choose } from '../../../test/select'
@@ -1179,11 +1179,8 @@ describe("Import Bambuddy's spools (#6261)", () => {
   })
 
   it('says to check the spools before importing again when the worker did not finish in time', async () => {
-    server.use(
-      http.post('*/api/v1/filament/bambuddy/import', () =>
-        HttpResponse.json({ type: 'about:blank', title: 'Service Unavailable', status: 503, detail: 'the print worker did not finish the import in time', code: 'import_unfinished' }, { status: 503 }),
-      ),
-    )
+    // The mock's own switch, which the dev preview and e2e use too.
+    leaveImportUnfinished()
     const { user } = renderSettingsSection(<Filament />, { route: '/settings/printing' })
     await seeded()
     const filament = region('Filament')

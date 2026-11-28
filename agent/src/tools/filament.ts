@@ -2362,7 +2362,7 @@ const tools: Tool[] = [
       '`usage_unlinked` (Bambuddy usage rows booked, and the rows of an unlinked spool later than the last ' +
       "read an earlier pull booked whole; a failed body's rows are counted again). " +
       '409 when no Bambuddy is configured, or when the Bambuddy URL changed during the import (import again). ' +
-      '503 when the print worker did not finish in time: it may still be running, so check the spools before ' +
+      '503 `import_unfinished` when the print worker did not finish in time: it may still be running, so check the spools before ' +
       'importing again. 502 when ScadBuddy refused what the worker read (importing again gets the same answer). ' +
       "ScadBuddy's print worker reads Bambuddy; this writes ScadBuddy only.",
     input: z.object({}),
