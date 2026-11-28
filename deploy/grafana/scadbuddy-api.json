@@ -840,7 +840,7 @@
       "id": 34,
       "type": "timeseries",
       "title": "Event subscriber lag",
-      "description": "How far each durable event subscriber's cursor is behind the event log (#6949, design §4.8): the events past its cursor, and the age of the oldest of them (right axis). The history subscriber runs in scadbuddy-core and writes the property history. A lag that only grows means it has stopped: a payload it cannot store stops it, and its log names the event's seq.",
+      "description": "How far each durable event subscriber's cursor is behind the event log (#6949, design §4.8): the events past its cursor, and the age of the oldest of them (right axis). The history subscriber runs in scadbuddy-core and writes the property history. A lag that only grows means it is slow or has stopped: a payload it cannot store stops it, its log names the event's seq, and scadbuddy_event_subscriber_stopped_seq is that seq (0 when it is stopped at none, #8074).",
       "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
       "gridPos": { "x": 0, "y": 93, "w": 24, "h": 8 },
       "fieldConfig": {

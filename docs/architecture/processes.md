@@ -110,7 +110,9 @@ flowchart LR
   It needs `SCADBUDDY_TEMPORAL_ADDRESS`, and the Python API reads through core's CRUD port
   (`SCADBUDDY_CORE_CRUD_URL`).
 - **History subscriber.** `internal/history` writes the property and parameter history from
-  the event stream (row `history` of `event_subscribers`).
+  the event stream (row `history` of `event_subscribers`). A payload it cannot store stops
+  its cursor; the row's `stopped_seq` names that event, and the API's scrape exports it as
+  `scadbuddy_event_subscriber_stopped_seq` (#8074).
 
 ## Render worker
 

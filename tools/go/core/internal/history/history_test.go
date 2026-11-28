@@ -4,13 +4,16 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"log/slog"
 	"math/rand/v2"
 	"reflect"
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/eh-homelab/ScadBuddy/tools/go/core/internal/testdb"
@@ -240,6 +243,10 @@ func TestABadPayloadStopsTheCursor(t *testing.T) {
 	if c := cursor(t, pool); c != bad-1 {
 		t.Fatalf("cursor %d, want %d, just before the bad event", c, bad-1)
 	}
+	// #8074: the subscriber's row names the event it cannot pass, for the API's scrape.
+	if s := stoppedAt(t, pool); s == nil || *s != bad {
+		t.Fatalf("stopped_seq %v, want %d", s, bad)
+	}
 	// Once the payload is fixed, the event is applied, and the ones after it.
 	if _, err := pool.Exec(ctx, `UPDATE events SET payload = payload || '{"key": "c"}' WHERE seq = $1`, bad); err != nil {
 		t.Fatal(err)
@@ -247,6 +254,69 @@ func TestABadPayloadStopsTheCursor(t *testing.T) {
 	apply(t, pool)
 	if n := rows(t, pool); n != 3 {
 		t.Fatalf("%d rows after the fix, want 3", n)
+	}
+	if s := stoppedAt(t, pool); s != nil {
+		t.Fatalf("stopped_seq %d after the fix, want NULL", *s)
+	}
+}
+
+func stoppedAt(t *testing.T, pool *pgxpool.Pool) *int64 {
+	t.Helper()
+	return scalar[*int64](t, pool, `SELECT stopped_seq FROM event_subscribers WHERE name = 'history'`)
+}
+
+func TestAnErrorBeforeTheMigrationsIsUnmigrated(t *testing.T) {
+	for _, err := range []error{
+		&noSubscriber{name: "history"},
+		fmt.Errorf("read: %w", &pgconn.PgError{Code: "42P01"}),
+		&pgconn.PgError{Code: "42703"},
+	} {
+		if !unmigrated(err) {
+			t.Errorf("unmigrated(%v) = false, want true", err)
+		}
+	}
+	for _, err := range []error{&badPayload{seq: 1}, &pgconn.PgError{Code: "57014"}} {
+		if unmigrated(err) {
+			t.Errorf("unmigrated(%v) = true, want false", err)
+		}
+	}
+}
+
+// counting counts the records at each level.
+type counting struct {
+	mu     sync.Mutex
+	levels map[slog.Level]int
+}
+
+func (c *counting) Enabled(context.Context, slog.Level) bool { return true }
+func (c *counting) Handle(_ context.Context, r slog.Record) error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.levels[r.Level]++
+	return nil
+}
+func (c *counting) WithAttrs([]slog.Attr) slog.Handler { return c }
+func (c *counting) WithGroup(string) slog.Handler { return c }
+
+func (c *counting) count(l slog.Level) int {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.levels[l]
+}
+
+// TestRunBeforeTheMigrationsWarnsOnce: a subscriber with no row yet (the API has not
+// migrated) is one warning, not an error every Poll (#8116).
+func TestRunBeforeTheMigrationsWarnsOnce(t *testing.T) {
+	pool := testdb.New(t)
+	logs := &counting{levels: map[slog.Level]int{}}
+	previous := slog.Default()
+	slog.SetDefault(slog.New(logs))
+	t.Cleanup(func() { slog.SetDefault(previous) })
+	run, stop := context.WithTimeout(ctx, 300*time.Millisecond)
+	defer stop()
+	Run(run, pool, Options{Name: "nobody", Poll: 10 * time.Millisecond})
+	if w, e := logs.count(slog.LevelWarn), logs.count(slog.LevelError); w != 1 || e != 0 {
+		t.Fatalf("%d warnings and %d errors, want 1 and 0", w, e)
 	}
 }
 
