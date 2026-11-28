@@ -71,7 +71,7 @@ func TestTokenIdleExpiry(t *testing.T) {
 	}
 	h.clock.add(61 * time.Minute)
 	if err := use(); !errors.Is(err, ErrUnauthorized) {
-		t.Fatalf("after 61 m of no use: %v", err)
+		t.Fatalf("at 179 m, 61 m after the last use at 118 m: %v", err)
 	}
 	expectStatus(t, h.do("POST", "/api/v1/devices/heartbeat", d.token, ""), 401)
 }
@@ -104,7 +104,13 @@ func TestDeviceRoutesRefuseInObserve(t *testing.T) {
 	expectStatus(t, h.do("POST", "/api/v1/devices/calls/"+uuidZero+"/events", bad, `{"events":[]}`), 401)
 	expectStatus(t, h.do("POST", "/api/v1/devices/calls/"+uuidZero+"/result", bad, `{"outcome":"error"}`), 401)
 	expectStatus(t, h.do("POST", "/api/v1/devices/uploads?call="+uuidZero+"&kind=tag_dump", bad, `{}`), 401)
-	_, res := h.pods[0].dial(map[string]string{"Authorization": "Bearer " + bad})
+	_, res := h.pods[0].dialDevice(map[string]string{"Authorization": "Bearer " + bad})
+	expect(t, res.StatusCode, 401)
+	// The device socket takes nothing but a device token: no credential is no signed-out
+	// socket, and a person's session is no device.
+	_, res = h.pods[0].dialDevice(nil)
+	expect(t, res.StatusCode, 401)
+	_, res = h.pods[0].dialDevice(map[string]string{"Cookie": h.person("user:i#me")})
 	expect(t, res.StatusCode, 401)
 	// In enforce too: the app holds no person's login.
 	e := newHarness(t, auth.Enforce)
@@ -114,6 +120,25 @@ func TestDeviceRoutesRefuseInObserve(t *testing.T) {
 	expectStatus(t, d, 200)
 	expectStatus(t, e.do("POST", "/api/v1/devices/heartbeat", d.body["token"].(string), ""), 204)
 	expectStatus(t, e.do("POST", "/api/v1/devices/pairings", "", ""), 401)
+}
+
+// The device socket refuses a person's session, and no credential, in every mode: in off and
+// observe the person's path would serve both.
+func TestDeviceSocketRefusesAPersonInEveryMode(t *testing.T) {
+	for _, mode := range []auth.Mode{auth.Off, auth.Observe, auth.Enforce} {
+		h := newHarness(t, mode)
+		me := h.person("user:i#me")
+		if _, res := h.pods[0].dialDevice(map[string]string{"Cookie": me}); res.StatusCode != 401 {
+			t.Errorf("%s: a session cookie on the device path: %d", mode, res.StatusCode)
+		}
+		if _, res := h.pods[0].dialDevice(nil); res.StatusCode != 401 {
+			t.Errorf("%s: no credential on the device path: %d", mode, res.StatusCode)
+		}
+		// The same cookie still opens the person's path, so the 401 is the path's.
+		if _, res := h.pods[0].dial(map[string]string{"Cookie": me}); res.StatusCode != 101 {
+			t.Errorf("%s: a session cookie on the person's path: %d", mode, res.StatusCode)
+		}
+	}
 }
 
 const uuidZero = "00000000-0000-4000-8000-000000000000"

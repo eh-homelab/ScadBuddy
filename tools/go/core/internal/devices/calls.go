@@ -194,8 +194,10 @@ func (s *Store) call(r *http.Request) (any, error) {
 	}
 	now := s.now()
 	deadline := now.Add(time.Duration(timeout) * time.Second)
+	// The call goes to the device in one device.call_requested event: args that would take it
+	// past bus.PayloadMax are refused here, never dropped by Publish after a 202.
 	if !bus.Fits("device.call_requested", requested("00000000-0000-0000-0000-000000000000", id, method, args, deadline)...) {
-		return nil, httpx.WithReason(http.StatusRequestEntityTooLarge, "The call's args are too large.", "args_too_large")
+		return nil, argsTooLarge()
 	}
 	approve := method == "nfc.write" && kind != "person"
 	if approve && s.Keys == nil {
@@ -536,8 +538,10 @@ func (s *Store) events(r *http.Request, d Device) (any, error) {
 		}
 		f = append(f, httpx.Field{Key: "topics", Value: []string{"device:" + d.ID, "device:call:" + id}},
 			httpx.Field{Key: "retention_seconds", Value: Retention})
+		// eventDataMax keeps every event under bus.PayloadMax (TestEventDataCapFitsTheEvent);
+		// this check stands behind it, so no event is dropped by Publish after a 204.
 		if !bus.Fits("device."+p.kind, f...) {
-			return nil, httpx.WithReason(http.StatusRequestEntityTooLarge, "An event is too large.", "event_too_large")
+			return nil, httpx.WithReason(http.StatusUnprocessableEntity, "An event is too large.", "event_too_large")
 		}
 		fields = append(fields, f)
 	}

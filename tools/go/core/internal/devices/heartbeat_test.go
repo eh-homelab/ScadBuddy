@@ -53,6 +53,6 @@ func TestRevokeClosesSocket(t *testing.T) {
 	expectStatus(t, h.do("POST", "/api/v1/devices/heartbeat", d.token, ""), 401)
 	expectStatus(t, h.do("POST", "/api/v1/devices/calls/"+uuidZero+"/events", d.token, `{"events":[]}`), 401)
 	expectStatus(t, h.do("POST", "/api/v1/devices/uploads?call="+uuidZero+"&kind=tag_dump", d.token, `{}`), 401)
-	_, res := h.pods[0].dial(map[string]string{"Authorization": "Bearer " + d.token})
+	_, res := h.pods[0].dialDevice(map[string]string{"Authorization": "Bearer " + d.token})
 	expect(t, res.StatusCode, 401)
 }

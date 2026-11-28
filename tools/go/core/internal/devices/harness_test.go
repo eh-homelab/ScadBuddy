@@ -327,14 +327,26 @@ type ws struct {
 	read *bufio.Reader
 }
 
+// dial opens a person's socket, realtime.Path.
 func (p *pod) dial(header map[string]string) (*ws, *http.Response) {
+	p.h.t.Helper()
+	return p.dialAt(realtime.Path, header)
+}
+
+// dialDevice opens a device's socket, realtime.DevicePath.
+func (p *pod) dialDevice(header map[string]string) (*ws, *http.Response) {
+	p.h.t.Helper()
+	return p.dialAt(realtime.DevicePath, header)
+}
+
+func (p *pod) dialAt(path string, header map[string]string) (*ws, *http.Response) {
 	p.h.t.Helper()
 	conn, err := net.Dial("tcp", strings.TrimPrefix(p.url, "http://"))
 	if err != nil {
 		p.h.t.Fatal(err)
 	}
 	p.h.t.Cleanup(func() { conn.Close() })
-	req := "GET /api/v1/ws HTTP/1.1\r\nHost: x\r\nUpgrade: websocket\r\nConnection: Upgrade\r\n" +
+	req := "GET " + path + " HTTP/1.1\r\nHost: x\r\nUpgrade: websocket\r\nConnection: Upgrade\r\n" +
 		"Sec-WebSocket-Version: 13\r\nSec-WebSocket-Key: " + base64.StdEncoding.EncodeToString([]byte("0123456789abcdef")) + "\r\n"
 	for k, v := range header {
 		req += k + ": " + v + "\r\n"
@@ -410,7 +422,7 @@ func (w *ws) frame() map[string]any {
 // device opens the device's realtime socket and follows its own topic.
 func (p *pod) device(d paired) *ws {
 	p.h.t.Helper()
-	sock, res := p.dial(map[string]string{"Authorization": "Bearer " + d.token})
+	sock, res := p.dialDevice(map[string]string{"Authorization": "Bearer " + d.token})
 	expect(p.h.t, res.StatusCode, 101)
 	sock.send(`{"type":"subscribe","topics":["device:` + d.id + `"]}`)
 	expect(p.h.t, sock.frame()["type"], "subscribed")

@@ -1,5 +1,6 @@
 // Package realtime is area ws: the browser's realtime socket WS /api/v1/ws, as
-// backend/scadbuddy/api/realtime.py serves it (#7768). The page follows topics and is told
+// backend/scadbuddy/api/realtime.py serves it (#7768), and the same socket for paired devices
+// at WS /api/v1/devices/ws (device.go). The page follows topics and is told
 // when something under one changed; frames carry kinds and ids, never content.
 //
 // Client to server: {"type": "subscribe" | "unsubscribe", "topics": [...]}, {"type": "check",
@@ -36,7 +37,7 @@ import (
 	"github.com/eh-homelab/ScadBuddy/tools/go/telemetry"
 )
 
-// Path is the socket's route.
+// Path is the socket's route for a person's page.
 const Path = "/api/v1/ws"
 
 const (
@@ -73,8 +74,8 @@ type Socket struct {
 	// setting's value when it has no row).
 	AllowedOrigins []string
 	PublicURL      string
-	// Devices is the devices area, nil when SCADBUDDY_CORE_AREAS does not name it: then a
-	// device token's handshake is refused (device.go).
+	// Devices is the devices area, nil when SCADBUDDY_CORE_AREAS does not name it: then every
+	// handshake on DevicePath is refused (device.go).
 	Devices DeviceTokens
 	// slots are the sockets that may be open at once (SCADBUDDY_REALTIME_SOCKETS).
 	slots chan struct{}
@@ -125,13 +126,20 @@ func setting(ctx context.Context, pool *pgxpool.Pool, name string) (json.RawMess
 }
 
 func (s *Socket) ServeHTTP(w http.ResponseWriter, r *http.Request) {
-	if r.URL.Path != Path || !isUpgrade(r) {
+	if (r.URL.Path != Path && r.URL.Path != DevicePath) || !isUpgrade(r) {
 		s.Next.ServeHTTP(w, r)
 		return
 	}
-	if deviceBearer(r) {
-		// A device's token is checked in every mode, never by the gate (device.go).
+	if r.URL.Path == DevicePath {
+		// Only a live device token opens this path, checked in every mode, never by the
+		// gate (device.go).
 		s.openDevice(w, r)
+		return
+	}
+	if deviceBearer(r) {
+		// A device token never opens a person's socket.
+		telemetry.SetRoute(r.Context(), Path)
+		unauthorized(w)
 		return
 	}
 	telemetry.SetRoute(r.Context(), Path)

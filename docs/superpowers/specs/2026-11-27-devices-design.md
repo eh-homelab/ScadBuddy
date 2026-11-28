@@ -68,14 +68,14 @@ The app came in with #8160 (merged). `DeepLink.cs` takes `scadbuddy://pair?url=â
 - Idle expiry: 1 hour (the owner's default). Each authenticated device request moves `expires_at` to now + 1 hour.
 - Hard cap: 30 days from pairing. This is the assistant's call; the owner may change it. When it is reached, the person pairs again.
 - Both values are settings with these defaults.
-- A token is at least 256 random bits. Only its hash is stored. It is sent as a bearer header on every device route and on the realtime socket.
+- A token is at least 256 random bits. Only its hash is stored. It is sent as a bearer header on every device route and on the realtime socket's device path, `/api/v1/devices/ws`.
 - Revoke: the Devices page ends a pairing at once. The bus event `device.revoked` closes its realtime socket, and its token is refused from then on.
 
 ### The link between a device and core
 
-The device uses what ScadBuddy already has. It gets no socket of its own.
+The device uses what ScadBuddy already has. It gets no socket server of its own: the realtime socket serves it at a path of its own (below).
 
-- **Calls in:** while the app is in front, it holds ScadBuddy's realtime socket (`internal/realtime`, #7768) with its device token, subscribed to its own topic `device:<device id>`. A call is the bus event `device.call_requested` on that topic. Every pod's realtime socket gets every bus event, so a call reaches the device whichever pod took the request, with nothing added. The realtime socket accepts a device token for that one topic only, and closes on `device.revoked`, as it closes on `auth.session_revoked` today.
+- **Calls in:** while the app is in front, it holds ScadBuddy's realtime socket (`internal/realtime`, #7768) at the device path `WS /api/v1/devices/ws` with its device token, subscribed to its own topic `device:<device id>`. A call is the bus event `device.call_requested` on that topic. Every pod's realtime socket gets every bus event, so a call reaches the device whichever pod took the request, with nothing added. Only a live device token opens the device path, in every auth mode, and it allows only that one topic. The person's path, `/api/v1/ws`, does not change for people, and it refuses a device token (401). So the device path can be a public route away from home while `/api/v1/ws` stays behind the SSO login. The device's socket closes on `device.revoked`, as a person's closes on `auth.session_revoked` today.
 - **Events and the result out:** plain HTTP with the device token: `POST /api/v1/devices/calls/{id}/events` (one or a few events) and `POST /api/v1/devices/calls/{id}/result`. Core publishes each event on the bus (below) and ends the call.
 - **Online:** `POST /api/v1/devices/heartbeat` every 30 s moves `last_seen_at` and the token's expiry. A device is online while `last_seen_at` is under 75 s old. When the app goes to the back, it stops the heartbeat and closes its realtime socket.
 - Bytes never go in an event or a result. The device uploads them with its token, and puts the blob's key in its result.
@@ -118,7 +118,7 @@ The result is generic and knows nothing of filament:
 
 ### Calls (G4)
 
-- `POST /api/v1/devices/{id}/calls {method, args, timeout_s}` answers `202 {call_id}` at once, or `409 offline` when the device is not online. `GET /api/v1/devices/calls/{id}` gives the call, its events and its result. Its events are read from the event log by the topic `device:call:<id>`. The realtime socket carries each new event. A caller that only wants the end can add `wait=true`, which holds the request until the result or the deadline (`504`). Core keeps a row per call: who called, the method, the outcome and the times.
+- `POST /api/v1/devices/{id}/calls {method, args, timeout_s}` answers `202 {call_id}` at once, or `409 offline` when the device is not online, or `422 args_too_large` when the args, or the `device.call_requested` event that carries them, would pass the bus's payload cap (`bus.PayloadMax`). Then no call is made, so no call is dropped after its `202`. A posted event that would pass that cap is `422 event_too_large`, and none of the request's events is logged. `GET /api/v1/devices/calls/{id}` gives the call, its events and its result. Its events are read from the event log by the topic `device:call:<id>`. The realtime socket carries each new event. Only the device's owner, or the caller that made the call, may read it; anyone else gets `404 call_not_found`, as for a call that does not exist. A caller that only wants the end can add `wait=true`, which holds the request until the result or the deadline (`504`). Core keeps a row per call: who called, the method, the outcome and the times.
 - The caller is a person (a page), a flow, or the assistant. An assistant tool `device_call` uses the same route.
 - An outward method (`nfc.write`) called by the assistant or a flow needs an approval, as outward tools do: a pending action confirmed in the UI. A person who calls it from a page with their own click has approved it by that click.
 - Grants are settings. By default, the device's owner and the owner's flows and assistant sessions may call every read method.
@@ -126,7 +126,7 @@ The result is generic and knows nothing of filament:
 ### Auth mode
 
 Prod runs in auth mode `observe`, and it never runs `enforce` (owner, 2026-11-17).
-- **Device-token routes:** the pairing claim, the heartbeat, a call's events and result, the device's uploads, and the realtime socket's device-token path. These routes check the device token in every mode, as service-credential routes do (#5297 part 1). They refuse a missing, bad, revoked or expired token. Without this check, a stolen token outlives its idle hour.
+- **Device-token routes:** the pairing claim, the heartbeat, a call's events and result, the device's uploads, and the realtime socket's device path `/api/v1/devices/ws`. These routes check the device token in every mode, as service-credential routes do (#5297 part 1). They refuse a missing, bad, revoked or expired token. Without this check, a stolen token outlives its idle hour.
 - **Person routes:** creating a pairing, listing devices, revoking a device, and calling a device. These follow the global mode, as every other person route does. With auth off (on the LAN host), the person is the anonymous principal, as for `nfc-jobs`.
 
 ### The Devices view (G5)
@@ -153,7 +153,7 @@ One migration creates them.
 
 ### Away from home (G8)
 
-- The SSO host (Pomerium) sends anything without a Pomerium login to sign-in. So the device-token routes are narrow public routes on that host: the pairing claim, the heartbeat, the call events and result, the device upload, and the realtime socket, each an Exact or narrow prefix route. The device-token check protects them. The owner accepted this pattern for `/mcp` and the plugin feeds on 2026-11-25. This needs a clusters PR, with a server-side dry run of the changed Ingress before merge.
+- The SSO host (Pomerium) sends anything without a Pomerium login to sign-in. So the device-token routes are narrow public routes on that host: the pairing claim, the heartbeat, the call events and result, the device upload, and the realtime socket's device path `/api/v1/devices/ws` (never `/api/v1/ws`), each an Exact or narrow prefix route. The device-token check protects them. The owner accepted this pattern for `/mcp` and the plugin feeds on 2026-11-25. This needs a clusters PR, with a server-side dry run of the changed Ingress before merge.
 - The person routes stay behind SSO.
 - The pairing link names the host the person is on (the page's `window.location`). A phone paired on the SSO host works away from home.
 
@@ -167,7 +167,7 @@ One migration creates them.
 - Device-token routes check the token in every auth mode, and person routes follow the global mode.
 - A person's own click approves an outward call made from a page. The assistant and flows need a pending action.
 - The device reads table is `device_reads`. The event kinds on the bus are `device.tag_found`, `device.tag_progress`, `device.tag_lost`, `device.call_requested`, `device.call_done`, `device.call_failed` and `device.revoked`.
-- No device socket of its own: the realtime socket carries calls in, and HTTP carries events and results out.
+- No device socket server of its own: the realtime socket carries calls in, at the device-only path `/api/v1/devices/ws`, and HTTP carries events and results out.
 - Device uploads: a device route of its own, with kind `scan_image` for photos.
 
 ## Left to the builder
