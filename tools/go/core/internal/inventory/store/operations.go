@@ -179,7 +179,7 @@ func FailOperation(ctx context.Context, pool *pgxpool.Pool, op Operation, cause 
 }
 
 // runOf limits an end or a note to the row's own run: the row's attempt is this one or an
-// earlier one ($3), and its workflow is this one ($4; '' for a standalone activity). Two
+// earlier one ($3), and its workflow is this one ($4; empty for a standalone activity). Two
 // standalone activities that reuse a key both have no workflow, so it does not tell them
 // apart.
 const runOf = ` AND attempt <= $3 AND workflow_id IS NOT DISTINCT FROM NULLIF($4, '')`
