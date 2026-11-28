@@ -266,22 +266,41 @@ function PresetsImportRow() {
   )
 }
 
-/** What the spool import found, in plain words (#6261). */
+/**
+ * What the spool import found, in plain words (#6261): the spools it made, linked and changed,
+ * what else it changed, and what it left out or could not read (`PullReport`). "Nothing to import"
+ * only when every count is 0 and no read failed.
+ */
 function spoolImportLine(done: PullReport): string {
-  const unread = done.invalid + (done.failed_bb_ids?.length ?? 0)
-  const parts = [
+  const failed = done.failed_bb_ids?.length ?? 0
+  const spoolParts = [
     done.created > 0 && plural(done.created, 'new spool', 'new spools'),
     done.linked > 0 && `${plural(done.linked, 'spool', 'spools')} linked`,
     done.updated > 0 && `${plural(done.updated, 'spool', 'spools')} updated`,
   ].filter(Boolean)
+  const changed = [
+    done.moved > 0 && `${plural(done.moved, 'spool', 'spools')} moved to their Bambuddy place`,
+    done.usage_booked > 0 && `${plural(done.usage_booked, 'Bambuddy print end', 'Bambuddy print ends')} booked`,
+    done.suppliers > 0 && plural(done.suppliers, 'supplier', 'suppliers'),
+    done.locations > 0 && plural(done.locations, 'place', 'places'),
+    done.colours > 0 && plural(done.colours, 'colour', 'colours'),
+  ].filter(Boolean)
   const lines = [
-    parts.length > 0 ? `Imported: ${parts.join(', ')}.` : null,
+    spoolParts.length > 0 && `Imported: ${spoolParts.join(', ')}.`,
+    changed.length > 0 && `Changed: ${changed.join(', ')}.`,
     done.needs_type > 0 && `${plural(done.needs_type, 'spool needs', 'spools need')} a type: choose one in Filament.`,
-    unread > 0 && `${plural(unread, 'Bambuddy spool', 'Bambuddy spools')} could not be read.`,
+    done.archived_deferred > 0 &&
+      `${plural(done.archived_deferred, 'archived Bambuddy spool was', 'archived Bambuddy spools were')} not imported yet: Bambuddy's usage could not be read. Import again later.`,
+    failed > 0 && `${plural(failed, 'Bambuddy spool', 'Bambuddy spools')} could not be imported.`,
+    done.invalid > 0 && `${plural(done.invalid, 'Bambuddy row', 'Bambuddy rows')} could not be read.`,
     done.rfid_duplicates > 0 && `${plural(done.rfid_duplicates, 'RFID duplicate', 'RFID duplicates')} skipped.`,
+    done.conflicts > 0 &&
+      `${plural(done.conflicts, 'supplier or place field changed on both sides was', 'supplier or place fields changed on both sides were')} kept as ScadBuddy has ${done.conflicts === 1 ? 'it' : 'them'}.`,
+    done.catalog_failed && "Bambuddy's spool catalog could not be read, so no insert type was set.",
+    done.colours_failed && "Bambuddy's colours could not be read.",
   ].filter(Boolean)
   if (lines.length === 0) return 'Nothing to import: ScadBuddy has every Bambuddy spool, and none changed since the last pull.'
-  if (parts.length === 0) lines.unshift('Nothing imported.')
+  if (spoolParts.length === 0 && changed.length === 0) lines.unshift('Nothing imported.')
   return lines.join(' ')
 }
 
@@ -318,7 +337,7 @@ function SpoolsImportRow() {
     <FieldRow
       id="filament-spools-import"
       label="Bambuddy's spools"
-      help="Pulls Bambuddy's spools, archived ones too, into ScadBuddy's own once, whatever the spools direction says. A spool already linked takes what Bambuddy changed since the last pull; any other becomes a new spool. It can take a few minutes. Nothing is sent to Bambuddy."
+      help="Pulls Bambuddy's spools, archived ones too, into ScadBuddy's own once, whatever the spools direction says. A spool already linked takes what Bambuddy changed since the last pull; a Bambuddy spool whose tag a ScadBuddy spool holds is linked to it; any other becomes a new spool, except Bambuddy's copy of a tag a linked spool holds, which is skipped. It can take a few minutes. Nothing is sent to Bambuddy."
     >
       <div id="filament-spools-import" className="flex flex-col gap-2 text-sm">
         <div>

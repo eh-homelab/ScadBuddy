@@ -1,10 +1,10 @@
 import { act, screen, waitFor, within } from '@testing-library/react'
 import { http, HttpResponse } from 'msw'
 import { api } from '../../../api/client'
-import { getResetPreview, getSyncStatus, listSyncPasses, resetSyncLinks } from '../../../api/filament'
+import { getResetPreview, getSyncStatus, listSyncPasses, resetSyncLinks, type PullReport } from '../../../api/filament'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { spoolId } from '../../../mocks/features/filament/seed'
-import { leaveOnlyColourLinks, leaveOnlyPresetLinks, leaveUnresolvedPresets, linkOtherBambuddy, loseSameBambuddy } from '../../../mocks/features/filament/sync'
+import { EMPTY_PULL, leaveOnlyColourLinks, leaveOnlyPresetLinks, leaveUnresolvedPresets, linkOtherBambuddy, loseSameBambuddy } from '../../../mocks/features/filament/sync'
 import { mockSettings } from '../../../mocks/handlers'
 import { server } from '../../../mocks/server'
 import { choose } from '../../../test/select'
@@ -1077,13 +1077,41 @@ describe("Import Bambuddy's spools (#6261)", () => {
     await user.click(button)
     expect(
       await within(filament).findByText(
-        'Imported: 2 new spools, 1 spool linked, 1 spool updated. 1 spool needs a type: choose one in Filament. 1 Bambuddy spool could not be read.',
+        'Imported: 2 new spools, 1 spool linked, 1 spool updated. 1 spool needs a type: choose one in Filament. 1 Bambuddy row could not be read.',
       ),
     ).toBeInTheDocument()
     await user.click(button)
     expect(await within(filament).findByText("Nothing to import: ScadBuddy has every Bambuddy spool, and none changed since the last pull.")).toBeInTheDocument()
     expect(calls).toBe(2)
     expect(mockSettings().filament_sync).toMatchObject({ spools: 'off' })
+  })
+
+  const answering = (report: Partial<PullReport>) =>
+    server.use(http.post('*/api/v1/filament/bambuddy/import', () => HttpResponse.json({ ...EMPTY_PULL, ...report })))
+
+  it.each([
+    [{ moved: 2 }, 'Changed: 2 spools moved to their Bambuddy place.'],
+    [{ usage_booked: 3 }, 'Changed: 3 Bambuddy print ends booked.'],
+    [{ suppliers: 1, locations: 2, colours: 4 }, 'Changed: 1 supplier, 2 places, 4 colours.'],
+    [{ archived_deferred: 3 }, "3 archived Bambuddy spools were not imported yet: Bambuddy's usage could not be read. Import again later."],
+    [{ conflicts: 1 }, '1 supplier or place field changed on both sides was kept as ScadBuddy has it.'],
+    [{ failed_bb_ids: [7, 8] }, '2 Bambuddy spools could not be imported.'],
+    [{ catalog_failed: true }, "Bambuddy's spool catalog could not be read, so no insert type was set."],
+    [{ colours_failed: true }, "Bambuddy's colours could not be read."],
+  ] as [Partial<PullReport>, string][])('says what a pull with %o did, never "Nothing to import"', async (report, text) => {
+    answering(report)
+    const { user } = renderSettingsSection(<Filament />, { route: '/settings/printing' })
+    await seeded()
+    const filament = region('Filament')
+    await user.click(within(filament).getByRole('button', { name: IMPORT }))
+    const status = await within(filament).findByText((_, node) => node?.getAttribute('role') === 'status' && (node.textContent ?? '').includes(text))
+    expect(status).not.toHaveTextContent('Nothing to import')
+  })
+
+  it('says how a Bambuddy spool is linked or made', async () => {
+    renderSettingsSection(<Filament />, { route: '/settings/printing' })
+    await seeded()
+    expect(within(region('Filament')).getByText(/a Bambuddy spool whose tag a ScadBuddy spool holds is linked to it; any other becomes a new spool, except Bambuddy's copy of a tag a linked spool holds, which is skipped/)).toBeInTheDocument()
   })
 
   it('links to Connection when no Bambuddy is set up', async () => {
