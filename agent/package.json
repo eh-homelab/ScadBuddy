@@ -39,7 +39,7 @@
     "@temporalio/worker": "^1.27.0",
     "@temporalio/workflow": "^1.27.0",
     "cron-parser": "5.10.6",
-    "hono": "^4.13.21",
+    "hono": "^4.13.22",
     "jose": "^6.2.18",
     "openapi-fetch": "^0.17.0",
     "quickjs-emscripten": "0.32.0",
