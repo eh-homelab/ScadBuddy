@@ -449,6 +449,44 @@ describe('inventory tools', () => {
     expect(calls).toHaveLength(4)
   })
 
+  it("sends each offer write of a call its own Idempotency-Key, and a retried call's the same (#8437)", async () => {
+    const keys: string[] = []
+    const offer = { id: OFFER, item_id: ITEM, supplier_id: SUPPLIER }
+    const keep = (request: Request, body: unknown) => {
+      keys.push(`${request.method} ${new URL(request.url).pathname} ${request.headers.get('Idempotency-Key')}`)
+      return HttpResponse.json(body)
+    }
+    server.use(
+      http.post(`${INV}/offers`, ({ request }) => keep(request, offer)),
+      http.patch(`${INV}/offers/${OFFER}`, ({ request }) => keep(request, offer)),
+      http.post(`${INV}/offers/${OFFER}/archive`, ({ request }) => keep(request, offer)),
+      http.post(`${INV}/offers/${OFFER}/prices`, ({ request }) => keep(request, { id: 'p1' })),
+    )
+    const add = { fields: { item_id: ITEM, supplier_id: SUPPLIER, sku: 'N3' } }
+    const edit = { offer_id: OFFER, fields: { note: 'n' }, archived: true as const }
+    const price = { offer_id: OFFER, price: '4.99' }
+    const added = { ...ctx(), callKey: 'session-1:offer-1' }
+    const edited = { ...ctx(), callKey: 'session-1:offer-2' }
+    const priced = { ...ctx(), callKey: 'session-1:offer-3' }
+    await runTool(tool('inventory_offer_upsert'), add, added)
+    await runTool(tool('inventory_offer_upsert'), add, added)
+    await runTool(tool('inventory_offer_upsert'), edit, edited)
+    await runTool(tool('inventory_offer_upsert'), edit, edited)
+    await runTool(tool('inventory_offer_price_add'), price, priced)
+    await runTool(tool('inventory_offer_price_add'), price, priced)
+    const [made, madeAgain, patch, archive, patchAgain, archiveAgain, first, firstAgain] = keys
+    expect(made).toMatch(/^POST \/api\/v1\/inventory\/offers [0-9a-f]{64}:add$/)
+    expect(patch).toMatch(/^PATCH \/api\/v1\/inventory\/offers\/[^ ]+ [0-9a-f]{64}:edit$/)
+    expect(archive).toMatch(/^POST \/api\/v1\/inventory\/offers\/[^ ]+\/archive [0-9a-f]{64}:archive$/)
+    expect(first).toMatch(/^POST \/api\/v1\/inventory\/offers\/[^ ]+\/prices [0-9a-f]{64}:price$/)
+    // A retried call sends the same keys, so the API answers the first write and writes nothing.
+    expect([madeAgain, patchAgain, archiveAgain, firstAgain]).toEqual([made, patch, archive, first])
+    // Two writes of one call share the call's key and differ by step; two calls never share one.
+    const callOf = (line: string | undefined) => line!.split(' ')[2]!.split(':')[0]
+    expect(callOf(patch)).toBe(callOf(archive))
+    expect(new Set([callOf(made), callOf(patch), callOf(first)]).size).toBe(3)
+  })
+
   it('receives, edits, re-costs, uses and counts lots through their routes', async () => {
     const calls: string[] = []
     const body = async (what: string, request: Request) => calls.push(`${what} ${JSON.stringify(await request.json())}`)

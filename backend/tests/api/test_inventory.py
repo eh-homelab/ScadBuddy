@@ -621,6 +621,43 @@ def test_offer_refusals(client: TestClient, go: Go) -> None:
         assert offer.status_code == 422, (field, offer.text)
 
 
+def test_an_offer_write_sent_again_with_its_key_writes_once(client: TestClient, go: Go) -> None:
+    """#8437: an offer write's retry with the same `Idempotency-Key` answers the first
+    result and writes nothing; the key with another body is a 422."""
+    item = _item(client)
+    go.reads[f"/items/{item['id']}"] = (200, {**answer("Item"), "id": item["id"]})
+    body = {"supplier_id": _supplier(client), "item_id": item["id"], "sku": "NUT-3"}
+    key = press()
+
+    made = client.post(f"{API}/offers", json=body, headers=key)
+    again = client.post(f"{API}/offers", json=body, headers=key)
+    assert (made.status_code, again.status_code) == (201, 201), again.text
+    assert again.json() == made.json()
+    offers = client.get(f"{API}/items/{item['id']}/offers").json()["offers"]
+    assert [o["id"] for o in offers] == [made.json()["id"]]
+    reused = client.post(f"{API}/offers", json={**body, "sku": "NUT-4"}, headers=key)
+    assert reused.status_code == 422, reused.text
+
+    offer = made.json()["id"]
+    price_key = press()
+    sent = {"price": "4.99", "on_date": "2026-11-20"}
+    first = client.post(f"{API}/offers/{offer}/prices", json=sent, headers=price_key)
+    retry = client.post(f"{API}/offers/{offer}/prices", json=sent, headers=price_key)
+    assert (first.status_code, retry.status_code) == (201, 201), retry.text
+    assert retry.json() == first.json()
+    prices = client.get(f"{API}/offers/{offer}/prices").json()["prices"]
+    assert [p["id"] for p in prices] == [first.json()["id"]]
+
+    # The same key from another sender is a write of its own.
+    agent = client.post(
+        f"{API}/offers/{offer}/prices",
+        json=sent,
+        headers={**price_key, AUTHOR_HEADER: "token:abc123"},
+    )
+    assert agent.status_code == 201, agent.text
+    assert agent.json()["id"] != first.json()["id"]
+
+
 # -- an item's properties ----------------------------------------------------------------
 
 

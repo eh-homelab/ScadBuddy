@@ -45,6 +45,15 @@ frontend follows `GET /api/v1/inventory/operations/{id}` (R-K1-24; the agent too
 `inventory_operation_get`). A repeat with the same key is never an error. If Temporal
 cannot start the activity, the route answers 503 and nothing was written.
 
+An offer write is not an activity: Python's `OfferStore` writes it (#8437). An offer's add,
+edit, archive and price add take an `Idempotency-Key` too. The store keeps the reply in
+`crud_requests` under the caller `inventory`, in the write's own transaction, with a key
+that starts with `offer:` and names the sender (`inventory/offers.py` `offer_key`). A retry
+with the same key gets the first reply and writes nothing. The same key with another body is
+a 422. A refused write keeps no reply. A write with no key is a write of its own. The
+agent's `inventory_offer_upsert` and `inventory_offer_price_add` send one key per write of a
+call, the same on each retry of that call.
+
 Go writes one `inventory_operations` row for each activity in its own transaction. It then
 sends `inventory_operation.changed` on `scadbuddy_events`. This is a typed event kind with
 no log row (NOTIFY only; `tools/go/core/internal/bus/event.go`,

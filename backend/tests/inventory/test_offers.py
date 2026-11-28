@@ -3,6 +3,7 @@ SKU unique per supplier and item (D13), pack prices in any ISO currency (R-7067-
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from datetime import date
 from decimal import Decimal
 from uuid import UUID, uuid4
@@ -10,12 +11,15 @@ from uuid import UUID, uuid4
 import pytest
 from pydantic import ValidationError
 
+from scadbuddy.core.problems import ApiError
 from scadbuddy.inventory.models import ItemInput, Offer, OfferInput, OfferPatch, PriceInput
 from scadbuddy.inventory.offers import (
+    CREATE_ROUTE,
     OfferExists,
     OfferNotFound,
     OfferStore,
     SupplierNotFound,
+    offer_key,
 )
 from scadbuddy.inventory.stock import FilamentItemRefused, ItemNotFound
 from scadbuddy.orders.models import Actor
@@ -275,3 +279,106 @@ def test_archived_offers_are_listed_only_when_asked(
     assert offers.for_supplier(shop) == []
     assert [o.id for o in offers.for_supplier(shop, include_archived=True)] == [offer.id]
     assert offers.by_sku(shop, "NUT-3") == []
+
+
+# -- Idempotency-Key (#8437) -------------------------------------------------------------
+
+
+def _ledger_routes(pg_pool: PgPool, key: str) -> list[str]:
+    with pg_pool.connection() as conn:
+        rows = conn.execute(
+            "SELECT route FROM crud_requests WHERE caller = 'inventory' AND key = %s", (key,)
+        ).fetchall()
+    return [r["route"] for r in rows]
+
+
+def test_a_keyed_create_runs_once_and_a_retry_gets_its_answer(
+    offers: OfferStore, items: ItemRows, pg_pool: PgPool
+) -> None:
+    shop, nut = _supplier(pg_pool), _item(items, "M3 nut")
+    key = offer_key(BY, "call-1:add")
+    body = OfferInput(supplier_id=shop, item_id=nut, sku="NUT-3")
+
+    first = offers.create(body, BY, key)
+    # Without the key, the same SKU again is `OfferExists`; with it, the first answer.
+    assert offers.create(body, BY, key) == first
+    assert [o.id for o in offers.for_item(nut)] == [first.id]
+    assert _ledger_routes(pg_pool, key) == [CREATE_ROUTE]
+    with pytest.raises(OfferExists):
+        offers.create(body, BY)
+
+
+def test_a_keyed_price_is_added_once(offers: OfferStore, items: ItemRows, pg_pool: PgPool) -> None:
+    offer = _offer(offers, _supplier(pg_pool), _item(items, "M3 nut"))
+    key = offer_key(BY, "call-2:price")
+    body = PriceInput(price=Decimal("4.5"), on_date=date(2026, 11, 1))
+
+    first = offers.add_price(offer.id, body, key)
+    assert offers.add_price(offer.id, body, key) == first
+    assert [p.id for p in offers.prices(offer.id)] == [first.id]
+    # With no key, each request is a write of its own.
+    offers.add_price(offer.id, body)
+    assert len(offers.prices(offer.id)) == 2
+
+
+def test_a_keyed_edit_or_archive_answers_its_first_result(
+    offers: OfferStore, items: ItemRows, pg_pool: PgPool
+) -> None:
+    offer = _offer(offers, _supplier(pg_pool), _item(items, "M3 nut"))
+    edit, archive = offer_key(BY, "call-3:edit"), offer_key(BY, "call-3:archive")
+
+    changed = offers.update(offer.id, OfferPatch(note="first"), BY, edit)
+    offers.update(offer.id, OfferPatch(note="later"), BY)
+    # The retry gets the first answer and does not write "first" over "later".
+    assert offers.update(offer.id, OfferPatch(note="first"), BY, edit) == changed
+    got = offers.get(offer.id)
+    assert got is not None and got.note == "later"
+
+    archived = offers.archive(offer.id, archive)
+    assert archived.archived_at is not None
+    assert offers.archive(offer.id, archive) == archived
+
+
+def test_a_key_with_another_body_or_offer_is_refused(
+    offers: OfferStore, items: ItemRows, pg_pool: PgPool
+) -> None:
+    shop = _supplier(pg_pool)
+    offer = _offer(offers, shop, _item(items, "M3 nut"))
+    other = _offer(offers, shop, _item(items, "M2 nut"), sku="NUT-2")
+    key = offer_key(BY, "call-4:edit")
+    offers.update(offer.id, OfferPatch(note="a"), BY, key)
+
+    retries: list[Callable[[], Offer]] = [
+        lambda: offers.update(offer.id, OfferPatch(note="b"), BY, key),
+        lambda: offers.update(other.id, OfferPatch(note="a"), BY, key),
+        lambda: offers.archive(offer.id, key),
+    ]
+    for retry in retries:
+        with pytest.raises(ApiError) as refused:
+            retry()
+        assert refused.value.status == 422
+    got = offers.get(other.id)
+    assert got is not None and got.note is None
+
+
+def test_a_refused_keyed_write_keeps_no_answer(
+    offers: OfferStore, items: ItemRows, pg_pool: PgPool
+) -> None:
+    shop, nut = _supplier(pg_pool), _item(items, "M3 nut")
+    _offer(offers, shop, nut)
+    key = offer_key(BY, "call-5:add")
+    body = OfferInput(supplier_id=shop, item_id=nut, sku="nut-3")
+
+    with pytest.raises(OfferExists):
+        offers.create(body, BY, key)
+    assert _ledger_routes(pg_pool, key) == []
+    lost = offer_key(BY, "call-5:archive")
+    with pytest.raises(OfferNotFound):
+        offers.archive(uuid4(), lost)
+    assert _ledger_routes(pg_pool, lost) == []
+
+
+def test_the_keys_of_two_senders_never_meet() -> None:
+    agent = Actor(kind="agent", principal="p1")
+    assert offer_key(BY, "k") != offer_key(agent, "k")
+    assert offer_key(agent, "k") != offer_key(Actor(kind="agent", principal="p2"), "k")
