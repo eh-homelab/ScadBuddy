@@ -5,6 +5,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { resetMockState } from '../../mocks/handlers'
 import { failNextRecost, INVENTORY, inventoryMock, seedItem, seedLot, takeStock } from '../../mocks/features/inventory'
 import { seedEntityProperties } from '../../mocks/features/entities'
+import { filamentLinks } from '../../lib/filamentLinks'
 import { inventoryApi } from './api'
 import { stockFollow } from '../../api/client'
 import { server } from '../../mocks/server'
@@ -51,6 +52,14 @@ describe('ItemPage (#7067)', () => {
     const hardware = inventoryMock.kinds.find((k) => k.id === 'hardware')!
     const path = screen.getByRole('navigation', { name: 'Kind' })
     expect(await within(path).findByText(`K-${hardware.number}`)).toBeInTheDocument()
+  })
+
+  it("shows the item's code by its name, and links its label", async () => {
+    render(INVENTORY.HOOK)
+    const heading = await screen.findByRole('heading', { level: 1, name: 'Silver keychain hook' })
+    const item = inventoryMock.items.find((i) => i.id === INVENTORY.HOOK)!
+    expect(within(heading.parentElement as HTMLElement).getByText(`I-${item.number}`)).toBeInTheDocument()
+    expect(screen.getByRole('link', { name: 'Print label' })).toHaveAttribute('href', filamentLinks.itemLabel(INVENTORY.HOOK))
   })
 
   it('lists the lots and receives one at the newest offer price for the quantity (Ruling 4)', async () => {

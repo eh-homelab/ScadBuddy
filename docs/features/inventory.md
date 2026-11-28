@@ -319,6 +319,9 @@ The sidebar entry is **Inventory**. The routes are in `frontend/src/App.tsx:149-
 - `/inventory/items/:id` (`ItemPage`): the item's details, its Offers (`ItemOffers`, with
   "Add price"), its Stock (`ItemStock`: receive, use, count, units and their status, the
   moves table), and the Files, links and properties panel.
+- An item's page shows its code, `I-<number>`, and has a "Print label" link. Each row of the
+  kind tree has one too. Both open the label page with the item or kind chosen (#7169), as a
+  saved spool type's page does for its type.
 - `/inventory/units/:id` (`UnitPage`) and `/inventory/lots/:id` (`LotPage`): a lot's path
   opens its item's page at the lot's row, where its cost, "Re-cost past uses" and its
   result show.

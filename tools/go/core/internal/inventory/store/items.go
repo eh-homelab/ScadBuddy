@@ -70,7 +70,7 @@ func itemExists(name string) error {
 // unarchived offers' count (R-P2-37). A lot counts at its on_hand, its value and unknown
 // cost only while it holds stock; a unit counts while in_stock.
 const itemsBase = `
-SELECT i.id, i.kind_id, k.tracking, k.uom, i.name, i.manufacturer, i.low_stock, i.saleable,
+SELECT i.id, i.number, i.kind_id, k.tracking, k.uom, i.name, i.manufacturer, i.low_stock, i.saleable,
     coalesce(i.saleable, k.saleable) AS effective_saleable, i.source, i.source_ref,
     i.edited_fields, i.note, i.archived_at, i.steps,
     CASE k.tracking WHEN 'lot' THEN l.on_hand WHEN 'unit' THEN u.on_hand ELSE 0 END AS on_hand,
@@ -98,7 +98,7 @@ CROSS JOIN LATERAL (
 // itemColumns are an item as the wire reads it: decimals as plain text (trim_scale, as
 // Python's format(value.normalize(), "f")), life_hours and life_months from the item's own
 // steps.life (R-K1-6), and low (never for a kind that is not counted).
-const itemColumns = `s.id::text, s.kind_id, s.tracking, s.uom, s.name, s.manufacturer,
+const itemColumns = `s.id::text, s.number, s.kind_id, s.tracking, s.uom, s.name, s.manufacturer,
     trim_scale(s.low_stock)::text, s.saleable, s.effective_saleable, s.source, s.source_ref,
     s.edited_fields, s.note, s.archived_at, s.steps, trim_scale(s.on_hand)::text,
     trim_scale(s.stock_value_minor)::text, s.cost_unknown, s.offer_count,
@@ -197,7 +197,7 @@ func (s *Items) read(ctx context.Context, q Querier, clause string, args ...any)
 	for rows.Next() {
 		var it wire.Item
 		var steps []byte
-		if err := rows.Scan(&it.ID, &it.KindID, &it.Tracking, &it.UOM, &it.Name, &it.Manufacturer, &it.LowStock,
+		if err := rows.Scan(&it.ID, &it.Number, &it.KindID, &it.Tracking, &it.UOM, &it.Name, &it.Manufacturer, &it.LowStock,
 			&it.Saleable, &it.EffectiveSaleable, &it.Source, &it.SourceRef, &it.EditedFields, &it.Note,
 			&it.ArchivedAt, &steps, &it.OnHand, &it.StockValueMinor, &it.CostUnknown, &it.OfferCount,
 			&it.LifeHours, &it.LifeMonths, &it.Low); err != nil {
@@ -208,6 +208,7 @@ func (s *Items) read(ctx context.Context, q Querier, clause string, args ...any)
 			rows.Close()
 			return nil, err
 		}
+		it.Code = fmt.Sprintf("I-%d", it.Number)
 		out = append(out, it)
 	}
 	if err := rows.Err(); err != nil {

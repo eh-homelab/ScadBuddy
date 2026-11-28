@@ -1,10 +1,11 @@
-import { ChevronLeftIcon, PlusIcon } from 'lucide-react'
+import { ChevronLeftIcon, PlusIcon, PrinterIcon } from 'lucide-react'
 import { useId, useState, type FormEvent } from 'react'
 import { Link } from 'react-router'
 import { REQUIRED_KINDS } from '../../components/entities/api'
 import { requiredOf } from '../../components/entities/definedProperties'
 import { PropertyKeyTable } from '../../components/entities/PropertyKeyTable'
 import { namedTwice, rowsOf, schemaOf, type KeyRow } from '../../components/entities/propertyKeys'
+import { filamentLinks } from '../../lib/filamentLinks'
 import { inventoryPaths } from '../../lib/inventoryLinks'
 import { useAsync } from '../../lib/useAsync'
 import { Button } from '@/components/ui/button'
@@ -130,6 +131,11 @@ function Node({ node, kinds, editing, onEdit, onArchive, onSaved }: NodeProps) {
         </span>
         {kind.archived_at && <span className="rounded-full bg-muted px-2 text-[12px] text-muted-foreground">Archived</span>}
         <span className="ml-auto flex gap-1">
+          <Button asChild size="xs" variant="ghost">
+            <Link to={filamentLinks.kindLabel(kind.id)} aria-label={`Print label for ${kind.name}`}>
+              <PrinterIcon /> Print label
+            </Link>
+          </Button>
           <Button size="xs" variant="ghost" aria-label={`Edit ${kind.name}`} aria-expanded={editing === kind.id} onClick={() => onEdit(editing === kind.id ? null : kind.id)}>
             Edit
           </Button>

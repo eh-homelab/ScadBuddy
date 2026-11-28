@@ -202,6 +202,15 @@ describe('a scan-made spool search (#8372)', () => {
     expect(screen.queryByText(/these filters hide them/)).not.toBeInTheDocument()
   })
 
+  it('names a chip filter by its title, and clears it (#8411)', async () => {
+    const { user } = renderScan('/filament/spools?q=%2319&from=scan&status=all&loaded=true')
+    expect(await screen.findByText(/No spool matches “#19”/)).toBeInTheDocument()
+    expect(screen.getByText(/these filters hide them: Loaded\./)).toBeInTheDocument()
+    await user.click(screen.getByRole('button', { name: 'Clear filters' }))
+    await waitFor(async () => expect(numbers(await table())).toEqual(['19']))
+    expect(screen.queryByText(/these filters hide them/)).not.toBeInTheDocument()
+  })
+
   it('shows an empty list with the code in the search box when nothing matches', async () => {
     renderScan()
     expect(await screen.findByText(`No spool matches “gtin:${GTIN}” with these filters.`)).toBeInTheDocument()

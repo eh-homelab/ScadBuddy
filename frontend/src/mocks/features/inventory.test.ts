@@ -1,11 +1,13 @@
 import { beforeEach, describe, expect, it } from 'vitest'
 import { ApiError } from '../../api/client'
 import { inventoryApi } from '../../pages/inventory/api'
-import { resolveCode } from '../../api/filament'
+import { listTypes, resolveCode, upsertType, type SpoolTypeCreate } from '../../api/filament'
 import { resetMockState } from '../handlers'
 import { INVENTORY, seedItem, seedLot, seedOffer, takeStock } from './inventory'
 import { SUPPLIER } from './filamentPurchasingSeed'
 import { seedEntityProperties } from './entities'
+import { resolveCodeText } from './filament'
+import { B, M } from './filament/seed'
 
 const refusal = async (promise: Promise<unknown>) => {
   const error = await promise.then(
@@ -103,6 +105,20 @@ describe('inventory mock', () => {
     expect(await resolveCode(made.code)).toEqual({ kind: 'item_kind', id: made.id, code: made.code, name: 'Magnet', archived: false })
     const typed = await inventoryApi.createKind({ id: 'k12', name: 'X' }).catch((e: unknown) => e as ApiError)
     expect((typed as ApiError).status).toBe(422)
+  })
+
+  it('numbers types and items from one sequence, as `item_numbers_seq` does (#7169)', async () => {
+    const types = await listTypes({ includeArchived: true })
+    const items = await inventoryApi.items({ archived: true })
+    const numbers = [...types.map((t) => t.number), ...items.map((i) => i.number)]
+    expect(new Set(numbers).size).toBe(numbers.length)
+    expect(Math.min(...items.map((i) => i.number))).toBeGreaterThan(Math.max(...types.map((t) => t.number)))
+    const item = await inventoryApi.createItem({ kind_id: 'hardware', name: 'M3 nut' })
+    expect(item.number).toBe(Math.max(...numbers) + 1)
+    expect(resolveCodeText(`T-${item.number}`)).toBeNull()
+    const type = await upsertType({ code: 'NEW-PLA-RED', material_id: M.PLA, brand_id: B.BAMBU, rgba: '#ff0000ff', label_weight_g: 1000 } as SpoolTypeCreate)
+    expect(type.number).toBe(item.number + 1)
+    expect(resolveCodeText(`I-${type.number}`)).toBeNull()
   })
 
   it('answers offer decimals normalized, as `_Decimals` writes them (R-P2-40)', async () => {
