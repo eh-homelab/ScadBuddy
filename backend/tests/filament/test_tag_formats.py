@@ -232,6 +232,138 @@ def test_openspool_names_a_missing_material_and_writes_generic_for_no_brand() ->
     assert body == {"protocol": "openspool", "version": "1.0", "brand": "Generic"}
 
 
+# Spool #114 (#8364): SUNLU PLA+ Silk Bronze, as its effective values and names read.
+FACTS_114 = replace(
+    FACTS_EMPTY,
+    material="PLA+",
+    subtype="Silk",
+    brand="SUNLU",
+    colour_name="Bronze",
+    rgba="#779E7CFF",
+    diameter_mm=Decimal("1.75"),
+    nozzle_temp_min=205,
+    nozzle_temp_max=235,
+    bed_temp_min=45,
+    bed_temp_max=55,
+    label_weight_g=250,
+    code="S-114",
+)
+
+
+def test_openspool_writes_every_extended_key_in_order() -> None:
+    # The extended keys: SnapmakerU1-Extended-Firmware docs/design/openspool.md @ 8cb0b4e1.
+    enc = encode("openspool", replace(FACTS_114, rgba="#779E7C80", extra_colours=("#112233FF",)))
+    assert enc.warnings == []
+    text = bytes.fromhex(enc.records[0].data_hex).decode()
+    assert text == (
+        '{"protocol":"openspool","version":"1.0","type":"PLA+","color_hex":"779E7C",'
+        '"brand":"SUNLU","min_temp":"205","max_temp":"235","subtype":"Silk",'
+        '"bed_min_temp":"45","bed_max_temp":"55","alpha":"80",'
+        '"additional_color_hexes":["112233"],"weight":"250","diameter":"1.75"}'
+    )
+
+
+def test_openspool_writes_no_alpha_for_an_opaque_colour() -> None:
+    body = json.loads(bytes.fromhex(encode("openspool", FACTS_114).records[0].data_hex))
+    assert "alpha" not in body and "additional_color_hexes" not in body
+    assert body["diameter"] == "1.75" and body["weight"] == "250"
+
+
+def test_openspool_writes_four_extra_colours_and_names_the_rest() -> None:
+    extra = tuple(f"#0000{i:02X}FF" for i in range(5))
+    enc = encode("openspool", replace(FACTS_114, extra_colours=extra))
+    body = json.loads(bytes.fromhex(enc.records[0].data_hex))
+    assert body["additional_color_hexes"] == ["000000", "000001", "000002", "000003"]
+    assert enc.warnings == ["additional_color_hexes"]
+
+
+def test_openspool_writes_a_diameter_without_trailing_zeros_or_exponent() -> None:
+    for value, text in (("1.750", "1.75"), ("2.85", "2.85"), ("3", "3"), ("3.00", "3")):
+        enc = encode("openspool", replace(FACTS_114, diameter_mm=Decimal(value)))
+        assert json.loads(bytes.fromhex(enc.records[0].data_hex))["diameter"] == text
+
+
+def test_openspool_round_trips_every_field() -> None:
+    facts = replace(FACTS_114, rgba="#779E7C80", extra_colours=("#112233FF", "#445566FF"))
+    got = decode(encode("openspool", facts).records)
+    assert got is not None and got.warnings == [] and got.other_keys is None
+    assert (got.material, got.subtype, got.brand) == ("PLA+", "Silk", "SUNLU")
+    assert got.rgba == "#779E7C80" and got.extra_colours == ["#112233FF", "#445566FF"]
+    assert got.diameter_mm == Decimal("1.75") and got.label_weight_g == 250
+    assert (got.nozzle_temp_min, got.nozzle_temp_max) == (205, 235)
+    assert (got.bed_temp_min, got.bed_temp_max) == (45, 55)
+
+
+def test_openspool_reads_extended_keys_as_numbers_too() -> None:
+    got = decode(
+        [
+            _json_record(
+                OPENSPOOL_SAMPLE
+                | {
+                    "bed_min_temp": 60,
+                    "bed_max_temp": 70.0,
+                    "weight": 1000,
+                    "diameter": 1.75,
+                    "alpha": 80,  # a number's digits, read as hex
+                    "subtype": "Matte",
+                }
+            )
+        ]
+    )
+    assert got is not None and got.warnings == []
+    assert (got.bed_temp_min, got.bed_temp_max, got.label_weight_g) == (60, 70, 1000)
+    assert got.diameter_mm == Decimal("1.75") and got.rgba == "#FFAABB80"
+    assert got.subtype == "Matte"
+
+
+def test_openspool_names_extended_keys_it_cannot_read() -> None:
+    bad = {
+        "bed_min_temp": "warm",
+        "weight": [1],
+        "diameter": "-1",
+        "alpha": "XYZ",
+        "additional_color_hexes": ["nothex"],
+    }
+    got = decode([_json_record(OPENSPOOL_SAMPLE | bad)])
+    assert got is not None
+    assert got.warnings == ["bed_min_temp", "weight", "alpha", "additional_color_hexes", "diameter"]
+    assert got.rgba == "#FFAABBFF" and got.extra_colours is None and got.diameter_mm is None
+    huge = decode([_json_record(OPENSPOOL_SAMPLE | {"diameter": "1e999999999"})])
+    assert huge is not None and huge.warnings == ["diameter"]
+
+
+def test_openspool_keeps_unknown_keys_as_json_text() -> None:
+    extra = {"price": "12.5", "lot": 7, "k": 1.50, "tags": ["a", "<b>"], "m": {"x": 1}, "n": None}
+    got = decode([_json_record(OPENSPOOL_SAMPLE | extra)])
+    assert got is not None and got.warnings == []
+    assert got.other_keys == {
+        "price": '"12.5"',
+        "lot": "7",
+        "k": "1.5",
+        "tags": '["a", "<b>"]',
+        "m": '{"x": 1}',
+        "n": "null",
+    }
+
+
+def test_openspool_bounds_unknown_keys() -> None:
+    many = {f"k{i:02d}": 0 for i in range(40)}
+    got = decode([_json_record(OPENSPOOL_SAMPLE | many)])
+    assert got is not None and got.other_keys is not None
+    assert len(got.other_keys) == 32 and "k32" not in got.other_keys
+    assert got.warnings == ["8 more unknown keys not kept"]
+    deep: object = 1
+    for _ in range(300):
+        deep = [deep]
+    nested = decode([_json_record(OPENSPOOL_SAMPLE | {"deep": deep})])
+    assert nested is not None and nested.other_keys is not None
+    assert nested.other_keys["deep"] == "[" * 8 + "…" + "]" * 8
+    cut = decode([_json_record(OPENSPOOL_SAMPLE | {"long": "x" * 300})])
+    assert cut is not None and cut.other_keys is not None
+    assert len(cut.other_keys["long"]) == 128
+    assert cut.warnings == ["long cut to 128 characters"]
+
+
 def test_opentag3d_decodes_a_payload_built_from_spec_json_examples() -> None:
     got = decode([_ot3d_record(_ot3d_from_examples())])
     assert got is not None

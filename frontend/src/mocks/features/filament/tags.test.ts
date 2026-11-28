@@ -98,6 +98,27 @@ describe('the tag mocks (#7273)', () => {
     expect(await codeOf(spoolTagRecords(spoolId(1), { uid: UID, records: [], backup_id }))).toEqual({ status: 409, code: 'backup_mismatch' })
   })
 
+  // #8364: `_openspool_encode` writes the extended keys after the published 7, in a fixed order.
+  it("writes the spool's extended OpenSpool keys after the published ones, and reads them back", async () => {
+    const { backup_id } = await createTagBackup({ uid: UID, records: [], reason: 'spool_write' })
+    const { records } = await spoolTagRecords(spoolId(1), { uid: UID, records: [], backup_id })
+    const json = new TextDecoder().decode(Uint8Array.from(records[0]!.data_hex.match(/../g)!, (byte) => parseInt(byte, 16)))
+    const keys = Object.keys(JSON.parse(json) as object)
+    const order = ['protocol', 'version', 'type', 'color_hex', 'brand', 'min_temp', 'max_temp', 'subtype', 'bed_min_temp', 'bed_max_temp', 'alpha', 'additional_color_hexes', 'weight', 'diameter']
+    expect(keys).toEqual(order.filter((key) => keys.includes(key)))
+    const spool = await getSpool(spoolId(1))
+    if (spool.effective?.label_weight_g != null) expect(keys).toContain('weight')
+    if (spool.effective?.diameter_mm != null) expect(keys).toContain('diameter')
+    const read = await postTagRead({ uid: '04:0d:0d:0d:0d:0d:0d', tag_type: null, records })
+    expect(read.decoded).toMatchObject({ format: 'openspool', label_weight_g: spool.effective?.label_weight_g ?? null })
+  })
+
+  it('reads an OpenSpool tag\'s unknown keys as their JSON text', async () => {
+    const tag = { protocol: 'openspool', version: '1.0', type: 'PLA', weight: '1000', diameter: '1.75', lot: 7, note: '<b>hi</b>' }
+    const read = await postTagRead({ uid: '04:0e:0e:0e:0e:0e:0e', tag_type: null, records: [{ record_type: 'mime', media_type: 'application/json', data_hex: hex(JSON.stringify(tag)) }] })
+    expect(read.decoded).toMatchObject({ label_weight_g: 1000, diameter_mm: '1.75', other_keys: { lot: '7', note: '"<b>hi</b>"' } })
+  })
+
   it("gives a checked write the format's origin and the write's time", async () => {
     const { backup_id } = await createTagBackup({ uid: UID, records: [], reason: 'spool_write' })
     const { records } = await spoolTagRecords(spoolId(1), { uid: UID, records: [], backup_id })

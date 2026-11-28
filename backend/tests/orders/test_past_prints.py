@@ -610,6 +610,51 @@ async def test_an_archive_quote_refuses_a_print_it_cannot_price(
     assert shop.rows.quotes(shop.item.id) == []
 
 
+async def test_an_archive_quote_names_a_plate_with_no_number(shop: QuoteShop, pool: PgPool) -> None:
+    """#8377: a LAN start whose bad ``plate_id`` is no plate, with no archive, is a plate
+    the quote waits for. The answer names it in words, not as ``None``."""
+    run_id = "f43ab9d22e9a07ccd2a1b3c4d5e6f7a8"
+    starts = [
+        {
+            "subtask_name": f"scadbuddy-{run_id[:8]}-p1",
+            "started_at": "2026-11-26T11:00:00Z",
+            "plate_id": 1,
+        },
+        {
+            "subtask_name": f"scadbuddy-{run_id[:8]}-p2",
+            "started_at": "2026-11-26T12:00:00Z",
+            "plate_id": 2.0,
+        },
+    ]
+    with pool.connection() as conn:
+        conn.execute(
+            "INSERT INTO print_runs (id, output_id, idempotency_key, status, result)"
+            " VALUES (%s, %s, %s, 'succeeded', %s)",
+            (run_id, OUTPUT, f"k-{run_id}", Jsonb({"lan": starts})),
+        )
+        conn.execute(
+            "INSERT INTO lan_print_archives (archive_id, run_id, subtask_name, plate_id)"
+            " VALUES (%s, %s, %s, 1)",
+            (395, run_id, starts[0]["subtask_name"]),
+        )
+    taken_from(pool, shop.item.id, 395)
+
+    with pytest.raises(ApiError) as caught:
+        await quote_from_archive(
+            shop.lifecycle,
+            Seam(plate(395)),
+            Book(),
+            shop.order.id,
+            shop.item.id,
+            archive_request(shop, 395),
+            BY,
+        )
+
+    assert caught.value.type == PROBLEMS + "archive_plates_missing"
+    assert caught.value.detail.endswith("plates with no archive: a plate with no number")
+    assert caught.value.extensions["plates"] == [None]
+
+
 async def test_a_library_file_item_takes_its_slots_from_the_archive(shop: QuoteShop) -> None:
     item: OrderItem = shop.lifecycle.add_library_item(
         shop.order.id,

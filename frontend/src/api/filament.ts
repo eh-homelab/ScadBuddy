@@ -354,7 +354,9 @@ export const resetSyncLinks = (confirmInstance: string, expectKept: boolean) =>
     json('POST', { confirm_instance: confirmInstance, expect_kept: expectKept }),
   )
 
-export const unbindTag = (tagId: string) => request<TagBinding>(`${BASE}/tags/${seg(tagId)}/binding`, { method: 'DELETE' })
+/** Takes a tag off its spool; `cleared` when the phone wrote the tag empty first (#8362). */
+export const unbindTag = (tagId: string, reason: 'unbound' | 'cleared' = 'unbound') =>
+  request<TagBinding>(`${BASE}/tags/${seg(tagId)}/binding${reason === 'unbound' ? '' : `?reason=${reason}`}`, { method: 'DELETE' })
 
 /** Replaces the spool's own presets; the answer is its effective set. */
 export const setSpoolPresets = (id: string, rows: PresetInput[]) =>

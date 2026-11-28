@@ -1323,7 +1323,7 @@ const tools: Tool[] = [
     label: 'List a spool tag’s backups',
     description:
       'List what a tag held before each write, newest first: its UID, its NDEF records (record type, media type, ' +
-      'data as hex), why it was written (`spool_write`, `agent_write`, `restore`, `place_write`: a place’s tag, written by the swap page), who wrote it and when. ' +
+      'data as hex), why it was written (`spool_write`, `agent_write`, `restore`, `place_write`: a place’s tag, written by the swap page, `clear`: the phone wrote the tag empty), who wrote it and when. ' +
       'A page holds up to `limit` backups (default 50, at most 200); pass the last `id` as `before` for the next page. Reads ScadBuddy only.',
     input: z.object({
       tag_id: z.string().uuid().describe("A tag's `id` from filament_tag_list"),
