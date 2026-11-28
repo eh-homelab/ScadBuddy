@@ -445,7 +445,7 @@ export const inventoryTools = [
     routes: ['POST /api/v1/inventory/offers', 'PATCH /api/v1/inventory/offers/{offer_id}', 'POST /api/v1/inventory/offers/{offer_id}/archive'],
     summarize: ({ offer_id, fields, archived }) =>
       (offer_id ? `Edit supplier offer ${offer_id}` : `Add supplier offer ${fields.sku ?? ''}`.trim()) + (archived ? ' and archive it' : ''),
-    handler: async ({ offer_id, fields, archived }, { backend }) => {
+    handler: async ({ offer_id, fields, archived }, { backend, callKey }) => {
       let row
       if (offer_id === undefined) {
         const { item_id, supplier_id, sku } = fields
@@ -453,16 +453,20 @@ export const inventoryTools = [
           throw new ToolError('a new offer needs `item_id`, `supplier_id` and `sku` in `fields`')
         }
         if (archived) throw new ToolError('archived needs an offer_id')
-        row = await ok(backend.POST('/api/v1/inventory/offers', { body: { ...changes(fields), item_id, supplier_id, sku } }), 'add a supplier offer')
+        row = await ok(
+          backend.POST('/api/v1/inventory/offers', { body: { ...changes(fields), item_id, supplier_id, sku }, ...keyed(callKey, 'add') }),
+          'add a supplier offer',
+        )
         return answer(row, 'offer')
       }
       if (fields.item_id !== undefined || fields.supplier_id !== undefined) {
         throw new ToolError("an offer's item and supplier do not change: archive it and add another")
       }
       const path = { params: { path: { offer_id } } }
-      if (!empty(fields)) row = await ok(backend.PATCH('/api/v1/inventory/offers/{offer_id}', { ...path, body: changes(fields) }), `edit offer ${offer_id}`)
-      else if (!archived) throw new ToolError('nothing to change: give `fields` or `archived`')
-      if (archived) row = await ok(backend.POST('/api/v1/inventory/offers/{offer_id}/archive', path), `archive offer ${offer_id}`)
+      if (!empty(fields)) {
+        row = await ok(backend.PATCH('/api/v1/inventory/offers/{offer_id}', { ...path, body: changes(fields), ...keyed(callKey, 'edit') }), `edit offer ${offer_id}`)
+      } else if (!archived) throw new ToolError('nothing to change: give `fields` or `archived`')
+      if (archived) row = await ok(backend.POST('/api/v1/inventory/offers/{offer_id}/archive', { ...path, ...keyed(callKey, 'archive') }), `archive offer ${offer_id}`)
       return answer(row, 'offer')
     },
   }),
@@ -484,8 +488,11 @@ export const inventoryTools = [
     source: SOURCE,
     routes: ['POST /api/v1/inventory/offers/{offer_id}/prices'],
     summarize: ({ offer_id, price, currency }) => `Add the pack price ${price}${currency ? ` ${currency}` : ''} to offer ${offer_id}`,
-    handler: async ({ offer_id, ...body }, { backend }) =>
-      answer(await ok(backend.POST('/api/v1/inventory/offers/{offer_id}/prices', { params: { path: { offer_id } }, body }), `add a price to offer ${offer_id}`), 'price'),
+    handler: async ({ offer_id, ...body }, { backend, callKey }) =>
+      answer(
+        await ok(backend.POST('/api/v1/inventory/offers/{offer_id}/prices', { params: { path: { offer_id } }, body, ...keyed(callKey, 'price') }), `add a price to offer ${offer_id}`),
+        'price',
+      ),
   }),
   defineTool({
     name: 'inventory_lot_receive',

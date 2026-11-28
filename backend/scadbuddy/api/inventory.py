@@ -41,6 +41,7 @@ from scadbuddy.inventory.models import (
     OfferPricePoint,
     PriceInput,
 )
+from scadbuddy.inventory.offers import offer_key
 from scadbuddy.inventory.problems import offer_not_found, refused, supplier_not_found
 from scadbuddy.operations.store import OperationAccepted
 from scadbuddy.orders.actor import current_actor
@@ -517,6 +518,20 @@ class PriceList(BaseModel):
     prices: list[OfferPricePoint]
 
 
+#: What an offer write says of its `Idempotency-Key` (#8437).
+_OFFER_KEY = (
+    " With an `Idempotency-Key`, a retry with the same key answers the first result and "
+    "writes nothing; the key with another body is a 422. A write that was refused keeps "
+    "no result. Without a key, each request is a write of its own."
+)
+_KEY_REUSED = (422, "`Idempotency-Key` used for another request")
+
+
+def _offer_key(key: str | None) -> str | None:
+    """The ledger key of an offer write's `Idempotency-Key`, scoped to who sent it."""
+    return None if key is None else offer_key(current_actor(), key)
+
+
 @router.get(
     "/inventory/items/{item_id}/offers",
     response_model=OfferList,
@@ -563,37 +578,51 @@ async def list_supplier_offers(
         "supplier and item among the unarchived, in any case: the same SKU for two items "
         "(a bundle) is allowed, twice for one item is 409 `offer_exists`. Offers are for "
         "items that are not filament until the filament phase. Nothing here reaches "
-        "Bambuddy."
+        "Bambuddy." + _OFFER_KEY
     ),
     responses=codes(
         (404, "`supplier_not_found` or `item_not_found` (unknown or archived)"),
         (409, "`offer_exists` or `filament_item_refused`"),
+        _KEY_REUSED,
     ),
 )
-async def create_offer(body: OfferInput, inventory: InventoryDep) -> Offer:
-    return await run(inventory.offers.create, body, current_actor())
+async def create_offer(
+    body: OfferInput, inventory: InventoryDep, idempotency_key: IdempotencyKey = None
+) -> Offer:
+    by = current_actor()
+    return await run(inventory.offers.create, body, by, _offer_key(idempotency_key))
 
 
 @router.patch(
     "/inventory/offers/{offer_id}",
     response_model=Offer,
     summary="Edit a supplier offer",
-    description="Only what is sent changes; `url` or `note` null clears it.",
-    responses=codes((404, "`offer_not_found`"), (409, "`offer_exists`")),
+    description="Only what is sent changes; `url` or `note` null clears it." + _OFFER_KEY,
+    responses=codes((404, "`offer_not_found`"), (409, "`offer_exists`"), _KEY_REUSED),
 )
-async def patch_offer(offer_id: UUID, body: OfferPatch, inventory: InventoryDep) -> Offer:
-    return await run(inventory.offers.update, offer_id, body, current_actor())
+async def patch_offer(
+    offer_id: UUID,
+    body: OfferPatch,
+    inventory: InventoryDep,
+    idempotency_key: IdempotencyKey = None,
+) -> Offer:
+    by = current_actor()
+    return await run(inventory.offers.update, offer_id, body, by, _offer_key(idempotency_key))
 
 
 @router.post(
     "/inventory/offers/{offer_id}/archive",
     response_model=Offer,
     summary="Archive a supplier offer",
-    description="Its SKU is free again for the item at the supplier; its prices stay.",
-    responses=codes((404, "`offer_not_found`")),
+    description=(
+        "Its SKU is free again for the item at the supplier; its prices stay." + _OFFER_KEY
+    ),
+    responses=codes((404, "`offer_not_found`"), _KEY_REUSED),
 )
-async def archive_offer(offer_id: UUID, inventory: InventoryDep) -> Offer:
-    return await run(inventory.offers.archive, offer_id)
+async def archive_offer(
+    offer_id: UUID, inventory: InventoryDep, idempotency_key: IdempotencyKey = None
+) -> Offer:
+    return await run(inventory.offers.archive, offer_id, _offer_key(idempotency_key))
 
 
 @router.get(
@@ -616,11 +645,14 @@ async def list_offer_prices(offer_id: UUID, inventory: InventoryDep) -> PriceLis
     summary="Add a pack price to a supplier offer",
     description=(
         "A person's price of one pack (`manual`), in any ISO currency: the shop's "
-        "`orders_currency` when `currency` is absent; today when `on_date` is absent."
+        "`orders_currency` when `currency` is absent; today when `on_date` is absent." + _OFFER_KEY
     ),
-    responses=codes((404, "`offer_not_found`")),
+    responses=codes((404, "`offer_not_found`"), _KEY_REUSED),
 )
 async def add_offer_price(
-    offer_id: UUID, body: PriceInput, inventory: InventoryDep
+    offer_id: UUID,
+    body: PriceInput,
+    inventory: InventoryDep,
+    idempotency_key: IdempotencyKey = None,
 ) -> OfferPricePoint:
-    return await run(inventory.offers.add_price, offer_id, body)
+    return await run(inventory.offers.add_price, offer_id, body, _offer_key(idempotency_key))
