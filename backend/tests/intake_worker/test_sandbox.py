@@ -277,12 +277,12 @@ class _Writer:
 
 async def test_a_refusal_reads_a_body_that_comes_slower_than_linger() -> None:
     """#8398: `_send` reads the whole announced body even when it takes longer than
-    `LINGER`, so the client is not reset while it still sends. 8 MiB comes in over
-    2 x `LINGER`; `linger` gives it about 2.4 s."""
+    `LINGER`, so the client is not reset while it still sends. 32 MiB comes in over
+    2 x `LINGER`; `linger` gives it about 8 s, so a loaded runner has slack."""
     reader = asyncio.StreamReader()
     chunks, step = 4, sandbox.LINGER / 2
-    body = b"\0" * (2 << 20)
-    assert chunks * step < sandbox.linger(chunks * len(body)) - 1.0
+    body = b"\0" * (8 << 20)
+    assert chunks * step < sandbox.linger(chunks * len(body)) - 5.0
 
     async def client() -> None:
         for _ in range(chunks):

@@ -101,6 +101,8 @@ REQUEST_DEADLINE: float = 60.0
 #: client sees the answer, not a reset: this, plus the time the announced body takes at
 #: the rate `REQUEST_DEADLINE` allows a whole body (`linger`, #8363). The client sends
 #: the whole body before it reads the answer, so a close before the body is in resets it.
+#: A body past `MAX_MODEL_FILE_BYTES` (413) is never read whole and gets `LINGER` alone
+#: (#8398): that client may be reset, by design.
 LINGER: Final = 0.5
 _CHUNK: Final = 1 << 20
 _TOKEN: Final = re.compile(r"[!#$%&'*+\-.^_`|~0-9A-Za-z]+")
