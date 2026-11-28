@@ -352,12 +352,21 @@ def test_a_key_with_another_body_or_offer_is_refused(
     ]
     priced = offer_key(BY, "call-4:price")
     offers.add_price(offer.id, PriceInput(price=Decimal("4.99"), currency="EUR"), priced)
-    # Another price under the key: the digest is the body as sent.
-    retries.append(
+    # Another price, currency or date under the key: the digest is the whole body as
+    # sent, every field of PriceInput (#8515).
+    retries += [
         lambda: offers.add_price(
             offer.id, PriceInput(price=Decimal("5.99"), currency="EUR"), priced
-        )
-    )
+        ),
+        lambda: offers.add_price(
+            offer.id, PriceInput(price=Decimal("4.99"), currency="USD"), priced
+        ),
+        lambda: offers.add_price(
+            offer.id,
+            PriceInput(price=Decimal("4.99"), currency="EUR", on_date=date(2026, 11, 1)),
+            priced,
+        ),
+    ]
     for retry in retries:
         with pytest.raises(ApiError) as refused:
             retry()
