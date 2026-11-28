@@ -384,6 +384,32 @@ def test_a_start_ends_when_the_printer_stops_printing(
 
 
 @pytest.mark.parametrize(
+    "data",
+    [{"gcode_state": "FINISH"}, {"gcode_state": "FAILED"}],
+    ids=["finish", "failed"],
+)
+def test_a_start_records_when_the_report_that_ended_it_was_seen(data: dict[str, Any]) -> None:
+    """#8321: the end is the time of the report that shows it, not the clock of the
+    wait, so an order attempt reads each plate's seconds from it."""
+    assert OURS.ended_at is None
+    ended = lan_ended(report(seconds=600, **data), OURS, seen=True)
+    assert ended is not None and ended.ended_at == at(seconds=600)
+
+
+@pytest.mark.parametrize(
+    "data",
+    [{"gcode_state": "IDLE"}, {"gcode_state": "FINISH", "subtask_name": "theirs"}],
+    ids=["idle", "moved on"],
+)
+def test_an_end_no_report_timed_records_no_time(data: dict[str, Any]) -> None:
+    """Review of #8333: ``IDLE`` or another print says the printer has moved on by now,
+    not when the plate ended (a reconnect can come hours later), so the start keeps no
+    ``ended_at`` and the attempt does not sum that gap."""
+    ended = lan_ended(report(seconds=600, **data), OURS, seen=True)
+    assert ended is not None and (ended.ended, ended.ended_at) == ("unknown", None)
+
+
+@pytest.mark.parametrize(
     "value",
     [
         None,

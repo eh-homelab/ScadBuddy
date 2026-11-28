@@ -4,6 +4,9 @@
 // reads with no records, and its serial number in the AMS's 8-byte form (the 4-byte UID and
 // `:00:00:01:00`, as the AMS reports it), where Chrome gives the 4 bytes; the server takes both. The blocks the app could read go
 // to window.ScadBuddyNfc.lastMifare and a `scadbuddy-mifare` window event, for the page to post.
+// Any other tag's reading carries `scadbuddyTag`: its chip, user memory, NDEF capacity and whether
+// it is writable (frontend/src/lib/webNfc.ts `TagInfo`, #8362). A tag whose NDEF read failed is a
+// `readingerror`, never a reading with no records.
 (() => {
   const port = window.ScadBuddyNfcNative
   if (!port || window.ScadBuddyNfc) return
@@ -109,6 +112,8 @@
           data: r.dataHex == null ? null : viewOf(r.dataHex),
         })),
       }
+      // Not Web NFC's: the tag's chip and capacity, which only the app can read (#8362).
+      if (message.tag) event.scadbuddyTag = message.tag
       this.dispatchEvent(event)
       this.onreading?.(event)
     }
