@@ -14,7 +14,7 @@ import sys
 import time
 from collections.abc import AsyncIterator, Callable
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 from urllib.parse import urlsplit
 
 import pytest
@@ -255,7 +255,52 @@ def test_a_refused_body_is_read_for_as_long_as_it_may_take() -> None:
     assert sandbox.linger(64 << 20) == pytest.approx(sandbox.LINGER + 15.0)
     whole = sandbox.LINGER + sandbox.REQUEST_DEADLINE
     assert sandbox.linger(MAX_MODEL_FILE_BYTES) == pytest.approx(whole)
-    assert sandbox.linger(MAX_MODEL_FILE_BYTES * 4) == pytest.approx(whole)
+    # #8398: a body past the cap (413) is never read whole, so it is not waited for.
+    assert sandbox.linger(MAX_MODEL_FILE_BYTES + 1) == sandbox.LINGER
+
+
+class _Writer:
+    """Enough of `asyncio.StreamWriter` for `_send`."""
+
+    def __init__(self) -> None:
+        self.sent = b""
+
+    def write(self, data: bytes) -> None:
+        self.sent += data
+
+    async def drain(self) -> None:
+        return None
+
+    def write_eof(self) -> None:
+        return None
+
+
+async def test_a_refusal_reads_a_body_that_comes_slower_than_linger() -> None:
+    """#8398: `_send` reads the whole announced body even when it takes longer than
+    `LINGER`, so the client is not reset while it still sends. 32 MiB comes in over
+    2 x `LINGER`; `linger` gives it about 8 s, so a loaded runner has slack."""
+    reader = asyncio.StreamReader()
+    chunks, step = 4, sandbox.LINGER / 2
+    body = b"\0" * (8 << 20)
+    assert chunks * step < sandbox.linger(chunks * len(body)) - 5.0
+
+    async def client() -> None:
+        for _ in range(chunks):
+            await asyncio.sleep(step)
+            reader.feed_data(body)
+        reader.feed_eof()
+
+    sending = asyncio.create_task(client())
+    writer = _Writer()
+    await sandbox._send(
+        cast(asyncio.StreamWriter, writer),
+        *sandbox._error(503, "busy"),
+        reader=reader,
+        unread=chunks * len(body),
+    )
+    await sending
+    assert writer.sent.startswith(b"HTTP/1.1 503 ")
+    assert reader.at_eof(), "the body was not read to its end"
 
 
 async def test_a_busy_sandbox_refuses_a_large_upload_with_an_answer(
