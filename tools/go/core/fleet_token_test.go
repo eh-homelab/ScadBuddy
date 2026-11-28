@@ -197,7 +197,7 @@ func TestAnotherPersonsTokenNeverTakesAMachine(t *testing.T) {
 	a.sql(`UPDATE personal_access_tokens SET revoked_at = now() WHERE id = $1`, oldID)
 	got := put(bob)
 	expect(t, got.status, 403)
-	expect(t, got.body["reason"], "machine-of-another-proof")
+	expect(t, got.body["reason"], "machine-of-another-person")
 	expect(t, a.count(`SELECT count(*) FROM fleet_machines WHERE token_id = $1`, oldID), 1)
 }
 

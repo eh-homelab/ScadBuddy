@@ -123,14 +123,21 @@ func anotherProof() error {
 		"another machine's token or proof registered that machine", "machine-of-another-proof")
 }
 
-// unknownOwner is the 403 for a machine whose token row is gone: its person is unknown, so
-// no token takes it over.
+// anotherPerson is the 403 for a token on a machine whose dead token was another person's.
+func anotherPerson() error {
+	return httpx.WithReason(http.StatusForbidden,
+		"another person's token registered that machine", "machine-of-another-person")
+}
+
+// proofOwner is the 403 for a token on a machine a bootstrap proof registered.
 func proofOwner() error {
 	return httpx.WithReason(http.StatusForbidden,
 		"a bootstrap proof registered that machine, and no token takes over a proof's machine: "+
 			"ask an admin to delete the machine's row", "machine-of-a-proof")
 }
 
+// unknownOwner is the 403 for a machine whose token row is gone: its person is unknown, so
+// no token takes it over.
 func unknownOwner() error {
 	return httpx.WithReason(http.StatusForbidden,
 		"the token that registered that machine is gone, so its owner is unknown and no token "+
@@ -210,19 +217,30 @@ func (f *registryWriter) putMachine(r *http.Request, p crud.Params) (any, error)
 	ctx := r.Context()
 	var m machine
 	err = pgx.BeginFunc(ctx, f.Pool, func(tx pgx.Tx) error {
-		err := tx.QueryRow(ctx, `INSERT INTO fleet_machines AS m
-				(id, hostname, os, os_user, service_version, proof_name, token_id)
-				VALUES ($1, $2, $3, $4, $5, $6, $7)
-			ON CONFLICT (id) DO NOTHING
-			RETURNING `+machineColumns, id, hostname, os, user, version, own.proof, own.token).Scan(m.targets()...)
-		if !errors.Is(err, pgx.ErrNoRows) {
-			return err
-		}
-		// The row exists: lock it, then decide whether the caller may write it.
 		var row owner
-		if err := tx.QueryRow(ctx, `SELECT proof_name, token_id FROM fleet_machines WHERE id = $1 FOR UPDATE`,
-			id).Scan(&row.proof, &row.token); err != nil {
-			return err
+		// Twice at most: a row deleted between the insert and the lock is inserted again.
+		for try := 0; ; try++ {
+			err := tx.QueryRow(ctx, `INSERT INTO fleet_machines AS m
+					(id, hostname, os, os_user, service_version, proof_name, token_id)
+					VALUES ($1, $2, $3, $4, $5, $6, $7)
+				ON CONFLICT (id) DO NOTHING
+				RETURNING `+machineColumns, id, hostname, os, user, version, own.proof, own.token).Scan(m.targets()...)
+			if !errors.Is(err, pgx.ErrNoRows) {
+				return err
+			}
+			// The row exists: lock it, then decide whether the caller may write it.
+			err = tx.QueryRow(ctx, `SELECT proof_name, token_id FROM fleet_machines WHERE id = $1 FOR UPDATE`,
+				id).Scan(&row.proof, &row.token)
+			if err == nil {
+				break
+			}
+			if !errors.Is(err, pgx.ErrNoRows) {
+				return err
+			}
+			if try == 1 {
+				return httpx.WithReason(http.StatusConflict,
+					"the machine's row changed while it was written: send it again", "machine-changed")
+			}
 		}
 		if err := f.mayTake(ctx, tx, row, own); err != nil {
 			return err
@@ -264,7 +282,10 @@ func (f *registryWriter) mayTake(ctx context.Context, tx pgx.Tx, row, own owner)
 	if err != nil {
 		return err
 	}
-	if !dead || principal != own.principal {
+	if principal != own.principal {
+		return anotherPerson()
+	}
+	if !dead {
 		return anotherProof()
 	}
 	return nil

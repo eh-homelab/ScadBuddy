@@ -215,7 +215,9 @@ that locks the row (`FOR UPDATE`) while it decides: a token's machine moves to a
 token of the same person (`personal_access_tokens.principal`) once the old token is revoked or
 expired. A token never takes a machine a bootstrap proof registered (403 `machine-of-a-proof`):
 a proof has no person to match, so an admin deletes the row first (#8450). A token of another
-person never takes a machine, and a proof never takes a token's machine. When the old token's row is gone, its person is unknown and every token is refused
+person never takes a machine (403 `machine-of-another-person`), and a proof never takes a
+token's machine. A row deleted while a `PUT` writes it is inserted again once; a second miss is
+409 `machine-changed`. When the old token's row is gone, its person is unknown and every token is refused
 (403 `machine-of-unknown-owner`); no route deletes a machine row yet (#8450), so an admin deletes it. A
 session `PUT` takes only the row's current owner, so fleetd's machine `PUT` moves the row
 first. A revoked, expired or unknown `sbpat_` token on these routes is 401 `no_credential`, so
