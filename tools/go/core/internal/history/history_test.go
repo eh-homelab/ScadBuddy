@@ -288,15 +288,24 @@ type counting struct {
 	levels map[slog.Level]int
 }
 
-func (c *counting) Enabled(context.Context, slog.Level) bool { return true }
+func (c *counting) Enabled(context.Context, slog.Level) bool {
+	return true
+}
+
 func (c *counting) Handle(_ context.Context, r slog.Record) error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	c.levels[r.Level]++
 	return nil
 }
-func (c *counting) WithAttrs([]slog.Attr) slog.Handler { return c }
-func (c *counting) WithGroup(string) slog.Handler { return c }
+
+func (c *counting) WithAttrs([]slog.Attr) slog.Handler {
+	return c
+}
+
+func (c *counting) WithGroup(string) slog.Handler {
+	return c
+}
 
 func (c *counting) count(l slog.Level) int {
 	c.mu.Lock()
