@@ -303,6 +303,38 @@ async def test_a_refusal_reads_a_body_that_comes_slower_than_linger() -> None:
     assert reader.at_eof(), "the body was not read to its end"
 
 
+async def test_a_refusal_of_a_body_past_the_cap_reads_for_linger_alone() -> None:
+    """#8430: a body past `MAX_MODEL_FILE_BYTES` (the 413 path) is never read whole.
+    `_send` stops after `LINGER` while the body still comes, not after the time a whole
+    body of that size would take (about 60 s)."""
+    reader = asyncio.StreamReader()
+
+    async def client() -> None:
+        while True:
+            await asyncio.sleep(0.05)
+            reader.feed_data(b"\0" * (1 << 20))
+
+    sending = asyncio.create_task(client())
+    writer = _Writer()
+    loop = asyncio.get_running_loop()
+    began = loop.time()
+    try:
+        await sandbox._send(
+            cast(asyncio.StreamWriter, writer),
+            *sandbox._error(413, "too-large"),
+            reader=reader,
+            unread=MAX_MODEL_FILE_BYTES + 1,
+        )
+        took = loop.time() - began
+    finally:
+        sending.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await sending
+    assert writer.sent.startswith(b"HTTP/1.1 413 ")
+    assert sandbox.LINGER <= took < sandbox.LINGER + 5.0
+    assert not reader.at_eof()
+
+
 async def test_a_busy_sandbox_refuses_a_large_upload_with_an_answer(
     tmp_path: Path, sleeper: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
