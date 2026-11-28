@@ -17,8 +17,9 @@ it("PAGE_CSP's script-src hash is index.html's inline script", () => {
   expect(inline).toHaveLength(1)
   const hash = createHash('sha256').update(inline[0]!, 'utf8').digest('base64')
   const scriptSrc = /script-src ([^;]*);/.exec(csp)?.[1]
-  // Beside it, only Plaid Link's one script (#4961, Settings → Payments).
+  // Beside it, only Plaid Link's one script (#4961, Settings → Payments) and Cloudflare
+  // Web Analytics' beacon, which Cloudflare's proxy injects.
   expect(scriptSrc, `put 'sha256-${hash}' in page-csp.txt and PAGE_CSP`).toBe(
-    `'self' 'sha256-${hash}' https://cdn.plaid.com/link/v2/stable/link-initialize.js`,
+    `'self' 'sha256-${hash}' https://cdn.plaid.com/link/v2/stable/link-initialize.js https://static.cloudflareinsights.com/beacon.min.js/`,
   )
 })
