@@ -422,11 +422,19 @@ func (k *Kinds) Schema(ctx context.Context, q Querier, id string) (KindSchema, e
 	return out, rows.Err()
 }
 
+// lockTree is the kind tree's lock, held until the commit. Every tree change (a create,
+// a move, a restore) takes it before any kind's row, so they never wait on each other in
+// a cycle. Taking it again in one transaction is a no-op.
+func lockTree(ctx context.Context, tx pgx.Tx) error {
+	_, err := tx.Exec(ctx, `SELECT pg_advisory_xact_lock(hashtext('item_kinds_tree'))`)
+	return err
+}
+
 // lockParent is phase 2's _lock_parent: one tree change at a time, so two moves cannot each
 // pass the cycle check and make a cycle together; then the parent, held until the commit so
 // it cannot be archived meanwhile.
 func lockParent(ctx context.Context, tx pgx.Tx, parent string) error {
-	if _, err := tx.Exec(ctx, `SELECT pg_advisory_xact_lock(hashtext('item_kinds_tree'))`); err != nil {
+	if err := lockTree(ctx, tx); err != nil {
 		return err
 	}
 	var archived *time.Time
@@ -665,6 +673,13 @@ func classChange(oldCls model.Class, oldSpecial string, newCls model.Class, newS
 // publishes one handler_config.changed per step whose handler or parameters changed, and
 // rewrites the tracking and life_basis of the kind and its descendants.
 func (k *Kinds) Update(ctx context.Context, tx pgx.Tx, id string, p wire.KindPatch, by Actor) (wire.ItemKind, error) {
+	// A move is a tree change: the tree lock before the kind's row, as Restore and Create
+	// take them, so a move and a restore cannot deadlock (lockParent takes it again).
+	if p.ParentID.Set {
+		if err := lockTree(ctx, tx); err != nil {
+			return wire.ItemKind{}, err
+		}
+	}
 	var tracking, basis string
 	var builtin bool
 	err := tx.QueryRow(ctx, `SELECT tracking, life_basis, builtin FROM item_kinds WHERE id = $1 FOR UPDATE`, id).
@@ -933,9 +948,8 @@ func (k *Kinds) Archive(ctx context.Context, tx pgx.Tx, id string) (wire.ItemKin
 // Restore unarchives the kind: kind_archived while its parent is archived, as a create or
 // a move under that parent is.
 func (k *Kinds) Restore(ctx context.Context, tx pgx.Tx, id string) (wire.ItemKind, error) {
-	// The tree lock before the kind's row, as a create or a move takes them (lockParent):
-	// the other order could deadlock with a create under this kind.
-	if _, err := tx.Exec(ctx, `SELECT pg_advisory_xact_lock(hashtext('item_kinds_tree'))`); err != nil {
+	// The tree lock before the kind's row, as a create or a move takes them (lockTree).
+	if err := lockTree(ctx, tx); err != nil {
 		return wire.ItemKind{}, err
 	}
 	var parent *string

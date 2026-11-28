@@ -8,6 +8,7 @@ import (
 	"reflect"
 	"slices"
 	"testing"
+	"time"
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -346,6 +347,44 @@ func TestAKindWithALiveChildIsNotArchived(t *testing.T) {
 	if got := must(restoreKind(t, pool, k, "gizmo")); got.ArchivedAt != nil {
 		t.Fatal("the child is still archived")
 	}
+}
+
+// An archive of a parent and a create under it race (#7464): the archive holds the
+// parent's row, the create waits on it FOR SHARE, and once the archive commits the create
+// is kind_archived. No live kind ends up under an archived one.
+func TestACreateThatWaitsOnAnArchiveOfItsParentIsRefused(t *testing.T) {
+	pool, k := testdb.New(t), kindStore()
+	must(createKind(t, pool, k, wire.KindInput{ID: "widget", Name: "Widget", Tracking: ptr("lot")}))
+	ctx := context.Background()
+	archived := make(chan struct{})
+	release := make(chan struct{})
+	done := make(chan error, 1)
+	go func() {
+		done <- Tx(ctx, pool, Actor(browser), func(tx pgx.Tx) error {
+			if _, err := k.Archive(ctx, tx, "widget"); err != nil {
+				return err
+			}
+			close(archived)
+			<-release
+			return nil
+		})
+	}()
+	<-archived
+	created := make(chan error, 1)
+	go func() {
+		_, err := createKind(t, pool, k, wire.KindInput{ID: "gizmo", Name: "Gizmo", ParentID: ptr("widget"), Tracking: ptr("lot")})
+		created <- err
+	}()
+	select {
+	case err := <-created:
+		t.Fatalf("the create did not wait for the archive: %v", err)
+	case <-time.After(200 * time.Millisecond):
+	}
+	close(release)
+	if err := <-done; err != nil {
+		t.Fatal(err)
+	}
+	refusal(t, <-created, 409, "kind_archived")
 }
 
 // A kind's unit changes only while it has no items, archived ones too (#7536): a lot

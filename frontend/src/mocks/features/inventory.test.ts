@@ -161,6 +161,22 @@ describe('inventory mock', () => {
     expect(count).toEqual({ status: 422, type: 'about:blank' })
   })
 
+  it('keeps the kind tree as Go does: no archive over a live child, no restore under an archived parent, no unit change with items (#7464, #7536)', async () => {
+    const refused = (status: number, code: string) => ({ status, type: `${INVENTORY_PROBLEM}${code}` })
+    await inventoryApi.createKind({ id: 'widget', name: 'Widget', parent_id: 'hardware' })
+    await inventoryApi.createKind({ id: 'gizmo', name: 'Gizmo', parent_id: 'widget' })
+    expect(await refusal(inventoryApi.archiveKind('widget'))).toEqual(refused(409, 'kind_in_use'))
+    await inventoryApi.archiveKind('gizmo')
+    await inventoryApi.archiveKind('widget')
+    expect(await refusal(inventoryApi.restoreKind('gizmo'))).toEqual(refused(409, 'kind_archived'))
+    await inventoryApi.restoreKind('widget')
+    expect((await inventoryApi.restoreKind('gizmo')).archived_at).toBeNull()
+    // An archived item still keeps the unit, as Go counts archived items too.
+    seedItem({ name: 'Old widget', kind_id: 'widget', archived_at: '2026-11-01T00:00:00Z' })
+    expect(await refusal(inventoryApi.patchKind('widget', { uom: 'g' }))).toEqual(refused(409, 'kind_in_use'))
+    expect((await inventoryApi.patchKind('widget', { uom: 'each' })).uom).toBe('each')
+  })
+
   it('normalizes a seeded offer pack too', () => {
     expect(seedOffer({ item_id: INVENTORY.HOOK, supplier_id: SUPPLIER.AMAZON, sku: 'X', pack_size: '10.50' }).pack_size).toBe('10.5')
   })
