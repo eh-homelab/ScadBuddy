@@ -144,10 +144,14 @@ func TestEditBodyAppliesR7(t *testing.T) {
 		}
 	}
 	for _, body := range []string{`{"name":"X"}`, `{"expected_version":0,"name":"X"}`, `{"expected_version":"1","name":"X"}`,
-		`{"expected_version":1.5,"name":"X"}`, `[]`, `{`} {
+		`{"expected_version":1.0,"name":"X"}`, `{"expected_version":1.5,"name":"X"}`, `[]`, `{`} {
+		before := len(e.starter.writes)
 		if status, problem := e.send(person, http.MethodPatch, fmt.Sprintf("%s/%d", listPath, id), "k", body); status != http.StatusUnprocessableEntity ||
 			code(problem) != invalidInput {
 			t.Errorf("%s: %d %s", body, status, jsonv.Dumps(problem))
+		}
+		if len(e.starter.writes) != before {
+			t.Errorf("%s: a write started", body)
 		}
 	}
 	for _, body := range []string{`{}`, `{"name":""}`, `{"name":1}`} {
@@ -340,14 +344,15 @@ func TestAWriteTimeoutIs503Pending(t *testing.T) {
 	for _, err := range []error{context.DeadlineExceeded, errors.New("temporal: the start was refused"), &Failure{Type: timeoutFailure}} {
 		e.starter.answer = func(Write) (json.RawMessage, error) { return nil, err }
 		status, problem := e.send(person, http.MethodPost, fmt.Sprintf("%s/%d/copy", listPath, id), "k", `{"name":"Mine"}`)
-		if status != http.StatusServiceUnavailable || code(problem) != writePending {
+		detail, _ := problem.Text("detail")
+		if status != http.StatusServiceUnavailable || code(problem) != writePending || detail != problems[writePending].detail || !strings.Contains(detail, "same Idempotency-Key") {
 			t.Errorf("%v: %d %s", err, status, jsonv.Dumps(problem))
 		}
 	}
 	// A send again has no key, so the text must not ask every write for one.
 	status, problem := e.send(person, http.MethodPost, fmt.Sprintf("%s/%d/mirror", listPath, id), "", ``)
 	detail, _ := problem.Text("detail")
-	if status != http.StatusServiceUnavailable || code(problem) != writePending || !strings.Contains(detail, "a copy or an edit with the same Idempotency-Key") {
+	if status != http.StatusServiceUnavailable || code(problem) != writePending || detail != mirrorPendingDetail || strings.Contains(detail, "Key") {
 		t.Errorf("mirror: %d %s", status, jsonv.Dumps(problem))
 	}
 }

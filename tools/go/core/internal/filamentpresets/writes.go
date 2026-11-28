@@ -126,7 +126,7 @@ func (x *writer) copy(w http.ResponseWriter, r *http.Request) {
 	}
 	caller := actor(auth.CallerOf(r.Context()))
 	input := jsonv.Object{{Key: "preset_id", Value: id}, {Key: "name", Value: name}, {Key: "actor", Value: caller}, {Key: "idempotency_key", Value: key}}
-	result, ok := x.run(w, r, Write{WorkflowID: keyedID("copy", caller, key, id, input), Activity: copyActivity, Input: input}, writeMirrorBound)
+	result, ok := x.run(w, r, Write{WorkflowID: keyedID("copy", caller, key, id, input), Activity: copyActivity, Input: input}, writeMirrorBound, "")
 	if !ok {
 		return
 	}
@@ -153,7 +153,7 @@ func (x *writer) edit(w http.ResponseWriter, r *http.Request) {
 	caller := actor(auth.CallerOf(r.Context()))
 	input := append(jsonv.Object{{Key: "preset_id", Value: id}}, fields...)
 	input = append(input, jsonv.Member{Key: "actor", Value: caller}, jsonv.Member{Key: "idempotency_key", Value: key})
-	result, ok := x.run(w, r, Write{WorkflowID: keyedID("edit", caller, key, id, input), Activity: editActivity, Input: input}, writeMirrorBound)
+	result, ok := x.run(w, r, Write{WorkflowID: keyedID("edit", caller, key, id, input), Activity: editActivity, Input: input}, writeMirrorBound, "")
 	if !ok {
 		return
 	}
@@ -183,7 +183,7 @@ func (x *writer) mirror(w http.ResponseWriter, r *http.Request) {
 	}
 	write := Write{WorkflowID: fmt.Sprintf("filament-preset-mirror-%d", id), Activity: mirrorActivity,
 		Input: jsonv.Object{{Key: "preset_id", Value: id}}}
-	result, ok := x.run(w, r, write, resendBound)
+	result, ok := x.run(w, r, write, resendBound, mirrorPendingDetail)
 	if !ok {
 		return
 	}
@@ -247,7 +247,7 @@ func (x *writer) begin(w http.ResponseWriter, r *http.Request, keyed bool) (id i
 
 // run starts write with its timeout, its bound plus activityMargin, and waits for it at most
 // that plus waitMargin. ok is false when it has answered the failure.
-func (x *writer) run(w http.ResponseWriter, r *http.Request, write Write, bound time.Duration) (json.RawMessage, bool) {
+func (x *writer) run(w http.ResponseWriter, r *http.Request, write Write, bound time.Duration, pendingDetail string) (json.RawMessage, bool) {
 	write.Timeout = bound + activityMargin
 	ctx, cancel := context.WithTimeout(r.Context(), write.Timeout+waitMargin)
 	defer cancel()
@@ -259,9 +259,9 @@ func (x *writer) run(w http.ResponseWriter, r *http.Request, write Write, bound 
 	switch {
 	case !errors.As(err, &f):
 		slog.WarnContext(r.Context(), "a filament preset write did not answer", "workflow_id", write.WorkflowID, "error", err.Error())
-		writeCode(w, r, writePending)
+		writeCodeDetail(w, r, writePending, pendingDetail)
 	case f.Type == timeoutFailure:
-		writeCode(w, r, writePending)
+		writeCodeDetail(w, r, writePending, pendingDetail)
 	case activityCodes[f.Type]:
 		var extra []httpx.Field
 		switch f.Type {

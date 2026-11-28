@@ -310,6 +310,22 @@ describe('the preset page', () => {
       expect(seen[0]!.key).toBeTruthy()
     })
 
+    it('drops an added setting with its Remove button', async () => {
+      const seen = patchBody(() => HttpResponse.json({ changed: true, preset: detail({ id: 3, version: 3 }) }))
+      const { user } = show(3)
+      const form = await openEdit(user)
+      await user.type(within(form).getByRole('textbox', { name: 'New key' }), 'dropped_key')
+      await user.type(within(form).getByRole('textbox', { name: 'New value' }), '1')
+      await user.click(within(form).getByRole('button', { name: 'Remove setting dropped_key' }))
+      expect(within(form).queryByRole('textbox', { name: 'New key' })).not.toBeInTheDocument()
+      await user.click(within(form).getByRole('button', { name: 'Add another' }))
+      await user.type(within(form).getByRole('textbox', { name: 'New key' }), 'kept_key')
+      await user.type(within(form).getByRole('textbox', { name: 'New value' }), '2')
+      await user.click(within(form).getByRole('button', { name: 'Save edit' }))
+      await waitFor(() => expect(seen).toHaveLength(1))
+      expect(seen[0]!.body).toEqual({ expected_version: 2, set: { kept_key: '2' } })
+    })
+
     it('says nothing changed when the server made no version', async () => {
       patchBody(() => HttpResponse.json({ changed: false, preset: detail({ id: 3, version: 2 }) }))
       const { user } = show(3)

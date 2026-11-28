@@ -107,6 +107,9 @@ var problems = map[string]struct {
 	writesNotConfigured: {http.StatusServiceUnavailable, "Preset writes need Temporal, and this server has no address for it."},
 }
 
+// mirrorPendingDetail is the 503 detail of a send again: it takes no key, so it names none.
+const mirrorPendingDetail = "The send did not finish in time and may still run. Read the preset, then send it again."
+
 func writeCode(w http.ResponseWriter, r *http.Request, code string) {
 	writeCodeDetail(w, r, code, "")
 }

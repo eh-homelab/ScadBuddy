@@ -1,4 +1,4 @@
-import { useMemo, useState } from 'react'
+import { useMemo, useRef, useState } from 'react'
 import { copyPreset, editPreset, type PresetDetail, type PresetEdit, type PresetEdited } from '../../api/filamentPresets'
 import { FilamentSearchBox } from '../../components/filament/FilamentSearchBox'
 import { Button } from '@/components/ui/button'
@@ -99,6 +99,7 @@ export function EditForm({
   const [values, setValues] = useState<Record<string, string>>({})
   const [removed, setRemoved] = useState<Set<string>>(new Set())
   const [added, setAdded] = useState<Added[]>([{ id: 0, key: '', value: '' }])
+  const nextAddedId = useRef(1)
   const [filter, setFilter] = useState('')
   const [busy, setBusy] = useState(false)
   const [failure, setFailure] = useState<WriteFailure | null>(null)
@@ -211,10 +212,13 @@ export function EditForm({
           <div key={row.id} className="flex flex-wrap items-start gap-2">
             <Input aria-label="New key" placeholder="Key" value={row.key} onChange={(event) => setAddedRow(row.id, { key: event.target.value })} className="w-full font-mono sm:w-64" />
             <Textarea aria-label="New value" placeholder="Value" value={row.value} rows={1} onChange={(event) => setAddedRow(row.id, { value: event.target.value })} className="min-h-8 w-full py-1 font-mono text-[13px] sm:w-64" />
+            <Button type="button" variant="outline" size="sm" aria-label={`Remove setting ${row.key.trim() || 'new setting'}`} onClick={() => setAdded((was) => was.filter((one) => one.id !== row.id))}>
+              Remove
+            </Button>
           </div>
         ))}
         <div>
-          <Button type="button" variant="outline" size="sm" onClick={() => setAdded((was) => [...was, { id: was.length, key: '', value: '' }])}>
+          <Button type="button" variant="outline" size="sm" onClick={() => setAdded((was) => [...was, { id: nextAddedId.current++, key: '', value: '' }])}>
             Add another
           </Button>
         </div>
