@@ -2508,6 +2508,60 @@ describe('filament preset write tools (#7204)', () => {
     await expect(stale).rejects.toThrow(/version_moved.*current version is 5/)
   })
 
+  it('names the current version only when the problem has one', async () => {
+    server.use(
+      http.patch(`${PRESETS}/7`, () =>
+        HttpResponse.json(
+          { type: 'about:blank', title: 'Conflict', status: 409, code: 'version_moved', detail: 'The preset moved.' },
+          { status: 409, headers: { 'content-type': 'application/problem+json' } },
+        ),
+      ),
+    )
+    const update = tool('filament_preset_update')
+    const stale = update.execute(update.parse({ preset_id: 7, expected_version: 3, name: 'N' }), ctx('outward'))
+    await expect(stale).rejects.toThrow(/version_moved/)
+    await expect(stale).rejects.not.toThrow(/current version|undefined|NaN/)
+    await expect(stale).rejects.toMatchObject({ problem: 'version_moved', status: 409 })
+  })
+
+  it.each([
+    ['not_manual', 409, 'filament_preset_update'],
+    ['key_refused', 422, 'filament_preset_update'],
+  ])('puts the code %s in the ToolError problem field', async (code, status, name) => {
+    server.use(
+      http.patch(`${PRESETS}/7`, () =>
+        HttpResponse.json(
+          { type: 'about:blank', title: 'x', status, code, detail: 'because' },
+          { status, headers: { 'content-type': 'application/problem+json' } },
+        ),
+      ),
+    )
+    const t = tool(name)
+    const run = t.execute(t.parse({ preset_id: 7, expected_version: 3, name: 'N' }), ctx('outward'))
+    await expect(run).rejects.toMatchObject({ problem: code, status })
+    await expect(run).rejects.toThrow(new RegExp(code))
+  })
+
+  const ANSWERS: Record<string, string[]> = {
+    filament_preset_copy: [
+      'invalid_input', 'idempotency_key_reused', 'preset_not_found', 'document_missing',
+      'preset_write_pending', 'writes_not_configured', '422', '404', '503',
+    ],
+    filament_preset_update: [
+      'not_manual', 'version_moved', 'current_version', 'key_refused', 'invalid_input', 'idempotency_key_reused',
+      'preset_not_found', 'document_missing', 'preset_write_pending', 'writes_not_configured',
+      '409', '422', '404', '503', '500', '^[A-Za-z0-9_.-]{1,128}$', 'at most 500', 'credential',
+    ],
+    filament_preset_mirror: [
+      'mirror_off', 'not_configured', 'instance_changed', 'not_mirrored', 'preset_not_found',
+      'preset_write_pending', 'writes_not_configured', '409', '404', '503',
+      '`sent`', '`failed`', '`busy`', '`in_sync`', '`pending`',
+    ],
+  }
+  it.each(Object.entries(ANSWERS))('the description of %s names every answer of its route', (name, words) => {
+    for (const word of words) expect(tool(name).description, word).toContain(word)
+  })
+
   it('takes no set value that is not a string or a string list', () => {
     const update = tool('filament_preset_update')
     const bad = [{ a: 1 }, { a: true }, { a: null }, { a: [1] }, { a: { b: 'c' } }]
