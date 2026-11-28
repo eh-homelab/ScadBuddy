@@ -456,7 +456,8 @@ describe('spool type, item and kind labels (#7169)', () => {
     renderPage(<LabelsPage />, { route: `/filament/labels?locations=${ids('l')}&types=${ids('t')}&items=${ids('i')}` })
     let answered = 0
     while (answered < 30) {
-      await waitFor(() => expect(held.length).toBeGreaterThan(0))
+      // Wait until the pool is full (or holds the rest), so the count does not hang on the runner's speed.
+      await waitFor(() => expect(held.length).toBe(Math.min(READ_AT_ONCE, 30 - answered)))
       const now = held.splice(0)
       answered += now.length
       now.forEach((release) => release())
