@@ -34,6 +34,8 @@ type S = components['schemas']
  * #6261 — `POST /api/v1/filament/bambuddy/import`: the same two 409s; else the first import reports
  * two spools made, one linked, one updated, one needing a type and one Bambuddy row it could not
  * read, and every later one finds nothing new. It changes no spool in the mock's inventory.
+ * `leaveImportUnfinished` (or the `IMPORT_UNFINISHED_SEED_KEY` seed) makes it answer 503
+ * `import_unfinished`, as when the print worker did not finish in time.
  */
 
 /** The filament routes' prefix, as `api/filament.ts` has it. */
@@ -75,12 +77,28 @@ let onlyPresets = false
 /** #7244 — whether the presets import ran: the next one finds nothing new. */
 let presetsImported = false
 let spoolsImported = false
+/** #6261 — the next spool imports answer 503 `import_unfinished`. */
+let importUnfinished = false
 /** #7244 — Bambuddy ids that bindings still name after an import (`unresolved`). */
 let unresolvedPresets = 0
 
 /** #7244 — the next imports find `count` bound Bambuddy ids they cannot import. */
 export function leaveUnresolvedPresets(count: number) {
   unresolvedPresets = count
+}
+
+/** #6261 — the print worker does not finish the spool imports in time: each answers 503 `import_unfinished`. */
+export function leaveImportUnfinished() {
+  importUnfinished = true
+}
+
+/** An e2e test or the dev preview sets this `sessionStorage` key (any value) before the page loads to call `leaveImportUnfinished`. */
+export const IMPORT_UNFINISHED_SEED_KEY = 'scadbuddy.mock.filament-import-unfinished'
+
+try {
+  if (typeof sessionStorage !== 'undefined' && sessionStorage.getItem(IMPORT_UNFINISHED_SEED_KEY) !== null) leaveImportUnfinished()
+} catch {
+  // Storage blocked: the import answers as usual.
 }
 
 /**
@@ -139,6 +157,7 @@ export function reset() {
   onlyColours = false
   presetsImported = false
   spoolsImported = false
+  importUnfinished = false
   unresolvedPresets = 0
   onlyPresets = false
   passes = seedPasses()
@@ -336,6 +355,13 @@ export const handlers = [
     if (!configured()) return conflict('no Bambuddy URL is configured; set one in Settings', 'no_bambuddy')
     if (linksInstance() !== null && linksInstance() !== configured())
       return conflict('the Bambuddy links belong to another Bambuddy; reset them first', 'instance_changed')
+    if (importUnfinished)
+      return problem(
+        503,
+        'Service Unavailable',
+        'the print worker did not finish the import in time; it may still be running, so check the spools before importing again',
+        { code: 'import_unfinished' },
+      )
     const first = !spoolsImported
     spoolsImported = true
     return HttpResponse.json(pullReport(first))
