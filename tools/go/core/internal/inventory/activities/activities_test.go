@@ -236,6 +236,36 @@ func TestABadInputIsA422AndNotARetry(t *testing.T) {
 	}
 }
 
+// A key with a NUL fails the activity, not retried, before the ledger reads it (#8256).
+func TestAKeyWithANULIsNotRetried(t *testing.T) {
+	f := newFixture(t)
+	_, err := f.tryKey("inventory.ItemCreate", newKey()+"\x00", nil, map[string]any{"kind_id": "hardware", "name": "x"})
+	var app *temporal.ApplicationError
+	if !errors.As(err, &app) || !app.NonRetryable() || app.Type() != "bad_key" {
+		t.Fatalf("not a non-retryable bad_key: %v", err)
+	}
+	if got := f.read("/items?kind=hardware", 200); len(got["items"].([]any)) != 0 {
+		t.Fatalf("the write ran: %v", got)
+	}
+}
+
+// Each text bound counts characters, and one past it is 422 bad_input (#8256).
+func TestATextPastItsBoundIsA422(t *testing.T) {
+	f := newFixture(t)
+	long := func(n int) string {
+		return strings.Repeat("é", n)
+	}
+	f.call("inventory.ItemCreate", 201, nil, map[string]any{"kind_id": "hardware", "name": long(200), "note": long(4000)})
+	f.refused("inventory.ItemCreate", 422, "bad_input", nil, map[string]any{"kind_id": "hardware", "name": long(201)})
+	f.refused("inventory.ItemCreate", 422, "bad_input", nil, map[string]any{"kind_id": "hardware", "name": "x", "note": long(4001)})
+
+	bolt := item(f, "hardware", "M3 bolt")
+	f.call("inventory.ReceiveLot", 201, p("item_id", bolt), map[string]any{"qty": "10", "unit_cost_minor": "5"})
+	f.refused("inventory.Take", 422, "bad_input", p("item_id", bolt), map[string]any{"qty": "1", "entity": long(201)})
+	f.refused("inventory.Take", 422, "bad_input", p("item_id", bolt), map[string]any{"qty": "1", "reason": long(4001)})
+	f.call("inventory.Take", 200, p("item_id", bolt), map[string]any{"qty": "1", "reason": long(4000)})
+}
+
 // strictKind is a kind under hardware whose schema requires material.
 func strictKind(f *fixture) {
 	f.t.Helper()
