@@ -16,6 +16,7 @@ import { Input } from '@/components/ui/input'
 import { Spinner } from '@/components/ui/spinner'
 import { isKit, itemActions, type ItemActionKey } from './itemActions'
 import { ItemPrintDialog } from './PrintItem'
+import { orderItemSource } from '../../lib/printSource'
 import { parseQuantity, QUANTITY_HINT } from './quantity'
 import { refusalItems, refusalText } from './refusal'
 
@@ -66,7 +67,8 @@ export function ItemsBulk({
   const rules = { shipments, unfulfilAllowed }
   const fulfil = allowed(order, selected, rules, ['fulfil']).filter((item) => FULFILLABLE.has(item.status))
   // A kit prints output by output from its own details (#5701), never in the item's dialog.
-  const print = allowed(order, selected, rules, ['print']).filter((item) => !isKit(item))
+  // #8481: an item with no output yet renders first from its own Print… (`PrintItem`), not here.
+  const print = allowed(order, selected, rules, ['print']).filter((item) => !isKit(item) && orderItemSource(item) !== null)
   const remove = allowed(order, selected, rules, ['delete', 'cancel'])
   const tooMany = fulfil.length > MAX_BULK_FULFIL
   const [fulfilling, setFulfilling] = useState(false)

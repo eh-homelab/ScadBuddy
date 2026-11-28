@@ -53,6 +53,13 @@ describe('itemActions (#4955)', () => {
     expect(keys(order({ status: 'accepted' }), priced)).toEqual(['open', 'print', 'fulfil', 'duplicate', 'cancel'])
   })
 
+  it('offers Print… on an accepted item with a design and no output: it renders first (#8481)', () => {
+    const storefront = item({ status: 'approved', output_id: null, quotes: [quote({ accepted: true, source: 'storefront' })] })
+    expect(keys(order({ status: 'accepted' }), storefront)).toEqual(['open', 'print', 'fulfil', 'duplicate', 'cancel'])
+    // No design to render: nothing to print.
+    expect(keys(order({ status: 'accepted' }), item({ ...storefront, kind: 'request', reference: null }))).not.toContain('print')
+  })
+
   it('says why print and fulfil are refused while the order is on hold', () => {
     const priced = item({ status: 'approved', quotes: [quote({ accepted: true })] })
     const actions = itemActions(order({ status: 'accepted', on_hold: true }), priced, { shipments: [], unfulfilAllowed: true })

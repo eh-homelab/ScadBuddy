@@ -62,6 +62,8 @@ from scadbuddy.orders.archives import copy_check, copy_in
 from scadbuddy.orders.component import ORDERS
 from scadbuddy.orders.held_print import restore_held
 from scadbuddy.orders.lifecycle import (
+    DERIVED,
+    FULFILLABLE,
     QUOTE_TIMEOUT,
     SETTLED,
     LifecycleError,
@@ -570,8 +572,9 @@ def render_check(store: OrderStore, order_id: str, item_id: str) -> None:
     404 for an unknown order or item, 409 ``order_not_submitted`` for a storefront cart,
     ``item_library_file`` (it slices its file), ``item_custom`` and
     ``item_has_no_design`` (``reference_of``), ``order_not_open`` while the item takes no
-    new quote (``requote_open``) and ``item_not_open`` for a settled item: what the slice
-    quote's own check refuses."""
+    new quote (``requote_open``) and is not one to print (#8481: an accepted order, the
+    item `approved` or `failed` with an accepted quote), and ``item_not_open`` for a
+    settled item: what the slice quote's own check refuses."""
     order = store.order(order_id)
     if order is None:
         raise ApiError(status.HTTP_404_NOT_FOUND, f"no order {order_id!r}")
@@ -591,12 +594,21 @@ def render_check(store: OrderStore, order_id: str, item_id: str) -> None:
             items=[item.id],
         )
     reference_of(item)
-    if not requote_open(order, item, store.quotes(item.id)):
+    quotes = store.quotes(item.id)
+    # #8481: an accepted item to print (a storefront item has no output) renders too. The
+    # render changes no quote, so the accepted price stays.
+    to_print = (
+        order.status in DERIVED
+        and item.status in FULFILLABLE
+        and any(quote.accepted for quote in quotes)
+    )
+    if not (to_print or requote_open(order, item, quotes)):
         raise ApiError(
             status.HTTP_409_CONFLICT,
             f"order {order.label} is {order.status}: an item is rendered for a quote while"
             " the order is draft or quoted, or, past that, while the item has no accepted"
-            " quote or was revised after acceptance",
+            " quote or was revised after acceptance, and for a print while the order is"
+            " accepted and the item approved or failed with an accepted quote",
             type_=PROBLEMS + "order_not_open",
         )
     if item.status in SETTLED:

@@ -903,7 +903,7 @@ function ItemDrawer({
       {itemProject && <BambuddyProject projectId={itemProject.project_id} label="The item's Bambuddy project" />}
       {!isCart(order) && (
         <div id="item-section-print" data-testid="item-section-print" ref={sectionRef('print')}>
-          <PrintItem order={order} item={item} onChanged={onChanged} />
+          <PrintItem order={order} item={item} onChanged={onChanged} renderFirst={{ run: slices.runs.get(item.id), start: () => slices.render(item.id, item.quotes.map((q) => q.id)) }} />
         </div>
       )}
       <div id="item-section-fulfil" data-testid="item-section-fulfil" ref={sectionRef('fulfil')}>

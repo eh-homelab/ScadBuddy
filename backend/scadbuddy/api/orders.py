@@ -2712,7 +2712,9 @@ async def render_item(
     the operation's error. Refused before anything runs: 404 for an unknown order or
     item, 409 ``order_not_submitted`` (a storefront cart), ``item_library_file``,
     ``item_custom``, ``item_has_no_design``, ``order_not_open`` and ``item_not_open``,
-    as the slice quote refuses them."""
+    as the slice quote refuses them. #8481: an item to print (an accepted order, the item
+    `approved` or `failed` with an accepted quote) renders too, so a storefront item gets
+    the output its print needs; its accepted quote stays."""
     check_path(order_id, item_id)
     result = await run_operation(
         ops,

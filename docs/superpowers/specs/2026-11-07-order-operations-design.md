@@ -284,6 +284,13 @@ main (#5315, #5337, #5347), and #5280 is closed. scadify reviewed §5 against th
   opens by itself (`useSliceQuotes` `landed`). A failed render is the run's
   error, where a failed slice quote shows (`quote-error`). The owner's ruling
   (2026-11-15): "Slice should just render if it needs; don't make another step."
+- #8481, as built: "Print…" does the same for an accepted item with a design and no
+  output (a storefront order, whose acceptance closed Slice…). The render's check
+  (`orders/operations.py` `render_check`) also takes an item to print: an accepted order,
+  the item `approved` or `failed` with an accepted quote. The render changes no quote, so
+  the customer's accepted price stays. The drawer's Print… renders first, then opens the
+  print dialog in item mode on the new output (`PrintItem` `renderFirst`); the row's
+  Print… opens the drawer there. The bulk Print… leaves such an item out.
 
 ## 6. A derived machine rate (#4625)
 
