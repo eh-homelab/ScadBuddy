@@ -227,6 +227,61 @@ func TestANonRetryableFailureEndsTheRecord(t *testing.T) {
 	}
 }
 
+// The policy's last attempt, and an error type the policy does not retry, end the record
+// failed too: no attempt follows (#8497).
+func TestALastAttemptEndsTheRecord(t *testing.T) {
+	for name, c := range map[string]struct {
+		err    error
+		policy temporal.RetryPolicy
+		want   int
+	}{
+		"the last attempt": {errors.New("the database is out of reach"),
+			temporal.RetryPolicy{InitialInterval: time.Millisecond, MaximumAttempts: 2}, 2},
+		"a type the policy does not retry": {temporal.NewApplicationError("no", "never_again"),
+			temporal.RetryPolicy{InitialInterval: time.Millisecond, MaximumAttempts: 3, NonRetryableErrorTypes: []string{"never_again"}}, 1},
+	} {
+		t.Run(name, func(t *testing.T) {
+			pool := testdb.New(t)
+			key := newKey()
+			attempts := 0
+			fail := func(ctx context.Context, in Input) (store.Answer, error) {
+				attempts++
+				return store.Answer{}, c.err
+			}
+			run := func(ctx workflow.Context, in Input) (store.Answer, error) {
+				policy := c.policy
+				ctx = workflow.WithActivityOptions(ctx, workflow.ActivityOptions{
+					ActivityID: in.Key, StartToCloseTimeout: time.Minute, RetryPolicy: &policy,
+				})
+				var answer store.Answer
+				err := workflow.ExecuteActivity(ctx, "inventory.Fail", in).Get(ctx, &answer)
+				return answer, err
+			}
+			env := (&testsuite.WorkflowTestSuite{}).NewTestWorkflowEnvironment()
+			env.SetWorkerOptions(worker.Options{Interceptors: []interceptor.WorkerInterceptor{Record(pool, nil)}})
+			env.RegisterActivityWithOptions(fail, activity.RegisterOptions{Name: "inventory.Fail"})
+			env.RegisterWorkflowWithOptions(run, workflow.RegisterOptions{Name: "Fail"})
+			env.ExecuteWorkflow("Fail", Input{Key: key, Actor: json.RawMessage(browser), Params: p("item_id", "i1")})
+			if env.GetWorkflowError() == nil || attempts != c.want {
+				t.Fatalf("attempts %d, want %d, error %v", attempts, c.want, env.GetWorkflowError())
+			}
+			r := operation(t, pool, key)
+			if r.status != "failed" || !r.finished || r.attempt != c.want || r.problem["code"] != "inventory_activity_failed" {
+				t.Fatalf("%+v", r)
+			}
+		})
+	}
+}
+
+// A retryable error before the last attempt leaves the record running: final.
+func TestFinalKnowsARetry(t *testing.T) {
+	policy := &temporal.RetryPolicy{MaximumAttempts: 3}
+	if final(errors.New("out of reach"), 1, policy) || final(errors.New("out of reach"), 1, nil) ||
+		final(temporal.NewApplicationError("no", "other"), 2, &temporal.RetryPolicy{NonRetryableErrorTypes: []string{"never_again"}}) {
+		t.Fatal("a retried error was final")
+	}
+}
+
 func TestAFailedRecordNeverFailsTheActivity(t *testing.T) {
 	f, _ := recorded(t)
 	// A key past the record's id bound: the record cannot start, the activity still runs.
