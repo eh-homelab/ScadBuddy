@@ -186,7 +186,13 @@ async fn put_streams_the_file_and_reports_its_digest() {
         .await
         .unwrap();
     assert_eq!(got.size, data.len() as u64);
-    assert_eq!(got.sha256, format!("{:x}", Sha256::digest(&data)));
+    assert_eq!(
+        got.sha256,
+        Sha256::digest(&data)
+            .iter()
+            .map(|b| format!("{b:02x}"))
+            .collect::<String>()
+    );
     let seen = state.lock().unwrap();
     assert!(seen.body == data);
     assert_eq!(
