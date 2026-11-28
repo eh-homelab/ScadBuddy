@@ -14,6 +14,18 @@ import (
 // self is this package's import path.
 const self = "github.com/eh-homelab/ScadBuddy/tools/go/core/internal/inventory/modeldata"
 
+// yamlLibs are the YAML libraries' import paths: only tests and this package read YAML.
+var yamlLibs = []string{"go.yaml.in/yaml/", "gopkg.in/yaml.", "sigs.k8s.io/yaml"}
+
+func isYAML(path string) bool {
+	for _, lib := range yamlLibs {
+		if strings.HasPrefix(path, lib) {
+			return true
+		}
+	}
+	return false
+}
+
 func TestDirWalksUpToTheProof(t *testing.T) {
 	root := t.TempDir()
 	if err := os.MkdirAll(filepath.Join(root, proofDir), 0o755); err != nil {
@@ -40,7 +52,7 @@ func TestDirNamesTheMissingFolder(t *testing.T) {
 }
 
 // TestOnlyTestsImportModeldata is R-K1-20 ("test-only YAML"): no non-test Go file of the
-// module outside this package imports it, so the YAML library stays out of the binary.
+// module outside this package imports it or a YAML library, so YAML stays out of the binary.
 func TestOnlyTestsImportModeldata(t *testing.T) {
 	wd, err := os.Getwd()
 	if err != nil {
@@ -83,13 +95,15 @@ func TestOnlyTestsImportModeldata(t *testing.T) {
 			if err != nil {
 				return err
 			}
-			if p != self {
+			if p != self && !isYAML(p) {
 				continue
 			}
 			if strings.HasSuffix(name, "_test.go") {
-				testImports++
+				if p == self {
+					testImports++
+				}
 			} else {
-				t.Errorf("%s imports %s; only test files may (R-K1-20)", path, self)
+				t.Errorf("%s imports %s; only test files may (R-K1-20)", path, p)
 			}
 		}
 		return nil

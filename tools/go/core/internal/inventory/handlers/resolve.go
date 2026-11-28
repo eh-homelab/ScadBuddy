@@ -117,11 +117,13 @@ func (c *Catalog) resolve(chain model.Chain, item, unit model.Steps, openOK bool
 		sp, ok := c.Special[special]
 		if !ok {
 			problems = append(problems, Problem{Reason: UnknownSpecial})
-		} else if miss := unmatched(cls, sp.Needs, openOK); miss != nil {
-			problems = append(problems, Problem{Reason: SpecialNeeds, Missing: miss})
-		}
-		for step, id := range sp.Handlers {
-			res.Steps[step] = Choice{Handler: id}
+		} else {
+			if miss := unmatched(cls, sp.Needs, openOK); miss != nil {
+				problems = append(problems, Problem{Reason: SpecialNeeds, Missing: miss})
+			}
+			for step, id := range sp.Handlers {
+				res.Steps[step] = Choice{Handler: id}
+			}
 		}
 	}
 
