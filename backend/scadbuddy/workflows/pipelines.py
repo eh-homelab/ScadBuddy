@@ -773,8 +773,9 @@ class TemplatePipeline:
         then that cancellation (`RELEASED_STEP_PATCH`). Around a running-state
         `_project` it adds only the workflow's cancel, since `_project` raises for a
         release itself. `workflow.patched` keeps its first answer for the run, so a
-        render already running when this build deployed keeps the old behaviour to its
-        end, which its history needs."""
+        render that had already passed a step when this build deployed keeps the old
+        behaviour to its end, which its history needs; one that had not takes the new
+        path from its first step."""
         answer = await call
         if workflow.patched(RELEASED_STEP_PATCH):
             self._raise_if_released()

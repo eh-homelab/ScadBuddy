@@ -3,9 +3,10 @@ import { useCallback, useEffect, useId, useRef, useState, useSyncExternalStore }
 import { useNavigate } from 'react-router'
 import { ApiError } from '../../api/client'
 import { postTagRead, type TagReadResult } from '../../api/filament'
+import { UseMyPhone } from '../../components/devices/UseMyPhone'
 import { BambuFields, type BambuTag } from '../../components/filament/scan/BambuFields'
 import { CodeCard } from '../../components/filament/scan/CodeCard'
-import { KnownTag } from '../../components/filament/scan/KnownTag'
+import { KnownTag, TagChipLine } from '../../components/filament/scan/KnownTag'
 import { NfcJobBanner } from '../../components/filament/scan/NfcJobBanner'
 import { DecodedFields, NewTag } from '../../components/filament/scan/NewTag'
 import type { HeldPhotos } from '../../components/filament/scan/PhotoButtons'
@@ -14,7 +15,7 @@ import { ScanCode } from '../../components/filament/scan/ScanCode'
 import { filamentLinks } from '../../lib/filamentLinks'
 import { codeLabel, codeTarget } from '../../lib/resolvedCode'
 import { takeMifare } from '../../lib/nativeMifare'
-import { NfcSession, nfcSupport, type Reading, type WireRecord } from '../../lib/webNfc'
+import { NfcSession, nfcSupport, type Reading, type TagInfo, type WireRecord } from '../../lib/webNfc'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
 import { Switch } from '@/components/ui/switch'
@@ -28,6 +29,8 @@ interface Entry {
   records: WireRecord[]
   result: TagReadResult
   held: HeldPhotos
+  /** The tag's chip and capacity, when the ScadBuddy app read them (#8362). */
+  tag?: TagInfo
 }
 
 const timeOf = (at: Date) => at.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' })
@@ -82,6 +85,7 @@ export function ScanPage() {
       <div className="flex flex-col gap-1">
         <h1 className="text-lg font-semibold tracking-tight">Scan</h1>
         <p className="text-muted-foreground">Hold a tag or a label to the phone: a spool's tag, a place's tag, or a label with a code such as L-12 or S-142.</p>
+        <UseMyPhone />
       </div>
       <ScanCameraProvider>
         <ScanCode />
@@ -189,7 +193,7 @@ function Scanner() {
         (result) => {
           if (!alive || navigated) return
           const key = (nextKey.current += 1)
-          setEntries((now) => [{ key, at: new Date(), uid: reading.uid, records: reading.records, result, held: {} }, ...now])
+          setEntries((now) => [{ key, at: new Date(), uid: reading.uid, records: reading.records, result, held: {}, ...(reading.tag ? { tag: reading.tag } : {}) }, ...now])
           setOpenKey(key)
           setError(null)
           // The read's number makes each announcement new: a live region says nothing when its text stays the same.
@@ -379,6 +383,7 @@ function ReadView({
       <KnownTag
         spool={result.spool}
         tag={result.tag}
+        tagInfo={entry.tag}
         session={session}
         held={entry.held}
         onHeld={(held) => onChange({ held })}
@@ -393,6 +398,8 @@ function ReadView({
   }
   if (result.next === 'bind_or_create') {
     return (
+      <>
+      <TagChipLine info={entry.tag} />
       <NewTag
         uid={entry.uid}
         records={entry.records}
@@ -401,6 +408,7 @@ function ReadView({
         onHeld={(held) => onChange({ held })}
         onBound={onResult}
       />
+      </>
     )
   }
   return (

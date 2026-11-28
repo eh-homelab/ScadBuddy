@@ -31,8 +31,9 @@ cd app/ScadBuddy.Tests && dotnet test
 `CLAUDE.md`), and on a dispatch. It runs the tests and the `android` job's build with the same
 pins, with version code `github.run_number` and version name `1.0.<run number>`. Then it
 pushes `app/Dockerfile`, a `FROM scratch` image with only `/scadbuddy.apk` and
-`/scadbuddy.apk.sha256`, to `ghcr.io/eh-homelab/scadbuddy-app`, tagged `sha-<7>` and
-`latest`. It publishes no GitHub release. To install the latest:
+`/scadbuddy.apk.sha256`, to `ghcr.io/eh-homelab/scadbuddy-app`, tagged `sha-<7>`, and
+`latest` only for a main build: a dispatch of another branch publishes `sha-<7>` alone.
+It publishes no GitHub release. To install the latest:
 
 ```bash
 crane export ghcr.io/eh-homelab/scadbuddy-app:latest - | tar -x scadbuddy.apk scadbuddy.apk.sha256
@@ -70,6 +71,11 @@ That stays until a release key signs every build (the #8376 follow-up).
   reads and writes, and the bridge to `Resources/Raw/nfc-polyfill.js` (Web NFC's `NDEFReader`).
   A running device call takes every tap (`StartCall`), and a read tells it its progress
   (`ITagProgress`).
+  A page write reads the tag back on the write's own connection (Android dispatches a tag only
+  when it finds it, and a new connection just after the write failed on prod, #8362); with no
+  read-back the page asks for a second tap. A failed NDEF read is a `readingerror`, never a
+  reading with no records. Each NDEF reading carries `tag`: the NTAG chip from GET_VERSION, its
+  user memory, `Ndef.getMaxSize()` and `isWritable()`.
 - `Platforms/Android/ScanChromeClient.cs`: the camera and the location, for the set origin only.
 - `Telemetry.cs`: OTLP/HTTP traces, metrics and logs (`scadbuddy-app`).
 

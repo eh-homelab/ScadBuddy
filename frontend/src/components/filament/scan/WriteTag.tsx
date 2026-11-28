@@ -1,9 +1,9 @@
 import { CheckIcon, XIcon } from 'lucide-react'
 import { useEffect, useRef, useState } from 'react'
 import { listTags, spoolTagRecords, spoolTagWritten, type Spool, type TagReadResult, type TagRecords, type TagRow } from '../../../api/filament'
-import { headlineOf, restoreBackup, writeWithBackup, type WriteOutcome, type WriteStep } from '../../../lib/tagWrite'
+import { clearTag, headlineOf, restoreBackup, writeWithBackup, type WriteMode, type WriteOutcome, type WriteStep } from '../../../lib/tagWrite'
 import { cleanTagUid } from '../../../lib/tagUid'
-import type { NfcSession, WireRecord } from '../../../lib/webNfc'
+import type { NfcSession, Reading, WireRecord } from '../../../lib/webNfc'
 import { Button } from '@/components/ui/button'
 import { cn } from '@/lib/utils'
 
@@ -27,14 +27,16 @@ function stepIndexOf(step: WriteStep | null, outcome: WriteOutcome | null): numb
   return 0
 }
 
+const AGAIN: Record<WriteMode, string> = { write: 'Write again', restore: 'Restore again', clear: 'Clear again' }
+
 /**
- * #7273 screens 5 and 6 — one write or restore run: the three steps, ticked as the run moves
- * on, then its outcome. It runs once on mount, and again on "Write again".
+ * #7273 screens 5 and 6 — one write, restore or clear run (#8362): the three steps, ticked as
+ * the run moves on, then its outcome. It runs once on mount, and again on "Write again".
  */
 export function WriteFlow({
   session,
   label,
-  restoring = false,
+  mode = 'write',
   run,
   onSettled,
   onRunning,
@@ -42,9 +44,9 @@ export function WriteFlow({
   onClose,
 }: {
   session: NfcSession
-  /** The section's name: "Write tag", "Restore a backup". */
+  /** The section's name: "Write tag", "Restore a backup", "Clear tag". */
   label: string
-  restoring?: boolean
+  mode?: WriteMode
   run: (hooks: RunHooks) => Promise<WriteOutcome>
   onSettled?: (outcome: WriteOutcome) => void
   /** True while a run is under way, false once it settles or stops: the parent allows one run at a time. */
@@ -121,7 +123,7 @@ export function WriteFlow({
 
   function detailOf(index: number) {
     if (index === 0 && at === 0 && !outcome && step === null) return ready ? 'Hold the tag still. If asked, lift it and tap again.' : 'Starting NFC…'
-    if (index === 1 && records && !restoring) {
+    if (index === 1 && records && mode === 'write') {
       const format = records.format ? FORMAT_NAMES[records.format] : null
       const warnings = records.warnings ?? []
       return (
@@ -173,7 +175,7 @@ export function WriteFlow({
       </ol>
 
       {outcome ? (
-        <Outcome outcome={outcome} restoring={restoring} onRestore={onRestore} />
+        <Outcome outcome={outcome} mode={mode} onRestore={onRestore} />
       ) : (
         <p className="text-muted-foreground">The tag's current contents are saved before anything is written. If the backup fails, nothing is written. Tags are never locked.</p>
       )}
@@ -185,7 +187,7 @@ export function WriteFlow({
               Done
             </Button>
             <Button type="button" variant="outline" className="h-11" onClick={() => setAttempt((count) => count + 1)}>
-              {restoring ? 'Restore again' : 'Write again'}
+              {AGAIN[mode]}
             </Button>
           </>
         ) : (
@@ -206,17 +208,20 @@ export function WriteFlow({
   )
 }
 
-function Outcome({ outcome, restoring, onRestore }: { outcome: WriteOutcome; restoring: boolean; onRestore?: (backupId: string) => void }) {
+function Outcome({ outcome, mode, onRestore }: { outcome: WriteOutcome; mode: WriteMode; onRestore?: (backupId: string) => void }) {
   const ok = outcome.status === 'checked'
   const spoolNumber = outcome.status === 'checked' ? outcome.result?.spool?.number : undefined
   return (
     <div className={cn('flex flex-col gap-1 border-l-4 py-1 pl-3', ok ? 'border-ok' : 'border-warn')}>
-      <p className="text-base font-semibold">{headlineOf(outcome, restoring)}</p>
-      {ok && !restoring && spoolNumber != null && <p>The tag holds exactly the record that was sent. It is now bound to spool #{spoolNumber}.</p>}
-      {ok && restoring && <p>The tag holds the backup's records again.</p>}
+      <p className="text-base font-semibold">{headlineOf(outcome, mode)}</p>
+      {ok && mode === 'write' && spoolNumber != null && <p>The tag holds exactly the record that was sent. It is now bound to spool #{spoolNumber}.</p>}
+      {ok && mode === 'restore' && <p>The tag holds the backup's records again.</p>}
+      {ok && mode === 'clear' && <p>The tag holds one empty record and is on no spool. Its old records are in the backup: Restore puts them back.</p>}
       {outcome.status === 'mismatch' && (
         <>
-          <p>Nothing was bound. Its old contents are in the backup. The tag may have moved away too soon, or it may be too small for the record.</p>
+          <p>
+            {mode === 'clear' ? 'The tag stays on its spool.' : 'Nothing was bound.'} Its old contents are in the backup. The tag may have moved away too soon, or it may be too small for the record.
+          </p>
           {onRestore && (
             <Button type="button" variant="outline" className="mt-2 h-11 self-start" onClick={() => onRestore(outcome.backupId)}>
               Restore from the backup
@@ -272,7 +277,7 @@ export function WriteTag({
   const [lookup, setLookup] = useState<string | null>(null)
   const written = useRef<{ uid: string; records: WireRecord[] }>({ uid: '', records: [] })
 
-  const settled = (outcome: WriteOutcome, restore: boolean) => {
+  const settled = (outcome: WriteOutcome, restore: WriteMode) => {
     onSettled?.(outcome)
     if (outcome.status === 'checked' && outcome.result) {
       onWritten?.(written.current.uid, written.current.records, outcome.result)
@@ -287,9 +292,9 @@ export function WriteTag({
         key={`restore-${restoring.backupId}`}
         session={session}
         label="Restore the tag"
-        restoring
+        mode="restore"
         run={({ onStep, onClaimed, signal }) => restoreBackup({ session, tagId: restoring.tagId, backupId: restoring.backupId, onStep, onClaimed, signal })}
-        onSettled={(outcome) => settled(outcome, true)}
+        onSettled={(outcome) => settled(outcome, 'restore')}
         onRunning={onRunning}
         onClose={onClose}
       />
@@ -320,7 +325,7 @@ export function WriteTag({
             },
           })
         }
-        onSettled={(outcome) => settled(outcome, false)}
+        onSettled={(outcome) => settled(outcome, 'write')}
         onRunning={onRunning}
         onRestore={(backupId) => {
           setLookup(null)
@@ -337,5 +342,76 @@ export function WriteTag({
         </p>
       )}
     </>
+  )
+}
+
+/**
+ * #8362 — "Clear tag" on a spool's tag: one tap backs the tag up, writes one empty record, reads
+ * it back, and takes the tag off its spool. The read is handed on (`onCleared`) only when the
+ * person closes the outcome, so the page shows the tag as new after they have read it. A mismatch
+ * offers the backup back, as a write does.
+ */
+export function ClearTag({
+  session,
+  tag,
+  onCleared,
+  onAnnounce,
+  onSettled,
+  onRunning,
+  onClose,
+}: {
+  session: NfcSession
+  tag: TagRow
+  /** A checked clear: the UID as the phone read it, what the tag holds now, and the server's answer for the tag. */
+  onCleared?: (uid: string, records: WireRecord[], result: TagReadResult) => void
+  onAnnounce?: (text: string) => void
+  onSettled?: (outcome: WriteOutcome) => void
+  onRunning?: (running: boolean) => void
+  onClose: () => void
+}) {
+  const [restoring, setRestoring] = useState<string | null>(null)
+  const back = useRef<Reading | null>(null)
+  const cleared = useRef<{ uid: string; records: WireRecord[]; result: TagReadResult } | null>(null)
+
+  if (restoring) {
+    return (
+      <WriteFlow
+        key={`restore-${restoring}`}
+        session={session}
+        label="Restore the tag"
+        mode="restore"
+        run={({ onStep, onClaimed, signal }) => restoreBackup({ session, tagId: tag.id, backupId: restoring, onStep, onClaimed, signal })}
+        onSettled={(outcome) => {
+          onSettled?.(outcome)
+          onAnnounce?.(headlineOf(outcome, 'restore'))
+        }}
+        onRunning={onRunning}
+        onClose={onClose}
+      />
+    )
+  }
+  return (
+    <WriteFlow
+      key="clear"
+      session={session}
+      label="Clear tag"
+      mode="clear"
+      run={({ onStep, onClaimed, signal }) => {
+        cleared.current = null
+        return clearTag({ session, tag, onStep, onClaimed, signal, onChecked: (reading) => (back.current = reading) })
+      }}
+      onSettled={(outcome) => {
+        onSettled?.(outcome)
+        if (outcome.status === 'checked' && outcome.result && back.current) cleared.current = { uid: back.current.uid, records: back.current.records, result: outcome.result }
+        onAnnounce?.(headlineOf(outcome, 'clear'))
+      }}
+      onRunning={onRunning}
+      onRestore={setRestoring}
+      onClose={() => {
+        const done = cleared.current
+        onClose()
+        if (done) onCleared?.(done.uid, done.records, done.result)
+      }}
+    />
   )
 }

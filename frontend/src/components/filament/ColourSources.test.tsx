@@ -1,6 +1,6 @@
 import { screen, waitFor, within } from '@testing-library/react'
 import { delay, http, HttpResponse } from 'msw'
-import { describe, expect, it } from 'vitest'
+import { afterEach, describe, expect, it } from 'vitest'
 import { server } from '../../mocks/server'
 import { renderPage } from '../../test/utils'
 import { CatalogList } from './CatalogList'
@@ -139,5 +139,67 @@ describe('the colour catalog', () => {
         'Stopped: filamentcolors.xyz did not answer (ConnectTimeout). 300 added, 0 changed, 0 already up to date, 2 kept (edited by a person, or from another source); what was read before stays.',
       ),
     ).toBeInTheDocument()
+  })
+})
+
+describe('the Bambu colour code lookup (#6907)', () => {
+  // The request listeners each test adds end with it.
+  afterEach(() => server.events.removeAllListeners())
+
+  const lookup = async (code: string) => {
+    const page = renderPage(<CatalogList kind="colours" />)
+    const sources = await screen.findByRole('region', { name: 'Colour sources' })
+    await page.user.type(within(sources).getByRole('textbox', { name: 'Bambu colour code' }), code)
+    await page.user.click(within(sources).getByRole('button', { name: 'Look up' }))
+    return { ...page, sources }
+  }
+
+  it("shows a code's name, colours, filament type and id", async () => {
+    const { sources } = await lookup('10100')
+    const found = await within(sources).findByRole('group', { name: 'Bambu colour code 10100' })
+    expect(found).toHaveTextContent('Jade White')
+    expect(found).toHaveTextContent('#FFFFFFFF')
+    expect(found).toHaveTextContent('PLA')
+    expect(found).toHaveTextContent('GFA00')
+  })
+
+  it('keeps the alpha of a translucent colour', async () => {
+    const { sources } = await lookup('13612')
+    const found = await within(sources).findByRole('group', { name: 'Bambu colour code 13612' })
+    expect(found).toHaveTextContent('#F4EE2A80')
+  })
+
+  it('shows every colour of a multi-colour code', async () => {
+    const { sources } = await lookup('15900')
+    const multi = await within(sources).findByRole('group', { name: 'Bambu colour code 15900' })
+    expect(within(multi).getAllByRole('img')).toHaveLength(2)
+  })
+
+  it('says when the table has no such code', async () => {
+    const { sources } = await lookup('99999')
+    expect(await within(sources).findByRole('alert')).toHaveTextContent("Bambu Studio's colour table has no code 99999.")
+  })
+
+  it("says why when the image has no colour table", async () => {
+    server.use(
+      http.get('/api/v1/filament/bambu-colour-codes', () =>
+        HttpResponse.json({ type: 'about:blank', title: 'Service Unavailable', status: 503, detail: 'no colour table at /profiles/filaments_color_codes.json' }, { status: 503 }),
+      ),
+    )
+    const { sources } = await lookup('10100')
+    expect(await within(sources).findByRole('alert')).toHaveTextContent('no colour table at /profiles/filaments_color_codes.json')
+  })
+
+  it('sends the code as typed, trimmed, and asks nothing for an empty one', async () => {
+    const asked: string[] = []
+    server.events.on('request:start', ({ request }) => {
+      if (request.url.includes('/bambu-colour-codes')) asked.push(new URL(request.url).searchParams.get('code') ?? '')
+    })
+    const page = renderPage(<CatalogList kind="colours" />)
+    const sources = await screen.findByRole('region', { name: 'Colour sources' })
+    expect(within(sources).getByRole('button', { name: 'Look up' })).toBeDisabled()
+    await page.user.type(within(sources).getByRole('textbox', { name: 'Bambu colour code' }), ' 10100 {Enter}')
+    await within(sources).findByRole('group', { name: 'Bambu colour code 10100' })
+    expect(asked).toEqual(['10100'])
   })
 })
