@@ -383,7 +383,7 @@ def test_the_workers_merge_names_bambuddy_as_an_in_process_merge_does(
         ).fetchall()
     moved = {(e["payload"]["op"], e["payload"]["key"]) for e in events}
     assert moved == {("set", "nozzle_note"), ("remove", "nozzle_note")}
-    assert {Actor.model_validate(e["payload"]["actor"]) for e in events} == {BAMBUDDY_ACTOR}
+    assert [Actor.model_validate(e["payload"]["actor"]) for e in events] == [BAMBUDDY_ACTOR] * 2
 
 
 @pytest.mark.requires_postgres
