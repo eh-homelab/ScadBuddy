@@ -57,7 +57,7 @@ journalctl --user -u fleetd -f
 ## Commands and flags
 
 ```
-fleetd run  [--api <url>] [--token-file <file>] [--config-dir <dir>]... [--interval 10s] [--refresh 5m] [--otel-endpoint <url>] [--no-telemetry]
+fleetd run  [--api <url>] [--token-file <file>] [--config-dir <dir>]... [--interval 10s] [--refresh 5m] [--otel-endpoint <url>] [--no-telemetry] [--update-interval 15m] [--no-update]
 fleetd scan [--config-dir <dir>]...
 fleetd version
 ```
@@ -73,6 +73,8 @@ fleetd version
 | `--refresh` | How often `run` sends every row again, changed or not, so the registry's `last_seen` stays fresh. Default `5m`. |
 | `--otel-endpoint` | OTLP/HTTP collector base URL for traces, metrics and logs (see "Telemetry"). |
 | `--no-telemetry` | Send no traces, metrics or logs. |
+| `--update-interval` | How often `run` looks for a new signed release (see "Auto-update"). Default `$FLEETD_UPDATE_INTERVAL`, else `15m`. At least `1m`. |
+| `--no-update` | Never replace this binary. |
 
 ## What `run` does
 
@@ -134,6 +136,84 @@ needs no token.
   or with a password in the scp-like form, is not sent.
 - A value that core would refuse (a control character, too long) is left out of the row,
   so one odd field does not lose the whole row.
+
+## Auto-update
+
+fleetd updates itself from signed GitHub releases (#8588, refs #7993).
+
+**The releases.** `.github/workflows/fleetd-release.yml` runs on each push to main that
+changes fleetd or a module it builds from, and on a dispatch of main. It cross-compiles
+fleetd for linux/amd64 and linux/arm64, stamped with the full commit sha (`fleetd version`
+prints it). It publishes the release `fleetd-<sha7>` with `fleetd-linux-amd64`,
+`fleetd-linux-arm64`, `SHA256SUMS` and `SHA256SUMS.sig`. The release is never the repo's
+"latest". Its tag is a lightweight tag at the commit. `SHA256SUMS`'s first line is
+`commit <full sha>`. Then comes one `sha256sum` line per binary.
+
+The workflow has two jobs. `build` holds no secret and only reads the repo. It builds,
+writes `SHA256SUMS` and uploads both as an artifact. `release` runs in the environment
+`fleetd-release`. It checks the artifact's sha256 against the one `build` output. It checks
+the commit line and the binaries' sums. Then it signs and publishes. Only this job may
+write releases.
+
+**The key.** `SHA256SUMS.sig` is an ed25519 signature of `SHA256SUMS`: the raw 64 bytes, in
+base64. The private key is `FLEETD_RELEASE_SIGNING_KEY` (PEM, PKCS#8). It is a secret of the
+environment `fleetd-release`, not of the repo. That environment's deployment branch policy
+allows only `main`, so a workflow on another branch cannot read the key. The job also
+checks `github.ref` itself. The signature covers the commit line, so a signature for one
+commit cannot vouch for the release of another commit. The public key is compiled into fleetd (`internal/update`, `publicKey`):
+`XLVoFjOOmaMxLpAg41zfmZ661BVZkwb3MSOMTGXP0h0=`. The workflow fails, and publishes nothing,
+when the secret is empty or its public half is not that key. To change the key, change both
+in one PR. A fleetd with the old key refuses releases signed by the new one, so install the
+new build by hand on each machine.
+
+**What `run` does.** At start and every `--update-interval`:
+
+1. It lists the repo's releases and takes the newest `fleetd-` release by `created_at`.
+2. It does nothing when that release is the running commit. Else it resolves the release's
+   tag with GitHub's git refs API. The tag must be a lightweight tag of the release's
+   target commit (`target_commitish`, which the tag name also names). Then it asks GitHub's
+   compare API whether that commit is ahead of the running one. A release that is behind,
+   or on another line, is never taken.
+3. It downloads `SHA256SUMS` and `SHA256SUMS.sig` and verifies the signature. The signed
+   first line must be `commit <that commit>`. It refuses a manifest signed for another
+   commit, or one with no commit line.
+4. It downloads `fleetd-<GOOS>-<GOARCH>` and checks its sha256 against the signed list.
+   Downloads go only to `github.com`, `objects.githubusercontent.com` and
+   `release-assets.githubusercontent.com`, over https, redirects included.
+5. It writes the binary next to the running one, with mode 0755, and runs `<new> version`
+   (10 s). It must print the release's commit.
+6. It renames the running binary to `<name>.old` and the new one to `<name>`.
+7. It stops its loops and telemetry, and re-execs the new binary with the same arguments and
+   environment. The pid stays the same, so systemd keeps the service.
+
+A failure at any step keeps the running binary. fleetd logs it once per release and reason,
+and tries again at the next check. A network error or a 5xx is retried twice, with backoff.
+A GitHub rate limit (`Retry-After`, or `X-RateLimit-Remaining: 0`) stops all checks until it
+resets. The calls are unauthenticated and carry no trace headers.
+
+A dev build (`go install`, so `fleetd version` prints `dev…`) never updates. To get updates,
+install a release binary:
+
+```bash
+tag=$(gh release list -R eh-homelab/ScadBuddy --json tagName,createdAt \
+  -q '[.[] | select(.tagName | startswith("fleetd-"))] | sort_by(.createdAt) | last | .tagName')
+gh release download "$tag" -R eh-homelab/ScadBuddy -p "fleetd-linux-$(dpkg --print-architecture)" -p 'SHA256SUMS*'
+head -n1 SHA256SUMS   # commit <the full sha of $tag>
+grep -v '^commit ' SHA256SUMS | sha256sum --ignore-missing -c -
+install -m 0755 "fleetd-linux-$(dpkg --print-architecture)" ~/.local/bin/fleetd
+```
+
+Then point the unit's `ExecStart` at `%h/.local/bin/fleetd run`. The directory must be
+writable by the service's user. Else each check logs why and fleetd keeps running.
+
+**Roll back.** The binary before the last update is `<name>.old`:
+
+```bash
+systemctl --user stop fleetd
+mv ~/.local/bin/fleetd.old ~/.local/bin/fleetd
+# Add --no-update to ExecStart, or the next check takes the newest release again.
+systemctl --user daemon-reload && systemctl --user start fleetd
+```
 
 ## Telemetry
 

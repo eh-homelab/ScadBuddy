@@ -20,7 +20,7 @@ bambuddy-fs's mount tests need `/dev/fuse` and `fusermount3` (they skip without 
 device). core's tests need `SCADBUDDY_TEST_DATABASE_URL` (they skip without it;
 CI sets `SCADBUDDY_TEST_POSTGRES_REQUIRED`). The Go toolchain is pinned in these places, moved together: `go.work`'s
 `toolchain`, the golang tag in `tools/go/bambuddy-fs/Dockerfile`, `tools/go/core/Dockerfile`, `tools/go/fleet/Dockerfile` and `tools/go/fleetd/Dockerfile`, and `GOTOOLCHAIN` in
-`go-module-ci.yml`, in `ci.yml`'s two freshness steps and in its `go-client` job.
+`go-module-ci.yml` and `fleetd-release.yml`, in `ci.yml`'s two freshness steps and in its `go-client` job.
 
 
 ## Layout
@@ -57,7 +57,29 @@ CI sets `SCADBUDDY_TEST_POSTGRES_REQUIRED`). The Go toolchain is pinned in these
   `<config dir>/sessions` and `/proc`, transcript paths by name only, git facts, the
   account uuid), `internal/registry` (the client of core's `…/crud/fleet-rotator/machines`
   routes, a `fleet` PAT from `--token-file`, https only), `internal/report` (changed rows
-  only, all every 5 minutes) and `internal/watch` (inotify); README there.
+  only, all every 5 minutes), `internal/watch` (inotify) and `internal/update` (auto-update
+  from signed releases, #8588); README there.
+
+## fleetd releases (#8588)
+
+`.github/workflows/fleetd-release.yml` publishes each main build of fleetd as the GitHub
+release `fleetd-<sha7>`: `fleetd-linux-amd64`, `fleetd-linux-arm64` (`CGO_ENABLED=0`,
+`-X main.version=<full sha>`), `SHA256SUMS` (first line `commit <full sha>`, then the
+binaries' sums) and `SHA256SUMS.sig` (ed25519 over SHA256SUMS, raw 64 bytes, base64, by
+`FLEETD_RELEASE_SIGNING_KEY`). The key is a secret of the environment `fleetd-release`,
+whose deployment branch policy allows only `main`. It is never a repo secret. The `build`
+job holds no secret and uploads the binaries as an artifact. The `release` job runs in that
+environment: it checks the artifact's sha256 against `build`'s output, signs and publishes.
+Running fleetds take the newest one (`internal/update`). They refuse it unless the signed
+commit line is the release tag's commit, which is also the commit the compare API said is
+ahead. arm64 here is a Go cross-compile on a hosted
+amd64 runner, with no QEMU and no image, so the root "No CI job builds an arm64 image" rule
+still holds. The run fails on an empty secret or one whose public half is not
+`internal/update`'s `publicKey`; it never publishes unsigned. It runs on main only (a
+branch release could pass fleetd's "ahead" check), one run at a time, and a re-run of a
+published commit does nothing. A change to the paths in its `on.push.paths` (fleetd,
+claudecreds, telemetry, `go.work`, `vendor/`) cuts a release, which every machine installs
+within `--update-interval`.
   `claudecreds/` is a library for Claude Code logins (#7981): `ParseEntry` and `Tail`, the
   rate-limit and credential events in transcripts (#7988), and `ResetFromText`, the reset a
   usage-limit text names, in UTC or an IANA zone, held to the agent's
