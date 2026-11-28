@@ -22,7 +22,12 @@ from pydantic import ValidationError
 
 from scadbuddy.filament import models as m
 from scadbuddy.filament import purchasing_models as pm
-from scadbuddy.filament.catalog import CatalogKeyEmptyError, TypeTempError, find_by_key
+from scadbuddy.filament.catalog import (
+    CatalogExistsError,
+    CatalogKeyEmptyError,
+    TypeTempError,
+    find_by_key,
+)
 from scadbuddy.filament.invoice_money import (
     RECONCILE_TOLERANCE,
     allocate,
@@ -711,6 +716,7 @@ class InvoiceStore:
             errors.DataError,
             TypeTempError,
             CatalogKeyEmptyError,
+            CatalogExistsError,
         ) as exc:
             raise InvoiceLineError(position, f"its proposed spool type is invalid ({exc})") from exc
         made[key] = (created.id, created.label_weight_g)

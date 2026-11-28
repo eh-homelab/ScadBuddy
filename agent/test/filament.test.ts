@@ -218,10 +218,15 @@ describe('filament type tools', () => {
 
   it('takes catalog names on an add only (#8228)', async () => {
     const bodies: unknown[] = []
+    const patches: unknown[] = []
     server.use(
       http.post(TYPES, async ({ request }) => {
         bodies.push(await request.json())
         return HttpResponse.json({ id: ROW }, { status: 201 })
+      }),
+      http.patch(`${TYPES}/${ROW}`, async ({ request }) => {
+        patches.push(await request.json())
+        return HttpResponse.json({ id: ROW })
       }),
     )
     const fields = { code: 'ZED-PLA-RED', rgba: '#FF0000', label_weight_g: 1000, material_name: 'PLA', brand_name: 'Zed', subtype_name: 'Matte' }
@@ -230,6 +235,7 @@ describe('filament type tools', () => {
     const edit = await runTool(tool('filament_type_upsert'), { type_id: ROW, fields: { brand_name: 'Zed' } }, ctx())
     expect(edit.isError).toBe(true)
     expect(bodies).toHaveLength(1)
+    expect(patches).toEqual([])
   })
 
   it('sends properties with the row on create, in one request, and answers them (#7703)', async () => {

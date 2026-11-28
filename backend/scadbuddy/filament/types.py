@@ -277,7 +277,9 @@ class SpoolTypeStore:
     def create_on(self, conn: Conn, body: m.SpoolTypeCreate) -> m.SpoolType:
         """`create` on ``conn``, in the caller's transaction (confirming an invoice,
         #6266). A duplicate or a missing catalog row is the driver's `UniqueViolation` or
-        `ForeignKeyViolation`; `create` maps them. It writes no ``properties`` and checks
+        `ForeignKeyViolation`; `create` maps them. A name with no key is
+        `CatalogKeyEmptyError`, and a name that keeps clashing is
+        `CatalogExistsError`. It writes no ``properties`` and checks
         nothing (#7703): `create` does. A ``brand_name``, ``material_name`` or
         ``subtype_name`` is its row, else a new one added on ``conn``, unchecked (spec
         §6.3b, #8228), so a refused type takes it back with it."""

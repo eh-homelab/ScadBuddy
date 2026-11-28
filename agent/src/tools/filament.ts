@@ -226,8 +226,6 @@ const tools: Tool[] = [
       if (row_id === undefined) {
         if (archived !== undefined) throw new ToolError('archived needs a row_id')
         row = await ok(backend.POST('/api/v1/filament/catalog/{kind}', { params: { path: { kind } }, body }), `add to the ${kind} catalog`)
-      } else if (NAME_FIELDS.some((name) => fields[name] !== undefined)) {
-        throw new ToolError(`${NAME_FIELDS.join(', ')} are for an add only; give the id to edit a type`)
       } else if (properties !== undefined && archived === undefined && Object.keys(fields).length === 0) {
         // Properties only: the property patch, which leaves the row and its `updated_at` alone.
         return json({ kind, id: row_id, properties: await setPropertiesAfter(backend, catalogRowRef(kind, row_id), properties) })
@@ -471,6 +469,8 @@ const tools: Tool[] = [
       if (type_id === undefined) {
         if (archived !== undefined) throw new ToolError('archived needs a type_id')
         row = await ok(backend.POST('/api/v1/filament/types', { body: { ...fields, properties } as never }), 'add a spool type')
+      } else if (NAME_FIELDS.some((name) => (fields as Record<string, unknown>)[name] !== undefined)) {
+        throw new ToolError(`${NAME_FIELDS.join(', ')} are for an add only; edit a type with ids`)
       } else if (properties !== undefined && archived === undefined && Object.keys(fields).length === 0) {
         // Properties only: no row PATCH, which would move the type's `updated_at` and so its sync time.
         const set = await setPropertiesAfter(backend, `spool_type:${type_id}`, properties)

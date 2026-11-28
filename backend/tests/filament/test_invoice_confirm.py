@@ -14,6 +14,7 @@ from uuid import UUID
 import pytest
 from psycopg import errors
 
+from scadbuddy.filament.catalog import CatalogExistsError
 from scadbuddy.filament.invoices import (
     InvoiceCurrencyError,
     InvoiceLineError,
@@ -189,6 +190,19 @@ def test_a_duplicate_proposed_type_is_a_409_line_error(shop: Shop) -> None:
 def test_a_missing_catalog_row_in_a_proposed_type_is_a_line_error(shop: Shop) -> None:
     body = shop.type_body("X").model_copy(update={"brand_id": UUID(int=7)})
     invoice = shop.one(None, proposed_type=body)
+    with pytest.raises(InvoiceLineError, match="line 1"):
+        shop.invoices.confirm(invoice.id, actor="ann")
+    assert shop.status(invoice.id) == "draft"
+
+
+def test_a_catalog_name_that_keeps_clashing_is_a_line_error(
+    shop: Shop, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    def clash(*_: Any, **__: Any) -> None:
+        raise CatalogExistsError()
+
+    monkeypatch.setattr("scadbuddy.filament.types.SpoolTypeStore.create_on", clash)
+    invoice = shop.one(None, proposed_type=shop.type_body("PLA-NEW"))
     with pytest.raises(InvoiceLineError, match="line 1"):
         shop.invoices.confirm(invoice.id, actor="ann")
     assert shop.status(invoice.id) == "draft"
