@@ -190,6 +190,34 @@ describe('the Bambu colour code lookup (#6907)', () => {
     expect(await within(sources).findByRole('alert')).toHaveTextContent('no colour table at /profiles/filaments_color_codes.json')
   })
 
+  it('clears a result once the code is edited', async () => {
+    const { user, sources } = await lookup('10100')
+    await within(sources).findByRole('group', { name: 'Bambu colour code 10100' })
+    await user.type(within(sources).getByRole('textbox', { name: 'Bambu colour code' }), '9')
+    expect(within(sources).queryByRole('group', { name: /Bambu colour code/ })).not.toBeInTheDocument()
+  })
+
+  it('drops a late answer to an older lookup', async () => {
+    let first: () => void = () => {}
+    const firstAsked = new Promise<void>((resolve) => (first = resolve))
+    server.use(
+      http.get('/api/v1/filament/bambu-colour-codes', async ({ request }) => {
+        if (new URL(request.url).searchParams.get('code') === '10100') await firstAsked
+        return undefined
+      }),
+    )
+    const { user, sources } = await lookup('10100')
+    const field = within(sources).getByRole('textbox', { name: 'Bambu colour code' })
+    await user.clear(field)
+    await user.type(field, '13612')
+    await user.click(within(sources).getByRole('button', { name: 'Look up' }))
+    await within(sources).findByRole('group', { name: 'Bambu colour code 13612' })
+    first()
+    await delay(50)
+    expect(within(sources).queryByRole('group', { name: 'Bambu colour code 10100' })).not.toBeInTheDocument()
+    expect(within(sources).getByRole('group', { name: 'Bambu colour code 13612' })).toBeInTheDocument()
+  })
+
   it('sends the code as typed, trimmed, and asks nothing for an empty one', async () => {
     const asked: string[] = []
     server.events.on('request:start', ({ request }) => {
