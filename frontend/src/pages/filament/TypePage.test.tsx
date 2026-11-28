@@ -638,6 +638,83 @@ describe('finding and adding the 3DFP filament (#7025)', () => {
     expect(creates[1]!.key).not.toBe(creates[0]!.key)
   })
 
+  const openAdd = async (route = `/filament/types/${T.JADE}`) => {
+    const page = render(route)
+    await code()
+    await page.user.click(screen.getByRole('button', { name: 'Find on 3DFP' }))
+    await page.user.click(within(finder()).getByRole('button', { name: 'Add the missing filament' }))
+    return { ...page, form: within(finder()).getByRole('form', { name: 'Add to 3DFP' }) }
+  }
+  const answerCreate = (status: number, body: Record<string, unknown>) =>
+    server.use(http.post('/api/v1/filament/tdfp/filaments', () => HttpResponse.json({ type: 'about:blank', title: 'x', status, ...body }, { status })))
+
+  it('fills the id of a type not saved yet, for the person to save', async () => {
+    const sent = tdfpRequests()
+    const { user, form } = await openAdd('/filament/types/new')
+    await user.type(within(form).getByLabelText('Brand'), 'Bambu Lab')
+    await user.type(within(form).getByLabelText('Material'), 'PLA')
+    await user.type(within(form).getByLabelText('Material type'), 'Basic')
+    await user.type(within(form).getByLabelText('Colour name'), 'Moon Rock')
+    await user.clear(within(form).getByLabelText('Hexes'))
+    await user.type(within(form).getByLabelText('Hexes'), '#8A8D8F')
+    await user.click(within(form).getByRole('button', { name: 'Add to 3DFP' }))
+    expect(await screen.findByText('Added to 3DFP as 38600. Save the type to keep the id.')).toBeInTheDocument()
+    expect(screen.getByLabelText('3DFP id')).toHaveValue('38600')
+    expect(sent.find((one) => one.path === '/api/v1/filament/tdfp/filaments')!.body.type_id).toBeNull()
+  })
+
+  it('sends #RRGGBB hexes when a colour with alpha is typed', async () => {
+    const sent = tdfpRequests()
+    const { user, form } = await openAdd()
+    expect(within(form).getByText('#RRGGBB each, 1 to 4, separated by commas.')).toBeInTheDocument()
+    await user.clear(within(form).getByLabelText('Hexes'))
+    await user.type(within(form).getByLabelText('Hexes'), '#8a8d8f80, #102030')
+    await user.click(within(form).getByRole('button', { name: 'Add to 3DFP' }))
+    await screen.findByText(/Added to 3DFP as/)
+    expect(sent.find((one) => one.path === '/api/v1/filament/tdfp/filaments')!.body.hexes).toEqual(['#8A8D8F', '#102030'])
+  })
+
+  it('checks a changed filament again as a plain add after a duplicate', async () => {
+    const { user, form } = await openAdd()
+    await user.click(within(form).getByRole('button', { name: 'Add to 3DFP' }))
+    await within(finder()).findByRole('list', { name: '3DFP may already have it' })
+    await user.clear(within(form).getByLabelText('Hexes'))
+    await user.type(within(form).getByLabelText('Hexes'), '#8A8D8F')
+    expect(within(finder()).queryByRole('list', { name: '3DFP may already have it' })).not.toBeInTheDocument()
+    expect(within(form).getByRole('button', { name: 'Add to 3DFP' })).toBeEnabled()
+  })
+
+  it('lets the person add anyway when the duplicate answer names only likely ids', async () => {
+    let calls = 0
+    server.use(
+      http.post('/api/v1/filament/tdfp/filaments', async ({ request }) => {
+        calls += 1
+        const body = (await request.json()) as { not_duplicates?: number[] }
+        if (calls === 1)
+          return HttpResponse.json({ create: { status: 'duplicate', duplicates: [], likely: [{ tdfp_id: 4411, reason: 'close name' }], duplicate_text: 'Similar: Jade White' }, type_id: T.JADE, type_tdfp_id_set: false })
+        expect(body.not_duplicates).toEqual([4411])
+        return HttpResponse.json({ create: { status: 'created', tdfp_id: 38601, duplicate_text: '' }, type_id: T.JADE, type_tdfp_id_set: true })
+      }),
+    )
+    const { user, form } = await openAdd()
+    await user.click(within(form).getByRole('button', { name: 'Add to 3DFP' }))
+    const dupes = await within(finder()).findByRole('list', { name: '3DFP may already have it' })
+    expect(within(finder()).getByText('Similar: Jade White')).toBeInTheDocument()
+    await user.click(within(dupes).getByRole('checkbox', { name: 'Not the same filament' }))
+    await user.click(within(finder()).getByRole('button', { name: 'Add anyway' }))
+    expect(await screen.findByText(/Added to 3DFP as 38601/)).toBeInTheDocument()
+  })
+
+  it.each([
+    [502, { detail: 'the site failed after the save', code: 'not_created' }, 'the site failed after the save. The filament may exist now: search before you add it again.'],
+    [504, { detail: 'no outcome in time' }, 'No answer came in time. The add may still run: press the add button again to wait for it, not to add a second one.'],
+  ] as const)('says what to do after a %i', async (status, body, text) => {
+    answerCreate(status, body)
+    const { user, form } = await openAdd()
+    await user.click(within(form).getByRole('button', { name: 'Add to 3DFP' }))
+    expect(await within(finder()).findByRole('alert')).toHaveTextContent(text)
+  })
+
   it('says why a search failed', async () => {
     server.use(
       http.post('/api/v1/filament/tdfp/search', () =>

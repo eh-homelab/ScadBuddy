@@ -38,7 +38,7 @@ function createProblem(cause: unknown): string {
   if (cause instanceof ApiError && cause.status === 502)
     return `${cause.detail || '3DFP failed while it saved'}. The filament may exist now: search before you add it again.`
   if (cause instanceof ApiError && cause.status === 504)
-    return 'No answer came in time. The add may still run: press Add to 3DFP again to wait for it, not to add a second one.'
+    return 'No answer came in time. The add may still run: press the add button again to wait for it, not to add a second one.'
   return detailOf(cause, 'The filament could not be added. Try again.')
 }
 
@@ -151,6 +151,13 @@ export function TdfpFinder({ defaults, linkTypeId, hasSavedId, onUse, onCreated 
     }
   }
 
+  /** An edit of the add form makes it another filament: it is checked again as a plain add. */
+  function edit(next: typeof add) {
+    setAdd(next)
+    setDuplicate(null)
+    setDiffer([])
+  }
+
   function startAdd() {
     // The add starts from what was searched for.
     setAdd((was) => ({ ...was, brand: ask.brand, material: ask.material, materialType: ask.materialType, colour: ask.colour }))
@@ -167,7 +174,8 @@ export function TdfpFinder({ defaults, linkTypeId, hasSavedId, onUse, onCreated 
       material: add.material.trim(),
       material_type: add.materialType.trim(),
       colour: add.colour.trim(),
-      hexes: add.hexes.split(',').map((one) => one.trim()).filter(Boolean),
+      // 3DFP takes `#RRGGBB`: a typed alpha is cut off, as the type's own colours are.
+      hexes: add.hexes.split(',').map((one) => one.trim().slice(0, 7).toUpperCase()).filter(Boolean),
       nominal_weight_g: weight ? Number(weight) : null,
       not_duplicates: duplicate ? differ : [],
       type_id: linkTypeId,
@@ -198,7 +206,12 @@ export function TdfpFinder({ defaults, linkTypeId, hasSavedId, onUse, onCreated 
   }
 
   const reasons = new Map((duplicate?.likely ?? []).map((one) => [one.tdfp_id, one.reason]))
-  const dupes = duplicate?.duplicates ?? []
+  // A duplicate answer that lists no filament still names the likely ids: each gets a row to tick.
+  const listed = duplicate?.duplicates ?? []
+  const dupes: TdfpCandidate[] =
+    listed.length > 0
+      ? listed
+      : (duplicate?.likely ?? []).flatMap((one) => (one.tdfp_id == null ? [] : [{ tdfp_id: one.tdfp_id, name: `3DFP ${one.tdfp_id}` }]))
 
   return (
     <section aria-label="Find on 3DFP" className="flex flex-col gap-3 rounded-md border bg-muted/30 p-3 text-[13px]">
@@ -246,16 +259,18 @@ export function TdfpFinder({ defaults, linkTypeId, hasSavedId, onUse, onCreated 
             Adds the filament to 3dfilamentprofiles.com, where everyone can see it.{linkTypeId ? ' This type takes its new id.' : ''}
           </p>
           <div className="grid grid-cols-2 gap-2">
-            <Field id="tdfp-add-brand" label="Brand" required value={add.brand} onChange={(brand) => setAdd({ ...add, brand })} />
-            <Field id="tdfp-add-material" label="Material" required value={add.material} onChange={(material) => setAdd({ ...add, material })} />
-            <Field id="tdfp-add-type" label="Material type" required value={add.materialType} onChange={(materialType) => setAdd({ ...add, materialType })} />
-            <Field id="tdfp-add-colour" label="Colour name" required value={add.colour} onChange={(colour) => setAdd({ ...add, colour })} />
-            <Field id="tdfp-add-hexes" label="Hexes" required hint="1 to 4, separated by commas." value={add.hexes} onChange={(hexes) => setAdd({ ...add, hexes })} />
-            <Field id="tdfp-add-weight" label="Nominal weight (g)" value={add.nominalWeight} onChange={(nominalWeight) => setAdd({ ...add, nominalWeight })} />
+            <Field id="tdfp-add-brand" label="Brand" required value={add.brand} onChange={(brand) => edit({ ...add, brand })} />
+            <Field id="tdfp-add-material" label="Material" required value={add.material} onChange={(material) => edit({ ...add, material })} />
+            <Field id="tdfp-add-type" label="Material type" required value={add.materialType} onChange={(materialType) => edit({ ...add, materialType })} />
+            <Field id="tdfp-add-colour" label="Colour name" required value={add.colour} onChange={(colour) => edit({ ...add, colour })} />
+            <Field id="tdfp-add-hexes" label="Hexes" required hint="#RRGGBB each, 1 to 4, separated by commas." value={add.hexes} onChange={(hexes) => edit({ ...add, hexes })} />
+            <Field id="tdfp-add-weight" label="Nominal weight (g)" value={add.nominalWeight} onChange={(nominalWeight) => edit({ ...add, nominalWeight })} />
           </div>
-          {duplicate && dupes.length > 0 && (
+          {duplicate && (
             <div className="flex flex-col gap-1 rounded-md border border-warn/40 bg-warn/5 p-2">
               <p className="font-medium">Nothing was added: 3DFP may already have this filament.</p>
+              {duplicate.duplicate_text && <p className="whitespace-pre-wrap text-muted-foreground">{duplicate.duplicate_text}</p>}
+              {dupes.length === 0 && <p className="text-muted-foreground">3DFP named no filament. Search 3DFP for it, and use its id.</p>}
               <ul aria-label="3DFP may already have it" className="flex flex-col">
                 {dupes.map((one) => (
                   <CandidateRow key={one.tdfp_id} one={one} note={reasons.get(one.tdfp_id)}>

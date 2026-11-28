@@ -146,6 +146,13 @@ let tdfpNext = TDFP_FIRST_NEW
 /** Each create's answer by its Idempotency-Key, as the server answers a repeated key. */
 const tdfpCreates = new Map<string, { body: string; answer: components['schemas']['TdfpCreated'] }>()
 
+/** #6907 — a few rows of Bambu Studio's colour table, for `GET /filament/bambu-colour-codes` (mock data). */
+const MOCK_COLOUR_CODES: components['schemas']['ColourCode'][] = [
+  { code: '10100', name: 'Jade White', rgba: ['#FFFFFFFF'], fila_type: 'PLA', fila_id: 'GFA00' },
+  { code: '13612', name: 'Translucent Yellow', rgba: ['#F4EE2A80'], fila_type: 'PLA', fila_id: 'GFA08' },
+  { code: '15900', name: 'Dawn Radiance', rgba: ['#EC984CFF', '#6CD4BCFF'], fila_type: 'PLA', fila_id: 'GFA05' },
+]
+
 /** #7067 — whether a place exists, for the inventory mock's `location_not_found`. */
 export function locationExists(id: string): boolean {
   return state.locations.some((place) => place.id === id)
@@ -2294,6 +2301,12 @@ export const handlers = [
     )
   }),
   // -- the colour catalog's syncs (#6907) --
+  http.get(`${BASE}/bambu-colour-codes`, ({ request }) => {
+    const code = new URL(request.url).searchParams.get('code')
+    if (code === null) return problem(422, 'code: Field required')
+    const found = MOCK_COLOUR_CODES.find((one) => one.code === code)
+    return found ? HttpResponse.json(found) : problem(404, `no Bambu colour code ${code}`)
+  }),
   http.get(`${BASE}/colour-syncs`, () => HttpResponse.json(colourSyncs)),
   http.post(`${BASE}/colour-syncs`, async ({ request }) => {
     const { source } = (await request.json()) as { source?: string }
