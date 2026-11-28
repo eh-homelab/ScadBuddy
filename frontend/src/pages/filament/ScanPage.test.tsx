@@ -84,6 +84,7 @@ describe('the scan page (#7273)', () => {
 
   it('starts one scan and lists each read', async () => {
     const { user } = open()
+    expect(within(screen.getByTestId('scan-toggle-slot')).getByRole('button', { name: 'Scan' })).toBeInTheDocument()
     await user.click(screen.getByRole('button', { name: 'Scan' }))
     const on = await screen.findByRole('button', { name: 'Scanning — hold a tag to the phone' })
     // The label says it is on; a toggle state would claim a second tap turns it off.

@@ -85,11 +85,12 @@ export function ScanPage() {
   const [toggleSlot, setToggleSlot] = useState<HTMLElement | null>(null)
   return (
     <div className="mx-auto flex min-h-full w-full max-w-md min-w-0 flex-col gap-5 px-4 pt-4 pb-[max(1rem,env(safe-area-inset-bottom))] text-[13px]">
+      {/* A child of the page column itself, so it stays at the top for the whole page. */}
+      <div className="sticky top-0 z-10 -mx-4 -mb-4 flex min-h-11 items-center justify-between gap-3 bg-background/95 px-4 py-1.5 backdrop-blur supports-[backdrop-filter]:bg-background/80">
+        <h1 className="text-lg font-semibold tracking-tight">Scan</h1>
+        <div ref={setToggleSlot} data-testid="scan-toggle-slot" className="flex items-center" />
+      </div>
       <div className="flex flex-col gap-1">
-        <div className="sticky top-0 z-10 -mx-4 flex min-h-11 items-center justify-between gap-3 bg-background/95 px-4 py-1.5 backdrop-blur supports-[backdrop-filter]:bg-background/80">
-          <h1 className="text-lg font-semibold tracking-tight">Scan</h1>
-          <div ref={setToggleSlot} className="flex items-center" />
-        </div>
         <p className="text-muted-foreground">Hold a tag or a label to the phone: a spool's tag, a place's tag, or a label with a code such as L-12 or S-142.</p>
         <UseMyPhone />
       </div>
