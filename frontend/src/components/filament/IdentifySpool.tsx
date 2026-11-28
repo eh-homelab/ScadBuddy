@@ -325,15 +325,31 @@ function HandWay({ onIdentified, initialSearch = '', fromScan = false }: { onIde
     }
   }, [])
 
+  const docs = useMemo(
+    () =>
+      new Map(
+        (spools ?? []).map((spool) => [
+          spool.id,
+          spoolSearchDoc(spool, { properties: properties?.get(spool.id), typeProperties: spool.type_id ? typeProperties?.get(spool.type_id) : undefined }),
+        ]),
+      ),
+    [spools, properties, typeProperties],
+  )
+
   const found = useMemo(() => {
-    const words = search.trim().toLowerCase().split(/\s+/).filter(Boolean)
+    const words = search
+      .trim()
+      .toLowerCase()
+      .split(/\s+/)
+      .filter(Boolean)
+      .map((word) => ({ word, tokens: parseSearch(word) }))
     return (spools ?? []).filter((spool) => {
       const text = searchText(spool)
-      const doc = spoolSearchDoc(spool, { properties: properties?.get(spool.id), typeProperties: spool.type_id ? typeProperties?.get(spool.type_id) : undefined })
+      const doc = docs.get(spool.id)!
       // Each word matches by one rule or the other, so `S-2 gtin:…` finds S-2.
-      return words.every((word) => text.includes(word) || matchesSearch(doc, parseSearch(word)))
+      return words.every(({ word, tokens }) => text.includes(word) || matchesSearch(doc, tokens))
     })
-  }, [spools, search, properties, typeProperties])
+  }, [spools, search, docs])
 
   const settled = (spools !== null || error !== null) && properties !== null && typeProperties !== null
   const looking = fromScan && !settled

@@ -262,9 +262,8 @@ export function SpoolsTab() {
   }
 
   const typeCodes = useMemo(() => new Map((data?.types ?? []).map((type) => [type.id, type.code])), [data])
-  const shown = useMemo(() => {
-    if (!data) return []
-    const searchDoc = (spool: Spool) =>
+  const searchDocOf = useMemo(
+    () => (spool: Spool) =>
       spoolSearchDoc(spool, {
         typeCode: spool.type_id ? typeCodes.get(spool.type_id) : null,
         skus: spool.type_id ? skus.get(spool.type_id) : undefined,
@@ -272,9 +271,24 @@ export function SpoolsTab() {
         tags: tagKeys.get(spool.id),
         properties: propertyTexts.get(spool.id),
         typeProperties: spool.type_id ? typePropertyTexts.get(spool.type_id) : undefined,
-      })
-    return sortSpools(filterSpools(data.spools, q, data.trays, searchDoc), q.sort)
-  }, [data, q, typeCodes, skus, trayNames, tagKeys, propertyTexts, typePropertyTexts])
+      }),
+    [typeCodes, skus, trayNames, tagKeys, propertyTexts, typePropertyTexts],
+  )
+  const shown = useMemo(() => {
+    if (!data) return []
+    return sortSpools(filterSpools(data.spools, q, data.trays, searchDocOf), q.sort)
+  }, [data, q, searchDocOf])
+  /** #8411: the query with every list filter off and the search kept. */
+  const withoutFilters = useMemo<SpoolsQuery>(() => {
+    const open: SpoolsQuery = { ...q, status: 'all' }
+    for (const chip of CHIPS) delete open[chip.key]
+    return open
+  }, [q])
+  /** #8411: the search matches spools that the list filters hide. */
+  const hiddenByFilters = useMemo(
+    () => !!q.q && !shown.length && !!data && filterSpools(data.spools, withoutFilters, data.trays, searchDocOf).length > 0,
+    [q.q, shown.length, data, withoutFilters, searchDocOf],
+  )
   const groups = useMemo(() => groupSpools(shown, q.group, typeCodes), [shown, q.group, typeCodes])
   const chosen = shown.filter((spool) => selected.has(spool.id))
 
@@ -346,8 +360,20 @@ export function SpoolsTab() {
   }
 
   const chips = CHIPS.filter((chip) => q[chip.key] !== undefined)
+  const clearFilters = () => update({ status: 'all', ...Object.fromEntries(CHIPS.map((chip) => [chip.key, undefined])) })
   /** The `place` filter's path (a tray's, from a spool in it), so two places of one name read apart. */
   const placeName = (q.place && (data?.places.find((one) => one.id === q.place)?.path ?? data?.spools.find((spool) => spool.location_id === q.place)?.names?.location)) || 'one place'
+  /** #8411: names the list filters that hide the search's spools, with a way to clear them. */
+  const hiddenFilters = !lookingUp && hiddenByFilters && (
+    <p role="status" className="flex flex-wrap items-center justify-center gap-2 text-[13px] text-muted-foreground">
+      <span>
+        Spools match, but these filters hide them: {[...(q.status === 'all' ? [] : [q.status === 'active' ? 'Active only' : 'Archived only']), ...chips.map((chip) => chip.title(q, placeName))].join(', ')}.
+      </span>
+      <Button size="sm" variant="outline" onClick={clearFilters}>
+        Clear filters
+      </Button>
+    </p>
+  )
 
   return (
     <div className="space-y-3">
@@ -583,6 +609,7 @@ export function SpoolsTab() {
           {q.q ? `Looking for “${q.q}”…` : 'Looking for the scanned code…'}
         </p>
       )}
+      {hiddenFilters}
       {data && !shown.length && !lookingUp && (
         <p className="rounded-md border px-3 py-6 text-center text-[13px] text-muted-foreground">
           {!data.spools.length ? 'No spools yet. Add a spool, or import a CSV.' : q.q ? `No spool matches “${q.q}” with these filters.` : 'No spool matches these filters.'}
