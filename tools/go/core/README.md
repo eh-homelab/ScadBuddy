@@ -144,7 +144,8 @@ API process serves. Go writes no row.
   timeout is that time too (P26): the schedule-to-start starts only when core's worker runs
   the workflow task, so a run whose workflow task no core worker took in time closes as the
   route answers, and Temporal gives a closed run's activity task to no worker. So a write
-  does not start after the route answered. An activity that started in time can still end
+  does not start later than a moment after the route answered (the timeout counts from
+  the moment Temporal records the start). An activity that started in time can still end
   after that: its write stands, and a copy or an edit keeps its reply in the ledger.
 - The run's id is `filament-preset-copy-` or `filament-preset-edit-` and the SHA-256 of the
   actor, the key, the preset id and the JSON body that Go sends the activity, joined by

@@ -24,7 +24,8 @@ const timeoutFailure = "temporal_timeout"
 // WriteRun is the workflow's input: the activity by name, its queue, its one JSON object
 // argument, its start-to-close timeout in seconds, and its schedule-to-start timeout in
 // seconds: the time the route waits (plan ruling P23). The run's own execution timeout is
-// that time too (P26), so the activity does not start after the route answered: see
+// that time too (P26), so the activity does not start later than a moment after the route answered (the
+// timeout counts from the moment Temporal records the start): see
 // TemporalStarter.
 type WriteRun struct {
 	Activity         string          `json:"activity"`
