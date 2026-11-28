@@ -1564,7 +1564,15 @@ def _rotate_service_credentials(state: AppState) -> None:
     minted = auth.credentials.rotate_due(kek)
     if minted:
         logger.info("issued service credentials", extra={"credentials": len(minted)})
-    auth.credentials.delete_expired()
+    try:
+        retention = state.settings_store.load().service_credential_retention_days
+    except Exception:
+        # The stored retention is unknown and may keep more than the default: delete none.
+        logger.warning(
+            "could not load the service credentials' retention; deleting none", exc_info=True
+        )
+        return
+    auth.credentials.delete_ended(retention)
 
 
 def _migrate_agent_at_start(state: AppState) -> None:

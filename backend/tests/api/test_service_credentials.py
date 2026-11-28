@@ -1,12 +1,13 @@
 """Service credentials through the app (#4975 phase 4, spec 2026-11-01 §7.2): issued at
-start, presented as a bearer, and the Settings routes."""
+start, presented as a bearer, and the Settings routes; and how long an ended one's row is
+kept (#8539, the stored-only setting `service_credential_retention_days`)."""
 
 from __future__ import annotations
 
 import base64
 import os
 from collections.abc import Iterator
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 import pytest
@@ -14,7 +15,8 @@ from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
 from scadbuddy import main
-from scadbuddy.api.deps import STATE_ATTR
+from scadbuddy.api.deps import STATE_ATTR, AppState
+from scadbuddy.auth.component import AUTH
 from scadbuddy.auth.service_credentials import (
     ServiceCaller,
     ServiceCredentialStore,
@@ -162,3 +164,41 @@ def test_a_failed_state_read_is_logged_and_still_rotates_the_credentials(
     rows = client.get("/api/v1/auth/service-credentials").json()
     projects = [row for row in rows if row["caller"] == "projects"]
     assert len(projects) == 1 and not projects[0]["live"] and projects[0]["revoked_at"]
+
+
+RETENTION = "service_credential_retention_days"
+
+
+def test_the_retention_setting_round_trips(client: TestClient) -> None:
+    """#8539: stored only, empty by default, 0 to ten years."""
+    body = client.get("/api/v1/settings").json()
+    assert body[RETENTION] is None
+    assert RETENTION not in body["sources"]
+    assert body["docs"][RETENTION]["title"] == "Keep ended service credentials for (days)"
+    assert client.put("/api/v1/settings", json={RETENTION: 0}).status_code == 200
+    assert client.get("/api/v1/settings").json()[RETENTION] == 0
+    assert client.put("/api/v1/settings", json={RETENTION: -1}).status_code == 422
+    assert client.put("/api/v1/settings", json={RETENTION: 3651}).status_code == 422
+    assert client.put("/api/v1/settings", json={RETENTION: None}).status_code == 200
+    assert client.get("/api/v1/settings").json()[RETENTION] is None
+
+
+def test_the_sweep_deletes_ended_credentials_by_the_setting(client: TestClient) -> None:
+    """#8539: 0 keeps every one, a number of days keeps them that long, empty is a day."""
+    state: AppState = getattr(client.app.state, STATE_ATTR)  # type: ignore[attr-defined]
+    credentials = state.components.get(AUTH).credentials
+    two_days_ago = datetime.now(UTC) - timedelta(days=2)
+    issued = credentials.issue(
+        "render", "k8s", pod_name="p", pod_uid="u", rate_limited=False, now=two_days_ago
+    )
+
+    def kept() -> bool:
+        return issued.credential_id in {c.id for c in credentials.list()}
+
+    for days in (0, 3):
+        assert client.put("/api/v1/settings", json={RETENTION: days}).status_code == 200
+        _rotate_service_credentials(state)
+        assert kept(), days
+    assert client.put("/api/v1/settings", json={RETENTION: None}).status_code == 200
+    _rotate_service_credentials(state)
+    assert not kept()

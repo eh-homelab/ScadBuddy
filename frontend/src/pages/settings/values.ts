@@ -84,7 +84,13 @@ export const HAND_LAID: Partial<Record<SectionId, readonly FieldName[]>> = {
     'store_s3_path_style',
   ],
   preview: ['display_unit', 'default_plate'],
-  administration: ['activity_follow', 'activity_ttl_seconds', 'activity_repair_window_seconds'],
+  // #8539 — and how long an ended service credential is kept (stored only).
+  administration: [
+    'activity_follow',
+    'activity_ttl_seconds',
+    'activity_repair_window_seconds',
+    'service_credential_retention_days',
+  ],
   // #959 — where the agent's `fetch_asset` (and `POST /models/{slug}/assets/fetch`) may fetch from.
   uploads: ['asset_fetch_domains'],
   // #6262, #6264 — what moves between ScadBuddy and Bambuddy: spools and weights in, tags out.
@@ -178,6 +184,8 @@ export const RETENTIONS: readonly FieldName[] = ['print_run_retention_seconds', 
 export const RETENTION_MAX_DAYS = 3650
 export const ACTIVITY_TTL = { min: 86400, max: RETENTION_MAX_DAYS * 86400, default: 2_592_000 }
 export const ACTIVITY_REPAIR = { min: 600, max: 7 * 86400, default: 86400 }
+/** #8539 — `service_credential_retention_days`: 0 keeps every one; empty is the defaults. */
+export const CREDENTIAL_RETENTION = { min: 0, max: 3650 }
 /** `activity_follow` empty is the default (`["browser"]`); this word follows nobody (`[]`). */
 export const FOLLOW_NOBODY = 'none'
 /**
@@ -330,6 +338,16 @@ export function toPatchValue(name: FieldName, raw: string, settings: Settings): 
     const days = Number(raw)
     if (!Number.isInteger(days) || days < SYNC_PASS_TTL.min || days > SYNC_PASS_TTL.max) {
       return { problem: `Enter ${SYNC_PASS_TTL.min} to ${SYNC_PASS_TTL.max} days, or leave it empty for ${SYNC_PASS_TTL.default}.` } satisfies Problem
+    }
+    return days
+  }
+  if (name === 'service_credential_retention_days') {
+    if (raw.trim() === '') return null
+    const days = Number(raw)
+    if (!Number.isInteger(days) || days < CREDENTIAL_RETENTION.min || days > CREDENTIAL_RETENTION.max) {
+      return {
+        problem: `Enter 1 to ${CREDENTIAL_RETENTION.max} days, 0 to keep every one, or leave it empty for the default.`,
+      } satisfies Problem
     }
     return days
   }
