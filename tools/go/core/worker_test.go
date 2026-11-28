@@ -5,6 +5,7 @@ import (
 	"errors"
 	"log/slog"
 	"net"
+	"os"
 	"os/exec"
 	"strings"
 	"sync"
@@ -154,12 +155,16 @@ func TestTheWorkersStopEndsAtTheDrainDeadline(t *testing.T) {
 }
 
 // TestTheWorkerRunsOnceTemporalComesUp starts core with Temporal out of reach, then starts
-// a Temporal dev server (the temporal CLI; the test skips without it) on that address: the
-// inventory worker must then run an activity. A workflow on a queue of the test's own runs
+// a Temporal dev server (the temporal CLI; the test skips without it, but fails under
+// GitHub Actions, whose go job installs it, #8256) on that address: the inventory worker
+// must then run an activity. A workflow on a queue of the test's own runs
 // inventory.KindCreate on the queue inventory, as a workflow step does (Task 16).
 func TestTheWorkerRunsOnceTemporalComesUp(t *testing.T) {
 	cli, err := exec.LookPath("temporal")
 	if err != nil {
+		if os.Getenv("GITHUB_ACTIONS") == "true" {
+			t.Fatal("the temporal CLI is not on PATH; go-module-ci.yml installs it")
+		}
 		t.Skip("the temporal CLI is not on PATH")
 	}
 	setWorkerRetry(t, 100*time.Millisecond)
