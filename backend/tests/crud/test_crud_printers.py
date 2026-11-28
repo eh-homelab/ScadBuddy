@@ -45,11 +45,12 @@ from scadbuddy.crud.print import (
     RemoteReports,
 )
 from scadbuddy.crud.wire import CRUD_HEADERS, NOT_CONFIGURED
+from scadbuddy.entities.actor import set_actor
 from scadbuddy.library.settings_store import SettingsStore
 from scadbuddy.orders.machine_rate import CostProfile, MachineRateInputs, MachineRateStore
 from scadbuddy.orders.models import Actor
 from scadbuddy.printers import run_hours
-from scadbuddy.printers.models import BambuddyView, LanLink, PrinterCreate, PrinterRow
+from scadbuddy.printers.models import BambuddyView, LanLink, PrinterCreate
 from scadbuddy.printers.reports import Advance, PrintEnd, PrinterReportStore
 from scadbuddy.printers.store import (
     BAMBUDDY_ACTOR,
@@ -349,23 +350,40 @@ def test_the_workers_merge_runs_on_the_api(store: SettingsStore, printers: Print
 
 @pytest.mark.requires_postgres
 def test_the_workers_merge_names_bambuddy_as_an_in_process_merge_does(
-    store: SettingsStore, printers: PrinterStore, monkeypatch: pytest.MonkeyPatch
+    store: SettingsStore, printers: PrinterStore
 ) -> None:
-    """#8190: the merge was credited to `print` through the route and to `bambuddy` in
-    process, so the history's actor hung on where the worker ran."""
+    """#8190, #8423: the merge was credited to `print` through the route and to `bambuddy`
+    in process, so the history's actor hung on where the worker ran. A real merge through
+    the route publishes each key it moves with `bambuddy` as the actor."""
+    gone = printers.ensure_bambuddy(4, serial=None, name="H2C", model="H2C", by=MERGED_BY)
     mine = printers.create(PrinterCreate(serial=SERIAL, name="Mine"))
-    seen: list[Actor] = []
-
-    def ensure(*_: Any, by: Actor, **__: Any) -> tuple[PrinterRow, bool]:
-        seen.append(by)
-        return mine, False
-
-    monkeypatch.setattr(printers, "ensure_bambuddy_written", ensure)
+    person = Jsonb(Actor(kind="browser").model_dump(mode="json"))
+    with store.pool.connection() as conn:
+        for printer, key in ((gone.id, "nozzle_note"), (mine.id, "bed_note")):
+            with conn.transaction():
+                set_actor(conn, Actor(kind="browser"))
+                conn.execute(
+                    "WITH e AS (INSERT INTO entities (kind, ref) VALUES ('printer', %s)"
+                    " RETURNING id) INSERT INTO entity_properties"
+                    " (entity_id, key, value, updated_by) SELECT id, %s, '1', %s FROM e",
+                    (printer, key, person),
+                )
+        row = conn.execute("SELECT coalesce(max(seq), 0) AS seq FROM events").fetchone()
+        assert row is not None
+        mark = row["seq"]
     with threaded_print_crud(store, printers=printers) as client:
-        RemotePrinterStore(client).ensure_bambuddy_written(
-            4, serial=SERIAL, name="H2C", model="H2C", by=MERGED_BY
+        merged, written = RemotePrinterStore(client).ensure_bambuddy_written(
+            4, serial=SERIAL, name="H2C", model="H2C", listed={4}, by=MERGED_BY
         )
-    assert seen == [BAMBUDDY_ACTOR]
+    assert merged.id == mine.id and written
+    with store.pool.connection() as conn:
+        events = conn.execute(
+            "SELECT payload FROM events WHERE kind = 'entity_property.changed' AND seq > %s",
+            (mark,),
+        ).fetchall()
+    moved = {(e["payload"]["op"], e["payload"]["key"]) for e in events}
+    assert moved == {("set", "nozzle_note"), ("remove", "nozzle_note")}
+    assert [Actor.model_validate(e["payload"]["actor"]) for e in events] == [BAMBUDDY_ACTOR] * 2
 
 
 @pytest.mark.requires_postgres
