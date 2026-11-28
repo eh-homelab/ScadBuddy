@@ -637,13 +637,15 @@ def own_lan_print(
     settled_after: timedelta,
     archive_id: int | None = 370,
     fields: dict[int, dict[str, Any]] | None = None,
+    result_fields: dict[str, Any] | None = None,
 ) -> tuple[Order, OrderItem, Fulfilment, str]:
     """An attempt whose LAN run started a plate at each of ``starts`` after `T0` (plate
     numbers from 1), as its result records them (#8282). ``uses`` gives the grams each
     plate's slots booked on SB spools; ``timed_ends`` the plates a printer report ended,
     after `T0`. The follow reads the print settled ``settled_after`` `T0`, and the settle
     books every use the reports did not end. With ``archive_id``, the archive the first
-    start became. ``fields`` adds fields to a plate's start in the result (#8321)."""
+    start became. ``fields`` adds fields to a plate's start in the result (#8321), and
+    ``result_fields`` to the result itself, before the follow reads it (#8415)."""
     order, item = shop.accepted()
     run_id = run_row(pool)
     names = [f"scadbuddy-{run_id[:8]}-p{n}" for n in range(1, len(starts) + 1)]
@@ -660,6 +662,7 @@ def own_lan_print(
             }
             for n, (name, at) in enumerate(zip(names, starts, strict=True), start=1)
         ],
+        **(result_fields or {}),
     }
     with pool.connection() as conn:
         conn.execute("UPDATE print_runs SET result = %s WHERE id = %s", (Jsonb(result), run_id))
@@ -1023,9 +1026,10 @@ async def test_lan_facts_of_a_run_stopped_before_its_last_plate_sum_the_started_
     shop: Shop, pool: PgPool
 ) -> None:
     """#8401, #8415: a run of three plates stopped after its second finished. Plate 3
-    never started: it stays in ``lan_waiting``, with ``lan_stopped`` set. The follow read
-    plate 2's print, which finished. The sliced grams are those of the two plates the
-    printer took; the record has no start for plate 3, and it adds nothing."""
+    never started: it stays in ``lan_waiting``, with ``lan_stopped`` set. The run's plates
+    leave it out, as a stopped run's. The follow read plate 2's print, which finished.
+    The sliced grams are those of the two plates the printer took (no ledger use books
+    any), never plate 3's."""
     _, _, _, run_id = own_lan_print(
         shop,
         pool,
@@ -1040,16 +1044,14 @@ async def test_lan_facts_of_a_run_stopped_before_its_last_plate_sum_the_started_
             },
             2: {"grams_by_slot": {"1": 2.5, "2": 1.0}},
         },
+        result_fields={
+            "lan_waiting": [3],
+            "lan_stopped": {"stage": "cancelled", "message": "stopped before plate 3"},
+        },
     )
-    stopped = {"stage": "cancelled", "message": "stopped before plate 3"}
-    with pool.connection() as conn:
-        conn.execute(
-            "UPDATE print_runs SET result = result || %s WHERE id = %s",
-            (Jsonb({"lan_waiting": [3], "lan_stopped": stopped}), run_id),
-        )
+    assert shop.rows.archive_run_plates(370) == [(1, 370), (2, None)]
     record = shop.rows.lan_record(run_id)
     assert record is not None and record.outcome == "finished"
-    assert [s.plate_id for s in record.starts] == [1, 2]
     assert record.uses == []
     assert lan_facts(record).actual_grams == 7.5
 
