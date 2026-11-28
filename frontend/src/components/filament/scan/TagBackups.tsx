@@ -12,6 +12,8 @@ const REASONS: Record<TagBackup['reason'], string> = {
   spool_write: 'before a spool write',
   agent_write: 'before an agent write',
   restore: 'before a restore',
+  place_write: 'before a place write',
+  clear: 'before a clear',
 }
 
 /** The route's default page: a full page means there are more. */
@@ -88,11 +90,11 @@ export function TagBackups({
             key={restoring.id}
             session={session}
             label="Restore a backup"
-            restoring
+            mode="restore"
             run={({ onStep, onClaimed, signal }) => restoreBackup({ session, tagId, backupId: restoring.id, onStep, onClaimed, signal })}
             onSettled={(outcome) => {
               setRestored((count) => count + 1)
-              onAnnounce?.(headlineOf(outcome, true))
+              onAnnounce?.(headlineOf(outcome, 'restore'))
             }}
             onRunning={onRunning}
             onClose={() => setRestoring(null)}

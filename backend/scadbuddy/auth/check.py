@@ -4,7 +4,8 @@ knows the route's class. ``AuthGate`` has already put the caller on the scope.
 
 In ``observe`` what ``enforce`` would refuse is served, counted as
 ``scadbuddy_auth_would_refuse_total{class, reason}`` and logged once per class and
-reason a minute; in ``off`` nothing is looked at. ``enforce`` (plan phase 8) refuses the
+reason a minute; in ``off`` nothing is looked at, except a ``fleet`` access token, which
+every mode refuses where ``enforce`` would (#8041). ``enforce`` (plan phase 8) refuses the
 same requests (§8.2): a missing or dead credential is 401 ``…/auth/signed-out``, with
 ``WWW-Authenticate: Bearer`` where a bearer is what is wanted, and a live one without the
 class is 403 ``…/auth/forbidden``. A socket is closed with 1008 before it is accepted
@@ -20,6 +21,8 @@ from starlette.requests import HTTPConnection
 from scadbuddy.api.deps import get_state
 from scadbuddy.auth.component import AUTH
 from scadbuddy.auth.gate import caller_of
+from scadbuddy.auth.models import PersonalToken
+from scadbuddy.auth.personal_tokens import PERSON_SCOPES
 from scadbuddy.auth.routes import (
     REQUEST_HEADER,
     Reason,
@@ -66,7 +69,9 @@ def refusal(route_cls: RouteClass, reason: Reason, *, bearer: bool) -> ApiError:
 
 async def auth_check(connection: HTTPConnection) -> None:
     state = get_state(connection)
-    if state.settings.auth_mode == "off":
+    caller = caller_of(connection.scope)
+    fleet = isinstance(caller, PersonalToken) and caller.scope not in PERSON_SCOPES
+    if state.settings.auth_mode == "off" and not fleet:
         return
     route = connection.scope.get("route")
     if not isinstance(route, APIRoute | APIWebSocketRoute):
@@ -75,14 +80,16 @@ async def auth_check(connection: HTTPConnection) -> None:
     websocket = connection.scope["type"] == "websocket"
     reason = would_refuse(
         route_cls,
-        caller_of(connection.scope),
+        caller,
         request_header=connection.headers.get(REQUEST_HEADER) == "1",
         # A browser cannot add a header to a socket's handshake; `Origin` covers it.
         header_needed=not websocket and not scriptless(route),
         method=connection.scope.get("method", "GET"),
     )
     if reason is not None:
-        if state.settings.auth_mode == "enforce":
+        # A fleet token is refused in every mode (#8041): it is new, so no client needs
+        # `off` or `observe` to let it through, and it must never act as its person.
+        if state.settings.auth_mode == "enforce" or fleet:
             if websocket:
                 # Before it is accepted, as the origin refusal closes one (§5.4).
                 raise WebSocketException(code=status.WS_1008_POLICY_VIOLATION)

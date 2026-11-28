@@ -201,9 +201,11 @@ from scadbuddy.filament.models import (
     TrayView,
 )
 from scadbuddy.filament.print_uses import SlotUse
+from scadbuddy.filament.unknown_tray_rows import UnknownSpoolBlock, UnknownSpoolRef
 from scadbuddy.library.output_prints import OutputPrintStore
 from scadbuddy.library.outputs import LanPlateSend, PlateSend
 from scadbuddy.library.settings_store import PrintSettings
+from scadbuddy.orders.models import Actor
 from scadbuddy.print_watch.lan import LanCapture, LanImport
 from scadbuddy.printers.lan_models import LanStopped
 from scadbuddy.printers.models import BambuddyView, PrinterRow
@@ -1040,7 +1042,13 @@ class RemotePrinterStore(PrinterStore):
         name: str,
         model: str | None,
         listed: set[int] | frozenset[int] | None = None,
+        by: Actor,
+        wait: float | None = None,
     ) -> tuple[PrinterRow, bool]:
+        # ``by`` stays here: the route names Bambuddy (`bambuddy`) as the merge's actor,
+        # whoever this process says it is (#6949, #8190). ``wait`` too: the route waits for a
+        # merge with no cap (#6949 K1 Task 16).
+        del by, wait
         body = {
             "bambuddy_printer_id": bambuddy_printer_id,
             "serial": serial,
@@ -1115,6 +1123,8 @@ PRINTERS_API_ONLY = (
     "record_bambuddy_view",
     "set_lan_sync_error",
     "delete",
+    # `MergePrinter`'s step 2 (#6949 K1 Task 16): the API's library worker runs it.
+    "merge_commit",
 )
 #: The `PrinterStore` methods that only call others of its own, each of which the worker
 #: sends over a route: ``require`` (``get``) and ``ensure_bambuddy``
@@ -1419,6 +1429,31 @@ _refuse(RemoteRackUsage, "RackUsageStore", RACK_API_ONLY)
 
 
 # -- filament (#6262, #6265, #6268, #6646, #6772, #7176) -------------------------------
+
+
+#: How long a read of the unknown trays retries a missing route (#7143): the route is
+#: `scadbuddy-core`'s and may not be switched on, and the caller then runs on (G3), so the
+#: wait is short, as the watch's calls are (`WATCH_CALL_BUDGET`).
+UNKNOWN_TRAYS_BUDGET = 2.0
+
+
+class RemoteUnknownTrays:
+    """`filament/unknown_tray_rows.py` `UnknownSpoolReads` over
+    ``…/print/filament/printers/{id}/unknown-trays`` (area ``unknown-trays``, #7143): the
+    trays a printer reports that no SB spool holds. A read, natural. The route is
+    `scadbuddy-core`'s (Go), so an API that does not serve it answers a missing route,
+    which is `CrudUnavailableError` here and the caller's to pass over (G3)."""
+
+    def __init__(self, client: CrudClient) -> None:
+        self._client = client
+
+    async def blocking(self, printer_id: str) -> list[UnknownSpoolRef]:
+        response = await self._client.request(
+            "GET",
+            f"{BASE}/filament/printers/{printer_id}/unknown-trays",
+            budget=UNKNOWN_TRAYS_BUDGET,
+        )
+        return UnknownSpoolBlock.model_validate(response.json()).trays
 
 
 class RemoteFilamentTrays:

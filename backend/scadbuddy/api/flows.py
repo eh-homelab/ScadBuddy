@@ -279,8 +279,9 @@ class PendingEntry(BaseModel):
     #: With `summary`: the input hash the approval binds (the printer the summary names),
     #: which an approval sends back as `bound_hash` (#4445).
     bound_hash: str | None = None
-    #: A prompt's task (#7364), which takes its answer at `POST /tasks/{id}/answer`; None
-    #: for a `wait_for_human`, whose answer is a text. Its own route has the answer.
+    #: A prompt's task (#7364), or a `wait_for_human`'s since #8062, which takes its answer
+    #: at `POST /tasks/{id}/answer`; None for a `wait_for_human` from before, whose answer
+    #: is a text. Its own route has the answer.
     task: TaskQuestion | None = None
     #: Whether only a person may answer the question (#7471). True for an approval and for
     #: a question parked before the flag: only a script's False opens it.
@@ -330,6 +331,9 @@ class GrantView(BaseModel):
     #: the standing grant it was seeded from (`FlowStore.grant_in_force`): calls inside
     #: it run without asking.
     in_force: bool
+    #: Its own expiry has passed, by the server's clock (#8220). Out of force and not
+    #: expired: a grant it inherits from, or its standing grant, ended.
+    expired: bool
     uses: list[GrantUseView] = []
     #: On approval: the parked calls it let through.
     released: list[str] = []
@@ -340,6 +344,7 @@ def run_grant_view(grant: Grant, uses: list[GrantUse], in_force: bool) -> GrantV
         **grant.model_dump(exclude={"run_id"}),
         # The whole chain's (`FlowStore.grant_in_force`), as each call is checked.
         in_force=in_force,
+        expired=grant.expired(datetime.now(UTC)),
         uses=[GrantUseView.model_validate(u.model_dump()) for u in uses],
     )
 

@@ -1,15 +1,25 @@
-"""Inventory kinds, items and offers over HTTP (#7067, spec 6.4 and 6.5): one round trip
-per family, the problem codes, and an item's property schema (its kind's, merged)."""
+"""Inventory kinds, items and offers over HTTP (#7067, spec 6.4 and 6.5; #6949 K1). Kinds
+and items are Go's since K1 (R-K1-4, R-K1-24): a read goes to Go's CRUD route and a write
+starts its activity on the queue `inventory`. Go and Temporal are fakes here (R-K1-21);
+the Go tests hold the kinds' and items' own rules. Offers stay Python's until K3."""
 
 from __future__ import annotations
 
+import json
 import uuid
+from pathlib import Path
 from typing import Any
 
 import pytest
 from fastapi.testclient import TestClient
+from temporalio.common import ActivityIDConflictPolicy, ActivityIDReusePolicy
 
+from scadbuddy.core.authorship import AUTHOR_HEADER
+from scadbuddy.inventory.component import INVENTORY
 from tests.api.test_settings_runtime import _state
+from tests.conftest import HistoryRows
+from tests.support.inventory_core import HANG, FakeTemporal, Go, install_go
+from tests.support.inventory_rows import insert_item, insert_kind
 from tests.support.operations import press
 
 pytestmark = pytest.mark.requires_postgres
@@ -17,6 +27,15 @@ pytestmark = pytest.mark.requires_postgres
 API = "/api/v1/inventory"
 PROBLEMS = "https://scadbuddy.dev/problems/inventory/"
 ENTITY_PROBLEMS = "https://scadbuddy.dev/problems/entities/"
+ANSWERS = (
+    Path(__file__).resolve().parents[3]
+    / "tools/go/core/internal/inventory/activities/testdata/answers"
+)
+
+
+def answer(name: str) -> Any:
+    """Go's recorded answer `name` (`activities/testdata/answers`)."""
+    return json.loads((ANSWERS / f"{name}.json").read_text(encoding="utf-8"))
 
 
 def _code(response: Any, status: int, code: str, prefix: str = PROBLEMS) -> None:
@@ -24,22 +43,9 @@ def _code(response: Any, status: int, code: str, prefix: str = PROBLEMS) -> None
     assert response.json()["type"] == prefix + code
 
 
-def _kind_id() -> str:
-    return f"k{uuid.uuid4().hex[:12]}"
-
-
-def _kind(client: TestClient, **body: Any) -> dict[str, Any]:
-    body = {"id": _kind_id(), "name": "Fasteners", "tracking": "lot", **body}
-    made = client.post(f"{API}/kinds", json=body, headers=press())
-    assert made.status_code == 201, made.text
-    return dict(made.json())
-
-
-def _item(client: TestClient, kind_id: str = "hardware", **body: Any) -> dict[str, Any]:
-    body = {"kind_id": kind_id, "name": f"M3 bolt {uuid.uuid4().hex[:6]}", **body}
-    made = client.post(f"{API}/items", json=body, headers=press())
-    assert made.status_code == 201, made.text
-    return dict(made.json())
+def _item(client: TestClient, kind_id: str = "hardware", **columns: Any) -> dict[str, Any]:
+    """An item row, made as Go's save leaves it: Python makes no item since K1."""
+    return {"id": str(insert_item(_state(client).refs.pool, kind_id, **columns))}
 
 
 def _supplier(client: TestClient) -> str:
@@ -52,217 +58,428 @@ def _supplier(client: TestClient) -> str:
     return str(row["id"])
 
 
-MPN_SCHEMA = {"type": "object", "properties": {"mpn": {"type": "string"}}}
+def done(status: int, body: Any) -> dict[str, Any]:
+    """An activity's answer."""
+    return {"status": status, "body": body}
+
+
+@pytest.fixture
+def go(client: TestClient) -> Go:
+    return install_go(client)
 
 
 # -- kinds -------------------------------------------------------------------------------
 
 
-def test_a_kind_round_trips(client: TestClient) -> None:
-    parent = _kind(client, attribute_schema=MPN_SCHEMA)
-    child = _kind(
-        client,
-        parent_id=parent["id"],
-        attribute_schema={"type": "object", "properties": {"thread": {"type": "string"}}},
-    )
+def test_kind_reads_go_to_go(client: TestClient, go: Go) -> None:
+    kind = answer("ItemKind")
+    go.reads["/kinds"] = (200, answer("KindList"))
+    go.reads[f"/kinds/{kind['id']}/schema"] = (200, answer("KindSchema"))
+
+    listed = client.get(f"{API}/kinds", params={"archived": "true"})
+    schema = client.get(f"{API}/kinds/{kind['id']}/schema")
+
+    assert listed.status_code == 200, listed.text
+    assert listed.json() == answer("KindList")
+    assert schema.json() == answer("KindSchema")
+    assert dict(go.seen[0].url.params) == {"archived": "true"}
+
+
+def test_a_kind_create_starts_kind_create(client: TestClient, go: Go) -> None:
+    go.temporal.answers.append(done(201, answer("KindCreate")))
+    body = {"id": "bolt", "name": "Bolt", "parent_id": "fastener", "nature": "physical"}
+
+    made = client.post(f"{API}/kinds", json=body, headers=press())
+
+    assert made.status_code == 201, made.text
+    assert made.json() == answer("KindCreate")
+    start = go.start
+    assert start.name == "inventory.KindCreate"
+    assert start.options["task_queue"] == "inventory"
+    assert start.options["id_conflict_policy"] == ActivityIDConflictPolicy.USE_EXISTING
+    assert start.options["id_reuse_policy"] == ActivityIDReusePolicy.ALLOW_DUPLICATE_FAILED_ONLY
+    assert start.arg["params"] == {}
+    assert start.arg["body"] == body
+    assert start.arg["actor"]["kind"] == "browser"
+    assert start.options["summary"] == "KindCreate item_kind:bolt"
+
+
+def test_a_kind_reads_its_number_and_code(client: TestClient, go: Go) -> None:
+    """Every kind has a number and the code K-<number> (#6955, the owner's decision of
+    2026-11-27); the read keeps both."""
+    go.reads["/kinds"] = (200, answer("KindList"))
+
     listed = client.get(f"{API}/kinds").json()["kinds"]
-    assert {parent["id"], child["id"]} <= {k["id"] for k in listed}
-    assert "part" in {k["id"] for k in listed}
 
-    patched = client.patch(f"{API}/kinds/{child['id']}", json={"name": "Bolts"}, headers=press())
+    assert listed
+    assert all(kind["code"] == f"K-{kind['number']}" for kind in listed)
+    assert [k["number"] for k in listed] == [k["number"] for k in answer("KindList")["kinds"]]
+
+
+def test_a_kind_create_with_no_id_sends_none(client: TestClient, go: Go) -> None:
+    """With no id, Go numbers the kind: k<number>."""
+    go.temporal.answers.append(done(201, answer("KindCreate")))
+    body = {"name": "Bolt", "parent_id": "fastener"}
+
+    made = client.post(f"{API}/kinds", json=body, headers=press())
+
+    assert made.status_code == 201, made.text
+    assert go.start.arg["body"] == body
+    assert go.start.options["summary"] == "KindCreate item_kind"
+
+
+@pytest.mark.parametrize("kind_id", ["k1", "k12", "k007"])
+def test_a_typed_id_of_k_and_digits_is_refused(client: TestClient, go: Go, kind_id: str) -> None:
+    """`k<number>` is a made kind's id (item_kinds_made_id_check): 422 before any start."""
+    refused = client.post(f"{API}/kinds", json={"id": kind_id, "name": "X"}, headers=press())
+
+    assert refused.status_code == 422, refused.text
+    assert "made kind" in refused.text
+    assert go.temporal.starts == []
+    # A k that digits do not end is an id a person may type.
+    go.temporal.answers.append(done(201, answer("KindCreate")))
+    assert (
+        client.post(f"{API}/kinds", json={"id": "k1a", "name": "X"}, headers=press()).status_code
+        == 201
+    )
+
+
+def test_gos_made_id_refusal_passes_through(client: TestClient, go: Go) -> None:
+    """Go's own 422 `bad_input` for a made id (the golden `KindCreateMadeID`) is the
+    answer, as Go wrote it."""
+    go.temporal.answers.append(done(422, answer("KindCreateMadeID")))
+
+    refused = client.post(f"{API}/kinds", json={"id": "kit", "name": "X"}, headers=press())
+
+    _code(refused, 422, "bad_input")
+    assert refused.json()["detail"] == answer("KindCreateMadeID")["detail"]
+
+
+def test_a_kind_patch_sends_its_nulls(client: TestClient, go: Go) -> None:
+    """A patch's null opens a class key or makes the kind a root; an absent field is
+    left out (Task 10). `steps` replaces the kind's own."""
+    go.temporal.answers.append(done(200, answer("KindUpdate")))
+    body = {"parent_id": None, "role": None, "steps": {"life": {"handler": "life.none"}}}
+
+    patched = client.patch(f"{API}/kinds/bolt", json=body, headers=press())
+
     assert patched.status_code == 200, patched.text
-    assert patched.json()["name"] == "Bolts"
-
-    schema = client.get(f"{API}/kinds/{child['id']}/schema")
-    assert schema.status_code == 200, schema.text
-    body = schema.json()
-    assert body["kind_id"] == child["id"]
-    assert set(body["schema"]["properties"]) == {"mpn", "thread"}
-    assert set(body["own_schema"]["properties"]) == {"thread"}
-    assert body["keys_in_use"] == []
-
-    item = _item(client, child["id"])
-    props = client.patch(
-        f"/api/v1/entities/item:{item['id']}/properties",
-        json={"set": {"mpn": "X1", "colour": "red"}},
-        headers=press(),
+    assert (go.start.name, go.start.arg["params"], go.start.arg["body"]) == (
+        "inventory.KindUpdate",
+        {"kind_id": "bolt"},
+        body,
     )
-    assert props.status_code == 200, props.text
-    keys = client.get(f"{API}/kinds/{parent['id']}/schema").json()["keys_in_use"]
-    assert keys == [{"key": "colour", "count": 1}, {"key": "mpn", "count": 1}]
-
-    client.post(f"{API}/items/{item['id']}/archive", headers=press())
-    archived = client.post(f"{API}/kinds/{child['id']}/archive", headers=press())
-    assert archived.status_code == 200, archived.text
-    assert archived.json()["archived_at"] is not None
-    assert child["id"] not in {k["id"] for k in client.get(f"{API}/kinds").json()["kinds"]}
-    every = client.get(f"{API}/kinds", params={"archived": True}).json()["kinds"]
-    assert child["id"] in {k["id"] for k in every}
-    restored = client.post(f"{API}/kinds/{child['id']}/restore", headers=press())
-    assert restored.status_code == 200, restored.text
-    assert restored.json()["archived_at"] is None
 
 
-def test_kind_refusals(client: TestClient) -> None:
-    kind = _kind(client)
-    again = client.post(
-        f"{API}/kinds", json={"id": kind["id"], "name": "X", "tracking": "lot"}, headers=press()
-    )
-    _code(again, 409, "kind_exists")
-    orphan = client.post(
-        f"{API}/kinds",
-        json={"id": _kind_id(), "name": "X", "tracking": "lot", "parent_id": "nope_kind"},
-        headers=press(),
-    )
-    _code(orphan, 404, "kind_not_found")
-    _code(client.get(f"{API}/kinds/nope_kind/schema"), 404, "kind_not_found")
-    _code(client.patch(f"{API}/kinds/nope_kind", json={}, headers=press()), 404, "kind_not_found")
-    child = _kind(client, parent_id=kind["id"])
-    cycle = client.patch(
-        f"{API}/kinds/{kind['id']}", json={"parent_id": child["id"]}, headers=press()
-    )
-    _code(cycle, 422, "kind_cycle")
-    builtin = client.patch(f"{API}/kinds/part", json={"tracking": "unit"}, headers=press())
-    _code(builtin, 409, "kind_in_use")
-    _item(client, kind["id"])
-    _code(client.post(f"{API}/kinds/{kind['id']}/archive", headers=press()), 409, "kind_in_use")
-    archived = _kind(client)
-    client.post(f"{API}/kinds/{archived['id']}/archive", headers=press())
-    into_archived = client.post(
-        f"{API}/items", json={"kind_id": archived["id"], "name": "X"}, headers=press()
-    )
-    _code(into_archived, 409, "kind_archived")
+@pytest.mark.parametrize("action", ["archive", "restore"])
+def test_a_kind_archive_and_restore_start_their_activities(
+    client: TestClient, go: Go, action: str
+) -> None:
+    go.temporal.answers.append(done(200, answer(f"Kind{action.capitalize()}")))
+
+    made = client.post(f"{API}/kinds/bolt/{action}", headers=press())
+
+    assert made.status_code == 200, made.text
+    assert go.start.name == f"inventory.Kind{action.capitalize()}"
+    assert (go.start.arg["params"], go.start.arg["body"]) == ({"kind_id": "bolt"}, None)
 
 
-def test_a_restricting_kind_schema_is_refused_and_makes_no_kind(client: TestClient) -> None:
-    kind_id = _kind_id()
-    refused = client.post(
-        f"{API}/kinds",
-        json={
-            "id": kind_id,
-            "name": "Strict",
-            "tracking": "lot",
-            "attribute_schema": {"type": "object", "required": ["mpn"]},
-        },
-        headers=press(),
-    )
-    _code(refused, 422, "bad_property_schema", ENTITY_PROBLEMS)
-    every = client.get(f"{API}/kinds", params={"archived": True}).json()["kinds"]
-    assert kind_id not in {k["id"] for k in every}
-    kind = _kind(client, attribute_schema=MPN_SCHEMA)
-    patched = client.patch(
-        f"{API}/kinds/{kind['id']}",
-        json={"attribute_schema": {"type": "object", "required": ["mpn"]}},
-        headers=press(),
-    )
-    _code(patched, 422, "bad_property_schema", ENTITY_PROBLEMS)
-    kept = client.get(f"{API}/kinds/{kind['id']}/schema").json()["own_schema"]
-    assert kept == MPN_SCHEMA
+def test_kind_schema_history_route(client: TestClient, history_rows: HistoryRows) -> None:
+    old = {"type": "object", "properties": {}}
+    new = {"type": "object", "properties": {"mpn": {"type": "string"}}}
+    with _state(client).refs.pool.connection() as conn:
+        history_rows(
+            conn,
+            {"event_seq": 9001, "owner": "item_kind:bolt", "old": None, "new": old},
+            {"event_seq": 9002, "owner": "item_kind:bolt", "old": old, "new": new},
+            {"event_seq": 9003, "owner": "item_kind:nut", "old": None, "new": old},
+        )
+
+    got = client.get(f"{API}/kinds/bolt/schema/history")
+
+    assert got.status_code == 200, got.text
+    assert [c["new"] for c in got.json()["changes"]] == [new, old]
+    assert client.get(f"{API}/kinds/bolt/schema/history", params={"limit": 0}).status_code == 422
 
 
 # -- items -------------------------------------------------------------------------------
 
 
-def test_an_item_round_trips(client: TestClient) -> None:
-    kind = _kind(client, parent_id="part")
-    item = _item(client, kind["id"], name="Brass insert M3", low_stock="5", manufacturer="Ruthex")
-    assert (item["kind_id"], item["tracking"], item["on_hand"]) == (kind["id"], "lot", "0")
-    assert item["kind_path"] == ["part", kind["id"]]
-    assert item["low"] is True
+def test_item_reads_go_to_go(client: TestClient, go: Go) -> None:
+    item = answer("Item")
+    go.reads["/items"] = (200, answer("ItemList"))
+    go.reads[f"/items/{item['id']}"] = (200, item)
 
-    got = client.get(f"{API}/items/{item['id']}")
+    listed = client.get(
+        f"{API}/items",
+        params={"kind": "hardware", "descendants": "false", "q": "M3", "low": "true", "limit": 5},
+    )
+    one = client.get(f"{API}/items/{item['id']}")
+
+    assert listed.json() == answer("ItemList")
+    assert one.json() == item
+    assert dict(go.seen[0].url.params) == {
+        "kind": "hardware",
+        "descendants": "false",
+        "q": "M3",
+        "low": "true",
+        "archived": "false",
+        "limit": "5",
+    }
+
+
+def test_an_item_create_starts_item_create(client: TestClient, go: Go) -> None:
+    go.temporal.answers.append(done(201, answer("ItemCreate")))
+    body = {"kind_id": "hardware", "name": "M3 bolt", "low_stock": "4.5"}
+
+    made = client.post(f"{API}/items", json=body, headers=press())
+
+    assert made.status_code == 201, made.text
+    assert made.json() == answer("ItemCreate")
+    assert (go.start.name, go.start.arg["body"]) == ("inventory.ItemCreate", body)
+    assert go.start.options["summary"] == "ItemCreate item_kind:hardware"
+
+
+def test_an_item_patch_and_its_archive_start_their_activities(client: TestClient, go: Go) -> None:
+    item_id = answer("Item")["id"]
+    go.temporal.answers += [
+        done(200, answer("ItemUpdate")),
+        done(200, answer("ItemArchive")),
+        done(200, answer("ItemRestore")),
+    ]
+    body: dict[str, Any] = {"life_hours": None, "steps": {}}
+
+    patched = client.patch(f"{API}/items/{item_id}", json=body, headers=press())
+    archived = client.post(f"{API}/items/{item_id}/archive", headers=press())
+    restored = client.post(f"{API}/items/{item_id}/restore", headers=press())
+
+    assert [r.status_code for r in (patched, archived, restored)] == [200, 200, 200]
+    assert [(s.name, s.arg["params"], s.arg["body"]) for s in go.temporal.starts] == [
+        ("inventory.ItemUpdate", {"item_id": item_id}, body),
+        ("inventory.ItemArchive", {"item_id": item_id}, None),
+        ("inventory.ItemRestore", {"item_id": item_id}, None),
+    ]
+
+
+def test_an_item_create_sends_its_properties_with_it(client: TestClient, go: Go) -> None:
+    """R-K1-33: the properties go in the activity's body, so Go writes the item and its
+    properties in one transaction."""
+    go.temporal.answers.append(done(201, answer("ItemCreate")))
+    body = {"kind_id": "hardware", "name": "N", "properties": {"mpn": "x", "thread": None}}
+
+    made = client.post(f"{API}/items", json=body, headers=press())
+
+    assert made.status_code == 201, made.text
+    assert go.start.arg["body"] == body
+
+
+def test_an_item_patch_sends_only_what_was_set(client: TestClient, go: Go) -> None:
+    """An empty patch stays empty, so Go does not check it; `properties: null` alone is no
+    patch of the properties and is not sent."""
+    item_id = answer("Item")["id"]
+    go.temporal.answers += [done(200, answer("ItemUpdate"))] * 3
+
+    for sent in ({}, {"properties": None}, {"name": "N", "properties": None}):
+        response = client.patch(f"{API}/items/{item_id}", json=sent, headers=press())
+        assert response.status_code == 200, response.text
+
+    assert [s.arg["body"] for s in go.temporal.starts] == [{}, {}, {"name": "N"}]
+
+
+def test_an_item_patch_sends_its_properties(client: TestClient, go: Go) -> None:
+    item_id = answer("Item")["id"]
+    go.temporal.answers.append(done(200, answer("ItemUpdate")))
+
+    client.patch(f"{API}/items/{item_id}", json={"properties": {"mpn": None}}, headers=press())
+
+    assert go.start.arg["body"] == {"properties": {"mpn": None}}
+
+
+@pytest.mark.parametrize("name", ["ItemCreateMissingProperties", "ItemCreateBadPropertyValue"])
+def test_an_items_property_refusal_passes_through(client: TestClient, go: Go, name: str) -> None:
+    problem = answer(name)
+    go.temporal.answers.append(done(422, problem))
+
+    refused = client.post(f"{API}/items", json={"kind_id": "strict", "name": "N"}, headers=press())
+
+    assert refused.status_code == 422, refused.text
+    assert {k: v for k, v in refused.json().items() if k != "instance"} == problem
+
+
+def test_an_items_properties_are_bounded(client: TestClient, go: Go) -> None:
+    too_many = {f"k{i}": 1 for i in range(201)}
+
+    refused = client.post(
+        f"{API}/items",
+        json={"kind_id": "hardware", "name": "N", "properties": too_many},
+        headers=press(),
+    )
+
+    assert refused.status_code == 422, refused.text
+    assert go.temporal.starts == []
+
+
+# -- the forwarders' own answers ---------------------------------------------------------
+
+
+def test_a_go_problem_is_passed_through(client: TestClient, go: Go) -> None:
+    problem = {
+        "type": PROBLEMS + "step_not_applicable",
+        "title": "Conflict",
+        "status": 409,
+        "detail": "the item's class has no consume step: x",
+        "code": "step_not_applicable",
+        "class": {"nature": "service"},
+        "step": "consume",
+    }
+    go.temporal.answers.append(done(409, problem))
+
+    used = client.post(f"{API}/items/{uuid.uuid4()}/use", json={"qty": "1"}, headers=press())
+
+    _code(used, 409, "step_not_applicable")
+    body = used.json()
+    assert (body["code"], body["step"], body["class"]) == (
+        "step_not_applicable",
+        "consume",
+        {"nature": "service"},
+    )
+    assert body["instance"] == used.request.url.path
+
+
+def test_a_slow_write_answers_202_and_a_repeat_202_again(client: TestClient, go: Go) -> None:
+    key = {"Idempotency-Key": "k-slow"}
+    go.temporal.answers += [HANG, HANG]
+
+    first = client.post(f"{API}/kinds/bolt/archive", headers=key)
+    again = client.post(f"{API}/kinds/bolt/archive", headers=key)
+
+    for accepted in (first, again):
+        assert accepted.status_code == 202, accepted.text
+        body = accepted.json()
+        assert (body["kind"], body["subject"], body["status"]) == (
+            "inventory.KindArchive",
+            "item_kind:bolt",
+            "running",
+        )
+        assert body["id"].endswith(":k-slow")
+    assert len(go.temporal.starts) == 2
+    assert {s.options["id"] for s in go.temporal.starts} == {
+        f"inventory.KindArchive:{first.json()['id']}"
+    }
+
+
+def test_a_done_write_answers_the_stored_result(client: TestClient, go: Go) -> None:
+    go.temporal.answers.append(HANG)
+    sent = {"kind_id": "hardware", "name": "N"}
+    first = client.post(f"{API}/items", json=sent, headers={"Idempotency-Key": "k-done"})
+    key = first.json()["id"]
+    go.temporal.done[f"inventory.ItemCreate:{key}"] = done(201, answer("ItemCreate"))
+
+    again = client.post(f"{API}/items", json=sent, headers={"Idempotency-Key": "k-done"})
+
+    assert again.status_code == 201, again.text
+    assert again.json() == answer("ItemCreate")
+    assert go.temporal.handles == [f"inventory.ItemCreate:{key}"]
+
+
+def test_a_failed_activity_runs_again(client: TestClient, go: Go) -> None:
+    """A key whose run failed starts again (Allow Duplicate Failed Only): the route
+    answers the new run."""
+    go.temporal.answers.append(done(200, answer("KindRestore")))
+
+    made = client.post(f"{API}/kinds/bolt/restore", headers={"Idempotency-Key": "k-failed"})
+
+    assert made.status_code == 200, made.text
+    assert go.temporal.handles == []
+
+
+def test_temporal_out_of_reach_is_a_503(client: TestClient) -> None:
+    go = install_go(client, FakeTemporal(refuse=True))
+
+    _code(client.post(f"{API}/kinds/bolt/archive", headers=press()), 503, "inventory_unavailable")
+    assert len(go.temporal.starts) == 1
+
+
+def test_go_out_of_reach_is_a_503(client: TestClient, go: Go) -> None:
+    go.down = True
+
+    _code(client.get(f"{API}/kinds"), 503, "inventory_unavailable")
+    assert _state(client).components.get(INVENTORY).core is not None
+
+
+def test_no_core_url_is_a_503(client: TestClient) -> None:
+    install_go(client, url=None)
+
+    _code(client.get(f"{API}/items"), 503, "inventory_unavailable")
+    _code(client.get(f"{API}/operations/x"), 503, "inventory_unavailable")
+
+
+def test_a_persons_key_is_scoped_to_the_actor(client: TestClient, go: Go) -> None:
+    go.temporal.answers += [done(200, answer("KindArchive"))] * 2
+    key = {"Idempotency-Key": "same"}
+
+    client.post(f"{API}/kinds/bolt/archive", headers=key)
+    client.post(f"{API}/kinds/bolt/archive", headers={**key, AUTHOR_HEADER: "token:abc123"})
+
+    ids = [s.options["id"] for s in go.temporal.starts]
+    assert len(set(ids)) == 2, ids
+    assert [s.arg["actor"]["kind"] for s in go.temporal.starts] == ["browser", "agent"]
+
+
+def test_a_write_with_no_key_gets_its_own(client: TestClient, go: Go) -> None:
+    go.temporal.answers += [done(200, answer("KindArchive"))] * 2
+
+    client.post(f"{API}/kinds/bolt/archive")
+    client.post(f"{API}/kinds/bolt/archive")
+
+    ids = [s.options["id"] for s in go.temporal.starts]
+    assert all(i.startswith("inventory.KindArchive:req:") for i in ids) and ids[0] != ids[1]
+
+
+def test_the_operation_route_reads_go(client: TestClient, go: Go) -> None:
+    operation = {
+        "id": "browser::k",
+        "kind": "inventory.Take",
+        "subject": "item:x",
+        "status": "failed",
+        "result": None,
+        "error": {
+            "type": PROBLEMS + "lot_empty",
+            "title": "Conflict",
+            "status": 409,
+            "detail": "the named lot has no stock on hand",
+            "extensions": {"code": "lot_empty"},
+        },
+        "created_at": "2026-11-26T12:00:00Z",
+        "finished_at": "2026-11-26T12:00:01Z",
+    }
+    go.reads["/operations/one"] = (200, operation)
+
+    got = client.get(f"{API}/operations/browser%3A%3Ak")
+
     assert got.status_code == 200, got.text
-    assert got.json()["name"] == "Brass insert M3"
-    patched = client.patch(
-        f"{API}/items/{item['id']}", json={"note": "for lids", "low_stock": "0"}, headers=press()
+    assert got.json() == operation
+    assert dict(go.seen[0].url.params) == {"id": "browser::k"}
+
+
+def test_an_unknown_operation_is_404(client: TestClient, go: Go) -> None:
+    go.reads["/operations/one"] = (
+        404,
+        {
+            "type": PROBLEMS + "operation_not_found",
+            "title": "Not Found",
+            "status": 404,
+            "detail": "no inventory operation 'x'",
+            "code": "operation_not_found",
+        },
     )
-    assert patched.status_code == 200, patched.text
-    assert (patched.json()["note"], patched.json()["low"]) == ("for lids", False)
 
-    by_parent = client.get(f"{API}/items", params={"kind": "part"}).json()["items"]
-    assert item["id"] in {i["id"] for i in by_parent}
-    only_part = client.get(f"{API}/items", params={"kind": "part", "descendants": False})
-    assert item["id"] not in {i["id"] for i in only_part.json()["items"]}
-    by_q = client.get(f"{API}/items", params={"q": "ruthex"}).json()["items"]
-    assert [i["id"] for i in by_q] == [item["id"]]
-
-    archived = client.post(f"{API}/items/{item['id']}/archive", headers=press())
-    assert archived.status_code == 200, archived.text
-    assert item["id"] not in {i["id"] for i in client.get(f"{API}/items").json()["items"]}
-    every = client.get(f"{API}/items", params={"archived": True}).json()["items"]
-    assert item["id"] in {i["id"] for i in every}
-    restored = client.post(f"{API}/items/{item['id']}/restore", headers=press())
-    assert restored.status_code == 200, restored.text
-    assert restored.json()["archived_at"] is None
+    _code(client.get(f"{API}/operations/x"), 404, "operation_not_found")
 
 
-def test_item_refusals(client: TestClient) -> None:
-    item = _item(client)
-    twin = client.post(
-        f"{API}/items", json={"kind_id": "hardware", "name": item["name"].upper()}, headers=press()
-    )
-    _code(twin, 409, "item_exists")
-    missing = uuid.uuid4()
-    _code(client.get(f"{API}/items/{missing}"), 404, "item_not_found")
-    _code(client.patch(f"{API}/items/{missing}", json={}, headers=press()), 404, "item_not_found")
-    _code(client.post(f"{API}/items/{missing}/archive", headers=press()), 404, "item_not_found")
-    filament = client.post(
-        f"{API}/items", json={"kind_id": "filament", "name": "PLA"}, headers=press()
-    )
-    _code(filament, 409, "filament_item_refused")
-    unknown = client.post(
-        f"{API}/items", json={"kind_id": "nope_kind", "name": "X"}, headers=press()
-    )
-    _code(unknown, 404, "kind_not_found")
-
-    other = _item(client)
-    renamed = client.patch(
-        f"{API}/items/{other['id']}", json={"name": item["name"].lower()}, headers=press()
-    )
-    _code(renamed, 409, "item_exists")
-
-
-def test_restoring_an_item_is_refused_under_an_archived_kind_or_a_taken_name(
-    client: TestClient,
-) -> None:
-    kind = _kind(client)
-    item = _item(client, kind["id"])
-    client.post(f"{API}/items/{item['id']}/archive", headers=press())
-    client.post(f"{API}/kinds/{kind['id']}/archive", headers=press())
-    _code(client.post(f"{API}/items/{item['id']}/restore", headers=press()), 409, "kind_archived")
-    client.post(f"{API}/kinds/{kind['id']}/restore", headers=press())
-    _item(client, kind["id"], name=item["name"])
-    _code(client.post(f"{API}/items/{item['id']}/restore", headers=press()), 409, "item_exists")
-
-
-def test_the_item_list_filters_low_and_compatible_and_takes_a_limit(client: TestClient) -> None:
-    kind = _kind(client)
-    model = f"X{uuid.uuid4().hex[:6]}"
-    low = _item(client, kind["id"], name="a low", low_stock="2", compatible_with=[model])
-    _item(client, kind["id"], name="b stocked")
-
-    def ids(**params: Any) -> list[str]:
-        got = client.get(f"{API}/items", params={"kind": kind["id"], **params})
-        assert got.status_code == 200, got.text
-        return [i["id"] for i in got.json()["items"]]
-
-    assert ids(low=True) == [low["id"]]
-    assert ids(compatible=model) == [low["id"]]
-    assert ids(compatible="nope") == []
-    assert ids(limit=1) == [low["id"]]
-    assert len(ids(limit=5000)) == 2
-    for limit in (0, 5001):
-        bad = client.get(f"{API}/items", params={"limit": limit})
-        assert bad.status_code == 422, bad.text
-
-
-def test_an_items_figures_are_normalized(client: TestClient) -> None:
-    item = _item(client, low_stock="4.5", life_hours="100")
-    assert (item["low_stock"], item["life_hours"], item["on_hand"]) == ("4.5", "100", "0")
-    assert item["stock_value_minor"] == "0"
-
-
-def test_nul_bytes_are_refused_in_paths_queries_and_bodies(client: TestClient) -> None:
+def test_bodies_pydantic_refuses_never_start(client: TestClient, go: Go) -> None:
+    """A NUL, a bound or an unknown field is the request's own 422: nothing starts."""
+    item = uuid.uuid4()
     for got in (
         client.get(f"{API}/kinds/a%00b/schema"),
         client.patch(f"{API}/kinds/a%00b", json={}, headers=press()),
@@ -270,9 +487,13 @@ def test_nul_bytes_are_refused_in_paths_queries_and_bodies(client: TestClient) -
         client.get(f"{API}/items", params={"kind": "a\x00b"}),
         client.get(f"{API}/items", params={"q": "a\x00b"}),
         client.get(f"{API}/items", params={"compatible": "a\x00b"}),
+        client.post(f"{API}/kinds", json={"id": "k1", "name": "K\x00"}, headers=press()),
+        client.post(f"{API}/kinds", json={"id": "k1", "name": "K", "role": "x"}, headers=press()),
+        client.patch(f"{API}/items/{item}", json={"note": "\x00"}, headers=press()),
+        client.patch(f"{API}/items/{item}", json={"life_months": 10**10}, headers=press()),
+        client.post(f"{API}/kinds/bolt/archive", headers={"Idempotency-Key": "k" * 201}),
     ):
         assert got.status_code == 422, got.text
-    kind = _kind(client)
     for field, value in (
         ("name", "M3\x00"),
         ("manufacturer", "Ruthex\x00"),
@@ -280,34 +501,6 @@ def test_nul_bytes_are_refused_in_paths_queries_and_bodies(client: TestClient) -
         ("compatible_with", ["X1\x00"]),
         ("source", "csv\x00"),
         ("source_ref", "r\x00"),
-    ):
-        made = client.post(
-            f"{API}/items", json={"kind_id": kind["id"], "name": "N", field: value}, headers=press()
-        )
-        assert made.status_code == 422, (field, made.text)
-    named = client.post(
-        f"{API}/kinds",
-        json={"id": _kind_id(), "name": "K\x00", "tracking": "lot"},
-        headers=press(),
-    )
-    assert named.status_code == 422, named.text
-    item = _item(client, kind["id"])
-    patched = client.patch(f"{API}/items/{item['id']}", json={"note": "\x00"}, headers=press())
-    assert patched.status_code == 422, patched.text
-    supplier = _supplier(client)
-    for field, value in (("sku", "S\x00"), ("pack_uom", "box\x00"), ("note", "\x00")):
-        offer = client.post(
-            f"{API}/offers",
-            json={"supplier_id": supplier, "item_id": item["id"], "sku": "S1", field: value},
-            headers=press(),
-        )
-        assert offer.status_code == 422, (field, offer.text)
-
-
-def test_item_and_offer_texts_and_life_months_are_capped(client: TestClient) -> None:
-    kind = _kind(client)
-    for field, value in (
-        ("life_months", 10**10),
         ("life_months", 1201),
         ("manufacturer", "m" * 201),
         ("compatible_with", ["c" * 101]),
@@ -316,29 +509,18 @@ def test_item_and_offer_texts_and_life_months_are_capped(client: TestClient) -> 
         ("source_ref", "r" * 201),
     ):
         made = client.post(
-            f"{API}/items", json={"kind_id": kind["id"], "name": "N", field: value}, headers=press()
+            f"{API}/items", json={"kind_id": "hardware", "name": "N", field: value}, headers=press()
         )
         assert made.status_code == 422, (field, made.text)
-    item = _item(client, kind["id"], life_months=1200)
-    patched = client.patch(
-        f"{API}/items/{item['id']}", json={"life_months": 10**10}, headers=press()
-    )
-    assert patched.status_code == 422, patched.text
-    supplier = _supplier(client)
-    for field, value in (("pack_uom", "u" * 101), ("note", "n" * 4001)):
-        offer = client.post(
-            f"{API}/offers",
-            json={"supplier_id": supplier, "item_id": item["id"], "sku": "S1", field: value},
-            headers=press(),
-        )
-        assert offer.status_code == 422, (field, offer.text)
+    assert go.temporal.starts == []
 
 
 # -- offers ------------------------------------------------------------------------------
 
 
-def test_an_offer_round_trips_with_its_prices(client: TestClient) -> None:
+def test_an_offer_round_trips_with_its_prices(client: TestClient, go: Go) -> None:
     item = _item(client)
+    go.reads[f"/items/{item['id']}"] = (200, {**answer("Item"), "id": item["id"]})
     supplier = _supplier(client)
     made = client.post(
         f"{API}/offers",
@@ -375,42 +557,13 @@ def test_an_offer_round_trips_with_its_prices(client: TestClient) -> None:
     assert (listed["pack_size"], listed["latest_price"]["price"]) == ("100", "4.99")
     prices = client.get(f"{API}/offers/{offer['id']}/prices").json()["prices"]
     assert [p["id"] for p in prices] == [price.json()["id"]]
-    assert (
-        client.get(f"{API}/items/{item['id']}/offers").json()["offers"][0]["latest_price"]["id"]
-        == price.json()["id"]
-    )
 
     archived = client.post(f"{API}/offers/{offer['id']}/archive", headers=press())
     assert archived.status_code == 200, archived.text
     assert client.get(f"{API}/items/{item['id']}/offers").json()["offers"] == []
 
 
-def test_an_item_counts_its_unarchived_offers(client: TestClient) -> None:
-    """R-P2-37: `offer_count` comes with the item, on the list and on one item."""
-    item = _item(client)
-    bare = _item(client)
-    supplier, other = _supplier(client), _supplier(client)
-    for shop, sku in ((supplier, "A-1"), (other, "B-1"), (supplier, "A-2")):
-        made = client.post(
-            f"{API}/offers",
-            json={"supplier_id": shop, "item_id": item["id"], "sku": sku},
-            headers=press(),
-        )
-        assert made.status_code == 201, made.text
-    assert (
-        client.post(f"{API}/offers/{made.json()['id']}/archive", headers=press()).status_code == 200
-    )
-
-    listed = {
-        i["id"]: i for i in client.get(f"{API}/items", params={"kind": "hardware"}).json()["items"]
-    }
-    assert listed[item["id"]]["offer_count"] == 2
-    assert listed[bare["id"]]["offer_count"] == 0
-    assert client.get(f"{API}/items/{item['id']}").json()["offer_count"] == 2
-    assert bare["offer_count"] == 0
-
-
-def test_offer_refusals(client: TestClient) -> None:
+def test_offer_refusals(client: TestClient, go: Go) -> None:
     item = _item(client)
     supplier = _supplier(client)
     body = {"supplier_id": supplier, "item_id": item["id"], "sku": "NUT-3"}
@@ -428,7 +581,18 @@ def test_offer_refusals(client: TestClient) -> None:
     assert listed.json()["detail"] == f"no supplier {str(unknown)!r}"
     no_item = {**body, "item_id": str(uuid.uuid4())}
     _code(client.post(f"{API}/offers", json=no_item, headers=press()), 404, "item_not_found")
-    _code(client.get(f"{API}/items/{uuid.uuid4()}/offers"), 404, "item_not_found")
+    missing_item = uuid.uuid4()
+    go.reads[f"/items/{missing_item}"] = (
+        404,
+        {
+            "type": PROBLEMS + "item_not_found",
+            "title": "Not Found",
+            "status": 404,
+            "detail": f"no item {str(missing_item)!r}",
+            "code": "item_not_found",
+        },
+    )
+    _code(client.get(f"{API}/items/{missing_item}/offers"), 404, "item_not_found")
     missing = uuid.uuid4()
     _code(client.patch(f"{API}/offers/{missing}", json={}, headers=press()), 404, "offer_not_found")
     _code(client.get(f"{API}/offers/{missing}/prices"), 404, "offer_not_found")
@@ -441,29 +605,78 @@ def test_offer_refusals(client: TestClient) -> None:
     )
     _code(clash, 409, "offer_exists")
 
-    with _state(client).refs.pool.connection() as conn:
-        row = conn.execute(
-            "INSERT INTO items (kind_id, name) VALUES ('filament', %s) RETURNING id",
-            (f"PLA {uuid.uuid4().hex[:6]}",),
-        ).fetchone()
-    assert row is not None
+    filament_item = _item(client, "filament", name=f"PLA {uuid.uuid4().hex[:6]}")
     filament = client.post(
-        f"{API}/offers", json={**body, "item_id": str(row["id"])}, headers=press()
+        f"{API}/offers", json={**body, "item_id": filament_item["id"]}, headers=press()
     )
     _code(filament, 409, "filament_item_refused")
+    for field, value in (
+        ("sku", "S\x00"),
+        ("pack_uom", "box\x00"),
+        ("note", "\x00"),
+        ("pack_uom", "u" * 101),
+        ("note", "n" * 4001),
+    ):
+        offer = client.post(f"{API}/offers", json={**body, field: value}, headers=press())
+        assert offer.status_code == 422, (field, offer.text)
+
+
+def test_an_offer_write_sent_again_with_its_key_writes_once(client: TestClient, go: Go) -> None:
+    """#8437: an offer write's retry with the same `Idempotency-Key` answers the first
+    result and writes nothing; the key with another body is a 422."""
+    item = _item(client)
+    go.reads[f"/items/{item['id']}"] = (200, {**answer("Item"), "id": item["id"]})
+    body = {"supplier_id": _supplier(client), "item_id": item["id"], "sku": "NUT-3"}
+    key = press()
+
+    made = client.post(f"{API}/offers", json=body, headers=key)
+    again = client.post(f"{API}/offers", json=body, headers=key)
+    assert (made.status_code, again.status_code) == (201, 201), again.text
+    assert again.json() == made.json()
+    offers = client.get(f"{API}/items/{item['id']}/offers").json()["offers"]
+    assert [o["id"] for o in offers] == [made.json()["id"]]
+    reused = client.post(f"{API}/offers", json={**body, "sku": "NUT-4"}, headers=key)
+    assert reused.status_code == 422, reused.text
+
+    offer = made.json()["id"]
+    price_key = press()
+    sent = {"price": "4.99", "on_date": "2026-11-20"}
+    first = client.post(f"{API}/offers/{offer}/prices", json=sent, headers=price_key)
+    retry = client.post(f"{API}/offers/{offer}/prices", json=sent, headers=price_key)
+    assert (first.status_code, retry.status_code) == (201, 201), retry.text
+    assert retry.json() == first.json()
+    prices = client.get(f"{API}/offers/{offer}/prices").json()["prices"]
+    assert [p["id"] for p in prices] == [first.json()["id"]]
+
+    # The same key from another sender is a write of its own.
+    agent = client.post(
+        f"{API}/offers/{offer}/prices",
+        json=sent,
+        headers={**price_key, AUTHOR_HEADER: "token:abc123"},
+    )
+    assert agent.status_code == 201, agent.text
+    assert agent.json()["id"] != first.json()["id"]
 
 
 # -- an item's properties ----------------------------------------------------------------
 
 
-def test_an_items_property_schema_is_its_kinds_merged(client: TestClient) -> None:
-    parent = _kind(client, parent_id="part", attribute_schema=MPN_SCHEMA)
-    child = _kind(
-        client,
-        parent_id=parent["id"],
+def test_an_items_property_schema_is_its_kinds_merged(client: TestClient, go: Go) -> None:
+    """The item's kind is read through Go (C16); the schema and the keys are the API's."""
+    pool = _state(client).refs.pool
+    parent = insert_kind(
+        pool, attribute_schema={"type": "object", "properties": {"mpn": {"type": "string"}}}
+    )
+    child = insert_kind(
+        pool,
+        parent_id=parent,
         attribute_schema={"type": "object", "properties": {"length_mm": {"type": "number"}}},
     )
-    item = _item(client, child["id"])
+    item = _item(client, child)
+    go.reads[f"/items/{item['id']}"] = (
+        200,
+        {**answer("Item"), "id": item["id"], "kind_id": child},
+    )
     got = client.get(f"/api/v1/entities/item:{item['id']}/property-schema")
     assert got.status_code == 200, got.text
     body = got.json()
@@ -482,6 +695,8 @@ def test_an_items_property_schema_is_its_kinds_merged(client: TestClient) -> Non
         headers=press(),
     )
     assert unknown_key.status_code == 200, unknown_key.text
+    again = client.get(f"/api/v1/entities/item:{item['id']}/property-schema")
+    assert again.json()["keys_in_use"] == [{"key": "finish", "count": 1}]
 
     put = client.put(
         "/api/v1/entity-kinds/item/property-schema",
@@ -492,7 +707,7 @@ def test_an_items_property_schema_is_its_kinds_merged(client: TestClient) -> Non
 
 
 def test_the_entity_property_schema_serves_other_kinds_and_refuses_a_missing_entity(
-    client: TestClient,
+    client: TestClient, go: Go
 ) -> None:
     supplier = _supplier(client)
     got = client.get(f"/api/v1/entities/supplier:{supplier}/property-schema")
@@ -507,3 +722,21 @@ def test_the_entity_property_schema_serves_other_kinds_and_refuses_a_missing_ent
         "bad_entity_ref",
         ENTITY_PROBLEMS,
     )
+
+
+def test_the_property_route_keeps_a_special_types_required_key(client: TestClient) -> None:
+    """`PATCH /entities/{ref}/properties` refuses to empty a printer item's `model_code`,
+    and its description says so."""
+    pg_pool = _state(client).refs.pool
+    fdm = insert_kind(pg_pool, parent_id="printer", tracking="none", special_type="printer")
+    item = str(insert_item(pg_pool, fdm, name="H2C"))
+    url = f"/api/v1/entities/item:{item}/properties"
+    assert client.patch(url, json={"set": {"model_code": "O1C"}}).status_code == 200
+
+    emptied = client.patch(url, json={"set": {"model_code": None}})
+
+    assert emptied.status_code == 422, emptied.text
+    assert emptied.json()["missing"] == ["model_code"]
+    spec = client.get("/openapi.json").json()
+    refused = spec["paths"]["/api/v1/entities/{ref}/properties"]["patch"]["responses"]["422"]
+    assert "`model_code`" in refused["description"]

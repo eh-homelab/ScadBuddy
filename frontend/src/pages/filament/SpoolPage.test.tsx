@@ -1,9 +1,10 @@
-import { screen, waitFor, within } from '@testing-library/react'
+import { act, screen, waitFor, within } from '@testing-library/react'
 import { http, HttpResponse } from 'msw'
 import { Route, Routes } from 'react-router'
 import { beforeEach, describe, expect, it, onTestFinished, vi } from 'vitest'
-import { addSpoolEvent, archiveSpool, createTagBackup, getSpool, getType, listSpoolEvents, listSpools, patchSpool, setSpoolKValues, setSpoolPresets, spoolTagRecords, spoolTagWritten } from '../../api/filament'
+import { addSpoolEvent, archiveSpool, createTagBackup, getSpool, getType, listSpoolEvents, listSpools, patchSpool, setSpoolKValues, setSpoolPresets, spoolTagRecords, spoolTagWritten, upsertLocation } from '../../api/filament'
 import { SPOOL_ADVANCED_KEY } from '../../components/filament/SpoolSections'
+import { seedHomeReturn } from '../../mocks/features/filament'
 import { H2C, L, spoolId, T, TAG } from '../../mocks/features/filament/seed'
 import { INVOICE, LINE, SUPPLIER } from '../../mocks/features/filamentPurchasingSeed'
 import { ORDER_CLOSED } from '../../mocks/features/orders/state'
@@ -12,7 +13,7 @@ import { server } from '../../mocks/server'
 import { entityMock, seedEntityProperties } from '../../mocks/features/entities'
 import { rememberAdvanced } from '../../test/advanced'
 import { choose } from '../../test/select'
-import { schemaProperty } from '../../test/spec'
+import { schemaKeyword } from '../../test/spec'
 import { renderPage } from '../../test/utils'
 import { SpoolPage } from './SpoolPage'
 import { SpoolsTab } from './SpoolsTab'
@@ -54,6 +55,47 @@ describe('the spool page', () => {
       expect(within(screen.getByRole('navigation', { name: 'Sections' })).getByRole('link', { name })).toHaveAttribute('href', `#${anchor}`)
     }
     expect(screen.getByRole('combobox', { name: 'Go to section' })).toBeInTheDocument()
+  })
+
+  it('asks which spool goes into its dry box, and the banner goes once answered (#7167)', async () => {
+    seedHomeReturn()
+    const { user } = open(11)
+    await heading(11)
+    const banner = await screen.findByRole('region', { name: 'Dry box' })
+    expect(within(banner).getByText('S-11 came out of its tray. Which spool goes into its dry box?')).toBeInTheDocument()
+    await user.click(within(banner).getByRole('button', { name: 'Choose the spool…' }))
+    const dialog = await screen.findByRole('dialog', { name: 'S-11 came out of 3DP-31B-598 H2C AMS-A slot 1. Which spool goes into Dry box 2?' })
+    await user.click(within(dialog).getByRole('radio', { name: 'Pick by hand' }))
+    await user.click(await within(await within(dialog).findByRole('radiogroup', { name: 'Spools' })).findByRole('radio', { name: /^S-11\b/ }))
+    await user.click(within(dialog).getByRole('button', { name: 'Put in box' }))
+    await waitFor(() => expect(screen.queryByRole('region', { name: 'Dry box' })).toBeNull())
+    expect(screen.getByText('Put S-11 in Dry box 2')).toBeInTheDocument()
+    expect((await getSpool(spoolId(7))).archived_at).not.toBeNull()
+  })
+
+  it('shows no dry box banner once its home is no dry box, as Needs you does (#7167 review M5)', async () => {
+    const { box } = seedHomeReturn()
+    await upsertLocation({ capacity: 4 }, box)
+    const answered = new Promise<void>((resolve) => {
+      const done = ({ request }: { request: Request }) => {
+        if (new URL(request.url).searchParams.get('awaiting_home') !== 'true') return
+        server.events.removeListener('response:mocked', done)
+        resolve()
+      }
+      server.events.on('response:mocked', done)
+    })
+    open(11)
+    await heading(11)
+    await answered
+    // Flush the updates the answer starts, with no timer: a slow runner cannot pass early.
+    await act(async () => {})
+    expect(screen.queryByRole('region', { name: 'Dry box' })).toBeNull()
+  })
+
+  it('shows no dry box banner for a spool that waits for nothing (#7167)', async () => {
+    open(1)
+    await heading(1)
+    expect(screen.queryByRole('region', { name: 'Dry box' })).toBeNull()
   })
 
   it('says what the newest weighing was made of (#7682)', async () => {
@@ -870,7 +912,7 @@ describe("the spool page's Advanced toggle", () => {
 
   it('shows a saved diameter other than the default with Advanced off, and hides the default (#7642)', async () => {
     // #8107: the backend's default, read from the spec, so a change there fails here.
-    const fallback = schemaProperty('SpoolTypeCreate-Input', 'diameter_mm', 'default', 'string')
+    const fallback = schemaKeyword('SpoolTypeCreate-Input', 'diameter_mm', 'default', 'string')
     await patchSpool(spoolId(2), { diameter_mm: fallback })
     const { unmount } = open(2)
     await heading(2)
@@ -925,6 +967,16 @@ describe("the spool page's Advanced toggle", () => {
       expect(posts.at(-1)).toMatchObject({ quantity: 1, spool: { properties: { lot_number: 'L-7' } } })
       const made = (await listSpools()).find((one) => one.number === 20)!
       expect(entityMock.properties.get(`spool:${made.id}`)?.map((p) => [p.key, p.value])).toEqual([['lot_number', 'L-7']])
+    })
+
+    // #8227 (spec §6.3b): the panel lists only the keys the form does not show.
+    it('lists in the Properties panel only the keys the form does not show (#8227)', async () => {
+      seedEntityProperties(`spool:${spoolId(1)}`, { lot_number: 'L-1', shelf_note: 'top' })
+      open(1)
+      const panel = await screen.findByRole('region', { name: 'Properties' })
+      expect(await within(panel).findByText('shelf_note')).toBeVisible()
+      expect(within(panel).queryByText('lot_number')).not.toBeInTheDocument()
+      expect(await screen.findByLabelText('lot_number')).toHaveValue('L-1')
     })
 
     it('an edit sends a changed defined property with its PATCH', async () => {

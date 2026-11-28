@@ -16,13 +16,16 @@ import {
 } from '../../api/filament'
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select'
 import { LocationTree } from '../../components/filament/LocationTree'
+import { UnknownSpoolButton } from '../../components/filament/UnknownSpoolButton'
+import { unknownSpoolTitle, useUnknownTrayList } from '../../lib/unknownSpools'
 import { Button } from '@/components/ui/button'
 import { Checkbox } from '@/components/ui/checkbox'
 import { Input } from '@/components/ui/input'
+import { Switch } from '@/components/ui/switch'
 
 interface Loaded {
   nodes: LocationNode[]
-  kinds: { id: string; name: string }[]
+  kinds: { id: string; name: string; dry_storage: boolean }[]
   spools: Spool[]
 }
 
@@ -35,6 +38,7 @@ interface Draft {
   identifier: string
   capacity: string
   note: string
+  station: boolean
 }
 
 const TOP = '__top'
@@ -64,6 +68,7 @@ const draftOf = (node: LocationNode | undefined, kindId: string): Draft => ({
   identifier: node?.identifier ?? '',
   capacity: node?.capacity == null ? '' : String(node.capacity),
   note: node?.note ?? '',
+  station: node?.station ?? false,
 })
 
 /** #6262 — the Locations tab: the tree of places spools are kept in, and the form that adds or changes one. */
@@ -78,6 +83,7 @@ export function LocationsTab() {
   const [saving, setSaving] = useState(false)
   const [sensors, setSensors] = useState<Sensor[]>([])
   const [sensorsError, setSensorsError] = useState(false)
+  const { trays: unknown, reload: reloadUnknown } = useUnknownTrayList()
 
   /** Each load takes a number; only the newest one's answer is used. */
   const latest = useRef(0)
@@ -120,6 +126,7 @@ export function LocationsTab() {
   }, [loadSensors])
 
   const kinds = useMemo(() => new Map((data?.kinds ?? []).map((kind) => [kind.id, kind.name])), [data])
+  const dryKinds = useMemo(() => new Set((data?.kinds ?? []).filter((kind) => kind.dry_storage).map((kind) => kind.id)), [data])
   const spoolsAt = useMemo(() => {
     const at = new Map<string, Spool[]>()
     for (const spool of data?.spools ?? []) {
@@ -162,6 +169,7 @@ export function LocationsTab() {
       identifier: draft.identifier.trim() || null,
       capacity,
       note: draft.note.trim() || null,
+      station: draft.station,
     }
     setSaving(true)
     setFormError(null)
@@ -169,15 +177,17 @@ export function LocationsTab() {
       if (was) {
         // Only what changed: a patch that names a field the place keeps still counts as an edit.
         const changed: LocationPatch = {}
-        for (const key of Object.keys(values) as (keyof typeof values)[]) {
+        for (const key of Object.keys(values).filter((name) => name !== 'station') as Exclude<keyof typeof values, 'station'>[]) {
           if (values[key] !== (was[key] ?? null)) Object.assign(changed, { [key]: values[key] })
         }
+        if (values.station !== (was.station ?? false)) changed.station = values.station
         if (Object.keys(changed).length > 0) await upsertLocation(changed, was.id)
       } else {
         const body: LocationCreate = { name: values.name, kind_id: values.kind_id, sort_order: 0 }
         for (const key of ['parent_id', 'identifier', 'capacity', 'note'] as const) {
           if (values[key] !== null) Object.assign(body, { [key]: values[key] })
         }
+        if (values.station) body.station = true
         await upsertLocation(body)
       }
       setDraft(null)
@@ -289,10 +299,39 @@ export function LocationsTab() {
               onChange={(event) => setDraft({ ...draft, capacity: event.target.value })}
             />
           </label>
+          {/* #7167: a dry box is a dry-storage place of capacity 1; a spool that comes out of its tray is asked about it. */}
+          {dryKinds.has(draft.kind_id) && (
+            <div className="flex flex-col gap-1 sm:col-span-2">
+              <div className="flex items-center gap-2">
+                <Switch
+                  id="place-dry-box"
+                  checked={draft.capacity.trim() === '1'}
+                  onCheckedChange={(on) => setDraft({ ...draft, capacity: on ? '1' : '' })}
+                />
+                <label htmlFor="place-dry-box" className="font-medium">
+                  Dry box
+                </label>
+              </div>
+              <p className="text-muted-foreground">Holds one spool. When that spool comes out of a printer, ScadBuddy asks which spool goes back in.</p>
+            </div>
+          )}
           <label className="flex flex-col gap-1">
             Note
             <Input value={draft.note} onChange={(event) => setDraft({ ...draft, note: event.target.value })} />
           </label>
+          <div className="flex items-center gap-2 sm:col-span-2">
+            <Switch
+              id="place-station"
+              checked={draft.station}
+              onCheckedChange={(next) => setDraft({ ...draft, station: next })}
+            />
+            <label htmlFor="place-station">Station for flow tasks</label>
+            {draft.id && draft.station && (
+              <Link to={`/station/${draft.id}`} className="text-muted-foreground underline">
+                Open the station
+              </Link>
+            )}
+          </div>
           {formError && (
             <p role="alert" className="text-warn sm:col-span-2">
               {formError}
@@ -317,6 +356,16 @@ export function LocationsTab() {
             Retry
           </Button>
         </div>
+      )}
+      {unknown.length > 0 && (
+        <ul aria-label="Unknown spools" className="flex flex-col gap-2 rounded-lg border border-primary/50 bg-primary/10 px-3 py-2 text-[13px]">
+          {unknown.map((tray) => (
+            <li key={tray.id} className="flex flex-wrap items-center gap-x-3 gap-y-1">
+              <span className="min-w-0 break-words">{unknownSpoolTitle(tray)}</span>
+              <UnknownSpoolButton trayId={tray.id} onResolved={reloadUnknown} />
+            </li>
+          ))}
+        </ul>
       )}
       {data && <LocationTree nodes={data.nodes} kinds={kinds} spoolsAt={spoolsAt} sensorsAt={sensorsAt} onSensorsChanged={() => void loadSensors()} onEdit={open} onArchive={(node, value) => void archive(node, value)} />}
     </div>

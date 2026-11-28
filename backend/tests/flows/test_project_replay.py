@@ -38,7 +38,11 @@ recorded once on that code, by a test that is not kept; `waited_open` on #7364's
 `wait_for_human` with no limit, answered) and `prompted` on #7364's (a prompt answered through
 its route, recorded by `tests/api/test_flow_prompt.py`), with `prompt_expired` (a prompt whose
 `timeout_s` ended it) and `prompted_twice` (two prompts at once); `people_only` on #7471's (an
-open `wait_for_human` and a people-only prompt at once). Never re-record them.
+open `wait_for_human` and a people-only prompt at once); `waited_task` on #8062's (a
+`wait_for_human` that opened a task, answered through `POST /tasks/{id}/answer`, recorded by
+`tests/api/test_flow_prompt.py`). `answered`, `waited_open` and `people_only` hold
+`wait_for_human` calls from before #8062: their tests no longer record, as they now run the
+patched workflow. Never re-record them.
 Their payloads are sealed under `flows_support.Keys`, a key derived from each subject.
 """
 
@@ -84,6 +88,7 @@ NAMES = [
     "prompt_expired",
     "prompted_twice",
     "people_only",
+    "waited_task",
 ]
 RECORD = os.environ.get("SCADBUDDY_RECORD_HISTORIES") == "1"
 
@@ -136,10 +141,9 @@ async def test_answered(flows: Flows) -> None:
     )
     run = await flows.row(run_id, lambda r: r.status == "waiting")
     await AgentClient(flows.client, f"flow-{run_id}").provide_callback_result(
-        run.waiting_on[0].call_id, result={"answer": "ok"}
+        run.waiting_on[0].call_id, result={"answer": {"answer": "ok"}}
     )
     await flows.finished(run_id)
-    await _record(flows, "answered", run_id)
 
 
 @pytest.mark.requires_temporal
@@ -154,9 +158,10 @@ async def test_waited_open(flows: Flows) -> None:
         if await client.get_pending_callbacks():
             break
         await asyncio.sleep(0.1)
-    await client.provide_callback_result(run.waiting_on[0].call_id, result={"answer": "ok"})
+    await client.provide_callback_result(
+        run.waiting_on[0].call_id, result={"answer": {"answer": "ok"}}
+    )
     assert (await flows.finished(run_id)).result == "result: 'ok'"
-    await _record(flows, "waited_open", run_id)
 
 
 ASKS = {"type": "object", "properties": {"size": {"type": "string"}}}
@@ -225,11 +230,10 @@ async def test_people_only(flows: Flows) -> None:
     run = await flows.row(run_id, lambda r: len(r.waiting_on) == 2)
     assert {w.prompt: w.people_only for w in run.waiting_on} == {"Open?": False, "People?": True}
     client = AgentClient(flows.client, f"flow-{run_id}")
-    await client.provide_callback_result(asked["Open?"], result={"answer": "ok"})
+    await client.provide_callback_result(asked["Open?"], result={"answer": {"answer": "ok"}})
     await _asked(flows, run_id, 1)
     await client.provide_callback_result(asked["People?"], result={"answer": {"size": "big"}})
     assert (await flows.finished(run_id)).result == "result: ['ok', 'big']"
-    await _record(flows, "people_only", run_id)
 
 
 @pytest.mark.parametrize("value", [1, None, "yes"])

@@ -38,6 +38,14 @@ describe('UnitPage (#7067)', () => {
     expect(inventoryMock.bodies.filter((b) => b.route === 'unitStatus').map((b) => b.body)).toEqual([{ status: 'retired', note: 'worn out' }])
   })
 
+  it('asks for a status when the unit has ended, as ended is not one a person picks (#8256)', async () => {
+    inventoryMock.units.find((u) => u.id === INVENTORY.NOZZLE_UNIT)!.status = 'ended'
+    render(INVENTORY.NOZZLE_UNIT)
+    await screen.findByRole('heading', { level: 1 })
+    expect(screen.getByRole('combobox', { name: 'New status' })).toHaveTextContent('Pick a status')
+    expect(screen.getByRole('button', { name: 'Change status' })).toBeDisabled()
+  })
+
   it('says when there is no such unit', async () => {
     render('ab710000-0000-4000-8000-0000000000ff')
     expect(await screen.findByRole('alert')).toHaveTextContent('No such unit')

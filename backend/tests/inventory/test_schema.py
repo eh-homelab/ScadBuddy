@@ -14,28 +14,35 @@ from tests.conftest import PgPool
 
 pytestmark = pytest.mark.requires_postgres
 
-#: id: (parent, tracking, uom, life_basis, saleable), as the plan's Task 1 table.
+#: id: (parent, tracking, uom, life_basis, saleable): the K1 tree (kinds.yaml), with
+#: `tracking` and `life_basis` derived from the class and `steps.life` (R-K1-6).
 BUILTIN_KINDS: dict[str, tuple[str | None, str, str, str, bool]] = {
-    "filament": (None, "filament", "g", "none", False),
-    "printer": (None, "unit", "each", "hours", False),
-    "part": (None, "lot", "each", "none", False),
-    "nozzle": ("part", "unit", "each", "hours", False),
-    "hotend": ("part", "unit", "each", "hours", False),
-    "belt": ("part", "unit", "each", "hours", False),
-    "build_plate": ("part", "unit", "each", "months", False),
-    "ams_part": ("part", "lot", "each", "none", False),
-    "hardware": ("part", "lot", "each", "none", False),
+    "service": (None, "none", "each", "none", False),
     "consumable": (None, "lot", "each", "none", False),
+    "durable": (None, "unit", "each", "none", False),
+    "filament": ("consumable", "filament", "g", "none", False),
+    "general_consumable": ("consumable", "lot", "each", "none", False),
     "desiccant": ("consumable", "lot", "g", "none", False),
     "packaging": ("consumable", "lot", "each", "none", False),
     "lubricant": ("consumable", "lot", "ml", "none", False),
-    "equipment": (None, "unit", "each", "months", False),
+    "hardware": ("consumable", "lot", "each", "none", False),
+    "ams_part": ("consumable", "lot", "each", "none", False),
+    "printed_part": ("consumable", "lot", "each", "none", True),
+    "assembly": ("consumable", "lot", "each", "none", True),
+    "printer": ("durable", "unit", "each", "hours", False),
+    "part": ("durable", "unit", "each", "none", False),
+    "nozzle": ("part", "unit", "each", "hours", False),
+    "hotend": ("part", "unit", "each", "hours", False),
+    "belt": ("part", "unit", "each", "hours", False),
+    "build_plate": ("part", "unit", "each", "none", False),
+    "spool_part": ("durable", "unit", "each", "none", False),
+    "equipment": ("durable", "unit", "each", "months", False),
     "dry_bin": ("equipment", "unit", "each", "months", False),
     "tool": ("equipment", "unit", "each", "months", False),
-    "printed_part": (None, "lot", "each", "none", True),
-    "assembly": (None, "lot", "each", "none", True),
-    "service": (None, "none", "each", "none", False),
-    "spool_part": (None, "unit", "each", "none", False),
+    "warranty": ("service", "none", "each", "none", False),
+    "service_plan": ("service", "none", "each", "none", False),
+    "labour": ("service", "none", "each", "none", False),
+    "flat_service": ("service", "none", "each", "none", False),
 }
 
 ACTOR = Jsonb({"kind": "user", "id": "test"})

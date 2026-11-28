@@ -10,7 +10,7 @@ import (
 )
 
 // This file is test support: it turns the proof's YAML into the model's types. No
-// production package imports it.
+// production package imports it (TestOnlyTestsImportModeldata).
 
 // ToSteps converts a layer's YAML steps.
 func ToSteps(in map[string]StepConf) model.Steps {
@@ -55,8 +55,10 @@ func Chain(m *Model, kindID string) (model.Chain, error) {
 			},
 			Steps:  ToSteps(k.Steps),
 			Schema: schema,
-			// seed is the YAML's "the migration seeds it".
-			Builtin: k.Seed,
+			// The K1 migration seeds each root, each seed: true kind and each phase 2
+			// built-in kind (was) with builtin = true (seeded_kinds); the others are kinds a
+			// person would add.
+			Builtin: k.Parent == "" || k.Seed || k.Was != nil,
 		})
 	}
 	for i, j := 0, len(out)-1; i < j; i, j = i+1, j-1 {

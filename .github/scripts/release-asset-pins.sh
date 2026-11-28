@@ -7,7 +7,8 @@
 # serves the pinned sha256. Weekly, from link-check.yml.
 #
 # Usage: release-asset-pins.sh [--resolve] [repo root]. With --resolve it fetches
-# nothing: it only checks that every pin is found in the files (the lint job runs it on
+# nothing: it only checks that every pin is found in the files, and that the workflows'
+# copies of the Temporal CLI pin equal the Dockerfile's (copies) (the lint job runs it on
 # each PR, so a renamed or re-indented pin fails there). GH_TOKEN, when set, is sent
 # with each API call. RELEASE_ASSET_CURL replaces curl (the test's stub).
 set -euo pipefail
@@ -106,5 +107,35 @@ check temporalio/cli "$(arg TEMPORAL_CLI_ASSET_ARM64)" \
 check kubernetes-sigs/kustomize "$(ci_env KUSTOMIZE_ASSET_ID)" \
   "$(ci_env KUSTOMIZE_SHA256)" "kustomize"
 check_temporal_download "$(arg TEMPORAL_CLI_VERSION)" "$(arg TEMPORAL_CLI_SHA256_AMD64)"
+
+# copies <name> <pinned value>: every `<name>: <value>` line in a workflow must hold the
+# pinned value. The workflows that install the amd64 Temporal CLI (ci.yml's agent and rust
+# jobs, go-module-ci.yml) copy the Dockerfile's version and sha256, which the check above
+# fetches; this keeps a partial bump from passing (#8513). It fetches nothing, so it runs
+# with --resolve too. It prints how many copies it found ("copies: <name> <n>"), which the
+# test checks for this repo, so a renamed key is not passed as no copies (#8536). The test
+# expects three copies of each ("three copies of $name in the repo" in
+# release-asset-pins.test.sh): a job that starts or stops installing the CLI changes that
+# number too (#8555).
+copies() {
+  local name="$1" want="$2" file line value found=0
+  for file in "$root"/.github/workflows/*.yml "$root"/.github/workflows/*.yaml; do
+    [[ -e "$file" ]] || continue
+    while IFS=: read -r line value; do
+      value="${value#"${value%%[! ]*}"}"
+      value="${value%"${value##*[! ]}"}"
+      value="${value#\"}"
+      value="${value%\"}"
+      found=$((found + 1))
+      if [[ "$value" != "$want" ]]; then
+        echo "::error file=${file#"$root"/},line=$line::$name is $value here, not the Dockerfile's $want"
+        failed=1
+      fi
+    done < <(grep -n "^ *$name:" "$file" | sed "s/^\([0-9]*\): *$name:/\1:/")
+  done
+  echo "copies: $name $found"
+}
+copies TEMPORAL_CLI_VERSION "$(arg TEMPORAL_CLI_VERSION)"
+copies TEMPORAL_CLI_SHA256 "$(arg TEMPORAL_CLI_SHA256_AMD64)"
 
 exit "$failed"

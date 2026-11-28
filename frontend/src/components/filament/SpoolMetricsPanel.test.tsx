@@ -15,6 +15,7 @@ const history = (values: Partial<SpoolHistory['metrics']> = {}, typeError: Spool
     prints: 3,
     grams_per_print: 40,
     wasted_g: 30,
+    non_print_waste_g: 0,
     cost_used: null,
     value_left: null,
     burn_g_per_day: 7,

@@ -137,10 +137,11 @@ func number(v Value) (float64, bool) {
 	return 0, false
 }
 
-// NotifyOnly says whether the kind is one only the agent NOTIFYs and the log never holds
+// NotifyOnly says whether the kind is one only the agent or scadbuddy-core NOTIFYs and the log never holds
 // (agent_changes/hub.py NOTIFY_ONLY): its change frame carries no id.
 func (e *Event) NotifyOnly() bool {
-	return !e.Opaque && (strings.HasPrefix(e.Kind, "session.") || e.Kind == "ai_operation.changed")
+	return !e.Opaque && (strings.HasPrefix(e.Kind, "session.") ||
+		e.Kind == "ai_operation.changed" || e.Kind == "inventory_operation.changed")
 }
 
 // Encoded is core/events.py encode_event of the event: a typed one as pydantic's
@@ -206,7 +207,12 @@ func (e *Event) Topics() []string {
 	case "task.changed":
 		topics := []string{"tasks", "task:" + t("task_id")}
 		if place := t("place"); place != "" {
+			// A task opened before #8062 kept its place as it was given (`l7`): its
+			// station listens on the folded one (`L-7`), as Python's topics_of says.
 			topics = append(topics, "tasks:"+place)
+			if folded := foldedPlace(place); folded != place {
+				topics = append(topics, "tasks:"+folded)
+			}
 		}
 		return topics
 	case "preview_slice.progress", "preview_slice.settled":
@@ -233,6 +239,46 @@ func (e *Event) Topics() []string {
 		return []string{"order:" + t("order_id")}
 	}
 	return nil
+}
+
+// OwnTopics is an opaque event's own topics field (the envelope's topics), nil for a typed
+// event or one with none. Python's socket sends no opaque event; core's sends one only of a
+// namespace it opts in (realtime, device.*).
+func (e *Event) OwnTopics() []string {
+	if !e.Opaque {
+		return nil
+	}
+	var out []string
+	if topics := e.raw.Get("topics"); topics != nil && topics.Kind == 'a' {
+		for _, t := range topics.Items {
+			if t.Kind == 's' {
+				out = append(out, t.Str)
+			}
+		}
+	}
+	return out
+}
+
+// OpaqueFrame is an opaque event's socket frame, as Frame writes a typed one: its kind and
+// id, and as data every field but id, at, kind, topics and retention_seconds, in the order
+// it was logged.
+func (e *Event) OpaqueFrame(topics []string) string {
+	data := Value{Kind: 'o', Keys: []string{}, Vals: []Value{}}
+	for i, k := range e.raw.Keys {
+		switch k {
+		case "id", "at", "kind", "topics", "retention_seconds":
+			continue
+		}
+		data.Keys, data.Vals = append(data.Keys, k), append(data.Vals, e.raw.Vals[i])
+	}
+	names := Value{Kind: 'a', Items: []Value{}}
+	for _, t := range topics {
+		names.Items = append(names.Items, Value{Kind: 's', Str: t})
+	}
+	frame := Value{Kind: 'o',
+		Keys: []string{"type", "id", "kind", "topics", "data"},
+		Vals: []Value{{Kind: 's', Str: "event"}, {Kind: 's', Str: e.ID}, {Kind: 's', Str: e.Kind}, names, data}}
+	return Dumps(frame, false, true)
 }
 
 // Frame is api/realtime.py event_frame, as the socket sends it (json.dumps, compact, no
@@ -405,4 +451,21 @@ func formatAt(t time.Time, zone string) string {
 		layout += ".000000"
 	}
 	return t.Format(layout) + zone
+}
+
+// placeCode is codes/parse.py's _CODE, on text trimmed and upper-cased as parse_code does.
+var placeCode = regexp.MustCompile(`^([A-Z])-?([0-9]{1,10})$`)
+
+// foldedPlace is tasks/models.py folded_place: a place that is a location's code (`l7`,
+// `L-07`) as `L-7`, and any other as it is.
+func foldedPlace(place string) string {
+	m := placeCode.FindStringSubmatch(strings.ToUpper(strings.TrimSpace(place)))
+	if m == nil || m[1] != "L" {
+		return place
+	}
+	n, err := strconv.Atoi(m[2])
+	if err != nil || n < 1 || n > math.MaxInt32 {
+		return place
+	}
+	return "L-" + strconv.Itoa(n)
 }

@@ -39,6 +39,8 @@ from scadbuddy.bambuddy.virtual_printers import (
 )
 from scadbuddy.core.problems import ApiError
 from scadbuddy.operations.component import OperationsDep
+from scadbuddy.orders.actor import current_actor
+from scadbuddy.orders.stock_start import WorkflowAccepted, accepted_response
 from scadbuddy.printers.address import UnsafeAddressError
 from scadbuddy.printers.ams_slots import SlotCommandSent, SlotConfigured
 from scadbuddy.printers.bambuddy_sync import (
@@ -60,7 +62,12 @@ from scadbuddy.printers.native import command_response
 from scadbuddy.printers.store import (
     BambuddyLinkTakenError,
     KekMissingError,
+    MergeChangedError,
+    MergeRunningError,
+    PrinterDeleteConflictError,
     PrinterNotFoundError,
+    PrinterPlaceNameClashError,
+    PrinterPlacesReferencedError,
     SerialTakenError,
     SerialUnknownError,
     VirtualPrinterRowError,
@@ -78,6 +85,8 @@ SERIAL_UNKNOWN = (
     "this printer's serial is not known (Bambuddy withheld it): create the printer"
     " with its serial and link Bambuddy to it"
 )
+#: The ``code`` of the 409 for a delete that met a concurrent write (#8177): try again.
+PRINTER_DELETE_CONFLICT = "printer_delete_conflict"
 
 
 class DiscoveredPrinter(BaseModel):
@@ -118,12 +127,24 @@ async def _call[T](work: Callable[[], T]) -> T:
         raise ApiError(status.HTTP_503_SERVICE_UNAVAILABLE, KEK_MISSING) from None
     except SerialUnknownError:
         raise ApiError(status.HTTP_422_UNPROCESSABLE_CONTENT, SERIAL_UNKNOWN) from None
+    except PrinterPlacesReferencedError as error:
+        raise ApiError(
+            status.HTTP_409_CONFLICT,
+            str(error),
+            references=[{"kind": kind, "id": str(ref)} for kind, ref in error.references],
+        ) from None
+    except PrinterPlaceNameClashError as error:
+        raise ApiError(status.HTTP_409_CONFLICT, str(error), place_id=str(error.place_id)) from None
+    except PrinterDeleteConflictError as error:
+        raise ApiError(status.HTTP_409_CONFLICT, str(error), code=PRINTER_DELETE_CONFLICT) from None
     except VirtualPrinterRowError as error:
         raise ApiError(
             status.HTTP_409_CONFLICT,
             f"printer {error.printer_id} is a Bambuddy virtual printer; it links no"
             " Bambuddy printer",
         ) from None
+    except MergeChangedError as error:
+        raise ApiError(status.HTTP_409_CONFLICT, f"{error}; try again") from None
 
 
 async def _bambuddy_printers(store: SettingsStoreDep) -> list[Printer]:
@@ -200,7 +221,7 @@ async def sync_bambuddy(
 ) -> PrinterSyncResult:
     settings = await asyncio.to_thread(store.load)
     async with client_for(settings) as client:
-        return await sync_printers(printers, client, dry_run=dry_run)
+        return await sync_printers(printers, client, by=current_actor(), dry_run=dry_run)
 
 
 # ── Bambuddy's virtual printers (#4747 item 4) ───────────────────────────────────────
@@ -435,7 +456,15 @@ async def patch_printer(printers: PrintersDep, printer_id: str, body: PrinterPat
     summary="Forget a printer",
     description=(
         "409 while it links a Bambuddy printer: the next read of what the printers are "
-        "doing would make it again, under a new id. Unlink Bambuddy first."
+        "doing would make it again, under a new id. Unlink Bambuddy first. Its places go "
+        "with it: each spool in one moves to no place, and each place under one moves to "
+        "the nearest place above the printer's root that is not the printer's. It moves to "
+        "the top level when the printer has no root, when nothing is above the root, or "
+        "when that place is archived. 409 when such a place would clash by name there "
+        "(`place_id`), or while a stock lot or unit points at one of its places "
+        "(`references`, each a `kind` and an `id`); 409 with `code` "
+        "`printer_delete_conflict` when another write changed its places at the same "
+        "time: try again. After a 409 the delete has changed nothing."
     ),
 )
 async def delete_printer(printers: PrintersDep, printer_id: str) -> Response:
@@ -462,12 +491,20 @@ async def delete_printer(printers: PrintersDep, printer_id: str) -> Response:
         "422 when Bambuddy reports a serial other than this row's. A row with no LAN link "
         "then gets one from Bambuddy's address and access code, through the LAN link's "
         "probe (#4747), when Bambuddy gives the code; a failure is the row's "
-        "`lan_sync_error`, never the link's."
+        "`lan_sync_error`, never the link's. A link that merges a row stock still names "
+        "moves that stock first (#6949 K1): 202 with its workflow when it takes longer than "
+        "15 s; it finishes by itself, and `printer.changed` brings the row."
     ),
+    responses={
+        202: {
+            "model": WorkflowAccepted,
+            "description": "The merge's workflow still runs; it finishes by itself.",
+        }
+    },
 )
 async def link_bambuddy(
     printers: PrintersDep, store: SettingsStoreDep, printer_id: str, body: BambuddyLink
-) -> PrinterRow:
+) -> PrinterRow | JSONResponse:
     row = await _call(lambda: printers.store.require(printer_id))
     async with client_for(await asyncio.to_thread(store.load)) as client:
         found = {printer.id: printer for printer in await client.printers()}
@@ -481,9 +518,13 @@ async def link_bambuddy(
                 status.HTTP_422_UNPROCESSABLE_CONTENT,
                 f"Bambuddy printer {printer.id} reports another serial than this printer's",
             )
-        linked = await _call(
-            lambda: printers.store.link_bambuddy(printer_id, body.bambuddy_printer_id)
-        )
+        by = current_actor()
+        try:
+            linked = await _call(
+                lambda: printers.store.link_bambuddy(printer_id, body.bambuddy_printer_id, by)
+            )
+        except MergeRunningError as running:
+            return accepted_response(running.accepted)
         printers.changed(printer_id)
         try:
             return await fill_lan_after_link(printers, client, linked, printer)

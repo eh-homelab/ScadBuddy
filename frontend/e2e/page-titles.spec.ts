@@ -35,7 +35,7 @@ const PAGES = [
   '/orders',
   // The profit report (#5329): its tab is "Profit by model · ScadBuddy".
   '/orders/profit',
-  // The old parts inventory (#5543) opens the Inventory on the Part kind (#7067).
+  // The old parts inventory (#5543) opens the Inventory on the Hardware kind (`PARTS_KIND`, #6949).
   '/orders/parts',
   '/orders/0e5a3c1e-1111-4222-8333-944455556661',
   '/customers',
@@ -52,6 +52,9 @@ const PAGES = [
   `/filament/spools/${spoolId(3)}`,
   '/filament/types',
   `/filament/types/${T.JADE}`,
+  '/filament/presets',
+  // A seeded preset's page (#7204): its tab is the preset's name.
+  '/filament/presets/3',
   '/filament/tags',
   // Purchasing (#6266): a seeded supplier and a seeded invoice, from
   // src/mocks/features/filamentPurchasingSeed.ts.
@@ -63,16 +66,23 @@ const PAGES = [
   // A place's page and a scanned code (#6955): the code opens the place, slot 1 of AMS-A.
   `/filament/locations/${L.AMS_A1}`,
   '/x/L-4',
+  // Flow task stations (#8062): the list of stations, and the Workshop's open tasks.
+  '/station',
+  `/station/${L.WORKSHOP}`,
   '/filament/catalog',
   '/filament/metrics',
   '/filament/shopping-list',
   '/filament/ledger',
   // Spool labels (#6264): with no spools chosen; the route check below reads paths, not queries.
   '/filament/labels',
+  // The swap wizard (#7168): without Web NFC it keeps the QR code and the pick by hand.
+  '/filament/swap',
   // The phone page that reads tags (#7273, the hand-held Scan mode): without Web NFC it shows
   // how to open it on a phone. `/filament/scan`, its old address, redirects to it.
   '/scan',
   '/filament/scan',
+  // Paired phones (#7905), with the mock's two devices (src/mocks/features/devices.ts).
+  '/devices',
   // The Inventory area (#7067), with the mock's seeded items (src/mocks/features/inventorySeed.ts).
   '/inventory',
   '/inventory/kinds',
@@ -107,9 +117,9 @@ test('/prints/queue/260 is the queue item, not a print', async ({ page }) => {
   await expect(page).toHaveTitle(waiting('Bracket.gcode.3mf · ScadBuddy'))
 })
 
-test('/orders/parts opens the Inventory on the Part kind, not an order (#7067)', async ({ page }) => {
+test('/orders/parts opens the Inventory on the Hardware kind, not an order (#7067, #6949)', async ({ page }) => {
   await page.goto('/orders/parts')
-  await expect(page).toHaveURL(/\/inventory\?kind=part$/)
+  await expect(page).toHaveURL(/\/inventory\?kind=hardware$/)
   await expect(page).toHaveTitle(waiting('Inventory · ScadBuddy'))
 })
 

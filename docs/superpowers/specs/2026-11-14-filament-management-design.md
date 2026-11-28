@@ -268,6 +268,10 @@ The builder decides whether to migrate its rows into types or keep a view.
 
 ### 5.3 Spool instance (a physical spool)
 
+As built in #7143: a loaded tray that no spool holds gets a row in `filament_unknown_trays`, and
+a spool is made at once for a tray with an RFID key. See
+[unknown-spool-flow](2026-11-23-unknown-spool-flow-design.md) "As built (#7143)".
+
 `spools`:
 - `id` (uuid, the fixed SB identity), short human number for labels
 - `spool_type_id`, nullable. A spool with no type is in the **needs type**

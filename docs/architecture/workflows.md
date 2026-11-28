@@ -17,11 +17,13 @@ Queue names are settings (`scadbuddy/core/config.py:40`, `scadbuddy/core/setting
 
 | Queue | Served by | Workflows |
 |---|---|---|
-| `render` | render worker, `python -m scadbuddy.worker` (`scadbuddy/worker.py:1081`) | `RenderPiece`, `RenderPreview`, `TemplatePipeline`, `MigrateInputs` (`scadbuddy/workflows/client.py:143`) |
-| `bambuddy` | print worker, `--queue bambuddy` (`scadbuddy/worker.py:1521`) | `PrintRun`, `PrintLanSequence`, `Operation` (bambuddy kinds), `FollowPrint`, `PrinterWatch`, `LanAutoImport`, `FilamentBbSync`, `FilamentBbPull`, `SensorNotifyPass`, `LanCommand` (a printer's K-profile and AMS commands over its LAN link, #7276; started and awaited by the API, `scadbuddy/workflows/lan_command.py`) (`scadbuddy/workflows/client.py:202-224`) |
+| `render` | render worker, `python -m scadbuddy.worker` (`scadbuddy/worker.py:1075`) | `RenderPiece`, `RenderPreview`, `TemplatePipeline`, `MigrateInputs` (`scadbuddy/workflows/client.py:143`) |
+| `bambuddy` | print worker, `--queue bambuddy` (`scadbuddy/worker.py:1511`) | `PrintRun`, `PrintLanSequence`, `Operation` (bambuddy kinds), `FollowPrint`, `PrinterWatch`, `LanAutoImport`, `FilamentBbSync`, `FilamentBbPull`, `SensorNotifyPass`, `LanCommand` (a printer's K-profile and AMS commands over its LAN link, #7276; started and awaited by the API, `scadbuddy/workflows/lan_command.py`) (`scadbuddy/workflows/client.py:202-224`) |
 | `bambuddy-follow` | print worker | activities only: `follow_print`, `printer_watch` (`scadbuddy/workflows/client.py:229-250`) |
-| `library` | the API process (`scadbuddy/main.py:1899-1989`) | `Housekeeping`, `PreviewBackfill`, `Operation` (library kinds), `FlowTriggerFire`, `StoreMigration`, `LibraryCopy`, `SliceWorkflow`, `SpoolRefresh`, `StagedFile`, `PrepareListing`, `AttemptMedia` (`scadbuddy/main.py:1832-1842`) |
-| `projects` | projects worker, `--queue projects` (`scadbuddy/worker.py:1607`) | `ProjectWorkflow` (flow runs), `Operation` (flow kinds) (`scadbuddy/workflows/projects_worker.py:81-110`) |
+| `library` | the API process (`scadbuddy/main.py:1899-1989`) | `Housekeeping`, `PreviewBackfill`, `Operation` (library kinds), `FlowTriggerFire`, `StoreMigration`, `LibraryCopy`, `SliceWorkflow`, `SpoolRefresh`, `StagedFile`, `PrepareListing`, `AttemptMedia` (`scadbuddy/main.py:1832-1842`), `FulfilOrderItem`, `RecostLot`, `MergePrinter` (the stock workflows, #6949 K1, `scadbuddy/workflows/order_stock.py`); also the activities `filament_preset_copy`, `filament_preset_edit` and `filament_preset_mirror_again` (#7204, `scadbuddy/filament/preset_writes.py`) and `filament_resolve_unknown_tray` (#7143, `scadbuddy/filament/unknown_resolve.py`), each the one step of a run of core's `LibraryRun` |
+| `filament-presets` | scadbuddy-core, the Go worker, when `SCADBUDDY_TEMPORAL_ADDRESS` is set and `SCADBUDDY_CORE_AREAS` names `filament-presets` or `unknown-trays` (`tools/go/core/main.go`; queue `SCADBUDDY_TEMPORAL_TASK_QUEUE_FILAMENT_PRESETS`) | `LibraryRun` (#7204, #8489, `tools/go/core/internal/libraryrun`; `FilamentPresetWrite` until #8489): one run per preset write or unknown-tray resolve, started by core's routes; its one activity runs on `library`, one attempt, and the run closes when the route stops waiting |
+| `inventory` | scadbuddy-core, the Go worker (`tools/go/core/internal/inventory/activities`) | no workflow of its own: the 19 activities `inventory.<Name>`, started by the API as standalone activities (id `inventory.<Name>:<scoped key>`) and run as workflow steps of the stock workflows (activity id = the key, `scadbuddy/workflows/order_stock.py`) (#6949 K1) |
+| `projects` | projects worker, `--queue projects` (`scadbuddy/worker.py:1597`) | `ProjectWorkflow` (flow runs), `Operation` (flow kinds) (`scadbuddy/workflows/projects_worker.py:81-110`) |
 | `slicer` | the Rust slicer (`workers/rust/bins/scadbuddy-slicer/src/main.rs:103-107`) | activity `slice_plate` only (`workers/rust/crates/sb-slicer/src/activity.rs:22-23`) |
 | `profile-fetch` | profile-fetch worker, `python -m scadbuddy.profile_fetch` (`scadbuddy/profile_fetch/worker.py:92`) | `ProfileFetch`, started by the API per run (`scadbuddy/profile_fetch/workflow.py:126`); `TdfpSearch` and `TdfpCreate`, started by the API per 3DFP search or add and awaited (#7025, `scadbuddy/filament/tdfp.py`) |
 | `profile-fetch-search` | the same process, a second worker (`scadbuddy/profile_fetch/worker.py:102`) | no workflow: a `TdfpSearch`'s activity only, so a search never waits for a preset fetch's export (#7062, `workflow.search_queue`) |
@@ -35,10 +37,13 @@ In development (`SCADBUDDY_TEMPORAL_WORKER_INPROCESS`), the API also serves `ren
 
 Versioned deployments: `scadbuddy-library`, `scadbuddy-render`, `scadbuddy-projects`
 (`scadbuddy/workflows/client.py:63-68`), `scadbuddy-print` for the print worker given a
-build id (`scadbuddy/workflows/client.py:256-265`, `scadbuddy/worker.py:1557-1581`) and the
+build id (`scadbuddy/workflows/client.py:256-265`, `scadbuddy/worker.py:1543-1567`) and the
 agent's `scadbuddy-agent`. Unversioned: the API's in-process print worker in development
-(`scadbuddy/main.py:1703-1791`) and the slicer
-(`workers/rust/bins/scadbuddy-slicer/src/lib.rs:1-2`).
+(`scadbuddy/main.py:1703-1791`), the slicer
+(`workers/rust/bins/scadbuddy-slicer/src/lib.rs:1-2`) and core's `inventory` and
+`filament-presets` workers (`tools/go/core/main.go`). A `LibraryRun` run is not
+versioned either, so the activity task it puts on the versioned `library` queue carries no
+version (`tools/go/core/README.md`, "The preset writes").
 
 ## Operations: one shape for writes
 
@@ -272,9 +277,10 @@ output, queue a print, arrange. `tool(...)` and `agent_session(...)` go to the a
 `agent-tools` queue. Triggers start `FlowTriggerFire` (`scadbuddy/workflows/flow_triggers.py:55`)
 from a Temporal Schedule or a bus event (`scadbuddy/flow_triggers/events.py:166-196`).
 
-A script's question to a person is a harness callback tool. `wait_for_human` waits on
-`human_answer_open` and `prompt` on `task_answer` (`flow_tools.py`), both with no default
-limit. A prompt also has a row in `tasks`, which the activities `flow_task_open`,
+A script's question to a person is a harness callback tool. `prompt`, and since #8062
+`wait_for_human` (`HUMAN_PROMPT_PATCH`), wait on `task_answer` (`flow_tools.py`), with no
+default limit; a `wait_for_human` from before replays on `human_answer_open` or
+`human_answer`. Such a question also has a row in `tasks`, which the activities `flow_task_open`,
 `flow_task_answered` and `flow_task_close` write through the API
 (`scadbuddy/workflows/flow_activities.py` `FlowTaskActivities`). The answers are the
 operation kinds `flow_answer` and `task_answer` on `projects`, and `flow_agent_answer` for an
@@ -282,14 +288,26 @@ assistant that the setting `flow_answerers` or the run's grant admits (#7471;
 `scadbuddy/flows/operations.py` `flow_kinds`). A grant-admitted answer is recorded only
 while the grant chain is in force (`FlowStore.record_decision`, 409 `grant_lapsed` over the
 CRUD route).
+A prompt's scan fields that name `expects` also put `kind:<kind>` and `code:<CODE>` entries in
+the task's `expects` column (`scadbuddy/tasks/widgets.py` `expects_entries`), which
+`GET /tasks?code=` reads, and the task keeps its `assignee`. A change of what `prompt` or
+`wait_for_human` checks or opens is a Temporal patch, because a refusal there schedules
+nothing and a replayed run must refuse as it did. `HUMAN_PROMPT_PATCH` gates the task of a
+`wait_for_human`, and `PROMPT_WIDGETS_PATCH` (a patch id per call) gates the widget keys
+and the checked context blocks of a `prompt`: a call from before replays with the rules it
+was checked by (`scadbuddy/tasks/models.py` `BEFORE_WIDGETS`). The open activity and the CRUD
+route that opens the task check by the same rules: a call under `PROMPT_WIDGETS_PATCH` puts
+`widgets: true` in the activity's input, which the client sends on
+(`backend/scadbuddy/api/crud_tasks.py` `OpenWrite`). A task without it, from an older call or
+from a worker from before #8062 during a rollout, is checked by the rules from before.
 See [features/flows.md](../features/flows.md#questions-to-a-person).
 
 ## Housekeeping
 
-`Housekeeping` (`scadbuddy/workflows/housekeeping.py:469`) runs on Schedules the API
-creates (`_set_up_housekeeping`, `scadbuddy/main.py:2038`) and calls the sweeps: printer watches, native
+`Housekeeping` (`scadbuddy/workflows/housekeeping.py:541`) runs on Schedules the API
+creates (`_set_up_housekeeping`, `scadbuddy/main.py:2469`) and calls the sweeps: printer watches, native
 copies, print auto-import, quote holds, payment closes and captures, bank deposits,
-storefront drafts and mail, published listings with no price, git remote pushes, blob sweeps (the sweep names start at `scadbuddy/workflows/housekeeping.py:142`).
+storefront drafts and mail, published listings with no price, git remote pushes, blob sweeps (the sweep names start at `scadbuddy/workflows/housekeeping.py:85`).
 
 ## Tests
 

@@ -83,11 +83,68 @@ def _open(conn: Conn, where: str, params: dict[str, Any]) -> list[OpenUse]:
     ]
 
 
+def _run_prefix(run_id: str) -> str:
+    """The ``LIKE`` pattern of the run's ``ref_id``s (``run/subtask/slot``), the run id
+    escaped."""
+    escaped = run_id.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+    return f"{escaped}/%"
+
+
 def open_for_run(conn: Conn, run_id: str) -> list[OpenUse]:
     """The run's uses still open, by `filament_spool_events_print_ref`: a prefix match
     on ``ref_id`` (``run/subtask/slot``), the run id escaped."""
-    escaped = run_id.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
-    return _open(conn, "e.ref_id LIKE %(prefix)s", {"prefix": f"{escaped}/%"})
+    return _open(conn, "e.ref_id LIKE %(prefix)s", {"prefix": _run_prefix(run_id)})
+
+
+@dataclass(frozen=True)
+class RunUse:
+    """One slot's use of a LAN start of a run, as the ledger booked it (`run_uses`)."""
+
+    #: The start's ``subtask_name``.
+    subtask: str
+    #: The grams its ``print_ended`` took off the spool; ``None`` while the use is open.
+    grams: float | None
+    #: Whether the end booked the sliced grams (``data.basis`` ``sliced``). False for an
+    #: end that dropped the estimate (``not_applied``), and while the use is open.
+    applied: bool
+    #: When the end was booked; ``None`` while the use is open.
+    ended_at: datetime | None
+    #: Whether a printer report booked the end, at the report that showed the plate end
+    #: (``data.ended`` ``report``), not the run's settle at the clock.
+    timed: bool
+
+
+def run_uses(conn: Conn, run_id: str) -> list[RunUse]:
+    """Each use the LAN starts of ``run_id`` booked (one per start and slot, #8282), and
+    its ``print_ended`` when it has one: what an order attempt reads as ScadBuddy's own
+    record of the run's grams and plate ends (`orders/archives.py` `lan_facts`). Found by
+    `filament_spool_events_print_ref`, as `open_for_run` finds them."""
+    rows = conn.execute(
+        "SELECT s.ref_id, d.delta_g, d.at, d.data ->> 'basis' AS basis,"
+        " d.data ->> 'ended' AS ended"
+        " FROM filament_spool_events s LEFT JOIN LATERAL (SELECT e.delta_g, e.at, e.data"
+        "  FROM filament_spool_events e WHERE e.spool_id = s.spool_id AND e.kind = %(ended)s"
+        "  AND e.ref_kind = s.ref_kind AND e.ref_id = s.ref_id ORDER BY e.at LIMIT 1) d ON true"
+        " WHERE s.kind = %(started)s AND s.ref_kind = %(kind)s AND s.ref_id LIKE %(prefix)s"
+        " ORDER BY s.ref_id",
+        {
+            "started": ledger.PRINT_STARTED,
+            "ended": ledger.PRINT_ENDED,
+            "kind": ledger.PRINT_RUN,
+            "prefix": _run_prefix(run_id),
+        },
+    ).fetchall()
+    skip = len(run_id) + 1
+    return [
+        RunUse(
+            subtask=row["ref_id"][skip:].rsplit("/", 1)[0],
+            grams=None if row["at"] is None else -(row["delta_g"] or 0.0),
+            applied=row["basis"] == "sliced",
+            ended_at=row["at"],
+            timed=row["ended"] == "report",
+        )
+        for row in rows
+    ]
 
 
 def open_for_job(conn: Conn, printer_id: str, job: str) -> list[OpenUse]:

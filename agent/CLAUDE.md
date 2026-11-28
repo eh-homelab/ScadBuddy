@@ -397,6 +397,14 @@ opens every one and seals it again byte for byte).
   per tool, projected in-process for the harness and over `/mcp` (`src/mcp/http.ts`,
   auth in `src/auth/`); every `/api/v1` operation needs a tool or a
   `src/tools/coverage.ts` entry, or `test/coverage.test.ts` fails.
+  - Unknown spools (#7143): `filament_unknown_trays` (read: the loaded trays no spool holds, with
+    ranked candidates and `made_from_tags`) and `filament_unknown_tray_resolve` (write, linked as a
+    `spool`; it takes `seen_at` as listed and the user's own choice, never a candidate the agent picks)
+    are in `src/tools/filament.ts`. They call the Go routes through `src/api/unknownTrays.ts`, whose
+    types are written by hand, because `pnpm gen:api` exports Python's OpenAPI only. There is no
+    dismiss tool (D10). The resolve tool's errors name the Go route's code (`resolveOk`: only a code
+    of `RESOLVE_CODES`, #8489), and a 404 with no code says the area `unknown-trays` is off.
+    Tests: `test/filament.test.ts`.
   - Data: the agent has no database ("Database access" above); the API owns the `ai_*`
     tables and applies their migrations (#5299 D6). The tests make their schemas with
     `test/support/migrations.ts` (`test/support/postgres.ts` `migrateSchema`), and
@@ -443,7 +451,8 @@ opens every one and seals it again byte for byte).
     replays. Temporal tests (`test/*temporal*.test.ts`)
     skip unless `SCADBUDDY_TEST_TEMPORAL_DEV_SERVER` names a Temporal CLI (or
     `temporal` is on `PATH`); the `agent` CI job installs the Dockerfile's pinned one.
-    The `@temporalio/*` packages are pinned exactly, all one version.
+    The `@temporalio/*` packages take a `^` range on the newest release and lock to one
+    version; Dependabot's `temporal` group moves them together.
   - The tool-call gate (#1056 phase 5b, spec 2026-10-01 §6.6, plan
     `docs/superpowers/plans/2026-10-08-durable-phase-5b-tool-call-gate.md`) is
     `src/gate/`: request ids (`ids.ts`: `approval:`, `question:`, `durable:<session>:<run>:<tool_use_id>`),
@@ -587,12 +596,28 @@ opens every one and seals it again byte for byte).
     an ended one is answered with no plugin, binding or contact; one with no outcome is sent
     again only when the binding maps `idempotency_key`, with the row's own recipients and text,
     and needs the binding (none is `no_messaging_plugin`) but no contact.
-  - The inventory (#7067, `docs/features/inventory.md`): `tools/inventory.ts`, 18 `inventory_*` tools
-    (kinds, items, offers and price points, lots, units, moves), `read` for the lists and gets and
-    `write` for the rest, `inventory_lot_recost` included (Ruling 8); each answer carries `ui_path`
+  - Filament presets (#7204): `filament_preset_list`, `filament_preset_get` and `filament_preset_diff` (all `read`),
+    and `filament_preset_copy`, `filament_preset_update` and `filament_preset_mirror` (`outward`; a stale edit is `version_moved`, which `presetOk` answers with the current version)
+    in `tools/filament.ts`. They call Go core's routes under `/api/v1/filament/presets`
+    (`tools/go/core/internal/filamentpresets`), which Python does not serve, so each has
+    `routes: []`. `filament_preset_copy` and `filament_preset_update` send an `Idempotency-Key`
+    (`idempotencyKey(ctx)`, so a repeat of one call gets the first answer; core answers 428 with none);
+    `filament_preset_mirror` needs none. Each is outward, so a person approves it first, and each
+    writes Bambuddy as well through the mirror while the setting `filament_preset_mirror` is on.
+    The codes are core's: 409 `not_manual`, `version_moved` (with `current_version`),
+    `document_missing`, `mirror_off`, `not_configured`, `instance_changed` and `not_mirrored`;
+    422 `key_refused`, `invalid_input` and `idempotency_key_reused`; 404 `preset_not_found`;
+    503 `writes_not_configured` (core has no Temporal address) and `preset_write_pending` (the
+    write may still run: the descriptions say to read the presets before a repeat). Only a
+    `manual` preset can be updated. A 404 with no `code` means core does not serve the area yet. `presetOk` then
+    throws a `ToolError` that names the area `filament-presets`. Tests: `test/filament.test.ts`
+    and the wire fixture `test-fixtures/filament/preset-wire.json`.
+  - The inventory (#7067, `docs/features/inventory.md`): `tools/inventory.ts`, 19 `inventory_*` tools
+    (kinds, items, offers and price points, lots, units, moves, and `inventory_operation_get`, which reads a write that answered 202), `read` for the lists and gets and
+    `write` for the rest, `inventory_lot_recost` included (Ruling 8); each answer but that one's carries `ui_path`
     from `tools/inventoryLinks.ts`, whose vectors `test-fixtures/inventory/ui-paths.json` the frontend's
-    `lib/inventoryLinks.ts` shares. `part_list` and `part_stock_add` (`tools/orders.ts`) are aliases of
-    `inventory_item_list` and `inventory_lot_receive`, and go after one release. Tests:
+    `lib/inventoryLinks.ts` shares. `part_list` (`tools/orders.ts`) lists an order's parts only; the old stock tool is gone
+    (#6949, K1 5/7): `inventory_lot_receive` receives the stock, and `inventory_item_list` with `kind=hardware` or `kind=ams_part` lists every part. Tests:
     `test/inventory.test.ts`, `test/inventoryLinks.test.ts`.
   - The storefront (#6131, design 2026-11-13 §6): `tools/storefront.ts`
     `storefront_listing_draft` (`write`: a listing from an output or a model, unpublished,

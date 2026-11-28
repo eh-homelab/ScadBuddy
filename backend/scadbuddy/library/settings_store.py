@@ -104,6 +104,7 @@ from scadbuddy.core.settings import (
 )
 from scadbuddy.core.settings_cache import SETTINGS_CACHE_TTL, SettingsCache
 from scadbuddy.filament.label_output import LabelOutput
+from scadbuddy.filament.label_printing import LabelJobOptions, server_url
 from scadbuddy.filament.label_templates import LabelTemplateChoice
 from scadbuddy.flows.answerers import MAX_ANSWERERS, AnswererRule
 from scadbuddy.library.asset_fetch import DEFAULT_ASSET_FETCH_DOMAINS, normalise_domain
@@ -152,8 +153,10 @@ S3_FIELDS = (
     "store_s3_secret_access_key",
     "store_s3_path_style",
 )
-#: The fields a render worker reads (spec §9): the store and the key it uses. The full
-#: key only when no render key is stored, as the fallback.
+#: The store's fields (spec §9), read through the `render_settings` view: by the API,
+#: and by a render worker through the API's CRUD route, which answers no Bambuddy key
+#: (`api/crud_render.py` `withheld`, #7882). The full key only when no render key is
+#: stored: the API's read of the Bambuddy store, a store migration's source.
 RENDER_FIELDS = (
     "store_backend",
     "bambuddy_url",
@@ -272,6 +275,9 @@ RECOVER_BAMBUDDY_LIBRARY_SQL = (
 )
 BAMBUDDY_NOT_READY = (
     "the Bambuddy store needs a Bambuddy URL and a library folder (its inbox) saved first"
+)
+BAMBUDDY_KEY_NOT_READY = (
+    "the Bambuddy store is read with the Bambuddy API key: save it first (Settings, Bambuddy)"
 )
 
 
@@ -503,6 +509,11 @@ class StoredSettings(BambuddyIds):
     #: How far back the activity sweep looks for rows its sources wrote and it missed.
     #: ``None``: 1 day.
     activity_repair_window_seconds: float | None = None
+    #: #8539: how many days an expired or revoked service credential's row is kept.
+    #: ``None``: the defaults, a day for an exchanged one and 30 days for a sealed one
+    #: (`auth/service_credentials.py` `EXCHANGE_RETENTION`, `LIFETIME`); ``0`` keeps
+    #: every one. Stored only: the auth sweep reads it.
+    service_credential_retention_days: int | None = None
     #: The principals whose activity the assistant follows. ``None``: ``["browser"]``.
     activity_follow: list[str] | None = None
     #: The domains `POST /models/{slug}/assets/fetch` may fetch from (#844), each with
@@ -547,6 +558,14 @@ class StoredSettings(BambuddyIds):
     #: #7216: the labels file's format, its PNG dpi and the spool label's fields
     #: (R-7216-8). ``None``: `LabelOutput()`, a PDF. Stored only.
     filament_label_output: LabelOutput | None = None
+    #: #7170: the CUPS server's URL, the queue the Labels page printed to last and its job
+    #: options. ``None``: `label_printing.DEFAULT_SERVER_URL`, no queue and
+    #: `LabelJobOptions()`. Stored only: Go's `internal/labelprint` reads
+    #: `filament_label_server_url` by name; the Labels page reads and saves the queue and
+    #: the job options.
+    filament_label_server_url: str | None = None
+    filament_label_queue: str | None = None
+    filament_label_job_options: LabelJobOptions | None = None
 
     # -- the shop's money rules (#5281), stored only: no environment seeds them --------
     #: The deposit policy's rules; ``None`` asks no deposit.
@@ -793,14 +812,11 @@ class StoredSettings(BambuddyIds):
             return DEFAULT_ASSET_FETCH_DOMAINS
         return tuple(self.asset_fetch_domains)
 
-    def render_bambuddy_key(self) -> tuple[str | None, bool]:
-        """The key the API's own render store uses, and whether it is the full key by
-        fallback. With no key at all there is nothing to fall back to: ``(None, False)``,
-        as the view's ``render_key_fallback``. A standalone render worker never gets the
-        full key: the CRUD route withholds it (`api/crud_render.py` `withheld`, #5298)."""
-        if self.bambuddy_render_api_key:
-            return self.bambuddy_render_api_key, False
-        return self.bambuddy_api_key, self.bambuddy_api_key is not None
+    def render_bambuddy_key(self) -> str | None:
+        """The key the API reads the Bambuddy store with, as a store migration's source:
+        the render key, else the full key. A render worker never gets either: the CRUD
+        route withholds them (`api/crud_render.py` `withheld`, #7882)."""
+        return self.bambuddy_render_api_key or self.bambuddy_api_key
 
     def s3_settings(self) -> S3Settings | None:
         """The S3 store's connection, or ``None`` until it has all it needs."""
@@ -846,6 +862,9 @@ class SettingsPatch(BaseModel):
     )
     activity_ttl_seconds: float | None = Field(default=None, ge=86400, le=RETENTION_MAX_SECONDS)
     activity_repair_window_seconds: float | None = Field(default=None, ge=600, le=7 * 86400)
+    #: #8539: days an ended service credential's row is kept, 0 (every one) to ten years;
+    #: ``null`` puts back the defaults (a day exchanged, 30 days sealed).
+    service_credential_retention_days: int | None = Field(default=None, ge=0, le=3650)
     activity_follow: list[Annotated[str, StringConstraints(max_length=256)]] | None = Field(
         default=None, max_length=50
     )
@@ -885,6 +904,11 @@ class SettingsPatch(BaseModel):
     filament_label_template: LabelTemplateChoice | None = None
     #: #7216: the labels output; ``null`` puts back a PDF at 300 dpi.
     filament_label_output: LabelOutput | None = None
+    #: #7170: the label print settings; ``null`` puts back the default server, no queue and
+    #: the default job options. Only a person changes the server.
+    filament_label_server_url: str | None = None
+    filament_label_queue: str | None = Field(default=None, pattern=r"^[A-Za-z0-9_-]{1,127}$")
+    filament_label_job_options: LabelJobOptions | None = None
 
     # -- the shop's money rules (#5281), stored only; only the user sets them ----------
     #: ``null`` asks no deposit.
@@ -1050,6 +1074,11 @@ class SettingsPatch(BaseModel):
         if domains is None:
             return None
         return list(dict.fromkeys(normalise_domain(domain) for domain in domains))
+
+    @field_validator("filament_label_server_url")
+    @classmethod
+    def _server_url(cls, url: str | None) -> str | None:
+        return None if url is None else server_url(url)
 
     @field_validator("flow_answerers")
     @classmethod
@@ -1498,12 +1527,12 @@ class SettingsStore:
     def _check_store_ready(
         self, conn: Connection[DictRow], changes: dict[str, Any], reset: list[str]
     ) -> None:
-        """The merged result, not the patch: clearing the URL or the inbox while on the
-        Bambuddy store would leave a store the next start refuses (`build_store`). A
-        reset name is part of it: its row goes, and the value is the deployment's.
+        """The merged result, not the patch: clearing an S3 key while on the S3 store
+        would leave a store the next start refuses (`build_store`). A reset name is part
+        of it: its row goes, and the value is the deployment's.
 
         Read under `STORE_READINESS_LOCK`, in the write's own transaction: two saves each
-        safe alone (one clears the URL, one switches to Bambuddy) serialize, and the
+        safe alone (one clears an S3 key, one switches to S3) serialize, and the
         second sees the first. A row lock would not do: a value that follows the
         environment has no row to lock. The storefront mail's user and TLS mode are
         checked the same way (`MAIL_LOGIN_TLS`)."""
@@ -1954,11 +1983,9 @@ class RenderStoreSettings(BaseModel):
 
     store_backend: StoreBackend = "local"
     bambuddy_url: str | None = None
+    #: The render key, else the full key: the API's own read only. The CRUD route's
+    #: answer to a render worker holds none (`api/crud_render.py` `withheld`, #7882).
     api_key: str | None = Field(default=None, repr=False)
-    #: True when no render key is stored but the full key is: the API's own read then
-    #: holds the full key in `api_key`; the CRUD route's answer to a render worker holds
-    #: none (`api/crud_render.py` `withheld`).
-    key_is_fallback: bool = False
     library_folder_id: int | None = None
     s3: S3Settings | None = None
     #: The per-job colour slots in effect: the Settings page's, else the environment's;
@@ -1972,8 +1999,7 @@ def load_render_store_settings(
     """Read only `RENDER_FIELDS`: a worker holds no settings store (spec §9). Through
     the `render_settings` view, all of the settings a render worker gets (#601), from
     the API's CRUD route (#5298). The full key is in it only while no render key is
-    stored, and the route withholds it from the worker then (`api/crud_render.py`
-    `withheld`)."""
+    stored; the route withholds both from the worker (`api/crud_render.py` `withheld`)."""
     kek = settings_kek(defaults.secret_key_file)
     with pool.connection() as conn:
         rows = conn.execute(
@@ -1986,12 +2012,10 @@ def load_render_store_settings(
     # A JSON null is a field cleared in Settings: it beats the environment's seed.
     values.update(_opened(kek, {row["name"]: row["value"] for row in rows}))
     stored = StoredSettings.model_validate(values)
-    key, fallback = stored.render_bambuddy_key()
     return RenderStoreSettings(
         store_backend=stored.store_backend,
         bambuddy_url=stored.bambuddy_url,
-        api_key=key,
-        key_is_fallback=fallback,
+        api_key=stored.render_bambuddy_key(),
         library_folder_id=stored.library_folder_id,
         s3=stored.s3_settings(),
         solid_concurrency=_solid_concurrency(values, defaults),

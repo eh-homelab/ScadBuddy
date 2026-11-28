@@ -54,10 +54,9 @@ SETTING_DOCS: Final[Mapping[str, SettingDoc]] = MappingProxyType(
         ),
         "bambuddy_render_api_key": SettingDoc(
             "Render worker API key",
-            "A second key with Manage Library only. Render workers run template code and"
-            " hold this key alone. Unset, standalone render workers get no Bambuddy key, and"
-            " a render inside the API process uses the full key, so template code could"
-            " print.",
+            "A second key with Manage Library only, which a store migration from the"
+            " Bambuddy store reads Bambuddy's library with. Unset, it uses the full key."
+            " Render workers get neither key.",
         ),
         "public_url": SettingDoc(
             "ScadBuddy’s own URL",
@@ -395,6 +394,12 @@ SETTING_DOCS: Final[Mapping[str, SettingDoc]] = MappingProxyType(
             "How far back the activity sweep looks for rows it missed. 600 to 604800. Empty"
             " is the default, one day.",
         ),
+        "service_credential_retention_days": SettingDoc(
+            "Keep ended service credentials for (days)",
+            "How long Service credentials keeps a credential after it expired or was revoked."
+            " 1 to 3650 days, or 0 to keep every one. Empty is the default: a day for the"
+            " 15-minute credentials the services exchange, 30 days for the agent's.",
+        ),
         "temporal_ui_url": SettingDoc(
             "Temporal UI URL",
             "The Temporal web UI, where render workflows can be inspected. Empty shows no link.",
@@ -508,6 +513,22 @@ SETTING_DOCS: Final[Mapping[str, SettingDoc]] = MappingProxyType(
             " stays. Without the QR code, the text uses its space. Place labels always print"
             " their code, name and QR code. The Labels page saves the last format, dpi and"
             " fields.",
+        ),
+        "filament_label_server_url": SettingDoc(
+            "Label print server",
+            "The CUPS server that the Labels page prints to, as an http or https URL. The"
+            " default is the cluster's own server, http://cups.cups.svc:8631. Only a person's"
+            " session changes it.",
+        ),
+        "filament_label_queue": SettingDoc(
+            "Label queue",
+            "The CUPS queue that the Labels page printed to last. The Labels page saves it.",
+        ),
+        "filament_label_job_options": SettingDoc(
+            "Label print options",
+            "Thermal transfer or direct thermal, darkness and print speed for a Zebra ZPL"
+            " queue. Printer default leaves the printer's own setting. The Labels page saves"
+            " the last choice.",
         ),
         "filament_shopping_auto_add_empty": SettingDoc(
             "Add empty spools to the shopping list",
@@ -898,6 +919,10 @@ SETTING_DOCS: Final[Mapping[str, SettingDoc]] = MappingProxyType(
             "Profile fetch task queue",
             _TEMPORAL_QUEUE.format(what="the exports of a type's slicer profiles"),
         ),
+        "temporal_task_queue_inventory": SettingDoc(
+            "Inventory task queue",
+            _TEMPORAL_QUEUE.format(what="the inventory's writes (scadbuddy-core's worker)"),
+        ),
         "profile_fetch_nozzles": SettingDoc(
             "Nozzles to fetch from 3DFP",
             "The nozzle diameters that Fetch from 3DFP exports for each printer model: any"
@@ -956,6 +981,11 @@ SETTING_DOCS: Final[Mapping[str, SettingDoc]] = MappingProxyType(
             "API internal URL",
             "Where the workers reach the API inside the cluster. The API also makes the"
             " native slicer's transfer URLs under it.",
+        ),
+        "core_crud_url": SettingDoc(
+            "Core CRUD URL",
+            "Where the API reads the inventory from scadbuddy-core, in its own pod. Unset,"
+            " every inventory read answers that the inventory is unavailable.",
         ),
         "slicer_profiles_dir": SettingDoc(
             "Slicer profiles folder",

@@ -18,6 +18,7 @@ CrudCaller = Literal[
     "camera",
     "camera-relay",
     "fleet",
+    "inventory",
     "fleet-rotator",
 ]
 CRUD_HEADER = "X-ScadBuddy-Crud"

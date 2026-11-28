@@ -7,11 +7,15 @@ from typing import Any
 
 import httpx
 import pytest
+from prometheus_client import REGISTRY
 
 from scadbuddy.auth.service_credentials import ServiceAuth
 from scadbuddy.camera.follow import ChangeFollower
 from scadbuddy.camera.relay import (
     HOOK_URL,
+    SILENT_MAX,
+    SILENT_SECONDS,
+    SILENT_TICK,
     Relay,
     SourceError,
     rtsps_source,
@@ -49,6 +53,8 @@ class FakeApi:
         #: The next feed POSTs that the API refuses (422).
         self.feed_refusals = 0
         self.feed_posts = 0
+        #: The next GETs of one printer's source that answer 503.
+        self.source_failures = 0
 
     def handle(self, request: httpx.Request) -> httpx.Response:
         path = request.url.path.removeprefix(BASE)
@@ -70,6 +76,9 @@ class FakeApi:
                 self.lost_answers -= 1
                 raise httpx.ReadTimeout("answer lost", request=request)
             return httpx.Response(204, headers=CRUD)
+        if self.source_failures > 0:
+            self.source_failures -= 1
+            return httpx.Response(503, headers=CRUD, json={"detail": "down"})
         found = [s for s in self.sources if s.get("printer_id") == parts[2]]
         if not found:
             problem = {"detail": "This printer is not recorded.", "reason": "not_recorded"}
@@ -510,3 +519,226 @@ async def test_restart_of_a_printer_no_longer_recorded_only_removes() -> None:
     await subject.restart("p1")
     assert mtx.calls == [("delete", "p1")]
     assert mtx.paths == {}
+
+
+SAMPLE = "scadbuddy_camera_relay_silent_restarts_total"
+
+
+def restarts(mtx: FakeMtx, name: str) -> int:
+    return mtx.calls.count(("delete", name))
+
+
+async def test_a_ready_pull_with_no_bytes_is_restarted() -> None:
+    api = FakeApi([source("p1"), source("p2")])
+    mtx = FakeMtx()
+    subject = relay(api, mtx)
+    await subject.reconcile_all()
+    mtx.ready.update({"p1": True, "p2": True})
+    mtx.received.update({"p1": 100, "p2": 100})
+    mtx.calls.clear()
+    before = REGISTRY.get_sample_value(SAMPLE, {"printer": "p1"}) or 0.0
+    await subject.check_silence(0.0)
+    mtx.received["p2"] += 10
+    await subject.check_silence(SILENT_SECONDS - 1)
+    assert restarts(mtx, "p1") == 0
+    mtx.received["p2"] += 10
+    await subject.check_silence(SILENT_SECONDS)
+    # p1 is open and sends nothing: the relay dials it afresh. p2 still sends.
+    assert restarts(mtx, "p1") == 1
+    assert restarts(mtx, "p2") == 0
+    assert REGISTRY.get_sample_value(SAMPLE, {"printer": "p1"}) == before + 1
+    await subject.flushed()
+    assert api.states("p1")[-1] == "retrying"
+    await subject.aclose()
+
+
+async def test_a_pull_that_is_not_ready_is_left_to_mediamtx() -> None:
+    api = FakeApi([source("p1")])
+    mtx = FakeMtx()
+    subject = relay(api, mtx)
+    await subject.reconcile_all()
+    mtx.calls.clear()
+    for now in (0.0, SILENT_SECONDS, 10 * SILENT_SECONDS):
+        await subject.check_silence(now)
+    assert restarts(mtx, "p1") == 0
+    await subject.aclose()
+
+
+async def test_the_wait_doubles_while_the_source_stays_silent() -> None:
+    api = FakeApi([source("p1")])
+    mtx = FakeMtx()
+    subject = relay(api, mtx)
+    await subject.reconcile_all()
+    mtx.ready["p1"] = True
+    mtx.received["p1"] = 100
+    mtx.calls.clear()
+    now = 0.0
+
+    async def silent_for(seconds: float) -> None:
+        nonlocal now
+        await subject.check_silence(now)
+        await subject.check_silence(now + seconds - 1)
+        assert restarts(mtx, "p1") == count, f"restarted before {seconds} s"
+        now += seconds
+        await subject.check_silence(now)
+
+    count = 0
+    for wait in (SILENT_SECONDS, 2 * SILENT_SECONDS, 4 * SILENT_SECONDS):
+        await silent_for(wait)
+        count += 1
+        assert restarts(mtx, "p1") == count
+    # The wait stops growing at SILENT_MAX.
+    for _ in range(5):
+        await silent_for(min(2 ** (count) * SILENT_SECONDS, SILENT_MAX))
+        count += 1
+    assert restarts(mtx, "p1") == count
+    # Bytes again: the next silence waits SILENT_SECONDS once more.
+    await subject.check_silence(now)
+    mtx.received["p1"] += 1
+    now += 1
+    await subject.check_silence(now)
+    await silent_for(SILENT_SECONDS)
+    assert restarts(mtx, "p1") == count + 1
+    await subject.aclose()
+
+
+async def test_a_failed_silent_restart_puts_the_path_back_later() -> None:
+    api = FakeApi([source("p1"), source("p2")])
+    mtx = FakeMtx()
+    subject = relay(api, mtx)
+    await subject.reconcile_all()
+    mtx.ready.update({"p1": True, "p2": True})
+    mtx.received.update({"p1": 100, "p2": 100})
+    await subject.check_silence(0.0)
+    # The restart of p1 deletes its path, then its source read gets a 503.
+    api.source_failures = 1
+    await subject.check_silence(SILENT_SECONDS)
+    assert "p1" not in mtx.paths
+    # p2 is silent too, and still restarts.
+    assert restarts(mtx, "p2") == 1
+    assert "p2" in mtx.paths
+    # The API answers again: the next tick puts p1 back.
+    await subject.check_silence(SILENT_SECONDS + SILENT_TICK)
+    assert "p1" in mtx.paths
+    # A silent restart reports retrying, never stopped: the printer is still recorded.
+    await subject.flushed()
+    assert "stopped" not in api.states("p1")
+    assert "stopped" not in api.states("p2")
+    await subject.aclose()
+
+
+async def test_a_path_put_back_after_a_failed_restart_keeps_its_doubled_wait() -> None:
+    api = FakeApi([source("p1")])
+    mtx = FakeMtx()
+    subject = relay(api, mtx)
+    await subject.reconcile_all()
+    mtx.ready["p1"] = True
+    mtx.received["p1"] = 100
+    await subject.check_silence(0.0)
+    # The restart's source read fails, and so does the first try to put p1 back.
+    api.source_failures = 2
+    await subject.check_silence(SILENT_SECONDS)
+    await subject.check_silence(SILENT_SECONDS + SILENT_TICK)
+    assert "p1" not in mtx.paths
+    now = SILENT_SECONDS + 2 * SILENT_TICK
+    await subject.check_silence(now)  # puts p1 back
+    assert "p1" in mtx.paths
+    await subject.check_silence(now + SILENT_TICK)
+    before = restarts(mtx, "p1")
+    # Still silent: the next restart waits 2 * SILENT_SECONDS, not SILENT_SECONDS.
+    await subject.check_silence(now + SILENT_TICK + SILENT_SECONDS)
+    assert restarts(mtx, "p1") == before
+    await subject.check_silence(now + SILENT_TICK + 2 * SILENT_SECONDS)
+    assert restarts(mtx, "p1") == before + 1
+    await subject.aclose()
+
+
+async def test_a_lost_path_with_an_undialable_source_is_not_tried_each_tick(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    api = FakeApi([source("p1")])
+    mtx = FakeMtx()
+    subject = relay(api, mtx)
+    await subject.reconcile_all()
+    mtx.ready["p1"] = True
+    mtx.received["p1"] = 100
+    await subject.check_silence(0.0)
+    api.source_failures = 1
+    await subject.check_silence(SILENT_SECONDS)
+    # The source now names a host off the LAN: reconcile refuses it once, then stops.
+    api.sources = [source("p1", host="8.8.8.8")]
+    for tick in range(1, 4):
+        await subject.check_silence(SILENT_SECONDS + tick * SILENT_TICK)
+    assert "p1" not in mtx.paths
+    assert caplog.text.count("is not put back") == 1
+    assert "still not back" not in caplog.text
+    await subject.aclose()
+
+
+async def test_a_lost_path_whose_host_does_not_resolve_once_is_put_back(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from scadbuddy.printers import address
+
+    failures = {"left": 0}
+
+    async def resolve(host: str, port: Any, **kwargs: Any) -> list[Any]:
+        if failures["left"]:
+            failures["left"] -= 1
+            raise OSError("temporary failure in name resolution")
+        return [(0, 0, 0, "", ("10.0.0.8", 0))]
+
+    monkeypatch.setattr(address, "_getaddrinfo", resolve)
+    api = FakeApi([source("p1", host="printer.lan")])
+    mtx = FakeMtx()
+    subject = relay(api, mtx)
+    await subject.reconcile_all()
+    mtx.ready["p1"] = True
+    mtx.received["p1"] = 100
+    await subject.check_silence(0.0)
+    api.source_failures = 1
+    await subject.check_silence(SILENT_SECONDS)
+    assert "p1" not in mtx.paths
+    failures["left"] = 1
+    await subject.check_silence(SILENT_SECONDS + SILENT_TICK)
+    assert "p1" not in mtx.paths
+    await subject.check_silence(SILENT_SECONDS + 2 * SILENT_TICK)
+    assert mtx.paths["p1"]["source"] == "rtsps://bblp:12345678@10.0.0.8:322/streaming/live/1"
+    await subject.aclose()
+
+
+async def test_a_lost_path_with_a_source_that_does_not_validate_reports_stopped() -> None:
+    api = FakeApi([source("p1")])
+    mtx = FakeMtx()
+    subject = relay(api, mtx)
+    await subject.reconcile_all()
+    mtx.ready["p1"] = True
+    mtx.received["p1"] = 100
+    await subject.check_silence(0.0)
+    api.source_failures = 1
+    await subject.check_silence(SILENT_SECONDS)
+    broken = source("p1")
+    del broken["cert_sha256"]
+    api.sources = [broken]
+    for tick in range(1, 3):
+        await subject.check_silence(SILENT_SECONDS + tick * SILENT_TICK)
+    await subject.flushed()
+    assert "p1" not in mtx.paths
+    assert api.states("p1")[-1] == "stopped"
+    await subject.aclose()
+
+
+async def test_a_stopped_printer_loses_its_silent_series() -> None:
+    api = FakeApi([source("p1")])
+    mtx = FakeMtx()
+    subject = relay(api, mtx)
+    await subject.reconcile_all()
+    mtx.ready["p1"] = True
+    mtx.received["p1"] = 100
+    await subject.check_silence(0.0)
+    await subject.check_silence(SILENT_SECONDS)
+    assert REGISTRY.get_sample_value(SAMPLE, {"printer": "p1"}) is not None
+    api.sources = []
+    await subject.reconcile_all()
+    assert REGISTRY.get_sample_value(SAMPLE, {"printer": "p1"}) is None
+    await subject.aclose()

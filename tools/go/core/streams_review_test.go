@@ -17,7 +17,7 @@ import (
 
 // The event stream's limits and refusals (#7768, the review of PR #8027).
 
-// A NOTIFY-only kind that Python reads as an opaque event (inventory_operation.changed) goes
+// A NOTIFY-only kind that no build knows (unknown_feature.changed) is an opaque event and goes
 // out with its id, as hub.py sends it. The log does not hold it, so a gap after it, or a
 // reconnect from it, is a resync, as in Python.
 func TestANotifyOnlyOpaqueEventsIDIsAResyncPlace(t *testing.T) {
@@ -26,7 +26,7 @@ func TestANotifyOnlyOpaqueEventsIDIsAResyncPlace(t *testing.T) {
 	expect(t, stream.next(), ready(false, false, "0"))
 	logged := s.publish("model.updated", httpx.Field{Key: "slug", Value: "a"})
 	expect(t, strings.HasPrefix(stream.next(), "id: "+logged+"\n"), true)
-	id, payload := eventPayload("inventory_operation.changed", `,"operation_id":"op"`)
+	id, payload := eventPayload("unknown_feature.changed", `,"operation_id":"op"`)
 	s.notify(bus.Channel, payload, false)
 	expect(t, stream.next(), bus.ChangeFrame(bus.Channel, payload, id))
 	s.hub.Gap()
@@ -34,6 +34,17 @@ func TestANotifyOnlyOpaqueEventsIDIsAResyncPlace(t *testing.T) {
 
 	again := s.open("agent", s.token, map[string]string{"Last-Event-ID": id})
 	expect(t, again.next(), ready(true, true, logged))
+}
+
+// inventory_operation.changed is a typed NOTIFY-only kind (#6949 K1, bus.Event.NotifyOnly):
+// its change frame carries no id, as a session. kind's does.
+func TestATypedInventoryOperationFrameHasNoID(t *testing.T) {
+	s := newStreams(t, nil)
+	stream := s.open("agent", s.token, nil)
+	expect(t, stream.next(), ready(false, false, "0"))
+	_, payload := eventPayload("inventory_operation.changed", `,"operation_id":"op"`)
+	s.notify(bus.Channel, payload, false)
+	expect(t, stream.next(), bus.ChangeFrame(bus.Channel, payload, ""))
 }
 
 // The per-credential cap counts the TCP peer, as uvicorn --no-proxy-headers gives Python's
@@ -186,6 +197,10 @@ func TestARevokedSessionIsFoundAtAResync(t *testing.T) {
 		now() + interval '1 day', now() + interval '2 days')`, []byte(token))
 	sock, res := s.dial(map[string]string{"Cookie": "__Host-scadbuddy_session=" + token})
 	expect(t, res.StatusCode, 101)
+	// The socket joins the hub after it sends 101; its "subscribed" says it has joined, so the
+	// gap below reaches it.
+	sock.send(1, `{"type":"subscribe","topics":["models"]}`)
+	expect(t, sock.text(), `{"type":"subscribed","topics":["models"]}`)
 	s.hub.Gap()
 	expect(t, sock.text(), `{"type":"resync"}`)
 	s.sql(`UPDATE auth_sessions SET revoked_at = now() WHERE id_hash = sha256($1::bytea)`, []byte(token))

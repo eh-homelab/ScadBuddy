@@ -100,7 +100,8 @@ ExchangedProof = Literal["k8s", "bootstrap", "inprocess"]
 #: recorders and live edge reach only `/internal/crud/camera/`; the camera relay only
 #: `/internal/crud/camera-relay/`. The fleet MCP server (agent fleet chat) reaches only
 #: `/internal/crud/fleet/`. The machine service (the fleet's session registry and login
-#: rotator) reaches only `/internal/crud/fleet-rotator/`.
+#: rotator) reaches only `/internal/crud/fleet-rotator/`. The inventory caller (#6949) is
+#: minted in process by the API and reaches only `/internal/crud/inventory/`.
 SCOPES: Mapping[ServiceCaller, frozenset[str]] = {
     "agent": frozenset({"api", "internal.workspace", "crud.agent"}),
     "print": frozenset({"internal.outputs", "internal.library", "crud.print"}),
@@ -112,6 +113,7 @@ SCOPES: Mapping[ServiceCaller, frozenset[str]] = {
     "camera": frozenset({"crud.camera"}),
     "camera-relay": frozenset({"crud.camera-relay"}),
     "fleet": frozenset({"crud.fleet"}),
+    "inventory": frozenset({"crud.inventory"}),
     "fleet-rotator": frozenset({"crud.fleet-rotator"}),
 }
 PREFIX = "sbsvc_"
@@ -539,6 +541,17 @@ class ServiceCredentialStore:
                 {"legacy": at - older_than, "exchanged": at - exchanged_older_than},
             )
         return cur.rowcount
+
+    def delete_ended(self, retention_days: int | None, *, now: datetime | None = None) -> int:
+        """The auth sweep's (#8539): ended credentials past the stored retention.
+        ``None`` keeps the defaults of :meth:`delete_expired`, ``0`` keeps every one, and
+        a number of days applies to both kinds."""
+        if retention_days == 0:
+            return 0
+        if retention_days is None:
+            return self.delete_expired(now=now)
+        kept = timedelta(days=retention_days)
+        return self.delete_expired(older_than=kept, exchanged_older_than=kept, now=now)
 
 
 #: How often a caller reads its view again (§7.2: at start and every hour).

@@ -19,6 +19,7 @@ const spools = `${BASE}/spools`
 const types = `${BASE}/types`
 const suppliers = `${BASE}/suppliers`
 const invoices = `${BASE}/invoices`
+const presets = `${BASE}/presets`
 const shoppingList = `${BASE}/shopping-list`
 const catalog = `${BASE}/catalog`
 
@@ -35,6 +36,8 @@ export const filamentLinks = {
   newSpool: `${spools}/new`,
   /** #7273 — the hand-held Scan mode: the phone page that reads and writes tags through Web NFC. Top-level, as it opens any thing a tag names. */
   scan: '/scan',
+  /** #7168 — the swap wizard: name a spool, then its new place, and the page moves it. */
+  swap: `${BASE}/swap`,
   /** #7150 — a new spool filled from an existing one. */
   copySpool: (id: string) => query(`${spools}/new`, { copy: id }),
   /** #7684 — a respooled spool continued as a new one, with its final filament as the new spool's grams. */
@@ -43,6 +46,9 @@ export const filamentLinks = {
   types,
   newType: `${types}/new`,
   type: (id: string) => at(types, id),
+  /** #7204 — the Presets tab, and a preset's page (its id is a number). */
+  presets,
+  preset: (id: number | string) => at(presets, id),
   suppliers,
   supplier: (id: string) => at(suppliers, id),
   /** A supplier's product or price sheet row: both live on the supplier's page. */
@@ -61,6 +67,12 @@ export const filamentLinks = {
   printerLabels: (printerId: string) => `${BASE}/labels?printers=${encodeURIComponent(printerId)}`,
   /** #6955 — the labels page for one place. */
   locationLabel: (id: string) => `${BASE}/labels?locations=${encodeURIComponent(id)}`,
+  /** #7169 — the labels page for one spool type. */
+  typeLabel: (id: string) => `${BASE}/labels?types=${encodeURIComponent(id)}`,
+  /** #7169 — the labels page for one inventory item. */
+  itemLabel: (id: string) => `${BASE}/labels?items=${encodeURIComponent(id)}`,
+  /** #7169 — the labels page for one item kind. */
+  kindLabel: (id: string) => `${BASE}/labels?kinds=${encodeURIComponent(id)}`,
   /** A catalog entry's list (the Catalog tab opens on materials). */
   catalog: (kind: CatalogKind) => (kind === 'materials' ? catalog : query(catalog, { kind })),
   shoppingList,

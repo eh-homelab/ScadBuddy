@@ -19,6 +19,7 @@ import {
   ReceiptIcon,
   ScanLineIcon,
   SettingsIcon,
+  SmartphoneIcon,
   SparklesIcon,
   SpoolIcon,
   StoreIcon,
@@ -50,6 +51,10 @@ import {
   type NeedsYouSource,
   type NeedsYou,
 } from '../lib/needsYou'
+import { useTagMadeToasts, useUnknownSpools } from '../lib/unknownSpools'
+import { useHomeReturns } from '../lib/homeReturns'
+import { useHomeReturnDialog } from './filament/useHomeReturnDialog'
+import { useUnknownSpoolDialog } from './filament/useUnknownSpoolDialog'
 import { useAttentionNotifications } from '../agent/attentionNotifications'
 import { useWebPush } from '../agent/webPush'
 import { useAiAvailability } from '../agent/chat/availability'
@@ -113,6 +118,8 @@ const NAV = [
   { to: '/filament', label: 'Filament', end: false, icon: SpoolIcon },
   // #7273 — the hand-held Scan mode: a tag or a label opens what it names.
   { to: '/scan', label: 'Scan', end: true, icon: ScanLineIcon },
+  // #7905 — paired phones: the ScadBuddy app as an NFC reader and writer, a code scanner and a camera.
+  { to: '/devices', label: 'Devices', end: true, icon: SmartphoneIcon },
   { to: '/inventory', label: 'Inventory', end: false, icon: PackageIcon },
   { to: '/orders', label: 'Orders', end: false, icon: ReceiptIcon },
   { to: '/storefront', label: 'Storefront', end: false, icon: StoreIcon },
@@ -215,24 +222,39 @@ export function AppShell({ embedded = isEmbedded(), assistantTransport, tabLink 
   // "Needs you" lists it in full, and each new one is toasted and (hidden) notified.
   const [pairings, setPairings] = useState<readonly PairingEntry[]>(NO_PAIRINGS)
   const { grants, refresh: refreshGrants } = useGrantRequests()
+  const { data: unknown, refresh: refreshUnknown } = useUnknownSpools()
+  useTagMadeToasts(unknown?.made_from_tags ?? null)
+  // #7167 — the spools whose home dry box waits to be told which spool goes in.
+  const { spools: homes, refresh: refreshHomes } = useHomeReturns()
   const waitingEntries = attention.counts?.waiting ?? NO_WAITING
   // Built from whichever reads have answered, so a failing one hides none of the others; null
   // until one has (unknown is not "nothing waits"). The toasts skip what waited at a source's
   // first answer: a reload must not announce it again.
   const agentKnown = !shown || attention.counts !== null
   const grantsKnown = grants !== null
+  const filamentKnown = unknown !== null
+  const homesKnown = homes !== null
   const needsSources = useMemo(
-    () => new Set<NeedsYouSource>(['pairings', ...(agentKnown ? (['agent'] as const) : []), ...(grantsKnown ? (['grants'] as const) : [])]),
-    [agentKnown, grantsKnown],
+    () =>
+      new Set<NeedsYouSource>([
+        'pairings',
+        ...(agentKnown ? (['agent'] as const) : []),
+        ...(grantsKnown ? (['grants'] as const) : []),
+        ...(filamentKnown ? (['filament'] as const) : []),
+        ...(homesKnown ? (['homes'] as const) : []),
+      ]),
+    [agentKnown, grantsKnown, filamentKnown, homesKnown],
   )
   const needsItems = useMemo(
-    () => (agentKnown || grantsKnown ? needsYouItems(waitingEntries, grants, pairings) : null),
-    [agentKnown, grantsKnown, waitingEntries, grants, pairings],
+    () => (agentKnown || grantsKnown || filamentKnown || homesKnown ? needsYouItems(waitingEntries, grants, pairings, unknown?.trays, homes ?? []) : null),
+    [agentKnown, grantsKnown, filamentKnown, homesKnown, waitingEntries, grants, pairings, unknown, homes],
   )
   const refreshNeeds = useCallback(() => {
     refreshAttention()
     refreshGrants()
-  }, [refreshAttention, refreshGrants])
+    refreshUnknown()
+    refreshHomes()
+  }, [refreshAttention, refreshGrants, refreshUnknown, refreshHomes])
   useNeedsYouToasts(needsItems, needsSources)
   const mainElement = useRef<HTMLElement>(null)
   useAttentionTitle(needsItems === null ? attention.waiting : needsItems.length, !embedded, usePageTitle(mainElement))
@@ -278,6 +300,11 @@ export function AppShell({ embedded = isEmbedded(), assistantTransport, tabLink 
     () => (grantsKnown ? needsYouNotices(needsYouItems(NO_WAITING, grants, NO_PAIRINGS)) : null),
     [grantsKnown, grants],
   )
+  const filamentNotices = useMemo(
+    () => (filamentKnown ? needsYouNotices(needsYouItems(NO_WAITING, null, NO_PAIRINGS, unknown?.trays)) : null),
+    [filamentKnown, unknown],
+  )
+  const homeNotices = useMemo(() => (homes !== null ? needsYouNotices(needsYouItems(NO_WAITING, null, NO_PAIRINGS, [], homes)) : null), [homes])
   const pairingNotices = useMemo(() => needsYouNotices(needsYouItems(NO_WAITING, null, pairings)), [pairings])
   const navigate = useNavigate()
   const openNotice = useCallback(
@@ -292,6 +319,8 @@ export function AppShell({ embedded = isEmbedded(), assistantTransport, tabLink 
   useAttentionNotifications(agentNotices, !embedded, openNotice)
   useAttentionNotifications(grantNotices, !embedded, openNotice)
   useAttentionNotifications(pairingNotices, !embedded, openNotice)
+  useAttentionNotifications(filamentNotices, !embedded, openNotice)
+  useAttentionNotifications(homeNotices, !embedded, openNotice)
   // #815 — and with every tab closed, through Web Push; its click opens the session here.
   useWebPush(shown && !embedded, openNotice)
   const opener = useMemo<AssistantOpener | null>(
@@ -306,11 +335,15 @@ export function AppShell({ embedded = isEmbedded(), assistantTransport, tabLink 
         : null,
     [shown, openPanel],
   )
+  const { open: answerSpool, dialog: unknownSpoolDialog } = useUnknownSpoolDialog(needsItems, refreshNeeds)
+  const { open: answerHome, dialog: homeReturnDialog } = useHomeReturnDialog(refreshNeeds)
   const needsYou = useMemo<NeedsYou>(
     () => ({
       items: needsItems,
       more: notListed(grants),
       refresh: refreshNeeds,
+      answerSpool,
+      answerHome,
       openSession: shown
         ? (sessionId) => {
             if (sessionId) setOpenRequest({ sessionId })
@@ -318,7 +351,7 @@ export function AppShell({ embedded = isEmbedded(), assistantTransport, tabLink 
           }
         : null,
     }),
-    [needsItems, grants, refreshNeeds, shown, openPanel],
+    [needsItems, grants, refreshNeeds, answerSpool, answerHome, shown, openPanel],
   )
   const closePanel = useCallback(() => {
     setOpen(false)
@@ -560,6 +593,8 @@ export function AppShell({ embedded = isEmbedded(), assistantTransport, tabLink 
             </div>
           </div>
         </SidebarProvider>
+        {unknownSpoolDialog}
+        {homeReturnDialog}
       </TooltipProvider>
       </ModalCompanionContext.Provider>
       </NeedsYouContext.Provider>

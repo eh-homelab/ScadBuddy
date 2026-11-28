@@ -4,7 +4,7 @@ version = "0.1.0"
 description = "ScadBuddy's Python agent parts: the payload codec, secrets and gate ports (spec 2026-10-13 §14.4)"
 requires-python = ">=3.14,<3.15"
 dependencies = [
-    "temporalio>=1.33.0,<1.35",
+    "temporalio>=1.37.0",
     "cryptography>=44",
     "psycopg>=3.2",
 ]

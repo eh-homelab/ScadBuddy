@@ -6,7 +6,7 @@ import { seedNfcJob } from '../../mocks/features/filament/tags'
 import { server } from '../../mocks/server'
 import { filamentLinks } from '../../lib/filamentLinks'
 import { installNdefStub, type NdefStub } from '../../test/ndefStub'
-import { http } from 'msw'
+import { HttpResponse, http } from 'msw'
 import { MemoryRouter, Route, Routes } from 'react-router'
 import { renderPage } from '../../test/utils'
 import { ScanPage } from './ScanPage'
@@ -54,6 +54,11 @@ describe('the scan page without Web NFC (#7273)', () => {
     expect(screen.queryByRole('button', { name: 'Scan' })).toBeNull()
   })
 
+  it('scrolls itself, as the shell clips its main', () => {
+    open()
+    expect(screen.getByTestId('scan-page')).toHaveClass('h-full', 'overflow-y-auto')
+  })
+
   it('has no back link and names what it reads', () => {
     open()
     expect(screen.queryByRole('link', { name: 'Spools' })).not.toBeInTheDocument()
@@ -84,6 +89,7 @@ describe('the scan page (#7273)', () => {
 
   it('starts one scan and lists each read', async () => {
     const { user } = open()
+    expect(within(screen.getByTestId('scan-toggle-slot')).getByRole('button', { name: 'Scan' })).toBeInTheDocument()
     await user.click(screen.getByRole('button', { name: 'Scan' }))
     const on = await screen.findByRole('button', { name: 'Scanning — hold a tag to the phone' })
     // The label says it is on; a toggle state would claim a second tap turns it off.
@@ -115,6 +121,67 @@ describe('the scan page (#7273)', () => {
     expect(screen.getByText('Filament label')).toBeInTheDocument()
     expect(screen.getByText('Spool label')).toBeInTheDocument()
     expect(await screen.findByLabelText('Gross weight (g)')).toBeInTheDocument()
+  })
+
+  it.each([
+    { status: 503, code: 'mifare_needs_core' },
+    { status: 422, code: 'mifare_unreadable' },
+    { status: 422, code: 'mifare_invalid' },
+  ])("posts the app's blocks, and the UID and records again on a $status $code (#8148)", async ({ status, code }) => {
+    const log = sent()
+    server.use(
+      http.post('/api/v1/filament/tags/reads', async ({ request }) => {
+        const body = (await request.clone().json()) as { mifare_blocks?: unknown }
+        if (body.mifare_blocks)
+          return HttpResponse.json(
+            { type: 'about:blank', title: 'Refused', status, detail: 'core does not decode this read', code },
+            { status, headers: { 'Content-Type': 'application/problem+json' } },
+          )
+        // Falls through to the filament mock's own answer.
+      }),
+    )
+    window.ScadBuddyNfc = { native: true, lastMifare: { uid: '04A1B2C3D4E5F6', blocks: [{ index: 1, dataHex: '4131372d503100004746413137000000' }] } }
+    try {
+      const { user } = open()
+      await user.click(screen.getByRole('button', { name: 'Scan' }))
+      await screen.findByRole('button', { name: 'Scanning — hold a tag to the phone' })
+      stub.tap({ serialNumber: '04:a1:b2:c3:d4:e5:f6', records: [] })
+      expect(await screen.findByRole('region', { name: 'Spool #3' })).toBeInTheDocument()
+      expect(screen.queryByText(/could not look up the tag/)).toBeNull()
+      const reads = log.requests.filter((one) => one.line === 'POST /api/v1/filament/tags/reads').map((one) => one.body)
+      expect(reads).toEqual([
+        { uid: '04A1B2C3D4E5F6', tag_type: 'mifare_classic', mifare_blocks: [{ index: 1, data_hex: '4131372d503100004746413137000000' }], records: [] },
+        { uid: '04:a1:b2:c3:d4:e5:f6', tag_type: null, records: [] },
+      ])
+    } finally {
+      log.off()
+      delete window.ScadBuddyNfc
+    }
+  })
+
+  it("shows another refusal of the app's blocks and does not post again (#8148)", async () => {
+    const log = sent()
+    server.use(
+      http.post('/api/v1/filament/tags/reads', () =>
+        HttpResponse.json(
+          { type: 'about:blank', title: 'Refused', status: 422, detail: 'no such spool', code: 'spool_unknown' },
+          { status: 422, headers: { 'Content-Type': 'application/problem+json' } },
+        ),
+      ),
+    )
+    window.ScadBuddyNfc = { native: true, lastMifare: { uid: '04A1B2C3D4E5F6', blocks: [{ index: 1, dataHex: '4131372d503100004746413137000000' }] } }
+    try {
+      const { user } = open()
+      await user.click(screen.getByRole('button', { name: 'Scan' }))
+      await screen.findByRole('button', { name: 'Scanning — hold a tag to the phone' })
+      stub.tap({ serialNumber: '04:a1:b2:c3:d4:e5:f6', records: [] })
+      expect(await screen.findByText(/could not look up the tag/)).toBeInTheDocument()
+      const reads = log.requests.filter((one) => one.line === 'POST /api/v1/filament/tags/reads')
+      expect(reads).toHaveLength(1)
+    } finally {
+      log.off()
+      delete window.ScadBuddyNfc
+    }
   })
 
   it("creates a spool from a new tag's draft and binds it", async () => {

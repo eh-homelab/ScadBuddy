@@ -9,6 +9,7 @@ import uuid
 
 import pytest
 
+from scadbuddy.entities.actor import SWEEP_ACTOR
 from scadbuddy.entities.attachments import EntityAttachmentStore
 from scadbuddy.entities.links import EntityLinkStore, LinkInput
 from scadbuddy.entities.properties import (
@@ -25,6 +26,8 @@ from scadbuddy.orders.store import ATTACHMENT_HOLDER
 from scadbuddy.printers.models import PrinterCreate
 from scadbuddy.printers.store import PrinterStore
 from tests.conftest import PgPool
+from tests.support.order_stock import GoStock, InlineStarter
+from tests.support.printers import MERGED_BY
 
 pytestmark = pytest.mark.requires_postgres
 
@@ -185,7 +188,7 @@ def test_a_printer_merge_keeps_the_gone_printers_files_and_links(
     attachments = EntityAttachmentStore(pg_pool, entities)
     links = EntityLinkStore(pg_pool, entities)
     printers = PrinterStore(pg_pool, None)
-    synthetic = printers.ensure_bambuddy(4, serial=None, name="H2C", model="H2C")
+    synthetic = printers.ensure_bambuddy(4, serial=None, name="H2C", model="H2C", by=MERGED_BY)
     gone = EntityRef("printer", synthetic.id)
     manual = _attach(attachments, pg_pool, gone)
     links.add(gone, LinkInput(url="https://example.com/support"), BY)
@@ -197,9 +200,9 @@ def test_a_printer_merge_keeps_the_gone_printers_files_and_links(
         links.add(kept, LinkInput(url="https://example.com/mine"), BY)
         props.apply(kept, PropertyPatch(set={"b": "kept"}), BY)
 
-    assert printers.ensure_bambuddy(4, serial="0938AB000000006", name="H2C", model="H2C").id == (
-        mine.id
-    )
+    assert printers.ensure_bambuddy(
+        4, serial="0938AB000000006", name="H2C", model="H2C", by=MERGED_BY
+    ).id == (mine.id)
 
     assert sweep_orphan_entities(entities, attachments) == 0
     assert [a.id for a in attachments.list(kept)] == [manual]
@@ -244,13 +247,13 @@ def test_a_merge_past_the_key_limit_may_shrink_but_not_grow(pg_pool: PgPool) -> 
     entities = EntityStore(pg_pool)
     props = EntityPropertyStore(pg_pool, entities)
     printers = PrinterStore(pg_pool, None)
-    synthetic = printers.ensure_bambuddy(5, serial=None, name="H2C", model="H2C")
+    synthetic = printers.ensure_bambuddy(5, serial=None, name="H2C", model="H2C", by=MERGED_BY)
     gone = EntityRef("printer", synthetic.id)
     props.apply(gone, PropertyPatch(set={f"g{i}": i for i in range(MAX_KEYS)}), BY)
     mine = printers.create(PrinterCreate(serial="0938AB000000007", name="Mine"))
     kept = EntityRef("printer", mine.id)
     props.apply(kept, PropertyPatch(set={f"k{i}": i for i in range(10)}), BY)
-    printers.ensure_bambuddy(5, serial="0938AB000000007", name="H2C", model="H2C")
+    printers.ensure_bambuddy(5, serial="0938AB000000007", name="H2C", model="H2C", by=MERGED_BY)
     assert len(props.list(kept)) == MAX_KEYS + 10
 
     with pytest.raises(BadPropertyValue):
@@ -323,10 +326,12 @@ def test_a_sweep_rechecks_the_moves_under_its_lock(
 
 def test_a_printer_merge_moves_the_stock_moves_to_the_kept_printer(pg_pool: PgPool) -> None:
     """R-P2-4: a merge deletes the gone printer's entity, so a move that named it names
-    the kept printer after it, as its files and links do."""
+    the kept printer after it, as its files and links do. Since #6949 K1 Task 16 the move
+    goes through `MergePrinter` (Go's `Repoint`, here its stand-in), not `repoint_entity`."""
     entities = EntityStore(pg_pool)
     printers = PrinterStore(pg_pool, None)
-    synthetic = printers.ensure_bambuddy(6, serial=None, name="H2C", model="H2C")
+    printers.merges = InlineStarter(None, GoStock(pg_pool), lambda: printers)
+    synthetic = printers.ensure_bambuddy(6, serial=None, name="H2C", model="H2C", by=MERGED_BY)
     gone = EntityRef("printer", synthetic.id)
     _move_on(pg_pool, gone)
     mine = printers.create(PrinterCreate(serial="0938AB000000008", name="Mine"))
@@ -334,9 +339,64 @@ def test_a_printer_merge_moves_the_stock_moves_to_the_kept_printer(pg_pool: PgPo
     with pg_pool.connection() as conn:
         kept_id = entities.ensure(conn, kept)
 
-    printers.ensure_bambuddy(6, serial="0938AB000000008", name="H2C", model="H2C")
+    printers.ensure_bambuddy(6, serial="0938AB000000008", name="H2C", model="H2C", by=MERGED_BY)
 
     with pg_pool.connection() as conn:
         assert entities.find(conn, gone) is None
         row = conn.execute("SELECT entity_id FROM stock_moves").fetchone()
     assert row is not None and row["entity_id"] == kept_id
+
+
+def test_an_entity_a_relation_names_survives_the_sweep(
+    pg_pool: PgPool, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """`relations` has plain foreign keys to `entities` (design §6.3), so the sweep leaves
+    an orphan that a relation names, as it leaves one a stock move names (R-P2-4), and
+    checks again under its lock."""
+    entities = EntityStore(pg_pool)
+    attachments = EntityAttachmentStore(pg_pool, entities)
+    links = EntityLinkStore(pg_pool, entities)
+    named, bare = _spool(pg_pool), _spool(pg_pool)
+    with pg_pool.connection() as conn, conn.transaction():
+        from_id = entities.ensure(conn, named)
+        to_id = entities.ensure(conn, EntityRef("item_kind", "printer"))
+        conn.execute(
+            "INSERT INTO relations (type_id, from_entity, to_entity, created_by)"
+            " VALUES ('compatible_with', %s, %s, '{}')",
+            (from_id, to_id),
+        )
+    links.add(bare, LinkInput(url="https://example.com/bare"), BY)
+    with pg_pool.connection() as conn:
+        conn.execute(
+            "DELETE FROM filament_spools WHERE id = ANY(%s)",
+            ([uuid.UUID(named.ref), uuid.UUID(bare.ref)],),
+        )
+
+    assert sweep_orphan_entities(entities, attachments) == 1
+
+    with pg_pool.connection() as conn:
+        assert entities.find(conn, named) == from_id
+        assert entities.find(conn, bare) is None
+    monkeypatch.setattr(entities, "orphans", lambda conn, limit, guarded=(): [(from_id, named)])
+    assert sweep_orphan_entities(entities, attachments) == 0
+
+
+def test_the_sweep_publishes_what_it_removes(pg_pool: PgPool) -> None:
+    """#6949: the orphan's key goes as one `remove` event, credited to the sweep."""
+    entities = EntityStore(pg_pool)
+    spool = _spool(pg_pool)
+    EntityPropertyStore(pg_pool, entities).apply(spool, PropertyPatch(set={"lot_number": "L1"}), BY)
+    with pg_pool.connection() as conn:
+        conn.execute("DELETE FROM filament_spools WHERE id = %s", (uuid.UUID(spool.ref),))
+        mark = conn.execute("SELECT coalesce(max(seq), 0) AS n FROM events").fetchone()
+    assert mark is not None
+
+    assert sweep_orphan_entities(entities, EntityAttachmentStore(pg_pool, entities)) == 1
+
+    with pg_pool.connection() as conn:
+        rows = conn.execute(
+            "SELECT payload FROM events WHERE kind = 'entity_property.changed' AND seq > %s",
+            (mark["n"],),
+        ).fetchall()
+    assert [(r["payload"]["op"], r["payload"]["key"]) for r in rows] == [("remove", "lot_number")]
+    assert Actor.model_validate(rows[0]["payload"]["actor"]) == SWEEP_ACTOR

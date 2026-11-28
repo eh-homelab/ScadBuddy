@@ -78,6 +78,16 @@ on:
   schedule:
     - cron: "23 7 * * 1"
   workflow_dispatch:
+    inputs:
+      # #6949 K1 Task 16: a run that records the stock workflows' replay histories.
+      # The backend shards set SCADBUDDY_RECORD_HISTORIES=1, write
+      # backend/tests/fixtures/order_stock_histories/ to a folder of the runner, and
+      # upload it as the artifact `order-stock-histories-<shard>`. Commit the files, then
+      # tests/test_order_stock_replay.py replays them on every run. Never re-record one.
+      record_histories:
+        description: "Record the stock workflows' replay histories (an artifact per shard)"
+        type: boolean
+        default: false
 
 # One run per ref. On a pull request a newer push supersedes an older one, so
 # cancelling costs nothing but the wasted minutes. Elsewhere a running run
@@ -126,6 +136,7 @@ jobs:
       run_agent_durable: ${{ steps.lanes.outputs.agent_durable }}
       run_rust: ${{ steps.lanes.outputs.rust }}
       run_image: ${{ steps.lanes.outputs.image }}
+      run_android: ${{ steps.lanes.outputs.android }}
       docs_only: ${{ steps.lanes.outputs.docs_only }}
     steps:
       - uses: actions/checkout@v7
@@ -327,6 +338,9 @@ jobs:
       - name: Test the OpenSCAD bump script
         run: .github/scripts/openscad-bump.test.sh
 
+      - name: Test the Bambu Studio bump script
+        run: .github/scripts/bambu-studio-bump.test.sh
+
       # Against a stub gh: rust-toolchain-pin.yml's weekly check (#4099).
       - name: Test the Rust toolchain action pin check
         run: .github/scripts/rust-toolchain-pin.test.sh
@@ -335,6 +349,11 @@ jobs:
       # including the agent sidecar's image beside the API's (#720).
       - name: Test the clusters deploy pin
         run: .github/scripts/deploy-pin.test.sh
+
+      # The hash of what each camera image runs, which keeps the recorder's
+      # and edge's pins while it does not change (#8191).
+      - name: Test the camera inputs hash
+        run: .github/scripts/camera-inputs.test.sh
 
       # Runs deploy.reusable.yml's own wait step against a stub gh: an open
       # deploy PR lands before a newer deploy replaces it (#5168).
@@ -854,8 +873,8 @@ jobs:
       # `test` stage (TEMPORAL_CLI_VERSION, TEMPORAL_CLI_SHA256_AMD64); bump together.
       - name: Install the Temporal CLI
         env:
-          TEMPORAL_CLI_VERSION: 1.9.1
-          TEMPORAL_CLI_SHA256: 09a0326a51db84d02735e53542b9ebd8c4758daf47482a9ab0abce15844e60d5
+          TEMPORAL_CLI_VERSION: 1.10.1
+          TEMPORAL_CLI_SHA256: 4c1500e2ce2d4de136e5fe8852d9b7f82eb62f19b6b383b3e0c040519a9d20b1
         run: |
           set -euo pipefail
           # Temporal's own download site serves the same tarball when GitHub's
@@ -1689,8 +1708,19 @@ jobs:
       # 950 MiB, their Go GC ran without end, and shards 4 and 6 took 2567 and 2751 s
       # against main's 1674 to 1852 s (runs 45268094893, 45252653403).
       - name: pytest
+        env:
+          # The dispatch input `record_histories` (#6949 K1 Task 16); "false" otherwise.
+          RECORD_HISTORIES: ${{ github.event_name == 'workflow_dispatch' && inputs.record_histories }}
         run: |
           set -euo pipefail
+          # A recording run writes the histories to a folder of the runner, mounted over
+          # the image's fixtures folder, for the upload step below.
+          record=()
+          if [ "$RECORD_HISTORIES" = "true" ]; then
+            mkdir -p results/order_stock_histories && chmod 777 results/order_stock_histories
+            record=(-e SCADBUDDY_RECORD_HISTORIES=1
+              -v "$PWD/results/order_stock_histories:/app/backend/tests/fixtures/order_stock_histories")
+          fi
           cid="$RUNNER_TEMP/pytest.cid"
           peak="$RUNNER_TEMP/pytest.peak"
           (
@@ -1735,6 +1765,7 @@ jobs:
             -e SCADBUDDY_TEST_FIXTURES=/app/test-fixtures \
             -e SCADBUDDY_TEST_FONTS_REQUIRED=1 \
             -e RUST_BACKTRACE=1 \
+            "${record[@]}" \
             -w /app/backend scadbuddy:ci-test uv run --frozen --no-sync pytest -n auto \
             --splits 8 --group ${{ matrix.group }} --splitting-algorithm least_duration \
             --store-durations --clean-durations --durations-path=/results/durations.json \
@@ -1749,6 +1780,17 @@ jobs:
             echo "the kernel log could not be read: $kernel"
           fi
           exit "$rc"
+
+      # The histories a `record_histories` dispatch recorded: each shard uploads the ones
+      # its tests wrote (the workflow tests split across shards). Kept a week.
+      - name: Upload the recorded stock workflow histories
+        if: ${{ always() && github.event_name == 'workflow_dispatch' && inputs.record_histories }}
+        uses: actions/upload-artifact@v7
+        with:
+          name: order-stock-histories-${{ matrix.group }}
+          path: results/order_stock_histories/
+          if-no-files-found: ignore
+          retention-days: 7
 
       # The intake sandbox's confinement (#6133, spec 2026-11-13 §7), proved on every
       # run: the step above runs as root under Docker's default seccomp and AppArmor
@@ -2209,8 +2251,8 @@ jobs:
       # bump together.
       - name: Install the Temporal CLI
         env:
-          TEMPORAL_CLI_VERSION: 1.9.1
-          TEMPORAL_CLI_SHA256: 09a0326a51db84d02735e53542b9ebd8c4758daf47482a9ab0abce15844e60d5
+          TEMPORAL_CLI_VERSION: 1.10.1
+          TEMPORAL_CLI_SHA256: 4c1500e2ce2d4de136e5fe8852d9b7f82eb62f19b6b383b3e0c040519a9d20b1
         run: |
           set -euo pipefail
           # Temporal's own download site serves the same tarball when GitHub's
@@ -2235,6 +2277,39 @@ jobs:
         env:
           SCADBUDDY_TEST_TEMPORAL_DEV_SERVER: ${{ runner.temp }}/temporal
         run: cargo test --workspace --locked
+
+  # ── The phone app (app/, #7905) ────────────────────────────────────────────
+  # A .NET MAUI Android app. Path-selected: it runs when `layout`'s `run_android`
+  # lane does (select-lanes.sh). The hosted runner has the Android SDK
+  # ($ANDROID_HOME); the job adds the .NET SDK, the maui-android workload and a JDK.
+  android:
+    name: Android app build
+    needs: layout
+    if: ${{ needs.layout.outputs.run_android == 'true' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    defaults:
+      run:
+        working-directory: app/ScadBuddy
+    steps:
+      - uses: actions/checkout@v7
+      # The SDK (here and in app/global.json) and the workload set are pinned (app/CLAUDE.md): a new release must not break
+      # an unchanged commit. Move both together.
+      - uses: actions/setup-dotnet@v6
+        with:
+          dotnet-version: 10.0.301
+      - uses: actions/setup-java@v6
+        with:
+          distribution: microsoft
+          java-version: '17'
+      # The app's pure .NET parts (the scan links and their origins), on net10.0 with no Android.
+      - name: Test
+        working-directory: app/ScadBuddy.Tests
+        run: dotnet test
+      - name: Install the maui-android workload
+        run: dotnet workload install maui-android --version 10.0.303.1
+      - name: Build (Release)
+        run: dotnet build -f net10.0-android -c Release -p:AndroidSdkDirectory="$ANDROID_HOME" -p:JavaSdkDirectory="$JAVA_HOME"
 
   # ── The slicer worker's image (#3821) ─────────────────────────────────────
   #
@@ -2596,7 +2671,10 @@ jobs:
   # a printer or disable a queue without the admin login; the web page's admin asks for
   # the mounted password and pauses a queue with it; a custom size prints at the queue's
   # width; a mounted snmp.conf reaches cupsd's ServerRoot; a waiting job and a queue
-  # added outside CUPS_QUEUES survive a restart on a PVC-like volume.
+  # added outside CUPS_QUEUES survive a restart on a PVC-like volume. Then core's IPP
+  # client (`TestLiveCUPS`) lists the queues, reads the 2 x 1 queue's size from its
+  # media-default, prints with Darkness and MediaType, which reach the ZPL, and gets
+  # "queue unknown" for a queue CUPS does not have.
   # In the `image` lane, and in `CI Summary`'s needs.
   cups-image:
     name: CUPS image build and smoke
@@ -2728,6 +2806,34 @@ jobs:
           docker exec cups-state lpstat -p Other >/dev/null
           docker exec cups-state lpstat -d | grep -q 'S-EDCDU03-2x1$'
           echo "CUPS image OK"
+
+      # core's IPP client (tools/go/core/internal/labelprint) against the smoke's `cups`
+      # and `fakezebra`, which still run with 2 x 1 labels loaded. The golang image is
+      # core's Dockerfile's, so there is no second toolchain pin; the build uses the
+      # root vendor/ through go.work, offline.
+      - name: core's IPP client against CUPS
+        run: |
+          set -euo pipefail
+          fz="$RUNNER_TEMP/fakezebra"
+          # shellcheck disable=SC2016 # $BUILDPLATFORM is the Dockerfile's text, not the shell's
+          img=$(sed -n 's/^FROM --platform=\$BUILDPLATFORM \(golang:[^ ]*\) AS build$/\1/p' tools/go/core/Dockerfile)
+          test -n "$img"
+          docker run --rm --entrypoint sh scadbuddy-cups:ci -c \
+            'printf "%%!PS\n/Helvetica findfont 14 scalefont setfont 10 30 moveto (ScadBuddy) show showpage\n" > /tmp/t.ps && gs -q -sDEVICE=pdfwrite -o - /tmp/t.ps' \
+            > "$RUNNER_TEMP/live.pdf"
+          before=$(grep -c '\^XZ' "$fz/out.zpl" || true)
+          size=$(wc -c < "$fz/out.zpl")
+          docker run --rm --network cupsci -v "$PWD:/src" -v "$RUNNER_TEMP/live.pdf:/live.pdf:ro" -w /src/tools/go/core \
+            -e GOTOOLCHAIN=local -e SCADBUDDY_TEST_CUPS_URL=http://cups:8631 \
+            -e SCADBUDDY_TEST_CUPS_PDF=/live.pdf "$img" go test ./internal/labelprint/ -run TestLiveCUPS -v | tee "$RUNNER_TEMP/live.txt"
+          # `go test -run` exits 0 when no test matches, so the pass line must be there.
+          grep -q -- '--- PASS: TestLiveCUPS' "$RUNNER_TEMP/live.txt"
+          # The job's Darkness and MediaType reach the ZPL.
+          for _ in $(seq 30); do [ "$(grep -c '\^XZ' "$fz/out.zpl")" -gt "$before" ] && break; sleep 1; done
+          tail -c "+$((size + 1))" "$fz/out.zpl" > "$RUNNER_TEMP/new.zpl"
+          if ! grep -q '~SD30' "$RUNNER_TEMP/new.zpl" || ! grep -q '\^MTT' "$RUNNER_TEMP/new.zpl"; then
+            docker logs cups; cat "$RUNNER_TEMP/new.zpl"; exit 1
+          fi
 
   # PR-only, and ALWAYS on a PR. A push has no base to diff against and no PR
   # to comment on. Never path-gated: `CI Summary` counts a SKIPPED job as
@@ -3157,7 +3263,7 @@ jobs:
     # THIS display name is the required status-check context. Renaming it
     # silently unsatisfiable-ifies branch protection.
     name: CI Summary
-    needs: [layout, lint, markdown, frontend, frontend-unit, frontend-e2e, frontend-e2e-split, agent, agent-durable, image, backend-pytest, backend-pytest-split, models, go-select, go, rust, slicer-image, profile-fetch-image, camera-image, cups-image, freshness, go-client]
+    needs: [layout, lint, markdown, frontend, frontend-unit, frontend-e2e, frontend-e2e-split, agent, agent-durable, image, backend-pytest, backend-pytest-split, models, go-select, go, rust, slicer-image, android, profile-fetch-image, camera-image, cups-image, freshness, go-client]
     # `!cancelled()`, not a bare `needs:`. A bare `needs:` SKIPS this job when
     # an upstream job fails, and GitHub counts a SKIPPED REQUIRED CHECK AS
     # SATISFIED — a failing build would report green on the one check that
@@ -3197,6 +3303,7 @@ jobs:
           GO_RESULT: ${{ needs.go.result }}
           RUST_RESULT: ${{ needs.rust.result }}
           SLICER_IMAGE_RESULT: ${{ needs.slicer-image.result }}
+          ANDROID_RESULT: ${{ needs.android.result }}
           PROFILE_FETCH_IMAGE_RESULT: ${{ needs.profile-fetch-image.result }}
           CAMERA_IMAGE_RESULT: ${{ needs.camera-image.result }}
           CUPS_IMAGE_RESULT: ${{ needs.cups-image.result }}
@@ -3258,6 +3365,7 @@ jobs:
           need_agent_durable=false
           if [ "$has_agent_durable" = true ] && [ "$(lane agent_durable)" = true ]; then need_agent_durable=true; fi
           need_rust=$(lane rust)
+          need_android=$(lane android)
           # A docs-only change (select-lanes.sh `docs_only`) needs only `markdown`.
           not_docs=true
           if [ "$(lane docs_only)" = true ]; then not_docs=false; fi
@@ -3297,6 +3405,8 @@ jobs:
           # Required when this change touches Rust (select-lanes.sh).
           assert "Rust workers"                           "$RUST_RESULT"     "$need_rust"
           assert "Slicer image build and smoke"           "$SLICER_IMAGE_RESULT" "$need_rust"
+          # Required when this change touches the phone app (select-lanes.sh).
+          assert "Android app build"                      "$ANDROID_RESULT"  "$need_android"
 
           # `freshness` is PR-only — it diffs the API against the PR's base and
           # comments on the PR, and a push to main has neither. It is therefore

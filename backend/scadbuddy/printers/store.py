@@ -18,7 +18,7 @@ a table that names a printer adds itself there (`tests/printers/test_store.py` c
 that every foreign key to ``printers`` is listed), in one of two forms:
 
 - a `PrinterReference` (table, column), for a plain column or one row per printer;
-- a `PrinterReference` with ``repoint``, a `RepointHook` ``hook(conn, merged, into)``,
+- a `PrinterReference` with ``repoint``, a `RepointHook` ``hook(conn, merged, into, by)``,
   for a table whose key holds more than the printer and whose conflicts only it can
   settle. It runs on the merge's connection, inside its transaction, while both rows
   still exist; raising undoes the merge. The filament inventory's AMS tray places and K
@@ -35,13 +35,14 @@ own, and the test leaves that table out until the PR that drops it."""
 
 from __future__ import annotations
 
+import logging
 import time
 import uuid
 from collections.abc import Callable, Iterable
 from dataclasses import dataclass
 from typing import Any, Literal
 
-from psycopg import Connection
+from psycopg import Connection, errors
 from psycopg.rows import DictRow
 from psycopg.types.json import Jsonb
 from psycopg_pool import ConnectionPool
@@ -49,7 +50,17 @@ from psycopg_pool import ConnectionPool
 from scadbuddy.core.events import EventBus, PrinterEvent, emit
 from scadbuddy.core.secrets import Envelope, Kek, open_secret, seal_secret
 from scadbuddy.core.settings_cache import settings_written
+from scadbuddy.entities.actor import set_actor
 from scadbuddy.entities.registry import repoint_entity
+from scadbuddy.inventory.core_client import unavailable
+from scadbuddy.orders.models import Actor
+from scadbuddy.orders.stock_start import (
+    MERGE_PRINTER,
+    WAIT,
+    StockStarter,
+    WorkflowAccepted,
+    WorkflowRefused,
+)
 from scadbuddy.printers.models import (
     BambuddyView,
     LanLink,
@@ -60,6 +71,8 @@ from scadbuddy.printers.models import (
     synthetic_serial,
     synthetic_vp_serial,
 )
+
+logger = logging.getLogger(__name__)
 
 Pool = ConnectionPool[Connection[DictRow]]
 
@@ -75,6 +88,61 @@ _LOCK = "SELECT pg_advisory_xact_lock(hashtextextended('scadbuddy:printers', 0))
 class PrinterNotFoundError(LookupError):
     def __init__(self, printer_id: str) -> None:
         super().__init__(f"no printer {printer_id}")
+        self.printer_id = printer_id
+
+
+class PrinterPlacesReferencedError(Exception):
+    """Rows with no move path that writes an event point at one of the printer's places,
+    which go with its row (#8177). Each reference is ``(kind, id)``; the kind names the
+    table and its column, such as ``stock_lots.location_id``."""
+
+    def __init__(self, printer_id: str, references: list[tuple[str, uuid.UUID]]) -> None:
+        named = ", ".join(f"{kind} {ref}" for kind, ref in references)
+        super().__init__(
+            f"printer {printer_id} has places that other rows still point at: {named};"
+            " move them out first"
+        )
+        self.printer_id = printer_id
+        self.references = references
+
+
+class PrinterPlaceNameClashError(Exception):
+    """A place under one of the printer's places cannot move to the place above the
+    printer (#8177): an unarchived place of that name is there already, or ``other_id``,
+    another place under the printer's places, has that name and moves there too."""
+
+    def __init__(
+        self, printer_id: str, place_id: uuid.UUID, name: str, other_id: uuid.UUID | None = None
+    ) -> None:
+        if other_id is None:
+            why = (
+                f"place {place_id} ({name!r}) is under printer {printer_id}'s places and"
+                " cannot move to the place above the printer: a place of that name is there"
+                " already; rename one first"
+            )
+        else:
+            why = (
+                f"places {other_id} and {place_id} ({name!r}) are under printer"
+                f" {printer_id}'s places and both move to the place above the printer, where"
+                " two places cannot have one name; rename one first"
+            )
+        super().__init__(why)
+        self.printer_id = printer_id
+        self.place_id = place_id
+        self.name = name
+        self.other_id = other_id
+
+
+class PrinterDeleteConflictError(Exception):
+    """Another write changed the printer's places while its delete ran (#8177): Postgres
+    stopped the delete on a deadlock, or a row still pointed at one of its places when
+    the cascade ran. The delete wrote nothing; it can be tried again."""
+
+    def __init__(self, printer_id: str) -> None:
+        super().__init__(
+            f"printer {printer_id} changed while it was being deleted; nothing was deleted,"
+            " try again"
+        )
         self.printer_id = printer_id
 
 
@@ -103,6 +171,34 @@ class VirtualPrinterRowError(Exception):
     def __init__(self, printer_id: str) -> None:
         super().__init__(f"printer {printer_id} is a Bambuddy virtual printer")
         self.printer_id = printer_id
+
+
+class StockNamesPrinterError(Exception):
+    """A merge found stock rows that still name the printer it deletes (#6949 K1 Task 16):
+    Go writes them, so its `inventory.Repoint` moves them first (`MergePrinter`)."""
+
+    def __init__(self, gone: str, kept: str) -> None:
+        super().__init__(f"stock rows still name printer {gone}")
+        self.gone = gone
+        self.kept = kept
+
+
+class MergeChangedError(Exception):
+    """A merge's workflow found that the caller would now merge another pair of rows."""
+
+    def __init__(self, gone: str, kept: str) -> None:
+        super().__init__(f"the merge of printer {gone} into {kept} is no longer the one to make")
+        self.gone = gone
+        self.kept = kept
+
+
+class MergeRunningError(Exception):
+    """A merge's workflow still runs after the wait (`MergePrinter`); it ends by itself and
+    publishes ``printer.changed``. ``accepted`` names it."""
+
+    def __init__(self, accepted: WorkflowAccepted) -> None:
+        super().__init__(f"the printer merge {accepted.workflow_id} still runs")
+        self.accepted = accepted
 
 
 class LanLinkChangedError(Exception):
@@ -138,9 +234,15 @@ class SerialUnknownError(ValueError):
         self.printer_id = printer_id
 
 
-#: ``hook(conn, merged, into)``: repoint one table's references from ``merged`` to
-#: ``into`` inside the merge's transaction (module docstring).
-RepointHook = Callable[[Connection[DictRow], str, str], None]
+#: The actor of a printer merge that Bambuddy's own listing causes (#6949): the periodic
+#: sync, a strip read or a run that finds the serial of a row it made without one.
+BAMBUDDY_ACTOR = Actor(kind="provider", principal="bambuddy")
+
+
+#: ``hook(conn, merged, into, by)``: repoint one table's references from ``merged`` to
+#: ``into`` inside the merge's transaction (module docstring); ``by`` is who merged, the
+#: actor of the history a hook's writes publish (#6949).
+RepointHook = Callable[[Connection[DictRow], str, str, Actor], None]
 
 
 @dataclass(frozen=True)
@@ -155,7 +257,9 @@ class PrinterReference:
     repoint: RepointHook | None = None
 
 
-def _repoint_filament_locations(conn: Connection[DictRow], merged: str, into: str) -> None:
+def _repoint_filament_locations(
+    conn: Connection[DictRow], merged: str, into: str, by: Actor
+) -> None:
     # Imported here: the filament inventory is a feature of its own, and the registry
     # needs it only while merging.
     from scadbuddy.filament.locations import repoint_printer_locations
@@ -163,21 +267,31 @@ def _repoint_filament_locations(conn: Connection[DictRow], merged: str, into: st
     repoint_printer_locations(conn, uuid.UUID(merged), uuid.UUID(into))
 
 
-def _repoint_filament_sensors(conn: Connection[DictRow], merged: str, into: str) -> None:
+def _repoint_filament_sensors(conn: Connection[DictRow], merged: str, into: str, by: Actor) -> None:
     from scadbuddy.filament.sensors import repoint_printer_sensors
 
     repoint_printer_sensors(conn, uuid.UUID(merged), uuid.UUID(into))
 
 
-def _drop_override_slots(conn: Connection[DictRow], merged: str, into: str) -> None:
+def _drop_override_slots(conn: Connection[DictRow], merged: str, into: str, by: Actor) -> None:
     """#6264: the merged printer's override-slot rows are dropped, not moved: a row is only
     the attempt guard of a slot the AMS may have reset, and the kept printer's next
     reconcile reads its report and configures what differs."""
     conn.execute("DELETE FROM filament_override_slots WHERE printer_id = %s", (merged,))
 
 
+#: The actor of the spool moves a printer's delete books (`PrinterStore.delete`).
+PRINTER_DELETE_ACTOR = "system:printer-delete"
+
+
+def _drop_unknown_trays(conn: Connection[DictRow], merged: str, into: str, by: Actor) -> None:
+    """#7143: the merged printer's unknown-tray rows are dropped, not moved. The kept
+    printer's next report records what it shows."""
+    conn.execute("DELETE FROM filament_unknown_trays WHERE printer_id = %s", (merged,))
+
+
 def _repoint_k_values(table: str) -> RepointHook:
-    def repoint(conn: Connection[DictRow], merged: str, into: str) -> None:
+    def repoint(conn: Connection[DictRow], merged: str, into: str, by: Actor) -> None:
         from scadbuddy.filament.types import repoint_k_values
 
         repoint_k_values(conn, table, uuid.UUID(merged), uuid.UUID(into))
@@ -185,7 +299,7 @@ def _repoint_k_values(table: str) -> RepointHook:
     return repoint
 
 
-def _repoint_run_activity(conn: Connection[DictRow], merged: str, into: str) -> None:
+def _repoint_run_activity(conn: Connection[DictRow], merged: str, into: str, by: Actor) -> None:
     # A print run's activity row names its printer in the ``printer`` facet (#3823 Task
     # 8), a JSON value rather than a column, so no foreign key keeps it.
     conn.execute(
@@ -200,7 +314,7 @@ def _repoint_keyed(table: str, keys: tuple[str, ...]) -> RepointHook:
     whose ``keys`` the kept printer already has: the kept printer's stands."""
     same = " AND ".join(f"kept.{key} = gone.{key}" for key in keys)
 
-    def repoint(conn: Connection[DictRow], merged: str, into: str) -> None:
+    def repoint(conn: Connection[DictRow], merged: str, into: str, by: Actor) -> None:
         conn.execute(
             f"DELETE FROM {table} AS gone WHERE gone.printer_id = %(merged)s::uuid"
             f" AND EXISTS (SELECT 1 FROM {table} AS kept"
@@ -220,7 +334,7 @@ def _forget_run_activity(conn: Connection[DictRow], printer_id: str) -> None:
     )
 
 
-def _repoint_lan_imports(conn: Connection[DictRow], merged: str, into: str) -> None:
+def _repoint_lan_imports(conn: Connection[DictRow], merged: str, into: str, by: Actor) -> None:
     # #6045: a LAN-only printer's print record (#4699 phase 4) is found by
     # ``printer_key``, so the key follows the row to the kept printer, and a job recorded
     # again after the merge (under the kept id) finds its row. A job the kept printer
@@ -244,7 +358,7 @@ def _repoint_lan_imports(conn: Connection[DictRow], merged: str, into: str) -> N
 MACHINE_RATE_TABLES = ("printer_cost_profiles", "printer_wear_parts", "printer_maintenance_costs")
 
 
-def _repoint_machine_rate(conn: Connection[DictRow], merged: str, into: str) -> None:
+def _repoint_machine_rate(conn: Connection[DictRow], merged: str, into: str, by: Actor) -> None:
     # The three tables are one set of inputs: when the kept printer has a profile, all of
     # the gone printer's rows go; otherwise all of them move. Never a mix of the two.
     kept = conn.execute(
@@ -264,7 +378,7 @@ def _repoint_rate_events(table: str) -> RepointHook:
     ``source`` names one event across both tables, so it is looked up in both."""
     history = table == "printer_maintenance_events"
 
-    def repoint(conn: Connection[DictRow], merged: str, into: str) -> None:
+    def repoint(conn: Connection[DictRow], merged: str, into: str, by: Actor) -> None:
         same_history = (
             " OR EXISTS (SELECT 1 FROM printer_maintenance_events AS kept"
             " WHERE kept.printer = %(into)s"
@@ -298,7 +412,7 @@ PRINTER_KEYED_SETTINGS = (
 PRINTER_LISTED_SETTINGS = ("print_auto_import_skip_lan_printers",)
 
 
-def _repoint_settings(conn: Connection[DictRow], merged: str, into: str) -> None:
+def _repoint_settings(conn: Connection[DictRow], merged: str, into: str, by: Actor) -> None:
     # The default printer, the registry-keyed map entries and each subject's
     # remembered printer are JSON values (#4971, #5167), so no foreign key keeps them. A
     # map entry ``into`` has of its own wins.
@@ -328,6 +442,39 @@ def _repoint_settings(conn: Connection[DictRow], merged: str, into: str) -> None
     )
 
 
+#: The columns that point at a place and have no move path that writes an event
+#: (#8177): a lot's or a unit's patch sets its place with no stock move, and nothing
+#: writes `location_ref_id` yet. A printer's delete is refused while one points at one of
+#: its places, rather than changed behind the inventory's back.
+_PLACE_REFERENCES = (
+    ("stock_lots", "location_id"),
+    ("stock_units", "location_id"),
+    ("stock_units", "location_ref_id"),
+)
+
+
+def _place_references(
+    conn: Connection[DictRow], printer_id: uuid.UUID
+) -> list[tuple[str, uuid.UUID]]:
+    """Each ``(table.column, id)`` of `_PLACE_REFERENCES` that points at one of the
+    printer's places, by kind then id. Read after the places are locked
+    (`lock_printer_places_on`): a lot or unit that would point at one of them waits on its
+    foreign key check, and one that passed it has committed, so no row can appear between
+    this read and the cascade. The rows themselves are not locked: a row found refuses the
+    delete, which then writes nothing, and a lock here would deadlock with a stock patch
+    that holds its lot and waits on one of the printer's places (`inventory/stock.py`
+    locks the lot, then its new place's key)."""
+    found: list[tuple[str, uuid.UUID]] = []
+    for table, column in _PLACE_REFERENCES:
+        rows = conn.execute(
+            f"SELECT r.id FROM {table} r JOIN filament_locations l ON l.id = r.{column}"
+            " WHERE l.printer_id = %s ORDER BY r.id",
+            (printer_id,),
+        ).fetchall()
+        found.extend((f"{table}.{column}", row["id"]) for row in rows)
+    return found
+
+
 def _forget_settings(conn: Connection[DictRow], printer_id: str) -> None:
     # A deleted printer is no default: `_named_printer` would refuse every run that
     # names no printer (#4971).
@@ -349,8 +496,66 @@ def _forget_settings(conn: Connection[DictRow], printer_id: str) -> None:
     )
 
 
-def _repoint_entity(conn: Connection[DictRow], gone: str, into: str) -> None:
-    repoint_entity(conn, "printer", gone, into)
+def _repoint_entity(conn: Connection[DictRow], gone: str, into: str, by: Actor) -> None:
+    repoint_entity(conn, "printer", gone, into, by)
+
+
+def _no_stock_names(conn: Connection[DictRow], gone: str, kept: str) -> None:
+    """The merge's check before it writes (#6949 K1 Task 16): the gone printer locked `FOR
+    UPDATE`, and both printers' entity rows (in id order, as `repoint_entity` locks them),
+    so no stock write can name it until the merge commits; then `StockNamesPrinterError`
+    when a stock row still names it (`stock_units.printer_id`, or a `stock_moves.entity_id`
+    of ``printer:<gone>``). Go is the one writer of those rows: its `inventory.Repoint`
+    moves them (`MergePrinter`), and the stock tables are not in `PRINTER_REFERENCES`."""
+    conn.execute("SELECT 1 FROM printers WHERE id = %s FOR UPDATE", (gone,))
+    conn.execute(
+        "SELECT id FROM entities WHERE kind = 'printer' AND ref = ANY(%s) ORDER BY id FOR UPDATE",
+        ([gone, kept],),
+    )
+    row = conn.execute(
+        "SELECT EXISTS (SELECT 1 FROM stock_units WHERE printer_id = %s)"
+        " OR EXISTS (SELECT 1 FROM stock_moves m JOIN entities e ON e.id = m.entity_id"
+        "  WHERE e.kind = 'printer' AND e.ref = %s) AS named",
+        (gone, gone),
+    ).fetchone()
+    if row is not None and row["named"]:
+        raise StockNamesPrinterError(gone, kept)
+
+
+def printer_problem(error: Exception) -> dict[str, Any] | None:
+    """A refusal of a merge's own checks as `MergePrinter` fails with it (R-K1-32); None for
+    any other error. `printer_error` reads it back."""
+    if isinstance(error, PrinterNotFoundError):
+        return {"code": "printer_not_found", "status": 404, "printer_id": error.printer_id}
+    if isinstance(error, SerialTakenError):
+        return {"code": "serial_taken", "status": 409, "existing_id": error.existing_id}
+    if isinstance(error, BambuddyLinkTakenError):
+        return {
+            "code": "bambuddy_link_taken",
+            "status": 409,
+            "existing_id": error.existing_id,
+            "bambuddy_printer_id": error.bambuddy_printer_id,
+        }
+    if isinstance(error, VirtualPrinterRowError):
+        return {"code": "virtual_printer_row", "status": 409, "printer_id": error.printer_id}
+    if isinstance(error, MergeChangedError):
+        return {"code": "merge_changed", "status": 409, "gone": error.gone, "kept": error.kept}
+    return None
+
+
+def printer_error(problem: dict[str, Any]) -> Exception:
+    code = problem.get("code")
+    if code == "printer_not_found":
+        return PrinterNotFoundError(str(problem["printer_id"]))
+    if code == "serial_taken":
+        return SerialTakenError(str(problem["existing_id"]))
+    if code == "bambuddy_link_taken":
+        return BambuddyLinkTakenError(
+            str(problem["existing_id"]), int(problem["bambuddy_printer_id"])
+        )
+    if code == "virtual_printer_row":
+        return VirtualPrinterRowError(str(problem["printer_id"]))
+    return MergeChangedError(str(problem.get("gone")), str(problem.get("kept")))
 
 
 #: Everything a merge repoints (I7 of the #4186 review). The extension point for every
@@ -371,8 +576,6 @@ PRINTER_REFERENCES: tuple[PrinterReference | RepointHook, ...] = (
     PrinterReference("print_runs", "printer"),
     # #4747: the printer a Bambuddy virtual printer forwards to.
     PrinterReference("printers", "forwards_to"),
-    # #7067: the printer a stock unit is (inventory spec §6.4).
-    PrinterReference("stock_units", "printer_id"),
     # #4971: the plate remembered on a printer; the kept printer's own wins.
     PrinterReference("printer_bed_types", "printer", unique=True),
     # #4971: the LAN-only printer a Bambuddy project last printed on.
@@ -418,6 +621,9 @@ PRINTER_REFERENCES: tuple[PrinterReference | RepointHook, ...] = (
     ),
     # #6264: the slots of override tags (dropped; the kept printer's reconcile redoes them).
     PrinterReference("filament_override_slots", "printer_id", repoint=_drop_override_slots),
+    # #7143: the unknown trays a printer reported (dropped; the kept printer's report
+    # records them again).
+    PrinterReference("filament_unknown_trays", "printer_id", repoint=_drop_unknown_trays),
     # #7276: ScadBuddy's K-profile notes and slot presets (``into``'s wins a key both have).
     PrinterReference(
         "printer_kprofile_notes",
@@ -514,6 +720,9 @@ class PrinterStore:
         self.previous_kek = previous_kek
         #: Where a merge announces the two rows it touched (``printer.changed``).
         self.events = events
+        #: What starts `MergePrinter` (#6949 K1 Task 16) for a merge whose gone printer
+        #: stock rows name. Set by the printers component; None answers 503 for one.
+        self.merges: StockStarter | None = None
 
     @property
     def pool(self) -> Pool:
@@ -628,16 +837,35 @@ class PrinterStore:
             raise PrinterNotFoundError(printer_id)
         return _row(data)
 
-    def _merge(self, conn: Connection[DictRow], gone: str, kept: str) -> None:
+    def _merge(
+        self,
+        conn: Connection[DictRow],
+        gone: str,
+        kept: str,
+        by: Actor,
+        expect: tuple[str, str] | None = None,
+    ) -> None:
         """Make ``kept`` the printer ``gone`` was: every `PRINTER_REFERENCES` row naming
         ``gone`` names ``kept`` (a unique one is dropped when ``kept`` has its own), then
-        ``gone`` is deleted. In the caller's transaction, under its lock."""
+        ``gone`` is deleted. In the caller's transaction, under its lock. ``by`` is who
+        merged: `set_actor` names it, and takes the event log's lock, before any hook
+        locks a row (the entities' rows, `entities/actor.py`). `StockNamesPrinterError`
+        before anything is written when stock rows still name ``gone``
+        (`_no_stock_names`): the caller rolls back and starts `MergePrinter`. ``expect``
+        is the pair a `MergePrinter` run merges: another pair is `MergeChangedError`,
+        checked before the stock."""
+        set_actor(conn, by)
+        # The pair first: a run whose pair changed must answer `merge_changed`, not
+        # ``again`` for stock its own Repoint never moves (fix round 1).
+        if expect is not None and expect != (gone, kept):
+            raise MergeChangedError(*expect)
+        _no_stock_names(conn, gone, kept)
         for ref in PRINTER_REFERENCES:
             if not isinstance(ref, PrinterReference):
-                ref(conn, gone, kept)
+                ref(conn, gone, kept, by)
                 continue
             if ref.repoint is not None:
-                ref.repoint(conn, gone, kept)
+                ref.repoint(conn, gone, kept, by)
                 continue
             if ref.unique:
                 conn.execute(
@@ -672,10 +900,31 @@ class PrinterStore:
                 ),
             )
 
-    def link_bambuddy(self, printer_id: str, bambuddy_printer_id: int) -> PrinterRow:
+    def link_bambuddy(
+        self, printer_id: str, bambuddy_printer_id: int, by: Actor, *, wait: float | None = WAIT
+    ) -> PrinterRow:
         """Link ``printer_id`` to a Bambuddy printer. A row `ensure_bambuddy` made for
         that Bambuddy printer while its serial was withheld (a synthetic serial, no LAN
-        link) is merged into this one (`_merge`); any other holder refuses."""
+        link) is merged into this one (`_merge`, by ``by``); any other holder refuses.
+
+        A merge whose gone row stock rows name is `MergePrinter` (#6949 K1 Task 16): this
+        transaction rolls back before it writes, and the workflow repoints the stock, then
+        runs it again. `MergeRunningError` when it takes longer than ``wait`` seconds (None:
+        no cap); it ends by itself."""
+        try:
+            return self._link(printer_id, bambuddy_printer_id, by)
+        except StockNamesPrinterError as named:
+            args = {"printer_id": printer_id, "bambuddy_printer_id": bambuddy_printer_id}
+            row, _ = self._merge_through(named, "link", args, by, wait)
+            return row
+
+    def _link(
+        self,
+        printer_id: str,
+        bambuddy_printer_id: int,
+        by: Actor,
+        expect: tuple[str, str] | None = None,
+    ) -> PrinterRow:
         merged: str | None = None
         with self.pool.connection() as conn, conn.transaction():
             conn.execute(_LOCK)
@@ -692,7 +941,7 @@ class PrinterStore:
             if holder is not None:
                 if not (is_synthetic_serial(holder.serial) and holder.lan_host is None):
                     raise BambuddyLinkTakenError(holder.id, bambuddy_printer_id)
-                self._merge(conn, holder.id, row.id)
+                self._merge(conn, holder.id, row.id, by, expect)
                 merged = holder.id
             linked = self._update(
                 conn,
@@ -707,6 +956,70 @@ class PrinterStore:
             settings_written()
             self._announce(merged, linked.id)
         return linked
+
+    def _merge_through(
+        self,
+        named: StockNamesPrinterError,
+        then: Literal["link", "ensure"],
+        args: dict[str, Any],
+        by: Actor,
+        wait: float | None,
+    ) -> tuple[PrinterRow, bool]:
+        """`MergePrinter` for the merge ``named`` found, waited for up to ``wait`` seconds:
+        the caller's row and whether it wrote. Its refusal is the caller's own error."""
+        if self.merges is None:
+            raise unavailable("ScadBuddy's background service is not set up here.")
+        try:
+            done = self.merges.start_and_wait(
+                MERGE_PRINTER,
+                {
+                    "gone": named.gone,
+                    "kept": named.kept,
+                    "then": then,
+                    "args": args,
+                    "actor": by.model_dump(mode="json"),
+                },
+                id=f"entity_merge:printer:{named.gone}:{named.kept}",
+                wait=wait,
+            )
+        except WorkflowRefused as refused:
+            raise printer_error(refused.problem) from None
+        if isinstance(done, WorkflowAccepted):
+            raise MergeRunningError(done)
+        return PrinterRow.model_validate(done.body["row"]), bool(done.body.get("wrote"))
+
+    def merge_commit(
+        self,
+        gone: str,
+        kept: str,
+        then: Literal["link", "ensure"],
+        args: dict[str, Any],
+        by: Actor,
+    ) -> dict[str, Any]:
+        """`MergePrinter`'s second step (`printers_merge_commit`): the caller's whole
+        transaction as it runs without a workflow (`link_bambuddy`'s, or
+        `ensure_bambuddy_written`'s), which merges ``gone`` into ``kept``. ``{row, wrote}``;
+        ``{again: true}`` when a stock row named ``gone`` again meanwhile (it rolled back).
+        The caller's own refusals are raised."""
+        try:
+            if then == "link":
+                row = self._link(
+                    args["printer_id"], int(args["bambuddy_printer_id"]), by, (gone, kept)
+                )
+                return {"row": row.model_dump(mode="json"), "wrote": True}
+            listed = args.get("listed")
+            row, wrote = self._ensure_tx(
+                int(args["bambuddy_printer_id"]),
+                serial=args.get("serial"),
+                name=args["name"],
+                model=args.get("model"),
+                listed=None if listed is None else frozenset(listed),
+                by=by,
+                expect=(gone, kept),
+            )
+            return {"row": row.model_dump(mode="json"), "wrote": wrote}
+        except StockNamesPrinterError:
+            return {"again": True}
 
     def mark_bambuddy_active(self, active: Iterable[int]) -> None:
         """Record which linked Bambuddy printers Bambuddy lists as active now, so a strip
@@ -873,11 +1186,20 @@ class PrinterStore:
         name: str,
         model: str | None,
         listed: set[int] | frozenset[int] | None = None,
+        by: Actor,
     ) -> PrinterRow:
-        """`ensure_bambuddy_written`'s row, for the callers that need only the row."""
-        row, _ = self.ensure_bambuddy_written(
-            bambuddy_printer_id, serial=serial, name=name, model=model, listed=listed
-        )
+        """`ensure_bambuddy_written`'s row, for the callers that need only the row. While a
+        merge's workflow still runs after the wait, the row linking the Bambuddy printer as
+        it is now."""
+        try:
+            row, _ = self.ensure_bambuddy_written(
+                bambuddy_printer_id, serial=serial, name=name, model=model, listed=listed, by=by
+            )
+        except MergeRunningError:
+            found = self.by_bambuddy_id(bambuddy_printer_id)
+            if found is None:
+                raise
+            return found
         return row
 
     def ensure_bambuddy_written(
@@ -888,6 +1210,8 @@ class PrinterStore:
         name: str,
         model: str | None,
         listed: set[int] | frozenset[int] | None = None,
+        by: Actor,
+        wait: float | None = WAIT,
     ) -> tuple[PrinterRow, bool]:
         """The row for a Bambuddy printer, and whether this call wrote anything, decided
         under the lock (#4861: an adoption another caller made meanwhile is not this
@@ -897,11 +1221,15 @@ class PrinterStore:
         row, ``preferred_path`` ``bambuddy``. Without a serial (Bambuddy withheld it) the
         new row's serial is `synthetic_serial`, so an unlinked Bambuddy printer still
         gets exactly one row; once the serial is known a synthetic row adopts it, or is
-        merged into the row that already holds it (`_merge`).
+        merged into the row that already holds it (`_merge`, by ``by``).
 
         ``listed`` is every id Bambuddy lists now; ``None`` treats every link as live.
         The known case (a row links this id and has nothing to adopt) is read without
-        the lock, so a strip read waits on no writer."""
+        the lock, so a strip read waits on no writer.
+
+        A merge whose gone row stock rows name is `MergePrinter` (#6949 K1 Task 16), as in
+        `link_bambuddy`: `MergeRunningError` when it takes longer than ``wait`` seconds
+        (None: no cap, the print worker's CRUD route)."""
         with self.pool.connection() as conn:
             # One read: the linking row, and whether the serial's row is one the user
             # unlinked from this Bambuddy printer (then there is nothing to adopt).
@@ -916,11 +1244,47 @@ class PrinterStore:
             return linked, False
         if linked is not None and not self._adopts(linked, serial):
             return linked, False
+        try:
+            return self._ensure_tx(
+                bambuddy_printer_id, serial=serial, name=name, model=model, listed=listed, by=by
+            )
+        except StockNamesPrinterError as named:
+            args = {
+                "bambuddy_printer_id": bambuddy_printer_id,
+                "serial": serial,
+                "name": name,
+                "model": model,
+                "listed": None if listed is None else sorted(listed),
+            }
+            return self._merge_through(named, "ensure", args, by, wait)
+
+    def _ensure_tx(
+        self,
+        bambuddy_printer_id: int,
+        *,
+        serial: str | None,
+        name: str,
+        model: str | None,
+        listed: set[int] | frozenset[int] | None,
+        by: Actor,
+        expect: tuple[str, str] | None = None,
+    ) -> tuple[PrinterRow, bool]:
+        """`ensure_bambuddy_written`'s transaction under the lock."""
         merged: tuple[str, str] | None = None
         with self.pool.connection() as conn, conn.transaction():
             conn.execute(_LOCK)
+            # The event log's lock before any row a merge writes, `_forget_read_intervals`'
+            # too (`entities/actor.py`).
+            set_actor(conn, by)
             row, merged, wrote = self._ensure_locked(
-                conn, bambuddy_printer_id, serial=serial, name=name, model=model, listed=listed
+                conn,
+                bambuddy_printer_id,
+                serial=serial,
+                name=name,
+                model=model,
+                listed=listed,
+                by=by,
+                expect=expect,
             )
         if merged is not None:
             settings_written()  # after the commit, as in `link_bambuddy`
@@ -941,6 +1305,8 @@ class PrinterStore:
         name: str,
         model: str | None,
         listed: set[int] | frozenset[int] | None,
+        by: Actor,
+        expect: tuple[str, str] | None = None,
     ) -> tuple[PrinterRow, tuple[str, str] | None, bool]:
         """The row, the merge it made (gone, kept), and whether it wrote."""
 
@@ -974,7 +1340,7 @@ class PrinterStore:
                     _forget_read_intervals(conn, holder.id)
                 merged = None
                 if linked is not None:  # the synthetic row made meanwhile is this printer
-                    self._merge(conn, linked.id, holder.id)
+                    self._merge(conn, linked.id, holder.id, by, expect)
                     merged = (linked.id, holder.id)
                 row = self._update(
                     conn, holder.id, "bambuddy_printer_id = %s", (bambuddy_printer_id,)
@@ -1196,17 +1562,90 @@ class PrinterStore:
         return _row(data), "created" if holder is None else "conflict", True
 
     def delete(self, printer_id: str) -> None:
+        """Delete the printer's row; its places go with it (ON DELETE CASCADE). One
+        transaction: a refusal writes nothing.
+
+        Lock order (#8177), the order a report write and the capture backstop take:
+
+        1. The printer's report lock and its report row (`reports.lock_report_on`), which
+           a report write (`PrinterReportStore.advance_in`), `capture.reconcile_all` and
+           `capture.sync_ams_weights` take before any spool or place. So none of them
+           waits on a lock below while it holds the report that the cascade must delete.
+        2. The printer's place lock (`LocationStore.lock_printer_on`), which every
+           `ensure_*` takes before it makes or changes one of the printer's places. No new
+           place of the printer appears after this. A tray resolve
+           (`filament/unknown_resolve.py`) takes it before its spools, so it is taken
+           before the spools here too. A capture takes it after its spools, but under the
+           report row of step 1.
+        3. The spools in the printer's places, in id order, each moved to no place
+           (`release_printer_spools_on`), as `LocationStore.move` locks a spool before
+           its place.
+        4. The tree lock, then the printer's places in id order
+           (`lock_printer_places_on`), as a parent change (`LocationStore.update_on`)
+           takes the tree lock before its place.
+        5. The spools again: one that moved in between 3 and 4 has committed by now, and
+           no other can move in.
+        6. The stock rows that point at a place (`_place_references`): any refuses with
+           `PrinterPlacesReferencedError`.
+        7. The places under the printer's places, and the place they move to
+           (`release_printer_child_places_on`); a name clash refuses with
+           `PrinterPlaceNameClashError`.
+        8. The printer's row, and the cascade.
+
+        A deadlock, or a row that still points at a place when the cascade runs, is
+        `PrinterDeleteConflictError`: the transaction rolled back, and it can be tried
+        again."""
         key = printer_uuid(printer_id)
         if key is None:
             raise PrinterNotFoundError(printer_id)
-        with self.pool.connection() as conn:
-            gone = conn.execute("DELETE FROM printers WHERE id = %s", (key,))
-            if gone.rowcount == 0:
-                raise PrinterNotFoundError(printer_id)
-            # `print_runs.printer` goes null with the row (ON DELETE SET NULL); its runs'
-            # activity facets follow in the same transaction, so the Printer filter never
-            # offers a printer that is gone (#4442 M3).
-            _forget_run_activity(conn, str(key))
-            _forget_settings(conn, str(key))
+        from scadbuddy.filament.locations import (
+            ChildPlaceClashError,
+            LocationStore,
+            lock_printer_places_on,
+            release_printer_child_places_on,
+            release_printer_spools_on,
+        )
+        from scadbuddy.printers.reports import lock_report_on
+
+        try:
+            with self.pool.connection() as conn, conn.transaction():
+                lock_report_on(conn, str(key))
+                LocationStore.lock_printer_on(conn, key)
+                release_printer_spools_on(conn, key, actor=PRINTER_DELETE_ACTOR)
+                lock_printer_places_on(conn, key)
+                release_printer_spools_on(conn, key, actor=PRINTER_DELETE_ACTOR)
+                refs = _place_references(conn, key)
+                if refs:
+                    raise PrinterPlacesReferencedError(str(key), refs)
+                try:
+                    release_printer_child_places_on(conn, key)
+                except ChildPlaceClashError as clash:
+                    raise PrinterPlaceNameClashError(
+                        str(key), clash.place_id, clash.name, clash.other_id
+                    ) from None
+                try:
+                    gone = conn.execute("DELETE FROM printers WHERE id = %s", (key,))
+                except errors.ForeignKeyViolation as fk:
+                    # A row reached one of the printer's places after the checks above: the
+                    # cascade meets it. Only this statement maps a foreign key error; one
+                    # from any other step is a bug and stays a database error.
+                    logger.warning(
+                        "printer %s: its delete met a new reference to its places (%s on %s);"
+                        " the caller may try again",
+                        key,
+                        fk.diag.constraint_name,
+                        fk.diag.table_name,
+                    )
+                    raise PrinterDeleteConflictError(str(key)) from None
+                if gone.rowcount == 0:
+                    raise PrinterNotFoundError(printer_id)
+                # `print_runs.printer` goes null with the row (ON DELETE SET NULL); its runs'
+                # activity facets follow in the same transaction, so the Printer filter never
+                # offers a printer that is gone (#4442 M3).
+                _forget_run_activity(conn, str(key))
+                _forget_settings(conn, str(key))
+        except errors.DeadlockDetected:
+            logger.warning("printer %s: its delete hit a deadlock; the caller may try again", key)
+            raise PrinterDeleteConflictError(str(key)) from None
         # After the commit (#7384), as in `link_bambuddy`.
         settings_written()

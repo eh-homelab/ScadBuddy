@@ -22,6 +22,8 @@ from scadbuddy.filament import label_fonts, label_pdf, label_png
 from scadbuddy.filament.label_output import ALL_FIELDS, DEFAULT_FIELDS, LabelField
 from scadbuddy.filament.label_pdf import Label, Layout
 from scadbuddy.filament.label_templates import LabelTemplate
+from tests.api.test_filament import _type
+from tests.api.test_settings_runtime import _state
 
 pytestmark = pytest.mark.requires_postgres
 
@@ -180,7 +182,31 @@ def test_a_place_label_opens_the_label_address(
     assert client.post(PDF, json=body).status_code == 200
     code = f"L-{place['number']}"
     assert drawn[-1][0] == [
-        label_pdf.PlaceLabel(code=code, name="Dry box", qr=f"https://sb.example.com/x/{code}")
+        label_pdf.CodeLabel(code=code, name="Dry box", qr=f"https://sb.example.com/x/{code}")
+    ]
+
+
+def test_a_dry_box_gets_a_place_label(
+    client: TestClient, drawn: list[tuple[list[Label], LabelTemplate, Layout]]
+) -> None:
+    """Pin (#7167): a dry box is a place, so its label is the place label, `L-<number>`.
+    No change in `labels.py` was needed."""
+    kind = next(
+        r["id"]
+        for r in client.get(f"{URL}/catalog/location-kinds").json()
+        if r["name"] == "Dry box"
+    )
+    made = client.post(f"{URL}/locations", json={"name": "Box 7", "kind_id": kind, "capacity": 1})
+    assert made.status_code == 201, made.text
+    box = made.json()
+    assert (
+        client.put(SETTINGS, json={"filament_label_base_url": "https://sb.example.com"}).status_code
+        == 200
+    )
+    assert client.post(PDF, json={"location_ids": [box["id"]]}).status_code == 200
+    code = f"L-{box['number']}"
+    assert drawn[-1][0] == [
+        label_pdf.CodeLabel(code=code, name="Box 7", qr=f"https://sb.example.com/x/{code}")
     ]
 
 
@@ -222,6 +248,180 @@ def test_an_unknown_id_is_a_404_that_names_it(client: TestClient) -> None:
     )
     assert answer.status_code == 404, answer.text
     assert gone in answer.text
+
+
+BASE = {"filament_label_base_url": "https://sb.example.com"}
+
+
+def _kind(client: TestClient) -> dict[str, str]:
+    """An item kind made with SQL: the inventory routes are not this file's subject."""
+    kind_id, name = f"kt_{uuid4().hex[:12]}", f"Fasteners {uuid4().hex[:6]}"
+    with _state(client).refs.pool.connection() as conn:
+        conn.execute(
+            "INSERT INTO item_kinds (id, name, parent_id, tracking, created_at)"
+            " VALUES (%s, %s, 'part', 'unit', %s)",
+            (kind_id, name, datetime(2026, 1, 1, tzinfo=UTC)),
+        )
+    return {"id": kind_id, "name": name}
+
+
+def _item(client: TestClient, kind_id: str = "part", archived: bool = False) -> dict[str, str]:
+    """An item made with SQL, archived when asked."""
+    name = f"Grease {uuid4().hex[:6]}"
+    stamp = datetime(2026, 1, 1, tzinfo=UTC)
+    with _state(client).refs.pool.connection() as conn:
+        row = conn.execute(
+            "INSERT INTO items (kind_id, name, created_at, archived_at)"
+            " VALUES (%s, %s, %s, %s) RETURNING id",
+            (kind_id, name, stamp, stamp if archived else None),
+        ).fetchone()
+    assert row is not None
+    return {"id": str(row["id"]), "name": name}
+
+
+def _number(client: TestClient, table: str, row_id: object) -> int:
+    """An item's or a kind's number, read from its row."""
+    with _state(client).refs.pool.connection() as conn:
+        row = conn.execute(f"SELECT number FROM {table} WHERE id = %s", (row_id,)).fetchone()
+    assert row is not None
+    return int(row["number"])
+
+
+def test_a_type_label_opens_the_label_address(
+    client: TestClient, drawn: list[tuple[list[Label], LabelTemplate, Layout]]
+) -> None:
+    made = _type(client, code="10101", colour_name="Charcoal")
+    assert client.put(SETTINGS, json=BASE).status_code == 200
+    answer = client.post(PDF, json={"type_ids": [made["id"]]})
+    assert answer.status_code == 200, answer.text
+    code = f"T-{made['number']}"
+    assert drawn[-1][0] == [
+        label_pdf.CodeLabel(code=code, name="10101 Charcoal", qr=f"https://sb.example.com/x/{code}")
+    ]
+
+
+def test_a_type_label_needs_the_label_address(client: TestClient) -> None:
+    made = _type(client)
+    refused = client.post(PDF, json={"type_ids": [made["id"]]})
+    assert refused.status_code == 409, refused.text
+    assert refused.json()["code"] == "no_label_base"
+    assert refused.json()["detail"].startswith("A code label needs an address")
+
+
+def test_an_item_and_a_kind_get_code_labels(
+    client: TestClient, drawn: list[tuple[list[Label], LabelTemplate, Layout]]
+) -> None:
+    kind = _kind(client)
+    item = _item(client, kind["id"])
+    assert client.put(SETTINGS, json=BASE).status_code == 200
+    answer = client.post(PDF, json={"item_ids": [item["id"]], "kind_ids": [kind["id"]]})
+    assert answer.status_code == 200, answer.text
+    item_code = f"I-{_number(client, 'items', item['id'])}"
+    kind_code = f"K-{_number(client, 'item_kinds', kind['id'])}"
+    assert drawn[-1][0] == [
+        label_pdf.CodeLabel(
+            code=item_code, name=item["name"], qr=f"https://sb.example.com/x/{item_code}"
+        ),
+        label_pdf.CodeLabel(
+            code=kind_code, name=kind["name"], qr=f"https://sb.example.com/x/{kind_code}"
+        ),
+    ]
+
+
+def test_an_archived_item_still_gets_its_label(
+    client: TestClient, drawn: list[tuple[list[Label], LabelTemplate, Layout]]
+) -> None:
+    item = _item(client, archived=True)
+    assert client.put(SETTINGS, json=BASE).status_code == 200
+    answer = client.post(PDF, json={"item_ids": [item["id"]]})
+    assert answer.status_code == 200, answer.text
+    assert [label.name for label in drawn[-1][0] if isinstance(label, label_pdf.CodeLabel)] == [
+        item["name"]
+    ]
+
+
+def test_an_unknown_type_is_404(client: TestClient) -> None:
+    assert client.put(SETTINGS, json=BASE).status_code == 200
+    gone = str(uuid4())
+    answer = client.post(PDF, json={"type_ids": [_type(client)["id"], gone]})
+    assert answer.status_code == 404, answer.text
+    assert f"no spool type {gone}" in answer.text
+
+
+def test_the_labels_keep_the_subject_order(
+    client: TestClient, drawn: list[tuple[list[Label], LabelTemplate, Layout]]
+) -> None:
+    spool, place, made = _spool(client), _place(client, "Shelf 4"), _type(client)
+    kind = _kind(client)
+    item = _item(client, kind["id"])
+    assert client.put(SETTINGS, json=BASE).status_code == 200
+    body = {
+        "kind_ids": [kind["id"]],
+        "item_ids": [item["id"]],
+        "type_ids": [made["id"]],
+        "location_ids": [place["id"]],
+        "spool_ids": [spool["id"]],
+    }
+    assert client.post(PDF, json=body).status_code == 200
+    assert [label.qr for label in drawn[-1][0]] == [
+        f"scadbuddy:spool:{spool['id']}",
+        f"https://sb.example.com/x/L-{place['number']}",
+        f"https://sb.example.com/x/T-{made['number']}",
+        f"https://sb.example.com/x/I-{_number(client, 'items', item['id'])}",
+        f"https://sb.example.com/x/K-{_number(client, 'item_kinds', kind['id'])}",
+    ]
+
+
+def test_the_cap_counts_every_list(client: TestClient) -> None:
+    body = {
+        "spool_ids": [str(uuid4()) for _ in range(60)],
+        "item_ids": [str(uuid4()) for _ in range(41)],
+    }
+    answer = client.post(PDF, json=body)
+    assert answer.status_code == 422, answer.text
+
+
+def test_an_empty_request_is_422(client: TestClient) -> None:
+    answer = client.post(PDF, json={})
+    assert answer.status_code == 422, answer.text
+    assert "spools, places, types, items and kinds" in answer.text
+
+
+def test_the_cap_counts_types_items_and_kinds(client: TestClient) -> None:
+    body = {
+        "type_ids": [str(uuid4()) for _ in range(40)],
+        "item_ids": [str(uuid4()) for _ in range(40)],
+        "kind_ids": ["printer"] * 21,
+    }
+    answer = client.post(PDF, json=body)
+    assert answer.status_code == 422, answer.text
+    assert "spools, places, types, items and kinds" in answer.text
+
+
+def test_a_kind_id_is_bounded(client: TestClient) -> None:
+    answer = client.post(PDF, json={"kind_ids": ["k" * 41]})
+    assert answer.status_code == 422, answer.text
+
+
+def test_a_repeated_type_id_gives_two_labels(
+    client: TestClient, drawn: list[tuple[list[Label], LabelTemplate, Layout]]
+) -> None:
+    made = _type(client)
+    assert client.put(SETTINGS, json=BASE).status_code == 200
+    answer = client.post(PDF, json={"type_ids": [made["id"], made["id"]]})
+    assert answer.status_code == 200, answer.text
+    assert len(drawn[-1][0]) == 2
+    assert drawn[-1][0][0] == drawn[-1][0][1]
+
+
+def test_a_png_of_one_type_label_is_named_by_its_code(client: TestClient) -> None:
+    first, second = _type(client, code="A1"), _type(client, code="B2")
+    assert client.put(SETTINGS, json=BASE).status_code == 200
+    body = {"type_ids": [first["id"], second["id"]], "format": "png", "layout": "roll"}
+    answer = client.post(PDF, json=body)
+    assert answer.status_code == 200, answer.text
+    with zipfile.ZipFile(io.BytesIO(answer.content)) as archive:
+        assert archive.namelist() == [f"T-{first['number']}.png", f"T-{second['number']}.png"]
 
 
 @pytest.mark.parametrize(
@@ -390,3 +590,16 @@ def test_the_stored_fields_are_used(client: TestClient) -> None:
 def test_a_request_with_no_fields_is_a_422(client: TestClient) -> None:
     answer = client.post(PDF, json={"spool_ids": [str(uuid4())], "fields": []})
     assert answer.status_code == 422, answer.text
+
+
+def test_the_2x1_template_is_one_png_of_406_by_203(client: TestClient) -> None:
+    spool = _spool(client)
+    body = {
+        "spool_ids": [spool["id"]],
+        "template": {"template": "roll_2x1in"},
+        "format": "png",
+        "dpi": 203,
+    }
+    answer = client.post(PDF, json=body)
+    assert answer.status_code == 200, answer.text
+    assert Image.open(io.BytesIO(answer.content)).size == (406, 203)

@@ -55,10 +55,17 @@ def _is_api(path: str) -> bool:
 #: section lists them (https://plaid.com/docs/link/web/); not its `'unsafe-inline'`
 #: script-src, which the nonce variant there shows is for the script tag alone. A template
 #: UI can so reach Plaid's API too, an exfiltration path no wider than the navigation above.
+#: Cloudflare Web Analytics, which Cloudflare's proxy injects into the page, adds its beacon
+#: script (https://developers.cloudflare.com/web-analytics/faq/, "What do I need to add to my
+#: Content Security Policy"). The source ends in `/` because the beacon is served from
+#: `/beacon.min.js/v<hash>` (measured on prod's console, 2026-11-28), and a path without the
+#: slash matches only itself. With automatic setup the beacon reports to this origin's
+#: `/cdn-cgi/rum`, which `connect-src 'self'` already allows.
 PAGE_CSP = (
     "default-src 'self'; "
     "script-src 'self' 'sha256-Rj6+2fB2Z4lK/lRKWJfaWIDmhqY3Ffti9UBR4X6oq2U='"
-    " https://cdn.plaid.com/link/v2/stable/link-initialize.js; "
+    " https://cdn.plaid.com/link/v2/stable/link-initialize.js"
+    " https://static.cloudflareinsights.com/beacon.min.js/; "
     "connect-src 'self' https://production.plaid.com/ https://sandbox.plaid.com/; "
     "frame-src 'self' https://cdn.plaid.com/; "
     "img-src 'self' data: blob:; media-src 'self' blob:; "

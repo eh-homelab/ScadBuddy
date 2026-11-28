@@ -1,6 +1,6 @@
 import { API_BASE, request, uploadForm } from '../../api/client'
 import type { components } from '../../api/schema'
-import { propertyTexts } from '../../lib/filamentSearch'
+import { propertyTexts, type PropertyText } from '../../lib/filamentSearch'
 
 /**
  * #6950 — the files and links of any entity (`kind:ref`, such as `spool:<id>`):
@@ -14,6 +14,7 @@ export type EntityLink = Schemas['EntityLink']
 export type EntityLinkInput = Schemas['LinkInput']
 export type EntityLinkPatch = Schemas['LinkPatch']
 export type EntityProperty = Schemas['EntityProperty']
+export type PropertyChange = Schemas['PropertyChange']
 export type PropertyValue = EntityProperty['value']
 export type KindPropertySchema = Schemas['KindPropertySchema']
 
@@ -21,9 +22,10 @@ export type KindPropertySchema = Schemas['KindPropertySchema']
 export const ORDER_KINDS = new Set(['order', 'order_item', 'order_item_fulfilment', 'order_item_revision'])
 /**
  * #7703 — the kinds whose schema may list `required` keys, checked on the row's own create and
- * save (`backend/scadbuddy/entities/properties.py` `REQUIRED_KINDS`; items follow later).
+ * save (`backend/scadbuddy/entities/properties.py` `REQUIRED_KINDS`). `item` joined with
+ * R-K1-33 (#7950): an item kind's schema marks them, and Go's item create and save check.
  */
-export const REQUIRED_KINDS = new Set(['spool', 'spool_type', 'material', 'subtype', 'brand', 'category', 'effect', 'insert_material', 'insert_type', 'colour', 'location_kind'])
+export const REQUIRED_KINDS = new Set(['item', 'spool', 'spool_type', 'material', 'subtype', 'brand', 'category', 'effect', 'insert_material', 'insert_type', 'colour', 'location_kind'])
 
 /** Whether a property has a value (spec §6.3b): a blank string and an empty list do not; `false` and `0` do. */
 export function hasValue(value: PropertyValue | null | undefined): boolean {
@@ -89,6 +91,11 @@ export const entityApi = {
     request<{ properties: Record<string, Record<string, PropertyValue>> }>(`/entity-kinds/${encodeURIComponent(kind)}/properties`).then(
       (body) => body.properties,
     ),
+  /** #6949 — each set and remove of the entity's keys (only `key`'s when given), newest first. */
+  propertyHistory: (entity: string, key?: string) =>
+    request<{ changes: PropertyChange[] }>(`${base(entity)}/properties/history${key === undefined ? '' : `?key=${encodeURIComponent(key)}`}`).then(
+      (body) => body.changes,
+    ),
   propertySchema: (kind: string) => request<KindPropertySchema>(`/entity-kinds/${encodeURIComponent(kind)}/property-schema`),
   /** Replaces the kind's whole schema; a bad one is 422 `bad_property_schema`, and `item`'s is its item kinds' (409). */
   setPropertySchema: (kind: string, schema: Record<string, unknown>) =>
@@ -98,13 +105,13 @@ export const entityApi = {
 }
 
 /** #7026 — every entity of `kind`'s property values as search text (`propertyTexts`), by ref. A failed read throws. */
-export async function readKindPropertyTexts(kind: string): Promise<Map<string, string[]>> {
+export async function readKindPropertyTexts(kind: string): Promise<Map<string, PropertyText[]>> {
   const found = await entityApi.kindProperties(kind)
   return new Map(Object.entries(found).map(([ref, values]) => [ref, propertyTexts(values)]))
 }
 
 /** `readKindPropertyTexts`, but a failed read gives an empty map: the filament search still runs on everything else. */
-export async function loadKindPropertyTexts(kind: string): Promise<Map<string, string[]>> {
+export async function loadKindPropertyTexts(kind: string): Promise<Map<string, PropertyText[]>> {
   try {
     return await readKindPropertyTexts(kind)
   } catch {

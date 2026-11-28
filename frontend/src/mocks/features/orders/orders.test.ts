@@ -1,5 +1,6 @@
 import { beforeEach, describe, expect, it } from 'vitest'
 import { api, type ApiError } from '../../../api/client'
+import type { Fulfilment } from '../../../api/types'
 import { DEFAULT_ORDERS_QUERY } from '../../../lib/ordersQuery'
 import { MAZE_SLUG } from '../../fixtures'
 import { resetMockState } from '../../handlers'
@@ -419,7 +420,7 @@ describe('orders mock · duplicate and bulk fulfil (#4955)', () => {
     expect(refused?.problem.type).toBe(`${PROBLEMS}item_not_approved`)
     expect(refused?.problem['items']).toEqual([second.id])
     expect(state.fulfilments).toHaveLength(before)
-    const made = await api.fulfilOrderItems(ORDER_ACCEPTED, [{ item_id: ITEM_APPROVED, quantity: 2 }])
+    const made = (await api.fulfilOrderItems(ORDER_ACCEPTED, [{ item_id: ITEM_APPROVED, quantity: 2 }])) as Fulfilment[]
     expect(made.map((f) => [f.order_item_id, f.quantity, f.outcome, f.accepted_at !== null])).toEqual([[ITEM_APPROVED, 2, 'succeeded', true]])
     expect(state.items.find((i) => i.id === ITEM_APPROVED)!.status).toBe('fulfilled')
     expect(order.status).not.toBe('accepted')

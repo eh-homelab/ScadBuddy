@@ -5,6 +5,7 @@ off. Bambuddy is respx only."""
 
 from __future__ import annotations
 
+import asyncio
 import json
 from collections.abc import AsyncIterator
 from pathlib import Path
@@ -14,17 +15,21 @@ import httpx
 import pytest
 import respx
 from psycopg.types.json import Jsonb
+from temporalio.exceptions import ApplicationError
 
 from scadbuddy.bambuddy.client import BambuddyClient, BambuddyConfig
 from scadbuddy.bambuddy.models import LocalPreset, LocalPresetCatalogue
 from scadbuddy.filament.bb_sync_results import ResetRefusedError, reset_links, reset_preview
 from scadbuddy.filament.preset_mirror import (
     LOCK,
+    MirrorAgain,
+    instance_of,
+    mirror_again,
     mirror_pending,
     mirror_with,
     wants_mirror,
 )
-from scadbuddy.filament.rfid_push import try_lock_on
+from scadbuddy.filament.rfid_push import acquire_lock, try_lock_on
 from scadbuddy.filament.sb_presets import (
     FilamentPresetStore,
     adopt_held,
@@ -782,3 +787,166 @@ async def test_copies_of_the_document_sent_and_other_bambuddys_ids_are_named_rig
     assert create.call_count == 2
     note = _row(pg_pool, other)["mirror_error"]
     assert note is not None and "51" in note
+
+
+#: The settings of a send again that reaches Bambuddy.
+ON = StoredSettings(bambuddy_url=BASE, bambuddy_api_key="k")
+
+
+async def _again(
+    pool: PgPool,
+    blobs: LocalBlobStore,
+    preset_id: int,
+    settings: StoredSettings = ON,
+    timeout: float | None = None,
+) -> MirrorAgain:
+    store = FilamentPresetStore(pool, lambda: blobs)
+    if timeout is None:
+        return await mirror_again(pool, store, settings, preset_id)
+    return await mirror_again(pool, store, settings, preset_id, timeout)
+
+
+def _error_at(pool: PgPool, preset_id: int) -> Any:
+    with pool.connection() as conn:
+        row = conn.execute(
+            "SELECT mirror_error_at FROM filament_presets WHERE id = %s", (preset_id,)
+        ).fetchone()
+    assert row is not None
+    return row["mirror_error_at"]
+
+
+def _failed_before(pool: PgPool, preset_id: int) -> None:
+    with pool.connection() as conn:
+        conn.execute(
+            "UPDATE filament_presets SET mirror_error = 'Bambuddy: down',"
+            " mirror_error_at = now() - interval '1 day' WHERE id = %s",
+            (preset_id,),
+        )
+
+
+@respx.mock
+async def test_send_again_sends_a_failed_preset(pg_pool: PgPool, tmp_path: Path) -> None:
+    blobs = LocalBlobStore(tmp_path / "blobs")
+    made = await _make(pg_pool, blobs, {"name": "Again"}, source="manual")
+    _failed_before(pg_pool, made)
+    listed()
+    create = respx.post(f"{API}/local-presets/").mock(
+        return_value=httpx.Response(200, json=_preset_json(61, "Again"))
+    )
+
+    assert await _again(pg_pool, blobs, made) == "sent"
+
+    assert create.call_count == 1
+    row = _row(pg_pool, made)
+    assert (row["bb_preset_id"], row["mirrored_sha256"]) == (61, row["sha256"])
+    assert (row["mirror_error"], _error_at(pg_pool, made)) == (None, None)
+
+
+@respx.mock
+async def test_send_again_keeps_a_new_failure(pg_pool: PgPool, tmp_path: Path) -> None:
+    blobs = LocalBlobStore(tmp_path / "blobs")
+    made = await _make(pg_pool, blobs, {"name": "Still down"})
+    _failed_before(pg_pool, made)
+    before = _error_at(pg_pool, made)
+    listed()
+    respx.post(f"{API}/local-presets/").mock(
+        return_value=httpx.Response(403, json={"detail": "Forbidden"})
+    )
+
+    assert await _again(pg_pool, blobs, made) == "failed"
+
+    assert _error_at(pg_pool, made) > before
+    assert _row(pg_pool, made)["mirrored_sha256"] is None
+
+
+@respx.mock
+async def test_send_again_of_a_sent_preset_calls_nothing(pg_pool: PgPool, tmp_path: Path) -> None:
+    """respx refuses any request no route mocks, so a call to Bambuddy fails the test."""
+    blobs = LocalBlobStore(tmp_path / "blobs")
+    made = await _make(pg_pool, blobs, {"name": "In step"}, bb_id=5, instance=instance_of(ON))
+    with pg_pool.connection() as conn:
+        conn.execute("UPDATE filament_presets SET mirrored_sha256 = sha256 WHERE id = %s", (made,))
+
+    assert await _again(pg_pool, blobs, made) == "in_sync"
+
+
+@pytest.mark.parametrize(
+    "refusal",
+    ["preset_not_found", "not_mirrored", "mirror_off", "not_configured", "instance_changed"],
+)
+@respx.mock
+async def test_send_again_refusals(pg_pool: PgPool, tmp_path: Path, refusal: str) -> None:
+    """Each refusal is a non-retryable failure of its type, with no Bambuddy call (respx
+    refuses any request no route mocks)."""
+    blobs = LocalBlobStore(tmp_path / "blobs")
+    made = await _make(
+        pg_pool,
+        blobs,
+        {"name": "Refused"},
+        source="bambuddy" if refusal == "not_mirrored" else "3dfp",
+    )
+    settings = {
+        "mirror_off": StoredSettings(
+            bambuddy_url=BASE, bambuddy_api_key="k", filament_preset_mirror=False
+        ),
+        "not_configured": StoredSettings(),
+    }.get(refusal, ON)
+    if refusal == "instance_changed":
+        _links_name(pg_pool, OLD)
+    preset_id = made + 1000 if refusal == "preset_not_found" else made
+
+    with pytest.raises(ApplicationError) as caught:
+        await _again(pg_pool, blobs, preset_id, settings)
+
+    assert (caught.value.type, caught.value.non_retryable) == (refusal, True)
+    assert _row(pg_pool, made)["mirror_error"] is None
+
+
+@respx.mock
+async def test_send_again_while_another_mirror_runs_is_busy(
+    pg_pool: PgPool, tmp_path: Path
+) -> None:
+    blobs = LocalBlobStore(tmp_path / "blobs")
+    made = await _make(pg_pool, blobs, {"name": "Waits"})
+    conninfo = pg_pool.conninfo
+    held = await acquire_lock(conninfo() if callable(conninfo) else str(conninfo), LOCK)
+    assert held is not None
+    try:
+        assert await _again(pg_pool, blobs, made) == "busy"
+    finally:
+        held.close()
+    assert _row(pg_pool, made)["mirrored_sha256"] is None
+
+
+@respx.mock
+async def test_send_again_with_an_old_error_while_another_mirror_runs_is_busy(
+    pg_pool: PgPool, tmp_path: Path
+) -> None:
+    """An error from before the start is no failure of this send: the lock is held, so busy."""
+    blobs = LocalBlobStore(tmp_path / "blobs")
+    made = await _make(pg_pool, blobs, {"name": "Waits"}, source="manual")
+    _failed_before(pg_pool, made)
+    conninfo = pg_pool.conninfo
+    held = await acquire_lock(conninfo() if callable(conninfo) else str(conninfo), LOCK)
+    assert held is not None
+    try:
+        assert await _again(pg_pool, blobs, made) == "busy"
+    finally:
+        held.close()
+
+
+@respx.mock
+async def test_send_again_past_its_timeout_is_pending(pg_pool: PgPool, tmp_path: Path) -> None:
+    """Bambuddy never answers the create, so any bound is passed."""
+    blobs = LocalBlobStore(tmp_path / "blobs")
+    made = await _make(pg_pool, blobs, {"name": "Slow"})
+    listed()
+
+    async def never(request: httpx.Request) -> httpx.Response:
+        await asyncio.Event().wait()
+        raise AssertionError("unreachable")
+
+    respx.post(f"{API}/local-presets/").mock(side_effect=never)
+
+    assert await _again(pg_pool, blobs, made, timeout=0.05) == "pending"
+    assert _row(pg_pool, made)["mirrored_sha256"] is None

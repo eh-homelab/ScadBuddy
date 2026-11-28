@@ -170,7 +170,7 @@ describe('PendingCard, a prompt (#7364)', () => {
     expect(screen.queryByRole('textbox', { name: 'Your answer' })).toBeNull()
     await waitFor(() => expect(reads.length).toBeGreaterThan(0))
     const before = reads.length
-    await user.click(screen.getByRole('checkbox', { name: /Also send a text message/ }))
+    await user.click(screen.getByRole('switch', { name: /Also send a text message/ }))
     await answer(user, 'jo@example.com')
     expect(await screen.findByText('Answered')).toBeInTheDocument()
     noForm()
@@ -692,9 +692,8 @@ describe('PendingCard and the assistant', () => {
     const { user } = draw()
     await user.type(email(), 'draft@example.com')
     expect(await refused('fill', { label: 'Email *email', value: 'agent@example.com' })).toBe('This is for the user to fill in.')
-    await refused('fill', { label: 'Languagelanguage', value: 'French' })
     await refused('click', { role: 'button', name: 'Answer' })
-    await refused('click', { role: 'checkbox', name: 'Also send a text messagealso_sms' })
+    await refused('click', { role: 'switch', name: 'Also send a text messagealso_sms' })
     // Settings' own tool does not reach a run's page.
     expect((await bridge.call('set_field', { field: 'bambuddy_url', value: 'x' })).ok).toBe(false)
     expect(email()).toHaveValue('draft@example.com')
@@ -704,14 +703,13 @@ describe('PendingCard and the assistant', () => {
     expect(snapshot.elements).toContainEqual(expect.objectContaining({ name: 'Answer', userOnly: true }))
   })
 
-  it('may not pick from a prompt’s open list', async () => {
+  it('may not pick a prompt’s option', async () => {
     const { user } = draw()
-    const language = screen.getByRole('combobox', { name: /Language/ })
-    await user.click(language)
-    await screen.findByRole('option', { name: 'French' })
-    await refused('click', { role: 'option', name: 'French' })
-    await user.click(screen.getByRole('option', { name: 'French' }))
-    expect(language).toHaveTextContent('French')
+    const french = screen.getByRole('radio', { name: 'French' })
+    await refused('click', { role: 'radio', name: 'French' })
+    expect(french).not.toBeChecked()
+    await user.click(french)
+    expect(french).toBeChecked()
   })
 
   it('may not fill or send a text answer, or read its draft; the person may', async () => {

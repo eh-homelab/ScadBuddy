@@ -80,11 +80,20 @@ func WouldRefuse(class string, c Caller, requestHeader, headerNeeded bool, metho
 	switch {
 	case class == "public" || class == "transfer" || class == "exchange":
 		return ""
+	case c.IsFleetToken():
+		// fleetd's token (#8041, #8179): core's rotator routes and nothing else.
+		if class == FleetRotatorClass {
+			return ""
+		}
+		return OutOfScope
 	case strings.HasPrefix(class, "internal."):
 		if !service {
 			return NoCredential
 		}
 		return scoped(c, class)
+	case c.Kind == KindToken && class == FleetRotatorClass:
+		// Only a fleet token, above, may call them; a read or write token may not.
+		return OutOfScope
 	case strings.HasPrefix(class, "crud."):
 		if !service {
 			return NoCredential
@@ -117,6 +126,10 @@ func WouldRefuse(class string, c Caller, requestHeader, headerNeeded bool, metho
 	}
 	return ""
 }
+
+// FleetRotatorClass is the class of core's routes for fleetd, the only ones a fleet token
+// reaches (auth/routes.py FLEET_ROTATOR_CLASS).
+const FleetRotatorClass = "crud.fleet-rotator"
 
 func scoped(c Caller, class string) string {
 	if c.Service.Has(class) {
@@ -214,6 +227,18 @@ func (g *Gate) Wrap(route Route, next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		c := g.Resolver.Caller(r.Context(), r.Header)
 		r = r.WithContext(WithCaller(r.Context(), c))
+		if c.IsFleetToken() {
+			// Refused in every mode where enforce would refuse it (auth/check.py auth_check,
+			// #8041): it must never act as its person. Not counted, as Python counts none.
+			if reason := WouldRefuse(route.Class, c, false, false, r.Method); reason != "" {
+				if strings.EqualFold(r.Header.Get("Upgrade"), "websocket") {
+					w.WriteHeader(http.StatusForbidden)
+					return
+				}
+				httpx.WriteProblem(w, r, Refusal(route.Class, reason, true))
+				return
+			}
+		}
 		if g.Mode != Observe && g.Mode != Enforce {
 			next.ServeHTTP(w, r)
 			return

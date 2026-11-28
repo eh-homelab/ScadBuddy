@@ -31,6 +31,7 @@ const KINDS: { id: Kind; title: string }[] = [
   { id: 'restored', title: 'Restored' },
   { id: 'synced_from_bb', title: 'Synced from Bambuddy' },
   { id: 'consumed_reset', title: 'Used counter reset' },
+  { id: 'non_print_waste', title: 'Non-print waste' },
 ]
 const SOURCES: { id: Source; title: string }[] = [
   { id: 'person', title: 'Person' },

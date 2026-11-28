@@ -1,10 +1,10 @@
 import { memo, useEffect, useId, useRef, useState, type FormEvent, type KeyboardEvent, type RefObject } from 'react'
 import { Link } from 'react-router'
-import { PencilIcon, PlusIcon, Trash2Icon, XIcon } from 'lucide-react'
+import { HistoryIcon, PencilIcon, PlusIcon, Trash2Icon, XIcon } from 'lucide-react'
 import { inventoryPaths } from '../../lib/inventoryLinks'
 import { failure } from '../../lib/mediaFiles'
 import { useAsync } from '../../lib/useAsync'
-import { entityParts, entityApi, type EntityProperty, type KindPropertySchema, type PropertyValue } from './api'
+import { entityParts, entityApi, type EntityProperty, type KindPropertySchema, type PropertyChange, type PropertyValue } from './api'
 import { KindKeysForm } from './KindKeysForm'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
@@ -176,20 +176,23 @@ function PatchFeedback({ patch, locked }: { patch: ReturnType<typeof usePatch>; 
  * lot number. Each row shows the key, its value (a list as chips) and what the kind's schema
  * says of the key. A key is edited in place; renaming one is one PATCH that removes the old
  * key and sets the new. The server decides what a key and a value may be (`bad_property_value`).
+ * `hideKeys` (R-K1-33): keys a form on the page holds as its own fields, which the panel does
+ * not list, so it lists only the other keys. They stay known to the add form.
  */
-export const PropertiesPanel = memo(function PropertiesPanel({ entity, title }: { entity: string; title?: string }) {
+export const PropertiesPanel = memo(function PropertiesPanel({ entity, title, hideKeys }: { entity: string; title?: string; hideKeys?: readonly string[] }) {
   // Keyed by its entity: a page that keeps the panel while its id changes (the quick find
   // opens another type from a type's page) gets a fresh one, so an earlier entity's PATCH
   // reply, edit or write lock never lands on the next one.
-  return <EntityProperties key={entity} entity={entity} title={title} />
+  return <EntityProperties key={entity} entity={entity} title={title} hideKeys={hideKeys} />
 })
 
-function EntityProperties({ entity, title = 'Properties' }: { entity: string; title?: string }) {
+function EntityProperties({ entity, title = 'Properties', hideKeys }: { entity: string; title?: string; hideKeys?: readonly string[] }) {
   const list = useAsync(() => entityApi.properties(entity), [entity])
   // #7067 — per entity: an item's schema is its item kind's, which `GET /entity-kinds/item/…` refuses.
   const schema = useAsync(() => entityApi.entityPropertySchema(entity), [entity])
-  const properties = list.data ?? []
-  const keys = new Set(properties.map((property) => property.key))
+  const all = list.data ?? []
+  const keys = new Set(all.map((property) => property.key))
+  const properties = hideKeys?.length ? all.filter((property) => !hideKeys.includes(property.key)) : all
   const docs = keyDocs(schema.data)
   const suggestions = [...new Set([...Object.keys(docs), ...(schema.data?.keys_in_use ?? []).map((row) => row.key)])].sort()
   const keysId = useId()
@@ -277,6 +280,7 @@ function EntityProperties({ entity, title = 'Properties' }: { entity: string; ti
                     else setFocusKey(after)
                   }}
                   onPatch={patch}
+                  entity={entity}
                 />
               ))}
             </tbody>
@@ -388,6 +392,7 @@ function PropertyRow({
   onClosed,
   onRemoved,
   onPatch,
+  entity,
 }: {
   property: EntityProperty
   doc: KeyDoc | undefined
@@ -404,9 +409,11 @@ function PropertyRow({
   /** The row's key was removed; the panel moves the focus. */
   onRemoved: () => void
   onPatch: Patch
+  entity: string
 }) {
   const { key } = property
   const [editing, setEditing] = useState(false)
+  const [historyOpen, setHistoryOpen] = useState(false)
   const [newKey, setNewKey] = useState(key)
   const [draft, setDraft] = useState<Draft>(() => draftOf(property.value))
   // An untouched value is sent as stored, so a rename alone never changes it.
@@ -498,6 +505,7 @@ function PropertyRow({
   }
 
   return (
+    <>
     <tr className="align-top">
       <th scope="row" className="w-2/5 px-2.5 py-1.5 text-left font-normal">
         <span className="font-mono text-[12px] break-all">{key}</span>
@@ -508,6 +516,16 @@ function PropertyRow({
         <PatchFeedback patch={patch} locked={locked} />
       </td>
       <td className="w-px py-1 pr-1 whitespace-nowrap">
+        <Button
+          variant="ghost"
+          size="icon-sm"
+          aria-label={`History of ${key}`}
+          title="History"
+          aria-expanded={historyOpen}
+          onClick={() => setHistoryOpen((open) => !open)}
+        >
+          <HistoryIcon aria-hidden="true" />
+        </Button>
         <Button
           ref={editButton}
           variant="ghost"
@@ -538,6 +556,86 @@ function PropertyRow({
         </Button>
       </td>
     </tr>
+    {historyOpen && (
+      <tr>
+        <td colSpan={3} className="px-2.5 pb-2">
+          <PropertyHistory entity={entity} property={property} />
+        </td>
+      </tr>
+    )}
+    </>
+  )
+}
+
+/**
+ * The text of a change's value: a list of strings joined, a yes or no for a boolean, an
+ * empty string for none. A value an older rule allowed (an object, a list with other
+ * items) is its JSON, so `[1, "a"]` never reads as `["1", "a"]` does (#8116).
+ */
+function changeText(value: PropertyChange['new']): string {
+  if (value === null || value === undefined) return ''
+  if (typeof value === 'boolean') return value ? 'Yes' : 'No'
+  if (Array.isArray(value) && value.every((item) => typeof item === 'string')) return value.join(', ')
+  if (typeof value === 'object') return JSON.stringify(value)
+  return String(value)
+}
+
+/**
+ * The waits before each new read while the newest change is not the key's value. The
+ * history subscriber writes a change up to its poll (2 s) after the commit.
+ */
+const HISTORY_RETRY_MS = [250, 500, 1000, 2000]
+
+/**
+ * #6949 — one key's changes, newest first. It reads again when the key's value changes,
+ * and then until the newest change sets that value, at most `HISTORY_RETRY_MS.length` times.
+ */
+function PropertyHistory({ entity, property }: { entity: string; property: EntityProperty }) {
+  const { key } = property
+  const valueText = JSON.stringify(property.value)
+  const history = useAsync(() => entityApi.propertyHistory(entity, key), [entity, key, valueText])
+  const { data, refresh } = history
+  const newest = data?.[0]
+  const recorded = newest !== undefined && newest.op === 'set' && JSON.stringify(newest.new) === valueText
+  // The reads made for this value; a new value starts again from none.
+  const [retries, setRetries] = useState({ valueText, count: 0 })
+  const count = retries.valueText === valueText ? retries.count : 0
+  const recording = data !== undefined && !recorded && count < HISTORY_RETRY_MS.length
+  useEffect(() => {
+    if (!recording) return
+    const timer = setTimeout(() => {
+      setRetries({ valueText, count: count + 1 })
+      refresh()
+    }, HISTORY_RETRY_MS[count])
+    return () => clearTimeout(timer)
+  }, [recording, data, count, valueText, refresh])
+  if (history.error) {
+    return (
+      <p role="alert" className="text-xs text-warn">
+        The history could not be loaded: {failure(history.error)}
+      </p>
+    )
+  }
+  if (!history.data) return <p className="text-xs text-muted-foreground">Loading the history…</p>
+  const pending = recording && <p className="text-xs text-muted-foreground">Recording the newest change…</p>
+  if (history.data.length === 0) return pending || <p className="text-xs text-muted-foreground">No changes recorded.</p>
+  return (
+    <>
+    {pending}
+    <ul aria-label={`History of ${key}`} className="flex flex-col gap-1 text-xs">
+      {history.data.map((change) => (
+        <li key={change.event_seq} className="flex flex-wrap gap-x-3">
+          <time dateTime={change.at} className="text-muted-foreground tabular-nums">
+            {new Date(change.at).toLocaleString()}
+          </time>
+          <span className="break-all whitespace-pre-wrap">
+            {change.op === 'remove' || change.old !== null ? `${changeText(change.old)} → ${change.op === 'remove' ? 'removed' : changeText(change.new)}` : changeText(change.new)}
+          </span>
+          <span className="text-muted-foreground">{change.actor.principal ?? change.actor.kind}</span>
+        </li>
+      ))}
+    </ul>
+    </>
   )
 }
 

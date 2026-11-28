@@ -233,6 +233,7 @@ function place(n: number, name: string, kind_id: string, values: Partial<S['Loca
     kind_id,
     number: n,
     printer_root: false,
+    station: false,
     parent_id: null,
     identifier: null,
     capacity: null,
@@ -279,6 +280,7 @@ type TypeLook = {
 function spoolType(look: TypeLook): S['SpoolType'] {
   return {
     id: typeId(look.n),
+    number: look.n,
     code: look.code,
     brand_id: look.brand,
     material_id: look.material,
@@ -438,7 +440,8 @@ function tags(): S['Tag'][] {
     created_at: '2026-11-01T10:00:00Z',
   })
   return [
-    tag(1, 'ntag_openspool', '04A1B2C3D4E5F6', null),
+    // #8366: the app read this one's chip; the others were never read by it.
+    { ...tag(1, 'ntag_openspool', '04A1B2C3D4E5F6', null), chip: 'NTAG215', max_ndef_bytes: 496, writable: true, chip_read_at: '2026-11-10T12:05:00Z' },
     tag(2, 'bambu_mifare', 'A1B2C3D4', '7F3E1C0A9B8D4E2F8A6B5C4D3E2F1A0B'),
     tag(3, 'other', '04FFEE0011223344', null),
   ]

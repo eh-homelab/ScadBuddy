@@ -21,7 +21,12 @@ from psycopg.rows import DictRow
 from psycopg_pool import ConnectionPool
 
 from scadbuddy.entities.refs import EntityRef
-from scadbuddy.entities.required import checks_save, mark_incomplete, save_properties_on
+from scadbuddy.entities.required import (
+    checks_save,
+    hold_for_properties,
+    mark_incomplete,
+    save_properties_on,
+)
 from scadbuddy.filament import ledger
 from scadbuddy.filament import models as m
 from scadbuddy.filament.bb_sync_models import forget_sync
@@ -31,6 +36,7 @@ from scadbuddy.filament.catalog import (
     catalog_key,
     check_temps,
     lookup_key,
+    resolve_or_add,
 )
 from scadbuddy.filament.catalog import (
     TypeTempError as TypeTempError,
@@ -50,6 +56,12 @@ _Kept = tuple[m.TypeKValue, dict[str, Any]]
 #: The K rows a fetch did not write, each with the row that kept its key (`merge_k_values`).
 _KeptK = list[_Kept]
 _Ids = list[int]
+
+#: Where a catalog row a type create names first is sorted: after the seeded ones, as the
+#: Bambuddy pull and the CSV import add theirs (`bambuddy_pull._ADDED_SORT`).
+_ADDED_SORT = 1000
+#: The fields of a type create that name a catalog row instead of giving its id.
+_NAMES = frozenset({"brand_name", "material_name", "subtype_name"})
 
 #: The fields whose change rewrites a type's price book row.
 _PRICED = frozenset({"cost_per_kg", "material_id", "subtype_id", "brand_id", "rgba"})
@@ -246,6 +258,7 @@ class SpoolTypeStore:
         nothing is written."""
         try:
             with self._orders.transaction() as conn:
+                hold_for_properties(conn, body.properties, by or Actor(kind="browser"))
                 made = self.create_on(conn, body.model_copy(update={"properties": None}))
                 if body.properties or checked:
                     save_properties_on(
@@ -264,11 +277,33 @@ class SpoolTypeStore:
     def create_on(self, conn: Conn, body: m.SpoolTypeCreate) -> m.SpoolType:
         """`create` on ``conn``, in the caller's transaction (confirming an invoice,
         #6266). A duplicate or a missing catalog row is the driver's `UniqueViolation` or
-        `ForeignKeyViolation`; `create` maps them. It writes no ``properties`` and checks
-        nothing (#7703): `create` does."""
+        `ForeignKeyViolation`; `create` maps them. A name with no key is
+        `CatalogKeyEmptyError`, and a name that keeps clashing is
+        `CatalogExistsError`. It writes no ``properties`` and checks
+        nothing (#7703): `create` does. A ``brand_name``, ``material_name`` or
+        ``subtype_name`` is its row, else a new one added on ``conn``, unchecked (spec
+        2026-11-21-inventory-and-purchasing-design.md §6.3b, #8228), so a refused type
+        takes it back with it. A name may resolve to an archived row (`find_by_key`
+        includes archived rows), as the Bambuddy pull and the CSV import do."""
         if body.properties is not None:
             raise ValueError("create_on writes no properties")
-        data = body.model_dump(exclude={"properties"})
+        data = body.model_dump(exclude={"properties", *_NAMES})
+        if body.material_name is not None:
+            data["material_id"] = resolve_or_add(
+                conn, "materials", body.material_name, sort_order=_ADDED_SORT
+            )
+        if body.brand_name is not None:
+            data["brand_id"] = resolve_or_add(
+                conn, "brands", body.brand_name, sort_order=_ADDED_SORT
+            )
+        if body.subtype_name is not None:
+            data["subtype_id"] = resolve_or_add(
+                conn,
+                "subtypes",
+                body.subtype_name,
+                sort_order=_ADDED_SORT,
+                material=data["material_id"],
+            )
         check_temps(data)
         names = list(data)
         row = conn.execute(
@@ -309,6 +344,8 @@ class SpoolTypeStore:
         sets.append("updated_at = now()")
         try:
             with self._orders.transaction() as conn:
+                # The log before the type row (#6949).
+                hold_for_properties(conn, patch.properties, by or Actor(kind="browser"))
                 current = self._row(conn, type_id, lock=True)
                 if current is None:
                     return None
@@ -718,6 +755,31 @@ class SpoolTypeStore:
         if subtype_id is False or brand_id is False:
             return None
         return _by_ids(conn, material_id, subtype_id, brand_id, rgba, label_weight_g)
+
+    @staticmethod
+    def match_tray(
+        conn: Conn, material: str, rgba: str | None, tray_info_idx: str | None
+    ) -> m.SpoolType | None:
+        """The unarchived type of a tray's material and colour (#7143): the material is a
+        catalog name, resolved by key; ``rgba`` is compared with its alpha. Brand, subtype
+        and label weight are not compared, as a tray reports none of them. A type with a
+        preset for the tray's ``tray_info_idx`` comes first, then the oldest. ``None`` for
+        no ``rgba`` and for a material with no key or no row. On ``conn``, in the caller's
+        transaction."""
+        if rgba is None:
+            return None
+        material_id = _by_key(conn, "materials", material)
+        if not material_id:
+            return None
+        row = conn.execute(
+            f"SELECT {_TYPE_COLUMNS} FROM filament_spool_types t"
+            " WHERE t.archived_at IS NULL AND t.material_id = %(m)s AND t.rgba = %(c)s"
+            " ORDER BY (%(i)s::text IS NOT NULL AND EXISTS (SELECT 1"
+            " FROM filament_spool_type_presets p WHERE p.type_id = t.id"
+            " AND p.slicer_filament = %(i)s::text)) DESC, t.created_at, t.id LIMIT 1",
+            {"m": material_id, "c": normalise_rgba(rgba), "i": tray_info_idx},
+        ).fetchone()
+        return None if row is None else m.SpoolType.model_validate(row)
 
     # -- internals --------------------------------------------------------------------
 

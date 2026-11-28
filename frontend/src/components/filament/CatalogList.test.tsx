@@ -1,6 +1,7 @@
 import { screen, waitFor, within } from '@testing-library/react'
 import { describe, expect, it } from 'vitest'
 import { listCatalog } from '../../api/filament'
+import { entityMock, seedEntityProperties } from '../../mocks/features/entities'
 import { renderPage } from '../../test/utils'
 import { CatalogList } from './CatalogList'
 
@@ -44,5 +45,20 @@ describe('the catalog aliases (#6706)', () => {
     await screen.findByRole('row', { name: /^Plastic/ })
     await user.click(screen.getByRole('button', { name: 'Edit Plastic' }))
     expect(screen.queryByRole('textbox', { name: 'New alias' })).not.toBeInTheDocument()
+  })
+})
+
+describe('the catalog row’s Properties panel (#8227)', () => {
+  it('lists only the keys the form does not show', async () => {
+    entityMock.schemas.effect = { type: 'object', properties: { sheen: { type: 'string' } } }
+    const { user } = renderPage(<CatalogList kind="effects" />)
+    const clear = (await listCatalog('effects')).find((one) => one.name === 'Clear')!
+    seedEntityProperties(`effect:${clear.id}`, { sheen: 'matte', shelf_note: 'top' })
+    await screen.findByRole('row', { name: /^Clear/ })
+    await user.click(screen.getByRole('button', { name: 'Edit Clear' }))
+    const panel = await screen.findByRole('region', { name: 'Properties' })
+    expect(await within(panel).findByText('shelf_note')).toBeVisible()
+    expect(within(panel).queryByText('sheen')).not.toBeInTheDocument()
+    expect(await screen.findByLabelText('sheen')).toHaveValue('matte')
   })
 })

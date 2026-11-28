@@ -18,6 +18,7 @@ from typing import Literal
 from fastapi.routing import APIRoute, APIWebSocketRoute
 
 from scadbuddy.auth.models import Anonymous, Caller, Person, PersonalToken, Service
+from scadbuddy.auth.personal_tokens import PERSON_SCOPES
 
 RouteClass = Literal[
     "public",
@@ -39,6 +40,7 @@ RouteClass = Literal[
     "crud.camera",
     "crud.camera-relay",
     "crud.fleet",
+    "crud.inventory",
     "crud.fleet-rotator",
     # The projects worker's flow host routes (#5298): `api` routes it may call too.
     "flow.host",
@@ -58,6 +60,8 @@ Reason = Literal[
 
 #: What a ``read`` access token may send (RFC 9110 §9.2.1's safe methods).
 SAFE_METHODS = frozenset({"GET", "HEAD", "OPTIONS"})
+#: The class of core's routes for fleetd, the only ones a ``fleet`` token reaches (#8041).
+FLEET_ROTATOR_CLASS = "crud.fleet-rotator"
 #: The header every cookie-authenticated request carries (§5.3 layer 3).
 REQUEST_HEADER = "x-scadbuddy-request"
 
@@ -234,6 +238,7 @@ CRUD_CLASSES: dict[str, RouteClass] = {
     "camera": "crud.camera",
     "camera-relay": "crud.camera-relay",
     "fleet": "crud.fleet",
+    "inventory": "crud.inventory",
     "fleet-rotator": "crud.fleet-rotator",
 }
 CRUD_CALLERS = frozenset(CRUD_CLASSES)
@@ -290,6 +295,9 @@ def would_refuse(
     ``header_needed`` is false for a socket and for a scriptless GET."""
     if route_cls in ("public", "transfer", "exchange"):
         return None
+    # A fleet token (#8041, #8179) is fleetd's: core's rotator routes and nothing else.
+    if isinstance(caller, PersonalToken) and caller.scope not in PERSON_SCOPES:
+        return None if route_cls == FLEET_ROTATOR_CLASS else "out_of_scope"
     if route_cls.startswith("internal."):
         # A live service credential without the class is a 403, as on a CRUD route
         # (#5514): a 401 tells the client to exchange again, and it would loop.
@@ -299,6 +307,9 @@ def would_refuse(
     if route_cls.startswith("crud."):
         # A live service credential of another caller, or without the class, is a 403
         # as `crud/guard.py` answers it in `off`; only no live credential is a 401.
+        if isinstance(caller, PersonalToken) and route_cls == FLEET_ROTATOR_CLASS:
+            # Only a fleet token, above, may call them; a read or write token may not.
+            return "out_of_scope"
         if not isinstance(caller, Service):
             return "no_credential"
         if route_cls.startswith("crud.") and route_cls != f"crud.{caller.caller}":

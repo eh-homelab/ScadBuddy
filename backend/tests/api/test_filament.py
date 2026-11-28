@@ -273,9 +273,15 @@ def test_an_archive_takes_a_reason_and_a_final_reading(client: TestClient) -> No
         f"{one}/archive", json={"archived": True, "reason": "finished", "final_reading_g": 230}
     )
     assert done.status_code == 200, done.text
-    assert done.json()["archived_at"] is not None and done.json()["grams_left"] == 30
+    assert done.json()["archived_at"] is not None and done.json()["grams_left"] == 0
     events = client.get(f"{one}/events").json()
-    assert [e["kind"] for e in events] == ["created", "weighed", "weighed", "archived"]
+    assert [e["kind"] for e in events] == [
+        "created",
+        "weighed",
+        "weighed",
+        "non_print_waste",
+        "archived",
+    ]
     assert events[-1]["data"]["reason"] == "finished"
     assert events[-1]["data"]["scale_consumed_g"] == 970 and events[-1]["data"]["drift_g"] == -970
     refused = client.post(f"{one}/archive", json={"archived": False, "reason": "finished"})
@@ -752,6 +758,8 @@ def test_an_import_that_did_not_finish_keeps_its_actor_and_says_it_may_run_on(
     answer = client.post(IMPORT_BB)
     assert answer.status_code == 503, answer.text
     assert "may still be running" in answer.json()["detail"]
+    # The page tells it apart from any other 503 by its code.
+    assert answer.json()["code"] == "import_unfinished"
     ((pull_id, kept),) = _kept_actors(pg_conninfo)
     assert pull_id.startswith("filament-bb-pull-")
     assert kept == actor(ANONYMOUS)

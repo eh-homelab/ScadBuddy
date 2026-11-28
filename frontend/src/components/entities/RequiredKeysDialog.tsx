@@ -42,12 +42,9 @@ export function RequiredKeysDialog({ schema, title, action, open, onCancel, onSu
       await onSubmit(propertiesPatch(asked, {}, values) as Record<string, PropertyValue>)
       setValues({})
     } catch (cause) {
-      // A refusal may come wrapped in an error whose own message adds to it (#7952).
-      const wrapped = !fieldErrorsOf(cause) && cause instanceof Error && fieldErrorsOf(cause.cause) !== null
-      const refused = fieldErrorsOf(wrapped ? (cause as Error).cause : cause)
+      const refused = fieldErrorsOf(cause)
       setErrors(refused ?? undefined)
-      if (refused) setError(wrapped ? `${refusalText(refused)} ${(cause as Error).message}` : refusalText(refused))
-      else setError(cause instanceof Error ? cause.message : String(cause))
+      setError(refused ? refusalText(refused) : cause instanceof Error ? cause.message : String(cause))
     } finally {
       setBusy(false)
     }

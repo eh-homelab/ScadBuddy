@@ -53,6 +53,13 @@ flowchart LR
   control API, never through a file. The path name is the printer id. MediaMTX's
   `runOnAvailable` and `runOnUnavailable` hooks call the relay's hook server, and the relay
   reports the feed state (`pulling`, `retrying`) to the API.
+- **A silent source (#8081).** The H2C can keep its RTSPS session open and send no media.
+  MediaMTX then keeps the path `ready`, and its `readTimeout` does not close it: on
+  2026-11-26 and 2026-11-27 the path's `bytesReceived` stayed flat for hours while the relay
+  reported `pulling`. Every 5 s the relay reads each ready path's `bytesReceived` from
+  MediaMTX's runtime list (`Relay.check_silence`). When it has not changed for 30 s, the relay
+  restarts the pull, as `camera.reconnect` does. While the source stays silent, the wait
+  doubles after each restart, up to 5 min, and goes back to 30 s once bytes come.
 - **The recorders** (`python -m scadbuddy.camera.recorder`, `camera/recorder.py`) run as two
   pods. Each MediaMTX reads every recorded printer from the relay with the read user and
   writes fMP4 segments under `/segments`. MediaMTX's `runOnRecordSegmentComplete` hook calls
@@ -74,7 +81,8 @@ flowchart LR
   stall checks in that time share the read, including one still in flight. Each release adds one to `scadbuddy_camera_stall_releases_total`.
   When both recorders cannot index (the bucket is down, or the API answers the lease route but fails the index route), they hand the lease back
   and forth every 25 to 30 s (a leader releases at its sixth stalled tick, and the other
-  recorder takes the lease at its next tick), and that counter shows it (#7998). If the API
+  recorder takes the lease at its next tick), and that counter shows it in the "Stall
+  releases" panel of the dashboard's "Cameras" row (#7998, #8187). If the API
   does not answer at all, no lease moves: the leader stops leading after `LEASE_SECONDS`,
   no recorder takes over, and the counter stays flat.
 - **The edge** (`python -m scadbuddy.camera.edge`, `camera/edge.py`) is the live view's
@@ -256,7 +264,8 @@ The hooks need `curl`, so the camera images take the release binary on
   recorder pods hold its keys.
 - Metrics. The relay (`camera/relay.py`): `scadbuddy_camera_relay_pulling` (1 while the
   pull is ready, 0 while MediaMTX tries it) and `scadbuddy_camera_relay_reconnects_total`
-  (each time the pull is ready again after it was not; a replaced path counts too). The
+  (each time the pull is ready again after it was not; a replaced path counts too) and
+  `scadbuddy_camera_relay_silent_restarts_total` (each restart of a silent pull; see "A silent source" in "How it works"). The
   recorders (`camera/recorder.py`): `scadbuddy_camera_segments_indexed_total`,
   `scadbuddy_camera_upload_lag_seconds`, `scadbuddy_camera_backlog_bytes`,
   `scadbuddy_camera_leader`, `scadbuddy_camera_last_segment_age_seconds` and

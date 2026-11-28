@@ -1,4 +1,4 @@
-import { describe, expect, it } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { ApiError, api, request } from '../../../api/client'
 import {
   addSpoolEvent,
@@ -30,6 +30,7 @@ import {
   listSpools,
   listTags,
   moveSpool,
+  staleOf,
   patchSpool,
   unbindTag,
   resolveCatalog,
@@ -43,6 +44,7 @@ import {
   type SpoolTypeCreate,
 } from '../../../api/filament'
 import { resetMockState } from '../../handlers'
+import { seedHomeReturn } from './index'
 import { B, H2C, IT, L, LK, M, SENSOR, spoolId, T, TAG } from './seed'
 
 // #6262 Task 14 — the Filament section's mock API over its seed, through the client.
@@ -263,13 +265,218 @@ describe('the filament mocks', () => {
     expect((await closingPreview(spoolId(1), 'damaged', 253, null)).notices.map((one) => one.code)).toEqual(['not_finished_but_empty'])
     const done = await archiveSpool(spoolId(1), { archived: true, reason: 'finished', final_reading_g: 280 })
     expect(done.archived_at).not.toBeNull()
-    expect(done.grams_left).toBe(30)
+    // The 30 g left are written off (#7167): the spool has none left.
+    expect(done.grams_left).toBe(0)
     const events = await listSpoolEvents(spoolId(1))
-    expect(events.slice(-2).map((one) => one.kind)).toEqual(['weighed', 'archived'])
+    expect(events.slice(-3).map((one) => one.kind)).toEqual(['weighed', 'non_print_waste', 'archived'])
     expect(events.at(-1)?.data).toMatchObject({ reason: 'finished', final_filament_g: 30, scale_consumed_g: (preview.closing.started_g ?? 0) - 30, ledger_consumed_g: preview.closing.ledger_consumed_g })
     expect(await refusal(archiveSpool(spoolId(2), { archived: false, reason: 'finished' }))).toMatchObject({ status: 422 })
     expect(await refusal(archiveSpool(spoolId(2), { archived: true, reason: 'damaged', final_reading_g: 100 }))).toMatchObject({ status: 422, code: 'reading_below_empty' })
     expect((await getSpool(spoolId(2))).archived_at).toBeNull()
+  })
+
+  describe('non-print waste (#7167): the mocks book it as the backend does', () => {
+    // A fixed clock: the mock stamps the waste with `now()`, and the range below is that day.
+    beforeEach(() => {
+      vi.useFakeTimers({ toFake: ['Date'] }).setSystemTime('2026-12-01T12:00:00Z')
+    })
+    afterEach(() => {
+      vi.useRealTimers()
+    })
+    const today = () => '2026-12-01'
+    const waste = async () => (await getMetrics({ since: today(), until: today() })).non_print_waste_g
+    const events = async (id: string) => (await listSpoolEvents(id)).filter((one) => one.kind === 'non_print_waste')
+
+    it('an archive books the grams left after the final weighing, before the archived event', async () => {
+      expect(await waste()).toBe(0)
+      await archiveSpool(spoolId(1), { archived: true, reason: 'finished', final_grams: 30 })
+      const kinds = (await listSpoolEvents(spoolId(1))).map((one) => one.kind)
+      expect(kinds.slice(-3)).toEqual(['weighed', 'non_print_waste', 'archived'])
+      expect((await events(spoolId(1)))[0]).toMatchObject({ source: 'person', grams_after: 0, data: { waste_g: 30, cause: 'archive' } })
+      expect((await getSpool(spoolId(1))).grams_left).toBe(0)
+      const found = await getMetrics({ since: today(), until: today() })
+      expect(found.non_print_waste_g).toBe(30)
+      expect(found.non_print_waste.filter((row) => row.dimension === 'material').map((row) => row.wasted_g)).toEqual([30])
+      expect(found.non_print_waste.some((row) => row.dimension === 'type' && row.key === T.JADE && row.wasted_g === 30)).toBe(true)
+      expect(found.waste.every((row) => row.wasted_g === 0)).toBe(true)
+      expect((await getMetrics({ since: '2020-01-01', until: '2020-01-02' })).non_print_waste_g).toBe(0)
+    })
+
+    it('books nothing for respooled, a bulk archive, a plain PATCH or 0 g left', async () => {
+      await archiveSpool(spoolId(1), { archived: true, reason: 'respooled' })
+      await bulkArchiveSpools([spoolId(2)], true)
+      await patchSpool(spoolId(3), { archived: true })
+      await archiveSpool(spoolId(4), { archived: true, reason: 'finished', final_grams: 0 })
+      expect(await waste()).toBe(0)
+    })
+
+    it('a replace move archives the box spool and books its grams with cause replaced', async () => {
+      const { box } = seedHomeReturn()
+      expect((await getSpool(spoolId(7))).location_id).toBe(box)
+      await moveSpool(spoolId(1), box, { ifOccupied: 'replace', expectedOccupantId: spoolId(7) })
+      expect((await getSpool(spoolId(7))).archived_at).not.toBeNull()
+      expect((await events(spoolId(7)))[0]?.data).toMatchObject({ waste_g: 300, cause: 'replaced' })
+      expect((await getSpool(spoolId(1))).location_id).toBe(box)
+      expect(await waste()).toBe(300)
+    })
+
+    it('a replace into a place that is no dry box is the plain move', async () => {
+      expect((await getSpool(spoolId(2))).location_id).toBe(L.DRY_BOX)
+      await moveSpool(spoolId(1), L.DRY_BOX, { ifOccupied: 'replace', expectedOccupantId: spoolId(2) })
+      expect((await getSpool(spoolId(2))).archived_at).toBeNull()
+      expect(await waste()).toBe(0)
+    })
+
+    it('refuses a replace that names no expected occupant (expected_occupant_required)', async () => {
+      const { box } = seedHomeReturn()
+      // The type requires the field; the test sends the body an older client could still send.
+      expect(await refusal(moveSpool(spoolId(1), box, { ifOccupied: 'replace' } as unknown as Parameters<typeof moveSpool>[2]))).toMatchObject({ status: 422, code: 'expected_occupant_required' })
+      expect((await getSpool(spoolId(7))).archived_at).toBeNull()
+      expect((await getSpool(spoolId(1))).location_id).toBe(L.SHELF_A)
+    })
+
+    it('the closing preview carries the waste the archive would book', async () => {
+      expect((await closingPreview(spoolId(10), 'damaged', null, null)).closing.non_print_waste_g).toBe(250)
+      expect((await closingPreview(spoolId(10), 'respooled', null, null)).closing.non_print_waste_g).toBeNull()
+      expect((await closingPreview(spoolId(10), 'finished', null, 0)).closing.non_print_waste_g).toBeNull()
+    })
+  })
+
+  describe('a move that carries the place the spool was read in (#7168)', () => {
+    it('refuses a move whose spool left the place it was read in', async () => {
+      await moveSpool(spoolId(1), L.WORKSHOP)
+      const cause = await moveSpool(spoolId(1), L.SHELF_A, { expectedLocationId: L.SHELF_A }).catch((e: unknown) => e)
+      expect(staleOf(cause)).toEqual({ locationId: L.WORKSHOP, archived: false })
+      expect((await getSpool(spoolId(1))).location_id).toBe(L.WORKSHOP)
+    })
+
+    it('checks an explicit null expected place', async () => {
+      await moveSpool(spoolId(1), L.WORKSHOP)
+      const cause = await moveSpool(spoolId(1), L.SHELF_A, { expectedLocationId: null }).catch((e: unknown) => e)
+      expect(staleOf(cause)).toEqual({ locationId: L.WORKSHOP, archived: false })
+      await moveSpool(spoolId(1), null)
+      expect((await moveSpool(spoolId(1), L.SHELF_A, { expectedLocationId: null })).location_id).toBe(L.SHELF_A)
+    })
+
+    it('checks the stale spool before the target, as homes.move_into does under the row lock', async () => {
+      await moveSpool(spoolId(1), L.WORKSHOP)
+      const cause = await moveSpool(spoolId(1), 'no-such-place', { expectedLocationId: L.SHELF_A }).catch((e: unknown) => e)
+      expect(staleOf(cause)).toEqual({ locationId: L.WORKSHOP, archived: false })
+    })
+
+    it('refuses a move of an archived spool as stale', async () => {
+      await archiveSpool(spoolId(1))
+      const cause = await moveSpool(spoolId(1), L.WORKSHOP, { expectedLocationId: L.SHELF_A }).catch((e: unknown) => e)
+      expect(staleOf(cause)).toMatchObject({ archived: true })
+    })
+
+    it('keeps the move as it was when no expected place is sent', async () => {
+      await moveSpool(spoolId(1), L.WORKSHOP)
+      expect((await moveSpool(spoolId(1), L.SHELF_A)).location_id).toBe(L.SHELF_A)
+      expect(staleOf(new Error('x'))).toBeNull()
+    })
+  })
+
+  describe('dry boxes and the home return (#7167)', () => {
+    it('lists only the spools awaiting a home answer with awaiting_home', async () => {
+      expect(await listSpools({ awaitingHome: true })).toEqual([])
+      seedHomeReturn()
+      expect((await listSpools({ awaitingHome: true })).map((one) => one.number)).toEqual([11])
+      expect((await listSpools({ awaitingHome: false })).map((one) => one.number)).not.toContain(11)
+    })
+
+    it('refuses a full box with box_full naming its spool, and changes nothing', async () => {
+      const { box } = seedHomeReturn()
+      expect(await refusal(moveSpool(spoolId(1), box))).toMatchObject({ status: 409, code: 'box_full', occupant_id: spoolId(7) })
+      expect((await getSpool(spoolId(1))).location_id).toBe(L.SHELF_A)
+    })
+
+    it('refuses a replace of another occupant than expected_occupant_id, and archives nothing', async () => {
+      const { box } = seedHomeReturn()
+      await moveSpool(spoolId(7), L.SHELF_A)
+      await moveSpool(spoolId(9), box)
+      expect(await refusal(moveSpool(spoolId(1), box, { ifOccupied: 'replace', expectedOccupantId: spoolId(7) }))).toMatchObject({ status: 409, code: 'box_full', occupant_id: spoolId(9) })
+      expect((await getSpool(spoolId(9))).archived_at).toBeNull()
+      await moveSpool(spoolId(1), box, { ifOccupied: 'replace', expectedOccupantId: spoolId(9) })
+      expect((await getSpool(spoolId(9))).archived_at).not.toBeNull()
+    })
+
+    it('answers the prompt with answers, and checks it', async () => {
+      const { box } = seedHomeReturn()
+      expect(await refusal(moveSpool(spoolId(7), box, { answers: NOBODY }))).toMatchObject({ status: 404 })
+      expect(await refusal(moveSpool(spoolId(7), L.SHELF_A, { answers: spoolId(11) }))).toMatchObject({ status: 422, code: 'not_its_home' })
+      await moveSpool(spoolId(7), box, { answers: spoolId(11) })
+      const unloaded = await getSpool(spoolId(11))
+      expect(unloaded.home_asked_at).toBeNull()
+      expect(unloaded.location_id).toBeNull()
+      expect(await listSpools({ awaitingHome: true })).toEqual([])
+    })
+
+    it('a copy of a spool in a dry box leaves the box out of the draft', async () => {
+      seedHomeReturn()
+      expect((await copySpool(spoolId(7))).location_id).toBeNull()
+      expect((await copySpool(spoolId(1))).location_id).toBe(L.SHELF_A)
+    })
+
+    it('a bulk create refuses a full box, and two spools into one empty box, and writes nothing', async () => {
+      const { box } = seedHomeReturn()
+      const body = { spool: { material_id: M.PLA, weight_locked: false }, quantity: 1, location_id: box, presets: [], k_values: [] }
+      const before = (await listSpools()).length
+      expect(await refusal(bulkCreateSpools(body, 'box-1'))).toMatchObject({ status: 409, code: 'box_full', occupant_id: spoolId(7) })
+      await moveSpool(spoolId(7), L.SHELF_A)
+      expect(await refusal(bulkCreateSpools({ ...body, quantity: 2 }, 'box-2'))).toMatchObject({ status: 409, code: 'box_full' })
+      expect((await listSpools()).length).toBe(before)
+      const [made] = await bulkCreateSpools(body, 'box-3')
+      expect(made?.location_id).toBe(box)
+    })
+
+    /** S-7 archived in its box (a bulk archive keeps the place), and S-1 moved in after it. */
+    async function boxTakenAfterArchive() {
+      const { box } = seedHomeReturn()
+      await bulkArchiveSpools([spoolId(7)], true)
+      await moveSpool(spoolId(1), box)
+    }
+
+    it('a restore through the archive route into a taken box is box_full, and restores nothing', async () => {
+      await boxTakenAfterArchive()
+      expect(await refusal(archiveSpool(spoolId(7), { archived: false }))).toMatchObject({ status: 409, code: 'box_full', occupant_id: spoolId(1) })
+      expect((await getSpool(spoolId(7))).archived_at).not.toBeNull()
+    })
+
+    it('a restore through PATCH into a taken box is box_full, and writes nothing', async () => {
+      await boxTakenAfterArchive()
+      expect(await refusal(patchSpool(spoolId(7), { archived: false, note: 'back' }))).toMatchObject({ status: 409, code: 'box_full', occupant_id: spoolId(1) })
+      const row = await getSpool(spoolId(7))
+      expect(row.archived_at).not.toBeNull()
+      expect(row.note).not.toBe('back')
+    })
+
+    it('a bulk restore with one spool whose box is taken is box_full, and restores none', async () => {
+      await boxTakenAfterArchive()
+      await bulkArchiveSpools([spoolId(3)], true)
+      expect(await refusal(bulkArchiveSpools([spoolId(3), spoolId(7)], false))).toMatchObject({ status: 409, code: 'box_full', occupant_id: spoolId(1) })
+      expect((await getSpool(spoolId(3))).archived_at).not.toBeNull()
+      expect((await getSpool(spoolId(7))).archived_at).not.toBeNull()
+    })
+
+    it('a bulk restore of two archived spools in one box restores neither: the first is the second one’s occupant', async () => {
+      await boxTakenAfterArchive()
+      await bulkArchiveSpools([spoolId(1)], true)
+      expect(await refusal(bulkArchiveSpools([spoolId(7), spoolId(1)], false))).toMatchObject({ status: 409, code: 'box_full', occupant_id: spoolId(1) })
+      expect((await getSpool(spoolId(1))).archived_at).not.toBeNull()
+      expect((await getSpool(spoolId(7))).archived_at).not.toBeNull()
+    })
+
+    it('refuses to make a kind dry storage while one of its capacity-1 places holds several spools (box_has_many)', async () => {
+      await upsertLocation({ capacity: 1 }, L.SHELF_A)
+      expect(await refusal(upsertCatalog('location-kinds', { dry_storage: true }, LK.SHELF))).toMatchObject({ status: 422, code: 'box_has_many' })
+      expect((await listCatalog('location-kinds')).find((one) => one.id === LK.SHELF)?.dry_storage).toBe(false)
+    })
+
+    it('refuses to make a box of a place that holds several spools (box_has_many)', async () => {
+      expect(await refusal(upsertLocation({ capacity: 1 }, L.DRY_BOX))).toMatchObject({ status: 422, code: 'box_has_many' })
+      expect((await listLocations()).flatMap((one) => one.children ?? []).find((one) => one.id === L.DRY_BOX)?.capacity).toBe(4)
+    })
   })
 
   it('moves a spool, and refuses a place that does not exist', async () => {
@@ -279,6 +486,14 @@ describe('the filament mocks', () => {
       title: 'Unprocessable Content',
       detail: "the place to move to does not exist, is archived or is an AMS unit's place",
     })
+  })
+
+  it('resolves a T- code to the type code and colour name, as the server does (#7169)', async () => {
+    const body = { code: 'NEW-PLA-RED', colour_name: 'Red', material_id: M.PLA, brand_id: B.BAMBU, rgba: '#ff0000ff', label_weight_g: 1000 } as SpoolTypeCreate
+    const made = await upsertType(body)
+    expect(await request<{ name: string }>(`/codes/T-${made.number}`)).toMatchObject({ kind: 'spool_type', name: 'NEW-PLA-RED Red' })
+    const bare = await upsertType({ ...body, code: 'NEW-PLA-BARE', colour_name: null })
+    expect(await request<{ name: string }>(`/codes/T-${bare.number}`)).toMatchObject({ name: 'NEW-PLA-BARE' })
   })
 
   it('adds a priced type with its price book row, and refuses a bad one', async () => {
@@ -306,6 +521,23 @@ describe('the filament mocks', () => {
       status: 422,
       detail: 'nozzle_temp_min is above nozzle_temp_max',
     })
+  })
+
+  // #8228, `types.py` `create_on`: a name is the other way to give a catalog id; a missing row is added with the type, and goes with a refused one.
+  it('takes catalog names on a type create, as the server does', async () => {
+    const body = { code: 'ZED-WAX-RED', material_name: 'p.l.a', brand_name: 'Zed', subtype_name: 'Glossy', rgba: '#FF0000', label_weight_g: 1000 } as SpoolTypeCreate
+    const made = await upsertType(body)
+    expect(made.material_id).toBe(M.PLA)
+    const brands = await listCatalog('brands')
+    expect(brands.find((row) => row.id === made.brand_id)?.name).toBe('Zed')
+    expect((await listCatalog('subtypes')).find((row) => row.id === made.subtype_id)).toMatchObject({ name: 'Glossy', material_id: M.PLA })
+    expect(await refusal(upsertType({ ...body, brand_name: 'Nadir' }))).toMatchObject({ status: 409 })
+    expect((await listCatalog('brands')).map((row) => row.name)).not.toContain('Nadir')
+    expect((await upsertType({ ...body, code: 'ZED-2', brand_name: 'zed' })).brand_id).toBe(made.brand_id)
+    expect((await listCatalog('brands')).length).toBe(brands.length)
+    expect(await refusal(upsertType({ ...body, code: 'X', brand_id: B.BAMBU }))).toMatchObject({ status: 422, detail: expect.stringContaining('brand_id or brand_name, not both') })
+    expect(await refusal(upsertType({ code: 'X', rgba: '#FF0000', label_weight_g: 1000 } as SpoolTypeCreate))).toMatchObject({ status: 422, detail: expect.stringContaining('material_id or material_name') })
+    expect(await refusal(upsertType({ brand_name: 'Zed' } as never, made.id))).toMatchObject({ status: 422, detail: expect.stringContaining('Extra inputs are not permitted') })
   })
 
   it("compares a type's code in any case, as `filament_spool_types_code` does", async () => {

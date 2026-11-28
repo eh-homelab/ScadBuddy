@@ -28,15 +28,17 @@ import {
   savedBody,
 } from '../src/harness/httpRequest.js'
 import { decide } from '../src/harness/permissions.js'
-import { assertHostAllowed, assertHttpUrl, EgressError } from '../src/http/egress.js'
+import { assertHostAllowed, assertHttpUrl, EgressError, isInternalAddress } from '../src/http/egress.js'
 import { UNTRUSTED_KEY } from '../src/safety/untrusted.js'
+import { pinnedOutward } from '../src/tools/pinnedOutward.js'
 import type { WorkspaceFileInfo } from '../src/workspace/store.js'
 import type { SessionFiles } from './support/sql/sessionFiles.js'
 
-// The assistant's http_request tool (#827): tiers by method, the guards that
-// stay while reach is open (no actor header, nothing but the model's own
-// headers, none of the turn's secrets), the size, time and redirect caps, the
-// untrusted-data envelope and the audit rows.
+// The assistant's http_request tool (#827): tiers by method, the guards (no
+// actor header, nothing but the model's own headers, none of the turn's
+// secrets, no private or loopback host for a GET unless a person approved it,
+// #8178), the size, time and redirect caps, the untrusted-data envelope and the
+// audit rows.
 
 const SECRET = 'sk-ant-api03-THE-AGENTS-OWN-KEY'
 const PLUGIN_TOKEN = 'plugin-bearer-token-1234'
@@ -104,6 +106,8 @@ async function context(overrides: Partial<HttpRequestContext> = {}): Promise<Htt
     actor: { kind: 'browser', id: 'user', label: 'User' },
     sessionId: '00000000-0000-4000-8000-000000000001',
     turnId: '00000000-0000-4000-8000-000000000002',
+    // The test servers listen on loopback. The private-host rule (#8178) has its own tests, which set this false.
+    allowPrivate: true,
     ...overrides,
   } as HttpRequestContext & { audit: MemoryAudit }
 }
@@ -143,7 +147,7 @@ describe('tiers by method', () => {
   })
 })
 
-describe('reach is open (decided 2026-09-30)', () => {
+describe('reach (#827)', () => {
   it('allows plain http to any host, private and *.internal names included', async () => {
     for (const url of ['http://192.168.1.20/api', 'http://10.0.0.5:8080/', 'http://printer.internal/status', 'https://example.com/']) {
       expect(() => assertHttpUrl(url, 'url')).not.toThrow()
@@ -162,6 +166,107 @@ describe('reach is open (decided 2026-09-30)', () => {
     expect(result.isError).toBe(true)
     expect(json(result).error).toMatch(/link-local or cloud metadata/)
     expect(ctx.audit.entries).toMatchObject([{ kind: 'http', outcome: 'refused' }])
+  })
+})
+
+describe('a private or loopback host needs a person to approve it (#8178)', () => {
+  const refusing = (overrides: Partial<HttpRequestContext> = {}) => context({ allowPrivate: false, ...overrides })
+  const loopback = async () => ['127.0.0.1']
+
+  it('knows the private, CGNAT, loopback and 0/8 ranges, also inside an IPv6 form', () => {
+    const inside = ['10.0.0.5', '172.16.0.9', '172.31.255.1', '192.168.1.20', '100.64.0.1', '100.127.255.254', '127.0.0.1', '127.8.9.10', '0.0.0.0', '0.1.2.3', '::ffff:0.1.2.3']
+    inside.push('::1', 'fd12:3456::1', 'fc00::1', '::ffff:10.0.0.5', '64:ff9b::c0a8:114', '[fd00::1]')
+    for (const address of inside) expect(isInternalAddress(address), address).toBe(true)
+    for (const address of ['8.8.8.8', '1.0.0.1', '172.32.0.1', '100.128.0.1', '192.169.0.1', '2001:db8::1', '2606:4700::1111']) {
+      expect(isInternalAddress(address), address).toBe(false)
+    }
+  })
+
+  it('refuses a GET or HEAD to a private or loopback literal without allow_private_host, and names the argument', async () => {
+    const cases = [
+      ['GET', 'http://10.0.0.5:8080/'],
+      ['HEAD', 'http://192.168.1.20/api'],
+      ['GET', 'http://100.64.1.2/'],
+      ['GET', 'http://[fd00::1]/'],
+      ['GET', 'http://127.0.0.1:9/'],
+      ['GET', 'http://localhost:9/'],
+    ] as const
+    for (const [method, url] of cases) {
+      const ctx = await refusing({ resolve: loopback })
+      const result = await runHttpRequest(args({ method, url }), ctx)
+      expect(result.isError, url).toBe(true)
+      expect(json(result).error, url).toMatch(/private or loopback address/)
+      expect(json(result).error, url).toContain(`allow_private_host: "${new URL(url).hostname}"`)
+      expect(ctx.audit.entries, url).toMatchObject([{ kind: 'http', outcome: 'refused' }])
+    }
+  })
+
+  it('refuses a host name that resolves to a private or loopback address, before it connects', async () => {
+    const { url, seen } = await serve((_req, res) => res.end('inside'))
+    const port = new URL(url).port
+    const lan = await runHttpRequest(args({ url: `http://nas.example:${port}/` }), await refusing({ resolve: async () => ['192.168.1.20'] }))
+    expect(json(lan).error).toMatch(/nas\.example is, or resolves to, 192\.168\.1\.20/)
+    const looped = await runHttpRequest(args({ url: `http://rebind.example:${port}/` }), await refusing({ resolve: loopback }))
+    expect(json(looped).error).toMatch(/rebind\.example is, or resolves to, 127\.0\.0\.1/)
+    expect(seen).toHaveLength(0)
+  })
+
+  it('reaches the host the call names as allow_private_host', async () => {
+    const { url, seen } = await serve((_req, res) => res.end('inside'))
+    const port = new URL(url).port
+    const ctx = await refusing({ resolve: loopback })
+    const result = await runHttpRequest(args({ url: `http://nas.example:${port}/status`, allow_private_host: 'nas.example' }), ctx)
+    expect(result.isError).toBeFalsy()
+    expect(json(result)).toMatchObject({ status: 200, body: 'inside' })
+    expect(seen).toHaveLength(1)
+    // Its audit row is outward: a person approved it.
+    expect(ctx.audit.entries).toMatchObject([{ kind: 'http', outcome: 'ok', tier: 'outward' }])
+  })
+
+  it("refuses an allow_private_host that is not the URL's host, before anything is sent", async () => {
+    const { url, seen } = await serve((_req, res) => res.end('inside'))
+    const port = new URL(url).port
+    const result = await runHttpRequest(
+      args({ url: `http://nas.example:${port}/`, allow_private_host: 'printer.example' }),
+      await refusing({ resolve: loopback }),
+    )
+    expect(json(result).error).toMatch(/allow_private_host is printer\.example, but the URL's host is nas\.example/)
+    expect(seen).toHaveLength(0)
+  })
+
+  it('refuses a redirect to a private host other than the approved one', async () => {
+    const other = await serve((_req, res) => res.end('other'))
+    const first = await serve((_req, res) => res.writeHead(302, { location: `http://other.example:${new URL(other.url).port}/` }).end())
+    const result = await runHttpRequest(
+      args({ url: `http://nas.example:${new URL(first.url).port}/`, allow_private_host: 'nas.example' }),
+      await refusing({ resolve: loopback }),
+    )
+    expect(json(result).error).toMatch(/redirect host other\.example is, or resolves to, 127\.0\.0\.1/)
+    expect(first.seen).toHaveLength(1)
+    expect(other.seen).toHaveLength(0)
+  })
+
+  it('lets a write reach a private host without the argument: a person approves every write', async () => {
+    const { url, seen } = await serve((_req, res) => res.end('done'))
+    const result = await runHttpRequest(args({ method: 'POST', url, body: 'b' }), await refusing())
+    expect(json(result)).toMatchObject({ status: 200 })
+    expect(seen).toHaveLength(1)
+  })
+
+  it('parks a call that names allow_private_host for a person, whatever its access tier', () => {
+    const input = { method: 'GET', url: 'http://nas.example/', allow_private_host: 'nas.example' }
+    expect(pinnedOutward(HTTP_TOOL_NAME, input)).toBe(true)
+    expect(pinnedOutward(HTTP_TOOL_NAME, { method: 'GET', url: 'http://nas.example/' })).toBe(false)
+    expect(httpTierOf(HTTP_TOOL_NAME, input)).toBe('outward')
+    // An access item set to read, or a guard's allow, lowers nothing here.
+    expect(httpAccessTierOf('read')(HTTP_TOOL_NAME, input)).toBe('outward')
+    expect(decide(HTTP_TOOL_NAME, httpAccessTierOf('read'), input, { allow: 'a test guard' })).toMatchObject({
+      decision: 'needs_approval',
+      tier: 'outward',
+      reason: expect.stringMatching(/allow_private_host/),
+    })
+    // Fails closed on a value that is not a host name: it still parks.
+    expect(pinnedOutward(HTTP_TOOL_NAME, { url: 'http://x/', allow_private_host: 7 })).toBe(true)
   })
 })
 

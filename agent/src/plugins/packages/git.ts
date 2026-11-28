@@ -133,6 +133,10 @@ export class GitFetcher implements RepoFetcher {
 
   private async git_(dir: string, args: string[], signal?: AbortSignal): Promise<string> {
     const config = [
+      // `dir` is this process's own checkout, but a volume can own it as another uid (an
+      // NFS share that writes every file as one owner), and git then refuses it as
+      // "dubious ownership" (#8509). Command-line config is a protected scope, so git honours it.
+      '-c', `safe.directory=${dir}`,
       '-c', 'http.followRedirects=false',
       '-c', 'core.hooksPath=/dev/null',
       '-c', 'core.symlinks=false',

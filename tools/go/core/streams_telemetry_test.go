@@ -26,7 +26,7 @@ func TestAStreamIsTracedAtItsStartAndMeasured(t *testing.T) {
 	pool := testdb.New(t)
 	hub := bus.NewHub(pool, rec.tel.Meter())
 	t.Cleanup(hub.Close)
-	router, err := newRouter(pool, http.NotFoundHandler(), nil, "changes", "", nil, nil, nil, &streams{hub: hub, env: func(string) string { return "" }})
+	router, err := newRouter(pool, http.NotFoundHandler(), nil, "changes", "", nil, nil, nil, nil, withStreams(&streams{hub: hub, env: func(string) string { return "" }}))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -83,7 +83,7 @@ func socketTelemetry(t *testing.T, env map[string]string) (*recorded, *streamAPI
 	hub := bus.NewHub(pool, rec.tel.Meter())
 	t.Cleanup(hub.Close)
 	st := &streams{hub: hub, env: func(name string) string { return env[name] }}
-	router, err := newRouter(pool, http.NotFoundHandler(), nil, "ws", env["SCADBUDDY_AUTH_MODE"], rec.tel.Meter(), nil, nil, st)
+	router, err := newRouter(pool, http.NotFoundHandler(), nil, "ws", env["SCADBUDDY_AUTH_MODE"], nil, rec.tel.Meter(), nil, nil, withStreams(st))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -153,9 +153,11 @@ func TestASocketIsTracedAs101AndItsChecksApart(t *testing.T) {
 	server := servers[0]
 	expect(t, value(server, "http.status_code").AsInt64(), int64(101))
 
-	id := s.publish("model.updated", httpx.Field{Key: "slug", Value: "a"})
+	// Subscribed first, so the event's frame comes before the check's answer, never after it.
 	sock.send(1, `{"type":"subscribe","topics":["models"]}`)
-	sock.text()
+	expect(t, sock.text(), `{"type":"subscribed","topics":["models"]}`)
+	id := s.publish("model.updated", httpx.Field{Key: "slug", Value: "a"})
+	expect(t, sock.text(), `{"type":"event","id":"`+id+`","kind":"model.updated","topics":["models"],"data":{"slug":"a"}}`)
 	sock.send(1, `{"type":"check","id":1,"since":["`+id+`"],"topics":["models"]}`)
 	expect(t, sock.text(), `{"type":"changed","id":1,"topics":[]}`)
 	checks := rec.named("ws check")

@@ -70,3 +70,18 @@ async def test_ready_reads_the_runtime_list() -> None:
 
     mtx = MediaMtx("http://mtx", transport=httpx.MockTransport(handle))
     assert await mtx.ready() == {"p1": True, "p2": False}
+
+
+async def test_received_reads_the_ready_paths_byte_counts() -> None:
+    def handle(request: httpx.Request) -> httpx.Response:
+        assert request.url.path == "/v3/paths/list"
+        items = [
+            {"name": "p1", "ready": True, "bytesReceived": 9084602},
+            {"name": "p2", "ready": False, "bytesReceived": 5},
+            {"name": "p3", "ready": True},
+        ]
+        return httpx.Response(200, json={"pageCount": 1, "itemCount": 3, "items": items})
+
+    mtx = MediaMtx("http://mtx", transport=httpx.MockTransport(handle))
+    # A path that is not ready, or lists no count, has nothing to judge.
+    assert await mtx.received() == {"p1": 9084602}

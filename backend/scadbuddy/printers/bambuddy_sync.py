@@ -37,6 +37,7 @@ from pydantic import BaseModel, ValidationError, computed_field
 from scadbuddy.bambuddy.client import BambuddyClient
 from scadbuddy.bambuddy.models import Printer, VirtualPrinter
 from scadbuddy.core.problems import ApiError
+from scadbuddy.orders.models import Actor
 from scadbuddy.printers.address import UnsafeAddressError
 from scadbuddy.printers.component import Printers
 from scadbuddy.printers.lan_link import LanProbeFailedError, probe_and_link
@@ -51,6 +52,8 @@ from scadbuddy.printers.store import (
     BambuddyLinkTakenError,
     KekMissingError,
     LanLinkChangedError,
+    MergeChangedError,
+    MergeRunningError,
     NoAccessCodeError,
     PrinterNotFoundError,
     PrinterStore,
@@ -62,7 +65,11 @@ from scadbuddy.printers.store import (
 
 logger = logging.getLogger(__name__)
 
-SyncAction = Literal["created", "linked", "already_linked", "skipped", "conflict", "missing"]
+#: ``merging``: the link merges a row stock still names, and its workflow still runs
+#: (#6949 K1 Task 16, ``workflow_id``); it ends by itself.
+SyncAction = Literal[
+    "created", "linked", "already_linked", "skipped", "conflict", "missing", "merging"
+]
 #: What happened to the row's LAN link: ``linked`` (filled from Bambuddy), ``relinked``
 #: (moved to Bambuddy's new address), ``kept`` (an existing link, untouched), ``failed``
 #: (a probe failed; the next sync tries again), ``withheld`` (Bambuddy gave no code),
@@ -128,6 +135,8 @@ class SyncEntry(BaseModel):
     #: pass (#4797): ``forwards_to`` is NULL, which is not "any <model>". ``action`` keeps
     #: what happened to the VP's own row; ``reason`` names the target.
     target_missing: bool = False
+    #: The merge's workflow, while ``action`` is ``merging``.
+    workflow_id: str | None = None
 
 
 class PrinterSyncResult(BaseModel):
@@ -283,11 +292,11 @@ def virtual_view(vp: VirtualPrinter, now: datetime) -> BambuddyView:
 
 
 async def sync_printers(
-    printers: Printers, client: BambuddyClient, *, dry_run: bool = False
+    printers: Printers, client: BambuddyClient, *, by: Actor, dry_run: bool = False
 ) -> PrinterSyncResult:
     """One pass (module docstring). Bambuddy's printer list failing fails the pass
     (an `ApiError`); its virtual-printer list failing is reported and the printers
-    still sync."""
+    still sync. ``by`` is the actor of a printer merge the pass makes (#6949)."""
     now = datetime.now(UTC)
     active = [printer for printer in await client.printers() if printer.is_active]
     vp_error: str | None = None
@@ -300,7 +309,9 @@ async def sync_printers(
     rows = await asyncio.to_thread(store.list)
     entries: list[SyncEntry] = []
     for printer in active:
-        entries.append(await _sync_printer(printers, client, printer, rows, now, dry_run=dry_run))
+        entries.append(
+            await _sync_printer(printers, client, printer, rows, now, by=by, dry_run=dry_run)
+        )
     rows = await asyncio.to_thread(store.list)
     physical_serials = {p.serial_number for p in active if p.serial_number is not None}
     # The Bambuddy printers this pass gives a row: a dry run wrote none, so a VP's target
@@ -341,6 +352,7 @@ async def _sync_printer(
     rows: list[PrinterRow],
     now: datetime,
     *,
+    by: Actor,
     dry_run: bool,
 ) -> SyncEntry:
     store = printers.store
@@ -382,7 +394,7 @@ async def _sync_printer(
             )
         elif action == "linked":
             assert row is not None
-            row = await asyncio.to_thread(store.link_bambuddy, row.id, printer.id)
+            row = await asyncio.to_thread(store.link_bambuddy, row.id, printer.id, by)
         else:
             assert row is not None
             if printer.serial_number is not None and is_synthetic_serial(row.serial):
@@ -393,9 +405,15 @@ async def _sync_printer(
                     serial=printer.serial_number,
                     name=printer.name,
                     model=printer.model,
+                    by=by,
                 )
-    except (SerialTakenError, BambuddyLinkTakenError, VirtualPrinterRowError):
+    except (SerialTakenError, BambuddyLinkTakenError, VirtualPrinterRowError, MergeChangedError):
         entry.action, entry.reason = "conflict", RACE
+        return entry
+    except MergeRunningError as running:
+        # #6949 K1 Task 16: the merge moves the gone printer's stock first; it ends by
+        # itself and publishes `printer.changed`.
+        entry.action, entry.workflow_id = "merging", running.accepted.workflow_id
         return entry
     except PrinterNotFoundError:
         entry.action, entry.reason = "conflict", RACE

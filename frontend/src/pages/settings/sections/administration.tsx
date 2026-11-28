@@ -7,14 +7,17 @@ import { docOf } from '../fields'
 import { Advanced, RuntimeRows, SavedSection } from '../formParts'
 import type { AreaId } from '../registry'
 import { useBackendSettings } from '../useBackendSettings'
-import { ACTIVITY_REPAIR, ACTIVITY_TTL, fieldsOf } from '../values'
+import { ACTIVITY_REPAIR, ACTIVITY_TTL, CREDENTIAL_RETENTION, fieldsOf } from '../values'
 
 export const id = 'administration'
 export const area: AreaId = 'system'
 export const title = 'Administration'
 export const order = 20
 
-/** Who the activity bell follows, how long activity is kept, and the Temporal UI (#668). */
+/**
+ * Who the activity bell follows, how long activity and ended service credentials are kept
+ * (#8539), and the Temporal UI (#668).
+ */
 export function Component() {
   const form = useBackendSettings(id, (s) => fieldsOf(id, s))
   const { value, setField, errors } = form
@@ -71,6 +74,29 @@ export function Component() {
             placeholder={String(ACTIVITY_REPAIR.default)}
             value={value('activity_repair_window_seconds')}
             onChange={(event) => setField('activity_repair_window_seconds', event.target.value)}
+            className="sb-num"
+          />
+        </FieldRow>
+      </Advanced>
+      <Advanced
+        label="Advanced: service credential retention"
+        invalid={Boolean(errors.service_credential_retention_days)}
+      >
+        <FieldRow
+          id="credential-retention"
+          {...docOf(form.settings, 'service_credential_retention_days')}
+          error={errors.service_credential_retention_days}
+        >
+          <Input
+            id="credential-retention"
+            type="number"
+            min={CREDENTIAL_RETENTION.min}
+            max={CREDENTIAL_RETENTION.max}
+            step={1}
+            inputMode="numeric"
+            placeholder="Default"
+            value={value('service_credential_retention_days')}
+            onChange={(event) => setField('service_credential_retention_days', event.target.value)}
             className="sb-num"
           />
         </FieldRow>

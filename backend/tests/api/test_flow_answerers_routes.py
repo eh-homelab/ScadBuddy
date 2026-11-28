@@ -30,7 +30,12 @@ from tests.auth.fake_oidc import CLIENT_ID, ISSUER, FakeIssuer
 from tests.flows.flows_support import parent_session
 from tests.support.agent_tables import AGENT_KEY_MIGRATIONS
 
-pytestmark = [pytest.mark.requires_postgres, pytest.mark.requires_temporal]
+#: Their `wait_for_human` takes a text: the path of a call from before #8062.
+pytestmark = [
+    pytest.mark.requires_postgres,
+    pytest.mark.requires_temporal,
+    pytest.mark.usefixtures("waits_before_8062"),
+]
 
 PUBLIC = "https://scadbuddy.test"
 NOT_ALLOWED = "/flow-answer-not-allowed"

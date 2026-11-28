@@ -6,7 +6,11 @@ import (
 )
 
 func TestTheProofLoads(t *testing.T) {
-	m, err := Load(Dir())
+	dir, err := Dir()
+	if err != nil {
+		t.Fatal(err)
+	}
+	m, err := Load(dir)
 	if err != nil {
 		t.Fatal(err)
 	}

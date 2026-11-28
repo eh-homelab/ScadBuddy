@@ -34,6 +34,7 @@ from opentelemetry.trace import SpanKind
 from psycopg import Connection, sql
 from psycopg.conninfo import conninfo_to_dict, make_conninfo
 from psycopg.rows import DictRow, dict_row
+from psycopg.types.json import Jsonb
 from psycopg_pool import ConnectionPool
 from temporalio.worker import _workflow as temporal_workflow_worker
 
@@ -440,6 +441,22 @@ def _skip_without_slicer_profiles(request: pytest.FixtureRequest) -> None:
 
 
 @pytest.fixture(autouse=True)
+def _inline_stock_workflows(
+    request: pytest.FixtureRequest, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#6949 K1 Task 16: an app under test runs the orders' stock workflows in line
+    (`tests/support/order_stock.py`), with phase 2's stock writes standing for Go, so a
+    test that fulfils an item needs no Temporal. A test marked `real_stock_workflows`
+    (`tests/workflows/test_order_stock.py`) keeps the app's Temporal starter."""
+    if request.node.get_closest_marker("real_stock_workflows"):
+        return
+    from scadbuddy.orders import stock_start
+    from tests.support.order_stock import inline_starter
+
+    monkeypatch.setattr(stock_start, "make_starter", inline_starter)
+
+
+@pytest.fixture(autouse=True)
 def _skip_without_temporal(request: pytest.FixtureRequest) -> None:
     if request.node.get_closest_marker("requires_temporal") and not temporal_available():
         pytest.skip(
@@ -523,6 +540,10 @@ def _pg_template(_pg_database_url: str | None) -> Iterator[str | None]:
     try:
         with psycopg.connect(make_conninfo(url, dbname=name), autocommit=True) as conn:
             migrate(conn)
+            # The migrations publish history events (#6949: the property history's
+            # back-fill, the item kinds' schemas). A test starts with the log as it was
+            # before them: empty, from seq 1, behind the history subscriber's cursor.
+            conn.execute("TRUNCATE events RESTART IDENTITY")
         yield name
     finally:
         with psycopg.connect(url, autocommit=True) as conn:
@@ -586,6 +607,42 @@ def pg_pool(pg_conninfo: str) -> Iterator[PgPool]:
         yield pool
     finally:
         pool.close()
+
+
+HistoryRows = Callable[..., None]
+
+_PROPERTY_HISTORY = ("event_seq", "entity_id", "kind", "ref", "key", "op", "old", "new", "source")
+_SCHEMA_HISTORY = ("event_seq", "owner", "old", "new")
+
+
+def _history_rows(conn: Connection[Any], *rows: Mapping[str, Any]) -> None:
+    """Insert history rows as the history subscriber (scadbuddy-core, Go) writes them: a
+    row with an ``owner`` into `entity_property_schema_history`, any other into
+    `entity_property_history`. ``at`` is now and ``actor`` the browser unless given; the
+    JSON columns take Python values."""
+    for row in rows:
+        schema = "owner" in row
+        columns = _SCHEMA_HISTORY if schema else _PROPERTY_HISTORY
+        values = [
+            Jsonb(row.get(c)) if c in ("old", "new") and row.get(c) is not None else row.get(c)
+            for c in columns
+        ]
+        table = "entity_property_schema_history" if schema else "entity_property_history"
+        conn.execute(
+            sql.SQL("INSERT INTO {} ({}, at, actor) VALUES ({}, coalesce(%s, now()), %s)").format(
+                sql.Identifier(table),
+                sql.SQL(", ").join(map(sql.Identifier, columns)),
+                sql.SQL(", ").join(sql.Placeholder() * len(columns)),
+            ),
+            (*values, row.get("at"), Jsonb(row.get("actor", {"kind": "browser"}))),
+        )
+
+
+@pytest.fixture
+def history_rows() -> HistoryRows:
+    """`_history_rows`: Python does not run the Go history subscriber, so a test of a
+    history read writes its rows."""
+    return _history_rows
 
 
 MODEL_SLUG = "demo"
@@ -994,3 +1051,22 @@ def one_whole_read_at_a_time(tmp_path_factory: pytest.TempPathFactory) -> Iterat
     with lock.open("a") as handle:
         fcntl.flock(handle, fcntl.LOCK_EX)
         yield
+
+
+@pytest.fixture
+def waits_before_8062(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A new run's `wait_for_human` takes the path of a call from before #8062: the text
+    callback, with no task. Prod reaches that path only in a replay, so a live test of the
+    text answer (`flow_answer`, `POST /workflow-runs/{id}/answer`) takes this fixture. The
+    in-process worker shares `temporalio.workflow` with the test: the sandbox passes
+    `temporalio` through."""
+    from temporalio import workflow
+
+    from scadbuddy.workflows.flow_tools import HUMAN_PROMPT_PATCH
+
+    patched = workflow.patched
+
+    def before(patch_id: str) -> bool:
+        return not patch_id.startswith(f"{HUMAN_PROMPT_PATCH}:") and patched(patch_id)
+
+    monkeypatch.setattr(workflow, "patched", before)

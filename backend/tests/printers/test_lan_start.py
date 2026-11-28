@@ -233,6 +233,7 @@ async def test_a_start_saves_what_it_uses_of_the_sb_spools_once(pg_pool: PgPool)
     )
     input = base.model_copy(update={"printer": row.id, "spools": {1: option}, "uploaded": uploaded})
     running = state(gcode_state="RUNNING", subtask_name=NAME)
+    starts: list[LanStarted] = []
     for lan in (Scripted(state(gcode_state="FINISH", **LAST), [running]), Scripted(running, [])):
         deps = LanDeps(
             printers=printers,
@@ -241,7 +242,11 @@ async def test_a_start_saves_what_it_uses_of_the_sb_spools_once(pg_pool: PgPool)
             connect=lambda *_, lan=lan: cast(LanPrinter, lan),
             start_wait=2,
         )
-        await ActivityEnvironment().run(LanActivities(deps).lan_print, input)
+        starts.append(await ActivityEnvironment().run(LanActivities(deps).lan_print, input))
+    # #8321: the start it sent and the start an attempt found running both carry the
+    # plate's sliced grams of every slot, whatever its tray holds.
+    assert [s.grams_by_slot for s in starts] == [{1: 12.5, 2: 4.0}] * 2
+    assert all(s.ended_at is None for s in starts)
     with pg_pool.connection() as conn:
         uses = conn.execute(
             "SELECT ref_id, spool_id, delta_g, at FROM filament_spool_events"

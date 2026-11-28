@@ -6,9 +6,10 @@ import { createSdkMcpServer, type McpSdkServerConfigWithInstance, tool } from '@
 import type { CallToolResult } from '@modelcontextprotocol/sdk/types.js'
 import { z } from 'zod'
 import { type AuditActor, type AuditSink, safeDetail } from '../audit/log.js'
-import { assertHostAllowed, assertHttpUrl, embeddedIPv4, isLoopbackHost, type Resolver, systemResolver } from '../http/egress.js'
+import { assertHostAllowed, assertHttpUrl, embeddedIPv4, isInternalAddress, isLoopbackHost, type Resolver, systemResolver } from '../http/egress.js'
 import { pinnedRequestOptions, requestFor } from '../http/pinned.js'
 import { markUntrusted } from '../safety/untrusted.js'
+import { pinnedOutward } from '../tools/pinnedOutward.js'
 import { type WorkspaceFiles, sha256, WorkspaceError, type WorkspaceRef, workspacePath } from '../workspace/store.js'
 import type { ToolAccess } from '../access/model.js'
 import type { RiskTier, TierResolver } from './permissions.js'
@@ -19,18 +20,24 @@ import type { RiskTier, TierResolver } from './permissions.js'
 // turn unless `builtin:http` is switched off, or its item is `off`, in `ai_access`
 // (#2171, access/capabilities.ts; on by default).
 //
-// REACH IS OPEN, decided by the owner on 2026-09-30 (#827): the internet, the
-// LAN, private ranges, `*.internal` names and plain `http:` to any host. There
-// is no private-range block, on purpose; security for this tool will come
-// from running it in a sandbox later. What egress.ts still refuses for every
-// URL the agent itself fetches stays refused here: link-local addresses
-// (169.254/16, fe80::/10) and the cloud metadata hosts, where a node's own
-// cloud credentials live, and URLs carrying user:password.
+// REACH: the internet, `*.internal` names and plain `http:` to any host (#827).
+// A GET or HEAD to a private or loopback host (10/8, 172.16/12, 192.168/16,
+// fc00::/7, CGNAT 100.64/10, 127/8, ::1, 0/8, `localhost`) is refused (#8178), unless
+// the call names that host as `allow_private_host`, which pins the call outward
+// (tools/pinnedOutward.ts): a person approves that one call to that one host, and a
+// flow run's grant does not cover it (`needsPersonsApproval`, temporal/turnTools.ts). So a
+// turn, or a prompt that got into one, cannot read in-cluster services alone. A
+// write (POST and the rest) is outward anyway (a person's approval, or a flow run's
+// grant), so it may reach such a host without the argument. What egress.ts refuses for every URL the agent itself
+// fetches stays refused here: link-local addresses (169.254/16, fe80::/10) and the
+// cloud metadata hosts, where a node's own cloud credentials live, and URLs
+// carrying user:password.
 //
 // TIERS, by method (permissions.ts reads the call's input for this one tool):
 //   GET, HEAD                  read     runs at once
 //   POST, PUT, PATCH, DELETE   outward  parks for a human approval (#258),
 //                                       bound to the exact input
+//   any, with allow_private_host  outward, whatever its access tier (#8178)
 // Anything the resolver does not recognise is `outward`.
 //
 // GUARDS
@@ -44,9 +51,11 @@ import type { RiskTier, TierResolver } from './permissions.js'
 //     plugins' header tokens, the same list the event log is redacted of): a
 //     header value, the URL or the body that contains one is refused, so the
 //     model cannot be talked into sending its own credential anywhere.
-//   - Every hop is checked (assertHttpUrl, assertHostAllowed) and connects to
-//     exactly the address that was checked (pinned.ts), so a name re-pointed
-//     between check and connect (DNS rebinding) reaches nothing new.
+//   - Every hop is checked (assertHttpUrl, assertHostAllowed, and for a GET or
+//     HEAD the private-host check) and connects to exactly the address that was
+//     checked (pinned.ts), so a name re-pointed between check and connect (DNS
+//     rebinding) reaches nothing new. A redirect to a private host other than
+//     `allow_private_host` is refused.
 //   - Limits: at most MAX_REDIRECTS redirects; one deadline for the whole
 //     request (timeout_ms, default 30 s, at most 120 s); the body is read up
 //     to SAVE_MAX_BYTES (20 MiB) and returned inline up to INLINE_MAX_BYTES
@@ -105,6 +114,7 @@ const PAGE_DEFAULT_BYTES = 256 * 1024
 export function httpTierOf(toolName: string, input?: unknown): RiskTier | undefined {
   if (toolName === HTTP_READ_TOOL_NAME) return 'read'
   if (toolName !== HTTP_TOOL_NAME) return undefined
+  if (pinnedOutward(toolName, input)) return 'outward'
   const method = typeof input === 'object' && input !== null ? (input as { method?: unknown }).method : undefined
   if (method === undefined) return 'read'
   return typeof method === 'string' && READ_METHODS.has(method) ? 'read' : 'outward'
@@ -113,11 +123,14 @@ export function httpTierOf(toolName: string, input?: unknown): RiskTier | undefi
 /**
  * The http tools' tiers under `http_request`'s access in `ai_access` (#2171): where it is
  * a tier, http_request takes it whatever the method; else `httpTierOf`. `off` is never a
- * tier here: an http_request that is off is not offered at all.
+ * tier here: an http_request that is off is not offered at all. A call with
+ * `allow_private_host` is outward whatever the access (#8178, pinnedOutward.ts).
  */
 export function httpAccessTierOf(override: ToolAccess | undefined): TierResolver {
   return (toolName, input) =>
-    toolName === HTTP_TOOL_NAME && override !== undefined && override !== 'off' ? override : httpTierOf(toolName, input)
+    toolName === HTTP_TOOL_NAME && override !== undefined && override !== 'off' && !pinnedOutward(toolName, input)
+      ? override
+      : httpTierOf(toolName, input)
 }
 
 /** Header names the model may not set: Node sets them from the request. */
@@ -137,8 +150,11 @@ const FORBIDDEN_HEADERS: ReadonlySet<string> = new Set([
 const CREDENTIAL_HEADERS: ReadonlySet<string> = new Set(['authorization', 'cookie', 'proxy-authorization'])
 
 export const HttpRequestInput = {
-  method: z.enum(METHODS).optional().describe('HTTP method (default GET); GET and HEAD run at once, the others wait for the user to approve'),
-  url: z.string().max(8192).describe('Absolute http:// or https:// URL; LAN hosts and plain http are allowed'),
+  method: z.enum(METHODS).optional().describe('HTTP method (default GET); GET and HEAD to a public host run at once, the others wait for the user to approve'),
+  url: z
+    .string()
+    .max(8192)
+    .describe('Absolute http:// or https:// URL; plain http is allowed. A private or loopback host needs allow_private_host'),
   // `catchall`, not `z.record`: see `params` in tools/common.ts (the MCP server
   // bundled in SDK 0.3.283 failed tools/list on a z.record field).
   headers: z
@@ -162,6 +178,17 @@ export const HttpRequestInput = {
     .describe(
       'Save the whole response body as this file in your workspace (e.g. "downloads/part.stl"), replacing any ' +
         'file there; workspace_read reads it, and uploads can send it',
+    ),
+  allow_private_host: z
+    .string()
+    .min(1)
+    .max(253)
+    .regex(/^(?:[a-z0-9.-]+|\[[0-9a-f:.]+\])$/, "must be the URL's host name, lower case, as the URL has it (an IPv6 address in brackets)")
+    .optional()
+    .describe(
+      'Only after a GET or HEAD was refused because its host is, or resolves to, a private or loopback address, ' +
+        "and the user wants that request: the URL's host, exactly. The call then waits for a person to approve " +
+        'this one request to that host. Always needs a person\'s approval',
     ),
 }
 // Defaults are applied here, not with zod's `.default()`: the MCP server
@@ -240,6 +267,14 @@ export type HttpRequestContext = {
   sameHostRedirects?: boolean | undefined
   /** Refuse a host that is, or resolves to, the pod's loopback: WebFetch fetches web pages, and loopback is the agent's own services (#2679). */
   refuseLoopback?: boolean | undefined
+  /**
+   * Refuse a host that is, or resolves to, a private or loopback address (`isInternalAddress`)
+   * unless it is the call's `allow_private_host` (#8178). `runHttpRequest` sets it for a GET
+   * or HEAD; WebFetch does not.
+   */
+  refusePrivate?: boolean | undefined
+  /** Tests only: a GET or HEAD may reach a private or loopback host with no allow_private_host (their servers listen on loopback). */
+  allowPrivate?: boolean | undefined
 }
 
 function contains(value: string, secrets: readonly string[]): boolean {
@@ -261,6 +296,17 @@ export function requestProblem(args: HttpRequestArgs, secrets: readonly string[]
     return "the body contains the agent's own credential or a plugin token; it is never sent"
   }
   if (args.body !== undefined && READ_METHODS.has(args.method)) return `a ${args.method} request cannot have a body`
+  if (args.allow_private_host !== undefined) {
+    let host: string | undefined
+    try {
+      host = new URL(args.url).hostname
+    } catch {
+      // not a URL; exchange says so
+    }
+    if (host !== undefined && host !== args.allow_private_host) {
+      return `allow_private_host is ${args.allow_private_host}, but the URL's host is ${host}`
+    }
+  }
   return undefined
 }
 
@@ -422,7 +468,7 @@ export async function exchange(args: HttpRequestArgs, context: Omit<HttpRequestC
         actor: context.actor,
         sessionId: context.sessionId,
         turnId: context.turnId,
-        tier: READ_METHODS.has(method) ? 'read' : 'outward',
+        tier: READ_METHODS.has(method) && args.allow_private_host === undefined ? 'read' : 'outward',
         inputSummary: JSON.stringify({
           method,
           scheme: url.protocol.replace(/:$/, ''),
@@ -443,6 +489,16 @@ export async function exchange(args: HttpRequestArgs, context: Omit<HttpRequestC
       const loopback = context.refuseLoopback ? addresses.find((a) => isLoopbackHost(embeddedIPv4(a) ?? a)) : undefined
       if (loopback !== undefined || (context.refuseLoopback && isLoopbackHost(url.hostname))) {
         throw new Error(`url host ${url.hostname} is, or resolves to, this pod's loopback, not a web page`)
+      }
+      if (context.refusePrivate && url.hostname !== args.allow_private_host) {
+        const internal = addresses.find(isInternalAddress) ?? (isLoopbackHost(url.hostname) ? 'loopback' : undefined)
+        if (internal !== undefined) {
+          throw new Error(
+            `${hop > 0 ? 'redirect' : 'url'} host ${url.hostname} is, or resolves to, ${internal}, a private or loopback address. ` +
+              `To read it, call ${HTTP_TOOL} again with allow_private_host: "${url.hostname}" and the URL of that host; ` +
+              'a person must then approve that one request',
+          )
+        }
       }
     } catch (err) {
       const reason = (err as Error).message
@@ -610,7 +666,7 @@ export async function runHttpRequest(
       actor: context.actor,
       sessionId: context.sessionId,
       turnId: context.turnId,
-      tier: READ_METHODS.has(args.method) ? 'read' : 'outward',
+      tier: READ_METHODS.has(args.method) && args.allow_private_host === undefined ? 'read' : 'outward',
       inputSummary: JSON.stringify({ method: args.method, host }),
       outcome: 'refused',
       detail: safeDetail(problem, context.secrets()),
@@ -629,7 +685,9 @@ export async function runHttpRequest(
     }
   }
   const limits = { ...DEFAULT_LIMITS, ...context.limits }
-  const outcome = await exchange(args, context, callSignal)
+  // A GET or HEAD reaches a private or loopback host only when a person approved it (#8178).
+  const refusePrivate = READ_METHODS.has(args.method) && context.allowPrivate !== true
+  const outcome = await exchange(args, { ...context, refusePrivate }, callSignal)
   if (!outcome.ok) return text({ error: `Not completed: ${outcome.reason}.` }, true)
   const { hop } = outcome
   const contentType = typeof hop.headers['content-type'] === 'string' ? hop.headers['content-type'] : undefined
@@ -805,8 +863,10 @@ function signalOf(extra: unknown): AbortSignal | undefined {
 
 /** What the model reads of http_request, and the Tools and plugins page shows. */
 export const HTTP_TOOL_DESCRIPTION =
-  'Make one HTTP request, like curl, to any http or https URL: the internet or the local network. ' +
+  'Make one HTTP request, like curl, to any http or https URL. ' +
   'GET and HEAD run at once; POST, PUT, PATCH and DELETE wait for the user to approve that exact request. ' +
+  'A GET or HEAD to a private or loopback address (the local network, the cluster, localhost) is refused unless ' +
+  'you name its host as allow_private_host; that request then waits for the user to approve it. ' +
   'Only the headers you give are sent. Returns the status, the response headers and the body ' +
   `(up to ${INLINE_MAX_BYTES} bytes inline); a longer text body is saved and read with ${HTTP_READ_TOOL}. ` +
   'A binary body (an image, a 3MF, a zip) is stored as a workspace file and the result names it; ' +

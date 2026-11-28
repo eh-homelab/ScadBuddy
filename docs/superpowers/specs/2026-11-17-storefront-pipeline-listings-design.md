@@ -760,7 +760,9 @@ dollhouse slice against it.
 (`quote.py` `ensure_output`) call `outputs_for_reference` with the item: it sets output 0
 on the item, because `OrderItem` holds one `output_id`, and saves each later output `k` of
 the same job under `orders/rendering.py` `kit_output_id(<the item's output>, k)`, a uuid5
-of that id and `k` (`later_as`). The item's own output is reused while it matches and its
+of that id and `k` (`later_as`). #8481: a storefront line holds the slice run's first
+output, `storefront_output_id(render_key)`, and its later outputs are
+`storefront_output_id(render_key, k)` (`later_output_id` of the line's render key). The item's own output is reused while it matches and its
 job can be read, and its later outputs go under ids of it; once the prune took the job,
 the reference renders again and the item takes the new job's outputs. `kit_output_ids`
 finds every output of the item from its `output_id`: each later id while it holds an output

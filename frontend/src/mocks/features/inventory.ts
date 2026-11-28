@@ -2,12 +2,13 @@ import { HttpResponse, http } from 'msw'
 import { addDecimals, cmpDecimals, divDecimal, mulDecimals, roundDecimal, subDecimals } from '../../lib/decimal'
 import type { components } from '../../api/schema'
 import { mockSettings } from '../handlers'
-import { schemaProblem } from './entities'
-import { locationExists } from './filament'
+import { itemKeysInUse, marksOf, rowPropertiesRefusal, saveRowProperties, schemaProblem } from './entities'
+import { locationExists, mockTypes } from './filament'
 import { supplierById } from './filamentPurchasing'
 import { SUPPLIER } from './filamentPurchasingSeed'
 import { INVENTORY } from './inventorySeed'
 import { BROWSER, fieldProblem, now, problem, PROBLEMS as ORDER_PROBLEMS, state as orders } from './orders/state'
+import { nextNumber } from '../nextNumber'
 
 /**
  * #7067 — the inventory (`backend/scadbuddy/api/inventory.py`, `inventory_stock.py`): item
@@ -25,12 +26,15 @@ type Tracking = S['ItemKind']['tracking']
 const PROBLEMS = 'https://scadbuddy.dev/problems/inventory/'
 const KIND_ID = /^[a-z][a-z0-9_]{0,39}$/
 
-type MockKind = Omit<S['ItemKind'], 'item_count'>
+type MockKind = Omit<S['ItemKind'], 'item_count' | 'code'>
 type MockItem = {
   id: string
+  /** From `item_numbers_seq`, which numbers spool types too (`nextItemNumber`); the code is I-<number>. */
+  number: number
   kind_id: string
   name: string
   manufacturer: string
+  /** The codes as sent. Unlike Go (`store/relations.go` `modelKind`), the mock makes no model kind for a code. */
   compatible_with: string[]
   low_stock: string
   life_hours: string | null
@@ -81,33 +85,42 @@ export { INVENTORY }
 const SEEDED_AT = '2026-11-20T09:00:00Z'
 
 function kind(id: string, name: string, parent_id: string | null, tracking: Tracking, uom: string, life_basis: MockKind['life_basis'], saleable = false): MockKind {
-  return { id, name, parent_id, tracking, uom, attribute_schema: { type: 'object', properties: {} }, life_basis, saleable, builtin: true, archived_at: null }
+  return { id, name, parent_id, tracking, uom, attribute_schema: { type: 'object', properties: {} }, life_basis, saleable, builtin: true, archived_at: null, number: 0 }
 }
 
-/** `20261124T0323Z_inventory_core.sql`'s built-in kinds. */
+/** The built-in kinds as `20261126T0218Z_inventory_class.sql` (inventory K1) leaves them:
+ * the three roots, and `tracking` and `life_basis` derived from the class (R-K1-6). */
 function builtinKinds(): MockKind[] {
   const kinds = [
-    kind('filament', 'Filament', null, 'filament', 'g', 'none'),
-    kind('printer', 'Printer', null, 'unit', 'each', 'hours'),
-    kind('part', 'Part', null, 'lot', 'each', 'none'),
-    kind('nozzle', 'Nozzle', 'part', 'unit', 'each', 'hours'),
-    kind('hotend', 'Hotend', 'part', 'unit', 'each', 'hours'),
-    kind('belt', 'Belt', 'part', 'unit', 'each', 'hours'),
-    kind('build_plate', 'Build plate', 'part', 'unit', 'each', 'months'),
-    kind('ams_part', 'AMS part', 'part', 'lot', 'each', 'none'),
-    kind('hardware', 'Hardware', 'part', 'lot', 'each', 'none'),
     kind('consumable', 'Consumable', null, 'lot', 'each', 'none'),
+    kind('filament', 'Filament', 'consumable', 'filament', 'g', 'none'),
+    kind('general_consumable', 'General consumable', 'consumable', 'lot', 'each', 'none'),
     kind('desiccant', 'Desiccant', 'consumable', 'lot', 'g', 'none'),
     kind('packaging', 'Packaging', 'consumable', 'lot', 'each', 'none'),
     kind('lubricant', 'Lubricant', 'consumable', 'lot', 'ml', 'none'),
-    kind('equipment', 'Equipment', null, 'unit', 'each', 'months'),
+    kind('hardware', 'Hardware', 'consumable', 'lot', 'each', 'none'),
+    kind('ams_part', 'AMS part', 'consumable', 'lot', 'each', 'none'),
+    kind('printed_part', 'Printed part', 'consumable', 'lot', 'each', 'none', true),
+    kind('assembly', 'Assembly', 'consumable', 'lot', 'each', 'none', true),
+    kind('durable', 'Durable', null, 'unit', 'each', 'none'),
+    kind('printer', 'Printer', 'durable', 'unit', 'each', 'hours'),
+    kind('part', 'Part', 'durable', 'unit', 'each', 'none'),
+    kind('nozzle', 'Nozzle', 'part', 'unit', 'each', 'hours'),
+    kind('hotend', 'Hotend', 'part', 'unit', 'each', 'hours'),
+    kind('belt', 'Belt', 'part', 'unit', 'each', 'hours'),
+    kind('build_plate', 'Build plate', 'part', 'unit', 'each', 'none'),
+    kind('spool_part', 'Spool insert', 'durable', 'unit', 'each', 'none'),
+    kind('equipment', 'Equipment', 'durable', 'unit', 'each', 'months'),
     kind('dry_bin', 'Dry bin', 'equipment', 'unit', 'each', 'months'),
     kind('tool', 'Tool', 'equipment', 'unit', 'each', 'months'),
-    kind('printed_part', 'Printed part', null, 'lot', 'each', 'none', true),
-    kind('assembly', 'Assembly', null, 'lot', 'each', 'none', true),
     kind('service', 'Service', null, 'none', 'each', 'none'),
-    kind('spool_part', 'Spool part', null, 'unit', 'each', 'none'),
+    kind('warranty', 'Warranty', 'service', 'none', 'each', 'none'),
+    kind('service_plan', 'Service plan', 'service', 'none', 'each', 'none'),
+    kind('labour', 'Labour', 'service', 'none', 'each', 'none'),
+    kind('flat_service', 'Flat-rate service', 'service', 'none', 'each', 'none'),
   ]
+  // The migration numbers the seeded kinds in order (`item_kinds_number_seq`).
+  kinds.forEach((k, at) => (k.number = at + 1))
   kinds.find((k) => k.id === 'spool_part')!.attribute_schema = {
     type: 'object',
     properties: {
@@ -129,8 +142,21 @@ function fresh() {
     moves: [] as MockMove[],
     /** Each request body the routes took, by route name, for the tests. */
     bodies: [] as { route: string; body: unknown }[],
+    /** Each write's `Idempotency-Key`, by route name, for the tests. */
+    keys: [] as { route: string; key: string | null }[],
+    /** #6949 K1 — the writes answered 202 (`slowNextWrite`), running until `settleSlowWrites`. */
+    slow: [] as SlowWrite[],
     counter: 0,
   }
+}
+
+/** A write the mock did at once but answered 202, as Go does past the API's wait. */
+interface SlowWrite {
+  id: string
+  key: string | null
+  created_at: string
+  result: Record<string, unknown> | null
+  settled: boolean
 }
 
 export const inventoryMock = fresh()
@@ -152,6 +178,15 @@ let recostBusy = false
 export function failNextRecost(): void {
   recostBusy = true
 }
+/** #6949 K1 — the next `n` writes answer 202; their operations run until `settleSlowWrites`. */
+let slowWrites = 0
+export function slowNextWrite(n = 1): void {
+  slowWrites = n
+}
+/** Ends every slow write's operation with its result, or (`gone`) with none, as a pruned answer reads. */
+export function settleSlowWrites({ gone = false }: { gone?: boolean } = {}): void {
+  for (const op of inventoryMock.slow) Object.assign(op, { settled: true }, gone ? { result: null } : {})
+}
 
 // -- seeds ----------------------------------------------------------------------------------
 
@@ -159,6 +194,7 @@ export function seedItem(fields: Partial<MockItem> & { name: string; kind_id: st
   ready()
   const item: MockItem = {
     id: id(),
+    number: nextItemNumber(),
     manufacturer: '',
     compatible_with: [],
     low_stock: '0',
@@ -205,7 +241,7 @@ function seed() {
   seedItem({ id: INVENTORY.NOZZLE, kind_id: 'nozzle', name: 'Hardened steel nozzle 0.4', manufacturer: 'Bambu Lab', compatible_with: ['H2C'] })
   newUnit(INVENTORY.NOZZLE, '1999', false, { id: INVENTORY.NOZZLE_UNIT, serial: 'HS-0001', received_at: SEEDED_AT })
   newUnit(INVENTORY.NOZZLE, '1999', false, { serial: 'HS-0002', received_at: SEEDED_AT })
-  seedItem({ id: INVENTORY.ENGRAVING, kind_id: 'service', name: 'Laser engraving' })
+  seedItem({ id: INVENTORY.ENGRAVING, kind_id: 'flat_service', name: 'Laser engraving' })
 }
 
 let seeded = false
@@ -224,6 +260,7 @@ export function reset(): void {
   Object.assign(inventoryMock, fresh())
   seeded = false
   recostBusy = false
+  slowWrites = 0
   ready()
 }
 
@@ -253,28 +290,47 @@ function subtree(kindId: string): Set<string> {
   return found
 }
 
-/** `kinds.item_schema`: each ancestor's `properties`, the kind's own last. */
+/** `kinds.item_schema`: each ancestor's `properties`, the kind's own last, and each `required` key, ancestor first and once (R-K1-33). */
 export function kindSchema(kindId: string): Record<string, unknown> {
   ready()
   const properties: Record<string, unknown> = {}
-  for (const k of kindPath(kindId)) Object.assign(properties, (k.attribute_schema.properties ?? {}) as Record<string, unknown>)
-  return { type: 'object', properties }
+  const required: string[] = []
+  for (const k of kindPath(kindId)) {
+    Object.assign(properties, (k.attribute_schema.properties ?? {}) as Record<string, unknown>)
+    for (const key of (k.attribute_schema.required ?? []) as string[]) if (!required.includes(key)) required.push(key)
+  }
+  return required.length ? { type: 'object', properties, required } : { type: 'object', properties }
 }
 
-/** An item's property schema (`schema_for`), or undefined for no such item. */
+/** Go's special types' `requires_properties` (`handlers/catalog.go`), by special type. */
+const SPECIAL_REQUIRES: Record<string, string[]> = { filament_spool: ['rgba', 'diameter_mm'], printer: ['model_code'] }
+
+/** The keys an item of the kind must have (Go's `item_required`): the schema's, then its special type's. */
+export function itemRequired(kindId: string): string[] {
+  const required = [...((kindSchema(kindId).required ?? []) as string[])]
+  const special = [...kindPath(kindId)].reverse().find((k) => k.special_type)?.special_type
+  for (const key of SPECIAL_REQUIRES[special ?? ''] ?? []) if (!required.includes(key)) required.push(key)
+  return required
+}
+
+/** An item's property schema (`schema_for`), or undefined for no such item. Its `required` is the item's, special type's included, so the marks and the save check match Go. */
 export function itemSchemaOf(itemId: string): Record<string, unknown> | undefined {
   ready()
   const item = inventoryMock.items.find((i) => i.id === itemId)
-  return item ? kindSchema(item.kind_id) : undefined
+  if (!item) return undefined
+  const required = itemRequired(item.kind_id)
+  return required.length ? { ...kindSchema(item.kind_id), required } : kindSchema(item.kind_id)
 }
+
+/** The ids of the items of the kinds, archived ones too. */
+const itemsOfKinds = (kinds: Set<string>) => inventoryMock.items.filter((i) => kinds.has(i.kind_id)).map((i) => i.id)
 
 /** The items of the item's kind and of its descendants, for `keys_in_use`. */
 export function itemsTypedLike(itemId: string): string[] {
   ready()
   const item = inventoryMock.items.find((i) => i.id === itemId)
   if (!item) return []
-  const kinds = subtree(item.kind_id)
-  return inventoryMock.items.filter((i) => kinds.has(i.kind_id)).map((i) => i.id)
+  return itemsOfKinds(subtree(item.kind_id))
 }
 
 const trackingOf = (item: MockItem): Tracking => kindOf(item.kind_id)?.tracking ?? 'none'
@@ -304,6 +360,8 @@ function answerItem(item: MockItem): S['Item'] {
   }
   return {
     id: item.id,
+    number: item.number,
+    code: `I-${item.number}`,
     kind_id: item.kind_id,
     kind_path: kindPath(item.kind_id).map((p) => p.id),
     tracking,
@@ -326,6 +384,7 @@ function answerItem(item: MockItem): S['Item'] {
     cost_unknown: unknown,
     low: tracking !== 'none' && above(item.low_stock) && !above(onHand, item.low_stock),
     offer_count: inventoryMock.offers.filter((o) => o.item_id === item.id && !o.archived_at).length,
+    ...marksOf(`item:${item.id}`, item.archived_at !== null),
   }
 }
 
@@ -336,8 +395,32 @@ export function inventoryItem(itemId: string): S['Item'] | undefined {
   return item ? answerItem(item) : undefined
 }
 
+/**
+ * The next number of `item_numbers_seq`: one sequence numbers spool types and items, so a
+ * T-<n> and an I-<n> never share n. The seeded items come after the seeded types.
+ */
+export function nextItemNumber(): number {
+  ready()
+  return nextNumber([...mockTypes(), ...inventoryMock.items])
+}
+
+/** The item an I-<number> code names, or undefined. */
+export const itemByNumber = (number: number): MockItem | undefined => {
+  ready()
+  return inventoryMock.items.find((i) => i.number === number)
+}
+
+/** The kind a K-<number> code names (`codes/resolve.py`), or undefined. */
+export const kindByNumber = (number: number): MockKind | undefined => {
+  ready()
+  return inventoryMock.kinds.find((k) => k.number === number)
+}
+
+/** A made kind's id: k and its number (`item_kinds_made_id_check`). */
+const MADE_KIND_ID = /^k[0-9]+$/
+
 function answerKind(k: MockKind): S['ItemKind'] {
-  return { ...k, item_count: inventoryMock.items.filter((i) => i.kind_id === k.id && !i.archived_at).length }
+  return { ...k, code: `K-${k.number}`, item_count: inventoryMock.items.filter((i) => i.kind_id === k.id && !i.archived_at).length }
 }
 
 function latestPrice(offerId: string): S['OfferPricePoint'] | null {
@@ -425,6 +508,15 @@ class Refused extends Error {
   }
 }
 
+/** A refusal another mock already wrote as a response (`rowPropertiesRefusal`). */
+class Answered extends Error {
+  readonly response: Response
+  constructor(response: Response) {
+    super('answered')
+    this.response = response
+  }
+}
+
 /** FastAPI's own 422 for a body field (no inventory code), as `fieldProblem` answers it. */
 class FieldRefused extends Error {
   readonly field: string
@@ -436,14 +528,31 @@ class FieldRefused extends Error {
 
 function refused(request: Request, error: unknown) {
   if (error instanceof FieldRefused) return fieldProblem(request, error.field, error.message)
+  if (error instanceof Answered) return error.response
   if (!(error instanceof Refused)) throw error
   return problem(request, error.status, error.message, error.base + error.code, { code: error.code })
 }
 
-/** The answer of `run()`, or its refusal as the route's problem. */
+const accepted = (op: SlowWrite, repeated: boolean) =>
+  HttpResponse.json({ id: op.id, kind: 'inventory.write', subject: '', status: 'running', created_at: op.created_at, repeated }, { status: 202 })
+
+/**
+ * The answer of `run()`, or its refusal as the route's problem. A write while `slowNextWrite`
+ * is set runs at once and answers 202; the same `Idempotency-Key` again attaches to it.
+ */
 async function answer(request: Request, run: () => object | Promise<object>, status = 200) {
+  const key = request.headers.get('Idempotency-Key')
+  const running = key ? inventoryMock.slow.find((op) => op.key === key && !op.settled) : undefined
+  if (running) return accepted(running, true)
   try {
-    return HttpResponse.json((await run()) as Record<string, unknown>, { status })
+    const result = (await run()) as Record<string, unknown>
+    if (request.method !== 'GET' && slowWrites > 0) {
+      slowWrites -= 1
+      const op: SlowWrite = { id: `op-${id()}`, key, created_at: now(), result, settled: false }
+      inventoryMock.slow.push(op)
+      return accepted(op, false)
+    }
+    return HttpResponse.json(result, { status })
   } catch (error) {
     return refused(request, error)
   }
@@ -455,13 +564,18 @@ function findItem(itemId: string): MockItem {
   return item
 }
 
-/** The item, refused unless its kind counts it in `tracking`. */
-function counted(itemId: string, tracking: 'lot' | 'unit'): MockItem {
+/**
+ * The item, refused unless its kind counts it in `tracking`. On an item that is not counted,
+ * a receive or a count is 409 `step_not_applicable`; a use (`take`) is 409 `handler_not_built`,
+ * because a service's consume step is `consume.service`, which K1 does not build (#6949 K1).
+ */
+function counted(itemId: string, tracking: 'lot' | 'unit', take = false): MockItem {
   const item = findItem(itemId)
   const has = trackingOf(item)
-  if (has === 'none') throw new Refused(409, 'item_not_counted', "the item's kind is not counted (tracking `none`): no lots, units or moves")
+  if (has === 'none' && take) throw new Refused(409, 'handler_not_built', "the item's consume step has a handler K1 does not build")
+  if (has === 'none') throw new Refused(409, 'step_not_applicable', "the item's kind is not counted (tracking `none`): no lots, units or moves")
   if (has === 'filament') throw new Refused(409, 'filament_item_refused', 'filament items and their offers wait for the filament phase (#7068)')
-  if (has !== tracking) throw new Refused(409, 'wrong_tracking', 'a lot call on an item counted in units, or a unit call on one counted in lots')
+  if (has !== tracking) throw new Refused(409, 'wrong_counting', 'a lot call on an item counted in units, or a unit call on one counted in lots')
   return item
 }
 
@@ -712,7 +826,10 @@ function kindProblem(body: { parent_id?: string | null; attribute_schema?: Recor
     if (own && kindPath(body.parent_id).some((k) => k.id === own)) throw new Refused(422, 'kind_cycle', 'the parent is the kind or below it')
   }
   if (body.attribute_schema != null) {
-    const reason = schemaProblem(body.attribute_schema)
+    // Go's checkSchema: a required key may be one a parent defines (the parent's merged keys).
+    const parent = body.parent_id !== undefined ? body.parent_id : own ? (kindOf(own)?.parent_id ?? null) : null
+    const inherited = parent ? Object.keys((kindSchema(parent).properties ?? {}) as Record<string, unknown>) : []
+    const reason = schemaProblem(body.attribute_schema, 'item', inherited)
     if (reason) throw new Refused(422, 'bad_property_schema', reason)
   }
 }
@@ -722,6 +839,7 @@ const params = (request: Request) => new URL(request.url).searchParams
 async function body<T>(request: Request, route: string): Promise<T> {
   const read = (await request.json()) as T
   inventoryMock.bodies.push({ route, body: read })
+  inventoryMock.keys.push({ route, key: request.headers.get('Idempotency-Key') })
   return read
 }
 
@@ -732,6 +850,15 @@ export const handlers = [
   http.all(`${B}/*`, () => {
     ready()
   }),
+  // -- operations (#6949 K1): a slow write's, running until `settleSlowWrites`
+  http.get(`${B}/operations/:id`, ({ request, params: p }) =>
+    answer(request, () => {
+      const op = inventoryMock.slow.find((o) => o.id === p.id)
+      if (!op) throw new Refused(404, 'operation_not_found', `no operation '${String(p.id)}'`)
+      const base = { id: op.id, kind: 'inventory.write', subject: '', created_at: op.created_at }
+      return op.settled ? { ...base, status: 'succeeded', finished_at: now(), result: op.result } : { ...base, status: 'running' }
+    }),
+  ),
   // -- kinds
   http.get(`${B}/kinds`, ({ request }) => {
     const archived = params(request).get('archived') === 'true'
@@ -742,20 +869,26 @@ export const handlers = [
     return answer(
       request,
       () => {
-        if (!KIND_ID.test(input.id)) throw new FieldRefused('id', "String should match pattern '^[a-z][a-z0-9_]{0,39}$'")
-        if (kindOf(input.id)) throw new Refused(409, 'kind_exists', `an item kind has that id: ${input.id}`)
+        if (input.id != null && !KIND_ID.test(input.id)) throw new FieldRefused('id', "String should match pattern '^[a-z][a-z0-9_]{0,39}$'")
+        if (input.id != null && MADE_KIND_ID.test(input.id)) throw new FieldRefused('id', "Value error, an id of k and digits is a made kind's id: k and its number")
+        if (input.id != null && kindOf(input.id)) throw new Refused(409, 'kind_exists', `an item kind has that id: ${input.id}`)
         kindProblem(input, null)
+        // The next number of `item_kinds_number_seq`; with no id, the kind is k<number>.
+        const number = nextNumber(inventoryMock.kinds)
         const made: MockKind = {
-          id: input.id,
+          id: input.id ?? `k${number}`,
+          number,
           name: input.name,
           parent_id: input.parent_id ?? null,
-          tracking: input.tracking,
+          // #6949 K1: a kind sent with no tracking is counted as its parent is.
+          tracking: input.tracking ?? (input.parent_id ? kindOf(input.parent_id)?.tracking : undefined) ?? 'none',
           uom: input.uom ?? 'each',
           attribute_schema: input.attribute_schema ?? { type: 'object', properties: {} },
           life_basis: input.life_basis ?? 'none',
           saleable: input.saleable ?? false,
           builtin: false,
           archived_at: null,
+          special_type: input.special_type ?? null,
         }
         inventoryMock.kinds.push(made)
         return answerKind(made)
@@ -770,7 +903,10 @@ export const handlers = [
       if (!k) throw new Refused(404, 'kind_not_found', `no item kind '${String(p.id)}'`)
       kindProblem(input, k.id)
       if (input.tracking && input.tracking !== k.tracking && (k.builtin || inventoryMock.items.some((i) => i.kind_id === k.id))) {
-        throw new Refused(409, 'kind_in_use', "the kind's items or built-in status forbid it")
+        throw new Refused(409, 'kind_in_use', "the kind's items, child kinds or built-in status forbid it")
+      }
+      if (input.uom && input.uom !== k.uom && inventoryMock.items.some((i) => i.kind_id === k.id)) {
+        throw new Refused(409, 'kind_in_use', `the kind's items, child kinds or built-in status forbid it: ${k.id} has items; its unit stays`)
       }
       if ('parent_id' in input) k.parent_id = input.parent_id ?? null
       for (const key of ['name', 'tracking', 'uom', 'attribute_schema', 'life_basis', 'saleable'] as const) {
@@ -783,7 +919,10 @@ export const handlers = [
     answer(request, () => {
       const k = kindOf(String(p.id))
       if (!k) throw new Refused(404, 'kind_not_found', `no item kind '${String(p.id)}'`)
-      if (inventoryMock.items.some((i) => i.kind_id === k.id && !i.archived_at)) throw new Refused(409, 'kind_in_use', "the kind's items or built-in status forbid it")
+      if (inventoryMock.items.some((i) => i.kind_id === k.id && !i.archived_at)) throw new Refused(409, 'kind_in_use', "the kind's items, child kinds or built-in status forbid it")
+      if (inventoryMock.kinds.some((c) => c.parent_id === k.id && !c.archived_at)) {
+        throw new Refused(409, 'kind_in_use', `the kind's items, child kinds or built-in status forbid it: ${k.id} has child kinds; archive them first`)
+      }
       k.archived_at = now()
       return answerKind(k)
     }),
@@ -792,6 +931,8 @@ export const handlers = [
     answer(request, () => {
       const k = kindOf(String(p.id))
       if (!k) throw new Refused(404, 'kind_not_found', `no item kind '${String(p.id)}'`)
+      const parent = k.parent_id ? kindOf(k.parent_id) : undefined
+      if (parent?.archived_at) throw new Refused(409, 'kind_archived', `the item kind is archived; restore it first: ${parent.id}`)
       k.archived_at = null
       return answerKind(k)
     }),
@@ -800,7 +941,7 @@ export const handlers = [
     answer(request, () => {
       const k = kindOf(String(p.id))
       if (!k) throw new Refused(404, 'kind_not_found', `no item kind '${String(p.id)}'`)
-      return { kind_id: k.id, schema: kindSchema(k.id), own_schema: k.attribute_schema, keys_in_use: [] }
+      return { kind_id: k.id, schema: kindSchema(k.id), own_schema: k.attribute_schema, keys_in_use: itemKeysInUse(itemsOfKinds(subtree(k.id))), item_required: itemRequired(k.id) }
     }),
   ),
 
@@ -831,7 +972,7 @@ export const handlers = [
         if (inventoryMock.items.some((i) => i.kind_id === k.id && !i.archived_at && i.name.toLowerCase() === input.name.trim().toLowerCase())) {
           throw new Refused(409, 'item_exists', 'an unarchived item of the kind has that name in any case, or that import ref')
         }
-        return seedItem({
+        const made = seedItem({
           kind_id: k.id,
           name: input.name,
           manufacturer: input.manufacturer ?? '',
@@ -839,6 +980,14 @@ export const handlers = [
           saleable: input.saleable ?? null,
           note: input.note ?? '',
         })
+        // R-K1-33: the item and its properties in one write, or nothing.
+        const refusal = rowPropertiesRefusal(request, `item:${made.id}`, input.properties, true)
+        if (refusal) {
+          inventoryMock.items = inventoryMock.items.filter((i) => i.id !== made.id)
+          throw new Answered(refusal)
+        }
+        saveRowProperties(`item:${made.id}`, input.properties)
+        return answerItem(findItem(made.id))
       },
       201,
     )
@@ -848,6 +997,12 @@ export const handlers = [
     const input = await body<S['InventoryItemPatch']>(request, 'patchItem')
     return answer(request, () => {
       const item = findItem(String(p.id))
+      // R-K1-33: a patch that sends a field is checked; an empty one is not. `properties: null`
+      // alone counts as empty, as `_item_body` drops it before Go sees the patch.
+      const sent = Object.entries(input).filter(([key, value]) => !(key === 'properties' && value === null))
+      const refusal = rowPropertiesRefusal(request, `item:${item.id}`, input.properties, sent.length > 0)
+      if (refusal) throw new Answered(refusal)
+      saveRowProperties(`item:${item.id}`, input.properties)
       if (input.name != null) item.name = input.name
       if (input.manufacturer != null) item.manufacturer = input.manufacturer
       if (input.note != null) item.note = input.note
@@ -963,7 +1118,7 @@ export const handlers = [
   http.post(`${B}/items/:id/use`, async ({ request, params: p }) => {
     const input = await body<S['UseInput']>(request, 'use')
     return answer(request, () => {
-      const item = counted(String(p.id), 'lot')
+      const item = counted(String(p.id), 'lot', true)
       return { moves: takeStock(item.id, quantity(item, input.qty, 'qty'), { lot_id: input.lot_id, reason: input.reason }) }
     })
   }),

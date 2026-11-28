@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { listCatalog, setCatalogAliases, type SpoolType } from '../../api/filament'
+import { listCatalog, setCatalogAliases, upsertType, type SpoolType } from '../../api/filament'
 import type { Filament } from '../../api/types'
 import { E, M, ST, B, T } from '../../mocks/features/filament/seed'
 import { server } from '../../mocks/server'
@@ -29,16 +29,35 @@ describe('makeTypeFromBook resolves names through the API (#6706)', () => {
     expect(after.map((rows) => rows.length)).toEqual(before.map((rows) => rows.length))
   })
 
-  it('adds a material it cannot resolve, and leaves an unknown effect empty', async () => {
-    let resolved = 0
+  // #8228: the names go with the type, and the server adds what the catalog lacks.
+  it('sends the names with the type, posts no catalog row, and leaves an unknown effect empty', async () => {
+    const seen: string[] = []
+    const bodies: Promise<unknown>[] = []
     server.events.on('request:start', ({ request }) => {
-      if (request.url.includes('/resolve')) resolved += 1
+      const path = new URL(request.url).pathname
+      seen.push(`${request.method} ${path}`)
+      if (request.method === 'POST' && path === '/api/v1/filament/types') bodies.push(request.clone().json())
     })
-    const made = await makeTypeFromBook(book({ material: 'Wax', effect: 'galaxy' }))
-    expect(made.effect_id).toBeNull()
-    expect((await listCatalog('materials')).find((row) => row.id === made.material_id)?.name).toBe('Wax')
-    expect(resolved).toBe(2)
-    server.events.removeAllListeners()
+    try {
+      const made = await makeTypeFromBook(book({ material: 'Wax', brand: 'Zed', subtype: 'Glossy', effect: 'galaxy' }))
+      expect(made.effect_id).toBeNull()
+      expect((await listCatalog('materials')).find((row) => row.id === made.material_id)?.name).toBe('Wax')
+      expect((await listCatalog('subtypes')).find((row) => row.id === made.subtype_id)).toMatchObject({ name: 'Glossy', material_id: made.material_id })
+      const [body] = (await Promise.all(bodies)) as Record<string, unknown>[]
+      expect(body).toMatchObject({ material_name: 'Wax', brand_name: 'Zed', subtype_name: 'Glossy' })
+      expect(body).not.toHaveProperty('material_id')
+      expect(seen.filter((one) => one.startsWith('POST /api/v1/filament/catalog'))).toEqual([])
+      expect(seen.filter((one) => one.includes('/resolve'))).toEqual(['GET /api/v1/filament/catalog/effects/resolve'])
+    } finally {
+      server.events.removeAllListeners()
+    }
+  })
+
+  it('adds no catalog row when the type is refused', async () => {
+    await upsertType({ code: 'NADIR-PLA-WAXY-RED', material_id: M.PLA, rgba: '#FF0000FF', label_weight_g: 1000, diameter_mm: '1.75' })
+    await expect(makeTypeFromBook(book({ brand: 'Nadir', subtype: 'Waxy' }))).rejects.toMatchObject({ status: 409 })
+    expect((await listCatalog('brands', { includeArchived: true })).map((row) => row.name)).not.toContain('Nadir')
+    expect((await listCatalog('subtypes', { includeArchived: true })).map((row) => row.name)).not.toContain('Waxy')
   })
 })
 

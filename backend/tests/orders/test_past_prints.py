@@ -10,6 +10,7 @@ from decimal import Decimal
 from pathlib import Path
 
 import pytest
+from psycopg.types.json import Jsonb
 
 from scadbuddy.core.problems import ApiError
 from scadbuddy.orders.costs import _unit
@@ -144,6 +145,183 @@ def test_an_archives_run_lists_every_plate_and_its_archive(rows: OrderStore, poo
     send(pool, subject, None, 54, 1, 84)
     assert rows.archive_run_plates(84) == []
     assert rows.archive_run_plates(99) == []
+
+
+def lan_run(
+    pool: PgPool,
+    run_id: str,
+    *plates: int,
+    archived: dict[int, int],
+    waiting: list[int] | None = None,
+    stopped: bool = False,
+) -> None:
+    """A LAN run (#8283): one start per plate in ``result.lan``, and for each plate in
+    ``archived`` the archive that start became, as `print_history._run_by_file` records it.
+    ``waiting`` are the plates still to start (``result.lan_waiting``); ``stopped`` sets
+    ``result.lan_stopped``."""
+    starts = [
+        {
+            "subtask_name": f"scadbuddy-{run_id[:8]}-p{p}",
+            "started_at": f"2026-11-26T1{p}:00:00Z",
+            "plate_id": p,
+        }
+        for p in plates
+    ]
+    with pool.connection() as conn:
+        conn.execute(
+            "INSERT INTO print_runs (id, output_id, idempotency_key, status, result)"
+            " VALUES (%s, %s, %s, 'succeeded', %s)",
+            (
+                run_id,
+                OUTPUT,
+                f"k-{run_id}",
+                Jsonb(
+                    {
+                        "lan": starts,
+                        "lan_waiting": waiting or [],
+                        "lan_stopped": {"stage": "cancelled", "message": "stopped"}
+                        if stopped
+                        else None,
+                    }
+                ),
+            ),
+        )
+        for p, archive_id in archived.items():
+            conn.execute(
+                "INSERT INTO lan_print_archives (archive_id, run_id, subtask_name, plate_id)"
+                " VALUES (%s, %s, %s, %s)",
+                (archive_id, run_id, f"scadbuddy-{run_id[:8]}-p{p}", p),
+            )
+
+
+def test_a_lan_runs_archive_lists_every_plate_of_its_run(rows: OrderStore, pool: PgPool) -> None:
+    """#8283: a LAN run sends no queue item, so its plates are its LAN starts, each with
+    the archive its start became; another LAN run of the same file adds none."""
+    lan_run(pool, "7cb24b655d0740999b530c96fb9f8f7a", 1, 2, archived={1: 360})
+    lan_run(pool, "8dc35c766e1851aaa641d07a0a9g08b", 1, archived={1: 370})
+    assert rows.archive_run_plates(360) == [(1, 360), (2, None)]
+    assert rows.archive_run_plates(370) == [(1, 370)]
+
+
+def test_a_lan_run_still_printing_lists_the_plates_it_has_yet_to_start(
+    rows: OrderStore, pool: PgPool
+) -> None:
+    """Review of #8295: a LAN run starts its plates one at a time (#4541), so a plate
+    still in ``lan_waiting`` is one of its plates, not yet archived, as the queue path's
+    send of a plate not yet printed is. A stopped run's waiting plates never print."""
+    lan_run(pool, "b1068fa99b4184ddd974040d3d3j3be", 1, archived={1: 500}, waiting=[2, 3])
+    assert rows.archive_run_plates(500) == [(1, 500), (2, None), (3, None)]
+    lan_run(
+        pool, "c2179ab00c5295eee085151e4e4k4cf", 1, archived={1: 510}, waiting=[2], stopped=True
+    )
+    assert rows.archive_run_plates(510) == [(1, 510)]
+
+
+def test_an_imported_archive_is_no_lan_runs(rows: OrderStore, pool: PgPool) -> None:
+    """Review of #8295: an archive an `import` link owns (#4698, #6394) is not a run's,
+    whatever `lan_print_archives` says, as `archive_origin` reads it."""
+    lan_run(pool, "d328abc11d6306fff196262f5f5l5dg", 1, 2, archived={1: 520})
+    with pool.connection() as conn:
+        conn.execute(
+            "INSERT INTO print_links (subject, archive_id, matched_by)"
+            " VALUES ('model:imported', 520, 'import')"
+        )
+    assert rows.archive_run_plates(520) == []
+
+
+def test_a_lan_run_of_copies_lists_each_copy(rows: OrderStore, pool: PgPool) -> None:
+    """#8336: copies of one plate are prints of their own (`-c<n>`, #4541), as the queue
+    path sends one item per copy. Each start and each waiting copy is a row of its own."""
+    run_id = "aef57e988a3073ccc863f29c2c2i2ae"
+    starts = [
+        {
+            "subtask_name": f"scadbuddy-{run_id[:8]}-p1",
+            "started_at": "2026-11-26T11:00:00Z",
+            "plate_id": 1,
+        },
+        {
+            "subtask_name": f"scadbuddy-{run_id[:8]}-p1-c2",
+            "started_at": "2026-11-26T12:00:00Z",
+            "plate_id": 1,
+        },
+    ]
+    with pool.connection() as conn:
+        conn.execute(
+            "INSERT INTO print_runs (id, output_id, idempotency_key, status, result)"
+            " VALUES (%s, %s, %s, 'succeeded', %s)",
+            (run_id, OUTPUT, f"k-{run_id}", Jsonb({"lan": starts, "lan_waiting": [1]})),
+        )
+        for archive_id, start in ((391, starts[0]), (392, starts[1])):
+            conn.execute(
+                "INSERT INTO lan_print_archives (archive_id, run_id, subtask_name, plate_id)"
+                " VALUES (%s, %s, %s, 1)",
+                (archive_id, run_id, start["subtask_name"]),
+            )
+    assert rows.archive_run_plates(392) == [(1, 391), (1, 392), (1, None)]
+
+
+def test_a_lan_start_with_a_bad_time_is_still_listed(rows: OrderStore, pool: PgPool) -> None:
+    """#8336: a start whose ``started_at`` is not a time, or is missing, does not fail
+    the read."""
+    run_id = "aef57e988a3073ccc863f29c2c2i2af"
+    starts = [
+        {"subtask_name": f"scadbuddy-{run_id[:8]}-p1", "started_at": "not a time", "plate_id": 1},
+        {"subtask_name": f"scadbuddy-{run_id[:8]}-p2", "plate_id": 2},
+    ]
+    with pool.connection() as conn:
+        conn.execute(
+            "INSERT INTO print_runs (id, output_id, idempotency_key, status, result)"
+            " VALUES (%s, %s, %s, 'succeeded', %s)",
+            (run_id, OUTPUT, f"k-{run_id}", Jsonb({"lan": starts})),
+        )
+        conn.execute(
+            "INSERT INTO lan_print_archives (archive_id, run_id, subtask_name, plate_id)"
+            " VALUES (%s, %s, %s, %s)",
+            (393, run_id, f"scadbuddy-{run_id[:8]}-p1", 1),
+        )
+    assert rows.archive_run_plates(393) == [(1, 393), (2, None)]
+
+
+def test_a_lan_start_with_a_bad_plate_is_no_plate_not_an_error(
+    rows: OrderStore, pool: PgPool
+) -> None:
+    """Review of #8295: a start's ``plate_id`` read as `print_links._LAN_JOBS` reads it
+    (#8083). 2.0, 10**12 and 0 are no plate; a start with none takes its recorded
+    archive's plate."""
+    run_id = "aef57e988a3073ccc863f29c2c2i2ad"
+    starts = [
+        {
+            "subtask_name": f"scadbuddy-{run_id[:8]}-p{n}",
+            "started_at": f"2026-11-26T1{n}:00:00Z",
+            "plate_id": bad,
+        }
+        for n, bad in ((1, 2.0), (2, 10**12), (3, 0))
+    ]
+    starts.append(
+        {"subtask_name": f"scadbuddy-{run_id[:8]}-p4", "started_at": "2026-11-26T14:00:00Z"}
+    )
+    with pool.connection() as conn:
+        conn.execute(
+            "INSERT INTO print_runs (id, output_id, idempotency_key, status, result)"
+            " VALUES (%s, %s, %s, 'succeeded', %s)",
+            (run_id, OUTPUT, f"k-{run_id}", Jsonb({"lan": starts})),
+        )
+        conn.execute(
+            "INSERT INTO lan_print_archives (archive_id, run_id, subtask_name, plate_id)"
+            " VALUES (%s, %s, %s, %s)",
+            (390, run_id, f"scadbuddy-{run_id[:8]}-p4", 4),
+        )
+    assert rows.archive_run_plates(390) == [(4, 390), (None, None), (None, None), (None, None)]
+
+
+def test_a_lan_archive_whose_run_was_pruned_lists_the_recorded_starts(
+    rows: OrderStore, pool: PgPool
+) -> None:
+    """#8283: `lan_print_archives` outlives the run's row (it has no foreign key)."""
+    lan_run(pool, "9ed46d877f2962bbb752e18b1b1h19c", 1, 2, archived={1: 380, 2: 381})
+    with pool.connection() as conn:
+        conn.execute("DELETE FROM print_runs WHERE id = %s", ("9ed46d877f2962bbb752e18b1b1h19c",))
+    assert rows.archive_run_plates(381) == [(1, 380), (2, 381)]
 
 
 def test_a_run_s_link_found_after_an_import_owns_the_archive(
@@ -430,6 +608,51 @@ async def test_an_archive_quote_refuses_a_print_it_cannot_price(
     gone = await refused(Seam(), 71)
     assert (gone.status, gone.type) == (409, PROBLEMS + "archive_gone")
     assert shop.rows.quotes(shop.item.id) == []
+
+
+async def test_an_archive_quote_names_a_plate_with_no_number(shop: QuoteShop, pool: PgPool) -> None:
+    """#8377: a LAN start whose bad ``plate_id`` is no plate, with no archive, is a plate
+    the quote waits for. The answer names it in words, not as ``None``."""
+    run_id = "f43ab9d22e9a07ccd2a1b3c4d5e6f7a8"
+    starts = [
+        {
+            "subtask_name": f"scadbuddy-{run_id[:8]}-p1",
+            "started_at": "2026-11-26T11:00:00Z",
+            "plate_id": 1,
+        },
+        {
+            "subtask_name": f"scadbuddy-{run_id[:8]}-p2",
+            "started_at": "2026-11-26T12:00:00Z",
+            "plate_id": 2.0,
+        },
+    ]
+    with pool.connection() as conn:
+        conn.execute(
+            "INSERT INTO print_runs (id, output_id, idempotency_key, status, result)"
+            " VALUES (%s, %s, %s, 'succeeded', %s)",
+            (run_id, OUTPUT, f"k-{run_id}", Jsonb({"lan": starts})),
+        )
+        conn.execute(
+            "INSERT INTO lan_print_archives (archive_id, run_id, subtask_name, plate_id)"
+            " VALUES (%s, %s, %s, 1)",
+            (395, run_id, starts[0]["subtask_name"]),
+        )
+    taken_from(pool, shop.item.id, 395)
+
+    with pytest.raises(ApiError) as caught:
+        await quote_from_archive(
+            shop.lifecycle,
+            Seam(plate(395)),
+            Book(),
+            shop.order.id,
+            shop.item.id,
+            archive_request(shop, 395),
+            BY,
+        )
+
+    assert caught.value.type == PROBLEMS + "archive_plates_missing"
+    assert caught.value.detail.endswith("plates with no archive: a plate with no number")
+    assert caught.value.extensions["plates"] == [None]
 
 
 async def test_a_library_file_item_takes_its_slots_from_the_archive(shop: QuoteShop) -> None:

@@ -281,6 +281,43 @@ describe('PrintItem', () => {
     expect(screen.getByRole('note')).toHaveTextContent('The order holds 1 of them. Save the others')
   })
 
+  // #8481: an accepted storefront item has a design and no output. Print… renders the design
+  // first (once), keeps that output on the item, then opens the dialog in item mode; the
+  // customer's accepted price stays.
+  it('renders an accepted item with no output first, then prints it in item mode', async () => {
+    const item = state.items.find((i) => i.id === ITEM_APPROVED)!
+    item.output_id = null
+    const accepted = state.quotes.filter((q) => q.order_item_id === ITEM_APPROVED && q.accepted).map((q) => q.id)
+    expect(accepted).toHaveLength(1)
+    const renderItem = vi.spyOn(api, 'renderItem')
+    const printed = vi.spyOn(api, 'printItem')
+    const { user } = render(`/orders/${ORDER_ACCEPTED}?item=${ITEM_APPROVED}`)
+    const button = await screen.findByTestId('print-item')
+    expect(button).toHaveTextContent('Print…')
+    await user.click(button)
+    const dialog = await screen.findByRole('dialog', { name: 'Print the line item' })
+    expect(renderItem).toHaveBeenCalledTimes(1)
+    expect(renderItem.mock.calls[0]!.slice(0, 2)).toEqual([ORDER_ACCEPTED, ITEM_APPROVED])
+    expect(state.items.find((i) => i.id === ITEM_APPROVED)!.output_id).toBe(OUTPUT_REAGAN)
+    const run = within(dialog).getByTestId('run-item-print')
+    await waitFor(() => expect(run).toBeEnabled())
+    await user.click(run)
+    await waitFor(() => expect(printed).toHaveBeenCalledTimes(1))
+    expect(printed.mock.calls[0]!.slice(0, 2)).toEqual([ORDER_ACCEPTED, ITEM_APPROVED])
+    expect(state.quotes.filter((q) => q.order_item_id === ITEM_APPROVED && q.accepted).map((q) => q.id)).toEqual(accepted)
+  })
+
+  it('starts one render while the first is still running', async () => {
+    state.items.find((i) => i.id === ITEM_APPROVED)!.output_id = null
+    const renderItem = vi.spyOn(api, 'renderItem').mockImplementation(() => new Promise(() => undefined))
+    const { user } = render(`/orders/${ORDER_ACCEPTED}?item=${ITEM_APPROVED}`)
+    const button = await screen.findByTestId('print-item')
+    await user.click(button)
+    await waitFor(() => expect(button).toBeDisabled())
+    expect(await screen.findByTestId('quote-running')).toHaveTextContent('Rendering the design')
+    expect(renderItem).toHaveBeenCalledTimes(1)
+  })
+
   it('is not offered before the order is accepted', async () => {
     render(`/orders/${ORDER_DRAFT}?item=${ITEM_DRAFT}`)
     await screen.findByRole('region', { name: 'Fulfilment' })

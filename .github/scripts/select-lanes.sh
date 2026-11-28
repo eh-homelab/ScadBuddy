@@ -11,6 +11,8 @@
 #                  frontend and Go trees that run against it; and the
 #                  `profile-fetch-image`, `camera-image` and `cups-image` jobs (#6625,
 #                  #7328, deploy/cups/)
+#   android        the `android` job: the phone app's build (app/, #7905). It selects
+#                  on its own wiring only, not on the Dockerfile, which it never reads.
 #   docs_only      every changed path is a Markdown file under docs/, or a CLAUDE.md
 #                  or AGENTS.md in any directory but a vendor/ tree, and none is a doc a
 #                  test reads (`read_by_tests`): the lint, frontend, agent, models,
@@ -23,9 +25,11 @@
 #
 # Each lane also selects on the shared build inputs (Dockerfile, .dockerignore) and
 # on its own wiring (ci.yml, this script, changed-paths.sh), as select-go.sh does.
+# The android lane is the exception: the app builds with no image, so it selects on
+# app/ and its wiring only, never on the Dockerfile or .dockerignore.
 set -euo pipefail
 
-lanes=(backend agent_durable rust image)
+lanes=(backend agent_durable rust image android)
 if [ "${1:-}" = all ]; then
   for lane in "${lanes[@]}"; do echo "$lane=true"; done
   echo "docs_only=false"
@@ -33,11 +37,12 @@ if [ "${1:-}" = all ]; then
 fi
 
 wiring='Dockerfile$|\.dockerignore$|\.github/workflows/ci\.yml$|\.github/scripts/(select-lanes|changed-paths)(\.test)?\.sh$'
-backend="^(backend/|models/|deploy/camera/|deploy/grafana/|deploy/security/|test-fixtures/|e2e-stack/|workers/rust/vectors/|workers/playwright-mcp/browser-vectors\.json$|frontend/page-csp\.txt$|THIRD_PARTY_NOTICES\.md$|\.gitattributes$|\.github/scripts/merge-test-durations\.sh$|$wiring)"
+backend="^(backend/|models/|deploy/camera/|deploy/grafana/|deploy/security/|test-fixtures/|e2e-stack/|workers/rust/vectors/|workers/playwright-mcp/browser-vectors\.json$|tools/go/core/internal/bus/testdata/|tools/go/core/internal/inventory/store/testdata/|tools/go/core/internal/inventory/activities/testdata/|tools/go/core/internal/publish/testdata/|frontend/page-csp\.txt$|THIRD_PARTY_NOTICES\.md$|\.gitattributes$|\.github/scripts/merge-test-durations\.sh$|$wiring)"
 # agent-durable's tests read agent/ (fixtures, vectors) and the agent's migrations in
 # backend/scadbuddy/migrations_agent/ (#5299). The job also checks the backend's harness pin.
 agent_durable="^(agent-durable/|agent/|backend/scadbuddy/migrations_agent/|backend/(pyproject\.toml|uv\.lock)$|\.github/scripts/(uv-git-pin|harness-pin)(\.test)?\.sh$|$wiring)"
 rust="^(workers/rust/|$wiring)"
+android="^(app/|\.github/workflows/ci\.yml$|\.github/scripts/(select-lanes|changed-paths)(\.test)?\.sh$)"
 image_extra='^(frontend/|deploy/cups/|scripts/gen-api-request-defaults\.mjs$|tools/go/|go\.work(\.sum)?$|vendor/|\.github/scripts/(bambuddy-fs-live|fonts-probe)\.sh$)'
 
 docs='^(docs/.+\.md|(.+/)?(CLAUDE|AGENTS)\.md)$'
@@ -55,6 +60,7 @@ echo "backend=$b"
 echo "agent_durable=$(pick "$agent_durable")"
 echo "rust=$(pick "$rust")"
 if [ "$b" = true ]; then echo "image=true"; else echo "image=$(pick "$image_extra")"; fi
+echo "android=$(pick "$android")"
 if [ -n "$paths" ] && [ -z "$code" ]; then
   echo "docs_only=true"
 else

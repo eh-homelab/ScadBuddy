@@ -1,0 +1,144 @@
+{
+  "row": {
+    "id": 7,
+    "ref": "sb-7",
+    "name": "Bambu PLA Basic @H2C 0.4",
+    "source": "3dfp",
+    "version": 3,
+    "type_id": "5d0c8f1e-0000-4000-8000-000000007204",
+    "printer_model": "Bambu Lab H2C",
+    "nozzle_diameter": "0.4",
+    "filament_type": "PLA",
+    "filament_colour": "#FF0000",
+    "compatible_printers": ["Bambu Lab H2C 0.4 nozzle"],
+    "sha256": "a3f1c0de9b6e4c2a8d7f5e3b1a0c9e8d7f6a5b4c3d2e1f0a9b8c7d6e5f4a3b2c",
+    "bb_preset_id": 41,
+    "bb_instance": "bambuddy.example",
+    "mirror": "sent",
+    "mirror_error": null,
+    "mirror_error_at": null,
+    "used_by_types": 1,
+    "used_by_spools": 2,
+    "created_at": "2026-11-26T10:00:00Z",
+    "updated_at": "2026-11-26T12:30:00.123456Z"
+  },
+  "detail": {
+    "id": 7,
+    "ref": "sb-7",
+    "name": "Bambu PLA Basic @H2C 0.4",
+    "source": "3dfp",
+    "version": 3,
+    "type_id": "5d0c8f1e-0000-4000-8000-000000007204",
+    "printer_model": "Bambu Lab H2C",
+    "nozzle_diameter": "0.4",
+    "filament_type": "PLA",
+    "filament_colour": "#FF0000",
+    "compatible_printers": ["Bambu Lab H2C 0.4 nozzle"],
+    "sha256": "a3f1c0de9b6e4c2a8d7f5e3b1a0c9e8d7f6a5b4c3d2e1f0a9b8c7d6e5f4a3b2c",
+    "bb_preset_id": 41,
+    "bb_instance": "bambuddy.example",
+    "mirror": "sent",
+    "mirror_error": null,
+    "mirror_error_at": null,
+    "used_by_types": 1,
+    "used_by_spools": 2,
+    "created_at": "2026-11-26T10:00:00Z",
+    "updated_at": "2026-11-26T12:30:00.123456Z",
+    "versions": [
+      {
+        "version": 3,
+        "sha256": "a3f1c0de9b6e4c2a8d7f5e3b1a0c9e8d7f6a5b4c3d2e1f0a9b8c7d6e5f4a3b2c",
+        "made_by": "profile_fetch",
+        "made_at": "2026-11-26T12:30:00.123456Z",
+        "fetch_run_id": "5d0c8f1e-0000-4000-8000-0000000072aa",
+        "bb_updated_at": null
+      }
+    ],
+    "document": {
+      "name": "Bambu PLA Basic @H2C 0.4",
+      "nozzle_temperature": ["220"]
+    },
+    "document_error": null
+  },
+  "diff": {
+    "preset_id": 7,
+    "from_version": 2,
+    "to_version": 3,
+    "changes": [
+      {"key": "nozzle_temperature", "before": ["215"], "after": ["220"]}
+    ]
+  },
+  "edited": {
+    "changed": true,
+    "preset": {
+      "id": 7,
+      "ref": "sb-7",
+      "name": "Bambu PLA Basic @H2C 0.4",
+      "source": "3dfp",
+      "version": 3,
+      "type_id": "5d0c8f1e-0000-4000-8000-000000007204",
+      "printer_model": "Bambu Lab H2C",
+      "nozzle_diameter": "0.4",
+      "filament_type": "PLA",
+      "filament_colour": "#FF0000",
+      "compatible_printers": [
+        "Bambu Lab H2C 0.4 nozzle"
+      ],
+      "sha256": "a3f1c0de9b6e4c2a8d7f5e3b1a0c9e8d7f6a5b4c3d2e1f0a9b8c7d6e5f4a3b2c",
+      "bb_preset_id": 41,
+      "bb_instance": "bambuddy.example",
+      "mirror": "sent",
+      "mirror_error": null,
+      "mirror_error_at": null,
+      "used_by_types": 1,
+      "used_by_spools": 2,
+      "created_at": "2026-11-26T10:00:00Z",
+      "updated_at": "2026-11-26T12:30:00.123456Z",
+      "versions": [
+        {
+          "version": 3,
+          "sha256": "a3f1c0de9b6e4c2a8d7f5e3b1a0c9e8d7f6a5b4c3d2e1f0a9b8c7d6e5f4a3b2c",
+          "made_by": "profile_fetch",
+          "made_at": "2026-11-26T12:30:00.123456Z",
+          "fetch_run_id": "5d0c8f1e-0000-4000-8000-0000000072aa",
+          "bb_updated_at": null
+        }
+      ],
+      "document": {
+        "name": "Bambu PLA Basic @H2C 0.4",
+        "nozzle_temperature": [
+          "220"
+        ]
+      },
+      "document_error": null
+    }
+  },
+  "mirror_again_outcome": {
+    "outcome": "sent",
+    "preset": {
+      "id": 7,
+      "ref": "sb-7",
+      "name": "Bambu PLA Basic @H2C 0.4",
+      "source": "3dfp",
+      "version": 3,
+      "type_id": "5d0c8f1e-0000-4000-8000-000000007204",
+      "printer_model": "Bambu Lab H2C",
+      "nozzle_diameter": "0.4",
+      "filament_type": "PLA",
+      "filament_colour": "#FF0000",
+      "compatible_printers": [
+        "Bambu Lab H2C 0.4 nozzle"
+      ],
+      "sha256": "a3f1c0de9b6e4c2a8d7f5e3b1a0c9e8d7f6a5b4c3d2e1f0a9b8c7d6e5f4a3b2c",
+      "bb_preset_id": 41,
+      "bb_instance": "bambuddy.example",
+      "mirror": "sent",
+      "mirror_error": null,
+      "mirror_error_at": null,
+      "used_by_types": 1,
+      "used_by_spools": 2,
+      "created_at": "2026-11-26T10:00:00Z",
+      "updated_at": "2026-11-26T12:30:00.123456Z"
+    }
+  }
+}

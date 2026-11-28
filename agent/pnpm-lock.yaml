@@ -170,11 +170,11 @@ importers:
   .:
     dependencies:
       '@anthropic-ai/claude-agent-sdk':
-        specifier: 0.3.330
-        version: 0.3.330(@anthropic-ai/sdk@1.12.0(zod@4.6.7))(@modelcontextprotocol/sdk@1.32.2(supports-color@10.2.2)(zod@4.6.7))(zod@4.6.7)
+        specifier: 0.3.331
+        version: 0.3.331(@anthropic-ai/sdk@1.13.0(zod@4.6.7))(@modelcontextprotocol/sdk@1.32.2(supports-color@10.2.2)(zod@4.6.7))(zod@4.6.7)
       '@anthropic-ai/sdk':
-        specifier: ^1.12.0
-        version: 1.12.0(zod@4.6.7)
+        specifier: ^1.13.0
+        version: 1.13.0(zod@4.6.7)
       '@hono/node-server':
         specifier: ^2.1.11
         version: 2.1.11(hono@4.13.21)
@@ -206,20 +206,20 @@ importers:
         specifier: 3.1.1
         version: 3.1.1(@opentelemetry/api@1.10.0)
       '@temporalio/activity':
-        specifier: 1.26.0
-        version: 1.26.0(long@5.3.2)(protobufjs@8.8.0)
+        specifier: ^1.27.0
+        version: 1.27.0(long@5.3.2)(protobufjs@8.8.0)
       '@temporalio/client':
-        specifier: 1.26.0
-        version: 1.26.0(long@5.3.2)(protobufjs@8.8.0)
+        specifier: ^1.27.0
+        version: 1.27.0(long@5.3.2)(protobufjs@8.8.0)
       '@temporalio/common':
-        specifier: 1.26.0
-        version: 1.26.0(long@5.3.2)(protobufjs@8.8.0)
+        specifier: ^1.27.0
+        version: 1.27.0(long@5.3.2)(protobufjs@8.8.0)
       '@temporalio/worker':
-        specifier: 1.26.0
-        version: 1.26.0(lightningcss@1.33.0)(long@5.3.2)(postcss@8.5.28)(protobufjs@8.8.0)
+        specifier: ^1.27.0
+        version: 1.27.0(lightningcss@1.33.0)(long@5.3.2)(postcss@8.5.28)(protobufjs@8.8.0)
       '@temporalio/workflow':
-        specifier: 1.26.0
-        version: 1.26.0(long@5.3.2)(protobufjs@8.8.0)
+        specifier: ^1.27.0
+        version: 1.27.0(long@5.3.2)(protobufjs@8.8.0)
       cron-parser:
         specifier: 5.10.6
         version: 5.10.6
@@ -258,8 +258,8 @@ importers:
         specifier: 3.1.1
         version: 3.1.1(@opentelemetry/api@1.10.0)
       '@temporalio/testing':
-        specifier: 1.26.0
-        version: 1.26.0(lightningcss@1.33.0)(long@5.3.2)(postcss@8.5.28)(protobufjs@8.8.0)
+        specifier: ^1.27.0
+        version: 1.27.0(lightningcss@1.33.0)(long@5.3.2)(postcss@8.5.28)(protobufjs@8.8.0)
       '@types/node':
         specifier: ^24.19.2
         version: 24.19.2
@@ -296,60 +296,60 @@ importers:
 
 packages:
 
-  '@anthropic-ai/claude-agent-sdk-darwin-arm64@0.3.330':
-    resolution: {integrity: sha512-J9nqvcfD2V90O5uoR8At66R51VYtSMKnxSmPc0S4A4F5oX1VbokcpJLXU1yVCOuTtzr/OIHjRr9nn2vKi/S6rQ==}
+  '@anthropic-ai/claude-agent-sdk-darwin-arm64@0.3.331':
+    resolution: {integrity: sha512-PQrn7YTiSV5Bg+ueF2hNvswc+wI7YKC2c32XNedvs6vfMCUUnIlq93VEbZiRY23b+JIVkEm8gb1VhkJTjsYISQ==}
     cpu: [arm64]
     os: [darwin]
 
-  '@anthropic-ai/claude-agent-sdk-darwin-x64@0.3.330':
-    resolution: {integrity: sha512-woe+f9qeZYWML5fACibNyth0xMDf22riNRNDryIYuhdteh7IoWrK6zC31cC2MrZRoqDZcPVtfOLND79+iZbrLA==}
+  '@anthropic-ai/claude-agent-sdk-darwin-x64@0.3.331':
+    resolution: {integrity: sha512-dc3iB+CY3jDpKpDpmvYc4V+UKSkudY29iJ62p0s5TK3h+b7Wqa2Hv0bPow0LUs4ZzDUXxEtCEHzk9X29VfLovw==}
     cpu: [x64]
     os: [darwin]
 
-  '@anthropic-ai/claude-agent-sdk-linux-arm64-musl@0.3.330':
-    resolution: {integrity: sha512-fXmuAEegw31v+kiBd51yn7RVhjs7Rz2lnhfx/+XJXqt5lyqR2v7Ul/U/9r1CQZKuIw8M3ms9jQqGpmKbgKndqQ==}
+  '@anthropic-ai/claude-agent-sdk-linux-arm64-musl@0.3.331':
+    resolution: {integrity: sha512-KdIClOdBUIpvf4PTFe2qedtPCOM3tC/jbsjh8U6WXF0QS8VjYkP0QR9i2AXG1PSAnI24T5xTxQb1scPAgRTIUQ==}
     cpu: [arm64]
     os: [linux]
     libc: [musl]
 
-  '@anthropic-ai/claude-agent-sdk-linux-arm64@0.3.330':
-    resolution: {integrity: sha512-2Q+kfzaoTvJv1rsyu+iR4UHDZ3nxiOfdXISk+2ydQShU9DqXNlgQAt3BdJMh0Yx4MrxB66TMphVvVQeRslwwhA==}
+  '@anthropic-ai/claude-agent-sdk-linux-arm64@0.3.331':
+    resolution: {integrity: sha512-xiRxBxoM8Qa5fnjCFk5iFheL5GUroLuHPJ7UnD4v2Sv1tWxGoSL67AYnMZ6OdjMguZK09X4WlgOn1nL1m6NEOA==}
     cpu: [arm64]
     os: [linux]
     libc: [glibc]
 
-  '@anthropic-ai/claude-agent-sdk-linux-x64-musl@0.3.330':
-    resolution: {integrity: sha512-kooZMdp6tFwNFkDXbGoNTZMgFcPQfJVfG+gZ2qAdkk11S6MFts9ybHRLQmzUK3VrqlahH7T9fmI2mNfzYgOXkw==}
+  '@anthropic-ai/claude-agent-sdk-linux-x64-musl@0.3.331':
+    resolution: {integrity: sha512-CSeT1JF++Vckf6TSXjQeuSjQ/sJnoTVL/XX44v4jHNAtU5i22nI9b27E6wkzudYVxoRoLWIU00V05dXhYYCvlg==}
     cpu: [x64]
     os: [linux]
     libc: [musl]
 
-  '@anthropic-ai/claude-agent-sdk-linux-x64@0.3.330':
-    resolution: {integrity: sha512-9w4uMdA3vNZXocwOUhivOGotXoRDxN/C/xPMkZMY9WPpKLAlj8upMZskNgPjQKlVRXhxPfNagcBijGPUH4WepA==}
+  '@anthropic-ai/claude-agent-sdk-linux-x64@0.3.331':
+    resolution: {integrity: sha512-nfHSiLJdkpsVAFsXTriyW3r64gS1sp5zxvaoF2dmNqKixR4rf9ISDDi81gF9L1uk/bAEcBGRx34U6Itw+NYIEg==}
     cpu: [x64]
     os: [linux]
     libc: [glibc]
 
-  '@anthropic-ai/claude-agent-sdk-win32-arm64@0.3.330':
-    resolution: {integrity: sha512-6jscch7vk/XBSn7mm1i6zwTeiz05q98nKrQ3HdTavQEDGvXycMcB/QxIdMrs3vrdNEjWuoxwrL1qlT1lOyAWLg==}
+  '@anthropic-ai/claude-agent-sdk-win32-arm64@0.3.331':
+    resolution: {integrity: sha512-FsPHWUpgHBFgSZESwM53JsbEoQiWPnigSCyjSfHDyiWnH66e0NsuksuJ/Nu9qI8UVgBDh/y1NOnnd4eGrB3eFQ==}
     cpu: [arm64]
     os: [win32]
 
-  '@anthropic-ai/claude-agent-sdk-win32-x64@0.3.330':
-    resolution: {integrity: sha512-ooThWbUXlXKTDgj2VgWBXQ/6vSOTaAbBDWPvvCGNHi20haoSkw4uPX9gczkX+HJuVTslvvLiYIfe8zleVPzi7A==}
+  '@anthropic-ai/claude-agent-sdk-win32-x64@0.3.331':
+    resolution: {integrity: sha512-AsLur4ov9MGTQTrnZ49ZDPasQ35U3X/rZDdF/rPhytN3h1F3w/0IkC6esW3OzldvPlci60QvggOLVGnFlUzdxw==}
     cpu: [x64]
     os: [win32]
 
-  '@anthropic-ai/claude-agent-sdk@0.3.330':
-    resolution: {integrity: sha512-7om9Xus6tfkeCUCfzg6ilJuN6Z7okkEvJ0mx+ukXa/Id5U/6BGtPkOYni+3ebedwa3b9SVF7A05+ln+/9EoU/w==}
+  '@anthropic-ai/claude-agent-sdk@0.3.331':
+    resolution: {integrity: sha512-ml/MPqgO95tG5zcApBFxEyoDk57d9htP09R8AtPbKPUCHpsobf84IjkN4zhGvQgk8zsA9dXoeMGrQcCc8gQE/w==}
     engines: {node: '>=18.14.0'}
     peerDependencies:
       '@anthropic-ai/sdk': '>=0.93.0'
       '@modelcontextprotocol/sdk': ^1.29.0
       zod: ^4.0.0
 
-  '@anthropic-ai/sdk@1.12.0':
-    resolution: {integrity: sha512-0j9zwiQdkvr90LoiiBDUh7kae1lsNW2EqeE0vGceYne4BrmMDdDVoQ4KGOieUee0zWZbVJKsf/06JY8U5i63Xg==}
+  '@anthropic-ai/sdk@1.13.0':
+    resolution: {integrity: sha512-F4Qu3zqRINxTV5xruOvw1gXhEsYH4lOgxffxZx4IworMefc395T458pl5Uj3TZiAlO3+gvhYoHSHU7qDsrchNA==}
     hasBin: true
     peerDependencies:
       zod: ^3.25.0 || ^4.0.0
@@ -1087,61 +1087,61 @@ packages:
   '@swc/types@0.1.28':
     resolution: {integrity: sha512-V6Mnml8v09QALx6K0elJ7o9K/MkVDtW3t6L+7Ou/JcWtb3xwId2AH4FeOceySd2JaO87IMw4+6vSZxLm34LPbw==}
 
-  '@temporalio/activity@1.26.0':
-    resolution: {integrity: sha512-j0/yL0PDasvbOuIH571c1rr1n+xsm0BnGX0dl/G+lpWRurxyojCCJmZG9FF472x8xUON6WWequ2qOGquw0gb8A==}
+  '@temporalio/activity@1.27.0':
+    resolution: {integrity: sha512-XlyrBWAGu+Xa3dNCGsjYU9eH3GT0rW1V2NMURkZVLdOwjzeFD9QeqBzNYTJ0/kkDlRfmdWjuRQyRr2gfHpvxig==}
     engines: {node: '>= 20.3.0'}
     peerDependencies:
       long: ^5.3.2
       protobufjs: ^8.7.1
 
-  '@temporalio/client@1.26.0':
-    resolution: {integrity: sha512-01hNfP6m6bjlut/huL6oCJ8czAMXm3jWKriLnEoLmnh5RzU6AEuqzbw77dmNDF3lQiZaFeY++lCKjSig4IVd9A==}
+  '@temporalio/client@1.27.0':
+    resolution: {integrity: sha512-g8N1HuljyaJb1mHAJRX8XOcVX1d8AxjpnZ4GqUrlu7Ltwb/OXDU4HuynuC/UaIWUGPaXjxnoBHKy3JyTIpPT7Q==}
     engines: {node: '>= 20.3.0'}
     peerDependencies:
       long: ^5.3.2
       protobufjs: ^8.7.1
 
-  '@temporalio/common@1.26.0':
-    resolution: {integrity: sha512-mHpfPAm6IThHUreLmH9iE7G0ekURbj6jDqJZuG8kfg2unMVx33fQ1cx05TkRuzG8U6IPjIMheyVDnVrBid/TBg==}
+  '@temporalio/common@1.27.0':
+    resolution: {integrity: sha512-XzqCXT+P4ioFfVxK0VcDB8CfWiTw286kP23jlYXZWJC3LCKQKVezyp0aWT4ePcxhuKwidTXzalE6Ygc3RttWQA==}
     engines: {node: '>= 20.3.0'}
     peerDependencies:
       long: ^5.3.2
       protobufjs: ^8.7.1
 
-  '@temporalio/core-bridge@1.26.0':
-    resolution: {integrity: sha512-O2vtTOtFkHyl4YQwmUZni63HGlTUxOVoiZNRTZezaygMXG3LJw0dMap4+qCMponkBOiV8Z6qkrGNnShslqYC5g==}
+  '@temporalio/core-bridge@1.27.0':
+    resolution: {integrity: sha512-a75lnAu12DCpb5CMpMyrfnH/f5FOM2VR/XbbKoqwA9WrSbiVpwqmaO8IVubQeC+aIpsLwP/y/z2Wwq+DZTwZqw==}
     engines: {node: '>= 20.3.0'}
     peerDependencies:
       long: ^5.3.2
       protobufjs: ^8.7.1
 
-  '@temporalio/nexus@1.26.0':
-    resolution: {integrity: sha512-Tj44f+H+hNQl3lgrLAduv17Nv3bcPXj4i1hN6wv3C+ZPjFbklD5sroN6gMHK6bzlEqGSR9s5UInjbfE4if8J9w==}
+  '@temporalio/nexus@1.27.0':
+    resolution: {integrity: sha512-hRUgcqkv8odAlgBngIagCxiBDn7b26WrwnYNBMG6tBTBNDSCnWlg0OKx3b2hj4iX+sz78EmtG7uoah4WCel4gQ==}
     engines: {node: '>= 20.3.0'}
     peerDependencies:
       long: ^5.3.2
       protobufjs: ^8.7.1
 
-  '@temporalio/proto@1.26.0':
-    resolution: {integrity: sha512-hrYoXs/b3W7u+PvuK6qB2Cvb/TZv1AxKJn9Rj4YCeQsemWknZ3a4+2FICRuGxwB6bR0qsoVFf5uKQOPtouyDCw==}
+  '@temporalio/proto@1.27.0':
+    resolution: {integrity: sha512-bkXsct+Nxjb0aqvl18OZh4e4IXRvwWjsvTsLY8xSVTCu3+9JMXI4HobWEKLcn2ukfgyb3fp5JTKdqGxbgFa9vg==}
     engines: {node: '>= 20.3.0'}
 
-  '@temporalio/testing@1.26.0':
-    resolution: {integrity: sha512-eClmpgDEl2xBj7wb2SdLsenAxlA8K42qhINDOnjctBA3NJbq2e85FkMRAe3f+vlzoao9HzT0A4hwcGapMYzeoA==}
-    engines: {node: '>= 20.3.0'}
-    peerDependencies:
-      long: ^5.3.2
-      protobufjs: ^8.7.1
-
-  '@temporalio/worker@1.26.0':
-    resolution: {integrity: sha512-X6xdDzBtPNBfP7wdl2PWaWov4wmMtzBLb6PAQYQmOmupPVBZSTajLUi9wP+Fz0s1sqFvUQamY02QaQ3TJysrRA==}
+  '@temporalio/testing@1.27.0':
+    resolution: {integrity: sha512-X07jvSx04QGi9iWlPrlaQqR1w/7EmheQsfUm//ySEMWgjDMOmReWXgry/ESGA5b57RBdsdNVxzY2nq8YQXEQsw==}
     engines: {node: '>= 20.3.0'}
     peerDependencies:
       long: ^5.3.2
       protobufjs: ^8.7.1
 
-  '@temporalio/workflow@1.26.0':
-    resolution: {integrity: sha512-wa5SYoxn4qNVOtNaP6D7QPzyifg8KX6rzTkmE9oIqAqF5uxPgCgv1BbIIRq8Iu7Z0AH/mkkUCGwhwirdcmQwhA==}
+  '@temporalio/worker@1.27.0':
+    resolution: {integrity: sha512-gF5/3K2D0SLCpiNlic/ihS9KZmq9iDPP8uDBH4ByNy39Xdetmqzda2Sg7EzFujPUAsE0Z0b8YeLaylrQQFDbtA==}
+    engines: {node: '>= 20.3.0'}
+    peerDependencies:
+      long: ^5.3.2
+      protobufjs: ^8.7.1
+
+  '@temporalio/workflow@1.27.0':
+    resolution: {integrity: sha512-y3epp0LHmhqv15JbsXQhYpX3PRxKwoQkyUuTiku4lTZNhzt+mCUhpSOS3v6f/0UQc/hRTP5y/ECgaX2i6Bcjzg==}
     engines: {node: '>= 20.3.0'}
     peerDependencies:
       long: ^5.3.2
@@ -2734,46 +2734,46 @@ packages:
 
 snapshots:
 
-  '@anthropic-ai/claude-agent-sdk-darwin-arm64@0.3.330':
+  '@anthropic-ai/claude-agent-sdk-darwin-arm64@0.3.331':
     optional: true
 
-  '@anthropic-ai/claude-agent-sdk-darwin-x64@0.3.330':
+  '@anthropic-ai/claude-agent-sdk-darwin-x64@0.3.331':
     optional: true
 
-  '@anthropic-ai/claude-agent-sdk-linux-arm64-musl@0.3.330':
+  '@anthropic-ai/claude-agent-sdk-linux-arm64-musl@0.3.331':
     optional: true
 
-  '@anthropic-ai/claude-agent-sdk-linux-arm64@0.3.330':
+  '@anthropic-ai/claude-agent-sdk-linux-arm64@0.3.331':
     optional: true
 
-  '@anthropic-ai/claude-agent-sdk-linux-x64-musl@0.3.330':
+  '@anthropic-ai/claude-agent-sdk-linux-x64-musl@0.3.331':
     optional: true
 
-  '@anthropic-ai/claude-agent-sdk-linux-x64@0.3.330':
+  '@anthropic-ai/claude-agent-sdk-linux-x64@0.3.331':
     optional: true
 
-  '@anthropic-ai/claude-agent-sdk-win32-arm64@0.3.330':
+  '@anthropic-ai/claude-agent-sdk-win32-arm64@0.3.331':
     optional: true
 
-  '@anthropic-ai/claude-agent-sdk-win32-x64@0.3.330':
+  '@anthropic-ai/claude-agent-sdk-win32-x64@0.3.331':
     optional: true
 
-  '@anthropic-ai/claude-agent-sdk@0.3.330(@anthropic-ai/sdk@1.12.0(zod@4.6.7))(@modelcontextprotocol/sdk@1.32.2(supports-color@10.2.2)(zod@4.6.7))(zod@4.6.7)':
+  '@anthropic-ai/claude-agent-sdk@0.3.331(@anthropic-ai/sdk@1.13.0(zod@4.6.7))(@modelcontextprotocol/sdk@1.32.2(supports-color@10.2.2)(zod@4.6.7))(zod@4.6.7)':
     dependencies:
-      '@anthropic-ai/sdk': 1.12.0(zod@4.6.7)
+      '@anthropic-ai/sdk': 1.13.0(zod@4.6.7)
       '@modelcontextprotocol/sdk': 1.32.2(supports-color@10.2.2)(zod@4.6.7)
       zod: 4.6.7
     optionalDependencies:
-      '@anthropic-ai/claude-agent-sdk-darwin-arm64': 0.3.330
-      '@anthropic-ai/claude-agent-sdk-darwin-x64': 0.3.330
-      '@anthropic-ai/claude-agent-sdk-linux-arm64': 0.3.330
-      '@anthropic-ai/claude-agent-sdk-linux-arm64-musl': 0.3.330
-      '@anthropic-ai/claude-agent-sdk-linux-x64': 0.3.330
-      '@anthropic-ai/claude-agent-sdk-linux-x64-musl': 0.3.330
-      '@anthropic-ai/claude-agent-sdk-win32-arm64': 0.3.330
-      '@anthropic-ai/claude-agent-sdk-win32-x64': 0.3.330
+      '@anthropic-ai/claude-agent-sdk-darwin-arm64': 0.3.331
+      '@anthropic-ai/claude-agent-sdk-darwin-x64': 0.3.331
+      '@anthropic-ai/claude-agent-sdk-linux-arm64': 0.3.331
+      '@anthropic-ai/claude-agent-sdk-linux-arm64-musl': 0.3.331
+      '@anthropic-ai/claude-agent-sdk-linux-x64': 0.3.331
+      '@anthropic-ai/claude-agent-sdk-linux-x64-musl': 0.3.331
+      '@anthropic-ai/claude-agent-sdk-win32-arm64': 0.3.331
+      '@anthropic-ai/claude-agent-sdk-win32-x64': 0.3.331
 
-  '@anthropic-ai/sdk@1.12.0(zod@4.6.7)':
+  '@anthropic-ai/sdk@1.13.0(zod@4.6.7)':
     dependencies:
       '@opentelemetry/api': 1.10.0
       json-schema-to-ts: 3.1.1
@@ -3497,61 +3497,61 @@ snapshots:
     dependencies:
       '@swc/counter': 0.1.3
 
-  '@temporalio/activity@1.26.0(long@5.3.2)(protobufjs@8.8.0)':
+  '@temporalio/activity@1.27.0(long@5.3.2)(protobufjs@8.8.0)':
     dependencies:
-      '@temporalio/client': 1.26.0(long@5.3.2)(protobufjs@8.8.0)
-      '@temporalio/common': 1.26.0(long@5.3.2)(protobufjs@8.8.0)
+      '@temporalio/client': 1.27.0(long@5.3.2)(protobufjs@8.8.0)
+      '@temporalio/common': 1.27.0(long@5.3.2)(protobufjs@8.8.0)
       long: 5.3.2
       protobufjs: 8.8.0
 
-  '@temporalio/client@1.26.0(long@5.3.2)(protobufjs@8.8.0)':
+  '@temporalio/client@1.27.0(long@5.3.2)(protobufjs@8.8.0)':
     dependencies:
       '@grpc/grpc-js': 1.14.5
-      '@temporalio/common': 1.26.0(long@5.3.2)(protobufjs@8.8.0)
-      '@temporalio/proto': 1.26.0
+      '@temporalio/common': 1.27.0(long@5.3.2)(protobufjs@8.8.0)
+      '@temporalio/proto': 1.27.0
       long: 5.3.2
       nexus-rpc: 0.0.3
       protobufjs: 8.8.0
       uuid: 11.1.1
 
-  '@temporalio/common@1.26.0(long@5.3.2)(protobufjs@8.8.0)':
+  '@temporalio/common@1.27.0(long@5.3.2)(protobufjs@8.8.0)':
     dependencies:
-      '@temporalio/proto': 1.26.0
+      '@temporalio/proto': 1.27.0
       long: 5.3.2
       ms: 3.0.0-canary.202508261828
       nexus-rpc: 0.0.3
       protobufjs: 8.8.0
 
-  '@temporalio/core-bridge@1.26.0(long@5.3.2)(protobufjs@8.8.0)':
+  '@temporalio/core-bridge@1.27.0(long@5.3.2)(protobufjs@8.8.0)':
     dependencies:
       '@grpc/grpc-js': 1.14.5
-      '@temporalio/common': 1.26.0(long@5.3.2)(protobufjs@8.8.0)
+      '@temporalio/common': 1.27.0(long@5.3.2)(protobufjs@8.8.0)
       long: 5.3.2
       protobufjs: 8.8.0
 
-  '@temporalio/nexus@1.26.0(long@5.3.2)(protobufjs@8.8.0)':
+  '@temporalio/nexus@1.27.0(long@5.3.2)(protobufjs@8.8.0)':
     dependencies:
-      '@temporalio/client': 1.26.0(long@5.3.2)(protobufjs@8.8.0)
-      '@temporalio/common': 1.26.0(long@5.3.2)(protobufjs@8.8.0)
-      '@temporalio/proto': 1.26.0
+      '@temporalio/client': 1.27.0(long@5.3.2)(protobufjs@8.8.0)
+      '@temporalio/common': 1.27.0(long@5.3.2)(protobufjs@8.8.0)
+      '@temporalio/proto': 1.27.0
       long: 5.3.2
       nexus-rpc: 0.0.3
       protobufjs: 8.8.0
 
-  '@temporalio/proto@1.26.0':
+  '@temporalio/proto@1.27.0':
     dependencies:
       long: 5.3.2
       protobufjs: 8.8.0
 
-  '@temporalio/testing@1.26.0(lightningcss@1.33.0)(long@5.3.2)(postcss@8.5.28)(protobufjs@8.8.0)':
+  '@temporalio/testing@1.27.0(lightningcss@1.33.0)(long@5.3.2)(postcss@8.5.28)(protobufjs@8.8.0)':
     dependencies:
-      '@temporalio/activity': 1.26.0(long@5.3.2)(protobufjs@8.8.0)
-      '@temporalio/client': 1.26.0(long@5.3.2)(protobufjs@8.8.0)
-      '@temporalio/common': 1.26.0(long@5.3.2)(protobufjs@8.8.0)
-      '@temporalio/core-bridge': 1.26.0(long@5.3.2)(protobufjs@8.8.0)
-      '@temporalio/proto': 1.26.0
-      '@temporalio/worker': 1.26.0(lightningcss@1.33.0)(long@5.3.2)(postcss@8.5.28)(protobufjs@8.8.0)
-      '@temporalio/workflow': 1.26.0(long@5.3.2)(protobufjs@8.8.0)
+      '@temporalio/activity': 1.27.0(long@5.3.2)(protobufjs@8.8.0)
+      '@temporalio/client': 1.27.0(long@5.3.2)(protobufjs@8.8.0)
+      '@temporalio/common': 1.27.0(long@5.3.2)(protobufjs@8.8.0)
+      '@temporalio/core-bridge': 1.27.0(long@5.3.2)(protobufjs@8.8.0)
+      '@temporalio/proto': 1.27.0
+      '@temporalio/worker': 1.27.0(lightningcss@1.33.0)(long@5.3.2)(postcss@8.5.28)(protobufjs@8.8.0)
+      '@temporalio/workflow': 1.27.0(long@5.3.2)(protobufjs@8.8.0)
       long: 5.3.2
       protobufjs: 8.8.0
     transitivePeerDependencies:
@@ -3573,17 +3573,17 @@ snapshots:
       - uglify-js
       - webpack-cli
 
-  '@temporalio/worker@1.26.0(lightningcss@1.33.0)(long@5.3.2)(postcss@8.5.28)(protobufjs@8.8.0)':
+  '@temporalio/worker@1.27.0(lightningcss@1.33.0)(long@5.3.2)(postcss@8.5.28)(protobufjs@8.8.0)':
     dependencies:
       '@grpc/grpc-js': 1.14.5
       '@swc/core': 1.16.13
-      '@temporalio/activity': 1.26.0(long@5.3.2)(protobufjs@8.8.0)
-      '@temporalio/client': 1.26.0(long@5.3.2)(protobufjs@8.8.0)
-      '@temporalio/common': 1.26.0(long@5.3.2)(protobufjs@8.8.0)
-      '@temporalio/core-bridge': 1.26.0(long@5.3.2)(protobufjs@8.8.0)
-      '@temporalio/nexus': 1.26.0(long@5.3.2)(protobufjs@8.8.0)
-      '@temporalio/proto': 1.26.0
-      '@temporalio/workflow': 1.26.0(long@5.3.2)(protobufjs@8.8.0)
+      '@temporalio/activity': 1.27.0(long@5.3.2)(protobufjs@8.8.0)
+      '@temporalio/client': 1.27.0(long@5.3.2)(protobufjs@8.8.0)
+      '@temporalio/common': 1.27.0(long@5.3.2)(protobufjs@8.8.0)
+      '@temporalio/core-bridge': 1.27.0(long@5.3.2)(protobufjs@8.8.0)
+      '@temporalio/nexus': 1.27.0(long@5.3.2)(protobufjs@8.8.0)
+      '@temporalio/proto': 1.27.0
+      '@temporalio/workflow': 1.27.0(long@5.3.2)(protobufjs@8.8.0)
       heap-js: 2.7.1
       long: 5.3.2
       memfs: 4.80.0
@@ -3615,10 +3615,10 @@ snapshots:
       - uglify-js
       - webpack-cli
 
-  '@temporalio/workflow@1.26.0(long@5.3.2)(protobufjs@8.8.0)':
+  '@temporalio/workflow@1.27.0(long@5.3.2)(protobufjs@8.8.0)':
     dependencies:
-      '@temporalio/common': 1.26.0(long@5.3.2)(protobufjs@8.8.0)
-      '@temporalio/proto': 1.26.0
+      '@temporalio/common': 1.27.0(long@5.3.2)(protobufjs@8.8.0)
+      '@temporalio/proto': 1.27.0
       long: 5.3.2
       nexus-rpc: 0.0.3
       protobufjs: 8.8.0

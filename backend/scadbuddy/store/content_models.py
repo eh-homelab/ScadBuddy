@@ -20,6 +20,7 @@ BlobKind = Literal[
     "media",
     "output",
     "tag_dump",
+    "scan_image",
 ]
 #: What a put stores: bytes, or a seekable file read from its start, which is hashed and
 #: uploaded a chunk at a time rather than held whole (#503).
@@ -52,6 +53,9 @@ def blob_digest(data: BlobData) -> tuple[str, int]:
 #: snapshots (a cache of git, held only by a published storefront listing, #5282), a
 #: saved output's bytes (#7256, held `(output, <output_id>)`) and a Bambu tag's raw dump
 #: (#7958, a service's upload through core's area `blobs`, `tools/go/core/internal/blobstore`)
+#: and a code scan's photo (#8155, held `(code_scan, <scan id>)` by core's
+#: `tools/go/core/internal/scan` until the scan is deleted; a paired device's upload of
+#: either kind is held `(device_call, <call id>)` by `tools/go/core/internal/devices`, #8244)
 #: by `blob_refs` and grace.
 #: Assets have `AssetStore.sweep`; fonts and library files are skipped here:
 #: `print_library/sweep.py` `sweep_library` purges their trash and collects the blobs no
@@ -64,6 +68,7 @@ SWEPT_KINDS: tuple[BlobKind, ...] = (
     "media",
     "output",
     "tag_dump",
+    "scan_image",
 )
 
 
