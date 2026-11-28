@@ -92,7 +92,7 @@ var (
 	// dialWait is how long a forward waits for the Python API to listen: at a pod's start,
 	// core is up some 25 s before Python is.
 	dialWait = 30 * time.Second
-	// untraced are the paths the API never traces either (main.py EXCLUDED_URLS).
+	// untraced are the paths the API never traces either (core/tracing.py EXCLUDED_URLS).
 	untraced = []string{"/healthz", "/metrics", "/telemetry/v1/traces"}
 )
 

@@ -3490,7 +3490,7 @@ IMPORT_UNFINISHED = (
         "waits for it (at most 4.5 minutes); 503 when the worker did not finish it in time "
         "(it may still be running: check the spools before importing again); 502 when "
         "ScadBuddy refused what the worker read (importing again gets the same answer); 409 "
-        "when the Bambuddy URL changed during the import. "
+        "with `code` `url_changed` when the Bambuddy URL changed during the import. "
         "The ledger events name the caller. Answers the counts and ids made, linked, changed, "
         "still needing a type and archived, the BB spool ids it could not pull, the count "
         "(and ids) of BB rows it could not read, and the duplicates it skipped. 409 when no "

@@ -47,10 +47,12 @@ from scadbuddy.crud.print import (
 from scadbuddy.crud.wire import CRUD_HEADERS, NOT_CONFIGURED
 from scadbuddy.library.settings_store import SettingsStore
 from scadbuddy.orders.machine_rate import CostProfile, MachineRateInputs, MachineRateStore
+from scadbuddy.orders.models import Actor
 from scadbuddy.printers import run_hours
-from scadbuddy.printers.models import BambuddyView, LanLink, PrinterCreate
+from scadbuddy.printers.models import BambuddyView, LanLink, PrinterCreate, PrinterRow
 from scadbuddy.printers.reports import Advance, PrintEnd, PrinterReportStore
 from scadbuddy.printers.store import (
+    BAMBUDDY_ACTOR,
     KekMissingError,
     NoAccessCodeError,
     PrinterNotFoundError,
@@ -343,6 +345,27 @@ def test_the_workers_merge_runs_on_the_api(store: SettingsStore, printers: Print
         )
         assert again.id == mine.id and not wrote
         assert _rows(store, "printers") == before
+
+
+@pytest.mark.requires_postgres
+def test_the_workers_merge_names_bambuddy_as_an_in_process_merge_does(
+    store: SettingsStore, printers: PrinterStore, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#8190: the merge was credited to `print` through the route and to `bambuddy` in
+    process, so the history's actor hung on where the worker ran."""
+    mine = printers.create(PrinterCreate(serial=SERIAL, name="Mine"))
+    seen: list[Actor] = []
+
+    def ensure(*_: Any, by: Actor, **__: Any) -> tuple[PrinterRow, bool]:
+        seen.append(by)
+        return mine, False
+
+    monkeypatch.setattr(printers, "ensure_bambuddy_written", ensure)
+    with threaded_print_crud(store, printers=printers) as client:
+        RemotePrinterStore(client).ensure_bambuddy_written(
+            4, serial=SERIAL, name="H2C", model="H2C", by=MERGED_BY
+        )
+    assert seen == [BAMBUDDY_ACTOR]
 
 
 @pytest.mark.requires_postgres
