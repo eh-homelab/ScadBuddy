@@ -187,6 +187,46 @@ func TestAFailedAttemptStaysRunning(t *testing.T) {
 	}
 }
 
+// An error that Temporal does not retry ends the record failed: no attempt follows to end
+// it (#8256).
+func TestANonRetryableFailureEndsTheRecord(t *testing.T) {
+	pool := testdb.New(t)
+	key := newKey()
+	attempts := 0
+	refuse := func(ctx context.Context, in Input) (store.Answer, error) {
+		attempts++
+		return store.Answer{}, temporal.NewNonRetryableApplicationError("the actor is not one", "bad_actor", nil)
+	}
+	run := func(ctx workflow.Context, in Input) (store.Answer, error) {
+		ctx = workflow.WithActivityOptions(ctx, workflow.ActivityOptions{
+			ActivityID:          in.Key,
+			StartToCloseTimeout: time.Minute,
+			RetryPolicy:         &temporal.RetryPolicy{InitialInterval: time.Millisecond, MaximumAttempts: 3},
+		})
+		var answer store.Answer
+		err := workflow.ExecuteActivity(ctx, "inventory.Refuse", in).Get(ctx, &answer)
+		return answer, err
+	}
+	env := (&testsuite.WorkflowTestSuite{}).NewTestWorkflowEnvironment()
+	env.SetWorkerOptions(worker.Options{Interceptors: []interceptor.WorkerInterceptor{Record(pool, nil)}})
+	env.RegisterActivityWithOptions(refuse, activity.RegisterOptions{Name: "inventory.Refuse"})
+	env.RegisterWorkflowWithOptions(run, workflow.RegisterOptions{Name: "Refuse"})
+	env.ExecuteWorkflow("Refuse", Input{Key: key, Actor: json.RawMessage(browser), Params: p("item_id", "i1")})
+	if env.GetWorkflowError() == nil || attempts != 1 {
+		t.Fatalf("attempts %d, error %v", attempts, env.GetWorkflowError())
+	}
+
+	r := operation(t, pool, key)
+	if r.status != "failed" || !r.finished || r.attempt != 1 || r.problem["code"] != "inventory_activity_failed" ||
+		r.lastError == nil || *r.lastError == "" {
+		t.Fatalf("%+v", r)
+	}
+	op, _, err := store.ReadOperation(context.Background(), pool, key, nil)
+	if err != nil || op.Status != "failed" || op.Error == nil || op.Error.Extensions["code"] != "inventory_activity_failed" {
+		t.Fatalf("%+v %v", op, err)
+	}
+}
+
 func TestAFailedRecordNeverFailsTheActivity(t *testing.T) {
 	f, _ := recorded(t)
 	// A key past the record's id bound: the record cannot start, the activity still runs.
