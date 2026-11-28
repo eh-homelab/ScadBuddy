@@ -122,6 +122,8 @@ func TestEditBodyAppliesR7(t *testing.T) {
 		{"empty", `"set":{"":"1"}`, keyRefused, ""},
 		{"long", `"set":{"` + long + `":"1"}`, keyRefused, strings.Repeat("x", 64) + "…"},
 		{"both", `"set":{"a":"1"},"unset":["a"]`, keyRefused, "a"},
+		{"a null set", `"set":null`, invalidInput, ""},
+		{"a null unset", `"unset":null`, invalidInput, ""},
 		{"501", `"set":{` + strings.Join(many, ",") + `}`, invalidInput, ""},
 		{"empty edit", ``, invalidInput, ""},
 		{"a number value", `"set":{"a":1}`, invalidInput, ""},
@@ -158,6 +160,20 @@ func TestEditBodyAppliesR7(t *testing.T) {
 	}
 	if n := len(e.starter.started()); n != 0 {
 		t.Errorf("%d writes started", n)
+	}
+}
+
+func TestBothSetAndUnsetSaysSoLikePython(t *testing.T) {
+	e := newEnv(t)
+	id := e.preset("manual", "PLA", `{"name":"PLA"}`)
+	_, problem := e.send(person, http.MethodPatch, fmt.Sprintf("%s/%d", listPath, id), "k",
+		`{"expected_version":1,"set":{"a":"1"},"unset":["a"]}`)
+	if detail, _ := problem.Get("detail"); detail != "the key a is both set and unset" {
+		t.Errorf("%s", jsonv.Dumps(problem))
+	}
+	_, problem = e.send(person, http.MethodPatch, fmt.Sprintf("%s/%d", listPath, id), "k", `{"expected_version":1,"set":{"name":"1"}}`)
+	if detail, _ := problem.Get("detail"); detail != "the key name cannot be set or unset" {
+		t.Errorf("%s", jsonv.Dumps(problem))
 	}
 }
 
@@ -210,18 +226,36 @@ func TestCopyJoinsARunWithTheSameKey(t *testing.T) {
 	e.send(person, http.MethodPatch, fmt.Sprintf("%s/%d", listPath, id), "same", `{"expected_version":1,"name":"X"}`)
 	e.send(person, http.MethodPost, fmt.Sprintf("%s/%d/mirror", listPath, id), "", ``)
 	writes := e.starter.started()
-	sum := sha256.Sum256(fmt.Appendf(nil, "user:test#ann\x1fsame\x1f%d", id))
+	sum := sha256.Sum256(fmt.Appendf(nil, "user:test#ann\x1fsame\x1f%d\x1f%s", id, jsonv.Dumps(writes[0].Input)))
 	if want := "filament-preset-copy-" + hex.EncodeToString(sum[:]); writes[0].WorkflowID != want || writes[1].WorkflowID != want {
 		t.Errorf("%s %s, want %s", writes[0].WorkflowID, writes[1].WorkflowID, want)
 	}
 	if writes[2].WorkflowID == writes[0].WorkflowID || writes[3].WorkflowID == writes[0].WorkflowID {
 		t.Error("another key or actor joins the run")
 	}
+	sum = sha256.Sum256(fmt.Appendf(nil, "user:test#ann\x1fsame\x1f%d\x1f%s", id, jsonv.Dumps(writes[4].Input)))
 	if want := "filament-preset-edit-" + hex.EncodeToString(sum[:]); writes[4].WorkflowID != want {
 		t.Errorf("edit %s", writes[4].WorkflowID)
 	}
 	if want := fmt.Sprintf("filament-preset-mirror-%d", id); writes[5].WorkflowID != want {
 		t.Errorf("mirror %s", writes[5].WorkflowID)
+	}
+}
+
+func TestTheSameKeyWithAnotherBodyRunsApart(t *testing.T) {
+	e := newEnv(t)
+	id := e.preset("manual", "PLA", `{"name":"PLA"}`)
+	e.starter.answer = written(id, 1, true)
+	copyPath := fmt.Sprintf("%s/%d/copy", listPath, id)
+	e.send(person, http.MethodPost, copyPath, "same", `{"name":"Mine"}`)
+	e.send(person, http.MethodPost, copyPath, "same", `{ "name": "Mine" }`)
+	e.send(person, http.MethodPost, copyPath, "same", `{"name":"Yours"}`)
+	writes := e.starter.started()
+	if writes[0].WorkflowID != writes[1].WorkflowID {
+		t.Error("the same key and body must join one run")
+	}
+	if writes[2].WorkflowID == writes[0].WorkflowID {
+		t.Error("the same key with another body must start its own run")
 	}
 }
 

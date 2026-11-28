@@ -280,12 +280,6 @@ func TestAReadTokenCannotWrite(t *testing.T) {
 // reads serve, and each write answers 503 writes_not_configured.
 func TestThePresetsAreaStartsWithoutTemporal(t *testing.T) {
 	pool := testdb.New(t)
-	free, err := net.Listen("tcp", "127.0.0.1:0")
-	if err != nil {
-		t.Fatal(err)
-	}
-	address := free.Addr().String()
-	free.Close()
 	kek := filepath.Join(t.TempDir(), "kek")
 	if err := os.WriteFile(kek, []byte(base64.StdEncoding.EncodeToString(make([]byte, 32))+"\n"), 0o600); err != nil {
 		t.Fatal(err)
@@ -293,25 +287,34 @@ func TestThePresetsAreaStartsWithoutTemporal(t *testing.T) {
 	env := map[string]string{
 		"SCADBUDDY_CORE_UPSTREAM": "http://127.0.0.1:1",
 		"SCADBUDDY_DATABASE_URL":  pool.Config().ConnString(),
-		"SCADBUDDY_CORE_LISTEN":   address,
 		"SCADBUDDY_CORE_AREAS":    filamentpresets.Area,
 		seal.Variable:             kek,
 	}
-	ctx, cancel := context.WithCancel(context.Background())
-	done := make(chan error, 1)
-	go func() { done <- run(ctx, func(k string) (string, bool) { v, ok := env[k]; return v, ok }, nil) }()
-	deadline := time.Now().Add(10 * time.Second)
-	for {
-		res, err := http.Get("http://" + address + "/api/v1/filament/presets")
-		if err == nil {
-			res.Body.Close()
-			expect(t, res.StatusCode, http.StatusOK)
-			break
-		}
-		if time.Now().After(deadline) {
+	// Core binds its own address, so the test cannot hand it a listener. A port taken between
+	// the pick and the bind makes run fail at once; the test then picks another.
+	var address string
+	var cancel context.CancelFunc
+	var done chan error
+	for attempt := 0; ; attempt++ {
+		free, err := net.Listen("tcp", "127.0.0.1:0")
+		if err != nil {
 			t.Fatal(err)
 		}
-		time.Sleep(20 * time.Millisecond)
+		address = free.Addr().String()
+		free.Close()
+		env["SCADBUDDY_CORE_LISTEN"] = address
+		var ctx context.Context
+		ctx, cancel = context.WithCancel(context.Background())
+		done = make(chan error, 1)
+		go func() { done <- run(ctx, func(k string) (string, bool) { v, ok := env[k]; return v, ok }, nil) }()
+		if !waitServing(address, done) {
+			cancel()
+			if attempt >= 4 {
+				t.Fatal("core did not start")
+			}
+			continue
+		}
+		break
 	}
 	req, _ := http.NewRequest(http.MethodPost, "http://"+address+"/api/v1/filament/presets/1/copy", strings.NewReader(`{"name":"Mine"}`))
 	req.Header.Set("Idempotency-Key", "k")
@@ -333,4 +336,25 @@ func TestThePresetsAreaStartsWithoutTemporal(t *testing.T) {
 	case <-time.After(30 * time.Second):
 		t.Fatal("run did not stop")
 	}
+}
+
+// waitServing is true once the area's list answers 200 at address, and false when run ended
+// first (its bind failed) or the wait ran out.
+func waitServing(address string, done chan error) bool {
+	deadline := time.Now().Add(10 * time.Second)
+	for time.Now().Before(deadline) {
+		select {
+		case err := <-done:
+			done <- err
+			return false
+		default:
+		}
+		res, err := http.Get("http://" + address + "/api/v1/filament/presets")
+		if err == nil {
+			res.Body.Close()
+			return res.StatusCode == http.StatusOK
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	return false
 }

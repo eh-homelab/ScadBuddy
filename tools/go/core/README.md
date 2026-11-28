@@ -136,11 +136,15 @@ API process serves. Go writes no row.
 - Each write is one run of core's workflow `FilamentPresetWrite`
   (`internal/filamentpresets/temporal.go`), on the queue
   `SCADBUDDY_TEMPORAL_TASK_QUEUE_FILAMENT_PRESETS`. Core's own worker runs it. Its one step is
-  the activity, with one JSON object as its argument, a start-to-close of its bound plus 30 s
-  (30 s for copy and edit, 60 s for a send again) and one attempt. The route waits for the
-  result 10 s more, then answers 503 `preset_write_pending`.
+  the activity, with one JSON object as its argument, and one attempt. The mirror bound is
+  30 s for copy and edit and 60 s for a send again. The activity's start-to-close is that
+  bound plus 30 s: 60 s for copy and edit, 90 s for a send again. Its schedule-to-start is
+  the route's wait, the start-to-close plus 10 s, so a task that no worker took by then never
+  runs late. The route waits for the result for that same time, then answers 503
+  `preset_write_pending`.
 - The run's id is `filament-preset-copy-` or `filament-preset-edit-` and the SHA-256 of the
-  actor, the key and the preset id, joined by `\x1f`; a send again's is
+  actor, the key, the preset id and the JSON body that Go sends the activity, joined by
+  `\x1f`, so one key with another body runs apart; a send again's is
   `filament-preset-mirror-<preset_id>`. The start uses the conflict policy `USE_EXISTING`, so
   a send while a run of the id is open joins it. Its reuse policy is `ALLOW_DUPLICATE`: a send
   after the run closed starts a new run, and the activity answers the reply that the

@@ -22,22 +22,38 @@ const WorkflowName = "FilamentPresetWrite"
 const timeoutFailure = "temporal_timeout"
 
 // WriteRun is the workflow's input: the activity by name, its queue, its one JSON object
-// argument, and its start-to-close timeout in seconds.
+// argument, its start-to-close timeout in seconds, and its schedule-to-start timeout in
+// seconds: the time the route waits (plan ruling P23), so a task no worker took by the time
+// the route answered never runs late.
 type WriteRun struct {
-	Activity      string          `json:"activity"`
-	Queue         string          `json:"queue"`
-	Input         json.RawMessage `json:"input"`
-	StartToCloseS int64           `json:"start_to_close_s"`
+	Activity         string          `json:"activity"`
+	Queue            string          `json:"queue"`
+	Input            json.RawMessage `json:"input"`
+	StartToCloseS    int64           `json:"start_to_close_s"`
+	ScheduleToStartS int64           `json:"schedule_to_start_s"`
+}
+
+// activityOptions are the options of the write's one activity: no retry (R11).
+func activityOptions(in WriteRun) workflow.ActivityOptions {
+	return workflow.ActivityOptions{
+		TaskQueue:              in.Queue,
+		StartToCloseTimeout:    time.Duration(in.StartToCloseS) * time.Second,
+		ScheduleToStartTimeout: time.Duration(in.ScheduleToStartS) * time.Second,
+		RetryPolicy:            &temporal.RetryPolicy{MaximumAttempts: 1},
+	}
+}
+
+// runOf is w's workflow input: its schedule-to-start is the route's wait, w's timeout plus
+// waitMargin.
+func runOf(w Write, queue string) WriteRun {
+	return WriteRun{Activity: w.Activity, Queue: queue, StartToCloseS: int64(w.Timeout / time.Second),
+		ScheduleToStartS: int64((w.Timeout + waitMargin) / time.Second)}
 }
 
 // WriteWorkflow runs in.Activity once (no retry, R11) on in.Queue and gives its result as
 // it came. The activity's failure is the workflow's.
 func WriteWorkflow(ctx workflow.Context, in WriteRun) (json.RawMessage, error) {
-	ctx = workflow.WithActivityOptions(ctx, workflow.ActivityOptions{
-		TaskQueue:           in.Queue,
-		StartToCloseTimeout: time.Duration(in.StartToCloseS) * time.Second,
-		RetryPolicy:         &temporal.RetryPolicy{MaximumAttempts: 1},
-	})
+	ctx = workflow.WithActivityOptions(ctx, activityOptions(in))
 	var out json.RawMessage
 	err := workflow.ExecuteActivity(ctx, in.Activity, in.Input).Get(ctx, &out)
 	return out, err
@@ -54,6 +70,9 @@ func WriteWorkflow(ctx workflow.Context, in WriteRun) (json.RawMessage, error) {
 // another body (idempotency_key_reused), which the old run's result could not. A refused
 // write keeps no reply, so a new run checks it again, as a Python route does. A send again
 // (the mirror) has no key: a new run sends again, as asked.
+//
+// The id also hashes the body (plan ruling P24), so one key with another body runs apart and
+// the ledger answers it idempotency_key_reused.
 type TemporalStarter struct {
 	Client              client.Client
 	Queue, LibraryQueue string
@@ -65,13 +84,14 @@ func (s TemporalStarter) Run(ctx context.Context, w Write) (json.RawMessage, err
 	if err != nil {
 		return nil, err
 	}
+	in := runOf(w, s.LibraryQueue)
+	in.Input = input
 	run, err := s.Client.ExecuteWorkflow(ctx, client.StartWorkflowOptions{
 		ID:                       w.WorkflowID,
 		TaskQueue:                s.Queue,
 		WorkflowIDConflictPolicy: enumspb.WORKFLOW_ID_CONFLICT_POLICY_USE_EXISTING,
 		WorkflowIDReusePolicy:    enumspb.WORKFLOW_ID_REUSE_POLICY_ALLOW_DUPLICATE,
-	}, WorkflowName, WriteRun{Activity: w.Activity, Queue: s.LibraryQueue, Input: input,
-		StartToCloseS: int64(w.Timeout / time.Second)})
+	}, WorkflowName, in)
 	if err != nil {
 		return nil, err
 	}

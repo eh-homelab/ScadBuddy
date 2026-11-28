@@ -91,3 +91,15 @@ func TestATimedOutActivityIsATimeout(t *testing.T) {
 		t.Fatalf("%+v", failure)
 	}
 }
+
+func TestTheActivityNeverStartsLateOrAfterTheRouteAnswered(t *testing.T) {
+	run := runOf(Write{Activity: "filament_preset_copy", Timeout: 60 * time.Second}, "library")
+	if run.StartToCloseS != 60 || run.ScheduleToStartS != 70 {
+		t.Errorf("%+v", run)
+	}
+	options := activityOptions(run)
+	if options.TaskQueue != "library" || options.StartToCloseTimeout != 60*time.Second ||
+		options.ScheduleToStartTimeout != 70*time.Second || options.RetryPolicy.MaximumAttempts != 1 {
+		t.Errorf("%+v", options)
+	}
+}

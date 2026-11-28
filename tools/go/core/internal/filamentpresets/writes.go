@@ -126,7 +126,7 @@ func (x *writer) copy(w http.ResponseWriter, r *http.Request) {
 	}
 	caller := actor(auth.CallerOf(r.Context()))
 	input := jsonv.Object{{Key: "preset_id", Value: id}, {Key: "name", Value: name}, {Key: "actor", Value: caller}, {Key: "idempotency_key", Value: key}}
-	result, ok := x.run(w, r, Write{WorkflowID: keyedID("copy", caller, key, id), Activity: copyActivity, Input: input}, writeMirrorBound)
+	result, ok := x.run(w, r, Write{WorkflowID: keyedID("copy", caller, key, id, input), Activity: copyActivity, Input: input}, writeMirrorBound)
 	if !ok {
 		return
 	}
@@ -153,7 +153,7 @@ func (x *writer) edit(w http.ResponseWriter, r *http.Request) {
 	caller := actor(auth.CallerOf(r.Context()))
 	input := append(jsonv.Object{{Key: "preset_id", Value: id}}, fields...)
 	input = append(input, jsonv.Member{Key: "actor", Value: caller}, jsonv.Member{Key: "idempotency_key", Value: key})
-	result, ok := x.run(w, r, Write{WorkflowID: keyedID("edit", caller, key, id), Activity: editActivity, Input: input}, writeMirrorBound)
+	result, ok := x.run(w, r, Write{WorkflowID: keyedID("edit", caller, key, id, input), Activity: editActivity, Input: input}, writeMirrorBound)
 	if !ok {
 		return
 	}
@@ -292,16 +292,21 @@ func unreadable(w http.ResponseWriter, r *http.Request, result json.RawMessage) 
 
 func refuse(w http.ResponseWriter, r *http.Request, bad *refusal) {
 	if bad.code == keyRefused {
-		writeCodeDetail(w, r, keyRefused, "the key "+bad.key+" cannot be set or unset", httpx.Field{Key: "key", Value: bad.key})
+		detail := bad.detail
+		if detail == "" {
+			detail = "the key " + bad.key + " cannot be set or unset"
+		}
+		writeCodeDetail(w, r, keyRefused, detail, httpx.Field{Key: "key", Value: bad.key})
 		return
 	}
 	writeCodeDetail(w, r, bad.code, bad.detail)
 }
 
 // keyedID is R12's workflow id: the op, then the SHA-256 of the actor, the key and the
-// preset id, so two sends of one key join one run.
-func keyedID(op, caller, key string, id int64) string {
-	sum := sha256.Sum256(fmt.Appendf(nil, "%s\x1f%s\x1f%d", caller, key, id))
+// preset id and the activity's input, so two sends of one key and one body join one run, and
+// one key with another body runs apart (plan ruling P24).
+func keyedID(op, caller, key string, id int64, input jsonv.Object) string {
+	sum := sha256.Sum256(fmt.Appendf(nil, "%s\x1f%s\x1f%d\x1f%s", caller, key, id, jsonv.Dumps(input)))
 	return "filament-preset-" + op + "-" + hex.EncodeToString(sum[:])
 }
 
@@ -351,7 +356,7 @@ func editFields(body jsonv.Object) (jsonv.Object, *refusal) {
 		fields = append(fields, jsonv.Member{Key: "name", Value: name})
 	}
 	setKeys := 0
-	if hasSet && set != nil {
+	if hasSet {
 		o, isObject := set.(jsonv.Object)
 		if !isObject {
 			return nil, &refusal{code: invalidInput, detail: "set: not an object"}
@@ -365,7 +370,7 @@ func editFields(body jsonv.Object) (jsonv.Object, *refusal) {
 		fields = append(fields, jsonv.Member{Key: "set", Value: o})
 	}
 	var unsetKeys []string
-	if hasUnset && unset != nil {
+	if hasUnset {
 		list, isList := unset.([]any)
 		if !isList {
 			return nil, &refusal{code: invalidInput, detail: "unset: not a list"}
@@ -392,7 +397,7 @@ func editFields(body jsonv.Object) (jsonv.Object, *refusal) {
 	}
 	if len(both) > 0 {
 		slices.Sort(both)
-		return nil, &refusal{code: keyRefused, key: shown(both[0])}
+		return nil, &refusal{code: keyRefused, key: shown(both[0]), detail: "the key " + shown(both[0]) + " is both set and unset"}
 	}
 	if name == nil && setKeys == 0 && len(unsetKeys) == 0 {
 		return nil, &refusal{code: invalidInput, detail: "an edit needs a name, a key to set or a key to unset"}
