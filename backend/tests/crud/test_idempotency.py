@@ -106,6 +106,24 @@ def test_the_prune_drops_rows_past_the_retention_only(pool: PgPool) -> None:
     assert keys == ["new"]
 
 
+def test_prune_reads_a_retention_of_fractional_seconds(
+    pool: PgPool, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#8477: a retention is sent as a JSON number of seconds, fractions too."""
+    monkeypatch.setitem(RETENTION_BY_CALLER, "inventory", timedelta(seconds=90.5))
+    with pool.connection() as conn:
+        for key, age in (("kept", "90 seconds"), ("gone", "91 seconds")):
+            conn.execute(
+                "INSERT INTO crud_requests"
+                " (caller, key, route, body_sha256, status, body, created_at)"
+                " VALUES ('inventory', %s, %s, 'h', 200, '{}', now() - %s::interval)",
+                (key, ROUTE, age),
+            )
+        assert prune(conn) == 1
+        keys = [r["key"] for r in conn.execute("SELECT key FROM crud_requests").fetchall()]
+    assert keys == ["kept"]
+
+
 def test_prune_keeps_inventory_keys_seven_days(pool: PgPool) -> None:
     with pool.connection() as conn:
         for caller, key, age in (

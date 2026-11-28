@@ -1,6 +1,6 @@
 // Package modeldata loads the inventory model's YAML proof (docs/inventory-model/) for
-// the tests. Only this package imports the YAML library, and only test files import this
-// package (R-K1-20; TestOnlyTestsImportModeldata checks it).
+// the tests. Only this package and test files import the YAML library, and only test
+// files import this package (R-K1-20; TestOnlyTestsImportModeldata checks it).
 package modeldata
 
 import (
