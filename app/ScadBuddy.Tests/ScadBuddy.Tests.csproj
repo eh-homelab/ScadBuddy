@@ -1,6 +1,6 @@
 <Project Sdk="Microsoft.NET.Sdk">
 
-	<!-- The app's pure .NET parts, tested without Android (#7905, #8244): the pairing link, and the device protocol (frames, events, results, the tag dump). -->
+	<!-- The app's pure .NET parts, tested without Android (#7905, #8244): the pairing link, the device protocol (frames, events, results, the tag dump), and the task form (#8574). -->
 	<PropertyGroup>
 		<TargetFramework>net10.0</TargetFramework>
 		<ImplicitUsings>enable</ImplicitUsings>
@@ -11,6 +11,12 @@
 	<ItemGroup>
 		<Compile Include="../ScadBuddy/DeepLink.Links.cs" Link="DeepLink.Links.cs" />
 		<Compile Include="../ScadBuddy/DeviceProtocol.cs" Link="DeviceProtocol.cs" />
+		<Compile Include="../ScadBuddy/TaskForm.cs" Link="TaskForm.cs" />
+	</ItemGroup>
+
+	<ItemGroup>
+		<!-- One task per widget and context block, the shapes #8181's widget tests use. -->
+		<None Include="fixtures/**/*.json" CopyToOutputDirectory="PreserveNewest" />
 	</ItemGroup>
 
 	<ItemGroup>

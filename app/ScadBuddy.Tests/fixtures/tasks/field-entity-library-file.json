@@ -1,0 +1,29 @@
+{
+  "id": "8181a2a2-0000-4000-8000-000015299508",
+  "run_id": "run-fixture",
+  "title": "Fixture entity-library-file",
+  "schema": {
+    "type": "object",
+    "properties": {
+      "f": {
+        "type": "string",
+        "x-sb-widget": "entity",
+        "kind": "library_file",
+        "title": "File"
+      }
+    },
+    "required": [
+      "f"
+    ]
+  },
+  "context": [],
+  "place": null,
+  "ui": null,
+  "assignee": null,
+  "expires_at": null,
+  "state": "open",
+  "created_at": "2026-11-28T09:00:00Z",
+  "updated_at": "2026-11-28T09:00:00Z",
+  "native": false,
+  "fallback_url": "/station"
+}

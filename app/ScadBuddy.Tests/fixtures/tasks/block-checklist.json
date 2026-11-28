@@ -1,0 +1,30 @@
+{
+  "id": "8181a2a2-0000-4000-8000-000012052718",
+  "run_id": "run-fixture",
+  "title": "Fixture block-checklist",
+  "schema": {
+    "type": "object",
+    "properties": {},
+    "required": []
+  },
+  "context": [
+    {
+      "checklist": [
+        "Bed clear",
+        "Nozzle clean"
+      ]
+    }
+  ],
+  "place": null,
+  "ui": null,
+  "assignee": null,
+  "expires_at": null,
+  "state": "open",
+  "created_at": "2026-11-28T09:00:00Z",
+  "updated_at": "2026-11-28T09:00:00Z",
+  "native": true,
+  "fallback_url": "/station",
+  "context_view": [
+    null
+  ]
+}

@@ -1,0 +1,35 @@
+{
+  "id": "8181a2a2-0000-4000-8000-000009795803",
+  "run_id": "run-fixture",
+  "title": "Fixture block-entity",
+  "schema": {
+    "type": "object",
+    "properties": {},
+    "required": []
+  },
+  "context": [
+    {
+      "entity": "spool:0f6a1c2e-3b4d-4e5f-8a9b-0c1d2e3f4a5b"
+    }
+  ],
+  "place": null,
+  "ui": null,
+  "assignee": null,
+  "expires_at": null,
+  "state": "open",
+  "created_at": "2026-11-28T09:00:00Z",
+  "updated_at": "2026-11-28T09:00:00Z",
+  "native": true,
+  "fallback_url": "/station",
+  "context_view": [
+    {
+      "ref": "spool:0f6a1c2e-3b4d-4e5f-8a9b-0c1d2e3f4a5b",
+      "kind": "spool",
+      "label": "spool 0f6a1c2e",
+      "code": "S-36",
+      "title": "Bambu PLA Basic Gold",
+      "subtitle": "812 g left",
+      "rgba": "#E4BD68FF"
+    }
+  ]
+}
