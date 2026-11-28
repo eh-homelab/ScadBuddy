@@ -404,7 +404,7 @@ same way, `vite.config.ts`).
   `q=` (`FilamentSearchBox`, "/" focuses it) with `lib/filamentSearch.ts` (every token must
   match a field; `#87` is spool 87 only; a hex with or without `#`; SKUs from the suppliers'
   products, trays from `/filament/inventory`, each spool's open tag's UID and tray UUID from 4 hex digits
-  (#7151, `tagsBySpool`), and each spool's and type's property values (#7026; a spool also by its type's, and a `key:value` token equals one key's whole value, GTIN-14 for digits, #8372; with `from=scan` the Spools tab shows no rows until the list and both property reads settle, then opens a single match),
+  (#7151, `tagsBySpool`), and each spool's and type's property values (#7026; a spool also by its type's, and a `key:value` token equals one key's whole value, GTIN-14 for digits, #8372; with `from=scan` the Spools tab shows no rows until the list and both property reads settle, then opens a single match), when any search matches spools that the list filters hide, the tab names those filters ("Spools match, but these filters hide them: …") and offers a "Clear filters" button (#8411),
   read by `readKindPropertyTexts` on every load of the tab's list; a failed reload keeps the values it had), and every Filament tab has the quick find
   (`FilamentQuickFind`, Ctrl+K or ⌘K: spools and types in groups, Enter opens one), which shares the
   colour picker's remembered filters (`lib/filamentPickerFilters.ts`). The agent's
