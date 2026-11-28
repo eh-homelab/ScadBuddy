@@ -122,6 +122,25 @@ func TestDeviceRoutesRefuseInObserve(t *testing.T) {
 	expectStatus(t, e.do("POST", "/api/v1/devices/pairings", "", ""), 401)
 }
 
+// The device socket refuses a person's session, and no credential, in every mode: in off and
+// observe the person's path would serve both.
+func TestDeviceSocketRefusesAPersonInEveryMode(t *testing.T) {
+	for _, mode := range []auth.Mode{auth.Off, auth.Observe, auth.Enforce} {
+		h := newHarness(t, mode)
+		me := h.person("user:i#me")
+		if _, res := h.pods[0].dialDevice(map[string]string{"Cookie": me}); res.StatusCode != 401 {
+			t.Errorf("%s: a session cookie on the device path: %d", mode, res.StatusCode)
+		}
+		if _, res := h.pods[0].dialDevice(nil); res.StatusCode != 401 {
+			t.Errorf("%s: no credential on the device path: %d", mode, res.StatusCode)
+		}
+		// The same cookie still opens the person's path, so the 401 is the path's.
+		if _, res := h.pods[0].dial(map[string]string{"Cookie": me}); res.StatusCode != 101 {
+			t.Errorf("%s: a session cookie on the person's path: %d", mode, res.StatusCode)
+		}
+	}
+}
+
 const uuidZero = "00000000-0000-4000-8000-000000000000"
 
 func TestListOnlyOwn(t *testing.T) {

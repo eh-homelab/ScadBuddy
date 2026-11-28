@@ -410,8 +410,8 @@ func TestCallArgsMustFitTheEvent(t *testing.T) {
 	}
 	for name, text := range map[string]string{
 		"args near the body's limit": strings.Repeat("x", 3900),
-		// The parsed form is what is sent, and it escapes < as <: 700 bytes posted are
-		// 4200 sent.
+		// The parsed form is what is sent. Go's encoding/json writes each '<' as a six-byte
+		// escape (a backslash, then u003c), so 700 bytes posted are 4200 sent.
 		"args that grow when parsed": strings.Repeat("<", 700),
 	} {
 		got := write(text)
@@ -437,8 +437,9 @@ func TestEventDataCapFitsTheEvent(t *testing.T) {
 	d := h.pair(me)
 	call := h.start(me, d, `{"method":"nfc.read"}`)
 	data := func(n int) string {
-		// {"a":"…","b":"…"} with n bytes in all: two keys, and text that is not ASCII.
-		head := `{"a":"` + strings.Repeat(" ", 100) + `","b":"`
+		// {"a":"…","b":"…"} with n bytes in all: two keys, and text that is not ASCII. "a"
+		// holds 100 U+2028 LINE SEPARATOR runes, 3 bytes each in UTF-8.
+		head := `{"a":"` + strings.Repeat(string(rune(0x2028)), 100) + `","b":"`
 		return head + strings.Repeat("y", n-len(head)-2) + `"}`
 	}
 	expect(t, len(data(eventDataMax)), eventDataMax)
