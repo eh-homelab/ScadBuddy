@@ -413,9 +413,14 @@ func firstErr(errs ...error) error {
 // handler_config.changed per step it resolves, and the property triggers one
 // entity_property.changed per key it sets.
 func (s *Items) Create(ctx context.Context, tx pgx.Tx, in wire.ItemInput, by Actor) (wire.Item, error) {
-	source := in.Source
-	if source == "" {
-		source = "manual"
+	// No source is manual, as models.py ItemInput's default; an empty one is refused, as
+	// its min_length is (#8256).
+	source := "manual"
+	if in.Source != nil {
+		if *in.Source == "" {
+			return wire.Item{}, badInput("source is at least 1 character")
+		}
+		source = *in.Source
 	}
 	if err := checkItemTexts(&in.Name, &in.Manufacturer, &in.Note, &in.CompatibleWith, in.LifeMonths); err != nil {
 		return wire.Item{}, err
