@@ -35,7 +35,6 @@ from fastapi import status
 
 from scadbuddy.core.problems import ApiError
 from scadbuddy.crud.idempotency import Replay, idempotent_write, stored
-from scadbuddy.library.outputs import storefront_output_id
 from scadbuddy.orders.component import ORDERS, OrdersComponent
 from scadbuddy.orders.lifecycle import LifecycleError, SubmitInput
 from scadbuddy.orders.models import Order, OrderItem
@@ -211,15 +210,14 @@ async def submit_draft(
                 body.draft_id, entry, by, cart_of=visitor.id, conn=conn, firm=repriced.firm
             )
             # #8481: a line added before its slice saved the render holds it now, under the
-            # order's lock the submit took, while the line is still that design with none.
+            # order's lock the submit took, while the line is still that design with none
+            # and the output is still its render (read again here: it may be gone since).
             for item in orders.store.items(order.id, conn=conn):
                 output_id = saved.get(item.id)
-                if (
-                    output_id is not None
-                    and item.output_id is None
-                    and item.reference is not None
-                    and storefront_output_id(item.reference.render_key) == output_id
-                ):
+                if output_id is None or item.output_id is not None or item.reference is None:
+                    continue
+                still = storefront_output(state.outputs, item.reference)
+                if still is not None and still.output_id == output_id:
                     orders.store.update_item(conn, item.id, output_id=output_id)
             changes.append((order, orders.store.items(order.id, conn=conn)))
             assert order.number is not None

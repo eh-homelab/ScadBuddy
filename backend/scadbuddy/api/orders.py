@@ -2714,8 +2714,9 @@ async def render_item(
     item, 409 ``order_not_submitted`` (a storefront cart), ``item_library_file``,
     ``item_custom``, ``item_has_no_design``, ``order_not_open`` and ``item_not_open``,
     as the slice quote refuses them. #8481: an item to print (an accepted order, the item
-    `approved` or `failed` with an accepted quote) renders too; its accepted quote stays.
-    An item with no output whose storefront slice saved its render
+    `approved` or `failed` with an accepted quote) renders too, but not while the order is
+    on hold (``order_on_hold``, as its print); its accepted quote stays. An item with no
+    output whose storefront slice saved its render
     (``storefront_output_id`` of its render key) takes that output, with no render."""
     check_path(order_id, item_id)
     result = await run_operation(

@@ -1116,10 +1116,14 @@ def test_an_accepted_item_with_no_output_renders_at_its_commit_and_prints(
     )
     quote_and_accept(bambuddy, order["id"], item["id"])
     assert bambuddy.post(f"/api/v1/orders/{order['id']}/accept").status_code == 200
+    path = f"/api/v1/orders/{order['id']}/items/{item['id']}"
+    # On hold, the render that changes what prints is refused, as the print is.
+    assert bambuddy.post(f"/api/v1/orders/{order['id']}/hold").status_code == 200
+    problem(bambuddy.post(f"{path}/render", headers=press()), "order_on_hold")
+    assert bambuddy.post(f"/api/v1/orders/{order['id']}/release").status_code == 200
     # The model moves on after the order pinned its commit.
     assert put_source(bambuddy, SECOND).status_code == 200
     assert bambuddy.get(f"/api/v1/models/{SLUG}").json()["version"] != first
-    path = f"/api/v1/orders/{order['id']}/items/{item['id']}"
 
     def current() -> dict[str, Any]:
         detail = bambuddy.get(f"/api/v1/orders/{order['id']}").json()
