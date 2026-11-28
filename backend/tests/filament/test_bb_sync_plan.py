@@ -665,7 +665,7 @@ def test_a_supplier_with_only_item_offers_has_no_link(pg_pool: PgPool) -> None:
     items = ItemRows(pg_pool)
     nut = items.create(ItemInput(kind_id="hardware", name="M3 nut"), Actor(kind="browser"))
     OfferStore(pg_pool, lambda: "USD").create(
-        OfferInput(supplier_id=shop.id, item_id=nut.id, sku="NUT-3"), Actor(kind="browser")
+        OfferInput(supplier_id=shop.id, item_id=nut.id, sku="NUT-3")
     )
     sync = SPOOLS.model_copy(update={"spools": "off", "suppliers": "sb_to_bb"})
     _link(pg_pool, spool, 50)
@@ -680,7 +680,7 @@ def test_an_unlinked_supplier_with_only_item_offers_is_not_created(pg_pool: PgPo
     items = ItemRows(pg_pool)
     nut = items.create(ItemInput(kind_id="hardware", name="M3 nut"), Actor(kind="browser"))
     OfferStore(pg_pool, lambda: "USD").create(
-        OfferInput(supplier_id=shop.id, item_id=nut.id, sku="NUT-3"), Actor(kind="browser")
+        OfferInput(supplier_id=shop.id, item_id=nut.id, sku="NUT-3")
     )
     sync = SPOOLS.model_copy(update={"spools": "off", "suppliers": "sb_to_bb"})
     writes = _plan(f, _snap([], suppliers=[]), sync).writes
