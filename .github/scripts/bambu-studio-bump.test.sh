@@ -113,7 +113,7 @@ cmp -s "$work/before" "$work/repo/Dockerfile" || fail "up to date: Dockerfile ch
 # 4. Newest by version, not by listing order.
 setup
 listing \
-  "$(release v02.08.02.60 false false)" \
+  "$(release v02.08.02.61 false false)" \
   "$(release v02.09.02.62 false false "$(asset "$new_asset" 787358056 "sha256:$new_sha")")" \
   "$(release v02.09.01.70 false false "$(asset BambuStudio_ubu24-v02.09.01.70-1.AppImage 7 "sha256:$old_sha")")"
 out="$(run)" || fail "by version exited non-zero"
@@ -133,6 +133,8 @@ if run >/dev/null 2>&1; then fail "no stable release: exited zero"; fi
 rm -f "$work/asset.bin"
 listing_new ""
 if run >/dev/null 2>&1; then fail "no digest, no download: exited zero"; fi
+listing "$(release v02.09.02.62 false false "$(asset "$new_asset" 787358056 "sha256:$new_sha")")"
+if run >/dev/null 2>&1; then fail "pin not in the listing: exited zero"; fi
 rm -f "$work/releases.json"
 if run >/dev/null 2>&1; then fail "no listing: exited zero"; fi
 cmp -s "$work/before" "$work/repo/Dockerfile" || fail "a failure changed the Dockerfile"
