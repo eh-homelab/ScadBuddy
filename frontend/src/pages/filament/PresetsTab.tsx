@@ -9,7 +9,7 @@ import { filamentLinks } from '../../lib/filamentLinks'
 import { Button } from '@/components/ui/button'
 import { cn } from '@/lib/utils'
 import { count } from './plural'
-import { canSendAgain, OUTCOME_TEXT, WRITES_OFF_TEXT, writeFailure } from './presetWrites'
+import { canSendAgain, OUTCOME_TEXT, sendFailure, WRITES_OFF_TEXT } from './presetWrites'
 
 const SOURCES: { id: PresetSource; label: string }[] = [
   { id: '3dfp', label: '3DFP' },
@@ -105,7 +105,7 @@ export function PresetsTab() {
       setRows((was) => was && was.map((one) => (one.id === row.id ? result.preset : one)))
       setNotice({ text: `${row.name}: ${OUTCOME_TEXT[result.outcome]}`, warn: result.outcome === 'failed' })
     } catch (cause) {
-      const failure = writeFailure(cause)
+      const failure = sendFailure(cause)
       if (failure.off) setWritesOff(true)
       setNotice({ text: failure.off ? WRITES_OFF_TEXT : `${row.name}: ${failure.text}`, warn: true })
     } finally {

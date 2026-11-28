@@ -7,6 +7,7 @@ package unknowntrays
 
 import (
 	"net/http"
+	"strings"
 
 	"github.com/jackc/pgx/v5/pgxpool"
 
@@ -50,7 +51,7 @@ func Public(pool *pgxpool.Pool, _ *seal.Keys, starter libraryrun.Starter) map[st
 		Pattern: "POST " + dismissPath,
 		Route:   auth.Route{Class: "api", Template: dismissPath},
 		Handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			id := r.PathValue("id")
+			id := strings.ToLower(r.PathValue("id"))
 			gone := &httpx.Problem{
 				Status: http.StatusNotFound, Detail: "That unknown tray is gone.",
 				Extensions: []httpx.Field{{Key: "code", Value: "tray_gone"}},

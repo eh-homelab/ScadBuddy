@@ -124,6 +124,7 @@ func TestResolveBodyNeedsExactlyOneOfSpoolAndCode(t *testing.T) {
 
 func TestResolveStartsTheActivityOnLibrary(t *testing.T) {
 	starter := &fakeStarter{}
+	before := time.Now()
 	status, _, header := post(t, resolveMux(starter), ann, resolveURL,
 		`{"code":"S-12","net_weight_g":980.5,"seen_at":"`+seenAt+`"}`)
 	if status != http.StatusOK || header.Get("Cache-Control") != "no-store" {
@@ -145,8 +146,10 @@ func TestResolveStartsTheActivityOnLibrary(t *testing.T) {
 		t.Errorf("id %q", w.WorkflowID)
 	}
 	// The route waits the activity's timeout plus the margin.
-	if wait := time.Until(starter.deadlines[0]); wait <= 30*time.Second || wait > 30*time.Second+libraryrun.WaitMargin {
-		t.Errorf("wait %s", wait)
+	// The check does not depend on the runner's speed: the deadline lies between the two bounds.
+	margin := 30*time.Second + libraryrun.WaitMargin
+	if d := starter.deadlines[0]; !d.After(before.Add(30*time.Second)) || d.After(time.Now().Add(margin)) {
+		t.Errorf("deadline %s, asked at %s", d, before)
 	}
 
 	// A spool by id: the code is null.

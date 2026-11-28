@@ -2,12 +2,17 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"crypto/sha256"
+	"log/slog"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"strings"
+	"sync"
 	"testing"
+	"time"
 
 	"github.com/eh-homelab/ScadBuddy/tools/go/core/internal/auth"
 	"github.com/eh-homelab/ScadBuddy/tools/go/core/internal/testdb"
@@ -162,6 +167,7 @@ func TestAReadTokenCannotResolve(t *testing.T) {
 		VALUES ('t1', 'user:test#me', 'read', 'read', $1, now() + interval '1 day')`, sum[:]); err != nil {
 		t.Fatal(err)
 	}
+	var cache string
 	post := func(handler http.Handler) (int, string) {
 		server := httptest.NewServer(handler)
 		defer server.Close()
@@ -172,6 +178,7 @@ func TestAReadTokenCannotResolve(t *testing.T) {
 			t.Fatal(err)
 		}
 		defer res.Body.Close()
+		cache = res.Header.Get("Cache-Control")
 		var b bytes.Buffer
 		_, _ = b.ReadFrom(res.Body)
 		return res.StatusCode, b.String()
@@ -184,6 +191,10 @@ func TestAReadTokenCannotResolve(t *testing.T) {
 	if status, body := post(enforce); status != http.StatusForbidden || !strings.Contains(body, "out_of_scope") || starter.count() != 0 {
 		t.Errorf("enforce: %d %s, %d runs", status, body, starter.count())
 	}
+	// The gate's own refusal carries no-store too.
+	if cache != "no-store" {
+		t.Errorf("enforce: Cache-Control %q", cache)
+	}
 	rec := recordTelemetry(t)
 	observe, err := newRouter(pool, teapot, nil, "unknown-trays", "observe", callerPackages, rec.tel.Meters, nil, nil, withLibraryRuns(starter))
 	if err != nil {
@@ -195,5 +206,98 @@ func TestAReadTokenCannotResolve(t *testing.T) {
 	}
 	if _, ok := rec.metrics(t)[auth.WouldRefuseMetric]; !ok {
 		t.Error("observe counted nothing")
+	}
+}
+
+// logLines keeps the message of each record the default logger gets.
+type logLines struct {
+	mu    sync.Mutex
+	lines []string
+}
+
+func (l *logLines) Enabled(context.Context, slog.Level) bool { return true }
+func (l *logLines) Handle(_ context.Context, r slog.Record) error {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	l.lines = append(l.lines, r.Message)
+	return nil
+}
+func (l *logLines) WithAttrs([]slog.Attr) slog.Handler { return l }
+func (l *logLines) WithGroup(string) slog.Handler      { return l }
+
+func (l *logLines) has(text string) bool {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	for _, line := range l.lines {
+		if strings.Contains(line, text) {
+			return true
+		}
+	}
+	return false
+}
+
+// The area alone, with a Temporal address, builds the starter and starts the library-run worker
+// (#8489 U2). Temporal is out of reach, so the worker's retry logs each failed start by name.
+// Without the address, core starts no worker.
+func TestTheUnknownTraysAreaStartsTheLibraryRunWorkerOnlyWithTemporal(t *testing.T) {
+	for _, withAddress := range []bool{true, false} {
+		pool := testdb.New(t)
+		free, err := net.Listen("tcp", "127.0.0.1:0")
+		if err != nil {
+			t.Fatal(err)
+		}
+		address := free.Addr().String()
+		free.Close()
+		env := map[string]string{
+			"SCADBUDDY_CORE_UPSTREAM": "http://127.0.0.1:1",
+			"SCADBUDDY_DATABASE_URL":  pool.Config().ConnString(),
+			"SCADBUDDY_CORE_LISTEN":   address,
+			"SCADBUDDY_CORE_AREAS":    "unknown-trays",
+		}
+		if withAddress {
+			env["SCADBUDDY_TEMPORAL_ADDRESS"] = "127.0.0.1:1"
+		}
+		setWorkerRetry(t, 10*time.Millisecond)
+		logs := &logLines{}
+		before := slog.Default()
+		slog.SetDefault(slog.New(logs))
+		ctx, cancel := context.WithCancel(context.Background())
+		done := make(chan error, 1)
+		go func() { done <- run(ctx, func(k string) (string, bool) { v, ok := env[k]; return v, ok }, nil) }()
+		deadline := time.Now().Add(10 * time.Second)
+		for {
+			res, err := http.Get("http://" + address + listPath)
+			if err == nil {
+				res.Body.Close()
+				break
+			}
+			if time.Now().After(deadline) {
+				t.Fatal(err)
+			}
+			time.Sleep(20 * time.Millisecond)
+		}
+		if withAddress {
+			for !logs.has("the library-run worker could not start") {
+				if time.Now().After(deadline) {
+					t.Fatal("the library-run worker was not started")
+				}
+				time.Sleep(20 * time.Millisecond)
+			}
+		} else {
+			time.Sleep(200 * time.Millisecond)
+			if logs.has("worker") {
+				t.Error("a worker started without a Temporal address")
+			}
+		}
+		cancel()
+		select {
+		case err := <-done:
+			if err != nil {
+				t.Fatal(err)
+			}
+		case <-time.After(30 * time.Second):
+			t.Fatal("run did not stop")
+		}
+		slog.SetDefault(before)
 	}
 }

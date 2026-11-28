@@ -10,7 +10,7 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@
 import { cn } from '@/lib/utils'
 import { CopyForm, EditForm } from './PresetForms'
 import { count } from './plural'
-import { canSendAgain, OUTCOME_TEXT, WRITES_OFF_TEXT, writeFailure } from './presetWrites'
+import { canSendAgain, OUTCOME_TEXT, sendFailure, WRITES_OFF_TEXT } from './presetWrites'
 
 const SOURCE_LABEL: Record<PresetSource, string> = { '3dfp': '3DFP', bambuddy: 'Bambuddy', manual: 'Manual' }
 const MIRROR_LABEL: Record<PresetMirror, string> = { sent: 'Sent to Bambuddy', pending: 'Not sent to Bambuddy yet', failed: 'Send to Bambuddy failed', bambuddy_owned: 'Owned by Bambuddy' }
@@ -338,7 +338,7 @@ function Actions({ preset, onPreset, reload }: { preset: PresetDetail; onPreset:
       else onPreset({ ...preset, ...result.preset })
       setNotice({ text: OUTCOME_TEXT[result.outcome], tone: result.outcome === 'failed' ? 'warn' : 'ok' })
     } catch (cause) {
-      const failure = writeFailure(cause)
+      const failure = sendFailure(cause)
       if (failure.off) writesOff()
       else setNotice({ text: failure.text, tone: 'warn' })
     } finally {

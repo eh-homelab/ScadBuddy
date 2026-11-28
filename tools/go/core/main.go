@@ -707,7 +707,11 @@ func newRouter(pool *pgxpool.Pool, next http.Handler, keys *seal.Keys, areas, au
 				unknownTraysMounted = true
 				router.Add(unknowntrays.Caller, unknowntrays.BlockRoutes(pool)...)
 			}
-			mountPublic(name)
+			for _, p := range publics[name] {
+				// no-store is set outside the gate, so its own 401 and 403 carry it too.
+				public.Handle(p.Pattern, noStore(gate.Wrap(p.Route, p.Handler)))
+				served = true
+			}
 		default:
 			if keys == nil && sealed[strings.TrimSuffix(name, ":read")] {
 				return nil, fmt.Errorf("SCADBUDDY_CORE_AREAS names %q, which needs %s", name, seal.Variable)

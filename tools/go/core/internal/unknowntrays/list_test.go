@@ -156,6 +156,18 @@ func TestDismissDeletesThenNotFound(t *testing.T) {
 	}
 }
 
+func TestDismissTakesAnUpperCaseID(t *testing.T) {
+	pool := testdb.New(t)
+	printer(t, pool)
+	id := unknown(t, pool, 0, 1, "PLA", "#FF0000FF")
+	if rec := dismiss(pool, strings.ToUpper(id)); rec.Code != http.StatusNoContent {
+		t.Fatalf("upper case: %d %q", rec.Code, rec.Body)
+	}
+	if n := text(t, pool, `SELECT count(*)::text FROM filament_unknown_trays WHERE id = $1`, id); n != "0" {
+		t.Errorf("the row stayed: %s", n)
+	}
+}
+
 func TestADatabaseOutOfReachIs503(t *testing.T) {
 	pool := testdb.New(t)
 	ctx, cancel := context.WithDeadline(context.Background(), time.Now().Add(-time.Second))

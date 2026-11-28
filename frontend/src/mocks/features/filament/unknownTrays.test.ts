@@ -38,6 +38,12 @@ describe('the unknown-tray resolve mock (#8489)', () => {
     expect(await codeOf(resolveUnknownTray(tray.id, { code: 'S-9', net_weight_g: 980, seen_at: tray.seen_at }))).toEqual({ status: 409, code: 'tray_changed' })
   })
 
+  it('looks the spool up by code when spool_id is null, as core does', async () => {
+    const tray = seedUnknownTray()
+    const resolved = await resolveUnknownTray(tray.id, { spool_id: null, code: 'S-9', net_weight_g: 980, seen_at: tray.seen_at } as never)
+    expect(resolved).toMatchObject({ id: spoolId(9), number: 9, code: 'S-9' })
+  })
+
   it('answers each refusal with its status and code', async () => {
     const tray = seedUnknownTray()
     const body = { net_weight_g: 980, seen_at: tray.seen_at }

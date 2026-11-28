@@ -1,5 +1,5 @@
 import { HttpResponse, http } from 'msw'
-import type { UnknownSpoolCandidate, UnknownSpoolResolve, UnknownSpoolTray, UnknownSpoolTrays } from '../../../api/unknownTrays'
+import type { UnknownSpoolCandidate, UnknownSpoolTray, UnknownSpoolTrays } from '../../../api/unknownTrays'
 import { inventoryRows, placeSpoolAtTray } from './index'
 import { H2C } from './seed'
 
@@ -144,12 +144,13 @@ export const handlers = [
       pendingNext = false
       return problem(503, 'resolve_pending', 'The link did not answer in time, and it may still run. Read the list of unknown trays, then send it again if the tray is still there.')
     }
-    const body = sent as UnknownSpoolResolve
+    const body = sent as { spool_id?: string | null; code?: string | null; net_weight_g: number; seen_at: string }
     const tray = trays.find((one) => one.id === params.id)
     if (!tray || tray.seen_at !== body.seen_at) return problem(409, 'tray_changed', 'the tray changed or was resolved')
     const spools = inventoryRows(true).map((row) => row.spool)
-    const spool = 'spool_id' in body ? spools.find((one) => one.id === body.spool_id) : spools.find((one) => one.number === codeNumber(body.code))
-    if (!spool) return 'spool_id' in body ? problem(404, 'spool_missing', 'That spool does not exist.') : problem(404, 'code_unknown', 'No spool has that code.')
+    const byId = body.spool_id != null
+    const spool = byId ? spools.find((one) => one.id === body.spool_id) : spools.find((one) => one.number === codeNumber(body.code ?? ''))
+    if (!spool) return byId ? problem(404, 'spool_missing', 'That spool does not exist.') : problem(404, 'code_unknown', 'No spool has that code.')
     if (spool.archived_at) return problem(409, 'spool_archived', 'That spool is archived.')
     const resolved = placeSpoolAtTray(spool.id, tray.printer_id, tray.ams_id, tray.tray_id)
     if (!resolved) return problem(404, 'spool_missing', 'no such spool')
