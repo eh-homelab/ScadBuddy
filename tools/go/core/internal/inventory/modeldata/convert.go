@@ -10,7 +10,7 @@ import (
 )
 
 // This file is test support: it turns the proof's YAML into the model's types. No
-// production package imports it.
+// production package imports it (TestOnlyTestsImportModeldata).
 
 // ToSteps converts a layer's YAML steps.
 func ToSteps(in map[string]StepConf) model.Steps {

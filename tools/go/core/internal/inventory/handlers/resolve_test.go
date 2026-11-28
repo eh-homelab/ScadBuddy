@@ -237,3 +237,14 @@ func TestResolveKindChecksTheSpecialTypesSetKeys(t *testing.T) {
 		t.Fatalf("item: got %v", err)
 	}
 }
+
+func TestAnUnknownSpecialTypeHasItsOwnReason(t *testing.T) {
+	ch := model.Chain{{ID: "k", Class: model.Class{Nature: "physical", Role: "consumable"}, Special: "no_such_special"}}
+	_, problems, err := Builtin().ResolveKind(ch)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(problems) != 1 || problems[0].Reason != UnknownSpecial || problems[0].Missing != nil {
+		t.Fatalf("problems = %+v, want one unknown_special", problems)
+	}
+}

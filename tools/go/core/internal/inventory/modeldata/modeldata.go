@@ -1,12 +1,12 @@
 // Package modeldata loads the inventory model's YAML proof (docs/inventory-model/) for
-// the tests. Only this package imports the YAML library.
+// the tests. Only this package imports the YAML library, and only test files import this
+// package (R-K1-20; TestOnlyTestsImportModeldata checks it).
 package modeldata
 
 import (
 	"fmt"
 	"os"
 	"path/filepath"
-	"runtime"
 
 	"go.yaml.in/yaml/v3"
 )
@@ -95,10 +95,31 @@ type Model struct {
 	Readme                string
 }
 
-// Dir is the repo's docs/inventory-model, found from this file's place.
-func Dir() string {
-	_, file, _, _ := runtime.Caller(0)
-	return filepath.Join(filepath.Dir(file), "../../../../../../docs/inventory-model")
+// proofDir is the proof's folder, relative to the repo root.
+const proofDir = "docs/inventory-model"
+
+// Dir is the repo's docs/inventory-model. It walks up from the working directory (a
+// test's package directory) to the first directory that holds that folder.
+func Dir() (string, error) {
+	wd, err := os.Getwd()
+	if err != nil {
+		return "", err
+	}
+	return dirFrom(wd)
+}
+
+func dirFrom(start string) (string, error) {
+	for dir := start; ; {
+		path := filepath.Join(dir, proofDir)
+		if info, err := os.Stat(path); err == nil && info.IsDir() {
+			return path, nil
+		}
+		parent := filepath.Dir(dir)
+		if parent == dir {
+			return "", fmt.Errorf("no %s folder in %s or a directory above it", proofDir, start)
+		}
+		dir = parent
+	}
 }
 
 func read(dir, name string, out any) error {

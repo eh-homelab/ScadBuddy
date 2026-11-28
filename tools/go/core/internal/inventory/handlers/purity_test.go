@@ -18,7 +18,11 @@ import (
 // catalog.go, which is the catalog's data, aside) is a kind id of kinds.yaml or a special
 // type id.
 func TestTheBaseFlowNamesNoKind(t *testing.T) {
-	m, err := modeldata.Load(modeldata.Dir())
+	dir, err := modeldata.Dir()
+	if err != nil {
+		t.Fatal(err)
+	}
+	m, err := modeldata.Load(dir)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -34,9 +38,9 @@ func TestTheBaseFlowNamesNoKind(t *testing.T) {
 	}
 
 	_, here, _, _ := runtime.Caller(0)
-	dir := filepath.Dir(here)
+	pkg := filepath.Dir(here)
 	var files []string
-	for _, pattern := range []string{filepath.Join(dir, "*.go"), filepath.Join(dir, "..", "flow", "*.go")} {
+	for _, pattern := range []string{filepath.Join(pkg, "*.go"), filepath.Join(pkg, "..", "flow", "*.go")} {
 		found, err := filepath.Glob(pattern)
 		if err != nil {
 			t.Fatal(err)
