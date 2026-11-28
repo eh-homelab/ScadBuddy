@@ -145,15 +145,22 @@ func (n *noSubscriber) Error() string {
 // Run applies until ctx ends: at once while a batch comes back full, else after Poll. An
 // error is logged, and Apply runs again after Poll. Before the API's migrations have made
 // the event log, it logs that once, at warn, until an Apply ends any other way: a success
-// or another error (#8116, #8463). Every replica runs it; the cursor's row lock lets one
-// apply at a time.
+// or another error (#8116, #8463). An event it cannot store is logged once, at error,
+// until the subscriber passes it or stops at another one: the subscriber's stopped_seq and
+// its alert say that it is still stuck, so a log every Poll adds nothing (#8256). Every
+// replica runs it; the cursor's row lock lets one apply at a time.
 func Run(ctx context.Context, pool *pgxpool.Pool, o Options) {
 	o = o.withDefaults()
 	waiting := false
+	var stuck *int64
 	for {
 		applied, err := Apply(ctx, pool, o)
 		if !unmigrated(err) {
 			waiting = false
+		}
+		var bad *badPayload
+		if !errors.As(err, &bad) {
+			stuck = nil
 		}
 		if err != nil && ctx.Err() == nil && unmigrated(err) {
 			if !waiting {
@@ -162,10 +169,12 @@ func Run(ctx context.Context, pool *pgxpool.Pool, o Options) {
 				waiting = true
 			}
 		} else if err != nil && ctx.Err() == nil {
-			var bad *badPayload
-			if errors.As(err, &bad) {
-				slog.ErrorContext(ctx, "the history subscriber stopped at an event it cannot store",
-					"subscriber", o.Name, "seq", bad.seq, "error", err.Error())
+			if bad != nil {
+				if stuck == nil || *stuck != bad.seq {
+					slog.ErrorContext(ctx, "the history subscriber stopped at an event it cannot store",
+						"subscriber", o.Name, "seq", bad.seq, "error", err.Error())
+					stuck = &bad.seq
+				}
 			} else {
 				slog.ErrorContext(ctx, "the history subscriber could not apply events",
 					"subscriber", o.Name, "error", err.Error())
