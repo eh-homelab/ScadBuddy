@@ -653,6 +653,27 @@ func TestUnitStatusWritesItsMove(t *testing.T) {
 	wantRefused(t, refused, 404, "unit_not_found")
 }
 
+// TestAUnitStatusChangeWithNoMoveRefusesANote: only a move keeps a note or an entity, so a
+// change between two statuses out of stock, or to the same status, refuses them (#7465).
+func TestAUnitStatusChangeWithNoMoveRefusesANote(t *testing.T) {
+	f, pool := setup(t)
+	nozzle := newItem(t, pool, "nozzle", "0.6 hardened")
+	units := out(receiveUnits(f, t, nozzle, wire.ReceiveUnits{Count: 1, CostMinor: ptr(wire.Decimal("3000"))})).ok(t)
+	one := units[0]
+	out(retire(f, t, one.ID, wire.UnitStatusInput{Status: "in_service", Note: "Fitted"})).ok(t)
+	_, refused := retire(f, t, one.ID, wire.UnitStatusInput{Status: "retired", Note: "Worn"})
+	wantRefused(t, refused, 422, "bad_input")
+	_, refused = retire(f, t, one.ID, wire.UnitStatusInput{Status: "retired", Entity: ptr("printer:p1")})
+	wantRefused(t, refused, 422, "bad_input")
+	_, refused = retire(f, t, one.ID, wire.UnitStatusInput{Status: "in_service", Note: "Again"})
+	wantRefused(t, refused, 422, "bad_input")
+	if got := moves(t, pool, store.MoveFilter{UnitID: one.ID}); len(got) != 2 {
+		t.Fatalf("%d moves, want the receive and the use", len(got))
+	}
+	retired := out(retire(f, t, one.ID, wire.UnitStatusInput{Status: "retired"})).ok(t)
+	eq(t, retired.Status, "retired")
+}
+
 func entityID(t *testing.T, pool *pgxpool.Pool, kind, ref string) string {
 	t.Helper()
 	var id string

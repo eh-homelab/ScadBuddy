@@ -1013,7 +1013,9 @@ func (Stock) PlaceUnit(ctx context.Context, tx pgx.Tx, unitID string, location *
 // SetUnitStatus is phase 2 set_unit_status: a new status. Leaving in_stock writes a move of
 // -1 (in_service a use, sold a sell, retired a retire, scrapped a scrap), coming back to it
 // a return of +1, at the unit's cost; a change between two statuses out of stock moves no
-// stock. Sets in_service_at on first service and retired_at on retire or scrap.
+// stock. Only the move keeps an entity and a note, so a change that writes no move (between
+// two statuses out of stock, or to the same status) refuses them, 422 bad_input (#7465).
+// Sets in_service_at on first service and retired_at on retire or scrap.
 // unit_installed for a unit fitted in another (#7278).
 func (Stock) SetUnitStatus(ctx context.Context, tx pgx.Tx, unitID string, in wire.UnitStatusInput, by json.RawMessage) (wire.Unit, error) {
 	if !slices.Contains(unitStatuses, in.Status) {
@@ -1039,8 +1041,11 @@ func (Stock) SetUnitStatus(ctx context.Context, tx pgx.Tx, unitID string, in wir
 	if installed != nil {
 		return wire.Unit{}, unitInstalled(unitID)
 	}
+	wasIn, nowIn := status == "in_stock", in.Status == "in_stock"
+	if wasIn == nowIn && (in.Entity != nil || in.Note != "") {
+		return wire.Unit{}, badInput("a change from %s to %s writes no move, so it keeps no entity or note", status, in.Status)
+	}
 	if in.Status != status {
-		wasIn, nowIn := status == "in_stock", in.Status == "in_stock"
 		if wasIn != nowIn {
 			entityID, err := entity(ctx, tx, in.Entity)
 			if err != nil {
