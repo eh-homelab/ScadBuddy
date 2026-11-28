@@ -14,7 +14,7 @@ require (
 	go.temporal.io/sdk v1.52.0
 	go.temporal.io/sdk/contrib/opentelemetry v0.9.0
 	go.yaml.in/yaml/v3 v3.0.6
-	golang.org/x/image v0.38.0
+	golang.org/x/image v0.41.0
 	golang.org/x/net v0.63.0
 )
 

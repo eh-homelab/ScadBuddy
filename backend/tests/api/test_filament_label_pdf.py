@@ -255,7 +255,7 @@ BASE = {"filament_label_base_url": "https://sb.example.com"}
 
 def _kind(client: TestClient) -> dict[str, str]:
     """An item kind made with SQL: the inventory routes are not this file's subject."""
-    kind_id, name = f"k{uuid4().hex[:12]}", f"Fasteners {uuid4().hex[:6]}"
+    kind_id, name = f"kt_{uuid4().hex[:12]}", f"Fasteners {uuid4().hex[:6]}"
     with _state(client).refs.pool.connection() as conn:
         conn.execute(
             "INSERT INTO item_kinds (id, name, parent_id, tracking, created_at)"

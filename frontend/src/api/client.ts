@@ -2629,6 +2629,8 @@ export const api = {
       method: 'PUT',
       body: JSON.stringify({ setting_id: key, note }),
     }),
+  deleteKProfileNote: (id: string, key: string) =>
+    printerCommand<KProfileWriteResult>(id, `/printers/${seg(id)}/kprofiles/notes/${seg(key)}`, { method: 'DELETE' }),
   /** #7153, #7276: a printer's AMS slots and labels, from its latest LAN report. */
   printerAms: (id: string) => request<AmsView>(`/printers/${seg(id)}/ams`),
   /**

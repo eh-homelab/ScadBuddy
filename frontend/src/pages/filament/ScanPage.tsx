@@ -3,6 +3,7 @@ import { useCallback, useEffect, useId, useRef, useState, useSyncExternalStore }
 import { useNavigate } from 'react-router'
 import { ApiError } from '../../api/client'
 import { postTagRead, type TagReadResult } from '../../api/filament'
+import { UseMyPhone } from '../../components/devices/UseMyPhone'
 import { BambuFields, type BambuTag } from '../../components/filament/scan/BambuFields'
 import { CodeCard } from '../../components/filament/scan/CodeCard'
 import { KnownTag } from '../../components/filament/scan/KnownTag'
@@ -82,6 +83,7 @@ export function ScanPage() {
       <div className="flex flex-col gap-1">
         <h1 className="text-lg font-semibold tracking-tight">Scan</h1>
         <p className="text-muted-foreground">Hold a tag or a label to the phone: a spool's tag, a place's tag, or a label with a code such as L-12 or S-142.</p>
+        <UseMyPhone />
       </div>
       <ScanCameraProvider>
         <ScanCode />

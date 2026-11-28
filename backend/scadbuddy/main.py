@@ -124,6 +124,7 @@ from scadbuddy.filament.bb_sync_run import FilamentSyncActivities, settings_load
 from scadbuddy.filament.component import FILAMENT
 from scadbuddy.filament.inventory import PoolSbSpoolReads
 from scadbuddy.filament.preset_mirror import mirror_after_pull
+from scadbuddy.filament.preset_writes import preset_write_activities
 from scadbuddy.filament.print_uses import PoolPrintUses
 from scadbuddy.filament.sb_presets import PresetImport, import_from_bambuddy
 from scadbuddy.filament.sensor_notify import SensorNotifyActivities
@@ -2374,7 +2375,40 @@ async def _run_library_worker(state: AppState, stop: asyncio.Event) -> None:
     current = asyncio.create_task(_make_library_current(client, build_id, queue, routed))
     ops = state.components.get(OPERATIONS)
     trigger_activities, stop_triggers = _flow_triggers(state, client, queue, stop)
-    activities = [
+    activities = _library_activities(state, client, ops, trigger_activities)
+    try:
+        while not stop.is_set():
+            worker = await _built_off_loop(
+                partial(
+                    library_worker,
+                    client,
+                    queue,
+                    activities,
+                    workflows=LIBRARY_WORKFLOWS,
+                    workflow_runner=sandboxed_runner(),
+                    graceful_shutdown_timeout=LIBRARY_GRACEFUL_SHUTDOWN,
+                    deployment_config=library_deployment(build_id),
+                )
+            )
+            if not await _serve_until([worker], stop, name="library"):
+                with suppress(TimeoutError):
+                    await asyncio.wait_for(stop.wait(), PRINT_WORKER_RECONNECT)
+    finally:
+        current.cancel()
+        schedules.cancel()
+        boot_nudge.cancel()
+        await stop_triggers()
+
+
+def _library_activities(
+    state: AppState,
+    client: Client,
+    ops: OperationCommands,
+    trigger_activities: list[Callable[..., Any]],
+) -> list[Callable[..., Any]]:
+    """The activities the ``library`` worker serves (`_run_library_worker`)."""
+    settings = state.settings
+    return [
         *_housekeeping_activities(state),
         *_preview_activities(state),
         # The retired spool-provider activities, for runs opened before
@@ -2410,6 +2444,9 @@ async def _run_library_worker(state: AppState, stop: asyncio.Event) -> None:
         # The activity that links an unknown AMS tray to a spool (#7143, G5). The Go route that
         # starts it is not built yet.
         *_unknown_tray_activities(state),
+        # Copy, edit and send again of ScadBuddy's own filament presets (#7204, N7). The Go
+        # routes that start them are not built yet.
+        *_preset_write_activities(state),
         *operation_activities(ops.store, state.settings_store, _kinds_on(ops, "library")),
         *trigger_activities,
         migrate_activity(lambda: state.settings_store.pool, state.settings),
@@ -2441,28 +2478,6 @@ async def _run_library_worker(state: AppState, stop: asyncio.Event) -> None:
         ),
         *merge_activities(lambda: state.components.get(PRINTERS).store),
     ]
-    try:
-        while not stop.is_set():
-            worker = await _built_off_loop(
-                partial(
-                    library_worker,
-                    client,
-                    queue,
-                    activities,
-                    workflows=LIBRARY_WORKFLOWS,
-                    workflow_runner=sandboxed_runner(),
-                    graceful_shutdown_timeout=LIBRARY_GRACEFUL_SHUTDOWN,
-                    deployment_config=library_deployment(build_id),
-                )
-            )
-            if not await _serve_until([worker], stop, name="library"):
-                with suppress(TimeoutError):
-                    await asyncio.wait_for(stop.wait(), PRINT_WORKER_RECONNECT)
-    finally:
-        current.cancel()
-        schedules.cancel()
-        boot_nudge.cancel()
-        await stop_triggers()
 
 
 def _unknown_tray_activities(state: AppState) -> list[Callable[..., Any]]:
@@ -2472,6 +2487,18 @@ def _unknown_tray_activities(state: AppState) -> list[Callable[..., Any]]:
             lambda: state.components.get(FILAMENT), lambda: state.settings_store.pool
         )
     ]
+
+
+def _preset_write_activities(state: AppState) -> list[Callable[..., Any]]:
+    """The copy, edit and send again of a filament preset (#7204): the API alone holds the
+    database secret."""
+    return list(
+        preset_write_activities(
+            lambda: state.settings_store.pool,
+            lambda: state.store.blobs,
+            lambda: state.settings_store.load(),
+        ).values()
+    )
 
 
 def _flow_triggers(
