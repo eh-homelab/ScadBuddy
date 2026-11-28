@@ -569,6 +569,32 @@ func TestAHandlerSwapThatBreaksAnItemIsRefused(t *testing.T) {
 	}
 }
 
+// One refusal names every kind and item below that the swap breaks, not only the first
+// (#8256).
+func TestAHandlerSwapNamesEveryOwnerItBreaks(t *testing.T) {
+	pool, k := testdb.New(t), kindStore()
+	must(createKind(t, pool, k, wire.KindInput{ID: "spindle", Name: "Spindle", ParentID: ptr("durable"),
+		Steps: model.Steps{"life": {Handler: "life.hours", Params: map[string]any{"hours": 100, "source": "manual"}}}}))
+	for _, id := range []string{"fast_spindle", "slow_spindle"} {
+		must(createKind(t, pool, k, wire.KindInput{ID: id, Name: id, ParentID: ptr("spindle"),
+			Steps: model.Steps{"life": {Params: map[string]any{"hours": 50}}}}))
+	}
+	made := must(createItem(t, pool, itemStore(), wire.ItemInput{KindID: "spindle", Name: "S1",
+		Steps: model.Steps{"life": {Params: map[string]any{"hours": 50}}}}))
+
+	_, err := updateKind(t, pool, k, "spindle", wire.KindPatch{Steps: &model.Steps{"life": {Handler: "life.months", Params: map[string]any{"months": 6}}}})
+	r := refusal(t, err, 422, "steps_invalid")
+	var owners []string
+	for _, p := range r.Problems.([]StepProblem) {
+		owners = append(owners, p.Owner)
+	}
+	slices.Sort(owners)
+	want := []string{"item:" + made.ID, "item_kind:fast_spindle", "item_kind:slow_spindle"}
+	if !slices.Equal(owners, want) {
+		t.Fatalf("owners %v, want %v", owners, want)
+	}
+}
+
 func TestALifeBasisNoneUnderPrinterReadsNone(t *testing.T) {
 	pool, k := testdb.New(t), kindStore()
 	made := must(createKind(t, pool, k, wire.KindInput{ID: "printer_dummy", Name: "Dummy", ParentID: ptr("printer"), LifeBasis: ptr("none")}))
