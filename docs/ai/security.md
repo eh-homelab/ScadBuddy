@@ -427,8 +427,10 @@ The agent reads no KEK (#5299 step 12).
   reorders it, and records `used`, `cooling_down` and `transient` events on it. So a
   compromised agent pod can neither plant a credential that a fleet machine installs (a
   `claude_login`, a `fleet` row or a `both` row) nor replace, delete or disable one. It can
-  still rename, reset or reorder a `both` row and cool one down, for a time it chooses, as the
-  agent's own health writes need. Only a caller other than the agent's (the fleet's own caller,
+  still rename, reset or reorder a `both` row and cool one down, as the agent's own health
+  writes need. Its cooldown of a `both` row ends within an hour, whatever time it names
+  (`SHARED_COOLDOWN_MAX`, core's `sharedCooldownMax`), so it can delay the fleet's use of the
+  row but not take the row from it. Only a caller other than the agent's (the fleet's own caller,
   #7984, `agent=False` in the store) writes fleet rows and `both` rows. Any other caller's save that widens a `fleet` row to `agent` or `both` must carry
   the secret again, else it is a 422), a
   subject's payload data key from `POST …/crud/agent/payload-keys/{subject}`, never the

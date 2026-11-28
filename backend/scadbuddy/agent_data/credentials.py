@@ -203,6 +203,15 @@ AGENTS_OWN = "scope IN ('agent', 'both') AND kind <> 'claude_login'"
 #: What the agent's caller's delete and disable add to ``AGENTS_OWN`` (#8587): never a row whose
 #: scope is both, which the fleet's login rotator reads too.
 NOT_SHARED = "scope <> 'both'"
+#: The agent's caller's cooldown on a row whose scope is both ends within this (#8587). A
+#: cooldown that names a later time would take the row from the fleet like a disable; an
+#: honest agent only tries the row again sooner. Go's sharedCooldownMax is the same.
+SHARED_COOLDOWN_MAX = "interval '1 hour'"
+_UNTIL = "%(until)s::timestamptz"
+_AGENTS_UNTIL = (
+    f"CASE WHEN c.scope = 'both' THEN LEAST({_UNTIL}, now() + {SHARED_COOLDOWN_MAX})"
+    f" ELSE {_UNTIL} END"
+)
 
 
 def _rows(
@@ -719,8 +728,8 @@ _RECORD = {
         " status = CASE WHEN c.status = 'disabled' THEN 'disabled' ELSE 'cooling_down' END,"
         " cooldown_until = CASE WHEN c.status = 'disabled' THEN NULL"
         " WHEN %(replacing)s::timestamptz IS NOT NULL"
-        " AND c.cooldown_until = %(replacing)s::timestamptz THEN %(until)s::timestamptz"
-        " ELSE GREATEST(%(until)s::timestamptz,"
+        " AND c.cooldown_until = %(replacing)s::timestamptz THEN {until}"
+        " ELSE GREATEST({until},"
         " CASE WHEN b.status = 'cooling_down' THEN c.cooldown_until END) END,"
         " last_error = %(reason)s, last_error_at = now()"
     ),
@@ -736,14 +745,17 @@ def record_event(
     several pods report at once. ``agent`` (the default): the agent's rows only, a fleet row
     is a 409, so the agent's caller never cools down or disables a fleet login. Its
     ``disabled`` on a row whose scope is both is a 409 too (#8587), so it cannot take that row
-    from the fleet. Its other events on such a row are recorded as before."""
+    from the fleet, and its cooldown of such a row ends within ``SHARED_COOLDOWN_MAX``. Its
+    other events on such a row are recorded as before."""
     shared = agent and event.kind == "disabled"
     own = ""
     if agent:
         own = f" AND {AGENTS_OWN} AND {NOT_SHARED}" if shared else f" AND {AGENTS_OWN}"
     before = _BEFORE.format(own=own)
+    record = _RECORD[event.kind].format(until=_AGENTS_UNTIL if agent else _UNTIL)
     sql = (
-        f"WITH b AS ({before}) {_RECORD[event.kind]} FROM b WHERE c.id = b.id"
+        f"WITH b AS ({before}) {record}"
+        " FROM b WHERE c.id = b.id"
         " RETURNING b.status AS before, b.raw AS raw, c.status AS after"
     )
     params = {

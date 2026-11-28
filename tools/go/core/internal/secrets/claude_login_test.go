@@ -479,6 +479,18 @@ func TestTheAgentStillUsesASharedRow(t *testing.T) {
 		r := a.post("/credentials/events", obj{"id": shared["id"], "epoch": 0, "event": c.event})
 		expect(t, []any{c.event["kind"], r.status, r.body["transition"].(obj)["after"]}, []any{c.event["kind"], 200, c.after})
 	}
+	// The agent's cooldown of a shared row ends within the hour; of its own row, when it says.
+	cool := obj{"kind": "cooling_down", "until": "2099-01-01T00:00:00Z", "reason": "429"}
+	r := a.post("/credentials/events", obj{"id": own["id"], "epoch": 0, "event": cool})
+	expect(t, r.body["transition"].(obj)["after"], "cooling_down")
+	for id, want := range map[any]bool{shared["id"]: true, own["id"]: false} {
+		var soon bool
+		if err := a.pool.QueryRow(context.Background(),
+			`SELECT cooldown_until <= now() + interval '1 hour' FROM ai_credentials WHERE id = $1`, id).Scan(&soon); err != nil {
+			t.Fatal(err)
+		}
+		expect(t, []any{id, soon}, []any{id, want})
+	}
 	reset := a.post("/credentials/reset", obj{"id": shared["id"]}).body["credential"].(obj)
 	expect(t, []any{reset["status"], reset["epoch"]}, []any{"active", 1})
 	renamed := a.post("/credentials/name", obj{"id": shared["id"], "name": "Shared"}).body["credential"].(obj)

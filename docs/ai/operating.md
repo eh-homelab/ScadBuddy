@@ -524,8 +524,8 @@ their priorities. The fleet's login rotator also reads a row whose scope is `bot
 the API refuses the assistant's caller (409) a create or save that names a scope other than
 `agent`, any save over a `both` row (a new secret, kind, base URL or scope), and a delete or a
 `disabled` event on a `both` row. The assistant still uses a `both` row: it opens, renames,
-resets and reorders it, and records its use, a rate limit (`cooling_down`) and a transient
-error on it. So the assistant cannot plant a credential that a fleet machine installs (a
+resets and reorders it, and records its use, a rate limit (`cooling_down`, which on a `both`
+row ends within an hour) and a transient error on it. So the assistant cannot plant a credential that a fleet machine installs (a
 `claude_login`, a `fleet` row or a `both` row), nor replace, delete or disable one; only a
 caller other than the assistant's makes a row `both` or changes one. Settings shows the fleet's rows read-only ("Managed
 by the fleet"); the fleet manages them (#7984).

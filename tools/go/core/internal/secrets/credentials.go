@@ -1048,6 +1048,21 @@ func before(agent, shared bool) string {
 	WHERE id = @id AND epoch = @epoch` + ownOnly(agent) + notSharedOnly(shared) + ` FOR UPDATE`
 }
 
+// sharedCooldownMax: the agent's caller's cooldown on a row whose scope is both ends within
+// it (#8587). A cooldown that names a later time would take the row from the fleet like a
+// disable; an honest agent only tries the row again sooner. Python's SHARED_COOLDOWN_MAX is
+// the same.
+const sharedCooldownMax = "interval '1 hour'"
+
+// untilOf is a cooldown's end as record writes it: with agent, clamped on a both row.
+func untilOf(agent bool) string {
+	if agent {
+		return "CASE WHEN c.scope = 'both' THEN LEAST(@until::timestamptz, now() + " + sharedCooldownMax +
+			") ELSE @until::timestamptz END"
+	}
+	return "@until::timestamptz"
+}
+
 var record = map[string]string{
 	"used": `UPDATE ai_credentials c SET last_used_at = now(),
 		status = CASE WHEN b.status = 'active' THEN 'active' ELSE c.status END,
@@ -1058,8 +1073,8 @@ var record = map[string]string{
 		status = CASE WHEN c.status = 'disabled' THEN 'disabled' ELSE 'cooling_down' END,
 		cooldown_until = CASE WHEN c.status = 'disabled' THEN NULL
 		WHEN @replacing::timestamptz IS NOT NULL
-		AND c.cooldown_until = @replacing::timestamptz THEN @until::timestamptz
-		ELSE GREATEST(@until::timestamptz,
+		AND c.cooldown_until = @replacing::timestamptz THEN {until}
+		ELSE GREATEST({until},
 		CASE WHEN b.status = 'cooling_down' THEN c.cooldown_until END) END,
 		last_error = @reason, last_error_at = now()`,
 	"transient": `UPDATE ai_credentials c SET last_error = @reason, last_error_at = now()`,
@@ -1137,11 +1152,12 @@ type recorded struct{ Before, Raw, After string }
 // locks the row, so the transition answered is the one written even when several pods report at
 // once. agent: the agent's rows only, a fleet row is a 409, so the agent's caller never cools down
 // or disables a fleet login. Its disabled on a row whose scope is both is a 409 too (#8587), so it
-// cannot take that row from the fleet. Its other events on such a row are recorded as before.
+// cannot take that row from the fleet, and its cooldown of such a row ends within
+// sharedCooldownMax. Its other events on such a row are recorded as before.
 func (s *Store) recordEvent(ctx context.Context, id string, epoch int64, kind string, reason *string,
 	until, replacing *time.Time, agent bool) (*recorded, error) {
 	shared := agent && kind == "disabled"
-	sql := "WITH b AS (" + before(agent, shared) + ") " + record[kind] +
+	sql := "WITH b AS (" + before(agent, shared) + ") " + strings.ReplaceAll(record[kind], "{until}", untilOf(agent)) +
 		" FROM b WHERE c.id = b.id RETURNING b.status AS before, b.raw AS raw, c.status AS after"
 	var found *recorded
 	err := pgx.BeginFunc(ctx, s.Pool, func(tx pgx.Tx) error {

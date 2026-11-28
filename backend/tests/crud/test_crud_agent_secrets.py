@@ -1215,6 +1215,18 @@ def test_the_agent_still_uses_a_shared_row(agent: Agent, tables: PgPool) -> None
         "event": {"kind": "cooling_down", "until": "2099-01-01T00:00:00Z", "reason": "429"},
     }
     assert agent.post("/credentials/events", cool).json()["transition"]["after"] == "cooling_down"
+    # The agent's cooldown of a shared row ends within the hour; of its own row, when it says.
+    own_cool = {**cool, "id": own["id"]}
+    cooled = agent.post("/credentials/events", own_cool).json()
+    assert cooled["transition"]["after"] == "cooling_down"
+    with tables.connection() as conn:
+        found = conn.execute(
+            "SELECT id, cooldown_until <= now() + interval '1 hour' AS soon FROM ai_credentials"
+            " WHERE id = ANY(%s)",
+            ([shared["id"], own["id"]],),
+        ).fetchall()
+    ends = {r["id"]: r["soon"] for r in found}
+    assert ends == {shared["id"]: True, own["id"]: False}
     reset = agent.post("/credentials/reset", {"id": shared["id"]}).json()["credential"]
     assert (reset["status"], reset["epoch"]) == ("active", 1)
     renamed = agent.post("/credentials/name", {"id": shared["id"], "name": "Shared"})
