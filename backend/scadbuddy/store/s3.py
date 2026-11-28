@@ -191,7 +191,7 @@ class S3ContentBackend:
     ) -> None:
         """``config`` is merged over the default, botocore's standard retry mode (three
         attempts, https://docs.aws.amazon.com/sdkref/latest/guide/feature-retry-behavior.html);
-        a check that must fail fast passes its own ``retries``. A content request whose
+        a check that must fail fast passes its own ``retries``. A store request whose
         connection was never made is tried again after each wait of ``connect_backoff``
         (`_connect_retried`, #8471)."""
         self.settings = settings
@@ -465,14 +465,7 @@ class S3ContentBackend:
 
     async def remove(self, backend_id: str) -> None:
         key = self._key(backend_id)
-        client = await self._s3()
-
-        async def delete() -> None:
-            with _request("DeleteObject", _kind_of(self.settings.prefix, key)):
-                await client.delete_object(Bucket=self.settings.bucket, Key=key)
-
-        # S3's delete is idempotent: a second one of a gone object is no error.
-        await self._connect_retried("DeleteObject", delete)
+        await self._delete(await self._s3(), key, _kind_of(self.settings.prefix, key))
 
     def _staged(self, key: str) -> str:
         prefix = f"{self.settings.prefix}/"
@@ -530,16 +523,20 @@ class S3ContentBackend:
         it is read."""
         checked = self._staged(key)
         client = await self._s3()
-        with _request("HeadObject", "staging") as current:
-            try:
-                head = await client.head_object(Bucket=self.settings.bucket, Key=checked)
-            except ClientError as error:
-                if _missing(error):
-                    current.set_attribute("scadbuddy.blob_found", False)
-                    return None
-                raise
-            current.set_attribute("scadbuddy.blob_found", True)
-        return int(head["ContentLength"])
+
+        async def head() -> int | None:
+            with _request("HeadObject", "staging") as current:
+                try:
+                    answer = await client.head_object(Bucket=self.settings.bucket, Key=checked)
+                except ClientError as error:
+                    if _missing(error):
+                        current.set_attribute("scadbuddy.blob_found", False)
+                        return None
+                    raise
+                current.set_attribute("scadbuddy.blob_found", True)
+            return int(answer["ContentLength"])
+
+        return await self._connect_retried("HeadObject", head)
 
     async def freeze_staged(self, key: str, frozen: str) -> Frozen | None:
         """The staging object copied, server side, to ``frozen`` (a key no presigned URL
@@ -550,22 +547,32 @@ class S3ContentBackend:
         passes through this process."""
         source, target = self._staged(key), self._staged(frozen)
         client = await self._s3()
-        with _request("CopyObject", "staging") as current:
-            try:
-                copied = await client.copy_object(
-                    Bucket=self.settings.bucket,
-                    Key=target,
-                    CopySource={"Bucket": self.settings.bucket, "Key": source},
-                    ACL=STAGED_ACL,
-                    ChecksumAlgorithm="SHA256",
-                )
-            except ClientError as error:
-                if _missing(error):
-                    current.set_attribute("scadbuddy.blob_found", False)
-                    return None
-                raise
-        with _request("HeadObject", "staging"):
-            head = await client.head_object(Bucket=self.settings.bucket, Key=target)
+
+        async def copy() -> Any:
+            with _request("CopyObject", "staging") as current:
+                try:
+                    return await client.copy_object(
+                        Bucket=self.settings.bucket,
+                        Key=target,
+                        CopySource={"Bucket": self.settings.bucket, "Key": source},
+                        ACL=STAGED_ACL,
+                        ChecksumAlgorithm="SHA256",
+                    )
+                except ClientError as error:
+                    if _missing(error):
+                        current.set_attribute("scadbuddy.blob_found", False)
+                        return None
+                    raise
+
+        async def head_copy() -> Any:
+            with _request("HeadObject", "staging"):
+                return await client.head_object(Bucket=self.settings.bucket, Key=target)
+
+        # The target is unique to the claim attempt: a second copy writes the same object.
+        copied = await self._connect_retried("CopyObject", copy)
+        if copied is None:
+            return None
+        head = await self._connect_retried("HeadObject", head_copy)
         sha256 = copied.get("CopyObjectResult", {}).get("ChecksumSHA256")
         return Frozen(int(head["ContentLength"]), str(head["ETag"]), sha256 or None)
 
@@ -574,30 +581,33 @@ class S3ContentBackend:
         them), or None when there is none or it is past ``max_bytes``."""
         checked = self._staged(key)
         client = await self._s3()
-        with _request("GetObject", "staging") as current:
-            try:
-                response = await client.get_object(Bucket=self.settings.bucket, Key=checked)
-            except ClientError as error:
-                if _missing(error):
-                    current.set_attribute("scadbuddy.blob_found", False)
-                    return None
-                raise
-            body = response["Body"]
-            taken = bytearray()
-            async with body:
-                async for chunk in body.iter_chunks(_CHUNK):
-                    taken += chunk
-                    if len(taken) > max_bytes:
+
+        async def get() -> bytes | None:
+            with _request("GetObject", "staging") as current:
+                try:
+                    response = await client.get_object(Bucket=self.settings.bucket, Key=checked)
+                except ClientError as error:
+                    if _missing(error):
+                        current.set_attribute("scadbuddy.blob_found", False)
                         return None
-            current.set_attribute("scadbuddy.bytes", len(taken))
-        return bytes(taken)
+                    raise
+                body = response["Body"]
+                taken = bytearray()
+                async with body:
+                    async for chunk in body.iter_chunks(_CHUNK):
+                        taken += chunk
+                        if len(taken) > max_bytes:
+                            return None
+                current.set_attribute("scadbuddy.bytes", len(taken))
+            return bytes(taken)
+
+        # A failure during the body is not a connect failure, so only a GET that never
+        # connected is made again, and it reads the body from its start.
+        return await self._connect_retried("GetObject", get)
 
     async def remove_staged(self, key: str) -> None:
         """The staging object deleted (none is no error: S3's delete is idempotent)."""
-        checked = self._staged(key)
-        client = await self._s3()
-        with _request("DeleteObject", "staging"):
-            await client.delete_object(Bucket=self.settings.bucket, Key=checked)
+        await self._delete(await self._s3(), self._staged(key), "staging")
 
     async def remove_staged_of(self, key: str) -> None:
         """Every staging object of the upload ``key`` deleted: the upload, its preview and
@@ -609,8 +619,7 @@ class S3ContentBackend:
         async for items in self._listed(client, checked, "staging"):
             for item in items:
                 if staged_upload(self.settings.prefix, item["Key"]) == checked:
-                    with _request("DeleteObject", "staging"):
-                        await client.delete_object(Bucket=self.settings.bucket, Key=item["Key"])
+                    await self._delete(client, item["Key"], "staging")
 
     async def staged_objects(self) -> AsyncGenerator[tuple[str, datetime]]:
         """Every staging object's key and its last write."""
@@ -664,8 +673,17 @@ class S3ContentBackend:
         return removed
 
     async def _delete_unrecorded(self, client: S3Client, key: str) -> None:
-        with _request("DeleteObject", _kind_of(self.settings.prefix, key)):
-            await client.delete_object(Bucket=self.settings.bucket, Key=key)
+        await self._delete(client, key, _kind_of(self.settings.prefix, key))
+
+    async def _delete(self, client: S3Client, key: str, kind: str) -> None:
+        """One ``DeleteObject``, made again after a connect failure: S3's delete is
+        idempotent, so a second one of a gone object is no error."""
+
+        async def delete() -> None:
+            with _request("DeleteObject", kind):
+                await client.delete_object(Bucket=self.settings.bucket, Key=key)
+
+        await self._connect_retried("DeleteObject", delete)
 
     async def _listed(
         self, client: S3Client, prefix: str, kind: str
@@ -676,15 +694,23 @@ class S3ContentBackend:
         in the consumer."""
         token: str | None = None
         while True:
-            with _request("ListObjectsV2", kind) as current:
-                if token is None:
-                    page = await client.list_objects_v2(Bucket=self.settings.bucket, Prefix=prefix)
-                else:
-                    page = await client.list_objects_v2(
-                        Bucket=self.settings.bucket, Prefix=prefix, ContinuationToken=token
-                    )
-                items = page.get("Contents", [])
-                current.set_attribute("scadbuddy.objects", len(items))
+
+            async def list_page(token: str | None = token) -> Any:
+                with _request("ListObjectsV2", kind) as current:
+                    if token is None:
+                        page = await client.list_objects_v2(
+                            Bucket=self.settings.bucket, Prefix=prefix
+                        )
+                    else:
+                        page = await client.list_objects_v2(
+                            Bucket=self.settings.bucket, Prefix=prefix, ContinuationToken=token
+                        )
+                    current.set_attribute("scadbuddy.objects", len(page.get("Contents", [])))
+                return page
+
+            # A list reads only, so a second one of the same page changes nothing.
+            page = await self._connect_retried("ListObjectsV2", list_page)
+            items = page.get("Contents", [])
             yield items
             token = page.get("NextContinuationToken")
             if not page.get("IsTruncated") or token is None:

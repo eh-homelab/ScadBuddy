@@ -661,3 +661,49 @@ async def test_an_error_after_the_request_was_sent_is_not_tried_again(
         assert len(puts) == 1
     finally:
         await backend.aclose()
+
+
+async def test_a_connect_failure_on_a_staging_call_is_tried_again(
+    s3: S3Settings, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#8471: the storefront's staging calls retry a request that never connected, as the
+    content calls do. Each step's S3 calls fail once on a connect timeout, then succeed."""
+    backend = S3ContentBackend(s3, connect_backoff=(0, 0, 0))
+    source = staging_key("t", STAGED)
+    frozen = staging_key("t", STAGED, frozen="0123456789abcdef")
+    try:
+        client = await backend._s3()
+        await client.put_object(Bucket=s3.bucket, Key=source, Body=b"staged")
+
+        def fail_once(*names: str) -> dict[str, list[int]]:
+            made: dict[str, list[int]] = {}
+            for name in names:
+                made[name] = []
+                real = getattr(type(client), name).__get__(client)
+                errors: list[Exception] = [ConnectTimeoutError(endpoint_url=URL)]
+                monkeypatch.setattr(client, name, _failing_first(real, errors, made[name]))
+            return made
+
+        made = fail_once("head_object")
+        assert await backend.staged_size(source) == 6
+        assert len(made["head_object"]) == 2
+        made = fail_once("get_object")
+        assert await backend.read_staged(source, 100) == b"staged"
+        assert len(made["get_object"]) == 2
+        made = fail_once("copy_object", "head_object")
+        copy = await backend.freeze_staged(source, frozen)
+        assert copy is not None and copy.size == 6
+        assert (len(made["copy_object"]), len(made["head_object"])) == (2, 2)
+        made = fail_once("list_objects_v2")
+        listed = [key async for key, _ in backend.staged_objects()]
+        assert sorted(listed) == sorted([source, frozen])
+        assert len(made["list_objects_v2"]) == 2
+        made = fail_once("delete_object")
+        await backend.remove_staged(frozen)
+        assert len(made["delete_object"]) == 2
+        made = fail_once("list_objects_v2", "delete_object")
+        await backend.remove_staged_of(source)
+        assert (len(made["list_objects_v2"]), len(made["delete_object"])) == (2, 2)
+        assert await backend.staged_size(source) is None
+    finally:
+        await backend.aclose()
