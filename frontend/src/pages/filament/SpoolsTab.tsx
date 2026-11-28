@@ -364,7 +364,7 @@ export function SpoolsTab() {
   /** The `place` filter's path (a tray's, from a spool in it), so two places of one name read apart. */
   const placeName = (q.place && (data?.places.find((one) => one.id === q.place)?.path ?? data?.spools.find((spool) => spool.location_id === q.place)?.names?.location)) || 'one place'
   /** #8411: names the list filters that hide the search's spools, with a way to clear them. */
-  const hiddenFilters = hiddenByFilters && (
+  const hiddenFilters = !lookingUp && hiddenByFilters && (
     <p role="status" className="flex flex-wrap items-center justify-center gap-2 text-[13px] text-muted-foreground">
       <span>
         Spools match, but these filters hide them: {[...(q.status === 'all' ? [] : [q.status === 'active' ? 'Active only' : 'Archived only']), ...chips.map((chip) => chip.title(q, placeName))].join(', ')}.
