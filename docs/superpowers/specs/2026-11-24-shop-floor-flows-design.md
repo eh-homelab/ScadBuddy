@@ -69,7 +69,7 @@ no parcel left behind) and costed; and none of this should need the assistant.
 - A general BPMN engine or a drag-and-drop flow builder. Flows stay scripts (#1057).
 - Payroll or time clocks. Labour is recorded as minutes on a step, as job cost does
   (`orders/models.py` `TimeKind`).
-- Replacing Bambuddy's queue UI. Bambuddy stays a sync target (owner, 2026-11-23).
+- Replacing Bambuddy's queue UI. ScadBuddy integrates with Bambuddy and does not build on it (owner, 2026-11-27).
 
 ## 4. Anti-goals
 

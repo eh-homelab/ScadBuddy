@@ -7,7 +7,7 @@ setting, a key the Settings page shows). The sweep read main at `e41fe681b` on 2
 numbers refer to that commit, and a `~` marks one that is approximate. A row a fix turned to MATCH cites the lines of the fix's own merge (the two #7156 rows: PR for #7156, 2026-11-23). BB's spool fields were
 read from `backend/tests/bambuddy/recordings/inventory-spools.json`.
 
-The sweep passes when every row matches or is RETIRED. The re-run read main at `2986ff042` on 2026-11-26, after #7216 and #7276 merged: every row is MATCH or RETIRED, so the sweep passes. A RETIRED row is a Bambuddy capability the owner retired: it cites the decision and the issue that replaces it, and it does not block the sweep (the ruling of 2026-11-24 on #6270; Bambuddy is a sync target only since 2026-11-23). Each miss is filed as one issue per area, every one a
+The sweep passes when every row matches or is RETIRED. The re-run read main at `2986ff042` on 2026-11-26, after #7216 and #7276 merged: every row is MATCH or RETIRED, so the sweep passes. A RETIRED row is a Bambuddy capability the owner retired: it cites the decision and the issue that replaces it, and it does not block the sweep (the ruling of 2026-11-24 on #6270; ScadBuddy does not act on hardware through Bambuddy since 2026-11-23; it integrates with Bambuddy and does not build on it, owner 2026-11-27). Each miss is filed as one issue per area, every one a
 sub-issue of #6260 that blocks #6270:
 
 | Gap | Items |
