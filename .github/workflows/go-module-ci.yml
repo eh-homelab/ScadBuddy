@@ -75,6 +75,31 @@ jobs:
         if: ${{ inputs.run == 'true' }}
         run: sudo apt-get update -qq && sudo apt-get install -y fuse3
 
+      # core's TestTheWorkerRunsOnceTemporalComesUp starts a dev server from this CLI
+      # and skips without one on PATH (#8256). The same version and amd64 digest as
+      # ci.yml's `agent` and `rust` jobs and the Dockerfile's `test` stage
+      # (TEMPORAL_CLI_VERSION, TEMPORAL_CLI_SHA256_AMD64); bump together.
+      - name: Install the Temporal CLI
+        if: ${{ inputs.run == 'true' }}
+        env:
+          TEMPORAL_CLI_VERSION: 1.10.1
+          TEMPORAL_CLI_SHA256: 4c1500e2ce2d4de136e5fe8852d9b7f82eb62f19b6b383b3e0c040519a9d20b1
+        run: |
+          set -euo pipefail
+          # Temporal's own download site serves the same tarball when GitHub's
+          # release URL keeps failing (#5706); the sha256 check covers both.
+          curl --fail --silent --show-error --location --retry 3 --retry-all-errors \
+            --output "$RUNNER_TEMP/temporal-cli.tar.gz" \
+            "https://github.com/temporalio/cli/releases/download/v${TEMPORAL_CLI_VERSION}/temporal_cli_${TEMPORAL_CLI_VERSION}_linux_amd64.tar.gz" \
+            || curl --fail --silent --show-error --location --retry 3 --retry-all-errors \
+              --output "$RUNNER_TEMP/temporal-cli.tar.gz" \
+              "https://temporal.download/cli/archive/v${TEMPORAL_CLI_VERSION}?platform=linux&arch=amd64"
+          echo "${TEMPORAL_CLI_SHA256}  $RUNNER_TEMP/temporal-cli.tar.gz" | sha256sum --check --strict
+          mkdir -p "$RUNNER_TEMP/temporal-bin"
+          tar -xzf "$RUNNER_TEMP/temporal-cli.tar.gz" -C "$RUNNER_TEMP/temporal-bin" temporal
+          "$RUNNER_TEMP/temporal-bin/temporal" --version
+          echo "$RUNNER_TEMP/temporal-bin" >> "$GITHUB_PATH"
+
       # WonderForgeLabs/gooey's gofmt step (its ci.yml, "gofmt"): one walk, not
       # one per module. gofmt is purely syntactic, so a single walk covers every
       # module and also a .go file that belongs to no module. The prune skips
