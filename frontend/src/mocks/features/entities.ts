@@ -123,9 +123,16 @@ export function seedEntityProperties(entity: string, values: Record<string, Prop
   entityMock.properties.set(entity, list.sort((a, b) => a.key.localeCompare(b.key)))
 }
 
-/** Adds a change as the newest of `entity`'s history; `source` is `manual` for a set. */
-export function seedPropertyChange(entity: string, change: Omit<PropertyChange, 'source' | 'actor'> & Partial<Pick<PropertyChange, 'source' | 'actor'>>): void {
-  const row: PropertyChange = { source: change.op === 'set' ? 'manual' : null, actor: BROWSER, ...change }
+/**
+ * Adds a change as the newest of `entity`'s history; `source` is `manual` for a set, and
+ * `event_seq` one past the newest seq of any entity's history, as the log numbers it.
+ */
+export function seedPropertyChange(
+  entity: string,
+  change: Omit<PropertyChange, 'source' | 'actor' | 'event_seq'> & Partial<Pick<PropertyChange, 'source' | 'actor' | 'event_seq'>>,
+): void {
+  const newest = Math.max(0, ...[...entityMock.history.values()].flat().map((c) => c.event_seq))
+  const row: PropertyChange = { source: change.op === 'set' ? 'manual' : null, actor: BROWSER, event_seq: newest + 1, ...change }
   entityMock.history.set(entity, [row, ...(entityMock.history.get(entity) ?? [])])
 }
 

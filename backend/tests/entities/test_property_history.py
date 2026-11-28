@@ -359,6 +359,27 @@ def test_history_lists_a_row_both_reads_find_once(
     assert [c.key for c in store.history(ref, "nozzle_note", 100)] == ["nozzle_note"]
 
 
+def test_history_lists_a_value_an_older_rule_allowed(
+    pg_pool: PgPool, history_rows: HistoryRows
+) -> None:
+    """#8116: a stored value today's rule refuses (an object, a list of numbers) is
+    still listed, not a 500. Each change carries its event's seq."""
+    store = _store(pg_pool)
+    ref = EntityRef("spool", str(uuid.uuid4()))
+    base = {"entity_id": str(uuid.uuid4()), "kind": ref.kind, "ref": ref.ref, "source": "manual"}
+    with pg_pool.connection() as conn:
+        history_rows(
+            conn,
+            {**base, "event_seq": 20, "key": "dims", "op": "set", "new": {"w": 1}},
+            {**base, "event_seq": 21, "key": "dims", "op": "set", "old": {"w": 1}, "new": [1, 2]},
+        )
+    changes = store.history(ref, None, 100)
+    assert [(c.event_seq, c.old, c.new) for c in changes] == [
+        (21, {"w": 1}, [1, 2]),
+        (20, None, {"w": 1}),
+    ]
+
+
 def test_history_follows_an_entity_a_merge_renamed(
     pg_pool: PgPool, history_rows: HistoryRows
 ) -> None:

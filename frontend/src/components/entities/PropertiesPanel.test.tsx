@@ -593,6 +593,19 @@ describe('PropertiesPanel history (#6949)', () => {
     expect(items[1]).not.toHaveTextContent('mpn')
   })
 
+  it('shows a value an older rule allowed as its JSON (#8116)', async () => {
+    seedEntityProperties(TYPE, { dims: 'x' })
+    seedPropertyChange(TYPE, { key: 'dims', op: 'set', old: null, new: { w: 1 }, at: '2026-11-20T10:00:00Z' })
+    seedPropertyChange(TYPE, { key: 'dims', op: 'set', old: { w: 1 }, new: [1, 'a'], at: '2026-11-21T10:00:00Z' })
+    seedPropertyChange(TYPE, { key: 'dims', op: 'set', old: [1, 'a'], new: 'x', at: '2026-11-22T10:00:00Z' })
+    const { user } = renderPage(<PropertiesPanel entity={TYPE} />)
+    const row = await screen.findByRole('row', { name: /dims/ })
+    await user.click(within(row).getByRole('button', { name: 'History of dims' }))
+    const history = await screen.findByRole('list', { name: 'History of dims' })
+    const items = within(history).getAllByRole('listitem')
+    expect(items.map((item) => item.querySelector('span')?.textContent)).toEqual(['1, a → x', '{"w":1} → 1, a', '{"w":1}'])
+  })
+
   it('reads the history again until an edit made while it is open is recorded', async () => {
     seedEntityProperties(TYPE, { mpn: 'A' })
     seedPropertyChange(TYPE, { key: 'mpn', op: 'set', old: null, new: 'A', at: '2026-11-22T10:00:00Z', actor: { kind: 'browser' } })
