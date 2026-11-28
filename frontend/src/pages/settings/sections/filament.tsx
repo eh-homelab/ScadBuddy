@@ -274,7 +274,8 @@ function PresetsImportRow() {
 function spoolImportLine(done: PullReport): string {
   const failed = done.failed_bb_ids?.length ?? 0
   const spoolParts = [
-    done.created > 0 && plural(done.created, 'new spool', 'new spools'),
+    done.created > 0 &&
+      `${plural(done.created, 'new spool', 'new spools')}${done.archived_created > 0 ? ` (${done.archived_created} of them archived)` : ''}`,
     done.linked > 0 && `${plural(done.linked, 'spool', 'spools')} linked`,
     done.updated > 0 && `${plural(done.updated, 'spool', 'spools')} updated`,
   ].filter(Boolean)
@@ -298,15 +299,28 @@ function spoolImportLine(done: PullReport): string {
       `${plural(done.conflicts, 'supplier or place field changed on both sides was', 'supplier or place fields changed on both sides were')} kept as ScadBuddy has ${done.conflicts === 1 ? 'it' : 'them'}.`,
     done.catalog_failed && "Bambuddy's spool catalog could not be read, so no insert type was set.",
     done.colours_failed && "Bambuddy's colours could not be read.",
+    done.archived > 0 && `${plural(done.archived, 'archived ScadBuddy spool was', 'archived ScadBuddy spools were')} left as they are.`,
+    done.claimed > 0 && `${plural(done.claimed, 'Bambuddy row was', 'Bambuddy rows were')} left to a create still in progress.`,
+    done.catalog_skipped > 0 &&
+      `${plural(done.catalog_skipped, "entry of Bambuddy's spool catalog was", "entries of Bambuddy's spool catalog were")} skipped (no name or weight, or a name another type has), so spools naming ${done.catalog_skipped === 1 ? 'it' : 'them'} got no insert type.`,
+    done.names_skipped > 0 &&
+      `${plural(done.names_skipped, 'catalog name with no letter or digit was', 'catalog names with no letter or digit were')} left out.`,
+    done.usage_unlinked > 0 &&
+      `${plural(done.usage_unlinked, 'Bambuddy usage row names', 'Bambuddy usage rows name')} a spool ScadBuddy has not linked.`,
+    done.colours_kept > 0 && `${plural(done.colours_kept, 'colour was', 'colours were')} kept as a person or another source set them.`,
   ].filter(Boolean)
   if (lines.length === 0) return 'Nothing to import: ScadBuddy has every Bambuddy spool, and none changed since the last pull.'
   if (spoolParts.length === 0 && changed.length === 0) lines.unshift('Nothing imported.')
   return lines.join(' ')
 }
 
-/** What the spool import says when the server refuses it: the presets import's words, plus its own 503. */
+/**
+ * What the spool import says when the server refuses it: the presets import's words, plus its own
+ * 503 and its 409 `url_changed` (the not-configured problem type, but a Bambuddy is set up).
+ */
 function spoolImportProblem(cause: unknown): ReactNode {
   if (!(cause instanceof ApiError)) return "Bambuddy's spools could not be imported. Try again."
+  if (cause.status === 409 && cause.problem.code === 'url_changed') return 'The Bambuddy URL changed during the import. Import again.'
   if (cause.status === 503) return 'The import did not finish in time and may still be running. Check the spools before you import again.'
   return importProblem(cause)
 }

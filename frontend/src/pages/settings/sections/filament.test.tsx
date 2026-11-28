@@ -1098,6 +1098,14 @@ describe("Import Bambuddy's spools (#6261)", () => {
     [{ failed_bb_ids: [7, 8] }, '2 Bambuddy spools could not be imported.'],
     [{ catalog_failed: true }, "Bambuddy's spool catalog could not be read, so no insert type was set."],
     [{ colours_failed: true }, "Bambuddy's colours could not be read."],
+    [{ rfid_duplicates: 1 }, '1 RFID duplicate skipped.'],
+    [{ created: 3, archived_created: 2 }, 'Imported: 3 new spools (2 of them archived).'],
+    [{ archived: 2 }, '2 archived ScadBuddy spools were left as they are.'],
+    [{ claimed: 1 }, '1 Bambuddy row was left to a create still in progress.'],
+    [{ catalog_skipped: 2 }, "2 entries of Bambuddy's spool catalog were skipped (no name or weight, or a name another type has), so spools naming them got no insert type."],
+    [{ names_skipped: 1 }, '1 catalog name with no letter or digit was left out.'],
+    [{ usage_unlinked: 4 }, '4 Bambuddy usage rows name a spool ScadBuddy has not linked.'],
+    [{ colours_kept: 5 }, '5 colours were kept as a person or another source set them.'],
   ] as [Partial<PullReport>, string][])('says what a pull with %o did, never "Nothing to import"', async (report, text) => {
     answering(report)
     const { user } = renderSettingsSection(<Filament />, { route: '/settings/printing' })
@@ -1135,6 +1143,24 @@ describe("Import Bambuddy's spools (#6261)", () => {
     const filament = region('Filament')
     await user.click(within(filament).getByRole('button', { name: IMPORT }))
     expect(await within(filament).findByRole('alert')).toHaveTextContent('The Bambuddy links belong to another Bambuddy. Reset them under Sync status, then try again.')
+  })
+
+  it('says to import again when the Bambuddy URL changed during the import', async () => {
+    server.use(
+      http.post('*/api/v1/filament/bambuddy/import', () =>
+        HttpResponse.json(
+          { type: 'https://scadbuddy.dev/problems/bambuddy-not-configured', title: 'Conflict', status: 409, detail: 'the Bambuddy URL changed during the import; import again', code: 'url_changed' },
+          { status: 409 },
+        ),
+      ),
+    )
+    const { user } = renderSettingsSection(<Filament />, { route: '/settings/printing' })
+    await seeded()
+    const filament = region('Filament')
+    await user.click(within(filament).getByRole('button', { name: IMPORT }))
+    const alert = await within(filament).findByRole('alert')
+    expect(alert).toHaveTextContent('The Bambuddy URL changed during the import. Import again.')
+    expect(within(alert).queryByRole('link', { name: 'Connection' })).not.toBeInTheDocument()
   })
 
   it('says to check the spools before importing again when the worker did not finish in time', async () => {

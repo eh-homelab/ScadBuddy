@@ -36,7 +36,9 @@ type S = components['schemas']
  * read, and every later one finds nothing new. It changes no spool in the mock's inventory.
  */
 
-const BASE = '/api/v1/filament/sync'
+/** The filament routes' prefix, as `api/filament.ts` has it. */
+const FILAMENT_BASE = '/api/v1/filament'
+const BASE = `${FILAMENT_BASE}/sync`
 const FIRST_PASS = '2026-11-15T07:00:00Z'
 
 const seedErrors = (): S['SyncError'][] => [
@@ -320,7 +322,7 @@ function pullReport(first: boolean): S['PullReport'] {
 const conflict = (detail: string, code: string) => problem(409, 'Conflict', detail, { code })
 
 export const handlers = [
-  http.post('/api/v1/filament/presets/bambuddy-import', () => {
+  http.post(`${FILAMENT_BASE}/presets/bambuddy-import`, () => {
     if (!configured()) return conflict('no Bambuddy URL is configured; set one in Settings', 'no_bambuddy')
     if (linksInstance() !== null && linksInstance() !== configured())
       return conflict('the Bambuddy links belong to another Bambuddy; reset them first', 'instance_changed')
@@ -330,7 +332,7 @@ export const handlers = [
     presetsImported = true
     return HttpResponse.json(done)
   }),
-  http.post('/api/v1/filament/bambuddy/import', () => {
+  http.post(`${FILAMENT_BASE}/bambuddy/import`, () => {
     if (!configured()) return conflict('no Bambuddy URL is configured; set one in Settings', 'no_bambuddy')
     if (linksInstance() !== null && linksInstance() !== configured())
       return conflict('the Bambuddy links belong to another Bambuddy; reset them first', 'instance_changed')
