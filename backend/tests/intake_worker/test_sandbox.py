@@ -23,6 +23,7 @@ from scadbuddy.intake_worker import confine, runner, sandbox
 from scadbuddy.intake_worker.child import PREVIEW, UPLOAD, VERDICT
 from scadbuddy.intake_worker.runner import CheckCrashedError, run_check
 from scadbuddy.intake_worker.wire import MAX_PREVIEW_BYTES
+from scadbuddy.storefront.wire import MAX_MODEL_FILE_BYTES
 from tests.intake_worker.test_check import box_stl
 from tests.intake_worker.test_runner import _job, _png, _state, needs_confinement
 from tests.support.waits import until
@@ -245,6 +246,16 @@ async def test_a_second_check_while_one_runs_is_503(tmp_path: Path, sleeper: Pat
         with contextlib.suppress(asyncio.CancelledError):
             await first
         await _until(lambda: not box.busy, "the sandbox stayed busy")
+
+
+def test_a_refused_body_is_read_for_as_long_as_it_may_take() -> None:
+    """#8363: after a refusal the sandbox reads the announced body at the rate a whole
+    request is allowed, so a large upload's answer is not lost to a reset."""
+    assert sandbox.linger(None) == sandbox.LINGER
+    assert sandbox.linger(64 << 20) == pytest.approx(sandbox.LINGER + 15.0)
+    whole = sandbox.LINGER + sandbox.REQUEST_DEADLINE
+    assert sandbox.linger(MAX_MODEL_FILE_BYTES) == pytest.approx(whole)
+    assert sandbox.linger(MAX_MODEL_FILE_BYTES * 4) == pytest.approx(whole)
 
 
 async def test_a_busy_sandbox_refuses_a_large_upload_with_an_answer(

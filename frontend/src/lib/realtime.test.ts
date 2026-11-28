@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import { CHECK_MS, RealtimeClient, readAgain, type Confirmation, type RealtimeSignal } from './realtime'
+import { CHECK_MS, MAX_CALL_TOPICS, RealtimeClient, readAgain, type Confirmation, type RealtimeSignal } from './realtime'
 import { ReadScope } from './readCursor'
 import { clearSignedOut, isSignedOut, setEnforced } from './signedOut'
 
@@ -165,6 +165,21 @@ describe('RealtimeClient', () => {
     expect(last().sent).toEqual([{ type: 'subscribe', topics: ['models', 'settings'] }])
     last().confirm()
     expect(seen).toEqual(['resync'])
+  })
+
+  it('resubscribes device call topics in frames of at most MAX_CALL_TOPICS, apart from the rest', () => {
+    const realtime = client()
+    const calls = Array.from({ length: 2 * MAX_CALL_TOPICS + 1 }, (_, at) => `device:call:${String(at).padStart(12, '0')}`)
+    realtime.subscribe('models', () => {})
+    for (const topic of calls) realtime.subscribe(topic, () => {})
+    realtime.subscribe('settings', () => {})
+    last().open()
+    expect(last().sent).toEqual([
+      { type: 'subscribe', topics: ['models', 'settings'] },
+      { type: 'subscribe', topics: calls.slice(0, MAX_CALL_TOPICS) },
+      { type: 'subscribe', topics: calls.slice(MAX_CALL_TOPICS, 2 * MAX_CALL_TOPICS) },
+      { type: 'subscribe', topics: calls.slice(2 * MAX_CALL_TOPICS) },
+    ])
   })
 
   it('resets the back-off once a connection opens', () => {

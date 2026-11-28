@@ -24,6 +24,22 @@ export interface NDEFMessage {
 export interface NDEFReadingEvent extends Event {
   serialNumber: string
   message: NDEFMessage
+  /** Only in the ScadBuddy app (`nfc-polyfill.js`, #8362): what Android tells of the tag. Web NFC has none. */
+  scadbuddyTag?: TagInfo
+}
+
+/**
+ * What the ScadBuddy app's NFC tells of a tag beside its records (#8362); Chrome's Web NFC tells
+ * none of it, so every field is optional. `chip` is from NTAG GET_VERSION (`NTAG213`, `NTAG215`,
+ * `NTAG216`) and `user_bytes` its user memory (NXP NTAG213/215/216 data sheet, GET_VERSION);
+ * `max_ndef_bytes` is Android's `Ndef.getMaxSize()`, the largest NDEF message the tag takes.
+ */
+export interface TagInfo {
+  tech?: string
+  chip?: string | null
+  user_bytes?: number | null
+  max_ndef_bytes?: number | null
+  writable?: boolean | null
 }
 
 export interface NDEFRecordInit {
@@ -50,6 +66,8 @@ export type WireRecord = components['schemas']['NdefRecord']
 export interface Reading {
   uid: string
   records: WireRecord[]
+  /** Only in the ScadBuddy app: the tag's chip and capacity (#8362). */
+  tag?: TagInfo
 }
 
 /** `ok`, or why this page cannot scan: no Web NFC in this browser, or inside a frame (Bambuddy's). */
@@ -295,6 +313,40 @@ export function toInit(record: WireRecord): NDEFRecordInit {
   return init
 }
 
+/**
+ * The bytes of the NDEF message these records make, as Android counts it against
+ * `Ndef.getMaxSize()` (NFC Forum NDEF 1.0, section 3.2: a header byte, the type length, a
+ * payload length of 1 byte (SR) or 4, an id length when there is an id, then the type, id and
+ * payload). A text record's payload is its status byte, its language and its text, with `lang`
+ * when the record names none; a URL is counted with no prefix code saved, so the count is never
+ * low. An empty message is one empty record (3 bytes), as `writeWithBackup` writes it.
+ */
+export function ndefMessageBytes(records: readonly WireRecord[], lang = 'en'): number {
+  const encoder = new TextEncoder()
+  const one = (record: WireRecord): number => {
+    const data = record.data_hex.length / 2
+    let type = 0
+    let payload = data
+    if (record.record_type === 'empty') payload = 0
+    else if (record.record_type === 'text') {
+      type = 1
+      payload = 1 + encoder.encode(record.lang ?? lang).length + data
+    } else if (record.record_type === 'url') {
+      type = 1
+      payload = 1 + data
+    } else if (record.record_type === 'smart-poster') type = 2
+    else if (record.record_type === 'mime') type = encoder.encode(record.media_type ?? 'application/octet-stream').length
+    else if (record.record_type === 'absolute-url') {
+      type = data
+      payload = 0
+    } else if (record.record_type.startsWith(':')) type = record.record_type.length - 1
+    else if (record.record_type.includes(':')) type = record.record_type.length
+    const id = record.id ? encoder.encode(record.id).length : 0
+    return 2 + (payload < 256 ? 1 : 4) + (id ? 1 : 0) + type + id + payload
+  }
+  return records.length === 0 ? 3 : records.reduce((sum, record) => sum + one(record), 0)
+}
+
 /** Why these records cannot be written from this page, or null when they can. */
 export function notWritable(records: readonly WireRecord[]): string | null {
   try {
@@ -367,8 +419,8 @@ export class NfcSession {
     for (const listener of [...this.errorListeners]) listener()
   }
   private readonly onReadingEvent = (event: Event) => {
-    const { serialNumber, message } = event as NDEFReadingEvent
-    const reading: Reading = { uid: serialNumber, records: message.records.map(toWire) }
+    const { serialNumber, message, scadbuddyTag } = event as NDEFReadingEvent
+    const reading: Reading = { uid: serialNumber, records: message.records.map(toWire), ...(scadbuddyTag ? { tag: scadbuddyTag } : {}) }
     for (const waiter of [...this.waiters]) waiter(reading)
     if (this.claimed) return
     for (const listener of [...this.listeners]) listener(reading)
