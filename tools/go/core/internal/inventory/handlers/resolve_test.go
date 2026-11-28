@@ -181,6 +181,18 @@ func TestRegistryNamesAHandlerNotBuilt(t *testing.T) {
 	}
 }
 
+// An implementation registered under an id the catalog lacks is a mistake that panics,
+// not a handler that stays unbuilt without a word (#8256).
+func TestImplementRefusesAnUnknownHandler(t *testing.T) {
+	r := &Registry{Catalog: Builtin()}
+	defer func() {
+		if recover() == nil {
+			t.Fatal("Implement took a handler the catalog does not have")
+		}
+	}()
+	r.Implement("life.hourz", "impl")
+}
+
 func TestResolveKindChecksWhatItNames(t *testing.T) {
 	consumable := model.Kind{ID: "consumable", Class: model.Class{Nature: "physical", Role: "consumable"}}
 	ch := model.Chain{consumable, {ID: "odd", ParentID: "consumable", Steps: model.Steps{
