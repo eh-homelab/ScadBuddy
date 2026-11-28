@@ -2,7 +2,7 @@ import { act, screen, waitFor, within } from '@testing-library/react'
 import { http, HttpResponse } from 'msw'
 import { api } from '../../../api/client'
 import { getResetPreview, getSyncStatus, listSyncPasses, resetSyncLinks } from '../../../api/filament'
-import { describe, expect, it, vi } from 'vitest'
+import { afterEach, describe, expect, it, vi } from 'vitest'
 import { spoolId } from '../../../mocks/features/filament/seed'
 import { leaveOnlyColourLinks, leaveOnlyPresetLinks, leaveUnresolvedPresets, linkOtherBambuddy, loseSameBambuddy } from '../../../mocks/features/filament/sync'
 import { mockSettings } from '../../../mocks/handlers'
@@ -1059,6 +1059,9 @@ describe("Import Bambuddy's presets (#7244)", () => {
 })
 
 describe("Import Bambuddy's spools (#6261)", () => {
+  // The request listeners each test adds end with it.
+  afterEach(() => server.events.removeAllListeners())
+
   const IMPORT = 'Import spools from Bambuddy now'
 
   it('pulls the spools once, says what it made, and saves nothing of the form', async () => {
