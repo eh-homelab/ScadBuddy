@@ -329,22 +329,26 @@ func TestRunBeforeTheMigrationsWarnsOnce(t *testing.T) {
 	}
 }
 
-// TestAnApplyThatSucceedsWarnsAgainLater: the row comes mid-run, an apply succeeds, and
-// the row goes again, so the subscriber waits a second time and warns again (#8463).
-func TestAnApplyThatSucceedsWarnsAgainLater(t *testing.T) {
-	pool := testdb.New(t)
-	logs := &counting{levels: map[slog.Level]int{}}
+// lateRun runs Run for the subscriber late in the background, its logs counted. until
+// waits for ok, and fails the test when the run's time is up; finish stops the run and
+// gives its warnings and errors.
+func lateRun(t *testing.T, pool *pgxpool.Pool) (until func(string, func() bool), logs *counting, finish func() (int, int)) {
+	t.Helper()
+	logs = &counting{levels: map[slog.Level]int{}}
 	previous := slog.Default()
 	slog.SetDefault(slog.New(logs))
 	t.Cleanup(func() { slog.SetDefault(previous) })
-	run, stop := context.WithTimeout(ctx, 5*time.Second)
-	defer stop()
+	run, stop := context.WithTimeout(ctx, 20*time.Second)
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
 		Run(run, pool, Options{Name: "late", Poll: 10 * time.Millisecond})
 	}()
-	until := func(what string, ok func() bool) {
+	t.Cleanup(func() {
+		stop()
+		<-done
+	})
+	until = func(what string, ok func() bool) {
 		t.Helper()
 		for !ok() {
 			if run.Err() != nil {
@@ -353,21 +357,68 @@ func TestAnApplyThatSucceedsWarnsAgainLater(t *testing.T) {
 			time.Sleep(10 * time.Millisecond)
 		}
 	}
-	until("the first warning", func() bool { return logs.count(slog.LevelWarn) == 1 })
-	if _, err := pool.Exec(ctx, `INSERT INTO event_subscribers (name, seq)
-		SELECT 'late', coalesce(max(seq), 0) FROM events`); err != nil {
+	finish = func() (int, int) {
+		stop()
+		<-done
+		return logs.count(slog.LevelWarn), logs.count(slog.LevelError)
+	}
+	return until, logs, finish
+}
+
+func lateAt(t *testing.T, pool *pgxpool.Pool, seq int64) {
+	t.Helper()
+	if _, err := pool.Exec(ctx, `INSERT INTO event_subscribers (name, seq) VALUES ('late', $1)`, seq); err != nil {
 		t.Fatal(err)
 	}
-	// Many polls, so at least one apply finds the row and succeeds.
-	time.Sleep(200 * time.Millisecond)
+}
+
+func lateGone(t *testing.T, pool *pgxpool.Pool) {
+	t.Helper()
 	if _, err := pool.Exec(ctx, `DELETE FROM event_subscribers WHERE name = 'late'`); err != nil {
 		t.Fatal(err)
 	}
+}
+
+// TestAnApplyThatSucceedsWarnsAgainLater: the row comes mid-run, an apply succeeds (the
+// cursor passes an event), and the row goes again, so the subscriber waits a second time
+// and warns again (#8463).
+func TestAnApplyThatSucceedsWarnsAgainLater(t *testing.T) {
+	pool := testdb.New(t)
+	set(t, pool, entity(t, pool, "item", "i1"), "a", `1`, person)
+	last := newest(t, pool)
+	until, logs, finish := lateRun(t, pool)
+	until("the first warning", func() bool { return logs.count(slog.LevelWarn) == 1 })
+	lateAt(t, pool, last-1)
+	until("an apply that succeeds", func() bool {
+		return scalar[int64](t, pool, `SELECT coalesce(max(seq), 0) FROM event_subscribers WHERE name = 'late'`) == last
+	})
+	lateGone(t, pool)
 	until("the second warning", func() bool { return logs.count(slog.LevelWarn) == 2 })
-	stop()
-	<-done
-	if w, e := logs.count(slog.LevelWarn), logs.count(slog.LevelError); w != 2 || e != 0 {
+	if w, e := finish(); w != 2 || e != 0 {
 		t.Fatalf("%d warnings and %d errors, want 2 and 0", w, e)
+	}
+}
+
+// TestAnotherErrorBetweenWaitsWarnsAgain: the row comes at an event the subscriber cannot
+// store, so each apply fails with another error, and the row goes again: the second wait
+// warns again too (#8463). On the old rule (a reset only after a success) it warned once.
+func TestAnotherErrorBetweenWaitsWarnsAgain(t *testing.T) {
+	pool := testdb.New(t)
+	set(t, pool, entity(t, pool, "item", "i1"), "a", `1`, person)
+	var bad int64
+	if err := pool.QueryRow(ctx, `INSERT INTO events (event_id, kind, at, payload)
+		SELECT 'bad', kind, at, payload - 'key' || '{"id": "bad"}' FROM events WHERE seq = $1
+		RETURNING seq`, newest(t, pool)).Scan(&bad); err != nil {
+		t.Fatal(err)
+	}
+	until, logs, finish := lateRun(t, pool)
+	until("the first warning", func() bool { return logs.count(slog.LevelWarn) == 1 })
+	lateAt(t, pool, bad-1)
+	until("an apply that fails at the bad event", func() bool { return logs.count(slog.LevelError) >= 1 })
+	lateGone(t, pool)
+	until("the second warning", func() bool { return logs.count(slog.LevelWarn) == 2 })
+	if w, e := finish(); w != 2 || e < 1 {
+		t.Fatalf("%d warnings and %d errors, want 2 and at least 1", w, e)
 	}
 }
 
