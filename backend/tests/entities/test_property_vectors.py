@@ -38,3 +38,8 @@ def test_property_values_match_the_go_vectors() -> None:
         found = completeness(row["schema"], row["values"])
         assert sorted(found.missing) == row["missing"], row
         assert [key for key, _ in found.invalid] == row["invalid"], row
+        # #8095: each invalid key fails on the keyword the vectors name, as Go's reason
+        # ("does not fit '<keyword>'") does.
+        known = row["schema"]["properties"]
+        keywords = [_fails(known[key], row["values"][key]) for key, _ in found.invalid]
+        assert keywords == row["keywords"], row
