@@ -36,6 +36,7 @@ import { PricePanel } from '../../components/filament/purchasing/PricePanel'
 import { useMoney } from '../../components/filament/purchasing/useMoney'
 import { RgbaColourField } from '../../components/filament/RgbaColourField'
 import { RgbaSwatch } from '../../components/filament/RgbaSwatch'
+import { TdfpFinder, type TdfpDefaults } from '../../components/filament/TdfpFinder'
 import { AlertDialog, AlertDialogCancel, AlertDialogContent, AlertDialogDescription, AlertDialogFooter, AlertDialogHeader, AlertDialogTitle } from '@/components/ui/alert-dialog'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
@@ -522,6 +523,36 @@ export function TypePage() {
   }
 
   const draftTdfp = tdfpOf(draft.tdfp_id)
+  const nameIn = (rows: { id: string; name: string }[], picked: string) => rows.find((one) => one.id === picked)?.name ?? ''
+  // #7025: what the type's fields say now, as 3DFP names it: `#RRGGBB` hexes, the type's colour first.
+  const tdfpDefaults: TdfpDefaults = {
+    brand: nameIn(lists.brands, draft.brand_id),
+    material: nameIn(lists.materials, draft.material_id),
+    materialType: nameIn(lists.subtypes, draft.subtype_id),
+    colour: draft.colour_name.trim(),
+    hexes: [draft.rgba ?? '', ...draft.extra_colours.split(',')]
+      .map((one) => one.trim())
+      .filter((one) => /^#[0-9a-f]{6}([0-9a-f]{2})?$/i.test(one))
+      .map((one) => one.slice(0, 7).toUpperCase())
+      .slice(0, 4),
+    nominalWeight: draft.label_weight_g.trim(),
+  }
+  const useTdfp = (tdfpId: number) => {
+    set('tdfp_id', String(tdfpId))
+    setNotice(`The 3DFP id is now ${tdfpId}. Save the type to keep it.`)
+  }
+  /** A 3DFP create for this saved type ended: the type is read again, and the field shows the id it holds. */
+  const tdfpCreated = async (tdfpId: number, typeTookIt: boolean): Promise<number | null> => {
+    try {
+      const fresh = await getType(madeId ?? id)
+      setSaved(fresh)
+      setDraft((was) => ({ ...was, tdfp_id: str(fresh.tdfp_id ?? (typeTookIt ? tdfpId : null)) }))
+      return fresh.tdfp_id ?? null
+    } catch (cause) {
+      setError(message(cause))
+      return null
+    }
+  }
   const subtypes = lists.subtypes.filter((one) => !one.material_id || one.material_id === draft.material_id)
   const models = [...new Set(lists.printers.map((p) => p.model).filter((m): m is string => !!m))]
   const mine = lists.spools.filter((spool) => spool.type_id === (madeId ?? id))
@@ -603,6 +634,13 @@ export function TypePage() {
               )}
             </div>
           </Field>
+          <TdfpFinder
+            defaults={tdfpDefaults}
+            linkTypeId={!creating && saved?.tdfp_id == null ? (madeId ?? id) : null}
+            hasSavedId={saved?.tdfp_id != null}
+            onUse={useTdfp}
+            onCreated={tdfpCreated}
+          />
         </section>
 
         <div className="flex flex-col gap-6">

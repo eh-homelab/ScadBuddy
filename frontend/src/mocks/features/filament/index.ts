@@ -57,7 +57,7 @@ function fillType(type: S['SpoolType'], options: { refresh?: boolean; apply?: Pa
   const result: S['TypeFill'] = { type_id: type.id, code: type.code, filled: {}, previous: {}, skipped: {}, k_values: [], written: false }
   const found = profileOf(type)
   if (!found) return { ...result, reason: 'the type has no slicer preset' }
-  if (!found.profile) return { ...result, reason: `Bambu Studio 02.08.02.61 has no filament preset ${found.preset.slicer_filament}` }
+  if (!found.profile) return { ...result, reason: `Bambu Studio has no filament preset ${found.preset.slicer_filament}` }
   result.source = { preset_id: found.preset.slicer_filament, name: found.profile.name, origin: 'system', printer_model: found.preset.printer_model, nozzle_diameter: found.preset.nozzle_diameter }
   result.cost_hint = found.profile.cost_hint
   const at = state.types.findIndex((one) => one.id === type.id)
@@ -132,6 +132,21 @@ const MOCK_SYNC_COLOURS = {
   ],
 } as const
 
+/** #7025 — the one filament the mock's 3DFP holds, and the ids the mock's creates give from. */
+const TDFP_JADE: components['schemas']['Candidate'] = {
+  tdfp_id: 4411,
+  name: 'Jade White (1000g)',
+  brand: 'Bambu Lab',
+  material: 'PLA',
+  material_type: 'Basic',
+  hexes: ['#FFFFFF'],
+  nominal_weight_g: 1000,
+}
+const TDFP_FIRST_NEW = 38600
+let tdfpNext = TDFP_FIRST_NEW
+/** Each create's answer by its Idempotency-Key, as the server answers a repeated key. */
+const tdfpCreates = new Map<string, { body: string; answer: components['schemas']['TdfpCreated'] }>()
+
 /** #6907 — a few rows of Bambu Studio's colour table, for `GET /filament/bambu-colour-codes` (mock data). */
 const MOCK_COLOUR_CODES: components['schemas']['ColourCode'][] = [
   { code: '10100', name: 'Jade White', rgba: ['#FFFFFFFF'], fila_type: 'PLA', fila_id: 'GFA00' },
@@ -146,6 +161,8 @@ export function locationExists(id: string): boolean {
 
 export function reset() {
   state = seed()
+  tdfpCreates.clear()
+  tdfpNext = TDFP_FIRST_NEW
   colourSyncs = []
   bambuddyKValues.clear()
   imports.clear()
@@ -2524,6 +2541,47 @@ export const handlers = [
     state.typePresets = [...state.typePresets.filter((one) => one.type_id !== typeId), ...rows]
     return HttpResponse.json(rows)
   }),
+  // #7025 — 3DFP search and create. The mock's 3DFP knows one filament (Bambu Lab PLA Basic Jade White).
+  http.post(`${BASE}/tdfp/search`, async ({ request }) => {
+    const ask = (await request.json()) as S['SearchAsk']
+    if (!ask.brand?.trim()) return problem(422, 'brand: String should have at least 1 character')
+    const words = [ask.brand, ask.material_type, ask.colour].filter(Boolean).join(' ').toLowerCase().split(/\s+/)
+    const text = `${TDFP_JADE.brand} ${TDFP_JADE.material_type} ${TDFP_JADE.name}`.toLowerCase()
+    const candidates = words.every((word) => text.includes(word)) ? [TDFP_JADE] : []
+    return HttpResponse.json({ query: words.join(' '), candidates } satisfies S['SearchAnswer'])
+  }),
+  http.post(`${BASE}/tdfp/filaments`, async ({ request }) => {
+    const key = request.headers.get('Idempotency-Key')
+    if (!key) return problem(428, 'an Idempotency-Key header is required')
+    const raw = await request.text()
+    const was = tdfpCreates.get(key)
+    if (was) return was.body === raw ? HttpResponse.json(was.answer) : problem(422, 'the Idempotency-Key was used with another body', { code: 'idempotency_key_reused' })
+    const body = JSON.parse(raw) as S['TdfpCreateRequest']
+    const type = body.type_id ? state.types.find((one) => one.id === body.type_id) : undefined
+    if (body.type_id && !type) return problem(404, `no spool type ${body.type_id}`)
+    if (type?.tdfp_id != null) return problem(409, 'the type already has a 3DFP id', { code: 'type_has_tdfp_id' })
+    if (!body.hexes.length || body.hexes.length > 4) return problem(422, 'hexes: List should have 1 to 4 items')
+    const same = body.brand === TDFP_JADE.brand && body.material === TDFP_JADE.material && body.material_type === TDFP_JADE.material_type
+    const close = same && TDFP_JADE.hexes!.some((hex) => body.hexes.some((one) => one.slice(0, 7).toUpperCase() === hex))
+    if (close && !(body.not_duplicates ?? []).includes(TDFP_JADE.tdfp_id)) {
+      const answer = {
+        create: { status: 'duplicate', duplicates: [TDFP_JADE], likely: [{ tdfp_id: TDFP_JADE.tdfp_id, reason: 'same colour' }], duplicate_text: '' },
+        type_id: body.type_id ?? null,
+        type_tdfp_id_set: false,
+      } satisfies S['TdfpCreated']
+      tdfpCreates.set(key, { body: raw, answer })
+      return HttpResponse.json(answer)
+    }
+    const tdfpId = tdfpNext++
+    if (type) type.tdfp_id = tdfpId
+    const answer = {
+      create: { status: 'created', tdfp_id: tdfpId, sent: ['brand', 'material', 'material_type', 'colour', 'hexes'], not_sent: [], duplicate_text: '' },
+      type_id: body.type_id ?? null,
+      type_tdfp_id_set: type !== undefined,
+    } satisfies S['TdfpCreated']
+    tdfpCreates.set(key, { body: raw, answer })
+    return HttpResponse.json(answer)
+  }),
   http.post(`${BASE}/types/:id/profile-fetch`, ({ params }) => {
     const typeId = String(params.id)
     const type = state.types.find((one) => one.id === typeId)
@@ -3341,42 +3399,6 @@ export const handlers = [
     return done instanceof Response ? done : HttpResponse.json(done)
   }),
 
-  // -- the pull: the mock has no Bambuddy spools to pull, so it changes nothing --
-  http.post(`${BASE}/bambuddy/import`, () =>
-    HttpResponse.json({
-      created: 0,
-      archived_created: 0,
-      linked: 0,
-      updated: 0,
-      needs_type: 0,
-      archived: 0,
-      invalid: 0,
-      catalog_failed: false,
-      catalog_skipped: 0,
-      names_skipped: 0,
-      created_ids: [],
-      linked_ids: [],
-      updated_ids: [],
-      needs_type_ids: [],
-      archived_ids: [],
-      failed_bb_ids: [],
-      invalid_bb_ids: [],
-      usage_booked: 0,
-      usage_unlinked: 0,
-      rfid_duplicates: 0,
-      rfid_duplicate_bb_ids: [],
-      archived_deferred: 0,
-      archived_deferred_bb_ids: [],
-      claimed: 0,
-      suppliers: 0,
-      locations: 0,
-      moved: 0,
-      conflicts: 0,
-      colours: 0,
-      colours_kept: 0,
-      colours_failed: false,
-    } satisfies S['PullReport']),
-  ),
 ]
 
 /**

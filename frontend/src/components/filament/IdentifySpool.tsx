@@ -4,10 +4,14 @@ import { ApiError } from '../../api/client'
 import { getSpool, listSpools, postTagRead, resolveCode, type NdefRecord, type Spool, type TagReadResult } from '../../api/filament'
 import { spoolCode } from '../../lib/homeReturns'
 import { codeFromScan } from '../../lib/unknownSpools'
+import { matchesSearch, parseSearch, spoolSearchDoc, type PropertyText } from '../../lib/filamentSearch'
+import { scanSearchQuery, searchesSpools } from '../../lib/scanSearch'
 import { takeMifare } from '../../lib/nativeMifare'
 import { nfcSupport, type Reading } from '../../lib/webNfc'
+import { loadKindPropertyTexts } from '../entities/api'
 import { DefinedFields } from '../entities/DefinedFields'
-import { CodeWay, Said, type CodeCopy } from './identify/CodeWay'
+import { SPOOL_FORMATS } from './identify/camera'
+import { CodeWay, Said, type CodeCopy, type CodeSearch } from './identify/CodeWay'
 import { reasonOf } from './identify/reason'
 import { useTagReads } from './identify/useTagReads'
 import { useSpoolFromTag } from './scan/useSpoolFromTag'
@@ -26,6 +30,7 @@ import { RgbaSwatch } from './RgbaSwatch'
  * (the way changes, the code is edited, a lookup, a photo or a tag read names no spool), so the
  * caller never acts on a spool the person has since replaced. An archived spool is never named.
  * `nfc` is the page's `nfcSupport()`: in a frame (`embedded`) there is no tag way and no camera.
+ * A code that names no thing (a maker's barcode) becomes a "Pick by hand" search (#8372).
  */
 
 type Way = 'tag' | 'code' | 'hand'
@@ -43,8 +48,14 @@ function codeOf(text: string): string {
   return codeFromScan(text) ?? last.trim().toUpperCase()
 }
 
-/** The spool a label's text names, or the sentence that says why it names none. */
-async function spoolFromText(text: string): Promise<Spool | string> {
+/**
+ * The spool a label's text names, or the sentence that says why it names none. With `search`
+ * (#8372), a text that no code resolves and that is not a ScadBuddy code (a barcode) gives its
+ * spool search instead.
+ */
+function spoolFromText(text: string): Promise<Spool | string>
+function spoolFromText(text: string, search: true): Promise<Spool | string | CodeSearch>
+async function spoolFromText(text: string, search = false): Promise<Spool | string | CodeSearch> {
   const direct = SPOOL_TEXT.exec(text.trim())
   if (direct) {
     try {
@@ -61,9 +72,13 @@ async function spoolFromText(text: string): Promise<Spool | string> {
     if (resolved.archived) return `${resolved.code} is archived.`
     return usable(await getSpool(resolved.id))
   } catch (cause) {
-    return cause instanceof ApiError && cause.status === 404 ? `No spool has the code ${code}.` : reasonOf(cause, 'ScadBuddy could not look up the code. Try again.')
+    const unknown = cause instanceof ApiError && cause.status === 404
+    if (unknown && search && searchesSpools(text)) return { search: scanSearchQuery(text) }
+    return unknown ? `No spool has the code ${code}.` : reasonOf(cause, 'ScadBuddy could not look up the code. Try again.')
   }
 }
+
+const spoolOrSearch = (text: string) => spoolFromText(text, true)
 
 const SPOOL_COPY: CodeCopy = { label: 'Spool code', placeholder: 'S-142', noLabel: 'No spool label was found in the photo. Take it again, or type the code.' }
 
@@ -71,8 +86,11 @@ export function IdentifySpool({ onIdentified, nfc }: { onIdentified: OnIdentifie
   // Asked once for the component's life, not on each render (#7168 review 3).
   const [support] = useState(() => nfc ?? nfcSupport())
   const [way, setWay] = useState<Way | ''>('')
+  /** #8372: the search a scanned code gave, which "Pick by hand" opens with. */
+  const [scanned, setScanned] = useState<string | null>(null)
   const change = (next: Way | '') => {
     setWay(next)
+    setScanned(null)
     // Another way: the spool named the old way is no longer the one.
     onIdentified(null)
   }
@@ -99,8 +117,22 @@ export function IdentifySpool({ onIdentified, nfc }: { onIdentified: OnIdentifie
         </ToggleGroupItem>
       </ToggleGroup>
       {way === 'tag' && <TagWay onIdentified={onIdentified} onPickByHand={() => change('hand')} />}
-      {way === 'code' && <CodeWay kind="spool" copy={SPOOL_COPY} fromText={spoolFromText} fromCode={spoolFromText} onIdentified={onIdentified} camera={support !== 'embedded'} />}
-      {way === 'hand' && <HandWay onIdentified={onIdentified} />}
+      {way === 'code' && (
+        <CodeWay
+          kind="spool"
+          copy={SPOOL_COPY}
+          fromText={spoolOrSearch}
+          fromCode={spoolFromText}
+          onIdentified={onIdentified}
+          onSearch={(search) => {
+            setWay('hand')
+            setScanned(search)
+          }}
+          camera={support !== 'embedded'}
+          formats={SPOOL_FORMATS}
+        />
+      )}
+      {way === 'hand' && <HandWay onIdentified={onIdentified} initialSearch={scanned ?? ''} fromScan={scanned !== null} />}
     </div>
   )
 }
@@ -254,12 +286,21 @@ function searchText(spool: Spool): string {
     .toLowerCase()
 }
 
-/** Every unarchived spool, found by its code, colour, material, brand or place; none picked until a click. */
-function HandWay({ onIdentified }: { onIdentified: OnIdentified }) {
+/**
+ * Every unarchived spool. Each word of the box matches its code, colour, material, brand or place,
+ * or the filament search over its and its type's property values (#8372); none picked until a click. `fromScan`
+ * (a scanned code's search in `initialSearch`): once the spools and both property reads have
+ * settled, one shown spool is named. That decision is made once, and never after an edit of the box.
+ */
+function HandWay({ onIdentified, initialSearch = '', fromScan = false }: { onIdentified: OnIdentified; initialSearch?: string; fromScan?: boolean }) {
   const [spools, setSpools] = useState<Spool[] | null>(null)
   const [error, setError] = useState<string | null>(null)
-  const [search, setSearch] = useState('')
+  const [search, setSearch] = useState(initialSearch)
   const [picked, setPicked] = useState<string | null>(null)
+  const [properties, setProperties] = useState<ReadonlyMap<string, PropertyText[]> | null>(null)
+  const [typeProperties, setTypeProperties] = useState<ReadonlyMap<string, PropertyText[]> | null>(null)
+  /** Whether the scan's one decision is made (or there is none to make). A ref, so StrictMode's second effect run does not make it again. */
+  const decided = useRef(!fromScan)
   const ids = useId()
 
   useEffect(() => {
@@ -272,6 +313,13 @@ function HandWay({ onIdentified }: { onIdentified: OnIdentified }) {
         if (alive) setError(`The spools could not be loaded: ${reasonOf(cause, 'try again')}.`)
       },
     )
+    // A failed read gives an empty map, so it settles too.
+    void loadKindPropertyTexts('spool').then((found) => {
+      if (alive) setProperties(found)
+    })
+    void loadKindPropertyTexts('spool_type').then((found) => {
+      if (alive) setTypeProperties(found)
+    })
     return () => {
       alive = false
     }
@@ -279,19 +327,46 @@ function HandWay({ onIdentified }: { onIdentified: OnIdentified }) {
 
   const found = useMemo(() => {
     const words = search.trim().toLowerCase().split(/\s+/).filter(Boolean)
-    return (spools ?? []).filter((spool) => words.every((word) => searchText(spool).includes(word)))
-  }, [spools, search])
+    return (spools ?? []).filter((spool) => {
+      const text = searchText(spool)
+      const doc = spoolSearchDoc(spool, { properties: properties?.get(spool.id), typeProperties: spool.type_id ? typeProperties?.get(spool.type_id) : undefined })
+      // Each word matches by one rule or the other, so `S-2 gtin:…` finds S-2.
+      return words.every((word) => text.includes(word) || matchesSearch(doc, parseSearch(word)))
+    })
+  }, [spools, search, properties, typeProperties])
+
+  const settled = (spools !== null || error !== null) && properties !== null && typeProperties !== null
+  const looking = fromScan && !settled
+  useEffect(() => {
+    if (decided.current || !settled) return
+    decided.current = true
+    const only = found.length === 1 ? found[0]! : null
+    if (!only) return
+    setPicked(only.id)
+    onIdentified(only)
+  }, [settled, found, onIdentified])
 
   return (
     <div className="flex flex-col gap-2">
-      <Input type="search" aria-label="Find a spool" placeholder="Code, colour, material or place" value={search} onChange={(event) => setSearch(event.target.value)} />
+      <Input
+        type="search"
+        aria-label="Find a spool"
+        placeholder="Code, colour, material or place"
+        value={search}
+        onChange={(event) => {
+          // After an edit of the box, the scan names no spool by itself.
+          decided.current = true
+          setSearch(event.target.value)
+        }}
+      />
       {error && (
         <p role="alert" className="text-[13px] text-warn">
           {error}
         </p>
       )}
-      {spools === null && !error && <Note>Loading the spools…</Note>}
-      {spools !== null && found.length === 0 && <Note>No spool matches. Check the code on its label.</Note>}
+      {looking && <Note>Looking for “{search}”…</Note>}
+      {spools === null && !error && !looking && <Note>Loading the spools…</Note>}
+      {spools !== null && !looking && found.length === 0 && <Note>No spool matches. Check the code on its label.</Note>}
       <RadioGroup
         aria-label="Spools"
         value={picked ?? ''}
@@ -303,7 +378,7 @@ function HandWay({ onIdentified }: { onIdentified: OnIdentified }) {
         }}
         className="max-h-56 gap-0.5 overflow-y-auto rounded-lg border p-1"
       >
-        {found.map((spool) => {
+        {!looking && found.map((spool) => {
           const rgba = spool.effective?.rgba ?? spool.rgba
           return (
             <div key={spool.id} className="flex items-center gap-2 rounded-md px-2 py-1 has-[[data-state=checked]]:bg-muted">

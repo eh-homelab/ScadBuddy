@@ -299,7 +299,7 @@ same way, `vite.config.ts`).
   (a dry box included) has a "Print label" link to the place label (`LocationTree.tsx`). The person always names the spool that goes in, through
   `components/filament/IdentifySpool.tsx` (Scan tag only where Web NFC is; a code field always, with
   "Use camera" where `window.BarcodeDetector` exists, else "Take a photo" through `api/scan.ts`, which
-  a 404 hides; Pick by hand): nothing is preselected, the unloaded spool included. The box's spool or
+  a 404 hides; Pick by hand; a code that names no thing becomes a "Pick by hand" search, `lib/scanSearch.ts` `searchesSpools`, #8372): nothing is preselected, the unloaded spool included. The box's spool or
   an empty box moves with `if_occupied: 'refuse'`, any other spool with `replace` and
   `expected_occupant_id` (the box's spool it showed; a replace without it is a 422 `expected_occupant_required`), each with `answers`; a 409 `box_full` reads
   the box again. `IdentifySpool` calls `onIdentified(null)` whenever no spool is named any more (a
@@ -344,7 +344,7 @@ same way, `vite.config.ts`).
   this server." in place of the table, and the page shows it in place of the versions and the
   document (`PresetsTab.tsx`, `PresetPage.tsx`).
   Codes and labels (#6955): `/x/:code` (`pages/CodePage.tsx`) asks `GET /api/v1/codes/{code}` and opens
-  the spool, place or item kind (`codeTarget`, `inventoryPaths.kind`); `filament/locations/:id` (`pages/filament/LocationPage.tsx`) is a place's page, with its files and links (entity `location:<id>`, #6950). The
+  the spool, place or item kind (`codeTarget`, `inventoryPaths.kind`), and sends a 404 text with no code shape to `lib/scanSearch.ts` `scanSearchPath` (#8372); `filament/locations/:id` (`pages/filament/LocationPage.tsx`) is a place's page, with its files and links (entity `location:<id>`, #6950). The
   Locations tab's name opens that page, its count badge opens the spools filter, and "Print printer
   labels" opens the labels page with `?printers=`. The labels page also takes `?locations=<id>,<id>`
   (`LocationLabel`; a place that cannot be read is named and the rest are drawn;
@@ -404,7 +404,7 @@ same way, `vite.config.ts`).
   `q=` (`FilamentSearchBox`, "/" focuses it) with `lib/filamentSearch.ts` (every token must
   match a field; `#87` is spool 87 only; a hex with or without `#`; SKUs from the suppliers'
   products, trays from `/filament/inventory`, each spool's open tag's UID and tray UUID from 4 hex digits
-  (#7151, `tagsBySpool`), and each spool's and type's property values (#7026),
+  (#7151, `tagsBySpool`), and each spool's and type's property values (#7026; a spool also by its type's, and a `key:value` token equals one key's whole value, GTIN-14 for digits, #8372; with `from=scan` the Spools tab shows no rows until the list and both property reads settle, then opens a single match),
   read by `readKindPropertyTexts` on every load of the tab's list; a failed reload keeps the values it had), and every Filament tab has the quick find
   (`FilamentQuickFind`, Ctrl+K or ⌘K: spools and types in groups, Enter opens one), which shares the
   colour picker's remembered filters (`lib/filamentPickerFilters.ts`). The agent's
@@ -464,6 +464,7 @@ same way, `vite.config.ts`).
   in `NfcJobBanner` (`components/filament/scan/`); tests stub Web NFC with `src/test/ndefStub.ts`.
   "Scan code" (#8155, `components/filament/scan/ScanCode.tsx`) shows the rear camera's live
   preview, or a chosen photo where the browser gives no camera (inside Bambuddy's frame too).
+  An unresolved code that `searchesSpools` allows gets a "Search spools for" link (#8372).
   `ScanCameraProvider` wraps the page; `useScanCamera()` (`scanCamera.ts`) gives any read the
   camera: `capture(source)` takes a still of the preview as a JPEG (canvas `toBlob`), stores it
   (`POST /scan/images`, the bytes as the body) and decodes it on the server (`POST /scan/codes`

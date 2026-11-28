@@ -116,6 +116,27 @@ describe('the bulk bar', () => {
     expect(onDone).toHaveBeenCalledWith('Reset the used counter of 500 spools. #501 and #502 were not reset: The database is busy.')
   })
 
+  it('counts the spools left unreset when more than 10 are (#7149)', async () => {
+    let calls = 0
+    server.use(
+      http.post('/api/v1/filament/spools/reset-consumed', async ({ request }) => {
+        calls += 1
+        if (calls > 1) return problem(503, 'Unavailable', 'The database is busy.')
+        const { spool_ids } = (await request.json()) as { spool_ids: string[] }
+        return HttpResponse.json({ reset: spool_ids.length, not_found: [] })
+      }),
+    )
+    const many = Array.from({ length: 1001 }, (_, at) => ({ id: `s${at}`, number: at + 1 }) as Spool)
+    const onDone = vi.fn()
+    const { user } = renderPage(<BulkBar selected={many} places={[]} types={[]} onDone={onDone} onClear={() => {}} />)
+    await user.click(screen.getByRole('button', { name: 'Reset used' }))
+    await user.click(within(await screen.findByRole('alertdialog')).getByRole('button', { name: 'Reset counters' }))
+    await waitFor(() => expect(onDone).toHaveBeenCalled())
+    expect(onDone).toHaveBeenCalledWith('Reset the used counter of 500 spools. The other 501 spools were not reset: The database is busy.')
+    // The third batch is never sent once the second is refused.
+    expect(calls).toBe(2)
+  })
+
   it('reports a refused reset once (#7149)', async () => {
     server.use(http.post('/api/v1/filament/spools/reset-consumed', () => problem(503, 'Unavailable', 'The database is busy.')))
     const onDone = vi.fn()

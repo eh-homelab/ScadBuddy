@@ -338,6 +338,9 @@ jobs:
       - name: Test the OpenSCAD bump script
         run: .github/scripts/openscad-bump.test.sh
 
+      - name: Test the Bambu Studio bump script
+        run: .github/scripts/bambu-studio-bump.test.sh
+
       # Against a stub gh: rust-toolchain-pin.yml's weekly check (#4099).
       - name: Test the Rust toolchain action pin check
         run: .github/scripts/rust-toolchain-pin.test.sh
