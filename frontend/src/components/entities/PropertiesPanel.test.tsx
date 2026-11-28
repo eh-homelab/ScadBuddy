@@ -603,7 +603,7 @@ describe('PropertiesPanel history (#6949)', () => {
     await user.click(within(row).getByRole('button', { name: 'History of dims' }))
     const history = await screen.findByRole('list', { name: 'History of dims' })
     const items = within(history).getAllByRole('listitem')
-    expect(items.map((item) => item.querySelector('span')?.textContent)).toEqual(['1, a → x', '{"w":1} → 1, a', '{"w":1}'])
+    expect(items.map((item) => item.querySelector('span')?.textContent)).toEqual(['[1,"a"] → x', '{"w":1} → [1,"a"]', '{"w":1}'])
   })
 
   it('reads the history again until an edit made while it is open is recorded', async () => {

@@ -568,14 +568,14 @@ function PropertyRow({
 }
 
 /**
- * The text of a change's value: a list joined, a yes or no for a boolean, an empty string
- * for none. A value an older rule allowed (an object, a list of other items) is its JSON
- * (#8116).
+ * The text of a change's value: a list of strings joined, a yes or no for a boolean, an
+ * empty string for none. A value an older rule allowed (an object, a list with other
+ * items) is its JSON, so `[1, "a"]` never reads as `["1", "a"]` does (#8116).
  */
 function changeText(value: PropertyChange['new']): string {
   if (value === null || value === undefined) return ''
   if (typeof value === 'boolean') return value ? 'Yes' : 'No'
-  if (Array.isArray(value)) return value.map((item) => (typeof item === 'string' ? item : JSON.stringify(item))).join(', ')
+  if (Array.isArray(value) && value.every((item) => typeof item === 'string')) return value.join(', ')
   if (typeof value === 'object') return JSON.stringify(value)
   return String(value)
 }
