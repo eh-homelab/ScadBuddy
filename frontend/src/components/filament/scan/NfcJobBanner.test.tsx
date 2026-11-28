@@ -253,6 +253,19 @@ describe('NfcJobBanner (#7273)', () => {
     expect(await screen.findByText(/This job cannot be written from this page: .*\. Cancel or decline it to tell the agent\./)).toBeInTheDocument()
   })
 
+  it('says the write has begun elsewhere when the cancel answers 409 write_begun, and keeps the job', async () => {
+    seedNfcJob({ kind: 'read' })
+    server.use(
+      http.post(`${JOBS}/:id/cancel`, () =>
+        HttpResponse.json({ type: 'about:blank', title: 'Conflict', status: 409, detail: 'the write has begun: the job ends only with its result', code: 'write_begun' }, { status: 409 }),
+      ),
+    )
+    const { user, onAnnounce } = render()
+    await user.click(await screen.findByRole('button', { name: 'Cancel job' }))
+    await waitFor(() => expect(onAnnounce).toHaveBeenLastCalledWith('Another page has begun writing this job. It ends with that write’s result.'))
+    expect(screen.getByRole('heading', { name: 'Agent wants to read a tag' })).toBeInTheDocument()
+  })
+
   it('says why when ScadBuddy refuses the cancel, and keeps the job', async () => {
     seedNfcJob({ kind: 'read' })
     server.use(http.post(`${JOBS}/:id/cancel`, () => HttpResponse.json({ detail: 'boom' }, { status: 500 })))

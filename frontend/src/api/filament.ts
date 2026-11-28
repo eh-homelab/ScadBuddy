@@ -287,7 +287,12 @@ export const getNfcJob = (id: string) => request<NfcJob>(`${BASE}/nfc-jobs/${seg
  */
 export const claimNfcJob = (id: string, body: NfcJobClaimIn = {}) => request<NfcJob>(`${BASE}/nfc-jobs/${seg(id)}/claim`, json('POST', body))
 
-/** Ends a pending job as cancelled, without arming it; the agent's tool sees `cancelled`. */
+/**
+ * Ends a job as cancelled without arming it; the agent's tool sees `cancelled`. The route also
+ * cancels an `armed` job whose write has not begun, so a page that armed it since the last poll
+ * stops; 409 `write_begun` once a write's backup is kept. A job that had already ended is answered
+ * unchanged.
+ */
 export const cancelNfcJob = (id: string) => request<NfcJob>(`${BASE}/nfc-jobs/${seg(id)}/cancel`, { method: 'POST' })
 
 /** Ends an armed job with what the tag gave, or with an `error`. */
