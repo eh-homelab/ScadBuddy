@@ -20,7 +20,8 @@ from scadbuddy.orders.models import Actor
 def insert_kind(pool: Any, kind_id: str | None = None, **columns: Any) -> str:
     """A kind under `part` unless `parent_id` says otherwise, counted in lots."""
     values: dict[str, Any] = {
-        "id": kind_id or columns.pop("id", None) or f"k{uuid.uuid4().hex[:12]}",
+        # Never `k` and digits only: that id is a numbered kind's (item_kinds_made_id_check).
+        "id": kind_id or columns.pop("id", None) or f"kind_{uuid.uuid4().hex[:12]}",
         "name": "Fasteners",
         "parent_id": "part",
         "tracking": "lot",
