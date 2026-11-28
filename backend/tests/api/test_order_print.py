@@ -1146,4 +1146,5 @@ def test_an_accepted_item_with_no_output_renders_at_its_commit_and_prints(
     assert attempt["print_run_id"]
     run = follow_run(bambuddy, attempt["print_run_id"])
     assert run["subject"] == f"output:{rendered['output_id']}"
-    assert current()["status"] == "queued"
+    # The item follows the print: queued, or printing already once the run is read.
+    assert current()["status"] in ("queued", "printing")
