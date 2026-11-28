@@ -29,7 +29,7 @@ const (
 	// lastErrorMax is the most characters of an attempt's error that the row keeps.
 	lastErrorMax = 2000
 	// requestRetention is how long crud_requests keeps the caller inventory's answers
-	// (crud/idempotency.py RETENTION_BY_CALLER).
+	// (crud/idempotency.py RETENTION_BY_CALLER). Both tests read testdata/retention.json.
 	requestRetention = 7 * 24 * time.Hour
 	// operationRetention is how long a finished row stays. It is longer than
 	// requestRetention: while the ledger keeps a key, a replay of the key and a read of
