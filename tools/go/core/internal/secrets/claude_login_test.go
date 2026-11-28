@@ -29,8 +29,8 @@ const login = `{"accessToken": "` + loginAccess + `", "refreshToken": "` + login
 func text(s string) *string { return &s }
 
 // fleetWrite is a create (or, with id, a save) by a caller other than the agent's: the agent's
-// routes refuse a claude_login and a fleet row, so the fleet's rows are written here. It answers
-// the stored row as the routes do, or the refusal's status.
+// routes refuse a claude_login, a fleet row and a row whose scope is both (#8587), so the fleet's
+// rows are written here. It answers the stored row as the routes do, or the refusal's status.
 func (a *api) fleetWrite(u update, id string) (obj, int) {
 	a.t.Helper()
 	s := &Store{Pool: a.pool, Keys: keysOf(kek)}
@@ -94,7 +94,7 @@ func TestTheAgentsRevealNeverOpensAFleetRow(t *testing.T) {
 	login := a.fleet(update{kind: claudeLogin, secret: text(login)}, "")
 	fleet := a.fleet(update{kind: "anthropic_api_key", secret: text(apiKey + "f"), scope: text("fleet")}, "")
 	own := a.post("/credentials", obj{"kind": "anthropic_api_key", "secret": apiKey}).body["credential"].(obj)
-	both := a.post("/credentials", obj{"kind": "anthropic_api_key", "secret": apiKey + "b", "scope": "both"}).body["credential"].(obj)
+	both := a.fleet(update{kind: "anthropic_api_key", secret: text(apiKey + "b"), scope: text("both")}, "")
 	all := a.post("/credentials/reveal", obj{"all": true, "purpose": "turn"})
 	var ids []any
 	for _, r := range all.body["credentials"].([]any) {
@@ -198,25 +198,31 @@ func TestANullScopeKeepsTheStoredOne(t *testing.T) {
 	created := a.post("/credentials", obj{"kind": "anthropic_api_key", "secret": apiKey, "scope": nil})
 	expect(t, []any{created.status, created.body["credential"].(obj)["scope"]}, []any{201, "agent"})
 	id := created.body["credential"].(obj)["id"]
-	a.post("/credentials/save", obj{"id": id, "update": obj{"kind": "anthropic_api_key", "scope": "both"}})
 	kept := a.post("/credentials/save", obj{"id": id, "update": obj{"kind": "anthropic_api_key", "secret": apiKey + "n", "scope": nil}})
-	expect(t, []any{kept.status, kept.body["credential"].(obj)["scope"]}, []any{200, "both"})
+	expect(t, []any{kept.status, kept.body["credential"].(obj)["scope"]}, []any{200, "agent"})
+	// Only a caller other than the agent's widens a row to both (#8587); its save with no scope
+	// keeps that one too.
+	a.fleet(update{kind: "anthropic_api_key", scope: text("both")}, id.(string))
+	shared := a.fleet(update{kind: "anthropic_api_key", secret: text(apiKey + "m")}, id.(string))
+	expect(t, shared["scope"], "both")
 }
 
 func TestTheScopeDefaultsToTheAgentAndASaveMovesIt(t *testing.T) {
 	a := newAPI(t, keysOf(kek))
 	key := a.post("/credentials", obj{"kind": "anthropic_api_key", "secret": apiKey}).body["credential"].(obj)
 	expect(t, []any{key["scope"], key["account_uuid"], key["email"]}, []any{"agent", nil, nil})
-	// A scope change keeps the secret and its epoch.
-	moved := a.post("/credentials/save", obj{"id": key["id"], "update": obj{"kind": "anthropic_api_key", "scope": "both"}})
-	expect(t, []any{moved.status, moved.body["credential"].(obj)["scope"], moved.body["credential"].(obj)["epoch"]},
-		[]any{200, "both", 0})
+	ownScope := a.post("/credentials/save", obj{"id": key["id"], "update": obj{"kind": "anthropic_api_key", "scope": "agent"}})
+	expect(t, []any{ownScope.status, ownScope.body["credential"].(obj)["scope"]}, []any{200, "agent"})
+	// A scope change keeps the secret and its epoch. Only a caller other than the agent's widens a
+	// row to both (#8587).
+	id := key["id"].(string)
+	moved := a.fleet(update{kind: "anthropic_api_key", scope: text("both")}, id)
+	expect(t, []any{moved["scope"], moved["epoch"]}, []any{"both", 0})
 	// A save that names no scope keeps the stored one.
-	kept := a.post("/credentials/save", obj{"id": key["id"], "update": obj{"kind": "anthropic_api_key", "secret": apiKey + "y"}})
-	expect(t, []any{kept.body["credential"].(obj)["scope"], kept.body["credential"].(obj)["epoch"]}, []any{"both", 1})
+	kept := a.fleet(update{kind: "anthropic_api_key", secret: text(apiKey + "y")}, id)
+	expect(t, []any{kept["scope"], kept["epoch"]}, []any{"both", 1})
 	// The fleet's caller turns a key into a login, which moves to the fleet; a login that becomes
 	// a key loses its account.
-	id := key["id"].(string)
 	asLogin := a.fleet(update{kind: claudeLogin, secret: text(login), email: text("ops@example.com")}, id)
 	expect(t, []any{asLogin["scope"], asLogin["subscription_type"], asLogin["email"]}, []any{"fleet", "max", "ops@example.com"})
 	back := a.fleet(update{kind: "anthropic_api_key", secret: text(apiKey)}, id)
@@ -234,7 +240,7 @@ func TestAScopeOrEmailSaveMovesUpdatedAt(t *testing.T) {
 	key := a.post("/credentials", obj{"kind": "anthropic_api_key", "secret": apiKey}).body["credential"].(obj)
 	held := a.fleet(update{kind: claudeLogin, secret: text(login)}, "")
 	a.sql(`UPDATE ai_credentials SET updated_at = '2026-01-01T00:00:00Z'`)
-	moved := a.post("/credentials/save", obj{"id": key["id"], "update": obj{"kind": "anthropic_api_key", "scope": "both"}}).body["credential"].(obj)
+	moved := a.fleet(update{kind: "anthropic_api_key", scope: text("both")}, key["id"].(string))
 	mailed := a.fleet(update{kind: claudeLogin, email: text("ops@example.com")}, held["id"].(string))
 	for _, r := range []obj{moved, mailed} {
 		expect(t, r["epoch"], 0)
@@ -321,7 +327,7 @@ func TestTheAgentsCallerChangesNoFleetRow(t *testing.T) {
 	loginRow := a.fleet(update{kind: claudeLogin, secret: text(login)}, "")
 	own := a.post("/credentials", obj{"kind": "anthropic_api_key", "secret": apiKey}).body["credential"].(obj)
 	fleet := a.fleet(update{kind: "anthropic_api_key", secret: text(apiKey + "f"), scope: text("fleet")}, "")
-	both := a.post("/credentials", obj{"kind": "anthropic_api_key", "secret": apiKey + "b", "scope": "both"}).body["credential"].(obj)
+	both := a.fleet(update{kind: "anthropic_api_key", secret: text(apiKey + "b"), scope: text("both")}, "")
 	before := a.state()
 	for _, row := range []obj{loginRow, fleet} {
 		for _, c := range []struct {
@@ -358,16 +364,145 @@ func TestTheAgentsCallerChangesNoFleetRow(t *testing.T) {
 	}
 	expect(t, got, []any{loginRow["id"], both["id"], fleet["id"], own["id"]})
 	// With no id, a read, a save and a delete go to the first row the agent uses, never the
-	// fleet's login before it.
+	// fleet's login before it. That row's scope is both, so the save and the delete are refused
+	// (#8587).
 	expect(t, a.get("/credentials/one").body["credential"].(obj)["id"], both["id"])
 	saved := a.post("/credentials/save", obj{"update": obj{"kind": "anthropic_api_key", "secret": "k"}})
-	expect(t, []any{saved.status, saved.body["credential"].(obj)["id"]}, []any{200, both["id"]})
-	expect(t, a.post("/credentials/delete", obj{}).body, obj{"deleted": true})
+	expect(t, []any{saved.status, saved.body["detail"]}, []any{409, sharedRowMessage})
+	gone := a.post("/credentials/delete", obj{})
+	expect(t, []any{gone.status, gone.body["detail"]}, []any{409, sharedRowMessage})
+	expect(t, a.post("/credentials/delete", obj{"id": own["id"]}).body, obj{"deleted": true})
 	left := a.state()
 	expect(t, len(left), 3)
 	// The rest close up; the fleet's rows are otherwise as they were.
 	expect(t, left[loginRow["id"]], before[loginRow["id"]])
-	expect(t, left[fleet["id"]], append([]any{1}, before[fleet["id"]][1:]...))
+	expect(t, left[both["id"]], append([]any{1}, before[both["id"]][1:]...))
+	expect(t, left[fleet["id"]], before[fleet["id"]])
+}
+
+// expectShared checks that the agent's caller was refused a change to a row the fleet reads too.
+func expectShared(t *testing.T, what any, r answer) {
+	t.Helper()
+	expect(t, []any{what, r.status, r.body["reason"], r.body["detail"]},
+		[]any{what, 409, credentialRefused, sharedRowMessage})
+}
+
+// The fleet's rotator reads a row whose scope is both (#8587), so the agent's caller may not make
+// one, nor move its own row to both.
+func TestTheAgentsCallerNeverWidensARowToTheFleet(t *testing.T) {
+	a := newAPI(t, keysOf(kek))
+	for _, body := range []obj{
+		{"kind": "anthropic_api_key", "secret": apiKey, "scope": "both"},
+		{"kind": "gateway", "base_url": "https://gw.example.com", "secret": apiKey, "scope": "both"},
+	} {
+		expectShared(t, body, a.post("/credentials", body))
+	}
+	own := a.post("/credentials", obj{"kind": "anthropic_api_key", "secret": apiKey, "scope": "agent"}).body["credential"].(obj)
+	expect(t, own["scope"], "agent")
+	for _, u := range []obj{
+		{"kind": "anthropic_api_key", "scope": "both"},
+		{"kind": "anthropic_api_key", "secret": apiKey + "x", "scope": "both"},
+	} {
+		expectShared(t, u, a.post("/credentials/save", obj{"id": own["id"], "update": u}))
+	}
+	// With no id, the save goes to the agent's first row, and is refused the same way.
+	expectShared(t, "no id", a.post("/credentials/save", obj{"update": obj{"kind": "anthropic_api_key", "scope": "both"}}))
+	listed := a.get("/credentials").body["credentials"].([]any)
+	expect(t, len(listed), 1)
+	row := listed[0].(obj)
+	expect(t, []any{row["id"], row["scope"], row["epoch"]}, []any{own["id"], "agent", 0})
+	opened := a.post("/credentials/reveal", obj{"id": own["id"], "purpose": "test"})
+	expect(t, opened.body["credential"].(obj)["secret"], apiKey)
+}
+
+// A row whose scope is both (#8587): the agent's caller may not change its secret, kind, base URL
+// or scope, delete it or disable it. Each is a 409, and the row is as it was.
+func TestTheAgentsCallerNeverRewritesASharedRow(t *testing.T) {
+	a := newAPI(t, keysOf(kek))
+	shared := a.fleet(update{kind: "anthropic_api_key", secret: text(apiKey + "b"), scope: text("both")}, "")
+	gateway := a.fleet(update{kind: "gateway", baseURL: text("https://gw.example.com"), secret: text(apiKey + "g"),
+		scope: text("both")}, "")
+	before := a.state()
+	for _, c := range []struct {
+		id     any
+		update obj
+	}{
+		{shared["id"], obj{"kind": "anthropic_api_key", "secret": apiKey + "x"}},
+		{shared["id"], obj{"kind": "anthropic_api_key", "secret": apiKey + "x", "scope": "agent"}},
+		{shared["id"], obj{"kind": "anthropic_api_key", "scope": "agent"}},
+		{shared["id"], obj{"kind": "claude_oauth_token", "secret": "sk-ant-oat01-x"}},
+		{shared["id"], obj{"kind": "gateway", "base_url": "https://evil.example.com", "secret": apiKey}},
+		{gateway["id"], obj{"kind": "gateway", "base_url": "https://evil.example.com", "secret": apiKey}},
+		{gateway["id"], obj{"kind": "gateway", "base_url": "https://gw.example.com"}},
+	} {
+		expectShared(t, c.update, a.post("/credentials/save", obj{"id": c.id, "update": c.update}))
+	}
+	for _, row := range []obj{shared, gateway} {
+		expectShared(t, "delete", a.post("/credentials/delete", obj{"id": row["id"]}))
+		expectShared(t, "disable", a.post("/credentials/events",
+			obj{"id": row["id"], "epoch": 0, "event": obj{"kind": "disabled", "reason": "401"}}))
+	}
+	expectShared(t, "delete with no id", a.post("/credentials/delete", obj{}))
+	expect(t, a.state(), before)
+	for _, c := range []struct {
+		row     obj
+		kind    string
+		baseURL any
+		secret  string
+	}{
+		{shared, "anthropic_api_key", nil, apiKey + "b"},
+		{gateway, "gateway", "https://gw.example.com", apiKey + "g"},
+	} {
+		row := a.get("/credentials/one?id=" + c.row["id"].(string)).body["credential"].(obj)
+		expect(t, []any{row["kind"], row["base_url"], row["scope"]}, []any{c.kind, c.baseURL, "both"})
+		opened := a.post("/credentials/reveal", obj{"id": c.row["id"], "purpose": "test"})
+		expect(t, opened.body["credential"].(obj)["secret"], c.secret)
+	}
+}
+
+// The agent uses a row whose scope is both (#8587): it opens it, renames, resets and reorders it,
+// and records its use, a rate limit and a transient error on it.
+func TestTheAgentStillUsesASharedRow(t *testing.T) {
+	a := newAPI(t, keysOf(kek))
+	shared := a.fleet(update{kind: "anthropic_api_key", secret: text(apiKey + "b"), scope: text("both")}, "")
+	own := a.post("/credentials", obj{"kind": "anthropic_api_key", "secret": apiKey}).body["credential"].(obj)
+	opened := a.post("/credentials/reveal", obj{"id": shared["id"], "purpose": "test"})
+	expect(t, opened.body["credential"].(obj)["secret"], apiKey+"b")
+	for _, c := range []struct {
+		event obj
+		after string
+	}{
+		{obj{"kind": "used"}, "active"},
+		{obj{"kind": "transient", "reason": "503"}, "active"},
+		{obj{"kind": "cooling_down", "until": "2099-01-01T00:00:00Z", "reason": "429"}, "cooling_down"},
+	} {
+		r := a.post("/credentials/events", obj{"id": shared["id"], "epoch": 0, "event": c.event})
+		expect(t, []any{c.event["kind"], r.status, r.body["transition"].(obj)["after"]}, []any{c.event["kind"], 200, c.after})
+	}
+	// The agent's cooldown of a shared row ends within the hour; of its own row, when it says.
+	cool := obj{"kind": "cooling_down", "until": "2099-01-01T00:00:00Z", "reason": "429"}
+	r := a.post("/credentials/events", obj{"id": own["id"], "epoch": 0, "event": cool})
+	expect(t, r.body["transition"].(obj)["after"], "cooling_down")
+	for id, want := range map[any]bool{shared["id"]: true, own["id"]: false} {
+		var soon bool
+		if err := a.pool.QueryRow(context.Background(),
+			`SELECT cooldown_until <= now() + interval '1 hour' FROM ai_credentials WHERE id = $1`, id).Scan(&soon); err != nil {
+			t.Fatal(err)
+		}
+		expect(t, []any{id, soon}, []any{id, want})
+	}
+	reset := a.post("/credentials/reset", obj{"id": shared["id"]}).body["credential"].(obj)
+	expect(t, []any{reset["status"], reset["epoch"]}, []any{"active", 1})
+	renamed := a.post("/credentials/name", obj{"id": shared["id"], "name": "Shared"}).body["credential"].(obj)
+	expect(t, renamed["name"], "Shared")
+	ordered := a.post("/credentials/order", obj{"ids": []any{own["id"], shared["id"]}})
+	var got []any
+	for _, c := range ordered.body["credentials"].([]any) {
+		got = append(got, c.(obj)["id"])
+	}
+	expect(t, got, []any{own["id"], shared["id"]})
+	row := a.get("/credentials/one?id=" + shared["id"].(string)).body["credential"].(obj)
+	expect(t, []any{row["scope"], row["kind"]}, []any{"both", "anthropic_api_key"})
 }
 
 // agent false (the fleet's own caller, #7984) still deletes, renames, resets, records and reorders

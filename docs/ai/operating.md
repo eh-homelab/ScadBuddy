@@ -520,8 +520,14 @@ reveal answers the assistant only the rows whose scope is `agent` or `both`. The
 refuses the assistant's caller (409) every change to a `claude_login` or a `fleet` row: a
 save that creates or changes one or makes a row `fleet`, and a delete, rename, reset or
 health event on one. A reorder names the assistant's rows only, and the fleet's rows keep
-their priorities. So the assistant cannot plant a login that a fleet machine installs, nor
-delete, disable or replace a fleet login. Settings shows the fleet's rows read-only ("Managed
+their priorities. The fleet's login rotator also reads a row whose scope is `both` (#8587), so
+the API refuses the assistant's caller (409) a create or save that names a scope other than
+`agent`, any save over a `both` row (a new secret, kind, base URL or scope), and a delete or a
+`disabled` event on a `both` row. The assistant still uses a `both` row: it opens, renames,
+resets and reorders it, and records its use, a rate limit (`cooling_down`, which on a `both`
+row ends within an hour) and a transient error on it. So the assistant cannot plant a credential that a fleet machine installs (a
+`claude_login`, a `fleet` row or a `both` row), nor replace, delete or disable one; only a
+caller other than the assistant's makes a row `both` or changes one. Settings shows the fleet's rows read-only ("Managed
 by the fleet"); the fleet manages them (#7984).
 
 The mapping is in `credentialEnv()` in [`agent/src/harness/run.ts`](../../agent/src/harness/run.ts).
