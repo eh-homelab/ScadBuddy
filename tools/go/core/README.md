@@ -326,24 +326,38 @@ login rotator's secret path. It needs the KEK, and the machine routes read area 
 must own (`fleet.OwnMachine`: 404 `unknown-machine`, 403 `machine-of-another-proof`), so a
 machine leases, writes back, records and rotates only for its own machines:
 
-- `POST /leases` `{machine_id}`: the first `claude_login` by priority whose scope is `fleet` or
-  `both` and that is not disabled, not cooling down, of no account with a login cooling down,
-  leased to no machine, and sealed under the current KEK (`FOR UPDATE SKIP LOCKED`). It sets
-  `leased_to`, `leased_at` and `lease_epoch + 1` and answers `{lease: {credential, lease_epoch,
-  login}, recovers_at: null}`: `login` is the `claudeAiOauth` object, the only secret these routes
-  answer. With none it answers `{lease: null, recovers_at}`, the soonest time one is usable again
-  (null when none recovers on its own). A row that does not open is 409 `credential-sealed`.
+- `POST /leases` `{machine_id, config_dir, replacing?: {credential_id, lease_epoch}}`: a config
+  dir's lease. A config dir holds one: asked again, the route answers the lease the dir holds and
+  reveals no other. A rotation names the lease it replaces (`replacing`, held at that epoch, else
+  409 `lease-stale`); while that one is still held (§6.6 step 5 releases it last) the dir holds
+  its successor too, and asked again the route answers that successor. Otherwise it leases the
+  first `claude_login` by priority whose scope is `fleet` or `both` and that is not disabled, not
+  cooling down, of no account with a login cooling down, held by no machine (a lease that ended
+  is free), and sealed under the current KEK (`FOR UPDATE SKIP LOCKED`). It sets `leased_to`,
+  `leased_at`, `lease_dir`, `lease_expires_at` (now + 24 hours) and `lease_epoch + 1`, and answers
+  `{lease: {credential, lease_epoch, login}, recovers_at: null}`: `login` is the `claudeAiOauth`
+  object, the only secret these routes answer. With none it answers `{lease: null, recovers_at}`,
+  the soonest time one is usable again (null when none recovers on its own). A row that does not
+  open is 409 `credential-sealed`.
 - `PUT /leases/{credential}` `{machine_id, lease_epoch, login}`: the write-back. It seals the
   login over the row (the AAD of every credential row) while the machine holds the lease at that
-  epoch, else 409 `lease-stale`; a login of another account is 409 `another-account`. The row's
-  health and `epoch` stay. The 10 s timeout and what fleetd does on a failure are the client's
-  (§6.6 step 3).
+  epoch, else 409 `lease-stale`, and moves the lease's end to now + 24 hours. It never sets or
+  changes the row's account: a row with an `account_uuid` takes only a login that names the same
+  one (one that names another or none is 409 `another-account`), and a row with none keeps none
+  (only a person's add sets it). The row's health and `epoch` stay. The 10 s timeout and what
+  fleetd does on a failure are the client's (§6.6 step 3).
+- `POST /leases/{credential}/renew` `{machine_id, lease_epoch}`: moves the lease's end to now +
+  24 hours (409 `lease-stale`). A lease no one renews or writes back for 24 hours ends: any
+  machine may then lease the row, which moves `lease_epoch` on, so the old holder's epoch is
+  stale (migration `20261128T1530Z_credential_lease_dir_expiry.sql`).
 - `DELETE /leases/{credential}?machine_id=&lease_epoch=`: the release, at that epoch (409
   `lease-stale`); `lease_epoch` moves on.
 - `POST /events` `{machine_id, entry_uuid, session_id?, credential_id, epoch, kind, reason?,
   until?, reset_source?}`: `kind` is `rate_limit` (needs `until`), `permanent`, `transient`
   (each needs a `reason`) or `recovery`, written as the agent's `cooling_down`, `disabled`,
-  `transient` and `used` health writes, keyed by the row's `epoch`. The row must be a fleet
+  `transient` and `used` health writes, keyed by the row's `epoch`. A rate limit's `until` is
+  from now to 7 days on, else 400: Claude's usage windows are five hours and a week
+  (`tools/go/claudecreds` `Event.LimitType`), and the cooldown cools the whole account. The row must be a fleet
   login the machine leases (409 `not-leased`). `fleet_credential_events` keeps one row per
   `entry_uuid`: a repeat answers `{duplicate: true}` and writes nothing. A rate limit also cools
   every other `claude_login` of the row's `account_uuid`, by the same later-wins rule, and

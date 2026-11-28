@@ -60,6 +60,7 @@ func RotatorRoutes(pool *pgxpool.Pool, keys *seal.Keys) []crud.Route {
 		{Method: "POST", Path: "/leases", Handle: s.lease, MaxBody: rotatorBodyMax},
 		{Method: "PUT", Path: "/leases/{credential}", Handle: s.writeBack, MaxBody: rotatorBodyMax},
 		{Method: "DELETE", Path: "/leases/{credential}", Handle: s.release},
+		{Method: "POST", Path: "/leases/{credential}/renew", Handle: s.renew, MaxBody: rotatorBodyMax},
 		{Method: "POST", Path: "/events", Handle: s.fleetEvent, MaxBody: rotatorBodyMax},
 		{Method: "POST", Path: "/rotations", Handle: s.createRotation, MaxBody: rotatorBodyMax, Status: 201},
 		{Method: "PUT", Path: "/rotations/{id}", Handle: s.putRotation, MaxBody: rotatorBodyMax},
@@ -101,16 +102,40 @@ type leased struct {
 	Login      json.RawMessage `json:"login"`
 }
 
-// lease leases the first usable fleet login by priority to the machine and reveals it: not
-// disabled, not cooling down, no login of its account cooling down, held by no machine, and
-// sealed under the current KEK. With none it answers recovers_at, the soonest one is usable
-// again, or null when none recovers on its own.
+// leaseTTL is how long a lease lasts unless its machine renews it or writes the login back
+// (each moves the end to now + leaseTTL). The spec gives no length (§6.6); fleetd writes back
+// after every refresh and renews more often than this, so only an abandoned lease ends.
+const leaseTTL = "24 hours"
+
+// leaseFree is a row no machine holds now: never leased, released, or its lease ended.
+const leaseFree = "(leased_to IS NULL OR lease_expires_at IS NULL OR lease_expires_at <= now())"
+
+// heldLease is one of a config dir's live leases.
+type heldLease struct {
+	id    string
+	epoch int64
+}
+
+// lease answers the machine's lease for a config dir, and reveals its login. A config dir has
+// one lease: asked again, it answers the one it holds. A rotation names the lease it replaces
+// (`replacing`, held at that epoch, else 409 lease-stale); while that one is still held the dir
+// may hold a second, its successor, and asked again it answers that one. Otherwise it leases the
+// first usable fleet login by priority: not disabled, not cooling down, no login of its account
+// cooling down, held by no machine (an ended lease is free), and sealed under the current KEK.
+// With none it answers recovers_at, the soonest one is usable again, or null when none recovers
+// on its own.
 func (s *Store) lease(r *http.Request, _ crud.Params) (any, error) {
-	b, err := crud.ReadBody(r, "machine_id")
+	b, err := crud.ReadBody(r, "machine_id", "config_dir", "replacing")
 	if err != nil {
 		return nil, err
 	}
 	machine := readMachine(b)
+	dir := b.Match("config_dir", 1, 4096, absolutePath)
+	var replacing *heldLease
+	if n := b.Object("replacing", "credential_id", "lease_epoch"); n != nil {
+		replacing = &heldLease{n.Text("credential_id", 1, credentialIDMax), n.Int("lease_epoch", 0)}
+		n.Done()
+	}
 	if err := b.Err(); err != nil {
 		return nil, err
 	}
@@ -124,52 +149,92 @@ func (s *Store) lease(r *http.Request, _ crud.Params) (any, error) {
 		if err := fleet.OwnMachine(ctx, tx, r, machine); err != nil {
 			return err
 		}
-		found, err := tx.Query(ctx, `SELECT `+columns+`, secret_sealed, dek_sealed FROM ai_credentials c
-			WHERE `+fleetLogin+` AND leased_to IS NULL AND status <> 'disabled'
-			AND NOT (status = 'cooling_down' AND cooldown_until > now()) AND NOT `+accountCooling+`
-			AND kek_id = $1 AND get_byte(secret_sealed, 0) <> $2
-			ORDER BY priority LIMIT 1 FOR UPDATE SKIP LOCKED`, kek.ID, seal.V1)
+		live, err := tx.Query(ctx, `SELECT id, lease_epoch FROM ai_credentials
+			WHERE `+fleetLogin+` AND leased_to = $1 AND lease_dir = $2 AND lease_expires_at > now()
+			ORDER BY leased_at, id FOR UPDATE`, machine, dir)
 		if err != nil {
 			return err
 		}
-		rows, err := pgx.CollectRows(found, pgx.RowToStructByPos[row])
+		held, err := pgx.CollectRows(live, func(row pgx.CollectableRow) (heldLease, error) {
+			var h heldLease
+			return h, row.Scan(&h.id, &h.epoch)
+		})
 		if err != nil {
 			return err
 		}
-		if len(rows) == 0 {
-			var at *time.Time
-			if err := tx.QueryRow(ctx, `SELECT min(GREATEST(
-					CASE WHEN status = 'cooling_down' AND cooldown_until > now() THEN cooldown_until END,
-					(SELECT max(s.cooldown_until) FROM ai_credentials s WHERE s.kind = 'claude_login'
-					 AND s.account_uuid = c.account_uuid AND s.status = 'cooling_down'
-					 AND s.cooldown_until > now())))
-				FROM ai_credentials c WHERE `+fleetLogin+` AND leased_to IS NULL AND status <> 'disabled'
-				AND kek_id = $1`, kek.ID).Scan(&at); err != nil {
+		others := held
+		if replacing != nil {
+			others = nil
+			found := false
+			for _, h := range held {
+				if h == *replacing {
+					found = true
+				} else {
+					others = append(others, h)
+				}
+			}
+			if !found {
+				return leaseStale()
+			}
+		}
+		var got *row
+		if len(others) > 0 {
+			// The dir's lease (or a rotation's successor) is held: answer it, reveal no other.
+			if got, err = sealedRow(ctx, tx, others[len(others)-1].id); err != nil {
 				return err
 			}
-			out.RecoversAt = iso(at)
-			return fleetAudit(ctx, tx, r, "fleet.lease", "refused",
-				"no usable Claude login for machine "+short(machine))
+		} else {
+			found, err := tx.Query(ctx, `SELECT `+columns+`, secret_sealed, dek_sealed FROM ai_credentials c
+				WHERE `+fleetLogin+` AND `+leaseFree+` AND status <> 'disabled'
+				AND NOT (status = 'cooling_down' AND cooldown_until > now()) AND NOT `+accountCooling+`
+				AND kek_id = $1 AND get_byte(secret_sealed, 0) <> $2
+				ORDER BY priority LIMIT 1 FOR UPDATE SKIP LOCKED`, kek.ID, seal.V1)
+			if err != nil {
+				return err
+			}
+			rows, err := pgx.CollectRows(found, pgx.RowToStructByPos[row])
+			if err != nil {
+				return err
+			}
+			if len(rows) == 0 {
+				var at *time.Time
+				if err := tx.QueryRow(ctx, `SELECT min(GREATEST(
+						CASE WHEN status = 'cooling_down' AND cooldown_until > now() THEN cooldown_until END,
+						(SELECT max(s.cooldown_until) FROM ai_credentials s WHERE s.kind = 'claude_login'
+						 AND s.account_uuid = c.account_uuid AND s.status = 'cooling_down'
+						 AND s.cooldown_until > now())))
+					FROM ai_credentials c WHERE `+fleetLogin+` AND `+leaseFree+` AND status <> 'disabled'
+					AND kek_id = $1`, kek.ID).Scan(&at); err != nil {
+					return err
+				}
+				out.RecoversAt = iso(at)
+				return fleetAudit(ctx, tx, r, "fleet.lease", "refused",
+					"no usable Claude login for machine "+short(machine))
+			}
+			got = &rows[0]
 		}
-		got := &rows[0]
 		o, err := open(kek, got)
 		if err != nil {
 			sealErr = err
 			return fleetAudit(ctx, tx, r, "fleet.reveal", "error", got.label()+" did not open")
 		}
-		if err := tx.QueryRow(ctx, `UPDATE ai_credentials SET leased_to = $2, leased_at = now(),
-			lease_epoch = lease_epoch + 1 WHERE id = $1 RETURNING lease_epoch`, got.ID, machine,
-		).Scan(&got.LeaseEpoch); err != nil {
-			return err
+		if len(others) == 0 {
+			if _, err := tx.Exec(ctx, `UPDATE ai_credentials SET leased_to = $2, leased_at = now(),
+				lease_dir = $3, lease_expires_at = now() + interval '`+leaseTTL+`',
+				lease_epoch = lease_epoch + 1 WHERE id = $1`, got.ID, machine, dir); err != nil {
+				return err
+			}
 		}
 		now, err := first(ctx, tx, &got.ID)
 		if err != nil {
 			return err
 		}
 		out.Lease = &leased{Credential: now.stored(), LeaseEpoch: now.LeaseEpoch, Login: json.RawMessage(o.Secret)}
-		if err := fleetAudit(ctx, tx, r, "fleet.lease", "ok",
-			fmt.Sprintf("%s leased to machine %s (lease %d)", got.label(), short(machine), now.LeaseEpoch)); err != nil {
-			return err
+		if len(others) == 0 {
+			if err := fleetAudit(ctx, tx, r, "fleet.lease", "ok", fmt.Sprintf("%s leased to machine %s (lease %d)",
+				got.label(), short(machine), now.LeaseEpoch)); err != nil {
+				return err
+			}
 		}
 		return fleetAudit(ctx, tx, r, "fleet.reveal", "ok", got.label()+" to machine "+short(machine))
 	})
@@ -180,6 +245,23 @@ func (s *Store) lease(r *http.Request, _ crud.Params) (any, error) {
 		return nil, httpx.WithReason(http.StatusConflict, sealErr.Error(), credentialSealed)
 	}
 	return out, nil
+}
+
+// sealedRow is a fleet login with its sealed bytes, locked by the caller's lease query.
+func sealedRow(ctx context.Context, tx pgx.Tx, id string) (*row, error) {
+	found, err := tx.Query(ctx, `SELECT `+columns+`, secret_sealed, dek_sealed FROM ai_credentials
+		WHERE id = $1 AND `+fleetLogin, id)
+	if err != nil {
+		return nil, err
+	}
+	rows, err := pgx.CollectRows(found, pgx.RowToStructByPos[row])
+	if err != nil {
+		return nil, err
+	}
+	if len(rows) == 0 {
+		return nil, unknownLogin()
+	}
+	return &rows[0], nil
 }
 
 func leaseStale() error {
@@ -246,18 +328,23 @@ func (s *Store) writeBack(r *http.Request, p crud.Params) (any, error) {
 		if err != nil {
 			return err
 		}
-		if current.AccountUUID != nil && acct.AccountUUID != nil && *current.AccountUUID != *acct.AccountUUID {
+		// The row's account is a person's to set (the add): a write-back never sets or changes
+		// it. A row with one takes only a login that names the same one; a row with none keeps
+		// none, and its other account fields stay as they are.
+		matched := current.AccountUUID != nil
+		if matched && (acct.AccountUUID == nil || *acct.AccountUUID != *current.AccountUUID) {
 			return httpx.WithReason(http.StatusConflict,
-				"that login is of another account than the row's: add it as a login of its own", "another-account")
+				"that login is not of the row's account: add it as a login of its own", "another-account")
 		}
 		envelope := seal.SealSecret(s.Keys.Current, secret, credentialAAD(id, claudeLogin, nil))
 		if _, err := tx.Exec(ctx, `UPDATE ai_credentials SET secret_sealed = $2, dek_sealed = $3, kek_id = $4,
-			last4 = $5, account_uuid = COALESCE($6, account_uuid),
-			organization_uuid = COALESCE($7, organization_uuid),
-			subscription_type = COALESCE($8, subscription_type), rate_limit_tier = COALESCE($9, rate_limit_tier),
-			updated_at = now() WHERE id = $1`,
-			id, envelope.SecretSealed, envelope.DEKSealed, envelope.KEKID, tail, acct.AccountUUID,
-			acct.OrganizationUUID, acct.SubscriptionType, acct.RateLimitTier); err != nil {
+			last4 = $5,
+			organization_uuid = CASE WHEN $9 THEN COALESCE($6, organization_uuid) ELSE organization_uuid END,
+			subscription_type = CASE WHEN $9 THEN COALESCE($7, subscription_type) ELSE subscription_type END,
+			rate_limit_tier = CASE WHEN $9 THEN COALESCE($8, rate_limit_tier) ELSE rate_limit_tier END,
+			lease_expires_at = now() + interval '`+leaseTTL+`', updated_at = now() WHERE id = $1`,
+			id, envelope.SecretSealed, envelope.DEKSealed, envelope.KEKID, tail,
+			acct.OrganizationUUID, acct.SubscriptionType, acct.RateLimitTier, matched); err != nil {
 			return err
 		}
 		if out, err = first(ctx, tx, &id); err != nil {
@@ -265,6 +352,44 @@ func (s *Store) writeBack(r *http.Request, p crud.Params) (any, error) {
 		}
 		return fleetAudit(ctx, tx, r, "fleet.write_back", "ok",
 			fmt.Sprintf("%s written back by machine %s (lease %d)", out.label(), short(machine), epoch))
+	})
+	if err != nil {
+		return nil, err
+	}
+	return one(out), nil
+}
+
+// renew moves the end of the machine's lease at lease_epoch to now + leaseTTL. It reveals
+// nothing and writes no audit row.
+func (s *Store) renew(r *http.Request, p crud.Params) (any, error) {
+	id, err := credentialParam(p)
+	if err != nil {
+		return nil, err
+	}
+	b, err := crud.ReadBody(r, "machine_id", "lease_epoch")
+	if err != nil {
+		return nil, err
+	}
+	machine := readMachine(b)
+	epoch := b.Int("lease_epoch", 0)
+	if err := b.Err(); err != nil {
+		return nil, err
+	}
+	ctx := r.Context()
+	var out *row
+	err = pgx.BeginFunc(ctx, s.Pool, func(tx pgx.Tx) error {
+		if err := fleet.OwnMachine(ctx, tx, r, machine); err != nil {
+			return err
+		}
+		if _, err := held(ctx, tx, id, machine, epoch); err != nil {
+			return err
+		}
+		if _, err := tx.Exec(ctx, `UPDATE ai_credentials SET lease_expires_at = now() + interval '`+leaseTTL+`'
+			WHERE id = $1`, id); err != nil {
+			return err
+		}
+		out, err = first(ctx, tx, &id)
+		return err
 	})
 	if err != nil {
 		return nil, err
@@ -300,7 +425,7 @@ func (s *Store) release(r *http.Request, p crud.Params) (any, error) {
 			return err
 		}
 		if _, err := tx.Exec(ctx, `UPDATE ai_credentials SET leased_to = NULL, leased_at = NULL,
-			lease_epoch = lease_epoch + 1 WHERE id = $1`, id); err != nil {
+			lease_dir = NULL, lease_expires_at = NULL, lease_epoch = lease_epoch + 1 WHERE id = $1`, id); err != nil {
 			return err
 		}
 		if out, err = first(ctx, tx, &id); err != nil {
@@ -314,6 +439,11 @@ func (s *Store) release(r *http.Request, p crud.Params) (any, error) {
 	}
 	return one(out), nil
 }
+
+// cooldownMax is the furthest a rate limit's until may be: Claude's usage windows are five hours
+// and a week (tools/go/claudecreds Event.LimitType, quotaLimits.rateLimitType; spec §6.4), so a
+// reset past 7 days on is no real one.
+const cooldownMax = 7 * 24 * time.Hour
 
 // fleetKinds are a transcript event's kinds (tools/go/claudecreds Kind, and recovery), and the
 // agent's health write each one is.
@@ -346,6 +476,10 @@ func (s *Store) fleetEvent(r *http.Request, _ crud.Params) (any, error) {
 	switch {
 	case kind == "rate_limit" && until == nil:
 		return nil, httpx.WithReason(422, "a rate_limit event needs until", credentialRefused)
+	case kind == "rate_limit" && (until.Before(time.Now()) || until.After(time.Now().Add(cooldownMax))):
+		// The cooldown cools every login of the account, so a caller may not push it far out.
+		return nil, httpx.WithReason(http.StatusBadRequest,
+			"a rate_limit event's until is from now to 7 days on", credentialRefused)
 	case (kind == "permanent" || kind == "transient") && reason == nil:
 		return nil, httpx.WithReason(422, fmt.Sprintf("a %s event needs a reason", kind), credentialRefused)
 	case kind == "rate_limit" && reason == nil:

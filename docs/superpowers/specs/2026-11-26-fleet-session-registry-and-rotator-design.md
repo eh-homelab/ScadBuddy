@@ -192,15 +192,22 @@ Where the accounts live:
   - `POST /leases`: lease the best usable `claude_login` row with scope `fleet` for this machine
     (priority order, no cooldown, not disabled, not leased elsewhere), and reveal it. Only
     `claude_login` rows are leased: `fleetd` writes only a `claudeAiOauth` login (§4, §6.6).
-    Answers `recovers_at` when none is usable.
+    Answers `recovers_at` when none is usable. A lease is for one config dir (`config_dir`): a
+    dir holds one, and asked again the route answers the one it holds. A rotation names the
+    lease it replaces (`replacing`), and the dir holds that lease's successor too until step 5
+    of §6.6 releases the old one.
   - `PUT /leases/{credential}`: write back the current login (the refresh token changes) while
-    the lease is held, keyed by `lease_epoch`.
+    the lease is held, keyed by `lease_epoch`. It never sets or changes the row's account: a row
+    with an account takes only a login of that account.
+  - `POST /leases/{credential}/renew`: extend the lease (§6.6, "Lease length").
   - `DELETE /leases/{credential}`: release. A lease whose login was installed is released after a
     final write-back; a lease that was never installed (§6.6 step 3) is released without one.
   - `POST /events`: a rate limit, a permanent or transient failure, or a recovery (`kind`
     `rate_limit`, `permanent`, `transient`, `recovery`: `claudecreds`' kinds and one more), with
     its source (transcript, session, entry uuid), deduplicated on the entry uuid. Only for a
-    login the machine leases.
+    login the machine leases. A rate limit's `until` is from now to 7 days on: Claude's usage
+    windows are five hours and a week (`claudecreds` `Event.LimitType`), and the cooldown
+    cools every login of the account, so a later one is refused.
   - `POST /rotations`, `PUT /rotations/{id}`: a rotation (from, to, reason, time) and its check
     (each session's result, `verified_at`).
   - Each of these names its `machine_id`, which the caller's token or proof must own.
@@ -283,6 +290,12 @@ Where the accounts live:
      it.
   6. Update `oauthAccount` in `~/.claude.json`, best effort (below).
   7. Record the rotation, then send continue (§6.7).
+- Lease length (#7984): a lease lasts 24 hours from its start, its last write-back or its last
+  renew (`POST /leases/{credential}/renew`). The service renews each lease it holds well inside
+  that. A lease no one renews ends, and any machine may then lease the row; that moves
+  `lease_epoch` on, so the old holder's write-back, renew and release are refused. 24 hours is
+  a call: it frees an abandoned machine's login within a day and is far longer than any gap
+  between renews.
 - `~/.claude.json` has no lock that the service can share. No lock around its writes was found
   in Claude Code 2.1.332's code (read 2026-11-26), and Claude Code rewrites the file often. The
   service reads the file, changes only `oauthAccount` (other keys kept), writes a temp file and

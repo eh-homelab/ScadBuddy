@@ -1306,7 +1306,9 @@ only the sleeps move; a budget on the real clock fails on a slow runner (#6252).
   core to the same. #8367 retires the machines' bootstrap proofs. The login rotator's lease,
   write-back, release, event and rotation routes (#7984) are core's too (area `fleet-logins`,
   `tools/go/core/README.md`), with the migration `20261128T1445Z_fleet_credential_events_rotations.sql`
-  (`fleet_credential_events`, one row per transcript entry uuid; `fleet_rotations`). Python
+  (`fleet_credential_events`, one row per transcript entry uuid; `fleet_rotations`) and the agent
+  migration `20261128T1530Z_credential_lease_dir_expiry.sql` (`ai_credentials.lease_dir`,
+  `lease_expires_at`: a lease per config dir that ends 24 hours after its last renew or write-back). Python
   serves none of them and keeps its `agent_data/credentials.py` `agent=False` path unused; a person
   adds a fleet login through core's `POST /api/v1/fleet/logins`, which calls Go's own `agent=False`
   insert.

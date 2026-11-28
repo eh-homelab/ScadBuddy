@@ -92,9 +92,23 @@ func (l *logins) rotator(method, path, body string, status int) answer {
 	return got
 }
 
+// homeDir is the config dir the tests lease for.
+const homeDir = "/home/elan/.claude"
+
 func (l *logins) lease() answer {
 	l.t.Helper()
-	return l.rotator("POST", "/leases", object("machine_id", machineID), 200)
+	return l.rotator("POST", "/leases", object("machine_id", machineID, "config_dir", homeDir), 200)
+}
+
+// leaseIn leases for dir; replacing, when given, is the {credential_id, lease_epoch} the new
+// lease is to replace (a rotation).
+func (l *logins) leaseIn(dir string, replacing map[string]any) answer {
+	l.t.Helper()
+	body := map[string]any{"machine_id": machineID, "config_dir": dir}
+	if replacing != nil {
+		body["replacing"] = replacing
+	}
+	return l.rotator("POST", "/leases", mustJSON(body), 200)
 }
 
 // leaseOf is a lease answer's lease.
@@ -143,9 +157,9 @@ func TestALeaseRevealsTheBestUsableLogin(t *testing.T) {
 	expect(t, l.audits("fleet.reveal"), 1)
 
 	// A login held by a machine is not leased again.
-	expect(t, leaseOf(t, l.lease())["credential"].(map[string]any)["id"], next)
+	expect(t, leaseOf(t, l.leaseIn("/home/elan/.claude-work", nil))["credential"].(map[string]any)["id"], next)
 	// The rest are disabled, cooling, or of a cooling account: none is leased.
-	expect(t, l.lease().body["lease"], nil)
+	expect(t, l.leaseIn("/home/elan/.claude-third", nil).body["lease"], nil)
 	expect(t, l.count(`SELECT count(*) FROM ai_credentials WHERE id = '`+sibling+`' AND leased_to IS NULL
 		AND status = 'active'`), 1)
 }
@@ -267,7 +281,7 @@ func TestTheRoutesAreBoundToTheCallersMachine(t *testing.T) {
 
 	for who, token := range map[string]string{"another token": theirs, "a bootstrap proof": proof} {
 		for name, c := range map[string]struct{ method, path, body string }{
-			"lease":     {"POST", "/leases", object("machine_id", machineID)},
+			"lease":     {"POST", "/leases", object("machine_id", machineID, "config_dir", homeDir)},
 			"write":     {"PUT", "/leases/" + id, `{"machine_id":"` + machineID + `","lease_epoch":` + jsonNumber(epoch) + `,"login":` + loginOf(accountA, "x-XXXX") + `}`},
 			"release":   {"DELETE", "/leases/" + id + "?machine_id=" + machineID + "&lease_epoch=" + jsonNumber(epoch), ""},
 			"event":     {"POST", "/events", object("machine_id", machineID, "entry_uuid", uuid(), "credential_id", id, "epoch", 0, "kind", "recovery")},
@@ -284,7 +298,7 @@ func TestTheRoutesAreBoundToTheCallersMachine(t *testing.T) {
 	write := l.do("PUT", rotatorBase+"/leases/"+id, `{"machine_id":"`+laptop+`","lease_epoch":`+jsonNumber(epoch)+
 		`,"login":`+loginOf(accountA, "x-XXXX")+`}`, bearer(theirs))
 	expect(t, []any{write.status, write.body["reason"]}, []any{409, "lease-stale"})
-	unknown := l.do("POST", rotatorBase+"/leases", object("machine_id", strings.Repeat("2", 64)), bearer(l.token))
+	unknown := l.do("POST", rotatorBase+"/leases", object("machine_id", strings.Repeat("2", 64), "config_dir", homeDir), bearer(l.token))
 	expect(t, []any{unknown.status, unknown.body["reason"]}, []any{404, "unknown-machine"})
 	expect(t, l.audits("fleet.write_back"), 0)
 	expect(t, l.count(`SELECT count(*) FROM ai_credentials WHERE leased_to = '`+machineID+`'`), 1)
@@ -294,7 +308,7 @@ func TestTheRoutesAreBoundToTheCallersMachine(t *testing.T) {
 // rotatorRoutes are every lease, event and rotation route, with a body that would pass.
 func rotatorRoutes(id string) map[string]struct{ method, path, body string } {
 	return map[string]struct{ method, path, body string }{
-		"lease":     {"POST", "/leases", object("machine_id", machineID)},
+		"lease":     {"POST", "/leases", object("machine_id", machineID, "config_dir", homeDir)},
 		"write":     {"PUT", "/leases/" + id, `{"machine_id":"` + machineID + `","lease_epoch":1,"login":` + loginOf(accountA, "x-XXXX") + `}`},
 		"release":   {"DELETE", "/leases/" + id + "?machine_id=" + machineID + "&lease_epoch=1", ""},
 		"event":     {"POST", "/events", object("machine_id", machineID, "entry_uuid", uuid(), "credential_id", id, "epoch", 0, "kind", "recovery")},
@@ -382,3 +396,93 @@ func TestAPersonAddsAFleetLoginTheAgentNeverReveals(t *testing.T) {
 }
 
 func jsonNumber(f float64) string { return mustJSON(int64(f)) }
+
+// loginWithout is a claudeAiOauth object that names no account.
+func loginWithout(tail string) string {
+	return object("accessToken", "sk-ant-oat01-access-"+tail, "refreshToken", "sk-ant-ort01-refresh-"+tail,
+		"expiresAt", 1795000000000)
+}
+
+// A write-back never changes the row's account: a row with one takes only a login of that
+// account, and a row with none is never given one (only a person's add sets it).
+func TestAWriteBackKeepsTheRowsAccount(t *testing.T) {
+	l := newLogins(t)
+	id := l.add(loginOf(accountA, "first-AAAA"))
+	epoch := jsonNumber(leaseOf(t, l.lease())["lease_epoch"].(float64))
+	write := func(id, epoch, login string) answer {
+		return l.do("PUT", rotatorBase+"/leases/"+id, `{"machine_id":"`+machineID+`","lease_epoch":`+epoch+
+			`,"login":`+login+`}`, bearer(l.token))
+	}
+	missing := write(id, epoch, loginWithout("none-ZZZZ"))
+	expect(t, []any{missing.status, missing.body["reason"]}, []any{409, "another-account"})
+
+	bare := l.add(loginWithout("bare-BBBB"))
+	bareEpoch := jsonNumber(leaseOf(t, l.leaseIn("/home/elan/.claude-bare", nil))["lease_epoch"].(float64))
+	expect(t, write(bare, bareEpoch, loginOf(accountB, "set-YYYY")).status, 200)
+	expect(t, l.count(`SELECT count(*) FROM ai_credentials WHERE id = '`+bare+`' AND account_uuid IS NULL
+		AND subscription_type IS NULL`), 1)
+}
+
+// A rate limit's until is now to 7 days on: Claude's usage windows are five hours and a week
+// (tools/go/claudecreds Event.LimitType, quotaLimits.rateLimitType).
+func TestAnEventsUntilIsBounded(t *testing.T) {
+	l := newLogins(t)
+	id := l.add(loginOf(accountA, "mine-AAAA"))
+	l.add(loginOf(accountA, "sibling-BBBB"))
+	credential := leaseOf(t, l.lease())["credential"].(map[string]any)
+	for name, until := range map[string]time.Time{
+		"in the past":    time.Now().Add(-time.Hour),
+		"past 7 days on": time.Now().Add(8 * 24 * time.Hour),
+	} {
+		got := l.do("POST", rotatorBase+"/events", object("machine_id", machineID, "entry_uuid", uuid(),
+			"credential_id", id, "epoch", credential["epoch"], "kind", "rate_limit",
+			"until", until.UTC().Format(time.RFC3339)), bearer(l.token))
+		if got.status != 400 {
+			t.Errorf("%s: %d %s", name, got.status, got.raw)
+		}
+	}
+	expect(t, l.count(`SELECT count(*) FROM ai_credentials WHERE status = 'cooling_down'`), 0)
+	expect(t, l.count(`SELECT count(*) FROM fleet_credential_events`), 0)
+}
+
+// One lease per config dir: a lease asked again answers the one held, a rotation names the
+// lease it replaces, and a lease no one renews ends after its TTL.
+func TestALeaseIsOnePerConfigDirAndEnds(t *testing.T) {
+	l := newLogins(t)
+	first := l.add(loginOf(accountA, "first-AAAA"))
+	second := l.add(loginOf(accountB, "second-BBBB"))
+	third := l.add(loginOf(accountC, "third-CCCC"))
+	held := leaseOf(t, l.lease())
+	expect(t, held["credential"].(map[string]any)["id"], first)
+	again := leaseOf(t, l.lease())
+	expect(t, []any{again["credential"].(map[string]any)["id"], again["lease_epoch"]},
+		[]any{first, held["lease_epoch"]})
+	expect(t, l.count(`SELECT count(*) FROM ai_credentials WHERE leased_to IS NOT NULL`), 1)
+
+	// A rotation: the next login, while the old one is still held; asked again, the same one.
+	replacing := map[string]any{"credential_id": first, "lease_epoch": held["lease_epoch"]}
+	next := leaseOf(t, l.leaseIn(homeDir, replacing))
+	expect(t, next["credential"].(map[string]any)["id"], second)
+	expect(t, leaseOf(t, l.leaseIn(homeDir, replacing))["credential"].(map[string]any)["id"], second)
+	expect(t, l.count(`SELECT count(*) FROM ai_credentials WHERE leased_to IS NOT NULL`), 2)
+	stale := l.do("POST", rotatorBase+"/leases", mustJSON(map[string]any{"machine_id": machineID,
+		"config_dir": homeDir, "replacing": map[string]any{"credential_id": third, "lease_epoch": 1}}), bearer(l.token))
+	expect(t, []any{stale.status, stale.body["reason"]}, []any{409, "lease-stale"})
+
+	// A renew moves the lease's end on; one that ended is free to another machine.
+	renew := l.rotator("POST", "/leases/"+first+"/renew", object("machine_id", machineID,
+		"lease_epoch", held["lease_epoch"]), 200)
+	expect(t, renew.body["credential"].(map[string]any)["leased_to"], machineID)
+	expect(t, l.count(`SELECT count(*) FROM ai_credentials WHERE id = '`+first+`'
+		AND lease_expires_at > now() + interval '23 hours'`), 1)
+	l.sql(`UPDATE ai_credentials SET lease_expires_at = now() - interval '1 second' WHERE id = $1`, first)
+	theirs, _ := accessToken(l.api, "fleet")
+	laptop := strings.Repeat("1", 64)
+	expect(t, l.do("PUT", rotatorBase+"/machines/"+laptop, machineBody(), bearer(theirs)).status, 200)
+	taken := l.do("POST", rotatorBase+"/leases", object("machine_id", laptop, "config_dir", homeDir), bearer(theirs))
+	expect(t, taken.status, 200)
+	expect(t, leaseOf(t, taken)["credential"].(map[string]any)["id"], first)
+	// The old holder's lease is stale now.
+	expect(t, l.do("POST", rotatorBase+"/leases/"+first+"/renew", object("machine_id", machineID,
+		"lease_epoch", held["lease_epoch"]), bearer(l.token)).status, 409)
+}
